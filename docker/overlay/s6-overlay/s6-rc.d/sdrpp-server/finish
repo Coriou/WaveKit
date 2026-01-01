@@ -1,0 +1,4 @@
+#!/bin/sh
+# Graceful shutdown for SDR++ server
+
+exec chpst -u root:root s6-svwait -t 5000 -d /run/service/sdrpp-server 2>/dev/null || true

@@ -1,0 +1,30 @@
+# WaveKit Override Configuration for Local Production Testing
+# Usage: docker-compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d
+
+services:
+  wavekit-full:
+    # Local development overrides
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final
+      cache_from:
+        - type=local,src=/tmp/docker-cache
+    image: wavekit:dev
+    environment:
+      WAVEKIT_LOG_LEVEL: debug
+      NODE_ENV: development
+
+  wavekit-sdrpp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final-sdrpp
+    image: wavekit:dev-sdrpp
+
+  wavekit-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final-core
+    image: wavekit:dev-core

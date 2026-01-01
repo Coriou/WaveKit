@@ -1,0 +1,138 @@
+# WaveKit Development Environment
+# Features: Live reload, hot debugging, volume mounts for development
+# Usage: docker-compose -f docker-compose.dev.yml up
+
+services:
+  rtl-tcp:
+    # Optional: Mock RTL-TCP service (comment out if using real hardware)
+    image: alpine:latest
+    command: nc -l -p 1234 < /dev/zero
+    container_name: rtl-tcp-mock
+    ports:
+      - "1234:1234"
+    networks:
+      - wavekit
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1234"]
+      interval: 5s
+      timeout: 2s
+      retries: 3
+
+  sdrpp-server:
+    # SDR++ Server - IQ stream provider
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final-sdrpp
+    container_name: wavekit-sdrpp
+    depends_on:
+      rtl-tcp:
+        condition: service_healthy
+    environment:
+      LOG_LEVEL: debug
+    ports:
+      - "5259:5259"
+    networks:
+      - wavekit
+    volumes:
+      - sdrpp-data:/sdr
+      - ./logs/sdrpp:/var/log/sdrpp
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5259/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  wavekit-api:
+    # Main WaveKit API + Decoders
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: final-core # Core mode - SDR++ is external service
+      cache_from:
+        - type=local,src=/tmp/docker-cache
+    container_name: wavekit-api
+    depends_on:
+      sdrpp-server:
+        condition: service_healthy
+    environment:
+      WAVEKIT_LOG_LEVEL: debug
+      WAVEKIT_CONFIG_PATH: /app/config
+      NODE_ENV: development
+      SDR_SOURCE: "tcp://sdrpp-server:5259" # Connect to external SDR++
+    ports:
+      - "9000:9000" # REST API
+      - "8080:8080" # Audio output TCP
+      - "4713:4713" # WebSocket events
+    networks:
+      - wavekit
+    volumes:
+      - ./dist:/app/dist # Live TypeScript output
+      - ./config:/app/config # Config files
+      - ./logs:/var/log/wavekit # Logs
+      - recordings:/recordings # Recording storage
+      - node-modules:/app/node_modules # Preserve node_modules
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cap_add:
+      - SYS_NICE # Process priority for decoders
+      - NET_RAW # Network operations
+
+  nginx-reverse-proxy:
+    # Optional: Nginx reverse proxy for cleaner URLs
+    image: nginx:alpine
+    container_name: wavekit-nginx
+    depends_on:
+      - wavekit-api
+    volumes:
+      - ./docker/nginx.dev.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "80:80"
+    networks:
+      - wavekit
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost/health",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Optional: Browser-based IDE for development
+  vscode-server:
+    image: codercom/code-server:latest
+    container_name: wavekit-ide
+    environment:
+      PASSWORD: wavekit-dev
+      SUDO_PASSWORD: wavekit-dev
+    volumes:
+      - .:/home/coder/project
+      - vscode-extensions:/home/coder/.local/share/code-server
+    ports:
+      - "3000:8080"
+    networks:
+      - wavekit
+
+networks:
+  wavekit:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  sdrpp-data:
+  node-modules:
+  vscode-extensions:
+  recordings:

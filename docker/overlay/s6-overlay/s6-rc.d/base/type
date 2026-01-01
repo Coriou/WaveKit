@@ -1,0 +1,6 @@
+#!/bin/sh
+# s6-rc service definition: base (initialization & prerequisites)
+# Purpose: Common initialization tasks required by all services
+
+type = oneshot
+up = /etc/s6-overlay/scripts/init-base.sh

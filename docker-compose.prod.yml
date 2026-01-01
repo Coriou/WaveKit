@@ -1,0 +1,158 @@
+# WaveKit Production Environment
+# Features: Optimized images, resource limits, health checks, security hardening
+# Usage: docker-compose -f docker-compose.prod.yml -f docker-compose.override.yml up -d
+
+services:
+  wavekit-full:
+    # Full mode: Everything in one container (recommended for Raspberry Pi)
+    image: wavekit:latest
+    container_name: wavekit
+    restart: unless-stopped
+    environment:
+      WAVEKIT_LOG_LEVEL: info
+      WAVEKIT_CONFIG_PATH: /app/config
+      NODE_ENV: production
+      # Connect to rtl_tcp on Raspberry Pi
+      RTL_TCP_HOST: "${RTL_TCP_HOST:-192.168.1.100}"
+      RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
+    ports:
+      - "9000:9000" # REST API
+      - "8080:8080" # Audio output TCP
+      - "4713:4713" # WebSocket events
+      - "5259:5259" # SDR++ server (optional, for external clients)
+    networks:
+      - wavekit
+    volumes:
+      - wavekit-config:/app/config
+      - wavekit-logs:/var/log/wavekit
+      - recordings:/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+        reservations:
+          cpus: "1"
+          memory: 512M
+    cap_add:
+      - SYS_NICE
+      - NET_RAW
+    security_opt:
+      - no-new-privileges:true
+
+  # Optional: Multi-host setup (distributed mode)
+  wavekit-sdrpp:
+    # Dedicated SDR++ server on Pi or other host
+    image: wavekit:latest-sdrpp
+    container_name: wavekit-sdrpp
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "5259:5259"
+    networks:
+      - wavekit
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5259/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
+
+  wavekit-core:
+    # Core mode: API + decoders (connect to external SDR++)
+    image: wavekit:latest-core
+    container_name: wavekit-core
+    restart: unless-stopped
+    depends_on:
+      - wavekit-sdrpp
+    environment:
+      WAVEKIT_LOG_LEVEL: info
+      WAVEKIT_CONFIG_PATH: /app/config
+      NODE_ENV: production
+      SDR_SOURCE: "tcp://wavekit-sdrpp:5259"
+    ports:
+      - "9000:9000"
+      - "8080:8080"
+      - "4713:4713"
+    networks:
+      - wavekit
+    volumes:
+      - wavekit-config:/app/config
+      - wavekit-logs:/var/log/wavekit
+      - recordings:/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 768M
+        reservations:
+          cpus: "0.75"
+          memory: 384M
+
+  # Monitoring & Logs (optional)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wavekit-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./docker/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - wavekit
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: wavekit-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - wavekit
+
+networks:
+  wavekit:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  wavekit-config:
+  wavekit-logs:
+  recordings:
+  prometheus-data:
+  grafana-data:

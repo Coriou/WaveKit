@@ -1,0 +1,12 @@
+#!/bin/sh
+# s6-rc service: sdrpp-server
+# Purpose: SDR++ server for IQ stream capture from hardware
+# Upstream: RTL-TCP on Pi or direct USB device
+
+exec 2>&1
+exec chpst -u root:root \
+  sdrpp \
+  --server \
+  --port 5259 \
+  --addr 0.0.0.0 \
+  --log-level info

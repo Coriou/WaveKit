@@ -1,0 +1,253 @@
+# =============================================================================
+# WaveKit Default Configuration
+# =============================================================================
+#
+# This file contains the default configuration for WaveKit, a TypeScript-based
+# SDR stream processing framework.
+#
+# Configuration values can be overridden using environment variables:
+#   WAVEKIT_API_HOST        - API server host (default: 0.0.0.0)
+#   WAVEKIT_API_PORT        - API server port (default: 3000)
+#   WAVEKIT_AUDIO_TCP_PORT  - Audio output TCP port (default: 8080)
+#   WAVEKIT_AUDIO_FORMAT    - Audio format: S16LE or FLOAT32LE (default: S16LE)
+#   WAVEKIT_AUDIO_SAMPLE_RATE - Audio sample rate in Hz (default: 48000)
+#   WAVEKIT_LOG_LEVEL       - Log level: trace, debug, info, warn, error (default: info)
+#   WAVEKIT_LOG_DIR         - Directory for log files (optional)
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SDR Sources
+# -----------------------------------------------------------------------------
+# Configure connections to SDR data sources. WaveKit supports:
+#   - rtl_tcp: RTL-SDR TCP server (e.g., from Raspberry Pi)
+#   - sdrpp-network: SDR++ network sink
+#   - recording: Replay recorded IQ/audio files for testing
+#
+# Each source requires:
+#   id         - Unique identifier for the source
+#   type       - Source type: "rtl_tcp", "sdrpp-network", or "recording"
+#   host       - Hostname or IP address (for network sources)
+#   port       - TCP port number (for network sources)
+#   filePath   - Path to recording file (for recording sources)
+#   loop       - Whether to loop recording playback (default: false)
+#   playbackSpeed - Playback speed multiplier (default: 1.0)
+#   caps       - Source capabilities:
+#     kind       - Data type: "audio_pcm", "iq", or "recording"
+#     sampleRate - Sample rate in Hz (e.g., 48000)
+#     format     - Data format: "S16LE", "FLOAT32LE", "U8_IQ", or "S16_IQ"
+#     channels   - Number of channels (optional, default: 1)
+#     centerFreq - Center frequency in Hz for IQ sources (optional)
+#     exclusive  - Whether source can only be used by one decoder (default: false)
+#
+# Example configurations:
+#
+# sources:
+#   - id: "rtl-pi"
+#     type: "rtl_tcp"
+#     host: "192.168.1.100"
+#     port: 1234
+#     caps:
+#       kind: "audio_pcm"
+#       sampleRate: 48000
+#       format: "S16LE"
+#       exclusive: false
+#
+#   - id: "sdrpp-local"
+#     type: "sdrpp-network"
+#     host: "127.0.0.1"
+#     port: 5555
+#     caps:
+#       kind: "audio_pcm"
+#       sampleRate: 48000
+#       format: "FLOAT32LE"
+#       exclusive: false
+#
+#   - id: "test-recording"
+#     type: "recording"
+#     filePath: "./recordings/test.raw"
+#     loop: true
+#     playbackSpeed: 1.0
+#     caps:
+#       kind: "recording"
+#       sampleRate: 48000
+#       format: "S16LE"
+#       exclusive: false
+
+sources: []
+
+# -----------------------------------------------------------------------------
+# Signal Decoders
+# -----------------------------------------------------------------------------
+# Configure signal decoders to process audio streams. Built-in decoder types:
+#
+#   dsd-fme     - Digital voice (DMR, P25, YSF, D-Star, NXDN, ProVoice)
+#   multimon-ng - Pager protocols (POCSAG, FLEX, EAS, DTMF)
+#   rtl433      - ISM band signals (weather sensors, remotes, etc.)
+#
+# Decoder Integration Patterns:
+#   pure_consumer   - Receives audio via stdin (dsd-fme, multimon-ng)
+#   network_producer - Runs as service with network output (readsb, AIS-catcher)
+#   external_sdr    - Manages own SDR hardware (acarsdec, dumpvdl2)
+#
+# Each decoder requires:
+#   id        - Unique identifier for the decoder
+#   type      - Decoder type (must be registered in the decoder registry)
+#   enabled   - Whether the decoder should start automatically
+#   sourceId  - Source to attach to (for pure_consumer decoders)
+#   options   - Decoder-specific configuration options
+#
+# For external SDR decoders (external_sdr pattern):
+#   deviceSerial - RTL-SDR device serial number
+#   frequencies  - Array of frequencies to monitor (Hz)
+#   gain         - Gain setting (optional)
+#   ppm          - PPM correction (optional)
+#
+# For network producer decoders (network_producer pattern):
+#   outputHost     - Host to connect to for output
+#   outputPort     - Port to connect to for output
+#   outputProtocol - Protocol: "tcp" or "udp"
+#
+# Version pinning (for security):
+#   minVersion - Minimum required decoder version
+#   maxVersion - Maximum allowed decoder version
+#
+# Example configurations:
+#
+# decoders:
+#   - id: "dsd-main"
+#     type: "dsd-fme"
+#     enabled: true
+#     sourceId: "rtl-pi"
+#     options:
+#       mode: "auto"           # auto, dmr, p25, ysf, dstar, nxdn, provoice
+#       output: "wav"          # null, wav, udp
+#       wavDir: "./decoded_calls"
+#
+#   - id: "pager-decoder"
+#     type: "multimon-ng"
+#     enabled: true
+#     sourceId: "rtl-pi"
+#     options:
+#       modes:
+#         - "POCSAG512"
+#         - "POCSAG1200"
+#         - "POCSAG2400"
+#         - "FLEX"
+#       verbosity: 1
+#
+#   - id: "ism-decoder"
+#     type: "rtl433"
+#     enabled: false
+#     sourceId: "rtl-pi"
+#     options:
+#       analyze: false
+#       outputFormat: "json"
+#       protocols: []          # Empty = all protocols
+#
+#   - id: "adsb-decoder"
+#     type: "readsb"
+#     enabled: true
+#     outputHost: "127.0.0.1"
+#     outputPort: 30003
+#     outputProtocol: "tcp"
+#     options:
+#       outputFormat: "sbs"
+#
+#   - id: "acars-decoder"
+#     type: "acarsdec"
+#     enabled: true
+#     deviceSerial: "00000001"
+#     frequencies:
+#       - 131550000
+#       - 131725000
+#     gain: 40
+#     options:
+#       outputFormat: "json"
+#     minVersion: "3.7"
+
+decoders: []
+
+# -----------------------------------------------------------------------------
+# Audio Output
+# -----------------------------------------------------------------------------
+# Configure the TCP server for streaming decoded audio to host-side players.
+# Connect using tools like sox, ffplay, or VLC:
+#
+#   nc localhost 8080 | sox -t raw -r 48000 -e signed -b 16 -c 1 - -d
+#   nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -
+#
+# Options:
+#   tcpPort    - TCP port for audio streaming (default: 8080)
+#   format     - Audio format: "S16LE" or "FLOAT32LE" (default: S16LE)
+#   sampleRate - Sample rate in Hz (default: 48000)
+
+audio:
+  tcpPort: 8080
+  format: "S16LE"
+  sampleRate: 48000
+
+# -----------------------------------------------------------------------------
+# API Server
+# -----------------------------------------------------------------------------
+# Configure the Fastify REST/WebSocket API server for control and monitoring.
+#
+# REST endpoints:
+#   GET  /health              - Health check
+#   GET  /api/status          - Full system status
+#   GET  /api/sources         - List all sources
+#   POST /api/sources         - Add a new source
+#   DELETE /api/sources/:id   - Remove a source
+#   GET  /api/decoders        - List all decoders
+#   GET  /api/decoders/:id    - Get decoder status
+#   POST /api/decoders/:id/start   - Start a decoder
+#   POST /api/decoders/:id/stop    - Stop a decoder
+#   POST /api/decoders/:id/restart - Restart a decoder
+#   PATCH /api/decoders/:id   - Update decoder config
+#
+# WebSocket endpoint:
+#   /ws - Real-time events (subscribe to: decoders, metrics, sources)
+#
+# Options:
+#   host - Bind address (default: 0.0.0.0 for all interfaces)
+#   port - HTTP port (default: 3000)
+
+api:
+  host: "0.0.0.0"
+  port: 3000
+
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+# Configure structured JSON logging using Pino.
+#
+# Options:
+#   level - Log level: trace, debug, info, warn, error (default: info)
+#   dir   - Directory for log files (optional, logs to stdout if not set)
+#
+# Log levels (from most to least verbose):
+#   trace - Very detailed debugging information
+#   debug - Debugging information
+#   info  - General operational information
+#   warn  - Warning conditions
+#   error - Error conditions
+
+logging:
+  level: "info"
+  # dir: "./logs"  # Uncomment to enable file logging
+
+# -----------------------------------------------------------------------------
+# Health Monitoring
+# -----------------------------------------------------------------------------
+# Configure decoder health monitoring. Decoders transition through health states:
+#   running  - Decoder is running and producing output
+#   degraded - Decoder is running but hasn't produced output recently
+#   faulted  - Decoder has crashed and exceeded restart limits
+#
+# Options:
+#   checkInterval   - Interval between health checks in ms (default: 5000)
+#   degradedTimeout - Time without output before degraded state in ms (default: 30000)
+
+# health:
+#   checkInterval: 5000
+#   degradedTimeout: 30000

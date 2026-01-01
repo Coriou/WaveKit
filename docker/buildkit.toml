@@ -1,0 +1,15 @@
+[buildkitd]
+# BuildKit daemon configuration for optimized WaveKit builds
+
+# Enable containerd snapshotter
+gc-policy = [
+  { all = true, keepDuration = 604800, keepBytes = 5368709120 }
+]
+
+# Enable inline cache
+enable-inline-cache = true
+
+# GC policy
+[[gc]]
+policy = "max-unused-build-cache-size"
+keepStorage = "10gb"

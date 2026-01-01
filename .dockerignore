@@ -1,0 +1,73 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Dependencies
+node_modules
+npm-debug.log
+yarn-error.log
+package-lock.json.bak
+*.tgz
+
+# Build artifacts
+dist
+*.js.map
+*.d.ts.map
+coverage
+.tsc-cache
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+.editorconfig
+
+# Documentation
+docs
+*.md
+README.md
+.github
+
+# Development
+.env
+.env.local
+.env.*.local
+.env.development
+.kiro
+wip
+
+# Tests
+tests
+vitest.config.ts
+
+# Logs
+logs
+*.log
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Docker
+Dockerfile
+docker-compose*.yml
+docker
+.docker
+.dockerignore
+
+# Misc
+.nvmrc
+.prettierrc
+eslint.config.js
+tsconfig.json
+config/default.yaml
+.editorconfig
+
+# Recordings & temporary
+decoded_calls
+recordings
+/tmp

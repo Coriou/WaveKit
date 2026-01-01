@@ -1,0 +1,8 @@
+#!/bin/sh
+# s6-rc service: wavekit-api
+# Purpose: Main WaveKit TypeScript API server
+# Depends on: base, sdrpp-server
+
+exec 2>&1
+exec chpst -u root:root \
+  node /app/dist/index.js

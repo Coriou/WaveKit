@@ -1,0 +1,4 @@
+#!/bin/sh
+# Graceful shutdown for WaveKit API
+
+exec chpst -u root:root s6-svwait -t 10000 -d /run/service/wavekit-api 2>/dev/null || true

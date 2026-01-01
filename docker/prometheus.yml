@@ -1,0 +1,54 @@
+# WaveKit Prometheus Configuration
+# Metrics collection for monitoring and alerting
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: "wavekit"
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Rule files for alerts
+rule_files: []
+
+# Scrape configurations
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # WaveKit API metrics
+  - job_name: "wavekit-api"
+    static_configs:
+      - targets: ["wavekit:9000", "wavekit-api:9000", "wavekit-core:9000"]
+    metrics_path: "/metrics"
+    scrape_interval: 10s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):\d+'
+        replacement: "${1}"
+
+  # SDR++ Server metrics (if available)
+  - job_name: "sdrpp"
+    static_configs:
+      - targets: ["wavekit:5259", "wavekit-sdrpp:5259"]
+    metrics_path: "/metrics"
+    scrape_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: '([^:]+):\d+'
+        replacement: "${1}"
+
+  # Node exporter (if running alongside)
+  - job_name: "node"
+    static_configs:
+      - targets: ["node-exporter:9100"]
+    scrape_interval: 30s
