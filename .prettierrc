@@ -1,5 +1,5 @@
 {
-  "useTabs": true,
-  "semi": false,
-  "arrowParens": "avoid"
+	"useTabs": true,
+	"semi": false,
+	"arrowParens": "avoid"
 }

@@ -1,7 +1,7 @@
 # WaveKit: SDR Stream Processing Framework
 
 > **AI Agent Implementation Specification v1.0**
-> 
+>
 > A production-ready TypeScript framework for SDR signal processing with Docker containerization, Fastify API, and extensible decoder architecture.
 
 ---
@@ -56,20 +56,20 @@ graph LR
     subgraph "Raspberry Pi"
         RTL[RTL-SDR + rtl_tcp<br/>:1234]
     end
-    
+
     subgraph "Docker Container"
         SDRPP[SDR++ Server<br/>:5259]
         SM[Source Manager]
         FM[Fanout Manager]
         DM[Decoder Manager]
         API[Fastify API<br/>:3000]
-        
+
         subgraph Decoders
             DSD[dsd-fme]
             MM[multimon-ng]
             RTL433[rtl_433]
         end
-        
+
         RTL --> SDRPP
         SDRPP --> SM
         SM --> FM
@@ -80,25 +80,25 @@ graph LR
         API --> DM
         API --> SM
     end
-    
+
     subgraph "Host"
         PLAYER[Audio Player<br/>sox/ffplay]
         BROWSER[Browser<br/>Dashboard]
     end
-    
+
     API -->|TCP :8080| PLAYER
     API -->|HTTP/WS| BROWSER
 ```
 
 ### Component Responsibilities
 
-| Component | Responsibility |
-|-----------|----------------|
-| **Source Manager** | TCP connections to SDR sources with auto-reconnect |
-| **Fanout Manager** | Multiplexes audio stream to N decoders with backpressure |
-| **Decoder Manager** | Lifecycle management for decoder processes |
-| **Process Manager** | Spawn, monitor, restart subprocesses |
-| **API Server** | REST endpoints + WebSocket for real-time events |
+| Component           | Responsibility                                           |
+| ------------------- | -------------------------------------------------------- |
+| **Source Manager**  | TCP connections to SDR sources with auto-reconnect       |
+| **Fanout Manager**  | Multiplexes audio stream to N decoders with backpressure |
+| **Decoder Manager** | Lifecycle management for decoder processes               |
+| **Process Manager** | Spawn, monitor, restart subprocesses                     |
+| **API Server**      | REST endpoints + WebSocket for real-time events          |
 
 ---
 
@@ -108,11 +108,11 @@ graph LR
 
 The Dockerfile supports three build targets:
 
-| Target | Contents | Use Case |
-|--------|----------|----------|
-| `wavekit:full` | SDR++ Server + API + All Decoders | All-in-one deployment |
-| `wavekit:core` | API + All Decoders (no SDR++) | SDR++ runs elsewhere |
-| `wavekit:sdrpp` | SDR++ Server only | Dedicated SDR server |
+| Target          | Contents                          | Use Case              |
+| --------------- | --------------------------------- | --------------------- |
+| `wavekit:full`  | SDR++ Server + API + All Decoders | All-in-one deployment |
+| `wavekit:core`  | API + All Decoders (no SDR++)     | SDR++ runs elsewhere  |
+| `wavekit:sdrpp` | SDR++ Server only                 | Dedicated SDR server  |
 
 ### Build Commands
 
@@ -161,6 +161,7 @@ Container :8080 → TCP → Host sox/ffplay
 ```
 
 Host-side player script:
+
 ```bash
 #!/bin/bash
 nc localhost 8080 | sox -t raw -r 48000 -c 1 -b 16 -e signed-integer - -d
@@ -264,33 +265,34 @@ Manages TCP connections to SDR sources with automatic reconnection.
 // src/core/source-manager.ts
 
 interface SourceConfig {
-  id: string;
-  type: 'sdrpp-network' | 'rtl_tcp';
-  host: string;
-  port: number;
-  format: 'S16LE' | 'FLOAT32LE';
-  sampleRate: number;
+	id: string
+	type: "sdrpp-network" | "rtl_tcp"
+	host: string
+	port: number
+	format: "S16LE" | "FLOAT32LE"
+	sampleRate: number
 }
 
 interface SourceStatus {
-  id: string;
-  connected: boolean;
-  bytesReceived: number;
-  dataRate: number; // KB/s
-  lastError?: string;
+	id: string
+	connected: boolean
+	bytesReceived: number
+	dataRate: number // KB/s
+	lastError?: string
 }
 
 class SourceManager extends EventEmitter {
-  // Events: 'connected', 'disconnected', 'error', 'data'
-  
-  connect(config: SourceConfig): Promise<Readable>;
-  disconnect(id: string): void;
-  getStatus(id: string): SourceStatus;
-  getAllStatus(): SourceStatus[];
+	// Events: 'connected', 'disconnected', 'error', 'data'
+
+	connect(config: SourceConfig): Promise<Readable>
+	disconnect(id: string): void
+	getStatus(id: string): SourceStatus
+	getAllStatus(): SourceStatus[]
 }
 ```
 
 **Key behaviors:**
+
 - Auto-reconnect with exponential backoff (2s, 4s, 8s, max 30s)
 - Emit data rate metrics every 5 seconds
 - Handle `ECONNREFUSED`, `ETIMEDOUT`, `ECONNRESET` gracefully
@@ -303,21 +305,22 @@ Multiplexes a single audio stream to multiple consumers.
 // src/core/fanout-manager.ts
 
 interface BranchConfig {
-  id: string;
-  highWaterMark?: number; // Default: 256KB
+	id: string
+	highWaterMark?: number // Default: 256KB
 }
 
 class FanoutManager extends EventEmitter {
-  // Events: 'backpressure', 'branch-added', 'branch-removed'
-  
-  attachSource(source: Readable): void;
-  addBranch(config: BranchConfig): PassThrough;
-  removeBranch(id: string): void;
-  getBranchIds(): string[];
+	// Events: 'backpressure', 'branch-added', 'branch-removed'
+
+	attachSource(source: Readable): void
+	addBranch(config: BranchConfig): PassThrough
+	removeBranch(id: string): void
+	getBranchIds(): string[]
 }
 ```
 
 **Key behaviors:**
+
 - Each branch has independent buffering
 - If a branch buffer fills, emit 'backpressure' event (don't block source)
 - Real-time audio priority: prefer dropping data over blocking
@@ -330,13 +333,13 @@ Transform streams for audio format conversion.
 // src/core/format-converter.ts
 
 // Convert 32-bit float to 16-bit signed integer
-function createF32ToS16Transform(): Transform;
+function createF32ToS16Transform(): Transform
 
 // Convert 16-bit signed integer to 32-bit float
-function createS16ToF32Transform(): Transform;
+function createS16ToF32Transform(): Transform
 
 // Resample audio (48kHz → 22050Hz for multimon-ng)
-function createResampleTransform(fromRate: number, toRate: number): Transform;
+function createResampleTransform(fromRate: number, toRate: number): Transform
 ```
 
 ---
@@ -351,47 +354,47 @@ All decoders implement this interface for consistent lifecycle management.
 // src/decoders/types.ts
 
 interface DecoderConfig {
-  id: string;
-  type: string;
-  enabled: boolean;
-  options: Record<string, unknown>;
+	id: string
+	type: string
+	enabled: boolean
+	options: Record<string, unknown>
 }
 
 interface DecoderOutput {
-  timestamp: Date;
-  decoder: string;
-  type: 'sync' | 'decode' | 'call' | 'message' | 'signal' | 'error' | 'stats';
-  data: unknown;
+	timestamp: Date
+	decoder: string
+	type: "sync" | "decode" | "call" | "message" | "signal" | "error" | "stats"
+	data: unknown
 }
 
 interface DecoderStatus {
-  id: string;
-  type: string;
-  running: boolean;
-  pid?: number;
-  uptime: number;
-  stats: {
-    bytesIn: number;
-    eventsOut: number;
-    errors: number;
-  };
+	id: string
+	type: string
+	running: boolean
+	pid?: number
+	uptime: number
+	stats: {
+		bytesIn: number
+		eventsOut: number
+		errors: number
+	}
 }
 
 interface Decoder {
-  readonly id: string;
-  readonly type: string;
-  
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  restart(): Promise<void>;
-  
-  attachInput(stream: Readable): void;
-  getOutput(): Readable; // Object mode stream of DecoderOutput
-  getStatus(): DecoderStatus;
-  
-  on(event: 'output', listener: (output: DecoderOutput) => void): this;
-  on(event: 'error', listener: (error: Error) => void): this;
-  on(event: 'exit', listener: (code: number) => void): this;
+	readonly id: string
+	readonly type: string
+
+	start(): Promise<void>
+	stop(): Promise<void>
+	restart(): Promise<void>
+
+	attachInput(stream: Readable): void
+	getOutput(): Readable // Object mode stream of DecoderOutput
+	getStatus(): DecoderStatus
+
+	on(event: "output", listener: (output: DecoderOutput) => void): this
+	on(event: "error", listener: (error: Error) => void): this
+	on(event: "exit", listener: (code: number) => void): this
 }
 ```
 
@@ -405,10 +408,10 @@ Digital voice decoder (DMR, P25, YSF, D-Star, NXDN, ProVoice).
 // src/decoders/builtin/dsd-fme.ts
 
 interface DsdFmeOptions {
-  mode: 'auto' | 'dmr' | 'p25' | 'ysf' | 'dstar' | 'nxdn' | 'provoice';
-  output: 'null' | 'wav' | 'udp';
-  wavDir?: string;
-  extraArgs?: string[];
+	mode: "auto" | "dmr" | "p25" | "ysf" | "dstar" | "nxdn" | "provoice"
+	output: "null" | "wav" | "udp"
+	wavDir?: string
+	extraArgs?: string[]
 }
 
 // Output types:
@@ -425,13 +428,22 @@ Pager and data protocol decoder.
 // src/decoders/builtin/multimon-ng.ts
 
 interface MultimonOptions {
-  modes: Array<'POCSAG512' | 'POCSAG1200' | 'POCSAG2400' | 'FLEX' | 'EAS' | 'AFSK1200' | 'FSK9600' | 'DTMF'>;
-  verbosity?: number;
-  filters?: {
-    highpass?: number;
-    lowpass?: number;
-    gain?: number;
-  };
+	modes: Array<
+		| "POCSAG512"
+		| "POCSAG1200"
+		| "POCSAG2400"
+		| "FLEX"
+		| "EAS"
+		| "AFSK1200"
+		| "FSK9600"
+		| "DTMF"
+	>
+	verbosity?: number
+	filters?: {
+		highpass?: number
+		lowpass?: number
+		gain?: number
+	}
 }
 
 // Output types:
@@ -447,8 +459,8 @@ ISM band signal classifier and decoder.
 // src/decoders/builtin/rtl433.ts
 
 interface Rtl433Options {
-  analyze?: boolean; // -A flag for pulse analysis
-  protocols?: number[]; // Specific protocols to decode
+	analyze?: boolean // -A flag for pulse analysis
+	protocols?: number[] // Specific protocols to decode
 }
 
 // Output types:
@@ -462,18 +474,18 @@ Plugin system for adding new decoders.
 ```typescript
 // src/decoders/registry.ts
 
-type DecoderFactory = (config: DecoderConfig) => Decoder;
+type DecoderFactory = (config: DecoderConfig) => Decoder
 
 class DecoderRegistry {
-  register(type: string, factory: DecoderFactory): void;
-  create(config: DecoderConfig): Decoder;
-  getRegisteredTypes(): string[];
+	register(type: string, factory: DecoderFactory): void
+	create(config: DecoderConfig): Decoder
+	getRegisteredTypes(): string[]
 }
 
 // Usage:
-registry.register('dsd-fme', (config) => new DsdFmeDecoder(config));
-registry.register('multimon-ng', (config) => new MultimonDecoder(config));
-registry.register('rtl_433', (config) => new Rtl433Decoder(config));
+registry.register("dsd-fme", config => new DsdFmeDecoder(config))
+registry.register("multimon-ng", config => new MultimonDecoder(config))
+registry.register("rtl_433", config => new Rtl433Decoder(config))
 ```
 
 ---
@@ -482,19 +494,19 @@ registry.register('rtl_433', (config) => new Rtl433Decoder(config));
 
 ### REST Endpoints
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/health` | Health check |
-| `GET` | `/api/status` | Full system status |
-| `GET` | `/api/sources` | List configured sources |
-| `POST` | `/api/sources` | Add a source |
-| `DELETE` | `/api/sources/:id` | Remove a source |
-| `GET` | `/api/decoders` | List all decoders |
-| `GET` | `/api/decoders/:id` | Get decoder status |
-| `POST` | `/api/decoders/:id/start` | Start a decoder |
-| `POST` | `/api/decoders/:id/stop` | Stop a decoder |
-| `POST` | `/api/decoders/:id/restart` | Restart a decoder |
-| `PATCH` | `/api/decoders/:id` | Update decoder config |
+| Method   | Path                        | Description             |
+| -------- | --------------------------- | ----------------------- |
+| `GET`    | `/health`                   | Health check            |
+| `GET`    | `/api/status`               | Full system status      |
+| `GET`    | `/api/sources`              | List configured sources |
+| `POST`   | `/api/sources`              | Add a source            |
+| `DELETE` | `/api/sources/:id`          | Remove a source         |
+| `GET`    | `/api/decoders`             | List all decoders       |
+| `GET`    | `/api/decoders/:id`         | Get decoder status      |
+| `POST`   | `/api/decoders/:id/start`   | Start a decoder         |
+| `POST`   | `/api/decoders/:id/stop`    | Stop a decoder          |
+| `POST`   | `/api/decoders/:id/restart` | Restart a decoder       |
+| `PATCH`  | `/api/decoders/:id`         | Update decoder config   |
 
 ### WebSocket Events
 
@@ -518,13 +530,13 @@ Connect to `ws://host:3000/ws` for real-time events:
 ```typescript
 // GET /api/status
 interface SystemStatus {
-  uptime: number;
-  sources: SourceStatus[];
-  decoders: DecoderStatus[];
-  audio: {
-    outputPort: number;
-    clientsConnected: number;
-  };
+	uptime: number
+	sources: SourceStatus[]
+	decoders: DecoderStatus[]
+	audio: {
+		outputPort: number
+		clientsConnected: number
+	}
 }
 ```
 
@@ -562,7 +574,7 @@ decoders:
       mode: auto
       output: wav
       wavDir: /data/recordings
-      
+
   - id: multimon
     type: multimon-ng
     enabled: true
@@ -575,7 +587,7 @@ decoders:
       filters:
         highpass: 200
         lowpass: 5000
-        
+
   - id: rtl433
     type: rtl_433
     enabled: false
@@ -597,7 +609,7 @@ api:
 logging:
   level: ${LOG_LEVEL:-info}
   dir: /data/logs
-  
+
 # Paths
 paths:
   recordings: /data/recordings
@@ -606,15 +618,15 @@ paths:
 
 ### Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RTL_TCP_HOST` | `192.168.1.100` | Pi rtl_tcp host |
-| `RTL_TCP_PORT` | `1234` | Pi rtl_tcp port |
-| `SDRPP_HOST` | `127.0.0.1` | SDR++ network sink host |
-| `SDRPP_PORT` | `7355` | SDR++ network sink port |
-| `API_PORT` | `3000` | Fastify API port |
-| `AUDIO_PORT` | `8080` | Audio output TCP port |
-| `LOG_LEVEL` | `info` | Log level (trace/debug/info/warn/error) |
+| Variable       | Default         | Description                             |
+| -------------- | --------------- | --------------------------------------- |
+| `RTL_TCP_HOST` | `192.168.1.100` | Pi rtl_tcp host                         |
+| `RTL_TCP_PORT` | `1234`          | Pi rtl_tcp port                         |
+| `SDRPP_HOST`   | `127.0.0.1`     | SDR++ network sink host                 |
+| `SDRPP_PORT`   | `7355`          | SDR++ network sink port                 |
+| `API_PORT`     | `3000`          | Fastify API port                        |
+| `AUDIO_PORT`   | `8080`          | Audio output TCP port                   |
+| `LOG_LEVEL`    | `info`          | Log level (trace/debug/info/warn/error) |
 
 ---
 
@@ -632,18 +644,19 @@ paths:
 - [ ] Unit tests for core components
 
 **Dependencies:**
+
 ```json
 {
-  "dependencies": {
-    "fastify": "^5.0.0",
-    "@fastify/websocket": "^11.0.0",
-    "@fastify/swagger": "^9.0.0",
-    "@fastify/swagger-ui": "^5.0.0",
-    "pino": "^9.0.0",
-    "pino-pretty": "^11.0.0",
-    "zod": "^3.23.0",
-    "yaml": "^2.4.0"
-  }
+	"dependencies": {
+		"fastify": "^5.0.0",
+		"@fastify/websocket": "^11.0.0",
+		"@fastify/swagger": "^9.0.0",
+		"@fastify/swagger-ui": "^5.0.0",
+		"pino": "^9.0.0",
+		"pino-pretty": "^11.0.0",
+		"zod": "^3.23.0",
+		"yaml": "^2.4.0"
+	}
 }
 ```
 
@@ -702,7 +715,6 @@ paths:
   - Audio player (WebRTC or Icecast)
   - Signal spectrogram visualization
   - SDR++ control integration (frequency, gain, mode)
-  
 - [ ] **More Decoders**
   - `op25` - P25 trunking support
   - `tetra-rx` - TETRA decoder
@@ -757,17 +769,20 @@ paths:
 ```typescript
 // Use custom error classes
 class WaveKitError extends Error {
-  constructor(message: string, public readonly code: string) {
-    super(message);
-    this.name = 'WaveKitError';
-  }
+	constructor(
+		message: string,
+		public readonly code: string,
+	) {
+		super(message)
+		this.name = "WaveKitError"
+	}
 }
 
 class SourceConnectionError extends WaveKitError {
-  constructor(host: string, port: number, cause?: Error) {
-    super(`Failed to connect to ${host}:${port}`, 'SOURCE_CONNECTION_ERROR');
-    this.cause = cause;
-  }
+	constructor(host: string, port: number, cause?: Error) {
+		super(`Failed to connect to ${host}:${port}`, "SOURCE_CONNECTION_ERROR")
+		this.cause = cause
+	}
 }
 ```
 

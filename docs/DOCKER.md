@@ -16,7 +16,7 @@ Everything runs inside one container: SDR++ Server, decoders, API, dashboard.
 graph TB
     subgraph "wavekit:latest"
         S6[s6-overlay<br/>init system]
-        
+
         subgraph Services
             SDRPP[SDR++ Server<br/>:5259]
             API[Fastify API<br/>:3000]
@@ -25,7 +25,7 @@ graph TB
             RTL[rtl_433]
             NEXT[Next.js Dashboard<br/>:3001]
         end
-        
+
         S6 --> SDRPP
         S6 --> API
         S6 --> DSD
@@ -33,12 +33,12 @@ graph TB
         S6 --> RTL
         S6 --> NEXT
     end
-    
+
     PI[Pi + RTL-SDR<br/>rtl_tcp :1234] -->|IQ data| SDRPP
     SDRPP -->|audio| API
     API -->|stream| DSD
     API -->|stream| MM
-    
+
     HOST[Host Machine]
     wavekit -->|TCP :8080| HOST
     HOST -->|audio playback| SPEAKER[🔊]
@@ -73,16 +73,18 @@ graph TB
         SDRPP[sdrpp-server<br/>:5259]
         WAVEKIT[wavekit-core<br/>API + Decoders<br/>:3000]
     end
-    
+
     PI[Pi + RTL-SDR] -->|rtl_tcp| SDRPP
     SDRPP -->|IQ/Audio| WAVEKIT
 ```
 
 **Pros:**
+
 - SDR++ Server can be updated independently
 - Cleaner separation of concerns
 
 **Cons:**
+
 - More complex networking
 - Need docker-compose or orchestration
 - Audio streaming between containers adds latency
@@ -101,20 +103,21 @@ graph TB
             A1 --> |contains| SDRPP1[SDR++ Server]
             A1 --> |contains| CORE1[API + Decoders]
         end
-        
+
         subgraph "Option 2: Sidecar"
             B1[wavekit:core]
             B2[wavekit:sdrpp]
             B1 -.->|network| B2
         end
     end
-    
+
     style A1 fill:#2d5a27
     style B1 fill:#1a3a5c
     style B2 fill:#1a3a5c
 ```
 
 **Why?**
+
 - Build **one Dockerfile** with multi-stage targets
 - `wavekit:full` = everything (for single-node deployment)
 - `wavekit:core` = just API + decoders (if you want SDR++ elsewhere)
@@ -128,14 +131,14 @@ Since we're running multiple processes in one container, we need a proper init s
 
 ### Why s6-overlay over supervisord?
 
-| Feature | s6-overlay | supervisord |
-|---------|-----------|-------------|
-| **Designed for containers** | ✅ Yes, runs as PID 1 | ❌ No, not designed for PID 1 |
-| **Signal handling** | ✅ Proper SIGTERM propagation | ⚠️ Can miss signals |
-| **Zombie reaping** | ✅ Handles orphaned processes | ⚠️ Limited |
-| **Dependencies** | C only, ~5MB | Python, ~50MB |
-| **Auto-restart** | ✅ Built-in | ✅ Built-in |
-| **Health checks** | ✅ Accurate container status | ⚠️ Can report false healthy |
+| Feature                     | s6-overlay                    | supervisord                   |
+| --------------------------- | ----------------------------- | ----------------------------- |
+| **Designed for containers** | ✅ Yes, runs as PID 1         | ❌ No, not designed for PID 1 |
+| **Signal handling**         | ✅ Proper SIGTERM propagation | ⚠️ Can miss signals           |
+| **Zombie reaping**          | ✅ Handles orphaned processes | ⚠️ Limited                    |
+| **Dependencies**            | C only, ~5MB                  | Python, ~50MB                 |
+| **Auto-restart**            | ✅ Built-in                   | ✅ Built-in                   |
+| **Health checks**           | ✅ Accurate container status  | ⚠️ Can report false healthy   |
 
 ### s6-overlay Service Structure
 
@@ -206,12 +209,12 @@ Options:
 
 ### What SDR++ Server Provides
 
-| Feature | Benefit |
-|---------|---------|
-| **Remote IQ streaming** | Clients get raw IQ data from the SDR |
-| **Full device control** | Frequency, gain, bandwidth via network |
-| **Multiple SDR support** | RTL-SDR, HackRF, SDRplay, AirSpy, etc |
-| **Better than rtl_tcp** | More features, better stability |
+| Feature                  | Benefit                                |
+| ------------------------ | -------------------------------------- |
+| **Remote IQ streaming**  | Clients get raw IQ data from the SDR   |
+| **Full device control**  | Frequency, gain, bandwidth via network |
+| **Multiple SDR support** | RTL-SDR, HackRF, SDRplay, AirSpy, etc  |
+| **Better than rtl_tcp**  | More features, better stability        |
 
 ### SDR++ Server in Docker
 
@@ -245,13 +248,13 @@ sequenceDiagram
     Pi->>SDRPP: IQ data (rtl_tcp)
     SDRPP->>SDRPP: Demodulate FM/AM/SSB
     SDRPP->>API: Audio stream (48kHz PCM)
-    
+
     Note over API: Fanout to decoders
-    
+
     API->>DSD: Audio copy 1
     DSD->>DSD: Decode DMR/P25/YSF
     DSD->>API: Decoded audio + metadata
-    
+
     API->>TCP: Forward decoded audio
     TCP->>Host: TCP stream
     Host->>Host: sox/ffplay
@@ -315,19 +318,29 @@ nc "$CONTAINER_HOST" "$AUDIO_PORT" \
 
 ```typescript
 // wavekit-audio-player.ts
-import { spawn } from 'child_process';
-import { createConnection } from 'net';
+import { spawn } from "child_process"
+import { createConnection } from "net"
 
-const socket = createConnection({ host: 'localhost', port: 8080 });
-const player = spawn('sox', [
-  '-t', 'raw', '-r', '48000', '-c', '1', '-b', '16', '-e', 'signed-integer',
-  '-', '-d'
-]);
+const socket = createConnection({ host: "localhost", port: 8080 })
+const player = spawn("sox", [
+	"-t",
+	"raw",
+	"-r",
+	"48000",
+	"-c",
+	"1",
+	"-b",
+	"16",
+	"-e",
+	"signed-integer",
+	"-",
+	"-d",
+])
 
-socket.pipe(player.stdin);
+socket.pipe(player.stdin)
 
-socket.on('connect', () => console.log('🔊 Audio connected'));
-socket.on('error', (e) => console.error('Audio error:', e.message));
+socket.on("connect", () => console.log("🔊 Audio connected"))
+socket.on("error", e => console.error("Audio error:", e.message))
 ```
 
 ---
@@ -502,16 +515,16 @@ ENTRYPOINT ["/init"]
 
 ## Image Size Analysis
 
-| Component | Estimated Size |
-|-----------|----------------|
-| Base Debian + runtime libs | ~200 MB |
-| SDR++ Server | ~50 MB |
-| dsd-fme | ~10 MB |
-| multimon-ng | ~5 MB |
-| rtl_433 | ~5 MB |
-| Node.js + WaveKit | ~100 MB |
-| s6-overlay | ~5 MB |
-| **Total** | **~375 MB** |
+| Component                  | Estimated Size |
+| -------------------------- | -------------- |
+| Base Debian + runtime libs | ~200 MB        |
+| SDR++ Server               | ~50 MB         |
+| dsd-fme                    | ~10 MB         |
+| multimon-ng                | ~5 MB          |
+| rtl_433                    | ~5 MB          |
+| Node.js + WaveKit          | ~100 MB        |
+| s6-overlay                 | ~5 MB          |
+| **Total**                  | **~375 MB**    |
 
 With multi-stage builds, we avoid including build tools in the final image.
 
@@ -575,9 +588,9 @@ The container will use a YAML config for runtime settings:
 source:
   # Connect to SDR++ server (can be internal or external)
   type: sdrpp-network
-  host: 127.0.0.1  # localhost = internal SDR++
+  host: 127.0.0.1 # localhost = internal SDR++
   port: 5259
-  
+
   # Or connect directly to rtl_tcp
   # type: rtl_tcp
   # host: 192.168.1.100
@@ -586,7 +599,7 @@ source:
 sdrpp:
   # Only used if source.type = sdrpp-network and host = 127.0.0.1
   enabled: true
-  rtl_tcp_host: ${RTL_TCP_HOST}  # Env variable
+  rtl_tcp_host: ${RTL_TCP_HOST} # Env variable
   rtl_tcp_port: ${RTL_TCP_PORT}
 
 decoders:
@@ -595,7 +608,7 @@ decoders:
     mode: auto
     output: wav
     wav_dir: /data/recordings
-    
+
   multimon-ng:
     enabled: true
     modes:
@@ -603,9 +616,9 @@ decoders:
       - POCSAG1200
       - POCSAG2400
       - FLEX
-    
+
   rtl_433:
-    enabled: false  # Only for ISM band signals
+    enabled: false # Only for ISM band signals
 
 audio:
   # Output decoded audio over TCP
@@ -615,7 +628,7 @@ audio:
 
 api:
   port: 3000
-  
+
 logging:
   level: info
   dir: /data/logs
@@ -630,7 +643,7 @@ graph TB
     subgraph "Your Setup"
         PI[🍓 Raspberry Pi<br/>RTL-SDR + rtl_tcp :1234]
     end
-    
+
     subgraph "Docker on Mac"
         subgraph "wavekit:full container"
             S6[s6-overlay]
@@ -639,29 +652,29 @@ graph TB
             DSD[dsd-fme]
             MM[multimon-ng]
             RTL[rtl_433]
-            
+
             S6 --> SDRPP
             S6 --> API
             S6 --> DSD
             S6 --> MM
             S6 --> RTL
-            
+
             SDRPP -->|audio| API
             API -->|fanout| DSD
             API -->|fanout| MM
         end
     end
-    
+
     subgraph "Mac Host"
         PLAYER[wavekit-audio-player<br/>sox/ffplay]
         BROWSER[Browser<br/>Dashboard :3000]
     end
-    
+
     PI -->|IQ data| SDRPP
     API -->|TCP :8080| PLAYER
     PLAYER --> SPEAKER[🔊]
     API --> BROWSER
-    
+
     style wavekit:full fill:#1a3a5c
 ```
 
@@ -669,7 +682,7 @@ graph TB
 
 ## Next Steps
 
-1. **Approve this architecture?** 
+1. **Approve this architecture?**
 2. **Start with the Dockerfile** - Build the multi-stage image
 3. **Add s6-overlay services** - Service definitions for each process
 4. **Implement WaveKit TypeScript core** - Stream handling, API
