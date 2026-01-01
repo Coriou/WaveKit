@@ -16,7 +16,12 @@ import fastifyCors from "@fastify/cors"
 import fastifyWebsocket from "@fastify/websocket"
 import fastifySwagger from "@fastify/swagger"
 import fastifySwaggerUi from "@fastify/swagger-ui"
-import { createComponentLogger, type Logger } from "../utils/logger.js"
+import {
+	createComponentLogger,
+	generateCorrelationId,
+	createScopedLogger,
+	type Logger,
+} from "../utils/logger.js"
 import type { SourceManager } from "../core/source-manager.js"
 import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
@@ -26,6 +31,12 @@ import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
+
+/**
+ * HTTP header name for correlation ID.
+ * Clients can provide their own correlation ID via this header.
+ */
+const CORRELATION_ID_HEADER = "x-correlation-id"
 
 export interface ApiServerConfig {
 	host: string
@@ -300,15 +311,22 @@ export class ApiServer {
 
 	/**
 	 * Registers the centralized error handler.
-	 * Converts errors to consistent JSON responses.
+	 * Converts errors to consistent JSON responses with correlation IDs.
+	 *
+	 * Requirements:
+	 * - 6.3: Include correlation IDs in logs for request tracing
 	 */
 	private registerErrorHandler(): void {
 		// Handle 404 Not Found
 		this.app.setNotFoundHandler((request, reply) => {
+			const correlationId = (request as unknown as { correlationId?: string })
+				.correlationId
+
 			this.log.debug(
 				{
 					method: request.method,
 					url: request.url,
+					correlationId,
 				},
 				"Route not found",
 			)
@@ -317,17 +335,22 @@ export class ApiServer {
 				error: "NotFound",
 				code: "NOT_FOUND",
 				message: `Route ${request.method} ${request.url} not found`,
+				correlationId,
 			})
 		})
 
 		this.app.setErrorHandler((error: FastifyError, request, reply) => {
-			// Log the error
+			const correlationId = (request as unknown as { correlationId?: string })
+				.correlationId
+
+			// Log the error with correlation ID
 			this.log.error(
 				{
 					err: error,
 					method: request.method,
 					url: request.url,
 					statusCode: error.statusCode ?? 500,
+					correlationId,
 				},
 				"Request error",
 			)
@@ -338,6 +361,7 @@ export class ApiServer {
 					error: error.name,
 					code: error.code,
 					message: error.message,
+					correlationId,
 				})
 			}
 
@@ -348,6 +372,7 @@ export class ApiServer {
 					code: "VALIDATION_ERROR",
 					message: error.message,
 					details: error.validation,
+					correlationId,
 				})
 			}
 
@@ -357,6 +382,7 @@ export class ApiServer {
 					error: "NotFound",
 					code: "NOT_FOUND",
 					message: error.message || "Resource not found",
+					correlationId,
 				})
 			}
 
@@ -370,6 +396,7 @@ export class ApiServer {
 					error: error.name || "ClientError",
 					code: error.code || "CLIENT_ERROR",
 					message: error.message,
+					correlationId,
 				})
 			}
 
@@ -381,6 +408,7 @@ export class ApiServer {
 					process.env["NODE_ENV"] === "production"
 						? "An internal error occurred"
 						: error.message,
+				correlationId,
 			})
 		})
 
@@ -389,16 +417,43 @@ export class ApiServer {
 
 	/**
 	 * Registers request logging hook.
-	 * Logs incoming requests and response times.
+	 * Logs incoming requests and response times with correlation IDs.
+	 *
+	 * Requirements:
+	 * - 6.1: Output structured JSON logs
+	 * - 6.3: Include correlation IDs in logs for request tracing
 	 */
 	private registerRequestLogging(): void {
-		this.app.addHook("onRequest", async request => {
+		// Generate or extract correlation ID for each request
+		this.app.addHook("onRequest", async (request, reply) => {
+			// Use client-provided correlation ID or generate a new one
+			const clientCorrelationId = request.headers[CORRELATION_ID_HEADER]
+			const correlationId =
+				typeof clientCorrelationId === "string"
+					? clientCorrelationId
+					: generateCorrelationId()
+
+			// Store correlation ID on request for later use
+			;(request as unknown as { correlationId: string }).correlationId =
+				correlationId
+
+			// Add correlation ID to response headers for client tracking
+			void reply.header(CORRELATION_ID_HEADER, correlationId)
+
+			// Create a request-scoped logger with correlation ID
+			const requestLogger = createScopedLogger(
+				this.log,
+				"Request",
+				correlationId,
+			)
+			;(request as unknown as { log: Logger }).log = requestLogger
+
 			// Skip logging for health checks and docs to reduce noise
 			if (request.url === "/health" || request.url.startsWith("/docs")) {
 				return
 			}
 
-			this.log.debug(
+			requestLogger.debug(
 				{
 					method: request.method,
 					url: request.url,
@@ -414,12 +469,17 @@ export class ApiServer {
 				return
 			}
 
+			// Get the correlation ID from the request
+			const correlationId = (request as unknown as { correlationId?: string })
+				.correlationId
+
 			this.log.info(
 				{
 					method: request.method,
 					url: request.url,
 					statusCode: reply.statusCode,
 					responseTime: reply.elapsedTime,
+					correlationId,
 				},
 				"Request completed",
 			)

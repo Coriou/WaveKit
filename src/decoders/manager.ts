@@ -405,49 +405,99 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Sets up event handlers for a decoder to forward events and handle auto-restart.
+	 * All handlers are wrapped in try-catch to ensure failure isolation (Requirement 10.1).
 	 */
 	private setupDecoderEventHandlers(state: DecoderState): void {
 		const { decoder } = state
 
 		// Forward output events (Requirement 4.4, 4.6)
 		// Also track last output time for health checks (Requirement 20.1, 20.2)
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("output", (output: DecoderOutput) => {
-			state.lastOutputAt = new Date()
-			this.emit("decoder:output", decoder.id, output)
+			try {
+				state.lastOutputAt = new Date()
+				this.emit("decoder:output", decoder.id, output)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Error handling decoder output event, continuing operation",
+				)
+			}
 		})
 
 		// Forward error events (Requirement 4.6)
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("error", (error: Error) => {
-			this.log.error({ err: error, decoderId: decoder.id }, "Decoder error")
-			this.emit("decoder:error", decoder.id, error)
+			try {
+				this.log.error({ err: error, decoderId: decoder.id }, "Decoder error")
+				this.emit("decoder:error", decoder.id, error)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Error handling decoder error event, continuing operation",
+				)
+			}
 		})
 
 		// Handle started event
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("started", () => {
-			// Reset health to running when decoder starts (Requirement 20.1)
-			this.updateDecoderHealth(state, "running")
-			this.emit("decoder:started", decoder.id)
+			try {
+				// Reset health to running when decoder starts (Requirement 20.1)
+				this.updateDecoderHealth(state, "running")
+				this.emit("decoder:started", decoder.id)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Error handling decoder started event, continuing operation",
+				)
+			}
 		})
 
 		// Handle stopped event
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("stopped", () => {
-			this.emit("decoder:stopped", decoder.id)
+			try {
+				this.emit("decoder:stopped", decoder.id)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Error handling decoder stopped event, continuing operation",
+				)
+			}
 		})
 
 		// Forward health events from decoder (Requirement 20.4)
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("health", (health: DecoderHealth) => {
-			this.updateDecoderHealth(state, health)
+			try {
+				this.updateDecoderHealth(state, health)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id },
+					"Error handling decoder health event, continuing operation",
+				)
+			}
 		})
 
 		// Handle exit for auto-restart (Requirement 4.2)
+		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("exit", (code: number | null, signal: string | null) => {
-			this.handleDecoderExit(state, code, signal)
+			try {
+				this.handleDecoderExit(state, code, signal)
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: decoder.id, code, signal },
+					"Error handling decoder exit event, continuing operation",
+				)
+			}
 		})
 	}
 
 	/**
 	 * Handles decoder process exit for auto-restart logic (Requirement 4.2).
 	 * Also handles health state transitions (Requirements 20.3).
+	 * Ensures failure isolation - errors here don't affect other decoders (Requirement 10.1).
 	 */
 	private handleDecoderExit(
 		state: DecoderState,
@@ -456,8 +506,15 @@ export class DecoderManager extends EventEmitter {
 	): void {
 		const { decoder } = state
 
-		// Clean up fanout branch on exit
-		this.unwireDecoderFromFanout(state)
+		// Clean up fanout branch on exit - wrapped in try-catch for isolation (Requirement 10.1)
+		try {
+			this.unwireDecoderFromFanout(state)
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: decoder.id },
+				"Error unwiring decoder from fanout, continuing with exit handling",
+			)
+		}
 
 		// Don't restart if intentionally stopped
 		if (state.intentionallyStopped) {
@@ -475,7 +532,7 @@ export class DecoderManager extends EventEmitter {
 		) {
 			this.log.error(
 				{ decoderId: decoder.id, restartCount: state.restartCount },
-				"Max restarts exceeded, not restarting",
+				"Max restarts exceeded, not restarting - other decoders continue operating",
 			)
 			// Set health to faulted when crash loop detected (Requirement 20.3)
 			this.updateDecoderHealth(state, "faulted")
@@ -495,7 +552,7 @@ export class DecoderManager extends EventEmitter {
 				attempt: state.restartCount,
 				delay,
 			},
-			"Decoder exited unexpectedly, scheduling restart",
+			"Decoder exited unexpectedly, scheduling restart - other decoders continue operating",
 		)
 
 		this.emit("decoder:restarting", decoder.id, state.restartCount, delay)
@@ -513,9 +570,10 @@ export class DecoderManager extends EventEmitter {
 					// Reset delay on successful start
 					state.currentDelay = this.config.restartDelay
 				} catch (err) {
+					// Log failure but don't crash - failure isolation (Requirement 10.1)
 					this.log.error(
 						{ err, decoderId: decoder.id },
-						"Failed to restart decoder",
+						"Failed to restart decoder - other decoders continue operating",
 					)
 					// The exit handler will be called again, triggering another restart attempt
 				}
@@ -764,58 +822,70 @@ export class DecoderManager extends EventEmitter {
 	 * Performs health checks on all running decoders.
 	 * Transitions to degraded state if no output received within timeout (Requirement 20.2).
 	 * Transitions back to running state if output is received (Requirement 20.1).
+	 * Wrapped in try-catch for failure isolation (Requirement 10.1).
 	 */
 	private performHealthChecks(): void {
 		const now = Date.now()
 
 		for (const [id, state] of this.decoders) {
-			const { decoder, lastOutputAt, lastHealth } = state
-			const status = decoder.getStatus()
+			try {
+				const { decoder, lastOutputAt, lastHealth } = state
+				const status = decoder.getStatus()
 
-			// Skip if not running or already faulted
-			if (!status.running || lastHealth === "faulted") {
-				continue
-			}
+				// Skip if not running or already faulted
+				if (!status.running || lastHealth === "faulted") {
+					continue
+				}
 
-			// Check if decoder has produced output recently
-			if (lastOutputAt) {
-				const timeSinceOutput = now - lastOutputAt.getTime()
+				// Check if decoder has produced output recently
+				if (lastOutputAt) {
+					const timeSinceOutput = now - lastOutputAt.getTime()
 
-				if (timeSinceOutput > this.config.degradedTimeout) {
-					// No output for too long - transition to degraded (Requirement 20.2)
-					if (lastHealth !== "degraded") {
+					if (timeSinceOutput > this.config.degradedTimeout) {
+						// No output for too long - transition to degraded (Requirement 20.2)
+						if (lastHealth !== "degraded") {
+							this.log.warn(
+								{
+									decoderId: id,
+									timeSinceOutput,
+									timeout: this.config.degradedTimeout,
+								},
+								"Decoder has not produced output, marking as degraded",
+							)
+							this.updateDecoderHealth(state, "degraded")
+						}
+					} else if (lastHealth === "degraded") {
+						// Output received recently - transition back to running (Requirement 20.1)
+						this.log.info(
+							{ decoderId: id },
+							"Decoder producing output again, marking as running",
+						)
+						this.updateDecoderHealth(state, "running")
+					}
+				} else {
+					// No output ever received - check if decoder has been running long enough
+					const uptime = status.uptime * 1000 // Convert to ms
+					if (
+						uptime > this.config.degradedTimeout &&
+						lastHealth !== "degraded"
+					) {
 						this.log.warn(
 							{
 								decoderId: id,
-								timeSinceOutput,
+								uptime: status.uptime,
 								timeout: this.config.degradedTimeout,
 							},
-							"Decoder has not produced output, marking as degraded",
+							"Decoder has never produced output, marking as degraded",
 						)
 						this.updateDecoderHealth(state, "degraded")
 					}
-				} else if (lastHealth === "degraded") {
-					// Output received recently - transition back to running (Requirement 20.1)
-					this.log.info(
-						{ decoderId: id },
-						"Decoder producing output again, marking as running",
-					)
-					this.updateDecoderHealth(state, "running")
 				}
-			} else {
-				// No output ever received - check if decoder has been running long enough
-				const uptime = status.uptime * 1000 // Convert to ms
-				if (uptime > this.config.degradedTimeout && lastHealth !== "degraded") {
-					this.log.warn(
-						{
-							decoderId: id,
-							uptime: status.uptime,
-							timeout: this.config.degradedTimeout,
-						},
-						"Decoder has never produced output, marking as degraded",
-					)
-					this.updateDecoderHealth(state, "degraded")
-				}
+			} catch (err) {
+				// Log error but continue checking other decoders (Requirement 10.1)
+				this.log.error(
+					{ err, decoderId: id },
+					"Error during health check for decoder, continuing with other decoders",
+				)
 			}
 		}
 	}

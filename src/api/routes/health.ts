@@ -2,8 +2,11 @@
  * Health Routes - Health check and system status endpoints
  *
  * Requirements:
+ * - 4.1: GET /health returns quick liveness status (200 OK or 503)
+ * - 4.5: GET /health/ready returns readiness probe
  * - 9.1: GET /health returns system health status
  * - 9.2: GET /api/status returns full system status including sources, decoders, and audio output
+ * - 10.4: Distinguish between healthy, degraded, and unhealthy states
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
@@ -11,23 +14,75 @@ import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
 import type { AudioOutput } from "../../core/audio-output.js"
-
-// Application start time for uptime calculation
-const startTime = Date.now()
+import {
+	performHealthCheck,
+	isReady,
+	getUptime,
+	type HealthStatus,
+	type HealthStatusLevel,
+	type ComponentHealth,
+} from "../../utils/health-check.js"
 
 // Application version (could be loaded from package.json in production)
 const APP_VERSION = "1.0.0"
 
+// ============================================================================
+// Schema Definitions
+// ============================================================================
+
 /**
- * Health response schema
+ * Liveness health response schema
  */
-const healthResponseSchema = {
+const livenessResponseSchema = {
 	type: "object",
 	properties: {
 		status: { type: "string", enum: ["ok"] },
 		timestamp: { type: "string", format: "date-time" },
 	},
 	required: ["status", "timestamp"],
+} as const
+
+/**
+ * Component health schema
+ */
+const componentHealthSchema = {
+	type: "object",
+	properties: {
+		status: { type: "string", enum: ["up", "down", "degraded"] },
+		message: { type: "string" },
+		lastCheck: { type: "string", format: "date-time" },
+		metrics: {
+			type: "object",
+			additionalProperties: { type: "number" },
+		},
+	},
+	required: ["status", "lastCheck"],
+} as const
+
+/**
+ * Full health status response schema
+ */
+const healthStatusResponseSchema = {
+	type: "object",
+	properties: {
+		status: { type: "string", enum: ["healthy", "degraded", "unhealthy"] },
+		timestamp: { type: "string", format: "date-time" },
+		uptime: { type: "number" },
+		components: {
+			type: "object",
+			properties: {
+				api: componentHealthSchema,
+				sdrpp: componentHealthSchema,
+				decoders: {
+					type: "object",
+					additionalProperties: componentHealthSchema,
+				},
+				source: componentHealthSchema,
+			},
+			required: ["api", "decoders", "source"],
+		},
+	},
+	required: ["status", "timestamp", "uptime", "components"],
 } as const
 
 /**
@@ -108,11 +163,12 @@ const decoderStatusSchema = {
 } as const
 
 /**
- * System status response schema
+ * System status response schema (legacy /api/status)
  */
 const systemStatusResponseSchema = {
 	type: "object",
 	properties: {
+		status: { type: "string", enum: ["healthy", "degraded", "unhealthy"] },
 		uptime: { type: "number", description: "System uptime in seconds" },
 		version: { type: "string", description: "Application version" },
 		sources: {
@@ -124,14 +180,36 @@ const systemStatusResponseSchema = {
 			items: decoderStatusSchema,
 		},
 		audio: audioStatusSchema,
+		health: healthStatusResponseSchema,
 	},
-	required: ["uptime", "version", "sources", "decoders", "audio"],
+	required: [
+		"status",
+		"uptime",
+		"version",
+		"sources",
+		"decoders",
+		"audio",
+		"health",
+	],
 } as const
 
+// ============================================================================
+// Response Interfaces
+// ============================================================================
+
 /**
- * System status response interface
+ * Liveness response interface
+ */
+export interface LivenessResponse {
+	status: "ok"
+	timestamp: string
+}
+
+/**
+ * System status response interface (extended with health)
  */
 export interface SystemStatusResponse {
+	status: HealthStatusLevel
 	uptime: number
 	version: string
 	sources: SourceStatus[]
@@ -139,17 +217,10 @@ export interface SystemStatusResponse {
 	audio: {
 		outputPort: number
 		clientsConnected: number
-		format?: string
-		sampleRate?: number
+		format?: string | undefined
+		sampleRate?: number | undefined
 	}
-}
-
-/**
- * Health response interface
- */
-export interface HealthResponse {
-	status: "ok"
-	timestamp: string
+	health: HealthStatus
 }
 
 /**
@@ -168,35 +239,117 @@ export interface HealthRoutesOptions {
 	decoderManager: DecoderManager
 	audioOutput: AudioOutput
 	audioConfig?: AudioConfig | undefined
+	/** Whether SDR++ server is expected to be running (full mode) */
+	sdrppEnabled?: boolean | undefined
 }
 
 /**
  * Health routes plugin for Fastify.
- * Registers /health and /api/status endpoints.
+ * Registers /health, /health/ready, /health/live, and /api/status endpoints.
  */
 export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 	fastify: FastifyInstance,
 	options: HealthRoutesOptions,
 ) => {
-	const { sourceManager, decoderManager, audioOutput, audioConfig } = options
+	const {
+		sourceManager,
+		decoderManager,
+		audioOutput,
+		audioConfig,
+		sdrppEnabled,
+	} = options
 
 	/**
-	 * GET /health - Basic health check
-	 * Requirement 9.1: Returns system health status
+	 * GET /health - Quick liveness check
+	 * Requirements: 4.1, 4.2
+	 * Returns 200 OK when healthy, 503 Service Unavailable when unhealthy
 	 */
-	fastify.get<{ Reply: HealthResponse }>(
+	fastify.get<{ Reply: LivenessResponse }>(
 		"/health",
 		{
 			schema: {
 				tags: ["health"],
 				summary: "Health check",
-				description: "Returns basic health status of the API server",
+				description:
+					"Returns quick liveness status. Returns 200 OK when healthy, 503 when unhealthy.",
 				response: {
-					200: healthResponseSchema,
+					200: livenessResponseSchema,
+					503: livenessResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const healthStatus = performHealthCheck(decoderManager, sourceManager, {
+				sdrppEnabled,
+			})
+
+			const response: LivenessResponse = {
+				status: "ok",
+				timestamp: new Date().toISOString(),
+			}
+
+			// Return 503 if unhealthy (Requirement 4.2)
+			if (healthStatus.status === "unhealthy") {
+				return reply.status(503).send(response)
+			}
+
+			return response
+		},
+	)
+
+	/**
+	 * GET /health/ready - Readiness probe
+	 * Requirements: 4.5
+	 * Returns 200 when ready to accept traffic, 503 when not ready
+	 */
+	fastify.get<{ Reply: LivenessResponse }>(
+		"/health/ready",
+		{
+			schema: {
+				tags: ["health"],
+				summary: "Readiness probe",
+				description:
+					"Returns 200 when ready to accept traffic, 503 when not ready.",
+				response: {
+					200: livenessResponseSchema,
+					503: livenessResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const ready = isReady(decoderManager, sourceManager)
+
+			const response: LivenessResponse = {
+				status: "ok",
+				timestamp: new Date().toISOString(),
+			}
+
+			if (!ready) {
+				return reply.status(503).send(response)
+			}
+
+			return response
+		},
+	)
+
+	/**
+	 * GET /health/live - Liveness probe
+	 * Returns 200 when process is alive
+	 */
+	fastify.get<{ Reply: LivenessResponse }>(
+		"/health/live",
+		{
+			schema: {
+				tags: ["health"],
+				summary: "Liveness probe",
+				description: "Returns 200 when process is alive.",
+				response: {
+					200: livenessResponseSchema,
 				},
 			},
 		},
 		async () => {
+			// If we can respond, we're alive
 			return {
 				status: "ok" as const,
 				timestamp: new Date().toISOString(),
@@ -205,8 +358,9 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 	)
 
 	/**
-	 * GET /api/status - Full system status
-	 * Requirement 9.2: Returns full system status including sources, decoders, and audio output
+	 * GET /api/status - Full system status with health details
+	 * Requirements: 4.5, 9.2, 10.4
+	 * Returns full HealthStatus JSON with all component states
 	 */
 	fastify.get<{ Reply: SystemStatusResponse }>(
 		"/api/status",
@@ -215,15 +369,17 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				tags: ["health"],
 				summary: "System status",
 				description:
-					"Returns full system status including sources, decoders, and audio output",
+					"Returns full system status including sources, decoders, audio output, and detailed health information",
 				response: {
 					200: systemStatusResponseSchema,
 				},
 			},
 		},
 		async () => {
-			// Calculate uptime in seconds
-			const uptime = Math.floor((Date.now() - startTime) / 1000)
+			// Perform full health check
+			const healthStatus = performHealthCheck(decoderManager, sourceManager, {
+				sdrppEnabled,
+			})
 
 			// Get all source statuses
 			const sources = sourceManager.getAllStatus()
@@ -244,14 +400,19 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 			}
 
 			return {
-				uptime,
+				status: healthStatus.status,
+				uptime: getUptime(),
 				version: APP_VERSION,
 				sources,
 				decoders,
 				audio,
+				health: healthStatus,
 			}
 		},
 	)
 }
 
 export default healthRoutes
+
+// Re-export types for convenience
+export type { HealthStatus, HealthStatusLevel, ComponentHealth }

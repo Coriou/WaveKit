@@ -23,11 +23,24 @@ curl http://localhost:9000/health
 
 ## 📦 Three Deployment Modes
 
-| Mode           | Size  | Use Case                   | Contains             |
-| -------------- | ----- | -------------------------- | -------------------- |
-| **Full**       | 1.2GB | Single-host (Raspberry Pi) | SDR++, API, Decoders |
-| **Core**       | 550MB | Distributed setup          | API, Decoders only   |
-| **SDR++-only** | 450MB | Dedicated SDR host         | SDR++ server only    |
+| Mode           | Size   | Use Case                   | Contains                   |
+| -------------- | ------ | -------------------------- | -------------------------- |
+| **Full**       | ~1.5GB | Single-host (Raspberry Pi) | SDR++, API, All 8 Decoders |
+| **Core**       | ~800MB | Distributed setup          | API, All 8 Decoders only   |
+| **SDR++-only** | ~450MB | Dedicated SDR host         | SDR++ server only          |
+
+## 📻 Included Decoders (8 Total)
+
+| Decoder         | Binary        | Protocol                      | Typical Frequency   |
+| --------------- | ------------- | ----------------------------- | ------------------- |
+| **dsd-fme**     | `dsd-fme`     | DMR, P25, YSF, D-Star, NXDN   | VHF/UHF             |
+| **multimon-ng** | `multimon-ng` | POCSAG, FLEX, EAS, DTMF       | VHF/UHF             |
+| **rtl_433**     | `rtl_433`     | ISM sensors, weather stations | 315/433/868 MHz     |
+| **acarsdec**    | `acarsdec`    | ACARS aircraft messages       | 129-137 MHz         |
+| **AIS-catcher** | `AIS-catcher` | Maritime AIS                  | 161.975/162.025 MHz |
+| **direwolf**    | `direwolf`    | APRS packets                  | 144.39 MHz          |
+| **dumpvdl2**    | `dumpvdl2`    | VDL Mode 2 aviation           | 136.725-136.975 MHz |
+| **readsb**      | `readsb`      | ADS-B aircraft                | 1090 MHz            |
 
 ## 🎯 Build & Run
 
@@ -150,6 +163,44 @@ SDR_SOURCE=tcp://host:5259   # External SDR++ (core mode)
 NODE_ENV=production
 ```
 
+### Decoder Configuration
+
+Enable/disable and configure individual decoders via environment variables:
+
+```bash
+# dsd-fme (Digital Voice)
+WAVEKIT_DECODERS__DSD_FME__ENABLED=true
+WAVEKIT_DECODERS__DSD_FME__MODE=auto  # auto, dmr, p25, ysf, dstar, nxdn
+
+# multimon-ng (Pager)
+WAVEKIT_DECODERS__MULTIMON_NG__ENABLED=true
+WAVEKIT_DECODERS__MULTIMON_NG__MODES=POCSAG512,POCSAG1200,FLEX
+
+# rtl_433 (ISM Sensors)
+WAVEKIT_DECODERS__RTL_433__ENABLED=true
+WAVEKIT_DECODERS__RTL_433__FREQUENCY=433920000
+
+# acarsdec (ACARS)
+WAVEKIT_DECODERS__ACARSDEC__ENABLED=true
+WAVEKIT_DECODERS__ACARSDEC__FREQUENCIES=131550000,130025000
+
+# AIS-catcher (Maritime)
+WAVEKIT_DECODERS__AIS_CATCHER__ENABLED=true
+WAVEKIT_DECODERS__AIS_CATCHER__CHANNELS=161975000,162025000
+
+# direwolf (APRS)
+WAVEKIT_DECODERS__DIREWOLF__ENABLED=true
+WAVEKIT_DECODERS__DIREWOLF__FREQUENCY=144390000
+
+# dumpvdl2 (VDL2)
+WAVEKIT_DECODERS__DUMPVDL2__ENABLED=true
+WAVEKIT_DECODERS__DUMPVDL2__FREQUENCIES=136975000,136875000
+
+# readsb (ADS-B)
+WAVEKIT_DECODERS__READSB__ENABLED=true
+WAVEKIT_DECODERS__READSB__GAIN=49.6
+```
+
 ### Volume Mounts
 
 ```yaml
@@ -173,10 +224,22 @@ docker inspect wavekit --format='{{.State.Health.Status}}'
 docker exec wavekit s6-rc-status
 ```
 
-### Verify decoder installation
+### Verify all 8 decoders are installed
 
 ```bash
-docker run wavekit:latest /bin/bash -c 'which dsd-fme multimon-ng rtl_433'
+docker exec wavekit bash -c '
+  echo "Checking decoders..."
+  which dsd-fme multimon-ng rtl_433 acarsdec AIS-catcher direwolf dumpvdl2 readsb
+'
+```
+
+### Test individual decoder versions
+
+```bash
+docker exec wavekit dsd-fme --version
+docker exec wavekit rtl_433 -V
+docker exec wavekit dumpvdl2 --version
+docker exec wavekit readsb --version
 ```
 
 ### Test API connectivity
@@ -184,6 +247,15 @@ docker run wavekit:latest /bin/bash -c 'which dsd-fme multimon-ng rtl_433'
 ```bash
 curl -v http://localhost:9000/api/status
 ```
+
+### Common Issues
+
+| Issue                 | Cause             | Solution                                     |
+| --------------------- | ----------------- | -------------------------------------------- |
+| Container won't start | Config error      | Check `docker logs wavekit`                  |
+| No decoder output     | Decoder disabled  | Set `WAVEKIT_DECODERS__<NAME>__ENABLED=true` |
+| "Device busy"         | SDR in use        | Only one process can use RTL-SDR             |
+| High CPU usage        | Multiple decoders | Normal; consider dedicated host              |
 
 ## 📚 Full Documentation
 
@@ -211,6 +283,7 @@ make docker-push REGISTRY=docker.io/myuser
 
 ## ✨ Key Features
 
+✅ **8 Signal Decoders**: dsd-fme, multimon-ng, rtl_433, acarsdec, AIS-catcher, direwolf, dumpvdl2, readsb  
 ✅ **Production-ready**: s6-overlay init system with proper signal handling  
 ✅ **Efficient**: Multi-stage builds, layer caching, minimal runtime  
 ✅ **Multi-platform**: amd64, arm64, arm/v7 support  

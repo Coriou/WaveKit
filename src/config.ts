@@ -160,10 +160,24 @@ export type Config = z.infer<typeof ConfigSchema>
 // ============================================================================
 
 /**
- * Maps environment variables to configuration paths.
+ * Prefix for all WaveKit environment variables.
+ * Requirements: 5.1
+ */
+const ENV_PREFIX = "WAVEKIT_"
+
+/**
+ * Separator for nested keys in environment variables.
+ * Example: WAVEKIT_API__PORT maps to config.api.port
+ * Requirements: 5.1
+ */
+const NESTED_KEY_SEPARATOR = "__"
+
+/**
+ * Legacy environment variable mappings for backward compatibility.
+ * These use single underscore format (e.g., WAVEKIT_API_PORT).
  * Format: ENV_VAR_NAME -> config.path.to.value
  */
-const ENV_MAPPINGS: Record<
+const LEGACY_ENV_MAPPINGS: Record<
 	string,
 	{ path: string[]; type: "string" | "number" | "boolean" }
 > = {
@@ -178,25 +192,46 @@ const ENV_MAPPINGS: Record<
 
 /**
  * Parses an environment variable value to the appropriate type.
+ * Attempts to infer the type from the value if not explicitly specified.
  */
 function parseEnvValue(
 	value: string,
-	type: "string" | "number" | "boolean",
+	type?: "string" | "number" | "boolean",
 ): unknown {
-	switch (type) {
-		case "number": {
-			const num = Number(value)
-			if (Number.isNaN(num)) {
-				throw new Error(`Invalid number value: ${value}`)
+	// If type is explicitly specified, use it
+	if (type) {
+		switch (type) {
+			case "number": {
+				const num = Number(value)
+				if (Number.isNaN(num)) {
+					throw new Error(`Invalid number value: ${value}`)
+				}
+				return num
 			}
+			case "boolean":
+				return value.toLowerCase() === "true" || value === "1"
+			case "string":
+			default:
+				return value
+		}
+	}
+
+	// Auto-detect type from value
+	// Check for boolean
+	if (value.toLowerCase() === "true" || value.toLowerCase() === "false") {
+		return value.toLowerCase() === "true"
+	}
+
+	// Check for number (integer or float)
+	if (/^-?\d+(\.\d+)?$/.test(value)) {
+		const num = Number(value)
+		if (!Number.isNaN(num)) {
 			return num
 		}
-		case "boolean":
-			return value.toLowerCase() === "true" || value === "1"
-		case "string":
-		default:
-			return value
 	}
+
+	// Default to string
+	return value
 }
 
 /**
@@ -227,22 +262,64 @@ function setNestedValue(
 }
 
 /**
- * Applies environment variable overrides to the configuration object.
- * Requirements: 12.2
+ * Converts an environment variable name to a config path.
+ * Uses double underscore (__) as separator for nested keys.
+ *
+ * Examples:
+ *   WAVEKIT_API__PORT -> ["api", "port"]
+ *   WAVEKIT_SOURCES__RTL_TCP__HOST -> ["sources", "rtlTcp", "host"]
+ *   WAVEKIT_DECODERS__DSD_FME__ENABLED -> ["decoders", "dsdFme", "enabled"]
+ *
+ * Requirements: 5.1
  */
-function applyEnvironmentOverrides(
-	config: Record<string, unknown>,
-): Record<string, unknown> {
-	const result = structuredClone(config)
+function envVarToConfigPath(envVar: string): string[] {
+	// Remove the WAVEKIT_ prefix
+	const withoutPrefix = envVar.slice(ENV_PREFIX.length)
 
-	for (const [envVar, mapping] of Object.entries(ENV_MAPPINGS)) {
-		const envValue = process.env[envVar]
-		if (envValue !== undefined && envValue !== "") {
-			try {
-				const parsedValue = parseEnvValue(envValue, mapping.type)
-				setNestedValue(result, mapping.path, parsedValue)
-			} catch {
-				// Skip invalid env values - validation will catch them later
+	// Split by double underscore for nested keys
+	const parts = withoutPrefix.split(NESTED_KEY_SEPARATOR)
+
+	// Convert each part from SCREAMING_SNAKE_CASE to camelCase
+	return parts.map(part => {
+		// Split by single underscore and convert to camelCase
+		const words = part.toLowerCase().split("_")
+		return words
+			.map((word, index) =>
+				index === 0 ? word : word.charAt(0).toUpperCase() + word.slice(1),
+			)
+			.join("")
+	})
+}
+
+/**
+ * Parses all WAVEKIT_* environment variables and returns them as a config object.
+ * Supports nested keys using double underscore separator.
+ *
+ * Requirements: 5.1
+ */
+export function parseEnvironmentVariables(): Record<string, unknown> {
+	const result: Record<string, unknown> = {}
+
+	for (const [key, value] of Object.entries(process.env)) {
+		if (key.startsWith(ENV_PREFIX) && value !== undefined && value !== "") {
+			// Check if this is a legacy mapping first
+			const legacyMapping = LEGACY_ENV_MAPPINGS[key]
+			if (legacyMapping) {
+				try {
+					const parsedValue = parseEnvValue(value, legacyMapping.type)
+					setNestedValue(result, legacyMapping.path, parsedValue)
+				} catch {
+					// Skip invalid env values - validation will catch them later
+				}
+			} else if (key.includes(NESTED_KEY_SEPARATOR)) {
+				// Use new double-underscore format for nested keys
+				try {
+					const path = envVarToConfigPath(key)
+					const parsedValue = parseEnvValue(value)
+					setNestedValue(result, path, parsedValue)
+				} catch {
+					// Skip invalid env values - validation will catch them later
+				}
 			}
 		}
 	}
@@ -250,55 +327,187 @@ function applyEnvironmentOverrides(
 	return result
 }
 
+/**
+ * Applies environment variable overrides to the configuration object.
+ * Environment variables take precedence over config file values.
+ *
+ * Requirements: 5.1, 5.3
+ */
+function applyEnvironmentOverrides(
+	config: Record<string, unknown>,
+): Record<string, unknown> {
+	const result = structuredClone(config)
+	const envConfig = parseEnvironmentVariables()
+
+	// Deep merge environment config into result
+	deepMerge(result, envConfig)
+
+	return result
+}
+
+/**
+ * Deep merges source object into target object.
+ * Source values override target values.
+ */
+function deepMerge(
+	target: Record<string, unknown>,
+	source: Record<string, unknown>,
+): void {
+	for (const [key, sourceValue] of Object.entries(source)) {
+		const targetValue = target[key]
+
+		if (
+			sourceValue !== null &&
+			typeof sourceValue === "object" &&
+			!Array.isArray(sourceValue) &&
+			targetValue !== null &&
+			typeof targetValue === "object" &&
+			!Array.isArray(targetValue)
+		) {
+			// Both are objects, merge recursively
+			deepMerge(
+				targetValue as Record<string, unknown>,
+				sourceValue as Record<string, unknown>,
+			)
+		} else {
+			// Override with source value
+			target[key] = sourceValue
+		}
+	}
+}
+
 // ============================================================================
 // Configuration Loading
 // ============================================================================
 
-const DEFAULT_CONFIG_PATH = "config/default.yaml"
+/**
+ * Default configuration paths.
+ * In Docker, configs are mounted at /app/config.
+ * For local development, use config/ directory.
+ */
+const CONFIG_PATHS = {
+	/** Docker container config directory */
+	dockerDir: "/app/config",
+	/** Local development config directory */
+	localDir: "config",
+	/** Default config filename */
+	defaultFile: "default.yaml",
+	/** Custom config filename (merged on top of default) */
+	customFile: "custom.yaml",
+}
 
 /**
- * Loads and validates configuration from a YAML file with environment variable overrides.
+ * Loads a YAML configuration file if it exists.
+ * Returns an empty object if the file doesn't exist.
+ *
+ * @param filePath - Path to the YAML file
+ * @returns Parsed configuration object or empty object
+ * @throws ConfigValidationError if YAML parsing fails
+ */
+function loadYamlFile(filePath: string): Record<string, unknown> {
+	if (!existsSync(filePath)) {
+		return {}
+	}
+
+	try {
+		const fileContent = readFileSync(filePath, "utf-8")
+		const parsed = parseYaml(fileContent) as unknown
+		if (parsed !== null && typeof parsed === "object") {
+			return parsed as Record<string, unknown>
+		}
+		return {}
+	} catch (error) {
+		throw new ConfigValidationError(
+			z.ZodError.create([
+				{
+					code: z.ZodIssueCode.custom,
+					path: [],
+					message: `Failed to parse YAML file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
+				},
+			]),
+		)
+	}
+}
+
+/**
+ * Determines the config directory to use.
+ * Prefers Docker path (/app/config) if it exists, otherwise uses local path.
+ *
+ * Requirements: 5.2
+ */
+function getConfigDirectory(): string {
+	if (existsSync(CONFIG_PATHS.dockerDir)) {
+		return CONFIG_PATHS.dockerDir
+	}
+	return CONFIG_PATHS.localDir
+}
+
+/**
+ * Loads configuration from multiple YAML files with merging.
+ * Files are loaded in order: default.yaml, then custom.yaml (if exists).
+ * Later files override earlier ones.
+ *
+ * Requirements: 5.2
+ *
+ * @param configDir - Directory containing config files
+ * @returns Merged configuration object
+ */
+function loadConfigFiles(configDir: string): Record<string, unknown> {
+	const defaultPath = `${configDir}/${CONFIG_PATHS.defaultFile}`
+	const customPath = `${configDir}/${CONFIG_PATHS.customFile}`
+
+	// Load default config as base
+	const defaultConfig = loadYamlFile(defaultPath)
+
+	// Load custom config if it exists
+	const customConfig = loadYamlFile(customPath)
+
+	// Merge custom on top of default
+	const merged = structuredClone(defaultConfig)
+	deepMerge(merged, customConfig)
+
+	return merged
+}
+
+/**
+ * Loads and validates configuration from YAML files with environment variable overrides.
+ *
+ * Configuration loading order (later sources override earlier):
+ * 1. default.yaml from config directory
+ * 2. custom.yaml from config directory (if exists)
+ * 3. Environment variables (WAVEKIT_* prefix)
  *
  * Requirements:
+ * - 5.1: Support configuration via environment variables with WAVEKIT_ prefix
+ * - 5.2: Support configuration via mounted YAML files at /app/config
+ * - 5.3: Environment variables take precedence over config files
+ * - 5.4: Validate configuration on startup and fail fast with clear error messages
  * - 12.1: Load configuration from default YAML file
  * - 12.2: Override config values with environment variables
  * - 12.3: Validate configuration against Zod schema
  * - 12.4: Return descriptive validation errors
  * - 12.5: Support configuration for sources, decoders, audio output, API server, and logging
  *
- * @param configPath - Optional path to the configuration file. Defaults to config/default.yaml
+ * @param configPath - Optional path to a specific configuration file (for testing/backward compatibility)
  * @returns Validated configuration object
  * @throws ConfigValidationError if configuration is invalid
  */
 export function loadConfig(configPath?: string): Config {
-	const filePath = configPath ?? DEFAULT_CONFIG_PATH
+	let rawConfig: Record<string, unknown>
 
-	// Load YAML file if it exists
-	let rawConfig: Record<string, unknown> = {}
-	if (existsSync(filePath)) {
-		try {
-			const fileContent = readFileSync(filePath, "utf-8")
-			const parsed = parseYaml(fileContent) as unknown
-			if (parsed !== null && typeof parsed === "object") {
-				rawConfig = parsed as Record<string, unknown>
-			}
-		} catch (error) {
-			throw new ConfigValidationError(
-				z.ZodError.create([
-					{
-						code: z.ZodIssueCode.custom,
-						path: [],
-						message: `Failed to parse YAML file: ${error instanceof Error ? error.message : String(error)}`,
-					},
-				]),
-			)
-		}
+	if (configPath) {
+		// Legacy mode: load from specific file path
+		rawConfig = loadYamlFile(configPath)
+	} else {
+		// New mode: load from config directory with merging
+		const configDir = getConfigDirectory()
+		rawConfig = loadConfigFiles(configDir)
 	}
 
-	// Apply environment variable overrides
+	// Apply environment variable overrides (Requirements: 5.1, 5.3)
 	const configWithOverrides = applyEnvironmentOverrides(rawConfig)
 
-	// Validate against schema
+	// Validate against schema (Requirements: 5.4, 12.3)
 	const result = ConfigSchema.safeParse(configWithOverrides)
 
 	if (!result.success) {
@@ -318,4 +527,55 @@ export function validateConfig(config: unknown): Config {
 		throw new ConfigValidationError(result.error)
 	}
 	return result.data
+}
+
+/**
+ * Validates configuration and returns detailed validation results.
+ * Useful for providing user feedback without throwing.
+ *
+ * Requirements: 5.4
+ *
+ * @param config - Configuration object to validate
+ * @returns Object with success status and either data or formatted errors
+ */
+export function validateConfigSafe(config: unknown): {
+	success: boolean
+	data?: Config
+	errors?: string[]
+} {
+	const result = ConfigSchema.safeParse(config)
+
+	if (result.success) {
+		return { success: true, data: result.data }
+	}
+
+	const errors = result.error.issues.map(issue => {
+		const path = issue.path.length > 0 ? issue.path.join(".") : "root"
+		return `${path}: ${issue.message}`
+	})
+
+	return { success: false, errors }
+}
+
+/**
+ * Gets the list of supported environment variables for configuration.
+ * Useful for documentation and help messages.
+ *
+ * Requirements: 5.1
+ */
+export function getSupportedEnvVars(): string[] {
+	const legacyVars = Object.keys(LEGACY_ENV_MAPPINGS)
+	const nestedExamples = [
+		"WAVEKIT_API__HOST",
+		"WAVEKIT_API__PORT",
+		"WAVEKIT_AUDIO__TCP_PORT",
+		"WAVEKIT_AUDIO__FORMAT",
+		"WAVEKIT_AUDIO__SAMPLE_RATE",
+		"WAVEKIT_LOGGING__LEVEL",
+		"WAVEKIT_LOGGING__DIR",
+		"WAVEKIT_SOURCES__<ID>__HOST",
+		"WAVEKIT_SOURCES__<ID>__PORT",
+		"WAVEKIT_DECODERS__<ID>__ENABLED",
+	]
+	return [...legacyVars, ...nestedExamples]
 }

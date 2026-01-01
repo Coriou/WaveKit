@@ -77,15 +77,43 @@ export class DecoderParseError extends WaveKitError {
 
 /**
  * Error thrown when configuration validation fails.
- * Requirements: 12.4
+ * Requirements: 5.4, 12.4
  */
 export class ConfigValidationError extends WaveKitError {
 	constructor(public readonly zodError: ZodError) {
-		super(
-			`Configuration validation failed: ${zodError.message}`,
-			"CONFIG_VALIDATION_ERROR",
-		)
+		const formattedMessage = ConfigValidationError.formatZodError(zodError)
+		super(formattedMessage, "CONFIG_VALIDATION_ERROR")
 		this.name = "ConfigValidationError"
+	}
+
+	/**
+	 * Formats a Zod error into a human-readable message.
+	 * Provides clear, actionable error messages for configuration issues.
+	 */
+	static formatZodError(error: ZodError): string {
+		const issues = error.issues.map(issue => {
+			const path = issue.path.length > 0 ? issue.path.join(".") : "root"
+			const code = issue.code
+
+			switch (code) {
+				case "invalid_type":
+					return `  - ${path}: Expected ${issue.expected}, received ${issue.received}`
+				case "invalid_enum_value":
+					return `  - ${path}: Invalid value. Expected one of: ${(issue as { options: string[] }).options.join(", ")}`
+				case "too_small":
+					return `  - ${path}: Value is too small (minimum: ${(issue as { minimum: number }).minimum})`
+				case "too_big":
+					return `  - ${path}: Value is too large (maximum: ${(issue as { maximum: number }).maximum})`
+				case "invalid_string":
+					return `  - ${path}: Invalid string format`
+				case "custom":
+					return `  - ${path}: ${issue.message}`
+				default:
+					return `  - ${path}: ${issue.message}`
+			}
+		})
+
+		return `Configuration validation failed:\n${issues.join("\n")}`
 	}
 }
 

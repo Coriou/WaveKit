@@ -54,6 +54,7 @@ function createMockDecoderManager() {
 		getAllDecoders: vi.fn().mockReturnValue([]),
 		getStatus: vi.fn(),
 		getAllStatus: vi.fn().mockReturnValue([]),
+		getAllHealth: vi.fn().mockReturnValue(new Map()),
 	})
 }
 
@@ -2337,6 +2338,7 @@ describe("Property-Based Tests", () => {
 							getAllDecoders: vi.fn().mockReturnValue([]),
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue(decoders),
+							getAllHealth: vi.fn().mockReturnValue(new Map()),
 						})
 
 						const mockAudioOutput = new EventEmitter()

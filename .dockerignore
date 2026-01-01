@@ -55,17 +55,17 @@ Thumbs.db
 # Docker
 Dockerfile
 docker-compose*.yml
-docker
 .docker
 .dockerignore
+# Note: docker/ directory is NOT ignored - it contains s6-overlay configs and scripts needed for build
 
 # Misc
 .nvmrc
 .prettierrc
 eslint.config.js
-tsconfig.json
-config/default.yaml
 .editorconfig
+# Note: tsconfig.json is NOT ignored - it's needed for TypeScript compilation
+# Note: config/default.yaml is NOT ignored - it's needed for the build
 
 # Recordings & temporary
 decoded_calls

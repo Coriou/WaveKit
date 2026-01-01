@@ -2111,4 +2111,80 @@ describe("Recording Source", () => {
 			expect(bytesAfterDisconnect).toBe(0)
 		})
 	})
+
+	describe("Degraded Mode (Requirements 10.2, 10.3)", () => {
+		it("should return false for isDegraded when no sources configured", () => {
+			expect(sourceManager.isDegraded()).toBe(false)
+		})
+
+		it("should return false for isAllSourcesUnavailable when no sources configured", () => {
+			expect(sourceManager.isAllSourcesUnavailable()).toBe(false)
+		})
+
+		it("should return false for isDegraded when all sources connected", async () => {
+			const mockServer1 = await createMockServer()
+			const mockServer2 = await createMockServer()
+
+			try {
+				await sourceManager.connect(
+					createSourceConfig("source-1", mockServer1.port),
+				)
+				await sourceManager.connect(
+					createSourceConfig("source-2", mockServer2.port),
+				)
+
+				expect(sourceManager.isDegraded()).toBe(false)
+				expect(sourceManager.isAllSourcesUnavailable()).toBe(false)
+			} finally {
+				await mockServer1.close()
+				await mockServer2.close()
+			}
+		})
+
+		it("should return correct degraded info when all sources connected", async () => {
+			const mockServer = await createMockServer()
+
+			try {
+				await sourceManager.connect(
+					createSourceConfig("source-1", mockServer.port),
+				)
+
+				const info = sourceManager.getDegradedInfo()
+
+				expect(info.isDegraded).toBe(false)
+				expect(info.isAllUnavailable).toBe(false)
+				expect(info.connectedSources).toEqual(["source-1"])
+				expect(info.disconnectedSources).toEqual([])
+				expect(info.totalSources).toBe(1)
+			} finally {
+				await mockServer.close()
+			}
+		})
+
+		it("should return correct degraded info structure", async () => {
+			const mockServer = await createMockServer()
+
+			try {
+				await sourceManager.connect(
+					createSourceConfig("test-source", mockServer.port),
+				)
+
+				const info = sourceManager.getDegradedInfo()
+
+				expect(info).toHaveProperty("isDegraded")
+				expect(info).toHaveProperty("isAllUnavailable")
+				expect(info).toHaveProperty("connectedSources")
+				expect(info).toHaveProperty("disconnectedSources")
+				expect(info).toHaveProperty("totalSources")
+
+				expect(typeof info.isDegraded).toBe("boolean")
+				expect(typeof info.isAllUnavailable).toBe("boolean")
+				expect(Array.isArray(info.connectedSources)).toBe(true)
+				expect(Array.isArray(info.disconnectedSources)).toBe(true)
+				expect(typeof info.totalSources).toBe("number")
+			} finally {
+				await mockServer.close()
+			}
+		})
+	})
 })

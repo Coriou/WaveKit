@@ -40,10 +40,10 @@
 # Development (hot reload)
 npm run dev
 
-# Build
+# Build single file
 npm run build-file ./src/index.ts
 
-# Run
+# Run production
 npm start
 
 # Type checking
@@ -77,4 +77,8 @@ Key strict settings enabled:
 - `useUnknownInCatchVariables`
 - `verbatimModuleSyntax`
 
-Path alias: `@/*` maps to project root
+ESLint enforces:
+
+- `@typescript-eslint/consistent-type-imports`
+- `@typescript-eslint/no-floating-promises`
+- `@typescript-eslint/no-misused-promises`

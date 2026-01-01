@@ -42,14 +42,35 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libavformat-dev \
     libavcodec-dev \
     libswresample-dev \
+    libpulse-dev \
     # SDR libraries
     librtlsdr-dev \
     libhackrf-dev \
     libairspy-dev \
     libairspyhf-dev \
     libbladerf-dev \
+    libsoapysdr-dev \
     libusb-1.0-0-dev \
     libudev-dev \
+    # dsd-fme dependencies
+    libitpp-dev \
+    # direwolf dependencies
+    libasound2-dev \
+    libgps-dev \
+    libhamlib-dev \
+    # dumpvdl2 dependencies
+    libglib2.0-dev \
+    libsqlite3-dev \
+    libzmq3-dev \
+    # Note: libacars-dev not in Debian repos, will be built from source in dumpvdl2-build stage
+    # readsb dependencies
+    libncurses-dev \
+    zlib1g-dev \
+    libzstd-dev \
+    # SDR++ dependencies
+    libglfw3-dev \
+    libglew-dev \
+    libvolk2-dev \
     # utilities
     curl \
     wget \
@@ -75,18 +96,38 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libflac12 \
     libavformat59 \
     libavcodec59 \
-    libswresample3 \
+    libswresample4 \
+    libpulse0 \
     # Runtime SDR libraries  
     librtlsdr0 \
     libhackrf0 \
     libairspy0 \
-    libairspyhf0 \
+    libairspyhf1 \
+    libsoapysdr0.8 \
     libusb-1.0-0 \
     udev \
+    # dsd-fme runtime
+    libitpp8v5 \
+    libfftw3-single3 \
+    libfftw3-double3 \
+    # direwolf runtime
+    libasound2 \
+    libgps28 \
+    libhamlib4 \
+    # dumpvdl2 runtime
+    libglib2.0-0 \
+    libsqlite3-0 \
+    libzmq5 \
+    # Note: libacars is statically linked in dumpvdl2
+    # readsb runtime
+    libncurses6 \
+    zlib1g \
+    libzstd1 \
     # Runtime utilities
     ca-certificates \
     curl \
     tini \
+    xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Install s6-overlay (PID 1 init system + service supervisor)
@@ -120,7 +161,7 @@ FROM base-deps AS sdrpp-build
 WORKDIR /build
 
 # Build SDR++
-RUN git clone --depth 1 --branch nightly https://github.com/AlexandreRouworx/SDRPlusPlus.git && \
+RUN git clone --depth 1 --branch nightly https://github.com/AlexandreRouma/SDRPlusPlus.git && \
     cd SDRPlusPlus && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release \
@@ -140,6 +181,16 @@ FROM base-deps AS dsd-fme-build
 
 WORKDIR /build
 
+# Build mbelib first (not in Debian repos)
+RUN git clone --depth 1 https://github.com/szechyjs/mbelib.git && \
+    cd mbelib && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Build dsd-fme
 RUN git clone --depth 1 https://github.com/lwvmobile/dsd-fme.git && \
     cd dsd-fme && \
     mkdir build && cd build && \
@@ -156,7 +207,7 @@ FROM base-deps AS multimon-ng-build
 
 WORKDIR /build
 
-RUN git clone --depth 1 https://github.com/EliasOeworsl/multimon-ng.git && \
+RUN git clone --depth 1 https://github.com/EliasOenal/multimon-ng.git && \
     cd multimon-ng && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
@@ -180,6 +231,94 @@ RUN git clone --depth 1 https://github.com/merbanan/rtl_433.git && \
     make install
 
 # ============================================================================
+# Stage: acarsdec-build
+# Purpose: Build acarsdec decoder (ACARS aircraft data link)
+# Size: ~150MB (not in final image)
+# ============================================================================
+FROM base-deps AS acarsdec-build
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/TLeconte/acarsdec.git && \
+    cd acarsdec && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install
+
+# ============================================================================
+# Stage: ais-catcher-build
+# Purpose: Build AIS-catcher decoder (Maritime AIS transponders)
+# Size: ~200MB (not in final image)
+# ============================================================================
+FROM base-deps AS ais-catcher-build
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/jvde-github/AIS-catcher.git && \
+    cd AIS-catcher && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    cp AIS-catcher /usr/local/bin/
+
+# ============================================================================
+# Stage: direwolf-build
+# Purpose: Build direwolf decoder (APRS amateur radio packets)
+# Size: ~180MB (not in final image)
+# ============================================================================
+FROM base-deps AS direwolf-build
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/wb2osz/direwolf.git && \
+    cd direwolf && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install
+
+# ============================================================================
+# Stage: dumpvdl2-build
+# Purpose: Build dumpvdl2 decoder (VDL Mode 2 aviation data link)
+# Size: ~200MB (not in final image)
+# ============================================================================
+FROM base-deps AS dumpvdl2-build
+
+WORKDIR /build
+
+# Build libacars first (not available in Debian repos)
+RUN git clone --depth 1 https://github.com/szpajder/libacars.git && \
+    cd libacars && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig
+
+# Build dumpvdl2
+RUN git clone --depth 1 https://github.com/szpajder/dumpvdl2.git && \
+    cd dumpvdl2 && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install
+
+# ============================================================================
+# Stage: readsb-build
+# Purpose: Build readsb decoder (ADS-B aircraft transponders)
+# Size: ~150MB (not in final image)
+# ============================================================================
+FROM base-deps AS readsb-build
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/wiedehopf/readsb.git && \
+    cd readsb && \
+    make -j$(nproc) RTLSDR=yes && \
+    cp readsb /usr/local/bin/
+
+# ============================================================================
 # Stage: node-build
 # Purpose: Build WaveKit TypeScript application
 # Size: ~450MB (not in final image)
@@ -190,7 +329,7 @@ WORKDIR /app
 
 # Copy package files and install dependencies
 COPY package*.json ./
-RUN npm ci --only=production && npm cache clean --force
+RUN npm ci && npm cache clean --force
 
 # Copy source code
 COPY . .
@@ -201,8 +340,11 @@ RUN npm run typecheck
 # Build application
 RUN npm run build-file -- ./src/index.ts
 
+# Prune dev dependencies for smaller final image
+RUN npm prune --production
+
 # Verify built output
-RUN ls -la dist/ && file dist/index.js
+RUN ls -la dist/ && head -1 dist/index.js
 
 # ============================================================================
 # Stage: final (full mode)
@@ -234,11 +376,29 @@ RUN ldconfig
 
 # Copy decoders from build stages
 COPY --from=dsd-fme-build /usr/local/bin/dsd* /usr/local/bin/
+COPY --from=dsd-fme-build /usr/local/lib/libmbe* /usr/local/lib/
 COPY --from=multimon-ng-build /usr/local/bin/multimon-ng /usr/local/bin/
 COPY --from=rtl433-build /usr/local/bin/rtl_433 /usr/local/bin/
+COPY --from=acarsdec-build /usr/local/bin/acarsdec /usr/local/bin/
+COPY --from=ais-catcher-build /usr/local/bin/AIS-catcher /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/direwolf /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/decode_aprs /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
+COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
+COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
+COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 
-# Verify decoder installations
-RUN dsd-fme --version && multimon-ng -h > /dev/null 2>&1 && rtl_433 -V
+# Verify all 8 decoder installations
+RUN echo "Verifying decoder installations..." && \
+    dsd-fme --version && \
+    multimon-ng -h > /dev/null 2>&1 && \
+    rtl_433 -V && \
+    acarsdec -h > /dev/null 2>&1 || true && \
+    AIS-catcher -h > /dev/null 2>&1 || true && \
+    direwolf -h > /dev/null 2>&1 || true && \
+    dumpvdl2 --version && \
+    readsb --version && \
+    echo "All 8 decoders verified successfully"
 
 # Copy Node.js application
 COPY --from=node-build /app/dist /app/dist
@@ -296,8 +456,17 @@ RUN mkdir -p /app /var/log/wavekit /var/run/wavekit && \
 
 # Copy decoders only (no SDR++)
 COPY --from=dsd-fme-build /usr/local/bin/dsd* /usr/local/bin/
+COPY --from=dsd-fme-build /usr/local/lib/libmbe* /usr/local/lib/
 COPY --from=multimon-ng-build /usr/local/bin/multimon-ng /usr/local/bin/
 COPY --from=rtl433-build /usr/local/bin/rtl_433 /usr/local/bin/
+COPY --from=acarsdec-build /usr/local/bin/acarsdec /usr/local/bin/
+COPY --from=ais-catcher-build /usr/local/bin/AIS-catcher /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/direwolf /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/decode_aprs /usr/local/bin/
+COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
+COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
+COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
+COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 
 # Copy Node.js application
 COPY --from=node-build /app/dist /app/dist

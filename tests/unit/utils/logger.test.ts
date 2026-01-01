@@ -2,7 +2,7 @@
  * Logger Unit Tests
  *
  * Tests for the Pino-based structured logging utility.
- * Requirements: 13.1, 13.2, 13.3, 13.4
+ * Requirements: 6.1, 6.3, 9.6, 13.1, 13.2, 13.3, 13.4
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
@@ -13,6 +13,12 @@ import * as fc from "fast-check"
 import {
 	createLogger,
 	createComponentLogger,
+	createRequestLogger,
+	createScopedLogger,
+	generateCorrelationId,
+	isSensitiveEnvVar,
+	getSensitiveEnvVarNames,
+	maskSensitiveValues,
 	type LogLevel,
 } from "../../../src/utils/logger.js"
 
@@ -58,6 +64,101 @@ describe("Logger", () => {
 
 			expect(child1.bindings()["component"]).toBe("Component1")
 			expect(child2.bindings()["component"]).toBe("Component2")
+		})
+	})
+
+	describe("correlation ID support", () => {
+		it("should generate unique correlation IDs", () => {
+			const id1 = generateCorrelationId()
+			const id2 = generateCorrelationId()
+
+			expect(id1).toBeDefined()
+			expect(id2).toBeDefined()
+			expect(id1).not.toBe(id2)
+			// UUID v4 format
+			expect(id1).toMatch(
+				/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+			)
+		})
+
+		it("should create request logger with correlation ID", () => {
+			const parent = createLogger({ level: "info" })
+			const requestLogger = createRequestLogger(parent)
+
+			const bindings = requestLogger.bindings()
+			expect(bindings["correlationId"]).toBeDefined()
+			expect(typeof bindings["correlationId"]).toBe("string")
+		})
+
+		it("should use provided correlation ID when specified", () => {
+			const parent = createLogger({ level: "info" })
+			const customId = "custom-correlation-id-123"
+			const requestLogger = createRequestLogger(parent, customId)
+
+			const bindings = requestLogger.bindings()
+			expect(bindings["correlationId"]).toBe(customId)
+		})
+
+		it("should create scoped logger with both component and correlation ID", () => {
+			const parent = createLogger({ level: "info" })
+			const correlationId = "test-correlation-id"
+			const scopedLogger = createScopedLogger(
+				parent,
+				"TestComponent",
+				correlationId,
+			)
+
+			const bindings = scopedLogger.bindings()
+			expect(bindings["component"]).toBe("TestComponent")
+			expect(bindings["correlationId"]).toBe(correlationId)
+		})
+	})
+
+	describe("secret masking", () => {
+		it("should identify sensitive environment variable names", () => {
+			expect(isSensitiveEnvVar("API_SECRET")).toBe(true)
+			expect(isSensitiveEnvVar("DB_PASSWORD")).toBe(true)
+			expect(isSensitiveEnvVar("AUTH_KEY")).toBe(true)
+			expect(isSensitiveEnvVar("ACCESS_TOKEN")).toBe(true)
+			expect(isSensitiveEnvVar("api_secret")).toBe(true) // case insensitive
+			expect(isSensitiveEnvVar("API_HOST")).toBe(false)
+			expect(isSensitiveEnvVar("PORT")).toBe(false)
+		})
+
+		it("should mask sensitive values in objects", () => {
+			const original = {
+				API_SECRET: "super-secret-value",
+				DB_PASSWORD: "password123",
+				API_HOST: "localhost",
+				PORT: 3000,
+			}
+
+			const masked = maskSensitiveValues(original)
+
+			expect(masked["API_SECRET"]).toBe("***REDACTED***")
+			expect(masked["DB_PASSWORD"]).toBe("***REDACTED***")
+			expect(masked["API_HOST"]).toBe("localhost")
+			expect(masked["PORT"]).toBe(3000)
+		})
+
+		it("should mask nested sensitive values", () => {
+			const original = {
+				config: {
+					API_SECRET: "nested-secret",
+					host: "localhost",
+				},
+				AUTH_TOKEN: "top-level-token",
+			}
+
+			const masked = maskSensitiveValues(original)
+
+			expect((masked["config"] as Record<string, unknown>)["API_SECRET"]).toBe(
+				"***REDACTED***",
+			)
+			expect((masked["config"] as Record<string, unknown>)["host"]).toBe(
+				"localhost",
+			)
+			expect(masked["AUTH_TOKEN"]).toBe("***REDACTED***")
 		})
 	})
 

@@ -4,7 +4,7 @@ WaveKit is a TypeScript-based SDR (Software Defined Radio) stream processing fra
 
 ## What It Does
 
-- Connects to SDR sources (rtl_tcp, SDR++ network sink)
+- Connects to SDR sources (rtl_tcp, SDR++ network sink, recording files)
 - Fans out audio streams to multiple signal decoders in parallel
 - Provides a Fastify REST/WebSocket API for control and monitoring
 - Runs in Docker with optional SDR++ Server integration
@@ -31,4 +31,6 @@ rtl_tcp :1234           + Decoders             Browser UI
 - Stream multiplexing with independent buffering per decoder
 - Real-time WebSocket events for decoder output
 - Extensible decoder plugin system
+- Health monitoring with degraded/faulted states
 - Structured JSON logging with Pino
+- Recording source playback with loop and speed control

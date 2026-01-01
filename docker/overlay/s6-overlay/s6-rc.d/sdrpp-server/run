@@ -1,11 +1,21 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # s6-rc service: sdrpp-server
 # Purpose: SDR++ server for IQ stream capture from hardware
 # Upstream: RTL-TCP on Pi or direct USB device
+# Requirements: 3.4 - Environment variable propagation to child services
 
+# with-contenv ensures all container environment variables are available
+
+# Log startup
+echo "[sdrpp-server] Starting SDR++ server..." >> /var/log/wavekit/system.log
+
+# Redirect stderr to stdout for unified logging
 exec 2>&1
-exec chpst -u root:root \
-  sdrpp \
+
+# Execute SDR++ server
+# - Listens on port 5259 for network connections
+# - Binds to all interfaces (0.0.0.0)
+exec sdrpp \
   --server \
   --port 5259 \
   --addr 0.0.0.0 \

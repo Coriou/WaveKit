@@ -1,4 +1,56 @@
-#!/bin/sh
-# Graceful shutdown for WaveKit API
+#!/command/with-contenv sh
+# s6-rc finish script: wavekit-api
+# Purpose: Graceful cleanup when WaveKit API stops
+# Requirements: 3.3, 3.6 - Proper signal handling and resource cleanup
 
-exec chpst -u root:root s6-svwait -t 10000 -d /run/service/wavekit-api 2>/dev/null || true
+# Exit code from the run script
+EXIT_CODE="${1:-0}"
+# Signal that killed the service (0 if normal exit)
+SIGNAL="${2:-0}"
+
+# Log shutdown event
+echo "[wavekit-api] Service stopped with exit code ${EXIT_CODE}, signal ${SIGNAL}" >> /var/log/wavekit/system.log
+
+# Cleanup any stale PID files
+rm -f /var/run/wavekit/wavekit-api.pid 2>/dev/null || true
+
+# Cleanup any Unix sockets
+rm -f /var/run/wavekit/*.sock 2>/dev/null || true
+
+# Cleanup any temporary decoder files
+rm -f /tmp/wavekit/decoder_* 2>/dev/null || true
+rm -f /tmp/wavekit/audio_* 2>/dev/null || true
+
+# Cleanup any orphaned decoder processes
+# This ensures decoders spawned by the API are properly terminated
+pkill -TERM -f "dsd-fme" 2>/dev/null || true
+pkill -TERM -f "multimon-ng" 2>/dev/null || true
+pkill -TERM -f "rtl_433" 2>/dev/null || true
+pkill -TERM -f "acarsdec" 2>/dev/null || true
+pkill -TERM -f "AIS-catcher" 2>/dev/null || true
+pkill -TERM -f "direwolf" 2>/dev/null || true
+pkill -TERM -f "dumpvdl2" 2>/dev/null || true
+pkill -TERM -f "readsb" 2>/dev/null || true
+
+# Give decoders time to terminate gracefully
+sleep 1
+
+# Force kill any remaining decoder processes
+pkill -KILL -f "dsd-fme" 2>/dev/null || true
+pkill -KILL -f "multimon-ng" 2>/dev/null || true
+pkill -KILL -f "rtl_433" 2>/dev/null || true
+pkill -KILL -f "acarsdec" 2>/dev/null || true
+pkill -KILL -f "AIS-catcher" 2>/dev/null || true
+pkill -KILL -f "direwolf" 2>/dev/null || true
+pkill -KILL -f "dumpvdl2" 2>/dev/null || true
+pkill -KILL -f "readsb" 2>/dev/null || true
+
+# If the service crashed (non-zero exit), log additional info
+if [ "${EXIT_CODE}" != "0" ]; then
+    echo "[wavekit-api] WARNING: Service exited abnormally, will be restarted by s6" >> /var/log/wavekit/system.log
+fi
+
+# Brief delay to allow resources to be released before restart
+sleep 1
+
+exit 0

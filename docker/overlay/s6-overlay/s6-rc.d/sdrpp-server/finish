@@ -1,4 +1,33 @@
-#!/bin/sh
-# Graceful shutdown for SDR++ server
+#!/command/with-contenv sh
+# s6-rc finish script: sdrpp-server
+# Purpose: Graceful cleanup when SDR++ server stops
+# Requirements: 3.3, 3.6 - Proper signal handling and resource cleanup
 
-exec chpst -u root:root s6-svwait -t 5000 -d /run/service/sdrpp-server 2>/dev/null || true
+# Exit code from the run script
+EXIT_CODE="${1:-0}"
+# Signal that killed the service (0 if normal exit)
+SIGNAL="${2:-0}"
+
+# Log shutdown event
+echo "[sdrpp-server] Service stopped with exit code ${EXIT_CODE}, signal ${SIGNAL}" >> /var/log/wavekit/system.log
+
+# Cleanup any stale PID files
+rm -f /var/run/wavekit/sdrpp.pid 2>/dev/null || true
+
+# Cleanup any shared memory segments created by SDR++
+if [ -d /dev/shm ]; then
+    rm -f /dev/shm/sdrpp_* 2>/dev/null || true
+fi
+
+# Cleanup any temporary files
+rm -f /tmp/wavekit/sdrpp_* 2>/dev/null || true
+
+# If the service crashed (non-zero exit), log additional info
+if [ "${EXIT_CODE}" != "0" ]; then
+    echo "[sdrpp-server] WARNING: Service exited abnormally, will be restarted by s6" >> /var/log/wavekit/system.log
+fi
+
+# Brief delay to allow resources to be released before restart
+sleep 1
+
+exit 0

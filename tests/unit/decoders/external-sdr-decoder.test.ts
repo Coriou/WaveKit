@@ -468,12 +468,17 @@ describe("ExternalSdrDecoder", () => {
 						}),
 					}),
 					configOverrides => {
-						const config = createConfig({
+						const configParams: Partial<ExternalSdrConfig> = {
 							deviceSerial: configOverrides.deviceSerial,
 							frequencies: configOverrides.frequencies,
-							gain: configOverrides.gain,
-							ppm: configOverrides.ppm,
-						})
+						}
+						if (configOverrides.gain !== undefined) {
+							configParams.gain = configOverrides.gain
+						}
+						if (configOverrides.ppm !== undefined) {
+							configParams.ppm = configOverrides.ppm
+						}
+						const config = createConfig(configParams)
 						const testDecoder = new TestExternalSdrDecoder(config)
 
 						// Verify input type is "external" (Requirement 19.2)

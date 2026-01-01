@@ -1,8 +1,23 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # s6-rc service: wavekit-api
 # Purpose: Main WaveKit TypeScript API server
 # Depends on: base, sdrpp-server
+# Requirements: 3.4 - Environment variable propagation to child services
 
+# with-contenv ensures all container environment variables are available
+# This includes WAVEKIT_* configuration variables
+
+# Log startup
+echo "[wavekit-api] Starting WaveKit API server..." >> /var/log/wavekit/system.log
+
+# Change to app directory
+cd /app
+
+# Redirect stderr to stdout for unified logging
 exec 2>&1
-exec chpst -u root:root \
-  node /app/dist/index.js
+
+# Execute the Node.js application
+# - Uses with-contenv shebang for environment propagation
+# - Logs are output to stdout in JSON format (handled by Pino)
+# - s6-overlay captures stdout and can redirect to logging pipeline
+exec node /app/dist/index.js

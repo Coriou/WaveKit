@@ -9,6 +9,8 @@
  * - 1.5: Emit data rate metrics every 5 seconds
  * - 1.6: Handle connection errors gracefully (ECONNREFUSED, ETIMEDOUT, ECONNRESET)
  * - 1.7: Return status information including connection state, bytes received, and data rate
+ * - 10.2: Keep API responsive when source unavailable
+ * - 10.3: Report degraded status in health check
  * - 15.1: Establish independent TCP connections to multiple sources
  * - 15.2: Assign decoders to specific sources by source ID
  * - 15.3: Prevent multiple decoders from sharing exclusive sources
@@ -847,6 +849,67 @@ export class SourceManager extends EventEmitter {
 			}
 		}
 		return statuses
+	}
+
+	/**
+	 * Checks if the SourceManager is in degraded mode (Requirement 10.3).
+	 * Degraded mode means at least one source is disconnected but not all.
+	 *
+	 * @returns true if in degraded mode, false otherwise
+	 */
+	isDegraded(): boolean {
+		const allStatus = this.getAllStatus()
+		if (allStatus.length === 0) {
+			return false // No sources configured is not degraded
+		}
+
+		const connectedCount = allStatus.filter(s => s.connected).length
+		const totalCount = allStatus.length
+
+		// Degraded if some but not all sources are disconnected
+		return connectedCount > 0 && connectedCount < totalCount
+	}
+
+	/**
+	 * Checks if all sources are unavailable (Requirement 10.2).
+	 *
+	 * @returns true if all sources are disconnected, false otherwise
+	 */
+	isAllSourcesUnavailable(): boolean {
+		const allStatus = this.getAllStatus()
+		if (allStatus.length === 0) {
+			return false // No sources configured
+		}
+
+		return allStatus.every(s => !s.connected)
+	}
+
+	/**
+	 * Gets detailed information about the degraded state (Requirement 10.3).
+	 * Useful for health check reporting.
+	 *
+	 * @returns Object with degraded state details
+	 */
+	getDegradedInfo(): {
+		isDegraded: boolean
+		isAllUnavailable: boolean
+		connectedSources: string[]
+		disconnectedSources: string[]
+		totalSources: number
+	} {
+		const allStatus = this.getAllStatus()
+		const connectedSources = allStatus.filter(s => s.connected).map(s => s.id)
+		const disconnectedSources = allStatus
+			.filter(s => !s.connected)
+			.map(s => s.id)
+
+		return {
+			isDegraded: this.isDegraded(),
+			isAllUnavailable: this.isAllSourcesUnavailable(),
+			connectedSources,
+			disconnectedSources,
+			totalSources: allStatus.length,
+		}
 	}
 
 	/**
