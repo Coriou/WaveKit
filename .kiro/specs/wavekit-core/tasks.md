@@ -32,20 +32,20 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - **Property 21: Config Environment Override**
     - **Property 22: Config Validation Errors**
     - **Validates: Requirements 12.2, 12.3, 12.4**
-  - [ ] 2.6 Implement Graceful Shutdown handler
+  - [x] 2.6 Implement Graceful Shutdown handler
     - Create shutdown handler registry with timeout support
     - Install SIGTERM/SIGINT signal handlers
     - _Requirements: 14.1, 14.6_
 
-- [ ] 3. Checkpoint - Utility Layer
+- [x] 3. Checkpoint - Utility Layer
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 4. Implement Core Stream Components
-  - [ ] 4.1 Implement Format Converter transforms
+  - [x] 4.1 Implement Format Converter transforms
     - Create F32→S16 and S16→F32 transform streams
     - Create resample transform stream
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
-  - [ ] 4.2 Write property tests for format conversion
+  - [-] 4.2 Write property tests for format conversion
     - **Property 7: Format Conversion Round-Trip**
     - **Property 8: Resample Length Ratio**
     - **Validates: Requirements 3.1, 3.2, 3.3**
