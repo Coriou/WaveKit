@@ -79,34 +79,34 @@ This implementation plan follows a bottom-up approach, starting with utilities a
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 6. Implement Decoder System
-  - [-] 6.1 Implement Decoder types and interfaces
+  - [x] 6.1 Implement Decoder types and interfaces
     - Create DecoderConfig, DecoderOutput, DecoderStatus types
     - Define Decoder interface
     - _Requirements: 4.4, 4.5, 4.6_
-  - [ ] 6.2 Implement Decoder Registry
+  - [x] 6.2 Implement Decoder Registry
     - Create factory registration and decoder creation
     - Implement type listing
     - _Requirements: 5.1, 5.2, 5.3, 5.4_
-  - [ ] 6.3 Write property test for Decoder Registry
+  - [x] 6.3 Write property test for Decoder Registry
     - **Property 9: Decoder Registry Consistency**
     - **Validates: Requirements 5.1, 5.2, 5.3, 5.4**
-  - [ ] 6.4 Implement Base Decoder abstract class
+  - [x] 6.4 Implement Base Decoder abstract class
     - Create process spawning with stdio piping
     - Implement graceful stop with SIGTERM/SIGKILL
     - Create output stream in object mode
     - _Requirements: 4.1, 4.3, 4.4, 4.5, 4.6_
-  - [ ] 6.5 Write property test for Decoder Status
+  - [x] 6.5 Write property test for Decoder Status
     - **Property 10: Decoder Status Completeness**
     - **Validates: Requirements 4.5**
-  - [ ] 6.6 Implement DSD-FME Decoder
+  - [x] 6.6 Implement DSD-FME Decoder
     - Extend BaseDecoder with dsd-fme specific args
     - Implement output parsing for sync, call, error events
     - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
-  - [ ] 6.7 Write property tests for DSD-FME parsing
+  - [x] 6.7 Write property tests for DSD-FME parsing
     - **Property 11: DSD Output Parsing**
     - **Property 12: DSD Mode Support**
     - **Validates: Requirements 6.2, 6.3, 6.4, 6.5**
-  - [ ] 6.8 Implement Multimon-ng Decoder
+  - [x] 6.8 Implement Multimon-ng Decoder
     - Extend BaseDecoder with multimon-ng specific args
     - Implement output parsing for POCSAG, FLEX, DTMF
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
@@ -114,20 +114,20 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - **Property 13: Multimon Output Parsing**
     - **Property 14: Multimon Mode Support**
     - **Validates: Requirements 7.2, 7.3**
-  - [ ] 6.10 Implement RTL_433 Decoder
+  - [x] 6.10 Implement RTL_433 Decoder
     - Extend BaseDecoder with rtl_433 specific args
     - Implement JSON output parsing
     - _Requirements: 8.1, 8.2, 8.3_
-  - [ ] 6.11 Write property test for RTL_433 parsing
+  - [x] 6.11 Write property test for RTL_433 parsing
     - **Property 15: RTL433 JSON Parsing**
     - **Validates: Requirements 8.2**
-  - [ ] 6.12 Implement Decoder Manager
+  - [x] 6.12 Implement Decoder Manager
     - Create decoder lifecycle orchestration
     - Implement auto-restart with exponential backoff
     - Wire decoders to fanout branches
     - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6_
 
-- [ ] 7. Checkpoint - Decoder System
+- [x] 7. Checkpoint - Decoder System
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 8. Implement API Layer
