@@ -3,3 +3,5 @@ dist
 .env
 .cache
 .log
+decoded_calls
+snapshots
