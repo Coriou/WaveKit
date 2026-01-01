@@ -256,6 +256,14 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 		})
 
 		it("should preserve JSON data structure exactly", () => {
+			// Helper to normalize -0 to 0 (JSON.stringify converts -0 to "0")
+			const normalizeValue = (val: unknown): unknown => {
+				if (typeof val === "number" && Object.is(val, -0)) {
+					return 0
+				}
+				return val
+			}
+
 			fc.assert(
 				fc.property(
 					decoderIdArb,
@@ -268,13 +276,16 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 						expect(output).not.toBeNull()
 
 						// Deep equality check - data should match exactly
+						// Note: JSON.stringify converts -0 to "0", so we normalize for comparison
 						const outputData = output!.data as Record<string, unknown>
 
 						for (const key of Object.keys(sensorData)) {
 							expect(outputData).toHaveProperty(key)
-							expect(outputData[key]).toEqual(
+							const expected = normalizeValue(
 								sensorData[key as keyof typeof sensorData],
 							)
+							const actual = normalizeValue(outputData[key])
+							expect(actual).toEqual(expected)
 						}
 
 						return true

@@ -131,26 +131,26 @@ This implementation plan follows a bottom-up approach, starting with utilities a
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 8. Implement API Layer
-  - [-] 8.1 Implement Fastify server setup
+  - [x] 8.1 Implement Fastify server setup
     - Create server with plugins (websocket, swagger)
     - Configure CORS and error handling
     - _Requirements: 9.1_
-  - [ ] 8.2 Implement health and status routes
+  - [x] 8.2 Implement health and status routes
     - GET /health endpoint
     - GET /api/status endpoint with full system status
     - _Requirements: 9.1, 9.2_
-  - [ ] 8.3 Write property test for status response
+  - [x] 8.3 Write property test for status response
     - **Property 16: API Status Response Completeness**
     - **Validates: Requirements 9.2**
-  - [ ] 8.4 Implement source routes
+  - [x] 8.4 Implement source routes
     - GET /api/sources - list sources
     - POST /api/sources - add source
     - DELETE /api/sources/:id - remove source
     - _Requirements: 9.3, 9.4, 9.5_
-  - [ ] 8.5 Write property test for source CRUD
+  - [x] 8.5 Write property test for source CRUD
     - **Property 17: Source CRUD Consistency**
     - **Validates: Requirements 9.3, 9.4, 9.5**
-  - [ ] 8.6 Implement decoder routes
+  - [x] 8.6 Implement decoder routes
     - GET /api/decoders - list decoders
     - GET /api/decoders/:id - get decoder status
     - POST /api/decoders/:id/start - start decoder
@@ -158,18 +158,18 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - POST /api/decoders/:id/restart - restart decoder
     - PATCH /api/decoders/:id - update config
     - _Requirements: 9.6, 9.7, 9.8, 9.9_
-  - [ ] 8.7 Write property test for decoder API
+  - [x] 8.7 Write property test for decoder API
     - **Property 18: Decoder API State Consistency**
     - **Validates: Requirements 9.6, 9.7, 9.8**
-  - [ ] 8.8 Implement WebSocket event broadcasting
+  - [x] 8.8 Implement WebSocket event broadcasting
     - Create subscription management
     - Broadcast decoder output, source events, metrics
     - _Requirements: 10.1, 10.2, 10.3, 10.4, 10.5_
-  - [ ] 8.9 Write property test for WebSocket filtering
+  - [x] 8.9 Write property test for WebSocket filtering
     - **Property 19: WebSocket Channel Filtering**
     - **Validates: Requirements 10.2, 10.3, 10.4**
 
-- [ ] 9. Checkpoint - API Layer
+- [x] 9. Checkpoint - API Layer
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 10. Application Bootstrap and Integration
