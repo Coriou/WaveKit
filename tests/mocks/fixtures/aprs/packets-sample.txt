@@ -1,0 +1,68 @@
+# APRS Sample Packets
+# Format: SOURCE>DESTINATION,PATH:INFO
+# Lines starting with # are comments
+
+# Position reports (! data type - no messaging)
+N0CALL>APRS:!4903.50N/07201.75W-PHG2360
+W1AW>APRS,WIDE1-1,WIDE2-2:!4144.00N/07234.00W-ARRL HQ
+VE3ABC>APRS:!4530.00N/07530.00W-Toronto area
+
+# Position reports with messaging (= data type)
+K1ABC-9>APRS:=4903.50N/07201.75W>Mobile station
+WA1XYZ-7>APRS,WIDE1-1:=3412.34N/11823.45W>Hiking in mountains
+
+# Position with timestamp (/ data type)
+N0CALL-5>APRS:/092345z4903.50N/07201.75W>Timestamp position
+W2XYZ>APRS,WIDE2-2:/152200h4144.00N/07234.00W>HMS timestamp
+
+# Position with timestamp and messaging (@ data type)
+K3ABC-12>APRS:@092345z4903.50N/07201.75W>Full featured position
+
+# Status reports (> data type)
+N0CALL>APRS:>En route to hamfest
+W1AW>APRS:>ARRL Headquarters, Newington CT
+K1ABC-9>APRS,WIDE1-1:>Mobile - monitoring 146.52
+VE3XYZ>APRS:>QRV on 2m and 70cm
+
+# Messages (: data type)
+N0CALL>APRS::W1AW     :Hello from N0CALL{001
+W1AW>APRS::N0CALL    :ack001
+K1ABC>APRS::BLN1     :Weekly net tonight at 8pm local
+N0CALL-5>APRS::ALL      :Testing APRS messaging
+
+# Weather reports (_ data type - positionless)
+WX1ABC>APRS:_01011200c180s005g010t072r001p010P010h50b10200
+N0WX>APRS:_01021500c270s012g025t045r000p000P000h85b10150
+
+# Mic-E encoded positions (` data type)
+N0CALL-9>T2SP0R:`l"<l!Xk/>"4]}
+K1ABC-7>S3RQPV:`nEl!#>/>"4T}
+
+# Objects (; data type)
+N0CALL>APRS:;MEETING  *092345z4903.50N/07201.75W-Weekly club meeting
+
+# Items () data type)
+W1AW>APRS:)AID#4!4903.50N/07201.75W-First aid station
+
+# Telemetry (T data type)
+N0CALL>APRS:T#123,001,002,003,004,005,00000000
+
+# Compressed position format
+N0CALL>APRS:!/5L!!<*e7>7P[
+W1AW>APRS:=/5L!!<*e7>7P[Compressed position
+
+# Digipeated packets with full paths
+N0CALL-9>APRS,WIDE1-1,WIDE2-1:!4903.50N/07201.75W>Mobile
+K1ABC>APRS,W1AW*,WIDE2-2:>Digipeated via W1AW
+VE3XYZ-5>APRS,VE3RPT*,WIDE1-1,WIDE2-1:!4530.00N/07530.00W>
+
+# Course/Speed in comment
+N0CALL-9>APRS:!4903.50N/07201.75W>090/045 Mobile heading east
+W1AW-7>APRS:!4144.00N/07234.00W>270/030 Westbound
+
+# Altitude in comment
+N0CALL-14>APRS:!4903.50N/07201.75W>/A=001234 Balloon at 1234 feet
+K1ABC-11>APRS:!3500.00N/10600.00W>/A=035000 High altitude
+
+# Combined course/speed and altitude
+N0CALL-9>APRS:!4903.50N/07201.75W>090/045/A=005280 Mile high mobile

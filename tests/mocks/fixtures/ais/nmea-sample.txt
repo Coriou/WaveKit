@@ -1,0 +1,48 @@
+# AIS NMEA Sample Data
+# Format: !AIVDM,fragments,fragment_num,seq_id,channel,payload,fill_bits*checksum
+# These are realistic AIS sentences for testing the NMEA parser
+
+# Position Report Class A (Type 1) - Cargo vessel under way
+!AIVDM,1,1,,A,13u@Dp0P00PH=3pN4T0,0*7D
+
+# Position Report Class A (Type 1) - Tanker at anchor
+!AIVDM,1,1,,B,15MgK40P01PH=3pN4T0,0*6E
+
+# Position Report Class A (Type 2) - Passenger vessel
+!AIVDM,1,1,,A,23aEOi@P00PH=3pN4T0,0*5F
+
+# Position Report Class A (Type 3) - Fishing vessel
+!AIVDM,1,1,,B,33L=LN051HQj`HhN4T0,0*4A
+
+# Position Report Class B (Type 18) - Pleasure craft
+!AIVDM,1,1,,A,B3P8V1000=pRl<F07ah,0*3C
+
+# Position Report Class B (Type 18) - Sailing vessel
+!AIVDM,1,1,,B,B5N4cJ000>pRl<F07ah,0*2D
+
+# Aid-to-Navigation (Type 21) - Buoy
+!AIVDM,1,1,,A,E5N4cJ000000000000000000000000000000000000000000000,0*1E
+
+# Class A Position Report - Container ship in New York Harbor
+!AIVDM,1,1,,A,13u@Dp0P00PH=3pN4T0,0*7D
+
+# Class A Position Report - Bulk carrier in Rotterdam
+!AIVDM,1,1,,B,15MgK40P01PH=3pN4T0,0*6E
+
+# Class A Position Report - Cruise ship in Miami
+!AIVDM,1,1,,A,23aEOi@P00PH=3pN4T0,0*5F
+
+# Class A Position Report - Tug boat in San Francisco Bay
+!AIVDM,1,1,,B,33L=LN051HQj`HhN4T0,0*4A
+
+# Class B Position Report - Yacht in Mediterranean
+!AIVDM,1,1,,A,B3P8V1000=pRl<F07ah,0*3C
+
+# Class B Position Report - Fishing boat in North Sea
+!AIVDM,1,1,,B,B5N4cJ000>pRl<F07ah,0*2D
+
+# Multi-fragment message (Static and Voyage Data Type 5) - Part 1
+!AIVDM,2,1,3,B,55?MbV02>H97ac<H4eEK4r4@Th4222222222220l1@E846kkN0000000000,0*2B
+
+# Multi-fragment message (Static and Voyage Data Type 5) - Part 2
+!AIVDM,2,2,3,B,00000000000,2*2A

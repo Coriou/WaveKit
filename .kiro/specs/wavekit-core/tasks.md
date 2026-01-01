@@ -309,31 +309,31 @@ This phase implements the decoder expansion roadmap, adding multi-source support
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 20. Maritime Decoders (AIS)
-  - [ ] 20.1 Implement AIS-catcher Decoder
+  - [x] 20.1 Implement AIS-catcher Decoder
     - Extend NetworkProducerDecoder for AIS-catcher
     - Support NMEA and JSON output formats
     - Parse output into ShipData events
     - _Requirements: 25.1, 25.2, 25.3, 25.4_
-  - [ ] 20.2 Write property test for AIS parsing
+  - [x] 20.2 Write property test for AIS parsing
     - **Property 36: AIS Output Parsing**
     - **Validates: Requirements 25.2**
-  - [ ] 20.3 Create AIS test fixtures
+  - [x] 20.3 Create AIS test fixtures
     - Add sample NMEA and JSON output files
     - Create recording source files for CI testing
 
-- [ ] 21. Checkpoint - Maritime Decoders
+- [x] 21. Checkpoint - Maritime Decoders
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 22. Amateur Radio Decoders (APRS)
-  - [ ] 22.1 Implement Direwolf APRS Decoder
+  - [x] 22.1 Implement Direwolf APRS Decoder
     - Extend NetworkProducerDecoder for direwolf
     - Connect to KISS TCP port for packet access
     - Parse KISS frames into APRSData events
     - _Requirements: 26.1, 26.2, 26.3, 26.4_
-  - [ ] 22.2 Write property test for APRS parsing
+  - [x] 22.2 Write property test for APRS parsing
     - **Property 37: APRS Output Parsing**
     - **Validates: Requirements 26.2**
-  - [ ] 22.3 Create APRS test fixtures
+  - [x] 22.3 Create APRS test fixtures
     - Add sample KISS frame data
     - Create recording source files for CI testing
 
