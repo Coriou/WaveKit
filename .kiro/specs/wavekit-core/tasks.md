@@ -24,11 +24,11 @@ This implementation plan follows a bottom-up approach, starting with utilities a
   - [x] 2.3 Write property test for log entry structure
     - **Property 23: Log Entry Structure**
     - **Validates: Requirements 13.3**
-  - [ ] 2.4 Implement Configuration loader
+  - [x] 2.4 Implement Configuration loader
     - Create Zod schemas for all config sections
     - Implement YAML loading with environment variable override
     - _Requirements: 12.1, 12.2, 12.3, 12.4, 12.5_
-  - [ ] 2.5 Write property tests for configuration
+  - [x] 2.5 Write property tests for configuration
     - **Property 21: Config Environment Override**
     - **Property 22: Config Validation Errors**
     - **Validates: Requirements 12.2, 12.3, 12.4**
