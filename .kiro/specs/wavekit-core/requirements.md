@@ -10,14 +10,29 @@ WaveKit is a TypeScript-based SDR (Software Defined Radio) stream processing fra
 - **Source_Manager**: Component responsible for TCP connections to SDR sources with auto-reconnect
 - **Fanout_Manager**: Component that multiplexes audio streams to multiple decoder consumers
 - **Decoder_Manager**: Component that handles lifecycle management for decoder processes
-- **Decoder**: A signal processing program (dsd-fme, multimon-ng, rtl_433) that decodes audio streams
+- **Decoder**: A signal processing program that decodes audio or IQ streams into structured data
 - **Decoder_Registry**: Plugin system for registering and creating decoder instances
 - **Format_Converter**: Transform streams for audio format conversion (F32↔S16, resampling)
 - **Audio_Output**: TCP server that streams decoded audio to host-side players
 - **API_Server**: Fastify-based REST and WebSocket server for control and monitoring
-- **SDR_Source**: An SDR data provider (rtl_tcp or SDR++ network sink)
-- **IQ_Data**: In-phase and Quadrature data from SDR hardware
+- **SDR_Source**: An SDR data provider (rtl_tcp, SDR++ network sink, or recording file)
+- **IQ_Data**: In-phase and Quadrature data from SDR hardware (baseband samples)
 - **PCM_Audio**: Pulse Code Modulation audio data (S16LE or FLOAT32LE format)
+- **Source_Caps**: Capability declaration for a source (kind, sampleRate, format, exclusive)
+- **Decoder_Caps**: Capability declaration for a decoder (input type, output format, exclusivity)
+- **Recording_Source**: A source that replays recorded IQ or audio files for testing
+- **Network_Producer**: A decoder pattern where the decoder runs as a service exposing network outputs
+- **External_SDR_Owner**: A decoder pattern where the decoder manages its own SDR hardware
+- **Readsb_Decoder**: Decoder adapter for readsb ADS-B decoder
+- **Acarsdec_Decoder**: Decoder adapter for acarsdec ACARS decoder
+- **Dumpvdl2_Decoder**: Decoder adapter for dumpvdl2 VDL Mode 2 decoder
+- **AISCatcher_Decoder**: Decoder adapter for AIS-catcher maritime decoder
+- **Direwolf_Decoder**: Decoder adapter for direwolf APRS decoder
+- **AircraftData**: Structured output for ADS-B aircraft position and identification
+- **ACARSMessage**: Structured output for ACARS data link messages
+- **VDL2Message**: Structured output for VDL Mode 2 data link messages
+- **ShipData**: Structured output for AIS vessel position and identification
+- **APRSData**: Structured output for APRS amateur radio packets
 
 ## Requirements
 
@@ -191,3 +206,150 @@ WaveKit is a TypeScript-based SDR (Software Defined Radio) stream processing fra
 4. WHEN shutting down, THE Application SHALL close all source connections
 5. WHEN shutting down, THE Application SHALL destroy all streams to prevent memory leaks
 6. IF shutdown takes longer than 10 seconds, THEN THE Application SHALL force exit
+
+---
+
+## Decoder Expansion Requirements
+
+### Requirement 15: Multi-Source Management
+
+**User Story:** As a system operator, I want to connect multiple SDR sources simultaneously, so that I can run decoders on different frequencies that require dedicated tuners.
+
+#### Acceptance Criteria
+
+1. WHEN multiple source configurations are provided, THE Source_Manager SHALL establish independent TCP connections to each source
+2. WHEN a decoder is configured, THE Decoder_Manager SHALL assign it to a specific source by source ID
+3. WHEN a source is exclusive, THE Source_Manager SHALL prevent multiple decoders from sharing it
+4. WHEN sources are listed, THE Source_Manager SHALL return capabilities (kind, sampleRate, format, exclusive) for each source
+5. THE Source_Manager SHALL support source kinds: audio_pcm, iq, recording
+
+### Requirement 16: Source Capabilities Declaration
+
+**User Story:** As a system operator, I want sources to declare their capabilities, so that decoders can be matched to compatible sources.
+
+#### Acceptance Criteria
+
+1. WHEN a source is configured, THE Source_Manager SHALL validate and store its capabilities (kind, sampleRate, format, channels, centerFreq, exclusive)
+2. WHEN a decoder requests a source, THE Source_Manager SHALL verify capability compatibility before attachment
+3. IF a decoder's required input type does not match the source kind, THEN THE Source_Manager SHALL return a compatibility error
+
+### Requirement 17: Decoder Capabilities Declaration
+
+**User Story:** As a developer, I want decoders to declare their input/output capabilities, so that the system can validate source-decoder compatibility.
+
+#### Acceptance Criteria
+
+1. WHEN a decoder is registered, THE Decoder_Registry SHALL store its capabilities (input type, exclusive requirement, preferred sample rates, output format)
+2. WHEN a decoder is created, THE Decoder_Manager SHALL validate its capabilities against the assigned source
+3. THE Decoder_Registry SHALL support input types: audio_pcm, iq, external
+4. THE Decoder_Registry SHALL support output formats: jsonl, nmea, beast, text
+
+### Requirement 18: Network Producer Decoder Pattern
+
+**User Story:** As a system operator, I want to integrate decoders that run as network services, so that I can use decoders like readsb and AIS-catcher that expose TCP/UDP outputs.
+
+#### Acceptance Criteria
+
+1. WHEN a network producer decoder is started, THE Decoder_Manager SHALL spawn the process and connect to its output port
+2. WHEN the decoder produces output on its network port, THE Decoder_Manager SHALL parse it into structured DecoderOutput objects
+3. WHEN the network connection is lost, THE Decoder_Manager SHALL attempt reconnection with exponential backoff
+4. THE Decoder_Manager SHALL support output protocols: TCP, UDP
+
+### Requirement 19: External SDR Owner Decoder Pattern
+
+**User Story:** As a system operator, I want to integrate decoders that manage their own SDR hardware, so that I can use decoders like acarsdec and dumpvdl2 that require tuner control.
+
+#### Acceptance Criteria
+
+1. WHEN an external SDR decoder is started, THE Decoder_Manager SHALL spawn it with SDR device configuration (serial, frequency, gain)
+2. WHEN the decoder is running, THE Decoder_Manager SHALL NOT attempt to pipe audio to it
+3. WHEN the decoder produces output, THE Decoder_Manager SHALL parse it into structured DecoderOutput objects
+4. THE Decoder_Manager SHALL pass device serial numbers to external decoders for multi-dongle setups
+
+### Requirement 20: Decoder Health Model
+
+**User Story:** As a system operator, I want detailed decoder health status, so that I can identify degraded or faulted decoders quickly.
+
+#### Acceptance Criteria
+
+1. WHEN a decoder is running and producing output, THE Decoder_Manager SHALL report health as "running"
+2. WHEN a decoder is running but has not produced output for the configured timeout, THE Decoder_Manager SHALL report health as "degraded"
+3. WHEN a decoder has crashed and exceeded restart limits, THE Decoder_Manager SHALL report health as "faulted"
+4. WHEN decoder health changes, THE Decoder_Manager SHALL emit a health event with the new status
+
+### Requirement 21: Recording Source for Testing
+
+**User Story:** As a developer, I want to replay recorded IQ/audio files as sources, so that I can run deterministic CI tests without live SDR hardware.
+
+#### Acceptance Criteria
+
+1. WHEN a recording source is configured, THE Source_Manager SHALL read from the specified file path
+2. WHEN the recording ends, THE Source_Manager SHALL optionally loop or emit an 'ended' event
+3. THE Recording_Source SHALL support formats: raw IQ (u8, s16), audio PCM (s16le, f32le)
+4. WHEN playback speed is configured, THE Recording_Source SHALL emit data at the specified rate multiplier
+
+### Requirement 22: Readsb ADS-B Decoder Integration
+
+**User Story:** As a system operator, I want to decode ADS-B aircraft transponder signals, so that I can track aircraft positions in real-time.
+
+#### Acceptance Criteria
+
+1. WHEN started, THE Readsb_Decoder SHALL spawn readsb with the configured device and output options
+2. WHEN readsb outputs aircraft data, THE Readsb_Decoder SHALL parse it into structured AircraftData events
+3. THE Readsb_Decoder SHALL support output formats: SBS (BaseStation), Beast binary, JSON
+4. WHEN configured, THE Readsb_Decoder SHALL expose its network ports for external feeders
+
+### Requirement 23: ACARS Decoder Integration
+
+**User Story:** As a system operator, I want to decode ACARS aircraft data link messages, so that I can monitor aviation communications.
+
+#### Acceptance Criteria
+
+1. WHEN started, THE Acarsdec_Decoder SHALL spawn acarsdec with the configured frequencies and device
+2. WHEN acarsdec decodes a message, THE Acarsdec_Decoder SHALL parse it into structured ACARSMessage events
+3. THE Acarsdec_Decoder SHALL support multiple simultaneous frequencies
+4. THE Acarsdec_Decoder SHALL normalize output to JSON format
+
+### Requirement 24: VDL2 Decoder Integration
+
+**User Story:** As a system operator, I want to decode VDL Mode 2 data link messages, so that I can monitor modern aviation data communications.
+
+#### Acceptance Criteria
+
+1. WHEN started, THE Dumpvdl2_Decoder SHALL spawn dumpvdl2 with the configured frequencies and device
+2. WHEN dumpvdl2 decodes a message, THE Dumpvdl2_Decoder SHALL parse it into structured VDL2Message events
+3. THE Dumpvdl2_Decoder SHALL support JSON output format
+4. THE Dumpvdl2_Decoder SHALL support multiple simultaneous frequencies
+
+### Requirement 25: AIS Maritime Decoder Integration
+
+**User Story:** As a system operator, I want to decode AIS ship transponder signals, so that I can track vessel positions in real-time.
+
+#### Acceptance Criteria
+
+1. WHEN started, THE AISCatcher_Decoder SHALL spawn AIS-catcher with the configured device and output options
+2. WHEN AIS-catcher decodes a message, THE AISCatcher_Decoder SHALL parse it into structured ShipData events
+3. THE AISCatcher_Decoder SHALL support output formats: NMEA, JSON
+4. THE AISCatcher_Decoder SHALL support multiple input sources (RTL-TCP, SpyServer, SoapySDR)
+
+### Requirement 26: APRS Decoder Integration
+
+**User Story:** As a system operator, I want to decode APRS amateur radio packets, so that I can monitor ham radio position and messaging traffic.
+
+#### Acceptance Criteria
+
+1. WHEN started, THE Direwolf_Decoder SHALL spawn direwolf with the configured audio input and KISS output
+2. WHEN direwolf decodes a packet, THE Direwolf_Decoder SHALL parse it into structured APRSData events
+3. THE Direwolf_Decoder SHALL support KISS TCP output for packet access
+4. THE Direwolf_Decoder SHALL support audio input from PCM streams
+
+### Requirement 27: Decoder Version Pinning
+
+**User Story:** As a system operator, I want decoder versions to be pinned and tracked, so that I can maintain security and reproducibility.
+
+#### Acceptance Criteria
+
+1. WHEN a decoder is configured, THE Decoder_Manager SHALL validate the installed version against the pinned version
+2. WHEN a version mismatch is detected, THE Decoder_Manager SHALL log a warning with upgrade instructions
+3. THE Configuration SHALL support specifying minimum and maximum versions per decoder type
+4. WHEN security advisories affect a decoder, THE Documentation SHALL include mitigation guidance

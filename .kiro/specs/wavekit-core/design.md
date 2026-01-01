@@ -82,18 +82,31 @@ graph TB
 
 ### Source Manager
 
-Manages TCP connections to SDR sources with automatic reconnection using exponential backoff.
+Manages TCP connections to SDR sources with automatic reconnection using exponential backoff. Supports multiple source types with capability declarations.
 
 ```typescript
 // src/core/source-manager.ts
 
+type SourceKind = "audio_pcm" | "iq" | "recording"
+
+interface SourceCaps {
+	kind: SourceKind
+	sampleRate: number
+	format: "S16LE" | "FLOAT32LE" | "U8_IQ" | "S16_IQ"
+	channels?: number
+	centerFreq?: number
+	exclusive: boolean
+}
+
 interface SourceConfig {
 	id: string
-	type: "sdrpp-network" | "rtl_tcp"
-	host: string
-	port: number
-	format: "S16LE" | "FLOAT32LE"
-	sampleRate: number
+	type: "sdrpp-network" | "rtl_tcp" | "recording"
+	host?: string
+	port?: number
+	filePath?: string // For recording sources
+	loop?: boolean // For recording sources
+	playbackSpeed?: number // For recording sources (1.0 = realtime)
+	caps: SourceCaps
 }
 
 interface SourceStatus {
@@ -103,6 +116,7 @@ interface SourceStatus {
 	dataRate: number // KB/s
 	lastError?: string
 	reconnectAttempts: number
+	caps: SourceCaps
 }
 
 interface SourceManagerEvents {
@@ -114,6 +128,7 @@ interface SourceManagerEvents {
 		sourceId: string,
 		metrics: { bytesReceived: number; dataRate: number },
 	) => void
+	ended: (sourceId: string) => void // For recording sources
 }
 
 class SourceManager extends EventEmitter {
@@ -126,6 +141,11 @@ class SourceManager extends EventEmitter {
 	getStatus(id: string): SourceStatus | undefined
 	getAllStatus(): SourceStatus[]
 	getStream(id: string): Readable | undefined
+	getCaps(id: string): SourceCaps | undefined
+
+	// Capability checking
+	isCompatible(sourceId: string, decoderCaps: DecoderCaps): boolean
+	getAvailableSources(decoderCaps: DecoderCaps): SourceStatus[]
 }
 ```
 
@@ -208,16 +228,43 @@ function createResampleTransform(fromRate: number, toRate: number): Transform
 
 ### Decoder Types
 
-Core type definitions for the decoder system.
+Core type definitions for the decoder system with capability declarations.
 
 ```typescript
 // src/decoders/types.ts
+
+type DecoderInputType = "audio_pcm" | "iq" | "external"
+type DecoderOutputFormat = "jsonl" | "nmea" | "beast" | "text"
+type DecoderIntegrationPattern =
+	| "pure_consumer"
+	| "network_producer"
+	| "external_sdr"
+type DecoderHealth = "running" | "degraded" | "faulted"
+
+interface DecoderCaps {
+	input: DecoderInputType
+	wantsExclusiveSource?: boolean
+	preferredSampleRates?: number[]
+	output: DecoderOutputFormat
+	integrationPattern: DecoderIntegrationPattern
+}
 
 interface DecoderConfig {
 	id: string
 	type: string
 	enabled: boolean
+	sourceId?: string // Which source to attach to (for non-external decoders)
 	options: Record<string, unknown>
+	// For external SDR decoders
+	deviceSerial?: string
+	frequencies?: number[]
+	// For network producer decoders
+	outputHost?: string
+	outputPort?: number
+	outputProtocol?: "tcp" | "udp"
+	// Version pinning
+	minVersion?: string
+	maxVersion?: string
 }
 
 type DecoderOutputType =
@@ -228,6 +275,11 @@ type DecoderOutputType =
 	| "signal"
 	| "error"
 	| "stats"
+	| "aircraft" // ADS-B
+	| "acars" // ACARS messages
+	| "vdl2" // VDL2 messages
+	| "ship" // AIS
+	| "aprs" // APRS packets
 
 interface DecoderOutput {
 	timestamp: Date
@@ -246,9 +298,13 @@ interface DecoderStatus {
 	id: string
 	type: string
 	running: boolean
+	health: DecoderHealth
 	pid?: number
 	uptime: number // seconds
 	stats: DecoderStats
+	lastOutputAt?: Date
+	restartCount: number
+	version?: string
 }
 
 interface DecoderEvents {
@@ -257,11 +313,13 @@ interface DecoderEvents {
 	exit: (code: number | null, signal: string | null) => void
 	started: () => void
 	stopped: () => void
+	health: (health: DecoderHealth) => void
 }
 
 interface Decoder extends EventEmitter {
 	readonly id: string
 	readonly type: string
+	readonly caps: DecoderCaps
 
 	start(): Promise<void>
 	stop(): Promise<void>
@@ -273,12 +331,13 @@ interface Decoder extends EventEmitter {
 	getOutput(): Readable // Object mode stream of DecoderOutput
 	getAudioOutput(): Readable | null // Raw audio output if available
 	getStatus(): DecoderStatus
+	getHealth(): DecoderHealth
 }
 ```
 
 ### Base Decoder
 
-Abstract base class implementing common decoder functionality.
+Abstract base class implementing common decoder functionality for the "pure consumer" pattern.
 
 ```typescript
 // src/decoders/base-decoder.ts
@@ -286,6 +345,7 @@ Abstract base class implementing common decoder functionality.
 abstract class BaseDecoder extends EventEmitter implements Decoder {
   readonly id: string;
   readonly type: string;
+  readonly caps: DecoderCaps;
 
   protected process: ChildProcess | null = null;
   protected inputStream: Readable | null = null;
@@ -293,6 +353,8 @@ abstract class BaseDecoder extends EventEmitter implements Decoder {
   protected audioOutputStream: PassThrough | null = null;
   protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 };
   protected startTime: number = 0;
+  protected lastOutputAt: Date | null = null;
+  protected health: DecoderHealth = 'running';
 
   constructor(config: DecoderConfig, protected logger: Logger);
 
@@ -300,6 +362,7 @@ abstract class BaseDecoder extends EventEmitter implements Decoder {
   protected abstract getCommand(): string;
   protected abstract getArgs(): string[];
   protected abstract parseOutput(line: string): DecoderOutput | null;
+  protected abstract getCaps(): DecoderCaps;
 
   async start(): Promise<void>;
   async stop(): Promise<void>;
@@ -311,6 +374,9 @@ abstract class BaseDecoder extends EventEmitter implements Decoder {
   getOutput(): Readable;
   getAudioOutput(): Readable | null;
   getStatus(): DecoderStatus;
+  getHealth(): DecoderHealth;
+
+  protected updateHealth(): void; // Called periodically to check degraded state
 }
 ```
 
@@ -320,10 +386,122 @@ abstract class BaseDecoder extends EventEmitter implements Decoder {
 - Stdout/stderr parsed line-by-line using `readline.createInterface`
 - Graceful stop: SIGTERM → wait 5s → SIGKILL
 - Auto-restart handled by DecoderManager, not BaseDecoder
+- Health transitions: running → degraded (no output for timeout) → faulted (crash loop)
+
+### Network Producer Decoder Base
+
+Abstract base class for decoders that run as network services (Pattern 2).
+
+```typescript
+// src/decoders/network-producer-decoder.ts
+
+interface NetworkProducerConfig extends DecoderConfig {
+	outputHost: string
+	outputPort: number
+	outputProtocol: 'tcp' | 'udp'
+}
+
+abstract class NetworkProducerDecoder extends EventEmitter implements Decoder {
+  readonly id: string;
+  readonly type: string;
+  readonly caps: DecoderCaps;
+
+  protected process: ChildProcess | null = null;
+  protected networkClient: Socket | dgram.Socket | null = null;
+  protected outputStream: PassThrough; // Object mode
+  protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 };
+  protected health: DecoderHealth = 'running';
+
+  constructor(config: NetworkProducerConfig, protected logger: Logger);
+
+  // Template method pattern
+  protected abstract getCommand(): string;
+  protected abstract getArgs(): string[];
+  protected abstract parseNetworkData(data: Buffer): DecoderOutput[];
+  protected abstract getCaps(): DecoderCaps;
+
+  async start(): Promise<void>;
+  async stop(): Promise<void>;
+  async restart(): Promise<void>;
+
+  // Network producers don't use stdin input
+  attachInput(stream: Readable): void { /* no-op */ }
+  detachInput(): void { /* no-op */ }
+
+  getOutput(): Readable;
+  getAudioOutput(): Readable | null { return null; }
+  getStatus(): DecoderStatus;
+  getHealth(): DecoderHealth;
+
+  protected connectToOutput(): Promise<void>;
+  protected reconnectToOutput(): Promise<void>;
+}
+```
+
+**Implementation Details:**
+
+- Spawns decoder process, then connects to its output port
+- Supports both TCP and UDP output protocols
+- Reconnects to output port with exponential backoff if connection lost
+- Process and network connection managed independently
+
+### External SDR Decoder Base
+
+Abstract base class for decoders that manage their own SDR hardware (Pattern 3).
+
+```typescript
+// src/decoders/external-sdr-decoder.ts
+
+interface ExternalSdrConfig extends DecoderConfig {
+	deviceSerial: string
+	frequencies: number[]
+	gain?: number
+	ppm?: number
+}
+
+abstract class ExternalSdrDecoder extends EventEmitter implements Decoder {
+  readonly id: string;
+  readonly type: string;
+  readonly caps: DecoderCaps;
+
+  protected process: ChildProcess | null = null;
+  protected outputStream: PassThrough; // Object mode
+  protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 };
+  protected health: DecoderHealth = 'running';
+
+  constructor(config: ExternalSdrConfig, protected logger: Logger);
+
+  // Template method pattern
+  protected abstract getCommand(): string;
+  protected abstract getArgs(): string[];
+  protected abstract parseOutput(line: string): DecoderOutput | null;
+  protected abstract getCaps(): DecoderCaps;
+
+  async start(): Promise<void>;
+  async stop(): Promise<void>;
+  async restart(): Promise<void>;
+
+  // External SDR decoders don't use stdin input
+  attachInput(stream: Readable): void { /* no-op */ }
+  detachInput(): void { /* no-op */ }
+
+  getOutput(): Readable;
+  getAudioOutput(): Readable | null { return null; }
+  getStatus(): DecoderStatus;
+  getHealth(): DecoderHealth;
+}
+```
+
+**Implementation Details:**
+
+- Passes device serial, frequencies, and gain to decoder command line
+- Does not receive audio input from WaveKit (decoder controls its own SDR)
+- Parses stdout/stderr for structured output (typically JSON)
+- Validates device availability before starting
 
 ### Decoder Manager
 
-Orchestrates decoder lifecycle and coordinates with other components.
+Orchestrates decoder lifecycle and coordinates with other components. Supports all three integration patterns.
 
 ```typescript
 // src/decoders/manager.ts
@@ -332,11 +510,22 @@ interface DecoderManagerConfig {
 	restartDelay: number // Initial restart delay in ms
 	maxRestartDelay: number // Maximum restart delay in ms
 	maxRestarts: number // Max restarts before giving up (0 = unlimited)
+	healthCheckInterval: number // ms between health checks
+	degradedTimeout: number // ms without output before degraded
+}
+
+interface DecoderManagerEvents {
+	"decoder:started": (id: string) => void
+	"decoder:stopped": (id: string) => void
+	"decoder:output": (id: string, output: DecoderOutput) => void
+	"decoder:error": (id: string, error: Error) => void
+	"decoder:health": (id: string, health: DecoderHealth) => void
 }
 
 class DecoderManager extends EventEmitter {
 	constructor(
 		registry: DecoderRegistry,
+		sourceManager: SourceManager,
 		fanout: FanoutManager,
 		logger: Logger,
 		config?: Partial<DecoderManagerConfig>,
@@ -357,29 +546,61 @@ class DecoderManager extends EventEmitter {
 	getAllDecoders(): Decoder[]
 	getStatus(id: string): DecoderStatus | undefined
 	getAllStatus(): DecoderStatus[]
+
+	// Health monitoring
+	getHealth(id: string): DecoderHealth | undefined
+	getAllHealth(): Map<string, DecoderHealth>
+
+	// Source assignment
+	assignSource(decoderId: string, sourceId: string): void
+	getAssignedSource(decoderId: string): string | undefined
 }
 ```
 
+**Implementation Details:**
+
+- Validates decoder-source compatibility using `DecoderCaps` and `SourceCaps`
+- For pure consumer decoders: creates fanout branch and pipes to decoder stdin
+- For network producer decoders: spawns process and connects to output port
+- For external SDR decoders: spawns process with device config, no input piping
+- Runs periodic health checks to detect degraded state
+- Emits health events when decoder health changes
+
+````
+
 ### Decoder Registry
 
-Plugin system for registering decoder factories.
+Plugin system for registering decoder factories with capability declarations.
 
 ```typescript
 // src/decoders/registry.ts
 
+interface DecoderFactoryMeta {
+	factory: DecoderFactory
+	caps: DecoderCaps
+	minVersion?: string
+	maxVersion?: string
+}
+
 type DecoderFactory = (config: DecoderConfig, logger: Logger) => Decoder
 
 class DecoderRegistry {
-	private factories: Map<string, DecoderFactory> = new Map()
+	private factories: Map<string, DecoderFactoryMeta> = new Map()
 
-	register(type: string, factory: DecoderFactory): void
+	register(type: string, factory: DecoderFactory, caps: DecoderCaps, versionConstraints?: { min?: string, max?: string }): void
 	unregister(type: string): boolean
 
 	create(config: DecoderConfig, logger: Logger): Decoder
 	has(type: string): boolean
 	getRegisteredTypes(): string[]
+	getCaps(type: string): DecoderCaps | undefined
+
+	// Capability queries
+	getDecodersByInput(input: DecoderInputType): string[]
+	getDecodersByOutput(output: DecoderOutputFormat): string[]
+	getCompatibleDecoders(sourceCaps: SourceCaps): string[]
 }
-```
+````
 
 ### Built-in Decoders
 
@@ -472,6 +693,251 @@ class Rtl433Decoder extends BaseDecoder {
 
 - Uses `-F json` flag for structured output
 - Parses JSON lines directly into `{ type: 'signal', data: parsedJson }`
+
+### Aviation Decoders
+
+#### Readsb ADS-B Decoder (Network Producer Pattern)
+
+```typescript
+// src/decoders/builtin/readsb.ts
+
+interface ReadsbOptions {
+	device?: string // RTL-SDR device index or serial
+	deviceSerial?: string
+	gain?: number
+	ppm?: number
+	outputFormat: "sbs" | "beast" | "json"
+	outputPort?: number // Default: 30003 for SBS, 30005 for Beast
+	enableMlat?: boolean
+	lat?: number
+	lon?: number
+}
+
+interface AircraftData {
+	icao: string // 24-bit ICAO address
+	callsign?: string
+	altitude?: number // feet
+	groundSpeed?: number // knots
+	track?: number // degrees
+	lat?: number
+	lon?: number
+	verticalRate?: number // ft/min
+	squawk?: string
+	onGround?: boolean
+	lastSeen: Date
+	messageCount: number
+}
+
+class ReadsbDecoder extends NetworkProducerDecoder {
+	constructor(config: DecoderConfig, logger: Logger)
+
+	protected getCommand(): string // 'readsb'
+	protected getArgs(): string[]
+	protected parseNetworkData(data: Buffer): DecoderOutput[]
+	protected getCaps(): DecoderCaps // { input: 'external', output: 'beast' | 'jsonl' }
+}
+```
+
+**Output Parsing:**
+
+- SBS format: Parse CSV lines into AircraftData
+- Beast format: Parse binary Beast protocol
+- JSON format: Parse JSON lines directly
+
+#### ACARS Decoder (External SDR Pattern)
+
+```typescript
+// src/decoders/builtin/acarsdec.ts
+
+interface AcarsdecOptions {
+	deviceSerial: string
+	frequencies: number[] // e.g., [131550000, 131725000]
+	gain?: number
+	ppm?: number
+	outputFormat?: "json" | "native"
+}
+
+interface ACARSMessage {
+	timestamp: Date
+	frequency: number
+	channel: number
+	level: number // signal level dB
+	error: number // bit errors
+	mode: string
+	label: string
+	blockId?: string
+	ack?: string
+	tail?: string // aircraft registration
+	flight?: string
+	msgno?: string
+	text?: string
+}
+
+class AcarsdecDecoder extends ExternalSdrDecoder {
+	constructor(config: DecoderConfig, logger: Logger)
+
+	protected getCommand(): string // 'acarsdec'
+	protected getArgs(): string[]
+	protected parseOutput(line: string): DecoderOutput | null
+	protected getCaps(): DecoderCaps // { input: 'external', output: 'jsonl' }
+}
+```
+
+**Output Parsing:**
+
+- Uses `-j` flag for JSON output
+- Parses JSON lines into ACARSMessage objects
+
+#### VDL2 Decoder (External SDR Pattern)
+
+```typescript
+// src/decoders/builtin/dumpvdl2.ts
+
+interface Dumpvdl2Options {
+	deviceSerial: string
+	frequencies: number[] // e.g., [136650000, 136700000, 136975000]
+	gain?: number
+	ppm?: number
+	outputFormat?: "json" | "text"
+}
+
+interface VDL2Message {
+	timestamp: Date
+	frequency: number
+	station?: string
+	icao?: string
+	toaddr?: string
+	fromaddr?: string
+	msgType: string
+	acars?: ACARSMessage // Embedded ACARS if present
+	text?: string
+}
+
+class Dumpvdl2Decoder extends ExternalSdrDecoder {
+	constructor(config: DecoderConfig, logger: Logger)
+
+	protected getCommand(): string // 'dumpvdl2'
+	protected getArgs(): string[]
+	protected parseOutput(line: string): DecoderOutput | null
+	protected getCaps(): DecoderCaps // { input: 'external', output: 'jsonl' }
+}
+```
+
+**Output Parsing:**
+
+- Uses `--output decoded:json:file:-` for JSON to stdout
+- Parses JSON lines into VDL2Message objects
+
+### Maritime Decoders
+
+#### AIS-catcher Decoder (Network Producer Pattern)
+
+```typescript
+// src/decoders/builtin/ais-catcher.ts
+
+interface AisCatcherOptions {
+	device?: string // RTL-SDR device index
+	deviceSerial?: string
+	rtlTcpHost?: string // Alternative: connect to rtl_tcp
+	rtlTcpPort?: number
+	gain?: number
+	ppm?: number
+	outputFormat: "nmea" | "json"
+	outputPort?: number // UDP port for output
+}
+
+interface ShipData {
+	mmsi: string // Maritime Mobile Service Identity
+	name?: string
+	callsign?: string
+	imo?: number
+	shipType?: number
+	lat?: number
+	lon?: number
+	cog?: number // Course over ground
+	sog?: number // Speed over ground (knots)
+	heading?: number
+	navStatus?: number
+	destination?: string
+	eta?: Date
+	draught?: number
+	lastSeen: Date
+	messageType: number
+}
+
+class AisCatcherDecoder extends NetworkProducerDecoder {
+	constructor(config: DecoderConfig, logger: Logger)
+
+	protected getCommand(): string // 'AIS-catcher'
+	protected getArgs(): string[]
+	protected parseNetworkData(data: Buffer): DecoderOutput[]
+	protected getCaps(): DecoderCaps // { input: 'external', output: 'nmea' | 'jsonl' }
+}
+```
+
+**Output Parsing:**
+
+- NMEA format: Parse !AIVDM/!AIVDO sentences
+- JSON format: Parse JSON lines directly into ShipData
+
+### Amateur Radio Decoders
+
+#### Direwolf APRS Decoder (Network Producer Pattern)
+
+```typescript
+// src/decoders/builtin/direwolf.ts
+
+interface DirewolfOptions {
+	audioDevice?: string // ALSA device or 'stdin'
+	sampleRate?: number // Default: 48000
+	kissPort?: number // Default: 8001
+	agwPort?: number // Default: 8000
+	callsign?: string
+}
+
+interface APRSData {
+	timestamp: Date
+	source: string // Callsign-SSID
+	destination: string
+	path: string[]
+	dataType: string // Position, Message, Weather, etc.
+	lat?: number
+	lon?: number
+	altitude?: number
+	course?: number
+	speed?: number
+	symbol?: string
+	comment?: string
+	weather?: {
+		temperature?: number
+		humidity?: number
+		pressure?: number
+		windSpeed?: number
+		windDirection?: number
+		rainfall?: number
+	}
+	message?: {
+		addressee: string
+		text: string
+		messageNo?: string
+	}
+}
+
+class DirewolfDecoder extends NetworkProducerDecoder {
+	constructor(config: DecoderConfig, logger: Logger)
+
+	protected getCommand(): string // 'direwolf'
+	protected getArgs(): string[]
+	protected parseNetworkData(data: Buffer): DecoderOutput[]
+	protected getCaps(): DecoderCaps // { input: 'audio_pcm', output: 'text' }
+}
+```
+
+**Output Parsing:**
+
+- Connects to KISS TCP port (8001)
+- Parses KISS frames into APRS packets
+- Decodes APRS packet types (position, message, weather, etc.)
 
 ### API Server
 
@@ -588,20 +1054,56 @@ class AudioOutput extends EventEmitter {
 
 import { z } from "zod"
 
+const SourceCapsSchema = z.object({
+	kind: z.enum(["audio_pcm", "iq", "recording"]),
+	sampleRate: z.number().int().positive(),
+	format: z.enum(["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ"]),
+	channels: z.number().int().positive().optional(),
+	centerFreq: z.number().positive().optional(),
+	exclusive: z.boolean().default(false),
+})
+
 const SourceConfigSchema = z.object({
 	id: z.string(),
-	type: z.enum(["sdrpp-network", "rtl_tcp"]),
-	host: z.string(),
-	port: z.number().int().positive(),
-	format: z.enum(["S16LE", "FLOAT32LE"]),
-	sampleRate: z.number().int().positive(),
+	type: z.enum(["sdrpp-network", "rtl_tcp", "recording"]),
+	host: z.string().optional(), // Required for network sources
+	port: z.number().int().positive().optional(), // Required for network sources
+	filePath: z.string().optional(), // Required for recording sources
+	loop: z.boolean().default(false), // For recording sources
+	playbackSpeed: z.number().positive().default(1.0), // For recording sources
+	caps: SourceCapsSchema,
+})
+
+const DecoderCapsSchema = z.object({
+	input: z.enum(["audio_pcm", "iq", "external"]),
+	wantsExclusiveSource: z.boolean().optional(),
+	preferredSampleRates: z.array(z.number().int().positive()).optional(),
+	output: z.enum(["jsonl", "nmea", "beast", "text"]),
+	integrationPattern: z.enum([
+		"pure_consumer",
+		"network_producer",
+		"external_sdr",
+	]),
 })
 
 const DecoderConfigSchema = z.object({
 	id: z.string(),
 	type: z.string(),
 	enabled: z.boolean(),
+	sourceId: z.string().optional(), // Which source to attach to
 	options: z.record(z.unknown()),
+	// For external SDR decoders
+	deviceSerial: z.string().optional(),
+	frequencies: z.array(z.number().positive()).optional(),
+	gain: z.number().optional(),
+	ppm: z.number().optional(),
+	// For network producer decoders
+	outputHost: z.string().optional(),
+	outputPort: z.number().int().positive().optional(),
+	outputProtocol: z.enum(["tcp", "udp"]).optional(),
+	// Version pinning
+	minVersion: z.string().optional(),
+	maxVersion: z.string().optional(),
 })
 
 const ConfigSchema = z.object({
@@ -620,6 +1122,12 @@ const ConfigSchema = z.object({
 		level: z.enum(["trace", "debug", "info", "warn", "error"]).default("info"),
 		dir: z.string().optional(),
 	}),
+	health: z
+		.object({
+			checkInterval: z.number().int().positive().default(5000), // ms
+			degradedTimeout: z.number().int().positive().default(30000), // ms without output
+		})
+		.optional(),
 })
 
 type Config = z.infer<typeof ConfigSchema>
@@ -871,6 +1379,88 @@ _For any_ log entry produced by the Logger, it should contain `time` (timestamp)
 _For any_ shutdown initiated by SIGTERM, after shutdown completes: (a) all decoders should be stopped, (b) all source connections should be closed, (c) all streams should be destroyed, and (d) no new connections should be accepted.
 
 **Validates: Requirements 14.2, 14.3, 14.4, 14.5**
+
+---
+
+## Decoder Expansion Properties
+
+### Property 25: Source Capability Compatibility
+
+_For any_ decoder D with capabilities C_d and source S with capabilities C_s, the Source_Manager should return `isCompatible(S, C_d) = true` if and only if C_d.input matches C_s.kind (audio_pcm↔audio_pcm, iq↔iq) or C_d.input is 'external'.
+
+**Validates: Requirements 16.2, 17.2**
+
+### Property 26: Multi-Source Independence
+
+_For any_ two sources S1 and S2 managed by Source_Manager, connecting/disconnecting S1 should not affect the connection state or data flow of S2.
+
+**Validates: Requirements 15.1**
+
+### Property 27: Decoder-Source Assignment Consistency
+
+_For any_ decoder D assigned to source S, after assignment: (a) `getAssignedSource(D.id)` should return S.id, and (b) if D is a pure consumer decoder, D should receive data from S's stream.
+
+**Validates: Requirements 15.2**
+
+### Property 28: Exclusive Source Enforcement
+
+_For any_ source S with `caps.exclusive = true`, the Source_Manager should prevent more than one decoder from being assigned to S, returning an error for subsequent assignment attempts.
+
+**Validates: Requirements 15.3**
+
+### Property 29: Recording Source Determinism
+
+_For any_ recording source R with file F, replaying F twice should produce identical byte sequences in the same order.
+
+**Validates: Requirements 21.1, 21.3**
+
+### Property 30: Health State Transitions
+
+_For any_ decoder D, health transitions should follow: running → degraded (after timeout without output), degraded → running (on output received), running/degraded → faulted (on crash loop), and health events should be emitted for each transition.
+
+**Validates: Requirements 20.1, 20.2, 20.3, 20.4**
+
+### Property 31: Network Producer Reconnection
+
+_For any_ network producer decoder D, if the output connection is lost while the process is running, D should attempt reconnection with exponential backoff and emit appropriate events.
+
+**Validates: Requirements 18.3**
+
+### Property 32: External SDR Decoder Device Isolation
+
+_For any_ external SDR decoder D configured with device serial S, the spawned process should receive S as a command-line argument, and D should not attempt to pipe audio input.
+
+**Validates: Requirements 19.1, 19.2, 19.4**
+
+### Property 33: ADS-B Output Parsing
+
+_For any_ valid readsb output line (SBS, Beast, or JSON format), the parser should produce a DecoderOutput object with `type: 'aircraft'` and an AircraftData object containing at minimum the ICAO address.
+
+**Validates: Requirements 22.2**
+
+### Property 34: ACARS Output Parsing
+
+_For any_ valid acarsdec JSON output line, the parser should produce a DecoderOutput object with `type: 'acars'` and an ACARSMessage object containing timestamp, frequency, and message content.
+
+**Validates: Requirements 23.2**
+
+### Property 35: VDL2 Output Parsing
+
+_For any_ valid dumpvdl2 JSON output line, the parser should produce a DecoderOutput object with `type: 'vdl2'` and a VDL2Message object containing timestamp, frequency, and message type.
+
+**Validates: Requirements 24.2**
+
+### Property 36: AIS Output Parsing
+
+_For any_ valid AIS-catcher output (NMEA or JSON), the parser should produce a DecoderOutput object with `type: 'ship'` and a ShipData object containing at minimum the MMSI.
+
+**Validates: Requirements 25.2**
+
+### Property 37: APRS Output Parsing
+
+_For any_ valid direwolf KISS frame containing an APRS packet, the parser should produce a DecoderOutput object with `type: 'aprs'` and an APRSData object containing source callsign and data type.
+
+**Validates: Requirements 26.2**
 
 ## Error Handling
 
