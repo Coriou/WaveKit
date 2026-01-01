@@ -1,0 +1,374 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec </dev/null
+
+HOST="${1:-127.0.0.1}"
+PORT="${2:-7355}"
+
+FORMAT="${FORMAT:-S16LE}"   # S16LE or FLOAT32LE
+PLAY="${PLAY:-0}"           # 1 = monitor raw audio, 0 = don't
+
+# --- DSD-FME ---
+DSD_LOG="${DSD_LOG:-./dsd.log}"
+DSD_ENABLE="${DSD_ENABLE:-1}"
+DSD_MODE="${DSD_MODE:-auto}"      # auto (now includes NXDN/PV) | dmr | ysf | p25 | dstar | provoice | tetra
+DSD_OUT="${DSD_OUT:-wav}"         # pulse | null | wav | udp
+DSD_WAV_DIR="${DSD_WAV_DIR:-./decoded_calls}"
+DSD_EXTRA="${DSD_EXTRA:-}"        # extra args (space separated)
+
+# --- multimon-ng ---
+MM_LOG="${MM_LOG:-./multimon.log}"
+MM_ENABLE="${MM_ENABLE:-1}"
+MM_GAIN="${MM_GAIN:-0}"
+MM_OPTS="${MM_OPTS:-}"            # extra args (space separated)
+MM_VERBOSITY="${MM_VERBOSITY:-5}"
+MM_MODES="${MM_MODES:-POCSAG512 POCSAG1200 POCSAG2400 FLEX EAS FSK9600 DTMF ZVEI1 ZVEI2 ZVEI3 AFSK1200}"
+
+# --- Signal Classification & Snapshots ---
+CLASSIFIER_ENABLE="${CLASSIFIER_ENABLE:-0}" # 1 = enable rtl_433 classifier
+SNAPSHOT_ENABLE="${SNAPSHOT_ENABLE:-0}"   # 1 = save spectrograms of signals
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-./snapshots}"
+
+MM_HIGHPASS="${MM_HIGHPASS:-200}"   # Hz (0 to disable)
+MM_LOWPASS="${MM_LOWPASS:-5000}"    # Hz (0 to disable)
+
+MM_GATE_ENABLE="${MM_GATE_ENABLE:-1}"
+MM_GATE_PARAMS="${MM_GATE_PARAMS:-1 0.08 1% 1 0.35 1%}"  # sox silence params
+
+# Headroom before filters (prevents filter-induced clipping)
+SOX_HEADROOM_DB="${SOX_HEADROOM_DB:-3}"  # dB (0 disables)
+
+# --- buffering helpers ---
+STDBUF_ENABLE="${STDBUF_ENABLE:-1}"   # uses stdbuf if available
+MBUFFER_ENABLE="${MBUFFER_ENABLE:-0}" # uses mbuffer if available
+MBUFFER_MB="${MBUFFER_MB:-2}"         # MB per branch buffer
+
+have_cmd() { command -v "$1" >/dev/null 2>&1; }
+require_cmd() { have_cmd "$1" || { echo "Missing: $1" >&2; exit 1; }; }
+dsd-fme --version 2>&1 | head -n1 | tee -a "$DSD_LOG" >/dev/null || true
+
+run_stdbuf() {
+  if [[ "${STDBUF_ENABLE}" == "1" ]] && have_cmd stdbuf; then
+    stdbuf -i0 -o0 -e0 "$@"
+  else
+    "$@"
+  fi
+}
+
+cleanup() {
+  # Kill all processes in the current process group
+  trap - EXIT INT TERM
+  kill 0 2>/dev/null || true
+  sleep 0.2
+  kill -9 0 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+# Requirements (conditional)
+require_cmd python3
+require_cmd sox
+
+if [[ "$DSD_ENABLE" == "1" ]]; then
+  require_cmd dsd-fme
+fi
+
+if [[ "$MM_ENABLE" == "1" ]]; then
+  require_cmd multimon-ng
+  require_cmd perl
+fi
+
+if [[ "$CLASSIFIER_ENABLE" == "1" ]]; then
+  require_cmd rtl_433
+fi
+
+if [[ "$PLAY" == "1" ]]; then
+  require_cmd play
+fi
+
+echo "Connecting to SDR++ at ${HOST}:${PORT}"
+echo "FORMAT=${FORMAT}  PLAY=${PLAY}  DSD_MODE=${DSD_MODE}  DSD_OUT=${DSD_OUT}"
+echo "In SDR++: Sinks -> Radio -> Network -> host ${HOST} port ${PORT}, 48k, mono"
+
+# --- Build DSD flags (in parent; simple scalars are inherited by subshells) ---
+declare -a DSD_FLAGS=()
+case "$DSD_MODE" in
+  auto)  DSD_FLAGS+=(-fa) ;;
+  dmr)   DSD_FLAGS+=(-fs) ;;
+  ysf)   DSD_FLAGS+=(-fy) ;;
+  p25)   DSD_FLAGS+=(-f1) ;;
+  dstar) DSD_FLAGS+=(-fd) ;;
+  provoice) DSD_FLAGS+=(-fp) ;;
+  # Note: TETRA support depends on your dsd-fme build. 
+  # Standard builds often use -fi for TMO and -fn for DMO.
+  tetra) DSD_FLAGS+=(-fi) ;;
+  tetra-dmo) DSD_FLAGS+=(-fn) ;;
+  *) echo "Unknown DSD_MODE=$DSD_MODE (auto|dmr|ysf|p25|dstar|provoice|tetra|tetra-dmo)" >&2; exit 1 ;;
+esac
+
+case "$DSD_OUT" in
+  pulse) DSD_FLAGS+=(-o pulse) ;;
+  null)  DSD_FLAGS+=(-o null) ;;
+  wav)
+    mkdir -p "$DSD_WAV_DIR"
+    # dsd-fme: -7 <dir> must be before -P
+    DSD_FLAGS+=(-o null -7 "$DSD_WAV_DIR" -P)
+    ;;
+  udp)   DSD_FLAGS+=(-o udp) ;;
+  *) echo "Unknown DSD_OUT=$DSD_OUT (pulse|null|wav|udp)" >&2; exit 1 ;;
+esac
+
+if [[ "$SNAPSHOT_ENABLE" == "1" ]]; then
+  mkdir -p "$SNAPSHOT_DIR"
+fi
+
+# --- Python TCP reader (clean BrokenPipe handling) ---
+PY_READER=$(cat <<'PY'
+import socket, sys, time, signal
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+out = sys.stdout.buffer
+
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+while True:
+    try:
+        s = socket.create_connection((host, port), timeout=10)
+        s.settimeout(10)
+        sys.stderr.write(f"Connected to {host}:{port}\n")
+        last_log = time.time()
+        bytes_recvd = 0
+        while True:
+            data = s.recv(16384)
+            if not data:
+                sys.stderr.write(f"Connection closed by server at {host}:{port}\n")
+                break
+            bytes_recvd += len(data)
+            now = time.time()
+            if now - last_log > 5:
+                rate = (bytes_recvd / (now - last_log)) / 1024
+                sys.stderr.write(f"Data rate: {rate:.2f} KB/s\n")
+                bytes_recvd = 0
+                last_log = now
+            try:
+                out.write(data)
+                out.flush()
+            except BrokenPipeError:
+                sys.exit(0)
+    except (ConnectionRefusedError, socket.timeout, ConnectionResetError) as e:
+        sys.stderr.write(f"Connection error on {host}:{port}: {e}. Retrying in 2s...\n")
+        time.sleep(2)
+        continue
+    except KeyboardInterrupt:
+        break
+PY
+)
+
+# --- Python Fanout (ignores BrokenPipe on branches) ---
+PY_FANOUT=$(cat <<'PY'
+import sys, os, signal
+signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+outputs = []
+for path in sys.argv[1:]:
+    try:
+        # Use os.open to get a file descriptor for the named pipe
+        fd = os.open(path, os.O_WRONLY)
+        outputs.append(fd)
+    except Exception as e:
+        sys.stderr.write(f"Fanout failed to open {path}: {e}\n")
+
+while True:
+    try:
+        data = sys.stdin.buffer.read(16384)
+        if not data: break
+        for fd in outputs[:]:
+            try:
+                os.write(fd, data)
+            except (BrokenPipeError, OSError):
+                outputs.remove(fd)
+                os.close(fd)
+    except KeyboardInterrupt:
+        break
+PY
+)
+
+# --- Python Snapshotter (saves spectrograms of active signals) ---
+PY_SNAPSHOT=$(cat <<'PY'
+import sys, os, subprocess, time
+
+out_dir = sys.argv[1]
+active = False
+start_time = 0
+buffer = []
+
+# Threshold for "active" signal (very basic)
+THRESHOLD = 500 
+
+def save_snapshot(data_list, timestamp):
+    fname = os.path.join(out_dir, f"sig_{timestamp}.png")
+    raw_name = os.path.join(out_dir, f"sig_{timestamp}.raw")
+    with open(raw_name, "wb") as f:
+        for chunk in data_list:
+            f.write(chunk)
+    
+    # Generate spectrogram using SoX
+    cmd = [
+        "sox", "-t", "raw", "-r", "48000", "-c", "1", "-b", "16", "-e", "signed-integer", raw_name,
+        "-n", "spectrogram", "-X", "100", "-y", "513", "-z", "80", "-o", fname
+    ]
+    subprocess.run(cmd, stderr=subprocess.DEVNULL)
+    os.remove(raw_name)
+    sys.stderr.write(f"Saved snapshot: {fname}\n")
+
+while True:
+    chunk = sys.stdin.buffer.read(4096)
+    if not chunk: break
+    
+    # Check for activity (max amplitude in chunk)
+    import struct
+    fmt = f"{len(chunk)//2}h"
+    samples = struct.unpack(fmt, chunk)
+    peak = max(abs(s) for s in samples)
+    
+    if peak > THRESHOLD:
+        if not active:
+            active = True
+            start_time = int(time.time())
+            buffer = []
+        buffer.append(chunk)
+        # Limit snapshot to ~5 seconds
+        if len(buffer) > (48000 * 2 * 5) // 4096:
+            save_snapshot(buffer, start_time)
+            active = False
+            buffer = []
+    else:
+        if active:
+            if len(buffer) > 10: # Minimum length
+                save_snapshot(buffer, start_time)
+            active = False
+            buffer = []
+PY
+)
+
+python3 -u -c "$PY_READER" "$HOST" "$PORT" \
+| (
+    if [[ "$FORMAT" == "FLOAT32LE" ]]; then
+      sox -q -t f32 -r 48000 -c 1 -e floating-point - \
+          -t raw -r 48000 -c 1 -b 16 -e signed-integer -
+    else
+      cat
+    fi
+  ) \
+| python3 -u -c "$PY_FANOUT" \
+  >( while true; do
+       if [[ "$DSD_ENABLE" == "1" ]]; then
+         # Parse extras locally (avoids array inheritance/nounset edge-cases)
+         dsd_extra=()
+         read -r -a dsd_extra <<<"$DSD_EXTRA"
+
+         if [[ "$MBUFFER_ENABLE" == "1" ]] && have_cmd mbuffer; then
+           mbuffer -q -m "${MBUFFER_MB}M" \
+           | run_stdbuf dsd-fme -i - ${DSD_FLAGS[@]+"${DSD_FLAGS[@]}"} ${dsd_extra[@]+"${dsd_extra[@]}"} 2>&1 \
+           | tee -a "$DSD_LOG"
+         else
+           run_stdbuf dsd-fme -i - ${DSD_FLAGS[@]+"${DSD_FLAGS[@]}"} ${dsd_extra[@]+"${dsd_extra[@]}"} 2>&1 \
+           | tee -a "$DSD_LOG"
+         fi
+       else
+         cat >/dev/null
+         break
+       fi
+       echo "DSD-FME exited, restarting in 2s..." >&2
+       sleep 2 || break
+     done ) \
+  >( while true; do
+       if [[ "$MM_ENABLE" == "1" ]]; then
+         # Parse extras locally (prevents accidental empty-arg / “open:” issues)
+         mm_extra=()
+         read -r -a mm_extra <<<"$MM_OPTS"
+
+         mm_args=()
+         for m in $MM_MODES; do
+           mm_args+=(-a "$m")
+         done
+
+         mm_gate=()
+         read -r -a mm_gate <<<"$MM_GATE_PARAMS"
+
+         # Build SoX effects safely (no command substitutions => no empty args)
+         sox_fx=()
+         if [[ "$SOX_HEADROOM_DB" != "0" ]]; then
+           sox_fx+=(gain "-$SOX_HEADROOM_DB")
+         fi
+         if [[ "$MM_HIGHPASS" != "0" ]]; then
+           sox_fx+=(highpass "$MM_HIGHPASS")
+         fi
+         if [[ "$MM_LOWPASS" != "0" ]]; then
+           sox_fx+=(lowpass "$MM_LOWPASS")
+         fi
+         sox_fx+=(gain "$MM_GAIN")
+         if [[ "$MM_GATE_ENABLE" == "1" ]]; then
+           if (( ${#mm_gate[@]} )); then
+             sox_fx+=(silence "${mm_gate[@]}")
+           fi
+         fi
+
+         if [[ "$MBUFFER_ENABLE" == "1" ]] && have_cmd mbuffer; then
+           sox -q -t raw -r 48000 -c 1 -b 16 -e signed-integer - \
+               -t raw -r 22050 -c 1 -b 16 -e signed-integer - \
+               ${sox_fx[@]+"${sox_fx[@]}"} \
+           | mbuffer -q -m "${MBUFFER_MB}M" \
+           | run_stdbuf multimon-ng -v "$MM_VERBOSITY" -t raw ${mm_extra[@]+"${mm_extra[@]}"} ${mm_args[@]+"${mm_args[@]}"} - \
+           | perl -MPOSIX -ne 'BEGIN { $| = 1; print strftime("%Y-%m-%d %H:%M:%S Multimon-ng listener started...\n", localtime) } print strftime("%Y-%m-%d %H:%M:%S ", localtime), $_' \
+           | tee -a "$MM_LOG"
+         else
+           sox -q -t raw -r 48000 -c 1 -b 16 -e signed-integer - \
+               -t raw -r 22050 -c 1 -b 16 -e signed-integer - \
+               ${sox_fx[@]+"${sox_fx[@]}"} \
+           | run_stdbuf multimon-ng -v "$MM_VERBOSITY" -t raw ${mm_extra[@]+"${mm_extra[@]}"} ${mm_args[@]+"${mm_args[@]}"} - \
+           | perl -MPOSIX -ne 'BEGIN { $| = 1; print strftime("%Y-%m-%d %H:%M:%S Multimon-ng listener started...\n", localtime) } print strftime("%Y-%m-%d %H:%M:%S ", localtime), $_' \
+           | tee -a "$MM_LOG"
+         fi
+       else
+         cat >/dev/null
+         break
+       fi
+       echo "Multimon-ng exited, restarting in 2s..." >&2
+       sleep 2 || break
+     done ) \
+  >( while true; do
+       if [[ "$CLASSIFIER_ENABLE" == "1" ]]; then
+         # rtl_433 expects a header for stdin, so we use sox to provide a wav stream
+         # -A : Pulse Analyzer (the "Artemis" mode)
+         sox -q -t raw -r 48000 -c 1 -b 16 -e signed-integer - -t wav - \
+         | rtl_433 -r - -A 2>&1 \
+         | perl -MPOSIX -ne 'BEGIN { $| = 1 } print strftime("%Y-%m-%d %H:%M:%S [Classifier] ", localtime), $_'
+       else
+         cat >/dev/null
+         break
+       fi
+       echo "Classifier exited, restarting in 2s..." >&2
+       sleep 2 || break
+     done ) \
+  >( while true; do
+       if [[ "$SNAPSHOT_ENABLE" == "1" ]]; then
+         python3 -u -c "$PY_SNAPSHOT" "$SNAPSHOT_DIR"
+       else
+         cat >/dev/null
+         break
+       fi
+       echo "Snapshotter exited, restarting in 2s..." >&2
+       sleep 2 || break
+     done ) \
+  >( while true; do
+       if [[ "$PLAY" == "1" ]]; then
+         play -q -t raw -r 48000 -c 1 -b 16 -e signed-integer -
+       else
+         cat >/dev/null
+         break
+       fi
+       echo "Play exited, restarting in 2s..." >&2
+       sleep 2 || break
+     done )
+

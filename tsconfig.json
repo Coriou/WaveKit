@@ -1,0 +1,35 @@
+{
+  "extends": "@tsconfig/node20/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["es2023"],
+    "module": "nodeNext",
+    "target": "es2022",
+    "strict": true,
+
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+
+    "moduleResolution": "nodeNext",
+    "resolveJsonModule": true,
+
+    "paths": {
+      "@/*": ["./*"]
+    },
+
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "useUnknownInCatchVariables": true,
+
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}
