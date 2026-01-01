@@ -45,15 +45,15 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - Create F32→S16 and S16→F32 transform streams
     - Create resample transform stream
     - _Requirements: 3.1, 3.2, 3.3, 3.4_
-  - [-] 4.2 Write property tests for format conversion
+  - [x] 4.2 Write property tests for format conversion
     - **Property 7: Format Conversion Round-Trip**
     - **Property 8: Resample Length Ratio**
     - **Validates: Requirements 3.1, 3.2, 3.3**
-  - [ ] 4.3 Implement Fanout Manager
+  - [x] 4.3 Implement Fanout Manager
     - Create branch management with independent buffering
     - Implement backpressure detection and event emission
     - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
-  - [ ] 4.4 Write property tests for Fanout Manager
+  - [x] 4.4 Write property tests for Fanout Manager
     - **Property 4: Fanout Data Distribution**
     - **Property 5: Branch Independence**
     - **Property 6: Backpressure Non-Blocking**
