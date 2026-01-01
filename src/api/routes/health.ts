@@ -88,12 +88,23 @@ const decoderStatusSchema = {
 		id: { type: "string" },
 		type: { type: "string" },
 		running: { type: "boolean" },
+		health: { type: "string", enum: ["running", "degraded", "faulted"] },
 		pid: { type: "number" },
 		uptime: { type: "number" },
 		stats: decoderStatsSchema,
+		lastOutputAt: { type: "string", format: "date-time", nullable: true },
 		restartCount: { type: "number" },
+		version: { type: "string" },
 	},
-	required: ["id", "type", "running", "uptime", "stats", "restartCount"],
+	required: [
+		"id",
+		"type",
+		"running",
+		"health",
+		"uptime",
+		"stats",
+		"restartCount",
+	],
 } as const
 
 /**

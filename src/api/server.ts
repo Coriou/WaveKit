@@ -19,6 +19,7 @@ import fastifySwaggerUi from "@fastify/swagger-ui"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SourceManager } from "../core/source-manager.js"
 import type { DecoderManager } from "../decoders/manager.js"
+import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
@@ -39,6 +40,7 @@ export interface AudioConfig {
 export interface ApiServerDependencies {
 	sourceManager: SourceManager
 	decoderManager: DecoderManager
+	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
@@ -59,6 +61,7 @@ export class ApiServer {
 	private readonly config: ApiServerConfig
 	private readonly sourceManager: SourceManager
 	private readonly decoderManager: DecoderManager
+	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
@@ -66,6 +69,7 @@ export class ApiServer {
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.sourceManager = dependencies.sourceManager
 		this.decoderManager = dependencies.decoderManager
+		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
@@ -188,6 +192,7 @@ export class ApiServer {
 	 * Requirements:
 	 * - 10.3: Broadcast decoder output to subscribed clients
 	 * - 10.4: Broadcast source events to subscribed clients
+	 * - 20.4: Broadcast decoder health state changes
 	 */
 	private setupEventBroadcasting(): void {
 		// Decoder events (Requirement 10.3)
@@ -205,6 +210,11 @@ export class ApiServer {
 
 		this.decoderManager.on("decoder:error", (decoderId, error) => {
 			this.wsBroadcaster.broadcastDecoderError(decoderId, error.message)
+		})
+
+		// Decoder health events (Requirement 20.4)
+		this.decoderManager.on("decoder:health", (decoderId, health) => {
+			this.wsBroadcaster.broadcastDecoderHealth(decoderId, health)
 		})
 
 		// Source events (Requirement 10.4)
@@ -439,6 +449,7 @@ export class ApiServer {
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
 		await this.app.register(decoderRoutes, {
 			decoderManager: this.decoderManager,
+			decoderRegistry: this.decoderRegistry,
 		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)

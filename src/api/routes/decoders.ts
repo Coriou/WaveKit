@@ -6,11 +6,16 @@
  * - 9.7: POST /api/decoders/:id/start starts the specified decoder
  * - 9.8: POST /api/decoders/:id/stop stops the specified decoder
  * - 9.9: PATCH /api/decoders/:id updates the decoder configuration
+ * - 17.1: Decoder capabilities declaration (input type, exclusive requirement, preferred sample rates, output format)
+ * - 20.1: Report health as "running" when producing output
+ * - 20.2: Report health as "degraded" when no output for configured timeout
+ * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import type { DecoderManager } from "../../decoders/manager.js"
-import type { DecoderStatus } from "../../decoders/types.js"
+import type { DecoderRegistry } from "../../decoders/registry.js"
+import type { DecoderStatus, DecoderCaps } from "../../decoders/types.js"
 
 /**
  * Decoder stats schema for response
@@ -26,7 +31,25 @@ const decoderStatsSchema = {
 } as const
 
 /**
- * Decoder status schema for response
+ * Decoder capabilities schema for response (Requirement 17.1)
+ */
+const decoderCapsSchema = {
+	type: "object",
+	properties: {
+		input: { type: "string", enum: ["audio_pcm", "iq", "external"] },
+		wantsExclusiveSource: { type: "boolean" },
+		preferredSampleRates: { type: "array", items: { type: "number" } },
+		output: { type: "string", enum: ["jsonl", "nmea", "beast", "text"] },
+		integrationPattern: {
+			type: "string",
+			enum: ["pure_consumer", "network_producer", "external_sdr"],
+		},
+	},
+	required: ["input", "output", "integrationPattern"],
+} as const
+
+/**
+ * Decoder status schema for response (Requirements 9.6, 20.1, 20.2, 20.3)
  */
 const decoderStatusSchema = {
 	type: "object",
@@ -34,12 +57,35 @@ const decoderStatusSchema = {
 		id: { type: "string" },
 		type: { type: "string" },
 		running: { type: "boolean" },
+		health: { type: "string", enum: ["running", "degraded", "faulted"] },
 		pid: { type: "number" },
 		uptime: { type: "number" },
 		stats: decoderStatsSchema,
+		lastOutputAt: { type: "string", format: "date-time", nullable: true },
 		restartCount: { type: "number" },
+		version: { type: "string" },
 	},
-	required: ["id", "type", "running", "uptime", "stats"],
+	required: [
+		"id",
+		"type",
+		"running",
+		"health",
+		"uptime",
+		"stats",
+		"restartCount",
+	],
+} as const
+
+/**
+ * Extended decoder info schema including capabilities
+ */
+const decoderInfoSchema = {
+	type: "object",
+	properties: {
+		...decoderStatusSchema.properties,
+		caps: decoderCapsSchema,
+	},
+	required: [...decoderStatusSchema.required],
 } as const
 
 /**
@@ -84,6 +130,7 @@ const decoderConfigUpdateSchema = {
  */
 export interface DecoderRoutesOptions {
 	decoderManager: DecoderManager
+	decoderRegistry?: DecoderRegistry | undefined
 }
 
 /**
@@ -106,6 +153,13 @@ export interface DecoderConfigUpdate {
 }
 
 /**
+ * Extended decoder info including capabilities
+ */
+export interface DecoderInfo extends DecoderStatus {
+	caps?: DecoderCaps
+}
+
+/**
  * Decoder routes plugin for Fastify.
  * Registers /api/decoders endpoints for decoder management.
  */
@@ -113,46 +167,59 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	fastify: FastifyInstance,
 	options: DecoderRoutesOptions,
 ) => {
-	const { decoderManager } = options
+	const { decoderManager, decoderRegistry } = options
+
+	/**
+	 * Helper function to enrich decoder status with capabilities
+	 */
+	const enrichWithCaps = (status: DecoderStatus): DecoderInfo => {
+		const caps = decoderRegistry?.getCaps(status.type)
+		return caps ? { ...status, caps } : status
+	}
 
 	/**
 	 * GET /api/decoders - List all decoders
 	 * Requirement 9.6: Returns all decoder statuses
+	 * Requirements 20.1, 20.2, 20.3: Includes health status
 	 */
-	fastify.get<{ Reply: DecoderStatus[] }>(
+	fastify.get<{ Reply: DecoderInfo[] }>(
 		"/api/decoders",
 		{
 			schema: {
 				tags: ["decoders"],
 				summary: "List all decoders",
-				description: "Returns all configured decoders with their status",
+				description:
+					"Returns all configured decoders with their status, health, and capabilities",
 				response: {
 					200: {
 						type: "array",
-						items: decoderStatusSchema,
+						items: decoderInfoSchema,
 					},
 				},
 			},
 		},
 		async () => {
-			return decoderManager.getAllStatus()
+			const statuses = decoderManager.getAllStatus()
+			return statuses.map(enrichWithCaps)
 		},
 	)
 
 	/**
 	 * GET /api/decoders/:id - Get decoder status
 	 * Requirement 9.6: Returns decoder status by ID
+	 * Requirements 20.1, 20.2, 20.3: Includes health status
 	 */
 	fastify.get<{
 		Params: { id: string }
-		Reply: DecoderStatus | ErrorResponse
+		Reply: DecoderInfo | ErrorResponse
 	}>(
 		"/api/decoders/:id",
 		{
 			schema: {
 				tags: ["decoders"],
 				summary: "Get decoder status",
-				description: "Returns the status of a specific decoder",
+				description:
+					"Returns the status, health, and capabilities of a specific decoder",
 				params: {
 					type: "object",
 					properties: {
@@ -161,7 +228,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					required: ["id"],
 				},
 				response: {
-					200: decoderStatusSchema,
+					200: decoderInfoSchema,
 					404: errorResponseSchema,
 				},
 			},
@@ -178,7 +245,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				})
 			}
 
-			return status
+			return enrichWithCaps(status)
 		},
 	)
 
@@ -482,6 +549,94 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				message: `Decoder '${id}' configuration updated`,
 				decoder: status,
 			}
+		},
+	)
+
+	/**
+	 * GET /api/decoders/types - List available decoder types
+	 * Requirement 17.1: Returns all registered decoder types with their capabilities
+	 */
+	fastify.get<{
+		Reply: Array<{ type: string; caps: DecoderCaps }> | ErrorResponse
+	}>(
+		"/api/decoders/types",
+		{
+			schema: {
+				tags: ["decoders"],
+				summary: "List available decoder types",
+				description:
+					"Returns all registered decoder types with their capabilities and integration patterns",
+				response: {
+					200: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								type: { type: "string" },
+								caps: decoderCapsSchema,
+							},
+							required: ["type", "caps"],
+						},
+					},
+					501: errorResponseSchema,
+				},
+			},
+		},
+		async (_request, reply) => {
+			if (!decoderRegistry) {
+				return reply.status(501).send({
+					error: "NotImplemented",
+					code: "REGISTRY_NOT_AVAILABLE",
+					message: "Decoder registry is not available",
+				})
+			}
+
+			const types = decoderRegistry.getRegisteredTypes()
+			return types.map(type => ({
+				type,
+				caps: decoderRegistry.getCaps(type)!,
+			}))
+		},
+	)
+
+	/**
+	 * GET /api/decoders/health - Get health status of all decoders
+	 * Requirements 20.1, 20.2, 20.3: Returns health status for all decoders
+	 */
+	fastify.get<{
+		Reply: Array<{ id: string; health: string }>
+	}>(
+		"/api/decoders/health",
+		{
+			schema: {
+				tags: ["decoders"],
+				summary: "Get health status of all decoders",
+				description:
+					"Returns the health status (running, degraded, faulted) for all configured decoders",
+				response: {
+					200: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								id: { type: "string" },
+								health: {
+									type: "string",
+									enum: ["running", "degraded", "faulted"],
+								},
+							},
+							required: ["id", "health"],
+						},
+					},
+				},
+			},
+		},
+		async () => {
+			const healthMap = decoderManager.getAllHealth()
+			return Array.from(healthMap.entries()).map(([id, health]) => ({
+				id,
+				health,
+			}))
 		},
 	)
 }

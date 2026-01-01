@@ -352,17 +352,17 @@ This phase implements the decoder expansion roadmap, adding multi-source support
     - _Requirements: 27.4_
 
 - [ ] 25. API Updates for Decoder Expansion
-  - [ ] 25.1 Update source routes for multi-source
+  - [x] 25.1 Update source routes for multi-source
     - Add capability information to source responses
     - Support source-decoder assignment in API
-  - [ ] 25.2 Update decoder routes for new patterns
+  - [x] 25.2 Update decoder routes for new patterns
     - Add health status to decoder responses
     - Support new decoder types in API
-  - [ ] 25.3 Add decoder health WebSocket events
+  - [x] 25.3 Add decoder health WebSocket events
     - Broadcast health state changes
     - Add 'health' channel to WebSocket subscriptions
 
-- [ ] 26. Final Checkpoint - Decoder Expansion
+- [x] 26. Final Checkpoint - Decoder Expansion
   - Ensure all tests pass, ask the user if questions arise.
   - Run full test suite with coverage report
   - Verify all new requirements are covered

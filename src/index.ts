@@ -274,6 +274,7 @@ async function main(): Promise<void> {
 		{
 			sourceManager,
 			decoderManager,
+			decoderRegistry,
 			audioOutput,
 			logger,
 			audioConfig: {

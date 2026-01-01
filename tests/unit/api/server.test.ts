@@ -30,6 +30,13 @@ function createMockSourceManager() {
 		getStatus: vi.fn(),
 		getAllStatus: vi.fn().mockReturnValue([]),
 		getStream: vi.fn(),
+		getSourceAssignments: vi.fn().mockReturnValue([]),
+		isSourceAvailable: vi.fn().mockReturnValue(true),
+		assignDecoder: vi.fn(),
+		unassignDecoder: vi.fn(),
+		getAssignedSource: vi.fn(),
+		getCaps: vi.fn(),
+		isCompatible: vi.fn().mockReturnValue(true),
 	})
 }
 
@@ -237,6 +244,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: true,
+					health: "running",
 					pid: 12345,
 					uptime: 3600,
 					stats: { bytesIn: 1000000, eventsOut: 500, errors: 2 },
@@ -246,6 +254,7 @@ describe("API Server", () => {
 					id: "decoder-2",
 					type: "multimon-ng",
 					running: false,
+					health: "running",
 					uptime: 0,
 					stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
 					restartCount: 1,
@@ -603,6 +612,8 @@ describe("API Server", () => {
 					},
 				]
 				mockSourceManager.getAllStatus.mockReturnValue(mockSources)
+				mockSourceManager.getSourceAssignments.mockReturnValue([])
+				mockSourceManager.isSourceAvailable.mockReturnValue(true)
 				await apiServer.start()
 
 				const app = apiServer.getApp()
@@ -613,7 +624,20 @@ describe("API Server", () => {
 
 				expect(response.statusCode).toBe(200)
 				const body = JSON.parse(response.body)
-				expect(body).toEqual(mockSources)
+				// Response now includes assignments and available fields
+				expect(body).toHaveLength(2)
+				expect(body[0]).toMatchObject({
+					id: "source-1",
+					connected: true,
+					assignments: [],
+					available: true,
+				})
+				expect(body[1]).toMatchObject({
+					id: "source-2",
+					connected: false,
+					assignments: [],
+					available: true,
+				})
 			})
 		})
 
@@ -827,6 +851,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: true,
+						health: "running",
 						pid: 12345,
 						uptime: 3600,
 						stats: { bytesIn: 1000000, eventsOut: 500, errors: 2 },
@@ -836,6 +861,7 @@ describe("API Server", () => {
 						id: "decoder-2",
 						type: "multimon-ng",
 						running: false,
+						health: "running",
 						uptime: 0,
 						stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
 						restartCount: 1,
@@ -862,6 +888,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: true,
+					health: "running",
 					pid: 12345,
 					uptime: 3600,
 					stats: { bytesIn: 1000000, eventsOut: 500, errors: 2 },
@@ -904,6 +931,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: false,
+						health: "running",
 						uptime: 0,
 						stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
 						restartCount: 0,
@@ -915,6 +943,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: true,
+					health: "running",
 					pid: 12345,
 					uptime: 0,
 					stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
@@ -958,6 +987,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: true,
+						health: "running",
 						pid: 12345,
 						uptime: 100,
 						stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
@@ -986,6 +1016,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: true,
+						health: "running",
 						pid: 12345,
 						uptime: 100,
 						stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
@@ -998,6 +1029,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: false,
+					health: "running",
 					uptime: 0,
 					stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
 					restartCount: 0,
@@ -1038,6 +1070,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: false,
+						health: "running",
 						uptime: 0,
 						stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
 						restartCount: 0,
@@ -1065,6 +1098,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: true,
+						health: "running",
 						pid: 12345,
 						uptime: 100,
 						stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
@@ -1077,6 +1111,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: true,
+					health: "running",
 					pid: 12346,
 					uptime: 0,
 					stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
@@ -1122,6 +1157,7 @@ describe("API Server", () => {
 						id: "decoder-1",
 						type: "dsd-fme",
 						running: true,
+						health: "running",
 						pid: 12345,
 						uptime: 100,
 						stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
@@ -1133,6 +1169,7 @@ describe("API Server", () => {
 					id: "decoder-1",
 					type: "dsd-fme",
 					running: true,
+					health: "running",
 					pid: 12345,
 					uptime: 100,
 					stats: { bytesIn: 1000, eventsOut: 10, errors: 0 },
@@ -1291,6 +1328,11 @@ describe("Property-Based Tests", () => {
 								return Array.from(sourcesStore.values())
 							}),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						const mockDecoderManager = new EventEmitter()
@@ -1506,6 +1548,11 @@ describe("Property-Based Tests", () => {
 								return Array.from(sourcesStore.values())
 							}),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						const mockDecoderManager = new EventEmitter()
@@ -1603,6 +1650,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn().mockReturnValue(undefined), // Source doesn't exist
 							getAllStatus: vi.fn().mockReturnValue([]),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						const mockDecoderManager = new EventEmitter()
@@ -1702,6 +1754,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue([]),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						// Track decoder state
@@ -1709,6 +1766,7 @@ describe("Property-Based Tests", () => {
 							id: decoderConfig.id,
 							type: decoderConfig.type,
 							running: false,
+							health: "running" as const,
 							pid: undefined as number | undefined,
 							uptime: 0,
 							stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
@@ -1882,6 +1940,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue([]),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						// Track decoder state - starts as running
@@ -1889,6 +1952,7 @@ describe("Property-Based Tests", () => {
 							id: decoderConfig.id,
 							type: decoderConfig.type,
 							running: false,
+							health: "running" as const,
 							pid: undefined as number | undefined,
 							uptime: 0,
 							stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
@@ -2003,6 +2067,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue([]),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						// Track decoder state - starts as stopped
@@ -2010,6 +2079,7 @@ describe("Property-Based Tests", () => {
 							id: decoderConfig.id,
 							type: decoderConfig.type,
 							running: false,
+							health: "running" as const,
 							pid: undefined as number | undefined,
 							uptime: 0,
 							stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
@@ -2105,6 +2175,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue([]),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						const mockDecoderManager = new EventEmitter()
@@ -2245,6 +2320,11 @@ describe("Property-Based Tests", () => {
 							getStatus: vi.fn(),
 							getAllStatus: vi.fn().mockReturnValue(sources),
 							getStream: vi.fn(),
+							getSourceAssignments: vi.fn().mockReturnValue([]),
+							isSourceAvailable: vi.fn().mockReturnValue(true),
+							assignDecoder: vi.fn(),
+							unassignDecoder: vi.fn(),
+							getAssignedSource: vi.fn(),
 						})
 
 						const mockDecoderManager = new EventEmitter()

@@ -19,7 +19,12 @@ import { createLogger } from "../../../src/utils/logger.js"
 const testLogger = createLogger({ level: "error" })
 
 // All valid WebSocket channels
-const ALL_CHANNELS: WebSocketChannel[] = ["decoders", "metrics", "sources"]
+const ALL_CHANNELS: WebSocketChannel[] = [
+	"decoders",
+	"metrics",
+	"sources",
+	"health",
+]
 
 /**
  * Mock WebSocket for testing
@@ -44,6 +49,7 @@ const channelArb = fc.constantFrom<WebSocketChannel>(
 	"decoders",
 	"metrics",
 	"sources",
+	"health",
 )
 
 /**
@@ -378,6 +384,79 @@ describe("WebSocket Events", () => {
 
 						// Client should receive ALL messages
 						expect(mockSocket.messages.length).toBe(broadcasts.length)
+
+						return true
+					},
+				),
+				{ numRuns: 100 },
+			)
+		})
+
+		/**
+		 * Feature: wavekit-core, Property 19: WebSocket Channel Filtering (Part 6)
+		 * Validates: Requirements 20.4
+		 *
+		 * Health events should be delivered to the health channel only.
+		 */
+		it("should route health events to health channel only", () => {
+			fc.assert(
+				fc.property(
+					// Generate decoder ID
+					fc
+						.string({ minLength: 1, maxLength: 20 })
+						.filter(s => s.trim().length > 0),
+					// Generate health state
+					fc.constantFrom("running", "degraded", "faulted"),
+					(decoderId, health) => {
+						// Setup broadcaster with two clients
+						const broadcaster = new WebSocketEventBroadcaster(testLogger)
+
+						const healthSocket = createMockWebSocket()
+						const decoderSocket = createMockWebSocket()
+
+						// Client subscribed to health only
+						const healthClient = {
+							socket: healthSocket as unknown as WebSocket,
+							subscriptions: new Set<WebSocketChannel>(["health"]),
+							id: "health-client",
+						}
+
+						// Client subscribed to decoders only
+						const decoderClient = {
+							socket: decoderSocket as unknown as WebSocket,
+							subscriptions: new Set<WebSocketChannel>(["decoders"]),
+							id: "decoder-client",
+						}
+
+						const clientsMap = (
+							broadcaster as unknown as {
+								clients: Map<string, typeof healthClient>
+							}
+						).clients
+						clientsMap.set("health-client", healthClient)
+						clientsMap.set("decoder-client", decoderClient)
+
+						// Clear messages
+						healthSocket.messages.length = 0
+						decoderSocket.messages.length = 0
+
+						// Broadcast health event (Requirement 20.4)
+						broadcaster.broadcastDecoderHealth(decoderId, health)
+
+						// Verify health client received health event
+						expect(healthSocket.messages.length).toBe(1)
+						const healthMsg = JSON.parse(healthSocket.messages[0] ?? "{}") as {
+							channel: WebSocketChannel
+							type: string
+							data: { decoderId: string; health: string }
+						}
+						expect(healthMsg.channel).toBe("health")
+						expect(healthMsg.type).toBe("decoder:health")
+						expect(healthMsg.data.decoderId).toBe(decoderId)
+						expect(healthMsg.data.health).toBe(health)
+
+						// Verify decoder client did NOT receive health event
+						expect(decoderSocket.messages.length).toBe(0)
 
 						return true
 					},

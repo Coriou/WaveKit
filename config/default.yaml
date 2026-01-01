@@ -251,3 +251,147 @@ logging:
 # health:
 #   checkInterval: 5000
 #   degradedTimeout: 30000
+
+# =============================================================================
+# EXAMPLE: Multi-Source Setup for Decoder Expansion
+# =============================================================================
+# This example demonstrates a comprehensive multi-source configuration with
+# various decoder types from the decoder expansion roadmap.
+#
+# Hardware setup:
+#   - RTL-SDR #1 (serial: 00000001): Audio source for voice decoders
+#   - RTL-SDR #2 (serial: 00000002): Dedicated to ADS-B (readsb)
+#   - RTL-SDR #3 (serial: 00000003): Dedicated to ACARS/VDL2
+#   - RTL-SDR #4 (serial: 00000004): Dedicated to AIS
+#
+# Uncomment and modify the sections below to enable:
+#
+# ---
+# sources:
+#   # Primary audio source from SDR++ or rtl_tcp
+#   - id: "audio-main"
+#     type: "sdrpp-network"
+#     host: "127.0.0.1"
+#     port: 5555
+#     caps:
+#       kind: "audio_pcm"
+#       sampleRate: 48000
+#       format: "FLOAT32LE"
+#       exclusive: false
+#
+#   # Recording source for CI testing (no live SDR required)
+#   - id: "test-adsb"
+#     type: "recording"
+#     filePath: "./tests/mocks/fixtures/adsb/beast-sample.bin"
+#     loop: true
+#     playbackSpeed: 1.0
+#     caps:
+#       kind: "recording"
+#       sampleRate: 2000000
+#       format: "U8_IQ"
+#       exclusive: false
+#
+# decoders:
+#   # -------------------------------------------------------------------------
+#   # Voice Decoders (pure_consumer pattern - receive audio via stdin)
+#   # -------------------------------------------------------------------------
+#   - id: "dsd-main"
+#     type: "dsd-fme"
+#     enabled: true
+#     sourceId: "audio-main"
+#     options:
+#       mode: "auto"
+#       output: "wav"
+#       wavDir: "./decoded_calls"
+#
+#   - id: "pager-decoder"
+#     type: "multimon-ng"
+#     enabled: true
+#     sourceId: "audio-main"
+#     options:
+#       modes: ["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"]
+#       verbosity: 1
+#
+#   # -------------------------------------------------------------------------
+#   # Aviation Decoders
+#   # -------------------------------------------------------------------------
+#   # ADS-B (network_producer pattern - connects to readsb output port)
+#   - id: "adsb-decoder"
+#     type: "readsb"
+#     enabled: true
+#     outputHost: "127.0.0.1"
+#     outputPort: 30003
+#     outputProtocol: "tcp"
+#     options:
+#       deviceSerial: "00000002"
+#       outputFormat: "sbs"
+#       gain: 49.6
+#       lat: 37.7749
+#       lon: -122.4194
+#     minVersion: "3.14.1"
+#
+#   # ACARS (external_sdr pattern - manages own RTL-SDR)
+#   - id: "acars-decoder"
+#     type: "acarsdec"
+#     enabled: true
+#     deviceSerial: "00000003"
+#     frequencies:
+#       - 131550000  # Primary ACARS
+#       - 131725000  # Secondary ACARS
+#       - 131825000  # Additional frequency
+#     gain: 40
+#     options:
+#       outputFormat: "json"
+#     minVersion: "3.7"
+#
+#   # VDL2 (external_sdr pattern - shares SDR with ACARS via time-slicing)
+#   - id: "vdl2-decoder"
+#     type: "dumpvdl2"
+#     enabled: true
+#     deviceSerial: "00000003"
+#     frequencies:
+#       - 136650000  # VDL2 frequency 1
+#       - 136700000  # VDL2 frequency 2
+#       - 136975000  # VDL2 frequency 3
+#     gain: 40
+#     options:
+#       outputFormat: "json"
+#     minVersion: "2.3.0"
+#
+#   # -------------------------------------------------------------------------
+#   # Maritime Decoders
+#   # -------------------------------------------------------------------------
+#   # AIS (network_producer pattern - connects to AIS-catcher output)
+#   - id: "ais-decoder"
+#     type: "ais-catcher"
+#     enabled: true
+#     outputHost: "127.0.0.1"
+#     outputPort: 10110
+#     outputProtocol: "udp"
+#     options:
+#       deviceSerial: "00000004"
+#       outputFormat: "nmea"
+#       gain: 33.8
+#
+#   # -------------------------------------------------------------------------
+#   # Amateur Radio Decoders
+#   # -------------------------------------------------------------------------
+#   # APRS (network_producer pattern - connects to direwolf KISS port)
+#   - id: "aprs-decoder"
+#     type: "direwolf"
+#     enabled: true
+#     sourceId: "audio-main"
+#     outputHost: "127.0.0.1"
+#     outputPort: 8001
+#     outputProtocol: "tcp"
+#     options:
+#       sampleRate: 48000
+#       kissPort: 8001
+#       callsign: "N0CALL"
+#     minVersion: "1.7"
+#     maxVersion: "1.7"  # Pin to 1.7 due to CVE-2025-34458 in later versions
+#
+# health:
+#   checkInterval: 5000
+#   degradedTimeout: 30000
+# ---

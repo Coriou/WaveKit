@@ -17,8 +17,12 @@ import type { DecoderOutput } from "../../decoders/types.js"
 
 /**
  * Supported WebSocket channels for subscription.
+ * - decoders: Decoder output, started, stopped, error events
+ * - metrics: Source metrics events
+ * - sources: Source connected, disconnected, error events
+ * - health: Decoder health state change events (Requirement 20.4)
  */
-export type WebSocketChannel = "decoders" | "metrics" | "sources"
+export type WebSocketChannel = "decoders" | "metrics" | "sources" | "health"
 
 /**
  * Message sent from client to server.
@@ -37,6 +41,7 @@ export interface ServerMessage {
 		| "decoder:started"
 		| "decoder:stopped"
 		| "decoder:error"
+		| "decoder:health"
 		| "source:connected"
 		| "source:disconnected"
 		| "source:error"
@@ -62,7 +67,10 @@ interface ClientState {
  */
 function isValidChannel(channel: unknown): channel is WebSocketChannel {
 	return (
-		channel === "decoders" || channel === "metrics" || channel === "sources"
+		channel === "decoders" ||
+		channel === "metrics" ||
+		channel === "sources" ||
+		channel === "health"
 	)
 }
 
@@ -349,6 +357,24 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("decoders", {
 			type: "decoder:error",
 			data: { decoderId, error },
+		})
+	}
+
+	/**
+	 * Broadcasts decoder health state change event (Requirement 20.4).
+	 *
+	 * @param decoderId - The decoder whose health changed
+	 * @param health - The new health state ('running', 'degraded', or 'faulted')
+	 * @param previousHealth - The previous health state (optional)
+	 */
+	broadcastDecoderHealth(
+		decoderId: string,
+		health: string,
+		previousHealth?: string,
+	): void {
+		this.broadcast("health", {
+			type: "decoder:health",
+			data: { decoderId, health, previousHealth },
 		})
 	}
 
