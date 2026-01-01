@@ -46,13 +46,24 @@ const decoderIdArb = fc
 	.filter(s => s.trim().length > 0 && !s.includes(" "))
 
 /**
+ * Arbitrary for generating valid dates that can be converted to ISO strings.
+ * Uses integer timestamps to avoid invalid date issues with fc.date().
+ */
+const validDateArb = fc
+	.integer({
+		min: new Date("2000-01-01").getTime(),
+		max: new Date("2030-12-31").getTime(),
+	})
+	.map(ts => new Date(ts).toISOString())
+
+/**
  * Arbitrary for generating typical rtl_433 JSON output objects.
  * These simulate real weather sensor and ISM band device outputs.
  */
 const rtl433JsonObjectArb = fc.oneof(
 	// Weather sensor output
 	fc.record({
-		time: fc.date().map(d => d.toISOString()),
+		time: validDateArb,
 		model: fc.constantFrom(
 			"Acurite-Tower",
 			"Oregon-THR128",
@@ -67,7 +78,7 @@ const rtl433JsonObjectArb = fc.oneof(
 	}),
 	// Tire pressure monitor output
 	fc.record({
-		time: fc.date().map(d => d.toISOString()),
+		time: validDateArb,
 		model: fc.constantFrom("Toyota-TPMS", "Schrader-TPMS", "Citroen-TPMS"),
 		id: fc.integer({ min: 100000, max: 999999 }),
 		pressure_kPa: fc.float({ min: 100, max: 400, noNaN: true }),
@@ -75,7 +86,7 @@ const rtl433JsonObjectArb = fc.oneof(
 	}),
 	// Generic device output
 	fc.record({
-		time: fc.date().map(d => d.toISOString()),
+		time: validDateArb,
 		model: fc.string({ minLength: 1, maxLength: 30 }),
 		id: fc.integer({ min: 0, max: 16777215 }),
 		data: fc.string({ minLength: 2, maxLength: 32 }),
@@ -107,6 +118,18 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 	 * a DecoderOutput object with type: 'signal' and the parsed JSON as the data field.
 	 */
 	describe("Property 15: RTL433 JSON Parsing", () => {
+		// Helper to normalize -0 to 0 (JSON.stringify converts -0 to "0")
+		const normalizeObject = <T extends Record<string, unknown>>(obj: T): T => {
+			const result = { ...obj }
+			for (const key of Object.keys(result)) {
+				const val = result[key]
+				if (typeof val === "number" && Object.is(val, -0)) {
+					;(result as Record<string, unknown>)[key] = 0
+				}
+			}
+			return result
+		}
+
 		it("should parse valid JSON lines into signal events with parsed data", () => {
 			fc.assert(
 				fc.property(decoderIdArb, jsonObjectArb, (decoderId, jsonObj) => {
@@ -121,7 +144,8 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 					expect(output!.timestamp).toBeInstanceOf(Date)
 
 					// Data should be the parsed JSON object
-					expect(output!.data).toEqual(jsonObj)
+					// Note: JSON.stringify converts -0 to "0", so we normalize for comparison
+					expect(output!.data).toEqual(normalizeObject(jsonObj))
 
 					return true
 				}),
@@ -146,7 +170,8 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 						expect(output!.timestamp).toBeInstanceOf(Date)
 
 						// Data should contain the sensor data
-						expect(output!.data).toEqual(sensorData)
+						// Note: JSON.stringify converts -0 to "0", so we normalize for comparison
+						expect(output!.data).toEqual(normalizeObject(sensorData))
 
 						return true
 					},
@@ -215,9 +240,10 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 						const output = decoder.testParseOutput(jsonLine)
 
 						// Should still parse successfully after trimming
+						// Note: JSON.stringify converts -0 to "0", so we normalize for comparison
 						expect(output).not.toBeNull()
 						expect(output!.type).toBe("signal")
-						expect(output!.data).toEqual(jsonObj)
+						expect(output!.data).toEqual(normalizeObject(jsonObj))
 
 						return true
 					},

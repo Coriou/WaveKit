@@ -1,0 +1,13 @@
+{"timestamp":1704067200,"freq":131.55,"channel":0,"level":-25,"error":0,"mode":"2","label":"H1","block_id":"A","ack":"!","tail":"N12345","flight":"UAL123","msgno":"M01A","text":"POSN40.7128W074.0060,FL350,ETA1430"}
+{"timestamp":1704067201,"freq":131.725,"channel":1,"level":-30,"error":0,"mode":"2","label":"Q0","block_id":"B","tail":"N67890","flight":"DAL456","msgno":"M02B","text":"REQUEST OCEANIC CLEARANCE"}
+{"timestamp":1704067202,"freq":131.55,"channel":0,"level":-22,"error":1,"mode":"X","label":"SA","block_id":"C","ack":"NAK","tail":"G-ABCD","flight":"BAW178","msgno":"M03C","text":"WEATHER REQUEST KJFK"}
+{"timestamp":1704067203,"freq":131.85,"channel":2,"level":-35,"error":0,"mode":"2","label":"H1","block_id":"D","tail":"F-WXYZ","flight":"AFR123","msgno":"M04D","text":"POSN48.8566E002.3522,FL410,ETA1545"}
+{"timestamp":1704067204,"freq":131.55,"channel":0,"level":-28,"error":0,"mode":"H","label":"_d","block_id":"E","tail":"D-EFGH","flight":"DLH789","msgno":"M05E","text":"ATIS INFO ALPHA CURRENT"}
+{"timestamp":1704067205,"freq":131.725,"channel":1,"level":-20,"error":0,"mode":"2","label":"H1","block_id":"F","tail":"JA1234","flight":"JAL001","msgno":"M06F","text":"POSN35.6762E139.6503,FL390,ETA0830"}
+{"timestamp":1704067206,"freq":131.55,"channel":0,"level":-32,"error":2,"mode":"2","label":"Q0","block_id":"G","tail":"VH-ABC","flight":"QFA012","msgno":"M07G","text":"SELCAL CHECK ABCD"}
+{"timestamp":1704067207,"freq":131.85,"channel":2,"level":-27,"error":0,"mode":"Q","label":"B6","block_id":"H","ack":"!","tail":"C-FGHI","flight":"ACA456","msgno":"M08H","text":"FUEL REMAINING 45.2 TONS"}
+{"timestamp":1704067208,"freq":131.55,"channel":0,"level":-24,"error":0,"mode":"2","label":"H1","block_id":"I","tail":"EC-JKL","flight":"IBE789","msgno":"M09I","text":"POSN40.4168W003.7038,FL370,ETA1215"}
+{"timestamp":1704067209,"freq":131.725,"channel":1,"level":-29,"error":0,"mode":"2","label":"80","block_id":"J","tail":"PH-MNO","flight":"KLM456","msgno":"M10J","text":"DEPARTURE EHAM RWY 24"}
+{"timestamp":1704067210,"freq":131.55,"channel":0,"level":-26,"error":0,"mode":"2","label":"H1","tail":"N54321","flight":"SWA321"}
+{"timestamp":1704067211,"freq":131.725,"channel":1,"level":-31,"error":0,"mode":"2","label":"Q0","tail":"N98765","flight":"AAL789","text":"LANDING CLEARANCE REQUEST"}
+{"timestamp":1704067212,"freq":131.55,"channel":0,"level":-23,"error":0,"mode":"2","label":"H1","block_id":"K","ack":"!","tail":"N11111","flight":"JBU567","msgno":"M11K","text":"POSN40.6413W073.7781,FL080,ETA1330"}

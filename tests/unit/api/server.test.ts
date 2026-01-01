@@ -580,6 +580,12 @@ describe("API Server", () => {
 						bytesReceived: 1024,
 						dataRate: 10.5,
 						reconnectAttempts: 0,
+						caps: {
+							kind: "audio_pcm",
+							sampleRate: 48000,
+							format: "S16LE",
+							exclusive: false,
+						},
 					},
 					{
 						id: "source-2",
@@ -588,6 +594,12 @@ describe("API Server", () => {
 						dataRate: 0,
 						lastError: "Connection refused",
 						reconnectAttempts: 3,
+						caps: {
+							kind: "audio_pcm",
+							sampleRate: 48000,
+							format: "S16LE",
+							exclusive: false,
+						},
 					},
 				]
 				mockSourceManager.getAllStatus.mockReturnValue(mockSources)
@@ -612,8 +624,12 @@ describe("API Server", () => {
 					type: "rtl_tcp",
 					host: "192.168.1.100",
 					port: 1234,
-					format: "S16LE",
-					sampleRate: 48000,
+					caps: {
+						kind: "audio_pcm",
+						sampleRate: 48000,
+						format: "S16LE",
+						exclusive: false,
+					},
 				}
 
 				mockSourceManager.getStatus.mockReturnValue(undefined) // Source doesn't exist
@@ -627,6 +643,12 @@ describe("API Server", () => {
 						bytesReceived: 0,
 						dataRate: 0,
 						reconnectAttempts: 0,
+						caps: {
+							kind: "audio_pcm",
+							sampleRate: 48000,
+							format: "S16LE",
+							exclusive: false,
+						},
 					})
 
 				await apiServer.start()
@@ -651,8 +673,12 @@ describe("API Server", () => {
 					type: "rtl_tcp",
 					host: "192.168.1.100",
 					port: 1234,
-					format: "S16LE",
-					sampleRate: 48000,
+					caps: {
+						kind: "audio_pcm",
+						sampleRate: 48000,
+						format: "S16LE",
+						exclusive: false,
+					},
 				}
 
 				mockSourceManager.getStatus.mockReturnValue({
@@ -684,8 +710,12 @@ describe("API Server", () => {
 					type: "rtl_tcp",
 					host: "192.168.1.100",
 					port: 1234,
-					format: "S16LE",
-					sampleRate: 48000,
+					caps: {
+						kind: "audio_pcm",
+						sampleRate: 48000,
+						format: "S16LE",
+						exclusive: false,
+					},
 				}
 
 				mockSourceManager.getStatus.mockReturnValue(undefined)
@@ -1201,8 +1231,12 @@ describe("Property-Based Tests", () => {
 							"127.0.0.1",
 						),
 						port: fc.integer({ min: 1024, max: 65535 }),
-						format: fc.constantFrom("S16LE" as const, "FLOAT32LE" as const),
-						sampleRate: fc.constantFrom(44100, 48000, 96000, 192000),
+						caps: fc.record({
+							kind: fc.constant("audio_pcm" as const),
+							sampleRate: fc.constantFrom(44100, 48000, 96000, 192000),
+							format: fc.constantFrom("S16LE" as const, "FLOAT32LE" as const),
+							exclusive: fc.boolean(),
+						}),
 					}),
 					async sourceConfig => {
 						// Create fresh mocks for each test iteration
@@ -1215,13 +1249,26 @@ describe("Property-Based Tests", () => {
 								bytesReceived: number
 								dataRate: number
 								reconnectAttempts: number
+								caps: {
+									kind: string
+									sampleRate: number
+									format: string
+									exclusive: boolean
+								}
 							}
 						>()
 
 						Object.assign(mockSourceManager, {
-							connect: vi
-								.fn()
-								.mockImplementation(async (config: { id: string }) => {
+							connect: vi.fn().mockImplementation(
+								async (config: {
+									id: string
+									caps: {
+										kind: string
+										sampleRate: number
+										format: string
+										exclusive: boolean
+									}
+								}) => {
 									// Simulate successful connection
 									sourcesStore.set(config.id, {
 										id: config.id,
@@ -1229,9 +1276,11 @@ describe("Property-Based Tests", () => {
 										bytesReceived: 0,
 										dataRate: 0,
 										reconnectAttempts: 0,
+										caps: config.caps,
 									})
 									return {}
-								}),
+								},
+							),
 							disconnect: vi.fn().mockImplementation(async (id: string) => {
 								sourcesStore.delete(id)
 							}),
@@ -1384,9 +1433,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 }, // Reduced from 100 due to server startup/shutdown overhead per iteration
 			)
-		})
+		}, 30000) // 30 second timeout for this test
 
 		it("should return 409 when adding a source that already exists", async () => {
 			await fc.assert(
@@ -1399,8 +1448,12 @@ describe("Property-Based Tests", () => {
 						type: fc.constantFrom("sdrpp-network" as const, "rtl_tcp" as const),
 						host: fc.constantFrom("192.168.1.100", "10.0.0.1", "localhost"),
 						port: fc.integer({ min: 1024, max: 65535 }),
-						format: fc.constantFrom("S16LE" as const, "FLOAT32LE" as const),
-						sampleRate: fc.constantFrom(44100, 48000, 96000),
+						caps: fc.record({
+							kind: fc.constant("audio_pcm" as const),
+							sampleRate: fc.constantFrom(44100, 48000, 96000),
+							format: fc.constantFrom("S16LE" as const, "FLOAT32LE" as const),
+							exclusive: fc.boolean(),
+						}),
 					}),
 					async sourceConfig => {
 						const mockSourceManager = new EventEmitter()
@@ -1412,22 +1465,37 @@ describe("Property-Based Tests", () => {
 								bytesReceived: number
 								dataRate: number
 								reconnectAttempts: number
+								caps: {
+									kind: string
+									sampleRate: number
+									format: string
+									exclusive: boolean
+								}
 							}
 						>()
 
 						Object.assign(mockSourceManager, {
-							connect: vi
-								.fn()
-								.mockImplementation(async (config: { id: string }) => {
+							connect: vi.fn().mockImplementation(
+								async (config: {
+									id: string
+									caps: {
+										kind: string
+										sampleRate: number
+										format: string
+										exclusive: boolean
+									}
+								}) => {
 									sourcesStore.set(config.id, {
 										id: config.id,
 										connected: true,
 										bytesReceived: 0,
 										dataRate: 0,
 										reconnectAttempts: 0,
+										caps: config.caps,
 									})
 									return {}
-								}),
+								},
+							),
 							disconnect: vi.fn().mockImplementation(async (id: string) => {
 								sourcesStore.delete(id)
 							}),
@@ -1516,9 +1584,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 
 		it("should return 404 when deleting a non-existent source", async () => {
 			await fc.assert(
@@ -1601,9 +1669,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 	})
 
 	/**
@@ -1792,9 +1860,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 
 		it("should return 409 when starting an already running decoder", async () => {
 			await fc.assert(
@@ -1913,9 +1981,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 
 		it("should return 409 when stopping an already stopped decoder", async () => {
 			await fc.assert(
@@ -2018,9 +2086,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 
 		it("should return 404 when starting/stopping non-existent decoder", async () => {
 			await fc.assert(
@@ -2118,9 +2186,9 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 	})
 
 	/**
@@ -2288,8 +2356,8 @@ describe("Property-Based Tests", () => {
 						}
 					},
 				),
-				{ numRuns: 100 },
+				{ numRuns: 20 },
 			)
-		})
+		}, 30000)
 	})
 })

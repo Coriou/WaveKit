@@ -1,0 +1,15 @@
+{"hex":"a12345","flight":"UAL123  ","alt_baro":35000,"gs":450,"track":180,"lat":40.7128,"lon":-74.006,"baro_rate":0,"squawk":"1234","ground":false,"messages":42}
+{"hex":"abcdef","flight":"DAL456  ","alt_baro":28000,"gs":380,"track":270,"lat":34.0522,"lon":-118.2437,"baro_rate":-1500,"squawk":"2345","ground":false,"messages":38}
+{"hex":"789abc","flight":"AAL789  ","alt_baro":15000,"gs":320,"track":90,"lat":41.8781,"lon":-87.6298,"baro_rate":2500,"squawk":"3456","ground":false,"messages":25}
+{"hex":"def012","flight":"SWA321  ","alt_baro":0,"gs":25,"track":45,"lat":33.9425,"lon":-118.4081,"baro_rate":0,"squawk":"4567","ground":true,"messages":15}
+{"hex":"345678","flight":"N12345  ","alt_baro":45000,"gs":520,"track":315,"lat":36.1699,"lon":-115.1398,"baro_rate":0,"squawk":"5670","ground":false,"messages":67}
+{"hex":"9abcde","flight":"JBU567  ","alt_baro":8000,"gs":250,"track":135,"lat":40.6413,"lon":-73.7781,"baro_rate":-1000,"squawk":"6701","ground":false,"messages":31}
+{"hex":"f12345","flight":"FDX890  ","alt_baro":32000,"gs":480,"track":225,"lat":35.2271,"lon":-80.8431,"baro_rate":0,"squawk":"7012","ground":false,"messages":54}
+{"hex":"e67890","flight":"EMG001  ","alt_baro":12000,"gs":300,"track":180,"lat":39.8561,"lon":-104.6737,"baro_rate":-2000,"squawk":"7700","ground":false,"messages":89}
+{"hex":"c0ffee","flight":"BAW178  ","alt_baro":38000,"gs":510,"track":60,"lat":51.47,"lon":-0.4543,"baro_rate":0,"squawk":"0123","ground":false,"messages":112}
+{"hex":"deadbe","flight":"AFR123  ","alt_baro":41000,"gs":490,"track":45,"lat":48.8566,"lon":2.3522,"baro_rate":0,"squawk":"2001","ground":false,"messages":78}
+{"hex":"beef01","flight":"KLM456  ","alt_baro":36000,"gs":475,"track":120,"lat":52.3676,"lon":4.9041,"baro_rate":0,"squawk":"3002","ground":false,"messages":95}
+{"hex":"cafe12","flight":"LH789   ","alt_baro":39000,"gs":505,"track":200,"lat":50.0379,"lon":8.5622,"baro_rate":0,"squawk":"4003","ground":false,"messages":63}
+{"hex":"123456"}
+{"hex":"fedcba","alt_baro":25000}
+{"hex":"aabbcc","flight":"TEST123 ","ground":false}

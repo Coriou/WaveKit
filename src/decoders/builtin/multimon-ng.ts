@@ -9,7 +9,7 @@
  */
 
 import { BaseDecoder } from "../base-decoder.js"
-import type { DecoderConfig, DecoderOutput } from "../types.js"
+import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported Multimon-ng decoder modes (Requirement 7.3) */
@@ -192,6 +192,20 @@ export class MultimonDecoder extends BaseDecoder {
 		}
 
 		return args
+	}
+
+	/**
+	 * Returns the decoder's capabilities (Requirement 17.1).
+	 * Multimon-ng is a pure consumer that accepts PCM audio and outputs text.
+	 */
+	protected getCaps(): DecoderCaps {
+		return {
+			input: "audio_pcm",
+			wantsExclusiveSource: false,
+			preferredSampleRates: [22050, 48000],
+			output: "text",
+			integrationPattern: "pure_consumer",
+		}
 	}
 
 	/**
@@ -381,4 +395,16 @@ export function createMultimonDecoder(
 	logger: Logger,
 ): MultimonDecoder {
 	return new MultimonDecoder(config, logger)
+}
+
+/**
+ * Capabilities for the Multimon-ng decoder.
+ * Used when registering with the DecoderRegistry.
+ */
+export const MULTIMON_CAPS: DecoderCaps = {
+	input: "audio_pcm",
+	wantsExclusiveSource: false,
+	preferredSampleRates: [22050, 48000],
+	output: "text",
+	integrationPattern: "pure_consumer",
 }

@@ -11,7 +11,9 @@ import { EventEmitter } from "node:events"
 import { PassThrough, type Readable } from "node:stream"
 import type {
 	Decoder,
+	DecoderCaps,
 	DecoderConfig,
+	DecoderHealth,
 	DecoderOutput,
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
@@ -27,11 +29,20 @@ const testLogger = pino({ level: "silent" })
 class TestDecoder extends EventEmitter implements Decoder {
 	readonly id: string
 	readonly type: string
+	readonly caps: DecoderCaps = {
+		input: "audio_pcm",
+		wantsExclusiveSource: false,
+		preferredSampleRates: [48000],
+		output: "text",
+		integrationPattern: "pure_consumer",
+	}
 	private outputStream = new PassThrough({ objectMode: true })
 	private _running = false
 	private _pid: number | undefined
 	private _startTime = 0
 	private _stats = { bytesIn: 0, eventsOut: 0, errors: 0 }
+	private _health: DecoderHealth = "running"
+	private _restartCount = 0
 
 	constructor(config: DecoderConfig) {
 		super()
@@ -88,6 +99,10 @@ class TestDecoder extends EventEmitter implements Decoder {
 		this._stats.errors += count
 	}
 
+	getHealth(): DecoderHealth {
+		return this._health
+	}
+
 	getStatus(): DecoderStatus {
 		const uptime = this._running
 			? Math.floor((Date.now() - this._startTime) / 1000)
@@ -97,9 +112,13 @@ class TestDecoder extends EventEmitter implements Decoder {
 			id: this.id,
 			type: this.type,
 			running: this._running,
+			health: this._health,
 			pid: this._pid,
 			uptime,
 			stats: { ...this._stats },
+			lastOutputAt: undefined,
+			restartCount: this._restartCount,
+			version: undefined,
 		}
 	}
 }

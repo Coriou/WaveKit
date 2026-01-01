@@ -15,19 +15,53 @@ import type {
 } from "../../core/source-manager.js"
 
 /**
+ * Source capabilities schema for request validation
+ */
+const sourceCapsSchema = {
+	type: "object",
+	properties: {
+		kind: { type: "string", enum: ["audio_pcm", "iq", "recording"] },
+		sampleRate: { type: "integer", minimum: 1 },
+		format: { type: "string", enum: ["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ"] },
+		channels: { type: "integer", minimum: 1 },
+		centerFreq: { type: "number", minimum: 0 },
+		exclusive: { type: "boolean" },
+	},
+	required: ["kind", "sampleRate", "format", "exclusive"],
+} as const
+
+/**
  * Source config schema for request validation
  */
 const sourceConfigSchema = {
 	type: "object",
 	properties: {
 		id: { type: "string", minLength: 1 },
-		type: { type: "string", enum: ["sdrpp-network", "rtl_tcp"] },
+		type: { type: "string", enum: ["sdrpp-network", "rtl_tcp", "recording"] },
 		host: { type: "string", minLength: 1 },
 		port: { type: "integer", minimum: 1, maximum: 65535 },
-		format: { type: "string", enum: ["S16LE", "FLOAT32LE"] },
-		sampleRate: { type: "integer", minimum: 1 },
+		filePath: { type: "string" },
+		loop: { type: "boolean" },
+		playbackSpeed: { type: "number", minimum: 0 },
+		caps: sourceCapsSchema,
 	},
-	required: ["id", "type", "host", "port", "format", "sampleRate"],
+	required: ["id", "type", "caps"],
+} as const
+
+/**
+ * Source capabilities schema for response
+ */
+const sourceCapsResponseSchema = {
+	type: "object",
+	properties: {
+		kind: { type: "string" },
+		sampleRate: { type: "number" },
+		format: { type: "string" },
+		channels: { type: "number" },
+		centerFreq: { type: "number" },
+		exclusive: { type: "boolean" },
+	},
+	required: ["kind", "sampleRate", "format", "exclusive"],
 } as const
 
 /**
@@ -42,6 +76,7 @@ const sourceStatusSchema = {
 		dataRate: { type: "number" },
 		lastError: { type: "string" },
 		reconnectAttempts: { type: "number" },
+		caps: sourceCapsResponseSchema,
 	},
 	required: [
 		"id",
@@ -49,6 +84,7 @@ const sourceStatusSchema = {
 		"bytesReceived",
 		"dataRate",
 		"reconnectAttempts",
+		"caps",
 	],
 } as const
 

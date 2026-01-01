@@ -8,7 +8,7 @@
  */
 
 import { BaseDecoder } from "../base-decoder.js"
-import type { DecoderConfig, DecoderOutput } from "../types.js"
+import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Output format options for rtl_433 */
@@ -109,6 +109,20 @@ export class Rtl433Decoder extends BaseDecoder {
 	}
 
 	/**
+	 * Returns the decoder's capabilities (Requirement 17.1).
+	 * RTL_433 is a pure consumer that accepts IQ data and outputs JSON.
+	 */
+	protected getCaps(): DecoderCaps {
+		return {
+			input: "iq",
+			wantsExclusiveSource: false,
+			preferredSampleRates: [250000, 1000000],
+			output: "jsonl",
+			integrationPattern: "pure_consumer",
+		}
+	}
+
+	/**
 	 * Parses rtl_433 output lines into DecoderOutput objects (Requirement 8.2).
 	 *
 	 * rtl_433 with -F json outputs one JSON object per line for each decoded signal.
@@ -154,4 +168,16 @@ export function createRtl433Decoder(
 	logger: Logger,
 ): Rtl433Decoder {
 	return new Rtl433Decoder(config, logger)
+}
+
+/**
+ * Capabilities for the RTL_433 decoder.
+ * Used when registering with the DecoderRegistry.
+ */
+export const RTL433_CAPS: DecoderCaps = {
+	input: "iq",
+	wantsExclusiveSource: false,
+	preferredSampleRates: [250000, 1000000],
+	output: "jsonl",
+	integrationPattern: "pure_consumer",
 }

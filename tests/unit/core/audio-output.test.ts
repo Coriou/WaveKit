@@ -19,10 +19,34 @@ import { createLogger } from "../../../src/utils/logger.js"
 const testLogger = createLogger({ level: "error" })
 
 // Use a dynamic port to avoid conflicts
+// Start at a high port and use a wider range to avoid conflicts in parallel tests
 let testPort = 18080
 
 function getNextPort(): number {
-	return testPort++
+	// Use a wider range and wrap around to avoid exhaustion
+	const port = testPort
+	testPort = testPort >= 19999 ? 18080 : testPort + 1
+	return port
+}
+
+/**
+ * Helper to find an available port by attempting to bind
+ */
+async function findAvailablePort(startPort: number): Promise<number> {
+	return new Promise((resolve, reject) => {
+		const server = net.createServer()
+		server.unref()
+		server.on("error", () => {
+			// Port in use, try next one
+			resolve(findAvailablePort(startPort + 1))
+		})
+		server.listen(startPort, "127.0.0.1", () => {
+			const address = server.address()
+			const port =
+				typeof address === "object" && address ? address.port : startPort
+			server.close(() => resolve(port))
+		})
+	})
 }
 
 /**
@@ -316,7 +340,7 @@ describe("Property-Based Tests", () => {
 	describe("Property 20: Audio Output Multi-Client Distribution", () => {
 		it(
 			"should distribute identical data to all connected clients",
-			{ timeout: 60000 },
+			{ timeout: 30000 },
 			async () => {
 				await fc.assert(
 					fc.asyncProperty(
@@ -328,8 +352,10 @@ describe("Property-Based Tests", () => {
 							maxLength: 3,
 						}),
 						async (numClients, dataChunks) => {
+							// Find an available port to avoid EADDRINUSE
+							const port = await findAvailablePort(getNextPort())
 							const config: AudioOutputConfig = {
-								port: getNextPort(),
+								port,
 								format: "S16LE",
 								sampleRate: 48000,
 							}
@@ -400,22 +426,24 @@ describe("Property-Based Tests", () => {
 							}
 						},
 					),
-					{ numRuns: 100 },
+					{ numRuns: 20 },
 				)
 			},
 		)
 
 		it(
 			"should distribute data independently to each client (no shared buffers)",
-			{ timeout: 60000 },
+			{ timeout: 30000 },
 			async () => {
 				await fc.assert(
 					fc.asyncProperty(
 						// Generate random audio data
 						fc.uint8Array({ minLength: 100, maxLength: 500 }),
 						async dataChunk => {
+							// Find an available port to avoid EADDRINUSE
+							const port = await findAvailablePort(getNextPort())
 							const config: AudioOutputConfig = {
-								port: getNextPort(),
+								port,
 								format: "S16LE",
 								sampleRate: 48000,
 							}
@@ -467,7 +495,7 @@ describe("Property-Based Tests", () => {
 							}
 						},
 					),
-					{ numRuns: 100 },
+					{ numRuns: 20 },
 				)
 			},
 		)

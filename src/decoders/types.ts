@@ -5,10 +5,83 @@
  * - 4.4: Parse decoder output into structured DecoderOutput objects
  * - 4.5: Return status for all managed decoders including PID, uptime, and statistics
  * - 4.6: Emit events for decoder output, errors, and exit conditions
+ * - 17.1: Decoder capabilities declaration (input type, exclusive requirement, preferred sample rates, output format)
+ * - 17.2: Validate decoder capabilities against assigned source
+ * - 17.3: Support input types: audio_pcm, iq, external
+ * - 17.4: Support output formats: jsonl, nmea, beast, text
+ * - 20.1: Report health as "running" when producing output
+ * - 20.2: Report health as "degraded" when no output for configured timeout
+ * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
+ * - 20.4: Emit health events when health changes
  */
 
 import type { EventEmitter } from "node:events"
 import type { Readable } from "node:stream"
+
+// ============================================================================
+// Decoder Capabilities (Requirements 17.1, 17.2, 17.3, 17.4)
+// ============================================================================
+
+/**
+ * Input types that a decoder can accept (Requirement 17.3).
+ * - audio_pcm: Decoder receives PCM audio data via stdin
+ * - iq: Decoder receives IQ data via stdin
+ * - external: Decoder manages its own input (e.g., external SDR)
+ */
+export type DecoderInputType = "audio_pcm" | "iq" | "external"
+
+/**
+ * Output formats that a decoder can produce (Requirement 17.4).
+ * - jsonl: JSON Lines format (one JSON object per line)
+ * - nmea: NMEA sentence format (e.g., AIS)
+ * - beast: Beast binary format (e.g., ADS-B)
+ * - text: Plain text format
+ */
+export type DecoderOutputFormat = "jsonl" | "nmea" | "beast" | "text"
+
+/**
+ * Integration patterns for decoders.
+ * - pure_consumer: Decoder receives audio via stdin, outputs to stdout
+ * - network_producer: Decoder runs as a service with network output
+ * - external_sdr: Decoder manages its own SDR hardware
+ */
+export type DecoderIntegrationPattern =
+	| "pure_consumer"
+	| "network_producer"
+	| "external_sdr"
+
+/**
+ * Decoder capabilities declaration (Requirement 17.1).
+ * Declares what input/output a decoder supports and its integration pattern.
+ */
+export interface DecoderCaps {
+	/** Input type the decoder accepts (Requirement 17.3) */
+	input: DecoderInputType
+	/** Whether the decoder requires exclusive access to its source */
+	wantsExclusiveSource?: boolean | undefined
+	/** Preferred sample rates for this decoder */
+	preferredSampleRates?: number[] | undefined
+	/** Output format produced by the decoder (Requirement 17.4) */
+	output: DecoderOutputFormat
+	/** Integration pattern for this decoder */
+	integrationPattern: DecoderIntegrationPattern
+}
+
+// ============================================================================
+// Decoder Health (Requirements 20.1, 20.2, 20.3, 20.4)
+// ============================================================================
+
+/**
+ * Health states for a decoder (Requirements 20.1, 20.2, 20.3).
+ * - running: Decoder is running and producing output normally
+ * - degraded: Decoder is running but has not produced output for the configured timeout
+ * - faulted: Decoder has crashed and exceeded restart limits
+ */
+export type DecoderHealth = "running" | "degraded" | "faulted"
+
+// ============================================================================
+// Decoder Configuration
+// ============================================================================
 
 /**
  * Configuration for a decoder instance.
@@ -20,8 +93,27 @@ export interface DecoderConfig {
 	type: string
 	/** Whether this decoder should be started automatically */
 	enabled: boolean
+	/** Which source to attach to (for non-external decoders) */
+	sourceId?: string | undefined
 	/** Decoder-specific options passed to the underlying process */
 	options: Record<string, unknown>
+	// For external SDR decoders
+	/** Device serial number for external SDR decoders */
+	deviceSerial?: string | undefined
+	/** Frequencies to monitor (Hz) for external SDR decoders */
+	frequencies?: number[] | undefined
+	// For network producer decoders
+	/** Host to connect to for network producer output */
+	outputHost?: string | undefined
+	/** Port to connect to for network producer output */
+	outputPort?: number | undefined
+	/** Protocol for network producer output */
+	outputProtocol?: "tcp" | "udp" | undefined
+	// Version pinning
+	/** Minimum required version for this decoder */
+	minVersion?: string | undefined
+	/** Maximum allowed version for this decoder */
+	maxVersion?: string | undefined
 }
 
 /**
@@ -35,6 +127,11 @@ export type DecoderOutputType =
 	| "signal"
 	| "error"
 	| "stats"
+	| "aircraft" // ADS-B
+	| "acars" // ACARS messages
+	| "vdl2" // VDL2 messages
+	| "ship" // AIS
+	| "aprs" // APRS packets
 
 /**
  * Structured output from a decoder (Requirement 4.4).
@@ -64,7 +161,7 @@ export interface DecoderStats {
 }
 
 /**
- * Status information for a decoder (Requirement 4.5).
+ * Status information for a decoder (Requirements 4.5, 20.1, 20.2, 20.3).
  */
 export interface DecoderStatus {
 	/** Unique identifier for this decoder */
@@ -73,16 +170,24 @@ export interface DecoderStatus {
 	type: string
 	/** Whether the decoder process is currently running */
 	running: boolean
+	/** Health state of the decoder (Requirement 20.1, 20.2, 20.3) */
+	health: DecoderHealth
 	/** Process ID if running */
 	pid?: number | undefined
 	/** Uptime in seconds since the decoder was started */
 	uptime: number
 	/** Decoder statistics */
 	stats: DecoderStats
+	/** Timestamp of last output received */
+	lastOutputAt?: Date | undefined
+	/** Number of times the decoder has been restarted */
+	restartCount: number
+	/** Detected version of the decoder binary */
+	version?: string | undefined
 }
 
 /**
- * Event signatures for decoder events (Requirement 4.6).
+ * Event signatures for decoder events (Requirements 4.6, 20.4).
  */
 export interface DecoderEvents {
 	/** Emitted when the decoder produces output */
@@ -95,6 +200,8 @@ export interface DecoderEvents {
 	started: () => void
 	/** Emitted when the decoder has stopped */
 	stopped: () => void
+	/** Emitted when the decoder health changes (Requirement 20.4) */
+	health: (health: DecoderHealth) => void
 }
 
 /**
@@ -107,6 +214,8 @@ export interface Decoder extends EventEmitter {
 	readonly id: string
 	/** Type of decoder (e.g., 'dsd-fme', 'multimon-ng', 'rtl433') */
 	readonly type: string
+	/** Capabilities of this decoder (Requirement 17.1) */
+	readonly caps: DecoderCaps
 
 	/**
 	 * Starts the decoder process.
@@ -151,7 +260,13 @@ export interface Decoder extends EventEmitter {
 
 	/**
 	 * Gets the current status of the decoder (Requirement 4.5).
-	 * @returns DecoderStatus with running state, PID, uptime, and statistics
+	 * @returns DecoderStatus with running state, PID, uptime, health, and statistics
 	 */
 	getStatus(): DecoderStatus
+
+	/**
+	 * Gets the current health state of the decoder (Requirements 20.1, 20.2, 20.3).
+	 * @returns Current health state
+	 */
+	getHealth(): DecoderHealth
 }

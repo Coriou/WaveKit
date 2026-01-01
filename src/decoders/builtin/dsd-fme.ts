@@ -10,7 +10,7 @@
  */
 
 import { BaseDecoder } from "../base-decoder.js"
-import type { DecoderConfig, DecoderOutput } from "../types.js"
+import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported DSD-FME decoder modes (Requirement 6.5) */
@@ -169,6 +169,20 @@ export class DsdFmeDecoder extends BaseDecoder {
 	}
 
 	/**
+	 * Returns the decoder's capabilities (Requirement 17.1).
+	 * DSD-FME is a pure consumer that accepts PCM audio and outputs text.
+	 */
+	protected getCaps(): DecoderCaps {
+		return {
+			input: "audio_pcm",
+			wantsExclusiveSource: false,
+			preferredSampleRates: [48000],
+			output: "text",
+			integrationPattern: "pure_consumer",
+		}
+	}
+
+	/**
 	 * Parses dsd-fme output lines into DecoderOutput objects.
 	 *
 	 * Handles:
@@ -238,4 +252,16 @@ export function createDsdFmeDecoder(
 	logger: Logger,
 ): DsdFmeDecoder {
 	return new DsdFmeDecoder(config, logger)
+}
+
+/**
+ * Capabilities for the DSD-FME decoder.
+ * Used when registering with the DecoderRegistry.
+ */
+export const DSD_FME_CAPS: DecoderCaps = {
+	input: "audio_pcm",
+	wantsExclusiveSource: false,
+	preferredSampleRates: [48000],
+	output: "text",
+	integrationPattern: "pure_consumer",
 }

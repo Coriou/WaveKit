@@ -99,3 +99,23 @@ export class RegistryError extends WaveKitError {
 		this.name = "RegistryError"
 	}
 }
+
+/**
+ * Error thrown when a network connection to a decoder output fails.
+ * Requirements: 18.3
+ */
+export class NetworkConnectionError extends WaveKitError {
+	constructor(
+		public readonly host: string,
+		public readonly port: number,
+		public readonly protocol: "tcp" | "udp",
+		cause?: Error,
+	) {
+		super(
+			`Failed to connect to decoder output at ${host}:${port} (${protocol})`,
+			"NETWORK_CONNECTION_ERROR",
+			cause,
+		)
+		this.name = "NetworkConnectionError"
+	}
+}

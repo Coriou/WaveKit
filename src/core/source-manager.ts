@@ -9,22 +9,49 @@
  * - 1.5: Emit data rate metrics every 5 seconds
  * - 1.6: Handle connection errors gracefully (ECONNREFUSED, ETIMEDOUT, ECONNRESET)
  * - 1.7: Return status information including connection state, bytes received, and data rate
+ * - 15.1: Establish independent TCP connections to multiple sources
+ * - 15.2: Assign decoders to specific sources by source ID
+ * - 15.3: Prevent multiple decoders from sharing exclusive sources
+ * - 15.4: Return capabilities (kind, sampleRate, format, exclusive) for each source
+ * - 15.5: Support source kinds: audio_pcm, iq, recording
+ * - 16.1: Validate and store source capabilities
+ * - 16.2: Verify capability compatibility before attachment
+ * - 16.3: Return compatibility error if decoder input type doesn't match source kind
  */
 
 import { EventEmitter } from "node:events"
 import * as net from "node:net"
+import * as fs from "node:fs"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError } from "../utils/errors.js"
+import type { SourceConfig, SourceCaps } from "../config.js"
 
-export interface SourceConfig {
-	id: string
-	type: "sdrpp-network" | "rtl_tcp"
-	host: string
-	port: number
-	format: "S16LE" | "FLOAT32LE"
-	sampleRate: number
+// Re-export types from config for convenience
+export type { SourceConfig, SourceCaps } from "../config.js"
+
+// ============================================================================
+// Types and Interfaces
+// ============================================================================
+
+/**
+ * Source kind - the type of data the source provides (Requirement 15.5)
+ */
+export type SourceKind = "audio_pcm" | "iq" | "recording"
+
+/**
+ * Decoder capabilities - used for compatibility checking (Requirements 16.2, 16.3)
+ */
+export type DecoderInputType = "audio_pcm" | "iq" | "external"
+
+export interface DecoderCaps {
+	/** Type of input the decoder expects */
+	input: DecoderInputType
+	/** Whether the decoder wants exclusive access to the source */
+	wantsExclusiveSource?: boolean
+	/** Preferred sample rates for the decoder */
+	preferredSampleRates?: number[]
 }
 
 export interface SourceStatus {
@@ -34,6 +61,7 @@ export interface SourceStatus {
 	dataRate: number // KB/s
 	lastError?: string | undefined
 	reconnectAttempts: number
+	caps: SourceCaps
 }
 
 export interface SourceManagerEvents {
@@ -45,6 +73,7 @@ export interface SourceManagerEvents {
 		sourceId: string,
 		metrics: { bytesReceived: number; dataRate: number },
 	) => void
+	ended: (sourceId: string) => void // For recording sources
 }
 
 // Exponential backoff constants
@@ -78,10 +107,66 @@ interface SourceState {
 	reconnectTimer: ReturnType<typeof setTimeout> | null
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stopping: boolean
+	// Recording source specific state
+	recordingState?: RecordingState | undefined
+}
+
+/**
+ * State for recording sources (Requirement 21)
+ */
+interface RecordingState {
+	fileDescriptor: number | null
+	playbackTimer: ReturnType<typeof setTimeout> | null
+	position: number
+	fileSize: number
+	chunkSize: number
+	isPlaying: boolean
+}
+
+/**
+ * Tracks decoder-source assignments (Requirement 15.2)
+ */
+interface DecoderAssignment {
+	decoderId: string
+	sourceId: string
+	assignedAt: Date
+}
+
+/**
+ * Error thrown when source-decoder compatibility check fails (Requirement 16.3)
+ */
+export class SourceCompatibilityError extends Error {
+	constructor(
+		public readonly sourceId: string,
+		public readonly decoderId: string,
+		public readonly reason: string,
+	) {
+		super(
+			`Source ${sourceId} is not compatible with decoder ${decoderId}: ${reason}`,
+		)
+		this.name = "SourceCompatibilityError"
+	}
+}
+
+/**
+ * Error thrown when trying to assign multiple decoders to an exclusive source (Requirement 15.3)
+ */
+export class ExclusiveSourceError extends Error {
+	constructor(
+		public readonly sourceId: string,
+		public readonly existingDecoderId: string,
+		public readonly newDecoderId: string,
+	) {
+		super(
+			`Source ${sourceId} is exclusive and already assigned to decoder ${existingDecoderId}. Cannot assign to ${newDecoderId}.`,
+		)
+		this.name = "ExclusiveSourceError"
+	}
 }
 
 export class SourceManager extends EventEmitter {
 	private sources: Map<string, SourceState> = new Map()
+	private decoderAssignments: Map<string, DecoderAssignment> = new Map()
 	private logger: Logger
 
 	constructor(logger: Logger) {
@@ -99,6 +184,17 @@ export class SourceManager extends EventEmitter {
 	async connect(config: SourceConfig): Promise<Readable> {
 		if (this.sources.has(config.id)) {
 			throw new Error(`Source ${config.id} already exists`)
+		}
+
+		// Validate config has required fields based on type
+		if (config.type === "recording") {
+			if (!config.filePath) {
+				throw new Error(`Recording source ${config.id} requires filePath`)
+			}
+		} else {
+			if (!config.host || !config.port) {
+				throw new Error(`Network source ${config.id} requires host and port`)
+			}
 		}
 
 		const stream = new PassThrough({
@@ -127,14 +223,26 @@ export class SourceManager extends EventEmitter {
 			this.emitMetrics(config.id)
 		}, METRICS_INTERVAL_MS)
 
-		// Attempt initial connection
-		try {
-			await this.attemptConnection(config.id)
-		} catch (err) {
-			// Clean up on initial connection failure
-			this.cleanupState(state)
-			this.sources.delete(config.id)
-			throw err
+		// Handle recording sources (Requirement 21)
+		if (config.type === "recording") {
+			try {
+				await this.startRecordingSource(config.id)
+			} catch (err) {
+				// Clean up on failure
+				this.cleanupState(state)
+				this.sources.delete(config.id)
+				throw err
+			}
+		} else {
+			// Attempt initial connection for network sources
+			try {
+				await this.attemptConnection(config.id)
+			} catch (err) {
+				// Clean up on initial connection failure
+				this.cleanupState(state)
+				this.sources.delete(config.id)
+				throw err
+			}
 		}
 
 		return stream
@@ -152,6 +260,315 @@ export class SourceManager extends EventEmitter {
 			clearInterval(state.metricsTimer)
 			state.metricsTimer = null
 		}
+		// Clean up recording source resources
+		if (state.recordingState) {
+			this.cleanupRecordingState(state.recordingState)
+			state.recordingState = undefined
+		}
+	}
+
+	/**
+	 * Cleans up recording source state.
+	 */
+	private cleanupRecordingState(recordingState: RecordingState): void {
+		if (recordingState.playbackTimer) {
+			clearTimeout(recordingState.playbackTimer)
+			recordingState.playbackTimer = null
+		}
+		if (recordingState.fileDescriptor !== null) {
+			try {
+				fs.closeSync(recordingState.fileDescriptor)
+			} catch {
+				// Ignore close errors
+			}
+			recordingState.fileDescriptor = null
+		}
+		recordingState.isPlaying = false
+	}
+
+	/**
+	 * Starts a recording source for file-based IQ/audio replay.
+	 * Requirements: 21.1, 21.2, 21.3, 21.4
+	 *
+	 * @param id - Source ID
+	 */
+	private async startRecordingSource(id: string): Promise<void> {
+		const state = this.sources.get(id)
+		if (!state || state.stopping) {
+			return
+		}
+
+		const { config } = state
+
+		if (!config.filePath) {
+			throw new Error(`Recording source ${id} requires filePath`)
+		}
+
+		// Check if file exists
+		if (!fs.existsSync(config.filePath)) {
+			throw new Error(`Recording file not found: ${config.filePath}`)
+		}
+
+		// Get file stats
+		const stats = fs.statSync(config.filePath)
+		const fileSize = stats.size
+
+		if (fileSize === 0) {
+			throw new Error(`Recording file is empty: ${config.filePath}`)
+		}
+
+		// Open file for reading
+		const fd = fs.openSync(config.filePath, "r")
+
+		// Calculate chunk size based on sample rate and format
+		// We want to emit data at approximately the real-time rate adjusted by playbackSpeed
+		// Default to 4096 bytes per chunk (good balance for most formats)
+		const chunkSize = this.calculateChunkSize(config.caps)
+
+		// Initialize recording state
+		state.recordingState = {
+			fileDescriptor: fd,
+			playbackTimer: null,
+			position: 0,
+			fileSize,
+			chunkSize,
+			isPlaying: true,
+		}
+
+		// Mark as connected
+		state.connected = true
+
+		this.logger.info(
+			{
+				sourceId: id,
+				filePath: config.filePath,
+				fileSize,
+				loop: config.loop,
+				playbackSpeed: config.playbackSpeed,
+			},
+			"Recording source started",
+		)
+
+		// Emit connected event
+		this.emit("connected", id)
+
+		// Start playback
+		this.scheduleNextChunk(id)
+	}
+
+	/**
+	 * Calculates the chunk size for recording playback based on format.
+	 * Requirements: 21.3
+	 */
+	private calculateChunkSize(caps: SourceCaps): number {
+		// Calculate bytes per sample based on format
+		let bytesPerSample: number
+		switch (caps.format) {
+			case "S16LE":
+			case "S16_IQ":
+				bytesPerSample = 2
+				break
+			case "FLOAT32LE":
+				bytesPerSample = 4
+				break
+			case "U8_IQ":
+				bytesPerSample = 1
+				break
+			default:
+				bytesPerSample = 2
+		}
+
+		// For IQ formats, we have I and Q components
+		const isIQ = caps.format === "U8_IQ" || caps.format === "S16_IQ"
+		const componentsPerSample = isIQ ? 2 : (caps.channels ?? 1)
+
+		// Calculate bytes per second at the sample rate
+		const bytesPerSecond =
+			caps.sampleRate * bytesPerSample * componentsPerSample
+
+		// Target ~50ms chunks for smooth playback
+		const targetChunkDurationMs = 50
+		const chunkSize = Math.floor(
+			(bytesPerSecond * targetChunkDurationMs) / 1000,
+		)
+
+		// Ensure chunk size is aligned to sample boundaries
+		const sampleSize = bytesPerSample * componentsPerSample
+		const alignedChunkSize = Math.floor(chunkSize / sampleSize) * sampleSize
+
+		// Minimum 1024 bytes, maximum 65536 bytes
+		return Math.max(1024, Math.min(65536, alignedChunkSize))
+	}
+
+	/**
+	 * Calculates the interval between chunks based on playback speed.
+	 * Requirements: 21.4
+	 */
+	private calculateChunkInterval(
+		chunkSize: number,
+		caps: SourceCaps,
+		playbackSpeed: number,
+	): number {
+		// Calculate bytes per sample based on format
+		let bytesPerSample: number
+		switch (caps.format) {
+			case "S16LE":
+			case "S16_IQ":
+				bytesPerSample = 2
+				break
+			case "FLOAT32LE":
+				bytesPerSample = 4
+				break
+			case "U8_IQ":
+				bytesPerSample = 1
+				break
+			default:
+				bytesPerSample = 2
+		}
+
+		// For IQ formats, we have I and Q components
+		const isIQ = caps.format === "U8_IQ" || caps.format === "S16_IQ"
+		const componentsPerSample = isIQ ? 2 : (caps.channels ?? 1)
+
+		// Calculate bytes per second at the sample rate
+		const bytesPerSecond =
+			caps.sampleRate * bytesPerSample * componentsPerSample
+
+		// Calculate how long this chunk represents in real time
+		const chunkDurationMs = (chunkSize / bytesPerSecond) * 1000
+
+		// Adjust for playback speed
+		const adjustedInterval = chunkDurationMs / playbackSpeed
+
+		// Minimum 1ms interval
+		return Math.max(1, adjustedInterval)
+	}
+
+	/**
+	 * Schedules the next chunk to be read and emitted.
+	 */
+	private scheduleNextChunk(id: string): void {
+		const state = this.sources.get(id)
+		if (!state || state.stopping || !state.recordingState) {
+			return
+		}
+
+		const { config } = state
+		const recordingState = state.recordingState
+
+		if (!recordingState.isPlaying || recordingState.fileDescriptor === null) {
+			return
+		}
+
+		const interval = this.calculateChunkInterval(
+			recordingState.chunkSize,
+			config.caps,
+			config.playbackSpeed ?? 1.0,
+		)
+
+		recordingState.playbackTimer = setTimeout(() => {
+			this.readAndEmitChunk(id)
+		}, interval)
+	}
+
+	/**
+	 * Reads a chunk from the recording file and emits it.
+	 */
+	private readAndEmitChunk(id: string): void {
+		const state = this.sources.get(id)
+		if (!state || state.stopping || !state.recordingState) {
+			return
+		}
+
+		const recordingState = state.recordingState
+
+		if (!recordingState.isPlaying || recordingState.fileDescriptor === null) {
+			return
+		}
+
+		// Calculate how many bytes to read
+		const remainingBytes = recordingState.fileSize - recordingState.position
+		const bytesToRead = Math.min(recordingState.chunkSize, remainingBytes)
+
+		if (bytesToRead <= 0) {
+			// End of file reached
+			this.handleRecordingEnd(id)
+			return
+		}
+
+		// Read chunk from file
+		const buffer = Buffer.alloc(bytesToRead)
+		try {
+			const bytesRead = fs.readSync(
+				recordingState.fileDescriptor,
+				buffer,
+				0,
+				bytesToRead,
+				recordingState.position,
+			)
+
+			if (bytesRead === 0) {
+				// End of file
+				this.handleRecordingEnd(id)
+				return
+			}
+
+			// Update position
+			recordingState.position += bytesRead
+
+			// Update stats
+			state.bytesReceived += bytesRead
+			state.bytesReceivedSinceLastMetric += bytesRead
+
+			// Write to stream
+			if (!state.stream.destroyed) {
+				state.stream.write(buffer.subarray(0, bytesRead))
+			}
+
+			// Emit data event
+			this.emit("data", id, buffer.subarray(0, bytesRead))
+
+			// Schedule next chunk
+			this.scheduleNextChunk(id)
+		} catch (err) {
+			this.logger.error({ sourceId: id, err }, "Error reading recording file")
+			state.lastError =
+				err instanceof Error ? err.message : "Unknown read error"
+			this.handleRecordingEnd(id)
+		}
+	}
+
+	/**
+	 * Handles the end of a recording file.
+	 * Requirements: 21.2
+	 */
+	private handleRecordingEnd(id: string): void {
+		const state = this.sources.get(id)
+		if (!state || !state.recordingState) {
+			return
+		}
+
+		const { config } = state
+		const recordingState = state.recordingState
+
+		if (config.loop) {
+			// Loop: reset position and continue
+			recordingState.position = 0
+
+			this.logger.debug({ sourceId: id }, "Recording source looping")
+
+			// Schedule next chunk
+			this.scheduleNextChunk(id)
+		} else {
+			// No loop: emit ended event and stop
+			recordingState.isPlaying = false
+			state.connected = false
+
+			this.logger.info({ sourceId: id }, "Recording source ended")
+
+			// Emit ended event (Requirement 21.2)
+			this.emit("ended", id)
+		}
 	}
 
 	/**
@@ -165,6 +582,11 @@ export class SourceManager extends EventEmitter {
 		}
 
 		const { config } = state
+
+		// Recording sources don't use TCP connections
+		if (config.type === "recording") {
+			return Promise.resolve()
+		}
 
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
@@ -211,7 +633,7 @@ export class SourceManager extends EventEmitter {
 
 				// Only reject on initial connection attempt
 				if (isInitialAttempt && !state.connected) {
-					reject(new SourceConnectionError(config.host, config.port, err))
+					reject(new SourceConnectionError(config.host!, config.port!, err))
 				}
 			}
 
@@ -244,7 +666,7 @@ export class SourceManager extends EventEmitter {
 			socket.on("close", onClose)
 
 			// Attempt connection
-			socket.connect(config.port, config.host)
+			socket.connect(config.port!, config.host!)
 		})
 	}
 
@@ -344,10 +766,10 @@ export class SourceManager extends EventEmitter {
 
 		state.stopping = true
 
-		// Clear timers
+		// Clear timers and recording state
 		this.cleanupState(state)
 
-		// Close socket
+		// Close socket for network sources
 		if (state.socket) {
 			state.socket.destroy()
 			state.socket = null
@@ -356,6 +778,13 @@ export class SourceManager extends EventEmitter {
 		// End the stream
 		if (!state.stream.destroyed) {
 			state.stream.end()
+		}
+
+		// Remove any decoder assignments for this source
+		for (const [decoderId, assignment] of this.decoderAssignments) {
+			if (assignment.sourceId === id) {
+				this.decoderAssignments.delete(decoderId)
+			}
 		}
 
 		this.sources.delete(id)
@@ -384,7 +813,7 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * Gets the status of a specific source (Requirement 1.7).
+	 * Gets the status of a specific source (Requirements 1.7, 15.4).
 	 *
 	 * @param id - Source ID
 	 * @returns Source status or undefined if not found
@@ -400,6 +829,7 @@ export class SourceManager extends EventEmitter {
 			dataRate: state.dataRate,
 			lastError: state.lastError,
 			reconnectAttempts: state.reconnectAttempts,
+			caps: state.config.caps,
 		}
 	}
 
@@ -428,6 +858,206 @@ export class SourceManager extends EventEmitter {
 	getStream(id: string): Readable | undefined {
 		const state = this.sources.get(id)
 		return state?.stream
+	}
+
+	/**
+	 * Gets the capabilities of a source (Requirement 15.4).
+	 *
+	 * @param id - Source ID
+	 * @returns Source capabilities or undefined if not found
+	 */
+	getCaps(id: string): SourceCaps | undefined {
+		const state = this.sources.get(id)
+		return state?.config.caps
+	}
+
+	/**
+	 * Checks if a source is compatible with a decoder's capabilities (Requirements 16.2, 16.3).
+	 *
+	 * Compatibility rules:
+	 * - audio_pcm decoder input matches audio_pcm source kind
+	 * - iq decoder input matches iq source kind
+	 * - external decoder input is always compatible (decoder manages its own source)
+	 *
+	 * @param sourceId - Source ID to check
+	 * @param decoderCaps - Decoder capabilities to check against
+	 * @returns true if compatible, false otherwise
+	 */
+	isCompatible(sourceId: string, decoderCaps: DecoderCaps): boolean {
+		const sourceCaps = this.getCaps(sourceId)
+		if (!sourceCaps) return false
+
+		// External decoders manage their own sources, always compatible
+		if (decoderCaps.input === "external") {
+			return true
+		}
+
+		// Check input type matches source kind
+		return decoderCaps.input === sourceCaps.kind
+	}
+
+	/**
+	 * Gets all sources that are compatible with a decoder's capabilities.
+	 *
+	 * @param decoderCaps - Decoder capabilities to match against
+	 * @returns Array of compatible source statuses
+	 */
+	getAvailableSources(decoderCaps: DecoderCaps): SourceStatus[] {
+		const available: SourceStatus[] = []
+
+		for (const [id] of this.sources) {
+			if (this.isCompatible(id, decoderCaps)) {
+				const status = this.getStatus(id)
+				if (status) {
+					available.push(status)
+				}
+			}
+		}
+
+		return available
+	}
+
+	/**
+	 * Assigns a decoder to a source (Requirement 15.2).
+	 *
+	 * @param decoderId - Decoder ID to assign
+	 * @param sourceId - Source ID to assign to
+	 * @param decoderCaps - Decoder capabilities for compatibility checking
+	 * @throws SourceCompatibilityError if source and decoder are not compatible
+	 * @throws ExclusiveSourceError if source is exclusive and already assigned
+	 */
+	assignDecoder(
+		decoderId: string,
+		sourceId: string,
+		decoderCaps: DecoderCaps,
+	): void {
+		const state = this.sources.get(sourceId)
+		if (!state) {
+			throw new Error(`Source ${sourceId} not found`)
+		}
+
+		// Check compatibility (Requirement 16.2, 16.3)
+		if (!this.isCompatible(sourceId, decoderCaps)) {
+			throw new SourceCompatibilityError(
+				sourceId,
+				decoderId,
+				`Decoder input type '${decoderCaps.input}' does not match source kind '${state.config.caps.kind}'`,
+			)
+		}
+
+		// Check exclusive source constraint (Requirement 15.3)
+		if (state.config.caps.exclusive) {
+			const existingAssignment = this.getSourceAssignments(sourceId)
+			if (existingAssignment.length > 0 && existingAssignment[0]) {
+				const existing = existingAssignment[0]
+				if (existing.decoderId !== decoderId) {
+					throw new ExclusiveSourceError(
+						sourceId,
+						existing.decoderId,
+						decoderId,
+					)
+				}
+			}
+		}
+
+		// Check if decoder wants exclusive access
+		if (decoderCaps.wantsExclusiveSource) {
+			const existingAssignment = this.getSourceAssignments(sourceId)
+			if (existingAssignment.length > 0 && existingAssignment[0]) {
+				const existing = existingAssignment[0]
+				if (existing.decoderId !== decoderId) {
+					throw new ExclusiveSourceError(
+						sourceId,
+						existing.decoderId,
+						decoderId,
+					)
+				}
+			}
+		}
+
+		// Remove any existing assignment for this decoder
+		this.decoderAssignments.delete(decoderId)
+
+		// Create new assignment
+		this.decoderAssignments.set(decoderId, {
+			decoderId,
+			sourceId,
+			assignedAt: new Date(),
+		})
+
+		this.logger.info({ decoderId, sourceId }, "Decoder assigned to source")
+	}
+
+	/**
+	 * Unassigns a decoder from its source.
+	 *
+	 * @param decoderId - Decoder ID to unassign
+	 */
+	unassignDecoder(decoderId: string): void {
+		const assignment = this.decoderAssignments.get(decoderId)
+		if (assignment) {
+			this.decoderAssignments.delete(decoderId)
+			this.logger.info(
+				{ decoderId, sourceId: assignment.sourceId },
+				"Decoder unassigned from source",
+			)
+		}
+	}
+
+	/**
+	 * Gets the source ID assigned to a decoder (Requirement 15.2).
+	 *
+	 * @param decoderId - Decoder ID to look up
+	 * @returns Source ID or undefined if not assigned
+	 */
+	getAssignedSource(decoderId: string): string | undefined {
+		return this.decoderAssignments.get(decoderId)?.sourceId
+	}
+
+	/**
+	 * Gets all decoder assignments for a source.
+	 *
+	 * @param sourceId - Source ID to look up
+	 * @returns Array of decoder assignments
+	 */
+	getSourceAssignments(sourceId: string): DecoderAssignment[] {
+		const assignments: DecoderAssignment[] = []
+		for (const assignment of this.decoderAssignments.values()) {
+			if (assignment.sourceId === sourceId) {
+				assignments.push(assignment)
+			}
+		}
+		return assignments
+	}
+
+	/**
+	 * Gets all decoder assignments.
+	 *
+	 * @returns Map of decoder ID to assignment
+	 */
+	getAllAssignments(): Map<string, DecoderAssignment> {
+		return new Map(this.decoderAssignments)
+	}
+
+	/**
+	 * Checks if a source is available for a new decoder assignment.
+	 * A source is available if:
+	 * - It exists
+	 * - It's not exclusive, OR
+	 * - It's exclusive but has no current assignments
+	 *
+	 * @param sourceId - Source ID to check
+	 * @returns true if available, false otherwise
+	 */
+	isSourceAvailable(sourceId: string): boolean {
+		const state = this.sources.get(sourceId)
+		if (!state) return false
+
+		if (!state.config.caps.exclusive) {
+			return true
+		}
+
+		return this.getSourceAssignments(sourceId).length === 0
 	}
 
 	/**

@@ -1,12 +1,11 @@
 /**
- * Base Decoder - Abstract base class for decoder implementations
+ * External SDR Decoder - Abstract base class for decoders managing own SDR hardware
  *
  * Requirements:
- * - 4.1: WHEN a decoder is started, THE Decoder_Manager SHALL spawn the decoder process with appropriate arguments
- * - 4.3: WHEN a decoder is stopped, THE Decoder_Manager SHALL send SIGTERM and wait, then SIGKILL if needed
- * - 4.4: WHEN a decoder produces output, THE Decoder_Manager SHALL parse it into structured DecoderOutput objects
- * - 4.5: WHEN requested, THE Decoder_Manager SHALL return status for all managed decoders including PID, uptime, and statistics
- * - 4.6: THE Decoder_Manager SHALL emit events for decoder output, errors, and exit conditions
+ * - 19.1: WHEN an external SDR decoder is started, THE Decoder_Manager SHALL spawn it with SDR device configuration (serial, frequency, gain)
+ * - 19.2: WHEN the decoder is running, THE Decoder_Manager SHALL NOT attempt to pipe audio to it
+ * - 19.3: WHEN the decoder produces output, THE Decoder_Manager SHALL parse it into structured DecoderOutput objects
+ * - 19.4: THE Decoder_Manager SHALL pass device serial numbers to external decoders for multi-dongle setups
  * - 17.1: Decoder capabilities declaration
  * - 20.1: Report health as "running" when producing output
  * - 20.2: Report health as "degraded" when no output for configured timeout
@@ -35,30 +34,50 @@ import { createComponentLogger } from "../utils/logger.js"
 const GRACEFUL_STOP_TIMEOUT = 5000
 
 /**
- * BaseDecoder - Abstract base class implementing common decoder functionality.
+ * Extended configuration for external SDR decoders (Requirement 19.1, 19.4).
+ */
+export interface ExternalSdrConfig extends DecoderConfig {
+	/** Device serial number for multi-dongle setups (Requirement 19.4) */
+	deviceSerial: string
+	/** Frequencies to monitor in Hz */
+	frequencies: number[]
+	/** Gain setting for the SDR device */
+	gain?: number
+	/** PPM correction for the SDR device */
+	ppm?: number
+}
+
+/**
+ * ExternalSdrDecoder - Abstract base class for decoders that manage their own SDR hardware.
+ *
+ * This pattern is used for decoders like acarsdec and dumpvdl2 that:
+ * - Require direct control of an RTL-SDR device
+ * - Cannot share the SDR with other decoders
+ * - Don't receive audio input via stdin (Requirement 19.2)
  *
  * Uses the Template Method pattern where subclasses implement:
  * - getCommand(): The executable command to spawn
- * - getArgs(): Command line arguments for the process
- * - parseOutput(line): Parse stdout/stderr lines into DecoderOutput objects
+ * - getArgs(): Command line arguments including device serial and frequencies (Requirement 19.1)
+ * - parseOutput(line): Parse stdout/stderr lines into DecoderOutput objects (Requirement 19.3)
  * - getCaps(): Return the decoder's capabilities
  *
  * Handles:
- * - Process spawning with stdio piping
- * - Graceful stop with SIGTERM/SIGKILL
+ * - Process spawning with device configuration (Requirement 19.1)
+ * - Device serial passing for multi-dongle setups (Requirement 19.4)
  * - Output stream in object mode for DecoderOutput
  * - Statistics tracking (bytesIn, eventsOut, errors)
  * - Status reporting (running, pid, uptime, health)
  * - Health state tracking (running, degraded, faulted)
  */
-export abstract class BaseDecoder extends EventEmitter implements Decoder {
+export abstract class ExternalSdrDecoder
+	extends EventEmitter
+	implements Decoder
+{
 	readonly id: string
 	readonly type: string
 
 	protected process: ChildProcess | null = null
-	protected inputStream: Readable | null = null
 	protected outputStream: PassThrough
-	protected audioOutputStream: PassThrough | null = null
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
 	protected startTime: number = 0
 	protected lastOutputAt: Date | null = null
@@ -66,7 +85,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	protected restartCount: number = 0
 	protected version: string | undefined = undefined
 	protected logger: Logger
-	protected config: DecoderConfig
+	protected config: ExternalSdrConfig
 
 	/**
 	 * Gets the decoder's capabilities (Requirement 17.1).
@@ -76,7 +95,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		return this.getCaps()
 	}
 
-	constructor(config: DecoderConfig, logger: Logger) {
+	constructor(config: ExternalSdrConfig, logger: Logger) {
 		super()
 		this.id = config.id
 		this.type = config.type
@@ -95,13 +114,15 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 	/**
 	 * Template method: Returns command line arguments.
-	 * Subclasses must implement this to return decoder-specific arguments.
+	 * Subclasses must implement this to return decoder-specific arguments
+	 * including device serial and frequencies (Requirement 19.1).
 	 */
 	protected abstract getArgs(): string[]
 
 	/**
 	 * Template method: Parses a line of output into a DecoderOutput object.
-	 * Subclasses must implement this to parse decoder-specific output formats.
+	 * Subclasses must implement this to parse decoder-specific output formats
+	 * (Requirement 19.3).
 	 *
 	 * @param line - A line of text from stdout or stderr
 	 * @returns DecoderOutput object if the line was parsed, null to skip
@@ -117,8 +138,24 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	protected abstract getCaps(): DecoderCaps
 
 	/**
-	 * Starts the decoder process (Requirement 4.1).
-	 * Spawns the process with stdio piping and sets up output parsing.
+	 * Gets the device serial number for this decoder (Requirement 19.4).
+	 * @returns The configured device serial number
+	 */
+	getDeviceSerial(): string {
+		return this.config.deviceSerial
+	}
+
+	/**
+	 * Gets the frequencies this decoder is monitoring.
+	 * @returns Array of frequencies in Hz
+	 */
+	getFrequencies(): number[] {
+		return [...this.config.frequencies]
+	}
+
+	/**
+	 * Starts the decoder process with SDR device configuration (Requirement 19.1).
+	 * Spawns the process with device serial, frequencies, and gain settings.
 	 *
 	 * @throws DecoderSpawnError if the process fails to start
 	 */
@@ -131,11 +168,20 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		const command = this.getCommand()
 		const args = this.getArgs()
 
-		this.logger.info({ command, args }, "Starting decoder process")
+		this.logger.info(
+			{
+				command,
+				args,
+				deviceSerial: this.config.deviceSerial,
+				frequencies: this.config.frequencies,
+			},
+			"Starting external SDR decoder",
+		)
 
 		try {
+			// External SDR decoders don't receive stdin input (Requirement 19.2)
 			this.process = spawn(command, args, {
-				stdio: ["pipe", "pipe", "pipe"],
+				stdio: ["ignore", "pipe", "pipe"],
 			})
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))
@@ -149,14 +195,14 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.emit("error", new DecoderSpawnError(this.id, command, err))
 		})
 
-		// Handle process exit (Requirement 4.6)
+		// Handle process exit
 		this.process.on("exit", (code, signal) => {
 			this.logger.info({ code, signal }, "Decoder process exited")
 			this.process = null
 			this.emit("exit", code, signal)
 		})
 
-		// Parse stdout line by line (Requirement 4.4)
+		// Parse stdout line by line (Requirement 19.3)
 		if (this.process.stdout) {
 			const stdoutReader = createInterface({
 				input: this.process.stdout,
@@ -180,21 +226,16 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			})
 		}
 
-		// Pipe input stream to process stdin if attached
-		if (this.inputStream && this.process.stdin) {
-			this.inputStream.pipe(this.process.stdin)
-			this.inputStream.on("data", (chunk: Buffer) => {
-				this.stats.bytesIn += chunk.length
-			})
-		}
-
 		this.startTime = Date.now()
 		this.emit("started")
-		this.logger.info({ pid: this.process.pid }, "Decoder started")
+		this.logger.info(
+			{ pid: this.process.pid, deviceSerial: this.config.deviceSerial },
+			"External SDR decoder started",
+		)
 	}
 
 	/**
-	 * Stops the decoder process gracefully (Requirement 4.3).
+	 * Stops the decoder process gracefully.
 	 * Sends SIGTERM first, waits 5 seconds, then SIGKILL if needed.
 	 */
 	async stop(): Promise<void> {
@@ -204,7 +245,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		}
 
 		const pid = this.process.pid
-		this.logger.info({ pid }, "Stopping decoder process")
+		this.logger.info({ pid }, "Stopping external SDR decoder")
 
 		return new Promise<void>(resolve => {
 			const proc = this.process
@@ -225,7 +266,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				clearTimeout(killTimeout)
 				this.process = null
 				this.emit("stopped")
-				this.logger.info({ pid }, "Decoder stopped")
+				this.logger.info({ pid }, "External SDR decoder stopped")
 				resolve()
 			})
 
@@ -239,46 +280,26 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	 * Equivalent to stop() followed by start().
 	 */
 	async restart(): Promise<void> {
-		this.logger.info("Restarting decoder")
+		this.logger.info("Restarting external SDR decoder")
 		await this.stop()
 		await this.start()
 	}
 
 	/**
-	 * Attaches an input stream to feed audio data to the decoder.
-	 * If the decoder is already running, pipes the stream to stdin.
-	 *
-	 * @param stream - Readable stream of audio data
+	 * External SDR decoders don't use stdin input - this is a no-op (Requirement 19.2).
+	 * @param _stream - Ignored
 	 */
-	attachInput(stream: Readable): void {
-		this.detachInput()
-		this.inputStream = stream
-
-		// Track bytes received
-		stream.on("data", (chunk: Buffer) => {
-			this.stats.bytesIn += chunk.length
-		})
-
-		// If process is already running, pipe to stdin
-		if (this.process?.stdin) {
-			stream.pipe(this.process.stdin)
-		}
-
-		this.logger.debug("Input stream attached")
+	attachInput(_stream: Readable): void {
+		// External SDR decoders don't receive audio via stdin (Requirement 19.2)
+		this.logger.debug("attachInput called on external SDR decoder (no-op)")
 	}
 
 	/**
-	 * Detaches the current input stream.
+	 * External SDR decoders don't use stdin input - this is a no-op (Requirement 19.2).
 	 */
 	detachInput(): void {
-		if (this.inputStream) {
-			// Unpipe from process stdin if connected
-			if (this.process?.stdin) {
-				this.inputStream.unpipe(this.process.stdin)
-			}
-			this.inputStream = null
-			this.logger.debug("Input stream detached")
-		}
+		// External SDR decoders don't receive audio via stdin (Requirement 19.2)
+		this.logger.debug("detachInput called on external SDR decoder (no-op)")
 	}
 
 	/**
@@ -290,13 +311,11 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
-	 * Gets the audio output stream if the decoder produces audio.
-	 * Base implementation returns null; subclasses can override.
-	 *
-	 * @returns Readable stream of audio data, or null if not available
+	 * External SDR decoders typically don't produce audio output.
+	 * @returns null (subclasses can override if they produce audio)
 	 */
 	getAudioOutput(): Readable | null {
-		return this.audioOutputStream
+		return null
 	}
 
 	/**
@@ -364,7 +383,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
-	 * Handles a line of output from stdout or stderr.
+	 * Handles a line of output from stdout or stderr (Requirement 19.3).
 	 * Calls the subclass parseOutput method and emits the result.
 	 * Updates lastOutputAt and health state on successful output.
 	 *

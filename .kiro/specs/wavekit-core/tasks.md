@@ -110,7 +110,7 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - Extend BaseDecoder with multimon-ng specific args
     - Implement output parsing for POCSAG, FLEX, DTMF
     - _Requirements: 7.1, 7.2, 7.3, 7.4_
-  - [ ] 6.9 Write property tests for Multimon-ng parsing
+  - [x] 6.9 Write property tests for Multimon-ng parsing
     - **Property 13: Multimon Output Parsing**
     - **Property 14: Multimon Mode Support**
     - **Validates: Requirements 7.2, 7.3**
@@ -173,25 +173,25 @@ This implementation plan follows a bottom-up approach, starting with utilities a
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 10. Application Bootstrap and Integration
-  - [ ] 10.1 Implement main application bootstrap
+  - [x] 10.1 Implement main application bootstrap
     - Load configuration
     - Initialize all components in correct order
     - Register shutdown handlers
     - Start API server
     - _Requirements: 12.1, 14.1_
-  - [ ] 10.2 Wire components together
+  - [x] 10.2 Wire components together
     - Connect Source Manager → Fanout Manager → Decoders
     - Connect Decoder outputs → WebSocket broadcaster
     - Connect Audio Output to decoder audio streams
     - _Requirements: 1.1, 2.1, 4.1, 11.1_
-  - [ ] 10.3 Write property test for graceful shutdown
+  - [x] 10.3 Write property test for graceful shutdown
     - **Property 24: Graceful Shutdown Completeness**
     - **Validates: Requirements 14.2, 14.3, 14.4, 14.5**
-  - [ ] 10.4 Create default configuration file
+  - [x] 10.4 Create default configuration file
     - Create config/default.yaml with documented options
     - _Requirements: 12.1, 12.5_
 
-- [ ] 11. Final Checkpoint
+- [x] 11. Final Checkpoint
   - Ensure all tests pass, ask the user if questions arise.
   - Run full test suite with coverage report
   - Verify all requirements are covered
@@ -205,107 +205,107 @@ This implementation plan follows a bottom-up approach, starting with utilities a
 This phase implements the decoder expansion roadmap, adding multi-source support, new decoder integration patterns, and aviation/maritime/amateur radio decoders.
 
 - [ ] 12. Multi-Source Foundation
-  - [ ] 12.1 Extend Source Manager for multi-source support
+  - [x] 12.1 Extend Source Manager for multi-source support
     - Add SourceCaps interface and capability validation
     - Support multiple simultaneous source connections
     - Implement source-decoder assignment tracking
     - _Requirements: 15.1, 15.2, 15.3, 15.4, 15.5, 16.1, 16.2, 16.3_
-  - [ ] 12.2 Write property tests for multi-source
+  - [x] 12.2 Write property tests for multi-source
     - **Property 25: Source Capability Compatibility**
     - **Property 26: Multi-Source Independence**
     - **Property 27: Decoder-Source Assignment Consistency**
     - **Property 28: Exclusive Source Enforcement**
     - **Validates: Requirements 15.1, 15.2, 15.3, 16.2, 17.2**
-  - [ ] 12.3 Implement Recording Source
+  - [x] 12.3 Implement Recording Source
     - Create file-based source for IQ/audio replay
     - Support loop and playback speed options
     - _Requirements: 21.1, 21.2, 21.3, 21.4_
-  - [ ] 12.4 Write property test for Recording Source
+  - [x] 12.4 Write property test for Recording Source
     - **Property 29: Recording Source Determinism**
     - **Validates: Requirements 21.1, 21.3**
-  - [ ] 12.5 Update Configuration schemas
+  - [x] 12.5 Update Configuration schemas
     - Add SourceCaps and DecoderCaps schemas
     - Add health monitoring configuration
     - Update decoder config for new patterns
     - _Requirements: 15.4, 17.1, 17.2, 17.3, 17.4_
 
-- [ ] 13. Checkpoint - Multi-Source Foundation
+- [x] 13. Checkpoint - Multi-Source Foundation
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 14. Decoder Integration Patterns
-  - [ ] 14.1 Extend Decoder types with capabilities
+  - [x] 14.1 Extend Decoder types with capabilities
     - Add DecoderCaps interface
     - Add DecoderHealth type and health tracking
     - Update DecoderStatus with health and version
     - _Requirements: 17.1, 17.2, 17.3, 17.4, 20.1, 20.2, 20.3, 20.4_
-  - [ ] 14.2 Implement Network Producer Decoder base class
+  - [x] 14.2 Implement Network Producer Decoder base class
     - Create abstract class for decoders with network outputs
     - Implement TCP/UDP client with reconnection
     - _Requirements: 18.1, 18.2, 18.3, 18.4_
-  - [ ] 14.3 Write property test for Network Producer reconnection
+  - [x] 14.3 Write property test for Network Producer reconnection
     - **Property 31: Network Producer Reconnection**
     - **Validates: Requirements 18.3**
-  - [ ] 14.4 Implement External SDR Decoder base class
+  - [x] 14.4 Implement External SDR Decoder base class
     - Create abstract class for decoders managing own SDR
     - Pass device serial and frequencies to process
     - _Requirements: 19.1, 19.2, 19.3, 19.4_
-  - [ ] 14.5 Write property test for External SDR Decoder
+  - [x] 14.5 Write property test for External SDR Decoder
     - **Property 32: External SDR Decoder Device Isolation**
     - **Validates: Requirements 19.1, 19.2, 19.4**
-  - [ ] 14.6 Implement Decoder Health Model
+  - [x] 14.6 Implement Decoder Health Model
     - Add health state tracking (running/degraded/faulted)
     - Implement periodic health checks in Decoder Manager
     - Emit health change events
     - _Requirements: 20.1, 20.2, 20.3, 20.4_
-  - [ ] 14.7 Write property test for Health State Transitions
+  - [x] 14.7 Write property test for Health State Transitions
     - **Property 30: Health State Transitions**
     - **Validates: Requirements 20.1, 20.2, 20.3, 20.4**
-  - [ ] 14.8 Update Decoder Registry with capabilities
+  - [x] 14.8 Update Decoder Registry with capabilities
     - Store DecoderCaps with factory registration
     - Add capability query methods
     - _Requirements: 17.1, 17.2_
 
-- [ ] 15. Checkpoint - Decoder Integration Patterns
+- [x] 15. Checkpoint - Decoder Integration Patterns
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 16. Aviation Decoders (Phase 1 - ADS-B)
-  - [ ] 16.1 Implement Readsb ADS-B Decoder
+  - [x] 16.1 Implement Readsb ADS-B Decoder
     - Extend NetworkProducerDecoder for readsb
     - Support SBS, Beast, and JSON output formats
     - Parse output into AircraftData events
     - _Requirements: 22.1, 22.2, 22.3, 22.4_
-  - [ ] 16.2 Write property test for Readsb parsing
+  - [x] 16.2 Write property test for Readsb parsing
     - **Property 33: ADS-B Output Parsing**
     - **Validates: Requirements 22.2**
-  - [ ] 16.3 Create ADS-B test fixtures
+  - [x] 16.3 Create ADS-B test fixtures
     - Add sample SBS, Beast, and JSON output files
     - Create recording source files for CI testing
 
-- [ ] 17. Checkpoint - ADS-B Decoder
+- [x] 17. Checkpoint - ADS-B Decoder
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 18. Aviation Decoders (Phase 2 - Data Links)
-  - [ ] 18.1 Implement ACARS Decoder (acarsdec)
+  - [x] 18.1 Implement ACARS Decoder (acarsdec)
     - Extend ExternalSdrDecoder for acarsdec
     - Support multiple frequencies
     - Parse JSON output into ACARSMessage events
     - _Requirements: 23.1, 23.2, 23.3, 23.4_
-  - [ ] 18.2 Write property test for ACARS parsing
+  - [x] 18.2 Write property test for ACARS parsing
     - **Property 34: ACARS Output Parsing**
     - **Validates: Requirements 23.2**
-  - [ ] 18.3 Implement VDL2 Decoder (dumpvdl2)
+  - [x] 18.3 Implement VDL2 Decoder (dumpvdl2)
     - Extend ExternalSdrDecoder for dumpvdl2
     - Support multiple frequencies
     - Parse JSON output into VDL2Message events
     - _Requirements: 24.1, 24.2, 24.3, 24.4_
-  - [ ] 18.4 Write property test for VDL2 parsing
+  - [x] 18.4 Write property test for VDL2 parsing
     - **Property 35: VDL2 Output Parsing**
     - **Validates: Requirements 24.2**
-  - [ ] 18.5 Create Aviation Data Link test fixtures
+  - [x] 18.5 Create Aviation Data Link test fixtures
     - Add sample acarsdec and dumpvdl2 output files
     - Create recording source files for CI testing
 
-- [ ] 19. Checkpoint - Aviation Data Links
+- [x] 19. Checkpoint - Aviation Data Links
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 20. Maritime Decoders (AIS)

@@ -14,6 +14,8 @@ import {
 	loadConfig,
 	validateConfig,
 	ConfigSchema,
+	DecoderCapsSchema,
+	HealthConfigSchema,
 } from "../../../src/config.js"
 import { ConfigValidationError } from "../../../src/utils/errors.js"
 
@@ -44,8 +46,11 @@ sources:
     type: rtl_tcp
     host: localhost
     port: 1234
-    format: S16LE
-    sampleRate: 48000
+    caps:
+      kind: audio_pcm
+      sampleRate: 48000
+      format: S16LE
+      exclusive: false
 decoders:
   - id: test-decoder
     type: dsd-fme
@@ -68,6 +73,7 @@ logging:
 
 			expect(config.sources).toHaveLength(1)
 			expect(config.sources[0]?.id).toBe("test-source")
+			expect(config.sources[0]?.caps.kind).toBe("audio_pcm")
 			expect(config.decoders).toHaveLength(1)
 			expect(config.decoders[0]?.type).toBe("dsd-fme")
 			expect(config.audio.tcpPort).toBe(9000)
@@ -123,8 +129,11 @@ sources:
     type: rtl_tcp
     host: localhost
     port: 1234
-    format: S16LE
-    sampleRate: 48000
+    caps:
+      kind: audio_pcm
+      sampleRate: 48000
+      format: S16LE
+      exclusive: false
 `
 			fs.writeFileSync(configPath, yamlContent)
 
@@ -132,7 +141,7 @@ sources:
 
 			// Should pass schema validation
 			expect(config.sources[0]?.type).toBe("rtl_tcp")
-			expect(config.sources[0]?.format).toBe("S16LE")
+			expect(config.sources[0]?.caps.format).toBe("S16LE")
 		})
 
 		it("should return descriptive validation errors for invalid config (Requirement 12.4)", () => {
@@ -170,8 +179,11 @@ sources:
     type: sdrpp-network
     host: 192.168.1.100
     port: 5555
-    format: FLOAT32LE
-    sampleRate: 96000
+    caps:
+      kind: audio_pcm
+      sampleRate: 96000
+      format: FLOAT32LE
+      exclusive: false
 decoders:
   - id: decoder1
     type: multimon-ng
@@ -648,5 +660,231 @@ ${sourceYaml}
 				{ numRuns: 100 },
 			)
 		})
+	})
+})
+
+describe("DecoderCapsSchema", () => {
+	it("should validate valid decoder capabilities", () => {
+		const validCaps = {
+			input: "audio_pcm",
+			output: "jsonl",
+			integrationPattern: "pure_consumer",
+		}
+		const result = DecoderCapsSchema.safeParse(validCaps)
+		expect(result.success).toBe(true)
+	})
+
+	it("should validate decoder caps with all optional fields", () => {
+		const fullCaps = {
+			input: "external",
+			wantsExclusiveSource: true,
+			preferredSampleRates: [48000, 96000],
+			output: "beast",
+			integrationPattern: "network_producer",
+		}
+		const result = DecoderCapsSchema.safeParse(fullCaps)
+		expect(result.success).toBe(true)
+		if (result.success) {
+			expect(result.data.wantsExclusiveSource).toBe(true)
+			expect(result.data.preferredSampleRates).toEqual([48000, 96000])
+		}
+	})
+
+	it("should reject invalid input type", () => {
+		const invalidCaps = {
+			input: "invalid_input",
+			output: "jsonl",
+			integrationPattern: "pure_consumer",
+		}
+		const result = DecoderCapsSchema.safeParse(invalidCaps)
+		expect(result.success).toBe(false)
+	})
+
+	it("should reject invalid output format", () => {
+		const invalidCaps = {
+			input: "audio_pcm",
+			output: "invalid_output",
+			integrationPattern: "pure_consumer",
+		}
+		const result = DecoderCapsSchema.safeParse(invalidCaps)
+		expect(result.success).toBe(false)
+	})
+
+	it("should reject invalid integration pattern", () => {
+		const invalidCaps = {
+			input: "audio_pcm",
+			output: "jsonl",
+			integrationPattern: "invalid_pattern",
+		}
+		const result = DecoderCapsSchema.safeParse(invalidCaps)
+		expect(result.success).toBe(false)
+	})
+})
+
+describe("HealthConfigSchema", () => {
+	it("should validate valid health config", () => {
+		const validHealth = {
+			checkInterval: 5000,
+			degradedTimeout: 30000,
+		}
+		const result = HealthConfigSchema.safeParse(validHealth)
+		expect(result.success).toBe(true)
+	})
+
+	it("should apply default values", () => {
+		const result = HealthConfigSchema.safeParse({})
+		expect(result.success).toBe(true)
+		if (result.success) {
+			expect(result.data.checkInterval).toBe(5000)
+			expect(result.data.degradedTimeout).toBe(30000)
+		}
+	})
+
+	it("should reject non-positive checkInterval", () => {
+		const invalidHealth = {
+			checkInterval: 0,
+			degradedTimeout: 30000,
+		}
+		const result = HealthConfigSchema.safeParse(invalidHealth)
+		expect(result.success).toBe(false)
+	})
+
+	it("should reject non-positive degradedTimeout", () => {
+		const invalidHealth = {
+			checkInterval: 5000,
+			degradedTimeout: -1,
+		}
+		const result = HealthConfigSchema.safeParse(invalidHealth)
+		expect(result.success).toBe(false)
+	})
+})
+
+describe("Extended DecoderConfigSchema", () => {
+	it("should validate decoder config with sourceId", () => {
+		const config = {
+			id: "test-decoder",
+			type: "dsd-fme",
+			enabled: true,
+			sourceId: "rtl-pi",
+			options: { mode: "auto" },
+		}
+		const result = validateConfig({ decoders: [config] })
+		expect(result.decoders[0]?.sourceId).toBe("rtl-pi")
+	})
+
+	it("should validate decoder config for external SDR pattern", () => {
+		const config = {
+			id: "acars-decoder",
+			type: "acarsdec",
+			enabled: true,
+			deviceSerial: "00000001",
+			frequencies: [131550000, 131725000],
+			gain: 40,
+			ppm: 0,
+			options: { outputFormat: "json" },
+		}
+		const result = validateConfig({ decoders: [config] })
+		expect(result.decoders[0]?.deviceSerial).toBe("00000001")
+		expect(result.decoders[0]?.frequencies).toEqual([131550000, 131725000])
+		expect(result.decoders[0]?.gain).toBe(40)
+	})
+
+	it("should validate decoder config for network producer pattern", () => {
+		const config = {
+			id: "adsb-decoder",
+			type: "readsb",
+			enabled: true,
+			outputHost: "127.0.0.1",
+			outputPort: 30003,
+			outputProtocol: "tcp" as const,
+			options: { outputFormat: "sbs" },
+		}
+		const result = validateConfig({ decoders: [config] })
+		expect(result.decoders[0]?.outputHost).toBe("127.0.0.1")
+		expect(result.decoders[0]?.outputPort).toBe(30003)
+		expect(result.decoders[0]?.outputProtocol).toBe("tcp")
+	})
+
+	it("should validate decoder config with version pinning", () => {
+		const config = {
+			id: "direwolf-decoder",
+			type: "direwolf",
+			enabled: true,
+			minVersion: "1.7",
+			maxVersion: "1.8",
+			options: {},
+		}
+		const result = validateConfig({ decoders: [config] })
+		expect(result.decoders[0]?.minVersion).toBe("1.7")
+		expect(result.decoders[0]?.maxVersion).toBe("1.8")
+	})
+
+	it("should reject invalid outputProtocol", () => {
+		const config = {
+			id: "test-decoder",
+			type: "test",
+			enabled: true,
+			outputProtocol: "http",
+			options: {},
+		}
+		expect(() => validateConfig({ decoders: [config] })).toThrow(
+			ConfigValidationError,
+		)
+	})
+
+	it("should reject invalid outputPort", () => {
+		const config = {
+			id: "test-decoder",
+			type: "test",
+			enabled: true,
+			outputPort: 70000,
+			options: {},
+		}
+		expect(() => validateConfig({ decoders: [config] })).toThrow(
+			ConfigValidationError,
+		)
+	})
+})
+
+describe("Config with health section", () => {
+	let tempDir: string
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wavekit-health-test-"))
+	})
+
+	afterEach(() => {
+		if (fs.existsSync(tempDir)) {
+			fs.rmSync(tempDir, { recursive: true })
+		}
+	})
+
+	it("should load config with health section", () => {
+		const configPath = path.join(tempDir, "config.yaml")
+		const yamlContent = `
+health:
+  checkInterval: 10000
+  degradedTimeout: 60000
+`
+		fs.writeFileSync(configPath, yamlContent)
+
+		const config = loadConfig(configPath)
+
+		expect(config.health).toBeDefined()
+		expect(config.health?.checkInterval).toBe(10000)
+		expect(config.health?.degradedTimeout).toBe(60000)
+	})
+
+	it("should allow config without health section", () => {
+		const configPath = path.join(tempDir, "config.yaml")
+		const yamlContent = `
+api:
+  port: 3000
+`
+		fs.writeFileSync(configPath, yamlContent)
+
+		const config = loadConfig(configPath)
+
+		expect(config.health).toBeUndefined()
 	})
 })

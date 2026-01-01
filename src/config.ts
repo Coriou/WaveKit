@@ -8,27 +8,88 @@ import { ConfigValidationError } from "./utils/errors.js"
 // ============================================================================
 
 /**
+ * Schema for source capabilities (Requirements 15.4, 16.1).
+ * Declares what kind of data a source provides.
+ */
+export const SourceCapsSchema = z.object({
+	kind: z.enum(["audio_pcm", "iq", "recording"]),
+	sampleRate: z.number().int().positive(),
+	format: z.enum(["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ"]),
+	channels: z.number().int().positive().optional(),
+	centerFreq: z.number().positive().optional(),
+	exclusive: z.boolean().default(false),
+})
+
+/**
  * Schema for SDR source configuration.
- * Supports rtl_tcp and SDR++ network sink sources.
+ * Supports rtl_tcp, SDR++ network sink, and recording sources.
  */
 export const SourceConfigSchema = z.object({
 	id: z.string().min(1),
-	type: z.enum(["sdrpp-network", "rtl_tcp"]),
-	host: z.string().min(1),
-	port: z.number().int().min(1).max(65535),
-	format: z.enum(["S16LE", "FLOAT32LE"]),
-	sampleRate: z.number().int().positive(),
+	type: z.enum(["sdrpp-network", "rtl_tcp", "recording"]),
+	host: z.string().min(1).optional(),
+	port: z.number().int().min(1).max(65535).optional(),
+	filePath: z.string().optional(), // For recording sources
+	loop: z.boolean().default(false), // For recording sources
+	playbackSpeed: z.number().positive().default(1.0), // For recording sources
+	caps: SourceCapsSchema,
+})
+
+/**
+ * Schema for decoder capabilities (Requirements 17.1, 17.2, 17.3, 17.4).
+ * Declares what input/output a decoder supports and its integration pattern.
+ */
+export const DecoderCapsSchema = z.object({
+	/** Input type the decoder accepts */
+	input: z.enum(["audio_pcm", "iq", "external"]),
+	/** Whether the decoder requires exclusive access to its source */
+	wantsExclusiveSource: z.boolean().optional(),
+	/** Preferred sample rates for this decoder */
+	preferredSampleRates: z.array(z.number().int().positive()).optional(),
+	/** Output format produced by the decoder */
+	output: z.enum(["jsonl", "nmea", "beast", "text"]),
+	/** Integration pattern for this decoder */
+	integrationPattern: z.enum([
+		"pure_consumer",
+		"network_producer",
+		"external_sdr",
+	]),
 })
 
 /**
  * Schema for decoder configuration.
  * Each decoder has a type that maps to a registered factory.
+ * Supports all three integration patterns: pure_consumer, network_producer, external_sdr.
+ * Requirements: 17.1, 17.2, 17.3, 17.4
  */
 export const DecoderConfigSchema = z.object({
 	id: z.string().min(1),
 	type: z.string().min(1),
 	enabled: z.boolean(),
+	/** Which source to attach to (for pure_consumer decoders) */
+	sourceId: z.string().min(1).optional(),
 	options: z.record(z.unknown()),
+	// For external SDR decoders (external_sdr pattern)
+	/** Device serial number for external SDR decoders */
+	deviceSerial: z.string().optional(),
+	/** Frequencies to monitor (Hz) for external SDR decoders */
+	frequencies: z.array(z.number().positive()).optional(),
+	/** Gain setting for external SDR decoders */
+	gain: z.number().optional(),
+	/** PPM correction for external SDR decoders */
+	ppm: z.number().optional(),
+	// For network producer decoders (network_producer pattern)
+	/** Host to connect to for network producer output */
+	outputHost: z.string().optional(),
+	/** Port to connect to for network producer output */
+	outputPort: z.number().int().min(1).max(65535).optional(),
+	/** Protocol for network producer output */
+	outputProtocol: z.enum(["tcp", "udp"]).optional(),
+	// Version pinning (Requirement 27.1, 27.2, 27.3)
+	/** Minimum required version for this decoder */
+	minVersion: z.string().optional(),
+	/** Maximum allowed version for this decoder */
+	maxVersion: z.string().optional(),
 })
 
 /**
@@ -57,8 +118,19 @@ export const LoggingConfigSchema = z.object({
 })
 
 /**
+ * Schema for health monitoring configuration (Requirements 20.1, 20.2, 20.3, 20.4).
+ * Configures how decoder health is monitored and when state transitions occur.
+ */
+export const HealthConfigSchema = z.object({
+	/** Interval in milliseconds between health checks (default: 5000ms) */
+	checkInterval: z.number().int().positive().default(5000),
+	/** Milliseconds without output before a decoder is considered degraded (default: 30000ms) */
+	degradedTimeout: z.number().int().positive().default(30000),
+})
+
+/**
  * Main configuration schema for WaveKit.
- * Requirements: 12.5
+ * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
 export const ConfigSchema = z.object({
 	sources: z.array(SourceConfigSchema).default([]),
@@ -66,17 +138,21 @@ export const ConfigSchema = z.object({
 	audio: AudioConfigSchema.default({}),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
+	health: HealthConfigSchema.optional(),
 })
 
 // ============================================================================
 // Type Exports
 // ============================================================================
 
+export type SourceCaps = z.infer<typeof SourceCapsSchema>
 export type SourceConfig = z.infer<typeof SourceConfigSchema>
+export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
+export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================

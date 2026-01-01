@@ -8,12 +8,17 @@
  * - 4.4: WHEN a decoder produces output, THE Decoder_Manager SHALL parse it into structured DecoderOutput objects
  * - 4.5: WHEN requested, THE Decoder_Manager SHALL return status for all managed decoders including PID, uptime, and statistics
  * - 4.6: THE Decoder_Manager SHALL emit events for decoder output, errors, and exit conditions
+ * - 20.1: WHEN a decoder is running and producing output, THE Decoder_Manager SHALL report health as "running"
+ * - 20.2: WHEN a decoder is running but has not produced output for the configured timeout, THE Decoder_Manager SHALL report health as "degraded"
+ * - 20.3: WHEN a decoder has crashed and exceeded restart limits, THE Decoder_Manager SHALL report health as "faulted"
+ * - 20.4: WHEN decoder health changes, THE Decoder_Manager SHALL emit a health event with the new status
  */
 
 import { EventEmitter } from "node:events"
 import type {
 	Decoder,
 	DecoderConfig,
+	DecoderHealth,
 	DecoderOutput,
 	DecoderStatus,
 } from "./types.js"
@@ -31,6 +36,10 @@ export interface DecoderManagerConfig {
 	maxRestartDelay: number
 	/** Maximum number of restarts before giving up (0 = unlimited, default: 0) */
 	maxRestarts: number
+	/** Interval in milliseconds between health checks (default: 5000) */
+	healthCheckInterval: number
+	/** Timeout in milliseconds without output before marking decoder as degraded (default: 30000) */
+	degradedTimeout: number
 }
 
 /**
@@ -44,6 +53,10 @@ interface DecoderState {
 	restartTimer: ReturnType<typeof setTimeout> | null
 	intentionallyStopped: boolean
 	branchId: string | null
+	/** Last known health state for change detection */
+	lastHealth: DecoderHealth
+	/** Timestamp of last output received */
+	lastOutputAt: Date | null
 }
 
 /**
@@ -66,12 +79,16 @@ export interface DecoderManagerEvents {
 	) => void
 	/** Emitted when max restarts exceeded */
 	"decoder:max-restarts": (decoderId: string, restartCount: number) => void
+	/** Emitted when decoder health changes (Requirement 20.4) */
+	"decoder:health": (decoderId: string, health: DecoderHealth) => void
 }
 
 const DEFAULT_CONFIG: DecoderManagerConfig = {
 	restartDelay: 2000,
 	maxRestartDelay: 30000,
 	maxRestarts: 0,
+	healthCheckInterval: 5000,
+	degradedTimeout: 30000,
 }
 
 /**
@@ -83,6 +100,7 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
  * - Auto-restart with exponential backoff on unexpected exits
  * - Wiring decoders to fanout branches for audio input
  * - Forwarding decoder events
+ * - Periodic health checks (Requirements 20.1, 20.2, 20.3, 20.4)
  */
 export class DecoderManager extends EventEmitter {
 	private readonly log: Logger
@@ -90,6 +108,7 @@ export class DecoderManager extends EventEmitter {
 	private readonly fanout: FanoutManager
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
+	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
 
 	constructor(
 		registry: DecoderRegistry,
@@ -102,6 +121,9 @@ export class DecoderManager extends EventEmitter {
 		this.fanout = fanout
 		this.log = createComponentLogger(logger, "DecoderManager")
 		this.config = { ...DEFAULT_CONFIG, ...config }
+
+		// Start periodic health checks (Requirements 20.1, 20.2, 20.3, 20.4)
+		this.startHealthChecks()
 	}
 
 	/**
@@ -136,6 +158,8 @@ export class DecoderManager extends EventEmitter {
 			restartTimer: null,
 			intentionallyStopped: false,
 			branchId: null,
+			lastHealth: "running",
+			lastOutputAt: null,
 		}
 
 		this.decoders.set(config.id, state)
@@ -343,6 +367,9 @@ export class DecoderManager extends EventEmitter {
 	async destroy(): Promise<void> {
 		this.log.info("Destroying DecoderManager")
 
+		// Stop health checks
+		this.stopHealthChecks()
+
 		await this.stopAll()
 
 		for (const id of this.decoders.keys()) {
@@ -357,7 +384,9 @@ export class DecoderManager extends EventEmitter {
 		const { decoder } = state
 
 		// Forward output events (Requirement 4.4, 4.6)
+		// Also track last output time for health checks (Requirement 20.1, 20.2)
 		decoder.on("output", (output: DecoderOutput) => {
+			state.lastOutputAt = new Date()
 			this.emit("decoder:output", decoder.id, output)
 		})
 
@@ -369,12 +398,19 @@ export class DecoderManager extends EventEmitter {
 
 		// Handle started event
 		decoder.on("started", () => {
+			// Reset health to running when decoder starts (Requirement 20.1)
+			this.updateDecoderHealth(state, "running")
 			this.emit("decoder:started", decoder.id)
 		})
 
 		// Handle stopped event
 		decoder.on("stopped", () => {
 			this.emit("decoder:stopped", decoder.id)
+		})
+
+		// Forward health events from decoder (Requirement 20.4)
+		decoder.on("health", (health: DecoderHealth) => {
+			this.updateDecoderHealth(state, health)
 		})
 
 		// Handle exit for auto-restart (Requirement 4.2)
@@ -385,6 +421,7 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Handles decoder process exit for auto-restart logic (Requirement 4.2).
+	 * Also handles health state transitions (Requirements 20.3).
 	 */
 	private handleDecoderExit(
 		state: DecoderState,
@@ -405,7 +442,7 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 
-		// Check if max restarts exceeded
+		// Check if max restarts exceeded (Requirement 20.3)
 		if (
 			this.config.maxRestarts > 0 &&
 			state.restartCount >= this.config.maxRestarts
@@ -414,6 +451,8 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: decoder.id, restartCount: state.restartCount },
 				"Max restarts exceeded, not restarting",
 			)
+			// Set health to faulted when crash loop detected (Requirement 20.3)
+			this.updateDecoderHealth(state, "faulted")
 			this.emit("decoder:max-restarts", decoder.id, state.restartCount)
 			return
 		}
@@ -507,6 +546,155 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: decoder.id, branchId },
 				"Decoder unwired from fanout branch",
 			)
+		}
+	}
+
+	// ============================================================================
+	// Health Monitoring (Requirements 20.1, 20.2, 20.3, 20.4)
+	// ============================================================================
+
+	/**
+	 * Gets the health state of a decoder by ID (Requirements 20.1, 20.2, 20.3).
+	 *
+	 * @param id - The decoder ID
+	 * @returns DecoderHealth or undefined if not found
+	 */
+	getHealth(id: string): DecoderHealth | undefined {
+		const state = this.decoders.get(id)
+		if (!state) {
+			return undefined
+		}
+		return state.lastHealth
+	}
+
+	/**
+	 * Gets the health state of all managed decoders (Requirements 20.1, 20.2, 20.3).
+	 *
+	 * @returns Map of decoder ID to health state
+	 */
+	getAllHealth(): Map<string, DecoderHealth> {
+		const healthMap = new Map<string, DecoderHealth>()
+		for (const [id, state] of this.decoders) {
+			healthMap.set(id, state.lastHealth)
+		}
+		return healthMap
+	}
+
+	/**
+	 * Starts periodic health checks for all decoders.
+	 * Checks for degraded state based on output timeout (Requirement 20.2).
+	 */
+	private startHealthChecks(): void {
+		if (this.healthCheckTimer) {
+			return
+		}
+
+		this.log.debug(
+			{ interval: this.config.healthCheckInterval },
+			"Starting health checks",
+		)
+
+		this.healthCheckTimer = setInterval(() => {
+			this.performHealthChecks()
+		}, this.config.healthCheckInterval)
+	}
+
+	/**
+	 * Stops periodic health checks.
+	 */
+	private stopHealthChecks(): void {
+		if (this.healthCheckTimer) {
+			clearInterval(this.healthCheckTimer)
+			this.healthCheckTimer = null
+			this.log.debug("Stopped health checks")
+		}
+	}
+
+	/**
+	 * Performs health checks on all running decoders.
+	 * Transitions to degraded state if no output received within timeout (Requirement 20.2).
+	 * Transitions back to running state if output is received (Requirement 20.1).
+	 */
+	private performHealthChecks(): void {
+		const now = Date.now()
+
+		for (const [id, state] of this.decoders) {
+			const { decoder, lastOutputAt, lastHealth } = state
+			const status = decoder.getStatus()
+
+			// Skip if not running or already faulted
+			if (!status.running || lastHealth === "faulted") {
+				continue
+			}
+
+			// Check if decoder has produced output recently
+			if (lastOutputAt) {
+				const timeSinceOutput = now - lastOutputAt.getTime()
+
+				if (timeSinceOutput > this.config.degradedTimeout) {
+					// No output for too long - transition to degraded (Requirement 20.2)
+					if (lastHealth !== "degraded") {
+						this.log.warn(
+							{
+								decoderId: id,
+								timeSinceOutput,
+								timeout: this.config.degradedTimeout,
+							},
+							"Decoder has not produced output, marking as degraded",
+						)
+						this.updateDecoderHealth(state, "degraded")
+					}
+				} else if (lastHealth === "degraded") {
+					// Output received recently - transition back to running (Requirement 20.1)
+					this.log.info(
+						{ decoderId: id },
+						"Decoder producing output again, marking as running",
+					)
+					this.updateDecoderHealth(state, "running")
+				}
+			} else {
+				// No output ever received - check if decoder has been running long enough
+				const uptime = status.uptime * 1000 // Convert to ms
+				if (uptime > this.config.degradedTimeout && lastHealth !== "degraded") {
+					this.log.warn(
+						{
+							decoderId: id,
+							uptime: status.uptime,
+							timeout: this.config.degradedTimeout,
+						},
+						"Decoder has never produced output, marking as degraded",
+					)
+					this.updateDecoderHealth(state, "degraded")
+				}
+			}
+		}
+	}
+
+	/**
+	 * Updates the health state of a decoder and emits an event if changed (Requirement 20.4).
+	 *
+	 * @param state - The decoder state to update
+	 * @param health - The new health state
+	 */
+	private updateDecoderHealth(
+		state: DecoderState,
+		health: DecoderHealth,
+	): void {
+		if (state.lastHealth !== health) {
+			const previousHealth = state.lastHealth
+			state.lastHealth = health
+
+			this.log.info(
+				{
+					decoderId: state.decoder.id,
+					previousHealth,
+					newHealth: health,
+				},
+				"Decoder health changed",
+			)
+
+			// Emit health event (Requirement 20.4)
+			this.emit("decoder:health", state.decoder.id, health)
 		}
 	}
 }

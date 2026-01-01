@@ -5,3 +5,4 @@ dist
 .log
 decoded_calls
 snapshots
+coverage
