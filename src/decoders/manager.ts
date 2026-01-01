@@ -12,6 +12,9 @@
  * - 20.2: WHEN a decoder is running but has not produced output for the configured timeout, THE Decoder_Manager SHALL report health as "degraded"
  * - 20.3: WHEN a decoder has crashed and exceeded restart limits, THE Decoder_Manager SHALL report health as "faulted"
  * - 20.4: WHEN decoder health changes, THE Decoder_Manager SHALL emit a health event with the new status
+ * - 27.1: WHEN a decoder is configured, THE Decoder_Manager SHALL validate the installed version against the pinned version
+ * - 27.2: WHEN a version mismatch is detected, THE Decoder_Manager SHALL log a warning with upgrade instructions
+ * - 27.3: THE Configuration SHALL support specifying minimum and maximum versions per decoder type
  */
 
 import { EventEmitter } from "node:events"
@@ -25,6 +28,11 @@ import type {
 import type { DecoderRegistry } from "./registry.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import {
+	validateDecoderVersion,
+	getUpgradeInstructions,
+	type VersionValidationResult,
+} from "../utils/version.js"
 
 /**
  * Configuration for the Decoder Manager.
@@ -40,6 +48,8 @@ export interface DecoderManagerConfig {
 	healthCheckInterval: number
 	/** Timeout in milliseconds without output before marking decoder as degraded (default: 30000) */
 	degradedTimeout: number
+	/** Whether to validate decoder versions at startup (default: true) */
+	validateVersions: boolean
 }
 
 /**
@@ -57,6 +67,8 @@ interface DecoderState {
 	lastHealth: DecoderHealth
 	/** Timestamp of last output received */
 	lastOutputAt: Date | null
+	/** Version validation result (Requirements 27.1, 27.2, 27.3) */
+	versionValidation?: VersionValidationResult | undefined
 }
 
 /**
@@ -81,6 +93,11 @@ export interface DecoderManagerEvents {
 	"decoder:max-restarts": (decoderId: string, restartCount: number) => void
 	/** Emitted when decoder health changes (Requirement 20.4) */
 	"decoder:health": (decoderId: string, health: DecoderHealth) => void
+	/** Emitted when decoder version validation fails (Requirement 27.2) */
+	"decoder:version-mismatch": (
+		decoderId: string,
+		validation: VersionValidationResult,
+	) => void
 }
 
 const DEFAULT_CONFIG: DecoderManagerConfig = {
@@ -89,6 +106,7 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 	maxRestarts: 0,
 	healthCheckInterval: 5000,
 	degradedTimeout: 30000,
+	validateVersions: true,
 }
 
 /**
@@ -129,6 +147,7 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * Creates a decoder instance using the registry.
 	 * Does not start the decoder - call startDecoder() separately.
+	 * Validates decoder version against configured constraints (Requirements 27.1, 27.2, 27.3).
 	 *
 	 * @param config - Configuration for the decoder
 	 * @returns The created decoder instance
@@ -150,6 +169,12 @@ export class DecoderManager extends EventEmitter {
 
 		const decoder = this.registry.create(config, this.log)
 
+		// Validate decoder version if constraints are specified (Requirements 27.1, 27.2, 27.3)
+		let versionValidation: VersionValidationResult | undefined
+		if (this.config.validateVersions) {
+			versionValidation = this.validateDecoderVersion(config)
+		}
+
 		const state: DecoderState = {
 			decoder,
 			config,
@@ -160,6 +185,7 @@ export class DecoderManager extends EventEmitter {
 			branchId: null,
 			lastHealth: "running",
 			lastOutputAt: null,
+			versionValidation,
 		}
 
 		this.decoders.set(config.id, state)
@@ -547,6 +573,130 @@ export class DecoderManager extends EventEmitter {
 				"Decoder unwired from fanout branch",
 			)
 		}
+	}
+
+	// ============================================================================
+	// Version Validation (Requirements 27.1, 27.2, 27.3)
+	// ============================================================================
+
+	/**
+	 * Validates a decoder's installed version against configured constraints.
+	 * Requirements: 27.1, 27.2, 27.3
+	 *
+	 * @param config - Decoder configuration with version constraints
+	 * @returns Version validation result
+	 */
+	private validateDecoderVersion(
+		config: DecoderConfig,
+	): VersionValidationResult {
+		const { type, minVersion, maxVersion } = config
+
+		// Skip validation if no constraints specified
+		if (!minVersion && !maxVersion) {
+			this.log.debug(
+				{ decoderId: config.id, type },
+				"No version constraints specified, skipping validation",
+			)
+			return { valid: true }
+		}
+
+		this.log.info(
+			{ decoderId: config.id, type, minVersion, maxVersion },
+			"Validating decoder version",
+		)
+
+		const result = validateDecoderVersion(type, minVersion, maxVersion)
+
+		if (result.valid) {
+			this.log.info(
+				{
+					decoderId: config.id,
+					type,
+					detectedVersion: result.detectedVersion,
+					minVersion,
+					maxVersion,
+				},
+				"Decoder version validation passed",
+			)
+		} else {
+			// Log warning with upgrade instructions (Requirement 27.2)
+			if (result.detectedVersion) {
+				if (minVersion && result.detectedVersion) {
+					const instructions = getUpgradeInstructions(
+						type,
+						result.detectedVersion,
+						minVersion,
+						true,
+					)
+					this.log.warn(
+						{
+							decoderId: config.id,
+							type,
+							detectedVersion: result.detectedVersion,
+							minVersion,
+							maxVersion,
+							error: result.error,
+						},
+						instructions,
+					)
+				} else if (maxVersion && result.detectedVersion) {
+					const instructions = getUpgradeInstructions(
+						type,
+						result.detectedVersion,
+						maxVersion,
+						false,
+					)
+					this.log.warn(
+						{
+							decoderId: config.id,
+							type,
+							detectedVersion: result.detectedVersion,
+							minVersion,
+							maxVersion,
+							error: result.error,
+						},
+						instructions,
+					)
+				}
+			} else {
+				this.log.warn(
+					{
+						decoderId: config.id,
+						type,
+						error: result.error,
+					},
+					`Failed to detect version for decoder ${type}. Version validation skipped.`,
+				)
+			}
+
+			// Emit version mismatch event
+			this.emit("decoder:version-mismatch", config.id, result)
+		}
+
+		return result
+	}
+
+	/**
+	 * Gets the version validation result for a decoder.
+	 *
+	 * @param id - Decoder ID
+	 * @returns Version validation result or undefined if not found
+	 */
+	getVersionValidation(id: string): VersionValidationResult | undefined {
+		return this.decoders.get(id)?.versionValidation
+	}
+
+	/**
+	 * Gets all version validation results.
+	 *
+	 * @returns Map of decoder ID to version validation result
+	 */
+	getAllVersionValidations(): Map<string, VersionValidationResult | undefined> {
+		const validations = new Map<string, VersionValidationResult | undefined>()
+		for (const [id, state] of this.decoders) {
+			validations.set(id, state.versionValidation)
+		}
+		return validations
 	}
 
 	// ============================================================================

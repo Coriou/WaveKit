@@ -119,3 +119,23 @@ export class NetworkConnectionError extends WaveKitError {
 		this.name = "NetworkConnectionError"
 	}
 }
+
+/**
+ * Error thrown when decoder version validation fails.
+ * Requirements: 27.1, 27.2, 27.3
+ */
+export class DecoderVersionError extends WaveKitError {
+	constructor(
+		public readonly decoderType: string,
+		public readonly detectedVersion: string | undefined,
+		public readonly minVersion: string | undefined,
+		public readonly maxVersion: string | undefined,
+		message?: string,
+	) {
+		const defaultMessage = detectedVersion
+			? `Decoder ${decoderType} version ${detectedVersion} does not satisfy version constraints`
+			: `Failed to detect version for decoder ${decoderType}`
+		super(message ?? defaultMessage, "DECODER_VERSION_ERROR")
+		this.name = "DecoderVersionError"
+	}
+}

@@ -490,9 +490,7 @@ export function loadPacketsSampleRaw(): string {
  * @param line - Packet line to parse
  * @returns Parsed packet components or null if invalid
  */
-export function parsePacketLine(
-	line: string,
-): {
+export function parsePacketLine(line: string): {
 	source: string
 	destination: string
 	path: string[]

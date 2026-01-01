@@ -22,7 +22,7 @@ Your roadmap is directionally solid, but it needed several important updates to 
 3. **SDR++ RAW mode**: Do **not** plan on it for IQ. Network sink is effectively **PCM/audio**, not a reliable IQ transport. Keep SDR++ as an **audio demod source only** unless you prove otherwise. ([sdrpp.org][3])
 4. **Multi-SDR must move earlier**: Many “new” domains (ADS-B 1090, AIS 162, VHF ACARS/VDL2 136, HF HFDL, etc.) cannot share a single tuner. Multi-source support is a prerequisite to a good UX.
 5. **Satellite plan must be updated**: NOAA APT via NOAA-15/18/19 is effectively **end-of-era**—NOAA-18 was decommissioned Jun 6, 2025; NOAA-15 & NOAA-19 were decommissioned Aug 2025. Satellite expansion should focus on **modern targets** (Meteor, GOES HRIT, etc.) via SatDump rather than “NOAA APT first”. ([NOAA OSPO][4])
-6. **Security & maintenance**: At least one key decoder (Direwolf) has a published 2025 security issue; we must add version pinning + update discipline into the plan. ([nvd.nist.gov][5])
+6. **Security & maintenance**: At least one key decoder (Direwolf) has a published 2025 security issue; we must add version pinning + update discipline into the plan. ([nvd.nist.gov][5]) See [SECURITY.md](./SECURITY.md) for version pinning best practices and security advisory tracking.
 
 ---
 
@@ -328,6 +328,7 @@ interface Band {
 **Security note**
 
 - Add version pinning + update doc; track published advisories. ([nvd.nist.gov][5])
+- See [SECURITY.md](./SECURITY.md) for detailed security guidance and CVE tracking.
 
 ---
 
@@ -393,6 +394,7 @@ Must include:
 5. **Security updates**:
    - Version pin all decoders
    - Monthly dependency refresh cadence (or automated CVE watch)
+   - See [SECURITY.md](./SECURITY.md) for complete security advisory tracking process
 
 ---
 

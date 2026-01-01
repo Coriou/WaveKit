@@ -337,16 +337,16 @@ This phase implements the decoder expansion roadmap, adding multi-source support
     - Add sample KISS frame data
     - Create recording source files for CI testing
 
-- [ ] 23. Checkpoint - Amateur Radio Decoders
+- [x] 23. Checkpoint - Amateur Radio Decoders
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 24. Decoder Version Management
-  - [ ] 24.1 Implement version detection and validation
+  - [x] 24.1 Implement version detection and validation
     - Detect installed decoder versions at startup
     - Validate against configured min/max versions
     - Log warnings for version mismatches
     - _Requirements: 27.1, 27.2, 27.3_
-  - [ ] 24.2 Update documentation with security guidance
+  - [x] 24.2 Update documentation with security guidance
     - Document version pinning best practices
     - Add security advisory tracking process
     - _Requirements: 27.4_
