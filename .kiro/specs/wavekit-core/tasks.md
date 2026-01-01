@@ -58,28 +58,28 @@ This implementation plan follows a bottom-up approach, starting with utilities a
     - **Property 5: Branch Independence**
     - **Property 6: Backpressure Non-Blocking**
     - **Validates: Requirements 2.2, 2.3, 2.4, 2.5**
-  - [ ] 4.5 Implement Source Manager
+  - [x] 4.5 Implement Source Manager
     - Create TCP client with auto-reconnect and exponential backoff
     - Implement status tracking and metrics emission
     - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7_
-  - [ ] 4.6 Write property tests for Source Manager
+  - [x] 4.6 Write property tests for Source Manager
     - **Property 1: Exponential Backoff Correctness**
     - **Property 2: Source Status Completeness**
     - **Property 3: Connection Error Resilience**
     - **Validates: Requirements 1.2, 1.6, 1.7**
-  - [ ] 4.7 Implement Audio Output TCP server
+  - [x] 4.7 Implement Audio Output TCP server
     - Create TCP server for streaming audio to host players
     - Implement multi-client fanout
     - _Requirements: 11.1, 11.2, 11.3, 11.4, 11.5_
-  - [ ] 4.8 Write property test for Audio Output
+  - [x] 4.8 Write property test for Audio Output
     - **Property 20: Audio Output Multi-Client Distribution**
     - **Validates: Requirements 11.2, 11.3**
 
-- [ ] 5. Checkpoint - Core Components
+- [x] 5. Checkpoint - Core Components
   - Ensure all tests pass, ask the user if questions arise.
 
 - [ ] 6. Implement Decoder System
-  - [ ] 6.1 Implement Decoder types and interfaces
+  - [-] 6.1 Implement Decoder types and interfaces
     - Create DecoderConfig, DecoderOutput, DecoderStatus types
     - Define Decoder interface
     - _Requirements: 4.4, 4.5, 4.6_
