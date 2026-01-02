@@ -1,0 +1,32 @@
+sources:
+  - id: sdrpp
+    type: sdrpp-network
+    host: host.docker.internal
+    port: 7355
+    caps:
+      kind: audio_pcm
+      sampleRate: 48000
+      format: FLOAT32LE
+      exclusive: false
+
+decoders:
+  - id: adsb
+    type: readsb
+    enabled: true
+    options:
+      outputFormat: sbs
+
+  - id: acars
+    type: acarsdec
+    enabled: true
+    options:
+      outputFormat: json
+
+audio:
+  tcpPort: 8080
+  format: S16LE
+  sampleRate: 48000
+
+api:
+  host: 0.0.0.0
+  port: 3000

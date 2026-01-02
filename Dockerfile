@@ -476,7 +476,10 @@ COPY --from=node-build /app/package*.json /app/
 
 # Copy s6-overlay service definitions (without sdrpp)
 COPY docker/overlay/s6-overlay/s6-rc.d /etc/s6-overlay/s6-rc.d
-RUN rm -rf /etc/s6-overlay/s6-rc.d/sdrpp-server
+RUN rm -rf /etc/s6-overlay/s6-rc.d/sdrpp-server && \
+    rm -f /etc/s6-overlay/s6-rc.d/wavekit-api/dependencies.d/sdrpp-server && \
+    rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/sdrpp-server && \
+    rm -f /etc/s6-overlay/s6-rc.d/services/contents.d/sdrpp-server
 
 COPY docker/scripts/healthcheck.sh /etc/s6-overlay/scripts/
 RUN chmod 755 /etc/s6-overlay/scripts/healthcheck.sh
