@@ -1,1 +1,400 @@
-# wavekit
+# WaveKit
+
+**TypeScript-based SDR stream processing framework**
+
+WaveKit connects to Software Defined Radio (SDR) sources and decodes multiple signal types in parallel. Connect an SDR (RTL-SDR, Airspy, HackRF) via TCP, and WaveKit automatically processes the stream through 8 specialized decoders—capturing aircraft (ADS-B), ships (AIS), aircraft datalinks (VDL2/ACARS), amateur radio (APRS), pager signals, and IoT sensors. Decoded data flows to applications via REST API and WebSocket, with audio playback available over TCP.
+
+[![License: ISC](https://img.shields.io/badge/license-ISC-blue.svg)](LICENSE)
+[![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](package.json)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)](https://www.typescriptlang.org/)
+
+## What It Does
+
+1. **Receives SDR data** over TCP from rtl_tcp, SDR++ network sink, or recorded files
+2. **Multiplexes streams** to multiple decoders in parallel with independent buffering
+3. **Decodes signals** using 8 specialized external programs (all implemented)
+4. **Streams output** via REST API and WebSocket to applications
+5. **Manages lifecycle** with auto-reconnect, health monitoring, and graceful degradation
+
+## Quick Start
+
+### Local Development
+
+```bash
+git clone https://github.com/coriou/wavekit.git
+cd wavekit
+npm install
+
+# Start dev server with hot reload
+npm run dev
+
+# In another terminal, start your SDR source
+rtl_tcp -a 127.0.0.1 -p 1234
+
+# View logs and API at http://localhost:3000
+```
+
+### Using Docker
+
+```bash
+# Build the image locally
+docker build -t wavekit:latest .
+
+# Run it (connects to rtl_tcp on host machine)
+docker run -p 3000:3000 -p 8080:8080 \
+  -e WAVEKIT_SOURCES_0_HOST=host.docker.internal \
+  -e WAVEKIT_SOURCES_0_PORT=1234 \
+  wavekit:latest
+```
+
+## How It Works
+
+```
+┌──────────────────┐
+│  SDR Source      │  rtl_tcp, SDR++ network sink, or recording file
+│  (TCP Input)     │
+└────────┬─────────┘
+         │
+         ▼ Raw audio/IQ data
+┌──────────────────────────────────────┐
+│   WaveKit Application (TypeScript)   │
+│                                      │
+│  • SourceManager: Connects, reconnects, metrics
+│  • FanoutManager: Copies stream to all decoders
+│  • Format Converter: Audio format transforms
+│  • 8 Decoder Processes (running in parallel):
+│    - dsd-fme (DMR/P25/YSF/D-Star)
+│    - multimon-ng (POCSAG/FLEX pagers)
+│    - rtl_433 (IoT sensors)
+│    - readsb (ADS-B aircraft)
+│    - dumpvdl2 (VDL2 aviation datalink)
+│    - acarsdec (ACARS aircraft)
+│    - AIS-catcher (Maritime AIS)
+│    - direwolf (APRS amateur radio)
+│  • Fastify API Server with WebSocket
+│                                      │
+└──────────┬──────────────┬───────────┘
+           │              │
+      Decoded events    Audio stream
+           │              │
+           ▼              ▼
+    WebSocket clients   TCP audio output
+    REST API clients    (sox, ffplay, etc)
+```
+
+## Decoders (All 8 Implemented)
+
+| Decoder         | Signals                               | Output            | Integration      |
+| --------------- | ------------------------------------- | ----------------- | ---------------- |
+| **dsd-fme**     | DMR, P25, YSF, D-Star, NXDN, ProVoice | Audio + metadata  | Process spawning |
+| **multimon-ng** | POCSAG, FLEX, EAS, DTMF               | Text/metadata     | Process spawning |
+| **rtl_433**     | ISM band sensors, weather stations    | JSON/text         | Process spawning |
+| **readsb**      | ADS-B aircraft radar                  | JSON (beast/json) | Network sink     |
+| **dumpvdl2**    | VDL2 aviation datalinks               | JSON/text         | Process spawning |
+| **acarsdec**    | ACARS aircraft datalink               | JSON/text         | Process spawning |
+| **AIS-catcher** | Maritime AIS transponders             | JSON/NMEA         | Network sink     |
+| **direwolf**    | APRS amateur radio packets            | Frames            | Beacon mode      |
+
+## API Endpoints
+
+All endpoints on `http://localhost:3000`:
+
+### Health & Status
+
+```bash
+# Liveness probe (200 OK or 503)
+curl http://localhost:3000/health
+
+# Readiness probe (includes component status)
+curl http://localhost:3000/health/ready
+
+# Full system status (sources, decoders, metrics)
+curl http://localhost:3000/api/status
+```
+
+### Sources
+
+```bash
+# List all configured sources
+curl http://localhost:3000/api/sources
+
+# Add a new source
+curl -X POST http://localhost:3000/api/sources \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "rtl_pi",
+    "type": "rtl_tcp",
+    "host": "192.168.1.100",
+    "port": 1234,
+    "caps": {
+      "kind": "audio_pcm",
+      "sampleRate": 48000,
+      "format": "S16LE",
+      "exclusive": false
+    }
+  }'
+
+# Remove a source
+curl -X DELETE http://localhost:3000/api/sources/rtl_pi
+```
+
+### Decoders
+
+```bash
+# List all decoders and their status
+curl http://localhost:3000/api/decoders
+
+# Start a decoder
+curl -X POST http://localhost:3000/api/decoders/readsb/start
+
+# Stop a decoder
+curl -X POST http://localhost:3000/api/decoders/readsb/stop
+
+# Update decoder config
+curl -X PATCH http://localhost:3000/api/decoders/readsb \
+  -H "Content-Type: application/json" \
+  -d '{ "args": ["--json-dir", "/tmp/adsb"] }'
+```
+
+### WebSocket Events
+
+Connect to `ws://localhost:3000/ws` and subscribe to channels:
+
+```javascript
+const ws = new WebSocket("ws://localhost:3000/ws")
+
+// Subscribe to decoder output events
+ws.send(
+	JSON.stringify({
+		type: "subscribe",
+		channels: ["decoders", "sources", "metrics", "health"],
+	}),
+)
+
+ws.onmessage = event => {
+	const msg = JSON.parse(event.data)
+	// msg.type: 'decoder:output', 'source:connected', 'metrics', 'decoder:health', etc
+	// msg.channel: 'decoders' | 'sources' | 'metrics' | 'health'
+	// msg.data: event data
+}
+```
+
+Channels:
+
+- **decoders**: Decoder output, started/stopped/error events
+- **sources**: Source connected/disconnected events
+- **metrics**: Stream data rate metrics (~5s intervals)
+- **health**: Decoder health state changes (running/degraded/faulted)
+
+## Configuration
+
+Configuration is YAML in `config/default.yaml`. Override with environment variables prefixed `WAVEKIT_`:
+
+```yaml
+# API server
+api:
+  host: 0.0.0.0
+  port: 3000
+
+# Audio output TCP server
+audio:
+  format: S16LE # S16LE or FLOAT32LE
+  sampleRate: 48000 # Hz
+  tcpPort: 8080 # TCP port for sox/ffplay
+
+# Log level
+log:
+  level: info # trace, debug, info, warn, error
+
+# SDR sources (connect via TCP)
+sources: []
+# Example:
+# - id: rtl_pi
+#   type: rtl_tcp
+#   host: 192.168.1.100
+#   port: 1234
+#   caps:
+#     kind: audio_pcm
+#     sampleRate: 48000
+#     format: S16LE
+#     exclusive: false
+
+# Decoders to run
+decoders:
+  dsd_fme:
+    enabled: true
+    args: ["-i", "stdin", "-o", "stdout"]
+  readsb:
+    enabled: true
+    args: ["--json-dir", "/tmp/adsb"]
+  # ... others
+```
+
+Environment variable examples:
+
+```bash
+WAVEKIT_API_PORT=3000
+WAVEKIT_AUDIO_SAMPLE_RATE=48000
+WAVEKIT_LOG_LEVEL=debug
+WAVEKIT_SOURCES_0_HOST=192.168.1.100
+WAVEKIT_SOURCES_0_PORT=1234
+```
+
+## Development
+
+### Project Structure
+
+```
+src/
+├── index.ts              # Entry point, wires components
+├── config.ts             # Config loading and validation (Zod)
+├── bootstrap.ts          # Environment setup
+│
+├── core/                 # Stream processing
+│   ├── source-manager.ts   # TCP client for SDR sources
+│   ├── fanout-manager.ts   # Stream multiplexer
+│   ├── format-converter.ts # Audio format transforms
+│   └── audio-output.ts     # TCP server for audio playback
+│
+├── decoders/             # Decoder plugin system
+│   ├── types.ts           # Decoder interfaces
+│   ├── base-decoder.ts    # Abstract base class for decoders
+│   ├── manager.ts         # Manages decoder lifecycle
+│   ├── registry.ts        # Registers decoders
+│   └── builtin/           # 8 built-in decoders
+│       ├── dsd-fme.ts
+│       ├── readsb.ts
+│       ├── acarsdec.ts
+│       ├── ais-catcher.ts
+│       ├── dumpvdl2.ts
+│       ├── direwolf.ts
+│       ├── multimon-ng.ts
+│       └── rtl433.ts
+│
+├── api/                  # Fastify REST/WebSocket server
+│   ├── server.ts         # Fastify setup, plugins, error handling
+│   ├── routes/
+│   │   ├── health.ts     # Health check endpoints
+│   │   ├── sources.ts    # Source management
+│   │   └── decoders.ts   # Decoder management
+│   └── websocket/
+│       └── events.ts     # WebSocket event broadcaster
+│
+└── utils/
+    ├── logger.ts         # Pino structured logging
+    ├── errors.ts         # Custom error classes
+    ├── health-check.ts   # Health monitoring
+    ├── version.ts        # Decoder version validation
+    └── graceful-shutdown.ts  # SIGTERM handling
+```
+
+### Code Style
+
+- **Tabs** for indentation (see `.editorconfig`)
+- **No semicolons**
+- **Strict TypeScript** with `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`
+- **Type imports**: `import type { Foo } from 'bar'`
+- **ESLint + Prettier** configured and enforced
+
+### Common Tasks
+
+```bash
+# Development with hot reload
+npm run dev
+
+# Type checking
+npm run typecheck
+
+# Linting
+npm run lint
+
+# Formatting
+npm run format
+
+# Build
+npm run build-file ./src/index.ts
+npm start
+
+# Tests
+npm test
+npm run test:watch
+npm run test:coverage
+```
+
+### Adding a New Decoder
+
+1. Create `src/decoders/builtin/my-decoder.ts` extending `BaseDecoder`
+2. Implement `Decoder` interface and parsing logic
+3. Register in `src/decoders/index.ts`
+4. Add to `config/default.yaml` with default args
+5. Add tests in `tests/unit/decoders/builtin/`
+
+Example decoder:
+
+```typescript
+import { BaseDecoder } from "../base-decoder.js"
+import type { DecoderCaps, DecoderOutput } from "../types.js"
+
+export const MY_DECODER_CAPS: DecoderCaps = {
+	input: "audio_pcm",
+	output: "jsonl",
+	wantsExclusiveSource: false,
+	preferredSampleRates: [48000],
+	integrationPattern: "pure_consumer",
+}
+
+export class MyDecoder extends BaseDecoder {
+	protected program = "my-decoder"
+	protected args = ["-i", "stdin", "-o", "stdout"]
+
+	protected parseOutput(line: string): DecoderOutput | null {
+		try {
+			return JSON.parse(line) as DecoderOutput
+		} catch {
+			return null
+		}
+	}
+}
+```
+
+## Docker Build
+
+Three build targets:
+
+```bash
+# Full: SDR++ + all decoders + API
+docker build --target=final -t wavekit:full .
+
+# Core: Just decoders + API (for remote SDR sources)
+docker build --target=final-core -t wavekit:core .
+
+# SDR++ only (for dedicated SDR host)
+docker build --target=final-sdrpp -t wavekit:sdrpp .
+```
+
+## Architecture Notes
+
+- **Streams**: Node.js streams with backpressure handling throughout
+- **Events**: EventEmitter-based communication between components
+- **Decoders**: Spawned as child processes, communicate via stdin/stdout
+- **Resilience**: Auto-reconnect with exponential backoff, auto-restart on crash
+- **Health**: Tracks state (running/degraded/faulted) and reports via API
+- **Logging**: Structured JSON with Pino, per-component loggers
+
+## Known Limitations
+
+- Single source attachment (fanning to multiple decoders, but only one source)
+- Decoders run as separate OS processes (not in-process libraries)
+- No persistent storage of decoded messages (only real-time streaming)
+- No Web UI (API and WebSocket only)
+
+## Contributing
+
+1. Follow code style: `npm run format && npm run lint`
+2. Add tests for new features
+3. Ensure TypeScript strict mode: `npm run typecheck`
+4. Submit a pull request
+
+## License
+
+ISC
