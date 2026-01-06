@@ -230,7 +230,7 @@ describe("Feature: docker-setup, Property 19: Decoder Failure Isolation", () => 
 			maxRestartDelay: 50,
 			maxRestarts: 3,
 			healthCheckInterval: 1000,
-			degradedTimeout: 5000,
+			idleTimeout: 5000,
 			validateVersions: false,
 		})
 	})

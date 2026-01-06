@@ -143,7 +143,7 @@ const decoderStatusSchema = {
 		id: { type: "string" },
 		type: { type: "string" },
 		running: { type: "boolean" },
-		health: { type: "string", enum: ["running", "degraded", "faulted"] },
+		health: { type: "string", enum: ["running", "idle", "faulted"] },
 		pid: { type: "number" },
 		uptime: { type: "number" },
 		stats: decoderStatsSchema,

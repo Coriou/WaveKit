@@ -8,7 +8,7 @@
  * - 9.9: PATCH /api/decoders/:id updates the decoder configuration
  * - 17.1: Decoder capabilities declaration (input type, exclusive requirement, preferred sample rates, output format)
  * - 20.1: Report health as "running" when producing output
- * - 20.2: Report health as "degraded" when no output for configured timeout
+ * - 20.2: Report health as "idle" when no output for configured timeout
  * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
  */
 
@@ -57,7 +57,7 @@ const decoderStatusSchema = {
 		id: { type: "string" },
 		type: { type: "string" },
 		running: { type: "boolean" },
-		health: { type: "string", enum: ["running", "degraded", "faulted"] },
+		health: { type: "string", enum: ["running", "idle", "faulted"] },
 		pid: { type: "number" },
 		uptime: { type: "number" },
 		stats: decoderStatsSchema,
@@ -612,7 +612,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				tags: ["decoders"],
 				summary: "Get health status of all decoders",
 				description:
-					"Returns the health status (running, degraded, faulted) for all configured decoders",
+					"Returns the health status (running, idle, faulted) for all configured decoders",
 				response: {
 					200: {
 						type: "array",
@@ -622,7 +622,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 								id: { type: "string" },
 								health: {
 									type: "string",
-									enum: ["running", "degraded", "faulted"],
+									enum: ["running", "idle", "faulted"],
 								},
 							},
 							required: ["id", "health"],

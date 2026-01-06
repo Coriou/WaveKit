@@ -9,7 +9,7 @@
  * - 4.5: WHEN requested, THE Decoder_Manager SHALL return status for all managed decoders including PID, uptime, and statistics
  * - 4.6: THE Decoder_Manager SHALL emit events for decoder output, errors, and exit conditions
  * - 20.1: WHEN a decoder is running and producing output, THE Decoder_Manager SHALL report health as "running"
- * - 20.2: WHEN a decoder is running but has not produced output for the configured timeout, THE Decoder_Manager SHALL report health as "degraded"
+ * - 20.2: WHEN a decoder is running but has not produced output for the configured timeout, THE Decoder_Manager SHALL report health as "idle"
  * - 20.3: WHEN a decoder has crashed and exceeded restart limits, THE Decoder_Manager SHALL report health as "faulted"
  * - 20.4: WHEN decoder health changes, THE Decoder_Manager SHALL emit a health event with the new status
  * - 27.1: WHEN a decoder is configured, THE Decoder_Manager SHALL validate the installed version against the pinned version
@@ -46,8 +46,8 @@ export interface DecoderManagerConfig {
 	maxRestarts: number
 	/** Interval in milliseconds between health checks (default: 5000) */
 	healthCheckInterval: number
-	/** Timeout in milliseconds without output before marking decoder as degraded (default: 30000) */
-	degradedTimeout: number
+	/** Timeout in milliseconds without output before marking decoder as idle (default: 30000) */
+	idleTimeout: number
 	/** Whether to validate decoder versions at startup (default: true) */
 	validateVersions: boolean
 }
@@ -105,7 +105,7 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 	maxRestartDelay: 30000,
 	maxRestarts: 0,
 	healthCheckInterval: 5000,
-	degradedTimeout: 30000,
+	idleTimeout: 30000,
 	validateVersions: true,
 }
 
@@ -790,7 +790,7 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Starts periodic health checks for all decoders.
-	 * Checks for degraded state based on output timeout (Requirement 20.2).
+	 * Checks for idle state based on output timeout (Requirement 20.2).
 	 */
 	private startHealthChecks(): void {
 		if (this.healthCheckTimer) {
@@ -820,7 +820,7 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Performs health checks on all running decoders.
-	 * Transitions to degraded state if no output received within timeout (Requirement 20.2).
+	 * Transitions to idle state if no output received within timeout (Requirement 20.2).
 	 * Transitions back to running state if output is received (Requirement 20.1).
 	 * Wrapped in try-catch for failure isolation (Requirement 10.1).
 	 */
@@ -841,20 +841,20 @@ export class DecoderManager extends EventEmitter {
 				if (lastOutputAt) {
 					const timeSinceOutput = now - lastOutputAt.getTime()
 
-					if (timeSinceOutput > this.config.degradedTimeout) {
-						// No output for too long - transition to degraded (Requirement 20.2)
-						if (lastHealth !== "degraded") {
-							this.log.warn(
+					if (timeSinceOutput > this.config.idleTimeout) {
+						// No output for too long - transition to idle (Requirement 20.2)
+						if (lastHealth !== "idle") {
+							this.log.info(
 								{
 									decoderId: id,
 									timeSinceOutput,
-									timeout: this.config.degradedTimeout,
+									timeout: this.config.idleTimeout,
 								},
-								"Decoder has not produced output, marking as degraded",
+								"Decoder has not produced output, marking as idle (no signals detected)",
 							)
-							this.updateDecoderHealth(state, "degraded")
+							this.updateDecoderHealth(state, "idle")
 						}
-					} else if (lastHealth === "degraded") {
+					} else if (lastHealth === "idle") {
 						// Output received recently - transition back to running (Requirement 20.1)
 						this.log.info(
 							{ decoderId: id },
@@ -865,19 +865,16 @@ export class DecoderManager extends EventEmitter {
 				} else {
 					// No output ever received - check if decoder has been running long enough
 					const uptime = status.uptime * 1000 // Convert to ms
-					if (
-						uptime > this.config.degradedTimeout &&
-						lastHealth !== "degraded"
-					) {
-						this.log.warn(
+					if (uptime > this.config.idleTimeout && lastHealth !== "idle") {
+						this.log.info(
 							{
 								decoderId: id,
 								uptime: status.uptime,
-								timeout: this.config.degradedTimeout,
+								timeout: this.config.idleTimeout,
 							},
-							"Decoder has never produced output, marking as degraded",
+							"Decoder has never produced output, marking as idle (no signals detected)",
 						)
-						this.updateDecoderHealth(state, "degraded")
+						this.updateDecoderHealth(state, "idle")
 					}
 				}
 			} catch (err) {

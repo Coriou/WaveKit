@@ -49,7 +49,7 @@ const GRACEFUL_STOP_TIMEOUT = 5000
  * - Output stream in object mode for DecoderOutput
  * - Statistics tracking (bytesIn, eventsOut, errors)
  * - Status reporting (running, pid, uptime, health)
- * - Health state tracking (running, degraded, faulted)
+ * - Health state tracking (running, idle, faulted)
  */
 export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	readonly id: string
@@ -394,7 +394,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				this.emit("output", output)
 
 				// Update health to running when we receive output (Requirement 20.1)
-				if (this._health === "degraded") {
+				if (this._health === "idle") {
 					this.setHealth("running")
 				}
 			}

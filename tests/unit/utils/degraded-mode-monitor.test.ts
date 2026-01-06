@@ -86,10 +86,10 @@ describe("DegradedModeMonitor", () => {
 			expect(monitor.isDegraded()).toBe(false)
 		})
 
-		it("should return true when a decoder is degraded", () => {
+		it("should return false when a decoder is idle (idle is normal)", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
 				["decoder1", "running"],
-				["decoder2", "degraded"],
+				["decoder2", "idle"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({
@@ -106,7 +106,8 @@ describe("DegradedModeMonitor", () => {
 				sourceManager,
 			)
 
-			expect(monitor.isDegraded()).toBe(true)
+			// Idle decoders are normal - not considered degraded
+			expect(monitor.isDegraded()).toBe(false)
 		})
 
 		it("should return true when a decoder is faulted", () => {
@@ -159,7 +160,7 @@ describe("DegradedModeMonitor", () => {
 		it("should return detailed degraded state information", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
 				["decoder1", "running"],
-				["decoder2", "degraded"],
+				["decoder2", "idle"],
 				["decoder3", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
@@ -179,18 +180,20 @@ describe("DegradedModeMonitor", () => {
 
 			const state = monitor.getState()
 
+			// Idle doesn't count as degraded anymore, only faulted
 			expect(state.isDecodersDegraded).toBe(true)
 			expect(state.isSourcesDegraded).toBe(true)
-			expect(state.degradedDecoders).toEqual(["decoder2"])
+			expect(state.idleDecoders).toEqual(["decoder2"])
 			expect(state.faultedDecoders).toEqual(["decoder3"])
 			expect(state.disconnectedSources).toEqual(["source2"])
 		})
 	})
 
 	describe("Periodic warnings (Requirement 10.5)", () => {
-		it("should log warning when started in degraded mode", () => {
+		it("should log warning when started with faulted decoders", () => {
+			// Use faulted, not idle - idle is normal and shouldn't trigger warnings
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({
@@ -218,7 +221,7 @@ describe("DegradedModeMonitor", () => {
 
 		it("should log warning every interval while degraded", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({
@@ -287,12 +290,12 @@ describe("DegradedModeMonitor", () => {
 		it("should log recovery message when degraded condition resolves", () => {
 			let isDegraded = true
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = {
 				getAllHealth: vi.fn(() => {
 					if (isDegraded) {
-						return new Map([["decoder1", "degraded"]])
+						return new Map([["decoder1", "faulted"]])
 					}
 					return new Map([["decoder1", "running"]])
 				}),
@@ -333,7 +336,7 @@ describe("DegradedModeMonitor", () => {
 
 		it("should stop logging warnings after stop() is called", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({
@@ -365,7 +368,7 @@ describe("DegradedModeMonitor", () => {
 	describe("Configuration", () => {
 		it("should use default warning interval of 60 seconds", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({
@@ -400,7 +403,7 @@ describe("DegradedModeMonitor", () => {
 
 		it("should allow disabling decoder monitoring", () => {
 			const decoderHealth = new Map<string, DecoderHealth>([
-				["decoder1", "degraded"],
+				["decoder1", "faulted"],
 			])
 			const decoderManager = createMockDecoderManager(decoderHealth)
 			const sourceManager = createMockSourceManager({

@@ -74,10 +74,13 @@ export interface DecoderCaps {
 /**
  * Health states for a decoder (Requirements 20.1, 20.2, 20.3).
  * - running: Decoder is running and producing output normally
- * - degraded: Decoder is running but has not produced output for the configured timeout
+ * - idle: Decoder is running but has not produced output for the configured timeout
+ *         (this is normal when no signals are present on the frequency)
  * - faulted: Decoder has crashed and exceeded restart limits
+ *
+ * Note: "degraded" is kept as an alias for backwards compatibility but "idle" is preferred.
  */
-export type DecoderHealth = "running" | "degraded" | "faulted"
+export type DecoderHealth = "running" | "idle" | "faulted"
 
 // ============================================================================
 // Decoder Configuration

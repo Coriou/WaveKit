@@ -184,7 +184,7 @@ Channels:
 - **decoders**: Decoder output, started/stopped/error events
 - **sources**: Source connected/disconnected events
 - **metrics**: Stream data rate metrics (~5s intervals)
-- **health**: Decoder health state changes (running/degraded/faulted)
+- **health**: Decoder health state changes (running/idle/faulted)
 
 ## Configuration
 
@@ -371,6 +371,61 @@ docker build --target=final-core -t wavekit:core .
 # SDR++ only (for dedicated SDR host)
 docker build --target=final-sdrpp -t wavekit:sdrpp .
 ```
+
+## Make Commands
+
+Run `make help` to see all available commands. Key commands organized by workflow:
+
+### Development Workflow (Recommended)
+
+```bash
+make dev-up        # Build + start container in one command
+make dev-decoders  # Live decoder status dashboard (refreshes 2s)
+make dev-logs      # Tail logs with pretty JSON formatting
+make dev-decoded   # Show only decoded signals (filtered)
+make dev-stop      # Stop the dev container
+```
+
+### Container Management
+
+| Command            | Description                                   |
+| ------------------ | --------------------------------------------- |
+| `make dev-build`   | Build core mode image (`wavekit:latest-core`) |
+| `make dev-start`   | Start container (auto-stops existing)         |
+| `make dev-stop`    | Stop container                                |
+| `make dev-restart` | Stop + start container                        |
+| `make dev-up`      | Build + start in one command                  |
+
+### Monitoring & Debugging
+
+| Command                | Description                                |
+| ---------------------- | ------------------------------------------ |
+| `make dev-status`      | Container status + health check            |
+| `make dev-decoders`    | Live decoder status (running/idle/faulted) |
+| `make dev-logs`        | Tail all logs (pretty JSON)                |
+| `make dev-logs-raw`    | Tail raw logs                              |
+| `make dev-decoded`     | Show decoded signals only                  |
+| `make dev-decoded-raw` | Show decoded signals (raw JSON)            |
+| `make dev-shell`       | Open shell in container                    |
+| `make dev-audio`       | Listen to decoded audio (requires sox)     |
+
+### Docker Compose
+
+| Command                    | Description                     |
+| -------------------------- | ------------------------------- |
+| `make docker-dev`          | Start dev environment (compose) |
+| `make docker-prod`         | Start production environment    |
+| `make docker-compose-down` | Stop compose                    |
+| `make docker-clean`        | Remove containers and volumes   |
+
+### Build Targets
+
+| Command                   | Description                          |
+| ------------------------- | ------------------------------------ |
+| `make docker-build`       | Build all images (full, core, sdrpp) |
+| `make docker-build-full`  | Build full mode image                |
+| `make docker-build-core`  | Build core mode image                |
+| `make docker-build-sdrpp` | Build SDR++ only image               |
 
 ## Architecture Notes
 

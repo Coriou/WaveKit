@@ -209,10 +209,10 @@ describe("NetworkProducerDecoder", () => {
 			const healthHandler = vi.fn()
 			decoder.on("health", healthHandler)
 
-			decoder.testSetHealth("degraded")
+			decoder.testSetHealth("idle")
 
-			expect(healthHandler).toHaveBeenCalledWith("degraded")
-			expect(decoder.getHealth()).toBe("degraded")
+			expect(healthHandler).toHaveBeenCalledWith("idle")
+			expect(decoder.getHealth()).toBe("idle")
 		})
 
 		it("should not emit health event when health stays the same", () => {

@@ -128,10 +128,10 @@ export function checkDecoderHealth(
 				message: `Decoder ${decoderId} is running and producing output`,
 				lastCheck: new Date().toISOString(),
 			}
-		case "degraded":
+		case "idle":
 			return {
-				status: "degraded",
-				message: `Decoder ${decoderId} is running but not producing output`,
+				status: "up",
+				message: `Decoder ${decoderId} is running but idle (no signals detected)`,
 				lastCheck: new Date().toISOString(),
 			}
 		case "faulted":
@@ -280,9 +280,7 @@ export function determineOverallHealth(components: {
 	const allDecodersDown =
 		decoderStatuses.length > 0 &&
 		decoderStatuses.every(d => d.status === "down")
-	const someDecodersDegraded = decoderStatuses.some(
-		d => d.status === "degraded" || d.status === "down",
-	)
+	const someDecodersFaulted = decoderStatuses.some(d => d.status === "down")
 
 	// All decoders down = unhealthy (if there are decoders configured)
 	if (allDecodersDown) {
@@ -293,8 +291,8 @@ export function determineOverallHealth(components: {
 	const sourceDown = components.source.status === "down"
 	const sourceDegraded = components.source.status === "degraded"
 
-	// Any degraded component = degraded overall
-	if (sdrppDown || someDecodersDegraded || sourceDown || sourceDegraded) {
+	// Any faulted decoder or disconnected source = degraded overall
+	if (sdrppDown || someDecodersFaulted || sourceDown || sourceDegraded) {
 		return "degraded"
 	}
 

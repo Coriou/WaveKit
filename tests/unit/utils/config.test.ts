@@ -725,7 +725,7 @@ describe("HealthConfigSchema", () => {
 	it("should validate valid health config", () => {
 		const validHealth = {
 			checkInterval: 5000,
-			degradedTimeout: 30000,
+			idleTimeout: 30000,
 		}
 		const result = HealthConfigSchema.safeParse(validHealth)
 		expect(result.success).toBe(true)
@@ -736,23 +736,23 @@ describe("HealthConfigSchema", () => {
 		expect(result.success).toBe(true)
 		if (result.success) {
 			expect(result.data.checkInterval).toBe(5000)
-			expect(result.data.degradedTimeout).toBe(30000)
+			expect(result.data.idleTimeout).toBe(30000)
 		}
 	})
 
 	it("should reject non-positive checkInterval", () => {
 		const invalidHealth = {
 			checkInterval: 0,
-			degradedTimeout: 30000,
+			idleTimeout: 30000,
 		}
 		const result = HealthConfigSchema.safeParse(invalidHealth)
 		expect(result.success).toBe(false)
 	})
 
-	it("should reject non-positive degradedTimeout", () => {
+	it("should reject non-positive idleTimeout", () => {
 		const invalidHealth = {
 			checkInterval: 5000,
-			degradedTimeout: -1,
+			idleTimeout: -1,
 		}
 		const result = HealthConfigSchema.safeParse(invalidHealth)
 		expect(result.success).toBe(false)
@@ -864,7 +864,7 @@ describe("Config with health section", () => {
 		const yamlContent = `
 health:
   checkInterval: 10000
-  degradedTimeout: 60000
+  idleTimeout: 60000
 `
 		fs.writeFileSync(configPath, yamlContent)
 
@@ -872,7 +872,7 @@ health:
 
 		expect(config.health).toBeDefined()
 		expect(config.health?.checkInterval).toBe(10000)
-		expect(config.health?.degradedTimeout).toBe(60000)
+		expect(config.health?.idleTimeout).toBe(60000)
 	})
 
 	it("should allow config without health section", () => {

@@ -33,7 +33,7 @@ const DEFAULT_CONFIG: DegradedModeMonitorConfig = {
 interface DegradedState {
 	isDecodersDegraded: boolean
 	isSourcesDegraded: boolean
-	degradedDecoders: string[]
+	idleDecoders: string[]
 	faultedDecoders: string[]
 	disconnectedSources: string[]
 }
@@ -46,7 +46,7 @@ interface DegradedState {
  * - Stops warnings when degraded condition is resolved
  *
  * Monitors:
- * - DecoderManager: degraded or faulted decoders
+ * - DecoderManager: faulted decoders (idle is normal, not degraded)
  * - SourceManager: disconnected sources
  */
 export class DegradedModeMonitor {
@@ -133,7 +133,7 @@ export class DegradedModeMonitor {
 		const state: DegradedState = {
 			isDecodersDegraded: false,
 			isSourcesDegraded: false,
-			degradedDecoders: [],
+			idleDecoders: [],
 			faultedDecoders: [],
 			disconnectedSources: [],
 		}
@@ -142,9 +142,9 @@ export class DegradedModeMonitor {
 		if (this.config.monitorDecoders && this.decoderManager) {
 			const allHealth = this.decoderManager.getAllHealth()
 			for (const [id, health] of allHealth) {
-				if (health === "degraded") {
-					state.degradedDecoders.push(id)
-					state.isDecodersDegraded = true
+				if (health === "idle") {
+					state.idleDecoders.push(id)
+					// Note: idle decoders do NOT set isDecodersDegraded - they are normal
 				} else if (health === "faulted") {
 					state.faultedDecoders.push(id)
 					state.isDecodersDegraded = true
@@ -170,8 +170,9 @@ export class DegradedModeMonitor {
 	private logDegradedWarning(state: DegradedState): void {
 		const issues: string[] = []
 
-		if (state.degradedDecoders.length > 0) {
-			issues.push(`degraded decoders: ${state.degradedDecoders.join(", ")}`)
+		if (state.idleDecoders.length > 0) {
+			// Idle decoders are informational only, not warnings
+			// issues.push(`idle decoders: ${state.idleDecoders.join(", ")}`)
 		}
 
 		if (state.faultedDecoders.length > 0) {
@@ -186,7 +187,7 @@ export class DegradedModeMonitor {
 
 		this.log.warn(
 			{
-				degradedDecoders: state.degradedDecoders,
+				idleDecoders: state.idleDecoders,
 				faultedDecoders: state.faultedDecoders,
 				disconnectedSources: state.disconnectedSources,
 			},

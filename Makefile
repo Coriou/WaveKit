@@ -118,10 +118,12 @@ dev-build: ## Build core mode image (for external SDR++)
 	@./docker/build.sh core latest
 	@echo "$(GREEN)✅ Built $(DEV_IMAGE)$(NC)"
 
-dev-start: ## Start dev container (core mode, uses dev_test.yaml)
+dev-start: ## Start dev container (stops existing first)
 	@echo "$(BLUE)Starting $(DEV_CONTAINER)...$(NC)"
+	@docker stop $(DEV_CONTAINER) 2>/dev/null || true
+	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
 	@docker run --rm -d --name $(DEV_CONTAINER) \
-		-p 9000:9000 -p 8080:8080 \
+		-p 9000:3000 -p 8080:8080 \
 		-v $(DEV_CONFIG):/app/config/default.yaml \
 		$(DEV_IMAGE)
 	@echo ""
@@ -134,7 +136,7 @@ dev-start: ## Start dev container (core mode, uses dev_test.yaml)
 	@echo "  $(YELLOW)Commands:$(NC)"
 	@echo "    make dev-logs      - All logs"
 	@echo "    make dev-decoded   - Decoded signals only"
-	@echo "    make dev-audio     - Listen to audio"
+	@echo "    make dev-decoders  - Live decoder status"
 	@echo "    make dev-stop      - Stop container"
 	@echo ""
 
@@ -143,7 +145,9 @@ dev-stop: ## Stop dev container
 	@docker stop $(DEV_CONTAINER) 2>/dev/null || echo "Not running"
 	@echo "$(GREEN)✅ Stopped$(NC)"
 
-dev-restart: dev-stop dev-start ## Restart dev container (rebuilds if needed)
+dev-restart: dev-stop dev-start ## Restart dev container
+
+dev-up: dev-build dev-start ## Build and start in one command
 
 dev-logs: ## Tail all container logs (pretty JSON)
 	@docker logs -f $(DEV_CONTAINER) 2>&1 | jq -R 'fromjson? // .' || docker logs -f $(DEV_CONTAINER)
@@ -171,6 +175,17 @@ dev-status: ## Show container status and health
 	@echo ""
 	@echo "$(BLUE)Health Check:$(NC)"
 	@curl -s http://localhost:9000/health | jq . 2>/dev/null || echo "API not reachable"
+
+dev-decoders: ## Show live decoder status (refreshes every 2s)
+	@echo "$(BLUE)Decoder Status Dashboard$(NC) (Ctrl+C to stop)"
+	@echo ""
+	@while true; do \
+		clear; \
+		echo "$(BLUE)Decoder Status$(NC) (updated every 2s - Ctrl+C to stop)"; \
+		echo ""; \
+		curl -s http://localhost:9000/api/decoders 2>/dev/null | jq -r '.[] | "\(.id)\t\(.running | if . then "✅ running" else "⏹ stopped" end)\t\(.health)\tevents: \(.stats.eventsOut // 0)\tuptime: \(.uptime // 0)s"' 2>/dev/null || echo "API not reachable - is container running?"; \
+		sleep 2; \
+	done
 
 
 docker-logs-sdrpp: ## Tail SDR++ logs

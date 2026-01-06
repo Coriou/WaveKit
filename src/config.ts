@@ -125,8 +125,8 @@ export const LoggingConfigSchema = z.object({
 export const HealthConfigSchema = z.object({
 	/** Interval in milliseconds between health checks (default: 5000ms) */
 	checkInterval: z.number().int().positive().default(5000),
-	/** Milliseconds without output before a decoder is considered degraded (default: 30000ms) */
-	degradedTimeout: z.number().int().positive().default(30000),
+	/** Milliseconds without output before a decoder is considered idle (default: 30000ms) */
+	idleTimeout: z.number().int().positive().default(30000),
 })
 
 /**

@@ -8,7 +8,7 @@
  * - 18.4: THE Decoder_Manager SHALL support output protocols: TCP, UDP
  * - 17.1: Decoder capabilities declaration
  * - 20.1: Report health as "running" when producing output
- * - 20.2: Report health as "degraded" when no output for configured timeout
+ * - 20.2: Report health as "idle" when no output for configured timeout
  * - 20.3: Report health as "faulted" when crashed and exceeded restart limits
  * - 20.4: Emit health events when health changes
  */
@@ -73,7 +73,7 @@ export interface NetworkProducerConfig extends DecoderConfig {
  * - Output stream in object mode for DecoderOutput
  * - Statistics tracking (bytesIn, eventsOut, errors)
  * - Status reporting (running, pid, uptime, health)
- * - Health state tracking (running, degraded, faulted)
+ * - Health state tracking (running, idle, faulted)
  */
 export abstract class NetworkProducerDecoder
 	extends EventEmitter
@@ -590,7 +590,7 @@ export abstract class NetworkProducerDecoder
 				this.emit("output", output)
 
 				// Update health to running when we receive output (Requirement 20.1)
-				if (this._health === "degraded") {
+				if (this._health === "idle") {
 					this.setHealth("running")
 				}
 			}

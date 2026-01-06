@@ -180,7 +180,7 @@ const healthCheckIntervalArb = fc.integer({ min: 100, max: 500 })
  * Arbitrary for generating degraded timeout values (in ms).
  * Must be >= 1000ms to work with second-based uptime tracking.
  */
-const degradedTimeoutArb = fc.integer({ min: 1000, max: 3000 })
+const idleTimeoutArb = fc.integer({ min: 1000, max: 3000 })
 
 /**
  * Arbitrary for generating max restart counts.
@@ -206,8 +206,8 @@ describe("Property-Based Tests", () => {
 				fc.asyncProperty(
 					decoderConfigArb,
 					healthCheckIntervalArb,
-					degradedTimeoutArb,
-					async (config, healthCheckInterval, degradedTimeout) => {
+					idleTimeoutArb,
+					async (config, healthCheckInterval, idleTimeout) => {
 						// Create components
 						const registry = new DecoderRegistry()
 						const fanout = new FanoutManager(testLogger)
@@ -227,7 +227,7 @@ describe("Property-Based Tests", () => {
 
 						const manager = new DecoderManager(registry, fanout, testLogger, {
 							healthCheckInterval,
-							degradedTimeout,
+							idleTimeout,
 							restartDelay: 100,
 							maxRestartDelay: 1000,
 							maxRestarts: 0,
@@ -250,10 +250,9 @@ describe("Property-Based Tests", () => {
 						expect(manager.getHealth(config.id)).toBe("running")
 
 						// Advance time past the degraded timeout
-						// Need to advance by degradedTimeout + 1000ms (for uptime to exceed timeout)
+						// Need to advance by idleTimeout + 1000ms (for uptime to exceed timeout)
 						// plus additional health check intervals to ensure the check runs
-						const timeToAdvance =
-							degradedTimeout + 1000 + healthCheckInterval * 3
+						const timeToAdvance = idleTimeout + 1000 + healthCheckInterval * 3
 						await vi.advanceTimersByTimeAsync(timeToAdvance)
 
 						// Health should transition to degraded
@@ -264,9 +263,7 @@ describe("Property-Based Tests", () => {
 						fanout.detachSource()
 
 						// Verify transition occurred and event was emitted
-						return (
-							finalHealth === "degraded" && healthEvents.includes("degraded")
-						)
+						return finalHealth === "idle" && healthEvents.includes("idle")
 					},
 				),
 				{ numRuns: 100 },
@@ -278,8 +275,8 @@ describe("Property-Based Tests", () => {
 				fc.asyncProperty(
 					decoderConfigArb,
 					healthCheckIntervalArb,
-					degradedTimeoutArb,
-					async (config, healthCheckInterval, degradedTimeout) => {
+					idleTimeoutArb,
+					async (config, healthCheckInterval, idleTimeout) => {
 						// Create components
 						const registry = new DecoderRegistry()
 						const fanout = new FanoutManager(testLogger)
@@ -304,7 +301,7 @@ describe("Property-Based Tests", () => {
 
 						const manager = new DecoderManager(registry, fanout, testLogger, {
 							healthCheckInterval,
-							degradedTimeout,
+							idleTimeout,
 							restartDelay: 100,
 							maxRestartDelay: 1000,
 							maxRestarts: 0,
@@ -324,13 +321,12 @@ describe("Property-Based Tests", () => {
 						await manager.startDecoder(config.id)
 
 						// Advance time to trigger degraded state
-						// Need to advance by degradedTimeout + 1000ms (for uptime to exceed timeout)
-						const timeToAdvance =
-							degradedTimeout + 1000 + healthCheckInterval * 3
+						// Need to advance by idleTimeout + 1000ms (for uptime to exceed timeout)
+						const timeToAdvance = idleTimeout + 1000 + healthCheckInterval * 3
 						await vi.advanceTimersByTimeAsync(timeToAdvance)
 
 						// Verify degraded state
-						expect(manager.getHealth(config.id)).toBe("degraded")
+						expect(manager.getHealth(config.id)).toBe("idle")
 
 						// Simulate output from decoder
 						testDecoder!.simulateOutput()
@@ -348,7 +344,7 @@ describe("Property-Based Tests", () => {
 						// Verify transition occurred: degraded → running
 						return (
 							finalHealth === "running" &&
-							healthEvents.includes("degraded") &&
+							healthEvents.includes("idle") &&
 							healthEvents.includes("running")
 						)
 					},
@@ -387,7 +383,7 @@ describe("Property-Based Tests", () => {
 
 						const manager = new DecoderManager(registry, fanout, testLogger, {
 							healthCheckInterval: 500,
-							degradedTimeout: 2000,
+							idleTimeout: 2000,
 							restartDelay: 10,
 							maxRestartDelay: 50,
 							maxRestarts,
@@ -459,11 +455,11 @@ describe("Property-Based Tests", () => {
 
 					// Use fixed values that work with second-based uptime
 					const healthCheckInterval = 200
-					const degradedTimeout = 1000
+					const idleTimeout = 1000
 
 					const manager = new DecoderManager(registry, fanout, testLogger, {
 						healthCheckInterval,
-						degradedTimeout,
+						idleTimeout,
 						restartDelay: 10,
 						maxRestartDelay: 50,
 						maxRestarts: 0,
@@ -480,7 +476,7 @@ describe("Property-Based Tests", () => {
 					await manager.startDecoder(config.id)
 
 					// Advance time to trigger degraded state (need > 1000ms uptime)
-					// degradedTimeout + 1000ms + buffer for health checks
+					// idleTimeout + 1000ms + buffer for health checks
 					await vi.advanceTimersByTimeAsync(2500)
 
 					// Simulate output to trigger running state
@@ -541,11 +537,11 @@ describe("Property-Based Tests", () => {
 
 					// Use fixed values that work with second-based uptime
 					const healthCheckInterval = 200
-					const degradedTimeout = 1000
+					const idleTimeout = 1000
 
 					const manager = new DecoderManager(registry, fanout, testLogger, {
 						healthCheckInterval,
-						degradedTimeout,
+						idleTimeout,
 						restartDelay: 10,
 						maxRestartDelay: 50,
 						maxRestarts: 2,
@@ -566,7 +562,7 @@ describe("Property-Based Tests", () => {
 					await manager.startDecoder(config.id)
 
 					// Trigger various state changes (need > 1000ms for degraded)
-					// degradedTimeout + 1000ms + buffer
+					// idleTimeout + 1000ms + buffer
 					await vi.advanceTimersByTimeAsync(2500) // Should go to degraded
 					testDecoder!.simulateOutput() // Should go back to running
 					await vi.advanceTimersByTimeAsync(500)
@@ -583,10 +579,10 @@ describe("Property-Based Tests", () => {
 
 					// Validate all transitions are valid
 					const validTransitions = [
-						["running", "degraded"],
-						["degraded", "running"],
+						["running", "idle"],
+						["idle", "running"],
 						["running", "faulted"],
-						["degraded", "faulted"],
+						["idle", "faulted"],
 					]
 
 					const allTransitionsValid = transitions.every(t =>
