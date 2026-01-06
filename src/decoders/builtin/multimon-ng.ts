@@ -144,53 +144,83 @@ export class MultimonDecoder extends BaseDecoder {
 	}
 
 	/**
-	 * Returns the multimon-ng command (Requirement 7.1).
+	 * Returns the command to execute (Requirement 7.1).
+	 * We use /bin/sh to pipe sox output into multimon-ng for resampling.
 	 */
 	protected getCommand(): string {
-		return "multimon-ng"
+		return "/bin/sh"
 	}
 
 	/**
-	 * Returns command line arguments for multimon-ng (Requirement 7.1).
+	 * Returns command line arguments (Requirement 7.1).
+	 * Constructs a shell pipeline: sox ... | multimon-ng ...
 	 */
 	protected getArgs(): string[] {
-		const args: string[] = []
+		// Construct multimon-ng command line
+		const multimonArgs: string[] = ["multimon-ng"]
 
-		// Input from stdin with raw audio format
-		args.push("-t", "raw")
-		args.push("-")
+		// Input from stdin with raw audio format (received from sox)
+		multimonArgs.push("-t", "raw")
+		multimonArgs.push("-")
 
 		// Add each enabled mode (Requirement 7.3)
 		for (const mode of this.options.modes) {
-			args.push("-a", mode)
+			multimonArgs.push("-a", mode)
 		}
 
 		// Set verbosity level
 		if (this.options.verbosity !== undefined) {
 			for (let i = 0; i < this.options.verbosity; i++) {
-				args.push("-v")
+				multimonArgs.push("-v")
 			}
 		}
 
 		// Set character set
 		if (this.options.charset) {
-			args.push("-c", this.options.charset)
+			multimonArgs.push("-c", this.options.charset)
 		}
 
-		// Apply audio filters (Requirement 7.4)
+		// Apply audio filters (Requirement 7.4) - applied to multimon-ng, though we could move to sox
 		if (this.options.filters) {
 			if (this.options.filters.highpass !== undefined) {
-				args.push("--highpass", String(this.options.filters.highpass))
+				multimonArgs.push("--highpass", String(this.options.filters.highpass))
 			}
 			if (this.options.filters.lowpass !== undefined) {
-				args.push("--lowpass", String(this.options.filters.lowpass))
+				multimonArgs.push("--lowpass", String(this.options.filters.lowpass))
 			}
 			if (this.options.filters.gain !== undefined) {
-				args.push("--gain", String(this.options.filters.gain))
+				multimonArgs.push("--gain", String(this.options.filters.gain))
 			}
 		}
 
-		return args
+		// Construct sox command line for resampling
+		// Input: stdin, 48kHz (default), S16LE, 1 channel
+		// Output: stdout, 22050Hz (multimon native), S16LE, 1 channel
+		const soxArgs = [
+			"sox",
+			"-t",
+			"raw",
+			"-r",
+			"48000", // Incoming sample rate (WaveKit default)
+			"-e",
+			"signed", // Signed integer
+			"-b",
+			"16", // 16-bit
+			"-c",
+			"1", // 1 channel
+			"-", // Input from stdin
+			"-t",
+			"raw",
+			"-r",
+			"22050", // Target sample rate for multimon-ng
+			"-", // Output to stdout
+		]
+
+		// Combine into shell pipeline
+		// "sox ... - | multimon-ng ..."
+		const cmd = `${soxArgs.join(" ")} 2>/dev/null | ${multimonArgs.join(" ")}`
+
+		return ["-c", cmd]
 	}
 
 	/**

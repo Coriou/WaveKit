@@ -71,6 +71,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libglfw3-dev \
     libglew-dev \
     libvolk2-dev \
+    librtaudio-dev \
+    libiio-dev \
+    libad9361-dev \
     # utilities
     curl \
     wget \
@@ -128,6 +131,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl \
     tini \
     xz-utils \
+    sox \
+    libsox-fmt-all \
     && rm -rf /var/lib/apt/lists/*
 
 # Install s6-overlay (PID 1 init system + service supervisor)
@@ -372,8 +377,6 @@ RUN mkdir -p /app /var/log/wavekit /var/run/wavekit && \
 # Copy SDR++ from build stage
 COPY --from=sdrpp-build /usr/local/bin/sdrpp* /usr/local/bin/
 COPY --from=sdrpp-build /usr/local/lib/libsdrpp* /usr/local/lib/
-RUN ldconfig
-
 # Copy decoders from build stages
 COPY --from=dsd-fme-build /usr/local/bin/dsd* /usr/local/bin/
 COPY --from=dsd-fme-build /usr/local/lib/libmbe* /usr/local/lib/
@@ -387,6 +390,9 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+
+# Update library cache for all copied libraries
+RUN ldconfig
 
 # Verify all 8 decoder installations
 RUN echo "Verifying decoder installations..." && \
