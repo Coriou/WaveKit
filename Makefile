@@ -104,6 +104,75 @@ docker-run-core: ## Run core mode manually (requires wavekit:core)
 		-v $(shell pwd)/config/dev_test.yaml:/app/config/default.yaml \
 		wavekit:core
 
+# ==============================================================================
+# Dev Testing Commands (State of the Art DevX)
+# Usage: make dev-build && make dev-start
+# ==============================================================================
+
+DEV_CONTAINER := wavekit-dev
+DEV_IMAGE := wavekit:latest-core
+DEV_CONFIG := $(shell pwd)/config/dev_test.yaml
+
+dev-build: ## Build core mode image (for external SDR++)
+	@echo "$(BLUE)Building WaveKit core image...$(NC)"
+	@./docker/build.sh core latest
+	@echo "$(GREEN)✅ Built $(DEV_IMAGE)$(NC)"
+
+dev-start: ## Start dev container (core mode, uses dev_test.yaml)
+	@echo "$(BLUE)Starting $(DEV_CONTAINER)...$(NC)"
+	@docker run --rm -d --name $(DEV_CONTAINER) \
+		-p 9000:9000 -p 8080:8080 \
+		-v $(DEV_CONFIG):/app/config/default.yaml \
+		$(DEV_IMAGE)
+	@echo ""
+	@echo "$(GREEN)✅ WaveKit running!$(NC)"
+	@echo ""
+	@echo "  $(BLUE)API$(NC)        http://localhost:9000"
+	@echo "  $(BLUE)Health$(NC)     http://localhost:9000/health"
+	@echo "  $(BLUE)Audio$(NC)      nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -"
+	@echo ""
+	@echo "  $(YELLOW)Commands:$(NC)"
+	@echo "    make dev-logs      - All logs"
+	@echo "    make dev-decoded   - Decoded signals only"
+	@echo "    make dev-audio     - Listen to audio"
+	@echo "    make dev-stop      - Stop container"
+	@echo ""
+
+dev-stop: ## Stop dev container
+	@echo "$(YELLOW)Stopping $(DEV_CONTAINER)...$(NC)"
+	@docker stop $(DEV_CONTAINER) 2>/dev/null || echo "Not running"
+	@echo "$(GREEN)✅ Stopped$(NC)"
+
+dev-restart: dev-stop dev-start ## Restart dev container (rebuilds if needed)
+
+dev-logs: ## Tail all container logs (pretty JSON)
+	@docker logs -f $(DEV_CONTAINER) 2>&1 | jq -R 'fromjson? // .' || docker logs -f $(DEV_CONTAINER)
+
+dev-logs-raw: ## Tail raw container logs
+	@docker logs -f $(DEV_CONTAINER)
+
+dev-decoded: ## Show only decoded messages (voice/text)
+	@echo "$(BLUE)Watching for decoded signals... (Ctrl+C to stop)$(NC)"
+	@docker logs -f $(DEV_CONTAINER) 2>&1 | grep --line-buffered '"msg":"Decoded Message"' | jq -r '.output | "\(.timestamp | split("T")[1] | split(".")[0]) [\(.decoder)] \(.type): \(.data)"'
+
+dev-decoded-raw: ## Show decoded messages (raw JSON)
+	@docker logs -f $(DEV_CONTAINER) 2>&1 | grep --line-buffered '"msg":"Decoded Message"'
+
+dev-audio: ## Listen to decoded audio (requires sox)
+	@echo "$(BLUE)Streaming audio from WaveKit... (Ctrl+C to stop)$(NC)"
+	@nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
+
+dev-shell: ## Open shell in dev container
+	@docker exec -it $(DEV_CONTAINER) /bin/bash
+
+dev-status: ## Show container status and health
+	@echo "$(BLUE)Container Status:$(NC)"
+	@docker ps --filter name=$(DEV_CONTAINER) --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "Not running"
+	@echo ""
+	@echo "$(BLUE)Health Check:$(NC)"
+	@curl -s http://localhost:9000/health | jq . 2>/dev/null || echo "API not reachable"
+
+
 docker-logs-sdrpp: ## Tail SDR++ logs
 	@docker exec -it wavekit tail -f /var/log/wavekit/sdrpp.log
 
