@@ -85,6 +85,7 @@ export abstract class NetworkProducerDecoder
 	protected process: ChildProcess | null = null
 	protected tcpClient: Socket | null = null
 	protected udpClient: UdpSocket | null = null
+	protected inputStream: Readable | null = null
 	protected outputStream: PassThrough
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
 	protected startTime: number = 0
@@ -168,7 +169,7 @@ export abstract class NetworkProducerDecoder
 
 		try {
 			this.process = spawn(command, args, {
-				stdio: ["ignore", "pipe", "pipe"],
+				stdio: ["pipe", "pipe", "pipe"],
 			})
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))
@@ -200,6 +201,14 @@ export abstract class NetworkProducerDecoder
 		if (this.process.stderr) {
 			this.process.stderr.on("data", (data: Buffer) => {
 				this.logger.debug({ output: data.toString().trim() }, "Process stderr")
+			})
+		}
+
+		// Pipe input stream to process stdin if attached
+		if (this.inputStream && this.process.stdin) {
+			this.inputStream.pipe(this.process.stdin)
+			this.inputStream.on("data", (chunk: Buffer) => {
+				this.stats.bytesIn += chunk.length
 			})
 		}
 
@@ -278,20 +287,40 @@ export abstract class NetworkProducerDecoder
 	}
 
 	/**
-	 * Network producer decoders don't use stdin input - this is a no-op.
-	 * @param _stream - Ignored
+	 * Attaches an input stream to feed audio data to the decoder.
+	 * If the decoder is already running, pipes the stream to stdin.
+	 *
+	 * @param stream - Readable stream of audio data
 	 */
-	attachInput(_stream: Readable): void {
-		// Network producer decoders don't receive audio via stdin
-		this.logger.debug("attachInput called on network producer decoder (no-op)")
+	attachInput(stream: Readable): void {
+		this.detachInput()
+		this.inputStream = stream
+
+		// Track bytes received
+		stream.on("data", (chunk: Buffer) => {
+			this.stats.bytesIn += chunk.length
+		})
+
+		// If process is already running, pipe to stdin
+		if (this.process?.stdin) {
+			stream.pipe(this.process.stdin)
+		}
+
+		this.logger.debug("Input stream attached to network producer decoder")
 	}
 
 	/**
-	 * Network producer decoders don't use stdin input - this is a no-op.
+	 * Detaches the current input stream.
 	 */
 	detachInput(): void {
-		// Network producer decoders don't receive audio via stdin
-		this.logger.debug("detachInput called on network producer decoder (no-op)")
+		if (this.inputStream) {
+			// Unpipe from process stdin if connected
+			if (this.process?.stdin) {
+				this.inputStream.unpipe(this.process.stdin)
+			}
+			this.inputStream = null
+			this.logger.debug("Input stream detached from network producer decoder")
+		}
 	}
 
 	/**

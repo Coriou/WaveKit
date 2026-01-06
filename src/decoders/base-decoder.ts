@@ -158,7 +158,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.emit("exit", code, signal)
 		})
 
-	// Parse stdout line by line (Requirement 4.4)
+		// Parse stdout line by line (Requirement 4.4)
 		if (this.process.stdout) {
 			if (this.parseStdout) {
 				const stdoutReader = createInterface({
