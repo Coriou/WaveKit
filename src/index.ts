@@ -15,7 +15,7 @@
 import "./bootstrap.js"
 
 import { PassThrough } from "node:stream"
-import { loadConfig } from "./config.js"
+import { loadConfig, type Config } from "./config.js"
 import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
@@ -72,8 +72,9 @@ const startTime = Date.now()
  */
 function wireDecoderAudioToOutput(
 	decoderManager: DecoderManager,
-	fanoutManager: FanoutManager, // Added for raw audio monitoring
+	fanoutManager: FanoutManager,
 	audioOutput: AudioOutput,
+	config: Config, // Added config parameter
 	log: Logger,
 ): () => void {
 	// Create a combined audio stream that aggregates audio from all decoders
@@ -82,10 +83,12 @@ function wireDecoderAudioToOutput(
 	})
 
 	// DEBUG: Monitor Raw Audio (Pipe Source -> Output directly)
-	// This helps verify that audio is reaching WaveKit
-	const rawAudioStream = fanoutManager.addBranch({ id: "audio-monitor" })
-	rawAudioStream.pipe(combinedAudioStream, { end: false })
-	log.info("Wired raw audio source to AudioOutput for monitoring")
+	// Only enabled if config.audio.monitoring is true
+	if (config.audio.monitoring) {
+		const rawAudioStream = fanoutManager.addBranch({ id: "audio-monitor" })
+		rawAudioStream.pipe(combinedAudioStream, { end: false })
+		log.info("Wired raw audio source to AudioOutput for monitoring")
+	}
 
 	// Track which decoders are piped to the combined stream
 	const pipedDecoders = new Map<string, Decoder>()
@@ -386,6 +389,7 @@ async function main(): Promise<void> {
 		decoderManager,
 		fanoutManager,
 		audioOutput,
+		config, // Pass config for monitoring check
 		log,
 	)
 
@@ -438,6 +442,11 @@ async function main(): Promise<void> {
 	}
 
 	// Step 15: Start enabled decoders
+	// Log decoded messages for user visibility (Requirement: User Feedback)
+	decoderManager.on("decoder:output", (decoderId, output) => {
+		log.info({ decoderId, output }, "Decoded Message")
+	})
+
 	await decoderManager.startAll()
 
 	// Log startup complete

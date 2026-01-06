@@ -99,6 +99,7 @@ export const AudioConfigSchema = z.object({
 	tcpPort: z.number().int().min(1).max(65535).default(8080),
 	format: z.enum(["S16LE", "FLOAT32LE"]).default("S16LE"),
 	sampleRate: z.number().int().positive().default(48000),
+	monitoring: z.boolean().default(false),
 })
 
 /**

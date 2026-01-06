@@ -6,7 +6,7 @@ sources:
     caps:
       kind: audio_pcm
       sampleRate: 48000
-      format: auto
+      format: S16LE
       exclusive: false
 
 decoders:
@@ -37,6 +37,7 @@ audio:
   tcpPort: 8080
   format: S16LE
   sampleRate: 48000
+  monitoring: true
 
 api:
   host: 0.0.0.0
