@@ -165,6 +165,9 @@ export class DirewolfDecoder extends NetworkProducerDecoder {
 	protected getArgs(): string[] {
 		const args: string[] = []
 
+		// Use configuration file for audio device settings (disables transmit)
+		args.push("-c", "/etc/direwolf.conf")
+
 		// Audio device configuration (Requirement 26.4)
 		if (this.options.audioDevice) {
 			if (this.options.audioDevice === "stdin") {
@@ -172,7 +175,7 @@ export class DirewolfDecoder extends NetworkProducerDecoder {
 				args.push("-")
 			} else {
 				// Use specified ALSA device
-				args.push("-A", this.options.audioDevice)
+				args.push("-A", this.options.audioDevice, "null")
 			}
 		}
 

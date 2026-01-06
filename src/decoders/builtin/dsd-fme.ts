@@ -73,6 +73,8 @@ export class DsdFmeDecoder extends BaseDecoder {
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = this.parseOptions(config.options)
+		// DSD-FME outputs data to stderr, and we route audio to stdout (which we drain)
+		this.parseStdout = false
 	}
 
 	/**
@@ -156,7 +158,8 @@ export class DsdFmeDecoder extends BaseDecoder {
 				break
 			case "null":
 			default:
-				args.push("-o", "/dev/null")
+				// Output audio to stdout (which we ignore/drain) to avoid PulseAudio connection issues with /dev/null
+				args.push("-o", "-")
 				break
 		}
 

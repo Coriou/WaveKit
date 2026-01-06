@@ -426,6 +426,9 @@ RUN mkdir -p /etc/s6-overlay/scripts
 COPY docker/scripts/healthcheck.sh /etc/s6-overlay/scripts/
 RUN chmod 755 /etc/s6-overlay/scripts/healthcheck.sh
 
+# Copy direwolf configuration
+COPY docker/config/direwolf.conf /etc/direwolf.conf
+
 # Expose ports
 EXPOSE 9000 \
     8080 \
@@ -476,6 +479,15 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+
+# Copy ncurses libraries from build stage to ensure version compatibility
+COPY --from=dsd-fme-build /usr/lib/x86_64-linux-gnu/libncurses* /usr/lib/x86_64-linux-gnu/
+
+# Run ldconfig to update cache
+RUN ldconfig
+
+# Copy direwolf configuration
+COPY docker/config/direwolf.conf /etc/direwolf.conf
 
 # Copy Node.js application
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/

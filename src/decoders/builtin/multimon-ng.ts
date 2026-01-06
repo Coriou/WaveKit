@@ -158,7 +158,6 @@ export class MultimonDecoder extends BaseDecoder {
 
 		// Input from stdin with raw audio format
 		args.push("-t", "raw")
-		args.push("-a", "S16LE") // 16-bit signed little-endian
 		args.push("-")
 
 		// Add each enabled mode (Requirement 7.3)

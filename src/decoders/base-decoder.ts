@@ -67,6 +67,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	protected version: string | undefined = undefined
 	protected logger: Logger
 	protected config: DecoderConfig
+	protected parseStdout: boolean = true
+	protected parseStderr: boolean = true
 
 	/**
 	 * Gets the decoder's capabilities (Requirement 17.1).
@@ -156,28 +158,38 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			this.emit("exit", code, signal)
 		})
 
-		// Parse stdout line by line (Requirement 4.4)
+	// Parse stdout line by line (Requirement 4.4)
 		if (this.process.stdout) {
-			const stdoutReader = createInterface({
-				input: this.process.stdout,
-				crlfDelay: Infinity,
-			})
+			if (this.parseStdout) {
+				const stdoutReader = createInterface({
+					input: this.process.stdout,
+					crlfDelay: Infinity,
+				})
 
-			stdoutReader.on("line", (line: string) => {
-				this.handleOutputLine(line)
-			})
+				stdoutReader.on("line", (line: string) => {
+					this.handleOutputLine(line)
+				})
+			} else {
+				// Drain stdout if not parsing to prevent buffer filling
+				this.process.stdout.resume()
+			}
 		}
 
 		// Parse stderr line by line (some decoders output to stderr)
 		if (this.process.stderr) {
-			const stderrReader = createInterface({
-				input: this.process.stderr,
-				crlfDelay: Infinity,
-			})
+			if (this.parseStderr) {
+				const stderrReader = createInterface({
+					input: this.process.stderr,
+					crlfDelay: Infinity,
+				})
 
-			stderrReader.on("line", (line: string) => {
-				this.handleOutputLine(line)
-			})
+				stderrReader.on("line", (line: string) => {
+					this.handleOutputLine(line)
+				})
+			} else {
+				// Drain stderr if not parsing
+				this.process.stderr.resume()
+			}
 		}
 
 		// Pipe input stream to process stdin if attached

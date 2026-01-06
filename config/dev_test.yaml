@@ -6,21 +6,32 @@ sources:
     caps:
       kind: audio_pcm
       sampleRate: 48000
-      format: FLOAT32LE
+      format: S16LE
       exclusive: false
 
 decoders:
-  - id: adsb
-    type: readsb
+  # Pager/data decoder - POCSAG, FLEX, EAS alerts, DTMF, AFSK1200
+  - id: pagers
+    type: multimon-ng
     enabled: true
     options:
-      outputFormat: sbs
+      modes: [POCSAG512, POCSAG1200, POCSAG2400, FLEX]
 
-  - id: acars
-    type: acarsdec
+  # Digital voice decoder - DMR, P25, YSF, D-Star, NXDN, ProVoice
+  - id: digital-voice
+    type: dsd-fme
     enabled: true
     options:
-      outputFormat: json
+      mode: auto
+      output: null
+
+  # APRS/AX.25 decoder - amateur radio packet
+  - id: aprs
+    type: direwolf
+    enabled: true
+    options:
+      audioDevice: stdin
+      sampleRate: 48000
 
 audio:
   tcpPort: 8080
