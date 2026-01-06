@@ -29,6 +29,11 @@ import { PassThrough } from "node:stream"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
+import {
+	detectAudioFormat,
+	type DetectedFormat,
+} from "../utils/audio-analyzer.js"
+import { convertFloat32ToS16LE } from "../utils/converters.js"
 
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
@@ -107,8 +112,12 @@ interface SourceState {
 	lastError?: string | undefined
 	reconnectAttempts: number
 	reconnectTimer: ReturnType<typeof setTimeout> | null
+
 	metricsTimer: ReturnType<typeof setInterval> | null
 	stopping: boolean
+	// Format detection
+	activeFormat: SourceCaps["format"] | "UNKNOWN"
+	detectionBuffer: Buffer | null
 	// Recording source specific state
 	recordingState?: RecordingState | undefined
 }
@@ -216,6 +225,8 @@ export class SourceManager extends EventEmitter {
 			reconnectTimer: null,
 			metricsTimer: null,
 			stopping: false,
+			activeFormat: config.caps.format,
+			detectionBuffer: config.caps.format === "auto" ? Buffer.alloc(0) : null,
 		}
 
 		this.sources.set(config.id, state)
@@ -617,16 +628,97 @@ export class SourceManager extends EventEmitter {
 			}
 
 			const onData = (chunk: Buffer) => {
+				if (state.bytesReceived === 0) {
+					this.logger.info(
+						{ sourceId: id, firstChunkSize: chunk.length },
+						"First data chunk received from source",
+					)
+				}
 				state.bytesReceived += chunk.length
 				state.bytesReceivedSinceLastMetric += chunk.length
 
+				// Handle Auto-Detection
+				if (state.activeFormat === "auto" || state.activeFormat === "UNKNOWN") {
+					// Append to detection buffer
+					state.detectionBuffer = Buffer.concat([
+						state.detectionBuffer || Buffer.alloc(0),
+						chunk,
+					])
+
+					// If we have enough data (e.g. 10ms of 48kHz float = ~2KB, let's wait for 4KB) or it's been a few packets
+					if (
+						state.detectionBuffer.length >= 4096 ||
+						state.bytesReceived > 8192
+					) {
+						const detected = detectAudioFormat(
+							state.detectionBuffer,
+							this.logger,
+						)
+
+						if (detected !== "UNKNOWN") {
+							this.logger.info(
+								{ sourceId: id, detected },
+								`Auto-detected source format`,
+							)
+							state.activeFormat = detected
+
+							// Flush the buffer based on detected format
+							let dataToProcess = state.detectionBuffer
+
+							// If float, convert to S16LE
+							if (
+								state.activeFormat === "FLOAT32LE" &&
+								config.caps.kind === "audio_pcm"
+							) {
+								dataToProcess = convertFloat32ToS16LE(dataToProcess)
+							}
+
+							if (!state.stream.destroyed) {
+								state.stream.write(dataToProcess)
+							}
+							this.emit("data", id, dataToProcess)
+
+							state.detectionBuffer = null
+						} else {
+							// Still unknown, maybe silence? Keep buffering up to a limit
+							if (state.detectionBuffer.length > 1024 * 1024) {
+								// 1MB limit
+								this.logger.warn(
+									{ sourceId: id },
+									"Could not detect format after 1MB, defaulting to S16LE",
+								)
+								state.activeFormat = "S16LE"
+								// Flush as S16LE
+								if (!state.stream.destroyed) {
+									state.stream.write(state.detectionBuffer)
+								}
+								this.emit("data", id, state.detectionBuffer)
+								state.detectionBuffer = null
+							}
+						}
+					}
+					return
+				}
+
+				let dataToProcess = chunk
+
+				// Apply conversion if needed
+				if (
+					state.activeFormat === "FLOAT32LE" &&
+					config.caps.kind === "audio_pcm"
+				) {
+					// We assume config.caps.format was either FLOAT32LE set explicitly, or auto-resolved to it.
+					// Note: if config says auto, state.activeFormat is now FLOAT32LE.
+					dataToProcess = convertFloat32ToS16LE(chunk)
+				}
+
 				// Forward data to the PassThrough stream
 				if (!state.stream.destroyed) {
-					state.stream.write(chunk)
+					state.stream.write(dataToProcess)
 				}
 
 				// Emit data event
-				this.emit("data", id, chunk)
+				this.emit("data", id, dataToProcess)
 			}
 
 			const onError = (err: Error) => {

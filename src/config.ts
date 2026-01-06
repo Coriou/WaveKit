@@ -14,7 +14,7 @@ import { ConfigValidationError } from "./utils/errors.js"
 export const SourceCapsSchema = z.object({
 	kind: z.enum(["audio_pcm", "iq", "recording"]),
 	sampleRate: z.number().int().positive(),
-	format: z.enum(["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ"]),
+	format: z.enum(["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ", "auto"]),
 	channels: z.number().int().positive().optional(),
 	centerFreq: z.number().positive().optional(),
 	exclusive: z.boolean().default(false),

@@ -6,7 +6,7 @@ sources:
     caps:
       kind: audio_pcm
       sampleRate: 48000
-      format: S16LE
+      format: auto
       exclusive: false
 
 decoders:

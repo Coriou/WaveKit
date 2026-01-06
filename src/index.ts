@@ -72,6 +72,7 @@ const startTime = Date.now()
  */
 function wireDecoderAudioToOutput(
 	decoderManager: DecoderManager,
+	fanoutManager: FanoutManager, // Added for raw audio monitoring
 	audioOutput: AudioOutput,
 	log: Logger,
 ): () => void {
@@ -79,6 +80,12 @@ function wireDecoderAudioToOutput(
 	const combinedAudioStream = new PassThrough({
 		highWaterMark: 256 * 1024, // 256KB buffer
 	})
+
+	// DEBUG: Monitor Raw Audio (Pipe Source -> Output directly)
+	// This helps verify that audio is reaching WaveKit
+	const rawAudioStream = fanoutManager.addBranch({ id: "audio-monitor" })
+	rawAudioStream.pipe(combinedAudioStream, { end: false })
+	log.info("Wired raw audio source to AudioOutput for monitoring")
 
 	// Track which decoders are piped to the combined stream
 	const pipedDecoders = new Map<string, Decoder>()
@@ -377,6 +384,7 @@ async function main(): Promise<void> {
 	// This creates a combined stream that aggregates audio from all decoders
 	const cleanupAudioWiring = wireDecoderAudioToOutput(
 		decoderManager,
+		fanoutManager,
 		audioOutput,
 		log,
 	)
