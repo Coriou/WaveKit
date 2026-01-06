@@ -401,10 +401,19 @@ RUN echo "Verifying decoder installations..." && \
     echo "All 8 decoders verified successfully"
 
 # Copy Node.js application
+COPY --from=node-build /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/dist /app/dist
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/config /app/config
 COPY --from=node-build /app/package*.json /app/
+
+# Copy helper scripts
+COPY docker/scripts/init-system.sh /usr/local/bin/
+COPY docker/scripts/start-api.sh /usr/local/bin/
+COPY docker/scripts/finish-api.sh /usr/local/bin/
+COPY docker/scripts/start-sdrpp.sh /usr/local/bin/
+COPY docker/scripts/finish-sdrpp.sh /usr/local/bin/
+RUN chmod 755 /usr/local/bin/init-system.sh /usr/local/bin/start-api.sh /usr/local/bin/finish-api.sh /usr/local/bin/start-sdrpp.sh /usr/local/bin/finish-sdrpp.sh
 
 # Copy s6-overlay service definitions
 COPY docker/overlay/s6-overlay/s6-rc.d /etc/s6-overlay/s6-rc.d
@@ -469,14 +478,22 @@ COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 
 # Copy Node.js application
+COPY --from=node-build /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/dist /app/dist
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/config /app/config
 COPY --from=node-build /app/package*.json /app/
 
+# Copy helper scripts
+COPY docker/scripts/init-system.sh /usr/local/bin/
+COPY docker/scripts/start-api.sh /usr/local/bin/
+COPY docker/scripts/finish-api.sh /usr/local/bin/
+RUN chmod 755 /usr/local/bin/init-system.sh /usr/local/bin/start-api.sh /usr/local/bin/finish-api.sh
+
 # Copy s6-overlay service definitions (without sdrpp)
 COPY docker/overlay/s6-overlay/s6-rc.d /etc/s6-overlay/s6-rc.d
-RUN rm -rf /etc/s6-overlay/s6-rc.d/sdrpp-server && \
+RUN chmod -R 755 /etc/s6-overlay/s6-rc.d && \
+    rm -rf /etc/s6-overlay/s6-rc.d/sdrpp-server && \
     rm -f /etc/s6-overlay/s6-rc.d/wavekit-api/dependencies.d/sdrpp-server && \
     rm -f /etc/s6-overlay/s6-rc.d/user/contents.d/sdrpp-server && \
     rm -f /etc/s6-overlay/s6-rc.d/services/contents.d/sdrpp-server
@@ -514,6 +531,11 @@ RUN mkdir -p /sdr /var/log/sdrpp && \
 COPY --from=sdrpp-build /usr/local/bin/sdrpp* /usr/local/bin/
 COPY --from=sdrpp-build /usr/local/lib/libsdrpp* /usr/local/lib/
 RUN ldconfig
+
+# Copy helper scripts
+COPY docker/scripts/start-sdrpp.sh /usr/local/bin/
+COPY docker/scripts/finish-sdrpp.sh /usr/local/bin/
+RUN chmod 755 /usr/local/bin/start-sdrpp.sh /usr/local/bin/finish-sdrpp.sh
 
 # Basic service setup for SDR++
 COPY docker/overlay/s6-overlay/s6-rc.d/base /etc/s6-overlay/s6-rc.d/base

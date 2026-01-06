@@ -33,6 +33,23 @@ import {
 	MULTIMON_CAPS,
 } from "./decoders/builtin/multimon-ng.js"
 import { createRtl433Decoder, RTL433_CAPS } from "./decoders/builtin/rtl433.js"
+import { createReadsbDecoder, READSB_CAPS } from "./decoders/builtin/readsb.js"
+import {
+	createAcarsdecDecoder,
+	ACARSDEC_CAPS,
+} from "./decoders/builtin/acarsdec.js"
+import {
+	createAisCatcherDecoder,
+	AIS_CATCHER_CAPS,
+} from "./decoders/builtin/ais-catcher.js"
+import {
+	createDumpvdl2Decoder,
+	DUMPVDL2_CAPS,
+} from "./decoders/builtin/dumpvdl2.js"
+import {
+	createDirewolfDecoder,
+	DIREWOLF_CAPS,
+} from "./decoders/builtin/direwolf.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder } from "./decoders/types.js"
 
@@ -247,6 +264,15 @@ async function main(): Promise<void> {
 	decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
 	decoderRegistry.register("multimon-ng", createMultimonDecoder, MULTIMON_CAPS)
 	decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
+	decoderRegistry.register("readsb", createReadsbDecoder, READSB_CAPS)
+	decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
+	decoderRegistry.register(
+		"ais-catcher",
+		createAisCatcherDecoder,
+		AIS_CATCHER_CAPS,
+	)
+	decoderRegistry.register("dumpvdl2", createDumpvdl2Decoder, DUMPVDL2_CAPS)
+	decoderRegistry.register("direwolf", createDirewolfDecoder, DIREWOLF_CAPS)
 
 	log.info(
 		{ registeredDecoders: decoderRegistry.getRegisteredTypes() },

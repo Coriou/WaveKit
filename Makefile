@@ -98,6 +98,12 @@ docker-logs: ## Tail WaveKit logs
 docker-logs-api: ## Tail API logs
 	@docker exec -it wavekit tail -f /var/log/wavekit/wavekit.log
 
+docker-run-core: ## Run core mode manually (requires wavekit:core)
+	@echo "$(BLUE)Running WaveKit core mode...$(NC)"
+	@docker run -p 3000:3000 -p 8080:8080 \
+		-v $(shell pwd)/config/dev_test.yaml:/app/config/default.yaml \
+		wavekit:core
+
 docker-logs-sdrpp: ## Tail SDR++ logs
 	@docker exec -it wavekit tail -f /var/log/wavekit/sdrpp.log
 
