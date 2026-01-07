@@ -174,7 +174,7 @@ export class Dumpvdl2Decoder extends BaseDecoder {
         // We might need to add sampleRate to Dumpvdl2Options.
         // Let's assume 2400000 for now or try to use a safe default if not provided.
         // The previous implementation didn't use sample rate because it controlled the device.
-		args.push("--sample-rate", "2400000") // TODO: Make configurable via options
+        // args.push("--sample-rate", "2400000") // TODO: Make configurable via options
 
 		// Gain setting - irrelevant for IQ file input? 
 		// Actually native dumpvdl2 might not support gain setting when reading from file/stdin?

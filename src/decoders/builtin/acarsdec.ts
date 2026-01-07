@@ -203,11 +203,15 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
             // If proxy is active (which it should be for network mode), use it.
             // The proxy listens on 127.0.0.1. We need the port.
             if (this.proxyPort) {
-                parts.push(`-r rtltcp://127.0.0.1:${this.proxyPort}`)
+                // acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT for SoapySDR (SoapyRTLTCP driver)
+                parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
+                // Set sample rate multiplier to 192 for 2.4 MS/s
+                parts.push("-m 192")
             } else {
                 // This case should ideally not happen if start() was successful
                 this.logger.warn("RTL-TCP host specified but proxy port not available. Falling back to default RTL-TCP port.")
-                parts.push(`-r rtltcp://127.0.0.1:${this.options.rtlTcpPort ?? 1235}`)
+                parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.options.rtlTcpPort ?? 1235}`)
+                parts.push("-m 192")
             }
 		} else {
 			// Local device mode: -r <device> specifies RTL-SDR device by index or serial
