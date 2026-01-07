@@ -183,7 +183,16 @@ export class FanoutManager extends EventEmitter {
 			branch.bufferedBytes += chunkCopy.length
 
 			// Write returns false when buffer is full (backpressure)
-			const canWrite = branch.stream.write(chunkCopy)
+			let canWrite = false
+			try {
+				canWrite = branch.stream.write(chunkCopy)
+			} catch (err) {
+				this.log.error(
+					{ err, branchId },
+					"Error writing to branch stream (likely closed)",
+				)
+				continue
+			}
 
 			if (!canWrite) {
 				// Requirement 2.4: Emit backpressure event without blocking

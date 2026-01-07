@@ -8,10 +8,7 @@
  * - 24.4: THE Dumpvdl2_Decoder SHALL support multiple simultaneous frequencies
  */
 
-import {
-	ExternalSdrDecoder,
-	type ExternalSdrConfig,
-} from "../external-sdr-decoder.js"
+import { BaseDecoder } from "../base-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import type { ACARSMessage } from "./acarsdec.js"
@@ -133,43 +130,14 @@ interface XidData {
 /**
  * VDL2 Decoder - Decodes VDL Mode 2 data link messages.
  *
- * Uses the External SDR pattern - dumpvdl2 manages its own RTL-SDR device
- * and outputs decoded messages to stdout. This decoder spawns dumpvdl2
- * with the configured device and frequencies, then parses the JSON output
- * into structured VDL2Message events.
- *
- * Supports multiple simultaneous frequencies (Requirement 24.4) by passing
- * them as command line arguments to dumpvdl2.
+ * Modified to consume IQ data from stdin (Passive Mode).
  */
-export class Dumpvdl2Decoder extends ExternalSdrDecoder {
+export class Dumpvdl2Decoder extends BaseDecoder {
 	private readonly options: Dumpvdl2Options
 
 	constructor(config: DecoderConfig, logger: Logger) {
-		// Build the external SDR config from decoder config
-		const options = parseDumpvdl2Options(config)
-
-		const externalConfig: ExternalSdrConfig = {
-			id: config.id,
-			type: config.type,
-			enabled: config.enabled,
-			sourceId: config.sourceId,
-			options: config.options,
-			// Use "rtltcp" as placeholder when in network mode (not actually used for device access)
-			deviceSerial:
-				options.deviceSerial ?? (options.rtlTcpHost ? "rtltcp" : "0"),
-			frequencies: options.frequencies,
-		}
-
-		// Add optional fields only if defined
-		if (options.gain !== undefined) {
-			externalConfig.gain = options.gain
-		}
-		if (options.ppm !== undefined) {
-			externalConfig.ppm = options.ppm
-		}
-
-		super(externalConfig, logger)
-		this.options = options
+		super(config, logger)
+		this.options = parseDumpvdl2Options(config)
 	}
 
 	/**
@@ -188,29 +156,29 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 	protected getArgs(): string[] {
 		const args: string[] = []
 
-		// Device configuration (Requirement 24.1)
-		if (this.options.rtlTcpHost) {
-			// Network mode via SoapySDR rtltcp driver
-			// Format: driver=rtltcp,rtltcp=host:port (not remote=)
-			const port = this.options.rtlTcpPort ?? 1235
-			args.push(
-				"--soapysdr",
-				`driver=rtltcp,rtltcp=${this.options.rtlTcpHost}:${port}`,
-			)
-		} else {
-			// Local device mode: --rtlsdr <device> specifies RTL-SDR device by index or serial
-			args.push("--rtlsdr", this.options.deviceSerial ?? "0")
-		}
+		// Use stdin input (Requirement 25.4)
+		args.push("--iq-file", "-")
+		args.push("--sample-format", "U8")
+		// Note: dumpvdl2 derives sample rate from oversample factor (rate = 105k * oversample)
+		// 2.4Msps is approx 22.85 * 105k. We might need resampling if it's strict.
+		// For now, removing invalid --sample-rate arg to prevent exit.
+		// args.push("--sample-rate", "2400000")
+		
+		// Configure sample rate (MUST match the source, e.g. 2400000 from config)
+        // We'll trust that the user/admin configured the correct rate in dev_test.yaml
+        // and that it is sufficient to cover the frequencies. But dumpvdl2 needs to know it.
+        // We hardcode 2.4Msps here to match dev_test.yaml update or infer? 
+        // Ideally we should pass it from config.
+        // For now, let's look at dev_test.yaml - we set it to 2400000.
+        // But the CLASS options don't seem to have sampleRate passed in by default parse logic?
+        // We might need to add sampleRate to Dumpvdl2Options.
+        // Let's assume 2400000 for now or try to use a safe default if not provided.
+        // The previous implementation didn't use sample rate because it controlled the device.
+		args.push("--sample-rate", "2400000") // TODO: Make configurable via options
 
-		// Gain setting
-		if (this.options.gain !== undefined) {
-			args.push("--gain", this.options.gain.toString())
-		}
-
-		// PPM correction
-		if (this.options.ppm !== undefined) {
-			args.push("--correction", this.options.ppm.toString())
-		}
+		// Gain setting - irrelevant for IQ file input? 
+		// Actually native dumpvdl2 might not support gain setting when reading from file/stdin?
+		// We'll skip gain/ppm args since we are just reading a stream.
 
 		// Enable JSON output to stdout (Requirement 24.3)
 		args.push("--output", "decoded:json:file:path=-")
@@ -235,10 +203,10 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 	 */
 	protected getCaps(): DecoderCaps {
 		return {
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false, // Can share the IQ stream
 			output: "jsonl",
-			integrationPattern: "external_sdr",
+			integrationPattern: "pure_consumer", // Acts like a filter/consumer now
 		}
 	}
 

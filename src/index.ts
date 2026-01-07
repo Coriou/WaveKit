@@ -215,6 +215,12 @@ function wireSourceReconnection(
  * 12. Start enabled decoders
  */
 async function main(): Promise<void> {
+	// DEBUG: Catch unhandled exceptions to prevent crash loop
+	process.on("uncaughtException", (err) => {
+		console.error("UNCAUGHT EXCEPTION (Main Process):", err)
+		// We don't exit, to keep the container alive for inspection
+	})
+
 	// Step 1: Load configuration (Requirement 12.1)
 	const config = loadConfig()
 

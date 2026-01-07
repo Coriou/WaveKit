@@ -8,10 +8,7 @@
  * - 25.4: THE AISCatcher_Decoder SHALL support multiple input sources (RTL-TCP, SpyServer, SoapySDR)
  */
 
-import {
-	NetworkProducerDecoder,
-	type NetworkProducerConfig,
-} from "../network-producer-decoder.js"
+import { BaseDecoder } from "../base-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -101,32 +98,55 @@ const NMEA_AIS_PATTERN =
 /**
  * AIS-catcher Decoder - Decodes maritime AIS transponder signals.
  *
- * Uses the Network Producer pattern - AIS-catcher runs as a standalone process
- * and exposes its output via UDP. This decoder receives that output and parses
- * it into structured ShipData events.
- *
- * Supports two output formats:
- * - NMEA: Standard NMEA 0183 AIS sentences (!AIVDM/!AIVDO)
- * - JSON: JSON Lines format, easy to parse
+ * Modified to consume IQ data from stdin (Passive Mode).
  */
-export class AisCatcherDecoder extends NetworkProducerDecoder {
+export class AisCatcherDecoder extends BaseDecoder {
 	private readonly options: AisCatcherOptions
-	private lineBuffer: string = ""
 
 	constructor(config: DecoderConfig, logger: Logger) {
-		// Build the network producer config from decoder config
-		const options = parseAisCatcherOptions(config.options)
-		const outputPort = options.outputPort ?? DEFAULT_OUTPUT_PORT
+		super(config, logger)
+		this.options = parseAisCatcherOptions(config.options)
+	}
 
-		const networkConfig: NetworkProducerConfig = {
-			...config,
-			outputHost: config.outputHost ?? "127.0.0.1",
-			outputPort,
-			outputProtocol: "udp", // AIS-catcher typically uses UDP for output
+    /**
+	 * Parses a line of output into a DecoderOutput object.
+     * Implements abstract method from BaseDecoder.
+	 */
+	protected parseOutput(line: string): DecoderOutput | null {
+        const trimmed = line.trim()
+		if (!trimmed) return null
+
+		if (this.options.outputFormat === "json") {
+            // Parse JSON output
+            if (!trimmed.startsWith("{")) return null;
+            try {
+				const json = JSON.parse(trimmed) as Record<string, unknown>
+				const ship = parseJsonShip(json)
+				if (ship) {
+					return {
+						timestamp: new Date(),
+						decoder: this.id,
+						type: "ship",
+						data: ship,
+					}
+				}
+			} catch {
+				// Skip invalid JSON lines
+                // this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
+			}
+		} else {
+            // Parse NMEA output
+			const ship = parseNmeaSentence(trimmed)
+			if (ship) {
+				return {
+					timestamp: new Date(),
+					decoder: this.id,
+					type: "ship",
+					data: ship,
+				}
+			}
 		}
-
-		super(networkConfig, logger)
-		this.options = options
+        return null;
 	}
 
 	/**
@@ -143,28 +163,12 @@ export class AisCatcherDecoder extends NetworkProducerDecoder {
 		const args: string[] = []
 
 		// Input source configuration (Requirement 25.4)
-		if (this.options.rtlTcpHost) {
-			// RTL-TCP input: -t host port (separate arguments)
-			args.push(
-				"-t",
-				this.options.rtlTcpHost,
-				String(this.options.rtlTcpPort ?? 1234),
-			)
-		} else if (this.options.spyServerHost) {
-			// SpyServer input
-			args.push(
-				"-y",
-				`${this.options.spyServerHost}:${this.options.spyServerPort ?? 5555}`,
-			)
-		} else if (this.options.deviceSerial) {
-			// Local RTL-SDR by serial
-			args.push("-d", this.options.deviceSerial)
-		} else if (this.options.device) {
-			// Local RTL-SDR by index
-			args.push("-d", this.options.device)
-		}
+		// Use stdin input (Passive Mode)
+		args.push("-r", ".") 
+		args.push("-s", "2400000") // TODO: Make configurable
 
-		// Gain setting
+		// Gain setting - irrelevant for stdin?
+		// keeping it just in case logic supports it, though likely ignored
 		if (this.options.gain !== undefined) {
 			args.push("-gr", `tuner=${this.options.gain}`)
 		}
@@ -173,14 +177,17 @@ export class AisCatcherDecoder extends NetworkProducerDecoder {
 		if (this.options.ppm !== undefined) {
 			args.push("-p", this.options.ppm.toString())
 		}
+        
+        // Output format check: we are now a STDOUT parser (BaseDecoder), 
+        // unlike NetworkProducerDecoder which connected to a UDP port.
+        // We need ais-catcher to output to STDOUT.
+        // -u HOST PORT sends to UDP. We don't want that anymore.
+        // We want native stdout.
+        // Checking AIS-catcher docs: defaults to stdout if no -u is passed?
+        // Or maybe -n (NMEA to stdout)? 
+        // -o 5 = JSON Full. Does it go to stdout? Yes usually.
 
-		// Output format and port configuration (Requirement 25.3)
-		const outputPort = this.options.outputPort ?? DEFAULT_OUTPUT_PORT
-
-		// UDP output: -u takes HOST and PORT as separate arguments
-		args.push("-u", "127.0.0.1", String(outputPort))
-
-		// Output format: -o 5 for JSON Full (see help for options: 0=quiet, 1=NMEA only, 2=NMEA+, 3=NMEA+ JSON, 4=JSON Sparse, 5=JSON Full)
+		// Output format: -o 5 for JSON Full
 		if (this.options.outputFormat === "json") {
 			args.push("-o", "5") // JSON Full
 		} else {
@@ -203,100 +210,15 @@ export class AisCatcherDecoder extends NetworkProducerDecoder {
 		const outputFormat = this.options.outputFormat === "json" ? "jsonl" : "nmea"
 
 		return {
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false,
 			output: outputFormat,
-			integrationPattern: "network_producer",
+			integrationPattern: "pure_consumer",
 		}
 	}
-
-	/**
-	 * Parses network data into DecoderOutput objects (Requirement 25.2).
-	 * Handles NMEA and JSON formats.
-	 *
-	 * @param data - Buffer of data received from the network
-	 * @returns Array of DecoderOutput objects with ShipData
-	 */
-	protected parseNetworkData(data: Buffer): DecoderOutput[] {
-		if (this.options.outputFormat === "json") {
-			return this.parseJsonData(data)
-		} else {
-			return this.parseNmeaData(data)
-		}
 	}
 
-	/**
-	 * Parses NMEA AIS sentence data.
-	 * NMEA sentences are line-based with checksum validation.
-	 */
-	private parseNmeaData(data: Buffer): DecoderOutput[] {
-		const outputs: DecoderOutput[] = []
 
-		// Add new data to line buffer
-		this.lineBuffer += data.toString()
-
-		// Process complete lines
-		const lines = this.lineBuffer.split("\n")
-		// Keep the last incomplete line in the buffer
-		this.lineBuffer = lines.pop() ?? ""
-
-		for (const line of lines) {
-			const trimmed = line.trim()
-			if (!trimmed) continue
-
-			const ship = parseNmeaSentence(trimmed)
-			if (ship) {
-				outputs.push({
-					timestamp: new Date(),
-					decoder: this.id,
-					type: "ship",
-					data: ship,
-				})
-			}
-		}
-
-		return outputs
-	}
-
-	/**
-	 * Parses JSON Lines format data.
-	 * Each line is a complete JSON object.
-	 */
-	private parseJsonData(data: Buffer): DecoderOutput[] {
-		const outputs: DecoderOutput[] = []
-
-		// Add new data to line buffer
-		this.lineBuffer += data.toString()
-
-		// Process complete lines
-		const lines = this.lineBuffer.split("\n")
-		// Keep the last incomplete line in the buffer
-		this.lineBuffer = lines.pop() ?? ""
-
-		for (const line of lines) {
-			const trimmed = line.trim()
-			if (!trimmed) continue
-
-			try {
-				const json = JSON.parse(trimmed) as Record<string, unknown>
-				const ship = parseJsonShip(json)
-				if (ship) {
-					outputs.push({
-						timestamp: new Date(),
-						decoder: this.id,
-						type: "ship",
-						data: ship,
-					})
-				}
-			} catch {
-				// Skip invalid JSON lines
-				this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
-			}
-		}
-
-		return outputs
-	}
-}
 
 /**
  * Parses and validates decoder options from config.

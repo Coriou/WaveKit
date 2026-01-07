@@ -12,6 +12,7 @@ import {
 	ExternalSdrDecoder,
 	type ExternalSdrConfig,
 } from "../external-sdr-decoder.js"
+import { PassiveRtlProxy } from "../passive-rtl-proxy.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -105,6 +106,9 @@ interface AcarsdecJsonOutput {
  */
 export class AcarsdecDecoder extends ExternalSdrDecoder {
 	private readonly options: AcarsdecOptions
+	private proxy: PassiveRtlProxy | null = null
+	private proxyPort: number | null = null
+
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		// Build the external SDR config from decoder config
@@ -135,6 +139,45 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	}
 
 	/**
+	 * Overrides start to initialize the passive proxy first.
+	 */
+	override async start(): Promise<void> {
+		if (this.options.rtlTcpHost) {
+			try {
+				const port = this.options.rtlTcpPort ?? 1235
+				this.logger.info({ host: this.options.rtlTcpHost, port }, "Starting Passive RTL Proxy for acarsdec")
+				
+				this.proxy = new PassiveRtlProxy(this.options.rtlTcpHost, port, this.logger)
+				this.proxyPort = await this.proxy.listen()
+				
+				// HACK: Modify the config options in place so getArgs() picks up the proxy port
+				// This is safe because this instance is ephemeral/dedicated to this run mostly?
+				// Actually typically instances are long lived. We should probably use a separate member.
+				// But getArgs() reads this.options.
+				// We'll trust that getArgs() handles the specific "proxy mode" if we set a flag or just reuse the logic.
+                // Better: Just override getArgs to check for this.proxy.
+			} catch (err) {
+				this.logger.error({ err }, "Failed to start passive proxy")
+				throw err
+			}
+		}
+
+		return super.start()
+	}
+
+	/**
+	 * Overrides stop to close the proxy.
+	 */
+	override async stop(): Promise<void> {
+		await super.stop()
+		if (this.proxy) {
+			this.proxy.close()
+			this.proxy = null
+			this.proxyPort = null
+		}
+	}
+
+	/**
 	 * Returns the acarsdec command (Requirement 23.1).
 	 */
 	protected getCommand(): string {
@@ -157,11 +200,15 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 
 		// Device configuration (Requirement 23.1)
 		if (this.options.rtlTcpHost) {
-			// Network mode via SoapySDR rtltcp driver
-			// Format: driver=rtltcp,rtltcp=host:port (not remote=)
-			const port = this.options.rtlTcpPort ?? 1235
-			// Quote the device string to prevent shell splitting
-			parts.push(`-d "driver=rtltcp,rtltcp=${this.options.rtlTcpHost}:${port}"`)
+            // If proxy is active (which it should be for network mode), use it.
+            // The proxy listens on 127.0.0.1. We need the port.
+            if (this.proxyPort) {
+                parts.push(`-r rtltcp://127.0.0.1:${this.proxyPort}`)
+            } else {
+                // This case should ideally not happen if start() was successful
+                this.logger.warn("RTL-TCP host specified but proxy port not available. Falling back to default RTL-TCP port.")
+                parts.push(`-r rtltcp://127.0.0.1:${this.options.rtlTcpPort ?? 1235}`)
+            }
 		} else {
 			// Local device mode: -r <device> specifies RTL-SDR device by index or serial
 			parts.push(`-r ${this.options.deviceSerial ?? "0"}`)

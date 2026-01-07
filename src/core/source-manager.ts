@@ -702,6 +702,29 @@ export class SourceManager extends EventEmitter {
 
 				let dataToProcess = chunk
 
+				// Strip RTL-TCP header (12 bytes) for U8_IQ format
+				// This is required because decoders expecting raw IQ (like dumpvdl2 --iq-file)
+				// generally don't expect the protocol header.
+				if (config.caps.format === "U8_IQ") {
+					const HEADER_SIZE = 12
+					const totalReceived = state.bytesReceived
+					const previousReceived = totalReceived - chunk.length
+
+					if (previousReceived < HEADER_SIZE) {
+						// We are processing part of the header
+						const headerRemaining = HEADER_SIZE - previousReceived
+						
+						if (chunk.length <= headerRemaining) {
+							// Entire chunk is header, skip it
+							return 
+						}
+						
+						// Slice off the header part
+						this.logger.debug({ sourceId: id }, "Stripping RTL-TCP header from stream")
+						dataToProcess = chunk.subarray(headerRemaining)
+					}
+				}
+
 				// Apply conversion if needed
 				if (
 					state.activeFormat === "FLOAT32LE" &&
@@ -709,7 +732,7 @@ export class SourceManager extends EventEmitter {
 				) {
 					// We assume config.caps.format was either FLOAT32LE set explicitly, or auto-resolved to it.
 					// Note: if config says auto, state.activeFormat is now FLOAT32LE.
-					dataToProcess = convertFloat32ToS16LE(chunk)
+					dataToProcess = convertFloat32ToS16LE(dataToProcess)
 				}
 
 				// Forward data to the PassThrough stream
