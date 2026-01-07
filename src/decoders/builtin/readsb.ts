@@ -135,55 +135,48 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * Returns the readsb command (Requirement 22.1).
 	 */
 	protected getCommand(): string {
-		// Requirement: If using network mode, we must use a shell to pipe data
-		// because readsb doesn't support rtl_tcp natively.
-		if (this.options.rtlTcpHost) {
-			return "sh"
-		}
 		return "readsb"
 	}
 
 	/**
 	 * Returns command line arguments for readsb (Requirement 22.1).
+	 *
+	 * IMPORTANT: readsb requires 2.0 Msps sample rate for ADS-B decoding.
+	 * When using ifile mode (stdin), the data must already be at 2.0 Msps.
+	 * If rtlTcpHost is configured, we use network mode where readsb controls the sample rate.
 	 */
 	protected getArgs(): string[] {
-		// If using RTL-TCP, we need to construct a shell command to pipe data:
-		// nc <host> <port> | readsb --device-type ifile --ifile - --iformat UC8 ...
-		if (this.options.rtlTcpHost) {
-			const port = this.options.rtlTcpPort ?? 1235
-			const readsbArgs = this.getReadsbArgs(true) // true = network mode
-			const cmd = `nc ${this.options.rtlTcpHost} ${port} | readsb ${readsbArgs.join(" ")}`
-			return ["-c", cmd]
-		}
-
-		// Otherwise return standard args
-		return this.getReadsbArgs(false)
-	}
-
-	/**
-	 * Generates arguments for the readsb binary.
-	 * @param isNetworkMode - If true, configures for stdin input (ifile)
-	 */
-	private getReadsbArgs(isNetworkMode: boolean): string[] {
 		const args: string[] = []
 
-		if (isNetworkMode) {
-			// Network mode: Read from stdin (piped from nc) using ifile driver
-			// UC8 format matches the 8-bit unsigned IQ from rtl_tcp
+		// Check if we have an rtl_tcp host configured (network mode)
+		if (this.options.rtlTcpHost) {
+			// Network mode: readsb connects to rtl_tcp and controls sample rate
+			args.push("--device-type", "rtltcp")
+			const port = this.options.rtlTcpPort ?? 1234
+			args.push(
+				"--net-connector",
+				`${this.options.rtlTcpHost},${port},beast_in`,
+			)
+			// Gain setting
+			if (this.options.gain !== undefined) {
+				args.push("--gain", this.options.gain.toString())
+			}
+			// PPM correction
+			if (this.options.ppm !== undefined) {
+				args.push("--ppm", this.options.ppm.toString())
+			}
+		} else {
+			// Stdin mode: We receive IQ data via stdin from WaveKit
+			// NOTE: readsb expects 2.0 Msps for ADS-B. If the source is 2.4 Msps,
+			// decoding will likely fail. Use rtlTcpHost for proper sample rate control.
 			args.push("--device-type", "ifile")
 			args.push("--ifile", "-")
 			args.push("--iformat", "UC8")
-		} else if (this.options.deviceSerial) {
-			// Local device by serial
-			args.push("--device-type", "rtlsdr")
-			args.push("--device", this.options.deviceSerial)
-		} else if (this.options.device) {
-			// Local device by index
-			args.push("--device-type", "rtlsdr")
-			args.push("--device", this.options.device)
+			// Note: --sample-rate is not a valid option for ifile mode
+			// readsb uses fixed 2.0 Msps internally for ADS-B
 		}
 
-		// Gain setting
+		// Gain setting - usually ignored for file input but we can pass it
 		if (this.options.gain !== undefined) {
 			args.push("--gain", this.options.gain.toString())
 		}
@@ -211,6 +204,11 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 		// Enable network output
 		args.push("--net")
+		// Disable other default ports to avoid conflicts/resource contention
+		// By default readsb opens multiple ports (30002, 30003, 30004, 30005, etc)
+		// which can cause issues. We explicitly set only what we need above,
+		// and disable the others to avoid port conflicts if multiple readsb instances run.
+		args.push("--net-only") // Listen only on configured ports, don't auto-open defaults
 
 		// MLAT configuration
 		if (this.options.enableMlat) {
@@ -230,7 +228,16 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 
 	/**
 	 * Returns the decoder's capabilities (Requirement 17.1).
-	 * Readsb is an external SDR decoder that produces output in various formats.
+	 *
+	 * IMPORTANT: ADS-B decoding requires:
+	 * - Frequency: 1090 MHz
+	 * - Sample rate: 2.0 Msps (fixed, not configurable)
+	 *
+	 * When using stdin mode (no rtlTcpHost), readsb expects the IQ stream to be
+	 * at 2.0 Msps. Shared IQ sources at 2.4 Msps will NOT work correctly.
+	 * For proper operation, either:
+	 * 1. Use rtlTcpHost to connect to a dedicated RTL-SDR
+	 * 2. Ensure the IQ source is configured for 2.0 Msps
 	 */
 	protected getCaps(): DecoderCaps {
 		// Output format depends on configuration
@@ -241,9 +248,13 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 					? "beast"
 					: "text"
 
+		// ADS-B requires exclusive access when not using network mode
+		// because it needs a specific sample rate (2.0 Msps) that other decoders don't use
+		const needsExclusive = !this.options.rtlTcpHost
+
 		return {
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: needsExclusive,
 			output: outputFormat,
 			integrationPattern: "network_producer",
 		}

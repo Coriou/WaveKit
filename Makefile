@@ -122,9 +122,12 @@ dev-start: ## Start dev container (stops existing first)
 	@echo "$(BLUE)Starting $(DEV_CONTAINER)...$(NC)"
 	@docker stop $(DEV_CONTAINER) 2>/dev/null || true
 	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
+	@mkdir -p $(shell pwd)/debug_audio
 	@docker run --rm -d --name $(DEV_CONTAINER) \
 		-p 9000:3000 -p 8080:8080 \
 		-v $(DEV_CONFIG):/app/config/default.yaml \
+		-v $(shell pwd)/debug_audio:/data/debug_audio \
+		-v $(shell pwd)/decoded_calls:/app/decoded_calls \
 		$(DEV_IMAGE)
 	@echo ""
 	@echo "$(GREEN)✅ WaveKit running!$(NC)"
@@ -134,10 +137,11 @@ dev-start: ## Start dev container (stops existing first)
 	@echo "  $(BLUE)Audio$(NC)      nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -"
 	@echo ""
 	@echo "  $(YELLOW)Commands:$(NC)"
-	@echo "    make dev-logs      - All logs"
-	@echo "    make dev-decoded   - Decoded signals only"
-	@echo "    make dev-decoders  - Live decoder status"
-	@echo "    make dev-stop      - Stop container"
+	@echo "    make dev-logs         - All logs"
+	@echo "    make dev-decoded      - Decoded signals only"
+	@echo "    make dev-decoders     - Live decoder status"
+	@echo "    make dev-backpressure - Fanout backpressure monitor"
+	@echo "    make dev-stop         - Stop container"
 	@echo ""
 
 dev-stop: ## Stop dev container
@@ -166,6 +170,16 @@ dev-audio: ## Listen to decoded audio (requires sox)
 	@echo "$(BLUE)Streaming audio from WaveKit... (Ctrl+C to stop)$(NC)"
 	@nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
 
+dev-debug-audio: ## Convert and list debug audio recordings
+	@echo "$(BLUE)Debug Audio Recordings:$(NC)"
+	@ls -lah debug_audio/*.raw 2>/dev/null || echo "No recordings yet"
+	@echo ""
+	@echo "$(BLUE)Converting to WAV...$(NC)"
+	@./scripts/convert-debug-audio.sh debug_audio 2>/dev/null || echo "No files to convert"
+	@echo ""
+	@echo "$(GREEN)To play recordings:$(NC) play debug_audio/*.wav"
+	@echo "$(GREEN)To analyze:$(NC) sox debug_audio/*.wav -n spectrogram -o spectrum.png"
+
 dev-shell: ## Open shell in dev container
 	@docker exec -it $(DEV_CONTAINER) /bin/bash
 
@@ -186,6 +200,10 @@ dev-decoders: ## Show live decoder status (refreshes every 2s)
 		curl -s http://localhost:9000/api/decoders 2>/dev/null | jq -r '.[] | "\(.id)\t\(.running | if . then "✅ running" else "⏹ stopped" end)\t\(.health)\tevents: \(.stats.eventsOut // 0)\tuptime: \(.uptime // 0)s"' 2>/dev/null || echo "API not reachable - is container running?"; \
 		sleep 2; \
 	done
+
+dev-backpressure: ## Show live fanout backpressure dashboard
+	@echo "$(BLUE)Backpressure Monitor$(NC)"
+	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./scripts/backpressure-viewer.mjs
 
 
 docker-logs-sdrpp: ## Tail SDR++ logs

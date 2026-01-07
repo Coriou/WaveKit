@@ -8,12 +8,17 @@
  * - 26.4: THE Direwolf_Decoder SHALL support audio input from PCM streams
  */
 
-import {
-	NetworkProducerDecoder,
-	type NetworkProducerConfig,
-} from "../network-producer-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import { createConnection, type Socket } from "node:net"
+import { createSocket, type Socket as UdpSocket } from "node:dgram"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DemodulationConfig,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import { NetworkConnectionError } from "../../utils/errors.js"
 
 /** Default KISS TCP port for direwolf */
 const DEFAULT_KISS_PORT = 8001
@@ -30,6 +35,9 @@ const KISS_FESC = 0xdb // Frame Escape
 const KISS_TFEND = 0xdc // Transposed Frame End
 const KISS_TFESC = 0xdd // Transposed Frame Escape
 
+const BASE_RECONNECT_DELAY = 2000
+const MAX_RECONNECT_DELAY = 30000
+
 /**
  * Configuration options for the Direwolf decoder.
  */
@@ -42,6 +50,8 @@ export interface DirewolfOptions {
 	kissPort?: number | undefined
 	/** AGW port for AGW protocol access (default: 8000) */
 	agwPort?: number | undefined
+	/** IQ sample rate from source (default: 2400000) */
+	inputSampleRate?: number | undefined
 	/** Station callsign */
 	callsign?: string | undefined
 	/** Additional command line arguments */
@@ -117,73 +127,76 @@ export interface APRSData {
 /**
  * Direwolf APRS Decoder - Decodes amateur radio APRS packets.
  *
- * Uses the Network Producer pattern - direwolf runs as a standalone process
- * and exposes its output via KISS TCP port. This decoder connects to that
- * port and parses KISS frames into structured APRSData events.
+ * HYBRID IMPLEMENTATION:
+ * Extends AudioDemodDecoder to consume IQ data and perform internal FM demodulation.
+ * ALSO implements Network Consumer logic (like NetworkProducerDecoder) to connect
+ * to direwolf's KISS TCP output port.
  *
- * Direwolf is a software TNC (Terminal Node Controller) that:
- * - Receives audio input (from soundcard or stdin)
- * - Decodes AX.25 packets using AFSK1200 or other modulations
- * - Outputs decoded packets via KISS protocol over TCP
- *
- * KISS Protocol:
- * - Frame delimiter: 0xC0 (FEND)
- * - Escape: 0xDB (FESC)
- * - Transposed FEND: 0xDC (TFEND)
- * - Transposed FESC: 0xDD (TFESC)
+ * Pipeline:
+ * IQ -> csdr demod -> S16LE audio -> direwolf (stdin) -> KISS TCP -> WaveKit
  */
-export class DirewolfDecoder extends NetworkProducerDecoder {
+export class DirewolfDecoder extends AudioDemodDecoder {
 	private readonly options: DirewolfOptions
 	private kissBuffer: Buffer = Buffer.alloc(0)
 
+	// Network Consumer State (from NetworkProducerDecoder)
+	protected tcpClient: Socket | null = null
+	protected udpClient: UdpSocket | null = null
+	protected reconnectAttempts: number = 0
+	protected reconnectTimer: ReturnType<typeof setTimeout> | null = null
+	protected isReconnecting: boolean = false
+	protected isStopping: boolean = false
+	protected outputHost: string
+	protected outputPort: number
+
 	constructor(config: DecoderConfig, logger: Logger) {
-		// Build the network producer config from decoder config
-		const options = parseDirewolfOptions(config.options)
-		const kissPort = options.kissPort ?? DEFAULT_KISS_PORT
+		super(config, logger)
+		this.options = parseDirewolfOptions(config.options)
 
-		const networkConfig: NetworkProducerConfig = {
-			...config,
-			outputHost: config.outputHost ?? "127.0.0.1",
-			outputPort: kissPort,
-			outputProtocol: "tcp", // KISS uses TCP
-		}
-
-		super(networkConfig, logger)
-		this.options = options
+		// Set up network connection params
+		this.outputHost = "127.0.0.1" // Always local for spawned process
+		this.outputPort = this.options.kissPort ?? DEFAULT_KISS_PORT
 	}
 
 	/**
-	 * Returns the direwolf command (Requirement 26.1).
+	 * Returns the demodulation configuration for Direwolf.
+	 * 12.5kHz bandwidth for APRS (NFM).
 	 */
-	protected getCommand(): string {
+	protected getDemodConfig(): DemodulationConfig {
+		return {
+			bandwidth: 12500, // 12.5 kHz NFM (standard for APRS on 2m)
+			sampleRate: 48000, // Direwolf native rate
+			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
+			deEmphasis: false,
+		}
+	}
+
+	/**
+	 * Returns the decoder command.
+	 */
+	protected getDecoderCommand(): string {
 		return "direwolf"
 	}
 
 	/**
-	 * Returns command line arguments for direwolf (Requirement 26.1).
+	 * Returns command line arguments for direwolf.
+	 * Base class handles piping audio to stdin.
 	 */
-	protected getArgs(): string[] {
+	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
-		// Use configuration file for audio device settings (disables transmit)
+		// Use configuration file
 		args.push("-c", "/etc/direwolf.conf")
 
-		// Audio device configuration (Requirement 26.4)
-		if (this.options.audioDevice) {
-			if (this.options.audioDevice === "stdin") {
-				// Read audio from stdin
-				args.push("-")
-			} else {
-				// Use specified ALSA device
-				args.push("-A", this.options.audioDevice, "null")
-			}
-		}
+		// Input from stdin (csdr pipeline pipes here)
+		// We explicitly tell direwolf to read from stdin with "-"
+		args.push("-")
 
-		// Sample rate
-		const sampleRate = this.options.sampleRate ?? DEFAULT_SAMPLE_RATE
+		// Sample rate override
+		const sampleRate = 48000 // Fixed by demod config
 		args.push("-r", sampleRate.toString())
 
-		// KISS TCP port (Requirement 26.3)
+		// KISS TCP port
 		const kissPort = this.options.kissPort ?? DEFAULT_KISS_PORT
 		args.push("-p", kissPort.toString())
 
@@ -205,27 +218,157 @@ export class DirewolfDecoder extends NetworkProducerDecoder {
 	}
 
 	/**
-	 * Returns the decoder's capabilities (Requirement 17.1).
-	 * Direwolf accepts PCM audio input and produces text output.
+	 * Starts the decoder process and connects to output.
 	 */
-	protected getCaps(): DecoderCaps {
+	override async start(): Promise<void> {
+		this.isStopping = false
+
+		// Start the process (AudioDemodDecoder logic)
+		await super.start()
+
+		// Connect to output port (Network Consumer logic)
+		// Direwolf needs time to initialize and bind the KISS port.
+		// We use a longer delay and rely on exponential backoff reconnection if needed.
+		setTimeout(() => {
+			void this.connectToOutput()
+		}, 2000)
+	}
+
+	/**
+	 * Stops the decoder process.
+	 */
+	override async stop(): Promise<void> {
+		this.isStopping = true
+		// Cancel reconnects
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer)
+			this.reconnectTimer = null
+		}
+		// Diconnect network
+		this.disconnectFromOutput()
+		// Stop process
+		await super.stop()
+	}
+
+	/**
+	 * Capabilities (Requirement 17.1).
+	 * Now consumes IQ.
+	 */
+	protected override getCaps(): DecoderCaps {
 		return {
-			input: "audio_pcm",
+			input: "iq",
 			wantsExclusiveSource: false,
-			preferredSampleRates: [48000, 44100],
+			preferredSampleRates: [48000],
 			output: "text",
-			integrationPattern: "network_producer",
+			integrationPattern: "pure_consumer", // Effectively pure consumer now
 		}
 	}
 
 	/**
-	 * Parses network data (KISS frames) into DecoderOutput objects (Requirement 26.2).
-	 *
-	 * @param data - Buffer of data received from the KISS TCP port
-	 * @returns Array of DecoderOutput objects with APRSData
+	 * Parses output from stdout/stderr.
+	 * Direwolf logs accessible here.
 	 */
-	protected parseNetworkData(data: Buffer): DecoderOutput[] {
-		const outputs: DecoderOutput[] = []
+	protected override parseOutput(line: string): DecoderOutput | null {
+		// Log interesting direwolf output if needed
+		return null
+	}
+
+	/**
+	 * Sets health and emits event (Helper from NetworkProducerDecoder)
+	 * Using basic typing to avoid complexity with conditional types
+	 */
+	protected override setHealth(health: any): void {
+		if (this._health !== health) {
+			const previousHealth = this._health
+			this._health = health
+			this.logger.info(
+				{ previousHealth, newHealth: health },
+				"Decoder health changed",
+			)
+			this.emit("health", health)
+		}
+	}
+
+	// =========================================================================
+	// Network Consumer Logic (Adapted from NetworkProducerDecoder)
+	// =========================================================================
+
+	protected async connectToOutput(): Promise<void> {
+		const host = this.outputHost
+		const port = this.outputPort
+
+		this.logger.info({ host, port }, "Connecting to Direwolf KISS output")
+
+		return new Promise<void>((resolve, reject) => {
+			this.tcpClient = createConnection({ host, port }, () => {
+				this.logger.info({ host, port }, "Connected to Direwolf KISS")
+				this.reconnectAttempts = 0
+				this.isReconnecting = false
+				resolve()
+			})
+
+			this.tcpClient.on("data", (data: Buffer) => {
+				this.handleNetworkData(data)
+			})
+
+			this.tcpClient.on("error", (err: Error) => {
+				this.logger.error({ err }, "KISS connection error")
+				if (!this.isReconnecting && this.reconnectAttempts === 0) {
+					this.scheduleReconnect()
+					resolve()
+				}
+			})
+
+			this.tcpClient.on("close", () => {
+				this.logger.info("KISS connection closed")
+				this.tcpClient = null
+				if (!this.isStopping) {
+					this.scheduleReconnect()
+				}
+			})
+		})
+	}
+
+	protected disconnectFromOutput(): void {
+		if (this.tcpClient) {
+			this.tcpClient.destroy()
+			this.tcpClient = null
+		}
+	}
+
+	protected scheduleReconnect(): void {
+		if (this.isStopping || this.isReconnecting) return
+
+		this.isReconnecting = true
+		this.reconnectAttempts++
+		const delay = Math.min(
+			BASE_RECONNECT_DELAY * Math.pow(2, this.reconnectAttempts - 1),
+			MAX_RECONNECT_DELAY,
+		)
+
+		this.logger.info(
+			{ attempt: this.reconnectAttempts, delay },
+			"Scheduling reconnect",
+		)
+		this.reconnectTimer = setTimeout(() => {
+			void this.attemptReconnect()
+		}, delay)
+	}
+
+	private async attemptReconnect(): Promise<void> {
+		this.reconnectTimer = null
+		if (this.isStopping) return
+
+		try {
+			await this.connectToOutput()
+		} catch (err) {
+			this.isReconnecting = false
+			this.scheduleReconnect()
+		}
+	}
+
+	private handleNetworkData(data: Buffer): void {
+		this.stats.bytesIn += data.length
 
 		// Append new data to buffer
 		this.kissBuffer = Buffer.concat([this.kissBuffer, data])
@@ -237,16 +380,22 @@ export class DirewolfDecoder extends NetworkProducerDecoder {
 		for (const frame of frames.frames) {
 			const aprs = parseKissFrame(frame)
 			if (aprs) {
-				outputs.push({
+				const output: DecoderOutput = {
 					timestamp: new Date(),
 					decoder: this.id,
 					type: "aprs",
 					data: aprs,
-				})
+				}
+				this.stats.eventsOut++
+				this.lastOutputAt = new Date()
+				this.emit("output", output)
+
+				// Update health
+				if (this._health === "idle") {
+					this.setHealth("running")
+				}
 			}
 		}
-
-		return outputs
 	}
 }
 
@@ -263,6 +412,7 @@ function parseDirewolfOptions(
 		agwPort: options["agwPort"] as number | undefined,
 		callsign: options["callsign"] as string | undefined,
 		extraArgs: options["extraArgs"] as string[] | undefined,
+		inputSampleRate: options["inputSampleRate"] as number | undefined,
 	}
 }
 
@@ -864,9 +1014,9 @@ export function createDirewolfDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const DIREWOLF_CAPS: DecoderCaps = {
-	input: "audio_pcm",
+	input: "iq",
 	wantsExclusiveSource: false,
-	preferredSampleRates: [48000, 44100],
+	preferredSampleRates: [48000],
 	output: "text",
-	integrationPattern: "network_producer",
+	integrationPattern: "pure_consumer",
 }

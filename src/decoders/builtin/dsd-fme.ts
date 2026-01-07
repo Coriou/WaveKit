@@ -7,10 +7,19 @@
  * - 6.3: WHEN dsd-fme decodes a call, THE DSD_Decoder SHALL emit call events with talkgroup, source, and duration
  * - 6.4: WHEN dsd-fme encounters errors, THE DSD_Decoder SHALL emit error events with the error message
  * - 6.5: THE DSD_Decoder SHALL support modes: auto, dmr, p25, ysf, dstar, nxdn, provoice
+ *
+ * This decoder now uses AudioDemodDecoder to consume IQ data and perform internal FM
+ * demodulation using csdr, eliminating dependency on SDR++ audio output and providing
+ * optimal demodulation settings for digital voice.
  */
 
-import { BaseDecoder } from "../base-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DemodulationConfig,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported DSD-FME decoder modes (Requirement 6.5) */
@@ -42,6 +51,10 @@ export interface DsdFmeOptions {
 	udpPort?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
+	/** IQ sample rate from source (default: 2400000) */
+	inputSampleRate?: number | undefined
+	/** FM Gain to apply (default: ~70.0 for digital voice) */
+	fmGain?: number | undefined
 }
 
 /** All supported DSD-FME modes */
@@ -66,8 +79,12 @@ const ERROR_PATTERN = /(FEC ERR|CRC ERR|SYNC LOST)/i
  *
  * Supports DMR, P25, YSF, D-Star, NXDN, and ProVoice protocols.
  * Parses dsd-fme output into structured sync, call, and error events.
+ *
+ * Now extends AudioDemodDecoder to consume IQ data directly and perform
+ * optimal FM demodulation (12.5kHz NFM without de-emphasis) before
+ * feeding audio to dsd-fme.
  */
-export class DsdFmeDecoder extends BaseDecoder {
+export class DsdFmeDecoder extends AudioDemodDecoder {
 	private readonly options: DsdFmeOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -99,54 +116,180 @@ export class DsdFmeDecoder extends BaseDecoder {
 			udpHost: options["udpHost"] as string | undefined,
 			udpPort: options["udpPort"] as number | undefined,
 			extraArgs: options["extraArgs"] as string[] | undefined,
+			inputSampleRate: options["inputSampleRate"] as number | undefined,
+			fmGain: options["fmGain"] as number | undefined,
 		}
 	}
 
 	/**
-	 * Returns the shell command (Requirement 6.1).
-	 * We use /bin/sh to pipe stdin to dsd-fme, ensuring stdin stays open.
+	 * Returns the demodulation configuration for DSD-FME.
+	 * Uses 12.5kHz NFM bandwidth with no de-emphasis (critical for digital voice).
 	 */
-	protected getCommand(): string {
-		return "/bin/sh"
+	/**
+	 * Returns the demodulation configuration for DSD-FME.
+	 * Uses 12.5kHz NFM bandwidth (via 24ksps demod rate) with no de-emphasis.
+	 */
+	protected getDemodConfig(): DemodulationConfig {
+		return {
+			bandwidth: 12500, // 12.5 kHz NFM - standard for digital voice
+			sampleRate: 48000, // 48 kHz output - dsd-fme native rate
+			demodSampleRate: 48000, // Demod at 48ksps (firdecimate 50) for proper bandwidth
+			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
+			deEmphasis: false, // Critical: no de-emphasis for digital signals
+			fmGain: this.options.fmGain,
+		}
 	}
 
 	/**
-	 * Returns command line arguments for dsd-fme (Requirement 6.1).
-	 * Constructs a shell command that pipes stdin to dsd-fme.
+	 * Returns the decoder command.
+	 * Note: This is only used for getDecoderArgs(), we override buildPipelineCommand()
+	 * to handle the sox WAV wrapper needed by dsd-fme.
 	 */
-	protected getArgs(): string[] {
-		const dsdArgs: string[] = ["dsd-fme"]
+	protected getDecoderCommand(): string {
+		return "dsd-fme"
+	}
 
-		// Input from stdin
-		dsdArgs.push("-i", "/dev/stdin")
+	/**
+	 * Overrides buildPipelineCommand to add sox WAV wrapper.
+	 *
+	 * dsd-fme doesn't support raw S16LE stdin - it expects WAV format.
+	 * We use sox to wrap the S16LE audio as a WAV stream before piping to dsd-fme.
+	 *
+	 * Pipeline: IQ -> csdr (demod at demodRate) -> S16LE -> sox (resample to outputRate + WAV wrapper) -> dsd-fme
+	 */
+	protected override buildPipelineCommand(): string {
+		const config = this.getDemodConfig()
+
+		// Determine rates
+		const demodRate = config.demodSampleRate ?? config.sampleRate
+		const outputRate = config.sampleRate
+		const inputSampleRate = config.inputSampleRate || 2_400_000
+		const decimation = inputSampleRate / demodRate
+
+		// Generate debug filename if debug recording is enabled
+		const debugFile = this.debugRecording
+			? `${this.debugRecording.path}/${this.getDebugFilename("final", "raw")}`
+			: null
+
+		// Build csdr pipeline stages (Using jketterl/csdr v0.18+ syntax)
+		// CRITICAL: dcblock and limit work on REAL float signals only.
+		// They must come AFTER fmdemod (which converts complex -> real audio).
+		const csdrStages: string[] = [
+			"csdr convert -i char -o float", // U8 IQ -> complex float
+			`csdr firdecimate ${decimation}`, // Decimate + filter (complex)
+			"csdr fmdemod", // FM demod: complex -> real audio
+			"csdr dcblock", // Remove DC offset (real audio)
+			`csdr gain ${config.fmGain ?? 10.0}`, // Apply gain (real)
+			"csdr limit", // Prevent clipping (real audio)
+		]
+
+		// Optional de-emphasis (should be false for digital voice)
+		if (config.deEmphasis) {
+			csdrStages.push(`csdr deemphasis ${demodRate}`)
+		}
+
+		// Convert to S16LE audio
+		csdrStages.push("csdr convert -i float -o s16")
+
+		// Join csdr stages
+		let pipelineStr = csdrStages.join(" | ")
+
+		// DEBUG: Record raw audio at demod rate before sox processing
+		// Using simple tee to file - no bash-specific syntax
+		if (debugFile && this.debugRecording) {
+			pipelineStr += ` | tee "${debugFile}"`
+			this.logger.warn(
+				{ file: debugFile, rate: demodRate },
+				"DEBUG: Recording raw audio BEFORE sox",
+			)
+		}
+
+		// Build sox command for WAV wrapper
+		const soxCommand = [
+			"sox",
+			"-t raw",
+			`-r ${demodRate}`,
+			"-e signed -b 16 -c 1",
+			"-",
+			"-t wav",
+			`-r ${outputRate}`,
+			"-",
+		].join(" ")
+
+		pipelineStr += ` | ${soxCommand}`
+
+		// Build dsd-fme command
+		const dsdFmeArgs = this.getDecoderArgs()
+		const dsdFmeCommand = `dsd-fme ${dsdFmeArgs.join(" ")}`
+
+		// Combine into full pipeline
+		const pipeline = `${pipelineStr} | ${dsdFmeCommand}`
+
+		this.logger.debug(
+			{
+				inputSampleRate,
+				demodRate,
+				outputSampleRate: outputRate,
+				decimation,
+				pipeline,
+				debugRecording: !!this.debugRecording,
+			},
+			"Built dsd-fme pipeline with WAV wrapper",
+		)
+
+		return pipeline
+	}
+
+	/**
+	 * Generates a timestamped filename for debug recordings.
+	 */
+	private getDebugFilename(stage: string, ext: string): string {
+		const now = new Date()
+		const ts = now
+			.toISOString()
+			.replace(/[:.]/g, "-")
+			.replace("T", "_")
+			.slice(0, 19)
+		return `${ts}_${this.config.id}_${stage}.${ext}`
+	}
+
+	/**
+	 * Returns decoder-specific command line arguments for dsd-fme.
+	 * Note: We use /dev/stdin because dsd-fme reads WAV from stdin (via sox wrapper).
+	 */
+	protected getDecoderArgs(): string[] {
+		const args: string[] = []
+
+		// Input from stdin (receives WAV stream from sox)
+		args.push("-i", "/dev/stdin")
 
 		// Set decoder mode with explicit flag
 		switch (this.options.mode) {
 			case "dmr":
 				// DMR TDMA BS and MS Simplex
-				dsdArgs.push("-fs")
+				args.push("-fs")
 				break
 			case "p25":
 				// P25 Phase 1
-				dsdArgs.push("-f1")
+				args.push("-f1")
 				break
 			case "ysf":
-				dsdArgs.push("-fy")
+				args.push("-fy")
 				break
 			case "dstar":
-				dsdArgs.push("-fd")
+				args.push("-fd")
 				break
 			case "nxdn":
 				// NXDN96 (12.5 kHz)
-				dsdArgs.push("-fn")
+				args.push("-fn")
 				break
 			case "provoice":
-				dsdArgs.push("-fp")
+				args.push("-fp")
 				break
 			case "auto":
 			default:
 				// Auto-detection mode
-				dsdArgs.push("-fa")
+				args.push("-fa")
 				break
 		}
 
@@ -154,50 +297,41 @@ export class DsdFmeDecoder extends BaseDecoder {
 		switch (this.options.output) {
 			case "wav":
 				if (this.options.wavDir) {
-					dsdArgs.push("-w", this.options.wavDir)
+					args.push("-w", this.options.wavDir)
 				}
 				break
 			case "udp":
 				if (this.options.udpHost && this.options.udpPort) {
-					dsdArgs.push(
-						"-o",
-						`udp:${this.options.udpHost}:${this.options.udpPort}`,
-					)
+					args.push("-o", `udp:${this.options.udpHost}:${this.options.udpPort}`)
 				}
 				break
 			case "null":
 			default:
 				// Disable audio output to avoid PulseAudio issues
-				dsdArgs.push("-o", "null")
+				args.push("-o", "null")
 				break
 		}
 
 		// Add any extra arguments
 		if (this.options.extraArgs) {
-			dsdArgs.push(...this.options.extraArgs)
+			args.push(...this.options.extraArgs)
 		}
 
-		// Use cat to pipe stdin to dsd-fme - this keeps stdin open
-		// The shell wrapper ensures dsd-fme receives a continuous stream
-		const cmd = `cat | ${dsdArgs.join(" ")}`
-
-		return ["-c", cmd]
+		return args
 	}
-
 	/**
 	 * Returns the decoder's capabilities (Requirement 17.1).
-	 * DSD-FME is a pure consumer that accepts PCM audio and outputs text.
+	 * DSD-FME now consumes IQ data (via AudioDemodDecoder's csdr pipeline).
 	 */
-	protected getCaps(): DecoderCaps {
+	protected override getCaps(): DecoderCaps {
 		return {
-			input: "audio_pcm",
+			input: "iq",
 			wantsExclusiveSource: false,
 			preferredSampleRates: [48000],
 			output: "text",
 			integrationPattern: "pure_consumer",
 		}
 	}
-
 	/**
 	 * Parses dsd-fme output lines into DecoderOutput objects.
 	 *
@@ -206,7 +340,7 @@ export class DsdFmeDecoder extends BaseDecoder {
 	 * - Call events (Requirement 6.3)
 	 * - Error events (Requirement 6.4)
 	 */
-	protected parseOutput(line: string): DecoderOutput | null {
+	protected override parseOutput(line: string): DecoderOutput | null {
 		// Check for sync information (Requirement 6.2)
 		const syncMatch = SYNC_PATTERN.exec(line)
 		if (syncMatch) {
@@ -275,7 +409,7 @@ export function createDsdFmeDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const DSD_FME_CAPS: DecoderCaps = {
-	input: "audio_pcm",
+	input: "iq",
 	wantsExclusiveSource: false,
 	preferredSampleRates: [48000],
 	output: "text",

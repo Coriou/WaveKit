@@ -23,6 +23,7 @@ import {
 	type Logger,
 } from "../utils/logger.js"
 import type { SourceManager } from "../core/source-manager.js"
+import type { FanoutManager } from "../core/fanout-manager.js"
 import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
@@ -30,6 +31,7 @@ import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
+import { telemetryRoutes } from "./routes/telemetry.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
 
 /**
@@ -50,6 +52,7 @@ export interface AudioConfig {
 
 export interface ApiServerDependencies {
 	sourceManager: SourceManager
+	fanoutManager: FanoutManager
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
@@ -71,14 +74,17 @@ export class ApiServer {
 	private readonly log: Logger
 	private readonly config: ApiServerConfig
 	private readonly sourceManager: SourceManager
+	private readonly fanoutManager: FanoutManager
 	private readonly decoderManager: DecoderManager
 	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
+	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.sourceManager = dependencies.sourceManager
+		this.fanoutManager = dependencies.fanoutManager
 		this.decoderManager = dependencies.decoderManager
 		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
@@ -145,6 +151,12 @@ export class ApiServer {
 		this.log.info("Stopping API server")
 
 		try {
+			// Stop telemetry broadcasting interval
+			if (this.telemetryInterval) {
+				clearInterval(this.telemetryInterval)
+				this.telemetryInterval = null
+			}
+
 			// Close all WebSocket connections first
 			this.wsBroadcaster.closeAll()
 
@@ -170,6 +182,14 @@ export class ApiServer {
 	 */
 	getSourceManager(): SourceManager {
 		return this.sourceManager
+	}
+
+	/**
+	 * Returns the fanout manager instance.
+	 * Used by route handlers and telemetry.
+	 */
+	getFanoutManager(): FanoutManager {
+		return this.fanoutManager
 	}
 
 	/**
@@ -204,6 +224,7 @@ export class ApiServer {
 	 * - 10.3: Broadcast decoder output to subscribed clients
 	 * - 10.4: Broadcast source events to subscribed clients
 	 * - 20.4: Broadcast decoder health state changes
+	 * - Telemetry: Broadcast fanout backpressure/drain events
 	 */
 	private setupEventBroadcasting(): void {
 		// Decoder events (Requirement 10.3)
@@ -245,6 +266,21 @@ export class ApiServer {
 		this.sourceManager.on("metrics", (sourceId, metrics) => {
 			this.wsBroadcaster.broadcastMetrics(sourceId, metrics)
 		})
+
+		// Fanout telemetry events (edge-triggered)
+		this.fanoutManager.on("backpressure", (branchId, bufferedBytes) => {
+			this.wsBroadcaster.broadcastFanoutBackpressure(branchId, bufferedBytes)
+		})
+
+		this.fanoutManager.on("drain", (branchId, durationMs) => {
+			this.wsBroadcaster.broadcastFanoutDrain(branchId, durationMs)
+		})
+
+		// Periodic fanout telemetry snapshot (every 1 second)
+		this.telemetryInterval = setInterval(() => {
+			const snapshot = this.fanoutManager.getTelemetrySnapshot()
+			this.wsBroadcaster.broadcastFanoutSnapshot(snapshot)
+		}, 1000)
 
 		this.log.debug("Event broadcasting handlers registered")
 	}
@@ -510,6 +546,11 @@ export class ApiServer {
 		await this.app.register(decoderRoutes, {
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,
+		})
+
+		// Register telemetry routes (Fanout backpressure monitoring)
+		await this.app.register(telemetryRoutes, {
+			fanoutManager: this.fanoutManager,
 		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)

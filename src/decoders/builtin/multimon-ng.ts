@@ -6,10 +6,18 @@
  * - 7.2: WHEN multimon-ng decodes a message, THE Multimon_Decoder SHALL parse it into structured message events
  * - 7.3: THE Multimon_Decoder SHALL support modes: POCSAG512, POCSAG1200, POCSAG2400, FLEX, EAS, AFSK1200, FSK9600, DTMF
  * - 7.4: WHEN audio filters are configured, THE Multimon_Decoder SHALL apply highpass, lowpass, and gain settings
+ *
+ * This decoder now uses AudioDemodDecoder to consume IQ data and perform internal FM
+ * demodulation using csdr, eliminating dependency on SDR++ audio output.
  */
 
-import { BaseDecoder } from "../base-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DemodulationConfig,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported Multimon-ng decoder modes (Requirement 7.3) */
@@ -47,6 +55,10 @@ export interface MultimonOptions {
 	charset?: string | undefined
 	/** Audio filter settings */
 	filters?: MultimonFilterOptions | undefined
+	/** IQ sample rate from source (default: 2400000) */
+	inputSampleRate?: number | undefined
+	/** FM Gain to apply (default: ~40.0 for pager signals) */
+	fmGain?: number | undefined
 }
 
 /** All supported Multimon-ng modes */
@@ -93,8 +105,13 @@ const FSK9600_PATTERN = /FSK9600:\s*(.+)/i
  *
  * Supports POCSAG, FLEX, EAS, AFSK1200, FSK9600, and DTMF protocols.
  * Parses multimon-ng output into structured message and decode events.
+ *
+ * Now extends AudioDemodDecoder to consume IQ data directly and perform
+ * optimal FM demodulation (15kHz bandwidth) before feeding audio to multimon-ng.
+ *
+ * Pipeline: IQ → csdr (FM demod, decimate) → sox (resample 48k→22k) → multimon-ng
  */
-export class MultimonDecoder extends BaseDecoder {
+export class MultimonDecoder extends AudioDemodDecoder {
 	private readonly options: MultimonOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -114,6 +131,8 @@ export class MultimonDecoder extends BaseDecoder {
 			verbosity: options["verbosity"] as number | undefined,
 			charset: options["charset"] as string | undefined,
 			filters: options["filters"] as MultimonFilterOptions | undefined,
+			inputSampleRate: options["inputSampleRate"] as number | undefined,
+			fmGain: options["fmGain"] as number | undefined,
 		}
 	}
 
@@ -144,92 +163,115 @@ export class MultimonDecoder extends BaseDecoder {
 	}
 
 	/**
-	 * Returns the command to execute (Requirement 7.1).
-	 * We use /bin/sh to pipe sox output into multimon-ng for resampling.
+	 * Returns the demodulation configuration for multimon-ng.
+	 *
+	 * CRITICAL: multimon-ng expects 22050 Hz sample rate for raw input!
+	 * (per multimon-ng --help: "Raw input requires ... usually 22050 Hz")
+	 *
+	 * We demodulate at 48kHz (matching SDR++ which worked), then resample
+	 * down to 22050Hz for multimon-ng compatibility.
 	 */
-	protected getCommand(): string {
-		return "/bin/sh"
+	protected getDemodConfig(): DemodulationConfig {
+		// Optimization Strategy: "SDR++ Replica"
+		// 1. Bandwidth: 12.5kHz (Tight channel filtering)
+		// 2. Audio LPF: 3kHz (Remove high freq noise)
+		// 3. Gain: Inverted (Reference confirms inverted signal)
+
+		return {
+			bandwidth: 12500, // 12.5 kHz - Match SDR++ NFM bandwidth
+			sampleRate: 22050, // multimon-ng expects 22050 Hz for raw input
+			demodSampleRate: 48000, // Demod at 48ksps
+			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
+
+			// Filter Tuning
+			// Cutoff 0.13 = (12.5k / 2) / 48k * 2 ?? No.
+			// firdecimate cutoff 0.5 = Nyquist (24k).
+			// We want 6.25k passband. 6.25 / 24 = 0.26 ?
+			// Wait, let's trust the "0.13" from manual testing which was 6.25/48.
+			// Actually 0.13 * 48k = 6.24k. That is correct for one-sided bandwidth.
+			filterCutoff: 0.13,
+			filterTransition: 0.05,
+
+			// Inversion & Gain
+			// References 23:55 and pager_noise_around.wav are NORMAL polarity.
+			// Only 23:11 appeared inverted. Defaulting to NORMAL (Positive gain).
+			// Using 2.0 to provide healthy boost.
+			fmGain: this.options.fmGain ?? 2.0,
+
+			// Audio Post-Processing
+			// Replicate SDR++ default audio filter (3k-4k LPF)
+			audioLowPass: 3500,
+
+			deEmphasis: false, // No de-emphasis for digital pagers
+		}
 	}
 
 	/**
-	 * Returns command line arguments (Requirement 7.1).
-	 * Constructs a shell pipeline: sox ... | multimon-ng ...
+	 * Returns the decoder command.
 	 */
-	protected getArgs(): string[] {
-		// Construct multimon-ng command line
-		const multimonArgs: string[] = ["multimon-ng"]
+	protected getDecoderCommand(): string {
+		return "multimon-ng"
+	}
 
-		// Input from stdin with raw audio format (received from sox)
-		multimonArgs.push("-t", "raw")
-		multimonArgs.push("-")
+	/**
+	 * Returns decoder-specific command line arguments for multimon-ng.
+	 * The base class AudioDemodDecoder handles the full csdr | sox pipeline.
+	 *
+	 * IMPORTANT: multimon-ng expects the input file LAST, after all options.
+	 * Usage: multimon-ng [options] [file...]
+	 * The "-" for stdin must come at the END of the argument list.
+	 */
+	protected getDecoderArgs(): string[] {
+		const args: string[] = []
+
+		// Input format (raw audio from sox)
+		args.push("-t", "raw")
 
 		// Add each enabled mode (Requirement 7.3)
 		for (const mode of this.options.modes) {
-			multimonArgs.push("-a", mode)
+			args.push("-a", mode)
 		}
 
 		// Set verbosity level
 		if (this.options.verbosity !== undefined) {
 			for (let i = 0; i < this.options.verbosity; i++) {
-				multimonArgs.push("-v")
+				args.push("-v")
 			}
 		}
 
 		// Set character set
 		if (this.options.charset) {
-			multimonArgs.push("-c", this.options.charset)
+			args.push("-c", this.options.charset)
 		}
 
-		// Apply audio filters (Requirement 7.4) - applied to multimon-ng, though we could move to sox
+		// Apply audio filters (Requirement 7.4)
 		if (this.options.filters) {
 			if (this.options.filters.highpass !== undefined) {
-				multimonArgs.push("--highpass", String(this.options.filters.highpass))
+				args.push("--highpass", String(this.options.filters.highpass))
 			}
 			if (this.options.filters.lowpass !== undefined) {
-				multimonArgs.push("--lowpass", String(this.options.filters.lowpass))
+				args.push("--lowpass", String(this.options.filters.lowpass))
 			}
 			if (this.options.filters.gain !== undefined) {
-				multimonArgs.push("--gain", String(this.options.filters.gain))
+				args.push("--gain", String(this.options.filters.gain))
 			}
 		}
 
-		// Construct sox command line for resampling
-		// Input: stdin, 48kHz (default), S16LE, 1 channel
-		// Output: stdout, 22050Hz (multimon native), S16LE, 1 channel
-		const soxArgs = [
-			"sox",
-			"-t",
-			"raw",
-			"-r",
-			"48000", // Incoming sample rate (WaveKit default)
-			"-e",
-			"signed", // Signed integer
-			"-b",
-			"16", // 16-bit
-			"-c",
-			"1", // 1 channel
-			"-", // Input from stdin
-			"-t",
-			"raw",
-			"-r",
-			"22050", // Target sample rate for multimon-ng
-			"-", // Output to stdout
-		]
+		// Input file: "-" for stdin - MUST be last!
+		args.push("-")
 
-		// Combine into shell pipeline
-		// "sox ... - | multimon-ng ..."
-		const cmd = `${soxArgs.join(" ")} 2>/dev/null | ${multimonArgs.join(" ")}`
-
-		return ["-c", cmd]
+		return args
 	}
+
+	// buildPipelineCommand override removed - using robust base class implementation
 
 	/**
 	 * Returns the decoder's capabilities (Requirement 17.1).
-	 * Multimon-ng is a pure consumer that accepts PCM audio and outputs text.
+	 * Multimon-ng now consumes IQ data (via AudioDemodDecoder's csdr pipeline).
 	 */
-	protected getCaps(): DecoderCaps {
+	protected override getCaps(): DecoderCaps {
 		return {
-			input: "audio_pcm",
+			input: "iq",
 			wantsExclusiveSource: false,
 			preferredSampleRates: [22050, 48000],
 			output: "text",
@@ -248,7 +290,7 @@ export class MultimonDecoder extends BaseDecoder {
 	 * - AFSK1200 packets
 	 * - FSK9600 packets
 	 */
-	protected parseOutput(line: string): DecoderOutput | null {
+	protected override parseOutput(line: string): DecoderOutput | null {
 		// Check for POCSAG messages
 		const pocsagMatch = POCSAG_PATTERN.exec(line)
 		if (pocsagMatch) {
@@ -431,7 +473,7 @@ export function createMultimonDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const MULTIMON_CAPS: DecoderCaps = {
-	input: "audio_pcm",
+	input: "iq",
 	wantsExclusiveSource: false,
 	preferredSampleRates: [22050, 48000],
 	output: "text",

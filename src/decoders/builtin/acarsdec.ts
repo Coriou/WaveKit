@@ -13,6 +13,7 @@ import {
 	type ExternalSdrConfig,
 } from "../external-sdr-decoder.js"
 import { PassiveRtlProxy } from "../passive-rtl-proxy.js"
+import { PassThrough, type Readable } from "node:stream"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -137,43 +138,123 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 		this.options = options
 	}
 
+	// We need a buffering stream to bridge the gap
+	private internalInputStream: PassThrough | null = null
+
 	/**
-	 * Overrides start to initialize the passive proxy first.
+	 * Returns the acarsdec command (Requirement 23.1).
 	 */
-	override async start(): Promise<void> {
-		if (this.options.rtlTcpHost) {
-			try {
-				const port = this.options.rtlTcpPort ?? 1235
-				this.logger.info(
-					{ host: this.options.rtlTcpHost, port },
-					"Starting Passive RTL Proxy for acarsdec",
-				)
-
-				this.proxy = new PassiveRtlProxy(
-					this.options.rtlTcpHost,
-					port,
-					this.logger,
-				)
-				this.proxyPort = await this.proxy.listen()
-
-				// HACK: Modify the config options in place so getArgs() picks up the proxy port
-				// This is safe because this instance is ephemeral/dedicated to this run mostly?
-				// Actually typically instances are long lived. We should probably use a separate member.
-				// But getArgs() reads this.options.
-				// We'll trust that getArgs() handles the specific "proxy mode" if we set a flag or just reuse the logic.
-				// Better: Just override getArgs to check for this.proxy.
-			} catch (err) {
-				this.logger.error({ err }, "Failed to start passive proxy")
-				throw err
-			}
-		}
-
-		return super.start()
+	protected getCommand(): string {
+		return "acarsdec"
 	}
 
 	/**
-	 * Overrides stop to close the proxy.
+	 * Returns command line arguments for acarsdec (Requirements 23.1, 23.3, 23.4).
 	 */
+	protected getArgs(): string[] {
+		// Ensure proxy is running
+		if (!this.proxy || !this.proxyPort) {
+			throw new Error("Passive Proxy not started")
+		}
+
+		// Construct the acarsdec command string
+		const args: string[] = []
+
+		// Enable JSON output to stdout (Requirement 23.4)
+		args.push("-o", "4")
+
+		// Use the proxy parameters
+		// acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT
+		args.push("-d", `driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
+		// Set sample rate multiplier to 192 for 2.4 MS/s
+		args.push("-m", "192")
+
+		// Gain setting - passed to proxy/acarsdec
+		if (this.options.gain !== undefined) {
+			args.push("-g", this.options.gain.toString())
+		}
+
+		// PPM correction
+		if (this.options.ppm !== undefined) {
+			args.push("-p", this.options.ppm.toString())
+		}
+
+		// Additional arguments
+		if (this.options.extraArgs) {
+			args.push(...this.options.extraArgs)
+		}
+
+		// Frequencies
+		for (const freq of this.options.frequencies) {
+			args.push((freq / 1_000_000).toFixed(3))
+		}
+
+		return args
+	}
+
+	/**
+	 * Returns the decoder's capabilities (Requirement 17.1).
+	 */
+	protected getCaps(): DecoderCaps {
+		return {
+			input: "iq",
+			wantsExclusiveSource: false,
+			output: "jsonl",
+			integrationPattern: "external_sdr",
+		}
+	}
+
+	/**
+	 * Override attachInput to pipe to our internal proxy stream.
+	 */
+	override attachInput(stream: Readable): void {
+		this.logger.debug("Attaching input to Acarsdec Proxy")
+		if (this.internalInputStream) {
+			stream.pipe(this.internalInputStream)
+		} else {
+			this.logger.warn("internalInputStream not initialized!")
+		}
+	}
+
+	override detachInput(): void {
+		this.logger.debug("Detaching input from Acarsdec Proxy")
+		// Cannot easily unpipe from the source side without reference to source
+		// But we can unpipe internalInputStream?
+		// Typically clean up happens by destroying streams.
+	}
+
+	/**
+	 * Initialize proxy in start() logic.
+	 * We need to do this carefully because super.start() calls getArgs() which needs proxyPort.
+	 * But we can't call async code in getArgs().
+	 * So we must overload start().
+	 */
+	override async start(): Promise<void> {
+		try {
+			// Create the bridge stream
+			this.internalInputStream = new PassThrough()
+
+			// Create and start the proxy
+			// We pass the bridge stream to the proxy
+			this.proxy = new PassiveRtlProxy(
+				{ stream: this.internalInputStream },
+				this.logger,
+			)
+			this.proxyPort = await this.proxy.listen()
+
+			this.logger.info(
+				{ proxyPort: this.proxyPort },
+				"Started internal Passive RTL Proxy for acarsdec",
+			)
+
+			// Now we can proceed with spawn
+			await super.start()
+		} catch (err) {
+			this.logger.error({ err }, "Failed to start acarsdec proxy")
+			throw err
+		}
+	}
+
 	override async stop(): Promise<void> {
 		await super.stop()
 		if (this.proxy) {
@@ -181,87 +262,9 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 			this.proxy = null
 			this.proxyPort = null
 		}
-	}
-
-	/**
-	 * Returns the acarsdec command (Requirement 23.1).
-	 */
-	protected getCommand(): string {
-		return "sh"
-	}
-
-	/**
-	 * Returns command line arguments for acarsdec (Requirements 23.1, 23.3, 23.4).
-	 *
-	 * acarsdec command line format:
-	 * acarsdec -j -r <device> [-g <gain>] [-p <ppm>] <freq1> [freq2] ...
-	 */
-	protected getArgs(): string[] {
-		// Construct the acarsdec command string
-		const parts: string[] = ["acarsdec"]
-
-		// Enable JSON output to stdout (Requirement 23.4)
-		// -o 4 = JSON output (one message per line or object)
-		parts.push("-o 4")
-
-		// Device configuration (Requirement 23.1)
-		if (this.options.rtlTcpHost) {
-			// If proxy is active (which it should be for network mode), use it.
-			// The proxy listens on 127.0.0.1. We need the port.
-			if (this.proxyPort) {
-				// acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT for SoapySDR (SoapyRTLTCP driver)
-				parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
-				// Set sample rate multiplier to 192 for 2.4 MS/s
-				parts.push("-m 192")
-			} else {
-				// This case should ideally not happen if start() was successful
-				this.logger.warn(
-					"RTL-TCP host specified but proxy port not available. Falling back to default RTL-TCP port.",
-				)
-				parts.push(
-					`-d driver=rtltcp,rtltcp=127.0.0.1:${this.options.rtlTcpPort ?? 1235}`,
-				)
-				parts.push("-m 192")
-			}
-		} else {
-			// Local device mode: -r <device> specifies RTL-SDR device by index or serial
-			parts.push(`-r ${this.options.deviceSerial ?? "0"}`)
-		}
-
-		// Gain setting
-		if (this.options.gain !== undefined) {
-			parts.push(`-g ${this.options.gain}`)
-		}
-
-		// PPM correction
-		if (this.options.ppm !== undefined) {
-			parts.push(`-p ${this.options.ppm}`)
-		}
-
-		// Additional arguments
-		if (this.options.extraArgs) {
-			parts.push(...this.options.extraArgs)
-		}
-
-		// Frequencies in Hz (Requirement 23.3)
-		// acarsdec expects frequencies in MHz, so convert from Hz
-		for (const freq of this.options.frequencies) {
-			parts.push((freq / 1_000_000).toFixed(3))
-		}
-
-		return ["-c", parts.join(" ")]
-	}
-
-	/**
-	 * Returns the decoder's capabilities (Requirement 17.1).
-	 * Acarsdec is an external SDR decoder that produces JSON output.
-	 */
-	protected getCaps(): DecoderCaps {
-		return {
-			input: "external",
-			wantsExclusiveSource: true,
-			output: "jsonl",
-			integrationPattern: "external_sdr",
+		if (this.internalInputStream) {
+			this.internalInputStream.destroy()
+			this.internalInputStream = null
 		}
 	}
 
@@ -403,8 +406,8 @@ export function createAcarsdecDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const ACARSDEC_CAPS: DecoderCaps = {
-	input: "external",
-	wantsExclusiveSource: true,
+	input: "iq",
+	wantsExclusiveSource: false,
 	output: "jsonl",
 	integrationPattern: "external_sdr",
 }

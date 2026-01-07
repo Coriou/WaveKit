@@ -427,6 +427,31 @@ make dev-stop      # Stop the dev container
 | `make docker-build-core`  | Build core mode image                |
 | `make docker-build-sdrpp` | Build SDR++ only image               |
 
+## Debugging & Troubleshooting
+
+If decoders aren't producing output, see the comprehensive debugging guides:
+
+- **[DEBUGGING-DECODERS.md](docs/DEBUGGING-DECODERS.md)** - Practical manual testing procedures and common issues
+- **[ARCHITECTURE-DECODER-FIXES.md](docs/ARCHITECTURE-DECODER-FIXES.md)** - Technical deep dive into pipeline architecture
+- **[SESSION-SUMMARY-DECODER-FIXES.md](docs/SESSION-SUMMARY-DECODER-FIXES.md)** - Recent decoder fixes and verification checklist
+
+Quick diagnostic:
+
+```bash
+# Check if decoders are running
+docker-compose ps
+
+# View real-time logs
+make dev-logs
+
+# Check for pipeline errors
+make dev-logs-raw 2>&1 | grep -i "error\|pipeline\|decoder"
+
+# Test csdr pipeline manually
+make dev-shell
+# Then inside container, run test commands from DEBUGGING-DECODERS.md
+```
+
 ## Architecture Notes
 
 - **Streams**: Node.js streams with backpressure handling throughout

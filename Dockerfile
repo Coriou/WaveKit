@@ -133,7 +133,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     xz-utils \
     sox \
     libsox-fmt-all \
+    libsox-fmt-all \
     netcat-openbsd \
+    libsamplerate0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install s6-overlay (PID 1 init system + service supervisor)
@@ -341,6 +343,28 @@ RUN git clone --depth 1 https://github.com/pothosware/SoapyRTLTCP.git && \
     make install
 
 # ============================================================================
+# Stage: csdr-build
+# Purpose: Build csdr command-line SDR tools for FM demodulation
+# Size: ~100MB (not in final image)
+# ============================================================================
+FROM base-deps AS csdr-build
+
+WORKDIR /build
+
+# Install libsamplerate (required by csdr)
+RUN apt-get update && apt-get install -y --no-install-recommends libsamplerate-dev
+
+
+
+# Build csdr command-line tool
+RUN git clone --depth 1 https://github.com/jketterl/csdr.git && \
+    cd csdr && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_BUILD_TYPE=Release && \
+    make -j$(nproc) && \
+    make install
+
+# ============================================================================
 # Stage: node-build
 # Purpose: Build WaveKit TypeScript application
 # Size: ~450MB (not in final image)
@@ -409,6 +433,9 @@ COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 # Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
+# Copy csdr for FM demodulation (audio-from-IQ decoders)
+COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
+COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
 
 # Update library cache for all copied libraries
 RUN ldconfig
@@ -423,7 +450,8 @@ RUN echo "Verifying decoder installations..." && \
     direwolf -h > /dev/null 2>&1 || true && \
     dumpvdl2 --version && \
     readsb --version && \
-    echo "All 8 decoders verified successfully"
+    csdr --help > /dev/null 2>&1 && \
+    echo "All 8 decoders + csdr verified successfully"
 
 # Copy Node.js application
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
@@ -506,6 +534,9 @@ COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 # Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
+# Copy csdr for FM demodulation (audio-from-IQ decoders)
+COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
+COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
 
 # Copy ncurses libraries from build stage to ensure version compatibility
 COPY --from=dsd-fme-build /usr/lib/x86_64-linux-gnu/libncurses* /usr/lib/x86_64-linux-gnu/

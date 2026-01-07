@@ -42,6 +42,8 @@ export interface AisCatcherOptions {
 	outputFormat: AisCatcherOutputFormat
 	/** UDP port for output */
 	outputPort?: number | undefined
+	/** IQ sample rate from source (default: 2400000) */
+	inputSampleRate?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
 }
@@ -164,11 +166,14 @@ export class AisCatcherDecoder extends BaseDecoder {
 
 		// Input source configuration (Requirement 25.4)
 		// Use stdin input (Passive Mode)
-		args.push("-r", ".")
-		args.push("-s", "2400000") // TODO: Make configurable
+		// "-r CU8 ." tells ais-catcher to read Raw Unsigned 8-bit output from stdin
+		args.push("-r", "CU8", ".")
 
-		// Gain setting - irrelevant for stdin?
-		// keeping it just in case logic supports it, though likely ignored
+		// Set the sample rate to match our IQ source
+		const sampleRate = this.options.inputSampleRate ?? 2_400_000
+		args.push("-s", sampleRate.toString())
+
+		// Gain setting - irrelevant for stdin but keep for consistency
 		if (this.options.gain !== undefined) {
 			args.push("-gr", `tuner=${this.options.gain}`)
 		}
@@ -178,20 +183,12 @@ export class AisCatcherDecoder extends BaseDecoder {
 			args.push("-p", this.options.ppm.toString())
 		}
 
-		// Output format check: we are now a STDOUT parser (BaseDecoder),
-		// unlike NetworkProducerDecoder which connected to a UDP port.
-		// We need ais-catcher to output to STDOUT.
-		// -u HOST PORT sends to UDP. We don't want that anymore.
-		// We want native stdout.
-		// Checking AIS-catcher docs: defaults to stdout if no -u is passed?
-		// Or maybe -n (NMEA to stdout)?
-		// -o 5 = JSON Full. Does it go to stdout? Yes usually.
-
-		// Output format: -o 5 for JSON Full
+		// Output format: Defaults to NMEA/JSON output to stdout
+		// (we parse stdout as BaseDecoder, not UDP)
 		if (this.options.outputFormat === "json") {
-			args.push("-o", "5") // JSON Full
+			args.push("-o", "5") // JSON Full (outputs to stdout by default)
 		} else {
-			args.push("-o", "1") // NMEA only
+			args.push("-o", "1") // NMEA only (outputs to stdout by default)
 		}
 
 		// Additional arguments

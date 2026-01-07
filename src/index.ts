@@ -315,6 +315,7 @@ async function main(): Promise<void> {
 	const apiServer = new ApiServer(
 		{
 			sourceManager,
+			fanoutManager,
 			decoderManager,
 			decoderRegistry,
 			audioOutput,

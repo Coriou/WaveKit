@@ -212,10 +212,22 @@ export abstract class NetworkProducerDecoder
 			})
 		}
 
+		// Handle stdin errors gracefully to prevent SIGPIPE issues
+		if (this.process.stdin) {
+			this.process.stdin.on("error", (err: Error) => {
+				// EPIPE is expected when process exits while we're writing
+				if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
+					this.logger.warn({ err }, "Process stdin error")
+				}
+			})
+		}
+
 		this.startTime = Date.now()
 
-		// Connect to the output port after a short delay to let the process start
-		await this.connectToOutput()
+		// Connect to the output port with retry logic
+		// Don't await - let the process run while we try to connect
+		// This handles the race condition where the process hasn't opened its port yet
+		this.scheduleInitialConnection()
 
 		this.emit("started")
 		this.logger.info(
@@ -521,6 +533,28 @@ export abstract class NetworkProducerDecoder
 			this.udpClient.close()
 			this.udpClient = null
 		}
+	}
+
+	/**
+	 * Initial delay before first connection attempt (ms).
+	 * Gives the process time to start up and open its ports.
+	 */
+	private static readonly INITIAL_CONNECTION_DELAY = 500
+
+	/**
+	 * Schedules the initial connection attempt after process startup.
+	 * Uses a short delay to give the process time to open its ports.
+	 */
+	private scheduleInitialConnection(): void {
+		setTimeout(() => {
+			if (this.isStopping || !this.process) {
+				return
+			}
+			this.connectToOutput().catch(() => {
+				// Connection failed, scheduleReconnect will be called via the error handler
+				// No action needed here as the TCP close event triggers scheduleReconnect
+			})
+		}, NetworkProducerDecoder.INITIAL_CONNECTION_DELAY)
 	}
 
 	/**

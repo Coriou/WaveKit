@@ -1,27 +1,41 @@
 import { createServer, createConnection, Socket, Server } from "node:net"
 import { EventEmitter } from "node:events"
+import { type Readable } from "node:stream"
 import { type Logger } from "../utils/logger.js"
 
 /**
- * PassiveRtlProxy - A TCP proxy that strips RTL-TCP control commands.
+ * PassiveRtlProxy - A TCP proxy/server for RTL-TCP clients.
  *
- * This proxy sits between a decoder (client) and the real RTL-TCP server.
- * It forwards IQ data from server to client (downstream) unchanged.
- * It intercepts and DROPS control commands from client to server (upstream)
- * to prevent the decoder from retuning the radio or changing sample rates.
+ * Modes:
+ * 1. Proxy Mode: Proxies to a real upstream RTL-TCP server.
+ *    - Strips upstream control commands.
+ *    - Forwards downstream IQ data.
+ * 2. Stream Mode: serves IQ data provided via a Readable stream (internal fanout).
+ *    - Synthesizes RTL-TCP header (magic, tuner type, gain count).
+ *    - Pipes internal stream to client.
+ *    - Ignores client control commands.
  */
 export class PassiveRtlProxy extends EventEmitter {
 	private server: Server
-	private realHost: string
-	private realPort: number
+	private realHost?: string
+	private realPort?: number
+	private inputStream?: Readable
 	private logger: Logger
 	private port: number = 0 // Assigned ephemeral port
 
-	constructor(realHost: string, realPort: number, logger: Logger) {
+	constructor(
+		target: { host: string; port: number } | { stream: Readable },
+		logger: Logger,
+	) {
 		super()
-		this.realHost = realHost
-		this.realPort = realPort
 		this.logger = logger
+
+		if ("stream" in target) {
+			this.inputStream = target.stream
+		} else {
+			this.realHost = target.host
+			this.realPort = target.port
+		}
 
 		this.server = createServer(clientSocket => {
 			this.handleConnection(clientSocket)
@@ -39,7 +53,13 @@ export class PassiveRtlProxy extends EventEmitter {
 				if (addr && typeof addr !== "string") {
 					this.port = addr.port
 					this.logger.info(
-						{ port: this.port, upstream: `${this.realHost}:${this.realPort}` },
+						{
+							port: this.port,
+							mode: this.inputStream ? "stream" : "proxy",
+							upstream: this.inputStream
+								? "internal"
+								: `${this.realHost}:${this.realPort}`,
+						},
 						"Passive RTL Proxy started",
 					)
 					resolve(this.port)
@@ -65,53 +85,63 @@ export class PassiveRtlProxy extends EventEmitter {
 	private handleConnection(clientSocket: Socket) {
 		this.logger.debug("Decoder connected to Passive Proxy")
 
-		// Connect to the real RTL-TCP server
-		const upstreamSocket = createConnection(
-			{ host: this.realHost, port: this.realPort },
-			() => {
-				this.logger.debug("Proxy connected to upstream RTL-TCP")
-			},
-		)
+		if (this.inputStream) {
+			this.handleStreamMode(clientSocket, this.inputStream)
+		} else if (this.realHost && this.realPort) {
+			this.handleProxyMode(clientSocket, this.realHost, this.realPort)
+		}
+	}
 
-		// Downstream: Server -> Client (Forward everything, mostly IQ data)
+	/**
+	 * Handles connection in Stream Mode (Internal IQ Source).
+	 */
+	private handleStreamMode(clientSocket: Socket, stream: Readable) {
+		// 1. Send RTL-TCP Header (12 bytes)
+		// Magic "RTL0" (4 bytes)
+		// Tuner Type (4 bytes) - 5 (R820T)
+		// Gain Count (4 bytes) - 29 (Standard)
+		const header = Buffer.alloc(12)
+		header.write("RTL0", 0, 4, "ascii")
+		header.writeUInt32BE(5, 4) // Tuner Type 5
+		header.writeUInt32BE(29, 8) // Gain Count 29
+
+		clientSocket.write(header)
+
+		// 2. Pipe internal stream to client
+		stream.pipe(clientSocket)
+
+		// 3. Handle upstream data (ignore/drop)
+		clientSocket.on("data", data => {
+			// Drop control commands
+		})
+
+		clientSocket.on("error", err => {
+			this.logger.error({ err }, "Client connection error (Stream Mode)")
+			// Don't destroy input stream! It's shared.
+			stream.unpipe(clientSocket)
+		})
+
+		clientSocket.on("close", () => {
+			stream.unpipe(clientSocket)
+		})
+	}
+
+	/**
+	 * Handles connection in Proxy Mode (Upstream RTL-TCP).
+	 */
+	private handleProxyMode(clientSocket: Socket, host: string, port: number) {
+		// Connect to the real RTL-TCP server
+		const upstreamSocket = createConnection({ host, port }, () => {
+			this.logger.debug("Proxy connected to upstream RTL-TCP")
+		})
+
+		// Downstream: Server -> Client (Forward everything)
 		upstreamSocket.pipe(clientSocket)
 
-		// Upstream: Client -> Server (Filter control commands)
+		// Upstream: Client -> Server (Dropping control commands)
 		clientSocket.on("data", data => {
-			// RTL-TCP commands are typically 5 bytes: [Command ID, Param1, Param2, Param3, Param4]
-			// We want to block commands that affect tuning.
-
-			// Command IDs (from rtl_tcp source):
-			// 0x01: Set Frequency
-			// 0x02: Set Sample Rate
-			// 0x03: Set Gain Mode
-			// 0x04: Set Gain
-			// 0x05: Set Frequency Correction
-			// 0x08: Set AGC
-
-			// We'll filter based on the command byte (first byte of packet).
-			// Since packets can be concatenated, we should technically parse properly,
-			// but for a lightweight proxy, checking chunks might be risky if boundaries don't align.
-			// However, control commands are rare and usually sent individually at start.
-
-			// For now, let's aggressively drop EVERYTHING from client to server.
-			// Passive decoders shouldn't need to send anything except maybe an initial handshake?
-			// rtl_tcp protocol doesn't require a client handshake to start streaming.
-			// As soon as you connect, it sends the Dongle Info header, then waits for commands?
-			// No, usually it waits for a command to start?
-			// Actually, rtl_tcp starts streaming immediately? No, it often waits for Set Freq/Rate.
-
-			// Wait, if we drop EVERYTHING, the decoder might hang if it expects to set freq before receiving.
-			// But if the server is ALREADY streaming (because SDR++ or another client started it),
-			// then we just need to tap into the stream.
-			// `rtlmux` specifically is designed to multiplex.
-
-			// The safest "Passive" approach is to transmit NOTHING upstream.
-			// If the decoder sends a "Set Freq" and doesn't get data, it might retry.
-			// But `rtlmux` should be sending data regardless if there is an active master.
-
 			this.logger.debug(
-				{ length: data.length, hex: data.toString("hex") },
+				{ length: data.length },
 				"Blocked upstream control packet",
 			)
 		})

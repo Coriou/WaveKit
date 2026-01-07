@@ -68,6 +68,43 @@ export interface DecoderCaps {
 }
 
 // ============================================================================
+// Demodulation Configuration (for IQ-to-audio decoders)
+// ============================================================================
+
+/**
+ * Configuration for FM demodulation settings.
+ * Used by decoders that consume IQ data and perform internal FM demodulation
+ * using csdr before feeding audio to the actual decoder process.
+ */
+export interface DemodulationConfig {
+	/** FM bandwidth in Hz (e.g., 12500 for NFM, 15000 for wider signals) */
+	bandwidth: number
+	/** Target audio sample rate in Hz (e.g., 48000, 22050) */
+	sampleRate: number
+	/** IQ input sample rate in Hz from the source (e.g., 2400000) */
+	inputSampleRate: number
+	/** Whether to apply de-emphasis (false for digital voice, true for analog FM) */
+	deEmphasis: boolean
+	/** De-emphasis time constant in µs (50 for EU, 75 for US) - only used if deEmphasis is true */
+	deEmphasisTau?: number | undefined
+	/** Gain to apply after demodulation (e.g. 1.0, 50.0). Important for normalizing levels after high sample rate demod. */
+	fmGain?: number | undefined
+	/**
+	 * Intermediate sample rate for demodulation in Hz (e.g. 24000).
+	 * If set, the pipeline will decimate to this rate first (setting the filter width),
+	 * perform FM demodulation, and then resample to the target sampleRate.
+	 * This allows for tighter filtering (e.g. 12kHz bw) while outputting higher rate audio.
+	 */
+	demodSampleRate?: number | undefined
+	/** Optional custom transition bandwidth for FIR filter (default: 0.05) */
+	filterTransition?: number
+	/** Optional custom cutoff for FIR filter (0.0-0.5, default: 0.5) */
+	filterCutoff?: number
+	/** Optional audio lowpass filter cutoff in Hz (e.g. 3000) */
+	audioLowPass?: number
+}
+
+// ============================================================================
 // Decoder Health (Requirements 20.1, 20.2, 20.3, 20.4)
 // ============================================================================
 

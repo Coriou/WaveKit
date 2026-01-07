@@ -14,6 +14,7 @@ import type { WebSocket } from "ws"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
+import type { FanoutStatus } from "../../core/fanout-manager.js"
 
 /**
  * Supported WebSocket channels for subscription.
@@ -21,8 +22,14 @@ import type { DecoderOutput } from "../../decoders/types.js"
  * - metrics: Source metrics events
  * - sources: Source connected, disconnected, error events
  * - health: Decoder health state change events (Requirement 20.4)
+ * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  */
-export type WebSocketChannel = "decoders" | "metrics" | "sources" | "health"
+export type WebSocketChannel =
+	| "decoders"
+	| "metrics"
+	| "sources"
+	| "health"
+	| "fanout"
 
 /**
  * Message sent from client to server.
@@ -46,6 +53,9 @@ export interface ServerMessage {
 		| "source:disconnected"
 		| "source:error"
 		| "metrics"
+		| "fanout:snapshot"
+		| "fanout:backpressure"
+		| "fanout:drain"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -70,7 +80,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "decoders" ||
 		channel === "metrics" ||
 		channel === "sources" ||
-		channel === "health"
+		channel === "health" ||
+		channel === "fanout"
 	)
 }
 
@@ -429,6 +440,52 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("metrics", {
 			type: "metrics",
 			data: { sourceId, ...metrics },
+		})
+	}
+
+	/**
+	 * Broadcasts fanout telemetry snapshot (periodic).
+	 *
+	 * @param snapshot - Complete fanout status snapshot
+	 */
+	broadcastFanoutSnapshot(snapshot: FanoutStatus): void {
+		this.broadcast("fanout", {
+			type: "fanout:snapshot",
+			data: snapshot,
+		})
+	}
+
+	/**
+	 * Broadcasts fanout backpressure event (edge-triggered on entry).
+	 *
+	 * @param branchId - The branch that entered backpressure
+	 * @param bufferedBytes - Current buffer usage when backpressure triggered
+	 */
+	broadcastFanoutBackpressure(branchId: string, bufferedBytes: number): void {
+		this.broadcast("fanout", {
+			type: "fanout:backpressure",
+			data: {
+				branchId,
+				bufferedBytes,
+				timestamp: new Date().toISOString(),
+			},
+		})
+	}
+
+	/**
+	 * Broadcasts fanout drain event (edge-triggered on exit).
+	 *
+	 * @param branchId - The branch that drained
+	 * @param durationMs - How long the branch was in backpressure state
+	 */
+	broadcastFanoutDrain(branchId: string, durationMs: number): void {
+		this.broadcast("fanout", {
+			type: "fanout:drain",
+			data: {
+				branchId,
+				durationMs,
+				timestamp: new Date().toISOString(),
+			},
 		})
 	}
 

@@ -1,16 +1,6 @@
 sources:
-  # Audio from SDR++ on Mac (when running)
-  - id: sdrpp
-    type: sdrpp-network
-    host: host.docker.internal
-    port: 7355
-    caps:
-      kind: audio_pcm
-      sampleRate: 48000
-      format: S16LE
-      exclusive: false
-
-  # IQ directly from Pi's rtl_tcp (for rtl433)
+  # IQ directly from Pi's rtlmux - PRIMARY SOURCE
+  # This is the main IQ source that feeds all decoders via fanout
   - id: pi-iq
     type: rtl_tcp
     host: 192.168.1.69
@@ -21,29 +11,49 @@ sources:
       format: U8_IQ
       exclusive: false
 
+  # Audio from SDR++ on Mac (optional, for audio monitoring)
+  - id: sdrpp
+    type: sdrpp-network
+    host: host.docker.internal
+    port: 7355
+    caps:
+      kind: audio_pcm
+      sampleRate: 48000
+      format: S16LE
+      exclusive: false
+
 decoders:
   # Pager/data decoder - POCSAG, FLEX, EAS alerts, DTMF, AFSK1200
+  # Now uses IQ source with internal csdr FM demodulation
   - id: pagers
     type: multimon-ng
     enabled: true
-    sourceId: sdrpp
+    sourceId: pi-iq
     options:
       modes: [POCSAG512, POCSAG1200, POCSAG2400, FLEX]
+      fmGain: 0.3 # Reduced further - signal was still clipping at 1.0
+      # DEBUG: Record demodulated audio for analysis
+      debugRecordPath: /data/debug_audio
 
   # Digital voice decoder - DMR, P25, YSF, D-Star, NXDN, ProVoice
+  # Now uses IQ source with internal csdr FM demodulation
   - id: digital-voice
     type: dsd-fme
     enabled: true
-    sourceId: sdrpp
+    sourceId: pi-iq
     options:
       mode: auto
       output: null
+      fmGain: 0.3 # Reduced further - signal was still clipping at 1.0
+      # DEBUG: Record demodulated audio for analysis
+      debugRecordPath: /data/debug_audio
 
   # APRS/AX.25 decoder - amateur radio packet
+  # Still uses SDR++ audio (direwolf NetworkProducerDecoder pattern not yet migrated)
   - id: aprs
     type: direwolf
-    enabled: true
-    sourceId: sdrpp
+    enabled: false
+    sourceId: pi-iq
     options:
       audioDevice: stdin
       sampleRate: 48000
@@ -51,7 +61,7 @@ decoders:
   # ISM band decoder - weather sensors, tire pressure, remotes
   - id: rtl433
     type: rtl433
-    enabled: true
+    enabled: false
     sourceId: pi-iq
     options:
       sampleRate: 2400000
@@ -60,37 +70,35 @@ decoders:
   # Maritime AIS decoder - ship positions and data
   - id: ais
     type: ais-catcher
-    enabled: true
+    enabled: false
+    sourceId: pi-iq
     options:
-      rtlTcpHost: 192.168.1.69
-      rtlTcpPort: 1235
       outputFormat: json
 
   # ACARS decoder - aircraft data link messages
   - id: acars
     type: acarsdec
-    enabled: true
+    enabled: false
+    sourceId: pi-iq
     options:
-      rtlTcpHost: 192.168.1.69
-      rtlTcpPort: 1235
       frequencies: [131550000, 131725000]
 
   # VDL2 decoder - aviation VDL Mode 2 data link
   - id: vdl2
     type: dumpvdl2
-    enabled: true
+    enabled: false
+    sourceId: pi-iq
     options:
-      rtlTcpHost: 192.168.1.69
-      rtlTcpPort: 1235
       frequencies: [136650000, 136975000]
 
   # ADS-B decoder - aircraft transponders (1090 MHz)
+  # Note: Works best with dedicated SDR at 1090 MHz / 2.0 Msps
+  # In shared IQ mode, will run idle if frequency/sample rate don't match
   - id: adsb
     type: readsb
-    enabled: true
+    enabled: false
+    sourceId: pi-iq
     options:
-      rtlTcpHost: 192.168.1.69
-      rtlTcpPort: 1235
       outputFormat: json
 
 audio:

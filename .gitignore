@@ -6,3 +6,5 @@ dist
 decoded_calls
 snapshots
 coverage
+debug_audio/
+debug_iq_output/
