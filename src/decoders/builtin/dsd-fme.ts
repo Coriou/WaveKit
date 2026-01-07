@@ -103,44 +103,50 @@ export class DsdFmeDecoder extends BaseDecoder {
 	}
 
 	/**
-	 * Returns the dsd-fme command (Requirement 6.1).
+	 * Returns the shell command (Requirement 6.1).
+	 * We use /bin/sh to pipe stdin to dsd-fme, ensuring stdin stays open.
 	 */
 	protected getCommand(): string {
-		return "dsd-fme"
+		return "/bin/sh"
 	}
 
 	/**
 	 * Returns command line arguments for dsd-fme (Requirement 6.1).
+	 * Constructs a shell command that pipes stdin to dsd-fme.
 	 */
 	protected getArgs(): string[] {
-		const args: string[] = []
+		const dsdArgs: string[] = ["dsd-fme"]
 
 		// Input from stdin
-		args.push("-i", "-")
+		dsdArgs.push("-i", "/dev/stdin")
 
-		// Set decoder mode
+		// Set decoder mode with explicit flag
 		switch (this.options.mode) {
 			case "dmr":
-				args.push("-fd")
+				// DMR TDMA BS and MS Simplex
+				dsdArgs.push("-fs")
 				break
 			case "p25":
-				args.push("-fp")
+				// P25 Phase 1
+				dsdArgs.push("-f1")
 				break
 			case "ysf":
-				args.push("-fy")
+				dsdArgs.push("-fy")
 				break
 			case "dstar":
-				args.push("-fs")
+				dsdArgs.push("-fd")
 				break
 			case "nxdn":
-				args.push("-fn")
+				// NXDN96 (12.5 kHz)
+				dsdArgs.push("-fn")
 				break
 			case "provoice":
-				args.push("-fv")
+				dsdArgs.push("-fp")
 				break
 			case "auto":
 			default:
-				// Auto mode - no specific flag needed
+				// Auto-detection mode
+				dsdArgs.push("-fa")
 				break
 		}
 
@@ -148,27 +154,34 @@ export class DsdFmeDecoder extends BaseDecoder {
 		switch (this.options.output) {
 			case "wav":
 				if (this.options.wavDir) {
-					args.push("-w", this.options.wavDir)
+					dsdArgs.push("-w", this.options.wavDir)
 				}
 				break
 			case "udp":
 				if (this.options.udpHost && this.options.udpPort) {
-					args.push("-u", `${this.options.udpHost}:${this.options.udpPort}`)
+					dsdArgs.push(
+						"-o",
+						`udp:${this.options.udpHost}:${this.options.udpPort}`,
+					)
 				}
 				break
 			case "null":
 			default:
-				// Output audio to stdout (which we ignore/drain) to avoid PulseAudio connection issues with /dev/null
-				args.push("-o", "-")
+				// Disable audio output to avoid PulseAudio issues
+				dsdArgs.push("-o", "null")
 				break
 		}
 
 		// Add any extra arguments
 		if (this.options.extraArgs) {
-			args.push(...this.options.extraArgs)
+			dsdArgs.push(...this.options.extraArgs)
 		}
 
-		return args
+		// Use cat to pipe stdin to dsd-fme - this keeps stdin open
+		// The shell wrapper ensures dsd-fme receives a continuous stream
+		const cmd = `cat | ${dsdArgs.join(" ")}`
+
+		return ["-c", cmd]
 	}
 
 	/**
