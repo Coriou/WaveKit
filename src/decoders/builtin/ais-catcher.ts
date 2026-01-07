@@ -108,18 +108,18 @@ export class AisCatcherDecoder extends BaseDecoder {
 		this.options = parseAisCatcherOptions(config.options)
 	}
 
-    /**
+	/**
 	 * Parses a line of output into a DecoderOutput object.
-     * Implements abstract method from BaseDecoder.
+	 * Implements abstract method from BaseDecoder.
 	 */
 	protected parseOutput(line: string): DecoderOutput | null {
-        const trimmed = line.trim()
+		const trimmed = line.trim()
 		if (!trimmed) return null
 
 		if (this.options.outputFormat === "json") {
-            // Parse JSON output
-            if (!trimmed.startsWith("{")) return null;
-            try {
+			// Parse JSON output
+			if (!trimmed.startsWith("{")) return null
+			try {
 				const json = JSON.parse(trimmed) as Record<string, unknown>
 				const ship = parseJsonShip(json)
 				if (ship) {
@@ -132,10 +132,10 @@ export class AisCatcherDecoder extends BaseDecoder {
 				}
 			} catch {
 				// Skip invalid JSON lines
-                // this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
+				// this.logger.debug({ line: trimmed }, "Failed to parse JSON line")
 			}
 		} else {
-            // Parse NMEA output
+			// Parse NMEA output
 			const ship = parseNmeaSentence(trimmed)
 			if (ship) {
 				return {
@@ -146,7 +146,7 @@ export class AisCatcherDecoder extends BaseDecoder {
 				}
 			}
 		}
-        return null;
+		return null
 	}
 
 	/**
@@ -164,7 +164,7 @@ export class AisCatcherDecoder extends BaseDecoder {
 
 		// Input source configuration (Requirement 25.4)
 		// Use stdin input (Passive Mode)
-		args.push("-r", ".") 
+		args.push("-r", ".")
 		args.push("-s", "2400000") // TODO: Make configurable
 
 		// Gain setting - irrelevant for stdin?
@@ -177,15 +177,15 @@ export class AisCatcherDecoder extends BaseDecoder {
 		if (this.options.ppm !== undefined) {
 			args.push("-p", this.options.ppm.toString())
 		}
-        
-        // Output format check: we are now a STDOUT parser (BaseDecoder), 
-        // unlike NetworkProducerDecoder which connected to a UDP port.
-        // We need ais-catcher to output to STDOUT.
-        // -u HOST PORT sends to UDP. We don't want that anymore.
-        // We want native stdout.
-        // Checking AIS-catcher docs: defaults to stdout if no -u is passed?
-        // Or maybe -n (NMEA to stdout)? 
-        // -o 5 = JSON Full. Does it go to stdout? Yes usually.
+
+		// Output format check: we are now a STDOUT parser (BaseDecoder),
+		// unlike NetworkProducerDecoder which connected to a UDP port.
+		// We need ais-catcher to output to STDOUT.
+		// -u HOST PORT sends to UDP. We don't want that anymore.
+		// We want native stdout.
+		// Checking AIS-catcher docs: defaults to stdout if no -u is passed?
+		// Or maybe -n (NMEA to stdout)?
+		// -o 5 = JSON Full. Does it go to stdout? Yes usually.
 
 		// Output format: -o 5 for JSON Full
 		if (this.options.outputFormat === "json") {
@@ -216,9 +216,7 @@ export class AisCatcherDecoder extends BaseDecoder {
 			integrationPattern: "pure_consumer",
 		}
 	}
-	}
-
-
+}
 
 /**
  * Parses and validates decoder options from config.

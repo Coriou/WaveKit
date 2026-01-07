@@ -195,18 +195,21 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
 			this.inputStream.pipe(this.process.stdin)
-			
+
 			// Handle stdin errors (e.g. EPIPE when process exits)
 			// Verified this code is running via log
 			this.logger.debug("Attached error handler to decoder process stdin")
-			
-			this.process.stdin.on("error", (err) => {
-				this.logger.warn({ err }, "Decoder stdin error (process likely exited) - Caught by handler")
+
+			this.process.stdin.on("error", err => {
+				this.logger.warn(
+					{ err },
+					"Decoder stdin error (process likely exited) - Caught by handler",
+				)
 				// Don't rethrow
 			})
-			
+
 			// Also catch errors on the input stream itself to be safe
-			this.inputStream.on("error", (err) => {
+			this.inputStream.on("error", err => {
 				this.logger.warn({ err }, "Decoder input stream error")
 			})
 

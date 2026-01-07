@@ -109,7 +109,6 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	private proxy: PassiveRtlProxy | null = null
 	private proxyPort: number | null = null
 
-
 	constructor(config: DecoderConfig, logger: Logger) {
 		// Build the external SDR config from decoder config
 		const options = parseAcarsdecOptions(config)
@@ -145,17 +144,24 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 		if (this.options.rtlTcpHost) {
 			try {
 				const port = this.options.rtlTcpPort ?? 1235
-				this.logger.info({ host: this.options.rtlTcpHost, port }, "Starting Passive RTL Proxy for acarsdec")
-				
-				this.proxy = new PassiveRtlProxy(this.options.rtlTcpHost, port, this.logger)
+				this.logger.info(
+					{ host: this.options.rtlTcpHost, port },
+					"Starting Passive RTL Proxy for acarsdec",
+				)
+
+				this.proxy = new PassiveRtlProxy(
+					this.options.rtlTcpHost,
+					port,
+					this.logger,
+				)
 				this.proxyPort = await this.proxy.listen()
-				
+
 				// HACK: Modify the config options in place so getArgs() picks up the proxy port
 				// This is safe because this instance is ephemeral/dedicated to this run mostly?
 				// Actually typically instances are long lived. We should probably use a separate member.
 				// But getArgs() reads this.options.
 				// We'll trust that getArgs() handles the specific "proxy mode" if we set a flag or just reuse the logic.
-                // Better: Just override getArgs to check for this.proxy.
+				// Better: Just override getArgs to check for this.proxy.
 			} catch (err) {
 				this.logger.error({ err }, "Failed to start passive proxy")
 				throw err
@@ -200,19 +206,23 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 
 		// Device configuration (Requirement 23.1)
 		if (this.options.rtlTcpHost) {
-            // If proxy is active (which it should be for network mode), use it.
-            // The proxy listens on 127.0.0.1. We need the port.
-            if (this.proxyPort) {
-                // acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT for SoapySDR (SoapyRTLTCP driver)
-                parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
-                // Set sample rate multiplier to 192 for 2.4 MS/s
-                parts.push("-m 192")
-            } else {
-                // This case should ideally not happen if start() was successful
-                this.logger.warn("RTL-TCP host specified but proxy port not available. Falling back to default RTL-TCP port.")
-                parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.options.rtlTcpPort ?? 1235}`)
-                parts.push("-m 192")
-            }
+			// If proxy is active (which it should be for network mode), use it.
+			// The proxy listens on 127.0.0.1. We need the port.
+			if (this.proxyPort) {
+				// acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT for SoapySDR (SoapyRTLTCP driver)
+				parts.push(`-d driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
+				// Set sample rate multiplier to 192 for 2.4 MS/s
+				parts.push("-m 192")
+			} else {
+				// This case should ideally not happen if start() was successful
+				this.logger.warn(
+					"RTL-TCP host specified but proxy port not available. Falling back to default RTL-TCP port.",
+				)
+				parts.push(
+					`-d driver=rtltcp,rtltcp=127.0.0.1:${this.options.rtlTcpPort ?? 1235}`,
+				)
+				parts.push("-m 192")
+			}
 		} else {
 			// Local device mode: -r <device> specifies RTL-SDR device by index or serial
 			parts.push(`-r ${this.options.deviceSerial ?? "0"}`)

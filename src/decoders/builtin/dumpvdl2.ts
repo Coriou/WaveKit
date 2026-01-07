@@ -163,20 +163,20 @@ export class Dumpvdl2Decoder extends BaseDecoder {
 		// 2.4Msps is approx 22.85 * 105k. We might need resampling if it's strict.
 		// For now, removing invalid --sample-rate arg to prevent exit.
 		// args.push("--sample-rate", "2400000")
-		
-		// Configure sample rate (MUST match the source, e.g. 2400000 from config)
-        // We'll trust that the user/admin configured the correct rate in dev_test.yaml
-        // and that it is sufficient to cover the frequencies. But dumpvdl2 needs to know it.
-        // We hardcode 2.4Msps here to match dev_test.yaml update or infer? 
-        // Ideally we should pass it from config.
-        // For now, let's look at dev_test.yaml - we set it to 2400000.
-        // But the CLASS options don't seem to have sampleRate passed in by default parse logic?
-        // We might need to add sampleRate to Dumpvdl2Options.
-        // Let's assume 2400000 for now or try to use a safe default if not provided.
-        // The previous implementation didn't use sample rate because it controlled the device.
-        // args.push("--sample-rate", "2400000") // TODO: Make configurable via options
 
-		// Gain setting - irrelevant for IQ file input? 
+		// Configure sample rate (MUST match the source, e.g. 2400000 from config)
+		// We'll trust that the user/admin configured the correct rate in dev_test.yaml
+		// and that it is sufficient to cover the frequencies. But dumpvdl2 needs to know it.
+		// We hardcode 2.4Msps here to match dev_test.yaml update or infer?
+		// Ideally we should pass it from config.
+		// For now, let's look at dev_test.yaml - we set it to 2400000.
+		// But the CLASS options don't seem to have sampleRate passed in by default parse logic?
+		// We might need to add sampleRate to Dumpvdl2Options.
+		// Let's assume 2400000 for now or try to use a safe default if not provided.
+		// The previous implementation didn't use sample rate because it controlled the device.
+		// args.push("--sample-rate", "2400000") // TODO: Make configurable via options
+
+		// Gain setting - irrelevant for IQ file input?
 		// Actually native dumpvdl2 might not support gain setting when reading from file/stdin?
 		// We'll skip gain/ppm args since we are just reading a stream.
 

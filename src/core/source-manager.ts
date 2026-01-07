@@ -713,14 +713,17 @@ export class SourceManager extends EventEmitter {
 					if (previousReceived < HEADER_SIZE) {
 						// We are processing part of the header
 						const headerRemaining = HEADER_SIZE - previousReceived
-						
+
 						if (chunk.length <= headerRemaining) {
 							// Entire chunk is header, skip it
-							return 
+							return
 						}
-						
+
 						// Slice off the header part
-						this.logger.debug({ sourceId: id }, "Stripping RTL-TCP header from stream")
+						this.logger.debug(
+							{ sourceId: id },
+							"Stripping RTL-TCP header from stream",
+						)
 						dataToProcess = chunk.subarray(headerRemaining)
 					}
 				}
