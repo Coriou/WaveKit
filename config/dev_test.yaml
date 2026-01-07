@@ -1,4 +1,5 @@
 sources:
+  # Audio from SDR++ on Mac (when running)
   - id: sdrpp
     type: sdrpp-network
     host: host.docker.internal
@@ -9,11 +10,23 @@ sources:
       format: S16LE
       exclusive: false
 
+  # IQ directly from Pi's rtl_tcp (for rtl433)
+  - id: pi-iq
+    type: rtl_tcp
+    host: 192.168.1.69
+    port: 1235
+    caps:
+      kind: iq
+      sampleRate: 250000
+      format: U8_IQ
+      exclusive: false
+
 decoders:
   # Pager/data decoder - POCSAG, FLEX, EAS alerts, DTMF, AFSK1200
   - id: pagers
     type: multimon-ng
     enabled: true
+    sourceId: sdrpp
     options:
       modes: [POCSAG512, POCSAG1200, POCSAG2400, FLEX]
 
@@ -21,6 +34,7 @@ decoders:
   - id: digital-voice
     type: dsd-fme
     enabled: true
+    sourceId: sdrpp
     options:
       mode: auto
       output: null
@@ -29,9 +43,19 @@ decoders:
   - id: aprs
     type: direwolf
     enabled: true
+    sourceId: sdrpp
     options:
       audioDevice: stdin
       sampleRate: 48000
+
+  # ISM band decoder - weather sensors, tire pressure, remotes
+  - id: rtl433
+    type: rtl433
+    enabled: true
+    sourceId: pi-iq
+    options:
+      sampleRate: 250000
+      outputFormat: json
 
 audio:
   tcpPort: 8080
