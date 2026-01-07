@@ -57,6 +57,42 @@ decoders:
       sampleRate: 250000
       outputFormat: json
 
+  # Maritime AIS decoder - ship positions and data
+  - id: ais
+    type: ais-catcher
+    enabled: true
+    options:
+      rtlTcpHost: 192.168.1.69
+      rtlTcpPort: 1235
+      outputFormat: json
+
+  # ACARS decoder - aircraft data link messages
+  - id: acars
+    type: acarsdec
+    enabled: true
+    options:
+      rtlTcpHost: 192.168.1.69
+      rtlTcpPort: 1235
+      frequencies: [131550000, 131725000]
+
+  # VDL2 decoder - aviation VDL Mode 2 data link
+  - id: vdl2
+    type: dumpvdl2
+    enabled: true
+    options:
+      rtlTcpHost: 192.168.1.69
+      rtlTcpPort: 1235
+      frequencies: [136650000, 136975000]
+
+  # ADS-B decoder - aircraft transponders (1090 MHz)
+  - id: adsb
+    type: readsb
+    enabled: true
+    options:
+      rtlTcpHost: 192.168.1.69
+      rtlTcpPort: 1235
+      outputFormat: json
+
 audio:
   tcpPort: 8080
   format: S16LE

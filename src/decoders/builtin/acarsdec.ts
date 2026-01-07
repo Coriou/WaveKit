@@ -19,8 +19,12 @@ import type { Logger } from "../../utils/logger.js"
  * Configuration options for the ACARS decoder.
  */
 export interface AcarsdecOptions {
-	/** RTL-SDR device serial number (Requirement 23.1) */
-	deviceSerial: string
+	/** RTL-SDR device serial number (local device mode) */
+	deviceSerial?: string | undefined
+	/** RTL-TCP host for network mode (e.g., "192.168.1.69") */
+	rtlTcpHost?: string | undefined
+	/** RTL-TCP port for network mode (default: 1235) */
+	rtlTcpPort?: number | undefined
 	/** Frequencies to monitor in Hz (Requirement 23.3) */
 	frequencies: number[]
 	/** Gain setting for the RTL-SDR */
@@ -112,7 +116,9 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 			enabled: config.enabled,
 			sourceId: config.sourceId,
 			options: config.options,
-			deviceSerial: options.deviceSerial,
+			// Use "rtltcp" as placeholder when in network mode (not actually used for device access)
+			deviceSerial:
+				options.deviceSerial ?? (options.rtlTcpHost ? "rtltcp" : "0"),
 			frequencies: options.frequencies,
 		}
 
@@ -132,7 +138,7 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	 * Returns the acarsdec command (Requirement 23.1).
 	 */
 	protected getCommand(): string {
-		return "acarsdec"
+		return "sh"
 	}
 
 	/**
@@ -142,37 +148,47 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	 * acarsdec -j -r <device> [-g <gain>] [-p <ppm>] <freq1> [freq2] ...
 	 */
 	protected getArgs(): string[] {
-		const args: string[] = []
+		// Construct the acarsdec command string
+		const parts: string[] = ["acarsdec"]
 
-		// Enable JSON output (Requirement 23.4)
-		args.push("-j")
+		// Enable JSON output to stdout (Requirement 23.4)
+		// -o 4 = JSON output (one message per line or object)
+		parts.push("-o 4")
 
 		// Device configuration (Requirement 23.1)
-		// -r <device> specifies RTL-SDR device by index or serial
-		args.push("-r", this.options.deviceSerial)
+		if (this.options.rtlTcpHost) {
+			// Network mode via SoapySDR rtltcp driver
+			// Format: driver=rtltcp,rtltcp=host:port (not remote=)
+			const port = this.options.rtlTcpPort ?? 1235
+			// Quote the device string to prevent shell splitting
+			parts.push(`-d "driver=rtltcp,rtltcp=${this.options.rtlTcpHost}:${port}"`)
+		} else {
+			// Local device mode: -r <device> specifies RTL-SDR device by index or serial
+			parts.push(`-r ${this.options.deviceSerial ?? "0"}`)
+		}
 
 		// Gain setting
 		if (this.options.gain !== undefined) {
-			args.push("-g", this.options.gain.toString())
+			parts.push(`-g ${this.options.gain}`)
 		}
 
 		// PPM correction
 		if (this.options.ppm !== undefined) {
-			args.push("-p", this.options.ppm.toString())
+			parts.push(`-p ${this.options.ppm}`)
 		}
 
 		// Additional arguments
 		if (this.options.extraArgs) {
-			args.push(...this.options.extraArgs)
+			parts.push(...this.options.extraArgs)
 		}
 
-		// Frequencies in MHz (Requirement 23.3)
+		// Frequencies in Hz (Requirement 23.3)
 		// acarsdec expects frequencies in MHz, so convert from Hz
 		for (const freq of this.options.frequencies) {
-			args.push((freq / 1_000_000).toFixed(3))
+			parts.push((freq / 1_000_000).toFixed(3))
 		}
 
-		return args
+		return ["-c", parts.join(" ")]
 	}
 
 	/**
@@ -230,9 +246,13 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
 	const options = config.options as Record<string, unknown>
 
-	// Device serial is required for external SDR decoders
+	// Device serial for local mode (optional when using rtl_tcp)
 	const deviceSerial =
-		config.deviceSerial ?? (options["deviceSerial"] as string) ?? "0"
+		config.deviceSerial ?? (options["deviceSerial"] as string | undefined)
+
+	// RTL-TCP network mode options
+	const rtlTcpHost = options["rtlTcpHost"] as string | undefined
+	const rtlTcpPort = options["rtlTcpPort"] as number | undefined
 
 	// Frequencies can come from config or options
 	let frequencies = config.frequencies ?? (options["frequencies"] as number[])
@@ -243,6 +263,8 @@ function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
 
 	return {
 		deviceSerial,
+		rtlTcpHost,
+		rtlTcpPort,
 		frequencies,
 		gain: options["gain"] as number | undefined,
 		ppm: options["ppm"] as number | undefined,

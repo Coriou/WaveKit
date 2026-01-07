@@ -144,10 +144,11 @@ export class AisCatcherDecoder extends NetworkProducerDecoder {
 
 		// Input source configuration (Requirement 25.4)
 		if (this.options.rtlTcpHost) {
-			// RTL-TCP input
+			// RTL-TCP input: -t host port (separate arguments)
 			args.push(
-				"-r",
-				`${this.options.rtlTcpHost}:${this.options.rtlTcpPort ?? 1234}`,
+				"-t",
+				this.options.rtlTcpHost,
+				String(this.options.rtlTcpPort ?? 1234),
 			)
 		} else if (this.options.spyServerHost) {
 			// SpyServer input
@@ -176,12 +177,14 @@ export class AisCatcherDecoder extends NetworkProducerDecoder {
 		// Output format and port configuration (Requirement 25.3)
 		const outputPort = this.options.outputPort ?? DEFAULT_OUTPUT_PORT
 
+		// UDP output: -u takes HOST and PORT as separate arguments
+		args.push("-u", "127.0.0.1", String(outputPort))
+
+		// Output format: -o 5 for JSON Full (see help for options: 0=quiet, 1=NMEA only, 2=NMEA+, 3=NMEA+ JSON, 4=JSON Sparse, 5=JSON Full)
 		if (this.options.outputFormat === "json") {
-			// JSON output via UDP
-			args.push("-u", `127.0.0.1:${outputPort}`, "JSON")
+			args.push("-o", "5") // JSON Full
 		} else {
-			// NMEA output via UDP (default)
-			args.push("-u", `127.0.0.1:${outputPort}`)
+			args.push("-o", "1") // NMEA only
 		}
 
 		// Additional arguments

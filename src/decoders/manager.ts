@@ -590,9 +590,20 @@ export class DecoderManager extends EventEmitter {
 
 	/**
 	 * Wires a decoder to a fanout branch for audio input.
+	 * Only wires decoders that accept audio/IQ via stdin (input type != "external").
 	 */
 	private async wireDecoderToFanout(state: DecoderState): Promise<void> {
 		const { decoder, config } = state
+
+		// Skip wiring for decoders that manage their own input
+		// (external SDR decoders and network producers using rtl_tcp, etc.)
+		if (decoder.caps.input === "external") {
+			this.log.debug(
+				{ decoderId: decoder.id, input: decoder.caps.input },
+				"Skipping fanout wiring for external input decoder",
+			)
+			return
+		}
 
 		// Create a branch ID based on decoder ID
 		const branchId = `decoder-${config.id}`

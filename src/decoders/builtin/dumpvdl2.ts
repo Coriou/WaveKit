@@ -20,8 +20,12 @@ import type { ACARSMessage } from "./acarsdec.js"
  * Configuration options for the VDL2 decoder.
  */
 export interface Dumpvdl2Options {
-	/** RTL-SDR device serial number (Requirement 24.1) */
-	deviceSerial: string
+	/** RTL-SDR device serial number (local device mode) */
+	deviceSerial?: string | undefined
+	/** RTL-TCP host for network mode (e.g., "192.168.1.69") */
+	rtlTcpHost?: string | undefined
+	/** RTL-TCP port for network mode (default: 1235) */
+	rtlTcpPort?: number | undefined
 	/** Frequencies to monitor in Hz (Requirement 24.4) */
 	frequencies: number[]
 	/** Gain setting for the RTL-SDR */
@@ -150,7 +154,9 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 			enabled: config.enabled,
 			sourceId: config.sourceId,
 			options: config.options,
-			deviceSerial: options.deviceSerial,
+			// Use "rtltcp" as placeholder when in network mode (not actually used for device access)
+			deviceSerial:
+				options.deviceSerial ?? (options.rtlTcpHost ? "rtltcp" : "0"),
 			frequencies: options.frequencies,
 		}
 
@@ -183,8 +189,18 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 		const args: string[] = []
 
 		// Device configuration (Requirement 24.1)
-		// --rtlsdr <device> specifies RTL-SDR device by index or serial
-		args.push("--rtlsdr", this.options.deviceSerial)
+		if (this.options.rtlTcpHost) {
+			// Network mode via SoapySDR rtltcp driver
+			// Format: driver=rtltcp,rtltcp=host:port (not remote=)
+			const port = this.options.rtlTcpPort ?? 1235
+			args.push(
+				"--soapysdr",
+				`driver=rtltcp,rtltcp=${this.options.rtlTcpHost}:${port}`,
+			)
+		} else {
+			// Local device mode: --rtlsdr <device> specifies RTL-SDR device by index or serial
+			args.push("--rtlsdr", this.options.deviceSerial ?? "0")
+		}
 
 		// Gain setting
 		if (this.options.gain !== undefined) {
@@ -197,7 +213,7 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 		}
 
 		// Enable JSON output to stdout (Requirement 24.3)
-		args.push("--output", "decoded:json:file:-")
+		args.push("--output", "decoded:json:file:path=-")
 
 		// Additional arguments
 		if (this.options.extraArgs) {
@@ -268,9 +284,13 @@ export class Dumpvdl2Decoder extends ExternalSdrDecoder {
 function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
 	const options = config.options as Record<string, unknown>
 
-	// Device serial is required for external SDR decoders
+	// Device serial for local mode (optional when using rtl_tcp)
 	const deviceSerial =
-		config.deviceSerial ?? (options["deviceSerial"] as string) ?? "0"
+		config.deviceSerial ?? (options["deviceSerial"] as string | undefined)
+
+	// RTL-TCP network mode options
+	const rtlTcpHost = options["rtlTcpHost"] as string | undefined
+	const rtlTcpPort = options["rtlTcpPort"] as number | undefined
 
 	// Frequencies can come from config or options
 	let frequencies = config.frequencies ?? (options["frequencies"] as number[])
@@ -281,6 +301,8 @@ function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
 
 	return {
 		deviceSerial,
+		rtlTcpHost,
+		rtlTcpPort,
 		frequencies,
 		gain: options["gain"] as number | undefined,
 		ppm: options["ppm"] as number | undefined,

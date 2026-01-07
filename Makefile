@@ -157,7 +157,7 @@ dev-logs-raw: ## Tail raw container logs
 
 dev-decoded: ## Show only decoded messages (voice/text)
 	@echo "$(BLUE)Watching for decoded signals... (Ctrl+C to stop)$(NC)"
-	@docker logs -f $(DEV_CONTAINER) 2>&1 | grep --line-buffered '"msg":"Decoded Message"' | jq -r '.output | "\(.timestamp | split("T")[1] | split(".")[0]) [\(.decoder)] \(.type): \(.data)"'
+	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./scripts/decoded-viewer.mjs
 
 dev-decoded-raw: ## Show decoded messages (raw JSON)
 	@docker logs -f $(DEV_CONTAINER) 2>&1 | grep --line-buffered '"msg":"Decoded Message"'

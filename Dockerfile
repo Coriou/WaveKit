@@ -133,6 +133,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     xz-utils \
     sox \
     libsox-fmt-all \
+    netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install s6-overlay (PID 1 init system + service supervisor)
@@ -247,7 +248,7 @@ WORKDIR /build
 RUN git clone --depth 1 https://github.com/TLeconte/acarsdec.git && \
     cd acarsdec && \
     mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    cmake -DCMAKE_BUILD_TYPE=Release -Dsoapy=ON .. && \
     make -j$(nproc) && \
     make install
 
@@ -324,6 +325,22 @@ RUN git clone --depth 1 https://github.com/wiedehopf/readsb.git && \
     cp readsb /usr/local/bin/
 
 # ============================================================================
+# Stage: soapy-rtltcp-build
+# Purpose: Build SoapyRTLTCP module for rtl_tcp network SDR support
+# Size: ~50MB (not in final image)
+# ============================================================================
+FROM base-deps AS soapy-rtltcp-build
+
+WORKDIR /build
+
+RUN git clone --depth 1 https://github.com/pothosware/SoapyRTLTCP.git && \
+    cd SoapyRTLTCP && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install
+
+# ============================================================================
 # Stage: node-build
 # Purpose: Build WaveKit TypeScript application
 # Size: ~450MB (not in final image)
@@ -390,6 +407,8 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+# Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
+COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 
 # Update library cache for all copied libraries
 RUN ldconfig
@@ -485,6 +504,8 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+# Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
+COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 
 # Copy ncurses libraries from build stage to ensure version compatibility
 COPY --from=dsd-fme-build /usr/lib/x86_64-linux-gnu/libncurses* /usr/lib/x86_64-linux-gnu/

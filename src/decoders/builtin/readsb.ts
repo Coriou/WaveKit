@@ -22,10 +22,14 @@ export type ReadsbOutputFormat = "sbs" | "beast" | "json"
  * Configuration options for the Readsb decoder.
  */
 export interface ReadsbOptions {
-	/** RTL-SDR device index or serial */
+	/** RTL-SDR device index or serial (local device mode) */
 	device?: string | undefined
-	/** RTL-SDR device serial number */
+	/** RTL-SDR device serial number (local device mode) */
 	deviceSerial?: string | undefined
+	/** RTL-TCP host for network mode (e.g., "192.168.1.69") */
+	rtlTcpHost?: string | undefined
+	/** RTL-TCP port for network mode (default: 1235) */
+	rtlTcpPort?: number | undefined
 	/** Gain setting for the RTL-SDR */
 	gain?: number | undefined
 	/** PPM correction for the RTL-SDR */
@@ -131,6 +135,11 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * Returns the readsb command (Requirement 22.1).
 	 */
 	protected getCommand(): string {
+		// Requirement: If using network mode, we must use a shell to pipe data
+		// because readsb doesn't support rtl_tcp natively.
+		if (this.options.rtlTcpHost) {
+			return "sh"
+		}
 		return "readsb"
 	}
 
@@ -138,13 +147,38 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * Returns command line arguments for readsb (Requirement 22.1).
 	 */
 	protected getArgs(): string[] {
+		// If using RTL-TCP, we need to construct a shell command to pipe data:
+		// nc <host> <port> | readsb --device-type ifile --ifile - --iformat UC8 ...
+		if (this.options.rtlTcpHost) {
+			const port = this.options.rtlTcpPort ?? 1235
+			const readsbArgs = this.getReadsbArgs(true) // true = network mode
+			const cmd = `nc ${this.options.rtlTcpHost} ${port} | readsb ${readsbArgs.join(" ")}`
+			return ["-c", cmd]
+		}
+
+		// Otherwise return standard args
+		return this.getReadsbArgs(false)
+	}
+
+	/**
+	 * Generates arguments for the readsb binary.
+	 * @param isNetworkMode - If true, configures for stdin input (ifile)
+	 */
+	private getReadsbArgs(isNetworkMode: boolean): string[] {
 		const args: string[] = []
 
-		// Device configuration
-		if (this.options.deviceSerial) {
+		if (isNetworkMode) {
+			// Network mode: Read from stdin (piped from nc) using ifile driver
+			// UC8 format matches the 8-bit unsigned IQ from rtl_tcp
+			args.push("--device-type", "ifile")
+			args.push("--ifile", "-")
+			args.push("--iformat", "UC8")
+		} else if (this.options.deviceSerial) {
+			// Local device by serial
 			args.push("--device-type", "rtlsdr")
 			args.push("--device", this.options.deviceSerial)
 		} else if (this.options.device) {
+			// Local device by index
 			args.push("--device-type", "rtlsdr")
 			args.push("--device", this.options.device)
 		}
@@ -385,6 +419,8 @@ function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
 	return {
 		device: options["device"] as string | undefined,
 		deviceSerial: options["deviceSerial"] as string | undefined,
+		rtlTcpHost: options["rtlTcpHost"] as string | undefined,
+		rtlTcpPort: options["rtlTcpPort"] as number | undefined,
 		gain: options["gain"] as number | undefined,
 		ppm: options["ppm"] as number | undefined,
 		outputFormat:
