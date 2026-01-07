@@ -75,6 +75,67 @@ describe("Fanout Manager", () => {
 			expect(branch1).toBe(branch1Again)
 		})
 	})
+
+	describe("Telemetry", () => {
+		it("should return branch telemetry with initial zero counters", () => {
+			fanout.addBranch({ id: "test-branch", decoderId: "test-decoder" })
+
+			const telemetry = fanout.getBranchTelemetry("test-branch")
+
+			expect(telemetry).toBeDefined()
+			expect(telemetry?.id).toBe("test-branch")
+			expect(telemetry?.decoderId).toBe("test-decoder")
+			expect(telemetry?.backpressureActive).toBe(false)
+			expect(telemetry?.backpressureEnterCount).toBe(0)
+			expect(telemetry?.droppedBytesTotal).toBe(0)
+			expect(telemetry?.droppedChunksTotal).toBe(0)
+		})
+
+		it("should return undefined for non-existent branch", () => {
+			const telemetry = fanout.getBranchTelemetry("non-existent")
+			expect(telemetry).toBeUndefined()
+		})
+
+		it("should return complete fanout status snapshot", () => {
+			fanout.addBranch({ id: "branch1" })
+			fanout.addBranch({ id: "branch2" })
+
+			const snapshot = fanout.getTelemetrySnapshot()
+
+			expect(snapshot.timestamp).toBeDefined()
+			expect(new Date(snapshot.timestamp).getTime()).toBeGreaterThan(0)
+			expect(snapshot.branches).toHaveLength(2)
+			expect(snapshot.backpressureActiveCount).toBe(0)
+			expect(snapshot.droppedBytesTotal).toBe(0)
+			expect(snapshot.droppedChunksTotal).toBe(0)
+		})
+
+		it("should include highWaterMark in branch telemetry", () => {
+			const customHWM = 512 * 1024 // 512KB
+			fanout.addBranch({ id: "custom", highWaterMark: customHWM })
+
+			const telemetry = fanout.getBranchTelemetry("custom")
+
+			expect(telemetry?.highWaterMark).toBe(customHWM)
+		})
+
+		it("should track buffer bytes as data is written", () => {
+			const branch = fanout.addBranch({ id: "test-branch" })
+			fanout.attachSource(source)
+
+			// Create a paused consumer (not reading from branch)
+			// This allows buffer to fill
+
+			const data = Buffer.alloc(1024, 0x42)
+			source.write(data)
+
+			const telemetry = fanout.getBranchTelemetry("test-branch")
+			expect(telemetry?.bufferBytes).toBe(1024)
+
+			// Drain the branch
+			branch.read()
+		})
+	})
 })
 
 describe("Property-Based Tests", () => {

@@ -59,6 +59,30 @@ function createMockDecoderManager() {
 }
 
 /**
+ * Mock FanoutManager for testing
+ */
+function createMockFanoutManager() {
+	const mock = new EventEmitter()
+	return Object.assign(mock, {
+		attachSource: vi.fn(),
+		detachSource: vi.fn(),
+		addBranch: vi.fn(),
+		removeBranch: vi.fn(),
+		getBranchIds: vi.fn().mockReturnValue([]),
+		getBranchStatus: vi.fn(),
+		getBranchTelemetry: vi.fn(),
+		getTelemetrySnapshot: vi.fn().mockReturnValue({
+			timestamp: new Date().toISOString(),
+			branches: [],
+			backpressureActiveCount: 0,
+			droppedBytesTotal: 0,
+			droppedChunksTotal: 0,
+		}),
+		destroy: vi.fn(),
+	})
+}
+
+/**
  * Mock AudioOutput for testing
  */
 function createMockAudioOutput() {
@@ -76,12 +100,14 @@ function createMockAudioOutput() {
 describe("API Server", () => {
 	let apiServer: ApiServer
 	let mockSourceManager: ReturnType<typeof createMockSourceManager>
+	let mockFanoutManager: ReturnType<typeof createMockFanoutManager>
 	let mockDecoderManager: ReturnType<typeof createMockDecoderManager>
 	let mockAudioOutput: ReturnType<typeof createMockAudioOutput>
 	let config: ApiServerConfig
 
 	beforeEach(() => {
 		mockSourceManager = createMockSourceManager()
+		mockFanoutManager = createMockFanoutManager()
 		mockDecoderManager = createMockDecoderManager()
 		mockAudioOutput = createMockAudioOutput()
 
@@ -93,6 +119,8 @@ describe("API Server", () => {
 		const dependencies: ApiServerDependencies = {
 			sourceManager:
 				mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+			fanoutManager:
+				mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 			decoderManager:
 				mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 			audioOutput:
@@ -298,6 +326,8 @@ describe("API Server", () => {
 			const testDependencies: ApiServerDependencies = {
 				sourceManager:
 					mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+				fanoutManager:
+					mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 				decoderManager:
 					mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 				audioOutput:
@@ -457,6 +487,8 @@ describe("API Server", () => {
 			const testDependencies: ApiServerDependencies = {
 				sourceManager:
 					mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+				fanoutManager:
+					mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 				decoderManager:
 					mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 				audioOutput:
@@ -499,6 +531,8 @@ describe("API Server", () => {
 			const testDependencies: ApiServerDependencies = {
 				sourceManager:
 					mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+				fanoutManager:
+					mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 				decoderManager:
 					mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 				audioOutput:
@@ -1348,6 +1382,25 @@ describe("Property-Based Tests", () => {
 							getAllStatus: vi.fn().mockReturnValue([]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -1362,6 +1415,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -1568,6 +1623,25 @@ describe("Property-Based Tests", () => {
 							getAllStatus: vi.fn().mockReturnValue([]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -1582,6 +1656,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -1670,6 +1746,25 @@ describe("Property-Based Tests", () => {
 							getAllStatus: vi.fn().mockReturnValue([]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -1684,6 +1779,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -1802,6 +1899,25 @@ describe("Property-Based Tests", () => {
 								.mockImplementation(() => [{ ...decoderState }]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -1816,6 +1932,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -1984,6 +2102,25 @@ describe("Property-Based Tests", () => {
 								.mockImplementation(() => [{ ...decoderState }]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -1998,6 +2135,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -2105,6 +2244,25 @@ describe("Property-Based Tests", () => {
 								.mockImplementation(() => [{ ...decoderState }]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -2119,6 +2277,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -2195,6 +2355,25 @@ describe("Property-Based Tests", () => {
 							getAllStatus: vi.fn().mockReturnValue([]),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -2209,6 +2388,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:
@@ -2341,6 +2522,25 @@ describe("Property-Based Tests", () => {
 							getAllHealth: vi.fn().mockReturnValue(new Map()),
 						})
 
+						const mockFanoutManager = new EventEmitter()
+						Object.assign(mockFanoutManager, {
+							attachSource: vi.fn(),
+							detachSource: vi.fn(),
+							addBranch: vi.fn(),
+							removeBranch: vi.fn(),
+							getBranchIds: vi.fn().mockReturnValue([]),
+							getBranchStatus: vi.fn(),
+							getBranchTelemetry: vi.fn(),
+							getTelemetrySnapshot: vi.fn().mockReturnValue({
+								timestamp: new Date().toISOString(),
+								branches: [],
+								backpressureActiveCount: 0,
+								droppedBytesTotal: 0,
+								droppedChunksTotal: 0,
+							}),
+							destroy: vi.fn(),
+						})
+
 						const mockAudioOutput = new EventEmitter()
 						Object.assign(mockAudioOutput, {
 							start: vi.fn(),
@@ -2357,6 +2557,8 @@ describe("Property-Based Tests", () => {
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+							fanoutManager:
+								mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
 							decoderManager:
 								mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
 							audioOutput:

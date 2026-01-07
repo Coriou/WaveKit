@@ -112,8 +112,8 @@ describe("ReadsbDecoder", () => {
 			decoder = new ReadsbDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
 				output: "text",
 				integrationPattern: "network_producer",
 			})
@@ -124,8 +124,8 @@ describe("ReadsbDecoder", () => {
 			decoder = new ReadsbDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
 				output: "beast",
 				integrationPattern: "network_producer",
 			})
@@ -136,8 +136,8 @@ describe("ReadsbDecoder", () => {
 			decoder = new ReadsbDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
 				output: "jsonl",
 				integrationPattern: "network_producer",
 			})

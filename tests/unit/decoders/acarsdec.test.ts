@@ -106,8 +106,8 @@ describe("AcarsdecDecoder", () => {
 			decoder = new AcarsdecDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: false,
 				output: "jsonl",
 				integrationPattern: "external_sdr",
 			})
@@ -279,8 +279,8 @@ describe("createAcarsdecDecoder", () => {
 describe("ACARSDEC_CAPS", () => {
 	it("should have correct capabilities", () => {
 		expect(ACARSDEC_CAPS).toEqual({
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false,
 			output: "jsonl",
 			integrationPattern: "external_sdr",
 		})
