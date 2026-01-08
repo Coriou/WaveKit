@@ -63,12 +63,24 @@ export interface DecoderCaps {
 
 export interface SourceStatus {
 	id: string
+	type?: SourceConfig["type"]
+	url?: string
 	connected: boolean
 	bytesReceived: number
 	dataRate: number // KB/s
 	lastError?: string | undefined
 	reconnectAttempts: number
 	caps: SourceCaps
+}
+
+function formatSourceUrl(config: SourceConfig): string {
+	if (config.type === "recording") {
+		return config.filePath ?? ""
+	}
+	if (config.host && config.port) {
+		return `${config.host}:${config.port}`
+	}
+	return ""
 }
 
 export interface SourceManagerEvents {
@@ -944,6 +956,8 @@ export class SourceManager extends EventEmitter {
 
 		return {
 			id: state.config.id,
+			type: state.config.type,
+			url: formatSourceUrl(state.config),
 			connected: state.connected,
 			bytesReceived: state.bytesReceived,
 			dataRate: state.dataRate,

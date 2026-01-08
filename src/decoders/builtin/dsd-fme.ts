@@ -136,8 +136,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			demodSampleRate: 48000, // Demod at 48ksps for proper bandwidth
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 			deEmphasis: false, // Critical: no de-emphasis for digital signals
-			fmGain: this.options.fmGain ?? 3.0, // Match working POCSAG value
-			filterTransition: 0.012, // Narrow transition from working demod-test.sh
+			fmGain: this.options.fmGain ?? -0.5, // Invert signal polarity (-0.5) to fix FEC errors
+			filterTransition: 0.05, // Relaxed transition (0.012 was too sharp)
 			skipDcBlock: true, // Critical: dcblock distorts digital signals
 		}
 	}
