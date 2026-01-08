@@ -89,6 +89,7 @@ describe("Fanout Manager", () => {
 			expect(telemetry?.backpressureEnterCount).toBe(0)
 			expect(telemetry?.droppedBytesTotal).toBe(0)
 			expect(telemetry?.droppedChunksTotal).toBe(0)
+			expect(telemetry?.totalBytesWritten).toBe(0)
 		})
 
 		it("should return undefined for non-existent branch", () => {
@@ -108,6 +109,7 @@ describe("Fanout Manager", () => {
 			expect(snapshot.backpressureActiveCount).toBe(0)
 			expect(snapshot.droppedBytesTotal).toBe(0)
 			expect(snapshot.droppedChunksTotal).toBe(0)
+			expect(snapshot.totalBytesWritten).toBe(0)
 		})
 
 		it("should include highWaterMark in branch telemetry", () => {
@@ -134,6 +136,24 @@ describe("Fanout Manager", () => {
 
 			// Drain the branch
 			branch.read()
+		})
+
+		it("should track total bytes written", () => {
+			fanout.addBranch({ id: "test-branch" })
+			fanout.attachSource(source)
+
+			const data = Buffer.alloc(100, 0x42)
+			source.write(data)
+
+			const telemetry = fanout.getBranchTelemetry("test-branch")
+			expect(telemetry?.totalBytesWritten).toBe(100)
+			expect(fanout.getTelemetrySnapshot().totalBytesWritten).toBe(100)
+
+			// Write more data
+			source.write(data)
+			expect(fanout.getBranchTelemetry("test-branch")?.totalBytesWritten).toBe(
+				200,
+			)
 		})
 	})
 })

@@ -50,6 +50,8 @@ export interface BranchTelemetry {
 	// Buffer
 	bufferBytes: number
 	highWaterMark: number
+	// Throughput
+	totalBytesWritten: number
 }
 
 /**
@@ -61,6 +63,7 @@ export interface FanoutStatus {
 	backpressureActiveCount: number
 	droppedBytesTotal: number
 	droppedChunksTotal: number
+	totalBytesWritten: number
 }
 
 export interface FanoutManagerEvents {
@@ -80,6 +83,7 @@ interface BranchState {
 	sourceId?: string | undefined
 	droppedBytesTotal: number
 	droppedChunksTotal: number
+	totalBytesWritten: number
 	backpressureEnterCount: number
 	backpressureSince?: number | undefined // hrtime in ms for precise duration
 	lastBackpressureAt?: string | undefined // ISO timestamp for display
@@ -168,6 +172,7 @@ export class FanoutManager extends EventEmitter {
 			sourceId: config.sourceId,
 			droppedBytesTotal: 0,
 			droppedChunksTotal: 0,
+			totalBytesWritten: 0,
 			backpressureEnterCount: 0,
 			backpressureSince: undefined,
 			lastBackpressureAt: undefined,
@@ -246,6 +251,9 @@ export class FanoutManager extends EventEmitter {
 			// for that branch until it drains. This prevents one slow consumer
 			// from blocking the entire pipeline or consuming excessive memory.
 
+			// Track total bytes attempted to be written (before dropping)
+			branch.totalBytesWritten += chunkLength
+
 			if (branch.backpressure) {
 				// Already in backpressure state, drop packet and track metrics
 				branch.droppedBytesTotal += chunkLength
@@ -322,6 +330,7 @@ export class FanoutManager extends EventEmitter {
 			droppedChunksTotal: branch.droppedChunksTotal,
 			bufferBytes: branch.bufferedBytes,
 			highWaterMark: branch.highWaterMark,
+			totalBytesWritten: branch.totalBytesWritten,
 		}
 
 		// Only set optional properties if they exist (exactOptionalPropertyTypes)
@@ -347,6 +356,7 @@ export class FanoutManager extends EventEmitter {
 		let backpressureActiveCount = 0
 		let droppedBytesTotal = 0
 		let droppedChunksTotal = 0
+		let totalBytesWritten = 0
 
 		for (const [id, branch] of this.branches) {
 			if (branch.backpressure) {
@@ -354,6 +364,7 @@ export class FanoutManager extends EventEmitter {
 			}
 			droppedBytesTotal += branch.droppedBytesTotal
 			droppedChunksTotal += branch.droppedChunksTotal
+			totalBytesWritten += branch.totalBytesWritten
 
 			const branchTelemetry: BranchTelemetry = {
 				id,
@@ -363,6 +374,7 @@ export class FanoutManager extends EventEmitter {
 				droppedChunksTotal: branch.droppedChunksTotal,
 				bufferBytes: branch.bufferedBytes,
 				highWaterMark: branch.highWaterMark,
+				totalBytesWritten: branch.totalBytesWritten,
 			}
 
 			if (branch.decoderId) branchTelemetry.decoderId = branch.decoderId
@@ -384,6 +396,7 @@ export class FanoutManager extends EventEmitter {
 			backpressureActiveCount,
 			droppedBytesTotal,
 			droppedChunksTotal,
+			totalBytesWritten,
 		}
 	}
 

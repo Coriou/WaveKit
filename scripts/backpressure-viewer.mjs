@@ -93,6 +93,7 @@ const branches = new Map()
 
 let globalDroppedBytes = 0
 let globalDroppedChunks = 0
+let globalTotalBytes = 0
 let backpressureActiveCount = 0
 let lastSnapshotAt = null
 let connectionStatus = "connecting"
@@ -193,6 +194,7 @@ function handleSnapshot(data) {
 	lastSnapshotAt = Date.now()
 	globalDroppedBytes = data.droppedBytesTotal ?? 0
 	globalDroppedChunks = data.droppedChunksTotal ?? 0
+	globalTotalBytes = data.totalBytesWritten ?? 0
 	backpressureActiveCount = data.backpressureActiveCount ?? 0
 
 	if (Array.isArray(data.branches)) {
@@ -305,7 +307,7 @@ function renderStatusIndicator(active) {
 
 function renderBufferBar(bufferBytes, highWaterMark) {
 	const pct = highWaterMark > 0 ? Math.min(1, bufferBytes / highWaterMark) : 0
-	const barWidth = 20
+	const barWidth = 12
 	const filled = Math.round(pct * barWidth)
 	const empty = barWidth - filled
 
@@ -341,6 +343,7 @@ function render() {
 
 	stdout.write(`  ${bold("Status:")} ${activeText}\n`)
 	stdout.write(`  ${bold("Drop Rate:")} ${formatRate(dropRate)}\n`)
+	stdout.write(`  ${bold("Total Flowed:")} ${formatBytes(globalTotalBytes)}\n`)
 	stdout.write(
 		`  ${bold("Total Dropped:")} ${formatBytes(globalDroppedBytes)} (${globalDroppedChunks} chunks)\n`,
 	)
@@ -357,8 +360,10 @@ function render() {
 		dim("  ") +
 		bold(padRight("Branch ID", 24)) +
 		bold(padRight("State", 10)) +
-		bold(padRight("Buffer Usage", 30)) +
-		bold(padRight("Dropped", 14)) +
+		bold(padRight("Buffer Usage", 22)) +
+		bold(padRight("Flowed", 12)) +
+		bold(padRight("Dropped", 12)) +
+		bold(padRight("% Drop", 8)) +
 		bold(padRight("Enter Count", 12)) +
 		"\n"
 
@@ -387,13 +392,23 @@ function render() {
 				branch.bufferBytes ?? 0,
 				branch.highWaterMark ?? 262144,
 			)
-			const dropped = padRight(formatBytes(branch.droppedBytesTotal ?? 0), 14)
+			const flowed = padRight(formatBytes(branch.totalBytesWritten ?? 0), 12)
+			const dropped = padRight(formatBytes(branch.droppedBytesTotal ?? 0), 12)
+
+			let dropPct = 0
+			if ((branch.totalBytesWritten ?? 0) > 0) {
+				dropPct =
+					((branch.droppedBytesTotal ?? 0) / (branch.totalBytesWritten ?? 1)) *
+					100
+			}
+			const dropPctText = padRight(`${dropPct.toFixed(1)}%`, 8)
+
 			const enterCount = padLeft(String(branch.backpressureEnterCount ?? 0), 12)
 
 			// Highlight row if in backpressure
 			const prefix = branch.backpressureActive ? red("▶ ") : "  "
 			stdout.write(
-				`${prefix}${id}${status}  ${bufferBar}  ${dropped}${enterCount}\n`,
+				`${prefix}${id}${status}  ${bufferBar}  ${flowed}${dropped}${dropPctText}${enterCount}\n`,
 			)
 		}
 	}
