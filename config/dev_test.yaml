@@ -7,7 +7,7 @@ sources:
     port: 1235
     caps:
       kind: iq
-      sampleRate: 2400000
+      sampleRate: 2048000
       format: U8_IQ
       exclusive: false
 
@@ -31,7 +31,8 @@ decoders:
     sourceId: pi-iq
     options:
       modes: [POCSAG512, POCSAG1200, POCSAG2400, FLEX]
-      fmGain: 0.3 # Reduced further - signal was still clipping at 1.0
+      inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
+      fmGain: 3 # Match working demod-test.sh gain
       # DEBUG: Record demodulated audio for analysis
       debugRecordPath: /data/debug_audio
 
@@ -44,6 +45,7 @@ decoders:
     options:
       mode: auto
       output: null
+      inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
       fmGain: 0.3 # Reduced further - signal was still clipping at 1.0
       # DEBUG: Record demodulated audio for analysis
       debugRecordPath: /data/debug_audio
@@ -64,7 +66,7 @@ decoders:
     enabled: false
     sourceId: pi-iq
     options:
-      sampleRate: 2400000
+      sampleRate: 2048000
       outputFormat: json
 
   # Maritime AIS decoder - ship positions and data

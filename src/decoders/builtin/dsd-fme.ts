@@ -164,7 +164,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const demodRate = config.demodSampleRate ?? config.sampleRate
 		const outputRate = config.sampleRate
 		const inputSampleRate = config.inputSampleRate || 2_400_000
-		const decimation = inputSampleRate / demodRate
+		// IMPORTANT: csdr firdecimate requires integer decimation factor
+		const decimation = Math.round(inputSampleRate / demodRate)
 
 		// Generate debug filename if debug recording is enabled
 		const debugFile = this.debugRecording

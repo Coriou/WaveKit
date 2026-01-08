@@ -171,13 +171,19 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Determine the rate at which demodulation happens (and thus the filter cutoff)
 		// If demodSampleRate is provided, use it. Otherwise use output sampleRate.
 		// This split allows tight filtering (low demod rate) with high output rate.
-		const demodRate = config.demodSampleRate ?? config.sampleRate
+		const targetDemodRate = config.demodSampleRate ?? config.sampleRate
 		const outputRate = config.sampleRate
 
 		// Calculate decimation factor for the heavy lifting (firdecimate)
 		// Input is IQ sample rate, output is demod/intermediate rate
+		// IMPORTANT: csdr firdecimate requires integer decimation factor
 		const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
-		const decimation = inputSampleRate / demodRate
+		const decimation = Math.round(inputSampleRate / targetDemodRate)
+
+		// CRITICAL: Calculate ACTUAL demod rate after integer decimation
+		// This may differ from targetDemodRate due to rounding
+		// sox must use the ACTUAL rate, not the configured rate
+		const actualDemodRate = inputSampleRate / decimation
 
 		// Generate debug filenames if debug recording is enabled
 		const debugDemodFile = this.debugRecording
@@ -220,12 +226,16 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		if (config.audioLowPass) {
 			// Calculate normalized cutoff (0.0 - 0.5) relative to sample rate
 			// 0.5 = Nyquist (Fs/2).
-			const normalizedCutoff = config.audioLowPass / demodRate
+			const normalizedCutoff = config.audioLowPass / actualDemodRate
 			csdrStages.push(`csdr lowpass -f float ${normalizedCutoff.toFixed(4)}`)
 		}
 
+		// Optional DC block (skip for FSK/POCSAG signals as it distorts them)
+		if (!config.skipDcBlock) {
+			csdrStages.push("csdr dcblock")
+		}
+
 		csdrStages.push(
-			"csdr dcblock", // Remove DC offset (real audio)
 			`csdr gain ${config.fmGain ?? 10.0}`, // Apply gain (real)
 			"csdr limit", // Prevent clipping (real audio)
 		)
@@ -233,7 +243,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Optional de-emphasis for analog signals
 		if (config.deEmphasis) {
 			// csdr deemphasis takes sample rate
-			csdrStages.push(`csdr deemphasis ${demodRate}`)
+			csdrStages.push(`csdr deemphasis ${actualDemodRate}`)
 		}
 
 		// Final conversion to S16LE (at demodRate)
@@ -248,18 +258,19 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			// Simple tee to file - no process substitution needed
 			pipelineStr += ` | tee "${debugDemodFile}"`
 			this.logger.info(
-				{ file: debugDemodFile, rate: demodRate },
+				{ file: debugDemodFile, rate: actualDemodRate },
 				"Debug recording DEMOD stage audio",
 			)
 		}
 
-		// If demodRate differs from outputRate, we need to resample
+		// If actualDemodRate differs from outputRate, we need to resample
 		// Use sox for high-quality resampling
-		if (demodRate !== outputRate) {
+		// CRITICAL: Use actualDemodRate (not configured rate) to match what csdr outputs
+		if (actualDemodRate !== outputRate) {
 			const soxResample = [
 				"sox",
 				"-t raw", // Input type
-				`-r ${demodRate}`, // Input rate
+				`-r ${actualDemodRate}`, // Input rate - MUST match csdr output
 				"-e signed -b 16 -c 1", // Input format (S16LE Mono)
 				"-", // Input from stdin
 				"-t raw", // Output type
@@ -294,7 +305,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		this.logger.debug(
 			{
 				inputSampleRate,
-				demodRate,
+				targetDemodRate,
+				actualDemodRate,
 				outputSampleRate: outputRate,
 				decimation,
 				bandwidth: config.bandwidth,

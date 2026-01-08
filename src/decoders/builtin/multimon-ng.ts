@@ -172,35 +172,26 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	 * down to 22050Hz for multimon-ng compatibility.
 	 */
 	protected getDemodConfig(): DemodulationConfig {
-		// Optimization Strategy: "SDR++ Replica"
-		// 1. Bandwidth: 12.5kHz (Tight channel filtering)
-		// 2. Audio LPF: 3kHz (Remove high freq noise)
-		// 3. Gain: Inverted (Reference confirms inverted signal)
+		// Match the working demod-test.sh pipeline exactly:
+		// csdr firdecimate 42 0.012 | csdr fmdemod | csdr gain 3 | csdr limit
+		// NO lowpass, NO dcblock, NO filterCutoff override
 
 		return {
-			bandwidth: 12500, // 12.5 kHz - Match SDR++ NFM bandwidth
+			bandwidth: 12500, // 12.5 kHz NFM
 			sampleRate: 22050, // multimon-ng expects 22050 Hz for raw input
-			demodSampleRate: 48000, // Demod at 48ksps
+			demodSampleRate: 48000, // Demod at 48ksps, then sox resamples to 22050
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 
-			// Filter Tuning
-			// Cutoff 0.13 = (12.5k / 2) / 48k * 2 ?? No.
-			// firdecimate cutoff 0.5 = Nyquist (24k).
-			// We want 6.25k passband. 6.25 / 24 = 0.26 ?
-			// Wait, let's trust the "0.13" from manual testing which was 6.25/48.
-			// Actually 0.13 * 48k = 6.24k. That is correct for one-sided bandwidth.
-			filterCutoff: 0.13,
-			filterTransition: 0.05,
+			// Filter: use narrow transition (0.012) like demod-test.sh
+			// Don't override cutoff - let csdr use default 0.5
+			filterTransition: 0.012,
+			// filterCutoff: removed - use csdr default
 
-			// Inversion & Gain
-			// References 23:55 and pager_noise_around.wav are NORMAL polarity.
-			// Only 23:11 appeared inverted. Defaulting to NORMAL (Positive gain).
-			// Using 2.0 to provide healthy boost.
-			fmGain: this.options.fmGain ?? 2.0,
+			// Gain: demod-test.sh uses 3, config can override
+			fmGain: this.options.fmGain ?? 3.0,
 
-			// Audio Post-Processing
-			// Replicate SDR++ default audio filter (3k-4k LPF)
-			audioLowPass: 3500,
+			// Match demod-test.sh: NO audioLowPass, NO dcblock
+			skipDcBlock: true,
 
 			deEmphasis: false, // No de-emphasis for digital pagers
 		}

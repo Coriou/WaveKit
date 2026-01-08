@@ -8,3 +8,7 @@ snapshots
 coverage
 debug_audio/
 debug_iq_output/
+output/
+logs/
+wip/
+demod_comparison_*/

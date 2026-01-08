@@ -102,6 +102,8 @@ export interface DemodulationConfig {
 	filterCutoff?: number
 	/** Optional audio lowpass filter cutoff in Hz (e.g. 3000) */
 	audioLowPass?: number
+	/** Skip DC block filter (useful for FSK/POCSAG signals) */
+	skipDcBlock?: boolean
 }
 
 // ============================================================================

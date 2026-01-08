@@ -240,6 +240,61 @@ WAVEKIT_SOURCES_0_HOST=192.168.1.100
 WAVEKIT_SOURCES_0_PORT=1234
 ```
 
+## RTL-SDR Tuner Setup
+
+For optimal signal reception with RTL-SDR dongles:
+
+### Recommended rtl_tcp Settings
+
+```bash
+# Enable AGC mode (-g 0) for automatic gain control
+rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
+
+# Parameters:
+#   -a 0.0.0.0    Listen on all interfaces
+#   -p 1234       Port (use 1235 for rtlmux)
+#   -f 446524920  Center frequency (Hz)
+#   -s 2048000    Sample rate: 2.048 Msps (not 2.4!)
+#   -g 0          AGC mode (critical for weak signals)
+```
+
+> [!IMPORTANT]
+> **Use AGC mode (`-g 0`)** instead of fixed gain. Fixed maximum gain (`-g 49.6`) can result in weak signals using only 6-7% of the ADC dynamic range, causing FM demodulation to fail.
+
+### Sample Rate
+
+WaveKit uses **2.048 Msps** (2,048,000 samples/second), not 2.4 Msps. This affects:
+- Filter bandwidth calculations
+- Decimation factors in the csdr pipeline
+- Audio sample rate after demodulation
+
+### systemd Service (Linux/Pi)
+
+```ini
+# /etc/systemd/system/rtl_tcp.service
+[Unit]
+Description=RTL-SDR TCP Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+### Using with rtlmux
+
+For multiple clients (e.g., SDR++ and WaveKit simultaneously), use [rtlmux](https://github.com/alexander-sholohov/rtlmux):
+
+```bash
+# rtlmux forwards rtl_tcp (port 1234) to multiple clients on port 1235
+rtlmux -s 192.168.1.69:1234 -l 0.0.0.0:1235
+```
+
 ## Development
 
 ### Project Structure
@@ -435,7 +490,7 @@ If decoders aren't producing output, see the comprehensive debugging guides:
 - **[ARCHITECTURE-DECODER-FIXES.md](docs/ARCHITECTURE-DECODER-FIXES.md)** - Technical deep dive into pipeline architecture
 - **[SESSION-SUMMARY-DECODER-FIXES.md](docs/SESSION-SUMMARY-DECODER-FIXES.md)** - Recent decoder fixes and verification checklist
 
-Quick diagnostic:
+### Quick Diagnostic
 
 ```bash
 # Check if decoders are running
@@ -450,6 +505,36 @@ make dev-logs-raw 2>&1 | grep -i "error\|pipeline\|decoder"
 # Test csdr pipeline manually
 make dev-shell
 # Then inside container, run test commands from DEBUGGING-DECODERS.md
+```
+
+### Weak Signal Troubleshooting
+
+If signals are received but not decoding:
+
+1. **Check AGC mode**: Ensure rtl_tcp uses `-g 0` (AGC), not fixed gain
+2. **Verify sample rate**: Must be 2.048 Msps, not 2.4 Msps
+3. **Check dynamic range**: Signals should use >20% of ADC range
+
+```bash
+# Analyze IQ capture dynamic range
+docker compose -f docker-compose.demod-test.yml run --rm demod-test \
+    python3 /scripts/compare-dynamic-range.py
+```
+
+### Demod-Test Container
+
+A standalone container for testing IQ demodulation:
+
+```bash
+# Build and enter the test container
+docker compose -f docker-compose.demod-test.yml build
+docker compose -f docker-compose.demod-test.yml run --rm demod-test bash
+
+# Capture IQ on signal detection
+python3 /scripts/auto-capture.py --host 192.168.1.69 --port 1235 --threshold 1.5
+
+# Demodulate and decode POCSAG
+bash /scripts/demod-test.sh /output/iq_capture_*.u8
 ```
 
 ## Architecture Notes
