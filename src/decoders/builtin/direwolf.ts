@@ -168,6 +168,9 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 			sampleRate: 48000, // Direwolf native rate
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 			deEmphasis: false,
+			fmGain: 3.0, // Match working POCSAG value
+			filterTransition: 0.012, // Narrow transition from working demod-test.sh
+			skipDcBlock: true, // Skip DC block for digital signals
 		}
 	}
 

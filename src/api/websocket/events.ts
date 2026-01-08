@@ -168,8 +168,8 @@ export class WebSocketEventBroadcaster {
 		})
 
 		// Handle client disconnect
-		socket.on("close", () => {
-			this.handleDisconnect(clientState)
+		socket.on("close", (code: number, reason: Buffer) => {
+			this.handleDisconnect(clientState, code, reason)
 		})
 
 		// Handle errors
@@ -269,9 +269,10 @@ export class WebSocketEventBroadcaster {
 	/**
 	 * Handles client disconnect.
 	 */
-	private handleDisconnect(client: ClientState): void {
+	private handleDisconnect(client: ClientState, code?: number, reason?: Buffer): void {
 		this.clients.delete(client.id)
-		this.log.info({ clientId: client.id }, "WebSocket client disconnected")
+		const reasonStr = reason ? reason.toString() : "unknown"
+		this.log.info({ clientId: client.id, code, reason: reasonStr }, "WebSocket client disconnected")
 	}
 
 	/**

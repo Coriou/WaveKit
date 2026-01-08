@@ -205,6 +205,12 @@ dev-backpressure: ## Show live fanout backpressure dashboard
 	@echo "$(BLUE)Backpressure Monitor$(NC)"
 	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./scripts/backpressure-viewer.mjs
 
+dev-dashboard: ## WaveKit CLI Dashboard (interactive, tab-based)
+	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
+
+dev-dashboard-build: ## Build CLI dashboard
+	@cd cli && npm run build
+
 
 docker-logs-sdrpp: ## Tail SDR++ logs
 	@docker exec -it wavekit tail -f /var/log/wavekit/sdrpp.log
