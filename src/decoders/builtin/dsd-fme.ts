@@ -133,10 +133,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return {
 			bandwidth: 12500, // 12.5 kHz NFM - standard for digital voice
 			sampleRate: 48000, // 48 kHz output - dsd-fme native rate
-			demodSampleRate: 48000, // Demod at 48ksps (firdecimate 50) for proper bandwidth
+			demodSampleRate: 48000, // Demod at 48ksps for proper bandwidth
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 			deEmphasis: false, // Critical: no de-emphasis for digital signals
-			fmGain: this.options.fmGain,
+			fmGain: this.options.fmGain ?? 3.0, // Match working POCSAG value
+			filterTransition: 0.012, // Narrow transition from working demod-test.sh
+			skipDcBlock: true, // Critical: dcblock distorts digital signals
 		}
 	}
 
@@ -155,7 +157,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * dsd-fme doesn't support raw S16LE stdin - it expects WAV format.
 	 * We use sox to wrap the S16LE audio as a WAV stream before piping to dsd-fme.
 	 *
-	 * Pipeline: IQ -> csdr (demod at demodRate) -> S16LE -> sox (resample to outputRate + WAV wrapper) -> dsd-fme
+	 * Pipeline: IQ -> csdr (demod at demodRate) -> S16LE -> sox (WAV wrapper) -> dsd-fme
 	 */
 	protected override buildPipelineCommand(): string {
 		const config = this.getDemodConfig()
@@ -166,6 +168,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const inputSampleRate = config.inputSampleRate || 2_400_000
 		// IMPORTANT: csdr firdecimate requires integer decimation factor
 		const decimation = Math.round(inputSampleRate / demodRate)
+		// CRITICAL: Calculate ACTUAL demod rate after integer decimation
+		// sox must use the ACTUAL rate, not the configured rate
+		const actualDemodRate = inputSampleRate / decimation
 
 		// Generate debug filename if debug recording is enabled
 		const debugFile = this.debugRecording
@@ -173,20 +178,26 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			: null
 
 		// Build csdr pipeline stages (Using jketterl/csdr v0.18+ syntax)
-		// CRITICAL: dcblock and limit work on REAL float signals only.
-		// They must come AFTER fmdemod (which converts complex -> real audio).
+		const transition = config.filterTransition ?? 0.05
 		const csdrStages: string[] = [
 			"csdr convert -i char -o float", // U8 IQ -> complex float
-			`csdr firdecimate ${decimation}`, // Decimate + filter (complex)
+			`csdr firdecimate ${decimation} ${transition}`, // Decimate + filter (complex)
 			"csdr fmdemod", // FM demod: complex -> real audio
-			"csdr dcblock", // Remove DC offset (real audio)
-			`csdr gain ${config.fmGain ?? 10.0}`, // Apply gain (real)
-			"csdr limit", // Prevent clipping (real audio)
 		]
+
+		// Optional DC block (skip for digital signals as it distorts them)
+		if (!config.skipDcBlock) {
+			csdrStages.push("csdr dcblock")
+		}
+
+		csdrStages.push(
+			`csdr gain ${config.fmGain ?? 3.0}`, // Apply gain (real)
+			"csdr limit", // Prevent clipping (real audio)
+		)
 
 		// Optional de-emphasis (should be false for digital voice)
 		if (config.deEmphasis) {
-			csdrStages.push(`csdr deemphasis ${demodRate}`)
+			csdrStages.push(`csdr deemphasis ${actualDemodRate}`)
 		}
 
 		// Convert to S16LE audio
@@ -196,24 +207,24 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		let pipelineStr = csdrStages.join(" | ")
 
 		// DEBUG: Record raw audio at demod rate before sox processing
-		// Using simple tee to file - no bash-specific syntax
 		if (debugFile && this.debugRecording) {
 			pipelineStr += ` | tee "${debugFile}"`
 			this.logger.warn(
-				{ file: debugFile, rate: demodRate },
+				{ file: debugFile, rate: actualDemodRate },
 				"DEBUG: Recording raw audio BEFORE sox",
 			)
 		}
 
 		// Build sox command for WAV wrapper
+		// CRITICAL: Use actualDemodRate (not configured rate) to match csdr output
 		const soxCommand = [
 			"sox",
 			"-t raw",
-			`-r ${demodRate}`,
+			`-r ${actualDemodRate}`, // Input rate from csdr
 			"-e signed -b 16 -c 1",
 			"-",
 			"-t wav",
-			`-r ${outputRate}`,
+			`-r ${outputRate}`, // Output rate for dsd-fme
 			"-",
 		].join(" ")
 
@@ -229,11 +240,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.logger.debug(
 			{
 				inputSampleRate,
-				demodRate,
+				targetDemodRate: demodRate,
+				actualDemodRate,
 				outputSampleRate: outputRate,
 				decimation,
+				skipDcBlock: config.skipDcBlock,
 				pipeline,
-				debugRecording: !!this.debugRecording,
 			},
 			"Built dsd-fme pipeline with WAV wrapper",
 		)

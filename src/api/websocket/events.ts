@@ -184,6 +184,8 @@ export class WebSocketEventBroadcaster {
 	private handleMessage(client: ClientState, data: Buffer | string): void {
 		try {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
+			this.log.info({ clientId: client.id, data: rawData }, "Received raw message")
+			
 			const parsed = JSON.parse(rawData) as unknown
 			const message = parseClientMessage(parsed)
 
@@ -223,7 +225,7 @@ export class WebSocketEventBroadcaster {
 			client.subscriptions.add(channel)
 		}
 
-		this.log.debug(
+		this.log.info(
 			{
 				clientId: client.id,
 				channels,
