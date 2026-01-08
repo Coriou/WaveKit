@@ -13,6 +13,7 @@
 import React, { useState, useCallback, useEffect } from "react"
 import { Box, useInput, useApp } from "ink"
 import { useWebSocket, type ServerMessage } from "./hooks/use-websocket.js"
+import { useTerminalSize } from "./hooks/use-terminal-size.js"
 import { ErrorBoundary } from "./components/error-boundary.js"
 import { Header } from "./components/header.js"
 import { TabBar } from "./components/tab-bar.js"
@@ -31,10 +32,6 @@ import type {
 	SourceStatus as SourceStatusType,
 	DecoderOutputMessage,
 } from "./types.js"
-
-
-
-
 
 // ============================================================================
 // Types
@@ -68,13 +65,13 @@ function recordDrop(bytes: number) {
 	const now = Date.now()
 	dropHistory.push({ timestamp: now, bytes })
 	// Prune old entries
-	dropHistory = dropHistory.filter((d) => d.timestamp >= now - DROP_WINDOW_MS)
+	dropHistory = dropHistory.filter(d => d.timestamp >= now - DROP_WINDOW_MS)
 }
 
 function getDropRate(): number {
 	const now = Date.now()
 	const windowStart = now - DROP_WINDOW_MS
-	const recentDrops = dropHistory.filter((d) => d.timestamp >= windowStart)
+	const recentDrops = dropHistory.filter(d => d.timestamp >= windowStart)
 	const totalBytes = recentDrops.reduce((sum, d) => sum + d.bytes, 0)
 	return Math.round(totalBytes / (DROP_WINDOW_MS / 1000))
 }
@@ -85,6 +82,7 @@ function getDropRate(): number {
 
 export function App({ initialView = "dashboard" }: AppProps) {
 	const { exit } = useApp()
+	const { columns: stdoutWidth, rows: stdoutHeight } = useTerminalSize()
 
 	// View state
 	const [activeView, setActiveView] = useState<View>(initialView)
@@ -99,62 +97,65 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	})
 
 	// Handle incoming WebSocket messages
-	const handleMessage = useCallback((msg: ServerMessage) => {
-		switch (msg.type) {
-			case "decoder:output": {
-				const data = msg.data as DecoderOutputMessage | undefined
-				if (data?.output) {
-					setState((prev) => ({
-						...prev,
-						messages: [...prev.messages.slice(-99), data.output],
-					}))
+	const handleMessage = useCallback(
+		(msg: ServerMessage) => {
+			switch (msg.type) {
+				case "decoder:output": {
+					const data = msg.data as DecoderOutputMessage | undefined
+					if (data?.output) {
+						setState(prev => ({
+							...prev,
+							messages: [...prev.messages.slice(-99), data.output],
+						}))
+					}
+					break
 				}
-				break
-			}
 
-			case "decoder:started":
-			case "decoder:stopped":
-			case "decoder:health": {
-				// Could update individual decoder, but for simplicity we'll rely on snapshots
-				break
-			}
+				case "decoder:started":
+				case "decoder:stopped":
+				case "decoder:health": {
+					// Could update individual decoder, but for simplicity we'll rely on snapshots
+					break
+				}
 
-			case "fanout:snapshot": {
-				const data = msg.data as FanoutSnapshot | undefined
-				if (data) {
-					// Track drop deltas for rate calculation
-					if (state.snapshot?.branches) {
-						const prevDrops = new Map<string, number>()
-						for (const branch of state.snapshot.branches) {
-							prevDrops.set(branch.id, branch.droppedBytesTotal ?? 0)
-						}
-						for (const branch of data.branches) {
-							const prev = prevDrops.get(branch.id) ?? 0
-							const delta = (branch.droppedBytesTotal ?? 0) - prev
-							if (delta > 0) {
-								recordDrop(delta)
+				case "fanout:snapshot": {
+					const data = msg.data as FanoutSnapshot | undefined
+					if (data) {
+						// Track drop deltas for rate calculation
+						if (state.snapshot?.branches) {
+							const prevDrops = new Map<string, number>()
+							for (const branch of state.snapshot.branches) {
+								prevDrops.set(branch.id, branch.droppedBytesTotal ?? 0)
+							}
+							for (const branch of data.branches) {
+								const prev = prevDrops.get(branch.id) ?? 0
+								const delta = (branch.droppedBytesTotal ?? 0) - prev
+								if (delta > 0) {
+									recordDrop(delta)
+								}
 							}
 						}
+
+						setState(prev => ({
+							...prev,
+							snapshot: data,
+							dropRate: getDropRate(),
+						}))
 					}
-
-					setState((prev) => ({
-						...prev,
-						snapshot: data,
-						dropRate: getDropRate(),
-					}))
+					break
 				}
-				break
+
+				case "subscribed":
+					// Successfully subscribed
+					break
+
+				case "error":
+					// Handle error messages if needed
+					break
 			}
-
-			case "subscribed":
-				// Successfully subscribed
-				break
-
-			case "error":
-				// Handle error messages if needed
-				break
-		}
-	}, [state.snapshot])
+		},
+		[state.snapshot],
+	)
 
 	// WebSocket connection
 	const { status, error, reconnect, closeCode, closeReason } = useWebSocket({
@@ -177,10 +178,10 @@ export function App({ initialView = "dashboard" }: AppProps) {
 
 						if (decodersRes.ok) {
 							const decoders = (await decodersRes.json()) as DecoderStatus[]
-							const sources = sourcesRes?.ok 
-								? ((await sourcesRes.json()) as SourceStatusType[]) 
+							const sources = sourcesRes?.ok
+								? ((await sourcesRes.json()) as SourceStatusType[])
 								: []
-							setState((prev) => ({ ...prev, decoders, sources }))
+							setState(prev => ({ ...prev, decoders, sources }))
 							break
 						}
 					} catch {
@@ -193,7 +194,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		}
 
 		fetchInitialState()
-		
+
 		// Refresh periodically
 		const interval = setInterval(fetchInitialState, 5000)
 		return () => clearInterval(interval)
@@ -202,7 +203,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	// Update drop rate periodically
 	useEffect(() => {
 		const interval = setInterval(() => {
-			setState((prev) => ({ ...prev, dropRate: getDropRate() }))
+			setState(prev => ({ ...prev, dropRate: getDropRate() }))
 		}, 1000)
 		return () => clearInterval(interval)
 	}, [])
@@ -235,7 +236,11 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	})
 
 	// Track last disconnect for diagnostics
-	const [lastDisconnect, setLastDisconnect] = useState<{ time: string; error?: string; code?: number } | null>(null)
+	const [lastDisconnect, setLastDisconnect] = useState<{
+		time: string
+		error?: string
+		code?: number
+	} | null>(null)
 
 	useEffect(() => {
 		if (status === "disconnected") {
@@ -249,6 +254,11 @@ export function App({ initialView = "dashboard" }: AppProps) {
 
 	// Render current view
 	const renderView = () => {
+		// Heuristic: available rows for the main panel.
+		// (Header + TabBar + HelpBar consume a handful of rows; keep this simple.)
+		const panelHeight = Math.max(8, stdoutHeight - 8)
+		const outputMaxMessages = Math.max(10, panelHeight - 4)
+
 		switch (activeView) {
 			case "dashboard":
 				return (
@@ -257,25 +267,36 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						sources={state.sources}
 						snapshot={state.snapshot}
 						dropRate={state.dropRate}
+						messages={state.messages}
 					/>
 				)
 			case "decoders":
 				return <DecoderList decoders={state.decoders} />
 			case "output":
-				return <DecoderOutputPanel messages={state.messages} />
+				return (
+					<DecoderOutputPanel
+						messages={state.messages}
+						maxMessages={outputMaxMessages}
+					/>
+				)
 			case "backpressure":
-				return <BackpressurePanel snapshot={state.snapshot} dropRate={state.dropRate} />
+				return (
+					<BackpressurePanel
+						snapshot={state.snapshot}
+						dropRate={state.dropRate}
+					/>
+				)
 			case "sources":
 				return <SourceStatus sources={state.sources} />
 		}
 	}
 
 	return (
-		<Box flexDirection="column">
-			<Header 
-				status={status} 
-				error={error} 
-				closeCode={closeCode} 
+		<Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
+			<Header
+				status={status}
+				error={error}
+				closeCode={closeCode}
 				closeReason={closeReason}
 				lastDisconnect={lastDisconnect}
 			/>

@@ -20,7 +20,12 @@ import WsModule from "ws"
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected"
 
-export type WebSocketChannel = "decoders" | "metrics" | "sources" | "health" | "fanout"
+export type WebSocketChannel =
+	| "decoders"
+	| "metrics"
+	| "sources"
+	| "health"
+	| "fanout"
 
 export interface ServerMessage {
 	type: string
@@ -55,16 +60,22 @@ function normalizeWsUrl(url: string | undefined): string | null {
 	if (!url || typeof url !== "string") return null
 	const trimmed = url.trim()
 	if (!trimmed) return null
-	if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://")) return trimmed
-	if (trimmed.startsWith("http://")) return "ws://" + trimmed.slice("http://".length)
-	if (trimmed.startsWith("https://")) return "wss://" + trimmed.slice("https://".length)
+	if (trimmed.startsWith("ws://") || trimmed.startsWith("wss://"))
+		return trimmed
+	if (trimmed.startsWith("http://"))
+		return "ws://" + trimmed.slice("http://".length)
+	if (trimmed.startsWith("https://"))
+		return "wss://" + trimmed.slice("https://".length)
 	return trimmed
 }
 
 function getCandidateWsUrls(): string[] {
 	const envUrls = process.env["WAVEKIT_WS_URLS"]
 	if (envUrls) {
-		return envUrls.split(",").map(normalizeWsUrl).filter((u): u is string => u !== null)
+		return envUrls
+			.split(",")
+			.map(normalizeWsUrl)
+			.filter((u): u is string => u !== null)
 	}
 
 	const single = process.env["WAVEKIT_WS_URL"]
@@ -126,7 +137,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 			clearTimeout(reconnectTimerRef.current)
 			reconnectTimerRef.current = null
 		}
-		
+
 		// Close existing connection if any
 		if (wsRef.current) {
 			try {
@@ -170,7 +181,7 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 				// Track when connection opened - only reset attempt after stable duration
 				connectedAtRef.current = Date.now()
 				setStatus("connected")
-				setError(null) 
+				setError(null)
 				// Clear error on success, but maybe we want to know WHICH url connected?
 				// For now let's leave it clean, but if send fails we'll see the URL.
 				closeCodeRef.current = null
@@ -197,15 +208,61 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 					}
 				}, 100) // Small delay to ensure server is ready
 
-				// Setup Ping Interval for KeepAlive
-				const pingInterval = setInterval(() => {
-					if (ws.readyState === WsModule.OPEN) {
-						ws.ping()
+				// ================================================================
+				// Heartbeat Watchdog - Ping/Pong with stale connection termination
+				// ================================================================
+				const HEARTBEAT_INTERVAL_MS = 30000 // Send ping every 30s
+				const PONG_TIMEOUT_MS = 10000 // Expect pong within 10s
+				let pongReceived = true // Start true - we just connected
+				let pongTimeoutId: NodeJS.Timeout | null = null
+
+				const heartbeatInterval = setInterval(() => {
+					if (ws.readyState !== WsModule.OPEN) {
+						clearInterval(heartbeatInterval)
+						return
 					}
-				}, 30000)
-				
-				ws.on("close", () => clearInterval(pingInterval))
-				ws.on("error", () => clearInterval(pingInterval))
+
+					if (!pongReceived) {
+						// Last ping didn't get a pong - connection is stale
+						setError("Heartbeat timeout - connection stale")
+						ws.terminate() // Force close immediately
+						return
+					}
+
+					// Send ping and start waiting for pong
+					pongReceived = false
+					ws.ping()
+
+					// Set a timeout - if pong doesn't arrive in time, mark as missed
+					if (pongTimeoutId) clearTimeout(pongTimeoutId)
+					pongTimeoutId = setTimeout(() => {
+						// If still no pong and socket still connected, terminate
+						if (!pongReceived && ws.readyState === WsModule.OPEN) {
+							setError("Pong timeout - terminating stale connection")
+							ws.terminate()
+						}
+					}, PONG_TIMEOUT_MS)
+				}, HEARTBEAT_INTERVAL_MS)
+
+				// Handle pong response
+				ws.on("pong", () => {
+					pongReceived = true
+					if (pongTimeoutId) {
+						clearTimeout(pongTimeoutId)
+						pongTimeoutId = null
+					}
+				})
+
+				// Cleanup on close/error
+				const cleanupHeartbeat = () => {
+					clearInterval(heartbeatInterval)
+					if (pongTimeoutId) {
+						clearTimeout(pongTimeoutId)
+						pongTimeoutId = null
+					}
+				}
+				ws.on("close", cleanupHeartbeat)
+				ws.on("error", cleanupHeartbeat)
 			})
 
 			ws.on("message", (data: WsData) => {
@@ -223,9 +280,12 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 
 			ws.on("error", (err: Error) => {
 				clearTimeout(connectionTimeout)
-				const errorMessage = err instanceof Error ? err.message : "Connection error"
+				const errorMessage =
+					err instanceof Error ? err.message : "Connection error"
 				setError(errorMessage)
-				onErrorRef.current?.(err instanceof Error ? err : new Error(errorMessage))
+				onErrorRef.current?.(
+					err instanceof Error ? err : new Error(errorMessage),
+				)
 			})
 
 			ws.on("close", (code, reason) => {
@@ -235,22 +295,30 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 				}
 				setStatus("disconnected")
 				closeCodeRef.current = code
-				closeReasonRef.current = reason ? reason.toString() : (code === 1005 ? "No Status Received" : null)
+				closeReasonRef.current = reason
+					? reason.toString()
+					: code === 1005
+						? "No Status Received"
+						: null
 
 				// Only reset attempt counter if connection was stable
-				const wasStable = connectedAtRef.current !== null && 
-					(Date.now() - connectedAtRef.current) > STABLE_CONNECTION_MS
+				const wasStable =
+					connectedAtRef.current !== null &&
+					Date.now() - connectedAtRef.current > STABLE_CONNECTION_MS
 				if (wasStable) {
 					attemptRef.current = 0
 				}
 				connectedAtRef.current = null
 
 				if (autoReconnect && !stopRequestedRef.current) {
-					const backoffMs = Math.min(15000, 500 * Math.pow(2, Math.min(5, attemptRef.current)))
-					
+					const backoffMs = Math.min(
+						15000,
+						500 * Math.pow(2, Math.min(5, attemptRef.current)),
+					)
+
 					// Clear any existing timer just in case
 					if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current)
-					
+
 					reconnectTimerRef.current = setTimeout(() => {
 						reconnectTimerRef.current = null
 						if (!stopRequestedRef.current) {
@@ -260,7 +328,8 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 				}
 			})
 		} catch (err) {
-			const errorMessage = err instanceof Error ? err.message : "Failed to create connection"
+			const errorMessage =
+				err instanceof Error ? err.message : "Failed to create connection"
 			setError(errorMessage)
 			setStatus("disconnected")
 		}
@@ -290,5 +359,11 @@ export function useWebSocket(options: UseWebSocketOptions): UseWebSocketResult {
 		}
 	}, [connect])
 
-	return { status, error, reconnect, closeCode: closeCodeRef.current, closeReason: closeReasonRef.current }
+	return {
+		status,
+		error,
+		reconnect,
+		closeCode: closeCodeRef.current,
+		closeReason: closeReasonRef.current,
+	}
 }

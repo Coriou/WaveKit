@@ -47,6 +47,19 @@ docker run -p 3000:3000 -p 8080:8080 \
   wavekit:latest
 ```
 
+## CLI Dashboard (Main UI)
+
+WaveKit includes an interactive terminal dashboard (Ink/React) that connects **only** via the same REST API + WebSocket server that the future web UI will use.
+
+- Run: `make dev-dashboard`
+- Keys: `1-5` switch tabs, `r` reconnect, `q` quit
+- Configure endpoints (optional): `WAVEKIT_WS_URLS`, `WAVEKIT_WS_URL`, `WAVEKIT_API_URL`
+
+Notes:
+
+- The dashboard is implemented in `cli/`.
+- For best results, run the WaveKit dev container first (`make dev-up`) so the dashboard can connect to `ws://localhost:9000/ws` / `ws://localhost:4713/ws`.
+
 ## How It Works
 
 ```
@@ -264,6 +277,7 @@ rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
 ### Sample Rate
 
 WaveKit uses **2.048 Msps** (2,048,000 samples/second), not 2.4 Msps. This affects:
+
 - Filter bandwidth calculations
 - Decimation factors in the csdr pipeline
 - Audio sample rate after demodulation

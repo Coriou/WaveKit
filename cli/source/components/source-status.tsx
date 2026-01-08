@@ -15,7 +15,9 @@ export function SourceStatus({ sources }: SourceStatusProps) {
 	if (sources.length === 0) {
 		return (
 			<Box flexDirection="column" paddingX={1}>
-				<Text bold color="cyan">SOURCES</Text>
+				<Text bold color="cyan">
+					SOURCES
+				</Text>
 				<Text dimColor>No sources configured</Text>
 			</Box>
 		)
@@ -23,7 +25,9 @@ export function SourceStatus({ sources }: SourceStatusProps) {
 
 	return (
 		<Box flexDirection="column" paddingX={1}>
-			<Text bold color="cyan">SOURCES</Text>
+			<Text bold color="cyan">
+				SOURCES
+			</Text>
 			<Box marginTop={1}>
 				<Text dimColor>
 					{padRight("ID", 16)}
@@ -36,7 +40,7 @@ export function SourceStatus({ sources }: SourceStatusProps) {
 			<Box>
 				<Text dimColor>{"─".repeat(90)}</Text>
 			</Box>
-			{sources.map((source) => (
+			{sources.map(source => (
 				<Box key={source.id}>
 					<Text>{padRight(source.id ?? "", 16)}</Text>
 					<Text dimColor>{padRight(source.type ?? "", 12)}</Text>
@@ -44,7 +48,11 @@ export function SourceStatus({ sources }: SourceStatusProps) {
 					<Text color={source.connected ? "green" : "red"}>
 						{padRight(source.connected ? "connected" : "disconnected", 12)}
 					</Text>
-					<Text>{source.consumers ?? 0}</Text>
+					{typeof source.consumers === "number" ? (
+						<Text>{source.consumers}</Text>
+					) : (
+						<Text dimColor>-</Text>
+					)}
 				</Box>
 			))}
 		</Box>

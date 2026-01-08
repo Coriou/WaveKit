@@ -14,10 +14,22 @@ export interface DecoderStats {
 
 export interface DecoderStatus {
 	id: string
+	type?: string
 	running: boolean
-	health: "healthy" | "degraded" | "unhealthy" | "unknown"
+	/** Server returns "running" | "idle" | "faulted" */
+	health:
+		| "running"
+		| "idle"
+		| "faulted"
+		| "healthy"
+		| "degraded"
+		| "unhealthy"
+		| "unknown"
 	stats: DecoderStats
 	uptime: number
+	pid?: number
+	restartCount?: number
+	version?: string
 	error?: string
 }
 
@@ -34,10 +46,14 @@ export interface DecoderOutput {
 
 export interface SourceStatus {
 	id: string
-	type: string
-	url: string
+	type?: string
+	url?: string
 	connected: boolean
-	consumers: number
+	consumers?: number
+	bytesReceived?: number
+	dataRate?: number
+	lastError?: string
+	reconnectAttempts?: number
 }
 
 // ============================================================================

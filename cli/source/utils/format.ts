@@ -10,7 +10,10 @@
 export function formatBytes(bytes: number): string {
 	if (bytes === 0) return "0 B"
 	const units = ["B", "KB", "MB", "GB", "TB"]
-	const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+	const exp = Math.min(
+		Math.floor(Math.log(bytes) / Math.log(1024)),
+		units.length - 1,
+	)
 	const value = bytes / Math.pow(1024, exp)
 	return `${value.toFixed(exp > 0 ? 1 : 0)} ${units[exp]}`
 }
@@ -39,7 +42,32 @@ export function formatDuration(seconds: number): string {
 }
 
 /**
- * Format ISO timestamp to time only (HH:MM:SS)
+ * Format ISO timestamp to local time (HH:MM:SS)
+ *
+ * Converts UTC timestamps to the user's local timezone for better UX.
+ * Falls back gracefully if parsing fails.
+ */
+export function formatLocalTime(isoTimestamp: string | undefined): string {
+	if (!isoTimestamp || typeof isoTimestamp !== "string") return "--:--:--"
+
+	try {
+		const date = new Date(isoTimestamp)
+		if (isNaN(date.getTime())) return "--:--:--"
+
+		// Use local time components
+		const hours = date.getHours().toString().padStart(2, "0")
+		const mins = date.getMinutes().toString().padStart(2, "0")
+		const secs = date.getSeconds().toString().padStart(2, "0")
+		return `${hours}:${mins}:${secs}`
+	} catch {
+		return "--:--:--"
+	}
+}
+
+/**
+ * Format ISO timestamp to time only (HH:MM:SS) - UTC
+ *
+ * @deprecated Use formatLocalTime for user-facing timestamps
  */
 export function formatTime(isoTimestamp: string | undefined): string {
 	if (!isoTimestamp || typeof isoTimestamp !== "string") return "--:--:--"

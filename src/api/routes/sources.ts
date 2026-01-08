@@ -88,6 +88,8 @@ const extendedSourceStatusSchema = {
 	type: "object",
 	properties: {
 		id: { type: "string" },
+		type: { type: "string" },
+		url: { type: "string" },
 		connected: { type: "boolean" },
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
@@ -119,6 +121,8 @@ const sourceStatusSchema = {
 	type: "object",
 	properties: {
 		id: { type: "string" },
+		type: { type: "string" },
+		url: { type: "string" },
 		connected: { type: "boolean" },
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
