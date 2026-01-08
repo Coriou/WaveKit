@@ -46,7 +46,7 @@ decoders:
       mode: auto
       output: null
       inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
-      fmGain: 0.3 # Reduced further - signal was still clipping at 1.0
+      fmGain: 3 # Match working POCSAG value
       # DEBUG: Record demodulated audio for analysis
       debugRecordPath: /data/debug_audio
 
