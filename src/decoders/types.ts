@@ -104,6 +104,26 @@ export interface DemodulationConfig {
 	audioLowPass?: number
 	/** Skip DC block filter (useful for FSK/POCSAG signals) */
 	skipDcBlock?: boolean
+	/**
+	 * Enable software AGC on demodulated audio (AFTER FM demod).
+	 * Useful for normalizing audio levels but cannot recover precision
+	 * lost at ADC when hardware AGC is disabled.
+	 * Uses csdr agc with 'slow' profile and reference level 0.7.
+	 */
+	enableAgc?: boolean
+	/**
+	 * Enable IQ-level AGC BEFORE decimation and FM demodulation.
+	 * This normalizes the complex IQ envelope without affecting FM frequency content.
+	 * Critical for weak signal reception when hardware AGC is disabled.
+	 *
+	 * Unlike audio AGC (enableAgc), IQ AGC can partially compensate for signals
+	 * that only used a few ADC bits by amplifying the complex envelope before
+	 * FM demodulation extracts the frequency content.
+	 *
+	 * Recommended for: pagers, weather satellites, any weak analog FM signal.
+	 * Not recommended for: DMR and other 4FSK digital modes (can distort symbol levels).
+	 */
+	enableIqAgc?: boolean
 }
 
 // ============================================================================
@@ -165,6 +185,8 @@ export type DecoderOutputType =
 	| "sync"
 	| "decode"
 	| "call"
+	| "call_start" // New: Call started
+	| "call_end" // New: Call ended with duration
 	| "message"
 	| "signal"
 	| "error"

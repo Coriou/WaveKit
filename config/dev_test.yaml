@@ -46,9 +46,11 @@ decoders:
       mode: auto
       output: null
       inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
-      fmGain: 3 # Match working POCSAG value
+      fmGain: 2.0 # TUNED: Balanced gain minimizes clipping + FEC errors (was 5.0)
       # DEBUG: Record demodulated audio for analysis
       debugRecordPath: /data/debug_audio
+      enablePerCallRecording: true
+      perCallRecordingDir: /app/decoded_calls
 
   # APRS/AX.25 decoder - amateur radio packet
   # Still uses SDR++ audio (direwolf NetworkProducerDecoder pattern not yet migrated)

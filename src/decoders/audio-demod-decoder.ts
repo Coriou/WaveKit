@@ -203,12 +203,14 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 
 		// Build csdr pipeline stages (Using jketterl/csdr v0.18+ syntax)
 		// 1. Convert U8 IQ to Float (complex)
-		// 2. Decimate to demodRate with filtering (complex -> complex)
-		// 3. FM Demodulate (complex -> real float audio)
-		// 4. (Optional) Audio Lowpass Filter
-		// 5. Remove DC offset from audio (real)
-		// 6. Apply gain (real)
-		// 7. Limit amplitude to prevent clipping (real)
+		// 2. (Optional) IQ-level AGC - normalizes complex envelope BEFORE decimation
+		// 3. Decimate to demodRate with filtering (complex -> complex)
+		// 4. FM Demodulate (complex -> real float audio)
+		// 5. (Optional) Audio Lowpass Filter
+		// 6. Remove DC offset from audio (real)
+		// 7. (Optional) Audio-level AGC
+		// 8. Apply gain (real)
+		// 9. Limit amplitude to prevent clipping (real)
 
 		const transition = config.filterTransition ?? 0.05
 		const cutoffArg = config.filterCutoff
@@ -217,9 +219,20 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 
 		const csdrStages: string[] = [
 			"csdr convert -i char -o float", // U8 IQ -> complex float
+		]
+
+		// Optional IQ-level AGC - applied BEFORE decimation and FM demod
+		// This normalizes the complex envelope without affecting FM frequency content.
+		// Critical for weak signal reception when hardware AGC is disabled.
+		// Uses 'slow' profile to avoid distorting signal dynamics.
+		if (config.enableIqAgc) {
+			csdrStages.push("csdr agc -f complex -p slow -r 0.7")
+		}
+
+		csdrStages.push(
 			`csdr firdecimate ${decimation} ${transition}${cutoffArg}`, // Decimate + filter (complex)
 			"csdr fmdemod", // FM demod: complex -> real audio
-		]
+		)
 
 		// Optional Audio Lowpass Filter (e.g. 3000Hz)
 		// Applied after demod but before DC block/Gain to clean noise
@@ -233,6 +246,12 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Optional DC block (skip for FSK/POCSAG signals as it distorts them)
 		if (!config.skipDcBlock) {
 			csdrStages.push("csdr dcblock")
+		}
+
+		// Optional software AGC - useful for weak signal decoders when hardware AGC is disabled
+		// Uses slow profile to avoid distorting FSK symbols, reference 0.7 for headroom
+		if (config.enableAgc) {
+			csdrStages.push("csdr agc -f float -p slow -r 0.7")
 		}
 
 		csdrStages.push(

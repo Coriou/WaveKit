@@ -194,6 +194,13 @@ export class MultimonDecoder extends AudioDemodDecoder {
 			skipDcBlock: true,
 
 			deEmphasis: false, // No de-emphasis for digital pagers
+
+			// IQ-level AGC: normalizes complex envelope BEFORE FM demodulation.
+			// Critical for weak pager signals when hardware AGC is disabled.
+			// Unlike audio AGC, this can partially compensate for signals that
+			// only used a few ADC bits by amplifying the IQ envelope before
+			// FM demod extracts the frequency content.
+			enableIqAgc: true,
 		}
 	}
 

@@ -13,7 +13,7 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"scripts": {
-		"demod:auto-capture": "node ./scripts/auto-capture.mjs",
+		"capture": "node ./scripts/auto-capture.mjs",
 		"build-file": "esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external",
 		"cli:install": "npm --prefix cli install",
 		"cli:build": "npm --prefix cli run build",

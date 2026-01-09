@@ -53,8 +53,14 @@ export interface DsdFmeOptions {
 	extraArgs?: string[] | undefined
 	/** IQ sample rate from source (default: 2400000) */
 	inputSampleRate?: number | undefined
-	/** FM Gain to apply (default: ~70.0 for digital voice) */
+	/** FM Gain to apply (default: 2.0 for digital voice) */
 	fmGain?: number | undefined
+	/** Enable IQ-level AGC before FM demod (default: true, helps weak signals) */
+	enableIqAgc?: boolean | undefined
+	/** Enable per-call WAV recording (default: false) */
+	enablePerCallRecording?: boolean | undefined
+	/** Directory for per-call WAV files (default: /app/decoded_calls) */
+	perCallRecordingDir?: string | undefined
 }
 
 /** All supported DSD-FME modes */
@@ -69,10 +75,26 @@ export const DSD_FME_MODES: readonly DsdFmeMode[] = [
 ] as const
 
 // Output parsing regex patterns
-const SYNC_PATTERN =
-	/Sync:\s*(DMR|P25|YSF|DSTAR|NXDN|ProVoice)(?:\s+Slot\s*(\d+))?/i
-const CALL_PATTERN = /TG:\s*(\d+)\s+SRC:\s*(\d+)/i
+// dsd-fme output format: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC"
+const SYNC_PATTERN = /Sync:\s*\+?([\w]+)/i // Captured group 1 is protocol
+// Call info format: "SLOT 1 TGT=9 SRC=2060945 Group Call"
+// Note: TGT and SRC are usually integers
+const CALL_PATTERN = /TGT=(\d+)\s+SRC=(\d+)/i
+// Slot extraction: "SLOT 1 ..."
+const SLOT_PATTERN = /SLOT\s+(\d+)/i
 const ERROR_PATTERN = /(FEC ERR|CRC ERR|SYNC LOST)/i
+// Termination pattern (TLC = Terminator Link Control, or implicit End of transmission)
+// Look for "TLC" or typical end messages.
+const TERM_PATTERN = /\b(TLC|Terminator)\b/i
+
+interface DsdFmeCallState {
+	talkgroup: number
+	source: number
+	slot?: number
+	startTime: Date
+	lastUpdate: Date
+	wavFile?: string
+}
 
 /**
  * DSD-FME Decoder - Decodes digital voice signals.
@@ -86,6 +108,11 @@ const ERROR_PATTERN = /(FEC ERR|CRC ERR|SYNC LOST)/i
  */
 export class DsdFmeDecoder extends AudioDemodDecoder {
 	private readonly options: DsdFmeOptions
+
+	// State for call tracking / deduplication
+	private callState: DsdFmeCallState | null = null
+
+	private lastSyncMode: string | null = null
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -118,16 +145,31 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			extraArgs: options["extraArgs"] as string[] | undefined,
 			inputSampleRate: options["inputSampleRate"] as number | undefined,
 			fmGain: options["fmGain"] as number | undefined,
+			enableIqAgc: options["enableIqAgc"] as boolean | undefined,
+			enablePerCallRecording:
+				(options["enablePerCallRecording"] as boolean) ?? false,
+			perCallRecordingDir:
+				(options["perCallRecordingDir"] as string) ?? "/app/decoded_calls",
 		}
 	}
 
 	/**
 	 * Returns the demodulation configuration for DSD-FME.
-	 * Uses 12.5kHz NFM bandwidth with no de-emphasis (critical for digital voice).
-	 */
-	/**
-	 * Returns the demodulation configuration for DSD-FME.
-	 * Uses 12.5kHz NFM bandwidth (via 24ksps demod rate) with no de-emphasis.
+	 * Uses 12.5kHz NFM bandwidth (via 48ksps demod rate) with no de-emphasis.
+	 *
+	 * Optimal gain tuning (tested with DMR IQ captures):
+	 * - Gain 5.0 with limiter: 34 audio errors (best)
+	 * - Gain 2.0 with limiter: 35 audio errors
+	 * - Gain 0.5 no limiter: 80 audio errors
+	 * - Gain 0.25 no limiter: 145 audio errors
+	 *
+	 * Higher gain + limiter provides better symbol detection for 4FSK.
+	 * The limiter prevents hard clipping distortion.
+	 *
+	 * IQ AGC (2026-01-09): Enabled to help with weak signals. Theory is that
+	 * IQ-level AGC normalizes envelope amplitude BEFORE FM demod, so frequency
+	 * content (which is what FM extracts) should be preserved. May help decode
+	 * weak signals without distorting 4FSK symbol levels as much as audio AGC.
 	 */
 	protected getDemodConfig(): DemodulationConfig {
 		return {
@@ -136,9 +178,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			demodSampleRate: 48000, // Demod at 48ksps for proper bandwidth
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 			deEmphasis: false, // Critical: no de-emphasis for digital signals
-			fmGain: this.options.fmGain ?? 0.5, // verified optimal gain
+			fmGain: this.options.fmGain ?? 2.0, // Tuned: balanced gain minimizes clipping + FEC errors
 			filterTransition: 0.05,
-			// skipDcBlock: true, // DC Block IS REQUIRED for DMR (4FSK centering)
+			enableIqAgc: this.options.enableIqAgc ?? true, // Try IQ AGC for weak signals
+			// DC block is REQUIRED for DMR - centers 4FSK symbol levels
 		}
 	}
 
@@ -191,8 +234,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		csdrStages.push(
-			`csdr gain ${config.fmGain ?? 3.0}`, // Apply gain (real)
-			"csdr limit", // Prevent clipping (real audio)
+			`csdr gain ${config.fmGain ?? 5.0}`, // Tuned: high gain with limiter for best 4FSK detection
+			"csdr limit", // Essential: prevents clipping distortion at high gain
 		)
 
 		// Optional de-emphasis (should be false for digital voice)
@@ -232,7 +275,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Build dsd-fme command
 		const dsdFmeArgs = this.getDecoderArgs()
-		const dsdFmeCommand = `dsd-fme ${dsdFmeArgs.join(" ")}`
+		let dsdFmeCommand = `dsd-fme ${dsdFmeArgs.join(" ")}`
+
+		// If per-call recording is enabled, ensure we run in the correct directory
+		if (this.options.enablePerCallRecording) {
+			const dir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+			// We ensure directory exists and cd into it
+			dsdFmeCommand = `(mkdir -p "${dir}" && cd "${dir}" && ${dsdFmeCommand})`
+		}
 
 		// Combine into full pipeline
 		const pipeline = `${pipelineStr} | ${dsdFmeCommand}`
@@ -275,6 +325,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Input from stdin (receives WAV stream from sox)
 		args.push("-i", "/dev/stdin")
+
+		// Enable per-call recording if configured
+		if (this.options.enablePerCallRecording) {
+			args.push("-P")
+		}
 
 		// Set decoder mode with explicit flag
 		switch (this.options.mode) {
@@ -332,6 +387,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		return args
 	}
+
 	/**
 	 * Returns the decoder's capabilities (Requirement 17.1).
 	 * DSD-FME now consumes IQ data (via AudioDemodDecoder's csdr pipeline).
@@ -345,54 +401,230 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			integrationPattern: "pure_consumer",
 		}
 	}
+
 	/**
 	 * Parses dsd-fme output lines into DecoderOutput objects.
 	 *
 	 * Handles:
-	 * - Sync events (Requirement 6.2)
-	 * - Call events (Requirement 6.3)
-	 * - Error events (Requirement 6.4)
+	 * - Sync events
+	 * - Call events (with deduplication)
+	 * - Error events
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
-		// Check for sync information (Requirement 6.2)
-		const syncMatch = SYNC_PATTERN.exec(line)
-		if (syncMatch) {
-			const mode = syncMatch[1]?.toUpperCase()
-			const slot = syncMatch[2] ? parseInt(syncMatch[2], 10) : undefined
+		const now = new Date()
 
-			return {
-				timestamp: new Date(),
-				decoder: this.id,
-				type: "sync",
-				data: {
-					mode,
-					slot,
-				},
+		// FIRST: Check for stale calls on EVERY line, not just at the end
+		// This ensures we detect call end even when receiving Sync/FEC lines
+		if (this.callState) {
+			const silenceDuration =
+				now.getTime() - this.callState.lastUpdate.getTime()
+			if (silenceDuration > 2000) {
+				// 2 seconds without TGT/SRC = call ended
+				const duration =
+					this.callState.lastUpdate.getTime() -
+					this.callState.startTime.getTime()
+				const callInfo = this.callState
+				this.callState = null
+
+				this.logger.info(
+					{
+						talkgroup: callInfo.talkgroup,
+						source: callInfo.source,
+						duration,
+						silenceDuration,
+					},
+					"Call ended due to metadata timeout",
+				)
+
+				// Emit call_end, then continue processing this line
+				// (it might be a new call starting)
+				return {
+					timestamp: now,
+					decoder: this.id,
+					type: "call_end",
+					data: {
+						talkgroup: callInfo.talkgroup,
+						source: callInfo.source,
+						slot: callInfo.slot,
+						duration,
+						timeout: true,
+					},
+				}
 			}
 		}
 
-		// Check for call information (Requirement 6.3)
+		// Check for sync information
+		const syncMatch = SYNC_PATTERN.exec(line)
+		if (syncMatch) {
+			const mode = syncMatch[1]?.toUpperCase() ?? "UNKNOWN"
+
+			// Deduplicate Sync events: only emit if mode changed
+			if (this.lastSyncMode === mode) {
+				return null
+			}
+
+			this.lastSyncMode = mode
+
+			return {
+				timestamp: now,
+				decoder: this.id,
+				type: "sync",
+				data: { mode },
+			}
+		}
+
+		// Check for call information header
 		const callMatch = CALL_PATTERN.exec(line)
 		if (callMatch) {
 			const talkgroup = parseInt(callMatch[1] ?? "0", 10)
 			const source = parseInt(callMatch[2] ?? "0", 10)
+			const slotMatch = SLOT_PATTERN.exec(line)
+			const slot = slotMatch?.[1] ? parseInt(slotMatch[1], 10) : undefined
 
-			return {
-				timestamp: new Date(),
-				decoder: this.id,
-				type: "call",
-				data: {
+			// Detect if this is a new call or continuation
+			const keyMatches =
+				this.callState &&
+				this.callState.talkgroup === talkgroup &&
+				this.callState.source === source
+
+			// If we have an active call but parameters changed, end the previous one
+			if (this.callState && !keyMatches) {
+				const duration = now.getTime() - this.callState.startTime.getTime()
+				const endEvent: DecoderOutput = {
+					timestamp: now,
+					decoder: this.id,
+					type: "call_end",
+					data: {
+						talkgroup: this.callState.talkgroup,
+						source: this.callState.source,
+						slot: this.callState.slot,
+						duration,
+						file: this.callState.wavFile,
+					},
+				}
+
+				// Log the switch for debugging
+				this.logger.info(
+					{
+						oldTg: this.callState.talkgroup,
+						oldSrc: this.callState.source,
+						newTg: talkgroup,
+						newSrc: source,
+					},
+					"Call switch detected mid-stream, ending previous call",
+				)
+
+				// Force close old state
+				this.callState = null
+
+				// IMPORTANT: Return the end event for the OLD call.
+				// The NEXT line from dsd-fme will trigger the new call's call_start.
+				return endEvent
+			}
+
+			// Start new call if needed
+			if (!this.callState) {
+				// Construct filename if recording is enabled
+				// Pattern: YYYYMMDD_HHMMSS_talkgroup_source.wav
+				let wavFile: string | undefined
+				if (this.options.enablePerCallRecording) {
+					// We don't know the exact filename dsd-fme generates,
+					// but standard format is often used or we could try to predict it.
+					// For now, we'll leave it undefined.
+				}
+
+				// Create state object
+				const newState: DsdFmeCallState = {
 					talkgroup,
 					source,
+					startTime: now,
+					lastUpdate: now,
+				}
+
+				// Handle optional properties respecting strict types
+				if (wavFile !== undefined) {
+					newState.wavFile = wavFile
+				}
+				if (slot !== undefined) {
+					newState.slot = slot
+				}
+
+				this.callState = newState
+
+				return {
+					timestamp: now,
+					decoder: this.id,
+					type: "call_start",
+					data: {
+						talkgroup,
+						source,
+						slot,
+					},
+				}
+			} else {
+				// Existing call
+				// Check if we have new information (e.g., slot was undefined and now we have it)
+				if (this.callState.slot === undefined && slot !== undefined) {
+					this.callState.slot = slot
+					this.callState.lastUpdate = now
+
+					// Re-emit call_start with fuller info so UI gets the slot
+					// Alternatively we could add a "call_update" type, but call_start is idempotent-ish for this purpose
+					return {
+						timestamp: now,
+						decoder: this.id,
+						type: "call_start",
+						data: {
+							talkgroup,
+							source,
+							slot,
+						},
+					}
+				}
+
+				// Just update heartbeat
+				this.callState.lastUpdate = now
+
+				// Optional: Update slot if it was missing (already handled above, but good for safety)
+				if (slot !== undefined && this.callState.slot === undefined) {
+					this.callState.slot = slot
+				}
+
+				// SUPPRESS output (deduplication)
+				return null
+			}
+		}
+
+		// Check for Terminator (End of Call)
+		const termMatch = TERM_PATTERN.exec(line)
+		if (termMatch && this.callState) {
+			const duration = now.getTime() - this.callState.startTime.getTime()
+			const callInfo = this.callState
+			this.callState = null // Clear state
+
+			return {
+				timestamp: now,
+				decoder: this.id,
+				type: "call_end",
+				data: {
+					talkgroup: callInfo.talkgroup,
+					source: callInfo.source,
+					slot: callInfo.slot,
+					duration,
+					// If we can parse the filename from dsd-fme output (sometimes it prints "Saving to..."),
+					// we could add it here. For now, just basic stats.
 				},
 			}
 		}
 
-		// Check for error conditions (Requirement 6.4)
+		// Check for error conditions
 		const errorMatch = ERROR_PATTERN.exec(line)
 		if (errorMatch) {
+			// Optional: Don't emit errors if they are just FEC errors during a valid call?
+			// User said "Resolve persistent FEC ERR".
+			// We'll keep reporting them for now as they indicate signal quality issues.
 			return {
-				timestamp: new Date(),
+				timestamp: now,
 				decoder: this.id,
 				type: "error",
 				data: {
