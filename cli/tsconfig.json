@@ -20,4 +20,3 @@
 	"include": ["source/**/*"],
 	"exclude": ["node_modules", "dist"]
 }
-

@@ -23,7 +23,7 @@ export function TabBar({ activeView }: TabBarProps) {
 		<Box paddingX={1} marginBottom={1}>
 			{tabs.map((tab, index) => (
 				<React.Fragment key={tab.key}>
-					{index > 0 && <Text dimColor>  </Text>}
+					{index > 0 && <Text dimColor> </Text>}
 					<Text
 						color={activeView === tab.view ? "cyan" : undefined}
 						bold={activeView === tab.view}

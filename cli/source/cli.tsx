@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /**
  * WaveKit CLI Entry Point
- * 
+ *
  * Usage:
  *   wavekit                    # Open interactive dashboard
  *   wavekit --view output      # Show decoded output only
  *   wavekit --view backpressure # Show backpressure monitor
  *   wavekit --help             # Show help
- * 
+ *
  * Environment:
  *   WAVEKIT_WS_URLS   - Comma-separated WebSocket URLs
  *   WAVEKIT_WS_URL    - Single WebSocket URL

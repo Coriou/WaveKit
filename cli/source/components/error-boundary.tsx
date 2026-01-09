@@ -1,5 +1,5 @@
-import React, { Component, ErrorInfo, ReactNode } from 'react'
-import { Text, Box } from 'ink'
+import React, { Component, ErrorInfo, ReactNode } from "react"
+import { Text, Box } from "ink"
 
 interface Props {
 	children: ReactNode
@@ -27,8 +27,15 @@ export class ErrorBoundary extends Component<Props, State> {
 	render() {
 		if (this.state.hasError) {
 			return (
-				<Box flexDirection="column" borderColor="red" borderStyle="single" padding={1}>
-					<Text color="red" bold>Render Error</Text>
+				<Box
+					flexDirection="column"
+					borderColor="red"
+					borderStyle="single"
+					padding={1}
+				>
+					<Text color="red" bold>
+						Render Error
+					</Text>
 					<Text>{this.state.error?.message}</Text>
 				</Box>
 			)

@@ -184,8 +184,11 @@ export class WebSocketEventBroadcaster {
 	private handleMessage(client: ClientState, data: Buffer | string): void {
 		try {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
-			this.log.info({ clientId: client.id, data: rawData }, "Received raw message")
-			
+			this.log.info(
+				{ clientId: client.id, data: rawData },
+				"Received raw message",
+			)
+
 			const parsed = JSON.parse(rawData) as unknown
 			const message = parseClientMessage(parsed)
 
@@ -269,10 +272,17 @@ export class WebSocketEventBroadcaster {
 	/**
 	 * Handles client disconnect.
 	 */
-	private handleDisconnect(client: ClientState, code?: number, reason?: Buffer): void {
+	private handleDisconnect(
+		client: ClientState,
+		code?: number,
+		reason?: Buffer,
+	): void {
 		this.clients.delete(client.id)
 		const reasonStr = reason ? reason.toString() : "unknown"
-		this.log.info({ clientId: client.id, code, reason: reasonStr }, "WebSocket client disconnected")
+		this.log.info(
+			{ clientId: client.id, code, reason: reasonStr },
+			"WebSocket client disconnected",
+		)
 	}
 
 	/**

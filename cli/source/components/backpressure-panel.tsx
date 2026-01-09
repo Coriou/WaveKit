@@ -28,13 +28,25 @@ function renderBufferBar(bufferBytes: number, highWaterMark: number): string {
 
 function StatusBadge({ active }: { active: boolean }) {
 	return active ? (
-		<Text backgroundColor="red" color="white"> DROP </Text>
+		<Text backgroundColor="red" color="white">
+			{" "}
+			DROP{" "}
+		</Text>
 	) : (
-		<Text backgroundColor="green" color="black">  OK  </Text>
+		<Text backgroundColor="green" color="black">
+			{" "}
+			OK{" "}
+		</Text>
 	)
 }
 
-function BufferBar({ bufferBytes, highWaterMark }: { bufferBytes: number; highWaterMark: number }) {
+function BufferBar({
+	bufferBytes,
+	highWaterMark,
+}: {
+	bufferBytes: number
+	highWaterMark: number
+}) {
 	const pct = highWaterMark > 0 ? Math.min(1, bufferBytes / highWaterMark) : 0
 	const barWidth = 12
 	const filled = Math.round(pct * barWidth)
@@ -53,17 +65,28 @@ function BufferBar({ bufferBytes, highWaterMark }: { bufferBytes: number; highWa
 	)
 }
 
-export function BackpressurePanel({ snapshot, dropRate }: BackpressurePanelProps) {
+export function BackpressurePanel({
+	snapshot,
+	dropRate,
+}: BackpressurePanelProps) {
 	if (!snapshot) {
 		return (
 			<Box flexDirection="column" paddingX={1}>
-				<Text bold color="cyan">BACKPRESSURE</Text>
+				<Text bold color="cyan">
+					BACKPRESSURE
+				</Text>
 				<Text dimColor>Waiting for telemetry data...</Text>
 			</Box>
 		)
 	}
 
-	const { branches, backpressureActiveCount, droppedBytesTotal, droppedChunksTotal, totalBytesWritten } = snapshot
+	const {
+		branches,
+		backpressureActiveCount,
+		droppedBytesTotal,
+		droppedChunksTotal,
+		totalBytesWritten,
+	} = snapshot
 
 	// Sort branches: active backpressure first, then by drops, then by ID
 	const sortedBranches = [...branches].sort((a, b) => {
@@ -76,15 +99,18 @@ export function BackpressurePanel({ snapshot, dropRate }: BackpressurePanelProps
 		return a.id.localeCompare(b.id)
 	})
 
-	const activeText = backpressureActiveCount > 0
-		? `${backpressureActiveCount} branch(es) dropping`
-		: "All branches flowing"
+	const activeText =
+		backpressureActiveCount > 0
+			? `${backpressureActiveCount} branch(es) dropping`
+			: "All branches flowing"
 	const activeColor = backpressureActiveCount > 0 ? "red" : "green"
 
 	return (
 		<Box flexDirection="column" paddingX={1}>
-			<Text bold color="cyan">BACKPRESSURE</Text>
-			
+			<Text bold color="cyan">
+				BACKPRESSURE
+			</Text>
+
 			{/* Summary stats */}
 			<Box marginTop={1} flexDirection="column">
 				<Box>
@@ -103,7 +129,9 @@ export function BackpressurePanel({ snapshot, dropRate }: BackpressurePanelProps
 				</Box>
 				<Box>
 					<Text bold>Total Dropped: </Text>
-					<Text>{formatBytes(droppedBytesTotal)} ({droppedChunksTotal} chunks)</Text>
+					<Text>
+						{formatBytes(droppedBytesTotal)} ({droppedChunksTotal} chunks)
+					</Text>
 				</Box>
 			</Box>
 
@@ -126,14 +154,17 @@ export function BackpressurePanel({ snapshot, dropRate }: BackpressurePanelProps
 
 			{/* Branch rows */}
 			{sortedBranches.length === 0 ? (
-				<Text dimColor>  No branches registered</Text>
+				<Text dimColor> No branches registered</Text>
 			) : (
-				sortedBranches.map((branch) => {
+				sortedBranches.map(branch => {
 					const flowed = formatBytes(branch.totalBytesWritten ?? 0)
 					const dropped = formatBytes(branch.droppedBytesTotal ?? 0)
-					const dropPct = (branch.totalBytesWritten ?? 0) > 0
-						? ((branch.droppedBytesTotal ?? 0) / (branch.totalBytesWritten ?? 1)) * 100
-						: 0
+					const dropPct =
+						(branch.totalBytesWritten ?? 0) > 0
+							? ((branch.droppedBytesTotal ?? 0) /
+									(branch.totalBytesWritten ?? 1)) *
+								100
+							: 0
 
 					return (
 						<Box key={branch.id}>
@@ -142,12 +173,12 @@ export function BackpressurePanel({ snapshot, dropRate }: BackpressurePanelProps
 							</Text>
 							<Text>{padRight(branch.id, 24)}</Text>
 							<StatusBadge active={branch.backpressureActive} />
-							<Text>  </Text>
-							<BufferBar 
-								bufferBytes={branch.bufferBytes ?? 0} 
-								highWaterMark={branch.highWaterMark ?? 262144} 
+							<Text> </Text>
+							<BufferBar
+								bufferBytes={branch.bufferBytes ?? 0}
+								highWaterMark={branch.highWaterMark ?? 262144}
 							/>
-							<Text>  </Text>
+							<Text> </Text>
 							<Text>{padRight(flowed, 12)}</Text>
 							<Text>{padRight(dropped, 12)}</Text>
 							<Text>{dropPct.toFixed(1)}%</Text>

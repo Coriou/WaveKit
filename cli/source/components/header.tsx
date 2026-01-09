@@ -14,7 +14,13 @@ interface HeaderProps {
 	lastDisconnect?: { time: string; error?: string; code?: number } | null
 }
 
-export function Header({ status, error, closeCode, closeReason, lastDisconnect }: HeaderProps) {
+export function Header({
+	status,
+	error,
+	closeCode,
+	closeReason,
+	lastDisconnect,
+}: HeaderProps) {
 	const now = new Date()
 	const timeStr = now.toLocaleTimeString("en-US", { hour12: false })
 
@@ -38,24 +44,28 @@ export function Header({ status, error, closeCode, closeReason, lastDisconnect }
 			statusColor = "red"
 			statusText = "Disconnected"
 			if (error) statusText += `: ${error}`
-			if (closeCode) statusText += ` (Code: ${closeCode}${closeReason ? ", " + closeReason : ""})`
+			if (closeCode)
+				statusText += ` (Code: ${closeCode}${closeReason ? ", " + closeReason : ""})`
 			break
 	}
 
 	return (
 		<Box borderStyle="single" borderColor="cyan" paddingX={1}>
 			<Box flexGrow={1}>
-				<Text bold color="cyan">📡 WaveKit Dashboard</Text>
+				<Text bold color="cyan">
+					📡 WaveKit Dashboard
+				</Text>
 			</Box>
 			<Box>
 				{status === "connected" && lastDisconnect && (
 					<Text color="red" dimColor>
-						(Last drop: {lastDisconnect.time} {lastDisconnect.code ? `[${lastDisconnect.code}]` : ""}){" "}
+						(Last drop: {lastDisconnect.time}{" "}
+						{lastDisconnect.code ? `[${lastDisconnect.code}]` : ""}){" "}
 					</Text>
 				)}
 				<Text color={statusColor}>{statusIcon} </Text>
 				<Text dimColor>{statusText}</Text>
-				<Text dimColor>  {timeStr}</Text>
+				<Text dimColor> {timeStr}</Text>
 			</Box>
 		</Box>
 	)
