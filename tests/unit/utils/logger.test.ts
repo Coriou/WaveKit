@@ -225,6 +225,7 @@ describe("Property-Based Tests", () => {
 				info: 30,
 				warn: 40,
 				error: 50,
+				fatal: 60,
 			}
 
 			await fc.assert(

@@ -6,9 +6,16 @@
  * - 25.2: WHEN AIS-catcher decodes a message, THE AISCatcher_Decoder SHALL parse it into structured ShipData events
  * - 25.3: THE AISCatcher_Decoder SHALL support output formats: NMEA, JSON
  * - 25.4: THE AISCatcher_Decoder SHALL support multiple input sources (RTL-TCP, SpyServer, SoapySDR)
+ *
+ * This decoder extends IqDecimateDecoder to automatically decimate high sample rate
+ * IQ data (e.g., 2.048 Msps) down to AIS-catcher's supported rates.
+ * AIS-catcher internally supports: 96K, 192K, 288K, 384K, 768K, 1536K, 3072K Hz
  */
 
-import { BaseDecoder } from "../base-decoder.js"
+import {
+	IqDecimateDecoder,
+	type IqDecimationConfig,
+} from "../iq-decimate-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -102,7 +109,7 @@ const NMEA_AIS_PATTERN =
  *
  * Modified to consume IQ data from stdin (Passive Mode).
  */
-export class AisCatcherDecoder extends BaseDecoder {
+export class AisCatcherDecoder extends IqDecimateDecoder {
 	private readonly options: AisCatcherOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -152,16 +159,30 @@ export class AisCatcherDecoder extends BaseDecoder {
 	}
 
 	/**
+	 * Returns the IQ decimation configuration for AIS-catcher.
+	 * AIS-catcher internally supports: 96K, 192K, 288K, 384K, 768K, 1536K, 3072K Hz
+	 * We decimate to 384000 Hz which is well-supported.
+	 */
+	protected override getIqDecimationConfig(): IqDecimationConfig {
+		const inputRate = this.options.inputSampleRate ?? 2_400_000
+		return {
+			inputSampleRate: inputRate,
+			targetSampleRate: 384_000, // Well-supported by AIS-catcher
+			filterTransition: 0.05,
+		}
+	}
+
+	/**
 	 * Returns the AIS-catcher command (Requirement 25.1).
 	 */
-	protected getCommand(): string {
+	protected override getDecoderCommand(): string {
 		return "AIS-catcher"
 	}
 
 	/**
 	 * Returns command line arguments for AIS-catcher (Requirement 25.1).
 	 */
-	protected getArgs(): string[] {
+	protected override getDecoderArgs(): string[] {
 		const args: string[] = []
 
 		// Input source configuration (Requirement 25.4)
@@ -169,9 +190,10 @@ export class AisCatcherDecoder extends BaseDecoder {
 		// "-r CU8 ." tells ais-catcher to read Raw Unsigned 8-bit output from stdin
 		args.push("-r", "CU8", ".")
 
-		// Set the sample rate to match our IQ source
-		const sampleRate = this.options.inputSampleRate ?? 2_400_000
-		args.push("-s", sampleRate.toString())
+		// Set the sample rate to match the DECIMATED output (not the source input rate)
+		// IqDecimateDecoder decimates down to targetSampleRate before passing to us
+		const decimationConfig = this.getIqDecimationConfig()
+		args.push("-s", decimationConfig.targetSampleRate.toString())
 
 		// Gain setting - irrelevant for stdin but keep for consistency
 		if (this.options.gain !== undefined) {
@@ -203,7 +225,7 @@ export class AisCatcherDecoder extends BaseDecoder {
 	 * Returns the decoder's capabilities (Requirement 17.1).
 	 * AIS-catcher is an external SDR decoder that produces NMEA or JSON output.
 	 */
-	protected getCaps(): DecoderCaps {
+	protected override getCaps(): DecoderCaps {
 		const outputFormat = this.options.outputFormat === "json" ? "jsonl" : "nmea"
 
 		return {

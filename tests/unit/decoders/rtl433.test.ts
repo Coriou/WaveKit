@@ -27,8 +27,8 @@ class TestRtl433Decoder extends Rtl433Decoder {
 		return this.parseOutput(line)
 	}
 
-	public testGetArgs(): string[] {
-		return this.getArgs()
+	public testGetDecoderArgs(): string[] {
+		return this.getDecoderArgs()
 	}
 }
 
@@ -333,7 +333,7 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 	describe("Command Line Arguments", () => {
 		it("should use cu8:- format for stdin input (not plain -)", () => {
 			const decoder = createTestDecoder("test-rtl433")
-			const args = decoder.testGetArgs()
+			const args = decoder.testGetDecoderArgs()
 
 			// Find the -r argument and its value
 			const rIndex = args.indexOf("-r")
@@ -347,7 +347,7 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 
 		it("should include JSON output format flag", () => {
 			const decoder = createTestDecoder("test-rtl433")
-			const args = decoder.testGetArgs()
+			const args = decoder.testGetDecoderArgs()
 
 			// Should have -F json for JSON output
 			expect(args).toContain("-F")
@@ -361,15 +361,16 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 				enabled: true,
 				options: {
 					outputFormat: "json",
-					sampleRate: 2_048_000, // rtl_433 uses 'sampleRate' not 'inputSampleRate'
+					inputSampleRate: 2_048_000,
+					targetSampleRate: 1_000_000, // Target 1 MHz
 				},
 			}
 			const decoder = new TestRtl433Decoder(config, testLogger)
-			const args = decoder.testGetArgs()
+			const args = decoder.testGetDecoderArgs()
 
-			// Should have -s for sample rate
+			// Should have -s for sample rate (decimated rate: 2048000 / 2 = 1024000)
 			expect(args).toContain("-s")
-			expect(args).toContain("2048000")
+			expect(args).toContain("1024000") // Effective rate after integer decimation
 		})
 
 		it("should support extra args for additional flags like frequency", () => {
@@ -383,7 +384,7 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 				},
 			}
 			const decoder = new TestRtl433Decoder(config, testLogger)
-			const args = decoder.testGetArgs()
+			const args = decoder.testGetDecoderArgs()
 
 			// Extra args should be included
 			expect(args).toContain("-f")

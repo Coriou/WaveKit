@@ -17,7 +17,7 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { randomUUID } from "node:crypto"
 
-export type LogLevel = "trace" | "debug" | "info" | "warn" | "error"
+export type LogLevel = "trace" | "debug" | "info" | "warn" | "error" | "fatal"
 
 export interface LoggerConfig {
 	level: LogLevel

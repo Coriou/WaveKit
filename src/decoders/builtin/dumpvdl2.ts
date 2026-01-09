@@ -8,7 +8,10 @@
  * - 24.4: THE Dumpvdl2_Decoder SHALL support multiple simultaneous frequencies
  */
 
-import { BaseDecoder } from "../base-decoder.js"
+import {
+	IqDecimateDecoder,
+	type IqDecimationConfig,
+} from "../iq-decimate-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import type { ACARSMessage } from "./acarsdec.js"
@@ -31,6 +34,10 @@ export interface Dumpvdl2Options {
 	ppm?: number | undefined
 	/** Output format: json or text (Requirement 24.3) */
 	outputFormat?: "json" | "text" | undefined
+	/** IQ input sample rate in Hz from the source (e.g., 2048000) */
+	inputSampleRate?: number | undefined
+	/** Target sample rate for processing (default: 1050000) */
+	targetSampleRate?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
 }
@@ -131,8 +138,9 @@ interface XidData {
  * VDL2 Decoder - Decodes VDL Mode 2 data link messages.
  *
  * Modified to consume IQ data from stdin (Passive Mode).
+ * Extends IqDecimateDecoder to support sample rate adaptation.
  */
-export class Dumpvdl2Decoder extends BaseDecoder {
+export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	private readonly options: Dumpvdl2Options
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -141,9 +149,20 @@ export class Dumpvdl2Decoder extends BaseDecoder {
 	}
 
 	/**
+	 * Returns the IQ decimation configuration.
+	 */
+	protected getIqDecimationConfig(): IqDecimationConfig {
+		return {
+			inputSampleRate: this.options.inputSampleRate ?? 2_048_000,
+			targetSampleRate: this.options.targetSampleRate ?? 1_050_000,
+			filterTransition: 0.05,
+		}
+	}
+
+	/**
 	 * Returns the dumpvdl2 command (Requirement 24.1).
 	 */
-	protected getCommand(): string {
+	protected getDecoderCommand(): string {
 		return "dumpvdl2"
 	}
 
@@ -153,28 +172,21 @@ export class Dumpvdl2Decoder extends BaseDecoder {
 	 * dumpvdl2 command line format:
 	 * dumpvdl2 --rtlsdr <device> [--gain <gain>] [--correction <ppm>] --output decoded:json:file:- <freq1> [freq2] ...
 	 */
-	protected getArgs(): string[] {
+	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
 		// Use stdin input (Requirement 25.4)
 		args.push("--iq-file", "-")
 		args.push("--sample-format", "U8")
-		// Note: dumpvdl2 derives sample rate from oversample factor (rate = 105k * oversample)
-		// 2.4Msps is approx 22.85 * 105k. We might need resampling if it's strict.
-		// For now, removing invalid --sample-rate arg to prevent exit.
-		// args.push("--sample-rate", "2400000")
 
-		// Configure sample rate (MUST match the source, e.g. 2400000 from config)
-		// We'll trust that the user/admin configured the correct rate in dev_test.yaml
-		// and that it is sufficient to cover the frequencies. But dumpvdl2 needs to know it.
-		// We hardcode 2.4Msps here to match dev_test.yaml update or infer?
-		// Ideally we should pass it from config.
-		// For now, let's look at dev_test.yaml - we set it to 2400000.
-		// But the CLASS options don't seem to have sampleRate passed in by default parse logic?
-		// We might need to add sampleRate to Dumpvdl2Options.
-		// Let's assume 2400000 for now or try to use a safe default if not provided.
-		// The previous implementation didn't use sample rate because it controlled the device.
-		// args.push("--sample-rate", "2400000") // TODO: Make configurable via options
+		// Set sample rate - dumpvdl2 might guess but better to be explicit if supported
+		// or rely on oversampling logic.
+		// For now we don't pass explicit --sample-rate because it might not be supported
+		// in all versions or might conflict with iq-file mode in some versions.
+		// But if we decimate, we change the rate.
+		// Let's assume dumpvdl2 detects or defaults.
+		// Actually, let's try to pass it if we can.
+		// The previous code commented it out: // args.push("--sample-rate", "2400000")
 
 		// Gain setting - irrelevant for IQ file input?
 		// Actually native dumpvdl2 might not support gain setting when reading from file/stdin?
@@ -201,7 +213,7 @@ export class Dumpvdl2Decoder extends BaseDecoder {
 	 * Returns the decoder's capabilities (Requirement 17.1).
 	 * Dumpvdl2 is an external SDR decoder that produces JSON output.
 	 */
-	protected getCaps(): DecoderCaps {
+	protected override getCaps(): DecoderCaps {
 		return {
 			input: "iq",
 			wantsExclusiveSource: false, // Can share the IQ stream
@@ -216,7 +228,7 @@ export class Dumpvdl2Decoder extends BaseDecoder {
 	 * @param line - A line of JSON output from dumpvdl2
 	 * @returns DecoderOutput with VDL2Message data, or null if parsing fails
 	 */
-	protected parseOutput(line: string): DecoderOutput | null {
+	protected override parseOutput(line: string): DecoderOutput | null {
 		const trimmed = line.trim()
 		if (!trimmed) return null
 
@@ -276,6 +288,8 @@ function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
 		ppm: options["ppm"] as number | undefined,
 		outputFormat:
 			(options["outputFormat"] as "json" | "text" | undefined) ?? "json",
+		inputSampleRate: options["inputSampleRate"] as number | undefined,
+		targetSampleRate: options["targetSampleRate"] as number | undefined,
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }

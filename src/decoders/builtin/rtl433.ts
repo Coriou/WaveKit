@@ -5,9 +5,15 @@
  * - 8.1: WHEN started, THE RTL433_Decoder SHALL spawn rtl_433 with the configured options
  * - 8.2: WHEN rtl_433 decodes a signal, THE RTL433_Decoder SHALL parse it into structured signal events
  * - 8.3: THE RTL433_Decoder SHALL support protocol filtering and analyze mode
+ *
+ * This decoder extends IqDecimateDecoder to automatically decimate high sample rate
+ * IQ data (e.g., 2.048 Msps) down to rtl_433's preferred rate (250 kHz or 1 MHz).
  */
 
-import { BaseDecoder } from "../base-decoder.js"
+import {
+	IqDecimateDecoder,
+	type IqDecimationConfig,
+} from "../iq-decimate-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -24,24 +30,51 @@ export interface Rtl433Options {
 	protocols?: number[] | undefined
 	/** Output format (json recommended for parsing) */
 	outputFormat?: Rtl433OutputFormat | undefined
-	/** Sample rate in Hz */
-	sampleRate?: number | undefined
+	/** IQ input sample rate in Hz from the source (e.g., 2048000) */
+	inputSampleRate?: number | undefined
+	/**
+	 * Target sample rate for rtl_433 processing in Hz.
+	 * rtl_433 works best at 250000 (250 kHz) or 1000000 (1 MHz).
+	 * Default: 1000000 (1 MHz) for wider protocol coverage.
+	 */
+	targetSampleRate?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
 }
+
+/** Default target sample rate for rtl_433 (1 MHz provides good protocol coverage) */
+const DEFAULT_TARGET_SAMPLE_RATE = 1_000_000
+
+/** Default IQ input sample rate */
+const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
 
 /**
  * RTL_433 Decoder - Decodes ISM band signals.
  *
  * Supports weather sensors, tire pressure monitors, and other ISM band devices.
  * Uses JSON output format for structured parsing of decoded signals.
+ *
+ * Automatically decimates high sample rate IQ data to rtl_433's preferred rate
+ * using csdr, reducing CPU usage and improving decoding performance.
  */
-export class Rtl433Decoder extends BaseDecoder {
+export class Rtl433Decoder extends IqDecimateDecoder {
 	private readonly options: Rtl433Options
+	private readonly effectiveTargetRate: number
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = this.parseOptions(config.options)
+
+		// Calculate actual target sample rate after decimation
+		const inputRate =
+			this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
+		const targetRate =
+			this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE
+
+		// Decimation must be integer, so actual output rate may differ
+		const decimation = Math.round(inputRate / targetRate)
+		this.effectiveTargetRate =
+			decimation > 0 ? inputRate / decimation : inputRate
 	}
 
 	/**
@@ -53,15 +86,30 @@ export class Rtl433Decoder extends BaseDecoder {
 			protocols: options["protocols"] as number[] | undefined,
 			outputFormat:
 				(options["outputFormat"] as Rtl433OutputFormat | undefined) ?? "json",
-			sampleRate: options["sampleRate"] as number | undefined,
+			inputSampleRate: options["inputSampleRate"] as number | undefined,
+			targetSampleRate: options["targetSampleRate"] as number | undefined,
 			extraArgs: options["extraArgs"] as string[] | undefined,
+		}
+	}
+
+	/**
+	 * Returns the IQ decimation configuration.
+	 * rtl_433 works best at 250 kHz - 1 MHz sample rates.
+	 */
+	protected getIqDecimationConfig(): IqDecimationConfig {
+		return {
+			inputSampleRate:
+				this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE,
+			targetSampleRate:
+				this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE,
+			filterTransition: 0.05,
 		}
 	}
 
 	/**
 	 * Returns the rtl_433 command (Requirement 8.1).
 	 */
-	protected getCommand(): string {
+	protected getDecoderCommand(): string {
 		return "rtl_433"
 	}
 
@@ -72,14 +120,16 @@ export class Rtl433Decoder extends BaseDecoder {
 	 * - Use 'cu8:-' to read unsigned 8-bit complex IQ from stdin
 	 * - Format must be specified with colon prefix (e.g., 'cu8:', 'cs16:', 'cf32:')
 	 * - The '-' after the colon means read from stdin
-	 * - See: https://github.com/merbanan/rtl_433#running (Read file option section)
 	 */
-	protected getArgs(): string[] {
+	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
 		// Read CU8 (unsigned 8-bit complex IQ) from stdin
-		// Format: -r <format>:<filename> where - means stdin
 		args.push("-r", "cu8:-")
+
+		// CRITICAL: Tell rtl_433 the sample rate of incoming IQ data
+		// This is the DECIMATED rate, not the original source rate
+		args.push("-s", String(this.effectiveTargetRate))
 
 		// Set output format to JSON for structured parsing (Requirement 8.2)
 		if (this.options.outputFormat === "json") {
@@ -102,11 +152,6 @@ export class Rtl433Decoder extends BaseDecoder {
 			}
 		}
 
-		// Set sample rate if specified
-		if (this.options.sampleRate) {
-			args.push("-s", String(this.options.sampleRate))
-		}
-
 		// Add any extra arguments
 		if (this.options.extraArgs) {
 			args.push(...this.options.extraArgs)
@@ -119,7 +164,7 @@ export class Rtl433Decoder extends BaseDecoder {
 	 * Returns the decoder's capabilities (Requirement 17.1).
 	 * RTL_433 is a pure consumer that accepts IQ data and outputs JSON.
 	 */
-	protected getCaps(): DecoderCaps {
+	protected override getCaps(): DecoderCaps {
 		return {
 			input: "iq",
 			wantsExclusiveSource: false,
