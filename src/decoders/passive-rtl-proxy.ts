@@ -1,4 +1,9 @@
-import { createServer, createConnection, Socket, Server } from "node:net"
+import {
+	createServer,
+	createConnection,
+	type Socket,
+	type Server,
+} from "node:net"
 import { EventEmitter } from "node:events"
 import { type Readable } from "node:stream"
 import { type Logger } from "../utils/logger.js"

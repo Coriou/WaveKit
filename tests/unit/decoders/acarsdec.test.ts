@@ -132,12 +132,18 @@ describe("AcarsdecDecoder", () => {
 	})
 
 	describe("attachInput/detachInput", () => {
-		it("should be no-ops for external SDR decoder (Requirement 19.2)", () => {
+		it("should pipe input to internal stream for proxy (Requirement 19.2)", () => {
 			const config = createConfig()
 			decoder = new AcarsdecDecoder(config, testLogger)
 
-			// These should not throw
-			expect(() => decoder.attachInput({} as any)).not.toThrow()
+			// Create a mock readable stream with pipe method
+			const mockStream = {
+				pipe: vi.fn().mockReturnValue({}),
+			} as any
+
+			// Should not throw and should call pipe
+			expect(() => decoder.attachInput(mockStream)).not.toThrow()
+			expect(mockStream.pipe).toHaveBeenCalled()
 			expect(() => decoder.detachInput()).not.toThrow()
 		})
 	})

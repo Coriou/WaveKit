@@ -207,10 +207,8 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		const agwPort = this.options.agwPort ?? DEFAULT_AGW_PORT
 		args.push("-a", agwPort.toString())
 
-		// Callsign
-		if (this.options.callsign) {
-			args.push("-c", this.options.callsign)
-		}
+		// Note: Callsign is configured in /etc/direwolf.conf (MYCALL directive)
+		// The -c flag is ONLY for config file path, not callsign
 
 		// Additional arguments
 		if (this.options.extraArgs) {

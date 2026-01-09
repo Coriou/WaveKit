@@ -48,55 +48,64 @@ decoders:
       enablePerCallRecording: true
       perCallRecordingDir: /app/decoded_calls
 
-  # APRS/AX.25 decoder - amateur radio packet
-  # Still uses SDR++ audio (direwolf NetworkProducerDecoder pattern not yet migrated)
+  # APRS/AX.25 decoder - amateur radio packet (AudioDemodDecoder)
+  # Uses IQ source with csdr FM demodulation to audio, then direwolf KISS output
   - id: aprs
     type: direwolf
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
       audioDevice: stdin
       sampleRate: 48000
+      inputSampleRate: 2048000 # Must match source
+      fmGain: 2.5 # Start here, tune if needed
+      kissPort: 8001
+      callsign: N0CALL
 
-  # ISM band decoder - weather sensors, tire pressure, remotes
+  # ISM band decoder - weather sensors, tire pressure, remotes (BaseDecoder IQ stdin)
   - id: rtl433
     type: rtl433
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
       sampleRate: 2048000
       outputFormat: json
 
-  # Maritime AIS decoder - ship positions and data
+  # Maritime AIS decoder - ship positions and data (BaseDecoder IQ stdin)
   - id: ais
     type: ais-catcher
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
       outputFormat: json
+      inputSampleRate: 2048000
 
-  # ACARS decoder - aircraft data link messages
+  # ACARS decoder - aircraft data link messages (ExternalSdrDecoder via proxy)
   - id: acars
     type: acarsdec
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
+      rtlTcpHost: 192.168.1.69 # RTL-TCP proxy mode
+      rtlTcpPort: 1235
       frequencies: [131550000, 131725000]
+      outputFormat: json
 
-  # VDL2 decoder - aviation VDL Mode 2 data link
+  # VDL2 decoder - aviation VDL Mode 2 data link (BaseDecoder IQ stdin)
   - id: vdl2
     type: dumpvdl2
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
       frequencies: [136650000, 136975000]
+      outputFormat: json
 
-  # ADS-B decoder - aircraft transponders (1090 MHz)
+  # ADS-B decoder - aircraft transponders (NetworkProducerDecoder)
   # Note: Works best with dedicated SDR at 1090 MHz / 2.0 Msps
-  # In shared IQ mode, will run idle if frequency/sample rate don't match
+  # In shared IQ mode (stdin), will run idle if frequency/sample rate don't match
   - id: adsb
     type: readsb
-    enabled: false
+    enabled: true
     sourceId: pi-iq
     options:
       outputFormat: json

@@ -109,6 +109,8 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	private readonly options: AcarsdecOptions
 	private proxy: PassiveRtlProxy | null = null
 	private proxyPort: number | null = null
+	// Initialize early to handle attachInput being called before start()
+	private internalInputStream: PassThrough = new PassThrough()
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		// Build the external SDR config from decoder config
@@ -137,9 +139,6 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 		super(externalConfig, logger)
 		this.options = options
 	}
-
-	// We need a buffering stream to bridge the gap
-	private internalInputStream: PassThrough | null = null
 
 	/**
 	 * Returns the acarsdec command (Requirement 23.1).
@@ -206,14 +205,11 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 
 	/**
 	 * Override attachInput to pipe to our internal proxy stream.
+	 * Stream is initialized in constructor so it's always available.
 	 */
 	override attachInput(stream: Readable): void {
 		this.logger.debug("Attaching input to Acarsdec Proxy")
-		if (this.internalInputStream) {
-			stream.pipe(this.internalInputStream)
-		} else {
-			this.logger.warn("internalInputStream not initialized!")
-		}
+		stream.pipe(this.internalInputStream)
 	}
 
 	override detachInput(): void {
@@ -231,9 +227,6 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 	 */
 	override async start(): Promise<void> {
 		try {
-			// Create the bridge stream
-			this.internalInputStream = new PassThrough()
-
 			// Create and start the proxy
 			// We pass the bridge stream to the proxy
 			this.proxy = new PassiveRtlProxy(
@@ -262,10 +255,9 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 			this.proxy = null
 			this.proxyPort = null
 		}
-		if (this.internalInputStream) {
-			this.internalInputStream.destroy()
-			this.internalInputStream = null
-		}
+		// Destroy old stream and create new one for potential restart
+		this.internalInputStream.destroy()
+		this.internalInputStream = new PassThrough()
 	}
 
 	/**

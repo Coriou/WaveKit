@@ -238,6 +238,7 @@ function parseAisCatcherOptions(
 				? outputFormat
 				: "nmea",
 		outputPort: options["outputPort"] as number | undefined,
+		inputSampleRate: options["inputSampleRate"] as number | undefined,
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }
