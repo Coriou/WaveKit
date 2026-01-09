@@ -16,7 +16,7 @@ import {
 import { createLogger } from "../../../src/utils/logger.js"
 
 // Create a test logger
-const testLogger = createLogger({ level: "error" })
+const testLogger = createLogger({ level: "fatal" })
 
 // All valid WebSocket channels
 const ALL_CHANNELS: WebSocketChannel[] = [

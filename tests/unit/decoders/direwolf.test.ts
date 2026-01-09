@@ -98,11 +98,11 @@ describe("DirewolfDecoder", () => {
 			decoder = new DirewolfDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "audio_pcm",
+				input: "iq",
 				wantsExclusiveSource: false,
-				preferredSampleRates: [48000, 44100],
+				preferredSampleRates: [48000],
 				output: "text",
-				integrationPattern: "network_producer",
+				integrationPattern: "pure_consumer",
 			})
 		})
 	})
@@ -379,11 +379,11 @@ describe("createDirewolfDecoder", () => {
 describe("DIREWOLF_CAPS", () => {
 	it("should have correct default capabilities", () => {
 		expect(DIREWOLF_CAPS).toEqual({
-			input: "audio_pcm",
+			input: "iq",
 			wantsExclusiveSource: false,
-			preferredSampleRates: [48000, 44100],
+			preferredSampleRates: [48000],
 			output: "text",
-			integrationPattern: "network_producer",
+			integrationPattern: "pure_consumer",
 		})
 	})
 })

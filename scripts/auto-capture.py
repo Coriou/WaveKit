@@ -31,6 +31,16 @@ from datetime import datetime
 import numpy as np
 
 
+def _running_in_container() -> bool:
+    if Path("/.dockerenv").exists():
+        return True
+    try:
+        cgroup = Path("/proc/1/cgroup").read_text(errors="ignore")
+        return "docker" in cgroup or "containerd" in cgroup
+    except Exception:
+        return False
+
+
 class SignalCapture:
     """Smart IQ capture with state machine and hysteresis."""
     
@@ -313,12 +323,28 @@ Examples:
                         help="Maximum number of captures")
     parser.add_argument("--timeout", type=float, default=300,
                         help="Monitoring timeout (0 = no timeout)")
-    parser.add_argument("--output", default="/output",
+    parser.add_argument("--output", default="/data/debug_audio",
                         help="Output directory")
     parser.add_argument("--quiet", "-q", action="store_true",
                         help="Minimal output")
+    parser.add_argument(
+        "--allow-host",
+        action="store_true",
+        help="Allow running outside the demod-test container (advanced)",
+    )
     
     args = parser.parse_args()
+
+    if not args.allow_host and not _running_in_container():
+        print(
+            "This tool is intended to run inside the demod-test container.\n\n"
+            "Run it via:\n"
+            "  docker compose -f docker-compose.demod-test.yml run --rm demod-test \\\n+    python3 /scripts/auto-capture.py --output /data/debug_audio\n\n"
+            "Or use the interactive wrapper:\n"
+            "  node scripts/auto-capture.mjs\n",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     
     capture = SignalCapture(
         host=args.host,

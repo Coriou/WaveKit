@@ -97,10 +97,10 @@ describe("AisCatcherDecoder", () => {
 			decoder = new AisCatcherDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: false,
 				output: "nmea",
-				integrationPattern: "network_producer",
+				integrationPattern: "pure_consumer",
 			})
 		})
 
@@ -109,10 +109,10 @@ describe("AisCatcherDecoder", () => {
 			decoder = new AisCatcherDecoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: false,
 				output: "jsonl",
-				integrationPattern: "network_producer",
+				integrationPattern: "pure_consumer",
 			})
 		})
 	})
@@ -325,10 +325,10 @@ describe("createAisCatcherDecoder", () => {
 describe("AIS_CATCHER_CAPS", () => {
 	it("should have correct default capabilities", () => {
 		expect(AIS_CATCHER_CAPS).toEqual({
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false,
 			output: "nmea",
-			integrationPattern: "network_producer",
+			integrationPattern: "pure_consumer",
 		})
 	})
 })

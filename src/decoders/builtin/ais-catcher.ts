@@ -467,8 +467,8 @@ export function createAisCatcherDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const AIS_CATCHER_CAPS: DecoderCaps = {
-	input: "external",
-	wantsExclusiveSource: true,
+	input: "iq",
+	wantsExclusiveSource: false,
 	output: "nmea", // Default, actual depends on outputFormat option
-	integrationPattern: "network_producer",
+	integrationPattern: "pure_consumer",
 }

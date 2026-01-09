@@ -13,7 +13,13 @@
 	"type": "module",
 	"main": "dist/index.js",
 	"scripts": {
+		"demod:auto-capture": "node ./scripts/auto-capture.mjs",
 		"build-file": "esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external",
+		"cli:install": "npm --prefix cli install",
+		"cli:build": "npm --prefix cli run build",
+		"cli:start": "npm --prefix cli run start",
+		"cli:typecheck": "npm --prefix cli run typecheck",
+		"cli:test": "npm --prefix cli run test",
 		"dev": "concurrently --raw \"npm:dev:*\"",
 		"dev:build": "npm run build-file -- --watch=forever ./src/index.ts",
 		"dev:run": "node --watch \"./dist/index.js\"",

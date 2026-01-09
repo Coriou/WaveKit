@@ -26,7 +26,7 @@ describe("GracefulShutdown", () => {
 
 	beforeEach(() => {
 		resetGracefulShutdown()
-		logger = createLogger({ level: "error" }) // Quiet during tests
+		logger = createLogger({ level: "fatal" }) // Quiet during tests
 		shutdown = new GracefulShutdown({ logger })
 	})
 
@@ -248,7 +248,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 		await fc.assert(
 			fc.asyncProperty(handlerListArb, async handlerNames => {
 				resetGracefulShutdown()
-				const logger = createLogger({ level: "error" })
+				const logger = createLogger({ level: "fatal" })
 				const shutdown = new GracefulShutdown({ logger })
 
 				// Track which handlers were executed
@@ -285,7 +285,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 		await fc.assert(
 			fc.asyncProperty(handlerListArb, async handlerNames => {
 				resetGracefulShutdown()
-				const logger = createLogger({ level: "error" })
+				const logger = createLogger({ level: "fatal" })
 				const shutdown = new GracefulShutdown({ logger })
 
 				// Register handlers
@@ -323,7 +323,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 		await fc.assert(
 			fc.asyncProperty(handlerListArb, async handlerNames => {
 				resetGracefulShutdown()
-				const logger = createLogger({ level: "error" })
+				const logger = createLogger({ level: "fatal" })
 				const shutdown = new GracefulShutdown({ logger })
 
 				// Track execution order
@@ -374,7 +374,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 				failingIndicesArb,
 				async (handlerNames, failingIndices) => {
 					resetGracefulShutdown()
-					const logger = createLogger({ level: "error" })
+					const logger = createLogger({ level: "fatal" })
 					const shutdown = new GracefulShutdown({ logger })
 
 					// Track which handlers were executed (even if they fail)
@@ -419,7 +419,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 		await fc.assert(
 			fc.asyncProperty(handlerListArb, async handlerNames => {
 				resetGracefulShutdown()
-				const logger = createLogger({ level: "error" })
+				const logger = createLogger({ level: "fatal" })
 				const shutdown = new GracefulShutdown({ logger })
 
 				// Track execution counts
@@ -461,7 +461,7 @@ describe("Property 24: Graceful Shutdown Completeness", () => {
 		await fc.assert(
 			fc.asyncProperty(fc.constant(null), async () => {
 				resetGracefulShutdown()
-				const logger = createLogger({ level: "error" })
+				const logger = createLogger({ level: "fatal" })
 				const shutdown = new GracefulShutdown({ logger })
 
 				// No handlers registered

@@ -1,6 +1,7 @@
 .PHONY: help docker-build docker-build-full docker-build-core docker-build-sdrpp \
-        docker-dev docker-prod docker-push docker-clean docker-logs \
-        docker-shell docker-compose-up docker-compose-down
+	docker-dev docker-prod docker-push docker-clean docker-logs \
+	docker-shell docker-compose-up docker-compose-down \
+	cli-install dev-dashboard-build dev-dashboard
 
 # WaveKit Docker Makefile
 # Quick commands for development and deployment
@@ -138,9 +139,7 @@ dev-start: ## Start dev container (stops existing first)
 	@echo ""
 	@echo "  $(YELLOW)Commands:$(NC)"
 	@echo "    make dev-logs         - All logs"
-	@echo "    make dev-decoded      - Decoded signals only"
-	@echo "    make dev-decoders     - Live decoder status"
-	@echo "    make dev-backpressure - Fanout backpressure monitor"
+	@echo "    make dev-dashboard    - Interactive CLI dashboard"
 	@echo "    make dev-stop         - Stop container"
 	@echo ""
 
@@ -158,13 +157,6 @@ dev-logs: ## Tail all container logs (pretty JSON)
 
 dev-logs-raw: ## Tail raw container logs
 	@docker logs -f $(DEV_CONTAINER)
-
-dev-decoded: ## Show only decoded messages (voice/text)
-	@echo "$(BLUE)Watching for decoded signals... (Ctrl+C to stop)$(NC)"
-	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./scripts/decoded-viewer.mjs
-
-dev-decoded-raw: ## Show decoded messages (raw JSON)
-	@docker logs -f $(DEV_CONTAINER) 2>&1 | grep --line-buffered '"msg":"Decoded Message"'
 
 dev-audio: ## Listen to decoded audio (requires sox)
 	@echo "$(BLUE)Streaming audio from WaveKit... (Ctrl+C to stop)$(NC)"
@@ -190,26 +182,14 @@ dev-status: ## Show container status and health
 	@echo "$(BLUE)Health Check:$(NC)"
 	@curl -s http://localhost:9000/health | jq . 2>/dev/null || echo "API not reachable"
 
-dev-decoders: ## Show live decoder status (refreshes every 2s)
-	@echo "$(BLUE)Decoder Status Dashboard$(NC) (Ctrl+C to stop)"
-	@echo ""
-	@while true; do \
-		clear; \
-		echo "$(BLUE)Decoder Status$(NC) (updated every 2s - Ctrl+C to stop)"; \
-		echo ""; \
-		curl -s http://localhost:9000/api/decoders 2>/dev/null | jq -r '.[] | "\(.id)\t\(.running | if . then "✅ running" else "⏹ stopped" end)\t\(.health)\tevents: \(.stats.eventsOut // 0)\tuptime: \(.uptime // 0)s"' 2>/dev/null || echo "API not reachable - is container running?"; \
-		sleep 2; \
-	done
+cli-install: ## Install CLI dashboard dependencies (if missing)
+	@test -d cli/node_modules || (cd cli && npm install)
 
-dev-backpressure: ## Show live fanout backpressure dashboard
-	@echo "$(BLUE)Backpressure Monitor$(NC)"
-	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./scripts/backpressure-viewer.mjs
-
-dev-dashboard: ## WaveKit CLI Dashboard (interactive, tab-based)
-	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
-
-dev-dashboard-build: ## Build CLI dashboard
+dev-dashboard-build: cli-install ## Build CLI dashboard
 	@cd cli && npm run build
+
+dev-dashboard: dev-dashboard-build ## WaveKit CLI Dashboard (interactive, tab-based)
+	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
 
 
 docker-logs-sdrpp: ## Tail SDR++ logs

@@ -17,7 +17,7 @@ import { WaveKitError } from "../../../src/utils/errors.js"
 import { EventEmitter } from "node:events"
 
 // Create a test logger
-const testLogger = createLogger({ level: "error" })
+const testLogger = createLogger({ level: "fatal" })
 
 /**
  * Mock SourceManager for testing
@@ -1411,7 +1411,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -1652,7 +1652,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -1775,7 +1775,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -1928,7 +1928,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -2131,7 +2131,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -2273,7 +2273,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -2384,7 +2384,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(8080),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
@@ -2553,7 +2553,7 @@ describe("Property-Based Tests", () => {
 							getPort: vi.fn().mockReturnValue(audioState.port),
 						})
 
-						const testLogger = createLogger({ level: "error" })
+						const testLogger = createLogger({ level: "fatal" })
 						const testDependencies: ApiServerDependencies = {
 							sourceManager:
 								mockSourceManager as unknown as ApiServerDependencies["sourceManager"],

@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y \
     libncurses-dev \
     # Build deps for csdr
     libsamplerate0-dev \
+    pulseaudio \
     && rm -rf /var/lib/apt/lists/*
 
 # Install numpy 1.x FIRST for GNU Radio compatibility

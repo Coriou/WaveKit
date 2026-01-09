@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import * as fc from "fast-check"
+import { PassThrough } from "node:stream"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
 import {
 	Dumpvdl2Decoder,
@@ -74,7 +75,7 @@ describe("Dumpvdl2Decoder", () => {
 			decoder = new Dumpvdl2Decoder(config, testLogger)
 
 			// Should use default VDL2 frequencies
-			expect(decoder.getFrequencies()).toEqual([
+			expect((decoder as any).options.frequencies).toEqual([
 				136_650_000, 136_700_000, 136_975_000,
 			])
 		})
@@ -85,7 +86,9 @@ describe("Dumpvdl2Decoder", () => {
 			})
 			decoder = new Dumpvdl2Decoder(config, testLogger)
 
-			expect(decoder.getFrequencies()).toEqual([136_650_000, 136_700_000])
+			expect((decoder as any).options.frequencies).toEqual([
+				136_650_000, 136_700_000,
+			])
 		})
 
 		it("should use configured device serial (Requirement 24.1)", () => {
@@ -94,7 +97,7 @@ describe("Dumpvdl2Decoder", () => {
 			})
 			decoder = new Dumpvdl2Decoder(config, testLogger)
 
-			expect(decoder.getDeviceSerial()).toBe("RTLSDR001")
+			expect((decoder as any).options.deviceSerial).toBe("RTLSDR001")
 		})
 	})
 
@@ -104,10 +107,10 @@ describe("Dumpvdl2Decoder", () => {
 			decoder = new Dumpvdl2Decoder(config, testLogger)
 
 			expect(decoder.caps).toEqual({
-				input: "external",
-				wantsExclusiveSource: true,
+				input: "iq",
+				wantsExclusiveSource: false,
 				output: "jsonl",
-				integrationPattern: "external_sdr",
+				integrationPattern: "pure_consumer",
 			})
 		})
 	})
@@ -130,12 +133,13 @@ describe("Dumpvdl2Decoder", () => {
 	})
 
 	describe("attachInput/detachInput", () => {
-		it("should be no-ops for external SDR decoder (Requirement 19.2)", () => {
+		it("should accept an IQ stream without throwing", () => {
 			const config = createConfig()
 			decoder = new Dumpvdl2Decoder(config, testLogger)
+			const iqStream = new PassThrough()
 
 			// These should not throw
-			expect(() => decoder.attachInput({} as any)).not.toThrow()
+			expect(() => decoder.attachInput(iqStream as any)).not.toThrow()
 			expect(() => decoder.detachInput()).not.toThrow()
 		})
 	})
@@ -334,10 +338,10 @@ describe("createDumpvdl2Decoder", () => {
 describe("DUMPVDL2_CAPS", () => {
 	it("should have correct capabilities", () => {
 		expect(DUMPVDL2_CAPS).toEqual({
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false,
 			output: "jsonl",
-			integrationPattern: "external_sdr",
+			integrationPattern: "pure_consumer",
 		})
 	})
 })

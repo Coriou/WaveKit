@@ -449,9 +449,8 @@ Run `make help` to see all available commands. Key commands organized by workflo
 
 ```bash
 make dev-up        # Build + start container in one command
-make dev-decoders  # Live decoder status dashboard (refreshes 2s)
+make dev-dashboard # Interactive CLI dashboard (tabs)
 make dev-logs      # Tail logs with pretty JSON formatting
-make dev-decoded   # Show only decoded signals (filtered)
 make dev-stop      # Stop the dev container
 ```
 
@@ -467,16 +466,14 @@ make dev-stop      # Stop the dev container
 
 ### Monitoring & Debugging
 
-| Command                | Description                                |
-| ---------------------- | ------------------------------------------ |
-| `make dev-status`      | Container status + health check            |
-| `make dev-decoders`    | Live decoder status (running/idle/faulted) |
-| `make dev-logs`        | Tail all logs (pretty JSON)                |
-| `make dev-logs-raw`    | Tail raw logs                              |
-| `make dev-decoded`     | Show decoded signals only                  |
-| `make dev-decoded-raw` | Show decoded signals (raw JSON)            |
-| `make dev-shell`       | Open shell in container                    |
-| `make dev-audio`       | Listen to decoded audio (requires sox)     |
+| Command              | Description                            |
+| -------------------- | -------------------------------------- |
+| `make dev-status`    | Container status + health check        |
+| `make dev-dashboard` | Interactive CLI dashboard (tabs)       |
+| `make dev-logs`      | Tail all logs (pretty JSON)            |
+| `make dev-logs-raw`  | Tail raw logs                          |
+| `make dev-shell`     | Open shell in container                |
+| `make dev-audio`     | Listen to decoded audio (requires sox) |
 
 ### Docker Compose
 
@@ -544,11 +541,14 @@ A standalone container for testing IQ demodulation:
 docker compose -f docker-compose.demod-test.yml build
 docker compose -f docker-compose.demod-test.yml run --rm demod-test bash
 
-# Capture IQ on signal detection
-python3 /scripts/auto-capture.py --host 192.168.1.69 --port 1235 --threshold 1.5
+# Capture IQ on signal detection (interactive wrapper, outputs to ./debug_audio)
+npm run demod:auto-capture
+
+# Or run the underlying capture script directly inside the container
+python3 /scripts/auto-capture.py --host 192.168.1.69 --port 1235 --threshold 1.5 --output /data/debug_audio
 
 # Demodulate and decode POCSAG
-bash /scripts/demod-test.sh /output/iq_capture_*.u8
+bash /scripts/demod-test.sh /data/debug_audio/iq_capture_*.u8
 ```
 
 ## Architecture Notes

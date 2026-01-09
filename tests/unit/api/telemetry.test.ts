@@ -33,6 +33,7 @@ function createMockFanoutManager() {
 				droppedChunksTotal: 4,
 				bufferBytes: 8192,
 				highWaterMark: 262144,
+				totalBytesWritten: 123_456,
 			},
 			{
 				id: "decoder-adsb",
@@ -45,11 +46,13 @@ function createMockFanoutManager() {
 				droppedChunksTotal: 2,
 				bufferBytes: 250000,
 				highWaterMark: 262144,
+				totalBytesWritten: 654_321,
 			},
 		],
 		backpressureActiveCount: 1,
 		droppedBytesTotal: 1536,
 		droppedChunksTotal: 6,
+		totalBytesWritten: 777_777,
 	}
 
 	return Object.assign(mock, {
@@ -208,6 +211,7 @@ describe("Telemetry Routes", () => {
 				backpressureActiveCount: 0,
 				droppedBytesTotal: 0,
 				droppedChunksTotal: 0,
+				totalBytesWritten: 0,
 			})
 
 			const response = await app.inject({

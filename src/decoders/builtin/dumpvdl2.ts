@@ -374,8 +374,8 @@ export function createDumpvdl2Decoder(
  * Used when registering with the DecoderRegistry.
  */
 export const DUMPVDL2_CAPS: DecoderCaps = {
-	input: "external",
-	wantsExclusiveSource: true,
+	input: "iq",
+	wantsExclusiveSource: false,
 	output: "jsonl",
-	integrationPattern: "external_sdr",
+	integrationPattern: "pure_consumer",
 }
