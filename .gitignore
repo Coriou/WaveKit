@@ -12,3 +12,5 @@ output/
 logs/
 wip/
 demod_comparison_*/
+fixtures/raw/
+fixtures/processed/

@@ -1,0 +1,220 @@
+# WaveKit Test Fixtures Manifest
+# Defines IQ/audio recordings for decoder validation testing
+#
+# Each fixture specifies:
+# - Source URL and download details
+# - IQ format and sample rate
+# - Target decoder and expected output
+
+version: 1
+
+fixtures:
+  # =============================================================================
+  # SMALL FIXTURES (< 10 MB) - Priority for fast testing
+  # =============================================================================
+
+  # POCSAG Pager - 1.18 MB (SigIDwiki)
+  # Needs FM demod before multimon-ng
+  - id: sigid_pocsag
+    decoder: multimon-ng
+    protocol: POCSAG
+    source_url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
+    format: zip
+    size_mb: 1.18
+    # IQ format typically detected from file, common: cu8 (unsigned 8-bit complex)
+    iq_format: cu8
+    sample_rate: null # Needs detection from file
+    needs_fm_demod: true
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      Small POCSAG pager capture from SigIDwiki.
+      Requires FM demodulation to audio before feeding to multimon-ng.
+
+  # FLEX Pager - 2.36 MB (SigIDwiki)
+  - id: sigid_flex
+    decoder: multimon-ng
+    protocol: FLEX
+    source_url: https://www.sigidwiki.com/images/e/ec/FLEX_Pager_IQ_20150816_929613kHz_IQ.zip
+    format: zip
+    size_mb: 2.36
+    iq_format: cu8
+    sample_rate: null
+    needs_fm_demod: true
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      FLEX pager capture from SigIDwiki.
+      Contains center frequency in filename: 929.613 MHz.
+
+  # VDL2 - 6.85 MB (SigIDwiki)
+  # dumpvdl2 supports direct IQ input via --iq-file
+  - id: sigid_vdlm2
+    decoder: dumpvdl2
+    protocol: VDL2
+    source_url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
+    format: zip
+    size_mb: 6.85
+    iq_format: cu8
+    sample_rate: null # May be 2.048 MHz, verify from file
+    needs_fm_demod: false
+    dumpvdl2_args:
+      - "--iq-file"
+      - "-"
+      - "--sample-format"
+      - "U8"
+    frequencies:
+      - 136650000
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      VDL Mode 2 aviation data link capture.
+      dumpvdl2 can read IQ directly with --iq-file mode.
+
+  # =============================================================================
+  # MEDIUM FIXTURES (10-50 MB)
+  # =============================================================================
+
+  # SDRangel DSD (YSF) - ~5 MB
+  - id: sdrangel_dsd
+    decoder: dsd-fme
+    protocol: YSF
+    source_url: https://www.sdrangel.org/iq/dsd.zip
+    format: zip
+    size_mb: 5
+    iq_format: s16le # SDRangel typically uses 16-bit
+    sample_rate: 75000 # Listed as "75k" on SDRangel page
+    needs_fm_demod: true
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      Yaesu System Fusion digital voice sample from SDRangel.
+      Listed as 16-bit WAV (IQ wrapper).
+
+  # SDRplay AIS - 16 MB
+  - id: sdrplay_ais
+    decoder: ais-catcher
+    protocol: AIS
+    source_url: https://sdrplay.com/resources/IQ/AIS.zip
+    format: zip
+    size_mb: 16
+    iq_format: wav # SDRuno-style WAV wrapper
+    sample_rate: null
+    needs_fm_demod: false # AIS-catcher handles demod internally
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      AIS ship tracking capture from SDRplay.
+      AIS-catcher can process WAV files directly.
+
+  # =============================================================================
+  # TIER A: WIDEBAND IQ (> 1 Msps) - Recommended for Pipeline Testing
+  # =============================================================================
+
+  # SDRangel ADS-B - 460 MB
+  # 2.4 Msps, 16-bit IQ in WAV wrapper
+  - id: sdrangel_adsb
+    decoder: readsb
+    protocol: ADSB
+    source_url: https://www.sdrangel.org/iq/adsb.zip
+    format: zip
+    size_mb: 460
+    iq_format: wav
+    sample_rate: 2400000
+    needs_conversion: false # readsb might handle --ifile-format
+    expected_output:
+      type: count
+      min_messages: 10
+    notes: |
+      Tier A wideband capture (2.4 Msps).
+      Best known-good public ADS-B IQ recording.
+
+  # SDRplay ACARS - 539 MB
+  # Wideband IQ, likely requires AM demodulation
+  - id: sdrplay_acars
+    decoder: acarsdec
+    protocol: ACARS
+    source_url: https://sdrplay.com/resources/IQ/acars.zip
+    format: zip
+    size_mb: 539
+    iq_format: wav
+    sample_rate: 2000000 # Estimated, verify with soxi
+    needs_am_demod: true
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      Tier A wideband ACARS capture.
+      Requires AM demodulation to audio for acarsdec.
+
+  # =============================================================================
+  # TIER B: NARROWBAND/AUDIO FIXTURES
+  # =============================================================================
+
+  # SigIDwiki ACARS - 3.3 MB (Tier B)
+  # 135k samples/sec, 32-bit float, Stereo IQ
+  - id: sigid_acars
+    decoder: acarsdec
+    protocol: ACARS
+    source_url: https://www.sigidwiki.com/images/0/00/ACARS_IQ.zip
+    format: zip
+    size_mb: 3.3
+    iq_format: f32le
+    sample_rate: 135498
+    needs_am_demod: true
+    expected_output:
+      type: count
+      min_messages: 1
+    notes: |
+      Tier B narrowband ACARS capture.
+      Requires AM demodulation.
+
+  # SigIDwiki VDL2 - 6.85 MB (Audio-rate only)
+  # 48kHz, 16-bit PCM - INVALID for dumpvdl2 direct IQ
+  - id: sigid_vdlm2
+    decoder: dumpvdl2
+    protocol: VDL2
+    source_url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
+    format: zip
+    size_mb: 6.85
+    iq_format: wav
+    sample_rate: 48000
+    expected_output:
+      type: none
+    notes: |
+      Audio-rate recording (48kHz). 
+      Too low for dumpvdl2 IQ input (needs >1Msps or integer multiple of 105k).
+      Marked as reference only.
+
+  # =============================================================================
+  # SPECIAL: rtl_433 uses external test repository
+  # =============================================================================
+
+  - id: rtl433_tests_repo
+    decoder: rtl433
+    protocol: various
+    source_url: https://github.com/merbanan/rtl_433_tests.git
+    format: git_repo
+    size_mb: null # Variable, contains many small samples
+    notes: |
+      rtl_433 community test repository with extensive sample coverage.
+      Clone and use specific samples for regression testing.
+
+  # =============================================================================
+  # SPECIAL: direwolf uses gen_packets for deterministic generation
+  # =============================================================================
+
+  - id: direwolf_generated
+    decoder: direwolf
+    protocol: APRS
+    source_url: null # Generated locally
+    format: generated
+    generator: gen_packets
+    notes: |
+      APRS packets generated with gen_packets tool.
+      No download needed - generate deterministic test WAV files.
