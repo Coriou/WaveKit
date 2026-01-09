@@ -77,6 +77,8 @@ export interface DecoderCaps {
  * using csdr before feeding audio to the actual decoder process.
  */
 export interface DemodulationConfig {
+	/** Modulation type: 'fm' (default) or 'am' for ACARS */
+	modulation?: "fm" | "am"
 	/** FM bandwidth in Hz (e.g., 12500 for NFM, 15000 for wider signals) */
 	bandwidth: number
 	/** Target audio sample rate in Hz (e.g., 48000, 22050) */

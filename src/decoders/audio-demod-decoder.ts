@@ -231,8 +231,16 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 
 		csdrStages.push(
 			`csdr firdecimate ${decimation} ${transition}${cutoffArg}`, // Decimate + filter (complex)
-			"csdr fmdemod", // FM demod: complex -> real audio
 		)
+
+		if (config.modulation === "am") {
+			csdrStages.push(
+				"csdr amdemod", // AM demod: complex -> real envelope (jketterl/csdr syntax)
+				"csdr agc -f float -p fast -r 0.8", // AM needs AGC for envelope normalization
+			)
+		} else {
+			csdrStages.push("csdr fmdemod") // FM demod: complex -> real audio
+		}
 
 		// Optional Audio Lowpass Filter (e.g. 3000Hz)
 		// Applied after demod but before DC block/Gain to clean noise

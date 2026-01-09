@@ -287,3 +287,22 @@ demo: docker-build-full docker-dev ## Build and run demo
 	@echo ""
 	@echo "View logs:     make docker-logs"
 	@echo "Stop demo:     make docker-compose-down"
+
+# ==============================================================================
+# Fixture Testing (IQ-based decoder validation)
+# ==============================================================================
+
+fixtures-download: ## Download test fixtures (small ones by default)
+	@./fixtures/download.sh
+
+fixtures-download-all: ## Download ALL test fixtures (large files!)
+	@./fixtures/download.sh --all
+
+fixtures-convert: ## Convert fixtures to decoder-ready formats
+	@./fixtures/convert.sh
+
+fixtures-test: ## Run decoder tests against fixtures (in container)
+	@docker exec -it $(DEV_CONTAINER) ./fixtures/test-decoders.sh
+
+fixtures-test-local: ## Run decoder tests locally (if decoders installed)
+	@./fixtures/test-decoders.sh

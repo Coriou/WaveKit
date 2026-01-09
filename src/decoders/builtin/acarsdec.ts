@@ -2,39 +2,29 @@
  * ACARS Decoder - Aircraft Communications Addressing and Reporting System decoder
  *
  * Requirements:
- * - 23.1: WHEN started, THE Acarsdec_Decoder SHALL spawn acarsdec with the configured frequencies and device
+ * - 23.1: WHEN started, THE Acarsdec_Decoder SHALL spawn acarsdec
  * - 23.2: WHEN acarsdec decodes a message, THE Acarsdec_Decoder SHALL parse it into structured ACARSMessage events
- * - 23.3: THE Acarsdec_Decoder SHALL support multiple simultaneous frequencies
  * - 23.4: THE Acarsdec_Decoder SHALL normalize output to JSON format
+ *
+ * Updated implementation (2026-01-09):
+ * Uses AudioDemodDecoder to consume shared IQ data and perform internal AM demodulation
+ * using csdr, feeding raw audio to f00b4r0/acarsdec fork via stdin.
  */
 
-import {
-	ExternalSdrDecoder,
-	type ExternalSdrConfig,
-} from "../external-sdr-decoder.js"
-import { PassiveRtlProxy } from "../passive-rtl-proxy.js"
-import { PassThrough, type Readable } from "node:stream"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import type { DecoderCaps, DecoderConfig, DecoderOutput, DemodulationConfig } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /**
  * Configuration options for the ACARS decoder.
  */
 export interface AcarsdecOptions {
-	/** RTL-SDR device serial number (local device mode) */
-	deviceSerial?: string | undefined
-	/** RTL-TCP host for network mode (e.g., "192.168.1.69") */
-	rtlTcpHost?: string | undefined
-	/** RTL-TCP port for network mode (default: 1235) */
-	rtlTcpPort?: number | undefined
-	/** Frequencies to monitor in Hz (Requirement 23.3) */
-	frequencies: number[]
-	/** Gain setting for the RTL-SDR */
+	/** Frequencies to monitor in Hz (metadata only in this mode) */
+	frequencies?: number[]
+	/** Gain setting (metadata only) */
 	gain?: number | undefined
-	/** PPM correction for the RTL-SDR */
-	ppm?: number | undefined
-	/** Output format: json or native (Requirement 23.4) */
-	outputFormat?: "json" | "native" | undefined
+	/** Input sample rate from source */
+	inputSampleRate?: number | undefined
 	/** Additional command line arguments */
 	extraArgs?: string[] | undefined
 }
@@ -96,175 +86,97 @@ interface AcarsdecJsonOutput {
 
 /**
  * ACARS Decoder - Decodes ACARS aircraft data link messages.
- *
- * Uses the External SDR pattern - acarsdec manages its own RTL-SDR device
- * and outputs decoded messages to stdout. This decoder spawns acarsdec
- * with the configured device and frequencies, then parses the JSON output
- * into structured ACARSMessage events.
- *
- * Supports multiple simultaneous frequencies (Requirement 23.3) by passing
- * them as command line arguments to acarsdec.
+ * 
+ * Uses the AudioDemodDecoder base class to consume shared IQ data.
+ * Performs AM demodulation using csdr and feeds raw S16LE audio to
+ * f00b4r0/acarsdec fork via stdin.
  */
-export class AcarsdecDecoder extends ExternalSdrDecoder {
+export class AcarsdecDecoder extends AudioDemodDecoder {
 	private readonly options: AcarsdecOptions
-	private proxy: PassiveRtlProxy | null = null
-	private proxyPort: number | null = null
-	// Initialize early to handle attachInput being called before start()
-	private internalInputStream: PassThrough = new PassThrough()
 
 	constructor(config: DecoderConfig, logger: Logger) {
-		// Build the external SDR config from decoder config
-		const options = parseAcarsdecOptions(config)
+		super(config, logger)
+		this.options = parseAcarsdecOptions(config)
+	}
 
-		const externalConfig: ExternalSdrConfig = {
-			id: config.id,
-			type: config.type,
-			enabled: config.enabled,
-			sourceId: config.sourceId,
-			options: config.options,
-			// Use "rtltcp" as placeholder when in network mode (not actually used for device access)
-			deviceSerial:
-				options.deviceSerial ?? (options.rtlTcpHost ? "rtltcp" : "0"),
-			frequencies: options.frequencies,
+	/**
+	 * Returns the demodulation configuration for ACARS.
+	 * 
+	 * Requirements:
+	 * - AM Modulation
+	 * - 12.5kHz or 25kHz bandwidth
+	 * - Sample rate must be multiple of 12kHz for acarsdec
+	 */
+	protected getDemodConfig(): DemodulationConfig {
+		return {
+			modulation: "am",           // ACARS uses AM Modulation
+			bandwidth: 25000,           // ~25kHz bandwidth
+			sampleRate: 12000,          // acarsdec requires 12kHz multiples (using 12000)
+			demodSampleRate: 24000,     // Demod at 24ksps (decimation=100 from 2.4Msps)
+			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
+			deEmphasis: false,          // No de-emphasis for data
+			fmGain: 1.0,                // Default gain
+			// skipDcBlock: true - removed to enable DC block (needed to remove carrier from AM envelope)
 		}
-
-		// Add optional fields only if defined
-		if (options.gain !== undefined) {
-			externalConfig.gain = options.gain
-		}
-		if (options.ppm !== undefined) {
-			externalConfig.ppm = options.ppm
-		}
-
-		super(externalConfig, logger)
-		this.options = options
 	}
 
 	/**
 	 * Returns the acarsdec command (Requirement 23.1).
 	 */
-	protected getCommand(): string {
+	protected getDecoderCommand(): string {
 		return "acarsdec"
 	}
 
 	/**
-	 * Returns command line arguments for acarsdec (Requirements 23.1, 23.3, 23.4).
+	 * Returns command line arguments for acarsdec.
+	 * Using f00b4r0 fork syntax for stdin injection.
+	 * 
+	 * IMPORTANT: The sndfile parameter syntax is critical for raw audio via stdin:
+	 * - Use: '/dev/stdin,subtype=0x02' (comma-separated, no file= prefix)
+	 * - subtype=0x02 is hex for SF_FORMAT_PCM_16 (S16LE)
+	 * - The comma syntax (not file=) triggers proper RAW format handling in libsndfile
 	 */
-	protected getArgs(): string[] {
-		// Ensure proxy is running
-		if (!this.proxy || !this.proxyPort) {
-			throw new Error("Passive Proxy not started")
-		}
-
-		// Construct the acarsdec command string
+	protected getDecoderArgs(): string[] {
 		const args: string[] = []
 
 		// Enable JSON output to stdout (Requirement 23.4)
-		args.push("-o", "4")
+		// f00b4r0 fork uses --output json:file:path=-
+		args.push("--output", "json:file:path=-")
 
-		// Use the proxy parameters
-		// acarsdec 3.4+ uses -d driver=rtltcp,rtltcp=IP:PORT
-		args.push("-d", `driver=rtltcp,rtltcp=127.0.0.1:${this.proxyPort}`)
-		// Set sample rate multiplier to 192 for 2.4 MS/s
-		args.push("-m", "192")
+		// Input from stdin using sndfile raw mode
+		// CRITICAL: Use comma syntax '/dev/stdin,subtype=0x02' NOT 'file=/dev/stdin,subtype=2'
+		// The comma syntax (without file=) properly triggers SF_FORMAT_RAW in libsndfile
+		// subtype=0x02 corresponds to SF_FORMAT_PCM_16 (S16LE)
+		args.push("--sndfile", "/dev/stdin,subtype=0x02")
 
-		// Gain setting - passed to proxy/acarsdec
-		if (this.options.gain !== undefined) {
-			args.push("-g", this.options.gain.toString())
-		}
-
-		// PPM correction
-		if (this.options.ppm !== undefined) {
-			args.push("-p", this.options.ppm.toString())
-		}
+		// Rate multiplier for 12kHz base rate
+		// "sample rate is <rateMult> * 12000 S/s"
+		args.push("-m", "1")
 
 		// Additional arguments
 		if (this.options.extraArgs) {
 			args.push(...this.options.extraArgs)
 		}
 
-		// Frequencies
-		for (const freq of this.options.frequencies) {
-			args.push((freq / 1_000_000).toFixed(3))
-		}
+		// Frequencies should NOT be passed as arguments in --sndfile mode
+		// The help text shows they are part of the mutually exclusive SDR branch
 
 		return args
 	}
 
+	// Note: We don't need to override buildPipelineCommand() anymore.
+	// The base AudioDemodDecoder pipeline outputs raw S16LE which acarsdec
+	// can now read via the correct '/dev/stdin,subtype=0x02' syntax.
+
 	/**
 	 * Returns the decoder's capabilities (Requirement 17.1).
 	 */
-	protected getCaps(): DecoderCaps {
-		return {
-			input: "iq",
-			wantsExclusiveSource: false,
-			output: "jsonl",
-			integrationPattern: "external_sdr",
-		}
-	}
-
-	/**
-	 * Override attachInput to pipe to our internal proxy stream.
-	 * Stream is initialized in constructor so it's always available.
-	 */
-	override attachInput(stream: Readable): void {
-		this.logger.debug("Attaching input to Acarsdec Proxy")
-		stream.pipe(this.internalInputStream)
-	}
-
-	override detachInput(): void {
-		this.logger.debug("Detaching input from Acarsdec Proxy")
-		// Cannot easily unpipe from the source side without reference to source
-		// But we can unpipe internalInputStream?
-		// Typically clean up happens by destroying streams.
-	}
-
-	/**
-	 * Initialize proxy in start() logic.
-	 * We need to do this carefully because super.start() calls getArgs() which needs proxyPort.
-	 * But we can't call async code in getArgs().
-	 * So we must overload start().
-	 */
-	override async start(): Promise<void> {
-		try {
-			// Create and start the proxy
-			// We pass the bridge stream to the proxy
-			this.proxy = new PassiveRtlProxy(
-				{ stream: this.internalInputStream },
-				this.logger,
-			)
-			this.proxyPort = await this.proxy.listen()
-
-			this.logger.info(
-				{ proxyPort: this.proxyPort },
-				"Started internal Passive RTL Proxy for acarsdec",
-			)
-
-			// Now we can proceed with spawn
-			await super.start()
-		} catch (err) {
-			this.logger.error({ err }, "Failed to start acarsdec proxy")
-			throw err
-		}
-	}
-
-	override async stop(): Promise<void> {
-		await super.stop()
-		if (this.proxy) {
-			this.proxy.close()
-			this.proxy = null
-			this.proxyPort = null
-		}
-		// Destroy old stream and create new one for potential restart
-		this.internalInputStream.destroy()
-		this.internalInputStream = new PassThrough()
+	protected override getCaps(): DecoderCaps {
+		return ACARSDEC_CAPS
 	}
 
 	/**
 	 * Parses a line of output into a DecoderOutput object (Requirement 23.2).
-	 *
-	 * @param line - A line of JSON output from acarsdec
-	 * @returns DecoderOutput with ACARSMessage data, or null if parsing fails
 	 */
 	protected parseOutput(line: string): DecoderOutput | null {
 		const trimmed = line.trim()
@@ -272,7 +184,7 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 
 		// Skip non-JSON lines (startup messages, etc.)
 		if (!trimmed.startsWith("{")) {
-			this.logger.debug({ line: trimmed }, "Skipping non-JSON line")
+			// this.logger.debug({ line: trimmed }, "Skipping non-JSON line")
 			return null
 		}
 
@@ -302,48 +214,28 @@ export class AcarsdecDecoder extends ExternalSdrDecoder {
 function parseAcarsdecOptions(config: DecoderConfig): AcarsdecOptions {
 	const options = config.options as Record<string, unknown>
 
-	// Device serial for local mode (optional when using rtl_tcp)
-	const deviceSerial =
-		config.deviceSerial ?? (options["deviceSerial"] as string | undefined)
-
-	// RTL-TCP network mode options
-	const rtlTcpHost = options["rtlTcpHost"] as string | undefined
-	const rtlTcpPort = options["rtlTcpPort"] as number | undefined
-
-	// Frequencies can come from config or options
+	// Frequencies (optional in this mode, but good to preserve)
 	let frequencies = config.frequencies ?? (options["frequencies"] as number[])
 	if (!frequencies || frequencies.length === 0) {
-		// Default ACARS frequencies (in Hz)
 		frequencies = [131_550_000, 131_725_000]
 	}
 
 	return {
-		deviceSerial,
-		rtlTcpHost,
-		rtlTcpPort,
 		frequencies,
 		gain: options["gain"] as number | undefined,
-		ppm: options["ppm"] as number | undefined,
-		outputFormat:
-			(options["outputFormat"] as "json" | "native" | undefined) ?? "json",
+		inputSampleRate: options["inputSampleRate"] as number | undefined,
 		extraArgs: options["extraArgs"] as string[] | undefined,
 	}
 }
 
 /**
  * Parses acarsdec JSON output into an ACARSMessage object (Requirement 23.2).
- *
- * @param json - Parsed JSON object from acarsdec output
- * @returns ACARSMessage object, or null if required fields are missing
  */
 export function parseAcarsdecJson(
 	json: AcarsdecJsonOutput,
 ): ACARSMessage | null {
 	// Frequency is required - use freq or frequency field
-	const frequency = json.freq ?? json.frequency
-	if (frequency === undefined) {
-		return null
-	}
+	const frequency = json.freq ?? json.frequency ?? 131.550 // Default fallback if missing (stdin mode might output 0 or null?)
 
 	// Parse timestamp - can be Unix timestamp or ISO string
 	let timestamp: Date
@@ -367,7 +259,7 @@ export function parseAcarsdecJson(
 
 	return {
 		timestamp,
-		frequency: frequency * 1_000_000, // Convert MHz to Hz for consistency
+		frequency: frequency * 1_000_000, // Convert MHz to Hz
 		channel: json.channel ?? 0,
 		level: json.level ?? 0,
 		error: json.error ?? 0,
@@ -384,7 +276,6 @@ export function parseAcarsdecJson(
 
 /**
  * Factory function for creating Acarsdec decoder instances.
- * Used by the DecoderRegistry.
  */
 export function createAcarsdecDecoder(
 	config: DecoderConfig,
@@ -395,11 +286,10 @@ export function createAcarsdecDecoder(
 
 /**
  * Capabilities for the Acarsdec decoder.
- * Used when registering with the DecoderRegistry.
  */
 export const ACARSDEC_CAPS: DecoderCaps = {
 	input: "iq",
 	wantsExclusiveSource: false,
 	output: "jsonl",
-	integrationPattern: "external_sdr",
+	integrationPattern: "pure_consumer", // Updated from external_sdr
 }

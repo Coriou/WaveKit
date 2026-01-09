@@ -74,6 +74,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     librtaudio-dev \
     libiio-dev \
     libad9361-dev \
+    libcjson-dev \
     # utilities
     curl \
     wget \
@@ -126,6 +127,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libncurses6 \
     zlib1g \
     libzstd1 \
+    libcjson1 \
     # Runtime utilities
     ca-certificates \
     curl \
@@ -247,10 +249,10 @@ FROM base-deps AS acarsdec-build
 
 WORKDIR /build
 
-RUN git clone --depth 1 https://github.com/TLeconte/acarsdec.git && \
+RUN git clone --depth 1 https://github.com/f00b4r0/acarsdec.git && \
     cd acarsdec && \
     mkdir build && cd build && \
-    cmake -DCMAKE_BUILD_TYPE=Release -Dsoapy=ON .. && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j$(nproc) && \
     make install
 
