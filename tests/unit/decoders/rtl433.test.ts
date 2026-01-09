@@ -19,12 +19,16 @@ import type {
 const testLogger = pino({ level: "silent" })
 
 /**
- * Access the protected parseOutput method for testing.
- * We create a test subclass to expose it.
+ * Access the protected methods for testing.
+ * We create a test subclass to expose them.
  */
 class TestRtl433Decoder extends Rtl433Decoder {
 	public testParseOutput(line: string): DecoderOutput | null {
 		return this.parseOutput(line)
+	}
+
+	public testGetArgs(): string[] {
+		return this.getArgs()
 	}
 }
 
@@ -319,6 +323,71 @@ describe("RTL_433 Decoder Property-Based Tests", () => {
 				),
 				{ numRuns: 100 },
 			)
+		})
+	})
+
+	/**
+	 * Command Line Arguments Tests
+	 * Validates that rtl_433 command line arguments are correctly formed.
+	 */
+	describe("Command Line Arguments", () => {
+		it("should use cu8:- format for stdin input (not plain -)", () => {
+			const decoder = createTestDecoder("test-rtl433")
+			const args = decoder.testGetArgs()
+
+			// Find the -r argument and its value
+			const rIndex = args.indexOf("-r")
+			expect(rIndex).toBeGreaterThanOrEqual(0)
+
+			const rValue = args[rIndex + 1]
+			// rtl_433 requires format:filename syntax for stdin, e.g., "cu8:-"
+			// Plain "-" doesn't specify the IQ format and won't work
+			expect(rValue).toBe("cu8:-")
+		})
+
+		it("should include JSON output format flag", () => {
+			const decoder = createTestDecoder("test-rtl433")
+			const args = decoder.testGetArgs()
+
+			// Should have -F json for JSON output
+			expect(args).toContain("-F")
+			expect(args).toContain("json")
+		})
+
+		it("should include sample rate when specified", () => {
+			const config: DecoderConfig = {
+				id: "test-rtl433-sr",
+				type: "rtl_433",
+				enabled: true,
+				options: {
+					outputFormat: "json",
+					sampleRate: 2_048_000, // rtl_433 uses 'sampleRate' not 'inputSampleRate'
+				},
+			}
+			const decoder = new TestRtl433Decoder(config, testLogger)
+			const args = decoder.testGetArgs()
+
+			// Should have -s for sample rate
+			expect(args).toContain("-s")
+			expect(args).toContain("2048000")
+		})
+
+		it("should support extra args for additional flags like frequency", () => {
+			const config: DecoderConfig = {
+				id: "test-rtl433-extra",
+				type: "rtl_433",
+				enabled: true,
+				options: {
+					outputFormat: "json",
+					extraArgs: ["-f", "433920000"],
+				},
+			}
+			const decoder = new TestRtl433Decoder(config, testLogger)
+			const args = decoder.testGetArgs()
+
+			// Extra args should be included
+			expect(args).toContain("-f")
+			expect(args).toContain("433920000")
 		})
 	})
 })

@@ -67,12 +67,19 @@ export class Rtl433Decoder extends BaseDecoder {
 
 	/**
 	 * Returns command line arguments for rtl_433 (Requirement 8.1, 8.3).
+	 *
+	 * rtl_433 file input format:
+	 * - Use 'cu8:-' to read unsigned 8-bit complex IQ from stdin
+	 * - Format must be specified with colon prefix (e.g., 'cu8:', 'cs16:', 'cf32:')
+	 * - The '-' after the colon means read from stdin
+	 * - See: https://github.com/merbanan/rtl_433#running (Read file option section)
 	 */
 	protected getArgs(): string[] {
 		const args: string[] = []
 
-		// Read from stdin (piped audio data)
-		args.push("-r", "-")
+		// Read CU8 (unsigned 8-bit complex IQ) from stdin
+		// Format: -r <format>:<filename> where - means stdin
+		args.push("-r", "cu8:-")
 
 		// Set output format to JSON for structured parsing (Requirement 8.2)
 		if (this.options.outputFormat === "json") {

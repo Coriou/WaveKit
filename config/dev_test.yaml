@@ -80,13 +80,18 @@ decoders:
       outputFormat: json
       inputSampleRate: 2048000
 
-  # ACARS decoder - aircraft data link messages (ExternalSdrDecoder via proxy)
+  # ACARS decoder - aircraft data link messages
+  # NOTE: acarsdec requires exclusive SDR control (SoapySDR driver), it cannot
+  # consume shared IQ data from the fanout. To use ACARS decoding:
+  # 1. Use a dedicated SDR on a different frequency, OR
+  # 2. Use dumpvdl2 which includes ACARS-over-VDL2 decoding via stdin
+  # Disabled in shared-source mode as it would just waste resources.
   - id: acars
     type: acarsdec
-    enabled: true
+    enabled: false
     sourceId: pi-iq
     options:
-      rtlTcpHost: 192.168.1.69 # RTL-TCP proxy mode
+      rtlTcpHost: 192.168.1.69 # Would need dedicated SDR
       rtlTcpPort: 1235
       frequencies: [131550000, 131725000]
       outputFormat: json
