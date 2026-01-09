@@ -53,18 +53,20 @@ class SignalCapture:
         port: int = 1235,
         trigger_threshold: float = 1.5,
         release_threshold: float | None = None,
+        release_hold_sec: float = 0.15,
         pre_buffer_sec: float = 1.0,
         post_signal_sec: float = 0.5,
         min_duration_sec: float = 0.5,
         max_duration_sec: float = 60.0,
         cooldown_sec: float = 2.0,
-        output_dir: str = "/output",
+        output_dir: str = "/data/debug_audio",
         quiet: bool = False,
     ):
         self.host = host
         self.port = port
         self.trigger_threshold = trigger_threshold
         self.release_threshold = release_threshold or (trigger_threshold * 0.85)
+        self.release_hold_sec = release_hold_sec
         self.pre_buffer_sec = pre_buffer_sec
         self.post_signal_sec = post_signal_sec
         self.min_duration_sec = min_duration_sec
@@ -158,6 +160,9 @@ class SignalCapture:
         last_signal_time = 0.0
         last_capture_time = 0.0
         capture_stats = {"peak_std": 0.0, "std_samples": []}
+
+        # Debounce signal end detection (prevents rapid end/resume flapping)
+        release_candidate_since: float | None = None
         
         # Smoothing for std (prevent false triggers)
         std_history: deque[float] = deque(maxlen=5)
@@ -229,21 +234,26 @@ class SignalCapture:
                     
                     # Check for signal end
                     if smoothed_std < self.release_threshold:
-                        self._log(f"\n  Signal ended at {duration:.2f}s")
-                        state = "POST_SIGNAL"
-                        last_signal_time = now
+                        if release_candidate_since is None:
+                            release_candidate_since = now
+                        elif (now - release_candidate_since) >= self.release_hold_sec:
+                            self._log(f"\n  Signal ended at {duration:.2f}s")
+                            state = "POST_SIGNAL"
+                            last_signal_time = now
                     elif duration >= self.max_duration_sec:
                         self._log(f"\n  Max duration reached")
                         state = "SAVING"
                     else:
+                        release_candidate_since = None
                         self._progress(f"  Capturing: {duration:.1f}s std={smoothed_std:.2f}")
                 
                 elif state == "POST_SIGNAL":
                     capture_buffer.append(data)
                     
-                    if smoothed_std > self.release_threshold:
-                        # Signal came back
+                    if smoothed_std > self.trigger_threshold:
+                        # Signal came back strongly enough to re-trigger
                         state = "CAPTURING"
+                        release_candidate_since = None
                         self._log("  Signal resumed")
                     elif (now - last_signal_time) >= self.post_signal_sec:
                         state = "SAVING"
@@ -272,6 +282,7 @@ class SignalCapture:
                     capture_buffer = []
                     ring_buffer.clear()
                     capture_stats = {"peak_std": 0.0, "std_samples": []}
+                    release_candidate_since = None
         
         except KeyboardInterrupt:
             self._log("\n\nInterrupted by user")
@@ -309,6 +320,12 @@ Examples:
                         help="Trigger threshold (std dev)")
     parser.add_argument("--release", type=float, default=None,
                         help="Release threshold (default: 85%% of trigger)")
+    parser.add_argument(
+        "--release-hold",
+        type=float,
+        default=0.15,
+        help="Seconds below release threshold required to end signal (debounce)",
+    )
     parser.add_argument("--pre", type=float, default=1.0,
                         help="Pre-trigger buffer seconds")
     parser.add_argument("--post", type=float, default=0.5,
@@ -339,7 +356,8 @@ Examples:
         print(
             "This tool is intended to run inside the demod-test container.\n\n"
             "Run it via:\n"
-            "  docker compose -f docker-compose.demod-test.yml run --rm demod-test \\\n+    python3 /scripts/auto-capture.py --output /data/debug_audio\n\n"
+            "  docker compose -f docker-compose.demod-test.yml run --rm demod-test "
+            "python3 /scripts/auto-capture.py --output /data/debug_audio\n\n"
             "Or use the interactive wrapper:\n"
             "  node scripts/auto-capture.mjs\n",
             file=sys.stderr,
@@ -351,6 +369,7 @@ Examples:
         port=args.port,
         trigger_threshold=args.threshold,
         release_threshold=args.release,
+        release_hold_sec=args.release_hold,
         pre_buffer_sec=args.pre,
         post_signal_sec=args.post,
         min_duration_sec=args.min_duration,
