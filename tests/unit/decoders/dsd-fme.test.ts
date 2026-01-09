@@ -42,23 +42,40 @@ function createDecoder(
 
 /**
  * Access the protected parseOutput method for testing.
- * We create a test subclass to expose it.
+ * We create a test subclass to expose it and internal state.
  */
 class TestDsdFmeDecoder extends DsdFmeDecoder {
 	public testParseOutput(line: string): DecoderOutput | null {
 		return this.parseOutput(line)
+	}
+
+	/** Get the current protocol for testing sync detection */
+	public getCurrentProtocol(): string | null {
+		return (this as unknown as { currentProtocol: string | null })
+			.currentProtocol
+	}
+
+	/** Get the pending call state for testing call buffering */
+	public getPendingCall(): unknown {
+		return (this as unknown as { pendingCall: unknown }).pendingCall
+	}
+
+	/** Get the active call state for testing */
+	public getCallState(): unknown {
+		return (this as unknown as { callState: unknown }).callState
 	}
 }
 
 function createTestDecoder(
 	id: string,
 	mode: DsdFmeMode = "auto",
+	options: Record<string, unknown> = {},
 ): TestDsdFmeDecoder {
 	const config: DecoderConfig = {
 		id,
 		type: "dsd-fme",
 		enabled: true,
-		options: { mode },
+		options: { mode, ...options },
 	}
 	return new TestDsdFmeDecoder(config, testLogger)
 }
@@ -111,28 +128,27 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 	 * Feature: wavekit-core, Property 11: DSD Output Parsing
 	 * Validates: Requirements 6.2, 6.3, 6.4
 	 *
-	 * For any valid dsd-fme output line matching sync, call, or error patterns,
-	 * the parser should produce a DecoderOutput object with the correct type
-	 * field and extracted data fields.
+	 * The new call handling philosophy:
+	 * - Sync is a CANDIDATE context, not an event. We track the protocol but don't emit on sync alone.
+	 * - Calls require minimum metadata (TGT+SRC for DMR/P25/NXDN, callsigns for D-Star)
+	 * - Error events are tracked for quality but not emitted unless debug mode is on
+	 *
+	 * These tests validate the new state-machine behavior.
 	 */
 	describe("Property 11: DSD Output Parsing", () => {
-		it("should parse sync lines with mode into structured sync events", () => {
+		it("should track protocol from sync lines without emitting events", () => {
 			fc.assert(
 				fc.property(decoderIdArb, syncModeArb, (decoderId, mode) => {
 					const decoder = createTestDecoder(decoderId)
-					const line = `Sync: ${mode}`
+					const line = `Sync: +${mode}`
+
+					// Sync lines should NOT produce immediate output (protocol tracking only)
 					const output = decoder.testParseOutput(line)
+					expect(output).toBeNull()
 
-					// Should produce a valid DecoderOutput
-					expect(output).not.toBeNull()
-					expect(output!.type).toBe("sync")
-					expect(output!.decoder).toBe(decoderId)
-					expect(output!.timestamp).toBeInstanceOf(Date)
-
-					// Data should contain the mode
-					const data = output!.data as { mode: string; slot?: number }
-					expect(data.mode).toBe(mode.toUpperCase())
-					expect(data.slot).toBeUndefined()
+					// But protocol should be tracked internally
+					const protocol = decoder.getCurrentProtocol()
+					expect(protocol).not.toBeNull()
 
 					return true
 				}),
@@ -140,7 +156,7 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 			)
 		})
 
-		it("should parse sync lines with mode and slot into structured sync events", () => {
+		it("should track slot from sync lines with mode and slot", () => {
 			fc.assert(
 				fc.property(
 					decoderIdArb,
@@ -148,18 +164,15 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 					slotArb,
 					(decoderId, mode, slot) => {
 						const decoder = createTestDecoder(decoderId)
-						const line = `Sync: ${mode} Slot ${slot}`
+						const line = `Sync: +${mode} Slot ${slot}`
+
+						// Should NOT emit (sync is just protocol context)
 						const output = decoder.testParseOutput(line)
+						expect(output).toBeNull()
 
-						// Should produce a valid DecoderOutput
-						expect(output).not.toBeNull()
-						expect(output!.type).toBe("sync")
-						expect(output!.decoder).toBe(decoderId)
-
-						// Data should contain mode and slot
-						const data = output!.data as { mode: string; slot?: number }
-						expect(data.mode).toBe(mode.toUpperCase())
-						expect(data.slot).toBe(slot)
+						// Protocol should be tracked
+						const protocol = decoder.getCurrentProtocol()
+						expect(protocol).not.toBeNull()
 
 						return true
 					},
@@ -168,7 +181,7 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 			)
 		})
 
-		it("should parse call lines into structured call events with talkgroup and source", () => {
+		it("should start pending call on valid metadata (TGT/SRC)", () => {
 			fc.assert(
 				fc.property(
 					decoderIdArb,
@@ -176,19 +189,20 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 					sourceIdArb,
 					(decoderId, talkgroup, source) => {
 						const decoder = createTestDecoder(decoderId)
-						const line = `TG: ${talkgroup} SRC: ${source}`
+
+						// First establish protocol context
+						decoder.testParseOutput("Sync: +DMR")
+
+						// Then send call metadata - this starts a pending call
+						const line = `TGT: ${talkgroup} SRC: ${source}`
 						const output = decoder.testParseOutput(line)
 
-						// Should produce a valid DecoderOutput
-						expect(output).not.toBeNull()
-						expect(output!.type).toBe("call")
-						expect(output!.decoder).toBe(decoderId)
-						expect(output!.timestamp).toBeInstanceOf(Date)
+						// Should NOT emit immediately (delayed emission pattern)
+						expect(output).toBeNull()
 
-						// Data should contain talkgroup and source
-						const data = output!.data as { talkgroup: number; source: number }
-						expect(data.talkgroup).toBe(talkgroup)
-						expect(data.source).toBe(source)
+						// But pending call should be created
+						const pendingCall = decoder.getPendingCall()
+						expect(pendingCall).not.toBeNull()
 
 						return true
 					},
@@ -197,25 +211,47 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 			)
 		})
 
-		it("should parse error lines into structured error events", () => {
+		it("should track errors for quality without emitting events", () => {
 			fc.assert(
 				fc.property(
 					decoderIdArb,
 					errorPatternArb,
 					(decoderId, errorPattern) => {
+						// Create decoder WITHOUT debug mode - errors should not emit
 						const decoder = createTestDecoder(decoderId)
 						const line = `Some context ${errorPattern} more context`
 						const output = decoder.testParseOutput(line)
 
-						// Should produce a valid DecoderOutput
+						// Should NOT produce output (errors are tracked for quality, not emitted)
+						expect(output).toBeNull()
+
+						return true
+					},
+				),
+				{ numRuns: 100 },
+			)
+		})
+
+		it("should emit error events when debug mode is enabled", () => {
+			fc.assert(
+				fc.property(
+					decoderIdArb,
+					errorPatternArb,
+					(decoderId, errorPattern) => {
+						// Create decoder WITH debug mode - errors should emit
+						const decoder = createTestDecoder(decoderId, "auto", {
+							emitDebugEvents: true,
+						})
+						const line = `Some context ${errorPattern} more context`
+						const output = decoder.testParseOutput(line)
+
+						// SHOULD produce output in debug mode
 						expect(output).not.toBeNull()
 						expect(output!.type).toBe("error")
 						expect(output!.decoder).toBe(decoderId)
-						expect(output!.timestamp).toBeInstanceOf(Date)
-
-						// Data should contain the error message
-						const data = output!.data as { message: string }
-						expect(data.message).toBe(errorPattern)
+						expect((output!.data as { message: string }).message).toBe(
+							errorPattern,
+						)
 
 						return true
 					},
@@ -233,8 +269,8 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 						const upper = s.toUpperCase()
 						return (
 							!upper.includes("SYNC:") &&
-							!upper.includes("TG:") &&
-							!upper.includes("SRC:") &&
+							!upper.includes("TGT") &&
+							!upper.includes("SRC") &&
 							!upper.includes("FEC ERR") &&
 							!upper.includes("CRC ERR") &&
 							!upper.includes("SYNC LOST")
@@ -248,52 +284,6 @@ describe("DSD-FME Decoder Property-Based Tests", () => {
 						return output === null
 					},
 				),
-				{ numRuns: 100 },
-			)
-		})
-
-		it("should produce DecoderOutput with all required fields for any valid pattern", () => {
-			// Combined test for all pattern types
-			const validLineArb = fc.oneof(
-				// Sync lines
-				fc
-					.tuple(syncModeArb, fc.option(slotArb))
-					.map(([mode, slot]) =>
-						slot !== null ? `Sync: ${mode} Slot ${slot}` : `Sync: ${mode}`,
-					),
-				// Call lines
-				fc
-					.tuple(talkgroupArb, sourceIdArb)
-					.map(([tg, src]) => `TG: ${tg} SRC: ${src}`),
-				// Error lines
-				errorPatternArb.map(err => `${err}`),
-			)
-
-			fc.assert(
-				fc.property(decoderIdArb, validLineArb, (decoderId, line) => {
-					const decoder = createTestDecoder(decoderId)
-					const output = decoder.testParseOutput(line)
-
-					// Should produce a valid DecoderOutput
-					expect(output).not.toBeNull()
-
-					// Verify all required fields exist
-					expect(output).toHaveProperty("timestamp")
-					expect(output).toHaveProperty("decoder")
-					expect(output).toHaveProperty("type")
-					expect(output).toHaveProperty("data")
-
-					// Verify field types
-					expect(output!.timestamp).toBeInstanceOf(Date)
-					expect(typeof output!.decoder).toBe("string")
-					expect(typeof output!.type).toBe("string")
-					expect(output!.decoder).toBe(decoderId)
-
-					// Type should be one of the valid output types
-					expect(["sync", "call", "error"]).toContain(output!.type)
-
-					return true
-				}),
 				{ numRuns: 100 },
 			)
 		})

@@ -117,3 +117,26 @@ export function stripNulls(value: string): string {
 		.replace(/\u0000/g, "")
 		.trimEnd()
 }
+
+/**
+ * Format milliseconds duration to human-readable string (e.g., "1.2s", "1m 23s")
+ * Optimized for call durations which are typically seconds to minutes.
+ */
+export function formatDurationMs(ms: number): string {
+	if (ms < 1000) return `${ms}ms`
+	const seconds = ms / 1000
+	if (seconds < 60) {
+		return seconds < 10 ? `${seconds.toFixed(1)}s` : `${Math.round(seconds)}s`
+	}
+	const mins = Math.floor(seconds / 60)
+	const secs = Math.round(seconds % 60)
+	return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
+}
+
+/**
+ * Format a protocol name for display (uppercase, clean)
+ */
+export function formatProtocol(protocol: string | undefined | null): string {
+	if (!protocol) return "UNKNOWN"
+	return protocol.toUpperCase().replace(/P(\d)/, "P$1 ") // "p25p1" -> "P25 P1"
+}

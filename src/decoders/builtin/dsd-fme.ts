@@ -19,6 +19,8 @@
  * - Short calls (< 250ms) with weak metadata are suppressed as likely false positives.
  */
 
+import * as fs from "node:fs"
+import * as path from "node:path"
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
 import type {
 	DecoderCaps,
@@ -255,6 +257,8 @@ export interface DsdFmeOptions {
 	minCallDurationMs?: number | undefined
 	/** Emit debug events like sync/errors to output (default: false) */
 	emitDebugEvents?: boolean | undefined
+	/** Delay in ms before emitting call_start to accumulate metadata (default: 100) */
+	callStartDelayMs?: number | undefined
 }
 
 /** All supported DSD-FME modes */
@@ -280,10 +284,25 @@ const BAD_SIGNAL_ERROR_RATE = 0.8
 /** Rolling window for error rate calculation (ms) */
 const ERROR_WINDOW_MS = 500
 
+/** Interval for checking call timeout (ms) - check every 500ms */
+const CALL_TIMEOUT_CHECK_INTERVAL_MS = 500
+
+/** Delay before emitting call_start to accumulate metadata (ms) */
+const CALL_START_DELAY_MS = 100
+
 /** Error event for rolling window tracking */
 interface ErrorEvent {
 	timestamp: number
 	type: "crc" | "fec"
+}
+
+/**
+ * Pending call state - buffered before emitting call_start
+ * Allows accumulating metadata (CC, FLCO, etc.) before emission
+ */
+interface PendingCall {
+	state: DsdFmeCallState
+	emitAfter: number // Timestamp when call_start should be emitted
 }
 
 /**
@@ -305,6 +324,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
 
+	// Pending call waiting for delayed emission (accumulating metadata)
+	private pendingCall: PendingCall | null = null
+
 	// Last sync mode for deduplication
 	private lastSyncMode: string | null = null
 
@@ -313,6 +335,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	// Frame count for error rate calculation
 	private frameCount = 0
+
+	// Timer for periodic call timeout checking
+	private callTimeoutTimer: NodeJS.Timeout | null = null
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -353,6 +378,120 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			minCallDurationMs:
 				(options["minCallDurationMs"] as number) ?? MIN_CALL_DURATION_MS,
 			emitDebugEvents: (options["emitDebugEvents"] as boolean) ?? false,
+			callStartDelayMs:
+				(options["callStartDelayMs"] as number) ?? CALL_START_DELAY_MS,
+		}
+	}
+
+	/**
+	 * Starts the decoder and sets up the call timeout timer.
+	 * The timer periodically checks for stale calls and emits call_end events
+	 * even when no new output is being received from dsd-fme.
+	 */
+	override async start(): Promise<void> {
+		await super.start()
+
+		// Start periodic call timeout check timer
+		this.callTimeoutTimer = setInterval(() => {
+			this.checkCallTimeoutAsync()
+		}, CALL_TIMEOUT_CHECK_INTERVAL_MS)
+
+		this.logger.debug("Call timeout timer started")
+	}
+
+	/**
+	 * Stops the decoder and cleans up resources.
+	 * Ends any active call and clears the timeout timer.
+	 */
+	override async stop(): Promise<void> {
+		// Clear the timeout timer
+		if (this.callTimeoutTimer) {
+			clearInterval(this.callTimeoutTimer)
+			this.callTimeoutTimer = null
+			this.logger.debug("Call timeout timer stopped")
+		}
+
+		// End any active or pending call before stopping
+		const now = new Date()
+		if (this.pendingCall) {
+			// Promote pending call to active and end it
+			this.callState = this.pendingCall.state
+			this.pendingCall = null
+		}
+		if (this.callState) {
+			const endEvent = this.endCall(now, true)
+			if (endEvent) {
+				this.emit("output", endEvent)
+			}
+		}
+
+		await super.stop()
+	}
+
+	/**
+	 * Checks for call timeout asynchronously (called by timer).
+	 * Emits call_end event if a stale call is detected.
+	 */
+	private checkCallTimeoutAsync(): void {
+		const now = new Date()
+		const nowMs = now.getTime()
+
+		// First, check if pending call should be promoted to active
+		const promotedEvent = this.checkPendingCallEmission(now, nowMs)
+		if (promotedEvent) {
+			this.emit("output", promotedEvent)
+		}
+
+		// Then check for call timeout
+		const timeoutEvent = this.checkCallTimeout(now)
+		if (timeoutEvent) {
+			this.emit("output", timeoutEvent)
+		}
+	}
+
+	/**
+	 * Checks if a pending call should be emitted as call_start.
+	 * Returns call_start event if ready, null otherwise.
+	 */
+	private checkPendingCallEmission(
+		now: Date,
+		nowMs: number,
+	): DecoderOutput | null {
+		if (!this.pendingCall) return null
+
+		// Check if delay has expired
+		if (nowMs < this.pendingCall.emitAfter) return null
+
+		// Promote pending call to active call
+		this.callState = this.pendingCall.state
+		this.pendingCall = null
+
+		this.logger.info(
+			{
+				protocol: this.callState.protocol,
+				talkgroup: this.callState.talkgroup,
+				source: this.callState.source,
+				slot: this.callState.slot,
+				dmrCc: this.callState.dmr?.cc,
+			},
+			"Call started (after metadata accumulation)",
+		)
+
+		return {
+			timestamp: now,
+			decoder: this.id,
+			type: "call_start",
+			data: {
+				protocol: this.callState.protocol,
+				talkgroup: this.callState.talkgroup,
+				source: this.callState.source,
+				slot: this.callState.slot,
+				dmr: this.callState.dmr,
+				p25: this.callState.p25,
+				nxdn: this.callState.nxdn,
+				dstar: this.callState.dstar,
+				ysf: this.callState.ysf,
+			},
 		}
 	}
 
@@ -674,9 +813,23 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Checks if the current call has timed out (no metadata for CALL_TIMEOUT_MS).
+	 * Also handles pending calls that have been abandoned.
 	 * Returns a call_end event if timeout occurred, otherwise null.
 	 */
 	private checkCallTimeout(now: Date): DecoderOutput | null {
+		// Check pending call timeout (promote and end if stale)
+		if (this.pendingCall && !this.callState) {
+			const pendingSilence =
+				now.getTime() - this.pendingCall.state.lastUpdate.getTime()
+			if (pendingSilence > CALL_TIMEOUT_MS) {
+				// Promote pending to active and end it
+				this.callState = this.pendingCall.state
+				this.pendingCall = null
+				return this.endCall(now, true)
+			}
+		}
+
+		// Check active call timeout
 		if (!this.callState) return null
 
 		const silenceDuration = now.getTime() - this.callState.lastUpdate.getTime()
@@ -687,6 +840,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Updates the rolling error window for quality tracking.
+	 * Tracks errors for both active and pending calls.
 	 */
 	private updateErrorWindow(line: string, nowMs: number): void {
 		// Prune old errors outside the window
@@ -694,19 +848,22 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			e => nowMs - e.timestamp < ERROR_WINDOW_MS,
 		)
 
+		// Get the call state to update (active call takes precedence, then pending)
+		const targetCall = this.callState ?? this.pendingCall?.state ?? null
+
 		// Track FEC errors
 		if (/\bFEC\s+ERR\b/i.test(line)) {
 			this.errorWindow.push({ timestamp: nowMs, type: "fec" })
-			if (this.callState) {
-				this.callState.quality.fecErrs++
+			if (targetCall) {
+				targetCall.quality.fecErrs++
 			}
 		}
 
 		// Track CRC errors
 		if (/\bCRC\s+ERR\b/i.test(line)) {
 			this.errorWindow.push({ timestamp: nowMs, type: "crc" })
-			if (this.callState) {
-				this.callState.quality.crcErrs++
+			if (targetCall) {
+				targetCall.quality.crcErrs++
 			}
 		}
 
@@ -1103,14 +1260,17 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Checks for explicit call termination patterns.
+	 * Handles both active and pending calls.
 	 */
 	private handleTermination(line: string, now: Date): DecoderOutput | null {
-		if (!this.callState) return null
+		// Get target call (active or pending)
+		const targetCall = this.callState ?? this.pendingCall?.state ?? null
+		if (!targetCall) return null
 
 		// Protocol-specific termination patterns
 		let isTerminator = false
 
-		switch (this.callState.protocol) {
+		switch (targetCall.protocol) {
 			case "dmr":
 				isTerminator = DMR_END_HINT.test(line)
 				break
@@ -1124,6 +1284,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		if (isTerminator) {
+			// If we have a pending call, promote it first so we can end it properly
+			if (this.pendingCall && !this.callState) {
+				this.callState = this.pendingCall.state
+				this.pendingCall = null
+			}
 			return this.endCall(now, false)
 		}
 
@@ -1132,7 +1297,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Processes call metadata and manages call state.
-	 * Handles call_start, continuation, and mid-stream switches.
+	 * Uses delayed emission pattern: buffers metadata before emitting call_start
+	 * to accumulate CC, FLCO, and other metadata that may arrive on subsequent lines.
 	 */
 	private processCallMetadata(
 		now: Date,
@@ -1146,17 +1312,88 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		dstar?: DStarMetadata,
 		ysf?: YsfMetadata,
 	): DecoderOutput | null {
-		// Check if this is a different call (TG/SRC changed)
-		const keyMatches =
+		const nowMs = now.getTime()
+
+		// Check if we have an active call that matches
+		const activeKeyMatches =
 			this.callState &&
 			this.callState.protocol === protocol &&
 			this.callState.talkgroup === tgt &&
 			this.callState.source === src
 
-		// If parameters changed, end the previous call first
-		if (this.callState && !keyMatches) {
-			const endEvent = this.endCall(now, false)
+		// Check if we have a pending call that matches
+		const pendingKeyMatches =
+			this.pendingCall &&
+			this.pendingCall.state.protocol === protocol &&
+			this.pendingCall.state.talkgroup === tgt &&
+			this.pendingCall.state.source === src
 
+		// Case 1: Active call with matching key - update metadata
+		if (activeKeyMatches && this.callState) {
+			this.callState.lastUpdate = now
+			if (slot !== undefined && this.callState.slot === undefined) {
+				this.callState.slot = slot
+			}
+			if (dmr) {
+				this.callState.dmr = { ...this.callState.dmr, ...dmr }
+			}
+			if (p25) {
+				this.callState.p25 = { ...this.callState.p25, ...p25 }
+			}
+			if (nxdn) {
+				this.callState.nxdn = { ...this.callState.nxdn, ...nxdn }
+			}
+			if (dstar) {
+				this.callState.dstar = { ...this.callState.dstar, ...dstar }
+			}
+			if (ysf) {
+				this.callState.ysf = { ...this.callState.ysf, ...ysf }
+			}
+			return null // No new event, just updated metadata
+		}
+
+		// Case 2: Pending call with matching key - update metadata, extend delay
+		if (pendingKeyMatches && this.pendingCall) {
+			this.pendingCall.state.lastUpdate = now
+			if (slot !== undefined && this.pendingCall.state.slot === undefined) {
+				this.pendingCall.state.slot = slot
+			}
+			if (dmr) {
+				this.pendingCall.state.dmr = {
+					...this.pendingCall.state.dmr,
+					...dmr,
+				}
+			}
+			if (p25) {
+				this.pendingCall.state.p25 = {
+					...this.pendingCall.state.p25,
+					...p25,
+				}
+			}
+			if (nxdn) {
+				this.pendingCall.state.nxdn = {
+					...this.pendingCall.state.nxdn,
+					...nxdn,
+				}
+			}
+			if (dstar) {
+				this.pendingCall.state.dstar = {
+					...this.pendingCall.state.dstar,
+					...dstar,
+				}
+			}
+			if (ysf) {
+				this.pendingCall.state.ysf = {
+					...this.pendingCall.state.ysf,
+					...ysf,
+				}
+			}
+			return null // No new event, metadata accumulated in pending call
+		}
+
+		// Case 3: Different call detected - end previous, start new pending
+		if (this.callState) {
+			const endEvent = this.endCall(now, false)
 			this.logger.debug(
 				{
 					oldProtocol: this.callState?.protocol,
@@ -1168,14 +1405,74 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				},
 				"Call switch detected, ending previous call",
 			)
-
-			// The next line will start the new call
+			// Start new pending call
+			this.startPendingCall(
+				now,
+				nowMs,
+				protocol,
+				tgt,
+				src,
+				slot,
+				dmr,
+				p25,
+				nxdn,
+				dstar,
+				ysf,
+			)
 			return endEvent
 		}
 
-		// Start new call if needed
-		if (!this.callState) {
-			this.callState = {
+		// Case 4: Different pending call - discard old, start new
+		if (this.pendingCall) {
+			this.logger.debug(
+				{
+					oldProtocol: this.pendingCall.state.protocol,
+					oldTg: this.pendingCall.state.talkgroup,
+					newProtocol: protocol,
+					newTg: tgt,
+				},
+				"New call before pending emitted, discarding previous",
+			)
+			this.pendingCall = null
+		}
+
+		// Case 5: No active or pending call - start new pending call
+		this.startPendingCall(
+			now,
+			nowMs,
+			protocol,
+			tgt,
+			src,
+			slot,
+			dmr,
+			p25,
+			nxdn,
+			dstar,
+			ysf,
+		)
+		return null // call_start will be emitted after delay
+	}
+
+	/**
+	 * Creates a new pending call that will be emitted after the configured delay.
+	 */
+	private startPendingCall(
+		now: Date,
+		nowMs: number,
+		protocol: NonNullable<DsdFmeProtocol>,
+		tgt: number,
+		src: number,
+		slot?: number,
+		dmr?: DmrMetadata,
+		p25?: P25Metadata,
+		nxdn?: NxdnMetadata,
+		dstar?: DStarMetadata,
+		ysf?: YsfMetadata,
+	): void {
+		const delayMs = this.options.callStartDelayMs ?? CALL_START_DELAY_MS
+
+		this.pendingCall = {
+			state: {
 				protocol,
 				talkgroup: tgt,
 				source: src,
@@ -1194,59 +1491,245 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 					badSignal: false,
 					falsePositiveSuppressed: false,
 				},
+			},
+			emitAfter: nowMs + delayMs,
+		}
+
+		this.logger.debug(
+			{ protocol, tgt, src, slot, delayMs },
+			"Pending call created, will emit after delay",
+		)
+	}
+
+	/**
+	 * Finds the WAV file created by dsd-fme for a completed call.
+	 *
+	 * dsd-fme filename format: YYYYMMDD_HHMMSS_XXXXX_PROTO_CC_N_CALLTYPE_TGT_N_SRC_N.wav
+	 * Where XXXXX is an internal frame ID we cannot predict.
+	 *
+	 * Strategy:
+	 * 1. Build a regex pattern from known call metadata (proto, CC, TGT, SRC)
+	 * 2. Search in the recording directory AND common subdirectories (dsd-fme creates WAV/)
+	 * 3. Filter files matching the pattern with timestamps within call window (±10s tolerance)
+	 * 4. Return the best match (prefer exact timestamp match, then closest)
+	 */
+	private findWavFile(
+		call: DsdFmeCallState,
+		callEndTime: Date,
+	): string | undefined {
+		if (!this.options.enablePerCallRecording) return undefined
+
+		const baseDir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+
+		// dsd-fme creates a WAV subdirectory inside the output directory
+		// Search in both the base directory and common subdirectories
+		const dirsToSearch = [
+			baseDir,
+			path.join(baseDir, "WAV"),
+			path.join(baseDir, "wav"),
+		]
+
+		for (const dir of dirsToSearch) {
+			const result = this.searchForWavFile(call, callEndTime, dir)
+			if (result) return result
+		}
+
+		return undefined
+	}
+
+	/**
+	 * Async WAV file search with retries.
+	 * dsd-fme may still be writing the file when call ends, so we retry a few times.
+	 * Emits a wav_file event when the file is found.
+	 */
+	private findWavFileAsync(call: DsdFmeCallState, callEndTime: Date): void {
+		if (!this.options.enablePerCallRecording) return
+
+		const baseDir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+
+		// dsd-fme creates a WAV subdirectory inside the output directory
+		const dirsToSearch = [
+			baseDir,
+			path.join(baseDir, "WAV"),
+			path.join(baseDir, "wav"),
+		]
+
+		const maxRetries = 5
+		const retryDelayMs = 200 // 200ms between retries = up to 1 second total
+
+		let attempt = 0
+		const tryFind = (): void => {
+			attempt++
+
+			// Search all directories
+			for (const dir of dirsToSearch) {
+				const wavFile = this.searchForWavFile(call, callEndTime, dir)
+				if (wavFile) {
+					// Found it! Emit an event so the UI can update
+					this.emit("output", {
+						timestamp: new Date(),
+						decoder: this.id,
+						type: "call_end",
+						data: {
+							protocol: call.protocol,
+							talkgroup: call.talkgroup,
+							source: call.source,
+							slot: call.slot,
+							duration: callEndTime.getTime() - call.startTime.getTime(),
+							dmr: call.dmr,
+							p25: call.p25,
+							nxdn: call.nxdn,
+							dstar: call.dstar,
+							ysf: call.ysf,
+							quality: call.quality,
+							flags: { ...call.flags, wavFileUpdate: true },
+							wavFile,
+						},
+					})
+					this.logger.debug(
+						{ wavFile, attempt, dir },
+						"Found WAV file after async search",
+					)
+					return
+				}
 			}
 
-			this.logger.info({ protocol, tgt, src, slot }, "Call started")
-
-			return {
-				timestamp: now,
-				decoder: this.id,
-				type: "call_start",
-				data: {
-					protocol,
-					talkgroup: tgt,
-					source: src,
-					slot,
-					dmr,
-					p25,
-					nxdn,
-					dstar,
-					ysf,
-				},
+			// Not found in any directory, retry if attempts remain
+			if (attempt < maxRetries) {
+				setTimeout(tryFind, retryDelayMs)
+			} else {
+				this.logger.debug(
+					{
+						proto: call.protocol,
+						tg: call.talkgroup,
+						src: call.source,
+						attempts: attempt,
+						dirsSearched: dirsToSearch,
+					},
+					"WAV file not found after max retries",
+				)
 			}
 		}
 
-		// Existing call - update metadata
-		this.callState.lastUpdate = now
+		// Start first retry after initial delay (give dsd-fme time to write)
+		setTimeout(tryFind, retryDelayMs)
+	}
 
-		// Update slot if we didn't have it
-		if (slot !== undefined && this.callState.slot === undefined) {
-			this.callState.slot = slot
-		}
-
-		// Merge protocol-specific metadata
-		if (dmr) {
-			this.callState.dmr = { ...this.callState.dmr, ...dmr }
-		}
-		if (p25) {
-			this.callState.p25 = { ...this.callState.p25, ...p25 }
-		}
-		if (nxdn) {
-			this.callState.nxdn = { ...this.callState.nxdn, ...nxdn }
-		}
-		if (dstar) {
-			this.callState.dstar = { ...this.callState.dstar, ...dstar }
-		}
-		if (ysf) {
-			this.callState.ysf = { ...this.callState.ysf, ...ysf }
+	/**
+	 * Core WAV file search logic - searches directory for matching file.
+	 */
+	private searchForWavFile(
+		call: DsdFmeCallState,
+		callEndTime: Date,
+		dir: string,
+	): string | undefined {
+		// Check if directory exists
+		if (!fs.existsSync(dir)) {
+			this.logger.debug({ dir }, "Recording directory does not exist")
+			return undefined
 		}
 
-		// Suppress duplicate events (deduplication)
-		return null
+		const proto = call.protocol?.toUpperCase().replace(/\d+$/, "") ?? "UNK"
+		const tg = call.talkgroup ?? 0
+		const src = call.source ?? 0
+		const cc = call.dmr?.cc ?? call.p25?.nac
+
+		// Build regex pattern for dsd-fme filename format
+		// Format: YYYYMMDD_HHMMSS_XXXXX_PROTO_CC_N_CALLTYPE_TGT_N_SRC_N.wav
+		const ccPattern = cc !== undefined ? `_CC_${cc}` : "_CC_\\d+"
+		const pattern = new RegExp(
+			`^(\\d{8}_\\d{6})_\\d+_${proto}${ccPattern}_(?:GROUP|UNIT)_TGT_${tg}_SRC_${src}\\.wav$`,
+			"i",
+		)
+
+		// Time window for matching (call start - 5s to call end + 5s)
+		const windowStartMs = call.startTime.getTime() - 5000
+		const windowEndMs = callEndTime.getTime() + 5000
+
+		try {
+			const files = fs.readdirSync(dir)
+			const candidates: Array<{ file: string; timestamp: Date; diff: number }> =
+				[]
+
+			for (const file of files) {
+				const match = pattern.exec(file)
+				if (!match) continue
+
+				// Parse timestamp from filename (YYYYMMDD_HHMMSS)
+				const tsStr = match[1]
+				if (!tsStr) continue
+
+				const fileTimestamp = this.parseFilenameTimestamp(tsStr)
+				if (!fileTimestamp) continue
+
+				const fileMs = fileTimestamp.getTime()
+
+				// Check if file timestamp falls within call window
+				if (fileMs >= windowStartMs && fileMs <= windowEndMs) {
+					// Calculate how close this file's timestamp is to call start
+					const diff = Math.abs(fileMs - call.startTime.getTime())
+					candidates.push({ file, timestamp: fileTimestamp, diff })
+				}
+			}
+
+			if (candidates.length === 0) {
+				return undefined
+			}
+
+			// Sort by timestamp difference (closest to call start first)
+			candidates.sort((a, b) => a.diff - b.diff)
+			const bestMatch = candidates[0]
+
+			if (bestMatch) {
+				const fullPath = path.join(dir, bestMatch.file)
+				this.logger.debug(
+					{
+						file: bestMatch.file,
+						callStart: call.startTime.toISOString(),
+						fileTimestamp: bestMatch.timestamp.toISOString(),
+						diffMs: bestMatch.diff,
+						candidates: candidates.length,
+					},
+					"Found matching WAV file for call",
+				)
+				return fullPath
+			}
+
+			return undefined
+		} catch (err) {
+			this.logger.warn(
+				{ dir, error: err instanceof Error ? err.message : String(err) },
+				"Error searching for WAV file",
+			)
+			return undefined
+		}
+	}
+
+	/**
+	 * Parses a timestamp string from dsd-fme filename format.
+	 * Format: YYYYMMDD_HHMMSS
+	 */
+	private parseFilenameTimestamp(tsStr: string): Date | null {
+		// Expected format: YYYYMMDD_HHMMSS (e.g., 20260109_105327)
+		const match = /^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})$/.exec(tsStr)
+		if (!match) return null
+
+		const [, year, month, day, hours, mins, secs] = match
+		if (!year || !month || !day || !hours || !mins || !secs) return null
+
+		return new Date(
+			parseInt(year, 10),
+			parseInt(month, 10) - 1, // Month is 0-indexed
+			parseInt(day, 10),
+			parseInt(hours, 10),
+			parseInt(mins, 10),
+			parseInt(secs, 10),
+		)
 	}
 
 	/**
 	 * Ends the current call and returns a call_end event.
+	 * Generates expected WAV filename if per-call recording is enabled.
 	 */
 	private endCall(now: Date, timeout: boolean): DecoderOutput | null {
 		if (!this.callState) return null
@@ -1276,6 +1759,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return null // Don't emit for likely false positives
 		}
 
+		// Try to find the WAV file immediately
+		const wavFile = this.findWavFile(callInfo, now)
+
+		// Also trigger async search with retries - dsd-fme may still be writing
+		// This will emit an update event if the file is found later
+		if (!wavFile) {
+			this.findWavFileAsync(callInfo, now)
+		}
+
 		// Clear state
 		this.callState = null
 		this.frameCount = 0
@@ -1290,6 +1782,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				timeout,
 				quality: callInfo.quality,
 				badSignal: callInfo.flags.badSignal,
+				wavFile,
 			},
 			"Call ended",
 		)
@@ -1311,7 +1804,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				ysf: callInfo.ysf,
 				quality: callInfo.quality,
 				flags: callInfo.flags,
-				wavFile: callInfo.wavFile,
+				wavFile,
 			},
 		}
 	}
