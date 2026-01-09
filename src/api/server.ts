@@ -540,6 +540,7 @@ export class ApiServer {
 		// Register source routes (Requirement 9.3, 9.4, 9.5)
 		await this.app.register(sourceRoutes, {
 			sourceManager: this.sourceManager,
+			fanoutManager: this.fanoutManager,
 		})
 
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)

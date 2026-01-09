@@ -17,6 +17,7 @@ import type {
 	SourceStatus,
 	DecoderCaps,
 } from "../../core/source-manager.js"
+import type { FanoutManager } from "../../core/fanout-manager.js"
 
 /**
  * Source capabilities schema for request validation
@@ -236,6 +237,7 @@ const unassignmentResponseSchema = {
  */
 export interface SourceRoutesOptions {
 	sourceManager: SourceManager
+	fanoutManager?: FanoutManager
 }
 
 /**
@@ -271,7 +273,7 @@ export interface DecoderAssignment {
  */
 export interface ExtendedSourceStatus extends SourceStatus {
 	assignments: DecoderAssignment[]
-	/** Number of decoder consumers assigned to this source */
+	/** Number of active fanout consumer branches for this source */
 	consumers: number
 	available: boolean
 }
@@ -308,7 +310,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 	fastify: FastifyInstance,
 	options: SourceRoutesOptions,
 ) => {
-	const { sourceManager } = options
+	const { sourceManager, fanoutManager } = options
 
 	/**
 	 * GET /api/sources - List all sources
@@ -333,13 +335,25 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			},
 		},
 		async () => {
+			const consumersBySourceId = new Map<string, number>()
+			if (fanoutManager) {
+				const snapshot = fanoutManager.getTelemetrySnapshot()
+				for (const branch of snapshot.branches) {
+					if (!branch.sourceId) continue
+					consumersBySourceId.set(
+						branch.sourceId,
+						(consumersBySourceId.get(branch.sourceId) ?? 0) + 1,
+					)
+				}
+			}
+
 			const statuses = sourceManager.getAllStatus()
 			return statuses.map(status => {
 				const assignments = sourceManager.getSourceAssignments(status.id)
 				return {
 					...status,
 					assignments,
-					consumers: assignments.length,
+					consumers: consumersBySourceId.get(status.id) ?? assignments.length,
 					available: sourceManager.isSourceAvailable(status.id),
 				}
 			})

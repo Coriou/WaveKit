@@ -27,16 +27,17 @@ function renderBufferBar(bufferBytes: number, highWaterMark: number): string {
 }
 
 function StatusBadge({ active }: { active: boolean }) {
-	return active ? (
-		<Text backgroundColor="red" color="white">
-			{" "}
-			DROP{" "}
-		</Text>
-	) : (
-		<Text backgroundColor="green" color="black">
-			{" "}
-			OK{" "}
-		</Text>
+	const width = 8
+	const label = active ? "DROP" : "OK"
+	return (
+		<Box width={width}>
+			<Text
+				backgroundColor={active ? "red" : "green"}
+				color={active ? "white" : "black"}
+			>
+				{padRight(label, width)}
+			</Text>
+		</Box>
 	)
 }
 
