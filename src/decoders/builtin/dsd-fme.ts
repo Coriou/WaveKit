@@ -11,6 +11,12 @@
  * This decoder now uses AudioDemodDecoder to consume IQ data and perform internal FM
  * demodulation using csdr, eliminating dependency on SDR++ audio output and providing
  * optimal demodulation settings for digital voice.
+ *
+ * Call Handling Philosophy:
+ * - Sync is a CANDIDATE context, not an event. We track the protocol but don't emit call_start on sync alone.
+ * - Calls require minimum metadata (TGT+SRC for DMR/P25/NXDN, callsigns for D-Star, etc.)
+ * - Calls end via explicit terminator, protocol switch, or 2-second metadata timeout.
+ * - Short calls (< 250ms) with weak metadata are suppressed as likely false positives.
  */
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
@@ -21,6 +27,102 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+
+// =============================================================================
+// REGEX PATTERNS - Protocol-specific patterns for parsing dsd-fme output
+// =============================================================================
+
+/** Strip ANSI escape codes from dsd-fme colored output */
+const ANSI_ESCAPE = /\x1b\[[0-9;]*m/g
+
+/** Extract optional timestamp prefix: "17:04:58" or "2025-04-22 23:29:15" (reserved for future use) */
+const _TS_PATTERN = /^(?:(?:\d{4}-\d{2}-\d{2}\s+)?\d{1,2}:\d{2}:\d{2})\s+/
+
+/** Sync detection: "Sync: +DMR", "Sync: +P25p1", etc. */
+const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])(?<proto>[A-Za-z0-9]+)\b/i
+
+/** Error conditions - FEC, CRC, sync lost */
+const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
+
+// --- DMR Patterns ---
+/** DMR color code: "Color Code=05" */
+const DMR_COLOR_CODE = /\bColor\s+Code\s*=\s*(?<cc>\d+)\b/i
+/** DMR slot inline format: "slot1" or "slot2" */
+const DMR_SLOT_INLINE = /\bslot(?<slot>[12])\b/i
+/** DMR slot word format: "SLOT 1" or "SLOT 2" */
+const DMR_SLOT_WORD = /\bSLOT\s+(?<slot>[12])\b/i
+/** DMR TGT/SRC format: "TGT=9 SRC=2060945" or "TGT: 9; SRC: 2060945" */
+const DMR_TGT_SRC = /\bTGT[:=]\s*(?<tgt>\d+)\b.*\bSRC[:=]\s*(?<src>\d+)\b/i
+/** DMR Voice event: "DMR Voice TGT: 00009001; SRC: 00001133;" */
+const DMR_VOICE_EVENT =
+	/\bDMR\s+Voice\b.*\bTGT:\s*(?<tgt>\d+);\s*SRC:\s*(?<src>\d+);/i
+/** DMR TLC fields: "FLCO=0x00 FID=0x00 SVC=0x00" */
+const DMR_TLC_FIELDS =
+	/\bFLCO=0x(?<flco>[0-9A-F]+)\b.*\bFID=0x(?<fid>[0-9A-F]+)\b.*\bSVC=0x(?<svc>[0-9A-F]+)\b/i
+/**
+ * DMR call termination hints - stricter than just "TLC" which appears in non-termination contexts.
+ * Look for explicit terminator keywords or call end indicators.
+ */
+const DMR_END_HINT =
+	/\b(Terminator|Call\s+Termination|GC\s+End|UC\s+End|End\s+Voice)\b/i
+
+// --- P25 Phase 1 Patterns ---
+/** P25 Phase 1 sync (reserved - protocol detection uses SYNC_PATTERN) */
+const _P25P1_HEAD = /\bSync:\s*\+P25p1\b/i
+/** P25 NAC: "nac: [ 1B]" */
+const P25_NAC = /\bnac:\s*\[\s*(?<nac>[0-9A-Fa-f]+)\s*\]/i
+/** P25 src/tg: "src: [      0] tg: [   0]" */
+const P25_SRC_TG =
+	/\bsrc:\s*\[\s*(?<src>\d+)\s*\]\s*tg:\s*\[\s*(?<tg>\d+)\s*\]/i
+/** P25 frame types (reserved for enhanced frame analysis) */
+const _P25P1_FRAME_TYPE = /\b(LDU1|LDU2|TDULC|TSBK|MPDU|TSDU|HDU)\b/i
+/** P25 call termination */
+const P25_CALL_TERM = /\b(Call\s+Termination|TDULC)\b/i
+
+// --- P25 Phase 2 Patterns ---
+/** P25 Phase 2 VCH: "VCH 0 - TG 7070 SRC 40820" */
+const P25P2_VCH =
+	/\bVCH\s+(?<vch>[01])\s*-\s*TG\s+(?<tg>\d+)\s+SRC\s+(?<src>\d+)\b/i
+/** P25 encryption indicators */
+const P25_CRYPTO =
+	/\bALG\s+ID:\s*0x(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*0x(?<key>[0-9A-F]+)\b|\bMI\b/i
+
+// --- YSF Patterns ---
+/** YSF sync (reserved - protocol detection uses SYNC_PATTERN) */
+const _YSF_HEAD = /\bSync:\s*\+YSF\b/i
+/** YSF FICH block (reserved - YSF_CRC_OK is preferred) */
+const _YSF_FICH = /\bFICH\b/i
+/** YSF CRC status in same line */
+const YSF_CRC_OK = /\bFICH\b(?!.*CRC\s+ERR)/i
+
+// --- NXDN Patterns ---
+/** NXDN sync (reserved - protocol detection uses SYNC_PATTERN) */
+const _NXDN_HEAD = /\bSync:\s*\+NXDN(?<rate>48|96)\b/i
+/** NXDN RAN (Radio Access Number): "RAN=50" */
+const NXDN_RAN = /\bRAN\s*=\s*(?<ran>\d+)\b/i
+/** NXDN voice/data indicator */
+const NXDN_VOICE_DATA = /\b(VOICE|DATA)\b/i
+/** NXDN TGT/SRC for VCALL */
+const NXDN_TGT_SRC = /\bTGT[:=]\s*(?<tgt>\d+)\b.*\bSRC[:=]\s*(?<src>\d+)\b/i
+
+// --- D-Star Patterns ---
+/** D-Star sync (reserved - protocol detection uses SYNC_PATTERN) */
+const _DSTAR_HEAD = /\bSync:\s*\+DSTAR\b/i
+/** D-Star header fields: MY, UR, RPT1, RPT2 */
+const DSTAR_MY = /\bMY[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
+const DSTAR_UR = /\bUR[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
+const DSTAR_RPT1 = /\bRPT1[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
+const DSTAR_RPT2 = /\bRPT2[:=]\s*(?<val>[A-Z0-9\/ ]{3,8})\b/i
+
+// --- ProVoice Patterns ---
+/** ProVoice sync (reserved - protocol detection uses SYNC_PATTERN) */
+const _PROVOICE_HEAD = /\bSync:\s*[-+]ProVoice\b/i
+/** Input level indicator */
+const INLVL = /\binlvl:\s*(?<inlvl>\d+)%\b/i
+
+// =============================================================================
+// TYPES
+// =============================================================================
 
 /** Supported DSD-FME decoder modes (Requirement 6.5) */
 export type DsdFmeMode =
@@ -34,6 +136,94 @@ export type DsdFmeMode =
 
 /** Audio output destination options */
 export type DsdFmeOutputType = "null" | "wav" | "udp"
+
+/** Protocol types detected by sync pattern */
+export type DsdFmeProtocol =
+	| "dmr"
+	| "p25p1"
+	| "p25p2"
+	| "ysf"
+	| "dstar"
+	| "nxdn48"
+	| "nxdn96"
+	| "provoice"
+	| null
+
+/** DMR-specific metadata */
+interface DmrMetadata {
+	cc?: number | undefined // Color Code
+	flco?: string | undefined
+	fid?: string | undefined
+	svc?: string | undefined
+}
+
+/** P25-specific metadata */
+interface P25Metadata {
+	nac?: string | undefined
+	sysid?: string | undefined
+	wacn?: string | undefined
+	alg?: string | undefined
+	keyId?: string | undefined
+	mi?: string | undefined
+}
+
+/** NXDN-specific metadata */
+interface NxdnMetadata {
+	ran?: number | undefined
+}
+
+/** D-Star-specific metadata */
+interface DStarMetadata {
+	my?: string | undefined
+	ur?: string | undefined
+	rpt1?: string | undefined
+	rpt2?: string | undefined
+}
+
+/** YSF-specific metadata */
+interface YsfMetadata {
+	mode?: string | undefined
+	callsign?: string | undefined
+}
+
+/** Call quality metrics */
+interface CallQuality {
+	inlvl?: number | undefined
+	crcErrs: number
+	fecErrs: number
+}
+
+/** Call state flags */
+interface CallFlags {
+	encrypted: boolean
+	timeout: boolean // Ended via timeout vs explicit terminator
+	badSignal: boolean // High error rate
+	falsePositiveSuppressed: boolean
+}
+
+/**
+ * Unified call state for all protocols.
+ * This captures the complete state of an active call.
+ */
+interface DsdFmeCallState {
+	protocol: DsdFmeProtocol
+	talkgroup: number | null
+	source: number | null
+	slot?: number | undefined
+	startTime: Date
+	lastUpdate: Date
+	wavFile?: string | undefined
+	// Protocol-specific metadata
+	dmr?: DmrMetadata | undefined
+	p25?: P25Metadata | undefined
+	nxdn?: NxdnMetadata | undefined
+	dstar?: DStarMetadata | undefined
+	ysf?: YsfMetadata | undefined
+	// Quality tracking
+	quality: CallQuality
+	// Flags
+	flags: CallFlags
+}
 
 /**
  * Configuration options for the DSD-FME decoder.
@@ -61,6 +251,10 @@ export interface DsdFmeOptions {
 	enablePerCallRecording?: boolean | undefined
 	/** Directory for per-call WAV files (default: /app/decoded_calls) */
 	perCallRecordingDir?: string | undefined
+	/** Minimum call duration in ms to emit (default: 250) */
+	minCallDurationMs?: number | undefined
+	/** Emit debug events like sync/errors to output (default: false) */
+	emitDebugEvents?: boolean | undefined
 }
 
 /** All supported DSD-FME modes */
@@ -74,26 +268,22 @@ export const DSD_FME_MODES: readonly DsdFmeMode[] = [
 	"provoice",
 ] as const
 
-// Output parsing regex patterns
-// dsd-fme output format: "Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC"
-const SYNC_PATTERN = /Sync:\s*\+?([\w]+)/i // Captured group 1 is protocol
-// Call info format: "SLOT 1 TGT=9 SRC=2060945 Group Call"
-// Note: TGT and SRC are usually integers
-const CALL_PATTERN = /TGT=(\d+)\s+SRC=(\d+)/i
-// Slot extraction: "SLOT 1 ..."
-const SLOT_PATTERN = /SLOT\s+(\d+)/i
-const ERROR_PATTERN = /(FEC ERR|CRC ERR|SYNC LOST)/i
-// Termination pattern (TLC = Terminator Link Control, or implicit End of transmission)
-// Look for "TLC" or typical end messages.
-const TERM_PATTERN = /\b(TLC|Terminator)\b/i
+/** Minimum call duration threshold (ms) - calls shorter than this are likely false positives */
+const MIN_CALL_DURATION_MS = 250
 
-interface DsdFmeCallState {
-	talkgroup: number
-	source: number
-	slot?: number
-	startTime: Date
-	lastUpdate: Date
-	wavFile?: string
+/** Call metadata timeout (ms) - if no metadata received for this long, end the call */
+const CALL_TIMEOUT_MS = 2000
+
+/** Error rate threshold - if > 80% frames have errors, mark as bad signal */
+const BAD_SIGNAL_ERROR_RATE = 0.8
+
+/** Rolling window for error rate calculation (ms) */
+const ERROR_WINDOW_MS = 500
+
+/** Error event for rolling window tracking */
+interface ErrorEvent {
+	timestamp: number
+	type: "crc" | "fec"
 }
 
 /**
@@ -109,10 +299,20 @@ interface DsdFmeCallState {
 export class DsdFmeDecoder extends AudioDemodDecoder {
 	private readonly options: DsdFmeOptions
 
-	// State for call tracking / deduplication
+	// Current protocol detected from sync (candidate context, not event)
+	private currentProtocol: DsdFmeProtocol = null
+
+	// Active call state (null = no call in progress)
 	private callState: DsdFmeCallState | null = null
 
+	// Last sync mode for deduplication
 	private lastSyncMode: string | null = null
+
+	// Rolling window of error events for quality tracking
+	private errorWindow: ErrorEvent[] = []
+
+	// Frame count for error rate calculation
+	private frameCount = 0
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -150,6 +350,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				(options["enablePerCallRecording"] as boolean) ?? false,
 			perCallRecordingDir:
 				(options["perCallRecordingDir"] as string) ?? "/app/decoded_calls",
+			minCallDurationMs:
+				(options["minCallDurationMs"] as number) ?? MIN_CALL_DURATION_MS,
+			emitDebugEvents: (options["emitDebugEvents"] as boolean) ?? false,
 		}
 	}
 
@@ -405,236 +608,712 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	/**
 	 * Parses dsd-fme output lines into DecoderOutput objects.
 	 *
-	 * Handles:
-	 * - Sync events
-	 * - Call events (with deduplication)
-	 * - Error events
+	 * Implementation follows these principles:
+	 * 1. Sync is a CANDIDATE context, not an event - we track protocol but don't emit call_start
+	 * 2. Calls require minimum metadata (TGT+SRC for DMR/P25/NXDN, callsigns for D-Star)
+	 * 3. Calls end via explicit terminator, protocol switch, or 2-second metadata timeout
+	 * 4. Short calls (< 250ms) with weak metadata are suppressed as likely false positives
+	 * 5. Error events (FEC/CRC) are tracked for quality but not emitted unless debug mode is on
 	 */
 	protected override parseOutput(line: string): DecoderOutput | null {
 		const now = new Date()
+		const nowMs = now.getTime()
 
-		// FIRST: Check for stale calls on EVERY line, not just at the end
-		// This ensures we detect call end even when receiving Sync/FEC lines
-		if (this.callState) {
-			const silenceDuration =
-				now.getTime() - this.callState.lastUpdate.getTime()
-			if (silenceDuration > 2000) {
-				// 2 seconds without TGT/SRC = call ended
-				const duration =
-					this.callState.lastUpdate.getTime() -
-					this.callState.startTime.getTime()
-				const callInfo = this.callState
-				this.callState = null
+		// STEP 1: Strip ANSI escape codes from colored output
+		const cleanLine = line.replace(ANSI_ESCAPE, "")
 
-				this.logger.info(
-					{
-						talkgroup: callInfo.talkgroup,
-						source: callInfo.source,
-						duration,
-						silenceDuration,
-					},
-					"Call ended due to metadata timeout",
-				)
+		// STEP 2: Check for stale calls (timeout-based call end)
+		const timeoutEvent = this.checkCallTimeout(now)
+		if (timeoutEvent) {
+			// Re-process this line after emitting the timeout event
+			// The line might contain the start of a new call
+			return timeoutEvent
+		}
 
-				// Emit call_end, then continue processing this line
-				// (it might be a new call starting)
+		// STEP 3: Track errors for quality metrics (rolling window)
+		this.updateErrorWindow(cleanLine, nowMs)
+
+		// STEP 4: Check for sync (protocol detection)
+		const syncResult = this.handleSync(cleanLine, now)
+		if (syncResult !== undefined) {
+			return syncResult
+		}
+
+		// STEP 5: Protocol-specific call handling
+		const callEvent = this.handleProtocolLine(cleanLine, now)
+		if (callEvent) {
+			return callEvent
+		}
+
+		// STEP 6: Check for explicit call termination
+		const termEvent = this.handleTermination(cleanLine, now)
+		if (termEvent) {
+			return termEvent
+		}
+
+		// STEP 7: Emit error events only in debug mode
+		if (this.options.emitDebugEvents) {
+			const errorMatch = ERROR_PATTERN.exec(cleanLine)
+			if (errorMatch) {
 				return {
 					timestamp: now,
 					decoder: this.id,
-					type: "call_end",
-					data: {
-						talkgroup: callInfo.talkgroup,
-						source: callInfo.source,
-						slot: callInfo.slot,
-						duration,
-						timeout: true,
-					},
+					type: "error",
+					data: { message: errorMatch[1] },
 				}
 			}
 		}
 
-		// Check for sync information
-		const syncMatch = SYNC_PATTERN.exec(line)
-		if (syncMatch) {
-			const mode = syncMatch[1]?.toUpperCase() ?? "UNKNOWN"
+		// Line didn't produce an event
+		return null
+	}
 
-			// Deduplicate Sync events: only emit if mode changed
-			if (this.lastSyncMode === mode) {
-				return null
+	// =========================================================================
+	// HELPER METHODS FOR parseOutput
+	// =========================================================================
+
+	/**
+	 * Checks if the current call has timed out (no metadata for CALL_TIMEOUT_MS).
+	 * Returns a call_end event if timeout occurred, otherwise null.
+	 */
+	private checkCallTimeout(now: Date): DecoderOutput | null {
+		if (!this.callState) return null
+
+		const silenceDuration = now.getTime() - this.callState.lastUpdate.getTime()
+		if (silenceDuration <= CALL_TIMEOUT_MS) return null
+
+		return this.endCall(now, true)
+	}
+
+	/**
+	 * Updates the rolling error window for quality tracking.
+	 */
+	private updateErrorWindow(line: string, nowMs: number): void {
+		// Prune old errors outside the window
+		this.errorWindow = this.errorWindow.filter(
+			e => nowMs - e.timestamp < ERROR_WINDOW_MS,
+		)
+
+		// Track FEC errors
+		if (/\bFEC\s+ERR\b/i.test(line)) {
+			this.errorWindow.push({ timestamp: nowMs, type: "fec" })
+			if (this.callState) {
+				this.callState.quality.fecErrs++
 			}
+		}
 
-			this.lastSyncMode = mode
+		// Track CRC errors
+		if (/\bCRC\s+ERR\b/i.test(line)) {
+			this.errorWindow.push({ timestamp: nowMs, type: "crc" })
+			if (this.callState) {
+				this.callState.quality.crcErrs++
+			}
+		}
 
+		// Increment frame count for error rate calculation
+		this.frameCount++
+	}
+
+	/**
+	 * Handles sync line - updates currentProtocol but does NOT start a call.
+	 * Returns undefined to continue processing, or a DecoderOutput for debug events.
+	 */
+	private handleSync(
+		line: string,
+		now: Date,
+	): DecoderOutput | null | undefined {
+		const syncMatch = SYNC_PATTERN.exec(line)
+		if (!syncMatch?.groups) return undefined
+
+		const proto = syncMatch.groups["proto"]?.toUpperCase() ?? ""
+		const newProtocol = this.parseProtocol(proto)
+
+		// If protocol changed, we may need to end the current call
+		if (this.callState && newProtocol !== this.currentProtocol) {
+			const endEvent = this.endCall(now, false)
+			this.currentProtocol = newProtocol
+			this.lastSyncMode = proto
+			return endEvent
+		}
+
+		// Update protocol tracking
+		this.currentProtocol = newProtocol
+
+		// Deduplicate sync events for debug output
+		if (proto === this.lastSyncMode) {
+			return undefined
+		}
+		this.lastSyncMode = proto
+
+		// Only emit sync events in debug mode
+		if (this.options.emitDebugEvents) {
 			return {
 				timestamp: now,
 				decoder: this.id,
 				type: "sync",
-				data: { mode },
+				data: { mode: proto, protocol: newProtocol },
 			}
 		}
 
-		// Check for call information header
-		const callMatch = CALL_PATTERN.exec(line)
-		if (callMatch) {
-			const talkgroup = parseInt(callMatch[1] ?? "0", 10)
-			const source = parseInt(callMatch[2] ?? "0", 10)
-			const slotMatch = SLOT_PATTERN.exec(line)
-			const slot = slotMatch?.[1] ? parseInt(slotMatch[1], 10) : undefined
+		return null // Suppress sync from user-facing output
+	}
 
-			// Detect if this is a new call or continuation
-			const keyMatches =
-				this.callState &&
-				this.callState.talkgroup === talkgroup &&
-				this.callState.source === source
-
-			// If we have an active call but parameters changed, end the previous one
-			if (this.callState && !keyMatches) {
-				const duration = now.getTime() - this.callState.startTime.getTime()
-				const endEvent: DecoderOutput = {
-					timestamp: now,
-					decoder: this.id,
-					type: "call_end",
-					data: {
-						talkgroup: this.callState.talkgroup,
-						source: this.callState.source,
-						slot: this.callState.slot,
-						duration,
-						file: this.callState.wavFile,
-					},
-				}
-
-				// Log the switch for debugging
-				this.logger.info(
-					{
-						oldTg: this.callState.talkgroup,
-						oldSrc: this.callState.source,
-						newTg: talkgroup,
-						newSrc: source,
-					},
-					"Call switch detected mid-stream, ending previous call",
-				)
-
-				// Force close old state
-				this.callState = null
-
-				// IMPORTANT: Return the end event for the OLD call.
-				// The NEXT line from dsd-fme will trigger the new call's call_start.
-				return endEvent
-			}
-
-			// Start new call if needed
-			if (!this.callState) {
-				// Construct filename if recording is enabled
-				// Pattern: YYYYMMDD_HHMMSS_talkgroup_source.wav
-				let wavFile: string | undefined
-				if (this.options.enablePerCallRecording) {
-					// We don't know the exact filename dsd-fme generates,
-					// but standard format is often used or we could try to predict it.
-					// For now, we'll leave it undefined.
-				}
-
-				// Create state object
-				const newState: DsdFmeCallState = {
-					talkgroup,
-					source,
-					startTime: now,
-					lastUpdate: now,
-				}
-
-				// Handle optional properties respecting strict types
-				if (wavFile !== undefined) {
-					newState.wavFile = wavFile
-				}
-				if (slot !== undefined) {
-					newState.slot = slot
-				}
-
-				this.callState = newState
-
-				return {
-					timestamp: now,
-					decoder: this.id,
-					type: "call_start",
-					data: {
-						talkgroup,
-						source,
-						slot,
-					},
-				}
-			} else {
-				// Existing call
-				// Check if we have new information (e.g., slot was undefined and now we have it)
-				if (this.callState.slot === undefined && slot !== undefined) {
-					this.callState.slot = slot
-					this.callState.lastUpdate = now
-
-					// Re-emit call_start with fuller info so UI gets the slot
-					// Alternatively we could add a "call_update" type, but call_start is idempotent-ish for this purpose
-					return {
-						timestamp: now,
-						decoder: this.id,
-						type: "call_start",
-						data: {
-							talkgroup,
-							source,
-							slot,
-						},
-					}
-				}
-
-				// Just update heartbeat
-				this.callState.lastUpdate = now
-
-				// Optional: Update slot if it was missing (already handled above, but good for safety)
-				if (slot !== undefined && this.callState.slot === undefined) {
-					this.callState.slot = slot
-				}
-
-				// SUPPRESS output (deduplication)
-				return null
-			}
-		}
-
-		// Check for Terminator (End of Call)
-		const termMatch = TERM_PATTERN.exec(line)
-		if (termMatch && this.callState) {
-			const duration = now.getTime() - this.callState.startTime.getTime()
-			const callInfo = this.callState
-			this.callState = null // Clear state
-
-			return {
-				timestamp: now,
-				decoder: this.id,
-				type: "call_end",
-				data: {
-					talkgroup: callInfo.talkgroup,
-					source: callInfo.source,
-					slot: callInfo.slot,
-					duration,
-					// If we can parse the filename from dsd-fme output (sometimes it prints "Saving to..."),
-					// we could add it here. For now, just basic stats.
-				},
-			}
-		}
-
-		// Check for error conditions
-		const errorMatch = ERROR_PATTERN.exec(line)
-		if (errorMatch) {
-			// Optional: Don't emit errors if they are just FEC errors during a valid call?
-			// User said "Resolve persistent FEC ERR".
-			// We'll keep reporting them for now as they indicate signal quality issues.
-			return {
-				timestamp: now,
-				decoder: this.id,
-				type: "error",
-				data: {
-					message: errorMatch[1],
-				},
-			}
-		}
-
-		// Line didn't match any known pattern - skip it
+	/**
+	 * Parses protocol string from sync output to typed protocol.
+	 */
+	private parseProtocol(proto: string): DsdFmeProtocol {
+		const upper = proto.toUpperCase()
+		if (upper === "DMR") return "dmr"
+		if (upper === "P25P1" || upper === "P25") return "p25p1"
+		if (upper === "P25P2") return "p25p2"
+		if (upper === "YSF") return "ysf"
+		if (upper === "DSTAR") return "dstar"
+		if (upper === "NXDN48") return "nxdn48"
+		if (upper === "NXDN96") return "nxdn96"
+		if (upper === "PROVOICE") return "provoice"
+		// Also handle NXDN without rate suffix
+		if (upper === "NXDN") return "nxdn96" // Default to 96
 		return null
+	}
+
+	/**
+	 * Handles protocol-specific line parsing and call state management.
+	 * Routes to appropriate handler based on currentProtocol.
+	 */
+	private handleProtocolLine(line: string, now: Date): DecoderOutput | null {
+		switch (this.currentProtocol) {
+			case "dmr":
+				return this.handleDmrLine(line, now)
+			case "p25p1":
+				return this.handleP25P1Line(line, now)
+			case "p25p2":
+				return this.handleP25P2Line(line, now)
+			case "nxdn48":
+			case "nxdn96":
+				return this.handleNxdnLine(line, now)
+			case "ysf":
+				return this.handleYsfLine(line, now)
+			case "dstar":
+				return this.handleDStarLine(line, now)
+			case "provoice":
+				return this.handleProVoiceLine(line, now)
+			default:
+				// No protocol detected yet, try to extract metadata anyway
+				return this.handleUnknownProtocol(line, now)
+		}
+	}
+
+	/**
+	 * Handles DMR-specific line parsing.
+	 * Requires TGT+SRC to start a call.
+	 */
+	private handleDmrLine(line: string, now: Date): DecoderOutput | null {
+		// Try to extract TGT/SRC from various DMR formats
+		let tgt: number | null = null
+		let src: number | null = null
+		let slot: number | undefined
+
+		// Format 1: "DMR Voice TGT: 00009001; SRC: 00001133;"
+		const voiceMatch = DMR_VOICE_EVENT.exec(line)
+		if (voiceMatch?.groups) {
+			tgt = parseInt(voiceMatch.groups["tgt"] ?? "0", 10)
+			src = parseInt(voiceMatch.groups["src"] ?? "0", 10)
+		}
+
+		// Format 2: "TGT=9 SRC=2060945" or "TGT: 9; SRC: 2060945"
+		if (tgt === null) {
+			const tgtSrcMatch = DMR_TGT_SRC.exec(line)
+			if (tgtSrcMatch?.groups) {
+				tgt = parseInt(tgtSrcMatch.groups["tgt"] ?? "0", 10)
+				src = parseInt(tgtSrcMatch.groups["src"] ?? "0", 10)
+			}
+		}
+
+		// Extract slot
+		const slotInline = DMR_SLOT_INLINE.exec(line)
+		const slotWord = DMR_SLOT_WORD.exec(line)
+		slot = slotInline?.groups?.["slot"]
+			? parseInt(slotInline.groups["slot"], 10)
+			: slotWord?.groups?.["slot"]
+				? parseInt(slotWord.groups["slot"], 10)
+				: undefined
+
+		// Extract color code
+		const ccMatch = DMR_COLOR_CODE.exec(line)
+		const cc = ccMatch?.groups?.["cc"]
+			? parseInt(ccMatch.groups["cc"], 10)
+			: undefined
+
+		// Extract TLC fields if present
+		const tlcMatch = DMR_TLC_FIELDS.exec(line)
+		const dmrMeta: DmrMetadata | undefined = tlcMatch?.groups
+			? {
+					flco: tlcMatch.groups["flco"],
+					fid: tlcMatch.groups["fid"],
+					svc: tlcMatch.groups["svc"],
+				}
+			: cc !== undefined
+				? { cc }
+				: undefined
+
+		// If we have TGT+SRC, process call state
+		if (tgt !== null && src !== null) {
+			return this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
+		}
+
+		// Update existing call with additional metadata
+		if (this.callState && this.callState.protocol === "dmr") {
+			if (cc !== undefined && !this.callState.dmr?.cc) {
+				this.callState.dmr = { ...this.callState.dmr, cc }
+			}
+			if (slot !== undefined && this.callState.slot === undefined) {
+				this.callState.slot = slot
+			}
+			this.callState.lastUpdate = now
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles P25 Phase 1 line parsing.
+	 * Requires tg+src to start a call.
+	 */
+	private handleP25P1Line(line: string, now: Date): DecoderOutput | null {
+		// Extract NAC
+		const nacMatch = P25_NAC.exec(line)
+		const nac = nacMatch?.groups?.["nac"]
+
+		// Extract src/tg
+		const srcTgMatch = P25_SRC_TG.exec(line)
+		if (srcTgMatch?.groups) {
+			const tg = parseInt(srcTgMatch.groups["tg"] ?? "0", 10)
+			const src = parseInt(srcTgMatch.groups["src"] ?? "0", 10)
+
+			// Only process if we have valid identifiers (not all zeros)
+			if (tg > 0 || src > 0) {
+				const p25Meta: P25Metadata | undefined = nac ? { nac } : undefined
+				return this.processCallMetadata(
+					now,
+					"p25p1",
+					tg,
+					src,
+					undefined,
+					undefined,
+					p25Meta,
+				)
+			}
+		}
+
+		// Check for encryption indicators
+		const cryptoMatch = P25_CRYPTO.exec(line)
+		if (cryptoMatch && this.callState?.protocol === "p25p1") {
+			this.callState.flags.encrypted = true
+			if (cryptoMatch.groups?.["alg"]) {
+				this.callState.p25 = {
+					...this.callState.p25,
+					alg: cryptoMatch.groups["alg"],
+				}
+			}
+			if (cryptoMatch.groups?.["key"]) {
+				this.callState.p25 = {
+					...this.callState.p25,
+					keyId: cryptoMatch.groups["key"],
+				}
+			}
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles P25 Phase 2 line parsing.
+	 * Uses VCH format: "VCH 0 - TG 7070 SRC 40820"
+	 */
+	private handleP25P2Line(line: string, now: Date): DecoderOutput | null {
+		const vchMatch = P25P2_VCH.exec(line)
+		if (vchMatch?.groups) {
+			const tg = parseInt(vchMatch.groups["tg"] ?? "0", 10)
+			const src = parseInt(vchMatch.groups["src"] ?? "0", 10)
+			const vch = parseInt(vchMatch.groups["vch"] ?? "0", 10)
+
+			if (tg > 0 || src > 0) {
+				return this.processCallMetadata(
+					now,
+					"p25p2",
+					tg,
+					src,
+					vch, // VCH acts like slot
+				)
+			}
+		}
+
+		// Check encryption
+		const cryptoMatch = P25_CRYPTO.exec(line)
+		if (cryptoMatch && this.callState?.protocol === "p25p2") {
+			this.callState.flags.encrypted = true
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles NXDN line parsing.
+	 * Requires RAN + VOICE indicator, optionally TGT/SRC.
+	 */
+	private handleNxdnLine(line: string, now: Date): DecoderOutput | null {
+		// Check for VOICE indicator (required for call)
+		if (!NXDN_VOICE_DATA.test(line) || !/\bVOICE\b/i.test(line)) {
+			return null
+		}
+
+		// Extract RAN
+		const ranMatch = NXDN_RAN.exec(line)
+		const ran = ranMatch?.groups?.["ran"]
+			? parseInt(ranMatch.groups["ran"], 10)
+			: undefined
+
+		// Try to extract TGT/SRC
+		const tgtSrcMatch = NXDN_TGT_SRC.exec(line)
+		let tgt: number | null = null
+		let src: number | null = null
+		if (tgtSrcMatch?.groups) {
+			tgt = parseInt(tgtSrcMatch.groups["tgt"] ?? "0", 10)
+			src = parseInt(tgtSrcMatch.groups["src"] ?? "0", 10)
+		}
+
+		// For NXDN, we can start a call with just VOICE + RAN
+		if (ran !== undefined) {
+			const nxdnMeta: NxdnMetadata = { ran }
+			return this.processCallMetadata(
+				now,
+				this.currentProtocol as "nxdn48" | "nxdn96",
+				tgt ?? 0,
+				src ?? 0,
+				undefined,
+				undefined,
+				undefined,
+				nxdnMeta,
+			)
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles YSF line parsing.
+	 * Requires at least one CRC-OK FICH block to start a call.
+	 */
+	private handleYsfLine(line: string, now: Date): DecoderOutput | null {
+		// YSF requires a CRC-OK FICH block to be considered valid
+		if (!YSF_CRC_OK.test(line)) {
+			return null
+		}
+
+		// YSF doesn't have traditional TGT/SRC, but we track calls anyway
+		// Use 0 as placeholder for talkgroup/source
+		return this.processCallMetadata(now, "ysf", 0, 0)
+	}
+
+	/**
+	 * Handles D-Star line parsing.
+	 * Requires MY/UR/RPT1/RPT2 header fields to start a call.
+	 */
+	private handleDStarLine(line: string, now: Date): DecoderOutput | null {
+		// Extract D-Star header fields
+		const myMatch = DSTAR_MY.exec(line)
+		const urMatch = DSTAR_UR.exec(line)
+		const rpt1Match = DSTAR_RPT1.exec(line)
+		const rpt2Match = DSTAR_RPT2.exec(line)
+
+		const my = myMatch?.groups?.["val"]?.trim()
+		const ur = urMatch?.groups?.["val"]?.trim()
+		const rpt1 = rpt1Match?.groups?.["val"]?.trim()
+		const rpt2 = rpt2Match?.groups?.["val"]?.trim()
+
+		// Need at least one field to consider this a valid call
+		if (my ?? ur ?? rpt1 ?? rpt2) {
+			const dstarMeta: DStarMetadata = { my, ur, rpt1, rpt2 }
+			return this.processCallMetadata(
+				now,
+				"dstar",
+				0,
+				0,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				dstarMeta,
+			)
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles ProVoice line parsing.
+	 * Requires VOICE indicator and reasonable input level.
+	 */
+	private handleProVoiceLine(line: string, now: Date): DecoderOutput | null {
+		// Check for VOICE indicator
+		if (!/\bVOICE\b/i.test(line)) {
+			return null
+		}
+
+		// Extract input level
+		const inlvlMatch = INLVL.exec(line)
+		const inlvl = inlvlMatch?.groups?.["inlvl"]
+			? parseInt(inlvlMatch.groups["inlvl"], 10)
+			: undefined
+
+		// Require minimum input level (e.g., > 10%) to filter noise
+		if (inlvl !== undefined && inlvl > 10) {
+			return this.processCallMetadata(now, "provoice", 0, 0)
+		}
+
+		return null
+	}
+
+	/**
+	 * Handles lines when no protocol has been detected yet.
+	 * Tries to detect protocol from metadata patterns.
+	 */
+	private handleUnknownProtocol(line: string, now: Date): DecoderOutput | null {
+		// Try DMR patterns
+		const dmrVoice = DMR_VOICE_EVENT.exec(line)
+		if (dmrVoice?.groups) {
+			this.currentProtocol = "dmr"
+			return this.handleDmrLine(line, now)
+		}
+
+		// Try P25P2 VCH
+		if (P25P2_VCH.test(line)) {
+			this.currentProtocol = "p25p2"
+			return this.handleP25P2Line(line, now)
+		}
+
+		// Try P25P1
+		if (P25_SRC_TG.test(line)) {
+			this.currentProtocol = "p25p1"
+			return this.handleP25P1Line(line, now)
+		}
+
+		return null
+	}
+
+	/**
+	 * Checks for explicit call termination patterns.
+	 */
+	private handleTermination(line: string, now: Date): DecoderOutput | null {
+		if (!this.callState) return null
+
+		// Protocol-specific termination patterns
+		let isTerminator = false
+
+		switch (this.callState.protocol) {
+			case "dmr":
+				isTerminator = DMR_END_HINT.test(line)
+				break
+			case "p25p1":
+			case "p25p2":
+				isTerminator = P25_CALL_TERM.test(line)
+				break
+			default:
+				// Other protocols mostly rely on timeout
+				break
+		}
+
+		if (isTerminator) {
+			return this.endCall(now, false)
+		}
+
+		return null
+	}
+
+	/**
+	 * Processes call metadata and manages call state.
+	 * Handles call_start, continuation, and mid-stream switches.
+	 */
+	private processCallMetadata(
+		now: Date,
+		protocol: NonNullable<DsdFmeProtocol>,
+		tgt: number,
+		src: number,
+		slot?: number,
+		dmr?: DmrMetadata,
+		p25?: P25Metadata,
+		nxdn?: NxdnMetadata,
+		dstar?: DStarMetadata,
+		ysf?: YsfMetadata,
+	): DecoderOutput | null {
+		// Check if this is a different call (TG/SRC changed)
+		const keyMatches =
+			this.callState &&
+			this.callState.protocol === protocol &&
+			this.callState.talkgroup === tgt &&
+			this.callState.source === src
+
+		// If parameters changed, end the previous call first
+		if (this.callState && !keyMatches) {
+			const endEvent = this.endCall(now, false)
+
+			this.logger.debug(
+				{
+					oldProtocol: this.callState?.protocol,
+					oldTg: this.callState?.talkgroup,
+					oldSrc: this.callState?.source,
+					newProtocol: protocol,
+					newTg: tgt,
+					newSrc: src,
+				},
+				"Call switch detected, ending previous call",
+			)
+
+			// The next line will start the new call
+			return endEvent
+		}
+
+		// Start new call if needed
+		if (!this.callState) {
+			this.callState = {
+				protocol,
+				talkgroup: tgt,
+				source: src,
+				slot,
+				startTime: now,
+				lastUpdate: now,
+				dmr,
+				p25,
+				nxdn,
+				dstar,
+				ysf,
+				quality: { crcErrs: 0, fecErrs: 0 },
+				flags: {
+					encrypted: false,
+					timeout: false,
+					badSignal: false,
+					falsePositiveSuppressed: false,
+				},
+			}
+
+			this.logger.info({ protocol, tgt, src, slot }, "Call started")
+
+			return {
+				timestamp: now,
+				decoder: this.id,
+				type: "call_start",
+				data: {
+					protocol,
+					talkgroup: tgt,
+					source: src,
+					slot,
+					dmr,
+					p25,
+					nxdn,
+					dstar,
+					ysf,
+				},
+			}
+		}
+
+		// Existing call - update metadata
+		this.callState.lastUpdate = now
+
+		// Update slot if we didn't have it
+		if (slot !== undefined && this.callState.slot === undefined) {
+			this.callState.slot = slot
+		}
+
+		// Merge protocol-specific metadata
+		if (dmr) {
+			this.callState.dmr = { ...this.callState.dmr, ...dmr }
+		}
+		if (p25) {
+			this.callState.p25 = { ...this.callState.p25, ...p25 }
+		}
+		if (nxdn) {
+			this.callState.nxdn = { ...this.callState.nxdn, ...nxdn }
+		}
+		if (dstar) {
+			this.callState.dstar = { ...this.callState.dstar, ...dstar }
+		}
+		if (ysf) {
+			this.callState.ysf = { ...this.callState.ysf, ...ysf }
+		}
+
+		// Suppress duplicate events (deduplication)
+		return null
+	}
+
+	/**
+	 * Ends the current call and returns a call_end event.
+	 */
+	private endCall(now: Date, timeout: boolean): DecoderOutput | null {
+		if (!this.callState) return null
+
+		const duration = now.getTime() - this.callState.startTime.getTime()
+		const callInfo = this.callState
+
+		// Calculate error rate
+		const totalErrors = callInfo.quality.crcErrs + callInfo.quality.fecErrs
+		const errorRate = this.frameCount > 0 ? totalErrors / this.frameCount : 0
+		callInfo.flags.badSignal = errorRate > BAD_SIGNAL_ERROR_RATE
+
+		// Check for false positive suppression
+		const minDuration = this.options.minCallDurationMs ?? MIN_CALL_DURATION_MS
+		const hasWeakMetadata =
+			(callInfo.talkgroup === 0 || callInfo.talkgroup === null) &&
+			(callInfo.source === 0 || callInfo.source === null)
+
+		if (duration < minDuration && hasWeakMetadata) {
+			callInfo.flags.falsePositiveSuppressed = true
+			this.logger.debug(
+				{ protocol: callInfo.protocol, duration },
+				"Short call with weak metadata suppressed as likely false positive",
+			)
+			this.callState = null
+			this.frameCount = 0
+			return null // Don't emit for likely false positives
+		}
+
+		// Clear state
+		this.callState = null
+		this.frameCount = 0
+		callInfo.flags.timeout = timeout
+
+		this.logger.info(
+			{
+				protocol: callInfo.protocol,
+				talkgroup: callInfo.talkgroup,
+				source: callInfo.source,
+				duration,
+				timeout,
+				quality: callInfo.quality,
+				badSignal: callInfo.flags.badSignal,
+			},
+			"Call ended",
+		)
+
+		return {
+			timestamp: now,
+			decoder: this.id,
+			type: "call_end",
+			data: {
+				protocol: callInfo.protocol,
+				talkgroup: callInfo.talkgroup,
+				source: callInfo.source,
+				slot: callInfo.slot,
+				duration,
+				dmr: callInfo.dmr,
+				p25: callInfo.p25,
+				nxdn: callInfo.nxdn,
+				dstar: callInfo.dstar,
+				ysf: callInfo.ysf,
+				quality: callInfo.quality,
+				flags: callInfo.flags,
+				wavFile: callInfo.wavFile,
+			},
+		}
 	}
 }
 

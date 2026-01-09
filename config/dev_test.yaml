@@ -33,8 +33,6 @@ decoders:
       modes: [POCSAG512, POCSAG1200, POCSAG2400, FLEX]
       inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
       fmGain: 3 # Match working demod-test.sh gain
-      # DEBUG: Record demodulated audio for analysis
-      debugRecordPath: /data/debug_audio
 
   # Digital voice decoder - DMR, P25, YSF, D-Star, NXDN, ProVoice
   # Now uses IQ source with internal csdr FM demodulation
@@ -47,8 +45,6 @@ decoders:
       output: null
       inputSampleRate: 2048000 # Must match Pi rtl_tcp sample rate
       fmGain: 2.0 # TUNED: Balanced gain minimizes clipping + FEC errors (was 5.0)
-      # DEBUG: Record demodulated audio for analysis
-      debugRecordPath: /data/debug_audio
       enablePerCallRecording: true
       perCallRecordingDir: /app/decoded_calls
 
