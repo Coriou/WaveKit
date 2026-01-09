@@ -116,7 +116,6 @@ type TextColor =
 interface TypeStyle {
 	color: TextColor
 	badge: string
-	icon?: string
 }
 
 function getTypeStyle(type: string, data?: unknown): TypeStyle {
@@ -129,8 +128,6 @@ function getTypeStyle(type: string, data?: unknown): TypeStyle {
 
 		// Protocol-specific colors
 		let color: TextColor = "cyan"
-		const icon = typeLower === "call_start" ? "▶" : "■"
-
 		switch (protocol) {
 			case "dmr":
 				color = "green"
@@ -157,39 +154,38 @@ function getTypeStyle(type: string, data?: unknown): TypeStyle {
 		return {
 			color,
 			badge: typeLower === "call_start" ? "CAL" : "END",
-			icon,
 		}
 	}
 
 	// Other event types
 	switch (typeLower) {
 		case "error":
-			return { color: "red", badge: "ERR", icon: "✗" }
+			return { color: "red", badge: "ERR" }
 		case "sync":
-			return { color: "magenta", badge: "SYN", icon: "~" }
+			return { color: "magenta", badge: "SYN" }
 		case "signal":
-			return { color: "yellow", badge: "SIG", icon: "📶" }
+			return { color: "yellow", badge: "SIG" }
 		case "data":
-			return { color: "green", badge: "DAT", icon: "◆" }
+			return { color: "green", badge: "DAT" }
 		case "decode":
 		case "decoded":
-			return { color: "cyan", badge: "DEC", icon: "●" }
+			return { color: "cyan", badge: "DEC" }
 		case "pocsag":
-			return { color: "blue", badge: "POC", icon: "📟" }
+			return { color: "blue", badge: "POC" }
 		case "flex":
-			return { color: "blue", badge: "FLX", icon: "📟" }
+			return { color: "blue", badge: "FLX" }
 		case "ais":
-			return { color: "cyan", badge: "AIS", icon: "🚢" }
+			return { color: "cyan", badge: "AIS" }
 		case "aircraft":
-			return { color: "cyan", badge: "ADS", icon: "✈" }
+			return { color: "cyan", badge: "ADS" }
 		case "acars":
-			return { color: "green", badge: "ACR", icon: "✈" }
+			return { color: "green", badge: "ACR" }
 		case "vdl2":
-			return { color: "green", badge: "VDL", icon: "✈" }
+			return { color: "green", badge: "VDL" }
 		case "ship":
-			return { color: "blue", badge: "AIS", icon: "🚢" }
+			return { color: "blue", badge: "AIS" }
 		case "aprs":
-			return { color: "yellow", badge: "APR", icon: "📡" }
+			return { color: "yellow", badge: "APR" }
 		default:
 			return { color: "white", badge: type.slice(0, 3).toUpperCase() }
 	}
@@ -214,12 +210,12 @@ function calculateQualityPercent(quality?: CallQuality): number {
 
 /**
  * Generate a visual quality bar (8 chars wide).
- * ████████ = 100%, ████░░░░ = 50%, etc.
+ * ######## = 100%, ####.... = 50%, etc.
  */
 function formatQualityBar(percent: number): string {
 	const filled = Math.round((percent / 100) * 8)
 	const empty = 8 - filled
-	return "█".repeat(filled) + "░".repeat(empty)
+	return "#".repeat(filled) + ".".repeat(empty)
 }
 
 /**
@@ -319,7 +315,7 @@ function formatCallEnd(data: CallData): string {
 
 	// Duration (important for call_end)
 	if (data.duration != null) {
-		parts.push(`⏱${formatDurationMs(data.duration)}`)
+		parts.push(formatDurationMs(data.duration))
 	}
 
 	// Quality indicators
@@ -327,23 +323,23 @@ function formatCallEnd(data: CallData): string {
 	if (data.quality) {
 		const totalErrs = (data.quality.crcErrs ?? 0) + (data.quality.fecErrs ?? 0)
 		if (totalErrs > 0) {
-			qualityParts.push(`⚠${totalErrs}err`)
+			qualityParts.push(`${totalErrs}err`)
 		}
 	}
 
 	// Flags
 	if (data.flags?.encrypted) {
-		qualityParts.push("🔒")
+		qualityParts.push("enc")
 	}
 	if (data.flags?.badSignal) {
-		qualityParts.push("📉")
+		qualityParts.push("bad")
 	}
 	if (data.flags?.timeout) {
-		qualityParts.push("⏰")
+		qualityParts.push("timeout")
 	}
 
 	if (qualityParts.length > 0) {
-		parts.push(qualityParts.join(""))
+		parts.push(qualityParts.join(","))
 	}
 
 	return parts.join(" │ ")
@@ -383,13 +379,7 @@ function formatPagerMessage(data: PagerData): string {
 
 	// Message type indicator
 	if (data.messageType) {
-		const typeIcon =
-			data.messageType === "Alpha"
-				? "📝"
-				: data.messageType === "Numeric"
-					? "🔢"
-					: "🔔"
-		parts.push(typeIcon)
+		parts.push(`type:${data.messageType}`)
 	}
 
 	return parts.join(" │ ")
@@ -447,7 +437,7 @@ export function formatMessageData(data: unknown, type?: string): string {
 				parts.push(`${obj.temperature_C}°C`)
 			if (typeof obj.humidity === "number") parts.push(`${obj.humidity}%`)
 			if (typeof obj.battery_ok === "number")
-				parts.push(obj.battery_ok ? "🔋" : "⚠️low")
+				parts.push(obj.battery_ok ? "bat" : "lowbat")
 			return parts.join(" ")
 		}
 
@@ -475,7 +465,7 @@ export function formatMessageData(data: unknown, type?: string): string {
 			if (obj.source != null) parts.push(`SRC:${obj.source}`)
 			if (obj.slot != null) parts.push(`S${obj.slot}`)
 			if (typeof obj.duration === "number") {
-				parts.push(`⏱${formatDurationMs(obj.duration as number)}`)
+				parts.push(formatDurationMs(obj.duration as number))
 			}
 			return parts.join(" │ ")
 		}
@@ -522,7 +512,6 @@ function CallCard({
 	style: TypeStyle
 	isStart: boolean
 }): React.ReactElement {
-	const icon = isStart ? "▶" : "■"
 	const proto = formatProtocol(callData.protocol)
 	const qualityPercent = calculateQualityPercent(callData.quality)
 	const qualityBar = formatQualityBar(qualityPercent)
@@ -559,11 +548,11 @@ function CallCard({
 				<Text dimColor>{time} </Text>
 				<Text color="blue">{decoder} </Text>
 				<Text color="green" bold>
-					{icon} {proto}
+					{proto}
 				</Text>
 				<Text> </Text>
 				<Text color={style.color}>{metaString}</Text>
-				{callData.flags?.encrypted && <Text color="yellow"> 🔒</Text>}
+				{callData.flags?.encrypted && <Text color="yellow"> enc</Text>}
 			</Box>
 		)
 	}
@@ -577,10 +566,10 @@ function CallCard({
 
 	// Build flags string
 	const flagParts: string[] = []
-	if (callData.flags?.encrypted) flagParts.push("🔒")
-	if (callData.flags?.timeout) flagParts.push("⏰")
-	if (callData.flags?.badSignal) flagParts.push("📉")
-	const flagStr = flagParts.join("")
+	if (callData.flags?.encrypted) flagParts.push("enc")
+	if (callData.flags?.timeout) flagParts.push("timeout")
+	if (callData.flags?.badSignal) flagParts.push("bad")
+	const flagStr = flagParts.join(",")
 
 	return (
 		<Box flexDirection="column">
@@ -589,22 +578,22 @@ function CallCard({
 				<Text dimColor>{time} </Text>
 				<Text color="blue">{decoder} </Text>
 				<Text color="yellow" bold>
-					{icon} {proto}
+					{proto}
 				</Text>
 				<Text> </Text>
 				<Text color={style.color}>{metaString}</Text>
 				<Text> │ </Text>
-				<Text bold>⏱{durationStr}</Text>
+				<Text bold>{durationStr}</Text>
 				<Text> │ </Text>
 				<Text color={qualityColor}>{qualityBar}</Text>
 				<Text dimColor> {qualityPercent}%</Text>
-				{totalErrs > 0 && <Text color="red"> ⚠{totalErrs}err</Text>}
+				{totalErrs > 0 && <Text color="red"> {totalErrs}err</Text>}
 				{flagStr && <Text> {flagStr}</Text>}
 			</Box>
 			{/* Second line: WAV file if available */}
 			{wavFilename && (
 				<Box marginLeft={9}>
-					<Text dimColor>🔊 </Text>
+					<Text dimColor>wav:</Text>
 					<Text color="cyan">{wavFilename}</Text>
 				</Box>
 			)}
@@ -631,17 +620,13 @@ function PagerCard({
 }): React.ReactElement {
 	const proto = pagerData.protocol?.toUpperCase() ?? "PAGER"
 
-	// Determine message type icon and color
-	let typeIcon = "📟"
+	// Determine message type color
 	let msgColor: TextColor = "white"
 	if (pagerData.messageType === "Alpha") {
-		typeIcon = "📝"
 		msgColor = "white"
 	} else if (pagerData.messageType === "Numeric") {
-		typeIcon = "🔢"
 		msgColor = "cyan"
 	} else if (pagerData.messageType === "Tone Only") {
-		typeIcon = "🔔"
 		msgColor = "yellow"
 	}
 
@@ -656,8 +641,14 @@ function PagerCard({
 				<Text dimColor>{time} </Text>
 				<Text color="blue">{decoder} </Text>
 				<Text color={style.color} bold>
-					{typeIcon} {proto}
+					{proto}
 				</Text>
+				{pagerData.messageType && (
+					<>
+						<Text dimColor> type:</Text>
+						<Text>{pagerData.messageType}</Text>
+					</>
+				)}
 				{pagerData.address != null && (
 					<>
 						<Text> │ </Text>
@@ -747,7 +738,6 @@ export function DecodedMessage({
 	// Full mode for call_start - simpler display
 	if (isCallEvent && callData) {
 		const isStart = message.type === "call_start"
-		const icon = isStart ? "▶" : "■"
 		const labelColor: TextColor = isStart ? "green" : "yellow"
 
 		return (
@@ -755,11 +745,11 @@ export function DecodedMessage({
 				<Text dimColor>{time} </Text>
 				<Text color="blue">{decoder} </Text>
 				<Text color={labelColor} bold>
-					{icon} {style.badge}
+					{style.badge}
 				</Text>
 				<Text> </Text>
 				<Text color={style.color}>{truncate(data, maxDataWidth)}</Text>
-				{callData.flags?.encrypted && <Text color="yellow"> 🔒</Text>}
+				{callData.flags?.encrypted && <Text color="yellow"> enc</Text>}
 			</Box>
 		)
 	}
@@ -822,7 +812,8 @@ export function DecodedMessageList({
 			))}
 			{showMoreHint && messages.length > maxMessages && (
 				<Text dimColor italic>
-					{"  "}↳ {messages.length - maxMessages} more messages ({moreHintText})
+					{"  " +
+						`+${messages.length - maxMessages} more messages (${moreHintText})`}
 				</Text>
 			)}
 		</Box>

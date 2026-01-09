@@ -91,6 +91,7 @@ const extendedSourceStatusSchema = {
 		type: { type: "string" },
 		url: { type: "string" },
 		connected: { type: "boolean" },
+		consumers: { type: "number" },
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
 		lastError: { type: "string" },
@@ -105,6 +106,7 @@ const extendedSourceStatusSchema = {
 	required: [
 		"id",
 		"connected",
+		"consumers",
 		"bytesReceived",
 		"dataRate",
 		"reconnectAttempts",
@@ -269,6 +271,8 @@ export interface DecoderAssignment {
  */
 export interface ExtendedSourceStatus extends SourceStatus {
 	assignments: DecoderAssignment[]
+	/** Number of decoder consumers assigned to this source */
+	consumers: number
 	available: boolean
 }
 
@@ -330,11 +334,15 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 		},
 		async () => {
 			const statuses = sourceManager.getAllStatus()
-			return statuses.map(status => ({
-				...status,
-				assignments: sourceManager.getSourceAssignments(status.id),
-				available: sourceManager.isSourceAvailable(status.id),
-			}))
+			return statuses.map(status => {
+				const assignments = sourceManager.getSourceAssignments(status.id)
+				return {
+					...status,
+					assignments,
+					consumers: assignments.length,
+					available: sourceManager.isSourceAvailable(status.id),
+				}
+			})
 		},
 	)
 

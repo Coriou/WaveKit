@@ -11,22 +11,22 @@ interface DecoderListProps {
 	decoders: DecoderStatus[]
 }
 
-function getHealthIcon(health: DecoderStatus["health"]): {
-	icon: string
+function getHealthText(health: DecoderStatus["health"]): {
+	text: string
 	color: string
 } {
 	switch (health) {
 		case "healthy":
 		case "running":
-			return { icon: "●", color: "green" }
+			return { text: "ok", color: "green" }
 		case "degraded":
 		case "idle":
-			return { icon: "○", color: "yellow" }
+			return { text: "warn", color: "yellow" }
 		case "unhealthy":
 		case "faulted":
-			return { icon: "✗", color: "red" }
+			return { text: "err", color: "red" }
 		default:
-			return { icon: "–", color: "gray" }
+			return { text: "unk", color: "gray" }
 	}
 }
 
@@ -67,13 +67,13 @@ export function DecoderList({ decoders }: DecoderListProps) {
 			</Box>
 			{decoders.map(decoder => {
 				const status = getStatusText(decoder.running)
-				const health = getHealthIcon(decoder.health)
+				const health = getHealthText(decoder.health)
 
 				return (
 					<Box key={decoder.id}>
 						<Text>{padRight(decoder.id, 18)}</Text>
 						<Text color={status.color}>{padRight(status.text, 12)}</Text>
-						<Text color={health.color}>{padRight(health.icon, 10)}</Text>
+						<Text color={health.color}>{padRight(health.text, 10)}</Text>
 						<Text>{padRight(formatNumber(decoder.stats.eventsOut), 10)}</Text>
 						<Text dimColor>
 							{decoder.running ? formatDuration(decoder.uptime) : "–"}

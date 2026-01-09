@@ -48,11 +48,23 @@ export function SourceStatus({ sources }: SourceStatusProps) {
 					<Text color={source.connected ? "green" : "red"}>
 						{padRight(source.connected ? "connected" : "disconnected", 12)}
 					</Text>
-					{typeof source.consumers === "number" ? (
-						<Text>{source.consumers}</Text>
-					) : (
-						<Text dimColor>-</Text>
-					)}
+					{(() => {
+						const consumers =
+							typeof source.consumers === "number"
+								? source.consumers
+								: Array.isArray(
+											(source as unknown as { assignments?: unknown[] })
+												.assignments,
+									  )
+									? (source as unknown as { assignments: unknown[] })
+											.assignments.length
+									: undefined
+						return typeof consumers === "number" ? (
+							<Text>{consumers}</Text>
+						) : (
+							<Text dimColor>-</Text>
+						)
+					})()}
 				</Box>
 			))}
 		</Box>

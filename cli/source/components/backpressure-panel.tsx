@@ -21,7 +21,7 @@ function renderBufferBar(bufferBytes: number, highWaterMark: number): string {
 	const filled = Math.round(pct * barWidth)
 	const empty = barWidth - filled
 
-	const bar = "█".repeat(filled) + "░".repeat(empty)
+	const bar = "#".repeat(filled) + ".".repeat(empty)
 	const pctText = `${Math.round(pct * 100)}%`
 	return `${bar} ${padLeft(pctText, 4)}`
 }
@@ -58,8 +58,8 @@ function BufferBar({
 
 	return (
 		<Box>
-			<Text color={color}>{"█".repeat(filled)}</Text>
-			<Text dimColor>{"░".repeat(empty)}</Text>
+			<Text color={color}>{"#".repeat(filled)}</Text>
+			<Text dimColor>{".".repeat(empty)}</Text>
 			<Text> {padLeft(`${Math.round(pct * 100)}%`, 4)}</Text>
 		</Box>
 	)
@@ -169,7 +169,7 @@ export function BackpressurePanel({
 					return (
 						<Box key={branch.id}>
 							<Text color={branch.backpressureActive ? "red" : undefined}>
-								{branch.backpressureActive ? "▶ " : "  "}
+								{branch.backpressureActive ? "> " : "  "}
 							</Text>
 							<Text>{padRight(branch.id, 24)}</Text>
 							<StatusBadge active={branch.backpressureActive} />

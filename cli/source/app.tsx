@@ -97,65 +97,101 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	})
 
 	// Handle incoming WebSocket messages
-	const handleMessage = useCallback(
-		(msg: ServerMessage) => {
-			switch (msg.type) {
-				case "decoder:output": {
-					const data = msg.data as DecoderOutputMessage | undefined
-					if (data?.output) {
-						setState(prev => ({
-							...prev,
-							messages: [...prev.messages.slice(-99), data.output],
-						}))
-					}
-					break
+	const handleMessage = useCallback((msg: ServerMessage) => {
+		switch (msg.type) {
+			case "decoder:output": {
+				const data = msg.data as DecoderOutputMessage | undefined
+				if (data?.output) {
+					setState(prev => ({
+						...prev,
+						messages: [...prev.messages.slice(-99), data.output],
+					}))
 				}
+				break
+			}
 
-				case "decoder:started":
-				case "decoder:stopped":
-				case "decoder:health": {
-					// Could update individual decoder, but for simplicity we'll rely on snapshots
-					break
-				}
+			case "decoder:started":
+			case "decoder:stopped":
+			case "decoder:health":
+			case "decoder:error": {
+				setState(prev => {
+					const data = msg.data as
+						| {
+								decoderId?: string
+								health?: string
+								error?: string
+						  }
+						| undefined
+					const decoderId = data?.decoderId
+					if (!decoderId) return prev
 
-				case "fanout:snapshot": {
-					const data = msg.data as FanoutSnapshot | undefined
-					if (data) {
+					const nextDecoders = prev.decoders.map(decoder => {
+						if (decoder.id !== decoderId) return decoder
+						if (msg.type === "decoder:started") {
+							return { ...decoder, running: true }
+						}
+						if (msg.type === "decoder:stopped") {
+							return { ...decoder, running: false }
+						}
+						if (
+							msg.type === "decoder:health" &&
+							typeof data?.health === "string"
+						) {
+							return {
+								...decoder,
+								health: data.health as DecoderStatus["health"],
+							}
+						}
+						if (
+							msg.type === "decoder:error" &&
+							typeof data?.error === "string"
+						) {
+							return { ...decoder, error: data.error }
+						}
+						return decoder
+					})
+
+					return { ...prev, decoders: nextDecoders }
+				})
+				break
+			}
+
+			case "fanout:snapshot": {
+				const data = msg.data as FanoutSnapshot | undefined
+				if (data) {
+					setState(prev => {
 						// Track drop deltas for rate calculation
-						if (state.snapshot?.branches) {
+						if (prev.snapshot?.branches) {
 							const prevDrops = new Map<string, number>()
-							for (const branch of state.snapshot.branches) {
+							for (const branch of prev.snapshot.branches) {
 								prevDrops.set(branch.id, branch.droppedBytesTotal ?? 0)
 							}
 							for (const branch of data.branches) {
-								const prev = prevDrops.get(branch.id) ?? 0
-								const delta = (branch.droppedBytesTotal ?? 0) - prev
-								if (delta > 0) {
-									recordDrop(delta)
-								}
+								const prevDrop = prevDrops.get(branch.id) ?? 0
+								const delta = (branch.droppedBytesTotal ?? 0) - prevDrop
+								if (delta > 0) recordDrop(delta)
 							}
 						}
 
-						setState(prev => ({
+						return {
 							...prev,
 							snapshot: data,
 							dropRate: getDropRate(),
-						}))
-					}
-					break
+						}
+					})
 				}
-
-				case "subscribed":
-					// Successfully subscribed
-					break
-
-				case "error":
-					// Handle error messages if needed
-					break
+				break
 			}
-		},
-		[state.snapshot],
-	)
+
+			case "subscribed":
+				// Successfully subscribed
+				break
+
+			case "error":
+				// Handle error messages if needed
+				break
+		}
+	}, [])
 
 	// WebSocket connection
 	const { status, error, reconnect, closeCode, closeReason } = useWebSocket({

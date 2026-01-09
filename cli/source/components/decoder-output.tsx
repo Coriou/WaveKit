@@ -31,7 +31,7 @@ export function DecoderOutput({
 			<Box flexDirection="column" paddingX={1}>
 				<Box marginBottom={1}>
 					<Text bold color="cyan">
-						📡 DECODED OUTPUT
+						DECODED OUTPUT
 					</Text>
 					<Text dimColor> — Live message feed</Text>
 				</Box>
@@ -42,7 +42,7 @@ export function DecoderOutput({
 					paddingY={1}
 					justifyContent="center"
 				>
-					<Text dimColor>⏳ Waiting for decoded messages...</Text>
+					<Text dimColor>Waiting for decoded messages...</Text>
 				</Box>
 			</Box>
 		)
@@ -52,7 +52,7 @@ export function DecoderOutput({
 		<Box flexDirection="column" paddingX={1}>
 			<Box marginBottom={1}>
 				<Text bold color="cyan">
-					📡 DECODED OUTPUT
+					DECODED OUTPUT
 				</Text>
 				<Text dimColor>
 					{" "}

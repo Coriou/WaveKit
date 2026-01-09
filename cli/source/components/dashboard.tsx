@@ -12,7 +12,7 @@ import type {
 	FanoutSnapshot,
 	SourceStatus as SourceStatusType,
 } from "../types.js"
-import { formatBytes, formatRate } from "../utils/format.js"
+import { formatBytes, formatRate, padRight } from "../utils/format.js"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
 import { DecodedMessageList } from "./decoded-message.js"
 
@@ -54,8 +54,8 @@ export function Dashboard({
 
 	// Calculate summary stats
 	const runningDecoders = decoders.filter(d => d.running).length
-	const healthyDecoders = decoders.filter(
-		d => normalizeHealth(d.health) === "ok",
+	const healthyRunningDecoders = decoders.filter(
+		d => d.running && normalizeHealth(d.health) === "ok",
 	).length
 	const totalEvents = decoders.reduce((sum, d) => sum + d.stats.eventsOut, 0)
 
@@ -65,6 +65,31 @@ export function Dashboard({
 	const backpressureActive = snapshot?.backpressureActiveCount ?? 0
 	const totalDropped = snapshot?.droppedBytesTotal ?? 0
 	const totalFlowed = snapshot?.totalBytesWritten ?? 0
+
+	const decoderItems = decoders.map(decoder => {
+		const status = normalizeHealth(decoder.health)
+		const color = !decoder.running
+			? ("gray" as const)
+			: status === "ok"
+				? ("green" as const)
+				: status === "warn"
+					? ("yellow" as const)
+					: ("red" as const)
+		const label =
+			status === "ok" || !decoder.running
+				? decoder.id
+				: `${decoder.id} [${status}]`
+		return { id: decoder.id, label, color }
+	})
+
+	const longestDecoderLabel = decoderItems.reduce(
+		(max, item) => Math.max(max, item.label.length),
+		0,
+	)
+	const availableWidth = Math.max(20, termWidth - 2)
+	const columnWidth = Math.min(32, Math.max(14, longestDecoderLabel + 2))
+	const columns = Math.max(1, Math.floor(availableWidth / columnWidth))
+	const rows = Math.max(1, Math.ceil(decoderItems.length / columns))
 
 	return (
 		<Box flexDirection="column" paddingX={1}>
@@ -83,9 +108,14 @@ export function Dashboard({
 					<Box>
 						<Text bold>Healthy: </Text>
 						<Text
-							color={healthyDecoders === runningDecoders ? "green" : "yellow"}
+							color={
+								runningDecoders === 0 ||
+								healthyRunningDecoders === runningDecoders
+									? "green"
+									: "yellow"
+							}
 						>
-							{healthyDecoders}/{runningDecoders}
+							{healthyRunningDecoders}/{runningDecoders}
 						</Text>
 					</Box>
 					<Box>
@@ -93,20 +123,29 @@ export function Dashboard({
 						<Text>{totalEvents.toLocaleString()}</Text>
 					</Box>
 				</Box>
-				{decoders.slice(0, 5).map(decoder => {
-					const status = normalizeHealth(decoder.health)
-					return (
-						<Box key={decoder.id}>
-							<Text color={decoder.running ? "green" : "gray"}>
-								{decoder.running ? "●" : "○"} {decoder.id}
-							</Text>
-							{status === "warn" && <Text color="yellow"> ⚠</Text>}
-							{status === "error" && <Text color="red"> ✗</Text>}
-						</Box>
-					)
-				})}
-				{decoders.length > 5 && (
-					<Text dimColor> ... and {decoders.length - 5} more</Text>
+				{decoderItems.length === 0 ? (
+					<Text dimColor>No decoders configured</Text>
+				) : (
+					<>
+						{Array.from({ length: rows }).map((_, rowIdx) => (
+							<Box key={`decoder-row-${rowIdx}`} flexDirection="row">
+								{Array.from({ length: columns }).map((__, colIdx) => {
+									const itemIdx = rowIdx * columns + colIdx
+									const item = decoderItems[itemIdx]
+									if (!item) {
+										return <Box key={`decoder-cell-${colIdx}`} />
+									}
+									return (
+										<Box key={item.id} width={columnWidth}>
+											<Text color={item.color}>
+												{padRight(item.label, columnWidth)}
+											</Text>
+										</Box>
+									)
+								})}
+							</Box>
+						))}
+					</>
 				)}
 			</Box>
 
@@ -164,9 +203,7 @@ export function Dashboard({
 				</Box>
 				{sources.map(source => (
 					<Box key={source.id}>
-						<Text color={source.connected ? "green" : "red"}>
-							{source.connected ? "●" : "○"} {source.id}
-						</Text>
+						<Text color={source.connected ? "green" : "red"}>{source.id}</Text>
 						<Text dimColor> @ {source.url}</Text>
 					</Box>
 				))}
@@ -184,7 +221,7 @@ export function Dashboard({
 					compact={true}
 					newestFirst={true}
 					showMoreHint={true}
-					moreHintText="press 4 to view all"
+					moreHintText="press 3 to view all"
 				/>
 			</Box>
 		</Box>
