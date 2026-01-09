@@ -1,86 +1,89 @@
 # WaveKit Project Structure
 
+## Directory Layout
+
 ```
 wavekit/
-├── src/
-│   ├── index.ts              # Entry point - wires all components
-│   ├── bootstrap.ts          # Environment setup (dotenv)
-│   ├── config.ts             # Zod schemas + YAML config loading
+├── src/                      # TypeScript source
+│   ├── index.ts                 # Entry point
+│   ├── config.ts                # Zod schemas + config loading
+│   ├── bootstrap.ts             # Environment setup
 │   │
-│   ├── core/                 # Core streaming infrastructure
-│   │   ├── source-manager.ts    # TCP client for SDR sources
-│   │   ├── fanout-manager.ts    # Stream multiplexer
-│   │   ├── format-converter.ts  # Audio format transforms (F32↔S16)
-│   │   └── audio-output.ts      # TCP server for audio out
+│   ├── core/                    # Stream infrastructure
+│   │   ├── source-manager.ts       # TCP client for SDR sources
+│   │   ├── fanout-manager.ts       # Stream multiplexer
+│   │   ├── format-converter.ts     # Audio format transforms
+│   │   └── audio-output.ts         # TCP server for audio
 │   │
-│   ├── decoders/             # Decoder plugin system
-│   │   ├── types.ts             # Decoder interfaces
-│   │   ├── base-decoder.ts      # Abstract base class
-│   │   ├── manager.ts           # Lifecycle orchestration
-│   │   ├── registry.ts          # Plugin registration
-│   │   └── builtin/             # Built-in decoder adapters
-│   │       ├── dsd-fme.ts
-│   │       ├── multimon-ng.ts
-│   │       └── rtl433.ts
+│   ├── decoders/                # Decoder plugin system
+│   │   ├── types.ts                # Interfaces
+│   │   ├── base-decoder.ts         # Pure consumer base class
+│   │   ├── network-producer-decoder.ts
+│   │   ├── external-sdr-decoder.ts
+│   │   ├── manager.ts              # Lifecycle orchestration
+│   │   ├── registry.ts             # Plugin registration
+│   │   └── builtin/                # 8 decoder adapters
 │   │
-│   ├── api/                  # Fastify REST/WebSocket API
-│   │   ├── server.ts            # Fastify setup
-│   │   ├── routes/              # Route handlers
+│   ├── api/                     # Fastify REST/WebSocket
+│   │   ├── server.ts
+│   │   ├── routes/
 │   │   └── websocket/
-│   │       └── events.ts        # Real-time event broadcasting
 │   │
-│   └── utils/                # Shared utilities
-│       ├── logger.ts            # Pino structured logging
-│       ├── errors.ts            # Custom error classes
-│       ├── health-check.ts      # Health monitoring
-│       ├── version.ts           # Decoder version validation
-│       └── graceful-shutdown.ts # SIGTERM handling
+│   └── utils/                   # Shared utilities
+│       ├── logger.ts
+│       ├── errors.ts
+│       └── graceful-shutdown.ts
 │
-├── config/                   # Runtime configuration files
-│   ├── default.yaml             # Base configuration
-│   └── custom.yaml              # User overrides (optional)
+├── cli/                      # CLI Dashboard (Ink/React)
+│   └── source/
+│       ├── app.tsx              # Main app
+│       ├── components/          # UI components
+│       └── hooks/               # WebSocket, terminal size
 │
-├── tests/
-│   ├── unit/                 # Unit tests (mirrors src/ structure)
-│   ├── integration/          # Integration tests
-│   └── mocks/fixtures/       # Test fixtures
+├── config/                   # Runtime configuration
+│   └── default.yaml
 │
-├── docker/                   # Docker build resources
-│   ├── overlay/                 # s6-overlay service definitions
-│   └── scripts/                 # Container scripts
+├── docker/                   # Docker resources
+│   ├── overlay/                 # s6-overlay services
+│   └── scripts/
 │
-└── dist/                     # Build output (gitignored)
+├── tests/                    # Test suites
+│   ├── unit/
+│   ├── integration/
+│   └── mocks/fixtures/
+│
+└── docs/                     # Documentation
 ```
 
-## Architecture Patterns
+## Key Patterns
 
-### Decoder Plugin System
+### Decoder Integration
 
-1. All decoders implement the `Decoder` interface from `types.ts`
-2. Extend `BaseDecoder` for common functionality (process spawning, output parsing)
-3. Register in `DecoderRegistry` with a factory function and capabilities
-4. `DecoderManager` handles lifecycle (start/stop/restart with exponential backoff)
+Three patterns for decoder integration:
+
+1. **Pure Consumer** - Receives audio via stdin (dsd-fme, multimon-ng)
+2. **Network Producer** - Runs as service with network output (readsb, AIS-catcher)
+3. **External SDR** - Controls own SDR hardware (acarsdec, dumpvdl2)
 
 ### Stream Flow
 
 ```
-SourceManager → FanoutManager → [Decoder1, Decoder2, ...] → API/WebSocket
-                                                         → AudioOutput
+SourceManager → FanoutManager → [Decoders] → DecoderManager → WebSocket
+                                          → AudioOutput
 ```
 
 ### Error Handling
 
 Custom error classes in `src/utils/errors.ts`:
 
-- `WaveKitError` - Base class with error codes
-- `SourceConnectionError` - TCP connection failures
+- `WaveKitError` - Base class
+- `SourceConnectionError` - TCP failures
 - `DecoderSpawnError` - Process spawn failures
 - `ConfigValidationError` - Zod validation errors
-- `DecoderVersionError` - Version constraint failures
 
-### Logging Convention
+### Logging
 
-Use component loggers:
+Component loggers via Pino:
 
 ```typescript
 import { createComponentLogger } from "./utils/logger.js"
@@ -89,7 +92,7 @@ const log = createComponentLogger(parentLogger, "ComponentName")
 
 ### Configuration
 
-- YAML files in `config/` directory (default.yaml, custom.yaml)
+- YAML files in `config/` directory
 - Environment variables with `WAVEKIT_` prefix override config
-- Nested keys use double underscore: `WAVEKIT_API__PORT`
+- Nested keys: `WAVEKIT_API__PORT` → `api.port`
 - Validated with Zod schemas at startup

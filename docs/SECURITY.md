@@ -283,5 +283,5 @@ Use this checklist for new deployments:
 
 - [NIST National Vulnerability Database](https://nvd.nist.gov/)
 - [GitHub Security Advisories](https://github.com/advisories)
-- [WaveKit Decoder Expansion Roadmap](./DECODER-EXPANSION.md)
+- [WaveKit Decoder Guide](./DECODER-GUIDE.md)
 - [CVE-2025-34458 (Direwolf)](https://nvd.nist.gov/vuln/detail/CVE-2025-34458)
