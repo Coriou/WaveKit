@@ -12,7 +12,12 @@
  */
 
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput, DemodulationConfig } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DemodulationConfig,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /**
@@ -86,7 +91,7 @@ interface AcarsdecJsonOutput {
 
 /**
  * ACARS Decoder - Decodes ACARS aircraft data link messages.
- * 
+ *
  * Uses the AudioDemodDecoder base class to consume shared IQ data.
  * Performs AM demodulation using csdr and feeds raw S16LE audio to
  * f00b4r0/acarsdec fork via stdin.
@@ -101,7 +106,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 
 	/**
 	 * Returns the demodulation configuration for ACARS.
-	 * 
+	 *
 	 * Requirements:
 	 * - AM Modulation
 	 * - 12.5kHz or 25kHz bandwidth
@@ -109,13 +114,13 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	 */
 	protected getDemodConfig(): DemodulationConfig {
 		return {
-			modulation: "am",           // ACARS uses AM Modulation
-			bandwidth: 25000,           // ~25kHz bandwidth
-			sampleRate: 12000,          // acarsdec requires 12kHz multiples (using 12000)
-			demodSampleRate: 24000,     // Demod at 24ksps (decimation=100 from 2.4Msps)
+			modulation: "am", // ACARS uses AM Modulation
+			bandwidth: 25000, // ~25kHz bandwidth
+			sampleRate: 12000, // acarsdec requires 12kHz multiples (using 12000)
+			demodSampleRate: 24000, // Demod at 24ksps (decimation=100 from 2.4Msps)
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
-			deEmphasis: false,          // No de-emphasis for data
-			fmGain: 1.0,                // Default gain
+			deEmphasis: false, // No de-emphasis for data
+			fmGain: 1.0, // Default gain
 			// skipDcBlock: true - removed to enable DC block (needed to remove carrier from AM envelope)
 		}
 	}
@@ -130,7 +135,7 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	/**
 	 * Returns command line arguments for acarsdec.
 	 * Using f00b4r0 fork syntax for stdin injection.
-	 * 
+	 *
 	 * IMPORTANT: The sndfile parameter syntax is critical for raw audio via stdin:
 	 * - Use: '/dev/stdin,subtype=0x02' (comma-separated, no file= prefix)
 	 * - subtype=0x02 is hex for SF_FORMAT_PCM_16 (S16LE)
@@ -235,7 +240,7 @@ export function parseAcarsdecJson(
 	json: AcarsdecJsonOutput,
 ): ACARSMessage | null {
 	// Frequency is required - use freq or frequency field
-	const frequency = json.freq ?? json.frequency ?? 131.550 // Default fallback if missing (stdin mode might output 0 or null?)
+	const frequency = json.freq ?? json.frequency ?? 131.55 // Default fallback if missing (stdin mode might output 0 or null?)
 
 	// Parse timestamp - can be Unix timestamp or ISO string
 	let timestamp: Date

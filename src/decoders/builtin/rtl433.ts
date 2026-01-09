@@ -66,8 +66,7 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		this.options = this.parseOptions(config.options)
 
 		// Calculate actual target sample rate after decimation
-		const inputRate =
-			this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
+		const inputRate = this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
 		const targetRate =
 			this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE
 

@@ -81,7 +81,7 @@ describe("AcarsdecDecoder", () => {
 			})
 		})
 	})
-	
+
 	describe("configuration", () => {
 		it("should use configured inputSampleRate", () => {
 			const config = createConfig({
@@ -98,10 +98,9 @@ describe("AcarsdecDecoder", () => {
 			}
 			const decoder = new TestDecoder(config, testLogger)
 			const demodConfig = decoder.getDemodConfigPublic()
-			
+
 			expect(demodConfig.inputSampleRate).toBe(2_048_000)
 		})
-
 
 		it("should build pipeline with correct raw format syntax for stdin", () => {
 			const config = createConfig({
@@ -117,7 +116,7 @@ describe("AcarsdecDecoder", () => {
 			}
 			const decoder = new TestDecoder(config, testLogger)
 			const pipeline = decoder.buildPipelineCommandPublic()
-			
+
 			// Verify pipeline uses correct sndfile syntax
 			expect(pipeline).toContain("acarsdec")
 			// Must use comma syntax with subtype in hex (not file= prefix)
@@ -187,7 +186,6 @@ describe("parseAcarsdecJson", () => {
 		expect(result?.mode).toBe("")
 		expect(result?.label).toBe("")
 	})
-
 
 	it("should handle alternative field names", () => {
 		const json = {
@@ -379,10 +377,10 @@ describe("ACARS Decoder Property-Based Tests", () => {
 			)
 		})
 
-        // Skipped "should return null for JSON without frequency" test as new implementation falls back to default freq
-        // This is a behavior change - fallback allows decoding even if acarsdec -j doesn't report freq in file mode?
-        // Actually, let's keep the test if we remove the fallback, OR update the test to expect default.
-        // My implementation added `?? 131.550`.
-        // Let's remove the test that expects null for missing frequency, as we now have a default.
+		// Skipped "should return null for JSON without frequency" test as new implementation falls back to default freq
+		// This is a behavior change - fallback allows decoding even if acarsdec -j doesn't report freq in file mode?
+		// Actually, let's keep the test if we remove the fallback, OR update the test to expect default.
+		// My implementation added `?? 131.550`.
+		// Let's remove the test that expects null for missing frequency, as we now have a default.
 	})
 })
