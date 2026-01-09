@@ -14,9 +14,9 @@ Features:
 - Quiet mode for minimal output
 
 Usage:
-    python3 auto-capture.py --host 192.168.1.69 --port 1235 --threshold 1.5
-    python3 auto-capture.py --threshold 1.5 --release 1.2 --pre 2.0 --post 1.0
-    python3 auto-capture.py --quiet --max 20 --timeout 3600
+    python3 auto-capture.py --host 192.168.1.69 --port 1235 --threshold 1.5 --output /data/debug_audio
+    python3 auto-capture.py --threshold 1.5 --release 1.2 --pre 2.0 --post 1.0 --output /data/debug_audio
+    python3 auto-capture.py --quiet --max 20 --timeout 3600 --output /data/debug_audio
 """
 
 import socket
