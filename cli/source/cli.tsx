@@ -27,7 +27,7 @@ WaveKit CLI Dashboard
 
 Usage:
   wavekit                    Open interactive dashboard
-  wavekit --view <view>      Open specific view (output|backpressure|decoders|sources)
+  wavekit --view <view>      Open specific view (output|backpressure|decoders|sources|live-audio)
   wavekit --help             Show this help
 
 Environment:
@@ -41,6 +41,7 @@ Views:
   output        Live decoded message feed
   backpressure  Full backpressure monitor
   sources       Source configuration and metrics
+  live-audio    Live demodulation status and streaming info
 `)
 	process.exit(0)
 }

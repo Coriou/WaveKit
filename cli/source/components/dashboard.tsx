@@ -12,6 +12,7 @@ import type {
 	FanoutSnapshot,
 	SourceStatus as SourceStatusType,
 	TunerRelayStatus,
+	LiveAudioStatus,
 } from "../types.js"
 import { formatBytes, formatRate, padRight } from "../utils/format.js"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
@@ -24,6 +25,7 @@ interface DashboardProps {
 	dropRate: number
 	messages?: DecoderOutput[]
 	tunerRelay?: TunerRelayStatus | null
+	liveAudioStatus?: LiveAudioStatus | null
 }
 
 /** Maps server health values to unified display status */
@@ -52,6 +54,7 @@ export function Dashboard({
 	dropRate,
 	messages = [],
 	tunerRelay = null,
+	liveAudioStatus = null,
 }: DashboardProps) {
 	const { columns: termWidth } = useTerminalSize()
 
@@ -81,6 +84,31 @@ export function Dashboard({
 	const relaySource = tunerRelay?.sourceId ?? "-"
 	const relayControl =
 		tunerRelay?.controlClientRemote ?? tunerRelay?.controlClientId ?? "none"
+
+	const liveAudioStatusLabel = !liveAudioStatus
+		? "unavailable"
+		: !liveAudioStatus.enabled
+			? "disabled"
+			: liveAudioStatus.pipelineHealth === "error"
+				? "error"
+				: liveAudioStatus.running
+					? liveAudioStatus.pipelineHealth
+					: "stopped"
+	const liveAudioColor =
+		liveAudioStatusLabel === "running"
+			? ("green" as const)
+			: liveAudioStatusLabel === "starting"
+				? ("yellow" as const)
+				: liveAudioStatusLabel === "error"
+					? ("red" as const)
+					: liveAudioStatusLabel === "unavailable"
+						? ("gray" as const)
+						: ("yellow" as const)
+	const liveAudioClients = liveAudioStatus?.clientCount ?? 0
+	const liveAudioUrl = liveAudioStatus?.httpUrl ?? "-"
+	const liveAudioSource = liveAudioStatus?.sourceId ?? "-"
+	const liveAudioRate = liveAudioStatus?.effectiveSampleRate ?? 0
+	const liveAudioDecimation = liveAudioStatus?.decimationFactor ?? 0
 
 	const backpressureActive = snapshot?.backpressureActiveCount ?? 0
 	const totalDropped = snapshot?.droppedBytesTotal ?? 0
@@ -265,6 +293,40 @@ export function Dashboard({
 				tunerRelay.compatibilityMessage ? (
 					<Text color="yellow">{tunerRelay.compatibilityMessage}</Text>
 				) : null}
+			</Box>
+
+			{/* Live Audio Summary */}
+			<Box flexDirection="column" marginBottom={1}>
+				<Text bold color="cyan">
+					LIVE AUDIO
+				</Text>
+				<Box flexDirection="row" gap={4}>
+					<Box>
+						<Text bold>Status: </Text>
+						<Text color={liveAudioColor}>{liveAudioStatusLabel}</Text>
+					</Box>
+					<Box>
+						<Text bold>Clients: </Text>
+						<Text>{liveAudioClients}</Text>
+					</Box>
+					<Box>
+						<Text bold>Source: </Text>
+						<Text>{liveAudioSource}</Text>
+					</Box>
+				</Box>
+				<Box flexDirection="row" gap={4}>
+					<Box>
+						<Text bold>Rate: </Text>
+						<Text>
+							{liveAudioRate > 0 ? `${Math.round(liveAudioRate)} Hz` : "n/a"}
+						</Text>
+					</Box>
+					<Box>
+						<Text bold>Decimation: </Text>
+						<Text>{liveAudioDecimation > 0 ? liveAudioDecimation : "n/a"}</Text>
+					</Box>
+				</Box>
+				<Text dimColor>{liveAudioUrl}</Text>
 			</Box>
 
 			{/* Recent Decoded Messages */}

@@ -15,6 +15,10 @@ import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
 import type { FanoutStatus } from "../../core/fanout-manager.js"
+import type {
+	LiveDemodConfig,
+	LiveDemodStatus,
+} from "../../core/live-demodulator.js"
 
 /**
  * Supported WebSocket channels for subscription.
@@ -23,6 +27,7 @@ import type { FanoutStatus } from "../../core/fanout-manager.js"
  * - sources: Source connected, disconnected, error events
  * - health: Decoder health state change events (Requirement 20.4)
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
+ * - live-audio: Live demodulation status and config events
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -30,6 +35,7 @@ export type WebSocketChannel =
 	| "sources"
 	| "health"
 	| "fanout"
+	| "live-audio"
 
 /**
  * Message sent from client to server.
@@ -56,6 +62,11 @@ export interface ServerMessage {
 		| "fanout:snapshot"
 		| "fanout:backpressure"
 		| "fanout:drain"
+		| "live-audio:status"
+		| "live-audio:config"
+		| "live-audio:started"
+		| "live-audio:stopped"
+		| "live-audio:error"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -81,7 +92,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "metrics" ||
 		channel === "sources" ||
 		channel === "health" ||
-		channel === "fanout"
+		channel === "fanout" ||
+		channel === "live-audio"
 	)
 }
 
@@ -499,6 +511,26 @@ export class WebSocketEventBroadcaster {
 				durationMs,
 				timestamp: new Date().toISOString(),
 			},
+		})
+	}
+
+	/**
+	 * Broadcasts live audio status to subscribed clients.
+	 */
+	broadcastLiveAudioStatus(status: LiveDemodStatus): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:status",
+			data: status,
+		})
+	}
+
+	/**
+	 * Broadcasts live audio config to subscribed clients.
+	 */
+	broadcastLiveAudioConfig(config: LiveDemodConfig): void {
+		this.broadcast("live-audio", {
+			type: "live-audio:config",
+			data: config,
 		})
 	}
 

@@ -33,7 +33,7 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 
 ```
 ┌─ WaveKit Dashboard ─────────────────────────────────────────────────────────┐
-│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources      │
+│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Live Audio │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ DECODERS                                                                    │
 │ Running: 5/8    Healthy: 5/5    Total Events: 12,847                        │
@@ -51,13 +51,13 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 │ 14:23:44 [ais]       ship      MMSI:123456789 LAT:37.77 LON:-122.41         │
 │ 14:23:43 [multimon]  message   POCSAG1200 ADDR:1234567 "Test message"       │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ [q] Quit  [r] Reconnect  [1-5] Switch tabs                                  │
+│ [q] Quit  [r] Reconnect  [1-6] Switch tabs                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Keyboard shortcuts:**
 
-- `1-5` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources)
+- `1-6` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Live Audio)
 - `r` — Reconnect WebSocket
 - `q` — Quit
 
@@ -148,7 +148,14 @@ const ws = new WebSocket("ws://localhost:9000/ws")
 ws.send(
 	JSON.stringify({
 		type: "subscribe",
-		channels: ["decoders", "sources", "metrics", "health", "fanout"],
+		channels: [
+			"decoders",
+			"sources",
+			"metrics",
+			"health",
+			"fanout",
+			"live-audio",
+		],
 	}),
 )
 
@@ -166,6 +173,7 @@ ws.onmessage = event => {
 - `metrics` — Data rate metrics (~5s intervals)
 - `health` — Decoder health state changes
 - `fanout` — Backpressure snapshots
+- `live-audio` — Live demod status/config events
 
 ### Audio Streaming
 
@@ -206,6 +214,67 @@ tunerRelay:
 - In `exclusive` mode, the first client gets control and others are read-only.
 - The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
 - RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
+
+### Live Demodulator (HTTP Audio)
+
+Live demodulates IQ in real time and serves mono audio over HTTP.
+Ideal for quick monitoring with ffplay/VLC without touching decoder configs.
+
+**Quick start:**
+
+```yaml
+liveDemod:
+  enabled: true
+  sourceId: "rtl-pi"
+  httpPort: 8081
+  modulation: "nfm"
+  bandwidth: 12500
+  squelch: 0
+  noiseReduction: "off"
+  lowPass: 0
+  highPass: 0
+  gain: 10.0
+  deEmphasis: false
+  deEmphasisTau: 50
+  audioFormat: "s16le"
+  iqDcBlock: true
+```
+
+```bash
+# Start demodulation (if not auto-started)
+curl -X POST http://localhost:9000/api/live-audio/start
+
+# Play the stream (use the effectiveSampleRate from /status)
+ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:8081/stream
+```
+
+**Configuration reference:**
+
+- `sourceId` — IQ source to demodulate (defaults to first source)
+- `modulation` — `nfm` | `wfm` | `am` | `usb` | `lsb` | `dsb` | `cw` | `raw`
+- `bandwidth` — Target audio bandwidth in Hz (0 allowed only for `raw`)
+- `squelch` — dBFS threshold (-160 to 0). `0` keeps squelch open
+- `noiseReduction` — `off` | `voice` | `noaa-apt` | `narrow-band`
+- `lowPass` / `highPass` — Optional audio filters in Hz
+- `gain` — Audio gain multiplier (float)
+- `deEmphasis` / `deEmphasisTau` — FM de-emphasis (50 or 75 microseconds)
+- `audioFormat` — `s16le` or `f32le`
+- `iqDcBlock` — Apply IQ DC blocking before decimation
+
+**API examples:**
+
+```bash
+# Status
+curl http://localhost:9000/api/live-audio/status
+
+# Update modulation on the fly
+curl -X PATCH http://localhost:9000/api/live-audio/config \
+  -H "Content-Type: application/json" \
+  -d '{"modulation":"am","bandwidth":10000}'
+
+# Presets
+curl http://localhost:9000/api/live-audio/presets
+```
 
 ## Configuration
 

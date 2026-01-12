@@ -126,6 +126,22 @@ tunerRelay:
   maxClients: 1
   commandHistoryLimit: 200
 
+liveDemod:
+  enabled: true
+  sourceId: pi-iq
+  httpPort: 8081
+  modulation: nfm
+  bandwidth: 12500
+  squelch: -120
+  noiseReduction: off
+  lowPass: 0
+  highPass: 0
+  gain: 10.0
+  deEmphasis: false
+  deEmphasisTau: 50
+  audioFormat: s16le
+  iqDcBlock: true
+
 api:
   host: 0.0.0.0
   port: 3000

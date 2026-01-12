@@ -26,6 +26,7 @@ export type WebSocketChannel =
 	| "sources"
 	| "health"
 	| "fanout"
+	| "live-audio"
 
 export interface ServerMessage {
 	type: string

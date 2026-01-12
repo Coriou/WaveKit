@@ -62,6 +62,7 @@ docker-dev: docker-build-core ## Start development environment
 	@echo "  API:       http://localhost:9000"
 	@echo "  WebSocket: ws://localhost:4713"
 	@echo "  Audio:     nc localhost 8080"
+	@echo "  LiveAudio: http://localhost:8081/stream"
 	@echo "  IDE:       http://localhost:3000"
 
 docker-prod: docker-build ## Start production environment
@@ -101,7 +102,7 @@ docker-logs-api: ## Tail API logs
 
 docker-run-core: ## Run core mode manually (requires wavekit:core)
 	@echo "$(BLUE)Running WaveKit core mode...$(NC)"
-	@docker run -p 3000:3000 -p 8080:8080 \
+	@docker run -p 3000:3000 -p 8080:8080 -p 8081:8081 \
 		-v $(shell pwd)/config/dev_test.yaml:/app/config/default.yaml \
 		wavekit:core
 
@@ -125,7 +126,7 @@ dev-start: ## Start dev container (stops existing first)
 	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
 	@mkdir -p $(shell pwd)/debug_audio
 	@docker run --rm -d --name $(DEV_CONTAINER) \
-		-p 9000:3000 -p 8080:8080 -p 1234:1234 \
+		-p 9000:3000 -p 8080:8080 -p 8081:8081 -p 1234:1234 \
 		-v $(DEV_CONFIG):/app/config/default.yaml \
 		-v $(shell pwd)/debug_audio:/data/debug_audio \
 		-v $(shell pwd)/decoded_calls:/app/decoded_calls \
@@ -136,6 +137,7 @@ dev-start: ## Start dev container (stops existing first)
 	@echo "  $(BLUE)API$(NC)        http://localhost:9000"
 	@echo "  $(BLUE)Health$(NC)     http://localhost:9000/health"
 	@echo "  $(BLUE)Audio$(NC)      nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -"
+	@echo "  $(BLUE)Live Audio$(NC) http://localhost:8081/stream"
 	@echo "  $(BLUE)Tuner$(NC)      rtl_tcp on localhost:1234 (SDR++)"
 	@echo ""
 	@echo "  $(YELLOW)Commands:$(NC)"

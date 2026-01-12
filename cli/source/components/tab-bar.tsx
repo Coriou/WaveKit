@@ -16,6 +16,7 @@ const tabs: Array<{ key: string; view: View; label: string }> = [
 	{ key: "3", view: "output", label: "Output" },
 	{ key: "4", view: "backpressure", label: "Backpressure" },
 	{ key: "5", view: "sources", label: "Sources" },
+	{ key: "6", view: "live-audio", label: "Live Audio" },
 ]
 
 export function TabBar({ activeView }: TabBarProps) {

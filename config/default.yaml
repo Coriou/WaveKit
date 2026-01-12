@@ -221,6 +221,47 @@ tunerRelay:
   commandHistoryLimit: 200
 
 # -----------------------------------------------------------------------------
+# Live Demodulator (HTTP Audio Stream)
+# -----------------------------------------------------------------------------
+# Real-time IQ demodulation with an embedded HTTP audio stream.
+# Useful for quick monitoring or piping into ffplay/VLC.
+#
+# Stream URL:
+#   http://<host>:8081/stream
+#
+# Example:
+# liveDemod:
+#   enabled: true
+#   sourceId: "rtl-pi"
+#   httpPort: 8081
+#   modulation: "nfm"        # nfm | wfm | am | usb | lsb | dsb | cw | raw
+#   bandwidth: 12500         # Hz (0 allowed only for raw)
+#   squelch: 0               # dBFS (-160 to 0). 0 = open
+#   noiseReduction: "off"    # off | voice | noaa-apt | narrow-band
+#   lowPass: 0               # Hz (0 disables)
+#   highPass: 0              # Hz (0 disables)
+#   gain: 10.0
+#   deEmphasis: false
+#   deEmphasisTau: 50         # microseconds (50 or 75)
+#   audioFormat: "s16le"      # s16le | f32le
+#   iqDcBlock: true
+#
+liveDemod:
+  enabled: false
+  httpPort: 8081
+  modulation: "nfm"
+  bandwidth: 12500
+  squelch: 0
+  noiseReduction: "off"
+  lowPass: 0
+  highPass: 0
+  gain: 10.0
+  deEmphasis: false
+  deEmphasisTau: 50
+  audioFormat: "s16le"
+  iqDcBlock: true
+
+# -----------------------------------------------------------------------------
 # API Server
 # -----------------------------------------------------------------------------
 # Configure the Fastify REST/WebSocket API server for control and monitoring.

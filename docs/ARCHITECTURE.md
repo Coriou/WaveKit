@@ -11,6 +11,7 @@ WaveKit is a TypeScript-based SDR stream processing framework that:
 3. Manages decoder process lifecycles with auto-restart
 4. Exposes decoded data via REST API and WebSocket
 5. Streams decoded audio over TCP
+6. Demodulates IQ to live audio over HTTP
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -23,20 +24,26 @@ WaveKit is a TypeScript-based SDR stream processing framework that:
 │  │ TCP Client  │    │ Multiplexer │    │  │dsd  │ │multi│ │readsb│ ...  │ │
 │  │ Auto-reconn │    │ Backpressure│    │  └─────┘ └─────┘ └─────┘       │ │
 │  └─────────────┘    └─────────────┘    └─────────────────────────────────┘ │
-│         │                                           │                       │
-│         │                                           ▼                       │
-│         │                              ┌─────────────────────────────────┐ │
-│         │                              │         API Server              │ │
-│         │                              │                                 │ │
-│         │                              │  REST /api/*    WebSocket /ws   │ │
-│         │                              └─────────────────────────────────┘ │
-│         │                                           │                       │
-│         ▼                                           ▼                       │
-│  ┌─────────────┐                       ┌─────────────────────────────────┐ │
-│  │   Audio     │                       │        External Clients         │ │
-│  │   Output    │                       │                                 │ │
-│  │  TCP :8080  │                       │  CLI Dashboard, Web UI, etc.   │ │
-│  └─────────────┘                       └─────────────────────────────────┘ │
+│         │              │      │                  │                         │
+│         │              │      │                  ▼                         │
+│         │              │      │     ┌─────────────────────────────────┐   │
+│         │              │      │     │         API Server              │   │
+│         │              │      │     │                                 │   │
+│         │              │      │     │  REST /api/*    WebSocket /ws   │   │
+│         │              │      │     └─────────────────────────────────┘   │
+│         │              │      │                  │                         │
+│         │              ▼      ▼                  ▼                         │
+│         │       ┌──────────┐  ┌─────────────┐  ┌─────────────────────────┐ │
+│         │       │LiveDemod │  │ Tuner Relay │  │        External         │ │
+│         │       │HTTP :8081│  │  TCP :1234  │  │        Clients          │ │
+│         │       └──────────┘  └─────────────┘  │  CLI, Web UI, Players   │ │
+│         │                                      └─────────────────────────┘ │
+│         ▼                                                                   │
+│  ┌─────────────┐                                                            │
+│  │   Audio     │                                                            │
+│  │   Output    │                                                            │
+│  │  TCP :8080  │                                                            │
+│  └─────────────┘                                                            │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -227,6 +234,27 @@ configured `rtl_tcp`/`rtlmux` source.
 - Forward tuner control commands upstream
 - Track control ownership and client connections
 
+### LiveDemodulator
+
+Real-time IQ demodulation with an embedded HTTP audio stream.
+
+**Location**: `src/core/live-demodulator.ts`
+
+**Responsibilities**:
+
+- Attach an IQ branch from `FanoutManager`
+- Spawn and manage a csdr demodulation pipeline
+- Serve demodulated audio via HTTP `/stream`
+- Hot-reconfigure modulation and DSP parameters
+
+**DSP pipeline (high-level)**:
+
+```
+IQ (U8/S16) -> csdr convert -> (optional IQ dcblock) -> csdr firdecimate
+-> modulation demod (FM/AM/SSB) -> (audio filters) -> gain/limit
+-> (optional deemphasis) -> audio stream
+```
+
 ## Data Flow
 
 ### Audio Pipeline
@@ -268,6 +296,27 @@ FanoutManager
                           │
                           ▼
                    Connected Clients
+```
+
+### Live Demodulation Pipeline
+
+```
+SDR Source (rtl_tcp)
+       │
+       ▼
+SourceManager
+       │
+       ▼
+FanoutManager
+       │
+       ▼
+LiveDemodulator
+       │
+       ▼
+HTTP /stream (audio)
+       │
+       ▼
+Players (ffplay, VLC, browser)
 ```
 
 ### Event Flow

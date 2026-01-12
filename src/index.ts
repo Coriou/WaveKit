@@ -15,13 +15,14 @@
 import "./bootstrap.js"
 
 import { PassThrough } from "node:stream"
-import { loadConfig, type Config } from "./config.js"
+import { loadConfig, LiveDemodConfigSchema, type Config } from "./config.js"
 import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
+import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { ApiServer } from "./api/server.js"
@@ -271,6 +272,13 @@ async function main(): Promise<void> {
 		controlPolicy: config.tunerRelay.controlPolicy,
 		maxClients: config.tunerRelay.maxClients,
 	})
+	const liveDemodConfig = LiveDemodConfigSchema.parse(config.liveDemod ?? {})
+	const liveDemod = new LiveDemodulator(
+		logger,
+		sourceManager,
+		fanoutManager,
+		liveDemodConfig,
+	)
 
 	// Step 5: Initialize decoder system
 	const decoderRegistry = new DecoderRegistry()
@@ -329,6 +337,7 @@ async function main(): Promise<void> {
 			decoderRegistry,
 			audioOutput,
 			tunerRelay,
+			liveDemod,
 			logger,
 			audioConfig: {
 				format: config.audio.format,
@@ -360,6 +369,16 @@ async function main(): Promise<void> {
 		handler: async () => {
 			log.info("Shutting down fanout manager")
 			fanoutManager.destroy()
+		},
+		timeout: 2000,
+	})
+
+	// Shutdown live demodulator
+	shutdown.register({
+		name: "live-demodulator",
+		handler: async () => {
+			log.info("Shutting down live demodulator")
+			await liveDemod.stop()
 		},
 		timeout: 2000,
 	})
@@ -406,6 +425,41 @@ async function main(): Promise<void> {
 
 	// Step 10: Start API server
 	await apiServer.start()
+
+	const wsBroadcaster = apiServer.getWebSocketBroadcaster()
+
+	// Wire live demodulator events to WebSocket broadcaster
+	liveDemod.on("started", () => {
+		wsBroadcaster.broadcast("live-audio", {
+			type: "live-audio:started",
+			data: {},
+		})
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
+	liveDemod.on("stopped", () => {
+		wsBroadcaster.broadcast("live-audio", {
+			type: "live-audio:stopped",
+			data: {},
+		})
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
+	liveDemod.on("config-changed", liveConfig => {
+		wsBroadcaster.broadcastLiveAudioConfig(liveConfig)
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
+	liveDemod.on("client-connected", () => {
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
+	liveDemod.on("client-disconnected", () => {
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
+	liveDemod.on("error", err => {
+		wsBroadcaster.broadcast("live-audio", {
+			type: "live-audio:error",
+			data: { message: err.message },
+		})
+		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+	})
 
 	// Step 11: Start audio output server
 	await audioOutput.start()
@@ -469,6 +523,15 @@ async function main(): Promise<void> {
 	// This ensures fanout stays connected when sources reconnect
 	if (primarySourceId) {
 		wireSourceReconnection(sourceManager, fanoutManager, primarySourceId, log)
+	}
+
+	// Step 14b: Start live demodulator (if enabled)
+	if (liveDemodConfig.enabled) {
+		try {
+			await liveDemod.start()
+		} catch (err) {
+			log.error({ err }, "Failed to start live demodulator")
+		}
 	}
 
 	// Step 15: Start enabled decoders

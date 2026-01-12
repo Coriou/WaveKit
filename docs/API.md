@@ -7,6 +7,7 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **REST API**: `http://localhost:9000`
 - **WebSocket**: `ws://localhost:9000/ws`
 - **Audio Stream**: `tcp://localhost:8080`
+- **Live Audio Stream**: `http://localhost:8081/stream`
 
 ## REST Endpoints
 
@@ -228,6 +229,119 @@ curl http://localhost:9000/api/tuner-relay
 			"clientRemote": "192.168.1.50:50522"
 		}
 	]
+}
+```
+
+### Live Audio
+
+#### GET /api/live-audio/status
+
+Get live demodulator status.
+
+```bash
+curl http://localhost:9000/api/live-audio/status
+```
+
+**Response**:
+
+```json
+{
+	"enabled": true,
+	"running": true,
+	"sourceId": "rtl-pi",
+	"sourceConnected": true,
+	"sourceIqSampleRate": 2400000,
+	"config": {
+		"enabled": true,
+		"sourceId": "rtl-pi",
+		"httpPort": 8081,
+		"modulation": "nfm",
+		"bandwidth": 12500,
+		"squelch": 0,
+		"noiseReduction": "off",
+		"lowPass": 0,
+		"highPass": 0,
+		"gain": 10,
+		"deEmphasis": false,
+		"deEmphasisTau": 50,
+		"audioFormat": "s16le",
+		"iqDcBlock": true
+	},
+	"effectiveSampleRate": 25000,
+	"decimationFactor": 96,
+	"httpUrl": "http://localhost:8081/stream",
+	"clientCount": 1,
+	"bytesStreamed": 1234567,
+	"pipelineHealth": "running"
+}
+```
+
+#### POST /api/live-audio/start
+
+Start live demodulation.
+
+```bash
+curl -X POST http://localhost:9000/api/live-audio/start
+```
+
+**Response**:
+
+```json
+{ "success": true }
+```
+
+#### POST /api/live-audio/stop
+
+Stop live demodulation.
+
+```bash
+curl -X POST http://localhost:9000/api/live-audio/stop
+```
+
+**Response**:
+
+```json
+{ "success": true }
+```
+
+#### PATCH /api/live-audio/config
+
+Update live demodulator configuration (hot-restart pipeline).
+
+```bash
+curl -X PATCH http://localhost:9000/api/live-audio/config \
+  -H "Content-Type: application/json" \
+  -d '{
+    "modulation": "am",
+    "bandwidth": 10000,
+    "gain": 8.0
+  }'
+```
+
+**Response**:
+
+Returns the updated status (same schema as `/api/live-audio/status`).
+
+#### GET /api/live-audio/presets
+
+Get recommended presets per modulation.
+
+```bash
+curl http://localhost:9000/api/live-audio/presets
+```
+
+**Response**:
+
+```json
+{
+	"nfm": { "bandwidth": 12500, "deEmphasis": false },
+	"wfm": { "bandwidth": 150000, "deEmphasis": true, "deEmphasisTau": 50 },
+	"am": { "bandwidth": 10000, "deEmphasis": false },
+	"usb": { "bandwidth": 2400, "deEmphasis": false },
+	"lsb": { "bandwidth": 2400, "deEmphasis": false },
+	"dsb": { "bandwidth": 6000, "deEmphasis": false },
+	"cw": { "bandwidth": 500, "deEmphasis": false },
+	"raw": { "bandwidth": 0, "deEmphasis": false }
 }
 ```
 

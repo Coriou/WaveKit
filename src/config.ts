@@ -120,6 +120,40 @@ export const TunerRelayConfigSchema = z.object({
 })
 
 /**
+ * Schema for live demodulation configuration.
+ */
+export const LiveDemodConfigSchema = z
+	.object({
+		enabled: z.boolean().default(false),
+		sourceId: z.string().optional(),
+		httpPort: z.number().int().min(1).max(65535).default(8081),
+		modulation: z
+			.enum(["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"])
+			.default("nfm"),
+		bandwidth: z.number().int().min(0).default(12500),
+		squelch: z.number().min(-160).max(0).default(0),
+		noiseReduction: z
+			.enum(["off", "voice", "noaa-apt", "narrow-band"])
+			.default("off"),
+		lowPass: z.number().int().min(0).max(20000).default(0),
+		highPass: z.number().int().min(0).max(5000).default(0),
+		gain: z.number().min(0.1).max(100).default(10.0),
+		deEmphasis: z.boolean().default(false),
+		deEmphasisTau: z.union([z.literal(50), z.literal(75)]).default(50),
+		audioFormat: z.enum(["s16le", "f32le"]).default("s16le"),
+		iqDcBlock: z.boolean().default(true),
+	})
+	.superRefine((value, ctx) => {
+		if (value.modulation !== "raw" && value.bandwidth <= 0) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				message: "bandwidth must be greater than 0 for non-raw modulation",
+				path: ["bandwidth"],
+			})
+		}
+	})
+
+/**
  * Schema for API server configuration.
  */
 export const ApiConfigSchema = z.object({
@@ -155,6 +189,7 @@ export const ConfigSchema = z.object({
 	decoders: z.array(DecoderConfigSchema).default([]),
 	audio: AudioConfigSchema.default({}),
 	tunerRelay: TunerRelayConfigSchema.default({}),
+	liveDemod: LiveDemodConfigSchema.optional(),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
@@ -170,6 +205,7 @@ export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
+export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>

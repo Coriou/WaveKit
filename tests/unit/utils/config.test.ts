@@ -16,6 +16,7 @@ import {
 	ConfigSchema,
 	DecoderCapsSchema,
 	HealthConfigSchema,
+	LiveDemodConfigSchema,
 } from "../../../src/config.js"
 import { ConfigValidationError } from "../../../src/utils/errors.js"
 
@@ -202,6 +203,20 @@ api:
 logging:
   level: trace
   dir: /var/log/wavekit
+liveDemod:
+  enabled: true
+  httpPort: 8081
+  modulation: nfm
+  bandwidth: 12500
+  squelch: -90
+  noiseReduction: voice
+  lowPass: 3000
+  highPass: 300
+  gain: 10.0
+  deEmphasis: false
+  deEmphasisTau: 50
+  audioFormat: s16le
+  iqDcBlock: true
 `
 			fs.writeFileSync(configPath, yamlContent)
 
@@ -219,6 +234,8 @@ logging:
 			expect(config.decoders[0]?.enabled).toBe(false)
 			expect(config.audio.format).toBe("FLOAT32LE")
 			expect(config.logging.dir).toBe("/var/log/wavekit")
+			expect(config.liveDemod?.enabled).toBe(true)
+			expect(config.liveDemod?.modulation).toBe("nfm")
 		})
 
 		it("should handle empty YAML file gracefully", () => {
@@ -237,6 +254,33 @@ logging:
 			fs.writeFileSync(configPath, "invalid: yaml: content: [")
 
 			expect(() => loadConfig(configPath)).toThrow(ConfigValidationError)
+		})
+
+		it("should validate live demod config defaults", () => {
+			const config = LiveDemodConfigSchema.parse({})
+			expect(config.enabled).toBe(false)
+			expect(config.httpPort).toBe(8081)
+			expect(config.modulation).toBe("nfm")
+			expect(config.bandwidth).toBe(12500)
+			expect(config.audioFormat).toBe("s16le")
+		})
+
+		it("should allow raw modulation with zero bandwidth", () => {
+			const config = LiveDemodConfigSchema.parse({
+				modulation: "raw",
+				bandwidth: 0,
+			})
+			expect(config.modulation).toBe("raw")
+			expect(config.bandwidth).toBe(0)
+		})
+
+		it("should reject zero bandwidth for non-raw modulation", () => {
+			expect(() =>
+				LiveDemodConfigSchema.parse({
+					modulation: "nfm",
+					bandwidth: 0,
+				}),
+			).toThrow()
 		})
 	})
 

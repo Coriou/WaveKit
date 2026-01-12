@@ -28,12 +28,14 @@ import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
 import type { TunerRelay } from "../core/tuner-relay.js"
+import type { LiveDemodulator } from "../core/live-demodulator.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
 import { tunerRelayRoutes } from "./routes/tuner-relay.js"
+import { liveAudioRoutes } from "./routes/live-audio.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
 
 /**
@@ -59,6 +61,7 @@ export interface ApiServerDependencies {
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
 	tunerRelay?: TunerRelay | undefined
+	liveDemod?: LiveDemodulator | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -82,6 +85,7 @@ export class ApiServer {
 	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
 	private readonly tunerRelay?: TunerRelay | undefined
+	private readonly liveDemod?: LiveDemodulator | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
@@ -93,6 +97,7 @@ export class ApiServer {
 		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
 		this.tunerRelay = dependencies.tunerRelay
+		this.liveDemod = dependencies.liveDemod
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -339,6 +344,7 @@ export class ApiServer {
 					{ name: "health", description: "Health check endpoints" },
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
+					{ name: "live-audio", description: "Live demodulation endpoints" },
 				],
 			},
 		})
@@ -570,6 +576,12 @@ export class ApiServer {
 		if (this.tunerRelay) {
 			await this.app.register(tunerRelayRoutes, {
 				tunerRelay: this.tunerRelay,
+			})
+		}
+
+		if (this.liveDemod) {
+			await this.app.register(liveAudioRoutes, {
+				liveDemod: this.liveDemod,
 			})
 		}
 
