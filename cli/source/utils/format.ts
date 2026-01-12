@@ -94,10 +94,15 @@ export function padLeft(text: string, width: number): string {
 /**
  * Pad string to fixed width (left-aligned)
  */
-export function padRight(text: string, width: number): string {
-	if (!text) return " ".repeat(width)
-	if (text.length >= width) return text.slice(0, width)
-	return text + " ".repeat(width - text.length)
+
+export function padRight(
+	text: string | number | null | undefined,
+	width: number,
+): string {
+	const value = text == null ? "" : String(text)
+	if (value.length === 0) return " ".repeat(width)
+	if (value.length >= width) return value.slice(0, width)
+	return value + " ".repeat(width - value.length)
 }
 
 /**
