@@ -6,11 +6,9 @@ DEFAULT_GAIN="49"
 GAIN="${SDR_HOST_RTL_TCP__GAIN:-$DEFAULT_GAIN}"
 
 gain_arg=""
+GAIN="$(printf '%s' "$GAIN" | tr -d '[:space:]')"
 is_valid_gain() {
-	case "$1" in
-		""|*[^0-9.]*|*.*.*|.*|*.) return 1 ;;
-	esac
-	return 0
+	printf '%s' "$1" | grep -Eq '^[0-9]+([.][0-9]+)?$'
 }
 
 case "$AGC" in
