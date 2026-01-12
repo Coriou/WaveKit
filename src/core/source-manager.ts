@@ -73,6 +73,15 @@ export interface SourceStatus {
 	caps: SourceCaps
 }
 
+/**
+ * RTL-TCP header information captured from the source stream (if available).
+ */
+export interface RtlTcpHeaderInfo {
+	magic: string
+	tunerType: number
+	gainCount: number
+}
+
 function formatSourceUrl(config: SourceConfig): string {
 	if (config.type === "recording") {
 		return config.filePath ?? ""
@@ -99,6 +108,7 @@ export interface SourceManagerEvents {
 const BASE_DELAY_MS = 2000
 const MAX_DELAY_MS = 30000
 const METRICS_INTERVAL_MS = 5000
+const RTL_TCP_HEADER_SIZE = 12
 
 /**
  * Calculates exponential backoff delay for reconnection attempts.
@@ -112,12 +122,27 @@ export function calculateBackoffDelay(attempts: number): number {
 	return Math.min(delay, MAX_DELAY_MS)
 }
 
+function parseRtlTcpHeader(buffer: Buffer): RtlTcpHeaderInfo | null {
+	if (buffer.length < RTL_TCP_HEADER_SIZE) {
+		return null
+	}
+	try {
+		const magic = buffer.toString("ascii", 0, 4)
+		const tunerType = buffer.readUInt32BE(4)
+		const gainCount = buffer.readUInt32BE(8)
+		return { magic, tunerType, gainCount }
+	} catch {
+		return null
+	}
+}
+
 interface SourceState {
 	config: SourceConfig
 	socket: net.Socket | null
 	stream: PassThrough
 	connected: boolean
 	bytesReceived: number
+	sessionBytesReceived: number
 	bytesReceivedSinceLastMetric: number
 	lastMetricTime: number
 	dataRate: number
@@ -130,6 +155,10 @@ interface SourceState {
 	// Format detection
 	activeFormat: SourceCaps["format"] | "UNKNOWN"
 	detectionBuffer: Buffer | null
+	// RTL-TCP header capture (IQ sources)
+	rtlTcpHeader: Buffer | null
+	rtlTcpHeaderInfo: RtlTcpHeaderInfo | null
+	rtlTcpHeaderBuffer: Buffer | null
 	// Recording source specific state
 	recordingState?: RecordingState | undefined
 }
@@ -230,6 +259,7 @@ export class SourceManager extends EventEmitter {
 			stream,
 			connected: false,
 			bytesReceived: 0,
+			sessionBytesReceived: 0,
 			bytesReceivedSinceLastMetric: 0,
 			lastMetricTime: Date.now(),
 			dataRate: 0,
@@ -239,6 +269,12 @@ export class SourceManager extends EventEmitter {
 			stopping: false,
 			activeFormat: config.caps.format,
 			detectionBuffer: config.caps.format === "auto" ? Buffer.alloc(0) : null,
+			rtlTcpHeader: null,
+			rtlTcpHeaderInfo: null,
+			rtlTcpHeaderBuffer:
+				config.type === "rtl_tcp" && config.caps.format === "U8_IQ"
+					? Buffer.alloc(0)
+					: null,
 		}
 
 		this.sources.set(config.id, state)
@@ -616,6 +652,13 @@ export class SourceManager extends EventEmitter {
 		return new Promise<void>((resolve, reject) => {
 			const socket = new net.Socket()
 			state.socket = socket
+			state.sessionBytesReceived = 0
+			state.rtlTcpHeader = null
+			state.rtlTcpHeaderInfo = null
+			state.rtlTcpHeaderBuffer =
+				config.type === "rtl_tcp" && config.caps.format === "U8_IQ"
+					? Buffer.alloc(0)
+					: null
 
 			// Track if this is the initial connection attempt
 			const isInitialAttempt = state.reconnectAttempts === 0
@@ -640,13 +683,14 @@ export class SourceManager extends EventEmitter {
 			}
 
 			const onData = (chunk: Buffer) => {
-				if (state.bytesReceived === 0) {
+				if (state.sessionBytesReceived === 0) {
 					this.logger.info(
 						{ sourceId: id, firstChunkSize: chunk.length },
 						"First data chunk received from source",
 					)
 				}
 				state.bytesReceived += chunk.length
+				state.sessionBytesReceived += chunk.length
 				state.bytesReceivedSinceLastMetric += chunk.length
 
 				// Handle Auto-Detection
@@ -717,14 +761,38 @@ export class SourceManager extends EventEmitter {
 				// Strip RTL-TCP header (12 bytes) for U8_IQ format
 				// This is required because decoders expecting raw IQ (like dumpvdl2 --iq-file)
 				// generally don't expect the protocol header.
-				if (config.caps.format === "U8_IQ") {
-					const HEADER_SIZE = 12
-					const totalReceived = state.bytesReceived
+				if (config.type === "rtl_tcp" && config.caps.format === "U8_IQ") {
+					const totalReceived = state.sessionBytesReceived
 					const previousReceived = totalReceived - chunk.length
 
-					if (previousReceived < HEADER_SIZE) {
+					if (previousReceived < RTL_TCP_HEADER_SIZE) {
 						// We are processing part of the header
-						const headerRemaining = HEADER_SIZE - previousReceived
+						const headerRemaining = RTL_TCP_HEADER_SIZE - previousReceived
+						const headerSlice = chunk.subarray(
+							0,
+							Math.min(headerRemaining, chunk.length),
+						)
+
+						if (headerSlice.length > 0 && state.rtlTcpHeaderBuffer) {
+							state.rtlTcpHeaderBuffer = Buffer.concat([
+								state.rtlTcpHeaderBuffer,
+								headerSlice,
+							])
+
+							if (state.rtlTcpHeaderBuffer.length >= RTL_TCP_HEADER_SIZE) {
+								const header = state.rtlTcpHeaderBuffer.subarray(
+									0,
+									RTL_TCP_HEADER_SIZE,
+								)
+								state.rtlTcpHeader = header
+								state.rtlTcpHeaderInfo = parseRtlTcpHeader(header)
+								state.rtlTcpHeaderBuffer = null
+								this.logger.debug(
+									{ sourceId: id, header: state.rtlTcpHeaderInfo },
+									"Captured RTL-TCP header from source",
+								)
+							}
+						}
 
 						if (chunk.length <= headerRemaining) {
 							// Entire chunk is header, skip it
@@ -1064,6 +1132,53 @@ export class SourceManager extends EventEmitter {
 	getCaps(id: string): SourceCaps | undefined {
 		const state = this.sources.get(id)
 		return state?.config.caps
+	}
+
+	/**
+	 * Gets the captured RTL-TCP header for a source, if available.
+	 *
+	 * @param id - Source ID
+	 * @returns RTL-TCP header buffer or undefined if not available
+	 */
+	getRtlTcpHeader(id: string): Buffer | undefined {
+		const state = this.sources.get(id)
+		return state?.rtlTcpHeader ?? undefined
+	}
+
+	/**
+	 * Gets parsed RTL-TCP header info for a source, if available.
+	 *
+	 * @param id - Source ID
+	 * @returns Parsed RTL-TCP header info or undefined if not available
+	 */
+	getRtlTcpInfo(id: string): RtlTcpHeaderInfo | undefined {
+		const state = this.sources.get(id)
+		return state?.rtlTcpHeaderInfo ?? undefined
+	}
+
+	/**
+	 * Sends control data upstream to a network source (e.g., RTL-TCP commands).
+	 *
+	 * @param id - Source ID
+	 * @param payload - Raw control bytes to send
+	 * @returns true if write buffer accepted the data
+	 */
+	writeToSource(id: string, payload: Buffer): boolean {
+		const state = this.sources.get(id)
+		if (!state) {
+			throw new Error(`Source ${id} not found`)
+		}
+		if (state.config.type === "recording") {
+			throw new Error(`Source ${id} does not accept control commands`)
+		}
+		if (!state.socket || !state.connected) {
+			throw new Error(`Source ${id} is not connected`)
+		}
+		if (!state.socket.writable) {
+			throw new Error(`Source ${id} socket is not writable`)
+		}
+
+		return state.socket.write(payload)
 	}
 
 	/**

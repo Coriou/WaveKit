@@ -21,6 +21,7 @@ import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
 import { AudioOutput } from "./core/audio-output.js"
+import { TunerRelay } from "./core/tuner-relay.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { ApiServer } from "./api/server.js"
@@ -262,6 +263,14 @@ async function main(): Promise<void> {
 		format: config.audio.format,
 		sampleRate: config.audio.sampleRate,
 	})
+	const tunerRelay = new TunerRelay(logger, sourceManager, fanoutManager, {
+		enabled: config.tunerRelay.enabled,
+		host: config.tunerRelay.host,
+		port: config.tunerRelay.port,
+		sourceId: config.tunerRelay.sourceId ?? config.sources[0]?.id,
+		controlPolicy: config.tunerRelay.controlPolicy,
+		maxClients: config.tunerRelay.maxClients,
+	})
 
 	// Step 5: Initialize decoder system
 	const decoderRegistry = new DecoderRegistry()
@@ -319,6 +328,7 @@ async function main(): Promise<void> {
 			decoderManager,
 			decoderRegistry,
 			audioOutput,
+			tunerRelay,
 			logger,
 			audioConfig: {
 				format: config.audio.format,
@@ -350,6 +360,16 @@ async function main(): Promise<void> {
 		handler: async () => {
 			log.info("Shutting down fanout manager")
 			fanoutManager.destroy()
+		},
+		timeout: 2000,
+	})
+
+	// Shutdown tuner relay
+	shutdown.register({
+		name: "tuner-relay",
+		handler: async () => {
+			log.info("Shutting down tuner relay")
+			await tunerRelay.stop()
 		},
 		timeout: 2000,
 	})
@@ -389,6 +409,9 @@ async function main(): Promise<void> {
 
 	// Step 11: Start audio output server
 	await audioOutput.start()
+
+	// Step 11b: Start tuner relay server (if enabled)
+	await tunerRelay.start()
 
 	// Step 12: Wire decoder audio outputs to AudioOutput (Requirement 11.1)
 	// This creates a combined stream that aggregates audio from all decoders

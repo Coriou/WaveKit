@@ -213,6 +213,20 @@ TCP server for streaming decoded audio.
 - Stream audio to all connected clients
 - Handle client connect/disconnect gracefully
 
+### TunerRelay
+
+Optional RTL-TCP compatible server that exposes the internal IQ stream to local
+tuner clients (e.g., SDR++). It forwards control commands upstream to the
+configured `rtl_tcp`/`rtlmux` source.
+
+**Location**: `src/core/tuner-relay.ts`
+
+**Responsibilities**:
+
+- Listen for RTL-TCP clients and stream IQ data
+- Forward tuner control commands upstream
+- Track control ownership and client connections
+
 ## Data Flow
 
 ### Audio Pipeline

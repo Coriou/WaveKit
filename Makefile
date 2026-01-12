@@ -125,7 +125,7 @@ dev-start: ## Start dev container (stops existing first)
 	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
 	@mkdir -p $(shell pwd)/debug_audio
 	@docker run --rm -d --name $(DEV_CONTAINER) \
-		-p 9000:3000 -p 8080:8080 \
+		-p 9000:3000 -p 8080:8080 -p 1234:1234 \
 		-v $(DEV_CONFIG):/app/config/default.yaml \
 		-v $(shell pwd)/debug_audio:/data/debug_audio \
 		-v $(shell pwd)/decoded_calls:/app/decoded_calls \
@@ -136,6 +136,7 @@ dev-start: ## Start dev container (stops existing first)
 	@echo "  $(BLUE)API$(NC)        http://localhost:9000"
 	@echo "  $(BLUE)Health$(NC)     http://localhost:9000/health"
 	@echo "  $(BLUE)Audio$(NC)      nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -"
+	@echo "  $(BLUE)Tuner$(NC)      rtl_tcp on localhost:1234 (SDR++)"
 	@echo ""
 	@echo "  $(YELLOW)Commands:$(NC)"
 	@echo "    make dev-logs         - All logs"

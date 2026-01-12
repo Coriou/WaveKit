@@ -31,6 +31,7 @@ import type {
 	BranchTelemetry,
 	SourceStatus as SourceStatusType,
 	DecoderOutputMessage,
+	TunerRelayStatus,
 } from "./types.js"
 
 // ============================================================================
@@ -47,6 +48,7 @@ interface AppState {
 	messages: DecoderOutput[]
 	snapshot: FanoutSnapshot | null
 	dropRate: number
+	tunerRelay: TunerRelayStatus | null
 }
 
 // ============================================================================
@@ -94,6 +96,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		messages: [],
 		snapshot: null,
 		dropRate: 0,
+		tunerRelay: null,
 	})
 
 	// Handle incoming WebSocket messages
@@ -211,13 +214,19 @@ export function App({ initialView = "dashboard" }: AppProps) {
 							fetch(`http://localhost:${port}/api/decoders`),
 							fetch(`http://localhost:${port}/api/sources`).catch(() => null),
 						])
+						const tunerRes = await fetch(
+							`http://localhost:${port}/api/tuner-relay`,
+						).catch(() => null)
 
 						if (decodersRes.ok) {
 							const decoders = (await decodersRes.json()) as DecoderStatus[]
 							const sources = sourcesRes?.ok
 								? ((await sourcesRes.json()) as SourceStatusType[])
 								: []
-							setState(prev => ({ ...prev, decoders, sources }))
+							const tunerRelay = tunerRes?.ok
+								? ((await tunerRes.json()) as TunerRelayStatus)
+								: null
+							setState(prev => ({ ...prev, decoders, sources, tunerRelay }))
 							break
 						}
 					} catch {
@@ -304,6 +313,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						snapshot={state.snapshot}
 						dropRate={state.dropRate}
 						messages={state.messages}
+						tunerRelay={state.tunerRelay}
 					/>
 				)
 			case "decoders":
@@ -323,7 +333,9 @@ export function App({ initialView = "dashboard" }: AppProps) {
 					/>
 				)
 			case "sources":
-				return <SourceStatus sources={state.sources} />
+				return (
+					<SourceStatus sources={state.sources} tunerRelay={state.tunerRelay} />
+				)
 		}
 	}
 

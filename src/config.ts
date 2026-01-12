@@ -103,6 +103,21 @@ export const AudioConfigSchema = z.object({
 })
 
 /**
+ * Schema for tuner relay configuration (RTL-TCP compatible server).
+ */
+export const TunerRelayConfigSchema = z.object({
+	enabled: z.boolean().default(false),
+	host: z.string().default("0.0.0.0"),
+	port: z.number().int().min(1).max(65535).default(1234),
+	/** Source ID to expose (defaults to primary source if omitted) */
+	sourceId: z.string().min(1).optional(),
+	/** Control policy for client commands */
+	controlPolicy: z.enum(["exclusive", "shared"]).default("exclusive"),
+	/** Max number of connected clients (optional cap) */
+	maxClients: z.number().int().positive().optional(),
+})
+
+/**
  * Schema for API server configuration.
  */
 export const ApiConfigSchema = z.object({
@@ -137,6 +152,7 @@ export const ConfigSchema = z.object({
 	sources: z.array(SourceConfigSchema).default([]),
 	decoders: z.array(DecoderConfigSchema).default([]),
 	audio: AudioConfigSchema.default({}),
+	tunerRelay: TunerRelayConfigSchema.default({}),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
@@ -151,6 +167,7 @@ export type SourceConfig = z.infer<typeof SourceConfigSchema>
 export type DecoderCaps = z.infer<typeof DecoderCapsSchema>
 export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
+export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
@@ -572,6 +589,12 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_AUDIO__TCP_PORT",
 		"WAVEKIT_AUDIO__FORMAT",
 		"WAVEKIT_AUDIO__SAMPLE_RATE",
+		"WAVEKIT_TUNER_RELAY__ENABLED",
+		"WAVEKIT_TUNER_RELAY__HOST",
+		"WAVEKIT_TUNER_RELAY__PORT",
+		"WAVEKIT_TUNER_RELAY__SOURCE_ID",
+		"WAVEKIT_TUNER_RELAY__CONTROL_POLICY",
+		"WAVEKIT_TUNER_RELAY__MAX_CLIENTS",
 		"WAVEKIT_LOGGING__LEVEL",
 		"WAVEKIT_LOGGING__DIR",
 		"WAVEKIT_SOURCES__<ID>__HOST",

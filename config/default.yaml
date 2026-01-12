@@ -188,6 +188,36 @@ audio:
   sampleRate: 48000
 
 # -----------------------------------------------------------------------------
+# Tuner Relay (RTL-TCP)
+# -----------------------------------------------------------------------------
+# Optional RTL-TCP compatible server that exposes WaveKit's internal IQ stream
+# for client tuners like SDR++. This allows a single upstream connection to
+# the remote RTL-SDR while SDR++ controls the tuner locally.
+#
+# Options:
+#   enabled       - Enable the relay (default: false)
+#   host          - Bind address (default: 0.0.0.0)
+#   port          - TCP port for SDR++ clients (default: 1234)
+#   sourceId      - Source to expose (default: first configured source)
+#   controlPolicy - "exclusive" (first client controls) or "shared"
+#   maxClients    - Optional cap on number of connected clients
+#   note         - Relay streams the primary source (first in `sources`)
+#
+# Example:
+# tunerRelay:
+#   enabled: true
+#   host: "0.0.0.0"
+#   port: 1234
+#   sourceId: "rtl-pi"
+#   controlPolicy: "exclusive"
+#   maxClients: 2
+
+tunerRelay:
+  enabled: false
+  host: "0.0.0.0"
+  port: 1234
+
+# -----------------------------------------------------------------------------
 # API Server
 # -----------------------------------------------------------------------------
 # Configure the Fastify REST/WebSocket API server for control and monitoring.

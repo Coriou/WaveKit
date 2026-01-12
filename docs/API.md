@@ -61,7 +61,7 @@ curl http://localhost:9000/health/ready
 
 #### GET /api/status
 
-Full system status including sources, decoders, and metrics.
+Full system status including sources, decoders, audio output, and tuner relay (if enabled).
 
 ```bash
 curl http://localhost:9000/api/status
@@ -103,6 +103,19 @@ curl http://localhost:9000/api/status
 		"clientsConnected": 1,
 		"format": "S16LE",
 		"sampleRate": 48000
+	},
+	"tunerRelay": {
+		"enabled": true,
+		"listening": true,
+		"host": "0.0.0.0",
+		"port": 1234,
+		"sourceId": "rtl-pi",
+		"clientsConnected": 1,
+		"controlPolicy": "exclusive",
+		"bytesSent": 421000000,
+		"bytesReceived": 120,
+		"lastFrequency": 446524920,
+		"lastSampleRate": 2048000
 	}
 }
 ```
@@ -137,6 +150,39 @@ curl http://localhost:9000/api/sources
 		}
 	}
 ]
+```
+
+### Tuner Relay
+
+#### GET /api/tuner-relay
+
+Get RTL-TCP tuner relay status and connection details.
+
+```bash
+curl http://localhost:9000/api/tuner-relay
+```
+
+**Response**:
+
+```json
+{
+	"enabled": true,
+	"listening": true,
+	"host": "0.0.0.0",
+	"port": 1234,
+	"sourceId": "rtl-pi",
+	"sourceConnected": true,
+	"sourceKind": "iq",
+	"sourceFormat": "U8_IQ",
+	"compatibility": "ok",
+	"clientsConnected": 1,
+	"controlClientRemote": "192.168.1.50:50522",
+	"controlPolicy": "exclusive",
+	"bytesSent": 421000000,
+	"bytesReceived": 120,
+	"lastFrequency": 446524920,
+	"lastSampleRate": 2048000
+}
 ```
 
 #### POST /api/sources

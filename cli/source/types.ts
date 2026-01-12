@@ -57,6 +57,37 @@ export interface SourceStatus {
 }
 
 // ============================================================================
+// Tuner Relay Types
+// ============================================================================
+
+export interface TunerRelayStatus {
+	enabled: boolean
+	listening: boolean
+	host: string
+	port: number
+	sourceId?: string
+	sourceConnected?: boolean
+	sourceKind?: string
+	sourceFormat?: string
+	compatibility?: string
+	compatibilityMessage?: string
+	clientsConnected: number
+	controlClientId?: string
+	controlClientRemote?: string
+	controlPolicy: "exclusive" | "shared"
+	maxClients?: number
+	bytesSent: number
+	bytesReceived: number
+	lastCommand?: string
+	lastCommandAt?: string
+	lastFrequency?: number
+	lastSampleRate?: number
+	lastGain?: number
+	lastPpm?: number
+	lastError?: string
+}
+
+// ============================================================================
 // Backpressure Types
 // ============================================================================
 

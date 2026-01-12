@@ -27,11 +27,13 @@ import type { FanoutManager } from "../core/fanout-manager.js"
 import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
+import type { TunerRelay } from "../core/tuner-relay.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
+import { tunerRelayRoutes } from "./routes/tuner-relay.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
 
 /**
@@ -56,6 +58,7 @@ export interface ApiServerDependencies {
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
+	tunerRelay?: TunerRelay | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -78,6 +81,7 @@ export class ApiServer {
 	private readonly decoderManager: DecoderManager
 	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
+	private readonly tunerRelay?: TunerRelay | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
@@ -88,6 +92,7 @@ export class ApiServer {
 		this.decoderManager = dependencies.decoderManager
 		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
+		this.tunerRelay = dependencies.tunerRelay
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -206,6 +211,13 @@ export class ApiServer {
 	 */
 	getAudioOutput(): AudioOutput {
 		return this.audioOutput
+	}
+
+	/**
+	 * Returns the tuner relay instance (if enabled).
+	 */
+	getTunerRelay(): TunerRelay | undefined {
+		return this.tunerRelay
 	}
 
 	/**
@@ -535,6 +547,7 @@ export class ApiServer {
 			decoderManager: this.decoderManager,
 			audioOutput: this.audioOutput,
 			audioConfig: this.audioConfig,
+			tunerRelay: this.tunerRelay,
 		})
 
 		// Register source routes (Requirement 9.3, 9.4, 9.5)
@@ -553,6 +566,12 @@ export class ApiServer {
 		await this.app.register(telemetryRoutes, {
 			fanoutManager: this.fanoutManager,
 		})
+
+		if (this.tunerRelay) {
+			await this.app.register(tunerRelayRoutes, {
+				tunerRelay: this.tunerRelay,
+			})
+		}
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app)

@@ -1020,12 +1020,18 @@ describe("Property-Based Tests", () => {
 
 						try {
 							const config = createSourceConfig("test-source", port)
+							let connected = false
 
 							try {
 								await sourceManager.connect(config)
+								connected =
+									sourceManager.getStatus("test-source")?.connected ?? false
 							} catch {
 								// Expected to throw SourceConnectionError
 							}
+
+							// If the port was actually open, this property doesn't apply.
+							if (connected) return true
 
 							// Should not have unhandled exception
 							if (unhandledException) return false

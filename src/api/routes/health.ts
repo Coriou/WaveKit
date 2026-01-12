@@ -14,6 +14,7 @@ import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
 import type { AudioOutput } from "../../core/audio-output.js"
+import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
 import {
 	performHealthCheck,
 	isReady,
@@ -100,6 +101,61 @@ const audioStatusSchema = {
 } as const
 
 /**
+ * Tuner relay status schema
+ */
+const tunerRelayStatusSchema = {
+	type: "object",
+	properties: {
+		enabled: { type: "boolean" },
+		listening: { type: "boolean" },
+		host: { type: "string" },
+		port: { type: "number" },
+		sourceId: { type: "string" },
+		sourceConnected: { type: "boolean" },
+		sourceKind: { type: "string" },
+		sourceFormat: { type: "string" },
+		compatibility: {
+			type: "string",
+			enum: ["ok", "missing-source", "unsupported-kind", "unsupported-format"],
+		},
+		compatibilityMessage: { type: "string" },
+		clientsConnected: { type: "number" },
+		controlClientId: { type: "string" },
+		controlClientRemote: { type: "string" },
+		controlPolicy: { type: "string", enum: ["exclusive", "shared"] },
+		maxClients: { type: "number" },
+		bytesSent: { type: "number" },
+		bytesReceived: { type: "number" },
+		lastCommand: { type: "string" },
+		lastCommandAt: { type: "string", format: "date-time" },
+		lastFrequency: { type: "number" },
+		lastSampleRate: { type: "number" },
+		lastGain: { type: "number" },
+		lastPpm: { type: "number" },
+		lastError: { type: "string" },
+		rtlTcpHeader: {
+			type: "object",
+			properties: {
+				magic: { type: "string" },
+				tunerType: { type: "number" },
+				gainCount: { type: "number" },
+			},
+			required: ["magic", "tunerType", "gainCount"],
+		},
+	},
+	required: [
+		"enabled",
+		"listening",
+		"host",
+		"port",
+		"clientsConnected",
+		"controlPolicy",
+		"bytesSent",
+		"bytesReceived",
+	],
+} as const
+
+/**
  * Source status schema
  */
 const sourceStatusSchema = {
@@ -180,6 +236,7 @@ const systemStatusResponseSchema = {
 			items: decoderStatusSchema,
 		},
 		audio: audioStatusSchema,
+		tunerRelay: tunerRelayStatusSchema,
 		health: healthStatusResponseSchema,
 	},
 	required: [
@@ -220,6 +277,7 @@ export interface SystemStatusResponse {
 		format?: string | undefined
 		sampleRate?: number | undefined
 	}
+	tunerRelay?: TunerRelayStatus
 	health: HealthStatus
 }
 
@@ -239,6 +297,7 @@ export interface HealthRoutesOptions {
 	decoderManager: DecoderManager
 	audioOutput: AudioOutput
 	audioConfig?: AudioConfig | undefined
+	tunerRelay?: TunerRelay | undefined
 	/** Whether SDR++ server is expected to be running (full mode) */
 	sdrppEnabled?: boolean | undefined
 }
@@ -256,6 +315,7 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 		decoderManager,
 		audioOutput,
 		audioConfig,
+		tunerRelay,
 		sdrppEnabled,
 	} = options
 
@@ -399,7 +459,9 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				audio.sampleRate = audioConfig.sampleRate
 			}
 
-			return {
+			const tunerRelayStatus = tunerRelay ? tunerRelay.getStatus() : undefined
+
+			const response: SystemStatusResponse = {
 				status: healthStatus.status,
 				uptime: getUptime(),
 				version: APP_VERSION,
@@ -408,6 +470,12 @@ export const healthRoutes: FastifyPluginAsync<HealthRoutesOptions> = async (
 				audio,
 				health: healthStatus,
 			}
+
+			if (tunerRelayStatus) {
+				response.tunerRelay = tunerRelayStatus
+			}
+
+			return response
 		},
 	)
 }

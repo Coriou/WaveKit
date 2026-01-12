@@ -3,6 +3,7 @@
 **Multi-protocol SDR signal decoder with real-time streaming**
 
 WaveKit connects to Software Defined Radio sources and decodes multiple signal types simultaneously. Aircraft tracking, ship positions, pager messages, digital voice, weather sensors—all decoded in parallel and streamed via WebSocket.
+It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tune locally without opening a second upstream connection.
 
 ```
 ┌─────────────────┐     ┌──────────────────────────────────────┐     ┌─────────────────┐
@@ -103,8 +104,8 @@ SDR Source (rtl_tcp/SDR++)
                             │
               ┌─────────────┼─────────────┐
               ▼             ▼             ▼
-         REST API      WebSocket     Audio TCP
-        :9000/api      :9000/ws       :8080
+         REST API      WebSocket     Audio TCP     Tuner Relay
+        :9000/api      :9000/ws       :8080        :1234
 ```
 
 **Key components:**
@@ -113,6 +114,7 @@ SDR Source (rtl_tcp/SDR++)
 - **FanoutManager** — Multiplexes audio to all decoders with backpressure handling
 - **DecoderManager** — Spawns/monitors decoder processes, handles restarts
 - **API Server** — Fastify REST + WebSocket for control and real-time events
+- **Tuner Relay** — Optional RTL-TCP server for local tuner clients (SDR++)
 
 ## API Reference
 
@@ -177,6 +179,32 @@ nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
 nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -nodisp -
 ```
 
+### Tuner Relay (SDR++)
+
+Expose the internal IQ stream as an RTL-TCP compatible endpoint for SDR++ (or any RTL-TCP client).
+Control commands are forwarded upstream so you only keep a single connection to the remote RTL-SDR.
+
+```yaml
+tunerRelay:
+  enabled: true
+  host: "0.0.0.0"
+  port: 1234
+  sourceId: "rtl-pi"
+  controlPolicy: "exclusive" # or "shared"
+```
+
+**Usage:**
+
+1. Start WaveKit with the relay enabled.
+2. In SDR++, select **RTL-TCP** and connect to `tcp://<wavekit-host>:1234`.
+3. Tune as usual — SDR++ commands are forwarded to the upstream `rtl_tcp`/`rtlmux`.
+
+**Notes:**
+
+- The relay expects an IQ source in `U8_IQ` format (standard RTL-TCP/rtlmux output).
+- In `exclusive` mode, the first client gets control and others are read-only.
+- The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
+
 ## Configuration
 
 Configuration via YAML (`config/default.yaml`) or environment variables:
@@ -212,6 +240,14 @@ audio:
   tcpPort: 8080
   format: "S16LE"
   sampleRate: 48000
+
+# Tuner relay (RTL-TCP)
+tunerRelay:
+  enabled: true
+  host: "0.0.0.0"
+  port: 1234
+  sourceId: "sdrpp-main"
+  controlPolicy: "exclusive"
 ```
 
 **Environment overrides:**
@@ -220,6 +256,8 @@ audio:
 WAVEKIT_API_PORT=9000
 WAVEKIT_LOG_LEVEL=debug
 WAVEKIT_SOURCES_0_HOST=192.168.1.100
+WAVEKIT_TUNER_RELAY__ENABLED=true
+WAVEKIT_TUNER_RELAY__PORT=1234
 ```
 
 ## Development
@@ -301,8 +339,10 @@ make docker-build-core
 
 # Run with external SDR++
 docker run -p 9000:3000 -p 8080:8080 \
+  -p 1234:1234 \
   -e WAVEKIT_SOURCES_0_HOST=192.168.1.69 \
   -e WAVEKIT_SOURCES_0_PORT=5555 \
+  -e WAVEKIT_TUNER_RELAY__ENABLED=true \
   wavekit:latest-core
 ```
 

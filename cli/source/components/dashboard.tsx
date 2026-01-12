@@ -11,6 +11,7 @@ import type {
 	DecoderStatus,
 	FanoutSnapshot,
 	SourceStatus as SourceStatusType,
+	TunerRelayStatus,
 } from "../types.js"
 import { formatBytes, formatRate, padRight } from "../utils/format.js"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
@@ -22,6 +23,7 @@ interface DashboardProps {
 	snapshot: FanoutSnapshot | null
 	dropRate: number
 	messages?: DecoderOutput[]
+	tunerRelay?: TunerRelayStatus | null
 }
 
 /** Maps server health values to unified display status */
@@ -49,6 +51,7 @@ export function Dashboard({
 	snapshot,
 	dropRate,
 	messages = [],
+	tunerRelay = null,
 }: DashboardProps) {
 	const { columns: termWidth } = useTerminalSize()
 
@@ -61,6 +64,23 @@ export function Dashboard({
 
 	const connectedSources = sources.filter(s => s.connected).length
 	const fanoutConsumers = snapshot?.branches?.length ?? 0
+	const relayStatus = !tunerRelay
+		? "unavailable"
+		: tunerRelay.enabled
+			? tunerRelay.listening
+				? "listening"
+				: "stopped"
+			: "disabled"
+	const relayColor =
+		relayStatus === "listening"
+			? ("green" as const)
+			: relayStatus === "unavailable"
+				? ("gray" as const)
+				: ("yellow" as const)
+	const relayClients = tunerRelay?.clientsConnected ?? 0
+	const relaySource = tunerRelay?.sourceId ?? "-"
+	const relayControl =
+		tunerRelay?.controlClientRemote ?? tunerRelay?.controlClientId ?? "none"
 
 	const backpressureActive = snapshot?.backpressureActiveCount ?? 0
 	const totalDropped = snapshot?.droppedBytesTotal ?? 0
@@ -207,6 +227,44 @@ export function Dashboard({
 						<Text dimColor> @ {source.url}</Text>
 					</Box>
 				))}
+			</Box>
+
+			{/* Tuner Relay Summary */}
+			<Box flexDirection="column" marginBottom={1}>
+				<Text bold color="cyan">
+					TUNER RELAY
+				</Text>
+				<Box flexDirection="row" gap={4}>
+					<Box>
+						<Text bold>Status: </Text>
+						<Text color={relayColor}>{relayStatus}</Text>
+					</Box>
+					<Box>
+						<Text bold>Clients: </Text>
+						<Text>{relayClients}</Text>
+					</Box>
+					<Box>
+						<Text bold>Source: </Text>
+						<Text>{relaySource}</Text>
+					</Box>
+					<Box>
+						<Text bold>Control: </Text>
+						<Text>{relayControl}</Text>
+					</Box>
+				</Box>
+				{tunerRelay?.lastFrequency ? (
+					<Text dimColor>
+						Last tune: {tunerRelay.lastFrequency.toLocaleString()} Hz
+						{tunerRelay.lastSampleRate
+							? ` @ ${tunerRelay.lastSampleRate.toLocaleString()}`
+							: ""}
+					</Text>
+				) : null}
+				{tunerRelay?.compatibility &&
+				tunerRelay.compatibility !== "ok" &&
+				tunerRelay.compatibilityMessage ? (
+					<Text color="yellow">{tunerRelay.compatibilityMessage}</Text>
+				) : null}
 			</Box>
 
 			{/* Recent Decoded Messages */}
