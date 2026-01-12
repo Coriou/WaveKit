@@ -1,0 +1,45 @@
+#!/bin/sh
+# Start rtl_tcp with configuration from environment
+
+AGC="${SDR_HOST_RTL_TCP__AGC:-false}"
+DEFAULT_GAIN="49"
+GAIN="${SDR_HOST_RTL_TCP__GAIN:-$DEFAULT_GAIN}"
+
+gain_arg=""
+is_valid_gain() {
+	case "$1" in
+		""|*[^0-9.]*|*.*.*|.*|*.) return 1 ;;
+	esac
+	return 0
+}
+
+case "$AGC" in
+	true|TRUE|1|yes|YES)
+		gain_arg="-g 0"
+		;;
+	false|FALSE|0|no|NO|"")
+		if is_valid_gain "$GAIN"; then
+			gain_arg="-g ${GAIN}"
+		else
+			echo "Invalid SDR_HOST_RTL_TCP__GAIN '${GAIN}' (expected numeric dB); using default ${DEFAULT_GAIN}." >&2
+			gain_arg="-g ${DEFAULT_GAIN}"
+		fi
+		;;
+	*)
+		echo "Invalid SDR_HOST_RTL_TCP__AGC '${AGC}' (expected true/false); defaulting to false." >&2
+		if is_valid_gain "$GAIN"; then
+			gain_arg="-g ${GAIN}"
+		else
+			echo "Invalid SDR_HOST_RTL_TCP__GAIN '${GAIN}' (expected numeric dB); using default ${DEFAULT_GAIN}." >&2
+			gain_arg="-g ${DEFAULT_GAIN}"
+		fi
+		;;
+esac
+
+exec rtl_tcp \
+    -a 127.0.0.1 \
+    -p ${SDR_HOST_RTL_TCP__INTERNAL_PORT:-1234} \
+    -s ${SDR_HOST_RTL_TCP__SAMPLE_RATE:-2048000} \
+    -d ${SDR_HOST_RTL_TCP__DEVICE_INDEX:-0} \
+    ${gain_arg} \
+    ${SDR_HOST_RTL_TCP__PPM:+-P ${SDR_HOST_RTL_TCP__PPM}}

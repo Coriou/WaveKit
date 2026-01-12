@@ -7,11 +7,8 @@
  */
 
 import type { FastifyPluginAsync } from "fastify"
-import type {
-	FanoutManager,
-	FanoutStatus,
-	BranchTelemetry,
-} from "../../core/fanout-manager.js"
+import type { FanoutManager } from "../../core/fanout-manager.js"
+import type { BranchTelemetry, FanoutSnapshot } from "@wavekit/api-types"
 
 // ============================================================================
 // Schema Definitions
@@ -163,7 +160,7 @@ export const telemetryRoutes: FastifyPluginAsync<
 	 * - Active backpressure count
 	 * - Per-branch detailed telemetry
 	 */
-	fastify.get<{ Reply: FanoutStatus }>(
+	fastify.get<{ Reply: FanoutSnapshot }>(
 		"/api/telemetry/fanout",
 		{
 			schema: {

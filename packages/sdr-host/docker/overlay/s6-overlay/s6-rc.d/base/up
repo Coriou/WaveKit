@@ -1,0 +1,3 @@
+#!/bin/sh
+# Base init - create required directories
+mkdir -p /var/log/sdr-host /var/run/sdr-host

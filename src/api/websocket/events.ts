@@ -151,9 +151,13 @@ export class WebSocketEventBroadcaster {
 	 * @param fastify - Fastify instance with websocket plugin registered
 	 */
 	registerRoute(fastify: FastifyInstance): void {
-		fastify.get("/ws", { websocket: true }, (socket: WebSocket, _request) => {
-			this.handleConnection(socket)
-		})
+		fastify.get(
+			"/ws",
+			{ websocket: true } as any,
+			((socket: WebSocket) => {
+				this.handleConnection(socket)
+			}) as any,
+		)
 
 		this.log.info("WebSocket route registered at /ws")
 	}

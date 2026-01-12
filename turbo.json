@@ -1,0 +1,29 @@
+{
+	"$schema": "https://turbo.build/schema.json",
+	"globalDependencies": [".nvmrc", "tsconfig.base.json"],
+	"tasks": {
+		"build": {
+			"dependsOn": ["^build"],
+			"outputs": ["dist/**"],
+			"inputs": ["src/**/*.ts", "tsconfig.json", "package.json"]
+		},
+		"typecheck": {
+			"dependsOn": ["^build", "^typecheck"],
+			"inputs": ["src/**/*.ts", "tsconfig.json"]
+		},
+		"lint": {
+			"inputs": ["src/**/*.ts", "eslint.config.js"]
+		},
+		"test": {
+			"dependsOn": ["build"],
+			"inputs": ["src/**/*.ts", "tests/**/*.ts"]
+		},
+		"dev": {
+			"cache": false,
+			"persistent": true
+		},
+		"clean": {
+			"cache": false
+		}
+	}
+}

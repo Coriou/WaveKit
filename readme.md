@@ -336,53 +336,66 @@ WAVEKIT_TUNER_RELAY__PORT=1234
 ### Prerequisites
 
 - Node.js 20+ (see `.nvmrc`)
+- pnpm 10+ (`npm install -g pnpm@10`)
 - Docker with BuildKit
 - RTL-SDR dongle (or rtl_tcp server)
 
 ### Commands
 
 ```bash
-# Development
-make dev-up              # Build + start container
-make dev-dashboard       # Interactive CLI dashboard
-make dev-logs            # Tail logs (pretty JSON)
-make dev-stop            # Stop container
+# Development (Docker)
+make dev-up                     # Build + start container (uses config/dev_test.yaml)
+make dev-up CONFIG=dev_acars    # Start with specific config (config/dev_acars.yaml)
+make dev-configs                # List all available configs
+make dev-dashboard              # Interactive CLI dashboard
+make dev-logs                   # Tail logs (pretty JSON)
+make dev-stop                   # Stop container
 
-# Testing
-npm test                 # Run tests
-npm run test:coverage    # With coverage
-npm run typecheck        # Type checking
+# Monorepo Tasks (pnpm + Turborepo)
+pnpm ws:build                   # Build all packages
+pnpm ws:typecheck               # Type check all packages
+pnpm ws:lint                    # Lint all packages
+pnpm ws:test                    # Test all packages
 
-# Building
-make docker-build-core   # Build core image
-make docker-build-full   # Build full image (with SDR++)
+# Single Package Commands
+pnpm test                       # Run root tests
+pnpm run test:coverage          # With coverage
+
+# Docker Images
+make docker-build-core          # Build core image (external SDR++)
+make docker-build-full          # Build full image (SDR++ included)
 ```
 
 ### Project Structure
 
-```
-src/
-├── index.ts              # Entry point
-├── config.ts             # Zod schemas + config loading
-├── core/                 # Stream infrastructure
-│   ├── source-manager.ts    # TCP client for SDR sources
-│   ├── fanout-manager.ts    # Stream multiplexer
-│   └── audio-output.ts      # TCP server for audio
-├── decoders/             # Decoder plugin system
-│   ├── base-decoder.ts      # Abstract base class
-│   ├── manager.ts           # Lifecycle orchestration
-│   └── builtin/             # 8 decoder adapters
-├── api/                  # Fastify REST/WebSocket
-│   ├── server.ts
-│   ├── routes/
-│   └── websocket/
-└── utils/                # Logger, errors, shutdown
+WaveKit uses a pnpm monorepo with Turborepo for task orchestration:
 
-cli/                      # CLI Dashboard (Ink/React)
-├── source/
-│   ├── app.tsx              # Main app component
-│   ├── components/          # UI components
-│   └── hooks/               # WebSocket, terminal size
+```
+wavekit/
+├── packages/                 # Internal packages
+│   ├── shared/                  # @wavekit/shared — Logger, errors
+│   ├── api-types/               # @wavekit/api-types — Shared API types
+│   └── sdr-host/                # @wavekit/sdr-host — Remote dongle host
+│
+├── src/                      # Core WaveKit
+│   ├── index.ts                 # Entry point
+│   ├── config.ts                # Zod schemas + config loading
+│   ├── core/                    # Stream infrastructure
+│   │   ├── source-manager.ts
+│   │   ├── fanout-manager.ts
+│   │   └── audio-output.ts
+│   ├── decoders/                # Decoder plugin system
+│   │   ├── base-decoder.ts
+│   │   ├── manager.ts
+│   │   └── builtin/             # 8 decoder adapters
+│   ├── api/                     # Fastify REST/WebSocket
+│   └── utils/
+│
+└── cli/                      # @wavekit/cli — Terminal dashboard (Ink/React)
+    └── source/
+        ├── app.tsx
+        ├── components/
+        └── hooks/
 ```
 
 ### Adding a Decoder
@@ -430,16 +443,17 @@ rtl_tcp -a 0.0.0.0 -p 1234 -f 446524920 -s 2048000 -g 0
 #   -s 2048000  Sample rate 2.048 Msps (not 2.4!)
 ```
 
-For multiple clients, use [rtlmux](https://github.com/alexander-sholohov/rtlmux):
+For multiple clients, use [rtlmux](https://github.com/slepp/rtlmux):
 
 ```bash
-rtlmux -s 192.168.1.69:1234 -l 0.0.0.0:1235
+rtlmux -a 0.0.0.0 -p 5555 -s 5556 127.0.0.1 1234
 ```
 
 ## Documentation
 
 - [API Reference](docs/API.md) — Full REST/WebSocket documentation
 - [Docker Setup](docs/DOCKER-SETUP.md) — Container deployment guide
+- [SDR Host Setup](docs/SDR-HOST-SETUP.md) — Remote dongle hosting with rtlmux
 - [Decoder Guide](docs/DECODER-GUIDE.md) — Adding new decoders
 - [Architecture](docs/ARCHITECTURE.md) — System design deep dive
 - [Security](docs/SECURITY.md) — Version pinning, CVE tracking

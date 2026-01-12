@@ -18,6 +18,11 @@ import type {
 	DecoderCaps,
 } from "../../core/source-manager.js"
 import type { FanoutManager } from "../../core/fanout-manager.js"
+import type {
+	DecoderAssignment as ApiDecoderAssignment,
+	ExtendedSourceStatus as ApiExtendedSourceStatus,
+	SourceCaps as ApiSourceCaps,
+} from "@wavekit/api-types"
 
 /**
  * Source capabilities schema for request validation
@@ -27,7 +32,10 @@ const sourceCapsSchema = {
 	properties: {
 		kind: { type: "string", enum: ["audio_pcm", "iq", "recording"] },
 		sampleRate: { type: "integer", minimum: 1 },
-		format: { type: "string", enum: ["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ"] },
+		format: {
+			type: "string",
+			enum: ["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ", "auto"],
+		},
 		channels: { type: "integer", minimum: 1 },
 		centerFreq: { type: "number", minimum: 0 },
 		exclusive: { type: "boolean" },
@@ -61,7 +69,10 @@ const sourceCapsResponseSchema = {
 	properties: {
 		kind: { type: "string" },
 		sampleRate: { type: "number" },
-		format: { type: "string" },
+		format: {
+			type: "string",
+			enum: ["S16LE", "FLOAT32LE", "U8_IQ", "S16_IQ", "auto"],
+		},
 		channels: { type: "number" },
 		centerFreq: { type: "number" },
 		exclusive: { type: "boolean" },
@@ -265,7 +276,7 @@ export interface ErrorResponse {
 export interface DecoderAssignment {
 	decoderId: string
 	sourceId: string
-	assignedAt: Date
+	assignedAt: string
 }
 
 /**
@@ -312,13 +323,25 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 ) => {
 	const { sourceManager, fanoutManager } = options
 
+	const toApiSourceCaps = (caps: SourceStatus["caps"]): ApiSourceCaps => {
+		const c = caps as NonNullable<SourceStatus["caps"]>
+		return {
+			kind: c.kind,
+			sampleRate: c.sampleRate,
+			format: c.format,
+			exclusive: c.exclusive,
+			...(c.channels !== undefined ? { channels: c.channels } : {}),
+			...(c.centerFreq !== undefined ? { centerFreq: c.centerFreq } : {}),
+		}
+	}
+
 	/**
 	 * GET /api/sources - List all sources
 	 * Requirement 9.3: Returns all configured sources
 	 * Requirement 15.4: Returns capabilities for each source
 	 * Includes decoder assignments and availability status
 	 */
-	fastify.get<{ Reply: ExtendedSourceStatus[] }>(
+	fastify.get<{ Reply: ApiExtendedSourceStatus[] }>(
 		"/api/sources",
 		{
 			schema: {
@@ -349,12 +372,28 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 
 			const statuses = sourceManager.getAllStatus()
 			return statuses.map(status => {
-				const assignments = sourceManager.getSourceAssignments(status.id)
+				const assignments: ApiDecoderAssignment[] = sourceManager
+					.getSourceAssignments(status.id)
+					.map(assignment => ({
+						...assignment,
+						assignedAt: assignment.assignedAt.toISOString(),
+					}))
+
 				return {
-					...status,
+					id: status.id,
+					connected: status.connected,
+					bytesReceived: status.bytesReceived,
+					dataRate: status.dataRate,
+					reconnectAttempts: status.reconnectAttempts,
+					caps: toApiSourceCaps(status.caps),
 					assignments,
 					consumers: consumersBySourceId.get(status.id) ?? assignments.length,
 					available: sourceManager.isSourceAvailable(status.id),
+					...(status.type !== undefined ? { type: status.type } : {}),
+					...(status.url !== undefined ? { url: status.url } : {}),
+					...(status.lastError !== undefined
+						? { lastError: status.lastError }
+						: {}),
 				}
 			})
 		},
@@ -480,7 +519,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 	 */
 	fastify.get<{
 		Params: { id: string }
-		Reply: DecoderAssignment[] | ErrorResponse
+		Reply: ApiDecoderAssignment[] | ErrorResponse
 	}>(
 		"/api/sources/:id/assignments",
 		{
@@ -518,7 +557,10 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				})
 			}
 
-			return sourceManager.getSourceAssignments(id)
+			return sourceManager.getSourceAssignments(id).map(assignment => ({
+				...assignment,
+				assignedAt: assignment.assignedAt.toISOString(),
+			}))
 		},
 	)
 
@@ -587,7 +629,10 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 
 				return reply.status(201).send({
 					message: `Decoder '${decoderId}' assigned to source '${sourceId}' successfully`,
-					assignment,
+					assignment: {
+						...assignment,
+						assignedAt: assignment.assignedAt.toISOString(),
+					},
 				})
 			} catch (err) {
 				const error = err as Error

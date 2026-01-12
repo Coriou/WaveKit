@@ -16,13 +16,10 @@ function getHealthText(health: DecoderStatus["health"]): {
 	color: string
 } {
 	switch (health) {
-		case "healthy":
 		case "running":
 			return { text: "ok", color: "green" }
-		case "degraded":
 		case "idle":
 			return { text: "warn", color: "yellow" }
-		case "unhealthy":
 		case "faulted":
 			return { text: "err", color: "red" }
 		default:

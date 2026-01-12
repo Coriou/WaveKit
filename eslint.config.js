@@ -7,14 +7,18 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export default [
 	{
-		ignores: ["dist/**", "node_modules/**"],
+		ignores: ["**/dist/**", "**/node_modules/**"],
 	},
 	{
 		files: ["**/*.ts", "**/*.tsx"],
 		languageOptions: {
 			parser: tsParser,
 			parserOptions: {
-				project: ["./tsconfig.json"],
+				project: [
+					"./tsconfig.json",
+					"./cli/tsconfig.json",
+					"./packages/*/tsconfig.json",
+				],
 				tsconfigRootDir: __dirname,
 				ecmaVersion: 2023,
 				sourceType: "module",

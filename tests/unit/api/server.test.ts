@@ -891,6 +891,7 @@ describe("API Server", () => {
 						uptime: 3600,
 						stats: { bytesIn: 1000000, eventsOut: 500, errors: 2 },
 						restartCount: 0,
+						lastOutputAt: null,
 					},
 					{
 						id: "decoder-2",
@@ -900,6 +901,7 @@ describe("API Server", () => {
 						uptime: 0,
 						stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
 						restartCount: 1,
+						lastOutputAt: null,
 					},
 				]
 				mockDecoderManager.getAllStatus.mockReturnValue(mockDecoders)
@@ -928,6 +930,7 @@ describe("API Server", () => {
 					uptime: 3600,
 					stats: { bytesIn: 1000000, eventsOut: 500, errors: 2 },
 					restartCount: 0,
+					lastOutputAt: null,
 				}
 				mockDecoderManager.getStatus.mockReturnValue(mockDecoder)
 				await apiServer.start()

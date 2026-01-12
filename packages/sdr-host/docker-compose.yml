@@ -1,0 +1,51 @@
+# wavekit-sdr-host — RTL-SDR dongle host with rtlmux fanout
+#
+# Quick Start:
+#   1. Blacklist DVB driver (one-time):
+#      echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtl.conf && sudo reboot
+#   2. Plug in RTL-SDR dongle
+#   3. docker compose up -d
+#   4. Point WaveKit to tcp://<this-host-ip>:5555
+#
+# Troubleshooting:
+#   - Status API: curl http://localhost:8080/api/status
+#   - rtlmux stats: curl http://localhost:5556/stats.json
+#   - Logs: docker compose logs -f
+
+services:
+  wavekit-sdr-host:
+    image: ghcr.io/coriou/wavekit-sdr-host:latest
+    container_name: wavekit-sdr-host
+    restart: unless-stopped
+
+    # Required for USB device access and LAN binding
+    network_mode: host
+
+    # USB device access (non-privileged approach)
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb:rw
+    device_cgroup_rules:
+      - "c 189:* rmw" # USB char devices
+
+    environment:
+      # rtl_tcp settings
+      SDR_HOST_RTL_TCP__SAMPLE_RATE: "2048000" # 2.048 Msps (NOT 2.4!)
+      SDR_HOST_RTL_TCP__AGC: "false" # AGC off by default
+      SDR_HOST_RTL_TCP__GAIN: "49" # Manual gain in dB (used when AGC is false)
+      SDR_HOST_RTL_TCP__PPM: "0"
+      SDR_HOST_RTL_TCP__DEVICE_INDEX: "0"
+
+      # rtlmux settings (IQ streaming)
+      SDR_HOST_RTLMUX__PORT: "5555" # WaveKit connects here
+      SDR_HOST_RTLMUX__BIND: "0.0.0.0"
+
+      # Status API
+      SDR_HOST_API__PORT: "8080"
+      SDR_HOST_LOGGING__LEVEL: "info"
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s

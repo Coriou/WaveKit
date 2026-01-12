@@ -1,0 +1,14 @@
+#!/bin/sh
+# Wait for rtl_tcp to be ready
+sleep 2
+
+# Calculate stats port (default: iq port + 1)
+IQ_PORT=${SDR_HOST_RTLMUX__PORT:-5555}
+STATS_PORT=${SDR_HOST_RTLMUX__STATS_PORT:-$((IQ_PORT + 1))}
+
+# Start rtlmux
+exec rtlmux \
+    -a ${SDR_HOST_RTLMUX__BIND:-0.0.0.0} \
+    -p ${IQ_PORT} \
+    -s ${STATS_PORT} \
+    127.0.0.1 ${SDR_HOST_RTL_TCP__INTERNAL_PORT:-1234}

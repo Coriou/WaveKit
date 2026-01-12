@@ -113,7 +113,10 @@ docker-run-core: ## Run core mode manually (requires wavekit:core)
 
 DEV_CONTAINER := wavekit-dev
 DEV_IMAGE := wavekit:latest-core
-DEV_CONFIG := $(shell pwd)/config/dev_test.yaml
+
+# Config selection: make dev-up CONFIG=dev_acars (defaults to dev_test)
+CONFIG ?= dev_test
+DEV_CONFIG := $(shell pwd)/config/$(CONFIG).yaml
 
 dev-build: ## Build core mode image (for external SDR++)
 	@echo "$(BLUE)Building WaveKit core image...$(NC)"
@@ -153,7 +156,7 @@ dev-stop: ## Stop dev container
 
 dev-restart: dev-stop dev-start ## Restart dev container
 
-dev-up: dev-build dev-start ## Build and start in one command
+dev-up: dev-build dev-start ## Build and start (CONFIG=name to use config/name.yaml)
 
 dev-logs: ## Tail all container logs (pretty JSON)
 	@docker logs -f $(DEV_CONTAINER) 2>&1 | jq -R 'fromjson? // .' || docker logs -f $(DEV_CONTAINER)
@@ -186,13 +189,19 @@ dev-status: ## Show container status and health
 	@curl -s http://localhost:9000/health | jq . 2>/dev/null || echo "API not reachable"
 
 cli-install: ## Install CLI dashboard dependencies (if missing)
-	@test -d cli/node_modules || (cd cli && npm install)
+	@test -d cli/node_modules || pnpm --filter @wavekit/cli install
 
 dev-dashboard-build: cli-install ## Build CLI dashboard
-	@cd cli && npm run build
+	@pnpm --filter @wavekit/cli build
 
 dev-dashboard: dev-dashboard-build ## WaveKit CLI Dashboard (interactive, tab-based)
 	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
+
+dev-configs: ## List available configs
+	@echo "$(BLUE)Available configs:$(NC)"
+	@ls -1 config/*.yaml | xargs -I {} basename {} .yaml | sort
+	@echo ""
+	@echo "Usage: make dev-up CONFIG=<name>"
 
 
 docker-logs-sdrpp: ## Tail SDR++ logs
@@ -239,21 +248,21 @@ docker-test: ## Run tests in container
 		-v $(PWD):/app \
 		-w /app \
 		$(IMAGE_NAME):$(TAG) \
-		npm test
+		pnpm test
 
 docker-test-coverage: ## Run tests with coverage
 	@docker run --rm \
 		-v $(PWD):/app \
 		-w /app \
 		$(IMAGE_NAME):$(TAG) \
-		npm run test:coverage
+		pnpm run test:coverage
 
 docker-lint: ## Run linting in container
 	@docker run --rm \
 		-v $(PWD):/app \
 		-w /app \
 		$(IMAGE_NAME):$(TAG) \
-		npm run lint
+		pnpm run lint
 
 # Information & Debugging
 

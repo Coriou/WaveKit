@@ -1,0 +1,7 @@
+#!/bin/sh
+# Wait for rtlmux to be ready
+sleep 1
+
+# Start the Node.js API server
+cd /app
+exec node dist/index.js

@@ -1,6 +1,7 @@
 {
 	"name": "wavekit",
 	"version": "1.0.0",
+	"packageManager": "pnpm@10.28.0",
 	"description": "TypeScript-based SDR stream processing framework",
 	"keywords": [
 		"sdr",
@@ -15,23 +16,30 @@
 	"scripts": {
 		"capture": "node ./scripts/auto-capture.mjs",
 		"build-file": "esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external",
-		"cli:install": "npm --prefix cli install",
-		"cli:build": "npm --prefix cli run build",
-		"cli:start": "npm --prefix cli run start",
-		"cli:typecheck": "npm --prefix cli run typecheck",
-		"cli:test": "npm --prefix cli run test",
-		"dev": "concurrently --raw \"npm:dev:*\"",
-		"dev:build": "npm run build-file -- --watch=forever ./src/index.ts",
+		"build": "pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build && pnpm run build-file ./src/index.ts",
+		"typecheck": "turbo run typecheck --filter=!wavekit && tsc --noEmit",
+		"lint": "eslint .",
+		"test": "turbo run test --filter=!wavekit && vitest run",
+		"dev": "concurrently --raw \"pnpm:dev:*\"",
+		"dev:build": "pnpm run build-file -- --watch=forever ./src/index.ts",
 		"dev:run": "node --watch \"./dist/index.js\"",
 		"format": "prettier --write .",
-		"lint": "eslint --ext .ts src",
-		"start": "npm run build-file ./src/index.ts && node ./dist/index.js",
-		"typecheck": "tsc --noEmit",
-		"test": "vitest run",
+		"start": "pnpm run build-file ./src/index.ts && node ./dist/index.js",
 		"test:watch": "vitest",
-		"test:coverage": "vitest run --coverage"
+		"test:coverage": "vitest run --coverage",
+		"ws:build": "turbo run build",
+		"ws:typecheck": "turbo run typecheck",
+		"ws:lint": "turbo run lint",
+		"ws:test": "turbo run test"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": [
+			"esbuild"
+		]
 	},
 	"dependencies": {
+		"@wavekit/api-types": "workspace:*",
+		"@wavekit/shared": "workspace:*",
 		"@fastify/cors": "^11.0.1",
 		"@fastify/swagger": "^9.4.2",
 		"@fastify/swagger-ui": "^5.2.2",
@@ -40,6 +48,7 @@
 		"fastify": "^5.3.3",
 		"pino": "^9.7.0",
 		"pino-pretty": "^13.0.0",
+		"ws": "^8.18.0",
 		"yaml": "^2.8.0",
 		"zod": "^3.25.67"
 	},
@@ -47,6 +56,7 @@
 		"@eslint/js": "^9.39.2",
 		"@tsconfig/node20": "^20.1.8",
 		"@types/node": "^25.0.3",
+		"@types/ws": "^8.5.13",
 		"@typescript-eslint/eslint-plugin": "^8.51.0",
 		"@typescript-eslint/parser": "^8.51.0",
 		"@vitest/coverage-v8": "^3.2.4",
@@ -58,6 +68,7 @@
 		"eslint-plugin-prettier": "^5.5.4",
 		"fast-check": "^4.1.1",
 		"prettier": "^3.7.4",
+		"turbo": "^2.5.6",
 		"typescript": "^5.9.3",
 		"vitest": "^3.2.4"
 	}

@@ -99,14 +99,16 @@ async function waitFor(
 }
 
 describe("LiveDemodulator", () => {
-	let LiveDemodulatorClass: typeof import("../../../src/core/live-demodulator.js").LiveDemodulator
+	let LiveDemodulatorClass: new (...args: any[]) => LiveDemodulatorType
 	let liveDemod: LiveDemodulatorType
 	let mockProcess: MockChildProcess | null = null
 	let port: number
 
 	beforeEach(async () => {
 		const module = await import("../../../src/core/live-demodulator.js")
-		LiveDemodulatorClass = module.LiveDemodulator
+		LiveDemodulatorClass = module.LiveDemodulator as unknown as new (
+			...args: any[]
+		) => LiveDemodulatorType
 		port = await findAvailablePort(19000)
 		const fanoutManager = createMockFanoutManager()
 		const sourceManager = createMockSourceManager()
@@ -137,12 +139,8 @@ describe("LiveDemodulator", () => {
 
 		liveDemod = new LiveDemodulatorClass(
 			testLogger,
-			sourceManager as unknown as ConstructorParameters<
-				typeof LiveDemodulatorClass
-			>[1],
-			fanoutManager as unknown as ConstructorParameters<
-				typeof LiveDemodulatorClass
-			>[2],
+			sourceManager as any,
+			fanoutManager as any,
 			config,
 		)
 	})

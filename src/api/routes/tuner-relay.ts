@@ -3,7 +3,8 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
-import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
+import type { TunerRelay } from "../../core/tuner-relay.js"
+import type { TunerRelayStatus } from "@wavekit/api-types"
 
 const tunerRelayStatusSchema = {
 	type: "object",

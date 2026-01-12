@@ -63,7 +63,8 @@ export function SourceStatus({ sources, tunerRelay }: SourceStatusProps) {
 								const consumers =
 									typeof source.consumers === "number"
 										? source.consumers
-										: Array.isArray(
+										: "assignments" in (source as object) &&
+											  Array.isArray(
 													(source as unknown as { assignments?: unknown[] })
 														.assignments,
 											  )

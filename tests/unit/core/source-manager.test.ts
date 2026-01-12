@@ -373,6 +373,24 @@ describe("Source Manager", () => {
 			// Process should still be running (no unhandled exception)
 			expect(true).toBe(true)
 		})
+
+		it("should keep source registered and schedule reconnect after initial failure", async () => {
+			const config = createSourceConfig("test-source", 59999)
+
+			await expect(sourceManager.connect(config)).rejects.toThrow()
+
+			// Source should remain registered (so it can auto-reconnect later)
+			const immediateStatus = sourceManager.getStatus("test-source")
+			expect(immediateStatus).toBeDefined()
+			expect(immediateStatus!.connected).toBe(false)
+
+			// Reconnect scheduling happens on socket close; give it a moment.
+			await new Promise(resolve => setTimeout(resolve, 100))
+
+			const statusAfterClose = sourceManager.getStatus("test-source")
+			expect(statusAfterClose).toBeDefined()
+			expect(statusAfterClose!.reconnectAttempts).toBeGreaterThanOrEqual(1)
+		})
 	})
 
 	describe("Stream Access", () => {

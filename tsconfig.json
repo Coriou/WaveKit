@@ -1,35 +1,15 @@
 {
-	"extends": "@tsconfig/node20/tsconfig.json",
+	"extends": "./tsconfig.base.json",
 	"compilerOptions": {
-		"lib": ["es2023"],
-		"module": "nodeNext",
-		"target": "es2022",
-		"strict": true,
-
-		"esModuleInterop": true,
-		"skipLibCheck": true,
-
-		"moduleResolution": "nodeNext",
-		"resolveJsonModule": true,
-
+		"composite": false,
+		"declaration": false,
+		"declarationMap": false,
+		"incremental": true,
 		"paths": {
 			"@/*": ["./*"]
 		},
-
-		"noUncheckedIndexedAccess": true,
-		"exactOptionalPropertyTypes": true,
-		"useUnknownInCatchVariables": true,
-
-		"noImplicitOverride": true,
-		"noImplicitReturns": true,
-		"noFallthroughCasesInSwitch": true,
-		"noPropertyAccessFromIndexSignature": true,
-
-		"isolatedModules": true,
-		"verbatimModuleSyntax": true,
-
-		"forceConsistentCasingInFileNames": true
+		"tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo"
 	},
-	"include": ["**/*.ts"],
-	"exclude": ["node_modules", "dist", "cli"]
+	"include": ["**/*.ts", "**/*.d.ts"],
+	"exclude": ["node_modules", "dist", "cli", "packages"]
 }

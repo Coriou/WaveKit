@@ -1,21 +1,16 @@
 {
+	"extends": "../tsconfig.base.json",
 	"compilerOptions": {
 		"outDir": "./dist",
 		"rootDir": "./source",
 		"jsx": "react-jsx",
-		"module": "NodeNext",
-		"moduleResolution": "NodeNext",
-		"target": "ES2022",
-		"lib": ["ES2022"],
-		"strict": true,
-		"esModuleInterop": true,
-		"skipLibCheck": true,
-		"forceConsistentCasingInFileNames": true,
+		"tsBuildInfoFile": "./node_modules/.cache/tsconfig.tsbuildinfo",
 		"declaration": true,
 		"declarationMap": true,
 		"sourceMap": true,
 		"noPropertyAccessFromIndexSignature": false,
-		"noUncheckedIndexedAccess": false
+		"noUncheckedIndexedAccess": false,
+		"exactOptionalPropertyTypes": false
 	},
 	"include": ["source/**/*"],
 	"exclude": ["node_modules", "dist"]

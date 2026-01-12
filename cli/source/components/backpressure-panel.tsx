@@ -7,23 +7,12 @@
 
 import React from "react"
 import { Box, Text } from "ink"
-import type { FanoutSnapshot, BranchTelemetry } from "../types.js"
+import type { FanoutSnapshot } from "../types.js"
 import { formatBytes, formatRate, padRight, padLeft } from "../utils/format.js"
 
 interface BackpressurePanelProps {
 	snapshot: FanoutSnapshot | null
 	dropRate: number
-}
-
-function renderBufferBar(bufferBytes: number, highWaterMark: number): string {
-	const pct = highWaterMark > 0 ? Math.min(1, bufferBytes / highWaterMark) : 0
-	const barWidth = 12
-	const filled = Math.round(pct * barWidth)
-	const empty = barWidth - filled
-
-	const bar = "#".repeat(filled) + ".".repeat(empty)
-	const pctText = `${Math.round(pct * 100)}%`
-	return `${bar} ${padLeft(pctText, 4)}`
 }
 
 function StatusBadge({ active }: { active: boolean }) {

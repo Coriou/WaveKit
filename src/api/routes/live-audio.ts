@@ -3,10 +3,11 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import type { LiveDemodulator } from "../../core/live-demodulator.js"
+import type { LiveDemodConfig, LiveDemodStatus } from "@wavekit/api-types"
 import type {
-	LiveDemodConfig,
-	LiveDemodStatus,
-	LiveDemodulator,
+	LiveDemodConfig as CoreLiveDemodConfig,
+	LiveDemodStatus as CoreLiveDemodStatus,
 } from "../../core/live-demodulator.js"
 
 const liveDemodConfigSchema = {
@@ -134,6 +135,49 @@ export const liveAudioRoutes: FastifyPluginAsync<
 > = async (fastify: FastifyInstance, options: LiveAudioRoutesOptions) => {
 	const { liveDemod } = options
 
+	const toApiLiveDemodConfig = (
+		config: CoreLiveDemodConfig,
+	): LiveDemodConfig => {
+		return {
+			enabled: config.enabled,
+			httpPort: config.httpPort,
+			modulation: config.modulation,
+			bandwidth: config.bandwidth,
+			squelch: config.squelch,
+			noiseReduction: config.noiseReduction,
+			lowPass: config.lowPass,
+			highPass: config.highPass,
+			gain: config.gain,
+			deEmphasis: config.deEmphasis,
+			deEmphasisTau: config.deEmphasisTau,
+			audioFormat: config.audioFormat,
+			iqDcBlock: config.iqDcBlock,
+			...(config.sourceId !== undefined ? { sourceId: config.sourceId } : {}),
+		}
+	}
+
+	const toApiLiveDemodStatus = (
+		status: CoreLiveDemodStatus,
+	): LiveDemodStatus => {
+		return {
+			enabled: status.enabled,
+			running: status.running,
+			sourceId: status.sourceId,
+			sourceConnected: status.sourceConnected,
+			sourceIqSampleRate: status.sourceIqSampleRate,
+			config: toApiLiveDemodConfig(status.config),
+			effectiveSampleRate: status.effectiveSampleRate,
+			decimationFactor: status.decimationFactor,
+			httpUrl: status.httpUrl,
+			clientCount: status.clientCount,
+			bytesStreamed: status.bytesStreamed,
+			pipelineHealth: status.pipelineHealth,
+			...(status.lastError !== undefined
+				? { lastError: status.lastError }
+				: {}),
+		}
+	}
+
 	fastify.get<{ Reply: LiveDemodStatus }>(
 		"/api/live-audio/status",
 		{
@@ -146,7 +190,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				},
 			},
 		},
-		async () => liveDemod.getStatus(),
+		async () => toApiLiveDemodStatus(liveDemod.getStatus()),
 	)
 
 	fastify.post<{ Reply: { success: boolean } }>(
@@ -202,9 +246,37 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			},
 		},
 		async request => {
-			const updates = request.body as Partial<LiveDemodConfig>
+			const body = request.body as Partial<LiveDemodConfig>
+
+			const updates: Partial<CoreLiveDemodConfig> = {
+				...(body.enabled !== undefined ? { enabled: body.enabled } : {}),
+				...(body.httpPort !== undefined ? { httpPort: body.httpPort } : {}),
+				...(body.modulation !== undefined
+					? { modulation: body.modulation }
+					: {}),
+				...(body.bandwidth !== undefined ? { bandwidth: body.bandwidth } : {}),
+				...(body.squelch !== undefined ? { squelch: body.squelch } : {}),
+				...(body.noiseReduction !== undefined
+					? { noiseReduction: body.noiseReduction }
+					: {}),
+				...(body.lowPass !== undefined ? { lowPass: body.lowPass } : {}),
+				...(body.highPass !== undefined ? { highPass: body.highPass } : {}),
+				...(body.gain !== undefined ? { gain: body.gain } : {}),
+				...(body.deEmphasis !== undefined
+					? { deEmphasis: body.deEmphasis }
+					: {}),
+				...(body.deEmphasisTau !== undefined
+					? { deEmphasisTau: body.deEmphasisTau }
+					: {}),
+				...(body.audioFormat !== undefined
+					? { audioFormat: body.audioFormat }
+					: {}),
+				...(body.iqDcBlock !== undefined ? { iqDcBlock: body.iqDcBlock } : {}),
+				...(body.sourceId !== undefined ? { sourceId: body.sourceId } : {}),
+			}
+
 			await liveDemod.reconfigure(updates)
-			return liveDemod.getStatus()
+			return toApiLiveDemodStatus(liveDemod.getStatus())
 		},
 	)
 

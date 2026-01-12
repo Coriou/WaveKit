@@ -22,7 +22,7 @@ import type {
 } from "../../../src/decoders/types.js"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
-import { FanoutManager } from "../../../src/core/fanout-manager.js"
+import type { FanoutManager } from "../../../src/core/fanout-manager.js"
 import pino from "pino"
 
 // Create a silent logger for tests

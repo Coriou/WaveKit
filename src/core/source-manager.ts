@@ -299,9 +299,14 @@ export class SourceManager extends EventEmitter {
 			try {
 				await this.attemptConnection(config.id)
 			} catch (err) {
-				// Clean up on initial connection failure
-				this.cleanupState(state)
-				this.sources.delete(config.id)
+				// IMPORTANT: Keep the source registered even if the initial connection fails.
+				// This allows the built-in reconnection loop to bring the source back when
+				// the remote (e.g. pi-iq) reboots or becomes temporarily unavailable.
+				// We only tear down the source for non-connection failures.
+				if (!(err instanceof SourceConnectionError)) {
+					this.cleanupState(state)
+					this.sources.delete(config.id)
+				}
 				throw err
 			}
 		}
@@ -663,6 +668,18 @@ export class SourceManager extends EventEmitter {
 			// Track if this is the initial connection attempt
 			const isInitialAttempt = state.reconnectAttempts === 0
 
+			let settled = false
+			const safeResolve = () => {
+				if (settled) return
+				settled = true
+				resolve()
+			}
+			const safeReject = (err: Error) => {
+				if (settled) return
+				settled = true
+				reject(err)
+			}
+
 			const cleanup = () => {
 				socket.removeAllListeners()
 			}
@@ -679,7 +696,7 @@ export class SourceManager extends EventEmitter {
 
 				// Emit connected event (Requirement 1.3)
 				this.emit("connected", id)
-				resolve()
+				safeResolve()
 			}
 
 			const onData = (chunk: Buffer) => {
@@ -828,16 +845,26 @@ export class SourceManager extends EventEmitter {
 			}
 
 			const onError = (err: Error) => {
-				cleanup()
 				this.handleConnectionError(id, err)
 
-				// Only reject on initial connection attempt
+				// For the initial attempt, surface the failure to the caller (API/startup)
+				// while still keeping the source registered for background retries.
 				if (isInitialAttempt && !state.connected) {
-					reject(new SourceConnectionError(config.host!, config.port!, err))
+					safeReject(new SourceConnectionError(config.host!, config.port!, err))
+				}
+
+				// Ensure we transition to 'close' so reconnection scheduling is consistent.
+				// (Do not remove listeners here; onClose will clean up.)
+				try {
+					socket.destroy()
+				} catch {
+					// Ignore destroy errors
 				}
 			}
 
 			const onClose = () => {
+				cleanup()
+
 				const wasConnected = state.connected
 				state.connected = false
 				state.socket = null
@@ -853,10 +880,24 @@ export class SourceManager extends EventEmitter {
 					)
 				}
 
-				// Schedule reconnection if not stopping and was previously connected
-				// or if this is a reconnection attempt (not initial)
-				if (!state.stopping && (wasConnected || !isInitialAttempt)) {
+				// Always schedule reconnection when a source socket closes, unless we're
+				// explicitly stopping/removing the source.
+				if (!state.stopping) {
 					this.scheduleReconnect(id)
+				}
+
+				// Ensure reconnect-attempt promises do not leak.
+				// Initial attempts should reject so callers can return a 400, but background
+				// reconnect attempts should resolve.
+				if (!wasConnected && isInitialAttempt) {
+					const reason = state.lastError
+						? new Error(state.lastError)
+						: new Error("Socket closed before establishing a connection")
+					safeReject(
+						new SourceConnectionError(config.host!, config.port!, reason),
+					)
+				} else {
+					safeResolve()
 				}
 			}
 
@@ -909,9 +950,13 @@ export class SourceManager extends EventEmitter {
 	private scheduleReconnect(id: string): void {
 		const state = this.sources.get(id)
 		if (!state || state.stopping) return
+		if (state.reconnectTimer) return
 
 		state.reconnectAttempts++
-		const delay = calculateBackoffDelay(state.reconnectAttempts)
+		const baseDelay = calculateBackoffDelay(state.reconnectAttempts)
+		// Add small jitter to avoid thundering herd when multiple sources restart.
+		// Equal-jitter: base/2 + rand*(base/2)
+		const delay = Math.round(baseDelay / 2 + Math.random() * (baseDelay / 2))
 
 		this.logger.info(
 			{

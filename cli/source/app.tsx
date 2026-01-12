@@ -14,7 +14,6 @@ import React, { useState, useCallback, useEffect } from "react"
 import { Box, useInput, useApp } from "ink"
 import { useWebSocket, type ServerMessage } from "./hooks/use-websocket.js"
 import { useTerminalSize } from "./hooks/use-terminal-size.js"
-import { ErrorBoundary } from "./components/error-boundary.js"
 import { Header } from "./components/header.js"
 import { TabBar } from "./components/tab-bar.js"
 import { HelpBar } from "./components/help-bar.js"
@@ -29,7 +28,6 @@ import type {
 	DecoderStatus,
 	DecoderOutput,
 	FanoutSnapshot,
-	BranchTelemetry,
 	SourceStatus as SourceStatusType,
 	DecoderOutputMessage,
 	TunerRelayStatus,
@@ -123,11 +121,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			case "decoder:error": {
 				setState(prev => {
 					const data = msg.data as
-						| {
-								decoderId?: string
-								health?: string
-								error?: string
-						  }
+						| { decoderId?: string; health?: string; error?: string }
 						| undefined
 					const decoderId = data?.decoderId
 					if (!decoderId) return prev
@@ -286,10 +280,12 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	}, [])
 
 	useEffect(() => {
-		fetchInitialState()
+		void fetchInitialState()
 
 		// Refresh periodically
-		const interval = setInterval(fetchInitialState, 5000)
+		const interval = setInterval(() => {
+			void fetchInitialState()
+		}, 5000)
 		return () => clearInterval(interval)
 	}, [fetchInitialState])
 

@@ -375,21 +375,31 @@ FROM node:22-bookworm-slim AS node-build
 
 WORKDIR /app
 
-# Copy package files and install dependencies
-COPY package*.json ./
-RUN npm ci && npm cache clean --force
+# Install pnpm v10
+RUN npm install -g pnpm@10
+
+# Copy workspace manifests and install dependencies
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json turbo.json .npmrc ./
+COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/shared/
+COPY packages/api-types/package.json packages/api-types/tsconfig.json ./packages/api-types/
+COPY cli/package.json cli/tsconfig.json ./cli/
+COPY packages/sdr-host/package.json packages/sdr-host/tsconfig.json ./packages/sdr-host/
+RUN pnpm install --frozen-lockfile --prod=false
 
 # Copy source code
 COPY . .
 
+# Ensure CLI workspace deps are present for typecheck (COPY overlays can drop node_modules)
+RUN pnpm --filter @wavekit/cli install --frozen-lockfile --prod=false
+
 # Run type checking
-RUN npm run typecheck
+RUN pnpm run typecheck
 
 # Build application
-RUN npm run build-file -- ./src/index.ts
+RUN pnpm run build
 
 # Prune dev dependencies for smaller final image
-RUN npm prune --production
+RUN CI=true pnpm prune --prod
 
 # Verify built output
 RUN ls -la dist/ && head -1 dist/index.js
@@ -459,8 +469,12 @@ RUN echo "Verifying decoder installations..." && \
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/dist /app/dist
 COPY --from=node-build /app/node_modules /app/node_modules
+COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
+COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist
+COPY --from=node-build /app/packages/api-types/package.json /app/packages/api-types/package.json
+COPY --from=node-build /app/packages/api-types/dist /app/packages/api-types/dist
 COPY --from=node-build /app/config /app/config
-COPY --from=node-build /app/package*.json /app/
+COPY --from=node-build /app/package.json /app/
 
 # Copy helper scripts
 COPY docker/scripts/init-system.sh /usr/local/bin/
@@ -553,8 +567,12 @@ COPY docker/config/direwolf.conf /etc/direwolf.conf
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/dist /app/dist
 COPY --from=node-build /app/node_modules /app/node_modules
+COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
+COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist
+COPY --from=node-build /app/packages/api-types/package.json /app/packages/api-types/package.json
+COPY --from=node-build /app/packages/api-types/dist /app/packages/api-types/dist
 COPY --from=node-build /app/config /app/config
-COPY --from=node-build /app/package*.json /app/
+COPY --from=node-build /app/package.json /app/
 
 # Copy helper scripts
 COPY docker/scripts/init-system.sh /usr/local/bin/

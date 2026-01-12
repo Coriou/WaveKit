@@ -33,13 +33,10 @@ function normalizeHealth(
 	health: DecoderStatus["health"],
 ): "ok" | "warn" | "error" {
 	switch (health) {
-		case "healthy":
 		case "running":
 			return "ok"
-		case "degraded":
 		case "idle":
 			return "warn"
-		case "unhealthy":
 		case "faulted":
 			return "error"
 		default:

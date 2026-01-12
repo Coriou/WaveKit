@@ -15,7 +15,14 @@
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
-import type { DecoderStatus, DecoderCaps } from "../../decoders/types.js"
+import type {
+	DecoderCaps as ApiDecoderCaps,
+	DecoderStatus as ApiDecoderStatus,
+} from "@wavekit/api-types"
+import type {
+	DecoderCaps as InternalDecoderCaps,
+	DecoderStatus as InternalDecoderStatus,
+} from "../../decoders/types.js"
 
 /**
  * Decoder stats schema for response
@@ -138,7 +145,7 @@ export interface DecoderRoutesOptions {
  */
 export interface DecoderActionResponse {
 	message: string
-	decoder: DecoderStatus
+	decoder: ApiDecoderStatus
 }
 
 export interface ErrorResponse {
@@ -155,8 +162,8 @@ export interface DecoderConfigUpdate {
 /**
  * Extended decoder info including capabilities
  */
-export interface DecoderInfo extends DecoderStatus {
-	caps?: DecoderCaps
+export interface DecoderInfo extends ApiDecoderStatus {
+	caps?: ApiDecoderCaps
 }
 
 /**
@@ -172,9 +179,43 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	/**
 	 * Helper function to enrich decoder status with capabilities
 	 */
-	const enrichWithCaps = (status: DecoderStatus): DecoderInfo => {
+	const toApiDecoderStatus = (
+		status: InternalDecoderStatus,
+	): ApiDecoderStatus => {
+		return {
+			id: status.id,
+			type: status.type,
+			running: status.running,
+			health: status.health,
+			...(status.pid !== undefined ? { pid: status.pid } : {}),
+			uptime: status.uptime,
+			stats: status.stats,
+			lastOutputAt: status.lastOutputAt
+				? status.lastOutputAt.toISOString()
+				: null,
+			restartCount: status.restartCount,
+			...(status.version !== undefined ? { version: status.version } : {}),
+		}
+	}
+
+	const toApiDecoderCaps = (caps: InternalDecoderCaps): ApiDecoderCaps => {
+		return {
+			input: caps.input,
+			output: caps.output,
+			integrationPattern: caps.integrationPattern,
+			...(caps.wantsExclusiveSource !== undefined
+				? { wantsExclusiveSource: caps.wantsExclusiveSource }
+				: {}),
+			...(caps.preferredSampleRates !== undefined
+				? { preferredSampleRates: caps.preferredSampleRates }
+				: {}),
+		}
+	}
+
+	const enrichWithCaps = (status: InternalDecoderStatus): DecoderInfo => {
 		const caps = decoderRegistry?.getCaps(status.type)
-		return caps ? { ...status, caps } : status
+		const apiStatus = toApiDecoderStatus(status)
+		return caps ? { ...apiStatus, caps: toApiDecoderCaps(caps) } : apiStatus
 	}
 
 	/**
@@ -315,7 +356,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 				return {
 					message: `Decoder '${id}' started successfully`,
-					decoder: status,
+					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
 				const error = err as Error
@@ -394,7 +435,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 				return {
 					message: `Decoder '${id}' stopped successfully`,
-					decoder: status,
+					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
 				const error = err as Error
@@ -462,7 +503,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 				return {
 					message: `Decoder '${id}' restarted successfully`,
-					decoder: status,
+					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
 				const error = err as Error
@@ -547,7 +588,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 
 			return {
 				message: `Decoder '${id}' configuration updated`,
-				decoder: status,
+				decoder: toApiDecoderStatus(status),
 			}
 		},
 	)
@@ -557,7 +598,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	 * Requirement 17.1: Returns all registered decoder types with their capabilities
 	 */
 	fastify.get<{
-		Reply: Array<{ type: string; caps: DecoderCaps }> | ErrorResponse
+		Reply: Array<{ type: string; caps: ApiDecoderCaps }> | ErrorResponse
 	}>(
 		"/api/decoders/types",
 		{
@@ -594,7 +635,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			const types = decoderRegistry.getRegisteredTypes()
 			return types.map(type => ({
 				type,
-				caps: decoderRegistry.getCaps(type)!,
+				caps: toApiDecoderCaps(decoderRegistry.getCaps(type)!),
 			}))
 		},
 	)
