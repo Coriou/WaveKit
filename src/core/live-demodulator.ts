@@ -95,7 +95,11 @@ export class LiveDemodulator extends EventEmitter {
 	private effectiveSampleRate = 0
 	private decimationFactor = 1
 	private stoppingPipeline = false
-	private squelchThreshold: number | null = null
+	private squelchThresholdDbfs: number | null = null
+	private squelchGateOpen = true
+	private squelchLastOpenAtMs = 0
+	private readonly squelchHysteresisDb = 2.0
+	private readonly squelchHangTimeMs = 250
 
 	constructor(
 		logger: Logger,
@@ -287,11 +291,15 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private updateSquelchThreshold(): void {
+		// Squelch is expressed as a negative dBFS threshold (e.g. -18.5).
+		// 0 disables squelch ("open").
 		if (this.config.squelch >= 0) {
-			this.squelchThreshold = null
+			this.squelchThresholdDbfs = null
+			this.squelchGateOpen = true
+			this.squelchLastOpenAtMs = 0
 			return
 		}
-		this.squelchThreshold = Math.pow(10, this.config.squelch / 20)
+		this.squelchThresholdDbfs = this.config.squelch
 	}
 
 	private calculateRates(
@@ -712,11 +720,34 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private applySquelch(chunk: Buffer): Buffer {
-		if (!this.squelchThreshold) return chunk
+		if (this.squelchThresholdDbfs == null) return chunk
 
 		const rms = this.calculateChunkRms(chunk)
-		if (rms >= this.squelchThreshold) return chunk
-		return Buffer.alloc(chunk.length)
+		const rmsDbfs = rms > 0 ? 20 * Math.log10(rms) : Number.NEGATIVE_INFINITY
+		const openThreshold = this.squelchThresholdDbfs + this.squelchHysteresisDb
+		const closeThreshold = this.squelchThresholdDbfs - this.squelchHysteresisDb
+		const nowMs = Date.now()
+
+		if (rmsDbfs >= openThreshold) {
+			this.squelchGateOpen = true
+			this.squelchLastOpenAtMs = nowMs
+			return chunk
+		}
+
+		if (this.squelchGateOpen) {
+			// Hold open briefly after the last strong-enough chunk to avoid chattering.
+			if (
+				this.squelchLastOpenAtMs > 0 &&
+				nowMs - this.squelchLastOpenAtMs < this.squelchHangTimeMs
+			) {
+				return chunk
+			}
+			if (rmsDbfs < closeThreshold) {
+				this.squelchGateOpen = false
+			}
+		}
+
+		return this.squelchGateOpen ? chunk : Buffer.alloc(chunk.length)
 	}
 
 	private calculateChunkRms(chunk: Buffer): number {

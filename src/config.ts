@@ -131,6 +131,7 @@ export const LiveDemodConfigSchema = z
 			.enum(["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"])
 			.default("nfm"),
 		bandwidth: z.number().int().min(0).default(12500),
+		// Squelch threshold in dBFS (negative). 0 disables squelch (open).
 		squelch: z.number().min(-160).max(0).default(0),
 		noiseReduction: z
 			.enum(["off", "voice", "noaa-apt", "narrow-band"])

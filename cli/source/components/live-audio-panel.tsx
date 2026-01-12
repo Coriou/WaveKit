@@ -51,7 +51,7 @@ export function LiveAudioPanel({ status }: LiveAudioPanelProps) {
 		["Bandwidth", `${status.config.bandwidth} Hz`],
 		[
 			"Squelch",
-			status.config.squelch === 0 ? "open" : `${status.config.squelch} dB`,
+			status.config.squelch === 0 ? "open" : `${status.config.squelch} dBFS`,
 		],
 		["Noise Reduction", status.config.noiseReduction],
 		["Low Pass", status.config.lowPass ? `${status.config.lowPass} Hz` : "off"],
