@@ -115,6 +115,8 @@ export const TunerRelayConfigSchema = z.object({
 	controlPolicy: z.enum(["exclusive", "shared"]).default("exclusive"),
 	/** Max number of connected clients (optional cap) */
 	maxClients: z.number().int().positive().optional(),
+	/** Command history entries to retain (0 disables history) */
+	commandHistoryLimit: z.number().int().min(0).max(10000).default(200),
 })
 
 /**
@@ -595,6 +597,7 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_TUNER_RELAY__SOURCE_ID",
 		"WAVEKIT_TUNER_RELAY__CONTROL_POLICY",
 		"WAVEKIT_TUNER_RELAY__MAX_CLIENTS",
+		"WAVEKIT_TUNER_RELAY__COMMAND_HISTORY_LIMIT",
 		"WAVEKIT_LOGGING__LEVEL",
 		"WAVEKIT_LOGGING__DIR",
 		"WAVEKIT_SOURCES__<ID>__HOST",

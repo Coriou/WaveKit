@@ -115,7 +115,30 @@ curl http://localhost:9000/api/status
 		"bytesSent": 421000000,
 		"bytesReceived": 120,
 		"lastFrequency": 446524920,
-		"lastSampleRate": 2048000
+		"lastSampleRate": 2048000,
+		"lastCommand": "set-frequency",
+		"lastCommandAt": "2024-05-21T03:12:01.123Z",
+		"lastCommandValue": 446524920,
+		"commandHistoryLimit": 200,
+		"commandStats": [
+			{
+				"id": 1,
+				"name": "set-frequency",
+				"count": 6,
+				"lastValue": 446524920,
+				"lastSeenAt": "2024-05-21T03:12:01.123Z"
+			}
+		],
+		"commandHistory": [
+			{
+				"id": 1,
+				"name": "set-frequency",
+				"value": 446524920,
+				"at": "2024-05-21T03:12:01.123Z",
+				"clientId": "client-1",
+				"clientRemote": "192.168.1.50:50522"
+			}
+		]
 	}
 }
 ```
@@ -181,7 +204,30 @@ curl http://localhost:9000/api/tuner-relay
 	"bytesSent": 421000000,
 	"bytesReceived": 120,
 	"lastFrequency": 446524920,
-	"lastSampleRate": 2048000
+	"lastSampleRate": 2048000,
+	"lastCommand": "set-frequency",
+	"lastCommandAt": "2024-05-21T03:12:01.123Z",
+	"lastCommandValue": 446524920,
+	"commandHistoryLimit": 200,
+	"commandStats": [
+		{
+			"id": 1,
+			"name": "set-frequency",
+			"count": 6,
+			"lastValue": 446524920,
+			"lastSeenAt": "2024-05-21T03:12:01.123Z"
+		}
+	],
+	"commandHistory": [
+		{
+			"id": 1,
+			"name": "set-frequency",
+			"value": 446524920,
+			"at": "2024-05-21T03:12:01.123Z",
+			"clientId": "client-1",
+			"clientRemote": "192.168.1.50:50522"
+		}
+	]
 }
 ```
 

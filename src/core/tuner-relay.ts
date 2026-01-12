@@ -25,6 +25,24 @@ export interface TunerRelayConfig {
 	sourceId?: string | undefined
 	controlPolicy: TunerRelayControlPolicy
 	maxClients?: number | undefined
+	commandHistoryLimit?: number | undefined
+}
+
+export interface TunerRelayCommandStat {
+	id: number
+	name: string
+	count: number
+	lastValue: number
+	lastSeenAt: string
+}
+
+export interface TunerRelayCommandHistoryEntry {
+	id: number
+	name: string
+	value: number
+	at: string
+	clientId?: string
+	clientRemote?: string
 }
 
 export interface TunerRelayStatus {
@@ -51,10 +69,14 @@ export interface TunerRelayStatus {
 	bytesReceived: number
 	lastCommand?: string
 	lastCommandAt?: string
+	lastCommandValue?: number
 	lastFrequency?: number
 	lastSampleRate?: number
 	lastGain?: number
 	lastPpm?: number
+	commandHistoryLimit?: number
+	commandStats?: TunerRelayCommandStat[]
+	commandHistory?: TunerRelayCommandHistoryEntry[]
 	lastError?: string
 	rtlTcpHeader?: RtlTcpHeaderInfo
 }
@@ -81,6 +103,7 @@ interface ClientState {
 const DEFAULT_TUNER_TYPE = 5
 const DEFAULT_GAIN_COUNT = 29
 const COMMAND_SIZE = 5
+const DEFAULT_COMMAND_HISTORY_LIMIT = 200
 
 const COMMAND_NAMES: Record<number, string> = {
 	0x01: "set-frequency",
@@ -116,11 +139,15 @@ export class TunerRelay extends EventEmitter {
 	private bytesReceived = 0
 	private lastCommand: string | null = null
 	private lastCommandAt: string | null = null
+	private lastCommandValue: number | null = null
 	private lastFrequency: number | null = null
 	private lastSampleRate: number | null = null
 	private lastGain: number | null = null
 	private lastPpm: number | null = null
 	private lastError: string | null = null
+	private readonly commandHistoryLimit: number
+	private commandHistory: TunerRelayCommandHistoryEntry[] = []
+	private commandStats: Map<number, TunerRelayCommandStat> = new Map()
 
 	constructor(
 		logger: Logger,
@@ -133,6 +160,10 @@ export class TunerRelay extends EventEmitter {
 		this.sourceManager = sourceManager
 		this.fanoutManager = fanoutManager
 		this.config = config
+		this.commandHistoryLimit = Math.max(
+			0,
+			config.commandHistoryLimit ?? DEFAULT_COMMAND_HISTORY_LIMIT,
+		)
 	}
 
 	async start(): Promise<void> {
@@ -227,11 +258,22 @@ export class TunerRelay extends EventEmitter {
 			status.maxClients = this.config.maxClients
 		if (this.lastCommand) status.lastCommand = this.lastCommand
 		if (this.lastCommandAt) status.lastCommandAt = this.lastCommandAt
+		if (this.lastCommandValue !== null)
+			status.lastCommandValue = this.lastCommandValue
 		if (this.lastFrequency !== null) status.lastFrequency = this.lastFrequency
 		if (this.lastSampleRate !== null)
 			status.lastSampleRate = this.lastSampleRate
 		if (this.lastGain !== null) status.lastGain = this.lastGain
 		if (this.lastPpm !== null) status.lastPpm = this.lastPpm
+		if (this.commandHistoryLimit >= 0)
+			status.commandHistoryLimit = this.commandHistoryLimit
+		if (this.commandHistory.length > 0)
+			status.commandHistory = [...this.commandHistory]
+		if (this.commandStats.size > 0) {
+			status.commandStats = Array.from(this.commandStats.values()).sort(
+				(a, b) => a.id - b.id,
+			)
+		}
 		if (this.lastError) status.lastError = this.lastError
 
 		if (this.controlClientId) {
@@ -446,15 +488,23 @@ export class TunerRelay extends EventEmitter {
 		while (client.commandBuffer.length >= COMMAND_SIZE) {
 			const cmd = client.commandBuffer.readUInt8(0)
 			const value = client.commandBuffer.readUInt32BE(1)
-			this.updateCommandState(cmd, value)
+			this.updateCommandState(cmd, value, client)
 			client.commandBuffer = client.commandBuffer.subarray(COMMAND_SIZE)
 		}
 	}
 
-	private updateCommandState(cmd: number, value: number): void {
+	private updateCommandState(
+		cmd: number,
+		value: number,
+		client: ClientState,
+	): void {
 		const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
+		const now = new Date().toISOString()
 		this.lastCommand = name
-		this.lastCommandAt = new Date().toISOString()
+		this.lastCommandAt = now
+		this.lastCommandValue = value
+		this.recordCommandStats(cmd, name, value, now)
+		this.recordCommandHistory(cmd, name, value, now, client)
 
 		switch (cmd) {
 			case 0x01:
@@ -471,6 +521,54 @@ export class TunerRelay extends EventEmitter {
 				break
 			default:
 				break
+		}
+	}
+
+	private recordCommandStats(
+		cmd: number,
+		name: string,
+		value: number,
+		timestamp: string,
+	): void {
+		const existing = this.commandStats.get(cmd)
+		if (existing) {
+			existing.count += 1
+			existing.lastValue = value
+			existing.lastSeenAt = timestamp
+			return
+		}
+		this.commandStats.set(cmd, {
+			id: cmd,
+			name,
+			count: 1,
+			lastValue: value,
+			lastSeenAt: timestamp,
+		})
+	}
+
+	private recordCommandHistory(
+		cmd: number,
+		name: string,
+		value: number,
+		timestamp: string,
+		client: ClientState,
+	): void {
+		if (this.commandHistoryLimit <= 0) return
+
+		this.commandHistory.push({
+			id: cmd,
+			name,
+			value,
+			at: timestamp,
+			clientId: client.id,
+			clientRemote: client.remoteAddress,
+		})
+
+		if (this.commandHistory.length > this.commandHistoryLimit) {
+			this.commandHistory.splice(
+				0,
+				this.commandHistory.length - this.commandHistoryLimit,
+			)
 		}
 	}
 

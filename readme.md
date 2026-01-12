@@ -191,6 +191,7 @@ tunerRelay:
   port: 1234
   sourceId: "rtl-pi"
   controlPolicy: "exclusive" # or "shared"
+  commandHistoryLimit: 200 # 0 disables command history
 ```
 
 **Usage:**
@@ -204,6 +205,7 @@ tunerRelay:
 - The relay expects an IQ source in `U8_IQ` format (standard RTL-TCP/rtlmux output).
 - In `exclusive` mode, the first client gets control and others are read-only.
 - The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
+- RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
 
 ## Configuration
 

@@ -80,11 +80,32 @@ export interface TunerRelayStatus {
 	bytesReceived: number
 	lastCommand?: string
 	lastCommandAt?: string
+	lastCommandValue?: number
 	lastFrequency?: number
 	lastSampleRate?: number
 	lastGain?: number
 	lastPpm?: number
+	commandHistoryLimit?: number
+	commandStats?: TunerRelayCommandStat[]
+	commandHistory?: TunerRelayCommandHistoryEntry[]
 	lastError?: string
+}
+
+export interface TunerRelayCommandStat {
+	id: number
+	name: string
+	count: number
+	lastValue: number
+	lastSeenAt: string
+}
+
+export interface TunerRelayCommandHistoryEntry {
+	id: number
+	name: string
+	value: number
+	at: string
+	clientId?: string
+	clientRemote?: string
 }
 
 // ============================================================================

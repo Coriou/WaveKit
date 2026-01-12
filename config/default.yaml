@@ -201,6 +201,7 @@ audio:
 #   sourceId      - Source to expose (default: first configured source)
 #   controlPolicy - "exclusive" (first client controls) or "shared"
 #   maxClients    - Optional cap on number of connected clients
+#   commandHistoryLimit - Number of command entries to retain (0 disables)
 #   note         - Relay streams the primary source (first in `sources`)
 #
 # Example:
@@ -211,11 +212,13 @@ audio:
 #   sourceId: "rtl-pi"
 #   controlPolicy: "exclusive"
 #   maxClients: 2
+#   commandHistoryLimit: 200
 
 tunerRelay:
   enabled: false
   host: "0.0.0.0"
   port: 1234
+  commandHistoryLimit: 200
 
 # -----------------------------------------------------------------------------
 # API Server

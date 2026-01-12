@@ -68,17 +68,18 @@ make docker-build-sdrpp  # SDR++ only
 
 ### Environment Variables
 
-| Variable                         | Default | Description                       |
-| -------------------------------- | ------- | --------------------------------- |
-| `WAVEKIT_API_PORT`               | 3000    | API server port                   |
-| `WAVEKIT_LOG_LEVEL`              | info    | Log level (debug/info/warn/error) |
-| `WAVEKIT_SOURCES_0_HOST`         | -       | First source hostname             |
-| `WAVEKIT_SOURCES_0_PORT`         | -       | First source port                 |
-| `WAVEKIT_TUNER_RELAY__ENABLED`   | false   | Enable RTL-TCP tuner relay        |
-| `WAVEKIT_TUNER_RELAY__PORT`      | 1234    | Tuner relay port                  |
-| `WAVEKIT_TUNER_RELAY__SOURCE_ID` | -       | Source ID to expose               |
-| `RTL_TCP_HOST`                   | -       | rtl_tcp host (full mode)          |
-| `RTL_TCP_PORT`                   | 1234    | rtl_tcp port (full mode)          |
+| Variable                                     | Default | Description                       |
+| -------------------------------------------- | ------- | --------------------------------- |
+| `WAVEKIT_API_PORT`                           | 3000    | API server port                   |
+| `WAVEKIT_LOG_LEVEL`                          | info    | Log level (debug/info/warn/error) |
+| `WAVEKIT_SOURCES_0_HOST`                     | -       | First source hostname             |
+| `WAVEKIT_SOURCES_0_PORT`                     | -       | First source port                 |
+| `WAVEKIT_TUNER_RELAY__ENABLED`               | false   | Enable RTL-TCP tuner relay        |
+| `WAVEKIT_TUNER_RELAY__PORT`                  | 1234    | Tuner relay port                  |
+| `WAVEKIT_TUNER_RELAY__SOURCE_ID`             | -       | Source ID to expose               |
+| `WAVEKIT_TUNER_RELAY__COMMAND_HISTORY_LIMIT` | 200     | Tuner relay command history size  |
+| `RTL_TCP_HOST`                               | -       | rtl_tcp host (full mode)          |
+| `RTL_TCP_PORT`                               | 1234    | rtl_tcp port (full mode)          |
 
 ### Mount Configuration
 

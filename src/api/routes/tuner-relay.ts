@@ -30,10 +30,41 @@ const tunerRelayStatusSchema = {
 		bytesReceived: { type: "number" },
 		lastCommand: { type: "string" },
 		lastCommandAt: { type: "string", format: "date-time" },
+		lastCommandValue: { type: "number" },
 		lastFrequency: { type: "number" },
 		lastSampleRate: { type: "number" },
 		lastGain: { type: "number" },
 		lastPpm: { type: "number" },
+		commandHistoryLimit: { type: "number" },
+		commandStats: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					id: { type: "number" },
+					name: { type: "string" },
+					count: { type: "number" },
+					lastValue: { type: "number" },
+					lastSeenAt: { type: "string", format: "date-time" },
+				},
+				required: ["id", "name", "count", "lastValue", "lastSeenAt"],
+			},
+		},
+		commandHistory: {
+			type: "array",
+			items: {
+				type: "object",
+				properties: {
+					id: { type: "number" },
+					name: { type: "string" },
+					value: { type: "number" },
+					at: { type: "string", format: "date-time" },
+					clientId: { type: "string" },
+					clientRemote: { type: "string" },
+				},
+				required: ["id", "name", "value", "at"],
+			},
+		},
 		lastError: { type: "string" },
 		rtlTcpHeader: {
 			type: "object",
