@@ -74,6 +74,8 @@ services:
       - "c 189:* rmw"
     environment:
       SDR_HOST_RTL_TCP__SAMPLE_RATE: "2048000"
+      SDR_HOST_RTL_TCP__FREQUENCY: "446524920"
+      SDR_HOST_RTL_TCP__BUFFER: "512"
       SDR_HOST_RTL_TCP__AGC: "false"
       SDR_HOST_RTL_TCP__GAIN: "49"
       SDR_HOST_RTLMUX__PORT: "5555"
@@ -95,6 +97,13 @@ To use a different manual gain (AGC off):
 
 ```bash
 SDR_HOST_RTL_TCP__GAIN=42.5
+```
+
+Legacy parity (old systemd setup):
+
+```bash
+SDR_HOST_RTL_TCP__FREQUENCY=446524920
+SDR_HOST_RTL_TCP__BUFFER=512
 ```
 
 ## Configure WaveKit
