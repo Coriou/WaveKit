@@ -308,17 +308,21 @@ export class SdrHostPoller extends EventEmitter {
 					pid?: number
 					restartCount?: number
 					lastRestartAt?: string
-					// Actual rtlmux stats.json format:
-					// { server: { dataIn, dataOut }, clients: [ { client: { host, port }, dataIn, dataOut, dropped: { size, count }, connected } ] }
+					// Stats can be in two formats:
+					// 1. SDR Host API format: { clients: [], bytesPerSec, totalBytesSent, clientDetails: [] }
+					// 2. Raw rtlmux format: { server: { dataIn, dataOut }, clients: [ { client, dropped, ... } ] }
 					stats?: {
-						server?: { dataIn?: number; dataOut?: number }
-						clients?: Array<{
-							client?: { host?: string; port?: number }
-							dataIn?: number
-							dataOut?: number
-							dropped?: { size?: number; count?: number }
-							connected?: number
+						// SDR Host API format (preferred)
+						clients?: number | Array<unknown>
+						bytesPerSec?: number
+						totalBytesSent?: number
+						clientDetails?: Array<{
+							id: number
+							address: string
+							bytesDropped: number
 						}>
+						// Raw rtlmux format (fallback)
+						server?: { dataIn?: number; dataOut?: number }
 					}
 				}
 				dongle?: {
@@ -331,19 +335,49 @@ export class SdrHostPoller extends EventEmitter {
 				errors?: string[]
 			}
 
-			// Extract rtlmux info with proper stats handling
+			// Extract rtlmux info - handle both SDR Host API and raw rtlmux formats
 			const rtlmuxStats = data.rtlmux?.stats
-			const clientCount = Array.isArray(rtlmuxStats?.clients)
-				? rtlmuxStats.clients.length
-				: 0
-			const totalBytesSent = rtlmuxStats?.server?.dataOut ?? 0
-			const clientDetails = Array.isArray(rtlmuxStats?.clients)
-				? rtlmuxStats.clients.map((c, i) => ({
+			let clientCount = 0
+			let bytesPerSec = 0
+			let totalBytesSent = 0
+			let clientDetails: Array<{
+				id: number
+				address: string
+				bytesDropped: number
+			}> = []
+
+			if (rtlmuxStats) {
+				// Check for SDR Host API format first (has bytesPerSec as number)
+				if (typeof rtlmuxStats.bytesPerSec === "number") {
+					// SDR Host API format
+					clientCount =
+						typeof rtlmuxStats.clients === "number"
+							? rtlmuxStats.clients
+							: Array.isArray(rtlmuxStats.clients)
+								? rtlmuxStats.clients.length
+								: 0
+					bytesPerSec = rtlmuxStats.bytesPerSec
+					totalBytesSent = rtlmuxStats.totalBytesSent ?? 0
+					clientDetails = rtlmuxStats.clientDetails ?? []
+				} else if (Array.isArray(rtlmuxStats.clients)) {
+					// Raw rtlmux stats.json format
+					const rawClients = rtlmuxStats.clients as Array<{
+						client?: { host?: string; port?: number }
+						dataIn?: number
+						dataOut?: number
+						dropped?: { size?: number; count?: number }
+						connected?: number
+					}>
+					clientCount = rawClients.length
+					totalBytesSent = rtlmuxStats.server?.dataOut ?? 0
+					// bytesPerSec not available in raw format
+					clientDetails = rawClients.map((c, i) => ({
 						id: i,
 						address: c.client?.host ?? "unknown",
 						bytesDropped: c.dropped?.size ?? 0,
 					}))
-				: []
+				}
+			}
 
 			return {
 				available: true,
@@ -373,7 +407,7 @@ export class SdrHostPoller extends EventEmitter {
 							restartCount: data.rtlmux.restartCount ?? 0,
 							lastRestartAt: data.rtlmux.lastRestartAt ?? null,
 							clients: clientCount,
-							bytesPerSec: 0, // Not directly available from stats.json
+							bytesPerSec,
 							totalBytesSent,
 							clientDetails,
 						}
