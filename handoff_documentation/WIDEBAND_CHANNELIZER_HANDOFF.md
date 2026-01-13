@@ -13,14 +13,15 @@ This document captures the vision and technical approach for a future **wideband
 
 Currently, decoders with incompatible requirements need separate SDR sources:
 
-| Protocol | Frequency | Sample Rate | Notes |
-|----------|-----------|-------------|-------|
-| Pagers (POCSAG) | 152-158 MHz | 2.048 Msps | Narrow FM |
-| ADS-B (aircraft) | 1090 MHz | 2.0 Msps | Pulse position modulation |
-| AIS (ships) | 161.975/162.025 MHz | 288 kHz | GMSK |
-| ACARS | 129-136 MHz | Various | AM |
+| Protocol         | Frequency           | Sample Rate | Notes                     |
+| ---------------- | ------------------- | ----------- | ------------------------- |
+| Pagers (POCSAG)  | 152-158 MHz         | 2.048 Msps  | Narrow FM                 |
+| ADS-B (aircraft) | 1090 MHz            | 2.0 Msps    | Pulse position modulation |
+| AIS (ships)      | 161.975/162.025 MHz | 288 kHz     | GMSK                      |
+| ACARS            | 129-136 MHz         | Various     | AM                        |
 
 These cannot share a single SDR stream because:
+
 1. Different center frequencies
 2. Different sample rate requirements
 3. Different modulation schemes
@@ -136,19 +137,19 @@ sources:
 channelizer:
   enabled: true
   sourceId: "wideband-dongle"
-  centerFrequency: 155000000  # 155 MHz center
-  bandwidth: 8000000          # 8 MHz capture
+  centerFrequency: 155000000 # 155 MHz center
+  bandwidth: 8000000 # 8 MHz capture
   channels:
     - id: "pager-ch1"
-      offset: -2500000        # 152.5 MHz
+      offset: -2500000 # 152.5 MHz
       bandwidth: 25000
       outputFormat: "audio_pcm"
     - id: "pager-ch2"
-      offset: 0               # 155 MHz
+      offset: 0 # 155 MHz
       bandwidth: 25000
       outputFormat: "audio_pcm"
     - id: "ais-ch"
-      offset: 7000000         # 162 MHz
+      offset: 7000000 # 162 MHz
       bandwidth: 50000
       outputFormat: "iq"
 ```
@@ -158,7 +159,7 @@ channelizer:
 Each channel would be exposed as a virtual source:
 
 ```typescript
-sourceManager.getStatus('pager-ch1')
+sourceManager.getStatus("pager-ch1")
 // {
 //   id: 'pager-ch1',
 //   type: 'channelizer-channel',
@@ -171,27 +172,27 @@ sourceManager.getStatus('pager-ch1')
 
 ## Files That Would Be Created
 
-| File | Purpose |
-|------|---------|
-| `src/core/channelizer.ts` | Main channelizer component |
-| `src/core/channelizer-channel.ts` | Virtual channel source |
-| `config/channelizer.schema.ts` | Zod schema for config |
-| `tests/unit/core/channelizer.test.ts` | Unit tests |
-| `docs/CHANNELIZER.md` | User documentation |
+| File                                  | Purpose                    |
+| ------------------------------------- | -------------------------- |
+| `src/core/channelizer.ts`             | Main channelizer component |
+| `src/core/channelizer-channel.ts`     | Virtual channel source     |
+| `config/channelizer.schema.ts`        | Zod schema for config      |
+| `tests/unit/core/channelizer.test.ts` | Unit tests                 |
+| `docs/CHANNELIZER.md`                 | User documentation         |
 
 ---
 
 ## Estimated Effort
 
-| Task | Effort |
-|------|--------|
-| Research csdr polyphase API | 2 days |
-| Channelizer core implementation | 5 days |
-| Virtual source integration | 3 days |
-| Configuration system | 1 day |
-| Testing | 3 days |
-| Documentation | 1 day |
-| **Total** | **~15 days** |
+| Task                            | Effort       |
+| ------------------------------- | ------------ |
+| Research csdr polyphase API     | 2 days       |
+| Channelizer core implementation | 5 days       |
+| Virtual source integration      | 3 days       |
+| Configuration system            | 1 day        |
+| Testing                         | 3 days       |
+| Documentation                   | 1 day        |
+| **Total**                       | **~15 days** |
 
 ---
 
@@ -214,7 +215,7 @@ sourceManager.getStatus('pager-ch1')
 
 ## Decision Log
 
-| Date | Decision | Rationale |
-|------|----------|-----------|
-| 2026-01-13 | Document as future feature | Requires significant bandwidth; simpler alternatives exist |
-| 2026-01-13 | Recommend multi-dongle first | Lower complexity, works with existing hardware |
+| Date       | Decision                     | Rationale                                                  |
+| ---------- | ---------------------------- | ---------------------------------------------------------- |
+| 2026-01-13 | Document as future feature   | Requires significant bandwidth; simpler alternatives exist |
+| 2026-01-13 | Recommend multi-dongle first | Lower complexity, works with existing hardware             |

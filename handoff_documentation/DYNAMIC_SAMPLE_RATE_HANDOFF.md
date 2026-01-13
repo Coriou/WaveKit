@@ -50,7 +50,7 @@ case 0x02:
 updateSourceCaps(id: string, updates: Partial<SourceCaps>): void {
   const state = this.sources.get(id)
   if (!state) return
-  
+
   state.config.caps = { ...state.config.caps, ...updates }
   this.emit('caps-changed', id, state.config.caps)
 }
@@ -63,8 +63,8 @@ updateSourceCaps(id: string, updates: Partial<SourceCaps>): void {
 **File**: `src/index.ts`
 
 ```typescript
-tunerRelay.on('sample-rate-changed', (sourceId, sampleRate) => {
-  sourceManager.updateSourceCaps(sourceId, { sampleRate })
+tunerRelay.on("sample-rate-changed", (sourceId, sampleRate) => {
+	sourceManager.updateSourceCaps(sourceId, { sampleRate })
 })
 ```
 
@@ -107,13 +107,13 @@ Listen for caps changes and restart pipeline with new decimation math.
 
 ## Files to Modify
 
-| File | Change |
-|------|--------|
-| `src/core/tuner-relay.ts` | Emit `sample-rate-changed` |
-| `src/core/source-manager.ts` | Add `updateSourceCaps()`, emit `caps-changed` |
-| `src/index.ts` | Wire events |
-| `src/core/live-demodulator.ts` | Listen for caps-changed, restart pipeline |
-| `src/decoders/manager.ts` | Listen for caps-changed, restart decoders |
+| File                           | Change                                        |
+| ------------------------------ | --------------------------------------------- |
+| `src/core/tuner-relay.ts`      | Emit `sample-rate-changed`                    |
+| `src/core/source-manager.ts`   | Add `updateSourceCaps()`, emit `caps-changed` |
+| `src/index.ts`                 | Wire events                                   |
+| `src/core/live-demodulator.ts` | Listen for caps-changed, restart pipeline     |
+| `src/decoders/manager.ts`      | Listen for caps-changed, restart decoders     |
 
 ---
 
