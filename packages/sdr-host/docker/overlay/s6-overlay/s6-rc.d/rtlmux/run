@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # Wait for rtl_tcp to be ready
 sleep 2
 

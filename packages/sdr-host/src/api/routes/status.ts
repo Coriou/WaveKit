@@ -42,6 +42,8 @@ export function registerStatusRoutes(
 				lastRestartAt: rtlTcpState.lastRestartAt?.toISOString() ?? null,
 				config: {
 					sampleRate: config.rtlTcp.sampleRate,
+					frequency: config.rtlTcp.frequency,
+					buffer: config.rtlTcp.buffer,
 					agc: config.rtlTcp.agc,
 					gain: config.rtlTcp.gain,
 					ppm: config.rtlTcp.ppm,

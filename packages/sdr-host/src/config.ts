@@ -15,6 +15,10 @@ export const SdrHostConfigSchema = z.object({
 			internalPort: z.number().int().min(1).max(65535).default(1234),
 			/** Sample rate in Hz (2.048 Msps recommended, NOT 2.4 Msps) */
 			sampleRate: z.number().int().positive().default(2048000),
+			/** Initial center frequency in Hz (used until a client retunes) */
+			frequency: z.number().int().positive().default(446_524_920),
+			/** rtl_tcp buffer size (legacy default) */
+			buffer: z.number().int().positive().default(512),
 			/** Enable tuner AGC */
 			agc: z.boolean().default(false),
 			/** Manual gain in dB (used when AGC is false) */

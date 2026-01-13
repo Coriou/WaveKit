@@ -30,6 +30,8 @@ services:
     environment:
       # rtl_tcp settings
       SDR_HOST_RTL_TCP__SAMPLE_RATE: "${SDR_HOST_RTL_TCP__SAMPLE_RATE:-2048000}" # 2.048 Msps (NOT 2.4!)
+      SDR_HOST_RTL_TCP__FREQUENCY: "${SDR_HOST_RTL_TCP__FREQUENCY:-446524920}" # Initial center frequency (Hz)
+      SDR_HOST_RTL_TCP__BUFFER: "${SDR_HOST_RTL_TCP__BUFFER:-512}" # Buffer size (legacy default)
       SDR_HOST_RTL_TCP__AGC: "${SDR_HOST_RTL_TCP__AGC:-false}" # AGC off by default
       SDR_HOST_RTL_TCP__GAIN: "${SDR_HOST_RTL_TCP__GAIN:-49}" # Manual gain in dB (used when AGC is false)
       SDR_HOST_RTL_TCP__PPM: "${SDR_HOST_RTL_TCP__PPM:-0}"

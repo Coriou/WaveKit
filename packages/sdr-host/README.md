@@ -56,18 +56,21 @@ Do these steps yourself (this is what the scripts automate):
 
 All configuration via environment variables with `SDR_HOST_` prefix:
 
-| Variable                         | Default   | Description       |
-| -------------------------------- | --------- | ----------------- |
-| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000` | Sample rate in Hz |
-| `SDR_HOST_RTL_TCP__AGC`          | `false`   | Enable tuner AGC  |
-| `SDR_HOST_RTL_TCP__GAIN`         | `49`      | Manual gain in dB |
-| `SDR_HOST_RTL_TCP__PPM`          | `0`       | PPM correction    |
-| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`       | USB device index  |
-| `SDR_HOST_RTLMUX__PORT`          | `5555`    | IQ stream port    |
-| `SDR_HOST_API__PORT`             | `8080`    | Status API port   |
-| `SDR_HOST_LOGGING__LEVEL`        | `info`    | Log level         |
+| Variable                         | Default     | Description                    |
+| -------------------------------- | ----------- | ------------------------------ |
+| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000`   | Sample rate in Hz              |
+| `SDR_HOST_RTL_TCP__FREQUENCY`    | `446524920` | Initial center frequency in Hz |
+| `SDR_HOST_RTL_TCP__BUFFER`       | `512`       | rtl_tcp buffer size            |
+| `SDR_HOST_RTL_TCP__AGC`          | `false`     | Enable tuner AGC               |
+| `SDR_HOST_RTL_TCP__GAIN`         | `49`        | Manual gain in dB              |
+| `SDR_HOST_RTL_TCP__PPM`          | `0`         | PPM correction                 |
+| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`         | USB device index               |
+| `SDR_HOST_RTLMUX__PORT`          | `5555`      | IQ stream port                 |
+| `SDR_HOST_API__PORT`             | `8080`      | Status API port                |
+| `SDR_HOST_LOGGING__LEVEL`        | `info`      | Log level                      |
 
 AGC is off by default to match common RTL-SDR setups. When `SDR_HOST_RTL_TCP__AGC` is `true`, manual gain is ignored.
+Defaults mirror the legacy Pi systemd service (gain 49 dB, 446.524920 MHz, buffer 512).
 
 ## Dev Workflow
 

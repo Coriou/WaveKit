@@ -1,14 +1,25 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # Start rtl_tcp with configuration from environment
 
 AGC="${SDR_HOST_RTL_TCP__AGC:-false}"
 DEFAULT_GAIN="49"
 GAIN="${SDR_HOST_RTL_TCP__GAIN:-$DEFAULT_GAIN}"
+DEFAULT_FREQUENCY="446524920"
+FREQUENCY="${SDR_HOST_RTL_TCP__FREQUENCY:-$DEFAULT_FREQUENCY}"
+DEFAULT_BUFFER="512"
+BUFFER="${SDR_HOST_RTL_TCP__BUFFER:-$DEFAULT_BUFFER}"
 
 gain_arg=""
+freq_arg=""
+buffer_arg=""
 GAIN="$(printf '%s' "$GAIN" | tr -d '[:space:]')"
+FREQUENCY="$(printf '%s' "$FREQUENCY" | tr -d '[:space:]')"
+BUFFER="$(printf '%s' "$BUFFER" | tr -d '[:space:]')"
 is_valid_gain() {
 	printf '%s' "$1" | grep -Eq '^[0-9]+([.][0-9]+)?$'
+}
+is_valid_int() {
+	printf '%s' "$1" | grep -Eq '^[0-9]+$'
 }
 
 case "$AGC" in
@@ -34,10 +45,26 @@ case "$AGC" in
 		;;
 esac
 
+if is_valid_int "$FREQUENCY"; then
+	freq_arg="-f ${FREQUENCY}"
+else
+	echo "Invalid SDR_HOST_RTL_TCP__FREQUENCY '${FREQUENCY}' (expected integer Hz); using default ${DEFAULT_FREQUENCY}." >&2
+	freq_arg="-f ${DEFAULT_FREQUENCY}"
+fi
+
+if is_valid_int "$BUFFER" && [ "$BUFFER" -gt 0 ]; then
+	buffer_arg="-b ${BUFFER}"
+else
+	echo "Invalid SDR_HOST_RTL_TCP__BUFFER '${BUFFER}' (expected positive integer); using default ${DEFAULT_BUFFER}." >&2
+	buffer_arg="-b ${DEFAULT_BUFFER}"
+fi
+
 exec rtl_tcp \
     -a 127.0.0.1 \
     -p ${SDR_HOST_RTL_TCP__INTERNAL_PORT:-1234} \
     -s ${SDR_HOST_RTL_TCP__SAMPLE_RATE:-2048000} \
+    ${freq_arg} \
+    ${buffer_arg} \
     -d ${SDR_HOST_RTL_TCP__DEVICE_INDEX:-0} \
     ${gain_arg} \
     ${SDR_HOST_RTL_TCP__PPM:+-P ${SDR_HOST_RTL_TCP__PPM}}

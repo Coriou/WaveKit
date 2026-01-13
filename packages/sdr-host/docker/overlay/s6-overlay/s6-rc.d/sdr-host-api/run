@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/command/with-contenv sh
 # Wait for rtlmux to be ready
 sleep 1
 

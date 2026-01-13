@@ -10,6 +10,8 @@ describe("SdrHostConfigSchema", () => {
 
 		expect(result.rtlTcp.internalPort).toBe(1234)
 		expect(result.rtlTcp.sampleRate).toBe(2048000)
+		expect(result.rtlTcp.frequency).toBe(446_524_920)
+		expect(result.rtlTcp.buffer).toBe(512)
 		expect(result.rtlTcp.agc).toBe(false)
 		expect(result.rtlTcp.gain).toBe(49)
 		expect(result.rtlTcp.ppm).toBe(0)
@@ -29,6 +31,8 @@ describe("SdrHostConfigSchema", () => {
 			rtlTcp: {
 				internalPort: 2345,
 				sampleRate: 1024000,
+				frequency: 145_500_000,
+				buffer: 1024,
 				agc: false,
 				gain: 42.5,
 				ppm: 50,
@@ -49,6 +53,8 @@ describe("SdrHostConfigSchema", () => {
 
 		expect(result.rtlTcp.internalPort).toBe(2345)
 		expect(result.rtlTcp.sampleRate).toBe(1024000)
+		expect(result.rtlTcp.frequency).toBe(145_500_000)
+		expect(result.rtlTcp.buffer).toBe(1024)
 		expect(result.rtlTcp.agc).toBe(false)
 		expect(result.rtlTcp.gain).toBe(42.5)
 		expect(result.rtlmux.port).toBe(6666)
