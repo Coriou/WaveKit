@@ -115,6 +115,13 @@ compose_cmd() {
 	)
 }
 
+remove_existing_container() {
+	if docker ps -a --format "{{.Names}}" | grep -qx "wavekit-sdr-host"; then
+		log "Removing existing container: wavekit-sdr-host"
+		docker rm -f wavekit-sdr-host >/dev/null
+	fi
+}
+
 COMMAND="${1:-help}"
 shift || true
 
@@ -138,7 +145,7 @@ done
 case "$COMMAND" in
 	install)
 		if [ -f "${SCRIPT_DIR}/install-docker.sh" ]; then
-			"${SCRIPT_DIR}/install-docker.sh"
+			bash "${SCRIPT_DIR}/install-docker.sh"
 		else
 			log "Downloading install script."
 			tmp_dir="$(mktemp -d)"
@@ -169,6 +176,7 @@ case "$COMMAND" in
 		if [ -n "$IMAGE_OVERRIDE" ]; then
 			set_env_key "WAVEKIT_SDR_HOST_IMAGE" "$IMAGE_OVERRIDE"
 		fi
+		remove_existing_container
 		compose_cmd up -d
 		;;
 	update)
@@ -180,6 +188,7 @@ case "$COMMAND" in
 			set_env_key "WAVEKIT_SDR_HOST_IMAGE" "$IMAGE_OVERRIDE"
 		fi
 		compose_cmd pull
+		remove_existing_container
 		compose_cmd up -d --force-recreate
 		;;
 	down)
