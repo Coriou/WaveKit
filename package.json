@@ -15,7 +15,7 @@
 	"main": "dist/index.js",
 	"scripts": {
 		"capture": "node ./scripts/auto-capture.mjs",
-		"build-file": "esbuild --bundle --outdir=dist --platform=node --format=esm --packages=external",
+		"build-file": "node ./scripts/build-file.mjs",
 		"build": "pnpm --filter @wavekit/shared build && pnpm --filter @wavekit/api-types build && pnpm run build-file ./src/index.ts",
 		"typecheck": "turbo run typecheck --filter=!wavekit && tsc --noEmit",
 		"lint": "eslint .",

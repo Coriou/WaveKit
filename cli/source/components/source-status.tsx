@@ -1,3 +1,4 @@
+/* eslint-disable no-mixed-spaces-and-tabs */
 /**
  * Source Status Component - Shows source connections
  */
@@ -65,11 +66,17 @@ export function SourceStatus({ sources, tunerRelay }: SourceStatusProps) {
 										? source.consumers
 										: "assignments" in (source as object) &&
 											  Array.isArray(
-													(source as unknown as { assignments?: unknown[] })
-														.assignments,
+													(
+														source as unknown as {
+															assignments?: unknown[]
+														}
+													).assignments,
 											  )
-											? (source as unknown as { assignments: unknown[] })
-													.assignments.length
+											? (
+													source as unknown as {
+														assignments: unknown[]
+													}
+												).assignments.length
 											: undefined
 								return typeof consumers === "number" ? (
 									<Text>{consumers}</Text>

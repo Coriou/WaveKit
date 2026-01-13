@@ -11,11 +11,15 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "10.28.0"
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
       - name: Lint
-        run: npm run lint
+        run: pnpm run lint
       - name: Typecheck
-        run: npm run typecheck
+        run: pnpm run typecheck
       - name: Build
-        run: npm run build-file ./src/index.ts
+        run: pnpm run build
