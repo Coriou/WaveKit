@@ -75,7 +75,3 @@ demod_comparison_*/
 fixtures/raw/
 fixtures/processed/
 
-# -----------------------------------------------------------------------------
-# Handoff Documentation (AI session artifacts, not source-controlled)
-# -----------------------------------------------------------------------------
-handoff_documentation/
