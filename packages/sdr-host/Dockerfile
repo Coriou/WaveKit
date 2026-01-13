@@ -19,6 +19,28 @@ RUN git clone --depth 1 https://gitlab.com/slepp/rtlmux.git && \
     make -j$(nproc) && \
     cp rtlmux /usr/local/bin/
 
+# Stage: rtlsdr-build
+FROM debian:bookworm-slim AS rtlsdr-build
+
+ARG RTLSDR_VERSION=v2.0.2
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cmake git pkg-config libusb-1.0-0-dev ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+RUN git clone --depth 1 --branch ${RTLSDR_VERSION} https://github.com/osmocom/rtl-sdr.git && \
+    cd rtl-sdr && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release \
+      -DDETACH_KERNEL_DRIVER=ON \
+      -DINSTALL_UDEV_RULES=OFF \
+      -DBUILD_TESTING=OFF \
+      .. && \
+    make -j$(nproc) && \
+    make install
+
 # Stage: node-build
 FROM node:22-bookworm-slim AS node-build
 
@@ -52,8 +74,6 @@ LABEL version="1.0.0"
 
 # Runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    rtl-sdr \
-    librtlsdr0 \
     libevent-2.1-7 \
     libevent-pthreads-2.1-7 \
     libusb-1.0-0 \
@@ -80,6 +100,9 @@ RUN mkdir -p /run/service && chmod 755 /run/service
 
 # Copy binaries
 COPY --from=rtlmux-build /usr/local/bin/rtlmux /usr/local/bin/
+COPY --from=rtlsdr-build /usr/local/bin/rtl_* /usr/local/bin/
+COPY --from=rtlsdr-build /usr/local/lib/librtlsdr* /usr/local/lib/
+RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/rtl-sdr.conf && ldconfig
 
 # Copy Node.js runtime and application
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
