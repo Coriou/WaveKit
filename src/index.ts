@@ -52,6 +52,10 @@ import {
 	createDirewolfDecoder,
 	DIREWOLF_CAPS,
 } from "./decoders/builtin/direwolf.js"
+import { ContainerMonitor } from "./core/container-monitor.js"
+import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
+import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
+import { ResourceAggregator } from "./core/resource-aggregator.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder } from "./decoders/types.js"
 
@@ -328,7 +332,94 @@ async function main(): Promise<void> {
 		}
 	}
 
-	// Step 8: Initialize API server
+	// Step 8: Initialize resource monitoring (if enabled)
+	let resourceAggregator: ResourceAggregator | undefined
+	let containerMonitor: ContainerMonitor | undefined
+	let sdrHostPoller: SdrHostPoller | undefined
+	let backpressureTracker: SourceBackpressureTracker | undefined
+
+	if (config.resources.enabled) {
+		// Create container monitor
+		if (config.resources.containerMonitor.enabled) {
+			containerMonitor = new ContainerMonitor(logger, {
+				pollIntervalMs: config.resources.containerMonitor.pollIntervalMs,
+				emitSnapshots: false, // ResourceAggregator handles broadcasting
+			})
+		}
+
+		// Create SDR host poller with auto-detection
+		// For rtl_tcp sources, try to detect SDR host API at standard ports
+		// Explicit sdrHost config overrides auto-detection
+		const sdrHostConfigs: SdrHostConfig[] = config.sources
+			.filter(s => s.type === "rtl_tcp" && s.host) // Only rtl_tcp with host
+			.map(s => {
+				// Explicit config takes priority
+				if (s.sdrHost?.apiUrl) {
+					const cfg: SdrHostConfig = {
+						sourceId: s.id,
+						apiUrl: s.sdrHost.apiUrl,
+					}
+					if (s.sdrHost.rtlmuxStatsUrl) {
+						cfg.rtlmuxStatsUrl = s.sdrHost.rtlmuxStatsUrl
+					}
+					return cfg
+				}
+
+				// Auto-detect: use source host with standard SDR host ports
+				const cfg: SdrHostConfig = {
+					sourceId: s.id,
+					apiUrl: `http://${s.host}:8080`, // Standard wavekit-sdr-host port
+				}
+				cfg.rtlmuxStatsUrl = `http://${s.host}:5556/stats.json` // Standard rtlmux stats
+				return cfg
+			})
+
+		if (config.resources.sdrHostPoller.enabled && sdrHostConfigs.length > 0) {
+			sdrHostPoller = new SdrHostPoller(logger, sdrHostConfigs, {
+				pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
+				timeoutMs: config.resources.sdrHostPoller.timeoutMs,
+			})
+			log.info(
+				{
+					count: sdrHostConfigs.length,
+					sources: sdrHostConfigs.map(c => c.sourceId),
+				},
+				"SDR host polling configured (auto-detected from source hosts)",
+			)
+		}
+
+		// Create backpressure tracker
+		backpressureTracker = new SourceBackpressureTracker(
+			logger,
+			sourceManager,
+			sdrHostPoller ?? null,
+		)
+
+		// Create resource aggregator
+		resourceAggregator = new ResourceAggregator(
+			logger,
+			{
+				broadcastIntervalMs: config.resources.broadcastIntervalMs,
+				autoBroadcast: true,
+			},
+			{
+				containerMonitor: containerMonitor ?? null,
+				sdrHostPoller: sdrHostPoller ?? null,
+				backpressureTracker,
+			},
+		)
+
+		log.info(
+			{
+				containerMonitor: !!containerMonitor,
+				sdrHostPoller: !!sdrHostPoller,
+				sdrHostCount: sdrHostConfigs.length,
+			},
+			"Resource monitoring initialized",
+		)
+	}
+
+	// Step 9: Initialize API server
 	const apiServer = new ApiServer(
 		{
 			sourceManager,
@@ -338,6 +429,7 @@ async function main(): Promise<void> {
 			audioOutput,
 			tunerRelay,
 			liveDemod,
+			resourceAggregator,
 			logger,
 			audioConfig: {
 				format: config.audio.format,
@@ -423,6 +515,20 @@ async function main(): Promise<void> {
 		timeout: 5000,
 	})
 
+	// Shutdown resource monitoring
+	if (resourceAggregator) {
+		shutdown.register({
+			name: "resource-aggregator",
+			handler: async () => {
+				log.info("Shutting down resource monitoring")
+				resourceAggregator?.stop()
+				sdrHostPoller?.stop()
+				containerMonitor?.stop()
+			},
+			timeout: 1000,
+		})
+	}
+
 	// Step 10: Start API server
 	await apiServer.start()
 
@@ -486,6 +592,14 @@ async function main(): Promise<void> {
 		},
 		timeout: 1000,
 	})
+
+	// Start resource monitoring components
+	if (resourceAggregator) {
+		containerMonitor?.start()
+		sdrHostPoller?.start()
+		resourceAggregator.start()
+		log.info("Resource monitoring started")
+	}
 
 	// Step 13: Connect to configured sources and wire to fanout
 	let primarySourceId: string | null = null

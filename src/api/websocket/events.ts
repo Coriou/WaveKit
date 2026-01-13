@@ -19,6 +19,7 @@ import type {
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../core/live-demodulator.js"
+import type { ResourceSnapshot, ResourceAlert } from "@wavekit/api-types"
 
 /**
  * Supported WebSocket channels for subscription.
@@ -28,6 +29,7 @@ import type {
  * - health: Decoder health state change events (Requirement 20.4)
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  * - live-audio: Live demodulation status and config events
+ * - resources: Container, SDR host, and source backpressure monitoring
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -36,6 +38,7 @@ export type WebSocketChannel =
 	| "health"
 	| "fanout"
 	| "live-audio"
+	| "resources"
 
 /**
  * Message sent from client to server.
@@ -67,6 +70,8 @@ export interface ServerMessage {
 		| "live-audio:started"
 		| "live-audio:stopped"
 		| "live-audio:error"
+		| "resources:snapshot"
+		| "resources:alert"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -93,7 +98,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "sources" ||
 		channel === "health" ||
 		channel === "fanout" ||
-		channel === "live-audio"
+		channel === "live-audio" ||
+		channel === "resources"
 	)
 }
 
@@ -535,6 +541,30 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("live-audio", {
 			type: "live-audio:config",
 			data: config,
+		})
+	}
+
+	/**
+	 * Broadcasts resource snapshot to subscribed clients.
+	 *
+	 * @param snapshot - Complete resource monitoring snapshot
+	 */
+	broadcastResourceSnapshot(snapshot: ResourceSnapshot): void {
+		this.broadcast("resources", {
+			type: "resources:snapshot",
+			data: snapshot,
+		})
+	}
+
+	/**
+	 * Broadcasts resource alert to subscribed clients.
+	 *
+	 * @param alert - Resource alert (high drops, OOM, etc.)
+	 */
+	broadcastResourceAlert(alert: ResourceAlert): void {
+		this.broadcast("resources", {
+			type: "resources:alert",
+			data: alert,
 		})
 	}
 

@@ -23,6 +23,7 @@ import { BackpressurePanel } from "./components/backpressure-panel.js"
 import { SourceStatus } from "./components/source-status.js"
 import { Dashboard } from "./components/dashboard.js"
 import { LiveAudioPanel } from "./components/live-audio-panel.js"
+import { ResourcePanel } from "./components/resource-panel.js"
 import type { View } from "./utils/args.js"
 import type {
 	DecoderStatus,
@@ -32,6 +33,7 @@ import type {
 	DecoderOutputMessage,
 	TunerRelayStatus,
 	LiveAudioStatus,
+	ResourceSnapshot,
 } from "./types.js"
 
 // ============================================================================
@@ -50,6 +52,7 @@ interface AppState {
 	dropRate: number
 	tunerRelay: TunerRelayStatus | null
 	liveAudioStatus: LiveAudioStatus | null
+	resourceSnapshot: ResourceSnapshot | null
 }
 
 // ============================================================================
@@ -99,6 +102,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		dropRate: 0,
 		tunerRelay: null,
 		liveAudioStatus: null,
+		resourceSnapshot: null,
 	})
 
 	// Handle incoming WebSocket messages
@@ -209,6 +213,14 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				break
 			}
 
+			case "resources:snapshot": {
+				const data = msg.data as ResourceSnapshot | undefined
+				if (data) {
+					setState(prev => ({ ...prev, resourceSnapshot: data }))
+				}
+				break
+			}
+
 			case "subscribed":
 				// Successfully subscribed
 				break
@@ -228,6 +240,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			"metrics",
 			"sources",
 			"live-audio",
+			"resources",
 		],
 		onMessage: handleMessage,
 	})
@@ -239,13 +252,15 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			const ports = [9000, 4713]
 			for (const port of ports) {
 				try {
-					const [decodersRes, sourcesRes, liveAudioRes] = await Promise.all([
-						fetch(`http://localhost:${port}/api/decoders`),
-						fetch(`http://localhost:${port}/api/sources`).catch(() => null),
-						fetch(`http://localhost:${port}/api/live-audio/status`).catch(
-							() => null,
-						),
-					])
+					const [decodersRes, sourcesRes, liveAudioRes, resourcesRes] =
+						await Promise.all([
+							fetch(`http://localhost:${port}/api/decoders`),
+							fetch(`http://localhost:${port}/api/sources`).catch(() => null),
+							fetch(`http://localhost:${port}/api/live-audio/status`).catch(
+								() => null,
+							),
+							fetch(`http://localhost:${port}/api/resources`).catch(() => null),
+						])
 					const tunerRes = await fetch(
 						`http://localhost:${port}/api/tuner-relay`,
 					).catch(() => null)
@@ -261,12 +276,16 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						const liveAudioStatus = liveAudioRes?.ok
 							? ((await liveAudioRes.json()) as LiveAudioStatus)
 							: null
+						const resourceSnapshot = resourcesRes?.ok
+							? ((await resourcesRes.json()) as ResourceSnapshot)
+							: null
 						setState(prev => ({
 							...prev,
 							decoders,
 							sources,
 							tunerRelay,
 							liveAudioStatus,
+							resourceSnapshot,
 						}))
 						break
 					}
@@ -354,6 +373,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			"4": "backpressure",
 			"5": "sources",
 			"6": "live-audio",
+			"7": "resources",
 		}
 		if (viewMap[input]) {
 			setActiveView(viewMap[input])
@@ -419,6 +439,8 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				)
 			case "live-audio":
 				return <LiveAudioPanel status={state.liveAudioStatus} />
+			case "resources":
+				return <ResourcePanel snapshot={state.resourceSnapshot} />
 		}
 	}
 

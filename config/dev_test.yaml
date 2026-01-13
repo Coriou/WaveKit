@@ -11,6 +11,8 @@ sources:
       sampleRate: 2048000
       format: U8_IQ
       exclusive: false
+    # SDR host monitoring is auto-detected from source host
+    # Override with explicit sdrHost.apiUrl if using non-standard ports
 
   # Audio from SDR++ on Mac (optional, for audio monitoring)
   # - id: sdrpp

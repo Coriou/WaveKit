@@ -33,6 +33,15 @@ export const SourceConfigSchema = z.object({
 	loop: z.boolean().default(false), // For recording sources
 	playbackSpeed: z.number().positive().default(1.0), // For recording sources
 	caps: SourceCapsSchema,
+	/** Optional SDR host endpoint for resource monitoring (per-source) */
+	sdrHost: z
+		.object({
+			/** URL to wavekit-sdr-host API (e.g., "http://192.168.1.50:8080") */
+			apiUrl: z.string().url().optional(),
+			/** URL to rtlmux stats endpoint (e.g., "http://192.168.1.50:5556/stats.json") */
+			rtlmuxStatsUrl: z.string().url().optional(),
+		})
+		.optional(),
 })
 
 /**
@@ -182,6 +191,37 @@ export const HealthConfigSchema = z.object({
 })
 
 /**
+ * Schema for resource monitoring configuration.
+ * Controls container metrics, SDR host polling, and backpressure tracking.
+ */
+export const ResourcesConfigSchema = z.object({
+	/** Enable resource monitoring (default: true) */
+	enabled: z.boolean().default(true),
+	/** Container resource monitoring (cgroups) */
+	containerMonitor: z
+		.object({
+			/** Enable container resource monitoring (default: true) */
+			enabled: z.boolean().default(true),
+			/** Poll interval in milliseconds (default: 2000) */
+			pollIntervalMs: z.number().int().positive().default(2000),
+		})
+		.default({}),
+	/** SDR host status polling */
+	sdrHostPoller: z
+		.object({
+			/** Enable SDR host polling (default: true) */
+			enabled: z.boolean().default(true),
+			/** Poll interval in milliseconds (default: 3000) */
+			pollIntervalMs: z.number().int().positive().default(3000),
+			/** HTTP request timeout in milliseconds (default: 2000) */
+			timeoutMs: z.number().int().positive().default(2000),
+		})
+		.default({}),
+	/** Broadcast interval for WebSocket updates (default: 2000ms) */
+	broadcastIntervalMs: z.number().int().positive().default(2000),
+})
+
+/**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
@@ -194,6 +234,7 @@ export const ConfigSchema = z.object({
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
+	resources: ResourcesConfigSchema.default({}),
 })
 
 // ============================================================================
@@ -210,6 +251,7 @@ export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
+export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================

@@ -9,6 +9,7 @@ export type View =
 	| "backpressure"
 	| "sources"
 	| "live-audio"
+	| "resources"
 
 export interface ParsedArgs {
 	view: View
@@ -22,6 +23,7 @@ const validViews: View[] = [
 	"backpressure",
 	"sources",
 	"live-audio",
+	"resources",
 ]
 
 export function parseArgs(argv: string[]): ParsedArgs {

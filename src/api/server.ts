@@ -36,7 +36,9 @@ import { decoderRoutes } from "./routes/decoders.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
 import { tunerRelayRoutes } from "./routes/tuner-relay.js"
 import { liveAudioRoutes } from "./routes/live-audio.js"
+import { resourceRoutes } from "./routes/resources.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
+import type { ResourceAggregator } from "../core/resource-aggregator.js"
 
 /**
  * HTTP header name for correlation ID.
@@ -62,6 +64,7 @@ export interface ApiServerDependencies {
 	audioOutput: AudioOutput
 	tunerRelay?: TunerRelay | undefined
 	liveDemod?: LiveDemodulator | undefined
+	resourceAggregator?: ResourceAggregator | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -86,6 +89,7 @@ export class ApiServer {
 	private readonly audioOutput: AudioOutput
 	private readonly tunerRelay?: TunerRelay | undefined
 	private readonly liveDemod?: LiveDemodulator | undefined
+	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
@@ -98,6 +102,7 @@ export class ApiServer {
 		this.audioOutput = dependencies.audioOutput
 		this.tunerRelay = dependencies.tunerRelay
 		this.liveDemod = dependencies.liveDemod
+		this.resourceAggregator = dependencies.resourceAggregator
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -226,6 +231,13 @@ export class ApiServer {
 	}
 
 	/**
+	 * Returns the resource aggregator instance (if enabled).
+	 */
+	getResourceAggregator(): ResourceAggregator | undefined {
+		return this.resourceAggregator
+	}
+
+	/**
 	 * Returns the WebSocket broadcaster instance.
 	 * Used for external event broadcasting.
 	 */
@@ -298,6 +310,17 @@ export class ApiServer {
 			const snapshot = this.fanoutManager.getTelemetrySnapshot()
 			this.wsBroadcaster.broadcastFanoutSnapshot(snapshot)
 		}, 1000)
+
+		// Resource monitoring events
+		if (this.resourceAggregator) {
+			this.resourceAggregator.on("snapshot", snapshot => {
+				this.wsBroadcaster.broadcastResourceSnapshot(snapshot)
+			})
+
+			this.resourceAggregator.on("alert", alert => {
+				this.wsBroadcaster.broadcastResourceAlert(alert)
+			})
+		}
 
 		this.log.debug("Event broadcasting handlers registered")
 	}
@@ -582,6 +605,13 @@ export class ApiServer {
 		if (this.liveDemod) {
 			await this.app.register(liveAudioRoutes, {
 				liveDemod: this.liveDemod,
+			})
+		}
+
+		// Register resource monitoring routes
+		if (this.resourceAggregator) {
+			await this.app.register(resourceRoutes, {
+				resourceAggregator: this.resourceAggregator,
 			})
 		}
 

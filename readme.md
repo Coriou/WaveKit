@@ -33,7 +33,7 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 
 ```
 ┌─ WaveKit Dashboard ─────────────────────────────────────────────────────────┐
-│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Live Audio │
+│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Live Audio  [7] Resources │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ DECODERS                                                                    │
 │ Running: 5/8    Healthy: 5/5    Total Events: 12,847                        │
@@ -51,13 +51,13 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 │ 14:23:44 [ais]       ship      MMSI:123456789 LAT:37.77 LON:-122.41         │
 │ 14:23:43 [multimon]  message   POCSAG1200 ADDR:1234567 "Test message"       │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│ [q] Quit  [r] Reconnect  [1-6] Switch tabs                                  │
+│ [q] Quit  [r] Reconnect  [1-7] Switch tabs                                  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Keyboard shortcuts:**
 
-- `1-6` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Live Audio)
+- `1-7` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Live Audio, Resources)
 - `r` — Reconnect WebSocket
 - `q` — Quit
 
@@ -174,6 +174,7 @@ ws.onmessage = event => {
 - `health` — Decoder health state changes
 - `fanout` — Backpressure snapshots
 - `live-audio` — Live demod status/config events
+- `resources` — Container, SDR host, and backpressure metrics
 
 ### Audio Streaming
 
