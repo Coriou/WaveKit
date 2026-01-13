@@ -129,9 +129,12 @@ export class DecoderManager extends EventEmitter {
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
 	private sourceManager: SourceManager | null = null
-	private capsChangedHandler: ((sourceId: string, caps: SourceCaps) => void) | null = null
+	private capsChangedHandler:
+		| ((sourceId: string, caps: SourceCaps) => void)
+		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
-	private pendingCapsChange: { sourceId: string; caps: SourceCaps } | null = null
+	private pendingCapsChange: { sourceId: string; caps: SourceCaps } | null =
+		null
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -703,12 +706,18 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * Handles a debounced caps change event.
 	 */
-	private async handleCapsChange(sourceId: string, caps: SourceCaps): Promise<void> {
+	private async handleCapsChange(
+		sourceId: string,
+		caps: SourceCaps,
+	): Promise<void> {
 		const affectedDecoders: string[] = []
 
 		// Find all running decoders using this source
 		for (const [decoderId, state] of this.decoders) {
-			if (state.config.sourceId === sourceId && state.decoder.getStatus().running) {
+			if (
+				state.config.sourceId === sourceId &&
+				state.decoder.getStatus().running
+			) {
 				affectedDecoders.push(decoderId)
 			}
 		}

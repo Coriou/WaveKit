@@ -9,7 +9,11 @@ import { spawn, type ChildProcess } from "node:child_process"
 import * as http from "node:http"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
-import { LiveDemodConfigSchema, type LiveDemodConfig, type SourceCaps } from "../config.js"
+import {
+	LiveDemodConfigSchema,
+	type LiveDemodConfig,
+	type SourceCaps,
+} from "../config.js"
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
 import type { FanoutManager } from "./fanout-manager.js"
@@ -100,7 +104,9 @@ export class LiveDemodulator extends EventEmitter {
 	private squelchLastOpenAtMs = 0
 	private readonly squelchHysteresisDb = 2.0
 	private readonly squelchHangTimeMs = 250
-	private capsChangedHandler: ((sourceId: string, caps: SourceCaps) => void) | null = null
+	private capsChangedHandler:
+		| ((sourceId: string, caps: SourceCaps) => void)
+		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
@@ -325,7 +331,10 @@ export class LiveDemodulator extends EventEmitter {
 					await this.reconfigure({})
 				} catch (err) {
 					const error = err instanceof Error ? err : new Error(String(err))
-					this.log.error({ err: error }, "Failed to restart pipeline after sample rate change")
+					this.log.error(
+						{ err: error },
+						"Failed to restart pipeline after sample rate change",
+					)
 					this.lastError = error.message
 					this.pipelineHealth = "error"
 					this.emit("error", error)

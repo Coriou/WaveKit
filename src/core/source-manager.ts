@@ -1036,6 +1036,7 @@ export class SourceManager extends EventEmitter {
 		this.sources.delete(id)
 
 		this.logger.info({ sourceId: id }, "Source disconnected and cleaned up")
+		this.emit("removed", id)
 	}
 
 	/**
@@ -1181,33 +1182,74 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * Updates the capabilities of a source dynamically.
-	 * Used when external events (e.g., TunerRelay commands) change source parameters.
-	 * Emits 'caps-changed' event so consumers can react to the change.
+	 * Updates the capabilities of a source dynamically (e.g., dynamic sample rate changes).
+	 * Emits 'caps-changed' so consumers can react.
+	 *
+	 * Note: This is intended for runtime-safe updates like sampleRate/centerFreq.
+	 * Changing format/kind may require additional pipeline reconfiguration.
 	 *
 	 * @param id - Source ID to update
 	 * @param updates - Partial caps to merge with existing
+	 * @returns Updated capabilities, or undefined if source not found
 	 */
-	updateSourceCaps(id: string, updates: Partial<SourceCaps>): void {
+	updateSourceCaps(
+		id: string,
+		updates: Partial<SourceCaps>,
+	): SourceCaps | undefined {
 		const state = this.sources.get(id)
 		if (!state) {
 			this.logger.warn({ sourceId: id }, "Cannot update caps: source not found")
-			return
+			return undefined
 		}
 
-		const oldCaps = { ...state.config.caps }
-		state.config.caps = { ...state.config.caps, ...updates }
+		const oldCaps = state.config.caps
+		const nextCaps: SourceCaps = {
+			...oldCaps,
+			...updates,
+		}
 
-		this.logger.info(
-			{
-				sourceId: id,
-				oldSampleRate: oldCaps.sampleRate,
-				newSampleRate: state.config.caps.sampleRate,
-			},
-			"Source caps updated dynamically",
-		)
+		state.config.caps = nextCaps
 
-		this.emit("caps-changed", id, state.config.caps)
+		if (
+			updates.format &&
+			updates.format !== state.activeFormat &&
+			updates.format !== "auto"
+		) {
+			state.activeFormat = updates.format
+			state.detectionBuffer = null
+		}
+
+		if (updates.format === "auto") {
+			state.activeFormat = "auto"
+			state.detectionBuffer = Buffer.alloc(0)
+		}
+
+		if (oldCaps.sampleRate !== nextCaps.sampleRate) {
+			this.logger.info(
+				{
+					sourceId: id,
+					oldSampleRate: oldCaps.sampleRate,
+					newSampleRate: nextCaps.sampleRate,
+				},
+				"Source caps updated dynamically",
+			)
+		}
+
+		this.emit("caps-changed", id, nextCaps)
+		return nextCaps
+	}
+
+	/**
+	 * Checks if a source supports RTL-TCP tuner control.
+	 * Only rtl_tcp type sources can receive tuner commands.
+	 *
+	 * @param id - Source ID
+	 * @returns true if source is rtl_tcp, false otherwise
+	 */
+	isRtlTcpSource(id: string): boolean {
+		const state = this.sources.get(id)
+		if (!state || !state.config.type) return false
+		return state.config.type === "rtl_tcp"
 	}
 
 	/**

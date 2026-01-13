@@ -4,7 +4,7 @@
  * A unified, modern, Ink-based CLI dashboard for monitoring WaveKit.
  *
  * Features:
- * - Tab-based navigation (1-5)
+ * - Tab-based navigation (1-8)
  * - Auto-reconnect WebSocket with exponential backoff
  * - Graceful shutdown (q or Ctrl+C)
  * - Real-time updates from WS channels
@@ -24,6 +24,7 @@ import { SourceStatus } from "./components/source-status.js"
 import { Dashboard } from "./components/dashboard.js"
 import { LiveAudioPanel } from "./components/live-audio-panel.js"
 import { ResourcePanel } from "./components/resource-panel.js"
+import { TunerPanel, type TunerCommand } from "./components/tuner-panel.js"
 import type { View } from "./utils/args.js"
 import type {
 	DecoderStatus,
@@ -32,6 +33,7 @@ import type {
 	SourceStatus as SourceStatusType,
 	DecoderOutputMessage,
 	TunerRelayStatus,
+	TunerState,
 	LiveAudioStatus,
 	ResourceSnapshot,
 } from "./types.js"
@@ -51,6 +53,8 @@ interface AppState {
 	snapshot: FanoutSnapshot | null
 	dropRate: number
 	tunerRelay: TunerRelayStatus | null
+	tunerStates: TunerState[]
+	tunerActionError: string | null
 	liveAudioStatus: LiveAudioStatus | null
 	resourceSnapshot: ResourceSnapshot | null
 }
@@ -101,9 +105,12 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		snapshot: null,
 		dropRate: 0,
 		tunerRelay: null,
+		tunerStates: [],
+		tunerActionError: null,
 		liveAudioStatus: null,
 		resourceSnapshot: null,
 	})
+	const [tunerInputActive, setTunerInputActive] = useState(false)
 
 	// Handle incoming WebSocket messages
 	const handleMessage = useCallback((msg: ServerMessage) => {
@@ -221,6 +228,26 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				break
 			}
 
+			case "tuner:state-changed": {
+				const data = msg.data as
+					| { sourceId?: string; state?: TunerState }
+					| undefined
+				const sourceId = data?.sourceId
+				const state = data?.state
+				if (state && sourceId) {
+					const nextSourceId = sourceId
+					const nextState: TunerState = state
+					setState(prev => {
+						const nextStates: TunerState[] = [
+							...prev.tunerStates.filter(s => s.sourceId !== nextSourceId),
+							nextState,
+						].sort((a, b) => a.sourceId.localeCompare(b.sourceId))
+						return { ...prev, tunerStates: nextStates }
+					})
+				}
+				break
+			}
+
 			case "subscribed":
 				// Successfully subscribed
 				break
@@ -241,6 +268,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			"sources",
 			"live-audio",
 			"resources",
+			"tuner",
 		],
 		onMessage: handleMessage,
 	})
@@ -252,15 +280,21 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			const ports = [9000, 4713]
 			for (const port of ports) {
 				try {
-					const [decodersRes, sourcesRes, liveAudioRes, resourcesRes] =
-						await Promise.all([
-							fetch(`http://localhost:${port}/api/decoders`),
-							fetch(`http://localhost:${port}/api/sources`).catch(() => null),
-							fetch(`http://localhost:${port}/api/live-audio/status`).catch(
-								() => null,
-							),
-							fetch(`http://localhost:${port}/api/resources`).catch(() => null),
-						])
+					const [
+						decodersRes,
+						sourcesRes,
+						liveAudioRes,
+						resourcesRes,
+						tunerStatesRes,
+					] = await Promise.all([
+						fetch(`http://localhost:${port}/api/decoders`),
+						fetch(`http://localhost:${port}/api/sources`).catch(() => null),
+						fetch(`http://localhost:${port}/api/live-audio/status`).catch(
+							() => null,
+						),
+						fetch(`http://localhost:${port}/api/resources`).catch(() => null),
+						fetch(`http://localhost:${port}/api/tuner`).catch(() => null),
+					])
 					const tunerRes = await fetch(
 						`http://localhost:${port}/api/tuner-relay`,
 					).catch(() => null)
@@ -279,11 +313,15 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						const resourceSnapshot = resourcesRes?.ok
 							? ((await resourcesRes.json()) as ResourceSnapshot)
 							: null
+						const tunerStates = tunerStatesRes?.ok
+							? ((await tunerStatesRes.json()) as TunerState[])
+							: []
 						setState(prev => ({
 							...prev,
 							decoders,
 							sources,
 							tunerRelay,
+							tunerStates,
 							liveAudioStatus,
 							resourceSnapshot,
 						}))
@@ -332,6 +370,103 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		[fetchInitialState],
 	)
 
+	const performTunerAction = useCallback(
+		async (command: TunerCommand) => {
+			const apiUrl = process.env["WAVEKIT_API_URL"]
+			const candidates = apiUrl
+				? [apiUrl.replace(/\/$/, "")]
+				: ["http://localhost:9000", "http://localhost:4713"]
+
+			const toRequest = () => {
+				switch (command.type) {
+					case "setFrequency":
+						return {
+							path: `/api/tuner/${command.sourceId}/frequency`,
+							body: { hz: command.hz },
+						}
+					case "setSampleRate":
+						return {
+							path: `/api/tuner/${command.sourceId}/sample-rate`,
+							body: { hz: command.hz },
+						}
+					case "setGainMode":
+						return {
+							path: `/api/tuner/${command.sourceId}/gain-mode`,
+							body: { mode: command.mode },
+						}
+					case "setGain":
+						return {
+							path: `/api/tuner/${command.sourceId}/gain`,
+							body: { tenthsDb: command.tenthsDb },
+						}
+					case "setPpm":
+						return {
+							path: `/api/tuner/${command.sourceId}/ppm`,
+							body: { ppm: command.ppm },
+						}
+					case "setAgcMode":
+						return {
+							path: `/api/tuner/${command.sourceId}/agc`,
+							body: { enabled: command.enabled },
+						}
+					case "setBiasTee":
+						return {
+							path: `/api/tuner/${command.sourceId}/bias-tee`,
+							body: { enabled: command.enabled },
+						}
+					case "setDirectSampling":
+						return {
+							path: `/api/tuner/${command.sourceId}/direct-sampling`,
+							body: { mode: command.mode },
+						}
+					case "setOffsetTuning":
+						return {
+							path: `/api/tuner/${command.sourceId}/offset-tuning`,
+							body: { enabled: command.enabled },
+						}
+					case "setControlMode":
+						return {
+							path: `/api/tuner/${command.sourceId}/control-mode`,
+							body: { mode: command.mode },
+						}
+				}
+			}
+
+			const request = toRequest()
+			let lastError: string | null = null
+
+			for (const baseUrl of candidates) {
+				try {
+					const response = await fetch(`${baseUrl}${request.path}`, {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(request.body),
+					})
+					if (response.ok) {
+						setState(prev => ({ ...prev, tunerActionError: null }))
+						await fetchInitialState()
+						return
+					}
+					const payload = (await response.json().catch(() => null)) as {
+						message?: string
+						error?: string
+					} | null
+					lastError =
+						payload?.message ??
+						payload?.error ??
+						`Request failed (${response.status})`
+				} catch (err) {
+					lastError = err instanceof Error ? err.message : "Request failed"
+				}
+			}
+
+			if (lastError) {
+				setState(prev => ({ ...prev, tunerActionError: lastError }))
+			}
+		},
+		[fetchInitialState],
+	)
+
 	// Update drop rate periodically
 	useEffect(() => {
 		const interval = setInterval(() => {
@@ -342,6 +477,12 @@ export function App({ initialView = "dashboard" }: AppProps) {
 
 	// Keyboard input handling
 	useInput((input, key) => {
+		if (tunerInputActive) {
+			if (key.ctrl && input === "c") {
+				exit()
+			}
+			return
+		}
 		// Quit
 		if (input === "q" || (key.ctrl && input === "c")) {
 			exit()
@@ -374,6 +515,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			"5": "sources",
 			"6": "live-audio",
 			"7": "resources",
+			"8": "tuner",
 		}
 		if (viewMap[input]) {
 			setActiveView(viewMap[input])
@@ -441,6 +583,17 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				return <LiveAudioPanel status={state.liveAudioStatus} />
 			case "resources":
 				return <ResourcePanel snapshot={state.resourceSnapshot} />
+			case "tuner":
+				return (
+					<TunerPanel
+						states={state.tunerStates}
+						onCommand={performTunerAction}
+						actionError={state.tunerActionError}
+						onInputCaptureChange={active =>
+							setTunerInputActive(prev => (prev === active ? prev : active))
+						}
+					/>
+				)
 		}
 	}
 
@@ -453,7 +606,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				closeReason={closeReason}
 				lastDisconnect={lastDisconnect}
 			/>
-			<TabBar activeView={activeView} />
+			<TabBar activeView={activeView} width={stdoutWidth} />
 			<Box flexGrow={1} minHeight={10}>
 				{renderView()}
 			</Box>

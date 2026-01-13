@@ -221,6 +221,19 @@ TCP server for streaming decoded audio.
 - Stream audio to all connected clients
 - Handle client connect/disconnect gracefully
 
+### TunerController
+
+Primary RTL-TCP tuner control for internal tuning (with optional handoff to SDR++).
+
+**Location**: `src/core/tuner-controller.ts`
+
+**Responsibilities**:
+
+- Maintain per-source tuner state (frequency, gain, PPM, etc.)
+- Send RTL-TCP control commands upstream via `SourceManager.writeToSource()`
+- Toggle control mode (internal/external) for SDR++ handoff
+- Apply relay command updates to keep CLI/API state in sync with SDR++
+
 ### TunerRelay
 
 Optional RTL-TCP compatible server that exposes the internal IQ stream to local
@@ -234,6 +247,7 @@ configured `rtl_tcp`/`rtlmux` source.
 - Listen for RTL-TCP clients and stream IQ data
 - Forward tuner control commands upstream
 - Track control ownership and client connections
+- Emit relay activity for control-mode sync
 
 ### LiveDemodulator
 

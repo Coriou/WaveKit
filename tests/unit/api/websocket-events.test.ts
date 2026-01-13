@@ -26,6 +26,7 @@ const ALL_CHANNELS: WebSocketChannel[] = [
 	"health",
 	"fanout",
 	"live-audio",
+	"tuner",
 ]
 
 /**
@@ -54,6 +55,7 @@ const channelArb = fc.constantFrom<WebSocketChannel>(
 	"health",
 	"fanout",
 	"live-audio",
+	"tuner",
 )
 
 /**

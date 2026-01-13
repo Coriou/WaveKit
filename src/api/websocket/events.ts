@@ -19,7 +19,12 @@ import type {
 	LiveDemodConfig,
 	LiveDemodStatus,
 } from "../../core/live-demodulator.js"
-import type { ResourceSnapshot, ResourceAlert } from "@wavekit/api-types"
+import type {
+	ResourceSnapshot,
+	ResourceAlert,
+	TunerState,
+	TunerControlMode,
+} from "@wavekit/api-types"
 
 /**
  * Supported WebSocket channels for subscription.
@@ -30,6 +35,7 @@ import type { ResourceSnapshot, ResourceAlert } from "@wavekit/api-types"
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  * - live-audio: Live demodulation status and config events
  * - resources: Container, SDR host, and source backpressure monitoring
+ * - tuner: RTL-TCP tuner control events
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -39,6 +45,7 @@ export type WebSocketChannel =
 	| "fanout"
 	| "live-audio"
 	| "resources"
+	| "tuner"
 
 /**
  * Message sent from client to server.
@@ -73,6 +80,10 @@ export interface ServerMessage {
 		| "live-audio:error"
 		| "resources:snapshot"
 		| "resources:alert"
+		| "tuner:state-changed"
+		| "tuner:command-sent"
+		| "tuner:control-mode-changed"
+		| "tuner:error"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -100,7 +111,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "health" ||
 		channel === "fanout" ||
 		channel === "live-audio" ||
-		channel === "resources"
+		channel === "resources" ||
+		channel === "tuner"
 	)
 }
 
@@ -566,6 +578,57 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("resources", {
 			type: "resources:alert",
 			data: alert,
+		})
+	}
+
+	/**
+	 * Broadcasts tuner state changes to subscribed clients.
+	 */
+	broadcastTunerStateChanged(sourceId: string, state: TunerState): void {
+		this.broadcast("tuner", {
+			type: "tuner:state-changed",
+			channel: "tuner",
+			data: { sourceId, state },
+		})
+	}
+
+	/**
+	 * Broadcasts tuner command events to subscribed clients.
+	 */
+	broadcastTunerCommandSent(
+		sourceId: string,
+		command: string,
+		value: number,
+	): void {
+		this.broadcast("tuner", {
+			type: "tuner:command-sent",
+			channel: "tuner",
+			data: { sourceId, command, value },
+		})
+	}
+
+	/**
+	 * Broadcasts tuner control mode changes to subscribed clients.
+	 */
+	broadcastTunerControlModeChanged(
+		sourceId: string,
+		mode: TunerControlMode,
+	): void {
+		this.broadcast("tuner", {
+			type: "tuner:control-mode-changed",
+			channel: "tuner",
+			data: { sourceId, mode },
+		})
+	}
+
+	/**
+	 * Broadcasts tuner errors to subscribed clients.
+	 */
+	broadcastTunerError(sourceId: string, error: string): void {
+		this.broadcast("tuner", {
+			type: "tuner:error",
+			channel: "tuner",
+			data: { sourceId, error },
 		})
 	}
 

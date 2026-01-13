@@ -96,21 +96,21 @@ All commands are 5 bytes: `[cmd: u8][value: u32be]`
 
 ```typescript
 const RTL_TCP_COMMANDS = {
-	SET_FREQUENCY: 0x01,        // Hz (24MHz - 1.9GHz)
-	SET_SAMPLE_RATE: 0x02,      // Hz
-	SET_GAIN_MODE: 0x03,        // 0=AGC, 1=manual
-	SET_GAIN: 0x04,             // 0.1 dB units (400 = 40.0 dB)
-	SET_FREQ_CORRECTION: 0x05,  // PPM
-	SET_IF_GAIN: 0x06,          // IF stage gain
-	SET_TEST_MODE: 0x07,        // Test mode
-	SET_AGC_MODE: 0x08,         // RTL2832 AGC
-	SET_DIRECT_SAMPLING: 0x09,  // 0=off, 1=I, 2=Q
-	SET_OFFSET_TUNING: 0x0a,    // Offset tuning
-	SET_RTL_XTAL: 0x0b,         // RTL XTAL freq
-	SET_TUNER_XTAL: 0x0c,       // Tuner XTAL freq
+	SET_FREQUENCY: 0x01, // Hz (24MHz - 1.9GHz)
+	SET_SAMPLE_RATE: 0x02, // Hz
+	SET_GAIN_MODE: 0x03, // 0=AGC, 1=manual
+	SET_GAIN: 0x04, // 0.1 dB units (400 = 40.0 dB)
+	SET_FREQ_CORRECTION: 0x05, // PPM
+	SET_IF_GAIN: 0x06, // IF stage gain
+	SET_TEST_MODE: 0x07, // Test mode
+	SET_AGC_MODE: 0x08, // RTL2832 AGC
+	SET_DIRECT_SAMPLING: 0x09, // 0=off, 1=I, 2=Q
+	SET_OFFSET_TUNING: 0x0a, // Offset tuning
+	SET_RTL_XTAL: 0x0b, // RTL XTAL freq
+	SET_TUNER_XTAL: 0x0c, // Tuner XTAL freq
 	SET_TUNER_GAIN_INDEX: 0x0d, // Gain by index
-	SET_BIAS_TEE: 0x0e,         // 0=off, 1=on
-	SET_TUNER_IF_GAIN: 0x0f,    // stage<<16 | gain
+	SET_BIAS_TEE: 0x0e, // 0=off, 1=on
+	SET_TUNER_IF_GAIN: 0x0f, // stage<<16 | gain
 } as const
 
 // Encoding function (matches tuner-relay.ts pattern)
@@ -140,33 +140,51 @@ export type TunerControlMode = "internal" | "external"
 
 export interface TunerState {
 	sourceId: string
-	frequency: number          // Hz
-	sampleRate: number         // Hz
+	frequency: number // Hz
+	sampleRate: number // Hz
 	gainMode: TunerGainMode
-	gain: number               // 0.1 dB units (0-500)
-	ppm: number                // PPM correction
-	agcMode: boolean           // RTL2832 AGC
-	biasTee: boolean           // Bias-T power
+	gain: number // 0.1 dB units (0-500)
+	ppm: number // PPM correction
+	agcMode: boolean // RTL2832 AGC
+	biasTee: boolean // Bias-T power
 	directSampling: TunerDirectSampling
 	offsetTuning: boolean
 	ifGain: number
 	tunerIfGain: { stage: number; gain: number } | null
-	controlMode: TunerControlMode  // "internal" = WaveKit controls, "external" = SDR++ controls
+	controlMode: TunerControlMode // "internal" = WaveKit controls, "external" = SDR++ controls
 	lastCommandAt?: string
 	lastError?: string
 	commandCount: number
 }
 
 // API request/response types
-export interface SetFrequencyRequest { hz: number }
-export interface SetGainRequest { tenthsDb: number }
-export interface SetGainModeRequest { mode: TunerGainMode }
-export interface SetSampleRateRequest { hz: number }
-export interface SetPpmRequest { ppm: number }
-export interface SetBooleanRequest { enabled: boolean }
-export interface SetDirectSamplingRequest { mode: TunerDirectSampling }
-export interface SetControlModeRequest { mode: TunerControlMode }
-export interface TunerConfigUpdate extends Partial<Omit<TunerState, 'sourceId' | 'lastCommandAt' | 'lastError' | 'commandCount'>> {}
+export interface SetFrequencyRequest {
+	hz: number
+}
+export interface SetGainRequest {
+	tenthsDb: number
+}
+export interface SetGainModeRequest {
+	mode: TunerGainMode
+}
+export interface SetSampleRateRequest {
+	hz: number
+}
+export interface SetPpmRequest {
+	ppm: number
+}
+export interface SetBooleanRequest {
+	enabled: boolean
+}
+export interface SetDirectSamplingRequest {
+	mode: TunerDirectSampling
+}
+export interface SetControlModeRequest {
+	mode: TunerControlMode
+}
+export interface TunerConfigUpdate extends Partial<
+	Omit<TunerState, "sourceId" | "lastCommandAt" | "lastError" | "commandCount">
+> {}
 ```
 
 ---
@@ -179,7 +197,12 @@ export interface TunerConfigUpdate extends Partial<Omit<TunerState, 'sourceId' |
 import { EventEmitter } from "node:events"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import type { SourceManager } from "./source-manager.js"
-import type { TunerState, TunerGainMode, TunerDirectSampling, TunerControlMode } from "@wavekit/api-types"
+import type {
+	TunerState,
+	TunerGainMode,
+	TunerDirectSampling,
+	TunerControlMode,
+} from "@wavekit/api-types"
 
 // Validation constants
 const VALIDATION = {
@@ -231,7 +254,7 @@ export interface TunerControllerEvents {
 	"state-changed": (sourceId: string, state: TunerState) => void
 	"command-sent": (sourceId: string, command: string, value: number) => void
 	"control-mode-changed": (sourceId: string, mode: TunerControlMode) => void
-	"error": (sourceId: string, error: Error) => void
+	error: (sourceId: string, error: Error) => void
 }
 
 export interface TunerControllerConfig {
@@ -266,8 +289,8 @@ export class TunerController extends EventEmitter {
 		// Default state: sensible defaults for immediate use
 		const state: TunerState = {
 			sourceId,
-			frequency: 100_000_000,  // 100 MHz
-			sampleRate: 2_400_000,   // 2.4 MSPS
+			frequency: 100_000_000, // 100 MHz
+			sampleRate: 2_400_000, // 2.4 MSPS
 			gainMode: "agc",
 			gain: 0,
 			ppm: 0,
@@ -277,7 +300,7 @@ export class TunerController extends EventEmitter {
 			offsetTuning: false,
 			ifGain: 0,
 			tunerIfGain: null,
-			controlMode: "internal",  // WaveKit controls by default
+			controlMode: "internal", // WaveKit controls by default
 			commandCount: 0,
 		}
 
@@ -342,42 +365,69 @@ export class TunerController extends EventEmitter {
 		this.validateRange("ppm", ppm, VALIDATION.ppm)
 		const state = this.validateSourceForControl(sourceId)
 		// PPM can be negative, need to handle signed value
-		const value = ppm < 0 ? (0xffffffff + ppm + 1) : ppm
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQ_CORRECTION, value)
+		const value = ppm < 0 ? 0xffffffff + ppm + 1 : ppm
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_FREQ_CORRECTION,
+			value,
+		)
 		state.ppm = ppm
 		this.emitStateChanged(sourceId, state)
 	}
 
 	async setAgcMode(sourceId: string, enabled: boolean): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_AGC_MODE, enabled ? 1 : 0)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_AGC_MODE,
+			enabled ? 1 : 0,
+		)
 		state.agcMode = enabled
 		this.emitStateChanged(sourceId, state)
 	}
 
 	async setBiasTee(sourceId: string, enabled: boolean): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_BIAS_TEE, enabled ? 1 : 0)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_BIAS_TEE,
+			enabled ? 1 : 0,
+		)
 		state.biasTee = enabled
 		this.emitStateChanged(sourceId, state)
 	}
 
-	async setDirectSampling(sourceId: string, mode: TunerDirectSampling): Promise<void> {
+	async setDirectSampling(
+		sourceId: string,
+		mode: TunerDirectSampling,
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "off" ? 0 : mode === "i" ? 1 : 2
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING, value)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING,
+			value,
+		)
 		state.directSampling = mode
 		this.emitStateChanged(sourceId, state)
 	}
 
 	async setOffsetTuning(sourceId: string, enabled: boolean): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_OFFSET_TUNING, enabled ? 1 : 0)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_OFFSET_TUNING,
+			enabled ? 1 : 0,
+		)
 		state.offsetTuning = enabled
 		this.emitStateChanged(sourceId, state)
 	}
 
-	async setIfGain(sourceId: string, stage: number, gain: number): Promise<void> {
+	async setIfGain(
+		sourceId: string,
+		stage: number,
+		gain: number,
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = (stage << 16) | (gain & 0xffff)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN, value)
@@ -387,7 +437,10 @@ export class TunerController extends EventEmitter {
 
 	// === Bulk Update ===
 
-	async configure(sourceId: string, updates: Partial<TunerState>): Promise<void> {
+	async configure(
+		sourceId: string,
+		updates: Partial<TunerState>,
+	): Promise<void> {
 		// Apply updates sequentially, validating each
 		if (updates.controlMode !== undefined) {
 			this.setControlMode(sourceId, updates.controlMode)
@@ -448,18 +501,30 @@ export class TunerController extends EventEmitter {
 	private validateSourceForControl(sourceId: string): TunerState {
 		const state = this.validateSource(sourceId)
 		if (state.controlMode === "external") {
-			throw new Error(`Cannot send commands: control released to external tuner for ${sourceId}`)
+			throw new Error(
+				`Cannot send commands: control released to external tuner for ${sourceId}`,
+			)
 		}
 		return state
 	}
 
-	private validateRange(name: string, value: number, range: { min: number; max: number }): void {
+	private validateRange(
+		name: string,
+		value: number,
+		range: { min: number; max: number },
+	): void {
 		if (value < range.min || value > range.max) {
-			throw new Error(`${name} out of range: ${value} (expected ${range.min}-${range.max})`)
+			throw new Error(
+				`${name} out of range: ${value} (expected ${range.min}-${range.max})`,
+			)
 		}
 	}
 
-	private async sendCommand(sourceId: string, cmd: number, value: number): Promise<void> {
+	private async sendCommand(
+		sourceId: string,
+		cmd: number,
+		value: number,
+	): Promise<void> {
 		const buf = Buffer.alloc(5)
 		buf.writeUInt8(cmd, 0)
 		buf.writeUInt32BE(value >>> 0, 1)
@@ -482,7 +547,11 @@ export class TunerController extends EventEmitter {
 				state.lastError = message
 			}
 			this.log.error({ sourceId, err: message }, "Failed to send tuner command")
-			this.emit("error", sourceId, err instanceof Error ? err : new Error(message))
+			this.emit(
+				"error",
+				sourceId,
+				err instanceof Error ? err : new Error(message),
+			)
 			throw err
 		}
 	}
@@ -569,7 +638,16 @@ const tunerStateSchema = {
 		lastError: { type: "string" },
 		commandCount: { type: "number" },
 	},
-	required: ["sourceId", "frequency", "sampleRate", "gainMode", "gain", "ppm", "controlMode", "commandCount"],
+	required: [
+		"sourceId",
+		"frequency",
+		"sampleRate",
+		"gainMode",
+		"gain",
+		"ppm",
+		"controlMode",
+		"commandCount",
+	],
 } as const
 
 export interface TunerRoutesOptions {
@@ -620,88 +698,142 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 		async (request, reply) => {
 			const state = tunerController.getState(request.params.sourceId)
 			if (!state) {
-				return reply.status(404).send({ error: `Tuner source not found: ${request.params.sourceId}` })
+				return reply
+					.status(404)
+					.send({ error: `Tuner source not found: ${request.params.sourceId}` })
 			}
 			return state
 		},
 	)
 
 	// POST /api/tuner/:sourceId/frequency
-	fastify.post<{ Params: { sourceId: string }; Body: SetFrequencyRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetFrequencyRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/frequency",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set frequency",
-				body: { type: "object", properties: { hz: { type: "number" } }, required: ["hz"] },
+				body: {
+					type: "object",
+					properties: { hz: { type: "number" } },
+					required: ["hz"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setFrequency(request.params.sourceId, request.body.hz)
+			await tunerController.setFrequency(
+				request.params.sourceId,
+				request.body.hz,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/gain
-	fastify.post<{ Params: { sourceId: string }; Body: SetGainRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetGainRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/gain",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set gain",
-				body: { type: "object", properties: { tenthsDb: { type: "number" } }, required: ["tenthsDb"] },
+				body: {
+					type: "object",
+					properties: { tenthsDb: { type: "number" } },
+					required: ["tenthsDb"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setGain(request.params.sourceId, request.body.tenthsDb)
+			await tunerController.setGain(
+				request.params.sourceId,
+				request.body.tenthsDb,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/gain-mode
-	fastify.post<{ Params: { sourceId: string }; Body: SetGainModeRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetGainModeRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/gain-mode",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set gain mode",
-				body: { type: "object", properties: { mode: { type: "string", enum: ["manual", "agc"] } }, required: ["mode"] },
+				body: {
+					type: "object",
+					properties: { mode: { type: "string", enum: ["manual", "agc"] } },
+					required: ["mode"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setGainMode(request.params.sourceId, request.body.mode)
+			await tunerController.setGainMode(
+				request.params.sourceId,
+				request.body.mode,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/sample-rate
-	fastify.post<{ Params: { sourceId: string }; Body: SetSampleRateRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetSampleRateRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/sample-rate",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set sample rate",
-				body: { type: "object", properties: { hz: { type: "number" } }, required: ["hz"] },
+				body: {
+					type: "object",
+					properties: { hz: { type: "number" } },
+					required: ["hz"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setSampleRate(request.params.sourceId, request.body.hz)
+			await tunerController.setSampleRate(
+				request.params.sourceId,
+				request.body.hz,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/ppm
-	fastify.post<{ Params: { sourceId: string }; Body: SetPpmRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetPpmRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/ppm",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set PPM correction",
-				body: { type: "object", properties: { ppm: { type: "number" } }, required: ["ppm"] },
+				body: {
+					type: "object",
+					properties: { ppm: { type: "number" } },
+					required: ["ppm"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
@@ -712,82 +844,137 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 	)
 
 	// POST /api/tuner/:sourceId/agc
-	fastify.post<{ Params: { sourceId: string }; Body: SetBooleanRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetBooleanRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/agc",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set AGC mode",
-				body: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] },
+				body: {
+					type: "object",
+					properties: { enabled: { type: "boolean" } },
+					required: ["enabled"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setAgcMode(request.params.sourceId, request.body.enabled)
+			await tunerController.setAgcMode(
+				request.params.sourceId,
+				request.body.enabled,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/bias-tee
-	fastify.post<{ Params: { sourceId: string }; Body: SetBooleanRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetBooleanRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/bias-tee",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set bias-T power",
-				body: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] },
+				body: {
+					type: "object",
+					properties: { enabled: { type: "boolean" } },
+					required: ["enabled"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setBiasTee(request.params.sourceId, request.body.enabled)
+			await tunerController.setBiasTee(
+				request.params.sourceId,
+				request.body.enabled,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/direct-sampling
-	fastify.post<{ Params: { sourceId: string }; Body: SetDirectSamplingRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetDirectSamplingRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/direct-sampling",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set direct sampling mode",
-				body: { type: "object", properties: { mode: { type: "string", enum: ["off", "i", "q"] } }, required: ["mode"] },
+				body: {
+					type: "object",
+					properties: { mode: { type: "string", enum: ["off", "i", "q"] } },
+					required: ["mode"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setDirectSampling(request.params.sourceId, request.body.mode)
+			await tunerController.setDirectSampling(
+				request.params.sourceId,
+				request.body.mode,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/offset-tuning
-	fastify.post<{ Params: { sourceId: string }; Body: SetBooleanRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetBooleanRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/offset-tuning",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set offset tuning",
-				body: { type: "object", properties: { enabled: { type: "boolean" } }, required: ["enabled"] },
+				body: {
+					type: "object",
+					properties: { enabled: { type: "boolean" } },
+					required: ["enabled"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
 		async (request, reply) => {
-			await tunerController.setOffsetTuning(request.params.sourceId, request.body.enabled)
+			await tunerController.setOffsetTuning(
+				request.params.sourceId,
+				request.body.enabled,
+			)
 			return tunerController.getState(request.params.sourceId)!
 		},
 	)
 
 	// POST /api/tuner/:sourceId/control-mode - Release/reclaim control
-	fastify.post<{ Params: { sourceId: string }; Body: SetControlModeRequest; Reply: TunerState }>(
+	fastify.post<{
+		Params: { sourceId: string }
+		Body: SetControlModeRequest
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/control-mode",
 		{
 			schema: {
 				tags: ["tuner"],
 				summary: "Set control mode",
-				description: "Set to 'external' to release control to SDR++, 'internal' to reclaim control",
-				body: { type: "object", properties: { mode: { type: "string", enum: ["internal", "external"] } }, required: ["mode"] },
+				description:
+					"Set to 'external' to release control to SDR++, 'internal' to reclaim control",
+				body: {
+					type: "object",
+					properties: {
+						mode: { type: "string", enum: ["internal", "external"] },
+					},
+					required: ["mode"],
+				},
 				response: { 200: tunerStateSchema },
 			},
 		},
@@ -798,7 +985,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 	)
 
 	// PATCH /api/tuner/:sourceId/config - Bulk update
-	fastify.patch<{ Params: { sourceId: string }; Body: TunerConfigUpdate; Reply: TunerState }>(
+	fastify.patch<{
+		Params: { sourceId: string }
+		Body: TunerConfigUpdate
+		Reply: TunerState
+	}>(
 		"/api/tuner/:sourceId/config",
 		{
 			schema: {
@@ -995,9 +1186,9 @@ const TABS: { view: View; label: string; shortLabel: string; key: string }[] = [
 	{ view: "output", label: "Output", shortLabel: "Out", key: "3" },
 	{ view: "backpressure", label: "Backpressure", shortLabel: "BP", key: "4" },
 	{ view: "sources", label: "Sources", shortLabel: "Src", key: "5" },
-	{ view: "live-audio", label: "Audio", shortLabel: "Aud", key: "6" },  // Renamed
+	{ view: "live-audio", label: "Audio", shortLabel: "Aud", key: "6" }, // Renamed
 	{ view: "resources", label: "Resources", shortLabel: "Res", key: "7" },
-	{ view: "tuner", label: "Tuner", shortLabel: "Tun", key: "8" },  // New
+	{ view: "tuner", label: "Tuner", shortLabel: "Tun", key: "8" }, // New
 ]
 
 // Render tabs with dynamic sizing based on terminal width
@@ -1011,6 +1202,7 @@ const TABS: { view: View; label: string; shortLabel: string; key: string }[] = [
 **Create:** `cli/source/components/tuner-panel.tsx` (~300 lines)
 
 Key features:
+
 - Source selector (Tab to cycle when multiple RTL-TCP sources)
 - Frequency display with step adjustment (brackets to change step)
 - Arrow keys to tune up/down
@@ -1044,6 +1236,7 @@ Key features:
 ```
 
 When `controlMode === "external"`:
+
 ```
 │ Source: rtl-pi • Control: EXTERNAL (SDR++ has control)           │
 ...
@@ -1101,13 +1294,13 @@ case "tuner":
 
 ## Validation Rules
 
-| Parameter | Min | Max | Unit | Notes |
-|-----------|-----|-----|------|-------|
-| frequency | 24,000,000 | 1,900,000,000 | Hz | RTL-SDR tuning range |
-| sampleRate | 225,001 | 3,200,000 | Hz | Hardware limits |
-| gain | 0 | 500 | 0.1 dB | 0 = 0dB, 500 = 50dB |
-| ppm | -500 | 500 | PPM | Typical crystal range |
-| directSampling | — | — | enum | off, i, q |
+| Parameter      | Min        | Max           | Unit   | Notes                 |
+| -------------- | ---------- | ------------- | ------ | --------------------- |
+| frequency      | 24,000,000 | 1,900,000,000 | Hz     | RTL-SDR tuning range  |
+| sampleRate     | 225,001    | 3,200,000     | Hz     | Hardware limits       |
+| gain           | 0          | 500           | 0.1 dB | 0 = 0dB, 500 = 50dB   |
+| ppm            | -500       | 500           | PPM    | Typical crystal range |
+| directSampling | —          | —             | enum   | off, i, q             |
 
 ---
 
@@ -1228,25 +1421,27 @@ curl -X POST http://localhost:9000/api/tuner/rtl-local/control-mode \
 ## Files Summary
 
 ### New Files (5)
-| File | Est. Lines | Purpose |
-|------|-----------|---------|
-| `src/core/tuner-controller.ts` | ~400 | Core tuner control logic |
-| `src/api/routes/tuner.ts` | ~250 | REST API endpoints |
-| `cli/source/components/tuner-panel.tsx` | ~300 | Interactive CLI panel |
-| `tests/unit/core/tuner-controller.test.ts` | ~350 | Unit tests |
-| `tests/unit/api/tuner-routes.test.ts` | ~250 | API route tests |
+
+| File                                       | Est. Lines | Purpose                  |
+| ------------------------------------------ | ---------- | ------------------------ |
+| `src/core/tuner-controller.ts`             | ~400       | Core tuner control logic |
+| `src/api/routes/tuner.ts`                  | ~250       | REST API endpoints       |
+| `cli/source/components/tuner-panel.tsx`    | ~300       | Interactive CLI panel    |
+| `tests/unit/core/tuner-controller.test.ts` | ~350       | Unit tests               |
+| `tests/unit/api/tuner-routes.test.ts`      | ~250       | API route tests          |
 
 ### Modified Files (9)
-| File | Changes | Purpose |
-|------|---------|---------|
-| `packages/api-types/src/tuner.ts` | +60 lines | Add TunerController types |
-| `packages/api-types/src/index.ts` | +1 line | Re-export (already exports tuner.ts) |
-| `src/core/source-manager.ts` | +10 lines | Add `isRtlTcpSource()` |
-| `src/api/server.ts` | +30 lines | Wire TunerController |
-| `src/api/websocket/events.ts` | +50 lines | Add tuner channel |
-| `src/index.ts` | +25 lines | Wire lifecycle |
-| `cli/source/app.tsx` | +60 lines | Add tuner tab + state + handlers |
-| `cli/source/components/tab-bar.tsx` | +20 lines | Scalable tabs, rename Audio |
+
+| File                                | Changes   | Purpose                              |
+| ----------------------------------- | --------- | ------------------------------------ |
+| `packages/api-types/src/tuner.ts`   | +60 lines | Add TunerController types            |
+| `packages/api-types/src/index.ts`   | +1 line   | Re-export (already exports tuner.ts) |
+| `src/core/source-manager.ts`        | +10 lines | Add `isRtlTcpSource()`               |
+| `src/api/server.ts`                 | +30 lines | Wire TunerController                 |
+| `src/api/websocket/events.ts`       | +50 lines | Add tuner channel                    |
+| `src/index.ts`                      | +25 lines | Wire lifecycle                       |
+| `cli/source/app.tsx`                | +60 lines | Add tuner tab + state + handlers     |
+| `cli/source/components/tab-bar.tsx` | +20 lines | Scalable tabs, rename Audio          |
 
 ---
 
@@ -1270,11 +1465,11 @@ curl -X POST http://localhost:9000/api/tuner/rtl-local/control-mode \
 
 ## Estimated Effort
 
-| Phase | Effort |
-|-------|--------|
-| Phase 1-3: Types + Core + SourceManager | 2-3 hours |
-| Phase 4-6: API + WebSocket + Server | 2-3 hours |
-| Phase 7: Application Integration | 1 hour |
-| Phase 8-9: CLI Dashboard + Tab Scaling | 3-4 hours |
-| Testing (Unit + Integration) | 2-3 hours |
-| **Total** | **10-14 hours** |
+| Phase                                   | Effort          |
+| --------------------------------------- | --------------- |
+| Phase 1-3: Types + Core + SourceManager | 2-3 hours       |
+| Phase 4-6: API + WebSocket + Server     | 2-3 hours       |
+| Phase 7: Application Integration        | 1 hour          |
+| Phase 8-9: CLI Dashboard + Tab Scaling  | 3-4 hours       |
+| Testing (Unit + Integration)            | 2-3 hours       |
+| **Total**                               | **10-14 hours** |

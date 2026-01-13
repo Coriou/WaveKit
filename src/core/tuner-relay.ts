@@ -57,6 +57,7 @@ export interface TunerRelayStatus {
 	compatibility?:
 		| "ok"
 		| "missing-source"
+		| "unsupported-type"
 		| "unsupported-kind"
 		| "unsupported-format"
 	compatibilityMessage?: string
@@ -81,10 +82,19 @@ export interface TunerRelayStatus {
 	rtlTcpHeader?: RtlTcpHeaderInfo
 }
 
+export interface TunerRelayCommandEvent {
+	sourceId?: string
+	command: number
+	value: number
+	clientId: string
+	clientRemote: string
+}
+
 export interface TunerRelayEvents {
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
 	"control-changed": (clientId: string | null) => void
+	"command-received": (event: TunerRelayCommandEvent) => void
 	"sample-rate-changed": (sourceId: string, sampleRate: number) => void
 	started: (port: number) => void
 	stopped: () => void
@@ -297,6 +307,9 @@ export class TunerRelay extends EventEmitter {
 			if (!sourceCaps) {
 				status.compatibility = "missing-source"
 				status.compatibilityMessage = "Source not found"
+			} else if (sourceStatus?.type && sourceStatus.type !== "rtl_tcp") {
+				status.compatibility = "unsupported-type"
+				status.compatibilityMessage = `Source type '${sourceStatus.type}' is not rtl_tcp`
 			} else if (sourceCaps.kind !== "iq") {
 				status.compatibility = "unsupported-kind"
 				status.compatibilityMessage = `Source kind '${sourceCaps.kind}' is not IQ`
@@ -506,6 +519,13 @@ export class TunerRelay extends EventEmitter {
 		this.lastCommandValue = value
 		this.recordCommandStats(cmd, name, value, now)
 		this.recordCommandHistory(cmd, name, value, now, client)
+		this.emit("command-received", {
+			sourceId: this.config.sourceId,
+			command: cmd,
+			value,
+			clientId: client.id,
+			clientRemote: client.remoteAddress,
+		})
 
 		switch (cmd) {
 			case 0x01:

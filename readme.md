@@ -33,7 +33,7 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 
 ```
 ┌─ WaveKit Dashboard ─────────────────────────────────────────────────────────┐
-│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Live Audio  [7] Resources │
+│ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Audio  [7] Resources  [8] Tuner │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ DECODERS                                                                    │
 │ Running: 5/8    Healthy: 5/5    Total Events: 12,847                        │
@@ -57,7 +57,7 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 
 **Keyboard shortcuts:**
 
-- `1-7` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Live Audio, Resources)
+- `1-8` — Switch between tabs (Dashboard, Decoders, Output, Backpressure, Sources, Audio, Resources, Tuner)
 - `r` — Reconnect WebSocket
 - `q` — Quit
 
@@ -114,6 +114,7 @@ SDR Source (rtl_tcp/SDR++)
 - **FanoutManager** — Multiplexes audio to all decoders with backpressure handling
 - **DecoderManager** — Spawns/monitors decoder processes, handles restarts
 - **API Server** — Fastify REST + WebSocket for control and real-time events
+- **Tuner Controller** — Primary RTL-TCP tuner control with internal/external handoff
 - **Tuner Relay** — Optional RTL-TCP server for local tuner clients (SDR++)
 
 ## API Reference
@@ -136,6 +137,13 @@ curl -X POST http://localhost:9000/api/decoders/readsb/stop
 
 # List sources
 curl http://localhost:9000/api/sources
+
+# List tuner states
+curl http://localhost:9000/api/tuner
+
+# Set tuner frequency
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
+  -H "Content-Type: application/json" -d '{"hz":144800000}'
 ```
 
 ### WebSocket Events
@@ -175,6 +183,7 @@ ws.onmessage = event => {
 - `fanout` — Backpressure snapshots
 - `live-audio` — Live demod status/config events
 - `resources` — Container, SDR host, and backpressure metrics
+- `tuner` — RTL-TCP tuner state/command events
 
 ### Audio Streaming
 
@@ -186,6 +195,42 @@ nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
 
 # Play with ffplay
 nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -nodisp -
+```
+
+### Tuner Control (WaveKit)
+
+WaveKit can directly control RTL-TCP sources without SDR++. Use the CLI Tuner tab
+or the REST API to tune frequency, gain, and other settings.
+
+**CLI keys (Tuner tab):**
+
+- `up/down` — Tune frequency
+- `left/right` — Change tuning step (also supports `[ ] , . /`)
+- `g` — Toggle gain mode (AGC/manual)
+- `+/-` — Adjust gain (manual only)
+- `s` — Edit sample rate
+- `p` — Edit PPM correction
+- `a` — Toggle RTL AGC
+- `b` — Toggle bias-tee
+- `d` — Cycle direct sampling (off/I/Q)
+- `o` — Toggle offset tuning
+- `c` — Release/reclaim control (internal/external)
+
+```bash
+# List tuner states
+curl http://localhost:9000/api/tuner
+
+# Set frequency
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \\
+  -H "Content-Type: application/json" -d '{\"hz\":144800000}'
+
+# Release control to SDR++
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
+  -H "Content-Type: application/json" -d '{\"mode\":\"external\"}'
+
+# Reclaim control
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \\
+  -H "Content-Type: application/json" -d '{\"mode\":\"internal\"}'
 ```
 
 ### Tuner Relay (SDR++)
@@ -215,10 +260,14 @@ tunerRelay:
 - In `exclusive` mode, the first client gets control and others are read-only.
 - The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
 - RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
+- Relay commands update the internal tuner state and will switch control mode to
+  `external` while a relay control client is active. When the relay becomes idle,
+  control returns to `internal` unless you explicitly released control.
 
 **Dynamic Sample Rate:**
 
 When SDR++ changes the sample rate, WaveKit automatically:
+
 - Updates source capabilities
 - Restarts the LiveDemodulator with new decimation rates
 - Restarts affected decoders to maintain optimal decoding

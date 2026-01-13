@@ -176,6 +176,89 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
+### Tuner
+
+#### GET /api/tuner
+
+List tuner states for all RTL-TCP sources.
+
+Relay-driven RTL-TCP commands (from SDR++ via the tuner relay) update these
+states and will automatically switch control mode to `external` while the relay
+has an active control client.
+
+```bash
+curl http://localhost:9000/api/tuner
+```
+
+**Response**:
+
+```json
+[
+	{
+		"sourceId": "rtl-pi",
+		"frequency": 144800000,
+		"sampleRate": 2400000,
+		"gainMode": "agc",
+		"gain": 0,
+		"ppm": 0,
+		"agcMode": true,
+		"biasTee": false,
+		"directSampling": "off",
+		"offsetTuning": false,
+		"ifGain": 0,
+		"tunerIfGain": null,
+		"testMode": false,
+		"controlMode": "internal",
+		"commandCount": 12,
+		"lastCommandAt": "2024-05-21T03:12:01.123Z"
+	}
+]
+```
+
+#### GET /api/tuner/:sourceId
+
+Get tuner state for a single source.
+
+```bash
+curl http://localhost:9000/api/tuner/rtl-pi
+```
+
+#### POST /api/tuner/:sourceId/frequency
+
+Set center frequency.
+
+```bash
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/frequency \
+  -H "Content-Type: application/json" -d '{"hz":144800000}'
+```
+
+#### POST /api/tuner/:sourceId/control-mode
+
+Release control to SDR++ (`external`) or reclaim (`internal`).
+
+```bash
+curl -X POST http://localhost:9000/api/tuner/rtl-pi/control-mode \
+  -H "Content-Type: application/json" -d '{"mode":"external"}'
+```
+
+#### Additional tuner endpoints
+
+- `POST /api/tuner/:sourceId/gain` — Set manual gain (`{ "tenthsDb": 400 }`)
+- `POST /api/tuner/:sourceId/gain-mode` — `manual` or `agc`
+- `POST /api/tuner/:sourceId/sample-rate` — Set sample rate
+- `POST /api/tuner/:sourceId/ppm` — Set PPM correction
+- `POST /api/tuner/:sourceId/agc` — RTL2832 AGC toggle
+- `POST /api/tuner/:sourceId/bias-tee` — Bias-T power toggle
+- `POST /api/tuner/:sourceId/direct-sampling` — `off` / `i` / `q`
+- `POST /api/tuner/:sourceId/offset-tuning` — Offset tuning toggle
+- `POST /api/tuner/:sourceId/if-gain` — IF gain value
+- `POST /api/tuner/:sourceId/tuner-if-gain` — IF stage/gain pair
+- `POST /api/tuner/:sourceId/test-mode` — Test mode toggle
+- `POST /api/tuner/:sourceId/rtl-xtal` — RTL XTAL frequency
+- `POST /api/tuner/:sourceId/tuner-xtal` — Tuner XTAL frequency
+- `POST /api/tuner/:sourceId/tuner-gain-index` — Gain index value
+- `PATCH /api/tuner/:sourceId/config` — Bulk update
+
 ### Tuner Relay
 
 #### GET /api/tuner-relay
@@ -573,7 +656,16 @@ ws.onopen = () => {
 	ws.send(
 		JSON.stringify({
 			type: "subscribe",
-			channels: ["decoders", "sources", "metrics", "health", "fanout"],
+			channels: [
+				"decoders",
+				"sources",
+				"metrics",
+				"health",
+				"fanout",
+				"live-audio",
+				"resources",
+				"tuner",
+			],
 		}),
 	)
 }
@@ -591,7 +683,16 @@ ws.onmessage = event => {
 ```json
 {
 	"type": "subscribe",
-	"channels": ["decoders", "sources", "metrics", "health", "fanout"]
+	"channels": [
+		"decoders",
+		"sources",
+		"metrics",
+		"health",
+		"fanout",
+		"live-audio",
+		"resources",
+		"tuner"
+	]
 }
 ```
 

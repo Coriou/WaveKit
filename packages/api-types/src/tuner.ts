@@ -35,6 +35,7 @@ export interface TunerRelayStatus {
 	compatibility?:
 		| "ok"
 		| "missing-source"
+		| "unsupported-type"
 		| "unsupported-kind"
 		| "unsupported-format"
 	compatibilityMessage?: string
@@ -58,3 +59,73 @@ export interface TunerRelayStatus {
 	lastError?: string
 	rtlTcpHeader?: RtlTcpHeaderInfo
 }
+
+// Tuner control types (for TunerController)
+export type TunerGainMode = "manual" | "agc"
+export type TunerDirectSampling = "off" | "i" | "q"
+export type TunerControlMode = "internal" | "external"
+
+export interface TunerState {
+	sourceId: string
+	frequency: number // Hz
+	sampleRate: number // Hz
+	gainMode: TunerGainMode
+	gain: number // 0.1 dB units (0-500)
+	ppm: number // PPM correction
+	agcMode: boolean // RTL2832 AGC
+	biasTee: boolean // Bias-T power
+	directSampling: TunerDirectSampling
+	offsetTuning: boolean
+	ifGain: number
+	tunerIfGain: { stage: number; gain: number } | null
+	testMode: boolean
+	rtlXtal?: number
+	tunerXtal?: number
+	tunerGainIndex?: number
+	controlMode: TunerControlMode // "internal" = WaveKit controls, "external" = SDR++ controls
+	lastCommandAt?: string
+	lastError?: string
+	commandCount: number
+}
+
+// API request/response types
+export interface SetFrequencyRequest {
+	hz: number
+}
+export interface SetGainRequest {
+	tenthsDb: number
+}
+export interface SetGainModeRequest {
+	mode: TunerGainMode
+}
+export interface SetSampleRateRequest {
+	hz: number
+}
+export interface SetPpmRequest {
+	ppm: number
+}
+export interface SetBooleanRequest {
+	enabled: boolean
+}
+export interface SetDirectSamplingRequest {
+	mode: TunerDirectSampling
+}
+export interface SetControlModeRequest {
+	mode: TunerControlMode
+}
+export interface SetIfGainRequest {
+	gain: number
+}
+export interface SetTunerIfGainRequest {
+	stage: number
+	gain: number
+}
+export interface SetTunerGainIndexRequest {
+	index: number
+}
+export interface SetXtalRequest {
+	hz: number
+}
+export interface TunerConfigUpdate extends Partial<
+	Omit<TunerState, "sourceId" | "lastCommandAt" | "lastError" | "commandCount">
+> {}

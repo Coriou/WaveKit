@@ -19,7 +19,13 @@ const tunerRelayStatusSchema = {
 		sourceFormat: { type: "string" },
 		compatibility: {
 			type: "string",
-			enum: ["ok", "missing-source", "unsupported-kind", "unsupported-format"],
+			enum: [
+				"ok",
+				"missing-source",
+				"unsupported-type",
+				"unsupported-kind",
+				"unsupported-format",
+			],
 		},
 		compatibilityMessage: { type: "string" },
 		clientsConnected: { type: "number" },

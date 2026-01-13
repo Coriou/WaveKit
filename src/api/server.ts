@@ -28,6 +28,7 @@ import type { DecoderManager } from "../decoders/manager.js"
 import type { DecoderRegistry } from "../decoders/registry.js"
 import type { AudioOutput } from "../core/audio-output.js"
 import type { TunerRelay } from "../core/tuner-relay.js"
+import type { TunerController } from "../core/tuner-controller.js"
 import type { LiveDemodulator } from "../core/live-demodulator.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
@@ -35,6 +36,7 @@ import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
 import { tunerRelayRoutes } from "./routes/tuner-relay.js"
+import { tunerRoutes } from "./routes/tuner.js"
 import { liveAudioRoutes } from "./routes/live-audio.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
@@ -63,6 +65,7 @@ export interface ApiServerDependencies {
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
 	tunerRelay?: TunerRelay | undefined
+	tunerController?: TunerController | undefined
 	liveDemod?: LiveDemodulator | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	logger: Logger
@@ -88,6 +91,7 @@ export class ApiServer {
 	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
 	private readonly tunerRelay?: TunerRelay | undefined
+	private readonly tunerController?: TunerController | undefined
 	private readonly liveDemod?: LiveDemodulator | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -101,6 +105,7 @@ export class ApiServer {
 		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
 		this.tunerRelay = dependencies.tunerRelay
+		this.tunerController = dependencies.tunerController
 		this.liveDemod = dependencies.liveDemod
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.audioConfig = dependencies.audioConfig
@@ -231,6 +236,13 @@ export class ApiServer {
 	}
 
 	/**
+	 * Returns the tuner controller instance (if enabled).
+	 */
+	getTunerController(): TunerController | undefined {
+		return this.tunerController
+	}
+
+	/**
 	 * Returns the resource aggregator instance (if enabled).
 	 */
 	getResourceAggregator(): ResourceAggregator | undefined {
@@ -322,6 +334,25 @@ export class ApiServer {
 			})
 		}
 
+		// Tuner controller events
+		if (this.tunerController) {
+			this.tunerController.on("state-changed", (sourceId, state) => {
+				this.wsBroadcaster.broadcastTunerStateChanged(sourceId, state)
+			})
+
+			this.tunerController.on("command-sent", (sourceId, command, value) => {
+				this.wsBroadcaster.broadcastTunerCommandSent(sourceId, command, value)
+			})
+
+			this.tunerController.on("control-mode-changed", (sourceId, mode) => {
+				this.wsBroadcaster.broadcastTunerControlModeChanged(sourceId, mode)
+			})
+
+			this.tunerController.on("error", (sourceId, error) => {
+				this.wsBroadcaster.broadcastTunerError(sourceId, error.message)
+			})
+		}
+
 		this.log.debug("Event broadcasting handlers registered")
 	}
 
@@ -368,6 +399,9 @@ export class ApiServer {
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
 					{ name: "live-audio", description: "Live demodulation endpoints" },
+					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
+					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
+					{ name: "resources", description: "Resource monitoring endpoints" },
 				],
 			},
 		})
@@ -599,6 +633,12 @@ export class ApiServer {
 		if (this.tunerRelay) {
 			await this.app.register(tunerRelayRoutes, {
 				tunerRelay: this.tunerRelay,
+			})
+		}
+
+		if (this.tunerController) {
+			await this.app.register(tunerRoutes, {
+				tunerController: this.tunerController,
 			})
 		}
 
