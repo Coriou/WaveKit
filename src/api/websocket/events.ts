@@ -61,6 +61,7 @@ export interface ServerMessage {
 		| "source:connected"
 		| "source:disconnected"
 		| "source:error"
+		| "source:caps-changed"
 		| "metrics"
 		| "fanout:snapshot"
 		| "fanout:backpressure"

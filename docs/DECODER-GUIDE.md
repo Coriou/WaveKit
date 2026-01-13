@@ -31,7 +31,8 @@ export const MY_DECODER_CAPS: DecoderCaps = {
 	input: "audio_pcm",
 	output: "jsonl",
 	wantsExclusiveSource: false,
-	preferredSampleRates: [48000],
+	wantsExclusiveSource: false,
+	preferredSampleRates: [48000], // Warn if source rate changes to something else
 	integrationPattern: "pure_consumer",
 }
 
@@ -377,6 +378,12 @@ WaveKit defines standard output types for decoded data:
 | `aprs`     | APRS packet         | direwolf    |
 | `error`    | Decoder error       | all         |
 | `stats`    | Statistics          | all         |
+
+### Dynamic Sample Rate Handling
+
+WaveKit automatically restarts decoders when the source sample rate changes (via TunerRelay). Your decoder does not need special handling—it will be gracefully stopped and restarted with the new rate.
+
+If your decoder has specific sample rate requirements, declare them in `preferredSampleRates`. WaveKit will log warnings when running at non-optimal rates but will not prevent operation.
 
 ## Best Practices
 

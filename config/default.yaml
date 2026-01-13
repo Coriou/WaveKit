@@ -34,7 +34,8 @@
 #   playbackSpeed - Playback speed multiplier (default: 1.0)
 #   caps       - Source capabilities:
 #     kind       - Data type: "audio_pcm", "iq", or "recording"
-#     sampleRate - Sample rate in Hz (e.g., 48000)
+#     sampleRate - Initial sample rate in Hz (e.g., 48000). For TunerRelay sources,
+#                  this may change dynamically when SDR++ adjusts the sample rate.
 #     format     - Data format: "S16LE", "FLOAT32LE", "U8_IQ", or "S16_IQ"
 #     channels   - Number of channels (optional, default: 1)
 #     centerFreq - Center frequency in Hz for IQ sources (optional)
@@ -203,6 +204,11 @@ audio:
 #   maxClients    - Optional cap on number of connected clients
 #   commandHistoryLimit - Number of command entries to retain (0 disables)
 #   note         - Relay streams the primary source (first in `sources`)
+#
+# Dynamic Sample Rate:
+#   When SDR++ clients connected via the relay change sample rate, WaveKit
+#   automatically updates source caps and restarts affected decoders and the
+#   live demodulator. No manual reconfiguration needed.
 #
 # Example:
 # tunerRelay:

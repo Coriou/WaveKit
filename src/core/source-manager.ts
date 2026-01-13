@@ -102,6 +102,7 @@ export interface SourceManagerEvents {
 		metrics: { bytesReceived: number; dataRate: number },
 	) => void
 	ended: (sourceId: string) => void // For recording sources
+	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 }
 
 // Exponential backoff constants
@@ -1177,6 +1178,36 @@ export class SourceManager extends EventEmitter {
 	getCaps(id: string): SourceCaps | undefined {
 		const state = this.sources.get(id)
 		return state?.config.caps
+	}
+
+	/**
+	 * Updates the capabilities of a source dynamically.
+	 * Used when external events (e.g., TunerRelay commands) change source parameters.
+	 * Emits 'caps-changed' event so consumers can react to the change.
+	 *
+	 * @param id - Source ID to update
+	 * @param updates - Partial caps to merge with existing
+	 */
+	updateSourceCaps(id: string, updates: Partial<SourceCaps>): void {
+		const state = this.sources.get(id)
+		if (!state) {
+			this.logger.warn({ sourceId: id }, "Cannot update caps: source not found")
+			return
+		}
+
+		const oldCaps = { ...state.config.caps }
+		state.config.caps = { ...state.config.caps, ...updates }
+
+		this.logger.info(
+			{
+				sourceId: id,
+				oldSampleRate: oldCaps.sampleRate,
+				newSampleRate: state.config.caps.sampleRate,
+			},
+			"Source caps updated dynamically",
+		)
+
+		this.emit("caps-changed", id, state.config.caps)
 	}
 
 	/**

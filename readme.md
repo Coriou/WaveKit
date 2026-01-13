@@ -216,6 +216,16 @@ tunerRelay:
 - The relay streams the primary source (first in `sources`), so set `sourceId` to match it.
 - RTL-TCP commands are tracked and available via `GET /api/tuner-relay`.
 
+**Dynamic Sample Rate:**
+
+When SDR++ changes the sample rate, WaveKit automatically:
+- Updates source capabilities
+- Restarts the LiveDemodulator with new decimation rates
+- Restarts affected decoders to maintain optimal decoding
+- Broadcasts `source:caps-changed` to WebSocket clients
+
+This enables seamless tuning without manual reconfiguration.
+
 ### Live Demodulator (HTTP Audio)
 
 Live demodulates IQ in real time and serves mono audio over HTTP.

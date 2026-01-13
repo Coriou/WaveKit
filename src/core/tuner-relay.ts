@@ -85,6 +85,7 @@ export interface TunerRelayEvents {
 	"client-connected": (clientId: string) => void
 	"client-disconnected": (clientId: string) => void
 	"control-changed": (clientId: string | null) => void
+	"sample-rate-changed": (sourceId: string, sampleRate: number) => void
 	started: (port: number) => void
 	stopped: () => void
 	error: (error: Error) => void
@@ -512,6 +513,14 @@ export class TunerRelay extends EventEmitter {
 				break
 			case 0x02:
 				this.lastSampleRate = value
+				// Emit sample rate changed event for dynamic pipeline adaptation
+				if (this.config.sourceId) {
+					this.emit("sample-rate-changed", this.config.sourceId, value)
+					this.log.info(
+						{ sourceId: this.config.sourceId, sampleRate: value },
+						"Sample rate changed via tuner relay",
+					)
+				}
 				break
 			case 0x04:
 				this.lastGain = value

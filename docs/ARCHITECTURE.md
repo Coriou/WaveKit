@@ -88,6 +88,7 @@ interface SourceCaps {
 - `disconnected` — Source disconnected (with error if applicable)
 - `data` — Raw data received
 - `metrics` — Data rate metrics (every 5s)
+- `caps-changed` — Source capabilities updated (e.g., sample rate change via TunerRelay)
 
 ### FanoutManager
 
@@ -254,6 +255,29 @@ IQ (U8/S16) -> csdr convert -> (optional IQ dcblock) -> csdr firdecimate
 -> modulation demod (FM/AM/SSB) -> (audio filters) -> gain/limit
 -> (optional deemphasis) -> audio stream
 ```
+
+### Dynamic Sample Rate Handling
+
+When connected via the TunerRelay, sample rate changes from SDR++ are propagated through the system automatically:
+
+```
+SDR++ → TunerRelay → SourceManager → caps-changed event
+                                          │
+                    ┌─────────────────────┼─────────────────────┐
+                    ▼                     ▼                     ▼
+            LiveDemodulator       DecoderManager         WebSocket
+            (restart pipeline)   (restart decoders)     (broadcast)
+```
+
+**Key behaviors**:
+
+- **TunerRelay** intercepts sample rate commands (cmd 0x02) and emits `sample-rate-changed`
+- **SourceManager** updates source caps and emits `caps-changed`
+- **LiveDemodulator** restarts its csdr pipeline with new decimation rates
+- **DecoderManager** gracefully restarts affected decoders
+- **WebSocket** broadcasts `source:caps-changed` to connected clients
+
+> **Note**: Dynamic sample rate only works for sources with an active TunerRelay connection.
 
 ## Data Flow
 

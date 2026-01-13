@@ -699,6 +699,26 @@ Emitted when a decoder produces output.
 }
 ```
 
+#### source:caps-changed
+
+Emitted when source capabilities change dynamically (e.g., sample rate changed via TunerRelay).
+
+```json
+{
+	"type": "source:caps-changed",
+	"channel": "sources",
+	"data": {
+		"sourceId": "rtl-pi",
+		"caps": {
+			"kind": "iq",
+			"sampleRate": 2400000,
+			"format": "U8_IQ",
+			"exclusive": false
+		}
+	}
+}
+```
+
 #### metrics
 
 Emitted every ~5 seconds.

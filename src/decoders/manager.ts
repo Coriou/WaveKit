@@ -27,6 +27,7 @@ import type {
 } from "./types.js"
 import type { DecoderRegistry } from "./registry.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
+import type { SourceManager, SourceCaps } from "../core/source-manager.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import {
 	validateDecoderVersion,
@@ -127,6 +128,11 @@ export class DecoderManager extends EventEmitter {
 	private readonly config: DecoderManagerConfig
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
+	private sourceManager: SourceManager | null = null
+	private capsChangedHandler: ((sourceId: string, caps: SourceCaps) => void) | null = null
+	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	private pendingCapsChange: { sourceId: string; caps: SourceCaps } | null = null
+	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
 		registry: DecoderRegistry,
@@ -396,6 +402,9 @@ export class DecoderManager extends EventEmitter {
 		// Stop health checks
 		this.stopHealthChecks()
 
+		// Unsubscribe from source caps changes
+		this.unsubscribeFromSourceCapsChanges()
+
 		await this.stopAll()
 
 		for (const id of this.decoders.keys()) {
@@ -641,6 +650,128 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: decoder.id, branchId },
 				"Decoder unwired from fanout branch",
 			)
+		}
+	}
+
+	// ============================================================================
+	// Dynamic Sample Rate Handling
+	// ============================================================================
+
+	/**
+	 * Sets the source manager for dynamic sample rate handling.
+	 * Should be called after creating the DecoderManager to enable auto-restart
+	 * when source sample rates change via TunerRelay.
+	 *
+	 * @param sourceManager - The source manager instance
+	 */
+	setSourceManager(sourceManager: SourceManager): void {
+		this.sourceManager = sourceManager
+		this.subscribeToSourceCapsChanges()
+	}
+
+	/**
+	 * Subscribes to source caps changes and restarts affected decoders.
+	 * This enables automatic pipeline adaptation when SDR++ users change sample rates.
+	 * Uses debouncing to prevent rapid successive restarts.
+	 */
+	private subscribeToSourceCapsChanges(): void {
+		if (!this.sourceManager || this.capsChangedHandler) return
+
+		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
+			// Store the pending change for debounced processing
+			this.pendingCapsChange = { sourceId, caps }
+
+			// Debounce rapid changes - SDR++ may send multiple rate changes quickly
+			if (this.capsChangeDebounceTimer) {
+				clearTimeout(this.capsChangeDebounceTimer)
+			}
+
+			this.capsChangeDebounceTimer = setTimeout(() => {
+				this.capsChangeDebounceTimer = null
+				const pending = this.pendingCapsChange
+				this.pendingCapsChange = null
+				if (pending) {
+					void this.handleCapsChange(pending.sourceId, pending.caps)
+				}
+			}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
+		}
+
+		this.sourceManager.on("caps-changed", this.capsChangedHandler)
+		this.log.debug("Subscribed to source caps changes")
+	}
+
+	/**
+	 * Handles a debounced caps change event.
+	 */
+	private async handleCapsChange(sourceId: string, caps: SourceCaps): Promise<void> {
+		const affectedDecoders: string[] = []
+
+		// Find all running decoders using this source
+		for (const [decoderId, state] of this.decoders) {
+			if (state.config.sourceId === sourceId && state.decoder.getStatus().running) {
+				affectedDecoders.push(decoderId)
+			}
+		}
+
+		if (affectedDecoders.length === 0) return
+
+		this.log.info(
+			{
+				sourceId,
+				newSampleRate: caps.sampleRate,
+				affectedDecoders,
+			},
+			"Source caps changed, restarting affected decoders",
+		)
+
+		// Restart each affected decoder
+		for (const decoderId of affectedDecoders) {
+			try {
+				await this.restartDecoder(decoderId)
+			} catch (err) {
+				this.log.error(
+					{ decoderId, err },
+					"Failed to restart decoder after sample rate change",
+				)
+			}
+		}
+
+		// Check for suboptimal sample rates and emit warnings
+		for (const decoderId of affectedDecoders) {
+			const state = this.decoders.get(decoderId)
+			if (!state) continue
+
+			const decoderCaps = state.decoder.caps
+			if (decoderCaps?.preferredSampleRates?.length) {
+				const preferred = decoderCaps.preferredSampleRates
+				const current = caps.sampleRate
+				if (!preferred.includes(current)) {
+					this.log.warn(
+						{
+							decoderId,
+							currentSampleRate: current,
+							preferredRates: preferred,
+						},
+						"Decoder running with suboptimal sample rate",
+					)
+				}
+			}
+		}
+	}
+
+	/**
+	 * Unsubscribes from source caps changes.
+	 */
+	private unsubscribeFromSourceCapsChanges(): void {
+		if (this.capsChangeDebounceTimer) {
+			clearTimeout(this.capsChangeDebounceTimer)
+			this.capsChangeDebounceTimer = null
+			this.pendingCapsChange = null
+		}
+		if (this.capsChangedHandler && this.sourceManager) {
+			this.sourceManager.off("caps-changed", this.capsChangedHandler)
+			this.capsChangedHandler = null
+			this.log.debug("Unsubscribed from source caps changes")
 		}
 	}
 

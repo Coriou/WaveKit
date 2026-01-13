@@ -297,6 +297,9 @@ async function main(): Promise<void> {
 		},
 	)
 
+	// Wire DecoderManager to SourceManager for dynamic sample rate handling
+	decoderManager.setSourceManager(sourceManager)
+
 	// Step 6: Register built-in decoders with capabilities
 	decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
 	decoderRegistry.register("multimon-ng", createMultimonDecoder, MULTIMON_CAPS)
@@ -572,6 +575,23 @@ async function main(): Promise<void> {
 
 	// Step 11b: Start tuner relay server (if enabled)
 	await tunerRelay.start()
+
+	// Wire dynamic sample rate changes from tuner relay to source manager
+	tunerRelay.on("sample-rate-changed", (sourceId, sampleRate) => {
+		log.info(
+			{ sourceId, sampleRate },
+			"Propagating sample rate change from tuner relay",
+		)
+		sourceManager.updateSourceCaps(sourceId, { sampleRate })
+	})
+
+	// Broadcast source caps changes to WebSocket clients
+	sourceManager.on("caps-changed", (sourceId, caps) => {
+		wsBroadcaster.broadcast("sources", {
+			type: "source:caps-changed",
+			data: { sourceId, caps },
+		})
+	})
 
 	// Step 12: Wire decoder audio outputs to AudioOutput (Requirement 11.1)
 	// This creates a combined stream that aggregates audio from all decoders

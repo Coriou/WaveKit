@@ -47,6 +47,7 @@ function createMockFanoutManager() {
 }
 
 function createMockSourceManager() {
+	const emitter = new EventEmitter()
 	return {
 		getAllStatus: vi.fn().mockReturnValue([
 			{
@@ -63,6 +64,16 @@ function createMockSourceManager() {
 			sampleRate: 2_400_000,
 			format: "U8_IQ",
 		}),
+		// EventEmitter methods for caps-changed subscription
+		on: vi.fn((event: string, listener: (...args: any[]) => void) => {
+			emitter.on(event, listener)
+			return emitter
+		}),
+		off: vi.fn((event: string, listener: (...args: any[]) => void) => {
+			emitter.off(event, listener)
+			return emitter
+		}),
+		emit: (event: string, ...args: any[]) => emitter.emit(event, ...args),
 	}
 }
 

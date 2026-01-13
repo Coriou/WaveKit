@@ -9,7 +9,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import * as http from "node:http"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
-import { LiveDemodConfigSchema, type LiveDemodConfig } from "../config.js"
+import { LiveDemodConfigSchema, type LiveDemodConfig, type SourceCaps } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
 import type { FanoutManager } from "./fanout-manager.js"
@@ -100,6 +100,9 @@ export class LiveDemodulator extends EventEmitter {
 	private squelchLastOpenAtMs = 0
 	private readonly squelchHysteresisDb = 2.0
 	private readonly squelchHangTimeMs = 250
+	private capsChangedHandler: ((sourceId: string, caps: SourceCaps) => void) | null = null
+	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
 		logger: Logger,
@@ -153,6 +156,7 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		await this.startHttpServer()
+		this.subscribeToSourceCapsChanges()
 		this.emit("started")
 		this.log.info(
 			{ httpPort: this.config.httpPort, sourceId },
@@ -166,6 +170,7 @@ export class LiveDemodulator extends EventEmitter {
 			return
 		}
 
+		this.unsubscribeFromSourceCapsChanges()
 		await this.stopPipeline({ keepBranch: false })
 		this.detachBranch()
 		this.closeAllClients()
@@ -288,6 +293,61 @@ export class LiveDemodulator extends EventEmitter {
 		this.branchId = null
 		this.branchStream = null
 		this.branchErrorHandler = null
+	}
+
+	/**
+	 * Subscribes to source caps changes and restarts pipeline when needed.
+	 * This enables dynamic sample rate adaptation when SDR++ users change rates.
+	 * Uses debouncing to prevent rapid successive restarts.
+	 */
+	private subscribeToSourceCapsChanges(): void {
+		if (this.capsChangedHandler) return // Already subscribed
+
+		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
+			// Only react if this is our active source
+			if (sourceId !== this.activeSourceId) return
+
+			// Debounce rapid changes - SDR++ may send multiple rate changes quickly
+			if (this.capsChangeDebounceTimer) {
+				clearTimeout(this.capsChangeDebounceTimer)
+			}
+
+			this.capsChangeDebounceTimer = setTimeout(async () => {
+				this.capsChangeDebounceTimer = null
+
+				this.log.info(
+					{ sourceId, newSampleRate: caps.sampleRate },
+					"Source caps changed, restarting pipeline with new sample rate",
+				)
+
+				try {
+					// Reconfigure triggers stop + start of pipeline with new rates
+					await this.reconfigure({})
+				} catch (err) {
+					const error = err instanceof Error ? err : new Error(String(err))
+					this.log.error({ err: error }, "Failed to restart pipeline after sample rate change")
+					this.lastError = error.message
+					this.pipelineHealth = "error"
+					this.emit("error", error)
+				}
+			}, LiveDemodulator.CAPS_CHANGE_DEBOUNCE_MS)
+		}
+
+		this.sourceManager.on("caps-changed", this.capsChangedHandler)
+	}
+
+	/**
+	 * Unsubscribes from source caps changes.
+	 */
+	private unsubscribeFromSourceCapsChanges(): void {
+		if (this.capsChangeDebounceTimer) {
+			clearTimeout(this.capsChangeDebounceTimer)
+			this.capsChangeDebounceTimer = null
+		}
+		if (this.capsChangedHandler) {
+			this.sourceManager.off("caps-changed", this.capsChangedHandler)
+			this.capsChangedHandler = null
+		}
 	}
 
 	private updateSquelchThreshold(): void {
