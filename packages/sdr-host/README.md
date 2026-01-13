@@ -81,6 +81,20 @@ make sdr-host-build
 make sdr-host-build-multi
 ```
 
+### Note on GHCR "unknown/unknown"
+
+When publishing multi-arch images, Docker Buildx/BuildKit can also push a **provenance attestation** alongside the real `linux/amd64` + `linux/arm64` images.
+GitHub Container Registry may display this extra artifact as OS/Arch `unknown/unknown`.
+
+In this repo, provenance is **disabled by default** for `make sdr-host-build-multi` to keep the GHCR UI to just `amd64` + `arm64`.
+If you want provenance anyway:
+
+```bash
+WAVEKIT_PROVENANCE=true make sdr-host-build-multi
+# or
+bash ./packages/sdr-host/scripts/build-publish.sh --multi-arch --provenance
+```
+
 Build and publish a new image directly (handles buildx for multi-arch):
 
 ```bash
