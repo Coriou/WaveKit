@@ -12,6 +12,7 @@ TAG="latest"
 PLATFORMS="linux/arm64"
 IMAGE=""
 PUSH=true
+PROVENANCE=false
 
 usage() {
 	cat <<'EOF'
@@ -26,11 +27,14 @@ Options:
   --platform <list>    Platform list (default: linux/arm64)
   --multi-arch         Build linux/amd64 + linux/arm64
   --load               Load into local Docker instead of --push (single-arch only)
+  --provenance         Enable BuildKit provenance attestation (may show as OS/Arch: unknown/unknown in GHCR)
+  --no-provenance      Disable provenance attestation (default)
   --builder <name>     Buildx builder name (default: wavekit-builder)
   -h, --help           Show help
 
 Environment:
   WAVEKIT_GH_OWNER     Default GHCR owner (auto-loaded from .env/.env.local)
+  WAVEKIT_PROVENANCE   Set to 'true' to enable provenance by default
 EOF
 }
 
@@ -64,6 +68,10 @@ guess_owner() {
 
 load_env
 
+if [ "${WAVEKIT_PROVENANCE:-}" != "" ]; then
+	PROVENANCE="${WAVEKIT_PROVENANCE}"
+fi
+
 while [ "${1:-}" != "" ]; do
 	case "$1" in
 		--image)
@@ -86,6 +94,14 @@ while [ "${1:-}" != "" ]; do
 			PUSH=false
 			shift
 			;;
+		--provenance)
+			PROVENANCE=true
+			shift
+			;;
+		--no-provenance)
+			PROVENANCE=false
+			shift
+			;;
 		--builder)
 			BUILDER="${2:-}"
 			shift 2
@@ -100,13 +116,14 @@ while [ "${1:-}" != "" ]; do
 	esac
 done
 
-	if [ -z "$IMAGE" ]; then
-		OWNER="${WAVEKIT_GH_OWNER:-$(guess_owner)}"
-		if [ -z "$OWNER" ]; then
-			OWNER="coriou"
-		fi
-	IMAGE="ghcr.io/${OWNER}/wavekit-sdr-host:${TAG}"
+
+if [ -z "$IMAGE" ]; then
+	OWNER="${WAVEKIT_GH_OWNER:-$(guess_owner)}"
+	if [ -z "$OWNER" ]; then
+		OWNER="coriou"
 	fi
+	IMAGE="ghcr.io/${OWNER}/wavekit-sdr-host:${TAG}"
+fi
 
 if [ "$PUSH" = false ] && printf '%s' "$PLATFORMS" | grep -q ','; then
 	fail "--load only supports single-platform builds. Use --push for multi-arch."
@@ -140,6 +157,10 @@ log "Building image: ${IMAGE}"
 log "Platforms: ${PLATFORMS}"
 log "Builder: ${BUILDER}"
 
+supports_buildx_provenance() {
+	docker buildx build --help 2>/dev/null | grep -q -- "--provenance" || return 1
+}
+
 BUILD_ARGS=(
 	"--platform" "$PLATFORMS"
 	"-f" "${REPO_ROOT}/packages/sdr-host/Dockerfile"
@@ -148,6 +169,9 @@ BUILD_ARGS=(
 
 if [ "$PUSH" = true ]; then
 	BUILD_ARGS+=("--push")
+	if supports_buildx_provenance; then
+		BUILD_ARGS+=("--provenance=${PROVENANCE}")
+	fi
 else
 	BUILD_ARGS+=("--load")
 fi
