@@ -308,14 +308,16 @@ export class SdrHostPoller extends EventEmitter {
 					pid?: number
 					restartCount?: number
 					lastRestartAt?: string
+					// Actual rtlmux stats.json format:
+					// { server: { dataIn, dataOut }, clients: [ { client: { host, port }, dataIn, dataOut, dropped: { size, count }, connected } ] }
 					stats?: {
-						clients?: number
-						bytesPerSec?: number
-						totalBytesSent?: number
-						clientDetails?: Array<{
-							id: number
-							address: string
-							bytesDropped: number
+						server?: { dataIn?: number; dataOut?: number }
+						clients?: Array<{
+							client?: { host?: string; port?: number }
+							dataIn?: number
+							dataOut?: number
+							dropped?: { size?: number; count?: number }
+							connected?: number
 						}>
 					}
 				}
@@ -328,6 +330,20 @@ export class SdrHostPoller extends EventEmitter {
 				warnings?: string[]
 				errors?: string[]
 			}
+
+			// Extract rtlmux info with proper stats handling
+			const rtlmuxStats = data.rtlmux?.stats
+			const clientCount = Array.isArray(rtlmuxStats?.clients)
+				? rtlmuxStats.clients.length
+				: 0
+			const totalBytesSent = rtlmuxStats?.server?.dataOut ?? 0
+			const clientDetails = Array.isArray(rtlmuxStats?.clients)
+				? rtlmuxStats.clients.map((c, i) => ({
+						id: i,
+						address: c.client?.host ?? "unknown",
+						bytesDropped: c.dropped?.size ?? 0,
+					}))
+				: []
 
 			return {
 				available: true,
@@ -356,10 +372,10 @@ export class SdrHostPoller extends EventEmitter {
 							pid: data.rtlmux.pid ?? null,
 							restartCount: data.rtlmux.restartCount ?? 0,
 							lastRestartAt: data.rtlmux.lastRestartAt ?? null,
-							clients: data.rtlmux.stats?.clients ?? 0,
-							bytesPerSec: data.rtlmux.stats?.bytesPerSec ?? 0,
-							totalBytesSent: data.rtlmux.stats?.totalBytesSent ?? 0,
-							clientDetails: data.rtlmux.stats?.clientDetails ?? [],
+							clients: clientCount,
+							bytesPerSec: 0, // Not directly available from stats.json
+							totalBytesSent,
+							clientDetails,
 						}
 					: null,
 				dongle: data.dongle
