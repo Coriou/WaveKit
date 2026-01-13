@@ -55,6 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rtl-sdr \
     librtlsdr0 \
     libevent-2.1-7 \
+    libevent-pthreads-2.1-7 \
     libusb-1.0-0 \
     usbutils \
     curl \

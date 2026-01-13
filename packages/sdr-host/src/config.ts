@@ -30,10 +30,6 @@ export const SdrHostConfigSchema = z.object({
 		.object({
 			/** TCP port for IQ stream clients (WaveKit connects here) */
 			port: z.number().int().min(1).max(65535).default(5555),
-			/** Bind address (0.0.0.0 for LAN access) */
-			bind: z.string().default("0.0.0.0"),
-			/** HTTP stats port (default: port + 1, i.e., 5556) */
-			statsPort: z.number().int().min(1).max(65535).optional(),
 		})
 		.default({}),
 

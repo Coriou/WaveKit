@@ -5,6 +5,10 @@
 
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILDER="${BUILDER:-wavekit-builder}"
+PLATFORMS="${PLATFORMS:-linux/amd64,linux/arm64,linux/arm/v7}"
+
 TAG="${1:-latest}"
 REGISTRIES=("${@:2}")
 
@@ -31,15 +35,37 @@ error() {
     exit 1
 }
 
+ensure_builder() {
+    local driver
+    if ! docker buildx inspect "$BUILDER" >/dev/null 2>&1; then
+        docker buildx create --name "$BUILDER" --driver docker-container --config "${SCRIPT_DIR}/buildkit.toml" --use >/dev/null
+    else
+        driver="$(docker buildx inspect "$BUILDER" | awk -F': ' '/Driver:/ {print $2}')"
+        if [ "$driver" = "docker" ]; then
+            docker buildx rm "$BUILDER" >/dev/null
+            docker buildx create --name "$BUILDER" --driver docker-container --config "${SCRIPT_DIR}/buildkit.toml" --use >/dev/null
+        else
+            docker buildx use "$BUILDER" >/dev/null
+        fi
+    fi
+    docker buildx inspect "$BUILDER" --bootstrap >/dev/null
+}
+
 # Modes to build
 MODES=("full" "core" "sdrpp")
 
 log "Pushing WaveKit images (tag: $TAG)"
 log "Registries: ${REGISTRIES[*]}"
+log "Platforms: ${PLATFORMS}"
+
+ensure_builder
 
 for MODE in "${MODES[@]}"; do
     log ""
     log "Building and pushing mode: $MODE"
+    TARGET="final"
+    [ "$MODE" = "core" ] && TARGET="final-core"
+    [ "$MODE" = "sdrpp" ] && TARGET="final-sdrpp"
     
     for REGISTRY in "${REGISTRIES[@]}"; do
         IMAGE_NAME="${REGISTRY}/wavekit"
@@ -54,11 +80,12 @@ for MODE in "${MODES[@]}"; do
         
         log "Pushing: $IMAGE"
         
-        DOCKER_BUILDKIT=1 docker build \
-            --target="final-${MODE#full}" \
+        DOCKER_BUILDKIT=1 docker buildx build \
+            --builder "$BUILDER" \
+            --target="$TARGET" \
             --tag="$IMAGE" \
             --tag="$IMAGE_LATEST" \
-            --platform=linux/amd64,linux/arm64,linux/arm/v7 \
+            --platform="$PLATFORMS" \
             --push \
             -f Dockerfile .
         

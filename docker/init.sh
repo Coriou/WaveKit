@@ -26,13 +26,22 @@ log "Docker version: $(docker --version)"
 # Create buildx builder
 log "Setting up Docker buildx builder..."
 if ! docker buildx inspect wavekit-builder &> /dev/null; then
-    docker buildx create --name wavekit-builder --config docker/buildkit.toml
+    docker buildx create --name wavekit-builder --driver docker-container --config docker/buildkit.toml --use
     log "Created new buildx builder: wavekit-builder"
 else
-    log "Buildx builder 'wavekit-builder' already exists"
+    DRIVER="$(docker buildx inspect wavekit-builder | awk -F': ' '/Driver:/ {print $2}')"
+    if [ "$DRIVER" = "docker" ]; then
+        log "Existing builder uses docker driver; recreating for multi-arch."
+        docker buildx rm wavekit-builder
+        docker buildx create --name wavekit-builder --driver docker-container --config docker/buildkit.toml --use
+        log "Recreated buildx builder: wavekit-builder"
+    else
+        log "Buildx builder 'wavekit-builder' already exists"
+        docker buildx use wavekit-builder
+    fi
 fi
 
-docker buildx use wavekit-builder
+docker buildx inspect wavekit-builder --bootstrap >/dev/null
 log "Using buildx builder: wavekit-builder"
 
 # Create build cache directory

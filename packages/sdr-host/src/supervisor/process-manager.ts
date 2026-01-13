@@ -93,8 +93,7 @@ export class ProcessManager {
 		this.refreshProcessStates()
 		this.startProcessPolling()
 
-		const statsPort =
-			this.config.rtlmux.statsPort ?? this.config.rtlmux.port + 1
+		const statsPort = this.config.rtlmux.port + 1
 		this.startStatsPolling(statsPort)
 	}
 

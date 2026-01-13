@@ -4,46 +4,64 @@ This guide covers deploying `wavekit-sdr-host` on a Raspberry Pi or other Linux 
 
 ## Prerequisites
 
-- Raspberry Pi 4/5 (or x86_64 Linux host)
+- Raspberry Pi 3/4/5 (or x86_64 Linux host)
 - RTL-SDR dongle (RTL2838UHIDIR recommended)
-- Docker and Docker Compose installed (see install script below)
+- Docker and Docker Compose installed (managed option handles this)
 - Network connectivity to WaveKit container
 
 ## Deployment
 
-### 1. Install Docker (if needed)
+Choose **one** of the two options below.
 
-Run the WaveKit installer on the host:
+### Option A — Managed (Recommended)
 
-```bash
-bash ./packages/sdr-host/scripts/install-docker.sh
-```
-
-Or via curl once published:
+The WaveKit host manager handles Docker install, USB prep, compose setup, updates, and restarts.
+Run this on the SDR host (Pi), not your build machine.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/install-docker.sh | bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
+chmod +x ~/.local/bin/wavekit-sdr-host
+
+~/.local/bin/wavekit-sdr-host install
+~/.local/bin/wavekit-sdr-host update
 ```
 
-### 2. Blacklist DVB Driver
-
-The Linux kernel's DVB driver claims RTL-SDR devices by default. Blacklist it:
+To update the manager script later:
 
 ```bash
-echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtl.conf
-sudo reboot
+curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
+chmod +x ~/.local/bin/wavekit-sdr-host
 ```
 
-### 3. Verify Dongle Detection
+This creates `~/.config/wavekit-sdr-host/` with a `docker-compose.yml` and `.env`.
 
-```bash
-lsusb | grep RTL
-# Should show: Bus 001 Device 004: ID 0bda:2838 Realtek Semiconductor Corp.
-```
+Edit `.env` to customize gain, sample rate, ports, or image tag.
 
-### 4. Deploy Container
+From the repo, `make sdr-host-install` and `make sdr-host-update` run the same pipeline.
 
-Create `docker-compose.yml`:
+The installer will offer to blacklist DVB drivers and recommend a reboot.
+
+### Option B — DIY (Manual)
+
+Run these steps on the SDR host (Pi), not your build machine.
+Do these steps yourself (this is what the scripts automate):
+
+1. **Install Docker + Compose** (and add your user to the `docker` group).
+2. **Blacklist DVB drivers** so the dongle is free:
+
+   ```bash
+   echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtl.conf
+   sudo reboot
+   ```
+
+3. **Verify dongle detection**:
+
+   ```bash
+   lsusb | grep RTL
+   ```
+
+4. **Create a compose file**:
 
 ```yaml
 services:
@@ -61,7 +79,7 @@ services:
       SDR_HOST_RTLMUX__PORT: "5555"
 ```
 
-Start:
+5. **Start the container**:
 
 ```bash
 docker compose up -d
@@ -79,7 +97,7 @@ To use a different manual gain (AGC off):
 SDR_HOST_RTL_TCP__GAIN=42.5
 ```
 
-### 5. Configure WaveKit
+## Configure WaveKit
 
 In WaveKit's `config/custom.yaml`:
 
@@ -127,6 +145,46 @@ curl http://localhost:8080/api/status
 
 ```bash
 curl http://localhost:8080/api/fix
+```
+
+Make shortcuts (from repo root):
+
+```bash
+make sdr-host-health
+make sdr-host-logs
+```
+
+## Maintenance
+
+Preferred (from repo root):
+
+```bash
+make sdr-host-clean
+```
+
+Free disk space on the host directly:
+
+```bash
+bash ./packages/sdr-host/scripts/docker-cleanup.sh --aggressive --volumes
+```
+
+### Stats Endpoint Not Reachable
+
+rtlmux binds its stats server on an IPv6 socket. If your host is configured
+for IPv6-only sockets (`net.ipv6.bindv6only=1`), IPv4 clients won't be able
+to reach `http://localhost:5556/stats.json`.
+
+Fix (recommended):
+
+```bash
+sudo sysctl -w net.ipv6.bindv6only=0
+echo "net.ipv6.bindv6only=0" | sudo tee /etc/sysctl.d/99-wavekit.conf
+```
+
+Then restart the container:
+
+```bash
+docker compose -f packages/sdr-host/docker-compose.yml up -d --force-recreate
 ```
 
 ## Architecture

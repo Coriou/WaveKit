@@ -16,13 +16,10 @@ export function registerStatusRoutes(
 		const rtlmuxState = processManager.getRtlmuxState()
 		const rtlmuxStats = processManager.getRtlmuxStats()
 
-		const statsPort = config.rtlmux.statsPort ?? config.rtlmux.port + 1
-		const bindHost = config.rtlmux.bind
-		const requestHost = request.hostname || bindHost
-		const publicHost =
-			bindHost === "0.0.0.0" || bindHost === "::" ? requestHost : bindHost
-		const endpoint = `tcp://${publicHost}:${config.rtlmux.port}`
-		const statsUrl = `http://${publicHost}:${statsPort}/stats.json`
+		const statsPort = config.rtlmux.port + 1
+		const requestHost = request.hostname || "localhost"
+		const endpoint = `tcp://${requestHost}:${config.rtlmux.port}`
+		const statsUrl = `http://${requestHost}:${statsPort}/stats.json`
 
 		const warnings: string[] = [...preflightResult.warnings]
 		const errors: string[] = [...preflightResult.errors]

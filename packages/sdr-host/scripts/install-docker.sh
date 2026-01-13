@@ -211,6 +211,19 @@ else
 	sudo apt-get install -y --no-install-recommends docker-compose-plugin
 fi
 
+if [ -r /proc/sys/net/ipv6/bindv6only ]; then
+	BINDV6ONLY="$(cat /proc/sys/net/ipv6/bindv6only 2>/dev/null || echo 0)"
+	if [ "${BINDV6ONLY}" != "0" ]; then
+		warn "IPv6 sockets are set to IPv6-only (net.ipv6.bindv6only=1)."
+		warn "rtlmux uses IPv6 sockets and needs dual-stack to serve IPv4 clients."
+		if confirm "Set net.ipv6.bindv6only=0 (recommended)?" "Y"; then
+			sudo sysctl -w net.ipv6.bindv6only=0 >/dev/null
+			echo "net.ipv6.bindv6only=0" | sudo tee /etc/sysctl.d/99-wavekit.conf >/dev/null
+			log "Saved to /etc/sysctl.d/99-wavekit.conf"
+		fi
+	fi
+fi
+
 if [ "$SKIP_BLACKLIST" = false ]; then
 	if confirm "Blacklist RTL-SDR DVB kernel drivers (recommended)?" "Y"; then
 		BLACKLIST_FILE="/etc/modprobe.d/wavekit-rtl-sdr-blacklist.conf"

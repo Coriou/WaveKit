@@ -243,10 +243,16 @@ services:
 
 ## Multi-Platform Builds
 
+Preferred (from repo root):
+
 ```bash
-# Enable buildx
-docker buildx create --name wavekit-builder
-docker buildx use wavekit-builder
+make install-buildx
+```
+
+```bash
+# Enable buildx (docker-container driver supports multi-arch)
+docker buildx create --name wavekit-builder --driver docker-container --use
+docker buildx inspect wavekit-builder --bootstrap
 
 # Build for multiple platforms
 docker buildx build \

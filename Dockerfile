@@ -325,7 +325,7 @@ WORKDIR /build
 
 RUN git clone --depth 1 https://github.com/wiedehopf/readsb.git && \
     cd readsb && \
-    make -j$(nproc) RTLSDR=yes && \
+    make -j2 RTLSDR=yes OPTIMIZE="-O1" && \
     cp readsb /usr/local/bin/
 
 # ============================================================================

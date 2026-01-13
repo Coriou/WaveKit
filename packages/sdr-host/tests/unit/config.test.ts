@@ -16,7 +16,6 @@ describe("SdrHostConfigSchema", () => {
 		expect(result.rtlTcp.deviceIndex).toBe(0)
 
 		expect(result.rtlmux.port).toBe(5555)
-		expect(result.rtlmux.bind).toBe("0.0.0.0")
 
 		expect(result.api.host).toBe("0.0.0.0")
 		expect(result.api.port).toBe(8080)
@@ -37,8 +36,6 @@ describe("SdrHostConfigSchema", () => {
 			},
 			rtlmux: {
 				port: 6666,
-				bind: "192.168.1.1",
-				statsPort: 6667,
 			},
 			api: {
 				host: "127.0.0.1",
@@ -55,7 +52,6 @@ describe("SdrHostConfigSchema", () => {
 		expect(result.rtlTcp.agc).toBe(false)
 		expect(result.rtlTcp.gain).toBe(42.5)
 		expect(result.rtlmux.port).toBe(6666)
-		expect(result.rtlmux.statsPort).toBe(6667)
 		expect(result.api.port).toBe(9090)
 		expect(result.logging.level).toBe("debug")
 	})

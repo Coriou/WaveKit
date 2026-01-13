@@ -4,7 +4,8 @@ sources:
   - id: pi-iq
     type: rtl_tcp
     host: 192.168.1.69
-    port: 1235
+    # port: 1235
+    port: 5555
     caps:
       kind: iq
       sampleRate: 2048000
@@ -12,15 +13,15 @@ sources:
       exclusive: false
 
   # Audio from SDR++ on Mac (optional, for audio monitoring)
-  - id: sdrpp
-    type: sdrpp-network
-    host: host.docker.internal
-    port: 7355
-    caps:
-      kind: audio_pcm
-      sampleRate: 48000
-      format: S16LE
-      exclusive: false
+  # - id: sdrpp
+  #   type: sdrpp-network
+  #   host: host.docker.internal
+  #   port: 7355
+  #   caps:
+  #     kind: audio_pcm
+  #     sampleRate: 48000
+  #     format: S16LE
+  #     exclusive: false
 
 decoders:
   # Pager/data decoder - POCSAG, FLEX, EAS alerts, DTMF, AFSK1200

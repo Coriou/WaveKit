@@ -1,7 +1,11 @@
 .PHONY: help docker-build docker-build-full docker-build-core docker-build-sdrpp \
 	docker-dev docker-prod docker-push docker-clean docker-logs \
 	docker-shell docker-compose-up docker-compose-down \
-	cli-install dev-dashboard-build dev-dashboard
+	cli-install dev-dashboard-build dev-dashboard \
+	sdr-host-build sdr-host-build-multi sdr-host-install sdr-host-init \
+	sdr-host-up sdr-host-update sdr-host-down sdr-host-restart \
+	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
+	sdr-host-clean
 
 # WaveKit Docker Makefile
 # Quick commands for development and deployment
@@ -16,6 +20,8 @@ TAG ?= latest
 BUILDKIT ?= 1
 COMPOSE_DEV := docker-compose -f docker-compose.dev.yml
 COMPOSE_PROD := docker-compose -f docker-compose.prod.yml -f docker-compose.override.yml
+SDR_HOST_TAG ?= latest
+SDR_HOST_PLATFORMS ?= linux/arm64
 
 # Colors for output
 BLUE := \033[0;34m
@@ -107,12 +113,59 @@ docker-run-core: ## Run core mode manually (requires wavekit:core)
 		wavekit:core
 
 # ==============================================================================
+# SDR Host Commands
+# ==============================================================================
+
+sdr-host-build: ## Build & publish sdr-host image (default: arm64)
+	@bash ./packages/sdr-host/scripts/build-publish.sh --tag $(SDR_HOST_TAG) --platform $(SDR_HOST_PLATFORMS)
+
+sdr-host-build-multi: ## Build & publish multi-arch sdr-host image
+	@bash ./packages/sdr-host/scripts/build-publish.sh --tag $(SDR_HOST_TAG) --multi-arch
+
+sdr-host-install: ## Install docker + deps on host (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh install
+
+sdr-host-init: ## Prepare host config files (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh init
+
+sdr-host-up: ## Start sdr-host container (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh up
+
+sdr-host-update: ## Pull latest image + recreate container (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh update
+
+sdr-host-down: ## Stop sdr-host container (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh down
+
+sdr-host-restart: ## Restart sdr-host container (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh restart
+
+sdr-host-logs: ## Tail sdr-host logs (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh logs
+
+sdr-host-status: ## Show sdr-host status (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh status
+
+sdr-host-health: ## Check sdr-host health endpoints (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh health
+
+sdr-host-compose-update: ## Refresh sdr-host compose file (run on host)
+	@bash ./packages/sdr-host/scripts/sdr-host.sh compose-update
+
+sdr-host-clean: ## Docker cleanup helper (run on host)
+	@bash ./packages/sdr-host/scripts/docker-cleanup.sh
+
+# ==============================================================================
 # Dev Testing Commands (State of the Art DevX)
 # Usage: make dev-build && make dev-start
 # ==============================================================================
 
 DEV_CONTAINER := wavekit-dev
 DEV_IMAGE := wavekit:latest-core
+DEV_PORT_API ?= 9000
+DEV_PORT_AUDIO ?= 8080
+DEV_PORT_LIVE ?= 8081
+DEV_PORT_TUNER ?= 1234
 
 # Config selection: make dev-up CONFIG=dev_acars (defaults to dev_test)
 CONFIG ?= dev_test
@@ -129,7 +182,7 @@ dev-start: ## Start dev container (stops existing first)
 	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
 	@mkdir -p $(shell pwd)/debug_audio
 	@docker run --rm -d --name $(DEV_CONTAINER) \
-		-p 9000:3000 -p 8080:8080 -p 8081:8081 -p 1234:1234 \
+		-p $(DEV_PORT_API):3000 -p $(DEV_PORT_AUDIO):8080 -p $(DEV_PORT_LIVE):8081 -p $(DEV_PORT_TUNER):1234 \
 		-v $(DEV_CONFIG):/app/config/default.yaml \
 		-v $(shell pwd)/debug_audio:/data/debug_audio \
 		-v $(shell pwd)/decoded_calls:/app/decoded_calls \
@@ -137,11 +190,11 @@ dev-start: ## Start dev container (stops existing first)
 	@echo ""
 	@echo "$(GREEN)✅ WaveKit running!$(NC)"
 	@echo ""
-	@echo "  $(BLUE)API$(NC)        http://localhost:9000"
-	@echo "  $(BLUE)Health$(NC)     http://localhost:9000/health"
-	@echo "  $(BLUE)Audio$(NC)      nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -"
-	@echo "  $(BLUE)Live Audio$(NC) http://localhost:8081/stream"
-	@echo "  $(BLUE)Tuner$(NC)      rtl_tcp on localhost:1234 (SDR++)"
+	@echo "  $(BLUE)API$(NC)        http://localhost:$(DEV_PORT_API)"
+	@echo "  $(BLUE)Health$(NC)     http://localhost:$(DEV_PORT_API)/health"
+	@echo "  $(BLUE)Audio$(NC)      nc localhost $(DEV_PORT_AUDIO) | play -t raw -r 48000 -e signed -b 16 -c 1 -"
+	@echo "  $(BLUE)Live Audio$(NC) http://localhost:$(DEV_PORT_LIVE)/stream"
+	@echo "  $(BLUE)Tuner$(NC)      rtl_tcp on localhost:$(DEV_PORT_TUNER) (SDR++)"
 	@echo ""
 	@echo "  $(YELLOW)Commands:$(NC)"
 	@echo "    make dev-logs         - All logs"
@@ -166,7 +219,7 @@ dev-logs-raw: ## Tail raw container logs
 
 dev-audio: ## Listen to decoded audio (requires sox)
 	@echo "$(BLUE)Streaming audio from WaveKit... (Ctrl+C to stop)$(NC)"
-	@nc localhost 8080 | play -t raw -r 48000 -e signed -b 16 -c 1 -
+	@nc localhost $(DEV_PORT_AUDIO) | play -t raw -r 48000 -e signed -b 16 -c 1 -
 
 dev-debug-audio: ## Convert and list debug audio recordings
 	@echo "$(BLUE)Debug Audio Recordings:$(NC)"
@@ -186,7 +239,7 @@ dev-status: ## Show container status and health
 	@docker ps --filter name=$(DEV_CONTAINER) --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "Not running"
 	@echo ""
 	@echo "$(BLUE)Health Check:$(NC)"
-	@curl -s http://localhost:9000/health | jq . 2>/dev/null || echo "API not reachable"
+	@curl -s http://localhost:$(DEV_PORT_API)/health | jq . 2>/dev/null || echo "API not reachable"
 
 cli-install: ## Install CLI dashboard dependencies (if missing)
 	@test -d cli/node_modules || pnpm --filter @wavekit/cli install
@@ -286,8 +339,18 @@ docker-history: ## Show image layer history
 
 install-buildx: ## Install Docker buildx (for multi-platform builds)
 	@echo "$(BLUE)Installing docker buildx...$(NC)"
-	@docker buildx create --name wavekit-builder 2>/dev/null || echo "Builder already exists"
-	@docker buildx use wavekit-builder
+	@driver=$$(docker buildx inspect wavekit-builder 2>/dev/null | awk -F': ' '/Driver:/ {print $$2}'); \
+	if [ "$$driver" = "docker" ]; then \
+		echo "$(YELLOW)Builder uses docker driver; recreating for multi-arch$(NC)"; \
+		docker buildx rm wavekit-builder >/dev/null; \
+	fi; \
+	if ! docker buildx inspect wavekit-builder >/dev/null 2>&1; then \
+		docker buildx create --name wavekit-builder --driver docker-container --config docker/buildkit.toml --use >/dev/null; \
+	else \
+		docker buildx use wavekit-builder >/dev/null; \
+	fi; \
+	docker buildx inspect wavekit-builder --bootstrap >/dev/null; \
+	echo "$(GREEN)✅ buildx ready$(NC)"
 
 demo: docker-build-full docker-dev ## Build and run demo
 	@echo ""

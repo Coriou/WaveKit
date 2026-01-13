@@ -13,34 +13,44 @@ RTL-SDR dongle host with rtlmux fanout and unified status API.
 
 ## Quick Start
 
-1. **Install Docker (if needed)**:
+Choose **one** of the two options below.
 
-   ```bash
-   bash ./scripts/install-docker.sh
-   ```
+### Option A — Managed (Recommended)
 
-   From the repo root:
+Run this on the SDR host (Pi), not your build machine.
 
-   ```bash
-   bash ./packages/sdr-host/scripts/install-docker.sh
-   ```
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
+chmod +x ~/.local/bin/wavekit-sdr-host
 
-2. **Blacklist DVB driver** (one-time on host):
+~/.local/bin/wavekit-sdr-host install
+~/.local/bin/wavekit-sdr-host update
+```
 
-   ```bash
-   echo 'blacklist dvb_usb_rtl28xxu' | sudo tee /etc/modprobe.d/blacklist-rtl.conf
-   sudo reboot
-   ```
+From the repo, `make sdr-host-install` and `make sdr-host-update` run the same pipeline.
 
-3. **Plug in RTL-SDR dongle**
+The script stores config in `~/.config/wavekit-sdr-host/` and creates a `.env` file you can edit.
 
-4. **Start the container**:
+The installer will offer to blacklist DVB drivers and recommend a reboot.
 
-   ```bash
-   docker compose up -d
-   ```
+To update the manager script later:
 
-5. **Point WaveKit** to `tcp://<this-host-ip>:5555`
+```bash
+curl -fsSL https://raw.githubusercontent.com/coriou/wavekit/main/packages/sdr-host/scripts/sdr-host.sh -o ~/.local/bin/wavekit-sdr-host
+chmod +x ~/.local/bin/wavekit-sdr-host
+```
+
+### Option B — DIY (Manual)
+
+Run these steps on the SDR host (Pi), not your build machine.
+
+Do these steps yourself (this is what the scripts automate):
+
+1. Install Docker + Compose and add your user to the `docker` group.
+2. Blacklist DVB drivers so the dongle is free.
+3. Create a `docker-compose.yml` and run `docker compose up -d`.
+4. Point WaveKit to `tcp://<this-host-ip>:5555`.
 
 ## Configuration
 
@@ -54,11 +64,51 @@ All configuration via environment variables with `SDR_HOST_` prefix:
 | `SDR_HOST_RTL_TCP__PPM`          | `0`       | PPM correction    |
 | `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`       | USB device index  |
 | `SDR_HOST_RTLMUX__PORT`          | `5555`    | IQ stream port    |
-| `SDR_HOST_RTLMUX__BIND`          | `0.0.0.0` | Bind address      |
 | `SDR_HOST_API__PORT`             | `8080`    | Status API port   |
 | `SDR_HOST_LOGGING__LEVEL`        | `info`    | Log level         |
 
 AGC is off by default to match common RTL-SDR setups. When `SDR_HOST_RTL_TCP__AGC` is `true`, manual gain is ignored.
+
+## Dev Workflow
+
+Preferred (from repo root):
+
+```bash
+make sdr-host-build
+make sdr-host-build-multi
+```
+
+Build and publish a new image directly (handles buildx for multi-arch):
+
+```bash
+bash ./packages/sdr-host/scripts/build-publish.sh --multi-arch
+```
+
+Single-arch (Pi only):
+
+```bash
+bash ./packages/sdr-host/scripts/build-publish.sh --platform linux/arm64
+```
+
+To avoid repeating your GH owner, add this to a repo-local `.env` or `.env.local` (ignored by git):
+
+```bash
+WAVEKIT_GH_OWNER=coriou
+```
+
+## Maintenance
+
+Preferred (from repo root):
+
+```bash
+make sdr-host-clean
+```
+
+Free disk space on the host directly:
+
+```bash
+bash ./packages/sdr-host/scripts/docker-cleanup.sh --aggressive --volumes
+```
 
 ## API Endpoints
 
@@ -96,4 +146,11 @@ curl http://localhost:5556/stats.json
 
 # View logs
 docker compose logs -f
+```
+
+Make shortcuts (from repo root):
+
+```bash
+make sdr-host-health
+make sdr-host-logs
 ```

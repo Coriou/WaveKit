@@ -14,7 +14,7 @@
 
 services:
   wavekit-sdr-host:
-    image: ghcr.io/coriou/wavekit-sdr-host:latest
+    image: ${WAVEKIT_SDR_HOST_IMAGE:-ghcr.io/coriou/wavekit-sdr-host:latest}
     container_name: wavekit-sdr-host
     restart: unless-stopped
 
@@ -29,19 +29,18 @@ services:
 
     environment:
       # rtl_tcp settings
-      SDR_HOST_RTL_TCP__SAMPLE_RATE: "2048000" # 2.048 Msps (NOT 2.4!)
-      SDR_HOST_RTL_TCP__AGC: "false" # AGC off by default
-      SDR_HOST_RTL_TCP__GAIN: "49" # Manual gain in dB (used when AGC is false)
-      SDR_HOST_RTL_TCP__PPM: "0"
-      SDR_HOST_RTL_TCP__DEVICE_INDEX: "0"
+      SDR_HOST_RTL_TCP__SAMPLE_RATE: "${SDR_HOST_RTL_TCP__SAMPLE_RATE:-2048000}" # 2.048 Msps (NOT 2.4!)
+      SDR_HOST_RTL_TCP__AGC: "${SDR_HOST_RTL_TCP__AGC:-false}" # AGC off by default
+      SDR_HOST_RTL_TCP__GAIN: "${SDR_HOST_RTL_TCP__GAIN:-49}" # Manual gain in dB (used when AGC is false)
+      SDR_HOST_RTL_TCP__PPM: "${SDR_HOST_RTL_TCP__PPM:-0}"
+      SDR_HOST_RTL_TCP__DEVICE_INDEX: "${SDR_HOST_RTL_TCP__DEVICE_INDEX:-0}"
 
       # rtlmux settings (IQ streaming)
-      SDR_HOST_RTLMUX__PORT: "5555" # WaveKit connects here
-      SDR_HOST_RTLMUX__BIND: "0.0.0.0"
+      SDR_HOST_RTLMUX__PORT: "${SDR_HOST_RTLMUX__PORT:-5555}" # WaveKit connects here
 
       # Status API
-      SDR_HOST_API__PORT: "8080"
-      SDR_HOST_LOGGING__LEVEL: "info"
+      SDR_HOST_API__PORT: "${SDR_HOST_API__PORT:-8080}"
+      SDR_HOST_LOGGING__LEVEL: "${SDR_HOST_LOGGING__LEVEL:-info}"
 
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]

@@ -274,11 +274,11 @@ See [docs/DOCKER-SETUP.md](../DOCKER-SETUP.md) for comprehensive documentation i
 # Setup buildx
 make install-buildx
 
-# Build for amd64, arm64, arm/v7
-make docker-build BUILDKIT=1
-
-# Push to registry
+# Build and push multi-arch images (amd64, arm64, arm/v7)
 make docker-push REGISTRY=docker.io/myuser
+
+# Local single-arch build
+make docker-build
 ```
 
 ## ✨ Key Features
