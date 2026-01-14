@@ -141,6 +141,8 @@ export interface AircraftIdentification {
 	operatorCode?: string
 	/** Country of registration */
 	country?: string
+	/** URL to aircraft image from hexdb.io (if available) */
+	imageUrl?: string
 	/** Data source */
 	source?: EnrichmentSource
 }

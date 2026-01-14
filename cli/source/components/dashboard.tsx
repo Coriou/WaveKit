@@ -13,6 +13,7 @@ import type {
 	SourceStatus as SourceStatusType,
 	TunerRelayStatus,
 	LiveAudioStatus,
+	AircraftState,
 } from "../types.js"
 import { formatBytes, formatRate, padRight } from "../utils/format.js"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
@@ -26,6 +27,8 @@ interface DashboardProps {
 	messages?: DecoderOutput[]
 	tunerRelay?: TunerRelayStatus | null
 	liveAudioStatus?: LiveAudioStatus | null
+	/** Enriched aircraft data from the aircraft:update channel, keyed by ICAO */
+	enrichedAircraft?: Map<string, AircraftState>
 }
 
 /** Maps server health values to unified display status */
@@ -52,6 +55,7 @@ export function Dashboard({
 	messages = [],
 	tunerRelay = null,
 	liveAudioStatus = null,
+	enrichedAircraft,
 }: DashboardProps) {
 	const { columns: termWidth } = useTerminalSize()
 
@@ -339,6 +343,7 @@ export function Dashboard({
 					newestFirst={true}
 					showMoreHint={true}
 					moreHintText="press 3 to view all"
+					enrichedAircraft={enrichedAircraft}
 				/>
 			</Box>
 		</Box>

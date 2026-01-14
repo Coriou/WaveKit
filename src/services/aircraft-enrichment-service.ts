@@ -41,6 +41,8 @@ export interface AircraftEnrichmentConfig {
 	requestTimeoutMs?: number
 	/** Enable enrichment (default: true) */
 	enabled?: boolean
+	/** Fetch aircraft images from hexdb.io (default: true) */
+	fetchImages?: boolean
 }
 
 const DEFAULT_CONFIG: Required<AircraftEnrichmentConfig> = {
@@ -50,6 +52,7 @@ const DEFAULT_CONFIG: Required<AircraftEnrichmentConfig> = {
 	rateLimitMs: 1000, // 1 request per second
 	requestTimeoutMs: 5000,
 	enabled: true,
+	fetchImages: true,
 }
 
 // ============================================================================
@@ -318,6 +321,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 
 	/**
 	 * Fetch aircraft data from hexdb.io API.
+	 * Fetches both aircraft info and image URL in parallel for efficiency.
 	 */
 	private async fetchFromHexdb(
 		icao: string,
@@ -331,14 +335,18 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		)
 
 		try {
-			const response = await fetch(url, {
-				method: "GET",
-				headers: {
-					Accept: "application/json",
-					"User-Agent": "WaveKit/1.0 (Aircraft Tracker)",
-				},
-				signal: controller.signal,
-			})
+			// Fetch aircraft data and image URL in parallel
+			const [response, imageUrl] = await Promise.all([
+				fetch(url, {
+					method: "GET",
+					headers: {
+						Accept: "application/json",
+						"User-Agent": "WaveKit/1.0 (Aircraft Tracker)",
+					},
+					signal: controller.signal,
+				}),
+				this.fetchImageUrl(icao),
+			])
 
 			clearTimeout(timeoutId)
 
@@ -351,7 +359,14 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			}
 
 			const data = (await response.json()) as HexdbAircraftResponse
-			return this.parseHexdbResponse(data)
+			const identification = this.parseHexdbResponse(data)
+
+			// Add image URL if available and we got valid identification
+			if (identification && imageUrl) {
+				identification.imageUrl = imageUrl
+			}
+
+			return identification
 		} catch (err) {
 			clearTimeout(timeoutId)
 			if (err instanceof Error && err.name === "AbortError") {
@@ -399,6 +414,62 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 	}
 
 	/**
+	 * Fetch aircraft image URL from hexdb.io hex-image endpoint.
+	 * Returns the image URL if available, null otherwise.
+	 *
+	 * The hex-image endpoint returns:
+	 * - Plain text URL (e.g., "https://hexdb.io/static/aircraft-images/N12345.jpg")
+	 * - "n/a" with 404 status if no image exists
+	 */
+	private async fetchImageUrl(icao: string): Promise<string | null> {
+		if (!this.config.fetchImages) {
+			return null
+		}
+
+		const url = `${this.config.hexdbUrl}/hex-image?hex=${icao}`
+
+		const controller = new AbortController()
+		const timeoutId = setTimeout(
+			() => controller.abort(),
+			this.config.requestTimeoutMs,
+		)
+
+		try {
+			const response = await fetch(url, {
+				method: "GET",
+				headers: {
+					"User-Agent": "WaveKit/1.0 (Aircraft Tracker)",
+				},
+				signal: controller.signal,
+			})
+
+			clearTimeout(timeoutId)
+
+			// 404 means no image available
+			if (!response.ok) {
+				return null
+			}
+
+			const text = (await response.text()).trim()
+
+			// "n/a" response means no image
+			if (text === "n/a" || !text.startsWith("http")) {
+				return null
+			}
+
+			return text
+		} catch (err) {
+			clearTimeout(timeoutId)
+			// Silently fail for image lookups - non-critical feature
+			this.log.debug(
+				{ icao, error: (err as Error).message },
+				"Image lookup failed",
+			)
+			return null
+		}
+	}
+
+	/**
 	 * Apply enrichment data to the tracker's aircraft state.
 	 */
 	private applyEnrichmentToTracker(
@@ -424,6 +495,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			if (existingId.operator) merged.operator = existingId.operator
 			if (existingId.operatorCode) merged.operatorCode = existingId.operatorCode
 			if (existingId.country) merged.country = existingId.country
+			if (existingId.imageUrl) merged.imageUrl = existingId.imageUrl
 			if (existingId.source) merged.source = existingId.source
 		}
 
@@ -435,6 +507,7 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 		if (data.operator) merged.operator = data.operator
 		if (data.operatorCode) merged.operatorCode = data.operatorCode
 		if (data.country) merged.country = data.country
+		if (data.imageUrl) merged.imageUrl = data.imageUrl
 		if (data.source) merged.source = data.source
 
 		aircraft.identification = merged

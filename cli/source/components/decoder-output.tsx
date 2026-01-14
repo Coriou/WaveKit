@@ -7,18 +7,24 @@
 
 import React from "react"
 import { Box, Text } from "ink"
-import type { DecoderOutput as DecoderOutputType } from "../types.js"
+import type {
+	DecoderOutput as DecoderOutputType,
+	AircraftState,
+} from "../types.js"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
 import { DecodedMessageList } from "./decoded-message.js"
 
 interface DecoderOutputProps {
 	messages: DecoderOutputType[]
 	maxMessages?: number
+	/** Enriched aircraft data from the aircraft:update channel, keyed by ICAO */
+	enrichedAircraft?: Map<string, AircraftState>
 }
 
 export function DecoderOutput({
 	messages,
 	maxMessages = 50,
+	enrichedAircraft,
 }: DecoderOutputProps): React.ReactElement {
 	const { columns: stdoutWidth } = useTerminalSize()
 
@@ -66,6 +72,7 @@ export function DecoderOutput({
 				maxDataWidth={dataWidth}
 				newestFirst={true}
 				compact={false}
+				enrichedAircraft={enrichedAircraft}
 			/>
 		</Box>
 	)

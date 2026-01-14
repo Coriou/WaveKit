@@ -145,3 +145,20 @@ export function formatProtocol(protocol: string | undefined | null): string {
 	if (!protocol) return "UNKNOWN"
 	return protocol.toUpperCase().replace(/P(\d)/, "P$1 ") // "p25p1" -> "P25 P1"
 }
+
+/**
+ * Format text as a clickable terminal hyperlink using OSC 8 escape sequence.
+ * Works in most modern terminal emulators (iTerm2, Terminal.app, VS Code, etc.)
+ *
+ * Falls back to plain text if url is undefined.
+ *
+ * NOTE: For Ink components, prefer using `ink-link` package instead, as Ink's
+ * Text component may escape these sequences. This utility is for raw terminal output.
+ *
+ * @see https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
+ */
+export function formatHyperlink(text: string, url: string | undefined): string {
+	if (!url) return text
+	// OSC 8 hyperlink: \x1b]8;;URL\x07TEXT\x1b]8;;\x07
+	return `\x1b]8;;${url}\x07${text}\x1b]8;;\x07`
+}

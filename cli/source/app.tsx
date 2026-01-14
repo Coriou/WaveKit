@@ -36,6 +36,7 @@ import type {
 	TunerState,
 	LiveAudioStatus,
 	ResourceSnapshot,
+	AircraftState,
 } from "./types.js"
 
 // ============================================================================
@@ -57,6 +58,8 @@ interface AppState {
 	tunerActionError: string | null
 	liveAudioStatus: LiveAudioStatus | null
 	resourceSnapshot: ResourceSnapshot | null
+	/** Enriched aircraft data from aircraft:update events, keyed by ICAO */
+	enrichedAircraft: Map<string, AircraftState>
 }
 
 // ============================================================================
@@ -109,6 +112,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		tunerActionError: null,
 		liveAudioStatus: null,
 		resourceSnapshot: null,
+		enrichedAircraft: new Map(),
 	})
 	const [tunerInputActive, setTunerInputActive] = useState(false)
 
@@ -248,6 +252,55 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				break
 			}
 
+			// Aircraft events - store enriched aircraft data for display
+			// Merge with existing state to preserve enrichment data
+			case "aircraft:new":
+			case "aircraft:update": {
+				const aircraft = msg.data as AircraftState | undefined
+				if (aircraft?.icao) {
+					setState(prev => {
+						const newMap = new Map(prev.enrichedAircraft)
+						const icaoKey = aircraft.icao.toUpperCase()
+						const existing = newMap.get(icaoKey)
+
+						// Merge: preserve existing identification if incoming doesn't have it
+						// This prevents enrichment data loss when non-enriched updates arrive
+						if (existing?.identification && !aircraft.identification) {
+							newMap.set(icaoKey, {
+								...aircraft,
+								identification: existing.identification,
+							})
+						} else if (existing?.identification && aircraft.identification) {
+							// Merge identification fields, incoming takes precedence for defined fields
+							newMap.set(icaoKey, {
+								...aircraft,
+								identification: {
+									...existing.identification,
+									...aircraft.identification,
+								},
+							})
+						} else {
+							newMap.set(icaoKey, aircraft)
+						}
+
+						return { ...prev, enrichedAircraft: newMap }
+					})
+				}
+				break
+			}
+
+			case "aircraft:lost": {
+				const data = msg.data as { icao?: string } | undefined
+				if (data?.icao) {
+					setState(prev => {
+						const newMap = new Map(prev.enrichedAircraft)
+						newMap.delete(data.icao!.toUpperCase())
+						return { ...prev, enrichedAircraft: newMap }
+					})
+				}
+				break
+			}
+
 			case "subscribed":
 				// Successfully subscribed
 				break
@@ -269,6 +322,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 			"live-audio",
 			"resources",
 			"tuner",
+			"aircraft",
 		],
 		onMessage: handleMessage,
 	})
@@ -563,6 +617,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						messages={state.messages}
 						tunerRelay={state.tunerRelay}
 						liveAudioStatus={state.liveAudioStatus}
+						enrichedAircraft={state.enrichedAircraft}
 					/>
 				)
 			case "decoders":
@@ -572,6 +627,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 					<DecoderOutputPanel
 						messages={state.messages}
 						maxMessages={outputMaxMessages}
+						enrichedAircraft={state.enrichedAircraft}
 					/>
 				)
 			case "backpressure":

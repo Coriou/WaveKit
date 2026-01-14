@@ -62,6 +62,17 @@ function mockFetchSuccess(data: Record<string, unknown>) {
 }
 
 /**
+ * Helper to create a successful text (image URL) fetch response
+ */
+function mockFetchTextSuccess(text: string) {
+	mockFetch.mockResolvedValueOnce({
+		ok: true,
+		status: 200,
+		text: () => Promise.resolve(text),
+	})
+}
+
+/**
  * Helper to create a 404 fetch response
  */
 function mockFetch404() {
@@ -69,6 +80,18 @@ function mockFetch404() {
 		ok: false,
 		status: 404,
 		statusText: "Not Found",
+	})
+}
+
+/**
+ * Helper to create a 404 text response for image lookups
+ */
+function mockFetch404Text() {
+	mockFetch.mockResolvedValueOnce({
+		ok: false,
+		status: 404,
+		statusText: "Not Found",
+		text: () => Promise.resolve("n/a"),
 	})
 }
 
@@ -177,6 +200,7 @@ describe("AircraftEnrichmentService", () => {
 	describe("Caching", () => {
 		it("should cache successful lookups", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			// First lookup
@@ -187,11 +211,12 @@ describe("AircraftEnrichmentService", () => {
 
 			expect(result).toBeDefined()
 			expect(result!.registration).toBe("N12345")
-			expect(mockFetch).toHaveBeenCalledTimes(1) // Only one API call
+			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
 		})
 
 		it("should cache 404 responses to avoid repeated lookups", async () => {
 			mockFetch404()
+			mockFetch404Text() // Image fetch also returns 404
 			service.start()
 
 			// First lookup
@@ -201,11 +226,12 @@ describe("AircraftEnrichmentService", () => {
 			const result = await service.lookup("UNKNOWN")
 
 			expect(result).toBeNull()
-			expect(mockFetch).toHaveBeenCalledTimes(1) // Only one API call
+			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
 		})
 
 		it("should track cache statistics", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			// First lookup - miss
@@ -222,7 +248,7 @@ describe("AircraftEnrichmentService", () => {
 
 		it("should evict oldest entries when cache is full", async () => {
 			const smallCacheService = new AircraftEnrichmentService(
-				{ ...defaultConfig, maxCacheSize: 2 },
+				{ ...defaultConfig, maxCacheSize: 2, fetchImages: false },
 				testLogger,
 			)
 			smallCacheService.start()
@@ -245,7 +271,7 @@ describe("AircraftEnrichmentService", () => {
 
 		it("should expire cache entries after TTL", async () => {
 			const shortTtlService = new AircraftEnrichmentService(
-				{ ...defaultConfig, cacheTtlMs: 50 }, // 50ms TTL
+				{ ...defaultConfig, cacheTtlMs: 50, fetchImages: false }, // 50ms TTL, no images
 				testLogger,
 			)
 			shortTtlService.start()
@@ -267,6 +293,7 @@ describe("AircraftEnrichmentService", () => {
 
 		it("should clear cache when requested", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			await service.lookup("ABC123")
@@ -280,6 +307,7 @@ describe("AircraftEnrichmentService", () => {
 	describe("Queue Processing", () => {
 		it("should queue lookups and process them", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			// Enqueue should not await
@@ -288,13 +316,13 @@ describe("AircraftEnrichmentService", () => {
 			// Wait for queue processing
 			await new Promise(resolve => setTimeout(resolve, 50))
 
-			expect(mockFetch).toHaveBeenCalledTimes(1)
+			expect(mockFetch).toHaveBeenCalledTimes(2) // Aircraft + image fetch
 		})
 
 		it("should not enqueue duplicate ICAOs that are still in queue", async () => {
 			// Use rate limiting to ensure items stay in queue longer
 			const slowService = new AircraftEnrichmentService(
-				{ ...defaultConfig, rateLimitMs: 200 },
+				{ ...defaultConfig, rateLimitMs: 200, fetchImages: false },
 				testLogger,
 			)
 			slowService.start()
@@ -318,6 +346,7 @@ describe("AircraftEnrichmentService", () => {
 
 		it("should skip already cached ICAOs in queue", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			// Direct lookup to populate cache
@@ -329,8 +358,8 @@ describe("AircraftEnrichmentService", () => {
 			// Wait for processing
 			await new Promise(resolve => setTimeout(resolve, 50))
 
-			// Only one fetch (from direct lookup)
-			expect(mockFetch).toHaveBeenCalledTimes(1)
+			// Only aircraft + image fetch from direct lookup
+			expect(mockFetch).toHaveBeenCalledTimes(2)
 		})
 	})
 
@@ -342,6 +371,7 @@ describe("AircraftEnrichmentService", () => {
 			)
 
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.wireToTracker(tracker)
 			service.start()
 
@@ -372,6 +402,7 @@ describe("AircraftEnrichmentService", () => {
 				Registration: "N99999",
 				ICAOTypeCode: "A320",
 			})
+			mockFetch404Text() // Image fetch
 			service.wireToTracker(tracker)
 			service.start()
 
@@ -443,6 +474,7 @@ describe("AircraftEnrichmentService", () => {
 	describe("Events", () => {
 		it("should emit enrichment:success on successful lookup", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			const eventPromise = new Promise<[string, AircraftIdentification]>(
@@ -479,6 +511,7 @@ describe("AircraftEnrichmentService", () => {
 
 		it("should emit enrichment:cached when using cached data", async () => {
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			// Populate cache
@@ -501,7 +534,7 @@ describe("AircraftEnrichmentService", () => {
 	describe("Rate Limiting", () => {
 		it("should respect rate limit between requests", async () => {
 			const rateLimitedService = new AircraftEnrichmentService(
-				{ ...defaultConfig, rateLimitMs: 100 },
+				{ ...defaultConfig, rateLimitMs: 100, fetchImages: false },
 				testLogger,
 			)
 			rateLimitedService.start()
@@ -528,6 +561,7 @@ describe("AircraftEnrichmentService", () => {
 	describe("Response Parsing", () => {
 		it("should handle empty response data", async () => {
 			mockFetchSuccess({})
+			mockFetch404Text() // Image fetch (will still run)
 			service.start()
 
 			const result = await service.lookup("ABC123")
@@ -541,6 +575,7 @@ describe("AircraftEnrichmentService", () => {
 				Registration: "N12345",
 				// No other fields
 			})
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			const result = await service.lookup("ABC123")
@@ -555,6 +590,7 @@ describe("AircraftEnrichmentService", () => {
 			mockFetchSuccess({
 				ICAOTypeCode: "B738",
 			})
+			mockFetch404Text() // Image fetch
 			service.start()
 
 			const result = await service.lookup("ABC123")
@@ -573,6 +609,7 @@ describe("AircraftEnrichmentService", () => {
 			)
 
 			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text() // Image fetch - no image
 			service.wireToTracker(tracker)
 			tracker.setEnrichmentCacheProvider(service)
 			service.start()
@@ -587,6 +624,167 @@ describe("AircraftEnrichmentService", () => {
 			expect(trackerStats.enrichmentCache.size).toBe(1)
 
 			tracker.stop()
+		})
+	})
+
+	describe("Image URL Fetching", () => {
+		it("should fetch image URL along with aircraft data", async () => {
+			// Mock aircraft API response
+			mockFetchSuccess(createHexdbResponse({ Registration: "N628TS" }))
+			// Mock image URL response
+			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N628TS.jpg")
+			service.start()
+
+			const result = await service.lookup("A835AF")
+
+			expect(result).toBeDefined()
+			expect(result!.registration).toBe("N628TS")
+			expect(result!.imageUrl).toBe(
+				"https://hexdb.io/static/aircraft-images/N628TS.jpg",
+			)
+		})
+
+		it("should handle missing image gracefully (404 response)", async () => {
+			mockFetchSuccess(createHexdbResponse())
+			mockFetch404Text()
+			service.start()
+
+			const result = await service.lookup("ABC123")
+
+			expect(result).toBeDefined()
+			expect(result!.registration).toBe("N12345")
+			expect(result!.imageUrl).toBeUndefined()
+		})
+
+		it("should handle 'n/a' image response", async () => {
+			mockFetchSuccess(createHexdbResponse())
+			// Mock image fetch returning "n/a" (no image available)
+			mockFetch.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				text: () => Promise.resolve("n/a"),
+			})
+			service.start()
+
+			const result = await service.lookup("ABC123")
+
+			expect(result).toBeDefined()
+			expect(result!.imageUrl).toBeUndefined()
+		})
+
+		it("should handle invalid image URL response", async () => {
+			mockFetchSuccess(createHexdbResponse())
+			// Mock image fetch returning non-URL text
+			mockFetch.mockResolvedValueOnce({
+				ok: true,
+				status: 200,
+				text: () => Promise.resolve("invalid-not-a-url"),
+			})
+			service.start()
+
+			const result = await service.lookup("ABC123")
+
+			expect(result).toBeDefined()
+			expect(result!.imageUrl).toBeUndefined()
+		})
+
+		it("should not fetch images when fetchImages config is false", async () => {
+			const noImagesService = new AircraftEnrichmentService(
+				{ ...defaultConfig, fetchImages: false },
+				testLogger,
+			)
+			mockFetchSuccess(createHexdbResponse())
+			noImagesService.start()
+
+			const result = await noImagesService.lookup("ABC123")
+
+			expect(result).toBeDefined()
+			expect(result!.imageUrl).toBeUndefined()
+			// Only one fetch call (aircraft API only, no image fetch)
+			expect(mockFetch).toHaveBeenCalledTimes(1)
+
+			noImagesService.stop()
+		})
+
+		it("should fetch aircraft and image in parallel", async () => {
+			// Set up responses for parallel calls
+			mockFetchSuccess(createHexdbResponse())
+			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
+			service.start()
+
+			await service.lookup("ABC123")
+
+			// Both calls should have been made
+			expect(mockFetch).toHaveBeenCalledTimes(2)
+
+			// Verify the URLs called
+			const calls = mockFetch.mock.calls
+			expect(calls[0]?.[0]).toContain("/api/v1/aircraft/")
+			expect(calls[1]?.[0]).toContain("/hex-image?hex=")
+		})
+
+		it("should handle image fetch network error gracefully", async () => {
+			mockFetchSuccess(createHexdbResponse())
+			// Mock image fetch network failure
+			mockFetch.mockRejectedValueOnce(new Error("Network error"))
+			service.start()
+
+			const result = await service.lookup("ABC123")
+
+			// Aircraft data should still be returned
+			expect(result).toBeDefined()
+			expect(result!.registration).toBe("N12345")
+			expect(result!.imageUrl).toBeUndefined()
+		})
+
+		it("should include imageUrl in tracker enrichment", async () => {
+			const tracker = new AircraftTracker(
+				{ maxAge: 60, cleanupInterval: 60000 },
+				testLogger,
+			)
+
+			mockFetchSuccess(createHexdbResponse())
+			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
+			service.wireToTracker(tracker)
+			service.start()
+
+			// Add new aircraft to tracker
+			const raw: RawAircraftMessage = { hex: "ABC123", flight: "UAL123" }
+			tracker.processUpdate(raw)
+
+			// Wait for enrichment
+			await new Promise(resolve => setTimeout(resolve, 100))
+
+			// Check that aircraft was enriched with image URL
+			const aircraft = tracker.get("ABC123")
+			expect(aircraft).toBeDefined()
+			expect(aircraft!.identification?.registration).toBe("N12345")
+			expect(aircraft!.identification?.imageUrl).toBe(
+				"https://hexdb.io/static/aircraft-images/N12345.jpg",
+			)
+
+			tracker.stop()
+		})
+
+		it("should cache image URL with aircraft data", async () => {
+			mockFetchSuccess(createHexdbResponse())
+			mockFetchTextSuccess("https://hexdb.io/static/aircraft-images/N12345.jpg")
+			service.start()
+
+			// First lookup
+			const result1 = await service.lookup("ABC123")
+			expect(result1!.imageUrl).toBe(
+				"https://hexdb.io/static/aircraft-images/N12345.jpg",
+			)
+
+			// Second lookup - should use cache
+			const result2 = await service.lookup("ABC123")
+			expect(result2!.imageUrl).toBe(
+				"https://hexdb.io/static/aircraft-images/N12345.jpg",
+			)
+
+			// Only 2 fetch calls total (1 aircraft + 1 image from first lookup)
+			expect(mockFetch).toHaveBeenCalledTimes(2)
 		})
 	})
 })

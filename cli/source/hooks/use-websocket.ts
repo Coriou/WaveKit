@@ -29,6 +29,7 @@ export type WebSocketChannel =
 	| "live-audio"
 	| "resources"
 	| "tuner"
+	| "aircraft"
 
 export interface ServerMessage {
 	type: string

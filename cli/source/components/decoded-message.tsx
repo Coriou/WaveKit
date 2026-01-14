@@ -20,7 +20,8 @@
 
 import React from "react"
 import { Box, Text } from "ink"
-import type { DecoderOutput } from "../types.js"
+import { TerminalLink } from "./terminal-link.js"
+import type { DecoderOutput, AircraftState } from "../types.js"
 import {
 	formatLocalTime,
 	stripNulls,
@@ -147,6 +148,7 @@ interface AircraftDisplayData {
 		registration?: string
 		typeCode?: string
 		operator?: string
+		imageUrl?: string
 	}
 	velocity?: {
 		gs?: number
@@ -557,6 +559,8 @@ export interface DecodedMessageProps {
 	compact?: boolean
 	/** Enhanced mode with quality bars and details (for call_end) */
 	enhanced?: boolean
+	/** Enriched aircraft data from the aircraft:update channel, keyed by ICAO */
+	enrichedAircraft?: Map<string, AircraftState>
 }
 
 /**
@@ -851,6 +855,13 @@ function getSquawk(data: AircraftDisplayData): string | undefined {
 }
 
 /**
+ * Get image URL from aircraft data (from hexdb.io enrichment)
+ */
+function getImageUrl(data: AircraftDisplayData): string | undefined {
+	return data.identification?.imageUrl
+}
+
+/**
  * Format track as compass direction (N, NE, E, SE, S, SW, W, NW)
  */
 function formatTrackDirection(track: number | undefined): string {
@@ -1061,6 +1072,16 @@ function AircraftCard({
 		)
 	}
 
+	// Aircraft image URL - clickable link to hexdb.io photo
+	const imageUrl = getImageUrl(aircraftData)
+	if (imageUrl) {
+		parts.push(
+			<TerminalLink key="img" url={imageUrl} dimColor>
+				📷
+			</TerminalLink>,
+		)
+	}
+
 	return (
 		<Box>
 			<Text dimColor>{time} </Text>
@@ -1151,6 +1172,7 @@ export function DecodedMessage({
 	maxDataWidth = 60,
 	compact = false,
 	enhanced = false,
+	enrichedAircraft,
 }: DecodedMessageProps): React.ReactElement {
 	const style = getTypeStyle(message.type, message.data)
 	const data = formatMessageData(message.data, message.type)
@@ -1169,12 +1191,29 @@ export function DecodedMessage({
 			? (message.data as PagerData)
 			: null
 
-	// Check for aircraft events
+	// Check for aircraft events - merge with enriched data if available
 	const isAircraftEvent = message.type === "aircraft"
-	const aircraftData =
-		isAircraftEvent && isAircraftData(message.data)
-			? (message.data as AircraftDisplayData)
-			: null
+	let aircraftData: AircraftDisplayData | null = null
+	if (isAircraftEvent && isAircraftData(message.data)) {
+		const rawData = message.data as AircraftDisplayData
+		const icao = (rawData.icao ?? rawData.hex ?? "").toUpperCase()
+		const enriched = enrichedAircraft?.get(icao)
+
+		// Merge raw data with enriched data if available
+		if (enriched) {
+			aircraftData = {
+				...rawData,
+				// Overlay enriched identification data
+				identification: enriched.identification,
+				// Also overlay enriched velocity/position if available
+				velocity: enriched.velocity ?? rawData.velocity,
+				position: enriched.position ?? rawData.position,
+				signalQuality: enriched.signalQuality ?? rawData.signalQuality,
+			}
+		} else {
+			aircraftData = rawData
+		}
+	}
 
 	if (compact) {
 		// Compact aircraft display - show key info in condensed format
@@ -1280,6 +1319,8 @@ export interface DecodedMessageListProps {
 	/** Show hint about viewing more */
 	showMoreHint?: boolean
 	moreHintText?: string
+	/** Enriched aircraft data from the aircraft:update channel, keyed by ICAO */
+	enrichedAircraft?: Map<string, AircraftState>
 }
 
 export function DecodedMessageList({
@@ -1290,6 +1331,7 @@ export function DecodedMessageList({
 	newestFirst = true,
 	showMoreHint = false,
 	moreHintText = "press 3 to view all",
+	enrichedAircraft,
 }: DecodedMessageListProps): React.ReactElement {
 	// Take last N messages, then optionally reverse for newest-first
 	const sliced = messages.slice(-maxMessages)
@@ -1307,6 +1349,7 @@ export function DecodedMessageList({
 					message={msg}
 					maxDataWidth={maxDataWidth}
 					compact={compact}
+					enrichedAircraft={enrichedAircraft}
 				/>
 			))}
 			{showMoreHint && messages.length > maxMessages && (
