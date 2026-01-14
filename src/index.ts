@@ -57,6 +57,8 @@ import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
 import { ResourceAggregator } from "./core/resource-aggregator.js"
+import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
+import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
 import type { Decoder } from "./decoders/types.js"
 
@@ -493,6 +495,34 @@ async function main(): Promise<void> {
 		)
 	}
 
+	// Step 8b: Initialize aircraft tracking (ADS-B specific)
+	const aircraftTrackingManager = new AircraftTrackingManager(
+		decoderManager,
+		{
+			maxAge: 60,
+			cleanupInterval: 5000,
+			maxTrackPoints: 100,
+			minTrackDistance: 50,
+		},
+		logger,
+	)
+
+	// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
+	const aircraftEnrichmentService = new AircraftEnrichmentService(
+		{
+			cacheTtlMs: 24 * 60 * 60 * 1000, // 24 hours
+			maxCacheSize: 10000,
+			rateLimitMs: 1000, // 1 request per second
+			enabled: true,
+		},
+		logger,
+	)
+	aircraftEnrichmentService.wireToTracker(aircraftTrackingManager.getTracker())
+	// Wire enrichment cache stats to tracker for accurate stats reporting
+	aircraftTrackingManager
+		.getTracker()
+		.setEnrichmentCacheProvider(aircraftEnrichmentService)
+
 	// Step 9: Initialize API server
 	const apiServer = new ApiServer(
 		{
@@ -505,6 +535,7 @@ async function main(): Promise<void> {
 			tunerController,
 			liveDemod,
 			resourceAggregator,
+			aircraftTracker: aircraftTrackingManager.getTracker(),
 			logger,
 			audioConfig: {
 				format: config.audio.format,
@@ -604,6 +635,17 @@ async function main(): Promise<void> {
 		})
 	}
 
+	// Shutdown aircraft tracking and enrichment
+	shutdown.register({
+		name: "aircraft-tracking",
+		handler: async () => {
+			log.info("Shutting down aircraft tracking and enrichment")
+			aircraftEnrichmentService.stop()
+			aircraftTrackingManager.stop()
+		},
+		timeout: 1000,
+	})
+
 	// Step 10: Start API server
 	await apiServer.start()
 
@@ -692,6 +734,10 @@ async function main(): Promise<void> {
 		resourceAggregator.start()
 		log.info("Resource monitoring started")
 	}
+
+	// Start aircraft tracking manager and enrichment service
+	aircraftTrackingManager.start()
+	aircraftEnrichmentService.start()
 
 	// Step 13: Connect to configured sources and wire to fanout
 	let primarySourceId: string | null = null

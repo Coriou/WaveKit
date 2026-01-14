@@ -24,6 +24,8 @@ import type {
 	ResourceAlert,
 	TunerState,
 	TunerControlMode,
+	AircraftState,
+	AircraftTrackerStats,
 } from "@wavekit/api-types"
 
 /**
@@ -46,6 +48,7 @@ export type WebSocketChannel =
 	| "live-audio"
 	| "resources"
 	| "tuner"
+	| "aircraft"
 
 /**
  * Message sent from client to server.
@@ -84,6 +87,10 @@ export interface ServerMessage {
 		| "tuner:command-sent"
 		| "tuner:control-mode-changed"
 		| "tuner:error"
+		| "aircraft:new"
+		| "aircraft:update"
+		| "aircraft:lost"
+		| "aircraft:stats"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -112,7 +119,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "fanout" ||
 		channel === "live-audio" ||
 		channel === "resources" ||
-		channel === "tuner"
+		channel === "tuner" ||
+		channel === "aircraft"
 	)
 }
 
@@ -629,6 +637,59 @@ export class WebSocketEventBroadcaster {
 			type: "tuner:error",
 			channel: "tuner",
 			data: { sourceId, error },
+		})
+	}
+
+	// ========================================================================
+	// Aircraft Events (ADS-B specific)
+	// ========================================================================
+
+	/**
+	 * Broadcasts new aircraft event to subscribed clients.
+	 *
+	 * @param aircraft - The new aircraft state
+	 */
+	broadcastAircraftNew(aircraft: AircraftState): void {
+		this.broadcast("aircraft", {
+			type: "aircraft:new",
+			data: aircraft,
+		})
+	}
+
+	/**
+	 * Broadcasts aircraft update event to subscribed clients.
+	 *
+	 * @param aircraft - The updated aircraft state
+	 */
+	broadcastAircraftUpdate(aircraft: AircraftState): void {
+		this.broadcast("aircraft", {
+			type: "aircraft:update",
+			data: aircraft,
+		})
+	}
+
+	/**
+	 * Broadcasts aircraft lost event to subscribed clients.
+	 *
+	 * @param icao - The ICAO address of the lost aircraft
+	 * @param aircraft - The final aircraft state before loss
+	 */
+	broadcastAircraftLost(icao: string, aircraft: AircraftState): void {
+		this.broadcast("aircraft", {
+			type: "aircraft:lost",
+			data: { icao, aircraft },
+		})
+	}
+
+	/**
+	 * Broadcasts aircraft tracker statistics to subscribed clients.
+	 *
+	 * @param stats - The tracker statistics
+	 */
+	broadcastAircraftStats(stats: AircraftTrackerStats): void {
+		this.broadcast("aircraft", {
+			type: "aircraft:stats",
+			data: stats,
 		})
 	}
 

@@ -14,6 +14,7 @@ import {
 } from "../network-producer-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import type { RawAircraftMessage } from "@wavekit/api-types"
 
 /** Supported output formats for readsb (Requirement 22.3) */
 export type ReadsbOutputFormat = "sbs" | "beast" | "json"
@@ -520,6 +521,7 @@ export function parseBeastMessage(
 /**
  * Parses a JSON object into AircraftData.
  * Handles readsb JSON output format.
+ * @deprecated Use parseRawAircraft for full field extraction
  */
 export function parseJsonAircraft(
 	json: Record<string, unknown>,
@@ -542,6 +544,99 @@ export function parseJsonAircraft(
 		lastSeen: new Date(),
 		messageCount: (json["messages"] as number) ?? 1,
 	}
+}
+
+/**
+ * Parses a JSON object into RawAircraftMessage with ALL available fields.
+ * This extracts the full 50+ fields from readsb JSON output for
+ * state-of-the-art aircraft tracking.
+ *
+ * Used by the AircraftTracker service for comprehensive state aggregation.
+ */
+export function parseRawAircraft(
+	json: Record<string, unknown>,
+): RawAircraftMessage | null {
+	// readsb JSON format uses 'hex' for ICAO address
+	const hex = (json["hex"] as string) ?? (json["icao"] as string)
+	if (!hex) return null
+
+	// Build result object, only adding defined properties
+	// This is required for exactOptionalPropertyTypes compliance
+	const result: RawAircraftMessage = {
+		hex: hex.toUpperCase().replace(/^~/, ""), // Remove non-ICAO prefix
+	}
+
+	// Core identity
+	if (typeof json["type"] === "string") result.type = json["type"]
+	if (typeof json["flight"] === "string") {
+		const trimmed = json["flight"].trim()
+		if (trimmed) result.flight = trimmed
+	}
+	if (typeof json["squawk"] === "string") result.squawk = json["squawk"]
+	if (typeof json["emergency"] === "string")
+		result.emergency = json["emergency"]
+	if (typeof json["category"] === "string") result.category = json["category"]
+
+	// Position
+	if (typeof json["lat"] === "number") result.lat = json["lat"]
+	if (typeof json["lon"] === "number") result.lon = json["lon"]
+	if (typeof json["seen_pos"] === "number") result.seen_pos = json["seen_pos"]
+	if (typeof json["nic"] === "number") result.nic = json["nic"]
+	if (typeof json["rc"] === "number") result.rc = json["rc"]
+	if (typeof json["nac_p"] === "number") result.nac_p = json["nac_p"]
+
+	// Altitude
+	if (json["alt_baro"] === "ground") result.alt_baro = "ground"
+	else if (typeof json["alt_baro"] === "number")
+		result.alt_baro = json["alt_baro"]
+	if (typeof json["alt_geom"] === "number") result.alt_geom = json["alt_geom"]
+	if (typeof json["baro_rate"] === "number")
+		result.baro_rate = json["baro_rate"]
+	if (typeof json["geom_rate"] === "number")
+		result.geom_rate = json["geom_rate"]
+
+	// Velocity
+	if (typeof json["gs"] === "number") result.gs = json["gs"]
+	if (typeof json["tas"] === "number") result.tas = json["tas"]
+	if (typeof json["ias"] === "number") result.ias = json["ias"]
+	if (typeof json["mach"] === "number") result.mach = json["mach"]
+	if (typeof json["track"] === "number") result.track = json["track"]
+	if (typeof json["track_rate"] === "number")
+		result.track_rate = json["track_rate"]
+	if (typeof json["mag_heading"] === "number")
+		result.mag_heading = json["mag_heading"]
+	if (typeof json["true_heading"] === "number")
+		result.true_heading = json["true_heading"]
+	if (typeof json["roll"] === "number") result.roll = json["roll"]
+
+	// Navigation
+	if (typeof json["nav_qnh"] === "number") result.nav_qnh = json["nav_qnh"]
+	if (typeof json["nav_altitude_mcp"] === "number")
+		result.nav_altitude_mcp = json["nav_altitude_mcp"]
+	if (typeof json["nav_altitude_fms"] === "number")
+		result.nav_altitude_fms = json["nav_altitude_fms"]
+	if (typeof json["nav_heading"] === "number")
+		result.nav_heading = json["nav_heading"]
+	if (Array.isArray(json["nav_modes"]))
+		result.nav_modes = json["nav_modes"] as string[]
+
+	// Enrichment (from readsb db)
+	if (typeof json["r"] === "string") result.r = json["r"]
+	if (typeof json["t"] === "string") result.t = json["t"]
+	if (typeof json["desc"] === "string") result.desc = json["desc"]
+
+	// Signal quality
+	if (typeof json["rssi"] === "number") result.rssi = json["rssi"]
+	if (typeof json["seen"] === "number") result.seen = json["seen"]
+	if (typeof json["messages"] === "number") result.messages = json["messages"]
+	if (typeof json["sil"] === "number") result.sil = json["sil"]
+	if (typeof json["sil_type"] === "string") result.sil_type = json["sil_type"]
+	if (typeof json["nac_v"] === "number") result.nac_v = json["nac_v"]
+	if (typeof json["gva"] === "number") result.gva = json["gva"]
+	if (typeof json["sda"] === "number") result.sda = json["sda"]
+	if (typeof json["version"] === "number") result.version = json["version"]
+
+	return result
 }
 
 /**

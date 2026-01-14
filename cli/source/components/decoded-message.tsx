@@ -100,6 +100,70 @@ interface PagerData {
 }
 
 // ============================================================================
+// Aircraft Data Types (from readsb decoder)
+// ============================================================================
+
+/**
+ * Aircraft data structure for CLI display.
+ * Contains fields from both basic AircraftData and enriched AircraftState.
+ */
+interface AircraftDisplayData {
+	// Core identity
+	icao?: string
+	hex?: string
+	callsign?: string
+	flight?: string
+	squawk?: string
+
+	// Altitude
+	altitude?: number
+	alt_baro?: number | "ground"
+	baro_rate?: number
+	verticalRate?: number
+	onGround?: boolean
+
+	// Speed & track
+	groundSpeed?: number
+	gs?: number
+	track?: number
+
+	// Position
+	lat?: number
+	lon?: number
+
+	// Signal quality
+	rssi?: number
+	messages?: number
+	messageCount?: number
+
+	// Enrichment data (from hexdb.io or readsb db)
+	r?: string // Registration
+	t?: string // Type code
+	registration?: string
+	typeCode?: string
+
+	// AircraftState nested structures (when receiving enriched data)
+	identification?: {
+		registration?: string
+		typeCode?: string
+		operator?: string
+	}
+	velocity?: {
+		gs?: number
+	}
+	position?: {
+		lat?: number
+		lon?: number
+	}
+	signalQuality?: {
+		rssi?: number
+	}
+
+	// Emergency
+	emergency?: string
+}
+
+// ============================================================================
 // Message Type Styling - Protocol & Event Aware
 // ============================================================================
 
@@ -672,6 +736,416 @@ function PagerCard({
 	)
 }
 
+// ============================================================================
+// Aircraft Card Component - Rich ADS-B display
+// ============================================================================
+
+/** Emergency squawk codes that require visual highlighting */
+const EMERGENCY_SQUAWKS = ["7500", "7600", "7700"] as const
+
+/**
+ * Type guard to check if data is aircraft display data.
+ */
+function isAircraftData(data: unknown): data is AircraftDisplayData {
+	if (typeof data !== "object" || data === null) return false
+	const obj = data as Record<string, unknown>
+	return typeof obj.icao === "string" || typeof obj.hex === "string"
+}
+
+/**
+ * Get ICAO from aircraft data (handles both icao and hex field names)
+ */
+function getIcao(data: AircraftDisplayData): string {
+	return (data.icao ?? data.hex ?? "??????").toUpperCase()
+}
+
+/**
+ * Get callsign from aircraft data (handles both callsign and flight)
+ */
+function getCallsign(data: AircraftDisplayData): string | undefined {
+	const cs = data.callsign ?? data.flight
+	return cs ? cs.trim() : undefined
+}
+
+/**
+ * Get registration from aircraft data (enriched or direct)
+ */
+function getRegistration(data: AircraftDisplayData): string | undefined {
+	return data.identification?.registration ?? data.registration ?? data.r
+}
+
+/**
+ * Get type code from aircraft data
+ */
+function getTypeCode(data: AircraftDisplayData): string | undefined {
+	return data.identification?.typeCode ?? data.typeCode ?? data.t
+}
+
+/**
+ * Get altitude from aircraft data (handles multiple field names)
+ */
+function getAltitude(data: AircraftDisplayData): {
+	altitude: number | null
+	onGround: boolean
+} {
+	// Check if explicitly on ground
+	if (data.onGround === true || data.alt_baro === "ground") {
+		return { altitude: null, onGround: true }
+	}
+
+	const alt =
+		typeof data.alt_baro === "number"
+			? data.alt_baro
+			: (data.altitude ?? undefined)
+
+	return { altitude: alt ?? null, onGround: false }
+}
+
+/**
+ * Get vertical rate for altitude trend indicator
+ */
+function getVerticalRate(data: AircraftDisplayData): number {
+	return data.baro_rate ?? data.verticalRate ?? 0
+}
+
+/**
+ * Get ground speed from aircraft data
+ */
+function getGroundSpeed(data: AircraftDisplayData): number | undefined {
+	return data.velocity?.gs ?? data.gs ?? data.groundSpeed
+}
+
+/**
+ * Get position from aircraft data
+ */
+function getPosition(
+	data: AircraftDisplayData,
+): { lat: number; lon: number } | undefined {
+	const lat = data.position?.lat ?? data.lat
+	const lon = data.position?.lon ?? data.lon
+	if (typeof lat === "number" && typeof lon === "number") {
+		return { lat, lon }
+	}
+	return undefined
+}
+
+/**
+ * Get RSSI from aircraft data
+ */
+function getRssi(data: AircraftDisplayData): number | undefined {
+	return data.signalQuality?.rssi ?? data.rssi
+}
+
+/**
+ * Get track/heading from aircraft data (degrees 0-359)
+ */
+function getTrack(data: AircraftDisplayData): number | undefined {
+	return data.track
+}
+
+/**
+ * Get squawk code from aircraft data
+ */
+function getSquawk(data: AircraftDisplayData): string | undefined {
+	return data.squawk
+}
+
+/**
+ * Format track as compass direction (N, NE, E, SE, S, SW, W, NW)
+ */
+function formatTrackDirection(track: number | undefined): string {
+	if (track === undefined) return ""
+	const directions = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
+	const index = Math.round(track / 45) % 8
+	return directions[index] ?? "?"
+}
+
+/**
+ * Format altitude as flight level or GND.
+ * FL350 = 35,000ft, rounds to nearest 100ft then converts
+ */
+function formatAltitude(altitude: number | null, onGround: boolean): string {
+	if (onGround) return "GND"
+	if (altitude === null) return "---"
+
+	// Convert to flight level (altitude / 100)
+	const fl = Math.round(altitude / 100)
+	return `FL${fl}`
+}
+
+/**
+ * Get trend indicator based on vertical rate.
+ * ↑ = climbing (>300 ft/min), ↓ = descending (<-300 ft/min)
+ */
+function getTrendIndicator(verticalRate: number): string {
+	if (verticalRate > 300) return "↑"
+	if (verticalRate < -300) return "↓"
+	return ""
+}
+
+/**
+ * Format signal strength as ASCII bars.
+ * ▓▓▓ (strong, > -10 dBFS)
+ * ▓▓░ (good, > -20 dBFS)
+ * ▓░░ (fair, > -30 dBFS)
+ * ░░░ (weak, <= -30 dBFS)
+ */
+function formatSignalBars(rssi: number | undefined): string {
+	if (rssi === undefined) return "   "
+	if (rssi > -10) return "▓▓▓"
+	if (rssi > -20) return "▓▓░"
+	if (rssi > -30) return "▓░░"
+	return "░░░"
+}
+
+/**
+ * Get signal bar color based on RSSI
+ */
+function getSignalColor(rssi: number | undefined): TextColor {
+	if (rssi === undefined) return "gray"
+	if (rssi > -15) return "green"
+	if (rssi > -25) return "yellow"
+	return "red"
+}
+
+/**
+ * Check if squawk is an emergency code
+ */
+function isEmergencySquawk(squawk: string | undefined): boolean {
+	if (!squawk) return false
+	return EMERGENCY_SQUAWKS.includes(
+		squawk as (typeof EMERGENCY_SQUAWKS)[number],
+	)
+}
+
+/**
+ * Check if aircraft has any emergency status
+ */
+function hasEmergency(data: AircraftDisplayData): boolean {
+	return (
+		isEmergencySquawk(data.squawk) ||
+		(data.emergency !== undefined &&
+			data.emergency !== "none" &&
+			data.emergency !== "")
+	)
+}
+
+/**
+ * AircraftCard Component - Rich aircraft display for CLI
+ *
+ * Display format (single-line):
+ * 12:34:56 readsb  ADS  A12345 │ N12345 │ UAL123 │ B738 │ FL350↑ │ 450kt │ 40.71,-74.01 │ NE
+ *
+ * Field meanings:
+ * - ICAO hex code (24-bit Mode S address, e.g., A12345)
+ * - Registration (tail number from hexdb.io enrichment, e.g., N12345)
+ * - Callsign (flight identifier from ADS-B, e.g., UAL123)
+ * - Type code (ICAO aircraft type designator, e.g., B738 = Boeing 737-800)
+ * - Altitude: FLxxx = Flight Level (altitude in feet ÷ 100), GND = on ground
+ * - Trend: ↑ = climbing, ↓ = descending
+ * - Speed: XXkt = ground speed in knots (nautical miles/hour)
+ * - Position: lat,lon coordinates
+ * - Track: compass heading (N/NE/E/SE/S/SW/W/NW)
+ * - Emergency squawks: 🚨7500 (hijack), 🚨7600 (radio failure), 🚨7700 (emergency)
+ */
+function AircraftCard({
+	aircraftData,
+	time,
+	decoder,
+}: {
+	aircraftData: AircraftDisplayData
+	time: string
+	decoder: string
+}): React.ReactElement {
+	const icao = getIcao(aircraftData)
+	const callsign = getCallsign(aircraftData)
+	const registration = getRegistration(aircraftData)
+	const typeCode = getTypeCode(aircraftData)
+	const { altitude, onGround } = getAltitude(aircraftData)
+	const verticalRate = getVerticalRate(aircraftData)
+	const groundSpeed = getGroundSpeed(aircraftData)
+	const position = getPosition(aircraftData)
+	const emergency = hasEmergency(aircraftData)
+
+	const altStr = formatAltitude(altitude, onGround)
+	const trend = getTrendIndicator(verticalRate)
+
+	// Build parts array for display
+	const parts: React.ReactElement[] = []
+
+	// ICAO - always shown, cyan for visibility
+	parts.push(
+		<Text key="icao" color="cyan" bold>
+			{icao}
+		</Text>,
+	)
+
+	// Registration (enriched data)
+	if (registration) {
+		parts.push(
+			<Text key="reg" color="yellow">
+				{registration}
+			</Text>,
+		)
+	}
+
+	// Callsign
+	if (callsign) {
+		parts.push(
+			<Text key="cs" color="white">
+				{callsign}
+			</Text>,
+		)
+	}
+
+	// Type code
+	if (typeCode) {
+		parts.push(
+			<Text key="type" color="magenta">
+				{typeCode}
+			</Text>,
+		)
+	}
+
+	// Altitude with trend
+	parts.push(
+		<Text key="alt" color={onGround ? "yellow" : "white"}>
+			{altStr}
+			{trend && <Text color="cyan">{trend}</Text>}
+		</Text>,
+	)
+
+	// Ground speed
+	if (groundSpeed !== undefined) {
+		parts.push(
+			<Text key="spd" color="white">
+				{Math.round(groundSpeed)}kt
+			</Text>,
+		)
+	}
+
+	// Position
+	if (position) {
+		parts.push(
+			<Text key="pos" dimColor>
+				{position.lat.toFixed(2)},{position.lon.toFixed(2)}
+			</Text>,
+		)
+	}
+
+	// Track direction (compass heading)
+	const track = getTrack(aircraftData)
+	if (track !== undefined) {
+		parts.push(
+			<Text key="track" dimColor>
+				{formatTrackDirection(track)}
+			</Text>,
+		)
+	}
+
+	// Squawk code (non-emergency in dim, emergency highlighted)
+	const squawk = getSquawk(aircraftData)
+	if (emergency) {
+		const squawkText = squawk ?? aircraftData.emergency ?? "EMG"
+		parts.push(
+			<Text key="emg" color="red" bold>
+				🚨{squawkText}
+			</Text>,
+		)
+	} else if (squawk) {
+		// Show non-emergency squawk dimmed
+		parts.push(
+			<Text key="squawk" dimColor>
+				{squawk}
+			</Text>,
+		)
+	}
+
+	return (
+		<Box>
+			<Text dimColor>{time} </Text>
+			<Text color="blue">{decoder} </Text>
+			<Text color="cyan" bold>
+				ADS{" "}
+			</Text>
+			{parts.map((part, idx) => (
+				<React.Fragment key={idx}>
+					{part}
+					{idx < parts.length - 1 && <Text dimColor> │ </Text>}
+				</React.Fragment>
+			))}
+		</Box>
+	)
+}
+
+/**
+ * CompactAircraftCard - Condensed aircraft display for dashboard
+ *
+ * Shows essential info in a shorter format for space-constrained views:
+ * ICAO │ Reg/Callsign │ FL350↑ │ 450kt
+ */
+function CompactAircraftCard({
+	aircraftData,
+	time,
+	decoder,
+}: {
+	aircraftData: AircraftDisplayData
+	time: string
+	decoder: string
+}): React.ReactElement {
+	const icao = getIcao(aircraftData)
+	const callsign = getCallsign(aircraftData)
+	const registration = getRegistration(aircraftData)
+	const { altitude, onGround } = getAltitude(aircraftData)
+	const verticalRate = getVerticalRate(aircraftData)
+	const groundSpeed = getGroundSpeed(aircraftData)
+	const emergency = hasEmergency(aircraftData)
+
+	const altStr = formatAltitude(altitude, onGround)
+	const trend = getTrendIndicator(verticalRate)
+
+	// Use registration or callsign (prefer registration for brevity)
+	const identifier = registration ?? callsign
+
+	return (
+		<Box>
+			<Text dimColor>{time} </Text>
+			<Text color="blue">{decoder} </Text>
+			<Text color="cyan" bold>
+				ADS{" "}
+			</Text>
+			<Text color="cyan" bold>
+				{icao}
+			</Text>
+			{identifier && (
+				<>
+					<Text dimColor> │ </Text>
+					<Text color="yellow">{identifier}</Text>
+				</>
+			)}
+			<Text dimColor> │ </Text>
+			<Text color={onGround ? "yellow" : "white"}>
+				{altStr}
+				{trend && <Text color="cyan">{trend}</Text>}
+			</Text>
+			{groundSpeed !== undefined && (
+				<>
+					<Text dimColor> │ </Text>
+					<Text>{Math.round(groundSpeed)}kt</Text>
+				</>
+			)}
+			{emergency && (
+				<>
+					<Text dimColor> │ </Text>
+					<Text color="red" bold>
+						🚨{aircraftData.squawk ?? "EMG"}
+					</Text>
+				</>
+			)}
+		</Box>
+	)
+}
+
 export function DecodedMessage({
 	message,
 	maxDataWidth = 60,
@@ -695,7 +1169,25 @@ export function DecodedMessage({
 			? (message.data as PagerData)
 			: null
 
+	// Check for aircraft events
+	const isAircraftEvent = message.type === "aircraft"
+	const aircraftData =
+		isAircraftEvent && isAircraftData(message.data)
+			? (message.data as AircraftDisplayData)
+			: null
+
 	if (compact) {
+		// Compact aircraft display - show key info in condensed format
+		if (aircraftData) {
+			return (
+				<CompactAircraftCard
+					aircraftData={aircraftData}
+					time={time}
+					decoder={decoder}
+				/>
+			)
+		}
+
 		// Compact mode: time + decoder + type badge + data
 		return (
 			<Box>
@@ -719,6 +1211,13 @@ export function DecodedMessage({
 				style={style}
 				maxMessageWidth={maxDataWidth}
 			/>
+		)
+	}
+
+	// Enhanced aircraft display - use AircraftCard
+	if (aircraftData) {
+		return (
+			<AircraftCard aircraftData={aircraftData} time={time} decoder={decoder} />
 		)
 	}
 

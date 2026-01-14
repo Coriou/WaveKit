@@ -39,8 +39,10 @@ import { tunerRelayRoutes } from "./routes/tuner-relay.js"
 import { tunerRoutes } from "./routes/tuner.js"
 import { liveAudioRoutes } from "./routes/live-audio.js"
 import { resourceRoutes } from "./routes/resources.js"
+import { aircraftRoutes } from "./routes/aircraft.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
+import type { AircraftTracker } from "../core/aircraft-tracker.js"
 
 /**
  * HTTP header name for correlation ID.
@@ -68,6 +70,7 @@ export interface ApiServerDependencies {
 	tunerController?: TunerController | undefined
 	liveDemod?: LiveDemodulator | undefined
 	resourceAggregator?: ResourceAggregator | undefined
+	aircraftTracker?: AircraftTracker | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -94,6 +97,7 @@ export class ApiServer {
 	private readonly tunerController?: TunerController | undefined
 	private readonly liveDemod?: LiveDemodulator | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
+	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
@@ -108,6 +112,7 @@ export class ApiServer {
 		this.tunerController = dependencies.tunerController
 		this.liveDemod = dependencies.liveDemod
 		this.resourceAggregator = dependencies.resourceAggregator
+		this.aircraftTracker = dependencies.aircraftTracker
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -353,6 +358,25 @@ export class ApiServer {
 			})
 		}
 
+		// Aircraft tracker events (ADS-B specific)
+		if (this.aircraftTracker) {
+			this.aircraftTracker.on("aircraft:new", aircraft => {
+				this.wsBroadcaster.broadcastAircraftNew(aircraft)
+			})
+
+			this.aircraftTracker.on("aircraft:update", aircraft => {
+				this.wsBroadcaster.broadcastAircraftUpdate(aircraft)
+			})
+
+			this.aircraftTracker.on("aircraft:lost", (icao, aircraft) => {
+				this.wsBroadcaster.broadcastAircraftLost(icao, aircraft)
+			})
+
+			this.aircraftTracker.on("stats:update", stats => {
+				this.wsBroadcaster.broadcastAircraftStats(stats)
+			})
+		}
+
 		this.log.debug("Event broadcasting handlers registered")
 	}
 
@@ -398,6 +422,7 @@ export class ApiServer {
 					{ name: "health", description: "Health check endpoints" },
 					{ name: "sources", description: "SDR source management" },
 					{ name: "decoders", description: "Decoder management" },
+					{ name: "aircraft", description: "Aircraft tracking endpoints" },
 					{ name: "live-audio", description: "Live demodulation endpoints" },
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
@@ -652,6 +677,13 @@ export class ApiServer {
 		if (this.resourceAggregator) {
 			await this.app.register(resourceRoutes, {
 				resourceAggregator: this.resourceAggregator,
+			})
+		}
+
+		// Register aircraft tracking routes (ADS-B specific)
+		if (this.aircraftTracker) {
+			await this.app.register(aircraftRoutes, {
+				tracker: this.aircraftTracker,
 			})
 		}
 

@@ -245,6 +245,7 @@ cli-install: ## Install CLI dashboard dependencies (if missing)
 	@test -d cli/node_modules || pnpm --filter @wavekit/cli install
 
 dev-dashboard-build: cli-install ## Build CLI dashboard
+	@rm -rf cli/node_modules/.cache cli/dist
 	@pnpm --filter @wavekit/cli build
 
 dev-dashboard: dev-dashboard-build ## WaveKit CLI Dashboard (interactive, tab-based)
