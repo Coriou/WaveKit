@@ -476,51 +476,57 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	}, [])
 
 	// Keyboard input handling
-	useInput((input, key) => {
-		if (tunerInputActive) {
+	useInput(
+		(input, key) => {
 			if (key.ctrl && input === "c") {
 				exit()
 			}
-			return
-		}
-		// Quit
-		if (input === "q" || (key.ctrl && input === "c")) {
-			exit()
-			return
-		}
+		},
+		{ isActive: tunerInputActive },
+	)
 
-		// Reconnect
-		if (input === "r") {
-			reconnect()
-			return
-		}
-
-		if (activeView === "live-audio") {
-			if (input === "s") {
-				void performLiveAudioAction("start")
+	useInput(
+		(input, key) => {
+			// Quit
+			if (input === "q" || (key.ctrl && input === "c")) {
+				exit()
 				return
 			}
-			if (input === "x") {
-				void performLiveAudioAction("stop")
+
+			// Reconnect
+			if (input === "r") {
+				reconnect()
 				return
 			}
-		}
 
-		// View navigation
-		const viewMap: Record<string, View> = {
-			"1": "dashboard",
-			"2": "decoders",
-			"3": "output",
-			"4": "backpressure",
-			"5": "sources",
-			"6": "live-audio",
-			"7": "resources",
-			"8": "tuner",
-		}
-		if (viewMap[input]) {
-			setActiveView(viewMap[input])
-		}
-	})
+			if (activeView === "live-audio") {
+				if (input === "s") {
+					void performLiveAudioAction("start")
+					return
+				}
+				if (input === "x") {
+					void performLiveAudioAction("stop")
+					return
+				}
+			}
+
+			// View navigation
+			const viewMap: Record<string, View> = {
+				"1": "dashboard",
+				"2": "decoders",
+				"3": "output",
+				"4": "backpressure",
+				"5": "sources",
+				"6": "live-audio",
+				"7": "resources",
+				"8": "tuner",
+			}
+			if (viewMap[input]) {
+				setActiveView(viewMap[input])
+			}
+		},
+		{ isActive: !tunerInputActive },
+	)
 
 	// Track last disconnect for diagnostics
 	const [lastDisconnect, setLastDisconnect] = useState<{

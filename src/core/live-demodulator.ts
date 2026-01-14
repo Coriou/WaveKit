@@ -318,31 +318,37 @@ export class LiveDemodulator extends EventEmitter {
 				clearTimeout(this.capsChangeDebounceTimer)
 			}
 
-			this.capsChangeDebounceTimer = setTimeout(async () => {
+			this.capsChangeDebounceTimer = setTimeout(() => {
 				this.capsChangeDebounceTimer = null
-
-				this.log.info(
-					{ sourceId, newSampleRate: caps.sampleRate },
-					"Source caps changed, restarting pipeline with new sample rate",
-				)
-
-				try {
-					// Reconfigure triggers stop + start of pipeline with new rates
-					await this.reconfigure({})
-				} catch (err) {
-					const error = err instanceof Error ? err : new Error(String(err))
-					this.log.error(
-						{ err: error },
-						"Failed to restart pipeline after sample rate change",
-					)
-					this.lastError = error.message
-					this.pipelineHealth = "error"
-					this.emit("error", error)
-				}
+				void this.handleCapsChange(sourceId, caps)
 			}, LiveDemodulator.CAPS_CHANGE_DEBOUNCE_MS)
 		}
 
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
+	}
+
+	private async handleCapsChange(
+		sourceId: string,
+		caps: SourceCaps,
+	): Promise<void> {
+		this.log.info(
+			{ sourceId, newSampleRate: caps.sampleRate },
+			"Source caps changed, restarting pipeline with new sample rate",
+		)
+
+		try {
+			// Reconfigure triggers stop + start of pipeline with new rates
+			await this.reconfigure({})
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err))
+			this.log.error(
+				{ err: error },
+				"Failed to restart pipeline after sample rate change",
+			)
+			this.lastError = error.message
+			this.pipelineHealth = "error"
+			this.emit("error", error)
+		}
 	}
 
 	/**

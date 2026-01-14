@@ -33,7 +33,6 @@ interface TunerPanelProps {
 
 const FREQUENCY_RANGE = { min: 24_000_000, max: 1_900_000_000 }
 const GAIN_RANGE = { min: 0, max: 500 }
-const PPM_RANGE = { min: -500, max: 500 }
 const FREQUENCY_STEPS = [100, 1_000, 10_000, 100_000, 1_000_000, 10_000_000]
 
 type NumericInputOptions = {
@@ -126,8 +125,10 @@ export function TunerPanel({
 	const [sampleRateEdit, setSampleRateEdit] = useState<string | null>(null)
 
 	useEffect(() => {
-		onInputCaptureChange?.(ppmEdit !== null || sampleRateEdit !== null)
-	}, [ppmEdit, sampleRateEdit, onInputCaptureChange])
+		return () => {
+			onInputCaptureChange?.(false)
+		}
+	}, [onInputCaptureChange])
 
 	useEffect(() => {
 		if (!selectedSourceId) {
@@ -149,6 +150,7 @@ export function TunerPanel({
 		if (ppmEdit !== null) {
 			if (key.escape) {
 				setPpmEdit(null)
+				onInputCaptureChange?.(false)
 				return
 			}
 			if (key.return) {
@@ -164,6 +166,7 @@ export function TunerPanel({
 					})
 				}
 				setPpmEdit(null)
+				onInputCaptureChange?.(false)
 				return
 			}
 			if (key.backspace || key.delete) {
@@ -184,6 +187,7 @@ export function TunerPanel({
 		if (sampleRateEdit !== null) {
 			if (key.escape) {
 				setSampleRateEdit(null)
+				onInputCaptureChange?.(false)
 				return
 			}
 			if (key.return) {
@@ -199,6 +203,7 @@ export function TunerPanel({
 					})
 				}
 				setSampleRateEdit(null)
+				onInputCaptureChange?.(false)
 				return
 			}
 			if (key.backspace || key.delete) {
@@ -361,11 +366,13 @@ export function TunerPanel({
 			}
 			case "p": {
 				if (!canControl) return
+				onInputCaptureChange?.(true)
 				setPpmEdit(selectedState.ppm.toString())
 				return
 			}
 			case "s": {
 				if (!canControl) return
+				onInputCaptureChange?.(true)
 				setSampleRateEdit(selectedState.sampleRate.toString())
 				return
 			}
