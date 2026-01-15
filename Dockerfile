@@ -375,8 +375,8 @@ FROM node:22-bookworm-slim AS node-build
 
 WORKDIR /app
 
-# Install pnpm v10
-RUN npm install -g pnpm@10
+# Use Corepack to install the exact pnpm version from packageManager
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
 
 # Copy workspace manifests and install dependencies
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.base.json turbo.json .npmrc ./
@@ -384,19 +384,29 @@ COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/share
 COPY packages/api-types/package.json packages/api-types/tsconfig.json ./packages/api-types/
 COPY cli/package.json cli/tsconfig.json ./cli/
 COPY packages/sdr-host/package.json packages/sdr-host/tsconfig.json ./packages/sdr-host/
-RUN pnpm install --frozen-lockfile --prod=false
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    pnpm install --frozen-lockfile --prod=false
 
 # Copy source code
 COPY . .
 
-# Ensure CLI workspace deps are present for typecheck (COPY overlays can drop node_modules)
-RUN pnpm --filter @wavekit/cli install --frozen-lockfile --prod=false
+# In Docker builds, prefer a hoisted node_modules layout for maximum tool compatibility
+RUN pnpm config set node-linker hoisted --location=project && \
+    pnpm config set enable-global-virtual-store false --location=project
 
-# Run type checking
-RUN pnpm run typecheck
+# Re-link dependencies under the selected node-linker (fast with cached store)
+RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
+    CI=true pnpm install --frozen-lockfile --prod=false
 
-# Build application
-RUN pnpm run build
+# Run type checking (cache Turbo + TS incremental artifacts)
+RUN --mount=type=cache,target=/root/.cache/turbo,sharing=locked \
+    --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
+    pnpm run typecheck
+
+# Build application (cache Turbo artifacts)
+RUN --mount=type=cache,target=/root/.cache/turbo,sharing=locked \
+    --mount=type=cache,target=/app/node_modules/.cache,sharing=locked \
+    pnpm run build
 
 # Prune dev dependencies for smaller final image
 RUN CI=true pnpm prune --prod

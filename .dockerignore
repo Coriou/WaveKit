@@ -44,6 +44,10 @@ wip
 tests
 vitest.config.ts
 
+# Large test fixture data (keep scripts/manifest, ignore downloaded artifacts)
+fixtures/raw
+fixtures/processed
+
 # Logs
 logs
 *.log
@@ -71,3 +75,11 @@ eslint.config.js
 decoded_calls
 recordings
 /tmp
+
+# Local runtime artifacts (these change when running the container)
+debug_audio
+output
+
+# Build system caches (can change often; not needed in image)
+.turbo
+.pnpm-store
