@@ -24,6 +24,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: final-sdrpp
+      cache_from:
+        - type=local,src=./.docker-cache
+      cache_to:
+        - type=local,dest=./.docker-cache,mode=max
     container_name: wavekit-sdrpp
     depends_on:
       rtl-tcp:
@@ -51,7 +55,9 @@ services:
       dockerfile: Dockerfile
       target: final-core # Core mode - SDR++ is external service
       cache_from:
-        - type=local,src=/tmp/docker-cache
+        - type=local,src=./.docker-cache
+      cache_to:
+        - type=local,dest=./.docker-cache,mode=max
     container_name: wavekit-api
     depends_on:
       sdrpp-server:

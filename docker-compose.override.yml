@@ -9,7 +9,9 @@ services:
       dockerfile: Dockerfile
       target: final
       cache_from:
-        - type=local,src=/tmp/docker-cache
+        - type=local,src=./.docker-cache
+      cache_to:
+        - type=local,dest=./.docker-cache,mode=max
     image: wavekit:dev
     environment:
       WAVEKIT_LOG_LEVEL: debug
@@ -20,6 +22,10 @@ services:
       context: .
       dockerfile: Dockerfile
       target: final-sdrpp
+      cache_from:
+        - type=local,src=./.docker-cache
+      cache_to:
+        - type=local,dest=./.docker-cache,mode=max
     image: wavekit:dev-sdrpp
 
   wavekit-core:
@@ -27,4 +33,8 @@ services:
       context: .
       dockerfile: Dockerfile
       target: final-core
+      cache_from:
+        - type=local,src=./.docker-cache
+      cache_to:
+        - type=local,dest=./.docker-cache,mode=max
     image: wavekit:dev-core

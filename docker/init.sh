@@ -46,8 +46,9 @@ log "Using buildx builder: wavekit-builder"
 
 # Create build cache directory
 log "Creating build cache directory..."
-mkdir -p /tmp/docker-cache
-chmod 777 /tmp/docker-cache
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+mkdir -p "${ROOT_DIR}/.docker-cache"
+chmod 777 "${ROOT_DIR}/.docker-cache"
 
 # Enable experimental features
 log "Enabling Docker experimental features..."

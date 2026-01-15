@@ -83,3 +83,4 @@ output
 # Build system caches (can change often; not needed in image)
 .turbo
 .pnpm-store
+.docker-cache
