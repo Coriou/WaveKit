@@ -40,8 +40,8 @@ help: ## Show this help message
 docker-build: ## Build all Docker images (full, core, sdrpp)
 	@echo "$(BLUE)Building all WaveKit images...$(NC)"
 	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh full $(TAG)
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)-core
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)-sdrpp
+	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)
+	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)
 	@echo "$(GREEN)✅ All images built successfully$(NC)"
 
 docker-build-full: ## Build full mode image
@@ -51,16 +51,18 @@ docker-build-full: ## Build full mode image
 
 docker-build-core: ## Build core mode image
 	@echo "$(BLUE)Building WaveKit core mode...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)-core
+	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)
 
 docker-build-sdrpp: ## Build SDR++-only mode image
 	@echo "$(BLUE)Building WaveKit SDR++ mode...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)-sdrpp
+	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)
 
 # Docker Compose Commands
 
-docker-dev: docker-build-core ## Start development environment
+docker-dev: ## Start development environment
 	@echo "$(BLUE)Starting WaveKit development environment...$(NC)"
+	@docker image inspect $(IMAGE_NAME):$(TAG)-core >/dev/null 2>&1 || (echo "$(YELLOW)Core image missing; building...$(NC)" && DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG))
+	@docker image inspect $(IMAGE_NAME):$(TAG)-sdrpp >/dev/null 2>&1 || (echo "$(YELLOW)SDR++ image missing; building...$(NC)" && DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG))
 	@$(COMPOSE_DEV) up -d
 	@echo "$(GREEN)✅ Development environment started$(NC)"
 	@echo ""

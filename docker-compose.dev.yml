@@ -20,6 +20,7 @@ services:
 
   sdrpp-server:
     # SDR++ Server - IQ stream provider
+    image: wavekit:latest-sdrpp
     build:
       context: .
       dockerfile: Dockerfile
@@ -50,6 +51,7 @@ services:
 
   wavekit-api:
     # Main WaveKit API + Decoders
+    image: wavekit:latest-core
     build:
       context: .
       dockerfile: Dockerfile
