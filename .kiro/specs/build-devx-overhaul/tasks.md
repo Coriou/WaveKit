@@ -8,12 +8,12 @@ Two checkpoints split the work into adoptable chunks.
 
 Touches no Dockerfile yet. Pure file-tree reorganization. Safe to land alone.
 
-- [ ] **A.1** Remove the file `docker/overlay/s6-overlay/s6-rc.d/wavekit-api/dependencies.d/sdrpp-server`. The canonical tree's `wavekit-api` SHALL now only depend on `wavekit-init`. _Requirements: 3.10, 3.11_
-- [ ] **A.2** Create directory `docker/overlay/s6-overlay-sdrpp/s6-rc.d/`. _Requirements: 3.8_
-- [ ] **A.3** Move `docker/overlay/s6-overlay/s6-rc.d/sdrpp-server/` (with all its files: `type`, `run`, `finish`, `dependencies.d/wavekit-init`) to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/sdrpp-server/`. _Requirements: 3.8_
-- [ ] **A.4** Move `docker/overlay/s6-overlay/s6-rc.d/services/contents.d/sdrpp-server` to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/services/contents.d/sdrpp-server`. _Requirements: 3.8_
-- [ ] **A.5** Move `docker/overlay/s6-overlay/s6-rc.d/user/contents.d/sdrpp-server` to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/user/contents.d/sdrpp-server`. _Requirements: 3.8_
-- [ ] **A.6** Verify `find docker/overlay/s6-overlay -iname '*sdrpp*'` returns empty. Verify `find docker/overlay/s6-overlay-sdrpp -type f` lists exactly: `sdrpp-server/type`, `sdrpp-server/run`, `sdrpp-server/finish`, `sdrpp-server/dependencies.d/wavekit-init`, `services/contents.d/sdrpp-server`, `user/contents.d/sdrpp-server`. _Requirements: 3.10, 3.11_
+- [x] **A.1** Remove the file `docker/overlay/s6-overlay/s6-rc.d/wavekit-api/dependencies.d/sdrpp-server`. The canonical tree's `wavekit-api` SHALL now only depend on `wavekit-init`. _Requirements: 3.10, 3.11_
+- [x] **A.2** Create directory `docker/overlay/s6-overlay-sdrpp/s6-rc.d/`. _Requirements: 3.8_
+- [x] **A.3** Move `docker/overlay/s6-overlay/s6-rc.d/sdrpp-server/` (with all its files: `type`, `run`, `finish`, `dependencies.d/wavekit-init`) to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/sdrpp-server/`. _Requirements: 3.8_
+- [x] **A.4** Move `docker/overlay/s6-overlay/s6-rc.d/services/contents.d/sdrpp-server` to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/services/contents.d/sdrpp-server`. _Requirements: 3.8_
+- [x] **A.5** Move `docker/overlay/s6-overlay/s6-rc.d/user/contents.d/sdrpp-server` to `docker/overlay/s6-overlay-sdrpp/s6-rc.d/user/contents.d/sdrpp-server`. _Requirements: 3.8_
+- [x] **A.6** Verify `find docker/overlay/s6-overlay -iname '*sdrpp*'` returns empty. Verify `find docker/overlay/s6-overlay-sdrpp -type f` lists exactly: `sdrpp-server/type`, `sdrpp-server/run`, `sdrpp-server/finish`, `sdrpp-server/dependencies.d/wavekit-init`, `services/contents.d/sdrpp-server`, `user/contents.d/sdrpp-server`. _Requirements: 3.10, 3.11_
 
 ## Phase B: Dockerfile Refactor
 
