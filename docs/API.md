@@ -732,6 +732,46 @@ Emitted when a decoder produces output.
 }
 ```
 
+The `output.type` field is the discriminator — switch on it to route per-decoder payloads. Known values include `call`, `call_start`, `call_end`, `signal`, `aircraft`, `ship`, `acars`, `vdl2`, `aprs`, `meshtastic`, plus generic `sync`, `decode`, `error`, `stats`.
+
+##### Meshtastic packet (type: `meshtastic`)
+
+Emitted by the `lora-meshtastic` decoder. `from`/`to`/`id` are 32-bit unsigned ints; `to === 0xFFFFFFFF` (4294967295) marks broadcast destinations. `payloadB64` is the AES-CTR-decrypted Meshtastic `Data.payload` (decode with the per-portnum protobuf — e.g. portnum `1` is `TEXT_MESSAGE_APP` UTF-8 text). `viaMqtt` and `priority` are present only when set on the originating frame.
+
+```json
+{
+	"type": "decoder:output",
+	"channel": "decoders",
+	"data": {
+		"decoderId": "meshtastic-eu",
+		"output": {
+			"timestamp": "2026-05-15T14:23:45.123Z",
+			"decoder": "meshtastic-eu",
+			"type": "meshtastic",
+			"data": {
+				"from": 3735928559,
+				"to": 4294967295,
+				"id": 1234567890,
+				"channel": 8,
+				"hopLimit": 2,
+				"hopStart": 3,
+				"wantAck": false,
+				"portnum": 1,
+				"payloadB64": "SGVsbG8gV29ybGQ=",
+				"payloadLen": 11,
+				"rxRssi": -97,
+				"rxSnr": 6.5,
+				"rxTime": "2026-05-15T14:23:45.012Z",
+				"frequency": 869525000,
+				"bw": 250000,
+				"sf": 11,
+				"cr": 5
+			}
+		}
+	}
+}
+```
+
 #### decoder:started
 
 ```json

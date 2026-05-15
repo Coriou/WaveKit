@@ -5,7 +5,7 @@ WaveKit is a TypeScript-based SDR stream processing framework that decodes multi
 ## What It Does
 
 - Connects to SDR sources (rtl_tcp, SDR++ network sink) over TCP
-- Fans out audio streams to 8 signal decoders running in parallel
+- Fans out audio/IQ streams to 9 signal decoders running in parallel
 - Provides REST API and WebSocket for control and real-time events
 - Streams decoded audio over TCP for host-side playback
 - Runs in Docker with s6-overlay process supervision
@@ -15,7 +15,7 @@ WaveKit is a TypeScript-based SDR stream processing framework that decodes multi
 ```
 Raspberry Pi          Docker Container        Host Machine
 RTL-SDR dongle   →    WaveKit                →  CLI Dashboard
-rtl_tcp :1234         8 Decoders                Audio Player
+rtl_tcp :1234         9 Decoders                Audio Player
                       REST API :9000
                       WebSocket :9000/ws
                       Audio TCP :8080
@@ -23,16 +23,17 @@ rtl_tcp :1234         8 Decoders                Audio Player
 
 ## Supported Decoders
 
-| Decoder     | Signals        | Pattern          |
-| ----------- | -------------- | ---------------- |
-| readsb      | ADS-B aircraft | Network producer |
-| AIS-catcher | AIS ships      | Network producer |
-| acarsdec    | ACARS aviation | External SDR     |
-| dumpvdl2    | VDL2 aviation  | External SDR     |
-| dsd-fme     | DMR, P25, YSF  | Pure consumer    |
-| multimon-ng | POCSAG, FLEX   | Pure consumer    |
-| direwolf    | APRS           | Network producer |
-| rtl_433     | ISM sensors    | Pure consumer    |
+| Decoder         | Signals             | Pattern          |
+| --------------- | ------------------- | ---------------- |
+| readsb          | ADS-B aircraft      | Network producer |
+| AIS-catcher     | AIS ships           | Network producer |
+| acarsdec        | ACARS aviation      | External SDR     |
+| dumpvdl2        | VDL2 aviation       | External SDR     |
+| dsd-fme         | DMR, P25, YSF       | Pure consumer    |
+| multimon-ng     | POCSAG, FLEX        | Pure consumer    |
+| direwolf        | APRS                | Network producer |
+| rtl_433         | ISM sensors         | Pure consumer    |
+| lora-meshtastic | Meshtastic LoRa     | Pure consumer    |
 
 ## Key Features
 

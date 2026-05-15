@@ -164,11 +164,12 @@ abstract class BaseDecoder {
 }
 ```
 
-**Built-in decoders extending BaseDecoder**:
+**Built-in decoders extending BaseDecoder** (or `IqDecimateDecoder` — a `BaseDecoder` subclass that adds csdr-based IQ decimation):
 
 - `DsdFmeDecoder` — Digital voice (DMR, P25, YSF, etc.)
 - `MultimonDecoder` — Pager protocols (POCSAG, FLEX, etc.)
-- `Rtl433Decoder` — ISM band sensors
+- `Rtl433Decoder` — ISM band sensors (extends `IqDecimateDecoder`)
+- `LoraMeshtasticDecoder` — Meshtastic LoRa packets (extends `IqDecimateDecoder`; csdr → Python wrapper around `gnuradio.lora_sdr`)
 
 ### NetworkProducerDecoder
 

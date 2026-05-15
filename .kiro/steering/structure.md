@@ -22,7 +22,7 @@ wavekit/
 │   │   ├── external-sdr-decoder.ts
 │   │   ├── manager.ts              # Lifecycle orchestration
 │   │   ├── registry.ts             # Plugin registration
-│   │   └── builtin/                # 8 decoder adapters
+│   │   └── builtin/                # 9 decoder adapters
 │   │
 │   ├── api/                     # Fastify REST/WebSocket
 │   │   ├── server.ts

@@ -454,6 +454,21 @@ logging:
 #       gain: 33.8
 #
 #   # -------------------------------------------------------------------------
+#   # LoRa/Meshtastic (pure_consumer pattern - shares iq source with rtl_433)
+#   # NOTE: Strongly recommend a TCXO RTL-SDR (e.g. RTL-SDR Blog v3) because
+#   # LoRa is narrow-band and standard crystals drift several kHz once warm.
+#   # -------------------------------------------------------------------------
+#   - id: "meshtastic-eu"
+#     type: "lora-meshtastic"
+#     enabled: true
+#     sourceId: "iq-868"   # Can be shared with rtl_433 on the same 868 MHz dongle
+#     options:
+#       region: "EU_868"
+#       preset: "LongFast"
+#       frequency: 869525000       # EU_868 Meshtastic primary
+#       channelKey: "AQ=="         # Default channel shorthand
+#
+#   # -------------------------------------------------------------------------
 #   # Amateur Radio Decoders
 #   # -------------------------------------------------------------------------
 #   # APRS (network_producer pattern - connects to direwolf KISS port)

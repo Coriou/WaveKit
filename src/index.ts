@@ -53,6 +53,10 @@ import {
 	createDirewolfDecoder,
 	DIREWOLF_CAPS,
 } from "./decoders/builtin/direwolf.js"
+import {
+	createLoraMeshtasticDecoder,
+	LORA_MESHTASTIC_CAPS,
+} from "./decoders/builtin/lora-meshtastic.js"
 import { ContainerMonitor } from "./core/container-monitor.js"
 import { SdrHostPoller, type SdrHostConfig } from "./core/sdr-host-poller.js"
 import { SourceBackpressureTracker } from "./core/source-backpressure-tracker.js"
@@ -386,6 +390,11 @@ async function main(): Promise<void> {
 	)
 	decoderRegistry.register("dumpvdl2", createDumpvdl2Decoder, DUMPVDL2_CAPS)
 	decoderRegistry.register("direwolf", createDirewolfDecoder, DIREWOLF_CAPS)
+	decoderRegistry.register(
+		"lora-meshtastic",
+		createLoraMeshtasticDecoder,
+		LORA_MESHTASTIC_CAPS,
+	)
 
 	log.info(
 		{ registeredDecoders: decoderRegistry.getRegisteredTypes() },

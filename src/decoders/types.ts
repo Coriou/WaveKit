@@ -198,6 +198,7 @@ export type DecoderOutputType =
 	| "vdl2" // VDL2 messages
 	| "ship" // AIS
 	| "aprs" // APRS packets
+	| "meshtastic" // Meshtastic LoRa packets
 
 /**
  * Structured output from a decoder (Requirement 4.4).

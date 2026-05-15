@@ -25,11 +25,11 @@ curl http://localhost:9000/health
 
 | Mode           | Size   | Use Case                   | Contains                   |
 | -------------- | ------ | -------------------------- | -------------------------- |
-| **Full**       | ~1.5GB | Single-host (Raspberry Pi) | SDR++, API, All 8 Decoders |
-| **Core**       | ~800MB | Distributed setup          | API, All 8 Decoders only   |
+| **Full**       | ~1.9GB | Single-host (Raspberry Pi) | SDR++, API, All 9 Decoders |
+| **Core**       | ~1.2GB | Distributed setup          | API, All 9 Decoders only   |
 | **SDR++-only** | ~450MB | Dedicated SDR host         | SDR++ server only          |
 
-## 📻 Included Decoders (8 Total)
+## 📻 Included Decoders (9 Total)
 
 | Decoder         | Binary        | Protocol                      | Typical Frequency   |
 | --------------- | ------------- | ----------------------------- | ------------------- |
@@ -41,6 +41,7 @@ curl http://localhost:9000/health
 | **direwolf**    | `direwolf`    | APRS packets                  | 144.39 MHz          |
 | **dumpvdl2**    | `dumpvdl2`    | VDL Mode 2 aviation           | 136.725-136.975 MHz |
 | **readsb**      | `readsb`      | ADS-B aircraft                | 1090 MHz            |
+| **lora-meshtastic** | `lora_meshtastic_decode.py` | Meshtastic LoRa (gr-lora_sdr) | 868/915 MHz ISM     |
 
 ## 🎯 Build & Run
 
@@ -224,12 +225,13 @@ docker inspect wavekit --format='{{.State.Health.Status}}'
 docker exec wavekit s6-rc-status
 ```
 
-### Verify all 8 decoders are installed
+### Verify all 9 decoders are installed
 
 ```bash
 docker exec wavekit bash -c '
   echo "Checking decoders..."
   which dsd-fme multimon-ng rtl_433 acarsdec AIS-catcher direwolf dumpvdl2 readsb
+  python3 -c "from gnuradio import lora_sdr; print(lora_sdr.__file__)"
 '
 ```
 

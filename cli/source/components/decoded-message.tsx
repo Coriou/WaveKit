@@ -87,6 +87,32 @@ interface CallData {
 }
 
 /**
+ * Meshtastic packet (from lora-meshtastic decoder).
+ * Mirrors the camelCase MeshtasticPacket emitted by parseMeshtasticPacket.
+ */
+interface MeshtasticPacketData {
+	from: number
+	to: number
+	id: number
+	channel: number
+	hopLimit: number
+	hopStart: number
+	wantAck: boolean
+	viaMqtt?: boolean
+	priority?: number
+	portnum: number
+	payloadB64: string
+	payloadLen: number
+	rxRssi: number
+	rxSnr: number
+	rxTime: string
+	frequency: number
+	bw: number
+	sf: number
+	cr: number
+}
+
+/**
  * Pager message data structure (POCSAG, FLEX)
  */
 interface PagerData {
@@ -252,6 +278,8 @@ function getTypeStyle(type: string, data?: unknown): TypeStyle {
 			return { color: "blue", badge: "AIS" }
 		case "aprs":
 			return { color: "yellow", badge: "APR" }
+		case "meshtastic":
+			return { color: "magenta", badge: "MSH" }
 		default:
 			return { color: "white", badge: type.slice(0, 3).toUpperCase() }
 	}
@@ -411,6 +439,94 @@ function formatCallEnd(data: CallData): string {
 	return parts.join(" │ ")
 }
 
+// ============================================================================
+// Meshtastic formatting helpers
+// ============================================================================
+
+/** 0xFFFFFFFF = broadcast destination per Meshtastic spec. */
+const MESHTASTIC_BROADCAST_ID = 0xffffffff
+
+/** Short labels for the well-known Meshtastic PortNum enum values. */
+const MESHTASTIC_PORTNUMS: Record<number, string> = {
+	0: "UNKNOWN",
+	1: "TEXT",
+	2: "REMOTE_HW",
+	3: "POS",
+	4: "NODE",
+	5: "ROUTING",
+	6: "ADMIN",
+	7: "TEXT_GZIP",
+	8: "WAYPOINT",
+	9: "AUDIO",
+	10: "DETECT",
+	32: "REPLY",
+	33: "IP_TUN",
+	34: "PAXCNTR",
+	64: "SERIAL",
+	65: "STORE_FWD",
+	66: "RANGE_TEST",
+	67: "TELEM",
+	68: "ZPS",
+	69: "SIM",
+	70: "TRACE",
+	71: "NEIGHBOR",
+	72: "ATAK",
+	73: "MAP",
+	74: "PWRSTRESS",
+	257: "PRIVATE",
+	258: "ATAK_FWD",
+}
+
+function isMeshtasticData(data: unknown): data is MeshtasticPacketData {
+	if (typeof data !== "object" || data === null) return false
+	const obj = data as Record<string, unknown>
+	return (
+		typeof obj["from"] === "number" &&
+		typeof obj["to"] === "number" &&
+		typeof obj["portnum"] === "number" &&
+		typeof obj["payloadB64"] === "string"
+	)
+}
+
+function formatMeshtasticNodeId(n: number): string {
+	if (n === MESHTASTIC_BROADCAST_ID) return "BCAST"
+	return "!" + (n >>> 0).toString(16).padStart(8, "0")
+}
+
+function formatMeshtasticPortnum(portnum: number): string {
+	return MESHTASTIC_PORTNUMS[portnum] ?? `PORT${portnum}`
+}
+
+function decodeMeshtasticText(payloadB64: string, maxLen: number): string {
+	try {
+		const text = Buffer.from(payloadB64, "base64")
+			.toString("utf8")
+			.replace(/[\x00-\x1f]/g, " ")
+			.trim()
+		return truncate(text, maxLen)
+	} catch {
+		return ""
+	}
+}
+
+function formatMeshtasticPacket(data: MeshtasticPacketData): string {
+	const parts: string[] = []
+	parts.push(
+		`${formatMeshtasticNodeId(data.from)}→${formatMeshtasticNodeId(data.to)}`,
+	)
+	parts.push(formatMeshtasticPortnum(data.portnum))
+	if (data.portnum === 1) {
+		const text = decodeMeshtasticText(data.payloadB64, 40)
+		parts.push(text ? `"${text}"` : `${data.payloadLen}B`)
+	} else {
+		parts.push(`${data.payloadLen}B`)
+	}
+	parts.push(`${data.rxRssi}dBm SNR:${data.rxSnr.toFixed(1)}`)
+	const hopsUsed = Math.max(0, data.hopStart - data.hopLimit)
+	parts.push(`${hopsUsed}/${data.hopStart} hops`)
+	return parts.join(" │ ")
+}
+
 /**
  * Check if data represents a pager message
  */
@@ -471,6 +587,11 @@ export function formatMessageData(data: unknown, type?: string): string {
 		if (isPagerData(data)) {
 			return formatPagerMessage(data)
 		}
+	}
+
+	// Handle Meshtastic packets — type-driven, validated by shape
+	if (type === "meshtastic" && isMeshtasticData(data)) {
+		return formatMeshtasticPacket(data)
 	}
 
 	if (typeof data === "string") {

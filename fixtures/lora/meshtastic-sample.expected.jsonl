@@ -1,0 +1,1 @@
+{"from":3735928559,"to":4294967295,"id":1234567890,"channel":8,"hop_limit":3,"hop_start":3,"want_ack":false,"portnum":1,"payload_b64":"SGVsbG8gV29ybGQ=","payload_len":11,"rx_rssi":-95,"rx_snr":6.5,"rx_time":"2026-05-15T12:34:56.789Z","frequency":869525000,"bw":250000,"sf":11,"cr":5}

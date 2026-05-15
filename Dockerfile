@@ -273,6 +273,45 @@ RUN git clone --depth 1 https://github.com/jvde-github/AIS-catcher.git && \
     cp AIS-catcher /usr/local/bin/
 
 # ============================================================================
+# Stage: lora-build
+# Purpose: Build gr-lora_sdr decoder blocks (LoRa/Meshtastic)
+# Size: ~500MB (not in final image)
+# ============================================================================
+FROM base-deps AS lora-build
+
+ARG GR_LORA_SDR_REF=862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9
+
+WORKDIR /build
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    gnuradio \
+    gnuradio-dev \
+    python3-dev \
+    python3-numpy \
+    pybind11-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone --no-checkout https://github.com/tapparelj/gr-lora_sdr.git && \
+    cd gr-lora_sdr && \
+    git fetch --depth 1 origin "${GR_LORA_SDR_REF}" && \
+    git checkout --detach FETCH_HEAD && \
+    mkdir build && cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release .. && \
+    make -j$(nproc) && \
+    make install && \
+    ldconfig && \
+    lora_py_dir="$(find /usr/local/lib -path '*/gnuradio/lora_sdr' -type d -print -quit)" && \
+    test -n "${lora_py_dir}" && \
+    lora_lib_src="$(find /usr/local/lib -maxdepth 3 -name 'libgnuradio-lora_sdr*' -printf '%h\n' -quit)" && \
+    test -n "${lora_lib_src}" && \
+    mkdir -p /usr/local/share/wavekit-lora/lib && \
+    cp -a "${lora_py_dir}" /usr/local/share/wavekit-lora/lora_sdr && \
+    cp -a "${lora_lib_src}"/libgnuradio-lora_sdr* /usr/local/share/wavekit-lora/lib/ && \
+    cd / && rm -rf /build/gr-lora_sdr
+
+# ============================================================================
 # Stage: direwolf-build
 # Purpose: Build direwolf decoder (APRS amateur radio packets)
 # Size: ~180MB (not in final image)
@@ -437,6 +476,16 @@ ENV WAVEKIT_HOME=/app \
 RUN mkdir -p /app /var/log/wavekit /var/run/wavekit && \
     chmod 755 /app /var/log/wavekit /var/run/wavekit
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    gnuradio \
+    python3-numpy \
+    python3-protobuf \
+    python3-cryptography \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy SDR++ from build stage
 COPY --from=sdrpp-build /usr/local/bin/sdrpp* /usr/local/bin/
 COPY --from=sdrpp-build /usr/local/lib/libsdrpp* /usr/local/lib/
@@ -453,16 +502,27 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+# Copy gr-lora_sdr blocks for LoRa/Meshtastic
+# KEEP IN SYNC with the lora install in the final-core stage below.
+# Source paths come from the stable wavekit-lora staging dir so they work for
+# both amd64 (x86_64-linux-gnu) and arm64 (aarch64-linux-gnu) builds.
+# The python module destination is the apt-managed gnuradio namespace dir;
+# Debian's `gnuradio` package keeps __init__.py at /usr/lib/python3/dist-packages/gnuradio/.
+COPY --from=lora-build /usr/local/share/wavekit-lora/lib/libgnuradio-lora_sdr* /usr/local/lib/
+COPY --from=lora-build /usr/local/share/wavekit-lora/lora_sdr /usr/lib/python3/dist-packages/gnuradio/lora_sdr
 # Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 # Copy csdr for FM demodulation (audio-from-IQ decoders)
 COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
 COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
+COPY docker/scripts/lora_meshtastic_decode.py /usr/local/bin/
+COPY docker/scripts/meshtastic_proto /usr/local/lib/wavekit/meshtastic_proto
 
 # Update library cache for all copied libraries
-RUN ldconfig
+RUN chmod 755 /usr/local/bin/lora_meshtastic_decode.py && \
+    ldconfig
 
-# Verify all 8 decoder installations
+# Verify all 9 decoder installations
 RUN echo "Verifying decoder installations..." && \
     dsd-fme --version && \
     multimon-ng -h > /dev/null 2>&1 && \
@@ -473,7 +533,9 @@ RUN echo "Verifying decoder installations..." && \
     dumpvdl2 --version && \
     readsb --version && \
     csdr --help > /dev/null 2>&1 && \
-    echo "All 8 decoders + csdr verified successfully"
+    python3 -c "from gnuradio import lora_sdr; print(lora_sdr.__file__)" && \
+    python3 /usr/local/bin/lora_meshtastic_decode.py --help > /dev/null && \
+    echo "All 9 decoders + csdr verified successfully"
 
 # Copy Node.js application
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/
@@ -545,6 +607,16 @@ ENV WAVEKIT_HOME=/app \
 RUN mkdir -p /app /var/log/wavekit /var/run/wavekit && \
     chmod 755 /app /var/log/wavekit /var/run/wavekit
 
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
+    gnuradio \
+    python3-numpy \
+    python3-protobuf \
+    python3-cryptography \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy decoders only (no SDR++)
 COPY --from=dsd-fme-build /usr/local/bin/dsd* /usr/local/bin/
 COPY --from=dsd-fme-build /usr/local/lib/libmbe* /usr/local/lib/
@@ -558,17 +630,26 @@ COPY --from=direwolf-build /usr/local/bin/gen_packets /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/bin/dumpvdl2 /usr/local/bin/
 COPY --from=dumpvdl2-build /usr/local/lib/libacars* /usr/local/lib/
 COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
+# Copy gr-lora_sdr blocks for LoRa/Meshtastic
+# KEEP IN SYNC with the lora install in the final stage above.
+COPY --from=lora-build /usr/local/share/wavekit-lora/lib/libgnuradio-lora_sdr* /usr/local/lib/
+COPY --from=lora-build /usr/local/share/wavekit-lora/lora_sdr /usr/lib/python3/dist-packages/gnuradio/lora_sdr
 # Copy SoapyRTLTCP module for rtl_tcp network SDR support (acarsdec, dumpvdl2)
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 # Copy csdr for FM demodulation (audio-from-IQ decoders)
 COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
 COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
+COPY docker/scripts/lora_meshtastic_decode.py /usr/local/bin/
+COPY docker/scripts/meshtastic_proto /usr/local/lib/wavekit/meshtastic_proto
 
 # Copy ncurses libraries from build stage to ensure version compatibility
 COPY --from=dsd-fme-build /usr/lib/x86_64-linux-gnu/libncurses* /usr/lib/x86_64-linux-gnu/
 
 # Run ldconfig to update cache
-RUN ldconfig
+RUN chmod 755 /usr/local/bin/lora_meshtastic_decode.py && \
+    ldconfig && \
+    python3 -c "from gnuradio import lora_sdr; print(lora_sdr.__file__)" && \
+    python3 /usr/local/bin/lora_meshtastic_decode.py --help > /dev/null
 
 # Copy direwolf configuration
 COPY docker/config/direwolf.conf /etc/direwolf.conf

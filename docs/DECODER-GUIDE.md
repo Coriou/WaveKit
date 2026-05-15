@@ -365,19 +365,20 @@ export class MySdrDecoder extends ExternalSdrDecoder {
 
 WaveKit defines standard output types for decoded data:
 
-| Type       | Description         | Used By     |
-| ---------- | ------------------- | ----------- |
-| `sync`     | Decoder sync event  | dsd-fme     |
-| `call`     | Voice call event    | dsd-fme     |
-| `message`  | Text message        | multimon-ng |
-| `signal`   | Generic signal      | rtl_433     |
-| `aircraft` | ADS-B aircraft data | readsb      |
-| `ship`     | AIS vessel data     | AIS-catcher |
-| `acars`    | ACARS message       | acarsdec    |
-| `vdl2`     | VDL2 message        | dumpvdl2    |
-| `aprs`     | APRS packet         | direwolf    |
-| `error`    | Decoder error       | all         |
-| `stats`    | Statistics          | all         |
+| Type         | Description            | Used By         |
+| ------------ | ---------------------- | --------------- |
+| `sync`       | Decoder sync event     | dsd-fme         |
+| `call`       | Voice call event       | dsd-fme         |
+| `message`    | Text message           | multimon-ng     |
+| `signal`     | Generic signal         | rtl_433         |
+| `aircraft`   | ADS-B aircraft data    | readsb          |
+| `ship`       | AIS vessel data        | AIS-catcher     |
+| `acars`      | ACARS message          | acarsdec        |
+| `meshtastic` | Meshtastic LoRa packet | lora-meshtastic |
+| `vdl2`       | VDL2 message           | dumpvdl2        |
+| `aprs`       | APRS packet            | direwolf        |
+| `error`      | Decoder error          | all             |
+| `stats`      | Statistics             | all             |
 
 ### Dynamic Sample Rate Handling
 

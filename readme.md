@@ -9,7 +9,7 @@ It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tu
 ┌─────────────────┐     ┌──────────────────────────────────────┐     ┌─────────────────┐
 │  RTL-SDR        │     │  WaveKit Container                   │     │  Your Apps      │
 │  on Raspberry Pi│────▶│                                      │────▶│                 │
-│  rtl_tcp :1234  │ IQ  │  8 Decoders running in parallel:     │ WS  │  CLI Dashboard  │
+│  rtl_tcp :1234  │ IQ  │  9 Decoders running in parallel:     │ WS  │  CLI Dashboard  │
 │                 │     │  ✈️ ADS-B  🚢 AIS  📟 Pagers  📻 DMR │     │  Web UI         │
 └─────────────────┘     └──────────────────────────────────────┘     └─────────────────┘
 ```
@@ -36,7 +36,7 @@ WaveKit's primary interface is an interactive terminal dashboard built with Ink/
 │ [1] Dashboard  [2] Decoders  [3] Output  [4] Backpressure  [5] Sources  [6] Audio  [7] Resources  [8] Tuner │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │ DECODERS                                                                    │
-│ Running: 5/8    Healthy: 5/5    Total Events: 12,847                        │
+│ Running: 5/9    Healthy: 5/5    Total Events: 12,847                        │
 │ ● dsd-fme       ● multimon-ng       ● readsb       ● ais-catcher            │
 │                                                                             │
 │ BACKPRESSURE                                                                │
@@ -70,16 +70,17 @@ WAVEKIT_API_URL=http://localhost:9000    # REST API endpoint
 
 ## Supported Decoders
 
-| Decoder         | Signals               | Use Case             |
-| --------------- | --------------------- | -------------------- |
-| **readsb**      | ADS-B 1090 MHz        | Aircraft tracking    |
-| **AIS-catcher** | AIS 162 MHz           | Ship tracking        |
-| **acarsdec**    | ACARS VHF             | Aircraft data link   |
-| **dumpvdl2**    | VDL2 136 MHz          | Aviation data link   |
-| **dsd-fme**     | DMR, P25, YSF, D-Star | Digital voice        |
-| **multimon-ng** | POCSAG, FLEX, DTMF    | Pagers, tones        |
-| **direwolf**    | APRS 144 MHz          | Amateur radio        |
-| **rtl_433**     | ISM 433/915 MHz       | Weather sensors, IoT |
+| Decoder             | Signals               | Use Case                |
+| ------------------- | --------------------- | ----------------------- |
+| **readsb**          | ADS-B 1090 MHz        | Aircraft tracking       |
+| **AIS-catcher**     | AIS 162 MHz           | Ship tracking           |
+| **acarsdec**        | ACARS VHF             | Aircraft data link      |
+| **dumpvdl2**        | VDL2 136 MHz          | Aviation data link      |
+| **dsd-fme**         | DMR, P25, YSF, D-Star | Digital voice           |
+| **multimon-ng**     | POCSAG, FLEX, DTMF    | Pagers, tones           |
+| **direwolf**        | APRS 144 MHz          | Amateur radio           |
+| **rtl_433**         | ISM 433/915 MHz       | Weather sensors, IoT    |
+| **lora-meshtastic** | LoRa 868/915 MHz      | Meshtastic mesh packets |
 
 All decoders are pre-built in the Docker image. Enable/disable via configuration.
 
@@ -95,7 +96,7 @@ SDR Source (rtl_tcp/SDR++)
    FanoutManager ─────┬─────┬─────┬─────┬─────┐           │
          │            │     │     │     │     │           │
          ▼            ▼     ▼     ▼     ▼     ▼           │
-      dsd-fme    multimon readsb  ais  acars vdl2         │
+      dsd-fme   multimon readsb ais acars vdl2 mesh       │
          │            │     │     │     │     │           │
          └────────────┴─────┴─────┴─────┴─────┘           │
                             │                             │
@@ -447,7 +448,7 @@ wavekit/
 │   ├── decoders/                # Decoder plugin system
 │   │   ├── base-decoder.ts
 │   │   ├── manager.ts
-│   │   └── builtin/             # 8 decoder adapters
+│   │   └── builtin/             # 9 decoder adapters
 │   ├── api/                     # Fastify REST/WebSocket
 │   └── utils/
 │

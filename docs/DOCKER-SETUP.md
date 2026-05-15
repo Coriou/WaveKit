@@ -148,23 +148,25 @@ nc localhost 8080 | ffplay -f s16le -ar 48000 -ac 1 -nodisp -
 
 ## Included Decoders
 
-All 8 decoders are pre-built in the Docker image:
+All 9 decoders are pre-built in the Docker image:
 
-| Decoder     | Binary        | Signals               |
-| ----------- | ------------- | --------------------- |
-| dsd-fme     | `dsd-fme`     | DMR, P25, YSF, D-Star |
-| multimon-ng | `multimon-ng` | POCSAG, FLEX, DTMF    |
-| rtl_433     | `rtl_433`     | ISM sensors           |
-| readsb      | `readsb`      | ADS-B 1090 MHz        |
-| acarsdec    | `acarsdec`    | ACARS VHF             |
-| dumpvdl2    | `dumpvdl2`    | VDL2 136 MHz          |
-| AIS-catcher | `AIS-catcher` | AIS 162 MHz           |
-| direwolf    | `direwolf`    | APRS 144 MHz          |
+| Decoder         | Binary                            | Signals                |
+| --------------- | --------------------------------- | ---------------------- |
+| dsd-fme         | `dsd-fme`                         | DMR, P25, YSF, D-Star  |
+| multimon-ng     | `multimon-ng`                     | POCSAG, FLEX, DTMF     |
+| rtl_433         | `rtl_433`                         | ISM sensors            |
+| readsb          | `readsb`                          | ADS-B 1090 MHz         |
+| acarsdec        | `acarsdec`                        | ACARS VHF              |
+| dumpvdl2        | `dumpvdl2`                        | VDL2 136 MHz           |
+| AIS-catcher    | `AIS-catcher`                      | AIS 162 MHz            |
+| direwolf        | `direwolf`                        | APRS 144 MHz           |
+| lora-meshtastic | `python3 lora_meshtastic_decode.py` | Meshtastic LoRa packets |
 
 Verify installation:
 
 ```bash
 docker exec wavekit which dsd-fme multimon-ng rtl_433 readsb acarsdec dumpvdl2 AIS-catcher direwolf
+docker exec wavekit python3 -c "from gnuradio import lora_sdr; print(lora_sdr.__file__)"
 ```
 
 ## Troubleshooting
