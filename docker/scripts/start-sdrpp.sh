@@ -9,8 +9,9 @@ echo "[sdrpp-server] Starting SDR++ server..." >> /var/log/wavekit/system.log
 exec 2>&1
 
 # Execute SDR++ server
+# Note: SDR++ v1.1.0 does not accept `--log-level`; passing it triggers a
+# basic_string-from-null std::logic_error crash. Verbosity is left at default.
 exec sdrpp \
   --server \
   --port 5259 \
-  --addr 0.0.0.0 \
-  --log-level info
+  --addr 0.0.0.0
