@@ -23,33 +23,34 @@ D).
 
 ### B.1 Capture upstream SHAs
 
-- [ ] **B.1.1** For each of the 12 upstream sources (SDR++, mbelib, dsd-fme, multimon-ng, rtl_433, acarsdec, AIS-catcher, direwolf, libacars, dumpvdl2, readsb, SoapyRTLTCP, csdr), `git ls-remote` the current branch tip and record the SHA. Save these as the initial values for the `ARG <NAME>_REF` declarations. _Requirements: 3.3_
-- [ ] **B.1.2** Keep `GR_LORA_SDR_REF=862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9` as-is. _Requirements: 3.3_
+- [x] **B.1.1** For each of the 12 upstream sources (SDR++, mbelib, dsd-fme, multimon-ng, rtl_433, acarsdec, AIS-catcher, direwolf, libacars, dumpvdl2, readsb, SoapyRTLTCP, csdr), `git ls-remote` the current branch tip and record the SHA. Save these as the initial values for the `ARG <NAME>_REF` declarations. _Requirements: 3.3_
+- [x] **B.1.2** Keep `GR_LORA_SDR_REF=862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9` as-is. _Requirements: 3.3_
 
 ### B.2 Rewrite Dockerfile
 
-- [ ] **B.2.1** Add a single top-of-file ARG block declaring `S6_OVERLAY_VERSION` and all 13 decoder/binary upstream refs from §B.1. _Requirements: 3.3_
-- [ ] **B.2.2** Replace the current `base-deps` stage with a thin `base-build` stage containing only `build-essential`, `cmake`, `git`, `pkg-config`, `ca-certificates`, `curl`. _Requirements: 3.1_
-- [ ] **B.2.3** Refactor `runtime-base`:
+- [x] **B.2.1** Add a single top-of-file ARG block declaring `S6_OVERLAY_VERSION` and all 13 decoder/binary upstream refs from §B.1. _Requirements: 3.3_
+- [x] **B.2.2** Replace the current `base-deps` stage with a thin `base-build` stage containing only `build-essential`, `cmake`, `git`, `pkg-config`, `ca-certificates`, `curl`. _Requirements: 3.1_
+- [x] **B.2.3** Refactor `runtime-base`:
     - Switch the s6-overlay platform-detection block from `BUILDPLATFORM` to `TARGETARCH` (case mapping per sdr-host pattern).
     - Drop the `--mount=type=cache,target=/var/lib/apt` mount; keep only the `/var/cache/apt` mount.
     - Dedupe the duplicate `libsox-fmt-all` line.
     - Verify whether `tini` is referenced anywhere under `docker/`; if not, remove the apt package.
     - _Requirements: 3.5, 10.1, 10.2, 10.4, 14_
-- [ ] **B.2.4** Rewrite each of the 12 `*-build` stages:
+- [x] **B.2.4** Rewrite each of the 12 `*-build` stages:
     - `FROM base-build`.
     - One `RUN apt-get install` with only this decoder's deps, protected by `--mount=type=cache,target=/var/cache/apt,sharing=locked`, ending with `rm -rf /var/lib/apt/lists/*`.
     - `ARG TARGETARCH` if the stage does arch-conditional work.
     - Pinned-ref checkout via `git clone --no-checkout <url> && cd <repo> && git fetch --depth 1 origin "${REF}" && git checkout --detach FETCH_HEAD`.
     - `make install` or equivalent.
     - _Requirements: 3.2, 3.3, 3.4_
-- [ ] **B.2.5** Refactor `node-build`:
+- [x] **B.2.5** Refactor `node-build`:
     - Remove the `pnpm config set node-linker hoisted` + second install block (lines 432–438 of the current Dockerfile).
     - Single `pnpm install --frozen-lockfile --prod=false` invocation with `--mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked`.
     - Keep the existing Turbo cache mount on typecheck + build.
     - Keep the existing `pnpm prune --prod` final step.
     - _Requirements: 3.6_
-- [ ] **B.2.6** Create a new `final-base` stage:
+    - **Note (R3 mitigation applied)**: pure-isolated single install couldn't survive cache-mount removal AND host-leaked `cli/node_modules`/`packages/*/node_modules` from build context. Per Phase B brief R3, switched to hoisted layout via `pnpm config set node-linker hoisted` BEFORE the single install. Project `.npmrc` default (`isolated`) is unchanged so `pnpm dev` is unaffected. Follow-up: fix `.dockerignore` to exclude `**/node_modules` so override can be lifted (Req 3.6).
+- [x] **B.2.6** Create a new `final-base` stage:
     - `FROM runtime-base`.
     - Apt-install python3 + gnuradio + python3-numpy + python3-protobuf (drop python3-cryptography if verification shows it's unused by `lora_meshtastic_decode.py`).
     - COPY every decoder binary + library from `*-build` stages (current `final` and `final-core` share these; consolidate).
@@ -67,7 +68,9 @@ D).
     - `ENTRYPOINT ["/init"]`.
     - LABELs: maintainer, version.
     - _Requirements: 3.7, 3.13, 3.14, 3.15, 10.1, 10.3_
-- [ ] **B.2.7** Define `final` stage:
+    - **R2 finding (ncurses)**: amd64 verification shows `libncurses6` apt package in `runtime-base` provides `/lib/x86_64-linux-gnu/libncursesw.so.6` which satisfies `dsd-fme`'s linkage. The hardcoded `COPY --from=dsd-fme-build /usr/lib/x86_64-linux-gnu/libncurses*` was DELETED entirely (no replacement). `libncurses6` is multi-arch in Debian so the same install resolves on arm64.
+    - **Note (python3-cryptography)**: verified KEPT — `docker/scripts/lora_meshtastic_decode.py` imports `from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes` (line 23).
+- [x] **B.2.7** Define `final` stage:
     - `FROM final-base`.
     - COPY SDR++ binaries + libraries from `sdrpp-build`.
     - COPY `docker/scripts/start-sdrpp.sh finish-sdrpp.sh` → `/usr/local/bin/`.
@@ -76,17 +79,19 @@ D).
     - EXPOSE add 5259, 7355.
     - LABEL mode=full.
     - _Requirements: 3.8, 3.10_
-- [ ] **B.2.8** Define `final-core` stage:
+    - **Note**: current SDR++ master installs to `/usr/bin/sdrpp`, `/usr/lib/libsdrpp_core.so`, `/usr/lib/sdrpp/plugins/`. The old Dockerfile's COPY paths (`/usr/local/bin/sdrpp*`, `/usr/local/lib/libsdrpp*`) silently no-op'd — they have been corrected here. Also added SDR++-specific runtime libs (`libglfw3`, `libvolk2.5`, `libglvnd0`, `libopengl0`) to `final` only (kept out of `runtime-base` so `final-core` stays slim).
+- [x] **B.2.8** Define `final-core` stage:
     - `FROM final-base`.
     - LABEL mode=core.
     - No further content. (Existence of the stage is the contract.)
     - _Requirements: 3.9, 3.10, 3.11_
-- [ ] **B.2.9** Rewrite `final-sdrpp` stage:
+- [x] **B.2.9** Rewrite `final-sdrpp` stage:
     - `FROM runtime-base`.
     - Apply the `TARGETARCH` s6 platform-detection fix (inherited from `runtime-base` refactor in B.2.3).
     - Existing structure otherwise preserved.
     - _Requirements: 3.5_
-- [ ] **B.2.10** Add `final-demod` stage:
+    - **Note**: the old `final-sdrpp` was already broken — it copied `s6-rc.d/base` which had been renamed to `s6-rc.d/wavekit-init` since commit 7d18546 (Jan 2). Reconstructed with per-file COPY: copy `services/type`, `user/type`, `user/contents.d/services` from the canonical tree, plus `sdrpp-server/{type,run,finish}` and the two `contents.d` registration files from the sdrpp overlay. `sdrpp-server/dependencies.d/wavekit-init` is intentionally omitted (this image doesn't ship wavekit-init). All COPYs are additive (Req 3.10).
+- [x] **B.2.10** Add `final-demod` stage:
     - `FROM runtime-base`.
     - Apt-install (with cache mount): sox, libsox-fmt-all (already in runtime-base — verify), vim, netcat-openbsd, python3, python3-pip, python3-matplotlib, python3-numpy, python3-scipy, ffmpeg, gnuradio, gr-osmosdr.
     - COPY dsd-fme + libmbe* from `dsd-fme-build`.
@@ -98,14 +103,14 @@ D).
     - `CMD ["/bin/bash"]`.
     - No s6, no ENTRYPOINT — this is an interactive utility container, not a supervised service.
     - _Requirements: 2.4, 3.12_
-- [ ] **B.2.11** Smoke-test locally:
+- [x] **B.2.11** Smoke-test locally:
     - `docker buildx build --target final-core --load -t wavekit:dev-core .`
     - `docker buildx build --target final --load -t wavekit:dev .`
     - `docker buildx build --target final-sdrpp --load -t wavekit:dev-sdrpp .`
     - `docker buildx build --target final-demod --load -t wavekit:dev-demod .`
     - All four builds succeed.
     - _Requirements: covers B.2.1–B.2.10_
-- [ ] **B.2.12** Verify Property 8 and Property 9 against the new `final-core` image:
+- [x] **B.2.12** Verify Property 8 and Property 9 against the new `final-core` image:
     - `docker run --rm wavekit:dev-core sh -c 'find /etc/s6-overlay -iname "*sdrpp*"'` returns empty.
     - `docker run --rm wavekit:dev-core ls /etc/s6-overlay/s6-rc.d/wavekit-api/dependencies.d/` returns exactly `wavekit-init`.
     - `docker run --rm wavekit:dev sh -c 'find /etc/s6-overlay -name "sdrpp-server" | wc -l'` returns >= 1.
