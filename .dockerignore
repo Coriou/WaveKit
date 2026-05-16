@@ -12,10 +12,13 @@ package-lock.json.bak
 
 # Build artifacts
 dist
+**/dist
 *.js.map
 *.d.ts.map
 coverage
+**/coverage
 .tsc-cache
+**/.tsc-cache
 
 # IDE
 .vscode
@@ -42,6 +45,7 @@ wip
 
 # Tests
 tests
+**/tests
 vitest.config.ts
 
 # Large test fixture data (keep scripts/manifest, ignore downloaded artifacts)
@@ -82,5 +86,7 @@ output
 
 # Build system caches (can change often; not needed in image)
 .turbo
+**/.turbo
 .pnpm-store
+**/.pnpm-store
 .docker-cache
