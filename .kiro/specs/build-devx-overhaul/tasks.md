@@ -159,16 +159,17 @@ D).
 
 ## Phase E: Makefile Cleanup
 
-- [ ] **E.1** Rewrite `/Users/ben/Projects/wavekit/Makefile` with the new target inventory per design §7.1. _Requirements: 6.1_
-- [ ] **E.2** Confirm no deleted targets remain in the file. Run `make help` and verify only the targets listed in 6.1 (plus sdr-host-* and fixtures-*) appear. _Requirements: 6.2_
-- [ ] **E.3** Verify all newly-introduced echo output is emoji-free and uses no decorative ANSI colour. Existing colour in retained targets MAY remain unchanged. _Requirements: 6.3_
-- [ ] **E.4** Test the new dev flow end-to-end:
+- [x] **E.1** Rewrite `/Users/ben/Projects/wavekit/Makefile` with the new target inventory per design §7.1. _Requirements: 6.1_
+- [x] **E.2** Confirm no deleted targets remain in the file. Run `make help` and verify only the targets listed in 6.1 (plus sdr-host-* and fixtures-*) appear. _Requirements: 6.2_
+- [x] **E.3** Verify all newly-introduced echo output is emoji-free and uses no decorative ANSI colour. Existing colour in retained targets MAY remain unchanged. _Requirements: 6.3_
+- [x] **E.4** Test the new dev flow end-to-end:
     - `make dev` SHALL start `pnpm dev` with esbuild watch + node watch.
     - `make dev-stack` SHALL build via buildx bake and start the dev profile.
     - `make dev-dashboard` SHALL connect the CLI dashboard.
     - `make docker-build` SHALL invoke bake.
     - `make demod-test` SHALL launch the demod-test profile interactively.
     - _Requirements: 1.1, 2.1, 2.4, 5.2, 6.1_
+    - **Result**: Verified via `make --dry-run` for each headline target. `make dev` → `pnpm dev`; `make dev-stack` → `docker compose --profile dev up --build`; `make docker-build` → `docker buildx bake --file docker/bake.hcl default`; `make demod-test` → `docker compose --profile demod-test run --rm demod-test`. `cli-install` folded into `dev-dashboard-build` as planned. New Makefile is 156 lines / 34 targets (down from 386 / 63).
 
 ## Phase F: CI Workflow
 

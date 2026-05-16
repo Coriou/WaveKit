@@ -1,122 +1,103 @@
-.PHONY: help docker-build docker-build-full docker-build-core docker-build-sdrpp \
-	docker-dev docker-prod docker-push docker-clean docker-logs \
-	docker-shell docker-compose-up docker-compose-down \
-	cli-install dev-dashboard-build dev-dashboard \
-	sdr-host-build sdr-host-build-multi sdr-host-install sdr-host-init \
-	sdr-host-up sdr-host-update sdr-host-down sdr-host-restart \
-	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
-	sdr-host-clean
-
-# WaveKit Docker Makefile
-# Quick commands for development and deployment
-# Usage: make [target]
+# WaveKit Makefile
+# Lifecycle-focused targets for dev, build, push, and ops.
+# Run `make help` for the full inventory.
 
 .DEFAULT_GOAL := help
 
-# Variables
-REGISTRY ?= 
-IMAGE_NAME ?= wavekit
-TAG ?= latest
-BUILDKIT ?= 1
-COMPOSE_DEV := docker-compose -f docker-compose.dev.yml
-COMPOSE_PROD := docker-compose -f docker-compose.prod.yml -f docker-compose.override.yml
+.PHONY: help \
+	dev dev-dashboard dev-dashboard-build dev-configs \
+	dev-stack dev-stack-down dev-stack-logs dev-shell dev-status \
+	docker-init docker-build docker-push docker-clean docker-prune \
+	demod-test \
+	sdr-host-build sdr-host-build-multi sdr-host-install sdr-host-init \
+	sdr-host-up sdr-host-update sdr-host-down sdr-host-restart \
+	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
+	sdr-host-clean \
+	fixtures-download fixtures-download-all fixtures-convert \
+	fixtures-test fixtures-test-local
+
+# SDR-host variables (preserved from prior Makefile)
 SDR_HOST_TAG ?= latest
 SDR_HOST_PLATFORMS ?= linux/arm64
 
-# Colors for output
+# Dev container (used by fixtures-test which exec's into the dev stack)
+DEV_CONTAINER ?= wavekit-api
+
+# Colors for retained sdr-host-* / fixtures-* output (newly-introduced
+# targets below are emoji-free and ANSI-free per Requirement 6.3).
 BLUE := \033[0;34m
 GREEN := \033[0;32m
 YELLOW := \033[1;33m
 RED := \033[0;31m
-NC := \033[0m # No Color
+NC := \033[0m
 
 help: ## Show this help message
-	@echo "$(BLUE)WaveKit Docker Commands$(NC)"
-	@echo ""
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "$(GREEN)%-25s$(NC) %s\n", $$1, $$2}'
+	@awk 'BEGIN {FS = ":.*?## "} \
+		/^# === / {sub(/^# === /, ""); sub(/ ===$$/, ""); printf "\n%s\n", $$0; next} \
+		/^[a-zA-Z][a-zA-Z0-9_-]+:.*?## / {printf "  %-25s %s\n", $$1, $$2}' \
+		$(MAKEFILE_LIST)
 
-# Docker Build Commands
+# === Native dev loop (no Docker) ===
 
-docker-build: ## Build all Docker images (full, core, sdrpp)
-	@echo "$(BLUE)Building all WaveKit images...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh full $(TAG)
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)
-	@echo "$(GREEN)✅ All images built successfully$(NC)"
+dev: ## Run app natively with hot-reload (esbuild watch + node --watch, no Docker)
+	@pnpm dev
 
-docker-build-full: ## Build full mode image
-	@echo "$(BLUE)Building WaveKit full mode...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh full $(TAG)
-	@docker image inspect $(IMAGE_NAME):$(TAG) --format="Size: {{.Size}}" | numfmt --to=iec
+dev-dashboard: dev-dashboard-build ## Launch Ink/React CLI dashboard (interactive)
+	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
 
-docker-build-core: ## Build core mode image
-	@echo "$(BLUE)Building WaveKit core mode...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG)
+dev-dashboard-build: ## Build CLI dashboard bundle (installs cli deps if missing)
+	@test -d cli/node_modules || pnpm --filter @wavekit/cli install --silent
+	@rm -rf cli/node_modules/.cache cli/dist
+	@pnpm --filter @wavekit/cli build
 
-docker-build-sdrpp: ## Build SDR++-only mode image
-	@echo "$(BLUE)Building WaveKit SDR++ mode...$(NC)"
-	@DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG)
+dev-configs: ## List available configs in config/
+	@echo "[wavekit] Available configs:"
+	@ls -1 config/*.yaml | xargs -I {} basename {} .yaml | sort
 
-# Docker Compose Commands
+# === Container integration (full stack) ===
 
-docker-dev: ## Start development environment
-	@echo "$(BLUE)Starting WaveKit development environment...$(NC)"
-	@docker image inspect $(IMAGE_NAME):$(TAG)-core >/dev/null 2>&1 || (echo "$(YELLOW)Core image missing; building...$(NC)" && DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh core $(TAG))
-	@docker image inspect $(IMAGE_NAME):$(TAG)-sdrpp >/dev/null 2>&1 || (echo "$(YELLOW)SDR++ image missing; building...$(NC)" && DOCKER_BUILDKIT=$(BUILDKIT) ./docker/build.sh sdrpp $(TAG))
-	@$(COMPOSE_DEV) up -d
-	@echo "$(GREEN)✅ Development environment started$(NC)"
-	@echo ""
-	@echo "$(YELLOW)Services:$(NC)"
-	@echo "  API:       http://localhost:9000"
-	@echo "  WebSocket: ws://localhost:4713"
-	@echo "  Audio:     nc localhost 8080"
-	@echo "  LiveAudio: http://localhost:8081/stream"
-	@echo "  IDE:       http://localhost:3000"
+dev-stack: ## Bring up dev profile (sdrpp-server + wavekit-api) with build
+	docker compose --profile dev up --build
 
-docker-prod: docker-build ## Start production environment
-	@echo "$(BLUE)Starting WaveKit production environment...$(NC)"
-	@$(COMPOSE_PROD) up -d
-	@echo "$(GREEN)✅ Production environment started$(NC)"
-	@echo ""
-	@$(COMPOSE_PROD) ps
+dev-stack-down: ## Stop dev profile and remove containers
+	docker compose --profile dev down
 
-docker-compose-up: ## Start Docker Compose
-	@$(COMPOSE_DEV) up
+dev-stack-logs: ## Follow logs from dev profile services
+	docker compose --profile dev logs -f
 
-docker-compose-down: ## Stop Docker Compose
-	@echo "$(YELLOW)Stopping Docker Compose...$(NC)"
-	@$(COMPOSE_DEV) down
-	@echo "$(GREEN)✅ Stopped$(NC)"
+dev-shell: ## Open shell in dev wavekit-api container (must be running via dev-stack)
+	docker compose --profile dev exec wavekit-api /bin/bash
 
-docker-compose-logs: ## Show Docker Compose logs
-	@$(COMPOSE_DEV) logs -f
+dev-status: ## Show dev stack container status and probe /health
+	@docker compose --profile dev ps
+	@echo
+	@curl -fsS http://localhost:9000/health 2>/dev/null && echo " OK" || echo "[wavekit] /health not reachable"
 
-# Docker Utilities
+# === Build / push ===
 
-docker-push: ## Push images to registry (requires REGISTRY variable)
-	@if [ -z "$(REGISTRY)" ]; then \
-		echo "$(RED)Error: REGISTRY not set$(NC)"; \
-		echo "Usage: make docker-push REGISTRY=docker.io/myuser"; \
-		exit 1; \
-	fi
-	@echo "$(BLUE)Pushing images to $(REGISTRY)...$(NC)"
-	@./docker/push.sh $(TAG) $(REGISTRY)
+docker-init: ## Bootstrap buildx builder + networks + volumes (run once)
+	bash docker/init.sh
 
-docker-logs: ## Tail WaveKit logs
-	@docker logs -f wavekit
+docker-build: ## Build all default-group images via buildx bake (final, final-core, final-sdrpp)
+	docker buildx bake --file docker/bake.hcl default
 
-docker-logs-api: ## Tail API logs
-	@docker exec -it wavekit tail -f /var/log/wavekit/wavekit.log
+docker-push: ## Push images to GHCR (multi-arch, mode=max cache write)
+	bash docker/push.sh
 
-docker-run-core: ## Run core mode manually (requires wavekit:core)
-	@echo "$(BLUE)Running WaveKit core mode...$(NC)"
-	@docker run -p 3000:3000 -p 8080:8080 -p 8081:8081 \
-		-v $(shell pwd)/config/dev_test.yaml:/app/config/default.yaml \
-		wavekit:core
+docker-clean: ## Stop compose profiles and remove named volumes
+	docker compose --profile dev down -v --remove-orphans 2>/dev/null || true
+	docker compose --profile prod-single-host down -v --remove-orphans 2>/dev/null || true
+	docker compose --profile prod-distributed down -v --remove-orphans 2>/dev/null || true
 
-# ==============================================================================
-# SDR Host Commands
-# ==============================================================================
+docker-prune: ## Prune unused Docker resources (dangling images, stopped containers, networks)
+	docker system prune -f
+
+# === Demod tooling ===
+
+demod-test: ## Launch interactive demod test environment (sox/ffmpeg/dsd-fme/multimon-ng/csdr)
+	docker compose --profile demod-test run --rm demod-test
+
+# === Pi-hosted SDR ===
 
 sdr-host-build: ## Build & publish sdr-host image (default: arm64)
 	@bash ./packages/sdr-host/scripts/build-publish.sh --tag $(SDR_HOST_TAG) --platform $(SDR_HOST_PLATFORMS)
@@ -157,218 +138,7 @@ sdr-host-compose-update: ## Refresh sdr-host compose file (run on host)
 sdr-host-clean: ## Docker cleanup helper (run on host)
 	@bash ./packages/sdr-host/scripts/docker-cleanup.sh
 
-# ==============================================================================
-# Dev Testing Commands (State of the Art DevX)
-# Usage: make dev-build && make dev-start
-# ==============================================================================
-
-DEV_CONTAINER := wavekit-dev
-DEV_IMAGE := wavekit:latest-core
-DEV_PORT_API ?= 9000
-DEV_PORT_AUDIO ?= 8080
-DEV_PORT_LIVE ?= 8081
-DEV_PORT_TUNER ?= 1234
-
-# Config selection: make dev-up CONFIG=dev_acars (defaults to dev_test)
-CONFIG ?= dev_test
-DEV_CONFIG := $(shell pwd)/config/$(CONFIG).yaml
-
-dev-build: ## Build core mode image (for external SDR++)
-	@echo "$(BLUE)Building WaveKit core image...$(NC)"
-	@./docker/build.sh core latest
-	@echo "$(GREEN)✅ Built $(DEV_IMAGE)$(NC)"
-
-dev-start: ## Start dev container (stops existing first)
-	@echo "$(BLUE)Starting $(DEV_CONTAINER)...$(NC)"
-	@docker stop $(DEV_CONTAINER) 2>/dev/null || true
-	@docker rm $(DEV_CONTAINER) 2>/dev/null || true
-	@mkdir -p $(shell pwd)/debug_audio
-	@docker run --rm -d --name $(DEV_CONTAINER) \
-		-p $(DEV_PORT_API):3000 -p $(DEV_PORT_AUDIO):8080 -p $(DEV_PORT_LIVE):8081 -p $(DEV_PORT_TUNER):1234 \
-		-v $(DEV_CONFIG):/app/config/default.yaml \
-		-v $(shell pwd)/debug_audio:/data/debug_audio \
-		-v $(shell pwd)/decoded_calls:/app/decoded_calls \
-		$(DEV_IMAGE)
-	@echo ""
-	@echo "$(GREEN)✅ WaveKit running!$(NC)"
-	@echo ""
-	@echo "  $(BLUE)API$(NC)        http://localhost:$(DEV_PORT_API)"
-	@echo "  $(BLUE)Health$(NC)     http://localhost:$(DEV_PORT_API)/health"
-	@echo "  $(BLUE)Audio$(NC)      nc localhost $(DEV_PORT_AUDIO) | play -t raw -r 48000 -e signed -b 16 -c 1 -"
-	@echo "  $(BLUE)Live Audio$(NC) http://localhost:$(DEV_PORT_LIVE)/stream"
-	@echo "  $(BLUE)Tuner$(NC)      rtl_tcp on localhost:$(DEV_PORT_TUNER) (SDR++)"
-	@echo ""
-	@echo "  $(YELLOW)Commands:$(NC)"
-	@echo "    make dev-logs         - All logs"
-	@echo "    make dev-dashboard    - Interactive CLI dashboard"
-	@echo "    make dev-stop         - Stop container"
-	@echo ""
-
-dev-stop: ## Stop dev container
-	@echo "$(YELLOW)Stopping $(DEV_CONTAINER)...$(NC)"
-	@docker stop $(DEV_CONTAINER) 2>/dev/null || echo "Not running"
-	@echo "$(GREEN)✅ Stopped$(NC)"
-
-dev-restart: dev-stop dev-start ## Restart dev container
-
-dev-up: dev-build dev-start ## Build and start (CONFIG=name to use config/name.yaml)
-
-dev-logs: ## Tail all container logs (pretty JSON)
-	@docker logs -f $(DEV_CONTAINER) 2>&1 | jq -R 'fromjson? // .' || docker logs -f $(DEV_CONTAINER)
-
-dev-logs-raw: ## Tail raw container logs
-	@docker logs -f $(DEV_CONTAINER)
-
-dev-audio: ## Listen to decoded audio (requires sox)
-	@echo "$(BLUE)Streaming audio from WaveKit... (Ctrl+C to stop)$(NC)"
-	@nc localhost $(DEV_PORT_AUDIO) | play -t raw -r 48000 -e signed -b 16 -c 1 -
-
-dev-debug-audio: ## Convert and list debug audio recordings
-	@echo "$(BLUE)Debug Audio Recordings:$(NC)"
-	@ls -lah debug_audio/*.raw 2>/dev/null || echo "No recordings yet"
-	@echo ""
-	@echo "$(BLUE)Converting to WAV...$(NC)"
-	@./scripts/convert-debug-audio.sh debug_audio 2>/dev/null || echo "No files to convert"
-	@echo ""
-	@echo "$(GREEN)To play recordings:$(NC) play debug_audio/*.wav"
-	@echo "$(GREEN)To analyze:$(NC) sox debug_audio/*.wav -n spectrogram -o spectrum.png"
-
-dev-shell: ## Open shell in dev container
-	@docker exec -it $(DEV_CONTAINER) /bin/bash
-
-dev-status: ## Show container status and health
-	@echo "$(BLUE)Container Status:$(NC)"
-	@docker ps --filter name=$(DEV_CONTAINER) --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" || echo "Not running"
-	@echo ""
-	@echo "$(BLUE)Health Check:$(NC)"
-	@curl -s http://localhost:$(DEV_PORT_API)/health | jq . 2>/dev/null || echo "API not reachable"
-
-cli-install: ## Install CLI dashboard dependencies (if missing)
-	@test -d cli/node_modules || pnpm --filter @wavekit/cli install
-
-dev-dashboard-build: cli-install ## Build CLI dashboard
-	@rm -rf cli/node_modules/.cache cli/dist
-	@pnpm --filter @wavekit/cli build
-
-dev-dashboard: dev-dashboard-build ## WaveKit CLI Dashboard (interactive, tab-based)
-	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
-
-dev-configs: ## List available configs
-	@echo "$(BLUE)Available configs:$(NC)"
-	@ls -1 config/*.yaml | xargs -I {} basename {} .yaml | sort
-	@echo ""
-	@echo "Usage: make dev-up CONFIG=<name>"
-
-
-docker-logs-sdrpp: ## Tail SDR++ logs
-	@docker exec -it wavekit tail -f /var/log/wavekit/sdrpp.log
-
-docker-logs-decoders: ## Tail decoder logs
-	@docker exec -it wavekit tail -f /var/log/wavekit/decoders.log
-
-docker-shell: ## Open shell in WaveKit container
-	@docker exec -it wavekit /bin/bash
-
-docker-status: ## Show WaveKit service status
-	@echo "$(BLUE)Service Status:$(NC)"
-	@docker exec wavekit s6-rc-status || echo "Container not running"
-	@echo ""
-	@echo "$(BLUE)Container Health:$(NC)"
-	@docker inspect wavekit --format='{{json .State.Health}}' | jq . || echo "Container not running"
-
-docker-health: ## Check container health
-	@docker exec wavekit /etc/s6-overlay/scripts/healthcheck.sh
-
-docker-ps: ## List running containers
-	@docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
-
-docker-clean: ## Remove WaveKit containers and volumes
-	@echo "$(YELLOW)Cleaning up WaveKit containers...$(NC)"
-	@docker-compose -f docker-compose.dev.yml down -v 2>/dev/null || true
-	@docker-compose -f docker-compose.prod.yml down -v 2>/dev/null || true
-	@docker volume rm wavekit-config wavekit-logs recordings 2>/dev/null || true
-	@echo "$(GREEN)✅ Cleanup complete$(NC)"
-
-docker-prune: ## Prune unused Docker resources
-	@echo "$(YELLOW)Pruning unused resources...$(NC)"
-	@docker image prune -a -f --filter "label!=keep=true"
-	@docker container prune -f
-	@docker volume prune -f
-	@docker network prune -f
-	@echo "$(GREEN)✅ Pruned successfully$(NC)"
-
-# Testing & Validation
-
-docker-test: ## Run tests in container
-	@docker run --rm \
-		-v $(PWD):/app \
-		-w /app \
-		$(IMAGE_NAME):$(TAG) \
-		pnpm test
-
-docker-test-coverage: ## Run tests with coverage
-	@docker run --rm \
-		-v $(PWD):/app \
-		-w /app \
-		$(IMAGE_NAME):$(TAG) \
-		pnpm run test:coverage
-
-docker-lint: ## Run linting in container
-	@docker run --rm \
-		-v $(PWD):/app \
-		-w /app \
-		$(IMAGE_NAME):$(TAG) \
-		pnpm run lint
-
-# Information & Debugging
-
-docker-info: ## Show Docker build info
-	@echo "$(BLUE)Docker Build Configuration:$(NC)"
-	@echo "Registry:      $(REGISTRY)"
-	@echo "Image:         $(IMAGE_NAME)"
-	@echo "Tag:           $(TAG)"
-	@echo "BuildKit:      $(BUILDKIT)"
-	@echo ""
-	@echo "$(BLUE)Environment:$(NC)"
-	@env | grep -E "^(DOCKER_|BUILDKIT_)" || echo "None set"
-
-docker-inspect: ## Inspect built image
-	@docker inspect $(IMAGE_NAME):$(TAG) | jq '.[0] | {Repo: .RepoTags, Size: .Size, Created: .Created, Architecture: .Architecture, Os: .Os}'
-
-docker-history: ## Show image layer history
-	@docker history --human $(IMAGE_NAME):$(TAG)
-
-# Convenience
-
-install-buildx: ## Install Docker buildx (for multi-platform builds)
-	@echo "$(BLUE)Installing docker buildx...$(NC)"
-	@driver=$$(docker buildx inspect wavekit-builder 2>/dev/null | awk -F': ' '/Driver:/ {print $$2}'); \
-	if [ "$$driver" = "docker" ]; then \
-		echo "$(YELLOW)Builder uses docker driver; recreating for multi-arch$(NC)"; \
-		docker buildx rm wavekit-builder >/dev/null; \
-	fi; \
-	if ! docker buildx inspect wavekit-builder >/dev/null 2>&1; then \
-		docker buildx create --name wavekit-builder --driver docker-container --config docker/buildkit.toml --use >/dev/null; \
-	else \
-		docker buildx use wavekit-builder >/dev/null; \
-	fi; \
-	docker buildx inspect wavekit-builder --bootstrap >/dev/null; \
-	echo "$(GREEN)✅ buildx ready$(NC)"
-
-demo: docker-build-full docker-dev ## Build and run demo
-	@echo ""
-	@echo "$(GREEN)✅ Demo ready!$(NC)"
-	@echo ""
-	@echo "API Health:    curl http://localhost:9000/health"
-	@echo "Full Status:   curl http://localhost:9000/api/status"
-	@echo "WebSocket:     wscat -c ws://localhost:4713"
-	@echo ""
-	@echo "View logs:     make docker-logs"
-	@echo "Stop demo:     make docker-compose-down"
-
-# ==============================================================================
-# Fixture Testing (IQ-based decoder validation)
-# ==============================================================================
+# === Fixtures ===
 
 fixtures-download: ## Download test fixtures (small ones by default)
 	@./fixtures/download.sh
