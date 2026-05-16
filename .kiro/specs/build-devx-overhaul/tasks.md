@@ -173,13 +173,13 @@ D).
 
 ## Phase F: CI Workflow
 
-- [ ] **F.1** Rewrite `/Users/ben/Projects/wavekit/.github/workflows/ci.yml` per design §8. _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
-- [ ] **F.2** Update Node to `22` and pnpm install to use Corepack (matches the Dockerfile pattern). _Requirements: 7.5_
-- [ ] **F.3** Add the `lint-typecheck-test` job that runs lint, typecheck, build, AND test (test was missing from the old workflow). _Requirements: 7.1_
-- [ ] **F.4** Add the `docker-build` job that depends on `lint-typecheck-test`, sets up QEMU + buildx, and runs bake. _Requirements: 7.2_
-- [ ] **F.5** PR path: `--cache-from` only, no login, no push. _Requirements: 7.3_
-- [ ] **F.6** Main-branch path: log in to GHCR, build `default` group with `--push` and `--cache-to mode=max`. _Requirements: 7.4_
-- [ ] **F.7** Smoke-test by opening a draft PR with a no-op change and verifying both jobs run and succeed. _Requirements: 7.1, 7.2, 7.3_
+- [x] **F.1** Rewrite `/Users/ben/Projects/wavekit/.github/workflows/ci.yml` per design §8. _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5_
+- [x] **F.2** Update Node to `22` and pnpm install to use Corepack (matches the Dockerfile pattern). _Requirements: 7.5_
+- [x] **F.3** Add the `lint-typecheck-test` job that runs lint, typecheck, build, AND test (test was missing from the old workflow). _Requirements: 7.1_
+- [x] **F.4** Add the `docker-build` job that depends on `lint-typecheck-test`, sets up QEMU + buildx, and runs bake. _Requirements: 7.2_
+- [x] **F.5** PR path: `--cache-from` only, no login, no push. _Requirements: 7.3_
+- [x] **F.6** Main-branch path: log in to GHCR, build `default` group with `--push` and `--cache-to mode=max`. _Requirements: 7.4_
+- [ ] **F.7** (DEFERRED — user-run): Smoke-test by opening a draft PR with a no-op change and verifying both jobs run and succeed. _Requirements: 7.1, 7.2, 7.3_ (Pre-merge gate: maintainer opens a draft PR after PR 2 is up; cold-cache PR build expected to take 15-25 min with no-cache fallback per Req 4.3, future PRs ~2-5 min with cache hits.)
 
 > **Checkpoint 2**: At this point the new build system is fully functional.
 > Phases G and H are documentation + sdr-host alignment polish.
