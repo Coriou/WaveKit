@@ -123,18 +123,23 @@ D).
 
 ## Phase C: Compose Collapse
 
-- [ ] **C.1** Create `/Users/ben/Projects/wavekit/compose.yaml` per the design §3 with four profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`). _Requirements: 2.1–2.5_
-- [ ] **C.2** Each service with a `build:` block declares `cache_from` pointing at the relevant `ghcr.io/coriou/wavekit:cache-*` registry refs (for now this is harmless; in Phase D those refs get populated). _Requirements: 2.5_
-- [ ] **C.3** Verify `docker compose --profile dev config` parses without warnings. _Requirements: 2.1, 2.6_
-- [ ] **C.4** Verify `docker compose --profile prod-single-host config` parses without warnings. _Requirements: 2.2_
-- [ ] **C.5** Verify `docker compose --profile prod-distributed config` parses without warnings. _Requirements: 2.3_
-- [ ] **C.6** Verify `docker compose --profile demod-test config` parses without warnings. _Requirements: 2.4_
-- [ ] **C.7** Delete `/Users/ben/Projects/wavekit/docker-compose.dev.yml`. _Requirements: 2.6, 2.7_
-- [ ] **C.8** Delete `/Users/ben/Projects/wavekit/docker-compose.prod.yml`. _Requirements: 2.6_
-- [ ] **C.9** Delete `/Users/ben/Projects/wavekit/docker-compose.override.yml`. _Requirements: 2.6_
-- [ ] **C.10** Delete `/Users/ben/Projects/wavekit/docker-compose.demod-test.yml`. _Requirements: 2.6_
-- [ ] **C.11** Delete `/Users/ben/Projects/wavekit/docker/Dockerfile.demod-test`. _Requirements: 3.12_
-- [ ] **C.12** Run end-to-end: `docker compose --profile dev up --build`. wavekit-api SHALL reach `service_healthy`. `curl localhost:9000/health` SHALL return 200. _Requirements: 2.1_
+- [x] **C.1** Create `/Users/ben/Projects/wavekit/compose.yaml` per the design §3 with four profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`). _Requirements: 2.1–2.5_
+- [x] **C.2** Each service with a `build:` block declares `cache_from` pointing at the relevant `ghcr.io/coriou/wavekit:cache-*` registry refs (for now this is harmless; in Phase D those refs get populated). _Requirements: 2.5_
+- [x] **C.3** Verify `docker compose --profile dev config` parses without warnings. _Requirements: 2.1, 2.6_
+- [x] **C.4** Verify `docker compose --profile prod-single-host config` parses without warnings. _Requirements: 2.2_
+- [x] **C.5** Verify `docker compose --profile prod-distributed config` parses without warnings. _Requirements: 2.3_
+- [x] **C.6** Verify `docker compose --profile demod-test config` parses without warnings. _Requirements: 2.4_
+- [x] **C.7** Delete `/Users/ben/Projects/wavekit/docker-compose.dev.yml`. _Requirements: 2.6, 2.7_
+- [x] **C.8** Delete `/Users/ben/Projects/wavekit/docker-compose.prod.yml`. _Requirements: 2.6_
+- [x] **C.9** Delete `/Users/ben/Projects/wavekit/docker-compose.override.yml`. _Requirements: 2.6_
+- [x] **C.10** Delete `/Users/ben/Projects/wavekit/docker-compose.demod-test.yml`. _Requirements: 2.6_
+- [x] **C.11** Delete `/Users/ben/Projects/wavekit/docker/Dockerfile.demod-test`. _Requirements: 3.12_
+- [x] **C.12** Run end-to-end: `docker compose --profile dev up --build`. wavekit-api SHALL reach `service_healthy`. `curl localhost:9000/health` SHALL return 200. _Requirements: 2.1_
+    - **Notes**: Three deviations from design.md §3 were necessary to make the gate pass; each is documented inline in compose.yaml.
+        1. **sdrpp-server healthcheck**: design.md prescribes `curl -fsS http://localhost:5259/`, but SDR++ in server mode speaks its own binary protocol on 5259, not HTTP, so curl fails on every probe with `HTTP/0.9 not allowed`. Switched to `bash -c '</dev/tcp/localhost/5259'` TCP probe. Same change applied to prod-distributed's `wavekit-sdrpp-prod` for consistency.
+        2. **wavekit-api port mapping**: design.md prescribes `9000:9000`, but `config/default.yaml`'s `api.port=3000` makes the container bind 3000. The s6-supervised process does not inherit `WAVEKIT_API_PORT` env from `docker exec`-style container env (s6 env-isolation: only `with-contenv` would propagate, which is a Phase B-scope script change). Mapped `9000:3000` to match the legacy `make dev-up -p 9000:3000` pattern, so the user-facing `curl http://localhost:9000/health` works. The wavekit-api healthcheck (which runs inside the container) probes `http://localhost:3000/health` to match the actually-bound port. Follow-up: update `config/default.yaml` or add `with-contenv` to make env override work, then revert to `9000:9000`.
+        3. **start-sdrpp.sh `--log-level info`**: pre-existing Phase A/B regression — SDR++ v1.1.0 doesn't accept `--log-level` and crash-loops with `basic_string from null` `std::logic_error`. Removed the flag from `docker/scripts/start-sdrpp.sh` to unblock C.12. This script wasn't in Phase C's "do not touch" list and the bug fully blocked the gate.
+    - **C.12 result**: `wavekit-sdrpp` reached `(healthy)` after ~60s of init-time crash-loop (writing first-run config files). `wavekit-api` reached `(healthy)` 7s after start. `curl http://localhost:9000/health` returned `{"status":"ok","timestamp":"..."}` immediately.
 
 ## Phase D: Bake + Registry Cache
 
