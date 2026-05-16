@@ -143,18 +143,19 @@ D).
 
 ## Phase D: Bake + Registry Cache
 
-- [ ] **D.1** Write `/Users/ben/Projects/wavekit/docker/bake.hcl` per design §4.3. Define `_base`, all four final-target bakes, the `ci-core` helper target, the `default` group, and the `demod` group. _Requirements: 5.2, 5.3, 4.4_
+- [x] **D.1** Write `/Users/ben/Projects/wavekit/docker/bake.hcl` per design §4.3. Define `_base`, all four final-target bakes, the `ci-core` helper target, the `default` group, and the `demod` group. _Requirements: 5.2, 5.3, 4.4_
 - [ ] **D.2** Test bake locally: `docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64"`. All three targets in `default` SHALL build successfully. _Requirements: 5.2_
 - [ ] **D.3** Test multi-arch bake: `docker buildx bake --file docker/bake.hcl ci-core --set "*.platform=linux/amd64,linux/arm64"`. Build SHALL succeed without `--push` (uses local layer cache for both arches). _Requirements: 5.4_
-- [ ] **D.4** Rewrite `/Users/ben/Projects/wavekit/docker/build.sh` as a thin wrapper that delegates to `docker buildx bake` (OR delete the file and have Makefile call bake directly — pick whichever keeps Makefile cleanest). _Requirements: 5.1, 5.2_
-- [ ] **D.5** Rewrite `/Users/ben/Projects/wavekit/docker/push.sh` to push only to GHCR (drop the docker.io path on lines 16–18). Use `WAVEKIT_GH_OWNER` env var with `coriou` fallback per sdr-host pattern. Drop `linux/arm/v7` from the default `PLATFORMS`. _Requirements: 5.4, 5.5_
-- [ ] **D.6** Edit `/Users/ben/Projects/wavekit/docker/init.sh`:
-    - Remove the `.docker-cache` mkdir + chmod (lines 47–51).
-    - Keep the buildx-builder setup.
-    - Keep the network/volume creation.
+- [x] **D.4** Deleted `/Users/ben/Projects/wavekit/docker/build.sh`. Phase E's Makefile invokes `docker buildx bake` directly; the wrapper provided no additional value. _Requirements: 5.1, 5.2_
+- [x] **D.5** Rewrote `/Users/ben/Projects/wavekit/docker/push.sh` as a thin bake invocation. GHCR-only (docker.io path dropped); uses `WAVEKIT_GH_OWNER` env var with `coriou` fallback; `linux/arm/v7` dropped from defaults. _Requirements: 5.4, 5.5_
+- [x] **D.6** Edited `/Users/ben/Projects/wavekit/docker/init.sh`:
+    - Removed the `.docker-cache` mkdir + chmod.
+    - Kept the buildx-builder setup.
+    - Kept the network/volume creation.
+    - Updated "Next steps" footer to reference new Phase E targets (`make dev-stack` / `make dev-stack-logs`).
     - _Requirements: 4.5_
-- [ ] **D.7** Delete `build_multiarch` from `/Users/ben/Projects/wavekit/docker/platform-utils.sh` (replaced by bake). If `detect_platform` is still used anywhere, keep it; if not, delete the whole file. _Requirements: 5.6_
-- [ ] **D.8** Initial cache seed: from a clean local machine, log in to GHCR, run `docker buildx bake --file docker/bake.hcl default --push --set "*.cache-to=type=registry,ref=ghcr.io/coriou/wavekit:cache-<stage>,mode=max"`. (One-time bootstrap; subsequent updates come from CI.) _Requirements: 4.1_
+- [x] **D.7** Deleted `/Users/ben/Projects/wavekit/docker/platform-utils.sh` entirely. `build_multiarch` is replaced by bake; `detect_platform` had no consumers (verified by grep across Makefile, docker/, .github/, packages/sdr-host/). _Requirements: 5.6_
+- [ ] **D.8** (DEFERRED — user-run): Initial cache seed: from a clean local machine, log in to GHCR, run `docker buildx bake --file docker/bake.hcl default --push --set "*.cache-to=type=registry,ref=ghcr.io/coriou/wavekit:cache-<stage>,mode=max"`. (One-time bootstrap; subsequent updates come from CI.) _Requirements: 4.1_ (Phase F's CI workflow on main-branch push will populate GHCR cache via cache-to mode=max on its first run; D.8 is redundant if CI lands first.)
 
 ## Phase E: Makefile Cleanup
 
