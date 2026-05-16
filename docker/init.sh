@@ -44,12 +44,6 @@ fi
 docker buildx inspect wavekit-builder --bootstrap >/dev/null
 log "Using buildx builder: wavekit-builder"
 
-# Create build cache directory
-log "Creating build cache directory..."
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-mkdir -p "${ROOT_DIR}/.docker-cache"
-chmod 777 "${ROOT_DIR}/.docker-cache"
-
 # Enable experimental features
 log "Enabling Docker experimental features..."
 export DOCKER_BUILDKIT=1
@@ -70,5 +64,5 @@ log "✅ Environment initialized successfully!"
 log ""
 log "Next steps:"
 log "  1. Build images:   make docker-build"
-log "  2. Start dev env:  make docker-dev"
-log "  3. View logs:      make docker-logs"
+log "  2. Start dev env:  make dev-stack"
+log "  3. View logs:      make dev-stack-logs"
