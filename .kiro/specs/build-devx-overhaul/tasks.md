@@ -191,15 +191,15 @@ D).
 
 ## Phase H: Documentation Consolidation
 
-- [ ] **H.1** Rewrite `/Users/ben/Projects/wavekit/docs/DOCKER-SETUP.md` to reflect:
+- [x] **H.1** Rewrite `/Users/ben/Projects/wavekit/docs/DOCKER-SETUP.md` to reflect:
     - `pnpm dev` as headline iteration loop.
     - `make dev-stack` as container integration.
     - The single `compose.yaml` with profiles.
     - The GHCR-backed registry cache.
     - The new Makefile target inventory.
     - _Requirements: 8.1_
-- [ ] **H.2** Either delete `/Users/ben/Projects/wavekit/docker/README.md` OR replace its content with a one-line pointer at `docs/DOCKER-SETUP.md`. _Requirements: 8.2_
-- [ ] **H.3** Condense the "Day-to-day dev (Docker)" section of `/Users/ben/Projects/wavekit/CLAUDE.md` to one paragraph (per Requirement 8.3). _Requirements: 8.3_
+- [x] **H.2** Either delete `/Users/ben/Projects/wavekit/docker/README.md` OR replace its content with a one-line pointer at `docs/DOCKER-SETUP.md`. _Requirements: 8.2_ Deleted: every line of the old 294-line file duplicated DOCKER-SETUP.md content and most references were stale (Makefile targets like `make docker-dev` / `make install-buildx`, the four-compose-file architecture diagram, `arm/v7` multi-arch claim).
+- [x] **H.3** Condense the "Day-to-day dev (Docker)" section of `/Users/ben/Projects/wavekit/CLAUDE.md` to one paragraph (per Requirement 8.3). _Requirements: 8.3_
 
 ## Phase I: Dockerignore Audit
 
