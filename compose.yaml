@@ -1,0 +1,197 @@
+name: wavekit
+
+services:
+
+  # ---------- dev profile ----------
+  sdrpp-server:
+    profiles: ["dev"]
+    image: wavekit:dev-sdrpp
+    build:
+      context: .
+      target: final-sdrpp
+      cache_from:
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-final-sdrpp
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-sdrpp-build
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-runtime-base
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-base-build
+    container_name: wavekit-sdrpp
+    ports:
+      - "5259:5259"
+    networks: [wavekit]
+    # SDR++ server speaks its own binary protocol on 5259, not HTTP, so the
+    # healthcheck verifies TCP reachability via bash's /dev/tcp rather than curl.
+    # start_period accommodates SDR++'s noisy first-run config-file initialization.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/5259' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 60s
+
+  wavekit-api:
+    profiles: ["dev"]
+    image: wavekit:dev-core
+    build:
+      context: .
+      target: final-core
+      cache_from:
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-final-core
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-final-base
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-node-build
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-runtime-base
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-base-build
+    container_name: wavekit-api
+    depends_on:
+      sdrpp-server:
+        condition: service_healthy
+    environment:
+      WAVEKIT_LOG_LEVEL: debug
+      NODE_ENV: development
+      SDR_SOURCE: "tcp://sdrpp-server:5259"
+    # config/default.yaml has api.port=3000 (the historical container-internal
+    # port); host port 9000 is mapped to container 3000 to match the previous
+    # `make dev-up -p 9000:3000` workflow. The same translation applies to the
+    # tuner port 1234 (mapped to host 4713 via the WebSocket convention).
+    # When the API config is updated to bind 9000 directly, simplify to 9000:9000.
+    ports:
+      - "9000:3000"
+      - "8080:8080"
+      - "8081:8081"
+      - "4713:4713"
+    networks: [wavekit]
+    volumes:
+      - ./config:/app/config:ro
+      - ./logs:/var/log/wavekit
+      - ./decoded_calls:/app/decoded_calls
+    # Container-internal port is 3000 (config/default.yaml api.port); host port
+    # 9000 is mapped above. The healthcheck runs inside the container, so probe
+    # localhost:3000. The user-facing curl http://localhost:9000/health works.
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    cap_add:
+      - SYS_NICE
+      - NET_RAW
+
+  # ---------- prod-single-host profile ----------
+  wavekit-full:
+    profiles: ["prod-single-host"]
+    image: ghcr.io/coriou/wavekit:latest
+    container_name: wavekit
+    restart: unless-stopped
+    environment:
+      WAVEKIT_LOG_LEVEL: info
+      NODE_ENV: production
+      RTL_TCP_HOST: "${RTL_TCP_HOST:-127.0.0.1}"
+      RTL_TCP_PORT: "${RTL_TCP_PORT:-1234}"
+    ports:
+      - "9000:9000"
+      - "8080:8080"
+      - "5259:5259"
+      - "4713:4713"
+    networks: [wavekit]
+    volumes:
+      - wavekit-config:/app/config
+      - wavekit-logs:/var/log/wavekit
+      - recordings:/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 1G
+    cap_add:
+      - SYS_NICE
+      - NET_RAW
+    security_opt:
+      - "no-new-privileges:true"
+
+  # ---------- prod-distributed profile ----------
+  wavekit-sdrpp-prod:
+    profiles: ["prod-distributed"]
+    image: ghcr.io/coriou/wavekit:latest-sdrpp
+    container_name: wavekit-sdrpp-prod
+    restart: unless-stopped
+    environment:
+      LOG_LEVEL: info
+    ports:
+      - "5259:5259"
+    networks: [wavekit]
+    # SDR++ server speaks its own binary protocol on 5259 (not HTTP), so the
+    # healthcheck verifies TCP reachability rather than HTTP.
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/5259' >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  wavekit-core-prod:
+    profiles: ["prod-distributed"]
+    image: ghcr.io/coriou/wavekit:latest-core
+    container_name: wavekit-core-prod
+    restart: unless-stopped
+    depends_on:
+      wavekit-sdrpp-prod:
+        condition: service_healthy
+    environment:
+      WAVEKIT_LOG_LEVEL: info
+      NODE_ENV: production
+      SDR_SOURCE: "tcp://wavekit-sdrpp-prod:5259"
+    ports:
+      - "9000:9000"
+      - "8080:8080"
+      - "4713:4713"
+    networks: [wavekit]
+    volumes:
+      - wavekit-config:/app/config
+      - wavekit-logs:/var/log/wavekit
+      - recordings:/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    cap_add:
+      - SYS_NICE
+      - NET_RAW
+    security_opt:
+      - "no-new-privileges:true"
+
+  # ---------- demod-test profile ----------
+  demod-test:
+    profiles: ["demod-test"]
+    image: wavekit:dev-demod
+    build:
+      context: .
+      target: final-demod
+      cache_from:
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-final-demod
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-runtime-base
+        - type=registry,ref=ghcr.io/coriou/wavekit:cache-base-build
+    volumes:
+      - ./debug_audio:/data/debug_audio
+      - ./scripts:/scripts
+      - ./output:/output
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    networks: [wavekit]
+
+networks:
+  wavekit:
+    driver: bridge
+
+volumes:
+  wavekit-config:
+  wavekit-logs:
+  recordings:
