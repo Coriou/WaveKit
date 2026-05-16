@@ -26,19 +26,7 @@ Because `src/` is the root package, monorepo commands need `--filter=!wavekit` t
 Node 20+ (`.nvmrc` pins v25.2.1) and pnpm 10 (`packageManager: pnpm@10.28.0`). Run `pnpm install` from the root.
 
 ### Day-to-day dev (Docker)
-The expected loop is Docker-based — the decoders are native binaries baked into the image.
-
-```bash
-make dev-up                    # build core image + start wavekit-dev container (uses config/dev_test.yaml)
-make dev-up CONFIG=dev_acars   # use config/dev_acars.yaml instead
-make dev-configs               # list available configs
-make dev-dashboard             # build + launch CLI dashboard (Ink/React TUI)
-make dev-logs                  # tail container logs through `jq` (falls back to raw)
-make dev-shell                 # bash into the running container
-make dev-stop / dev-restart
-```
-
-Dev ports: API `9000`, audio TCP `8080`, live demod HTTP `8081`, tuner relay `1234`. Note that `docker-compose.dev.yml` (used by the `docker-dev` target, separate from `dev-up`) exposes a *different* WebSocket port `4713` and connects to a separate `sdrpp-server` container — `dev-up` is the simpler path.
+The headline iteration loop is `pnpm dev` (esbuild watch + `node --watch` in parallel against `src/index.ts`) — no Docker round-trip per edit. When you need the full container stack for end-to-end decoder testing, `make dev-stack` brings up the `dev` profile of the single root `compose.yaml` (sdrpp-server + wavekit-api, built via `docker buildx bake`). Counterpart lifecycle targets: `make dev-stack-down`, `make dev-stack-logs`, `make dev-shell`, `make dev-status`. Image production goes through `make docker-build` (bakes the `default` group: `final`, `final-core`, `final-sdrpp`). See `docs/DOCKER-SETUP.md` for the full reference — compose profiles, GHCR registry cache behaviour, the `demod-test` environment, and expected first-run log noise.
 
 ### Build / typecheck / lint / test
 
