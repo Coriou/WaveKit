@@ -513,36 +513,11 @@ COPY packages/api-types/package.json packages/api-types/tsconfig.json ./packages
 COPY cli/package.json cli/tsconfig.json ./cli/
 COPY packages/sdr-host/package.json packages/sdr-host/tsconfig.json ./packages/sdr-host/
 
-# R3 mitigation (Build & DX Overhaul, Phase B):
-#
-# Two layout issues prevent a single isolated install from working in this
-# build context, both observed empirically during the refactor:
-#
-#   1. `.npmrc` has `enable-global-virtual-store=true`, which makes the
-#      installed virtual store live at the same cache-mount path used by
-#      the install. After the mount goes away the symlinks dangle.
-#
-#   2. `.dockerignore` excludes `node_modules` at the root only (not
-#      `**/node_modules`), so the host's `cli/node_modules/` and
-#      `packages/*/node_modules/` enter the build context via `COPY . .`
-#      and overwrite the freshly-installed workspace symlinks with paths
-#      that point at the developer's local pnpm store.
-#
-# Per the Phase B brief's R3 mitigation, switching node-build to a hoisted
-# layout for a single install resolves both issues at once: `pnpm install`
-# materializes real package directories instead of symlinks, so subsequent
-# `COPY . .` can clobber the (now harmless) host node_modules without
-# breaking workspace package resolution.
-#
-# Project default in `.npmrc` (node-linker=isolated) remains unchanged for
-# native `pnpm dev`; this Dockerfile-local override only affects builds.
-# A follow-up issue should fix `.dockerignore` to exclude `**/node_modules`
-# so this override can be lifted (Requirement 3.6).
-RUN pnpm config set node-linker hoisted --location=project && \
-    pnpm config set enable-global-virtual-store false --location=project
-
+# Override .npmrc's enable-global-virtual-store=true: keep the virtual store
+# at node_modules/.pnpm/ so symlinks survive the cache-mount unmount.
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    pnpm install --frozen-lockfile --prod=false
+    pnpm install --frozen-lockfile --prod=false \
+        --config.enable-global-virtual-store=false
 
 # Now copy sources. Edits here invalidate from this layer down — but
 # decoder *-build stages are unaffected.
@@ -557,7 +532,8 @@ RUN --mount=type=cache,target=/root/.cache/turbo,sharing=locked \
     pnpm run build
 
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
-    CI=true pnpm prune --prod
+    CI=true pnpm prune --prod \
+        --config.enable-global-virtual-store=false
 
 RUN ls -la dist/ && head -1 dist/index.js
 
