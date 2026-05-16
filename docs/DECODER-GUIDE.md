@@ -552,7 +552,7 @@ describe("HfdlDecoder", () => {
 
 1. Check if binary exists: `docker exec wavekit which my-decoder`
 2. Check permissions: `docker exec wavekit ls -la /usr/local/bin/my-decoder`
-3. Check logs: `make dev-logs | grep my-decoder`
+3. Check logs: `make dev-stack-logs | grep my-decoder`
 
 ### No output being parsed
 
