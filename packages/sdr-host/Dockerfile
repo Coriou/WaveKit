@@ -45,7 +45,7 @@ RUN git clone --depth 1 --branch ${RTLSDR_VERSION} https://github.com/osmocom/rt
 FROM node:22-bookworm-slim AS node-build
 
 # Install pnpm v10
-RUN npm install -g pnpm@10
+RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
 
 WORKDIR /app
 

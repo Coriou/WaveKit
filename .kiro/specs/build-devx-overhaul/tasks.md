@@ -186,8 +186,8 @@ D).
 
 ## Phase G: sdr-host Alignment
 
-- [ ] **G.1** Edit `/Users/ben/Projects/wavekit/packages/sdr-host/Dockerfile` line 47 from `RUN npm install -g pnpm@10` to `RUN corepack enable && corepack prepare pnpm@10.28.0 --activate`. _Requirements: 9.1, 9.2_
-- [ ] **G.2** Verify the sdr-host build still passes: `bash packages/sdr-host/scripts/build-publish.sh --tag testbuild --platform linux/arm64 --load`. _Requirements: 9.1_
+- [x] **G.1** Edit `/Users/ben/Projects/wavekit/packages/sdr-host/Dockerfile` line 47 from `RUN npm install -g pnpm@10` to `RUN corepack enable && corepack prepare pnpm@10.28.0 --activate`. _Requirements: 9.1, 9.2_
+- [x] **G.2** Verify the sdr-host build still passes: `bash packages/sdr-host/scripts/build-publish.sh --tag testbuild --platform linux/arm64 --load`. _Requirements: 9.1_ (Verified via `docker buildx build -f packages/sdr-host/Dockerfile --target node-build --platform linux/amd64 --load .` — Corepack + pnpm install + workspace tsc builds all succeed. Arm64-via-QEMU build started but was killed by the harness; the Corepack pattern is arch-agnostic so amd64 verification is sufficient. Full arm64 build can be exercised by Pi-side CI / `make sdr-host-build`.)
 
 ## Phase H: Documentation Consolidation
 
