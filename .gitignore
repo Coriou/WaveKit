@@ -78,3 +78,9 @@ demod_comparison_*/
 fixtures/raw/
 fixtures/processed/
 
+# -----------------------------------------------------------------------------
+# Python interpreter caches (docker/scripts/ has the lora decoder)
+# -----------------------------------------------------------------------------
+__pycache__/
+*.pyc
+
