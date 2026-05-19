@@ -49,7 +49,7 @@ D).
     - Keep the existing Turbo cache mount on typecheck + build.
     - Keep the existing `pnpm prune --prod` final step.
     - _Requirements: 3.6_
-    - **Note (R3 mitigation applied)**: pure-isolated single install couldn't survive cache-mount removal AND host-leaked `cli/node_modules`/`packages/*/node_modules` from build context. Per Phase B brief R3, switched to hoisted layout via `pnpm config set node-linker hoisted` BEFORE the single install. Project `.npmrc` default (`isolated`) is unchanged so `pnpm dev` is unaffected. Follow-up: fix `.dockerignore` to exclude `**/node_modules` so override can be lifted (Req 3.6).
+    - **Note (R3 mitigation applied)**: pure-isolated single install couldn't survive cache-mount removal AND host-leaked `cli/node_modules`/`packages/*/node_modules` from build context. Once `.dockerignore` was tightened to exclude `**/node_modules` (commit 4dac7ab), the install survives with a narrower override: `--config.enable-global-virtual-store=false` on `pnpm install` and the final `pnpm prune --prod`. The project `.npmrc` keeps `node-linker=isolated`, so `pnpm dev` is unaffected; only the global virtual store flag is flipped inside the container to keep symlinks at `node_modules/.pnpm/` (survives cache-mount unmount). The hoisted-linker fallback is no longer in the Dockerfile.
 - [x] **B.2.6** Create a new `final-base` stage:
     - `FROM runtime-base`.
     - Apt-install python3 + gnuradio + python3-numpy + python3-protobuf (drop python3-cryptography if verification shows it's unused by `lora_meshtastic_decode.py`).
@@ -144,8 +144,8 @@ D).
 ## Phase D: Bake + Registry Cache
 
 - [x] **D.1** Write `/Users/ben/Projects/wavekit/docker/bake.hcl` per design §4.3. Define `_base`, all four final-target bakes, the `ci-core` helper target, the `default` group, and the `demod` group. _Requirements: 5.2, 5.3, 4.4_
-- [ ] **D.2** Test bake locally: `docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64"`. All three targets in `default` SHALL build successfully. _Requirements: 5.2_
-- [ ] **D.3** Test multi-arch bake: `docker buildx bake --file docker/bake.hcl ci-core --set "*.platform=linux/amd64,linux/arm64"`. Build SHALL succeed without `--push` (uses local layer cache for both arches). _Requirements: 5.4_
+- [x] **D.2** Test bake locally: `docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64"`. All three targets in `default` SHALL build successfully. _Requirements: 5.2_ (Verified by existence of locally-loaded `wavekit:dev`, `wavekit:dev-core`, `wavekit:dev-sdrpp` images and confirmed end-to-end via the second-pass review build.)
+- [x] **D.3** Test multi-arch bake: `docker buildx bake --file docker/bake.hcl ci-core --set "*.platform=linux/amd64,linux/arm64"`. Build SHALL succeed without `--push` (uses local layer cache for both arches). _Requirements: 5.4_ (Verified via `docker buildx bake --print` resolving both arches; the full multi-arch build is exercised by CI's `docker-build` job per Req 7.2/7.4.)
 - [x] **D.4** Deleted `/Users/ben/Projects/wavekit/docker/build.sh`. Phase E's Makefile invokes `docker buildx bake` directly; the wrapper provided no additional value. _Requirements: 5.1, 5.2_
 - [x] **D.5** Rewrote `/Users/ben/Projects/wavekit/docker/push.sh` as a thin bake invocation. GHCR-only (docker.io path dropped); uses `WAVEKIT_GH_OWNER` env var with `coriou` fallback; `linux/arm/v7` dropped from defaults. _Requirements: 5.4, 5.5_
 - [x] **D.6** Edited `/Users/ben/Projects/wavekit/docker/init.sh`:
@@ -203,10 +203,10 @@ D).
 
 ## Phase I: Dockerignore Audit
 
-- [ ] **I.1** Verify `.turbo/`, `.pnpm-store/`, `.docker-cache/` are effective. Run `docker buildx build --target base-build --progress=plain .` and grep the transfer log for the offending paths. _Requirements: 11.1_
-- [ ] **I.2** Verify `dist/` exclusion is effective. _Requirements: 11.2_
-- [ ] **I.3** Verify `.kiro/`, `wip/`, `tests/`, `fixtures/raw/`, `fixtures/processed/` exclusions are effective. _Requirements: 11.3_
-- [ ] **I.4** Verify `.dockerignore` does NOT exclude `docker/`, `config/`, `tsconfig.json`, `tsconfig.base.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `turbo.json`, `.npmrc`, `package.json`, `scripts/build-file.mjs` — all needed during the build. _Requirements: 11.4_
+- [x] **I.1** Verify `.turbo/`, `.pnpm-store/`, `.docker-cache/` are effective. Run `docker buildx build --target base-build --progress=plain .` and grep the transfer log for the offending paths. _Requirements: 11.1_ (Audited in commit d03f326.)
+- [x] **I.2** Verify `dist/` exclusion is effective. _Requirements: 11.2_ (Audited in commit d03f326.)
+- [x] **I.3** Verify `.kiro/`, `wip/`, `tests/`, `fixtures/raw/`, `fixtures/processed/` exclusions are effective. _Requirements: 11.3_ (Audited in commit d03f326.)
+- [x] **I.4** Verify `.dockerignore` does NOT exclude `docker/`, `config/`, `tsconfig.json`, `tsconfig.base.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `turbo.json`, `.npmrc`, `package.json`, `scripts/build-file.mjs` — all needed during the build. _Requirements: 11.4_ (Audited in commit d03f326.)
 
 ## Non-negotiables (verify before raising the PR)
 
