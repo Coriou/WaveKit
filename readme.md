@@ -17,9 +17,15 @@ It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tu
 ## Quick Start
 
 ```bash
-# Clone and build
+# Clone and install
 git clone https://github.com/coriou/wavekit.git && cd wavekit
-make dev-up
+pnpm install
+
+# Run natively (esbuild watch + node --watch, no Docker)
+pnpm dev
+
+# Or bring up the full container stack (sdrpp-server + wavekit-api)
+make dev-stack
 
 # Open the interactive dashboard
 make dev-dashboard
@@ -396,35 +402,36 @@ WAVEKIT_TUNER_RELAY__PORT=1234
 
 ### Prerequisites
 
-- Node.js 20+ (see `.nvmrc`)
-- pnpm 10+ (`npm install -g pnpm@10`)
-- Docker with BuildKit
+- Node.js 22+ (`.nvmrc` pins v25.2.1; Dockerfile uses `node:22-bookworm-slim`)
+- pnpm 10 via Corepack (`corepack enable && corepack prepare pnpm@10.28.0 --activate`)
+- Docker with BuildKit + buildx (run `make docker-init` once)
 - RTL-SDR dongle (or rtl_tcp server)
 
 ### Commands
 
 ```bash
-# Development (Docker)
-make dev-up                     # Build + start container (uses config/dev_test.yaml)
-make dev-up CONFIG=dev_acars    # Start with specific config (config/dev_acars.yaml)
-make dev-configs                # List all available configs
-make dev-dashboard              # Interactive CLI dashboard
-make dev-logs                   # Tail logs (pretty JSON)
-make dev-stop                   # Stop container
+# Native dev loop (no Docker — headline iteration loop)
+pnpm dev                        # esbuild watch + node --watch against src/index.ts
+make dev-dashboard              # Build and launch the Ink/React CLI dashboard
+make dev-configs                # List configs in config/
+
+# Full container stack (dev profile of compose.yaml)
+make dev-stack                  # Build + start sdrpp-server + wavekit-api
+make dev-stack-logs             # Follow logs from both services
+make dev-stack-down             # Stop and remove containers
+make dev-shell                  # Shell into the running wavekit-api container
+make dev-status                 # ps + curl /health
 
 # Monorepo Tasks (pnpm + Turborepo)
-pnpm ws:build                   # Build all packages
-pnpm ws:typecheck               # Type check all packages
-pnpm ws:lint                    # Lint all packages
-pnpm ws:test                    # Test all packages
-
-# Single Package Commands
-pnpm test                       # Run root tests
-pnpm run test:coverage          # With coverage
+pnpm run build                  # Build all packages + bundle src/
+pnpm run typecheck              # Type check workspaces + root
+pnpm run lint                   # eslint .
+pnpm test                       # Test all packages + root vitest
+pnpm run test:coverage          # With coverage (v8)
 
 # Docker Images
-make docker-build-core          # Build core image (external SDR++)
-make docker-build-full          # Build full image (SDR++ included)
+make docker-build               # Bake the default group (final, final-core, final-sdrpp)
+make docker-push                # Multi-arch push to GHCR with mode=max cache
 ```
 
 ### Project Structure
@@ -470,7 +477,7 @@ See [docs/DECODER-GUIDE.md](docs/DECODER-GUIDE.md) for detailed instructions.
 
 ## Docker
 
-Three build targets:
+Three build targets, all produced by a single `docker buildx bake` invocation:
 
 | Target                 | Contents               | Use Case           |
 | ---------------------- | ---------------------- | ------------------ |
@@ -479,8 +486,11 @@ Three build targets:
 | `wavekit:latest-sdrpp` | SDR++ only             | Dedicated SDR host |
 
 ```bash
-# Build core (recommended for development)
-make docker-build-core
+# Build the default group (all three images)
+make docker-build
+
+# Single-arch local build (skip multi-arch when you don't need it)
+docker buildx bake --file docker/bake.hcl default --set "*.platform=linux/amd64" --load
 
 # Run with external SDR++
 docker run -p 9000:3000 -p 8080:8080 \
@@ -490,6 +500,8 @@ docker run -p 9000:3000 -p 8080:8080 \
   -e WAVEKIT_TUNER_RELAY__ENABLED=true \
   wavekit:latest-core
 ```
+
+See `docs/DOCKER-SETUP.md` for the compose profiles (`dev`, `prod-single-host`, `prod-distributed`, `demod-test`) and the GHCR-backed registry cache.
 
 ## RTL-SDR Setup
 
