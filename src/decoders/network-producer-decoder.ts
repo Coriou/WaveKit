@@ -416,6 +416,26 @@ export abstract class NetworkProducerDecoder
 	}
 
 	/**
+	 * Updates decoder options at runtime.
+	 * Network producer decoders can receive inputSampleRate for IQ stream handling.
+	 *
+	 * @param updates - Partial options to merge with existing
+	 */
+	updateOptions(updates: Record<string, unknown>): void {
+		this.config.options = { ...this.config.options, ...updates }
+		this.logger.debug({ updates }, "Decoder options updated")
+		this.onOptionsUpdated()
+	}
+
+	/**
+	 * Hook called after options are updated.
+	 * Subclasses can override to re-parse typed options.
+	 */
+	protected onOptionsUpdated(): void {
+		// No-op in base class. Subclasses override if needed.
+	}
+
+	/**
 	 * Connects to the decoder's output port (Requirements 18.1, 18.4).
 	 * Supports both TCP and UDP protocols.
 	 */

@@ -141,11 +141,23 @@ interface XidData {
  * Extends IqDecimateDecoder to support sample rate adaptation.
  */
 export class Dumpvdl2Decoder extends IqDecimateDecoder {
-	private readonly options: Dumpvdl2Options
+	private options: Dumpvdl2Options
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = parseDumpvdl2Options(config)
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = parseDumpvdl2Options(this.config)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"Dumpvdl2 options re-parsed after update",
+		)
 	}
 
 	/**

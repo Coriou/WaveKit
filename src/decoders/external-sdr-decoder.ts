@@ -383,6 +383,27 @@ export abstract class ExternalSdrDecoder
 	}
 
 	/**
+	 * Updates decoder options at runtime.
+	 * External SDR decoders don't typically use inputSampleRate since they manage
+	 * their own SDR, but this method is required for Decoder interface compliance.
+	 *
+	 * @param updates - Partial options to merge with existing
+	 */
+	updateOptions(updates: Record<string, unknown>): void {
+		this.config.options = { ...this.config.options, ...updates }
+		this.logger.debug({ updates }, "Decoder options updated")
+		this.onOptionsUpdated()
+	}
+
+	/**
+	 * Hook called after options are updated.
+	 * Subclasses can override to re-parse typed options.
+	 */
+	protected onOptionsUpdated(): void {
+		// No-op in base class. Subclasses override if needed.
+	}
+
+	/**
 	 * Handles a line of output from stdout or stderr (Requirement 19.3).
 	 * Calls the subclass parseOutput method and emits the result.
 	 * Updates lastOutputAt and health state on successful output.

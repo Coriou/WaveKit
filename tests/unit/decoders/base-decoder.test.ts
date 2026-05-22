@@ -103,6 +103,10 @@ class TestDecoder extends EventEmitter implements Decoder {
 		return this._health
 	}
 
+	updateOptions(_updates: Record<string, unknown>): void {
+		// No-op for test
+	}
+
 	getStatus(): DecoderStatus {
 		const uptime = this._running
 			? Math.floor((Date.now() - this._startTime) / 1000)

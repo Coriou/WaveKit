@@ -123,6 +123,10 @@ class TestableDecoder extends EventEmitter implements Decoder {
 		return this._health
 	}
 
+	updateOptions(_updates: Record<string, unknown>): void {
+		// No-op for test
+	}
+
 	getStatus(): DecoderStatus {
 		const now = this.getTime()
 		const uptime = this._running

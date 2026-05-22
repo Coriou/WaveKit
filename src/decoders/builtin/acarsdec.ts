@@ -97,11 +97,23 @@ interface AcarsdecJsonOutput {
  * f00b4r0/acarsdec fork via stdin.
  */
 export class AcarsdecDecoder extends AudioDemodDecoder {
-	private readonly options: AcarsdecOptions
+	private options: AcarsdecOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = parseAcarsdecOptions(config)
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = parseAcarsdecOptions(this.config)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"Acarsdec options re-parsed after update",
+		)
 	}
 
 	/**

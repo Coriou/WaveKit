@@ -336,4 +336,11 @@ export interface Decoder extends EventEmitter {
 	 * @returns Current health state
 	 */
 	getHealth(): DecoderHealth
+
+	/**
+	 * Updates decoder options at runtime.
+	 * Used for dynamic sample rate changes before restart.
+	 * @param updates - Partial options to merge with existing
+	 */
+	updateOptions(updates: Record<string, unknown>): void
 }

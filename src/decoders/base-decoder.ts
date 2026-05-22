@@ -394,6 +394,31 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * Updates decoder options at runtime.
+	 * Used for dynamic sample rate changes before restart.
+	 *
+	 * Subclasses that cache parsed options should override onOptionsUpdated()
+	 * to re-parse their typed options from this.config.options.
+	 *
+	 * @param updates - Partial options to merge with existing
+	 */
+	updateOptions(updates: Record<string, unknown>): void {
+		this.config.options = { ...this.config.options, ...updates }
+		this.logger.debug({ updates }, "Decoder options updated")
+		this.onOptionsUpdated()
+	}
+
+	/**
+	 * Hook called after options are updated via updateOptions().
+	 * Subclasses should override this to re-parse typed options.
+	 *
+	 * Default implementation is a no-op.
+	 */
+	protected onOptionsUpdated(): void {
+		// No-op in base class. Subclasses override to re-parse options.
+	}
+
+	/**
 	 * Handles a line of output from stdout or stderr.
 	 * Calls the subclass parseOutput method and emits the result.
 	 * Updates lastOutputAt and health state on successful output.

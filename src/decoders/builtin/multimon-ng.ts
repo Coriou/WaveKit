@@ -112,7 +112,7 @@ const FSK9600_PATTERN = /FSK9600:\s*(.+)/i
  * Pipeline: IQ → csdr (FM demod, decimate) → sox (resample 48k→22k) → multimon-ng
  */
 export class MultimonDecoder extends AudioDemodDecoder {
-	private readonly options: MultimonOptions
+	private options: MultimonOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -160,6 +160,18 @@ export class MultimonDecoder extends AudioDemodDecoder {
 		return validModes.length > 0
 			? validModes
 			: ["POCSAG512", "POCSAG1200", "POCSAG2400"]
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = this.parseOptions(this.config.options)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"Multimon options re-parsed after update",
+		)
 	}
 
 	/**

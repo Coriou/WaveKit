@@ -23,6 +23,7 @@ import type {
 	AircraftState,
 	EnrichmentSource,
 } from "@wavekit/api-types"
+import { getCountryFromIcao } from "../data/icao-country-prefixes.js"
 
 // ============================================================================
 // Configuration
@@ -352,14 +353,14 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 
 			if (!response.ok) {
 				if (response.status === 404) {
-					// Aircraft not in database
-					return null
+					// Aircraft not in database, but still provide country from ICAO prefix
+					return this.getCountryOnlyIdentification(icao)
 				}
 				throw new Error(`HTTP ${response.status}: ${response.statusText}`)
 			}
 
 			const data = (await response.json()) as HexdbAircraftResponse
-			const identification = this.parseHexdbResponse(data)
+			const identification = this.parseHexdbResponse(data, icao)
 
 			// Add image URL if available and we got valid identification
 			if (identification && imageUrl) {
@@ -378,9 +379,11 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 
 	/**
 	 * Parse hexdb.io response into our AircraftIdentification format.
+	 * Also enriches with country from ICAO hex prefix (no API call needed).
 	 */
 	private parseHexdbResponse(
 		data: HexdbAircraftResponse,
+		icao: string,
 	): AircraftIdentification | null {
 		// If no meaningful data, return null
 		if (!data.Registration && !data.ICAOTypeCode && !data.RegisteredOwners) {
@@ -410,7 +413,30 @@ export class AircraftEnrichmentService extends EventEmitter<AircraftEnrichmentEv
 			identification.operatorCode = data.OperatorFlagCode
 		}
 
+		// Add country from ICAO hex prefix (deterministic, no API call)
+		const countryInfo = getCountryFromIcao(icao)
+		if (countryInfo) {
+			identification.country = countryInfo.country
+		}
+
 		return identification
+	}
+
+	/**
+	 * Get minimal identification with just country from ICAO prefix.
+	 * Used when hexdb.io returns 404 (aircraft not in database).
+	 */
+	private getCountryOnlyIdentification(
+		icao: string,
+	): AircraftIdentification | null {
+		const countryInfo = getCountryFromIcao(icao)
+		if (!countryInfo) {
+			return null
+		}
+		return {
+			country: countryInfo.country,
+			source: "hexdb" as EnrichmentSource, // Still mark as hexdb since we attempted lookup
+		}
 	}
 
 	/**

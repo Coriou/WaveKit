@@ -316,7 +316,7 @@ interface PendingCall {
  * feeding audio to dsd-fme.
  */
 export class DsdFmeDecoder extends AudioDemodDecoder {
-	private readonly options: DsdFmeOptions
+	private options: DsdFmeOptions
 
 	// Current protocol detected from sync (candidate context, not event)
 	private currentProtocol: DsdFmeProtocol = null
@@ -381,6 +381,18 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			callStartDelayMs:
 				(options["callStartDelayMs"] as number) ?? CALL_START_DELAY_MS,
 		}
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = this.parseOptions(this.config.options)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"DSD-FME options re-parsed after update",
+		)
 	}
 
 	/**

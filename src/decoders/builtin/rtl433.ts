@@ -58,22 +58,42 @@ const DEFAULT_INPUT_SAMPLE_RATE = 2_048_000
  * using csdr, reducing CPU usage and improving decoding performance.
  */
 export class Rtl433Decoder extends IqDecimateDecoder {
-	private readonly options: Rtl433Options
-	private readonly effectiveTargetRate: number
+	private options: Rtl433Options
+	private effectiveTargetRate: number
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = this.parseOptions(config.options)
+		this.effectiveTargetRate = this.calculateEffectiveTargetRate()
+	}
 
-		// Calculate actual target sample rate after decimation
+	/**
+	 * Calculates the effective target sample rate after integer decimation.
+	 */
+	private calculateEffectiveTargetRate(): number {
 		const inputRate = this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
 		const targetRate =
 			this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE
 
 		// Decimation must be integer, so actual output rate may differ
 		const decimation = Math.round(inputRate / targetRate)
-		this.effectiveTargetRate =
-			decimation > 0 ? inputRate / decimation : inputRate
+		return decimation > 0 ? inputRate / decimation : inputRate
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = this.parseOptions(this.config.options)
+		this.effectiveTargetRate = this.calculateEffectiveTargetRate()
+		this.logger.debug(
+			{
+				inputSampleRate: this.options.inputSampleRate,
+				effectiveTargetRate: this.effectiveTargetRate,
+			},
+			"RTL_433 options re-parsed after update",
+		)
 	}
 
 	/**

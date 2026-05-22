@@ -730,10 +730,34 @@ export class DecoderManager extends EventEmitter {
 				newSampleRate: caps.sampleRate,
 				affectedDecoders,
 			},
-			"Source caps changed, restarting affected decoders",
+			"Source caps changed, updating decoder options and restarting",
 		)
 
-		// Restart each affected decoder
+		// Update each decoder's inputSampleRate option BEFORE restart
+		// This ensures the decoder rebuilds its pipeline with the correct sample rate
+		for (const decoderId of affectedDecoders) {
+			const state = this.decoders.get(decoderId)
+			if (!state) continue
+
+			try {
+				// Propagate the new sample rate to the decoder's options
+				state.decoder.updateOptions({ inputSampleRate: caps.sampleRate })
+				this.log.debug(
+					{
+						decoderId,
+						inputSampleRate: caps.sampleRate,
+					},
+					"Updated decoder inputSampleRate before restart",
+				)
+			} catch (err) {
+				this.log.warn(
+					{ decoderId, err },
+					"Failed to update decoder options before restart",
+				)
+			}
+		}
+
+		// Restart each affected decoder (now with updated options)
 		for (const decoderId of affectedDecoders) {
 			try {
 				await this.restartDecoder(decoderId)
