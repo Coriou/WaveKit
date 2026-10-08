@@ -63,6 +63,8 @@ export interface KeyContext {
 	edit: boolean
 	detail: boolean
 	heightClass: HeightClass
+	/** Selectable rows in the active list (ViewKeyInfo.rowIds.length). */
+	rows: number
 	v: ViewKeyCtx
 }
 
@@ -93,6 +95,8 @@ export interface Binding {
 
 export const RECEIVER_EXTERNAL_NOTICE =
 	"controlled externally · c to take control"
+/** Control state not read yet: names no key, because `c` is not bound until it is known. */
+export const RECEIVER_UNKNOWN_NOTICE = "tuner control unknown"
 const ANY = "*any"
 const PRINTABLE = "*printable"
 const DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const
@@ -257,19 +261,19 @@ export const BINDINGS: readonly Binding[] = [
 	},
 	{
 		mode: "list",
-		views: DETAIL_VIEWS,
+		views: LIST_VIEWS,
 		keys: ["<pgup>"],
 		action: () => ({ type: "page", delta: -1 }),
 	},
 	{
 		mode: "list",
-		views: DETAIL_VIEWS,
+		views: LIST_VIEWS,
 		keys: ["<pgdn>"],
 		action: () => ({ type: "page", delta: 1 }),
 	},
 	{
 		mode: "list",
-		views: DETAIL_VIEWS,
+		views: LIST_VIEWS,
 		keys: ["g"],
 		action: () => ({ type: "top" }),
 	},
@@ -277,7 +281,7 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: LIST_VIEWS,
 		keys: ["<enter>"],
-		when: c => !c.detail,
+		when: c => !c.detail && c.rows > 0,
 		action: () => ({ type: "open" }),
 		hint: hint("Enter", "open"),
 	},
@@ -305,12 +309,14 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: ["messages"],
 		keys: ["G"],
+		// Following with nothing selected is already "newest".
+		when: c => c.v.paused || c.v.hasSelection,
 		action: () => ({ type: "newest" }),
 		hint: hint("G", "newest"),
 	},
 	{
 		mode: "list",
-		views: ["decoders"],
+		views: ["overview", "decoders"],
 		keys: ["G"],
 		action: () => ({ type: "newest" }),
 	},
@@ -357,8 +363,15 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: ["receiver"],
 		keys: ["e"],
-		when: c => c.v.control !== "internal",
+		when: c => c.v.control === "external",
 		action: () => ({ type: "notice", text: RECEIVER_EXTERNAL_NOTICE }),
+	},
+	{
+		mode: "list",
+		views: ["receiver"],
+		keys: ["e"],
+		when: c => c.v.control === null,
+		action: () => ({ type: "notice", text: RECEIVER_UNKNOWN_NOTICE }),
 	},
 	{
 		mode: "list",
@@ -463,6 +476,8 @@ export interface FooterHint {
 	key: string
 	hint: Hint
 	mode: ModeName
+	/** What the hinted binding does on its key (P20 checks resolveKey agrees). */
+	action: Action
 }
 
 export function footerHints(ctx: KeyContext): FooterHint[] {
@@ -475,7 +490,7 @@ export function footerHints(ctx: KeyContext): FooterHint[] {
 			const key = b.keys[0]
 			if (!h || key === undefined || seen.has(h.keys)) continue
 			seen.add(h.keys)
-			out.push({ key, hint: h, mode })
+			out.push({ key, hint: h, mode, action: b.action(key, ctx) })
 		}
 	}
 	return out
