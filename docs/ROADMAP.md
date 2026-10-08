@@ -310,6 +310,16 @@ on port 8080 only after setup completes and that page responds. Reboot/shutdown
 controls remain deliberately absent until authentication, authorization and
 origin/CSRF protection exist.
 
+**Next (low priority, Pi UI): one address for the user.** Two ports (80 for
+setup, 8080 for status) confuse operators. Goal: typing `http://<pi>/` always
+shows the right page — the setup page while installing, the status page once
+setup completes. Preferred shape: the status service takes over port 80 when
+setup finishes (the early setup server releases it), with 8080 kept as a
+compatibility alias or redirect; the early server's honest handoff check
+(status page responds before switching) must survive. Ship in an image after
+the 2026-10-08b candidate, with its own clean-card acceptance (setup → switch
+→ reboot keeps port 80 on the status page).
+
 ## Delivery discipline
 
 Review and publish coherent commits as each batch passes its relevant checks.
