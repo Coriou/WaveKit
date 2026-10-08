@@ -19,6 +19,58 @@ import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 
+export type RxLane = "tuner" | "sources" | "relay"
+export interface RxValue {
+	v: number
+	lane: RxLane
+	/** The lane it came from is older than the TTL. */
+	old: boolean
+}
+
+/**
+ * Centre and sample rate for one source, each the first positive value (windowFor's
+ * rule, R44) and kept apart, so a known centre still shows when the rate is unknown
+ * (R53). Centre: tuner → source caps → relay; rate: tuner → source caps.
+ */
+export function rxValues(
+	state: AppState,
+	sourceId: string | undefined,
+): { centre: RxValue | null; rate: RxValue | null } {
+	if (sourceId === undefined) return { centre: null, rate: null }
+	const now = state.now
+	const tuner = state.tuner.value?.find(t => t.sourceId === sourceId)
+	const src = state.sources.value?.find(x => x.id === sourceId)
+	const relay = state.relay.value
+	const relayFreq =
+		relay && (relay.sourceId === undefined || relay.sourceId === sourceId)
+			? relay.lastFrequency
+			: undefined
+	const old: Readonly<Record<RxLane, boolean>> = {
+		tuner: isOld(state.tuner, now),
+		sources: isOld(state.sources, now),
+		relay: isOld(state.relay, now),
+	}
+	const pick = (
+		cands: ReadonlyArray<readonly [number | undefined, RxLane]>,
+	): RxValue | null => {
+		for (const [v, lane] of cands)
+			if (v !== undefined && Number.isFinite(v) && v > 0)
+				return { v, lane, old: old[lane] }
+		return null
+	}
+	return {
+		centre: pick([
+			[tuner?.frequency, "tuner"],
+			[src?.caps.centerFreq, "sources"],
+			[relayFreq, "relay"],
+		]),
+		rate: pick([
+			[tuner?.sampleRate, "tuner"],
+			[src?.caps.sampleRate, "sources"],
+		]),
+	}
+}
+
 export function stripInput(state: AppState): StripInput {
 	const now = state.now
 	const rows = state.decoders.value
@@ -60,41 +112,9 @@ export function stripInput(state: AppState): StripInput {
 		: null
 	const tuner = state.tuner.value?.[0]
 	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
-	const src = state.sources.value?.find(x => x.id === sourceId)
-	const relay = state.relay.value
-	const relayFreq =
-		relay && (relay.sourceId === undefined || relay.sourceId === sourceId)
-			? relay.lastFrequency
-			: undefined
-	// windowFor's rule (first positive value), kept per field so a known centre
-	// still shows when the rate is unknown (R53), and each value remembers its lane.
-	type Lane = "tuner" | "sources" | "relay"
-	const pick = (
-		cands: ReadonlyArray<[number | undefined, Lane]>,
-	): { v: number; lane: Lane } | null => {
-		for (const [v, lane] of cands)
-			if (v !== undefined && Number.isFinite(v) && v > 0) return { v, lane }
-		return null
-	}
-	const centre = pick([
-		[tuner?.frequency, "tuner"],
-		[src?.caps.centerFreq, "sources"],
-		[relayFreq, "relay"],
-	])
-	const rate = pick([
-		[tuner?.sampleRate, "tuner"],
-		[src?.caps.sampleRate, "sources"],
-	])
-	const laneOld = (l: Lane): boolean =>
-		l === "tuner"
-			? isOld(state.tuner, now)
-			: l === "sources"
-				? isOld(state.sources, now)
-				: isOld(state.relay, now)
+	const { centre, rate } = rxValues(state, sourceId)
 	// Item 8: rx dims when the lane of its centre or of its rate is old.
-	const rxOld =
-		centre !== null &&
-		(laneOld(centre.lane) || (rate !== null && laneOld(rate.lane)))
+	const rxOld = centre !== null && (centre.old || rate?.old === true)
 	return {
 		api: apiView(state.conn, now),
 		iq: iqSummary(state.sources, state.metrics, now),

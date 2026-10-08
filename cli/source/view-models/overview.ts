@@ -1,6 +1,5 @@
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import type { AppState } from "../data/types.js"
-import { windowFor } from "../data/window.js"
 import { fitGroups } from "../ui/fit.js"
 import {
 	formatAge,
@@ -14,6 +13,7 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { overviewBudget } from "../ui/frame.js"
+import { rxValues } from "./chrome.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncateLine } from "../ui/text.js"
@@ -53,23 +53,48 @@ function hostOf(url: string | undefined): string | null {
 	}
 }
 
+/** M4: the address part of a remote (`192.0.2.1:5555`, `::ffff:192.0.2.1:5555`, `[2001:db8::1]:5555`). */
+function remoteHost(remote: string | undefined): string | null {
+	if (remote === undefined) return null
+	const r = sanitize(remote).trim()
+	let host: string
+	if (r.startsWith("[")) {
+		const close = r.indexOf("]")
+		host = close > 0 ? r.slice(1, close) : r
+	} else {
+		const i = r.lastIndexOf(":")
+		host = i > 0 ? r.slice(0, i) : r
+	}
+	host = host.replace(/^::ffff:/i, "")
+	return host === "" ? null : host
+}
+
+/** The Overview's source: the first listed one (the receiver row and the empty-feed line agree). */
+function primarySource(state: AppState) {
+	return state.sources.value?.[0]
+}
+
 /** Spec §6.1 receiver rows: groups drop by priority (relay clients and centre first). */
 export function receiverSummary(state: AppState, width: number): [Line, Line] {
 	const now = state.now
-	const src = state.sources.value?.[0]
+	const src = primarySource(state)
 	const sep = ` ${glyphs().sep} `
 	if (!src) {
 		const why =
 			state.sources.error || state.conn.rest.firstFailAt !== null
-				? "no data · API unreachable"
+				? `no data${sep}API unreachable`
 				: "fetching /api/sources"
-		return [[...title("RECEIVER"), sp(why, "label")], label("window")]
+		return [
+			[...title("RECEIVER"), sp(why, "label")],
+			[...label("window"), sp("?", "unknown")],
+		]
 	}
 	const old = isOld(state.sources, now)
-	const v = (
-		t: string,
-		role: Role = "value",
-	): { text: string; role: Role } => ({ text: t, role: old ? "old" : role })
+	const role = (r: Role, isOldLane: boolean): Role => (isOldLane ? "old" : r)
+	const v = (t: string, r: Role = "value"): { text: string; role: Role } => ({
+		text: t,
+		role: role(r, old),
+	})
 	const iq = iqView(
 		src,
 		isFresh(state.sources, now),
@@ -77,20 +102,35 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 		now,
 	)
 	const host = hostOf(src.url)
-	// Server strings are sanitised before they reach a line.
+	// Server strings are sanitised before they reach a line; no made-up transport word (M6).
 	const srcId = sanitize(src.id)
-	const transport = src.type !== undefined ? sanitize(src.type) : "source"
+	const transport = src.type !== undefined ? sanitize(src.type) : null
+	const ident = [transport, host]
+		.filter((x): x is string => x !== null)
+		.join(" ")
 	const age = src.activity?.sampleAgeMs
 	const relay = state.relay.value
-	const rate: Line = [v(formatRate(iq.rateBytesPerSec))]
-	const rateRich: Line = [
-		...rate,
-		sp(sep, "label"),
-		v(formatMSps(src.caps.sampleRate)),
-	]
-	const relayText = relay
-		? `relay ${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}`
+	const { centre, rate } = rxValues(state, src.id)
+	const rateLine: Line = [v(formatRate(iq.rateBytesPerSec))]
+	// M1: the sample rate follows the window rule; unknown is left out, never 0.
+	const rateRich: Line | null = rate
+		? [
+				...rateLine,
+				sp(sep, "label"),
+				{ text: formatMSps(rate.v), role: role("value", rate.old) },
+			]
 		: null
+	// M5: a disabled relay has no clients to report.
+	const relayText =
+		relay && relay.enabled
+			? `relay ${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}`
+			: null
+	const others = (state.sources.value?.length ?? 1) - 1
+	// M2: a stale source keeps its sample age ("no samples 23s", §9).
+	const word =
+		iq.ageMs !== null && iq.word === "no samples"
+			? `${iq.word} ${formatAge(iq.ageMs)}`
+			: iq.word
 	// Priorities: activity first, then the source identity, then rates; relay clients are the richest
 	// rate variant so they are the first thing to go (spec §6.1 "relay clients and centre first").
 	const row1: Group[] = [
@@ -98,22 +138,20 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 			priority: 1,
 			variants: [
 				[...title("RECEIVER"), v(srcId)],
-				[
-					...title("RECEIVER"),
-					v(srcId),
-					sp(`${sep}${transport}${host ? ` ${host}` : ""}`, "label"),
-				],
+				...(ident !== ""
+					? [[...title("RECEIVER"), v(srcId), sp(`${sep}${ident}`, "label")]]
+					: []),
 			],
 		},
 		{
 			priority: 0,
 			variants: [
-				[glyphSpan(iq.glyph), v(` ${iq.word}`)],
+				[glyphSpan(iq.glyph), v(` ${word}`)],
 				...(iq.word === "streaming" && age !== null && age !== undefined
 					? [
 							[
 								glyphSpan(iq.glyph),
-								v(` ${iq.word}`),
+								v(` ${word}`),
 								sp(`${sep}sample age ${formatSampleAge(age)}`, "label"),
 							],
 						]
@@ -123,50 +161,93 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 		{
 			priority: 2,
 			variants: [
-				rate,
-				rateRich,
+				rateLine,
+				...(rateRich ? [rateRich] : []),
 				...(relayText
-					? [[...rateRich, sp(`${GROUP_SEP}${relayText}`, "label")]]
+					? [
+							[
+								...(rateRich ?? rateLine),
+								sp(`${GROUP_SEP}${relayText}`, "label"),
+							],
+						]
 					: []),
 			],
 		},
+		// M7: further sources are counted, not hidden.
+		...(others > 0
+			? [
+					{
+						priority: 3,
+						variants: [
+							[sp(`+${others} source${others === 1 ? "" : "s"}`, "label")],
+						],
+					},
+				]
+			: []),
 	]
-	const win = windowFor(src.id, state.tuner.value, state.sources.value, relay)
+	const tunerLaneOld = isOld(state.tuner, now)
 	const tuner = state.tuner.value?.find(t => t.sourceId === src.id)
 	const owner = tuner
 		? tuner.controlMode === "external"
 			? "external control"
 			: "wavekit control"
 		: null
-	const ownerIp =
-		relay?.controlClientRemote !== undefined
-			? sanitize(relay.controlClientRemote.split(":")[0] ?? "")
-			: undefined
+	const ownerIp = remoteHost(relay?.controlClientRemote)
 	const lastCmd = tuner?.lastCommandAt
 		? Date.parse(tuner.lastCommandAt)
 		: Number.NaN
-	const row2: Group[] = [
-		{
-			priority: 0,
-			variants: win
-				? [
-						[...label("window"), v(formatWindow(win.loHz, win.hiHz))],
+	// M3: window dims by the lanes its centre and rate came from; owner and last
+	// command by the tuner lane; the owner address by the relay lane.
+	const winOld = (centre?.old ?? false) || (rate?.old ?? false)
+	const centreText = centre ? `centre ${formatMHzBare(centre.v, 4)}` : null
+	const windowVariants: Line[] =
+		centre && rate
+			? [
+					[
+						...label("window"),
+						{
+							text: formatWindow(centre.v - rate.v / 2, centre.v + rate.v / 2),
+							role: role("value", winOld),
+						},
+					],
+					[
+						...label("window"),
+						{
+							text: formatWindow(centre.v - rate.v / 2, centre.v + rate.v / 2),
+							role: role("value", winOld),
+						},
+						sp(`${sep}${centreText ?? ""}`, "label"),
+					],
+				]
+			: centre
+				? // I3 (R53): a known centre is shown even when the rate is not.
+					[
 						[
 							...label("window"),
-							v(formatWindow(win.loHz, win.hiHz)),
-							sp(`${sep}centre ${formatMHzBare(win.centreHz, 4)}`, "label"),
+							sp("?", "unknown"),
+							sp(sep, "label"),
+							{ text: centreText ?? "", role: role("value", winOld) },
 						],
 					]
-				: [[...label("window"), sp("?", "unknown")]],
-		},
+				: [[...label("window"), sp("?", "unknown")]]
+	const row2: Group[] = [
+		{ priority: 0, variants: windowVariants },
 		...(owner
 			? [
 					{
 						priority: 1,
 						variants: [
-							[v(owner)],
+							[{ text: owner, role: role("value", tunerLaneOld) }],
 							...(owner === "external control" && ownerIp
-								? [[v(owner), sp(`${sep}${ownerIp}`, "label")]]
+								? [
+										[
+											{ text: owner, role: role("value", tunerLaneOld) },
+											{
+												text: `${sep}${ownerIp}`,
+												role: role("label", isOld(state.relay, now)),
+											},
+										],
+									]
 								: []),
 						],
 					},
@@ -177,7 +258,12 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 					{
 						priority: 2,
 						variants: [
-							[sp(`last command ${formatAge(now - lastCmd)} ago`, "label")],
+							[
+								{
+									text: `last command ${formatAge(now - lastCmd)} ago`,
+									role: role("label", tunerLaneOld),
+								},
+							],
 						],
 					},
 				]
@@ -242,18 +328,11 @@ export function emptyFeedLine(state: AppState): Line {
 	const facts = decoderFacts(state)
 	const since = state.conn.ws.since ?? state.now
 	const inWin = facts.filter(f => f.membership === "in").length
-	// R44: the window's centre (first positive), so a tuner frequency of 0 never prints.
-	const tuner = state.tuner.value?.[0]
-	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
-	const centre =
-		sourceId === undefined
-			? undefined
-			: windowFor(
-					sourceId,
-					state.tuner.value,
-					state.sources.value,
-					state.relay.value,
-				)?.centreHz
+	// R44/R53: the centre on its own (first positive), for the receiver row's source (M7).
+	const centre = rxValues(
+		state,
+		primarySource(state)?.id ?? state.tuner.value?.[0]?.sourceId,
+	).centre?.v
 	const sep = ` ${glyphs().sep} `
 	const parts = [
 		`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,

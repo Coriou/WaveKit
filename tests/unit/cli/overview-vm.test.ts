@@ -216,3 +216,135 @@ describe("A6 fix 1: feed truth", () => {
 		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes since/)
 	})
 })
+
+describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
+	const live = () => scenarioState("live", deps)
+	const rows = (st: ReturnType<typeof scenarioState>, w = 119) =>
+		receiverSummary(st, w)
+	const text = (st: ReturnType<typeof scenarioState>, w = 119) =>
+		rows(st, w).map(lineText)
+	const noRate = (s: ReturnType<typeof scenarioState>) => ({
+		...s,
+		tuner: {
+			...s.tuner,
+			value: s.tuner.value!.map(t => ({ ...t, sampleRate: 0 })),
+		},
+		sources: {
+			...s.sources,
+			value: s.sources.value!.map(x => ({
+				...x,
+				caps: { ...x.caps, sampleRate: 0 },
+			})),
+		},
+	})
+	it("I3: a known centre shows when the rate is unknown", () => {
+		const [, b] = text(noRate(live()))
+		expect(b).toMatch(/^window +\? · centre 445\.9707/)
+		const idle = noRate(scenarioState("idle", deps))
+		expect(lineText(emptyFeedLine(idle))).toContain("rx 445.971 MHz")
+	})
+	it("M1: the sample rate follows the window rule and never prints 0", () => {
+		const s = live()
+		const capsRate = {
+			...s,
+			tuner: {
+				...s.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, sampleRate: 0 })),
+			},
+		}
+		expect(text(capsRate)[0]).toContain("2.048 MS/s")
+		expect(text(noRate(s))[0]).not.toContain("MS/s")
+	})
+	it("M2: a stale source keeps its sample age", () => {
+		const s = live()
+		const stale = {
+			...s,
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					activity: {
+						state: "stale" as const,
+						lastSampleAt: null,
+						sampleAgeMs: 23_000,
+						timeoutMs: 10_000,
+					},
+				})),
+			},
+		}
+		expect(text(stale)[0]).toContain("× no samples 23s")
+	})
+	it("M3: window, owner and last command dim by their own lanes", () => {
+		const s = live()
+		const tunerOld = { ...s, tuner: { ...s.tuner, receivedAt: s.now - 60_000 } }
+		const [, row2] = rows(tunerOld)
+		for (const t of ["external control", "444.947–446.995 MHz"]) {
+			expect(row2!.find(sp => sp.text.includes(t))?.role).toBe("old")
+		}
+		expect(row2!.find(sp => sp.text.startsWith("last command"))?.role).toBe(
+			"old",
+		)
+		const [, fresh] = rows(s)
+		expect(
+			fresh!.find(sp => sp.text.includes("external control"))?.role,
+		).not.toBe("old")
+	})
+	it("M4: the owner address parses IPv4, IPv4-mapped and IPv6 remotes", () => {
+		const s = live()
+		for (const [remote, ip] of [
+			["192.0.2.1:54321", "192.0.2.1"],
+			["::ffff:192.0.2.7:5555", "192.0.2.7"],
+			["[2001:db8::1]:5555", "2001:db8::1"],
+		] as const) {
+			const st = {
+				...s,
+				relay: {
+					...s.relay,
+					value: { ...s.relay.value!, controlClientRemote: remote },
+				},
+			}
+			expect(text(st)[1]).toContain(`external control · ${ip}`)
+		}
+	})
+	it("M5: a disabled relay shows no client count", () => {
+		const s = live()
+		const off = {
+			...s,
+			relay: {
+				...s.relay,
+				value: { ...s.relay.value!, enabled: false, clientsConnected: 0 },
+			},
+		}
+		expect(text(off)[0]).not.toContain("relay")
+	})
+	it("M6: no transport type means no made-up word", () => {
+		const s = live()
+		const noType = {
+			...s,
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(({ type: _t, ...x }) => x),
+			},
+		}
+		const [a] = text(noType)
+		expect(a).toContain("RECEIVER  pi-iq · 192.0.2.23:5555")
+		expect(a).not.toMatch(/\bsource\b/)
+	})
+	it("M7: more sources are counted, and the empty feed uses the receiver row's source", () => {
+		const s = live()
+		const extra = {
+			...s.sources.value![0]!,
+			id: "pi-b",
+			url: "192.0.2.24:5555",
+		}
+		const two = {
+			...s,
+			sources: { ...s.sources, value: [...s.sources.value!, extra] },
+		}
+		expect(text(two, 199)[0]).toContain("+1 source")
+	})
+	it("an unknown window reads ?, never an empty row", () => {
+		const [, b] = text(scenarioState("api-down", deps), 79)
+		expect(b).toMatch(/^window +\?$/)
+	})
+})
