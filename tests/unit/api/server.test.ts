@@ -600,6 +600,70 @@ describe("API Server", () => {
 	})
 
 	describe("Source Routes", () => {
+		it("preserves sample activity in list, creation and system status JSON", async () => {
+			const activity = {
+				state: "stale",
+				lastSampleAt: "2026-10-08T12:00:00.000Z",
+				sampleAgeMs: 15000,
+				timeoutMs: 10000,
+			}
+			const source = {
+				id: "iq",
+				connected: true,
+				bytesReceived: 1000,
+				dataRate: 0,
+				reconnectAttempts: 0,
+				activity,
+				caps: {
+					kind: "iq",
+					sampleRate: 2048000,
+					format: "U8_IQ",
+					exclusive: false,
+				},
+			}
+			mockSourceManager.getAllStatus.mockReturnValue([source])
+			await apiServer.start()
+			const app = apiServer.getApp()
+			const list = await app.inject({ method: "GET", url: "/api/sources" })
+			expect(list.statusCode).toBe(200)
+			expect(list.json()[0].activity).toEqual(activity)
+			const status = await app.inject({ method: "GET", url: "/api/status" })
+			expect(status.statusCode).toBe(200)
+			expect(status.json().sources[0].activity).toEqual(activity)
+			mockSourceManager.getStatus
+				.mockReturnValueOnce(undefined)
+				.mockReturnValue(source)
+			const created = await app.inject({
+				method: "POST",
+				url: "/api/sources",
+				payload: {
+					id: "iq",
+					type: "rtl_tcp",
+					host: "127.0.0.1",
+					port: 1234,
+					caps: source.caps,
+				},
+			})
+			expect(created.statusCode).toBe(201)
+			expect(created.json().source.activity).toEqual(activity)
+			mockSourceManager.getAllStatus.mockReturnValue([
+				{
+					...source,
+					activity: {
+						...activity,
+						state: "waiting",
+						lastSampleAt: null,
+						sampleAgeMs: null,
+					},
+				},
+			])
+			const waiting = await app.inject({ method: "GET", url: "/api/sources" })
+			expect(waiting.json()[0].activity).toMatchObject({
+				lastSampleAt: null,
+				sampleAgeMs: null,
+			})
+		})
+
 		describe("GET /api/sources", () => {
 			it("should return empty array when no sources configured", async () => {
 				mockSourceManager.getAllStatus.mockReturnValue([])

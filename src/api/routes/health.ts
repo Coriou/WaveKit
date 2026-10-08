@@ -10,6 +10,7 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import { sourceActivitySchema } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
@@ -200,6 +201,7 @@ const sourceStatusSchema = {
 	properties: {
 		id: { type: "string" },
 		connected: { type: "boolean" },
+		activity: sourceActivitySchema,
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
 		lastError: { type: "string" },

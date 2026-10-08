@@ -77,7 +77,10 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
 - [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
       buffered final data; read errors stop looping playback).
 - [ ] Distinguish disconnected, waiting, stale, dropping and streaming states;
-      display current activity separately from historical counters.
+      display current activity separately from historical counters. Core REST now
+      exposes payload freshness (waiting/streaming/stale/paused/disconnected/ended)
+      independently of transport and assignment capacity. CLI snapshots expire
+      after 15 seconds; host sampling and combined drop reporting remain pending.
 - [ ] Exercise real decoder IQ fixtures, lifecycle failure cases, and memory limits.
 
 ## 4. API and event foundation for multiple clients

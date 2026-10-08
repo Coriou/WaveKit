@@ -2086,9 +2086,12 @@ describe("Recording Source", () => {
 				await vi.waitFor(() => expect(ended).toHaveBeenCalledOnce())
 				expect(closeSpy).toHaveBeenCalledOnce()
 				expect(sourceManager.getStatus("buffered-eof")?.dataRate).toBe(0)
+				expect(sourceManager.getStatus("buffered-eof")?.activity.state).toBe(
+					"ended",
+				)
 				const chunks: Buffer[] = []
 				for await (const chunk of stream) chunks.push(chunk)
-				expect(Buffer.concat(chunks)).toEqual(payload)
+				expect(Buffer.concat(chunks).equals(payload)).toBe(true)
 				await sourceManager.disconnect("buffered-eof")
 				expect(closeSpy).toHaveBeenCalledOnce()
 			} finally {

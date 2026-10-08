@@ -5,6 +5,7 @@
  */
 
 import React from "react"
+import { sourceActivityLabel } from "../utils/source-activity.js"
 import { Box, Text } from "ink"
 import type {
 	DecoderOutput,
@@ -22,6 +23,7 @@ import { DecodedMessageList } from "./decoded-message.js"
 interface DashboardProps {
 	decoders: DecoderStatus[]
 	sources: SourceStatusType[]
+	snapshotFresh?: boolean
 	snapshot: FanoutSnapshot | null
 	dropRate: number
 	messages?: DecoderOutput[]
@@ -50,6 +52,7 @@ function normalizeHealth(
 export function Dashboard({
 	decoders,
 	sources,
+	snapshotFresh = true,
 	snapshot,
 	dropRate,
 	messages = [],
@@ -147,14 +150,14 @@ export function Dashboard({
 				<Text bold color="cyan">
 					DECODERS
 				</Text>
-				<Box flexDirection="row" gap={4}>
-					<Box>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
 						<Text bold>Running: </Text>
 						<Text color={runningDecoders > 0 ? "green" : "yellow"}>
 							{runningDecoders}/{decoders.length}
 						</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Healthy: </Text>
 						<Text
 							color={
@@ -167,13 +170,13 @@ export function Dashboard({
 							{healthyRunningDecoders}/{runningDecoders}
 						</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Total Events: </Text>
 						<Text>{totalEvents.toLocaleString()}</Text>
 					</Box>
 				</Box>
 				{decoderItems.length === 0 ? (
-					<Text dimColor>No decoders configured</Text>
+					<Text dimColor>No decoders configured in the server profile</Text>
 				) : (
 					<>
 						{Array.from({ length: rows }).map((_, rowIdx) => (
@@ -203,27 +206,27 @@ export function Dashboard({
 				<Text bold color="cyan">
 					BACKPRESSURE
 				</Text>
-				<Box flexDirection="row" gap={4}>
-					<Box>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
 						<Text bold>Status: </Text>
 						<Text color={backpressureActive > 0 ? "red" : "green"}>
 							{backpressureActive > 0
 								? `${backpressureActive} dropping`
-								: "All flowing"}
+								: "No fanout drops"}
 						</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Drop Rate: </Text>
 						<Text color={dropRate > 0 ? "yellow" : undefined}>
 							{formatRate(dropRate)}
 						</Text>
 					</Box>
-					<Box>
-						<Text bold>Flowed: </Text>
+					<Box flexShrink={0}>
+						<Text bold>Total flowed: </Text>
 						<Text>{formatBytes(totalFlowed)}</Text>
 					</Box>
-					<Box>
-						<Text bold>Dropped: </Text>
+					<Box flexShrink={0}>
+						<Text bold>Total dropped: </Text>
 						<Text color={totalDropped > 0 ? "yellow" : undefined}>
 							{formatBytes(totalDropped)}
 						</Text>
@@ -236,24 +239,41 @@ export function Dashboard({
 				<Text bold color="cyan">
 					SOURCES
 				</Text>
-				<Box flexDirection="row" gap={4}>
-					<Box>
-						<Text bold>Connected: </Text>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
+						<Text bold>Transport: </Text>
 						<Text
-							color={connectedSources === sources.length ? "green" : "yellow"}
+							color={
+								snapshotFresh &&
+								sources.length > 0 &&
+								connectedSources === sources.length
+									? "green"
+									: "yellow"
+							}
 						>
 							{connectedSources}/{sources.length}
 						</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Fanout Consumers: </Text>
 						<Text>{fanoutConsumers}</Text>
 					</Box>
 				</Box>
 				{sources.map(source => (
 					<Box key={source.id}>
-						<Text color={source.connected ? "green" : "red"}>{source.id}</Text>
+						<Text
+							color={
+								snapshotFresh && source.activity?.state === "streaming"
+									? "green"
+									: source.connected
+										? "yellow"
+										: "red"
+							}
+						>
+							{source.id}
+						</Text>
 						<Text dimColor> @ {source.url}</Text>
+						<Text> | {sourceActivityLabel(source, snapshotFresh)}</Text>
 					</Box>
 				))}
 			</Box>
@@ -263,20 +283,20 @@ export function Dashboard({
 				<Text bold color="cyan">
 					TUNER RELAY
 				</Text>
-				<Box flexDirection="row" gap={4}>
-					<Box>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
 						<Text bold>Status: </Text>
 						<Text color={relayColor}>{relayStatus}</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Clients: </Text>
 						<Text>{relayClients}</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Source: </Text>
 						<Text>{relaySource}</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Control: </Text>
 						<Text>{relayControl}</Text>
 					</Box>
@@ -301,28 +321,28 @@ export function Dashboard({
 				<Text bold color="cyan">
 					LIVE AUDIO
 				</Text>
-				<Box flexDirection="row" gap={4}>
-					<Box>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
 						<Text bold>Status: </Text>
 						<Text color={liveAudioColor}>{liveAudioStatusLabel}</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Clients: </Text>
 						<Text>{liveAudioClients}</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Source: </Text>
 						<Text>{liveAudioSource}</Text>
 					</Box>
 				</Box>
-				<Box flexDirection="row" gap={4}>
-					<Box>
+				<Box flexDirection="row" gap={2} flexWrap="wrap">
+					<Box flexShrink={0}>
 						<Text bold>Rate: </Text>
 						<Text>
 							{liveAudioRate > 0 ? `${Math.round(liveAudioRate)} Hz` : "n/a"}
 						</Text>
 					</Box>
-					<Box>
+					<Box flexShrink={0}>
 						<Text bold>Decimation: </Text>
 						<Text>{liveAudioDecimation > 0 ? liveAudioDecimation : "n/a"}</Text>
 					</Box>

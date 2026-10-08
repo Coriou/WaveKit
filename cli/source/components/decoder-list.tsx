@@ -40,7 +40,7 @@ export function DecoderList({ decoders }: DecoderListProps) {
 				<Text bold color="cyan">
 					DECODERS
 				</Text>
-				<Text dimColor>No decoders configured</Text>
+				<Text dimColor>No decoders configured in the server profile</Text>
 			</Box>
 		)
 	}

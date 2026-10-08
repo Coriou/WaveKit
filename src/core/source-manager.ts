@@ -26,6 +26,7 @@ import * as net from "node:net"
 import * as fs from "node:fs"
 import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
+import type { SourceActivity } from "@wavekit/api-types"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
@@ -63,6 +64,7 @@ export interface SourceStatus {
 	type?: SourceConfig["type"]
 	url?: string
 	connected: boolean
+	activity: SourceActivity
 	bytesReceived: number
 	dataRate: number // KB/s
 	lastError?: string | undefined
@@ -107,6 +109,7 @@ const BASE_DELAY_MS = 2000
 const MAX_DELAY_MS = 30000
 const METRICS_INTERVAL_MS = 5000
 const RTL_TCP_HEADER_SIZE = 12
+const SAMPLE_TIMEOUT_MS = 10000
 
 /**
  * Calculates exponential backoff delay for reconnection attempts.
@@ -139,6 +142,9 @@ interface SourceState {
 	socket: net.Socket | null
 	stream: PassThrough
 	connected: boolean
+	lastSampleAt: number | null
+	expectedSince: number
+	recordingEnded: boolean
 	bytesReceived: number
 	sessionBytesReceived: number
 	bytesReceivedSinceLastMetric: number
@@ -258,6 +264,9 @@ export class SourceManager extends EventEmitter {
 			socket: null,
 			stream,
 			connected: false,
+			lastSampleAt: null,
+			expectedSince: Date.now(),
+			recordingEnded: false,
 			bytesReceived: 0,
 			sessionBytesReceived: 0,
 			bytesReceivedSinceLastMetric: 0,
@@ -281,6 +290,7 @@ export class SourceManager extends EventEmitter {
 		this.sources.set(config.id, state)
 		stream.on("drain", () => {
 			if (state.stopping) return
+			state.expectedSince = Date.now()
 			state.socket?.resume()
 			if (state.recordingState) this.scheduleNextChunk(config.id)
 		})
@@ -321,6 +331,7 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private forwardData(id: string, state: SourceState, chunk: Buffer): boolean {
+		if (chunk.length > 0) state.lastSampleAt = Date.now()
 		let canWrite = true
 		if (!state.stream.destroyed) {
 			canWrite = state.stream.write(chunk)
@@ -428,6 +439,7 @@ export class SourceManager extends EventEmitter {
 
 		// Mark as connected
 		state.connected = true
+		state.expectedSince = Date.now()
 
 		this.logger.info(
 			{
@@ -659,6 +671,7 @@ export class SourceManager extends EventEmitter {
 			// Retain status/assignments, but release the file and timers at EOF.
 			this.cleanupState(state)
 			state.connected = false
+			state.recordingEnded = true
 			state.dataRate = 0
 			state.stream.end()
 
@@ -719,6 +732,11 @@ export class SourceManager extends EventEmitter {
 
 			const onConnect = () => {
 				state.connected = true
+				state.lastSampleAt = null
+				state.expectedSince = Date.now()
+				state.dataRate = 0
+				state.bytesReceivedSinceLastMetric = 0
+				state.lastMetricTime = Date.now()
 				state.reconnectAttempts = 0
 				state.lastError = undefined
 
@@ -888,6 +906,8 @@ export class SourceManager extends EventEmitter {
 
 				const wasConnected = state.connected
 				state.connected = false
+				state.dataRate = 0
+				state.bytesReceivedSinceLastMetric = 0
 				state.socket = null
 
 				if (wasConnected) {
@@ -1095,11 +1115,40 @@ export class SourceManager extends EventEmitter {
 			type: state.config.type,
 			url: formatSourceUrl(state.config),
 			connected: state.connected,
+			activity: this.getActivity(state),
 			bytesReceived: state.bytesReceived,
 			dataRate: state.dataRate,
 			lastError: state.lastError,
 			reconnectAttempts: state.reconnectAttempts,
 			caps: state.config.caps,
+		}
+	}
+
+	private getActivity(state: SourceState): SourceActivity {
+		const now = Date.now()
+		const sampleAgeMs =
+			state.lastSampleAt === null ? null : Math.max(0, now - state.lastSampleAt)
+		let activity: SourceActivity["state"]
+		if (state.recordingEnded) activity = "ended"
+		else if (!state.connected) activity = "disconnected"
+		else if (state.stream.writableNeedDrain || state.socket?.isPaused())
+			activity = "paused"
+		else if (sampleAgeMs !== null && sampleAgeMs < SAMPLE_TIMEOUT_MS)
+			activity = "streaming"
+		else if (
+			now - Math.max(state.lastSampleAt ?? 0, state.expectedSince) >=
+			SAMPLE_TIMEOUT_MS
+		)
+			activity = "stale"
+		else activity = "waiting"
+		return {
+			state: activity,
+			lastSampleAt:
+				state.lastSampleAt === null
+					? null
+					: new Date(state.lastSampleAt).toISOString(),
+			sampleAgeMs,
+			timeoutMs: SAMPLE_TIMEOUT_MS,
 		}
 	}
 

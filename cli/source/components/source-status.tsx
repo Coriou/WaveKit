@@ -4,6 +4,7 @@
  */
 
 import React from "react"
+import { sourceActivityLabel } from "../utils/source-activity.js"
 import { Box, Text } from "ink"
 import type {
 	SourceStatus as SourceStatusType,
@@ -13,10 +14,15 @@ import { padRight } from "../utils/format.js"
 
 interface SourceStatusProps {
 	sources: SourceStatusType[]
+	snapshotFresh?: boolean
 	tunerRelay?: TunerRelayStatus | null
 }
 
-export function SourceStatus({ sources, tunerRelay }: SourceStatusProps) {
+export function SourceStatus({
+	sources,
+	tunerRelay,
+	snapshotFresh = true,
+}: SourceStatusProps) {
 	const relayStatus = !tunerRelay
 		? "unavailable"
 		: tunerRelay.enabled
@@ -57,8 +63,16 @@ export function SourceStatus({ sources, tunerRelay }: SourceStatusProps) {
 							<Text>{padRight(source.id ?? "", 16)}</Text>
 							<Text dimColor>{padRight(source.type ?? "", 12)}</Text>
 							<Text dimColor>{padRight(source.url ?? "", 40)}</Text>
-							<Text color={source.connected ? "green" : "red"}>
-								{padRight(source.connected ? "connected" : "disconnected", 12)}
+							<Text
+								color={
+									snapshotFresh && source.activity?.state === "streaming"
+										? "green"
+										: source.connected
+											? "yellow"
+											: "red"
+								}
+							>
+								{padRight(sourceActivityLabel(source, snapshotFresh), 12)}
 							</Text>
 							{(() => {
 								const consumers =

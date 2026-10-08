@@ -47,6 +47,26 @@ monitoring URLs. The source uses the Pi's rtlmux port 5555; monitoring uses
 the Linux container/VM even when they work on the Mac. Wi-Fi and Ethernet use
 the same application configuration; use the Pi's current address.
 
+The Pi acquires and relays IQ; the laptop's WaveKit container runs DSP and
+configured decoders. The example profile has `decoders: []`, so the dashboard's
+"No decoders configured in the server profile" is expected until entries are
+added to that profile. Bundled decoder executables do not start automatically.
+Choose decoders compatible with the receiver's current frequency and sample rate.
+
+Source REST status includes `activity`: `waiting`, `streaming`, `stale`, `paused`,
+`disconnected`, or `ended`. It reflects payload delivered into the core, excluding
+RTL-TCP headers, with a 10-second freshness deadline. `paused` means intentional
+backpressure; `ended` means recording playback finished or failed (see `lastError`).
+`connected` remains transport state, and `available` remains assignment capacity.
+Neither implies sampling. `bytesReceived` is cumulative transport traffic; it
+includes headers and survives automatic reconnects. Activity freshness resets on
+reconnect. Fresh samples do not prove loss-free delivery or correct RF decoding.
+
+The CLI labels API connectivity separately and shows `status stale` after 15
+seconds without a successful source snapshot. It falls back to transport labels
+when an older core does not provide activity. These fields do not change health
+probe semantics; SDR-host sampling evidence remains a separate follow-up.
+
 `WAVEKIT_APP_CONFIG` selects the full configuration. Use an absolute container
 path such as `/app/config/your-radio.local.yaml`; a Mac filesystem path is not
 valid inside the container. Docker-specific API overrides bind the server to

@@ -30,7 +30,7 @@ export function Header({
 	switch (status) {
 		case "connected":
 			statusColor = "green"
-			statusText = "Connected"
+			statusText = "API connected"
 			break
 		case "connecting":
 			statusColor = "yellow"

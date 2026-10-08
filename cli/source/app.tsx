@@ -25,6 +25,7 @@ import { Dashboard } from "./components/dashboard.js"
 import { LiveAudioPanel } from "./components/live-audio-panel.js"
 import { ResourcePanel } from "./components/resource-panel.js"
 import { TunerPanel, type TunerCommand } from "./components/tuner-panel.js"
+import { sourceSnapshotFresh } from "./utils/source-activity.js"
 import type { View } from "./utils/args.js"
 import type {
 	DecoderStatus,
@@ -50,6 +51,7 @@ interface AppProps {
 interface AppState {
 	decoders: DecoderStatus[]
 	sources: SourceStatusType[]
+	sourcesReceivedAt: number | null
 	messages: DecoderOutput[]
 	snapshot: FanoutSnapshot | null
 	dropRate: number
@@ -104,6 +106,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 	const [state, setState] = useState<AppState>({
 		decoders: [],
 		sources: [],
+		sourcesReceivedAt: null,
 		messages: [],
 		snapshot: null,
 		dropRate: 0,
@@ -327,13 +330,26 @@ export function App({ initialView = "dashboard" }: AppProps) {
 		onMessage: handleMessage,
 	})
 
+	const [snapshotClock, setSnapshotClock] = useState(Date.now())
+	useEffect(() => {
+		const timer = setInterval(() => setSnapshotClock(Date.now()), 1000)
+		return () => clearInterval(timer)
+	}, [])
+	const sourcesFresh = sourceSnapshotFresh(
+		state.sourcesReceivedAt,
+		snapshotClock,
+	)
+
 	// Fetch initial decoder/source state via REST
 	const fetchInitialState = useCallback(async () => {
 		try {
-			// Try common ports
-			const ports = [9000, 4713]
-			for (const port of ports) {
+			// Use the configured HTTP API; the IQ relay port is not an API.
+			const baseUrls = process.env["WAVEKIT_API_URL"]
+				? [process.env["WAVEKIT_API_URL"].replace(/\/$/, "")]
+				: ["http://localhost:9000"]
+			for (const baseUrl of baseUrls) {
 				try {
+					const requestOptions = { signal: AbortSignal.timeout(2000) }
 					const [
 						decodersRes,
 						sourcesRes,
@@ -341,23 +357,24 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						resourcesRes,
 						tunerStatesRes,
 					] = await Promise.all([
-						fetch(`http://localhost:${port}/api/decoders`),
-						fetch(`http://localhost:${port}/api/sources`).catch(() => null),
-						fetch(`http://localhost:${port}/api/live-audio/status`).catch(
+						fetch(`${baseUrl}/api/decoders`, requestOptions),
+						fetch(`${baseUrl}/api/sources`, requestOptions).catch(() => null),
+						fetch(`${baseUrl}/api/live-audio/status`, requestOptions).catch(
 							() => null,
 						),
-						fetch(`http://localhost:${port}/api/resources`).catch(() => null),
-						fetch(`http://localhost:${port}/api/tuner`).catch(() => null),
+						fetch(`${baseUrl}/api/resources`, requestOptions).catch(() => null),
+						fetch(`${baseUrl}/api/tuner`, requestOptions).catch(() => null),
 					])
 					const tunerRes = await fetch(
-						`http://localhost:${port}/api/tuner-relay`,
+						`${baseUrl}/api/tuner-relay`,
+						requestOptions,
 					).catch(() => null)
 
 					if (decodersRes.ok) {
 						const decoders = (await decodersRes.json()) as DecoderStatus[]
 						const sources = sourcesRes?.ok
 							? ((await sourcesRes.json()) as SourceStatusType[])
-							: []
+							: null
 						const tunerRelay = tunerRes?.ok
 							? ((await tunerRes.json()) as TunerRelayStatus)
 							: null
@@ -373,7 +390,8 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						setState(prev => ({
 							...prev,
 							decoders,
-							sources,
+							sources: sources ?? prev.sources,
+							sourcesReceivedAt: sources ? Date.now() : prev.sourcesReceivedAt,
 							tunerRelay,
 							tunerStates,
 							liveAudioStatus,
@@ -382,11 +400,11 @@ export function App({ initialView = "dashboard" }: AppProps) {
 						break
 					}
 				} catch {
-					// Try next port
+					// Leave the previous snapshot to expire on request failure.
 				}
 			}
 		} catch {
-			// Ignore fetch errors, WS will provide updates
+			// Keep cached sources; their independent freshness deadline still expires.
 		}
 	}, [])
 
@@ -612,6 +630,7 @@ export function App({ initialView = "dashboard" }: AppProps) {
 					<Dashboard
 						decoders={state.decoders}
 						sources={state.sources}
+						snapshotFresh={sourcesFresh}
 						snapshot={state.snapshot}
 						dropRate={state.dropRate}
 						messages={state.messages}
@@ -639,7 +658,11 @@ export function App({ initialView = "dashboard" }: AppProps) {
 				)
 			case "sources":
 				return (
-					<SourceStatus sources={state.sources} tunerRelay={state.tunerRelay} />
+					<SourceStatus
+						sources={state.sources}
+						snapshotFresh={sourcesFresh}
+						tunerRelay={state.tunerRelay}
+					/>
 				)
 			case "live-audio":
 				return <LiveAudioPanel status={state.liveAudioStatus} />

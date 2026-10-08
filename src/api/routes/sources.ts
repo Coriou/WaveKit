@@ -11,6 +11,7 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import { sourceActivitySchema } from "@wavekit/api-types"
 import type {
 	SourceManager,
 	SourceConfig,
@@ -103,6 +104,7 @@ const extendedSourceStatusSchema = {
 		type: { type: "string" },
 		url: { type: "string" },
 		connected: { type: "boolean" },
+		activity: sourceActivitySchema,
 		consumers: { type: "number" },
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
@@ -138,6 +140,7 @@ const sourceStatusSchema = {
 		type: { type: "string" },
 		url: { type: "string" },
 		connected: { type: "boolean" },
+		activity: sourceActivitySchema,
 		bytesReceived: { type: "number" },
 		dataRate: { type: "number" },
 		lastError: { type: "string" },
@@ -382,6 +385,7 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 				return {
 					id: status.id,
 					connected: status.connected,
+					activity: status.activity,
 					bytesReceived: status.bytesReceived,
 					dataRate: status.dataRate,
 					reconnectAttempts: status.reconnectAttempts,
