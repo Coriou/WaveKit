@@ -28,13 +28,21 @@ continuous IQ reception, correct RF decoding, or unattended installation.
    2026-10-09): 30-minute continuous baseline, overnight bounded-CSDR soak with
    decode counts compared to baseline, quiet-host matched capacity comparison,
    then decide whether bounded rings become the default.
-5. **Next Pi image**, after the rate model: carry an rtlmux patch for a
-   use-after-free on commands sent while its upstream is down, include the
-   polished operator and setup pages, and re-run clean-card acceptance
-   including Ethernet.
-6. Later: API access/origin policy (prerequisite for host controls and a web
-   UI), real IQ fixture baselines, then the opt-in core channelizer prototype
+5. **Next Pi image** (pulled forward 2026-10-09; the rate model is Mac-side
+   only): carry an rtlmux patch for a use-after-free on commands sent while its
+   upstream is down, include the polished operator and setup pages, and re-run
+   clean-card acceptance including Ethernet.
+6. **Core channelizer** — implementation planning started 2026-10-09 in a
+   dedicated design session (plan only; code after the rate model's
+   suspension lands): real IQ fixture baselines, then the opt-in prototype
    ([sample-rate/channelizer design](superpowers/specs/2026-10-08-sample-rate-and-channelizer-design.md)).
+   Live evidence 2026-10-09 (loaded Mac, all nine decoders, 2.048 Msps): the
+   app used ~7.5 of 8 cores and every branch dropped 8–36%; four per-decoder
+   `sox rate -h` IQ resamplers alone cost ~1.5 cores. The user chose the
+   channelizer ahead of cheaper per-decoder resampling, which it largely
+   subsumes (raw-fanout readsb keeps its resample; a 2.4 Msps capture removes it).
+7. Later: API access/origin policy (prerequisite for host controls and a web
+   UI).
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
