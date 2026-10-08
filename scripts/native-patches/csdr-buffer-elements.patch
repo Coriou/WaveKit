@@ -1,0 +1,125 @@
+diff --git a/src/apps/csdr/commands.cpp b/src/apps/csdr/commands.cpp
+index c05612b..9229cf5 100644
+--- a/src/apps/csdr/commands.cpp
++++ b/src/apps/csdr/commands.cpp
+@@ -50,13 +50,45 @@ along with csdr.  If not, see <https://www.gnu.org/licenses/>.
+ #include <cstring>
+ #include <fcntl.h>
+ #include <cstdio>
++#include <cmath>
++#include <cstdlib>
+ 
+ using namespace Csdr;
+ 
++size_t Command::configuredBufferSize() {
++    const char* setting = std::getenv("WAVEKIT_CSDR_BUFFER_ELEMENTS");
++    if (setting == nullptr) return bufferSize();
++
++    const std::string name = "WAVEKIT_CSDR_BUFFER_ELEMENTS";
++    constexpr size_t maximum = 10485760;
++    size_t value = 0;
++    if (*setting == '\0') throw CLI::ValidationError(name, "must be a decimal integer");
++    for (const char* p = setting; *p; ++p) {
++        if (*p < '0' || *p > '9' || value > (maximum - (*p - '0')) / 10) {
++            throw CLI::ValidationError(name, "must be a decimal integer from 2048 to 10485760");
++        }
++        value = value * 10 + (*p - '0');
++    }
++    if (value < 2048 || value > maximum) {
++        throw CLI::ValidationError(name, "must be from 2048 to 10485760 elements");
++    }
++    if (*get_parent()->get_option("--async")) {
++        throw CLI::ValidationError(name, "only supports synchronous processing; remove --async");
++    }
++    const size_t minimum = minimumBufferSize();
++    if (value < minimum) {
++        throw CLI::ValidationError(name, "requires at least " + std::to_string(minimum) +
++                                   " elements for this command's lookahead and 1024-element read");
++    }
++    return value;
++}
++
+ template <typename T, typename U>
+ void Command::runModule(Module<T, U>* module) {
+-    auto buffer = new Ringbuffer<T>(bufferSize());
+-    module->setReader(new RingbufferReader<T>(buffer));
++    const bool boundedBuffer = std::getenv("WAVEKIT_CSDR_BUFFER_ELEMENTS") != nullptr;
++    auto buffer = new Ringbuffer<T>(configuredBufferSize());
++    auto reader = new RingbufferReader<T>(buffer);
++    module->setReader(reader);
+     auto writer = new StdoutWriter<U>();
+     module->setWriter(writer);
+ 
+@@ -108,6 +140,13 @@ void Command::runModule(Module<T, U>* module) {
+             if (FD_ISSET(fileno(stdin), &read_fds)) {
+                 // clamp so we don't overwrite the whole buffer in one go
+                 size_t writeable = std::min((size_t) 1024, buffer->writeable());
++                // The upstream ring does not account for unread elements. With
++                // an explicitly small ring, fail rather than overwrite a
++                // command's retained window when it cannot make progress.
++                if (boundedBuffer && reader->available() + writeable > buffer->writeable()) {
++                    throw CLI::ValidationError("WAVEKIT_CSDR_BUFFER_ELEMENTS",
++                                               "ring too small for this command's retained input window");
++                }
+                 // compensate for byte to element alignment
+                 writeable = (writeable * sizeof(T)) - read_over;
+                 bytes_read = read(fileno(stdin), ((char *) buffer->getWritePointer()) + read_over, writeable);
+@@ -330,12 +369,29 @@ void ShiftCommand::processFifoData(std::string data) {
+     shiftModule->setRate(std::stof(data));
+ }
+ 
++size_t FirDecimateCommand::minimumBufferSize() {
++    if (decimationFactor == 0 || !std::isfinite(transitionBandwidth) || transitionBandwidth <= 0) {
++        throw CLI::ValidationError("WAVEKIT_CSDR_BUFFER_ELEMENTS",
++                                   "firdecimate requires positive decimation and finite positive transition bandwidth");
++    }
++    // FirFilter::filterLength uses floor(4 / transition), rounded up to odd.
++    // Conservatively allow an extra tap, the largest residual decimation
++    // window, one unchanged read batch, and the ring's empty-slot sentinel.
++    const double lookahead = std::ceil(4.0 / transitionBandwidth) + 1;
++    if (lookahead > 10485760 || decimationFactor > 10485760) {
++        throw CLI::ValidationError("WAVEKIT_CSDR_BUFFER_ELEMENTS", "firdecimate lookahead exceeds the opt-in buffer limit");
++    }
++    return static_cast<size_t>(lookahead) + decimationFactor + 1024;
++}
++
+ FirDecimateCommand::FirDecimateCommand(): Command("firdecimate", "Decimate and filter") {
+     add_option("decimation_factor", decimationFactor, "Decimation factor")->required();
+     add_option("transition_bw", transitionBandwidth, "Transition bandwidth", true);
+     add_option("-c,--cutoff", cutoffRate, "Cutoff rate", true);
+     add_set("-w,--window", window, {"boxcar", "blackman", "hamming"}, "Window function", true);
+     callback( [this] () {
++        // Validate before constructing/allocating the FIR filter itself.
++        if (std::getenv("WAVEKIT_CSDR_BUFFER_ELEMENTS") != nullptr) configuredBufferSize();
+         Window* w;
+         if (window == "boxcar") {
+             w = new BoxcarWindow();
+diff --git a/src/apps/csdr/commands.hpp b/src/apps/csdr/commands.hpp
+index 3a7331f..6219f29 100644
+--- a/src/apps/csdr/commands.hpp
++++ b/src/apps/csdr/commands.hpp
+@@ -37,6 +37,9 @@ namespace Csdr {
+             void runSource(Source<T>* source);
+             virtual void processFifoData(std::string data) {}
+             virtual size_t bufferSize() { return 10485760; }
++            // WaveKit opt-in; leave upstream allocations unchanged when unset.
++            size_t configuredBufferSize();
++            virtual size_t minimumBufferSize() { return 2048; }
+             std::string fifoName = "";
+             CLI::Option* addFifoOption();
+     };
+@@ -133,6 +136,7 @@ namespace Csdr {
+             FirDecimateCommand();
+         protected:
+             size_t bufferSize() override { return 10 * Command::bufferSize(); }
++            size_t minimumBufferSize() override;
+         private:
+             unsigned int decimationFactor = 1;
+             float transitionBandwidth = 0.05;
+@@ -286,4 +290,4 @@ namespace Csdr {
+             std::string window = "hamming";
+     };
+ 
+-}
+\ No newline at end of file
++}

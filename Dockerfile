@@ -444,6 +444,7 @@ RUN git clone --no-checkout https://github.com/pothosware/SoapyRTLTCP.git repo &
 FROM base-build AS csdr-build
 
 ARG CSDR_REF
+ARG CSDR_BUILD_JOBS
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -451,13 +452,17 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libfftw3-dev \
     && rm -rf /var/lib/apt/lists/*
 
+COPY scripts/native-patches/csdr-buffer-elements.patch /build/csdr-buffer-elements.patch
+
 RUN git clone --no-checkout https://github.com/jketterl/csdr.git repo && \
     cd repo && \
     git fetch --depth 1 origin "${CSDR_REF}" && \
     git checkout --detach FETCH_HEAD && \
+    git apply --check /build/csdr-buffer-elements.patch && \
+    git apply /build/csdr-buffer-elements.patch && \
     mkdir build && cd build && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
-    make -j"$(nproc)" && \
+    make -j"${CSDR_BUILD_JOBS:-$(nproc)}" && \
     make install
 
 # ============================================================================
