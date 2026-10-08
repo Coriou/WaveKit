@@ -330,18 +330,20 @@ Do these steps yourself (this is what the scripts automate):
 
 All configuration via environment variables with `SDR_HOST_` prefix:
 
-| Variable                         | Default     | Description                         |
-| -------------------------------- | ----------- | ----------------------------------- |
-| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000`   | Sample rate in Hz                   |
-| `SDR_HOST_RTL_TCP__FREQUENCY`    | `446524920` | Initial center frequency in Hz      |
-| `SDR_HOST_RTL_TCP__BUFFER`       | `15`        | Number of USB transfer buffers (-b) |
-| `SDR_HOST_RTL_TCP__AGC`          | `false`     | Enable tuner AGC                    |
-| `SDR_HOST_RTL_TCP__GAIN`         | `49`        | Manual gain in dB                   |
-| `SDR_HOST_RTL_TCP__PPM`          | `0`         | PPM correction                      |
-| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`         | USB device index                    |
-| `SDR_HOST_RTLMUX__PORT`          | `5555`      | IQ stream port                      |
-| `SDR_HOST_API__PORT`             | `8080`      | Status API port                     |
-| `SDR_HOST_LOGGING__LEVEL`        | `info`      | Log level                           |
+| Variable                         | Default                   | Description                         |
+| -------------------------------- | ------------------------- | ----------------------------------- |
+| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000`                 | Sample rate in Hz                   |
+| `SDR_HOST_RTL_TCP__FREQUENCY`    | `446524920`               | Initial center frequency in Hz      |
+| `SDR_HOST_RTL_TCP__BUFFER`       | `15`                      | Number of USB transfer buffers (-b) |
+| `SDR_HOST_RTL_TCP__AGC`          | `false`                   | Enable tuner AGC                    |
+| `SDR_HOST_RTL_TCP__GAIN`         | `49`                      | Manual gain in dB                   |
+| `SDR_HOST_RTL_TCP__PPM`          | `0`                       | PPM correction                      |
+| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`                       | USB device index                    |
+| `SDR_HOST_RTLMUX__PORT`          | `5555`                    | IQ stream port                      |
+| `SDR_HOST_API__PORT`             | `8080`                    | Status API port                     |
+| `SDR_HOST_API__CORS_ORIGINS`     | (none)                    | Extra browser origins, comma list   |
+| `WAVEKIT_HOST_STATUS_DIR`        | `/var/lib/wavekit/status` | Host dir with setup.json (compose)  |
+| `SDR_HOST_LOGGING__LEVEL`        | `info`                    | Log level                           |
 
 AGC is off by default to match common RTL-SDR setups. When `SDR_HOST_RTL_TCP__AGC` is `true`, manual gain is ignored.
 The defaults use gain 49 dB, 446.524920 MHz, and 15 asynchronous USB transfer
@@ -404,15 +406,44 @@ Free disk space on the host directly:
 bash ./packages/sdr-host/scripts/docker-cleanup.sh --aggressive --volumes
 ```
 
-## API Endpoints
+## Status page and API
+
+Open `http://<pi-host>:8080/` for the read-only operator page: upstream sample
+flow, receiver chain, power, host readouts and first-boot setup. It is a few
+static files served from memory (gzip, ETag revalidation, strict same-origin
+CSP), polls every 3 s while visible, and pauses when the tab is hidden. See
+[the setup guide](../../docs/SDR-HOST-SETUP.md#status-page) for what each part means.
 
 ### GET /health
 
-Returns service health status (200 OK or 503 Service Unavailable).
+Returns service health status (200 OK or 503 Service Unavailable) from USB and
+process presence, unchanged for the Docker healthcheck. The informational
+`sampling` field carries the upstream sampling state; it does not affect the
+verdict.
 
 ### GET /api/status
 
-Returns complete system status including dongle info, process states, and rtlmux stats.
+Returns dongle info, process states and the legacy `rtlmux.stats` shape, plus:
+
+- `sampling` (`SdrHostSampling`): `streaming` only while rtlmux's upstream byte
+  count grows by real sample data within 10 s; `waiting`, `stale`,
+  `disconnected` or `unknown` otherwise. Zero downstream clients never implies
+  sampling stopped. Counter and PID resets start a new baseline.
+- `delivery` (`SdrHostDelivery`): per-client queued rate and bytes rtlmux
+  dropped for clients more than 4 MiB behind.
+- `samplingHistory`: per-poll upstream rate for the last five minutes.
+
+rtlmux stats are polled every 2 s, one request at a time with a 1.5 s timeout;
+cached values turn stale after 6 s and are dropped after 30 s.
+
+### GET /api/host
+
+Pi host telemetry (`SdrHostTelemetry`), sampled in the background so requests
+cost no I/O. Every section is a `Reading` with `state` (`ok`, `stale`,
+`unavailable`), `scope` (`host`, `container`, `docker-storage`, `service`),
+age and a `reason` when unavailable. The container is not privileged:
+throttling flags are reported unavailable, and under-voltage history covers only
+what the service observed since it started.
 
 ### GET /api/fix
 
@@ -424,7 +455,7 @@ Returns copy-paste fix commands when issues are detected.
 | ---- | ------- | -------------------------------------- |
 | 5555 | rtlmux  | IQ data stream (WaveKit connects here) |
 | 5556 | rtlmux  | Stats HTTP endpoint                    |
-| 8080 | API     | Health and status API                  |
+| 8080 | API     | Status page, health and status API     |
 
 ## Troubleshooting
 

@@ -122,6 +122,35 @@ sources:
       format: "U8_IQ"
 ```
 
+## Status Page
+
+Open `http://<pi-host>:8080/` from a phone or computer on the same network. The
+page is served by the Pi itself and works without WaveKit running on your
+computer. It is read-only.
+
+- **Upstream sample flow** leads: "Sampling" appears only when rtlmux's count of
+  bytes read from the dongle keeps growing. A detected dongle and running
+  processes alone never count. The plot shows the last five minutes against the
+  expected rate (2 bytes per sample); gaps mean no measurement, not zero.
+- **Receiver chain** shows presence of the dongle, `rtl_tcp`, `rtlmux` and
+  downstream clients. No clients means delivery is idle; sampling continues.
+  "Dropping" means rtlmux skipped data for a client that fell over 4 MiB behind
+  (slow client or network); it is not loss at the antenna.
+- **Power**: under-voltage now (from the kernel's `rpi_volt` sensor) is shown
+  separately from dips observed since the receiver service started. Throttling
+  flags need `vcgencmd`, which the container is deliberately not given, so they
+  are shown as not measurable rather than guessed.
+- **Pi host**: CPU, memory, storage backing Docker, SoC temperature, network and
+  uptime. Every value is marked stale or unavailable when it cannot be read.
+- **First-boot setup** appears on images whose first boot writes
+  `/var/lib/wavekit/status/setup.json`; compose mounts only that directory,
+  read-only. The boot partition is never mounted into the container.
+
+The same data is available as JSON: `GET /api/status` (receiver, `sampling`,
+`delivery`) and `GET /api/host` (host telemetry). The API no longer allows
+cross-origin browser reads by default; set `SDR_HOST_API__CORS_ORIGINS` to a
+comma-separated list of origins if another web app must read it.
+
 ## Troubleshooting
 
 ### DVB Driver Conflict

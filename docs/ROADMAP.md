@@ -91,7 +91,10 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       display current activity separately from historical counters. Core REST now
       exposes payload freshness (waiting/streaming/stale/paused/disconnected/ended)
       independently of transport and assignment capacity. CLI snapshots expire
-      after 15 seconds; host sampling and combined drop reporting remain pending.
+      after 15 seconds. The Pi SDR-host now derives upstream sampling evidence
+      from fresh rtlmux byte counts (bounded non-overlapping polling, PID and
+      counter resets, 10 s deadline), independent of USB, processes and clients;
+      not yet deployed to the Pi. Combined core + Pi drop reporting remains pending.
 - [ ] Exercise real decoder IQ fixtures, lifecycle failure cases, and memory limits.
 
 ## 4. API and event foundation for multiple clients
@@ -152,14 +155,14 @@ Provide an optional, uncluttered page served by the Pi itself, reachable from a
 phone or computer on the local network without a cloud account. Keep it focused
 on receiver operation and available without the laptop's WaveKit core running.
 
-- [ ] Show first-boot progress/failure, host uptime, CPU load, memory, disk space,
+- [x] Show first-boot progress/failure, host uptime, CPU load, memory, disk space,
       temperature and network connection with clearly labelled fresh/stale data.
-- [ ] Distinguish active undervoltage/throttling from historical power events;
+- [x] Distinguish active undervoltage/throttling from historical power events;
       report unavailable measurements honestly, without implying battery charge
       or power consumption can be measured on unsupported hardware.
-- [ ] List attached SDR dongles and receiver service state, separating USB presence
+- [x] List attached SDR dongles and receiver service state, separating USB presence
       from actual sample flow, throughput and dropped data.
-- [ ] Present a compact overview with optional diagnostic details, readable on
+- [x] Present a compact overview with optional diagnostic details, readable on
       mobile and inexpensive to serve on a Pi 3. Reuse the host API and shared
       telemetry contracts rather than creating a separate monitoring stack.
 - [ ] Offer authenticated, explicitly confirmed shutdown (and optionally reboot),
@@ -168,9 +171,31 @@ on receiver operation and available without the laptop's WaveKit core running.
 - [ ] Start with read-only status, then add host controls after access/origin policy
       is implemented. Test reconnects, setup failures, USB hotplug and stale data.
 
-This is a planned operator convenience, not an implemented UI or a prerequisite
-for the current clean-card acceptance run. Schedule it alongside the API/access
-foundation once unattended setup is reliable.
+The read-only page is implemented in `packages/sdr-host` and served at
+`http://<pi>:8080/`; `GET /api/host` and additive `/api/status` fields
+(`sampling`, `delivery`, `samplingHistory`) carry the shared
+`@wavekit/api-types` contracts. Each reading states its scope (Pi host,
+receiver container, Docker storage filesystem, or observed by the service) and
+its freshness; anything the unprivileged container cannot see is shown as
+unavailable with a reason. The Pi CORS policy no longer reflects every origin.
+
+Evidence so far is software-only: unit/integration tests cover stale counters,
+idle delivery with ongoing sampling, header-only growth, rtlmux/rtl_tcp restarts,
+hung and malformed stats, expiry, missing sysfs files, setup records and page
+logic; the page was checked at desktop and mobile widths, light and dark, against
+the real server code with simulated Pi data, including lost contact. It is NOT
+deployed: the current Pi runtime and the SD image being accepted do not include
+it. Hardware checks still pending: `rpi_volt` visibility in the container, the
+thermal zone name, `/proc/net/wireless`, kernel version and cgroup namespace.
+
+Known limits: on current Raspberry Pi kernels the firmware's "since boot" power
+bits are cleared by the kernel's own polling and throttling flags need
+`vcgencmd`/`/dev/vcio`, so under-voltage history is "observed by the receiver
+service since it started" and throttling is reported as not measurable. Setup
+progress appears only on images whose first boot writes the sanitized
+`/var/lib/wavekit/status/setup.json` (next image build). Reboot/shutdown
+controls remain deliberately absent until authentication, authorization and
+origin/CSRF protection exist.
 
 ## Delivery discipline
 
