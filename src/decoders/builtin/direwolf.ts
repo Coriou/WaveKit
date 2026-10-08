@@ -136,7 +136,7 @@ export interface APRSData {
  * IQ -> csdr demod -> S16LE audio -> direwolf (stdin) -> KISS TCP -> WaveKit
  */
 export class DirewolfDecoder extends AudioDemodDecoder {
-	private readonly options: DirewolfOptions
+	private options: DirewolfOptions
 	private kissBuffer: Buffer = Buffer.alloc(0)
 
 	// Network Consumer State (from NetworkProducerDecoder)
@@ -156,6 +156,18 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 		// Set up network connection params
 		this.outputHost = "127.0.0.1" // Always local for spawned process
 		this.outputPort = this.options.kissPort ?? DEFAULT_KISS_PORT
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = parseDirewolfOptions(this.config.options)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"Direwolf options re-parsed after update",
+		)
 	}
 
 	/**

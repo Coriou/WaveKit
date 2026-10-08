@@ -110,11 +110,23 @@ const NMEA_AIS_PATTERN =
  * Modified to consume IQ data from stdin (Passive Mode).
  */
 export class AisCatcherDecoder extends IqDecimateDecoder {
-	private readonly options: AisCatcherOptions
+	private options: AisCatcherOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = parseAisCatcherOptions(config.options)
+	}
+
+	/**
+	 * Re-parses options when updated dynamically (e.g., sample rate change).
+	 * Called by BaseDecoder.updateOptions().
+	 */
+	protected override onOptionsUpdated(): void {
+		this.options = parseAisCatcherOptions(this.config.options)
+		this.logger.debug(
+			{ inputSampleRate: this.options.inputSampleRate },
+			"AIS-catcher options re-parsed after update",
+		)
 	}
 
 	/**

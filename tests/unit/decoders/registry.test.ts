@@ -92,6 +92,10 @@ class MockDecoder extends EventEmitter implements Decoder {
 		return this._health
 	}
 
+	updateOptions(_updates: Record<string, unknown>): void {
+		// No-op for mock
+	}
+
 	getStatus(): DecoderStatus {
 		return {
 			id: this.id,
