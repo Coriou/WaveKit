@@ -5,19 +5,22 @@ import type { AppState } from "../../../cli/source/data/types.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { SCENARIO_NAMES } from "../../../cli/source/test/scenario-types.js"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
+import { formatClock } from "../../../cli/source/ui/format.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { applyEditKey, startEdit } from "../../../cli/source/ui/tuner-edit.js"
 import type { EditKey } from "../../../cli/source/ui/actions.js"
 import { initialUi } from "../../../cli/source/ui/ui-state.js"
 import {
 	controlConfirm,
+	editAffects,
 	receiverLines,
+	remoteHost,
 	tunerConfirm,
 	tunerResultText,
 } from "../../../cli/source/view-models/receiver.js"
 
-// Module level: the describe body below renders at collection time, before any beforeAll.
-process.env["TZ"] = "UTC"
+// Clock times are built with the same local getters as the view (no TZ mutation, M9).
+const clock = (iso: string): string => formatClock(Date.parse(iso))
 
 function internal(s: AppState): AppState {
 	const t = s.tuner.value![0]!
@@ -61,11 +64,12 @@ describe("receiver view-model (spec §6.4)", () => {
 		expect(text.find(l => l.startsWith("RELAY"))).toBe(
 			"RELAY     listening :4713 · 1 of 4 clients · 545.5 MB sent · exclusive control · last error —",
 		)
+		const at = clock("2026-10-08T18:01:20.000Z")
 		expect(
 			text.some(l =>
-				/^18:01:20 {2}client-3 192\.0\.2\.1:59430 {2}set-frequency +445 970 700$/.test(
-					l,
-				),
+				new RegExp(
+					`^${at} {2}client-3 192\\.0\\.2\\.1:59430 {2}set-frequency +445 970 700$`,
+				).test(l),
 			),
 		).toBe(true)
 		expect(text.find(l => l.startsWith("FANOUT"))).toBe(
@@ -126,7 +130,19 @@ describe("receiver view-model (spec §6.4)", () => {
 			35,
 			true,
 		).map(lineText)
-		expect(stale.find(l => l.startsWith("FANOUT"))).toContain("drop now ?")
+		expect(stale.find(l => l.startsWith("FANOUT"))).toContain(
+			"drop now ? · no IQ offered in 10s",
+		)
+		const disc = receiverLines(
+			scenarioState("iq-disconnected"),
+			initialUi("receiver"),
+			119,
+			35,
+			true,
+		).map(lineText)
+		expect(disc.find(l => l.startsWith("FANOUT"))).toContain(
+			"drop now ? · no IQ offered in 10s",
+		)
 		expect(stale.find(l => l.startsWith("SOURCE"))).toContain("× no samples")
 	})
 	it("shows a disconnected source with its error quoted", () => {
@@ -159,8 +175,19 @@ describe("receiver view-model (spec §6.4)", () => {
 		expect(lines).toContain(
 			"TUNER     EDIT · wavekit control · nothing sent until confirmed",
 		)
+		// Focus is on gain now: the frequency shows its draft without the cursor (M8).
 		expect(lines.find(l => l.startsWith("frequency"))).toMatch(
-			/^frequency 446 000 ▏000 Hz {3}window 444\.976–447\.024 MHz/,
+			/^frequency 446 000 000 Hz {3}window 444\.976–447\.024 MHz/,
+		)
+		const cursorLines = receiverLines(
+			st,
+			{ ...initialUi("receiver"), edit: editAfter(st, ["up", "right"]) },
+			119,
+			35,
+			true,
+		).map(lineText)
+		expect(cursorLines.find(l => l.startsWith("frequency"))).toMatch(
+			/^frequency 445 971 ▏700 Hz {3}/,
 		)
 		expect(lines).toContain(
 			"pending   frequency 445 970 700 → 446 000 000 · gain 0.0 → 20.7 dB",
@@ -397,7 +424,9 @@ describe("receiver view-model (spec §6.4)", () => {
 			],
 			t0,
 		)
-		expect(tunerResultText(sending, "pi-iq", t0)).toBe("sending 18:07:52")
+		expect(tunerResultText(sending, "pi-iq", t0)).toBe(
+			`sending ${formatClock(t0)}`,
+		)
 		const ok = reduce(
 			s,
 			[
@@ -430,7 +459,153 @@ describe("receiver view-model (spec §6.4)", () => {
 			t0,
 		)
 		expect(tunerResultText(ok, "pi-iq", t0 + 1000)).toBe(
-			"sent · frequency ok 18:07:52",
+			`sent · frequency ok ${formatClock(t0)}`,
 		)
+	})
+
+	describe("C3 fix round 1", () => {
+		const live = scenarioState("live")
+		const at = (st: AppState, w = 119, h = 35) =>
+			receiverLines(st, initialUi("receiver"), w, h, true).map(lineText)
+		it("says '?' for a rate 'now' on an old lane and keeps 'lifetime' when narrow", () => {
+			const old = {
+				...live,
+				resources: { ...live.resources, receivedAt: live.now - 60_000 },
+			}
+			expect(at(old).find(l => l.startsWith("upstream"))).toContain("· ? now ·")
+			expect(at(live, 79, 20).find(l => l.startsWith("upstream"))).toMatch(
+				/^upstream {2}3\.5 MB dropped lifetime \(0\.29%\)/,
+			)
+			const noHost = {
+				...live,
+				resources: laneOk(
+					{ ...live.resources.value!, sourceBackpressure: [] },
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(at(noHost).find(l => l.startsWith("upstream"))).toContain(
+				"Pi rtlmux → core: —",
+			)
+		})
+		it("never turns an unknown decoders lane into an empty one", () => {
+			const unknown = {
+				...internal(live),
+				decoders: { ...live.decoders, value: undefined },
+			}
+			const lines = at(unknown)
+			expect(lines).toContain("in window ?")
+			expect(lines).toContain("out       ?")
+			const edit = editAfter(unknown, ["up"])
+			expect(editAffects(unknown, edit)).toBe("decoders ?")
+			const editing = receiverLines(
+				unknown,
+				{ ...initialUi("receiver"), edit },
+				119,
+				35,
+				true,
+			).map(lineText)
+			expect(editing).toContain("affects   decoders ?")
+		})
+		it("marks hidden rows instead of dropping them silently (M2)", () => {
+			const lines = at(live, 79, 9)
+			expect(lines.length).toBeLessThanOrEqual(9)
+			expect(lines.at(-1)).toMatch(/^ {10}\+\d+ rows? hidden$/)
+			expect(lines.some(l => l.startsWith("FANOUT"))).toBe(true)
+		})
+		it("puts the blast radius into the confirm (M1)", () => {
+			const st = internal(live)
+			const edit = editAfter(st, [
+				...Array<EditKey>(5).fill("left"),
+				"8",
+				"6",
+				"9",
+				"5",
+				"2",
+				"5",
+			])
+			expect(tunerConfirm(edit, st)?.extra).toBe(
+				"affects dsd-fme, multimon-ng (tuned) · lora-meshtastic enters",
+			)
+			const bias = editAfter(st, [
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"space",
+			])
+			expect(tunerConfirm(bias, st)?.extra).toBe(
+				"bias-t supplies DC on the antenna port · affects dsd-fme, multimon-ng (tuned) · no decoder enters or leaves the window",
+			)
+		})
+		it("dims the RELAY header when its lane is old (M3)", () => {
+			const old = {
+				...live,
+				relay: { ...live.relay, receivedAt: live.now - 60_000 },
+			}
+			const relay = receiverLines(
+				old,
+				initialUi("receiver"),
+				119,
+				35,
+				true,
+			).find(l => lineText(l).startsWith("RELAY"))
+			expect(
+				relay
+					?.slice(1)
+					.every(span => span.role === "old" || span.role === "label"),
+			).toBe(true)
+		})
+		it("parses relay remotes, IPv6 included, and sanitises client text (M4)", () => {
+			expect(remoteHost("192.0.2.1:59430")).toBe("192.0.2.1")
+			expect(remoteHost("[2001:db8::1]:59430")).toBe("2001:db8::1")
+			expect(remoteHost("2001:db8::1:59430")).toBe("2001:db8::1")
+			expect(remoteHost("::ffff:192.0.2.1:59430")).toBe("192.0.2.1")
+			const hostile = {
+				...live,
+				relay: laneOk(
+					{
+						...live.relay.value!,
+						controlClientId: "c\u001b[2J1",
+						controlClientRemote: "[2001:db8::7]:4000",
+					},
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(controlConfirm(hostile)?.prompt).toBe(
+				"take tuner control from relay c1 2001:db8::7? its next tuning command is refused",
+			)
+			expect(at(hostile).find(l => l.startsWith("TUNER"))).toContain(
+				"relay c1 [2001:db8::7]:4000",
+			)
+		})
+		it("uses the tuner of the rendered source and counts other sources (M5)", () => {
+			const src = live.sources.value![0]!
+			const two = {
+				...live,
+				sources: laneOk(
+					[src, { ...src, id: "usb-iq", assignments: [] }],
+					live.now - 2000,
+					"rest" as const,
+				),
+				tuner: laneOk(
+					[
+						{
+							...live.tuner.value![0]!,
+							sourceId: "usb-iq",
+							controlMode: "internal" as const,
+						},
+						live.tuner.value![0]!,
+					],
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(at(two).find(l => l.startsWith("SOURCE"))).toContain("+1 source")
+			expect(controlConfirm(two)?.yes).toBe("take")
+		})
 	})
 })
