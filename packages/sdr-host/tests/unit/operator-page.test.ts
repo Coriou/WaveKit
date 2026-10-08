@@ -9,6 +9,7 @@ import {
 	power,
 	readouts,
 	setupLine,
+	smoothTrace,
 	stages,
 	tracePath,
 	verdict,
@@ -131,6 +132,23 @@ describe("operator page verdict", () => {
 		expect(low.detail).toContain("under-voltage")
 	})
 
+	it("keeps a full-rate verdict green but names active under-voltage beside it", () => {
+		const host = emptyHost()
+		host.power.undervoltageNow = {
+			...host.power.undervoltageNow,
+			state: "ok",
+			value: true,
+			reason: null,
+		}
+		const v = verdict({ status: status(sampling()), host, fresh: true })
+		expect(v).toMatchObject({ state: "ok", title: "Sampling" })
+		expect(v.detail).toContain("under-voltage right now")
+		expect(
+			verdict({ status: status(sampling()), host: emptyHost(), fresh: true })
+				.detail,
+		).not.toContain("under-voltage")
+	})
+
 	it("reports unknown flow when rtlmux counters cannot be read", () => {
 		expect(
 			verdict({
@@ -146,6 +164,24 @@ describe("operator page verdict", () => {
 				fresh: true,
 			}).title,
 		).toBe("Flow not reported")
+	})
+
+	it("names chain stages for the operator and keeps process names as facts", () => {
+		const chain = stages(status(sampling()))
+		expect(chain?.rtltcp).toMatchObject({ word: "Running", fact: "rtl_tcp" })
+		expect(chain?.rtlmux).toMatchObject({ word: "Running", fact: "rtlmux" })
+		const restarted = status(sampling())
+		restarted.rtlTcp = {
+			running: false,
+			pid: null,
+			restartCount: 2,
+			lastRestartAt: null,
+		}
+		expect(stages(restarted)?.rtltcp).toMatchObject({
+			state: "fault",
+			word: "Stopped",
+			fact: "rtl_tcp · 2 restarts",
+		})
 	})
 
 	it("keeps zero clients as idle delivery, separate from sampling", () => {
@@ -309,6 +345,46 @@ describe("operator page polling and plot", () => {
 		)
 		expect(d.match(/M/g)).toHaveLength(2)
 		expect(gaps).toEqual([[300, 400]])
+	})
+
+	it("fills under the trace per unbroken run, down to zero, never across a gap", () => {
+		const { area } = tracePath(
+			[
+				[300_000, 4e6],
+				[200_000, 4e6],
+				[150_000, null],
+				[100_000, 4e6],
+				[0, 4e6],
+			],
+			{ windowMs: 300_000, width: 600, height: 200, max: 5e6 },
+		)
+		expect(area).toBe(
+			"M0.0 200.0L0.0 40.0L200.0 40.0L200.0 200.0L0.0 200.0Z" +
+				"M400.0 200.0L400.0 40.0L600.0 40.0L600.0 200.0L400.0 200.0Z",
+		)
+	})
+
+	it("averages the trace over the server's 10 s rate window without reaching across gaps", () => {
+		// Whole-chunk counts alternate around the true rate at a 2 s poll.
+		const points: Array<[number, number | null]> = [
+			[20_000, 4.2e6],
+			[18_000, 4.0e6],
+			[16_000, 4.2e6],
+			[14_000, 4.0e6],
+			[12_000, 4.2e6],
+			[10_000, 4.0e6],
+			[8_000, null],
+			[6_000, 1e6],
+			[4_000, 3e6],
+		]
+		const smooth = smoothTrace(points)
+		expect(smooth[0]).toEqual([20_000, 4.2e6])
+		expect(smooth[4]?.[1]).toBeCloseTo(4.12e6)
+		expect(smooth[5]?.[1]).toBeCloseTo(4.08e6)
+		// The gap survives, and the run after it starts fresh.
+		expect(smooth[6]).toEqual([8_000, null])
+		expect(smooth[7]).toEqual([6_000, 1e6])
+		expect(smooth[8]).toEqual([4_000, 2e6])
 	})
 })
 

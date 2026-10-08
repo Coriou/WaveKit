@@ -155,13 +155,18 @@ export function verdict({ status, host, fresh }) {
 					detail: `${percent === null ? "Below the expected rate." : `${percent}% of the expected rate.`} Samples are being lost before rtlmux.${cause ? ` ${cause}` : ""}`,
 				}
 			}
+			const undervoltage =
+				host?.power?.undervoltageNow?.value === true
+					? " The Pi reports under-voltage right now; watch for drops."
+					: ""
 			return {
 				state: "ok",
 				title: "Sampling",
-				detail:
+				detail: `${
 					upstream.rateBasis === "client-controlled"
 						? "Fresh samples from the dongle. A client changed the receiver settings, so the expected rate is unknown."
-						: "Fresh samples are arriving from the dongle.",
+						: "Fresh samples are arriving from the dongle."
+				}${undervoltage}`,
 			}
 		}
 		case "waiting":
@@ -218,19 +223,17 @@ export function stages(status) {
 	if (!status) return null
 	const dongle = status.dongle ?? {}
 	const restarts = n => (n > 0 ? ` · ${n} restart${n === 1 ? "" : "s"}` : "")
-	const process = p =>
+	const process = (p, name) =>
 		p?.running
 			? {
 					state: "ok",
 					word: "Running",
-					fact: `pid ${p.pid}${restarts(p.restartCount)}`,
+					fact: `${name}${restarts(p.restartCount)}`,
 				}
 			: {
 					state: "fault",
 					word: "Stopped",
-					fact: p
-						? `${p.restartCount} restart${p.restartCount === 1 ? "" : "s"}`
-						: "",
+					fact: `${name}${p ? restarts(p.restartCount) : ""}`,
 				}
 	const delivery = status.delivery
 	let clients = {
@@ -266,8 +269,8 @@ export function stages(status) {
 						fact: dongle.conflictingDriver ?? "",
 					}
 				: { state: "ok", word: "Present", fact: dongle.product ?? "RTL-SDR" },
-		rtltcp: process(status.rtlTcp),
-		rtlmux: process(status.rtlmux),
+		rtltcp: process(status.rtlTcp, "rtl_tcp"),
+		rtlmux: process(status.rtlmux, "rtlmux"),
 		clients,
 	}
 }
@@ -332,13 +335,9 @@ export function power(host) {
 	const notes = []
 	if (observed?.value) {
 		notes.push(
-			`History covers the last ${formatDuration(observed.value.coveredMs / 1000)} (since the receiver service started), not since boot.`,
+			`Dips counted over ${formatDuration(observed.value.coveredMs / 1000)} of receiver service, not since boot.`,
 		)
 	}
-	if (throttling?.state === "unavailable")
-		notes.push(
-			"Throttle flags need firmware access the container does not have.",
-		)
 	if (now?.state === "unavailable" && now.reason)
 		notes.push(`Under-voltage: ${now.reason}.`)
 	return { windows, note: notes.join(" ") }
@@ -428,8 +427,8 @@ export function readouts(host) {
 			value: `${celsius.toFixed(1)} °C`,
 			sub:
 				celsius >= 80
-					? `throttling expected at this temperature${staleSuffix(temperature)}`
-					: `throttling expected near 80 °C${staleSuffix(temperature)}`,
+					? `hot enough to throttle${staleSuffix(temperature)}`
+					: `throttles near 80 °C${staleSuffix(temperature)}`,
 			// Scale 20–85 °C.
 			fill: Math.max(0, Math.min(100, ((celsius - 20) / 65) * 100)),
 		}
@@ -501,7 +500,7 @@ export function setupLine(reading) {
 			return { state: "ok", text: `Complete · finished${ago}` }
 		case "running":
 			return {
-				state: "warn",
+				state: "ok",
 				text: `In progress · ${phaseLabel(v.phase)}${forDuration(v.updatedAgeMs)}`,
 			}
 		case "interrupted":
@@ -538,9 +537,17 @@ function phaseLabel(phase) {
  */
 export function tracePath(points, { windowMs, width, height, max }) {
 	let d = ""
+	let area = ""
 	let pen = false
+	let runX = null
+	let lastX = null
 	const gaps = []
 	let gapStart = null
+	const base = height.toFixed(1)
+	const close = () => {
+		if (runX !== null) area += `L${lastX} ${base}L${runX} ${base}Z`
+		runX = null
+	}
 	// Oldest first.
 	const ordered = [...points].sort((a, b) => b[0] - a[0])
 	for (const [age, value] of ordered) {
@@ -548,6 +555,7 @@ export function tracePath(points, { windowMs, width, height, max }) {
 		const x = width - (age / windowMs) * width
 		if (value === null) {
 			pen = false
+			close()
 			gapStart ??= x
 			continue
 		}
@@ -556,14 +564,46 @@ export function tracePath(points, { windowMs, width, height, max }) {
 			gapStart = null
 		}
 		const y = height - Math.min(1, Math.max(0, value / max)) * height
-		d += `${pen ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`
+		const at = `${x.toFixed(1)} ${y.toFixed(1)}`
+		d += `${pen ? "L" : "M"}${at}`
+		if (runX === null) {
+			runX = x.toFixed(1)
+			area += `M${runX} ${base}`
+		}
+		area += `L${at}`
+		lastX = x.toFixed(1)
 		pen = true
 	}
+	close()
 	if (gapStart !== null) gaps.push([gapStart, width])
-	return { d, gaps }
+	return { d, area, gaps }
 }
 
-/** Full-scale for the plot: room above the expected line and any peak. */
+/**
+ * Trailing mean over the server's own rate window, so the trace reads the same
+ * quantity as the headline figure. Per-poll counts arrive in whole rtlmux
+ * chunks, which makes single samples saw-tooth around the true rate. Averages
+ * never reach across a missing sample: gaps stay gaps.
+ */
+export const TRACE_AVERAGE_MS = 10_000
+export function smoothTrace(points, spanMs = TRACE_AVERAGE_MS) {
+	const ordered = [...points].sort((a, b) => b[0] - a[0])
+	const out = []
+	let run = []
+	for (const [age, value] of ordered) {
+		if (value === null) {
+			run = []
+			out.push([age, null])
+			continue
+		}
+		run.push([age, value])
+		run = run.filter(([older]) => older - age < spanMs)
+		out.push([age, run.reduce((sum, [, v]) => sum + v, 0) / run.length])
+	}
+	return out
+}
+
+/** Full scale: the expected rate sits on the fourth of five divisions. */
 export function plotMax(expected, points) {
 	const peak = points.reduce((m, [, v]) => (v !== null && v > m ? v : m), 0)
 	const base = expected && expected > 0 ? expected * 1.25 : peak * 1.25
