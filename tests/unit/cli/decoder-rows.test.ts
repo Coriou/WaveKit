@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { formatMessage } from "../../../cli/source/ui/messages/index.js"
+import {
+	POLL_ENDPOINTS,
+	type AppState,
+} from "../../../cli/source/data/types.js"
 import { pickVariant } from "../../../cli/source/ui/columns.js"
+import { bannerConditions } from "../../../cli/source/view-models/chrome.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
 import { setGlyphMode } from "../../../cli/source/ui/theme.js"
 import {
@@ -358,6 +363,10 @@ describe("decoder rows (live fixture)", () => {
 		it("m7: one failing endpoint is not 'API unreachable' (§9)", () => {
 			const st = {
 				...s,
+				conn: {
+					...s.conn,
+					rest: { ...s.conn.rest, failing: ["decoders" as const] },
+				},
 				decoders: {
 					value: undefined,
 					receivedAt: null,
@@ -373,6 +382,90 @@ describe("decoder rows (live fixture)", () => {
 			expect(lineText(decodersPlaceholder(st) ?? [])).toBe(
 				"no data · GET /api/decoders failing · 500",
 			)
+		})
+	})
+	describe("R57 follow-ups", () => {
+		const err = (status: number) => ({
+			kind: "http" as const,
+			status,
+			message: "boom",
+			at: s.now,
+		})
+		const noDecoders = {
+			value: undefined,
+			receivedAt: null,
+			origin: "rest" as const,
+			error: err(500),
+		}
+		it("placeholder agrees with the banner: endpoint failing, then whole API down", () => {
+			const one: AppState = {
+				...s,
+				decoders: noDecoders,
+				conn: { ...s.conn, rest: { ...s.conn.rest, failing: ["decoders"] } },
+			}
+			expect(lineText(decodersPlaceholder(one) ?? [])).toBe(
+				"no data · GET /api/decoders failing · 500",
+			)
+			const ep = bannerConditions(one).find(c => c.kind === "endpoint")
+			expect(ep).toMatchObject({ path: "/api/decoders", reason: "500" })
+			const all: AppState = {
+				...one,
+				conn: {
+					...one.conn,
+					ws: { ...one.conn.ws, state: "closed" },
+					rest: {
+						...one.conn.rest,
+						failing: [...POLL_ENDPOINTS],
+						lastError: { kind: "network", message: "ECONNREFUSED", at: s.now },
+					},
+				},
+			}
+			expect(bannerConditions(all)[0]?.kind).toBe("api-down")
+			expect(lineText(decodersPlaceholder(all) ?? [])).toBe(
+				"no data · API unreachable",
+			)
+		})
+		it("never truncates a configured band's mark: the column fits the widest label", () => {
+			const wide = {
+				...s,
+				decoders: {
+					...s.decoders,
+					value: (s.decoders.value ?? []).map(d =>
+						d.id === "readsb"
+							? { ...d, targetFrequenciesHz: [978_000_000, 1_090_000_000] }
+							: d,
+					),
+				},
+			}
+			const t = decoderTable(
+				decoderFacts(wide),
+				"overview",
+				119,
+				20,
+				null,
+				s.now,
+			)
+			const row = lineText(
+				t.rows.find(r => lineText(r).includes("readsb")) ?? [],
+			)
+			expect(row).toContain("978.000–1090.000*")
+		})
+		it("a selected row keeps the selected role under dim", () => {
+			const t = decoderTable(facts, "overview", 119, 20, "readsb", s.now, {
+				dim: true,
+			})
+			const row = t.rows.find(r => lineText(r).includes("readsb")) ?? []
+			expect(row.slice(0, 3).map(x => x.role)).toEqual([
+				"selected",
+				"selected",
+				"selected",
+			])
+			expect(
+				row
+					.slice(4)
+					.filter(x => x.text.trim() !== "")
+					.every(x => x.role === "old"),
+			).toBe(true)
 		})
 	})
 })
