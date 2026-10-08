@@ -1,49 +1,62 @@
 #!/usr/bin/env node
 /**
- * WaveKit CLI Entry Point
- *
- * Usage:
- *   wavekit                    # Open interactive dashboard
- *   wavekit --view output      # Show decoded output only
- *   wavekit --view backpressure # Show backpressure monitor
- *   wavekit --help             # Show help
- *
- * Environment:
- *   WAVEKIT_WS_URLS   - Comma-separated WebSocket URLs
- *   WAVEKIT_WS_URL    - Single WebSocket URL
- *   WAVEKIT_API_URL   - HTTP API URL (WS path derived from this)
+ * WaveKit CLI entry point. `wavekit --help` lists views, options and env vars.
+ * Phase 1: renders the legacy App until the new shell replaces it (Task 37).
  */
-
 import { render } from "ink"
-import React from "react"
-import { App } from "./app.js"
-import { parseArgs } from "./utils/args.js"
+import { App as LegacyApp } from "./app.js"
+import { HELP_TEXT, parseArgs } from "./args.js"
+import { resolveExplicit } from "./data/config.js"
+import { createScreen, installExitHandlers } from "./terminal.js"
+import type { ViewId } from "./ui/actions.js"
+import { detectGlyphMode, setGlyphMode } from "./ui/theme.js"
 
-const args = parseArgs(process.argv.slice(2))
-
-if (args.help) {
-	console.log(`
-WaveKit CLI Dashboard
-
-Usage:
-  wavekit                    Open interactive dashboard
-  wavekit --view <view>      Open specific view (output|backpressure|decoders|sources|live-audio)
-  wavekit --help             Show this help
-
-Environment:
-  WAVEKIT_WS_URLS   Comma-separated WebSocket URLs (default: ws://localhost:9000/ws)
-  WAVEKIT_WS_URL    Single WebSocket URL
-  WAVEKIT_API_URL   HTTP API URL (WebSocket path derived from this)
-
-Views:
-  dashboard     Overview with decoder health, source status, backpressure summary
-  decoders      Detailed decoder list with stats
-  output        Live decoded message feed
-  backpressure  Full backpressure monitor
-  sources       Source configuration and metrics
-  live-audio    Live demodulation status and streaming info
-`)
-	process.exit(0)
+const LEGACY_VIEW: Record<
+	ViewId,
+	"dashboard" | "decoders" | "output" | "sources" | "resources"
+> = {
+	overview: "dashboard",
+	decoders: "decoders",
+	messages: "output",
+	receiver: "sources",
+	system: "resources",
 }
 
-render(React.createElement(App, { initialView: args.view }))
+const parsed = parseArgs(process.argv.slice(2))
+if (parsed.kind === "help") {
+	process.stdout.write(HELP_TEXT)
+	process.exit(0)
+}
+if (parsed.kind === "error") {
+	process.stderr.write(`${parsed.message}\n`)
+	process.exit(2)
+}
+try {
+	const target = resolveExplicit(parsed.api, process.env)
+	if (target) {
+		// The legacy App reads only env vars; hand it the resolved target (removed with the legacy App).
+		process.env["WAVEKIT_API_URL"] = target.base
+		process.env["WAVEKIT_WS_URLS"] = target.ws
+		process.env["WAVEKIT_WS_URL"] = target.ws
+	}
+} catch (err: unknown) {
+	process.stderr.write(
+		`wavekit: ${err instanceof Error ? err.message : String(err)}\n`,
+	)
+	process.exit(2)
+}
+
+setGlyphMode(detectGlyphMode(process.env))
+const screen = createScreen(process.stdout)
+screen.enter()
+const instance = render(<LegacyApp initialView={LEGACY_VIEW[parsed.view]} />)
+let done = false
+const shutdown = (code: number): void => {
+	if (done) return
+	done = true
+	instance.unmount()
+	screen.restore()
+	process.exit(code)
+}
+installExitHandlers(process, screen, shutdown)
+void instance.waitUntilExit().then(() => shutdown(0))
