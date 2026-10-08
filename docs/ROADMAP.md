@@ -32,6 +32,13 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
 fixture evidence. Exploratory research is not a final implementation spec.
+Current software milestones: initial/reconnect TCP waits are bounded at five
+seconds with background recovery. The rate model has shared types, a validated
+pure resolver and REST serialization; built-in instance declarations, manager
+suspension/resumption and WebSocket/CLI integration remain pending. The pinned
+CSDR build has a tested opt-in smaller ring, with unchanged defaults; enabling it
+in known pipelines and measuring all-decoder capacity is a separate next step.
+
 The Pi image/operator-page and CLI teams continue independently in their owned
 files. Persistent Wi-Fi power saving configuration belongs to the image team.
 Clean-card reboot/hotplug and stable-power streaming acceptance continue in the
@@ -43,8 +50,10 @@ A flashable WaveKit SD image and dedicated Imager launcher are now built locally
 The intended onboarding is: select WaveKit in Imager, configure network/account/SSH,
 write, boot. Physical clean-card acceptance and release distribution remain pending;
 the older manual staging workflow is retained for development and recovery.
-The final candidate has completed a fresh unattended install and delivered IQ
-to the laptop; its reboot and physical hotplug acceptance remain pending.
+The previously flashed candidate completed a fresh unattended install and delivered
+IQ to the laptop; its reboot and physical hotplug acceptance remain pending.
+The updated operator-page candidate adds an independent early setup page and
+persistent Wi-Fi policy; it requires its own clean-card acceptance.
 Earlier patched-runtime hotplug evidence is separate from this clean-card run.
 
 - [x] Build a reproducible flashable WaveKit image from a pinned Pi OS base,
@@ -100,8 +109,10 @@ pending. Coordinate any live receiver/network changes with the hardware session.
       class setup, so the channelizer is built for the core first (it cuts
       per-decoder CPU there and enables several protocols from one capture)
       and only then offered on the SDR host as a transport optimisation.
-- [ ] Disable Wi-Fi power save persistently in the Pi image (first boot writes a
-      NetworkManager `wifi.powersave` drop-in); verify after reboot.
+- [ ] Disable Wi-Fi power save persistently in the Pi image. The image now embeds
+      a NetworkManager `wifi.powersave=2` default before first network activation;
+      image/software checks pass, verification on the next card and reboot remains
+      pending. Explicit per-connection operator choices retain precedence.
 - [ ] Make the SDR host re-apply its configured gain and sample rate when the last
       rtlmux client disconnects, so a departing client cannot leave the receiver
       under-driven (observed: gain left at index 11, samples spanning 124–131).
@@ -250,9 +261,10 @@ Evidence so far is software-only: unit/integration tests cover stale counters,
 idle delivery with ongoing sampling, header-only growth, rtlmux/rtl_tcp restarts,
 hung and malformed stats, expiry, missing sysfs files, setup records and page
 logic; the page was checked at desktop and mobile widths, light and dark, against
-the real server code with simulated Pi data, including lost contact. It is NOT
-deployed: the current Pi runtime and the SD image being accepted do not include
-it. Hardware checks still pending: `rpi_volt` visibility in the container, the
+the real server code with simulated Pi data, including lost contact. It is included
+in the updated image candidate, but is NOT deployed: the current Pi runtime and
+the SD image being accepted do not include it. Hardware checks still pending:
+`rpi_volt` visibility in the container, the
 thermal zone name, `/proc/net/wireless`, kernel version and cgroup namespace.
 
 Known limits: on current Raspberry Pi kernels the firmware's "since boot" power
@@ -260,7 +272,9 @@ bits are cleared by the kernel's own polling and throttling flags need
 `vcgencmd`/`/dev/vcio`, so under-voltage history is "observed by the receiver
 service since it started" and throttling is reported as not measurable. Setup
 progress appears only on images whose first boot writes the sanitized
-`/var/lib/wavekit/status/setup.json` (next image build). Reboot/shutdown
+`/var/lib/wavekit/status/setup.json`. Updated images also serve an independent
+early setup page on port 80 before Docker installation, opening the full page
+on port 8080 only after setup completes and that page responds. Reboot/shutdown
 controls remain deliberately absent until authentication, authorization and
 origin/CSRF protection exist.
 
