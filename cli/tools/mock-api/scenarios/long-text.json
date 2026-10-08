@@ -55,7 +55,7 @@
 					"type": "weird",
 					"decoder": "an-extremely-long-decoder-identifier-used-for-truncation-tests",
 					"timestamp": "2026-10-08T18:07:49.700Z",
-					"data": { "nested": { "deeper": { "deepest": [1, 2, 3, "2J"] } } }
+					"data": { "nested": { "deeper": { "deepest": [1, 2, 3, "\u009b2J"] } } }
 				}
 			}
 		}

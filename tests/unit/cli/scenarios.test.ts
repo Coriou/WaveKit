@@ -110,6 +110,10 @@ describe("scenario loader", () => {
 			expect(text).not.toMatch(
 				/password|secret|token|apikey|\.local\b|\.lan\b/i,
 			)
+			// Control characters are committed only as JSON escapes (\u001b, \u009b), never raw.
+			expect(text, file).not.toMatch(
+				/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/,
+			)
 		}
 	})
 

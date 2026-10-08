@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
+import { connect } from "node:net"
 import WebSocket from "ws"
 import { startMockServer } from "./server.js"
 
@@ -343,6 +344,65 @@ describe("mock core", () => {
 			expect(Number(counts[0])).toBeLessThanOrEqual(11)
 			counts.slice(1).forEach((c, i) => expect(c).toBe(Number(counts[i]) + 1))
 			expect(counts[counts.length - 1]).toBe(14)
+		} finally {
+			await crash.close()
+		}
+	})
+	it("starts non-crash-looping decoders at the scenario's current values", async () => {
+		await control("scenario", { name: "live" })
+		const dsd = await get<{ stats: { eventsOut: number } }>(
+			"/api/decoders/dsd-fme",
+		)
+		expect(dsd.stats.eventsOut).toBe(3)
+	})
+	it("does not replay on load when the scenario's WS starts closed", async () => {
+		await control("scenario", { name: "rest-only" })
+		await control("ws", { mode: "up" })
+		const frames = await collectFor(["decoders"], 200)
+		expect(frames.filter(f => f.type === "decoder:output")).toHaveLength(0)
+		await control("scenario", { name: "live" })
+	})
+	it("refuses an upgrade with an unparsable request target and keeps serving", async () => {
+		const closed = await new Promise<boolean>(resolve => {
+			const sock = connect(server.port, "127.0.0.1", () => {
+				sock.write(
+					"GET http://[bad HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+				)
+			})
+			sock.on("close", () => resolve(true))
+			sock.on("error", () => resolve(true))
+			setTimeout(() => {
+				sock.destroy()
+				resolve(false)
+			}, 2000)
+		})
+		expect(closed).toBe(true)
+		expect((await get<{ status: string }>("/health")).status).toBe("ok")
+	})
+	it("an operator restart during the history ends that decoder's crash loop", async () => {
+		const crash = await startMockServer({
+			port: 0,
+			scenario: "crash-loop",
+			historyStepMs: 150,
+			crashEveryMs: 200,
+		})
+		const at = (p: string) => `http://127.0.0.1:${crash.port}${p}`
+		try {
+			const dsd = (await (await fetch(at("/api/decoders/dsd-fme"))).json()) as {
+				stats: { eventsOut: number }
+			}
+			expect(dsd.stats.eventsOut).toBe(3)
+			expect(
+				(await fetch(at("/api/decoders/acarsdec/restart"), { method: "POST" }))
+					.status,
+			).toBe(200)
+			await new Promise(r => setTimeout(r, 900))
+			const acars = (await (
+				await fetch(at("/api/decoders/acarsdec"))
+			).json()) as {
+				restartCount: number
+			}
+			expect(acars.restartCount).toBe(0)
 		} finally {
 			await crash.close()
 		}

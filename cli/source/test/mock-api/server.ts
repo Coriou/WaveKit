@@ -323,7 +323,12 @@ function initTimeline(sc: Obj, decoders: Obj[], now: number): Timeline | null {
 	const crashIds = Object.keys(shape).filter(
 		id => restarts(steps[steps.length - 1], id) > restarts(steps[0], id),
 	)
-	return { steps, idx: 0, crashIds, nextCrashAt: now }
+	if (crashIds.length === 0) return null
+	// Only crash-looping decoders replay their history; every other decoder starts at
+	// the scenario's "now" values, so captures match the fixtures' scenarioState at once.
+	const only = (step: Obj): Obj =>
+		Object.fromEntries(crashIds.map(id => [id, step[id]]))
+	return { steps: steps.map(only), idx: 0, crashIds, nextCrashAt: now }
 }
 
 function connModes(sc: Obj): { rest: RestMode; ws: WsMode } {
@@ -359,7 +364,7 @@ function loadState(name: string, prev?: State): State {
 		loadedAt: now,
 		rest: modes.rest,
 		ws: modes.ws,
-		replay: true,
+		replay: modes.ws === "up",
 		dropPercent:
 			typeof sc["dropPercent"] === "number" ? sc["dropPercent"] : null,
 		calls: prev?.calls ?? [],
@@ -1088,9 +1093,18 @@ export async function startMockServer(
 			delete d["lastError"]
 			st.decoderUptimeAt.set(id, Date.now())
 		}
-		// An operator start/stop ends a scripted crash loop for that decoder.
-		if (st.timeline)
-			st.timeline.crashIds = st.timeline.crashIds.filter(x => x !== id)
+		// An operator start/stop ends a scripted crash loop for that decoder, including
+		// the history steps still to come (else restartCount 0 → 11 → 12 → 13).
+		if (st.timeline) {
+			const tl = st.timeline
+			tl.crashIds = tl.crashIds.filter(x => x !== id)
+			tl.steps = tl.steps.map((step, i) => {
+				if (i <= tl.idx) return step
+				const rest = { ...step }
+				delete rest[id]
+				return rest
+			})
+		}
 		const verb =
 			op === "stop" ? "stopped" : op === "start" ? "started" : "restarted"
 		const owner = st
@@ -1319,7 +1333,13 @@ export async function startMockServer(
 	const wss = new WebSocketServer({ noServer: true })
 	server.on("upgrade", (req, socket, head) => {
 		socket.on("error", () => socket.destroy())
-		if (new URL(req.url ?? "/", "http://mock").pathname !== "/ws") {
+		let pathname = ""
+		try {
+			pathname = new URL(req.url ?? "/", "http://mock").pathname
+		} catch {
+			// An unparsable request target is refused like any non-/ws upgrade.
+		}
+		if (pathname !== "/ws") {
 			socket.destroy()
 			return
 		}
