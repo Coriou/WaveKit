@@ -5,14 +5,29 @@ import type {
 	MessageSegment,
 } from "../../data/types.js"
 import { sanitize } from "../text.js"
+import { ASCII_GLYPHS, glyphs } from "../theme.js"
 
 export const MAX_TEXT = 2000
 export const MAX_SEARCH = 4000
 
+/** Cut to at most `max` UTF-16 units without leaving a lone high surrogate. */
+function cutAt(s: string, max: number): string {
+	if (s.length <= max) return s
+	const cut = s.slice(0, max)
+	const last = cut.charCodeAt(cut.length - 1)
+	return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut
+}
+
 /** Sanitise and bound a payload string (slice first so a 100 KB string costs little). */
 export function clip(s: string, max = MAX_TEXT): string {
-	const t = sanitize(s.length > max * 2 ? s.slice(0, max * 2) : s)
-	return t.length > max ? t.slice(0, max) : t
+	return cutAt(sanitize(cutAt(s, max * 2)), max)
+}
+
+/** Non-glyph-table symbols, swapped for ASCII in ASCII glyph mode (R32). */
+export function textGlyphs(): { arrow: string; degree: string } {
+	return glyphs() === ASCII_GLYPHS
+		? { arrow: "->", degree: "" }
+		: { arrow: "→", degree: "°" }
 }
 
 export function seg(
@@ -38,6 +53,13 @@ export function str(o: Obj, key: string): string | undefined {
 export function num(o: Obj, key: string): number | undefined {
 	const v = o[key]
 	return isNum(v) ? v : undefined
+}
+
+/** A string or finite number as text; objects, arrays and the rest are absent (never "[object Object]"). */
+export function prim(o: Obj, key: string): string | undefined {
+	const v = o[key]
+	if (isStr(v)) return v
+	return isNum(v) ? String(v) : undefined
 }
 
 export function asObj(data: unknown): Obj {

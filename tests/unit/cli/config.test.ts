@@ -106,6 +106,22 @@ describe("A1 fix round 1: WS env scheme", () => {
 	})
 })
 
+describe("A2 fix round 1: fragments", () => {
+	it("refuses a URL with a fragment (ws throws on it)", () => {
+		expect(() => resolveExplicit("http://192.0.2.4:9000/#x", {})).toThrow(
+			CliUsageError,
+		)
+		expect(() => resolveExplicit("http://192.0.2.4:9000#", {})).toThrow(
+			CliUsageError,
+		)
+		expect(() =>
+			resolveExplicit(undefined, {
+				WAVEKIT_WS_URL: "ws://192.0.2.4:9000/ws#frag",
+			}),
+		).toThrow(CliUsageError)
+	})
+})
+
 describe("discover", () => {
 	it("never probes localhost or 4713", () => {
 		for (const c of DISCOVERY_CANDIDATES) {

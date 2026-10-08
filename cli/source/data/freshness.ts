@@ -154,7 +154,8 @@ const GLYPH_RANK: Readonly<Record<GlyphRole, number>> = {
 	live: 0,
 	neutral: 1,
 	unknown: 2,
-	fault: 3,
+	attention: 3,
+	fault: 4,
 }
 
 export function iqSummary(

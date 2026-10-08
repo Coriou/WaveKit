@@ -30,6 +30,9 @@ import {
 } from "../../../cli/source/ui/text.js"
 import { PRESET_ORDER, initialUi } from "../../../cli/source/ui/ui-state.js"
 import { SCENARIO_NAMES } from "../../../cli/source/test/scenario-types.js"
+import { glyphSpan } from "../../../cli/source/ui/strip.js"
+import { procRole } from "../../../cli/source/data/decoder-state.js"
+import type { GlyphRole } from "../../../cli/source/data/types.js"
 
 describe("data/types contracts", () => {
 	it("keys write intents by their target", () => {
@@ -216,5 +219,26 @@ describe("test/scenario-types", () => {
 	it("names eleven scenarios", () => {
 		expect(SCENARIO_NAMES).toHaveLength(11)
 		expect(new Set(SCENARIO_NAMES).size).toBe(11)
+	})
+})
+
+describe("R31: attention is a GlyphRole", () => {
+	afterEach(() => setGlyphMode("utf8"))
+	it("renders every glyph role, attention as ! in both glyph sets", () => {
+		const roles: GlyphRole[] = [
+			"live",
+			"neutral",
+			"attention",
+			"unknown",
+			"fault",
+		]
+		for (const r of roles) expect(glyphSpan(r).role).toBe(r)
+		expect(glyphSpan("attention")).toEqual({ text: "!", role: "attention" })
+		setGlyphMode("ascii")
+		expect(glyphSpan("attention").text).toBe("!")
+	})
+	it("procRole returns a GlyphRole", () => {
+		const r: GlyphRole = procRole("restarting")
+		expect(r).toBe("attention")
 	})
 })

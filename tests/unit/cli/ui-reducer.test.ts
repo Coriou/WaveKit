@@ -101,4 +101,46 @@ describe("applyUiAction", () => {
 			).notice,
 		).toEqual({ text: "x", at: 9 })
 	})
+
+	describe("fix round 1", () => {
+		const m = { rowIds: ["42", "41", "40"], pageSize: 5 }
+		const openDetail = () => {
+			const paused = applyUiAction(
+				initialUi("messages"),
+				{ type: "move", delta: 1 },
+				m,
+				0,
+			)
+			return applyUiAction(paused, { type: "open" }, m, 0)
+		}
+		it("G from the Messages detail closes the detail with the selection", () => {
+			const ui = applyUiAction(openDetail(), { type: "newest" }, m, 0)
+			expect(ui.selected.messages).toBeNull()
+			expect(ui.detail.messages.open).toBe(false)
+			expect(ui.messages.following).toBe(true)
+		})
+		it("applying a filter from the Messages detail closes the detail", () => {
+			let ui = applyUiAction(openDetail(), { type: "filter-open" }, m, 0)
+			ui = applyUiAction(ui, { type: "filter-apply" }, m, 0)
+			expect(ui.selected.messages).toBeNull()
+			expect(ui.detail.messages.open).toBe(false)
+		})
+		it("Enter on Messages while following pauses so the opened row stays put", () => {
+			const ui = applyUiAction(initialUi("messages"), { type: "open" }, m, 0)
+			expect(ui.messages).toMatchObject({ following: false, pausedAtSeq: 42 })
+			expect(ui.selected.messages).toBe("42")
+			expect(ui.detail.messages.open).toBe(true)
+		})
+		it("movement on an empty list does not pause the feed", () => {
+			const empty = { rowIds: [], pageSize: 5 }
+			for (const a of [
+				{ type: "move", delta: -1 },
+				{ type: "page", delta: 1 },
+				{ type: "top" },
+			] as const) {
+				const ui = applyUiAction(initialUi("messages"), a, empty, 0)
+				expect(ui.messages.following).toBe(true)
+			}
+		})
+	})
 })

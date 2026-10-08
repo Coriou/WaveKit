@@ -49,11 +49,93 @@ export function cellWidth(s: string): number {
 	return w
 }
 
+const ESC = 0x1b
+const C1_CSI = 0x9b
+/** DCS, SOS, OSC, PM, APC: string introducers ended by BEL or ST. */
+const C1_STRINGS: ReadonlySet<number> = new Set([0x90, 0x98, 0x9d, 0x9e, 0x9f])
+const ESC_STRINGS = "]PX^_"
+
+const isIntroducer = (c: number): boolean =>
+	c === ESC || c === C1_CSI || C1_STRINGS.has(c)
+
+/**
+ * Remove whole terminal sequences (R27) in one linear pass: CSI (`ESC [` or
+ * 0x9B, then params, intermediates and a final byte) and OSC/DCS/SOS/PM/APC
+ * strings ended by BEL, ST, the next ESC or the end. A run of introducers is
+ * one nested sequence: its bodies are consumed innermost-first, so
+ * `ESC ESC[0m [2J` leaves nothing and `ESC×k + "[m"×k` costs O(k), not O(k²).
+ * `steps` counts loop iterations so tests can assert linearity without timing.
+ */
+export function stripSequences(s: string): { text: string; steps: number } {
+	const n = s.length
+	const parts: string[] = []
+	let i = 0
+	let steps = 0
+	const at = (k: number): number => (k < n ? s.charCodeAt(k) : -1)
+	/** Advance over code units in [lo, hi]; at most `max` of them. */
+	const skipRange = (lo: number, hi: number, max = Infinity): void => {
+		let taken = 0
+		while (taken < max && at(i) >= lo && at(i) <= hi) {
+			i++
+			taken++
+			steps++
+		}
+	}
+	const csiBody = (): void => {
+		skipRange(0x30, 0x3f) // parameters
+		skipRange(0x20, 0x2f) // intermediates
+		skipRange(0x40, 0x7e, 1) // final byte
+	}
+	const stringBody = (): void => {
+		while (i < n) {
+			steps++
+			const c = at(i)
+			if (c === 0x07 || c === 0x9c) {
+				i++
+				return
+			}
+			if (c === ESC) {
+				if (s[i + 1] === "\\") i += 2
+				return
+			}
+			i++
+		}
+	}
+	while (i < n) {
+		const start = i
+		while (i < n && !isIntroducer(at(i))) {
+			i++
+			steps++
+		}
+		if (i > start) parts.push(s.slice(start, i))
+		const runStart = i
+		while (i < n && isIntroducer(at(i))) {
+			i++
+			steps++
+		}
+		for (let k = i - 1; k >= runStart; k--) {
+			steps++
+			const intro = s.charCodeAt(k)
+			if (intro === C1_CSI) csiBody()
+			else if (intro !== ESC) stringBody()
+			else if (s[i] === "[") {
+				i++
+				csiBody()
+			} else if (ESC_STRINGS.includes(s[i] ?? "[")) {
+				i++
+				stringBody()
+			} else break
+		}
+	}
+	return { text: parts.join(""), steps }
+}
+
 /** Payload strings only: strip ESC sequences, C0/C1/DEL, bidi controls and U+2028/9, tabs → space, emoji → "?". Idempotent. */
 export function sanitize(s: string): string {
+	const t = stripSequences(s).text
 	// Order matters for idempotence: removing a control could otherwise join a
 	// pictograph and U+FE0F into a new emoji sequence.
-	return s.replace(/\t/g, " ").replace(CONTROL_RE, "").replace(EMOJI_RE, "?")
+	return t.replace(/\t/g, " ").replace(CONTROL_RE, "").replace(EMOJI_RE, "?")
 }
 
 /** Width ≤ w; ends with the ellipsis glyph iff the input was wider than w. */

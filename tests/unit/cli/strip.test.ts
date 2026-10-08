@@ -72,13 +72,50 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(out).toContain("decoders ?")
 		expect(out).toContain("drops ?")
 	})
-	it("keeps the backpressure ! when the drop ratio is unknown", () => {
+	it("says backpressure in words when the drop ratio is unknown (R32)", () => {
 		const out = stripLine(
 			{ ...live, drops: { ratio: null, backpressure: true } },
 			119,
 		)
-		expect(lineText(out)).toContain("drops !?")
-		expect(out.find(s => s.text === "!?")?.role).toBe("attention")
+		expect(lineText(out)).toContain("drops ? · backpressure")
+		expect(out.find(s => s.text === "backpressure")?.role).toBe("attention")
+		expect(out.find(s => s.text === "?")?.role).toBe("unknown")
+	})
+	it("pins the §4.2 120-column row", () => {
+		const left =
+			"api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 failing · 2 in window  drops !34% now"
+		expect(lineText(stripLine(live, 119))).toBe(
+			left + " ".repeat(119 - left.length - 5) + "18:07",
+		)
+	})
+	it("shows the IQ rate only while the lane is live (B3 fix 1)", () => {
+		const stale = stripLine(
+			{
+				...live,
+				iq: {
+					glyph: "fault",
+					word: "no samples",
+					ageMs: 12_000,
+					rateBytesPerSec: 3_900_000,
+				},
+			},
+			199,
+		)
+		expect(lineText(stale)).toContain("iq × no samples 12s  ")
+		expect(lineText(stale)).not.toContain("MB/s")
+		const down = stripLine(
+			{
+				...live,
+				iq: {
+					glyph: "fault",
+					word: "disconnected",
+					ageMs: null,
+					rateBytesPerSec: 0,
+				},
+			},
+			199,
+		)
+		expect(lineText(down)).not.toContain("B/s")
 	})
 
 	function conn(

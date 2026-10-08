@@ -10,20 +10,22 @@ export interface FilterSpec {
 export const EMPTY_FILTER: FilterSpec = { terms: [], emerg: false }
 export const EMERG_TOKEN = "!emerg"
 
+/**
+ * Space ANDs terms, comma ORs alternatives. `!emerg` is the emergency predicate
+ * wherever it appears: alone (or with stray commas) it is the `emerg` flag, and
+ * inside a group (`ais,!emerg`) it is one OR alternative.
+ */
 export function parseFilter(text: string): FilterSpec {
 	const terms: string[][] = []
 	let emerg = false
 	for (const tok of text.trim().split(/\s+/)) {
-		if (tok === "") continue
-		if (tok.toLowerCase() === EMERG_TOKEN) {
-			emerg = true
-			continue
-		}
 		const alts = tok
 			.toLowerCase()
 			.split(",")
 			.filter(x => x !== "")
-		if (alts.length > 0) terms.push(alts)
+		if (alts.length === 0) continue
+		if (alts.every(a => a === EMERG_TOKEN)) emerg = true
+		else terms.push(alts)
 	}
 	return { terms, emerg }
 }
@@ -44,7 +46,9 @@ export interface FilterSubject {
 export function matchesFilter(f: FilterSpec, s: FilterSubject): boolean {
 	if (f.emerg && !s.emergency) return false
 	const t = s.text.toLowerCase()
-	return f.terms.every(alts => alts.some(a => t.includes(a)))
+	return f.terms.every(alts =>
+		alts.some(a => (a === EMERG_TOKEN ? s.emergency : t.includes(a))),
+	)
 }
 
 export function matchesPreset(p: PresetName, c: MessageCategory): boolean {

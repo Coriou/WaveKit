@@ -90,7 +90,12 @@ describe("api-client actions", () => {
 			respond(200, { message: "Decoder restarted", decoder }),
 		)
 		const r = await client(fetchFn).decoder("readsb", "restart")
-		expect(r).toEqual({ ok: true, status: 200, message: "Decoder restarted" })
+		expect(r).toEqual({
+			ok: true,
+			outcome: "ok",
+			status: 200,
+			message: "Decoder restarted",
+		})
 		expect(fetchFn.mock.calls[0]?.[0]).toBe(
 			"http://127.0.0.1:9000/api/decoders/readsb/restart",
 		)
@@ -112,6 +117,7 @@ describe("api-client actions", () => {
 		})
 		expect(r).toEqual({
 			ok: false,
+			outcome: "failed",
 			status: 409,
 			code: "TUNER_CONTROL_EXTERNAL",
 			message: "device busy",
@@ -134,5 +140,158 @@ describe("api-client actions", () => {
 			Promise.reject(new TypeError("fetch failed")),
 		).audio("start")
 		expect(r).toMatchObject({ ok: false, status: null })
+	})
+})
+
+function bodyFails(status: number, err: unknown) {
+	return () =>
+		Promise.resolve({
+			ok: status < 400,
+			status,
+			statusText: "",
+			json: () => Promise.reject(err),
+		})
+}
+
+describe("A2 fix round 1", () => {
+	it("I1: a body read that times out or resets is timeout/network, not invalid", async () => {
+		const t = await client(
+			bodyFails(200, new DOMException("t", "TimeoutError")),
+		).get("decoders")
+		expect(t).toMatchObject({
+			ok: false,
+			error: { kind: "timeout", message: "timeout 2s" },
+		})
+		const reset = Object.assign(new TypeError("terminated"), {
+			cause: { code: "ECONNRESET" },
+		})
+		const n = await client(bodyFails(200, reset)).get("decoders")
+		expect(n).toMatchObject({
+			ok: false,
+			error: { kind: "network", message: "ECONNRESET" },
+		})
+		const html = await client(
+			bodyFails(200, new SyntaxError("Unexpected token <")),
+		).get("decoders")
+		expect(html).toMatchObject({ ok: false, error: { kind: "invalid" } })
+	})
+	it("M2: an empty statusText falls back to HTTP <status>", async () => {
+		const r = await client(bodyFails(500, new SyntaxError("x"))).get("status")
+		expect(r).toEqual({
+			ok: false,
+			error: { kind: "http", status: 500, message: "HTTP 500", at: 1000 },
+		})
+		const w = await client(bodyFails(502, new SyntaxError("x"))).decoder(
+			"readsb",
+			"stop",
+		)
+		expect(w).toEqual({
+			ok: false,
+			outcome: "failed",
+			status: 502,
+			message: "HTTP 502",
+		})
+	})
+	it("I4/R23: a write with no reply in time is unknown, never a failure", async () => {
+		const timeout = () => Promise.reject(new DOMException("t", "TimeoutError"))
+		const r = await client(timeout).decoder("readsb", "restart")
+		expect(r).toEqual({
+			ok: false,
+			outcome: "unknown",
+			status: null,
+			message: "sent · no reply in 10s",
+		})
+		const custom = createApiClient({
+			base: () => "http://127.0.0.1:9000",
+			fetchFn: timeout,
+			now: () => 1,
+			writeTimeoutMs: 15000,
+		})
+		expect(
+			(
+				await custom.tuner("pi-iq", {
+					setting: "ppm",
+					body: { ppm: 1 },
+					label: "ppm",
+				})
+			).message,
+		).toBe("sent · no reply in 15s")
+	})
+	it("I4: a refused write is a failure (nothing was sent)", async () => {
+		const refused = () =>
+			Promise.reject(
+				Object.assign(new TypeError("fetch failed"), {
+					cause: { code: "ECONNREFUSED" },
+				}),
+			)
+		expect(await client(refused).decoder("readsb", "start")).toEqual({
+			ok: false,
+			outcome: "failed",
+			status: null,
+			message: "ECONNREFUSED",
+		})
+	})
+	it("outcome and ok agree for every answered write", async () => {
+		for (const status of [200, 204, 400, 404, 409, 500, 503]) {
+			const r = await client(() => respond(status, {})).audio("start")
+			expect(r.ok).toBe(r.outcome === "ok")
+			expect(r.outcome).toBe(status < 400 ? "ok" : "failed")
+		}
+	})
+})
+
+describe("A2 re-review: never report a landed write as failed", () => {
+	const reset = (code: string) =>
+		Object.assign(new TypeError("fetch failed"), { cause: { code } })
+	it("judges by the received status when the body read then fails", async () => {
+		for (const err of [
+			reset("ECONNRESET"),
+			new DOMException("t", "TimeoutError"),
+		]) {
+			expect(
+				await client(bodyFails(200, err)).decoder("readsb", "stop"),
+			).toEqual({
+				ok: true,
+				outcome: "ok",
+				status: 200,
+				message: "ok",
+			})
+			expect(await client(bodyFails(500, err)).audio("start")).toEqual({
+				ok: false,
+				outcome: "failed",
+				status: 500,
+				message: "HTTP 500",
+			})
+		}
+	})
+	it("a reset after sending, before any status, is unknown", async () => {
+		for (const code of [
+			"ECONNRESET",
+			"EPIPE",
+			"UND_ERR_SOCKET",
+			"UND_ERR_CLOSED",
+		]) {
+			expect(
+				await client(() => Promise.reject(reset(code))).decoder(
+					"readsb",
+					"restart",
+				),
+			).toEqual({
+				ok: false,
+				outcome: "unknown",
+				status: null,
+				message: "sent · connection reset",
+			})
+		}
+	})
+	it("a connection that never opened is a failure", async () => {
+		for (const code of ["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]) {
+			expect(
+				await client(() => Promise.reject(reset(code))).audio("stop"),
+			).toMatchObject({
+				outcome: "failed",
+				message: code,
+			})
+		}
 	})
 })

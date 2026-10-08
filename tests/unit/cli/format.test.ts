@@ -48,6 +48,14 @@ describe("formatters (spec §8)", () => {
 		expect(f.formatSampleAge(1200)).toBe("1.2s")
 		expect(f.formatSampleAge(23_000)).toBe("23s")
 	})
+	it("never rounds a nonzero or non-total ratio to 0% or 100% (R21, T4)", () => {
+		expect(f.formatPercent(0)).toBe("0%")
+		expect(f.formatPercent(0.004)).toBe("<1%")
+		expect(f.formatPercent(0.005)).toBe("1%")
+		expect(f.formatPercent(0.996)).toBe(">99%")
+		expect(f.formatPercent(1)).toBe("100%")
+		expect(f.formatEventRate(-0.5)).toBe("?")
+	})
 	it("never rounds up into the next bucket's number", () => {
 		expect(f.formatSampleAge(999.6)).toBe("999 ms")
 		expect(f.formatSampleAge(9_990)).toBe("9.9s")

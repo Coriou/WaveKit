@@ -1,7 +1,7 @@
 import type { AircraftLookup, FormattedMessage } from "../../data/types.js"
 import { formatCount, formatSpaced } from "../format.js"
 import { glyphs } from "../theme.js"
-import { asObj, finish, num, obj, seg, str } from "./common.js"
+import { asObj, finish, num, obj, seg, str, textGlyphs } from "./common.js"
 
 export const EMERGENCY_SQUAWKS: readonly string[] = ["7500", "7600", "7700"]
 const DIRS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"] as const
@@ -114,7 +114,13 @@ export function formatAircraft(
 			? [{ label: "speed", value: `${Math.round(gs)} kt` }]
 			: []),
 		...(track !== undefined
-			? [{ label: "track", value: `${Math.round(track)}° ${dir ?? ""}`.trim() }]
+			? [
+					{
+						label: "track",
+						value:
+							`${Math.round(track)}${textGlyphs().degree} ${dir ?? ""}`.trim(),
+					},
+				]
 			: []),
 		...(lat !== undefined && lon !== undefined
 			? [{ label: "position", value: `${lat.toFixed(4)}, ${lon.toFixed(4)}` }]
