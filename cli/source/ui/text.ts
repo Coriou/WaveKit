@@ -8,6 +8,11 @@ const ANSI_RE =
 // line/paragraph separators (hostile-payload vectors that reorder or break rows).
 const CONTROL_RE =
 	/[\u0000-\u001f\u007f-\u009f\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g
+// Whole terminal sequences in payloads (R27), 7-bit and 8-bit introducers:
+// CSI params/intermediates/final, and OSC/DCS/SOS/PM/APC strings ended by BEL,
+// ST, the next ESC or the end of the text.
+const SEQUENCE_RE =
+	/(?:\x1b\[|\x9b)[0-?]*[ -/]*[@-~]|(?:\x1b[\]PX^_]|[\x90\x98\x9d\x9e\x9f])[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c|(?=\x1b)|$)/g
 /** Non-global, so `.test()` is stateless; copy-rules reuses it. */
 export const EMOJI = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F/u
 const EMOJI_RE = new RegExp(EMOJI.source, "gu")
@@ -51,9 +56,17 @@ export function cellWidth(s: string): number {
 
 /** Payload strings only: strip ESC sequences, C0/C1/DEL, bidi controls and U+2028/9, tabs → space, emoji → "?". Idempotent. */
 export function sanitize(s: string): string {
+	// Removing one sequence can splice another together (ESC ESC[0m [2J), so
+	// repeat until stable; every pass shortens the text, so this terminates.
+	let t = s
+	for (;;) {
+		const next = t.replace(SEQUENCE_RE, "")
+		if (next === t) break
+		t = next
+	}
 	// Order matters for idempotence: removing a control could otherwise join a
 	// pictograph and U+FE0F into a new emoji sequence.
-	return s.replace(/\t/g, " ").replace(CONTROL_RE, "").replace(EMOJI_RE, "?")
+	return t.replace(/\t/g, " ").replace(CONTROL_RE, "").replace(EMOJI_RE, "?")
 }
 
 /** Width ≤ w; ends with the ellipsis glyph iff the input was wider than w. */

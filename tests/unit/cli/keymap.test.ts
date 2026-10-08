@@ -6,6 +6,8 @@ import {
 	type ViewId,
 } from "../../../cli/source/ui/actions.js"
 import {
+	RECEIVER_EXTERNAL_NOTICE,
+	RECEIVER_UNKNOWN_NOTICE,
 	footerHints,
 	footerLine,
 	keyName,
@@ -22,6 +24,7 @@ const base: KeyContext = {
 	edit: false,
 	detail: false,
 	heightClass: "roomy",
+	rows: 3,
 	v: {
 		hasSelection: false,
 		decoderRunning: null,
@@ -100,6 +103,48 @@ describe("resolveKey", () => {
 	})
 })
 
+describe("fix round 1", () => {
+	const receiver = (control: KeyContext["v"]["control"]): KeyContext => ({
+		...base,
+		view: "receiver",
+		v: { ...base.v, control },
+	})
+	it("says control is unknown on e, naming no key, while control is unknown", () => {
+		expect(resolveKey(receiver(null), "e")).toEqual({
+			type: "notice",
+			text: RECEIVER_UNKNOWN_NOTICE,
+		})
+		expect(RECEIVER_UNKNOWN_NOTICE).not.toMatch(/\bc\b/)
+		expect(resolveKey(receiver(null), "c")).toBeUndefined()
+		expect(resolveKey(receiver("external"), "e")).toEqual({
+			type: "notice",
+			text: RECEIVER_EXTERNAL_NOTICE,
+		})
+		expect(lineText(footerLine(receiver(null), 119))).toBe(
+			"r reconnect  q quit  ? help",
+		)
+	})
+	it("hints Enter only when there is a row to open", () => {
+		const empty = { ...base, view: "decoders" as ViewId, rows: 0 }
+		expect(resolveKey(empty, "<enter>")).toBeUndefined()
+		expect(lineText(footerLine(empty, 119))).not.toContain("Enter")
+	})
+	it("hints G only when it would change something", () => {
+		const m = { ...base, view: "messages" as ViewId }
+		expect(resolveKey(m, "G")).toBeUndefined()
+		expect(lineText(footerLine(m, 119))).not.toContain("newest")
+		const paused = { ...m, v: { ...m.v, paused: true } }
+		expect(resolveKey(paused, "G")).toEqual({ type: "newest" })
+		expect(lineText(footerLine(paused, 119))).toContain("G newest")
+	})
+	it("gives the Overview decoder list g, G, PgUp and PgDn (§7)", () => {
+		expect(resolveKey(base, "g")).toEqual({ type: "top" })
+		expect(resolveKey(base, "G")).toEqual({ type: "newest" })
+		expect(resolveKey(base, "<pgup>")).toEqual({ type: "page", delta: -1 })
+		expect(resolveKey(base, "<pgdn>")).toEqual({ type: "page", delta: 1 })
+	})
+})
+
 describe("footer", () => {
 	it("matches the spec footers", () => {
 		expect(lineText(footerLine(base, 119))).toBe(
@@ -149,6 +194,7 @@ const arbCtx: fc.Arbitrary<KeyContext> = fc.record({
 	input: fc.boolean(),
 	edit: fc.boolean(),
 	detail: fc.boolean(),
+	rows: fc.integer({ min: 0, max: 3 }),
 	heightClass: fc.constantFrom("roomy", "compact") as fc.Arbitrary<
 		KeyContext["heightClass"]
 	>,
@@ -255,11 +301,11 @@ describe("P20", () => {
 
 	// Feature: cli-dashboard-overhaul, Property 20: keymap safety
 	// Validates: spec §7
-	it("P20: every footer hint resolves to an action in its mode", () => {
+	it("P20: every footer hint resolves to its own binding's action", () => {
 		fc.assert(
 			fc.property(arbCtx, ctx => {
 				for (const h of footerHints(ctx))
-					expect(resolveKey(ctx, h.key)).toBeDefined()
+					expect(resolveKey(ctx, h.key)).toEqual(h.action)
 			}),
 			{ numRuns: 100 },
 		)

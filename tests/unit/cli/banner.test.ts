@@ -108,8 +108,48 @@ describe("banner copy (spec §9)", () => {
 		const out = t([
 			{ kind: "endpoint", path: "/api/x\x1b[2J", reason: "5\r00\x9b" },
 		])
-		expect(out).toBe(
-			"! GET /api/x[2J failing · 500 · other endpoints answering",
-		)
+		expect(out).toBe("! GET /api/x failing · 500 · other endpoints answering")
+	})
+
+	describe("fix round 1", () => {
+		const rest: BannerCondition = {
+			kind: "rest-down",
+			reason: "timeout 2s",
+			retryAt: NOW + 3000,
+			asOf: NOW - 51000,
+		}
+		const ws: BannerCondition = {
+			kind: "ws-down",
+			code: 1006,
+			retryAt: NOW + 8000,
+		}
+		it("drops the reason before +N, never the other way round", () => {
+			expect(t([rest, ws], 45)).toBe("! REST failing · timeout 2s · +1")
+			expect(t([rest, ws], 20)).toBe("! REST failing · +1")
+		})
+		it("clips an over-long reason so the countdown and as-of survive", () => {
+			const long =
+				"connect ECONNREFUSED 192.0.2.10:9000 after 3 attempts with backoff"
+			const c: BannerCondition = {
+				kind: "api-down",
+				reason: long,
+				retryAt: NOW + 4000,
+				asOf: Date.parse("2026-10-08T18:07:40Z"),
+				target: "http://127.0.0.1:9000",
+				tried: [],
+			}
+			const narrow = t([c], 80) ?? ""
+			expect(narrow).toContain("retry in 4s")
+			expect(narrow).toContain("data as of 18:07:40")
+			expect(narrow).toContain("connect ECONNREFUSED")
+			expect(narrow).toContain("…")
+			expect(t([c], 200)).toContain(long)
+		})
+		it("says retrying once the retry time has passed", () => {
+			expect(t([{ ...ws, retryAt: NOW - 1000 }])).toBe(
+				"! live feed down · ws closed 1006 · REST every 5s · retrying",
+			)
+			expect(t([{ ...ws, retryAt: NOW }])).toContain("· retrying")
+		})
 	})
 })

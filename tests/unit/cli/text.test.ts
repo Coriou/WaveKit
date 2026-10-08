@@ -26,8 +26,57 @@ describe("cellWidth", () => {
 
 describe("sanitize", () => {
 	it("strips controls, expands tabs and replaces emoji", () => {
-		expect(sanitize("a\tb\x1b[2Jc\r\nd\u0085e")).toBe("a b[2Jcde")
+		expect(sanitize("a\tb\x1b[2Jc\r\nd\u0085e")).toBe("a bcde")
 		expect(sanitize("hi 🚀")).toBe("hi ?")
+	})
+	it("strips whole CSI, OSC and string sequences, leaving no residue (R27)", () => {
+		expect(sanitize("a\x1b[2Jb")).toBe("ab")
+		expect(sanitize("x\x1b[38;5;196mred\x1b[0m")).toBe("xred")
+		expect(sanitize("a\x1b[?1049hb")).toBe("ab")
+		expect(sanitize("t\x1b]0;title\x07u")).toBe("tu")
+		expect(sanitize("t\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\")).toBe("tlink")
+		expect(sanitize("a\x1bPq#0;1\x1b\\b")).toBe("ab")
+		expect(sanitize("a\x9b2Jb\x9d0;t\x9cc")).toBe("abc")
+		expect(sanitize("a\x1b]0;never terminated")).toBe("a")
+		expect(sanitize("\x1b\x1b[0m[2J")).toBe("")
+	})
+
+	const ESCAPE_BITS = [
+		"\x1b",
+		"[",
+		"]",
+		"2",
+		"J",
+		";",
+		"0",
+		"m",
+		"?",
+		"\x07",
+		"\\",
+		"\x9b",
+		"\x9c",
+		"\x9d",
+		"P",
+		"a",
+		" ",
+	]
+
+	// Feature: cli-dashboard-overhaul, Property 7: sanitize and truncate
+	// Validates: spec §5.2
+	it("P7: escape soup sanitises to no ESC/C1, no CSI residue, idempotently", () => {
+		fc.assert(
+			fc.property(
+				fc
+					.array(fc.constantFrom(...ESCAPE_BITS), { maxLength: 40 })
+					.map(a => a.join("")),
+				s => {
+					const once = sanitize(s)
+					expect(CONTROL.test(once)).toBe(false)
+					expect(sanitize(once)).toBe(once)
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 
 	// Feature: cli-dashboard-overhaul, Property 7: sanitize and truncate
