@@ -24,9 +24,16 @@ the older manual staging workflow is retained for development and recovery.
 - [x] Preserve Imager accounts, Wi-Fi, SSH policy, and existing cloud-init commands.
 - [x] Validate bundle integrity and platform before installation; retain explicit
       failed/running/complete status and actionable recovery logs.
-- [ ] Verify first-boot root installation with password-required sudo accounts.
+- [x] Verify first-boot root installation with password-required sudo accounts.
 - [ ] Repeat installation on a freshly written card: Wi-Fi, Ethernet, mDNS, direct
       SSH, Docker startup, dongle detection, reboot and receiver hotplug recovery.
+
+The 2026-10-08 Wi-Fi run passed unattended installation, direct key-based SSH,
+receiver startup and reboot recovery. USB reattachment exposed a stale receiver
+handle; a subsequent runtime fix passed a physical unplug/replug test with IQ
+resuming automatically. That runtime test does not count as a pristine image
+pass; the refreshed image still needs a complete clean-card rerun. Ethernet and
+sustained loss-free streaming remain unverified.
 
 Validate SD writing, unattended first boot and sustained streaming separately.
 Current development hardware has repeated undervoltage and substantial IQ loss
