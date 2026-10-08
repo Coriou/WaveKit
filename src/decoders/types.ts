@@ -282,6 +282,20 @@ export interface DecoderStatus {
 	idleTimeoutMs?: number | undefined
 	/** When the scheduled automatic restart fires; absent when none is pending. */
 	nextRestartAt?: Date | undefined
+	/** Operator intent (start recorded, not stopped); set by the manager. */
+	desiredRunning?: boolean | undefined
+	/** Wanted but held back because the source rate is unusable; set by the manager. */
+	suspended?: boolean | undefined
+	/** Why and since when the decoder is suspended. */
+	suspension?: DecoderSuspensionStatus | undefined
+	/** An in-flight rate transition. */
+	transition?: "suspending" | "resuming" | undefined
+}
+
+/** Why and since when a decoder is suspended for its source rate. */
+export interface DecoderSuspensionStatus {
+	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	since: Date
 }
 
 /**

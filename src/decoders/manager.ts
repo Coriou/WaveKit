@@ -103,6 +103,25 @@ interface DecoderState {
 	lastStartedAt: Date | null
 	/** Cached instance rate plan; recomputed on wire, caps change, connect/remove */
 	ratePlan: DecoderRateAssessment | undefined
+	/** Operator intent: set by start, cleared by stop/remove */
+	desiredRunning: boolean
+	/** Set while the source rate makes the instance unusable (reversible) */
+	suspension: DecoderSuspension | null
+	/** An in-flight suspend (stop pending or failed) or resume */
+	transition: "suspending" | "resuming" | null
+	/** Bumped by every rate transition, start, stop and remove */
+	rateGeneration: number
+}
+
+interface DecoderSuspension {
+	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	since: Date
+}
+
+/** A queued source evaluation; adapt=false never restarts running pipelines. */
+interface PendingSourceEvaluation {
+	caps: SourceCaps | null
+	adapt: boolean
 }
 
 /**
@@ -170,13 +189,17 @@ export class DecoderManager extends EventEmitter {
 	private ownsSourceRouting = false
 	private sourceConnectedHandler: ((sourceId: string) => void) | null = null
 	private sourceRemovedHandler: ((sourceId: string) => void) | null = null
+	private sourceConnectedEvaluation: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
 	private capsWorkerRunning = false
 	private destroying = false
-	private readonly pendingCapsChanges = new Map<string, SourceCaps>()
+	private readonly pendingCapsChanges = new Map<
+		string,
+		PendingSourceEvaluation
+	>()
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -257,6 +280,10 @@ export class DecoderManager extends EventEmitter {
 			lastError: null,
 			lastStartedAt: null,
 			ratePlan: undefined,
+			desiredRunning: false,
+			suspension: null,
+			transition: null,
+			rateGeneration: 0,
 		}
 
 		this.decoders.set(config.id, state)
@@ -288,11 +315,44 @@ export class DecoderManager extends EventEmitter {
 
 		// Reset restart tracking
 		state.intentionallyStopped = false
+		state.desiredRunning = true
+		state.rateGeneration++
 		state.restartCount = 0
 		state.consecutiveFailures = 0
 		state.lastError = null
 		state.currentDelay = this.config.restartDelay
 		this.cancelScheduledRestart(state)
+
+		// Intent is recorded separately from eligibility: an unusable source
+		// rate suspends the instance instead of spawning a failing pipeline.
+		if (state.decoder.caps.input !== "external") {
+			const plan = this.assessState(state)
+			state.ratePlan = plan
+			if (plan.verdict === "unusable") {
+				state.suspension = {
+					reasonCode: plan.reasonCode ?? "unsupported-sample-rate",
+					since: state.suspension?.since ?? new Date(),
+				}
+				state.transition = null
+				try {
+					this.reserveSource(state)
+				} catch (err) {
+					state.suspension = null
+					state.lastError = createDecoderLastError(err, "error")
+					this.updateDecoderHealth(state, "faulted")
+					this.emitStatusChanged(state)
+					throw err
+				}
+				this.log.info(
+					{ decoderId: id, reasonCode: state.suspension.reasonCode },
+					"Start recorded; decoder suspended until the source rate is usable",
+				)
+				this.emitStatusChanged(state)
+				return
+			}
+		}
+		state.suspension = null
+		state.transition = null
 
 		try {
 			await this.wireDecoderToFanout(state)
@@ -323,6 +383,10 @@ export class DecoderManager extends EventEmitter {
 		// Mark as intentionally stopped to prevent auto-restart
 		state.intentionallyStopped = true
 		state.stopRevision++
+		state.desiredRunning = false
+		state.rateGeneration++
+		state.suspension = null
+		state.transition = null
 
 		// Cancel any pending restart; "restarting" no longer holds once the
 		// operator stopped the decoder (a fault stays visible until a start).
@@ -444,6 +508,10 @@ export class DecoderManager extends EventEmitter {
 			restartCount: state.restartCount,
 			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
 			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),
+			desiredRunning: state.desiredRunning,
+			suspended: state.suspension !== null,
+			...(state.suspension ? { suspension: { ...state.suspension } } : {}),
+			...(state.transition ? { transition: state.transition } : {}),
 			...describeDecoderStatusFields({
 				config: state.config,
 				caps: state.decoder.caps,
@@ -507,6 +575,10 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceRemovedHandler && this.sourceManager) {
 			this.sourceManager.off("removed", this.sourceRemovedHandler)
 			this.sourceRemovedHandler = null
+		}
+		if (this.sourceConnectedEvaluation && this.sourceManager) {
+			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
+			this.sourceConnectedEvaluation = null
 		}
 
 		await this.stopAll()
@@ -632,6 +704,16 @@ export class DecoderManager extends EventEmitter {
 	): void {
 		const { decoder } = state
 		const now = Date.now()
+
+		// A suspension stop is not a failure: keep the reservation, record no
+		// lastError, schedule no restart and consume no budget.
+		if (state.suspension !== null) {
+			this.log.debug(
+				{ decoderId: decoder.id, code, signal },
+				"Decoder exited for rate suspension",
+			)
+			return
+		}
 
 		// Clean up fanout branch on exit - wrapped in try-catch for isolation (Requirement 10.1)
 		try {
@@ -866,6 +948,9 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceRemovedHandler && this.sourceManager) {
 			this.sourceManager.off("removed", this.sourceRemovedHandler)
 		}
+		if (this.sourceConnectedEvaluation && this.sourceManager) {
+			this.sourceManager.off("connected", this.sourceConnectedEvaluation)
+		}
 		this.unsubscribeFromSourceCapsChanges()
 		if (this.ownsSourceRouting) this.sourceRouting?.destroy()
 		this.sourceManager = sourceManager
@@ -882,7 +967,6 @@ export class DecoderManager extends EventEmitter {
 			for (const state of this.decoders.values()) {
 				const selected =
 					state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
-				if (selected === sourceId) this.refreshRatePlan(state)
 				if (!state.branchId || selected !== sourceId) continue
 				try {
 					sourceManager.assignDecoder(state.config.id, sourceId, {
@@ -907,13 +991,17 @@ export class DecoderManager extends EventEmitter {
 			}
 		}
 		sourceManager.on("connected", this.sourceConnectedHandler)
-		// A removed source has no rate; the plan reports it as unknown.
-		this.sourceRemovedHandler = sourceId => {
-			for (const state of this.decoders.values()) {
-				if (this.selectedSourceId(state) === sourceId)
-					this.refreshRatePlan(state, null)
-			}
-		}
+		// Connect and removal are evaluated by the same serial worker as caps
+		// changes; a removed source has no rate (plan unknown, never reassigned).
+		const connectedEvaluation = (sourceId: string) =>
+			this.enqueueSourceEvaluation(sourceId, {
+				caps: sourceManager.getCaps(sourceId) ?? null,
+				adapt: false,
+			})
+		sourceManager.on("connected", connectedEvaluation)
+		this.sourceRemovedHandler = sourceId =>
+			this.enqueueSourceEvaluation(sourceId, { caps: null, adapt: false })
+		this.sourceConnectedEvaluation = connectedEvaluation
 		sourceManager.on("removed", this.sourceRemovedHandler)
 		this.subscribeToSourceCapsChanges()
 	}
@@ -926,23 +1014,39 @@ export class DecoderManager extends EventEmitter {
 	private subscribeToSourceCapsChanges(): void {
 		if (!this.sourceManager || this.capsChangedHandler) return
 
-		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
-			// Store the pending change for debounced processing
-			this.pendingCapsChanges.set(sourceId, caps)
-
-			// Debounce rapid changes - SDR++ may send multiple rate changes quickly
-			if (this.capsChangeDebounceTimer) {
-				clearTimeout(this.capsChangeDebounceTimer)
-			}
-
-			this.capsChangeDebounceTimer = setTimeout(() => {
-				this.capsChangeDebounceTimer = null
-				void this.drainCapsChanges()
-			}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
-		}
+		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) =>
+			this.enqueueSourceEvaluation(sourceId, { caps, adapt: true })
 
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
 		this.log.debug("Subscribed to source caps changes")
+	}
+
+	/**
+	 * Queues a source evaluation for the serial worker. The latest caps per
+	 * source win; a pending caps change keeps its pipeline adaptation.
+	 */
+	private enqueueSourceEvaluation(
+		sourceId: string,
+		evaluation: PendingSourceEvaluation,
+	): void {
+		if (!this.capsChangedHandler) return
+		const previous = this.pendingCapsChanges.get(sourceId)
+		this.pendingCapsChanges.set(sourceId, {
+			caps: evaluation.caps,
+			adapt:
+				evaluation.caps !== null &&
+				(evaluation.adapt || (previous?.adapt ?? false)),
+		})
+
+		// Debounce rapid changes - SDR++ may send multiple rate changes quickly
+		if (this.capsChangeDebounceTimer) {
+			clearTimeout(this.capsChangeDebounceTimer)
+		}
+
+		this.capsChangeDebounceTimer = setTimeout(() => {
+			this.capsChangeDebounceTimer = null
+			void this.drainCapsChanges()
+		}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
 	}
 
 	/** Keep stop/start cycles serialized while retaining the latest tuning request. */
@@ -953,8 +1057,8 @@ export class DecoderManager extends EventEmitter {
 			while (this.capsChangedHandler && this.pendingCapsChanges.size > 0) {
 				const pending = new Map(this.pendingCapsChanges)
 				this.pendingCapsChanges.clear()
-				for (const [id, caps] of pending) {
-					await this.handleCapsChange(id, caps)
+				for (const [id, evaluation] of pending) {
+					await this.handleCapsChange(id, evaluation.caps, evaluation.adapt)
 				}
 			}
 		} catch (err) {
@@ -969,24 +1073,22 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private async handleCapsChange(
 		sourceId: string,
-		caps: SourceCaps,
+		caps: SourceCaps | null,
+		adapt = true,
 	): Promise<void> {
 		const affectedDecoders: string[] = []
 
-		// Every decoder selecting this source gets a fresh plan; only running
-		// stdin decoders are adapted (external input never reads this source).
-		for (const [decoderId, state] of this.decoders) {
+		// Every decoder selecting this source gets a fresh plan and, if the
+		// operator wants it running, a suspend/resume decision (spec §4.3).
+		// Only running stdin decoders are adapted to a caps change.
+		for (const [decoderId, state] of [...this.decoders]) {
+			if (this.decoders.get(decoderId) !== state) continue
 			if (this.selectedSourceId(state) !== sourceId) continue
-			this.refreshRatePlan(state, caps)
-			if (
-				state.decoder.caps.input !== "external" &&
-				state.decoder.getStatus().running
-			) {
-				affectedDecoders.push(decoderId)
-			}
+			const adapting = await this.evaluateRate(state, caps)
+			if (adapting && adapt && caps) affectedDecoders.push(decoderId)
 		}
 
-		if (affectedDecoders.length === 0) return
+		if (affectedDecoders.length === 0 || !caps) return
 
 		this.log.info(
 			{
@@ -1100,6 +1202,222 @@ export class DecoderManager extends EventEmitter {
 			this.sourceManager.off("caps-changed", this.capsChangedHandler)
 			this.capsChangedHandler = null
 			this.log.debug("Unsubscribed from source caps changes")
+		}
+	}
+
+	// ============================================================================
+	// Reversible rate suspension (rate model B2)
+	// ============================================================================
+
+	/** Serialized rate-related status, to publish only on real changes. */
+	private rateKey(state: DecoderState): string {
+		return JSON.stringify([
+			state.ratePlan,
+			state.suspension,
+			state.transition,
+			state.desiredRunning,
+		])
+	}
+
+	private publishIfRateChanged(state: DecoderState, before: string): void {
+		if (this.rateKey(state) !== before) this.emitStatusChanged(state)
+	}
+
+	/** Still the same, wanted instance after an await in a transition. */
+	private stillWanted(state: DecoderState, generation: number): boolean {
+		return (
+			!this.destroying &&
+			this.decoders.get(state.config.id) === state &&
+			state.rateGeneration === generation &&
+			state.desiredRunning
+		)
+	}
+
+	/**
+	 * Applies one source evaluation to one decoder. Returns true when the
+	 * decoder is running normally and the caller may adapt its pipeline.
+	 */
+	private async evaluateRate(
+		state: DecoderState,
+		caps: SourceCaps | null,
+	): Promise<boolean> {
+		const before = this.rateKey(state)
+		const plan = this.assessState(state, caps)
+		const external = state.decoder.caps.input === "external"
+		const running = state.decoder.getStatus().running
+		const terminalFault =
+			!running && !state.restartTimer && state.lastHealth === "faulted"
+
+		if (external || !state.desiredRunning || state.intentionallyStopped) {
+			state.ratePlan = plan
+			this.publishIfRateChanged(state, before)
+			return false
+		}
+
+		if (state.suspension) {
+			// Removal keeps a suspended decoder suspended on its own source.
+			if (caps === null) {
+				state.ratePlan = plan
+				this.publishIfRateChanged(state, before)
+			} else if (plan.verdict !== "unusable") {
+				await this.resume(state, plan)
+			} else if (state.transition === "suspending") {
+				await this.suspend(state, plan) // retry a failed stop
+			} else {
+				state.ratePlan = plan
+				state.suspension.reasonCode =
+					plan.reasonCode ?? state.suspension.reasonCode
+				this.publishIfRateChanged(state, before)
+			}
+			return false
+		}
+
+		if (caps !== null && plan.verdict === "unusable" && !terminalFault) {
+			await this.suspend(state, plan)
+			return false
+		}
+
+		// A removed source leaves running decoders running (today's behaviour).
+		state.ratePlan = plan
+		this.publishIfRateChanged(state, before)
+		return running
+	}
+
+	/**
+	 * Stops the process and detaches its branch but keeps the source
+	 * reservation and intent. A failed stop leaves transition "suspending"
+	 * (the process may still run); the next evaluation retries.
+	 */
+	private async suspend(
+		state: DecoderState,
+		plan: DecoderRateAssessment,
+	): Promise<void> {
+		const id = state.config.id
+		state.rateGeneration++
+		state.suspension = {
+			reasonCode: plan.reasonCode ?? "unsupported-sample-rate",
+			since: state.suspension?.since ?? new Date(),
+		}
+		state.transition = "suspending"
+		state.ratePlan = plan
+		this.cancelScheduledRestart(state)
+		if (state.lastHealth === "restarting")
+			this.updateDecoderHealth(state, "running")
+		this.log.info(
+			{ decoderId: id, reasonCode: state.suspension.reasonCode },
+			"Suspending decoder: source rate is unusable",
+		)
+		this.emitStatusChanged(state)
+
+		try {
+			if (state.decoder.getStatus().running) await state.decoder.stop()
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: id },
+				"Failed to stop decoder for rate suspension; will retry",
+			)
+			this.emitStatusChanged(state)
+			return
+		}
+		// A stop/remove meanwhile owns cleanup (full unwire, intent cleared).
+		if (
+			this.destroying ||
+			this.decoders.get(id) !== state ||
+			!state.desiredRunning ||
+			!state.suspension
+		)
+			return
+
+		this.detachBranch(state)
+		try {
+			this.reserveSource(state)
+		} catch (err) {
+			this.log.warn(
+				{ err, decoderId: id },
+				"Could not keep the source reservation for a suspended decoder",
+			)
+		}
+		state.transition = null
+		this.emitStatusChanged(state)
+	}
+
+	/** Rewires and starts a suspended decoder whose source rate is usable again. */
+	private async resume(
+		state: DecoderState,
+		plan: DecoderRateAssessment,
+	): Promise<void> {
+		const id = state.config.id
+		const generation = ++state.rateGeneration
+		state.suspension = null
+		state.transition = "resuming"
+		state.ratePlan = plan
+		this.log.info({ decoderId: id }, "Resuming decoder: source rate is usable")
+		this.emitStatusChanged(state)
+
+		const abandon = async (startedProcess: boolean) => {
+			if (state.transition === "resuming") state.transition = null
+			if (this.decoders.get(id) !== state) return
+			if (startedProcess) {
+				try {
+					await state.decoder.stop()
+				} catch (err) {
+					this.log.error(
+						{ err, decoderId: id },
+						"Failed to stop a decoder whose resume was superseded",
+					)
+				}
+			}
+			if (!state.desiredRunning) this.unwireDecoderFromFanout(state)
+			this.emitStatusChanged(state)
+		}
+
+		try {
+			await this.wireDecoderToFanout(state)
+			if (!this.stillWanted(state, generation)) return await abandon(false)
+			await state.decoder.start()
+		} catch (err) {
+			if (!this.stillWanted(state, generation)) return await abandon(false)
+			state.transition = null
+			// A real spawn failure: record it and use the normal backoff/budget.
+			state.lastError = createDecoderLastError(err, "error")
+			this.log.error({ err, decoderId: id }, "Failed to resume decoder")
+			this.handleDecoderExit(state, null, null)
+			return
+		}
+		if (!this.stillWanted(state, generation)) return await abandon(true)
+		state.transition = null
+		this.emitStatusChanged(state)
+	}
+
+	/** Reserves the selected source for this decoder without a fanout branch. */
+	private reserveSource(state: DecoderState): void {
+		const sourceId = this.selectedSourceId(state)
+		if (!sourceId || !this.sourceManager) return
+		if (state.decoder.caps.input === "external") return
+		this.sourceManager.assignDecoder(state.config.id, sourceId, {
+			input: state.decoder.caps.input,
+			wantsExclusiveSource: state.decoder.caps.wantsExclusiveSource ?? false,
+		})
+		state.assignedSourceId = sourceId
+	}
+
+	/**
+	 * Removes the fanout branch but keeps assignedSourceId and the source
+	 * reservation (unlike unwireDecoderFromFanout, which releases both).
+	 */
+	private detachBranch(state: DecoderState): void {
+		const { decoder, branchId, branchFanout, assignedSourceId } = state
+		try {
+			if (branchId) decoder.detachInput()
+		} finally {
+			try {
+				if (branchId) branchFanout?.removeBranch(branchId)
+			} finally {
+				state.branchId = null
+				state.branchFanout = null
+				if (branchId && assignedSourceId)
+					this.sourceRouting?.releaseUnused(assignedSourceId)
+			}
 		}
 	}
 

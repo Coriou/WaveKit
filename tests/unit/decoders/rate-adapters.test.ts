@@ -465,6 +465,8 @@ describe("cached instance rate plan in manager status", () => {
 				{ timeout: 3000 },
 			)
 			sources.emit("connected", "rtl")
+			// Connect is evaluated by the debounced worker (300 ms).
+			await new Promise(resolve => setTimeout(resolve, 600))
 			expect(manager.getStatus("multimon-ng")?.rateAssessment).toMatchObject({
 				verdict: "unusable",
 				sourceRateHz: 20_000,
