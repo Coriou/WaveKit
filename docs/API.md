@@ -202,8 +202,16 @@ received while the source is down become desired state and are sent on
 reconnect. With `reset`, core sends nothing and returns tuner state and source
 caps to the configured baseline. With either policy, source caps
 (`sampleRate`/`centerFreq`) are reconciled to values backed by an accepted
-command or the configured baseline. Combine with the source `connected` flag to
-tell sent from pending.
+command or the configured baseline (the `reset` baseline must mirror the
+receiver's startup arguments). A relay rate the controller rejects never
+changes source caps. Combine with the source `connected` flag to tell sent from
+pending.
+
+Reconciliation is not readback. After a core-only restart nothing has been
+accepted, so nothing is written and caps show the configured baseline, while the
+hardware may still be at relay-set values (rtlmux caches client commands and
+replays them to rtl_tcp). Through an rtlmux host, test mode and direct sampling
+commands are dropped, so those two tuner fields may over-claim.
 
 ```bash
 curl http://localhost:9000/api/tuner

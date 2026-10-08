@@ -5,6 +5,8 @@ import { SourceManager } from "../../../src/core/source-manager.js"
 import { LiveDemodulator } from "../../../src/core/live-demodulator.js"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import { createLogger } from "../../../src/utils/logger.js"
+import { TunerController } from "../../../src/core/tuner-controller.js"
+import { wireTunerControl } from "../../../src/core/tuner-wiring.js"
 
 // Mocks
 const mockLogger = createLogger({ level: "fatal" })
@@ -81,22 +83,44 @@ describe("Dynamic Sample Rate Integration", () => {
 		}
 	})
 
-	it("propagates sample rate changes from TunerRelay to SourceManager", () => {
+	it("propagates accepted (not rejected) relay sample rates to SourceManager", () => {
+		const tunerController = new TunerController(mockLogger, sourceManager)
+		tunerController.initializeSource(
+			"test-source",
+			{ kind: "iq", format: "U8_IQ", sampleRate: 2048000, exclusive: false },
+			"rtl_tcp",
+		)
+		wireTunerControl({
+			log: mockLogger,
+			sourceManager,
+			tunerController,
+			tunerRelay: tunerRelay as unknown as TunerRelay,
+			relayEnabled: true,
+		})
+		// Mirror TunerRelay: command-received, then sample-rate-changed.
+		const relayRate = (value: number) => {
+			tunerRelay.emit("command-received", {
+				sourceId: "test-source",
+				command: 0x02,
+				value,
+				clientId: "client-1",
+				clientRemote: "127.0.0.1:1",
+			})
+			tunerRelay.emit("sample-rate-changed", "test-source", value)
+		}
 		const onCapsChanged = vi.fn()
 		sourceManager.on("caps-changed", onCapsChanged)
+		const sourceState = (sourceManager as any).sources.get("test-source")
 
-		// Simulate TunerRelay event reception in index.ts wiring
-		tunerRelay.on("sample-rate-changed", (sourceId, rate) => {
-			sourceManager.updateSourceCaps(sourceId, { sampleRate: rate })
-		})
+		relayRate(3500000) // out of range: rejected
+		expect(onCapsChanged).not.toHaveBeenCalled()
+		expect(sourceState.config.caps.sampleRate).toBe(2048000)
 
-		// Trigger change (Simulate cmd 0x02)
-		;(tunerRelay as any).updateCommandState(0x02, 2400000)
-
+		relayRate(2400000)
+		expect(onCapsChanged).toHaveBeenCalledTimes(1)
 		expect(onCapsChanged).toHaveBeenCalledWith("test-source", {
 			sampleRate: 2400000,
 		})
-		const sourceState = (sourceManager as any).sources.get("test-source")
 		expect(sourceState.config.caps.sampleRate).toBe(2400000)
 	})
 

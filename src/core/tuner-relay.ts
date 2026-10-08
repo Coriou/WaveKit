@@ -157,6 +157,7 @@ export class TunerRelay extends EventEmitter {
 	private lastGain: number | null = null
 	private lastPpm: number | null = null
 	private lastError: string | null = null
+	private lastErrorFromForward = false
 	private readonly commandHistoryLimit: number
 	private commandHistory: TunerRelayCommandHistoryEntry[] = []
 	private commandStats: Map<number, TunerRelayCommandStat> = new Map()
@@ -476,24 +477,42 @@ export class TunerRelay extends EventEmitter {
 
 		if (!this.config.sourceId) {
 			this.lastError = "No source configured for tuner relay"
+			this.lastErrorFromForward = false
 			return
 		}
 		const sourceStatus = this.sourceManager.getStatus(this.config.sourceId)
 		if (sourceStatus?.type && sourceStatus.type !== "rtl_tcp") {
 			this.lastError = `Source '${this.config.sourceId}' does not support RTL-TCP control`
+			this.lastErrorFromForward = false
 			return
 		}
 
 		try {
 			this.sourceManager.writeToSource(this.config.sourceId, payload)
+			this.clearForwardError()
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err)
 			this.lastError = message
+			this.lastErrorFromForward = true
 			this.log.warn(
 				{ err: message },
 				"Failed to forward tuner command upstream",
 			)
 		}
+	}
+
+	/**
+	 * The upstream source (re)connected: an upstream-forward failure recorded
+	 * during the outage no longer describes the relay, so drop it.
+	 */
+	handleSourceConnected(sourceId: string): void {
+		if (sourceId === this.config.sourceId) this.clearForwardError()
+	}
+
+	private clearForwardError(): void {
+		if (!this.lastErrorFromForward) return
+		this.lastError = null
+		this.lastErrorFromForward = false
 	}
 
 	private parseCommands(client: ClientState, data: Buffer): void {

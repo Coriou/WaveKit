@@ -28,6 +28,7 @@ import { SourceFanoutRouter } from "./core/source-fanout-router.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
 import { TunerController } from "./core/tuner-controller.js"
+import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
@@ -292,66 +293,13 @@ async function main(): Promise<void> {
 		}
 	}
 
-	sourceManager.on("connected", sourceId => {
-		if (sourceManager.isRtlTcpSource(sourceId)) {
-			tunerController.initializeSource(
-				sourceId,
-				sourceManager.getCaps(sourceId),
-			)
-			// The receiver may have come back at its own defaults: restore or reset
-			// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
-			tunerController.synchronizeOnConnect(sourceId)
-		}
+	wireTunerControl({
+		log,
+		sourceManager,
+		tunerController,
+		tunerRelay,
+		relayEnabled: config.tunerRelay.enabled,
 	})
-
-	sourceManager.on("removed", sourceId => {
-		tunerController.removeSource(sourceId)
-	})
-
-	const syncRelayControl = () => {
-		const status = tunerRelay.getStatus()
-		if (!status.sourceId) {
-			return
-		}
-
-		if (!tunerController.getState(status.sourceId)) {
-			if (sourceManager.isRtlTcpSource(status.sourceId)) {
-				tunerController.initializeSource(
-					status.sourceId,
-					sourceManager.getCaps(status.sourceId),
-				)
-			} else {
-				log.warn(
-					{ sourceId: status.sourceId },
-					"Tuner relay source is not RTL-TCP compatible",
-				)
-				return
-			}
-		}
-
-		const hasExternalControl =
-			status.controlPolicy === "shared"
-				? status.clientsConnected > 0
-				: Boolean(status.controlClientId)
-
-		tunerController.syncExternalControl(status.sourceId, hasExternalControl)
-	}
-
-	if (config.tunerRelay.enabled) {
-		tunerRelay.on("client-connected", syncRelayControl)
-		tunerRelay.on("client-disconnected", syncRelayControl)
-		tunerRelay.on("control-changed", syncRelayControl)
-		tunerRelay.on("command-received", event => {
-			if (!event.sourceId) {
-				return
-			}
-			tunerController.applyExternalCommand(
-				event.sourceId,
-				event.command,
-				event.value,
-			)
-		})
-	}
 
 	// Step 5: Initialize decoder system
 	const decoderRegistry = new DecoderRegistry()
@@ -688,15 +636,6 @@ async function main(): Promise<void> {
 
 	// Step 11b: Start tuner relay server (if enabled)
 	await tunerRelay.start()
-
-	// Wire dynamic sample rate changes from tuner relay to source manager
-	tunerRelay.on("sample-rate-changed", (sourceId, sampleRate) => {
-		log.info(
-			{ sourceId, sampleRate },
-			"Propagating sample rate change from tuner relay",
-		)
-		sourceManager.updateSourceCaps(sourceId, { sampleRate })
-	})
 
 	// Broadcast source caps changes to WebSocket clients
 	sourceManager.on("caps-changed", (sourceId, caps) => {

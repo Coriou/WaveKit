@@ -7,6 +7,7 @@
 
 import { EventEmitter } from "node:events"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import { WaveKitError } from "../utils/errors.js"
 import type {
 	SourceCaps,
 	SourceConfig,
@@ -128,7 +129,6 @@ const REPLAY_PHASES: ReadonlyArray<{
 	{ fields: ["testMode"], byAcceptance: false },
 ]
 
-/** Outcome of replaying accepted tuner state after a source (re)connects. */
 /**
  * What happens to accepted tuner state when an rtl_tcp source reconnects:
  * "restore" re-sends it, "reset" discards it and falls back to the configured
@@ -842,7 +842,10 @@ export class TunerController extends EventEmitter {
 			try {
 				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
 			} catch (err) {
-				failure = err instanceof Error ? err : new Error(String(err))
+				failure =
+					err instanceof Error
+						? err
+						: new WaveKitError(String(err), "TUNER_RESTORE_FAILED")
 				break
 			}
 			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`

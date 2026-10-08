@@ -232,6 +232,12 @@ tunerRelay:
 #   reconnectPolicy: reset   - send nothing; reset tuner state and source caps
 #                              to the configured baseline (shared/remote hosts
 #                              another operator may own after an outage)
+# The reset baseline is the source's configured caps (sampleRate/centerFreq)
+# plus AGC/zero gain; it must mirror the receiver's startup args (Pi:
+# SDR_HOST_RTL_TCP__SAMPLE_RATE, SDR_HOST_RTL_TCP__FREQUENCY and its gain mode,
+# SDR_HOST_RTL_TCP__GAIN/AGC) or caps will claim values nobody commanded.
+# Caps reconciliation is not readback: after a core-only restart nothing is
+# written, yet rtlmux may still hold relay-set values it replays to rtl_tcp.
 # Env override: WAVEKIT_TUNER__RECONNECT_POLICY=reset
 tuner:
   reconnectPolicy: restore
