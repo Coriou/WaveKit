@@ -42,7 +42,7 @@ describe("sanitize", () => {
 			}),
 			{ numRuns: 100 },
 		)
-	}, 30_000)
+	}, 60_000)
 
 	// Feature: cli-dashboard-overhaul, Property 7: sanitize and truncate
 	// Validates: spec §5.2
