@@ -34,14 +34,18 @@ export function processState(
 	return "up"
 }
 
-export function procRole(s: ProcState): GlyphRole {
+/** GlyphRole plus "attention" (`!`, yellow): not running, but not a fault (R31). */
+export type ProcRole = GlyphRole | "attention"
+
+export function procRole(s: ProcState): ProcRole {
 	switch (s) {
 		case "faulted":
 		case "crash-loop":
 		case "down":
 			return "fault"
-		case "stopped":
 		case "restarting":
+			return "attention"
+		case "stopped":
 		case "starting":
 			return "neutral"
 		case "up":

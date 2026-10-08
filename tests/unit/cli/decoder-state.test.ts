@@ -157,8 +157,8 @@ describe("decodes facts", () => {
 })
 
 describe("restarting (R15)", () => {
-	it("is neutral, not failing, and never red", () => {
-		expect(procRole("restarting")).toBe("neutral")
+	it("uses the attention role (R31): not calm, not failing, never red", () => {
+		expect(procRole("restarting")).toBe("attention")
 		expect(isFailing("restarting")).toBe(false)
 	})
 	it("shows no decodes while not running", () => {
