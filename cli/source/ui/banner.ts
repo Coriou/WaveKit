@@ -1,7 +1,7 @@
 import { fitGroups } from "./fit.js"
 import { formatClock } from "./format.js"
 import type { Group, Line } from "./line.js"
-import { sanitize } from "./text.js"
+import { cellWidth, sanitize, truncate } from "./text.js"
 import { glyphs } from "./theme.js"
 
 export interface ApiDownCondition {
@@ -45,29 +45,43 @@ const RANK: Readonly<Record<BannerCondition["kind"], number>> = {
 	endpoint: 3,
 }
 
-/** Reasons, paths and hosts come from errors and servers, so they are sanitised here. */
+/**
+ * Priorities (lower survives longer): the head, then `+N`, then the reason,
+ * then the retry countdown, then the trailing context. `+N` therefore never
+ * goes before the reason.
+ */
+const P = { head: 0, more: 1, reason: 2, retry: 3, tail: 4 } as const
+
+/** Free text longer than this also gets a clipped minimal variant, so it cannot push out the countdown. */
+const CLIP_COLS = 24
+
+/** Minimal → rich variants of server or error text, sanitised here. */
+function variantsOf(raw: string): string[] {
+	const text = sanitize(raw)
+	return cellWidth(text) > CLIP_COLS
+		? [truncate(text, CLIP_COLS), text]
+		: [text]
+}
+
 const plain = (text: string, priority: number): Group => ({
 	priority,
-	variants: [[{ text: sanitize(text), role: "value" }]],
+	variants: variantsOf(text).map(v => [{ text: v, role: "value" }]),
 })
 
-function head(text: string): Group {
+function head(prefix: string, raw: string, suffix: string): Group {
 	return {
-		priority: 0,
-		variants: [
-			[
-				{ text: `${glyphs().attention} `, role: "attention", bold: true },
-				{ text: sanitize(text), role: "value", bold: true },
-			],
-		],
+		priority: P.head,
+		variants: variantsOf(raw).map(v => [
+			{ text: `${glyphs().attention} `, role: "attention", bold: true },
+			{ text: `${prefix}${v}${suffix}`, role: "value", bold: true },
+		]),
 	}
 }
 
 function retry(retryAt: number | null, now: number): Group[] {
 	if (retryAt === null) return []
-	return [
-		plain(`retry in ${Math.max(0, Math.ceil((retryAt - now) / 1000))}s`, 2),
-	]
+	const s = Math.ceil((retryAt - now) / 1000)
+	return [plain(s > 0 ? `retry in ${s}s` : "retrying", P.retry)]
 }
 
 function hostOf(url: string): string {
@@ -81,39 +95,39 @@ function hostOf(url: string): string {
 function groupsFor(c: BannerCondition, now: number): Group[] {
 	switch (c.kind) {
 		case "api-down": {
-			const out: Group[] = [head("API unreachable")]
+			const out: Group[] = [head("", "API unreachable", "")]
 			if (c.target === null && c.tried.length > 0)
-				out.push(plain(`tried ${c.tried.join(", ")}`, 1))
-			else out.push(plain(c.reason, 1))
+				out.push(plain(`tried ${c.tried.join(", ")}`, P.reason))
+			else out.push(plain(c.reason, P.reason))
 			out.push(...retry(c.retryAt, now))
 			if (c.asOf !== null)
-				out.push(plain(`data as of ${formatClock(c.asOf)}`, 3))
-			else if (c.target !== null) out.push(plain(hostOf(c.target), 3))
+				out.push(plain(`data as of ${formatClock(c.asOf)}`, P.tail))
+			else if (c.target !== null) out.push(plain(hostOf(c.target), P.tail))
 			return out
 		}
 		case "rest-down": {
 			const out: Group[] = [
-				head("REST failing"),
-				plain(c.reason, 1),
+				head("", "REST failing", ""),
+				plain(c.reason, P.reason),
 				...retry(c.retryAt, now),
 			]
 			if (c.asOf !== null)
-				out.push(plain(`REST data as of ${formatClock(c.asOf)}`, 3))
+				out.push(plain(`REST data as of ${formatClock(c.asOf)}`, P.tail))
 			return out
 		}
 		case "ws-down":
-			// Display order follows the spec copy; `REST every 5s` (3) still drops before `retry` (2).
+			// Display order follows the spec copy; `REST every 5s` (tail) still drops before `retry`.
 			return [
-				head("live feed down"),
-				plain(c.code === null ? "ws closed" : `ws closed ${c.code}`, 1),
-				plain("REST every 5s", 3),
+				head("", "live feed down", ""),
+				plain(c.code === null ? "ws closed" : `ws closed ${c.code}`, P.reason),
+				plain("REST every 5s", P.tail),
 				...retry(c.retryAt, now),
 			]
 		case "endpoint":
 			return [
-				head(`GET ${c.path} failing`),
-				plain(c.reason, 1),
-				plain("other endpoints answering", 3),
+				head("GET ", c.path, " failing"),
+				plain(c.reason, P.reason),
+				plain("other endpoints answering", P.tail),
 			]
 	}
 }
@@ -129,7 +143,7 @@ export function bannerLine(
 	const first = sorted[0]
 	if (!first) return null
 	const groups = groupsFor(first, now)
-	if (sorted.length > 1) groups.push(plain(`+${sorted.length - 1}`, 4))
+	if (sorted.length > 1) groups.push(plain(`+${sorted.length - 1}`, P.more))
 	return fitGroups(groups, width, {
 		sep: [{ text: ` ${glyphs().sep} `, role: "label" }],
 	})
