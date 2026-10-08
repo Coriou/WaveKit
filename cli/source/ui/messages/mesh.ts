@@ -1,5 +1,5 @@
 import type { FormattedMessage } from "../../data/types.js"
-import { asObj, clip, finish, num, seg, str } from "./common.js"
+import { asObj, clip, finish, num, seg, str, textGlyphs } from "./common.js"
 
 const BROADCAST = 0xffffffff
 const PORTS: Readonly<Record<number, string>> = {
@@ -55,8 +55,9 @@ export function formatMesh(
 	const to = num(o, "to") ?? 0
 	const port = num(o, "portnum") ?? 0
 	const len = num(o, "payloadLen")
-	const rssi = num(o, "rxRssi")
-	const snr = num(o, "rxSnr")
+	// The wrapper sends 0 when RSSI/SNR are unavailable: unknown, not 0 dBm (T5).
+	const rssi = num(o, "rxRssi") || undefined
+	const snr = num(o, "rxSnr") || undefined
 	const hopStart = num(o, "hopStart")
 	const hopLimit = num(o, "hopLimit")
 	let text: string | undefined
@@ -70,7 +71,7 @@ export function formatMesh(
 		}
 	}
 	const segments = [
-		seg(`${nodeId(from)}→${nodeId(to)}`, 0),
+		seg(`${nodeId(from)}${textGlyphs().arrow}${nodeId(to)}`, 0),
 		seg(PORTS[port] ?? `PORT${port}`, 1),
 		...(text === undefined && len !== undefined ? [seg(`${len} B`, 2)] : []),
 		...(rssi !== undefined ? [seg(`${rssi} dBm`, 3)] : []),

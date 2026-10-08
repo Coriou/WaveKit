@@ -13,10 +13,27 @@ function protocolLabel(p: string | undefined): string {
 	return m ? `P25 P${m[1] ?? ""}` : p.toUpperCase()
 }
 
-/** Calls without a call_* type (older dsd-fme output) still carry talkgroup or source. */
+const CALL_KEYS = [
+	"slot",
+	"duration",
+	"dmr",
+	"p25",
+	"nxdn",
+	"dstar",
+	"ysf",
+] as const
+
+/**
+ * Calls without a call_* type (older dsd-fme output). A numeric talkgroup is
+ * call-shaped; a bare numeric `source` is too generic on its own and needs one
+ * call key beside it (slot, duration or protocol metadata).
+ */
 export function isCallShape(data: unknown): boolean {
 	const o = asObj(data)
-	return num(o, "talkgroup") !== undefined || num(o, "source") !== undefined
+	if (num(o, "talkgroup") !== undefined) return true
+	return (
+		num(o, "source") !== undefined && CALL_KEYS.some(k => o[k] !== undefined)
+	)
 }
 
 export function formatCall(
@@ -35,6 +52,7 @@ export function formatCall(
 	const ran = num(obj(o, "nxdn"), "ran")
 	const my = str(obj(o, "dstar"), "my")?.trim()
 	const ur = str(obj(o, "dstar"), "ur")?.trim()
+	const ysfCall = str(obj(o, "ysf"), "callsign")?.trim()
 	const q = o["quality"]
 	const quality = obj(o, "quality")
 	const errors = (num(quality, "crcErrs") ?? 0) + (num(quality, "fecErrs") ?? 0)
@@ -50,6 +68,7 @@ export function formatCall(
 		...(ran !== undefined ? [seg(`RAN ${ran}`, 5)] : []),
 		...(my ? [seg(`MY ${my}`, 3)] : []),
 		...(ur ? [seg(`UR ${ur}`, 4)] : []),
+		...(ysfCall ? [seg(`CS ${ysfCall}`, 1)] : []),
 		...(isStart ? [seg("call start", 2)] : []),
 		...(duration !== undefined
 			? [seg(`${(duration / 1000).toFixed(1)} s`, 2)]
@@ -72,6 +91,7 @@ export function formatCall(
 		...(ran !== undefined ? [{ label: "ran", value: String(ran) }] : []),
 		...(my ? [{ label: "my", value: my }] : []),
 		...(ur ? [{ label: "ur", value: ur }] : []),
+		...(ysfCall ? [{ label: "callsign", value: ysfCall }] : []),
 		...(duration !== undefined
 			? [{ label: "duration", value: `${(duration / 1000).toFixed(1)} s` }]
 			: []),
