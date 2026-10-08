@@ -404,6 +404,48 @@ describe("Source Manager", () => {
 				await mockServer.close()
 			}
 		})
+
+		it("ignores a late close from the previous socket after the same id is recreated", async () => {
+			const mockServer = await createMockServer()
+			try {
+				const config = createSourceConfig("test-source", mockServer.port)
+				await sourceManager.connect(config)
+				const internals = sourceManager as unknown as {
+					sources: Map<string, { socket: net.Socket | null }>
+				}
+				const oldSocket = internals.sources.get("test-source")?.socket
+				if (!oldSocket) throw new Error("expected a connected socket")
+
+				// Hold the old socket's close so it lands after the recreate, as it
+				// can under load (socket close and the new connect race in libuv).
+				const heldCloses: unknown[][] = []
+				const emit = oldSocket.emit.bind(oldSocket)
+				oldSocket.emit = ((event: string | symbol, ...args: unknown[]) => {
+					if (event === "close") {
+						heldCloses.push(args)
+						return true
+					}
+					return emit(event, ...args)
+				}) as typeof oldSocket.emit
+
+				await sourceManager.disconnect("test-source")
+				const stream = await sourceManager.connect(config)
+				await vi.waitFor(() => expect(heldCloses).toHaveLength(1))
+
+				const disconnected = vi.fn()
+				sourceManager.on("disconnected", disconnected)
+				for (const args of heldCloses) emit("close", ...args)
+
+				expect(disconnected).not.toHaveBeenCalled()
+				expect(sourceManager.getStatus("test-source")?.connected).toBe(true)
+				expect(
+					sourceManager.getStatus("test-source")?.lastError,
+				).toBeUndefined()
+				expect(sourceManager.getStream("test-source")).toBe(stream)
+			} finally {
+				await mockServer.close()
+			}
+		})
 	})
 
 	describe("Error Handling", () => {
