@@ -1,5 +1,5 @@
 import { Box, Text } from "ink"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
 import { renderAt } from "../test/harness.js"
 import { ConfirmBar } from "./confirm-bar.js"
@@ -58,6 +58,8 @@ describe("chrome components", () => {
 	})
 	// R27: sanitize strips the whole CSI sequence, so no "[2J" residue survives.
 	it("catches render errors with a sanitised one-line fallback", async () => {
+		// M8: React logs the caught error; keep the test output clean.
+		const spy = vi.spyOn(console, "error").mockImplementation(() => undefined)
 		const h = await renderAt(
 			<Box>
 				<ErrorBoundary>
@@ -66,7 +68,32 @@ describe("chrome components", () => {
 			</Box>,
 			{ cols: 80, rows: 10 },
 		)
-		expect(h.text()).toBe("wavekit: render error · boom · q quit")
+		expect(h.text()).toBe(" wavekit: render error · boom · q quit")
 		h.unmount()
+		spy.mockRestore()
+	})
+})
+
+describe("error boundary (M7)", () => {
+	function Thrower({ value }: { value: unknown }): never {
+		throw value
+	}
+	it("handles non-Error throws", async () => {
+		const spy = vi.spyOn(console, "error").mockImplementation(() => undefined)
+		for (const [value, text] of [
+			["plain string", " wavekit: render error · plain string · q quit"],
+			[42, " wavekit: render error · 42 · q quit"],
+			[null, " wavekit: render error · null · q quit"],
+		] as const) {
+			const h = await renderAt(
+				<ErrorBoundary>
+					<Thrower value={value} />
+				</ErrorBoundary>,
+				{ cols: 80, rows: 10 },
+			)
+			expect(h.text()).toBe(text)
+			h.unmount()
+		}
+		spy.mockRestore()
 	})
 })

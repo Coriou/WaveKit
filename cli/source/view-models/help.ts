@@ -1,7 +1,7 @@
-import { VIEW_TITLES } from "../ui/actions.js"
-import { footerHints, type KeyContext } from "../ui/keymap.js"
+import { VIEW_TITLES, type Action } from "../ui/actions.js"
+import { BINDINGS, type KeyContext, type ModeName } from "../ui/keymap.js"
 import { sp, type Line } from "../ui/line.js"
-import { padEnd, truncate } from "../ui/text.js"
+import { cellWidth, padEnd, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 
 const BOX_WIDTH = 60
@@ -19,30 +19,151 @@ function boxChars(): {
 		: { tl: "+", tr: "+", bl: "+", br: "+", h: "-", v: "|" }
 }
 
-function entries(ctx: KeyContext): Array<[string, string]> {
-	const base: KeyContext = {
-		...ctx,
-		help: false,
-		confirm: null,
-		input: false,
-		edit: false,
+const ASKS = " (asks to confirm)"
+
+/** What a binding does, in help words; null = not listed (typing keys, notices). */
+function labelOf(a: Action, mode: ModeName): string | null {
+	switch (a.type) {
+		case "move":
+			return "select"
+		case "page":
+			return "page"
+		case "top":
+			return "top"
+		case "newest":
+			return "newest"
+		case "open":
+			return "open detail"
+		case "escape":
+			return mode === "detail" ? "close detail" : "back"
+		case "detail-scroll":
+			return "scroll detail"
+		case "copy-json":
+			return "copy JSON"
+		case "filter-open":
+			return "filter"
+		case "filter-apply":
+			return "apply filter"
+		case "filter-cancel":
+			return "cancel filter"
+		case "pause-toggle":
+			return "pause / resume"
+		case "preset-cycle":
+			return "filter preset"
+		case "decoder-op":
+			return `${a.op}${ASKS}`
+		case "edit-open":
+			return "edit tuner"
+		case "control-toggle":
+			return `take / release control${ASKS}`
+		case "audio-toggle":
+			return "start / stop audio"
+		case "preset-open":
+			return `audio preset${ASKS}`
+		case "edit-key":
+			switch (a.key) {
+				case "left":
+				case "right":
+					return "digit"
+				case "up":
+				case "down":
+					return "change"
+				case "tab":
+					return "next field"
+				case "space":
+					return "toggle"
+				case "backspace":
+					return "delete digit"
+				default:
+					return "type digit"
+			}
+		case "edit-review":
+			return `review${ASKS}`
+		case "edit-discard":
+			return "discard"
+		case "view":
+			return "views"
+		case "view-step":
+			return a.delta > 0 ? "next view" : "previous view"
+		case "reconnect":
+			return "reconnect + refetch"
+		case "quit":
+			return "quit"
+		case "help-open":
+			return "this help"
+		default:
+			return null
 	}
-	const seen = new Set<string>()
-	const out: Array<[string, string]> = []
-	const add = (k: string, l: string): void => {
-		if (seen.has(k)) return
-		seen.add(k)
-		out.push([k, l])
+}
+
+function keyText(keys: readonly string[]): string {
+	const g = glyphs()
+	const ascii = g.up !== "↑"
+	const named: Readonly<Record<string, string>> = {
+		"<up>": g.up,
+		"<down>": g.down,
+		"<left>": ascii ? "<" : "←",
+		"<right>": ascii ? ">" : "→",
+		"<pgup>": "PgUp",
+		"<pgdn>": "PgDn",
+		"<enter>": "Enter",
+		"<esc>": "Esc",
+		"<tab>": "Tab",
+		"<shift-tab>": "S-Tab",
+		"<space>": "Space",
+		"<backspace>": "Bksp",
 	}
-	for (const c of [
-		{ ...base, detail: false },
-		{ ...base, detail: true },
-		{ ...base, edit: ctx.view === "receiver" },
-	]) {
-		for (const h of footerHints(c))
-			if (h.mode !== "global") add(h.hint.keys, h.hint.rich ?? h.hint.label)
+	const digits = keys.filter(k => /^[0-9]$/.test(k))
+	if (digits.length >= 3 && digits.length === keys.length) {
+		return `${digits[0]}-${digits[digits.length - 1]}`
 	}
-	return out
+	const arrows: string[] = []
+	const words: string[] = []
+	const letters: string[] = []
+	for (const k of keys) {
+		const n = named[k]
+		if (n !== undefined) {
+			if (k === "<up>" || k === "<down>" || k === "<left>" || k === "<right>")
+				arrows.push(n)
+			else words.push(n)
+		} else letters.push(k)
+	}
+	letters.sort((a, b) => a.localeCompare(b, "en", { caseFirst: "lower" }))
+	return [arrows.join(""), ...words, ...letters].filter(x => x !== "").join(" ")
+}
+
+/** M11: every binding of the view (not filtered by `when`), grouped by label, from the keymap. */
+function entries(
+	ctx: KeyContext,
+	section: "view" | "global",
+): Array<[string, string]> {
+	const modes: readonly ModeName[] =
+		section === "global"
+			? ["global"]
+			: [
+					"list",
+					"detail",
+					...(ctx.view === "messages" ? (["input"] as const) : []),
+					...(ctx.view === "receiver" ? (["edit"] as const) : []),
+				]
+	const order: string[] = []
+	const keysBy = new Map<string, string[]>()
+	for (const mode of modes) {
+		for (const b of BINDINGS) {
+			if (b.mode !== mode) continue
+			if (b.views && !b.views.includes(ctx.view)) continue
+			const first = b.keys[0]
+			if (first === undefined) continue
+			const label = labelOf(b.action(first, ctx), mode)
+			if (label === null) continue
+			const list = keysBy.get(label)
+			if (!list) {
+				order.push(label)
+				keysBy.set(label, [...b.keys])
+			} else for (const k of b.keys) if (!list.includes(k)) list.push(k)
+		}
+	}
+	return order.map(label => [keyText(keysBy.get(label) ?? []), label])
 }
 
 /** Spec §6.6: centred 60-column box; current view keys, then global keys, then the legend. */
@@ -58,25 +179,30 @@ export function helpLines(
 	const inner = w - 3
 	const half = Math.floor((inner - 1) / 2)
 	const left = " ".repeat(Math.max(0, Math.floor((width - w) / 2)))
-	const pair = (
-		a: [string, string] | undefined,
-		c: [string, string] | undefined,
-	): string =>
-		padEnd(a ? `${padEnd(a[0], 10)} ${a[1]}` : "", half) +
-		" " +
-		(c ? `${padEnd(c[0], 8)} ${c[1]}` : "")
-	const body: string[] = []
-	const view = entries(ctx)
-	for (let i = 0; i < view.length; i += 2) body.push(pair(view[i], view[i + 1]))
-	body.push("")
-	const global: Array<[string, string]> = [
-		["1-5 Tab", "views"],
-		["r", "reconnect + refetch"],
-		["?", "this help"],
-		["q", "quit"],
+	const entry = (e: [string, string]): string => `${padEnd(e[0], 10)} ${e[1]}`
+	/** Two entries share a row only when both fit their half; long labels are never cut. */
+	const pack = (list: Array<[string, string]>): string[] => {
+		const out: string[] = []
+		for (let i = 0; i < list.length; i++) {
+			const a = list[i]
+			const c = list[i + 1]
+			if (!a) continue
+			if (
+				c &&
+				cellWidth(entry(a)) <= half &&
+				cellWidth(entry(c)) <= inner - half - 1
+			) {
+				out.push(`${padEnd(entry(a), half)} ${entry(c)}`)
+				i++
+			} else out.push(entry(a))
+		}
+		return out
+	}
+	const body: string[] = [
+		...pack(entries(ctx, "view")),
+		"",
+		...pack(entries(ctx, "global")),
 	]
-	for (let i = 0; i < global.length; i += 2)
-		body.push(pair(global[i], global[i + 1]))
 	body.push("")
 	body.push(
 		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.attention} now  ${g.unknown} unknown`,

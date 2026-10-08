@@ -104,6 +104,8 @@ export interface RenderHandle {
 		timeoutMs?: number,
 	): Promise<void>
 	writes(): readonly string[]
+	/** True once the app called useApp().exit() (or was unmounted). */
+	exited(): boolean
 	unmount(): void
 }
 
@@ -122,6 +124,15 @@ export async function renderAt(
 		exitOnCtrlC: false,
 		patchConsole: false,
 	})
+	let exited = false
+	void instance.waitUntilExit().then(
+		() => {
+			exited = true
+		},
+		() => {
+			exited = true
+		},
+	)
 	// Wait for the first frame. useInput attaches in a passive effect after it;
 	// input sent before that flushes is dropped, hence the extra settle.
 	await pollUntil(() => stdout.chunks.length > 0)
@@ -182,6 +193,7 @@ export async function renderAt(
 			}
 		},
 		writes: () => stdout.chunks,
+		exited: () => exited,
 		unmount: () => {
 			instance.unmount()
 			instance.cleanup()

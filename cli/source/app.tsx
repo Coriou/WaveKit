@@ -33,6 +33,14 @@ export interface AppProps {
 }
 
 const selectAll = (s: AppState): AppState => s
+
+function safe<T>(fn: () => T, fallback: T): T {
+	try {
+		return fn()
+	} catch {
+		return fallback
+	}
+}
 const NO_INFO: ViewKeyInfo = { rowIds: [], pageSize: 1, ctx: EMPTY_VIEW_CTX }
 
 export function App({
@@ -52,10 +60,13 @@ export function App({
 	const width = cols - 1
 	const banner = small
 		? null
-		: bannerLine(bannerConditions(state), state.now, width)
+		: safe(() => bannerLine(bannerConditions(state), state.now, width), null)
 	const chrome = chromeRows(rows, banner !== null)
 	const view = views[ui.view]
-	const info = view ? view.keyInfo(state, ui, width, chrome.content) : NO_INFO
+	// Computed outside the boundary, so a throw here must not take the app down.
+	const info = view
+		? safe(() => view.keyInfo(state, ui, width, chrome.content), NO_INFO)
+		: NO_INFO
 	const ctx: KeyContext = {
 		view: ui.view,
 		confirm: ui.confirm?.kind ?? null,
@@ -69,11 +80,13 @@ export function App({
 	}
 
 	const applyEffect = (e: Effect): void => {
-		if (e.kind === "write") runtime.send(e.intent)
-		else (writeRaw ?? (s => process.stdout.write(s)))(osc52(e.text))
+		;(writeRaw ?? (s => process.stdout.write(s)))(osc52(e.text))
 	}
 
 	const dispatch = (a: Action): void => {
+		// While too small nothing is visible: only quit (q, Ctrl-C) is honoured, so a
+		// hidden confirm, audio toggle, draft or edit cannot change blind.
+		if (small && a.type !== "quit") return
 		switch (a.type) {
 			case "quit":
 				setUi(u => ({ ...u, quit: true }))
@@ -134,20 +147,21 @@ export function App({
 
 	return (
 		<ColorContext.Provider value={color}>
-			<Box
-				flexDirection="column"
-				width={cols}
-				height={rows - 1}
-				overflow="hidden"
-			>
-				<ChainStrip state={state} width={width} />
-				{chrome.switcher === 1 ? (
-					<Switcher view={ui.view} width={width} />
-				) : null}
-				{chrome.blank === 1 ? <Text> </Text> : null}
-				{banner ? <Banner line={banner} /> : null}
-				<Box flexDirection="column" height={chrome.content} overflow="hidden">
-					<ErrorBoundary key={ui.epoch}>
+			<ErrorBoundary key={ui.epoch}>
+				<Box
+					flexDirection="column"
+					width={cols}
+					height={rows - 1}
+					overflow="hidden"
+				>
+					<ChainStrip state={state} width={width} />
+					{/* §5.1: the banner sits directly under the strip. */}
+					{banner ? <Banner line={banner} /> : null}
+					{chrome.switcher === 1 ? (
+						<Switcher view={ui.view} width={width} />
+					) : null}
+					{chrome.blank === 1 ? <Text> </Text> : null}
+					<Box flexDirection="column" height={chrome.content} overflow="hidden">
 						{ui.help ? (
 							<HelpOverlay
 								ctx={ctx}
@@ -167,14 +181,19 @@ export function App({
 						) : (
 							<Text> </Text>
 						)}
-					</ErrorBoundary>
+					</Box>
+					{ui.confirm ? (
+						<ConfirmBar confirm={ui.confirm} width={width} />
+					) : (
+						<Footer
+							ctx={ctx}
+							notice={ui.notice}
+							now={state.now}
+							width={width}
+						/>
+					)}
 				</Box>
-				{ui.confirm ? (
-					<ConfirmBar confirm={ui.confirm} width={width} />
-				) : (
-					<Footer ctx={ctx} notice={ui.notice} now={state.now} width={width} />
-				)}
-			</Box>
+			</ErrorBoundary>
 		</ColorContext.Provider>
 	)
 }
