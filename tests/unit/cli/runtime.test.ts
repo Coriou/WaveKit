@@ -27,11 +27,12 @@ const fakeTimers: Timers = {
 
 function wsFake() {
 	const sockets: WsHandlers[] = []
+	const closed: number[] = []
 	const factory: WsFactory = (_url, h) => {
-		sockets.push(h)
-		return { send: () => undefined, close: () => undefined }
+		const n = sockets.push(h) - 1
+		return { send: () => undefined, close: () => void closed.push(n) }
 	}
-	return { factory, sockets }
+	return { factory, sockets, closed }
 }
 
 const never: FetchLike = () => new Promise(() => undefined)
@@ -267,9 +268,10 @@ describe("runtime", () => {
 
 	it("stop() halts the flush, polls and socket", async () => {
 		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
-			wsFactory: wsFake().factory,
+			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
 			timers: fakeTimers,
@@ -278,12 +280,16 @@ describe("runtime", () => {
 		})
 		rt.start()
 		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(ws.closed).toEqual([])
 		rt.stop()
+		expect(ws.closed).toEqual([0])
+		expect(vi.getTimerCount()).toBe(0)
 		const calls = fetchFn.mock.calls.length
 		const commits = rt.store.commits()
 		await vi.advanceTimersByTimeAsync(30_000)
 		expect(fetchFn.mock.calls.length).toBe(calls)
 		expect(rt.store.commits()).toBe(commits)
+		expect(ws.sockets).toHaveLength(1)
 	})
 
 	it("rediscovers after a failed discovery and reports what it tried", async () => {
@@ -312,6 +318,183 @@ describe("runtime", () => {
 		expect(rt.store.get().conn.rest.failing.length).toBeGreaterThan(0)
 		await vi.advanceTimersByTimeAsync(15_000)
 		expect(discover).toHaveBeenCalledTimes(2)
+		rt.stop()
+	})
+})
+
+const DISCOVERED = { ...TARGET, explicit: false }
+const refused = (): Promise<never> =>
+	Promise.reject(
+		new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } }),
+	)
+
+/**
+ * A core that can go down and come back: discovery, REST and WS all follow `up`.
+ * Sockets open (with the subscribe ack) or close 10 ms after they are created.
+ */
+function flakyCore(discoverMs = 100) {
+	const state = {
+		up: true,
+		sockets: 0,
+		opened: [] as number[],
+		live: null as WsHandlers | null,
+	}
+	const discover = vi.fn(
+		() =>
+			new Promise<{ target: typeof DISCOVERED | null; tried: string[] }>(
+				resolve => {
+					setTimeout(
+						() =>
+							resolve({
+								target: state.up ? DISCOVERED : null,
+								tried: ["127.0.0.1:9000", "127.0.0.1:3000"],
+							}),
+						discoverMs,
+					)
+				},
+			),
+	)
+	const fetchFn = vi.fn<FetchLike>(url =>
+		state.up ? okJson(bodies(url)) : refused(),
+	)
+	const factory: WsFactory = (_url, h) => {
+		const n = ++state.sockets
+		setTimeout(() => {
+			if (state.up) {
+				state.live = h
+				state.opened.push(n)
+				h.open()
+				h.message(
+					JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+				)
+			} else h.close(1006, "")
+		}, 10)
+		return { send: () => undefined, close: () => undefined }
+	}
+	const goDown = (): void => {
+		state.up = false
+		state.live?.close(1006, "")
+		state.live = null
+	}
+	return Object.assign(state, { discover, fetchFn, factory, goDown })
+}
+
+describe("rediscovery (fix round 1, Critical)", () => {
+	it("discovered target lost for 120 s, then recovered: one chain, one gap, no extra reconnects", async () => {
+		const core = flakyCore()
+		const rt = createRuntime({
+			fetchFn: core.fetchFn,
+			wsFactory: core.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+			discover: core.discover,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(5_000)
+		expect(core.discover).toHaveBeenCalledTimes(1)
+		expect(rt.store.get().conn.ws.state).toBe("open")
+
+		core.goDown()
+		await vi.advanceTimersByTimeAsync(120_000)
+		// ≤ one run per 15 s once the first 15 s unreachable have passed.
+		const downRuns = core.discover.mock.calls.length - 1
+		expect(downRuns).toBeGreaterThanOrEqual(1)
+		expect(downRuns).toBeLessThanOrEqual(8)
+
+		core.up = true
+		await vi.advanceTimersByTimeAsync(30_000)
+		const afterRecovery = core.discover.mock.calls.length - 1 - downRuns
+		expect(afterRecovery).toBeLessThanOrEqual(1)
+		// Exactly one socket opened after recovery and nothing reconnected it again.
+		expect(core.opened).toHaveLength(2)
+		expect(core.sockets).toBe(core.opened[1])
+		const s = rt.store.get()
+		expect(s.conn.ws.state).toBe("open")
+		expect(s.messages.ring.gaps).toHaveLength(1)
+		expect(s.messages.ring.gaps[0]?.to).not.toBeNull()
+
+		rt.stop()
+		expect(vi.getTimerCount()).toBe(0)
+	})
+
+	it("discovery that finds the current target does not reconnect a socket that is already back", async () => {
+		// Discovery is slow here, so the socket's own backoff reconnects first.
+		const core = flakyCore(20_000)
+		const rt = createRuntime({
+			fetchFn: core.fetchFn,
+			wsFactory: core.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+			discover: core.discover,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(25_000)
+		expect(core.opened).toHaveLength(1)
+		core.goDown()
+		// Wait for the rediscovery run to start, then bring the core back while it runs.
+		for (let i = 0; i < 60 && core.discover.mock.calls.length < 2; i++)
+			await vi.advanceTimersByTimeAsync(1_000)
+		expect(core.discover).toHaveBeenCalledTimes(2)
+		core.up = true
+		await vi.advanceTimersByTimeAsync(40_000)
+		expect(core.discover).toHaveBeenCalledTimes(2)
+		expect(rt.store.get().conn.discovery.mode).toBe("found")
+		expect(core.opened).toHaveLength(2)
+		expect(core.sockets).toBe(core.opened[1])
+		expect(rt.store.get().messages.ring.gaps).toHaveLength(1)
+		rt.stop()
+		expect(vi.getTimerCount()).toBe(0)
+	})
+
+	it("a timeout is not an answer: a discovered target that only times out is rediscovered (M3)", async () => {
+		const discover = vi.fn(() =>
+			Promise.resolve({ target: DISCOVERED, tried: [] }),
+		)
+		const rt = createRuntime({
+			fetchFn: () => Promise.reject(new DOMException("t", "TimeoutError")),
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+			discover,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(25_000)
+		expect(discover.mock.calls.length).toBeGreaterThanOrEqual(2)
+		rt.stop()
+	})
+
+	it("a poll that answers cancels the pending rediscovery chain", async () => {
+		const core = flakyCore()
+		const rt = createRuntime({
+			fetchFn: core.fetchFn,
+			wsFactory: core.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+			discover: core.discover,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(5_000)
+		core.goDown()
+		// Polls fail from ~5 s; the first rediscovery fails at ~20 s and arms the chain.
+		await vi.advanceTimersByTimeAsync(16_000)
+		const runs = core.discover.mock.calls.length
+		expect(runs).toBe(2)
+		// Back up before the chain fires: the next poll answers and cancels it.
+		core.up = true
+		await vi.advanceTimersByTimeAsync(60_000)
+		expect(core.discover.mock.calls.length).toBe(runs)
 		rt.stop()
 	})
 })

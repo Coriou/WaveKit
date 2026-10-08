@@ -39,8 +39,13 @@ export interface Timers {
 	clearInterval(handle: unknown): void
 }
 
+/** Every timer is unref'd: none of them may keep the process alive after the UI exits. */
 export const NODE_TIMERS: Timers = {
-	setTimeout: (fn, ms) => setTimeout(fn, ms),
+	setTimeout: (fn, ms) => {
+		const h = setTimeout(fn, ms)
+		h.unref()
+		return h
+	},
 	clearTimeout: h => clearTimeout(h as NodeJS.Timeout),
 	setInterval: (fn, ms) => {
 		const h = setInterval(fn, ms)
@@ -105,6 +110,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let rediscoverTimer: unknown = null
 	let discovering = false
 	let unreachableSince: number | null = null
+	/** Bumped by stop(): async work started before it finishes silently. */
+	let epoch = 0
 
 	const api = createApiClient({
 		base: () => target?.base ?? null,
@@ -130,11 +137,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		return { kind: "rest", endpoint, outcome, at } as RestInbound
 	}
 
-	/** Resolves true when the server answered at all (any non-network outcome). */
+	/** Resolves true when the server answered at all; a network error or a timeout is no answer (M3). */
 	async function fetchOne(endpoint: Endpoint): Promise<boolean> {
 		const outcome = await api.get(endpoint)
 		push(restInbound(endpoint, outcome, deps.now()))
-		return outcome.ok || outcome.error.kind !== "network"
+		return (
+			outcome.ok ||
+			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
+		)
 	}
 
 	function schedulePoll(): void {
@@ -147,26 +157,44 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	}
 
 	async function pollCycle(endpoints: readonly Endpoint[]): Promise<void> {
+		const run = epoch
 		const results = await Promise.allSettled(endpoints.map(fetchOne))
-		if (stopped) return
+		if (run !== epoch) return
 		const at = deps.now()
 		push({ kind: "rest:cycle", at, nextAt: at + POLL_MS })
 		const answered = results.some(r => r.status === "fulfilled" && r.value)
-		if (answered) unreachableSince = null
-		else unreachableSince ??= at
+		if (answered) {
+			unreachableSince = null
+			clearRediscover()
+		} else unreachableSince ??= at
 		maybeRediscover(at)
 		schedulePoll()
 	}
 
+	function clearRediscover(): void {
+		if (rediscoverTimer !== null) deps.timers.clearTimeout(rediscoverTimer)
+		rediscoverTimer = null
+	}
+
+	/** Starts a discovery chain unless one is running or pending: there is only ever one. */
 	function maybeRediscover(at: number): void {
-		if (deps.explicit !== null || discovering || unreachableSince === null)
+		if (
+			deps.explicit !== null ||
+			discovering ||
+			rediscoverTimer !== null ||
+			unreachableSince === null
+		)
 			return
 		if (at - unreachableSince < REDISCOVER_AFTER_MS) return
 		void runDiscovery()
 	}
 
 	async function runDiscovery(): Promise<void> {
+		if (stopped || discovering) return
+		// A run supersedes the pending retry, so the chain never forks.
+		clearRediscover()
 		discovering = true
+		const run = epoch
 		push({
 			kind: "target",
 			at: deps.now(),
@@ -175,10 +203,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			discovery: { mode: "probing", tried: [] },
 		})
 		const found = await discoverFn(deps.fetchFn)
+		if (run !== epoch) return
 		discovering = false
-		if (stopped) return
 		const at = deps.now()
 		if (found.target) {
+			const same =
+				target !== null &&
+				target.base === found.target.base &&
+				target.ws === found.target.ws
 			target = found.target
 			unreachableSince = null
 			push({
@@ -188,30 +220,38 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				ws: target.ws,
 				discovery: { mode: "found", tried: found.tried },
 			})
-			ws.reconnectNow()
+			// The socket may already be back on this target by itself; reconnecting it
+			// would record a false gap and wipe the rate and fanout histories.
+			if (!same || !ws.connected()) ws.reconnectNow()
 			void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 			return
 		}
 		push({
 			kind: "target",
 			at,
-			base: null,
-			ws: null,
+			base: target?.base ?? null,
+			ws: target?.ws ?? null,
 			discovery: { mode: "failed", tried: found.tried },
 		})
-		for (const endpoint of POLL_ENDPOINTS) {
-			push(
-				restInbound(
-					endpoint,
-					{
-						ok: false,
-						error: { kind: "network", message: "no API answered", at },
-					},
-					at,
-				),
-			)
+		if (target === null) {
+			// Nothing to poll yet, so discovery stands in for the poll cycle.
+			for (const endpoint of POLL_ENDPOINTS) {
+				push(
+					restInbound(
+						endpoint,
+						{
+							ok: false,
+							error: { kind: "network", message: "no API answered", at },
+						},
+						at,
+					),
+				)
+			}
+			push({ kind: "rest:cycle", at, nextAt: at + MAX_BACKOFF_MS })
+		} else if (unreachableSince === null) {
+			// A poll of the current target answered while this ran: nothing to chase.
+			return
 		}
-		push({ kind: "rest:cycle", at, nextAt: at + MAX_BACKOFF_MS })
 		rediscoverTimer = deps.timers.setTimeout(() => {
 			rediscoverTimer = null
 			void runDiscovery()
@@ -296,18 +336,19 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		},
 		stop: () => {
 			stopped = true
-			for (const t of [pollTimer, rediscoverTimer])
-				if (t !== null) deps.timers.clearTimeout(t)
+			epoch++
+			discovering = false
+			if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
+			clearRediscover()
 			if (flushTimer !== null) deps.timers.clearInterval(flushTimer)
 			pollTimer = null
-			rediscoverTimer = null
 			flushTimer = null
 			ws.stop()
 		},
 		reconnect: () => {
 			if (stopped) return
 			if (target === null) {
-				if (!discovering) void runDiscovery()
+				void runDiscovery()
 				return
 			}
 			ws.reconnectNow()
