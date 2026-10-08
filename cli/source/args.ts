@@ -1,4 +1,5 @@
 import { VIEW_ORDER, type ViewId } from "./ui/actions.js"
+import { ASCII_GLYPHS, UTF8_GLYPHS, glyphs, type Glyphs } from "./ui/theme.js"
 
 export const VIEW_ALIASES: Readonly<Record<string, ViewId>> = {
 	overview: "overview",
@@ -32,7 +33,7 @@ function lookupView(v: string): ViewId | undefined {
 function viewError(v: string): ParsedArgs {
 	return {
 		kind: "error",
-		message: `wavekit: invalid view "${v}" · valid views: ${VALID} (aliases: ${ALIASES})`,
+		message: `wavekit: invalid view "${v}" ${glyphs().sep} valid views: ${VALID} (aliases: ${ALIASES})`,
 	}
 }
 
@@ -77,13 +78,25 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 		}
 		return {
 			kind: "error",
-			message: `wavekit: unknown argument "${a}" · see wavekit --help`,
+			message: `wavekit: unknown argument "${a}" ${glyphs().sep} see wavekit --help`,
 		}
 	}
 	return api === undefined ? { kind: "run", view } : { kind: "run", view, api }
 }
 
-export const HELP_TEXT = `wavekit · WaveKit terminal dashboard
+/** Help in the given glyph set; cli.tsx prints it after the glyph mode is set (WAVEKIT_ASCII, locale). */
+export function helpText(g: Glyphs = glyphs()): string {
+	const ascii = g === ASCII_GLYPHS
+	const to = ascii ? "->" : "→"
+	const unicode = ascii
+		? "Unicode marks"
+		: [
+				UTF8_GLYPHS.live,
+				UTF8_GLYPHS.neutral,
+				UTF8_GLYPHS.fault,
+				UTF8_GLYPHS.ellipsis,
+			].join(" ")
+	return `wavekit ${g.sep} WaveKit terminal dashboard
 
 Usage:
   wavekit [--view <view>] [--api <url>]
@@ -97,8 +110,9 @@ Views (keys 1-5):
   system     5  container, SDR host, live audio, core
 
 Aliases:
-  dashboard → overview, output → messages, backpressure → decoders,
-  sources → receiver, tuner → receiver, live-audio → system, resources → system
+  dashboard ${to} overview, output ${to} messages, backpressure ${to} decoders,
+  sources ${to} receiver, tuner ${to} receiver,
+  live-audio ${to} system, resources ${to} system
 
 Options:
   --view, -v <view>   open this view first
@@ -110,10 +124,13 @@ Environment:
   WAVEKIT_WS_URL      WebSocket URL (API base derived from it)
   WAVEKIT_WS_URLS     comma-separated WebSocket URLs; the first is used
   NO_COLOR            no colour (bold, dim and inverse are kept)
-  WAVEKIT_ASCII=1     ASCII glyphs instead of ● ○ × … (also used when the
+  WAVEKIT_ASCII=1     ASCII glyphs instead of ${unicode} (also used when the
                       locale does not name UTF-8)
 
 Precedence: --api, then WAVEKIT_API_URL, then WAVEKIT_WS_URL / WAVEKIT_WS_URLS.
 With none set, wavekit tries http://127.0.0.1:9000, then http://127.0.0.1:3000.
 localhost is read as 127.0.0.1. Port 4713 is the RTL-TCP relay, not the API.
 `
+}
+
+export const HELP_TEXT = helpText(UTF8_GLYPHS)

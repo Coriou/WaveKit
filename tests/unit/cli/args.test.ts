@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest"
-import { HELP_TEXT, VIEW_ALIASES, parseArgs } from "../../../cli/source/args.js"
+import {
+	HELP_TEXT,
+	VIEW_ALIASES,
+	helpText,
+	parseArgs,
+} from "../../../cli/source/args.js"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
+import {
+	ASCII_GLYPHS,
+	UTF8_GLYPHS,
+	setGlyphMode,
+} from "../../../cli/source/ui/theme.js"
 
 describe("parseArgs", () => {
 	it("accepts new names and every old alias", () => {
@@ -80,6 +90,26 @@ describe("parseArgs", () => {
 		for (const argv of [["--view", "nope"], ["--bogus"], ["--api"]]) {
 			const r = parseArgs(argv)
 			expect(r.kind === "error" && findBanned(r.message)).toEqual([])
+		}
+	})
+	it("prints help and errors in ASCII when the glyph mode is ASCII", () => {
+		const ascii = helpText(ASCII_GLYPHS)
+		expect(ascii).toMatch(/^[\x20-\x7e\n]*$/)
+		for (const line of ascii.split("\n"))
+			expect(line.length).toBeLessThanOrEqual(80)
+		for (const alias of Object.keys(VIEW_ALIASES))
+			expect(ascii).toContain(alias)
+		expect(findBanned(ascii)).toEqual([])
+		expect(helpText(UTF8_GLYPHS)).toBe(HELP_TEXT)
+		setGlyphMode("ascii")
+		try {
+			expect(helpText()).toBe(ascii)
+			for (const argv of [["--view", "nope"], ["--bogus"]]) {
+				const r = parseArgs(argv)
+				expect(r.kind === "error" && r.message).toMatch(/^[\x20-\x7e]*$/)
+			}
+		} finally {
+			setGlyphMode("utf8")
 		}
 	})
 })

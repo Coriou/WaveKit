@@ -898,6 +898,18 @@
 			}
 		},
 		{
+			"offsetMs": -3000,
+			"type": "decoder:status",
+			"channel": "decoders",
+			"data": "$decoderStatus:acarsdec"
+		},
+		{
+			"offsetMs": -1000,
+			"type": "source:status",
+			"channel": "sources",
+			"data": "$sourceStatus:pi-iq"
+		},
+		{
 			"offsetMs": -9000,
 			"type": "decoder:output",
 			"channel": "decoders",
@@ -915,7 +927,12 @@
 						"duration": 8400,
 						"dmr": { "cc": 1 },
 						"quality": { "crcErrs": 4, "fecErrs": 3 },
-						"flags": { "encrypted": true }
+						"flags": {
+							"encrypted": true,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
 					}
 				}
 			}
@@ -927,14 +944,14 @@
 			"data": {
 				"decoderId": "multimon-ng",
 				"output": {
-					"type": "pocsag",
+					"type": "message",
 					"decoder": "multimon-ng",
 					"timestamp": "2026-10-08T18:07:20.000Z",
 					"data": {
 						"protocol": "POCSAG1200",
 						"address": 1234567,
 						"function": 3,
-						"messageType": "Alpha",
+						"messageType": "alpha",
 						"message": "FIRE ALARM ACTIVATION - 12 LONG STREET UNIT 4B - ZONE 3 SMOKE DETECTOR - RESPOND"
 					}
 				}
@@ -957,7 +974,13 @@
 						"slot": 2,
 						"duration": 3100,
 						"dmr": { "cc": 1 },
-						"quality": { "crcErrs": 2, "fecErrs": 0 }
+						"quality": { "crcErrs": 2, "fecErrs": 0 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
 					}
 				}
 			}
@@ -969,14 +992,14 @@
 			"data": {
 				"decoderId": "multimon-ng",
 				"output": {
-					"type": "pocsag",
+					"type": "message",
 					"decoder": "multimon-ng",
 					"timestamp": "2026-10-08T18:05:44.000Z",
 					"data": {
 						"protocol": "POCSAG1200",
 						"address": 7654321,
 						"function": 0,
-						"messageType": "Numeric",
+						"messageType": "numeric",
 						"message": "0207 555 0101"
 					}
 				}
@@ -999,7 +1022,13 @@
 						"slot": 1,
 						"duration": 1200,
 						"dmr": { "cc": 1 },
-						"quality": { "crcErrs": 1, "fecErrs": 1 }
+						"quality": { "crcErrs": 1, "fecErrs": 1 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
 					}
 				}
 			}
@@ -1011,12 +1040,14 @@
 			"data": {
 				"decoderId": "multimon-ng",
 				"output": {
-					"type": "flex",
+					"type": "message",
 					"decoder": "multimon-ng",
 					"timestamp": "2026-10-08T18:03:58.000Z",
 					"data": {
 						"protocol": "FLEX",
-						"capcode": "1-2345678",
+						"mode": "1600/2/A",
+						"frequency": "03.058",
+						"capcode": "1234567",
 						"messageType": "ALN",
 						"message": "TEST PAGE 03:58"
 					}
@@ -1040,7 +1071,13 @@
 						"slot": 1,
 						"duration": 12000,
 						"dmr": { "cc": 1 },
-						"quality": { "crcErrs": 3, "fecErrs": 2 }
+						"quality": { "crcErrs": 3, "fecErrs": 2 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
 					}
 				}
 			}

@@ -1,7 +1,7 @@
 {
 	"extends": "live",
 	"name": "long-text",
-	"description": "Long payloads, control characters, emoji and an over-long decoder id.",
+	"description": "Long payloads, control characters, emoji and an over-long decoder id (the last frame is a synthetic unknown type on purpose).",
 	"wsAppend": [
 		{
 			"offsetMs": -500,
@@ -10,13 +10,14 @@
 			"data": {
 				"decoderId": "multimon-ng",
 				"output": {
-					"type": "pocsag",
+					"type": "message",
 					"decoder": "multimon-ng",
 					"timestamp": "2026-10-08T18:07:49.500Z",
 					"data": {
+						"protocol": "POCSAG1200",
 						"address": 1112223,
 						"function": 2,
-						"messageType": "Alpha",
+						"messageType": "alpha",
 						"message": "EXTENDED MAINTENANCE NOTICE FOR SECTOR 7 \u001b[31mRED\u001b[0m BELL\u0007 THEN TAB\tAND NEWLINE\nAND 🚀 ROCKET - LINE ONE OF MANY - LINE TWO OF MANY - LINE THREE OF MANY - LINE FOUR OF MANY - LINE FIVE OF MANY - LINE SIX OF MANY - LINE SEVEN OF MANY - LINE EIGHT OF MANY - LINE NINE OF MANY - LINE TEN OF MANY - END"
 					}
 				}
@@ -29,16 +30,17 @@
 			"data": {
 				"decoderId": "ais-catcher",
 				"output": {
-					"type": "ais",
+					"type": "ship",
 					"decoder": "ais-catcher",
 					"timestamp": "2026-10-08T18:07:49.600Z",
 					"data": {
-						"mmsi": 235012345,
-						"shipname": "SEA PRINCESS OF THE NORTHERN WATERS AND THE FAR WESTERN ISLES",
-						"shiptype_text": "passenger",
-						"lat": 51.5,
-						"lon": -0.12,
-						"speed": 12.1
+						"mmsi": "235012345",
+						"name": "SEA PRINCESS OF THE NORTHERN WATERS AND THE FAR WESTERN ISLES",
+						"callsign": "MXYZ7",
+						"shipType": 60,
+						"destination": "PORT OF SOUTHAMPTON WESTERN DOCKS BERTH 101 VIA THE SOLENT",
+						"lastSeen": "2026-10-08T18:07:49.600Z",
+						"messageType": 5
 					}
 				}
 			}
@@ -53,9 +55,7 @@
 					"type": "weird",
 					"decoder": "an-extremely-long-decoder-identifier-used-for-truncation-tests",
 					"timestamp": "2026-10-08T18:07:49.700Z",
-					"data": {
-						"nested": { "deeper": { "deepest": [1, 2, 3, "\u009b2J"] } }
-					}
+					"data": { "nested": { "deeper": { "deepest": [1, 2, 3, "2J"] } } }
 				}
 			}
 		}

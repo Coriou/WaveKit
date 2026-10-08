@@ -8,6 +8,8 @@ export const SCENARIO_DIR = fileURLToPath(
 )
 export const DELETE = "$delete"
 const FANOUT_REST = "$fanoutRest"
+const SOURCE_STATUS = "$sourceStatus:"
+const DECODER_STATUS = "$decoderStatus:"
 
 /** DecoderStatus fields an older core does not send (CLI-COORDINATION requests 1-4). */
 const NEW_DECODER_FIELDS = [
@@ -136,23 +138,88 @@ function applyDropPercent(sc: Obj, pct: number): void {
 	}
 }
 
-/** A frame whose data is "$fanoutRest" carries a copy of the REST fanout body, so the two cannot drift. */
+/**
+ * Frame-data macros, expanded once at the top level so a child's restPatch reaches the copies:
+ * "$fanoutRest" is the REST fanout body, "$sourceStatus:<id>" and "$decoderStatus:<id>" are the
+ * REST /api/sources and /api/decoders items with that id (the source:status/decoder:status payloads).
+ */
 function expandMacros(sc: Obj): void {
-	const body = restBody(sc, "/api/telemetry/fanout")
-	sc["ws"] = list(sc["ws"]).map((fr: unknown) =>
-		isObj(fr) && fr["data"] === FANOUT_REST
-			? { ...fr, data: structuredClone(body) }
-			: fr,
-	)
+	const item = (path: string, id: string): unknown =>
+		list(restBody(sc, path)).find(x => isObj(x) && x["id"] === id)
+	const expand = (data: unknown): unknown => {
+		if (data === FANOUT_REST) return restBody(sc, "/api/telemetry/fanout")
+		if (typeof data !== "string") return data
+		if (data.startsWith(SOURCE_STATUS))
+			return item("/api/sources", data.slice(SOURCE_STATUS.length))
+		if (data.startsWith(DECODER_STATUS))
+			return item("/api/decoders", data.slice(DECODER_STATUS.length))
+		return data
+	}
+	sc["ws"] = list(sc["ws"]).map((fr: unknown) => {
+		if (!isObj(fr)) return fr
+		const data = expand(fr["data"])
+		if (data === undefined)
+			throw new Error(`scenario macro ${String(fr["data"])} has no target`)
+		return data === fr["data"] ? fr : { ...fr, data: structuredClone(data) }
+	})
 }
 
-function resolve(name: string): Obj {
+/** No IQ arrives: every fanout snapshot and metrics frame carries the REST counters, so nothing moves. */
+function applyStallIq(sc: Obj): void {
+	const rest = restBody(sc, "/api/telemetry/fanout")
+	if (!isObj(rest)) return
+	const byId = new Map<string, Obj>()
+	for (const b of list(rest["branches"]))
+		if (isObj(b)) byId.set(String(b["id"]), b)
+	for (const b of byId.values()) {
+		b["backpressureActive"] = false
+		delete b["backpressureSince"]
+	}
+	rest["backpressureActiveCount"] = 0
+	for (const fr of list(sc["ws"])) {
+		const data = isObj(fr) ? fr["data"] : undefined
+		if (!isObj(fr) || !isObj(data)) continue
+		if (fr["type"] === "fanout:snapshot") {
+			for (const k of [
+				"totalBytesWritten",
+				"droppedBytesTotal",
+				"droppedChunksTotal",
+				"backpressureActiveCount",
+			]) {
+				if (rest[k] !== undefined) data[k] = rest[k]
+			}
+			data["branches"] = list(data["branches"]).map(b =>
+				isObj(b) && byId.has(String(b["id"]))
+					? structuredClone(byId.get(String(b["id"])))
+					: b,
+			)
+		}
+		if (fr["type"] === "metrics") {
+			const src = list(restBody(sc, "/api/sources")).find(
+				x => isObj(x) && x["id"] === data["sourceId"],
+			)
+			if (isObj(src))
+				fr["data"] = {
+					...data,
+					bytesReceived: src["bytesReceived"],
+					dataRate: 0,
+				}
+		}
+	}
+}
+
+interface Composed {
+	sc: Obj
+	transforms: Obj[]
+}
+
+/** extends, restPatch, noOutputs (inherited outputs only) and wsAppend, level by level; transforms are collected. */
+function compose(name: string): Composed {
 	const own = readRaw(name)
 	const parentName = own["extends"]
+	const parent = typeof parentName === "string" ? compose(parentName) : null
 	const sc = structuredClone(
-		typeof parentName === "string"
-			? (deepMerge(resolve(parentName), { ...own, extends: DELETE }) as Obj)
-			: own,
+		parent ? (deepMerge(parent.sc, { ...own, extends: DELETE }) as Obj) : own,
 	)
 	const patch = isObj(own["restPatch"]) ? own["restPatch"] : {}
 	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
@@ -161,27 +228,47 @@ function resolve(name: string): Obj {
 		if (isObj(r) && isObj(merge)) r["body"] = mergeById(r["body"], merge)
 	}
 	const t = isObj(own["transform"]) ? own["transform"] : {}
-	// noOutputs removes inherited outputs only; frames this scenario appends are kept.
 	const inherited = list(sc["ws"])
 	const kept =
 		t["noOutputs"] === true
 			? inherited.filter(f => !(isObj(f) && f["type"] === "decoder:output"))
 			: inherited
 	sc["ws"] = [...kept, ...list(own["wsAppend"])]
-	expandMacros(sc)
-	if (typeof t["dropPercent"] === "number")
-		applyDropPercent(sc, t["dropPercent"])
-	if (t["legacy"] === true) applyLegacy(sc)
 	delete sc["restPatch"]
 	delete sc["transform"]
 	delete sc["wsAppend"]
 	delete sc["extends"]
+	return { sc, transforms: [...(parent?.transforms ?? []), t] }
+}
+
+function resolve(name: string): Obj {
+	const { sc, transforms } = compose(name)
+	expandMacros(sc)
+	const last = <T>(pick: (t: Obj) => T | undefined): T | undefined =>
+		transforms.reduce<T | undefined>((acc, t) => pick(t) ?? acc, undefined)
+	const pct = last(t =>
+		typeof t["dropPercent"] === "number" ? t["dropPercent"] : undefined,
+	)
+	if (last(t => (t["stallIq"] === true ? true : undefined))) applyStallIq(sc)
+	else if (pct !== undefined) applyDropPercent(sc, pct)
+	if (last(t => (t["legacy"] === true ? true : undefined))) applyLegacy(sc)
 	sc["name"] = name
 	return sc
 }
 
+/**
+ * Scenarios beyond SCENARIO_NAMES (spec §9 copy rows): IQ stale, IQ disconnected, a faulted decoder.
+ * Proposed for SCENARIO_NAMES; until then they load by name here and in the mock core.
+ */
+export const EXTRA_SCENARIO_NAMES = [
+	"iq-stale",
+	"iq-disconnected",
+	"decoder-faulted",
+] as const
+export type ExtraScenarioName = (typeof EXTRA_SCENARIO_NAMES)[number]
+
 /** Fully resolved scenario (extends, restPatch, wsAppend, macros and transforms applied). */
-export function loadScenario(name: ScenarioName): Scenario {
+export function loadScenario(name: ScenarioName | ExtraScenarioName): Scenario {
 	return resolve(name) as unknown as Scenario
 }
 

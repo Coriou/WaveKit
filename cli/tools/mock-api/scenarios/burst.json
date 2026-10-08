@@ -1,7 +1,7 @@
 {
 	"extends": "live",
 	"name": "burst",
-	"description": "Receiver at 1090 MHz; mixed ADS-B/AIS rows including an emergency squawk.",
+	"description": "Receiver at 1090 MHz; mixed protocols (ADS-B with an emergency squawk, AIS, APRS, VDL2, rtl_433, Meshtastic, DMR call start).",
 	"restPatch": {
 		"/api/tuner": { "pi-iq": { "frequency": 1090000000 } },
 		"/api/sources": { "pi-iq": { "caps": { "centerFreq": 1090000000 } } }
@@ -57,18 +57,62 @@
 					"decoder": "readsb",
 					"timestamp": "2026-10-08T18:07:48.000Z",
 					"data": {
-						"hex": "4ca9d2",
-						"flight": "RYR4KT ",
-						"alt_baro": 37000,
-						"baro_rate": -1216,
-						"gs": 451.2,
+						"icao": "4CA9D2",
+						"callsign": "RYR4KT",
+						"altitude": 37000,
+						"groundSpeed": 451.2,
 						"track": 134.1,
 						"lat": 51.4712,
 						"lon": -0.4521,
+						"verticalRate": -1216,
 						"squawk": "7700",
-						"rssi": -12.3,
-						"seen": 0.4,
-						"messages": 1204
+						"lastSeen": "2026-10-08T18:07:48.000Z",
+						"messageCount": 1204
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -4000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "direwolf",
+				"output": {
+					"type": "aprs",
+					"decoder": "direwolf",
+					"timestamp": "2026-10-08T18:07:46.000Z",
+					"data": {
+						"timestamp": "2026-10-08T18:07:46.000Z",
+						"source": "G4ABC-9",
+						"destination": "APDW16",
+						"path": ["WIDE1-1", "WIDE2-1"],
+						"dataType": "Position with messaging",
+						"lat": 51.4775,
+						"lon": -0.0014,
+						"symbol": "/>",
+						"comment": "mobile 145.800",
+						"raw": "=5128.65N/00000.08W>mobile 145.800"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -6000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dsd-fme",
+				"output": {
+					"type": "call_start",
+					"decoder": "dsd-fme",
+					"timestamp": "2026-10-08T18:07:44.000Z",
+					"data": {
+						"protocol": "dmr",
+						"talkgroup": 2350,
+						"source": 2341234,
+						"slot": 1,
+						"dmr": { "cc": 1 }
 					}
 				}
 			}
@@ -80,16 +124,59 @@
 			"data": {
 				"decoderId": "ais-catcher",
 				"output": {
-					"type": "ais",
+					"type": "ship",
 					"decoder": "ais-catcher",
 					"timestamp": "2026-10-08T18:07:42.000Z",
 					"data": {
-						"mmsi": 235012345,
-						"shipname": "SEA PRINCESS OF THE NORTHERN WATERS",
-						"shiptype_text": "passenger",
+						"mmsi": "235012345",
 						"lat": 51.5,
 						"lon": -0.12,
-						"speed": 12.1
+						"cog": 265.2,
+						"sog": 12.1,
+						"heading": 266,
+						"navStatus": 0,
+						"lastSeen": "2026-10-08T18:07:42.000Z",
+						"messageType": 1
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -11000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dumpvdl2",
+				"output": {
+					"type": "vdl2",
+					"decoder": "dumpvdl2",
+					"timestamp": "2026-10-08T18:07:39.000Z",
+					"data": {
+						"timestamp": "2026-10-08T18:07:39.000Z",
+						"frequency": 136975000,
+						"station": "EGLL",
+						"icao": "4CA9D2",
+						"toaddr": "10A0E1",
+						"fromaddr": "4CA9D2",
+						"msgType": "acars",
+						"acars": {
+							"timestamp": "2026-10-08T18:07:39.000Z",
+							"frequency": 136975000,
+							"channel": 0,
+							"level": -21.3,
+							"error": 0,
+							"mode": "2",
+							"label": "H1",
+							"blockId": "5",
+							"ack": "!",
+							"tail": ".EI-DCL",
+							"flight": "FR4KT",
+							"msgno": "M12A",
+							"text": "REQ PWI DES"
+						},
+						"level": -21.3,
+						"noiseFloor": -48.1,
+						"frameType": "I"
 					}
 				}
 			}
@@ -105,15 +192,72 @@
 					"decoder": "readsb",
 					"timestamp": "2026-10-08T18:07:36.000Z",
 					"data": {
-						"hex": "4ca9d2",
-						"flight": "RYR4KT ",
-						"alt_baro": 37500,
-						"baro_rate": -1100,
-						"gs": 449,
+						"icao": "4CA9D2",
+						"callsign": "RYR4KT",
+						"altitude": 37500,
+						"groundSpeed": 449,
 						"track": 134,
 						"lat": 51.49,
 						"lon": -0.47,
-						"squawk": "7700"
+						"verticalRate": -1100,
+						"squawk": "7700",
+						"lastSeen": "2026-10-08T18:07:36.000Z",
+						"messageCount": 1190
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -20000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "rtl433",
+				"output": {
+					"type": "signal",
+					"decoder": "rtl433",
+					"timestamp": "2026-10-08T18:07:30.000Z",
+					"data": {
+						"time": "2026-10-08 18:07:30",
+						"model": "Acurite-Tower",
+						"id": 12345,
+						"channel": "A",
+						"battery_ok": 1,
+						"temperature_C": 18.2,
+						"humidity": 64,
+						"mic": "CHECKSUM"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -30000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "lora-meshtastic",
+				"output": {
+					"type": "meshtastic",
+					"decoder": "lora-meshtastic",
+					"timestamp": "2026-10-08T18:07:20.000Z",
+					"data": {
+						"from": 305419896,
+						"to": 4294967295,
+						"id": 2882400001,
+						"channel": 8,
+						"hopLimit": 3,
+						"hopStart": 3,
+						"wantAck": false,
+						"portnum": 1,
+						"payloadB64": "aGVsbG8gbWVzaA==",
+						"payloadLen": 10,
+						"rxRssi": -92,
+						"rxSnr": 6.5,
+						"rxTime": "2026-10-08T18:07:20.000Z",
+						"frequency": 869525000,
+						"bw": 250000,
+						"sf": 11,
+						"cr": 5
 					}
 				}
 			}
@@ -129,14 +273,16 @@
 					"decoder": "readsb",
 					"timestamp": "2026-10-08T18:07:09.000Z",
 					"data": {
-						"hex": "3c6444",
-						"flight": "DLH4XP",
-						"alt_baro": 12000,
-						"baro_rate": 1500,
-						"gs": 312,
+						"icao": "3C6444",
+						"callsign": "DLH4XP",
+						"altitude": 12000,
+						"groundSpeed": 312,
 						"track": 45,
 						"lat": 51.21,
-						"lon": -0.31
+						"lon": -0.31,
+						"verticalRate": 1500,
+						"lastSeen": "2026-10-08T18:07:09.000Z",
+						"messageCount": 312
 					}
 				}
 			}
@@ -148,16 +294,39 @@
 			"data": {
 				"decoderId": "ais-catcher",
 				"output": {
-					"type": "ais",
+					"type": "ship",
 					"decoder": "ais-catcher",
 					"timestamp": "2026-10-08T18:07:08.000Z",
 					"data": {
-						"mmsi": 244660123,
-						"shipname": "EEMS SPIRIT",
-						"shiptype_text": "cargo",
-						"lat": 51.44,
-						"lon": 0.21,
-						"speed": 8.4
+						"mmsi": "244660123",
+						"name": "EEMS SPIRIT",
+						"callsign": "PBXY",
+						"shipType": 70,
+						"destination": "ROTTERDAM",
+						"lastSeen": "2026-10-08T18:07:08.000Z",
+						"messageType": 5
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -43000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "ais-catcher",
+				"output": {
+					"type": "ship",
+					"decoder": "ais-catcher",
+					"timestamp": "2026-10-08T18:07:07.000Z",
+					"data": {
+						"mmsi": "235012345",
+						"name": "SEA PRINCESS OF THE NORTHERN WATERS",
+						"callsign": "MXYZ7",
+						"shipType": 60,
+						"destination": "SOUTHAMPTON",
+						"lastSeen": "2026-10-08T18:07:07.000Z",
+						"messageType": 5
 					}
 				}
 			}
@@ -173,15 +342,17 @@
 					"decoder": "readsb",
 					"timestamp": "2026-10-08T18:06:40.000Z",
 					"data": {
-						"hex": "4ca9d2",
-						"flight": "RYR4KT ",
-						"alt_baro": 38000,
-						"baro_rate": -900,
-						"gs": 447,
+						"icao": "4CA9D2",
+						"callsign": "RYR4KT",
+						"altitude": 38000,
+						"groundSpeed": 447,
 						"track": 134,
 						"lat": 51.51,
 						"lon": -0.49,
-						"squawk": "7700"
+						"verticalRate": -900,
+						"squawk": "7700",
+						"lastSeen": "2026-10-08T18:06:40.000Z",
+						"messageCount": 1100
 					}
 				}
 			}

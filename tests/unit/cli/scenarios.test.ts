@@ -2,6 +2,7 @@ import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
+	EXTRA_SCENARIO_NAMES,
 	SCENARIO_DIR,
 	deepMerge,
 	loadScenario,
@@ -32,6 +33,26 @@ function dropNow(sc: Scenario): Record<string, number> {
 		const dO = Number(b["totalBytesWritten"]) - Number(b0["totalBytesWritten"])
 		const dD = Number(b["droppedBytesTotal"]) - Number(b0["droppedBytesTotal"])
 		out[b["decoderId"]] = Math.round((dD / dO) * 1000) / 10
+	}
+	return out
+}
+
+/** Like dropNow, but a branch with Δoffered ≤ 0 is unknown (null), as spec §10.6 says. */
+function dropNowOrNull(sc: Scenario): Record<string, number | null> {
+	const frames = fanoutFrames(sc)
+	const first = new Map(
+		(frames[0]?.["branches"] as Obj[]).map(b => [b["id"], b]),
+	)
+	const out: Record<string, number | null> = {}
+	for (const b of frames[frames.length - 1]?.["branches"] as Obj[]) {
+		const b0 = first.get(b["id"])
+		if (typeof b["decoderId"] !== "string" || !b0) continue
+		const dO = Number(b["totalBytesWritten"]) - Number(b0["totalBytesWritten"])
+		out[b["decoderId"]] =
+			dO > 0
+				? (Number(b["droppedBytesTotal"]) - Number(b0["droppedBytesTotal"])) /
+					dO
+				: null
 	}
 	return out
 }
@@ -158,7 +179,19 @@ describe("scenario loader", () => {
 		const outputs = sc.ws
 			.filter(f => f.type === "decoder:output")
 			.map(f => (f.data as Obj)["decoderId"])
-		expect(new Set(outputs)).toEqual(new Set(["readsb", "ais-catcher"]))
+		expect(new Set(outputs)).toEqual(
+			new Set([
+				"readsb",
+				"ais-catcher",
+				"direwolf",
+				"dsd-fme",
+				"dumpvdl2",
+				"rtl433",
+				"lora-meshtastic",
+			]),
+		)
+		const status = sc.ws.find(f => f.type === "source:status")?.data as Obj
+		expect((status["caps"] as Obj)["centerFreq"]).toBe(1090000000)
 	})
 	it("crash-loop keeps live's REST and replaces its history", () => {
 		const sc = loadScenario("crash-loop")
@@ -166,5 +199,139 @@ describe("scenario loader", () => {
 			-240000, -120000, -60000,
 		])
 		expect(sc.conn).toEqual(loadScenario("live").conn)
+	})
+
+	it("live carries one source:status and one decoder:status equal to their REST items", () => {
+		const sc = loadScenario("live")
+		const source = sc.ws.filter(f => f.type === "source:status")
+		const decoder = sc.ws.filter(f => f.type === "decoder:status")
+		expect(source).toHaveLength(1)
+		expect(decoder).toHaveLength(1)
+		expect(source[0]?.data).toEqual((sc.rest["/api/sources"]?.body as Obj[])[0])
+		expect(decoder[0]?.data).toEqual(
+			(sc.rest["/api/decoders"]?.body as Obj[]).find(
+				d => d["id"] === "acarsdec",
+			),
+		)
+	})
+	it("decoder outputs use the core wire shapes (src/decoders/builtin, R33)", () => {
+		const TYPES: Record<string, string[]> = {
+			"dsd-fme": ["call_start", "call_end"],
+			"multimon-ng": ["message", "decode"],
+			rtl433: ["signal"],
+			readsb: ["aircraft"],
+			acarsdec: ["acars"],
+			"ais-catcher": ["ship"],
+			dumpvdl2: ["vdl2"],
+			direwolf: ["aprs"],
+			"lora-meshtastic": ["meshtastic"],
+		}
+		const has = (o: Obj, keys: string[]) => keys.every(k => o[k] !== undefined)
+		let checked = 0
+		for (const name of [...SCENARIO_NAMES, ...EXTRA_SCENARIO_NAMES]) {
+			for (const f of loadScenario(name).ws) {
+				if (f.type !== "decoder:output") continue
+				const { decoderId, output } = f.data as {
+					decoderId: string
+					output: Obj
+				}
+				const allowed = TYPES[decoderId]
+				if (allowed === undefined) continue // long-text's synthetic over-long id
+				checked++
+				const where = `${name} ${decoderId} ${String(output["type"])}`
+				expect(allowed, where).toContain(output["type"])
+				expect(output["decoder"], where).toBe(decoderId)
+				expect(
+					Number.isNaN(Date.parse(String(output["timestamp"]))),
+					where,
+				).toBe(false)
+				const d = output["data"] as Obj
+				switch (output["type"]) {
+					case "call_start":
+					case "call_end":
+						expect(has(d, ["protocol", "talkgroup", "source"]), where).toBe(
+							true,
+						)
+						if (output["type"] === "call_end")
+							expect(has(d, ["duration", "quality", "flags"]), where).toBe(true)
+						break
+					case "message":
+						expect(String(d["protocol"]), where).toMatch(
+							/^(POCSAG\d+|FLEX|EAS)$/,
+						)
+						if (String(d["protocol"]).startsWith("POCSAG"))
+							expect(
+								["alpha", "numeric", "tone only", "unknown"],
+								where,
+							).toContain(d["messageType"])
+						break
+					case "ship":
+						expect(d["mmsi"], where).toMatch(/^\d{9}$/)
+						if (d["shipType"] !== undefined)
+							expect(typeof d["shipType"], where).toBe("number")
+						break
+					case "aircraft":
+						expect(d["icao"], where).toMatch(/^[0-9A-F]{6}$/)
+						expect(has(d, ["lastSeen", "messageCount"]), where).toBe(true)
+						break
+					case "vdl2":
+						expect(d["frequency"] as number, where).toBeGreaterThan(100_000_000)
+						break
+					case "aprs":
+						expect(
+							Array.isArray(d["path"]) &&
+								has(d, ["source", "destination", "dataType"]),
+							where,
+						).toBe(true)
+						break
+					case "signal":
+						expect(has(d, ["model"]), where).toBe(true)
+						break
+					case "meshtastic":
+						expect(
+							has(d, [
+								"from",
+								"to",
+								"portnum",
+								"payloadB64",
+								"rxTime",
+								"frequency",
+								"sf",
+							]),
+							where,
+						).toBe(true)
+						break
+				}
+			}
+		}
+		expect(checked).toBeGreaterThan(20)
+	})
+	it("extra scenarios cover stale IQ, a disconnected source and a faulted decoder", () => {
+		const stale = loadScenario("iq-stale")
+		const src = (stale.rest["/api/sources"]?.body as Obj[])[0] as Obj
+		expect((src["activity"] as Obj)["state"]).toBe("stale")
+		for (const pct of Object.values(dropNowOrNull(stale)))
+			expect(pct).toBeNull()
+		const fanout = stale.rest["/api/telemetry/fanout"]?.body as Obj
+		expect(fanout["backpressureActiveCount"]).toBe(0)
+		const disc = loadScenario("iq-disconnected")
+		const dsrc = (disc.rest["/api/sources"]?.body as Obj[])[0] as Obj
+		expect(dsrc["connected"]).toBe(false)
+		expect((dsrc["activity"] as Obj)["state"]).toBe("disconnected")
+		expect(
+			(disc.ws.find(f => f.type === "source:status")?.data as Obj)["connected"],
+		).toBe(false)
+		const faulted = loadScenario("decoder-faulted")
+		const acars = (faulted.rest["/api/decoders"]?.body as Obj[]).find(
+			d => d["id"] === "acarsdec",
+		) as Obj
+		expect(acars["health"]).toBe("faulted")
+		expect(
+			(faulted.ws.find(f => f.type === "decoder:status")?.data as Obj)[
+				"health"
+			],
+		).toBe("faulted")
+		for (const name of EXTRA_SCENARIO_NAMES)
+			expect(readdirSync(SCENARIO_DIR)).toContain(`${name}.json`)
 	})
 })
