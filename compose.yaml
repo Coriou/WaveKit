@@ -2,6 +2,45 @@ name: wavekit
 
 services:
 
+  # ---------- standalone Docker application (no SDR++ dependency) ----------
+  wavekit-app:
+    profiles: ["app"]
+    image: ${WAVEKIT_APP_IMAGE:-wavekit:local-core}
+    build:
+      context: .
+      target: final-core
+    container_name: wavekit-app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      WAVEKIT_CONFIG: ${WAVEKIT_APP_CONFIG:-/app/config/docker.yaml}
+      WAVEKIT_API__HOST: "0.0.0.0"
+      WAVEKIT_API__PORT: "9000"
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:4713:4713"
+    networks: [wavekit]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config:/app/config:ro
+      - ./decoded_calls:/app/decoded_calls
+      - ./fixtures:/app/fixtures:ro
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    stop_grace_period: 15s
+
   # ---------- dev profile ----------
   sdrpp-server:
     profiles: ["dev"]

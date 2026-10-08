@@ -75,7 +75,7 @@ services:
     environment:
       SDR_HOST_RTL_TCP__SAMPLE_RATE: "2048000"
       SDR_HOST_RTL_TCP__FREQUENCY: "446524920"
-      SDR_HOST_RTL_TCP__BUFFER: "512"
+      SDR_HOST_RTL_TCP__BUFFER: "15"
       SDR_HOST_RTL_TCP__AGC: "false"
       SDR_HOST_RTL_TCP__GAIN: "49"
       SDR_HOST_RTLMUX__PORT: "5555"
@@ -103,7 +103,7 @@ Legacy parity (old systemd setup):
 
 ```bash
 SDR_HOST_RTL_TCP__FREQUENCY=446524920
-SDR_HOST_RTL_TCP__BUFFER=512
+SDR_HOST_RTL_TCP__BUFFER=15
 ```
 
 ## Configure WaveKit

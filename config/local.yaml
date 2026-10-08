@@ -1,0 +1,21 @@
+# Native API/dashboard mode. Starts without a Pi, dongle, Docker, or decoders.
+# Explicitly selected by pnpm start:local / pnpm dev:local.
+sources: []
+decoders: []
+api:
+  host: 127.0.0.1
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: false
+liveDemod:
+  enabled: false
+resources:
+  containerMonitor:
+    enabled: false
+  sdrHostPoller:
+    enabled: false
+logging:
+  level: info

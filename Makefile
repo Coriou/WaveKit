@@ -5,11 +5,12 @@
 .DEFAULT_GOAL := help
 
 .PHONY: help \
-	dev dev-dashboard dev-dashboard-build dev-configs \
+	app-up app-down app-logs app-status \
+	dev dev-local dev-rtl rtl-serve doctor dev-dashboard dev-dashboard-build dev-configs \
 	dev-stack dev-stack-down dev-stack-logs dev-shell dev-status \
 	docker-init docker-build docker-push docker-clean docker-prune \
 	demod-test \
-	sdr-host-build sdr-host-build-multi sdr-host-install sdr-host-init \
+	sdr-host-build sdr-host-build-multi sdr-host-bundle sdr-host-install sdr-host-init \
 	sdr-host-up sdr-host-update sdr-host-down sdr-host-restart \
 	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
 	sdr-host-clean \
@@ -19,6 +20,7 @@
 # SDR-host variables (preserved from prior Makefile)
 SDR_HOST_TAG ?= latest
 SDR_HOST_PLATFORMS ?= linux/arm64
+SDR_HOST_BUNDLE_ARGS ?=
 
 # Dev container (used by fixtures-test which exec's into the dev stack)
 DEV_CONTAINER ?= wavekit-api
@@ -37,13 +39,40 @@ help: ## Show this help message
 		/^[a-zA-Z][a-zA-Z0-9_-]+:.*?## / {printf "  %-25s %s\n", $$1, $$2}' \
 		$(MAKEFILE_LIST)
 
+# === Docker application (normal runtime, no SDR++ dependency) ===
+
+app-up: ## Start Docker app; optional WAVEKIT_APP_CONFIG selects a container config path
+	docker compose --profile app up -d wavekit-app
+
+app-down: ## Stop and remove the Docker app container
+	docker compose --profile app rm -sf wavekit-app
+
+app-logs: ## Follow Docker app logs
+	docker compose --profile app logs -f --tail=100 wavekit-app
+
+app-status: ## Show Docker app status and check its local API
+	@docker compose --profile app ps wavekit-app
+	@curl -fsS http://127.0.0.1:9000/health
+
 # === Native dev loop (no Docker) ===
 
 dev: ## Run app natively with hot-reload (esbuild watch + node --watch, no Docker)
 	@pnpm dev
 
+dev-local: ## Run natively without a Pi, dongle, Docker, or decoder binaries
+	@pnpm dev:local
+
+dev-rtl: ## Run natively with IQ from local rtl_tcp (start rtl-serve first)
+	@pnpm dev:rtl
+
+rtl-serve: ## Serve a plugged-in USB RTL-SDR with native rtl_tcp on localhost:1234
+	@pnpm rtl:serve
+
+doctor: ## Show installed binaries and missing native decoder dependencies
+	@pnpm run doctor
+
 dev-dashboard: dev-dashboard-build ## Launch Ink/React CLI dashboard (interactive)
-	@WAVEKIT_WS_URLS=ws://localhost:9000/ws,ws://localhost:4713/ws node ./cli/dist/cli.js
+	@node ./cli/dist/cli.js
 
 dev-dashboard-build: ## Build CLI dashboard bundle (installs cli deps if missing)
 	@test -d cli/node_modules || pnpm --filter @wavekit/cli install --silent
@@ -104,6 +133,9 @@ sdr-host-build: ## Build & publish sdr-host image (default: arm64)
 
 sdr-host-build-multi: ## Build & publish multi-arch sdr-host image
 	@bash ./packages/sdr-host/scripts/build-publish.sh --tag $(SDR_HOST_TAG) --multi-arch
+
+sdr-host-bundle: ## Build portable ARM64 Pi bundle (add SDR_HOST_BUNDLE_ARGS=--skip-build to reuse image)
+	@bash ./packages/sdr-host/scripts/build-pi-bundle.sh $(SDR_HOST_BUNDLE_ARGS)
 
 sdr-host-install: ## Install docker + deps on host (run on host)
 	@bash ./packages/sdr-host/scripts/sdr-host.sh install

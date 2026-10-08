@@ -1,0 +1,40 @@
+# All hardware access and decoding run inside Docker.
+# Use with compose.usb.yaml on Linux or after attaching USB to OrbStack.
+# The SDR host defaults match this source's sample rate and initial frequency.
+sources:
+  - id: local-usb-iq
+    type: rtl_tcp
+    host: wavekit-usb-sdr-host
+    port: 5555
+    caps:
+      kind: iq
+      format: U8_IQ
+      sampleRate: 2048000
+      centerFreq: 446524920
+      exclusive: false
+    sdrHost:
+      apiUrl: http://wavekit-usb-sdr-host:8080
+      rtlmuxStatsUrl: http://wavekit-usb-sdr-host:5556/stats.json
+decoders: []
+api:
+  host: 0.0.0.0
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: true
+  host: 0.0.0.0
+  port: 4713
+  sourceId: local-usb-iq
+  controlPolicy: exclusive
+liveDemod:
+  enabled: false
+  sourceId: local-usb-iq
+resources:
+  containerMonitor:
+    enabled: true
+  sdrHostPoller:
+    enabled: true
+logging:
+  level: info

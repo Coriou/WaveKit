@@ -96,12 +96,12 @@ function getCandidateWsUrls(): string[] {
 		}
 	}
 
-	// Defaults: dev container uses 9000, docker-compose exposes 4713
+	// Local profiles and Docker use 9000; the default native config uses 3000.
 	return [
 		"ws://localhost:9000/ws",
-		"ws://localhost:4713/ws",
+		"ws://localhost:3000/ws",
 		"ws://127.0.0.1:9000/ws",
-		"ws://127.0.0.1:4713/ws",
+		"ws://127.0.0.1:3000/ws",
 	]
 }
 

@@ -1,0 +1,36 @@
+# Native rtl_tcp source. Start pnpm rtl:serve with a USB dongle plugged in.
+# Only WaveKit connects to rtl_tcp; SDR++ can connect to WaveKit's relay on 4713.
+sources:
+  - id: local-iq
+    type: rtl_tcp
+    host: 127.0.0.1
+    port: 1234
+    caps:
+      kind: iq
+      format: U8_IQ
+      sampleRate: 2048000
+      centerFreq: 446524920
+      exclusive: false
+decoders: []
+api:
+  host: 127.0.0.1
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: true
+  host: 127.0.0.1
+  port: 4713
+  sourceId: local-iq
+  controlPolicy: exclusive
+liveDemod:
+  enabled: false
+  sourceId: local-iq
+resources:
+  containerMonitor:
+    enabled: false
+  sdrHostPoller:
+    enabled: false
+logging:
+  level: info

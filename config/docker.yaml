@@ -1,0 +1,20 @@
+# Default Docker runtime: start the API even while hardware is unavailable.
+sources: []
+decoders: []
+api:
+  host: 0.0.0.0
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: false
+liveDemod:
+  enabled: false
+resources:
+  containerMonitor:
+    enabled: true
+  sdrHostPoller:
+    enabled: false
+logging:
+  level: info

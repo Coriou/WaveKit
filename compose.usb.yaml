@@ -1,0 +1,62 @@
+# Local USB SDR hardware inside Docker (Linux or OrbStack USB passthrough).
+# On OrbStack, attach only your RTL-SDR with: orbctl usb attach <device-id>
+# Launch: docker compose -f compose.yaml -f compose.usb.yaml --profile app up -d --build
+services:
+  wavekit-app:
+    environment:
+      WAVEKIT_CONFIG: ${WAVEKIT_APP_CONFIG:-/app/config/docker-usb.yaml}
+    depends_on:
+      wavekit-usb-sdr-host:
+        condition: service_started
+    networks:
+      - wavekit-usb
+
+  wavekit-usb-sdr-host:
+    profiles: ["app"]
+    image: ${WAVEKIT_SDR_HOST_IMAGE:-wavekit-sdr-host:local}
+    build:
+      context: .
+      dockerfile: packages/sdr-host/Dockerfile
+    container_name: wavekit-usb-sdr-host
+    restart: unless-stopped
+    networks:
+      - wavekit-usb
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb:rw
+    device_cgroup_rules:
+      - "c 189:* rmw"
+    environment:
+      # Match config/docker-usb.yaml source capabilities when changing these.
+      SDR_HOST_RTL_TCP__SAMPLE_RATE: "2048000"
+      SDR_HOST_RTL_TCP__FREQUENCY: "446524920"
+      SDR_HOST_RTL_TCP__BUFFER: "${SDR_HOST_RTL_TCP__BUFFER:-15}"
+      SDR_HOST_RTL_TCP__AGC: "${SDR_HOST_RTL_TCP__AGC:-false}"
+      SDR_HOST_RTL_TCP__GAIN: "${SDR_HOST_RTL_TCP__GAIN:-49}"
+      SDR_HOST_RTL_TCP__PPM: "${SDR_HOST_RTL_TCP__PPM:-0}"
+      SDR_HOST_RTL_TCP__DEVICE_INDEX: "${SDR_HOST_RTL_TCP__DEVICE_INDEX:-0}"
+      SDR_HOST_RTLMUX__PORT: "5555"
+      SDR_HOST_API__PORT: "8080"
+      SDR_HOST_LOGGING__LEVEL: "${SDR_HOST_LOGGING__LEVEL:-info}"
+    # IQ stays on the container network; the app exposes its tuner relay.
+    # Keep the SDR status API separate from the app's audio listener on 8080.
+    ports:
+      - "127.0.0.1:18080:8080"
+      - "127.0.0.1:5556:5556"
+    logging:
+      driver: local
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 15s
+
+networks:
+  wavekit-usb:
+    driver: bridge
+    # rtlmux opens an IPv6 socket for its HTTP stats server.
+    enable_ipv6: true

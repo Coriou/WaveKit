@@ -2,7 +2,7 @@
 
 **Multi-protocol SDR signal decoder with real-time streaming**
 
-WaveKit connects to Software Defined Radio sources and decodes multiple signal types simultaneously. Aircraft tracking, ship positions, pager messages, digital voice, weather sensors—all decoded in parallel and streamed via WebSocket.
+WaveKit connects to Software Defined Radio sources and decodes multiple signal types within the captured frequency window. Different bands require retuning or additional dongles. Aircraft tracking, ship positions, pager messages, digital voice, weather sensors—all decoded in parallel and streamed via WebSocket.
 It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tune locally without opening a second upstream connection.
 
 ```
@@ -16,22 +16,27 @@ It can also expose the internal IQ stream as an RTL-TCP endpoint so SDR++ can tu
 
 ## Quick Start
 
+Run WaveKit and its decoder tools in Docker. From the repository root:
+
 ```bash
-# Clone and install
-git clone https://github.com/coriou/wavekit.git && cd wavekit
-pnpm install
-
-# Run natively (esbuild watch + node --watch, no Docker)
-pnpm dev
-
-# Or bring up the full container stack (sdrpp-server + wavekit-api)
-make dev-stack
-
-# Open the interactive dashboard
-make dev-dashboard
+make app-up
+make app-status
+# Follow logs:
+make app-logs
 ```
 
-The dashboard shows decoder health, live decoded messages, backpressure status, and source connections—all in your terminal.
+The standalone app runs at http://127.0.0.1:9000 with no hardware required and
+no dependency on SDR++. Compose uses `wavekit:local-core` and builds the
+`final-core` image if it is missing. The image contains Node and the decoder
+binaries; no host decoder installation is needed.
+
+See [Docker runtime](docs/DOCKER-RUNTIME.md) to select the Pi source or a USB
+bridge and [fresh-card Pi setup](packages/sdr-host/README.md) for the bundled
+SDR host installer. Stop the app with `make app-down`.
+
+Native scripts are optional development tools: `pnpm install --frozen-lockfile`,
+`pnpm run doctor`, and `pnpm dev:local`. The terminal dashboard can be launched
+with `make dev-dashboard` against the Docker API. See [native development](docs/LOCAL-SETUP.md).
 
 ## CLI Dashboard
 

@@ -1,0 +1,40 @@
+# Copy to docker-pi.local.yaml and replace 192.0.2.10 with the Pi's LAN IP.
+# The example address is reserved for documentation and will not reach your Pi.
+# Use a LAN IP: mDNS .local names may not resolve inside a Linux container/VM.
+sources:
+  - id: pi-iq
+    type: rtl_tcp
+    host: 192.0.2.10
+    port: 5555
+    caps:
+      kind: iq
+      format: U8_IQ
+      sampleRate: 2048000
+      centerFreq: 446524920
+      exclusive: false
+    sdrHost:
+      apiUrl: http://192.0.2.10:8080
+      rtlmuxStatsUrl: http://192.0.2.10:5556/stats.json
+decoders: []
+api:
+  host: 0.0.0.0
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: true
+  host: 0.0.0.0
+  port: 4713
+  sourceId: pi-iq
+  controlPolicy: exclusive
+liveDemod:
+  enabled: false
+  sourceId: pi-iq
+resources:
+  containerMonitor:
+    enabled: true
+  sdrHostPoller:
+    enabled: true
+logging:
+  level: info

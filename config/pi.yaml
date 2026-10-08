@@ -1,0 +1,40 @@
+# Pi SDR-host source. The Pi container owns the dongle and serves rtlmux.
+# Change wavekit-pi.local to the Pi address if your network does not resolve mDNS.
+# Defaults match the bundled SDR-host container.
+sources:
+  - id: pi-iq
+    type: rtl_tcp
+    host: wavekit-pi.local
+    port: 5555
+    caps:
+      kind: iq
+      format: U8_IQ
+      sampleRate: 2048000
+      centerFreq: 446524920
+      exclusive: false
+    sdrHost:
+      apiUrl: http://wavekit-pi.local:8080
+      rtlmuxStatsUrl: http://wavekit-pi.local:5556/stats.json
+decoders: []
+api:
+  host: 127.0.0.1
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: true
+  host: 127.0.0.1
+  port: 4713
+  sourceId: pi-iq
+  controlPolicy: exclusive
+liveDemod:
+  enabled: false
+  sourceId: pi-iq
+resources:
+  containerMonitor:
+    enabled: false
+  sdrHostPoller:
+    enabled: true
+logging:
+  level: info

@@ -1,0 +1,37 @@
+# Docker decoders consuming rtl_tcp hosted on this computer.
+# Start the host/VM's USB-accessible rtl_tcp on a reachable interface first.
+# Direct USB inside a Linux VM/container is another option where supported.
+sources:
+  - id: local-iq
+    type: rtl_tcp
+    host: host.docker.internal
+    port: 1234
+    caps:
+      kind: iq
+      format: U8_IQ
+      sampleRate: 2048000
+      centerFreq: 446524920
+      exclusive: false
+decoders: []
+api:
+  host: 0.0.0.0
+  port: 9000
+audio:
+  tcpPort: 8080
+  monitoring: false
+tunerRelay:
+  enabled: true
+  host: 0.0.0.0
+  port: 4713
+  sourceId: local-iq
+  controlPolicy: exclusive
+liveDemod:
+  enabled: false
+  sourceId: local-iq
+resources:
+  containerMonitor:
+    enabled: true
+  sdrHostPoller:
+    enabled: false
+logging:
+  level: info
