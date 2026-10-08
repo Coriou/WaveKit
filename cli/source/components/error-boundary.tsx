@@ -6,23 +6,36 @@ interface Props {
 	children: ReactNode
 }
 interface State {
-	error: Error | null
+	message: string | null
 }
 
-/** Mounted inside the frame; the app keys stay live, and `r` remounts it via a new key. */
-export class ErrorBoundary extends Component<Props, State> {
-	override state: State = { error: null }
+/** Any thrown value, Error or not, becomes one sanitised line. */
+function messageOf(thrown: unknown): string {
+	const raw =
+		thrown instanceof Error
+			? thrown.message
+			: typeof thrown === "string"
+				? thrown
+				: String(thrown)
+	return sanitize(raw).trim() || "?"
+}
 
-	static getDerivedStateFromError(error: Error): State {
-		return { error }
+/**
+ * Wraps the whole frame (spec §6.6). The app's key hook lives above it, so q and r stay
+ * live; `r` remounts it through a new key. The fallback keeps the 1-column gutter (§8).
+ */
+export class ErrorBoundary extends Component<Props, State> {
+	override state: State = { message: null }
+
+	static getDerivedStateFromError(thrown: unknown): State {
+		return { message: messageOf(thrown) }
 	}
 
 	override render(): ReactNode {
-		if (this.state.error) {
+		if (this.state.message !== null) {
 			return (
 				<Text wrap="truncate-end">
-					wavekit: render error · {sanitize(this.state.error.message).trim()} ·
-					q quit
+					{` wavekit: render error · ${this.state.message} · q quit`}
 				</Text>
 			)
 		}
