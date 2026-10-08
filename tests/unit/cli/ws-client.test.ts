@@ -1,9 +1,10 @@
 import { createServer, type AddressInfo, type Socket } from "node:net"
 import { describe, expect, it } from "vitest"
-import { WebSocketServer } from "ws"
+import { WebSocketServer, type WebSocket } from "ws"
 import {
 	CHANNELS,
 	backoffDelay,
+	createNodeWsFactory,
 	createWsClient,
 	nodeWsFactory,
 	type WsHandlers,
@@ -304,6 +305,70 @@ describe("A2 fix round 1", () => {
 		expect(errors.join(" ")).toMatch(/max payload size exceeded/i)
 		// ws tells the peer 1009 (message too big); locally the close reads 1006.
 		expect(await peerClose).toBe(1009)
+		await new Promise<void>(resolve => wss.close(() => resolve()))
+	}, 20000)
+})
+
+describe("liveness watchdog (A2 review M4, optional in A4)", () => {
+	const quick = createNodeWsFactory({ silenceMs: 300, checkMs: 50 })
+	async function server(onConn: (sock: WebSocket) => void) {
+		const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 })
+		await new Promise<void>(resolve => wss.once("listening", () => resolve()))
+		wss.on("connection", onConn)
+		const { port } = wss.address() as AddressInfo
+		return { wss, url: `ws://127.0.0.1:${port}/ws` }
+	}
+	it("terminates a socket whose server pinged once and then went silent", async () => {
+		const { wss, url } = await server(sock => sock.ping())
+		const errors: string[] = []
+		const started = Date.now()
+		const code = await new Promise<number>(resolve => {
+			quick(url, {
+				open: () => {},
+				message: () => {},
+				close: c => resolve(c),
+				error: m => errors.push(m),
+			})
+		})
+		expect(code).toBe(1006)
+		expect(errors.join(" ")).toMatch(/no heartbeat from server/)
+		expect(Date.now() - started).toBeLessThan(5000)
+		await new Promise<void>(resolve => wss.close(() => resolve()))
+	}, 20000)
+	it("never fires for a server that does not ping (older core)", async () => {
+		const { wss, url } = await server(() => {})
+		let closed = false
+		const h = quick(url, {
+			open: () => {},
+			message: () => {},
+			close: () => {
+				closed = true
+			},
+			error: () => {},
+		})
+		await new Promise(r => setTimeout(r, 700))
+		expect(closed).toBe(false)
+		h.close()
+		await new Promise<void>(resolve => wss.close(() => resolve()))
+	}, 20000)
+	it("keeps a socket alive while pings keep coming", async () => {
+		let timer: NodeJS.Timeout | undefined
+		const { wss, url } = await server(sock => {
+			timer = setInterval(() => sock.ping(), 100)
+		})
+		let closed = false
+		const h = quick(url, {
+			open: () => {},
+			message: () => {},
+			close: () => {
+				closed = true
+			},
+			error: () => {},
+		})
+		await new Promise(r => setTimeout(r, 800))
+		expect(closed).toBe(false)
+		clearInterval(timer)
+		h.close()
 		await new Promise<void>(resolve => wss.close(() => resolve()))
 	}, 20000)
 })

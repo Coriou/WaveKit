@@ -62,14 +62,30 @@ export function formatAis(
 	const kind = codeLabel ?? str(o, "shiptype_text") ?? str(o, "shipType")
 	const callsign = str(o, "callsign")?.trim()
 	const destination = str(o, "destination")?.trim()
-	const lat = num(o, "lat")
-	const lon = num(o, "lon")
-	const sog = num(o, "sog") ?? num(o, "speed")
-	const cog = num(o, "cog")
+	// ITU-R M.1371 "not available" sentinels are unknown, never numbers (R44):
+	// lat 91, lon 181, sog 102.3, cog 360, heading 511, imo 0, draught 0.
+	const rawLat = num(o, "lat")
+	const rawLon = num(o, "lon")
+	const posSent = rawLat !== undefined || rawLon !== undefined
+	const lat =
+		rawLat !== undefined && Math.abs(rawLat) <= 90 ? rawLat : undefined
+	const lon =
+		rawLon !== undefined && Math.abs(rawLon) <= 180 ? rawLon : undefined
+	const rawSog = num(o, "sog") ?? num(o, "speed")
+	const sog = rawSog !== undefined && rawSog < 102.3 ? rawSog : undefined
+	const rawCog = num(o, "cog")
+	const cog = rawCog !== undefined && rawCog < 360 ? rawCog : undefined
 	const status = num(o, "navStatus")
 	const statusText = status !== undefined ? NAV_STATUS[status] : undefined
-	const imo = prim(o, "imo")
-	const draught = num(o, "draught")
+	const rawImo = prim(o, "imo")
+	const imo = rawImo === "0" ? "?" : rawImo
+	const rawDraught = num(o, "draught")
+	const draught =
+		rawDraught === undefined
+			? undefined
+			: rawDraught > 0
+				? `${rawDraught} m`
+				: "?"
 	const pos =
 		lat !== undefined && lon !== undefined
 			? {
@@ -100,17 +116,23 @@ export function formatAis(
 				]
 			: []),
 		...(statusText ? [{ label: "status", value: statusText }] : []),
-		...(pos ? [{ label: "position", value: pos.long }] : []),
+		...(pos
+			? [{ label: "position", value: pos.long }]
+			: posSent
+				? [{ label: "position", value: "?" }]
+				: []),
 		...(sog !== undefined
 			? [{ label: "speed", value: `${sog.toFixed(1)} kn` }]
-			: []),
+			: rawSog !== undefined
+				? [{ label: "speed", value: "?" }]
+				: []),
 		...(cog !== undefined
 			? [{ label: "course", value: `${Math.round(cog)}${textGlyphs().degree}` }]
-			: []),
+			: rawCog !== undefined
+				? [{ label: "course", value: "?" }]
+				: []),
 		...(destination ? [{ label: "destination", value: destination }] : []),
-		...(draught !== undefined
-			? [{ label: "draught", value: `${draught} m` }]
-			: []),
+		...(draught !== undefined ? [{ label: "draught", value: draught }] : []),
 	]
 	return finish(decoderId, type, "AIS", "data", segments, fields)
 }

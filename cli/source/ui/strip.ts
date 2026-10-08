@@ -15,6 +15,8 @@ export interface StripDecoders {
 	up: number
 	total: number
 	failing: number
+	/** R46: decoders restarting after a crash (attention, not a fault); optional for older producers. */
+	restarting?: number
 	inWindow: number | null
 }
 
@@ -130,18 +132,22 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 		}
 	const sep = ` ${glyphs().sep} `
 	const up = `${d.up}/${d.total} up`
+	// Failing (fault) then restarting (attention, R46): same priority, so they
+	// stay in every variant together.
+	const issues: Line = []
+	if (d.failing > 0) issues.push(value(`${d.failing} failing`, old, "fault"))
+	const restarting = d.restarting ?? 0
+	if (restarting > 0) {
+		if (issues.length > 0) issues.push(label(sep))
+		issues.push(value(`${restarting} restarting`, old, "attention"))
+	}
 	const minimal: Line =
-		d.failing > 0
-			? [label("decoders "), value(`${d.failing} failing`, old, "fault")]
+		issues.length > 0
+			? [label("decoders "), ...issues]
 			: [label("decoders "), value(up, old)]
 	const mid: Line =
-		d.failing > 0
-			? [
-					label("decoders "),
-					value(up, old),
-					label(sep),
-					value(`${d.failing} failing`, old, "fault"),
-				]
+		issues.length > 0
+			? [label("decoders "), value(up, old), label(sep), ...issues]
 			: minimal
 	const rich: Line =
 		d.inWindow !== null
