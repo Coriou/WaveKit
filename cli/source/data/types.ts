@@ -347,6 +347,10 @@ export interface FanoutSample {
 	branches: Record<string, FanoutBranchSample>
 }
 export interface DecoderSession {
+	/**
+	 * Server time (ms) of the newest decoder:output, from its `timestamp`; compare with
+	 * other server times, never with the local clock (a server ahead must read "<1s").
+	 */
 	lastWsOutputAt: number | null
 	lastError: { message: string; at: number } | null
 	previousHealth: DecoderHealth | null
@@ -494,7 +498,8 @@ export type Inbound =
 
 // ---------- derived evidence shared by data/ and ui/ ----------
 
-export type GlyphRole = "live" | "neutral" | "fault" | "unknown"
+/** "attention" (`!`, yellow): needs a look now but is not a fault, e.g. a decoder restarting (R31). */
+export type GlyphRole = "live" | "neutral" | "attention" | "fault" | "unknown"
 
 export type ApiView =
 	| { kind: "connecting" }

@@ -57,12 +57,8 @@ export function classifyError(
 			at,
 		}
 	}
-	const cause =
-		err instanceof Error
-			? (err as Error & { cause?: unknown }).cause
-			: undefined
-	const code = isObj(cause) && isStr(cause["code"]) ? cause["code"] : undefined
-	const message = code ?? (err instanceof Error ? err.message : String(err))
+	const message =
+		errorCode(err) ?? (err instanceof Error ? err.message : String(err))
 	return { kind: "network", message, at }
 }
 
@@ -99,6 +95,22 @@ function isTimeout(err: unknown): boolean {
 		err instanceof Error &&
 		(err.name === "TimeoutError" || err.name === "AbortError")
 	)
+}
+
+/** Errors that mean the connection dropped after the request went out. */
+const RESET_CODES: ReadonlySet<string> = new Set([
+	"ECONNRESET",
+	"EPIPE",
+	"UND_ERR_SOCKET",
+	"UND_ERR_CLOSED",
+])
+
+function errorCode(err: unknown): string | undefined {
+	const cause =
+		err instanceof Error
+			? (err as Error & { cause?: unknown }).cause
+			: undefined
+	return isObj(cause) && isStr(cause["code"]) ? cause["code"] : undefined
 }
 
 function statusMessage(res: { status: number; statusText: string }): string {
@@ -163,8 +175,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 				status: null,
 				message: "no API target",
 			}
+		let res: Awaited<ReturnType<FetchLike>>
 		try {
-			const res = await opts.fetchFn(`${base}${path}`, {
+			res = await opts.fetchFn(`${base}${path}`, {
 				method,
 				signal: AbortSignal.timeout(writeTimeoutMs),
 				...(body !== undefined
@@ -174,23 +187,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 						}
 					: {}),
 			})
-			const json = await readJson(res)
-			const message =
-				isObj(json) && isStr(json["message"])
-					? json["message"]
-					: res.ok
-						? "ok"
-						: statusMessage(res)
-			const code = isObj(json) && isStr(json["code"]) ? json["code"] : undefined
-			return {
-				ok: res.ok,
-				outcome: res.ok ? "ok" : "failed",
-				status: res.status,
-				message,
-				...(!res.ok && code !== undefined ? { code } : {}),
-			}
 		} catch (err: unknown) {
-			// R23: no reply in time means the request may have landed; say so.
+			// R23: no reply in time, or a reset after sending, means the request may
+			// have landed: the outcome is unknown, never a failure.
 			if (isTimeout(err)) {
 				return {
 					ok: false,
@@ -199,12 +198,41 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 					message: `sent · no reply in ${Math.round(writeTimeoutMs / 1000)}s`,
 				}
 			}
+			if (RESET_CODES.has(errorCode(err) ?? "")) {
+				return {
+					ok: false,
+					outcome: "unknown",
+					status: null,
+					message: "sent · connection reset",
+				}
+			}
 			return {
 				ok: false,
 				outcome: "failed",
 				status: null,
 				message: classifyError(err, opts.now(), writeTimeoutMs).message,
 			}
+		}
+		// The status line arrived, so it decides the outcome even if the body read fails.
+		let json: unknown
+		try {
+			json = await readJson(res)
+		} catch {
+			json = undefined
+		}
+		const message =
+			isObj(json) && isStr(json["message"])
+				? json["message"]
+				: res.ok
+					? "ok"
+					: statusMessage(res)
+		const code = isObj(json) && isStr(json["code"]) ? json["code"] : undefined
+		return {
+			ok: res.ok,
+			outcome: res.ok ? "ok" : "failed",
+			status: res.status,
+			message,
+			...(!res.ok && code !== undefined ? { code } : {}),
 		}
 	}
 
