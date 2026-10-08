@@ -12,7 +12,8 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
 
-describe("generated Pi first-boot bootstrap", () => {
+// Subprocess-heavy fixtures need headroom when the complete suite runs in parallel.
+describe("generated Pi first-boot bootstrap", { timeout: 15000 }, () => {
 	let temp: string
 	let boot: string
 	let home: string
