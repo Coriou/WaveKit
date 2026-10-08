@@ -39,17 +39,15 @@ describe("message ring", () => {
 	it("P9: bounded, ordered, newest kept, per-decoder floor honoured", () => {
 		fc.assert(
 			fc.property(
-				fc
-					.integer({ min: 1, max: 20 })
-					.chain(n =>
-						fc.tuple(
-							fc.constant(n),
-							fc.array(fc.integer({ min: 0, max: n - 1 }), {
-								minLength: 1,
-								maxLength: 2500,
-							}),
-						),
+				fc.integer({ min: 1, max: 20 }).chain(n =>
+					fc.tuple(
+						fc.constant(n),
+						fc.array(fc.integer({ min: 0, max: n - 1 }), {
+							minLength: 1,
+							maxLength: 2500,
+						}),
 					),
+				),
 				([, picks]) => {
 					const ring = createRing()
 					const inserted = new Map<string, number[]>()
