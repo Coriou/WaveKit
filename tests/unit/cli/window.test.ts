@@ -3,16 +3,22 @@ import { describe, expect, it } from "vitest"
 import type { ExtendedSourceStatus, TunerState } from "@wavekit/api-types"
 import {
 	bandFor,
+	bandLabel,
+	configuredNote,
 	decoderBand,
 	type NominalBand,
 } from "../../../cli/source/data/nominal-bands.js"
 import {
 	decoderMembership,
+	decoderSourceId,
 	membership,
+	retuneCandidates,
 	retuneImpact,
+	rowSourceId,
 	windowFor,
 	type TunedWindow,
 } from "../../../cli/source/data/window.js"
+import { glyphs, setGlyphMode } from "../../../cli/source/ui/theme.js"
 import type { DecoderRow } from "../../../cli/source/data/types.js"
 
 const win = (centreHz: number, sampleRate = 2_048_000): TunedWindow => ({
@@ -60,12 +66,35 @@ const dec = (id: string, type = id): DecoderRow => ({
 	restartCount: 0,
 })
 
+const TYPES = [
+	"readsb",
+	"ais-catcher",
+	"acarsdec",
+	"dumpvdl2",
+	"direwolf",
+	"rtl433",
+	"lora-meshtastic",
+	"dsd-fme",
+	"multimon-ng",
+] as const
+
 describe("nominal bands", () => {
-	it("labels the spec table", () => {
-		expect(bandFor("readsb")?.label).toBe("1090.000")
-		expect(bandFor("acarsdec")?.label).toBe("131.550–131.825")
-		expect(bandFor("dsd-fme")?.kind).toBe("tuned")
+	it("labels the spec table, ranges through the glyph table (R41)", () => {
+		const label = (t: string): string | undefined => {
+			const b = bandFor(t)
+			return b ? bandLabel(b, glyphs().range) : undefined
+		}
+		expect(label("readsb")).toBe("1090.000")
+		expect(label("ais-catcher")).toBe("161.975/162.025")
+		expect(label("acarsdec")).toBe("131.550–131.825")
+		expect(label("dsd-fme")).toBe("tuned")
 		expect(bandFor("mystery")).toBeUndefined()
+		setGlyphMode("ascii")
+		try {
+			expect(label("acarsdec")).toBe("131.550-131.825")
+		} finally {
+			setGlyphMode("utf8")
+		}
 	})
 })
 
@@ -83,6 +112,18 @@ describe("window", () => {
 		).toBe(100_000_000)
 		expect(windowFor("pi-iq", [], [], undefined)).toBeNull()
 	})
+	it("treats a centre at or below 0 Hz as no window (R41)", () => {
+		expect(windowFor("a", [], [src("a", 0, [])], undefined)).toBeNull()
+		expect(windowFor("a", [], [src("a", -5, [])], undefined)).toBeNull()
+		expect(
+			decoderMembership(
+				dec("rtl433"),
+				[src("a", 0, ["rtl433"])],
+				[],
+				undefined,
+			),
+		).toBe("?")
+	})
 	it("handles two sources with decoders split between them (review focus 5)", () => {
 		const sources = [
 			src("a", 433_920_000, ["rtl433"]),
@@ -96,21 +137,6 @@ describe("window", () => {
 		expect(decoderMembership(dec("dumpvdl2"), sources, [], undefined)).toBe("?")
 		expect(
 			decoderMembership(
-				{
-					...dec("acarsdec"),
-					caps: {
-						input: "external",
-						output: "jsonl",
-						integrationPattern: "external_sdr",
-					},
-				},
-				sources,
-				[],
-				undefined,
-			),
-		).toBe("—")
-		expect(
-			decoderMembership(
 				dec("weird", "mystery"),
 				[src("only", 1e8, [])],
 				[],
@@ -118,25 +144,88 @@ describe("window", () => {
 			),
 		).toBe("?")
 	})
+	it("marks external decoders — by input or by integration pattern (R41)", () => {
+		const sources = [src("a", 131_550_000, [])]
+		const ext = (caps: DecoderRow["caps"]): DecoderRow => ({
+			...dec("acarsdec"),
+			...(caps ? { caps } : {}),
+		})
+		expect(
+			decoderMembership(
+				ext({
+					input: "external",
+					output: "jsonl",
+					integrationPattern: "external_sdr",
+				}),
+				sources,
+				[],
+				undefined,
+			),
+		).toBe("—")
+		expect(
+			decoderMembership(
+				ext({
+					input: "external",
+					output: "jsonl",
+					integrationPattern: "pure_consumer",
+				}),
+				sources,
+				[],
+				undefined,
+			),
+		).toBe("—")
+		expect(
+			decoderMembership(
+				ext({
+					input: "iq",
+					output: "jsonl",
+					integrationPattern: "external_sdr",
+				}),
+				sources,
+				[],
+				undefined,
+			),
+		).toBe("—")
+		expect(
+			decoderMembership(
+				ext({
+					input: "iq",
+					output: "jsonl",
+					integrationPattern: "pure_consumer",
+				}),
+				sources,
+				[],
+				undefined,
+			),
+		).toBe("in")
+	})
 
 	// Feature: cli-dashboard-overhaul, Property 14: window membership
 	// Validates: spec §10.9
-	it("P14: tuned → in; a channel at the centre → in; all channels outside half-span → out; no window → ?", () => {
+	it("P14: tuned → in; a channel at the centre or exactly rate/2 away → in; all channels outside half-span → out; no window → ?", () => {
 		fc.assert(
 			fc.property(
-				fc.array(fc.double({ min: 24, max: 1900, noNaN: true }), {
+				fc.array(fc.integer({ min: 24, max: 1900 }), {
 					minLength: 1,
 					maxLength: 4,
 				}),
-				fc.integer({ min: 250_000, max: 3_200_000 }),
+				fc.integer({ min: 125_000, max: 1_600_000 }).map(h => h * 2),
 				(channels, rate) => {
 					const band: NominalBand = {
 						kind: "channels",
 						channelsMHz: channels,
-						label: "x",
+						join: "alternatives",
 					}
-					expect(membership({ kind: "tuned", label: "tuned" }, null)).toBe("in")
-					expect(membership(band, win(channels[0]! * 1e6, rate))).toBe("in")
+					const c0 = channels[0]! * 1e6
+					expect(membership({ kind: "tuned" }, null)).toBe("in")
+					expect(membership(band, win(c0, rate))).toBe("in")
+					// Inclusive boundary: |c − centre| = rate/2 is still in.
+					expect(
+						membership(
+							{ ...band, channelsMHz: [channels[0]!] },
+							win(c0 + rate / 2, rate),
+						),
+					).toBe("in")
 					const far = Math.max(...channels) * 1e6 + rate
 					expect(membership(band, win(far + 1, rate))).toBe("out")
 					expect(membership(band, null)).toBe("?")
@@ -148,32 +237,48 @@ describe("window", () => {
 
 	// Feature: cli-dashboard-overhaul, Property 15: retune impact
 	// Validates: spec §10.9
-	it("P15: retuneImpact = tuned ∪ decoders whose membership flips", () => {
-		const types = [
-			"readsb",
-			"ais-catcher",
-			"acarsdec",
-			"dumpvdl2",
-			"direwolf",
-			"rtl433",
-			"lora-meshtastic",
-			"dsd-fme",
-			"multimon-ng",
-		]
+	it("P15: tuned stays tuned; enters/leaves are exact flips; unknown before or after is reported apart", () => {
+		const arbDecoders = fc.tuple(
+			...TYPES.map(t =>
+				fc
+					.option(
+						fc.array(
+							fc.integer({ min: 24, max: 1900 }).map(m => m * 1e6),
+							{ minLength: 1, maxLength: 3 },
+						),
+						{ nil: undefined },
+					)
+					.map(targets => ({
+						id: t,
+						type: t,
+						...(targets !== undefined ? { targetFrequenciesHz: targets } : {}),
+					})),
+			),
+		)
 		fc.assert(
 			fc.property(
+				arbDecoders,
+				fc.option(fc.integer({ min: 24_000_000, max: 1_900_000_000 }), {
+					nil: null,
+				}),
 				fc.integer({ min: 24_000_000, max: 1_900_000_000 }),
-				fc.integer({ min: 24_000_000, max: 1_900_000_000 }),
-				(a, b) => {
-					const decoders = types.map(t => ({ id: t, type: t }))
-					const r = retuneImpact(decoders, win(a), win(b))
-					expect(r.tuned.sort()).toEqual(["dsd-fme", "multimon-ng"])
+				(decoders, a, b) => {
+					const from = a === null ? null : win(a)
+					const r = retuneImpact(decoders, from, win(b))
+					expect([...r.tuned].sort()).toEqual(["dsd-fme", "multimon-ng"])
 					for (const d of decoders) {
 						if (bandFor(d.type)?.kind === "tuned") continue
-						const before = membership(bandFor(d.type), win(a)) === "in"
-						const after = membership(bandFor(d.type), win(b)) === "in"
-						expect(r.enters.includes(d.id)).toBe(!before && after)
-						expect(r.leaves.includes(d.id)).toBe(before && !after)
+						const band = decoderBand(d)?.band
+						const before = membership(band, from)
+						const after = membership(band, win(b))
+						const unknown = before === "?" || after === "?"
+						expect(r.unknown.includes(d.id)).toBe(unknown)
+						expect(r.enters.includes(d.id)).toBe(
+							!unknown && before === "out" && after === "in",
+						)
+						expect(r.leaves.includes(d.id)).toBe(
+							!unknown && before === "in" && after === "out",
+						)
 					}
 				},
 			),
@@ -182,20 +287,19 @@ describe("window", () => {
 	})
 })
 
-describe("configured targets (R15)", () => {
-	it("prefers targetFrequenciesHz, labelled configured; else the table, labelled nominal", () => {
-		expect(
-			decoderBand({ type: "readsb", targetFrequenciesHz: [445_970_700] }),
-		).toEqual({
-			band: { kind: "channels", channelsMHz: [445.9707], label: "445.971" },
-			origin: "configured",
+describe("configured targets (R15, R40)", () => {
+	it("configured targets replace the table for channel decoders, labelled configured", () => {
+		const one = decoderBand({
+			type: "readsb",
+			targetFrequenciesHz: [445_970_700],
 		})
-		expect(
-			decoderBand({
-				type: "acarsdec",
-				targetFrequenciesHz: [131_825_000, 131_550_000, 131_725_000],
-			})?.band.label,
-		).toBe("131.550–131.825")
+		expect(one?.origin).toBe("configured")
+		expect(one && bandLabel(one.band, glyphs().range)).toBe("445.971")
+		const span = decoderBand({
+			type: "acarsdec",
+			targetFrequenciesHz: [131_825_000, 131_550_000, 131_725_000],
+		})
+		expect(span && bandLabel(span.band, glyphs().range)).toBe("131.550–131.825")
 		expect(decoderBand({ type: "readsb" })).toEqual({
 			band: bandFor("readsb"),
 			origin: "nominal",
@@ -203,22 +307,39 @@ describe("configured targets (R15)", () => {
 		expect(
 			decoderBand({ type: "readsb", targetFrequenciesHz: [] })?.origin,
 		).toBe("nominal")
-		expect(
-			decoderBand({ type: "readsb", targetFrequenciesHz: [Number.NaN, -1] })
-				?.origin,
-		).toBe("nominal")
 		expect(decoderBand({ type: "mystery" })).toBeUndefined()
 	})
-	it("decides membership from configured targets, even for a tuned type", () => {
-		const sources = [src("a", 433_920_000, ["readsb", "dsd-fme"])]
+	it("treats targets all-or-nothing, like the guards (R41)", () => {
 		expect(
-			decoderMembership(
-				{ ...dec("readsb"), targetFrequenciesHz: [433_920_000] },
-				sources,
-				[],
-				undefined,
-			),
-		).toBe("in")
+			decoderBand({
+				type: "readsb",
+				targetFrequenciesHz: [445_970_700, Number.NaN],
+			}),
+		).toEqual({
+			band: bandFor("readsb"),
+			origin: "nominal",
+		})
+		expect(
+			decoderBand({ type: "readsb", targetFrequenciesHz: [-1] })?.origin,
+		).toBe("nominal")
+	})
+	it("keeps tuned types tuned; a configured target is an annotation only (R40)", () => {
+		const b = decoderBand({
+			type: "dsd-fme",
+			targetFrequenciesHz: [446_525_000],
+		})
+		expect(b).toEqual({
+			band: { kind: "tuned" },
+			origin: "nominal",
+			ignoredTargetsHz: [446_525_000],
+		})
+		expect(b && configuredNote(b)).toBe(
+			"configured 446.525 MHz (not applied by this decoder)",
+		)
+		expect(
+			configuredNote({ band: { kind: "tuned" }, origin: "nominal" }),
+		).toBeNull()
+		const sources = [src("a", 433_920_000, ["dsd-fme"])]
 		expect(
 			decoderMembership(
 				{ ...dec("dsd-fme"), targetFrequenciesHz: [100_000_000] },
@@ -226,10 +347,19 @@ describe("configured targets (R15)", () => {
 				[],
 				undefined,
 			),
-		).toBe("out")
+		).toBe("in")
+		const r = retuneImpact(
+			[{ id: "m", type: "multimon-ng", targetFrequenciesHz: [100_000_000] }],
+			win(433_920_000),
+			win(1_090_000_000),
+		)
+		expect(r).toEqual({ tuned: ["m"], enters: [], leaves: [], unknown: [] })
 	})
-	it("falls back to the decoder's declared sourceId before the single-source rule", () => {
-		const sources = [src("a", 433_920_000, []), src("b", 1_090_000_000, [])]
+	it("resolves a decoder's source the same way everywhere: assignment, declared sourceId, single source", () => {
+		const sources = [
+			src("a", 433_920_000, []),
+			src("b", 1_090_000_000, ["rtl433"]),
+		]
 		expect(
 			decoderMembership(
 				{ ...dec("readsb"), sourceId: "b" },
@@ -247,13 +377,48 @@ describe("configured targets (R15)", () => {
 			),
 		).toBe("out")
 		expect(decoderMembership(dec("readsb"), sources, [], undefined)).toBe("?")
+		expect(rowSourceId({ ...dec("readsb"), sourceId: "a" }, sources)).toBe("a")
+		expect(rowSourceId({ ...dec("rtl433"), sourceId: "a" }, sources)).toBe("b")
+		expect(decoderSourceId("x", [src("only", 1e8, [])], undefined)).toBe("only")
+		const rows = [
+			{ ...dec("readsb"), sourceId: "b" },
+			{ ...dec("rtl433") },
+			{
+				...dec("acarsdec"),
+				sourceId: "b",
+				caps: {
+					input: "external",
+					output: "jsonl",
+					integrationPattern: "external_sdr",
+				},
+			} as DecoderRow,
+			{ ...dec("ais-catcher"), sourceId: "a" },
+		]
+		expect(retuneCandidates(rows, sources, "b").map(d => d.id)).toEqual([
+			"readsb",
+			"rtl433",
+		])
 	})
-	it("feeds configured targets into retuneImpact", () => {
+	it("never claims enters when the current window is unknown (R41)", () => {
 		const r = retuneImpact(
+			[
+				{ id: "x", type: "readsb", targetFrequenciesHz: [433_920_000] },
+				{ id: "y", type: "rtl433" },
+			],
+			null,
+			win(433_920_000),
+		)
+		expect(r).toEqual({
+			tuned: [],
+			enters: [],
+			leaves: [],
+			unknown: ["x", "y"],
+		})
+		const known = retuneImpact(
 			[{ id: "x", type: "readsb", targetFrequenciesHz: [433_920_000] }],
 			win(1_090_000_000),
 			win(433_920_000),
 		)
-		expect(r).toEqual({ tuned: [], enters: ["x"], leaves: [] })
+		expect(known).toEqual({ tuned: [], enters: ["x"], leaves: [], unknown: [] })
 	})
 })

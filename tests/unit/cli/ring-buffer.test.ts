@@ -84,6 +84,26 @@ describe("message ring", () => {
 		for (const id of ["a", "a", "b", "b", "c"]) ringPush(ring, entry(id))
 		expect(ring.entries.map(e => e.decoderId)).toEqual(["a", "b", "b", "c"])
 	})
+	it("counts decoder ids like __proto__ as plain keys (R30)", () => {
+		const ring = createRing(4, 2)
+		for (const id of [
+			"__proto__",
+			"__proto__",
+			"__proto__",
+			"constructor",
+			"constructor",
+		])
+			ringPush(ring, entry(id))
+		expect(ring.perDecoder["__proto__"]).toBe(2)
+		expect(ring.perDecoder["constructor"]).toBe(2)
+		expect(Object.getPrototypeOf(ring.perDecoder)).toBeNull()
+		expect(ring.entries.map(e => e.decoderId)).toEqual([
+			"__proto__",
+			"__proto__",
+			"constructor",
+			"constructor",
+		])
+	})
 })
 
 describe("gaps", () => {
@@ -147,12 +167,10 @@ describe("aircraft map", () => {
 			identification: { registration: "EI-DCL", typeCode: "B738" },
 		})
 	})
-	it("deletes by any-case ICAO, mutating the one map in place", () => {
+	it("deletes by any-case ICAO", () => {
 		const map = new Map<string, AircraftEntry>()
 		aircraftUpsert(map, ac("4ca9d2"), 1)
-		const before = map
 		aircraftDelete(map, "4ca9d2")
-		expect(map).toBe(before)
 		expect(map.size).toBe(0)
 	})
 	it("prunes after 300 s and resyncs wholesale", () => {
