@@ -322,6 +322,104 @@ describe("runtime", () => {
 	})
 })
 
+/** Every GET waits until the test answers it. */
+function heldFetch() {
+	const pending: Array<{ url: string; answer: (body: unknown) => void }> = []
+	const fetchFn: FetchLike = url =>
+		new Promise(resolve => {
+			pending.push({
+				url,
+				answer: body =>
+					resolve({
+						ok: true,
+						status: 200,
+						statusText: "OK",
+						json: () => Promise.resolve(body),
+					}),
+			})
+		})
+	const answerAll = (): void => {
+		for (const p of pending.splice(0)) p.answer(bodies(p.url))
+	}
+	return { fetchFn, pending, answerAll }
+}
+
+const decoderRow = (running: boolean) => ({
+	id: "readsb",
+	type: "readsb",
+	running,
+	health: running ? "running" : "idle",
+	uptime: 1,
+	stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
+	restartCount: 0,
+})
+
+describe("poll cycles (R47 M1, M2)", () => {
+	it("M1: reconnect() during a cycle queues the next cycle instead of overlapping it", async () => {
+		const held = heldFetch()
+		const rt = createRuntime({
+			fetchFn: held.fetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(held.pending).toHaveLength(10)
+		rt.reconnect()
+		rt.reconnect()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(held.pending).toHaveLength(10)
+		held.answerAll()
+		await vi.advanceTimersByTimeAsync(0)
+		// One queued cycle (both reconnects folded), started as soon as the first ended.
+		expect(held.pending).toHaveLength(10)
+		held.answerAll()
+		await vi.advanceTimersByTimeAsync(4_999)
+		expect(held.pending).toHaveLength(0)
+		await vi.advanceTimersByTimeAsync(1)
+		expect(held.pending).toHaveLength(8)
+		rt.stop()
+	})
+
+	it("M2: an older response never overwrites a newer one for the same endpoint", async () => {
+		const held = heldFetch()
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn: held.fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		const older = held.pending.find(p => p.url.endsWith("/api/decoders"))!
+		// decoder:started schedules an immediate /api/decoders poll beside the cycle's.
+		ws.sockets[0]!.message(
+			JSON.stringify({
+				type: "decoder:started",
+				channel: "decoders",
+				data: { decoderId: "readsb" },
+			}),
+		)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		const newer = held.pending.filter(p => p.url.endsWith("/api/decoders"))
+		expect(newer).toHaveLength(2)
+		newer[1]!.answer([decoderRow(false)])
+		await vi.advanceTimersByTimeAsync(0)
+		older.answer([decoderRow(true)])
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
+		rt.stop()
+	})
+})
+
 const DISCOVERED = { ...TARGET, explicit: false }
 const refused = (): Promise<never> =>
 	Promise.reject(

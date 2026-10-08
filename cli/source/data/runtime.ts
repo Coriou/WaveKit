@@ -112,6 +112,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let unreachableSince: number | null = null
 	/** Bumped by stop(): async work started before it finishes silently. */
 	let epoch = 0
+	let cycleRunning = false
+	/** Endpoints of the cycle requested while one was in flight (M1). */
+	let queuedCycle: Endpoint[] | null = null
+	/** Per-endpoint request sequence: issued, and the newest applied (M2). */
+	const issued = new Map<Endpoint, number>()
+	const applied = new Map<Endpoint, number>()
 
 	const api = createApiClient({
 		base: () => target?.base ?? null,
@@ -139,8 +145,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 
 	/** Resolves true when the server answered at all; a network error or a timeout is no answer (M3). */
 	async function fetchOne(endpoint: Endpoint): Promise<boolean> {
+		const seq = (issued.get(endpoint) ?? 0) + 1
+		issued.set(endpoint, seq)
 		const outcome = await api.get(endpoint)
-		push(restInbound(endpoint, outcome, deps.now()))
+		// M2: a response older than one already applied is dropped, never applied over it.
+		if (seq > (applied.get(endpoint) ?? 0)) {
+			applied.set(endpoint, seq)
+			push(restInbound(endpoint, outcome, deps.now()))
+		}
 		return (
 			outcome.ok ||
 			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
@@ -152,14 +164,28 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
 		pollTimer = deps.timers.setTimeout(() => {
 			pollTimer = null
-			void pollCycle(POLL_ENDPOINTS)
+			requestCycle(POLL_ENDPOINTS)
 		}, POLL_MS)
+	}
+
+	/** Cycles never overlap (spec §10.2): one requested mid-cycle runs when it ends (M1). */
+	function requestCycle(endpoints: readonly Endpoint[]): void {
+		if (stopped) return
+		if (cycleRunning) {
+			queuedCycle = [...new Set([...(queuedCycle ?? []), ...endpoints])]
+			return
+		}
+		if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
+		pollTimer = null
+		void pollCycle(endpoints)
 	}
 
 	async function pollCycle(endpoints: readonly Endpoint[]): Promise<void> {
 		const run = epoch
+		cycleRunning = true
 		const results = await Promise.allSettled(endpoints.map(fetchOne))
 		if (run !== epoch) return
+		cycleRunning = false
 		const at = deps.now()
 		push({ kind: "rest:cycle", at, nextAt: at + POLL_MS })
 		const answered = results.some(r => r.status === "fulfilled" && r.value)
@@ -168,7 +194,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			clearRediscover()
 		} else unreachableSince ??= at
 		maybeRediscover(at)
-		schedulePoll()
+		const next = queuedCycle
+		queuedCycle = null
+		if (next !== null) requestCycle(next)
+		else schedulePoll()
 	}
 
 	function clearRediscover(): void {
@@ -223,7 +252,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			// The socket may already be back on this target by itself; reconnecting it
 			// would record a false gap and wipe the rate and fanout histories.
 			if (!same || !ws.connected()) ws.reconnectNow()
-			void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 			return
 		}
 		push({
@@ -329,7 +358,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 					discovery: { mode: "explicit", tried: [] },
 				})
 				ws.start()
-				void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+				requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 			} else {
 				void runDiscovery()
 			}
@@ -338,6 +367,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			stopped = true
 			epoch++
 			discovering = false
+			cycleRunning = false
+			queuedCycle = null
 			if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
 			clearRediscover()
 			if (flushTimer !== null) deps.timers.clearInterval(flushTimer)
@@ -352,7 +383,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				return
 			}
 			ws.reconnectNow()
-			void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 		},
 		send: intent => {
 			const key = actionKey(intent)
