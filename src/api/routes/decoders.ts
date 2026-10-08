@@ -498,7 +498,9 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				}
 
 				return {
-					message: `Decoder '${id}' restarted successfully`,
+					message: status.suspended
+						? `Decoder '${id}' restart recorded; suspended until the source rate is usable`
+						: `Decoder '${id}' restarted successfully`,
 					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {

@@ -159,6 +159,9 @@ export class FakeSources extends EventEmitter {
 			throw new Error(`Source ${sourceId} not found`)
 		this.assignments.set(decoderId, sourceId)
 	}
+	getAssignedSource(decoderId: string) {
+		return this.assignments.get(decoderId)
+	}
 	unassignDecoder(decoderId: string) {
 		this.assignments.delete(decoderId)
 	}

@@ -198,6 +198,22 @@ describe("caps-driven suspension", () => {
 		expect(status().transition).toBeUndefined()
 	})
 
+	it("replaces a process that survived a failed suspension stop on resume", async () => {
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		decoder.failStop = true
+		sources.setRate("rtl", 20_000)
+		await settle()
+		expect(status()).toMatchObject({ transition: "suspending", running: true })
+		decoder.failStop = false
+		sources.setRate("rtl", 2_400_000)
+		await settle()
+		expect(decoder.starts).toBe(2)
+		expect(status()).toMatchObject({ running: true, suspended: false })
+		expect(status().transition).toBeUndefined()
+		expect(status().restartCount).toBe(0)
+	})
+
 	it("uses the normal backoff when the resume spawn fails", async () => {
 		sources.caps.set("rtl", iqCaps(20_000))
 		const decoder = create("dec")
@@ -332,6 +348,20 @@ describe("source removal and reconnect", () => {
 		await settle()
 		expect(decoder.starts).toBe(1)
 		expect(status()).toMatchObject({ running: true, suspended: false })
+		expect(sources.assignments.get("dec")).toBe("rtl")
+	})
+
+	it("restores the reservation when the source returns at a still-unusable rate", async () => {
+		sources.caps.set("rtl", iqCaps(20_000))
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		sources.remove("rtl")
+		await settle()
+		expect(sources.assignments.has("dec")).toBe(false)
+		sources.reconnect("rtl", 20_000)
+		await settle()
+		expect(decoder.starts).toBe(0)
+		expect(status()).toMatchObject({ suspended: true, sourceId: "rtl" })
 		expect(sources.assignments.get("dec")).toBe("rtl")
 	})
 

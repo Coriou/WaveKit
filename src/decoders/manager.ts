@@ -337,7 +337,11 @@ export class DecoderManager extends EventEmitter {
 		// Intent is recorded separately from eligibility: an unusable source
 		// rate suspends the instance instead of spawning a failing pipeline.
 		if (state.decoder.caps.input !== "external") {
-			const plan = this.assessState(state)
+			const sourceId = this.selectedSourceId(state)
+			const plan = this.assessState(
+				state,
+				(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined) ?? null,
+			)
 			state.ratePlan = plan
 			if (plan.verdict === "unusable") {
 				state.suspension = {
@@ -549,6 +553,7 @@ export class DecoderManager extends EventEmitter {
 		const items: RatePreviewItem[] = []
 		for (const state of this.decoders.values()) {
 			if (this.selectedSourceId(state) !== sourceId) continue
+			if (state.decoder.caps.input === "external") continue
 			items.push({
 				decoderId: state.config.id,
 				assessment: this.assessState(state, {
@@ -1305,6 +1310,8 @@ export class DecoderManager extends EventEmitter {
 				state.ratePlan = plan
 				state.suspension.reasonCode =
 					plan.reasonCode ?? state.suspension.reasonCode
+				// Removal drops assignments; a returning source is held again.
+				this.ensureReservation(state)
 				this.publishIfRateChanged(state, before)
 			}
 			return false
@@ -1386,9 +1393,25 @@ export class DecoderManager extends EventEmitter {
 	): Promise<void> {
 		const id = state.config.id
 		const generation = ++state.rateGeneration
+		state.ratePlan = plan
+		// After a failed suspension stop the old process may still run with the
+		// pre-suspension options. Stop it while still suspended, so its exit is
+		// not treated as a crash, then start a fresh pipeline.
+		if (state.decoder.getStatus().running) {
+			try {
+				await state.decoder.stop()
+			} catch (err) {
+				this.log.error(
+					{ err, decoderId: id },
+					"Failed to stop the surviving process before resuming; will retry",
+				)
+				this.emitStatusChanged(state)
+				return
+			}
+			if (!this.stillWanted(state, generation) || !state.suspension) return
+		}
 		state.suspension = null
 		state.transition = "resuming"
-		state.ratePlan = plan
 		this.log.info({ decoderId: id }, "Resuming decoder: source rate is usable")
 		this.emitStatusChanged(state)
 
@@ -1425,6 +1448,22 @@ export class DecoderManager extends EventEmitter {
 		if (!this.stillWanted(state, generation)) return await abandon(true)
 		state.transition = null
 		this.emitStatusChanged(state)
+	}
+
+	/** Re-reserves the selected source if the reservation was lost. */
+	private ensureReservation(state: DecoderState): void {
+		const sourceId = this.selectedSourceId(state)
+		if (!sourceId || !this.sourceManager) return
+		if (this.sourceManager.getAssignedSource(state.config.id) === sourceId)
+			return
+		try {
+			this.reserveSource(state)
+		} catch (err) {
+			this.log.warn(
+				{ err, decoderId: state.config.id, sourceId },
+				"Could not restore the source reservation for a suspended decoder",
+			)
+		}
 	}
 
 	/** Reserves the selected source for this decoder without a fanout branch. */

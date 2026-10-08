@@ -634,8 +634,9 @@ until fixture-verified requirements exist; external-input decoders report
 
 A decoder that is running is suspended when its source changes to an unusable
 rate and resumed when the rate becomes usable again (or the source reconnects
-with a usable rate). Suspension does not set `lastError`, change `health` or
-count restarts. A removed source leaves a suspended decoder suspended and a
+with a usable rate). Suspension does not set `lastError` or count restarts,
+and leaves `health` unchanged except that a pending automatic restart is
+cancelled (`"restarting"` becomes `"running"`, as on an explicit stop). A removed source leaves a suspended decoder suspended and a
 running decoder running. Render `suspended` ahead of `health`.
 
 #### GET /api/decoders/rate-preview
@@ -715,7 +716,7 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/start
 #### POST /api/decoders/:id/stop
 
 Stop a decoder. Also accepted (200) for a decoder that is not running but
-still wanted: suspended, or waiting in restart backoff. 409 only when neither
+still wanted: suspended, waiting in restart backoff, or terminally faulted. 409 only when neither
 running nor wanted. Stopping clears intent and any suspension and releases the
 source reservation.
 
