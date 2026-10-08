@@ -39,6 +39,12 @@ describe("Configuration Loader", () => {
 	})
 
 	describe("loadConfig", () => {
+		it("ignores an incomplete legacy array override name", () => {
+			const configPath = path.join(tempDir, "empty.yaml")
+			fs.writeFileSync(configPath, "sources: []\n")
+			process.env["WAVEKIT_SOURCES_0_"] = "localhost"
+			expect(loadConfig(configPath).sources).toEqual([])
+		})
 		it.each(["WAVEKIT_SOURCES__0__HOST", "WAVEKIT_SOURCES_0_HOST"])(
 			"overrides an indexed source without replacing the array: %s",
 			variable => {

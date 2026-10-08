@@ -414,7 +414,7 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 				} catch {
 					// Skip invalid env values - validation will catch them later
 				}
-			} else if (/^WAVEKIT_(SOURCES|DECODERS)_\d+_/.test(key)) {
+			} else if (/^WAVEKIT_(SOURCES|DECODERS)_\d+_.+/.test(key)) {
 				// Compatibility with the indexed form shown in older Docker examples.
 				const indexed = /^WAVEKIT_(SOURCES|DECODERS)_(\d+)_(.+)$/.exec(key)!
 				const path = envVarToConfigPath(
