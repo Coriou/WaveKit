@@ -9,6 +9,7 @@ import {
 	controlConfirm,
 	receiverControl,
 	receiverLines,
+	receiverTuner,
 	reviewHeldNotice,
 	tunerConfirm,
 } from "../view-models/receiver.js"
@@ -46,7 +47,7 @@ export const receiverView: ViewModule = {
 		})
 		switch (action.type) {
 			case "edit-open": {
-				const t = state.tuner.value?.[0]
+				const t = receiverTuner(state)
 				if (!t) return notice("tuner state ?")
 				if (t.controlMode !== "internal")
 					return notice(RECEIVER_EXTERNAL_NOTICE)
@@ -61,7 +62,7 @@ export const receiverView: ViewModule = {
 					: undefined
 			case "edit-review": {
 				if (!ui.edit) return undefined
-				const confirm = tunerConfirm(ui.edit)
+				const confirm = tunerConfirm(ui.edit, state)
 				// Held while nothing changed or a field is out of core's range (R42).
 				return confirm
 					? { ui: { ...ui, confirm }, effects: [] }

@@ -16,10 +16,31 @@ import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest } from "../ui/ui-state.js"
+import { gapRow, grouped, keep, optional, shed, type Row } from "./shed.js"
 
 const RESULT_MS = 10_000
 const LABEL_W = 10
 const MAX_ALERTS = 3
+/** Host warnings or errors shown per host before "+N more". */
+const MAX_NOTES = 2
+/**
+ * Shedding order on short views (highest first). Heads (CONTAINER, SDR HOST, AUDIO,
+ * CORE), the unreachable line and audio results/errors always stay.
+ */
+const DROP = {
+	gap: 9,
+	component: 8,
+	warning: 7,
+	error: 6,
+	alert: 6,
+	dongle: 5,
+	demod: 5,
+	sampling: 4,
+	mem: 4,
+	firstAlert: 3,
+	proc: 2,
+	cpu: 1,
+} as const
 const MODULATIONS: readonly LiveAudioConfig["modulation"][] = [
 	"nfm",
 	"wfm",
@@ -48,13 +69,11 @@ const own = <T>(
 ): T | undefined =>
 	Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined
 
-/** A row; `drop` rows may go when the view is short, highest number first. */
-interface Row {
-	line: Line
-	drop?: number
+interface Block {
+	rows: Row[]
+	/** Group items never rendered (beyond their cap), for the groups' "+N more". */
+	capped: Record<string, number>
 }
-const keep = (line: Line): Row => ({ line })
-const optional = (line: Line, drop: number): Row => ({ line, drop })
 
 function kv(
 	label: string,
@@ -83,14 +102,23 @@ function noData(state: AppState, path: string): string {
 		: `fetching ${path}`
 }
 
-function containerBlock(state: AppState, width: number): Row[] {
+function containerBlock(state: AppState, width: number): Block {
 	const r = state.resources.value
 	if (!r)
-		return [
-			keep(
-				kv("CONTAINER", noData(state, "/api/resources"), width, "label", true),
-			),
-		]
+		return {
+			rows: [
+				keep(
+					kv(
+						"CONTAINER",
+						noData(state, "/api/resources"),
+						width,
+						"label",
+						true,
+					),
+				),
+			],
+			capped: {},
+		}
 	const now = state.now
 	const role: Role = isOld(state.resources, now) ? "old" : "value"
 	const c = r.container
@@ -110,24 +138,28 @@ function containerBlock(state: AppState, width: number): Row[] {
 	]
 	const pct = (v: number | null): string =>
 		v === null ? g.na : `${Math.round(v)}%`
+	// With a limit, a missing percentage is unknown, not "not applicable" (M7).
+	const memPct = (v: number | null): string =>
+		v === null ? "?" : `${Math.round(v)}%`
 	const cpu =
 		c.cpuUsagePercent === null ? "?" : `${Math.round(c.cpuUsagePercent)}%`
 	rows.push(
-		keep(
+		optional(
 			kv(
 				"cpu",
 				`${cpu}   throttled ${pct(c.cpuThrottledPercent)}   oom kills ${c.oomKillCount ?? "?"}`,
 				width,
 				role,
 			),
+			DROP.cpu,
 		),
 	)
 	const used = formatBytes(c.memoryUsageBytes, 2)
 	const mem =
 		c.memoryLimitBytes === null
 			? `${used}${sep()}no limit`
-			: `${used} of ${formatBytes(c.memoryLimitBytes, 2)} (${pct(c.memoryUsagePercent)})`
-	rows.push(optional(kv("mem", mem, width, role), 1))
+			: `${used} of ${formatBytes(c.memoryLimitBytes, 2)} (${memPct(c.memoryUsagePercent)})`
+	rows.push(optional(kv("mem", mem, width, role), DROP.mem))
 	const alerts = [...state.alerts].sort((a, b) => b.lastAt - a.lastAt)
 	alerts.slice(0, MAX_ALERTS).forEach((a, i) => {
 		// Server severity and message verbatim (quoted, assumption 9); count, first seen, last age.
@@ -146,16 +178,9 @@ function containerBlock(state: AppState, width: number): Row[] {
 			],
 			width,
 		)
-		rows.push(i === 0 ? keep(line) : optional(line, 4))
+		rows.push(grouped(line, "alerts", i === 0 ? DROP.firstAlert : DROP.alert))
 	})
-	if (alerts.length > MAX_ALERTS)
-		rows.push(
-			optional(
-				kv("", `+${alerts.length - MAX_ALERTS} more`, width, "label"),
-				4,
-			),
-		)
-	return rows
+	return { rows, capped: { alerts: Math.max(0, alerts.length - MAX_ALERTS) } }
 }
 
 type Proc = {
@@ -179,7 +204,8 @@ function procRow(
 				glyphSpan(p.running ? "live" : "fault"),
 				sp(` ${p.running ? "running" : "down"}`, role),
 			]),
-			one(2, txt(`pid ${p.pid ?? glyphs().na}`, role)),
+			// A running process without a pid is unknown; a stopped one has none (M7).
+			one(2, txt(`pid ${p.pid ?? (p.running ? "?" : glyphs().na)}`, role)),
 			...extra,
 			one(1, txt(`${p.restartCount} restarts`, role)),
 		],
@@ -187,13 +213,18 @@ function procRow(
 	)
 }
 
-function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
+function hostBlock(
+	state: AppState,
+	h: SdrHostView,
+	index: number,
+	width: number,
+): Block {
 	const now = state.now
 	const g = glyphs()
 	const unreachable = h.fetchError !== null
-	// Spec §6.5: when core cannot reach the Pi, the block's rows go dim.
-	const role: Role =
-		unreachable || isOld(state.resources, now) ? "old" : "value"
+	const old = isOld(state.resources, now)
+	// Spec §6.5: when core cannot reach the Pi, the block's rows go dim (header too, M3).
+	const role: Role = unreachable || old ? "old" : "value"
 	const polled = h.lastFetchedAt
 		? `${formatAge(now - Date.parse(h.lastFetchedAt))} ago`
 		: "?"
@@ -202,10 +233,10 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 			fitDot(
 				lbl("SDR HOST", true),
 				[
-					one(0, txt(sanitize(h.sourceId))),
-					one(2, txt(sanitize(h.apiUrl))),
-					one(1, txt(`polled by core ${polled}`)),
-					one(3, txt(`uptime ${formatDuration(h.uptime)}`)),
+					one(0, txt(sanitize(h.sourceId), role)),
+					one(2, txt(sanitize(h.apiUrl), role)),
+					one(1, txt(`polled by core ${polled}`, role)),
+					one(3, txt(`uptime ${formatDuration(h.uptime)}`, role)),
 				],
 				width,
 			),
@@ -225,10 +256,10 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 				),
 			]),
 		)
-	rows.push(keep(procRow("rtl_tcp", h.rtlTcp, [], role, width)))
+	rows.push(optional(procRow("rtl_tcp", h.rtlTcp, [], role, width), DROP.proc))
 	const mux = h.rtlmux
 	rows.push(
-		keep(
+		optional(
 			procRow(
 				"rtlmux",
 				mux,
@@ -241,13 +272,15 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 									role,
 								),
 							),
-							one(1, txt(formatRate(mux.bytesPerSec), role)),
+							// A rate from an old lane is unknown, not a dimmed number (T6).
+							one(1, txt(formatRate(old ? null : mux.bytesPerSec), role)),
 							one(4, txt(`${formatBytes(mux.totalBytesSent)} sent`, role)),
 						]
 					: [],
 				role,
 				width,
 			),
+			DROP.proc,
 		),
 	)
 	const smp = h.sampling
@@ -265,17 +298,21 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 				? "?"
 				: formatRate(smp.upstream.bytesPerSec)
 		rows.push(
-			keep(
+			optional(
 				fitDot(
 					lbl("sampling"),
 					[
-						one(0, [glyphSpan(glyph), sp(` ${smp.state}`, role)]),
+						one(0, [
+							glyphSpan(glyph),
+							sp(` ${smp.state === "unknown" ? "?" : smp.state}`, role),
+						]),
 						one(1, txt(`sample age ${formatSampleAge(smp.sampleAgeMs)}`, role)),
 						one(2, txt(`${rate} upstream (${smp.upstream.rateStatus})`, role)),
 						one(3, txt(`${smp.epoch.resets} resets`, role)),
 					],
 					width,
 				),
+				DROP.sampling,
 			),
 		)
 	}
@@ -286,12 +323,23 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 			: d.found
 				? `${sanitize([d.vendor, d.product].filter(Boolean).join(" ")) || "?"}${sep()}serial ${d.serial === null ? g.na : sanitize(d.serial)}`
 				: "not found"
-	rows.push(optional(kv("dongle", dongle, width, role), 3))
-	for (const w of h.warnings)
-		rows.push(keep(kv("warning", quote(w), width, "attention")))
-	for (const e of h.errors)
-		rows.push(keep(kv("error", quote(e), width, "fault")))
-	return rows
+	rows.push(optional(kv("dongle", dongle, width, role), DROP.dongle))
+	// Preflight warnings and errors verbatim, capped per host with "+N more".
+	const warn = `host${index}-warnings`
+	const err = `host${index}-errors`
+	for (const w of h.warnings.slice(0, MAX_NOTES))
+		rows.push(
+			grouped(kv("warning", quote(w), width, "attention"), warn, DROP.warning),
+		)
+	for (const e of h.errors.slice(0, MAX_NOTES))
+		rows.push(grouped(kv("error", quote(e), width, "fault"), err, DROP.error))
+	return {
+		rows,
+		capped: {
+			[warn]: Math.max(0, h.warnings.length - MAX_NOTES),
+			[err]: Math.max(0, h.errors.length - MAX_NOTES),
+		},
+	}
 }
 
 /**
@@ -419,7 +467,7 @@ function audioBlock(state: AppState, width: number): Row[] {
 				],
 				width,
 			),
-			2,
+			DROP.demod,
 		),
 	]
 	const result = audioResultText(state, state.now)
@@ -457,31 +505,35 @@ function coreBlock(state: AppState, width: number): Row[] {
 				optional(
 					kv(
 						"",
-						`${sanitize(c.name)} ${sanitize(c.status)} ${quote(c.message)}`,
+						// Status and message are server text: both quoted (assumption 9, M7).
+						`${sanitize(c.name)} ${quote(c.status, 16)} ${quote(c.message)}`,
 						width,
 						"label",
 					),
-					5,
+					DROP.component,
 				),
 			)
 	return rows
 }
 
-/** Spec §6.5 order: CONTAINER (+alerts), SDR HOST per host, AUDIO, CORE. */
+/**
+ * Spec §6.5 order: CONTAINER (+alerts), SDR HOST per host, AUDIO, CORE. Short views
+ * shed by DROP with "+N more" / "+N rows hidden" markers; the heads always stay.
+ */
 export function systemLines(
 	state: AppState,
 	width: number,
 	height: number,
 	roomy: boolean,
 ): Line[] {
-	const gap = (): Row[] => (roomy ? [optional([], 6)] : [])
-	const hosts = state.resources.value?.sdrHosts ?? []
+	const gap = (): Row[] => (roomy ? [gapRow(DROP.gap)] : [])
+	const container = containerBlock(state, width)
+	const hosts = (state.resources.value?.sdrHosts ?? []).map((h, i) =>
+		hostBlock(state, h, i, width),
+	)
 	const hostRows: Row[] =
 		hosts.length > 0
-			? hosts.flatMap((h, i) => [
-					...(i > 0 ? gap() : []),
-					...hostBlock(state, h, width),
-				])
+			? hosts.flatMap((b, i) => [...(i > 0 ? gap() : []), ...b.rows])
 			: [
 					keep(
 						kv(
@@ -495,22 +547,24 @@ export function systemLines(
 						),
 					),
 				]
-	let rows: Row[] = [
-		...containerBlock(state, width),
-		...gap(),
-		...hostRows,
-		...gap(),
-		...audioBlock(state, width),
-		...gap(),
-		...coreBlock(state, width),
-	]
-	while (rows.length > height) {
-		const worst = rows.reduce((m, r) => Math.max(m, r.drop ?? -1), -1)
-		if (worst < 0) break
-		const at = rows.map(r => r.drop ?? -1).lastIndexOf(worst)
-		rows = rows.filter((_, i) => i !== at)
-	}
-	return rows.map(r => r.line).slice(0, height)
+	const capped = Object.assign(
+		{},
+		container.capped,
+		...hosts.map(b => b.capped),
+	) as Record<string, number>
+	return shed(
+		[
+			...container.rows,
+			...gap(),
+			...hostRows,
+			...gap(),
+			...audioBlock(state, width),
+			...gap(),
+			...coreBlock(state, width),
+		],
+		height,
+		capped,
+	)
 }
 
 export function presetNames(state: AppState): string[] {

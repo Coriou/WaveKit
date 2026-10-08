@@ -13,7 +13,7 @@ exports[`System view (spec §6.5) > golden: 80x24 1`] = `
  AUDIO     ○ stopped · 0 clients · 127.0.0.1:8081/stream
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · 25 kHz s16le
  CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
-           api up "API server is responding"
+           api "up" "API server is responding"
 
 
 
@@ -44,7 +44,7 @@ exports[`System view (spec §6.5) > golden: 120x40 1`] = `
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · gain 10 · 25 kHz s16le
 
  CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
-           api up "API server is responding"
+           api "up" "API server is responding"
 
 
 
