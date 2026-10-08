@@ -494,7 +494,8 @@ export type Inbound =
 
 // ---------- derived evidence shared by data/ and ui/ ----------
 
-export type GlyphRole = "live" | "neutral" | "fault" | "unknown"
+/** "attention" (`!`, yellow): needs a look now but is not a fault, e.g. a decoder restarting (R31). */
+export type GlyphRole = "live" | "neutral" | "attention" | "fault" | "unknown"
 
 export type ApiView =
 	| { kind: "connecting" }

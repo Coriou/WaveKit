@@ -101,8 +101,10 @@ describe("processState (§10.7)", () => {
 				const s = processState(d, a.inc, a.stopped)
 				const red = procRole(s) === "fault"
 				expect(red).toBe(s === "faulted" || s === "crash-loop" || s === "down")
-				if (a.health === "idle" && a.inc < 2 && a.running)
+				if (a.health === "idle" && a.inc < 2 && a.running) {
 					expect(red).toBe(false)
+					expect(procRole(s)).not.toBe("attention")
+				}
 				if (!a.running) expect(["up", "starting"]).not.toContain(s)
 				// R15
 				const backoff =

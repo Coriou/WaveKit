@@ -38,6 +38,7 @@ const GLYPH_ROLE: Readonly<Record<GlyphRole, Role>> = {
 	live: "live",
 	neutral: "neutral",
 	fault: "fault",
+	attention: "attention",
 	unknown: "unknown",
 }
 
@@ -50,7 +51,9 @@ export function glyphSpan(role: GlyphRole): Span {
 				? g.fault
 				: role === "neutral"
 					? g.neutral
-					: g.unknown
+					: role === "attention"
+						? g.attention
+						: g.unknown
 	return { text, role: GLYPH_ROLE[role] }
 }
 
