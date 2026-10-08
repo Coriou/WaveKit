@@ -126,10 +126,17 @@ export function summaryLine(fm: FormattedMessage, width: number): Line {
 	if (groups.length === 0) return [sp(truncate(fm.text, width))]
 	const textW = cellWidth(fm.text)
 	const reserve = SEP.length + Math.min(textW, TEXT_RESERVE)
-	const fit = fitGroupsDetailed(groups, Math.max(0, width - reserve))
+	// The marker's width is part of the fit (R57); it is then moved to the end of the line.
+	const marker = ellipsis()
+	const fit = fitGroupsDetailed(groups, Math.max(0, width - reserve), {
+		dropMarker: marker,
+	})
 	const dropped = fit.present.some(p => !p)
-	const line: Line = [...fit.line, sp(SEP, "label"), sp(fm.text)]
-	if (dropped) line.push(sp(SEP, "label"), ellipsis())
+	// fitGroups appends [sep, marker] when it drops; strip exactly that pair (a truncated fit keeps its own …).
+	const last = fit.line[fit.line.length - 1]
+	const segs = dropped && last === marker ? fit.line.slice(0, -2) : fit.line
+	const line: Line = [...segs, sp(SEP, "label"), sp(fm.text)]
+	if (dropped) line.push(sp(SEP, "label"), marker)
 	return truncateLine(line, width)
 }
 
