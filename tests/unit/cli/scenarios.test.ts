@@ -2,7 +2,6 @@ import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import {
-	EXTRA_SCENARIO_NAMES,
 	SCENARIO_DIR,
 	deepMerge,
 	loadScenario,
@@ -232,7 +231,7 @@ describe("scenario loader", () => {
 		}
 		const has = (o: Obj, keys: string[]) => keys.every(k => o[k] !== undefined)
 		let checked = 0
-		for (const name of [...SCENARIO_NAMES, ...EXTRA_SCENARIO_NAMES]) {
+		for (const name of SCENARIO_NAMES) {
 			for (const f of loadScenario(name).ws) {
 				if (f.type !== "decoder:output") continue
 				const { decoderId, output } = f.data as {
@@ -335,7 +334,11 @@ describe("scenario loader", () => {
 				"health"
 			],
 		).toBe("faulted")
-		for (const name of EXTRA_SCENARIO_NAMES)
+		for (const name of [
+			"iq-stale",
+			"iq-disconnected",
+			"decoder-faulted",
+		] as const)
 			expect(readdirSync(SCENARIO_DIR)).toContain(`${name}.json`)
 	})
 })
