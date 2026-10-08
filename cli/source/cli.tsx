@@ -7,7 +7,11 @@ import { render } from "ink"
 import { App as LegacyApp } from "./app.js"
 import { helpText, parseArgs } from "./args.js"
 import { resolveExplicit } from "./data/config.js"
-import { createScreen, installExitHandlers } from "./terminal.js"
+import {
+	createScreen,
+	createShutdown,
+	installExitHandlers,
+} from "./terminal.js"
 import type { ViewId } from "./ui/actions.js"
 import { detectGlyphMode, setGlyphMode } from "./ui/theme.js"
 
@@ -36,7 +40,8 @@ if (parsed.kind === "error") {
 try {
 	const target = resolveExplicit(parsed.api, process.env)
 	if (target) {
-		// The legacy App reads only env vars; hand it the resolved target (removed with the legacy App).
+		// TEMPORARY, removed in T43 with the legacy App: it reads only env vars, so hand it the
+		// resolved target. WAVEKIT_WS_URLS collapses to the one resolved URL (the first in the list).
 		process.env["WAVEKIT_API_URL"] = target.base
 		process.env["WAVEKIT_WS_URLS"] = target.ws
 		process.env["WAVEKIT_WS_URL"] = target.ws
@@ -49,15 +54,15 @@ try {
 }
 
 const screen = createScreen(process.stdout)
-screen.enter()
-const instance = render(<LegacyApp initialView={LEGACY_VIEW[parsed.view]} />)
-let done = false
-const shutdown = (code: number): void => {
-	if (done) return
-	done = true
-	instance.unmount()
-	screen.restore()
-	process.exit(code)
-}
+let instance: ReturnType<typeof render> | null = null
+const shutdown = createShutdown({
+	unmount: () => instance?.unmount(),
+	screen,
+	stderr: process.stderr,
+	exit: code => process.exit(code),
+})
+// Handlers first, so a crash during enter() or the first render still restores the screen.
 installExitHandlers(process, screen, shutdown)
+screen.enter()
+instance = render(<LegacyApp initialView={LEGACY_VIEW[parsed.view]} />)
 void instance.waitUntilExit().then(() => shutdown(0))

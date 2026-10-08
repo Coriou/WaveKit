@@ -1,3 +1,5 @@
+import { sanitize } from "./ui/text.js"
+
 export const ALT_ENTER = "\x1b[?1049h"
 export const ALT_EXIT = "\x1b[?1049l"
 export const CURSOR_SHOW = "\x1b[?25h"
@@ -34,28 +36,52 @@ export function osc52(text: string): string {
 
 export interface ProcessLike {
 	on(event: string, fn: (...args: unknown[]) => void): unknown
-	stderr: { write(s: string): unknown }
 }
 
-/** First line of the error, with C0/C1 controls removed so it cannot move the restored cursor. */
-function oneLine(err: unknown): string {
+/** First line of the error, sanitised (whole escape sequences removed) so it cannot move the restored cursor. */
+export function oneLine(err: unknown): string {
 	const text = err instanceof Error ? err.message : String(err)
-	return (text.split(/\r?\n/)[0] ?? "").replace(
-		/[\u0000-\u001f\u007f-\u009f]/g,
-		"",
-	)
+	return sanitize(text.split(/\r?\n/)[0] ?? "")
 }
 
+export type Shutdown = (code: number, message?: string) => void
+
+export interface ShutdownDeps {
+	/** Unmount the Ink tree; may be absent before render. Errors are ignored. */
+	unmount: () => void
+	screen: Screen
+	stderr: { write(s: string): unknown }
+	exit: (code: number) => void
+}
+
+/**
+ * Runs once: unmount Ink first (its last frame is written to the alternate
+ * screen, not over the user's shell), then restore the main screen, then print
+ * the message, then exit.
+ */
+export function createShutdown(deps: ShutdownDeps): Shutdown {
+	let done = false
+	return (code, message) => {
+		if (done) return
+		done = true
+		try {
+			deps.unmount()
+		} catch {
+			// The tree may already be gone; the screen still has to be restored.
+		}
+		deps.screen.restore()
+		if (message !== undefined) deps.stderr.write(`wavekit: ${message}\n`)
+		deps.exit(code)
+	}
+}
+
+/** exit restores the screen; SIGINT 130, SIGTERM 143; uncaught errors print one sanitised line and exit 1. */
 export function installExitHandlers(
 	proc: ProcessLike,
 	screen: Screen,
-	shutdown: (code: number) => void,
+	shutdown: Shutdown,
 ): void {
-	const fatal = (err: unknown): void => {
-		screen.restore()
-		proc.stderr.write(`wavekit: ${oneLine(err)}\n`)
-		shutdown(1)
-	}
+	const fatal = (err: unknown): void => shutdown(1, oneLine(err))
 	proc.on("exit", () => screen.restore())
 	proc.on("SIGINT", () => shutdown(130))
 	proc.on("SIGTERM", () => shutdown(143))
