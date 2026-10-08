@@ -110,3 +110,55 @@ describe("overview truth details", () => {
 		expect(a).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u202E]/)
 	})
 })
+
+describe("decoder table kinds and dimming (B4 API)", () => {
+	it("uses the narrow column set below 79 columns", () => {
+		const s = scenarioState("live", deps)
+		const narrow = overviewModel(
+			s,
+			initialUi("overview"),
+			59,
+			19,
+			false,
+		).left.map(lineText)
+		const header = narrow.find(l => l.includes("DECODERS")) ?? ""
+		// The narrow set keeps drop and window at 60 columns (§6.1 60×20 mockup).
+		expect(header).toMatch(/DECODERS +process +decodes +drop +window$/)
+		expect(header).not.toContain("lifetime")
+		expect(header).not.toContain("nominal")
+		const wide = overviewModel(
+			s,
+			initialUi("overview"),
+			119,
+			35,
+			true,
+		).left.map(lineText)
+		expect(wide.find(l => l.includes("DECODERS"))).toContain("lifetime")
+	})
+	it("dims every decoder row when the decoders lane is old (§6.1 API down)", () => {
+		const m = overviewModel(
+			scenarioState("api-down-cached", deps),
+			initialUi("overview"),
+			79,
+			22,
+			false,
+		)
+		const rows = m.left.filter(
+			l => /^ ?[●!×○?] /.test(lineText(l)) || lineText(l).includes("dsd-fme"),
+		)
+		expect(rows.length).toBeGreaterThan(0)
+		for (const l of rows)
+			for (const sp of l) if (sp.text.trim() !== "") expect(sp.role).toBe("old")
+		const live = overviewModel(
+			scenarioState("live", deps),
+			initialUi("overview"),
+			79,
+			22,
+			false,
+		)
+		const liveRow = live.left.find(l => lineText(l).includes("dsd-fme")) ?? []
+		expect(liveRow.some(sp => sp.role !== "old" && sp.text.trim() !== "")).toBe(
+			true,
+		)
+	})
+})

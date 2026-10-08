@@ -20,7 +20,6 @@ import { padEnd, sanitize, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
 import {
-	OVERVIEW_COLUMNS,
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
@@ -261,13 +260,16 @@ export function overviewModel(
 	const b = overviewBudget(width + 1, height, roomy, facts.length)
 	const leftWidth = b.layout === "columns" ? b.leftWidth : width
 	const receiver = receiverSummary(state, leftWidth)
+	// "overview" picks the narrow column set below 79 columns; with the decoders
+	// lane old (API down, cached view) every row is dim (§6.1).
 	const table = decoderTable(
 		facts,
-		OVERVIEW_COLUMNS,
+		"overview",
 		leftWidth,
 		b.decoderRows + b.more,
 		ui.selected.overview,
 		state.now,
+		{ dim: isOld(state.decoders, state.now) },
 	)
 	const placeholder = decodersPlaceholder(state)
 	const decoderLines = placeholder
