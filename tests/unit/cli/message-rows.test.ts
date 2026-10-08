@@ -141,6 +141,17 @@ describe("message rows", () => {
 			)
 			expect(line).toBe(`${"a".repeat(12)}  hello  …`)
 		})
+		it("R57: the drop marker's width is reserved, so the text is not cut to fit it", () => {
+			const f: FormattedMessage = {
+				...fm(["a".repeat(6), "c".repeat(6), "b".repeat(5)], "hi"),
+				segments: [
+					{ text: "a".repeat(6), priority: 0 },
+					{ text: "c".repeat(6), priority: 1 },
+					{ text: "b".repeat(5), priority: 5 },
+				],
+			}
+			expect(lineText(summaryLine(f, 20))).toBe(`${"a".repeat(6)}  hi  …`)
+		})
 		it("m6: a full ring whose oldest entry is under 60 s old reads N+ in 60s", () => {
 			const ring = createRing(3, 1)
 			for (let i = 0; i < 3; i++)
