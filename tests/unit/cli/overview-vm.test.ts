@@ -348,3 +348,57 @@ describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
 		expect(b).toMatch(/^window +\?$/)
 	})
 })
+
+describe("A6 fix 1: I4 in-window count", () => {
+	it("shows the count only when the window is known for the non-tuned decoders", () => {
+		const s = scenarioState("idle", deps)
+		expect(lineText(emptyFeedLine(s))).toMatch(/\d+ of 9 decoders in window/)
+		const noWindow = {
+			...s,
+			tuner: {
+				...s.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, frequency: 0 })),
+			},
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					caps: { ...x.caps, centerFreq: 0 },
+				})),
+			},
+			relay: { ...s.relay, value: { ...s.relay.value!, lastFrequency: 0 } },
+		}
+		const text = lineText(emptyFeedLine(noWindow))
+		expect(text).toMatch(/^no decodes since /)
+		expect(text).not.toContain("in window")
+	})
+	it("leaves decoders with no window (—) out of the total", () => {
+		const s = scenarioState("idle", deps)
+		const ext = {
+			...s,
+			decoders: {
+				...s.decoders,
+				value: s.decoders.value!.map(d =>
+					d.id === "readsb"
+						? {
+								...d,
+								caps: {
+									input: "external" as const,
+									output: "jsonl" as const,
+									integrationPattern: "external_sdr" as const,
+								},
+							}
+						: d,
+				),
+			},
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					assignments: x.assignments.filter(a => a.decoderId !== "readsb"),
+				})),
+			},
+		}
+		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 decoders in window/)
+	})
+})

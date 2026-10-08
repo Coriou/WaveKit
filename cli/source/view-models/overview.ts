@@ -327,7 +327,14 @@ function feedPlaceholder(state: AppState): Line {
 export function emptyFeedLine(state: AppState): Line {
 	const facts = decoderFacts(state)
 	const since = state.conn.ws.since ?? state.now
-	const inWin = facts.filter(f => f.membership === "in").length
+	// I4: decoders with no window (—) are not counted; tuned decoders are always "in", so
+	// the count is shown only when every other decoder's membership is known.
+	const counted = facts.filter(f => f.membership !== "—")
+	const inWin = counted.filter(f => f.membership === "in").length
+	const others = counted.filter(f => f.nominal !== "tuned")
+	const windowKnown =
+		others.length > 0 &&
+		others.every(f => f.membership === "in" || f.membership === "out")
 	// R44/R53: the centre on its own (first positive), for the receiver row's source (M7).
 	const centre = rxValues(
 		state,
@@ -336,8 +343,8 @@ export function emptyFeedLine(state: AppState): Line {
 	const sep = ` ${glyphs().sep} `
 	const parts = [
 		`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,
-		...(facts.length > 0
-			? [`${inWin} of ${facts.length} decoders in window`]
+		...(windowKnown
+			? [`${inWin} of ${counted.length} decoders in window`]
 			: []),
 		...(centre !== undefined ? [`rx ${formatMHz(centre)}`] : []),
 	]
