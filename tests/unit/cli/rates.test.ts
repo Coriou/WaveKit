@@ -5,6 +5,7 @@ import {
 	aggregateDropNow,
 	branchDropNow,
 	counterRate,
+	fanoutSample,
 	pushCounter,
 	pushFanout,
 	restartIncrements,
@@ -257,5 +258,114 @@ describe("R4: aggregate drop now and counter resets", () => {
 		const h = build([snap(0, 0, 0), snap(5000, 1_000_000, 37)])
 		expect(branchDropNow(h, "decoder-a")).toBe(37 / 1_000_000)
 		expect(aggregateDropNow(h).ratio).toBe(37 / 1_000_000)
+	})
+})
+
+function multi(
+	t: number,
+	branches: Array<[string, number, number]>,
+): FanoutSnapshot {
+	return {
+		timestamp: new Date(t).toISOString(),
+		branches: branches.map(([id, offered, dropped]) => ({
+			id,
+			decoderId: id.replace("decoder-", ""),
+			backpressureActive: false,
+			backpressureEnterCount: 0,
+			droppedBytesTotal: dropped,
+			droppedChunksTotal: 0,
+			bufferBytes: 0,
+			highWaterMark: 0,
+			totalBytesWritten: offered,
+		})),
+		backpressureActiveCount: 0,
+		droppedBytesTotal: 0,
+		droppedChunksTotal: 0,
+	}
+}
+
+describe("A3 review fixes", () => {
+	it("R30: server branch ids never touch the prototype", () => {
+		const s = fanoutSample(
+			multi(0, [
+				["__proto__", 10, 1],
+				["toString", 20, 2],
+				["constructor", 30, 3],
+			]),
+		)
+		expect(s).not.toBeNull()
+		expect(Object.keys(s!.branches).sort()).toEqual([
+			"__proto__",
+			"constructor",
+			"toString",
+		])
+		expect(s!.branches["__proto__"]?.offered).toBe(10)
+		const h = build([
+			multi(0, [["__proto__", 0, 0]]),
+			multi(5000, [["__proto__", 1000, 100]]),
+		])
+		expect(branchDropNow(h, "__proto__")).toBeCloseTo(0.1)
+		const plain = build([snap(0, 0, 0), snap(5000, 1000, 100)])
+		expect(branchDropNow(plain, "toString")).toBeNull()
+		expect(branchDropNow(plain, "constructor")).toBeNull()
+		expect(aggregateDropNow(plain).branches).toBe(1)
+	})
+	it("minor 3: a late, older counter sample is ignored, not a reset", () => {
+		let h: CounterSample[] = []
+		h = pushCounter(h, 0, 10, 60000)
+		h = pushCounter(h, 10000, 12, 60000)
+		const before = h
+		expect(pushCounter(h, 5000, 3, 60000)).toBe(before)
+		expect(pushCounter(h, 10000, 1, 60000)).toBe(before)
+	})
+	it("minor 4: a sample older than the window means the server clock stepped back", () => {
+		const h = build([snap(100000, 0, 0), snap(105000, 1000, 10)])
+		const stepped = pushFanout(h, snap(50000, 2000, 20))
+		expect(stepped.map(x => x.t)).toEqual([50000])
+		const inside = pushFanout(h, snap(102000, 500, 5))
+		expect(inside.map(x => x.t)).toEqual([100000, 102000, 105000])
+	})
+	it("minor 5: aggregate uses only branches in both the oldest and newest samples", () => {
+		const h = build([
+			multi(0, [
+				["decoder-a", 0, 0],
+				["decoder-c", 0, 0],
+			]),
+			multi(3000, [
+				["decoder-a", 500, 50],
+				["decoder-b", 0, 0],
+			]),
+			multi(6000, [
+				["decoder-a", 1000, 100],
+				["decoder-b", 1000, 900],
+				["decoder-c", 1000, 300],
+			]),
+		])
+		// b is missing from the oldest sample: excluded even though it has 2 points.
+		expect(aggregateDropNow(h).ratio).toBeCloseTo(400 / 2000)
+		// A reset in an excluded branch does not make the aggregate unknown.
+		const h2 = build([
+			multi(0, [["decoder-a", 0, 0]]),
+			multi(3000, [
+				["decoder-a", 500, 50],
+				["decoder-b", 1000, 500],
+			]),
+			multi(6000, [
+				["decoder-a", 1000, 100],
+				["decoder-b", 10, 0],
+			]),
+		])
+		expect(aggregateDropNow(h2).ratio).toBeCloseTo(0.1)
+	})
+	it("minor 6: after a counter reset the sparkline counts cur.v as a lower bound", () => {
+		const spark = sparkAdd({}, { t: 600000, v: 10 }, { t: 660000, v: 3 })
+		expect(sparkBuckets(spark, 660000)[29]).toBe(3)
+	})
+	it("minor 8: no-op pushes return the input array", () => {
+		const h = build([snap(0, 0, 0), snap(5000, 10, 1)])
+		expect(pushFanout(h, snap(5000, 10, 1))).toBe(h)
+		expect(pushFanout(h, { ...snap(0, 0, 0), timestamp: "not a date" })).toBe(h)
+		const c = pushCounter([], 0, 1, 60000)
+		expect(pushCounter(c, 0, 1, 60000)).toBe(c)
 	})
 })

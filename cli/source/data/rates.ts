@@ -17,7 +17,8 @@ export const SPARK_MINUTES = 30
 export function fanoutSample(s: FanoutSnapshot): FanoutSample | null {
 	const t = Date.parse(s.timestamp)
 	if (!Number.isFinite(t)) return null
-	const branches: Record<string, FanoutBranchSample> = {}
+	// Keyed by server branch ids: no prototype, so "__proto__" etc. are plain keys (R30).
+	const branches: Record<string, FanoutBranchSample> = Object.create(null)
 	for (const b of s.branches) {
 		branches[b.id] = {
 			dropped: b.droppedBytesTotal,
@@ -31,13 +32,26 @@ export function fanoutSample(s: FanoutSnapshot): FanoutSample | null {
 	return { t, branches }
 }
 
-/** Add a snapshot (deduped by server timestamp) and keep the trailing 10 s by server time. */
+function branchOf(
+	sample: FanoutSample,
+	id: string,
+): FanoutBranchSample | undefined {
+	return Object.hasOwn(sample.branches, id) ? sample.branches[id] : undefined
+}
+
+/**
+ * Add a snapshot (deduped by server timestamp) and keep the trailing 10 s by server time.
+ * A no-op returns the input array. A sample older than the window means the server
+ * clock stepped back: the history restarts from it.
+ */
 export function pushFanout(
-	history: readonly FanoutSample[],
+	history: FanoutSample[],
 	s: FanoutSnapshot,
 ): FanoutSample[] {
 	const sample = fanoutSample(s)
-	if (!sample || history.some(h => h.t === sample.t)) return [...history]
+	if (!sample || history.some(h => h.t === sample.t)) return history
+	const latest = history[history.length - 1]
+	if (latest && sample.t < latest.t - DROP_WINDOW_MS) return [sample]
 	const next = [...history, sample].sort((a, b) => a.t - b.t)
 	const newest = next[next.length - 1]?.t ?? sample.t
 	return next.filter(h => h.t >= newest - DROP_WINDOW_MS)
@@ -56,7 +70,7 @@ function deltaOf(
 ): BranchDelta | "reset" | null {
 	const pts: Array<{ t: number; b: FanoutBranchSample }> = []
 	for (const h of history) {
-		const b = h.branches[branchId]
+		const b = branchOf(h, branchId)
 		if (b) pts.push({ t: h.t, b })
 	}
 	if (pts.length < 2) return null
@@ -118,8 +132,7 @@ function sumOver(
 	const rates: number[] = []
 	for (const id of ids) {
 		const d = deltaOf(history, id)
-		// R4: a reset in any branch seen in two samples makes the aggregate unknown;
-		// branches seen in fewer than two samples are excluded.
+		// R4: a reset in any included branch makes the aggregate unknown.
 		if (d === "reset") return { ratio: null, rates: [] }
 		if (!d) continue
 		dd += d.dDropped
@@ -127,6 +140,12 @@ function sumOver(
 		rates.push((d.dOffered / d.spanMs) * 1000)
 	}
 	return { ratio: dof > 0 ? Math.min(1, Math.max(0, dd / dof)) : null, rates }
+}
+
+/** R4: only branches present in both the oldest and the newest sample count. */
+function inBoth(history: readonly FanoutSample[], ids: string[]): string[] {
+	const oldest = history[0]
+	return oldest ? ids.filter(id => branchOf(oldest, id) !== undefined) : []
 }
 
 /** Σ Δ dropped / Σ Δ offered over branches with a decoderId. */
@@ -145,9 +164,9 @@ export function aggregateDropNow(
 		.filter(([, b]) => b.decoderId !== undefined)
 		.map(([id]) => id)
 	const backpressure = ids.filter(
-		id => newest.branches[id]?.backpressure === true,
+		id => branchOf(newest, id)?.backpressure === true,
 	).length
-	const { ratio, rates } = sumOver(history, ids)
+	const { ratio, rates } = sumOver(history, inBoth(history, ids))
 	return {
 		ratio,
 		backpressure,
@@ -164,19 +183,22 @@ export function relayDropNow(history: readonly FanoutSample[]): number | null {
 	const ids = Object.entries(newest.branches)
 		.filter(([, b]) => b.decoderId === undefined)
 		.map(([id]) => id)
-	return sumOver(history, ids).ratio
+	return sumOver(history, inBoth(history, ids)).ratio
 }
 
-/** Append a counter sample; a decrease resets the history; samples older than the window are dropped. */
+/**
+ * Append a counter sample; a late (not newer) sample is ignored and returns the input
+ * array; a decrease resets the history; samples older than the window are dropped.
+ */
 export function pushCounter(
-	history: readonly CounterSample[],
+	history: CounterSample[],
 	t: number,
 	v: number,
 	windowMs: number,
 ): CounterSample[] {
 	const last = history[history.length - 1]
+	if (last && t <= last.t) return history
 	if (last && v < last.v) return [{ t, v }]
-	if (last && t <= last.t) return [...history]
 	return [...history, { t, v }].filter(s => s.t >= t - windowMs)
 }
 
@@ -210,7 +232,8 @@ export function sparkAdd(
 	cur: CounterSample,
 ): Record<string, number> {
 	const minute = Math.floor(cur.t / 60_000)
-	const delta = prev && cur.v >= prev.v ? cur.v - prev.v : 0
+	// After a counter reset, cur.v is a lower bound on decodes since prev.
+	const delta = prev ? (cur.v >= prev.v ? cur.v - prev.v : cur.v) : 0
 	const next: Record<string, number> = {}
 	for (const [k, v] of Object.entries(spark)) {
 		if (Number(k) > minute - SPARK_MINUTES) next[k] = v
