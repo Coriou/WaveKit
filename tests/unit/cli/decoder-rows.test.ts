@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { formatMessage } from "../../../cli/source/ui/messages/index.js"
+import { pickVariant } from "../../../cli/source/ui/columns.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
 import {
 	DECODERS_COLUMNS,
@@ -52,7 +53,7 @@ describe("decoder rows (live fixture)", () => {
 		const rows = t.rows.map(lineText)
 		const acars = rows.find(r => r.includes("acarsdec")) ?? ""
 		expect(acars).toMatch(
-			/^! acarsdec +restarting +— +— +— +131\.550–131\.825 +out/,
+			/^! acarsdec +restarting ×13 +— +— +— +131\.550–131\.825 +out/,
 		)
 		const readsb = rows.find(r => r.includes("readsb")) ?? ""
 		expect(readsb).toMatch(
@@ -71,7 +72,7 @@ describe("decoder rows (live fixture)", () => {
 		)
 		const rows = t.rows.map(lineText)
 		expect(rows.find(r => r.includes("acarsdec"))).toMatch(
-			/restarting +— +— +out/,
+			/restarting ×13 +— +— +out/,
 		)
 		expect(rows.find(r => r.includes("rtl433"))).toMatch(
 			/^● rtl433 {12}up 51s {14}none for 51s {10}!15% {2}out/,
@@ -158,6 +159,44 @@ describe("decoder rows (live fixture)", () => {
 		expect(proc[0]?.role).toBe("attention")
 		const name = cells["decoder"]?.variants[0] ?? []
 		expect(name[0]).toMatchObject({ text: "!", role: "attention" })
+	})
+
+	it("R50: restarting keeps its evidence as width allows (rich, mid, min)", () => {
+		const proc = decoderCells(by("acarsdec"), s.now)["process"]
+		expect(proc?.variants.map(lineText)).toEqual([
+			"restarting",
+			"restarting ×13",
+			"restarting · 13 restarts",
+		])
+		for (const v of proc?.variants ?? [])
+			for (const span of v) expect(span.role).toBe("attention")
+		expect(lineText(pickVariant(proc ?? { variants: [[]] }, 24))).toBe(
+			"restarting · 13 restarts",
+		)
+		const rowAt = (cols: typeof OVERVIEW_COLUMNS, w: number): string =>
+			lineText(
+				decoderTable(facts, cols, w, 20, null, s.now).rows.find(r =>
+					lineText(r).includes("acarsdec"),
+				) ?? [],
+			)
+		// Overview standard (process 18): mid. Decoders view (process 10) and narrow: min.
+		expect(rowAt(OVERVIEW_COLUMNS, 119)).toContain("restarting ×13 ")
+		expect(rowAt(OVERVIEW_COLUMNS, 79)).toContain("restarting ×13 ")
+		expect(rowAt(OVERVIEW_COLUMNS, 59)).toMatch(/restarting +—/)
+		expect(rowAt(DECODERS_COLUMNS, 119)).toMatch(/restarting +13 /)
+	})
+
+	it("R50: down with restarts reads down · N restarts; no restarts, just down", () => {
+		const a = by("acarsdec")
+		const down: DecoderFacts = { ...a, proc: "down", role: "fault" }
+		const v = decoderCells(down, s.now)["process"]?.variants ?? []
+		expect(v.map(lineText)).toEqual(["down", "down ×13", "down · 13 restarts"])
+		for (const line of v)
+			for (const span of line) expect(span.role).toBe("fault")
+		const fresh: DecoderFacts = { ...down, row: { ...a.row, restartCount: 0 } }
+		expect(
+			decoderCells(fresh, s.now)["process"]?.variants.map(lineText),
+		).toEqual(["down"])
 	})
 
 	it("R21: a nonzero drop never reads 0%", () => {
