@@ -201,8 +201,9 @@ describe("health on unexpected exit", () => {
 		expect(manager.getStatus("acars")?.health).toBe("faulted")
 		decoder.produceOutput()
 		expect(manager.getStatus("acars")?.health).toBe("running")
+		// That run produced output, so its exit starts a fresh count.
 		decoder.crash()
-		expect(manager.getStatus("acars")?.health).toBe("faulted")
+		expect(manager.getStatus("acars")?.health).toBe("restarting")
 	})
 
 	it("a stable run between crashes resets the consecutive count", async () => {
@@ -214,6 +215,24 @@ describe("health on unexpected exit", () => {
 			expect(manager.getStatus("acars")?.health).toBe("restarting")
 			await vi.advanceTimersByTimeAsync(10)
 		}
+	})
+
+	it("the exit that ends a stable run is not counted as an unstable run", async () => {
+		setup()
+		await manager.startDecoder("acars")
+		await vi.advanceTimersByTimeAsync(1000)
+		decoder.crash() // ends a stable run: count stays 0, backoff resets
+		await vi.advanceTimersByTimeAsync(10)
+		expect(decoder.starts).toBe(2)
+		decoder.crash() // unstable 1
+		await vi.advanceTimersByTimeAsync(20)
+		expect(decoder.starts).toBe(3)
+		decoder.crash() // unstable 2
+		expect(manager.getStatus("acars")?.health).toBe("restarting")
+		await vi.advanceTimersByTimeAsync(40)
+		expect(decoder.starts).toBe(4)
+		decoder.crash() // unstable 3
+		expect(manager.getStatus("acars")?.health).toBe("faulted")
 	})
 
 	it("an exhausted finite budget is terminal: faulted without nextRestartAt", async () => {

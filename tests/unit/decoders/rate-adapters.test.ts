@@ -411,4 +411,66 @@ describe("cached instance rate plan in manager status", () => {
 			await manager.destroy()
 		}
 	})
+
+	it("does not resurrect a stopped decoder's old input caps on reconnect", async () => {
+		const registry = new DecoderRegistry()
+		registry.register(
+			"multimon-ng",
+			cfg => {
+				// Real declarations and adapter; the process lifecycle is faked.
+				const decoder = new MultimonDecoder(cfg, logger)
+				let running = false
+				return Object.assign(decoder, {
+					start: async () => {
+						running = true
+						decoder.emit("started")
+					},
+					stop: async () => {
+						running = false
+						decoder.emit("stopped")
+					},
+					getStatus: () => ({
+						...MultimonDecoder.prototype.getStatus.call(decoder),
+						running,
+					}),
+				})
+			},
+			{ input: "iq", output: "text", integrationPattern: "pure_consumer" },
+		)
+		const caps: SourceCaps = {
+			kind: "iq",
+			format: "U8_IQ",
+			sampleRate: 2_400_000,
+			exclusive: false,
+		}
+		const sources = new FakeSources(caps)
+		const manager = new DecoderManager(
+			registry,
+			new FanoutManager(logger),
+			logger,
+			{ validateVersions: false },
+		)
+		manager.setSourceManager(sources as unknown as SourceManager)
+		try {
+			manager.createDecoder(config("multimon-ng", { modes: ["POCSAG1200"] }))
+			await manager.startDecoder("multimon-ng")
+			await manager.stopDecoder("multimon-ng")
+			sources.caps = { ...caps, sampleRate: 20_000 }
+			sources.emit("caps-changed", "rtl", sources.caps)
+			await vi.waitFor(
+				() =>
+					expect(
+						manager.getStatus("multimon-ng")?.rateAssessment?.verdict,
+					).toBe("unusable"),
+				{ timeout: 3000 },
+			)
+			sources.emit("connected", "rtl")
+			expect(manager.getStatus("multimon-ng")?.rateAssessment).toMatchObject({
+				verdict: "unusable",
+				sourceRateHz: 20_000,
+			})
+		} finally {
+			await manager.destroy()
+		}
+	})
 })

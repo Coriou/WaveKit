@@ -597,13 +597,15 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 - `"restarting"`: the process exited without being asked to stop and an
   automatic restart is scheduled at `nextRestartAt`. The restarted run reports
   `"running"` (then `"idle"` as usual).
-- `"faulted"` with `nextRestartAt`: crash loop. `health.faultAfterFailures`
-  (default 5) consecutive runs ended without output and before 30 s. Retries
-  continue at the maximum backoff (30 s); a run that produces output or stays
-  up 30 s returns to `"running"`.
-- `"faulted"` without `nextRestartAt`: terminal. The restart budget
-  (`maxRestarts`, unlimited by default) is exhausted or an explicit start
-  failed; an explicit start/restart is required.
+- `"faulted"` with `nextRestartAt` (or with `running: true`): crash loop.
+  `health.faultAfterFailures` (default 5) consecutive runs ended without output
+  and before 30 s. Retries continue at the maximum backoff (30 s); a retry run
+  stays `"faulted"` on probation until it produces output or stays up 30 s,
+  then returns to `"running"`.
+- `"faulted"` with `running: false` and no `nextRestartAt`: terminal. The
+  restart budget (`maxRestarts`, unlimited by default) is exhausted, an explicit
+  start failed, or the operator stopped a faulted decoder; an explicit
+  start/restart is required.
 
 An explicit stop cancels a pending restart; a `"restarting"` decoder then
 reports `"running"` with `running: false` (a fault stays visible until the next

@@ -674,10 +674,12 @@ export class DecoderManager extends EventEmitter {
 				state.lastOutputAt.getTime() >= startedAt) ||
 				now - startedAt >= this.config.stableRunMs)
 		if (stableRun) {
+			// The exit ending a stable run is not itself an unstable run.
 			state.consecutiveFailures = 0
 			state.currentDelay = this.config.restartDelay
+		} else {
+			state.consecutiveFailures++
 		}
-		state.consecutiveFailures++
 
 		// Check if max restarts exceeded (Requirement 20.3)
 		if (
@@ -1119,11 +1121,13 @@ export class DecoderManager extends EventEmitter {
 		caps?: SourceCaps | null,
 	): DecoderRateAssessment {
 		const sourceId = this.selectedSourceId(state)
+		// inputCaps describe the running pipeline only while it is wired; a
+		// stopped decoder's old inputCaps must not outlive later caps changes.
 		const resolved =
 			caps === null
 				? undefined
 				: (caps ??
-					state.inputCaps ??
+					(state.branchId ? state.inputCaps : undefined) ??
 					(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined))
 		try {
 			const requirements =

@@ -9,8 +9,10 @@ export interface DecoderStats {
  * - idle: running without output for `idleTimeoutMs`
  * - restarting: exited unexpectedly; an automatic restart is scheduled at `nextRestartAt`
  * - faulted: crash loop (consecutive unstable runs) or restart budget exhausted.
- *   With `nextRestartAt` retries continue and a stable run returns to "running";
- *   without it the fault is terminal until an explicit start/restart.
+ *   `running: true` = a crash-loop retry on probation (returns to "running"
+ *   once it produces output or stays up 30 s); `nextRestartAt` set = waiting
+ *   for the next retry; `!running && !nextRestartAt` = terminal until an
+ *   explicit start/restart.
  */
 export type DecoderHealth = "running" | "idle" | "restarting" | "faulted"
 
