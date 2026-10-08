@@ -13,9 +13,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Build slepp/rtlmux from GitLab (canonical source)
-RUN git clone --depth 1 https://gitlab.com/slepp/rtlmux.git && \
+# Pinned slepp/rtlmux (GitLab, canonical source) plus WaveKit's reconnect fix:
+# upstream writes client commands to a freed rtl_tcp connection during the
+# reconnect gap. Regression harness: scripts/native-patches/run-rtlmux-tests.sh
+ARG RTLMUX_REF=60bc8de9cc4085603463801d6d1fe20da7c28484
+
+COPY scripts/native-patches/rtlmux-server-reconnect.patch /build/rtlmux-server-reconnect.patch
+
+RUN git clone https://gitlab.com/slepp/rtlmux.git && \
     cd rtlmux && \
+    git checkout --detach "${RTLMUX_REF}" && \
+    git apply --check /build/rtlmux-server-reconnect.patch && \
+    git apply /build/rtlmux-server-reconnect.patch && \
     make -j$(nproc) && \
     cp rtlmux /usr/local/bin/
 
