@@ -69,12 +69,40 @@ export function settle(ms = 15): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/** Upper bound for every wait; generous because the host may be heavily loaded. */
+export const WAIT_TIMEOUT_MS = 5000
+const POLL_MS = 5
+
+/** Poll until `predicate()` holds; resolves false (never throws) on timeout. */
+export async function pollUntil(
+	predicate: () => boolean,
+	timeoutMs = WAIT_TIMEOUT_MS,
+): Promise<boolean> {
+	const deadline = Date.now() + timeoutMs
+	while (!predicate()) {
+		if (Date.now() >= deadline) return false
+		await settle(POLL_MS)
+	}
+	return true
+}
+
+export interface WaitOptions {
+	/** false = the input is not expected to change the frame; wait briefly instead of for a write. */
+	expectWrite?: boolean
+}
+
 export interface RenderHandle {
 	frame(): string[]
 	text(): string
-	press(seq: string): Promise<void>
-	resize(cols: number, rows: number): Promise<void>
-	rerender(el: ReactElement): Promise<void>
+	/** Feed one key, then wait for the frame it produces (or briefly, with expectWrite: false). */
+	press(seq: string, opts?: WaitOptions): Promise<void>
+	resize(cols: number, rows: number, opts?: WaitOptions): Promise<void>
+	rerender(el: ReactElement, opts?: WaitOptions): Promise<void>
+	/** Poll the current frame until `predicate` holds; throws with the last frame on timeout. */
+	waitFor(
+		predicate: (frame: string[]) => boolean,
+		timeoutMs?: number,
+	): Promise<void>
 	writes(): readonly string[]
 	unmount(): void
 }
@@ -94,8 +122,29 @@ export async function renderAt(
 		exitOnCtrlC: false,
 		patchConsole: false,
 	})
-	// useInput attaches in a passive effect; input sent before it flushes is dropped.
+	// Wait for the first frame. useInput attaches in a passive effect after it;
+	// input sent before that flushes is dropped, hence the extra settle.
+	await pollUntil(() => stdout.chunks.length > 0)
 	await settle()
+	/** Wait for a write after `before` chunks, then until no write lands for quietMs. */
+	const afterInput = async (
+		before: number,
+		opts: WaitOptions | undefined,
+		quietMs: number,
+	): Promise<void> => {
+		if (opts?.expectWrite === false) {
+			await settle(quietMs)
+			return
+		}
+		await pollUntil(() => stdout.chunks.length > before)
+		const deadline = Date.now() + WAIT_TIMEOUT_MS
+		let seen = stdout.chunks.length
+		while (Date.now() < deadline) {
+			await settle(quietMs)
+			if (stdout.chunks.length === seen) return
+			seen = stdout.chunks.length
+		}
+	}
 	const frame = (): string[] => {
 		for (let i = stdout.chunks.length - 1; i >= 0; i--) {
 			const chunk = stdout.chunks[i] ?? ""
@@ -107,20 +156,30 @@ export async function renderAt(
 	return {
 		frame,
 		text: () => frame().join("\n"),
-		press: async seq => {
+		press: async (seq, opts) => {
+			const before = stdout.chunks.length
 			stdin.feed(seq)
-			await settle()
+			await afterInput(before, opts, 15)
 		},
-		resize: async (cols, rows) => {
+		resize: async (cols, rows, opts) => {
+			const before = stdout.chunks.length
 			stdout.columns = cols
 			stdout.rows = rows
 			stdout.emit("resize")
-			// use-terminal-size debounces 50 ms.
-			await settle(90)
+			// use-terminal-size debounces 50 ms, so the quiet window must exceed it.
+			await afterInput(before, opts, 90)
 		},
-		rerender: async next => {
+		rerender: async (next, opts) => {
+			const before = stdout.chunks.length
 			instance.rerender(next)
-			await settle()
+			await afterInput(before, opts, 15)
+		},
+		waitFor: async (predicate, timeoutMs = WAIT_TIMEOUT_MS) => {
+			if (!(await pollUntil(() => predicate(frame()), timeoutMs))) {
+				throw new Error(
+					`waitFor timed out after ${timeoutMs} ms; last frame:\n${frame().join("\n")}`,
+				)
+			}
 		},
 		writes: () => stdout.chunks,
 		unmount: () => {

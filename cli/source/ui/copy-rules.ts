@@ -1,3 +1,5 @@
+import { EMOJI } from "./text.js"
+
 export interface BannedRule {
 	id: string
 	re: RegExp
@@ -25,7 +27,7 @@ export const BANNED_RULES: readonly BannedRule[] = [
 	{ id: "lagging", re: /\blagging\b/i },
 	{ id: "overloaded", re: /\boverloaded\b/i },
 	{ id: "bottleneck", re: /\bbottleneck\b/i },
-	{ id: "emoji", re: /\p{Emoji_Presentation}/u },
+	{ id: "emoji", re: EMOJI },
 ]
 
 /** Server-quoted text ("…") is shown verbatim and is exempt from the copy rules. */
