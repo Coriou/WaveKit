@@ -31,10 +31,11 @@ export function windowFor(
 		relay && (relay.sourceId === undefined || relay.sourceId === sourceId)
 			? relay.lastFrequency
 			: undefined
-	const centreHz = t?.frequency ?? s?.caps.centerFreq ?? relayFreq
-	const sampleRate = t?.sampleRate ?? s?.caps.sampleRate
 	const positive = (x: number | undefined): x is number =>
 		x !== undefined && Number.isFinite(x) && x > 0
+	// A tuner that reports 0 does not know its frequency (R44): fall through.
+	const centreHz = [t?.frequency, s?.caps.centerFreq, relayFreq].find(positive)
+	const sampleRate = [t?.sampleRate, s?.caps.sampleRate].find(positive)
 	if (!positive(centreHz) || !positive(sampleRate)) return null
 	return {
 		sourceId,

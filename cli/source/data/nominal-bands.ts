@@ -60,7 +60,8 @@ const mhz3 = (mhz: number): string => mhz.toFixed(3)
 export function bandLabel(band: NominalBand, range: string): string {
 	if (band.kind === "tuned") return "tuned"
 	const ch = band.channelsMHz
-	if (ch.length <= 1) return mhz3(ch[0] ?? 0)
+	if (ch.length === 0) return "?"
+	if (ch.length === 1) return mhz3(ch[0] ?? 0)
 	if (band.join === "alternatives") return ch.map(mhz3).join("/")
 	return `${mhz3(Math.min(...ch))}${range}${mhz3(Math.max(...ch))}`
 }
