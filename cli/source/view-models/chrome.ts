@@ -26,6 +26,7 @@ export function stripInput(state: AppState): StripInput {
 	if (rows !== undefined) {
 		let up = 0
 		let failing = 0
+		let restarting = 0
 		let inWindow = 0
 		let known = 0
 		for (const d of rows) {
@@ -36,6 +37,7 @@ export function stripInput(state: AppState): StripInput {
 			)
 			if (p === "up" || p === "starting") up++
 			if (isFailing(p)) failing++
+			if (p === "restarting") restarting++
 			const m = decoderMembership(
 				d,
 				state.sources.value,
@@ -49,6 +51,7 @@ export function stripInput(state: AppState): StripInput {
 			up,
 			total: rows.length,
 			failing,
+			restarting,
 			inWindow: known > 0 ? inWindow : null,
 		}
 	}

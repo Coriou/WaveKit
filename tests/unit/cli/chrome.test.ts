@@ -43,7 +43,15 @@ describe("strip input", () => {
 		const input = stripInput(s)
 		// R15/R31: acarsdec (running false, 13 restarts, not faulted) is "restarting",
 		// attention rather than failing; it is still not up.
-		expect(input.decoders).toEqual({ up: 8, total: 9, failing: 0, inWindow: 2 })
+		expect(input.decoders).toEqual({
+			up: 8,
+			total: 9,
+			failing: 0,
+			restarting: 1,
+			inWindow: 2,
+		})
+		// R46: the restarting decoder is visible in the strip.
+		expect(lineText(stripLine(input, 199))).toContain("1 restarting")
 		expect(input.drops.backpressure).toBe(true)
 		expect(input.drops.ratio).toBeCloseTo(0.2125, 3)
 		expect(lineText(stripLine(input, 119))).toMatch(
