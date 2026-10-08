@@ -24,6 +24,14 @@ for (const [localPort, targetPort] of [
 		sockets.add(upstream)
 		client.setNoDelay(true)
 		upstream.setNoDelay(true)
+		upstream.setKeepAlive(true, 5000)
+		// IQ never pauses on a healthy rtl_tcp stream; silence means a receiver
+		// reboot left a half-open socket, so close it and let the client reconnect.
+		if (targetPort === 5555) {
+			upstream.setTimeout(15000, () =>
+				upstream.destroy(new Error("Receiver IQ stalled")),
+			)
+		}
 		const timer = setTimeout(
 			() => upstream.destroy(new Error("Receiver connection timed out")),
 			5000,
