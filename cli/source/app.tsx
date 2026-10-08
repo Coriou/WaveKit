@@ -1,701 +1,180 @@
-/**
- * WaveKit CLI Dashboard - Main Application
- *
- * A unified, modern, Ink-based CLI dashboard for monitoring WaveKit.
- *
- * Features:
- * - Tab-based navigation (1-8)
- * - Auto-reconnect WebSocket with exponential backoff
- * - Graceful shutdown (q or Ctrl+C)
- * - Real-time updates from WS channels
- */
-
-import React, { useState, useCallback, useEffect } from "react"
-import { Box, useInput, useApp } from "ink"
-import { useWebSocket, type ServerMessage } from "./hooks/use-websocket.js"
+import { Box, Text, useApp } from "ink"
+import { useEffect, useState, type ReactElement } from "react"
+import { Banner } from "./components/banner.js"
+import { ChainStrip } from "./components/chain-strip.js"
+import { ConfirmBar } from "./components/confirm-bar.js"
+import { ErrorBoundary } from "./components/error-boundary.js"
+import { Footer } from "./components/footer.js"
+import { HelpOverlay } from "./components/help-overlay.js"
+import { ColorContext } from "./components/lines.js"
+import { Switcher } from "./components/switcher.js"
+import { TooSmall } from "./components/too-small.js"
+import type { RuntimeHandle } from "./data/runtime.js"
+import type { AppState } from "./data/types.js"
+import { useKeys } from "./hooks/use-keys.js"
+import { useStore } from "./hooks/use-store.js"
 import { useTerminalSize } from "./hooks/use-terminal-size.js"
-import { Header } from "./components/header.js"
-import { TabBar } from "./components/tab-bar.js"
-import { HelpBar } from "./components/help-bar.js"
-import { DecoderList } from "./components/decoder-list.js"
-import { DecoderOutput as DecoderOutputPanel } from "./components/decoder-output.js"
-import { BackpressurePanel } from "./components/backpressure-panel.js"
-import { SourceStatus } from "./components/source-status.js"
-import { Dashboard } from "./components/dashboard.js"
-import { LiveAudioPanel } from "./components/live-audio-panel.js"
-import { ResourcePanel } from "./components/resource-panel.js"
-import { TunerPanel, type TunerCommand } from "./components/tuner-panel.js"
-import { sourceSnapshotFresh } from "./utils/source-activity.js"
-import type { View } from "./utils/args.js"
-import type {
-	DecoderStatus,
-	DecoderOutput,
-	FanoutSnapshot,
-	SourceStatus as SourceStatusType,
-	DecoderOutputMessage,
-	TunerRelayStatus,
-	TunerState,
-	LiveAudioStatus,
-	ResourceSnapshot,
-	AircraftState,
-} from "./types.js"
+import { osc52 } from "./terminal.js"
+import { EMPTY_VIEW_CTX, type Action, type ViewId } from "./ui/actions.js"
+import { bannerLine } from "./ui/banner.js"
+import { chromeRows, heightClass, tooSmall, widthClass } from "./ui/frame.js"
+import type { KeyContext } from "./ui/keymap.js"
+import { applyUiAction } from "./ui/ui-reducer.js"
+import { initialUi, type UiState } from "./ui/ui-state.js"
+import { bannerConditions } from "./view-models/chrome.js"
+import type { Effect, ViewKeyInfo, ViewModule } from "./views/types.js"
 
-// ============================================================================
-// Types
-// ============================================================================
-
-interface AppProps {
-	initialView?: View
+export interface AppProps {
+	runtime: RuntimeHandle
+	views: Partial<Record<ViewId, ViewModule>>
+	initialView: ViewId
+	color: boolean
+	writeRaw?: (s: string) => void
 }
 
-interface AppState {
-	decoders: DecoderStatus[]
-	sources: SourceStatusType[]
-	sourcesReceivedAt: number | null
-	messages: DecoderOutput[]
-	snapshot: FanoutSnapshot | null
-	dropRate: number
-	tunerRelay: TunerRelayStatus | null
-	tunerStates: TunerState[]
-	tunerActionError: string | null
-	liveAudioStatus: LiveAudioStatus | null
-	resourceSnapshot: ResourceSnapshot | null
-	/** Enriched aircraft data from aircraft:update events, keyed by ICAO */
-	enrichedAircraft: Map<string, AircraftState>
-}
+const selectAll = (s: AppState): AppState => s
+const NO_INFO: ViewKeyInfo = { rowIds: [], pageSize: 1, ctx: EMPTY_VIEW_CTX }
 
-// ============================================================================
-// Drop Rate Tracking
-// ============================================================================
-
-interface DropRecord {
-	timestamp: number
-	bytes: number
-}
-
-const DROP_WINDOW_MS = 5000
-let dropHistory: DropRecord[] = []
-
-function recordDrop(bytes: number) {
-	const now = Date.now()
-	dropHistory.push({ timestamp: now, bytes })
-	// Prune old entries
-	dropHistory = dropHistory.filter(d => d.timestamp >= now - DROP_WINDOW_MS)
-}
-
-function getDropRate(): number {
-	const now = Date.now()
-	const windowStart = now - DROP_WINDOW_MS
-	const recentDrops = dropHistory.filter(d => d.timestamp >= windowStart)
-	const totalBytes = recentDrops.reduce((sum, d) => sum + d.bytes, 0)
-	return Math.round(totalBytes / (DROP_WINDOW_MS / 1000))
-}
-
-// ============================================================================
-// Main App Component
-// ============================================================================
-
-export function App({ initialView = "dashboard" }: AppProps) {
+export function App({
+	runtime,
+	views,
+	initialView,
+	color,
+	writeRaw,
+}: AppProps): ReactElement {
 	const { exit } = useApp()
-	const { columns: stdoutWidth, rows: stdoutHeight } = useTerminalSize()
-
-	// View state
-	const [activeView, setActiveView] = useState<View>(initialView)
-
-	// Data state
-	const [state, setState] = useState<AppState>({
-		decoders: [],
-		sources: [],
-		sourcesReceivedAt: null,
-		messages: [],
-		snapshot: null,
-		dropRate: 0,
-		tunerRelay: null,
-		tunerStates: [],
-		tunerActionError: null,
-		liveAudioStatus: null,
-		resourceSnapshot: null,
-		enrichedAircraft: new Map(),
-	})
-	const [tunerInputActive, setTunerInputActive] = useState(false)
-
-	// Handle incoming WebSocket messages
-	const handleMessage = useCallback((msg: ServerMessage) => {
-		switch (msg.type) {
-			case "decoder:output": {
-				const data = msg.data as DecoderOutputMessage | undefined
-				if (data?.output) {
-					setState(prev => ({
-						...prev,
-						messages: [...prev.messages.slice(-99), data.output],
-					}))
-				}
-				break
-			}
-
-			case "decoder:started":
-			case "decoder:stopped":
-			case "decoder:health":
-			case "decoder:error": {
-				setState(prev => {
-					const data = msg.data as
-						| { decoderId?: string; health?: string; error?: string }
-						| undefined
-					const decoderId = data?.decoderId
-					if (!decoderId) return prev
-
-					const nextDecoders = prev.decoders.map(decoder => {
-						if (decoder.id !== decoderId) return decoder
-						if (msg.type === "decoder:started") {
-							return { ...decoder, running: true }
-						}
-						if (msg.type === "decoder:stopped") {
-							return { ...decoder, running: false }
-						}
-						if (
-							msg.type === "decoder:health" &&
-							typeof data?.health === "string"
-						) {
-							return {
-								...decoder,
-								health: data.health as DecoderStatus["health"],
-							}
-						}
-						if (
-							msg.type === "decoder:error" &&
-							typeof data?.error === "string"
-						) {
-							return { ...decoder, error: data.error }
-						}
-						return decoder
-					})
-
-					return { ...prev, decoders: nextDecoders }
-				})
-				break
-			}
-
-			case "fanout:snapshot": {
-				const data = msg.data as FanoutSnapshot | undefined
-				if (data) {
-					setState(prev => {
-						// Track drop deltas for rate calculation
-						if (prev.snapshot?.branches) {
-							const prevDrops = new Map<string, number>()
-							for (const branch of prev.snapshot.branches) {
-								prevDrops.set(branch.id, branch.droppedBytesTotal ?? 0)
-							}
-							for (const branch of data.branches) {
-								const prevDrop = prevDrops.get(branch.id) ?? 0
-								const delta = (branch.droppedBytesTotal ?? 0) - prevDrop
-								if (delta > 0) recordDrop(delta)
-							}
-						}
-
-						return {
-							...prev,
-							snapshot: data,
-							dropRate: getDropRate(),
-						}
-					})
-				}
-				break
-			}
-
-			case "live-audio:status": {
-				const data = msg.data as LiveAudioStatus | undefined
-				if (data) {
-					setState(prev => ({ ...prev, liveAudioStatus: data }))
-				}
-				break
-			}
-
-			case "live-audio:config": {
-				const data = msg.data as LiveAudioStatus["config"] | undefined
-				if (data) {
-					setState(prev => {
-						if (!prev.liveAudioStatus) return prev
-						return {
-							...prev,
-							liveAudioStatus: {
-								...prev.liveAudioStatus,
-								config: data,
-							},
-						}
-					})
-				}
-				break
-			}
-
-			case "resources:snapshot": {
-				const data = msg.data as ResourceSnapshot | undefined
-				if (data) {
-					setState(prev => ({ ...prev, resourceSnapshot: data }))
-				}
-				break
-			}
-
-			case "tuner:state-changed": {
-				const data = msg.data as
-					| { sourceId?: string; state?: TunerState }
-					| undefined
-				const sourceId = data?.sourceId
-				const state = data?.state
-				if (state && sourceId) {
-					const nextSourceId = sourceId
-					const nextState: TunerState = state
-					setState(prev => {
-						const nextStates: TunerState[] = [
-							...prev.tunerStates.filter(s => s.sourceId !== nextSourceId),
-							nextState,
-						].sort((a, b) => a.sourceId.localeCompare(b.sourceId))
-						return { ...prev, tunerStates: nextStates }
-					})
-				}
-				break
-			}
-
-			// Aircraft events - store enriched aircraft data for display
-			// Merge with existing state to preserve enrichment data
-			case "aircraft:new":
-			case "aircraft:update": {
-				const aircraft = msg.data as AircraftState | undefined
-				if (aircraft?.icao) {
-					setState(prev => {
-						const newMap = new Map(prev.enrichedAircraft)
-						const icaoKey = aircraft.icao.toUpperCase()
-						const existing = newMap.get(icaoKey)
-
-						// Merge: preserve existing identification if incoming doesn't have it
-						// This prevents enrichment data loss when non-enriched updates arrive
-						if (existing?.identification && !aircraft.identification) {
-							newMap.set(icaoKey, {
-								...aircraft,
-								identification: existing.identification,
-							})
-						} else if (existing?.identification && aircraft.identification) {
-							// Merge identification fields, incoming takes precedence for defined fields
-							newMap.set(icaoKey, {
-								...aircraft,
-								identification: {
-									...existing.identification,
-									...aircraft.identification,
-								},
-							})
-						} else {
-							newMap.set(icaoKey, aircraft)
-						}
-
-						return { ...prev, enrichedAircraft: newMap }
-					})
-				}
-				break
-			}
-
-			case "aircraft:lost": {
-				const data = msg.data as { icao?: string } | undefined
-				if (data?.icao) {
-					setState(prev => {
-						const newMap = new Map(prev.enrichedAircraft)
-						newMap.delete(data.icao!.toUpperCase())
-						return { ...prev, enrichedAircraft: newMap }
-					})
-				}
-				break
-			}
-
-			case "subscribed":
-				// Successfully subscribed
-				break
-
-			case "error":
-				// Handle error messages if needed
-				break
-		}
-	}, [])
-
-	// WebSocket connection
-	const { status, error, reconnect, closeCode, closeReason } = useWebSocket({
-		channels: [
-			"decoders",
-			"health",
-			"fanout",
-			"metrics",
-			"sources",
-			"live-audio",
-			"resources",
-			"tuner",
-			"aircraft",
-		],
-		onMessage: handleMessage,
-	})
-
-	const [snapshotClock, setSnapshotClock] = useState(Date.now())
-	useEffect(() => {
-		const timer = setInterval(() => setSnapshotClock(Date.now()), 1000)
-		return () => clearInterval(timer)
-	}, [])
-	const sourcesFresh = sourceSnapshotFresh(
-		state.sourcesReceivedAt,
-		snapshotClock,
-	)
-
-	// Fetch initial decoder/source state via REST
-	const fetchInitialState = useCallback(async () => {
-		try {
-			// Use the configured HTTP API; the IQ relay port is not an API.
-			const baseUrls = process.env["WAVEKIT_API_URL"]
-				? [process.env["WAVEKIT_API_URL"].replace(/\/$/, "")]
-				: ["http://localhost:9000"]
-			for (const baseUrl of baseUrls) {
-				try {
-					const requestOptions = { signal: AbortSignal.timeout(2000) }
-					const [
-						decodersRes,
-						sourcesRes,
-						liveAudioRes,
-						resourcesRes,
-						tunerStatesRes,
-					] = await Promise.all([
-						fetch(`${baseUrl}/api/decoders`, requestOptions),
-						fetch(`${baseUrl}/api/sources`, requestOptions).catch(() => null),
-						fetch(`${baseUrl}/api/live-audio/status`, requestOptions).catch(
-							() => null,
-						),
-						fetch(`${baseUrl}/api/resources`, requestOptions).catch(() => null),
-						fetch(`${baseUrl}/api/tuner`, requestOptions).catch(() => null),
-					])
-					const tunerRes = await fetch(
-						`${baseUrl}/api/tuner-relay`,
-						requestOptions,
-					).catch(() => null)
-
-					if (decodersRes.ok) {
-						const decoders = (await decodersRes.json()) as DecoderStatus[]
-						const sources = sourcesRes?.ok
-							? ((await sourcesRes.json()) as SourceStatusType[])
-							: null
-						const tunerRelay = tunerRes?.ok
-							? ((await tunerRes.json()) as TunerRelayStatus)
-							: null
-						const liveAudioStatus = liveAudioRes?.ok
-							? ((await liveAudioRes.json()) as LiveAudioStatus)
-							: null
-						const resourceSnapshot = resourcesRes?.ok
-							? ((await resourcesRes.json()) as ResourceSnapshot)
-							: null
-						const tunerStates = tunerStatesRes?.ok
-							? ((await tunerStatesRes.json()) as TunerState[])
-							: []
-						setState(prev => ({
-							...prev,
-							decoders,
-							sources: sources ?? prev.sources,
-							sourcesReceivedAt: sources ? Date.now() : prev.sourcesReceivedAt,
-							tunerRelay,
-							tunerStates,
-							liveAudioStatus,
-							resourceSnapshot,
-						}))
-						break
-					}
-				} catch {
-					// Leave the previous snapshot to expire on request failure.
-				}
-			}
-		} catch {
-			// Keep cached sources; their independent freshness deadline still expires.
-		}
-	}, [])
-
-	useEffect(() => {
-		void fetchInitialState()
-
-		// Refresh periodically
-		const interval = setInterval(() => {
-			void fetchInitialState()
-		}, 5000)
-		return () => clearInterval(interval)
-	}, [fetchInitialState])
-
-	const performLiveAudioAction = useCallback(
-		async (action: "start" | "stop") => {
-			const apiUrl = process.env["WAVEKIT_API_URL"]
-			const candidates = apiUrl
-				? [apiUrl.replace(/\/$/, "")]
-				: ["http://localhost:9000", "http://localhost:4713"]
-
-			for (const baseUrl of candidates) {
-				try {
-					const response = await fetch(`${baseUrl}/api/live-audio/${action}`, {
-						method: "POST",
-					})
-					if (response.ok) {
-						await fetchInitialState()
-						break
-					}
-				} catch {
-					// Try next URL
-				}
-			}
-		},
-		[fetchInitialState],
-	)
-
-	const performTunerAction = useCallback(
-		async (command: TunerCommand) => {
-			const apiUrl = process.env["WAVEKIT_API_URL"]
-			const candidates = apiUrl
-				? [apiUrl.replace(/\/$/, "")]
-				: ["http://localhost:9000", "http://localhost:4713"]
-
-			const toRequest = () => {
-				switch (command.type) {
-					case "setFrequency":
-						return {
-							path: `/api/tuner/${command.sourceId}/frequency`,
-							body: { hz: command.hz },
-						}
-					case "setSampleRate":
-						return {
-							path: `/api/tuner/${command.sourceId}/sample-rate`,
-							body: { hz: command.hz },
-						}
-					case "setGainMode":
-						return {
-							path: `/api/tuner/${command.sourceId}/gain-mode`,
-							body: { mode: command.mode },
-						}
-					case "setGain":
-						return {
-							path: `/api/tuner/${command.sourceId}/gain`,
-							body: { tenthsDb: command.tenthsDb },
-						}
-					case "setPpm":
-						return {
-							path: `/api/tuner/${command.sourceId}/ppm`,
-							body: { ppm: command.ppm },
-						}
-					case "setAgcMode":
-						return {
-							path: `/api/tuner/${command.sourceId}/agc`,
-							body: { enabled: command.enabled },
-						}
-					case "setBiasTee":
-						return {
-							path: `/api/tuner/${command.sourceId}/bias-tee`,
-							body: { enabled: command.enabled },
-						}
-					case "setDirectSampling":
-						return {
-							path: `/api/tuner/${command.sourceId}/direct-sampling`,
-							body: { mode: command.mode },
-						}
-					case "setOffsetTuning":
-						return {
-							path: `/api/tuner/${command.sourceId}/offset-tuning`,
-							body: { enabled: command.enabled },
-						}
-					case "setControlMode":
-						return {
-							path: `/api/tuner/${command.sourceId}/control-mode`,
-							body: { mode: command.mode },
-						}
-				}
-			}
-
-			const request = toRequest()
-			let lastError: string | null = null
-
-			for (const baseUrl of candidates) {
-				try {
-					const response = await fetch(`${baseUrl}${request.path}`, {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify(request.body),
-					})
-					if (response.ok) {
-						setState(prev => ({ ...prev, tunerActionError: null }))
-						await fetchInitialState()
-						return
-					}
-					const payload = (await response.json().catch(() => null)) as {
-						message?: string
-						error?: string
-					} | null
-					lastError =
-						payload?.message ??
-						payload?.error ??
-						`Request failed (${response.status})`
-				} catch (err) {
-					lastError = err instanceof Error ? err.message : "Request failed"
-				}
-			}
-
-			if (lastError) {
-				setState(prev => ({ ...prev, tunerActionError: lastError }))
-			}
-		},
-		[fetchInitialState],
-	)
-
-	// Update drop rate periodically
-	useEffect(() => {
-		const interval = setInterval(() => {
-			setState(prev => ({ ...prev, dropRate: getDropRate() }))
-		}, 1000)
-		return () => clearInterval(interval)
-	}, [])
-
-	// Keyboard input handling
-	useInput(
-		(input, key) => {
-			if (key.ctrl && input === "c") {
-				exit()
-			}
-		},
-		{ isActive: tunerInputActive },
-	)
-
-	useInput(
-		(input, key) => {
-			// Quit
-			if (input === "q" || (key.ctrl && input === "c")) {
-				exit()
-				return
-			}
-
-			// Reconnect
-			if (input === "r") {
-				reconnect()
-				return
-			}
-
-			if (activeView === "live-audio") {
-				if (input === "s") {
-					void performLiveAudioAction("start")
-					return
-				}
-				if (input === "x") {
-					void performLiveAudioAction("stop")
-					return
-				}
-			}
-
-			// View navigation
-			const viewMap: Record<string, View> = {
-				"1": "dashboard",
-				"2": "decoders",
-				"3": "output",
-				"4": "backpressure",
-				"5": "sources",
-				"6": "live-audio",
-				"7": "resources",
-				"8": "tuner",
-			}
-			if (viewMap[input]) {
-				setActiveView(viewMap[input])
-			}
-		},
-		{ isActive: !tunerInputActive },
-	)
-
-	// Track last disconnect for diagnostics
-	const [lastDisconnect, setLastDisconnect] = useState<{
-		time: string
-		error?: string
-		code?: number
-	} | null>(null)
-
-	useEffect(() => {
-		if (status === "disconnected") {
-			setLastDisconnect({
-				time: new Date().toLocaleTimeString(),
-				error: error || closeReason || undefined,
-				code: closeCode || undefined,
-			})
-		}
-	}, [status, error, closeCode, closeReason])
-
-	// Render current view
-	const renderView = () => {
-		// Heuristic: available rows for the main panel.
-		// (Header + TabBar + HelpBar consume a handful of rows; keep this simple.)
-		const panelHeight = Math.max(8, stdoutHeight - 8)
-		const outputMaxMessages = Math.max(10, panelHeight - 4)
-
-		switch (activeView) {
-			case "dashboard":
-				return (
-					<Dashboard
-						decoders={state.decoders}
-						sources={state.sources}
-						snapshotFresh={sourcesFresh}
-						snapshot={state.snapshot}
-						dropRate={state.dropRate}
-						messages={state.messages}
-						tunerRelay={state.tunerRelay}
-						liveAudioStatus={state.liveAudioStatus}
-						enrichedAircraft={state.enrichedAircraft}
-					/>
-				)
-			case "decoders":
-				return <DecoderList decoders={state.decoders} />
-			case "output":
-				return (
-					<DecoderOutputPanel
-						messages={state.messages}
-						maxMessages={outputMaxMessages}
-						enrichedAircraft={state.enrichedAircraft}
-					/>
-				)
-			case "backpressure":
-				return (
-					<BackpressurePanel
-						snapshot={state.snapshot}
-						dropRate={state.dropRate}
-					/>
-				)
-			case "sources":
-				return (
-					<SourceStatus
-						sources={state.sources}
-						snapshotFresh={sourcesFresh}
-						tunerRelay={state.tunerRelay}
-					/>
-				)
-			case "live-audio":
-				return <LiveAudioPanel status={state.liveAudioStatus} />
-			case "resources":
-				return <ResourcePanel snapshot={state.resourceSnapshot} />
-			case "tuner":
-				return (
-					<TunerPanel
-						states={state.tunerStates}
-						onCommand={performTunerAction}
-						actionError={state.tunerActionError}
-						onInputCaptureChange={active =>
-							setTunerInputActive(prev => (prev === active ? prev : active))
-						}
-					/>
-				)
-		}
+	const { columns: cols, rows } = useTerminalSize()
+	const state = useStore(runtime.store, selectAll)
+	const [ui, setUi] = useState<UiState>(() => initialUi(initialView))
+	const small = tooSmall(cols, rows)
+	const hc = heightClass(rows)
+	const wc = widthClass(cols)
+	const width = cols - 1
+	const banner = small
+		? null
+		: bannerLine(bannerConditions(state), state.now, width)
+	const chrome = chromeRows(rows, banner !== null)
+	const view = views[ui.view]
+	const info = view ? view.keyInfo(state, ui, width, chrome.content) : NO_INFO
+	const ctx: KeyContext = {
+		view: ui.view,
+		confirm: ui.confirm?.kind ?? null,
+		help: ui.help,
+		input: ui.view === "messages" && ui.messages.draft !== null,
+		edit: ui.view === "receiver" && ui.edit !== null,
+		detail: ui.detail[ui.view].open,
+		heightClass: hc,
+		rows: info.rowIds.length,
+		v: info.ctx,
 	}
 
+	const applyEffect = (e: Effect): void => {
+		if (e.kind === "write") runtime.send(e.intent)
+		else (writeRaw ?? (s => process.stdout.write(s)))(osc52(e.text))
+	}
+
+	const dispatch = (a: Action): void => {
+		switch (a.type) {
+			case "quit":
+				setUi(u => ({ ...u, quit: true }))
+				return
+			case "reconnect":
+				runtime.reconnect()
+				setUi(u => ({ ...u, epoch: u.epoch + 1 }))
+				return
+			case "confirm-yes": {
+				const c = ui.confirm
+				if (!c) return
+				runtime.send(c.intent)
+				setUi(u => ({
+					...u,
+					confirm: null,
+					edit: c.kind === "tuner" ? null : u.edit,
+				}))
+				return
+			}
+			case "audio-toggle":
+				if (info.ctx.audioRunning === null) return
+				runtime.send({
+					kind: "audio",
+					op: info.ctx.audioRunning ? "stop" : "start",
+				})
+				return
+			default:
+				break
+		}
+		const out = view?.onAction?.(a, state, ui)
+		if (out) {
+			setUi(out.ui)
+			for (const e of out.effects) applyEffect(e)
+			return
+		}
+		setUi(u =>
+			applyUiAction(
+				u,
+				a,
+				{ rowIds: info.rowIds, pageSize: info.pageSize },
+				state.now,
+			),
+		)
+	}
+
+	useKeys(ctx, dispatch)
+	useEffect(() => {
+		if (ui.quit) exit()
+	}, [ui.quit, exit])
+
+	// ColorContext wraps every path, so NO_COLOR also holds for the too-small line.
+	if (small)
+		return (
+			<ColorContext.Provider value={color}>
+				<TooSmall cols={cols} rows={rows} />
+			</ColorContext.Provider>
+		)
+
 	return (
-		<Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
-			<Header
-				status={status}
-				error={error}
-				closeCode={closeCode}
-				closeReason={closeReason}
-				lastDisconnect={lastDisconnect}
-			/>
-			<TabBar activeView={activeView} width={stdoutWidth} />
-			<Box flexGrow={1} minHeight={10}>
-				{renderView()}
+		<ColorContext.Provider value={color}>
+			<Box
+				flexDirection="column"
+				width={cols}
+				height={rows - 1}
+				overflow="hidden"
+			>
+				<ChainStrip state={state} width={width} />
+				{chrome.switcher === 1 ? (
+					<Switcher view={ui.view} width={width} />
+				) : null}
+				{chrome.blank === 1 ? <Text> </Text> : null}
+				{banner ? <Banner line={banner} /> : null}
+				<Box flexDirection="column" height={chrome.content} overflow="hidden">
+					<ErrorBoundary key={ui.epoch}>
+						{ui.help ? (
+							<HelpOverlay
+								ctx={ctx}
+								state={state}
+								width={width}
+								height={chrome.content}
+							/>
+						) : view ? (
+							<view.Component
+								state={state}
+								ui={ui}
+								width={width}
+								height={chrome.content}
+								heightClass={hc}
+								widthClass={wc}
+							/>
+						) : (
+							<Text> </Text>
+						)}
+					</ErrorBoundary>
+				</Box>
+				{ui.confirm ? (
+					<ConfirmBar confirm={ui.confirm} width={width} />
+				) : (
+					<Footer ctx={ctx} notice={ui.notice} now={state.now} width={width} />
+				)}
 			</Box>
-			<HelpBar />
-		</Box>
+		</ColorContext.Provider>
 	)
 }
