@@ -321,16 +321,18 @@ logging:
 # -----------------------------------------------------------------------------
 # Configure decoder health monitoring. Decoders transition through health states:
 #   running  - Decoder is running and producing output
-#   degraded - Decoder is running but hasn't produced output recently
+#   idle     - Decoder is running but hasn't produced output recently
+#              (normal when nothing is transmitting)
 #   faulted  - Decoder has crashed and exceeded restart limits
 #
 # Options:
-#   checkInterval   - Interval between health checks in ms (default: 5000)
-#   degradedTimeout - Time without output before degraded state in ms (default: 30000)
+#   checkInterval - Interval between health checks in ms (default: 5000)
+#   idleTimeout   - Time without output before idle state in ms (default: 30000);
+#                   reported per decoder as `idleTimeoutMs` in the API
 
 # health:
 #   checkInterval: 5000
-#   degradedTimeout: 30000
+#   idleTimeout: 30000
 
 # =============================================================================
 # EXAMPLE: Multi-Source Setup for Decoder Expansion
@@ -488,5 +490,5 @@ logging:
 #
 # health:
 #   checkInterval: 5000
-#   degradedTimeout: 30000
+#   idleTimeout: 30000
 # ---
