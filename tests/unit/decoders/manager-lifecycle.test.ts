@@ -41,6 +41,7 @@ class ControlledDecoder extends EventEmitter implements Decoder {
 	}
 	attachInput(_input: Readable) {}
 	detachInput() {}
+	updateOptions(_updates: Record<string, unknown>) {}
 	getOutput() {
 		return this.output
 	}
