@@ -146,7 +146,12 @@ function editFrequency(
 			setDigit(d.frequency, s.digit, 0),
 			Math.min(FREQ_DIGITS - 1, s.digit + 1),
 		)
-	if (dir !== 0) return set(d.frequency + dir * 10 ** s.digit)
+	if (dir !== 0) {
+		// At the field's edge the step is refused rather than clamped, which would
+		// rewrite the lower digits.
+		const next = d.frequency + dir * 10 ** s.digit
+		return next < 0 || next > FREQ_FIELD_MAX ? s : set(next)
+	}
 	// Typing replaces the digit and moves to the next lower one.
 	if (/^[0-9]$/.test(key))
 		return set(
