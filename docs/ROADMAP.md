@@ -124,6 +124,32 @@ activity, not merely stop on a strong signal.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly.
 
+## 6. Lightweight Pi operator page
+
+Provide an optional, uncluttered page served by the Pi itself, reachable from a
+phone or computer on the local network without a cloud account. Keep it focused
+on receiver operation and available without the laptop's WaveKit core running.
+
+- [ ] Show first-boot progress/failure, host uptime, CPU load, memory, disk space,
+      temperature and network connection with clearly labelled fresh/stale data.
+- [ ] Distinguish active undervoltage/throttling from historical power events;
+      report unavailable measurements honestly, without implying battery charge
+      or power consumption can be measured on unsupported hardware.
+- [ ] List attached SDR dongles and receiver service state, separating USB presence
+      from actual sample flow, throughput and dropped data.
+- [ ] Present a compact overview with optional diagnostic details, readable on
+      mobile and inexpensive to serve on a Pi 3. Reuse the host API and shared
+      telemetry contracts rather than creating a separate monitoring stack.
+- [ ] Offer authenticated, explicitly confirmed shutdown (and optionally reboot),
+      protected against cross-origin requests and limited to those host actions.
+      Make pending shutdown and the expected loss of connectivity clear.
+- [ ] Start with read-only status, then add host controls after access/origin policy
+      is implemented. Test reconnects, setup failures, USB hotplug and stale data.
+
+This is a planned operator convenience, not an implemented UI or a prerequisite
+for the current clean-card acceptance run. Schedule it alongside the API/access
+foundation once unattended setup is reliable.
+
 ## Delivery discipline
 
 Review and publish coherent commits as each batch passes its relevant checks.
