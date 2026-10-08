@@ -31,11 +31,28 @@ function resume(ui: UiState): UiState {
 	}
 }
 
+/** Selecting a Messages row while following freezes the feed (§6.3); an empty list has nothing to hold. */
+function autoPause(ui: UiState, ctx: UiCtx): UiState {
+	return ui.view === "messages" &&
+		ui.messages.following &&
+		ctx.rowIds.length > 0
+		? pause(ui, ctx)
+		: ui
+}
+
+/** Clearing the Messages selection also closes its detail, which would otherwise show no row. */
+function clearMessagesSelection(ui: UiState): UiState {
+	return {
+		...ui,
+		selected: { ...ui.selected, messages: null },
+		detail: { ...ui.detail, messages: { open: false, scroll: 0 } },
+	}
+}
+
 function moveBy(ui: UiState, ctx: UiCtx, delta: number): UiState {
-	const base =
-		ui.view === "messages" && ui.messages.following ? pause(ui, ctx) : ui
 	const rows = ctx.rowIds
-	if (rows.length === 0) return base
+	if (rows.length === 0) return ui
+	const base = autoPause(ui, ctx)
 	const cur = base.selected[base.view]
 	const idx = cur === null ? -1 : rows.indexOf(cur)
 	const next = idx < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + delta))
@@ -73,21 +90,21 @@ export function applyUiAction(
 		case "page":
 			return moveBy(ui, ctx, action.delta * Math.max(1, ctx.pageSize))
 		case "top": {
-			const base =
-				v === "messages" && ui.messages.following ? pause(ui, ctx) : ui
-			return select(base, ctx.rowIds[0] ?? null)
+			if (ctx.rowIds.length === 0) return ui
+			return select(autoPause(ui, ctx), ctx.rowIds[0] ?? null)
 		}
 		case "newest":
 			return v === "messages"
-				? { ...resume(ui), selected: { ...ui.selected, messages: null } }
+				? clearMessagesSelection(resume(ui))
 				: select(ui, ctx.rowIds[ctx.rowIds.length - 1] ?? null)
 		case "open": {
 			const id = ui.selected[v] ?? ctx.rowIds[0] ?? null
 			if (id === null) return ui
 			// Overview has no detail pane: Enter opens the decoder in the Decoders view (spec §7).
 			const target = v === "overview" ? "decoders" : v
+			const base = autoPause(ui, ctx)
 			return {
-				...ui,
+				...base,
 				view: target,
 				selected: { ...ui.selected, [target]: id },
 				detail: { ...ui.detail, [target]: { open: true, scroll: 0 } },
@@ -141,15 +158,14 @@ export function applyUiAction(
 						},
 					}
 		case "filter-apply":
-			return {
+			return clearMessagesSelection({
 				...ui,
 				messages: {
 					...ui.messages,
 					filterText: (ui.messages.draft ?? "").trim(),
 					draft: null,
 				},
-				selected: { ...ui.selected, messages: null },
-			}
+			})
 		case "filter-cancel":
 			return { ...ui, messages: { ...ui.messages, draft: null } }
 		case "pause-toggle":
