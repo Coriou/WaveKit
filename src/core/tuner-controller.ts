@@ -801,7 +801,8 @@ export class TunerController extends EventEmitter {
 	// === Reconnect Synchronization ===
 
 	/**
-	 * Synchronize tuner state and source metadata after the source (re)connects.
+	 * Synchronize tuner state and source metadata for a new source session.
+	 * Wired to the session's first payload (see core/tuner-wiring.ts).
 	 *
 	 * rtl_tcp cannot report the receiver's rate or center, so after a reconnect
 	 * the receiver may be at its own defaults. Policy (config `tuner.reconnectPolicy`):

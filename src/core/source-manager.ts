@@ -37,7 +37,9 @@ import { convertFloat32ToS16LE } from "../utils/converters.js"
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
 // Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
 export const SOURCE_STALL_TIMEOUT_MS = 15_000
-// TCP keepalive is defence in depth only: OS probe counts make it too slow alone.
+// TCP keepalive is defence in depth for a dead peer (Node 21+ on Linux probes
+// every 1 s, 10 probes). It cannot detect a live rtlmux whose upstream dongle /
+// rtl_tcp is gone: that socket stays healthy but silent, hence the watchdog.
 export const SOURCE_KEEPALIVE_DELAY_MS = 5000
 
 // Re-export types from config for convenience
@@ -109,6 +111,11 @@ export interface SourceManagerEvents {
 	) => void
 	ended: (sourceId: string) => void // For recording sources
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
+	/**
+	 * First payload bytes of a session (after rtl_tcp header stripping), once
+	 * per connection. Through rtlmux this means the upstream dongle is back.
+	 */
+	"payload-started": (sourceId: string) => void
 }
 
 // Exponential backoff constants
@@ -357,6 +364,7 @@ export class SourceManager extends EventEmitter {
 			if (!chunk.length) return true
 		}
 
+		const firstPayload = chunk.length > 0 && state.lastSampleAt === null
 		if (chunk.length > 0) state.lastSampleAt = Date.now()
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -364,6 +372,7 @@ export class SourceManager extends EventEmitter {
 			if (!canWrite) state.socket?.pause()
 		}
 		this.emit("data", id, chunk)
+		if (firstPayload) this.emit("payload-started", id)
 		return canWrite
 	}
 
@@ -1005,9 +1014,12 @@ export class SourceManager extends EventEmitter {
 	 * half-open peer (e.g. a rebooted host that never sent FIN). The socket is
 	 * then failed into the normal reconnect/backoff path.
 	 *
-	 * Not covered: recordings, SDR++ network and audio sources (may idle), a
-	 * session that has not delivered payload yet (kept connected and reported
-	 * stale, as e64e16b intends), and time spent paused by local backpressure.
+	 * Covered: rtl_tcp sources with U8_IQ caps, the only format whose 12-byte
+	 * protocol header is stripped, so header bytes can never arm the watchdog.
+	 * Not covered: recordings, SDR++ network and audio sources (may idle), other
+	 * rtl_tcp formats, a session that has not delivered payload yet (kept
+	 * connected and reported stale, as e64e16b intends), and time spent paused
+	 * by local backpressure.
 	 */
 	private startStallWatchdog(
 		state: SourceState,
@@ -1016,13 +1028,21 @@ export class SourceManager extends EventEmitter {
 	): void {
 		this.stopStallWatchdog(state)
 		const { config } = state
-		const timeoutMs = config.stallTimeoutMs ?? SOURCE_STALL_TIMEOUT_MS
 		if (
-			timeoutMs <= 0 ||
 			config.type !== "rtl_tcp" ||
-			config.caps.kind !== "iq"
+			config.caps.kind !== "iq" ||
+			config.caps.format !== "U8_IQ"
 		)
 			return
+		let timeoutMs = config.stallTimeoutMs ?? SOURCE_STALL_TIMEOUT_MS
+		if (!Number.isFinite(timeoutMs)) {
+			this.logger.warn(
+				{ sourceId: config.id, stallTimeoutMs: config.stallTimeoutMs },
+				"Invalid stallTimeoutMs; using the default stall watchdog timeout",
+			)
+			timeoutMs = SOURCE_STALL_TIMEOUT_MS
+		}
+		if (timeoutMs <= 0) return
 
 		const checkEveryMs = Math.max(50, Math.min(1000, Math.floor(timeoutMs / 4)))
 		state.stallTimer = setInterval(() => {

@@ -138,6 +138,20 @@ describe("TunerController reconnect synchronization", () => {
 		])
 	})
 
+	it("a gain-group command issued between connect and first payload stays newest after the replay", async () => {
+		await controller.setGainMode("rtl-1", "manual")
+		await controller.setGain("rtl-1", 250)
+		transport.frames.length = 0
+		// Session connected, no payload yet: the user switches to AGC.
+		await controller.setGainMode("rtl-1", "agc")
+		controller.synchronizeOnConnect("rtl-1") // first payload arrives
+		expect(transport.frames).toEqual([
+			[0x03, 0], // gap command
+			[0x04, 250], // replay, acceptance order: older manual gain first...
+			[0x03, 0], // ...then the newer AGC selection, which wins
+		])
+	})
+
 	it("drops a cleared tuner IF gain from the desired state", async () => {
 		await controller.setTunerIfGain("rtl-1", 1, 30)
 		await controller.configure("rtl-1", { tunerIfGain: null })

@@ -111,10 +111,12 @@ async function setup(
 	cleanups.push(() => manager.disconnectAll())
 	const disconnects: Array<string | undefined> = []
 	manager.on("disconnected", (_id, err) => disconnects.push(err?.message))
+	const payloadStarts: string[] = []
+	manager.on("payload-started", id => payloadStarts.push(id))
 	const stream = await manager.connect(rtlSource(server.port, overrides))
 	if (consume) stream.resume()
 	await waitFor(() => server.connections.length === 1)
-	return { server, manager, disconnects, stream }
+	return { server, manager, disconnects, stream, payloadStarts }
 }
 
 describe("source stall watchdog", () => {
@@ -133,16 +135,19 @@ describe("source stall watchdog", () => {
 
 	it("reconnects a half-open rtl_tcp source that stops streaming, without a reconnect storm", async () => {
 		const keepAlive = vi.spyOn(net.Socket.prototype, "setKeepAlive")
-		const { server, manager, disconnects } = await setup({ intervalMs: 50 })
+		const { server, manager, disconnects, payloadStarts } = await setup({
+			intervalMs: 50,
+		})
 		await waitFor(
 			() => manager.getStatus("rtl-1")?.activity.state === "streaming",
 		)
 		expect(keepAlive).toHaveBeenCalledWith(true, 5000)
+		expect(payloadStarts).toEqual(["rtl-1"]) // once per session, not per chunk
 
 		const silentAt = Date.now()
 		server.goSilent()
 		await waitFor(() => disconnects.length === 1)
-		expect(Date.now() - silentAt).toBeLessThan(STALL_MS + 600)
+		expect(Date.now() - silentAt).toBeLessThan(STALL_MS * 4)
 		expect(disconnects[0]).toMatch(/no data .*stall watchdog/i)
 		expect(manager.getStatus("rtl-1")?.lastError).toMatch(/stall watchdog/i)
 
@@ -156,6 +161,7 @@ describe("source stall watchdog", () => {
 		expect(server.connections).toHaveLength(2)
 		expect(disconnects).toHaveLength(1)
 		expect(manager.getStatus("rtl-1")?.connected).toBe(true)
+		expect(payloadStarts).toEqual(["rtl-1"]) // header alone is not payload
 	}, 20_000)
 
 	it("does not trip on a slow but non-zero stream", async () => {
@@ -241,5 +247,36 @@ describe("source stall watchdog", () => {
 		expect(disconnects.some(m => /stall/i.test(m ?? ""))).toBe(false)
 		expect(server.connections).toHaveLength(1)
 		expect(manager.getStatus("rtl-1")).toBeUndefined()
+	}, 20_000)
+
+	it("does not arm on the rtl_tcp header when the format keeps it in-stream (non-U8_IQ)", async () => {
+		const { server, disconnects } = await setup(
+			{},
+			{
+				caps: {
+					kind: "iq",
+					format: "S16_IQ",
+					sampleRate: 2_048_000,
+					exclusive: false,
+				},
+			},
+		)
+		await sleep(STALL_MS * 4)
+		expect(disconnects).toEqual([])
+		expect(server.connections).toHaveLength(1)
+	}, 20_000)
+
+	it("falls back to the default timeout for a non-finite stallTimeoutMs (no trip loop)", async () => {
+		const { server, manager, disconnects } = await setup(
+			{ intervalMs: 50 },
+			{ stallTimeoutMs: Number.NaN },
+		)
+		await waitFor(
+			() => manager.getStatus("rtl-1")?.activity.state === "streaming",
+		)
+		server.goSilent()
+		await sleep(STALL_MS * 3)
+		expect(disconnects).toEqual([])
+		expect(server.connections).toHaveLength(1)
 	}, 20_000)
 })

@@ -38,9 +38,10 @@ export const SourceConfigSchema = z.object({
 	playbackSpeed: z.number().positive().default(1.0), // For recording sources
 	caps: SourceCapsSchema,
 	/**
-	 * Stall watchdog (rtl_tcp IQ sources only): once a session has streamed, a
-	 * payload gap this long drops the connection and reconnects. Default 15000;
-	 * 0 disables. Ignored for recordings and SDR++ network sources.
+	 * Stall watchdog (rtl_tcp U8_IQ sources only): once a session has streamed,
+	 * a payload gap this long drops the connection and reconnects. Default
+	 * 15000; 0 disables. Ignored for recordings, SDR++ network sources and other
+	 * rtl_tcp formats.
 	 */
 	stallTimeoutMs: z
 		.union([z.literal(0), z.number().int().min(1000).max(600_000)])

@@ -787,7 +787,12 @@ describe("API Server", () => {
 				const body = JSON.parse(response.body)
 				expect(body.message).toContain("new-source")
 				expect(body.source.id).toBe("new-source")
-				expect(mockSourceManager.connect).toHaveBeenCalledWith(newSource)
+				// The body is parsed with SourceConfigSchema, which applies defaults.
+				expect(mockSourceManager.connect).toHaveBeenCalledWith({
+					...newSource,
+					loop: false,
+					playbackSpeed: 1,
+				})
 			})
 
 			it("should return 409 when source already exists", async () => {

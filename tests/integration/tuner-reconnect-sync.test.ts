@@ -19,6 +19,8 @@ const logger = createLogger({ level: "fatal" })
 interface FakeConnection {
 	socket: net.Socket
 	frames: Array<[number, number]>
+	/** Send one IQ chunk (the session's first payload unless already sent). */
+	sendPayload(): void
 }
 
 function frame(cmd: number, value: number): Buffer {
@@ -28,15 +30,30 @@ function frame(cmd: number, value: number): Buffer {
 	return buf
 }
 
-async function startFakeRtlTcp(): Promise<{
+/**
+ * rtl_tcp-like server: header on accept, then one IQ chunk. `holdPayload`
+ * mimics rtlmux during an upstream gap: header only until released.
+ */
+async function startFakeRtlTcp(
+	options: { holdPayload?: boolean } = {},
+): Promise<{
 	server: net.Server
 	port: number
 	connections: FakeConnection[]
+	setHoldPayload(hold: boolean): void
 }> {
 	const connections: FakeConnection[] = []
+	let holdPayload = options.holdPayload ?? false
 	const server = net.createServer(socket => {
-		const conn: FakeConnection = { socket, frames: [] }
+		const conn: FakeConnection = {
+			socket,
+			frames: [],
+			sendPayload: () => {
+				if (!socket.destroyed) socket.write(Buffer.alloc(512, 127))
+			},
+		}
 		connections.push(conn)
+		if (!holdPayload) setTimeout(conn.sendPayload, 20)
 		let pending = Buffer.alloc(0)
 		socket.on("data", data => {
 			pending = Buffer.concat([pending, Buffer.from(data)])
@@ -54,7 +71,14 @@ async function startFakeRtlTcp(): Promise<{
 	})
 	await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve))
 	const address = server.address() as net.AddressInfo
-	return { server, port: address.port, connections }
+	return {
+		server,
+		port: address.port,
+		connections,
+		setHoldPayload: (hold: boolean) => {
+			holdPayload = hold
+		},
+	}
 }
 
 async function freePort(): Promise<number> {
@@ -130,6 +154,10 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			},
 		})
 		await waitFor(() => upstream.connections.length === 1)
+		// First payload (and its tuner sync) before commanding this session.
+		await waitFor(
+			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
+		)
 		const first = upstream.connections[0]!
 		expect(first.frames).toEqual([]) // config defaults are never pushed
 
@@ -223,6 +251,10 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			},
 		})
 		await waitFor(() => upstream.connections.length === 1)
+		// First payload (and its tuner sync) before commanding this session.
+		await waitFor(
+			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
+		)
 		const first = upstream.connections[0]!
 
 		await tuner.setSampleRate("rtl-1", 2_160_000)
@@ -292,6 +324,10 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 			},
 		})
 		await waitFor(() => upstream.connections.length === 1)
+		// First payload (and its tuner sync) before commanding this session.
+		await waitFor(
+			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
+		)
 		const conn = upstream.connections[0]!
 		await relay.start()
 		cleanups.push(() => relay.stop())
@@ -313,5 +349,77 @@ describe("tuner reconnect synchronization over rtl_tcp", () => {
 		await waitFor(() => conn.frames.length === 2)
 		expect(capsEvents).toHaveLength(1)
 		expect(capsEvents[0]?.sampleRate).toBe(2_400_000)
+	}, 20_000)
+
+	it("defers the replay to the session's first payload (rtlmux upstream gap); a command issued in the gap wins", async () => {
+		vi.spyOn(Math, "random").mockReturnValue(0)
+		const upstream = await startFakeRtlTcp()
+		cleanups.push(
+			() =>
+				new Promise<void>(resolve => upstream.server.close(() => resolve())),
+		)
+		const sourceManager = new SourceManager(logger)
+		cleanups.push(() => sourceManager.disconnectAll())
+		const tuner = new TunerController(logger, sourceManager)
+		wireTunerControl({
+			log: logger,
+			sourceManager,
+			tunerController: tuner,
+			tunerRelay: new TunerRelay(
+				logger,
+				sourceManager,
+				new FanoutManager(logger),
+				{ enabled: false, host: "127.0.0.1", port: 1, controlPolicy: "shared" },
+			),
+			relayEnabled: false,
+		})
+		await sourceManager.connect({
+			id: "rtl-1",
+			type: "rtl_tcp",
+			host: "127.0.0.1",
+			port: upstream.port,
+			loop: false,
+			playbackSpeed: 1,
+			caps: {
+				kind: "iq",
+				format: "U8_IQ",
+				sampleRate: 2_048_000,
+				exclusive: false,
+			},
+		})
+		await waitFor(() => upstream.connections.length === 1)
+		// First payload (and its tuner sync) before commanding this session.
+		await waitFor(
+			() => sourceManager.getStatus("rtl-1")?.activity.state === "streaming",
+		)
+		const first = upstream.connections[0]!
+		await tuner.setSampleRate("rtl-1", 2_400_000)
+		await tuner.setFrequency("rtl-1", 145_000_000)
+		await waitFor(() => first.frames.length === 2)
+
+		// rtlmux accepts and sends its header, but its dongle is not back yet.
+		upstream.setHoldPayload(true)
+		first.socket.destroy()
+		await waitFor(() => upstream.connections.length === 2)
+		await waitFor(() => sourceManager.getStatus("rtl-1")?.connected === true)
+		const second = upstream.connections[1]!
+		await new Promise(resolve => setTimeout(resolve, 300))
+		expect(second.frames).toEqual([]) // nothing written during the gap
+
+		const capsEvents: SourceCaps[] = []
+		sourceManager.on("caps-changed", (_id, caps) => capsEvents.push(caps))
+		await tuner.setFrequency("rtl-1", 146_000_000) // issued in the gap
+		await waitFor(() => second.frames.length === 1)
+
+		second.sendPayload() // upstream back: first payload of the session
+		await waitFor(() => second.frames.length === 3)
+		expect(second.frames).toEqual([
+			[0x01, 146_000_000],
+			[0x02, 2_400_000],
+			[0x01, 146_000_000],
+		])
+		expect(tuner.getState("rtl-1")?.frequency).toBe(146_000_000)
+		expect(capsEvents).toHaveLength(1) // the gap command only; replay adds none
+		expect(capsEvents[0]?.centerFreq).toBe(146_000_000)
 	}, 20_000)
 })

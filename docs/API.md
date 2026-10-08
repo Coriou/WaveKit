@@ -182,18 +182,23 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
-**Stall watchdog (rtl_tcp IQ sources).** An rtl_tcp IQ stream never pauses while
+**Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
 connection is half-open, e.g. a rebooted host that never sent FIN. Core then drops
 the connection: `connected` becomes `false`, `lastError` reads
 `No data from source for <n>ms (stall watchdog <timeout>ms); reconnecting`, and
 the normal reconnect/backoff path runs. A successful reconnect clears `lastError`
-and resets `reconnectAttempts`, and tuner sync runs on the new connection.
+and resets `reconnectAttempts`. Tuner sync runs on the new session's first payload
+(not on connect), so nothing is written to an rtlmux whose upstream is still down.
 Without this, such a source stayed `connected: true` with activity `stale`
-indefinitely. The watchdog does not apply to recordings, `sdrpp-network` or audio
-sources, to a session that has not streamed yet (it stays connected and reports
-`stale`), or to time spent `paused` by local backpressure.
+indefinitely. TCP keepalive is enabled too, but it only detects a dead peer, not a
+live rtlmux with a dead upstream. The watchdog does not apply to recordings,
+`sdrpp-network` or audio sources, rtl_tcp sources with a format other than
+`U8_IQ`, a session that has not streamed yet (it stays connected and reports
+`stale`), or time spent `paused` by local backpressure. `POST /api/sources`
+accepts `stallTimeoutMs` (integer, `0` or 1000–600000) and validates the whole
+body with the config schema (`400 VALIDATION_ERROR` on failure).
 
 ### Tuner
 

@@ -26,6 +26,16 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 	sourceManager.on("connected", sourceId => {
 		if (!sourceManager.isRtlTcpSource(sourceId)) return
 		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
+		tunerRelay.handleSourceConnected(sourceId)
+	})
+
+	// Sync on the session's first payload, not on connect: through rtlmux the
+	// TCP accept precedes the dongle (writing commands into an rtlmux upstream
+	// gap can crash it), and rtlmux replays its own command cache first, so the
+	// core's restore lands last. Direct rtl_tcp streams within milliseconds.
+	sourceManager.on("payload-started", sourceId => {
+		if (!sourceManager.isRtlTcpSource(sourceId)) return
+		tunerController.initializeSource(sourceId, sourceManager.getCaps(sourceId))
 		// The receiver may have come back at its own defaults: restore or reset
 		// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
 		const result = tunerController.synchronizeOnConnect(sourceId)
@@ -40,7 +50,6 @@ export function wireTunerControl(deps: TunerWiringDeps): void {
 				"Tuner state restore after reconnect failed; will retry on next connection",
 			)
 		}
-		tunerRelay.handleSourceConnected(sourceId)
 	})
 
 	sourceManager.on("removed", sourceId => {

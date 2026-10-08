@@ -12,6 +12,7 @@
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import { sourceActivitySchema } from "@wavekit/api-types"
+import { SourceConfigSchema } from "../../config.js"
 import type {
 	SourceManager,
 	SourceConfig,
@@ -61,6 +62,8 @@ const sourceConfigSchema = {
 		loop: { type: "boolean" },
 		playbackSpeed: { type: "number", minimum: 0 },
 		caps: sourceCapsSchema,
+		/** 0 disables; the >= 1000 floor is enforced by SourceConfigSchema (Zod). */
+		stallTimeoutMs: { type: "integer", minimum: 0, maximum: 600_000 },
 	},
 	required: ["id", "type", "caps"],
 } as const
@@ -384,7 +387,19 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			},
 		},
 		async (request, reply) => {
-			const config = request.body
+			// Zod at the boundary: the JSON schema cannot express every rule
+			// (e.g. stallTimeoutMs is 0 or >= 1000) and does not apply defaults.
+			const parsed = SourceConfigSchema.safeParse(request.body)
+			if (!parsed.success) {
+				return reply.status(400).send({
+					error: "BadRequest",
+					code: "VALIDATION_ERROR",
+					message: parsed.error.issues
+						.map(issue => `${issue.path.join(".") || "body"}: ${issue.message}`)
+						.join("; "),
+				})
+			}
+			const config = parsed.data
 
 			// Check if source already exists
 			const existingStatus = sourceManager.getStatus(config.id)
