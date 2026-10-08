@@ -21,6 +21,9 @@ import type {
 	DecoderRateAssessment,
 	DecoderRateRequirements,
 } from "@wavekit/api-types"
+import type { DecoderRateAdapter } from "./rate-resolver.js"
+
+export type { DecoderRateAdapter } from "./rate-resolver.js"
 
 export type {
 	DecoderRateAssessment,
@@ -149,11 +152,13 @@ export interface DemodulationConfig {
  * - running: Decoder is running and producing output normally
  * - idle: Decoder is running but has not produced output for the configured timeout
  *         (this is normal when no signals are present on the frequency)
- * - faulted: Decoder has crashed and exceeded restart limits
+ * - restarting: Decoder exited unexpectedly and an automatic restart is scheduled
+ * - faulted: Crash loop (consecutive unstable runs, retries may continue) or
+ *            restart budget exhausted (terminal until an explicit start)
  *
  * Note: "degraded" is kept as an alias for backwards compatibility but "idle" is preferred.
  */
-export type DecoderHealth = "running" | "idle" | "faulted"
+export type DecoderHealth = "running" | "idle" | "restarting" | "faulted"
 
 // ============================================================================
 // Decoder Configuration
@@ -275,6 +280,22 @@ export interface DecoderStatus {
 	lastError?: DecoderLastError | undefined
 	/** Effective ms without output before health becomes "idle". */
 	idleTimeoutMs?: number | undefined
+	/** When the scheduled automatic restart fires; absent when none is pending. */
+	nextRestartAt?: Date | undefined
+	/** Operator intent (start recorded, not stopped); set by the manager. */
+	desiredRunning?: boolean | undefined
+	/** Wanted but held back because the source rate is unusable; set by the manager. */
+	suspended?: boolean | undefined
+	/** Why and since when the decoder is suspended. */
+	suspension?: DecoderSuspensionStatus | undefined
+	/** An in-flight rate transition. */
+	transition?: "suspending" | "resuming" | undefined
+}
+
+/** Why and since when a decoder is suspended for its source rate. */
+export interface DecoderSuspensionStatus {
+	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	since: Date
 }
 
 /**
@@ -378,4 +399,18 @@ export interface Decoder extends EventEmitter {
 	 * @param updates - Partial options to merge with existing
 	 */
 	updateOptions(updates: Record<string, unknown>): void
+
+	/**
+	 * Instance rate requirements; falls back to registry caps.rateRequirements.
+	 * Optional so custom decoders stay `unknown` rather than incompatible.
+	 */
+	getRateRequirements?(): DecoderRateRequirements | undefined
+
+	/**
+	 * What this instance's stdin pipeline delivers for a candidate source rate.
+	 * Pure: no spawn, no option change. Undefined when the decoder owns its input.
+	 */
+	getRateAdapter?(input: {
+		sampleRateHz: number
+	}): DecoderRateAdapter | undefined
 }

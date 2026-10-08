@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { spawnSync } from "node:child_process"
 import {
-	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -11,6 +10,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
+import { writeExecutable } from "../../mocks/executables.js"
 
 // Subprocess-heavy fixtures need headroom when the complete suite runs in parallel.
 describe("generated Pi first-boot bootstrap", { timeout: 15000 }, () => {
@@ -71,8 +71,7 @@ case "\${0##*/}" in
 esac
 `
 		for (const command of ["id", "getent", "chown", "sudo"]) {
-			writeFileSync(join(bin, command), shim)
-			chmodSync(join(bin, command), 0o755)
+			writeExecutable(join(bin, command), shim)
 		}
 		mkdirSync(join(boot, "wavekit-pi-bundle"))
 		writeFileSync(

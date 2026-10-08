@@ -55,6 +55,24 @@ export function toApiDecoderStatus(
 		...(status.idleTimeoutMs !== undefined
 			? { idleTimeoutMs: status.idleTimeoutMs }
 			: {}),
+		...(status.nextRestartAt !== undefined
+			? { nextRestartAt: status.nextRestartAt.toISOString() }
+			: {}),
+		...(status.desiredRunning !== undefined
+			? { desiredRunning: status.desiredRunning }
+			: {}),
+		...(status.suspended !== undefined ? { suspended: status.suspended } : {}),
+		...(status.suspension !== undefined
+			? {
+					suspension: {
+						reasonCode: status.suspension.reasonCode,
+						since: status.suspension.since.toISOString(),
+					},
+				}
+			: {}),
+		...(status.transition !== undefined
+			? { transition: status.transition }
+			: {}),
 	}
 }
 

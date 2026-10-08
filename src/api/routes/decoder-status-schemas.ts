@@ -1,5 +1,8 @@
 import { DECODER_LAST_ERROR_MAX_LENGTH } from "@wavekit/api-types"
-import { decoderRateAssessmentSchema } from "./decoder-rate-schemas.js"
+import {
+	decoderRateAssessmentSchema,
+	decoderRateReasonCodes,
+} from "./decoder-rate-schemas.js"
 
 /**
  * Decoder status response schemas shared by /api/decoders* and /api/status.
@@ -35,7 +38,28 @@ export const decoderStatusExtensionProperties = {
 		required: ["kind", "message", "at"],
 	},
 	idleTimeoutMs: { type: "number", minimum: 0 },
+	nextRestartAt: { type: "string", format: "date-time" },
+	// Rate model B3 (reversible suspension).
+	desiredRunning: { type: "boolean" },
+	suspended: { type: "boolean" },
+	suspension: {
+		type: "object",
+		properties: {
+			reasonCode: { type: "string", enum: decoderRateReasonCodes },
+			since: { type: "string", format: "date-time" },
+		},
+		required: ["reasonCode", "since"],
+	},
+	transition: { type: "string", enum: ["suspending", "resuming"] },
 } as const
+
+/** Every DecoderHealth value; Fastify schemas share this one list. */
+export const decoderHealthValues = [
+	"running",
+	"idle",
+	"restarting",
+	"faulted",
+] as const
 
 /** Decoder status schema (Requirements 9.6, 20.1, 20.2, 20.3). */
 export const decoderStatusSchema = {
@@ -44,7 +68,7 @@ export const decoderStatusSchema = {
 		id: { type: "string" },
 		type: { type: "string" },
 		running: { type: "boolean" },
-		health: { type: "string", enum: ["running", "idle", "faulted"] },
+		health: { type: "string", enum: decoderHealthValues },
 		pid: { type: "number" },
 		uptime: { type: "number" },
 		stats: decoderStatsSchema,

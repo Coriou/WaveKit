@@ -213,6 +213,11 @@ export const HealthConfigSchema = z.object({
 	checkInterval: z.number().int().positive().default(5000),
 	/** Milliseconds without output before a decoder is considered idle (default: 30000ms) */
 	idleTimeout: z.number().int().positive().default(30000),
+	/**
+	 * Consecutive unstable runs (no output and under 30 s) before a decoder is
+	 * reported "faulted" while retries continue (manager default: 5).
+	 */
+	faultAfterFailures: z.number().int().positive().optional(),
 })
 
 /**

@@ -12,7 +12,12 @@ import {
 	IqDecimateDecoder,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateRequirements,
+} from "../types.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import type { Logger } from "../../utils/logger.js"
 
@@ -319,6 +324,38 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 
 	protected override onOptionsUpdated(): void {
 		this.options = parseLoraMeshtasticOptions(this.config.options)
+	}
+
+	/**
+	 * Complex capture span equals the sample rate and the LoRa signal occupies
+	 * bw Hz, so a capture below bw cannot hold the channel (Nyquist bound, not
+	 * an RF-verified operating point). The modem runs best without resampling.
+	 */
+	getRateRequirements(): DecoderRateRequirements {
+		const { bw } = this.options
+		const target = bw * this.options.oversampling
+		const exact = [{ kind: "discrete" as const, valuesHz: [target] }]
+		return {
+			version: 1,
+			sourceKind: "iq",
+			capture: {
+				accepted: [{ kind: "range", minHz: bw }],
+				preferredHz: [target],
+				minimum: {
+					hz: bw,
+					basis: "implementation",
+					evidence:
+						"Complex capture span equals the sample rate; the LoRa signal occupies bw Hz (lora-meshtastic.ts PRESET_TABLE, getIqDecimationConfig). Nyquist bound, not an RF-verified operating point.",
+				},
+			},
+			frontendIq: { preferredHz: target, accepted: exact },
+			decoderInput: {
+				kind: "iq",
+				format: "cu8",
+				preferredHz: target,
+				accepted: exact,
+			},
+		}
 	}
 
 	protected override getIqDecimationConfig(): IqDecimationConfig {

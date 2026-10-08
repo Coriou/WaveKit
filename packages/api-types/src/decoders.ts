@@ -4,7 +4,17 @@ export interface DecoderStats {
 	errors: number
 }
 
-export type DecoderHealth = "running" | "idle" | "faulted"
+/**
+ * - running: running (or stopped by the operator; see `running`)
+ * - idle: running without output for `idleTimeoutMs`
+ * - restarting: exited unexpectedly; an automatic restart is scheduled at `nextRestartAt`
+ * - faulted: crash loop (consecutive unstable runs) or restart budget exhausted.
+ *   `running: true` = a crash-loop retry on probation (returns to "running"
+ *   once it produces output or stays up 30 s); `nextRestartAt` set = waiting
+ *   for the next retry; `!running && !nextRestartAt` = terminal until an
+ *   explicit start/restart.
+ */
+export type DecoderHealth = "running" | "idle" | "restarting" | "faulted"
 
 export type DecoderInputType = "audio_pcm" | "iq" | "external"
 
@@ -120,6 +130,36 @@ export interface DecoderStatus {
 	lastError?: DecoderLastError
 	/** Effective ms without output before `health` becomes "idle". */
 	idleTimeoutMs?: number
+	/** ISO-8601 time of the scheduled automatic restart; present only while one is pending. */
+	nextRestartAt?: string
+	/** Operator intent: true after start/restart, false after stop. Always sent by current cores. */
+	desiredRunning?: boolean
+	/**
+	 * Wanted but held back because the source rate makes this instance
+	 * unusable. The source reservation and `sourceId` are kept; no lastError,
+	 * no health change, no restart counted. Always sent by current cores.
+	 */
+	suspended?: boolean
+	/** Present only while suspended. */
+	suspension?: DecoderSuspension
+	/**
+	 * Present only during a transition. A lasting "suspending" means the stop
+	 * failed and the process may still run (`running` stays truthful).
+	 */
+	transition?: "suspending" | "resuming"
+}
+
+/** Why and since when a decoder is suspended for its source rate. */
+export interface DecoderSuspension {
+	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	/** ISO-8601 */
+	since: string
+}
+
+/** GET /api/decoders/rate-preview item: the plan if the source ran at the given rate. */
+export interface DecoderRatePreviewItem {
+	decoderId: string
+	assessment: DecoderRateAssessment
 }
 
 /** GET /api/decoders item and `decoder:status` WebSocket payload. */

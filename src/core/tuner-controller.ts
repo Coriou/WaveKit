@@ -20,9 +20,29 @@ import type {
 	TunerControlMode,
 } from "@wavekit/api-types"
 
+/**
+ * Sample rates the RTL2832U accepts. librtlsdr's rtlsdr_set_sample_rate()
+ * rejects 300 001-900 000 Hz, so the overall 225 001-3 200 000 bound is not
+ * enough: a gap rate would be recorded in caps and replayed on reconnect
+ * while the dongle keeps its previous rate.
+ */
+export const RTL_SAMPLE_RATE_RANGES = [
+	{ min: 225_001, max: 300_000 },
+	{ min: 900_001, max: 3_200_000 },
+] as const
+
+/** True when librtlsdr can set `hz` (an integer in one of the RTL ranges). */
+export function isValidRtlSampleRate(hz: number): boolean {
+	return (
+		Number.isInteger(hz) &&
+		RTL_SAMPLE_RATE_RANGES.some(range => hz >= range.min && hz <= range.max)
+	)
+}
+
 // Validation constants
 const VALIDATION = {
 	frequency: { min: 24_000_000, max: 1_900_000_000 },
+	/** Outer bound only; see RTL_SAMPLE_RATE_RANGES for the gap. */
 	sampleRate: { min: 225_001, max: 3_200_000 },
 	gain: { min: 0, max: 500 },
 	ppm: { min: -500, max: 500 },
@@ -362,7 +382,7 @@ export class TunerController extends EventEmitter {
 				}
 				break
 			case RTL_TCP_COMMANDS.SET_SAMPLE_RATE:
-				if (this.isWithinRange(value, VALIDATION.sampleRate)) {
+				if (isValidRtlSampleRate(value)) {
 					state.sampleRate = value
 					updated = true
 					try {
@@ -549,6 +569,11 @@ export class TunerController extends EventEmitter {
 	async setSampleRate(sourceId: string, hz: number): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("sampleRate", hz, VALIDATION.sampleRate)
+		if (!isValidRtlSampleRate(hz)) {
+			throw new TunerValidationError(
+				`sampleRate ${hz} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+			)
+		}
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz)
 		state.sampleRate = hz
 		try {

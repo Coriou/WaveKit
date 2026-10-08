@@ -13,9 +13,36 @@ import {
 	NetworkProducerDecoder,
 	type NetworkProducerConfig,
 } from "../network-producer-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateAdapter,
+	DecoderRateRequirements,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import type { RawAircraftMessage } from "@wavekit/api-types"
+
+/** readsb's fixed ADS-B sample rate; stdin mode adapts the source to it. */
+export const READSB_SAMPLE_RATE = 2_400_000
+
+/**
+ * Adapter facts for stdin mode at source rate `fs`; undefined in rtlTcpHost
+ * mode, where readsb owns its input and no core pipeline exists.
+ */
+export function readsbRateAdapter(
+	options: Pick<ReadsbOptions, "rtlTcpHost">,
+	fs: number,
+): DecoderRateAdapter | undefined {
+	if (options.rtlTcpHost) return undefined
+	return {
+		adaptation: fs === READSB_SAMPLE_RATE ? "none" : "resample",
+		frontendRateHz: READSB_SAMPLE_RATE,
+		decoderInputKind: "iq",
+		decoderInputRateHz: READSB_SAMPLE_RATE,
+		decoderInputFormat: "uc8",
+	}
+}
 
 /** Supported output formats for readsb (Requirement 22.3) */
 export type ReadsbOutputFormat = "sbs" | "beast" | "json"
@@ -159,10 +186,44 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		const rate = this.options.inputSampleRate ?? 2048000
 		return [
 			"-c",
-			rate === 2400000
+			rate === READSB_SAMPLE_RATE
 				? decoder
-				: `${iqResampleCommand(rate, 2400000)} | ${decoder}`,
+				: `${iqResampleCommand(rate, READSB_SAMPLE_RATE)} | ${decoder}`,
 		]
+	}
+
+	/**
+	 * The readsb 2.0 Msps capture floor is an evidence gap, so stdin mode
+	 * declares only its fixed adapter rate (verdict stays unknown). rtlTcpHost
+	 * mode owns its input and is never evaluated against the core source.
+	 */
+	getRateRequirements(): DecoderRateRequirements {
+		if (this.options.rtlTcpHost)
+			return {
+				version: 1,
+				sourceKind: "external",
+				decoderInput: { kind: "external" },
+			}
+		const accepted = [
+			{ kind: "discrete" as const, valuesHz: [READSB_SAMPLE_RATE] },
+		]
+		return {
+			version: 1,
+			sourceKind: "iq",
+			frontendIq: { preferredHz: READSB_SAMPLE_RATE, accepted },
+			decoderInput: {
+				kind: "iq",
+				format: "uc8",
+				preferredHz: READSB_SAMPLE_RATE,
+				accepted,
+			},
+		}
+	}
+
+	getRateAdapter(input: {
+		sampleRateHz: number
+	}): DecoderRateAdapter | undefined {
+		return readsbRateAdapter(this.options, input.sampleRateHz)
 	}
 
 	private getReadsbArgs(): string[] {
@@ -264,7 +325,9 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 					: "text"
 
 		return {
-			input: "iq",
+			// rtlTcpHost mode connects to rtl_tcp itself and ignores stdin, so it
+			// must not take a fanout branch (or a source reservation).
+			input: this.options.rtlTcpHost ? "external" : "iq",
 			wantsExclusiveSource: false,
 			output: outputFormat,
 			integrationPattern: "network_producer",

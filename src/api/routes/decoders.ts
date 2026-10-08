@@ -18,11 +18,18 @@ import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
 	DecoderCaps as ApiDecoderCaps,
 	DecoderInfo as ApiDecoderInfo,
+	DecoderRatePreviewItem,
 	DecoderStatus as ApiDecoderStatus,
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
-import { decoderRateRequirementsSchema } from "./decoder-rate-schemas.js"
-import { decoderStatusSchema } from "./decoder-status-schemas.js"
+import {
+	decoderRateAssessmentSchema,
+	decoderRateRequirementsSchema,
+} from "./decoder-rate-schemas.js"
+import {
+	decoderHealthValues,
+	decoderStatusSchema,
+} from "./decoder-status-schemas.js"
 import {
 	toApiDecoderCaps,
 	toApiDecoderInfo,
@@ -170,6 +177,65 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	)
 
 	/**
+	 * GET /api/decoders/rate-preview - Rate plans if a source ran at a rate.
+	 * Pure: no tuner write, no caps change (rate model B3).
+	 */
+	fastify.get<{
+		Querystring: { sourceId: string; sampleRateHz: number }
+		Reply: DecoderRatePreviewItem[] | ErrorResponse
+	}>(
+		"/api/decoders/rate-preview",
+		{
+			schema: {
+				tags: ["decoders"],
+				summary: "Preview decoder rate plans",
+				description:
+					"Returns each decoder's rate assessment for the source as if it ran at sampleRateHz, without changing anything",
+				querystring: {
+					type: "object",
+					properties: {
+						sourceId: { type: "string", minLength: 1 },
+						sampleRateHz: { type: "integer", exclusiveMinimum: 0 },
+					},
+					required: ["sourceId", "sampleRateHz"],
+					additionalProperties: false,
+				},
+				response: {
+					200: {
+						type: "array",
+						items: {
+							type: "object",
+							properties: {
+								decoderId: { type: "string" },
+								assessment: decoderRateAssessmentSchema,
+							},
+							required: ["decoderId", "assessment"],
+						},
+					},
+					400: errorResponseSchema,
+					404: errorResponseSchema,
+				},
+			},
+		},
+		async (request, reply) => {
+			const { sourceId, sampleRateHz } = request.query
+			const preview = decoderManager.previewRates(sourceId, sampleRateHz)
+			if (preview.ok) return preview.items
+			if (preview.reason === "source-not-found")
+				return reply.status(404).send({
+					error: "NotFound",
+					code: "SOURCE_NOT_FOUND",
+					message: `Source with id '${sourceId}' not found`,
+				})
+			return reply.status(400).send({
+				error: "BadRequest",
+				code: "VALIDATION_ERROR",
+				message: `Sample rate ${sampleRateHz} Hz is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+			})
+		},
+	)
+
+	/**
 	 * GET /api/decoders/:id - Get decoder status
 	 * Requirement 9.6: Returns decoder status by ID
 	 * Requirements 20.1, 20.2, 20.3: Includes health status
@@ -279,7 +345,9 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				}
 
 				return {
-					message: `Decoder '${id}' started successfully`,
+					message: status.suspended
+						? `Decoder '${id}' start recorded; suspended until the source rate is usable`
+						: `Decoder '${id}' started successfully`,
 					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
@@ -335,9 +403,13 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				})
 			}
 
-			// Check if already stopped
+			// Check if already stopped; a suspended decoder (or one waiting in
+			// restart backoff) is not running but can still be stopped.
 			const currentStatus = decoder.getStatus()
-			if (!currentStatus.running) {
+			if (
+				!currentStatus.running &&
+				!decoderManager.getStatus(id)?.desiredRunning
+			) {
 				return reply.status(409).send({
 					error: "Conflict",
 					code: "DECODER_NOT_RUNNING",
@@ -426,7 +498,9 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				}
 
 				return {
-					message: `Decoder '${id}' restarted successfully`,
+					message: status.suspended
+						? `Decoder '${id}' restart recorded; suspended until the source rate is usable`
+						: `Decoder '${id}' restarted successfully`,
 					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
@@ -572,7 +646,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 								id: { type: "string" },
 								health: {
 									type: "string",
-									enum: ["running", "idle", "faulted"],
+									enum: decoderHealthValues,
 								},
 							},
 							required: ["id", "health"],

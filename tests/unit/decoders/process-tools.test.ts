@@ -77,17 +77,35 @@ describe("paired IQ resampling with SoX", () => {
 					iqResampleCommand(inputRate, 1050000),
 				])
 				const output: Buffer[] = []
+				let stderr = ""
+				let stdinError: Error | undefined
 				proc.stdout.on("data", chunk => output.push(chunk))
+				proc.stderr.on("data", chunk => (stderr += String(chunk)))
+				// If the pipeline dies early (e.g. fork fails under host load) the
+				// writes fail with EPIPE. Record it so the assertion below reports
+				// the exit status and SoX/shell stderr instead of an unhandled error.
+				proc.stdin.on("error", error => (stdinError = error))
 				const closed = once(proc, "close")
 				const input = tone(50000)
-				for (let n = 0; n < input.length; n += chunkSize)
-					proc.stdin.write(input.subarray(n, n + chunkSize))
+				for (let n = 0; n < input.length && !stdinError; n += chunkSize) {
+					if (!proc.stdin.write(input.subarray(n, n + chunkSize)))
+						await Promise.race([
+							once(proc.stdin, "drain").catch(() => undefined),
+							closed,
+						])
+				}
 				proc.stdin.end()
-				expect((await closed)[0]).toBe(0)
+				const [code, signal] = await closed
+				expect(
+					{ code, signal, stdinError: stdinError?.message },
+					`SoX pipeline stderr: ${stderr}`,
+				).toEqual({ code: 0, signal: null, stdinError: undefined })
 				return Buffer.concat(output)
 			}
 			expect(await run(17)).toEqual(await run(frames * 2))
 		},
+		// Two real SoX subprocesses; allow for a loaded host without masking hangs.
+		20_000,
 	)
 
 	it.skipIf(!available)(

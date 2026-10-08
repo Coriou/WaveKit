@@ -590,11 +590,68 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
 | `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
 | `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
+| `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
 
-`running` and `health` are independent: during automatic-restart backoff a
-decoder reports `running: false` while `health` keeps its last value (usually
-`"running"`) until it is restarted or `maxRestarts` is exhausted (`"faulted"`).
-Use `restartCount` and `lastError` to explain that state.
+`health` after an unexpected exit:
+
+- `"restarting"`: the process exited without being asked to stop and an
+  automatic restart is scheduled at `nextRestartAt`. The restarted run reports
+  `"running"` (then `"idle"` as usual).
+- `"faulted"` with `nextRestartAt` (or with `running: true`): crash loop.
+  `health.faultAfterFailures` (default 5) consecutive runs ended without output
+  and before 30 s. Retries continue at the maximum backoff (30 s); a retry run
+  stays `"faulted"` on probation until it produces output or stays up 30 s,
+  then returns to `"running"`.
+- `"faulted"` with `running: false` and no `nextRestartAt`: terminal. The
+  restart budget (`maxRestarts`, unlimited by default) is exhausted, an explicit
+  start failed, or the operator stopped a faulted decoder; an explicit
+  start/restart is required.
+
+An explicit stop cancels a pending restart; a `"restarting"` decoder then
+reports `"running"` with `running: false` (a fault stays visible until the next
+explicit start). Use `restartCount` and `lastError` to explain these states.
+
+##### Rate plan and reversible suspension
+
+`rateAssessment` is the decoder instance's plan for its source's current
+sample rate: `verdict` (`best` | `acceptable` | `unusable` | `unknown`), the
+observed `sourceRateHz`, `frontendRateHz` (IQ rate after the decoder's own
+decimation/resampling) and `decoderInputRateHz` (what the program reads on
+stdin), the `adaptation`, and for `unusable` the `reasonCode`,
+`requiredMinimumHz` and `requirementBasis`. Built-in minimums are
+implementation facts (`"implementation"`): the audio decoders need at least
+their demod rate (48 kHz; 24 kHz for acarsdec), LoRa at least its bandwidth.
+readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
+until fixture-verified requirements exist; external-input decoders report
+`external-input`.
+
+| Field            | Meaning                                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable`. The decoder keeps its source reservation and `sourceId` and is never moved to another source.      |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended.                                                                                                               |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
+
+A decoder that is running is suspended when its source changes to an unusable
+rate and resumed when the rate becomes usable again (or the source reconnects
+with a usable rate). Suspension does not set `lastError` or count restarts,
+and leaves `health` unchanged except that a pending automatic restart is
+cancelled (`"restarting"` becomes `"running"`, as on an explicit stop). A removed source leaves a suspended decoder suspended and a
+running decoder running. Render `suspended` ahead of `health`.
+
+#### GET /api/decoders/rate-preview
+
+Each decoder's `rateAssessment` for a source as if it ran at `sampleRateHz`.
+Pure: nothing is tuned, no caps change, no decoder starts or stops.
+
+```bash
+curl 'http://localhost:9000/api/decoders/rate-preview?sourceId=rtl-pi&sampleRateHz=1024000'
+```
+
+**Response** (200 OK): `[{ "decoderId": "acars", "assessment": { "verdict": "acceptable", ... } }]`
+for every decoder selecting that source. 404 for an unknown source; 400 for a
+non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
+librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
 #### GET /api/decoders/:id
 
@@ -636,7 +693,10 @@ curl http://localhost:9000/api/decoders/dsd-main
 
 #### POST /api/decoders/:id/start
 
-Start a decoder.
+Start a decoder. On an unusable source rate the start is recorded instead:
+200 with the full status (`suspended: true`, `suspension`, `rateAssessment`),
+never 409; starting a suspended decoder again is a 200 no-op. The same applies
+to `/restart`.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/start
@@ -655,7 +715,10 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/start
 
 #### POST /api/decoders/:id/stop
 
-Stop a decoder.
+Stop a decoder. Also accepted (200) for a decoder that is not running but
+still wanted: suspended, waiting in restart backoff, or terminally faulted. 409 only when neither
+running nor wanted. Stopping clears intent and any suspension and releases the
+source reservation.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/stop

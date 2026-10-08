@@ -926,8 +926,19 @@ export class SourceManager extends EventEmitter {
 				this.forwardData(id, state, dataToProcess)
 			}
 
+			// disconnect() removes the state before this socket's close/error land,
+			// and reconnect() or a recreate can register a new state under the same
+			// id in between. A superseded socket must never touch the new state or
+			// emit lifecycle events for it (a late "disconnected" detaches the new
+			// stream from its fanout and silently starves every decoder). A plain
+			// removal (no successor) keeps its trailing "disconnected" as before.
+			const isSuperseded = () => {
+				const current = this.sources.get(id)
+				return current !== undefined && current !== state
+			}
+
 			const onError = (err: Error) => {
-				this.handleConnectionError(id, err)
+				if (!isSuperseded()) this.handleConnectionError(id, err)
 
 				// For the initial attempt, surface the failure to the caller (API/startup)
 				// while still keeping the source registered for background retries.
@@ -953,7 +964,7 @@ export class SourceManager extends EventEmitter {
 				state.bytesReceivedSinceLastMetric = 0
 				state.socket = null
 
-				if (wasConnected) {
+				if (wasConnected && !isSuperseded()) {
 					this.logger.info({ sourceId: id }, "Disconnected from source")
 
 					// Emit disconnected event (Requirement 1.4)
@@ -966,7 +977,7 @@ export class SourceManager extends EventEmitter {
 
 				// Always schedule reconnection when a source socket closes, unless we're
 				// explicitly stopping/removing the source.
-				if (!state.stopping) {
+				if (!state.stopping && !isSuperseded()) {
 					this.scheduleReconnect(id)
 				}
 

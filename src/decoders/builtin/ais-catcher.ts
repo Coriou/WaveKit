@@ -16,7 +16,12 @@ import {
 	IqDecimateDecoder,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateRequirements,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported output formats for AIS-catcher (Requirement 25.3) */
@@ -175,6 +180,18 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	 * AIS-catcher internally supports: 96K, 192K, 288K, 384K, 768K, 1536K, 3072K Hz
 	 * We decimate to 384000 Hz which is well-supported.
 	 */
+	/** AIS span needs are an evidence gap; only the fixed adapter rate is declared. */
+	getRateRequirements(): DecoderRateRequirements {
+		const rate = this.getIqDecimationConfig().targetSampleRate
+		const accepted = [{ kind: "discrete" as const, valuesHz: [rate] }]
+		return {
+			version: 1,
+			sourceKind: "iq",
+			frontendIq: { preferredHz: rate, accepted },
+			decoderInput: { kind: "iq", format: "cu8", preferredHz: rate, accepted },
+		}
+	}
+
 	protected override getIqDecimationConfig(): IqDecimationConfig {
 		const inputRate = this.options.inputSampleRate ?? 2_400_000
 		return {
