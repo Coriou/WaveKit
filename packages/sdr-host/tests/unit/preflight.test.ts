@@ -94,3 +94,93 @@ it("prevents overlapping USB checks and discards results after shutdown", async 
 		vi.useRealTimers()
 	}
 })
+
+function usbSnapshot(device: number | null) {
+	return {
+		ready: device !== null,
+		dongle: {
+			present: device !== null,
+			product: null,
+			serial: null,
+			usb:
+				device === null ? null : { vid: "0bda", pid: "2838", bus: 1, device },
+			driverConflict: false,
+			conflictingDriver: null,
+		},
+		warnings: [] as string[],
+		errors: [] as string[],
+	}
+}
+
+it("recovers on removal, insertion and rapid USB re-enumeration, not unchanged polls", async () => {
+	vi.useFakeTimers()
+	const { startPreflightMonitoring } =
+		await import("../../src/supervisor/preflight.js")
+	const result = usbSnapshot(4)
+	let current = usbSnapshot(4)
+	const recover = vi.fn(async () => {})
+	const stop = startPreflightMonitoring(result, logger, {
+		intervalMs: 100,
+		refresh: async () => current,
+		onDeviceChange: recover,
+	})
+	try {
+		await vi.advanceTimersByTimeAsync(200)
+		expect(recover).not.toHaveBeenCalled()
+		current = usbSnapshot(null)
+		await vi.advanceTimersByTimeAsync(200)
+		expect(recover).toHaveBeenCalledTimes(1)
+		current = usbSnapshot(5)
+		await vi.advanceTimersByTimeAsync(200)
+		expect(recover).toHaveBeenCalledTimes(2)
+		current = usbSnapshot(6)
+		await vi.advanceTimersByTimeAsync(200)
+		expect(recover).toHaveBeenCalledTimes(3)
+		current = { ...current, warnings: ["diagnostic changed"] }
+		await vi.advanceTimersByTimeAsync(200)
+		expect(recover).toHaveBeenCalledTimes(3)
+	} finally {
+		await stop()
+		vi.useRealTimers()
+	}
+})
+
+it("serializes recovery, waits on shutdown and retries failed recovery", async () => {
+	vi.useFakeTimers()
+	const { startPreflightMonitoring } =
+		await import("../../src/supervisor/preflight.js")
+	let finish!: () => void
+	const recover = vi
+		.fn()
+		.mockRejectedValueOnce(new Error("s6 unavailable"))
+		.mockImplementationOnce(
+			() =>
+				new Promise<void>(resolve => {
+					finish = resolve
+				}),
+		)
+	const refresh = vi.fn(async () => usbSnapshot(5))
+	const stop = startPreflightMonitoring(usbSnapshot(4), logger, {
+		intervalMs: 100,
+		refresh,
+		onDeviceChange: recover,
+	})
+	try {
+		await vi.advanceTimersByTimeAsync(500)
+		expect(recover).toHaveBeenCalledTimes(2)
+		expect(refresh).toHaveBeenCalledTimes(2)
+		let stopped = false
+		const stopping = stop().then(() => {
+			stopped = true
+		})
+		await Promise.resolve()
+		expect(stopped).toBe(false)
+		finish()
+		await stopping
+		await vi.advanceTimersByTimeAsync(500)
+		expect(recover).toHaveBeenCalledTimes(2)
+	} finally {
+		await stop()
+		vi.useRealTimers()
+	}
+})

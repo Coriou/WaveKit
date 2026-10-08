@@ -5,6 +5,7 @@
  * RTL-SDR dongle host with rtlmux fanout and unified status API.
  */
 import { createLogger } from "@wavekit/shared"
+import { restartUsbReceiver } from "./supervisor/usb-recovery.js"
 import { loadConfig } from "./config.js"
 import { ProcessManager } from "./supervisor/process-manager.js"
 import {
@@ -30,6 +31,7 @@ async function main(): Promise<void> {
 	const stopPreflightMonitoring = startPreflightMonitoring(
 		preflightResult,
 		logger,
+		{ onDeviceChange: () => restartUsbReceiver(logger) },
 	)
 
 	// Create process manager

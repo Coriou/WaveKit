@@ -56,11 +56,15 @@ export function startPreflightMonitoring(
 	options: {
 		intervalMs?: number
 		refresh?: () => Promise<PreflightResult>
+		onDeviceChange?: () => Promise<void>
 	} = {},
 ): () => Promise<void> {
 	// Startup diagnostics are already logged. During polling, log state changes.
 	const pollLogger = logger.child({}, { level: "silent" })
 	const refresh = options.refresh ?? (() => runPreflight(pollLogger))
+	const identity = (dongle: DongleInfo): string =>
+		JSON.stringify([dongle.present, dongle.usb, dongle.serial])
+	let handledIdentity = identity(result.dongle)
 	let stopped = false
 	let pending: Promise<void> | null = null
 	const timer = setInterval(() => {
@@ -68,10 +72,16 @@ export function startPreflightMonitoring(
 		if (pending || stopped) return
 		pending = Promise.resolve()
 			.then(refresh)
-			.then(updated => {
+			.then(async updated => {
 				if (stopped) return
 				const changed = JSON.stringify(result) !== JSON.stringify(updated)
 				Object.assign(result, updated)
+				const currentIdentity = identity(updated.dongle)
+				if (currentIdentity !== handledIdentity) {
+					await options.onDeviceChange?.()
+					// A failed restart is retried on the next poll, without overlap.
+					handledIdentity = currentIdentity
+				}
 				if (changed) {
 					logger.info(
 						{ dongle: updated.dongle, ready: updated.ready },
