@@ -31,7 +31,11 @@ docker network inspect "$NETWORK" >/dev/null 2>&1 ||
 
 case "$MODE" in
 	memory)
-		docker run --rm --cpus 2 --memory 1g --network "$NETWORK" -e RTLMUX_REF="$RTLMUX_REF" \
+		# Pin the daemon's native platform: a prior release run on another
+		# architecture may have re-tagged the local base image.
+		NATIVE="$(docker version --format '{{.Server.Os}}/{{.Server.Arch}}')"
+		docker run --rm --cpus 2 --memory 1g --platform "$NATIVE" --network "$NETWORK" \
+			-e RTLMUX_REF="$RTLMUX_REF" \
 			-v "$HERE:/verification:ro" "$BASE_IMAGE" bash -euo pipefail -c '
 				apt-get update -qq
 				apt-get install -y -qq --no-install-recommends build-essential git \

@@ -32,6 +32,7 @@ binary is checked functionally with --candidate only.
 import argparse
 import json
 import os
+import pty
 import signal
 import socket
 import struct
@@ -169,6 +170,8 @@ class Client:
 
     def __init__(self, port):
         self.sock = socket.create_connection(('127.0.0.1', port), timeout=5)
+        # Block while draining: an rtl_tcp outage can exceed any recv timeout.
+        self.sock.settimeout(None)
         self.received = 0
         self.closed = False
         threading.Thread(target=self._drain, daemon=True).start()
@@ -209,31 +212,57 @@ MEMCHECK_ERRORS = ('Invalid read', 'Invalid write', 'Invalid free', 'Conditional
 
 
 class Rtlmux:
+    """rtlmux on a pseudo-terminal: its slog printf() output is then
+    line-buffered, so the log reflects events as they happen."""
+
     def __init__(self, binary, upstream, listen, log_path):
         env = dict(os.environ)
-        env.setdefault('ASAN_OPTIONS', 'detect_leaks=0:halt_on_error=1:abort_on_error=0')
+        env.setdefault('ASAN_OPTIONS', 'detect_leaks=0:halt_on_error=1:abort_on_error=0:color=never')
         self.log_path = log_path
         self.log = open(log_path, 'wb')
+        self.lock = threading.Lock()
+        master, terminal = pty.openpty()
         self.proc = subprocess.Popen(
             [*WRAPPER, binary, '-h', '127.0.0.1', '-p', str(upstream), '-l', str(listen)],
-            stdout=self.log, stderr=subprocess.STDOUT, env=env)
+            stdin=subprocess.DEVNULL, stdout=terminal, stderr=terminal, env=env)
+        os.close(terminal)
+        self.reader = threading.Thread(target=self._copy, args=(master,), daemon=True)
+        self.reader.start()
+
+    def _copy(self, master):
+        try:
+            while True:
+                try:
+                    chunk = os.read(master, 65536)
+                except OSError:  # EIO once the child side is closed
+                    break
+                if not chunk:
+                    break
+                with self.lock:
+                    self.log.write(chunk)
+                    self.log.flush()
+        finally:
+            os.close(master)
 
     def alive(self):
         return self.proc.poll() is None
 
     def output(self):
-        self.log.flush()
+        with self.lock:
+            self.log.flush()
         return Path(self.log_path).read_text(errors='replace')
 
     def stop(self):
         if self.alive():
             self.proc.send_signal(signal.SIGTERM)
             try:
-                self.proc.wait(timeout=5)
+                self.proc.wait(timeout=5 * TIMEOUT_SCALE)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
                 self.proc.wait()
-        self.log.close()
+        self.reader.join(timeout=5)
+        with self.lock:
+            self.log.close()
 
 
 class Failure(Exception):
@@ -301,7 +330,7 @@ def scenario_down(binary, workdir):
             client.send(SET_FREQ, frequency)
             time.sleep(0.45)
         assert_healthy(mux)
-        check(STORED in mux.output(), 'no command landed in the disconnected window')
+        check(wait_for(lambda: STORED in mux.output(), 5), 'no command landed in the disconnected window')
         check(not client.closed, 'rtlmux dropped its client while rtl_tcp was down')
         before = len(server.sessions)
         server.start()
@@ -365,7 +394,7 @@ def scenario_header(binary, workdir):
             client.send(SET_FREQ, frequency + offset)
             time.sleep(0.4)
         assert_healthy(mux)
-        check(STORED in mux.output(), 'no command landed in the disconnected window')
+        check(wait_for(lambda: STORED in mux.output(), 5), 'no command landed in the disconnected window')
         check(all(code != SET_FREQ for session in server.sessions if session.magic != b'RTL0'
                   for code, _ in session.snapshot()), 'command sent to a server with a bad header')
         server.stop()
