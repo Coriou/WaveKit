@@ -1,0 +1,195 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
+" api × 2m 31s  iq ? unknown  rx 445.971 MHz  decoders 1 restarting  drops ?
+ ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
+ RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   ? · 2.048 MS/s
+ window    444.947–446.995 MHz   external control   last command 6m 32s ago
+   DECODERS          process             decodes           drop now  window
+ ● dsd-fme           up 52s              11s ago                  ?  in
+ ● multimon-ng       up 51s              32s ago                  ?  in
+ ● rtl433            up 51s              none for 51s             ?  out
+ ● readsb            up 51s              none for 51s             ?  out
+ ! acarsdec          restarting ×13      —                        —  out
+ ● ais-catcher       up 51s              none for 51s             ?  out
+ ● dumpvdl2          up 50s              none for 50s             ?  out
+ ● direwolf          up 50s              none for 50s             ?  out
+ ● lora-meshtastic   up 50s              none for 50s             ?  out
+ MESSAGES  feed stopped 18:05:21 · 7 cached
+ ── gap since 18:05:19 · 2m 33s ──
+ 18:05:11  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …
+ 18:04:50  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…
+ 18:04:32  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  …
+ 18:03:14  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
+ 18:01:40  dsd-fme       DMR     TG 9  SRC 2341001  1.2 s  quality 90%  2 err  …
+ 18:01:28  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
+ Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+`;
+
+exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
+" api ● 2s  iq ● streaming  decoders 1 restarting  drops !21%
+ RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s
+ window    444.947–446.995 MHz   external control
+   DECODERS         process     decodes       drop  window
+ ● dsd-fme          up 52s      11s ago        12%  in
+ ● multimon-ng      up 51s      32s ago        14%  in
+ ● rtl433           up 51s      none for 51s  !15%  out
+ ● readsb           up 51s      none for 51s  !38%  out
+ ! acarsdec         restarting  —                —  out
+ ● ais-catcher      up 51s      none for 51s  !31%  out
+ ● dumpvdl2         up 50s      none for 50s  !40%  out
+ ● direwolf         up 50s      none for 50s   11%  out
+ ● lora-meshtastic  up 50s      none for 50s    9%  out
+ MESSAGES  3 in 60s · 7 total
+ 18:07  dsd-fme      TG 2350  SRC 2341234  8.4 s  …
+ 18:07  multimon-ng  1234567  fn 3  FIRE ALARM ACTIVATION -…
+ 18:07  dsd-fme      TG 2350  SRC 2340001  3.1 s  …
+ 18:05  multimon-ng  7654321  fn 0  numeric  0207 555 0101
+ Overview · 1-5 views  ↑↓ select  Enter open  q quit  ? help"
+`;
+
+exports[`Overview goldens (spec §6.1) > live 80x24 1`] = `
+" api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 restarting  drops !21% now
+ RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
+ window    444.947–446.995 MHz   external control   last command 6m 32s ago
+   DECODERS          process             decodes           drop now  window
+ ● dsd-fme           up 52s              2/min · 11s ago        12%  in
+ ● multimon-ng       up 51s              1/min · 32s ago        14%  in
+ ● rtl433            up 51s              none for 51s          !15%  out
+ ● readsb            up 51s              none for 51s          !38%  out
+ ! acarsdec          restarting ×13      —                        —  out
+ ● ais-catcher       up 51s              none for 51s          !31%  out
+ ● dumpvdl2          up 50s              none for 50s          !40%  out
+ ● direwolf          up 50s              none for 50s           11%  out
+ ● lora-meshtastic   up 50s              none for 50s            9%  out
+ MESSAGES  3 in 60s · 7 total
+ 18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …
+ 18:07:20  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…
+ 18:07:02  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  …
+ 18:05:44  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
+ 18:04:10  dsd-fme       DMR     TG 9  SRC 2341001  1.2 s  quality 90%  2 err  …
+ 18:03:58  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
+ 18:01:12  dsd-fme       DMR     TG 2350  SRC 2341234  12.0 s  quality 75%  …
+
+ Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+`;
+
+exports[`Overview goldens (spec §6.1) > live 120x40 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drops !21%     18:07
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+ RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client
+ window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago
+
+   DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window
+ ● dsd-fme           up 52s              2/min · 11s ago        12%       36%  tuned             in
+ ● multimon-ng       up 51s              1/min · 32s ago        14%       39%  tuned             in
+ ● rtl433            up 51s              none for 51s          !15%       41%  433.920           out
+ ● readsb            up 51s              none for 51s          !38%       44%  1090.000          out
+ ! acarsdec          restarting ×13      —                        —         —  131.550–131.825*  out
+ ● ais-catcher       up 51s              none for 51s          !31%       36%  161.975/162.025   out
+ ● dumpvdl2          up 50s              none for 50s          !40%       41%  136.650–136.975*  out
+ ● direwolf          up 50s              none for 50s           11%       35%  144.390/144.800   out
+ ● lora-meshtastic   up 50s              none for 50s            9%       30%  869.525/906.875   out
+
+ MESSAGES  3 in 60s · 7 total
+ 18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  slot 1  CC 1  8.4 s  quality 65%  7 err  encrypted
+ 18:07:20  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG STREET UNIT 4B - ZONE 3 SMOKE DETECTOR …
+ 18:07:02  dsd-fme       DMR     TG 2350  SRC 2340001  slot 2  CC 1  3.1 s  quality 90%  2 err
+ 18:05:44  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
+ 18:04:10  dsd-fme       DMR     TG 9  SRC 2341001  slot 1  CC 1  1.2 s  quality 90%  2 err
+ 18:03:58  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
+ 18:01:12  dsd-fme       DMR     TG 2350  SRC 2341234  slot 1  CC 1  12.0 s  quality 75%  5 err
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select decoder  Enter open  r reconnect  q quit  ? help"
+`;
+
+exports[`Overview goldens (spec §6.1) > live 200x50 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21% now                                                       18:07
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+ RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s                MESSAGES  3 in 60s · 7 total
+ window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago         18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  quality 65%  encrypted  …
+                                                                                                                  18:07:20  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG STREET…
+   DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window           18:07:02  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  2 err  …
+ ● dsd-fme           up 52s              2/min · 11s ago        12%       36%  tuned             in               18:05:44  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
+ ● multimon-ng       up 51s              1/min · 32s ago        14%       39%  tuned             in               18:04:10  dsd-fme       DMR     TG 9  SRC 2341001  1.2 s  quality 90%  2 err  …
+ ● rtl433            up 51s              none for 51s          !15%       41%  433.920           out              18:03:58  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
+ ● readsb            up 51s              none for 51s          !38%       44%  1090.000          out              18:01:12  dsd-fme       DMR     TG 2350  SRC 2341234  12.0 s  quality 75%  5 err  …
+ ! acarsdec          restarting ×13      —                        —         —  131.550–131.825*  out
+ ● ais-catcher       up 51s              none for 51s          !31%       36%  161.975/162.025   out
+ ● dumpvdl2          up 50s              none for 50s          !40%       41%  136.650–136.975*  out
+ ● direwolf          up 50s              none for 50s           11%       35%  144.390/144.800   out
+ ● lora-meshtastic   up 50s              none for 50s            9%       30%  869.525/906.875   out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select decoder  Enter open  r reconnect  q quit  ? help"
+`;
+
+exports[`Overview goldens (spec §6.1) > ws-only (REST down) 80x24 1`] = `
+" api ws ● rest × 45s  iq ● streaming  decoders 8/9 up · 1 restarting  drops !21%
+ ! REST failing · timeout 2s · retry in 4s · REST data as of 18:07:07
+ RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
+ window    444.947–446.995 MHz   external control   last command 6m 32s ago
+   DECODERS          process             decodes           drop now  window
+ ● dsd-fme           up 52s              11s ago                12%  in
+ ● multimon-ng       up 51s              32s ago                14%  in
+ ● rtl433            up 51s              none for 51s          !15%  out
+ ● readsb            up 51s              none for 51s          !38%  out
+ ! acarsdec          restarting ×13      —                        —  out
+ ● ais-catcher       up 51s              none for 51s          !31%  out
+ ● dumpvdl2          up 50s              none for 50s          !40%  out
+ ● direwolf          up 50s              none for 50s           11%  out
+ ● lora-meshtastic   up 50s              none for 50s            9%  out
+ MESSAGES  3 in 60s · 7 total
+ 18:07:42  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …
+ 18:07:21  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…
+ 18:07:03  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  …
+ 18:05:45  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
+ 18:04:11  dsd-fme       DMR     TG 9  SRC 2341001  1.2 s  quality 90%  2 err  …
+ 18:03:59  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
+ 18:01:13  dsd-fme       DMR     TG 2350  SRC 2341234  12.0 s  quality 75%  …
+ Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+`;

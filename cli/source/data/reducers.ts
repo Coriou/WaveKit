@@ -37,12 +37,18 @@ import {
 	type Lane,
 	type LaneError,
 	type RestInbound,
+	type TunerCommand,
 	type WriteIntent,
 	type WsEvent,
 } from "./types.js"
 
 /** An unknown write that nothing reconciles within this long after its result ends as no-reply (R47 M5). */
 export const NO_REPLY_MS = 10_000
+/**
+ * A sparkline baseline older than this is not used: after an outage the decodes since
+ * it would all land in the current minute as a false spike (R55).
+ */
+export const SPARK_BASELINE_MS = 120_000
 
 export interface ReduceDeps {
 	summarize(
@@ -206,7 +212,13 @@ function updateSessions(
 				d.restartCount,
 				RESTART_WINDOW_MS,
 			),
-			spark: sparkAdd(cur.spark, cur.sparkPrev, sample),
+			spark: sparkAdd(
+				cur.spark,
+				cur.sparkPrev && at - cur.sparkPrev.t <= SPARK_BASELINE_MS
+					? cur.sparkPrev
+					: undefined,
+				sample,
+			),
 			sparkPrev: sample,
 		}
 	}
@@ -595,14 +607,19 @@ function reduceWs(
 				: { ...s, tuner: { ...patched, receivedAt: at, origin: "ws" } }
 		}
 		case "tuner:command-sent":
-			return {
-				...s,
-				tunerLastCommand: put(s.tunerLastCommand, ev.sourceId, {
-					command: ev.command,
-					value: ev.value,
-					at,
-				}),
-			}
+			return observe(
+				{
+					...s,
+					tunerLastCommand: put(s.tunerLastCommand, ev.sourceId, {
+						command: ev.command,
+						value: ev.value,
+						at,
+					}),
+				},
+				actionKey({ kind: "tuner", sourceId: ev.sourceId }),
+				at,
+				tunerSeen(ev.command, ev.value),
+			)
 		case "live-audio:status":
 			return { ...s, audio: laneOk(ev.status, at, "ws") }
 		case "live-audio:config": {
@@ -726,6 +743,63 @@ function stoppedAfter(
 
 /** What a reconciling event says about a pending action. */
 type Seen = "confirms" | "not-running" | "nothing"
+
+/** rtl_tcp command name and value core emits in tuner:command-sent (src/core/tuner-controller.ts). */
+function rtlCommand(cmd: TunerCommand): { name: string; value: number } | null {
+	const b = cmd.body
+	const bit = (v: unknown): number => (v === true ? 1 : 0)
+	switch (cmd.setting) {
+		case "frequency":
+			return { name: "set-frequency", value: Number(b["hz"]) }
+		case "sample-rate":
+			return { name: "set-sample-rate", value: Number(b["hz"]) }
+		case "gain-mode":
+			return { name: "set-gain-mode", value: b["mode"] === "manual" ? 1 : 0 }
+		case "gain":
+			return { name: "set-gain", value: Number(b["tenthsDb"]) }
+		case "ppm": {
+			const ppm = Number(b["ppm"])
+			return {
+				name: "set-freq-correction",
+				value: ppm < 0 ? 0xffffffff + ppm + 1 : ppm,
+			}
+		}
+		case "agc":
+			return { name: "set-agc-mode", value: bit(b["enabled"]) }
+		case "bias-tee":
+			return { name: "set-bias-tee", value: bit(b["enabled"]) }
+		case "offset-tuning":
+			return { name: "set-offset-tuning", value: bit(b["enabled"]) }
+		case "direct-sampling":
+			return {
+				name: "set-direct-sampling",
+				value: b["mode"] === "i" ? 1 : b["mode"] === "q" ? 2 : 0,
+			}
+		case "tuner-gain-index":
+			return { name: "set-tuner-gain-index", value: Number(b["index"]) }
+		case "control-mode":
+			return null
+	}
+}
+
+/**
+ * tuner:command-sent confirms a tuner write when it is the intent's last command with
+ * the value sent: a single command, or the end of a sequence that ran to the end (R55).
+ * A sequence halted before its last command is never confirmed by an earlier one.
+ */
+function tunerSeen(
+	command: string,
+	value: unknown,
+): (rec: ActionRecord) => Seen {
+	return rec => {
+		if (rec.intent.kind !== "tuner") return "nothing"
+		const last = rec.intent.commands[rec.intent.commands.length - 1]
+		const want = last ? rtlCommand(last) : null
+		return want !== null && want.name === command && want.value === value
+			? "confirms"
+			: "nothing"
+	}
+}
 
 /**
  * A decoder event, read against a pending decoder action: stop needs not running, start

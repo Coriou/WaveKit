@@ -635,3 +635,93 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		rt.stop()
 	})
 })
+
+describe("R55 runtime follow-ups", () => {
+	/** The ws client reports ws:open on the subscribe ack (assumption 6). */
+	const openAndAck = (h: WsHandlers): void => {
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+	}
+	const make = (fetchFn: FetchLike, ws = wsFake()) =>
+		createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+
+	it("start and reconnect each fetch one set of endpoints, not one per trigger plus one per ws:open", async () => {
+		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		const ws = wsFake()
+		const rt = make(fetchFn, ws)
+		rt.start()
+		openAndAck(ws.sockets[0]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(fetchFn).toHaveBeenCalledTimes(10)
+		rt.reconnect()
+		openAndAck(ws.sockets[1]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(fetchFn).toHaveBeenCalledTimes(20)
+		rt.stop()
+	})
+
+	it("a ws:open the runtime did not ask for still resyncs REST", async () => {
+		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		const ws = wsFake()
+		const rt = make(fetchFn, ws)
+		rt.start()
+		openAndAck(ws.sockets[0]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		const before = fetchFn.mock.calls.length
+		// The socket drops and the ws client's own backoff reopens it later.
+		ws.sockets[0]!.close(1006, "")
+		await vi.advanceTimersByTimeAsync(2_000)
+		openAndAck(ws.sockets[ws.sockets.length - 1]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(fetchFn.mock.calls.length - before).toBeGreaterThanOrEqual(10)
+		rt.stop()
+	})
+
+	it("a response that lands after stop() is not applied", async () => {
+		const held = heldFetch()
+		const rt = make(held.fetchFn)
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(held.pending).toHaveLength(10)
+		rt.stop()
+		held.answerAll()
+		await vi.advanceTimersByTimeAsync(0)
+		rt.tick()
+		expect(rt.store.get().decoders.receivedAt).toBeNull()
+	})
+
+	it("stop() drops inbound queued before it", () => {
+		const ws = wsFake()
+		const rt = make(never, ws)
+		rt.start()
+		const h = ws.sockets[0]!
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		h.message(
+			JSON.stringify({
+				type: "decoder:output",
+				channel: "decoders",
+				data: {
+					decoderId: "readsb",
+					output: {
+						type: "aircraft",
+						decoder: "readsb",
+						timestamp: "t",
+						data: {},
+					},
+				},
+			}),
+		)
+		rt.stop()
+		rt.tick()
+		expect(rt.store.get().messages.ring.entries).toHaveLength(0)
+	})
+})
