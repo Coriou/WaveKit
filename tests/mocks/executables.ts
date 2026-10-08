@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto"
 import {
+	accessSync,
 	chmodSync,
+	constants,
 	mkdirSync,
 	readFileSync,
 	renameSync,
@@ -22,17 +24,24 @@ import { join } from "node:path"
  * and per-test paths are symlinks to it: `$0` keeps the link name (so a shared
  * shim can still dispatch on its own name) and the link costs no assessment.
  */
-const CACHE_DIR = join(tmpdir(), "wavekit-test-executables")
+// Per-user and private: on Linux tmpdir() is a shared /tmp.
+const CACHE_DIR = join(
+	tmpdir(),
+	`wavekit-test-executables-${process.getuid?.() ?? "user"}`,
+)
 
 function cachedExecutable(body: string): string {
 	const hash = createHash("sha256").update(body).digest("hex").slice(0, 32)
 	const target = join(CACHE_DIR, hash)
 	try {
-		if (readFileSync(target, "utf8") === body) return target
+		if (readFileSync(target, "utf8") === body) {
+			accessSync(target, constants.X_OK)
+			return target
+		}
 	} catch {
 		// Not cached yet; write it below.
 	}
-	mkdirSync(CACHE_DIR, { recursive: true })
+	mkdirSync(CACHE_DIR, { recursive: true, mode: 0o700 })
 	// Concurrent workers may race: write privately, then rename atomically.
 	const temporary = `${target}.${process.pid}.${Math.random().toString(36).slice(2)}`
 	try {

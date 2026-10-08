@@ -434,6 +434,10 @@ describe("Source Manager", () => {
 
 				const disconnected = vi.fn()
 				sourceManager.on("disconnected", disconnected)
+				emit(
+					"error",
+					Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }),
+				)
 				for (const args of heldCloses) emit("close", ...args)
 
 				expect(disconnected).not.toHaveBeenCalled()
