@@ -9,7 +9,6 @@ import type {
 	DecoderLastError,
 	DecoderOutput,
 	DecoderStats,
-	ExtendedSourceStatus,
 	FanoutSnapshot,
 	LiveAudioConfig,
 	LiveAudioStatus,
@@ -34,6 +33,7 @@ import type {
 	PresetMap,
 	ResourceView,
 	SdrHostView,
+	SourceRow,
 	WsEvent,
 } from "./types.js"
 
@@ -149,6 +149,8 @@ function guardStats(v: unknown): DecoderStats | undefined {
 	return { bytesIn, eventsOut, errors }
 }
 
+const isFrequency = (v: unknown): v is number => isNum(v) && v > 0
+
 const isErrorKind = oneOf<DecoderLastError["kind"]>(["error", "exit"])
 
 function guardLastError(v: unknown): DecoderLastError | undefined {
@@ -196,8 +198,12 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 		...pick(v, ["pid", "idleTimeoutMs"] as const, isNum),
 		...pick(v, ["version", "sourceId", "deviceSerial"] as const, isStr),
 		...(isStrOrNull(lastOutputAt) ? { lastOutputAt } : {}),
-		...(Array.isArray(targets)
-			? { targetFrequenciesHz: targets.filter(isNum) }
+		// All or nothing: this list overrides the nominal band table (R15), so a
+		// partial or empty one would give a confident wrong in-window answer.
+		...(Array.isArray(targets) &&
+		targets.length > 0 &&
+		targets.every(isFrequency)
+			? { targetFrequenciesHz: targets }
 			: {}),
 		...(lastError ? { lastError } : {}),
 		...(caps ? { caps } : {}),
@@ -272,7 +278,7 @@ function guardAssignment(v: unknown): DecoderAssignment | undefined {
 	return { decoderId, sourceId, assignedAt }
 }
 
-export function guardSource(v: unknown): ExtendedSourceStatus | undefined {
+export function guardSource(v: unknown): SourceRow | undefined {
 	if (!isObj(v)) return undefined
 	const id = v["id"]
 	const connected = v["connected"]
@@ -296,7 +302,8 @@ export function guardSource(v: unknown): ExtendedSourceStatus | undefined {
 	) {
 		return undefined
 	}
-	const activity = guardActivity(v["activity"])
+	const rawActivity = v["activity"]
+	const activity = guardActivity(rawActivity)
 	return {
 		id,
 		connected,
@@ -309,6 +316,9 @@ export function guardSource(v: unknown): ExtendedSourceStatus | undefined {
 		assignments: assignments.value,
 		...pick(v, ["type", "url", "lastError"] as const, isStr),
 		...(activity ? { activity } : {}),
+		...(!activity && rawActivity !== undefined
+			? { activityUnrecognised: true as const }
+			: {}),
 	}
 }
 
@@ -1224,7 +1234,8 @@ export function guardPresets(v: unknown): PresetMap | undefined {
 	if (!isObj(v)) return undefined
 	const out: PresetMap = {}
 	for (const [name, p] of Object.entries(v)) {
-		if (!isObj(p)) continue
+		// JSON.parse makes "__proto__" an own key; assigning it would swap the prototype.
+		if (name === "__proto__" || !isObj(p)) continue
 		const bandwidth = p["bandwidth"]
 		if (!isNum(bandwidth)) continue
 		const tau = p["deEmphasisTau"]

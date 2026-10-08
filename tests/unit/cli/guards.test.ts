@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import type { DecoderRow } from "../../../cli/source/data/types.js"
 import {
 	guardCoreStatus,
 	guardDecoder,
@@ -6,6 +7,7 @@ import {
 	guardList,
 	guardPresets,
 	guardResources,
+	guardSource,
 	parseServerMessage,
 	readHostSampling,
 } from "../../../cli/source/data/guards.js"
@@ -312,11 +314,16 @@ describe("R15: optional decoder status fields", () => {
 		expect(g).toBeDefined()
 		for (const k of Object.keys(extra)) expect(g && k in g).toBe(false)
 	})
-	it("keeps only numeric target frequencies", () => {
-		expect(
-			guardDecoder({ ...decoder, targetFrequenciesHz: [446525000, "x", null] })
-				?.targetFrequenciesHz,
-		).toEqual([446525000])
+	it("keeps target frequencies only when every one is a positive number", () => {
+		const targets = (t: unknown) =>
+			guardDecoder({ ...decoder, targetFrequenciesHz: t })
+		expect(targets([446525000, 1090000000])?.targetFrequenciesHz).toEqual([
+			446525000, 1090000000,
+		])
+		for (const bad of [[446525000, "x", null], [], [0], [-1], [446525000, 0]]) {
+			expect(targets(bad)).toBeDefined()
+			expect(targets(bad)).not.toHaveProperty("targetFrequenciesHz")
+		}
 	})
 	it("rejects a lastError with a missing message or time", () => {
 		expect(
@@ -399,5 +406,88 @@ describe("R15: status events", () => {
 				data: { id: "pi-iq" },
 			}),
 		).toBeUndefined()
+	})
+})
+
+describe("A1 fix round 1", () => {
+	it("R13 at compile time: DecoderRow has no rateAssessment", () => {
+		const row: DecoderRow | undefined = guardDecoder(decoder)
+		// @ts-expect-error DecoderRow omits rateAssessment (spec §2, R13)
+		expect(row?.rateAssessment).toBeUndefined()
+	})
+	it("ignores a __proto__ preset key instead of reassigning the prototype", () => {
+		const raw: unknown = JSON.parse(
+			'{"__proto__": {"bandwidth": 1}, "nfm": {"bandwidth": 12500}}',
+		)
+		const p = guardPresets(raw)
+		expect(p).toEqual({ nfm: { bandwidth: 12500 } })
+		expect(Object.getPrototypeOf(p)).toBe(Object.prototype)
+		expect(Object.keys(p ?? {})).toEqual(["nfm"])
+	})
+	describe("source activity: absent vs present but unrecognised", () => {
+		const src = {
+			id: "pi-iq",
+			connected: true,
+			consumers: 2,
+			bytesReceived: 1,
+			dataRate: 4800,
+			reconnectAttempts: 0,
+			available: true,
+			caps: {
+				kind: "iq",
+				sampleRate: 2400000,
+				format: "U8_IQ",
+				exclusive: false,
+			},
+			assignments: [],
+		}
+		it("leaves the flag unset when activity is absent (older core)", () => {
+			const g = guardSource(src)
+			expect(g).toBeDefined()
+			expect(g && "activity" in g).toBe(false)
+			expect(g && "activityUnrecognised" in g).toBe(false)
+		})
+		it("flags an unknown state or malformed activity (newer core)", () => {
+			for (const activity of [
+				{
+					state: "buffering",
+					lastSampleAt: null,
+					sampleAgeMs: null,
+					timeoutMs: 10000,
+				},
+				{ state: "streaming" },
+				null,
+				"streaming",
+			]) {
+				const g = guardSource({ ...src, activity })
+				expect(g).toBeDefined()
+				expect(g && "activity" in g).toBe(false)
+				expect(g?.activityUnrecognised).toBe(true)
+			}
+		})
+		it("keeps valid activity without the flag", () => {
+			const g = guardSource({
+				...src,
+				activity: {
+					state: "stale",
+					lastSampleAt: null,
+					sampleAgeMs: 12400,
+					timeoutMs: 10000,
+				},
+			})
+			expect(g?.activity?.state).toBe("stale")
+			expect(g && "activityUnrecognised" in g).toBe(false)
+		})
+		it("carries the flag through source:status", () => {
+			const e = parseServerMessage({
+				type: "source:status",
+				channel: "sources",
+				data: { ...src, activity: { state: "warming-up" } },
+			})
+			expect(e).toMatchObject({
+				type: "source:status",
+				source: { activityUnrecognised: true },
+			})
+		})
 	})
 })
