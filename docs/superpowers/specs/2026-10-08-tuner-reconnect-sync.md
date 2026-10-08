@@ -1,9 +1,6 @@
 # Tuner state synchronization on source reconnection
 
-Status: implemented (ROADMAP §3). Parent: `2026-10-08-sample-rate-and-channelizer-design.md`.
-
-## Problem
-
+Implemented (ROADMAP §3). Parent: `2026-10-08-sample-rate-and-channelizer-design.md`.
 An rtl_tcp source (rtl_tcp, rtlmux, SDR++ in rtl_tcp mode) can return at its own defaults.
 Observed: a reflashed Pi came back at its configured 2.048 Msps while core caps still
 claimed a pre-outage relay tuning of 2.16 Msps / 446.866968 MHz. The dongle-info header
@@ -58,18 +55,25 @@ exactly one (`SourceManager.setTuningCaps`). No public API shape change: `TunerS
 _last commanded_; replay writes count in `commandCount`/`lastCommandAt`; failures set
 `lastError`. Config gains `tuner`. Documented in `docs/API.md`.
 
+## Detecting the outage: stall watchdog
+
+A rebooted Pi can leave the socket half-open (connected, `stale`, never reconnecting).
+For rtl_tcp IQ sources, once a session has delivered payload, a gap of `stallTimeoutMs`
+(default 15 s, 0 = off) fails the socket into the normal backoff path; sync then runs on the
+new connection. Exempt: recordings, sdrpp-network/audio, a not-yet-streamed session
+(e64e16b keeps it connected and `stale`) and local-backpressure pauses. TCP keepalive
+(5 s) is also enabled as defence in depth only.
+
 ## Residual gap and follow-up
 
 After a core-only restart nothing is accepted, so nothing is written and caps = config
-baseline. The hardware may still be at relay-set values, because rtlmux caches and replays
-client commands to rtl_tcp itself. Follow-up: opt-in "command baseline on first connect"
-(send the configured rate/center once so caps are backed by a command).
+baseline, while rtlmux may still replay relay-set values it cached to rtl_tcp. Follow-up:
+opt-in "command baseline on first connect" (send configured rate/center once).
 
 ## Out of scope
 
-- SDR-host default gain/rate restoration on last-client departure (Pi team; it must
-  serialize against an arriving, replaying core).
-- rtlmux drops 0x07 test mode and 0x09 direct sampling: replaying them through the Pi host
+- SDR-host default gain/rate restoration on last-client departure (Pi team).
+- rtlmux drops 0x07 test mode and 0x09 direct sampling: replaying them via the Pi host
   is a no-op, so `TunerState` may over-claim those two fields.
-- Explicit `SourceManager.reconnect()`/removal (discards tuner state by design); dongle-swap
-  detection; hardware readback; per-source policy; non-rtl_tcp sources.
+- Explicit `reconnect()`/removal (discards tuner state); dongle-swap detection; readback;
+  per-source policy; non-rtl_tcp sources; a session that never streams after connect.

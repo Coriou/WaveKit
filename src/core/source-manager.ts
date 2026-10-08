@@ -28,13 +28,17 @@ import type { Readable } from "node:stream"
 import { PassThrough } from "node:stream"
 import type { SourceActivity } from "@wavekit/api-types"
 import type { Logger } from "../utils/logger.js"
-import { SourceConnectionError } from "../utils/errors.js"
+import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
 import { detectAudioFormat } from "../utils/audio-analyzer.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
+// Default stall watchdog for continuous-stream rtl_tcp IQ sessions (0 = off).
+export const SOURCE_STALL_TIMEOUT_MS = 15_000
+// TCP keepalive is defence in depth only: OS probe counts make it too slow alone.
+export const SOURCE_KEEPALIVE_DELAY_MS = 5000
 
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
@@ -158,6 +162,7 @@ interface SourceState {
 	reconnectTimer: ReturnType<typeof setTimeout> | null
 
 	metricsTimer: ReturnType<typeof setInterval> | null
+	stallTimer: ReturnType<typeof setInterval> | null
 	stopping: boolean
 	// Format detection
 	activeFormat: SourceCaps["format"] | "UNKNOWN"
@@ -279,6 +284,7 @@ export class SourceManager extends EventEmitter {
 			reconnectAttempts: 0,
 			reconnectTimer: null,
 			metricsTimer: null,
+			stallTimer: null,
 			stopping: false,
 			activeFormat: config.caps.format,
 			detectionBuffer: config.caps.format === "auto" ? Buffer.alloc(0) : null,
@@ -382,6 +388,7 @@ export class SourceManager extends EventEmitter {
 			clearInterval(state.metricsTimer)
 			state.metricsTimer = null
 		}
+		this.stopStallWatchdog(state)
 		// Clean up recording source resources
 		if (state.recordingState) {
 			this.cleanupRecordingState(state.recordingState)
@@ -749,11 +756,13 @@ export class SourceManager extends EventEmitter {
 			}
 
 			const cleanup = () => {
+				this.stopStallWatchdog(state)
 				socket.removeAllListeners()
 			}
 
 			const onConnect = () => {
 				socket.setTimeout(0)
+				socket.setKeepAlive(true, SOURCE_KEEPALIVE_DELAY_MS)
 				state.connected = true
 				state.lastSampleAt = null
 				state.expectedSince = Date.now()
@@ -767,6 +776,8 @@ export class SourceManager extends EventEmitter {
 					{ sourceId: id, host: config.host, port: config.port },
 					"Connected to source",
 				)
+
+				this.startStallWatchdog(state, socket, onError)
 
 				// Emit connected event (Requirement 1.3)
 				this.emit("connected", id)
@@ -988,6 +999,65 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
+	 * Stall watchdog for continuous-stream sessions: rtl_tcp IQ sources stream
+	 * without pause while healthy, so once a session has delivered payload, a
+	 * gap longer than `stallTimeoutMs` (default 15 s, 0 = off) means a dead or
+	 * half-open peer (e.g. a rebooted host that never sent FIN). The socket is
+	 * then failed into the normal reconnect/backoff path.
+	 *
+	 * Not covered: recordings, SDR++ network and audio sources (may idle), a
+	 * session that has not delivered payload yet (kept connected and reported
+	 * stale, as e64e16b intends), and time spent paused by local backpressure.
+	 */
+	private startStallWatchdog(
+		state: SourceState,
+		socket: net.Socket,
+		fail: (err: Error) => void,
+	): void {
+		this.stopStallWatchdog(state)
+		const { config } = state
+		const timeoutMs = config.stallTimeoutMs ?? SOURCE_STALL_TIMEOUT_MS
+		if (
+			timeoutMs <= 0 ||
+			config.type !== "rtl_tcp" ||
+			config.caps.kind !== "iq"
+		)
+			return
+
+		const checkEveryMs = Math.max(50, Math.min(1000, Math.floor(timeoutMs / 4)))
+		state.stallTimer = setInterval(() => {
+			if (state.socket !== socket || !state.connected || state.stopping) {
+				this.stopStallWatchdog(state)
+				return
+			}
+			// Not armed until this session delivered payload; paused is local.
+			if (state.lastSampleAt === null) return
+			if (state.stream.writableNeedDrain || socket.isPaused()) return
+			const idleMs =
+				Date.now() - Math.max(state.lastSampleAt, state.expectedSince)
+			if (idleMs < timeoutMs) return
+
+			this.stopStallWatchdog(state)
+			this.logger.warn(
+				{ sourceId: config.id, idleMs, timeoutMs },
+				"Source stream stalled; dropping connection to reconnect",
+			)
+			fail(
+				new WaveKitError(
+					`No data from source for ${idleMs}ms (stall watchdog ${timeoutMs}ms); reconnecting`,
+					"SOURCE_STALLED",
+				),
+			)
+		}, checkEveryMs)
+	}
+
+	private stopStallWatchdog(state: SourceState): void {
+		if (!state.stallTimer) return
+		clearInterval(state.stallTimer)
+		state.stallTimer = null
+	}
+
+	/**
 	 * Handles connection errors gracefully (Requirement 1.6).
 	 * Logs the error and prepares for reconnection.
 	 */
@@ -1001,7 +1071,8 @@ export class SourceManager extends EventEmitter {
 		const isKnownError =
 			errorCode === "ECONNREFUSED" ||
 			errorCode === "ETIMEDOUT" ||
-			errorCode === "ECONNRESET"
+			errorCode === "ECONNRESET" ||
+			errorCode === "SOURCE_STALLED"
 
 		state.lastError = err.message
 

@@ -40,6 +40,13 @@
 #     channels   - Number of channels (optional, default: 1)
 #     centerFreq - Center frequency in Hz for IQ sources (optional)
 #     exclusive  - Whether source can only be used by one decoder (default: false)
+#   stallTimeoutMs - rtl_tcp IQ sources only: once a session has streamed, a
+#                payload gap this long drops the (possibly half-open) connection
+#                and reconnects with backoff (default: 15000; 0 disables;
+#                otherwise 1000-600000). Not applied to recordings, sdrpp-network
+#                or audio sources, to a session that has not streamed yet, or
+#                while paused by local backpressure. TCP keepalive (5 s) is also
+#                enabled, but OS probe counts make it too slow on its own.
 #
 # Example configurations:
 #

@@ -182,6 +182,19 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
+**Stall watchdog (rtl_tcp IQ sources).** An rtl_tcp IQ stream never pauses while
+it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
+(source config, default 15000, `0` disables) means the peer is dead or the
+connection is half-open, e.g. a rebooted host that never sent FIN. Core then drops
+the connection: `connected` becomes `false`, `lastError` reads
+`No data from source for <n>ms (stall watchdog <timeout>ms); reconnecting`, and
+the normal reconnect/backoff path runs. A successful reconnect clears `lastError`
+and resets `reconnectAttempts`, and tuner sync runs on the new connection.
+Without this, such a source stayed `connected: true` with activity `stale`
+indefinitely. The watchdog does not apply to recordings, `sdrpp-network` or audio
+sources, to a session that has not streamed yet (it stays connected and reports
+`stale`), or to time spent `paused` by local backpressure.
+
 ### Tuner
 
 #### GET /api/tuner

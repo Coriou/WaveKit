@@ -19,6 +19,9 @@ vi.mock("node:net", async importOriginal => {
 		isPaused() {
 			return false
 		}
+		setKeepAlive() {
+			return this
+		}
 		connect() {
 			behavior.attempts++
 			if (behavior.connect) queueMicrotask(() => this.emit("connect"))
