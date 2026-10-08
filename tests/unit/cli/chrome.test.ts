@@ -192,12 +192,13 @@ describe("M6: rx uses windowFor and the age of its actual source", () => {
 		// Centre from the tuner; tuner lane old → dim, even though sources are fresh.
 		const tunerOld = { ...s, tuner: { ...s.tuner, receivedAt: oldAt } }
 		expect(stripInput(tunerOld).old.rx).toBe(true)
-		// Centre from the source caps (tuner frequency 0); the old tuner lane does not dim it.
+		// Centre and rate from the source caps (tuner reports 0 for both); the old
+		// tuner lane does not dim them (item 8 dims by both centre and rate lanes).
 		const fromSource = {
 			...tunerOld,
 			tuner: {
 				...tunerOld.tuner,
-				value: s.tuner.value!.map(t => ({ ...t, frequency: 0 })),
+				value: s.tuner.value!.map(t => ({ ...t, frequency: 0, sampleRate: 0 })),
 			},
 			sources: {
 				...s.sources,
@@ -280,5 +281,46 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 		expect(t).not.toContain("...)")
 		for (const l of lines.filter(l => l.trim() !== ""))
 			expect(cellWidth(l.trimStart())).toBe(60)
+	})
+})
+
+describe("R53: rx shows the centre alone when the rate is unknown", () => {
+	it("keeps the centre with no span", () => {
+		const s = scenarioState("live")
+		const st = {
+			...s,
+			tuner: {
+				...s.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, sampleRate: 0 })),
+			},
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					caps: { ...x.caps, sampleRate: 0 },
+				})),
+			},
+		}
+		const input = stripInput(st)
+		expect(input.rx).toMatchObject({ centreHz: 445_970_700, halfSpanHz: null })
+		const text = lineText(stripLine(input, 199))
+		expect(text).toContain("rx 445.971 MHz")
+		expect(text).not.toContain("±")
+	})
+	it("item 8: dims rx when the lane its rate came from is old", () => {
+		const s = scenarioState("live")
+		const oldAt = s.now - 60_000
+		// Centre from a fresh tuner; rate only from the (old) source caps.
+		const st = {
+			...s,
+			tuner: {
+				...s.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, sampleRate: 0 })),
+			},
+			sources: { ...s.sources, receivedAt: oldAt },
+		}
+		expect(stripInput(st).rx?.halfSpanHz).toBe(1_024_000)
+		expect(stripInput(st).old.rx).toBe(true)
+		expect(stripInput({ ...st, sources: s.sources }).old.rx).toBe(false)
 	})
 })
