@@ -74,7 +74,8 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
 - [ ] Make resampling independent of input chunk boundaries; report actual rates.
 - [ ] Synchronize tuner state on reconnection and propagate accepted changes.
 - [x] Preserve arrays when applying indexed environment overrides.
-- [ ] Fix recording EOF cleanup.
+- [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
+      buffered final data; read errors stop looping playback).
 - [ ] Distinguish disconnected, waiting, stale, dropping and streaming states;
       display current activity separately from historical counters.
 - [ ] Exercise real decoder IQ fixtures, lifecycle failure cases, and memory limits.

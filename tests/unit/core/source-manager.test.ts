@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import * as net from "node:net"
+import { syncBuiltinESMExports } from "node:module"
 import * as fc from "fast-check"
 import {
 	SourceManager,
@@ -2068,6 +2069,62 @@ describe("Recording Source", () => {
 	})
 
 	describe("Loop Support (Requirement 21.2)", () => {
+		it("releases the file and ends downstream after buffered final data", async () => {
+			const payload = Buffer.alloc(7 * 65536, 0x42)
+			const filePath = createTestFile("buffered-eof.raw", payload)
+			const closeSpy = vi.spyOn(fs, "closeSync")
+			syncBuiltinESMExports()
+			const ended = vi.fn()
+			sourceManager.on("ended", ended)
+			try {
+				const stream = await sourceManager.connect(
+					createRecordingConfig("buffered-eof", filePath, {
+						playbackSpeed: 100,
+						caps: { sampleRate: 2048000, format: "U8_IQ" },
+					}),
+				)
+				await vi.waitFor(() => expect(ended).toHaveBeenCalledOnce())
+				expect(closeSpy).toHaveBeenCalledOnce()
+				expect(sourceManager.getStatus("buffered-eof")?.dataRate).toBe(0)
+				const chunks: Buffer[] = []
+				for await (const chunk of stream) chunks.push(chunk)
+				expect(Buffer.concat(chunks)).toEqual(payload)
+				await sourceManager.disconnect("buffered-eof")
+				expect(closeSpy).toHaveBeenCalledOnce()
+			} finally {
+				closeSpy.mockRestore()
+				syncBuiltinESMExports()
+			}
+		})
+
+		it("stops a looping recording after a read error", async () => {
+			const filePath = createTestFile("read-error.raw", Buffer.alloc(1024))
+			const ended = vi.fn()
+			sourceManager.on("ended", ended)
+			const stream = await sourceManager.connect(
+				createRecordingConfig("read-error", filePath, {
+					loop: true,
+					playbackSpeed: 100,
+				}),
+			)
+			const readSpy = vi.spyOn(fs, "readSync").mockImplementation(() => {
+				throw new Error("recording read failed")
+			})
+			syncBuiltinESMExports()
+			try {
+				stream.resume()
+				await vi.waitFor(() => expect(ended).toHaveBeenCalledOnce())
+				expect(readSpy).toHaveBeenCalledOnce()
+				expect(sourceManager.getStatus("read-error")?.lastError).toBe(
+					"recording read failed",
+				)
+				expect(stream.readableEnded).toBe(true)
+			} finally {
+				readSpy.mockRestore()
+				syncBuiltinESMExports()
+			}
+		})
+
 		it("should emit ended event when loop is false", async () => {
 			const testData = Buffer.alloc(1024, 0x42)
 			const filePath = createTestFile("test-audio.raw", testData)

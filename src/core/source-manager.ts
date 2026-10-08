@@ -558,6 +558,7 @@ export class SourceManager extends EventEmitter {
 		)
 
 		recordingState.playbackTimer = setTimeout(() => {
+			recordingState.playbackTimer = null
 			this.readAndEmitChunk(id)
 		}, interval)
 	}
@@ -612,14 +613,24 @@ export class SourceManager extends EventEmitter {
 			state.bytesReceivedSinceLastMetric += bytesRead
 
 			// Stop reading until downstream drains instead of buffering the entire file.
-			if (this.forwardData(id, state, buffer.subarray(0, bytesRead))) {
+			const canWrite = this.forwardData(
+				id,
+				state,
+				buffer.subarray(0, bytesRead),
+			)
+			if (
+				recordingState.position >= recordingState.fileSize &&
+				!state.config.loop
+			) {
+				this.handleRecordingEnd(id)
+			} else if (canWrite) {
 				this.scheduleNextChunk(id)
 			}
 		} catch (err) {
 			this.logger.error({ sourceId: id, err }, "Error reading recording file")
 			state.lastError =
 				err instanceof Error ? err.message : "Unknown read error"
-			this.handleRecordingEnd(id)
+			this.handleRecordingEnd(id, false)
 		}
 	}
 
@@ -627,7 +638,7 @@ export class SourceManager extends EventEmitter {
 	 * Handles the end of a recording file.
 	 * Requirements: 21.2
 	 */
-	private handleRecordingEnd(id: string): void {
+	private handleRecordingEnd(id: string, allowLoop = true): void {
 		const state = this.sources.get(id)
 		if (!state || !state.recordingState) {
 			return
@@ -636,7 +647,7 @@ export class SourceManager extends EventEmitter {
 		const { config } = state
 		const recordingState = state.recordingState
 
-		if (config.loop) {
+		if (config.loop && allowLoop) {
 			// Loop: reset position and continue
 			recordingState.position = 0
 
@@ -645,9 +656,11 @@ export class SourceManager extends EventEmitter {
 			// Schedule next chunk
 			this.scheduleNextChunk(id)
 		} else {
-			// No loop: emit ended event and stop
-			recordingState.isPlaying = false
+			// Retain status/assignments, but release the file and timers at EOF.
+			this.cleanupState(state)
 			state.connected = false
+			state.dataRate = 0
+			state.stream.end()
 
 			this.logger.info({ sourceId: id }, "Recording source ended")
 
