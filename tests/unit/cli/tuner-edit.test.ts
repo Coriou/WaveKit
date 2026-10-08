@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 import type { TunerState } from "@wavekit/api-types"
 import {
 	FREQ_DIGITS,
+	FREQ_FIELD_MAX,
 	FREQ_MAX,
 	FREQ_MIN,
 	GAIN_MAX,
@@ -10,8 +11,10 @@ import {
 	SEND_ORDER,
 	VALID_SAMPLE_RATES,
 	applyEditKey,
+	canReview,
 	digitAt,
 	editWindow,
+	outOfRange,
 	pendingChanges,
 	pendingCommands,
 	startEdit,
@@ -55,9 +58,25 @@ describe("tuner edit", () => {
 		expect(s.draft.frequency).toBe(445_970_000)
 		expect(s.digit).toBe(3)
 	})
-	it("clamps the frequency to the server range", () => {
+	it("lets the frequency leave the server range while editing and holds the review (R42)", () => {
 		const s = press(Array<EditKey>(12).fill("left").concat(["up", "up", "up"]))
-		expect(s.draft.frequency).toBeLessThanOrEqual(FREQ_MAX)
+		expect(s.draft.frequency).toBe(3_445_970_700)
+		expect(s.draft.frequency).toBeGreaterThan(FREQ_MAX)
+		expect(outOfRange(s)).toEqual(["frequency"])
+		expect(canReview(s)).toBe(false)
+		expect(canReview(press(["down", "down"], s))).toBe(true)
+		expect(canReview(startEdit(tuner))).toBe(false)
+	})
+	it("typing a leading 0 keeps the lower digits (no clamp per keystroke)", () => {
+		// Cursor on the 100 MHz digit: 445 970 700 → 045 970 700, lower digits kept.
+		let s = press(["left", "left", "left", "left", "left", "0"])
+		expect(s.draft.frequency).toBe(45_970_700)
+		expect(outOfRange(s)).toEqual([])
+		// From the 1 GHz digit, 0 0 0 → 005 970 700: below the range but nothing rewritten.
+		s = press(["left", "left", "left", "left", "left", "left", "0", "0", "0"])
+		expect(s.draft.frequency).toBe(5_970_700)
+		expect(outOfRange(s)).toEqual(["frequency"])
+		expect(press(["9"], s).draft.frequency).toBe(9_970_700)
 	})
 	it("cycles fields and edits sample rate, gain and toggles", () => {
 		let s = press(["tab", "up"])
@@ -135,12 +154,13 @@ describe("tuner edit", () => {
 		expect(s.digit).toBe(0)
 		expect(press(Array<EditKey>(20).fill("left")).digit).toBe(FREQ_DIGITS - 1)
 	})
-	it("snaps an off-list sample rate to the nearest valid rate on the first change", () => {
-		const s = press(
-			["tab", "up"],
-			startEdit({ ...tuner, sampleRate: 2_000_000 }),
-		)
-		expect(s.draft.sampleRate).toBe(2_048_000)
+	it("moves an off-list sample rate to the next valid rate in the key's direction (R42)", () => {
+		const off = startEdit({ ...tuner, sampleRate: 2_000_000 })
+		expect(press(["tab", "up"], off).draft.sampleRate).toBe(2_048_000)
+		expect(press(["tab", "down"], off).draft.sampleRate).toBe(1_920_000)
+		const below = startEdit({ ...tuner, sampleRate: 230_000 })
+		expect(press(["tab", "down"], below).draft.sampleRate).toBe(250_000)
+		expect(press(["tab", "up"], below).draft.sampleRate).toBe(250_000)
 		expect(
 			press(["tab", ...Array<EditKey>(20).fill("up")]).draft.sampleRate,
 		).toBe(3_200_000)
@@ -148,7 +168,7 @@ describe("tuner edit", () => {
 			press(["tab", ...Array<EditKey>(20).fill("down")]).draft.sampleRate,
 		).toBe(250_000)
 	})
-	it("clamps ppm and gain and holds the frequency floor", () => {
+	it("clamps ppm and gain and keeps the frequency field non-negative", () => {
 		const ppm = press([
 			...tabs(3),
 			...Array<EditKey>(PPM_LIMIT + 5).fill("down"),
@@ -157,7 +177,16 @@ describe("tuner edit", () => {
 		const gain = press(["tab", "tab", "down"])
 		expect(gain.draft.gainTenthsDb).toBe(0)
 		const low = press(["down"], startEdit({ ...tuner, frequency: FREQ_MIN }))
-		expect(low.draft.frequency).toBe(FREQ_MIN)
+		expect(low.draft.frequency).toBe(FREQ_MIN - 1000)
+		const zero = press(
+			Array<EditKey>(9).fill("down"),
+			startEdit({ ...tuner, frequency: 5000 }),
+		)
+		expect(zero.draft.frequency).toBe(0)
+		const top = press(
+			Array<EditKey>(12).fill("left").concat(Array<EditKey>(12).fill("up")),
+		)
+		expect(top.draft.frequency).toBe(FREQ_FIELD_MAX)
 	})
 	it("reports the pending window and reads digits", () => {
 		const s = press(["tab", "up"])
@@ -170,8 +199,8 @@ describe("tuner edit", () => {
 		expect(digitAt(445_970_700, 8)).toBe(4)
 	})
 
-	// Invariant (not a §12 property): any key sequence keeps every draft value in the server's range,
-	// and pending commands follow SEND_ORDER with no duplicates.
+	// Feature: cli-dashboard-overhaul, Property —: tuner edit invariants
+	// Validates: spec §6.4, plan assumption 7
 	it("keeps the draft in range and commands in send order for any key sequence", () => {
 		const key = fc.constantFrom<EditKey>(
 			"left",
@@ -189,9 +218,12 @@ describe("tuner edit", () => {
 		fc.assert(
 			fc.property(fc.array(key, { maxLength: 60 }), keys => {
 				const s = press(keys)
-				expect(s.draft.frequency).toBeGreaterThanOrEqual(FREQ_MIN)
-				expect(s.draft.frequency).toBeLessThanOrEqual(FREQ_MAX)
-				expect(Number.isInteger(s.draft.frequency)).toBe(true)
+				const f = s.draft.frequency
+				expect(f).toBeGreaterThanOrEqual(0)
+				expect(f).toBeLessThanOrEqual(FREQ_FIELD_MAX)
+				expect(Number.isInteger(f)).toBe(true)
+				expect(outOfRange(s).length === 0).toBe(f >= FREQ_MIN && f <= FREQ_MAX)
+				if (canReview(s)) expect(pendingCommands(s).length).toBeGreaterThan(0)
 				expect(VALID_SAMPLE_RATES).toContain(s.draft.sampleRate)
 				expect(s.draft.gainTenthsDb).toBeGreaterThanOrEqual(0)
 				expect(s.draft.gainTenthsDb).toBeLessThanOrEqual(GAIN_MAX)

@@ -37,6 +37,8 @@ export const FREQ_MAX = 1_900_000_000
 export const GAIN_MAX = 500
 export const PPM_LIMIT = 500
 export const FREQ_DIGITS = 10
+/** Largest value the 10-digit frequency field can show. */
+export const FREQ_FIELD_MAX = 10 ** FREQ_DIGITS - 1
 
 const clamp = (v: number, lo: number, hi: number): number =>
 	Math.min(hi, Math.max(lo, v))
@@ -75,7 +77,10 @@ function setDigit(n: number, digit: number, value: number): number {
 	return n - digitAt(n, digit) * 10 ** digit + value * 10 ** digit
 }
 
-/** Steps through VALID_SAMPLE_RATES; an off-list rate snaps to the nearest valid one first. */
+/**
+ * Steps through VALID_SAMPLE_RATES. An off-list rate moves to the nearest valid
+ * rate in the key's direction (↓ from 2 000 000 is 1 920 000, ↑ is 2 048 000).
+ */
 function nextRate(rate: number, dir: 1 | -1): number {
 	const idx = VALID_SAMPLE_RATES.indexOf(rate)
 	if (idx >= 0)
@@ -83,10 +88,17 @@ function nextRate(rate: number, dir: 1 | -1): number {
 			VALID_SAMPLE_RATES[clamp(idx + dir, 0, VALID_SAMPLE_RATES.length - 1)] ??
 			rate
 		)
-	let best = VALID_SAMPLE_RATES[0] ?? rate
-	for (const r of VALID_SAMPLE_RATES)
-		if (Math.abs(r - rate) < Math.abs(best - rate)) best = r
-	return best
+	const ahead =
+		dir > 0
+			? VALID_SAMPLE_RATES.find(r => r > rate)
+			: [...VALID_SAMPLE_RATES].reverse().find(r => r < rate)
+	return (
+		ahead ??
+		(dir > 0
+			? VALID_SAMPLE_RATES[VALID_SAMPLE_RATES.length - 1]
+			: VALID_SAMPLE_RATES[0]) ??
+		rate
+	)
 }
 
 function toggle(d: TunerDraft, field: EditField, dir: 1 | -1 = 1): TunerDraft {
@@ -118,9 +130,11 @@ function editFrequency(
 	dir: 1 | -1 | 0,
 ): TunerEditState {
 	const d = s.draft
+	// Not clamped to the server range while typing (that would rewrite the lower
+	// digits); outOfRange() reports it and canReview() holds the confirm.
 	const set = (frequency: number, digit = s.digit): TunerEditState => ({
 		...s,
-		draft: { ...d, frequency: clamp(frequency, FREQ_MIN, FREQ_MAX) },
+		draft: { ...d, frequency: clamp(frequency, 0, FREQ_FIELD_MAX) },
 		digit,
 	})
 	if (key === "left")
@@ -268,4 +282,15 @@ export function editWindow(s: TunerEditState): {
 	sampleRate: number
 } {
 	return { centreHz: s.draft.frequency, sampleRate: s.draft.sampleRate }
+}
+
+/** Draft fields core would refuse; the pending line shows them with the attention role. */
+export function outOfRange(s: TunerEditState): EditField[] {
+	const f = s.draft.frequency
+	return f < FREQ_MIN || f > FREQ_MAX ? ["frequency"] : []
+}
+
+/** Enter opens the review confirm only when something changed and every field is in range. */
+export function canReview(s: TunerEditState): boolean {
+	return pendingChanges(s).length > 0 && outOfRange(s).length === 0
 }
