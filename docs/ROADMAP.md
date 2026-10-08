@@ -8,9 +8,8 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 ## Immediate software priorities (re-ordered 2026-10-08 evening)
 
-1. **Land and deploy the merged core on the Mac.** Merge tuner-state
-   reconnect synchronization and the rtl_tcp stall watchdog (reviewed branch,
-   final check pending), rebuild the Mac image with all merged core work and
+1. **Deploy the merged core on the Mac.** Tuner-state reconnect
+   synchronization and the rtl_tcp stall watchdog are merged; rebuild the Mac image with all merged core work and
    redeploy it with the hardware profile. Then repeat end-to-end Pi reboot and
    USB hotplug recovery through the Mac (a runtime result, separate from the
    clean-card image claims) and announce the new events to the CLI team.
@@ -52,8 +51,7 @@ fixture evidence. Exploratory research is not a final implementation spec.
   the live app's CSDR ring memory was measured at about 5 GiB versus about
   9 MiB when bounded. A synthetic all-decoder run on a heavily loaded host was
   CPU-bound (most IQ dropped either way), so throughput is not established.
-- Tuner reconnect synchronization and an rtl_tcp stall watchdog are reviewed on
-  a branch: last accepted tuner state is replayed on the first payload of a new
+- Tuner reconnect synchronization and an rtl_tcp stall watchdog are merged: last accepted tuner state is replayed on the first payload of a new
   session (`tuner.reconnectPolicy: restore|reset`), rejected relay rates no
   longer change caps, and a silent connected rtl_tcp session reconnects after
   `stallTimeoutMs` (default 15 s). This fixes two observed live failures: stale
@@ -99,7 +97,7 @@ and the earlier candidate's results remain separate claims.
       Wi-Fi path passed on the operator-page image (2026-10-08); Ethernet pending.
 - [ ] Recover the laptop's IQ stream automatically after a receiver reboot or
       hotplug. Observed failure: the core kept a half-open connection marked
-      connected/stale and never reconnected. Fix (stall watchdog) is reviewed but
+      connected/stale and never reconnected. Fix (stall watchdog) is merged but
       not yet deployed.
 
 The 2026-10-08 Wi-Fi run passed unattended installation, direct key-based SSH,
@@ -195,7 +193,7 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       Accepted frequencies now update source/decoder metadata, and tuning-driven
       decoder restarts are serialized. Reconnect replay of the last accepted state
       (on first payload), caps reconciliation and an rtl_tcp stall watchdog are
-      reviewed on a branch; merge, deploy and live re-test remain.
+      merged; deploy and live re-test remain.
 - [x] Preserve arrays when applying indexed environment overrides.
 - [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
       buffered final data; read errors stop looping playback).
