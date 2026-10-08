@@ -1,0 +1,14 @@
+{
+	"extends": "live",
+	"name": "rest-only",
+	"description": "WS closed 1006 for 30 s; REST answering every 5 s.",
+	"conn": {
+		"rest": "ok",
+		"ws": "closed",
+		"cached": true,
+		"restAgoMs": 2000,
+		"wsAgoMs": 40000,
+		"wsClosedAgoMs": 30000,
+		"closeCode": 1006
+	}
+}

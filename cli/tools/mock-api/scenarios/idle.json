@@ -1,0 +1,21 @@
+{
+	"extends": "live",
+	"name": "idle",
+	"description": "Feed live, nothing decoded: no outputs, no lastOutputAt.",
+	"restPatch": {
+		"/api/decoders": {
+			"dsd-fme": {
+				"health": "idle",
+				"stats": { "eventsOut": 0 },
+				"lastOutputAt": null
+			},
+			"multimon-ng": {
+				"health": "idle",
+				"stats": { "eventsOut": 0 },
+				"lastOutputAt": null
+			}
+		}
+	},
+	"restHistory": [],
+	"transform": { "noOutputs": true }
+}
