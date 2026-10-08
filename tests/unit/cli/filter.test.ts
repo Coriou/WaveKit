@@ -1,6 +1,7 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import {
+	EMERG_TOKEN,
 	EMPTY_FILTER,
 	applyFilter,
 	parseFilter,
@@ -43,11 +44,35 @@ describe("filter grammar", () => {
 		expect(applyFilter(rows, EMPTY_FILTER, "pager", r => r)).toHaveLength(1)
 	})
 
-	const term = fc.stringMatching(/^[a-z0-9.:-]{1,8}$/)
+	it("recognises !emerg inside OR groups and with stray commas", () => {
+		expect(parseFilter("!emerg,")).toEqual({ terms: [], emerg: true })
+		expect(parseFilter(",!EMERG readsb")).toEqual({
+			terms: [["readsb"]],
+			emerg: true,
+		})
+		const f = parseFilter("ais,!emerg")
+		expect(f).toEqual({ terms: [["ais", "!emerg"]], emerg: false })
+		expect(applyFilter(rows, f, "all", r => r).map(r => r.category)).toEqual([
+			"aircraft",
+			"data",
+		])
+		expect(applyFilter(rows, parseFilter("!7700"), "all", r => r)).toHaveLength(
+			1,
+		)
+	})
+
+	const term = fc.oneof(
+		fc.stringMatching(/^!?[a-z0-9.:-]{1,8}$/),
+		fc.constant(EMERG_TOKEN),
+	)
 	const arbFilter: fc.Arbitrary<FilterSpec> = fc.record({
-		terms: fc.array(fc.array(term, { minLength: 1, maxLength: 3 }), {
-			maxLength: 4,
-		}),
+		// A group of only !emerg is the emerg flag, so it is not a canonical term.
+		terms: fc.array(
+			fc
+				.array(term, { minLength: 1, maxLength: 3 })
+				.filter(g => !g.every(a => a === EMERG_TOKEN)),
+			{ maxLength: 4 },
+		),
 		emerg: fc.boolean(),
 	})
 	const arbRows = fc.array(
