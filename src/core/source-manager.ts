@@ -178,6 +178,7 @@ interface RecordingState {
  * Tracks decoder-source assignments (Requirement 15.2)
  */
 interface DecoderAssignment {
+	wantsExclusiveSource: boolean
 	decoderId: string
 	sourceId: string
 	assignedAt: Date
@@ -1380,34 +1381,20 @@ export class SourceManager extends EventEmitter {
 			)
 		}
 
-		// Check exclusive source constraint (Requirement 15.3)
-		if (state.config.caps.exclusive) {
-			const existingAssignment = this.getSourceAssignments(sourceId)
-			if (existingAssignment.length > 0 && existingAssignment[0]) {
-				const existing = existingAssignment[0]
-				if (existing.decoderId !== decoderId) {
-					throw new ExclusiveSourceError(
-						sourceId,
-						existing.decoderId,
-						decoderId,
-					)
-				}
-			}
-		}
-
-		// Check if decoder wants exclusive access
-		if (decoderCaps.wantsExclusiveSource) {
-			const existingAssignment = this.getSourceAssignments(sourceId)
-			if (existingAssignment.length > 0 && existingAssignment[0]) {
-				const existing = existingAssignment[0]
-				if (existing.decoderId !== decoderId) {
-					throw new ExclusiveSourceError(
-						sourceId,
-						existing.decoderId,
-						decoderId,
-					)
-				}
-			}
+		// Enforce exclusivity for both incoming and existing assignments (Requirement 15.3).
+		const conflictingAssignment = this.getSourceAssignments(sourceId).find(
+			assignment =>
+				assignment.decoderId !== decoderId &&
+				(state.config.caps.exclusive ||
+					decoderCaps.wantsExclusiveSource ||
+					assignment.wantsExclusiveSource),
+		)
+		if (conflictingAssignment) {
+			throw new ExclusiveSourceError(
+				sourceId,
+				conflictingAssignment.decoderId,
+				decoderId,
+			)
 		}
 
 		// Remove any existing assignment for this decoder
@@ -1415,6 +1402,7 @@ export class SourceManager extends EventEmitter {
 
 		// Create new assignment
 		this.decoderAssignments.set(decoderId, {
+			wantsExclusiveSource: decoderCaps.wantsExclusiveSource ?? false,
 			decoderId,
 			sourceId,
 			assignedAt: new Date(),
@@ -1478,8 +1466,8 @@ export class SourceManager extends EventEmitter {
 	 * Checks if a source is available for a new decoder assignment.
 	 * A source is available if:
 	 * - It exists
-	 * - It's not exclusive, OR
-	 * - It's exclusive but has no current assignments
+	 * - Neither the source nor an assigned decoder requires exclusive access, OR
+	 * - It has no current assignments
 	 *
 	 * @param sourceId - Source ID to check
 	 * @returns true if available, false otherwise
@@ -1488,11 +1476,12 @@ export class SourceManager extends EventEmitter {
 		const state = this.sources.get(sourceId)
 		if (!state) return false
 
-		if (!state.config.caps.exclusive) {
-			return true
-		}
-
-		return this.getSourceAssignments(sourceId).length === 0
+		const assignments = this.getSourceAssignments(sourceId)
+		return (
+			assignments.length === 0 ||
+			(!state.config.caps.exclusive &&
+				!assignments.some(assignment => assignment.wantsExclusiveSource))
+		)
 	}
 
 	/**

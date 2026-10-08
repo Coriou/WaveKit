@@ -741,6 +741,102 @@ describe("Source Manager", () => {
 			}
 		})
 
+		it.each([true, false])(
+			"should enforce decoder exclusivity when exclusive decoder arrives first: %s",
+			async exclusiveFirst => {
+				const mockServer = await createMockServer()
+				try {
+					await sourceManager.connect(
+						createSourceConfig("test-source", mockServer.port),
+					)
+					sourceManager.assignDecoder("decoder-1", "test-source", {
+						input: "audio_pcm",
+						wantsExclusiveSource: exclusiveFirst,
+					})
+					expect(() =>
+						sourceManager.assignDecoder("decoder-2", "test-source", {
+							input: "audio_pcm",
+							wantsExclusiveSource: !exclusiveFirst,
+						}),
+					).toThrow(ExclusiveSourceError)
+					expect(
+						sourceManager.getSourceAssignments("test-source"),
+					).toHaveLength(1)
+					expect(sourceManager.getAssignedSource("decoder-2")).toBeUndefined()
+				} finally {
+					await mockServer.close()
+				}
+			},
+		)
+
+		it("should release decoder exclusivity on unassignment and reassignment", async () => {
+			const mockServer = await createMockServer()
+			try {
+				await sourceManager.connect(
+					createSourceConfig("test-source", mockServer.port),
+				)
+				await sourceManager.connect(
+					createSourceConfig("other-source", mockServer.port),
+				)
+				const exclusiveCaps: DecoderCaps = {
+					input: "audio_pcm",
+					wantsExclusiveSource: true,
+				}
+				const sharedCaps: DecoderCaps = { input: "audio_pcm" }
+				sourceManager.assignDecoder("decoder-1", "test-source", exclusiveCaps)
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(false)
+				sourceManager.unassignDecoder("decoder-1")
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(true)
+				sourceManager.assignDecoder("decoder-1", "test-source", exclusiveCaps)
+				sourceManager.assignDecoder("decoder-1", "other-source", exclusiveCaps)
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(true)
+				expect(sourceManager.isSourceAvailable("other-source")).toBe(false)
+				sourceManager.assignDecoder("decoder-2", "test-source", sharedCaps)
+				sourceManager.assignDecoder("decoder-3", "test-source", sharedCaps)
+				expect(sourceManager.getSourceAssignments("test-source")).toHaveLength(
+					2,
+				)
+			} finally {
+				await mockServer.close()
+			}
+		})
+
+		it("should check other consumers when updating an existing decoder's exclusivity", async () => {
+			const mockServer = await createMockServer()
+			try {
+				await sourceManager.connect(
+					createSourceConfig("test-source", mockServer.port),
+				)
+				const sharedCaps: DecoderCaps = { input: "audio_pcm" }
+				const exclusiveCaps: DecoderCaps = {
+					input: "audio_pcm",
+					wantsExclusiveSource: true,
+				}
+				sourceManager.assignDecoder("decoder-1", "test-source", sharedCaps)
+				sourceManager.assignDecoder("decoder-2", "test-source", sharedCaps)
+				expect(() =>
+					sourceManager.assignDecoder(
+						"decoder-1",
+						"test-source",
+						exclusiveCaps,
+					),
+				).toThrow(ExclusiveSourceError)
+				expect(sourceManager.getSourceAssignments("test-source")).toHaveLength(
+					2,
+				)
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(true)
+				sourceManager.unassignDecoder("decoder-2")
+				sourceManager.assignDecoder("decoder-1", "test-source", exclusiveCaps)
+				sourceManager.assignDecoder("decoder-1", "test-source", exclusiveCaps)
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(false)
+				sourceManager.assignDecoder("decoder-1", "test-source", sharedCaps)
+				expect(sourceManager.isSourceAvailable("test-source")).toBe(true)
+				sourceManager.assignDecoder("decoder-2", "test-source", sharedCaps)
+			} finally {
+				await mockServer.close()
+			}
+		})
+
 		it("should unassign decoder", async () => {
 			const mockServer = await createMockServer()
 
