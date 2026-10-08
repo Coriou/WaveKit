@@ -126,6 +126,8 @@ export interface WsClient {
 	start(): void
 	stop(): void
 	reconnectNow(): void
+	/** True while a socket exists, connecting or open. */
+	connected(): boolean
 }
 
 export function createWsClient(deps: WsClientDeps): WsClient {
@@ -252,5 +254,6 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 			attempt = 0
 			connect()
 		},
+		connected: () => handle !== null,
 	}
 }
