@@ -12,7 +12,10 @@ export function formatAprs(
 	const source = str(o, "source") ?? "?"
 	const destination = str(o, "destination")
 	const path = Array.isArray(o["path"]) ? o["path"].filter(isStr) : []
-	const dataType = str(o, "dataType")
+	// direwolf's default "Unknown" is an unknown value (R44).
+	const rawType = str(o, "dataType")
+	const dataType =
+		rawType !== undefined && /^unknown$/i.test(rawType.trim()) ? "?" : rawType
 	const lat = num(o, "lat")
 	const lon = num(o, "lon")
 	const speed = num(o, "speed")
@@ -32,7 +35,7 @@ export function formatAprs(
 	const segments = [
 		seg(source, 0),
 		...(addressee ? [seg(`to ${addressee}`, 1)] : []),
-		...(dataType ? [seg(dataType, 3)] : []),
+		...(dataType && dataType !== "?" ? [seg(dataType, 3)] : []),
 		...(lat !== undefined && lon !== undefined
 			? [seg(`${lat.toFixed(2)},${lon.toFixed(2)}`, 2)]
 			: []),
