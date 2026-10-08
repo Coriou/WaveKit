@@ -147,6 +147,73 @@ const POOL: Array<(at: number) => Inbound> = [
 	}),
 	at => ({ kind: "ws:open", at }),
 	at => ({ kind: "ws:invalid", at }),
+	// R47 M9: status events, actions and server-time timestamps (server clock ahead).
+	at => restSources(at, [source({ bytesReceived: at })]),
+	at =>
+		ws(at, {
+			type: "source:status",
+			source: source({ connected: (at / 100) % 2 === 0, bytesReceived: at }),
+		}),
+	at =>
+		ws(at, {
+			type: "decoder:status",
+			decoder: decoder({
+				running: at % 3 !== 0,
+				health: at % 3 !== 0 ? "running" : "idle",
+			}),
+		}),
+	at => ({
+		kind: "ws",
+		at,
+		event: {
+			type: "decoder:output",
+			decoderId: "readsb",
+			output: {
+				type: "aircraft",
+				decoder: "readsb",
+				timestamp: new Date(at + 3_600_000).toISOString(),
+				data: {},
+			},
+		},
+	}),
+	at => ({
+		kind: "action:sent",
+		at,
+		id: 1 + ((at / 100) % 2),
+		key: "decoder:readsb",
+		intent: { kind: "decoder", op: "restart", decoderId: "readsb" },
+	}),
+	at => ({
+		kind: "action:result",
+		at,
+		id: 1 + ((at / 100) % 2),
+		key: "decoder:readsb",
+		outcomes: [
+			{
+				label: "restart",
+				at,
+				result:
+					at % 3 === 0
+						? { ok: true, outcome: "ok", status: 200, message: "ok" }
+						: {
+								ok: false,
+								outcome: "unknown",
+								status: null,
+								message: "sent · no reply in 10s",
+							},
+			},
+		],
+	}),
+	at => ws(at, { type: "decoder:started", decoderId: "readsb" }),
+	at => ws(at, { type: "decoder:stopped", decoderId: "readsb" }),
+	at => ({
+		kind: "action:sent",
+		at,
+		id: 3,
+		key: "audio",
+		intent: { kind: "audio", op: "start" },
+	}),
+	at => ws(at, { type: "live-audio:started" }),
 ]
 
 const comparable = (s: AppState) =>
@@ -905,6 +972,30 @@ describe("R47: action correlation and reconciliation", () => {
 		expect(s.actions.stoppedByCli).toEqual([])
 		s = reduce(s, [resultAs(2, key, result("failed"), T0 + 20)], T0 + 20)
 		expect(s.actions.byKey[key]).toMatchObject({ id: 2, state: "failed" })
+	})
+})
+
+describe("decode sparkline across reconnects (R47 M12)", () => {
+	it("keeps its baseline across ws:open instead of recording a false 0 minute", () => {
+		const t2 = T0 + 60_000
+		const s = reduce(
+			initialState(T0),
+			[
+				restOk(T0, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 10, errors: 0 } }),
+				]),
+				{ kind: "ws:open", at: T0 + 1 },
+				restOk(t2, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 25, errors: 0 } }),
+				]),
+			],
+			t2,
+		)
+		const sess = s.session["readsb"]
+		// The rate window still restarts at ws:open (spec §10.5)…
+		expect(sess?.events).toEqual([{ t: t2, v: 25 }])
+		// …but the 15 decodes since the last sample land in t2's minute.
+		expect(sess?.spark[String(Math.floor(t2 / 60_000))]).toBe(15)
 	})
 })
 

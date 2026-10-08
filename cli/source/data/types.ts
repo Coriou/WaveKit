@@ -381,6 +381,8 @@ export interface DecoderSession {
 	restarts: CounterSample[]
 	/** minute index (floor(t/60000)) → decodes observed in that minute. */
 	spark: Record<string, number>
+	/** The last eventsOut sample the sparkline counted from; unlike `events`, kept across ws:open (R47 M12). */
+	sparkPrev?: CounterSample
 	firstObservedAt: number
 }
 export interface MetricBeat {

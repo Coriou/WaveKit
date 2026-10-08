@@ -196,7 +196,7 @@ function updateSessions(
 	const next = Object.assign(record<DecoderSession>(), prev)
 	for (const d of rows) {
 		const cur = own(prev, d.id) ?? newSession(at)
-		const lastEvent = cur.events[cur.events.length - 1]
+		const sample = { t: at, v: d.stats.eventsOut }
 		next[d.id] = {
 			...cur,
 			events: pushCounter(cur.events, at, d.stats.eventsOut, RATE_WINDOW_MS),
@@ -206,7 +206,8 @@ function updateSessions(
 				d.restartCount,
 				RESTART_WINDOW_MS,
 			),
-			spark: sparkAdd(cur.spark, lastEvent, { t: at, v: d.stats.eventsOut }),
+			spark: sparkAdd(cur.spark, cur.sparkPrev, sample),
+			sparkPrev: sample,
 		}
 	}
 	return next
