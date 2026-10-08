@@ -6,6 +6,18 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 ## 1. Reproducible SD-card installation
 
+A flashable WaveKit SD image and dedicated Imager launcher are now built locally.
+The intended onboarding is: select WaveKit in Imager, configure network/account/SSH,
+write, boot. Physical clean-card acceptance and release distribution remain pending;
+the older manual staging workflow is retained for development and recovery.
+
+- [x] Build a reproducible flashable WaveKit image from a pinned Pi OS base,
+      embedding the verified receiver bundle and automatic first-boot setup.
+- [x] Supply an Imager manifest with customization metadata so account, Wi-Fi
+      and SSH setup work without post-write commands or preinstalled credentials.
+- [ ] Validate the actual distributed image from a fresh write without manual
+      payload staging or repairs on the Pi.
+
 - [x] Provide a documented Imager → stage → eject → boot workflow for 64-bit Pi OS.
 - [x] Stage optional SSH public-key access without copying private keys or requiring
       a manual SSH multiplex session. Normal receiver operation must not need SSH.
@@ -49,7 +61,7 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
 
 ## 3. Correctness and performance audit
 
-- [ ] Route stdin decoders through the explicitly selected source.
+- [x] Route stdin decoders through the explicitly selected source.
 - [x] Enforce source exclusivity in both assignment orders.
 - [ ] Manage complete decoder process trees and avoid unsafe shell interpolation.
 - [ ] Make resampling independent of input chunk boundaries; report actual rates.

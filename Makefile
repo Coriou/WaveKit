@@ -10,7 +10,7 @@
 	dev-stack dev-stack-down dev-stack-logs dev-shell dev-status \
 	docker-init docker-build docker-push docker-clean docker-prune \
 	demod-test \
-	sdr-host-build sdr-host-build-multi sdr-host-bundle sdr-host-install sdr-host-init \
+	sdr-host-build sdr-host-build-multi sdr-host-bundle sdr-host-image sdr-host-imager sdr-host-install sdr-host-init \
 	sdr-host-up sdr-host-update sdr-host-down sdr-host-restart \
 	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
 	sdr-host-clean \
@@ -21,6 +21,8 @@
 SDR_HOST_TAG ?= latest
 SDR_HOST_PLATFORMS ?= linux/arm64
 SDR_HOST_BUNDLE_ARGS ?=
+SDR_HOST_IMAGE_ARGS ?=
+SDR_HOST_IMAGER_ARGS ?=
 
 # Dev container (used by fixtures-test which exec's into the dev stack)
 DEV_CONTAINER ?= wavekit-api
@@ -136,6 +138,12 @@ sdr-host-build-multi: ## Build & publish multi-arch sdr-host image
 
 sdr-host-bundle: ## Build portable ARM64 Pi bundle (add SDR_HOST_BUNDLE_ARGS=--skip-build to reuse image)
 	@bash ./packages/sdr-host/scripts/build-pi-bundle.sh $(SDR_HOST_BUNDLE_ARGS)
+
+sdr-host-image: ## Build flashable WaveKit SD image from a verified Pi OS base
+	@python3 ./packages/sdr-host/scripts/build-pi-image.py $(SDR_HOST_IMAGE_ARGS)
+
+sdr-host-imager: ## Open Raspberry Pi Imager with only the WaveKit image catalog
+	@node ./packages/sdr-host/scripts/open-pi-imager.mjs $(SDR_HOST_IMAGER_ARGS)
 
 sdr-host-install: ## Install docker + deps on host (run on host)
 	@bash ./packages/sdr-host/scripts/sdr-host.sh install

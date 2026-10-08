@@ -1,0 +1,15 @@
+[Unit]
+Description=WaveKit SDR host firstboot installation
+Wants=cloud-final.service network-online.target
+After=cloud-final.service network-online.target
+ConditionPathExists=!/var/lib/wavekit/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wavekit-firstboot
+TimeoutStartSec=0
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=cloud-init.target

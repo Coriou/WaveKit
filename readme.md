@@ -34,6 +34,11 @@ See [Docker runtime](docs/DOCKER-RUNTIME.md) to select the Pi source or a USB
 bridge and [fresh-card Pi setup](packages/sdr-host/README.md) for the bundled
 SDR host installer. Stop the app with `make app-down`.
 
+With Raspberry Pi Imager 2 installed and a built WaveKit SD image in
+`output/pi-image/`, run `make sdr-host-imager` to open the dedicated WaveKit
+catalog. Configure Wi-Fi and SSH in Imager, write the card and boot the Pi.
+See the fresh-card guide for image build prerequisites and acceptance status.
+
 Native scripts are optional development tools: `pnpm install --frozen-lockfile`,
 `pnpm run doctor`, and `pnpm dev:local`. The terminal dashboard can be launched
 with `make dev-dashboard` against the Docker API. See [native development](docs/LOCAL-SETUP.md).

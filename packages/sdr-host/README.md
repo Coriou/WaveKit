@@ -100,9 +100,53 @@ Checksums detect damaged or incomplete copies, not an untrusted publisher.
 Rebuild older bundles without a manifest with `make sdr-host-bundle` (add
 `SDR_HOST_BUNDLE_ARGS=--skip-build` to reuse an existing ARM64 image).
 
-### Install automatically on the first boot
+### Dedicated WaveKit installer
 
-This is the preferred fresh-card path: **Imager → stage → eject → boot**.
+The intended fresh-card workflow is **WaveKit in Imager → customize → write →
+boot**. Open the dedicated catalog from the repository root:
+
+```sh
+make sdr-host-imager
+```
+
+This requires Raspberry Pi Imager 2 and a built image catalog at
+`output/pi-image/os-list.json`. To use a catalog stored elsewhere:
+
+```sh
+make sdr-host-imager SDR_HOST_IMAGER_ARGS='--manifest /path/to/os-list.json'
+```
+
+The launcher opens only the WaveKit image entry. Choose the Pi model and SD
+card, configure the hostname, normal account, Wi-Fi and SSH public key, then
+write and verify. The catalog preserves Imager's customization metadata;
+selecting the image through plain **Use custom** does not provide that metadata.
+See [Imager's customization documentation](https://github.com/raspberrypi/rpi-imager/blob/main/doc/os_customisation_formats.md).
+
+The flashable image embeds the receiver bundle and first-boot service. It must
+pass physical clean-card acceptance before being considered release-ready.
+First boot still needs internet to install system packages. No separate payload
+staging or SSH installation command is part of this workflow.
+
+To build the SD image, first create the ARM64 bundle with `make sdr-host-bundle`.
+Install Python 3, `xz` and e2fsprogs (`debugfs` and `e2fsck`) on the build computer,
+then supply a pristine Raspberry Pi OS Lite ARM64 `.img.xz` and its trusted
+**decompressed image** SHA-256 from the OS publisher:
+
+```sh
+make sdr-host-image SDR_HOST_IMAGE_ARGS='--base /path/to/raspios-lite.img.xz --base-sha256 TRUSTED_RAW_IMAGE_SHA256'
+make sdr-host-imager
+```
+
+The builder works on temporary regular files without mounting partitions or
+writing an SD card. It verifies the base and bundle, embeds setup into the root
+filesystem, checks that filesystem and emits the image, Imager catalog and build
+hashes under `output/pi-image/`. Imager owns the actual device write and verification.
+The first-boot service runs after cloud-init creates the configured account;
+credentials remain specific to each operator's Imager customization.
+
+### Stage automatic installation onto stock Pi OS
+
+The lower-level stock-image path is **Imager → stage → eject → boot**.
 No SSH session or manual command on the Pi is required for installation or
 normal streaming. SSH is optional diagnostic/maintenance access. Configure
 public-key authentication in Imager to avoid repeated password entry; WaveKit
