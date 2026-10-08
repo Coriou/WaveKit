@@ -265,6 +265,27 @@ export interface DecoderStatus {
 	version?: string | undefined
 	/** Reporting only; independent of process health and operator intent. */
 	rateAssessment?: DecoderRateAssessment | undefined
+	/** Live source assignment while wired, else the configured sourceId; absent for external input. */
+	sourceId?: string | undefined
+	/** Configured device serial of an external-input decoder; never inferred. */
+	deviceSerial?: string | undefined
+	/** Configured target frequencies in Hz; absent when none are declared. */
+	targetFrequenciesHz?: number[] | undefined
+	/** Most recent failure, retained across auto-restarts, cleared by an explicit start. */
+	lastError?: DecoderLastError | undefined
+	/** Effective ms without output before health becomes "idle". */
+	idleTimeoutMs?: number | undefined
+}
+
+/**
+ * Most recent decoder failure (bounded; see DECODER_LAST_ERROR_MAX_LENGTH).
+ * - error: the decoder emitted an error or failed to start
+ * - exit: the process exited without being asked to stop
+ */
+export interface DecoderLastError {
+	kind: "error" | "exit"
+	message: string
+	at: Date
 }
 
 /**

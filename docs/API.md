@@ -164,6 +164,12 @@ curl http://localhost:9000/api/sources
 		"host": "192.168.1.69",
 		"port": 5555,
 		"connected": true,
+		"activity": {
+			"state": "streaming",
+			"lastSampleAt": "2026-10-08T12:00:00.000Z",
+			"sampleAgeMs": 12,
+			"timeoutMs": 10000
+		},
 		"bytesReceived": 847000000,
 		"dataRate": 192000,
 		"caps": {
@@ -506,7 +512,14 @@ curl http://localhost:9000/api/decoders
 			"errors": 2
 		},
 		"restartCount": 0,
-		"version": "2.0.0"
+		"version": "2.0.0",
+		"idleTimeoutMs": 30000,
+		"targetFrequenciesHz": [446525000],
+		"lastError": {
+			"kind": "exit",
+			"message": "Process exited unexpectedly (code 1)",
+			"at": "2026-10-08T12:00:00.000Z"
+		}
 	},
 	{
 		"id": "readsb",
@@ -526,6 +539,23 @@ curl http://localhost:9000/api/decoders
 	}
 ]
 ```
+
+**Optional status fields** (additive; also present on `/api/decoders/:id`, the
+start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
+`decoder:status` WebSocket event):
+
+| Field                 | Meaning                                                                                                                                                                                                                                                                                                        |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sourceId`            | WaveKit source the decoder reads: the live assignment while wired, otherwise the configured `sourceId`. Absent for external-input decoders (they own their device) and for unwired decoders relying on the default source.                                                                                     |
+| `deviceSerial`        | Configured device serial of an external-input decoder (`caps.input: "external"`). Never inferred; absent when not configured and always absent for stdin decoders (their serial options are ignored in stdin mode).                                                                                            |
+| `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
+| `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
+| `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
+
+`running` and `health` are independent: during automatic-restart backoff a
+decoder reports `running: false` while `health` keeps its last value (usually
+`"running"`) until it is restarted or `maxRestarts` is exhausted (`"faulted"`).
+Use `restartCount` and `lastError` to explain that state.
 
 #### GET /api/decoders/:id
 
@@ -814,6 +844,43 @@ Emitted by the `lora-meshtastic` decoder. `from`/`to`/`id` are 32-bit unsigned i
 }
 ```
 
+#### decoder:status
+
+Full decoder status whenever a decoder starts, stops, errors, changes health,
+schedules a restart, or exhausts its restarts. `data` is byte-for-byte the
+`GET /api/decoders/:id` body (including `caps`, `lastError`, `restartCount`,
+`sourceId`, `targetFrequenciesHz`, `idleTimeoutMs`). Lifecycle-driven only — no
+periodic cadence. After a stop or process exit, a final `decoder:status` is sent
+once cleanup (unassigning the source) has finished, so the last message for a
+stopped decoder carries the unwired state (e.g. no stale `sourceId`). Expect
+more than one `decoder:status` per transition; always apply the latest.
+
+```json
+{
+	"type": "decoder:status",
+	"channel": "decoders",
+	"data": {
+		"id": "acars",
+		"type": "acarsdec",
+		"running": false,
+		"health": "running",
+		"uptime": 0,
+		"stats": { "bytesIn": 0, "eventsOut": 0, "errors": 0 },
+		"lastOutputAt": null,
+		"restartCount": 8,
+		"rateAssessment": { "verdict": "unknown", "reasonCode": "unknown-requirements" },
+		"sourceId": "rtl-pi",
+		"idleTimeoutMs": 30000,
+		"lastError": {
+			"kind": "exit",
+			"message": "Process exited unexpectedly (code 1)",
+			"at": "2026-10-08T12:00:00.000Z"
+		},
+		"caps": { "input": "iq", "output": "text", "integrationPattern": "pure_consumer" }
+	}
+}
+```
+
 #### decoder:health
 
 ```json
@@ -852,6 +919,47 @@ Emitted by the `lora-meshtastic` decoder. `from`/`to`/`id` are 32-bit unsigned i
 	"data": {
 		"id": "sdrpp-main",
 		"error": "Connection reset by peer"
+	}
+}
+```
+
+#### source:status
+
+Full source status including `activity` (sample freshness). `data` is identical
+to one `GET /api/sources` item. Cadence, per source:
+
+- on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
+  `caps-changed`) when the state actually changed;
+- within 1 s of a time-based state change (`connected`, `activity.state`,
+  `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
+  in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
+- a heartbeat every 10 s (0.1 msg/s per source) refreshing counters;
+- nothing while no client subscribes to `sources`; whenever the subscriber
+  count rises (first or additional client) the next publish sends a snapshot of
+  every source (already-connected clients receive it too).
+
+```json
+{
+	"type": "source:status",
+	"channel": "sources",
+	"data": {
+		"id": "rtl-pi",
+		"type": "rtl_tcp",
+		"url": "192.168.1.50:1234",
+		"connected": true,
+		"activity": {
+			"state": "stale",
+			"lastSampleAt": "2026-10-08T12:00:00.000Z",
+			"sampleAgeMs": 12400,
+			"timeoutMs": 10000
+		},
+		"bytesReceived": 847000000,
+		"dataRate": 4800,
+		"reconnectAttempts": 0,
+		"caps": { "kind": "iq", "sampleRate": 2400000, "format": "U8_IQ", "exclusive": false },
+		"assignments": [{ "decoderId": "dmr", "sourceId": "rtl-pi", "assignedAt": "2026-10-08T11:00:00.000Z" }],
+		"consumers": 2,
+		"available": true
 	}
 }
 ```

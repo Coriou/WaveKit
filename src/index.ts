@@ -27,6 +27,7 @@ import { TunerController } from "./core/tuner-controller.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
+import { createDecoderManagerOptions } from "./decoders/manager-options.js"
 import { ApiServer } from "./api/server.js"
 import {
 	createDsdFmeDecoder,
@@ -329,11 +330,7 @@ async function main(): Promise<void> {
 		decoderRegistry,
 		fanoutManager,
 		logger,
-		{
-			restartDelay: 2000,
-			maxRestartDelay: 30000,
-			maxRestarts: 0, // Unlimited restarts
-		},
+		createDecoderManagerOptions(config.health),
 	)
 
 	// Wire DecoderManager to SourceManager for dynamic sample rate handling

@@ -76,6 +76,24 @@ export interface DecoderCaps {
 	integrationPattern: DecoderIntegrationPattern
 }
 
+/** Upper bound on `DecoderLastError.message`, in UTF-16 code units. */
+export const DECODER_LAST_ERROR_MAX_LENGTH = 512
+
+/**
+ * Most recent decoder failure. Retained across automatic restarts so a crash
+ * loop keeps its cause visible; cleared only by an explicit start/restart
+ * (the same moment `restartCount` resets to 0). An "error" recorded during a
+ * run is not replaced by the generic "exit" that ends that run.
+ */
+export interface DecoderLastError {
+	/** "error": the decoder emitted an error (spawn failure, socket error, failed start). "exit": the process exited without being asked to stop. */
+	kind: "error" | "exit"
+	/** Human-readable message, truncated to DECODER_LAST_ERROR_MAX_LENGTH with a trailing "…". */
+	message: string
+	/** ISO-8601 time the failure was recorded. */
+	at: string
+}
+
 export interface DecoderStatus {
 	id: string
 	type: string
@@ -88,6 +106,25 @@ export interface DecoderStatus {
 	restartCount: number
 	version?: string
 	rateAssessment?: DecoderRateAssessment
+	/**
+	 * WaveKit source this decoder reads: the live assignment while wired,
+	 * otherwise the configured `sourceId`. Absent for external-input decoders
+	 * (they own their device) and for unwired decoders that use the default source.
+	 */
+	sourceId?: string
+	/** Configured device serial of an external-input decoder; never inferred. */
+	deviceSerial?: string
+	/** Configured target frequencies in Hz; absent when the config declares none. */
+	targetFrequenciesHz?: number[]
+	/** Most recent failure; see DecoderLastError for retention semantics. */
+	lastError?: DecoderLastError
+	/** Effective ms without output before `health` becomes "idle". */
+	idleTimeoutMs?: number
+}
+
+/** GET /api/decoders item and `decoder:status` WebSocket payload. */
+export interface DecoderInfo extends DecoderStatus {
+	caps?: DecoderCaps
 }
 
 export interface DecoderOutput {

@@ -209,6 +209,28 @@ describe("Source-aware stdin routing", () => {
 		expect(routing.getTelemetrySnapshot().totalBytesWritten).toBe(16)
 	})
 
+	it("reports the live source assignment as DecoderStatus.sourceId, falling back to config when unwired", async () => {
+		await connect("first")
+		await connect("second")
+		create("explicit", "second")
+		create("legacy")
+		expect(manager.getStatus("explicit")?.sourceId).toBe("second")
+		expect(manager.getStatus("legacy")).not.toHaveProperty("sourceId")
+		await manager.startAll()
+		expect(manager.getStatus("explicit")?.sourceId).toBe("second")
+		expect(manager.getStatus("legacy")?.sourceId).toBe("first")
+		const lastSeen = new Map<string, unknown>()
+		manager.on("decoder:status-changed", (id: string) =>
+			lastSeen.set(id, manager.getStatus(id)),
+		)
+		await manager.stopAll()
+		expect(manager.getStatus("explicit")?.sourceId).toBe("second")
+		expect(manager.getStatus("legacy")).not.toHaveProperty("sourceId")
+		// the last status-changed after stop reflects the unwired state
+		expect(lastSeen.get("legacy")).not.toHaveProperty("sourceId")
+		expect(lastSeen.get("legacy")).toMatchObject({ running: false })
+	})
+
 	it("rebinds only the selected source after removal and recreation, restoring ownership", async () => {
 		const first = await connect("first")
 		let second = await connect("second")

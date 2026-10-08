@@ -26,13 +26,15 @@ import type {
 	TunerControlMode,
 	AircraftState,
 	AircraftTrackerStats,
+	DecoderStatusEventData,
+	SourceStatusEventData,
 } from "@wavekit/api-types"
 
 /**
  * Supported WebSocket channels for subscription.
- * - decoders: Decoder output, started, stopped, error events
+ * - decoders: Decoder output, started, stopped, error, status events
  * - metrics: Source metrics events
- * - sources: Source connected, disconnected, error events
+ * - sources: Source connected, disconnected, error, status events
  * - health: Decoder health state change events (Requirement 20.4)
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  * - live-audio: Live demodulation status and config events
@@ -68,10 +70,12 @@ export interface ServerMessage {
 		| "decoder:stopped"
 		| "decoder:error"
 		| "decoder:health"
+		| "decoder:status"
 		| "source:connected"
 		| "source:disconnected"
 		| "source:error"
 		| "source:caps-changed"
+		| "source:status"
 		| "metrics"
 		| "fanout:snapshot"
 		| "fanout:backpressure"
@@ -535,6 +539,28 @@ export class WebSocketEventBroadcaster {
 		this.broadcast("decoders", {
 			type: "decoder:error",
 			data: { decoderId, error },
+		})
+	}
+
+	/**
+	 * Broadcasts a decoder's full status on lifecycle changes; the payload is
+	 * identical to GET /api/decoders/:id.
+	 */
+	broadcastDecoderStatus(status: DecoderStatusEventData): void {
+		this.broadcast("decoders", {
+			type: "decoder:status",
+			data: status,
+		})
+	}
+
+	/**
+	 * Broadcasts a source's full status; the payload is identical to a
+	 * GET /api/sources item, including `activity`.
+	 */
+	broadcastSourceStatus(status: SourceStatusEventData): void {
+		this.broadcast("sources", {
+			type: "source:status",
+			data: status,
 		})
 	}
 

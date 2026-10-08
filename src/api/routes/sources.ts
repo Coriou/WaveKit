@@ -22,8 +22,11 @@ import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js
 import type {
 	DecoderAssignment as ApiDecoderAssignment,
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
-	SourceCaps as ApiSourceCaps,
 } from "@wavekit/api-types"
+import {
+	countConsumersBySource,
+	toApiExtendedSourceStatus,
+} from "../serializers/source-status.js"
 
 /**
  * Source capabilities schema for request validation
@@ -326,18 +329,6 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 ) => {
 	const { sourceManager, fanoutManager } = options
 
-	const toApiSourceCaps = (caps: SourceStatus["caps"]): ApiSourceCaps => {
-		const c = caps as NonNullable<SourceStatus["caps"]>
-		return {
-			kind: c.kind,
-			sampleRate: c.sampleRate,
-			format: c.format,
-			exclusive: c.exclusive,
-			...(c.channels !== undefined ? { channels: c.channels } : {}),
-			...(c.centerFreq !== undefined ? { centerFreq: c.centerFreq } : {}),
-		}
-	}
-
 	/**
 	 * GET /api/sources - List all sources
 	 * Requirement 9.3: Returns all configured sources
@@ -361,45 +352,12 @@ export const sourceRoutes: FastifyPluginAsync<SourceRoutesOptions> = async (
 			},
 		},
 		async () => {
-			const consumersBySourceId = new Map<string, number>()
-			if (fanoutManager) {
-				const snapshot = fanoutManager.getTelemetrySnapshot()
-				for (const branch of snapshot.branches) {
-					if (!branch.sourceId) continue
-					consumersBySourceId.set(
-						branch.sourceId,
-						(consumersBySourceId.get(branch.sourceId) ?? 0) + 1,
-					)
-				}
-			}
-
-			const statuses = sourceManager.getAllStatus()
-			return statuses.map(status => {
-				const assignments: ApiDecoderAssignment[] = sourceManager
-					.getSourceAssignments(status.id)
-					.map(assignment => ({
-						...assignment,
-						assignedAt: assignment.assignedAt.toISOString(),
-					}))
-
-				return {
-					id: status.id,
-					connected: status.connected,
-					activity: status.activity,
-					bytesReceived: status.bytesReceived,
-					dataRate: status.dataRate,
-					reconnectAttempts: status.reconnectAttempts,
-					caps: toApiSourceCaps(status.caps),
-					assignments,
-					consumers: consumersBySourceId.get(status.id) ?? assignments.length,
-					available: sourceManager.isSourceAvailable(status.id),
-					...(status.type !== undefined ? { type: status.type } : {}),
-					...(status.url !== undefined ? { url: status.url } : {}),
-					...(status.lastError !== undefined
-						? { lastError: status.lastError }
-						: {}),
-				}
-			})
+			const consumersBySourceId = countConsumersBySource(fanoutManager)
+			return sourceManager
+				.getAllStatus()
+				.map(status =>
+					toApiExtendedSourceStatus(status, sourceManager, consumersBySourceId),
+				)
 		},
 	)
 
