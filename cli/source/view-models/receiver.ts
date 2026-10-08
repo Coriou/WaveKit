@@ -100,6 +100,14 @@ function fitRow(label: Line, groups: Group[], width: number): Line {
 	]
 }
 
+/** Groups joined by " · ", lowest-priority groups dropped first when narrow (spec §4.2). */
+function fitDot(label: Line, groups: Group[], width: number): Line {
+	return [
+		...label,
+		...fitGroups(groups, Math.max(1, width - LABEL_W), { sep: sep() }),
+	]
+}
+
 function clipped(
 	label: Line,
 	text: string,
@@ -485,8 +493,8 @@ function tunerBlock(
 			t.controlMode === "external" ? "external control" : "wavekit control"
 		const client =
 			t.controlMode === "external" && relay?.controlClientId
-				? `${sep()}relay ${relay.controlClientId}${relay.controlClientRemote ? ` ${relay.controlClientRemote}` : ""}`
-				: ""
+				? `relay ${relay.controlClientId}${relay.controlClientRemote ? ` ${relay.controlClientRemote}` : ""}`
+				: null
 		const ws = own(state.tunerLastCommand, t.sourceId)
 		const last =
 			ws ??
@@ -495,15 +503,19 @@ function tunerBlock(
 				: null)
 		const lastText =
 			last && Number.isFinite(last.at)
-				? `${sep()}last ${sanitize(last.command)} ${formatAge(now - last.at)} ago`
-				: ""
+				? `last ${sanitize(last.command)} ${formatAge(now - last.at)} ago`
+				: null
 		rows.push(
 			keep(
-				clipped(
+				fitDot(
 					lbl("TUNER", true),
-					`${owner}${client}${sep()}${t.commandCount} commands${lastText}`,
+					[
+						one(0, txt(owner, role)),
+						...(client ? [one(2, txt(client, role))] : []),
+						one(3, txt(`${t.commandCount} commands`, role)),
+						...(lastText ? [one(1, txt(lastText, role))] : []),
+					],
 					width,
-					role,
 				),
 			),
 		)
@@ -634,14 +646,28 @@ function tunerBlock(
 }
 
 function relayHeader(relay: TunerRelayStatus, width: number): Line {
-	const parts = [
-		relay.listening ? `listening :${relay.port}` : "not listening",
-		`${relay.clientsConnected} of ${relay.maxClients ?? "?"} clients`,
-		`${formatBytes(relay.bytesSent)} sent`,
-		`${relay.controlPolicy} control`,
-		`last error ${relay.lastError ? quoted(relay.lastError) : glyphs().na}`,
-	]
-	return clipped(lbl("RELAY", true), parts.join(sep()), width)
+	return fitDot(
+		lbl("RELAY", true),
+		[
+			one(
+				0,
+				txt(relay.listening ? `listening :${relay.port}` : "not listening"),
+			),
+			one(
+				1,
+				txt(`${relay.clientsConnected} of ${relay.maxClients ?? "?"} clients`),
+			),
+			one(3, txt(`${formatBytes(relay.bytesSent)} sent`)),
+			one(2, txt(`${relay.controlPolicy} control`)),
+			one(
+				1,
+				txt(
+					`last error ${relay.lastError ? quoted(relay.lastError) : glyphs().na}`,
+				),
+			),
+		],
+		width,
+	)
 }
 
 function historyRows(
@@ -705,10 +731,29 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 		: null
 	const dec = f.branches.filter(b => b.decoderId !== undefined)
 	const bp = dec.filter(b => b.backpressureActive).length
-	const head =
-		agg?.ratio !== null && agg?.ratio !== undefined
-			? `decoder branches: ${formatPercent(agg.ratio)} of offered IQ dropped now${sep()}${bp} of ${dec.length} in backpressure${sep()}${formatRate(agg.offeredBytesPerSec)} offered each`
-			: `decoder branches: drop now ?${sep()}${dropUnknownReason(state)}${sep()}${bp} of ${dec.length} in backpressure`
+	const known = agg?.ratio !== null && agg?.ratio !== undefined
+	const head: Group[] = known
+		? [
+				one(
+					0,
+					txt(`${formatPercent(agg.ratio)} dropped now`, role),
+					txt(
+						`decoder branches: ${formatPercent(agg.ratio)} of offered IQ dropped now`,
+						role,
+					),
+				),
+				one(1, txt(`${bp} of ${dec.length} in backpressure`, role)),
+				one(2, txt(`${formatRate(agg.offeredBytesPerSec)} offered each`, role)),
+			]
+		: [
+				one(
+					0,
+					txt("drop now ?", role),
+					txt("decoder branches: drop now ?", role),
+				),
+				one(1, txt(dropUnknownReason(state), role)),
+				one(2, txt(`${bp} of ${dec.length} in backpressure`, role)),
+			]
 	const offered =
 		dec.length > 0 && dec.every(b => b.totalBytesWritten !== undefined)
 			? dec.reduce((a, b) => a + (b.totalBytesWritten ?? 0), 0)
@@ -717,26 +762,55 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 	const relayDropped = f.branches
 		.filter(b => b.decoderId === undefined)
 		.reduce((a, b) => a + b.droppedBytesTotal, 0)
-	const life = `${offered === null ? "?" : formatBytes(offered / dec.length)} offered per branch${sep()}${formatBytes(dropped)} dropped across branches (${offered === null || offered === 0 ? "?" : formatPercent(dropped / offered)})${sep()}relay branch ${formatBytes(relayDropped)} dropped`
+	const lifePct =
+		offered === null || offered === 0 ? "?" : formatPercent(dropped / offered)
+	const life: Group[] = [
+		one(
+			1,
+			txt(
+				`${offered === null ? "?" : formatBytes(offered / dec.length)} offered per branch`,
+				role,
+			),
+		),
+		one(
+			0,
+			txt(`${formatBytes(dropped)} dropped (${lifePct})`, role),
+			txt(`${formatBytes(dropped)} dropped across branches (${lifePct})`, role),
+		),
+		one(2, txt(`relay branch ${formatBytes(relayDropped)} dropped`, role)),
+	]
 	const src = state.sources.value?.[0]
 	const up = src
 		? state.resources.value?.sourceBackpressure.find(b => b.sourceId === src.id)
 		: undefined
-	const upText = up
-		? `Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)${sep()}${formatRate(up.dropRate)} now${sep()}checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`
-		: "Pi rtlmux → core: ? (no SDR host data)"
+	const upRole: Role = isOld(state.resources, now) ? "old" : "value"
+	const upGroups: Group[] = up
+		? [
+				one(
+					0,
+					txt(
+						`${formatBytes(up.bytesDroppedUpstream)} dropped (${up.dropPercent.toFixed(2)}%)`,
+						upRole,
+					),
+					txt(
+						`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+						upRole,
+					),
+				),
+				one(1, txt(`${formatRate(up.dropRate)} now`, upRole)),
+				one(
+					2,
+					txt(
+						`checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`,
+						upRole,
+					),
+				),
+			]
+		: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
 	return [
-		keep(clipped(lbl("FANOUT", true), head, width, role)),
-		optional(clipped(lbl("lifetime"), life, width, role), 4),
-		optional(
-			clipped(
-				lbl("upstream"),
-				upText,
-				width,
-				isOld(state.resources, now) ? "old" : "value",
-			),
-			4,
-		),
+		keep(fitDot(lbl("FANOUT", true), head, width)),
+		optional(fitDot(lbl("lifetime"), life, width), 4),
+		optional(fitDot(lbl("upstream"), upGroups, width), 4),
 	]
 }
 
