@@ -294,55 +294,51 @@ function hostBlock(state: AppState, h: SdrHostView, width: number): Row[] {
 	return rows
 }
 
-function resultParts(rec: ActionRecord): {
-	failed: string | null
-	unknown: boolean
-} {
-	const r = rec.outcomes[0]?.result
-	if (rec.state === "failed")
-		return {
-			failed: `${r?.status ?? "network"}${sep()}${quote(r?.message ?? "?")}`,
-			unknown: false,
-		}
-	return { failed: null, unknown: r?.outcome === "unknown" }
-}
-
 /**
- * Result line for 10 s after the last outcome, in CLI words (R29): "audio started · 0
- * clients", "audio stop sent · no reply in 10s" (R23), `audio start failed · 503 · "…"`.
+ * Result line in CLI words (R29), by action state: sent → "audio start sending";
+ * unknown (R23) → "audio stop sent · no reply in 10s"; no-reply → "audio stop sent ·
+ * no reply"; ok → "audio started · 0 clients" / "preset wfm applied"; failed →
+ * `audio start failed · 503 · "…"`. Terminal states show for 10 s after doneAt.
  */
 export function audioResultText(state: AppState, now: number): string | null {
 	let best: { at: number; text: string } | null = null
 	for (const key of ["audio", "preset"] as const) {
 		const rec = own(state.actions.byKey, key)
-		if (!rec || rec.outcomes.length === 0) continue
-		const ats = rec.outcomes
-			.map(o => o.at)
-			.filter((x): x is number => x !== null)
-		const doneAt = rec.doneAt ?? (ats.length > 0 ? Math.max(...ats) : null)
-		if (doneAt === null || now - doneAt > RESULT_MS) continue
-		const { failed, unknown } = resultParts(rec)
-		const noReply = `sent${sep()}no reply in ${Math.round(RESULT_MS / 1000)}s`
-		const intent = rec.intent
-		let text: string | null = null
-		if (intent.kind === "audio") {
-			text = failed
-				? `audio ${intent.op} failed${sep()}${failed}`
-				: unknown
-					? `audio ${intent.op} ${noReply}`
-					: `audio ${intent.op === "start" ? "started" : "stopped"}${sep()}${state.audio.value?.clientCount ?? "?"} clients`
-		} else if (intent.kind === "preset") {
-			const name = sanitize(intent.name)
-			text = failed
-				? `preset ${name} failed${sep()}${failed}`
-				: unknown
-					? `preset ${name} ${noReply}`
-					: `preset ${name} applied`
-		}
-		if (text !== null && (best === null || doneAt > best.at))
-			best = { at: doneAt, text }
+		if (!rec) continue
+		const pending = rec.state === "sent" || rec.state === "unknown"
+		if (!pending && (rec.doneAt === null || now - rec.doneAt > RESULT_MS))
+			continue
+		const at = rec.doneAt ?? rec.resultAt ?? rec.sentAt
+		const text = resultText(state, rec)
+		if (text !== null && (best === null || at > best.at)) best = { at, text }
 	}
 	return best?.text ?? null
+}
+
+function resultText(state: AppState, rec: ActionRecord): string | null {
+	const intent = rec.intent
+	const what =
+		intent.kind === "audio"
+			? `audio ${intent.op}`
+			: intent.kind === "preset"
+				? `preset ${sanitize(intent.name)}`
+				: null
+	if (what === null) return null
+	const r = rec.outcomes[0]?.result
+	switch (rec.state) {
+		case "sent":
+			return `${what} sending`
+		case "unknown":
+			return `${what} sent${sep()}no reply in ${Math.round(RESULT_MS / 1000)}s`
+		case "no-reply":
+			return `${what} sent${sep()}no reply`
+		case "failed":
+			return `${what} failed${sep()}${r?.status ?? "network"}${sep()}${quote(r?.message ?? "?")}`
+		case "ok":
+			return intent.kind === "audio"
+				? `audio ${intent.op === "start" ? "started" : "stopped"}${sep()}${state.audio.value?.clientCount ?? "?"} clients`
+				: `${what} applied`
+	}
 }
 
 function audioBlock(state: AppState, width: number): Row[] {

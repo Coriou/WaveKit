@@ -136,7 +136,15 @@ describe("decoders view-model", () => {
 		const t0 = s.now
 		let st = reduce(
 			s,
-			[{ kind: "action:sent", at: t0, key: "decoder:readsb", intent: RESTART }],
+			[
+				{
+					kind: "action:sent",
+					at: t0,
+					id: 1,
+					key: "decoder:readsb",
+					intent: RESTART,
+				},
+			],
 			t0,
 		)
 		expect(decoderActionText(st, "readsb", t0)).toBe(
@@ -147,6 +155,7 @@ describe("decoders view-model", () => {
 			[
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0 + 500,
 					key: "decoder:readsb",
 					outcomes: [
@@ -178,9 +187,16 @@ describe("decoders view-model", () => {
 		const failed = reduce(
 			s,
 			[
-				{ kind: "action:sent", at: t0, key: "decoder:readsb", intent: RESTART },
+				{
+					kind: "action:sent",
+					at: t0,
+					id: 1,
+					key: "decoder:readsb",
+					intent: RESTART,
+				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0 + 10,
 					key: "decoder:readsb",
 					outcomes: [
@@ -209,9 +225,16 @@ describe("decoders view-model", () => {
 		const st = reduce(
 			s,
 			[
-				{ kind: "action:sent", at: t0, key: "decoder:readsb", intent: RESTART },
+				{
+					kind: "action:sent",
+					at: t0,
+					id: 1,
+					key: "decoder:readsb",
+					intent: RESTART,
+				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0 + 10_000,
 					key: "decoder:readsb",
 					outcomes: [
@@ -233,6 +256,12 @@ describe("decoders view-model", () => {
 		expect(decoderActionText(st, "readsb", t0 + 10_000)).toBe(
 			`restart sent ${clock(t0)} · no reply in 10s`,
 		)
+		// Nothing reconciled within 10 s more: the record ends as no-reply (R47 M5).
+		const later = reduce(st, [], t0 + 21_000)
+		expect(decoderActionText(later, "readsb", t0 + 21_000)).toBe(
+			`restart sent ${clock(t0)} · no reply · not confirmed`,
+		)
+		expect(decoderActionText(later, "readsb", t0 + 32_000)).toBeNull()
 	})
 
 	it("truncates unknown long decoder ids and shows ? for unknown nominal bands (review focus)", () => {
@@ -257,6 +286,20 @@ describe("decoders view-model", () => {
 		const row = m.list.map(lineText).find(r => r.includes("an-extremely")) ?? ""
 		expect(row).toContain("…")
 		expect(cellWidth(row)).toBeLessThanOrEqual(119)
+	})
+
+	it("fits every detail row to the pane width (no reliance on Ink truncation)", () => {
+		const f = fact(s, "readsb")
+		for (const w of [86, 60, 40]) {
+			const rows = decoderDetail(s, f, w, s.now)
+			for (const r of rows)
+				expect(cellWidth(lineText(r))).toBeLessThanOrEqual(w)
+			const activity =
+				rows.map(lineText).find(r => r.startsWith("activity")) ?? ""
+			// The sparkline always stays; the caption shortens, then drops whole at 40.
+			if (w >= 60) expect(activity).toContain("decodes/min")
+			expect(activity.endsWith("…")).toBe(false)
+		}
 	})
 
 	it("places the detail by size", () => {
