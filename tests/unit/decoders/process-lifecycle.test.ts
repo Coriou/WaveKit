@@ -1,3 +1,4 @@
+import type { ChildProcess } from "node:child_process"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { once } from "node:events"
 import { PassThrough } from "node:stream"
@@ -219,3 +220,37 @@ it("rejects UDP bind failures instead of leaving the connection attempt pending"
 		occupied.close()
 	}
 })
+
+it.skipIf(process.platform === "win32")(
+	"kills a TERM-resistant grandchild with its decoder process group",
+	async () => {
+		const decoder = new Consumer()
+		active.push(decoder)
+		decoder.program = `
+ const {spawn} = require('node:child_process');
+ process.on('SIGTERM', () => {});
+ const child = spawn(process.execPath, ['-e', 'process.on("SIGTERM",()=>{});console.log("ready");setInterval(()=>{},1000)']);
+ child.stdout.once('data', () => console.log(child.pid));
+ setInterval(()=>{},1000);
+ `
+		await decoder.start()
+		const [data] = await once(
+			(
+				decoder as unknown as {
+					process: ChildProcess
+				}
+			).process.stdout!,
+			"data",
+		)
+		const childPid = Number(String(data).trim())
+		expect(childPid).toBeGreaterThan(1)
+		vi.useFakeTimers()
+		const stopping = decoder.stop()
+		await vi.advanceTimersByTimeAsync(5001)
+		await stopping
+		vi.useRealTimers()
+		await vi.waitFor(() => expect(() => process.kill(childPid, 0)).toThrow(), {
+			timeout: 2000,
+		})
+	},
+)

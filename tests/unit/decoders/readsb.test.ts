@@ -113,7 +113,7 @@ describe("ReadsbDecoder", () => {
 
 			expect(decoder.caps).toEqual({
 				input: "iq",
-				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
+				wantsExclusiveSource: false, // Passive resampling permits shared IQ
 				output: "text",
 				integrationPattern: "network_producer",
 			})
@@ -125,7 +125,7 @@ describe("ReadsbDecoder", () => {
 
 			expect(decoder.caps).toEqual({
 				input: "iq",
-				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
+				wantsExclusiveSource: false, // Passive resampling permits shared IQ
 				output: "beast",
 				integrationPattern: "network_producer",
 			})
@@ -137,7 +137,7 @@ describe("ReadsbDecoder", () => {
 
 			expect(decoder.caps).toEqual({
 				input: "iq",
-				wantsExclusiveSource: true, // No rtlTcpHost, so needs exclusive
+				wantsExclusiveSource: false, // Passive resampling permits shared IQ
 				output: "jsonl",
 				integrationPattern: "network_producer",
 			})
@@ -343,8 +343,8 @@ describe("createReadsbDecoder", () => {
 describe("READSB_CAPS", () => {
 	it("should have correct default capabilities", () => {
 		expect(READSB_CAPS).toEqual({
-			input: "external",
-			wantsExclusiveSource: true,
+			input: "iq",
+			wantsExclusiveSource: false,
 			output: "jsonl",
 			integrationPattern: "network_producer",
 		})

@@ -360,9 +360,67 @@ describe("Source-aware stdin routing", () => {
 			expect(updateTwo).toHaveBeenCalledWith({ inputSampleRate: 24000 })
 			expect(updateLegacy).toHaveBeenCalledWith({ inputSampleRate: 96000 })
 		})
-		expect(updateOne).toHaveBeenCalledTimes(1)
-		expect(updateTwo).toHaveBeenCalledTimes(1)
+		expect(updateOne).toHaveBeenCalledTimes(2)
+		expect(updateTwo).toHaveBeenCalledTimes(2)
 	})
+
+	it("serializes frequency changes while a decoder stop is pending", async () => {
+		await connect("first")
+		const decoder = create("one", "first")
+		await manager.startAll()
+		let release!: () => void
+		const stopped = new Promise<void>(resolve => {
+			release = resolve
+		})
+		const originalStop = decoder.stop.bind(decoder)
+		const stop = vi.spyOn(decoder, "stop").mockImplementationOnce(async () => {
+			await stopped
+			await originalStop()
+		})
+		const update = vi.spyOn(decoder, "updateOptions")
+		sources.updateSourceCaps("first", { centerFreq: 136975000 })
+		await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
+		sources.updateSourceCaps("first", { centerFreq: 137000000 })
+		await new Promise(resolve => setTimeout(resolve, 400))
+		expect(stop).toHaveBeenCalledOnce()
+		release()
+		await vi.waitFor(() =>
+			expect(update).toHaveBeenLastCalledWith(
+				expect.objectContaining({ inputCenterFreq: 137000000 }),
+			),
+		)
+		await vi.waitFor(() => expect(stop).toHaveBeenCalledTimes(2))
+		expect(decoder.getStatus().running).toBe(true)
+	})
+
+	it.each(["stop", "destroy"])(
+		"does not undo %s while a tuning restart is pending",
+		async action => {
+			await connect("first")
+			const decoder = create("one", "first")
+			await manager.startAll()
+			let release!: () => void
+			const pending = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const originalStop = decoder.stop.bind(decoder)
+			const stop = vi
+				.spyOn(decoder, "stop")
+				.mockImplementationOnce(async () => {
+					await pending
+					await originalStop()
+				})
+			const start = vi.spyOn(decoder, "start")
+			sources.updateSourceCaps("first", { centerFreq: 136975000 })
+			await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
+			if (action === "destroy") await manager.destroy()
+			else await manager.stopDecoder("one")
+			release()
+			await new Promise(resolve => setTimeout(resolve, 100))
+			expect(start).not.toHaveBeenCalled()
+			expect(decoder.getStatus().running).toBe(false)
+		},
+	)
 
 	it("uses one primary fanout when an explicit decoder starts before the first source connects", async () => {
 		routing.destroy()

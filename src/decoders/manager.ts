@@ -64,6 +64,7 @@ interface DecoderState {
 	currentDelay: number
 	restartTimer: ReturnType<typeof setTimeout> | null
 	intentionallyStopped: boolean
+	stopRevision: number
 	branchId: string | null
 	branchFanout: FanoutManager | null
 	assignedSourceId: string | null
@@ -139,6 +140,8 @@ export class DecoderManager extends EventEmitter {
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+	private capsWorkerRunning = false
+	private destroying = false
 	private readonly pendingCapsChanges = new Map<string, SourceCaps>()
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
@@ -196,6 +199,7 @@ export class DecoderManager extends EventEmitter {
 			currentDelay: this.config.restartDelay,
 			restartTimer: null,
 			intentionallyStopped: false,
+			stopRevision: 0,
 			branchId: null,
 			branchFanout: null,
 			assignedSourceId: null,
@@ -266,6 +270,7 @@ export class DecoderManager extends EventEmitter {
 
 		// Mark as intentionally stopped to prevent auto-restart
 		state.intentionallyStopped = true
+		state.stopRevision++
 
 		// Cancel any pending restart
 		if (state.restartTimer) {
@@ -296,7 +301,15 @@ export class DecoderManager extends EventEmitter {
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
 		// Stop first (this marks intentionallyStopped = true)
-		await this.stopDecoder(id)
+		const stopping = this.stopDecoder(id)
+		const revision = state.stopRevision
+		await stopping
+		if (
+			this.destroying ||
+			this.decoders.get(id) !== state ||
+			state.stopRevision !== revision
+		)
+			return
 
 		// Reset the flag and start
 		state.intentionallyStopped = false
@@ -416,6 +429,7 @@ export class DecoderManager extends EventEmitter {
 	 * Destroys the manager and all managed decoders.
 	 */
 	async destroy(): Promise<void> {
+		this.destroying = true
 		this.log.info("Destroying DecoderManager")
 
 		// Stop health checks
@@ -658,6 +672,14 @@ export class DecoderManager extends EventEmitter {
 			)
 		}
 		if (sourceId && this.sourceManager) {
+			const caps = this.sourceManager.getCaps(sourceId)
+			if (caps)
+				decoder.updateOptions({
+					inputSampleRate: caps.sampleRate,
+					...(caps.centerFreq !== undefined
+						? { inputCenterFreq: caps.centerFreq }
+						: {}),
+				})
 			this.sourceManager.assignDecoder(config.id, sourceId, {
 				input: decoder.caps.input,
 				wantsExclusiveSource: decoder.caps.wantsExclusiveSource ?? false,
@@ -790,16 +812,31 @@ export class DecoderManager extends EventEmitter {
 
 			this.capsChangeDebounceTimer = setTimeout(() => {
 				this.capsChangeDebounceTimer = null
-				const pending = new Map(this.pendingCapsChanges)
-				this.pendingCapsChanges.clear()
-				for (const [id, changedCaps] of pending) {
-					void this.handleCapsChange(id, changedCaps)
-				}
+				void this.drainCapsChanges()
 			}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
 		}
 
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
 		this.log.debug("Subscribed to source caps changes")
+	}
+
+	/** Keep stop/start cycles serialized while retaining the latest tuning request. */
+	private async drainCapsChanges(): Promise<void> {
+		if (this.capsWorkerRunning) return
+		this.capsWorkerRunning = true
+		try {
+			while (this.capsChangedHandler && this.pendingCapsChanges.size > 0) {
+				const pending = new Map(this.pendingCapsChanges)
+				this.pendingCapsChanges.clear()
+				for (const [id, caps] of pending) {
+					await this.handleCapsChange(id, caps)
+				}
+			}
+		} catch (err) {
+			this.log.error({ err }, "Failed to apply source tuning changes")
+		} finally {
+			this.capsWorkerRunning = false
+		}
 	}
 
 	/**
@@ -841,7 +878,12 @@ export class DecoderManager extends EventEmitter {
 
 			try {
 				// Propagate the new sample rate to the decoder's options
-				state.decoder.updateOptions({ inputSampleRate: caps.sampleRate })
+				state.decoder.updateOptions({
+					inputSampleRate: caps.sampleRate,
+					...(caps.centerFreq !== undefined
+						? { inputCenterFreq: caps.centerFreq }
+						: {}),
+				})
 				this.log.debug(
 					{
 						decoderId,
@@ -859,6 +901,8 @@ export class DecoderManager extends EventEmitter {
 
 		// Restart each affected decoder (now with updated options)
 		for (const decoderId of affectedDecoders) {
+			if (!this.capsChangedHandler || this.destroying) break
+			if (this.decoders.get(decoderId)?.intentionallyStopped) continue
 			try {
 				await this.restartDecoder(decoderId)
 			} catch (err) {
@@ -896,6 +940,7 @@ export class DecoderManager extends EventEmitter {
 	 * Unsubscribes from source caps changes.
 	 */
 	private unsubscribeFromSourceCapsChanges(): void {
+		this.pendingCapsChanges.clear()
 		if (this.capsChangeDebounceTimer) {
 			clearTimeout(this.capsChangeDebounceTimer)
 			this.capsChangeDebounceTimer = null

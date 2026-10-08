@@ -20,6 +20,7 @@
  * The output is still IQ data (U8 complex), just at a lower sample rate.
  */
 
+import { iqResampleCommand, shellCommand } from "./process-tools.js"
 import { BaseDecoder } from "./base-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "./types.js"
 import type { Logger } from "../utils/logger.js"
@@ -30,6 +31,8 @@ import type { Logger } from "../utils/logger.js"
 export interface IqDecimationConfig {
 	/** Preferred output IQ sample rate in Hz (e.g., 250000 for rtl_433) */
 	targetSampleRate: number
+	/** Adapt to an exact rate rather than integer decimation. */
+	exactSampleRate?: boolean
 	/** IQ input sample rate in Hz from the source (e.g., 2048000) */
 	inputSampleRate: number
 	/** Optional custom transition bandwidth for FIR filter (default: 0.05) */
@@ -128,6 +131,15 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 
 		const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
 		const targetSampleRate = config.targetSampleRate
+		if (config.exactSampleRate) {
+			const decoder = shellCommand(
+				this.getDecoderCommand(),
+				this.getDecoderArgs(),
+			)
+			return inputSampleRate === targetSampleRate
+				? decoder
+				: `${iqResampleCommand(inputSampleRate, targetSampleRate)} | ${decoder}`
+		}
 
 		// Calculate decimation factor
 		// IMPORTANT: csdr firdecimate requires integer decimation factor
@@ -173,7 +185,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 		// This is decoder-specific - subclasses should configure this
 		const decoderFullCommand =
 			decoderArgs.length > 0
-				? `${decoderCommand} ${decoderArgs.join(" ")}`
+				? shellCommand(decoderCommand, decoderArgs)
 				: decoderCommand
 
 		// Combine into full pipeline
@@ -204,7 +216,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 		const decoderArgs = this.getDecoderArgs()
 
 		return decoderArgs.length > 0
-			? `${decoderCommand} ${decoderArgs.join(" ")}`
+			? shellCommand(decoderCommand, decoderArgs)
 			: decoderCommand
 	}
 

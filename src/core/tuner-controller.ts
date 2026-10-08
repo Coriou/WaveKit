@@ -269,6 +269,7 @@ export class TunerController extends EventEmitter {
 			case RTL_TCP_COMMANDS.SET_FREQUENCY:
 				if (this.isWithinRange(value, VALIDATION.frequency)) {
 					state.frequency = value
+					this.sourceManager.updateSourceCaps(sourceId, { centerFreq: value })
 					updated = true
 				} else {
 					this.log.warn(
@@ -457,6 +458,7 @@ export class TunerController extends EventEmitter {
 		this.validateRange("frequency", hz, VALIDATION.frequency)
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz)
 		state.frequency = hz
+		this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz })
 		this.emitStateChanged(sourceId)
 	}
 

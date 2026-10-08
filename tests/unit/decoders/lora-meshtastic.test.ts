@@ -285,12 +285,7 @@ describe("LoRa/Meshtastic Decoder Property-Based Tests", () => {
 						try {
 							const resolved = parseLoraMeshtasticOptions(opts)
 							const nominalTarget = bandwidth * oversampling
-							const decimation = Math.max(
-								1,
-								Math.round(inputSampleRate / nominalTarget),
-							)
-							const expected = inputSampleRate / decimation
-							expect(resolved.effectiveTargetRate).toBe(expected)
+							expect(resolved.effectiveTargetRate).toBe(nominalTarget)
 							const sps = resolved.effectiveTargetRate / bandwidth
 							expect(sps).toBeGreaterThanOrEqual(2)
 							expect(sps).toBeLessThanOrEqual(32)

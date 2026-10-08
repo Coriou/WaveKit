@@ -79,7 +79,10 @@ const BASE64_CHARS_RE = /^[A-Za-z0-9+/]*={0,2}$/
 /** Canonical install path of the Python wrapper inside the Docker image. */
 export const WRAPPER_SCRIPT_PATH = "/usr/local/bin/lora_meshtastic_decode.py"
 
-function isBase64(value: string, { allowEmpty }: { allowEmpty: boolean }): boolean {
+function isBase64(
+	value: string,
+	{ allowEmpty }: { allowEmpty: boolean },
+): boolean {
 	if (value.length === 0) return allowEmpty
 	if (value.length % 4 !== 0) return false
 	return BASE64_CHARS_RE.test(value)
@@ -96,7 +99,7 @@ export interface LoraMeshtasticOptions {
 	cr: number
 	inputSampleRate: number
 	oversampling: number
-	/** Actual post-csdr output rate in Hz after integer decimation. */
+	/** Exact resampled IQ rate in Hz. */
 	effectiveTargetRate: number
 }
 
@@ -115,6 +118,8 @@ const RawOptionsSchema = z
 		spreadingFactor: z.number().int().min(6).max(12).optional(),
 		codingRate: z.number().int().min(5).max(8).optional(),
 		inputSampleRate: z.number().int().positive().optional(),
+		inputCenterFreq: z.number().int().positive().optional(),
+		followCenter: z.boolean().optional(),
 		oversampling: z.number().int().positive().optional(),
 	})
 	.strict()
@@ -125,11 +130,7 @@ const RawOptionsSchema = z
 		const cr = raw.codingRate ?? presetParams.cr
 		const inputSampleRate = raw.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
 		const oversampling = raw.oversampling ?? DEFAULT_OVERSAMPLING
-		const decimation = Math.max(
-			1,
-			Math.round(inputSampleRate / (bw * oversampling)),
-		)
-		const effectiveTargetRate = inputSampleRate / decimation
+		const effectiveTargetRate = bw * oversampling
 		const sps = effectiveTargetRate / bw
 
 		if (sps < MIN_SPS || sps > MAX_SPS) {
@@ -144,7 +145,10 @@ const RawOptionsSchema = z
 		return {
 			region: raw.region,
 			preset: raw.preset,
-			frequency: raw.frequency,
+			frequency:
+				raw.followCenter && raw.inputCenterFreq !== undefined
+					? raw.inputCenterFreq
+					: raw.frequency,
 			channelKey: raw.channelKey,
 			bw,
 			sf,
@@ -270,9 +274,7 @@ const PacketWireSchema = z
  * Validates a wrapper-emitted JSON object and remaps snake_case to camelCase.
  * Returns null on malformed input and never throws.
  */
-export function parseMeshtasticPacket(
-	json: unknown,
-): MeshtasticPacket | null {
+export function parseMeshtasticPacket(json: unknown): MeshtasticPacket | null {
 	const result = PacketWireSchema.safeParse(json)
 	return result.success ? result.data : null
 }
@@ -308,15 +310,20 @@ export function buildDecoderArgs(options: LoraMeshtasticOptions): string[] {
 
 /** LoRa/Meshtastic pure-consumer decoder. */
 export class LoraMeshtasticDecoder extends IqDecimateDecoder {
-	private readonly options: LoraMeshtasticOptions
+	private options: LoraMeshtasticOptions
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = parseLoraMeshtasticOptions(config.options)
 	}
 
+	protected override onOptionsUpdated(): void {
+		this.options = parseLoraMeshtasticOptions(this.config.options)
+	}
+
 	protected override getIqDecimationConfig(): IqDecimationConfig {
 		return {
+			exactSampleRate: true,
 			inputSampleRate: this.options.inputSampleRate,
 			targetSampleRate: this.options.bw * this.options.oversampling,
 			filterTransition: 0.05,
@@ -349,7 +356,10 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 
 		const packet = parseMeshtasticPacket(parsed)
 		if (!packet) {
-			this.logger.debug({ line: trimmed }, "Wrapper output failed schema validation")
+			this.logger.debug(
+				{ line: trimmed },
+				"Wrapper output failed schema validation",
+			)
 			return null
 		}
 

@@ -8,6 +8,7 @@
  * - 22.4: WHEN configured, THE Readsb_Decoder SHALL expose its network ports for external feeders
  */
 
+import { iqResampleCommand, shellCommand } from "../process-tools.js"
 import {
 	NetworkProducerDecoder,
 	type NetworkProducerConfig,
@@ -23,6 +24,7 @@ export type ReadsbOutputFormat = "sbs" | "beast" | "json"
  * Configuration options for the Readsb decoder.
  */
 export interface ReadsbOptions {
+	inputSampleRate?: number | undefined
 	/** RTL-SDR device index or serial (local device mode) */
 	device?: string | undefined
 	/** RTL-SDR device serial number (local device mode) */
@@ -113,7 +115,7 @@ const SBS_MSG_PATTERN =
  * - JSON: JSON Lines format, easy to parse
  */
 export class ReadsbDecoder extends NetworkProducerDecoder {
-	private readonly options: ReadsbOptions
+	private options: ReadsbOptions
 	private lineBuffer: string = ""
 
 	constructor(config: DecoderConfig, logger: Logger) {
@@ -136,17 +138,34 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * Returns the readsb command (Requirement 22.1).
 	 */
 	protected getCommand(): string {
-		return "readsb"
+		return this.options.rtlTcpHost ? "readsb" : "/bin/sh"
 	}
 
 	/**
 	 * Returns command line arguments for readsb (Requirement 22.1).
 	 *
-	 * IMPORTANT: readsb requires 2.0 Msps sample rate for ADS-B decoding.
-	 * When using ifile mode (stdin), the data must already be at 2.0 Msps.
+	 * IMPORTANT: readsb requires 2.4 Msps sample rate for ADS-B decoding.
+	 * When using ifile mode (stdin), the data must already be at 2.4 Msps.
 	 * If rtlTcpHost is configured, we use network mode where readsb controls the sample rate.
 	 */
+	protected override onOptionsUpdated(): void {
+		this.options = parseReadsbOptions(this.config.options)
+	}
+
 	protected getArgs(): string[] {
+		const args = this.getReadsbArgs()
+		if (this.options.rtlTcpHost) return args
+		const decoder = shellCommand("readsb", args)
+		const rate = this.options.inputSampleRate ?? 2048000
+		return [
+			"-c",
+			rate === 2400000
+				? decoder
+				: `${iqResampleCommand(rate, 2400000)} | ${decoder}`,
+		]
+	}
+
+	private getReadsbArgs(): string[] {
 		const args: string[] = []
 
 		// Check if we have an rtl_tcp host configured (network mode)
@@ -168,13 +187,12 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 			}
 		} else {
 			// Stdin mode: We receive IQ data via stdin from WaveKit
-			// NOTE: readsb expects 2.0 Msps for ADS-B. If the source is 2.4 Msps,
-			// decoding will likely fail. Use rtlTcpHost for proper sample rate control.
+			// The stdin pipeline adapts the shared source to readsb's fixed 2.4 Msps.
 			args.push("--device-type", "ifile")
 			args.push("--ifile", "-")
 			args.push("--iformat", "UC8")
 			// Note: --sample-rate is not a valid option for ifile mode
-			// readsb uses fixed 2.0 Msps internally for ADS-B
+			// readsb uses fixed 2.4 Msps internally for ADS-B
 		}
 
 		// Gain setting - usually ignored for file input but we can pass it
@@ -209,7 +227,7 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		// By default readsb opens multiple ports (30002, 30003, 30004, 30005, etc)
 		// which can cause issues. We explicitly set only what we need above,
 		// and disable the others to avoid port conflicts if multiple readsb instances run.
-		args.push("--net-only") // Listen only on configured ports, don't auto-open defaults
+		// Pinned readsb treats --net-only as a legacy alias for --net.
 
 		// MLAT configuration
 		if (this.options.enableMlat) {
@@ -232,13 +250,9 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 *
 	 * IMPORTANT: ADS-B decoding requires:
 	 * - Frequency: 1090 MHz
-	 * - Sample rate: 2.0 Msps (fixed, not configurable)
+	 * - Sample rate: 2.4 Msps (fixed, not configurable)
 	 *
-	 * When using stdin mode (no rtlTcpHost), readsb expects the IQ stream to be
-	 * at 2.0 Msps. Shared IQ sources at 2.4 Msps will NOT work correctly.
-	 * For proper operation, either:
-	 * 1. Use rtlTcpHost to connect to a dedicated RTL-SDR
-	 * 2. Ensure the IQ source is configured for 2.0 Msps
+	 * Stdin mode resamples the shared source to the fixed decoder rate.
 	 */
 	protected getCaps(): DecoderCaps {
 		// Output format depends on configuration
@@ -249,13 +263,9 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 					? "beast"
 					: "text"
 
-		// ADS-B requires exclusive access when not using network mode
-		// because it needs a specific sample rate (2.0 Msps) that other decoders don't use
-		const needsExclusive = !this.options.rtlTcpHost
-
 		return {
 			input: "iq",
-			wantsExclusiveSource: needsExclusive,
+			wantsExclusiveSource: false,
 			output: outputFormat,
 			integrationPattern: "network_producer",
 		}
@@ -429,6 +439,7 @@ function parseReadsbOptions(options: Record<string, unknown>): ReadsbOptions {
 	const outputFormat = (options["outputFormat"] as ReadsbOutputFormat) ?? "sbs"
 
 	return {
+		inputSampleRate: options["inputSampleRate"] as number | undefined,
 		device: options["device"] as string | undefined,
 		deviceSerial: options["deviceSerial"] as string | undefined,
 		rtlTcpHost: options["rtlTcpHost"] as string | undefined,
@@ -655,8 +666,8 @@ export function createReadsbDecoder(
  * Used when registering with the DecoderRegistry.
  */
 export const READSB_CAPS: DecoderCaps = {
-	input: "external",
-	wantsExclusiveSource: true,
+	input: "iq",
+	wantsExclusiveSource: false,
 	output: "jsonl", // Default, actual depends on outputFormat option
 	integrationPattern: "network_producer",
 }

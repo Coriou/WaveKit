@@ -178,6 +178,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	protected override getIqDecimationConfig(): IqDecimationConfig {
 		const inputRate = this.options.inputSampleRate ?? 2_400_000
 		return {
+			exactSampleRate: true,
 			inputSampleRate: inputRate,
 			targetSampleRate: 384_000, // Well-supported by AIS-catcher
 			filterTransition: 0.05,

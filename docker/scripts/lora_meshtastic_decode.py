@@ -220,7 +220,7 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
             # os.read returns whatever's available rather than blocking for
             # the full request, which matches GR's streaming-source contract.
             raw = os.read(self.fd, max_bytes)
-            if not raw and not self.pending:
+            if not raw:
                 return -1
 
             data = self.pending + raw if self.pending else raw
@@ -272,6 +272,8 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
     preamble_len = 8
     sync_word = [0x2B]
     os_factor = max(1, int(round(float(args.samp_rate) / float(args.bw))))
+    # frame_sync forecasts one oversampled symbol plus two samples of lookahead.
+    source.set_min_output_buffer(os_factor * ((1 << int(args.sf)) + 2))
     gr_cr = max(1, min(4, int(args.cr) - 4))
 
     frame_sync = lora_sdr.frame_sync(
@@ -321,6 +323,10 @@ def build_flowgraph(args: argparse.Namespace, channel_key: bytes) -> Any:
         os_factor=os_factor,
         region=args.region,
     )
+    # Retain Python block wrappers while the scheduler uses their C++ trampolines.
+    top._wavekit_blocks = (source, frame_sync, fft_demod, gray_mapping,
+                           deinterleaver, hamming_dec, header_decoder,
+                           dewhitening, crc_verif, packet_sink, null_sink)
     return top
 
 

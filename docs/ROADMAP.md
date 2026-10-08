@@ -10,6 +10,9 @@ A flashable WaveKit SD image and dedicated Imager launcher are now built locally
 The intended onboarding is: select WaveKit in Imager, configure network/account/SSH,
 write, boot. Physical clean-card acceptance and release distribution remain pending;
 the older manual staging workflow is retained for development and recovery.
+The final candidate has completed a fresh unattended install and delivered IQ
+to the laptop; its reboot and physical hotplug acceptance remain pending.
+Earlier patched-runtime hotplug evidence is separate from this clean-card run.
 
 - [x] Build a reproducible flashable WaveKit image from a pinned Pi OS base,
       embedding the verified receiver bundle and automatic first-boot setup.
@@ -71,8 +74,16 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
 - [x] Route stdin decoders through the explicitly selected source.
 - [x] Enforce source exclusivity in both assignment orders.
 - [ ] Manage complete decoder process trees and avoid unsafe shell interpolation.
+      Shared-IQ pipelines now own POSIX process groups and quote decoder arguments
+      and recording paths; native grandchild cleanup tests pass. Audit remaining
+      external-device/custom pipeline paths before marking the whole item complete.
 - [ ] Make resampling independent of input chunk boundaries; report actual rates.
+      Exact paired-IQ conversion now supports passive readsb (2.4 Msps), AIS,
+      VDL2 and LoRa. Actual SoX rate, complex-phase, filtering and odd-chunk
+      tests pass; all-decoder RF fixture coverage remains pending.
 - [ ] Synchronize tuner state on reconnection and propagate accepted changes.
+      Accepted frequencies now update source/decoder metadata, and tuning-driven
+      decoder restarts are serialized. Reconnection synchronization remains open.
 - [x] Preserve arrays when applying indexed environment overrides.
 - [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
       buffered final data; read errors stop looping playback).
@@ -168,3 +179,28 @@ Keep credentials, SSH identities, local network settings, SD images, card backup
 and raw diagnostic/session notes out of the public repository. Preserve local
 artifacts while publishing only reusable examples and sanitized findings.
 Record test results honestly, including skipped tests and hardware limitations.
+
+## 7. CLI dashboard UI and UX overhaul
+
+Run this as a dedicated design/implementation team alongside core reliability and
+Pi operator-page work. Use Opus agents for implementation and review, with Fable
+as a consultant for difficult product/design decisions and critical review.
+
+- [ ] Audit the current dashboard with realistic live, idle, disconnected, stale,
+      dropping and partially failing receiver/decoder states; establish a clear
+      information hierarchy and operator workflows before redesigning.
+- [ ] Improve layout, typography, spacing, navigation, keyboard interaction,
+      discoverability and readable status/event presentation across terminal sizes.
+- [ ] Make tuning, source ownership, decoder activity and decoded results easy to
+      understand; distinguish API connectivity, IQ freshness, decoder process
+      health, successful decoding and historical counters.
+- [ ] Support useful detail views and filters without overwhelming the overview;
+      handle empty states, reconnection, errors and unavailable measurements.
+- [ ] Validate with representative fixtures and real terminal sessions, including
+      narrow terminals, resize, keyboard use, long text and sustained event flow.
+      Document any terminal/accessibility limitations and check rendering cost.
+- [ ] Coordinate shared API/event changes with the core team. CLI team owns `cli/`;
+      Pi team owns `packages/sdr-host/`; core team owns core/API/decoder changes.
+      Agree on shared contracts before editing them, preserve concurrent work,
+      and stage only each team's files. UI work must preserve the distinctions
+      between clean-card acceptance, patched-runtime tests and streaming stability.

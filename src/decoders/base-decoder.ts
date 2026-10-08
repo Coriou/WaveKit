@@ -14,6 +14,7 @@
  * - 20.4: Emit health events when health changes
  */
 
+import { signalDecoder } from "./process-tools.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createInterface } from "node:readline"
@@ -144,6 +145,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		try {
 			this.process = spawn(command, args, {
 				stdio: ["pipe", "pipe", "pipe"],
+				detached: process.platform !== "win32",
 			})
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))
@@ -173,8 +175,16 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 		// Handle process exit (Requirement 4.6)
 		this.process.on("exit", (code, signal) => {
+			try {
+				signalDecoder(proc, "SIGKILL")
+			} catch (err) {
+				this.logger.error(
+					{ err, pid: proc.pid },
+					"Failed to clean up decoder process group",
+				)
+			}
 			this.logger.info({ code, signal }, "Decoder process exited")
-			this.process = null
+			if (this.process === proc) this.process = null
 			this.emit("exit", code, signal)
 		})
 
@@ -254,7 +264,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			const killTimeout = setTimeout(() => {
 				if (proc.exitCode !== null || proc.signalCode !== null) return
 				this.logger.warn({ pid }, "Graceful stop timeout, sending SIGKILL")
-				proc.kill("SIGKILL")
+				signalDecoder(proc, "SIGKILL")
 			}, GRACEFUL_STOP_TIMEOUT)
 
 			// Failed spawns emit close without exit; running processes emit exit
@@ -263,7 +273,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 				clearTimeout(killTimeout)
 				proc.off("exit", finish)
 				proc.off("close", finish)
-				this.process = null
+				if (this.process === proc) this.process = null
 				this.emit("stopped")
 				this.logger.info({ pid }, "Decoder stopped")
 				resolve()
@@ -272,7 +282,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			proc.once("close", finish)
 
 			// Send SIGTERM for graceful shutdown
-			proc.kill("SIGTERM")
+			if (!proc.killed) signalDecoder(proc, "SIGTERM")
 		})
 	}
 

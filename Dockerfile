@@ -281,6 +281,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         libsndfile1-dev \
         libzmq3-dev \
         libsqlite3-dev \
+        libcjson-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git clone --no-checkout https://github.com/f00b4r0/acarsdec.git repo && \
@@ -288,6 +289,7 @@ RUN git clone --no-checkout https://github.com/f00b4r0/acarsdec.git repo && \
     git fetch --depth 1 origin "${ACARSDEC_REF}" && \
     git checkout --detach FETCH_HEAD && \
     mkdir build && cd build && \
+    pkg-config --exists libcjson && \
     cmake -DCMAKE_BUILD_TYPE=Release .. && \
     make -j"$(nproc)" && \
     make install

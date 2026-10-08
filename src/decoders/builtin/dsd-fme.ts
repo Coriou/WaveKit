@@ -21,6 +21,7 @@
 
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { shellArg, shellCommand } from "../process-tools.js"
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
 import type {
 	DecoderCaps,
@@ -605,7 +606,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// DEBUG: Record raw audio at demod rate before sox processing
 		if (debugFile && this.debugRecording) {
-			pipelineStr += ` | tee "${debugFile}"`
+			pipelineStr += ` | ${shellCommand("tee", [debugFile])}`
 			this.logger.warn(
 				{ file: debugFile, rate: actualDemodRate },
 				"DEBUG: Recording raw audio BEFORE sox",
@@ -629,13 +630,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Build dsd-fme command
 		const dsdFmeArgs = this.getDecoderArgs()
-		let dsdFmeCommand = `dsd-fme ${dsdFmeArgs.join(" ")}`
+		let dsdFmeCommand = shellCommand("dsd-fme", dsdFmeArgs)
 
 		// If per-call recording is enabled, ensure we run in the correct directory
 		if (this.options.enablePerCallRecording) {
 			const dir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
 			// We ensure directory exists and cd into it
-			dsdFmeCommand = `(mkdir -p "${dir}" && cd "${dir}" && ${dsdFmeCommand})`
+			dsdFmeCommand = `(mkdir -p ${shellArg(dir)} && cd ${shellArg(dir)} && ${dsdFmeCommand})`
 		}
 
 		// Combine into full pipeline

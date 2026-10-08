@@ -20,6 +20,8 @@ import type { ACARSMessage } from "./acarsdec.js"
  * Configuration options for the VDL2 decoder.
  */
 export interface Dumpvdl2Options {
+	inputCenterFreq?: number | undefined
+	followCenter?: boolean | undefined
 	/** RTL-SDR device serial number (local device mode) */
 	deviceSerial?: string | undefined
 	/** RTL-TCP host for network mode (e.g., "192.168.1.69") */
@@ -165,6 +167,7 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 */
 	protected getIqDecimationConfig(): IqDecimationConfig {
 		return {
+			exactSampleRate: true,
 			inputSampleRate: this.options.inputSampleRate ?? 2_048_000,
 			targetSampleRate: this.options.targetSampleRate ?? 1_050_000,
 			filterTransition: 0.05,
@@ -190,6 +193,14 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 		// Use stdin input (Requirement 25.4)
 		args.push("--iq-file", "-")
 		args.push("--sample-format", "U8")
+		const rate = this.options.targetSampleRate ?? 1050000
+		if (rate % 105000 !== 0)
+			throw new Error("VDL2 target rate must be a multiple of 105000")
+		args.push("--oversample", String(rate / 105000))
+		args.push(
+			"--centerfreq",
+			String(this.options.inputCenterFreq ?? this.options.frequencies[0]),
+		)
 
 		// Set sample rate - dumpvdl2 might guess but better to be explicit if supported
 		// or rely on oversampling logic.
@@ -214,7 +225,10 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 
 		// Frequencies in Hz (Requirement 24.4)
 		// dumpvdl2 expects frequencies in Hz
-		for (const freq of this.options.frequencies) {
+		for (const freq of this.options.followCenter &&
+		this.options.inputCenterFreq !== undefined
+			? [this.options.inputCenterFreq]
+			: this.options.frequencies) {
 			args.push(freq.toString())
 		}
 
@@ -292,6 +306,8 @@ function parseDumpvdl2Options(config: DecoderConfig): Dumpvdl2Options {
 	}
 
 	return {
+		inputCenterFreq: options["inputCenterFreq"] as number | undefined,
+		followCenter: options["followCenter"] as boolean | undefined,
 		deviceSerial,
 		rtlTcpHost,
 		rtlTcpPort,

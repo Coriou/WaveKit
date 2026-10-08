@@ -21,6 +21,7 @@
  * The decoder will use `tee` to save the audio to WAV files at different pipeline stages.
  */
 
+import { shellCommand } from "./process-tools.js"
 import { BaseDecoder } from "./base-decoder.js"
 import type {
 	DecoderCaps,
@@ -283,7 +284,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Using simple tee to avoid bash-specific process substitution
 		if (shouldRecordDemod && debugDemodFile) {
 			// Simple tee to file - no process substitution needed
-			pipelineStr += ` | tee "${debugDemodFile}"`
+			pipelineStr += ` | ${shellCommand("tee", [debugDemodFile])}`
 			this.logger.info(
 				{ file: debugDemodFile, rate: actualDemodRate },
 				"Debug recording DEMOD stage audio",
@@ -311,7 +312,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// DEBUG: Record audio at final stage (at outputRate, right before decoder)
 		// Using simple tee to avoid bash-specific process substitution
 		if (shouldRecordFinal && debugFinalFile) {
-			pipelineStr += ` | tee "${debugFinalFile}"`
+			pipelineStr += ` | ${shellCommand("tee", [debugFinalFile])}`
 			this.logger.info(
 				{ file: debugFinalFile, rate: outputRate },
 				"Debug recording FINAL stage audio",
@@ -323,7 +324,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		const decoderArgs = this.getDecoderArgs()
 		const decoderFullCommand =
 			decoderArgs.length > 0
-				? `${decoderCommand} ${decoderArgs.join(" ")}`
+				? shellCommand(decoderCommand, decoderArgs)
 				: decoderCommand
 
 		// Combine into full pipeline
