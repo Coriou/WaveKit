@@ -611,6 +611,47 @@ An explicit stop cancels a pending restart; a `"restarting"` decoder then
 reports `"running"` with `running: false` (a fault stays visible until the next
 explicit start). Use `restartCount` and `lastError` to explain these states.
 
+##### Rate plan and reversible suspension
+
+`rateAssessment` is the decoder instance's plan for its source's current
+sample rate: `verdict` (`best` | `acceptable` | `unusable` | `unknown`), the
+observed `sourceRateHz`, `frontendRateHz` (IQ rate after the decoder's own
+decimation/resampling) and `decoderInputRateHz` (what the program reads on
+stdin), the `adaptation`, and for `unusable` the `reasonCode`,
+`requiredMinimumHz` and `requirementBasis`. Built-in minimums are
+implementation facts (`"implementation"`): the audio decoders need at least
+their demod rate (48 kHz; 24 kHz for acarsdec), LoRa at least its bandwidth.
+readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
+until fixture-verified requirements exist; external-input decoders report
+`external-input`.
+
+| Field            | Meaning                                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable`. The decoder keeps its source reservation and `sourceId` and is never moved to another source.      |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended.                                                                                                               |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
+
+A decoder that is running is suspended when its source changes to an unusable
+rate and resumed when the rate becomes usable again (or the source reconnects
+with a usable rate). Suspension does not set `lastError`, change `health` or
+count restarts. A removed source leaves a suspended decoder suspended and a
+running decoder running. Render `suspended` ahead of `health`.
+
+#### GET /api/decoders/rate-preview
+
+Each decoder's `rateAssessment` for a source as if it ran at `sampleRateHz`.
+Pure: nothing is tuned, no caps change, no decoder starts or stops.
+
+```bash
+curl 'http://localhost:9000/api/decoders/rate-preview?sourceId=rtl-pi&sampleRateHz=1024000'
+```
+
+**Response** (200 OK): `[{ "decoderId": "acars", "assessment": { "verdict": "acceptable", ... } }]`
+for every decoder selecting that source. 404 for an unknown source; 400 for a
+non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
+librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
+
 #### GET /api/decoders/:id
 
 Get status of a specific decoder.
@@ -651,7 +692,10 @@ curl http://localhost:9000/api/decoders/dsd-main
 
 #### POST /api/decoders/:id/start
 
-Start a decoder.
+Start a decoder. On an unusable source rate the start is recorded instead:
+200 with the full status (`suspended: true`, `suspension`, `rateAssessment`),
+never 409; starting a suspended decoder again is a 200 no-op. The same applies
+to `/restart`.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/start
@@ -670,7 +714,10 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/start
 
 #### POST /api/decoders/:id/stop
 
-Stop a decoder.
+Stop a decoder. Also accepted (200) for a decoder that is not running but
+still wanted: suspended, or waiting in restart backoff. 409 only when neither
+running nor wanted. Stopping clears intent and any suspension and releases the
+source reservation.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/stop

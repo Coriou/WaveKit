@@ -106,6 +106,15 @@ sources: []
 #   sourceId  - Source to attach to (for pure_consumer decoders)
 #   options   - Decoder-specific configuration options
 #
+# Sample rates: do not set options.inputSampleRate for decoders reading a
+# WaveKit source. The manager injects the source's caps.sampleRate (and
+# centerFreq) before every start and on every caps change; per-decoder
+# defaults (2048000 or 2400000) apply only when no source caps exist. Each
+# decoder reports its instance rate plan as `rateAssessment`; a decoder whose
+# source rate is below its minimum (48 kHz for audio decoders, 24 kHz for
+# acarsdec, the bandwidth for LoRa) is suspended instead of crash-looping and
+# resumes when the rate is usable (see docs/API.md).
+#
 # For external SDR decoders (external_sdr pattern):
 #   deviceSerial - RTL-SDR device serial number
 #   frequencies  - Array of frequencies to monitor (Hz)
