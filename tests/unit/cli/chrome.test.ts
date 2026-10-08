@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest"
+import { afterEach, beforeAll, describe, expect, it } from "vitest"
 import type { ExtendedSourceStatus } from "@wavekit/api-types"
 import { laneOk } from "../../../cli/source/data/freshness.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
@@ -14,6 +14,7 @@ import {
 	switcherLine,
 } from "../../../cli/source/view-models/chrome.js"
 import { helpLines } from "../../../cli/source/view-models/help.js"
+import { setGlyphMode } from "../../../cli/source/ui/theme.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -208,5 +209,76 @@ describe("M6: rx uses windowFor and the age of its actual source", () => {
 		}
 		expect(stripInput(fromSource).old.rx).toBe(false)
 		expect(stripInput(s).old.rx).toBe(false)
+	})
+})
+
+describe("M11: help lists every binding of the view, from the keymap", () => {
+	afterEach(() => setGlyphMode("utf8"))
+	const diag = { invalidFrames: 0, rejectedItems: 0 }
+	const noSel: KeyContext = {
+		...ctx,
+		v: {
+			hasSelection: false,
+			decoderRunning: null,
+			control: null,
+			audioRunning: null,
+			paused: false,
+		},
+		rows: 0,
+	}
+	const text = (c: KeyContext, height = 40) =>
+		helpLines(c, 119, height, diag).map(lineText).join("\n")
+	it("is not filtered by selection or running state", () => {
+		const t = text(noSel)
+		for (const s of [
+			"start (asks to confirm)",
+			"stop (asks to confirm)",
+			"restart (asks to confirm)",
+			"open detail",
+			"close detail",
+			"↑↓ j k",
+			"PgUp PgDn",
+			"top",
+			"newest",
+			"reconnect + refetch",
+			"this help",
+			"quit",
+			"1-5",
+			"next view",
+		]) {
+			expect(t).toContain(s)
+		}
+		expect(t).toMatch(/│ s +start \(asks to confirm\)/)
+		expect(t).toMatch(/│ R +restart \(asks to confirm\)/)
+		expect(t).toMatch(/ G +newest/)
+		expect(t).toMatch(/ g +top/)
+	})
+	it("lists view-specific keys from the keymap", () => {
+		const recv = text({ ...noSel, view: "receiver" })
+		expect(recv).toContain("edit tuner")
+		expect(recv).toContain("take / release control (asks to confirm)")
+		expect(recv).toContain("review (asks to confirm)")
+		expect(recv).not.toContain("restart (asks to confirm)")
+		const msgs = text({ ...noSel, view: "messages" })
+		for (const s of [
+			"filter",
+			"pause / resume",
+			"copy JSON",
+			"scroll detail",
+			"apply filter",
+		])
+			expect(msgs).toContain(s)
+		const sys = text({ ...noSel, view: "system" })
+		expect(sys).toContain("start / stop audio")
+		expect(sys).toContain("audio preset (asks to confirm)")
+	})
+	it("never cuts a label, and keeps the 60-column box in ASCII mode", () => {
+		setGlyphMode("ascii")
+		const lines = helpLines(noSel, 119, 40, diag).map(lineText)
+		const t = lines.join("\n")
+		expect(t).toContain("^v j k")
+		expect(t).not.toContain("...)")
+		for (const l of lines.filter(l => l.trim() !== ""))
+			expect(cellWidth(l.trimStart())).toBe(60)
 	})
 })
