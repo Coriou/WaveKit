@@ -732,9 +732,9 @@ function reduceActionResult(
 	const rec = own(s.actions.byKey, item.key)
 	if (!rec) return s
 	const results = item.outcomes.map(o => o.result)
+	// null = not sent (an earlier command failed or was unknown): only the sent ones count.
 	const failed =
-		results.length === 0 ||
-		results.some(r => r === null || r.outcome === "failed")
+		results.every(r => r === null) || results.some(r => r?.outcome === "failed")
 	const unknown = !failed && results.some(r => r?.outcome === "unknown")
 	// R23: no reply is not a failure; it stays "sent" until an event confirms it.
 	const state: ActionRecord["state"] = failed

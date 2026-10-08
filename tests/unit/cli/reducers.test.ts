@@ -657,6 +657,51 @@ describe("R23: unknown write outcomes", () => {
 		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("ok")
 		expect(s.actions.stoppedByCli).toEqual(["readsb"])
 	})
+	it("an unknown outcome followed by not-sent commands stays sent", () => {
+		const s = reduce(
+			initialState(T0),
+			[
+				{
+					kind: "action:sent",
+					at: T0,
+					key: "tuner:pi-iq",
+					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
+				},
+				{
+					kind: "action:result",
+					at: T0 + 10,
+					key: "tuner:pi-iq",
+					outcomes: [
+						{ ...result("unknown"), label: "frequency" },
+						{ label: "gain", result: null, at: null },
+					],
+				},
+			],
+			T0 + 10,
+		)
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("sent")
+	})
+	it("no command sent at all is failed", () => {
+		const s = reduce(
+			initialState(T0),
+			[
+				{
+					kind: "action:sent",
+					at: T0,
+					key: "audio",
+					intent: { kind: "audio", op: "start" },
+				},
+				{
+					kind: "action:result",
+					at: T0 + 10,
+					key: "audio",
+					outcomes: [{ label: "start", result: null, at: null }],
+				},
+			],
+			T0 + 10,
+		)
+		expect(s.actions.byKey["audio"]?.state).toBe("failed")
+	})
 	it("a failed outcome is failed", () => {
 		const s = reduce(
 			initialState(T0),
