@@ -15,7 +15,8 @@ export function createRing(
 		entries: [],
 		gaps: [],
 		nextSeq: 0,
-		perDecoder: {},
+		// Null prototype: decoder ids are data, so "__proto__" must be a plain key (R30).
+		perDecoder: Object.create(null) as Record<string, number>,
 		total: 0,
 	}
 }
