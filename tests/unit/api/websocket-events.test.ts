@@ -472,3 +472,156 @@ describe("WebSocket Events", () => {
 		})
 	})
 })
+
+// Exercise real connection setup so heartbeat listeners and cleanup are covered.
+function connectSocket(broadcaster: WebSocketEventBroadcaster) {
+	const listeners = new Map<string, (...args: unknown[]) => void>()
+	const socket = {
+		...createMockWebSocket(),
+		bufferedAmount: 0,
+		ping: vi.fn(),
+		terminate: vi.fn(),
+		on: vi.fn((event: string, listener: (...args: unknown[]) => void) => {
+			listeners.set(event, listener)
+		}),
+	}
+	const connect = broadcaster as unknown as {
+		handleConnection(socket: WebSocket): void
+	}
+	connect.handleConnection(socket as unknown as WebSocket)
+	listeners.get("message")?.(
+		JSON.stringify({ type: "subscribe", channels: ["metrics"] }),
+	)
+	socket.messages.length = 0
+	return {
+		socket,
+		emit: (event: string, ...args: unknown[]) =>
+			listeners.get(event)?.(...args),
+	}
+}
+
+describe("WebSocket reliability", () => {
+	it("bounds a slow client's queue and continues delivering to healthy peers", () => {
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const slow = connectSocket(broadcaster)
+		const healthy = connectSocket(broadcaster)
+		try {
+			slow.socket.bufferedAmount = 1
+			for (let index = 0; index < 257; index++) {
+				broadcaster.broadcastMetrics("source", {
+					bytesReceived: index,
+					dataRate: 1,
+				})
+			}
+			expect(slow.socket.terminate).toHaveBeenCalledOnce()
+			expect(slow.socket.messages).toHaveLength(0)
+			expect(healthy.socket.messages).toHaveLength(257)
+			expect(broadcaster.getConnectedClients()).toBe(1)
+		} finally {
+			broadcaster.closeAll()
+		}
+	})
+
+	it("counts UTF-8 bytes and ws buffered bytes toward the outbound limit", () => {
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const client = connectSocket(broadcaster)
+		try {
+			client.socket.bufferedAmount = 1024 * 1024 - 100
+			broadcaster.broadcast("metrics", {
+				type: "metrics",
+				data: "é".repeat(50),
+			})
+			expect(client.socket.terminate).toHaveBeenCalledOnce()
+			expect(broadcaster.getConnectedClients()).toBe(0)
+		} finally {
+			broadcaster.closeAll()
+		}
+	})
+
+	it("flushes queued messages in order after the socket drains", () => {
+		vi.useFakeTimers()
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const client = connectSocket(broadcaster)
+		try {
+			client.socket.bufferedAmount = 1
+			broadcaster.broadcastMetrics("source", { bytesReceived: 1, dataRate: 1 })
+			broadcaster.broadcastMetrics("source", { bytesReceived: 2, dataRate: 1 })
+			expect(client.socket.messages).toHaveLength(0)
+			client.socket.bufferedAmount = 0
+			vi.advanceTimersByTime(100)
+			expect(
+				client.socket.messages.map(
+					message => JSON.parse(message).data.bytesReceived,
+				),
+			).toEqual([1, 2])
+		} finally {
+			broadcaster.closeAll()
+			vi.useRealTimers()
+		}
+	})
+
+	it("isolates asynchronous send errors and synchronous send throws", () => {
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const failing = connectSocket(broadcaster)
+		const throwing = connectSocket(broadcaster)
+		const healthy = connectSocket(broadcaster)
+		try {
+			let callback: ((error?: Error) => void) | undefined
+			failing.socket.send.mockImplementation(
+				(_data: string, ...args: unknown[]) => {
+					callback = args[0] as (error?: Error) => void
+				},
+			)
+			throwing.socket.send.mockImplementation(() => {
+				throw new Error("send failed")
+			})
+			broadcaster.broadcastMetrics("source", { bytesReceived: 1, dataRate: 1 })
+			callback?.(new Error("write failed"))
+			expect(failing.socket.terminate).toHaveBeenCalledOnce()
+			expect(throwing.socket.terminate).toHaveBeenCalledOnce()
+			expect(healthy.socket.messages).toHaveLength(1)
+			expect(broadcaster.getConnectedClients()).toBe(1)
+		} finally {
+			broadcaster.closeAll()
+		}
+	})
+
+	it("terminates clients missing pong while retaining responsive clients and clears timers", () => {
+		vi.useFakeTimers()
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const dead = connectSocket(broadcaster)
+		const healthy = connectSocket(broadcaster)
+		try {
+			vi.advanceTimersByTime(30_000)
+			expect(dead.socket.ping).toHaveBeenCalledOnce()
+			healthy.emit("pong")
+			vi.advanceTimersByTime(30_000)
+			expect(dead.socket.terminate).toHaveBeenCalledOnce()
+			expect(healthy.socket.terminate).not.toHaveBeenCalled()
+			expect(broadcaster.getConnectedClients()).toBe(1)
+			healthy.emit("close", 1000, Buffer.alloc(0))
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			broadcaster.closeAll()
+			vi.useRealTimers()
+		}
+	})
+
+	it("discards pending delivery and heartbeat timers on shutdown", () => {
+		vi.useFakeTimers()
+		const broadcaster = new WebSocketEventBroadcaster(testLogger)
+		const client = connectSocket(broadcaster)
+		try {
+			client.socket.bufferedAmount = 1
+			broadcaster.broadcastMetrics("source", { bytesReceived: 1, dataRate: 1 })
+			broadcaster.closeAll()
+			client.socket.bufferedAmount = 0
+			vi.advanceTimersByTime(60_000)
+			expect(client.socket.messages).toHaveLength(0)
+			expect(client.socket.ping).not.toHaveBeenCalled()
+			expect(vi.getTimerCount()).toBe(0)
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+})

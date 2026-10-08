@@ -646,6 +646,22 @@ curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
 
 ## WebSocket API
 
+Each connection has a 1 MiB outbound payload budget across the application queue
+and WebSocket buffer, with at most 256 messages waiting in the application queue.
+Messages remain FIFO. A client exceeding either limit, including with a single
+oversized event, is terminated independently of other clients. Pending queues
+are checked every 100 ms while connections exist; this is not a delivery deadline.
+
+The server sends WebSocket protocol pings every 30 seconds and terminates a
+connection that has not answered by its next heartbeat. Browsers and standard
+WebSocket libraries normally answer protocol pings automatically. This does not
+require a new JSON message type.
+
+After disconnecting, reconnect and resubscribe, then refresh state through REST.
+Events missed during disconnection are not replayed, and snapshot/event ordering
+is not yet guaranteed. SSE and resumable event history are planned, not currently
+implemented. See [the API roadmap](ROADMAP.md#4-api-and-event-foundation-for-multiple-clients).
+
 ### Connection
 
 ```javascript

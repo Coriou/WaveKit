@@ -107,6 +107,17 @@ interface ClientState {
 	id: string
 }
 
+interface DeliveryState {
+	queue: Array<{ data: string; bytes: number }>
+	queuedBytes: number
+	alive: boolean
+	lastPing: number
+}
+
+const MAX_OUTBOUND_BYTES = 1024 * 1024
+const MAX_QUEUED_MESSAGES = 256
+const HEARTBEAT_INTERVAL_MS = 30_000
+
 /**
  * Validates if a value is a valid WebSocket channel.
  */
@@ -166,6 +177,8 @@ export class WebSocketEventBroadcaster {
 	private readonly log: Logger
 	private readonly clients: Map<string, ClientState> = new Map()
 	private clientIdCounter = 0
+	private readonly delivery = new WeakMap<ClientState, DeliveryState>()
+	private maintenanceTimer: ReturnType<typeof setInterval> | undefined
 
 	constructor(logger: Logger) {
 		this.log = createComponentLogger(logger, "WebSocketBroadcaster")
@@ -202,6 +215,14 @@ export class WebSocketEventBroadcaster {
 		}
 
 		this.clients.set(clientId, clientState)
+		this.getDelivery(clientState)
+		if (!this.maintenanceTimer) {
+			this.maintenanceTimer = setInterval(() => this.maintainClients(), 100)
+			this.maintenanceTimer.unref()
+		}
+		socket.on("pong", () => {
+			this.getDelivery(clientState).alive = true
+		})
 
 		this.log.info({ clientId }, "WebSocket client connected")
 
@@ -218,6 +239,7 @@ export class WebSocketEventBroadcaster {
 		// Handle errors
 		socket.on("error", (err: Error) => {
 			this.log.error({ clientId, err }, "WebSocket error")
+			this.terminateClient(clientState)
 		})
 	}
 
@@ -321,6 +343,8 @@ export class WebSocketEventBroadcaster {
 		reason?: Buffer,
 	): void {
 		this.clients.delete(client.id)
+		this.delivery.delete(client)
+		this.stopMaintenanceIfIdle()
 		const reasonStr = reason ? reason.toString() : "unknown"
 		this.log.info(
 			{ clientId: client.id, code, reason: reasonStr },
@@ -332,16 +356,111 @@ export class WebSocketEventBroadcaster {
 	 * Sends a message to a specific client.
 	 */
 	private sendToClient(client: ClientState, message: ServerMessage): void {
-		if (client.socket.readyState === 1) {
-			// WebSocket.OPEN
+		this.enqueue(client, JSON.stringify(message))
+	}
+
+	private getDelivery(client: ClientState): DeliveryState {
+		let state = this.delivery.get(client)
+		if (!state) {
+			state = { queue: [], queuedBytes: 0, alive: true, lastPing: Date.now() }
+			this.delivery.set(client, state)
+		}
+		return state
+	}
+
+	private enqueue(client: ClientState, data: string): boolean {
+		if (!this.clients.has(client.id) || client.socket.readyState !== 1)
+			return false
+		const state = this.getDelivery(client)
+		const bytes = Buffer.byteLength(data)
+		if (
+			state.queue.length >= MAX_QUEUED_MESSAGES ||
+			state.queuedBytes + (client.socket.bufferedAmount ?? 0) + bytes >
+				MAX_OUTBOUND_BYTES
+		) {
+			this.log.warn(
+				{ clientId: client.id },
+				"WebSocket outbound limit exceeded",
+			)
+			this.terminateClient(client)
+			return false
+		}
+		state.queue.push({ data, bytes })
+		state.queuedBytes += bytes
+		this.flushClient(client, state)
+		return this.clients.has(client.id)
+	}
+
+	private flushClient(client: ClientState, state: DeliveryState): void {
+		// Wait for ws to drain before handing it another application message.
+		while (state.queue.length && (client.socket.bufferedAmount ?? 0) === 0) {
+			if (!this.clients.has(client.id) || client.socket.readyState !== 1) return
+			const message = state.queue.shift()!
+			state.queuedBytes -= message.bytes
 			try {
-				client.socket.send(JSON.stringify(message))
+				client.socket.send(message.data, err => {
+					if (err) {
+						this.log.error(
+							{ clientId: client.id, err },
+							"WebSocket send failed",
+						)
+						this.terminateClient(client)
+					}
+				})
 			} catch (err) {
-				this.log.error(
-					{ clientId: client.id, err },
-					"Failed to send message to client",
-				)
+				this.log.error({ clientId: client.id, err }, "WebSocket send failed")
+				this.terminateClient(client)
+				return
 			}
+		}
+	}
+
+	private maintainClients(): void {
+		for (const client of this.clients.values()) {
+			if (client.socket.readyState !== 1) {
+				this.terminateClient(client)
+				continue
+			}
+			const state = this.getDelivery(client)
+			this.flushClient(client, state)
+			if (
+				!this.clients.has(client.id) ||
+				Date.now() - state.lastPing < HEARTBEAT_INTERVAL_MS
+			)
+				continue
+			if (!state.alive) {
+				this.terminateClient(client)
+				continue
+			}
+			state.alive = false
+			state.lastPing = Date.now()
+			try {
+				client.socket.ping(undefined, undefined, err => {
+					if (err) this.terminateClient(client)
+				})
+			} catch {
+				this.terminateClient(client)
+			}
+		}
+	}
+
+	private terminateClient(client: ClientState): void {
+		if (!this.clients.has(client.id)) return
+		this.handleDisconnect(client)
+		try {
+			client.socket.terminate()
+		} catch (err) {
+			this.log.warn(
+				{ clientId: client.id, err },
+				"WebSocket termination failed",
+			)
+		}
+	}
+
+	private stopMaintenanceIfIdle(): void {
+		if (this.clients.size === 0 && this.maintenanceTimer) {
+			clearInterval(this.maintenanceTimer)
+			this.maintenanceTimer = undefined
 		}
 	}
 
@@ -359,15 +478,7 @@ export class WebSocketEventBroadcaster {
 
 		for (const client of this.clients.values()) {
 			if (client.subscriptions.has(channel) && client.socket.readyState === 1) {
-				try {
-					client.socket.send(serialized)
-					sentCount++
-				} catch (err) {
-					this.log.error(
-						{ clientId: client.id, err },
-						"Failed to broadcast to client",
-					)
-				}
+				if (this.enqueue(client, serialized)) sentCount++
 			}
 		}
 
@@ -724,7 +835,9 @@ export class WebSocketEventBroadcaster {
 				// Ignore errors during shutdown
 			}
 		}
+		for (const client of this.clients.values()) this.delivery.delete(client)
 		this.clients.clear()
+		this.stopMaintenanceIfIdle()
 		this.log.info("All WebSocket connections closed")
 	}
 }
