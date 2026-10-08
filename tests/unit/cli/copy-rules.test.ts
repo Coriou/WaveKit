@@ -11,6 +11,8 @@ describe("findBanned", () => {
 		expect(findBanned("Connected")).toContain("Connected")
 		expect(findBanned("all done!")).toContain("sentence !")
 		expect(findBanned("rocket 🚀")).toContain("emoji")
+		expect(findBanned("❤️")).toContain("emoji")
+		expect(findBanned("ok ☀️ now")).toContain("emoji")
 	})
 	it("accepts the spec's own copy", () => {
 		const ok = [
