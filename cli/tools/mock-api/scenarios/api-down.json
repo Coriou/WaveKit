@@ -1,0 +1,13 @@
+{
+	"extends": "live",
+	"name": "api-down",
+	"description": "Cold start with the API unreachable: no cache.",
+	"conn": {
+		"rest": "down",
+		"ws": "closed",
+		"cached": false,
+		"downForMs": 151000,
+		"restError": "ECONNREFUSED",
+		"closeCode": 1006
+	}
+}

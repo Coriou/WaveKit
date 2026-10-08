@@ -1,0 +1,26 @@
+{
+	"extends": "live",
+	"name": "crash-loop",
+	"description": "acarsdec restarted 3 times in the last 4 minutes.",
+	"restHistory": [
+		{
+			"offsetMs": -240000,
+			"path": "/api/decoders",
+			"merge": { "acarsdec": { "restartCount": 10 } }
+		},
+		{
+			"offsetMs": -120000,
+			"path": "/api/decoders",
+			"merge": { "acarsdec": { "restartCount": 11 } }
+		},
+		{
+			"offsetMs": -60000,
+			"path": "/api/decoders",
+			"merge": {
+				"acarsdec": { "restartCount": 12 },
+				"dsd-fme": { "stats": { "eventsOut": 1 } },
+				"multimon-ng": { "stats": { "eventsOut": 1 } }
+			}
+		}
+	]
+}

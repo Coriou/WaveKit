@@ -1,0 +1,14 @@
+{
+	"extends": "live",
+	"name": "ws-only",
+	"description": "REST timing out for 45 s while the WS feed is live.",
+	"conn": {
+		"rest": "down",
+		"ws": "open",
+		"cached": true,
+		"restAgoMs": 45000,
+		"wsAgoMs": 1000,
+		"downForMs": 45000,
+		"restError": "timeout"
+	}
+}

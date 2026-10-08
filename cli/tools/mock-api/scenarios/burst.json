@@ -1,0 +1,190 @@
+{
+	"extends": "live",
+	"name": "burst",
+	"description": "Receiver at 1090 MHz; mixed ADS-B/AIS rows including an emergency squawk.",
+	"restPatch": {
+		"/api/tuner": { "pi-iq": { "frequency": 1090000000 } },
+		"/api/sources": { "pi-iq": { "caps": { "centerFreq": 1090000000 } } }
+	},
+	"transform": { "noOutputs": true, "dropPercent": 0 },
+	"rest": {
+		"/api/aircraft": {
+			"status": 200,
+			"body": {
+				"timestamp": 1791483130000,
+				"aircraft": [
+					{
+						"icao": "4CA9D2",
+						"seen": 0,
+						"messages": 1204,
+						"firstSeen": 0,
+						"lastUpdated": 0,
+						"callsign": "RYR4KT",
+						"squawk": "7700",
+						"identification": { "registration": "EI-DCL", "typeCode": "B738" }
+					},
+					{
+						"icao": "3C6444",
+						"seen": 1,
+						"messages": 312,
+						"firstSeen": 0,
+						"lastUpdated": 0,
+						"callsign": "DLH4XP",
+						"identification": { "registration": "D-AIUE", "typeCode": "A320" }
+					}
+				],
+				"stats": {
+					"aircraftCount": 14,
+					"withPosition": 9,
+					"withCallsign": 11,
+					"enrichedCount": 8,
+					"messagesProcessed": 5120,
+					"messagesPerSecond": 12.5,
+					"enrichmentCache": { "hits": 8, "misses": 6, "size": 14 }
+				}
+			}
+		}
+	},
+	"wsAppend": [
+		{
+			"offsetMs": -2000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "readsb",
+				"output": {
+					"type": "aircraft",
+					"decoder": "readsb",
+					"timestamp": "2026-10-08T18:07:48.000Z",
+					"data": {
+						"hex": "4ca9d2",
+						"flight": "RYR4KT ",
+						"alt_baro": 37000,
+						"baro_rate": -1216,
+						"gs": 451.2,
+						"track": 134.1,
+						"lat": 51.4712,
+						"lon": -0.4521,
+						"squawk": "7700",
+						"rssi": -12.3,
+						"seen": 0.4,
+						"messages": 1204
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -8000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "ais-catcher",
+				"output": {
+					"type": "ais",
+					"decoder": "ais-catcher",
+					"timestamp": "2026-10-08T18:07:42.000Z",
+					"data": {
+						"mmsi": 235012345,
+						"shipname": "SEA PRINCESS OF THE NORTHERN WATERS",
+						"shiptype_text": "passenger",
+						"lat": 51.5,
+						"lon": -0.12,
+						"speed": 12.1
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -14000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "readsb",
+				"output": {
+					"type": "aircraft",
+					"decoder": "readsb",
+					"timestamp": "2026-10-08T18:07:36.000Z",
+					"data": {
+						"hex": "4ca9d2",
+						"flight": "RYR4KT ",
+						"alt_baro": 37500,
+						"baro_rate": -1100,
+						"gs": 449,
+						"track": 134,
+						"lat": 51.49,
+						"lon": -0.47,
+						"squawk": "7700"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -41000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "readsb",
+				"output": {
+					"type": "aircraft",
+					"decoder": "readsb",
+					"timestamp": "2026-10-08T18:07:09.000Z",
+					"data": {
+						"hex": "3c6444",
+						"flight": "DLH4XP",
+						"alt_baro": 12000,
+						"baro_rate": 1500,
+						"gs": 312,
+						"track": 45,
+						"lat": 51.21,
+						"lon": -0.31
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -42000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "ais-catcher",
+				"output": {
+					"type": "ais",
+					"decoder": "ais-catcher",
+					"timestamp": "2026-10-08T18:07:08.000Z",
+					"data": {
+						"mmsi": 244660123,
+						"shipname": "EEMS SPIRIT",
+						"shiptype_text": "cargo",
+						"lat": 51.44,
+						"lon": 0.21,
+						"speed": 8.4
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -70000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "readsb",
+				"output": {
+					"type": "aircraft",
+					"decoder": "readsb",
+					"timestamp": "2026-10-08T18:06:40.000Z",
+					"data": {
+						"hex": "4ca9d2",
+						"flight": "RYR4KT ",
+						"alt_baro": 38000,
+						"baro_rate": -900,
+						"gs": 447,
+						"track": 134,
+						"lat": 51.51,
+						"lon": -0.49,
+						"squawk": "7700"
+					}
+				}
+			}
+		}
+	]
+}
