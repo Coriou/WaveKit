@@ -46,6 +46,9 @@ export function checkTarget(url: string): URL {
 	} catch {
 		throw new CliUsageError(`invalid API URL: ${url}${hint}`)
 	}
+	if (url.includes("#")) {
+		throw new CliUsageError(`invalid API URL: ${url}; remove the #fragment`)
+	}
 	if (!SCHEMES.has(u.protocol) || u.hostname === "") {
 		throw new CliUsageError(
 			`invalid API URL: ${url}; use http(s):// or ws(s)://${hint}`,
