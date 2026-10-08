@@ -38,6 +38,7 @@ import {
 } from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
+import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
@@ -116,6 +117,16 @@ interface DecoderState {
 interface DecoderSuspension {
 	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
 	since: Date
+}
+
+/** Result of DecoderManager.previewRates. */
+export type RatePreviewResult =
+	| { ok: true; items: RatePreviewItem[] }
+	| { ok: false; reason: "source-not-found" | "unsupported-rate" }
+
+export interface RatePreviewItem {
+	decoderId: string
+	assessment: DecoderRateAssessment
 }
 
 /** A queued source evaluation; adapt=false never restarts running pipelines. */
@@ -520,6 +531,33 @@ export class DecoderManager extends EventEmitter {
 				idleTimeoutMs: this.config.idleTimeout,
 			}),
 		}
+	}
+
+	/**
+	 * Rate plans for every decoder selecting `sourceId` as if that source ran
+	 * at `sampleRateHz`. Pure: no tuner write, no caps change, no lifecycle.
+	 * RTL-TCP sources reject rates librtlsdr cannot set.
+	 */
+	previewRates(sourceId: string, sampleRateHz: number): RatePreviewResult {
+		const caps = this.sourceManager?.getCaps(sourceId)
+		if (!caps) return { ok: false, reason: "source-not-found" }
+		if (
+			this.sourceManager?.isRtlTcpSource(sourceId) &&
+			!isValidRtlSampleRate(sampleRateHz)
+		)
+			return { ok: false, reason: "unsupported-rate" }
+		const items: RatePreviewItem[] = []
+		for (const state of this.decoders.values()) {
+			if (this.selectedSourceId(state) !== sourceId) continue
+			items.push({
+				decoderId: state.config.id,
+				assessment: this.assessState(state, {
+					...caps,
+					sampleRate: sampleRateHz,
+				}),
+			})
+		}
+		return { ok: true, items }
 	}
 
 	/**

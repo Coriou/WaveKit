@@ -1,5 +1,8 @@
 import { DECODER_LAST_ERROR_MAX_LENGTH } from "@wavekit/api-types"
-import { decoderRateAssessmentSchema } from "./decoder-rate-schemas.js"
+import {
+	decoderRateAssessmentSchema,
+	decoderRateReasonCodes,
+} from "./decoder-rate-schemas.js"
 
 /**
  * Decoder status response schemas shared by /api/decoders* and /api/status.
@@ -36,6 +39,18 @@ export const decoderStatusExtensionProperties = {
 	},
 	idleTimeoutMs: { type: "number", minimum: 0 },
 	nextRestartAt: { type: "string", format: "date-time" },
+	// Rate model B3 (reversible suspension).
+	desiredRunning: { type: "boolean" },
+	suspended: { type: "boolean" },
+	suspension: {
+		type: "object",
+		properties: {
+			reasonCode: { type: "string", enum: decoderRateReasonCodes },
+			since: { type: "string", format: "date-time" },
+		},
+		required: ["reasonCode", "since"],
+	},
+	transition: { type: "string", enum: ["suspending", "resuming"] },
 } as const
 
 /** Every DecoderHealth value; Fastify schemas share this one list. */

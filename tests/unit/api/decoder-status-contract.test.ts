@@ -37,6 +37,13 @@ function fullStatus(): DecoderStatus {
 		stats: { bytesIn: 1, eventsOut: 0, errors: 0 },
 		restartCount: 8,
 		nextRestartAt: new Date("2026-10-08T12:00:30.000Z"),
+		desiredRunning: true,
+		suspended: true,
+		suspension: {
+			reasonCode: "insufficient-sample-rate",
+			since: new Date("2026-10-08T12:00:10.000Z"),
+		},
+		transition: "suspending",
 		sourceId: "rtl-pi",
 		targetFrequenciesHz: [131_550_000, 131_725_000],
 		idleTimeoutMs: 30_000,
@@ -51,6 +58,13 @@ function fullStatus(): DecoderStatus {
 const expectedFields = {
 	health: "restarting",
 	nextRestartAt: "2026-10-08T12:00:30.000Z",
+	desiredRunning: true,
+	suspended: true,
+	suspension: {
+		reasonCode: "insufficient-sample-rate",
+		since: "2026-10-08T12:00:10.000Z",
+	},
+	transition: "suspending",
 	sourceId: "rtl-pi",
 	targetFrequenciesHz: [131_550_000, 131_725_000],
 	idleTimeoutMs: 30_000,

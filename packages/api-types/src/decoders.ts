@@ -132,6 +132,34 @@ export interface DecoderStatus {
 	idleTimeoutMs?: number
 	/** ISO-8601 time of the scheduled automatic restart; present only while one is pending. */
 	nextRestartAt?: string
+	/** Operator intent: true after start/restart, false after stop. Always sent by current cores. */
+	desiredRunning?: boolean
+	/**
+	 * Wanted but held back because the source rate makes this instance
+	 * unusable. The source reservation and `sourceId` are kept; no lastError,
+	 * no health change, no restart counted. Always sent by current cores.
+	 */
+	suspended?: boolean
+	/** Present only while suspended. */
+	suspension?: DecoderSuspension
+	/**
+	 * Present only during a transition. A lasting "suspending" means the stop
+	 * failed and the process may still run (`running` stays truthful).
+	 */
+	transition?: "suspending" | "resuming"
+}
+
+/** Why and since when a decoder is suspended for its source rate. */
+export interface DecoderSuspension {
+	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	/** ISO-8601 */
+	since: string
+}
+
+/** GET /api/decoders/rate-preview item: the plan if the source ran at the given rate. */
+export interface DecoderRatePreviewItem {
+	decoderId: string
+	assessment: DecoderRateAssessment
 }
 
 /** GET /api/decoders item and `decoder:status` WebSocket payload. */
