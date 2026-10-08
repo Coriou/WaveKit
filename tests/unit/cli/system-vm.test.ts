@@ -175,12 +175,14 @@ describe("system view-model (spec §6.5)", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "audio",
 					intent: { kind: "audio", op: "start" },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0,
 					key: "audio",
 					outcomes: [
@@ -211,12 +213,14 @@ describe("system view-model (spec §6.5)", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "audio",
 					intent: { kind: "audio", op: "stop" },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0 + 10_000,
 					key: "audio",
 					outcomes: [
@@ -238,17 +242,22 @@ describe("system view-model (spec §6.5)", () => {
 		expect(audioResultText(unknown, t0 + 11_000)).toBe(
 			"audio stop sent · no reply in 10s",
 		)
+		expect(audioResultText(reduce(unknown, [], t0 + 20_000), t0 + 21_000)).toBe(
+			"audio stop sent · no reply",
+		)
 		const ok = reduce(
 			s,
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "audio",
 					intent: { kind: "audio", op: "start" },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0,
 					key: "audio",
 					outcomes: [
