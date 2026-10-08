@@ -56,13 +56,7 @@ describe("tuner edit", () => {
 		expect(s.digit).toBe(3)
 	})
 	it("clamps the frequency to the server range", () => {
-		const s = press(
-			Array.from({ length: 12 }, () => "left" as const).concat([
-				"up",
-				"up",
-				"up",
-			]),
-		)
+		const s = press(Array<EditKey>(12).fill("left").concat(["up", "up", "up"]))
 		expect(s.draft.frequency).toBeLessThanOrEqual(FREQ_MAX)
 	})
 	it("cycles fields and edits sample rate, gain and toggles", () => {
@@ -139,9 +133,7 @@ describe("tuner edit", () => {
 			expect(applyEditKey(onRate, k)).toEqual(onRate)
 		const s = press(["right", "right", "right", "right"])
 		expect(s.digit).toBe(0)
-		expect(press(Array.from({ length: 20 }, () => "left" as const)).digit).toBe(
-			FREQ_DIGITS - 1,
-		)
+		expect(press(Array<EditKey>(20).fill("left")).digit).toBe(FREQ_DIGITS - 1)
 	})
 	it("snaps an off-list sample rate to the nearest valid rate on the first change", () => {
 		const s = press(
