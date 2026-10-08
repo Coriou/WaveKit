@@ -24,6 +24,14 @@ PAYLOAD = ('IMAGE.txt', 'wavekit-sdr-host-image.tar.gz', 'docker-compose.yml',
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
 SECTOR = 512
+BOOT_ASSETS = ('boot.html', 'boot.js', 'boot.css', 'app.css',
+               'fonts/barlow-500.woff2', 'fonts/barlow-600.woff2',
+               'fonts/barlow-semi-condensed-600.woff2', 'fonts/OFL.txt')
+IMAGE_SUPPORT = {
+    'pi-boot-status.py': '/usr/local/lib/wavekit/boot-status.py',
+    'wavekit-boot-status.service': '/etc/systemd/system/wavekit-boot-status.service',
+    'wavekit-wifi-powersave.conf': '/etc/NetworkManager/conf.d/90-wavekit-wifi-powersave.conf',
+}
 
 
 def digest(path):
@@ -216,6 +224,8 @@ def validate_stock(fs):
         raise ValueError('Base does not contain an ARM64 userland')
     if not fs.exists('/usr/bin/cloud-init') or not fs.exists('/usr/bin/python3'):
         raise ValueError('Base requires cloud-init and Python 3')
+    if not fs.exists('/usr/sbin/NetworkManager'):
+        raise ValueError('Base requires NetworkManager for the image Wi-Fi policy')
     unit_path = '/usr/lib/systemd/system/cloud-final.service'
     if not fs.exists(unit_path):
         unit_path = '/lib/systemd/system/cloud-final.service'
@@ -271,6 +281,17 @@ def check_clean(root, e2fsck):
         raise ValueError('Image filesystem is not clean; refusing repair or publication')
 
 
+def enable_service(fs, target, service):
+    wants = '/etc/systemd/system/' + target + '.wants'
+    fs.directory(wants)
+    link = wants + '/' + service
+    if fs.exists(link):
+        raise ValueError('WaveKit service is already enabled')
+    fs.command(f'symlink {quote(link)} ../{service}', write=True)
+    if f'Fast link dest: "../{service}"' not in fs.command(f'stat {quote(link)}'):
+        raise ValueError('Failed to enable WaveKit service')
+
+
 def build(args):
     base, bundle, output = args.base.resolve(), args.bundle.resolve(), args.output.resolve()
     regular(base)
@@ -296,6 +317,15 @@ def build(args):
         service_source = work / 'firstboot.service'
         shutil.copyfile(SCRIPT_DIR / 'pi-image-firstboot.py', firstboot_source)
         shutil.copyfile(SCRIPT_DIR / 'wavekit-firstboot.service', service_source)
+        support = work / 'support'
+        support.mkdir()
+        for name in IMAGE_SUPPORT:
+            shutil.copyfile(SCRIPT_DIR / name, support / name)
+        assets = work / 'boot-assets'
+        for name in BOOT_ASSETS:
+            destination = assets / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(SCRIPT_DIR.parent / 'ui' / name, destination)
         image = work / 'wavekit.img'
         print('[wavekit] Decompressing and verifying pinned stock image', flush=True)
         with image.open('wb') as target:
@@ -316,14 +346,13 @@ def build(args):
             fs.insert(bundle_snapshot / name, '/opt/wavekit/pi-bundle/' + name, mode)
         fs.insert(firstboot_source, '/usr/local/sbin/wavekit-firstboot', 0o100755)
         fs.insert(service_source, '/etc/systemd/system/wavekit-firstboot.service', 0o100644)
-        wants = '/etc/systemd/system/cloud-init.target.wants'
-        fs.directory(wants)
-        link = wants + '/wavekit-firstboot.service'
-        if fs.exists(link):
-            raise ValueError('WaveKit service is already enabled')
-        fs.command(f'symlink {quote(link)} ../wavekit-firstboot.service', write=True)
-        if 'Fast link dest: "../wavekit-firstboot.service"' not in fs.command(f'stat {quote(link)}'):
-            raise ValueError('Failed to enable WaveKit service')
+        for name, target in IMAGE_SUPPORT.items():
+            fs.insert(support / name, target, 0o100644)
+        for name in BOOT_ASSETS:
+            fs.insert(assets / name, '/usr/local/share/wavekit/boot-status/' + name, 0o100644)
+        fs.directory('/var/lib/wavekit/status')
+        enable_service(fs, 'cloud-init.target', 'wavekit-firstboot.service')
+        enable_service(fs, 'multi-user.target', 'wavekit-boot-status.service')
         check_clean(root, e2fsck)
         with image.open('r+b') as target, root.open('rb') as source:
             target.seek(begin)
@@ -353,6 +382,8 @@ def build(args):
             'base_extract_sha256': args.base_sha256.lower(), 'bundle_sha256sums_sha256': digest(bundle_snapshot / 'SHA256SUMS'),
             'firstboot_sha256': digest(firstboot_source),
             'service_sha256': digest(service_source),
+            'image_support_sha256': {name: digest(support / name) for name in IMAGE_SUPPORT},
+            'boot_assets_sha256': {name: digest(assets / name) for name in BOOT_ASSETS},
             'extract_sha256': image_hash, 'compressed_sha256': digest(compressed),
         }, indent=2) + '\n')
         # All validation completes before publishing. Each replacement is atomic;

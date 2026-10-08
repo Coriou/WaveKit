@@ -1,6 +1,8 @@
 """File-only installer acceptance; all mutable paths live in temporary fixtures."""
 import argparse
 import hashlib
+import gzip
+import http.client
 import importlib.util
 import io
 import json
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import types
 import unittest
 from unittest.mock import patch
@@ -27,6 +30,7 @@ def load(name, filename):
 
 builder = load('pi_image_builder', 'build-pi-image.py')
 firstboot = load('pi_image_firstboot', 'pi-image-firstboot.py')
+boot_status = load('pi_boot_status', 'pi-boot-status.py')
 
 
 class ImageBuilderTests(unittest.TestCase):
@@ -293,6 +297,107 @@ class ImageFirstbootTests(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertIn('failed', (self.boot / 'wavekit-setup.status').read_text())
         self.assertFalse((firstboot.STATE / 'firstboot.done').exists())
+
+
+class BootStatusTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='wavekit-boot-status-')
+        self.root = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        self.status, self.boot = self.root / 'setup.json', self.root / 'boot_id'
+        self.boot.write_text('current-boot')
+        self.record = {'schema': 1, 'state': 'running', 'phase': 'install',
+                       'updatedAt': '2026-01-01T12:00:00+00:00',
+                       'bootId': 'current-boot', 'exitCode': None}
+
+    def read(self, **values):
+        self.status.write_text(json.dumps({**self.record, **values}))
+        return boot_status.setup_status(self.status, self.boot)
+
+    def test_waits_before_cloud_init_and_exposes_only_sanitized_values(self):
+        self.assertEqual(boot_status.setup_status(self.status, self.boot)['state'], 'waiting')
+        result = self.read(password='fixture-secret', logs='fixture-private-log')
+        self.assertEqual(result['state'], 'running')
+        self.assertEqual(set(result), {'state', 'phase', 'updatedAt', 'updatedAgeMs', 'exitCode'})
+        self.assertNotIn('fixture', json.dumps(result))
+        self.assertEqual(self.read(state='failed', phase=None, exitCode=23)['exitCode'], 23)
+
+    def test_interrupted_boot_is_not_reported_as_running(self):
+        self.assertEqual(self.read(bootId='previous-boot')['state'], 'interrupted')
+        self.assertEqual(self.read(bootId='previous-boot', state='complete')['state'], 'complete')
+
+    def test_rejects_symlink_directory_oversized_or_malformed_records(self):
+        target = self.root / 'private'
+        target.write_text('fixture-secret')
+        self.status.symlink_to(target)
+        self.assertEqual(boot_status.setup_status(self.status, self.boot)['state'], 'unavailable')
+        self.status.unlink()
+        self.status.mkdir()
+        self.assertEqual(boot_status.setup_status(self.status, self.boot)['state'], 'unavailable')
+        self.status.rmdir()
+        for text in ('x' * 4097, 'not-json', '[]', '{}'):
+            self.status.write_text(text)
+            self.assertEqual(boot_status.setup_status(self.status, self.boot)['state'], 'unavailable')
+        for change in ({'updatedAt': '2026-01-01'}, {'phase': 'fixture-secret'}, {'exitCode': True}):
+            self.assertEqual(self.read(**change)['state'], 'unavailable')
+
+    def server(self):
+        probe = types.SimpleNamespace(available=lambda: False)
+        server = boot_status.StatusServer(('127.0.0.1', 0), ROOT / 'packages/sdr-host/ui', self.status, self.boot, probe)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server
+
+    def request(self, server, path, method='GET', headers=None):
+        connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=2)
+        connection.request(method, path, headers=headers or {})
+        response = connection.getresponse()
+        result = response.status, dict(response.getheaders()), response.read()
+        connection.close()
+        return result
+
+    def test_http_serves_page_before_receiver_and_never_serves_private_files(self):
+        server = self.server()
+        code, headers, body = self.request(server, '/', headers={'Accept-Encoding': 'gzip'})
+        self.assertEqual(code, 200)
+        self.assertIn(b'First-boot setup', gzip.decompress(body))
+        self.assertIn("default-src 'none'", headers['Content-Security-Policy'])
+        self.assertNotIn('Access-Control-Allow-Origin', headers)
+        code, _, body = self.request(server, '/api/setup')
+        self.assertEqual(json.loads(body)['state'], 'waiting')
+        self.assertFalse(json.loads(body)['receiverPageReady'])
+        for path in ('/../setup.json', '/%2e%2e/setup.json', '/boot/firmware/user-data', '/api/fix', '//etc/passwd'):
+            self.assertEqual(self.request(server, path)[0], 404)
+        self.assertEqual(self.request(server, '/api/setup', method='POST')[0], 501)
+        self.assertEqual(self.request(server, '/', method='HEAD')[2], b'')
+
+    def test_receiver_probe_checks_a_real_html_page_and_caches_bounded_requests(self):
+        server = self.server()
+        probe = boot_status.ReceiverProbe(server.server_port)
+        self.assertTrue(probe.available())
+        with patch.object(boot_status.http.client, 'HTTPConnection', side_effect=AssertionError('unexpected duplicate probe')):
+            self.assertTrue(probe.available())
+        response = types.SimpleNamespace(status=200, getheader=lambda *_: 'application/json')
+        connection = types.SimpleNamespace(request=lambda *_: None, getresponse=lambda: response, close=lambda: None)
+        probe.checked = float('-inf')
+        with patch.object(boot_status.http.client, 'HTTPConnection', return_value=connection):
+            self.assertFalse(probe.available())
+
+    def test_image_support_is_present_and_service_has_no_setup_dependency(self):
+        script_dir = ROOT / 'packages/sdr-host/scripts'
+        for name in builder.IMAGE_SUPPORT:
+            self.assertTrue((script_dir / name).is_file())
+        for name in builder.BOOT_ASSETS:
+            self.assertTrue((script_dir.parent / 'ui' / name).is_file())
+        unit = (script_dir / 'wavekit-boot-status.service').read_text()
+        self.assertIn('DynamicUser=yes', unit)
+        self.assertIn('WantedBy=multi-user.target', unit)
+        for dependency in ('cloud-final', 'network-online', 'docker.service'):
+            self.assertNotIn(dependency, unit)
+        policy = (script_dir / 'wavekit-wifi-powersave.conf').read_text()
+        self.assertIn('[connection]\nwifi.powersave=2', policy)
 
 
 if __name__ == '__main__':

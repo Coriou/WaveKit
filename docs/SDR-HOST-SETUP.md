@@ -124,6 +124,22 @@ sources:
 
 ## Status Page
 
+On newly built WaveKit SD images, open `http://<pi-host>/` as soon as the Pi
+joins your network. A small host service starts independently of cloud-init,
+Docker and the receiver, so the page can show setup before package installation
+finishes. It reports waiting, installation, completion, failure and interruption
+after a reboot. Before the first progress record appears, it reports that it is
+waiting; it does not infer that cloud-init succeeded. Network configuration must
+work before any browser can reach the Pi.
+
+The setup page opens the full receiver page automatically once installation
+finishes and that page responds. If installation fails or Docker is unavailable,
+the entry page stays reachable. Port 80 serves only bundled assets and sanitized
+setup state, with no account settings, raw logs, file browsing or control routes.
+It runs as a restricted dynamic system user; existing Imager account and sudo
+choices are preserved. The automatic link uses the image's default API port
+8080; if you customize that port, open your chosen receiver URL directly.
+
 Open `http://<pi-host>:8080/` from a phone or computer on the same network. The
 page is served by the Pi itself and works without WaveKit running on your
 computer. It is read-only.
@@ -150,6 +166,30 @@ The same data is available as JSON: `GET /api/status` (receiver, `sampling`,
 `delivery`) and `GET /api/host` (host telemetry). The API no longer allows
 cross-origin browser reads by default; set `SDR_HOST_API__CORS_ORIGINS` to a
 comma-separated list of origins if another web app must read it.
+
+### Wi-Fi power saving on dedicated images
+
+The image embeds `/etc/NetworkManager/conf.d/90-wavekit-wifi-powersave.conf`
+with `[connection]` and `wifi.powersave=2` before the first network activation.
+This disables power saving by default, including after reboot; an explicitly
+configured per-connection power-save choice still takes precedence. No network
+restart is needed during first-boot installation. These are the documented
+[NetworkManager default-setting semantics](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/NetworkManager.conf.html)
+and [Wi-Fi power-save values](https://networkmanager.pages.freedesktop.org/NetworkManager/NetworkManager/settings-802-11-wireless.html).
+
+Verify on the freshly flashed Pi, then after a reboot:
+
+```bash
+iw dev wlan0 get power_save
+systemctl status wavekit-boot-status wavekit-firstboot
+curl -fsS http://localhost/api/setup
+curl -fsS http://localhost:8080/
+```
+
+Replace `wlan0` if the Wi-Fi interface has a different name. Disabling power
+saving is a latency policy, not evidence that undervoltage or IQ loss is fixed.
+Image-content checks, clean-card setup, patched-runtime checks and sustained
+streaming acceptance remain separate results.
 
 ## Troubleshooting
 

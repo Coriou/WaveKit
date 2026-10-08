@@ -1,7 +1,7 @@
 [Unit]
 Description=WaveKit SDR host firstboot installation
-Wants=cloud-final.service network-online.target
-After=cloud-final.service network-online.target
+Wants=cloud-final.service network-online.target wavekit-boot-status.service
+After=cloud-final.service network-online.target wavekit-boot-status.service
 ConditionPathExists=!/var/lib/wavekit/firstboot.done
 
 [Service]

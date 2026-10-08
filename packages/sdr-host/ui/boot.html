@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<title>WaveKit Receiver · Setup</title>
+		<link rel="stylesheet" href="app.css" />
+		<link rel="stylesheet" href="boot.css" />
+		<link rel="icon" href="data:," />
+		<script type="module" src="boot.js"></script>
+	</head>
+	<body>
+		<div class="panel boot-panel">
+			<header class="nameplate">
+				<h1 class="nameplate__title">WaveKit <span>Receiver</span></h1>
+				<p class="nameplate__host">First-boot setup</p>
+				<p class="link" id="contact" data-state="connecting" role="status">
+					<span class="lamp" aria-hidden="true"></span
+					><span id="contact-text">Connecting</span>
+				</p>
+			</header>
+			<main>
+				<section aria-labelledby="setup-heading">
+					<h2 class="legend" id="setup-heading">Installation</h2>
+					<div
+						class="screen boot-screen"
+						id="setup-screen"
+						data-state="unknown"
+					>
+						<p class="verdict" id="setup-title" aria-live="polite">
+							Checking setup
+						</p>
+						<p class="verdict__detail" id="setup-detail">
+							The Pi will report its progress here.
+						</p>
+						<p class="boot-age" id="setup-age"></p>
+					</div>
+					<ol class="boot-steps" aria-label="Installation stages">
+						<li data-phase="cloud-init">
+							<span>01</span> Configure the Pi <small>Waiting</small>
+						</li>
+						<li data-phase="install">
+							<span>02</span> Install the receiver <small>Waiting</small>
+						</li>
+						<li data-phase="publish">
+							<span>03</span> Finish setup <small>Waiting</small>
+						</li>
+					</ol>
+					<p class="note">
+						Initial setup can take several minutes. Keep the Pi powered and
+						connected to the internet.
+					</p>
+					<p class="boot-open" id="receiver-link-wrap" hidden>
+						<a id="receiver-link">Open receiver status</a>
+					</p>
+					<noscript
+						><p>
+							Enable JavaScript to follow live setup progress. Receiver status
+							is available on this Pi at port 8080 after installation.
+						</p></noscript
+					>
+				</section>
+			</main>
+			<footer class="footer">
+				<p>
+					Read-only. Served by the Pi, available while the receiver installs.
+				</p>
+			</footer>
+		</div>
+	</body>
+</html>

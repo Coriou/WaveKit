@@ -1,0 +1,57 @@
+.boot-panel {
+	max-width: 720px;
+}
+.boot-screen {
+	padding: 24px;
+}
+.boot-screen .verdict {
+	font-size: 1.625rem;
+}
+.boot-screen .verdict__detail {
+	margin-top: 12px;
+	max-width: 52ch;
+}
+.boot-age {
+	color: var(--screen-ink-2);
+	font-size: 0.8125rem;
+	margin-top: 20px;
+}
+.boot-steps {
+	margin: 24px 0 16px;
+}
+.boot-steps li {
+	display: grid;
+	grid-template-columns: 24px 1fr auto;
+	gap: 12px;
+	align-items: center;
+	padding: 16px 0;
+	border-bottom: 1px solid var(--rule);
+}
+.boot-steps li > span,
+.boot-steps small {
+	color: var(--ink-2);
+}
+.boot-steps [aria-current="step"] {
+	font-weight: 600;
+}
+.boot-steps [aria-current="step"] small {
+	color: var(--warn-ink);
+}
+.boot-open {
+	margin-top: 20px;
+}
+.boot-open a {
+	display: inline-flex;
+	align-items: center;
+	min-height: 44px;
+	color: var(--ink);
+	text-underline-offset: 4px;
+}
+@media (max-width: 400px) {
+	.boot-screen {
+		padding: 18px;
+	}
+	.boot-steps li {
+		gap: 8px;
+	}
+}
