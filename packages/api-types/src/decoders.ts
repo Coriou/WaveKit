@@ -82,7 +82,8 @@ export const DECODER_LAST_ERROR_MAX_LENGTH = 512
 /**
  * Most recent decoder failure. Retained across automatic restarts so a crash
  * loop keeps its cause visible; cleared only by an explicit start/restart
- * (the same moment `restartCount` resets to 0).
+ * (the same moment `restartCount` resets to 0). An "error" recorded during a
+ * run is not replaced by the generic "exit" that ends that run.
  */
 export interface DecoderLastError {
 	/** "error": the decoder emitted an error (spawn failure, socket error, failed start). "exit": the process exited without being asked to stop. */

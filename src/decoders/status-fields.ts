@@ -21,7 +21,10 @@ const DeviceSerial = z.string().min(1)
 /** Bounds a message to DECODER_LAST_ERROR_MAX_LENGTH, marking truncation with "…". */
 export function boundDecoderErrorMessage(message: string): string {
 	if (message.length <= DECODER_LAST_ERROR_MAX_LENGTH) return message
-	return `${message.slice(0, DECODER_LAST_ERROR_MAX_LENGTH - 1)}…`
+	let head = message.slice(0, DECODER_LAST_ERROR_MAX_LENGTH - 1)
+	// Never leave half of a surrogate pair (e.g. an emoji) at the cut.
+	if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1)
+	return `${head}…`
 }
 
 /** Normalizes any thrown/emitted value into a bounded, timestamped DecoderLastError. */

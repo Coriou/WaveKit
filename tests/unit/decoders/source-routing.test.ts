@@ -219,9 +219,16 @@ describe("Source-aware stdin routing", () => {
 		await manager.startAll()
 		expect(manager.getStatus("explicit")?.sourceId).toBe("second")
 		expect(manager.getStatus("legacy")?.sourceId).toBe("first")
+		const lastSeen = new Map<string, unknown>()
+		manager.on("decoder:status-changed", (id: string) =>
+			lastSeen.set(id, manager.getStatus(id)),
+		)
 		await manager.stopAll()
 		expect(manager.getStatus("explicit")?.sourceId).toBe("second")
 		expect(manager.getStatus("legacy")).not.toHaveProperty("sourceId")
+		// the last status-changed after stop reflects the unwired state
+		expect(lastSeen.get("legacy")).not.toHaveProperty("sourceId")
+		expect(lastSeen.get("legacy")).toMatchObject({ running: false })
 	})
 
 	it("rebinds only the selected source after removal and recreation, restoring ownership", async () => {

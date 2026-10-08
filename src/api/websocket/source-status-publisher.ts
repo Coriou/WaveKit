@@ -11,14 +11,19 @@
  * - A 10 s per-source heartbeat refreshes counters (bytes, sample age) and
  *   resyncs clients. Cost: 0.1 msg/s per source, versus 1 msg/s per source on
  *   `metrics`; and it beats the CLI's former 5 s REST poll on freshness.
- * - No work at all while nobody subscribes to `sources`; the first tick after
- *   a subscriber appears sends a full snapshot (one message per source).
+ * - No work at all while nobody subscribes to `sources`. Whenever the
+ *   subscriber count rises (first or additional client), the next publish
+ *   sends a full snapshot (one message per source; existing subscribers
+ *   receive it too, since broadcasts are per channel).
+ * - Publishing runs from a timer and inside SourceManager emits, so failures
+ *   are logged and swallowed; the next tick retries with a full snapshot.
  */
 
 import type { EventEmitter } from "node:events"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js"
 import type { WebSocketEventBroadcaster } from "./events.js"
+import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import {
 	countConsumersBySource,
 	toApiExtendedSourceStatus,
@@ -50,6 +55,7 @@ export interface SourceStatusPublisherOptions {
 		WebSocketEventBroadcaster,
 		"broadcastSourceStatus" | "getSubscribersCount"
 	>
+	logger: Logger
 }
 
 interface Published {
@@ -59,7 +65,9 @@ interface Published {
 
 export class SourceStatusPublisher {
 	private readonly options: SourceStatusPublisherOptions
+	private readonly log: Logger
 	private readonly published = new Map<string, Published>()
+	private subscribers = 0
 	private timer: ReturnType<typeof setInterval> | undefined
 	private readonly onLifecycle = (sourceId: unknown): void => {
 		if (typeof sourceId === "string") this.publish([sourceId])
@@ -70,6 +78,7 @@ export class SourceStatusPublisher {
 
 	constructor(options: SourceStatusPublisherOptions) {
 		this.options = options
+		this.log = createComponentLogger(options.logger, "SourceStatusPublisher")
 	}
 
 	start(): void {
@@ -77,7 +86,9 @@ export class SourceStatusPublisher {
 		for (const event of LIFECYCLE_EVENTS)
 			this.options.sourceManager.on(event, this.onLifecycle)
 		this.options.sourceManager.on("removed", this.onRemoved)
-		this.timer = setInterval(() => this.publish(), SOURCE_STATUS_POLL_MS)
+		this.timer = setInterval(() => {
+			this.publish()
+		}, SOURCE_STATUS_POLL_MS)
 		this.timer.unref()
 	}
 
@@ -88,16 +99,27 @@ export class SourceStatusPublisher {
 			this.options.sourceManager.off(event, this.onLifecycle)
 		this.options.sourceManager.off("removed", this.onRemoved)
 		this.published.clear()
+		this.subscribers = 0
 	}
 
 	/** Publishes changed or heartbeat-due sources; all sources when ids is omitted. */
 	private publish(ids?: string[]): void {
-		const { sourceManager, broadcaster, fanoutTelemetry } = this.options
-		if (broadcaster.getSubscribersCount("sources") === 0) {
-			// Forget what was sent so a new subscriber gets a full snapshot.
+		try {
+			this.publishDue(ids)
+		} catch (err) {
+			// Forget what was sent so the next tick retries everything.
 			this.published.clear()
-			return
+			this.log.error({ err, sourceIds: ids }, "Failed to publish source status")
 		}
+	}
+
+	private publishDue(ids?: string[]): void {
+		const { sourceManager, broadcaster, fanoutTelemetry } = this.options
+		const subscribers = broadcaster.getSubscribersCount("sources")
+		// A new subscriber has seen nothing yet: resend every source.
+		if (subscribers > this.subscribers) this.published.clear()
+		this.subscribers = subscribers
+		if (subscribers === 0) return
 		const statuses = ids
 			? ids.flatMap(id => sourceManager.getStatus(id) ?? [])
 			: sourceManager.getAllStatus()

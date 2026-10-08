@@ -21,29 +21,13 @@ import type {
 	DecoderStatus as ApiDecoderStatus,
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
-import {
-	decoderRateAssessmentSchema,
-	decoderRateRequirementsSchema,
-} from "./decoder-rate-schemas.js"
-import { decoderStatusExtensionProperties } from "./decoder-status-schemas.js"
+import { decoderRateRequirementsSchema } from "./decoder-rate-schemas.js"
+import { decoderStatusSchema } from "./decoder-status-schemas.js"
 import {
 	toApiDecoderCaps,
 	toApiDecoderInfo,
 	toApiDecoderStatus,
 } from "../serializers/decoder-status.js"
-
-/**
- * Decoder stats schema for response
- */
-const decoderStatsSchema = {
-	type: "object",
-	properties: {
-		bytesIn: { type: "number" },
-		eventsOut: { type: "number" },
-		errors: { type: "number" },
-	},
-	required: ["bytesIn", "eventsOut", "errors"],
-} as const
 
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
@@ -62,36 +46,6 @@ const decoderCapsSchema = {
 		},
 	},
 	required: ["input", "output", "integrationPattern"],
-} as const
-
-/**
- * Decoder status schema for response (Requirements 9.6, 20.1, 20.2, 20.3)
- */
-const decoderStatusSchema = {
-	type: "object",
-	properties: {
-		id: { type: "string" },
-		type: { type: "string" },
-		running: { type: "boolean" },
-		health: { type: "string", enum: ["running", "idle", "faulted"] },
-		pid: { type: "number" },
-		uptime: { type: "number" },
-		stats: decoderStatsSchema,
-		lastOutputAt: { type: "string", format: "date-time", nullable: true },
-		restartCount: { type: "number" },
-		version: { type: "string" },
-		rateAssessment: decoderRateAssessmentSchema,
-		...decoderStatusExtensionProperties,
-	},
-	required: [
-		"id",
-		"type",
-		"running",
-		"health",
-		"uptime",
-		"stats",
-		"restartCount",
-	],
 } as const
 
 /**

@@ -83,6 +83,8 @@ interface DecoderState {
 	versionValidation?: VersionValidationResult | undefined
 	/** Most recent failure; retained across auto-restarts, cleared by startDecoder */
 	lastError: DecoderLastError | null
+	/** When the current run started; scopes lastError to a run */
+	lastStartedAt: Date | null
 }
 
 /**
@@ -107,6 +109,8 @@ export interface DecoderManagerEvents {
 	"decoder:max-restarts": (decoderId: string, restartCount: number) => void
 	/** Emitted when decoder health changes (Requirement 20.4) */
 	"decoder:health": (decoderId: string, health: DecoderHealth) => void
+	/** Emitted after stop/exit cleanup so status consumers read the final state */
+	"decoder:status-changed": (decoderId: string) => void
 	/** Emitted when decoder version validation fails (Requirement 27.2) */
 	"decoder:version-mismatch": (
 		decoderId: string,
@@ -216,6 +220,7 @@ export class DecoderManager extends EventEmitter {
 			lastOutputAt: null,
 			versionValidation,
 			lastError: null,
+			lastStartedAt: null,
 		}
 
 		this.decoders.set(config.id, state)
@@ -295,6 +300,7 @@ export class DecoderManager extends EventEmitter {
 			await state.decoder.stop()
 		} finally {
 			this.unwireDecoderFromFanout(state)
+			this.emitStatusChanged(state)
 		}
 	}
 
@@ -518,6 +524,7 @@ export class DecoderManager extends EventEmitter {
 		decoder.on("started", () => {
 			try {
 				state.lastOutputAt = null
+				state.lastStartedAt = new Date()
 				// Reset health to running when decoder starts (Requirement 20.1)
 				this.updateDecoderHealth(state, "running")
 				this.emit("decoder:started", decoder.id)
@@ -591,6 +598,21 @@ export class DecoderManager extends EventEmitter {
 			)
 		}
 
+		// Real exits carry a code or signal; (null, null) marks a failed restart
+		// whose cause the restart path already recorded. An error from this same
+		// run is more specific than the generic exit that follows it.
+		const errorThisRun =
+			state.lastError?.kind === "error" &&
+			(state.lastStartedAt === null ||
+				state.lastError.at.getTime() >= state.lastStartedAt.getTime())
+		if (
+			!state.intentionallyStopped &&
+			(code !== null || signal !== null) &&
+			!errorThisRun
+		)
+			state.lastError = createDecoderExitError(code, signal)
+		this.emitStatusChanged(state)
+
 		// Don't restart if intentionally stopped
 		if (state.intentionallyStopped) {
 			this.log.debug(
@@ -599,11 +621,6 @@ export class DecoderManager extends EventEmitter {
 			)
 			return
 		}
-
-		// Real exits carry a code or signal; (null, null) marks a failed restart
-		// whose cause the restart path already recorded.
-		if (code !== null || signal !== null)
-			state.lastError = createDecoderExitError(code, signal)
 
 		// Check if max restarts exceeded (Requirement 20.3)
 		if (
@@ -1255,6 +1272,21 @@ export class DecoderManager extends EventEmitter {
 					"Error during health check for decoder, continuing with other decoders",
 				)
 			}
+		}
+	}
+
+	/**
+	 * Signals that a decoder's status settled after cleanup. Listener failures
+	 * are isolated so they never interrupt stop or restart handling.
+	 */
+	private emitStatusChanged(state: DecoderState): void {
+		try {
+			this.emit("decoder:status-changed", state.decoder.id)
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: state.decoder.id },
+				"Error handling decoder status-changed event, continuing operation",
+			)
 		}
 	}
 

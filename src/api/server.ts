@@ -131,6 +131,7 @@ export class ApiServer {
 			sourceManager: this.sourceManager,
 			fanoutTelemetry: this.fanoutTelemetry,
 			broadcaster: this.wsBroadcaster,
+			logger: dependencies.logger,
 		})
 
 		// Create Fastify instance with custom logger
@@ -325,6 +326,8 @@ export class ApiServer {
 			"decoder:health",
 			"decoder:restarting",
 			"decoder:max-restarts",
+			// after stop/exit cleanup (unwire), so the final status is not stale
+			"decoder:status-changed",
 		] as const)
 			this.decoderManager.on(event, publishDecoderStatus)
 

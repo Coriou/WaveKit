@@ -90,8 +90,14 @@ function createBroadcaster(subscribers = 1) {
 	}
 }
 
+function createLogger() {
+	const log = { error: vi.fn(), warn: vi.fn(), info: vi.fn(), debug: vi.fn() }
+	return { log, logger: { child: vi.fn(() => log) } }
+}
+
 let sourceManager: ReturnType<typeof createSourceManager>
 let broadcaster: ReturnType<typeof createBroadcaster>
+let logging: ReturnType<typeof createLogger>
 let publisher: SourceStatusPublisher
 
 function sentIds(): string[] {
@@ -104,10 +110,12 @@ beforeEach(() => {
 	vi.useFakeTimers()
 	sourceManager = createSourceManager([makeStatus("rtl"), makeStatus("pi")])
 	broadcaster = createBroadcaster()
+	logging = createLogger()
 	publisher = new SourceStatusPublisher({
 		sourceManager: sourceManager as never,
 		fanoutTelemetry: fanout as never,
 		broadcaster,
+		logger: logging.logger as never,
 	})
 	publisher.start()
 })
@@ -170,6 +178,43 @@ describe("SourceStatusPublisher", () => {
 		expect(broadcaster.broadcastSourceStatus).not.toHaveBeenCalled()
 		expect(sourceManager.getAllStatus).not.toHaveBeenCalled()
 		broadcaster.subscribers = 1
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl", "pi"])
+	})
+
+	it("sends a fresh snapshot when an additional subscriber joins", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl", "pi"])
+		broadcaster.broadcastSourceStatus.mockClear()
+		broadcaster.subscribers = 2
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl", "pi"])
+		broadcaster.broadcastSourceStatus.mockClear()
+		// a leaving subscriber needs nothing; a later rejoin snapshots again
+		broadcaster.subscribers = 1
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(broadcaster.broadcastSourceStatus).not.toHaveBeenCalled()
+		broadcaster.subscribers = 2
+		sourceManager.emit("connected", "pi")
+		expect(sentIds()).toEqual(["pi"])
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["pi", "rtl"])
+	})
+
+	it("logs and survives a serializer failure from the timer and from a source event", async () => {
+		expect(logging.logger.child).toHaveBeenCalledWith({
+			component: "SourceStatusPublisher",
+		})
+		sourceManager.getSourceAssignments.mockImplementation(() => {
+			throw new Error("assignments exploded")
+		})
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(() => sourceManager.emit("connected", "rtl")).not.toThrow()
+		expect(logging.log.error).toHaveBeenCalledTimes(2)
+		expect(logging.log.error.mock.calls[0]![0]).toMatchObject({
+			err: expect.objectContaining({ message: "assignments exploded" }),
+		})
+		sourceManager.getSourceAssignments.mockReturnValue([])
 		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
 		expect(sentIds()).toEqual(["rtl", "pi"])
 	})

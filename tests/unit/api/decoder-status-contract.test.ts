@@ -142,6 +142,12 @@ describe("legacy /api/status decoder entries", () => {
 	it("carries the same new fields", async () => {
 		const app = Fastify()
 		const status = fullStatus()
+		status.rateAssessment = {
+			verdict: "acceptable",
+			sourceKind: "iq",
+			sourceRateHz: 2_400_000,
+			adaptation: "integer-decimation",
+		}
 		await app.register(healthRoutes, {
 			decoderManager: {
 				getAllStatus: () => [status],
@@ -154,6 +160,10 @@ describe("legacy /api/status decoder entries", () => {
 		await app.close()
 		expect(response.statusCode).toBe(200)
 		expect(response.json().decoders[0]).toMatchObject(expectedFields)
+		// rateAssessment is no longer stripped by the /api/status schema
+		expect(response.json().decoders[0].rateAssessment).toEqual(
+			status.rateAssessment,
+		)
 	})
 })
 
@@ -199,6 +209,7 @@ describe("decoder:status WebSocket event", () => {
 		["decoder:health", ["acars", "idle"]],
 		["decoder:restarting", ["acars", 3, 8000]],
 		["decoder:max-restarts", ["acars", 5]],
+		["decoder:status-changed", ["acars"]],
 	] as const)(
 		"publishes the GET /api/decoders/:id body on %s",
 		async (event, args) => {

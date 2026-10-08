@@ -271,6 +271,41 @@ describe("lastError (request 3)", () => {
 		})
 	})
 
+	it("keeps an error from the current run instead of the generic exit that follows it", async () => {
+		const decoder = create({ id: "a" })
+		manager.on("decoder:error", () => {})
+		await manager.startDecoder("a")
+		await vi.advanceTimersByTimeAsync(5)
+		decoder.emit("error", new Error("bind EADDRINUSE 0.0.0.0:30003"))
+		decoder.crash(1)
+		expect(manager.getStatus("a")?.lastError).toMatchObject({
+			kind: "error",
+			message: "bind EADDRINUSE 0.0.0.0:30003",
+		})
+		// the next run starts later; its own exit then replaces the old error
+		await vi.advanceTimersByTimeAsync(10)
+		expect(decoder.running).toBe(true)
+		await vi.advanceTimersByTimeAsync(5)
+		decoder.crash(2)
+		expect(manager.getStatus("a")?.lastError).toMatchObject({
+			kind: "exit",
+			message: "Process exited unexpectedly (code 2)",
+		})
+	})
+
+	it("emits decoder:status-changed after stop and exit cleanup", async () => {
+		const decoder = create({ id: "a" })
+		const changed = vi.fn()
+		manager.on("decoder:status-changed", changed)
+		await manager.startDecoder("a")
+		decoder.crash(1)
+		expect(changed).toHaveBeenCalledWith("a")
+		changed.mockClear()
+		await vi.advanceTimersByTimeAsync(10)
+		await manager.stopDecoder("a")
+		expect(changed).toHaveBeenCalledWith("a")
+	})
+
 	it("is not recorded for an intentional stop", async () => {
 		const decoder = create({ id: "a" })
 		await manager.startDecoder("a")
@@ -291,6 +326,19 @@ describe("lastError (request 3)", () => {
 		await manager.startDecoder("a")
 		expect(manager.getStatus("a")).not.toHaveProperty("lastError")
 		expect(manager.getStatus("a")?.restartCount).toBe(0)
+	})
+
+	it("never splits a surrogate pair when truncating", () => {
+		const emoji = "\u{1F6F0}" // two UTF-16 code units
+		const message =
+			"x".repeat(DECODER_LAST_ERROR_MAX_LENGTH - 2) + emoji + "tail"
+		const bounded = createDecoderLastError(message, "error").message
+		expect(bounded.length).toBeLessThanOrEqual(DECODER_LAST_ERROR_MAX_LENGTH)
+		expect(bounded.endsWith("…")).toBe(true)
+		const loneSurrogate =
+			/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/
+		expect(loneSurrogate.test(bounded)).toBe(false)
+		expect(bounded).toBe(`${"x".repeat(DECODER_LAST_ERROR_MAX_LENGTH - 2)}…`)
 	})
 
 	it("normalizes non-Error values", () => {
