@@ -317,6 +317,30 @@ logging:
   # dir: "./logs"  # Uncomment to enable file logging
 
 # -----------------------------------------------------------------------------
+# CSDR ring buffers
+# -----------------------------------------------------------------------------
+# Upstream CSDR keeps one shared-memory ring per pipeline stage: 80 MiB for a
+# complex stage, 40 MiB for a float stage and 800 MiB for each firdecimate. The
+# kernel keeps those pages resident once the stream has wrapped them. With
+# boundedBuffers enabled, WaveKit's patched CSDR uses bufferElements instead,
+# but only for stages that the native harness has validated:
+# convert, firdecimate, fmdemod, amdemod, agc, dcblock, gain, limit and
+# realpart. Others, including lowpass, deemphasis and bandpass, keep upstream
+# rings. See src/decoders/csdr-buffers.ts.
+#
+# Options:
+#   boundedBuffers - false keeps upstream rings everywhere (default: false)
+#   bufferElements - ring size in elements, 2048..10485760 (default: 65536)
+#
+# Env: WAVEKIT_CSDR__BOUNDED_BUFFERS=true, WAVEKIT_CSDR__BUFFER_ELEMENTS=65536.
+# Setting the native WAVEKIT_CSDR_BUFFER_ELEMENTS on the container has no
+# effect. WaveKit strips it from child shells.
+
+csdr:
+  boundedBuffers: false
+  bufferElements: 65536
+
+# -----------------------------------------------------------------------------
 # Health Monitoring
 # -----------------------------------------------------------------------------
 # Configure decoder health monitoring. Decoders transition through health states:

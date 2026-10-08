@@ -16,6 +16,10 @@ import "./bootstrap.js"
 
 import { PassThrough } from "node:stream"
 import { loadConfig, LiveDemodConfigSchema, type Config } from "./config.js"
+import {
+	CSDR_BUFFER_ENV,
+	configureCsdrBuffers,
+} from "./decoders/csdr-buffers.js"
 import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
@@ -213,6 +217,26 @@ async function main(): Promise<void> {
 			},
 		},
 		"Starting WaveKit",
+	)
+
+	// CSDR ring sizing applies only to validated streaming stages; an inherited
+	// native setting is stripped from child shells so it cannot widen that set.
+	configureCsdrBuffers({
+		enabled: config.csdr.boundedBuffers,
+		elements: config.csdr.bufferElements,
+	})
+	if (process.env[CSDR_BUFFER_ENV] !== undefined) {
+		log.warn(
+			{ env: CSDR_BUFFER_ENV },
+			"Ignoring inherited CSDR buffer setting; use csdr.boundedBuffers / WAVEKIT_CSDR__BOUNDED_BUFFERS",
+		)
+	}
+	log.info(
+		{
+			boundedBuffers: config.csdr.boundedBuffers,
+			bufferElements: config.csdr.bufferElements,
+		},
+		"CSDR ring policy",
 	)
 
 	// Step 3: Create graceful shutdown handler (Requirement 14.1)

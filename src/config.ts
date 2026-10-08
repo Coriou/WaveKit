@@ -2,6 +2,10 @@ import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
 import { ConfigValidationError } from "./utils/errors.js"
+import {
+	CSDR_BUFFER_MAX_ELEMENTS,
+	CSDR_BUFFER_MIN_ELEMENTS,
+} from "./decoders/csdr-buffers.js"
 
 // ============================================================================
 // Zod Schemas
@@ -222,6 +226,24 @@ export const ResourcesConfigSchema = z.object({
 })
 
 /**
+ * Schema for CSDR DSP stage tuning.
+ * `boundedBuffers` caps the per-process ring of harness-validated streaming
+ * stages (see src/decoders/csdr-buffers.ts); false keeps upstream rings.
+ * Limits mirror the native WAVEKIT_CSDR_BUFFER_ELEMENTS validation.
+ */
+export const CsdrConfigSchema = z.object({
+	/** Enable bounded rings for validated stages (default: false = upstream) */
+	boundedBuffers: z.boolean().default(false),
+	/** Ring size in input elements for bounded stages */
+	bufferElements: z
+		.number()
+		.int()
+		.min(CSDR_BUFFER_MIN_ELEMENTS)
+		.max(CSDR_BUFFER_MAX_ELEMENTS)
+		.default(65536),
+})
+
+/**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
@@ -235,6 +257,7 @@ export const ConfigSchema = z.object({
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
 	resources: ResourcesConfigSchema.default({}),
+	csdr: CsdrConfigSchema.default({}),
 })
 
 // ============================================================================
@@ -252,6 +275,7 @@ export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
+export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================

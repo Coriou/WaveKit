@@ -22,6 +22,7 @@
 import * as fs from "node:fs"
 import * as path from "node:path"
 import { shellArg, shellCommand } from "../process-tools.js"
+import { boundCsdrStages } from "../csdr-buffers.js"
 import { AudioDemodDecoder } from "../audio-demod-decoder.js"
 import type {
 	DecoderCaps,
@@ -602,7 +603,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		csdrStages.push("csdr convert -i float -o s16")
 
 		// Join csdr stages
-		let pipelineStr = csdrStages.join(" | ")
+		let pipelineStr = boundCsdrStages(csdrStages).join(" | ")
 
 		// DEBUG: Record raw audio at demod rate before sox processing
 		if (debugFile && this.debugRecording) {

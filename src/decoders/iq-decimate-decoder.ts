@@ -21,6 +21,7 @@
  */
 
 import { iqResampleCommand, shellCommand } from "./process-tools.js"
+import { boundCsdrStages } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
 import type { DecoderCaps, DecoderConfig, DecoderOutput } from "./types.js"
 import type { Logger } from "../utils/logger.js"
@@ -175,7 +176,7 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 			"csdr convert -i float -o char", // complex float → U8 IQ
 		]
 
-		const pipelineStr = csdrStages.join(" | ")
+		const pipelineStr = boundCsdrStages(csdrStages).join(" | ")
 
 		// Build decoder command with args
 		const decoderCommand = this.getDecoderCommand()
