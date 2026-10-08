@@ -17,7 +17,7 @@ import type {
 	SourceStatus,
 	DecoderCaps,
 } from "../../core/source-manager.js"
-import type { FanoutManager } from "../../core/fanout-manager.js"
+import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js"
 import type {
 	DecoderAssignment as ApiDecoderAssignment,
 	ExtendedSourceStatus as ApiExtendedSourceStatus,
@@ -248,7 +248,7 @@ const unassignmentResponseSchema = {
  */
 export interface SourceRoutesOptions {
 	sourceManager: SourceManager
-	fanoutManager?: FanoutManager
+	fanoutManager?: FanoutTelemetryProvider
 }
 
 /**

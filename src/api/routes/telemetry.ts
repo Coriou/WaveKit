@@ -7,7 +7,7 @@
  */
 
 import type { FastifyPluginAsync } from "fastify"
-import type { FanoutManager } from "../../core/fanout-manager.js"
+import type { FanoutTelemetryProvider } from "../../core/source-fanout-router.js"
 import type { BranchTelemetry, FanoutSnapshot } from "@wavekit/api-types"
 
 // ============================================================================
@@ -69,6 +69,10 @@ const branchTelemetrySchema = {
 			type: "integer",
 			description: "Current buffer usage in bytes",
 		},
+		totalBytesWritten: {
+			type: "integer",
+			description: "Total bytes received by this branch",
+		},
 		highWaterMark: {
 			type: "integer",
 			description: "Buffer high water mark threshold",
@@ -109,6 +113,10 @@ const fanoutStatusSchema = {
 			type: "integer",
 			description: "Total bytes dropped across all branches",
 		},
+		totalBytesWritten: {
+			type: "integer",
+			description: "Total bytes received across all branches",
+		},
 		droppedChunksTotal: {
 			type: "integer",
 			description: "Total chunks dropped across all branches",
@@ -136,7 +144,7 @@ const branchesArraySchema = {
 // ============================================================================
 
 export interface TelemetryRoutesOptions {
-	fanoutManager: FanoutManager
+	fanoutManager: FanoutTelemetryProvider
 }
 
 // ============================================================================

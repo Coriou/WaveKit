@@ -11,6 +11,7 @@
  * - Centralized error handling
  */
 
+import type { FanoutTelemetryProvider } from "../core/source-fanout-router.js"
 import Fastify, { type FastifyInstance, type FastifyError } from "fastify"
 import fastifyCors from "@fastify/cors"
 import fastifyWebsocket from "@fastify/websocket"
@@ -63,6 +64,7 @@ export interface AudioConfig {
 export interface ApiServerDependencies {
 	sourceManager: SourceManager
 	fanoutManager: FanoutManager
+	fanoutTelemetry?: FanoutTelemetryProvider
 	decoderManager: DecoderManager
 	decoderRegistry?: DecoderRegistry | undefined
 	audioOutput: AudioOutput
@@ -90,6 +92,7 @@ export class ApiServer {
 	private readonly config: ApiServerConfig
 	private readonly sourceManager: SourceManager
 	private readonly fanoutManager: FanoutManager
+	private readonly fanoutTelemetry: FanoutTelemetryProvider
 	private readonly decoderManager: DecoderManager
 	private readonly decoderRegistry?: DecoderRegistry | undefined
 	private readonly audioOutput: AudioOutput
@@ -105,6 +108,8 @@ export class ApiServer {
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.sourceManager = dependencies.sourceManager
 		this.fanoutManager = dependencies.fanoutManager
+		this.fanoutTelemetry =
+			dependencies.fanoutTelemetry ?? dependencies.fanoutManager
 		this.decoderManager = dependencies.decoderManager
 		this.decoderRegistry = dependencies.decoderRegistry
 		this.audioOutput = dependencies.audioOutput
@@ -314,17 +319,17 @@ export class ApiServer {
 		})
 
 		// Fanout telemetry events (edge-triggered)
-		this.fanoutManager.on("backpressure", (branchId, bufferedBytes) => {
+		this.fanoutTelemetry.on("backpressure", (branchId, bufferedBytes) => {
 			this.wsBroadcaster.broadcastFanoutBackpressure(branchId, bufferedBytes)
 		})
 
-		this.fanoutManager.on("drain", (branchId, durationMs) => {
+		this.fanoutTelemetry.on("drain", (branchId, durationMs) => {
 			this.wsBroadcaster.broadcastFanoutDrain(branchId, durationMs)
 		})
 
 		// Periodic fanout telemetry snapshot (every 1 second)
 		this.telemetryInterval = setInterval(() => {
-			const snapshot = this.fanoutManager.getTelemetrySnapshot()
+			const snapshot = this.fanoutTelemetry.getTelemetrySnapshot()
 			this.wsBroadcaster.broadcastFanoutSnapshot(snapshot)
 		}, 1000)
 
@@ -641,7 +646,7 @@ export class ApiServer {
 		// Register source routes (Requirement 9.3, 9.4, 9.5)
 		await this.app.register(sourceRoutes, {
 			sourceManager: this.sourceManager,
-			fanoutManager: this.fanoutManager,
+			fanoutManager: this.fanoutTelemetry,
 		})
 
 		// Register decoder routes (Requirement 9.6, 9.7, 9.8, 9.9)
@@ -652,7 +657,7 @@ export class ApiServer {
 
 		// Register telemetry routes (Fanout backpressure monitoring)
 		await this.app.register(telemetryRoutes, {
-			fanoutManager: this.fanoutManager,
+			fanoutManager: this.fanoutTelemetry,
 		})
 
 		if (this.tunerRelay) {

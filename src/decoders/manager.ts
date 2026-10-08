@@ -26,6 +26,7 @@ import type {
 	DecoderStatus,
 } from "./types.js"
 import type { DecoderRegistry } from "./registry.js"
+import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
@@ -64,6 +65,8 @@ interface DecoderState {
 	restartTimer: ReturnType<typeof setTimeout> | null
 	intentionallyStopped: boolean
 	branchId: string | null
+	branchFanout: FanoutManager | null
+	assignedSourceId: string | null
 	/** Last known health state for change detection */
 	lastHealth: DecoderHealth
 	/** Timestamp of last output received */
@@ -129,12 +132,14 @@ export class DecoderManager extends EventEmitter {
 	private readonly decoders: Map<string, DecoderState> = new Map()
 	private healthCheckTimer: ReturnType<typeof setInterval> | null = null
 	private sourceManager: SourceManager | null = null
+	private sourceRouting: SourceFanoutRouter | null = null
+	private ownsSourceRouting = false
+	private sourceConnectedHandler: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
-	private pendingCapsChange: { sourceId: string; caps: SourceCaps } | null =
-		null
+	private readonly pendingCapsChanges = new Map<string, SourceCaps>()
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -192,6 +197,8 @@ export class DecoderManager extends EventEmitter {
 			restartTimer: null,
 			intentionallyStopped: false,
 			branchId: null,
+			branchFanout: null,
+			assignedSourceId: null,
 			lastHealth: "running",
 			lastOutputAt: null,
 			versionValidation,
@@ -267,10 +274,11 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		// Stop the decoder process
-		await state.decoder.stop()
-
-		// Clean up fanout branch
-		this.unwireDecoderFromFanout(state)
+		try {
+			await state.decoder.stop()
+		} finally {
+			this.unwireDecoderFromFanout(state)
+		}
 	}
 
 	/**
@@ -416,11 +424,17 @@ export class DecoderManager extends EventEmitter {
 		// Unsubscribe from source caps changes
 		this.unsubscribeFromSourceCapsChanges()
 
+		if (this.sourceConnectedHandler && this.sourceManager) {
+			this.sourceManager.off("connected", this.sourceConnectedHandler)
+			this.sourceConnectedHandler = null
+		}
+
 		await this.stopAll()
 
 		for (const id of this.decoders.keys()) {
 			await this.removeDecoder(id)
 		}
+		if (this.ownsSourceRouting) this.sourceRouting?.destroy()
 	}
 
 	/**
@@ -637,16 +651,30 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 
-		// Create a branch ID based on decoder ID
+		const sourceId = config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
+		if (config.sourceId && !this.sourceRouting) {
+			throw new Error(
+				`Source routing is not configured for decoder ${config.id}`,
+			)
+		}
+		if (sourceId && this.sourceManager) {
+			this.sourceManager.assignDecoder(config.id, sourceId, {
+				input: decoder.caps.input,
+				wantsExclusiveSource: decoder.caps.wantsExclusiveSource ?? false,
+			})
+			state.assignedSourceId = sourceId
+		}
 		const branchId = `decoder-${config.id}`
-
-		// Add branch to fanout
-		const branch = this.fanout.addBranch({ id: branchId })
-
-		// Attach branch to decoder input
-		decoder.attachInput(branch)
-
+		const fanout = this.sourceRouting?.getFanout(sourceId) ?? this.fanout
+		// Track resources before attaching so failed attachment is cleaned up too.
 		state.branchId = branchId
+		state.branchFanout = fanout
+		const branch = fanout.addBranch({
+			id: branchId,
+			decoderId: config.id,
+			...(sourceId ? { sourceId } : {}),
+		})
+		decoder.attachInput(branch)
 
 		this.log.debug(
 			{ decoderId: decoder.id, branchId },
@@ -658,17 +686,23 @@ export class DecoderManager extends EventEmitter {
 	 * Unwires a decoder from its fanout branch.
 	 */
 	private unwireDecoderFromFanout(state: DecoderState): void {
-		const { decoder, branchId } = state
-
+		const { decoder, branchId, branchFanout, assignedSourceId } = state
+		try {
+			if (branchId) decoder.detachInput()
+		} finally {
+			try {
+				if (branchId) branchFanout?.removeBranch(branchId)
+			} finally {
+				state.branchId = null
+				state.branchFanout = null
+				state.assignedSourceId = null
+				if (assignedSourceId) {
+					this.sourceManager?.unassignDecoder(state.config.id)
+					this.sourceRouting?.releaseUnused(assignedSourceId)
+				}
+			}
+		}
 		if (branchId) {
-			// Detach input from decoder
-			decoder.detachInput()
-
-			// Remove branch from fanout
-			this.fanout.removeBranch(branchId)
-
-			state.branchId = null
-
 			this.log.debug(
 				{ decoderId: decoder.id, branchId },
 				"Decoder unwired from fanout branch",
@@ -687,8 +721,53 @@ export class DecoderManager extends EventEmitter {
 	 *
 	 * @param sourceManager - The source manager instance
 	 */
-	setSourceManager(sourceManager: SourceManager): void {
+	setSourceManager(
+		sourceManager: SourceManager,
+		routing?: SourceFanoutRouter,
+	): void {
+		if (this.sourceConnectedHandler && this.sourceManager) {
+			this.sourceManager.off("connected", this.sourceConnectedHandler)
+		}
+		this.unsubscribeFromSourceCapsChanges()
+		if (this.ownsSourceRouting) this.sourceRouting?.destroy()
 		this.sourceManager = sourceManager
+		this.sourceRouting =
+			routing ??
+			new SourceFanoutRouter(
+				sourceManager,
+				this.fanout,
+				this.log,
+				sourceManager.getAllStatus()[0]?.id,
+			)
+		this.ownsSourceRouting = !routing
+		this.sourceConnectedHandler = sourceId => {
+			for (const state of this.decoders.values()) {
+				const selected =
+					state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
+				if (!state.branchId || selected !== sourceId) continue
+				try {
+					sourceManager.assignDecoder(state.config.id, sourceId, {
+						input: state.decoder.caps.input,
+						wantsExclusiveSource:
+							state.decoder.caps.wantsExclusiveSource ?? false,
+					})
+					state.assignedSourceId = sourceId
+				} catch (err) {
+					this.log.error(
+						{ err, decoderId: state.config.id, sourceId },
+						"Source reassignment failed",
+					)
+					this.unwireDecoderFromFanout(state)
+					void this.stopDecoder(state.config.id).catch(error => {
+						this.log.error(
+							{ err: error, decoderId: state.config.id },
+							"Failed to stop decoder after source reassignment failure",
+						)
+					})
+				}
+			}
+		}
+		sourceManager.on("connected", this.sourceConnectedHandler)
 		this.subscribeToSourceCapsChanges()
 	}
 
@@ -702,7 +781,7 @@ export class DecoderManager extends EventEmitter {
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			// Store the pending change for debounced processing
-			this.pendingCapsChange = { sourceId, caps }
+			this.pendingCapsChanges.set(sourceId, caps)
 
 			// Debounce rapid changes - SDR++ may send multiple rate changes quickly
 			if (this.capsChangeDebounceTimer) {
@@ -711,10 +790,10 @@ export class DecoderManager extends EventEmitter {
 
 			this.capsChangeDebounceTimer = setTimeout(() => {
 				this.capsChangeDebounceTimer = null
-				const pending = this.pendingCapsChange
-				this.pendingCapsChange = null
-				if (pending) {
-					void this.handleCapsChange(pending.sourceId, pending.caps)
+				const pending = new Map(this.pendingCapsChanges)
+				this.pendingCapsChanges.clear()
+				for (const [id, changedCaps] of pending) {
+					void this.handleCapsChange(id, changedCaps)
 				}
 			}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
 		}
@@ -735,7 +814,8 @@ export class DecoderManager extends EventEmitter {
 		// Find all running decoders using this source
 		for (const [decoderId, state] of this.decoders) {
 			if (
-				state.config.sourceId === sourceId &&
+				(state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()) ===
+					sourceId &&
 				state.decoder.getStatus().running
 			) {
 				affectedDecoders.push(decoderId)
@@ -819,7 +899,7 @@ export class DecoderManager extends EventEmitter {
 		if (this.capsChangeDebounceTimer) {
 			clearTimeout(this.capsChangeDebounceTimer)
 			this.capsChangeDebounceTimer = null
-			this.pendingCapsChange = null
+			this.pendingCapsChanges.clear()
 		}
 		if (this.capsChangedHandler && this.sourceManager) {
 			this.sourceManager.off("caps-changed", this.capsChangedHandler)

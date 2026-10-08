@@ -20,6 +20,7 @@ import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
+import { SourceFanoutRouter } from "./core/source-fanout-router.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
 import { TunerController } from "./core/tuner-controller.js"
@@ -172,45 +173,6 @@ function wireDecoderAudioToOutput(
 }
 
 /**
- * Wires source reconnection events to re-attach to fanout.
- * Ensures the fanout manager stays connected when sources reconnect.
- *
- * Requirements:
- * - 1.4: Handle source disconnection and reconnection
- * - 2.1: Maintain fanout connection to source
- *
- * @param sourceManager - The source manager
- * @param fanoutManager - The fanout manager
- * @param primarySourceId - The ID of the primary source to attach to fanout
- * @param log - Logger instance
- */
-function wireSourceReconnection(
-	sourceManager: SourceManager,
-	fanoutManager: FanoutManager,
-	primarySourceId: string,
-	log: Logger,
-): void {
-	// When the primary source reconnects, re-attach to fanout
-	sourceManager.on("connected", (sourceId: string) => {
-		if (sourceId === primarySourceId) {
-			const stream = sourceManager.getStream(sourceId)
-			if (stream) {
-				fanoutManager.attachSource(stream)
-				log.info({ sourceId }, "Source reconnected and re-attached to fanout")
-			}
-		}
-	})
-
-	// When the primary source disconnects, detach from fanout to prevent errors
-	sourceManager.on("disconnected", (sourceId: string) => {
-		if (sourceId === primarySourceId) {
-			fanoutManager.detachSource()
-			log.info({ sourceId }, "Source disconnected, detached from fanout")
-		}
-	})
-}
-
-/**
  * Main application bootstrap function.
  *
  * Initializes all components in the correct order:
@@ -264,6 +226,12 @@ async function main(): Promise<void> {
 	// Step 4: Initialize core components
 	const sourceManager = new SourceManager(logger)
 	const fanoutManager = new FanoutManager(logger)
+	const sourceRouting = new SourceFanoutRouter(
+		sourceManager,
+		fanoutManager,
+		logger,
+		config.sources[0]?.id,
+	)
 	const audioOutput = new AudioOutput(logger, {
 		port: config.audio.tcpPort,
 		format: config.audio.format,
@@ -369,7 +337,7 @@ async function main(): Promise<void> {
 	)
 
 	// Wire DecoderManager to SourceManager for dynamic sample rate handling
-	decoderManager.setSourceManager(sourceManager)
+	decoderManager.setSourceManager(sourceManager, sourceRouting)
 
 	// Step 6: Register built-in decoders with capabilities
 	decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
@@ -531,6 +499,7 @@ async function main(): Promise<void> {
 		{
 			sourceManager,
 			fanoutManager,
+			fanoutTelemetry: sourceRouting,
 			decoderManager,
 			decoderRegistry,
 			audioOutput,
@@ -569,6 +538,7 @@ async function main(): Promise<void> {
 		name: "fanout-manager",
 		handler: async () => {
 			log.info("Shutting down fanout manager")
+			sourceRouting.destroy()
 			fanoutManager.destroy()
 		},
 		timeout: 2000,
@@ -743,12 +713,6 @@ async function main(): Promise<void> {
 	aircraftEnrichmentService.start()
 
 	// Step 13: Connect to configured sources and wire to fanout
-	// Register before connecting: a source can reconnect while another source
-	// is still awaiting its initial connection.
-	const primarySourceId = config.sources[0]?.id
-	if (primarySourceId) {
-		wireSourceReconnection(sourceManager, fanoutManager, primarySourceId, log)
-	}
 	for (const sourceConfig of config.sources) {
 		try {
 			await sourceManager.connect(sourceConfig)
