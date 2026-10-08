@@ -4,7 +4,15 @@ export interface DecoderStats {
 	errors: number
 }
 
-export type DecoderHealth = "running" | "idle" | "faulted"
+/**
+ * - running: running (or stopped by the operator; see `running`)
+ * - idle: running without output for `idleTimeoutMs`
+ * - restarting: exited unexpectedly; an automatic restart is scheduled at `nextRestartAt`
+ * - faulted: crash loop (consecutive unstable runs) or restart budget exhausted.
+ *   With `nextRestartAt` retries continue and a stable run returns to "running";
+ *   without it the fault is terminal until an explicit start/restart.
+ */
+export type DecoderHealth = "running" | "idle" | "restarting" | "faulted"
 
 export type DecoderInputType = "audio_pcm" | "iq" | "external"
 
@@ -120,6 +128,8 @@ export interface DecoderStatus {
 	lastError?: DecoderLastError
 	/** Effective ms without output before `health` becomes "idle". */
 	idleTimeoutMs?: number
+	/** ISO-8601 time of the scheduled automatic restart; present only while one is pending. */
+	nextRestartAt?: string
 }
 
 /** GET /api/decoders item and `decoder:status` WebSocket payload. */

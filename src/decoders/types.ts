@@ -152,11 +152,13 @@ export interface DemodulationConfig {
  * - running: Decoder is running and producing output normally
  * - idle: Decoder is running but has not produced output for the configured timeout
  *         (this is normal when no signals are present on the frequency)
- * - faulted: Decoder has crashed and exceeded restart limits
+ * - restarting: Decoder exited unexpectedly and an automatic restart is scheduled
+ * - faulted: Crash loop (consecutive unstable runs, retries may continue) or
+ *            restart budget exhausted (terminal until an explicit start)
  *
  * Note: "degraded" is kept as an alias for backwards compatibility but "idle" is preferred.
  */
-export type DecoderHealth = "running" | "idle" | "faulted"
+export type DecoderHealth = "running" | "idle" | "restarting" | "faulted"
 
 // ============================================================================
 // Decoder Configuration
@@ -278,6 +280,8 @@ export interface DecoderStatus {
 	lastError?: DecoderLastError | undefined
 	/** Effective ms without output before health becomes "idle". */
 	idleTimeoutMs?: number | undefined
+	/** When the scheduled automatic restart fires; absent when none is pending. */
+	nextRestartAt?: Date | undefined
 }
 
 /**

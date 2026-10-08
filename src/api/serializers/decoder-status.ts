@@ -55,6 +55,9 @@ export function toApiDecoderStatus(
 		...(status.idleTimeoutMs !== undefined
 			? { idleTimeoutMs: status.idleTimeoutMs }
 			: {}),
+		...(status.nextRestartAt !== undefined
+			? { nextRestartAt: status.nextRestartAt.toISOString() }
+			: {}),
 	}
 }
 

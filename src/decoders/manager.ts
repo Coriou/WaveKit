@@ -57,6 +57,13 @@ export interface DecoderManagerConfig {
 	maxRestartDelay: number
 	/** Maximum number of restarts before giving up (0 = unlimited, default: 0) */
 	maxRestarts: number
+	/**
+	 * Consecutive unstable runs before health becomes "faulted" (default: 5).
+	 * Retries continue at the max backoff unless maxRestarts is exhausted.
+	 */
+	faultAfterFailures: number
+	/** A run that lasts this long (or produces output) is stable (default: 30000) */
+	stableRunMs: number
 	/** Interval in milliseconds between health checks (default: 5000) */
 	healthCheckInterval: number
 	/** Timeout in milliseconds without output before marking decoder as idle (default: 30000) */
@@ -74,6 +81,10 @@ interface DecoderState {
 	restartCount: number
 	currentDelay: number
 	restartTimer: ReturnType<typeof setTimeout> | null
+	/** When restartTimer fires; null when no automatic restart is pending */
+	nextRestartAt: Date | null
+	/** Unstable runs (or failed restarts) since the last stable run or explicit start */
+	consecutiveFailures: number
 	intentionallyStopped: boolean
 	stopRevision: number
 	inputCaps?: SourceCaps
@@ -129,6 +140,8 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 	restartDelay: 2000,
 	maxRestartDelay: 30000,
 	maxRestarts: 0,
+	faultAfterFailures: 5,
+	stableRunMs: 30000,
 	healthCheckInterval: 5000,
 	idleTimeout: 30000,
 	validateVersions: true,
@@ -231,6 +244,8 @@ export class DecoderManager extends EventEmitter {
 			restartCount: 0,
 			currentDelay: this.config.restartDelay,
 			restartTimer: null,
+			nextRestartAt: null,
+			consecutiveFailures: 0,
 			intentionallyStopped: false,
 			stopRevision: 0,
 			branchId: null,
@@ -274,12 +289,10 @@ export class DecoderManager extends EventEmitter {
 		// Reset restart tracking
 		state.intentionallyStopped = false
 		state.restartCount = 0
+		state.consecutiveFailures = 0
 		state.lastError = null
 		state.currentDelay = this.config.restartDelay
-		if (state.restartTimer) {
-			clearTimeout(state.restartTimer)
-			state.restartTimer = null
-		}
+		this.cancelScheduledRestart(state)
 
 		try {
 			await this.wireDecoderToFanout(state)
@@ -311,11 +324,11 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = true
 		state.stopRevision++
 
-		// Cancel any pending restart
-		if (state.restartTimer) {
-			clearTimeout(state.restartTimer)
-			state.restartTimer = null
-		}
+		// Cancel any pending restart; "restarting" no longer holds once the
+		// operator stopped the decoder (a fault stays visible until a start).
+		this.cancelScheduledRestart(state)
+		if (state.lastHealth === "restarting")
+			this.updateDecoderHealth(state, "running")
 
 		// Stop the decoder process
 		try {
@@ -430,6 +443,7 @@ export class DecoderManager extends EventEmitter {
 			health: state.lastHealth,
 			restartCount: state.restartCount,
 			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
+			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),
 			...describeDecoderStatusFields({
 				config: state.config,
 				caps: state.decoder.caps,
@@ -521,6 +535,8 @@ export class DecoderManager extends EventEmitter {
 			try {
 				state.lastOutputAt = new Date()
 				state.currentDelay = this.config.restartDelay
+				// Output proves the run is stable and ends any crash loop.
+				state.consecutiveFailures = 0
 				this.updateDecoderHealth(state, "running")
 				this.emit("decoder:output", decoder.id, output)
 			} catch (err) {
@@ -552,8 +568,9 @@ export class DecoderManager extends EventEmitter {
 			try {
 				state.lastOutputAt = null
 				state.lastStartedAt = new Date()
-				// Reset health to running when decoder starts (Requirement 20.1)
-				this.updateDecoderHealth(state, "running")
+				// Reset health to running when decoder starts (Requirement 20.1),
+				// except that a crash loop stays faulted until a run proves stable.
+				if (!this.inCrashLoop(state)) this.updateDecoderHealth(state, "running")
 				this.emit("decoder:started", decoder.id)
 			} catch (err) {
 				this.log.error(
@@ -614,6 +631,7 @@ export class DecoderManager extends EventEmitter {
 		signal: string | null,
 	): void {
 		const { decoder } = state
+		const now = Date.now()
 
 		// Clean up fanout branch on exit - wrapped in try-catch for isolation (Requirement 10.1)
 		try {
@@ -632,13 +650,9 @@ export class DecoderManager extends EventEmitter {
 			state.lastError?.kind === "error" &&
 			(state.lastStartedAt === null ||
 				state.lastError.at.getTime() >= state.lastStartedAt.getTime())
-		if (
-			!state.intentionallyStopped &&
-			(code !== null || signal !== null) &&
-			!errorThisRun
-		)
+		const realExit = code !== null || signal !== null
+		if (!state.intentionallyStopped && realExit && !errorThisRun)
 			state.lastError = createDecoderExitError(code, signal)
-		this.emitStatusChanged(state)
 
 		// Don't restart if intentionally stopped
 		if (state.intentionallyStopped) {
@@ -646,8 +660,24 @@ export class DecoderManager extends EventEmitter {
 				{ decoderId: decoder.id },
 				"Decoder stopped intentionally, not restarting",
 			)
+			this.emitStatusChanged(state)
 			return
 		}
+
+		// A run that produced output or lasted stableRunMs ends any crash loop
+		// and resets the backoff; (null, null) is a failed restart, not a run.
+		const startedAt = state.lastStartedAt?.getTime()
+		const stableRun =
+			realExit &&
+			startedAt !== undefined &&
+			((state.lastOutputAt !== null &&
+				state.lastOutputAt.getTime() >= startedAt) ||
+				now - startedAt >= this.config.stableRunMs)
+		if (stableRun) {
+			state.consecutiveFailures = 0
+			state.currentDelay = this.config.restartDelay
+		}
+		state.consecutiveFailures++
 
 		// Check if max restarts exceeded (Requirement 20.3)
 		if (
@@ -660,6 +690,7 @@ export class DecoderManager extends EventEmitter {
 			)
 			// Set health to faulted when crash loop detected (Requirement 20.3)
 			this.updateDecoderHealth(state, "faulted")
+			this.emitStatusChanged(state)
 			this.emit("decoder:max-restarts", decoder.id, state.restartCount)
 			return
 		}
@@ -679,10 +710,17 @@ export class DecoderManager extends EventEmitter {
 			"Decoder exited unexpectedly, scheduling restart - other decoders continue operating",
 		)
 
+		state.nextRestartAt = new Date(now + delay)
+		this.updateDecoderHealth(
+			state,
+			this.inCrashLoop(state) ? "faulted" : "restarting",
+		)
+		this.emitStatusChanged(state)
 		this.emit("decoder:restarting", decoder.id, state.restartCount, delay)
 
 		state.restartTimer = setTimeout(() => {
 			state.restartTimer = null
+			state.nextRestartAt = null
 
 			// Use void to handle the promise without blocking
 			void (async () => {
@@ -1318,6 +1356,24 @@ export class DecoderManager extends EventEmitter {
 				const { decoder, lastOutputAt, lastHealth } = state
 				const status = decoder.getStatus()
 
+				// A crash-loop retry that stayed up for stableRunMs is stable again.
+				if (
+					status.running &&
+					lastHealth === "faulted" &&
+					this.inCrashLoop(state) &&
+					status.uptime * 1000 >= this.config.stableRunMs
+				) {
+					state.consecutiveFailures = 0
+					state.currentDelay = this.config.restartDelay
+					this.log.info(
+						{ decoderId: id, uptime: status.uptime },
+						"Decoder run is stable again, clearing crash-loop fault",
+					)
+					this.updateDecoderHealth(state, "running")
+					this.emitStatusChanged(state)
+					continue
+				}
+
 				// Skip if not running or already faulted
 				if (!status.running || lastHealth === "faulted") {
 					continue
@@ -1371,6 +1427,19 @@ export class DecoderManager extends EventEmitter {
 				)
 			}
 		}
+	}
+
+	/** Consecutive unstable runs reached the crash-loop threshold. */
+	private inCrashLoop(state: DecoderState): boolean {
+		return state.consecutiveFailures >= this.config.faultAfterFailures
+	}
+
+	private cancelScheduledRestart(state: DecoderState): void {
+		if (state.restartTimer) {
+			clearTimeout(state.restartTimer)
+			state.restartTimer = null
+		}
+		state.nextRestartAt = null
 	}
 
 	/**

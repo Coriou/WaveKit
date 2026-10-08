@@ -134,6 +134,12 @@ export function checkDecoderHealth(
 				message: `Decoder ${decoderId} is running but idle (no signals detected)`,
 				lastCheck: new Date().toISOString(),
 			}
+		case "restarting":
+			return {
+				status: "down",
+				message: `Decoder ${decoderId} exited and is restarting`,
+				lastCheck: new Date().toISOString(),
+			}
 		case "faulted":
 			return {
 				status: "down",

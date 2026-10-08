@@ -590,11 +590,24 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
 | `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
 | `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
+| `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
 
-`running` and `health` are independent: during automatic-restart backoff a
-decoder reports `running: false` while `health` keeps its last value (usually
-`"running"`) until it is restarted or `maxRestarts` is exhausted (`"faulted"`).
-Use `restartCount` and `lastError` to explain that state.
+`health` after an unexpected exit:
+
+- `"restarting"`: the process exited without being asked to stop and an
+  automatic restart is scheduled at `nextRestartAt`. The restarted run reports
+  `"running"` (then `"idle"` as usual).
+- `"faulted"` with `nextRestartAt`: crash loop. `health.faultAfterFailures`
+  (default 5) consecutive runs ended without output and before 30 s. Retries
+  continue at the maximum backoff (30 s); a run that produces output or stays
+  up 30 s returns to `"running"`.
+- `"faulted"` without `nextRestartAt`: terminal. The restart budget
+  (`maxRestarts`, unlimited by default) is exhausted or an explicit start
+  failed; an explicit start/restart is required.
+
+An explicit stop cancels a pending restart; a `"restarting"` decoder then
+reports `"running"` with `running: false` (a fault stays visible until the next
+explicit start). Use `restartCount` and `lastError` to explain these states.
 
 #### GET /api/decoders/:id
 

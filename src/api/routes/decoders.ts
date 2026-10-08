@@ -22,7 +22,10 @@ import type {
 } from "@wavekit/api-types"
 import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
 import { decoderRateRequirementsSchema } from "./decoder-rate-schemas.js"
-import { decoderStatusSchema } from "./decoder-status-schemas.js"
+import {
+	decoderHealthValues,
+	decoderStatusSchema,
+} from "./decoder-status-schemas.js"
 import {
 	toApiDecoderCaps,
 	toApiDecoderInfo,
@@ -572,7 +575,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 								id: { type: "string" },
 								health: {
 									type: "string",
-									enum: ["running", "idle", "faulted"],
+									enum: decoderHealthValues,
 								},
 							},
 							required: ["id", "health"],
