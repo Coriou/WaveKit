@@ -38,7 +38,9 @@ runcmd:
   - [echo, existing-command]
 `
 
-describe("Pi boot staging", () => {
+// Every test spawns real subprocesses (node/bash); their wall time scales with
+// host load and suite parallelism, so allow headroom beyond the 5 s default.
+describe("Pi boot staging", { timeout: 15000 }, () => {
 	let temp: string
 	let boot: string
 	let bundle: string
