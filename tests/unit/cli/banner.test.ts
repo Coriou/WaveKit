@@ -108,9 +108,7 @@ describe("banner copy (spec §9)", () => {
 		const out = t([
 			{ kind: "endpoint", path: "/api/x\x1b[2J", reason: "5\r00\x9b" },
 		])
-		expect(out).toBe(
-			"! GET /api/x[2J failing · 500 · other endpoints answering",
-		)
+		expect(out).toBe("! GET /api/x failing · 500 · other endpoints answering")
 	})
 
 	describe("fix round 1", () => {
