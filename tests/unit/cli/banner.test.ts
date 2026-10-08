@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest"
+import { describe, expect, it } from "vitest"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
 import {
 	bannerLine,
@@ -6,9 +6,15 @@ import {
 } from "../../../cli/source/ui/banner.js"
 import { lineText } from "../../../cli/source/ui/text.js"
 
-beforeAll(() => {
-	process.env["TZ"] = "UTC"
-})
+// Clock strings are local time; build expectations from the same instant via
+// local getters so the file passes in any timezone (no runtime TZ mutation).
+const pad2 = (n: number): string => String(n).padStart(2, "0")
+const localClock = (ms: number): string => {
+	const d = new Date(ms)
+	return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+}
+const AS_OF = Date.parse("2026-10-08T18:07:40Z")
+const REST_AS_OF = Date.parse("2026-10-08T18:08:20Z")
 
 const NOW = Date.parse("2026-10-08T18:10:11Z")
 const t = (conds: BannerCondition[], w = 119) => {
@@ -27,13 +33,13 @@ describe("banner copy (spec §9)", () => {
 					kind: "api-down",
 					reason: "ECONNREFUSED",
 					retryAt: NOW + 4000,
-					asOf: Date.parse("2026-10-08T18:07:40Z"),
+					asOf: AS_OF,
 					target: "http://127.0.0.1:9000",
 					tried: [],
 				},
 			]),
 		).toBe(
-			"! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:07:40",
+			`! API unreachable · ECONNREFUSED · retry in 4s · data as of ${localClock(AS_OF)}`,
 		)
 		expect(
 			t([
@@ -70,11 +76,11 @@ describe("banner copy (spec §9)", () => {
 					kind: "rest-down",
 					reason: "timeout 2s",
 					retryAt: NOW + 3000,
-					asOf: Date.parse("2026-10-08T18:08:20Z"),
+					asOf: REST_AS_OF,
 				},
 			]),
 		).toBe(
-			"! REST failing · timeout 2s · retry in 3s · REST data as of 18:08:20",
+			`! REST failing · timeout 2s · retry in 3s · REST data as of ${localClock(REST_AS_OF)}`,
 		)
 		expect(
 			t([{ kind: "endpoint", path: "/api/resources", reason: "500" }]),
@@ -134,13 +140,13 @@ describe("banner copy (spec §9)", () => {
 				kind: "api-down",
 				reason: long,
 				retryAt: NOW + 4000,
-				asOf: Date.parse("2026-10-08T18:07:40Z"),
+				asOf: AS_OF,
 				target: "http://127.0.0.1:9000",
 				tried: [],
 			}
 			const narrow = t([c], 80) ?? ""
 			expect(narrow).toContain("retry in 4s")
-			expect(narrow).toContain("data as of 18:07:40")
+			expect(narrow).toContain(`data as of ${localClock(AS_OF)}`)
 			expect(narrow).toContain("connect ECONNREFUSED")
 			expect(narrow).toContain("…")
 			expect(t([c], 200)).toContain(long)

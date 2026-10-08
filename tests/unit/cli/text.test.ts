@@ -5,6 +5,7 @@ import {
 	padEnd,
 	sanitize,
 	stripAnsi,
+	stripSequences,
 	truncate,
 	truncateLine,
 	lineWidth,
@@ -39,6 +40,24 @@ describe("sanitize", () => {
 		expect(sanitize("a\x9b2Jb\x9d0;t\x9cc")).toBe("abc")
 		expect(sanitize("a\x1b]0;never terminated")).toBe("a")
 		expect(sanitize("\x1b\x1b[0m[2J")).toBe("")
+	})
+
+	it("strips nested escape runs in one linear pass (B2 fix 2)", () => {
+		for (const k of [6_667, 33_333]) {
+			for (const s of [
+				"\x1b".repeat(k) + "[m".repeat(k),
+				"\x9b".repeat(k) + "m".repeat(k),
+			]) {
+				const r = stripSequences(s)
+				expect(r.text).toBe("")
+				expect(r.steps).toBeLessThanOrEqual(3 * s.length)
+				expect(sanitize(s)).toBe("")
+			}
+		}
+		const mixed = "a\x1b\x1b[0m[2Jb\x9d0;t\x07".repeat(5_000)
+		const r = stripSequences(mixed)
+		expect(r.text).toBe("ab".repeat(5_000))
+		expect(r.steps).toBeLessThanOrEqual(3 * mixed.length)
 	})
 
 	const ESCAPE_BITS = [
