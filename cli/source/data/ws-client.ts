@@ -20,9 +20,17 @@ function rawToString(data: WebSocket.RawData): string {
 	return Buffer.from(data).toString("utf8")
 }
 
-/** Every socket gets error and close handlers; nothing is logged. */
+/** ws has no default handshake timeout; a silent server would hold CONNECTING forever. */
+export const HANDSHAKE_TIMEOUT_MS = 2000
+/** Frames above this close the socket with 1009 (ws's own default is 100 MiB). */
+export const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
+
+/** Every socket gets error and close handlers; nothing is logged. Throws synchronously on a bad URL. */
 export const nodeWsFactory: WsFactory = (url, h) => {
-	const sock = new WebSocket(url)
+	const sock = new WebSocket(url, {
+		handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
+		maxPayload: MAX_PAYLOAD_BYTES,
+	})
 	sock.on("open", () => h.open())
 	sock.on("message", (data: WebSocket.RawData) => h.message(rawToString(data)))
 	sock.on("error", (err: Error) => h.error(err.message))
@@ -82,6 +90,8 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 	let attempt = 0
 	let stopped = true
 	let lastError = ""
+	/** True between the subscribe ack (ws:open) and the socket's close. */
+	let open = false
 
 	function clearTimer(): void {
 		if (timer !== null) deps.clearTimeout(timer)
@@ -110,44 +120,56 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		}
 		lastError = ""
 		deps.emit({ kind: "ws:connecting", at: deps.now(), attempt })
-		handle = deps.factory(url, {
-			open: () => {
-				if (gen !== generation) return
-				handle?.send(
-					JSON.stringify({ type: "subscribe", channels: [...CHANNELS] }),
-				)
-			},
-			message: text => {
-				if (gen !== generation) return
-				let raw: unknown
-				try {
-					raw = JSON.parse(text)
-				} catch {
-					deps.emit({ kind: "ws:invalid", at: deps.now() })
-					return
-				}
-				const event = parseServerMessage(raw)
-				if (!event) {
-					deps.emit({ kind: "ws:invalid", at: deps.now() })
-					return
-				}
-				if (event.type === "subscribed") {
-					attempt = 0
-					deps.emit({ kind: "ws:open", at: deps.now() })
-					return
-				}
-				deps.emit({ kind: "ws", event, at: deps.now() })
-			},
-			error: message => {
-				if (gen !== generation) return
-				lastError = message
-			},
-			close: (code, reason) => {
-				if (gen !== generation) return
-				handle = null
-				scheduleRetry(code, reason !== "" ? reason : lastError)
-			},
-		})
+		let local: WsHandle | null = null
+		try {
+			local = deps.factory(url, {
+				open: () => {
+					if (gen !== generation) return
+					local?.send(
+						JSON.stringify({ type: "subscribe", channels: [...CHANNELS] }),
+					)
+				},
+				message: text => {
+					if (gen !== generation) return
+					let raw: unknown
+					try {
+						raw = JSON.parse(text)
+					} catch {
+						deps.emit({ kind: "ws:invalid", at: deps.now() })
+						return
+					}
+					const event = parseServerMessage(raw)
+					if (!event) {
+						deps.emit({ kind: "ws:invalid", at: deps.now() })
+						return
+					}
+					if (event.type === "subscribed") {
+						attempt = 0
+						open = true
+						deps.emit({ kind: "ws:open", at: deps.now() })
+						return
+					}
+					deps.emit({ kind: "ws", event, at: deps.now() })
+				},
+				error: message => {
+					if (gen !== generation) return
+					lastError = message
+				},
+				close: (code, reason) => {
+					if (gen !== generation) return
+					handle = null
+					open = false
+					scheduleRetry(code, reason !== "" ? reason : lastError)
+				},
+			})
+		} catch (err: unknown) {
+			// A synchronous throw (e.g. a URL with a fragment) must not escape:
+			// from the retry timer it would be an uncaught exception.
+			handle = null
+			scheduleRetry(0, err instanceof Error ? err.message : String(err))
+			return
+		}
+		handle = local
 	}
 
 	return {
@@ -158,6 +180,7 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		},
 		stop: () => {
 			stopped = true
+			open = false
 			generation++
 			clearTimer()
 			handle?.close()
@@ -167,6 +190,18 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 			stopped = false
 			generation++
 			clearTimer()
+			if (open) {
+				// The old socket's own close is ignored (generation), so record the
+				// disconnect here; the reducer opens a gap on ws:close.
+				open = false
+				deps.emit({
+					kind: "ws:close",
+					at: deps.now(),
+					code: 1000,
+					reason: "reconnect requested",
+					nextRetryAt: deps.now(),
+				})
+			}
 			handle?.close()
 			handle = null
 			attempt = 0

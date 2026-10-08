@@ -1,4 +1,4 @@
-import type { AddressInfo } from "node:net"
+import { createServer, type AddressInfo, type Socket } from "node:net"
 import { describe, expect, it } from "vitest"
 import { WebSocketServer } from "ws"
 import {
@@ -174,4 +174,136 @@ describe("nodeWsFactory (in-test server on 127.0.0.1, never the live core)", () 
 		})
 		expect(typeof (await closed)).toBe("number")
 	})
+})
+
+describe("A2 fix round 1", () => {
+	it("I3: a factory that throws schedules a retry instead of escaping", () => {
+		const emitted: Inbound[] = []
+		const timers: Array<() => void> = []
+		let calls = 0
+		const client = createWsClient({
+			url: () => "ws://127.0.0.1:9000/ws",
+			factory: () => {
+				calls++
+				throw new SyntaxError("The URL contains a fragment identifier")
+			},
+			emit: i => emitted.push(i),
+			now: () => 1000,
+			random: () => 0.5,
+			setTimeout: fn => {
+				timers.push(fn)
+				return fn
+			},
+			clearTimeout: () => {},
+		})
+		expect(() => client.start()).not.toThrow()
+		expect(emitted.map(e => e.kind)).toEqual(["ws:connecting", "ws:close"])
+		expect(emitted[1]).toMatchObject({
+			code: 0,
+			reason: "The URL contains a fragment identifier",
+			nextRetryAt: 2000,
+		})
+		expect(() => timers.shift()?.()).not.toThrow()
+		expect(calls).toBe(2)
+		client.stop()
+	})
+	it("I3: nodeWsFactory throws synchronously on a fragment URL; the client survives it", () => {
+		expect(() =>
+			nodeWsFactory("ws://127.0.0.1:9/ws#x", {
+				open: () => {},
+				message: () => {},
+				close: () => {},
+				error: () => {},
+			}),
+		).toThrow()
+		const emitted: Inbound[] = []
+		const client = createWsClient({
+			url: () => "ws://127.0.0.1:9/ws#x",
+			factory: nodeWsFactory,
+			emit: i => emitted.push(i),
+			now: () => 0,
+			random: () => 0.5,
+			setTimeout: fn => fn,
+			clearTimeout: () => {},
+		})
+		expect(() => client.start()).not.toThrow()
+		expect(emitted.at(-1)?.kind).toBe("ws:close")
+		client.stop()
+	})
+	it("M1: reconnectNow on an open socket records a close before reconnecting", () => {
+		const { client, sockets, emitted } = harness()
+		client.start()
+		sockets[0]!.h.open()
+		sockets[0]!.h.message(
+			JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+		)
+		client.reconnectNow()
+		expect(emitted.map(e => e.kind)).toEqual([
+			"ws:connecting",
+			"ws:open",
+			"ws:close",
+			"ws:connecting",
+		])
+		expect(emitted[2]).toMatchObject({
+			code: 1000,
+			reason: "reconnect requested",
+			nextRetryAt: 1000,
+		})
+		// The synthetic close is emitted once; a later close of the old socket is ignored.
+		sockets[0]!.h.close(1006, "")
+		expect(emitted).toHaveLength(4)
+	})
+	it("M1: no synthetic close when the socket was never open", () => {
+		const { client, emitted } = harness()
+		client.start()
+		client.reconnectNow()
+		expect(emitted.map(e => e.kind)).toEqual(["ws:connecting", "ws:connecting"])
+	})
+	it("I2: a server that never answers the handshake closes the socket", async () => {
+		const held: Socket[] = []
+		const server = createServer(sock => held.push(sock))
+		await new Promise<void>(resolve =>
+			server.listen(0, "127.0.0.1", () => resolve()),
+		)
+		const { port } = server.address() as AddressInfo
+		const started = Date.now()
+		const code = await new Promise<number>(resolve => {
+			nodeWsFactory(`ws://127.0.0.1:${port}/ws`, {
+				open: () => {},
+				message: () => {},
+				close: c => resolve(c),
+				error: () => {},
+			})
+		})
+		expect(code).toBe(1006)
+		expect(Date.now() - started).toBeLessThan(10000)
+		for (const s of held) s.destroy()
+		await new Promise<void>(resolve => server.close(() => resolve()))
+	}, 20000)
+	it("M5: a frame over 8 MiB is refused and the socket closes", async () => {
+		const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 })
+		await new Promise<void>(resolve => wss.once("listening", () => resolve()))
+		const { port } = wss.address() as AddressInfo
+		const peerClose = new Promise<number>(resolve =>
+			wss.on("connection", sock => {
+				sock.on("close", code => resolve(code))
+				sock.send(Buffer.alloc(8 * 1024 * 1024 + 1, 0x61))
+			}),
+		)
+		const got: string[] = []
+		const errors: string[] = []
+		await new Promise<void>(resolve => {
+			nodeWsFactory(`ws://127.0.0.1:${port}/ws`, {
+				open: () => {},
+				message: t => got.push(t),
+				close: () => resolve(),
+				error: m => errors.push(m),
+			})
+		})
+		expect(got).toEqual([])
+		expect(errors.join(" ")).toMatch(/max payload size exceeded/i)
+		// ws tells the peer 1009 (message too big); locally the close reads 1006.
+		expect(await peerClose).toBe(1009)
+		await new Promise<void>(resolve => wss.close(() => resolve()))
+	}, 20000)
 })
