@@ -1,5 +1,31 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
+exports[`Overview goldens (spec §6.1) > api-down cold (no cache) 80x24 1`] = `
+" api × 2m 31s  iq ? unknown  decoders ?  drops ?                           18:07
+ ! API unreachable · ECONNREFUSED · retry in 4s · 127.0.0.1:9000
+ RECEIVER  no data · API unreachable
+ window
+   DECODERS          process             decodes           drop now  window
+ no data · API unreachable
+ MESSAGES  ? in 60s · ? total
+ no data · API unreachable
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ Overview · 1-5 views  ↑↓ select  r reconnect  q quit  ? help"
+`;
+
 exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 " api × 2m 31s  iq ? unknown  rx 445.971 MHz  decoders 1 restarting  drops ?
  ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
@@ -15,7 +41,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
  ● dumpvdl2          up 50s              none for 50s             ?  out
  ● direwolf          up 50s              none for 50s             ?  out
  ● lora-meshtastic   up 50s              none for 50s             ?  out
- MESSAGES  feed stopped 18:05:21 · 7 cached
+ MESSAGES  feed stopped 18:05:19 · 7 cached
  ── gap since 18:05:19 · 2m 33s ──
  18:05:11  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …
  18:04:50  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…

@@ -6,9 +6,12 @@ import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { initialUi } from "../../../cli/source/ui/ui-state.js"
 import {
 	emptyFeedLine,
+	feedHeader,
 	overviewModel,
 	receiverSummary,
 } from "../../../cli/source/view-models/overview.js"
+import { initialState } from "../../../cli/source/data/reducers.js"
+import { formatClock } from "../../../cli/source/ui/format.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -160,5 +163,56 @@ describe("decoder table kinds and dimming (B4 API)", () => {
 		expect(liveRow.some(sp => sp.role !== "old" && sp.text.trim() !== "")).toBe(
 			true,
 		)
+	})
+})
+
+describe("A6 fix 1: feed truth", () => {
+	const feedText = (st: ReturnType<typeof scenarioState>, w = 79, h = 22) =>
+		overviewModel(st, initialUi("overview"), w, h, false)
+			.left.map(lineText)
+			.join("\n")
+	it("C1: a full ring that turns over within 60 s shows N+", () => {
+		const s = scenarioState("live", deps)
+		const ring = {
+			...s.messages.ring,
+			capacity: s.messages.ring.entries.length,
+			entries: s.messages.ring.entries.map(e => ({
+				...e,
+				receivedAt: s.now - 1000,
+			})),
+		}
+		const full = { ...s, messages: { version: s.messages.version + 1, ring } }
+		expect(lineText(feedHeader(full))).toContain("7+ in 60s")
+	})
+	it("I2: feed stopped is anchored on the open gap, not the last retry", () => {
+		const s = scenarioState("api-down-cached", deps)
+		const gap = s.messages.ring.gaps.find(g => g.to === null)
+		expect(gap).toBeDefined()
+		const header = lineText(feedHeader(s))
+		expect(header).toContain(`feed stopped ${formatClock(gap!.from)}`)
+		const retried = {
+			...s,
+			conn: { ...s.conn, ws: { ...s.conn.ws, since: s.now - 500 } },
+		}
+		expect(lineText(feedHeader(retried))).toBe(header)
+	})
+	it("I1: a cold start with the API down shows §9 copy, never 0 counts or no decodes since", () => {
+		const text = feedText(scenarioState("api-down", deps))
+		expect(text).toContain("MESSAGES  ? in 60s · ? total")
+		expect(text).not.toMatch(/\b0 in 60s|0 total|no decodes since/)
+		expect(
+			text.split("\n").filter(l => l.includes("no data · API unreachable"))
+				.length,
+		).toBeGreaterThanOrEqual(2)
+	})
+	it("I1: a cold start before any answer says so without counts", () => {
+		const cold = initialState(Date.parse("2026-10-08T18:07:52Z"))
+		const text = feedText(cold)
+		expect(text).toContain("MESSAGES  ? in 60s · ? total")
+		expect(text).toContain("connecting to /ws")
+		expect(text).not.toMatch(/no decodes since|0 total/)
+	})
+	it("the empty state line still shows while the feed is live and empty", () => {
+		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes since/)
 	})
 })

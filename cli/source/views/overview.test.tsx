@@ -28,6 +28,7 @@ describe("Overview goldens (spec §6.1)", () => {
 		["live 60x20", "live", 60, 20],
 		["live 200x50", "live", 200, 50],
 		["api-down-cached 80x24", "api-down-cached", 80, 24],
+		["api-down cold (no cache) 80x24", "api-down", 80, 24],
 		["ws-only (REST down) 80x24", "ws-only", 80, 24],
 	]
 	for (const [name, scenario, cols, rows] of cases) {

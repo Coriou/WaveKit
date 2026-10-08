@@ -27,6 +27,7 @@ import {
 import {
 	feedCounts,
 	feedLines,
+	in60sText,
 	interleave,
 	newestFirst,
 } from "./message-rows.js"
@@ -188,27 +189,52 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 	]
 }
 
+/**
+ * The live feed has been open at some point: it is open now, it delivered messages, or
+ * a gap was recorded (a gap is only opened for a socket that was open).
+ */
+function feedEverLive(state: AppState): boolean {
+	const ring = state.messages.ring
+	return (
+		state.conn.ws.state === "open" || ring.total > 0 || ring.gaps.length > 0
+	)
+}
+
 /** MESSAGES header: live counts, or "feed stopped" while the WS is down (spec §6.1). */
 export function feedHeader(state: AppState): Line {
 	const c = feedCounts(state.messages.ring, state.now)
 	const sep = ` ${glyphs().sep} `
-	if (
-		state.conn.ws.state !== "open" &&
-		state.conn.ws.since !== null &&
-		c.cached > 0
-	) {
+	// I1: counts are unknown until the feed has been live; never "0 in 60s".
+	if (!feedEverLive(state)) {
+		return [...title("MESSAGES"), sp(`? in 60s${sep}? total`, "label")]
+	}
+	// I2: the open gap's start is when the feed stopped; ws.since moves on every retry.
+	const openGap = state.messages.ring.gaps.findLast(g => g.to === null)
+	if (state.conn.ws.state !== "open" && c.cached > 0) {
+		const stopped = openGap?.from ?? state.conn.ws.since
 		return [
 			...title("MESSAGES"),
 			sp(
-				`feed stopped ${formatClock(state.conn.ws.since)}${sep}${c.cached} cached`,
+				`feed stopped${stopped !== null ? ` ${formatClock(stopped)}` : ""}${sep}${c.cached} cached`,
 				"label",
 			),
 		]
 	}
 	return [
 		...title("MESSAGES"),
-		sp(`${c.in60s} in 60s${sep}${c.total} total`, "label"),
+		sp(`${in60sText(c)} in 60s${sep}${c.total} total`, "label"),
 	]
+}
+
+/** §9 copy for an empty feed that is not live: the empty-state line needs a live feed (§6.3). */
+function feedPlaceholder(state: AppState): Line {
+	const c = state.conn
+	const sep = ` ${glyphs().sep} `
+	const apiDown = c.rest.firstFailAt !== null || c.discovery.mode === "failed"
+	if (apiDown) return [sp(`no data${sep}API unreachable`, "label")]
+	if (c.ws.state === "closed")
+		return [sp(`no data${sep}live feed down`, "label")]
+	return [sp("connecting to /ws", "label")]
 }
 
 /** Spec §6.3 empty state: no decodes since … · n of m decoders in window · rx …. */
@@ -282,7 +308,9 @@ export function overviewModel(
 	const feed =
 		rows.length > 0
 			? feedLines(rows, msgWidth, b.messageRows, null, state.now, feedOld).lines
-			: [emptyFeedLine(state)]
+			: state.conn.ws.state === "open"
+				? [emptyFeedLine(state)]
+				: [feedPlaceholder(state)]
 	const messages = [feedHeader(state), ...feed].map(l =>
 		truncateLine(l, msgWidth),
 	)
