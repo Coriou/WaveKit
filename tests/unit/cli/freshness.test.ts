@@ -7,12 +7,18 @@ import {
 	emptyLane,
 	iqSummary,
 	iqView,
+	isFresh,
 	isOld,
 	laneFail,
 	laneOk,
+	restFresh,
 } from "../../../cli/source/data/freshness.js"
 import { memoOne } from "../../../cli/source/data/memo.js"
-import type { ConnState, LaneError } from "../../../cli/source/data/types.js"
+import type {
+	ConnState,
+	LaneError,
+	SourceRow,
+} from "../../../cli/source/data/types.js"
 
 function source(
 	over: Partial<ExtendedSourceStatus> = {},
@@ -232,8 +238,10 @@ describe("lanes", () => {
 					expect(failed.value).toBe(value)
 					expect(failed.receivedAt).toBe(at)
 					expect(failed.error).toEqual(err)
-					const healed = laneOk(value, at + age, "rest")
-					expect(healed.error).toBeUndefined()
+					// A success after a failure: the failed lane's value comes back fresh.
+					const healed = laneOk(failed.value, at + age, "rest")
+					expect("error" in healed).toBe(false)
+					expect(healed.receivedAt).toBe(at + age)
 				},
 			),
 			{ numRuns: 100 },
@@ -256,5 +264,52 @@ describe("memoOne", () => {
 		expect(calls).toBe(1)
 		f({}, 1)
 		expect(calls).toBe(2)
+	})
+})
+
+describe("A1 fix round 1", () => {
+	it("TTL boundary: 15 000 ms is fresh, 15 001 ms is old (P17)", () => {
+		const lane = laneOk([1], 1000, "rest")
+		expect(isOld(lane, 1000 + 15000)).toBe(false)
+		expect(isFresh(lane, 1000 + 15000)).toBe(true)
+		expect(isOld(lane, 1000 + 15001)).toBe(true)
+		expect(isFresh(lane, 1000 + 15001)).toBe(false)
+		expect(restFresh(conn({ lastOkAt: 1000 }), 16000)).toBe(true)
+		expect(restFresh(conn({ lastOkAt: 1000 }), 16001)).toBe(false)
+	})
+	it("a success after a failure clears the error", () => {
+		const failed = laneFail(laneOk("v", 1000, "rest"), {
+			kind: "http",
+			status: 500,
+			message: "boom",
+			at: 2000,
+		})
+		expect(failed.error?.kind).toBe("http")
+		const healed = laneOk(failed.value, 3000, "rest")
+		expect(healed).toEqual({ value: "v", receivedAt: 3000, origin: "rest" })
+	})
+	it("shows unknown, not transport wording, for unrecognised activity", () => {
+		const { activity: _a, ...rest } = source()
+		const row: SourceRow = { ...rest, activityUnrecognised: true }
+		expect(iqView(row, true, undefined, 0)).toMatchObject({
+			glyph: "unknown",
+			word: "unknown",
+		})
+		const lane = laneOk([row, source({ id: "b" })], 1000, "rest")
+		expect(iqSummary(lane, {}, 2000).glyph).toBe("unknown")
+	})
+	it("multi-source rate is unknown when any source's rate is unknown", () => {
+		const lane = laneOk([source(), source({ id: "b" })], 0, "rest")
+		const beat = { bytesReceived: 1, dataRateKiB: 100, at: 50000 }
+		// Lane is old; only pi-iq has a fresh heartbeat, so b's rate is unknown.
+		expect(iqSummary(lane, { "pi-iq": beat }, 50000).rateBytesPerSec).toBeNull()
+		expect(
+			iqSummary(lane, { "pi-iq": beat, b: { ...beat, dataRateKiB: 50 } }, 50000)
+				.rateBytesPerSec,
+		).toBe(150 * 1024)
+		expect(
+			iqSummary(laneOk([source(), source({ id: "b" })], 1000, "rest"), {}, 2000)
+				.rateBytesPerSec,
+		).toBe(2 * 3994 * 1024)
 	})
 })

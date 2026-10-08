@@ -57,6 +57,55 @@ describe("resolveExplicit", () => {
 	})
 })
 
+describe("A1 fix round 1: URL validation", () => {
+	it("refuses a URL without an http(s) or ws(s) scheme, with a hint", () => {
+		expect(() => resolveExplicit("localhost:9000", {})).toThrow(CliUsageError)
+		expect(() => resolveExplicit("localhost:9000", {})).toThrow(
+			/did you mean http:\/\/localhost:9000\?/,
+		)
+		expect(() => resolveExplicit("127.0.0.1:9000", {})).toThrow(
+			/did you mean http:\/\/127\.0\.0\.1:9000\?/,
+		)
+		expect(() => resolveExplicit("file:///x", {})).toThrow(CliUsageError)
+		expect(() => resolveExplicit("ftp://h", {})).toThrow(CliUsageError)
+		expect(() =>
+			resolveExplicit(undefined, { WAVEKIT_WS_URL: "localhost:9000/ws" }),
+		).toThrow(CliUsageError)
+	})
+	it("maps a ws(s) --api URL to its http(s) REST base", () => {
+		expect(resolveExplicit("ws://192.0.2.4:9000/ws", {})).toEqual({
+			base: "http://192.0.2.4:9000",
+			ws: "ws://192.0.2.4:9000/ws",
+			explicit: true,
+		})
+		expect(resolveExplicit("wss://192.0.2.4/ws", {})?.base).toBe(
+			"https://192.0.2.4",
+		)
+		expect(resolveExplicit("https://192.0.2.4:8443", {})?.base).toBe(
+			"https://192.0.2.4:8443",
+		)
+	})
+})
+
+describe("A1 fix round 1: WS env scheme", () => {
+	it("maps an http(s) WAVEKIT_WS_URL to ws(s) and keeps https for REST", () => {
+		expect(
+			resolveExplicit(undefined, { WAVEKIT_WS_URL: "https://192.0.2.4/ws" }),
+		).toEqual({
+			base: "https://192.0.2.4",
+			ws: "wss://192.0.2.4/ws",
+			explicit: true,
+		})
+		expect(
+			resolveExplicit(undefined, { WAVEKIT_WS_URL: "http://192.0.2.4:9000/ws" })
+				?.ws,
+		).toBe("ws://192.0.2.4:9000/ws")
+		expect(deriveBase("https://192.0.2.9:8443/ws")).toBe(
+			"https://192.0.2.9:8443",
+		)
+	})
+})
+
 describe("discover", () => {
 	it("never probes localhost or 4713", () => {
 		for (const c of DISCOVERY_CANDIDATES) {

@@ -21,7 +21,17 @@ import type {
 
 // ---------- DTO views (what guards produce) ----------
 
-export type DecoderRow = DecoderStatus & { caps?: DecoderCaps }
+/** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
+export type DecoderRow = Omit<DecoderStatus, "rateAssessment"> & {
+	caps?: DecoderCaps
+}
+
+/**
+ * A guarded source. `activityUnrecognised` is set when a (newer) core sent
+ * `activity` that is malformed or has an unknown state: the IQ lane is then
+ * unknown. Absent `activity` (older core) leaves it unset.
+ */
+export type SourceRow = ExtendedSourceStatus & { activityUnrecognised?: true }
 
 export interface CoreComponent {
 	name: string
@@ -98,7 +108,7 @@ export const RESYNC_ENDPOINTS: readonly Endpoint[] = ["presets", "aircraft"]
 
 export interface RestValues {
 	decoders: DecoderRow[]
-	sources: ExtendedSourceStatus[]
+	sources: SourceRow[]
 	tuner: TunerState[]
 	relay: TunerRelayStatus
 	fanout: FanoutSnapshot
@@ -177,7 +187,7 @@ export type WsEvent =
 	/** One GET /api/decoders/:id body; several per transition, apply the latest. */
 	| { type: "decoder:status"; decoder: DecoderRow }
 	/** One GET /api/sources item incl. activity; apply the latest per id. */
-	| { type: "source:status"; source: ExtendedSourceStatus }
+	| { type: "source:status"; source: SourceRow }
 	| { type: "source:connected"; sourceId: string }
 	| { type: "source:disconnected"; sourceId: string; error?: string }
 	| { type: "source:error"; sourceId: string; error: string }
@@ -402,7 +412,7 @@ export interface Effects {
 
 export interface AppState {
 	conn: ConnState
-	sources: Lane<ExtendedSourceStatus[]>
+	sources: Lane<SourceRow[]>
 	metrics: Record<string, MetricBeat>
 	decoders: Lane<DecoderRow[]>
 	session: Record<string, DecoderSession>
