@@ -1,7 +1,15 @@
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
-import type { AircraftState, FanoutSnapshot } from "@wavekit/api-types"
-import { initialState, reduce } from "../../../cli/source/data/reducers.js"
+import type {
+	AircraftState,
+	FanoutSnapshot,
+	LiveAudioConfig,
+} from "@wavekit/api-types"
+import {
+	NO_REPLY_MS,
+	initialState,
+	reduce,
+} from "../../../cli/source/data/reducers.js"
 import type {
 	AppState,
 	CommandOutcome,
@@ -9,6 +17,7 @@ import type {
 	Inbound,
 	RestInbound,
 	SourceRow,
+	WriteIntent,
 } from "../../../cli/source/data/types.js"
 
 const T0 = 1_000_000
@@ -138,6 +147,73 @@ const POOL: Array<(at: number) => Inbound> = [
 	}),
 	at => ({ kind: "ws:open", at }),
 	at => ({ kind: "ws:invalid", at }),
+	// R47 M9: status events, actions and server-time timestamps (server clock ahead).
+	at => restSources(at, [source({ bytesReceived: at })]),
+	at =>
+		ws(at, {
+			type: "source:status",
+			source: source({ connected: (at / 100) % 2 === 0, bytesReceived: at }),
+		}),
+	at =>
+		ws(at, {
+			type: "decoder:status",
+			decoder: decoder({
+				running: at % 3 !== 0,
+				health: at % 3 !== 0 ? "running" : "idle",
+			}),
+		}),
+	at => ({
+		kind: "ws",
+		at,
+		event: {
+			type: "decoder:output",
+			decoderId: "readsb",
+			output: {
+				type: "aircraft",
+				decoder: "readsb",
+				timestamp: new Date(at + 3_600_000).toISOString(),
+				data: {},
+			},
+		},
+	}),
+	at => ({
+		kind: "action:sent",
+		at,
+		id: 1 + ((at / 100) % 2),
+		key: "decoder:readsb",
+		intent: { kind: "decoder", op: "restart", decoderId: "readsb" },
+	}),
+	at => ({
+		kind: "action:result",
+		at,
+		id: 1 + ((at / 100) % 2),
+		key: "decoder:readsb",
+		outcomes: [
+			{
+				label: "restart",
+				at,
+				result:
+					at % 3 === 0
+						? { ok: true, outcome: "ok", status: 200, message: "ok" }
+						: {
+								ok: false,
+								outcome: "unknown",
+								status: null,
+								message: "sent · no reply in 10s",
+							},
+			},
+		],
+	}),
+	at => ws(at, { type: "decoder:started", decoderId: "readsb" }),
+	at => ws(at, { type: "decoder:stopped", decoderId: "readsb" }),
+	at => ({
+		kind: "action:sent",
+		at,
+		id: 3,
+		key: "audio",
+		intent: { kind: "audio", op: "start" },
+	}),
+	at => ws(at, { type: "live-audio:started" }),
 ]
 
 const comparable = (s: AppState) =>
@@ -338,6 +414,7 @@ describe("reduce", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: T0,
 					key: "decoder:readsb",
 					intent: { kind: "decoder", op: "stop", decoderId: "readsb" },
@@ -350,6 +427,7 @@ describe("reduce", () => {
 			[
 				{
 					kind: "action:result",
+					id: 1,
 					at: T0 + 10,
 					key: "decoder:readsb",
 					outcomes: [
@@ -556,24 +634,26 @@ const result = (outcome: "ok" | "failed" | "unknown"): CommandOutcome => ({
 describe("R23: unknown write outcomes", () => {
 	const sent = (op: "stop" | "restart"): Inbound => ({
 		kind: "action:sent",
+		id: 1,
 		at: T0,
 		key: "decoder:readsb",
 		intent: { kind: "decoder", op, decoderId: "readsb" },
 	})
 	const res = (o: CommandOutcome): Inbound => ({
 		kind: "action:result",
+		id: 1,
 		at: T0 + 10,
 		key: "decoder:readsb",
 		outcomes: [o],
 	})
-	it("an unknown outcome stays sent until an event confirms it", () => {
+	it("an unknown outcome waits as unknown until an event confirms it", () => {
 		let s = reduce(
 			initialState(T0),
 			[sent("stop"), res(result("unknown"))],
 			T0 + 10,
 		)
 		expect(s.actions.byKey["decoder:readsb"]).toMatchObject({
-			state: "sent",
+			state: "unknown",
 			doneAt: null,
 			confirmedAt: null,
 		})
@@ -606,7 +686,7 @@ describe("R23: unknown write outcomes", () => {
 			],
 			T0 + 30,
 		)
-		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("sent")
+		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("unknown")
 		s = reduce(
 			s,
 			[
@@ -657,18 +737,20 @@ describe("R23: unknown write outcomes", () => {
 		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("ok")
 		expect(s.actions.stoppedByCli).toEqual(["readsb"])
 	})
-	it("an unknown outcome followed by not-sent commands stays sent", () => {
+	it("an unknown outcome followed by not-sent commands stays unknown", () => {
 		const s = reduce(
 			initialState(T0),
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: T0,
 					key: "tuner:pi-iq",
 					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: T0 + 10,
 					key: "tuner:pi-iq",
 					outcomes: [
@@ -679,7 +761,7 @@ describe("R23: unknown write outcomes", () => {
 			],
 			T0 + 10,
 		)
-		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("sent")
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
 	})
 	it("no command sent at all is failed", () => {
 		const s = reduce(
@@ -687,12 +769,14 @@ describe("R23: unknown write outcomes", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: T0,
 					key: "audio",
 					intent: { kind: "audio", op: "start" },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: T0 + 10,
 					key: "audio",
 					outcomes: [{ label: "start", result: null, at: null }],
@@ -709,6 +793,209 @@ describe("R23: unknown write outcomes", () => {
 			T0 + 10,
 		)
 		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("failed")
+	})
+})
+
+describe("R47: action correlation and reconciliation", () => {
+	const sendAs = (id: number, key: string, intent: WriteIntent): Inbound => ({
+		kind: "action:sent",
+		at: T0,
+		id,
+		key,
+		intent,
+	})
+	const resultAs = (
+		id: number,
+		key: string,
+		o: CommandOutcome,
+		at = T0 + 10,
+	): Inbound => ({ kind: "action:result", at, id, key, outcomes: [o] })
+	const restart = sendAs(1, "decoder:readsb", {
+		kind: "decoder",
+		op: "restart",
+		decoderId: "readsb",
+	})
+	const status = (at: number, running: boolean): Inbound =>
+		ws(at, { type: "decoder:status", decoder: decoder({ running }) })
+
+	it("M4: a running status before any not-running observation does not confirm a restart", () => {
+		let s = reduce(
+			initialState(T0),
+			[restart, resultAs(1, "decoder:readsb", result("unknown"))],
+			T0 + 10,
+		)
+		s = reduce(s, [status(T0 + 20, true)], T0 + 20)
+		expect(s.actions.byKey["decoder:readsb"]).toMatchObject({
+			state: "unknown",
+			confirmedAt: null,
+		})
+		s = reduce(s, [status(T0 + 30, false)], T0 + 30)
+		expect(s.actions.byKey["decoder:readsb"]?.confirmedAt).toBeNull()
+		s = reduce(s, [status(T0 + 40, true)], T0 + 40)
+		expect(s.actions.byKey["decoder:readsb"]).toMatchObject({
+			state: "ok",
+			confirmedAt: T0 + 40,
+		})
+	})
+
+	it("M4: a running status while the restart is in flight does not confirm it either", () => {
+		let s = reduce(initialState(T0), [restart, status(T0 + 5, true)], T0 + 5)
+		s = reduce(s, [resultAs(1, "decoder:readsb", result("unknown"))], T0 + 10)
+		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("unknown")
+	})
+
+	it("M5: in flight is sent; an unknown reply waits, then becomes no-reply after NO_REPLY_MS", () => {
+		const key = "audio"
+		let s = reduce(
+			initialState(T0),
+			[sendAs(1, key, { kind: "audio", op: "start" })],
+			T0,
+		)
+		expect(s.actions.byKey[key]?.state).toBe("sent")
+		s = reduce(s, [resultAs(1, key, result("unknown"), T0 + 10)], T0 + 10)
+		expect(s.actions.byKey[key]).toMatchObject({
+			state: "unknown",
+			resultAt: T0 + 10,
+			doneAt: null,
+		})
+		s = reduce(s, [], T0 + 10 + NO_REPLY_MS - 1000)
+		expect(s.actions.byKey[key]?.state).toBe("unknown")
+		const at = T0 + 10 + NO_REPLY_MS + 1000
+		s = reduce(s, [], at)
+		expect(s.actions.byKey[key]).toMatchObject({
+			state: "no-reply",
+			doneAt: at,
+		})
+		// Terminal: a later event is not attributed to this write.
+		s = reduce(s, [ws(at + 1, { type: "live-audio:started" })], at + 1)
+		expect(s.actions.byKey[key]?.state).toBe("no-reply")
+	})
+
+	it("M5: live-audio:started / stopped reconcile an unknown audio write", () => {
+		let s = reduce(
+			initialState(T0),
+			[
+				sendAs(1, "audio", { kind: "audio", op: "stop" }),
+				resultAs(1, "audio", result("unknown")),
+				ws(T0 + 20, { type: "live-audio:started" }),
+			],
+			T0 + 20,
+		)
+		expect(s.actions.byKey["audio"]?.state).toBe("unknown")
+		s = reduce(s, [ws(T0 + 30, { type: "live-audio:stopped" })], T0 + 30)
+		expect(s.actions.byKey["audio"]).toMatchObject({
+			state: "ok",
+			confirmedAt: T0 + 30,
+			doneAt: T0 + 30,
+		})
+	})
+
+	it("M5: a live-audio:config matching the patch reconciles an unknown preset", () => {
+		const config: LiveAudioConfig = {
+			enabled: true,
+			httpPort: 8090,
+			modulation: "nfm",
+			bandwidth: 12_500,
+			squelch: -50,
+			noiseReduction: "off",
+			lowPass: 3000,
+			highPass: 300,
+			gain: 1,
+			deEmphasis: false,
+			deEmphasisTau: 50,
+			audioFormat: "s16le",
+			iqDcBlock: true,
+		}
+		let s = reduce(
+			initialState(T0),
+			[
+				sendAs(1, "preset", {
+					kind: "preset",
+					name: "nfm",
+					patch: { modulation: "nfm", bandwidth: 12_500 },
+				}),
+				resultAs(1, "preset", result("unknown")),
+				ws(T0 + 20, {
+					type: "live-audio:config",
+					config: { ...config, bandwidth: 25_000 },
+				}),
+			],
+			T0 + 20,
+		)
+		expect(s.actions.byKey["preset"]?.state).toBe("unknown")
+		s = reduce(s, [ws(T0 + 30, { type: "live-audio:config", config })], T0 + 30)
+		expect(s.actions.byKey["preset"]?.state).toBe("ok")
+	})
+
+	it("M5: an unknown tuner write and an unconfirmed decoder write end as no-reply", () => {
+		let s = reduce(
+			initialState(T0),
+			[
+				sendAs(1, "tuner:pi-iq", {
+					kind: "tuner",
+					sourceId: "pi-iq",
+					commands: [],
+				}),
+				resultAs(1, "tuner:pi-iq", { ...result("unknown"), label: "gain" }),
+				sendAs(2, "decoder:readsb", {
+					kind: "decoder",
+					op: "stop",
+					decoderId: "readsb",
+				}),
+				resultAs(2, "decoder:readsb", result("unknown")),
+			],
+			T0 + 10,
+		)
+		s = reduce(s, [], T0 + 10 + NO_REPLY_MS)
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("no-reply")
+		expect(s.actions.byKey["decoder:readsb"]?.state).toBe("no-reply")
+		expect(s.actions.stoppedByCli).toEqual([])
+	})
+
+	it("M6: a second write on the same key never inherits the first one's result", () => {
+		const key = "decoder:readsb"
+		let s = reduce(
+			initialState(T0),
+			[
+				sendAs(1, key, { kind: "decoder", op: "stop", decoderId: "readsb" }),
+				sendAs(2, key, { kind: "decoder", op: "start", decoderId: "readsb" }),
+				resultAs(1, key, result("ok")),
+			],
+			T0 + 10,
+		)
+		expect(s.actions.byKey[key]).toMatchObject({
+			id: 2,
+			state: "sent",
+			outcomes: [],
+			doneAt: null,
+		})
+		expect(s.actions.stoppedByCli).toEqual([])
+		s = reduce(s, [resultAs(2, key, result("failed"), T0 + 20)], T0 + 20)
+		expect(s.actions.byKey[key]).toMatchObject({ id: 2, state: "failed" })
+	})
+})
+
+describe("decode sparkline across reconnects (R47 M12)", () => {
+	it("keeps its baseline across ws:open instead of recording a false 0 minute", () => {
+		const t2 = T0 + 60_000
+		const s = reduce(
+			initialState(T0),
+			[
+				restOk(T0, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 10, errors: 0 } }),
+				]),
+				{ kind: "ws:open", at: T0 + 1 },
+				restOk(t2, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 25, errors: 0 } }),
+				]),
+			],
+			t2,
+		)
+		const sess = s.session["readsb"]
+		// The rate window still restarts at ws:open (spec §10.5)…
+		expect(sess?.events).toEqual([{ t: t2, v: 25 }])
+		// …but the 15 decodes since the last sample land in t2's minute.
+		expect(sess?.spark[String(Math.floor(t2 / 60_000))]).toBe(15)
 	})
 })
 

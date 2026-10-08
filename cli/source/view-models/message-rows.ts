@@ -10,7 +10,7 @@ import {
 	type ColumnLayout,
 	type ColumnSpec,
 } from "../ui/columns.js"
-import { fitGroups } from "../ui/fit.js"
+import { fitGroups, fitGroupsDetailed } from "../ui/fit.js"
 import { formatAge, formatClock, formatClockShort } from "../ui/format.js"
 import {
 	cell,
@@ -21,7 +21,7 @@ import {
 	type Role,
 	type Span,
 } from "../ui/line.js"
-import { lineWidth, sanitize, truncate, truncateLine } from "../ui/text.js"
+import { cellWidth, sanitize, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 
 const hdr = (v: string): Cell => ({ variants: [[sp(v, "label")]] })
@@ -106,7 +106,16 @@ export function interleave(
 
 const ellipsis = (): Span => ({ text: glyphs().ellipsis, role: "label" })
 
-/** Fixed segments by priority (dropping is marked with "  …"); free text takes the rest and is cut at the row end. */
+/** Free text keeps at least this much room once segments must give way. */
+const TEXT_RESERVE = 12
+const SEP = "  "
+
+/**
+ * Fixed segments by priority, then the free text, which takes the rest and is
+ * cut at the row end. When segments and text fit, nothing is reserved; when
+ * segments are dropped, the `  …` marker ends the line (spec §5.2), never
+ * sitting between the segments and the text (R52 m8).
+ */
 export function summaryLine(fm: FormattedMessage, width: number): Line {
 	const groups: Group[] = fm.segments.map(s => ({
 		priority: s.priority,
@@ -115,16 +124,13 @@ export function summaryLine(fm: FormattedMessage, width: number): Line {
 	if (fm.text === undefined)
 		return fitGroups(groups, width, { dropMarker: ellipsis() })
 	if (groups.length === 0) return [sp(truncate(fm.text, width))]
-	const fixed = fitGroups(groups, Math.max(0, width - 12), {
-		dropMarker: ellipsis(),
-	})
-	const rest = width - lineWidth(fixed) - 2
-	return rest > 0
-		? truncateLine(
-				[...fixed, sp("  ", "label"), sp(truncate(fm.text, rest))],
-				width,
-			)
-		: fixed
+	const textW = cellWidth(fm.text)
+	const reserve = SEP.length + Math.min(textW, TEXT_RESERVE)
+	const fit = fitGroupsDetailed(groups, Math.max(0, width - reserve))
+	const dropped = fit.present.some(p => !p)
+	const line: Line = [...fit.line, sp(SEP, "label"), sp(fm.text)]
+	if (dropped) line.push(sp(SEP, "label"), ellipsis())
+	return truncateLine(line, width)
 }
 
 export function messageRow(
@@ -161,13 +167,28 @@ export function gapLine(g: Gap, now: number, width: number): Line {
 	return [sp(truncate(text, width), "label")]
 }
 
-export function feedCounts(
-	ring: MessageRing,
-	now: number,
-): { in60s: number; total: number; cached: number } {
+export interface FeedCounts {
+	in60s: number
+	total: number
+	cached: number
+	/** The ring is full and its oldest entry is under 60 s old: in60s is a lower bound (R52 m6). */
+	capped: boolean
+}
+
+export function feedCounts(ring: MessageRing, now: number): FeedCounts {
 	let in60s = 0
 	for (const e of ring.entries) if (e.receivedAt >= now - 60_000) in60s++
-	return { in60s, total: ring.total, cached: ring.entries.length }
+	const oldest = ring.entries[0]
+	const capped =
+		ring.entries.length >= ring.capacity &&
+		oldest !== undefined &&
+		oldest.receivedAt >= now - 60_000
+	return { in60s, total: ring.total, cached: ring.entries.length, capped }
+}
+
+/** `3`, or `1000+` when the count is a lower bound. */
+export function in60sText(c: FeedCounts): string {
+	return c.capped ? `${c.in60s}+` : String(c.in60s)
 }
 
 /** Render at most maxRows feed rows, scrolled so the selected message stays visible. */

@@ -1,5 +1,5 @@
 import type { ReactElement } from "react"
-import type { AppState, WriteIntent } from "../data/types.js"
+import type { AppState } from "../data/types.js"
 import type { Action, ViewId, ViewKeyCtx } from "../ui/actions.js"
 import type { HeightClass, WidthClass } from "../ui/line.js"
 import type { UiState } from "../ui/ui-state.js"
@@ -15,9 +15,11 @@ export interface ViewProps {
 	widthClass: WidthClass
 }
 
-export type Effect =
-	| { kind: "write"; intent: WriteIntent }
-	| { kind: "copy"; text: string }
+/**
+ * Side effects a view may request. There is no write effect: writes happen only
+ * through the confirm bar's `y` or System's `a` (spec T9, P20).
+ */
+export type Effect = { kind: "copy"; text: string }
 
 export interface ViewOutcome {
 	ui: UiState
