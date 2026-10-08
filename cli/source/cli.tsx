@@ -5,7 +5,7 @@
  */
 import { render } from "ink"
 import { App as LegacyApp } from "./app.js"
-import { HELP_TEXT, parseArgs } from "./args.js"
+import { helpText, parseArgs } from "./args.js"
 import { resolveExplicit } from "./data/config.js"
 import { createScreen, installExitHandlers } from "./terminal.js"
 import type { ViewId } from "./ui/actions.js"
@@ -22,9 +22,11 @@ const LEGACY_VIEW: Record<
 	system: "resources",
 }
 
+// Glyph mode first, so help and usage errors honour WAVEKIT_ASCII and the locale.
+setGlyphMode(detectGlyphMode(process.env))
 const parsed = parseArgs(process.argv.slice(2))
 if (parsed.kind === "help") {
-	process.stdout.write(HELP_TEXT)
+	process.stdout.write(helpText())
 	process.exit(0)
 }
 if (parsed.kind === "error") {
@@ -46,7 +48,6 @@ try {
 	process.exit(2)
 }
 
-setGlyphMode(detectGlyphMode(process.env))
 const screen = createScreen(process.stdout)
 screen.enter()
 const instance = render(<LegacyApp initialView={LEGACY_VIEW[parsed.view]} />)
