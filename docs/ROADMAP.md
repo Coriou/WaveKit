@@ -16,10 +16,13 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 - [ ] Repeat installation on a freshly written card: Wi-Fi, Ethernet, mDNS, direct
       SSH, Docker startup, dongle detection, reboot and receiver hotplug recovery.
 
-Hardware acceptance requires a stable supply. Current development hardware has
-repeated undervoltage and substantial IQ loss over Wi-Fi; a replacement supply
-is expected on 2026-10-09. Do not erase the running card until the corrected
-payload is tested and the actual target disk is identified again.
+Validate SD writing, unattended first boot and sustained streaming separately.
+Current development hardware has repeated undervoltage and substantial IQ loss
+over Wi-Fi; a replacement supply is expected on 2026-10-09. Proceed with the
+clean-card installer test on the current supply, recording any power events so
+they are not confused with installer failures. Streaming stability acceptance
+still requires stable power. Before erasing, verify the corrected payload and
+identify the actual target disk again.
 
 ## 2. Network performance and portability
 

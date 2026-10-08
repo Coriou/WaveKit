@@ -112,7 +112,14 @@ for candidate in /boot/firmware /boot; do
   if [ -d "$candidate/wavekit-pi-bundle" ]; then BOOT="$candidate"; break; fi
 done
 if [ -z "$BOOT" ]; then
-  echo "WaveKit bundle missing from boot partition; copy it and run setup.sh manually."
+  # Retain a writable status location when a mounted boot partition has lost
+  # its bundle, so headless failures still publish the diagnostic log.
+  for candidate in /boot/firmware /boot; do
+    if [ -d "$candidate" ]; then BOOT="$candidate"; break; fi
+  done
+fi
+if [ -z "$BOOT" ]; then
+  echo "WaveKit boot partition unavailable; see /var/log/wavekit-firstboot.log."
   exit 1
 fi
 write_status() { printf '%s %s\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" > "$BOOT/wavekit-setup.status"; }
@@ -125,6 +132,10 @@ failed() {
   exit "$code"
 }
 trap 'failed "$?"' ERR
+if [ ! -d "$BOOT/wavekit-pi-bundle" ]; then
+  echo "WaveKit bundle missing from boot partition; copy it and run setup.sh manually."
+  failed 1
+fi
 if [ -f /var/lib/wavekit/firstboot.done ]; then write_status complete; exit 0; fi
 write_status running
 echo "Starting WaveKit first-boot setup."
@@ -142,7 +153,11 @@ mkdir -p "$DEST"
 cp -a "$BOOT/wavekit-pi-bundle/." "$DEST/"
 chown -R "$TASK_USER:$(id -gn "$TASK_USER")" "$DEST"
 # cloud-init already runs as root; preserve the user's existing sudo policy.
-(cd "$DEST"; bash ./setup.sh --target-user "$TASK_USER")
+if (cd "$DEST" && bash ./setup.sh --target-user "$TASK_USER"); then
+  :
+else
+  failed "$?"
+fi
 touch /var/lib/wavekit/firstboot.done
 echo "WaveKit first-boot setup complete; verify /health with the dongle attached."
 write_status complete

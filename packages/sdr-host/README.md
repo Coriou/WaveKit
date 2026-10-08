@@ -158,6 +158,9 @@ boot partition receives `wavekit-setup.status` (`running`, `complete`, or
 `/var/log/wavekit-firstboot.log`. `complete` means installation and Compose
 startup completed; confirm `/health` with the dongle connected before treating
 hardware streaming as verified.
+Automated first-boot tests execute the generated bootstrap with temporary paths
+and mocked account/privilege commands. They verify status, logs, retries, and
+completion markers; physical card boot and dongle streaming require Pi testing.
 
 Plain raw-image writes without cloud-init configuration need the manual
 `bash setup.sh` flow. Once staging succeeds, eject the card and boot the Pi;
@@ -184,6 +187,19 @@ A completed headless installation should satisfy these checks:
   user's password/sudo policy. `wavekit-setup.status` reports `complete`.
 - The status API responds, and `/health` becomes healthy with a working dongle
   connected. WaveKit receives IQ from the Pi on port 5555.
+
+For a clean-card acceptance run, record the checkout commit, bundle checksum,
+Pi model, OS version, network and elapsed time from power-on to healthy API.
+Start from Imager's verified write and follow only the documented staging steps.
+Any manual repair on the Pi is an installer failure to fix and retest from a
+fresh write, even if it makes that particular boot work. Confirm that a reboot
+starts the receiver automatically and that unplugging/reconnecting the dongle
+recovers without reinstalling. Keep passwords, private keys and Wi-Fi credentials
+out of acceptance reports.
+
+SD writing is performed on the computer and does not depend on the Pi's power
+supply. Record power events during first boot separately from installer errors;
+measure sustained IQ throughput and loss as a separate streaming acceptance run.
 
 `build-pi-bundle.sh --image <tag> --skip-build` can reuse another local image;
 the script rejects images that are not Linux ARM64. You can also transfer an
