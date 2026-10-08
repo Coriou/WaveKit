@@ -37,7 +37,7 @@ try {
 }
 
 // The UI owns the terminal. React reports errors caught by the boundary (which
-// already shows them as one line) through console.error, and any console write
+// already shows them as one line) through the console error method, and any write
 // would land on the alternate screen and corrupt the frame, so all are dropped.
 const drop = (): void => undefined
 for (const m of ["log", "info", "warn", "error", "debug"] as const)
