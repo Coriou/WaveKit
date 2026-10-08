@@ -1,8 +1,41 @@
 # Reliability and portable receiver roadmap
 
-Updated 2026-10-08. Work proceeds in the order below. Software checks and hardware
+Updated 2026-10-08. The immediate software sequence is below; numbered sections
+track related work and acceptance rather than blocking all work on hardware.
+Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
+
+## Immediate software priorities
+
+1. Define and review the sample-rate capability model, then implement the pure
+   resolver and additive API status before manager suspension/resumption. Keep
+   capture bandwidth, adapted IQ rate and decoder PCM/IQ input rate distinct;
+   do not turn an unverified preferred rate into a hard RF minimum. Preserve
+   operator stop/disable intent and unknown custom-decoder behavior. The proposed
+   contract and implementation gates are in
+   [the sample-rate/channelizer design](superpowers/specs/2026-10-08-sample-rate-and-channelizer-design.md).
+2. In parallel, validate the bounded opt-in CSDR buffer correction against the
+   pinned upstream build, preserve sample integrity, and repeat software capacity
+   measurements. Also complete bounded source startup/reconnect and accepted
+   tuner-state synchronization. Review default gain/rate restoration on the host
+   against client-arrival races before implementing that separate policy.
+3. Establish real IQ fixture baselines and prototype one opt-in core channelizer
+   per source. Compare direct translating FIR/resampling with fast convolution
+   after specifying output quality, latency, discontinuities and resource limits.
+   Rust is a candidate for this component; a whole-application rewrite is not
+   planned. Preserve raw fanout and give directly attached dongles equal support.
+4. Extend shared API/event contracts and source ownership for multiple consumers;
+   then implement protocol-aware scanning. Optional SDR-host channelization needs
+   its own transport/admission contract and stable-power measurements first.
+
+The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
+buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
+fixture evidence. Exploratory research is not a final implementation spec.
+The Pi image/operator-page and CLI teams continue independently in their owned
+files. Persistent Wi-Fi power saving configuration belongs to the image team.
+Clean-card reboot/hotplug and stable-power streaming acceptance continue in the
+hardware session; no software milestone substitutes for those tests.
 
 ## 1. Reproducible SD-card installation
 
@@ -48,7 +81,8 @@ identify the actual target disk again.
 
 ## 2. Network performance and portability
 
-Begin research after the complete SD installation has been exercised.
+Software policy and transport research may proceed while hardware acceptance is
+pending. Coordinate any live receiver/network changes with the hardware session.
 
 - [ ] Measure native and container delivery separately on Ethernet and Wi-Fi:
       generated/delivered/dropped bytes, stalls, latency, CPU, memory and power.
@@ -57,6 +91,39 @@ Begin research after the complete SD installation has been exercised.
 - [ ] Investigate Wi-Fi power saving, interference, channel/link limits and sample
       rate choices; change one variable at a time and report bandwidth tradeoffs.
 - [ ] Evaluate on-Pi processing, decimation and transport alternatives where useful.
+      Research notes: `docs/RESEARCH-2026-10-08-CHANNELIZER.md` (one shared
+      channelizer per source instead of per-decoder csdr pipelines; design,
+      core-side measurements) and `docs/RESEARCH-2026-10-08-PI-CHANNELIZER.md`
+      (placing it on the Pi: pros/cons, Pi 3 CPU measurements, optionality on
+      weak hardware, keeping "decode anything" intact). WaveKit is not Pi
+      centric: a dongle plugged straight into the computer is an equal first
+      class setup, so the channelizer is built for the core first (it cuts
+      per-decoder CPU there and enables several protocols from one capture)
+      and only then offered on the SDR host as a transport optimisation.
+- [ ] Disable Wi-Fi power save persistently in the Pi image (first boot writes a
+      NetworkManager `wifi.powersave` drop-in); verify after reboot.
+- [ ] Make the SDR host re-apply its configured gain and sample rate when the last
+      rtlmux client disconnects, so a departing client cannot leave the receiver
+      under-driven (observed: gain left at index 11, samples spanning 124–131).
+- [ ] Sample-rate model, WaveKit-wide: every decoder (including future ones)
+      declares the input rate it works best at, the rates it accepts and the
+      minimum below which it cannot work; the manager resolves each decoder
+      against the source rate, suspends decoders with a machine-readable reason
+      (`insufficient-sample-rate`) and resumes them when the rate rises; the
+      per-decoder verdict (best / acceptable / unusable, with the reason) and the
+      source's valid rate presets travel through REST/WebSocket/`api-types` so
+      the CLI (and later web UI) can tell the user which rate suits which
+      decoder. Keep capture requirements separate from adapter output and decoder
+      stdin rates; unknown requirements remain explicit rather than disabling
+      third-party decoders. The core already sets the upstream rate via
+      `POST /api/tuner/:sourceId/sample-rate` and the SDR++ relay; keep both.
+      A channelizer (`docs/RESEARCH-2026-10-08-CHANNELIZER.md`) gives each
+      decoder an exact requested rate when supported, but cannot recover RF
+      bandwidth absent from the capture. Passband/transition margins and source
+      quality remain part of channel admission.
+- [ ] Decided 2026-10-08: no lossy bit reduction, no lossless-only compression
+      (measured 0.68–0.86 at real gains), no decoders on the Pi for now. Details
+      and measurements: `docs/RESEARCH-2026-10-08-WIFI-IQ-TRANSPORT.md`.
 - [ ] Design an optional secured direct Wi-Fi connection for a laptop + battery +
       Pi setup, including provisioning, discovery, reconnect and LAN fallback.
 - [ ] Support a direct Ethernet cable between the Pi and the operator's computer,
