@@ -239,12 +239,20 @@ export type WriteIntent =
 	| { kind: "audio"; op: "start" | "stop" }
 	| { kind: "preset"; name: string; patch: Partial<LiveAudioConfig> }
 
-export function actionKey(intent: WriteIntent): string {
-	switch (intent.kind) {
+/** What an action is keyed by; every WriteIntent is one. */
+export type ActionTarget =
+	| { kind: "decoder"; decoderId: string }
+	| { kind: "tuner"; sourceId: string }
+	| { kind: "audio" }
+	| { kind: "preset" }
+
+/** The one place action keys are built (R47 M13). */
+export function actionKey(target: ActionTarget): string {
+	switch (target.kind) {
 		case "decoder":
-			return `decoder:${intent.decoderId}`
+			return `decoder:${target.decoderId}`
 		case "tuner":
-			return `tuner:${intent.sourceId}`
+			return `tuner:${target.sourceId}`
 		case "audio":
 			return "audio"
 		case "preset":
@@ -271,15 +279,28 @@ export interface CommandOutcome {
 	result: ActionResult | null
 	at: number | null
 }
+/**
+ * - sent: the request is in flight.
+ * - unknown: no reply in time or the connection reset (R23); waiting for a reconciling event.
+ * - no-reply: terminal; nothing reconciled the unknown write within NO_REPLY_MS (R47 M5).
+ * - ok / failed: terminal.
+ */
+export type ActionState = "sent" | "unknown" | "no-reply" | "ok" | "failed"
 export interface ActionRecord {
+	/** Per-send id: a result applies only to the send it answers (R47 M6). */
+	id: number
 	key: string
 	intent: WriteIntent
 	sentAt: number
-	state: "sent" | "ok" | "failed"
+	state: ActionState
 	outcomes: CommandOutcome[]
+	/** When the action:result arrived. */
+	resultAt: number | null
 	doneAt: number | null
-	/** decoder:started / decoder:stopped observed after the send. */
+	/** A reconciling event (decoder:started / stopped / status, live-audio:*) observed after the send. */
 	confirmedAt: number | null
+	/** A restart saw the decoder not running after the send (R47 M4). */
+	sawNotRunning: boolean
 }
 
 // ---------- messages ----------
@@ -477,9 +498,17 @@ export interface TargetInbound {
 	ws: string | null
 	discovery: DiscoveryState
 }
+export interface ActionSentInbound {
+	kind: "action:sent"
+	at: number
+	id: number
+	key: string
+	intent: WriteIntent
+}
 export interface ActionResultInbound {
 	kind: "action:result"
 	at: number
+	id: number
 	key: string
 	outcomes: CommandOutcome[]
 }
@@ -493,7 +522,7 @@ export type Inbound =
 	| WsCloseInbound
 	| { kind: "ws:invalid"; at: number }
 	| TargetInbound
-	| { kind: "action:sent"; at: number; key: string; intent: WriteIntent }
+	| ActionSentInbound
 	| ActionResultInbound
 
 // ---------- derived evidence shared by data/ and ui/ ----------

@@ -112,6 +112,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let unreachableSince: number | null = null
 	/** Bumped by stop(): async work started before it finishes silently. */
 	let epoch = 0
+	/** Correlates each action:result with its action:sent (R47 M6). */
+	let sendSeq = 0
 	let cycleRunning = false
 	/** Endpoints of the cycle requested while one was in flight (M1). */
 	let queuedCycle: Endpoint[] | null = null
@@ -387,9 +389,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		},
 		send: intent => {
 			const key = actionKey(intent)
-			push({ kind: "action:sent", at: deps.now(), key, intent })
+			const id = ++sendSeq
+			push({ kind: "action:sent", at: deps.now(), id, key, intent })
 			void execute(intent).then(outcomes => {
-				push({ kind: "action:result", at: deps.now(), key, outcomes })
+				push({ kind: "action:result", at: deps.now(), id, key, outcomes })
 			})
 		},
 	}

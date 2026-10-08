@@ -21,7 +21,9 @@ import {
 import {
 	POLL_ENDPOINTS,
 	RESYNC_ENDPOINTS,
+	actionKey,
 	type ActionRecord,
+	type ActionState,
 	type AircraftLookup,
 	type AppState,
 	type ConnState,
@@ -38,6 +40,9 @@ import {
 	type WriteIntent,
 	type WsEvent,
 } from "./types.js"
+
+/** An unknown write that nothing reconciles within this long after its result ends as no-reply (R47 M5). */
+export const NO_REPLY_MS = 10_000
 
 export interface ReduceDeps {
 	summarize(
@@ -399,11 +404,18 @@ function reduceWs(
 			}
 		}
 		case "decoder:started":
-		case "decoder:stopped":
+		case "decoder:stopped": {
+			const started = ev.type === "decoder:started"
 			return withPolls(
-				confirmDecoder(s, ev.decoderId, ev.type === "decoder:started", at),
+				observe(
+					s,
+					actionKey({ kind: "decoder", decoderId: ev.decoderId }),
+					at,
+					decoderSeen(started, started),
+				),
 				["decoders"],
 			)
+		}
 		case "decoder:status": {
 			// One GET /api/decoders/:id body, latest wins. Lifecycle-driven, so the
 			// lane's receivedAt (the last full list) is kept.
@@ -424,7 +436,12 @@ function reduceWs(
 				prev !== undefined && prev.health !== d.health
 					? put(s.session, d.id, { ...sess, previousHealth: prev.health })
 					: s.session
-			return confirmDecoder({ ...s, decoders, session }, d.id, d.running, at)
+			return observe(
+				{ ...s, decoders, session },
+				actionKey({ kind: "decoder", decoderId: d.id }),
+				at,
+				decoderSeen(d.running, false),
+			)
 		}
 		case "decoder:health": {
 			const prev =
@@ -589,9 +606,16 @@ function reduceWs(
 			return { ...s, audio: laneOk(ev.status, at, "ws") }
 		case "live-audio:config": {
 			const cur = s.audio.value
-			return cur
-				? { ...s, audio: laneOk({ ...cur, config: ev.config }, at, "ws") }
-				: s
+			const config = ev.config
+			return observe(
+				cur ? { ...s, audio: laneOk({ ...cur, config }, at, "ws") } : s,
+				actionKey({ kind: "preset" }),
+				at,
+				rec =>
+					rec.intent.kind === "preset" && matchesPatch(config, rec.intent.patch)
+						? "confirms"
+						: "nothing",
+			)
 		}
 		case "aircraft:new":
 		case "aircraft:update":
@@ -611,10 +635,17 @@ function reduceWs(
 				...s,
 				aircraft: { ...s.aircraft, stats: laneOk(ev.stats, at, "ws") },
 			}
+		case "live-audio:started":
+		case "live-audio:stopped": {
+			const op = ev.type === "live-audio:started" ? "start" : "stop"
+			return observe(s, actionKey({ kind: "audio" }), at, rec =>
+				rec.intent.kind === "audio" && rec.intent.op === op
+					? "confirms"
+					: "nothing",
+			)
+		}
 		// The POST response carries tuner and audio failures; these frames add nothing the CLI shows.
 		case "tuner:error":
-		case "live-audio:started":
-		case "live-audio:stopped":
 		case "live-audio:error":
 		case "subscribed":
 		case "unsubscribed":
@@ -692,24 +723,67 @@ function stoppedAfter(
 		: stopped.filter(x => x !== id)
 }
 
+/** What a reconciling event says about a pending action. */
+type Seen = "confirms" | "not-running" | "nothing"
+
 /**
- * decoder:started / stopped / status observed: confirm a pending decoder action whose
- * target running state it shows (stop → not running; start/restart → running). A sent
- * action whose result was "unknown" (R23) becomes ok here.
+ * A decoder event, read against a pending decoder action: stop needs not running, start
+ * needs running. A restart is confirmed only by decoder:started, or by running after a
+ * not-running observation for this send (R47 M4): a stale running status says nothing.
  */
-function confirmDecoder(
-	s: AppState,
-	decoderId: string,
+function decoderSeen(
 	running: boolean,
+	started: boolean,
+): (rec: ActionRecord) => Seen {
+	return rec => {
+		if (rec.intent.kind !== "decoder") return "nothing"
+		switch (rec.intent.op) {
+			case "stop":
+				return running ? "nothing" : "confirms"
+			case "start":
+				return running ? "confirms" : "nothing"
+			case "restart":
+				if (!running) return "not-running"
+				return started || rec.sawNotRunning ? "confirms" : "nothing"
+		}
+	}
+}
+
+/** Every patched field has that value in the new config. */
+function matchesPatch<T extends object>(config: T, patch: Partial<T>): boolean {
+	return (Object.keys(patch) as Array<keyof T>).every(
+		k => config[k] === patch[k],
+	)
+}
+
+/**
+ * Apply a reconciling event to the action under `key`. A confirmation sets confirmedAt
+ * and turns an unknown write (R23) ok; one that arrives while the request is in flight
+ * makes a later unknown result ok. no-reply is terminal: a late event is not attributed.
+ */
+function observe(
+	s: AppState,
+	key: string,
 	at: number,
+	judge: (rec: ActionRecord) => Seen,
 ): AppState {
-	const key = `decoder:${decoderId}`
 	const rec = own(s.actions.byKey, key)
-	if (!rec || rec.intent.kind !== "decoder" || rec.confirmedAt !== null)
-		return s
-	const op = rec.intent.op
-	if ((op === "stop") === running) return s
-	const resolve = rec.state === "sent" && rec.outcomes.length > 0
+	if (!rec || rec.confirmedAt !== null || rec.state === "no-reply") return s
+	const seen = judge(rec)
+	if (seen === "nothing") return s
+	if (seen === "not-running") {
+		return rec.sawNotRunning
+			? s
+			: {
+					...s,
+					actions: {
+						...s.actions,
+						byKey: put(s.actions.byKey, key, { ...rec, sawNotRunning: true }),
+					},
+				}
+	}
+	const resolve = rec.state === "unknown"
+	const intent = rec.intent
 	return {
 		...s,
 		actions: {
@@ -718,11 +792,27 @@ function confirmDecoder(
 				confirmedAt: at,
 				...(resolve ? { state: "ok" as const, doneAt: at } : {}),
 			}),
-			stoppedByCli: resolve
-				? stoppedAfter(s.actions.stoppedByCli, op, decoderId)
-				: s.actions.stoppedByCli,
+			stoppedByCli:
+				resolve && intent.kind === "decoder"
+					? stoppedAfter(s.actions.stoppedByCli, intent.op, intent.decoderId)
+					: s.actions.stoppedByCli,
 		},
 	}
+}
+
+/** Unknown writes that nothing reconciled within NO_REPLY_MS end as no-reply (R47 M5). */
+function expireActions(s: AppState, now: number): AppState {
+	let byKey: Record<string, ActionRecord> | null = null
+	for (const [key, rec] of Object.entries(s.actions.byKey)) {
+		if (rec.state !== "unknown" || rec.resultAt === null) continue
+		if (now - rec.resultAt < NO_REPLY_MS) continue
+		byKey = put(byKey ?? s.actions.byKey, key, {
+			...rec,
+			state: "no-reply",
+			doneAt: now,
+		})
+	}
+	return byKey === null ? s : { ...s, actions: { ...s.actions, byKey } }
 }
 
 function reduceActionResult(
@@ -730,17 +820,18 @@ function reduceActionResult(
 	item: Extract<Inbound, { kind: "action:result" }>,
 ): AppState {
 	const rec = own(s.actions.byKey, item.key)
-	if (!rec) return s
+	// A result answers only its own send; a newer send on the key owns the record (M6).
+	if (!rec || rec.id !== item.id) return s
 	const results = item.outcomes.map(o => o.result)
 	// null = not sent (an earlier command failed or was unknown): only the sent ones count.
 	const failed =
 		results.every(r => r === null) || results.some(r => r?.outcome === "failed")
 	const unknown = !failed && results.some(r => r?.outcome === "unknown")
-	// R23: no reply is not a failure; it stays "sent" until an event confirms it.
-	const state: ActionRecord["state"] = failed
+	// R23: no reply is not a failure; it waits as "unknown" until an event confirms it.
+	const state: ActionState = failed
 		? "failed"
 		: unknown && rec.confirmedAt === null
-			? "sent"
+			? "unknown"
 			: "ok"
 	const intent = rec.intent
 	const stopped =
@@ -755,7 +846,8 @@ function reduceActionResult(
 					...rec,
 					state,
 					outcomes: item.outcomes,
-					doneAt: state === "sent" ? null : item.at,
+					resultAt: item.at,
+					doneAt: state === "unknown" ? null : item.at,
 				}),
 				stoppedByCli: stopped,
 			},
@@ -815,13 +907,16 @@ function reduceOne(s: AppState, item: Inbound, deps: ReduceDeps): AppState {
 				actions: {
 					...s.actions,
 					byKey: put(s.actions.byKey, item.key, {
+						id: item.id,
 						key: item.key,
 						intent: item.intent,
 						sentAt: item.at,
 						state: "sent",
 						outcomes: [],
+						resultAt: null,
 						doneAt: null,
 						confirmedAt: null,
+						sawNotRunning: false,
 					}),
 				},
 			}
@@ -831,8 +926,8 @@ function reduceOne(s: AppState, item: Inbound, deps: ReduceDeps): AppState {
 }
 
 /**
- * Fold a batch of inbound items. `now` advances (and stale aircraft are pruned)
- * only when a 1 s boundary has passed, before the batch is applied, so
+ * Fold a batch of inbound items. `now` advances (stale aircraft are pruned and unknown
+ * writes expire) only when a 1 s boundary has passed, before the batch is applied, so
  * reduce(s, [a, b]) equals reduce(reduce(s, [a]), [b]) (P18).
  */
 export function reduce(
@@ -843,7 +938,7 @@ export function reduce(
 ): AppState {
 	let s = state
 	if (Math.floor(now / 1000) !== Math.floor(s.now / 1000)) {
-		s = { ...s, now }
+		s = expireActions({ ...s, now }, now)
 		if (aircraftPrune(s.aircraft.map, now) > 0) {
 			s = { ...s, aircraft: { ...s.aircraft, version: s.aircraft.version + 1 } }
 		}

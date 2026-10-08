@@ -256,13 +256,52 @@ describe("runtime", () => {
 		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
 		expect(posts).toEqual([`${TARGET.base}/api/tuner/pi-iq/frequency`])
 		const rec = rt.store.get().actions.byKey["tuner:pi-iq"]
-		expect(rec?.state).toBe("sent")
+		expect(rec?.state).toBe("unknown")
 		expect(
 			rec?.outcomes.map(o => [o.label, o.result?.outcome ?? null]),
 		).toEqual([
 			["frequency", "unknown"],
 			["gain", null],
 		])
+		rt.stop()
+	})
+
+	it("M6: a slow first write's result does not land on the second write to the same key", async () => {
+		let failFirst: (() => void) | null = null
+		const fetchFn: FetchLike = (url, init) => {
+			if (init?.method !== "POST") return new Promise(() => undefined)
+			if (url.endsWith("/stop"))
+				return new Promise(resolve => {
+					failFirst = () =>
+						resolve({
+							ok: false,
+							status: 500,
+							statusText: "Internal Server Error",
+							json: () => Promise.resolve({ message: "boom" }),
+						})
+				})
+			return okJson({})
+		}
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.send({ kind: "decoder", op: "stop", decoderId: "readsb" })
+		rt.send({ kind: "decoder", op: "start", decoderId: "readsb" })
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(rt.store.get().actions.byKey["decoder:readsb"]?.state).toBe("ok")
+		failFirst!()
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(rt.store.get().actions.byKey["decoder:readsb"]).toMatchObject({
+			state: "ok",
+			intent: { op: "start" },
+		})
 		rt.stop()
 	})
 
