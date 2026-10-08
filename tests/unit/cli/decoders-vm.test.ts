@@ -327,3 +327,32 @@ describe("detail helpers", () => {
 		expect(sparkline([undefined, 0, 0])).toBe(" ▁▁")
 	})
 })
+
+describe("R65 M2: server-chosen types are plain keys", () => {
+	it("a decoder of type 'constructor' or '__proto__' renders with unknown band and raw type", () => {
+		const s = scenarioState("live")
+		for (const type of ["constructor", "__proto__", "toString"]) {
+			const odd: DecoderRow = {
+				id: `odd-${type}`,
+				type,
+				running: true,
+				health: "running",
+				uptime: 5,
+				stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
+				restartCount: 0,
+			}
+			const st = {
+				...s,
+				decoders: laneOk(
+					[...(s.decoders.value ?? []), odd],
+					s.now - 1000,
+					"rest" as const,
+				),
+			}
+			const f = decoderFacts(st).find(x => x.row.id === odd.id)
+			expect(f?.nominal).toBe("?")
+			const rows = f ? decoderDetail(st, f, 119, s.now).map(lineText) : []
+			expect(rows[0]).toContain(`${type} · pid —`)
+		}
+	})
+})

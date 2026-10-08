@@ -46,8 +46,9 @@ export const NOMINAL_BANDS: Readonly<Record<string, NominalBand>> = {
 	"multimon-ng": TUNED,
 }
 
+/** Types come from the server: own keys only, so "constructor" or "__proto__" find nothing (R65 M2, R30). */
 export function bandFor(type: string): NominalBand | undefined {
-	return NOMINAL_BANDS[type]
+	return Object.hasOwn(NOMINAL_BANDS, type) ? NOMINAL_BANDS[type] : undefined
 }
 
 const mhz3 = (mhz: number): string => mhz.toFixed(3)

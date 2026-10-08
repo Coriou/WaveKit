@@ -64,6 +64,14 @@ const PAST: Readonly<Record<DecoderOp, string>> = {
 	restart: "restarted",
 }
 
+/** Own-key lookup for server-chosen keys (R65 M2): "constructor" must not hit the prototype. */
+function own<T>(
+	table: Readonly<Record<string, T>>,
+	key: string,
+): T | undefined {
+	return Object.hasOwn(table, key) ? table[key] : undefined
+}
+
 /** Sub-10 s server-relative durations in tenths, floored like the ages ("0.2s", assumption 18). */
 const secs = (ms: number): string =>
 	ms < 10_000
@@ -151,11 +159,11 @@ export function decoderDetail(
 	const sess = state.session[r.id]
 	const caps = r.caps
 	const identity = [
-		PROTOCOL[r.type] ?? sanitize(r.type),
+		own(PROTOCOL, r.type) ?? sanitize(r.type),
 		...(caps
 			? [
-					PATTERN[caps.integrationPattern],
-					`${INPUT[caps.input]}, ${OUTPUT[caps.output]}`,
+					own(PATTERN, caps.integrationPattern) ?? g.unknown,
+					`${own(INPUT, caps.input) ?? g.unknown}, ${own(OUTPUT, caps.output) ?? g.unknown}`,
 				]
 			: []),
 		`pid ${r.pid ?? g.na}`,
