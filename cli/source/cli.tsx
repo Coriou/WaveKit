@@ -4,7 +4,7 @@
  * Phase 1: renders the legacy App until the new shell replaces it (Task 37).
  */
 import { render } from "ink"
-import { App as LegacyApp } from "./app.js"
+import { App as LegacyApp } from "./legacy-app.js"
 import { helpText, parseArgs } from "./args.js"
 import { resolveExplicit } from "./data/config.js"
 import { createScreen, installExitHandlers } from "./terminal.js"
