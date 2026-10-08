@@ -4,7 +4,12 @@ import {
 	type ApiTarget,
 	type FetchLike,
 } from "./config.js"
-import { initialState, reduce, type ReduceDeps } from "./reducers.js"
+import {
+	endpointsFor,
+	initialState,
+	reduce,
+	type ReduceDeps,
+} from "./reducers.js"
 import { createStore, type Store } from "./store.js"
 import {
 	POLL_ENDPOINTS,
@@ -120,6 +125,18 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	/** Per-endpoint request sequence: issued, and the newest applied (M2). */
 	const issued = new Map<Endpoint, number>()
 	const applied = new Map<Endpoint, number>()
+	/**
+	 * When the runtime itself last requested a full POLL+RESYNC cycle (start, reconnect,
+	 * discovery). The ws:open that follows asks for the same set; within POLL_MS it is
+	 * already covered, so its effect polls are dropped (one set of GETs, not two, R55).
+	 */
+	let resyncAt: number | null = null
+	const RESYNC_SET = new Set<Endpoint>([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+
+	function requestResync(): void {
+		resyncAt = deps.now()
+		requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+	}
 
 	const api = createApiClient({
 		base: () => target?.base ?? null,
@@ -147,9 +164,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 
 	/** Resolves true when the server answered at all; a network error or a timeout is no answer (M3). */
 	async function fetchOne(endpoint: Endpoint): Promise<boolean> {
+		const run = epoch
 		const seq = (issued.get(endpoint) ?? 0) + 1
 		issued.set(endpoint, seq)
 		const outcome = await api.get(endpoint)
+		// Work started before stop() ends silently: nothing reaches the next session.
+		if (run !== epoch) return false
 		// M2: a response older than one already applied is dropped, never applied over it.
 		if (seq > (applied.get(endpoint) ?? 0)) {
 			applied.set(endpoint, seq)
@@ -254,7 +274,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			// The socket may already be back on this target by itself; reconnecting it
 			// would record a false gap and wipe the rate and fanout histories.
 			if (!same || !ws.connected()) ws.reconnectNow()
-			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			requestResync()
 			return
 		}
 		push({
@@ -289,6 +309,38 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		}, MAX_BACKOFF_MS)
 	}
 
+	/**
+	 * The effect polls to run. A ws:open soon after a runtime-requested resync asks for
+	 * endpoints that cycle already covers; those are dropped unless a write result in the
+	 * same batch needs them (its poll must see the state after the write).
+	 */
+	function effectPolls(
+		before: AppState,
+		batch: readonly Inbound[],
+		polls: readonly Endpoint[],
+		now: number,
+	): Endpoint[] {
+		if (polls.length === 0) return []
+		const covered =
+			resyncAt !== null &&
+			now - resyncAt <= POLL_MS &&
+			batch.some(i => i.kind === "ws:open")
+		if (!covered) return [...polls]
+		resyncAt = null
+		const needed = new Set<Endpoint>()
+		for (const item of batch) {
+			if (item.kind !== "action:result") continue
+			const rec = Object.prototype.hasOwnProperty.call(
+				before.actions.byKey,
+				item.key,
+			)
+				? before.actions.byKey[item.key]
+				: undefined
+			if (rec) for (const e of endpointsFor(rec.intent)) needed.add(e)
+		}
+		return polls.filter(e => !RESYNC_SET.has(e) || needed.has(e))
+	}
+
 	function tick(): void {
 		const current = store.get()
 		const now = deps.now()
@@ -299,8 +351,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			return
 		const batch = queue.splice(0, queue.length)
 		let next = reduce(current, batch, now, reduceDeps)
-		const polls = next.effects.polls
-		if (polls.length > 0) {
+		const polls = effectPolls(current, batch, next.effects.polls, now)
+		if (next.effects.polls.length > 0) {
 			next = { ...next, effects: { polls: [] } }
 			for (const endpoint of polls) void fetchOne(endpoint)
 		}
@@ -360,7 +412,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 					discovery: { mode: "explicit", tried: [] },
 				})
 				ws.start()
-				requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+				requestResync()
 			} else {
 				void runDiscovery()
 			}
@@ -368,6 +420,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		stop: () => {
 			stopped = true
 			epoch++
+			// Queued inbound belongs to the stopped session.
+			queue.length = 0
+			resyncAt = null
 			discovering = false
 			cycleRunning = false
 			queuedCycle = null
@@ -385,7 +440,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				return
 			}
 			ws.reconnectNow()
-			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			requestResync()
 		},
 		send: intent => {
 			const key = actionKey(intent)
