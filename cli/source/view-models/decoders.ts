@@ -13,8 +13,9 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { listBudget, type DetailPlacement } from "../ui/frame.js"
+import { fitGroups } from "../ui/fit.js"
 import { sp, type Line } from "../ui/line.js"
-import { lineText, sanitize, truncate } from "../ui/text.js"
+import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
@@ -24,7 +25,7 @@ import {
 	decodersPlaceholder,
 	type DecoderFacts,
 } from "./decoder-rows.js"
-import { sparkline, wrapKV } from "./detail.js"
+import { LABEL_WIDTH, sparkline, wrapKV } from "./detail.js"
 
 export const RESULT_MS = 10_000
 /** Server error text in a result or error row is cut here; the detail row wraps the rest of the line. */
@@ -78,8 +79,11 @@ const processText = (f: DecoderFacts, now: number): string =>
 
 /**
  * Result line for the last decoder write (spec §6.2), CLI-owned copy only (R29):
- * `restart sent 18:07:52`, `· no reply in 10s` when the reply timed out (R23),
- * `restarted 18:07:53` once core confirms, `restart failed · 502 · "<server text>"`.
+ * - sent, no reply yet: `restart sent 18:07:52`
+ * - reply timed out, waiting for an event (R23): `restart sent 18:07:52 · no reply in 10s`
+ * - nothing reconciled it (R47 M5): `restart sent 18:07:52 · no reply · not confirmed`
+ * - confirmed by core: `restarted 18:07:53`
+ * - failed: `restart failed · 502 · "<server text>"`
  * A finished result clears after 10 s.
  */
 export function decoderActionText(
@@ -92,22 +96,31 @@ export function decoderActionText(
 	const sep = ` ${glyphs().sep} `
 	const op = rec.intent.op
 	const sent = `${op} sent ${formatClock(rec.sentAt)}`
-	if (rec.state === "sent") {
-		const noReply = rec.outcomes.some(o => o.result?.outcome === "unknown")
-		return noReply ? `${sent}${sep}no reply in 10s` : sent
+	switch (rec.state) {
+		case "sent":
+			return sent
+		case "unknown":
+			return `${sent}${sep}no reply in 10s`
+		default:
+			break
 	}
 	if (now - Math.max(rec.doneAt ?? 0, rec.confirmedAt ?? 0) > RESULT_MS)
 		return null
-	if (rec.state === "failed") {
-		const r =
-			rec.outcomes.find(o => o.result?.outcome === "failed")?.result ??
-			rec.outcomes[0]?.result
-		const status = r?.status ?? r?.code ?? "network"
-		return `${op} failed${sep}${status}${sep}${quoted(r?.message ?? "?")}`
+	switch (rec.state) {
+		case "no-reply":
+			return `${sent}${sep}no reply${sep}not confirmed`
+		case "failed": {
+			const r =
+				rec.outcomes.find(o => o.result?.outcome === "failed")?.result ??
+				rec.outcomes[0]?.result
+			const status = r?.status ?? r?.code ?? "network"
+			return `${op} failed${sep}${status}${sep}${quoted(r?.message ?? "?")}`
+		}
+		case "ok":
+			return rec.confirmedAt !== null
+				? `${PAST[op]} ${formatClock(rec.confirmedAt)}`
+				: sent
 	}
-	return rec.confirmedAt !== null
-		? `${PAST[op]} ${formatClock(rec.confirmedAt)}`
-		: sent
 }
 
 function errorText(
@@ -240,14 +253,32 @@ export function decoderDetail(
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
 	const observed = buckets.filter(x => x !== undefined).length
 	const from = sess?.firstObservedAt ?? now
-	lines.push([
-		sp("activity  ", "label"),
-		sp(sparkline(buckets), "value"),
-		sp(
-			`  decodes/min since ${formatClockShort(from)} (${observed} of 30 min observed)`,
-			"label",
+	// Fitted, not left to Ink's truncation: the sparkline stays, the caption shortens.
+	const caption = `decodes/min since ${formatClockShort(from)}`
+	lines.push(
+		fitGroups(
+			[
+				{
+					priority: 0,
+					variants: [
+						[
+							sp(padEnd("activity", LABEL_WIDTH), "label"),
+							sp(sparkline(buckets)),
+						],
+					],
+				},
+				{
+					priority: 1,
+					variants: [
+						[sp("decodes/min", "label")],
+						[sp(caption, "label")],
+						[sp(`${caption} (${observed} of 30 min observed)`, "label")],
+					],
+				},
+			],
+			width,
 		),
-	])
+	)
 	const err = errorText(state, f, now)
 	if (err) lines.push(...wrapKV("error", err, width))
 	return lines
