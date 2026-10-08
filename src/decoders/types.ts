@@ -21,6 +21,9 @@ import type {
 	DecoderRateAssessment,
 	DecoderRateRequirements,
 } from "@wavekit/api-types"
+import type { DecoderRateAdapter } from "./rate-resolver.js"
+
+export type { DecoderRateAdapter } from "./rate-resolver.js"
 
 export type {
 	DecoderRateAssessment,
@@ -378,4 +381,18 @@ export interface Decoder extends EventEmitter {
 	 * @param updates - Partial options to merge with existing
 	 */
 	updateOptions(updates: Record<string, unknown>): void
+
+	/**
+	 * Instance rate requirements; falls back to registry caps.rateRequirements.
+	 * Optional so custom decoders stay `unknown` rather than incompatible.
+	 */
+	getRateRequirements?(): DecoderRateRequirements | undefined
+
+	/**
+	 * What this instance's stdin pipeline delivers for a candidate source rate.
+	 * Pure: no spawn, no option change. Undefined when the decoder owns its input.
+	 */
+	getRateAdapter?(input: {
+		sampleRateHz: number
+	}): DecoderRateAdapter | undefined
 }

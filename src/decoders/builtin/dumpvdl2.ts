@@ -12,7 +12,12 @@ import {
 	IqDecimateDecoder,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateRequirements,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import type { ACARSMessage } from "./acarsdec.js"
 
@@ -160,6 +165,28 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 			{ inputSampleRate: this.options.inputSampleRate },
 			"Dumpvdl2 options re-parsed after update",
 		)
+	}
+
+	/** dumpvdl2 reads unsigned 8-bit IQ (--sample-format U8). */
+	protected override getDecoderInputFormat(): string {
+		return "u8"
+	}
+
+	/**
+	 * Exact multiples of the 105 kHz VDL2 symbol clock. The channel-span
+	 * capture floor is a follow-up (pinned dumpvdl2 out-of-band behaviour).
+	 */
+	getRateRequirements(): DecoderRateRequirements {
+		const target = this.getIqDecimationConfig().targetSampleRate
+		const accepted = [
+			{ kind: "range" as const, minHz: 105_000, stepHz: 105_000 },
+		]
+		return {
+			version: 1,
+			sourceKind: "iq",
+			frontendIq: { preferredHz: target, accepted },
+			decoderInput: { kind: "iq", format: "u8", preferredHz: target, accepted },
+		}
 	}
 
 	/**

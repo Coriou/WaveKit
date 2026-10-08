@@ -24,8 +24,13 @@ import type {
 	DecoderHealth,
 	DecoderLastError,
 	DecoderOutput,
+	DecoderRateAssessment,
 	DecoderStatus,
 } from "./types.js"
+import {
+	assessDecoderRate,
+	validateDeclaredRateRequirements,
+} from "./rate-resolver.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -85,6 +90,8 @@ interface DecoderState {
 	lastError: DecoderLastError | null
 	/** When the current run started; scopes lastError to a run */
 	lastStartedAt: Date | null
+	/** Cached instance rate plan; recomputed on wire, caps change, connect/remove */
+	ratePlan: DecoderRateAssessment | undefined
 }
 
 /**
@@ -149,6 +156,7 @@ export class DecoderManager extends EventEmitter {
 	private sourceRouting: SourceFanoutRouter | null = null
 	private ownsSourceRouting = false
 	private sourceConnectedHandler: ((sourceId: string) => void) | null = null
+	private sourceRemovedHandler: ((sourceId: string) => void) | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
@@ -198,6 +206,18 @@ export class DecoderManager extends EventEmitter {
 		)
 
 		const decoder = this.registry.create(config, this.log)
+		const declared = decoder.getRateRequirements?.()
+		if (declared !== undefined) {
+			try {
+				validateDeclaredRateRequirements(
+					declared,
+					`decoders.${config.id}.rateRequirements`,
+				)
+			} catch (err) {
+				decoder.removeAllListeners()
+				throw err
+			}
+		}
 
 		// Validate decoder version if constraints are specified (Requirements 27.1, 27.2, 27.3)
 		let versionValidation: VersionValidationResult | undefined
@@ -221,10 +241,12 @@ export class DecoderManager extends EventEmitter {
 			versionValidation,
 			lastError: null,
 			lastStartedAt: null,
+			ratePlan: undefined,
 		}
 
 		this.decoders.set(config.id, state)
 		this.setupDecoderEventHandlers(state)
+		this.refreshRatePlan(state)
 
 		return decoder
 	}
@@ -407,6 +429,7 @@ export class DecoderManager extends EventEmitter {
 			...state.decoder.getStatus(),
 			health: state.lastHealth,
 			restartCount: state.restartCount,
+			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
 			...describeDecoderStatusFields({
 				config: state.config,
 				caps: state.decoder.caps,
@@ -466,6 +489,10 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceConnectedHandler && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedHandler)
 			this.sourceConnectedHandler = null
+		}
+		if (this.sourceRemovedHandler && this.sourceManager) {
+			this.sourceManager.off("removed", this.sourceRemovedHandler)
+			this.sourceRemovedHandler = null
 		}
 
 		await this.stopAll()
@@ -725,6 +752,7 @@ export class DecoderManager extends EventEmitter {
 						: {}),
 				})
 			}
+			this.refreshRatePlan(state, caps ?? null)
 			this.sourceManager.assignDecoder(config.id, sourceId, {
 				input: decoder.caps.input,
 				wantsExclusiveSource: decoder.caps.wantsExclusiveSource ?? false,
@@ -795,6 +823,9 @@ export class DecoderManager extends EventEmitter {
 		if (this.sourceConnectedHandler && this.sourceManager) {
 			this.sourceManager.off("connected", this.sourceConnectedHandler)
 		}
+		if (this.sourceRemovedHandler && this.sourceManager) {
+			this.sourceManager.off("removed", this.sourceRemovedHandler)
+		}
 		this.unsubscribeFromSourceCapsChanges()
 		if (this.ownsSourceRouting) this.sourceRouting?.destroy()
 		this.sourceManager = sourceManager
@@ -811,6 +842,7 @@ export class DecoderManager extends EventEmitter {
 			for (const state of this.decoders.values()) {
 				const selected =
 					state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
+				if (selected === sourceId) this.refreshRatePlan(state)
 				if (!state.branchId || selected !== sourceId) continue
 				try {
 					sourceManager.assignDecoder(state.config.id, sourceId, {
@@ -835,6 +867,14 @@ export class DecoderManager extends EventEmitter {
 			}
 		}
 		sourceManager.on("connected", this.sourceConnectedHandler)
+		// A removed source has no rate; the plan reports it as unknown.
+		this.sourceRemovedHandler = sourceId => {
+			for (const state of this.decoders.values()) {
+				if (this.selectedSourceId(state) === sourceId)
+					this.refreshRatePlan(state, null)
+			}
+		}
+		sourceManager.on("removed", this.sourceRemovedHandler)
 		this.subscribeToSourceCapsChanges()
 	}
 
@@ -893,11 +933,13 @@ export class DecoderManager extends EventEmitter {
 	): Promise<void> {
 		const affectedDecoders: string[] = []
 
-		// Find all running decoders using this source
+		// Every decoder selecting this source gets a fresh plan; only running
+		// stdin decoders are adapted (external input never reads this source).
 		for (const [decoderId, state] of this.decoders) {
+			if (this.selectedSourceId(state) !== sourceId) continue
+			this.refreshRatePlan(state, caps)
 			if (
-				(state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()) ===
-					sourceId &&
+				state.decoder.caps.input !== "external" &&
 				state.decoder.getStatus().running
 			) {
 				affectedDecoders.push(decoderId)
@@ -1019,6 +1061,62 @@ export class DecoderManager extends EventEmitter {
 			this.capsChangedHandler = null
 			this.log.debug("Unsubscribed from source caps changes")
 		}
+	}
+
+	// ============================================================================
+	// Rate plan (reporting only; rate model B1)
+	// ============================================================================
+
+	private selectedSourceId(state: DecoderState): string | undefined {
+		return state.config.sourceId ?? this.sourceRouting?.getDefaultSourceId()
+	}
+
+	/**
+	 * Instance rate plan for `caps`: undefined resolves the pipeline's input
+	 * caps, else the selected source's caps; null means the source rate is
+	 * unknown (for example the source was removed). Never throws.
+	 */
+	private assessState(
+		state: DecoderState,
+		caps?: SourceCaps | null,
+	): DecoderRateAssessment {
+		const sourceId = this.selectedSourceId(state)
+		const resolved =
+			caps === null
+				? undefined
+				: (caps ??
+					state.inputCaps ??
+					(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined))
+		try {
+			const requirements =
+				state.decoder.getRateRequirements?.() ??
+				state.decoder.caps.rateRequirements
+			const adapter = resolved
+				? state.decoder.getRateAdapter?.({ sampleRateHz: resolved.sampleRate })
+				: undefined
+			return assessDecoderRate(requirements, {
+				...(resolved
+					? {
+							source: {
+								// Recording pipelines are the IQ ones.
+								kind: resolved.kind === "recording" ? "iq" : resolved.kind,
+								rateHz: resolved.sampleRate,
+							},
+						}
+					: {}),
+				...(adapter ? { adapter } : {}),
+			})
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: state.config.id },
+				"Rate assessment failed; reporting unknown",
+			)
+			return { verdict: "unknown", reasonCode: "adaptation-unknown" }
+		}
+	}
+
+	private refreshRatePlan(state: DecoderState, caps?: SourceCaps | null): void {
+		state.ratePlan = this.assessState(state, caps)
 	}
 
 	// ============================================================================

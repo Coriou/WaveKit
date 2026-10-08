@@ -23,7 +23,11 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import { shellArg, shellCommand } from "../process-tools.js"
 import { boundCsdrPipeline } from "../csdr-buffers.js"
-import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import {
+	AudioDemodDecoder,
+	audioDemodRates,
+	type AudioDecoderStdin,
+} from "../audio-demod-decoder.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -550,6 +554,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return "dsd-fme"
 	}
 
+	/** dsd-fme reads a sox WAV stream (S16LE mono) at the output rate. */
+	protected override getDecoderStdin(): AudioDecoderStdin {
+		return { format: "wav-s16le", rateHz: this.getDemodConfig().sampleRate }
+	}
+
 	/**
 	 * Overrides buildPipelineCommand to add sox WAV wrapper.
 	 *
@@ -561,15 +570,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	protected override buildPipelineCommand(): string {
 		const config = this.getDemodConfig()
 
-		// Determine rates
-		const demodRate = config.demodSampleRate ?? config.sampleRate
+		// Integer decimation to the ACTUAL demod rate (clamped to >= 1); sox must
+		// use that rate. Shared with getRateAdapter() via audioDemodRates().
 		const outputRate = config.sampleRate
-		const inputSampleRate = config.inputSampleRate || 2_400_000
-		// IMPORTANT: csdr firdecimate requires integer decimation factor
-		const decimation = Math.round(inputSampleRate / demodRate)
-		// CRITICAL: Calculate ACTUAL demod rate after integer decimation
-		// sox must use the ACTUAL rate, not the configured rate
-		const actualDemodRate = inputSampleRate / decimation
+		const { inputSampleRate, targetDemodRate, decimation, actualDemodRate } =
+			audioDemodRates(config)
 
 		// Generate debug filename if debug recording is enabled
 		const debugFile = this.debugRecording
@@ -646,7 +651,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		this.logger.debug(
 			{
 				inputSampleRate,
-				targetDemodRate: demodRate,
+				targetDemodRate,
 				actualDemodRate,
 				outputSampleRate: outputRate,
 				decimation,

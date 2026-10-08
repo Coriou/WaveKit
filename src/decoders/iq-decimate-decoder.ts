@@ -23,7 +23,12 @@
 import { iqResampleCommand, shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "./types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateAdapter,
+} from "./types.js"
 import type { Logger } from "../utils/logger.js"
 
 /**
@@ -46,6 +51,59 @@ export interface IqDecimationConfig {
  * Default IQ sample rate from sources (2.048 Msps)
  */
 const DEFAULT_IQ_SAMPLE_RATE = 2_048_000
+
+/**
+ * Rate conversion the IQ pipeline really performs for its configured input:
+ * exact SoX resampling to the target, or integer csdr decimation (factor
+ * clamped to 1, in which case no conversion stage runs).
+ */
+export function iqDecimationRates(config: IqDecimationConfig): {
+	inputSampleRate: number
+	decimation: number
+	outputRate: number
+} {
+	const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
+	if (config.exactSampleRate)
+		return {
+			inputSampleRate,
+			decimation: 1,
+			outputRate: config.targetSampleRate,
+		}
+	const decimation = Math.max(
+		1,
+		Math.round(inputSampleRate / config.targetSampleRate),
+	)
+	return {
+		inputSampleRate,
+		decimation,
+		outputRate: inputSampleRate / decimation,
+	}
+}
+
+/** Adapter facts for a candidate source rate `fs`; pure. */
+export function iqDecimateRateAdapter(
+	config: IqDecimationConfig,
+	fs: number,
+	decoderInputFormat = "cu8",
+): DecoderRateAdapter {
+	const { decimation, outputRate } = iqDecimationRates({
+		...config,
+		inputSampleRate: fs,
+	})
+	return {
+		adaptation: config.exactSampleRate
+			? fs === outputRate
+				? "none"
+				: "resample"
+			: decimation === 1
+				? "none"
+				: "integer-decimation",
+		frontendRateHz: outputRate,
+		decoderInputKind: "iq",
+		decoderInputRateHz: outputRate,
+		decoderInputFormat,
+	}
+}
 
 /**
  * IqDecimateDecoder - Abstract base class for decoders that need decimated IQ data.
@@ -94,6 +152,19 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 	 */
 	protected abstract getDecoderArgs(): string[]
 
+	/** Sample format the decoder program reads on stdin. */
+	protected getDecoderInputFormat(): string {
+		return "cu8"
+	}
+
+	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {
+		return iqDecimateRateAdapter(
+			this.getIqDecimationConfig(),
+			input.sampleRateHz,
+			this.getDecoderInputFormat(),
+		)
+	}
+
 	/**
 	 * Returns the shell command for pipeline execution.
 	 * Uses /bin/sh to execute the csdr pipeline string.
@@ -130,8 +201,13 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 	protected buildPipelineCommand(): string {
 		const config = this.getIqDecimationConfig()
 
-		const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
 		const targetSampleRate = config.targetSampleRate
+		// Shared with getRateAdapter() so the reported plan matches the pipeline.
+		const {
+			inputSampleRate,
+			decimation,
+			outputRate: actualOutputRate,
+		} = iqDecimationRates(config)
 		if (config.exactSampleRate) {
 			const decoder = shellCommand(
 				this.getDecoderCommand(),
@@ -141,18 +217,6 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 				? decoder
 				: `${iqResampleCommand(inputSampleRate, targetSampleRate)} | ${decoder}`
 		}
-
-		// Calculate decimation factor
-		// IMPORTANT: csdr firdecimate requires integer decimation factor
-		let decimation = Math.round(inputSampleRate / targetSampleRate)
-
-		// Ensure at least 1x decimation (pass-through)
-		if (decimation < 1) {
-			decimation = 1
-		}
-
-		// Calculate ACTUAL output sample rate after integer decimation
-		const actualOutputRate = inputSampleRate / decimation
 
 		// If decimation is 1, we can skip the pipeline entirely
 		if (decimation === 1) {
