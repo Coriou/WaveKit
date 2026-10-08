@@ -186,7 +186,18 @@ describe("tuner edit", () => {
 		const top = press(
 			Array<EditKey>(12).fill("left").concat(Array<EditKey>(12).fill("up")),
 		)
-		expect(top.draft.frequency).toBe(FREQ_FIELD_MAX)
+		// 445 970 700 + 9 × 1 GHz, then further ↑ is refused: the lower digits are kept.
+		expect(top.draft.frequency).toBe(9_445_970_700)
+		const edge = press(
+			["up"],
+			startEdit({ ...tuner, frequency: 9_999_999_999 }),
+		)
+		expect(edge.draft.frequency).toBe(9_999_999_999)
+		const floor = press(
+			["left", "down"],
+			startEdit({ ...tuner, frequency: 5_500 }),
+		)
+		expect(floor.draft.frequency).toBe(5_500)
 	})
 	it("reports the pending window and reads digits", () => {
 		const s = press(["tab", "up"])
