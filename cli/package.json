@@ -12,7 +12,7 @@
 		"lint": "eslint -c ../eslint.config.js .",
 		"mock": "node ./source/test/mock-api/server.ts",
 		"start": "node ./dist/cli.js",
-		"test": "vitest run --passWithNoTests",
+		"test": "vitest run",
 		"typecheck": "pnpm -w exec tsc -p cli/tsconfig.json --noEmit"
 	},
 	"dependencies": {
