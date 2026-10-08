@@ -4,9 +4,16 @@ import { glyphs } from "./theme.js"
 // CSI, OSC (BEL or ST terminated) and 2-byte ESC sequences.
 const ANSI_RE =
 	/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g
-const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/g
-const EMOJI_RE = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F/gu
-const ZERO_WIDTH_RE = /^[\p{Mn}\p{Me}\u200B-\u200F\uFE00-\uFE0F]$/u
+// C0, DEL, C1, plus bidi marks/embeddings/overrides/isolates and the Unicode
+// line/paragraph separators (hostile-payload vectors that reorder or break rows).
+const CONTROL_RE =
+	/[\u0000-\u001f\u007f-\u009f\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/g
+/** Non-global, so `.test()` is stateless; copy-rules reuses it. */
+export const EMOJI = /\p{Emoji_Presentation}|\p{Extended_Pictographic}\uFE0F/u
+const EMOJI_RE = new RegExp(EMOJI.source, "gu")
+const EMOJI_PRESENTATION_RE = /^\p{Emoji_Presentation}$/u
+const ZERO_WIDTH_RE =
+	/^[\p{Mn}\p{Me}\u00AD\u200B-\u200F\u2060\uFE00-\uFE0F\uFEFF]$/u
 
 export function stripAnsi(s: string): string {
 	return s.replace(ANSI_RE, "")
@@ -22,7 +29,9 @@ function isWide(cp: number): boolean {
 		(cp >= 0xff00 && cp <= 0xff60) ||
 		(cp >= 0xffe0 && cp <= 0xffe6) ||
 		(cp >= 0x1f300 && cp <= 0x1f64f) ||
+		(cp >= 0x1f680 && cp <= 0x1f6ff) ||
 		(cp >= 0x1f900 && cp <= 0x1f9ff) ||
+		(cp >= 0x1fa70 && cp <= 0x1faff) ||
 		(cp >= 0x20000 && cp <= 0x3fffd)
 	)
 }
@@ -31,7 +40,7 @@ export function charWidth(ch: string): 0 | 1 | 2 {
 	if (ZERO_WIDTH_RE.test(ch)) return 0
 	const cp = ch.codePointAt(0) ?? 0
 	if (cp < 0x20 || (cp >= 0x7f && cp < 0xa0)) return 0
-	return isWide(cp) ? 2 : 1
+	return isWide(cp) || EMOJI_PRESENTATION_RE.test(ch) ? 2 : 1
 }
 
 export function cellWidth(s: string): number {
@@ -40,7 +49,7 @@ export function cellWidth(s: string): number {
 	return w
 }
 
-/** Payload strings only: strip ESC sequences and C0/C1/DEL, tabs → space, emoji → "?". Idempotent. */
+/** Payload strings only: strip ESC sequences, C0/C1/DEL, bidi controls and U+2028/9, tabs → space, emoji → "?". Idempotent. */
 export function sanitize(s: string): string {
 	// Order matters for idempotence: removing a control could otherwise join a
 	// pictograph and U+FE0F into a new emoji sequence.
@@ -53,6 +62,7 @@ export function truncate(s: string, w: number): string {
 	if (cellWidth(s) <= w) return s
 	const ell = glyphs().ellipsis
 	const ellW = cellWidth(ell)
+	// Accepted: in ASCII mode below 3 columns the result is dots without "...".
 	if (ellW > w) return ".".repeat(w)
 	let out = ""
 	let used = 0
@@ -87,6 +97,7 @@ export function lineText(line: Line): string {
 
 /** Cut a span line to width w, ending in the ellipsis glyph when it was wider. */
 export function truncateLine(line: Line, w: number): Line {
+	if (w <= 0) return []
 	if (lineWidth(line) <= w) return line
 	const ell = glyphs().ellipsis
 	const budget = w - cellWidth(ell)
@@ -107,10 +118,11 @@ export function truncateLine(line: Line, w: number): Line {
 			used += cw
 		}
 		if (part !== "") out.push({ ...span, text: part })
-		const last = out[out.length - 1]
+		const from = out[out.length - 1] ?? span
 		out.push({
 			text: budget < 0 ? ".".repeat(w) : ell,
-			role: last?.role ?? span.role,
+			role: from.role,
+			...(from.bold !== undefined ? { bold: from.bold } : {}),
 		})
 		return out
 	}
