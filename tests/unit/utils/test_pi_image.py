@@ -149,8 +149,14 @@ class ImageFirstbootTests(unittest.TestCase):
             context.start()
             self.addCleanup(context.stop)
 
-    def run_setup(self, fail=False):
+    def run_setup(self, fail=False, cloud_report=None, cloud_code=0):
         def command(command, **kwargs):
+            if command[0] == 'cloud-init':
+                report = cloud_report if cloud_report is not None else {
+                    'status': 'done', 'extended_status': 'done',
+                    'errors': [], 'recoverable_errors': {},
+                }
+                return subprocess.CompletedProcess(command, cloud_code, json.dumps(report))
             if command[0] == 'bash':
                 self.assertEqual(command, ['bash', './setup.sh', '--target-user', 'operator'])
                 self.assertIn('running', (self.boot / 'wavekit-setup.status').read_text())
@@ -211,6 +217,43 @@ class ImageFirstbootTests(unittest.TestCase):
         destination = self.home / 'wavekit-pi-bundle'
         destination.symlink_to(self.root)
         self.assertEqual(self.run_setup(), (1, 1))
+
+    def test_reviewed_missing_module_warning_allows_setup(self):
+        report = {'status': 'done', 'extended_status': 'degraded done',
+                  'errors': [], 'recoverable_errors': {'WARNING': [firstboot.KNOWN_CLOUD_WARNING]}}
+        report['modules-final'] = {'errors': [], 'recoverable_errors': report['recoverable_errors']}
+        self.assertEqual(self.run_setup(cloud_report=report, cloud_code=2), (0, 4))
+        self.assertIn('reviewed missing cc_netplan_nm_patch', firstboot.LOG.read_text())
+        self.assertTrue((firstboot.STATE / 'firstboot.done').exists())
+
+    def test_unreviewed_or_incomplete_cloud_init_never_installs(self):
+        good = {'status': 'done', 'extended_status': 'degraded done',
+                'errors': [], 'recoverable_errors': {'WARNING': [firstboot.KNOWN_CLOUD_WARNING]}}
+        reports = [
+            {**good, 'status': 'running'},
+            {**good, 'extended_status': 'error - done'},
+            {**good, 'errors': ['fixture-secret-error']},
+            {**good, 'recoverable_errors': {'WARNING': [firstboot.KNOWN_CLOUD_WARNING, 'fixture-secret-warning']}},
+            {**good, 'recoverable_errors': {}},
+            {**good, 'modules-final': {'errors': ['fixture-secret-stage-error'], 'recoverable_errors': {}}},
+            {**good, 'recoverable_errors': {'ERROR': [firstboot.KNOWN_CLOUD_WARNING]}},
+            {**good, 'recoverable_errors': {'WARNING': firstboot.KNOWN_CLOUD_WARNING}},
+        ]
+        for report in reports:
+            with self.subTest(report=report):
+                self.assertEqual(self.run_setup(cloud_report=report, cloud_code=2), (1, 1))
+                self.assertFalse((firstboot.STATE / 'firstboot.done').exists())
+                self.assertIn('failed', (self.boot / 'wavekit-setup.status').read_text())
+                self.assertNotIn('fixture-secret', firstboot.LOG.read_text())
+                self.assertFalse((firstboot.STATE / 'install').exists())
+
+    def test_cloud_init_fatal_and_malformed_results_never_install(self):
+        for code, output in [(1, '{}'), (2, 'fixture-secret-invalid-json')]:
+            with patch.object(firstboot.subprocess, 'run', return_value=subprocess.CompletedProcess([], code, output)) as run:
+                self.assertEqual(firstboot.main(), 1)
+            self.assertEqual(run.call_count, 1)
+            self.assertFalse((firstboot.STATE / 'install').exists())
+            self.assertNotIn('fixture-secret', firstboot.LOG.read_text())
 
     def test_cloud_init_recoverable_error_requires_review_and_never_runs_setup(self):
         with patch.object(firstboot.subprocess, 'run', side_effect=subprocess.CalledProcessError(2, ['cloud-init'])) as run:

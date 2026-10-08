@@ -116,7 +116,14 @@ This requires Raspberry Pi Imager 2 and a built image catalog at
 make sdr-host-imager SDR_HOST_IMAGER_ARGS='--manifest /path/to/os-list.json'
 ```
 
-The launcher opens only the WaveKit image entry. Choose the Pi model and SD
+On macOS the launcher runs Imager directly from `/Applications` or
+`~/Applications`, keeping startup errors and crash status visible in Terminal.
+Keep that terminal open until Imager closes. For an installation elsewhere, pass
+`--executable /path/to/rpi-imager`. A started process or successful exit does not
+confirm that a window appeared or a card was written. If no window appears,
+check the terminal diagnostics before proceeding.
+
+The catalog contains only the WaveKit image entry. Choose the Pi model and SD
 card, configure the hostname, normal account, Wi-Fi and SSH public key, then
 write and verify. The catalog preserves Imager's customization metadata;
 selecting the image through plain **Use custom** does not provide that metadata.
@@ -143,6 +150,11 @@ filesystem, checks that filesystem and emits the image, Imager catalog and build
 hashes under `output/pi-image/`. Imager owns the actual device write and verification.
 The first-boot service runs after cloud-init creates the configured account;
 credentials remain specific to each operator's Imager customization.
+The bootstrap checks cloud-init's structured completion status. It allows the
+specific missing `cc_netplan_nm_patch` warning observed with Raspberry Pi OS
+2026-10-06 and Imager 2.0.11.1, recording it in the setup log; other cloud-init
+errors or warnings stop setup for review. Network, SSH and receiver checks
+remain required even when setup reports completion.
 
 ### Stage automatic installation onto stock Pi OS
 
@@ -234,7 +246,9 @@ A completed headless installation should satisfy these checks:
 
 For a clean-card acceptance run, record the checkout commit, bundle checksum,
 Pi model, OS version, network and elapsed time from power-on to healthy API.
-Start from Imager's verified write and follow only the documented staging steps.
+For the dedicated WaveKit image, start from Imager's verified write, eject, and
+boot directly: no post-write staging or SSH installation is permitted in this
+acceptance run. The stock-image staging flow above is a separate workflow.
 Any manual repair on the Pi is an installer failure to fix and retest from a
 fresh write, even if it makes that particular boot work. Confirm that a reboot
 starts the receiver automatically and that unplugging/reconnecting the dongle

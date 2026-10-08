@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Activate the image payload after Imager's cloud-init customization."""
 import datetime
+import json
 import os
 from pathlib import Path
 import pwd
@@ -47,6 +48,51 @@ def configured_user(config):
     return account
 
 
+# Raspberry Pi OS 2026-10-06 + Imager 2.0.11.1 requests this absent module.
+# The observed run completes account/network setup; allow only this exact
+# warning, never arbitrary cloud-init exit-2 results or unfinished runs.
+KNOWN_CLOUD_WARNING = (
+    "Could not find module named cc_netplan_nm_patch "
+    "(searched ['cc_netplan_nm_patch', 'cloudinit.config.cc_netplan_nm_patch'])"
+)
+
+
+def wait_for_cloud_init(log):
+    command = ['cloud-init', 'status', '--wait', '--format', 'json']
+    result = subprocess.run(command, capture_output=True, text=True)
+    if result.returncode not in (0, 2):
+        raise subprocess.CalledProcessError(result.returncode, command)
+    report = json.loads(result.stdout)
+    if not isinstance(report, dict) or report.get('status') != 'done':
+        raise ValueError('Cloud-init did not finish')
+    if report.get('extended_status') not in ('done', 'degraded done'):
+        raise ValueError('Cloud-init did not finish successfully')
+    warning_seen = False
+    # Check both aggregate and per-stage diagnostics without copying their
+    # arbitrary text (which can include credentials) into the public boot log.
+    for section in [report] + [report[key] for key in
+                              ('init-local', 'init', 'modules-config', 'modules-final')
+                              if key in report]:
+        if not isinstance(section, dict) or section.get('errors') != []:
+            raise ValueError('Cloud-init reported errors')
+        recoverable = section.get('recoverable_errors')
+        if not isinstance(recoverable, dict):
+            raise ValueError('Cloud-init diagnostics are missing')
+        for level, messages in recoverable.items():
+            if not isinstance(messages, list):
+                raise ValueError('Cloud-init diagnostics are malformed')
+            for message in messages:
+                if level != 'WARNING' or message != KNOWN_CLOUD_WARNING:
+                    raise ValueError('Cloud-init reported an unreviewed warning')
+                warning_seen = True
+    if result.returncode == 2 and not warning_seen:
+        raise ValueError('Cloud-init exit 2 has no reviewed warning')
+    if warning_seen:
+        print('Cloud-init completed with reviewed missing cc_netplan_nm_patch warning; continuing', file=log)
+    else:
+        print('Cloud-init completed successfully', file=log)
+
+
 def main():
     if os.geteuid() != 0:
         print('WaveKit firstboot must run as root', file=sys.stderr)
@@ -73,7 +119,7 @@ def main():
             status('running')
             print('Starting WaveKit firstboot', file=log)
             # This runs from its own service, never from cloud-final runcmd.
-            subprocess.run(['cloud-init', 'status', '--wait'], check=True, stdout=log, stderr=log)
+            wait_for_cloud_init(log)
             import yaml  # Already required by Raspberry Pi OS cloud-init.
             config = yaml.safe_load(CONFIG.read_text())
             if not isinstance(config, dict):
