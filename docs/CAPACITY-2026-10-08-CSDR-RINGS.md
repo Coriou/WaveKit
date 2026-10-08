@@ -132,3 +132,46 @@ A subset of two or three CSDR decoders on upstream rings needs about 0.9 GiB
 per FIR chain at steady state. That cannot fit under a safe cap while the
 core container holds about 5 GiB of ring shmem, so only the one-decoder pair
 is planned.
+
+## Results: quiet window 2026-10-08 20:57–21:10 (heavy host load)
+
+These runs used image `wavekit:csdr-activate-test` and a **synthetic** source.
+Each container had a 4-CPU quota and a 640 MiB hard cap with no swap. The
+live core container was idle and disconnected throughout. Its CPU stayed at
+2–30% and VM MemAvailable never fell below 1.1 GiB. **Every run had very high
+host load:** the Mac's 1-minute load average was 490–575 because other
+sessions were running. CPU and drop figures are therefore contention-dominated.
+They are not a clean software capacity baseline. The drop fraction is dropped
+bytes divided by bytes offered to the branch.
+
+| Run (all nine decoders) | Window | CPU cores (user / sys)              | cgroup max | CSDR PSS (shmem) | Branch drops              | Restarts in window             | OOM kills  |
+| ----------------------- | ------ | ----------------------------------- | ---------- | ---------------- | ------------------------- | ------------------------------ | ---------- |
+| bounded, 2.048 Msps     | 150 s  | 3.38 (2.42 / 0.96), 103 s throttled | 380 MiB    | 26 MiB (9)       | 66.8% (39–85% per branch) | 1 (readsb)                     | 0          |
+| bounded, 2.4 Msps       | 150 s  | 3.06 (2.04 / 1.03), 101 s throttled | 406 MiB    | 27 MiB (9)       | 71.2% (30–89%)            | 1 (readsb)                     | 0          |
+| upstream, 2.048 Msps    | 94 s   | not comparable                      | 640 (cap)  | 405 MiB (389)    | not comparable            | —                              | 0          |
+| upstream, 2.4 Msps      | 90 s   | not comparable                      | 640 (cap)  | 379 MiB (362)    | not comparable            | 3 (readsb, acarsdec, direwolf) | 2 at ≈88 s |
+
+- **Bounded memory is settled.** With the policy on, CSDR ring shmem for all
+  31 stages is 9 MiB and the whole container peaks at about 0.4 GiB. The live
+  container's upstream rings currently hold 5090 MiB. No OOM kills occurred.
+- **Upstream memory under a cap** (a trajectory, not a throughput result).
+  At 2.048 Msps the cgroup reached the 640 MiB cap about 48 s after start.
+  Shmem rose to 389 MiB, the cgroup hit its limit 41,356 times with no OOM
+  kill, and then the container stalled. The API stopped answering from
+  about 60 s, and the synthetic source stopped being read after 45 s. At
+  2.4 Msps the source connected late (synthesis under host load), shmem rose
+  from about 66 s, the cap was reached about 84 s after start, and 2 OOM
+  kills followed. Shmem can't be swapped or reclaimed here, so the cap turns
+  into reclaim thrash or OOM, not graceful degradation.
+- **Delivery capacity remains unproven.** Even bounded, all nine decoders
+  dropped 67–71% of offered bytes while the 4-CPU quota was saturated and
+  the host load average was about 500. That shows these conditions are CPU
+  bound. It does not measure the rings: the bounded runs don't show what
+  share of CPU went to ring page faults versus DSP. A matched comparison
+  needs a quiet host.
+- **Matched rtl433-only pair not run.** The preflight refused at 1867 MiB
+  MemAvailable, below the required 2304 MiB, while the live container held
+  about 5.2 GiB.
+- Only one source connection was made in each run, with no disconnects. One
+  readsb restart in each bounded run is unexplained, and so is the late
+  source start at 2.4 Msps upstream.

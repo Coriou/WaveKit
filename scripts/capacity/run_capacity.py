@@ -194,7 +194,8 @@ def main():
         "decoders": [d[0] for d in decoders], "warmup": options.warmup,
         "window": options.window, "interval": options.interval,
         "memoryCap": options.memory, "cpus": options.cpus, "source": "synthetic fake_rtl_tcp.py",
-        "preflight": {"vmMemAvailableMiB": available, "protect": protect_stats(options.protect)},
+        "preflight": {"vmMemAvailableMiB": available, "protect": protect_stats(options.protect),
+                      "hostLoadAvg": [round(x, 1) for x in os.getloadavg()]},
     }
     (out / "meta.json").write_text(json.dumps(meta, indent=2))
     # Even if both containers fill their caps, VM MemAvailable must stay above the floor.
@@ -269,6 +270,7 @@ def main():
         (out / "fake.log").write_text(
             subprocess.run(["docker", "logs", "wkcap-fake"], capture_output=True, text=True).stdout)
         meta["aborted"] = aborted
+        meta["endHostLoadAvg"] = [round(x, 1) for x in os.getloadavg()]
         meta["endedAt"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
         (out / "meta.json").write_text(json.dumps(meta, indent=2))
         cleanup(network)

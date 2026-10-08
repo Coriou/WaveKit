@@ -65,7 +65,7 @@ def summarize(run):
             "droppedBytes": row["droppedBytesTotal"] - before.get("droppedBytesTotal", 0),
             "droppedChunks": row["droppedChunksTotal"] - before.get("droppedChunksTotal", 0),
             "droppedBytesSinceStart": row["droppedBytesTotal"],
-            "writtenBytes": row["totalBytesWritten"] - before.get("totalBytesWritten", 0),
+            "offeredBytes": row["totalBytesWritten"] - before.get("totalBytesWritten", 0),
             "backpressureEnters": row["backpressureEnterCount"] - before.get("backpressureEnterCount", 0),
             "maxSampledBufferBytes": max_buffer[bid],
             "highWaterMark": row.get("highWaterMark"),
@@ -84,7 +84,7 @@ def summarize(run):
                    "shmemMiB": round((s["mem"]["shmem"] or 0) / 2**20),
                    "oomKill": s["memEvents"].get("oom_kill", 0)} for s in samples]
     first_oom = next((s["t"] for s in samples if s["memEvents"].get("oom_kill", 0) > 0), None)
-    total_written = sum(r["writtenBytes"] for r in branch_rows.values())
+    total_written = sum(r["offeredBytes"] for r in branch_rows.values())
     total_dropped = sum(r["droppedBytes"] for r in branch_rows.values())
     return {
         "run": run.name,
@@ -107,9 +107,11 @@ def summarize(run):
                             sorted(groups.items(), key=lambda kv: -kv[1]["pssKiB"])[:16]},
         "oomKillsSinceStart": last["memEvents"].get("oom_kill", 0),
         "firstOomSampleT": first_oom,
-        "branchTotals": {"writtenBytes": total_written, "droppedBytes": total_dropped,
-                         "dropFraction": round(total_dropped / (total_written + total_dropped), 6)
-                         if total_written + total_dropped else None},
+        # totalBytesWritten counts every byte offered to the branch, including
+        # the bytes dropped, so the drop fraction is dropped / offered.
+        "branchTotals": {"offeredBytes": total_written, "droppedBytes": total_dropped,
+                         "dropFraction": round(total_dropped / total_written, 6)
+                         if total_written else None},
         "branches": branch_rows,
         "decoders": decoders,
         "source": fake[-1] if fake else None,
