@@ -347,6 +347,10 @@ export interface FanoutSample {
 	branches: Record<string, FanoutBranchSample>
 }
 export interface DecoderSession {
+	/**
+	 * Server time (ms) of the newest decoder:output, from its `timestamp`; compare with
+	 * other server times, never with the local clock (a server ahead must read "<1s").
+	 */
 	lastWsOutputAt: number | null
 	lastError: { message: string; at: number } | null
 	previousHealth: DecoderHealth | null
