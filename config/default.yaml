@@ -226,6 +226,16 @@ tunerRelay:
   port: 1234
   commandHistoryLimit: 200
 
+# Tuner control (API + relay). rtl_tcp cannot read back rate/center, so after a
+# source reconnect the receiver may be at its own defaults:
+#   reconnectPolicy: restore - re-send the last accepted tuner state (default)
+#   reconnectPolicy: reset   - send nothing; reset tuner state and source caps
+#                              to the configured baseline (shared/remote hosts
+#                              another operator may own after an outage)
+# Env override: WAVEKIT_TUNER__RECONNECT_POLICY=reset
+tuner:
+  reconnectPolicy: restore
+
 # -----------------------------------------------------------------------------
 # Live Demodulator (HTTP Audio Stream)
 # -----------------------------------------------------------------------------

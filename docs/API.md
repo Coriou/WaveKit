@@ -192,6 +192,19 @@ Relay-driven RTL-TCP commands (from SDR++ via the tuner relay) update these
 states and will automatically switch control mode to `external` while the relay
 has an active control client.
 
+Tuner values are the last _commanded_ desired values, not hardware readback:
+rtl_tcp has no positive acknowledgement. When an rtl_tcp source reconnects, the
+`tuner.reconnectPolicy` config decides what happens. With `restore` (the default),
+core re-sends the fields that were accepted through this API or the relay (never
+config defaults) and counts them in `commandCount`/`lastCommandAt`; a failed
+restore sets `lastError` and is retried on the next connection. Relay commands
+received while the source is down become desired state and are sent on
+reconnect. With `reset`, core sends nothing and returns tuner state and source
+caps to the configured baseline. With either policy, source caps
+(`sampleRate`/`centerFreq`) are reconciled to values backed by an accepted
+command or the configured baseline. Combine with the source `connected` flag to
+tell sent from pending.
+
 ```bash
 curl http://localhost:9000/api/tuner
 ```

@@ -1355,6 +1355,48 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
+	 * Sets the tuning metadata (sampleRate + centerFreq) exactly, dropping
+	 * centerFreq when undefined. Used to reconcile caps with the tuner state core
+	 * can actually back (e.g. a reset to the configured baseline after reconnect).
+	 * Emits 'caps-changed' only when either value changes.
+	 */
+	setTuningCaps(
+		id: string,
+		tuning: { sampleRate: number; centerFreq?: number | undefined },
+	): SourceCaps | undefined {
+		const state = this.sources.get(id)
+		if (!state) {
+			this.logger.warn({ sourceId: id }, "Cannot set tuning: source not found")
+			return undefined
+		}
+
+		const oldCaps = state.config.caps
+		if (
+			oldCaps.sampleRate === tuning.sampleRate &&
+			oldCaps.centerFreq === tuning.centerFreq
+		)
+			return oldCaps
+
+		const { centerFreq: _previousCenter, ...rest } = oldCaps
+		const nextCaps: SourceCaps = { ...rest, sampleRate: tuning.sampleRate }
+		if (tuning.centerFreq !== undefined) nextCaps.centerFreq = tuning.centerFreq
+		state.config.caps = nextCaps
+
+		this.logger.info(
+			{
+				sourceId: id,
+				oldSampleRate: oldCaps.sampleRate,
+				newSampleRate: nextCaps.sampleRate,
+				oldCenterFreq: oldCaps.centerFreq,
+				newCenterFreq: nextCaps.centerFreq,
+			},
+			"Source tuning metadata reconciled",
+		)
+		this.emit("caps-changed", id, nextCaps)
+		return nextCaps
+	}
+
+	/**
 	 * Checks if a source supports RTL-TCP tuner control.
 	 * Only rtl_tcp type sources can receive tuner commands.
 	 *

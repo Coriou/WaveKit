@@ -270,7 +270,9 @@ async function main(): Promise<void> {
 		controlPolicy: config.tunerRelay.controlPolicy,
 		maxClients: config.tunerRelay.maxClients,
 	})
-	const tunerController = new TunerController(logger, sourceManager, {})
+	const tunerController = new TunerController(logger, sourceManager, {
+		reconnectPolicy: config.tuner.reconnectPolicy,
+	})
 	const liveDemodConfig = LiveDemodConfigSchema.parse(config.liveDemod ?? {})
 	const liveDemod = new LiveDemodulator(
 		logger,
@@ -296,6 +298,9 @@ async function main(): Promise<void> {
 				sourceId,
 				sourceManager.getCaps(sourceId),
 			)
+			// The receiver may have come back at its own defaults: restore or reset
+			// accepted tuner state per tuner.reconnectPolicy and reconcile caps.
+			tunerController.synchronizeOnConnect(sourceId)
 		}
 	})
 

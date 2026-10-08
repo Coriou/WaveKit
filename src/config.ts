@@ -133,6 +133,18 @@ export const TunerRelayConfigSchema = z.object({
 })
 
 /**
+ * Schema for tuner control behaviour (shared by the tuner API and relay).
+ */
+export const TunerConfigSchema = z.object({
+	/**
+	 * On rtl_tcp reconnect: "restore" re-sends the last accepted tuner state;
+	 * "reset" sends nothing and resets tuner state/source caps to the configured
+	 * baseline (use when another operator may own the receiver after an outage).
+	 */
+	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
+})
+
+/**
  * Schema for live demodulation configuration.
  */
 export const LiveDemodConfigSchema = z
@@ -252,6 +264,7 @@ export const ConfigSchema = z.object({
 	decoders: z.array(DecoderConfigSchema).default([]),
 	audio: AudioConfigSchema.default({}),
 	tunerRelay: TunerRelayConfigSchema.default({}),
+	tuner: TunerConfigSchema.default({}),
 	liveDemod: LiveDemodConfigSchema.optional(),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
