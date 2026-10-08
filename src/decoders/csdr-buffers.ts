@@ -13,8 +13,9 @@
  * scripts/native-patches/test_csdr_buffers.py:
  *
  * - `firdecimate` — the patch validates its lookahead minimum; WaveKit also
- *   computes that minimum and keeps the upstream ring when the configured
- *   ring is too small, rather than letting the stage fail at start.
+ *   computes that minimum. When the configured ring is too small it keeps
+ *   the upstream ring rather than letting the stage fail at start, and the
+ *   builders log that fallback at info (boundCsdrPipeline).
  * - `convert`, `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`,
  *   `realpart` — CSDR AnyLengthModule stages with no retained input window.
  *
@@ -26,6 +27,8 @@
  *   NFM form to keep one rule per command.
  * - Any stage using `--async`: the patch rejects asynchronous mode.
  */
+
+import type { Logger } from "../utils/logger.js"
 
 /** Native setting read by the patched CSDR binary. */
 export const CSDR_BUFFER_ENV = "WAVEKIT_CSDR_BUFFER_ELEMENTS"
@@ -85,22 +88,32 @@ function parseNumber(token: string | undefined): number | null {
 	return Number(token)
 }
 
-function stageMayBeBounded(tokens: string[], elements: number): boolean {
-	if (tokens[0] !== "csdr") return false
+type StageDecision =
+	| { kind: "bounded" }
+	| { kind: "upstream" }
+	| { kind: "firFallback"; minimum: number }
+
+function classifyStage(stage: string, elements: number): StageDecision {
+	const upstream: StageDecision = { kind: "upstream" }
+	const tokens = stage.trim().split(/\s+/)
+	if (tokens[0] !== "csdr") return upstream
 	const command = tokens[1]
-	if (command === undefined || command.startsWith("-")) return false
-	if (tokens.includes("--async")) return false
-	if (STREAMING_COMMANDS.has(command)) return true
-	if (command !== "firdecimate") return false
+	if (command === undefined || command.startsWith("-")) return upstream
+	if (tokens.includes("--async")) return upstream
+	if (STREAMING_COMMANDS.has(command)) return { kind: "bounded" }
+	if (command !== "firdecimate") return upstream
 	const decimation = parseNumber(tokens[2])
 	// Upstream default transition when omitted.
 	const transition =
 		tokens[3] === undefined || tokens[3].startsWith("-")
 			? 0.05
 			: parseNumber(tokens[3])
-	if (decimation === null || transition === null) return false
+	if (decimation === null || transition === null) return upstream
 	const minimum = firDecimateMinimumElements(decimation, transition)
-	return minimum !== null && elements >= minimum
+	if (minimum === null) return upstream
+	return elements >= minimum
+		? { kind: "bounded" }
+		: { kind: "firFallback", minimum }
 }
 
 /**
@@ -112,22 +125,74 @@ export function boundCsdrStage(
 	policy: CsdrBufferPolicy,
 ): string {
 	if (!policy.enabled) return stage
-	const tokens = stage.trim().split(/\s+/)
-	return stageMayBeBounded(tokens, policy.elements)
+	return classifyStage(stage, policy.elements).kind === "bounded"
 		? `${CSDR_BUFFER_ENV}=${policy.elements} ${stage}`
 		: stage
+}
+
+/** A firdecimate kept on its upstream ring because bufferElements is too small. */
+export interface CsdrFirFallback {
+	stage: string
+	/** Elements the native patch requires for this filter. */
+	minimumElements: number
+	configuredElements: number
+}
+
+export interface BoundCsdrStages {
+	stages: string[]
+	/** Always empty while the policy is disabled. */
+	firFallbacks: CsdrFirFallback[]
 }
 
 export function boundCsdrStages(
 	stages: readonly string[],
 	policy: CsdrBufferPolicy = activePolicy,
-): string[] {
-	return stages.map(stage => boundCsdrStage(stage, policy))
+): BoundCsdrStages {
+	const firFallbacks: CsdrFirFallback[] = []
+	const bounded = stages.map(stage => {
+		if (!policy.enabled) return stage
+		const decision = classifyStage(stage, policy.elements)
+		if (decision.kind === "firFallback") {
+			firFallbacks.push({
+				stage,
+				minimumElements: decision.minimum,
+				configuredElements: policy.elements,
+			})
+		}
+		return decision.kind === "bounded"
+			? `${CSDR_BUFFER_ENV}=${policy.elements} ${stage}`
+			: stage
+	})
+	return { stages: bounded, firFallbacks }
+}
+
+/**
+ * Bounds a pipeline's stages and returns them joined with " | ". Logs at info
+ * for each firdecimate that stays on its 800 MiB upstream ring while the
+ * policy is enabled, so the fallback is never silent.
+ */
+export function boundCsdrPipeline(
+	stages: readonly string[],
+	logger: Pick<Logger, "info">,
+	policy: CsdrBufferPolicy = activePolicy,
+): string {
+	const result = boundCsdrStages(stages, policy)
+	for (const fallback of result.firFallbacks) {
+		logger.info(
+			fallback,
+			"csdr firdecimate keeps the upstream ring: csdr.bufferElements is below its lookahead minimum",
+		)
+	}
+	return result.stages.join(" | ")
 }
 
 let activePolicy: CsdrBufferPolicy = DISABLED_CSDR_BUFFER_POLICY
 
-/** Set once at startup from the validated `csdr` config section. */
+/**
+ * Set once at startup from the validated `csdr` config section. This must run
+ * before any pipeline builder (decoder start, live demod start): builders
+ * read the policy each time they build a command.
+ */
 export function configureCsdrBuffers(policy: CsdrBufferPolicy): void {
 	activePolicy = Object.freeze({ ...policy })
 }

@@ -22,7 +22,7 @@
  */
 
 import { shellCommand } from "./process-tools.js"
-import { boundCsdrStages } from "./csdr-buffers.js"
+import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
 import type {
 	DecoderCaps,
@@ -279,7 +279,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		csdrStages.push("csdr convert -i float -o s16")
 
 		// Join csdr stages
-		let pipelineStr = boundCsdrStages(csdrStages).join(" | ")
+		let pipelineStr = boundCsdrPipeline(csdrStages, this.logger)
 
 		// DEBUG: Record audio right after csdr demodulation (at demodRate)
 		// Using simple tee to avoid bash-specific process substitution

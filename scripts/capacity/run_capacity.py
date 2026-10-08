@@ -12,7 +12,10 @@ inside that cgroup and other containers are unaffected.
 Safety: before starting, and every --guard seconds while running, the driver
 reads VM MemAvailable. It aborts the run (removing its own containers only) if
 MemAvailable is below --min-available-mib. It also records `docker stats` for
-the --protect container, which defaults to the live wavekit-app.
+the --protect container, which defaults to the live wavekit-app. Preflight
+refuses to start while that container uses more than --max-protect-cpu
+(default 5%) unless --allow-live is given. A run is marked aborted if the
+synthetic source logs a client disconnect inside the measurement window.
 
 All output goes to --out (e.g. output/capacity/<run-id>/, gitignored):
 config.yaml, meta.json, samples.jsonl (from sampler.py), app.log, fake.log
@@ -53,6 +56,24 @@ def docker(*args, check=True, capture=True):
     if check and result.returncode != 0:
         raise RuntimeError(f"docker {' '.join(args[:3])}... failed: {result.stderr.strip()}")
     return result.stdout if capture else ""
+
+
+def cpu_percent(stats):
+    try:
+        return float(str(stats.get("CPUPerc", "")).rstrip("%"))
+    except ValueError:
+        return None  # container absent: nothing to protect
+
+
+def parse_events(text):
+    events = []
+    for line in text.splitlines():
+        if line.startswith("{"):
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                pass
+    return events
 
 
 def cap_mib(value):
@@ -146,6 +167,10 @@ def main():
     parser.add_argument("--min-available-mib", type=int, default=1024)
     parser.add_argument("--guard", type=float, default=5)
     parser.add_argument("--protect", default="wavekit-app")
+    parser.add_argument("--max-protect-cpu", type=float, default=5.0,
+                        help="refuse to start if --protect uses more CPU %% than this")
+    parser.add_argument("--allow-live", action="store_true",
+                        help="run even while --protect is busy (results then contended)")
     parser.add_argument("--center", type=int, default=446524920)
     parser.add_argument("--out", required=True)
     options = parser.parse_args()
@@ -178,6 +203,12 @@ def main():
         print(f"ABORT preflight: VM MemAvailable {available} MiB < {required} MiB "
               f"(cap + fake source + floor)", file=sys.stderr)
         return 2
+    protect_cpu = cpu_percent(meta["preflight"]["protect"])
+    if protect_cpu is not None and protect_cpu > options.max_protect_cpu and not options.allow_live:
+        print(f"ABORT preflight: {options.protect} is at {protect_cpu}% CPU (> "
+              f"{options.max_protect_cpu}%); likely live streaming. Use --allow-live to "
+              "override.", file=sys.stderr)
+        return 2
 
     cleanup(network)
     docker("network", "create", network)
@@ -204,6 +235,7 @@ def main():
                "--out", "/wkcap/samples.jsonl", "--duration", str(options.window),
                "--interval", str(options.interval))
         start = time.monotonic()
+        window_start_wall = time.time()
         with (out / "guard.jsonl").open("w") as guard:
             while time.monotonic() - start < options.window + 10:
                 time.sleep(options.guard)
@@ -223,6 +255,13 @@ def main():
                 if vm is not None and vm < options.min_available_mib:
                     aborted = f"VM MemAvailable {vm} MiB below {options.min_available_mib}"
                     break
+        window_end_wall = time.time()
+        fake_log = subprocess.run(["docker", "logs", "wkcap-fake"], capture_output=True,
+                                  text=True).stdout
+        drops = [e for e in parse_events(fake_log) if e.get("event") == "disconnected"
+                 and window_start_wall <= e.get("ts", 0) <= window_end_wall]
+        if drops and not aborted:
+            aborted = f"source client disconnected {len(drops)}x inside the window"
         return 4 if aborted else 0
     finally:
         logs = subprocess.run(["docker", "logs", "wkcap-app"], capture_output=True, text=True)

@@ -113,6 +113,8 @@ def summarize(run):
         "branches": branch_rows,
         "decoders": decoders,
         "source": fake[-1] if fake else None,
+        "sourceConnections": sum(1 for e in fake if e.get("event") == "connected"),
+        "sourceDisconnects": sum(1 for e in fake if e.get("event") == "disconnected"),
         "minVmMemAvailableMiB": min((g["vmMemAvailableMiB"] for g in guard
                                      if g.get("vmMemAvailableMiB") is not None), default=None),
         "protect": [g["protect"] for g in guard[:: max(1, len(guard) // 4)]],

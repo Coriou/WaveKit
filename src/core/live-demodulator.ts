@@ -17,7 +17,7 @@ import {
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
 import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
-import { boundCsdrStages, csdrChildEnv } from "../decoders/csdr-buffers.js"
+import { boundCsdrPipeline, csdrChildEnv } from "../decoders/csdr-buffers.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceManager } from "./source-manager.js"
 
@@ -513,7 +513,7 @@ export class LiveDemodulator extends EventEmitter {
 			csdrStages.push("csdr convert -i float -o s16")
 		}
 
-		let pipeline = boundCsdrStages(csdrStages).join(" | ")
+		let pipeline = boundCsdrPipeline(csdrStages, this.log)
 
 		if (useSox) {
 			const outputFormat =

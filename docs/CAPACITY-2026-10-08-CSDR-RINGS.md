@@ -12,23 +12,44 @@ range as the native validation. When the flag is on, the IQ-decimate,
 audio-demod, dsd-fme and live-demod builders prefix only validated stages with
 `WAVEKIT_CSDR_BUFFER_ELEMENTS=<n>` (`src/decoders/csdr-buffers.ts`).
 
-| Bounded (harness-validated) | Upstream ring kept | Why kept |
-|---|---|---|
-| `convert` (char/s16→float, float→char/s16) | `lowpass` | FIR FilterModule; the patch does not size its lookahead |
-| `firdecimate` when ring ≥ ceil(4/float(tbw))+1+M+1024 | `deemphasis` (nfm and wfm) | NFM is a FIR FilterModule; one rule per command |
-| `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`, `realpart` | `bandpass --fft`, `fft`, `shift`, others | Window not sized, or not covered by the harness |
-| | any `--async` stage | The patch rejects asynchronous mode |
+| Bounded (harness-validated)                                         | Upstream ring kept                       | Why kept                                                |
+| ------------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| `convert` (char/s16→float, float→char/s16)                          | `lowpass`                                | FIR FilterModule; the patch does not size its lookahead |
+| `firdecimate` when ring ≥ ceil(4/float(tbw))+1+M+1024               | `deemphasis` (nfm and wfm)               | NFM is a FIR FilterModule; one rule per command         |
+| `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`, `realpart` | `bandpass --fft`, `fft`, `shift`, others | Window not sized, or not covered by the harness         |
+|                                                                     | any `--async` stage                      | The patch rejects asynchronous mode                     |
 
 The bounded commands other than `firdecimate` are CSDR `AnyLengthModule`s,
-which keep no input window. Decoder and live-demod shells no longer inherit
-`WAVEKIT_CSDR_BUFFER_ELEMENTS`, so an operator-set value cannot widen this set.
-The Dockerfile and s6 overlay build no CSDR pipelines; only the Node app
-spawns them.
+which keep no input window. The Dockerfile and s6 overlay build no CSDR
+pipelines; only the Node app spawns them.
+
+Operational notes:
+
+- **Inherited env is scrubbed.** Earlier, an operator could set the native
+  `WAVEKIT_CSDR_BUFFER_ELEMENTS` on the container and it would reach every
+  csdr process. Now it is removed from decoder and live-demod shells, and
+  startup logs a warning. Use `csdr.boundedBuffers` /
+  `WAVEKIT_CSDR__BOUNDED_BUFFERS` instead. This keeps unvalidated stages
+  (`lowpass`, `deemphasis`, …) on upstream rings.
+- **FIR fallback is logged, not silent.** If `bufferElements` is below a
+  filter's native minimum, that `firdecimate` keeps its 800 MiB upstream ring
+  instead of failing at start. The builder logs `csdr firdecimate keeps the
+upstream ring` at info, with the stage, the minimum and the configured size.
+- **Ordering.** The policy is process-wide module state that `src/index.ts`
+  sets right after `loadConfig()`. That happens before any decoder or live-demod
+  pipeline is built. Builders read it whenever they build a command, so a new
+  entry point must call `configureCsdrBuffers()` before creating decoders.
+  Otherwise the default (off) applies.
 
 ## Native harness against the app image
 
-Image `wavekit:csdr-activate-test` (`docker build --target final-core`), candidate
-`/usr/local/bin/csdr` vs unpatched csdr copied from the previous core image:
+Sanitized report, with image IDs and binary SHA-256 values for candidate and
+baseline, case list and results:
+[`scripts/native-patches/results/2026-10-08-csdr-activate-test.json`](../scripts/native-patches/results/2026-10-08-csdr-activate-test.json).
+
+Image `wavekit:csdr-activate-test` (`docker build --target final-core`, image
+`sha256:5c488b47…`). The candidate is its `/usr/local/bin/csdr`; the baseline is
+the unpatched csdr copied from the previous core image (`sha256:2bc9bc14…`):
 
 - 4 FIR equivalence cases, the CU8 convert→FIR→convert chain, the default FFT
   case, 16 invalid settings and the blocked-consumer case all pass.
@@ -80,9 +101,13 @@ container and records cgroup CPU/memory, smaps per process, decoder restarts
 and fanout branch counters. `run_capacity.py` is the driver. It uses private
 `wkcap-*` containers and the `wkcap-net` network, publishes no ports, sets a
 hard memory cap with no swap and a 4-CPU quota, and aborts if VM
-MemAvailable drops below 1 GiB. `summarize.py` reduces the output. Before
-each run, confirm that no live streaming is running (`docker stats
-wavekit-app`). Each run lasts at most 5 minutes.
+MemAvailable drops below 1 GiB. Preflight refuses to start while
+`wavekit-app` is above 5% CPU, which usually means live streaming, unless
+`--allow-live` is given. It also refuses when VM MemAvailable is below the
+cap + 128 MiB + 1 GiB. The synthetic source accepts reconnects, and a client
+disconnect inside the measurement window marks the run aborted rather than
+leaving a clean-looking empty run. `summarize.py` reduces the output. Each
+run lasts at most 5 minutes.
 
 ```bash
 IMG=wavekit:csdr-activate-test; R=scripts/capacity/run_capacity.py; O=output/capacity

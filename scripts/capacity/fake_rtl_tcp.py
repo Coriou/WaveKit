@@ -8,7 +8,8 @@ WaveKit's stream delivery path (source -> fanout -> CSDR -> decoders) at an exac
 byte rate. It does not test decode correctness.
 
 The server sends the 12-byte rtl_tcp header ("RTL0", R820T, 29 gains), ignores
-5-byte client commands, and writes 262144-byte blocks (rtl_tcp's default
+5-byte client commands, and keeps accepting reconnects until --duration
+expires. It writes 262144-byte blocks (rtl_tcp's default
 buffer) on an absolute schedule. Every --report seconds it prints one JSON line
 to stdout with bytes sent and the largest delay behind schedule. A blocked
 socket shows up as growing lag, which means the consumer read side did not keep
@@ -68,46 +69,68 @@ def serve(args: argparse.Namespace) -> None:
     listener = socket.create_server(("0.0.0.0", args.port), reuse_port=False)
     print(json.dumps({"event": "listening", "port": args.port, "rate": args.rate,
                       "synthetic": True, "seed": args.seed}), flush=True)
-    conn, peer = listener.accept()
-    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    conn.sendall(b"RTL0" + struct.pack(">II", 5, 29))
-    threading.Thread(target=drain_commands, args=(conn,), daemon=True).start()
-    print(json.dumps({"event": "connected", "peer": str(peer)}), flush=True)
+    server_deadline = time.monotonic() + args.duration
+    listener.settimeout(1.0)
+    connection = 0
+    # Keep accepting until the deadline, so a reconnecting client gets data again.
+    # Every disconnect is logged with a wall-clock "ts"; the driver marks a run
+    # aborted if one falls inside the measurement window.
+    while time.monotonic() < server_deadline:
+        try:
+            conn, peer = listener.accept()
+        except socket.timeout:
+            continue
+        connection += 1
+        stream(conn, peer, connection, looped, len(period), bytes_per_second,
+               server_deadline, args.report)
+    listener.close()
 
+
+def emit(event: dict) -> None:
+    event["ts"] = round(time.time(), 3)
+    print(json.dumps(event), flush=True)
+
+
+def stream(conn, peer, connection, looped, period_len, bytes_per_second, deadline, report):
+    conn.settimeout(None)
+    conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     start = time.monotonic()
     sent = 0
     offset = 0
     max_lag = 0.0
-    next_report = start + args.report
-    deadline = start + args.duration
+    next_report = start + report
     try:
+        conn.sendall(b"RTL0" + struct.pack(">II", 5, 29))
+        threading.Thread(target=drain_commands, args=(conn,), daemon=True).start()
+        emit({"event": "connected", "connection": connection, "peer": str(peer)})
         while True:
             now = time.monotonic()
             if now >= deadline:
                 break
             due = start + sent / bytes_per_second
             if due > now:
-                time.sleep(due - now)
+                time.sleep(min(due, deadline) - now)
+                if time.monotonic() >= deadline:
+                    break
             else:
                 max_lag = max(max_lag, now - due)
             conn.sendall(looped[offset:offset + BLOCK])
             sent += BLOCK
-            offset = (offset + BLOCK) % len(period)
+            offset = (offset + BLOCK) % period_len
             if time.monotonic() >= next_report:
                 elapsed = time.monotonic() - start
-                print(json.dumps({"event": "progress", "t": round(elapsed, 1), "bytes": sent,
-                                  "expectedBytes": int(elapsed * bytes_per_second),
-                                  "maxLagSeconds": round(max_lag, 3)}), flush=True)
-                next_report += args.report
-    except (BrokenPipeError, ConnectionResetError) as error:
-        print(json.dumps({"event": "disconnected", "error": str(error)}), flush=True)
+                emit({"event": "progress", "connection": connection, "t": round(elapsed, 1),
+                      "bytes": sent, "expectedBytes": int(elapsed * bytes_per_second),
+                      "maxLagSeconds": round(max_lag, 3)})
+                next_report += report
+    except (BrokenPipeError, ConnectionResetError, OSError) as error:
+        emit({"event": "disconnected", "connection": connection, "error": str(error)})
     finally:
         elapsed = time.monotonic() - start
-        print(json.dumps({"event": "done", "t": round(elapsed, 1), "bytes": sent,
-                          "expectedBytes": int(elapsed * bytes_per_second),
-                          "maxLagSeconds": round(max_lag, 3)}), flush=True)
+        emit({"event": "done", "connection": connection, "t": round(elapsed, 1), "bytes": sent,
+              "expectedBytes": int(elapsed * bytes_per_second),
+              "maxLagSeconds": round(max_lag, 3)})
         conn.close()
-        listener.close()
 
 
 def main() -> None:

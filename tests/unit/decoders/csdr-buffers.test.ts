@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach } from "vitest"
+import { describe, expect, it, afterEach, vi } from "vitest"
 import * as fc from "fast-check"
 import pino from "pino"
 import { mkdtempSync, writeFileSync } from "node:fs"
@@ -7,6 +7,7 @@ import { join } from "node:path"
 import {
 	CSDR_BUFFER_ENV,
 	DISABLED_CSDR_BUFFER_POLICY,
+	boundCsdrPipeline,
 	boundCsdrStage,
 	boundCsdrStages,
 	configureCsdrBuffers,
@@ -104,6 +105,41 @@ describe("csdr bounded ring policy (stage builder)", () => {
 		)
 	})
 
+	it("reports and logs a firdecimate that stays on the upstream ring", () => {
+		const small = { enabled: true, elements: 2048 }
+		const stages = [
+			"csdr convert -i char -o float",
+			"csdr firdecimate 45 0.002",
+			"csdr fmdemod",
+		]
+		const result = boundCsdrStages(stages, small)
+		expect(result.firFallbacks).toEqual([
+			{
+				stage: "csdr firdecimate 45 0.002",
+				// ceil(4/float(0.002)) = 2000 taps, +1, +45, +1024
+				minimumElements: 2001 + 45 + 1024,
+				configuredElements: 2048,
+			},
+		])
+		const info = vi.fn()
+		const joined = boundCsdrPipeline(stages, { info }, small)
+		expect(joined).toBe(
+			[
+				`${CSDR_BUFFER_ENV}=2048 csdr convert -i char -o float`,
+				"csdr firdecimate 45 0.002",
+				`${CSDR_BUFFER_ENV}=2048 csdr fmdemod`,
+			].join(" | "),
+		)
+		expect(info).toHaveBeenCalledTimes(1)
+		expect(info.mock.calls[0]?.[0]).toEqual(result.firFallbacks[0])
+
+		// Nothing to report when disabled, or when the ring is large enough.
+		info.mockClear()
+		boundCsdrPipeline(stages, { info }, DISABLED_CSDR_BUFFER_POLICY)
+		boundCsdrPipeline(["csdr firdecimate 45 0.05"], { info }, on)
+		expect(info).not.toHaveBeenCalled()
+	})
+
 	it("only ever prefixes; stage arguments are preserved (property)", () => {
 		// Feature: csdr-bounded-buffers, Property 1: prefix-only transformation
 		const stage = fc.oneof(
@@ -127,8 +163,15 @@ describe("csdr bounded ring policy (stage builder)", () => {
 				fc.integer({ min: 2048, max: 10485760 }),
 				fc.boolean(),
 				(stages, elements, enabled) => {
-					const out = boundCsdrStages(stages, { enabled, elements })
+					const result = boundCsdrStages(stages, { enabled, elements })
+					const out = result.stages
 					expect(out).toHaveLength(stages.length)
+					if (!enabled) expect(result.firFallbacks).toEqual([])
+					for (const fallback of result.firFallbacks) {
+						expect(fallback.stage.startsWith("csdr firdecimate ")).toBe(true)
+						expect(fallback.minimumElements).toBeGreaterThan(elements)
+						expect(out).toContain(fallback.stage)
+					}
 					out.forEach((value, index) => {
 						const original = stages[index]!
 						const envPrefix = `${CSDR_BUFFER_ENV}=${elements} `
@@ -166,7 +209,11 @@ describe("csdr config schema", () => {
 	})
 
 	it("is overridable from the environment", () => {
-		const saved = { ...process.env }
+		const keys = [
+			"WAVEKIT_CSDR__BOUNDED_BUFFERS",
+			"WAVEKIT_CSDR__BUFFER_ELEMENTS",
+		] as const
+		const saved = keys.map(key => process.env[key])
 		try {
 			const dir = mkdtempSync(join(tmpdir(), "wavekit-csdr-config-"))
 			const file = join(dir, "config.yaml")
@@ -179,7 +226,11 @@ describe("csdr config schema", () => {
 				bufferElements: 131072,
 			})
 		} finally {
-			process.env = saved
+			keys.forEach((key, index) => {
+				const value = saved[index]
+				if (value === undefined) delete process.env[key]
+				else process.env[key] = value
+			})
 		}
 	})
 })

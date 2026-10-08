@@ -327,6 +327,9 @@ logging:
 # convert, firdecimate, fmdemod, amdemod, agc, dcblock, gain, limit and
 # realpart. Others, including lowpass, deemphasis and bandpass, keep upstream
 # rings. See src/decoders/csdr-buffers.ts.
+# A firdecimate whose filter needs more than bufferElements
+# (ceil(4/transition)+1 + decimation + 1024) keeps its 800 MiB upstream ring
+# instead of failing; WaveKit logs that fallback at info level.
 #
 # Options:
 #   boundedBuffers - false keeps upstream rings everywhere (default: false)
