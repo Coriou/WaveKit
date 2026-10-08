@@ -201,13 +201,6 @@ describe("A2 fix round 1", () => {
 			status: null,
 			message: "sent · no reply in 10s",
 		})
-		const body = await client(
-			bodyFails(200, new DOMException("t", "TimeoutError")),
-		).audio("stop")
-		expect(body).toMatchObject({
-			outcome: "unknown",
-			message: "sent · no reply in 10s",
-		})
 		const custom = createApiClient({
 			base: () => "http://127.0.0.1:9000",
 			fetchFn: timeout,
@@ -243,6 +236,62 @@ describe("A2 fix round 1", () => {
 			const r = await client(() => respond(status, {})).audio("start")
 			expect(r.ok).toBe(r.outcome === "ok")
 			expect(r.outcome).toBe(status < 400 ? "ok" : "failed")
+		}
+	})
+})
+
+describe("A2 re-review: never report a landed write as failed", () => {
+	const reset = (code: string) =>
+		Object.assign(new TypeError("fetch failed"), { cause: { code } })
+	it("judges by the received status when the body read then fails", async () => {
+		for (const err of [
+			reset("ECONNRESET"),
+			new DOMException("t", "TimeoutError"),
+		]) {
+			expect(
+				await client(bodyFails(200, err)).decoder("readsb", "stop"),
+			).toEqual({
+				ok: true,
+				outcome: "ok",
+				status: 200,
+				message: "ok",
+			})
+			expect(await client(bodyFails(500, err)).audio("start")).toEqual({
+				ok: false,
+				outcome: "failed",
+				status: 500,
+				message: "HTTP 500",
+			})
+		}
+	})
+	it("a reset after sending, before any status, is unknown", async () => {
+		for (const code of [
+			"ECONNRESET",
+			"EPIPE",
+			"UND_ERR_SOCKET",
+			"UND_ERR_CLOSED",
+		]) {
+			expect(
+				await client(() => Promise.reject(reset(code))).decoder(
+					"readsb",
+					"restart",
+				),
+			).toEqual({
+				ok: false,
+				outcome: "unknown",
+				status: null,
+				message: "sent · connection reset",
+			})
+		}
+	})
+	it("a connection that never opened is a failure", async () => {
+		for (const code of ["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"]) {
+			expect(
+				await client(() => Promise.reject(reset(code))).audio("stop"),
+			).toMatchObject({
+				outcome: "failed",
+				message: code,
+			})
 		}
 	})
 })
