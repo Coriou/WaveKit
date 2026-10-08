@@ -783,3 +783,43 @@ describe("R32 formatter hygiene", () => {
 		).toBe("voice")
 	})
 })
+
+describe("R62 operator enrichment", () => {
+	it("adds the operator, when known, as the last and lowest-priority segment", () => {
+		const m = formatMessage(
+			out("aircraft", "readsb", {
+				icao: "4CA9D2",
+				callsign: "RYR4KT",
+				altitude: 37000,
+			}),
+			"readsb",
+			icao =>
+				icao === "4CA9D2"
+					? {
+							icao,
+							seen: 0,
+							messages: 0,
+							firstSeen: 0,
+							lastUpdated: 0,
+							identification: {
+								registration: "EI-DCL",
+								typeCode: "B738",
+								operator: "Ryanair",
+							},
+						}
+					: undefined,
+		)
+		expect(segs(m)).toEqual([
+			"4CA9D2",
+			"EI-DCL",
+			"RYR4KT",
+			"B738",
+			"FL370",
+			"Ryanair",
+		])
+		expect(m.segments.at(-1)?.priority).toBeGreaterThan(
+			Math.max(...m.segments.slice(0, -1).map(x => x.priority)),
+		)
+		expect(m.fields.find(f => f.label === "operator")?.value).toBe("Ryanair")
+	})
+})

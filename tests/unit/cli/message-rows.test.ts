@@ -13,6 +13,7 @@ import {
 	interleave,
 	messageLayout,
 	messageRow,
+	aircraftLookup,
 	in60sText,
 	newestFirst,
 	summaryLine,
@@ -162,6 +163,34 @@ describe("message rows", () => {
 			const live = feedCounts(s.messages.ring, s.now)
 			expect(live.capped).toBe(false)
 			expect(in60sText(live)).toBe("3")
+		})
+	})
+	describe("R62 aircraft enrichment at render time", () => {
+		const burst = scenarioState("burst", { summarize: formatMessage })
+		const rows = interleave(
+			newestFirst(burst.messages.ring),
+			burst.messages.ring.gaps,
+		)
+		const readsbRow = (lines: ReturnType<typeof feedLines>["lines"]): string =>
+			lineText(lines.find(l => lineText(l).includes("4CA9D2")) ?? [])
+		it("ADS-B rows read registration and type from the aircraft map (spec §6.3)", () => {
+			const lookup = aircraftLookup(burst)
+			const out = feedLines(rows, 119, 12, null, burst.now, false, lookup)
+			expect(readsbRow(out.lines)).toMatch(
+				/4CA9D2 {2}EI-DCL {2}RYR4KT {2}B738 {2}FL370 ↓/,
+			)
+		})
+		it("stays backward compatible without a lookup (ingest-time summary)", () => {
+			const out = feedLines(rows, 119, 12, null, burst.now, false)
+			expect(readsbRow(out.lines)).not.toContain("EI-DCL")
+		})
+		it("keeps one lookup per aircraft-map version", () => {
+			expect(aircraftLookup(burst)).toBe(aircraftLookup(burst))
+			const bumped = {
+				...burst,
+				aircraft: { ...burst.aircraft, version: burst.aircraft.version + 1 },
+			}
+			expect(aircraftLookup(bumped)).not.toBe(aircraftLookup(burst))
 		})
 	})
 })
