@@ -122,6 +122,16 @@ sources:
       format: "U8_IQ"
 ```
 
+## Selecting the current image
+
+`make sdr-host-imager` selects the latest successfully built local image through
+`output/pi-image-current.json`. The builder updates this pointer only after
+publishing the image, provenance and catalog. Versioned candidates remain
+available; use `SDR_HOST_IMAGER_ARGS='--manifest <catalog-path>'` to select one
+explicitly. Before any pointer exists, the launcher uses `output/pi-image`.
+A missing or invalid current selection fails instead of silently choosing an
+older image.
+
 ## Status Page
 
 On newly built WaveKit SD images, open `http://<pi-host>/` as soon as the Pi

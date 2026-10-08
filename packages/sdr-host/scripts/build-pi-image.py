@@ -292,6 +292,28 @@ def enable_service(fs, target, service):
         raise ValueError('Failed to enable WaveKit service')
 
 
+def select_default(output, repo_root=REPO_ROOT):
+    """Promote a completed local build without replacing older candidate files."""
+    output, workspace_output = output.resolve(), repo_root.resolve() / 'output'
+    if not output.is_relative_to(workspace_output):
+        return
+    regular(output / 'os-list.json')
+    regular(output / 'BUILD.json')
+    regular(output / 'wavekit-sdr-host.img.xz')
+    pointer = workspace_output / 'pi-image-current.json'
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=workspace_output,
+                                         prefix='.pi-image-current-', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump({'manifest': os.path.relpath(output / 'os-list.json', workspace_output)}, stream)
+            stream.write('\n')
+        os.replace(temporary, pointer)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def build(args):
     base, bundle, output = args.base.resolve(), args.bundle.resolve(), args.output.resolve()
     regular(base)
@@ -391,6 +413,7 @@ def build(args):
         os.replace(compressed, image_target)
         os.replace(provenance_tmp, output / 'BUILD.json')
         os.replace(manifest_tmp, output / 'os-list.json')
+        select_default(output)
     print(f'[wavekit] Flashable image ready: {image_target}', flush=True)
 
 

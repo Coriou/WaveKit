@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, expect, it } from "vitest"
-import { mkdtempSync, writeFileSync, rmSync, chmodSync } from "node:fs"
+import {
+	mkdtempSync,
+	writeFileSync,
+	rmSync,
+	chmodSync,
+	mkdirSync,
+	copyFileSync,
+	realpathSync,
+} from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -7,7 +15,7 @@ import { spawnSync } from "node:child_process"
 
 let dir: string
 beforeEach(() => {
-	dir = mkdtempSync(join(tmpdir(), "wavekit imager "))
+	dir = realpathSync(mkdtempSync(join(tmpdir(), "wavekit imager ")))
 })
 afterEach(() => {
 	rmSync(dir, { recursive: true, force: true })
@@ -91,4 +99,63 @@ it("reports a missing executable as a launch failure", () => {
 	const result = run([entry()], join(dir, "missing imager"))
 	expect(result.status).toBe(1)
 	expect(result.stderr).toContain("Cannot launch Raspberry Pi Imager")
+})
+
+function defaultLauncher(pointer?: string) {
+	const script = join(dir, "packages/sdr-host/scripts/open-pi-imager.mjs")
+	mkdirSync(join(dir, "packages/sdr-host/scripts"), { recursive: true })
+	copyFileSync(resolve("packages/sdr-host/scripts/open-pi-imager.mjs"), script)
+	for (const name of ["pi-image", "operator-next"]) {
+		const target = join(dir, "output", name)
+		mkdirSync(target, { recursive: true })
+		writeFileSync(
+			join(target, "os-list.json"),
+			JSON.stringify({ os_list: [entry()] }),
+		)
+	}
+	if (pointer !== undefined)
+		writeFileSync(join(dir, "output/pi-image-current.json"), pointer)
+	return (args: string[] = []) =>
+		spawnSync(
+			process.execPath,
+			[script, "--executable", process.execPath, "--dry-run", ...args],
+			{ encoding: "utf8" },
+		)
+}
+
+it("defaults to the promoted image while retaining the older catalog", () => {
+	const launch = defaultLauncher(
+		JSON.stringify({ manifest: "operator-next/os-list.json" }),
+	)
+	const result = launch()
+	expect(result.status, result.stderr).toBe(0)
+	expect(JSON.parse(result.stdout).args).toEqual([
+		"--repo",
+		join(dir, "output/operator-next/os-list.json"),
+	])
+})
+
+it("uses the legacy default before any promotion", () => {
+	const result = defaultLauncher()()
+	expect(result.status, result.stderr).toBe(0)
+	expect(JSON.parse(result.stdout).args).toEqual([
+		"--repo",
+		join(dir, "output/pi-image/os-list.json"),
+	])
+})
+
+it("fails closed for a broken current selection while allowing an explicit older image", () => {
+	const launch = defaultLauncher(
+		JSON.stringify({ manifest: "missing/os-list.json" }),
+	)
+	expect(launch().status).toBe(1)
+	const result = launch([
+		"--manifest",
+		join(dir, "output/pi-image/os-list.json"),
+	])
+	expect(result.status, result.stderr).toBe(0)
+	expect(JSON.parse(result.stdout).args).toEqual([
+		"--repo",
+		join(dir, "output/pi-image/os-list.json"),
+	])
 })

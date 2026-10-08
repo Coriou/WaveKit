@@ -39,6 +39,26 @@ class ImageBuilderTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.addCleanup(self.temporary.cleanup)
 
+    def test_promotes_only_completed_workspace_images_without_overwriting_old_candidates(self):
+        workspace = self.root / 'project'
+        candidate = workspace / 'output/operator-next'
+        candidate.mkdir(parents=True)
+        pointer = workspace / 'output/pi-image-current.json'
+        pointer.write_text('{"manifest":"previous/os-list.json"}')
+        with self.assertRaises(FileNotFoundError):
+            builder.select_default(candidate, workspace)
+        self.assertEqual(json.loads(pointer.read_text())['manifest'], 'previous/os-list.json')
+        for name in ('os-list.json', 'BUILD.json', 'wavekit-sdr-host.img.xz'):
+            (candidate / name).write_text('fixture')
+        previous = workspace / 'output/previous'
+        previous.mkdir()
+        (previous / 'wavekit-sdr-host.img.xz').write_text('older candidate')
+        builder.select_default(candidate, workspace)
+        self.assertEqual(json.loads(pointer.read_text())['manifest'], 'operator-next/os-list.json')
+        self.assertEqual((previous / 'wavekit-sdr-host.img.xz').read_text(), 'older candidate')
+        builder.select_default(self.root / 'external', workspace)
+        self.assertEqual(json.loads(pointer.read_text())['manifest'], 'operator-next/os-list.json')
+
     def bundle(self, architecture='arm64'):
         bundle = self.root / 'bundle'
         bundle.mkdir()

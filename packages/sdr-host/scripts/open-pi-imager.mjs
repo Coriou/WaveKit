@@ -7,7 +7,7 @@ import { spawn } from "node:child_process"
 import { homedir } from "node:os"
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
-let manifest = resolve(root, "output/pi-image/os-list.json")
+let manifest
 let dryRun = false
 let executable
 try {
@@ -25,6 +25,15 @@ try {
 			)
 			process.exit(0)
 		} else throw new Error(`Unknown or incomplete argument: ${arg}`)
+	}
+	if (!manifest) {
+		const pointer = resolve(root, "output/pi-image-current.json")
+		if (existsSync(pointer)) {
+			const current = JSON.parse(readFileSync(pointer, "utf8"))
+			if (typeof current.manifest !== "string" || !current.manifest.trim())
+				throw new Error("Current WaveKit image selection is invalid.")
+			manifest = resolve(dirname(pointer), current.manifest)
+		} else manifest = resolve(root, "output/pi-image/os-list.json")
 	}
 	if (!existsSync(manifest))
 		throw new Error(
