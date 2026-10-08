@@ -1093,3 +1093,168 @@ describe("lastWsOutputAt is server time (minor 7)", () => {
 		)
 	})
 })
+
+describe("R55 follow-ups", () => {
+	const tuner = (
+		commands: Extract<WriteIntent, { kind: "tuner" }>["commands"],
+	): WriteIntent => ({ kind: "tuner", sourceId: "pi-iq", commands })
+	const freq = {
+		setting: "frequency" as const,
+		body: { hz: 446_000_000 },
+		label: "frequency",
+	}
+	const gain = {
+		setting: "gain" as const,
+		body: { tenthsDb: 207 },
+		label: "gain",
+	}
+	const sent = (id: number, intent: WriteIntent, at = T0): Inbound => ({
+		kind: "action:sent",
+		at,
+		id,
+		key: "tuner:pi-iq",
+		intent,
+	})
+	const outcomes = (
+		id: number,
+		os: CommandOutcome[],
+		at = T0 + 10,
+	): Inbound => ({
+		kind: "action:result",
+		at,
+		id,
+		key: "tuner:pi-iq",
+		outcomes: os,
+	})
+	const unknown = (label: string): CommandOutcome => ({
+		label,
+		at: T0 + 10,
+		result: {
+			ok: false,
+			outcome: "unknown",
+			status: null,
+			message: "sent · no reply in 10s",
+		},
+	})
+	const sentEvent = (at: number, command: string, value: number): Inbound =>
+		ws(at, { type: "tuner:command-sent", sourceId: "pi-iq", command, value })
+
+	it("a sparkline baseline older than 2 min is not used (no false spike after an outage)", () => {
+		const t2 = T0 + 180_000
+		const s = reduce(
+			initialState(T0),
+			[
+				restOk(T0, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 10, errors: 0 } }),
+				]),
+				restOk(t2, [
+					decoder({ stats: { bytesIn: 1, eventsOut: 25, errors: 0 } }),
+				]),
+			],
+			t2,
+		)
+		expect(s.session["readsb"]?.spark[String(Math.floor(t2 / 60_000))]).toBe(0)
+		expect(s.session["readsb"]?.sparkPrev).toEqual({ t: t2, v: 25 })
+	})
+
+	it("tuner:command-sent with the sent value confirms an unknown single-command write", () => {
+		let s = reduce(
+			initialState(T0),
+			[sent(1, tuner([freq])), outcomes(1, [unknown("frequency")])],
+			T0 + 10,
+		)
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
+		s = reduce(s, [sentEvent(T0 + 20, "set-frequency", 445_000_000)], T0 + 20)
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
+		s = reduce(s, [sentEvent(T0 + 30, "set-frequency", 446_000_000)], T0 + 30)
+		expect(s.actions.byKey["tuner:pi-iq"]).toMatchObject({
+			state: "ok",
+			confirmedAt: T0 + 30,
+		})
+		expect(s.tunerLastCommand["pi-iq"]).toMatchObject({
+			command: "set-frequency",
+		})
+	})
+
+	it("confirms a sequence only by its last command; a halted sequence stays as it is", () => {
+		const halted = reduce(
+			initialState(T0),
+			[
+				sent(1, tuner([freq, gain])),
+				outcomes(1, [
+					unknown("frequency"),
+					{ label: "gain", result: null, at: null },
+				]),
+				sentEvent(T0 + 20, "set-frequency", 446_000_000),
+			],
+			T0 + 20,
+		)
+		expect(halted.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
+		const full = reduce(
+			initialState(T0),
+			[
+				sent(1, tuner([freq, gain])),
+				// The last command's event arrives while the request is in flight.
+				sentEvent(T0 + 5, "set-gain", 207),
+				outcomes(1, [
+					{
+						label: "frequency",
+						at: T0 + 10,
+						result: { ok: true, outcome: "ok", status: 200, message: "ok" },
+					},
+					unknown("gain"),
+				]),
+			],
+			T0 + 10,
+		)
+		expect(full.actions.byKey["tuner:pi-iq"]?.state).toBe("ok")
+	})
+
+	it("maps every tuner setting to core's command name and value", () => {
+		const cases: Array<
+			[
+				Extract<WriteIntent, { kind: "tuner" }>["commands"][number],
+				string,
+				number,
+			]
+		> = [
+			[
+				{ setting: "ppm", body: { ppm: -3 }, label: "ppm" },
+				"set-freq-correction",
+				4294967293,
+			],
+			[
+				{ setting: "gain-mode", body: { mode: "agc" }, label: "gain mode" },
+				"set-gain-mode",
+				0,
+			],
+			[
+				{ setting: "direct-sampling", body: { mode: "q" }, label: "ds" },
+				"set-direct-sampling",
+				2,
+			],
+			[
+				{ setting: "bias-tee", body: { enabled: true }, label: "bias-t" },
+				"set-bias-tee",
+				1,
+			],
+			[
+				{ setting: "sample-rate", body: { hz: 2_400_000 }, label: "sr" },
+				"set-sample-rate",
+				2_400_000,
+			],
+		]
+		for (const [cmd, name, value] of cases) {
+			const s = reduce(
+				initialState(T0),
+				[
+					sent(1, tuner([cmd])),
+					outcomes(1, [unknown(cmd.label)]),
+					sentEvent(T0 + 20, name, value),
+				],
+				T0 + 20,
+			)
+			expect(s.actions.byKey["tuner:pi-iq"]?.state, name).toBe("ok")
+		}
+	})
+})

@@ -262,7 +262,9 @@ export function actionKey(target: ActionTarget): string {
 
 /**
  * "unknown": the write was sent but no reply arrived in time (R23); it is not a
- * failure and is reconciled from decoder:started / stopped / status events.
+ * failure and is reconciled by an event: decoder:started / stopped / status for
+ * decoders, live-audio:started / stopped for audio, live-audio:config for presets
+ * and tuner:command-sent for tuner commands.
  */
 export type ActionOutcome = "ok" | "failed" | "unknown"
 export interface ActionResult {
