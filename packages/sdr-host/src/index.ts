@@ -13,6 +13,7 @@ import {
 	startPreflightMonitoring,
 } from "./supervisor/preflight.js"
 import { createApiServer, startApiServer } from "./api/server.js"
+import { HostCollector } from "./telemetry/host.js"
 
 async function main(): Promise<void> {
 	// Load configuration
@@ -38,12 +39,19 @@ async function main(): Promise<void> {
 	const processManager = new ProcessManager(config, logger)
 	processManager.startMonitoring()
 
+	// Host telemetry is sampled in the background so page viewers cost no I/O.
+	const hostCollector = new HostCollector({
+		statusDir: config.api.hostStatusDir,
+	})
+	hostCollector.start()
+
 	// Create API server
 	const fastify = await createApiServer({
 		config,
 		logger,
 		processManager,
 		preflightResult,
+		hostTelemetry: hostCollector,
 	})
 
 	// Handle shutdown
@@ -51,6 +59,7 @@ async function main(): Promise<void> {
 		logger.info("Shutting down")
 		await fastify.close()
 		await stopPreflightMonitoring()
+		hostCollector.stop()
 		await processManager.shutdown()
 		process.exit(0)
 	}

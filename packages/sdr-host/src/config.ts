@@ -43,6 +43,37 @@ export const SdrHostConfigSchema = z.object({
 			host: z.string().default("0.0.0.0"),
 			/** API server port */
 			port: z.number().int().min(1).max(65535).default(8080),
+			/**
+			 * Extra browser origins allowed to read the API cross-origin
+			 * (comma-separated in env). The status page is same-origin and needs none.
+			 */
+			corsOrigins: z
+				.preprocess(
+					value =>
+						typeof value === "string"
+							? value
+									.split(",")
+									.map(origin => origin.trim())
+									.filter(Boolean)
+							: value,
+					// Browsers send a bare origin (scheme://host[:port]); an entry with a
+					// path or trailing slash would never match, so normalise or reject.
+					z.array(
+						z
+							.string()
+							.url()
+							.refine(value => {
+								const url = new URL(value)
+								return (
+									url.pathname === "/" && url.search === "" && url.hash === ""
+								)
+							}, "CORS origins must not include a path, query or fragment")
+							.transform(value => new URL(value).origin),
+					),
+				)
+				.default([]),
+			/** Directory with the sanitized first-boot setup.json (read-only mount). */
+			hostStatusDir: z.string().default("/host-status"),
 		})
 		.default({}),
 

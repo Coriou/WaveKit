@@ -144,3 +144,25 @@ describe("parseEnvironmentVariables", () => {
 		expect(Object.keys(result)).not.toContain("someOtherVar")
 	})
 })
+
+describe("API CORS origins", () => {
+	it("normalises origins and rejects ones that could never match", () => {
+		const parsed = SdrHostConfigSchema.parse({
+			api: { corsOrigins: "http://laptop.local:3000, https://ops.example" },
+		})
+		expect(parsed.api.corsOrigins).toEqual([
+			"http://laptop.local:3000",
+			"https://ops.example",
+		])
+		expect(
+			SdrHostConfigSchema.parse({ api: { corsOrigins: "http://mac:3000/" } })
+				.api.corsOrigins,
+		).toEqual(["http://mac:3000"])
+		expect(() =>
+			SdrHostConfigSchema.parse({
+				api: { corsOrigins: "http://mac:3000/app" },
+			}),
+		).toThrow()
+		expect(SdrHostConfigSchema.parse({}).api.corsOrigins).toEqual([])
+	})
+})

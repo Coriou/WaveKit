@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify"
+import type { SamplingState } from "@wavekit/api-types"
 
 export interface HealthResponse {
 	healthy: boolean
@@ -9,6 +10,11 @@ export interface HealthResponse {
 		rtlmux: "ok" | "error"
 	}
 	reason?: string
+	/**
+	 * Informational upstream sampling state. It does not affect `healthy` or
+	 * the status code, which keep their USB/process meaning for Docker.
+	 */
+	sampling: SamplingState
 }
 
 /**
@@ -36,6 +42,7 @@ export function registerHealthRoutes(fastify: FastifyInstance): void {
 			healthy,
 			uptime,
 			checks,
+			sampling: processManager.getSampling().state,
 		}
 
 		// Add reason if unhealthy

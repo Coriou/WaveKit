@@ -2,7 +2,13 @@ import * as fs from "node:fs"
 import * as path from "node:path"
 import type { Logger } from "@wavekit/shared"
 import { createComponentLogger } from "@wavekit/shared"
+import type { SdrHostDelivery, SdrHostSampling } from "@wavekit/api-types"
 import type { SdrHostConfig } from "../config.js"
+import {
+	RtlmuxStatsSchema,
+	SamplingMonitor,
+	type RtlmuxStats,
+} from "../telemetry/sampling.js"
 
 export interface ProcessState {
 	running: boolean
@@ -12,22 +18,10 @@ export interface ProcessState {
 	lastError: string | null
 }
 
-export interface RtlmuxStats {
-	clients: number
-	bytesPerSec: number
-	totalBytesSent: number
-	clientDetails: Array<{
-		id: number
-		address: string
-		bytesDropped: number
-	}>
-}
+export type { RtlmuxStats }
 
-interface RawRtlmuxClient {
-	client: { host: string; port: number }
-	dataOut: number
-	dropped?: { size?: number }
-}
+/** Canonical stats are a few hundred bytes per client. */
+const MAX_STATS_BYTES = 256 * 1024
 
 interface InternalProcessState extends ProcessState {
 	lastPid?: number
@@ -37,9 +31,13 @@ interface InternalProcessState extends ProcessState {
 interface ProcessManagerOptions {
 	procRoot?: string
 	fetchFn?: typeof fetch
+	/** Monotonic milliseconds for polling cadence and sampling deadlines. */
 	now?: () => number
+	/** Wall-clock milliseconds, used only for ISO timestamps. */
+	wallNow?: () => number
 	processPollIntervalMs?: number
 	statsPollIntervalMs?: number
+	statsTimeoutMs?: number
 }
 
 /**
@@ -53,8 +51,13 @@ export class ProcessManager {
 	private readonly now: () => number
 	private readonly processPollIntervalMs: number
 	private readonly statsPollIntervalMs: number
+	private readonly statsTimeoutMs: number
+	private readonly wallNow: () => number
+	private readonly sampling: SamplingMonitor
 	private processPollingInterval: ReturnType<typeof setInterval> | null = null
-	private statsPollingInterval: ReturnType<typeof setInterval> | null = null
+	private statsTimer: ReturnType<typeof setTimeout> | null = null
+	private statsInFlight: Promise<void> | null = null
+	private stopped = false
 	private rtlTcpState: InternalProcessState = {
 		running: false,
 		pid: undefined,
@@ -71,17 +74,6 @@ export class ProcessManager {
 		lastError: null,
 		seenOnce: false,
 	}
-	private lastStatsSample: {
-		at: number
-		totalBytesSent: number
-		pid: number | undefined
-	} | null = null
-	private currentStats: RtlmuxStats = {
-		clients: 0,
-		bytesPerSec: 0,
-		totalBytesSent: 0,
-		clientDetails: [],
-	}
 
 	constructor(
 		config: SdrHostConfig,
@@ -92,9 +84,17 @@ export class ProcessManager {
 		this.log = createComponentLogger(logger, "ProcessManager")
 		this.procRoot = options.procRoot ?? "/proc"
 		this.fetchFn = options.fetchFn ?? fetch
-		this.now = options.now ?? (() => Date.now())
+		this.now = options.now ?? (() => performance.now())
+		this.wallNow = options.wallNow ?? (() => Date.now())
 		this.processPollIntervalMs = options.processPollIntervalMs ?? 2000
 		this.statsPollIntervalMs = options.statsPollIntervalMs ?? 2000
+		this.statsTimeoutMs = options.statsTimeoutMs ?? 1500
+		this.sampling = new SamplingMonitor({
+			sampleRate: config.rtlTcp.sampleRate,
+			now: this.now,
+			wallNow: this.wallNow,
+			maxObservationGapMs: this.statsPollIntervalMs * 2.5,
+		})
 	}
 
 	/**
@@ -133,10 +133,24 @@ export class ProcessManager {
 	}
 
 	/**
-	 * Returns current rtlmux stats.
+	 * Returns rtlmux delivery stats in the legacy shape core's poller reads.
+	 * Expired snapshots report no clients rather than cached values.
 	 */
 	getRtlmuxStats(): RtlmuxStats {
-		return { ...this.currentStats }
+		return this.sampling.legacyStats()
+	}
+
+	/** Upstream sampling evidence, independent of downstream clients. */
+	getSampling(): SdrHostSampling {
+		return this.sampling.sampling()
+	}
+
+	getDelivery(): SdrHostDelivery {
+		return this.sampling.delivery()
+	}
+
+	getSamplingHistory(): Array<[number, number | null]> {
+		return this.sampling.recentHistory()
 	}
 
 	/**
@@ -144,8 +158,10 @@ export class ProcessManager {
 	 */
 	async shutdown(): Promise<void> {
 		this.log.info("Stopping process monitoring")
+		this.stopped = true
 		this.stopProcessPolling()
 		this.stopStatsPolling()
+		await this.statsInFlight
 	}
 
 	private startProcessPolling(): void {
@@ -214,7 +230,7 @@ export class ProcessManager {
 		if (pid !== undefined) {
 			if (state.seenOnce && (!wasRunning || state.lastPid !== pid)) {
 				state.restartCount += 1
-				state.lastRestartAt = new Date(this.now())
+				state.lastRestartAt = new Date(this.wallNow())
 			}
 
 			state.seenOnce = true
@@ -234,91 +250,108 @@ export class ProcessManager {
 	}
 
 	private startStatsPolling(statsPort: number): void {
-		if (this.statsPollingInterval) return
-		const pollStats = async (): Promise<void> => {
-			if (!this.rtlmuxState.running) {
-				this.lastStatsSample = null
-				this.currentStats = {
-					clients: 0,
-					bytesPerSec: 0,
-					totalBytesSent: 0,
-					clientDetails: [],
-				}
+		if (this.statsTimer || this.stopped) return
+		const url = `http://127.0.0.1:${statsPort}/stats.json`
+		const schedule = (delayMs: number): void => {
+			if (this.stopped) return
+			this.statsTimer = setTimeout(() => {
+				const startedAt = this.now()
+				this.statsInFlight = this.pollStats(url).finally(() => {
+					this.statsInFlight = null
+					// Start-to-start cadence; a slow poll never overlaps the next.
+					schedule(
+						Math.max(0, this.statsPollIntervalMs - (this.now() - startedAt)),
+					)
+				})
+			}, delayMs)
+			this.statsTimer.unref?.()
+		}
+		schedule(this.statsPollIntervalMs)
+	}
+
+	private async pollStats(url: string): Promise<void> {
+		this.sampling.observeProcesses(this.rtlmuxState.pid, this.rtlTcpState.pid)
+		const pid = this.rtlmuxState.pid
+		if (!this.rtlmuxState.running || pid === undefined) return
+
+		const controller = new AbortController()
+		const timeout = setTimeout(() => controller.abort(), this.statsTimeoutMs)
+		let body: unknown
+		try {
+			const response = await this.fetchFn(url, { signal: controller.signal })
+			if (!response.ok) {
+				this.sampling.observeFailure("http")
 				return
 			}
-
-			try {
-				const response = await this.fetchFn(
-					`http://127.0.0.1:${statsPort}/stats.json`,
-				)
-				if (response.ok) {
-					const data = (await response.json()) as {
-						clients?: number | RawRtlmuxClient[]
-						bytes_per_sec?: number
-						total_bytes_sent?: number
-						client_details?: Array<{
-							id: number
-							address: string
-							bytes_dropped: number
-						}>
-					}
-					// slepp/rtlmux exposes a clients array, not the legacy numeric
-					// count / client_details shape. Normalize both into our API.
-					const rawClients = Array.isArray(data.clients) ? data.clients : null
-					const totalBytesSent =
-						data.total_bytes_sent ??
-						rawClients?.reduce((total, client) => total + client.dataOut, 0) ??
-						0
-					const at = this.now()
-					const previous = this.lastStatsSample
-					const elapsedSeconds = previous ? (at - previous.at) / 1000 : 0
-					const bytesPerSec =
-						data.bytes_per_sec ??
-						(previous &&
-						previous.pid === this.rtlmuxState.pid &&
-						elapsedSeconds > 0
-							? Math.max(
-									0,
-									(totalBytesSent - previous.totalBytesSent) / elapsedSeconds,
-								)
-							: 0)
-					this.lastStatsSample = {
-						at,
-						totalBytesSent,
-						pid: this.rtlmuxState.pid,
-					}
-					this.currentStats = {
-						clients: rawClients
-							? rawClients.length
-							: ((data.clients as number | undefined) ?? 0),
-						bytesPerSec,
-						totalBytesSent,
-						clientDetails: rawClients
-							? rawClients.map((client, index) => ({
-									id: index,
-									address: `${client.client.host.includes(":") ? `[${client.client.host}]` : client.client.host}:${client.client.port}`,
-									bytesDropped: client.dropped?.size ?? 0,
-								}))
-							: (data.client_details?.map(c => ({
-									id: c.id,
-									address: c.address,
-									bytesDropped: c.bytes_dropped,
-								})) ?? []),
-					}
-				}
-			} catch {
-				// Stats endpoint not yet available, ignore
+			const text = await readCapped(response, MAX_STATS_BYTES, controller)
+			if (text === null) {
+				this.sampling.observeFailure("invalid")
+				return
 			}
+			body = JSON.parse(text)
+		} catch (error) {
+			this.sampling.observeFailure(
+				controller.signal.aborted
+					? "timeout"
+					: error instanceof SyntaxError
+						? "invalid"
+						: "unreachable",
+			)
+			return
+		} finally {
+			clearTimeout(timeout)
 		}
 
-		this.statsPollingInterval = setInterval(() => {
-			void pollStats()
-		}, this.statsPollIntervalMs)
+		const parsed = RtlmuxStatsSchema.safeParse(body)
+		if (!parsed.success) {
+			this.sampling.observeFailure("invalid")
+			return
+		}
+		// Counters belong to one rtlmux process; discard a sample that may
+		// straddle a restart rather than mixing two processes' counters.
+		if (this.rtlmuxState.pid !== pid || !this.isProcess(pid, "rtlmux")) return
+		this.sampling.observeStats(parsed.data, pid)
+	}
+
+	private isProcess(pid: number, name: string): boolean {
+		try {
+			return (
+				fs
+					.readFileSync(path.join(this.procRoot, String(pid), "comm"), "utf8")
+					.trim() === name
+			)
+		} catch {
+			return false
+		}
 	}
 
 	private stopStatsPolling(): void {
-		if (!this.statsPollingInterval) return
-		clearInterval(this.statsPollingInterval)
-		this.statsPollingInterval = null
+		if (!this.statsTimer) return
+		clearTimeout(this.statsTimer)
+		this.statsTimer = null
 	}
+}
+
+/** Reads a response body, aborting as soon as it exceeds `limit` bytes. */
+async function readCapped(
+	response: Response,
+	limit: number,
+	controller: AbortController,
+): Promise<string | null> {
+	if (!response.body) return await response.text()
+	const reader = response.body.getReader()
+	const chunks: Uint8Array[] = []
+	let size = 0
+	for (;;) {
+		const { done, value } = await reader.read()
+		if (done) break
+		size += value.byteLength
+		if (size > limit) {
+			controller.abort()
+			await reader.cancel().catch(() => undefined)
+			return null
+		}
+		chunks.push(value)
+	}
+	return Buffer.concat(chunks).toString("utf8")
 }

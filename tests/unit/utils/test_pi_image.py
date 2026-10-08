@@ -137,8 +137,11 @@ class ImageFirstbootTests(unittest.TestCase):
         self.config = self.root / 'cloud-config'
         self.config.write_text(json.dumps({'user': {'name': 'operator', 'sudo': ['ALL=(ALL) ALL']}}))
         self.account = types.SimpleNamespace(pw_name='operator', pw_uid=1000, pw_gid=1000, pw_dir=str(self.home))
+        self.boot_id = self.root / 'boot_id'
+        self.expect_record = True
+        self.boot_id.write_text('fixture-boot-id\n')
         for name, value in [('BUNDLE', self.bundle), ('STATE', self.root / 'state'), ('LOG', self.root / 'log'),
-                            ('BOOT_PATHS', (self.boot,)), ('CONFIG', self.config)]:
+                            ('BOOT_PATHS', (self.boot,)), ('CONFIG', self.config), ('BOOT_ID', self.boot_id)]:
             context = patch.object(firstboot, name, value)
             context.start()
             self.addCleanup(context.stop)
@@ -160,6 +163,8 @@ class ImageFirstbootTests(unittest.TestCase):
             if command[0] == 'bash':
                 self.assertEqual(command, ['bash', './setup.sh', '--target-user', 'operator'])
                 self.assertIn('running', (self.boot / 'wavekit-setup.status').read_text())
+                if self.expect_record:
+                    self.assertEqual(self.setup_record()['phase'], 'install')
                 self.assertEqual(kwargs['cwd'], firstboot.STATE / 'install/wavekit-pi-bundle')
                 self.assertEqual(kwargs['cwd'].parent.stat().st_mode & 0o777, 0o700)
                 kwargs['stdout'].write('fixture setup output\n')
@@ -173,6 +178,33 @@ class ImageFirstbootTests(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0)
         with patch.object(firstboot.subprocess, 'run', side_effect=command) as run:
             return firstboot.main(), run.call_count
+
+    def setup_record(self):
+        return json.loads((firstboot.STATE / 'status/setup.json').read_text())
+
+    def test_status_page_record_is_allowlisted_and_world_readable(self):
+        self.assertEqual(self.run_setup(), (0, 4))
+        record = self.setup_record()
+        self.assertEqual(set(record), {'schema', 'state', 'phase', 'updatedAt', 'bootId', 'exitCode'})
+        self.assertEqual((record['state'], record['phase'], record['exitCode']), ('complete', 'done', 0))
+        self.assertEqual(record['bootId'], 'fixture-boot-id')
+        status_dir = firstboot.STATE / 'status'
+        self.assertEqual(sorted(path.name for path in status_dir.iterdir()), ['setup.json'])
+        self.assertEqual(status_dir.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((status_dir / 'setup.json').stat().st_mode & 0o777, 0o644)
+        self.assertNotIn('operator', (status_dir / 'setup.json').read_text())
+
+    def test_status_page_record_reports_failure_without_details(self):
+        self.assertEqual(self.run_setup(fail=True), (23, 2))
+        record = self.setup_record()
+        self.assertEqual((record['state'], record['phase'], record['exitCode']), ('failed', None, 23))
+        self.assertNotIn('fixture setup output', json.dumps(record))
+
+    def test_status_page_record_failure_never_fails_setup(self):
+        self.expect_record = False
+        with patch.object(firstboot, 'write_setup_status', side_effect=PermissionError):
+            self.assertEqual(self.run_setup(), (0, 4))
+        self.assertIn('Could not publish status page record', firstboot.LOG.read_text())
 
     def test_root_setup_uses_top_level_imager_user_and_copies_status_logs(self):
         self.assertEqual(self.run_setup(), (0, 4))

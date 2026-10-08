@@ -13,6 +13,7 @@ import sys
 BUNDLE = Path('/opt/wavekit/pi-bundle')
 STATE = Path('/var/lib/wavekit')
 LOG = Path('/var/log/wavekit-firstboot.log')
+BOOT_ID = Path('/proc/sys/kernel/random/boot_id')
 BOOT_PATHS = (Path('/boot/firmware'), Path('/boot'))
 CONFIG = Path('/var/lib/cloud/instance/cloud-config.txt')
 
@@ -93,6 +94,34 @@ def wait_for_cloud_init(log):
         print('Cloud-init completed successfully', file=log)
 
 
+def write_setup_status(state, phase, exit_code=None):
+    """Publish sanitized progress for the receiver status page.
+
+    Compose mounts only STATE/status, read-only. The record holds allowlisted
+    fields: never messages, accounts, paths or configuration.
+    """
+    status_dir = STATE / 'status'
+    try:
+        boot_id = BOOT_ID.read_text().strip()[:64] or None
+    except OSError:
+        boot_id = None
+    record = {
+        'schema': 1,
+        'state': state,
+        'phase': phase,
+        'updatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'bootId': boot_id,
+        'exitCode': exit_code,
+    }
+    status_dir.mkdir(parents=True, exist_ok=True)
+    status_dir.chmod(0o755)
+    temporary = status_dir / '.setup.json.tmp'
+    temporary.write_text(json.dumps(record) + '\n')
+    temporary.chmod(0o644)
+    # Atomic rename: readers never see a partial record.
+    os.replace(temporary, status_dir / 'setup.json')
+
+
 def main():
     if os.geteuid() != 0:
         print('WaveKit firstboot must run as root', file=sys.stderr)
@@ -101,10 +130,15 @@ def main():
     LOG.parent.mkdir(parents=True, exist_ok=True)
     boot = next((path for path in BOOT_PATHS if (path / 'config.txt').is_file()), None)
     with LOG.open('a', buffering=1) as log:
-        def status(value):
+        def status(value, phase, exit_code=None):
             if boot:
                 timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 (boot / 'wavekit-setup.status').write_text(f'{timestamp} {value}\n')
+            try:
+                write_setup_status(value, phase, exit_code)
+            except OSError:
+                # The status page is optional; never fail setup over it.
+                print('Could not publish status page record', file=log)
 
         def publish_log():
             log.flush()
@@ -113,10 +147,10 @@ def main():
 
         try:
             if (STATE / 'firstboot.done').is_file():
-                status('complete')
+                status('complete', 'done')
                 publish_log()
                 return 0
-            status('running')
+            status('running', 'cloud-init')
             print('Starting WaveKit firstboot', file=log)
             # This runs from its own service, never from cloud-final runcmd.
             wait_for_cloud_init(log)
@@ -142,18 +176,20 @@ def main():
             # Execute only root-controlled inputs. The eventual SSH account's
             # writable home is never the source of a root-executed installer.
             shutil.copytree(BUNDLE, working, dirs_exist_ok=True)
+            status('running', 'install')
             subprocess.run(['bash', './setup.sh', '--target-user', account.pw_name],
                            cwd=working, check=True, stdout=log, stderr=log)
             # Publish as the account itself so concurrent home-directory edits
             # cannot turn a root copy/chown into an arbitrary privileged write.
             install.chmod(0o755)
+            status('running', 'publish')
             for command in [
                 ['runuser', '-u', account.pw_name, '--', 'mkdir', '-p', str(destination)],
                 ['runuser', '-u', account.pw_name, '--', 'cp', '-a', '--no-preserve=ownership', str(working) + '/.', str(destination)],
             ]:
                 subprocess.run(command, check=True, stdout=log, stderr=log)
             print('WaveKit setup complete; verify dongle streaming separately', file=log)
-            status('complete')
+            status('complete', 'done', 0)
             publish_log()
             (STATE / 'firstboot.done').touch()
             return 0
@@ -163,7 +199,7 @@ def main():
             code = error.returncode if isinstance(error, subprocess.CalledProcessError) else 1
             print(f'WaveKit firstboot failed ({type(error).__name__}, exit {code}); retry with systemctl restart wavekit-firstboot', file=log)
             try:
-                status('failed')
+                status('failed', None, code if 0 < code < 256 else 1)
                 publish_log()
             except OSError:
                 print('Could not publish boot diagnostics; see system log', file=log)

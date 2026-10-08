@@ -1,0 +1,843 @@
+@font-face {
+	font-family: "Barlow";
+	font-weight: 500;
+	font-display: swap;
+	src: url("fonts/barlow-500.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Barlow";
+	font-weight: 600;
+	font-display: swap;
+	src: url("fonts/barlow-600.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Barlow Semi Condensed";
+	font-weight: 600;
+	font-display: swap;
+	src: url("fonts/barlow-semi-condensed-600.woff2") format("woff2");
+}
+
+:root {
+	/* Bezel: lab-grey enamel by day, graphite at night. */
+	--bezel: #d9dbd5;
+	--bezel-raised: #e4e6e0;
+	--ink: #1c201e;
+	--ink-2: #4a524e;
+	--rule: #a7ada6;
+	--ok-ink: #1d7347;
+	--warn-ink: #855600;
+	--fault-ink: #b02a1f;
+
+	/* Screen: always dark, like the instrument's display. */
+	--screen: #0d1210;
+	--screen-ink: #dde5e0;
+	--screen-ink-2: #8f9d96;
+	--grat: rgb(160 190 175 / 0.09);
+	--grat-major: rgb(160 190 175 / 0.2);
+	--trace: #f2b33d;
+	--expected: #7f9a8c;
+
+	/* Lamps. */
+	--ok: #3dbe7e;
+	--warn: #f2b33d;
+	--fault: #ef5b4c;
+	--lamp-off: #9aa19c;
+
+	--focus: #2f6fd6;
+	--face: "Barlow", ui-sans-serif, system-ui, sans-serif;
+	--legend: "Barlow Semi Condensed", "Barlow", ui-sans-serif, sans-serif;
+	--gutter: 16px;
+	color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bezel: #1b1e1d;
+		--bezel-raised: #222625;
+		--ink: #e3e7e2;
+		--ink-2: #9ba49f;
+		--rule: #3b423f;
+		--ok-ink: #5fd39a;
+		--warn-ink: #f2b33d;
+		--fault-ink: #ff8073;
+		--lamp-off: #5c6460;
+		--focus: #7fb0ff;
+		color-scheme: dark;
+	}
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html {
+	-webkit-text-size-adjust: 100%;
+	text-size-adjust: 100%;
+}
+
+body {
+	margin: 0;
+	background: var(--bezel);
+	color: var(--ink);
+	font: 500 1rem/1.4 var(--face);
+	font-variant-numeric: tabular-nums;
+	-webkit-font-smoothing: antialiased;
+}
+
+::selection {
+	background: var(--trace);
+	color: #1c201e;
+}
+
+:focus-visible {
+	outline: 2px solid var(--focus);
+	outline-offset: 3px;
+	border-radius: 2px;
+}
+
+h1,
+h2,
+h3,
+p,
+dl,
+dd,
+ol,
+ul,
+figure {
+	margin: 0;
+}
+
+ol,
+ul {
+	padding: 0;
+	list-style: none;
+}
+
+.panel {
+	max-width: 1180px;
+	margin: 0 auto;
+	padding: max(12px, env(safe-area-inset-top))
+		max(var(--gutter), env(safe-area-inset-right))
+		max(24px, env(safe-area-inset-bottom))
+		max(var(--gutter), env(safe-area-inset-left));
+}
+
+/* Silk-screened legends: the instrument's only labelling voice. */
+.legend {
+	font: 600 0.75rem/1 var(--legend);
+	letter-spacing: 0.09em;
+	text-transform: uppercase;
+	color: var(--ink-2);
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 12px;
+}
+.legend::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: var(--rule);
+}
+
+/* Nameplate */
+.nameplate {
+	display: grid;
+	grid-template-columns: 1fr auto;
+	grid-template-areas: "title link" "host link";
+	align-items: center;
+	column-gap: 16px;
+	padding: 6px 0 16px;
+	border-bottom: 1px solid var(--rule);
+	margin-bottom: 20px;
+}
+.nameplate__title {
+	grid-area: title;
+	font: 600 1.0625rem/1.2 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+}
+.nameplate__title span {
+	color: var(--ink-2);
+}
+.nameplate__host {
+	grid-area: host;
+	color: var(--ink-2);
+	font-size: 0.875rem;
+	overflow-wrap: anywhere;
+}
+
+.link {
+	grid-area: link;
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font: 600 0.8125rem/1 var(--legend);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	padding: 8px 12px;
+	border: 1px solid var(--rule);
+	border-radius: 999px;
+	white-space: nowrap;
+}
+.link[data-state="live"] {
+	color: var(--ok-ink);
+}
+.link[data-state="stale"],
+.link[data-state="reconnecting"] {
+	color: var(--warn-ink);
+}
+.link[data-state="offline"] {
+	color: var(--fault-ink);
+}
+
+/* Lamps: filled when lit, a hollow ring when dark or unknown. */
+.lamp {
+	--lamp: var(--lamp-off);
+	flex: none;
+	width: 10px;
+	height: 10px;
+	border-radius: 50%;
+	border: 2px solid var(--lamp);
+	background: transparent;
+}
+[data-state="live"] > .lamp,
+[data-state="ok"] .lamp {
+	--lamp: var(--ok);
+	background: var(--lamp);
+}
+[data-state="warn"] .lamp,
+[data-state="stale"] > .lamp,
+[data-state="reconnecting"] > .lamp {
+	--lamp: var(--warn);
+	background: var(--lamp);
+}
+[data-state="fault"] .lamp,
+[data-state="offline"] > .lamp {
+	--lamp: var(--fault);
+	background: var(--lamp);
+}
+[data-state="idle"] .lamp {
+	--lamp: var(--ok);
+}
+[data-state="connecting"] > .lamp,
+[data-state="reconnecting"] > .lamp {
+	animation: blink 1.2s steps(2, jump-none) infinite;
+}
+@keyframes blink {
+	50% {
+		opacity: 0.25;
+	}
+}
+
+/* Layout */
+.layout {
+	display: grid;
+	gap: 28px;
+}
+/* Narrow screens read flow, power, host, then setup; the column wrappers only
+   matter side by side. */
+.column {
+	display: contents;
+}
+.setup {
+	order: 1;
+}
+.diagnostics {
+	order: 2;
+}
+@media (min-width: 900px) {
+	.column {
+		display: grid;
+		gap: 28px;
+		align-content: start;
+		min-width: 0;
+	}
+	.setup {
+		order: 0;
+	}
+	.layout {
+		grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
+		column-gap: 40px;
+		row-gap: 28px;
+		align-items: start;
+	}
+	.diagnostics {
+		grid-column: 1 / -1;
+	}
+}
+
+/* The screen */
+.screen {
+	position: relative;
+	background: var(--screen);
+	color: var(--screen-ink);
+	border-radius: 14px;
+	padding: 18px 18px 12px;
+	display: grid;
+	grid-template-columns: 1fr auto;
+	grid-template-areas: "verdict rate" "plot plot";
+	gap: 14px 16px;
+	box-shadow:
+		inset 0 0 0 1px rgb(255 255 255 / 0.04),
+		inset 0 2px 10px rgb(0 0 0 / 0.5);
+}
+.screen__verdict {
+	grid-area: verdict;
+	min-width: 0;
+}
+.verdict {
+	font: 600 1.625rem/1.1 var(--face);
+	letter-spacing: -0.01em;
+}
+.verdict::before {
+	content: "";
+	display: inline-block;
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	margin-right: 10px;
+	vertical-align: 0.08em;
+	border: 2px solid var(--screen-ink-2);
+}
+.screen[data-state="ok"] .verdict::before {
+	background: var(--ok);
+	border-color: var(--ok);
+}
+.screen[data-state="warn"] .verdict::before {
+	background: var(--warn);
+	border-color: var(--warn);
+}
+.screen[data-state="fault"] .verdict::before {
+	background: var(--fault);
+	border-color: var(--fault);
+}
+.verdict__detail {
+	margin-top: 6px;
+	color: var(--screen-ink-2);
+	font-size: 0.9375rem;
+	max-width: 46ch;
+}
+.screen__rate {
+	grid-area: rate;
+	text-align: right;
+}
+.rate {
+	font: 500 2.25rem/1 var(--face);
+	letter-spacing: -0.02em;
+	color: var(--trace);
+	white-space: nowrap;
+}
+.screen[data-state="unknown"] .rate,
+.screen[data-state="fault"] .rate {
+	color: var(--screen-ink-2);
+}
+.rate__unit {
+	font-size: 0.9375rem;
+	letter-spacing: 0;
+	color: var(--screen-ink-2);
+}
+.rate__expected {
+	margin-top: 6px;
+	color: var(--screen-ink-2);
+	font-size: 0.875rem;
+	white-space: nowrap;
+}
+
+.plot {
+	grid-area: plot;
+	position: relative;
+	touch-action: pan-y;
+}
+.plot__svg {
+	display: block;
+	width: 100%;
+	height: clamp(150px, 34vw, 260px);
+	overflow: visible;
+	cursor: crosshair;
+}
+.graticule line {
+	stroke: var(--grat);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
+}
+.graticule line.major {
+	stroke: var(--grat-major);
+}
+.plot__expected {
+	stroke: var(--expected);
+	stroke-width: 1.25;
+	stroke-dasharray: 6 5;
+	vector-effect: non-scaling-stroke;
+}
+.plot__trace {
+	fill: none;
+	stroke: var(--trace);
+	stroke-width: 2;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	vector-effect: non-scaling-stroke;
+}
+/* Missing measurements stay blank; the broken trace is the signal. */
+.plot__gap {
+	fill: none;
+	stroke: none;
+}
+/* A reading the page cannot confirm is drawn in stale ink, never amber. */
+.screen[data-fresh="false"] .plot__trace {
+	stroke: var(--screen-ink-2);
+	opacity: 0.55;
+}
+.screen[data-fresh="false"] .plot__expected {
+	opacity: 0.5;
+}
+.screen[data-fresh="false"] .rate {
+	color: var(--screen-ink-2);
+}
+.plot__scale {
+	display: inline-flex;
+	gap: 12px;
+	align-items: center;
+}
+.plot__key::before {
+	content: "";
+	display: inline-block;
+	width: 18px;
+	margin-right: 6px;
+	vertical-align: 0.25em;
+	border-top: 1.25px dashed var(--expected);
+}
+.plot__key[hidden] {
+	display: none;
+}
+/* SVG ignores the hidden attribute; honour it explicitly. */
+.plot__marker[hidden],
+.plot__readout[hidden] {
+	display: none;
+}
+.plot__marker line {
+	stroke: var(--screen-ink);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
+}
+.plot__marker circle {
+	fill: var(--screen);
+	stroke: var(--trace);
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+.plot__readout {
+	position: absolute;
+	top: 6px;
+	padding: 4px 8px;
+	border-radius: 6px;
+	background: rgb(13 18 16 / 0.92);
+	border: 1px solid var(--grat-major);
+	font-size: 0.8125rem;
+	white-space: nowrap;
+	pointer-events: none;
+}
+.plot__axis {
+	display: flex;
+	justify-content: space-between;
+	margin-top: 8px;
+	font: 600 0.6875rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--screen-ink-2);
+}
+
+/* Receiver chain: presence per stage, the flow itself lives on the screen. */
+.chain {
+	display: grid;
+	grid-template-columns: repeat(4, minmax(0, 1fr));
+	margin-top: 16px;
+	position: relative;
+}
+.chain::before {
+	content: "";
+	position: absolute;
+	left: 6px;
+	right: 12.5%;
+	top: 35px;
+	height: 1px;
+	background: var(--rule);
+}
+.stage {
+	position: relative;
+	display: grid;
+	gap: 6px;
+	padding-right: 8px;
+	min-width: 0;
+}
+.stage__name {
+	font: 600 0.75rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-2);
+	padding-bottom: 10px;
+}
+.stage__state {
+	display: flex;
+	align-items: center;
+	gap: 7px;
+	font-weight: 600;
+	font-size: 0.9375rem;
+	background: var(--bezel);
+	width: max-content;
+	max-width: 100%;
+	padding-right: 6px;
+	position: relative;
+}
+.stage__state .lamp {
+	box-shadow: 0 0 0 4px var(--bezel);
+}
+.stage__word {
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.stage__fact {
+	color: var(--ink-2);
+	font-size: 0.8125rem;
+	overflow-wrap: anywhere;
+}
+.stage[data-state="fault"] .stage__word {
+	color: var(--fault-ink);
+}
+.stage[data-state="warn"] .stage__word {
+	color: var(--warn-ink);
+}
+
+/* Annunciator windows */
+/* Full-width rows keep labels whole; three across only in the mid band where
+   the power section spans the page. */
+.annunciators {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: 6px;
+}
+.annunciator {
+	grid-template-columns: minmax(0, 1fr) auto;
+	align-items: center;
+}
+.annunciator small {
+	text-align: right;
+}
+@media (min-width: 560px) and (max-width: 899px) {
+	.annunciators {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+		gap: 8px;
+	}
+	.annunciator {
+		grid-template-columns: 1fr;
+		align-items: start;
+	}
+	.annunciator small {
+		text-align: left;
+	}
+}
+.annunciator {
+	display: grid;
+	gap: 4px;
+	padding: 10px 12px;
+	border: 1px solid var(--rule);
+	border-radius: 6px;
+	background: var(--bezel-raised);
+	min-height: 46px;
+	align-content: center;
+}
+.annunciator span {
+	font: 600 0.8125rem/1.1 var(--legend);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+.annunciator small {
+	font-size: 0.8125rem;
+	color: var(--ink-2);
+}
+.annunciator[data-state="clear"] span {
+	color: var(--ink-2);
+}
+.annunciator[data-state="unknown"] {
+	border-style: dashed;
+	background: transparent;
+}
+.annunciator[data-state="unknown"] span {
+	color: var(--ink-2);
+}
+.annunciator[data-state="latched"] {
+	border-color: var(--warn-ink);
+}
+.annunciator[data-state="latched"] small {
+	color: var(--warn-ink);
+}
+.annunciator[data-state="active"] {
+	background: var(--fault);
+	border-color: var(--fault);
+	color: #1a0a08;
+}
+.annunciator[data-state="active"] small {
+	color: #2a0e0b;
+	font-weight: 600;
+}
+.note {
+	margin-top: 10px;
+	font-size: 0.8125rem;
+	color: var(--ink-2);
+}
+
+/* Host readouts */
+.readouts {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	border-top: 1px solid var(--rule);
+}
+@media (min-width: 560px) and (max-width: 899px) {
+	.readouts {
+		grid-template-columns: repeat(3, minmax(0, 1fr));
+	}
+}
+.readout {
+	position: relative;
+	padding: 12px 12px 14px 0;
+	border-bottom: 1px solid var(--rule);
+	min-width: 0;
+}
+.readout dt {
+	font: 600 0.6875rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-2);
+	margin-bottom: 6px;
+}
+.readout dd {
+	display: grid;
+	gap: 2px;
+}
+.readout__value {
+	font-size: 1.375rem;
+	line-height: 1.1;
+	letter-spacing: -0.01em;
+	overflow-wrap: anywhere;
+}
+.readout__sub {
+	font-size: 0.8125rem;
+	color: var(--ink-2);
+	overflow-wrap: anywhere;
+}
+.readout[data-state="unavailable"] .readout__value,
+.readout[data-state="stale"] .readout__value {
+	color: var(--ink-2);
+	font-size: 1rem;
+	line-height: 1.5;
+}
+.readout[data-state="warn"] .readout__value {
+	color: var(--warn-ink);
+}
+.readout[data-state="fault"] .readout__value {
+	color: var(--fault-ink);
+}
+
+/* A ruled scale under the value: the instrument's bar meter. */
+.meter {
+	display: block;
+	height: 4px;
+	margin-top: 8px;
+	background: repeating-linear-gradient(
+		to right,
+		var(--rule) 0 1px,
+		transparent 1px 10%
+	);
+	border-bottom: 1px solid var(--rule);
+	position: relative;
+}
+.meter span {
+	position: absolute;
+	inset: 0;
+	background: var(--ink);
+	transform: scaleX(var(--fill, 0));
+	transform-origin: left center;
+	transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.readout[data-state="warn"] .meter span {
+	background: var(--warn-ink);
+}
+.readout[data-state="fault"] .meter span {
+	background: var(--fault-ink);
+}
+.readout[data-state="unavailable"] .meter,
+.readout[data-state="stale"] .meter span {
+	opacity: 0.35;
+}
+
+/* Setup */
+.setup__line {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	font-size: 0.9375rem;
+}
+.setup__line[data-state="fault"] {
+	color: var(--fault-ink);
+}
+
+/* Diagnostics */
+.diagnostics {
+	border-top: 1px solid var(--rule);
+	border-bottom: 1px solid var(--rule);
+}
+.diagnostics summary {
+	cursor: pointer;
+	padding: 14px 0;
+	font: 600 0.8125rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-2);
+	list-style: none;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 44px;
+}
+.diagnostics summary::-webkit-details-marker {
+	display: none;
+}
+.diagnostics summary::before {
+	content: "";
+	width: 7px;
+	height: 7px;
+	border-right: 1.5px solid currentColor;
+	border-bottom: 1.5px solid currentColor;
+	transform: rotate(-45deg);
+	transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.diagnostics[open] summary::before {
+	transform: rotate(45deg);
+}
+.diagnostics summary:hover {
+	color: var(--ink);
+}
+.diagnostics__body {
+	display: grid;
+	gap: 8px;
+	padding-bottom: 20px;
+}
+.diagnostics__body .legend {
+	margin-top: 12px;
+	margin-bottom: 4px;
+}
+.clients {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: 0.875rem;
+}
+.clients th {
+	text-align: left;
+	font: 600 0.6875rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--ink-2);
+	padding: 6px 8px 6px 0;
+}
+.clients td {
+	padding: 8px 8px 8px 0;
+	border-top: 1px solid var(--rule);
+	overflow-wrap: anywhere;
+}
+.clients th:not(:first-child),
+.clients td:not(:first-child) {
+	text-align: right;
+}
+.facts {
+	display: grid;
+	grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+	gap: 6px 16px;
+	font-size: 0.875rem;
+}
+.facts dt {
+	color: var(--ink-2);
+}
+.facts dd {
+	overflow-wrap: anywhere;
+}
+
+.footer {
+	margin-top: 28px;
+	font-size: 0.8125rem;
+	color: var(--ink-2);
+}
+
+@media (max-width: 420px) {
+	.screen {
+		grid-template-columns: 1fr;
+		grid-template-areas: "verdict" "rate" "plot";
+		padding: 16px 14px 10px;
+	}
+	.screen__rate {
+		text-align: left;
+		display: flex;
+		align-items: baseline;
+		gap: 12px;
+		flex-wrap: wrap;
+	}
+	.verdict {
+		font-size: 1.5rem;
+	}
+}
+
+@media (max-width: 559px) {
+	.plot__axis {
+		flex-wrap: wrap;
+		row-gap: 8px;
+	}
+	.plot__scale {
+		order: 3;
+		width: 100%;
+		justify-content: center;
+	}
+}
+
+/* Phones: the chain reads top to bottom, lamps on one connecting rule, and
+   annunciators become full-width rows so their words never break. */
+@media (max-width: 559px) {
+	.chain {
+		grid-template-columns: 1fr;
+	}
+	.chain::before {
+		left: calc(5.5rem + 5px);
+		right: auto;
+		top: 22px;
+		bottom: 30px;
+		width: 1px;
+		height: auto;
+	}
+	.stage {
+		grid-template-columns: 5.5rem minmax(0, 1fr);
+		grid-template-areas: "name state" ". fact";
+		row-gap: 2px;
+		padding: 8px 0;
+	}
+	.stage__name {
+		grid-area: name;
+		padding-bottom: 0;
+		align-self: center;
+	}
+	.stage__state {
+		grid-area: state;
+	}
+	.stage__fact {
+		grid-area: fact;
+		padding-left: 17px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation: none !important;
+		transition: none !important;
+	}
+}

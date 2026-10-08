@@ -1,0 +1,599 @@
+{
+	"schemaVersion": 2,
+	"generatedAt": "2026-10-08T16:46:53.073Z",
+	"title": "Design System: WaveKit Receiver",
+	"extensions": {
+		"colorMeta": {
+			"bezel": {
+				"role": "neutral",
+				"displayName": "Lab-Grey Enamel",
+				"canonical": "oklch(88.8% 0.008 122)",
+				"tonalRamp": [
+					"oklch(15% 0.008 122)",
+					"oklch(26% 0.008 122)",
+					"oklch(38% 0.008 122)",
+					"oklch(50% 0.008 122)",
+					"oklch(62% 0.008 122)",
+					"oklch(74% 0.008 122)",
+					"oklch(85% 0.008 122)",
+					"oklch(95% 0.008 122)"
+				]
+			},
+			"bezel-raised": {
+				"role": "neutral",
+				"displayName": "Raised Enamel",
+				"canonical": "oklch(92.2% 0.008 122)",
+				"tonalRamp": [
+					"oklch(15% 0.008 122)",
+					"oklch(26% 0.008 122)",
+					"oklch(38% 0.008 122)",
+					"oklch(50% 0.008 122)",
+					"oklch(62% 0.008 122)",
+					"oklch(74% 0.008 122)",
+					"oklch(85% 0.008 122)",
+					"oklch(95% 0.008 122)"
+				]
+			},
+			"ink": {
+				"role": "neutral",
+				"displayName": "Panel Ink",
+				"canonical": "oklch(23.9% 0.007 164)",
+				"tonalRamp": [
+					"oklch(15% 0.007 164)",
+					"oklch(26% 0.007 164)",
+					"oklch(38% 0.007 164)",
+					"oklch(50% 0.007 164)",
+					"oklch(62% 0.007 164)",
+					"oklch(74% 0.007 164)",
+					"oklch(85% 0.007 164)",
+					"oklch(95% 0.007 164)"
+				]
+			},
+			"ink-2": {
+				"role": "neutral",
+				"displayName": "Legend Ink",
+				"canonical": "oklch(43.0% 0.012 164)",
+				"tonalRamp": [
+					"oklch(15% 0.012 164)",
+					"oklch(26% 0.012 164)",
+					"oklch(38% 0.012 164)",
+					"oklch(50% 0.012 164)",
+					"oklch(62% 0.012 164)",
+					"oklch(74% 0.012 164)",
+					"oklch(85% 0.012 164)",
+					"oklch(95% 0.012 164)"
+				]
+			},
+			"rule": {
+				"role": "neutral",
+				"displayName": "Silkscreen Rule",
+				"canonical": "oklch(74.1% 0.012 141)",
+				"tonalRamp": [
+					"oklch(15% 0.012 141)",
+					"oklch(26% 0.012 141)",
+					"oklch(38% 0.012 141)",
+					"oklch(50% 0.012 141)",
+					"oklch(62% 0.012 141)",
+					"oklch(74% 0.012 141)",
+					"oklch(85% 0.012 141)",
+					"oklch(95% 0.012 141)"
+				]
+			},
+			"ok-ink": {
+				"role": "status",
+				"displayName": "Status Ink Green",
+				"canonical": "oklch(49.4% 0.107 156)",
+				"tonalRamp": [
+					"oklch(15% 0.107 156)",
+					"oklch(26% 0.107 156)",
+					"oklch(38% 0.107 156)",
+					"oklch(50% 0.107 156)",
+					"oklch(62% 0.107 156)",
+					"oklch(74% 0.107 156)",
+					"oklch(85% 0.107 156)",
+					"oklch(95% 0.107 156)"
+				]
+			},
+			"warn-ink": {
+				"role": "status",
+				"displayName": "Status Ink Amber",
+				"canonical": "oklch(49.3% 0.105 73)",
+				"tonalRamp": [
+					"oklch(15% 0.105 73)",
+					"oklch(26% 0.105 73)",
+					"oklch(38% 0.105 73)",
+					"oklch(50% 0.105 73)",
+					"oklch(62% 0.105 73)",
+					"oklch(74% 0.105 73)",
+					"oklch(85% 0.105 73)",
+					"oklch(95% 0.105 73)"
+				]
+			},
+			"fault-ink": {
+				"role": "status",
+				"displayName": "Status Ink Red",
+				"canonical": "oklch(49.9% 0.172 29)",
+				"tonalRamp": [
+					"oklch(15% 0.172 29)",
+					"oklch(26% 0.172 29)",
+					"oklch(38% 0.172 29)",
+					"oklch(50% 0.172 29)",
+					"oklch(62% 0.172 29)",
+					"oklch(74% 0.172 29)",
+					"oklch(85% 0.172 29)",
+					"oklch(95% 0.172 29)"
+				]
+			},
+			"bezel-night": {
+				"role": "neutral",
+				"displayName": "Graphite",
+				"canonical": "oklch(23.1% 0.005 174)",
+				"tonalRamp": [
+					"oklch(15% 0.005 174)",
+					"oklch(26% 0.005 174)",
+					"oklch(38% 0.005 174)",
+					"oklch(50% 0.005 174)",
+					"oklch(62% 0.005 174)",
+					"oklch(74% 0.005 174)",
+					"oklch(85% 0.005 174)",
+					"oklch(95% 0.005 174)"
+				]
+			},
+			"bezel-raised-night": {
+				"role": "neutral",
+				"displayName": "Raised Graphite",
+				"canonical": "oklch(26.4% 0.006 179)",
+				"tonalRamp": [
+					"oklch(15% 0.006 179)",
+					"oklch(26% 0.006 179)",
+					"oklch(38% 0.006 179)",
+					"oklch(50% 0.006 179)",
+					"oklch(62% 0.006 179)",
+					"oklch(74% 0.006 179)",
+					"oklch(85% 0.006 179)",
+					"oklch(95% 0.006 179)"
+				]
+			},
+			"ink-night": {
+				"role": "neutral",
+				"displayName": "Panel Ink (night)",
+				"canonical": "oklch(92.4% 0.008 139)",
+				"tonalRamp": [
+					"oklch(15% 0.008 139)",
+					"oklch(26% 0.008 139)",
+					"oklch(38% 0.008 139)",
+					"oklch(50% 0.008 139)",
+					"oklch(62% 0.008 139)",
+					"oklch(74% 0.008 139)",
+					"oklch(85% 0.008 139)",
+					"oklch(95% 0.008 139)"
+				]
+			},
+			"ink-2-night": {
+				"role": "neutral",
+				"displayName": "Legend Ink (night)",
+				"canonical": "oklch(71.0% 0.012 162)",
+				"tonalRamp": [
+					"oklch(15% 0.012 162)",
+					"oklch(26% 0.012 162)",
+					"oklch(38% 0.012 162)",
+					"oklch(50% 0.012 162)",
+					"oklch(62% 0.012 162)",
+					"oklch(74% 0.012 162)",
+					"oklch(85% 0.012 162)",
+					"oklch(95% 0.012 162)"
+				]
+			},
+			"rule-night": {
+				"role": "neutral",
+				"displayName": "Silkscreen Rule (night)",
+				"canonical": "oklch(37.2% 0.011 168)",
+				"tonalRamp": [
+					"oklch(15% 0.011 168)",
+					"oklch(26% 0.011 168)",
+					"oklch(38% 0.011 168)",
+					"oklch(50% 0.011 168)",
+					"oklch(62% 0.011 168)",
+					"oklch(74% 0.011 168)",
+					"oklch(85% 0.011 168)",
+					"oklch(95% 0.011 168)"
+				]
+			},
+			"ok-ink-night": {
+				"role": "status",
+				"displayName": "Status Ink Green (night)",
+				"canonical": "oklch(78.5% 0.135 160)",
+				"tonalRamp": [
+					"oklch(15% 0.135 160)",
+					"oklch(26% 0.135 160)",
+					"oklch(38% 0.135 160)",
+					"oklch(50% 0.135 160)",
+					"oklch(62% 0.135 160)",
+					"oklch(74% 0.135 160)",
+					"oklch(85% 0.135 160)",
+					"oklch(95% 0.135 160)"
+				]
+			},
+			"fault-ink-night": {
+				"role": "status",
+				"displayName": "Status Ink Red (night)",
+				"canonical": "oklch(74.2% 0.157 27)",
+				"tonalRamp": [
+					"oklch(15% 0.157 27)",
+					"oklch(26% 0.157 27)",
+					"oklch(38% 0.157 27)",
+					"oklch(50% 0.157 27)",
+					"oklch(62% 0.157 27)",
+					"oklch(74% 0.157 27)",
+					"oklch(85% 0.157 27)",
+					"oklch(95% 0.157 27)"
+				]
+			},
+			"screen": {
+				"role": "neutral",
+				"displayName": "Display Black",
+				"canonical": "oklch(17.6% 0.009 169)",
+				"tonalRamp": [
+					"oklch(15% 0.009 169)",
+					"oklch(26% 0.009 169)",
+					"oklch(38% 0.009 169)",
+					"oklch(50% 0.009 169)",
+					"oklch(62% 0.009 169)",
+					"oklch(74% 0.009 169)",
+					"oklch(85% 0.009 169)",
+					"oklch(95% 0.009 169)"
+				]
+			},
+			"screen-ink": {
+				"role": "neutral",
+				"displayName": "Phosphor White",
+				"canonical": "oklch(91.4% 0.011 159)",
+				"tonalRamp": [
+					"oklch(15% 0.011 159)",
+					"oklch(26% 0.011 159)",
+					"oklch(38% 0.011 159)",
+					"oklch(50% 0.011 159)",
+					"oklch(62% 0.011 159)",
+					"oklch(74% 0.011 159)",
+					"oklch(85% 0.011 159)",
+					"oklch(95% 0.011 159)"
+				]
+			},
+			"screen-ink-2": {
+				"role": "neutral",
+				"displayName": "Dim Phosphor",
+				"canonical": "oklch(68.3% 0.019 164)",
+				"tonalRamp": [
+					"oklch(15% 0.019 164)",
+					"oklch(26% 0.019 164)",
+					"oklch(38% 0.019 164)",
+					"oklch(50% 0.019 164)",
+					"oklch(62% 0.019 164)",
+					"oklch(74% 0.019 164)",
+					"oklch(85% 0.019 164)",
+					"oklch(95% 0.019 164)"
+				]
+			},
+			"trace": {
+				"role": "primary",
+				"displayName": "Trace Amber",
+				"canonical": "oklch(80.6% 0.147 79)",
+				"tonalRamp": [
+					"oklch(15% 0.147 79)",
+					"oklch(26% 0.147 79)",
+					"oklch(38% 0.147 79)",
+					"oklch(50% 0.147 79)",
+					"oklch(62% 0.147 79)",
+					"oklch(74% 0.147 79)",
+					"oklch(85% 0.147 79)",
+					"oklch(95% 0.147 79)"
+				]
+			},
+			"expected": {
+				"role": "neutral",
+				"displayName": "Graticule Sage",
+				"canonical": "oklch(66.1% 0.037 163)",
+				"tonalRamp": [
+					"oklch(15% 0.037 163)",
+					"oklch(26% 0.037 163)",
+					"oklch(38% 0.037 163)",
+					"oklch(50% 0.037 163)",
+					"oklch(62% 0.037 163)",
+					"oklch(74% 0.037 163)",
+					"oklch(85% 0.037 163)",
+					"oklch(95% 0.037 163)"
+				]
+			},
+			"ok": {
+				"role": "status",
+				"displayName": "Lamp Green",
+				"canonical": "oklch(71.5% 0.147 157)",
+				"tonalRamp": [
+					"oklch(15% 0.147 157)",
+					"oklch(26% 0.147 157)",
+					"oklch(38% 0.147 157)",
+					"oklch(50% 0.147 157)",
+					"oklch(62% 0.147 157)",
+					"oklch(74% 0.147 157)",
+					"oklch(85% 0.147 157)",
+					"oklch(95% 0.147 157)"
+				]
+			},
+			"warn": {
+				"role": "status",
+				"displayName": "Lamp Amber",
+				"canonical": "oklch(80.6% 0.147 79)",
+				"tonalRamp": [
+					"oklch(15% 0.147 79)",
+					"oklch(26% 0.147 79)",
+					"oklch(38% 0.147 79)",
+					"oklch(50% 0.147 79)",
+					"oklch(62% 0.147 79)",
+					"oklch(74% 0.147 79)",
+					"oklch(85% 0.147 79)",
+					"oklch(95% 0.147 79)"
+				]
+			},
+			"fault": {
+				"role": "status",
+				"displayName": "Lamp Red",
+				"canonical": "oklch(66.3% 0.185 29)",
+				"tonalRamp": [
+					"oklch(15% 0.185 29)",
+					"oklch(26% 0.185 29)",
+					"oklch(38% 0.185 29)",
+					"oklch(50% 0.185 29)",
+					"oklch(62% 0.185 29)",
+					"oklch(74% 0.185 29)",
+					"oklch(85% 0.185 29)",
+					"oklch(95% 0.185 29)"
+				]
+			},
+			"lamp-off": {
+				"role": "neutral",
+				"displayName": "Dark Lamp",
+				"canonical": "oklch(70.2% 0.011 155)",
+				"tonalRamp": [
+					"oklch(15% 0.011 155)",
+					"oklch(26% 0.011 155)",
+					"oklch(38% 0.011 155)",
+					"oklch(50% 0.011 155)",
+					"oklch(62% 0.011 155)",
+					"oklch(74% 0.011 155)",
+					"oklch(85% 0.011 155)",
+					"oklch(95% 0.011 155)"
+				]
+			},
+			"lamp-off-night": {
+				"role": "neutral",
+				"displayName": "Dark Lamp (night)",
+				"canonical": "oklch(49.5% 0.012 165)",
+				"tonalRamp": [
+					"oklch(15% 0.012 165)",
+					"oklch(26% 0.012 165)",
+					"oklch(38% 0.012 165)",
+					"oklch(50% 0.012 165)",
+					"oklch(62% 0.012 165)",
+					"oklch(74% 0.012 165)",
+					"oklch(85% 0.012 165)",
+					"oklch(95% 0.012 165)"
+				]
+			},
+			"focus": {
+				"role": "focus",
+				"displayName": "Focus Blue",
+				"canonical": "oklch(55.7% 0.172 260)",
+				"tonalRamp": [
+					"oklch(15% 0.172 260)",
+					"oklch(26% 0.172 260)",
+					"oklch(38% 0.172 260)",
+					"oklch(50% 0.172 260)",
+					"oklch(62% 0.172 260)",
+					"oklch(74% 0.172 260)",
+					"oklch(85% 0.172 260)",
+					"oklch(95% 0.172 260)"
+				]
+			},
+			"focus-night": {
+				"role": "focus",
+				"displayName": "Focus Blue (night)",
+				"canonical": "oklch(75.5% 0.126 260)",
+				"tonalRamp": [
+					"oklch(15% 0.126 260)",
+					"oklch(26% 0.126 260)",
+					"oklch(38% 0.126 260)",
+					"oklch(50% 0.126 260)",
+					"oklch(62% 0.126 260)",
+					"oklch(74% 0.126 260)",
+					"oklch(85% 0.126 260)",
+					"oklch(95% 0.126 260)"
+				]
+			}
+		},
+		"typographyMeta": {
+			"display": {
+				"displayName": "Display",
+				"purpose": "The live rate figure on the screen."
+			},
+			"headline": {
+				"displayName": "Headline",
+				"purpose": "The one-line flow verdict."
+			},
+			"title": {
+				"displayName": "Title",
+				"purpose": "Host readout values."
+			},
+			"body": {
+				"displayName": "Body",
+				"purpose": "Stage words, verdict detail, setup line."
+			},
+			"body-sm": {
+				"displayName": "Body Small",
+				"purpose": "Sub-facts, notes, footer, marker readout."
+			},
+			"nameplate": {
+				"displayName": "Nameplate",
+				"purpose": "Product name in the nameplate."
+			},
+			"label": {
+				"displayName": "Legend",
+				"purpose": "Silk-screened section legends and stage names."
+			},
+			"label-sm": {
+				"displayName": "Legend Small",
+				"purpose": "Plot axis, readout names, table heads."
+			}
+		},
+		"shadows": [
+			{
+				"name": "screen-recess",
+				"value": "inset 0 0 0 1px rgb(255 255 255 / 0.04), inset 0 2px 10px rgb(0 0 0 / 0.5)",
+				"purpose": "Recesses the display screen into the bezel; the only depth cue."
+			},
+			{
+				"name": "lamp-knockout",
+				"value": "0 0 0 4px var(--bezel)",
+				"purpose": "Bezel-coloured mask that cuts the chain rule around stage lamps."
+			}
+		],
+		"motion": [
+			{
+				"name": "ease-instrument",
+				"value": "cubic-bezier(0.22, 1, 0.36, 1)",
+				"purpose": "Meter fills (0.25s) and disclosure chevron (0.2s)."
+			},
+			{
+				"name": "lamp-blink",
+				"value": "1.2s steps(2, jump-none) infinite",
+				"purpose": "Connecting and reconnecting lamps; disabled under reduced motion."
+			}
+		],
+		"breakpoints": [
+			{
+				"name": "phone-narrow",
+				"value": "420px"
+			},
+			{
+				"name": "phone",
+				"value": "559px"
+			},
+			{
+				"name": "mid-band",
+				"value": "560px"
+			},
+			{
+				"name": "two-column",
+				"value": "900px"
+			}
+		]
+	},
+	"components": [
+		{
+			"name": "Status Pill",
+			"kind": "chip",
+			"refersTo": "status-pill",
+			"description": "Nameplate link state: lamp plus word in status ink.",
+			"html": "<p class=\"ds-pill\" data-state=\"live\"><span class=\"ds-lamp\"></span>Live</p><p class=\"ds-pill\" data-state=\"offline\"><span class=\"ds-lamp\"></span>Lost · 16 s ago</p>",
+			"css": ".ds-pill{display:inline-flex;align-items:center;gap:8px;margin:0 8px 0 0;font:600 0.8125rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;padding:8px 12px;border:1px solid var(--rule,#a7ada6);border-radius:999px;white-space:nowrap}.ds-pill[data-state=\"live\"]{color:var(--ok-ink,#1d7347)}.ds-pill[data-state=\"offline\"]{color:var(--fault-ink,#b02a1f)}.ds-lamp{width:10px;height:10px;border-radius:50%;border:2px solid var(--lamp,#9aa19c)}.ds-pill[data-state=\"live\"] .ds-lamp{--lamp:#3dbe7e;background:#3dbe7e}.ds-pill[data-state=\"offline\"] .ds-lamp{--lamp:#ef5b4c;background:#ef5b4c}.ds-pill:focus-visible{outline:2px solid var(--focus,#2f6fd6);outline-offset:3px}"
+		},
+		{
+			"name": "Lamp with Word",
+			"kind": "custom",
+			"refersTo": "lamp",
+			"description": "Filled when lit, hollow ring when dark or unknown; always paired with a word.",
+			"html": "<p class=\"ds-lampline\"><span class=\"ds-l ds-l-ok\"></span>Running</p><p class=\"ds-lampline\"><span class=\"ds-l ds-l-warn\"></span>Stale</p><p class=\"ds-lampline\"><span class=\"ds-l\"></span>Unknown</p>",
+			"css": ".ds-lampline{display:flex;align-items:center;gap:7px;margin:0 0 6px;font:600 0.9375rem/1.4 \"Barlow\",sans-serif;color:var(--ink,#1c201e)}.ds-l{width:10px;height:10px;border-radius:50%;border:2px solid #9aa19c}.ds-l-ok{border-color:#3dbe7e;background:#3dbe7e}.ds-l-warn{border-color:#f2b33d;background:#f2b33d}"
+		},
+		{
+			"name": "Legend",
+			"kind": "custom",
+			"description": "Silk-screened section label with a hairline to the edge.",
+			"html": "<h2 class=\"ds-legend\">Power &amp; throttling</h2>",
+			"css": ".ds-legend{display:flex;align-items:center;gap:10px;margin:0;font:600 0.75rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.09em;text-transform:uppercase;color:var(--ink-2,#4a524e)}.ds-legend::after{content:\"\";flex:1;height:1px;background:var(--rule,#a7ada6)}"
+		},
+		{
+			"name": "Screen",
+			"kind": "card",
+			"refersTo": "screen",
+			"description": "Always-dark recessed display: verdict, amber rate, graticule plot with dashed expected line.",
+			"html": "<div class=\"ds-screen\"><div><p class=\"ds-verdict\">Sampling</p><p class=\"ds-detail\">Fresh samples are arriving from the dongle.</p></div><p class=\"ds-rate\">4.08 <small>MB/s</small></p><svg class=\"ds-plot\" viewBox=\"0 0 600 160\" preserveAspectRatio=\"none\"><g stroke=\"rgb(160 190 175 / 0.2)\"><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\"/><line x1=\"0\" x2=\"600\" y1=\"80\" y2=\"80\"/><line x1=\"0\" x2=\"600\" y1=\"120\" y2=\"120\"/><line x1=\"150\" x2=\"150\" y1=\"0\" y2=\"160\"/><line x1=\"300\" x2=\"300\" y1=\"0\" y2=\"160\"/><line x1=\"450\" x2=\"450\" y1=\"0\" y2=\"160\"/></g><line x1=\"0\" x2=\"600\" y1=\"50\" y2=\"50\" stroke=\"#7f9a8c\" stroke-width=\"1.25\" stroke-dasharray=\"6 5\"/><path d=\"M0 52 L80 51 L160 53 L200 52 M240 51 L400 52 L520 50 L600 53\" fill=\"none\" stroke=\"#f2b33d\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg></div>",
+			"css": ".ds-screen{display:grid;grid-template-columns:1fr auto;gap:14px 16px;background:#0d1210;color:#dde5e0;border-radius:14px;padding:18px 18px 12px;box-shadow:inset 0 0 0 1px rgb(255 255 255 / 0.04),inset 0 2px 10px rgb(0 0 0 / 0.5);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums}.ds-verdict{margin:0;font:600 1.625rem/1.1 \"Barlow\",sans-serif;letter-spacing:-0.01em}.ds-verdict::before{content:\"\";display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:10px;background:#3dbe7e;border:2px solid #3dbe7e}.ds-detail{margin:6px 0 0;color:#8f9d96;font-size:0.9375rem}.ds-rate{margin:0;font:500 2.25rem/1 \"Barlow\",sans-serif;letter-spacing:-0.02em;color:#f2b33d}.ds-rate small{font-size:0.9375rem;color:#8f9d96;letter-spacing:0}.ds-plot{grid-column:1/-1;width:100%;height:160px;border:1px solid rgb(160 190 175 / 0.2)}"
+		},
+		{
+			"name": "Annunciator Window",
+			"kind": "card",
+			"refersTo": "annunciator-clear",
+			"description": "Power window: clear, unknown (dashed), latched (warn border), active (solid red face).",
+			"html": "<ul class=\"ds-ann\"><li data-state=\"clear\"><span>Under-voltage</span><small>Clear now</small></li><li data-state=\"latched\"><span>Earlier dips</span><small>Seen 18:40</small></li><li data-state=\"unknown\"><span>Throttling</span><small>Not measurable</small></li><li data-state=\"active\"><span>Under-voltage</span><small>Active now</small></li></ul>",
+			"css": ".ds-ann{display:grid;gap:6px;margin:0;padding:0;list-style:none}.ds-ann li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;min-height:46px;padding:10px 12px;border:1px solid var(--rule,#a7ada6);border-radius:6px;background:var(--bezel-raised,#e4e6e0);color:var(--ink,#1c201e)}.ds-ann span{font:600 0.8125rem/1.1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.06em;text-transform:uppercase}.ds-ann small{font:500 0.8125rem/1.4 \"Barlow\",sans-serif;color:var(--ink-2,#4a524e);text-align:right}.ds-ann [data-state=\"clear\"] span,.ds-ann [data-state=\"unknown\"] span{color:var(--ink-2,#4a524e)}.ds-ann [data-state=\"unknown\"]{border-style:dashed;background:transparent}.ds-ann [data-state=\"latched\"]{border-color:var(--warn-ink,#855600)}.ds-ann [data-state=\"latched\"] small{color:var(--warn-ink,#855600)}.ds-ann [data-state=\"active\"]{background:#ef5b4c;border-color:#ef5b4c;color:#1a0a08}.ds-ann [data-state=\"active\"] small{color:#2a0e0b;font-weight:600}"
+		},
+		{
+			"name": "Host Readout",
+			"kind": "custom",
+			"refersTo": "readout",
+			"description": "Ruled readout: legend name, tabular value, sub-fact, ruled bar meter.",
+			"html": "<dl class=\"ds-readout\"><dt>CPU</dt><dd><span class=\"ds-v\">24%</span><span class=\"ds-s\">load 0.62 · 4 cores</span></dd><span class=\"ds-meter\"><span style=\"--fill:0.24\"></span></span></dl>",
+			"css": ".ds-readout{margin:0;max-width:200px;padding:12px 12px 14px 0;border-top:1px solid var(--rule,#a7ada6);border-bottom:1px solid var(--rule,#a7ada6);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums;color:var(--ink,#1c201e)}.ds-readout dt{font:600 0.6875rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-2,#4a524e);margin-bottom:6px}.ds-readout dd{margin:0;display:grid;gap:2px}.ds-v{font-size:1.375rem;line-height:1.1;letter-spacing:-0.01em}.ds-s{font-size:0.8125rem;color:var(--ink-2,#4a524e)}.ds-meter{display:block;position:relative;height:4px;margin-top:8px;background:repeating-linear-gradient(to right,var(--rule,#a7ada6) 0 1px,transparent 1px 10%);border-bottom:1px solid var(--rule,#a7ada6)}.ds-meter span{position:absolute;inset:0;background:var(--ink,#1c201e);transform:scaleX(var(--fill,0));transform-origin:left center;transition:transform 0.25s cubic-bezier(0.22,1,0.36,1)}.ds-readout:hover .ds-meter span{--fill:0.6}"
+		},
+		{
+			"name": "Diagnostics Disclosure",
+			"kind": "nav",
+			"description": "Native details between rules with a CSS-drawn chevron.",
+			"html": "<details class=\"ds-disc\"><summary>Diagnostics</summary><p>Downstream clients, receiver facts, measurement sources.</p></details>",
+			"css": ".ds-disc{border-top:1px solid var(--rule,#a7ada6);border-bottom:1px solid var(--rule,#a7ada6);font-family:\"Barlow\",sans-serif;color:var(--ink,#1c201e)}.ds-disc summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;min-height:44px;padding:14px 0;font:600 0.8125rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-2,#4a524e)}.ds-disc summary::-webkit-details-marker{display:none}.ds-disc summary::before{content:\"\";width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform 0.2s cubic-bezier(0.22,1,0.36,1)}.ds-disc[open] summary::before{transform:rotate(45deg)}.ds-disc summary:hover{color:var(--ink,#1c201e)}.ds-disc summary:focus-visible{outline:2px solid var(--focus,#2f6fd6);outline-offset:3px;border-radius:2px}.ds-disc p{margin:0 0 16px;font-size:0.875rem;color:var(--ink-2,#4a524e)}"
+		}
+	],
+	"narrative": {
+		"northStar": "The Bench Instrument Front Panel",
+		"overview": "The page is a piece of test equipment, not a dashboard. A painted bezel carries silk-screened legends and hairline rules; set into it is one always-dark display screen with a fine graticule, plotting measured flow as a single amber trace against a dashed expected line. Everything else (the receiver chain, power annunciators, host readouts) is printed or mounted on the bezel around that screen, the way legends and lamps surround a scope's CRT.\n\nThe bezel follows the system theme: lab-grey enamel by day, graphite at night. The screen does not; it stays dark in both. Density is instrument-like: small condensed capitals for labels, tabular figures everywhere, values large only where a glance needs them. State is spoken twice, by a lamp and by a word, and absence is drawn honestly: hollow lamps, dashed windows, blank gaps in the trace, stale ink instead of amber.\n\nThe world refuses the equal-card metrics wall. There is one screen, one trace, one accent.",
+		"keyCharacteristics": [
+			"Two materials: a theme-following bezel and an always-dark screen.",
+			"One amber trace as the only chromatic accent; status hues live in lamps and state words.",
+			"Silk-screened small-caps legends with a hairline running out to the edge.",
+			"Lamps with words: filled when lit, hollow when dark or unknown.",
+			"Flat bezel; the screen is the only recessed surface."
+		],
+		"rules": [
+			{
+				"name": "The One Trace Rule",
+				"body": "Amber on the screen means a fresh measurement. A reading the page cannot confirm is redrawn in dim phosphor at reduced opacity, never amber.",
+				"section": "colors"
+			},
+			{
+				"name": "The Theme-Proof Screen Rule",
+				"body": "The bezel follows `prefers-color-scheme`; the screen and its inks never do.",
+				"section": "colors"
+			},
+			{
+				"name": "The Tabular Figures Rule",
+				"body": "`font-variant-numeric: tabular-nums` is set on the body; numbers never jitter as they update.",
+				"section": "typography"
+			},
+			{
+				"name": "The Silkscreen Voice Rule",
+				"body": "Uppercase spaced condensed type is reserved for printed panel labels naming a real section, stage, window or axis. It never decorates a headline or carries a value.",
+				"section": "typography"
+			},
+			{
+				"name": "The Recessed Screen Rule",
+				"body": "Nothing rises off the panel. The only depth cue is the screen sinking into it.",
+				"section": "elevation"
+			}
+		],
+		"dos": [
+			"Do pair every lamp with a word, and draw unknown as a hollow lamp or dashed window.",
+			"Do keep amber for fresh measurement only; redraw stale readings in dim phosphor.",
+			"Do leave gaps in a trace blank where samples are missing.",
+			"Do name sections with a silk-screened legend whose hairline runs to the edge.",
+			"Do keep the screen dark in both themes and the bezel following the system theme.",
+			"Do honour `prefers-reduced-motion` by stopping blink and transitions."
+		],
+		"donts": [
+			"Don't build an equal-card metrics wall; host values are ruled readouts printed on the bezel, not tiles.",
+			"Don't add drop shadows to anything on the bezel; the screen recess is the only depth.",
+			"Don't introduce a second accent hue on the screen or a third typeface.",
+			"Don't use glyph or emoji icons; lamps, rules and CSS-drawn marks carry the visual signals.",
+			"Don't show a stale, missing or unmeasurable value in healthy colour."
+		]
+	}
+}

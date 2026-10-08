@@ -8,6 +8,7 @@
 #   4. Point WaveKit to tcp://<this-host-ip>:5555
 #
 # Troubleshooting:
+#   - Status page: http://<this-host>:8080/ (read-only)
 #   - Status API: curl http://localhost:8080/api/status
 #   - rtlmux stats: curl http://localhost:5556/stats.json
 #   - Logs: docker compose logs -f
@@ -29,6 +30,9 @@ services:
     # USB device access (non-privileged approach)
     volumes:
       - /dev/bus/usb:/dev/bus/usb:rw
+      # Sanitized first-boot progress for the status page (read-only). Only this
+      # directory is shared; Docker creates it empty on installs without it.
+      - ${WAVEKIT_HOST_STATUS_DIR:-/var/lib/wavekit/status}:/host-status:ro
     device_cgroup_rules:
       - "c 189:* rmw" # USB char devices
 

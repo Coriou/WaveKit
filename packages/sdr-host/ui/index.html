@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta
+			name="viewport"
+			content="width=device-width, initial-scale=1, viewport-fit=cover"
+		/>
+		<meta name="color-scheme" content="light dark" />
+		<meta
+			name="theme-color"
+			content="#d9dbd5"
+			media="(prefers-color-scheme: light)"
+		/>
+		<meta
+			name="theme-color"
+			content="#1b1e1d"
+			media="(prefers-color-scheme: dark)"
+		/>
+		<title>WaveKit Receiver</title>
+		<link
+			rel="preload"
+			href="fonts/barlow-500.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link
+			rel="preload"
+			href="fonts/barlow-semi-condensed-600.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
+		<link rel="stylesheet" href="app.css" />
+		<link rel="icon" href="data:," />
+		<script type="module" src="app.js"></script>
+	</head>
+	<body>
+		<div class="panel">
+			<header class="nameplate">
+				<h1 class="nameplate__title">WaveKit <span>Receiver</span></h1>
+				<p class="nameplate__host" id="host-name">This Pi</p>
+				<p class="link" id="link" data-state="connecting" role="status">
+					<span class="lamp" aria-hidden="true"></span>
+					<span id="link-text">Connecting</span>
+				</p>
+			</header>
+
+			<main class="layout">
+				<div class="column">
+					<section class="screen-block" aria-labelledby="flow-heading">
+						<h2 class="legend" id="flow-heading">Upstream sample flow</h2>
+						<div class="screen" id="screen" data-state="unknown">
+							<div class="screen__verdict">
+								<p class="verdict" id="verdict" aria-live="polite">
+									Waiting for data
+								</p>
+								<p class="verdict__detail" id="verdict-detail">
+									No measurement yet
+								</p>
+							</div>
+							<div class="screen__rate">
+								<p class="rate">
+									<span id="rate-value">—</span>
+									<span class="rate__unit" id="rate-unit">MB/s</span>
+								</p>
+								<p class="rate__expected" id="rate-expected">Expected —</p>
+							</div>
+							<figure class="plot">
+								<svg
+									id="plot"
+									class="plot__svg"
+									viewBox="0 0 600 200"
+									preserveAspectRatio="none"
+									role="img"
+									tabindex="0"
+									aria-labelledby="plot-label"
+									aria-describedby="marker-readout"
+								>
+									<title id="plot-label">
+										Upstream rate over the last five minutes
+									</title>
+									<g class="graticule" id="graticule"></g>
+									<path class="plot__gap" id="plot-gaps" d="" />
+									<line
+										class="plot__expected"
+										id="plot-expected"
+										x1="0"
+										x2="600"
+										y1="-10"
+										y2="-10"
+									/>
+									<path class="plot__trace" id="plot-trace" d="" />
+									<g class="plot__marker" id="plot-marker" hidden>
+										<line id="marker-line" x1="0" x2="0" y1="0" y2="200" />
+										<circle id="marker-dot" r="3.5" cx="0" cy="0" />
+									</g>
+								</svg>
+								<p class="plot__readout" id="marker-readout" hidden></p>
+								<figcaption class="plot__axis">
+									<span>−5 min</span
+									><span class="plot__scale"
+										><span id="plot-scale"></span
+										><span class="plot__key" id="plot-key" hidden
+											>expected</span
+										></span
+									><span>now</span>
+								</figcaption>
+							</figure>
+						</div>
+
+						<ol class="chain" aria-label="Receiver chain">
+							<li class="stage" id="stage-dongle" data-state="unknown">
+								<span class="stage__name">Dongle</span>
+								<span class="stage__state"
+									><span class="lamp" aria-hidden="true"></span
+									><span class="stage__word">—</span></span
+								>
+								<span class="stage__fact"></span>
+							</li>
+							<li class="stage" id="stage-rtltcp" data-state="unknown">
+								<span class="stage__name">rtl_tcp</span>
+								<span class="stage__state"
+									><span class="lamp" aria-hidden="true"></span
+									><span class="stage__word">—</span></span
+								>
+								<span class="stage__fact"></span>
+							</li>
+							<li class="stage" id="stage-rtlmux" data-state="unknown">
+								<span class="stage__name">rtlmux</span>
+								<span class="stage__state"
+									><span class="lamp" aria-hidden="true"></span
+									><span class="stage__word">—</span></span
+								>
+								<span class="stage__fact"></span>
+							</li>
+							<li class="stage" id="stage-clients" data-state="unknown">
+								<span class="stage__name">Clients</span>
+								<span class="stage__state"
+									><span class="lamp" aria-hidden="true"></span
+									><span class="stage__word">—</span></span
+								>
+								<span class="stage__fact"></span>
+							</li>
+						</ol>
+					</section>
+
+					<section class="setup" aria-labelledby="setup-heading">
+						<h2 class="legend" id="setup-heading">First-boot setup</h2>
+						<p class="setup__line" id="setup" data-state="unknown">
+							<span class="lamp" aria-hidden="true"></span>
+							<span id="setup-text">—</span>
+						</p>
+					</section>
+				</div>
+				<div class="column">
+					<section class="power" aria-labelledby="power-heading">
+						<h2 class="legend" id="power-heading">Power &amp; throttling</h2>
+						<ul class="annunciators" id="annunciators">
+							<li class="annunciator" data-key="now" data-state="unknown">
+								<span>Under-voltage</span><small>—</small>
+							</li>
+							<li class="annunciator" data-key="history" data-state="unknown">
+								<span>Earlier dips</span><small>—</small>
+							</li>
+							<li
+								class="annunciator"
+								data-key="throttling"
+								data-state="unknown"
+							>
+								<span>Throttling</span><small>—</small>
+							</li>
+						</ul>
+						<p class="note" id="power-note"></p>
+					</section>
+
+					<section class="host" aria-labelledby="host-heading">
+						<h2 class="legend" id="host-heading">Pi host</h2>
+						<dl class="readouts" id="readouts">
+							<div class="readout" data-key="cpu">
+								<dt>CPU</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+								<span class="meter" aria-hidden="true"><span></span></span>
+							</div>
+							<div class="readout" data-key="memory">
+								<dt>Memory</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+								<span class="meter" aria-hidden="true"><span></span></span>
+							</div>
+							<div class="readout" data-key="disk">
+								<dt>Storage</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+								<span class="meter" aria-hidden="true"><span></span></span>
+							</div>
+							<div class="readout" data-key="temperature">
+								<dt>SoC temp.</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+								<span class="meter" aria-hidden="true"><span></span></span>
+							</div>
+							<div class="readout" data-key="network">
+								<dt>Network</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+							</div>
+							<div class="readout" data-key="uptime">
+								<dt>Host uptime</dt>
+								<dd>
+									<span class="readout__value">—</span
+									><span class="readout__sub"></span>
+								</dd>
+							</div>
+						</dl>
+					</section>
+				</div>
+				<details class="diagnostics" id="diagnostics">
+					<summary>Diagnostics</summary>
+					<div class="diagnostics__body">
+						<h3 class="legend">Downstream clients</h3>
+						<table class="clients">
+							<thead>
+								<tr>
+									<th scope="col">Client</th>
+									<th scope="col">Delivery</th>
+									<th scope="col">Dropped</th>
+								</tr>
+							</thead>
+							<tbody id="clients"></tbody>
+						</table>
+						<h3 class="legend">Receiver</h3>
+						<dl class="facts" id="facts-receiver"></dl>
+						<h3 class="legend">Measurement sources</h3>
+						<dl class="facts" id="facts-sources"></dl>
+					</div>
+				</details>
+			</main>
+
+			<footer class="footer">
+				<p>
+					Read-only. Served by the Pi; works without WaveKit on your computer.
+				</p>
+			</footer>
+		</div>
+	</body>
+</html>

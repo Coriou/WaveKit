@@ -150,6 +150,9 @@ importers:
       "@fastify/cors":
         specifier: ^11.0.1
         version: 11.2.0
+      "@wavekit/api-types":
+        specifier: workspace:*
+        version: link:../api-types
       "@wavekit/shared":
         specifier: workspace:*
         version: link:../shared

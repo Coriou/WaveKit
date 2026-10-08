@@ -1,7 +1,10 @@
 import { describe, it, expect, afterEach, vi } from "vitest"
 import { createLogger } from "@wavekit/shared"
+import type { SdrHostTelemetry } from "@wavekit/api-types"
 import { createApiServer } from "../../src/api/server.js"
 import { SdrHostConfigSchema } from "../../src/config.js"
+import { HostCollector } from "../../src/telemetry/host.js"
+import { SamplingMonitor } from "../../src/telemetry/sampling.js"
 import type {
 	ProcessManager,
 	ProcessState,
@@ -12,6 +15,15 @@ import {
 } from "../../src/supervisor/preflight.js"
 
 const logger = createLogger({ level: "fatal" })
+const sampling = new SamplingMonitor({ sampleRate: 2_048_000 })
+// No procfs/sysfs: every host reading must be reported unavailable.
+const emptyHost = new HostCollector({
+	procRoot: "/nonexistent/proc",
+	sysRoot: "/nonexistent/sys",
+	statusDir: "/nonexistent/status",
+	statfsPath: "/nonexistent",
+	networkInterfaces: () => ({}),
+})
 
 function createProcessManager(
 	overrides?: Partial<{
@@ -58,6 +70,9 @@ function createProcessManager(
 		getRtlTcpState: () => rtlTcp,
 		getRtlmuxState: () => rtlmux,
 		getRtlmuxStats: () => stats,
+		getSampling: () => sampling.sampling(),
+		getDelivery: () => sampling.delivery(),
+		getSamplingHistory: () => sampling.recentHistory(),
 	} as unknown as ProcessManager
 }
 
@@ -111,6 +126,7 @@ describe("sdr-host API", () => {
 			refresh: async () => current,
 		})
 		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
 			config: SdrHostConfigSchema.parse({}),
 			logger,
 			processManager: createProcessManager(),
@@ -145,6 +161,7 @@ describe("sdr-host API", () => {
 	it("returns healthy status when services are running", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
 			config,
 			logger,
 			processManager: createProcessManager(),
@@ -162,6 +179,7 @@ describe("sdr-host API", () => {
 	it("reports unhealthy when rtlmux is down", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
 			config,
 			logger,
 			processManager: createProcessManager({
@@ -190,6 +208,7 @@ describe("sdr-host API", () => {
 			rtlmux: { bind: "0.0.0.0", port: 5555 },
 		})
 		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
 			config,
 			logger,
 			processManager: createProcessManager(),
@@ -213,6 +232,7 @@ describe("sdr-host API", () => {
 	it("returns fix instructions for driver conflict", async () => {
 		const config = SdrHostConfigSchema.parse({})
 		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
 			config,
 			logger,
 			processManager: createProcessManager(),
@@ -234,5 +254,155 @@ describe("sdr-host API", () => {
 
 		expect(response.statusCode).toBe(200)
 		expect(payload.issue).toBe("dvb_driver_conflict")
+	})
+})
+
+describe("operator page and telemetry API", () => {
+	let fastify: Awaited<ReturnType<typeof createApiServer>> | null = null
+
+	afterEach(async () => {
+		await fastify?.close()
+		fastify = null
+	})
+
+	const create = async (config = SdrHostConfigSchema.parse({})) => {
+		fastify = await createApiServer({
+			hostTelemetry: emptyHost,
+			config,
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: createPreflightResult(),
+		})
+		await fastify.ready()
+		return fastify
+	}
+
+	it("keeps legacy status keys and adds sampling evidence separately", async () => {
+		const app = await create()
+		const response = await app.inject({ method: "GET", url: "/api/status" })
+		const payload = response.json() as {
+			rtlmux: Record<string, unknown>
+			sampling: unknown
+			delivery: unknown
+			samplingHistory: unknown
+		}
+		expect(response.headers["cache-control"]).toBe("no-store")
+		expect(Object.keys(payload.rtlmux)).toEqual(
+			expect.arrayContaining([
+				"running",
+				"pid",
+				"endpoint",
+				"statsUrl",
+				"stats",
+			]),
+		)
+		expect(payload.rtlmux["stats"]).toEqual({
+			clients: 0,
+			bytesPerSec: 0,
+			totalBytesSent: 0,
+			clientDetails: [],
+		})
+		expect(payload.sampling).toMatchObject({
+			timeoutMs: 10_000,
+			upstream: { expectedBytesPerSec: 4_096_000 },
+		})
+		expect(payload.delivery).toHaveProperty("state")
+		expect(payload.samplingHistory).toMatchObject({
+			pollIntervalMs: 2000,
+			windowMs: 300_000,
+		})
+	})
+
+	it("adds informational sampling to /health without changing its verdict", async () => {
+		const app = await create()
+		const response = await app.inject({ method: "GET", url: "/health" })
+		const payload = response.json() as {
+			healthy: boolean
+			sampling: string
+			checks: object
+		}
+		expect(response.statusCode).toBe(200)
+		expect(payload.healthy).toBe(true)
+		expect(payload.checks).toEqual({ dongle: "ok", rtlTcp: "ok", rtlmux: "ok" })
+		expect([
+			"waiting",
+			"unknown",
+			"disconnected",
+			"streaming",
+			"stale",
+		]).toContain(payload.sampling)
+	})
+
+	it("serves host telemetry with explicit unavailable states", async () => {
+		const app = await create()
+		const response = await app.inject({ method: "GET", url: "/api/host" })
+		const payload = response.json() as SdrHostTelemetry
+		expect(response.statusCode).toBe(200)
+		expect(response.headers["cache-control"]).toBe("no-store")
+		expect(payload.cpu).toMatchObject({ state: "unavailable", value: null })
+		expect(payload.power.throttling.state).toBe("unavailable")
+	})
+
+	it("does not let arbitrary sites read the API, but honours an allowlist", async () => {
+		let app = await create()
+		let response = await app.inject({
+			method: "GET",
+			url: "/api/host",
+			headers: { origin: "https://evil.example" },
+		})
+		expect(response.headers["access-control-allow-origin"]).toBeUndefined()
+		await app.close()
+		app = await create(
+			SdrHostConfigSchema.parse({
+				api: { corsOrigins: "http://laptop.local:3000" },
+			}),
+		)
+		response = await app.inject({
+			method: "GET",
+			url: "/api/host",
+			headers: { origin: "http://laptop.local:3000" },
+		})
+		expect(response.headers["access-control-allow-origin"]).toBe(
+			"http://laptop.local:3000",
+		)
+	})
+
+	it("serves the page same-origin with a strict CSP, revalidation and compression", async () => {
+		const app = await create()
+		const page = await app.inject({
+			method: "GET",
+			url: "/",
+			headers: { "accept-encoding": "gzip" },
+		})
+		expect(page.statusCode).toBe(200)
+		expect(page.headers["content-type"]).toContain("text/html")
+		expect(page.headers["content-encoding"]).toBe("gzip")
+		expect(page.headers["content-security-policy"]).toContain(
+			"default-src 'none'",
+		)
+		expect(page.headers["content-security-policy"]).toContain(
+			"connect-src 'self'",
+		)
+		const etag = page.headers.etag as string
+		const again = await app.inject({
+			method: "GET",
+			url: "/",
+			headers: { "if-none-match": etag },
+		})
+		expect(again.statusCode).toBe(304)
+		const script = await app.inject({ method: "GET", url: "/app.js" })
+		expect(script.headers["content-type"]).toContain("text/javascript")
+		expect(script.body).toContain("api/host")
+		const font = await app.inject({
+			method: "GET",
+			url: "/fonts/barlow-500.woff2",
+		})
+		expect(font.headers["cache-control"]).toContain("max-age")
+		expect(
+			(await app.inject({ method: "GET", url: "/../src/index.ts" })).statusCode,
+		).toBe(404)
+		expect(
+			(await app.inject({ method: "GET", url: "/fonts/OFL.txt" })).statusCode,
+		).toBe(404)
 	})
 })

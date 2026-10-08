@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify"
+import type { SdrHostSamplingHistory } from "@wavekit/api-types"
 import type { SdrHostConfig } from "../../config.js"
 
 /**
@@ -58,6 +59,15 @@ export function registerStatusRoutes(
 				statsUrl,
 				stats: rtlmuxStats,
 			},
+			// Upstream sample evidence, independent of USB/process presence and
+			// of downstream clients (rtlmux reads upstream with zero clients).
+			sampling: processManager.getSampling(),
+			delivery: processManager.getDelivery(),
+			samplingHistory: {
+				pollIntervalMs: 2000,
+				windowMs: 5 * 60_000,
+				points: processManager.getSamplingHistory(),
+			} satisfies SdrHostSamplingHistory,
 			warnings,
 			errors,
 		})

@@ -37,6 +37,7 @@ describe("ProcessManager", () => {
 		const manager = new ProcessManager(config, logger, {
 			procRoot,
 			now: () => now,
+			wallNow: () => now,
 			processPollIntervalMs: 1000,
 			statsPollIntervalMs: 100000,
 			fetchFn: vi.fn(async () => ({ ok: false })) as unknown as typeof fetch,
@@ -144,10 +145,12 @@ it("normalizes canonical rtlmux client arrays and derives byte throughput", asyn
 	const manager = new ProcessManager(SdrHostConfigSchema.parse({}), logger, {
 		procRoot,
 		now: () => now,
-		fetchFn: vi.fn(async () => ({
-			ok: true,
-			json: async () => ({ server: { dataIn: 1000, dataOut: 5 }, clients }),
-		})) as unknown as typeof fetch,
+		fetchFn: vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({ server: { dataIn: 1000, dataOut: 5 }, clients }),
+				),
+		) as unknown as typeof fetch,
 		statsPollIntervalMs: 1000,
 	})
 	try {
@@ -184,4 +187,173 @@ it("normalizes canonical rtlmux client arrays and derives byte throughput", asyn
 		fs.rmSync(procRoot, { recursive: true, force: true })
 		vi.useRealTimers()
 	}
+})
+
+describe("ProcessManager rtlmux stats polling", () => {
+	it("aborts a hung stats request and never overlaps polls", async () => {
+		vi.useFakeTimers()
+		const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdr-host-hung-"))
+		writeProc(procRoot, 100, "rtl_tcp")
+		writeProc(procRoot, 200, "rtlmux")
+		let inFlight = 0
+		let maxInFlight = 0
+		let calls = 0
+		const fetchFn = vi.fn(
+			(_url: string, init?: RequestInit) =>
+				new Promise<Response>((_resolve, reject) => {
+					calls += 1
+					inFlight += 1
+					maxInFlight = Math.max(maxInFlight, inFlight)
+					init?.signal?.addEventListener("abort", () => {
+						inFlight -= 1
+						reject(new DOMException("aborted", "AbortError"))
+					})
+				}),
+		)
+		let now = 0
+		const manager = new ProcessManager(
+			SdrHostConfigSchema.parse({}),
+			createLogger({ level: "fatal" }),
+			{
+				procRoot,
+				now: () => now,
+				fetchFn: fetchFn as unknown as typeof fetch,
+				statsPollIntervalMs: 2000,
+				statsTimeoutMs: 1500,
+				processPollIntervalMs: 100_000,
+			},
+		)
+		try {
+			manager.startMonitoring()
+			for (let i = 0; i < 20; i++) {
+				now += 500
+				await vi.advanceTimersByTimeAsync(500)
+			}
+			expect(maxInFlight).toBe(1)
+			// 10 s at a 2 s start-to-start cadence: about five polls, not more.
+			expect(calls).toBeGreaterThanOrEqual(4)
+			expect(calls).toBeLessThanOrEqual(5)
+			expect(manager.getSampling().stats.lastError).toBe("timeout")
+			expect(manager.getSampling().state).toBe("unknown")
+		} finally {
+			await vi.advanceTimersByTimeAsync(2000)
+			await manager.shutdown()
+			fs.rmSync(procRoot, { recursive: true, force: true })
+			vi.useRealTimers()
+		}
+	})
+
+	it("discards a sample when rtlmux restarts during the request", async () => {
+		vi.useFakeTimers()
+		const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdr-host-race-"))
+		writeProc(procRoot, 100, "rtl_tcp")
+		writeProc(procRoot, 200, "rtlmux")
+		let now = 0
+		const fetchFn = vi.fn(async () => {
+			// rtlmux 200 exits while its stats are in flight.
+			fs.rmSync(path.join(procRoot, "200"), { recursive: true, force: true })
+			writeProc(procRoot, 201, "rtlmux")
+			return new Response(
+				JSON.stringify({ server: { dataIn: 9e9, dataOut: 0 }, clients: [] }),
+			)
+		})
+		const manager = new ProcessManager(
+			SdrHostConfigSchema.parse({}),
+			createLogger({ level: "fatal" }),
+			{
+				procRoot,
+				now: () => now,
+				fetchFn: fetchFn as unknown as typeof fetch,
+				statsPollIntervalMs: 2000,
+				processPollIntervalMs: 100_000,
+			},
+		)
+		try {
+			manager.startMonitoring()
+			now += 2000
+			await vi.advanceTimersByTimeAsync(2000)
+			expect(fetchFn).toHaveBeenCalledTimes(1)
+			expect(manager.getSampling().upstream.bytesTotal).toBeNull()
+			expect(manager.getSampling().epoch.rtlmuxPid).toBeNull()
+		} finally {
+			await manager.shutdown()
+			fs.rmSync(procRoot, { recursive: true, force: true })
+			vi.useRealTimers()
+		}
+	})
+
+	it("stops reading an oversized stats body at the cap", async () => {
+		vi.useFakeTimers()
+		const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdr-host-big-"))
+		writeProc(procRoot, 100, "rtl_tcp")
+		writeProc(procRoot, 200, "rtlmux")
+		let pulled = 0
+		const endless = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				pulled += 1
+				controller.enqueue(new Uint8Array(64 * 1024).fill(32))
+			},
+		})
+		let now = 0
+		const manager = new ProcessManager(
+			SdrHostConfigSchema.parse({}),
+			createLogger({ level: "fatal" }),
+			{
+				procRoot,
+				now: () => now,
+				fetchFn: vi.fn(
+					async () => new Response(endless),
+				) as unknown as typeof fetch,
+				statsPollIntervalMs: 2000,
+				processPollIntervalMs: 100_000,
+			},
+		)
+		try {
+			manager.startMonitoring()
+			now += 2000
+			await vi.advanceTimersByTimeAsync(2000)
+			expect(manager.getSampling().stats.lastError).toBe("invalid")
+			// 256 KiB cap: a handful of 64 KiB chunks, never the endless stream.
+			expect(pulled).toBeLessThanOrEqual(8)
+		} finally {
+			await manager.shutdown()
+			fs.rmSync(procRoot, { recursive: true, force: true })
+			vi.useRealTimers()
+		}
+	})
+
+	it("rejects malformed stats instead of caching them", async () => {
+		vi.useFakeTimers()
+		const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdr-host-invalid-"))
+		writeProc(procRoot, 100, "rtl_tcp")
+		writeProc(procRoot, 200, "rtlmux")
+		let now = 0
+		const manager = new ProcessManager(
+			SdrHostConfigSchema.parse({}),
+			createLogger({ level: "fatal" }),
+			{
+				procRoot,
+				now: () => now,
+				fetchFn: vi.fn(
+					async () => new Response('{"clients":"x"}'),
+				) as unknown as typeof fetch,
+				statsPollIntervalMs: 2000,
+				processPollIntervalMs: 100_000,
+			},
+		)
+		try {
+			manager.startMonitoring()
+			now += 2000
+			await vi.advanceTimersByTimeAsync(2000)
+			expect(manager.getSampling().stats).toMatchObject({
+				state: "unavailable",
+				lastError: "invalid",
+			})
+			expect(manager.getRtlmuxStats().clients).toBe(0)
+		} finally {
+			await manager.shutdown()
+			fs.rmSync(procRoot, { recursive: true, force: true })
+			vi.useRealTimers()
+		}
+	})
 })

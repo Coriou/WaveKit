@@ -113,6 +113,8 @@ RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/rtl-sdr.conf && ldconfig
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/
 COPY --from=node-build /app/package.json /app/package.json
 COPY --from=node-build /app/packages/sdr-host/dist /app/dist
+# Operator page: static, read-only assets served by the API.
+COPY packages/sdr-host/ui /app/ui
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json
 COPY --from=node-build /app/packages/shared/dist /app/packages/shared/dist
