@@ -57,7 +57,14 @@ export interface DecoderFacts {
 	bandOrigin: BandOrigin | null
 	/** R40 detail annotation for targets a tuned decoder does not apply, else null. */
 	bandNote: string | null
+	/** REST decoders lane older than the TTL: every REST-fed cell renders dim (T6). */
 	oldRest: boolean
+	/** Fanout lane is fresh: a running decoder without a branch then has no drop (—), not an unknown one. */
+	fanoutFresh: boolean
+	/** Fanout lane older than the TTL: drop and lifetime render dim. */
+	oldFanout: boolean
+	/** Sources or tuner lane older than the TTL: window and band render dim. */
+	oldWindow: boolean
 }
 
 const compute = memoOne(
@@ -75,6 +82,8 @@ const compute = memoOne(
 		const rows = decoders.value ?? []
 		const oldRest = isOld(decoders, now)
 		const fanoutFresh = isFresh(fanout, now)
+		const oldFanout = isOld(fanout, now)
+		const oldWindow = isOld(sources, now) || isOld(tuner, now)
 		return rows.map(row => {
 			const sess = session[row.id]
 			const inc = restartIncrements(sess?.restarts ?? [], now)
@@ -115,6 +124,9 @@ const compute = memoOne(
 				bandOrigin: band?.origin ?? null,
 				bandNote: band ? configuredNote(band) : null,
 				oldRest,
+				fanoutFresh,
+				oldFanout,
+				oldWindow,
 			}
 		})
 	},
@@ -145,7 +157,7 @@ const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 }
 
 function processCell(f: DecoderFacts): Cell {
-	const role: Role = f.oldRest ? "old" : PROC_ROLE[f.proc]
+	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
 	const restarts = `${formatCount(n)} restart${n === 1 ? "" : "s"}`
 	const sep = ` ${glyphs().sep} `
@@ -156,11 +168,12 @@ function processCell(f: DecoderFacts): Cell {
 				? cell([sp(`up ${up}`, role)], [sp(`up ${up}${sep}${restarts}`, role)])
 				: cell([sp(`up ${up}`, role)])
 		case "starting":
-			return cell([sp(`starting ${up}`, role)])
+			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
+			return cell([sp("starting", role)], [sp(`starting ${up}`, role)])
 		case "stopped":
 			return cell([sp("stopped", role)])
 		default:
-			// R50: keep the restart evidence as width allows (min, mid, rich).
+			// R50: keep the restart evidence as width allows (min, mid, rich); none without restarts.
 			// The multiplication sign is the fault glyph, so ASCII mode reads `x13`.
 			return n > 0
 				? cell(
@@ -173,7 +186,6 @@ function processCell(f: DecoderFacts): Cell {
 }
 
 function decodesCell(f: DecoderFacts, now: number): Cell {
-	const role: Role = f.oldRest ? "old" : "value"
 	const d = f.decodes
 	const ago = (at: number): string => `${formatAge(now - at)} ago`
 	switch (d.kind) {
@@ -182,29 +194,36 @@ function decodesCell(f: DecoderFacts, now: number): Cell {
 		case "rate": {
 			const rate = formatEventRate(d.perSec)
 			return d.lastAt === null
-				? cell([sp(rate, role)])
+				? cell([sp(rate)])
 				: cell(
-						[sp(ago(d.lastAt), role)],
-						[sp(`${rate} ${glyphs().sep} ${ago(d.lastAt)}`, role)],
+						[sp(ago(d.lastAt))],
+						[sp(`${rate} ${glyphs().sep} ${ago(d.lastAt)}`)],
 					)
 		}
 		case "last":
-			return cell([sp(ago(d.lastAt), role)])
+			return cell([sp(ago(d.lastAt))])
 		case "none": {
 			const dur = formatDuration(d.uptimeSec)
 			return cell(
-				[sp(`none ${dur}`, f.oldRest ? "old" : "neutral")],
-				[sp(`none for ${dur}`, f.oldRest ? "old" : "neutral")],
+				[sp(`none ${dur}`, "neutral")],
+				[sp(`none for ${dur}`, "neutral")],
 			)
 		}
 		case "total":
-			return cell([sp(`${formatCount(d.count)} total`, role)])
+			return cell([sp(`${formatCount(d.count)} total`)])
 	}
 }
 
+const NA = (): Cell => cell([sp(glyphs().na, "label")])
+
 function dropCell(f: DecoderFacts): Cell {
-	if (!f.row.running) return cell([sp(glyphs().na, "label")])
-	if (f.dropNow === null) return cell([sp("?", "unknown")])
+	if (!f.row.running) return NA()
+	// R52 m5: no branch while fanout is fresh means nothing to drop, not an unknown drop.
+	if (f.branch === null && f.fanoutFresh) return NA()
+	if (f.dropNow === null)
+		return f.backpressure
+			? cell([sp("?", "unknown"), sp(" "), sp(glyphs().attention, "attention")])
+			: cell([sp("?", "unknown")])
 	const pct = formatPercent(f.dropNow)
 	return f.backpressure
 		? cell([sp(glyphs().attention, "attention"), sp(pct, "attention")])
@@ -213,44 +232,82 @@ function dropCell(f: DecoderFacts): Cell {
 
 function lifetimeCell(f: DecoderFacts): Cell {
 	if (f.lifetime !== null) return cell([sp(formatPercent(f.lifetime))])
-	return f.branch === null && !f.row.running
-		? cell([sp(glyphs().na, "label")])
+	return f.branch === null && (f.fanoutFresh || !f.row.running)
+		? NA()
 		: cell([sp("?", "unknown")])
 }
 
-/** A configured band is never passed off as nominal (R15): the rich variant says `cfg`. */
+/** Marks a configured band in every variant, so it never passes as nominal (R15, T7). */
+export const CONFIGURED_MARK = "*"
+
 function nominalCell(f: DecoderFacts): Cell {
 	if (f.nominal === "?") return cell([sp("?", "unknown")])
 	if (f.bandOrigin !== "configured") return cell([sp(f.nominal)])
-	return cell([sp(f.nominal)], [sp(f.nominal), sp(" cfg", "label")])
+	return cell([sp(f.nominal), sp(CONFIGURED_MARK, "label")])
 }
 
+function windowCell(f: DecoderFacts): Cell {
+	const m = f.membership
+	if (m === "—") return NA()
+	return cell([sp(m, m === "?" ? "unknown" : "value")])
+}
+
+/** Every span of the cell in the `old` role (stale lane, T6). */
+function dim(c: Cell): Cell {
+	return {
+		variants: c.variants.map(v => v.map(x => ({ ...x, role: "old" as const }))),
+	}
+}
+
+const REST_CELLS = [
+	"decoder",
+	"process",
+	"decodes",
+	"restarts",
+	"errors",
+	"events",
+	"iq",
+] as const
+const FANOUT_CELLS = ["drop", "lifetime"] as const
+const WINDOW_CELLS = ["window", "nominal"] as const
+
+/**
+ * Cells for one decoder row. Each cell dims (role `old`) when the lane it comes
+ * from is older than the TTL (T6): REST cells by the decoders lane, drop and
+ * lifetime by the fanout lane, window and band by the sources/tuner lanes.
+ * `dimAll` dims every cell (spec §6.1: everything below the banner is dim).
+ */
 export function decoderCells(
 	f: DecoderFacts,
 	now: number,
+	dimAll = false,
 ): Record<string, Cell> {
-	return {
+	const cells: Record<string, Cell> = {
 		decoder: cell([glyphSpan(f.role), sp(" "), sp(sanitize(f.row.id))]),
 		process: processCell(f),
 		decodes: decodesCell(f, now),
 		drop: dropCell(f),
 		lifetime: lifetimeCell(f),
 		nominal: nominalCell(f),
-		window: cell([
-			sp(
-				f.membership,
-				f.membership === "?"
-					? "unknown"
-					: f.membership === "—"
-						? "label"
-						: "value",
-			),
-		]),
+		window: windowCell(f),
 		restarts: cell([sp(formatCount(f.row.restartCount))]),
 		errors: cell([sp(formatCount(f.row.stats.errors))]),
 		events: cell([sp(formatCount(f.row.stats.eventsOut))]),
 		iq: cell([sp(formatBytes(f.row.stats.bytesIn))]),
 	}
+	const groups: ReadonlyArray<[boolean, readonly string[]]> = [
+		[dimAll || f.oldRest, REST_CELLS],
+		[dimAll || f.oldFanout, FANOUT_CELLS],
+		[dimAll || f.oldWindow, WINDOW_CELLS],
+	]
+	for (const [old, ids] of groups) {
+		if (!old) continue
+		for (const id of ids) {
+			const c = cells[id]
+			if (c) cells[id] = dim(c)
+		}
+	}
+	return cells
 }
 
 const header = (...variants: string[]): Cell => ({
@@ -314,13 +371,34 @@ const NARROW_COLUMNS: ColumnSpec[] = [
 
 const NARROW_BELOW = 79
 
-/** The column set a table actually lays out: both exported sets switch to the narrow set below 79 columns. */
-export function decoderColumnsFor(
-	columns: readonly ColumnSpec[],
+/** Which table a view lays out; the kind, not a column array, selects the narrow set (R52 m4). */
+export type DecoderTableKind = "overview" | "decoders"
+
+/** The columns a table lays out at `width`: its standard set, or the narrow set below 79 columns. */
+export function decoderColumns(
+	kind: DecoderTableKind,
 	width: number,
 ): readonly ColumnSpec[] {
-	const known = columns === OVERVIEW_COLUMNS || columns === DECODERS_COLUMNS
-	return known && width < NARROW_BELOW ? NARROW_COLUMNS : columns
+	if (width < NARROW_BELOW) return NARROW_COLUMNS
+	return kind === "overview" ? OVERVIEW_COLUMNS : DECODERS_COLUMNS
+}
+
+/** With a configured band on screen the band column gains a column for the mark and says what it means (I1). */
+function withConfiguredMark(
+	cols: readonly ColumnSpec[],
+	facts: readonly DecoderFacts[],
+): readonly ColumnSpec[] {
+	if (!facts.some(f => f.bandOrigin === "configured")) return cols
+	return cols.map(c =>
+		c.id === "nominal"
+			? {
+					...c,
+					min: c.min + 1,
+					pref: c.pref + 1,
+					header: header(`nominal MHz ${CONFIGURED_MARK}cfg`),
+				}
+			: c,
+	)
 }
 
 export interface DecoderTable {
@@ -329,16 +407,28 @@ export interface DecoderTable {
 	shownIds: string[]
 }
 
-/** maxRows includes the "+N more" marker row; the selected row is always kept visible. */
+export interface DecoderTableOptions {
+	/** Dim every row (spec §6.1: with a cached view under the banner, everything below it is dim). */
+	dim?: boolean
+}
+
+/**
+ * maxRows includes the "+N more" marker row; the selected row is always kept visible.
+ * `columns` is a table kind (standard set, narrow set below 79 columns) or an
+ * explicit column array laid out as given at every width.
+ */
 export function decoderTable(
 	facts: readonly DecoderFacts[],
-	columns: readonly ColumnSpec[],
+	columns: DecoderTableKind | readonly ColumnSpec[],
 	width: number,
 	maxRows: number,
 	selectedId: string | null,
 	now: number,
+	opts: DecoderTableOptions = {},
 ): DecoderTable {
-	const cols = decoderColumnsFor(columns, width)
+	const base =
+		typeof columns === "string" ? decoderColumns(columns, width) : columns
+	const cols = withConfiguredMark(base, facts)
 	const layout = layoutColumns(width, cols)
 	const fits = facts.length <= maxRows
 	const visible = fits ? facts.length : Math.max(0, maxRows - 1)
@@ -350,7 +440,7 @@ export function decoderTable(
 			: Math.min(sel - visible + 1, facts.length - visible)
 	const shown = facts.slice(start, start + visible)
 	const rows = shown.map(f => {
-		const cells = decoderCells(f, now)
+		const cells = decoderCells(f, now, opts.dim === true)
 		// Spec §6.2: the selected row is inverse on the glyph and the name.
 		if (f.row.id === selectedId) {
 			cells["decoder"] = cell([
@@ -361,7 +451,13 @@ export function decoderTable(
 		}
 		return renderRow(layout, cells)
 	})
-	if (!fits) rows.push([sp(`  +${facts.length - shown.length} more`, "label")])
+	if (!fits)
+		rows.push([
+			sp(
+				`  +${facts.length - shown.length} more`,
+				opts.dim === true ? "old" : "label",
+			),
+		])
 	return {
 		header: renderHeader(layout, cols),
 		rows,
@@ -376,7 +472,13 @@ export function decodersPlaceholder(state: AppState): Line | null {
 		return lane.value.length === 0
 			? [sp("no decoders configured", "label")]
 			: null
+	const sep = ` ${glyphs().sep} `
+	// R52 m7: other endpoints answering means this endpoint is failing, not the API (§9).
+	if (lane.error && state.conn.rest.lastOkAt !== null) {
+		const why = lane.error.status ?? lane.error.kind
+		return [sp(`no data${sep}GET /api/decoders failing${sep}${why}`, "label")]
+	}
 	if (lane.error || state.conn.rest.firstFailAt !== null)
-		return [sp(`no data ${glyphs().sep} API unreachable`, "label")]
+		return [sp(`no data${sep}API unreachable`, "label")]
 	return [sp("fetching /api/decoders", "label")]
 }

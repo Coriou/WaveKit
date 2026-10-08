@@ -18,7 +18,6 @@ import { lineText, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
-	DECODERS_COLUMNS,
 	decoderCells,
 	decoderFacts,
 	decoderTable,
@@ -298,7 +297,7 @@ export function decodersModel(
 	const detailWidth = b.placement.kind === "right" ? b.placement.width : width
 	const table = decoderTable(
 		facts,
-		DECODERS_COLUMNS,
+		"decoders",
 		listWidth,
 		b.listRows,
 		selected?.row.id ?? null,
