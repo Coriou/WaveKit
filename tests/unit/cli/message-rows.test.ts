@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
-import type { MessageEntry } from "../../../cli/source/data/types.js"
+import type {
+	FormattedMessage,
+	MessageEntry,
+} from "../../../cli/source/data/types.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { formatMessage } from "../../../cli/source/ui/messages/index.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
@@ -10,9 +13,11 @@ import {
 	interleave,
 	messageLayout,
 	messageRow,
+	in60sText,
 	newestFirst,
 	summaryLine,
 } from "../../../cli/source/view-models/message-rows.js"
+import { createRing, ringPush } from "../../../cli/source/data/ring-buffer.js"
 
 // Row times are local; expectations are built from the same instants with
 // local getters so the file passes in any timezone (no TZ mutation).
@@ -39,6 +44,7 @@ describe("message rows", () => {
 			in60s: 3,
 			total: 7,
 			cached: 7,
+			capped: false,
 		})
 	})
 
@@ -112,5 +118,39 @@ describe("message rows", () => {
 		const e: MessageEntry = { ...at(0), decoderId: "x\x1b[2J\u202Ey" }
 		const line = lineText(messageRow(e, messageLayout(119), false, false))
 		expect(/[\u0000-\u001f\u007f-\u009f\u202E]/.test(line)).toBe(false)
+	})
+
+	describe("fix round 1", () => {
+		const fm = (texts: string[], text?: string): FormattedMessage => ({
+			protocol: "T",
+			category: "other",
+			segments: texts.map((t, i) => ({ text: t, priority: i === 0 ? 0 : 5 })),
+			fields: [],
+			emergency: false,
+			searchText: "",
+			...(text !== undefined ? { text } : {}),
+		})
+		it("m8: segments plus short text are not squeezed by a fixed reservation", () => {
+			expect(
+				lineText(summaryLine(fm(["a".repeat(12), "b".repeat(12)], "ok"), 31)),
+			).toBe(`${"a".repeat(12)}  ${"b".repeat(12)}  ok`)
+		})
+		it("m8: the drop marker ends the line, never sits before the text", () => {
+			const line = lineText(
+				summaryLine(fm(["a".repeat(12), "b".repeat(12)], "hello"), 26),
+			)
+			expect(line).toBe(`${"a".repeat(12)}  hello  …`)
+		})
+		it("m6: a full ring whose oldest entry is under 60 s old reads N+ in 60s", () => {
+			const ring = createRing(3, 1)
+			for (let i = 0; i < 3; i++)
+				ringPush(ring, { ...at(0), receivedAt: s.now - 1000 })
+			const c = feedCounts(ring, s.now)
+			expect(c).toMatchObject({ in60s: 3, cached: 3, capped: true })
+			expect(in60sText(c)).toBe("3+")
+			const live = feedCounts(s.messages.ring, s.now)
+			expect(live.capped).toBe(false)
+			expect(in60sText(live)).toBe("3")
+		})
 	})
 })

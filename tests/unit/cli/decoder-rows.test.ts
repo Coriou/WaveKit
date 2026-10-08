@@ -3,9 +3,8 @@ import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { formatMessage } from "../../../cli/source/ui/messages/index.js"
 import { pickVariant } from "../../../cli/source/ui/columns.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
+import { setGlyphMode } from "../../../cli/source/ui/theme.js"
 import {
-	DECODERS_COLUMNS,
-	OVERVIEW_COLUMNS,
 	decoderCells,
 	decoderFacts,
 	decoderTable,
@@ -46,14 +45,14 @@ describe("decoder rows (live fixture)", () => {
 	})
 
 	it("renders the 120-column overview table like spec §6.1", () => {
-		const t = decoderTable(facts, OVERVIEW_COLUMNS, 119, 20, null, s.now)
+		const t = decoderTable(facts, "overview", 119, 20, null, s.now)
 		expect(lineText(t.header)).toBe(
-			"  DECODERS          process             decodes           drop now  lifetime  nominal MHz      window",
+			"  DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window",
 		)
 		const rows = t.rows.map(lineText)
 		const acars = rows.find(r => r.includes("acarsdec")) ?? ""
 		expect(acars).toMatch(
-			/^! acarsdec +restarting ×13 +— +— +— +131\.550–131\.825 +out/,
+			/^! acarsdec +restarting ×13 +— +— +— +131\.550–131\.825\* +out/,
 		)
 		const readsb = rows.find(r => r.includes("readsb")) ?? ""
 		expect(readsb).toMatch(
@@ -66,7 +65,7 @@ describe("decoder rows (live fixture)", () => {
 	})
 
 	it("drops lifetime and nominal whole at 80 columns, keeping core cells rich (§6.1 80×24)", () => {
-		const t = decoderTable(facts, OVERVIEW_COLUMNS, 79, 20, null, s.now)
+		const t = decoderTable(facts, "overview", 79, 20, null, s.now)
 		expect(lineText(t.header)).toBe(
 			"  DECODERS          process             decodes           drop now  window",
 		)
@@ -80,14 +79,14 @@ describe("decoder rows (live fixture)", () => {
 	})
 
 	it("drops lifetime and nominal at 60 columns and marks hidden rows (§6.1 60×20)", () => {
-		const t = decoderTable(facts, OVERVIEW_COLUMNS, 59, 5, null, s.now)
+		const t = decoderTable(facts, "overview", 59, 5, null, s.now)
 		expect(lineText(t.header)).toBe(
 			"  DECODERS         process     decodes       drop  window",
 		)
 		expect(t.rows).toHaveLength(5)
 		expect(lineText(t.rows[4] ?? [])).toContain("+5 more")
 		expect(t.shownIds).toHaveLength(4)
-		const all = decoderTable(facts, OVERVIEW_COLUMNS, 59, 20, null, s.now)
+		const all = decoderTable(facts, "overview", 59, 20, null, s.now)
 		expect(all.rows.map(lineText).find(r => r.includes("lora"))).toMatch(
 			/^● lora-meshtastic {2}up 50s {6}none for 50s {4}9% {2}out/,
 		)
@@ -95,7 +94,7 @@ describe("decoder rows (live fixture)", () => {
 	})
 
 	it("hides nominal first in the Decoders view at 120 columns (§6.2)", () => {
-		const t = decoderTable(facts, DECODERS_COLUMNS, 119, 20, "readsb", s.now)
+		const t = decoderTable(facts, "decoders", 119, 20, "readsb", s.now)
 		expect(lineText(t.header)).toBe(
 			"  DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window",
 		)
@@ -105,14 +104,7 @@ describe("decoder rows (live fixture)", () => {
 	})
 
 	it("keeps the selected row visible when rows are hidden", () => {
-		const t = decoderTable(
-			facts,
-			OVERVIEW_COLUMNS,
-			79,
-			4,
-			"lora-meshtastic",
-			s.now,
-		)
+		const t = decoderTable(facts, "overview", 79, 4, "lora-meshtastic", s.now)
 		expect(t.shownIds).toContain("lora-meshtastic")
 	})
 
@@ -120,7 +112,7 @@ describe("decoder rows (live fixture)", () => {
 		const legacy = scenarioState("legacy")
 		const t = decoderTable(
 			decoderFacts(legacy),
-			OVERVIEW_COLUMNS,
+			"overview",
 			119,
 			20,
 			null,
@@ -173,17 +165,17 @@ describe("decoder rows (live fixture)", () => {
 		expect(lineText(pickVariant(proc ?? { variants: [[]] }, 24))).toBe(
 			"restarting · 13 restarts",
 		)
-		const rowAt = (cols: typeof OVERVIEW_COLUMNS, w: number): string =>
+		const rowAt = (cols: "overview" | "decoders", w: number): string =>
 			lineText(
 				decoderTable(facts, cols, w, 20, null, s.now).rows.find(r =>
 					lineText(r).includes("acarsdec"),
 				) ?? [],
 			)
 		// Overview standard (process 18): mid. Decoders view (process 10) and narrow: min.
-		expect(rowAt(OVERVIEW_COLUMNS, 119)).toContain("restarting ×13 ")
-		expect(rowAt(OVERVIEW_COLUMNS, 79)).toContain("restarting ×13 ")
-		expect(rowAt(OVERVIEW_COLUMNS, 59)).toMatch(/restarting +—/)
-		expect(rowAt(DECODERS_COLUMNS, 119)).toMatch(/restarting +13 /)
+		expect(rowAt("overview", 119)).toContain("restarting ×13 ")
+		expect(rowAt("overview", 79)).toContain("restarting ×13 ")
+		expect(rowAt("overview", 59)).toMatch(/restarting +—/)
+		expect(rowAt("decoders", 119)).toMatch(/restarting +13 /)
 	})
 
 	it("R50: down with restarts reads down · N restarts; no restarts, just down", () => {
@@ -204,7 +196,7 @@ describe("decoder rows (live fixture)", () => {
 		expect(text(cells["drop"])).toBe("<1%")
 	})
 
-	it("R40/R15: tuned stays tuned with a note; a configured band says cfg", () => {
+	it("R40/R15: tuned stays tuned with a note; a configured band carries its mark", () => {
 		const withTargets = {
 			...s,
 			decoders: {
@@ -228,7 +220,7 @@ describe("decoder rows (live fixture)", () => {
 		})
 		const rtl = f.find(x => x.row.id === "rtl433")
 		expect(rtl?.bandOrigin).toBe("configured")
-		expect(rtl && text(decoderCells(rtl, s.now)["nominal"])).toBe("433.920 cfg")
+		expect(rtl && text(decoderCells(rtl, s.now)["nominal"])).toBe("433.920*")
 	})
 
 	it("sanitises server-sent decoder ids (review focus 4)", () => {
@@ -237,10 +229,150 @@ describe("decoder rows (live fixture)", () => {
 			...by("readsb"),
 			row: { ...by("readsb").row, id: evil },
 		}
-		const t = decoderTable([f], OVERVIEW_COLUMNS, 119, 5, evil, s.now)
+		const t = decoderTable([f], "overview", 119, 5, evil, s.now)
 		for (const line of [...t.rows, t.header])
 			expect(/[\u0000-\u001f\u007f-\u009f\u202E]/.test(lineText(line))).toBe(
 				false,
 			)
+	})
+
+	describe("fix round 1", () => {
+		const configured = facts.filter(f => f.bandOrigin === "configured")
+		it("I1: a configured band is marked at every width the column shows", () => {
+			expect(configured.map(f => f.row.id).sort()).toEqual([
+				"acarsdec",
+				"dumpvdl2",
+			])
+			for (const [kind, w] of [
+				["overview", 199],
+				["overview", 119],
+				["decoders", 199],
+			] as const) {
+				const t = decoderTable(facts, kind, w, 20, null, s.now)
+				expect(lineText(t.header)).toContain("nominal MHz *cfg")
+				const acars = lineText(
+					t.rows.find(r => lineText(r).includes("acarsdec")) ?? [],
+				)
+				expect(acars).toContain("131.550–131.825*")
+			}
+			// At 80 the band column is gone, so no bare configured band appears.
+			const at80 = decoderTable(facts, "overview", 79, 20, null, s.now)
+			expect(lineText(at80.header)).not.toContain("nominal")
+			// Without configured rows the mockup header is unchanged.
+			const plain = facts.filter(f => f.bandOrigin !== "configured")
+			expect(
+				lineText(decoderTable(plain, "overview", 119, 20, null, s.now).header),
+			).toBe(
+				"  DECODERS          process             decodes           drop now  lifetime  nominal MHz      window",
+			)
+		})
+		it("I2: every cell of a stale lane is dim, and dim covers whole rows (api-down-cached)", () => {
+			const cached = scenarioState("api-down-cached")
+			const f = decoderFacts(cached)
+			expect(f.length).toBeGreaterThan(0)
+			// The cached lanes are past the TTL on their own: no option needed to dim them.
+			expect(f.every(x => x.oldRest && x.oldFanout)).toBe(true)
+			const own = decoderTable(f, "overview", 119, 20, null, cached.now)
+			for (const row of own.rows)
+				for (const span of row)
+					if (span.text.trim() !== "" && span.role !== "old")
+						throw new Error(`not dim: ${JSON.stringify(span)}`)
+			const t = decoderTable(f, "overview", 119, 20, null, cached.now, {
+				dim: true,
+			})
+			for (const row of t.rows)
+				for (const span of row)
+					if (span.text.trim() !== "") expect(span.role).toBe("old")
+			// Lane-driven: an old decoders lane dims every REST cell without the option.
+			const oldRest = { ...by("readsb"), oldRest: true }
+			const cells = decoderCells(oldRest, s.now)
+			for (const id of [
+				"decoder",
+				"process",
+				"decodes",
+				"restarts",
+				"errors",
+				"events",
+				"iq",
+			])
+				for (const span of cells[id]?.variants[0] ?? [])
+					expect(span.role).toBe("old")
+			expect(cells["drop"]?.variants[0]?.[0]?.role).not.toBe("old")
+			const oldFanout = decoderCells(
+				{ ...by("readsb"), oldFanout: true },
+				s.now,
+			)
+			for (const id of ["drop", "lifetime"])
+				for (const span of oldFanout[id]?.variants[0] ?? [])
+					expect(span.role).toBe("old")
+			const oldWindow = decoderCells(
+				{ ...by("readsb"), oldWindow: true },
+				s.now,
+			)
+			for (const id of ["window", "nominal"])
+				for (const span of oldWindow[id]?.variants[0] ?? [])
+					expect(span.role).toBe("old")
+		})
+		it("m2: starting has a minimal variant that fits 10 columns", () => {
+			const st: DecoderFacts = {
+				...by("readsb"),
+				proc: "starting",
+				role: "neutral",
+				row: { ...by("readsb").row, uptime: 4 },
+			}
+			const v = decoderCells(st, s.now)["process"]?.variants.map(lineText)
+			expect(v).toEqual(["starting", "starting 4s"])
+		})
+		it("m3: the window — follows the glyph mode", () => {
+			setGlyphMode("ascii")
+			try {
+				const ext = decoderCells({ ...by("readsb"), membership: "—" }, s.now)
+				expect(text(ext["window"])).toBe("-")
+			} finally {
+				setGlyphMode("utf8")
+			}
+		})
+		it("m5: unknown drop under backpressure is '? !'; no branch on a fresh fanout is —", () => {
+			const r = by("readsb")
+			expect(
+				text(
+					decoderCells({ ...r, dropNow: null, backpressure: true }, s.now)[
+						"drop"
+					],
+				),
+			).toBe("? !")
+			const nob = decoderCells(
+				{
+					...r,
+					branch: null,
+					dropNow: null,
+					lifetime: null,
+					backpressure: false,
+					fanoutFresh: true,
+				},
+				s.now,
+			)
+			expect(text(nob["drop"])).toBe("—")
+			expect(text(nob["lifetime"])).toBe("—")
+		})
+		it("m7: one failing endpoint is not 'API unreachable' (§9)", () => {
+			const st = {
+				...s,
+				decoders: {
+					value: undefined,
+					receivedAt: null,
+					origin: "rest" as const,
+					error: {
+						kind: "http" as const,
+						status: 500,
+						message: "boom",
+						at: s.now,
+					},
+				},
+			}
+			expect(lineText(decodersPlaceholder(st) ?? [])).toBe(
+				"no data · GET /api/decoders failing · 500",
+			)
+		})
 	})
 })
