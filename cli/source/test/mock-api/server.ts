@@ -8,9 +8,11 @@
  *
  * Fixture times are shifted so the scenario's `now` maps to the moment it was
  * loaded; ages then grow in real time. Counters (fanout, source bytes, decoder
- * uptime) advance from the scenario values at the scenario's rates.
+ * uptime) advance from the scenario values at the scenario's rates while IQ is
+ * streaming. A scenario's /api/decoders restHistory replays on a compressed
+ * timer, and decoders that restart during it keep restarting (crash loop).
  */
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 import {
 	createServer,
 	type IncomingMessage,
@@ -30,6 +32,8 @@ const SCENARIO_DIR = fileURLToPath(
 )
 const DELETE = "$delete"
 const FANOUT_REST = "$fanoutRest"
+const SOURCE_STATUS = "$sourceStatus:"
+const DECODER_STATUS = "$decoderStatus:"
 const NEW_DECODER_FIELDS = [
 	"sourceId",
 	"deviceSerial",
@@ -42,6 +46,20 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
 /** Bytes per dropped chunk in the scenarios (684 MB / 13 680 chunks). */
 const CHUNK_BYTES = 50_000
 const DEFAULT_RATE_KIB = 3994
+const REST_MODES = ["ok", "fail", "hang", "500"] as const
+const WS_MODES = ["up", "drop", "refuse"] as const
+const SOURCE_STATES = ["streaming", "stale", "disconnected", "waiting"] as const
+type RestMode = (typeof REST_MODES)[number]
+type WsMode = (typeof WS_MODES)[number]
+type SourceState = (typeof SOURCE_STATES)[number]
+
+/** Scenario names are the JSON files in SCENARIO_DIR; nothing else is ever read. */
+export function scenarioNames(): string[] {
+	return readdirSync(SCENARIO_DIR)
+		.filter(f => /^[a-z0-9-]+\.json$/.test(f))
+		.map(f => f.slice(0, -".json".length))
+		.sort()
+}
 
 // ---------- scenario resolver (mirror of ../scenarios.ts) ----------
 
@@ -88,16 +106,36 @@ function applyLegacy(sc: Obj): void {
 	// Fanout offered counters are dropped when served (fanoutSnapshot), so drop ratios survive.
 }
 
-function resolve(name: string): Obj {
+function expandMacros(sc: Obj): void {
+	const item = (path: string, id: string): unknown =>
+		list(restBody(sc, path)).find(x => isObj(x) && x["id"] === id)
+	const expand = (data: unknown): unknown => {
+		if (data === FANOUT_REST) return restBody(sc, "/api/telemetry/fanout")
+		if (typeof data !== "string") return data
+		if (data.startsWith(SOURCE_STATUS))
+			return item("/api/sources", data.slice(SOURCE_STATUS.length))
+		if (data.startsWith(DECODER_STATUS))
+			return item("/api/decoders", data.slice(DECODER_STATUS.length))
+		return data
+	}
+	sc["ws"] = list(sc["ws"]).map((fr: unknown) => {
+		if (!isObj(fr)) return fr
+		const data = expand(fr["data"])
+		if (data === undefined)
+			throw new Error(`scenario macro ${String(fr["data"])} has no target`)
+		return data === fr["data"] ? fr : { ...fr, data: structuredClone(data) }
+	})
+}
+
+function compose(name: string): { sc: Obj; transforms: Obj[] } {
 	const own: unknown = JSON.parse(
 		readFileSync(`${SCENARIO_DIR}${name}.json`, "utf8"),
 	)
 	if (!isObj(own)) throw new Error(`scenario ${name} is not an object`)
-	const parent = own["extends"]
+	const parentName = own["extends"]
+	const parent = typeof parentName === "string" ? compose(parentName) : null
 	const sc = structuredClone(
-		typeof parent === "string"
-			? (deepMerge(resolve(parent), { ...own, extends: DELETE }) as Obj)
-			: own,
+		parent ? (deepMerge(parent.sc, { ...own, extends: DELETE }) as Obj) : own,
 	)
 	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
 	const patch = isObj(own["restPatch"]) ? own["restPatch"] : {}
@@ -112,22 +150,24 @@ function resolve(name: string): Obj {
 			? inherited.filter(f => !(isObj(f) && f["type"] === "decoder:output"))
 			: inherited
 	sc["ws"] = [...kept, ...list(own["wsAppend"])]
-	const fanout = restBody(sc, "/api/telemetry/fanout")
-	sc["ws"] = list(sc["ws"]).map((fr: unknown) =>
-		isObj(fr) && fr["data"] === FANOUT_REST
-			? { ...fr, data: structuredClone(fanout) }
-			: fr,
-	)
-	// The mock evolves fanout itself; the transform only fixes the ratio it evolves with.
-	if (typeof t["dropPercent"] === "number") sc["dropPercent"] = t["dropPercent"]
-	if (t["legacy"] === true) {
-		sc["legacy"] = true
-		applyLegacy(sc)
-	}
 	delete sc["restPatch"]
 	delete sc["transform"]
 	delete sc["wsAppend"]
 	delete sc["extends"]
+	return { sc, transforms: [...(parent?.transforms ?? []), t] }
+}
+
+function resolve(name: string): Obj {
+	const { sc, transforms } = compose(name)
+	expandMacros(sc)
+	// The mock evolves fanout itself: dropPercent only fixes the ratio it evolves with,
+	// and stallIq follows from the source's activity state (no IQ unless streaming).
+	for (const t of transforms) {
+		if (typeof t["dropPercent"] === "number")
+			sc["dropPercent"] = t["dropPercent"]
+		if (t["legacy"] === true) sc["legacy"] = true
+	}
+	if (sc["legacy"] === true) applyLegacy(sc)
 	sc["name"] = name
 	return sc
 }
@@ -149,9 +189,6 @@ function shiftTimes(v: unknown, delta: number, key = ""): unknown {
 
 // ---------- live state ----------
 
-type RestMode = "ok" | "fail" | "hang" | "500"
-type WsMode = "up" | "drop" | "refuse"
-
 interface Branch {
 	id: string
 	decoderId?: string
@@ -159,7 +196,7 @@ interface Branch {
 	dropped: number
 	baseDropped: number
 	baseChunks: number
-	/** Δdropped/Δoffered taken from the scenario's two newest snapshots. */
+	/** Δdropped/Δoffered taken from the scenario's oldest WS snapshot and the REST body. */
 	ratio: number
 	base: Obj
 }
@@ -171,6 +208,15 @@ interface Call {
 	body: unknown
 }
 
+/** /api/decoders restHistory replayed one step per `historyStepMs`, then a crash loop for `crashIds`. */
+interface Timeline {
+	/** Per-step merges, oldest first; the last restores the scenario's current values. */
+	steps: Obj[]
+	idx: number
+	crashIds: string[]
+	nextCrashAt: number
+}
+
 interface State {
 	name: string
 	sc: Obj
@@ -178,14 +224,19 @@ interface State {
 	loadedAt: number
 	rest: RestMode
 	ws: WsMode
+	/** Replay recorded frames to new subscribers; off after a WS drop until the next scenario load. */
+	replay: boolean
 	dropPercent: number | null
 	calls: Call[]
 	branches: Branch[]
 	decoders: Obj[]
 	decoderUptimeAt: Map<string, number>
 	sources: Obj[]
+	/** KiB/s each source streams at, kept while its reported dataRate is 0 (not streaming). */
+	baseRates: Map<string, number>
 	tuner: Obj[]
 	audio: Obj
+	timeline: Timeline | null
 	lastTick: number
 	burst: NodeJS.Timeout | null
 }
@@ -232,6 +283,49 @@ function initBranches(sc: Obj): Branch[] {
 	return out
 }
 
+/** The base values at the paths `shape` names; absent values become $delete. */
+function pickPaths(base: unknown, shape: unknown): unknown {
+	if (!isObj(shape)) return base === undefined ? DELETE : structuredClone(base)
+	const out: Obj = {}
+	for (const k of Object.keys(shape))
+		out[k] = pickPaths(isObj(base) ? base[k] : undefined, shape[k])
+	return out
+}
+
+function initTimeline(sc: Obj, decoders: Obj[], now: number): Timeline | null {
+	const hist = list(sc["restHistory"])
+		.filter(
+			(h): h is Obj =>
+				isObj(h) && h["path"] === "/api/decoders" && isObj(h["merge"]),
+		)
+		.sort((a, b) => Number(a["offsetMs"]) - Number(b["offsetMs"]))
+	if (hist.length === 0) return null
+	const merges = hist.map(h => h["merge"] as Obj)
+	const shape = merges.reduce<Obj>((acc, m) => deepMerge(acc, m) as Obj, {})
+	const restore: Obj = {}
+	for (const id of Object.keys(shape)) {
+		const d = decoders.find(x => x["id"] === id)
+		restore[id] = pickPaths(d, shape[id])
+	}
+	// Each step is the scenario's value at that time for every path any step touches.
+	const steps = [...merges, restore].map(m => {
+		const full: Obj = {}
+		for (const id of Object.keys(shape)) {
+			const d = decoders.find(x => x["id"] === id)
+			full[id] = pickPaths(deepMerge(d, m[id] ?? {}), shape[id])
+		}
+		return full
+	})
+	const restarts = (step: Obj | undefined, id: string): number => {
+		const v = isObj(step?.[id]) ? (step[id] as Obj)["restartCount"] : undefined
+		return typeof v === "number" ? v : Number.NaN
+	}
+	const crashIds = Object.keys(shape).filter(
+		id => restarts(steps[steps.length - 1], id) > restarts(steps[0], id),
+	)
+	return { steps, idx: 0, crashIds, nextCrashAt: now }
+}
+
 function connModes(sc: Obj): { rest: RestMode; ws: WsMode } {
 	const c = isObj(sc["conn"]) ? sc["conn"] : {}
 	return {
@@ -246,6 +340,8 @@ function connModes(sc: Obj): { rest: RestMode; ws: WsMode } {
 }
 
 function loadState(name: string, prev?: State): State {
+	if (!scenarioNames().includes(name))
+		throw new Error(`unknown scenario "${name}"`)
 	const now = Date.now()
 	const raw = resolve(name)
 	const sc = shiftTimes(raw, now - Date.parse(String(raw["now"]))) as Obj
@@ -253,6 +349,9 @@ function loadState(name: string, prev?: State): State {
 		list(structuredClone(restBody(sc, path))).filter(isObj)
 	const audio = restBody(sc, "/api/live-audio/status")
 	const modes = connModes(sc)
+	const decoders = arr("/api/decoders")
+	const timeline = initTimeline(sc, decoders, now)
+	const sources = arr("/api/sources")
 	return {
 		name,
 		sc,
@@ -260,24 +359,46 @@ function loadState(name: string, prev?: State): State {
 		loadedAt: now,
 		rest: modes.rest,
 		ws: modes.ws,
+		replay: true,
 		dropPercent:
 			typeof sc["dropPercent"] === "number" ? sc["dropPercent"] : null,
 		calls: prev?.calls ?? [],
 		branches: initBranches(sc),
-		decoders: arr("/api/decoders"),
+		decoders: timeline
+			? (mergeById(decoders, timeline.steps[0] ?? {}) as Obj[])
+			: decoders,
 		decoderUptimeAt: new Map(),
-		sources: arr("/api/sources"),
+		sources,
+		baseRates: new Map(
+			sources.map(s => [
+				String(s["id"]),
+				typeof s["dataRate"] === "number" && s["dataRate"] > 0
+					? s["dataRate"]
+					: DEFAULT_RATE_KIB,
+			]),
+		),
 		tuner: arr("/api/tuner"),
 		audio: isObj(audio) ? structuredClone(audio) : {},
+		timeline,
 		lastTick: now,
 		burst: null,
 	}
 }
 
-function sourceRateBytes(s: Obj): number {
+/** IQ flows while the (first) source is connected and, when it reports activity, streaming. */
+function iqFlowing(st: State): boolean {
+	const s = st.sources[0]
+	if (!s) return true
+	if (s["connected"] !== true) return false
+	const a = s["activity"]
+	return !isObj(a) || a["state"] === "streaming"
+}
+
+function rateBytes(st: State, s: Obj | undefined): number {
 	return (
-		(typeof s["dataRate"] === "number" ? s["dataRate"] : DEFAULT_RATE_KIB) *
-		1024
+		(s
+			? (st.baseRates.get(String(s["id"])) ?? DEFAULT_RATE_KIB)
+			: DEFAULT_RATE_KIB) * 1024
 	)
 }
 
@@ -287,16 +408,13 @@ function tick(st: State): void {
 	const dt = (now - st.lastTick) / 1000
 	if (dt <= 0) return
 	st.lastTick = now
-	const rate = st.sources[0]
-		? sourceRateBytes(st.sources[0])
-		: DEFAULT_RATE_KIB * 1024
+	if (!iqFlowing(st)) return
 	for (const s of st.sources)
-		if (s["connected"] === true)
-			s["bytesReceived"] = Math.round(
-				Number(s["bytesReceived"] ?? 0) + sourceRateBytes(s) * dt,
-			)
+		s["bytesReceived"] = Math.round(
+			Number(s["bytesReceived"] ?? 0) + rateBytes(st, s) * dt,
+		)
+	const delta = rateBytes(st, st.sources[0]) * dt
 	for (const b of st.branches) {
-		const delta = rate * dt
 		b.offered += delta
 		b.dropped += delta * branchRatio(st, b)
 	}
@@ -309,7 +427,7 @@ function branchRatio(st: State, b: Branch): number {
 }
 
 function branchActive(st: State, b: Branch): boolean {
-	if (b.decoderId === undefined) return false
+	if (b.decoderId === undefined || !iqFlowing(st)) return false
 	return st.dropPercent !== null
 		? st.dropPercent > 0
 		: b.base["backpressureActive"] === true
@@ -359,12 +477,21 @@ function sourcesNow(st: State): Obj[] {
 	const now = Date.now()
 	return st.sources.map(s => {
 		const a = s["activity"]
-		if (!isObj(a) || a["state"] !== "streaming") return s
-		const age = typeof a["sampleAgeMs"] === "number" ? a["sampleAgeMs"] : 4
-		return {
-			...s,
-			activity: { ...a, lastSampleAt: new Date(now - age).toISOString() },
+		if (!isObj(a)) return s
+		if (a["state"] === "streaming") {
+			const age = typeof a["sampleAgeMs"] === "number" ? a["sampleAgeMs"] : 4
+			return {
+				...s,
+				activity: { ...a, lastSampleAt: new Date(now - age).toISOString() },
+			}
 		}
+		const last =
+			typeof a["lastSampleAt"] === "string"
+				? Date.parse(a["lastSampleAt"])
+				: NaN
+		return Number.isNaN(last)
+			? s
+			: { ...s, activity: { ...a, sampleAgeMs: Math.max(0, now - last) } }
 	})
 }
 
@@ -429,9 +556,17 @@ function readBody(req: IncomingMessage): Promise<unknown> {
 }
 
 function send(res: ServerResponse, status: number, body: unknown): void {
+	if (res.headersSent || res.destroyed) return
 	res.writeHead(status, { "content-type": "application/json" })
 	res.end(JSON.stringify(body))
 }
+
+function badRequest(res: ServerResponse, message: string): void {
+	send(res, 400, { error: "Bad Request", code: "MOCK_BAD_REQUEST", message })
+}
+
+const isOneOf = <T extends string>(values: readonly T[], v: unknown): v is T =>
+	typeof v === "string" && (values as readonly string[]).includes(v)
 
 // ---------- writes ----------
 
@@ -454,6 +589,29 @@ const TUNER_FIELDS: Readonly<
 	"control-mode": ["controlMode", "mode", ["internal", "external"]],
 }
 
+const bit = (v: unknown): number => (v === true ? 1 : 0)
+/** rtl_tcp command name and numeric value core emits in tuner:command-sent (src/core/tuner-controller.ts). */
+const RTL_COMMANDS: Readonly<
+	Record<string, readonly [string, (v: unknown) => number]>
+> = {
+	frequency: ["set-frequency", Number],
+	"sample-rate": ["set-sample-rate", Number],
+	"gain-mode": ["set-gain-mode", v => (v === "manual" ? 1 : 0)],
+	gain: ["set-gain", Number],
+	ppm: [
+		"set-freq-correction",
+		v => (Number(v) < 0 ? 0xffffffff + Number(v) + 1 : Number(v)),
+	],
+	agc: ["set-agc-mode", bit],
+	"bias-tee": ["set-bias-tee", bit],
+	"offset-tuning": ["set-offset-tuning", bit],
+	"direct-sampling": [
+		"set-direct-sampling",
+		v => (v === "i" ? 1 : v === "q" ? 2 : 0),
+	],
+	"tuner-gain-index": ["set-tuner-gain-index", Number],
+}
+
 function validField(v: unknown, kind: FieldKind): boolean {
 	if (kind === "integer") return Number.isInteger(v)
 	if (kind === "boolean") return typeof v === "boolean"
@@ -463,89 +621,147 @@ function validField(v: unknown, kind: FieldKind): boolean {
 const BURST_TEXT =
 	"MAINTENANCE PAGE \u001b[31mRED\u001b[0m BELL\u0007 TAB\tEND 🚀 "
 
+/** One decoder:output per call in the core wire shape of src/decoders/builtin/*, rotating protocols. */
 function burstFrame(i: number): Obj {
 	const t = new Date().toISOString()
-	switch (i % 4) {
+	const frame = (decoderId: string, type: string, data: unknown): Obj => ({
+		decoderId,
+		output: { type, decoder: decoderId, timestamp: t, data },
+	})
+	switch (i % 8) {
 		case 0:
-			return {
-				decoderId: "readsb",
-				output: {
-					type: "aircraft",
-					decoder: "readsb",
-					timestamp: t,
-					data: {
-						hex: (0x4ca9d2 + (i % 50)).toString(16),
-						flight: `RYR${i % 900} `,
-						alt_baro: 30000 + (i % 80) * 100,
-						baro_rate: (i % 3) * 600 - 600,
-						gs: 420 + (i % 40),
-						track: (i * 7) % 360,
-						lat: 51 + (i % 100) / 100,
-						lon: -0.5 + (i % 50) / 100,
-						squawk: i % 97 === 0 ? "7700" : "2000",
-					},
-				},
-			}
+			return frame("readsb", "aircraft", {
+				icao: (0x4ca9d2 + (i % 50)).toString(16).toUpperCase(),
+				callsign: `RYR${i % 900}`,
+				altitude: 30000 + (i % 80) * 100,
+				groundSpeed: 420 + (i % 40),
+				track: (i * 7) % 360,
+				lat: 51 + (i % 100) / 100,
+				lon: -0.5 + (i % 50) / 100,
+				verticalRate: (i % 3) * 600 - 600,
+				squawk: i % 97 === 0 ? "7700" : "2000",
+				lastSeen: t,
+				messageCount: 1 + i,
+			})
 		case 1:
-			return {
-				decoderId: "ais-catcher",
-				output: {
-					type: "ais",
-					decoder: "ais-catcher",
-					timestamp: t,
-					data: {
-						mmsi: 235000000 + i,
-						shipname: `VESSEL ${i} OF THE EXTREMELY LONG NAMED FLEET`,
-						shiptype_text: "cargo",
-						lat: 51.4,
-						lon: 0.2,
-						speed: 8 + (i % 10),
-					},
-				},
-			}
+			return frame("ais-catcher", "ship", {
+				mmsi: String(235000000 + (i % 1000)).padStart(9, "0"),
+				name: `VESSEL ${i} OF THE EXTREMELY LONG NAMED FLEET`,
+				callsign: "MXYZ7",
+				shipType: 70,
+				destination: "ROTTERDAM",
+				lastSeen: t,
+				messageType: 5,
+			})
 		case 2:
-			return {
-				decoderId: "multimon-ng",
-				output: {
-					type: "pocsag",
-					decoder: "multimon-ng",
-					timestamp: t,
-					data: {
-						protocol: "POCSAG1200",
-						address: 1000000 + i,
-						function: i % 4,
-						messageType: "Alpha",
-						message: BURST_TEXT.repeat(1 + (i % 6)),
-					},
+			return frame("multimon-ng", "message", {
+				protocol: "POCSAG1200",
+				address: 1000000 + i,
+				function: i % 4,
+				messageType: "alpha",
+				message: BURST_TEXT.repeat(1 + (i % 6)),
+			})
+		case 3:
+			return frame("dsd-fme", "call_end", {
+				protocol: "dmr",
+				talkgroup: 2350 + (i % 5),
+				source: 2340000 + i,
+				slot: 1 + (i % 2),
+				duration: 1000 + (i % 20) * 300,
+				dmr: { cc: 1 },
+				quality: { crcErrs: i % 5, fecErrs: 0 },
+				flags: {
+					encrypted: i % 7 === 0,
+					timeout: false,
+					badSignal: false,
+					falsePositiveSuppressed: false,
 				},
-			}
+			})
+		case 4:
+			return frame("direwolf", "aprs", {
+				timestamp: t,
+				source: `G4ABC-${i % 16}`,
+				destination: "APDW16",
+				path: ["WIDE1-1", "WIDE2-1"],
+				dataType: "Status",
+				comment: `burst ${i}`,
+				raw: `>burst ${i}`,
+			})
+		case 5:
+			return frame("dumpvdl2", "vdl2", {
+				timestamp: t,
+				frequency: 136975000,
+				icao: "4CA9D2",
+				toaddr: "10A0E1",
+				fromaddr: "4CA9D2",
+				msgType: "acars",
+				acars: {
+					timestamp: t,
+					frequency: 136975000,
+					channel: 0,
+					level: -21.3,
+					error: 0,
+					mode: "2",
+					label: "H1",
+					tail: ".EI-DCL",
+					flight: "FR4KT",
+					text: `MSG ${i}`,
+				},
+				level: -21.3,
+				noiseFloor: -48.1,
+				frameType: "I",
+			})
+		case 6:
+			return frame("rtl433", "signal", {
+				time: t.slice(0, 19).replace("T", " "),
+				model: "Acurite-Tower",
+				id: 12345 + (i % 3),
+				channel: "A",
+				battery_ok: 1,
+				temperature_C: 18 + (i % 5) / 10,
+				humidity: 60 + (i % 10),
+			})
 		default:
-			return {
-				decoderId: "dsd-fme",
-				output: {
-					type: "call_end",
-					decoder: "dsd-fme",
-					timestamp: t,
-					data: {
-						protocol: "dmr",
-						talkgroup: 2350 + (i % 5),
-						source: 2340000 + i,
-						slot: 1 + (i % 2),
-						duration: 1000 + (i % 20) * 300,
-						dmr: { cc: 1 },
-						quality: { crcErrs: i % 5, fecErrs: 0 },
-					},
-				},
-			}
+			return frame("lora-meshtastic", "meshtastic", {
+				from: 305419896 + (i % 4),
+				to: 4294967295,
+				id: 2882400000 + i,
+				channel: 8,
+				hopLimit: 3,
+				hopStart: 3,
+				wantAck: false,
+				portnum: 1,
+				payloadB64: "aGVsbG8gbWVzaA==",
+				payloadLen: 10,
+				rxRssi: -92,
+				rxSnr: 6.5,
+				rxTime: t,
+				frequency: 869525000,
+				bw: 250000,
+				sf: 11,
+				cr: 5,
+			})
 	}
 }
 
 // ---------- server ----------
 
-export async function startMockServer(opts: {
+export interface MockServerOptions {
 	port: number
 	scenario: string
-}): Promise<{ port: number; close(): Promise<void> }> {
+	/** restHistory step interval (default 5000 ms, the CLI's poll cadence). */
+	historyStepMs?: number
+	/** Restart interval of a crash-looping decoder once its history has played (default 30000 ms). */
+	crashEveryMs?: number
+}
+
+export async function startMockServer(
+	opts: MockServerOptions,
+): Promise<{ port: number; close(): Promise<void> }> {
+	if (!Number.isInteger(opts.port) || opts.port < 0 || opts.port > 65535)
+		throw new Error(`invalid port ${String(opts.port)}`)
+	const historyStepMs = opts.historyStepMs ?? 5000
+	const crashEveryMs = opts.crashEveryMs ?? 30_000
 	let st = loadState(opts.scenario)
 	const clients = new Map<WebSocket, Set<string>>()
 	const hanging = new Set<ServerResponse>()
@@ -587,10 +803,117 @@ export async function startMockServer(opts: {
 		if (st.legacy) return
 		for (const s of sourcesNow(st)) broadcast("sources", "source:status", s)
 	}
+	/** The scenario's recorded frames for `channels`, oldest first; fanout and metrics are generated live. */
+	const replayTo = (ws: WebSocket, channels: readonly string[]): void => {
+		const frames = list(st.sc["ws"])
+			.filter(isObj)
+			.filter(
+				f =>
+					f["type"] !== "fanout:snapshot" &&
+					f["type"] !== "metrics" &&
+					channels.includes(String(f["channel"])),
+			)
+			.sort((a, b) => Number(a["offsetMs"]) - Number(b["offsetMs"]))
+		// Status frames carry the live state for their id, so an animated history cannot be contradicted.
+		const current = (f: Obj): unknown => {
+			const id = isObj(f["data"]) ? f["data"]["id"] : undefined
+			if (f["type"] === "decoder:status")
+				return decodersNow(st).find(d => d["id"] === id) ?? f["data"]
+			if (f["type"] === "source:status")
+				return sourcesNow(st).find(s => s["id"] === id) ?? f["data"]
+			return f["data"]
+		}
+		for (const f of frames)
+			sendTo(ws, String(f["channel"]), String(f["type"]), current(f))
+	}
 	const canned = (key: string): Obj | undefined => {
 		const actions = isObj(st.sc["actions"]) ? st.sc["actions"] : {}
 		const a = actions[key]
 		return isObj(a) ? a : undefined
+	}
+	const restartDecoder = (id: string): void => {
+		const d = st.decoders.find(x => x["id"] === id)
+		if (!d) return
+		d["restartCount"] = Number(d["restartCount"] ?? 0) + 1
+		if (isObj(d["lastError"]))
+			d["lastError"] = { ...d["lastError"], at: new Date().toISOString() }
+		decoderStatus(id)
+	}
+
+	function stepTimeline(): void {
+		const tl = st.timeline
+		if (!tl) return
+		if (tl.idx < tl.steps.length - 1) {
+			tl.idx++
+			const step = tl.steps[tl.idx] ?? {}
+			const before = new Map(
+				st.decoders.map(d => [String(d["id"]), Number(d["restartCount"] ?? 0)]),
+			)
+			st.decoders = mergeById(st.decoders, step) as Obj[]
+			for (const id of Object.keys(step)) {
+				const d = st.decoders.find(x => x["id"] === id)
+				const prevRestarts = before.get(id) ?? 0
+				if (
+					d &&
+					Number(d["restartCount"] ?? 0) > prevRestarts &&
+					isObj(d["lastError"])
+				)
+					d["lastError"] = { ...d["lastError"], at: new Date().toISOString() }
+				decoderStatus(id)
+			}
+			tl.nextCrashAt = Date.now() + crashEveryMs
+			return
+		}
+		if (tl.crashIds.length > 0 && Date.now() >= tl.nextCrashAt) {
+			for (const id of tl.crashIds) restartDecoder(id)
+			tl.nextCrashAt = Date.now() + crashEveryMs
+		}
+	}
+
+	function loadScenario(name: string): void {
+		const next = loadState(name, st)
+		if (st.burst) clearInterval(st.burst)
+		st = next
+		if (st.ws !== "up") dropClients()
+		if (st.rest === "ok") releaseHanging()
+		// Connected clients get the new scenario's frames, as if core had just sent them.
+		for (const [ws, chans] of clients) replayTo(ws, [...chans])
+		sourceSnapshot()
+	}
+
+	function setSourceState(state: SourceState): void {
+		tick(st)
+		const nowIso = new Date().toISOString()
+		for (const s of st.sources) {
+			const id = String(s["id"])
+			const wasConnected = s["connected"] === true
+			const a = s["activity"]
+			if (isObj(a)) {
+				if (a["state"] === "streaming" && state !== "streaming")
+					a["lastSampleAt"] = nowIso
+				a["state"] = state
+				if (state === "waiting") {
+					a["lastSampleAt"] = null
+					a["sampleAgeMs"] = null
+				}
+			}
+			s["connected"] = state !== "disconnected"
+			s["dataRate"] = state === "streaming" ? (st.baseRates.get(id) ?? 0) : 0
+			if (wasConnected && state === "disconnected") {
+				s["reconnectAttempts"] = Number(s["reconnectAttempts"] ?? 0) + 1
+				s["lastError"] = `connect ECONNREFUSED ${String(s["url"] ?? id)}`
+				broadcast("sources", "source:disconnected", {
+					sourceId: id,
+					error: s["lastError"],
+				})
+			}
+			if (!wasConnected && state !== "disconnected") {
+				s["reconnectAttempts"] = 0
+				delete s["lastError"]
+				broadcast("sources", "source:connected", { sourceId: id })
+			}
+		}
+		sourceSnapshot()
 	}
 
 	function handleControl(path: string, b: Obj, res: ServerResponse): void {
@@ -599,49 +922,63 @@ export async function startMockServer(opts: {
 			st.calls = []
 			return send(res, 200, { calls: 0 })
 		}
-		if (path === "/__mock/scenario" && typeof b["name"] === "string") {
-			let next: State
-			try {
-				next = loadState(b["name"], st)
-			} catch {
-				return send(res, 404, {
-					error: "Not Found",
-					code: "MOCK_SCENARIO",
-					message: `unknown scenario ${b["name"]}`,
-				})
-			}
-			if (st.burst) clearInterval(st.burst)
-			st = next
-			if (st.ws !== "up") dropClients()
-			if (st.rest === "ok") releaseHanging()
-			sourceSnapshot()
+		if (path === "/__mock/scenario") {
+			const name = b["name"]
+			if (typeof name !== "string" || !scenarioNames().includes(name))
+				return badRequest(
+					res,
+					`unknown scenario ${JSON.stringify(name)}; known: ${scenarioNames().join(", ")}`,
+				)
+			loadScenario(name)
 			return send(res, 200, { scenario: st.name, rest: st.rest, ws: st.ws })
 		}
-		if (
-			path === "/__mock/rest" &&
-			["ok", "fail", "hang", "500"].includes(String(b["mode"]))
-		) {
-			st.rest = b["mode"] as RestMode
+		if (path === "/__mock/rest") {
+			if (!isOneOf(REST_MODES, b["mode"]))
+				return badRequest(res, `mode must be one of ${REST_MODES.join("|")}`)
+			st.rest = b["mode"]
 			if (st.rest !== "hang") releaseHanging()
 			return send(res, 200, { rest: st.rest })
 		}
-		if (
-			path === "/__mock/ws" &&
-			["up", "drop", "refuse"].includes(String(b["mode"]))
-		) {
-			st.ws = b["mode"] as WsMode
+		if (path === "/__mock/ws") {
+			if (!isOneOf(WS_MODES, b["mode"]))
+				return badRequest(res, `mode must be one of ${WS_MODES.join("|")}`)
+			st.ws = b["mode"]
+			// A real core never replays history to a reconnecting client.
+			if (st.ws !== "up") st.replay = false
 			if (st.ws === "drop") dropClients()
 			return send(res, 200, { ws: st.ws })
 		}
 		if (path === "/__mock/fanout") {
+			const pct = b["dropPercent"]
+			if (
+				pct !== null &&
+				pct !== undefined &&
+				!(typeof pct === "number" && pct >= 0 && pct <= 100)
+			)
+				return badRequest(res, "dropPercent must be 0-100 or null")
 			tick(st)
-			st.dropPercent =
-				typeof b["dropPercent"] === "number" ? b["dropPercent"] : null
+			st.dropPercent = typeof pct === "number" ? pct : null
 			return send(res, 200, { dropPercent: st.dropPercent })
 		}
+		if (path === "/__mock/source") {
+			if (!isOneOf(SOURCE_STATES, b["state"]))
+				return badRequest(
+					res,
+					`state must be one of ${SOURCE_STATES.join("|")}`,
+				)
+			setSourceState(b["state"])
+			return send(res, 200, { state: b["state"] })
+		}
 		if (path === "/__mock/burst") {
-			const perSecond = typeof b["perSecond"] === "number" ? b["perSecond"] : 50
-			const seconds = typeof b["seconds"] === "number" ? b["seconds"] : 60
+			const perSecond = b["perSecond"] ?? 50
+			const seconds = b["seconds"] ?? 60
+			if (
+				typeof perSecond !== "number" ||
+				!(perSecond > 0 && perSecond <= 5000) ||
+				typeof seconds !== "number" ||
+				!(seconds > 0 && seconds <= 3600)
+			)
+				return badRequest(res, "perSecond must be 1-5000 and seconds 1-3600")
 			if (st.burst) clearInterval(st.burst)
 			let i = 0
 			let carry = 0
@@ -686,15 +1023,14 @@ export async function startMockServer(opts: {
 		if (path === "/api/decoders") return send(res, 200, decodersNow(st))
 		const one = /^\/api\/decoders\/([^/]+)$/.exec(path)
 		if (one) {
-			const d = decodersNow(st).find(
-				x => x["id"] === decodeURIComponent(one[1] ?? ""),
-			)
+			const id = decodeURIComponent(one[1] ?? "")
+			const d = decodersNow(st).find(x => x["id"] === id)
 			return d
 				? send(res, 200, d)
 				: send(res, 404, {
 						error: "NotFound",
 						code: "DECODER_NOT_FOUND",
-						message: `Decoder with id '${one[1] ?? ""}' not found`,
+						message: `Decoder with id '${id}' not found`,
 					})
 		}
 		if (path === "/api/sources") return send(res, 200, sourcesNow(st))
@@ -752,6 +1088,9 @@ export async function startMockServer(opts: {
 			delete d["lastError"]
 			st.decoderUptimeAt.set(id, Date.now())
 		}
+		// An operator start/stop ends a scripted crash loop for that decoder.
+		if (st.timeline)
+			st.timeline.crashIds = st.timeline.crashIds.filter(x => x !== id)
 		const verb =
 			op === "stop" ? "stopped" : op === "start" ? "started" : "restarted"
 		const owner = st
@@ -820,19 +1159,21 @@ export async function startMockServer(opts: {
 			})
 		}
 		t[key] = value
-		t["commandCount"] = Number(t["commandCount"] ?? 0) + 1
 		t["lastCommandAt"] = new Date().toISOString()
-		if (setting === "control-mode")
+		const rtl = RTL_COMMANDS[setting]
+		if (setting === "control-mode") {
 			broadcast("tuner", "tuner:control-mode-changed", {
 				sourceId,
 				mode: value,
 			})
-		else
+		} else if (rtl) {
+			t["commandCount"] = Number(t["commandCount"] ?? 0) + 1
 			broadcast("tuner", "tuner:command-sent", {
 				sourceId,
-				command: setting,
-				value,
+				command: rtl[0],
+				value: rtl[1](value),
 			})
+		}
 		broadcast("tuner", "tuner:state-changed", { sourceId, state: t })
 		if (setting === "frequency" || setting === "sample-rate") {
 			const s = st.sources.find(x => x["id"] === sourceId)
@@ -907,6 +1248,10 @@ export async function startMockServer(opts: {
 			const body = await readBody(req)
 			return handleControl(path, isObj(body) ? body : {}, res)
 		}
+		// Writes are recorded even when the REST mode then fails them.
+		const body = method === "GET" ? undefined : await readBody(req)
+		if (method !== "GET")
+			st.calls.push({ at: new Date().toISOString(), method, path, body })
 		if (st.rest === "fail") {
 			req.socket.destroy()
 			return
@@ -923,8 +1268,6 @@ export async function startMockServer(opts: {
 				message: "mock failure",
 			})
 		if (method === "GET") return handleGet(path, res)
-		const body = await readBody(req)
-		st.calls.push({ at: new Date().toISOString(), method, path, body })
 		const dec = /^\/api\/decoders\/([^/]+)\/(start|stop|restart)$/.exec(path)
 		const tun = /^\/api\/tuner\/([^/]+)\/([a-z-]+)$/.exec(path)
 		const key = dec
@@ -956,7 +1299,22 @@ export async function startMockServer(opts: {
 	}
 
 	const server = createServer((req, res) => {
-		void handle(req, res)
+		handle(req, res).catch((err: unknown) => {
+			// A malformed %-escape is the client's fault (Fastify answers FST_ERR_BAD_URL).
+			if (err instanceof URIError)
+				send(res, 400, {
+					statusCode: 400,
+					code: "FST_ERR_BAD_URL",
+					error: "Bad Request",
+					message: `'${req.url ?? ""}' is not a valid url component`,
+				})
+			else
+				send(res, 500, {
+					error: "InternalServerError",
+					code: "MOCK_INTERNAL",
+					message: err instanceof Error ? err.message : String(err),
+				})
+		})
 	})
 	const wss = new WebSocketServer({ noServer: true })
 	server.on("upgrade", (req, socket, head) => {
@@ -1013,22 +1371,20 @@ export async function startMockServer(opts: {
 						data: { channels: [...chans] },
 					}),
 				)
-				// Replay the scenario's recorded frames, oldest first; fanout and metrics are generated live.
-				const frames = list(st.sc["ws"])
-					.filter(isObj)
-					.filter(
-						f =>
-							f["type"] !== "fanout:snapshot" &&
-							f["type"] !== "metrics" &&
-							fresh.includes(String(f["channel"])),
-					)
-					.sort((a, b) => Number(a["offsetMs"]) - Number(b["offsetMs"]))
-				for (const f of frames)
-					sendTo(ws, String(f["channel"]), String(f["type"]), f["data"])
+				if (st.replay) replayTo(ws, fresh)
 				if (fresh.includes("sources")) sourceSnapshot()
 			})
 		})
 	})
+
+	await new Promise<void>((resolveListen, rejectListen) => {
+		server.once("error", rejectListen)
+		server.listen(opts.port, "127.0.0.1", () => {
+			server.off("error", rejectListen)
+			resolveListen()
+		})
+	})
+	const port = (server.address() as AddressInfo).port
 
 	const fanoutTimer = setInterval(
 		() => broadcast("fanout", "fanout:snapshot", fanoutSnapshot(st)),
@@ -1046,9 +1402,11 @@ export async function startMockServer(opts: {
 		if (r !== undefined) broadcast("resources", "resources:snapshot", r)
 	}, 5000)
 	const heartbeatTimer = setInterval(sourceSnapshot, 10_000)
+	const historyTimer = setInterval(
+		stepTimeline,
+		Math.min(historyStepMs, crashEveryMs),
+	)
 
-	await new Promise<void>(r => server.listen(opts.port, "127.0.0.1", () => r()))
-	const port = (server.address() as AddressInfo).port
 	return {
 		port,
 		close: () =>
@@ -1056,6 +1414,7 @@ export async function startMockServer(opts: {
 				clearInterval(fanoutTimer)
 				clearInterval(metricsTimer)
 				clearInterval(heartbeatTimer)
+				clearInterval(historyTimer)
 				for (const t of timers) clearTimeout(t)
 				if (st.burst) clearInterval(st.burst)
 				dropClients()
@@ -1074,8 +1433,8 @@ function arg(name: string, fallback: string): string {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 	const scenario = arg("--scenario", "live")
-	void startMockServer({ port: Number(arg("--port", "9100")), scenario }).then(
-		s => {
+	startMockServer({ port: Number(arg("--port", "9100")), scenario })
+		.then(s => {
 			process.stdout.write(
 				`wavekit mock core on http://127.0.0.1:${s.port} (scenario ${scenario})\n`,
 			)
@@ -1084,6 +1443,11 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
 			}
 			process.on("SIGINT", stop)
 			process.on("SIGTERM", stop)
-		},
-	)
+		})
+		.catch((err: unknown) => {
+			process.stderr.write(
+				`wavekit mock core: ${err instanceof Error ? err.message : String(err)}\n`,
+			)
+			process.exit(1)
+		})
 }

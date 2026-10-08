@@ -24,8 +24,9 @@ function collect(
 	channels: string[],
 	done: (f: Frame) => boolean,
 	before?: () => Promise<unknown>,
+	port = server.port,
 ): Promise<Frame[]> {
-	const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
+	const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`)
 	const frames: Frame[] = []
 	return new Promise<Frame[]>((resolve, reject) => {
 		ws.on("error", reject)
@@ -43,6 +44,39 @@ function collect(
 		})
 	})
 }
+
+/** Subscribes and collects every frame for `ms` after the subscribe ack. */
+function collectFor(
+	channels: string[],
+	ms: number,
+	afterAck?: () => Promise<unknown>,
+): Promise<Frame[]> {
+	const ws = new WebSocket(`ws://127.0.0.1:${server.port}/ws`)
+	const frames: Frame[] = []
+	return new Promise<Frame[]>((resolve, reject) => {
+		ws.on("error", reject)
+		ws.on("open", () =>
+			ws.send(JSON.stringify({ type: "subscribe", channels })),
+		)
+		ws.on("message", (d: WebSocket.RawData) => {
+			const f = JSON.parse(d.toString()) as Frame
+			frames.push(f)
+			if (f.type !== "subscribed") return
+			void (afterAck ? afterAck() : Promise.resolve()).then(() =>
+				setTimeout(() => {
+					ws.terminate()
+					resolve(frames)
+				}, ms),
+			)
+		})
+	})
+}
+const post = (path: string, body?: unknown) =>
+	fetch(`${base()}${path}`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+	})
 
 beforeAll(async () => {
 	server = await startMockServer({ port: 0, scenario: "live" })
@@ -121,7 +155,10 @@ describe("mock core", () => {
 		let first: Response | undefined
 		const frames = await collect(
 			["decoders"],
-			f => f.type === "decoder:status" && f.data["running"] === false,
+			f =>
+				f.type === "decoder:status" &&
+				f.data["id"] === "direwolf" &&
+				f.data["running"] === false,
 			async () => {
 				first = await stop()
 			},
@@ -174,5 +211,140 @@ describe("mock core", () => {
 		).resolves.toBeDefined()
 		expect((await fetch(`${base()}/api/decoders`)).status).toBe(200)
 		await control("scenario", { name: "live" })
+	})
+	it("does not replay recorded frames after a WS drop until the next scenario load", async () => {
+		const outputs = (fs: Frame[]) =>
+			fs.filter(f => f.type === "decoder:output").length
+		expect(outputs(await collectFor(["decoders"], 200))).toBeGreaterThan(0)
+		await control("ws", { mode: "drop" })
+		await control("ws", { mode: "up" })
+		expect(outputs(await collectFor(["decoders"], 300))).toBe(0)
+		await control("scenario", { name: "live" })
+		expect(outputs(await collectFor(["decoders"], 200))).toBeGreaterThan(0)
+	})
+	it("pushes a new scenario's frames to connected clients", async () => {
+		const frames = await collectFor(["decoders", "sources"], 300, () =>
+			control("scenario", { name: "burst" }),
+		)
+		const ids = frames
+			.filter(f => f.type === "decoder:output")
+			.map(f => f.data["decoderId"])
+		expect(ids).toContain("direwolf")
+		const status = frames.filter(f => f.type === "source:status").pop()
+		expect(
+			(status?.data["caps"] as Record<string, unknown>)["centerFreq"],
+		).toBe(1090000000)
+		await control("scenario", { name: "live" })
+	})
+	it("records writes even when the REST mode fails them", async () => {
+		await fetch(`${base()}/__mock/reset`, { method: "POST" })
+		await control("rest", { mode: "fail" })
+		await expect(post("/api/decoders/readsb/restart")).rejects.toThrow()
+		await control("rest", { mode: "500" })
+		expect((await post("/api/live-audio/start")).status).toBe(500)
+		await control("rest", { mode: "ok" })
+		const calls = await get<Array<{ path: string }>>("/__mock/calls")
+		expect(calls.map(c => c.path)).toEqual([
+			"/api/decoders/readsb/restart",
+			"/api/live-audio/start",
+		])
+	})
+	it("answers bad input with 400 and never reads outside the scenario directory", async () => {
+		const r = await fetch(`${base()}/api/decoders/%E0%A4%A`)
+		expect(r.status).toBe(400)
+		expect(((await r.json()) as { code: string }).code).toBe("FST_ERR_BAD_URL")
+		for (const name of ["../../../package", "nope", 7]) {
+			expect((await control("scenario", { name })).status).toBe(400)
+		}
+		expect((await control("ws", { mode: "bogus" })).status).toBe(400)
+		expect((await control("rest", {})).status).toBe(400)
+		expect((await control("fanout", { dropPercent: 140 })).status).toBe(400)
+		expect((await control("burst", { perSecond: -1 })).status).toBe(400)
+		expect((await control("source", { state: "gone" })).status).toBe(400)
+		expect((await get<{ status: string }>("/health")).status).toBe("ok")
+	})
+	it("rejects when the port is taken or invalid", async () => {
+		await expect(
+			startMockServer({ port: server.port, scenario: "live" }),
+		).rejects.toThrow(/EADDRINUSE/)
+		await expect(
+			startMockServer({ port: 70000, scenario: "live" }),
+		).rejects.toThrow(/invalid port/)
+		await expect(
+			startMockServer({ port: 0, scenario: "../x" }),
+		).rejects.toThrow(/unknown scenario/)
+	})
+	it("emits tuner:command-sent with core command names and numeric values", async () => {
+		const frames = await collectFor(["tuner"], 300, async () => {
+			await post("/api/tuner/pi-iq/control-mode", { mode: "internal" })
+			await post("/api/tuner/pi-iq/frequency", { hz: 446000000 })
+			await post("/api/tuner/pi-iq/ppm", { ppm: -3 })
+			await post("/api/tuner/pi-iq/gain-mode", { mode: "agc" })
+		})
+		const sent = frames
+			.filter(f => f.type === "tuner:command-sent")
+			.map(f => [f.data["command"], f.data["value"]])
+		expect(sent).toEqual([
+			["set-frequency", 446000000],
+			["set-freq-correction", 4294967293],
+			["set-gain-mode", 0],
+		])
+		await control("scenario", { name: "live" })
+	})
+	it("stops IQ while the source is stale and resumes when it streams", async () => {
+		const frames = await collectFor(["sources"], 100, () =>
+			control("source", { state: "stale" }),
+		)
+		const last = frames.filter(f => f.type === "source:status").pop()
+		expect((last?.data["activity"] as Record<string, unknown>)["state"]).toBe(
+			"stale",
+		)
+		const f1 = await get<{ totalBytesWritten: number }>("/api/telemetry/fanout")
+		await new Promise(r => setTimeout(r, 300))
+		const f2 = await get<{ totalBytesWritten: number }>("/api/telemetry/fanout")
+		expect(f2.totalBytesWritten).toBe(f1.totalBytesWritten)
+		await control("source", { state: "disconnected" })
+		expect(
+			(await get<Array<Record<string, unknown>>>("/api/sources"))[0]?.[
+				"connected"
+			],
+		).toBe(false)
+		await control("source", { state: "streaming" })
+		await new Promise(r => setTimeout(r, 300))
+		const f3 = await get<{ totalBytesWritten: number }>("/api/telemetry/fanout")
+		expect(f3.totalBytesWritten).toBeGreaterThan(f2.totalBytesWritten)
+		await control("scenario", { name: "live" })
+	})
+	it("animates crash-loop restarts from the history and keeps restarting", async () => {
+		const crash = await startMockServer({
+			port: 0,
+			scenario: "crash-loop",
+			historyStepMs: 100,
+			crashEveryMs: 250,
+		})
+		try {
+			const first = (await (
+				await fetch(`http://127.0.0.1:${crash.port}/api/decoders/acarsdec`)
+			).json()) as { restartCount: number }
+			expect(first.restartCount).toBe(10)
+			const frames = await collect(
+				["decoders"],
+				f =>
+					f.type === "decoder:status" &&
+					f.data["id"] === "acarsdec" &&
+					Number(f.data["restartCount"]) >= 14,
+				undefined,
+				crash.port,
+			)
+			const counts = frames
+				.filter(f => f.type === "decoder:status" && f.data["id"] === "acarsdec")
+				.map(f => f.data["restartCount"])
+			// The replayed status shows the live count; then one decoder:status per restart.
+			expect(Number(counts[0])).toBeLessThanOrEqual(11)
+			counts.slice(1).forEach((c, i) => expect(c).toBe(Number(counts[i]) + 1))
+			expect(counts[counts.length - 1]).toBe(14)
+		} finally {
+			await crash.close()
+		}
 	})
 })
