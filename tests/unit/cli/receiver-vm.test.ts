@@ -309,12 +309,14 @@ describe("receiver view-model (spec §6.4)", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "tuner:pi-iq",
 					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0,
 					key: "tuner:pi-iq",
 					outcomes: [
@@ -347,12 +349,14 @@ describe("receiver view-model (spec §6.4)", () => {
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "tuner:pi-iq",
 					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0 + 10_000,
 					key: "tuner:pi-iq",
 					outcomes: [
@@ -374,17 +378,39 @@ describe("receiver view-model (spec §6.4)", () => {
 		expect(tunerResultText(st, "pi-iq", t0 + 11_000)).toBe(
 			"frequency sent · no reply in 10s",
 		)
+		// Nothing reconciled it within NO_REPLY_MS: terminal no-reply, shown 10 s more.
+		const later = reduce(st, [], t0 + 20_000)
+		expect(tunerResultText(later, "pi-iq", t0 + 21_000)).toBe(
+			"frequency sent · no reply",
+		)
+		expect(tunerResultText(later, "pi-iq", t0 + 31_000)).toBeNull()
+		const sending = reduce(
+			s,
+			[
+				{
+					kind: "action:sent",
+					id: 2,
+					at: t0,
+					key: "tuner:pi-iq",
+					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
+				},
+			],
+			t0,
+		)
+		expect(tunerResultText(sending, "pi-iq", t0)).toBe("sending 18:07:52")
 		const ok = reduce(
 			s,
 			[
 				{
 					kind: "action:sent",
+					id: 1,
 					at: t0,
 					key: "tuner:pi-iq",
 					intent: { kind: "tuner", sourceId: "pi-iq", commands: [] },
 				},
 				{
 					kind: "action:result",
+					id: 1,
 					at: t0,
 					key: "tuner:pi-iq",
 					outcomes: [

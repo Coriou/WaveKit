@@ -317,8 +317,11 @@ export function controlConfirm(state: AppState): ConfirmRequest | null {
 }
 
 /**
- * Result line for 10 s after the last outcome, in CLI words (R29): "sent · frequency ok
- * 18:07:52", "frequency sent · no reply in 10s" (R23), `frequency failed · 409 · "…"`.
+ * Result line in CLI words (R29), by action state:
+ * sent → "sending 18:07:52"; unknown (R23, awaiting a reconciling event) →
+ * "frequency sent · no reply in 10s"; no-reply (terminal) → "frequency sent · no reply";
+ * ok → "sent · frequency ok 18:07:52"; failed → `frequency failed · 409 · "…" · gain not sent`.
+ * Terminal states show for 10 s after doneAt; unknown shows until it resolves.
  */
 export function tunerResultText(
 	state: AppState,
@@ -327,18 +330,24 @@ export function tunerResultText(
 ): string | null {
 	const rec = own(state.actions.byKey, `tuner:${sourceId}`)
 	if (!rec) return null
-	if (rec.state === "sent" && rec.outcomes.length === 0)
-		return `sending ${formatClock(rec.sentAt)}`
-	const ats = rec.outcomes.map(o => o.at).filter((x): x is number => x !== null)
-	const doneAt = rec.doneAt ?? (ats.length > 0 ? Math.max(...ats) : null)
-	if (doneAt === null || now - doneAt > RESULT_MS) return null
+	if (rec.state === "sent") return `sending ${formatClock(rec.sentAt)}`
+	if (
+		rec.state !== "unknown" &&
+		(rec.doneAt === null || now - rec.doneAt > RESULT_MS)
+	)
+		return null
 	const parts = rec.outcomes.map((o, i) => {
 		const r = o.result
 		if (r === null) return `${o.label} not sent`
-		if (r.outcome === "ok")
-			return `${o.label} ok${i === 0 && o.at !== null ? ` ${formatClock(o.at)}` : ""}`
+		// An unknown command that an event confirmed reads ok, at the confirmation time.
+		if (r.outcome === "ok" || (r.outcome === "unknown" && rec.state === "ok")) {
+			const at = r.outcome === "ok" ? o.at : rec.confirmedAt
+			return `${o.label} ok${i === 0 && at !== null ? ` ${formatClock(at)}` : ""}`
+		}
 		if (r.outcome === "unknown")
-			return `${o.label} sent${sep()}no reply in ${Math.round(RESULT_MS / 1000)}s`
+			return rec.state === "no-reply"
+				? `${o.label} sent${sep()}no reply`
+				: `${o.label} sent${sep()}no reply in ${Math.round(RESULT_MS / 1000)}s`
 		return `${o.label} failed${sep()}${r.status ?? "network"}${sep()}${quoted(r.message, 60)}`
 	})
 	return `${rec.state === "ok" ? `sent${sep()}` : ""}${parts.join(sep())}`
