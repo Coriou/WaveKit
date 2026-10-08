@@ -77,8 +77,13 @@ export function formatHalfSpan(sampleRate: N): string {
 	return isKnown(sampleRate) ? `±${(sampleRate / 2e6).toFixed(3)}` : UNKNOWN
 }
 
+/** Integer percent; a nonzero ratio never reads 0% and a partial one never reads 100% (T4). */
 export function formatPercent(ratio: N): string {
-	return isKnown(ratio) ? `${Math.round(ratio * 100)}%` : UNKNOWN
+	if (!isKnown(ratio)) return UNKNOWN
+	const pct = Math.round(ratio * 100)
+	if (pct === 0 && ratio > 0) return "<1%"
+	if (pct === 100 && ratio < 1) return ">99%"
+	return `${pct}%`
 }
 
 const pad2 = (n: number): string => String(n).padStart(2, "0")
@@ -111,7 +116,7 @@ export function formatSampleAge(ms: N): string {
 
 /** 3/min below 60/min, else 1.2/s. */
 export function formatEventRate(perSec: N): string {
-	if (!isKnown(perSec)) return UNKNOWN
+	if (!isKnown(perSec) || perSec < 0) return UNKNOWN
 	const perMin = perSec * 60
 	if (perMin < 1) return "<1/min"
 	const r = Math.round(perMin)
