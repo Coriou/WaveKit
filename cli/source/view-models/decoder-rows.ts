@@ -160,7 +160,15 @@ function processCell(f: DecoderFacts): Cell {
 		case "stopped":
 			return cell([sp("stopped", role)])
 		default:
-			return cell([sp(f.proc, role)], [sp(`${f.proc}${sep}${restarts}`, role)])
+			// R50: keep the restart evidence as width allows (min, mid, rich).
+			// The multiplication sign is the fault glyph, so ASCII mode reads `x13`.
+			return n > 0
+				? cell(
+						[sp(f.proc, role)],
+						[sp(`${f.proc} ${glyphs().fault}${formatCount(n)}`, role)],
+						[sp(`${f.proc}${sep}${restarts}`, role)],
+					)
+				: cell([sp(f.proc, role)])
 	}
 }
 
