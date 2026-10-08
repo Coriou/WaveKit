@@ -228,12 +228,6 @@ function wireSourceReconnection(
  * 12. Start enabled decoders
  */
 async function main(): Promise<void> {
-	// DEBUG: Catch unhandled exceptions to prevent crash loop
-	process.on("uncaughtException", err => {
-		console.error("UNCAUGHT EXCEPTION (Main Process):", err)
-		// We don't exit, to keep the container alive for inspection
-	})
-
 	// Step 1: Load configuration (Requirement 12.1)
 	const config = loadConfig()
 
@@ -749,17 +743,15 @@ async function main(): Promise<void> {
 	aircraftEnrichmentService.start()
 
 	// Step 13: Connect to configured sources and wire to fanout
-	let primarySourceId: string | null = null
+	// Register before connecting: a source can reconnect while another source
+	// is still awaiting its initial connection.
+	const primarySourceId = config.sources[0]?.id
+	if (primarySourceId) {
+		wireSourceReconnection(sourceManager, fanoutManager, primarySourceId, log)
+	}
 	for (const sourceConfig of config.sources) {
 		try {
-			const stream = await sourceManager.connect(sourceConfig)
-			// Attach first source to fanout (for now, single source support)
-			// Multi-source support will be added in Phase 2
-			if (config.sources.indexOf(sourceConfig) === 0) {
-				fanoutManager.attachSource(stream)
-				primarySourceId = sourceConfig.id
-				log.info({ sourceId: sourceConfig.id }, "Source attached to fanout")
-			}
+			await sourceManager.connect(sourceConfig)
 			log.info(
 				{
 					sourceId: sourceConfig.id,
@@ -773,17 +765,7 @@ async function main(): Promise<void> {
 				{ err, sourceId: sourceConfig.id },
 				"Failed to connect to source (will retry)",
 			)
-			// Even if initial connection fails, set up for reconnection
-			if (config.sources.indexOf(sourceConfig) === 0) {
-				primarySourceId = sourceConfig.id
-			}
 		}
-	}
-
-	// Step 14: Wire source reconnection handling
-	// This ensures fanout stays connected when sources reconnect
-	if (primarySourceId) {
-		wireSourceReconnection(sourceManager, fanoutManager, primarySourceId, log)
 	}
 
 	// Step 14b: Start live demodulator (if enabled)

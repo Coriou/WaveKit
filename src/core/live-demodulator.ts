@@ -16,6 +16,7 @@ import {
 } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
+import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceManager } from "./source-manager.js"
 
@@ -779,7 +780,19 @@ export class LiveDemodulator extends EventEmitter {
 		const payload = this.applySquelch(chunk)
 
 		for (const [clientId, client] of this.clients) {
-			if (client.response.writableEnded) {
+			if (client.response.writableEnded || client.response.destroyed) {
+				this.cleanupClient(clientId)
+				continue
+			}
+			if (
+				client.response.writableLength + payload.length >
+				MAX_CLIENT_BUFFER_BYTES
+			) {
+				this.log.warn(
+					{ clientId },
+					"Disconnecting slow live audio client (buffer limit reached)",
+				)
+				client.response.destroy()
 				this.cleanupClient(clientId)
 				continue
 			}

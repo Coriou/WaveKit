@@ -97,6 +97,8 @@ export class FanoutManager extends EventEmitter {
 	private readonly branches: Map<string, BranchState> = new Map()
 	private source: Readable | null = null
 	private dataHandler: ((chunk: Buffer) => void) | null = null
+	private sourceErrorHandler: ((error: Error) => void) | null = null
+	private sourceEndHandler: (() => void) | null = null
 
 	constructor(logger: Logger) {
 		super()
@@ -116,12 +118,14 @@ export class FanoutManager extends EventEmitter {
 		this.dataHandler = (chunk: Buffer) => this.distributeData(chunk)
 
 		source.on("data", this.dataHandler)
-		source.on("error", err => {
+		this.sourceErrorHandler = err => {
 			this.log.error({ err }, "Source stream error")
-		})
-		source.on("end", () => {
+		}
+		this.sourceEndHandler = () => {
 			this.log.info("Source stream ended")
-		})
+		}
+		source.on("error", this.sourceErrorHandler)
+		source.on("end", this.sourceEndHandler)
 
 		this.log.info("Source attached")
 	}
@@ -132,6 +136,12 @@ export class FanoutManager extends EventEmitter {
 	detachSource(): void {
 		if (this.source && this.dataHandler) {
 			this.source.removeListener("data", this.dataHandler)
+			if (this.sourceErrorHandler)
+				this.source.removeListener("error", this.sourceErrorHandler)
+			if (this.sourceEndHandler)
+				this.source.removeListener("end", this.sourceEndHandler)
+			this.sourceErrorHandler = null
+			this.sourceEndHandler = null
 			this.dataHandler = null
 			this.source = null
 			this.log.info("Source detached")
@@ -225,7 +235,7 @@ export class FanoutManager extends EventEmitter {
 
 		return {
 			id,
-			bufferedBytes: branch.bufferedBytes,
+			bufferedBytes: this.getBufferedBytes(branch),
 			backpressure: branch.backpressure,
 		}
 	}
@@ -265,7 +275,7 @@ export class FanoutManager extends EventEmitter {
 			try {
 				if (!branch.stream.destroyed) {
 					canWrite = branch.stream.write(chunk)
-					branch.bufferedBytes += chunkLength
+					branch.bufferedBytes = this.getBufferedBytes(branch)
 				}
 			} catch (err) {
 				this.log.error(
@@ -328,7 +338,7 @@ export class FanoutManager extends EventEmitter {
 			backpressureEnterCount: branch.backpressureEnterCount,
 			droppedBytesTotal: branch.droppedBytesTotal,
 			droppedChunksTotal: branch.droppedChunksTotal,
-			bufferBytes: branch.bufferedBytes,
+			bufferBytes: this.getBufferedBytes(branch),
 			highWaterMark: branch.highWaterMark,
 			totalBytesWritten: branch.totalBytesWritten,
 		}
@@ -372,7 +382,7 @@ export class FanoutManager extends EventEmitter {
 				backpressureEnterCount: branch.backpressureEnterCount,
 				droppedBytesTotal: branch.droppedBytesTotal,
 				droppedChunksTotal: branch.droppedChunksTotal,
-				bufferBytes: branch.bufferedBytes,
+				bufferBytes: this.getBufferedBytes(branch),
 				highWaterMark: branch.highWaterMark,
 				totalBytesWritten: branch.totalBytesWritten,
 			}
@@ -398,6 +408,10 @@ export class FanoutManager extends EventEmitter {
 			droppedChunksTotal,
 			totalBytesWritten,
 		}
+	}
+
+	private getBufferedBytes(branch: BranchState): number {
+		return branch.stream.readableLength + branch.stream.writableLength
 	}
 
 	/**

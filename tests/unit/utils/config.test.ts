@@ -39,6 +39,38 @@ describe("Configuration Loader", () => {
 	})
 
 	describe("loadConfig", () => {
+		it("selects WAVEKIT_CONFIG without merging another profile", () => {
+			const configPath = path.join(tempDir, "local.yaml")
+			fs.writeFileSync(configPath, "api:\n  port: 9000\nsources: []\n")
+			process.env["WAVEKIT_CONFIG"] = configPath
+			process.env["WAVEKIT_API__PORT"] = "9001"
+
+			const config = loadConfig()
+			expect(config.sources).toEqual([])
+			expect(config.api.port).toBe(9001)
+		})
+
+		it("prioritizes an explicit argument over WAVEKIT_CONFIG", () => {
+			const configPath = path.join(tempDir, "explicit.yaml")
+			fs.writeFileSync(configPath, "api:\n  port: 4200\n")
+			process.env["WAVEKIT_CONFIG"] = path.join(tempDir, "missing.yaml")
+			expect(loadConfig(configPath).api.port).toBe(4200)
+		})
+
+		it("fails when WAVEKIT_CONFIG points to a missing file", () => {
+			process.env["WAVEKIT_CONFIG"] = path.join(tempDir, "missing.yaml")
+			expect(() => loadConfig()).toThrow("WAVEKIT_CONFIG file does not exist")
+		})
+
+		it.each(["just a scalar", "- item\n- another"])(
+			"rejects non-mapping YAML instead of silently loading defaults: %s",
+			content => {
+				const configPath = path.join(tempDir, "invalid-root.yaml")
+				fs.writeFileSync(configPath, content)
+				expect(() => loadConfig(configPath)).toThrow("YAML mapping")
+			},
+		)
+
 		it("should load configuration from YAML file (Requirement 12.1)", () => {
 			const configPath = path.join(tempDir, "config.yaml")
 			const yamlContent = `

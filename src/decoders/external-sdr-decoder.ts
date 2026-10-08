@@ -188,11 +188,25 @@ export abstract class ExternalSdrDecoder
 			throw new DecoderSpawnError(this.id, command, error)
 		}
 
+		// Keep the spawned process reference stable across exit/error callbacks.
+		const proc = this.process
+		const spawned = new Promise<void>((resolve, reject) => {
+			proc.once("spawn", resolve)
+			proc.once("error", err => {
+				if (proc.pid === undefined && this.process === proc) {
+					this.process = null
+				}
+				reject(new DecoderSpawnError(this.id, command, err))
+			})
+		})
+
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
 			this.logger.error({ err }, "Decoder process error")
 			this.stats.errors++
-			this.emit("error", new DecoderSpawnError(this.id, command, err))
+			if (this.listenerCount("error") > 0) {
+				this.emit("error", new DecoderSpawnError(this.id, command, err))
+			}
 		})
 
 		// Handle process exit
@@ -226,6 +240,7 @@ export abstract class ExternalSdrDecoder
 			})
 		}
 
+		await spawned
 		this.startTime = Date.now()
 		this.emit("started")
 		this.logger.info(
@@ -256,19 +271,24 @@ export abstract class ExternalSdrDecoder
 
 			// Set up timeout for SIGKILL
 			const killTimeout = setTimeout(() => {
-				if (proc.killed) return
+				if (proc.exitCode !== null || proc.signalCode !== null) return
 				this.logger.warn({ pid }, "Graceful stop timeout, sending SIGKILL")
 				proc.kill("SIGKILL")
 			}, GRACEFUL_STOP_TIMEOUT)
 
-			// Listen for exit to clean up
-			proc.once("exit", () => {
+			// Failed spawns emit close without exit; running processes emit exit
+			// before inherited pipeline stdio necessarily closes.
+			const finish = (): void => {
 				clearTimeout(killTimeout)
+				proc.off("exit", finish)
+				proc.off("close", finish)
 				this.process = null
 				this.emit("stopped")
 				this.logger.info({ pid }, "External SDR decoder stopped")
 				resolve()
-			})
+			}
+			proc.once("exit", finish)
+			proc.once("close", finish)
 
 			// Send SIGTERM for graceful shutdown
 			proc.kill("SIGTERM")

@@ -326,7 +326,8 @@ export class SdrHostPoller extends EventEmitter {
 					}
 				}
 				dongle?: {
-					found: boolean
+					present?: boolean
+					found?: boolean
 					vendor?: string
 					product?: string
 					serial?: string
@@ -369,7 +370,11 @@ export class SdrHostPoller extends EventEmitter {
 						connected?: number
 					}>
 					clientCount = rawClients.length
-					totalBytesSent = rtlmuxStats.server?.dataOut ?? 0
+					// server.dataOut counts upstream tuner commands; IQ is sent to clients.
+					totalBytesSent = rawClients.reduce(
+						(total, client) => total + (client.dataOut ?? 0),
+						0,
+					)
 					// bytesPerSec not available in raw format
 					clientDetails = rawClients.map((c, i) => ({
 						id: i,
@@ -414,7 +419,7 @@ export class SdrHostPoller extends EventEmitter {
 					: null,
 				dongle: data.dongle
 					? {
-							found: data.dongle.found,
+							found: data.dongle.present ?? data.dongle.found ?? false,
 							vendor: data.dongle.vendor ?? null,
 							product: data.dongle.product ?? null,
 							serial: data.dongle.serial ?? null,

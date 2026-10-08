@@ -69,6 +69,16 @@ describe("Fanout Manager", () => {
 			// Should not throw
 		})
 
+		it("should remove all source listeners across repeated reconnects", () => {
+			for (let i = 0; i < 20; i++) {
+				fanout.attachSource(source)
+				fanout.detachSource()
+			}
+			expect(source.listenerCount("data")).toBe(0)
+			expect(source.listenerCount("error")).toBe(0)
+			expect(source.listenerCount("end")).toBe(0)
+		})
+
 		it("should return existing branch if adding duplicate", () => {
 			const branch1 = fanout.addBranch({ id: "branch1" })
 			const branch1Again = fanout.addBranch({ id: "branch1" })
@@ -136,6 +146,17 @@ describe("Fanout Manager", () => {
 
 			// Drain the branch
 			branch.read()
+			expect(fanout.getBranchTelemetry("test-branch")?.bufferBytes).toBe(0)
+			expect(fanout.getBranchStatus("test-branch")?.bufferedBytes).toBe(0)
+			expect(fanout.getTelemetrySnapshot().branches[0]?.bufferBytes).toBe(0)
+		})
+
+		it("should report no queued bytes for a consumer keeping up with the source", () => {
+			const branch = fanout.addBranch({ id: "fast" })
+			branch.on("data", () => {})
+			fanout.attachSource(source)
+			for (let i = 0; i < 100; i++) source.write(Buffer.alloc(1024))
+			expect(fanout.getBranchTelemetry("fast")?.bufferBytes).toBe(0)
 		})
 
 		it("should track total bytes written", () => {

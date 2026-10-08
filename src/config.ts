@@ -511,10 +511,17 @@ function loadYamlFile(filePath: string): Record<string, unknown> {
 	try {
 		const fileContent = readFileSync(filePath, "utf-8")
 		const parsed = parseYaml(fileContent) as unknown
-		if (parsed !== null && typeof parsed === "object") {
+		if (
+			parsed !== null &&
+			typeof parsed === "object" &&
+			!Array.isArray(parsed)
+		) {
 			return parsed as Record<string, unknown>
 		}
-		return {}
+		if (parsed === null || parsed === undefined) return {}
+		throw new Error(
+			"Configuration must be a YAML mapping, not a scalar or array",
+		)
 	} catch (error) {
 		throw new ConfigValidationError(
 			z.ZodError.create([
@@ -593,10 +600,22 @@ function loadConfigFiles(configDir: string): Record<string, unknown> {
  */
 export function loadConfig(configPath?: string): Config {
 	let rawConfig: Record<string, unknown>
+	const selectedPath = configPath ?? process.env["WAVEKIT_CONFIG"]
 
-	if (configPath) {
+	if (selectedPath) {
+		if (!configPath && !existsSync(selectedPath)) {
+			throw new ConfigValidationError(
+				z.ZodError.create([
+					{
+						code: z.ZodIssueCode.custom,
+						path: [],
+						message: `WAVEKIT_CONFIG file does not exist: ${selectedPath}`,
+					},
+				]),
+			)
+		}
 		// Legacy mode: load from specific file path
-		rawConfig = loadYamlFile(configPath)
+		rawConfig = loadYamlFile(selectedPath)
 	} else {
 		// New mode: load from config directory with merging
 		const configDir = getConfigDirectory()
@@ -683,5 +702,5 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SOURCES__<ID>__PORT",
 		"WAVEKIT_DECODERS__<ID>__ENABLED",
 	]
-	return [...legacyVars, ...nestedExamples]
+	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
 }

@@ -540,7 +540,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				},
 				body: decoderConfigUpdateSchema,
 				response: {
-					200: decoderActionResponseSchema,
+					501: errorResponseSchema,
 					404: errorResponseSchema,
 					400: errorResponseSchema,
 				},
@@ -569,27 +569,12 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				})
 			}
 
-			// Note: The actual config update would require the DecoderManager to support
-			// updating decoder configs. For now, we return the current status.
-			// In a full implementation, we would:
-			// 1. Update the decoder's config
-			// 2. If running and options changed, restart the decoder
-			// 3. If enabled changed to false and running, stop the decoder
-			// 4. If enabled changed to true and not running, optionally start it
-
-			const status = decoderManager.getStatus(id)
-			if (!status) {
-				return reply.status(500).send({
-					error: "InternalServerError",
-					code: "DECODER_STATUS_ERROR",
-					message: "Decoder status could not be retrieved",
-				})
-			}
-
-			return {
-				message: `Decoder '${id}' configuration updated`,
-				decoder: toApiDecoderStatus(status),
-			}
+			return reply.status(501).send({
+				error: "NotImplemented",
+				code: "DECODER_CONFIG_UPDATE_UNSUPPORTED",
+				message:
+					"Runtime decoder configuration updates are not implemented. Edit the YAML configuration and restart WaveKit; use the start/stop endpoints for lifecycle control.",
+			})
 		},
 	)
 

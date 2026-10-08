@@ -8,6 +8,7 @@ import { Transform, type TransformCallback } from "node:stream"
  * Implements Requirement 3.1
  */
 export function createF32ToS16Transform(): Transform {
+	let pending = Buffer.alloc(0)
 	return new Transform({
 		objectMode: false,
 		transform(
@@ -15,8 +16,10 @@ export function createF32ToS16Transform(): Transform {
 			_encoding: BufferEncoding,
 			callback: TransformCallback,
 		) {
+			chunk = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
 			// F32 samples are 4 bytes each, S16 samples are 2 bytes each
 			const sampleCount = Math.floor(chunk.length / 4)
+			pending = Buffer.from(chunk.subarray(sampleCount * 4))
 			const output = Buffer.alloc(sampleCount * 2)
 
 			for (let i = 0; i < sampleCount; i++) {
@@ -39,6 +42,7 @@ export function createF32ToS16Transform(): Transform {
  * Implements Requirement 3.2
  */
 export function createS16ToF32Transform(): Transform {
+	let pending = Buffer.alloc(0)
 	return new Transform({
 		objectMode: false,
 		transform(
@@ -46,8 +50,10 @@ export function createS16ToF32Transform(): Transform {
 			_encoding: BufferEncoding,
 			callback: TransformCallback,
 		) {
+			chunk = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk
 			// S16 samples are 2 bytes each, F32 samples are 4 bytes each
 			const sampleCount = Math.floor(chunk.length / 2)
+			pending = Buffer.from(chunk.subarray(sampleCount * 2))
 			const output = Buffer.alloc(sampleCount * 4)
 
 			for (let i = 0; i < sampleCount; i++) {

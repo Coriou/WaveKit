@@ -227,12 +227,19 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = false
 		state.restartCount = 0
 		state.currentDelay = this.config.restartDelay
+		if (state.restartTimer) {
+			clearTimeout(state.restartTimer)
+			state.restartTimer = null
+		}
 
-		// Wire to fanout branch
-		await this.wireDecoderToFanout(state)
-
-		// Start the decoder process
-		await state.decoder.start()
+		try {
+			await this.wireDecoderToFanout(state)
+			await state.decoder.start()
+		} catch (err) {
+			this.unwireDecoderFromFanout(state)
+			this.updateDecoderHealth(state, "faulted")
+			throw err
+		}
 	}
 
 	/**
@@ -317,14 +324,13 @@ export class DecoderManager extends EventEmitter {
 
 		const stopPromises: Promise<void>[] = []
 
-		for (const [id, state] of this.decoders) {
-			if (state.decoder.getStatus().running) {
-				stopPromises.push(
-					this.stopDecoder(id).catch(err => {
-						this.log.error({ err, decoderId: id }, "Failed to stop decoder")
-					}),
-				)
-			}
+		// Stop every instance so queued retries are cancelled even after a crash.
+		for (const id of this.decoders.keys()) {
+			stopPromises.push(
+				this.stopDecoder(id).catch(err => {
+					this.log.error({ err, decoderId: id }, "Failed to stop decoder")
+				}),
+			)
 		}
 
 		await Promise.all(stopPromises)
@@ -356,7 +362,13 @@ export class DecoderManager extends EventEmitter {
 	 * @returns DecoderStatus or undefined if not found
 	 */
 	getStatus(id: string): DecoderStatus | undefined {
-		return this.decoders.get(id)?.decoder.getStatus()
+		const state = this.decoders.get(id)
+		if (!state) return undefined
+		return {
+			...state.decoder.getStatus(),
+			health: state.lastHealth,
+			restartCount: state.restartCount,
+		}
 	}
 
 	/**
@@ -365,9 +377,7 @@ export class DecoderManager extends EventEmitter {
 	 * @returns Array of DecoderStatus for all decoders
 	 */
 	getAllStatus(): DecoderStatus[] {
-		return Array.from(this.decoders.values()).map(state =>
-			state.decoder.getStatus(),
-		)
+		return Array.from(this.decoders.keys()).map(id => this.getStatus(id)!)
 	}
 
 	/**
@@ -384,10 +394,8 @@ export class DecoderManager extends EventEmitter {
 
 		this.log.info({ decoderId: id }, "Removing decoder")
 
-		// Stop if running
-		if (state.decoder.getStatus().running) {
-			await this.stopDecoder(id)
-		}
+		// Also cancel pending restarts when the process has already exited.
+		await this.stopDecoder(id)
 
 		// Remove event listeners
 		state.decoder.removeAllListeners()
@@ -422,12 +430,18 @@ export class DecoderManager extends EventEmitter {
 	private setupDecoderEventHandlers(state: DecoderState): void {
 		const { decoder } = state
 
+		// The manager consumes output via events. Drain the parallel stream so
+		// unattended decoders do not retain every event for the lifetime of the app.
+		decoder.getOutput().resume()
+
 		// Forward output events (Requirement 4.4, 4.6)
 		// Also track last output time for health checks (Requirement 20.1, 20.2)
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("output", (output: DecoderOutput) => {
 			try {
 				state.lastOutputAt = new Date()
+				state.currentDelay = this.config.restartDelay
+				this.updateDecoderHealth(state, "running")
 				this.emit("decoder:output", decoder.id, output)
 			} catch (err) {
 				this.log.error(
@@ -455,6 +469,7 @@ export class DecoderManager extends EventEmitter {
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("started", () => {
 			try {
+				state.lastOutputAt = null
 				// Reset health to running when decoder starts (Requirement 20.1)
 				this.updateDecoderHealth(state, "running")
 				this.emit("decoder:started", decoder.id)
@@ -576,18 +591,23 @@ export class DecoderManager extends EventEmitter {
 			void (async () => {
 				try {
 					// Wire to fanout and start
+					if (state.intentionallyStopped) return
 					await this.wireDecoderToFanout(state)
+					if (state.intentionallyStopped) {
+						this.unwireDecoderFromFanout(state)
+						return
+					}
 					await decoder.start()
-
-					// Reset delay on successful start
-					state.currentDelay = this.config.restartDelay
 				} catch (err) {
 					// Log failure but don't crash - failure isolation (Requirement 10.1)
 					this.log.error(
 						{ err, decoderId: decoder.id },
 						"Failed to restart decoder - other decoders continue operating",
 					)
-					// The exit handler will be called again, triggering another restart attempt
+					// Spawn failures do not emit exit, so retry them explicitly.
+					if (!state.intentionallyStopped && !state.restartTimer) {
+						this.handleDecoderExit(state, null, null)
+					}
 				}
 			})()
 		}, delay)

@@ -86,6 +86,12 @@ export abstract class NetworkProducerDecoder
 	protected tcpClient: Socket | null = null
 	protected udpClient: UdpSocket | null = null
 	protected inputStream: Readable | null = null
+	private readonly trackInputBytes = (chunk: Buffer): void => {
+		this.stats.bytesIn += chunk.length
+	}
+	private readonly handleInputError = (err: Error): void => {
+		this.logger.warn({ err }, "Decoder input stream error")
+	}
 	protected outputStream: PassThrough
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
 	protected startTime: number = 0
@@ -101,6 +107,7 @@ export abstract class NetworkProducerDecoder
 	protected reconnectTimer: ReturnType<typeof setTimeout> | null = null
 	protected isReconnecting: boolean = false
 	protected isStopping: boolean = false
+	private initialConnectionTimer: ReturnType<typeof setTimeout> | null = null
 
 	/**
 	 * Gets the decoder's capabilities (Requirement 17.1).
@@ -162,6 +169,8 @@ export abstract class NetworkProducerDecoder
 		}
 
 		this.isStopping = false
+		this.isReconnecting = false
+		this.reconnectAttempts = 0
 		const command = this.getCommand()
 		const args = this.getArgs()
 
@@ -176,17 +185,32 @@ export abstract class NetworkProducerDecoder
 			throw new DecoderSpawnError(this.id, command, error)
 		}
 
+		// Keep the spawned process reference stable across exit/error callbacks.
+		const proc = this.process
+		const spawned = new Promise<void>((resolve, reject) => {
+			proc.once("spawn", resolve)
+			proc.once("error", err => {
+				if (proc.pid === undefined && this.process === proc) {
+					this.process = null
+				}
+				reject(new DecoderSpawnError(this.id, command, err))
+			})
+		})
+
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
 			this.logger.error({ err }, "Decoder process error")
 			this.stats.errors++
-			this.emit("error", new DecoderSpawnError(this.id, command, err))
+			if (this.listenerCount("error") > 0) {
+				this.emit("error", new DecoderSpawnError(this.id, command, err))
+			}
 		})
 
 		// Handle process exit
 		this.process.on("exit", (code, signal) => {
 			this.logger.info({ code, signal }, "Decoder process exited")
 			this.process = null
+			this.cancelConnectionTimers()
 			this.disconnectFromOutput()
 			this.emit("exit", code, signal)
 		})
@@ -207,9 +231,6 @@ export abstract class NetworkProducerDecoder
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
 			this.inputStream.pipe(this.process.stdin)
-			this.inputStream.on("data", (chunk: Buffer) => {
-				this.stats.bytesIn += chunk.length
-			})
 		}
 
 		// Handle stdin errors gracefully to prevent SIGPIPE issues
@@ -222,6 +243,7 @@ export abstract class NetworkProducerDecoder
 			})
 		}
 
+		await spawned
 		this.startTime = Date.now()
 
 		// Connect to the output port with retry logic
@@ -243,11 +265,8 @@ export abstract class NetworkProducerDecoder
 	async stop(): Promise<void> {
 		this.isStopping = true
 
-		// Cancel any pending reconnection
-		if (this.reconnectTimer) {
-			clearTimeout(this.reconnectTimer)
-			this.reconnectTimer = null
-		}
+		this.cancelConnectionTimers()
+		this.isReconnecting = false
 
 		// Disconnect from output
 		this.disconnectFromOutput()
@@ -269,19 +288,24 @@ export abstract class NetworkProducerDecoder
 
 			// Set up timeout for SIGKILL
 			const killTimeout = setTimeout(() => {
-				if (proc.killed) return
+				if (proc.exitCode !== null || proc.signalCode !== null) return
 				this.logger.warn({ pid }, "Graceful stop timeout, sending SIGKILL")
 				proc.kill("SIGKILL")
 			}, GRACEFUL_STOP_TIMEOUT)
 
-			// Listen for exit to clean up
-			proc.once("exit", () => {
+			// Failed spawns emit close without exit; running processes emit exit
+			// before inherited pipeline stdio necessarily closes.
+			const finish = (): void => {
 				clearTimeout(killTimeout)
+				proc.off("exit", finish)
+				proc.off("close", finish)
 				this.process = null
 				this.emit("stopped")
 				this.logger.info({ pid }, "Network producer decoder stopped")
 				resolve()
-			})
+			}
+			proc.once("exit", finish)
+			proc.once("close", finish)
 
 			// Send SIGTERM for graceful shutdown
 			proc.kill("SIGTERM")
@@ -309,9 +333,8 @@ export abstract class NetworkProducerDecoder
 		this.inputStream = stream
 
 		// Track bytes received
-		stream.on("data", (chunk: Buffer) => {
-			this.stats.bytesIn += chunk.length
-		})
+		stream.on("data", this.trackInputBytes)
+		stream.on("error", this.handleInputError)
 
 		// If process is already running, pipe to stdin
 		if (this.process?.stdin) {
@@ -330,6 +353,8 @@ export abstract class NetworkProducerDecoder
 			if (this.process?.stdin) {
 				this.inputStream.unpipe(this.process.stdin)
 			}
+			this.inputStream.off("data", this.trackInputBytes)
+			this.inputStream.off("error", this.handleInputError)
 			this.inputStream = null
 			this.logger.debug("Input stream detached from network producer decoder")
 		}
@@ -441,7 +466,7 @@ export abstract class NetworkProducerDecoder
 		const { outputHost, outputPort } = this.config
 
 		return new Promise<void>((resolve, reject) => {
-			this.tcpClient = createConnection(
+			const client = createConnection(
 				{ host: outputHost, port: outputPort },
 				() => {
 					this.logger.info(
@@ -454,22 +479,22 @@ export abstract class NetworkProducerDecoder
 				},
 			)
 
-			this.tcpClient.on("data", (data: Buffer) => {
+			this.tcpClient = client
+			client.on("data", (data: Buffer) => {
 				this.handleNetworkData(data)
 			})
 
-			this.tcpClient.on("error", (err: Error) => {
+			client.on("error", (err: Error) => {
 				this.logger.error({ err }, "TCP connection error")
 				this.stats.errors++
 
-				// Only reject if this is the initial connection
-				if (!this.isReconnecting && this.reconnectAttempts === 0) {
-					reject(new NetworkConnectionError(outputHost, outputPort, "tcp", err))
-				}
+				// Every failed attempt must settle, including retries.
+				reject(new NetworkConnectionError(outputHost, outputPort, "tcp", err))
 			})
 
-			this.tcpClient.on("close", () => {
+			client.on("close", () => {
 				this.logger.info("TCP connection closed")
+				if (this.tcpClient !== client) return
 				this.tcpClient = null
 
 				// Attempt reconnection if not stopping (Requirement 18.3)
@@ -497,14 +522,18 @@ export abstract class NetworkProducerDecoder
 				this.udpClient.on("error", (err: Error) => {
 					this.logger.error({ err }, "UDP socket error")
 					this.stats.errors++
-					this.emit(
-						"error",
-						new NetworkConnectionError(outputHost, outputPort, "udp", err),
+					const error = new NetworkConnectionError(
+						outputHost,
+						outputPort,
+						"udp",
+						err,
 					)
+					reject(error)
+					if (this.listenerCount("error") > 0) this.emit("error", error)
 				})
 
 				// Bind to receive messages
-				this.udpClient.bind(outputPort, () => {
+				this.udpClient.bind(outputPort, outputHost, () => {
 					this.logger.info(
 						{ port: outputPort },
 						"UDP socket bound for receiving",
@@ -546,15 +575,27 @@ export abstract class NetworkProducerDecoder
 	 * Uses a short delay to give the process time to open its ports.
 	 */
 	private scheduleInitialConnection(): void {
-		setTimeout(() => {
+		this.initialConnectionTimer = setTimeout(() => {
+			this.initialConnectionTimer = null
 			if (this.isStopping || !this.process) {
 				return
 			}
 			this.connectToOutput().catch(() => {
-				// Connection failed, scheduleReconnect will be called via the error handler
-				// No action needed here as the TCP close event triggers scheduleReconnect
+				this.disconnectFromOutput()
+				this.scheduleReconnect()
 			})
 		}, NetworkProducerDecoder.INITIAL_CONNECTION_DELAY)
+	}
+
+	private cancelConnectionTimers(): void {
+		if (this.initialConnectionTimer) {
+			clearTimeout(this.initialConnectionTimer)
+			this.initialConnectionTimer = null
+		}
+		if (this.reconnectTimer) {
+			clearTimeout(this.reconnectTimer)
+			this.reconnectTimer = null
+		}
 	}
 
 	/**
@@ -591,7 +632,8 @@ export abstract class NetworkProducerDecoder
 	private async attemptReconnect(): Promise<void> {
 		this.reconnectTimer = null
 
-		if (this.isStopping) {
+		if (this.isStopping || !this.process) {
+			this.isReconnecting = false
 			return
 		}
 
@@ -599,6 +641,7 @@ export abstract class NetworkProducerDecoder
 			await this.connectToOutput()
 		} catch (err) {
 			this.logger.error({ err }, "Reconnection failed")
+			this.disconnectFromOutput()
 			// Schedule another attempt
 			this.isReconnecting = false
 			this.scheduleReconnect()

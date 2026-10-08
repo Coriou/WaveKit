@@ -57,6 +57,12 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 	protected process: ChildProcess | null = null
 	protected inputStream: Readable | null = null
+	private readonly trackInputBytes = (chunk: Buffer): void => {
+		this.stats.bytesIn += chunk.length
+	}
+	private readonly handleInputError = (err: Error): void => {
+		this.logger.warn({ err }, "Decoder input stream error")
+	}
 	protected outputStream: PassThrough
 	protected audioOutputStream: PassThrough | null = null
 	protected stats: DecoderStats = { bytesIn: 0, eventsOut: 0, errors: 0 }
@@ -144,11 +150,25 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			throw new DecoderSpawnError(this.id, command, error)
 		}
 
+		// Keep the spawned process reference stable across exit/error callbacks.
+		const proc = this.process
+		const spawned = new Promise<void>((resolve, reject) => {
+			proc.once("spawn", resolve)
+			proc.once("error", err => {
+				if (proc.pid === undefined && this.process === proc) {
+					this.process = null
+				}
+				reject(new DecoderSpawnError(this.id, command, err))
+			})
+		})
+
 		// Handle spawn errors (e.g., command not found)
 		this.process.on("error", (err: Error) => {
 			this.logger.error({ err }, "Decoder process error")
 			this.stats.errors++
-			this.emit("error", new DecoderSpawnError(this.id, command, err))
+			if (this.listenerCount("error") > 0) {
+				this.emit("error", new DecoderSpawnError(this.id, command, err))
+			}
 		})
 
 		// Handle process exit (Requirement 4.6)
@@ -195,29 +215,16 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		// Pipe input stream to process stdin if attached
 		if (this.inputStream && this.process.stdin) {
 			this.inputStream.pipe(this.process.stdin)
-
-			// Handle stdin errors (e.g. EPIPE when process exits)
-			// Verified this code is running via log
-			this.logger.debug("Attached error handler to decoder process stdin")
-
-			this.process.stdin.on("error", err => {
-				this.logger.warn(
-					{ err },
-					"Decoder stdin error (process likely exited) - Caught by handler",
-				)
-				// Don't rethrow
-			})
-
-			// Also catch errors on the input stream itself to be safe
-			this.inputStream.on("error", err => {
-				this.logger.warn({ err }, "Decoder input stream error")
-			})
-
-			this.inputStream.on("data", (chunk: Buffer) => {
-				this.stats.bytesIn += chunk.length
-			})
 		}
 
+		// Input can be attached after start; stdin errors must always be handled.
+		this.process.stdin?.on("error", err => {
+			if ((err as NodeJS.ErrnoException).code !== "EPIPE") {
+				this.logger.warn({ err }, "Decoder stdin error")
+			}
+		})
+
+		await spawned
 		this.startTime = Date.now()
 		this.emit("started")
 		this.logger.info({ pid: this.process.pid }, "Decoder started")
@@ -245,19 +252,24 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 			// Set up timeout for SIGKILL
 			const killTimeout = setTimeout(() => {
-				if (proc.killed) return
+				if (proc.exitCode !== null || proc.signalCode !== null) return
 				this.logger.warn({ pid }, "Graceful stop timeout, sending SIGKILL")
 				proc.kill("SIGKILL")
 			}, GRACEFUL_STOP_TIMEOUT)
 
-			// Listen for exit to clean up
-			proc.once("exit", () => {
+			// Failed spawns emit close without exit; running processes emit exit
+			// before inherited pipeline stdio necessarily closes.
+			const finish = (): void => {
 				clearTimeout(killTimeout)
+				proc.off("exit", finish)
+				proc.off("close", finish)
 				this.process = null
 				this.emit("stopped")
 				this.logger.info({ pid }, "Decoder stopped")
 				resolve()
-			})
+			}
+			proc.once("exit", finish)
+			proc.once("close", finish)
 
 			// Send SIGTERM for graceful shutdown
 			proc.kill("SIGTERM")
@@ -285,9 +297,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 		this.inputStream = stream
 
 		// Track bytes received
-		stream.on("data", (chunk: Buffer) => {
-			this.stats.bytesIn += chunk.length
-		})
+		stream.on("data", this.trackInputBytes)
+		stream.on("error", this.handleInputError)
 
 		// If process is already running, pipe to stdin
 		if (this.process?.stdin) {
@@ -306,6 +317,8 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 			if (this.process?.stdin) {
 				this.inputStream.unpipe(this.process.stdin)
 			}
+			this.inputStream.off("data", this.trackInputBytes)
+			this.inputStream.off("error", this.handleInputError)
 			this.inputStream = null
 			this.logger.debug("Input stream detached")
 		}

@@ -38,6 +38,47 @@ describe("Format Converter", () => {
 	})
 
 	describe("Transform Streams", () => {
+		it("should preserve float samples split across arbitrary byte boundaries", async () => {
+			const input = Buffer.alloc(16)
+			;[0.5, -0.25, 1, -1].forEach((sample, index) =>
+				input.writeFloatLE(sample, index * 4),
+			)
+			const transform = createF32ToS16Transform()
+			const chunks: Buffer[] = []
+			transform.on("data", chunk => chunks.push(chunk))
+			const ended = new Promise<void>(resolve => transform.on("end", resolve))
+			for (const byte of input) transform.write(Buffer.from([byte]))
+			transform.end()
+			await ended
+			const output = Buffer.concat(chunks)
+			expect(output.length).toBe(8)
+			expect([0, 1, 2, 3].map(index => output.readInt16LE(index * 2))).toEqual([
+				16384, -8192, 32767, -32767,
+			])
+		})
+
+		it("should preserve integer samples split across arbitrary byte boundaries", async () => {
+			const input = Buffer.alloc(8)
+			;[16384, -8192, 32767, -32768].forEach((sample, index) =>
+				input.writeInt16LE(sample, index * 2),
+			)
+			const transform = createS16ToF32Transform()
+			const chunks: Buffer[] = []
+			transform.on("data", chunk => chunks.push(chunk))
+			const ended = new Promise<void>(resolve => transform.on("end", resolve))
+			for (const byte of input) transform.write(Buffer.from([byte]))
+			transform.end()
+			await ended
+			const output = Buffer.concat(chunks)
+			expect(output.length).toBe(16)
+			expect([0, 1, 2, 3].map(index => output.readFloatLE(index * 4))).toEqual([
+				0.5,
+				-0.25,
+				32767 / 32768,
+				-1,
+			])
+		})
+
 		it("should create F32 to S16 transform stream", () => {
 			const transform = createF32ToS16Transform()
 			expect(transform).toBeDefined()

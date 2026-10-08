@@ -1189,7 +1189,7 @@ describe("API Server", () => {
 		})
 
 		describe("PATCH /api/decoders/:id", () => {
-			it("should update decoder configuration", async () => {
+			it("should reject unsupported updates instead of claiming they were applied", async () => {
 				const mockDecoder = {
 					getStatus: vi.fn().mockReturnValue({
 						id: "decoder-1",
@@ -1225,10 +1225,10 @@ describe("API Server", () => {
 					},
 				})
 
-				expect(response.statusCode).toBe(200)
+				expect(response.statusCode).toBe(501)
 				const body = JSON.parse(response.body)
-				expect(body.message).toContain("decoder-1")
-				expect(body.decoder.id).toBe("decoder-1")
+				expect(body.code).toBe("DECODER_CONFIG_UPDATE_UNSUPPORTED")
+				expect(mockDecoderManager.stopDecoder).not.toHaveBeenCalled()
 			})
 
 			it("should return 404 when decoder not found", async () => {

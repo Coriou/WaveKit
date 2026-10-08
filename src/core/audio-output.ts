@@ -13,6 +13,7 @@ import { EventEmitter } from "node:events"
 import * as net from "node:net"
 import type { Readable } from "node:stream"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
 
 export interface AudioOutputConfig {
 	port: number
@@ -253,14 +254,25 @@ export class AudioOutput extends EventEmitter {
 				this.log.debug({ clientId }, "Client socket not writable, skipping")
 				continue
 			}
+			if (
+				client.socket.writableLength + chunk.length >
+				MAX_CLIENT_BUFFER_BYTES
+			) {
+				this.log.warn(
+					{ clientId },
+					"Disconnecting slow audio client (buffer limit reached)",
+				)
+				client.socket.destroy()
+				this.cleanupClient(clientId)
+				continue
+			}
 
 			// Write data to client - don't wait for drain (real-time priority)
 			const canWrite = client.socket.write(chunk)
 			client.bytesWritten += chunk.length
 
 			if (!canWrite) {
-				// Client is slow, but we continue (real-time audio priority)
-				// The socket will buffer and eventually catch up or disconnect
+				// Brief stalls may buffer up to the per-client limit.
 				this.log.debug({ clientId }, "Client backpressure detected")
 			}
 		}

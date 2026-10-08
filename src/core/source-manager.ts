@@ -29,10 +29,7 @@ import { PassThrough } from "node:stream"
 import type { Logger } from "../utils/logger.js"
 import { SourceConnectionError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
-import {
-	detectAudioFormat,
-	type DetectedFormat,
-} from "../utils/audio-analyzer.js"
+import { detectAudioFormat } from "../utils/audio-analyzer.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 
 // Re-export types from config for convenience
@@ -156,6 +153,7 @@ interface SourceState {
 	// Format detection
 	activeFormat: SourceCaps["format"] | "UNKNOWN"
 	detectionBuffer: Buffer | null
+	conversionRemainder: Buffer
 	// RTL-TCP header capture (IQ sources)
 	rtlTcpHeader: Buffer | null
 	rtlTcpHeaderInfo: RtlTcpHeaderInfo | null
@@ -270,6 +268,7 @@ export class SourceManager extends EventEmitter {
 			stopping: false,
 			activeFormat: config.caps.format,
 			detectionBuffer: config.caps.format === "auto" ? Buffer.alloc(0) : null,
+			conversionRemainder: Buffer.alloc(0),
 			rtlTcpHeader: null,
 			rtlTcpHeaderInfo: null,
 			rtlTcpHeaderBuffer:
@@ -279,6 +278,11 @@ export class SourceManager extends EventEmitter {
 		}
 
 		this.sources.set(config.id, state)
+		stream.on("drain", () => {
+			if (state.stopping) return
+			state.socket?.resume()
+			if (state.recordingState) this.scheduleNextChunk(config.id)
+		})
 
 		// Start metrics emission interval (Requirement 1.5)
 		state.metricsTimer = setInterval(() => {
@@ -313,6 +317,25 @@ export class SourceManager extends EventEmitter {
 		}
 
 		return stream
+	}
+
+	private forwardData(id: string, state: SourceState, chunk: Buffer): boolean {
+		let canWrite = true
+		if (!state.stream.destroyed) {
+			canWrite = state.stream.write(chunk)
+			if (!canWrite) state.socket?.pause()
+		}
+		this.emit("data", id, chunk)
+		return canWrite
+	}
+
+	private convertAudioChunk(state: SourceState, chunk: Buffer): Buffer {
+		const input = state.conversionRemainder.length
+			? Buffer.concat([state.conversionRemainder, chunk])
+			: chunk
+		const alignedLength = input.length - (input.length % 4)
+		state.conversionRemainder = Buffer.from(input.subarray(alignedLength))
+		return convertFloat32ToS16LE(input.subarray(0, alignedLength))
 	}
 
 	/**
@@ -587,16 +610,10 @@ export class SourceManager extends EventEmitter {
 			state.bytesReceived += bytesRead
 			state.bytesReceivedSinceLastMetric += bytesRead
 
-			// Write to stream
-			if (!state.stream.destroyed) {
-				state.stream.write(buffer.subarray(0, bytesRead))
+			// Stop reading until downstream drains instead of buffering the entire file.
+			if (this.forwardData(id, state, buffer.subarray(0, bytesRead))) {
+				this.scheduleNextChunk(id)
 			}
-
-			// Emit data event
-			this.emit("data", id, buffer.subarray(0, bytesRead))
-
-			// Schedule next chunk
-			this.scheduleNextChunk(id)
 		} catch (err) {
 			this.logger.error({ sourceId: id, err }, "Error reading recording file")
 			state.lastError =
@@ -659,6 +676,7 @@ export class SourceManager extends EventEmitter {
 			const socket = new net.Socket()
 			state.socket = socket
 			state.sessionBytesReceived = 0
+			state.conversionRemainder = Buffer.alloc(0)
 			state.rtlTcpHeader = null
 			state.rtlTcpHeaderInfo = null
 			state.rtlTcpHeaderBuffer =
@@ -744,13 +762,10 @@ export class SourceManager extends EventEmitter {
 								state.activeFormat === "FLOAT32LE" &&
 								config.caps.kind === "audio_pcm"
 							) {
-								dataToProcess = convertFloat32ToS16LE(dataToProcess)
+								dataToProcess = this.convertAudioChunk(state, dataToProcess)
 							}
 
-							if (!state.stream.destroyed) {
-								state.stream.write(dataToProcess)
-							}
-							this.emit("data", id, dataToProcess)
+							this.forwardData(id, state, dataToProcess)
 
 							state.detectionBuffer = null
 						} else {
@@ -763,10 +778,7 @@ export class SourceManager extends EventEmitter {
 								)
 								state.activeFormat = "S16LE"
 								// Flush as S16LE
-								if (!state.stream.destroyed) {
-									state.stream.write(state.detectionBuffer)
-								}
-								this.emit("data", id, state.detectionBuffer)
+								this.forwardData(id, state, state.detectionBuffer)
 								state.detectionBuffer = null
 							}
 						}
@@ -833,16 +845,10 @@ export class SourceManager extends EventEmitter {
 				) {
 					// We assume config.caps.format was either FLOAT32LE set explicitly, or auto-resolved to it.
 					// Note: if config says auto, state.activeFormat is now FLOAT32LE.
-					dataToProcess = convertFloat32ToS16LE(dataToProcess)
+					dataToProcess = this.convertAudioChunk(state, dataToProcess)
 				}
 
-				// Forward data to the PassThrough stream
-				if (!state.stream.destroyed) {
-					state.stream.write(dataToProcess)
-				}
-
-				// Emit data event
-				this.emit("data", id, dataToProcess)
+				this.forwardData(id, state, dataToProcess)
 			}
 
 			const onError = (err: Error) => {
@@ -1024,6 +1030,7 @@ export class SourceManager extends EventEmitter {
 		// End the stream
 		if (!state.stream.destroyed) {
 			state.stream.end()
+			state.stream.destroy()
 		}
 
 		// Remove any decoder assignments for this source

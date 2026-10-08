@@ -5,7 +5,7 @@
  * Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 15.1, 15.2, 15.3, 15.4, 15.5, 16.1, 16.2, 16.3
  */
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest"
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import * as net from "node:net"
 import * as fc from "fast-check"
 import {
@@ -138,6 +138,75 @@ describe("Source Manager", () => {
 	})
 
 	describe("Connection Management", () => {
+		it("should pause an unread source and resume without losing data", async () => {
+			const mockServer = await createMockServer()
+			const payload = Buffer.alloc(2 * 1024 * 1024, 0x42)
+			mockServer.server.on("connection", socket => socket.write(payload))
+			try {
+				const stream = await sourceManager.connect(
+					createSourceConfig("unread-source", mockServer.port),
+				)
+				await vi.waitFor(() => {
+					expect(
+						sourceManager.getStatus("unread-source")!.bytesReceived,
+					).toBeGreaterThanOrEqual(256 * 1024)
+				})
+				await new Promise(resolve => setTimeout(resolve, 50))
+				expect(
+					sourceManager.getStatus("unread-source")!.bytesReceived,
+				).toBeLessThan(payload.length)
+				const chunks: Buffer[] = []
+				let receivedBytes = 0
+				stream.on("data", chunk => {
+					chunks.push(chunk)
+					receivedBytes += chunk.length
+				})
+				await vi.waitFor(() => {
+					expect(receivedBytes).toBe(payload.length)
+				})
+				expect(Buffer.concat(chunks).equals(payload)).toBe(true)
+			} finally {
+				await mockServer.close()
+			}
+		})
+
+		it("should preserve float audio samples split across TCP chunks", async () => {
+			const mockServer = await createMockServer()
+			const accepted = new Promise<net.Socket>(resolve => {
+				mockServer.server.once("connection", resolve)
+			})
+			try {
+				const stream = await sourceManager.connect(
+					createSourceConfig("float-source", mockServer.port, {
+						format: "FLOAT32LE",
+					}),
+				)
+				const chunks: Buffer[] = []
+				stream.on("data", chunk => chunks.push(chunk))
+				const upstream = await accepted
+				const input = Buffer.alloc(8)
+				input.writeFloatLE(0.5, 0)
+				input.writeFloatLE(-0.25, 4)
+				for (const part of [
+					input.subarray(0, 3),
+					input.subarray(3, 5),
+					input.subarray(5),
+				]) {
+					const received = new Promise<void>(resolve =>
+						sourceManager.once("data", () => resolve()),
+					)
+					upstream.write(part)
+					await received
+				}
+				const output = Buffer.concat(chunks)
+				expect(output.length).toBe(4)
+				expect(output.readInt16LE(0)).toBe(16384)
+				expect(output.readInt16LE(2)).toBe(-8192)
+			} finally {
+				await mockServer.close()
+			}
+		})
+
 		it("should connect to a TCP server and emit connected event", async () => {
 			const mockServer = await createMockServer()
 
