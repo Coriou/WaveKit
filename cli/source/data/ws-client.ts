@@ -25,27 +25,72 @@ export const HANDSHAKE_TIMEOUT_MS = 2000
 /** Frames above this close the socket with 1009 (ws's own default is 100 MiB). */
 export const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024
 
-/** Every socket gets error and close handlers; nothing is logged. Throws synchronously on a bad URL. */
-export const nodeWsFactory: WsFactory = (url, h) => {
-	const sock = new WebSocket(url, {
-		handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
-		maxPayload: MAX_PAYLOAD_BYTES,
-	})
-	sock.on("open", () => h.open())
-	sock.on("message", (data: WebSocket.RawData) => h.message(rawToString(data)))
-	sock.on("error", (err: Error) => h.error(err.message))
-	sock.on("close", (code: number, reason: Buffer) =>
-		h.close(code, reason.toString("utf8")),
-	)
-	return {
-		send: text => {
-			if (sock.readyState === WebSocket.OPEN) sock.send(text)
-		},
-		close: () => {
+/** Core pings every 30 s; this much silence after a ping means the socket is half-open. */
+export const SILENCE_MS = 75_000
+const WATCHDOG_CHECK_MS = 5_000
+
+export interface NodeWsOptions {
+	silenceMs?: number
+	checkMs?: number
+}
+
+/**
+ * Every socket gets error and close handlers; nothing is logged. Throws synchronously on
+ * a bad URL. A liveness watchdog arms on the first server ping (older cores that never
+ * ping are left alone) and terminates the socket after `silenceMs` without any frame,
+ * ping or pong, so a half-open socket cannot look connected forever.
+ */
+export function createNodeWsFactory(opts: NodeWsOptions = {}): WsFactory {
+	const silenceMs = opts.silenceMs ?? SILENCE_MS
+	const checkMs = opts.checkMs ?? WATCHDOG_CHECK_MS
+	return (url, h) => {
+		const sock = new WebSocket(url, {
+			handshakeTimeout: HANDSHAKE_TIMEOUT_MS,
+			maxPayload: MAX_PAYLOAD_BYTES,
+		})
+		let lastSeen = Date.now()
+		let armed = false
+		const seen = (): void => {
+			lastSeen = Date.now()
+		}
+		const watchdog = setInterval(() => {
+			if (!armed || Date.now() - lastSeen <= silenceMs) return
+			clearInterval(watchdog)
+			h.error(`no heartbeat from server in ${Math.round(silenceMs / 1000)}s`)
 			sock.terminate()
-		},
+		}, checkMs)
+		watchdog.unref()
+		sock.on("open", () => {
+			seen()
+			h.open()
+		})
+		sock.on("message", (data: WebSocket.RawData) => {
+			seen()
+			h.message(rawToString(data))
+		})
+		sock.on("ping", () => {
+			armed = true
+			seen()
+		})
+		sock.on("pong", seen)
+		sock.on("error", (err: Error) => h.error(err.message))
+		sock.on("close", (code: number, reason: Buffer) => {
+			clearInterval(watchdog)
+			h.close(code, reason.toString("utf8"))
+		})
+		return {
+			send: text => {
+				if (sock.readyState === WebSocket.OPEN) sock.send(text)
+			},
+			close: () => {
+				clearInterval(watchdog)
+				sock.terminate()
+			},
+		}
 	}
 }
+
+export const nodeWsFactory: WsFactory = createNodeWsFactory()
 
 export const CHANNELS = [
 	"decoders",
