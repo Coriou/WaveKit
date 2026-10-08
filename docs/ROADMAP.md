@@ -6,43 +6,63 @@ Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate software priorities
+## Immediate software priorities (re-ordered 2026-10-08 evening)
 
-1. Define and review the sample-rate capability model, then implement the pure
-   resolver and additive API status before manager suspension/resumption. Keep
-   capture bandwidth, adapted IQ rate and decoder PCM/IQ input rate distinct;
-   do not turn an unverified preferred rate into a hard RF minimum. Preserve
-   operator stop/disable intent and unknown custom-decoder behavior. The proposed
-   contract and implementation gates are in
-   [the sample-rate/channelizer design](superpowers/specs/2026-10-08-sample-rate-and-channelizer-design.md).
-2. In parallel, validate the bounded opt-in CSDR buffer correction against the
-   pinned upstream build, preserve sample integrity, and repeat software capacity
-   measurements. Also complete bounded source startup/reconnect and accepted
-   tuner-state synchronization. Review default gain/rate restoration on the host
-   against client-arrival races before implementing that separate policy.
-3. Establish real IQ fixture baselines and prototype one opt-in core channelizer
-   per source. Compare direct translating FIR/resampling with fast convolution
-   after specifying output quality, latency, discontinuities and resource limits.
-   Rust is a candidate for this component; a whole-application rewrite is not
-   planned. Preserve raw fanout and give directly attached dongles equal support.
-4. Extend shared API/event contracts and source ownership for multiple consumers;
-   then implement protocol-aware scanning. Optional SDR-host channelization needs
-   its own transport/admission contract and stable-power measurements first.
+1. **Land and deploy the merged core on the Mac.** Merge tuner-state
+   reconnect synchronization and the rtl_tcp stall watchdog (reviewed branch,
+   final check pending), rebuild the Mac image with all merged core work and
+   redeploy it with the hardware profile. Then repeat end-to-end Pi reboot and
+   USB hotplug recovery through the Mac (a runtime result, separate from the
+   clean-card image claims) and announce the new events to the CLI team.
+   Run the bounded CSDR rings on the live Mac app as an explicit, reversible
+   trial (`csdr.boundedBuffers: true`) to gather real-RF evidence.
+2. **Make the full test suite trustworthy.** Pi script tests time out under
+   host load and one source-routing ownership test is intermittently flaky;
+   fix them so a full-suite pass is meaningful again.
+3. **Rate model, batches B1–B4** per the
+   [instance/suspension addendum](superpowers/specs/2026-10-08-rate-model-instances-and-suspension.md):
+   B1 adapter truth, per-instance declarations, the decimation-factor clamp and
+   rejection of tuner rates librtlsdr cannot run; B2 reversible manager
+   suspension; B3 REST/WebSocket contracts (announced to the CLI team before
+   merge; published through `decoder:status`); B4 wiring and docs.
+4. **Streaming stability on stable power** (replacement supply expected
+   2026-10-09): 30-minute continuous baseline, overnight bounded-CSDR soak with
+   decode counts compared to baseline, quiet-host matched capacity comparison,
+   then decide whether bounded rings become the default.
+5. **Next Pi image**, after the rate model: carry an rtlmux patch for a
+   use-after-free on commands sent while its upstream is down, include the
+   polished operator and setup pages, and re-run clean-card acceptance
+   including Ethernet.
+6. Later: API access/origin policy (prerequisite for host controls and a web
+   UI), real IQ fixture baselines, then the opt-in core channelizer prototype
+   ([sample-rate/channelizer design](superpowers/specs/2026-10-08-sample-rate-and-channelizer-design.md)).
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
 fixture evidence. Exploratory research is not a final implementation spec.
-Current software milestones: initial/reconnect TCP waits are bounded at five
-seconds with background recovery. The rate model has shared types, a validated
-pure resolver and REST serialization; built-in instance declarations, manager
-suspension/resumption and WebSocket/CLI integration remain pending. The pinned
-CSDR build has a tested opt-in smaller ring, with unchanged defaults; enabling it
-in known pipelines and measuring all-decoder capacity is a separate next step.
+
+### Status at end of 2026-10-08 (committed code; NOT yet deployed to the Mac app)
+
+- CLI requests 1–4 are merged: `source:status` and `decoder:status` WebSocket
+  events and additive `DecoderStatus` fields (`sourceId`, `targetFrequenciesHz`,
+  `lastError`, `idleTimeoutMs`, `deviceSerial`). Configured `health.idleTimeout`
+  and `checkInterval` now reach the decoder manager.
+- Bounded CSDR rings are merged behind `csdr.boundedBuffers` (default off) for
+  harness-validated stages only. Native outputs are byte-identical to upstream;
+  the live app's CSDR ring memory was measured at about 5 GiB versus about
+  9 MiB when bounded. A synthetic all-decoder run on a heavily loaded host was
+  CPU-bound (most IQ dropped either way), so throughput is not established.
+- Tuner reconnect synchronization and an rtl_tcp stall watchdog are reviewed on
+  a branch: last accepted tuner state is replayed on the first payload of a new
+  session (`tuner.reconnectPolicy: restore|reset`), rejected relay rates no
+  longer change caps, and a silent connected rtl_tcp session reconnects after
+  `stallTimeoutMs` (default 15 s). This fixes two observed live failures: stale
+  rate metadata after a receiver reboot, and a half-open connection that never
+  reconnected.
+- The rate-model instance/suspension design is written and reviewed.
 
 The Pi image/operator-page and CLI teams continue independently in their owned
-files. Persistent Wi-Fi power saving configuration belongs to the image team.
-Clean-card reboot/hotplug and stable-power streaming acceptance continue in the
-hardware session; no software milestone substitutes for those tests.
+files. No software milestone substitutes for hardware acceptance.
 
 ## 1. Reproducible SD-card installation
 
@@ -50,11 +70,15 @@ A flashable WaveKit SD image and dedicated Imager launcher are now built locally
 The intended onboarding is: select WaveKit in Imager, configure network/account/SSH,
 write, boot. Physical clean-card acceptance and release distribution remain pending;
 the older manual staging workflow is retained for development and recovery.
-The previously flashed candidate completed a fresh unattended install and delivered
-IQ to the laptop; its reboot and physical hotplug acceptance remain pending.
-The updated operator-page candidate adds an independent early setup page and
-persistent Wi-Fi policy; it requires its own clean-card acceptance.
-Earlier patched-runtime hotplug evidence is separate from this clean-card run.
+The operator-page candidate (early setup page, persistent Wi-Fi policy) was
+written to a fresh card on 2026-10-08 and passed its own clean-card run on Wi-Fi
+with no runtime patches: first boot, mDNS and key-based SSH, the early setup page
+throughout installation (it reported the full page ready only once that page
+answered), unattended installation in about six minutes, the full operator page,
+Wi-Fi power saving off after the first boot and after a reboot, receiver reboot
+recovery and physical USB hotplug recovery (sampling resumed about 8 s after
+re-enumeration). Ethernet was not tested. Earlier patched-runtime hotplug evidence
+and the earlier candidate's results remain separate claims.
 
 - [x] Build a reproducible flashable WaveKit image from a pinned Pi OS base,
       embedding the verified receiver bundle and automatic first-boot setup.
@@ -72,13 +96,20 @@ Earlier patched-runtime hotplug evidence is separate from this clean-card run.
 - [x] Verify first-boot root installation with password-required sudo accounts.
 - [ ] Repeat installation on a freshly written card: Wi-Fi, Ethernet, mDNS, direct
       SSH, Docker startup, dongle detection, reboot and receiver hotplug recovery.
+      Wi-Fi path passed on the operator-page image (2026-10-08); Ethernet pending.
+- [ ] Recover the laptop's IQ stream automatically after a receiver reboot or
+      hotplug. Observed failure: the core kept a half-open connection marked
+      connected/stale and never reconnected. Fix (stall watchdog) is reviewed but
+      not yet deployed.
 
 The 2026-10-08 Wi-Fi run passed unattended installation, direct key-based SSH,
 receiver startup and reboot recovery. USB reattachment exposed a stale receiver
 handle; a subsequent runtime fix passed a physical unplug/replug test with IQ
 resuming automatically. That runtime test does not count as a pristine image
-pass; the refreshed image still needs a complete clean-card rerun. Ethernet and
-sustained loss-free streaming remain unverified.
+pass. The operator-page image later passed the clean-card Wi-Fi run described
+above. Ethernet and sustained loss-free streaming remain unverified; that run
+logged nine brief undervoltage episodes (including three right after the dongle
+was re-plugged), a weak Wi-Fi link and substantial delivery loss at times.
 
 Validate SD writing, unattended first boot and sustained streaming separately.
 Current development hardware has repeated undervoltage and substantial IQ loss
@@ -109,10 +140,11 @@ pending. Coordinate any live receiver/network changes with the hardware session.
       class setup, so the channelizer is built for the core first (it cuts
       per-decoder CPU there and enables several protocols from one capture)
       and only then offered on the SDR host as a transport optimisation.
-- [ ] Disable Wi-Fi power save persistently in the Pi image. The image now embeds
+- [x] Disable Wi-Fi power save persistently in the Pi image. The image embeds
       a NetworkManager `wifi.powersave=2` default before first network activation;
-      image/software checks pass, verification on the next card and reboot remains
-      pending. Explicit per-connection operator choices retain precedence.
+      verified off on a freshly written card after first boot and after reboot,
+      with the Imager connection inheriting the default. Explicit per-connection
+      operator choices retain precedence. (Not a cure for streaming loss.)
 - [ ] Make the SDR host re-apply its configured gain and sample rate when the last
       rtlmux client disconnects, so a departing client cannot leave the receiver
       under-driven (observed: gain left at index 11, samples spanning 124–131).
@@ -161,7 +193,9 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       tests pass; all-decoder RF fixture coverage remains pending.
 - [ ] Synchronize tuner state on reconnection and propagate accepted changes.
       Accepted frequencies now update source/decoder metadata, and tuning-driven
-      decoder restarts are serialized. Reconnection synchronization remains open.
+      decoder restarts are serialized. Reconnect replay of the last accepted state
+      (on first payload), caps reconciliation and an rtl_tcp stall watchdog are
+      reviewed on a branch; merge, deploy and live re-test remain.
 - [x] Preserve arrays when applying indexed environment overrides.
 - [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
       buffered final data; read errors stop looping playback).
@@ -257,15 +291,15 @@ receiver container, Docker storage filesystem, or observed by the service) and
 its freshness; anything the unprivileged container cannot see is shown as
 unavailable with a reason. The Pi CORS policy no longer reflects every origin.
 
-Evidence so far is software-only: unit/integration tests cover stale counters,
-idle delivery with ongoing sampling, header-only growth, rtlmux/rtl_tcp restarts,
-hung and malformed stats, expiry, missing sysfs files, setup records and page
-logic; the page was checked at desktop and mobile widths, light and dark, against
-the real server code with simulated Pi data, including lost contact. It is included
-in the updated image candidate, but is NOT deployed: the current Pi runtime and
-the SD image being accepted do not include it. Hardware checks still pending:
-`rpi_volt` visibility in the container, the
-thermal zone name, `/proc/net/wireless`, kernel version and cgroup namespace.
+Unit/integration tests cover stale counters, idle delivery with ongoing
+sampling, header-only growth, rtlmux/rtl_tcp restarts, hung and malformed stats,
+expiry, missing sysfs files, setup records and page logic. On hardware, the
+operator-page image (2026-10-08) served the page from a fresh card: undervoltage
+state (`rpi_volt`), the `cpu-thermal` zone and `/proc/net/wireless` link data
+are visible to the receiver container; container memory accounting is not
+visible from inside it, and throttling stays unavailable by design. The page
+showed the USB hotplug transition. A later visual polish of the status and
+setup pages is committed but not yet in an image.
 
 Known limits: on current Raspberry Pi kernels the firmware's "since boot" power
 bits are cleared by the kernel's own polling and throttling flags need
