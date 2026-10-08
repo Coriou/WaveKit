@@ -33,12 +33,23 @@ export type FetchLike = (
 	json(): Promise<unknown>
 }>
 
+const SCHEMES = new Set(["http:", "https:", "ws:", "wss:"])
+
 export function checkTarget(url: string): URL {
+	// "localhost:9000" parses as scheme "localhost:" with an empty host.
+	const hint = /^[a-z][a-z0-9+.-]*:\/\//i.test(url)
+		? ""
+		: ` (did you mean http://${url}?)`
 	let u: URL
 	try {
 		u = new URL(url)
 	} catch {
-		throw new CliUsageError(`invalid API URL: ${url}`)
+		throw new CliUsageError(`invalid API URL: ${url}${hint}`)
+	}
+	if (!SCHEMES.has(u.protocol) || u.hostname === "") {
+		throw new CliUsageError(
+			`invalid API URL: ${url}; use http(s):// or ws(s)://${hint}`,
+		)
 	}
 	if (u.hostname === "localhost") u.hostname = "127.0.0.1"
 	if (u.port === RELAY_PORT) {
@@ -60,7 +71,8 @@ export function deriveWs(base: string): string {
 
 export function deriveBase(ws: string): string {
 	const u = new URL(ws)
-	u.protocol = u.protocol === "wss:" ? "https:" : "http:"
+	u.protocol =
+		u.protocol === "wss:" || u.protocol === "https:" ? "https:" : "http:"
 	return u.origin
 }
 
@@ -77,13 +89,19 @@ export function resolveExplicit(
 ): ApiTarget | null {
 	const api = apiFlag ?? env["WAVEKIT_API_URL"]
 	if (api !== undefined && api !== "") {
-		const base = checkTarget(api).origin
+		const u = checkTarget(api)
+		if (u.protocol === "ws:") u.protocol = "http:"
+		else if (u.protocol === "wss:") u.protocol = "https:"
+		const base = u.origin
 		return { base, ws: deriveWs(base), explicit: true }
 	}
 	const ws =
 		env["WAVEKIT_WS_URL"] ?? env["WAVEKIT_WS_URLS"]?.split(",")[0]?.trim()
 	if (ws !== undefined && ws !== "") {
-		const url = checkTarget(ws).toString()
+		const u = checkTarget(ws)
+		if (u.protocol === "http:") u.protocol = "ws:"
+		else if (u.protocol === "https:") u.protocol = "wss:"
+		const url = u.toString()
 		return { base: deriveBase(url), ws: url, explicit: true }
 	}
 	return null

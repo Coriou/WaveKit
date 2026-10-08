@@ -1,0 +1,6 @@
+{
+	"extends": "live",
+	"name": "dropping",
+	"description": "Every decoder branch dropping 60 % of offered IQ now.",
+	"transform": { "dropPercent": 60 }
+}

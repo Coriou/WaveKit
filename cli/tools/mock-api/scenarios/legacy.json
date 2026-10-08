@@ -1,0 +1,6 @@
+{
+	"extends": "live",
+	"name": "legacy",
+	"description": "Older core: no source activity, no fanout offered counters, no optional decoder status fields (source, targets, last error, idle timeout), no source:status or decoder:status events.",
+	"transform": { "legacy": true }
+}

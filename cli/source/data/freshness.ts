@@ -1,4 +1,3 @@
-import type { ExtendedSourceStatus } from "@wavekit/api-types"
 import type {
 	ApiView,
 	ConnState,
@@ -8,6 +7,7 @@ import type {
 	LaneError,
 	LaneOrigin,
 	MetricBeat,
+	SourceRow,
 } from "./types.js"
 
 export const LANE_TTL_MS = 15_000
@@ -93,7 +93,7 @@ function beatFresh(
 
 /** T2: the word follows the evidence (activity → transport flag → WS heartbeat → unknown). */
 export function iqView(
-	source: ExtendedSourceStatus | undefined,
+	source: SourceRow | undefined,
 	sourceFresh: boolean,
 	beat: MetricBeat | undefined,
 	now: number,
@@ -115,6 +115,9 @@ export function iqView(
 			ageMs,
 			rateBytesPerSec: rate,
 		})
+		// A newer core sent activity we cannot read: say so rather than fall back
+		// to transport wording, which is only for cores without activity.
+		if (source.activityUnrecognised === true) return view("unknown", "unknown")
 		const a = source.activity
 		if (a) {
 			switch (a.state) {
@@ -155,7 +158,7 @@ const GLYPH_RANK: Readonly<Record<GlyphRole, number>> = {
 }
 
 export function iqSummary(
-	sources: Lane<ExtendedSourceStatus[]>,
+	sources: Lane<SourceRow[]>,
 	metrics: Record<string, MetricBeat>,
 	now: number,
 ): IqView {
@@ -179,13 +182,15 @@ export function iqSummary(
 		allSame && first
 			? `${views.length}/${views.length} ${first.word}`
 			: `${streaming}/${views.length} streaming`
-	const rates = views
-		.map(v => v.rateBytesPerSec)
-		.filter((r): r is number => r !== null)
+	// One unknown rate makes the total unknown ("?"), never a partial sum.
+	const rates = views.map(v => v.rateBytesPerSec)
+	const total = rates.every((r): r is number => r !== null)
+		? rates.reduce((a, b) => a + b, 0)
+		: null
 	return {
 		glyph: worst.glyph,
 		word,
 		ageMs: null,
-		rateBytesPerSec: rates.length > 0 ? rates.reduce((a, b) => a + b, 0) : null,
+		rateBytesPerSec: total,
 	}
 }
