@@ -17,16 +17,20 @@ import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
 	DecoderCaps as ApiDecoderCaps,
+	DecoderInfo as ApiDecoderInfo,
 	DecoderStatus as ApiDecoderStatus,
 } from "@wavekit/api-types"
-import type {
-	DecoderCaps as InternalDecoderCaps,
-	DecoderStatus as InternalDecoderStatus,
-} from "../../decoders/types.js"
+import type { DecoderStatus as InternalDecoderStatus } from "../../decoders/types.js"
 import {
 	decoderRateAssessmentSchema,
 	decoderRateRequirementsSchema,
 } from "./decoder-rate-schemas.js"
+import { decoderStatusExtensionProperties } from "./decoder-status-schemas.js"
+import {
+	toApiDecoderCaps,
+	toApiDecoderInfo,
+	toApiDecoderStatus,
+} from "../serializers/decoder-status.js"
 
 /**
  * Decoder stats schema for response
@@ -77,6 +81,7 @@ const decoderStatusSchema = {
 		restartCount: { type: "number" },
 		version: { type: "string" },
 		rateAssessment: decoderRateAssessmentSchema,
+		...decoderStatusExtensionProperties,
 	},
 	required: [
 		"id",
@@ -166,11 +171,9 @@ export interface DecoderConfigUpdate {
 }
 
 /**
- * Extended decoder info including capabilities
+ * Extended decoder info including capabilities (shared with `decoder:status`).
  */
-export interface DecoderInfo extends ApiDecoderStatus {
-	caps?: ApiDecoderCaps
-}
+export type DecoderInfo = ApiDecoderInfo
 
 /**
  * Decoder routes plugin for Fastify.
@@ -182,55 +185,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 ) => {
 	const { decoderManager, decoderRegistry } = options
 
-	/**
-	 * Helper function to enrich decoder status with capabilities
-	 */
-	const toApiDecoderStatus = (
-		status: InternalDecoderStatus,
-	): ApiDecoderStatus => {
-		return {
-			id: status.id,
-			type: status.type,
-			running: status.running,
-			health: status.health,
-			...(status.pid !== undefined ? { pid: status.pid } : {}),
-			uptime: status.uptime,
-			stats: status.stats,
-			lastOutputAt: status.lastOutputAt
-				? status.lastOutputAt.toISOString()
-				: null,
-			restartCount: status.restartCount,
-			...(status.version !== undefined ? { version: status.version } : {}),
-			// No built-in capture limits are inferred from legacy audio/IQ preferences.
-			rateAssessment: status.rateAssessment ?? {
-				verdict: "unknown",
-				reasonCode: "unknown-requirements",
-			},
-		}
-	}
-
-	const toApiDecoderCaps = (caps: InternalDecoderCaps): ApiDecoderCaps => {
-		return {
-			input: caps.input,
-			output: caps.output,
-			integrationPattern: caps.integrationPattern,
-			...(caps.wantsExclusiveSource !== undefined
-				? { wantsExclusiveSource: caps.wantsExclusiveSource }
-				: {}),
-			...(caps.preferredSampleRates !== undefined
-				? { preferredSampleRates: caps.preferredSampleRates }
-				: {}),
-			...(caps.rateRequirements !== undefined
-				? { rateRequirements: caps.rateRequirements }
-				: {}),
-		}
-	}
-
-	const enrichWithCaps = (status: InternalDecoderStatus): DecoderInfo => {
-		const caps = decoderRegistry?.getCaps(status.type)
-		const apiStatus = toApiDecoderStatus(status)
-		return caps ? { ...apiStatus, caps: toApiDecoderCaps(caps) } : apiStatus
-	}
+	const enrichWithCaps = (status: InternalDecoderStatus): DecoderInfo =>
+		toApiDecoderInfo(status, decoderRegistry)
 
 	/**
 	 * GET /api/decoders - List all decoders

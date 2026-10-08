@@ -14,6 +14,7 @@ import { sourceActivitySchema } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
+import { decoderStatusExtensionProperties } from "./decoder-status-schemas.js"
 import type { AudioOutput } from "../../core/audio-output.js"
 import type { TunerRelay, TunerRelayStatus } from "../../core/tuner-relay.js"
 import {
@@ -245,6 +246,7 @@ const decoderStatusSchema = {
 		lastOutputAt: { type: "string", format: "date-time", nullable: true },
 		restartCount: { type: "number" },
 		version: { type: "string" },
+		...decoderStatusExtensionProperties,
 	},
 	required: [
 		"id",

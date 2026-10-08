@@ -22,9 +22,15 @@ import type {
 	Decoder,
 	DecoderConfig,
 	DecoderHealth,
+	DecoderLastError,
 	DecoderOutput,
 	DecoderStatus,
 } from "./types.js"
+import {
+	createDecoderExitError,
+	createDecoderLastError,
+	describeDecoderStatusFields,
+} from "./status-fields.js"
 import type { DecoderRegistry } from "./registry.js"
 import { SourceFanoutRouter } from "../core/source-fanout-router.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
@@ -75,6 +81,8 @@ interface DecoderState {
 	lastOutputAt: Date | null
 	/** Version validation result (Requirements 27.1, 27.2, 27.3) */
 	versionValidation?: VersionValidationResult | undefined
+	/** Most recent failure; retained across auto-restarts, cleared by startDecoder */
+	lastError: DecoderLastError | null
 }
 
 /**
@@ -207,6 +215,7 @@ export class DecoderManager extends EventEmitter {
 			lastHealth: "running",
 			lastOutputAt: null,
 			versionValidation,
+			lastError: null,
 		}
 
 		this.decoders.set(config.id, state)
@@ -238,6 +247,7 @@ export class DecoderManager extends EventEmitter {
 		// Reset restart tracking
 		state.intentionallyStopped = false
 		state.restartCount = 0
+		state.lastError = null
 		state.currentDelay = this.config.restartDelay
 		if (state.restartTimer) {
 			clearTimeout(state.restartTimer)
@@ -248,6 +258,7 @@ export class DecoderManager extends EventEmitter {
 			await this.wireDecoderToFanout(state)
 			await state.decoder.start()
 		} catch (err) {
+			state.lastError = createDecoderLastError(err, "error")
 			this.unwireDecoderFromFanout(state)
 			this.updateDecoderHealth(state, "faulted")
 			throw err
@@ -390,6 +401,13 @@ export class DecoderManager extends EventEmitter {
 			...state.decoder.getStatus(),
 			health: state.lastHealth,
 			restartCount: state.restartCount,
+			...describeDecoderStatusFields({
+				config: state.config,
+				caps: state.decoder.caps,
+				assignedSourceId: state.assignedSourceId,
+				lastError: state.lastError,
+				idleTimeoutMs: this.config.idleTimeout,
+			}),
 		}
 	}
 
@@ -484,6 +502,7 @@ export class DecoderManager extends EventEmitter {
 		// Wrapped in try-catch for failure isolation (Requirement 10.1)
 		decoder.on("error", (error: Error) => {
 			try {
+				state.lastError = createDecoderLastError(error, "error")
 				this.log.error({ err: error, decoderId: decoder.id }, "Decoder error")
 				this.emit("decoder:error", decoder.id, error)
 			} catch (err) {
@@ -581,6 +600,11 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 
+		// Real exits carry a code or signal; (null, null) marks a failed restart
+		// whose cause the restart path already recorded.
+		if (code !== null || signal !== null)
+			state.lastError = createDecoderExitError(code, signal)
+
 		// Check if max restarts exceeded (Requirement 20.3)
 		if (
 			this.config.maxRestarts > 0 &&
@@ -628,6 +652,7 @@ export class DecoderManager extends EventEmitter {
 					}
 					await decoder.start()
 				} catch (err) {
+					state.lastError = createDecoderLastError(err, "error")
 					// Log failure but don't crash - failure isolation (Requirement 10.1)
 					this.log.error(
 						{ err, decoderId: decoder.id },

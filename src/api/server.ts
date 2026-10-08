@@ -42,6 +42,8 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
+import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
+import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
 
@@ -103,6 +105,7 @@ export class ApiServer {
 	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
+	private readonly sourceStatusPublisher: SourceStatusPublisher
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
@@ -124,6 +127,11 @@ export class ApiServer {
 
 		// Create WebSocket broadcaster
 		this.wsBroadcaster = new WebSocketEventBroadcaster(dependencies.logger)
+		this.sourceStatusPublisher = new SourceStatusPublisher({
+			sourceManager: this.sourceManager,
+			fanoutTelemetry: this.fanoutTelemetry,
+			broadcaster: this.wsBroadcaster,
+		})
 
 		// Create Fastify instance with custom logger
 		this.app = Fastify({
@@ -186,6 +194,7 @@ export class ApiServer {
 				clearInterval(this.telemetryInterval)
 				this.telemetryInterval = null
 			}
+			this.sourceStatusPublisher.stop()
 
 			// Close all WebSocket connections first
 			this.wsBroadcaster.closeAll()
@@ -299,6 +308,28 @@ export class ApiServer {
 		this.decoderManager.on("decoder:health", (decoderId, health) => {
 			this.wsBroadcaster.broadcastDecoderHealth(decoderId, health)
 		})
+
+		// Full decoder status (same body as GET /api/decoders/:id) on every
+		// lifecycle transition, so WS clients see lastError/restartCount without REST.
+		const publishDecoderStatus = (decoderId: string): void => {
+			const status = this.decoderManager.getStatus(decoderId)
+			if (status)
+				this.wsBroadcaster.broadcastDecoderStatus(
+					toApiDecoderInfo(status, this.decoderRegistry),
+				)
+		}
+		for (const event of [
+			"decoder:started",
+			"decoder:stopped",
+			"decoder:error",
+			"decoder:health",
+			"decoder:restarting",
+			"decoder:max-restarts",
+		] as const)
+			this.decoderManager.on(event, publishDecoderStatus)
+
+		// Source status with activity (same body as a GET /api/sources item)
+		this.sourceStatusPublisher.start()
 
 		// Source events (Requirement 10.4)
 		this.sourceManager.on("connected", sourceId => {
