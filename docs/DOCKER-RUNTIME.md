@@ -54,6 +54,14 @@ valid inside the container. Docker-specific API overrides bind the server to
 Changing this environment variable and running `make app-up` recreates the app
 with the selected config.
 
+Environment overrides can target existing YAML array entries by zero-based index:
+`WAVEKIT_SOURCES__0__HOST=192.0.2.10` or
+`WAVEKIT_DECODERS__0__ENABLED=false`. Nested values use another separator, for
+example `WAVEKIT_SOURCES__0__CAPS__SAMPLE_RATE=1024000`. Other entries and fields
+are retained. Indices must already exist; create sources/decoders in YAML first.
+The older `WAVEKIT_SOURCES_0_HOST` spelling also works. Array overrides use indices,
+not source IDs. If changing a receiver address, update its monitoring URLs too.
+
 Decoders and live audio are opt-in. Add the desired decoder configuration for
 the captured band, with `sourceId: pi-iq`, or enable `liveDemod`. Consult
 [the decoder guide](DECODER-GUIDE.md) and [decoder status](DECODER_STATUS.md).

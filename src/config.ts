@@ -345,8 +345,9 @@ function setNestedValue(
 	for (let i = 0; i < path.length - 1; i++) {
 		const key = path[i]
 		if (key === undefined) continue
+		if (["__proto__", "constructor", "prototype"].includes(key)) return
 		if (
-			!(key in current) ||
+			!Object.hasOwn(current, key) ||
 			typeof current[key] !== "object" ||
 			current[key] === null
 		) {
@@ -355,7 +356,10 @@ function setNestedValue(
 		current = current[key] as Record<string, unknown>
 	}
 	const lastKey = path[path.length - 1]
-	if (lastKey !== undefined) {
+	if (
+		lastKey !== undefined &&
+		!["__proto__", "constructor", "prototype"].includes(lastKey)
+	) {
 		current[lastKey] = value
 	}
 }
@@ -366,8 +370,8 @@ function setNestedValue(
  *
  * Examples:
  *   WAVEKIT_API__PORT -> ["api", "port"]
- *   WAVEKIT_SOURCES__RTL_TCP__HOST -> ["sources", "rtlTcp", "host"]
- *   WAVEKIT_DECODERS__DSD_FME__ENABLED -> ["decoders", "dsdFme", "enabled"]
+ *   WAVEKIT_SOURCES__0__HOST -> ["sources", "0", "host"]
+ *   WAVEKIT_DECODERS__0__ENABLED -> ["decoders", "0", "enabled"]
  *
  * Requirements: 5.1
  */
@@ -410,6 +414,13 @@ export function parseEnvironmentVariables(): Record<string, unknown> {
 				} catch {
 					// Skip invalid env values - validation will catch them later
 				}
+			} else if (/^WAVEKIT_(SOURCES|DECODERS)_\d+_/.test(key)) {
+				// Compatibility with the indexed form shown in older Docker examples.
+				const indexed = /^WAVEKIT_(SOURCES|DECODERS)_(\d+)_(.+)$/.exec(key)!
+				const path = envVarToConfigPath(
+					`WAVEKIT_${indexed[1]}__${indexed[2]}__${indexed[3]}`,
+				)
+				setNestedValue(result, path, parseEnvValue(value))
 			} else if (key.includes(NESTED_KEY_SEPARATOR)) {
 				// Use new double-underscore format for nested keys
 				try {
@@ -439,7 +450,7 @@ function applyEnvironmentOverrides(
 	const envConfig = parseEnvironmentVariables()
 
 	// Deep merge environment config into result
-	deepMerge(result, envConfig)
+	deepMerge(result, envConfig, true)
 
 	return result
 }
@@ -451,9 +462,53 @@ function applyEnvironmentOverrides(
 function deepMerge(
 	target: Record<string, unknown>,
 	source: Record<string, unknown>,
+	indexedArrays = false,
 ): void {
 	for (const [key, sourceValue] of Object.entries(source)) {
+		if (["__proto__", "constructor", "prototype"].includes(key)) continue
 		const targetValue = target[key]
+		if (
+			indexedArrays &&
+			sourceValue !== null &&
+			typeof sourceValue === "object" &&
+			!Array.isArray(sourceValue) &&
+			Array.isArray(targetValue)
+		) {
+			for (const [index, value] of Object.entries(sourceValue)) {
+				if (
+					!/^(0|[1-9]\d*)$/.test(index) ||
+					Number(index) >= targetValue.length ||
+					!Object.hasOwn(targetValue, index)
+				) {
+					throw new ConfigValidationError(
+						z.ZodError.create([
+							{
+								code: z.ZodIssueCode.custom,
+								path: [key, index],
+								message:
+									"Environment array overrides must select an existing numeric index in the YAML configuration",
+							},
+						]),
+					)
+				}
+				const item = targetValue[Number(index)] as unknown
+				if (
+					item !== null &&
+					typeof item === "object" &&
+					!Array.isArray(item) &&
+					value !== null &&
+					typeof value === "object" &&
+					!Array.isArray(value)
+				) {
+					deepMerge(
+						item as Record<string, unknown>,
+						value as Record<string, unknown>,
+						true,
+					)
+				} else targetValue[Number(index)] = value
+			}
+			continue
+		}
 
 		if (
 			sourceValue !== null &&
@@ -467,6 +522,7 @@ function deepMerge(
 			deepMerge(
 				targetValue as Record<string, unknown>,
 				sourceValue as Record<string, unknown>,
+				indexedArrays,
 			)
 		} else {
 			// Override with source value
@@ -698,9 +754,9 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_TUNER_RELAY__COMMAND_HISTORY_LIMIT",
 		"WAVEKIT_LOGGING__LEVEL",
 		"WAVEKIT_LOGGING__DIR",
-		"WAVEKIT_SOURCES__<ID>__HOST",
-		"WAVEKIT_SOURCES__<ID>__PORT",
-		"WAVEKIT_DECODERS__<ID>__ENABLED",
+		"WAVEKIT_SOURCES__<INDEX>__HOST",
+		"WAVEKIT_SOURCES__<INDEX>__PORT",
+		"WAVEKIT_DECODERS__<INDEX>__ENABLED",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
 }

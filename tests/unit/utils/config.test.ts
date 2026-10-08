@@ -39,6 +39,69 @@ describe("Configuration Loader", () => {
 	})
 
 	describe("loadConfig", () => {
+		it.each(["WAVEKIT_SOURCES__0__HOST", "WAVEKIT_SOURCES_0_HOST"])(
+			"overrides an indexed source without replacing the array: %s",
+			variable => {
+				const configPath = path.join(tempDir, "arrays.yaml")
+				const source = {
+					id: "first",
+					type: "rtl_tcp",
+					host: "localhost",
+					port: 1234,
+					caps: { kind: "iq", format: "U8_IQ", sampleRate: 2048000 },
+				}
+				fs.writeFileSync(
+					configPath,
+					JSON.stringify({
+						sources: [source, { ...source, id: "second" }],
+						decoders: [
+							{
+								id: "sensor",
+								type: "rtl433",
+								enabled: true,
+								sourceId: "first",
+								options: { gain: 12 },
+							},
+						],
+					}),
+				)
+				process.env[variable] = "192.0.2.10"
+				process.env["WAVEKIT_SOURCES__0__CAPS__SAMPLE_RATE"] = "1024000"
+				process.env["WAVEKIT_DECODERS__0__ENABLED"] = "false"
+				const config = loadConfig(configPath)
+				expect(config.sources).toHaveLength(2)
+				expect(config.sources[0]).toMatchObject({
+					...source,
+					host: "192.0.2.10",
+					caps: { ...source.caps, sampleRate: 1024000 },
+				})
+				expect(config.sources[1]).toMatchObject({ ...source, id: "second" })
+				expect(config.decoders[0]).toMatchObject({
+					enabled: false,
+					sourceId: "first",
+					options: { gain: 12 },
+				})
+			},
+		)
+
+		it.each(["0", "2", "receiver", "999999999"])(
+			"rejects nonexistent source index %s without creating sparse arrays",
+			index => {
+				const configPath = path.join(tempDir, "empty.yaml")
+				fs.writeFileSync(configPath, "sources: []\n")
+				process.env[`WAVEKIT_SOURCES__${index}__HOST`] = "192.0.2.10"
+				expect(() => loadConfig(configPath)).toThrow("existing numeric index")
+			},
+		)
+
+		it("does not merge inherited prototype paths from YAML or environment", () => {
+			const configPath = path.join(tempDir, "prototype.yaml")
+			fs.writeFileSync(configPath, "api:\n  __proto__:\n    polluted: true\n")
+			process.env["WAVEKIT_CONSTRUCTOR__PROTOTYPE__POLLUTED"] = "true"
+			loadConfig(configPath)
+			expect(Object.prototype).not.toHaveProperty("polluted")
+		})
+
 		it("selects WAVEKIT_CONFIG without merging another profile", () => {
 			const configPath = path.join(tempDir, "local.yaml")
 			fs.writeFileSync(configPath, "api:\n  port: 9000\nsources: []\n")
