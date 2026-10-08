@@ -23,6 +23,12 @@ export interface RtlmuxStats {
 	}>
 }
 
+interface RawRtlmuxClient {
+	client: { host: string; port: number }
+	dataOut: number
+	dropped?: { size?: number }
+}
+
 interface InternalProcessState extends ProcessState {
 	lastPid?: number
 	seenOnce: boolean
@@ -65,6 +71,11 @@ export class ProcessManager {
 		lastError: null,
 		seenOnce: false,
 	}
+	private lastStatsSample: {
+		at: number
+		totalBytesSent: number
+		pid: number | undefined
+	} | null = null
 	private currentStats: RtlmuxStats = {
 		clients: 0,
 		bytesPerSec: 0,
@@ -178,7 +189,10 @@ export class ProcessManager {
 
 				try {
 					const cmdline = fs.readFileSync(cmdlinePath, "utf8")
-					if (cmdline.includes(name)) return pid
+					// Arguments may mention a service name (e.g. s6-supervise rtlmux).
+					// Match the executable itself rather than any command-line substring.
+					const executable = cmdline.split("\0", 1)[0]
+					if (executable && path.basename(executable) === name) return pid
 				} catch {
 					// Ignore unreadable cmdline files
 				}
@@ -223,6 +237,7 @@ export class ProcessManager {
 		if (this.statsPollingInterval) return
 		const pollStats = async (): Promise<void> => {
 			if (!this.rtlmuxState.running) {
+				this.lastStatsSample = null
 				this.currentStats = {
 					clients: 0,
 					bytesPerSec: 0,
@@ -238,7 +253,7 @@ export class ProcessManager {
 				)
 				if (response.ok) {
 					const data = (await response.json()) as {
-						clients?: number
+						clients?: number | RawRtlmuxClient[]
 						bytes_per_sec?: number
 						total_bytes_sent?: number
 						client_details?: Array<{
@@ -247,16 +262,48 @@ export class ProcessManager {
 							bytes_dropped: number
 						}>
 					}
+					// slepp/rtlmux exposes a clients array, not the legacy numeric
+					// count / client_details shape. Normalize both into our API.
+					const rawClients = Array.isArray(data.clients) ? data.clients : null
+					const totalBytesSent =
+						data.total_bytes_sent ??
+						rawClients?.reduce((total, client) => total + client.dataOut, 0) ??
+						0
+					const at = this.now()
+					const previous = this.lastStatsSample
+					const elapsedSeconds = previous ? (at - previous.at) / 1000 : 0
+					const bytesPerSec =
+						data.bytes_per_sec ??
+						(previous &&
+						previous.pid === this.rtlmuxState.pid &&
+						elapsedSeconds > 0
+							? Math.max(
+									0,
+									(totalBytesSent - previous.totalBytesSent) / elapsedSeconds,
+								)
+							: 0)
+					this.lastStatsSample = {
+						at,
+						totalBytesSent,
+						pid: this.rtlmuxState.pid,
+					}
 					this.currentStats = {
-						clients: data.clients ?? 0,
-						bytesPerSec: data.bytes_per_sec ?? 0,
-						totalBytesSent: data.total_bytes_sent ?? 0,
-						clientDetails:
-							data.client_details?.map(c => ({
-								id: c.id,
-								address: c.address,
-								bytesDropped: c.bytes_dropped,
-							})) ?? [],
+						clients: rawClients
+							? rawClients.length
+							: ((data.clients as number | undefined) ?? 0),
+						bytesPerSec,
+						totalBytesSent,
+						clientDetails: rawClients
+							? rawClients.map((client, index) => ({
+									id: index,
+									address: `${client.client.host.includes(":") ? `[${client.client.host}]` : client.client.host}:${client.client.port}`,
+									bytesDropped: client.dropped?.size ?? 0,
+								}))
+							: (data.client_details?.map(c => ({
+									id: c.id,
+									address: c.address,
+									bytesDropped: c.bytes_dropped,
+								})) ?? []),
 					}
 				}
 			} catch {

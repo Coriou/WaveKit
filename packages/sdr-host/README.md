@@ -11,6 +11,198 @@ RTL-SDR dongle host with rtlmux fanout and unified status API.
 - **Fanout multiplexing** (`rtlmux` exposed to LAN)
 - **Unified status API** for health, dongle info, and client stats
 
+The image contains `rtl_tcp` and librtlsdr. The Pi only needs a supported
+64-bit Linux OS, Docker, and the USB dongle; do not install a separate host
+`rtl_tcp` service that would compete for the device.
+
+## Recover a Pi 3 Model B with a fresh SD card
+
+The Pi supplies IQ while WaveKit and its decoders run on your main computer.
+Use **Raspberry Pi OS Lite (64-bit)**: this image supports `linux/arm64` and
+`linux/amd64`, and does not support a 32-bit `armhf` userland.
+
+1. Open [Raspberry Pi Imager](https://www.raspberrypi.com/software/) on your
+   computer. Select the Pi model, Raspberry Pi OS Lite (64-bit), and the SD
+   card. Check the selected card's identity before writing it.
+2. In Imager's customisation settings, set a hostname such as `wavekit-sdr`,
+   your username, the local timezone/country, and SSH with your public key.
+   Configure **Wi-Fi for normal use**: enter your network name and password
+   locally in Imager. The original Pi 3 Model B supports
+   [2.4 GHz Wi-Fi only](https://github.com/raspberrypi/documentation/blob/master/documentation/asciidoc/computers/getting-started/setting-up.adoc),
+   so choose a network that offers that band. These steps are described in the
+   [official headless setup instructions](https://www.raspberrypi.com/documentation/computers/getting-started.html).
+3. Write and verify the card, eject it, then put it in the Pi. Connect the
+   dongle and a suitable power supply. The Pi joins the configured Wi-Fi on
+   boot. Ethernet remains supported: plug in a cable as a fallback if Wi-Fi
+   setup fails or streaming is unreliable; the same container and WaveKit
+   configuration work over either network interface. At 2.048 Msps the raw U8
+   IQ stream is about 4 MB/s, so verify continuous streaming on your Wi-Fi.
+4. SSH to the hostname (or the IP shown by your router), then check the OS:
+
+   ```sh
+   ssh YOUR_USER@wavekit-sdr.local
+   dpkg --print-architecture
+   # Must print arm64.
+   ```
+
+5. Follow the managed installation below. Reboot or log out/in after Docker
+   group and USB driver changes before starting the container. `install` sets
+   up the host; `update` pulls and starts the application. For an unattended
+   host installation, the manager also accepts `install --yes`.
+6. After starting the container, check its API on the Pi:
+
+   ```sh
+   ~/.local/bin/wavekit-sdr-host health
+   curl -fsS http://localhost:8080/health
+   ```
+
+For WaveKit on your main computer, use the [Docker runtime](../../docs/DOCKER-RUNTIME.md).
+Copy `config/docker-pi.example.yaml` to `config/docker-pi.local.yaml`, replace
+the example source host and monitoring addresses with the Pi's LAN IP, then run
+`WAVEKIT_APP_CONFIG=/app/config/docker-pi.local.yaml make app-up`. The API and
+decoder tools stay in Docker. Set the source's `caps.sampleRate` to match
+`SDR_HOST_RTL_TCP__SAMPLE_RATE`.
+
+The compose file rotates container logs (`10 MB` per file, three files) to
+limit SD-card writes and disk growth. Keep the manager's `.env` file and your
+WaveKit configuration backed up on your main computer. Hardware streaming and
+fresh-card recovery still need verification on the actual Pi.
+
+### If the registry image cannot be pulled
+
+An anonymous pull of `ghcr.io/coriou/wavekit-sdr-host:latest` returned HTTP 401
+during the local audit. Authenticate if you have access, or build from this
+checkout. The portable bundle includes an ARM64 image, compose configuration,
+and installer. It needs no registry login and no native `rtl_tcp` installation:
+
+```sh
+# On your computer, from the repository root (build may take a while):
+make sdr-host-bundle
+# If wavekit-sdr-host:pi-local is already built:
+make sdr-host-bundle SDR_HOST_BUNDLE_ARGS=--skip-build
+
+# Copy the bundle and install on the Pi:
+scp -r output/pi-bundle YOUR_USER@wavekit-sdr.local:~/
+ssh YOUR_USER@wavekit-sdr.local
+cd ~/pi-bundle
+bash setup.sh
+```
+
+Run `setup.sh` as the normal Pi user with sudo available. It verifies the
+archive, installs/prepares the host once, loads the image, and starts Compose
+with `--pull never`. It uses sudo for Docker if your new group membership is
+not active yet. Internet is needed for system packages on a fresh OS. Existing
+`.env` settings survive reruns; the loaded image tag is selected explicitly.
+The bundle lives under gitignored `output/` and contains no account keys.
+
+### Install automatically on the first boot
+
+This is the preferred fresh-card path: **Imager → stage → eject → boot**.
+No SSH session or manual command on the Pi is required for installation or
+normal streaming. SSH is optional diagnostic/maintenance access. Configure
+public-key authentication in Imager to avoid repeated password entry; WaveKit
+does not require an SSH control socket or passwordless sudo.
+
+For a fresh card written with Imager's **cloudinit-rpi** format, the staging
+helper can add installation to the existing `user-data`. Run this on your main
+computer **after Imager has finished writing and verifying**, while the card's
+boot partition is mounted. If Imager ejected the card, reconnect it first.
+
+```sh
+# Replace the mount path with the card's actual boot partition:
+node packages/sdr-host/scripts/stage-pi-boot.mjs \
+  --boot /Volumes/bootfs --dry-run
+node packages/sdr-host/scripts/stage-pi-boot.mjs \
+  --boot /Volumes/bootfs
+```
+
+If you did not add your SSH public key in Imager, stage it explicitly:
+
+```sh
+node packages/sdr-host/scripts/stage-pi-boot.mjs \
+  --boot /Volumes/bootfs --ssh-public-key ~/.ssh/id_ed25519.pub --dry-run
+node packages/sdr-host/scripts/stage-pi-boot.mjs \
+  --boot /Volumes/bootfs --ssh-public-key ~/.ssh/id_ed25519.pub
+```
+
+This validates and appends one public key to the explicitly named Imager user,
+retaining existing keys and password/sudo policy. It requires `ssh-keygen` on
+the staging computer, rejects private keys, and omits the key's comment. Never
+copy the private identity onto the card. For an unresolved `default` user,
+configure the public key in Imager instead. After boot, ordinary
+`ssh YOUR_USER@wavekit-sdr.local` uses your local key/agent; an encrypted key may
+still require unlocking. Keep SSH host-key verification enabled. A freshly
+rewritten card has a new host identity: verify it before replacing a saved key.
+
+The helper requires an explicit mount, checks the expected Raspberry Pi files
+and `#cloud-config`, copies `output/pi-bundle`, and appends its own bootstrap.
+It preserves Imager's Wi-Fi/login settings and existing commands, and does not
+print credentials. If user-data does not identify one normal user, pass
+`--user YOUR_IMAGER_USERNAME`; it never guesses the name of a `default` user.
+It neither flashes nor erases the card.
+
+On the Pi, cloud-init runs the bootstrap as root. It copies the bundle into the
+configured user's writable home, then runs `setup.sh --target-user USER` as
+root. This installs Docker and adds that normal user to the Docker group without
+changing their sudo/password policy. Passwordless sudo is not required. The
+boot partition receives `wavekit-setup.status` (`running`, `complete`, or
+`failed`) and `wavekit-setup.log`; the system log is
+`/var/log/wavekit-firstboot.log`. `complete` means installation and Compose
+startup completed; confirm `/health` with the dongle connected before treating
+hardware streaming as verified.
+
+Plain raw-image writes without cloud-init configuration need the manual
+`bash setup.sh` flow. Once staging succeeds, eject the card and boot the Pi;
+first boot needs working Wi-Fi or Ethernet and internet for system packages.
+
+For recovery on an already configured Pi, generate the same bootstrap with
+`node packages/sdr-host/scripts/stage-pi-boot.mjs --bootstrap-out output/pi-setup/wavekit-firstboot.sh --user YOUR_IMAGER_USERNAME`.
+Copy corrected bundle files to `/boot/firmware/wavekit-pi-bundle` before
+running that bootstrap as root: it copies the boot bundle into the user's home.
+For manual installation, use `bash setup.sh` as the normal user, or
+`sudo bash setup.sh --target-user YOUR_IMAGER_USERNAME` for one root invocation.
+Neither flow changes sudoers or requires the user to have passwordless sudo.
+
+### Headless setup checks
+
+A completed headless installation should satisfy these checks:
+
+- SSH accepts the login/key configured in Imager.
+- The Pi joins the configured 2.4 GHz Wi-Fi network; Ethernet can also obtain
+  an address from the router without changing the application configuration.
+- The configured hostname resolves through mDNS where supported, or the
+  router's IP address works directly.
+- Cloud-init runs installation as root automatically, retaining the normal
+  user's password/sudo policy. `wavekit-setup.status` reports `complete`.
+- The status API responds, and `/health` becomes healthy with a working dongle
+  connected. WaveKit receives IQ from the Pi on port 5555.
+
+`build-pi-bundle.sh --image <tag> --skip-build` can reuse another local image;
+the script rejects images that are not Linux ARM64. You can also transfer an
+image manually. A Pi 3 has limited memory; building on the Mac avoids a source
+build on the Pi:
+
+```sh
+# On your computer, from the WaveKit repository root:
+docker buildx build --platform linux/arm64 \
+  -f packages/sdr-host/Dockerfile -t wavekit-sdr-host:local --load .
+docker save -o /tmp/wavekit-sdr-host-arm64.tar wavekit-sdr-host:local
+scp /tmp/wavekit-sdr-host-arm64.tar YOUR_USER@wavekit-sdr.local:/tmp/
+
+# On the Pi, after installing Docker and logging back in:
+docker load -i /tmp/wavekit-sdr-host-arm64.tar
+~/.local/bin/wavekit-sdr-host up --image wavekit-sdr-host:local
+rm /tmp/wavekit-sdr-host-arm64.tar
+```
+
+Alternatively, build directly on a 64-bit Linux host with
+`docker build -f packages/sdr-host/Dockerfile -t wavekit-sdr-host:local .` from
+the repository root. Use `up` for a locally built image; `update` attempts a
+registry pull. Builds require network access to upstream source repositories.
+If you are testing uncommitted changes, copy the checkout's manager, installer,
+and compose file to the Pi; the download commands below fetch the published
+version from GitHub.
+
 ## Quick Start
 
 Choose **one** of the two options below.
@@ -56,21 +248,24 @@ Do these steps yourself (this is what the scripts automate):
 
 All configuration via environment variables with `SDR_HOST_` prefix:
 
-| Variable                         | Default     | Description                    |
-| -------------------------------- | ----------- | ------------------------------ |
-| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000`   | Sample rate in Hz              |
-| `SDR_HOST_RTL_TCP__FREQUENCY`    | `446524920` | Initial center frequency in Hz |
-| `SDR_HOST_RTL_TCP__BUFFER`       | `512`       | rtl_tcp buffer size            |
-| `SDR_HOST_RTL_TCP__AGC`          | `false`     | Enable tuner AGC               |
-| `SDR_HOST_RTL_TCP__GAIN`         | `49`        | Manual gain in dB              |
-| `SDR_HOST_RTL_TCP__PPM`          | `0`         | PPM correction                 |
-| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`         | USB device index               |
-| `SDR_HOST_RTLMUX__PORT`          | `5555`      | IQ stream port                 |
-| `SDR_HOST_API__PORT`             | `8080`      | Status API port                |
-| `SDR_HOST_LOGGING__LEVEL`        | `info`      | Log level                      |
+| Variable                         | Default     | Description                         |
+| -------------------------------- | ----------- | ----------------------------------- |
+| `SDR_HOST_RTL_TCP__SAMPLE_RATE`  | `2048000`   | Sample rate in Hz                   |
+| `SDR_HOST_RTL_TCP__FREQUENCY`    | `446524920` | Initial center frequency in Hz      |
+| `SDR_HOST_RTL_TCP__BUFFER`       | `15`        | Number of USB transfer buffers (-b) |
+| `SDR_HOST_RTL_TCP__AGC`          | `false`     | Enable tuner AGC                    |
+| `SDR_HOST_RTL_TCP__GAIN`         | `49`        | Manual gain in dB                   |
+| `SDR_HOST_RTL_TCP__PPM`          | `0`         | PPM correction                      |
+| `SDR_HOST_RTL_TCP__DEVICE_INDEX` | `0`         | USB device index                    |
+| `SDR_HOST_RTLMUX__PORT`          | `5555`      | IQ stream port                      |
+| `SDR_HOST_API__PORT`             | `8080`      | Status API port                     |
+| `SDR_HOST_LOGGING__LEVEL`        | `info`      | Log level                           |
 
 AGC is off by default to match common RTL-SDR setups. When `SDR_HOST_RTL_TCP__AGC` is `true`, manual gain is ignored.
-Defaults mirror the legacy Pi systemd service (gain 49 dB, 446.524920 MHz, buffer 512).
+The defaults use gain 49 dB, 446.524920 MHz, and 15 asynchronous USB transfer
+buffers, matching the rtl-sdr library default. `-b` counts buffers; it does not
+set their size in bytes. The former value of 512 can exhaust the Pi's USB transfer
+memory and prevent IQ streaming.
 
 ## Dev Workflow
 

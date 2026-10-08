@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { createLogger } from "@wavekit/shared"
 
 const detectDongleMock = vi.fn()
@@ -10,6 +10,9 @@ vi.mock("../../src/utils/usb-dongle.js", () => ({
 const logger = createLogger({ level: "fatal" })
 
 describe("runPreflight", () => {
+	afterEach(() => {
+		vi.useRealTimers()
+	})
 	beforeEach(() => {
 		detectDongleMock.mockReset()
 	})
@@ -47,4 +50,47 @@ describe("runPreflight", () => {
 		expect(result.ready).toBe(true)
 		expect(result.warnings.length).toBe(1)
 	})
+})
+
+it("prevents overlapping USB checks and discards results after shutdown", async () => {
+	vi.useFakeTimers()
+	const { startPreflightMonitoring } =
+		await import("../../src/supervisor/preflight.js")
+	const result = {
+		ready: false,
+		dongle: {
+			present: false,
+			product: null,
+			serial: null,
+			usb: null,
+			driverConflict: false,
+			conflictingDriver: null,
+		},
+		warnings: [],
+		errors: ["Missing dongle"],
+	}
+	let complete!: (value: typeof result) => void
+	const refresh = vi.fn(
+		() =>
+			new Promise<typeof result>(resolve => {
+				complete = resolve
+			}),
+	)
+	const stop = startPreflightMonitoring(result, logger, {
+		intervalMs: 1000,
+		refresh,
+	})
+	try {
+		await vi.advanceTimersByTimeAsync(4000)
+		expect(refresh).toHaveBeenCalledOnce()
+		const stopped = stop()
+		complete({ ...result, ready: true, errors: [] })
+		await stopped
+		await vi.advanceTimersByTimeAsync(4000)
+		expect(refresh).toHaveBeenCalledOnce()
+		expect(result.ready).toBe(false)
+	} finally {
+		await stop()
+		vi.useRealTimers()
+	}
 })

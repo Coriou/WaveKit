@@ -5,6 +5,8 @@ import { createComponentLogger } from "@wavekit/shared"
 
 const execAsync = promisify(exec)
 type ExecRunner = (command: string) => Promise<{ stdout: string }>
+const runUsbCommand: ExecRunner = command =>
+	execAsync(command, { timeout: 3000 })
 
 export interface DongleInfo {
 	present: boolean
@@ -33,12 +35,12 @@ const RTL_SDR_USB_IDS = [
  */
 export async function detectDongle(
 	logger: Logger,
-	execRunner: ExecRunner = execAsync,
+	execRunner: ExecRunner = runUsbCommand,
 ): Promise<DongleInfo> {
 	const log = createComponentLogger(logger, "UsbDongle")
 
 	try {
-		const { stdout } = await execRunner("lsusb -v 2>/dev/null || lsusb")
+		const { stdout } = await execRunner("lsusb")
 
 		for (const { vid, pid } of RTL_SDR_USB_IDS) {
 			// Match format: Bus 001 Device 004: ID 0bda:2838
@@ -96,7 +98,7 @@ export async function detectDongle(
  */
 export async function checkDriverConflict(
 	logger: Logger,
-	execRunner: ExecRunner = execAsync,
+	execRunner: ExecRunner = runUsbCommand,
 ): Promise<{ conflict: boolean; driver: string | null }> {
 	const log = createComponentLogger(logger, "UsbDongle")
 

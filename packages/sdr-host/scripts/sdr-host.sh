@@ -35,6 +35,8 @@ Commands:
 
 Options:
   --image <tag>   Persist image tag in env file
+  --yes           Non-interactive Docker installation (install only)
+  --no-blacklist  Skip DVB driver changes (install only)
   -h, --help      Show help
 
 Config:
@@ -53,11 +55,17 @@ fail() {
 }
 
 ensure_docker() {
+	if [ "$(uname -s)" != Linux ]; then
+		fail "The SDR-host container requires Linux USB access. On macOS use pnpm start:rtl and pnpm rtl:serve."
+	fi
 	if ! command -v docker >/dev/null 2>&1; then
 		fail "Docker not found. Run: ./sdr-host.sh install"
 	fi
 	if ! docker compose version >/dev/null 2>&1; then
 		fail "Docker Compose not available. Run: ./sdr-host.sh install"
+	fi
+	if ! docker info >/dev/null 2>&1; then
+		fail "Docker daemon is unavailable to this user. After installation, reboot or log out/in, then retry."
 	fi
 }
 
@@ -84,7 +92,7 @@ ensure_env_file() {
 WAVEKIT_SDR_HOST_IMAGE=${IMAGE_DEFAULT}
 SDR_HOST_RTL_TCP__SAMPLE_RATE=2048000
 SDR_HOST_RTL_TCP__FREQUENCY=446524920
-SDR_HOST_RTL_TCP__BUFFER=512
+SDR_HOST_RTL_TCP__BUFFER=15
 SDR_HOST_RTL_TCP__AGC=false
 SDR_HOST_RTL_TCP__GAIN=49
 SDR_HOST_RTL_TCP__PPM=0
@@ -117,22 +125,22 @@ compose_cmd() {
 	)
 }
 
-remove_existing_container() {
-	if docker ps -a --format "{{.Names}}" | grep -qx "wavekit-sdr-host"; then
-		log "Removing existing container: wavekit-sdr-host"
-		docker rm -f wavekit-sdr-host >/dev/null
-	fi
-}
-
 COMMAND="${1:-help}"
 shift || true
 
 IMAGE_OVERRIDE=""
+INSTALL_ARGS=()
 while [ "${1:-}" != "" ]; do
 	case "$1" in
 		--image)
-			IMAGE_OVERRIDE="${2:-}"
+			[ -n "${2:-}" ] || fail "--image requires an image tag"
+			IMAGE_OVERRIDE="$2"
 			shift 2
+			;;
+		--yes|--no-blacklist)
+			[ "$COMMAND" = install ] || fail "$1 is only supported by install"
+			INSTALL_ARGS+=("$1")
+			shift
 			;;
 		-h|--help)
 			usage
@@ -147,12 +155,12 @@ done
 case "$COMMAND" in
 	install)
 		if [ -f "${SCRIPT_DIR}/install-docker.sh" ]; then
-			bash "${SCRIPT_DIR}/install-docker.sh"
+			bash "${SCRIPT_DIR}/install-docker.sh" "${INSTALL_ARGS[@]}"
 		else
 			log "Downloading install script."
 			tmp_dir="$(mktemp -d)"
 			curl -fsSL "$INSTALL_URL" -o "${tmp_dir}/install-docker.sh"
-			bash "${tmp_dir}/install-docker.sh"
+			bash "${tmp_dir}/install-docker.sh" "${INSTALL_ARGS[@]}"
 			rm -rf "$tmp_dir"
 		fi
 		;;
@@ -178,7 +186,6 @@ case "$COMMAND" in
 		if [ -n "$IMAGE_OVERRIDE" ]; then
 			set_env_key "WAVEKIT_SDR_HOST_IMAGE" "$IMAGE_OVERRIDE"
 		fi
-		remove_existing_container
 		compose_cmd up -d
 		;;
 	update)
@@ -189,8 +196,9 @@ case "$COMMAND" in
 		if [ -n "$IMAGE_OVERRIDE" ]; then
 			set_env_key "WAVEKIT_SDR_HOST_IMAGE" "$IMAGE_OVERRIDE"
 		fi
-		compose_cmd pull
-		remove_existing_container
+		if ! compose_cmd pull; then
+			fail "Image pull failed. Verify registry access or build locally: docker build -f packages/sdr-host/Dockerfile -t wavekit-sdr-host:local .; then run this manager with up --image wavekit-sdr-host:local."
+		fi
 		compose_cmd up -d --force-recreate
 		;;
 	down)
@@ -214,7 +222,10 @@ case "$COMMAND" in
 		curl -fsS http://localhost:8080/api/status || true
 		curl -fsS http://localhost:5556/stats.json || true
 		;;
-	help|*)
+	help|-h|--help)
 		usage
+		;;
+	*)
+		fail "Unknown command: $COMMAND (use --help)"
 		;;
 esac

@@ -17,8 +17,8 @@ export const SdrHostConfigSchema = z.object({
 			sampleRate: z.number().int().positive().default(2048000),
 			/** Initial center frequency in Hz (used until a client retunes) */
 			frequency: z.number().int().positive().default(446_524_920),
-			/** rtl_tcp buffer size (legacy default) */
-			buffer: z.number().int().positive().default(512),
+			/** Number of asynchronous USB transfer buffers (-b); library default is 15. */
+			buffer: z.number().int().positive().default(15),
 			/** Enable tuner AGC */
 			agc: z.boolean().default(false),
 			/** Manual gain in dB (used when AGC is false) */

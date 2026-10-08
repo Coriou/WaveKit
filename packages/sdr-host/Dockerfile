@@ -41,8 +41,9 @@ RUN git clone --depth 1 --branch ${RTLSDR_VERSION} https://github.com/osmocom/rt
     make -j$(nproc) && \
     make install
 
-# Stage: node-build
-FROM node:22-bookworm-slim AS node-build
+# TypeScript and production dependencies are JavaScript-only. Build them on the
+# build machine rather than emulating Node for ARM64 cross-builds.
+FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS node-build
 
 # Install pnpm v10
 RUN corepack enable && corepack prepare pnpm@10.28.0 --activate
@@ -59,11 +60,15 @@ COPY packages/api-types/src ./packages/api-types/src
 COPY packages/sdr-host/src ./packages/sdr-host/src
 
 # Install dependencies and build
-RUN pnpm install --frozen-lockfile --prod=false && \
+# Keep the virtual store inside /app so dependency links survive the runtime copy.
+RUN pnpm install --frozen-lockfile --prod=false --config.enable-global-virtual-store=false && \
     pnpm --filter @wavekit/shared build && \
     pnpm --filter @wavekit/api-types build && \
     pnpm --filter @wavekit/sdr-host build && \
-    CI=true pnpm prune --prod
+    CI=true pnpm prune --prod --config.enable-global-virtual-store=false
+
+# Supply the target architecture's Node binary, not the build machine's binary.
+FROM node:22-bookworm-slim AS node-runtime
 
 # Stage: runtime
 FROM debian:bookworm-slim AS runtime
@@ -105,7 +110,8 @@ COPY --from=rtlsdr-build /usr/local/lib/librtlsdr* /usr/local/lib/
 RUN echo "/usr/local/lib" > /etc/ld.so.conf.d/rtl-sdr.conf && ldconfig
 
 # Copy Node.js runtime and application
-COPY --from=node-build /usr/local/bin/node /usr/local/bin/
+COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/
+COPY --from=node-build /app/package.json /app/package.json
 COPY --from=node-build /app/packages/sdr-host/dist /app/dist
 COPY --from=node-build /app/node_modules /app/node_modules
 COPY --from=node-build /app/packages/shared/package.json /app/packages/shared/package.json

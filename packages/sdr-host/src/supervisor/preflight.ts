@@ -48,3 +48,48 @@ export async function runPreflight(logger: Logger): Promise<PreflightResult> {
 		errors,
 	}
 }
+
+/** Refresh the shared status snapshot after USB insertions and removals. */
+export function startPreflightMonitoring(
+	result: PreflightResult,
+	logger: Logger,
+	options: {
+		intervalMs?: number
+		refresh?: () => Promise<PreflightResult>
+	} = {},
+): () => Promise<void> {
+	// Startup diagnostics are already logged. During polling, log state changes.
+	const pollLogger = logger.child({}, { level: "silent" })
+	const refresh = options.refresh ?? (() => runPreflight(pollLogger))
+	let stopped = false
+	let pending: Promise<void> | null = null
+	const timer = setInterval(() => {
+		// USB commands can take longer than the poll interval. Keep one in flight.
+		if (pending || stopped) return
+		pending = Promise.resolve()
+			.then(refresh)
+			.then(updated => {
+				if (stopped) return
+				const changed = JSON.stringify(result) !== JSON.stringify(updated)
+				Object.assign(result, updated)
+				if (changed) {
+					logger.info(
+						{ dongle: updated.dongle, ready: updated.ready },
+						"USB status changed",
+					)
+				}
+			})
+			.catch(error => {
+				logger.warn({ error }, "Failed to refresh USB status")
+			})
+			.finally(() => {
+				pending = null
+			})
+	}, options.intervalMs ?? 5000)
+	timer.unref()
+	return async () => {
+		stopped = true
+		clearInterval(timer)
+		await pending
+	}
+}

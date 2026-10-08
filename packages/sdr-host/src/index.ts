@@ -7,7 +7,10 @@
 import { createLogger } from "@wavekit/shared"
 import { loadConfig } from "./config.js"
 import { ProcessManager } from "./supervisor/process-manager.js"
-import { runPreflight } from "./supervisor/preflight.js"
+import {
+	runPreflight,
+	startPreflightMonitoring,
+} from "./supervisor/preflight.js"
 import { createApiServer, startApiServer } from "./api/server.js"
 
 async function main(): Promise<void> {
@@ -24,6 +27,10 @@ async function main(): Promise<void> {
 
 	// Run preflight checks
 	const preflightResult = await runPreflight(logger)
+	const stopPreflightMonitoring = startPreflightMonitoring(
+		preflightResult,
+		logger,
+	)
 
 	// Create process manager
 	const processManager = new ProcessManager(config, logger)
@@ -41,6 +48,7 @@ async function main(): Promise<void> {
 	const shutdown = async (): Promise<void> => {
 		logger.info("Shutting down")
 		await fastify.close()
+		await stopPreflightMonitoring()
 		await processManager.shutdown()
 		process.exit(0)
 	}

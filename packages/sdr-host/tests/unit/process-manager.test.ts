@@ -70,3 +70,118 @@ describe("ProcessManager", () => {
 		void manager.shutdown()
 	})
 })
+
+it("does not mistake s6 supervisors or arguments mentioning a service for the service", async () => {
+	const procRoot = fs.mkdtempSync(
+		path.join(os.tmpdir(), "sdr-host-supervisor-"),
+	)
+	const logger = createLogger({ level: "fatal" })
+	const manager = new ProcessManager(SdrHostConfigSchema.parse({}), logger, {
+		procRoot,
+	})
+	try {
+		writeProc(procRoot, 10, "s6-supervise")
+		fs.writeFileSync(
+			path.join(procRoot, "10", "cmdline"),
+			"/command/s6-supervise\0rtlmux\0",
+		)
+		writeProc(procRoot, 20, "sh")
+		fs.writeFileSync(
+			path.join(procRoot, "20", "cmdline"),
+			"/bin/sh\0-c\0rtl_tcp -a 0.0.0.0\0",
+		)
+		writeProc(procRoot, 30, "rtlmux-backup")
+		manager.startMonitoring()
+		expect(manager.getRtlmuxState().running).toBe(false)
+		expect(manager.getRtlTcpState().running).toBe(false)
+	} finally {
+		await manager.shutdown()
+		fs.rmSync(procRoot, { recursive: true, force: true })
+	}
+})
+
+it("matches an executable path in argv[0] when comm cannot be read", async () => {
+	const procRoot = fs.mkdtempSync(
+		path.join(os.tmpdir(), "sdr-host-executable-"),
+	)
+	const logger = createLogger({ level: "fatal" })
+	const manager = new ProcessManager(SdrHostConfigSchema.parse({}), logger, {
+		procRoot,
+	})
+	try {
+		writeProc(procRoot, 10, "s6-supervise")
+		fs.writeFileSync(
+			path.join(procRoot, "10", "cmdline"),
+			"/command/s6-supervise\0rtlmux\0",
+		)
+		writeProc(procRoot, 200, "rtlmux")
+		fs.rmSync(path.join(procRoot, "200", "comm"))
+		fs.writeFileSync(
+			path.join(procRoot, "200", "cmdline"),
+			"/usr/local/bin/rtlmux\0--listen\0:5555\0",
+		)
+		manager.startMonitoring()
+		expect(manager.getRtlmuxState().pid).toBe(200)
+	} finally {
+		await manager.shutdown()
+		fs.rmSync(procRoot, { recursive: true, force: true })
+	}
+})
+
+it("normalizes canonical rtlmux client arrays and derives byte throughput", async () => {
+	vi.useFakeTimers()
+	const procRoot = fs.mkdtempSync(path.join(os.tmpdir(), "sdr-host-stats-"))
+	const logger = createLogger({ level: "fatal" })
+	writeProc(procRoot, 200, "rtlmux")
+	let now = 0
+	let clients = [
+		{
+			client: { host: "192.168.1.10", port: 50000 },
+			dataOut: 1000,
+			dropped: { size: 64, count: 1 },
+		},
+	]
+	const manager = new ProcessManager(SdrHostConfigSchema.parse({}), logger, {
+		procRoot,
+		now: () => now,
+		fetchFn: vi.fn(async () => ({
+			ok: true,
+			json: async () => ({ server: { dataIn: 1000, dataOut: 5 }, clients }),
+		})) as unknown as typeof fetch,
+		statsPollIntervalMs: 1000,
+	})
+	try {
+		manager.startMonitoring()
+		now = 1000
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(manager.getRtlmuxStats()).toEqual({
+			clients: 1,
+			bytesPerSec: 0,
+			totalBytesSent: 1000,
+			clientDetails: [
+				{ id: 0, address: "192.168.1.10:50000", bytesDropped: 64 },
+			],
+		})
+		clients[0]!.dataOut = 3000
+		now = 2000
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(manager.getRtlmuxStats()).toMatchObject({
+			clients: 1,
+			bytesPerSec: 2000,
+			totalBytesSent: 3000,
+		})
+		clients = []
+		now = 3000
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(manager.getRtlmuxStats()).toEqual({
+			clients: 0,
+			bytesPerSec: 0,
+			totalBytesSent: 0,
+			clientDetails: [],
+		})
+	} finally {
+		await manager.shutdown()
+		fs.rmSync(procRoot, { recursive: true, force: true })
+		vi.useRealTimers()
+	}
+})

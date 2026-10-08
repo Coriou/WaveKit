@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from "vitest"
+import { describe, it, expect, afterEach, vi } from "vitest"
 import { createLogger } from "@wavekit/shared"
 import { createApiServer } from "../../src/api/server.js"
 import { SdrHostConfigSchema } from "../../src/config.js"
@@ -6,7 +6,10 @@ import type {
 	ProcessManager,
 	ProcessState,
 } from "../../src/supervisor/process-manager.js"
-import type { PreflightResult } from "../../src/supervisor/preflight.js"
+import {
+	startPreflightMonitoring,
+	type PreflightResult,
+} from "../../src/supervisor/preflight.js"
 
 const logger = createLogger({ level: "fatal" })
 
@@ -79,12 +82,64 @@ function createPreflightResult(
 
 describe("sdr-host API", () => {
 	let fastify: Awaited<ReturnType<typeof createApiServer>> | null = null
+	let stopMonitoring: (() => Promise<void>) | null = null
 
 	afterEach(async () => {
+		if (stopMonitoring) {
+			await stopMonitoring()
+			stopMonitoring = null
+		}
+		vi.useRealTimers()
 		if (fastify) {
 			await fastify.close()
 			fastify = null
 		}
+	})
+
+	it("updates health, status errors, and fix instructions after unplugging and reconnecting USB", async () => {
+		vi.useFakeTimers()
+		const present = createPreflightResult()
+		const missing = createPreflightResult({
+			ready: false,
+			dongle: { ...present.dongle, present: false, usb: null },
+			errors: ["No RTL-SDR dongle detected. Check USB connection."],
+		})
+		const shared = { ...missing }
+		let current = present
+		stopMonitoring = startPreflightMonitoring(shared, logger, {
+			intervalMs: 1000,
+			refresh: async () => current,
+		})
+		fastify = await createApiServer({
+			config: SdrHostConfigSchema.parse({}),
+			logger,
+			processManager: createProcessManager(),
+			preflightResult: shared,
+		})
+		expect(
+			(await fastify.inject({ method: "GET", url: "/health" })).statusCode,
+		).toBe(503)
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(
+			(await fastify.inject({ method: "GET", url: "/health" })).statusCode,
+		).toBe(200)
+		expect(
+			(await fastify.inject({ method: "GET", url: "/api/fix" })).statusCode,
+		).toBe(204)
+		expect(
+			(await fastify.inject({ method: "GET", url: "/api/status" })).json(),
+		).toMatchObject({ dongle: { present: true }, errors: [] })
+		current = missing
+		await vi.advanceTimersByTimeAsync(1000)
+		expect(
+			(await fastify.inject({ method: "GET", url: "/health" })).statusCode,
+		).toBe(503)
+		expect(
+			(await fastify.inject({ method: "GET", url: "/api/fix" })).json(),
+		).toMatchObject({ issue: "dongle_not_detected" })
+		expect(
+			(await fastify.inject({ method: "GET", url: "/api/status" })).json(),
+		).toMatchObject({ dongle: { present: false }, errors: missing.errors })
 	})
 
 	it("returns healthy status when services are running", async () => {
