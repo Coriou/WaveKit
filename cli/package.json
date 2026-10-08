@@ -7,9 +7,10 @@
 		"wavekit": "./dist/cli.js"
 	},
 	"scripts": {
-		"build": "pnpm --filter @wavekit/api-types build && pnpm -w exec tsc -p cli/tsconfig.json",
-		"dev": "pnpm -w exec tsc -p cli/tsconfig.json --watch",
+		"build": "pnpm --filter @wavekit/api-types build && pnpm -w exec tsc -p cli/tsconfig.build.json",
+		"dev": "pnpm -w exec tsc -p cli/tsconfig.build.json --watch",
 		"lint": "eslint -c ../eslint.config.js .",
+		"mock": "node ./source/test/mock-api/server.ts",
 		"start": "node ./dist/cli.js",
 		"test": "vitest run --passWithNoTests",
 		"typecheck": "pnpm -w exec tsc -p cli/tsconfig.json --noEmit"
