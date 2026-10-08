@@ -252,8 +252,15 @@ export function actionKey(intent: WriteIntent): string {
 	}
 }
 
+/**
+ * "unknown": the write was sent but no reply arrived in time (R23); it is not a
+ * failure and is reconciled from decoder:started / stopped / status events.
+ */
+export type ActionOutcome = "ok" | "failed" | "unknown"
 export interface ActionResult {
+	/** Read `outcome`; `ok` is true only when outcome is "ok". */
 	ok: boolean
+	outcome: ActionOutcome
 	status: number | null
 	code?: string
 	message: string
