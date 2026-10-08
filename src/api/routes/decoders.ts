@@ -23,6 +23,10 @@ import type {
 	DecoderCaps as InternalDecoderCaps,
 	DecoderStatus as InternalDecoderStatus,
 } from "../../decoders/types.js"
+import {
+	decoderRateAssessmentSchema,
+	decoderRateRequirementsSchema,
+} from "./decoder-rate-schemas.js"
 
 /**
  * Decoder stats schema for response
@@ -46,6 +50,7 @@ const decoderCapsSchema = {
 		input: { type: "string", enum: ["audio_pcm", "iq", "external"] },
 		wantsExclusiveSource: { type: "boolean" },
 		preferredSampleRates: { type: "array", items: { type: "number" } },
+		rateRequirements: decoderRateRequirementsSchema,
 		output: { type: "string", enum: ["jsonl", "nmea", "beast", "text"] },
 		integrationPattern: {
 			type: "string",
@@ -71,6 +76,7 @@ const decoderStatusSchema = {
 		lastOutputAt: { type: "string", format: "date-time", nullable: true },
 		restartCount: { type: "number" },
 		version: { type: "string" },
+		rateAssessment: decoderRateAssessmentSchema,
 	},
 	required: [
 		"id",
@@ -195,6 +201,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				: null,
 			restartCount: status.restartCount,
 			...(status.version !== undefined ? { version: status.version } : {}),
+			// No built-in capture limits are inferred from legacy audio/IQ preferences.
+			rateAssessment: status.rateAssessment ?? {
+				verdict: "unknown",
+				reasonCode: "unknown-requirements",
+			},
 		}
 	}
 
@@ -208,6 +219,9 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				: {}),
 			...(caps.preferredSampleRates !== undefined
 				? { preferredSampleRates: caps.preferredSampleRates }
+				: {}),
+			...(caps.rateRequirements !== undefined
+				? { rateRequirements: caps.rateRequirements }
 				: {}),
 		}
 	}

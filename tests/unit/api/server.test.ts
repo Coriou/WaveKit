@@ -979,7 +979,15 @@ describe("API Server", () => {
 
 				expect(response.statusCode).toBe(200)
 				const body = JSON.parse(response.body)
-				expect(body).toEqual(mockDecoders)
+				expect(body).toEqual(
+					mockDecoders.map(decoder => ({
+						...decoder,
+						rateAssessment: {
+							verdict: "unknown",
+							reasonCode: "unknown-requirements",
+						},
+					})),
+				)
 			})
 		})
 
@@ -1007,7 +1015,13 @@ describe("API Server", () => {
 
 				expect(response.statusCode).toBe(200)
 				const body = JSON.parse(response.body)
-				expect(body).toEqual(mockDecoder)
+				expect(body).toEqual({
+					...mockDecoder,
+					rateAssessment: {
+						verdict: "unknown",
+						reasonCode: "unknown-requirements",
+					},
+				})
 			})
 
 			it("should return 404 when decoder not found", async () => {

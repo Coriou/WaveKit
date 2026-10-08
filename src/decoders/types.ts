@@ -17,6 +17,16 @@
 
 import type { EventEmitter } from "node:events"
 import type { Readable } from "node:stream"
+import type {
+	DecoderRateAssessment,
+	DecoderRateRequirements,
+} from "@wavekit/api-types"
+
+export type {
+	DecoderRateAssessment,
+	DecoderRateRequirements,
+	DecoderRateSet,
+} from "@wavekit/api-types"
 
 // ============================================================================
 // Decoder Capabilities (Requirements 17.1, 17.2, 17.3, 17.4)
@@ -61,6 +71,8 @@ export interface DecoderCaps {
 	wantsExclusiveSource?: boolean | undefined
 	/** Preferred sample rates for this decoder */
 	preferredSampleRates?: number[] | undefined
+	/** Explicit rate domains; legacy preferences never establish capture limits. */
+	rateRequirements?: DecoderRateRequirements | undefined
 	/** Output format produced by the decoder (Requirement 17.4) */
 	output: DecoderOutputFormat
 	/** Integration pattern for this decoder */
@@ -251,6 +263,8 @@ export interface DecoderStatus {
 	restartCount: number
 	/** Detected version of the decoder binary */
 	version?: string | undefined
+	/** Reporting only; independent of process health and operator intent. */
+	rateAssessment?: DecoderRateAssessment | undefined
 }
 
 /**
