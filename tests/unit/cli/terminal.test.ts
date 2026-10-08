@@ -4,7 +4,9 @@ import {
 	ALT_ENTER,
 	ALT_EXIT,
 	createScreen,
+	createShutdown,
 	installExitHandlers,
+	oneLine,
 	osc52,
 } from "../../../cli/source/terminal.js"
 
@@ -29,31 +31,54 @@ describe("screen", () => {
 			`\x1b]52;c;${Buffer.from("€").toString("base64")}\x07`,
 		)
 	})
-	it("restores and exits with the conventional codes", () => {
-		const proc = Object.assign(new EventEmitter(), {
-			stderr: { write: vi.fn() },
-		})
+	it("routes signals and crashes to shutdown with the conventional codes", () => {
+		const proc = new EventEmitter()
 		const screen = { enter: vi.fn(), restore: vi.fn() }
 		const shutdown = vi.fn()
 		installExitHandlers(proc, screen, shutdown)
 		proc.emit("SIGINT")
 		proc.emit("SIGTERM")
 		proc.emit("uncaughtException", new Error("boom"))
+		proc.emit(
+			"unhandledRejection",
+			"first line\x1b[2J\x1b]0;title\x07\nsecond line",
+		)
+		expect(shutdown.mock.calls).toEqual([
+			[130],
+			[143],
+			[1, "boom"],
+			[1, "first line"],
+		])
+		// Crash handlers leave the restore to shutdown (after Ink unmounts).
+		expect(screen.restore).not.toHaveBeenCalled()
 		proc.emit("exit")
-		expect(shutdown.mock.calls.map(c => c[0])).toEqual([130, 143, 1])
-		expect(screen.restore).toHaveBeenCalled()
-		expect(proc.stderr.write).toHaveBeenCalledWith("wavekit: boom\n")
-	})
-	it("reports unhandled rejections on one sanitised line", () => {
-		const proc = Object.assign(new EventEmitter(), {
-			stderr: { write: vi.fn() },
-		})
-		const screen = { enter: vi.fn(), restore: vi.fn() }
-		const shutdown = vi.fn()
-		installExitHandlers(proc, screen, shutdown)
-		proc.emit("unhandledRejection", "first line\x1b[2J\nsecond line")
-		expect(proc.stderr.write).toHaveBeenCalledWith("wavekit: first line[2J\n")
-		expect(shutdown).toHaveBeenCalledWith(1)
 		expect(screen.restore).toHaveBeenCalledTimes(1)
+	})
+	it("shuts down once: unmount, then restore, then message, then exit", () => {
+		const order: string[] = []
+		const shutdown = createShutdown({
+			unmount: () => {
+				order.push("unmount")
+				throw new Error("already unmounted")
+			},
+			screen: {
+				enter: () => order.push("enter"),
+				restore: () => order.push("restore"),
+			},
+			stderr: { write: s => order.push(`stderr ${s}`) },
+			exit: code => order.push(`exit ${code}`),
+		})
+		shutdown(1, "boom")
+		shutdown(130)
+		expect(order).toEqual([
+			"unmount",
+			"restore",
+			"stderr wavekit: boom\n",
+			"exit 1",
+		])
+	})
+	it("keeps the first line of an error and strips whole escape sequences", () => {
+		expect(oneLine(new Error("a\x1b[31mred\x1b[0m\r\nb"))).toBe("ared")
+		expect(oneLine({ toString: () => "\x9b2Jx" })).toBe("x")
 	})
 })
