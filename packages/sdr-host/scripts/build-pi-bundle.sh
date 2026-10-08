@@ -63,6 +63,11 @@ cp "${SCRIPT_DIR}/pi-bundle-setup.sh" "${OUTPUT}/setup.sh"
 chmod +x "${OUTPUT}/setup.sh" "${OUTPUT}/install-docker.sh"
 printf '%s\n' "$IMAGE" > "${OUTPUT}/IMAGE.txt"
 printf 'WAVEKIT_SDR_HOST_IMAGE=%s\n' "$IMAGE" > "${OUTPUT}/.env.example"
+(
+	cd "$OUTPUT"
+	if command -v sha256sum >/dev/null 2>&1; then HASH=(sha256sum); else HASH=(shasum -a 256); fi
+	"${HASH[@]}" IMAGE.txt wavekit-sdr-host-image.tar.gz docker-compose.yml install-docker.sh setup.sh .env.example > SHA256SUMS
+)
 cat > "${OUTPUT}/README.txt" <<'EOF'
 WaveKit SDR host bundle (Linux ARM64 / Raspberry Pi OS Lite 64-bit)
 

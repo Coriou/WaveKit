@@ -40,10 +40,17 @@ fi
 
 BUNDLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$BUNDLE_DIR"
-for file in IMAGE.txt wavekit-sdr-host-image.tar.gz docker-compose.yml install-docker.sh .env.example; do
+for file in IMAGE.txt wavekit-sdr-host-image.tar.gz docker-compose.yml install-docker.sh setup.sh .env.example SHA256SUMS; do
 	[ -f "$file" ] || { echo "Bundle is incomplete: missing $file" >&2; exit 1; }
 done
 
+# Check the payload before installing packages or changing Docker/USB settings.
+for file in IMAGE.txt wavekit-sdr-host-image.tar.gz docker-compose.yml install-docker.sh setup.sh .env.example; do
+	awk -v name="$file" '$2 == name { count++ } END { exit count != 1 }' SHA256SUMS || {
+		echo "Bundle checksum entry missing or duplicated: $file" >&2; exit 1;
+	}
+done
+sha256sum --check --strict SHA256SUMS
 gzip -t wavekit-sdr-host-image.tar.gz
 if [ ! -f .host-prepared ] || ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
 	INSTALL_ARGS=(--yes)

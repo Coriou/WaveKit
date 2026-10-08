@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { spawnSync } from "node:child_process"
+import { createHash, generateKeyPairSync } from "node:crypto"
 import {
 	existsSync,
 	mkdtempSync,
@@ -50,15 +51,24 @@ describe("Pi boot staging", () => {
 		for (const name of ["config.txt", "cmdline.txt"])
 			writeFileSync(join(boot, name), "fixture\n")
 		writeFileSync(join(boot, "user-data"), fixture)
-		for (const name of [
+		const files = [
 			"IMAGE.txt",
 			"wavekit-sdr-host-image.tar.gz",
 			"docker-compose.yml",
 			"install-docker.sh",
 			"setup.sh",
 			".env.example",
-		])
-			writeFileSync(join(bundle, name), "fixture\n")
+		]
+		for (const name of files) writeFileSync(join(bundle, name), "fixture\n")
+		writeFileSync(
+			join(bundle, "SHA256SUMS"),
+			files
+				.map(
+					name =>
+						`${createHash("sha256").update("fixture\n").digest("hex")}  ${name}\n`,
+				)
+				.join(""),
+		)
 	})
 
 	afterEach(() => rmSync(temp, { recursive: true, force: true }))
@@ -71,22 +81,88 @@ describe("Pi boot staging", () => {
 		)
 	}
 
-	function publicKey() {
+	it("rejects corrupted payload before touching the card", () => {
+		writeFileSync(join(bundle, "setup.sh"), "corrupted")
+		const result = stage()
+		expect(result.status).toBe(1)
+		expect(result.stderr).toContain("checksum mismatch: setup.sh")
+		expect(readFileSync(join(boot, "user-data"), "utf8")).toBe(fixture)
+		expect(existsSync(join(boot, "wavekit-pi-bundle"))).toBe(false)
+	})
+
+	it("requires checksums for every payload file", () => {
+		writeFileSync(join(bundle, "SHA256SUMS"), "")
+		expect(stage("--dry-run").status).toBe(1)
+		expect(existsSync(join(boot, "wavekit-pi-bundle"))).toBe(false)
+	})
+
+	function publicKey(
+		kind: "ed25519" | "rsa" | "nistp256" | "nistp384" | "nistp521" = "ed25519",
+	) {
 		const path = join(temp, "identity")
-		const generated = spawnSync("ssh-keygen", [
-			"-q",
-			"-t",
-			"ed25519",
-			"-N",
-			"",
-			"-C",
-			"private-local-comment",
-			"-f",
+		const pair =
+			kind === "ed25519"
+				? generateKeyPairSync("ed25519")
+				: kind === "rsa"
+					? generateKeyPairSync("rsa", { modulusLength: 2048 })
+					: generateKeyPairSync("ec", {
+							namedCurve: {
+								nistp256: "prime256v1",
+								nistp384: "secp384r1",
+								nistp521: "secp521r1",
+							}[kind],
+						})
+		const jwk = pair.publicKey.export({ format: "jwk" })
+		const field = (value: Buffer) => {
+			const size = Buffer.alloc(4)
+			size.writeUInt32BE(value.length)
+			return Buffer.concat([size, value])
+		}
+		const type =
+			kind === "ed25519"
+				? "ssh-ed25519"
+				: kind === "rsa"
+					? "ssh-rsa"
+					: `ecdsa-sha2-${kind}`
+		const positive = (encoded: string) => {
+			const value = Buffer.from(encoded, "base64url")
+			return field(
+				value[0]! & 0x80 ? Buffer.concat([Buffer.from([0]), value]) : value,
+			)
+		}
+		const fields =
+			kind === "ed25519"
+				? [field(Buffer.from(jwk.x!, "base64url"))]
+				: kind === "rsa"
+					? [positive(jwk.e!), positive(jwk.n!)]
+					: [
+							field(Buffer.from(kind)),
+							field(
+								Buffer.concat([
+									Buffer.from([4]),
+									Buffer.from(jwk.x!, "base64url"),
+									Buffer.from(jwk.y!, "base64url"),
+								]),
+							),
+						]
+		const blob = Buffer.concat([field(Buffer.from(type)), ...fields])
+		writeFileSync(
+			`${path}.pub`,
+			`${type} ${blob.toString("base64")} private-local-comment\n`,
+		)
+		writeFileSync(
 			path,
-		])
-		expect(generated.status).toBe(0)
+			pair.privateKey.export({ format: "pem", type: "pkcs8" }),
+		)
 		return `${path}.pub`
 	}
+
+	it.each(["rsa", "nistp256", "nistp384", "nistp521"] as const)(
+		"validates %s public keys",
+		kind => {
+			expect(stage("--ssh-public-key", publicKey(kind)).status).toBe(0)
+		},
+	)
 
 	it("adds a validated public key once, preserves account policy and excludes its comment", () => {
 		const path = publicKey()

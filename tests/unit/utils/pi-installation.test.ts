@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { spawnSync } from "node:child_process"
+import { createHash } from "node:crypto"
 import {
 	chmodSync,
 	mkdirSync,
@@ -157,6 +158,25 @@ esac
 				join(bundle, "install-docker.sh"),
 				`#!/bin/bash\nprintf '%s\\n' "$*" >> '${installLog}'\n`,
 			)
+			const payload = [
+				"IMAGE.txt",
+				"wavekit-sdr-host-image.tar.gz",
+				"docker-compose.yml",
+				"install-docker.sh",
+				"setup.sh",
+				".env.example",
+			]
+			writeFileSync(
+				join(bundle, "SHA256SUMS"),
+				payload
+					.map(
+						name =>
+							`${createHash("sha256")
+								.update(readFileSync(join(bundle, name)))
+								.digest("hex")}  ${name}\n`,
+					)
+					.join(""),
+			)
 			const args = uid === "0" ? ["--target-user", "ben"] : []
 			for (let i = 0; i < 2; i++) {
 				const result = spawnSync("bash", [join(bundle, "setup.sh"), ...args], {
@@ -183,6 +203,20 @@ esac
 			}
 			if (uid === "0")
 				expect(recordedCalls().some(call => call.name === "sudo")).toBe(false)
+
+			// A damaged script must fail before any new Docker operation.
+			const dockerCalls = recordedCalls().filter(
+				call => call.name === "docker",
+			).length
+			writeFileSync(join(bundle, "install-docker.sh"), "corrupted payload\n")
+			const damaged = spawnSync("bash", [join(bundle, "setup.sh"), ...args], {
+				env: environment(uid),
+				encoding: "utf8",
+			})
+			expect(damaged.status).not.toBe(0)
+			expect(
+				recordedCalls().filter(call => call.name === "docker"),
+			).toHaveLength(dockerCalls)
 		},
 		15000,
 	)

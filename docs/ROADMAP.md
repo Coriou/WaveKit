@@ -6,11 +6,11 @@ continuous IQ reception, correct RF decoding, or unattended installation.
 
 ## 1. Reproducible SD-card installation
 
-- [ ] Provide a documented Imager → stage → eject → boot workflow for 64-bit Pi OS.
-- [ ] Stage optional SSH public-key access without copying private keys or requiring
+- [x] Provide a documented Imager → stage → eject → boot workflow for 64-bit Pi OS.
+- [x] Stage optional SSH public-key access without copying private keys or requiring
       a manual SSH multiplex session. Normal receiver operation must not need SSH.
-- [ ] Preserve Imager accounts, Wi-Fi, SSH policy, and existing cloud-init commands.
-- [ ] Validate bundle integrity and platform before installation; retain explicit
+- [x] Preserve Imager accounts, Wi-Fi, SSH policy, and existing cloud-init commands.
+- [x] Validate bundle integrity and platform before installation; retain explicit
       failed/running/complete status and actionable recovery logs.
 - [ ] Verify first-boot root installation with password-required sudo accounts.
 - [ ] Repeat installation on a freshly written card: Wi-Fi, Ethernet, mDNS, direct
@@ -52,6 +52,15 @@ Begin research after the complete SD installation has been exercised.
 The CLI is the first consumer; a future web interface must use the same public
 contracts. Audit existing REST, WebSocket, SSE and binary/server streaming paths
 before choosing extensions or promising compatibility.
+
+Initial code audit: REST routes have Fastify schemas and Swagger; `/ws` supports
+channel subscriptions and caps incoming messages at 1 MiB. Its outgoing event
+queues are unbounded, with no heartbeat, sequence/replay or reconnect snapshot
+contract. No SSE endpoint is implemented. Authentication is absent from the
+API layer and CORS reflects all origins with credentials enabled. Audio and IQ
+use separate streaming servers; their per-client queues are now bounded. Prioritize
+WebSocket output bounds and access/origin policy before exposing a browser UI.
+These findings describe the current code, not completed API acceptance.
 
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,

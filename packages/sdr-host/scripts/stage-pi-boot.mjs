@@ -2,6 +2,7 @@
 // Add WaveKit installation to Imager's cloud-config without changing login/Wi-Fi.
 import {
 	cpSync,
+	createReadStream,
 	existsSync,
 	readFileSync,
 	realpathSync,
@@ -11,11 +12,41 @@ import {
 } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
-import { spawnSync } from "node:child_process"
+import { createHash, createPublicKey } from "node:crypto"
 import { isMap, isSeq, parseDocument } from "yaml"
 
 const bootstrapPath = "/usr/local/sbin/wavekit-firstboot"
 const bootstrapMarker = "# WaveKit first-boot installer"
+const bundleFiles = [
+	"IMAGE.txt",
+	"wavekit-sdr-host-image.tar.gz",
+	"docker-compose.yml",
+	"install-docker.sh",
+	"setup.sh",
+	".env.example",
+]
+
+async function verifyBundle(bundle) {
+	const manifestPath = join(bundle, "SHA256SUMS")
+	if (!existsSync(manifestPath))
+		fail("Bundle checksum manifest missing; rebuild with make sdr-host-bundle.")
+	const entries = readFileSync(manifestPath, "utf8").trim().split(/\r?\n/)
+	const expected = new Map()
+	for (const line of entries) {
+		const match = /^([a-f0-9]{64})  (.+)$/.exec(line)
+		if (!match || !bundleFiles.includes(match[2]) || expected.has(match[2]))
+			fail("Invalid bundle checksum manifest; rebuild the bundle.")
+		expected.set(match[2], match[1])
+	}
+	for (const name of bundleFiles) {
+		const hash = createHash("sha256")
+		for await (const chunk of createReadStream(join(bundle, name)))
+			hash.update(chunk)
+		const digest = hash.digest("hex")
+		if (expected.get(name) !== digest)
+			fail(`Bundle checksum mismatch: ${name}; rebuild the bundle.`)
+	}
+}
 
 function fail(message) {
 	throw new Error(message)
@@ -139,14 +170,61 @@ function addPublicKey(doc, user, path) {
 		fail(
 			"Supply one OpenSSH public key, never a private key or authorized_keys options.",
 		)
-	const check = spawnSync("ssh-keygen", ["-l", "-f", path], {
-		encoding: "utf8",
-		timeout: 5000,
-	})
-	if (check.status !== 0)
-		fail(
-			"Public key validation failed; ensure ssh-keygen is installed and the public key is valid.",
-		)
+	try {
+		const [type, encoded] = text.split(" ")
+		const blob = Buffer.from(encoded, "base64")
+		let offset = 0
+		const field = () => {
+			const length = blob.readUInt32BE(offset)
+			offset += 4
+			if (length > blob.length - offset) throw new Error("Truncated key")
+			const value = blob.subarray(offset, offset + length)
+			offset += length
+			return value
+		}
+		if (field().toString() !== type) throw new Error("Key type mismatch")
+		let jwk
+		if (type === "ssh-ed25519") {
+			const key = field()
+			if (key.length !== 32) throw new Error("Invalid Ed25519 key")
+			jwk = { kty: "OKP", crv: "Ed25519", x: key.toString("base64url") }
+		} else if (type === "ssh-rsa") {
+			const integer = () => {
+				let bytes = field()
+				if (!bytes.length || bytes[0] & 0x80)
+					throw new Error("Invalid RSA integer")
+				while (bytes.length > 1 && bytes[0] === 0) bytes = bytes.subarray(1)
+				if (bytes.length === 1 && bytes[0] === 0)
+					throw new Error("Zero RSA integer")
+				return bytes.toString("base64url")
+			}
+			jwk = { kty: "RSA", e: integer(), n: integer() }
+		} else {
+			const curve = field().toString()
+			const curves = {
+				nistp256: ["P-256", 32],
+				nistp384: ["P-384", 48],
+				nistp521: ["P-521", 66],
+			}
+			const spec = curves[curve]
+			if (!spec || type !== `ecdsa-sha2-${curve}`)
+				throw new Error("Invalid curve")
+			const point = field(),
+				[crv, size] = spec
+			if (point[0] !== 4 || point.length !== 1 + size * 2)
+				throw new Error("Invalid EC point")
+			jwk = {
+				kty: "EC",
+				crv,
+				x: point.subarray(1, 1 + size).toString("base64url"),
+				y: point.subarray(1 + size).toString("base64url"),
+			}
+		}
+		if (offset !== blob.length) throw new Error("Trailing key data")
+		createPublicKey({ key: jwk, format: "jwk" })
+	} catch {
+		fail("Invalid OpenSSH public-key data.")
+	}
 	// Strip the optional local username/hostname comment from the staged key.
 	const key = text.split(" ").slice(0, 2).join(" ")
 	const users = doc.get("users", true)
@@ -175,7 +253,7 @@ function addPublicKey(doc, user, path) {
 		keys.add(key)
 }
 
-function main() {
+async function main() {
 	const args = process.argv.slice(2)
 	let bootPath,
 		user,
@@ -238,14 +316,7 @@ function main() {
 		if (!existsSync(join(boot, name)) || !statSync(join(boot, name)).isFile())
 			fail(`Expected Raspberry Pi boot file missing: ${name}`)
 	}
-	for (const name of [
-		"IMAGE.txt",
-		"wavekit-sdr-host-image.tar.gz",
-		"docker-compose.yml",
-		"install-docker.sh",
-		"setup.sh",
-		".env.example",
-	]) {
+	for (const name of bundleFiles) {
 		if (
 			!existsSync(join(bundle, name)) ||
 			!statSync(join(bundle, name)).isFile()
@@ -254,6 +325,7 @@ function main() {
 				`Bundle incomplete: ${name}; create it with make sdr-host-bundle first.`,
 			)
 	}
+	await verifyBundle(bundle)
 	const configPath = join(boot, "user-data")
 	const content = readFileSync(configPath, "utf8")
 	if (!/^#cloud-config\s*(?:\r?\n|$)/.test(content))
@@ -300,6 +372,7 @@ function main() {
 		commands.add(doc.createNode([bootstrapPath]))
 	if (!dryRun) {
 		cpSync(bundle, join(boot, "wavekit-pi-bundle"), { recursive: true })
+		await verifyBundle(join(boot, "wavekit-pi-bundle"))
 		const temporary = join(boot, ".wavekit-user-data.tmp")
 		writeFileSync(temporary, String(doc), { mode: 0o600 })
 		renameSync(temporary, configPath)
@@ -313,7 +386,7 @@ function main() {
 }
 
 try {
-	main()
+	await main()
 } catch (error) {
 	console.error(`[wavekit] ${error.message}`)
 	process.exitCode = 1

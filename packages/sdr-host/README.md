@@ -94,6 +94,11 @@ with `--pull never`. It uses sudo for Docker if your new group membership is
 not active yet. Internet is needed for system packages on a fresh OS. Existing
 `.env` settings survive reruns; the loaded image tag is selected explicitly.
 The bundle lives under gitignored `output/` and contains no account keys.
+`SHA256SUMS` covers the image and installation payload. Staging verifies the
+source and copied bundle; setup verifies it again before changing the host.
+Checksums detect damaged or incomplete copies, not an untrusted publisher.
+Rebuild older bundles without a manifest with `make sdr-host-bundle` (add
+`SDR_HOST_BUNDLE_ARGS=--skip-build` to reuse an existing ARM64 image).
 
 ### Install automatically on the first boot
 
@@ -126,8 +131,8 @@ node packages/sdr-host/scripts/stage-pi-boot.mjs \
 ```
 
 This validates and appends one public key to the explicitly named Imager user,
-retaining existing keys and password/sudo policy. It requires `ssh-keygen` on
-the staging computer, rejects private keys, and omits the key's comment. Never
+retaining existing keys and password/sudo policy. It validates Ed25519, RSA or
+ECDSA public keys locally, rejects private keys, and omits the key's comment. Never
 copy the private identity onto the card. For an unresolved `default` user,
 configure the public key in Imager instead. After boot, ordinary
 `ssh YOUR_USER@wavekit-sdr.local` uses your local key/agent; an encrypted key may
