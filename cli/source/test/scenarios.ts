@@ -256,19 +256,8 @@ function resolve(name: string): Obj {
 	return sc
 }
 
-/**
- * Scenarios beyond SCENARIO_NAMES (spec §9 copy rows): IQ stale, IQ disconnected, a faulted decoder.
- * Proposed for SCENARIO_NAMES; until then they load by name here and in the mock core.
- */
-export const EXTRA_SCENARIO_NAMES = [
-	"iq-stale",
-	"iq-disconnected",
-	"decoder-faulted",
-] as const
-export type ExtraScenarioName = (typeof EXTRA_SCENARIO_NAMES)[number]
-
 /** Fully resolved scenario (extends, restPatch, wsAppend, macros and transforms applied). */
-export function loadScenario(name: ScenarioName | ExtraScenarioName): Scenario {
+export function loadScenario(name: ScenarioName): Scenario {
 	return resolve(name) as unknown as Scenario
 }
 

@@ -39,8 +39,13 @@ export interface Timers {
 	clearInterval(handle: unknown): void
 }
 
+/** Every timer is unref'd: none of them may keep the process alive after the UI exits. */
 export const NODE_TIMERS: Timers = {
-	setTimeout: (fn, ms) => setTimeout(fn, ms),
+	setTimeout: (fn, ms) => {
+		const h = setTimeout(fn, ms)
+		h.unref()
+		return h
+	},
 	clearTimeout: h => clearTimeout(h as NodeJS.Timeout),
 	setInterval: (fn, ms) => {
 		const h = setInterval(fn, ms)
@@ -105,6 +110,16 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let rediscoverTimer: unknown = null
 	let discovering = false
 	let unreachableSince: number | null = null
+	/** Bumped by stop(): async work started before it finishes silently. */
+	let epoch = 0
+	/** Correlates each action:result with its action:sent (R47 M6). */
+	let sendSeq = 0
+	let cycleRunning = false
+	/** Endpoints of the cycle requested while one was in flight (M1). */
+	let queuedCycle: Endpoint[] | null = null
+	/** Per-endpoint request sequence: issued, and the newest applied (M2). */
+	const issued = new Map<Endpoint, number>()
+	const applied = new Map<Endpoint, number>()
 
 	const api = createApiClient({
 		base: () => target?.base ?? null,
@@ -130,11 +145,20 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		return { kind: "rest", endpoint, outcome, at } as RestInbound
 	}
 
-	/** Resolves true when the server answered at all (any non-network outcome). */
+	/** Resolves true when the server answered at all; a network error or a timeout is no answer (M3). */
 	async function fetchOne(endpoint: Endpoint): Promise<boolean> {
+		const seq = (issued.get(endpoint) ?? 0) + 1
+		issued.set(endpoint, seq)
 		const outcome = await api.get(endpoint)
-		push(restInbound(endpoint, outcome, deps.now()))
-		return outcome.ok || outcome.error.kind !== "network"
+		// M2: a response older than one already applied is dropped, never applied over it.
+		if (seq > (applied.get(endpoint) ?? 0)) {
+			applied.set(endpoint, seq)
+			push(restInbound(endpoint, outcome, deps.now()))
+		}
+		return (
+			outcome.ok ||
+			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
+		)
 	}
 
 	function schedulePoll(): void {
@@ -142,31 +166,66 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
 		pollTimer = deps.timers.setTimeout(() => {
 			pollTimer = null
-			void pollCycle(POLL_ENDPOINTS)
+			requestCycle(POLL_ENDPOINTS)
 		}, POLL_MS)
 	}
 
-	async function pollCycle(endpoints: readonly Endpoint[]): Promise<void> {
-		const results = await Promise.allSettled(endpoints.map(fetchOne))
+	/** Cycles never overlap (spec §10.2): one requested mid-cycle runs when it ends (M1). */
+	function requestCycle(endpoints: readonly Endpoint[]): void {
 		if (stopped) return
+		if (cycleRunning) {
+			queuedCycle = [...new Set([...(queuedCycle ?? []), ...endpoints])]
+			return
+		}
+		if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
+		pollTimer = null
+		void pollCycle(endpoints)
+	}
+
+	async function pollCycle(endpoints: readonly Endpoint[]): Promise<void> {
+		const run = epoch
+		cycleRunning = true
+		const results = await Promise.allSettled(endpoints.map(fetchOne))
+		if (run !== epoch) return
+		cycleRunning = false
 		const at = deps.now()
 		push({ kind: "rest:cycle", at, nextAt: at + POLL_MS })
 		const answered = results.some(r => r.status === "fulfilled" && r.value)
-		if (answered) unreachableSince = null
-		else unreachableSince ??= at
+		if (answered) {
+			unreachableSince = null
+			clearRediscover()
+		} else unreachableSince ??= at
 		maybeRediscover(at)
-		schedulePoll()
+		const next = queuedCycle
+		queuedCycle = null
+		if (next !== null) requestCycle(next)
+		else schedulePoll()
 	}
 
+	function clearRediscover(): void {
+		if (rediscoverTimer !== null) deps.timers.clearTimeout(rediscoverTimer)
+		rediscoverTimer = null
+	}
+
+	/** Starts a discovery chain unless one is running or pending: there is only ever one. */
 	function maybeRediscover(at: number): void {
-		if (deps.explicit !== null || discovering || unreachableSince === null)
+		if (
+			deps.explicit !== null ||
+			discovering ||
+			rediscoverTimer !== null ||
+			unreachableSince === null
+		)
 			return
 		if (at - unreachableSince < REDISCOVER_AFTER_MS) return
 		void runDiscovery()
 	}
 
 	async function runDiscovery(): Promise<void> {
+		if (stopped || discovering) return
+		// A run supersedes the pending retry, so the chain never forks.
+		clearRediscover()
 		discovering = true
+		const run = epoch
 		push({
 			kind: "target",
 			at: deps.now(),
@@ -175,10 +234,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			discovery: { mode: "probing", tried: [] },
 		})
 		const found = await discoverFn(deps.fetchFn)
+		if (run !== epoch) return
 		discovering = false
-		if (stopped) return
 		const at = deps.now()
 		if (found.target) {
+			const same =
+				target !== null &&
+				target.base === found.target.base &&
+				target.ws === found.target.ws
 			target = found.target
 			unreachableSince = null
 			push({
@@ -188,30 +251,38 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				ws: target.ws,
 				discovery: { mode: "found", tried: found.tried },
 			})
-			ws.reconnectNow()
-			void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			// The socket may already be back on this target by itself; reconnecting it
+			// would record a false gap and wipe the rate and fanout histories.
+			if (!same || !ws.connected()) ws.reconnectNow()
+			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 			return
 		}
 		push({
 			kind: "target",
 			at,
-			base: null,
-			ws: null,
+			base: target?.base ?? null,
+			ws: target?.ws ?? null,
 			discovery: { mode: "failed", tried: found.tried },
 		})
-		for (const endpoint of POLL_ENDPOINTS) {
-			push(
-				restInbound(
-					endpoint,
-					{
-						ok: false,
-						error: { kind: "network", message: "no API answered", at },
-					},
-					at,
-				),
-			)
+		if (target === null) {
+			// Nothing to poll yet, so discovery stands in for the poll cycle.
+			for (const endpoint of POLL_ENDPOINTS) {
+				push(
+					restInbound(
+						endpoint,
+						{
+							ok: false,
+							error: { kind: "network", message: "no API answered", at },
+						},
+						at,
+					),
+				)
+			}
+			push({ kind: "rest:cycle", at, nextAt: at + MAX_BACKOFF_MS })
+		} else if (unreachableSince === null) {
+			// A poll of the current target answered while this ran: nothing to chase.
+			return
 		}
-		push({ kind: "rest:cycle", at, nextAt: at + MAX_BACKOFF_MS })
 		rediscoverTimer = deps.timers.setTimeout(() => {
 			rediscoverTimer = null
 			void runDiscovery()
@@ -289,35 +360,39 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 					discovery: { mode: "explicit", tried: [] },
 				})
 				ws.start()
-				void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+				requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 			} else {
 				void runDiscovery()
 			}
 		},
 		stop: () => {
 			stopped = true
-			for (const t of [pollTimer, rediscoverTimer])
-				if (t !== null) deps.timers.clearTimeout(t)
+			epoch++
+			discovering = false
+			cycleRunning = false
+			queuedCycle = null
+			if (pollTimer !== null) deps.timers.clearTimeout(pollTimer)
+			clearRediscover()
 			if (flushTimer !== null) deps.timers.clearInterval(flushTimer)
 			pollTimer = null
-			rediscoverTimer = null
 			flushTimer = null
 			ws.stop()
 		},
 		reconnect: () => {
 			if (stopped) return
 			if (target === null) {
-				if (!discovering) void runDiscovery()
+				void runDiscovery()
 				return
 			}
 			ws.reconnectNow()
-			void pollCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 		},
 		send: intent => {
 			const key = actionKey(intent)
-			push({ kind: "action:sent", at: deps.now(), key, intent })
+			const id = ++sendSeq
+			push({ kind: "action:sent", at: deps.now(), id, key, intent })
 			void execute(intent).then(outcomes => {
-				push({ kind: "action:result", at: deps.now(), key, outcomes })
+				push({ kind: "action:result", at: deps.now(), id, key, outcomes })
 			})
 		},
 	}

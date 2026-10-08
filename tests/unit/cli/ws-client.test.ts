@@ -126,6 +126,18 @@ describe("ws client", () => {
 			4000 + 1000,
 		)
 	})
+	it("connected() is true from connect until the socket closes", () => {
+		const { client, sockets } = harness()
+		expect(client.connected()).toBe(false)
+		client.start()
+		expect(client.connected()).toBe(true)
+		sockets[0]!.h.close(1006, "")
+		expect(client.connected()).toBe(false)
+		client.reconnectNow()
+		expect(client.connected()).toBe(true)
+		client.stop()
+		expect(client.connected()).toBe(false)
+	})
 	it("reconnectNow ignores the old socket's events and connects immediately", () => {
 		const { client, sockets, emitted } = harness()
 		client.start()
