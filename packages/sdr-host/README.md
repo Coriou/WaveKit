@@ -145,6 +145,9 @@ It preserves Imager's Wi-Fi/login settings and existing commands, and does not
 print credentials. If user-data does not identify one normal user, pass
 `--user YOUR_IMAGER_USERNAME`; it never guesses the name of a `default` user.
 It neither flashes nor erases the card.
+Staging verifies a temporary copy before replacing the bundle and `user-data`.
+Reruns retain custom bundle files such as `.env`; existing bundle destinations
+must be real directories. Keep the card mounted until staging exits successfully.
 
 On the Pi, cloud-init runs the bootstrap as root. It copies the bundle into the
 configured user's writable home, then runs `setup.sh --target-user USER` as

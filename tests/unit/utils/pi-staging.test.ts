@@ -8,6 +8,7 @@ import {
 	rmSync,
 	writeFileSync,
 	mkdirSync,
+	symlinkSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
@@ -251,6 +252,72 @@ describe("Pi boot staging", () => {
 		const staged = parse(readFileSync(join(boot, "user-data"), "utf8"))
 		expect(staged.write_files).toHaveLength(2)
 		expect(staged.runcmd).toHaveLength(2)
+	})
+
+	it("replaces payload symlinks safely and preserves existing bundle settings", () => {
+		expect(stage().status).toBe(0)
+		const destination = join(boot, "wavekit-pi-bundle")
+		const outside = join(temp, "outside.sh")
+		writeFileSync(outside, "must survive\n")
+		rmSync(join(destination, "setup.sh"))
+		symlinkSync(outside, join(destination, "setup.sh"))
+		writeFileSync(join(destination, ".env"), "CUSTOM_SETTING=42\n")
+		expect(stage().status).toBe(0)
+		expect(readFileSync(outside, "utf8")).toBe("must survive\n")
+		expect(readFileSync(join(destination, "setup.sh"), "utf8")).toBe(
+			"fixture\n",
+		)
+		expect(readFileSync(join(destination, ".env"), "utf8")).toBe(
+			"CUSTOM_SETTING=42\n",
+		)
+	})
+
+	it("ignores a preexisting predictable temporary symlink", () => {
+		const outside = join(temp, "outside")
+		writeFileSync(outside, "must survive\n")
+		symlinkSync(outside, join(boot, ".wavekit-user-data.tmp"))
+		expect(stage().status).toBe(0)
+		expect(readFileSync(outside, "utf8")).toBe("must survive\n")
+	})
+
+	it("materializes source payload symlinks so the staged card is self-contained", () => {
+		const archive = join(bundle, "wavekit-sdr-host-image.tar.gz")
+		const outside = join(temp, "archive")
+		writeFileSync(outside, "fixture\n")
+		rmSync(archive)
+		symlinkSync(outside, archive)
+		const result = stage()
+		expect(result.status, result.stderr).toBe(0)
+		rmSync(outside)
+		expect(
+			readFileSync(
+				join(boot, "wavekit-pi-bundle", "wavekit-sdr-host-image.tar.gz"),
+				"utf8",
+			),
+		).toBe("fixture\n")
+	})
+
+	it("rejects a symlink bundle destination even in dry-run", () => {
+		symlinkSync(bundle, join(boot, "wavekit-pi-bundle"))
+		expect(stage("--dry-run").status).toBe(1)
+		expect(readFileSync(join(boot, "user-data"), "utf8")).toBe(fixture)
+	})
+
+	it("keeps the staged bundle and Imager config intact when preparing a replacement fails", () => {
+		expect(stage().status).toBe(0)
+		const content = readFileSync(join(boot, "user-data"), "utf8")
+		const destination = join(boot, "wavekit-pi-bundle")
+		writeFileSync(join(destination, ".env"), "CUSTOM_SETTING=42\n")
+		// An invalid optional documentation file fails during preparation.
+		mkdirSync(join(bundle, "README.txt"))
+		expect(stage().status).toBe(1)
+		expect(readFileSync(join(boot, "user-data"), "utf8")).toBe(content)
+		expect(readFileSync(join(destination, "setup.sh"), "utf8")).toBe(
+			"fixture\n",
+		)
+		expect(readFileSync(join(destination, ".env"), "utf8")).toBe(
+			"CUSTOM_SETTING=42\n",
+		)
 	})
 
 	it("generates the same root bootstrap for recovery without writing boot metadata", () => {

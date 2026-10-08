@@ -4,9 +4,14 @@ import {
 	cpSync,
 	createReadStream,
 	existsSync,
+	lstatSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	renameSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs"
@@ -313,9 +318,16 @@ async function main() {
 		fail("--boot is required; the helper never guesses a disk or boot mount.")
 	const boot = realpathSync(bootPath)
 	for (const name of ["config.txt", "cmdline.txt", "user-data"]) {
-		if (!existsSync(join(boot, name)) || !statSync(join(boot, name)).isFile())
+		if (!existsSync(join(boot, name)) || !lstatSync(join(boot, name)).isFile())
 			fail(`Expected Raspberry Pi boot file missing: ${name}`)
 	}
+	const destination = join(boot, "wavekit-pi-bundle")
+	const destinationStat = lstatSync(destination, { throwIfNoEntry: false })
+	const existingBundle = Boolean(destinationStat)
+	if (existingBundle && !destinationStat.isDirectory())
+		fail(
+			"Existing wavekit-pi-bundle must be a directory, not a symlink or file.",
+		)
 	for (const name of bundleFiles) {
 		if (
 			!existsSync(join(bundle, name)) ||
@@ -371,11 +383,54 @@ async function main() {
 	)
 		commands.add(doc.createNode([bootstrapPath]))
 	if (!dryRun) {
-		cpSync(bundle, join(boot, "wavekit-pi-bundle"), { recursive: true })
-		await verifyBundle(join(boot, "wavekit-pi-bundle"))
-		const temporary = join(boot, ".wavekit-user-data.tmp")
-		writeFileSync(temporary, String(doc), { mode: 0o600 })
-		renameSync(temporary, configPath)
+		// Prepare and verify away from the live files. Never follow an existing
+		// payload symlink when replacing files, or reuse a predictable temp file.
+		const staging = mkdtempSync(join(boot, ".wavekit-stage-"))
+		const replacement = join(staging, "bundle")
+		const previous = join(staging, "previous")
+		let savedPrevious = false
+		let installedReplacement = false
+		let cleanStaging = true
+		try {
+			const managedFiles = [...bundleFiles, "SHA256SUMS", "README.txt"]
+			mkdirSync(replacement)
+			if (existingBundle) {
+				for (const name of readdirSync(destination)) {
+					if (managedFiles.includes(name)) continue
+					cpSync(join(destination, name), join(replacement, name), {
+						recursive: true,
+					})
+				}
+			}
+			// Copy each payload once, including the large image archive. Source
+			// symlinks are materialized so the card is independent of the builder.
+			for (const name of managedFiles) {
+				if (!existsSync(join(bundle, name))) continue
+				cpSync(realpathSync(join(bundle, name)), join(replacement, name), {
+					dereference: true,
+				})
+			}
+			await verifyBundle(replacement)
+			const temporary = join(staging, "user-data")
+			writeFileSync(temporary, String(doc), { mode: 0o600, flag: "wx" })
+			if (existingBundle) {
+				renameSync(destination, previous)
+				savedPrevious = true
+			}
+			renameSync(replacement, destination)
+			installedReplacement = true
+			renameSync(temporary, configPath)
+		} catch (error) {
+			// If rollback itself fails, retain the backup for manual recovery.
+			cleanStaging = false
+			if (installedReplacement)
+				rmSync(destination, { recursive: true, force: true })
+			if (savedPrevious) renameSync(previous, destination)
+			cleanStaging = true
+			throw error
+		} finally {
+			if (cleanStaging) rmSync(staging, { recursive: true, force: true })
+		}
 	}
 	console.log(
 		`[wavekit] ${dryRun ? "Validated staging" : "Staged first-boot installation"} for ${selectedUser} at ${boot}.`,
