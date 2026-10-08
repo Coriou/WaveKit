@@ -132,7 +132,22 @@ export function App({
 		)
 	}
 
-	useKeys(ctx, dispatch)
+	// While too small, keys resolve as if no modal were open, so a bare q reaches the
+	// global quit binding even under a hidden confirm, help, filter or edit; dispatch
+	// drops everything else.
+	useKeys(
+		small
+			? {
+					...ctx,
+					confirm: null,
+					help: false,
+					input: false,
+					edit: false,
+					detail: false,
+				}
+			: ctx,
+		dispatch,
+	)
 	useEffect(() => {
 		if (ui.quit) exit()
 	}, [ui.quit, exit])

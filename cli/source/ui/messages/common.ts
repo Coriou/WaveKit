@@ -19,6 +19,16 @@ function cutAt(s: string, max: number): string {
 }
 
 /** Sanitise and bound a payload string (slice first so a 100 KB string costs little). */
+/** Server default strings ("unknown", "Unknown") carry no value (R44). */
+export function isUnknownString(s: string | undefined): boolean {
+	return s !== undefined && /^unknown$/i.test(s.trim())
+}
+
+/** `s`, or "?" when it is a server default string (R44). */
+export function knownOr(s: string | undefined): string | undefined {
+	return isUnknownString(s) ? "?" : s
+}
+
 export function clip(s: string, max = MAX_TEXT): string {
 	return cutAt(sanitize(cutAt(s, max * 2)), max)
 }

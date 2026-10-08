@@ -60,17 +60,20 @@ describe("chrome components", () => {
 	it("catches render errors with a sanitised one-line fallback", async () => {
 		// M8: React logs the caught error; keep the test output clean.
 		const spy = vi.spyOn(console, "error").mockImplementation(() => undefined)
-		const h = await renderAt(
-			<Box>
-				<ErrorBoundary>
-					<Boom />
-				</ErrorBoundary>
-			</Box>,
-			{ cols: 80, rows: 10 },
-		)
-		expect(h.text()).toBe(" wavekit: render error · boom · q quit")
-		h.unmount()
-		spy.mockRestore()
+		try {
+			const h = await renderAt(
+				<Box>
+					<ErrorBoundary>
+						<Boom />
+					</ErrorBoundary>
+				</Box>,
+				{ cols: 80, rows: 10 },
+			)
+			expect(h.text()).toBe(" wavekit: render error · boom · q quit")
+			h.unmount()
+		} finally {
+			spy.mockRestore()
+		}
 	})
 })
 
@@ -80,20 +83,23 @@ describe("error boundary (M7)", () => {
 	}
 	it("handles non-Error throws", async () => {
 		const spy = vi.spyOn(console, "error").mockImplementation(() => undefined)
-		for (const [value, text] of [
-			["plain string", " wavekit: render error · plain string · q quit"],
-			[42, " wavekit: render error · 42 · q quit"],
-			[null, " wavekit: render error · null · q quit"],
-		] as const) {
-			const h = await renderAt(
-				<ErrorBoundary>
-					<Thrower value={value} />
-				</ErrorBoundary>,
-				{ cols: 80, rows: 10 },
-			)
-			expect(h.text()).toBe(text)
-			h.unmount()
+		try {
+			for (const [value, text] of [
+				["plain string", " wavekit: render error · plain string · q quit"],
+				[42, " wavekit: render error · 42 · q quit"],
+				[null, " wavekit: render error · null · q quit"],
+			] as const) {
+				const h = await renderAt(
+					<ErrorBoundary>
+						<Thrower value={value} />
+					</ErrorBoundary>,
+					{ cols: 80, rows: 10 },
+				)
+				expect(h.text()).toBe(text)
+				h.unmount()
+			}
+		} finally {
+			spy.mockRestore()
 		}
-		spy.mockRestore()
 	})
 })
