@@ -111,7 +111,8 @@ function iqGroup(iq: IqView, old: boolean): Group {
 		iq.word === "no samples" ? `no samples ${formatAge(iq.ageMs)}` : iq.word
 	const base: Line = [label("iq "), glyphSpan(iq.glyph), value(` ${word}`, old)]
 	const variants: Line[] = [base]
-	if (iq.rateBytesPerSec !== null && iq.glyph !== "unknown") {
+	// A rate beside a stalled or dropped lane reads as flow, so it shows only while live.
+	if (iq.rateBytesPerSec !== null && iq.glyph === "live") {
 		variants.push([
 			...base,
 			label(` ${glyphs().sep} `),
@@ -150,12 +151,22 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 }
 
 function dropsGroup(d: StripInput["drops"]): Group {
-	// Backpressure is current evidence even when the ratio cannot be computed (§4.1).
+	// Backpressure is current evidence even when the ratio cannot be computed
+	// (§4.1); it is said in words beside the unknown ratio (R32).
 	if (d.ratio === null) {
-		const unknown: Span = d.backpressure
-			? { text: `${glyphs().attention}?`, role: "attention", bold: true }
-			: { text: "?", role: "unknown" }
-		return { priority: 4, variants: [[label("drops "), unknown]] }
+		const unknown: Line = [label("drops "), { text: "?", role: "unknown" }]
+		return {
+			priority: 4,
+			variants: d.backpressure
+				? [
+						[
+							...unknown,
+							label(` ${glyphs().sep} `),
+							{ text: "backpressure", role: "attention", bold: true },
+						],
+					]
+				: [unknown],
+		}
 	}
 	const pct = formatPercent(d.ratio)
 	const v: Span = d.backpressure

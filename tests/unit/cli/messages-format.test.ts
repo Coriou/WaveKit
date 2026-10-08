@@ -277,3 +277,509 @@ describe("formatMessage", () => {
 		expect(formatMessage(out("x", "y", { k: 1 }), "y").text).toBe('{"k":1}')
 	})
 })
+
+// Payloads below copy the shapes emitted by src/decoders/builtin/* (R6: src/ is
+// the wire authority). They are built here, not taken from mock scenarios.
+const T = "2026-10-08T18:07:41.000Z"
+
+describe("real wire shapes, one per decoder (B3 fix 1)", () => {
+	it("readsb: SBS AircraftData", () => {
+		const m = formatMessage(
+			out("aircraft", "readsb", {
+				icao: "4CA9D2",
+				callsign: "RYR4KT",
+				altitude: 37000,
+				groundSpeed: 451,
+				track: 134,
+				lat: 51.4712,
+				lon: -0.4521,
+				verticalRate: -1216,
+				squawk: "7700",
+				onGround: false,
+				lastSeen: T,
+				messageCount: 12,
+			}),
+			"readsb",
+		)
+		expect(m.protocol).toBe("ADS-B")
+		expect(segs(m)).toEqual([
+			"4CA9D2",
+			"RYR4KT",
+			"FL370 ↓",
+			"451 kt",
+			"51.47,-0.45",
+			"SE",
+			"!7700",
+		])
+		expect(m.emergency).toBe(true)
+	})
+	it("ais-catcher: type ship with ShipData", () => {
+		const m = formatMessage(
+			out("ship", "ais-catcher", {
+				mmsi: "235012345",
+				name: "SEA PRINCESS",
+				callsign: "MXYZ7",
+				imo: 9241061,
+				shipType: 60,
+				lat: 51.5,
+				lon: -0.12,
+				cog: 90.4,
+				sog: 12.1,
+				heading: 91,
+				navStatus: 0,
+				destination: "ROTTERDAM",
+				eta: "2026-10-09T06:00:00.000Z",
+				draught: 7.2,
+				lastSeen: T,
+				messageType: 5,
+			}),
+			"ais-catcher",
+		)
+		expect(m.protocol).toBe("AIS")
+		expect(m.category).toBe("data")
+		expect(segs(m)).toEqual([
+			"235012345",
+			"SEA PRINCESS",
+			"passenger",
+			"51.50,-0.12",
+			"12.1 kn",
+			"MXYZ7",
+			"dest ROTTERDAM",
+		])
+		const f = Object.fromEntries(m.fields.map(x => [x.label, x.value]))
+		expect(f).toMatchObject({
+			callsign: "MXYZ7",
+			type: "passenger (60)",
+			status: "under way using engine",
+			destination: "ROTTERDAM",
+		})
+		expect(
+			segs(
+				formatMessage(
+					out("ship", "ais-catcher", {
+						mmsi: "244660123",
+						name: "EEMS SPIRIT",
+						shipType: 71,
+						sog: 8.4,
+					}),
+					"ais-catcher",
+				),
+			),
+		).toEqual(["244660123", "EEMS SPIRIT", "cargo", "8.4 kn"])
+	})
+	it("acarsdec: ACARSMessage with frequency in Hz", () => {
+		const m = formatMessage(
+			out("acars", "acarsdec", {
+				timestamp: T,
+				frequency: 131_550_000,
+				channel: 0,
+				level: -18.2,
+				error: 0,
+				mode: "2",
+				label: "H1",
+				blockId: "5",
+				ack: "!",
+				tail: ".EI-DCL",
+				flight: "FR4KT",
+				msgno: "M01A",
+				text: "REQUEST WX",
+			}),
+			"acarsdec",
+		)
+		expect(m.protocol).toBe("ACARS")
+		expect(segs(m)).toEqual([".EI-DCL", "FR4KT", "H1", "131.550 MHz"])
+		expect(m.text).toBe("REQUEST WX")
+	})
+	it("dumpvdl2: VDL2Message with embedded ACARS and frequency in Hz", () => {
+		const m = formatMessage(
+			out("vdl2", "dumpvdl2", {
+				timestamp: T,
+				frequency: 136_975_000,
+				station: "EGLL",
+				icao: "4CA9D2",
+				msgType: "ACARS",
+				acars: {
+					timestamp: T,
+					frequency: 136_975_000,
+					channel: 0,
+					level: -30,
+					error: 0,
+					mode: "2",
+					label: "H1",
+					tail: ".EI-DCL",
+					flight: "FR4KT",
+					text: "POS N51",
+				},
+				level: -30.1,
+				noiseFloor: -45,
+			}),
+			"dumpvdl2",
+		)
+		expect(m.protocol).toBe("VDL2")
+		expect(segs(m)).toEqual([".EI-DCL", "FR4KT", "H1", "136.975 MHz"])
+		expect(m.text).toBe("POS N51")
+		const bare = formatMessage(
+			out("vdl2", "dumpvdl2", {
+				timestamp: T,
+				frequency: 136_650_000,
+				icao: "3C6444",
+				msgType: "XID",
+			}),
+			"dumpvdl2",
+		)
+		expect(segs(bare)).toEqual(["3C6444", "XID", "136.650 MHz"])
+		const raw = formatMessage(
+			out("vdl2", "dumpvdl2", { vdl2: { freq: 136_725_000 } }),
+			"dumpvdl2",
+		)
+		expect(segs(raw)).toEqual(["136.725 MHz"])
+	})
+	it("direwolf: APRSData position, message and weather", () => {
+		const pos = formatMessage(
+			out("aprs", "direwolf", {
+				timestamp: T,
+				source: "N0CALL-9",
+				destination: "APRS",
+				path: ["WIDE1-1", "WIDE2-1"],
+				dataType: "Position with messaging",
+				lat: 51.5,
+				lon: -0.12,
+				altitude: 120,
+				course: 90,
+				speed: 35,
+				symbol: "/>",
+				comment: "on the road",
+			}),
+			"direwolf",
+		)
+		expect(pos.protocol).toBe("APRS")
+		expect(pos.category).toBe("data")
+		expect(segs(pos)).toEqual([
+			"N0CALL-9",
+			"Position with messaging",
+			"51.50,-0.12",
+			"35 mph",
+		])
+		expect(pos.text).toBe("on the road")
+		const msg = formatMessage(
+			out("aprs", "direwolf", {
+				timestamp: T,
+				source: "N0CALL",
+				destination: "APRS",
+				path: [],
+				dataType: "Message",
+				message: { addressee: "BLN1", text: "NET TONIGHT", messageNo: "7" },
+			}),
+			"direwolf",
+		)
+		expect(segs(msg)).toEqual(["N0CALL", "to BLN1", "Message"])
+		expect(msg.text).toBe("NET TONIGHT")
+		const wx = formatMessage(
+			out("aprs", "direwolf", {
+				timestamp: T,
+				source: "WX1",
+				destination: "APRS",
+				path: [],
+				dataType: "Positionless weather",
+				weather: { temperature: 68, humidity: 40, windSpeed: 5 },
+			}),
+			"direwolf",
+		)
+		expect(segs(wx)).toEqual([
+			"WX1",
+			"Positionless weather",
+			"20.0°C",
+			"40%",
+			"wind 5 mph",
+		])
+	})
+	it("rtl433: type signal with raw rtl_433 JSON", () => {
+		const m = formatMessage(
+			out("signal", "rtl433", {
+				time: "2026-10-08 18:07:41",
+				model: "Acurite-Tower",
+				id: 1234,
+				channel: "A",
+				battery_ok: 1,
+				temperature_C: 21.25,
+				humidity: 40,
+				mic: "CHECKSUM",
+			}),
+			"rtl433",
+		)
+		expect(m.protocol).toBe("433")
+		expect(segs(m)).toEqual(["Acurite-Tower", "#1234", "ch A", "21.3°C", "40%"])
+	})
+	it("lora-meshtastic: rxRssi/rxSnr of 0 mean unavailable, not 0 dBm", () => {
+		const m = formatMessage(
+			out("meshtastic", "lora-meshtastic", {
+				from: 0x11223344,
+				to: 0xffffffff,
+				id: 1,
+				channel: 0,
+				hopLimit: 2,
+				hopStart: 3,
+				wantAck: false,
+				portnum: 1,
+				payloadB64: Buffer.from("hello").toString("base64"),
+				payloadLen: 5,
+				rxRssi: 0,
+				rxSnr: 0,
+				rxTime: T,
+				frequency: 869_525_000,
+				bw: 250,
+				sf: 11,
+				cr: 5,
+			}),
+			"lora-meshtastic",
+		)
+		expect(segs(m)).toEqual(["!11223344→BCAST", "TEXT", "1/3 hops"])
+		expect(m.text).toBe("hello")
+	})
+	it("multimon-ng: POCSAG and FLEX arrive as type message", () => {
+		const p = formatMessage(
+			out("message", "multimon-ng", {
+				protocol: "POCSAG1200",
+				address: 1234567,
+				function: 3,
+				messageType: "alpha",
+				message: "FIRE ALARM",
+			}),
+			"multimon-ng",
+		)
+		expect(p.protocol).toBe("POCSAG")
+		expect(p.category).toBe("pager")
+		expect(segs(p)).toEqual(["1234567", "fn 3"])
+		expect(p.text).toBe("FIRE ALARM")
+		const f = formatMessage(
+			out("message", "multimon-ng", {
+				protocol: "FLEX",
+				mode: "1600/2/K/A",
+				frequency: "929.6125",
+				capcode: "001234567",
+				messageType: "ALN",
+				message: "TEST PAGE",
+			}),
+			"multimon-ng",
+		)
+		expect(f.protocol).toBe("FLEX")
+		expect(f.category).toBe("pager")
+		expect(segs(f)).toEqual(["001234567", "ALN"])
+		expect(f.searchText).toContain("001234567")
+	})
+	it("multimon-ng: decode (DTMF, AFSK1200, FSK9600) and EAS show data.protocol", () => {
+		const dtmf = formatMessage(
+			out("decode", "multimon-ng", { protocol: "DTMF", digits: "123#" }),
+			"multimon-ng",
+		)
+		expect(dtmf.protocol).toBe("DTMF")
+		expect(segs(dtmf)).toEqual(["123#"])
+		const afsk = formatMessage(
+			out("decode", "multimon-ng", {
+				protocol: "AFSK1200",
+				from: "N0CALL",
+				to: "APRS",
+				via: "WIDE1-1",
+			}),
+			"multimon-ng",
+		)
+		expect(afsk.protocol).toBe("AFSK1200")
+		expect(segs(afsk)).toEqual(["N0CALL→APRS", "via WIDE1-1"])
+		const fsk = formatMessage(
+			out("decode", "multimon-ng", { protocol: "FSK9600", rawData: "1A2B3C" }),
+			"multimon-ng",
+		)
+		expect(fsk.protocol).toBe("FSK9600")
+		expect(fsk.text).toBe("1A2B3C")
+		const eas = formatMessage(
+			out("message", "multimon-ng", {
+				protocol: "EAS",
+				rawMessage: "ZCZC-WXR-TOR-012345+0030",
+			}),
+			"multimon-ng",
+		)
+		expect(eas.protocol).toBe("EAS")
+		expect(eas.text).toBe("ZCZC-WXR-TOR-012345+0030")
+	})
+	it("dsd-fme: call_start with YSF callsign, sync and error", () => {
+		const ysf = formatMessage(
+			out("call_start", "dsd-fme", {
+				protocol: "ysf",
+				talkgroup: 0,
+				source: 0,
+				ysf: { mode: "V/D mode 2", callsign: "EI2ABC" },
+			}),
+			"dsd-fme",
+		)
+		expect(ysf.protocol).toBe("YSF")
+		expect(segs(ysf)).toEqual(["CS EI2ABC", "call start"])
+		const dmr = formatMessage(
+			out("call_start", "dsd-fme", {
+				protocol: "dmr",
+				talkgroup: 2350,
+				source: 2341234,
+				slot: 1,
+				dmr: { cc: 1 },
+			}),
+			"dsd-fme",
+		)
+		expect(segs(dmr)).toEqual([
+			"TG 2350",
+			"SRC 2341234",
+			"slot 1",
+			"CC 1",
+			"call start",
+		])
+		expect(
+			segs(
+				formatMessage(
+					out("sync", "dsd-fme", { mode: "DMR", protocol: "dmr" }),
+					"dsd-fme",
+				),
+			),
+		).toEqual(["sync DMR"])
+		expect(
+			formatMessage(
+				out("error", "dsd-fme", { message: "CRC error" }),
+				"dsd-fme",
+			).text,
+		).toBe("CRC error")
+	})
+})
+
+describe("R32 formatter hygiene", () => {
+	const BAD =
+		/[\u0000-\u001f\u007f-\u009f\u061C\u200E\u200F\u2028-\u202E\u2066-\u2069]/
+	const everyText = (m: ReturnType<typeof formatMessage>): string[] => [
+		m.protocol,
+		m.searchText,
+		m.text ?? "",
+		...m.segments.map(s => s.text),
+		...m.fields.flatMap(f => [f.label, f.value]),
+	]
+	it("never leaves a lone high surrogate at a cut", () => {
+		const m = formatMessage(
+			out("message", "multimon-ng", {
+				protocol: "POCSAG1200",
+				address: 1,
+				message: "a".repeat(1999) + "𠀀𠀀",
+			}),
+			"multimon-ng",
+		)
+		const text = m.text ?? ""
+		expect(text.length).toBeLessThanOrEqual(2000)
+		const last = text.charCodeAt(text.length - 1)
+		expect(last >= 0xd800 && last <= 0xdbff).toBe(false)
+	})
+	it("swaps → and ° for ASCII in ASCII glyph mode", () => {
+		setGlyphMode("ascii")
+		try {
+			const mesh = formatMessage(
+				out("meshtastic", "lora-meshtastic", {
+					from: 1,
+					to: 0xffffffff,
+					portnum: 3,
+					payloadB64: "",
+					payloadLen: 0,
+					hopLimit: 3,
+					hopStart: 3,
+					rxRssi: -90,
+					rxSnr: 5,
+				}),
+				"lora-meshtastic",
+			)
+			expect(segs(mesh)[0]).toBe("!00000001->BCAST")
+			const wx = formatMessage(
+				out("signal", "rtl433", { model: "M", temperature_C: 21.25 }),
+				"rtl433",
+			)
+			expect(segs(wx)).toContain("21.3C")
+			const ac = formatMessage(
+				out("aircraft", "readsb", { icao: "ABC123", track: 134 }),
+				"readsb",
+			)
+			expect(ac.fields.find(f => f.label === "track")?.value).toBe("134 SE")
+			for (const m of [mesh, wx, ac])
+				for (const t of everyText(m)) expect(t).not.toMatch(/[→°]/)
+		} finally {
+			setGlyphMode("utf8")
+		}
+	})
+	it("sanitises segments, fields and protocol against C1 and bidi input", () => {
+		const evil = "\u202Eev\x9b2Jil\u2066\x1b]0;t\x07"
+		const ms = [
+			formatMessage(
+				out("aircraft", "readsb", {
+					icao: `4CA${evil}`,
+					callsign: evil,
+					squawk: "7700",
+					altitude: 1000,
+				}),
+				"readsb",
+			),
+			formatMessage(out(`x${evil}`, "x", { k: evil }), "x"),
+			formatMessage(
+				out("ship", "ais-catcher", {
+					mmsi: evil,
+					name: evil,
+					destination: evil,
+					callsign: evil,
+				}),
+				"ais-catcher",
+			),
+			formatMessage(
+				out("aprs", "direwolf", {
+					source: evil,
+					dataType: evil,
+					comment: evil,
+					path: [],
+				}),
+				"direwolf",
+			),
+		]
+		for (const m of ms)
+			for (const t of everyText(m)) expect(BAD.test(t)).toBe(false)
+	})
+	it("never renders [object Object] for object-valued fields", () => {
+		const ms = [
+			formatMessage(
+				out("ship", "ais-catcher", {
+					mmsi: { a: 1 },
+					name: "X",
+					shipType: { b: 2 },
+				}),
+				"ais-catcher",
+			),
+			formatMessage(
+				out("signal", "rtl433", {
+					model: "M",
+					id: { c: 3 },
+					channel: { d: 4 },
+				}),
+				"rtl433",
+			),
+			formatMessage(
+				out("message", "multimon-ng", {
+					protocol: "POCSAG1200",
+					address: { e: 5 },
+					function: [1],
+					message: "m",
+				}),
+				"multimon-ng",
+			),
+		]
+		for (const m of ms)
+			for (const t of everyText(m)) expect(t).not.toContain("[object")
+	})
+	it("routes to voice only for call-shaped objects", () => {
+		expect(
+			formatMessage(out("x", "y", { source: 5, value: 1 }), "y").category,
+		).toBe("other")
+		expect(formatMessage(out("x", "y", { talkgroup: 9 }), "y").category).toBe(
+			"voice",
+		)
+		expect(
+			formatMessage(out("x", "y", { source: 3120001, slot: 2 }), "y").category,
+		).toBe("voice")
+	})
+})
