@@ -174,6 +174,10 @@ export type WsEvent =
 	| { type: "decoder:stopped"; decoderId: string }
 	| { type: "decoder:error"; decoderId: string; error: string }
 	| { type: "decoder:health"; decoderId: string; health: DecoderHealth }
+	/** One GET /api/decoders/:id body; several per transition, apply the latest. */
+	| { type: "decoder:status"; decoder: DecoderRow }
+	/** One GET /api/sources item incl. activity; apply the latest per id. */
+	| { type: "source:status"; source: ExtendedSourceStatus }
 	| { type: "source:connected"; sourceId: string }
 	| { type: "source:disconnected"; sourceId: string; error?: string }
 	| { type: "source:error"; sourceId: string; error: string }
