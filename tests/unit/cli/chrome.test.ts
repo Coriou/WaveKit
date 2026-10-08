@@ -167,3 +167,46 @@ describe("footer, confirm, switcher, help", () => {
 		expect(findBanned(lines.join("\n"))).toEqual([])
 	})
 })
+
+describe("M6: rx uses windowFor and the age of its actual source", () => {
+	it("a tuner frequency of 0 falls back to the source centre, never 0.000 MHz", () => {
+		const s = scenarioState("live")
+		const tuner = s.tuner.value!.map(t => ({ ...t, frequency: 0 }))
+		const src = s.sources.value!.map(x => ({
+			...x,
+			caps: { ...x.caps, centerFreq: 446_000_000 },
+		}))
+		const st = {
+			...s,
+			tuner: { ...s.tuner, value: tuner },
+			sources: { ...s.sources, value: src },
+		}
+		const input = stripInput(st)
+		expect(input.rx?.centreHz).toBe(446_000_000)
+		expect(lineText(stripLine(input, 199))).not.toContain("0.000 MHz")
+	})
+	it("dims rx by the lane the centre came from", () => {
+		const s = scenarioState("live")
+		const oldAt = s.now - 60_000
+		// Centre from the tuner; tuner lane old → dim, even though sources are fresh.
+		const tunerOld = { ...s, tuner: { ...s.tuner, receivedAt: oldAt } }
+		expect(stripInput(tunerOld).old.rx).toBe(true)
+		// Centre from the source caps (tuner frequency 0); the old tuner lane does not dim it.
+		const fromSource = {
+			...tunerOld,
+			tuner: {
+				...tunerOld.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, frequency: 0 })),
+			},
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					caps: { ...x.caps, centerFreq: 446_000_000 },
+				})),
+			},
+		}
+		expect(stripInput(fromSource).old.rx).toBe(false)
+		expect(stripInput(s).old.rx).toBe(false)
+	})
+})

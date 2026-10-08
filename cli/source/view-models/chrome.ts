@@ -8,7 +8,7 @@ import {
 	type Endpoint,
 	type LaneError,
 } from "../data/types.js"
-import { decoderMembership } from "../data/window.js"
+import { decoderMembership, windowFor } from "../data/window.js"
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
@@ -59,10 +59,28 @@ export function stripInput(state: AppState): StripInput {
 		? aggregateDropNow(state.fanoutHistory)
 		: null
 	const tuner = state.tuner.value?.[0]
-	const src = state.sources.value?.[0]
-	const centre =
-		tuner?.frequency ?? src?.caps.centerFreq ?? state.relay.value?.lastFrequency
-	const rate = tuner?.sampleRate ?? src?.caps.sampleRate
+	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
+	// M6: one rule for the window (first positive centre and rate), shared with
+	// the decoder membership column, so a frequency of 0 is never shown.
+	const win =
+		sourceId === undefined
+			? null
+			: windowFor(
+					sourceId,
+					state.tuner.value,
+					state.sources.value,
+					state.relay.value,
+				)
+	const src = state.sources.value?.find(x => x.id === sourceId)
+	// Dim rx by the lane its centre actually came from.
+	const rxOld =
+		win === null
+			? false
+			: tuner !== undefined && tuner.frequency === win.centreHz
+				? isOld(state.tuner, now)
+				: src?.caps.centerFreq === win.centreHz
+					? isOld(state.sources, now)
+					: isOld(state.relay, now)
 	return {
 		api: apiView(state.conn, now),
 		iq: iqSummary(state.sources, state.metrics, now),
@@ -72,11 +90,11 @@ export function stripInput(state: AppState): StripInput {
 			backpressure: (agg?.backpressure ?? 0) > 0,
 		},
 		rx:
-			centre === undefined
+			win === null
 				? null
 				: {
-						centreHz: centre,
-						halfSpanHz: rate === undefined ? null : rate / 2,
+						centreHz: win.centreHz,
+						halfSpanHz: win.sampleRate / 2,
 						control: tuner
 							? tuner.controlMode === "external"
 								? "external"
@@ -87,7 +105,7 @@ export function stripInput(state: AppState): StripInput {
 		old: {
 			iq: false,
 			decoders: isOld(state.decoders, now),
-			rx: isOld(state.tuner, now) && isOld(state.sources, now),
+			rx: rxOld,
 		},
 	}
 }
