@@ -65,6 +65,7 @@ interface DecoderState {
 	restartTimer: ReturnType<typeof setTimeout> | null
 	intentionallyStopped: boolean
 	stopRevision: number
+	inputCaps?: SourceCaps
 	branchId: string | null
 	branchFanout: FanoutManager | null
 	assignedSourceId: string | null
@@ -673,13 +674,15 @@ export class DecoderManager extends EventEmitter {
 		}
 		if (sourceId && this.sourceManager) {
 			const caps = this.sourceManager.getCaps(sourceId)
-			if (caps)
+			if (caps) {
+				state.inputCaps = { ...caps }
 				decoder.updateOptions({
 					inputSampleRate: caps.sampleRate,
 					...(caps.centerFreq !== undefined
 						? { inputCenterFreq: caps.centerFreq }
 						: {}),
 				})
+			}
 			this.sourceManager.assignDecoder(config.id, sourceId, {
 				input: decoder.caps.input,
 				wantsExclusiveSource: decoder.caps.wantsExclusiveSource ?? false,
@@ -867,14 +870,37 @@ export class DecoderManager extends EventEmitter {
 				newSampleRate: caps.sampleRate,
 				affectedDecoders,
 			},
-			"Source caps changed, updating decoder options and restarting",
+			"Source caps changed, updating decoder options",
 		)
 
+		const restartDecoders = new Set<string>()
 		// Update each decoder's inputSampleRate option BEFORE restart
 		// This ensures the decoder rebuilds its pipeline with the correct sample rate
 		for (const decoderId of affectedDecoders) {
 			const state = this.decoders.get(decoderId)
 			if (!state) continue
+
+			const previous = state.inputCaps
+			const inputChanged =
+				!previous ||
+				previous.sampleRate !== caps.sampleRate ||
+				previous.format !== caps.format ||
+				previous.kind !== caps.kind ||
+				previous.channels !== caps.channels
+			const passive =
+				[
+					"dsd-fme",
+					"multimon-ng",
+					"rtl433",
+					"readsb",
+					"acarsdec",
+					"ais-catcher",
+					"direwolf",
+				].includes(state.config.type) ||
+				(state.config.type === "lora-meshtastic" &&
+					!state.config.options["followCenter"])
+			if (inputChanged || !passive) restartDecoders.add(decoderId)
+			state.inputCaps = { ...caps }
 
 			try {
 				// Propagate the new sample rate to the decoder's options
@@ -899,8 +925,8 @@ export class DecoderManager extends EventEmitter {
 			}
 		}
 
-		// Restart each affected decoder (now with updated options)
-		for (const decoderId of affectedDecoders) {
+		// Restart only pipelines whose input format/rate or tuned arguments changed.
+		for (const decoderId of restartDecoders) {
 			if (!this.capsChangedHandler || this.destroying) break
 			if (this.decoders.get(decoderId)?.intentionallyStopped) continue
 			try {

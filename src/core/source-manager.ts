@@ -160,6 +160,7 @@ interface SourceState {
 	activeFormat: SourceCaps["format"] | "UNKNOWN"
 	detectionBuffer: Buffer | null
 	conversionRemainder: Buffer
+	iqRemainder: Buffer
 	// RTL-TCP header capture (IQ sources)
 	rtlTcpHeader: Buffer | null
 	rtlTcpHeaderInfo: RtlTcpHeaderInfo | null
@@ -279,6 +280,7 @@ export class SourceManager extends EventEmitter {
 			activeFormat: config.caps.format,
 			detectionBuffer: config.caps.format === "auto" ? Buffer.alloc(0) : null,
 			conversionRemainder: Buffer.alloc(0),
+			iqRemainder: Buffer.alloc(0),
 			rtlTcpHeader: null,
 			rtlTcpHeaderInfo: null,
 			rtlTcpHeaderBuffer:
@@ -331,6 +333,21 @@ export class SourceManager extends EventEmitter {
 	}
 
 	private forwardData(id: string, state: SourceState, chunk: Buffer): boolean {
+		// TCP boundaries are arbitrary. Fanout may shed complete chunks, so each
+		// CU8 chunk must contain whole I/Q pairs before reaching its branches.
+		if (
+			state.config.caps.kind === "iq" &&
+			state.config.caps.format === "U8_IQ"
+		) {
+			const input = state.iqRemainder.length
+				? Buffer.concat([state.iqRemainder, chunk])
+				: chunk
+			const length = input.length - (input.length % 2)
+			state.iqRemainder = Buffer.from(input.subarray(length))
+			chunk = input.subarray(0, length)
+			if (!chunk.length) return true
+		}
+
 		if (chunk.length > 0) state.lastSampleAt = Date.now()
 		let canWrite = true
 		if (!state.stream.destroyed) {
@@ -662,6 +679,7 @@ export class SourceManager extends EventEmitter {
 		if (config.loop && allowLoop) {
 			// Loop: reset position and continue
 			recordingState.position = 0
+			state.iqRemainder = Buffer.alloc(0)
 
 			this.logger.debug({ sourceId: id }, "Recording source looping")
 
@@ -704,6 +722,7 @@ export class SourceManager extends EventEmitter {
 			state.socket = socket
 			state.sessionBytesReceived = 0
 			state.conversionRemainder = Buffer.alloc(0)
+			state.iqRemainder = Buffer.alloc(0)
 			state.rtlTcpHeader = null
 			state.rtlTcpHeaderInfo = null
 			state.rtlTcpHeaderBuffer =
@@ -1278,7 +1297,17 @@ export class SourceManager extends EventEmitter {
 			...updates,
 		}
 
+		// Tuner clients commonly resend their current settings on connection.
+		if (
+			Object.entries(nextCaps).every(
+				([key, value]) => Reflect.get(oldCaps, key) === value,
+			)
+		)
+			return oldCaps
+
 		state.config.caps = nextCaps
+		if (oldCaps.format !== nextCaps.format || oldCaps.kind !== nextCaps.kind)
+			state.iqRemainder = Buffer.alloc(0)
 
 		if (
 			updates.format &&

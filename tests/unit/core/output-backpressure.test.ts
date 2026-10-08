@@ -7,7 +7,10 @@ import { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { LiveDemodulator } from "../../../src/core/live-demodulator.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
-import { MAX_CLIENT_BUFFER_BYTES } from "../../../src/core/client-buffer.js"
+import {
+	MAX_CLIENT_BUFFER_BYTES,
+	iqClientBufferLimit,
+} from "../../../src/core/client-buffer.js"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
@@ -128,12 +131,12 @@ describe.each(["audio", "tuner", "live"] as const)(
 			output.connect("healthy", healthy)
 			const expected: Buffer[] = []
 			try {
-				for (let index = 0; index < 32; index++) {
+				for (let index = 0; index < (kind === "tuner" ? 160 : 32); index++) {
 					const chunk = Buffer.alloc(64 * 1024, index)
 					expected.push(chunk)
 					output.write(chunk)
 					expect(slow.writableLength).toBeLessThanOrEqual(
-						MAX_CLIENT_BUFFER_BYTES,
+						kind === "tuner" ? iqClientBufferLimit() : MAX_CLIENT_BUFFER_BYTES,
 					)
 				}
 				expect(slow.destroyed).toBe(true)
@@ -180,3 +183,18 @@ describe.each(["audio", "tuner", "live"] as const)(
 		})
 	},
 )
+
+it("allows a tuner client to initialize for one second of IQ before reading", () => {
+	const output = createOutput("tuner")
+	const client = new ClientTransport(true)
+	output.connect("client", client)
+	try {
+		for (let n = 0; n < 64; n++) output.write(Buffer.alloc(65536, n))
+		expect(client.destroyed).toBe(false)
+		client.resumeWrites()
+		expect(client.writableLength).toBe(0)
+		expect(output.clientCount()).toBe(1)
+	} finally {
+		client.destroy()
+	}
+})

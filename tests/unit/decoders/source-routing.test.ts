@@ -422,6 +422,32 @@ describe("Source-aware stdin routing", () => {
 		},
 	)
 
+	it("keeps a passive audio decoder running on retunes and identical rate commands", async () => {
+		await connect("first")
+		registry.register(
+			"dsd-fme",
+			config => new ReceivingDecoder(config.id, sharedCaps),
+			sharedCaps,
+		)
+		const decoder = manager.createDecoder({
+			id: "passive",
+			type: "dsd-fme",
+			enabled: true,
+			sourceId: "first",
+			options: {},
+		})
+		await manager.startAll()
+		const stop = vi.spyOn(decoder, "stop")
+		sources.updateSourceCaps("first", { centerFreq: 446000000 })
+		sources.updateSourceCaps("first", {
+			sampleRate: sources.getCaps("first")!.sampleRate,
+		})
+		await new Promise(resolve => setTimeout(resolve, 400))
+		expect(stop).not.toHaveBeenCalled()
+		sources.updateSourceCaps("first", { sampleRate: 24000 })
+		await vi.waitFor(() => expect(stop).toHaveBeenCalledOnce())
+	})
+
 	it("uses one primary fanout when an explicit decoder starts before the first source connects", async () => {
 		routing.destroy()
 		routing = new SourceFanoutRouter(sources, primary, logger)

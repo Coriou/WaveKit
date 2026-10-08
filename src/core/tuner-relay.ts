@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events"
 import * as net from "node:net"
 import type { Readable } from "node:stream"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
-import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
+import { iqClientBufferLimit } from "./client-buffer.js"
 import type { BranchConfig, FanoutManager } from "./fanout-manager.js"
 import type {
 	RtlTcpHeaderInfo,
@@ -630,17 +630,24 @@ export class TunerRelay extends EventEmitter {
 	}
 
 	private distributeToClients(chunk: Buffer): void {
+		const sampleRate = this.config.sourceId
+			? this.sourceManager.getCaps(this.config.sourceId)?.sampleRate
+			: undefined
+		const bufferLimit = iqClientBufferLimit(sampleRate)
+
 		for (const [clientId, client] of this.clients) {
 			if (!client.socket.writable) {
 				this.log.debug({ clientId }, "Client socket not writable, skipping")
 				continue
 			}
-			if (
-				client.socket.writableLength + chunk.length >
-				MAX_CLIENT_BUFFER_BYTES
-			) {
+			if (client.socket.writableLength + chunk.length > bufferLimit) {
 				this.log.warn(
-					{ clientId },
+					{
+						clientId,
+						queuedBytes: client.socket.writableLength,
+						incomingBytes: chunk.length,
+						bufferLimit,
+					},
 					"Disconnecting slow tuner client (buffer limit reached)",
 				)
 				client.socket.destroy()
