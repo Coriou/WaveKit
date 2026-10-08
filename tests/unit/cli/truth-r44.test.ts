@@ -109,6 +109,8 @@ describe("R44: AIS sentinels are unknown", () => {
 		expect(field(real, "draught")).toBe("5.2 m")
 		expect(field(real, "speed")).toBe("12.4 kn")
 		expect(field(real, "position")).toBe("51.5000, -0.1000")
+		// cog 359.9 rounds to 360, which is 0°, never "360°".
+		expect(field(real, "course")).toBe("0°")
 		expect(summary(real)).toContain("12.4 kn")
 	})
 })
