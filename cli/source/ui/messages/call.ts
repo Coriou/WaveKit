@@ -77,7 +77,8 @@ export function formatCall(
 			? [seg(`quality ${qualityPercent(errors)}%`, 3)]
 			: []),
 		...(errors > 0 ? [seg(`${errors} err`, 3)] : []),
-		...(flags["encrypted"] === true ? [seg("encrypted", 1)] : []),
+		// Same priority as the duration and after it, so a narrow row keeps `8.4 s` (§6.1 60×20).
+		...(flags["encrypted"] === true ? [seg("encrypted", 2)] : []),
 		...(flags["badSignal"] === true ? [seg("bad signal", 3)] : []),
 		...(flags["timeout"] === true ? [seg("timeout", 4)] : []),
 	]
