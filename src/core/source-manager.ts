@@ -33,6 +33,9 @@ import type { SourceConfig, SourceCaps } from "../config.js"
 import { detectAudioFormat } from "../utils/audio-analyzer.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
 
+// Bound startup/reconnect waits without treating quiet connected sources as failures.
+export const SOURCE_CONNECT_TIMEOUT_MS = 5000
+
 // Re-export types from config for convenience
 export type { SourceConfig, SourceCaps } from "../config.js"
 
@@ -750,6 +753,7 @@ export class SourceManager extends EventEmitter {
 			}
 
 			const onConnect = () => {
+				socket.setTimeout(0)
 				state.connected = true
 				state.lastSampleAt = null
 				state.expectedSince = Date.now()
@@ -965,6 +969,18 @@ export class SourceManager extends EventEmitter {
 			socket.on("data", onData)
 			socket.on("error", onError)
 			socket.on("close", onClose)
+			socket.setTimeout(SOURCE_CONNECT_TIMEOUT_MS)
+			socket.on("timeout", () => {
+				if (state.connected || state.stopping) return
+				onError(
+					Object.assign(
+						new Error(
+							`Source connection timed out after ${SOURCE_CONNECT_TIMEOUT_MS}ms`,
+						),
+						{ code: "ETIMEDOUT" },
+					),
+				)
+			})
 
 			// Attempt connection
 			socket.connect(config.port!, config.host!)
