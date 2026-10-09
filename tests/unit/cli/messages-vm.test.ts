@@ -24,7 +24,11 @@ import {
 	messagesHeader,
 	messagesModel,
 } from "../../../cli/source/view-models/messages.js"
-import { aircraftLookup } from "../../../cli/source/view-models/message-rows.js"
+import {
+	aircraftLookup,
+	formattedFor,
+} from "../../../cli/source/view-models/message-rows.js"
+import { EMPTY_FILTER, applyFilter } from "../../../cli/source/ui/filter.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -105,7 +109,7 @@ describe("messages header and states", () => {
 		// Every readsb and ais-catcher row of the fixture (4 + 3) arrived after seq -1.
 		expect(fv.newCount).toBe(7)
 		expect(lineText(messagesHeader(s, mu, fv, 119))).toBe(
-			`MESSAGES  paused · 7 new · filter readsb,ais · ${fv.matching} of ${fv.total} · Esc resume`,
+			`MESSAGES  paused · 7 new · filter readsb,ais · ${fv.matching} of ${fv.total} cached · Esc resume`,
 		)
 	})
 	it("adds aircraft tracker stats for the aircraft preset", () => {
@@ -155,9 +159,8 @@ describe("messages header and states", () => {
 		const lines = listText(closed, initialUi("messages")).split("\n")
 		// The open gap row keeps its place at the top; the explanation follows.
 		expect(lines[0]).toMatch(/^── gap since /)
-		expect(lines[1]).toMatch(
-			/^no decodes cached · feed stopped \d\d:\d\d:\d\d$/,
-		)
+		// Final review: the chain reason, as the Overview gives it.
+		expect(lines[1]).toBe("no feed · ws closed 1006 · polling REST")
 		// A fresh state: reduce() mutates the ring in place, so `idle` now holds a gap.
 		const fresh = scenarioState("idle", deps)
 		const never: AppState = {
@@ -197,7 +200,9 @@ describe("messages header and states", () => {
 		const all = messageDetail(e, 119, 1000, 0)
 		const last = messageDetail(e, 119, 6, 10_000).map(lineText)
 		expect(last).toHaveLength(6)
-		expect(last.slice(1)).toEqual(all.slice(-5).map(lineText))
+		// The last page is full: its first row announces what is above.
+		expect(last[1]).toBe(`+${all.length - 5} rows · PgUp`)
+		expect(last.slice(2)).toEqual(all.slice(-4).map(lineText))
 	})
 })
 
@@ -290,7 +295,8 @@ describe("T40 fix round 1: header truth", () => {
 			},
 		}
 		const h = headerOf(never, following)
-		expect(h).toBe("MESSAGES  live feed connecting")
+		// MUST 5: no count text; the body gives the reason.
+		expect(h).toBe("MESSAGES")
 	})
 	it("I1/I2: a feed that ran empty and stopped says when it stopped, from the gap", () => {
 		const idle = scenarioState("idle", deps)
@@ -300,9 +306,7 @@ describe("T40 fix round 1: header truth", () => {
 		const retried = close(stopped, idle.now)
 		expect(retried.conn.ws.since).toBe(idle.now)
 		const clock = new Date(from).toISOString().slice(11, 19)
-		expect(headerOf(retried, following)).toBe(
-			`MESSAGES  feed stopped ${clock} · 0 cached`,
-		)
+		expect(headerOf(retried, following)).toBe(`MESSAGES  feed stopped ${clock}`)
 	})
 	it("I4: a full ring whose oldest entry is under 60 s old reads 1000+", () => {
 		const s = scenarioState("idle", deps)
@@ -318,7 +322,7 @@ describe("T40 fix round 1: header truth", () => {
 		const h = headerOf(s, mu, 59)
 		expect([...h].length).toBeLessThanOrEqual(59)
 		// M10: the Esc hint outlives the filter text.
-		expect(h).toMatch(/\d+ of \d+ · Esc clear$/)
+		expect(h).toMatch(/\d+ of \d+ cached · Esc clear$/)
 	})
 })
 
@@ -458,7 +462,7 @@ describe("T40 fix round 1 addendum: right-placement header", () => {
 		expect(m.listWidth).toBeLessThan(199)
 		const header = lineText(m.header)
 		expect([...header].length).toBeLessThanOrEqual(m.listWidth)
-		expect(header).toMatch(/\d+ of \d+$/)
+		expect(header).toMatch(/\d+ of \d+ cached$/)
 		const input = lineText(m.input!)
 		expect([...input].length).toBeLessThanOrEqual(m.listWidth)
 		expect(input.endsWith("▏")).toBe(true)
@@ -503,5 +507,142 @@ describe("design polish: header and empty state (M10, S8)", () => {
 		expect(listText(s, withMessages(mu))).toMatch(
 			/^0 of 12 match · filter dsd · preset aircraft · Esc clear$/m,
 		)
+	})
+})
+
+describe("final views review (lane D)", () => {
+	it("MUST 5: on a cold API-down start the header has no counts and the body gives the reason", () => {
+		const s = scenarioState("api-down", deps)
+		const fv = feedView(s.messages.ring, following)
+		expect(lineText(messagesHeader(s, following, fv, 119))).toBe("MESSAGES")
+		expect(listText(s, initialUi("messages"))).toMatch(
+			/^no feed · API unreachable/,
+		)
+	})
+	it("MUST 5: a paused header counts the lifetime total; a filtered one counts the cache", () => {
+		const s = scenarioState("idle", deps)
+		for (let i = 0; i < 1005; i++) ringPush(s.messages.ring, entry("d2"))
+		const ring = s.messages.ring
+		expect(ring.total).toBe(1005)
+		expect(ring.entries.length).toBeLessThan(1005)
+		const paused = { ...following, following: false, pausedAtSeq: 1e9 }
+		expect(headerOf(s, paused)).toContain(`· ${ring.total} total`)
+		expect(headerOf(s, { ...following, filterText: "d2" })).toMatch(
+			new RegExp(`${ring.entries.length} of ${ring.entries.length} cached`),
+		)
+	})
+	it("the detail announces rows hidden below and above", () => {
+		const s = scenarioState("long-text", deps)
+		const e = [...s.messages.ring.entries].sort(
+			(a, b) =>
+				(b.formatted.text?.length ?? 0) - (a.formatted.text?.length ?? 0),
+		)[0]!
+		const all = messageDetail(e, 59, 1000, 0).length
+		const top = messageDetail(e, 59, 6, 0).map(lineText)
+		expect(top).toHaveLength(6)
+		expect(top[5]).toBe(`+${all - 5} rows · PgDn`)
+		const mid = messageDetail(e, 59, 6, 2).map(lineText)
+		expect(mid[1]).toMatch(/^\+\d+ rows · PgUp$/)
+		const end = messageDetail(e, 59, 6, 10_000).map(lineText)
+		expect(end.some(l => l.includes("PgDn"))).toBe(false)
+	})
+	it("a paused, filtered, empty slice names the Esc layer the header names", () => {
+		const s = scenarioState("burst", deps)
+		const mu = {
+			...following,
+			following: false,
+			pausedAtSeq: 1e9,
+			filterText: "nothing-matches",
+		}
+		expect(listText(s, withMessages(mu))).toMatch(/ · Esc resume$/m)
+		expect(headerOf(s, mu)).toMatch(/ · Esc resume$/)
+	})
+})
+
+describe("MUST 1: enrichment and filtering cost", () => {
+	it("an update to one aircraft re-formats only that aircraft's entries", () => {
+		const s = scenarioState("burst", deps)
+		const readsb = s.messages.ring.entries.filter(x => x.decoderId === "readsb")
+		const icaoOf = (e: (typeof readsb)[number]) =>
+			String((e.output.data as Record<string, unknown>)["icao"])
+		const a = readsb.find(e => icaoOf(e) === "4CA9D2")!
+		const b = readsb.find(e => icaoOf(e) === "3C6444")!
+		const l1 = aircraftLookup(s)
+		const fa = formattedFor(a, l1)
+		const fb = formattedFor(b, l1)
+		aircraftUpsert(
+			s.aircraft.map,
+			{
+				icao: "4CA9D2",
+				seen: 0,
+				messages: 2,
+				firstSeen: 0,
+				lastUpdated: 1,
+				identification: { registration: "EI-NEW" },
+			} as AircraftState,
+			s.now,
+		)
+		const s2: AppState = {
+			...s,
+			aircraft: { ...s.aircraft, version: s.aircraft.version + 1 },
+		}
+		const l2 = aircraftLookup(s2)
+		expect(l2).not.toBe(l1)
+		expect(formattedFor(b, l2)).toBe(fb)
+		const fa2 = formattedFor(a, l2)
+		expect(fa2).not.toBe(fa)
+		expect(fa2.searchText).toContain("ei-new")
+	})
+	it("an empty filter with preset all never asks for a row's subject", () => {
+		let calls = 0
+		const out = applyFilter([1, 2, 3], EMPTY_FILTER, "all", () => {
+			calls++
+			return { text: "", emergency: false, category: "other" }
+		})
+		expect(out).toEqual([1, 2, 3])
+		expect(calls).toBe(0)
+	})
+	it("1000 ADS-B entries after an aircraft update lay out well within a frame budget", () => {
+		const s = scenarioState("burst", deps)
+		const src = s.messages.ring.entries.find(x => x.decoderId === "readsb")!
+		for (let i = 0; i < 1000; i++) {
+			const icao = (0x400000 + (i % 200)).toString(16).toUpperCase()
+			const output = {
+				...src.output,
+				data: { ...(src.output.data as Record<string, unknown>), icao },
+			}
+			ringPush(s.messages.ring, {
+				decoderId: "readsb",
+				type: output.type,
+				receivedAt: s.now,
+				output,
+				formatted: formatMessage(output, "readsb", () => undefined),
+			})
+		}
+		let state: AppState = s
+		const runs: number[] = []
+		for (let k = 0; k < 5; k++) {
+			aircraftUpsert(
+				state.aircraft.map,
+				{
+					icao: "400001",
+					seen: 0,
+					messages: k,
+					firstSeen: 0,
+					lastUpdated: k,
+				} as AircraftState,
+				state.now,
+			)
+			state = {
+				...state,
+				now: state.now + 1,
+				aircraft: { ...state.aircraft, version: state.aircraft.version + 1 },
+			}
+			const t0 = performance.now()
+			messagesModel(state, initialUi("messages"), 119, 35, true)
+			runs.push(performance.now() - t0)
+		}
+		// Re-formatting all 1000 entries took ~27 ms; generous bound for a loaded host.
+		expect(Math.min(...runs)).toBeLessThan(15)
 	})
 })

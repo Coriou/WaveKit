@@ -46,7 +46,7 @@ exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then pause
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz ±1.024  decoders 8/9 up · 1 restarting · 3 in window  drops 0%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
- MESSAGES  paused · 0 new · filter readsb,ais · 7 of 12
+ MESSAGES  paused · 0 new · filter readsb,ais · 7 of 12 cached
  18:07:48  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL370 ↓  451 kt  51.47,-0.45  SE  !7700
  18:07:42  ais-catcher   AIS     235012345  51.50,-0.12  12.1 kn
  18:07:36  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL375 ↓  449 kt  51.49,-0.47  SE  !7700
