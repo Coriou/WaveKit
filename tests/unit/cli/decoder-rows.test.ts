@@ -52,7 +52,7 @@ describe("decoder rows (live fixture)", () => {
 	it("renders the 120-column overview table like spec §6.1", () => {
 		const t = decoderTable(facts, "overview", 119, 20, null, s.now)
 		expect(lineText(t.header)).toBe(
-			"  DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window",
+			"  DECODERS          process             decodes           drop now  lifetime  band MHz          window",
 		)
 		const rows = t.rows.map(lineText)
 		const acars = rows.find(r => r.includes("acarsdec")) ?? ""
@@ -101,7 +101,7 @@ describe("decoder rows (live fixture)", () => {
 	it("hides nominal first in the Decoders view at 120 columns (§6.2)", () => {
 		const t = decoderTable(facts, "decoders", 119, 20, "readsb", s.now)
 		expect(lineText(t.header)).toBe(
-			"  DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window",
+			"  DECODERS          process     restarts  errors  decodes          events      iq in  drop now  lifetime  window",
 		)
 		expect(lineText(t.header)).not.toContain("nominal")
 		const readsb = t.rows.find(r => lineText(r).includes("readsb")) ?? []
@@ -254,7 +254,7 @@ describe("decoder rows (live fixture)", () => {
 				["decoders", 199],
 			] as const) {
 				const t = decoderTable(facts, kind, w, 20, null, s.now)
-				expect(lineText(t.header)).toContain("nominal MHz *cfg")
+				expect(lineText(t.header)).toContain("band MHz")
 				const acars = lineText(
 					t.rows.find(r => lineText(r).includes("acarsdec")) ?? [],
 				)
@@ -268,7 +268,7 @@ describe("decoder rows (live fixture)", () => {
 			expect(
 				lineText(decoderTable(plain, "overview", 119, 20, null, s.now).header),
 			).toBe(
-				"  DECODERS          process             decodes           drop now  lifetime  nominal MHz      window",
+				"  DECODERS          process             decodes           drop now  lifetime  band MHz         window",
 			)
 		})
 		it("I2: every cell of a stale lane is dim, and dim covers whole rows (api-down-cached)", () => {
@@ -466,6 +466,58 @@ describe("decoder rows (live fixture)", () => {
 					.filter(x => x.text.trim() !== "")
 					.every(x => x.role === "old"),
 			).toBe(true)
+		})
+	})
+	describe("polish (Fable critique)", () => {
+		it("M12: the decodes cell leads with its rate; narrow keeps the rate, wide adds the age", () => {
+			const dsd = decoderCells(by("dsd-fme"), s.now)["decodes"]?.variants.map(
+				lineText,
+			)
+			expect(dsd?.[0]).toBe("2/min")
+			expect(dsd?.at(-1)).toMatch(/^2\/min · \d+s ago$/)
+			const narrow = decoderTable(facts, "overview", 59, 20, null, s.now)
+			expect(
+				lineText(narrow.rows.find(r => lineText(r).includes("dsd-fme")) ?? []),
+			).toMatch(/^● dsd-fme +up 52s +2\/min +12%/)
+		})
+		it("M12: a decode older than 60 s reads none for its age; the feed count stands in for a missing rate", () => {
+			const f = by("dsd-fme")
+			const stale: DecoderFacts = {
+				...f,
+				decodes: { kind: "last", lastAt: s.now - 6 * 60_000 },
+				lastAt: s.now - 6 * 60_000,
+				feed60: 0,
+			}
+			expect(
+				decoderCells(stale, s.now)["decodes"]?.variants.map(lineText),
+			).toEqual(["none 6m", "none for 6m"])
+			const fed: DecoderFacts = {
+				...f,
+				decodes: { kind: "last", lastAt: s.now - 5000 },
+				lastAt: s.now - 5000,
+				feed60: 4,
+			}
+			expect(
+				decoderCells(fed, s.now)["decodes"]?.variants.map(lineText),
+			).toEqual(["4/min", "4/min · 5s ago"])
+		})
+		it("S10: beside a right detail pane the band column survives", () => {
+			const t = decoderTable(facts, "decoders-pane", 111, 20, "readsb", s.now)
+			expect(lineText(t.header)).toContain("band MHz")
+			for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(111)
+		})
+		it("S10: the ultra Overview's left column adds restarts and errors and keeps the band", () => {
+			const t = decoderTable(facts, "overview-columns", 111, 20, null, s.now)
+			const head = lineText(t.header)
+			for (const h of ["restarts", "errors", "decodes", "band MHz", "window"])
+				expect(head).toContain(h)
+			for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(111)
+			// Below the narrow threshold the kind still picks the narrow set.
+			expect(
+				lineText(
+					decoderTable(facts, "overview-columns", 60, 20, null, s.now).header,
+				),
+			).not.toContain("restarts")
 		})
 	})
 })

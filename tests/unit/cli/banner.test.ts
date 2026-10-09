@@ -39,7 +39,7 @@ describe("banner copy (spec §9)", () => {
 				},
 			]),
 		).toBe(
-			`! API unreachable · ECONNREFUSED · retry in 4s · data as of ${localClock(AS_OF)}`,
+			`! API unreachable · 127.0.0.1:9000 · connection refused (ECONNREFUSED) · retry in 4s · data as of ${localClock(AS_OF)} · r now`,
 		)
 		expect(
 			t([
@@ -52,7 +52,9 @@ describe("banner copy (spec §9)", () => {
 					tried: [],
 				},
 			]),
-		).toBe("! API unreachable · ECONNREFUSED · retry in 4s · 127.0.0.1:9000")
+		).toBe(
+			"! API unreachable · 127.0.0.1:9000 · connection refused (ECONNREFUSED) · retry in 4s · r now",
+		)
 		expect(
 			t([
 				{
@@ -65,7 +67,7 @@ describe("banner copy (spec §9)", () => {
 				},
 			]),
 		).toBe(
-			"! API unreachable · tried 127.0.0.1:9000, 127.0.0.1:3000 · retry in 4s",
+			"! API unreachable · tried 127.0.0.1:9000, 127.0.0.1:3000 · retry in 4s · r now",
 		)
 		expect(t([{ kind: "ws-down", code: 1006, retryAt: NOW + 8000 }])).toBe(
 			"! live feed down · ws closed 1006 · REST every 5s · retry in 8s",
@@ -151,6 +153,31 @@ describe("banner copy (spec §9)", () => {
 			expect(narrow).toContain("connect ECONNREFUSED")
 			expect(narrow).toContain("…")
 			expect(t([c], 200)).toContain(long)
+		})
+		it("M5: address first, codes in words, and the as-of outlives the address", () => {
+			const cold: BannerCondition = {
+				kind: "api-down",
+				reason: "UND_ERR_SOCKET",
+				retryAt: NOW + 4000,
+				asOf: null,
+				target: "http://127.0.0.1:21788",
+				tried: [],
+			}
+			expect(t([cold])).toBe(
+				"! API unreachable · 127.0.0.1:21788 · connection closed (UND_ERR_SOCKET) · retry in 4s · r now",
+			)
+			// Narrow: the words give way to the bare code before anything is dropped.
+			expect(t([cold], 79)).toBe(
+				"! API unreachable · 127.0.0.1:21788 · UND_ERR_SOCKET · retry in 4s · r now",
+			)
+			const cached = { ...cold, asOf: AS_OF }
+			expect(t([cached], 80)).toBe(
+				`! API unreachable · UND_ERR_SOCKET · retry in 4s · data as of ${localClock(AS_OF)}`,
+			)
+			// Free text that is not a bare code is kept as is.
+			expect(t([{ ...cold, reason: "fetch failed" }])).toContain(
+				"· fetch failed ·",
+			)
 		})
 		it("says retrying once the retry time has passed", () => {
 			expect(t([{ ...ws, retryAt: NOW - 1000 }])).toBe(

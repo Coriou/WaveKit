@@ -337,10 +337,11 @@ export function overviewModel(
 	const leftWidth = b.layout === "columns" ? b.leftWidth : width
 	const receiver = receiverSummary(state, leftWidth)
 	// "overview" picks the narrow column set below 79 columns; with the decoders
-	// lane old (API down, cached view) every row is dim (§6.1).
+	// lane old (API down, cached view) every row is dim (§6.1). The two-column
+	// layout adds restarts and errors (S10).
 	const table = decoderTable(
 		facts,
-		"overview",
+		b.layout === "columns" ? "overview-columns" : "overview",
 		leftWidth,
 		b.decoderRows + b.more,
 		ui.selected.overview,

@@ -25,7 +25,7 @@ describe("system view-model (spec §6.5)", () => {
 			`alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since ${formatClockShort(Date.parse("2026-10-08T18:07:49.000Z"))} · last 3s ago`,
 		)
 		expect(text).toContain(
-			"SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m 51s",
+			"SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m",
 		)
 		expect(text).toContain("rtl_tcp   ● running · pid 58 · 0 restarts")
 		expect(text).toContain(
@@ -39,9 +39,7 @@ describe("system view-model (spec §6.5)", () => {
 		expect(text).toContain(
 			"demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · gain 10 · 25 kHz s16le",
 		)
-		expect(text).toContain(
-			'CORE      v1.0.0 · uptime 7m 40s · reports "degraded"',
-		)
+		expect(text).toContain('CORE      v1.0.0 · uptime 7m · reports "degraded"')
 		expect(text).toContain('          api "up" · "API server is responding"')
 		// The CLI's boundary counters live here, dim, not in the keys box (polish copy sweep).
 		expect(text).toContain(

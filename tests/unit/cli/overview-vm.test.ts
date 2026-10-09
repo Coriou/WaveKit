@@ -27,7 +27,7 @@ describe("overview view-model", () => {
 			"RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client",
 		)
 		expect(b).toBe(
-			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m 32s ago",
+			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m ago",
 		)
 		const [c, d] = receiverSummary(s, 59).map(lineText)
 		expect(c?.startsWith("RECEIVER  pi-iq   ● streaming")).toBe(true)
@@ -64,8 +64,9 @@ describe("overview view-model", () => {
 			.left.map(lineText)
 			.join("\n")
 		expect(text).toContain("MESSAGES  feed stopped")
-		expect(text).toMatch(/── gap since \d\d:\d\d:\d\d · 2m 3\ds ──/)
-		expect(text).toMatch(/dsd-fme .* ago/)
+		expect(text).toMatch(/── gap since \d\d:\d\d:\d\d · 2m ──/)
+		// M12: a last decode older than a minute reads as a ticking `none for` age.
+		expect(text).toMatch(/dsd-fme .*none (for )?2m/)
 	})
 	it("explains a cold start with the API down", () => {
 		const text = overviewModel(

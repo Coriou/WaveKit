@@ -1,17 +1,17 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then paused + filtered + detail open > following 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz  decoders 8/9 up · 1 restarting · 3 in window  drops 0% now  18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz ±1.024  decoders 8/9 up · 1 restarting · 3 in window  drops 0%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  MESSAGES  11 in 60s · 12 total
  18:07:48  readsb        ADS-B   4CA9D2  RYR4KT  FL370 ↓  451 kt  51.47,-0.45  SE  !7700
- 18:07:46  direwolf      APRS    G4ABC-9  Position with messaging  51.48,-0.00  mobile 145.800
+ 18:07:46  direwolf      APRS    G4ABC-9  position+msg  51.48,-0.00  mobile 145.800
  18:07:44  dsd-fme       DMR     TG 2350  SRC 2341234  slot 1  CC 1  call start
  18:07:42  ais-catcher   AIS     235012345  51.50,-0.12  12.1 kn
  18:07:39  dumpvdl2      VDL2    .EI-DCL  FR4KT  H1  136.975 MHz  REQ PWI DES
  18:07:36  readsb        ADS-B   4CA9D2  RYR4KT  FL375 ↓  449 kt  51.49,-0.47  SE  !7700
- 18:07:30  rtl433        433     Acurite-Tower  #12345  ch A  18.2°C  64%
+ 18:07:30  rtl433        ISM     Acurite-Tower  #12345  ch A  18.2°C  64%
  18:07:20  lora-meshta…  MESH    !12345678→BCAST  TEXT  -92 dBm  SNR 6.5  0/3 hops  hello mesh
  18:07:09  readsb        ADS-B   3C6444  DLH4XP  FL120 ↑  312 kt  51.21,-0.31  NE
  18:07:08  ais-catcher   AIS     244660123  EEMS SPIRIT  cargo  PBXY  dest ROTTERDAM
@@ -43,7 +43,7 @@ exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then pause
 `;
 
 exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then paused + filtered + detail open > paused-filtered-detail 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz  decoders 8/9 up · 1 restarting · 3 in window  drops 0% now  18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz ±1.024  decoders 8/9 up · 1 restarting · 3 in window  drops 0%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  MESSAGES  paused · 0 new · filter readsb,ais · 7 of 12

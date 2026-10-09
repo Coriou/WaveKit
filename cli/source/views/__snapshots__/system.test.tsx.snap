@@ -1,18 +1,18 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`System view (spec §6.5) > golden: 80x24 1`] = `
-" api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 restarting  drops !21% now
+" api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 8/9 !1  drops !21%   18:07
  CONTAINER cgroup v2 · as of 2s ago
  cpu       240%   throttled —   oom kills 0
  mem       1.9 GB · no limit
  alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since 18:07
- SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago
+ SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m
  rtl_tcp   ● running · pid 58 · 0 restarts
  rtlmux    ● running · pid 63 · 1 client · 4.2 MB/s · 1.2 GB sent · 0 restarts
  dongle    RTLSDRBlog Blog V4 · serial —
  AUDIO     ○ stopped · 0 clients · 127.0.0.1:8081/stream
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · 25 kHz s16le
- CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
+ CORE      v1.0.0 · uptime 7m · reports "degraded"
            api "up" · "API server is responding"
            cli  frames rejected 0 · items rejected 0
 
@@ -27,7 +27,7 @@ exports[`System view (spec §6.5) > golden: 80x24 1`] = `
 `;
 
 exports[`System view (spec §6.5) > golden: 120x40 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drop !21% now  18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  CONTAINER cgroup v2 · as of 2s ago
@@ -35,7 +35,7 @@ exports[`System view (spec §6.5) > golden: 120x40 1`] = `
  mem       1.9 GB · no limit
  alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since 18:07 · last 3s ago
 
- SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m 51s
+ SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m
  rtl_tcp   ● running · pid 58 · 0 restarts
  rtlmux    ● running · pid 63 · 1 client · 4.2 MB/s · 1.2 GB sent · 0 restarts
  dongle    RTLSDRBlog Blog V4 · serial —
@@ -43,7 +43,7 @@ exports[`System view (spec §6.5) > golden: 120x40 1`] = `
  AUDIO     ○ stopped · 0 clients · 127.0.0.1:8081/stream
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · gain 10 · 25 kHz s16le
 
- CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
+ CORE      v1.0.0 · uptime 7m · reports "degraded"
            api "up" · "API server is responding"
            cli  frames rejected 0 · items rejected 0
 

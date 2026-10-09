@@ -30,15 +30,16 @@ describe("R46: restarting decoders are visible in the strip", () => {
 			"decoders 8/9 up · 1 restarting · 2 in window",
 		)
 		expect(lineText(at(base, 120))).toContain("decoders 8/9 up · 1 restarting")
-		expect(lineText(at(base, 80))).toContain("decoders 1 restarting")
-		// R75: at 60 the bare count keeps the drops lane on the strip.
+		// M2: below 80 the compact form keeps the up-count; `!1` is one restarting.
+		expect(lineText(at(base, 80))).toContain("dec 8/9 !1")
 		expect(lineText(at(base, 60))).toBe(
-			"api ● 2s  iq ● streaming  1 restarting  drops !21% now",
+			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 !1  drops !21%",
 		)
 		for (const cols of [200, 120, 80, 60]) {
 			const line = at(base, cols)
 			expect(lineWidth(line)).toBeLessThanOrEqual(cols - 1)
-			expect(line.find(s => s.text === "1 restarting")?.role).toBe("attention")
+			const mark = cols >= 120 ? "1 restarting" : "!1"
+			expect(line.find(s => s.text === mark)?.role).toBe("attention")
 			expect(findBanned(lineText(line))).toEqual([])
 		}
 	})
@@ -50,15 +51,15 @@ describe("R46: restarting decoders are visible in the strip", () => {
 		expect(lineText(at(both, 200))).toContain(
 			"decoders 6/9 up · 2 failing · 1 restarting · 2 in window",
 		)
-		expect(lineText(at(both, 60))).toContain(
-			"decoders 2 failing · 1 restarting",
-		)
+		expect(lineText(at(both, 60))).toContain("dec 6/9 ×2 !1")
 		const narrow = at(both, 60)
 		expect(lineWidth(narrow)).toBeLessThanOrEqual(59)
 		expect(findBanned(lineText(narrow))).toEqual([])
 		const line = at(both, 200)
 		expect(line.find(s => s.text === "2 failing")?.role).toBe("fault")
 		expect(line.find(s => s.text === "1 restarting")?.role).toBe("attention")
+		expect(narrow.find(s => s.text === "×2")?.role).toBe("fault")
+		expect(narrow.find(s => s.text === "!1")?.role).toBe("attention")
 	})
 	it("is unchanged when restarting is 0 or absent", () => {
 		const { restarting: _r, ...noField } = base.decoders!
