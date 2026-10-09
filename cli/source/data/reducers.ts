@@ -225,7 +225,9 @@ function updateSessions(
 	rows: readonly DecoderRow[],
 	at: number,
 ): Record<string, DecoderSession> {
-	const next = Object.assign(record<DecoderSession>(), prev)
+	// Final M4: the full list is the truth, so sessions of decoders it no longer has
+	// (or that only ever appeared in decoder:status) are dropped: no unbounded growth.
+	const next = record<DecoderSession>()
 	for (const d of rows) {
 		const cur = trackSuspending(own(prev, d.id) ?? newSession(at), d, at)
 		const sample = { t: at, v: d.stats.eventsOut }

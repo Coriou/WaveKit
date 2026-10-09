@@ -33,6 +33,7 @@ import {
 	type ColumnSpec,
 } from "../ui/columns.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatCount,
@@ -81,7 +82,7 @@ export interface DecoderFacts {
 	oldFanout: boolean
 	/** Window and band lane older than the TTL (decoders lane under core's bandAssessment, else sources or tuner): they render dim. */
 	oldWindow: boolean
-	/** Decodes of this decoder in the message feed over the last 60 s (M12). */
+	/** Decodes of this decoder in the message feed over the last 60 s (M12); 0 while the feed is not open. */
 	feed60: number
 }
 
@@ -99,6 +100,7 @@ const compute = memoOne(
 		_ringVersion: number,
 		now: number,
 		resources: AppState["resources"],
+		wsOpen: boolean,
 	): DecoderFacts[] => {
 		const server = serverNow(now, [
 			{ iso: fanout.value?.timestamp, receivedAt: fanout.receivedAt },
@@ -106,8 +108,9 @@ const compute = memoOne(
 		])
 		const rows = decoders.value ?? []
 		// M12: decodes per decoder in the feed's last minute (local receipt times).
+		// Only while the feed is live: a closed socket would make it decay (T4).
 		const feed60: Record<string, number> = Object.create(null)
-		for (const e of ring.entries)
+		for (const e of wsOpen ? ring.entries : [])
 			if (e.receivedAt >= now - 60_000)
 				feed60[e.decoderId] = (feed60[e.decoderId] ?? 0) + 1
 		const oldRest = isOld(decoders, now)
@@ -185,6 +188,7 @@ export function decoderFacts(state: AppState): DecoderFacts[] {
 		state.messages.version,
 		state.now,
 		state.resources,
+		state.conn.ws.state === "open",
 	)
 }
 
@@ -195,6 +199,7 @@ const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 	"crash-loop": "fault",
 	down: "fault",
 	restarting: "attention",
+	resuming: "neutral",
 	"suspend-pending": "attention",
 	suspended: "neutral",
 	stopped: "neutral",
@@ -261,7 +266,7 @@ export function processWords(f: DecoderFacts): string {
 function processCell(f: DecoderFacts): Cell {
 	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
-	const restarts = `${formatCount(n)} restart${n === 1 ? "" : "s"}`
+	const restarts = counted(n, "restart")
 	const sep = ` ${glyphs().sep} `
 	const words = processWords(f)
 	const withCount = n > 0 ? [[sp(`${words}${sep}${restarts}`, role)]] : []
@@ -276,15 +281,29 @@ function processCell(f: DecoderFacts): Cell {
 			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
 			return cell([sp("starting", role)], [sp(words, role)])
 		case "suspended":
+			// MUST 4: `suspended · band` fits where `… out of band` does not.
 			return words === "suspended"
 				? cell([sp(words, role)])
-				: cell([sp("suspended", role)], [sp(words, role)])
+				: words.endsWith("out of band")
+					? cell(
+							[sp("suspended", role)],
+							[sp(`suspended${sep}band`, role)],
+							[sp(words, role)],
+						)
+					: cell([sp("suspended", role)], [sp(words, role)])
 		case "suspend-pending":
 			return cell([sp("suspending", role)], [sp(words, role)])
+		// MUST 4: a retrying fault never reads like the terminal `faulted ×13`; the
+		// narrowest form names the retry, the 15-column one both.
 		case "faulted-retrying":
-			return cell([sp("faulted", role)], [sp(words, role)])
+			return cell([sp("retrying", role)], [sp(words, role)])
 		case "faulted-retry":
-			return cell([sp("faulted", role)], [sp(words, role)], ...withCount)
+			return cell(
+				[sp("retry", role)],
+				[sp(`faulted${sep}retry`, role)],
+				[sp(words, role)],
+				...withCount,
+			)
 		case "restarting":
 			if (countdown(f) !== null)
 				return cell([sp("restarting", role)], [sp(words, role)], ...withCount)
@@ -456,7 +475,7 @@ const TITLE: Cell = { variants: [[sp("  DECODERS", "label", true)]] }
  */
 export const OVERVIEW_COLUMNS: ColumnSpec[] = [
 	col("decoder", 18, 18, 0, "left", TITLE),
-	col("process", 18, 18, 0, "left", header("process")),
+	col("process", 18, 24, 0, "left", header("process")),
 	col("decodes", 16, 16, 1, "left", header("decodes")),
 	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
 	col("lifetime", 8, 8, 4, "right", header("lifetime")),
@@ -510,7 +529,7 @@ const DECODERS_PANE_COLUMNS: ColumnSpec[] = DECODERS_COLUMNS.map(c =>
  */
 const OVERVIEW_COLUMNS_SET: ColumnSpec[] = [
 	col("decoder", 18, 18, 0, "left", TITLE),
-	col("process", 10, 18, 0, "left", header("process")),
+	col("process", 10, 24, 0, "left", header("process")),
 	col("restarts", 8, 8, 5, "right", header("restarts")),
 	col("errors", 6, 6, 5, "right", header("errors")),
 	col("decodes", 15, 16, 1, "left", header("decodes")),
@@ -620,6 +639,19 @@ export function decoderTable(
 		rows,
 		shownIds: shown.map(f => f.row.id),
 	}
+}
+
+/**
+ * Final views: with no rows the column header says nothing, so the reason sits beside
+ * the title: `   DECODERS  no data · API unreachable`.
+ */
+export function titled(header: Line, placeholder: Line): Line {
+	const i = header.findIndex(s => s.text.includes("DECODERS"))
+	if (i < 0) return placeholder
+	const head = header.slice(0, i + 1)
+	const last = head[i]
+	if (last) head[i] = { ...last, text: last.text.trimEnd() }
+	return [...head, sp("  ", "label"), ...placeholder]
 }
 
 /** Spec §9: cold start, API down without cache, REST 200 with []. */

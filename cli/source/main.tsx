@@ -8,6 +8,7 @@ import {
 	createScreen,
 	createShutdown,
 	installExitHandlers,
+	startOrShutdown,
 } from "./terminal.js"
 import { formatMessage } from "./ui/messages/index.js"
 import { detectColor, detectGlyphMode, setGlyphMode } from "./ui/theme.js"
@@ -73,15 +74,21 @@ const shutdown = createShutdown({
 })
 // Handlers first, so a crash during enter() or the first render still restores the screen.
 installExitHandlers(process, screen, shutdown)
-screen.enter()
-runtime.start()
-instance = render(
-	<App
-		runtime={runtime}
-		views={VIEWS}
-		initialView={parsed.view}
-		color={detectColor(process.env, process.stdout.isTTY === true)}
-	/>,
-	{ exitOnCtrlC: false, patchConsole: false },
-)
-void instance.waitUntilExit().then(() => shutdown(0))
+// A synchronous throw here restores the terminal, then prints one line (not lost on the alt screen).
+const started = startOrShutdown(() => {
+	screen.enter()
+	runtime.start()
+	return render(
+		<App
+			runtime={runtime}
+			views={VIEWS}
+			initialView={parsed.view}
+			color={detectColor(process.env, process.stdout.isTTY === true)}
+		/>,
+		{ exitOnCtrlC: false, patchConsole: false },
+	)
+}, shutdown)
+if (started) {
+	instance = started
+	void started.waitUntilExit().then(() => shutdown(0))
+}

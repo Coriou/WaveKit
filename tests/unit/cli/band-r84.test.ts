@@ -202,7 +202,7 @@ describe("R84 band label and basis", () => {
 				windowHalfWidthHz: 800_000,
 			},
 		})
-		expect(text).toContain("1090.000 MHz protocol")
+		expect(text).toContain("1090.000 MHz (protocol)")
 		expect(text).toContain("usable 445.171–446.771 MHz")
 		expect(text).toContain("out of window")
 		for (const [basis, words] of [
@@ -219,7 +219,7 @@ describe("R84 band label and basis", () => {
 						basis,
 					},
 				}),
-			).toContain(`1090.000 MHz ${words}`)
+			).toContain(`1090.000 MHz (${words})`)
 	})
 	it("an unknown verdict says why, in plain words or quoted", () => {
 		const readsb = liveRow("readsb")
@@ -231,17 +231,17 @@ describe("R84 band label and basis", () => {
 					reasonCode: "no-target-frequency",
 				},
 			}),
-		).toContain("window ? (no target frequency)")
+		).toContain("in window ? (no target frequency)")
 		expect(
 			detail({
 				...readsb,
 				bandAssessment: { verdict: "unknown", reasonCode: "solar-flare" },
 			}),
-		).toContain('window ? ("solar-flare")')
+		).toContain('in window ? ("solar-flare")')
 	})
 	it("an older core (no bandAssessment) keeps the nominal wording", () => {
 		const text = detail(liveRow("readsb"))
-		expect(text).toContain("1090.000 MHz nominal")
+		expect(text).toContain("1090.000 MHz (nominal)")
 		expect(text).toContain("window 444.947–446.995 MHz")
 	})
 })
@@ -305,7 +305,7 @@ describe("R84 retune impact prefers core's assessment", () => {
 			retuneImpact([subject({ verdict: "unknown" })], from, at(CENTRE)).unknown,
 		).toEqual(["x"])
 	})
-	it("a rate change scales core's capture-limited half-width (R90 I3)", () => {
+	it("a higher rate leaves a capture-limited half-width unknown (R90 I3, final M1)", () => {
 		const readsb = {
 			id: "readsb",
 			type: "readsb",
@@ -316,7 +316,7 @@ describe("R84 retune impact prefers core's assessment", () => {
 			} satisfies BandAssessment,
 		}
 		expect(
-			retuneImpact([readsb], from, at(1_090_500_000, 2_400_000)).enters,
+			retuneImpact([readsb], from, at(1_090_500_000, 2_400_000)).unknown,
 		).toEqual(["readsb"])
 	})
 })
@@ -344,6 +344,7 @@ describe("R84 band suspension", () => {
 		const r = suspended()
 		expect(cellText(r, "process")).toEqual([
 			"suspended",
+			"suspended · band",
 			"suspended · out of band",
 		])
 		const cell = decoderCells(facts(r), NOW)["process"]!

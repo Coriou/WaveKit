@@ -72,13 +72,13 @@ describe("message rows", () => {
 		const row = (i: number, w: number): string =>
 			lineText(messageRow(at(i), messageLayout(w), false, false)).trimEnd()
 		expect(row(0, 79)).toBe(
-			`${hhmmss(at(0).receivedAt)}  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …`,
+			`${hhmmss(at(0).receivedAt)}  dsd-fme       DMR     TG 2350  SRC 2341234  8.4s  encrypted  …`,
 		)
 		expect(row(1, 79)).toBe(
 			`${hhmmss(at(1).receivedAt)}  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…`,
 		)
 		expect(row(0, 59)).toBe(
-			`${hhmm(at(0).receivedAt)}  dsd-fme      TG 2350  SRC 2341234  8.4 s  …`,
+			`${hhmm(at(0).receivedAt)}  dsd-fme      TG 2350  SRC 2341234  8.4s  …`,
 		)
 		expect(row(1, 59)).toBe(
 			`${hhmm(at(1).receivedAt)}  multimon-ng  1234567  fn 3  FIRE ALARM ACTIVATION -…`,

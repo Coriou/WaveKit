@@ -24,6 +24,7 @@ import {
 } from "../data/window.js"
 import { fitGroups } from "../ui/fit.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatClock,
@@ -33,8 +34,8 @@ import {
 	formatPercent,
 	formatRate,
 	formatSampleAge,
-	formatSps,
 	formatSpaced,
+	formatSps,
 	formatWindow,
 } from "../ui/format.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
@@ -147,10 +148,10 @@ function noData(state: AppState, path: string): string {
 /** The source the Receiver renders (the first), and the tuner for it: used everywhere (M5). */
 export function receiverTuner(state: AppState): TunerState | undefined {
 	const src = state.sources.value?.[0]
-	return (
-		state.tuner.value?.find(x => x.sourceId === src?.id) ??
-		state.tuner.value?.[0]
-	)
+	// Final views: never another source's tuner; with no source listed, the first tuner.
+	return src
+		? state.tuner.value?.find(x => x.sourceId === src.id)
+		: state.tuner.value?.[0]
 }
 
 export function receiverControl(
@@ -191,8 +192,6 @@ function unknownOf(
 function tunerOf(state: AppState, sourceId: string): TunerState | undefined {
 	return state.tuner.value?.find(x => x.sourceId === sourceId)
 }
-
-/** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
 
 function relayClient(
 	relay: TunerRelayStatus | undefined,
@@ -246,7 +245,7 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				? a.sampleAgeMs === null
 					? null
 					: `last sample ${formatSampleAge(a.sampleAgeMs)} ago`
-				: `sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)} s`
+				: `sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)}s`
 	// The error code alone ("ECONNREFUSED") when the row is narrow; the message when it fits.
 	const code = src.lastError
 		? /\b(E[A-Z]{3,}|UND_ERR_[A-Z_]+)\b/.exec(sanitize(src.lastError))?.[1]
@@ -307,14 +306,14 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				: []),
 		),
 		one(1, txt(`received ${formatBytes(src.bytesReceived)}`, role)),
-		one(3, txt(`assigned ${src.assignments.length} decoders`, role)),
+		one(3, txt(`assigned ${counted(src.assignments.length, "decoder")}`, role)),
 		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
 		...(held.length > 0
 			? [
 					one(
 						1,
 						txt(
-							`held by suspended ${held.slice(0, 2).join(", ")}${held.length > 2 ? ` +${held.length - 2}` : ""}`,
+							`held by suspended ${held.slice(0, 2).join("  ")}${held.length > 2 ? `  +${held.length - 2}` : ""}`,
 							role,
 						),
 					),
@@ -333,7 +332,7 @@ function signedPercent(ratio: number): string {
 	const pct = ratio * 100
 	const a = Math.abs(pct)
 	const text = a < 10 ? a.toFixed(1).replace(/\.0$/, "") : String(Math.round(a))
-	return `${pct < 0 ? "−" : "+"}${text}%`
+	return `${pct < 0 ? glyphs().minus : "+"}${text}%`
 }
 
 /**
@@ -410,12 +409,12 @@ export function changeText(c: PendingChange, from?: string): string {
 		c.field === "gain" && typeof c.to === "number"
 			? formatDb(c.to)
 			: plainValue(c.field, c.to)
-	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} → ${to}`
+	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} ${glyphs().arrow} ${to}`
 }
 
 /** "+10 Hz", "+29.3 kHz", "−1.5 MHz": the unit follows the magnitude, so a small step never reads +0.0. */
 export function deltaText(hz: number): string {
-	const sign = hz < 0 ? "−" : "+"
+	const sign = hz < 0 ? glyphs().minus : "+"
 	const a = Math.abs(hz)
 	const trim = (v: string): string => v.replace(/\.?0+$/, "")
 	if (a < 1000) return `${sign}${Math.round(a)} Hz`
@@ -460,7 +459,7 @@ export function tunerConfirm(
 	const terse =
 		n === 1 && first
 			? `send ${COMMAND_NAME[first.field]} ${to}`
-			: `send ${n} commands ${to}`
+			: `send ${counted(n, "command")} ${to}`
 	const listed = new Set<string>(
 		(state ? tunerOf(state, edit.sourceId) : undefined)?.unknownFields ?? [],
 	)
@@ -474,7 +473,10 @@ export function tunerConfirm(
 	const groups: Group[] = [
 		one(
 			0,
-			[sp(`send ${n} ${to}`, "value", true)],
+			// Final review: the count names its noun; at 80 columns beside the bias-t
+			// warning and who moves (R71) the target goes first.
+			[sp(`send ${counted(n, "command")}`, "value", true)],
+			[sp(`send ${counted(n, "command")} ${to}`, "value", true)],
 			[sp(terse, "value", true)],
 			[sp(action, "value", true)],
 		),
@@ -686,11 +688,12 @@ function membershipLists(
 		else if (m === "?") unknown.push(d.id)
 	}
 	const na = glyphs().na
-	// A grid of ids, two spaces apart; the tuned group keeps its own " · " clause.
+	// A grid of ids, two spaces apart; the tuned group keeps its own " · " clause,
+	// label first like the other groups (final review).
 	const grid = (ids: string[]): string => ids.join("  ")
 	const ins = [
 		...(inside.length > 0 ? [grid(inside)] : []),
-		...(tuned.length > 0 ? [`${grid(tuned)} (tuned)`] : []),
+		...(tuned.length > 0 ? [`tuned  ${grid(tuned)}`] : []),
 	]
 	return {
 		inside: ins.join(sep()) || na,
@@ -893,7 +896,7 @@ function tunerBlock(
 					[
 						one(0, txt(owner, role)),
 						...(client ? [one(2, txt(client, role))] : []),
-						one(3, txt(`${t.commandCount} commands`, role)),
+						one(3, txt(counted(t.commandCount, "command"), role)),
 						...(lastText ? [one(1, txt(lastText, role))] : []),
 					],
 					width,
@@ -1046,19 +1049,16 @@ function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 			one(
 				1,
 				txt(
-					`${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}${sep()}max ${relay.maxClients ?? "?"}`,
+					`${counted(relay.clientsConnected, "client")}${sep()}max ${relay.maxClients ?? "?"}`,
 					role,
 				),
 			),
 			one(3, txt(`${formatBytes(relay.bytesSent)} sent`, role)),
 			one(2, txt(`${sanitize(relay.controlPolicy)} control`, role)),
-			one(
-				1,
-				txt(
-					`last error ${relay.lastError ? quoted(relay.lastError) : glyphs().na}`,
-					role,
-				),
-			),
+			// Final review: no "last error —" filler when there is none.
+			...(relay.lastError
+				? [one(1, txt(`last error ${quoted(relay.lastError)}`, role))]
+				: []),
 		],
 		width,
 	)
@@ -1227,7 +1227,7 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 							upRole,
 						),
 						txt(
-							`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							`Pi rtlmux ${glyphs().arrow} core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
 							upRole,
 						),
 					),
@@ -1243,8 +1243,21 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 				]
 			: resources && !hasHost
 				? // No SDR host for this source: not applicable.
-					[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
-				: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
+					[
+						one(
+							0,
+							txt(`Pi rtlmux ${glyphs().arrow} core: ${glyphs().na}`, upRole),
+						),
+					]
+				: [
+						one(
+							0,
+							txt(
+								`Pi rtlmux ${glyphs().arrow} core: ? (no SDR host data)`,
+								upRole,
+							),
+						),
+					]
 	return [
 		essential(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),
@@ -1264,13 +1277,17 @@ export function receiverLines(
 	const relay = state.relay.value
 	const t = receiverTuner(state)
 	const gap = (): Row[] => (roomy ? [gapRow(9)] : [])
+	// Final views (MUST 3): no-data copy only while a lane has never answered;
+	// an answered empty lane says what came back.
 	const source = src
 		? sourceBlock(state, src, width)
 		: [
 				essential(
 					clipped(
 						lbl("SOURCE", true),
-						noData(state, "/api/sources"),
+						state.sources.value
+							? "no sources configured"
+							: noData(state, "/api/sources"),
 						width,
 						"label",
 					),
@@ -1282,7 +1299,9 @@ export function receiverLines(
 				essential(
 					clipped(
 						lbl("TUNER", true),
-						noData(state, "/api/tuner"),
+						state.tuner.value
+							? `${glyphs().na} ${glyphs().sep} no tuner control for this source`
+							: noData(state, "/api/tuner"),
 						width,
 						"label",
 					),

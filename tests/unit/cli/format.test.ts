@@ -34,6 +34,13 @@ describe("formatters (spec §8)", () => {
 			"18:12:10.412",
 		)
 	})
+	it("final review: one plural rule for every count", () => {
+		expect(f.counted(1, "restart")).toBe("1 restart")
+		expect(f.counted(2, "restart")).toBe("2 restarts")
+		expect(f.counted(0, "client")).toBe("0 clients")
+		expect(f.counted(null, "error")).toBe("? errors")
+		expect(f.counted(1200, "chunk")).toBe("1 200 chunks")
+	})
 	it("formats ages in buckets", () => {
 		expect(f.formatAge(-5000)).toBe("<1s")
 		expect(f.formatAge(400)).toBe("<1s")
@@ -48,7 +55,7 @@ describe("formatters (spec §8)", () => {
 		expect(f.formatAge(7_800_000)).toBe("2h 10m")
 		expect(f.formatAge(3 * 86_400_000)).toBe("3d")
 		expect(f.formatDuration(52)).toBe("52s")
-		expect(f.formatSampleAge(4)).toBe("4 ms")
+		expect(f.formatSampleAge(4)).toBe("4ms")
 		expect(f.formatSampleAge(1200)).toBe("1.2s")
 		expect(f.formatSampleAge(23_000)).toBe("23s")
 	})
@@ -61,7 +68,7 @@ describe("formatters (spec §8)", () => {
 		expect(f.formatEventRate(-0.5)).toBe("?")
 	})
 	it("never rounds up into the next bucket's number", () => {
-		expect(f.formatSampleAge(999.6)).toBe("999 ms")
+		expect(f.formatSampleAge(999.6)).toBe("999ms")
 		expect(f.formatSampleAge(9_990)).toBe("9.9s")
 		expect(f.formatEventRate(59.6 / 60)).toBe("1.0/s")
 		expect(f.formatBytes(999.7)).toBe("1.0 KB")

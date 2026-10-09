@@ -42,9 +42,7 @@ describe("system view-model (spec §6.5)", () => {
 		expect(text).toContain('CORE      v1.0.0 · uptime 7m · reports "degraded"')
 		expect(text).toContain('          api "up" · "API server is responding"')
 		// The CLI's boundary counters live here, dim, not in the keys box (polish copy sweep).
-		expect(text).toContain(
-			"          cli  frames rejected 0 · items rejected 0",
-		)
+		expect(text).toContain("cli       frames rejected 0 · items rejected 0")
 		expect(text.some(l => l.includes("acarsdec"))).toBe(false)
 		for (const l of text) {
 			expect(cellWidth(l)).toBeLessThanOrEqual(119)
@@ -117,7 +115,7 @@ describe("system view-model (spec §6.5)", () => {
 		const lines = systemLines(st, 119, 35, true).map(lineText)
 		const i = lines.findIndex(l => l.startsWith("sampling"))
 		expect(lines[i]).toBe(
-			"sampling  ● streaming · sample age 200 ms · 4.1 MB/s upstream (nominal) · 0 resets",
+			"sampling  ● streaming · sample age 200ms · 4.1 MB/s upstream (nominal) · 0 resets",
 		)
 		expect(lines[i - 1]?.startsWith("rtlmux")).toBe(true)
 		expect(lines[i + 1]?.startsWith("dongle")).toBe(true)

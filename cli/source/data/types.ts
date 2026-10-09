@@ -545,6 +545,8 @@ export type RestInbound = {
 		endpoint: E
 		outcome: FetchOutcome<RestValues[E]>
 		at: number
+		/** Set by the runtime for an answer a user waits on (final M2): the lane's first, or a poll after a write. */
+		urgent?: true
 	}
 }[Endpoint]
 

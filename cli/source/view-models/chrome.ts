@@ -16,8 +16,8 @@ import {
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
-import { footerGroups, type KeyContext } from "../ui/keymap.js"
-import { sp, type Line } from "../ui/line.js"
+import { footerGroups, footerHints, type KeyContext } from "../ui/keymap.js"
+import { sp, type Group, type Line } from "../ui/line.js"
 import type { StripInput } from "../ui/strip.js"
 import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
@@ -31,7 +31,7 @@ export interface WindowItem {
 }
 
 /**
- * "N in window" (strip) and "N of M decoders in window" (Overview) share one rule (I4,
+ * "N in window" (strip) and "N of M in window" (Overview) share one rule (I4,
  * I-C, R90 I1): N and M count the decoders whose membership is known, so a `?` is never
  * counted as not in; `unknown` says how many were left out. Decoders with no window (—)
  * are not counted. Null when no decoder that tells about the window is known.
@@ -57,6 +57,11 @@ export interface RxValue {
 	lane: RxLane
 	/** The lane it came from is older than the TTL. */
 	old: boolean
+}
+
+/** The source rx reads from, for the strip, the Overview and its empty-feed line alike: the first listed. */
+export function rxSourceId(state: AppState): string | undefined {
+	return state.sources.value?.[0]?.id ?? state.tuner.value?.[0]?.sourceId
 }
 
 /**
@@ -149,9 +154,9 @@ export function stripInput(state: AppState): StripInput {
 	const agg = isFresh(state.fanout, now)
 		? aggregateDropNow(state.fanoutHistory)
 		: null
-	// The same tuner the Receiver shows: the one for the rendered source (R72 item 5).
+	// The same source as the Overview and the tuner the Receiver shows for it (R72 item 5).
 	const tuner = receiverTuner(state)
-	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
+	const sourceId = rxSourceId(state)
 	const { centre, rate } = rxValues(state, sourceId)
 	// Item 8: rx dims when the lane of its centre or of its rate is old.
 	const rxOld = centre !== null && (centre.old || rate?.old === true)
@@ -260,10 +265,32 @@ export function footerWithNotice(
 	width: number,
 ): Line {
 	const shown = notice && now - notice.at < NOTICE_MS ? notice : null
-	const groups = footerGroups(ctx, shown?.text)
-	if (shown)
-		groups.unshift({ priority: 0, variants: [[sp(shown.text, "attention")]] })
-	return fitGroups(groups, width)
+	if (!shown) return fitGroups(footerGroups(ctx), width)
+	// S5 (final review): a notice that ends with a footer hint, matched as a whole
+	// ` · `-part (so quoted server text cannot trigger it), takes that hint's place.
+	// Its context shortens first and the key itself is never cut.
+	const sep = ` ${glyphs().sep} `
+	const parts = shown.text.split(sep)
+	const last = parts.length > 1 ? parts[parts.length - 1] : undefined
+	const said =
+		last !== undefined &&
+		footerHints(ctx).some(
+			h => h.mode !== "global" && `${h.hint.keys} ${h.hint.label}` === last,
+		)
+			? last
+			: undefined
+	const lead: Group = { priority: 0, variants: [] }
+	const text = (t: string): Line => [sp(t, "attention")]
+	if (said !== undefined) {
+		// Minimal keeps a stub of the context (`tuner contr… · c take control`), so
+		// the notice never reads as a bare footer hint.
+		const head = parts.slice(0, -1).join(sep)
+		for (const n of [12, 20, 28, 36, 44])
+			if (n < cellWidth(head))
+				lead.variants.push(text(`${truncate(head, n)}${sep}${said}`))
+	}
+	lead.variants.push(text(shown.text))
+	return fitGroups([lead, ...footerGroups(ctx, said)], width)
 }
 
 /** ▶ prompt, cut so the y/n hints always fit (spec §6.2, §6.4, §6.5). */

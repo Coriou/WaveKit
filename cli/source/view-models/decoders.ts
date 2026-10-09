@@ -4,6 +4,7 @@ import { RATE_REASON_WORDS } from "../data/reason-codes.js"
 import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatClock,
@@ -18,12 +19,13 @@ import { listBudget, type DetailPlacement } from "../ui/frame.js"
 import { fitGroups } from "../ui/fit.js"
 import { sp, type Line, type Role } from "../ui/line.js"
 import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
-import { ASCII_GLYPHS, glyphs } from "../ui/theme.js"
+import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	titled,
 	processWords,
 	type DecoderFacts,
 } from "./decoder-rows.js"
@@ -235,14 +237,13 @@ export function decoderDetail(
 	const r = f.row
 	const sess = state.session[r.id]
 	const caps = r.caps
-	const arrow = g === ASCII_GLYPHS ? "->" : "→"
 	// S1: pid and version are shown when known; an absent one adds nothing.
 	const identity = [
 		own(PROTOCOL, r.type) ?? sanitize(r.type),
 		...(caps
 			? [
 					own(PATTERN, caps.integrationPattern) ?? g.unknown,
-					`${own(INPUT, caps.input) ?? g.unknown} ${arrow} ${own(OUTPUT, caps.output) ?? g.unknown}`,
+					`${own(INPUT, caps.input) ?? g.unknown} ${g.arrow} ${own(OUTPUT, caps.output) ?? g.unknown}`,
 				]
 			: []),
 		...(r.pid !== null && r.pid !== undefined ? [`pid ${r.pid}`] : []),
@@ -266,7 +267,7 @@ export function decoderDetail(
 	rest.push(
 		...wrapKV(
 			"process",
-			`${processWords(f)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
+			`${processWords(f)}${sep}${counted(r.restartCount, "restart")}${sep}${counted(r.stats.errors, "error")}${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
@@ -321,7 +322,7 @@ export function decoderDetail(
 		fanout.push(
 			...wrapKV(
 				"iq",
-				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)} / ${formatBytes(b.highWaterMark)} hwm${sep}${bp}${sep}${formatCount(b.backpressureEnterCount)} episodes`,
+				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)} / ${formatBytes(b.highWaterMark)} hwm${sep}${bp}${sep}${counted(b.backpressureEnterCount, "episode")}`,
 				width,
 			),
 		)
@@ -331,7 +332,7 @@ export function decoderDetail(
 		fanout.push(
 			...wrapKV(
 				"drops",
-				`${now_} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${formatCount(b.droppedChunksTotal)} chunks${sep}last drain ${drain}`,
+				`${now_} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${counted(b.droppedChunksTotal, "chunk")}${sep}last drain ${drain}`,
 				width,
 			),
 		)
@@ -363,7 +364,7 @@ export function decoderDetail(
 	const member = {
 		in: "in window",
 		out: "out of window",
-		"?": `window ?${why}`,
+		"?": `in window ?${why}`,
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
 	// R90: under core's assessment a tuned type is placed by core, not assumed to follow.
@@ -374,7 +375,7 @@ export function decoderDetail(
 				: "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
-				: `${f.nominal} MHz ${bandOriginWords(f)}`
+				: `${f.nominal} MHz (${bandOriginWords(f)})`
 	const parts = [band, ...(f.bandNote ? [f.bandNote] : []), windowPart, member]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
@@ -473,6 +474,8 @@ export interface DecodersModel {
 	selected: DecoderFacts | null
 	/** The last write's result for the footer while the detail is closed (R64, R75), else null. */
 	notice: string | null
+	/** Last scroll offset that still moves the open detail; null while it is closed (final review). */
+	detailMaxScroll: number | null
 }
 
 /** N5: the result line's role from the action state: failed is a fault, an unconfirmed no-reply needs attention. */
@@ -550,15 +553,16 @@ export function decodersModel(
 	const list =
 		open && b.placement.kind === "overlay"
 			? []
-			: [table.header, ...(placeholder ? [placeholder] : table.rows)]
-	const detail =
+			: placeholder
+				? [titled(table.header, placeholder)]
+				: [table.header, ...table.rows]
+	const all =
 		open && selected
-			? detailWindow(
-					decoderDetail(state, selected, detailWidth, state.now),
-					ui.detail.decoders.scroll,
-					b.detailRows,
-				)
+			? decoderDetail(state, selected, detailWidth, state.now)
 			: null
+	const detail = all
+		? detailWindow(all, ui.detail.decoders.scroll, b.detailRows)
+		: null
 	return {
 		list,
 		detail,
@@ -569,5 +573,7 @@ export function decodersModel(
 		pageSize: Math.max(1, b.listRows),
 		selected,
 		notice: result ? lineText(result) : null,
+		// detailWindow clamps the same way, so over-scrolling cannot stall PgUp.
+		detailMaxScroll: all ? Math.max(0, all.length - b.detailRows) : null,
 	}
 }

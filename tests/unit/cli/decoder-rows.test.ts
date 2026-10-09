@@ -51,20 +51,21 @@ describe("decoder rows (live fixture)", () => {
 
 	it("renders the 120-column overview table like spec §6.1", () => {
 		const t = decoderTable(facts, "overview", 119, 20, null, s.now)
+		// Final review MUST 4: process prefers 24 columns, so its richest words fit.
 		expect(lineText(t.header)).toBe(
-			"  DECODERS          process             decodes           drop now  lifetime  band MHz          window",
+			"  DECODERS          process                   decodes           drop now  lifetime  band MHz          window",
 		)
 		const rows = t.rows.map(lineText)
 		const acars = rows.find(r => r.includes("acarsdec")) ?? ""
 		expect(acars).toMatch(
-			/^! acarsdec +restarting ×13 +— +— +— +131\.550–131\.825\* +out/,
+			/^! acarsdec +restarting · 13 restarts +— +— +— +131\.550–131\.825\* +out/,
 		)
 		const readsb = rows.find(r => r.includes("readsb")) ?? ""
 		expect(readsb).toMatch(
 			/^● readsb +up 51s +none for 51s +!38% +44% +1090\.000 +out/,
 		)
 		expect(rows[0]).toMatch(
-			/^● dsd-fme {11}up 52s {14}2\/min · \d+s ago +12% +36% {2}tuned/,
+			/^● dsd-fme {11}up 52s {20}2\/min · \d+s ago +12% +36% {2}tuned/,
 		)
 		for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(119)
 	})
@@ -72,14 +73,14 @@ describe("decoder rows (live fixture)", () => {
 	it("drops lifetime and nominal whole at 80 columns, keeping core cells rich (§6.1 80×24)", () => {
 		const t = decoderTable(facts, "overview", 79, 20, null, s.now)
 		expect(lineText(t.header)).toBe(
-			"  DECODERS          process             decodes           drop now  window",
+			"  DECODERS          process                  decodes           drop now  window",
 		)
 		const rows = t.rows.map(lineText)
 		expect(rows.find(r => r.includes("acarsdec"))).toMatch(
 			/restarting ×13 +— +— +out/,
 		)
 		expect(rows.find(r => r.includes("rtl433"))).toMatch(
-			/^● rtl433 {12}up 51s {14}none for 51s {10}!15% {2}out/,
+			/^● rtl433 {12}up 51s {19}none for 51s {10}!15% {2}out/,
 		)
 	})
 
@@ -176,8 +177,8 @@ describe("decoder rows (live fixture)", () => {
 					lineText(r).includes("acarsdec"),
 				) ?? [],
 			)
-		// Overview standard (process 18): mid. Decoders view (process 10) and narrow: min.
-		expect(rowAt("overview", 119)).toContain("restarting ×13 ")
+		// Overview at 120 (process 24): rich; at 80 (23): mid. Decoders view (10) and narrow: min.
+		expect(rowAt("overview", 119)).toContain("restarting · 13 restarts ")
 		expect(rowAt("overview", 79)).toContain("restarting ×13 ")
 		expect(rowAt("overview", 59)).toMatch(/restarting +—/)
 		expect(rowAt("decoders", 119)).toMatch(/restarting +13 /)
@@ -268,7 +269,7 @@ describe("decoder rows (live fixture)", () => {
 			expect(
 				lineText(decoderTable(plain, "overview", 119, 20, null, s.now).header),
 			).toBe(
-				"  DECODERS          process             decodes           drop now  lifetime  band MHz         window",
+				"  DECODERS          process                   decodes           drop now  lifetime  band MHz         window",
 			)
 		})
 		it("I2: every cell of a stale lane is dim, and dim covers whole rows (api-down-cached)", () => {
@@ -479,6 +480,15 @@ describe("decoder rows (live fixture)", () => {
 			expect(
 				lineText(narrow.rows.find(r => lineText(r).includes("dsd-fme")) ?? []),
 			).toMatch(/^● dsd-fme +up 52s +2\/min +12%/)
+		})
+		it("final review MUST 2: the feed count is used only while the WS is open", () => {
+			const live = facts.reduce((n, f) => n + f.feed60, 0)
+			expect(live).toBeGreaterThan(0)
+			const closed = {
+				...s,
+				conn: { ...s.conn, ws: { ...s.conn.ws, state: "closed" as const } },
+			}
+			for (const f of decoderFacts(closed)) expect(f.feed60).toBe(0)
 		})
 		it("M12: a decode older than 60 s reads none for its age; the feed count stands in for a missing rate", () => {
 			const f = by("dsd-fme")

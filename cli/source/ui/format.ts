@@ -36,10 +36,15 @@ export function kibToBytes(kib: number): number {
 
 export function formatSpaced(n: N): string {
 	if (!isKnown(n)) return UNKNOWN
-	const sign = n < 0 ? "−" : ""
+	const sign = n < 0 ? glyphs().minus : ""
 	return (
 		sign + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!\d))/g, " ")
 	)
+}
+
+/** A count with its noun, singular for exactly one: `1 restart`, `2 restarts`, `? restarts`. */
+export function counted(n: N, one: string, many = `${one}s`): string {
+	return `${formatCount(n)} ${n === 1 ? one : many}`
 }
 
 export function formatCount(n: N): string {
@@ -74,7 +79,9 @@ export function formatWindow(loHz: N, hiHz: N): string {
 }
 
 export function formatHalfSpan(sampleRate: N): string {
-	return isKnown(sampleRate) ? `±${(sampleRate / 2e6).toFixed(3)}` : UNKNOWN
+	return isKnown(sampleRate)
+		? `${glyphs().plusMinus}${(sampleRate / 2e6).toFixed(3)}`
+		: UNKNOWN
 }
 
 /** Integer percent; a nonzero ratio never reads 0% and a partial one never reads 100% (T4). */
@@ -114,7 +121,7 @@ export function formatDuration(sec: N): string {
 export function formatSampleAge(ms: N): string {
 	if (!isKnown(ms)) return UNKNOWN
 	const v = Math.max(0, ms)
-	if (v < 1000) return `${Math.floor(v)} ms`
+	if (v < 1000) return `${Math.floor(v)}ms`
 	if (v < 10_000) return `${(Math.floor(v / 100) / 10).toFixed(1)}s`
 	return formatAge(v)
 }
@@ -135,7 +142,7 @@ export function formatDb(tenths: N): string {
 
 export function formatDeltaHz(hz: N): string {
 	if (!isKnown(hz)) return UNKNOWN
-	const sign = hz < 0 ? "−" : "+"
+	const sign = hz < 0 ? glyphs().minus : "+"
 	const a = Math.abs(hz)
 	const khz = (a / 1e3).toFixed(1)
 	return Number(khz) >= 1000

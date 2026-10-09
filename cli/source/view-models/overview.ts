@@ -2,6 +2,7 @@ import { iqView, isFresh, isOld } from "../data/freshness.js"
 import type { AppState } from "../data/types.js"
 import { fitGroups } from "../ui/fit.js"
 import {
+	counted,
 	formatAge,
 	formatClock,
 	formatMHzBare,
@@ -15,7 +16,7 @@ import { rxValues } from "./chrome.js"
 import { emptyFeedGroups, noDataText } from "./feed-state.js"
 import { remoteHost } from "./net.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
-import { glyphSpan } from "../ui/strip.js"
+import { glyphSpan, iqWordText } from "../ui/strip.js"
 import { padEnd, sanitize, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
@@ -23,6 +24,7 @@ import {
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	titled,
 } from "./decoder-rows.js"
 import {
 	aircraftLookup,
@@ -66,9 +68,11 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const sep = ` ${glyphs().sep} `
 	if (!src) {
 		// M4/M5: one row saying why (REST failing vs API unreachable); no label without a value.
-		return [
-			[...title("RECEIVER"), sp(noDataText(state, "/api/sources"), "label")],
-		]
+		// Final views (MUST 3): an answered empty list is not "fetching".
+		const why = state.sources.value
+			? "no sources configured"
+			: noDataText(state, "/api/sources")
+		return [[...title("RECEIVER"), sp(why, "label")]]
 	}
 	const old = isOld(state.sources, now)
 	const role = (r: Role, isOldLane: boolean): Role => (isOldLane ? "old" : r)
@@ -94,24 +98,31 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const { centre, rate } = rxValues(state, src.id)
 	const rateLine: Line = [v(formatRate(iq.rateBytesPerSec))]
 	// M1: the sample rate follows the window rule; unknown is left out, never 0.
+	// Final views: core measures another rate, so this one is only declared.
+	const mismatch = src.rateMismatch !== undefined
 	const rateRich: Line | null = rate
 		? [
 				...rateLine,
 				sp(sep, "label"),
-				{ text: formatMSps(rate.v), role: role("value", rate.old) },
+				mismatch
+					? {
+							text: `${formatMSps(rate.v)} declared${sep}rate mismatch`,
+							role: role("attention", rate.old),
+						}
+					: { text: formatMSps(rate.v), role: role("value", rate.old) },
 			]
 		: null
 	// M5: a disabled relay has no clients to report.
 	const relayText =
 		relay && relay.enabled
-			? `relay ${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}`
+			? `relay ${counted(relay.clientsConnected, "client")}`
 			: null
 	const others = (state.sources.value?.length ?? 1) - 1
 	// M2: a stale source keeps its sample age ("no samples 23s", §9).
 	const word =
 		iq.ageMs !== null && iq.word === "no samples"
 			? `${iq.word} ${formatAge(iq.ageMs)}`
-			: iq.word
+			: iqWordText(iq.word)
 	// Priorities: activity first, then the source identity, then rates; relay clients are the richest
 	// rate variant so they are the first thing to go (spec §6.1 "relay clients and centre first").
 	const row1: Group[] = [
@@ -350,7 +361,7 @@ export function overviewModel(
 	)
 	const placeholder = decodersPlaceholder(state)
 	const decoderLines = placeholder
-		? [table.header, placeholder]
+		? [titled(table.header, placeholder)]
 		: [table.header, ...table.rows]
 	const msgWidth = b.layout === "columns" ? b.rightWidth : width
 	const ring = state.messages.ring

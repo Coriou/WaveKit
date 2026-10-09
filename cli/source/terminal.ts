@@ -88,3 +88,21 @@ export function installExitHandlers(
 	proc.on("uncaughtException", fatal)
 	proc.on("unhandledRejection", fatal)
 }
+
+/**
+ * Runs the startup steps (enter the screen, start the runtime, render). A
+ * synchronous throw goes through shutdown, which restores the terminal before
+ * printing one sanitised line; otherwise it would reject the entry import and
+ * be written onto the alternate screen, then wiped by the restore.
+ */
+export function startOrShutdown<T>(
+	steps: () => T,
+	shutdown: Shutdown,
+): T | undefined {
+	try {
+		return steps()
+	} catch (err: unknown) {
+		shutdown(1, oneLine(err))
+		return undefined
+	}
+}

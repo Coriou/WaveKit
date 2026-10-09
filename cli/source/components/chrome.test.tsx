@@ -1,14 +1,22 @@
 import { Box, Text } from "ink"
+import { useEffect } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { useTerminalSize } from "../hooks/use-terminal-size.js"
-import { renderAt } from "../test/harness.js"
+import { pollUntil, renderAt } from "../test/harness.js"
 import { ConfirmBar } from "./confirm-bar.js"
 import { ErrorBoundary } from "./error-boundary.js"
 import { ColorContext } from "./lines.js"
 import { TooSmall } from "./too-small.js"
 
+/** Set once Size's effects ran; useTerminalSize's resize listener is attached before it. */
+let sizeReady = false
+
 function Size() {
 	const { columns, rows } = useTerminalSize()
+	// Effects run in declaration order, so this follows the hook's subscription.
+	useEffect(() => {
+		sizeReady = true
+	}, [])
 	return <Text>{`${columns}x${rows}`}</Text>
 }
 
@@ -18,10 +26,14 @@ function Boom(): never {
 
 describe("chrome components", () => {
 	it("tracks resize through its own stdout listener (works under CI=true)", async () => {
+		sizeReady = false
 		const h = await renderAt(<Size />, { cols: 120, rows: 40 })
 		expect(h.text()).toBe("120x40")
+		// Under load the passive effect that subscribes can lag the first frame, and
+		// the re-render can lag the harness's quiet window: wait for both, not a time.
+		expect(await pollUntil(() => sizeReady)).toBe(true)
 		await h.resize(60, 16)
-		expect(h.text()).toBe("60x16")
+		await h.waitFor(f => f.join("\n") === "60x16")
 		expect(h.writes().some(w => w.includes("\u001b[2J"))).toBe(true)
 		h.unmount()
 	})

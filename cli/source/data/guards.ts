@@ -181,6 +181,9 @@ const isVerdict = oneOf<BandAssessment["verdict"]>([
 	"unknown",
 ])
 
+/** More targets than any decoder declares: the list is dropped (spreading it into Math.min would throw). */
+export const MAX_BAND_TARGETS = 64
+
 /** R84: a string verdict this CLI does not know reads "unknown"; any other malformed field is dropped. */
 function guardBandAssessment(v: unknown): BandAssessment | undefined {
 	if (!isObj(v)) return undefined
@@ -192,6 +195,7 @@ function guardBandAssessment(v: unknown): BandAssessment | undefined {
 		...pick(v, ["reasonCode", "basis"] as const, isStr),
 		...(Array.isArray(targets) &&
 		targets.length > 0 &&
+		targets.length <= MAX_BAND_TARGETS &&
 		targets.every(isFrequency)
 			? { targetsHz: targets }
 			: {}),

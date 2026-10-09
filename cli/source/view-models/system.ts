@@ -3,6 +3,7 @@ import { isOld } from "../data/freshness.js"
 import type { ActionRecord, AppState, SdrHostView } from "../data/types.js"
 import { fitGroups } from "../ui/fit.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatClockShort,
@@ -185,7 +186,12 @@ function containerBlock(state: AppState, width: number): Block {
 						a.alert.severity === "critical" ? "attention" : "value",
 					),
 				]),
-				one(1, txt(`${a.count}× since ${formatClockShort(a.firstAt)}`)),
+				one(
+					1,
+					txt(
+						`${a.count}${glyphs().times} since ${formatClockShort(a.firstAt)}`,
+					),
+				),
 				one(2, txt(`last ${formatAge(now - a.lastAt)} ago`)),
 			],
 			width,
@@ -219,7 +225,7 @@ function procRow(
 			// A running process without a pid is unknown; a stopped one has none (M7).
 			one(2, txt(`pid ${p.pid ?? (p.running ? "?" : glyphs().na)}`, role)),
 			...extra,
-			one(1, txt(`${p.restartCount} restarts`, role)),
+			one(1, txt(counted(p.restartCount, "restart"), role)),
 		],
 		width,
 	)
@@ -277,13 +283,7 @@ function hostBlock(
 				mux,
 				mux
 					? [
-							one(
-								3,
-								txt(
-									`${mux.clients} client${mux.clients === 1 ? "" : "s"}`,
-									role,
-								),
-							),
+							one(3, txt(counted(mux.clients, "client"), role)),
 							// A rate from an old lane is unknown, not a dimmed number (T6).
 							one(1, txt(formatRate(old ? null : mux.bytesPerSec), role)),
 							one(4, txt(`${formatBytes(mux.totalBytesSent)} sent`, role)),
@@ -400,7 +400,7 @@ function resultText(state: AppState, rec: ActionRecord): string | null {
 			return `${what} failed${sep()}${r?.status ?? "network"}${sep()}${quote(r?.message ?? "?")}`
 		case "ok":
 			return intent.kind === "audio"
-				? `audio ${intent.op === "start" ? "started" : "stopped"}${sep()}${state.audio.value?.clientCount ?? "?"} clients`
+				? `audio ${intent.op === "start" ? "started" : "stopped"}${sep()}${counted(state.audio.value?.clientCount ?? null, "client")}`
 				: `${what} applied`
 	}
 }
@@ -452,13 +452,7 @@ function audioBlock(state: AppState, width: number): Row[] {
 				lbl("AUDIO", true),
 				[
 					one(0, [glyphSpan(glyph), sp(` ${word}`, role)]),
-					one(
-						1,
-						txt(
-							`${a.clientCount} client${a.clientCount === 1 ? "" : "s"}`,
-							role,
-						),
-					),
+					one(1, txt(counted(a.clientCount, "client"), role)),
 					one(2, txt(url, role)),
 				],
 				width,
@@ -503,8 +497,8 @@ function cliRow(state: AppState, width: number): Row {
 	const c = state.conn
 	return optional(
 		kv(
-			"",
-			`cli  frames rejected ${c.invalidFrames}${sep()}items rejected ${c.rejectedItems}`,
+			"cli",
+			`frames rejected ${c.invalidFrames}${sep()}items rejected ${c.rejectedItems}`,
 			width,
 			"label",
 		),
