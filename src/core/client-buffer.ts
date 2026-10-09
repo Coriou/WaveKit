@@ -8,3 +8,20 @@ export function iqClientBufferLimit(sampleRate = 2048000): number {
 		Math.min(8 * 1024 * 1024, Math.ceil(sampleRate * 2 * 2)),
 	)
 }
+
+/**
+ * Per-client live audio queue: about one second of audio (whole samples),
+ * never below 4 KiB. Older audio is dropped beyond it: for live listening,
+ * low latency beats completeness.
+ */
+export function liveAudioClientQueueLimit(
+	sampleRate: number,
+	frameBytes: number,
+	seconds = 1,
+): number {
+	const frames = Math.max(
+		Math.ceil(4096 / frameBytes),
+		Math.ceil((Number.isFinite(sampleRate) ? sampleRate : 0) * seconds),
+	)
+	return frames * frameBytes
+}

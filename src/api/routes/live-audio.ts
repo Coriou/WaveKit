@@ -3,6 +3,8 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import { ZodError } from "zod"
+import { ConfigValidationError, WaveKitError } from "../../utils/errors.js"
 import type { LiveDemodulator } from "../../core/live-demodulator.js"
 import type { LiveDemodConfig, LiveDemodStatus } from "@wavekit/api-types"
 import type {
@@ -33,6 +35,7 @@ const liveDemodConfigSchema = {
 		deEmphasisTau: { type: "number", enum: [50, 75] },
 		audioFormat: { type: "string", enum: ["s16le", "f32le"] },
 		iqDcBlock: { type: "boolean" },
+		offsetHz: { type: "number" },
 	},
 	required: [
 		"enabled",
@@ -70,6 +73,10 @@ const liveDemodStatusSchema = {
 			enum: ["running", "starting", "stopped", "error"],
 		},
 		lastError: { type: "string" },
+		wavUrl: { type: "string" },
+		pipelineRestarts: { type: "number" },
+		channelPowerDbfs: { type: "number" },
+		squelchOpen: { type: "boolean" },
 	},
 	required: [
 		"enabled",
@@ -152,6 +159,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			deEmphasisTau: config.deEmphasisTau,
 			audioFormat: config.audioFormat,
 			iqDcBlock: config.iqDcBlock,
+			offsetHz: config.offsetHz,
 			...(config.sourceId !== undefined ? { sourceId: config.sourceId } : {}),
 		}
 	}
@@ -172,8 +180,16 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			clientCount: status.clientCount,
 			bytesStreamed: status.bytesStreamed,
 			pipelineHealth: status.pipelineHealth,
+			wavUrl: status.wavUrl,
+			pipelineRestarts: status.pipelineRestarts,
 			...(status.lastError !== undefined
 				? { lastError: status.lastError }
+				: {}),
+			...(status.channelPowerDbfs !== undefined
+				? { channelPowerDbfs: status.channelPowerDbfs }
+				: {}),
+			...(status.squelchOpen !== undefined
+				? { squelchOpen: status.squelchOpen }
 				: {}),
 		}
 	}
@@ -199,7 +215,8 @@ export const liveAudioRoutes: FastifyPluginAsync<
 			schema: {
 				tags: ["live-audio"],
 				summary: "Start live audio",
-				description: "Starts the live demodulation pipeline and HTTP stream",
+				description:
+					"Starts the live demodulation pipeline and HTTP stream, or restarts a dead pipeline while the stream server is up",
 				response: {
 					200: liveDemodActionResponseSchema,
 				},
@@ -231,7 +248,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 
 	fastify.patch<{
 		Body: Partial<LiveDemodConfig>
-		Reply: LiveDemodStatus
+		Reply: LiveDemodStatus | { error: string; message: string }
 	}>(
 		"/api/live-audio/config",
 		{
@@ -245,7 +262,7 @@ export const liveAudioRoutes: FastifyPluginAsync<
 				},
 			},
 		},
-		async request => {
+		async (request, reply) => {
 			const body = request.body as Partial<LiveDemodConfig>
 
 			const updates: Partial<CoreLiveDemodConfig> = {
@@ -272,10 +289,28 @@ export const liveAudioRoutes: FastifyPluginAsync<
 					? { audioFormat: body.audioFormat }
 					: {}),
 				...(body.iqDcBlock !== undefined ? { iqDcBlock: body.iqDcBlock } : {}),
+				...(body.offsetHz !== undefined ? { offsetHz: body.offsetHz } : {}),
 				...(body.sourceId !== undefined ? { sourceId: body.sourceId } : {}),
 			}
 
-			await liveDemod.reconfigure(updates)
+			try {
+				await liveDemod.reconfigure(updates)
+			} catch (err) {
+				if (
+					err instanceof ZodError ||
+					(err instanceof WaveKitError &&
+						err.code === "CHANNEL_OFFSET_OUT_OF_RANGE")
+				) {
+					return reply.code(400).send({
+						error: "Bad Request",
+						message:
+							err instanceof ZodError
+								? ConfigValidationError.formatZodError(err)
+								: err.message,
+					})
+				}
+				throw err
+			}
 			return toApiLiveDemodStatus(liveDemod.getStatus())
 		},
 	)

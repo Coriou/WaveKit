@@ -12,7 +12,13 @@ export interface LiveAudioConfig {
 	deEmphasis: boolean
 	deEmphasisTau: 50 | 75
 	audioFormat: "s16le" | "f32le"
+	/** Deprecated and ignored by the server (accepted for compatibility). */
 	iqDcBlock: boolean
+	/**
+	 * Channel offset from the tuned centre in Hz (a carrier at centre + offsetHz
+	 * is shifted to DC before demodulation). Default 0.
+	 */
+	offsetHz?: number
 }
 
 export interface LiveAudioStatus {
@@ -29,6 +35,14 @@ export interface LiveAudioStatus {
 	bytesStreamed: number
 	pipelineHealth: "running" | "starting" | "stopped" | "error"
 	lastError?: string
+	/** Same audio as httpUrl behind a streaming WAV header. */
+	wavUrl?: string
+	/** Automatic pipeline restarts since the last manual start. */
+	pipelineRestarts?: number
+	/** Smoothed pre-demodulation channel power in dBFS (while running). */
+	channelPowerDbfs?: number
+	/** Squelch gate state (while running; true when squelch is off). */
+	squelchOpen?: boolean
 }
 
 export type LiveDemodConfig = LiveAudioConfig

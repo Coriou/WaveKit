@@ -66,28 +66,16 @@ function createOutput(kind: "audio" | "tuner" | "live") {
 			LiveDemodConfigSchema.parse({ squelch: 0 }),
 		)
 		const internals = output as unknown as {
-			clients: Map<
-				string,
-				{
-					id: string
-					response: ServerResponse
-					remoteAddress: string
-					connectedAt: Date
-					bytesWritten: number
-				}
-			>
+			registerClient(response: ServerResponse, remoteAddress: string): unknown
 			handleAudioData(chunk: Buffer): void
 		}
 		return {
 			output,
-			connect(id: string, transport: ClientTransport) {
-				internals.clients.set(id, {
-					id,
-					response: transport as unknown as ServerResponse,
-					remoteAddress: "local",
-					connectedAt: new Date(),
-					bytesWritten: 0,
-				})
+			connect(_id: string, transport: ClientTransport) {
+				internals.registerClient(
+					transport as unknown as ServerResponse,
+					"local",
+				)
 			},
 			write: (chunk: Buffer) => internals.handleAudioData(chunk),
 			clientCount: () => output.getStatus().clientCount,
@@ -118,71 +106,66 @@ function createOutput(kind: "audio" | "tuner" | "live") {
 	}
 }
 
-describe.each(["audio", "tuner", "live"] as const)(
-	"%s output backpressure",
-	kind => {
-		it("disconnects a stalled client while delivering every byte to a healthy client", async () => {
-			const output = createOutput(kind)
-			const slow = new ClientTransport(true)
-			const healthy = new ClientTransport(false)
-			const disconnected: string[] = []
-			output.output.on("client-disconnected", id => disconnected.push(id))
-			output.connect("slow", slow)
-			output.connect("healthy", healthy)
-			const expected: Buffer[] = []
-			try {
-				for (let index = 0; index < (kind === "tuner" ? 160 : 32); index++) {
-					const chunk = Buffer.alloc(64 * 1024, index)
-					expected.push(chunk)
-					output.write(chunk)
-					expect(slow.writableLength).toBeLessThanOrEqual(
-						kind === "tuner" ? iqClientBufferLimit() : MAX_CLIENT_BUFFER_BYTES,
-					)
-				}
-				expect(slow.destroyed).toBe(true)
-				expect(healthy.destroyed).toBe(false)
-				expect(output.clientCount()).toBe(1)
-				if (output.output instanceof TunerRelay) {
-					expect(output.output.getStatus().controlClientId).toBe("client-2")
-				}
-				expect(
-					Buffer.concat(healthy.chunks).equals(Buffer.concat(expected)),
-				).toBe(true)
-				await new Promise<void>(resolve => setImmediate(resolve))
-				expect(disconnected).toHaveLength(1)
-			} finally {
-				slow.destroy()
-				healthy.destroy()
+describe.each(["audio", "tuner"] as const)("%s output backpressure", kind => {
+	it("disconnects a stalled client while delivering every byte to a healthy client", async () => {
+		const output = createOutput(kind)
+		const slow = new ClientTransport(true)
+		const healthy = new ClientTransport(false)
+		const disconnected: string[] = []
+		output.output.on("client-disconnected", id => disconnected.push(id))
+		output.connect("slow", slow)
+		output.connect("healthy", healthy)
+		const expected: Buffer[] = []
+		try {
+			for (let index = 0; index < (kind === "tuner" ? 160 : 32); index++) {
+				const chunk = Buffer.alloc(64 * 1024, index)
+				expected.push(chunk)
+				output.write(chunk)
+				expect(slow.writableLength).toBeLessThanOrEqual(
+					kind === "tuner" ? iqClientBufferLimit() : MAX_CLIENT_BUFFER_BYTES,
+				)
 			}
-		})
+			expect(slow.destroyed).toBe(true)
+			expect(healthy.destroyed).toBe(false)
+			expect(output.clientCount()).toBe(1)
+			if (output.output instanceof TunerRelay) {
+				expect(output.output.getStatus().controlClientId).toBe("client-2")
+			}
+			expect(
+				Buffer.concat(healthy.chunks).equals(Buffer.concat(expected)),
+			).toBe(true)
+			await new Promise<void>(resolve => setImmediate(resolve))
+			expect(disconnected).toHaveLength(1)
+		} finally {
+			slow.destroy()
+			healthy.destroy()
+		}
+	})
 
-		it("allows a brief stall to recover without dropping stream bytes", () => {
-			const output = createOutput(kind)
-			const client = new ClientTransport(true)
-			output.connect("client", client)
-			try {
-				const chunks = [Buffer.alloc(64 * 1024, 1), Buffer.alloc(64 * 1024, 2)]
-				for (const chunk of chunks) output.write(chunk)
-				expect(client.writableNeedDrain).toBe(true)
-				expect(client.destroyed).toBe(false)
-				client.resumeWrites()
-				const last = Buffer.alloc(64 * 1024, 3)
-				output.write(last)
-				// A stalled tuner header is delivered before the IQ chunks.
-				const delivered = Buffer.concat(client.chunks)
-				const expected = Buffer.concat([...chunks, last])
-				expect(
-					delivered
-						.subarray(delivered.length - expected.length)
-						.equals(expected),
-				).toBe(true)
-				expect(output.clientCount()).toBe(1)
-			} finally {
-				client.destroy()
-			}
-		})
-	},
-)
+	it("allows a brief stall to recover without dropping stream bytes", () => {
+		const output = createOutput(kind)
+		const client = new ClientTransport(true)
+		output.connect("client", client)
+		try {
+			const chunks = [Buffer.alloc(64 * 1024, 1), Buffer.alloc(64 * 1024, 2)]
+			for (const chunk of chunks) output.write(chunk)
+			expect(client.writableNeedDrain).toBe(true)
+			expect(client.destroyed).toBe(false)
+			client.resumeWrites()
+			const last = Buffer.alloc(64 * 1024, 3)
+			output.write(last)
+			// A stalled tuner header is delivered before the IQ chunks.
+			const delivered = Buffer.concat(client.chunks)
+			const expected = Buffer.concat([...chunks, last])
+			expect(
+				delivered.subarray(delivered.length - expected.length).equals(expected),
+			).toBe(true)
+			expect(output.clientCount()).toBe(1)
+		} finally {
+			client.destroy()
+		}
+	})
+})
 
 it("allows a tuner client to initialize for one second of IQ before reading", () => {
 	const output = createOutput("tuner")
@@ -196,5 +179,38 @@ it("allows a tuner client to initialize for one second of IQ before reading", ()
 		expect(output.clientCount()).toBe(1)
 	} finally {
 		client.destroy()
+	}
+})
+
+// Live audio favours latency: a stalled listener keeps about one second of
+// the newest audio instead of being disconnected after a large backlog.
+it("bounds a stalled live audio client to about one second without disconnecting it", async () => {
+	const output = createOutput("live")
+	const slow = new ClientTransport(true)
+	const healthy = new ClientTransport(false)
+	output.connect("slow", slow)
+	output.connect("healthy", healthy)
+	const expected: Buffer[] = []
+	try {
+		for (let index = 0; index < 32; index++) {
+			const chunk = Buffer.alloc(64 * 1024, index)
+			expected.push(chunk)
+			output.write(chunk)
+			// Let the healthy client drain, as a socket would between pipe reads.
+			await new Promise<void>(resolve => setImmediate(resolve))
+			// One second of 25 kHz s16le (50 kB) plus the transport's own buffer.
+			expect(slow.writableLength).toBeLessThanOrEqual(64 * 1024 + 50_000)
+		}
+		expect(slow.destroyed).toBe(false)
+		expect(output.clientCount()).toBe(2)
+		expect(Buffer.concat(healthy.chunks).equals(Buffer.concat(expected))).toBe(
+			true,
+		)
+		slow.resumeWrites()
+		output.write(Buffer.alloc(1024, 77))
+		expect(Buffer.concat(slow.chunks).at(-1)).toBe(77)
+	} finally {
+		slow.destroy()
+		healthy.destroy()
 	}
 })
