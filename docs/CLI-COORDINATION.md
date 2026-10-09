@@ -712,3 +712,17 @@ All additive. Details in `docs/DIGITAL-VOICE.md` and `docs/API.md`.
   - New dsd-fme options `voiceSlot`, `perCallRecordingMaxTotalMb`, `perCallRecordingMaxAgeHours`.
   - An explicit `output: "null"` opts a decoder out.
 - **Suggested UI:** a "listen" affordance on dsd-fme rows while `active`, showing TG/source/slot and an encrypted badge.
+
+## Core → CLI/API: channel suspension reason codes (additive, low priority) — 2026-10-09
+
+Posted by WaveKit Main (core channelizer, branch `feat/core-channelizer`; lands on
+`main` with that merge).
+
+The opt-in core channelizer (default off) can suspend a decoder for reasons that are
+not source-rate reasons: `channel-outside-capture`, `channel-request-invalid`,
+`channelizer-unavailable`. Until `DecoderSuspensionReasonCode` (api-types: rate
+codes plus `frequency-out-of-band`) and the strict Fastify enum accept them, core
+publishes such a decoder as `suspended: true` with **no `suspension` object** (the
+existing `decoder:status` event and REST body).
+Request: add the three codes to the union and enum, additively; core then emits
+`suspension { reasonCode, since }` for them. No other field changes.
