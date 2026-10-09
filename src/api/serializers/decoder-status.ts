@@ -36,6 +36,16 @@ export function toApiDecoderStatus(
 			verdict: "unknown",
 			reasonCode: "unknown-requirements",
 		},
+		...(status.bandAssessment !== undefined
+			? {
+					bandAssessment: {
+						...status.bandAssessment,
+						...(status.bandAssessment.targetsHz
+							? { targetsHz: [...status.bandAssessment.targetsHz] }
+							: {}),
+					},
+				}
+			: {}),
 		...(status.sourceId !== undefined ? { sourceId: status.sourceId } : {}),
 		...(status.deviceSerial !== undefined
 			? { deviceSerial: status.deviceSerial }
