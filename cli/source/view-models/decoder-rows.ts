@@ -33,6 +33,7 @@ import {
 	type ColumnSpec,
 } from "../ui/columns.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatCount,
@@ -265,7 +266,7 @@ export function processWords(f: DecoderFacts): string {
 function processCell(f: DecoderFacts): Cell {
 	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
-	const restarts = `${formatCount(n)} restart${n === 1 ? "" : "s"}`
+	const restarts = counted(n, "restart")
 	const sep = ` ${glyphs().sep} `
 	const words = processWords(f)
 	const withCount = n > 0 ? [[sp(`${words}${sep}${restarts}`, role)]] : []

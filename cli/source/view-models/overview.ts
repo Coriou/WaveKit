@@ -2,6 +2,7 @@ import { iqView, isFresh, isOld } from "../data/freshness.js"
 import type { AppState } from "../data/types.js"
 import { fitGroups } from "../ui/fit.js"
 import {
+	counted,
 	formatAge,
 	formatClock,
 	formatMHzBare,
@@ -104,7 +105,7 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	// M5: a disabled relay has no clients to report.
 	const relayText =
 		relay && relay.enabled
-			? `relay ${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}`
+			? `relay ${counted(relay.clientsConnected, "client")}`
 			: null
 	const others = (state.sources.value?.length ?? 1) - 1
 	// M2: a stale source keeps its sample age ("no samples 23s", §9).

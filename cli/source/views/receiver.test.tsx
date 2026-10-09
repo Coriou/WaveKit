@@ -158,7 +158,10 @@ describe("Receiver view (spec §6.4)", () => {
 			await h.press(KEYS.enter)
 			const bar = h.frame().at(-1) ?? ""
 			expect([...bar].length).toBeLessThanOrEqual(cols)
-			expect(bar).toMatch(/send 2 (commands )?to pi-iq/)
+			// The count always names its noun; the target joins it from 120 columns.
+			expect(bar).toMatch(
+				cols >= 120 ? /send 2 commands to pi-iq/ : /send 2 commands /,
+			)
 			expect(bar).toMatch(
 				/bias-t (DC on antenna|supplies DC on the antenna port)/,
 			)

@@ -4,6 +4,7 @@ import { RATE_REASON_WORDS } from "../data/reason-codes.js"
 import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatClock,
@@ -265,7 +266,7 @@ export function decoderDetail(
 	rest.push(
 		...wrapKV(
 			"process",
-			`${processWords(f)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
+			`${processWords(f)}${sep}${counted(r.restartCount, "restart")}${sep}${counted(r.stats.errors, "error")}${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
@@ -320,7 +321,7 @@ export function decoderDetail(
 		fanout.push(
 			...wrapKV(
 				"iq",
-				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)} / ${formatBytes(b.highWaterMark)} hwm${sep}${bp}${sep}${formatCount(b.backpressureEnterCount)} episodes`,
+				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)} / ${formatBytes(b.highWaterMark)} hwm${sep}${bp}${sep}${counted(b.backpressureEnterCount, "episode")}`,
 				width,
 			),
 		)
@@ -330,7 +331,7 @@ export function decoderDetail(
 		fanout.push(
 			...wrapKV(
 				"drops",
-				`${now_} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${formatCount(b.droppedChunksTotal)} chunks${sep}last drain ${drain}`,
+				`${now_} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${counted(b.droppedChunksTotal, "chunk")}${sep}last drain ${drain}`,
 				width,
 			),
 		)
@@ -362,7 +363,7 @@ export function decoderDetail(
 	const member = {
 		in: "in window",
 		out: "out of window",
-		"?": `window ?${why}`,
+		"?": `in window ?${why}`,
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
 	// R90: under core's assessment a tuned type is placed by core, not assumed to follow.
@@ -373,7 +374,7 @@ export function decoderDetail(
 				: "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
-				: `${f.nominal} MHz ${bandOriginWords(f)}`
+				: `${f.nominal} MHz (${bandOriginWords(f)})`
 	const parts = [band, ...(f.bandNote ? [f.bandNote] : []), windowPart, member]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)

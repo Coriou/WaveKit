@@ -4,10 +4,10 @@ import { Lines } from "../components/lines.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { memoOne } from "../data/memo.js"
 import { decoderConfirm, decodersModel } from "../view-models/decoders.js"
+import type { ViewModule, ViewProps } from "./types.js"
 
 /** keyInfo and the component ask for the same model in one commit: build it once (D3). */
 const model = memoOne(decodersModel)
-import type { ViewModule, ViewProps } from "./types.js"
 
 function DecodersComponent({
 	state,

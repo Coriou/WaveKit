@@ -202,7 +202,7 @@ describe("R84 band label and basis", () => {
 				windowHalfWidthHz: 800_000,
 			},
 		})
-		expect(text).toContain("1090.000 MHz protocol")
+		expect(text).toContain("1090.000 MHz (protocol)")
 		expect(text).toContain("usable 445.171–446.771 MHz")
 		expect(text).toContain("out of window")
 		for (const [basis, words] of [
@@ -219,7 +219,7 @@ describe("R84 band label and basis", () => {
 						basis,
 					},
 				}),
-			).toContain(`1090.000 MHz ${words}`)
+			).toContain(`1090.000 MHz (${words})`)
 	})
 	it("an unknown verdict says why, in plain words or quoted", () => {
 		const readsb = liveRow("readsb")
@@ -231,17 +231,17 @@ describe("R84 band label and basis", () => {
 					reasonCode: "no-target-frequency",
 				},
 			}),
-		).toContain("window ? (no target frequency)")
+		).toContain("in window ? (no target frequency)")
 		expect(
 			detail({
 				...readsb,
 				bandAssessment: { verdict: "unknown", reasonCode: "solar-flare" },
 			}),
-		).toContain('window ? ("solar-flare")')
+		).toContain('in window ? ("solar-flare")')
 	})
 	it("an older core (no bandAssessment) keeps the nominal wording", () => {
 		const text = detail(liveRow("readsb"))
-		expect(text).toContain("1090.000 MHz nominal")
+		expect(text).toContain("1090.000 MHz (nominal)")
 		expect(text).toContain("window 444.947–446.995 MHz")
 	})
 })
