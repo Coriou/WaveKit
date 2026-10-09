@@ -141,6 +141,11 @@ sources: []
 #       mode: "auto"           # auto, dmr, p25, ysf, dstar, nxdn, provoice
 #       output: "wav"          # null, wav, udp
 #       wavDir: "./decoded_calls"
+#       offsetHz: 0            # channel at tuned centre + offsetHz is shifted to
+#                              # DC before demodulation (any audio-demod decoder:
+#                              # dsd-fme, multimon-ng, direwolf)
+#       callTimeoutMs: 4000    # fallback call end without any dsd-fme line; calls
+#                              # normally end on the terminator (DMR TLC, P25 TDULC)
 #
 #   - id: "pager-decoder"
 #     type: "multimon-ng"
@@ -265,8 +270,14 @@ tuner:
 # Real-time IQ demodulation with an embedded HTTP audio stream.
 # Useful for quick monitoring or piping into ffplay/VLC.
 #
-# Stream URL:
-#   http://<host>:8081/stream
+# Stream URLs:
+#   http://<host>:8081/stream      raw PCM; format in the X-Audio-Format,
+#                                  X-Sample-Rate and X-Channels headers
+#   http://<host>:8081/stream.wav  same audio behind a streaming WAV header
+#   ffplay -nodisp http://<host>:8081/stream.wav
+#
+# Pipeline: capture IQ -> [shift offsetHz to DC] -> channel filter/decimation
+# -> squelch (channel power) -> demodulation -> gain -> limit.
 #
 # Example:
 # liveDemod:
@@ -275,15 +286,20 @@ tuner:
 #   httpPort: 8081
 #   modulation: "nfm"        # nfm | wfm | am | usb | lsb | dsb | cw | raw
 #   bandwidth: 12500         # Hz (0 allowed only for raw)
-#   squelch: 0               # dBFS (-160 to 0). 0 = open
+#   squelch: 0               # channel power before demod, dBFS (-160 to 0);
+#                            # 0 = open. Typical: noise -55..-65, a carrier
+#                            # -10..-30, so -40 opens on real signals only
 #   noiseReduction: "off"    # off | voice | noaa-apt | narrow-band
 #   lowPass: 0               # Hz (0 disables)
 #   highPass: 0              # Hz (0 disables)
-#   gain: 10.0
+#   gain: 2.0                 # FM: 2 puts +-5 kHz deviation at 0.8 full scale
 #   deEmphasis: false
 #   deEmphasisTau: 50         # microseconds (50 or 75)
 #   audioFormat: "s16le"      # s16le | f32le
-#   iqDcBlock: true
+#   offsetHz: 0               # carrier at tuned centre + offsetHz is shifted to
+#                             # DC (tune the dongle a few kHz off the carrier to
+#                             # keep the receiver's DC spike out of the channel)
+#   iqDcBlock: false          # deprecated, ignored (it corrupted I/Q)
 #
 liveDemod:
   enabled: false
@@ -294,11 +310,12 @@ liveDemod:
   noiseReduction: "off"
   lowPass: 0
   highPass: 0
-  gain: 10.0
+  gain: 2.0
   deEmphasis: false
   deEmphasisTau: 50
   audioFormat: "s16le"
-  iqDcBlock: true
+  offsetHz: 0
+  iqDcBlock: false
 
 # -----------------------------------------------------------------------------
 # API Server

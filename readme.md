@@ -315,18 +315,22 @@ liveDemod:
   noiseReduction: "off"
   lowPass: 0
   highPass: 0
-  gain: 10.0
+  gain: 2.0
   deEmphasis: false
   deEmphasisTau: 50
   audioFormat: "s16le"
-  iqDcBlock: true
+  offsetHz: 0
 ```
 
 ```bash
 # Start demodulation (if not auto-started)
 curl -X POST http://localhost:9000/api/live-audio/start
 
-# Play the stream (use the effectiveSampleRate from /status)
+# Play the self-describing WAV stream (no format flags needed)
+ffplay -nodisp -autoexit http://localhost:8081/stream.wav
+
+# Or the raw stream: format and exact rate are in the X-Audio-Format and
+# X-Sample-Rate response headers (round the rate for ffplay)
 ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:8081/stream
 ```
 
@@ -335,13 +339,18 @@ ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:808
 - `sourceId` — IQ source to demodulate (defaults to first source)
 - `modulation` — `nfm` | `wfm` | `am` | `usb` | `lsb` | `dsb` | `cw` | `raw`
 - `bandwidth` — Target audio bandwidth in Hz (0 allowed only for `raw`)
-- `squelch` — dBFS threshold (-160 to 0). `0` keeps squelch open
+- `squelch` — channel power threshold before demodulation, dBFS (-160 to 0);
+  `0` keeps squelch open. `channelPowerDbfs` in `/api/live-audio/status` shows the
+  current level (noise is typically -55 to -65 dBFS, a nearby carrier -10 to -30)
 - `noiseReduction` — `off` | `voice` | `noaa-apt` | `narrow-band`
 - `lowPass` / `highPass` — Optional audio filters in Hz
-- `gain` — Audio gain multiplier (float)
+- `gain` — Audio gain multiplier (default 2: ±5 kHz FM deviation at 0.8 full scale)
+- `offsetHz` — Channel offset from the tuned centre; a carrier at centre + offsetHz
+  is shifted to DC before filtering. Tune the dongle a few kHz off the carrier and
+  set this, so the receiver's DC spike stays out of the channel
 - `deEmphasis` / `deEmphasisTau` — FM de-emphasis (50 or 75 microseconds)
 - `audioFormat` — `s16le` or `f32le`
-- `iqDcBlock` — Apply IQ DC blocking before decimation
+- `iqDcBlock` — Deprecated and ignored (it corrupted I/Q); use `offsetHz`
 
 **API examples:**
 
