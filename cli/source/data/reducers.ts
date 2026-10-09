@@ -584,7 +584,8 @@ function reduceWs(
 				own(s.metrics, id) !== undefined
 			if (!has) return s
 			const metrics = record<AppState["metrics"][string]>()
-			for (const [k, m] of Object.entries(s.metrics)) if (k !== id) metrics[k] = m
+			for (const [k, m] of Object.entries(s.metrics))
+				if (k !== id) metrics[k] = m
 			return {
 				...s,
 				sources: s.sources.value
