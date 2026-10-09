@@ -1,6 +1,10 @@
 import { remoteHost } from "./net.js"
 import { noDataText } from "./feed-state.js"
-import type { TunerRelayStatus, TunerState } from "@wavekit/api-types"
+import type {
+	TunerRelayStatus,
+	TunerState,
+	TunerStateField,
+} from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import { decoderBand } from "../data/nominal-bands.js"
 import { aggregateDropNow, MIN_DROP_SPAN_MS } from "../data/rates.js"
@@ -48,6 +52,7 @@ import {
 	FREQ_MAX,
 	FREQ_MIN,
 	editWindow,
+	fieldValue,
 	outOfRange,
 	pendingChanges,
 	pendingCommands,
@@ -152,6 +157,39 @@ export function receiverControl(
 	state: AppState,
 ): "internal" | "external" | null {
 	return receiverTuner(state)?.controlMode ?? null
+}
+
+/** The TunerState field behind each edit field (R84 unknownFields). */
+const STATE_FIELD: Readonly<Record<EditField, TunerStateField>> = {
+	frequency: "frequency",
+	sampleRate: "sampleRate",
+	gain: "gain",
+	ppm: "ppm",
+	gainMode: "gainMode",
+	agc: "agcMode",
+	biasTee: "biasTee",
+	directSampling: "directSampling",
+	offsetTuning: "offsetTuning",
+}
+
+/**
+ * Fields core never commanded or observed (R84): their value is a placeholder and reads
+ * "?". In edit mode a field stays unknown until the draft changes it, so an unknown
+ * field is only sent when the operator sets it.
+ */
+function unknownOf(
+	t: TunerState | undefined,
+	edit: TunerEditState | null,
+): (f: EditField) => boolean {
+	const listed = new Set<string>(t?.unknownFields ?? [])
+	return f =>
+		listed.has(STATE_FIELD[f]) &&
+		(edit === null ||
+			fieldValue(edit.draft, f) === fieldValue(edit.original, f))
+}
+
+function tunerOf(state: AppState, sourceId: string): TunerState | undefined {
+	return state.tuner.value?.find(x => x.sourceId === sourceId)
 }
 
 /** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
@@ -280,7 +318,49 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	]
 	return [
 		essential(fitRow(lbl("SOURCE", true), row1, width)),
+		...(src.rateMismatch ? [keep(mismatchLine(src, width, role))] : []),
 		optional(fitRow(lbl("rate"), row2, width), 2),
+	]
+}
+
+/** "−50%", "+2.5%": the sign always, one decimal below 10 %. */
+function signedPercent(ratio: number): string {
+	const pct = ratio * 100
+	const a = Math.abs(pct)
+	const text = a < 10 ? a.toFixed(1).replace(/\.0$/, "") : String(Math.round(a))
+	return `${pct < 0 ? "−" : "+"}${text}%`
+}
+
+/**
+ * R84 rate-truth check, a warning only (core never corrects caps from it):
+ * "rate mismatch · measured 1.024 MS/s vs declared 2.048 MS/s (−50%) since 18:07:52".
+ */
+function mismatchLine(src: SourceRow, width: number, role: Role): Line {
+	const m = src.rateMismatch
+	if (!m) return []
+	const since = Date.parse(m.since)
+	const lineRole: Role = role === "old" ? "old" : "attention"
+	return [
+		...lbl(""),
+		glyphSpan("attention"),
+		...fitGroups(
+			[
+				one(0, txt(" rate mismatch", lineRole)),
+				one(
+					0,
+					txt(`measured ${formatMSps(m.measuredSampleRateHz)}`, lineRole),
+					txt(
+						`measured ${formatMSps(m.measuredSampleRateHz)} vs declared ${formatMSps(m.declaredSampleRateHz)} (${signedPercent(m.deviation)})`,
+						lineRole,
+					),
+				),
+				...(Number.isFinite(since)
+					? [one(1, txt(`since ${formatClock(since)}`, lineRole))]
+					: []),
+			],
+			Math.max(1, width - LABEL_W - 1),
+			{ sep: sep() },
+		),
 	]
 }
 
@@ -317,18 +397,15 @@ function rangeNote(): string {
 
 /**
  * Pending row item: "frequency 445 970 700 → 446 000 000", "gain 0.0 → 20.7 dB".
- * `gainFrom` names a gain core gave only as an index ("index 11"), never "0.0" (M7).
+ * `from` replaces a placeholder: "?" for a field core does not know, "index 11" for a
+ * gain core gave only as an index, never "0.0" (M7, R84).
  */
-export function changeText(c: PendingChange, gainFrom?: string): string {
+export function changeText(c: PendingChange, from?: string): string {
 	const to =
 		c.field === "gain" && typeof c.to === "number"
 			? formatDb(c.to)
 			: plainValue(c.field, c.to)
-	const from =
-		c.field === "gain" && gainFrom !== undefined
-			? gainFrom
-			: plainValue(c.field, c.from)
-	return `${FIELD_LABEL[c.field]} ${from} → ${to}`
+	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} → ${to}`
 }
 
 /** "+10 Hz", "+29.3 kHz", "−1.5 MHz": the unit follows the magnitude, so a small step never reads +0.0. */
@@ -343,20 +420,20 @@ export function deltaText(hz: number): string {
 }
 
 /** The value a command sends: "446 000 000 Hz (+29.3 kHz)", "20.7 dB", "on". */
-function confirmValue(c: PendingChange): string {
-	if (
-		c.field === "frequency" &&
-		typeof c.to === "number" &&
-		typeof c.from === "number"
-	)
-		return `${formatHz(c.to)} (${deltaText(c.to - c.from)})`
+function confirmValue(c: PendingChange, fromKnown: boolean): string {
+	if (c.field === "frequency" && typeof c.to === "number") {
+		// No delta from a frequency core does not know (R84).
+		return fromKnown && typeof c.from === "number"
+			? `${formatHz(c.to)} (${deltaText(c.to - c.from)})`
+			: formatHz(c.to)
+	}
 	if (c.field === "gain" && typeof c.to === "number") return formatDb(c.to)
 	return plainValue(c.field, c.to)
 }
 
 /** Confirm item, named by the command core relays: "set-frequency 446 000 000 Hz (+29.3 kHz)". */
-export function confirmItem(c: PendingChange): string {
-	return `${COMMAND_NAME[c.field]} ${confirmValue(c)}`
+export function confirmItem(c: PendingChange, fromKnown = true): string {
+	return `${COMMAND_NAME[c.field]} ${confirmValue(c, fromKnown)}`
 }
 
 /**
@@ -379,7 +456,10 @@ export function tunerConfirm(
 		n === 1 && first
 			? `send ${COMMAND_NAME[first.field]} ${to}`
 			: `send ${n} commands ${to}`
-	const action = `send ${changes.map(confirmItem).join(", ")} ${to}`
+	const listed = new Set<string>(
+		(state ? tunerOf(state, edit.sourceId) : undefined)?.unknownFields ?? [],
+	)
+	const action = `send ${changes.map(c => confirmItem(c, !listed.has(STATE_FIELD[c.field]))).join(", ")} ${to}`
 	const bias = turnsBiasTeeOn(edit)
 	const affects = state ? editImpact(state, edit) : null
 	const extras = [
@@ -692,12 +772,16 @@ function editImpact(state: AppState, edit: TunerEditState): Affects {
 			short: "decoders ?",
 			count: "decoders ?",
 		}
-	const current = windowFor(
-		edit.sourceId,
-		state.tuner.value,
-		state.sources.value,
-		state.relay.value,
-	)
+	const unknown = unknownOf(tunerOf(state, edit.sourceId), null)
+	const current =
+		unknown("frequency") || unknown("sampleRate")
+			? null
+			: windowFor(
+					edit.sourceId,
+					state.tuner.value,
+					state.sources.value,
+					state.relay.value,
+				)
 	const candidates = retuneCandidates(
 		state.decoders.value,
 		state.sources.value,
@@ -714,7 +798,7 @@ function editImpact(state: AppState, edit: TunerEditState): Affects {
 function pendingLine(
 	edit: TunerEditState,
 	width: number,
-	gainFrom: string | undefined,
+	fromText: (f: EditField) => string | undefined,
 ): Line {
 	const changes = pendingChanges(edit)
 	if (changes.length === 0)
@@ -725,9 +809,13 @@ function pendingLine(
 		if (i > 0) spans.push(sp(sep(), "label"))
 		if (bad.has(c.field))
 			spans.push(
-				sp(`${changeText(c, gainFrom)} (${rangeNote()})`, "attention", true),
+				sp(
+					`${changeText(c, fromText(c.field))} (${rangeNote()})`,
+					"attention",
+					true,
+				),
 			)
-		else spans.push(sp(changeText(c, gainFrom), "value"))
+		else spans.push(sp(changeText(c, fromText(c.field)), "value"))
 	})
 	return [
 		...lbl("pending"),
@@ -745,19 +833,27 @@ function tunerBlock(
 	const now = state.now
 	const role: Role = isOld(state.tuner, now) ? "old" : "value"
 	const edit = ui.edit && ui.edit.sourceId === t.sourceId ? ui.edit : null
-	const current = windowFor(
-		t.sourceId,
-		state.tuner.value,
-		state.sources.value,
-		relay,
-	)
-	const win: TunedWindow | null = edit ? draftWindow(edit) : current
+	// "?" for a field core never commanded or observed, until the draft sets it (R84).
+	const unknown = unknownOf(t, edit)
+	const placeholder = unknownOf(t, null)
+	const windowKnown = !unknown("frequency") && !unknown("sampleRate")
+	const current = windowKnown
+		? windowFor(t.sourceId, state.tuner.value, state.sources.value, relay)
+		: null
+	const win: TunedWindow | null =
+		edit && windowKnown ? draftWindow(edit) : current
 	const focus = (f: EditField): Role =>
 		edit && edit.field === f ? "accent" : role
 	const d = edit?.draft
+	const q = (f: EditField, text: string): string => (unknown(f) ? "?" : text)
 	const freqCell: Line = edit
-		? withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
-		: txt(formatHz(t.frequency), role)
+		? unknown("frequency")
+			? [
+					...(edit.field === "frequency" ? [sp(glyphs().cursor, "edit")] : []),
+					sp("? Hz", edit.field === "frequency" ? "accent" : role),
+				]
+			: withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
+		: txt(unknown("frequency") ? "? Hz" : formatHz(t.frequency), role)
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
@@ -813,11 +909,11 @@ function tunerBlock(
 					one(
 						1,
 						txt(
-							`sample rate ${formatSps(d?.sampleRate ?? t.sampleRate)}`,
+							`sample rate ${q("sampleRate", formatSps(d?.sampleRate ?? t.sampleRate))}`,
 							focus("sampleRate"),
 						),
 					),
-					one(2, txt(`ppm ${d?.ppm ?? t.ppm}`, focus("ppm"))),
+					one(2, txt(`ppm ${q("ppm", String(d?.ppm ?? t.ppm))}`, focus("ppm"))),
 				],
 				width,
 			),
@@ -827,19 +923,24 @@ function tunerBlock(
 	const tunerType = relay?.rtlTcpHeader
 		? own(TUNER_TYPES, String(relay.rtlTcpHeader.tunerType))
 		: undefined
-	// Core reports a gain set by index (an rtl_tcp client) as 0 dB: the dB value is unknown.
-	const byIndex =
-		t.tunerGainIndex !== undefined && t.gain === 0
-			? `index ${t.tunerGainIndex}`
+	const indexText =
+		t.tunerGainIndex !== undefined
+			? `index ${t.tunerGainIndex}${tunerType ? ` (${tunerType})` : ""}`
 			: undefined
-	// The editor keeps the view's representation until the gain itself changes (M7).
+	// A core without unknownFields reports a gain set by index as 0 dB: the dB value is
+	// unknown there too. The editor keeps the view's text until the gain changes (M7).
 	const gainUnchanged = !d || d.gainTenthsDb === edit?.original.gainTenthsDb
-	const gainText =
-		gainMode === "agc"
+	const dbUnknown =
+		unknown("gain") ||
+		(t.tunerGainIndex !== undefined && t.gain === 0 && gainUnchanged)
+	const dbText = dbUnknown
+		? (indexText ?? "?")
+		: formatDb(d ? d.gainTenthsDb : t.gain)
+	const gainText = unknown("gainMode")
+		? `mode ?${sep()}${dbText}`
+		: gainMode === "agc"
 			? "agc"
-			: byIndex !== undefined && gainUnchanged
-				? `manual${sep()}${byIndex}${tunerType ? ` (${tunerType})` : ""}`
-				: `manual${sep()}${formatDb(d ? d.gainTenthsDb : t.gain)}`
+			: `manual${sep()}${dbText}`
 	const gainRow = (line: Line): Row =>
 		// While editing, the gain row shows draft values and is kept (M8).
 		edit ? keep(line) : optional(line, 1)
@@ -857,22 +958,31 @@ function tunerBlock(
 								: role,
 						),
 					),
-					one(1, txt(`rtl agc ${onOff(d?.agc ?? t.agcMode)}`, focus("agc"))),
 					one(
 						1,
-						txt(`bias-t ${onOff(d?.biasTee ?? t.biasTee)}`, focus("biasTee")),
+						txt(
+							`rtl agc ${q("agc", onOff(d?.agc ?? t.agcMode))}`,
+							focus("agc"),
+						),
+					),
+					one(
+						1,
+						txt(
+							`bias-t ${q("biasTee", onOff(d?.biasTee ?? t.biasTee))}`,
+							focus("biasTee"),
+						),
 					),
 					one(
 						2,
 						txt(
-							`direct sampling ${d?.directSampling ?? t.directSampling}`,
+							`direct sampling ${q("directSampling", d?.directSampling ?? t.directSampling)}`,
 							focus("directSampling"),
 						),
 					),
 					one(
 						2,
 						txt(
-							`offset tuning ${onOff(d?.offsetTuning ?? t.offsetTuning)}`,
+							`offset tuning ${q("offsetTuning", onOff(d?.offsetTuning ?? t.offsetTuning))}`,
 							focus("offsetTuning"),
 						),
 					),
@@ -882,13 +992,33 @@ function tunerBlock(
 		),
 	)
 	if (edit) {
-		rows.push(keep(pendingLine(edit, width, byIndex)))
+		const byIndexFrom =
+			t.tunerGainIndex !== undefined && t.gain === 0
+				? `index ${t.tunerGainIndex}`
+				: undefined
+		rows.push(
+			keep(
+				pendingLine(edit, width, f =>
+					f === "gain" && (placeholder("gain") || byIndexFrom)
+						? (byIndexFrom ??
+							(t.tunerGainIndex !== undefined
+								? `index ${t.tunerGainIndex}`
+								: "?"))
+						: placeholder(f)
+							? "?"
+							: undefined,
+				),
+			),
+		)
 		rows.push(keep(clipped(lbl("affects"), editAffects(state, edit), width)))
 		return rows
 	}
 	const result = tunerResultText(state, t.sourceId, now)
 	if (result) rows.push(keep(clipped(lbl("result"), result, width)))
-	const lists = membershipLists(state, t.sourceId)
+	// Membership against an unknown window is unknown (R84).
+	const lists = windowKnown
+		? membershipLists(state, t.sourceId)
+		: { inside: "?", outside: "?", unknown: "" }
 	rows.push(optional(clipped(lbl("in window"), lists.inside, width, role), 3))
 	rows.push(optional(clipped(lbl("out"), lists.outside, width, role), 3))
 	if (lists.unknown)

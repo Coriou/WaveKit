@@ -171,6 +171,22 @@ describe("system view-model (spec §6.5)", () => {
 		})
 		expect(presetConfirm(s, 9)?.presetIndex).toBe(1)
 	})
+	it("says ? for a demod centre core never commanded or observed (R84)", () => {
+		const t = s.tuner.value![0]!
+		const st = {
+			...s,
+			tuner: laneOk(
+				[{ ...t, unknownFields: ["frequency" as const] }],
+				s.now - 1000,
+				"rest" as const,
+			),
+		}
+		expect(
+			systemLines(st, 119, 35, true)
+				.map(lineText)
+				.find(l => l.startsWith("demod")),
+		).toMatch(/^demod {5}pi-iq at \? · /)
+	})
 	it("says the demod restarts when a preset hits a running pipeline (S7)", () => {
 		const a = s.audio.value!
 		const running = {

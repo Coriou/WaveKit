@@ -221,6 +221,13 @@ const VALUE: Readonly<
 	offsetTuning: d => d.offsetTuning,
 }
 
+export function fieldValue(
+	d: TunerDraft,
+	field: EditField,
+): number | string | boolean {
+	return VALUE[field](d)
+}
+
 /** Changed fields in SEND_ORDER. Gain is left out when the draft is in AGC mode. */
 export function pendingChanges(s: TunerEditState): PendingChange[] {
 	const out: PendingChange[] = []

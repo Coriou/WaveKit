@@ -441,9 +441,11 @@ function audioBlock(state: AppState, width: number): Row[] {
 		// Not a URL: shown sanitised as received.
 	}
 	const c = a.config
-	const centre = state.tuner.value?.find(
-		t => t.sourceId === a.sourceId,
-	)?.frequency
+	const tuner = state.tuner.value?.find(t => t.sourceId === a.sourceId)
+	// A frequency core never commanded or observed is a placeholder (R84).
+	const centre = tuner?.unknownFields?.includes("frequency")
+		? undefined
+		: tuner?.frequency
 	const rows: Row[] = [
 		essential(
 			fitDot(

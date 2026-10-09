@@ -868,6 +868,124 @@ describe("receiver view-model (spec §6.4)", () => {
 				/● connected {3}× no samples · sample age /,
 			)
 		})
+		it("renders fields core never commanded or observed as ? (R84 unknownFields)", () => {
+			const t = live.tuner.value![0]!
+			const st = internal({
+				...live,
+				tuner: laneOk(
+					[
+						{
+							...t,
+							unknownFields: [
+								"gain",
+								"ppm",
+								"agcMode",
+								"biasTee",
+								"directSampling",
+								"offsetTuning",
+							],
+						},
+					],
+					live.now - 1000,
+					"rest" as const,
+				),
+			})
+			const view = receiverLines(st, initialUi("receiver"), 119, 35, true).map(
+				lineText,
+			)
+			expect(view.find(l => l.startsWith("frequency"))).toBe(
+				"frequency 445 970 700 Hz   window 444.947–446.995 MHz   sample rate 2 048 000 S/s   ppm ?",
+			)
+			expect(view.find(l => l.startsWith("gain"))).toBe(
+				"gain      manual · index 11 (R828D)   rtl agc ?   bias-t ?   direct sampling ?   offset tuning ?",
+			)
+			// Edit mode: a listed field stays ? until the operator changes it; only then is it sent.
+			const edit = editAfter(st, [
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"tab",
+				"space",
+			])
+			const lines = receiverLines(
+				st,
+				{ ...initialUi("receiver"), edit },
+				119,
+				35,
+				true,
+			).map(lineText)
+			expect(lines.find(l => l.startsWith("gain"))).toBe(
+				"gain      manual · index 11 (R828D)   rtl agc ?   bias-t on   direct sampling ?   offset tuning ?",
+			)
+			expect(lines).toContain("pending   bias-t ? → on")
+			expect(tunerConfirm(edit, st)?.intent).toMatchObject({
+				commands: [{ setting: "bias-tee", body: { enabled: true } }],
+			})
+		})
+		it("an unknown frequency has no window, no membership and no delta (R84)", () => {
+			const t = live.tuner.value![0]!
+			const st = internal({
+				...live,
+				tuner: laneOk(
+					[{ ...t, unknownFields: ["frequency"] }],
+					live.now - 1000,
+					"rest" as const,
+				),
+			})
+			const view = receiverLines(st, initialUi("receiver"), 119, 35, true).map(
+				lineText,
+			)
+			expect(view.find(l => l.startsWith("frequency"))).toMatch(
+				/^frequency \? Hz {3}window \? {3}/,
+			)
+			expect(view).toContain("in window ?")
+			const edit = editAfter(st, ["up"])
+			expect(tunerConfirm(edit, st)?.prompt).toBe(
+				"send set-frequency 445 971 700 Hz to pi-iq",
+			)
+			const lines = receiverLines(
+				st,
+				{ ...initialUi("receiver"), edit },
+				119,
+				35,
+				true,
+			).map(lineText)
+			expect(lines).toContain("pending   frequency ? → 445 971 700")
+		})
+		it("warns of a rate mismatch on the SOURCE block, never as an error (R84)", () => {
+			const src = live.sources.value![0]!
+			const st = {
+				...live,
+				sources: laneOk(
+					[
+						{
+							...src,
+							rateMismatch: {
+								declaredSampleRateHz: 2_048_000,
+								measuredSampleRateHz: 1_024_000,
+								deviation: -0.5,
+								since: "2026-10-08T18:07:52.000Z",
+							},
+						},
+					],
+					live.now - 1000,
+					"rest" as const,
+				),
+			}
+			const lines = receiverLines(st, initialUi("receiver"), 119, 35, true).map(
+				lineText,
+			)
+			const i = lines.findIndex(l => l.startsWith("SOURCE"))
+			expect(lines[i + 1]).toBe(
+				`          ! rate mismatch · measured 1.024 MS/s vs declared 2.048 MS/s (−50%) · since ${clock("2026-10-08T18:07:52.000Z")}`,
+			)
+			const narrow = receiverLines(st, initialUi("receiver"), 59, 20, false)
+			const row = narrow.map(lineText).find(l => l.includes("rate mismatch"))
+			expect(row).toBeDefined()
+			expect(cellWidth(row ?? "")).toBeLessThanOrEqual(59)
+		})
 		it("names the command in the result and says control taken (S6)", () => {
 			const t0 = live.now
 			const st = reduce(
