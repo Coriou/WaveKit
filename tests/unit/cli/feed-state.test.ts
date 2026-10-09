@@ -63,9 +63,7 @@ describe("M3: an empty feed names the first broken link", () => {
 			},
 		}
 		const text = reason(out)
-		expect(text).toMatch(
-			/^no decodes · 0 of \d+ decoders in window · rx 445\.971 MHz$/,
-		)
+		expect(text).toMatch(/^no decodes · 0 of \d+ in window · rx 445\.971 MHz$/)
 	})
 	it("a healthy chain says for how long, then the window and rx", () => {
 		const text = reason(scenarioState("idle", deps))

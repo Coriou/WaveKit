@@ -148,10 +148,10 @@ function noData(state: AppState, path: string): string {
 /** The source the Receiver renders (the first), and the tuner for it: used everywhere (M5). */
 export function receiverTuner(state: AppState): TunerState | undefined {
 	const src = state.sources.value?.[0]
-	return (
-		state.tuner.value?.find(x => x.sourceId === src?.id) ??
-		state.tuner.value?.[0]
-	)
+	// Final views: never another source's tuner; with no source listed, the first tuner.
+	return src
+		? state.tuner.value?.find(x => x.sourceId === src.id)
+		: state.tuner.value?.[0]
 }
 
 export function receiverControl(
@@ -1277,13 +1277,17 @@ export function receiverLines(
 	const relay = state.relay.value
 	const t = receiverTuner(state)
 	const gap = (): Row[] => (roomy ? [gapRow(9)] : [])
+	// Final views (MUST 3): no-data copy only while a lane has never answered;
+	// an answered empty lane says what came back.
 	const source = src
 		? sourceBlock(state, src, width)
 		: [
 				essential(
 					clipped(
 						lbl("SOURCE", true),
-						noData(state, "/api/sources"),
+						state.sources.value
+							? "no sources configured"
+							: noData(state, "/api/sources"),
 						width,
 						"label",
 					),
@@ -1295,7 +1299,9 @@ export function receiverLines(
 				essential(
 					clipped(
 						lbl("TUNER", true),
-						noData(state, "/api/tuner"),
+						state.tuner.value
+							? `${glyphs().na} ${glyphs().sep} no tuner control for this source`
+							: noData(state, "/api/tuner"),
 						width,
 						"label",
 					),

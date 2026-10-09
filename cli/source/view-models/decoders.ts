@@ -25,6 +25,7 @@ import {
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	titled,
 	processWords,
 	type DecoderFacts,
 } from "./decoder-rows.js"
@@ -552,7 +553,9 @@ export function decodersModel(
 	const list =
 		open && b.placement.kind === "overlay"
 			? []
-			: [table.header, ...(placeholder ? [placeholder] : table.rows)]
+			: placeholder
+				? [titled(table.header, placeholder)]
+				: [table.header, ...table.rows]
 	const all =
 		open && selected
 			? decoderDetail(state, selected, detailWidth, state.now)

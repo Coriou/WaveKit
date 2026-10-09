@@ -24,6 +24,7 @@ import {
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	titled,
 } from "./decoder-rows.js"
 import {
 	aircraftLookup,
@@ -67,9 +68,11 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const sep = ` ${glyphs().sep} `
 	if (!src) {
 		// M4/M5: one row saying why (REST failing vs API unreachable); no label without a value.
-		return [
-			[...title("RECEIVER"), sp(noDataText(state, "/api/sources"), "label")],
-		]
+		// Final views (MUST 3): an answered empty list is not "fetching".
+		const why = state.sources.value
+			? "no sources configured"
+			: noDataText(state, "/api/sources")
+		return [[...title("RECEIVER"), sp(why, "label")]]
 	}
 	const old = isOld(state.sources, now)
 	const role = (r: Role, isOldLane: boolean): Role => (isOldLane ? "old" : r)
@@ -95,11 +98,18 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const { centre, rate } = rxValues(state, src.id)
 	const rateLine: Line = [v(formatRate(iq.rateBytesPerSec))]
 	// M1: the sample rate follows the window rule; unknown is left out, never 0.
+	// Final views: core measures another rate, so this one is only declared.
+	const mismatch = src.rateMismatch !== undefined
 	const rateRich: Line | null = rate
 		? [
 				...rateLine,
 				sp(sep, "label"),
-				{ text: formatMSps(rate.v), role: role("value", rate.old) },
+				mismatch
+					? {
+							text: `${formatMSps(rate.v)} declared${sep}rate mismatch`,
+							role: role("attention", rate.old),
+						}
+					: { text: formatMSps(rate.v), role: role("value", rate.old) },
 			]
 		: null
 	// M5: a disabled relay has no clients to report.
@@ -351,7 +361,7 @@ export function overviewModel(
 	)
 	const placeholder = decodersPlaceholder(state)
 	const decoderLines = placeholder
-		? [table.header, placeholder]
+		? [titled(table.header, placeholder)]
 		: [table.header, ...table.rows]
 	const msgWidth = b.layout === "columns" ? b.rightWidth : width
 	const ring = state.messages.ring
