@@ -31,6 +31,10 @@ export interface ViewKeyInfo {
 	rowIds: string[]
 	pageSize: number
 	ctx: ViewKeyCtx
+	/** Last scroll offset at which the open detail still fills its pane (R73). */
+	detailMaxScroll?: number
+	/** Messages: the ring's newest seq, for a pause with no visible rows (R73). */
+	newestSeq?: number | null
 }
 
 export interface ViewModule {

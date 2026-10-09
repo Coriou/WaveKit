@@ -65,6 +65,8 @@ export interface MessagesUi {
 	following: boolean
 	/** Newest seq visible when the feed was paused; null while following. */
 	pausedAtSeq: number | null
+	/** When the feed was paused (local ms); absent while following (R73, M5). */
+	pausedAt?: number
 	filterText: string
 	/** Non-null while the filter input row is open. */
 	draft: string | null

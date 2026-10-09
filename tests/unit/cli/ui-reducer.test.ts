@@ -144,3 +144,49 @@ describe("applyUiAction", () => {
 		})
 	})
 })
+
+describe("R73: detail scroll and empty pause (T40 fix round 1 M3/M4)", () => {
+	const open = (view: "messages" | "decoders") => {
+		const ui = initialUi(view)
+		return {
+			...ui,
+			selected: { ...ui.selected, [view]: "b" },
+			detail: { ...ui.detail, [view]: { open: true, scroll: 0 } },
+		}
+	}
+	it("M3: detail scroll stops at detailMaxScroll, so PgUp answers at once", () => {
+		const c = { ...ctx, detailMaxScroll: 7 }
+		let ui = open("messages")
+		for (let i = 0; i < 5; i++)
+			ui = applyUiAction(ui, { type: "detail-scroll", delta: 1 }, c, 0)
+		expect(ui.detail.messages.scroll).toBe(7)
+		ui = applyUiAction(ui, { type: "detail-scroll", delta: -1 }, c, 0)
+		expect(ui.detail.messages.scroll).toBe(2)
+	})
+	it("M3: moving the selection with the detail open scrolls it back to the top", () => {
+		const c = { ...ctx, detailMaxScroll: 20 }
+		let ui = applyUiAction(
+			open("decoders"),
+			{ type: "detail-scroll", delta: 1 },
+			c,
+			0,
+		)
+		expect(ui.detail.decoders.scroll).toBe(5)
+		ui = applyUiAction(ui, { type: "move", delta: 1 }, c, 0)
+		expect(ui.selected.decoders).toBe("c")
+		expect(ui.detail.decoders).toEqual({ open: true, scroll: 0 })
+	})
+	it("M4: p on an empty Messages list freezes at the ring's newest seq and records when", () => {
+		const ui = applyUiAction(
+			initialUi("messages"),
+			{ type: "pause-toggle" },
+			{ rowIds: [], pageSize: 5, newestSeq: 41 },
+			1234,
+		)
+		expect(ui.messages).toMatchObject({
+			following: false,
+			pausedAtSeq: 41,
+			pausedAt: 1234,
+		})
+	})
+})

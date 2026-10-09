@@ -126,7 +126,16 @@ export function App({
 			applyUiAction(
 				u,
 				a,
-				{ rowIds: info.rowIds, pageSize: info.pageSize },
+				{
+					rowIds: info.rowIds,
+					pageSize: info.pageSize,
+					...(info.detailMaxScroll !== undefined
+						? { detailMaxScroll: info.detailMaxScroll }
+						: {}),
+					...(info.newestSeq !== undefined
+						? { newestSeq: info.newestSeq }
+						: {}),
+				},
 				state.now,
 			),
 		)
