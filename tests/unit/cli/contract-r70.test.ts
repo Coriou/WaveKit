@@ -236,6 +236,31 @@ describe("R70 process cells", () => {
 			),
 		).toContain("faulted · retrying")
 	})
+	it("final review MUST 4: a retrying fault never reads like the terminal one", () => {
+		const retry = processVariants(
+			row({
+				running: false,
+				health: "faulted",
+				restartCount: 13,
+				nextRestartAt: iso(NOW + 12_000),
+			}),
+		)
+		expect(retry.slice(0, 3)).toEqual([
+			"retry",
+			"faulted · retry",
+			"faulted · retry in 12s",
+		])
+		expect(
+			processVariants(
+				row({ running: true, health: "faulted", restartCount: 13 }),
+			)[0],
+		).toBe("retrying")
+		expect(
+			processVariants(
+				row({ running: false, health: "faulted", restartCount: 13 }),
+			)[0],
+		).toBe("faulted")
+	})
 	it("suspended and a pending suspension", () => {
 		const susp = {
 			suspended: true,

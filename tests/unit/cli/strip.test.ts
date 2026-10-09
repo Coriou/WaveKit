@@ -31,7 +31,7 @@ const live: StripInput = {
 }
 
 describe("strip (spec §4.2 widths)", () => {
-	it("M2: renders the 200/120/80/60 column variants, keeping rx and drops", () => {
+	it("R93: renders the 200/120/80/60 column variants in words; rx goes first at 60 (§4.2)", () => {
 		expect(lineText(stripLine(live, 199))).toMatch(
 			/^api ● 2s {2}iq ● streaming · 4\.1 MB\/s {2}rx 445\.971 MHz ±1\.024 · external control {2}decoders 8\/9 up · 1 failing · 2 in window {2}drops !34% +18:07$/,
 		)
@@ -39,10 +39,10 @@ describe("strip (spec §4.2 widths)", () => {
 			"api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 failing · 2 in window  drops !34%",
 		)
 		expect(lineText(stripLine(live, 79))).toBe(
-			"api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 8/9 ×1  drops !34%   18:07",
+			"api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 1 failing  drops !34%",
 		)
 		expect(lineText(stripLine(live, 59))).toBe(
-			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 ×1  drops !34%",
+			"api ● 2s  iq ● streaming  dec 1 failing  drops !34%",
 		)
 	})
 	it("renders the connectivity variants", () => {
@@ -94,7 +94,16 @@ describe("strip (spec §4.2 widths)", () => {
 			if (text.includes("drops")) expect(text).toContain("drops !34%")
 		}
 	})
-	it("M2: rx and drops stay at 60 columns in every scenario that has them", () => {
+	// R93 / spec §4.1: every glyph keeps a word; a lane that does not fit in
+	// words goes whole, in §4.2 order (rx, drops, decoders), never as a cluster.
+	const GLYPH_ONLY = [
+		/(^| )iq [●×○?](  |$)/,
+		/(^| )api ●(  |$)/,
+		/\bdec \d+\/\d+ [×!]/,
+		/drops \? !/,
+		/(^| )dec [×!]\d/,
+	]
+	it("R93: no glyph-only form at 59/79/119 in any scenario", () => {
 		for (const sc of [
 			"live",
 			"ws-only",
@@ -103,24 +112,32 @@ describe("strip (spec §4.2 widths)", () => {
 			"iq-disconnected",
 			"crash-loop",
 			"dropping",
+			"contracts",
+			"api-down",
 		] as const) {
 			const input = stripInput(scenarioState(sc))
 			for (const w of [59, 79, 119]) {
-				const text = lineText(stripLine(input, w))
-				expect(text, `${sc} ${w}`).toContain("rx 445.971")
-				expect(text, `${sc} ${w}`).toContain("drops ")
-				expect(lineWidth(stripLine(input, w))).toBeLessThanOrEqual(w)
+				const line = stripLine(input, w)
+				const text = lineText(line)
+				for (const re of GLYPH_ONLY) expect(text, `${sc} ${w}`).not.toMatch(re)
+				expect(text, `${sc} ${w}`).toMatch(/(^| )dec(oders)? /)
+				expect(lineWidth(line)).toBeLessThanOrEqual(w)
 			}
+			if (input.rx)
+				expect(lineText(stripLine(input, 119)), sc).toContain("rx 445.971")
 		}
 		expect(lineText(stripLine(stripInput(scenarioState("live")), 59))).toBe(
-			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 !1  drops !21%",
+			"api ● 2s  iq ● streaming  dec 1 restarting  drops !21%",
+		)
+		expect(lineText(stripLine(stripInput(scenarioState("live")), 79))).toBe(
+			"api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 1 restarting  drops !21%",
 		)
 	})
-	it("final fix: non-live iq states have short words, so rx survives at 59", () => {
+	it("final fix: long non-live iq words have short worded forms; the full word returns with room", () => {
 		const states: Array<[StripInput["iq"]["glyph"], string, string]> = [
 			["fault", "disconnected", "iq × down"],
 			["neutral", "connected · no samples", "iq ○ no samples"],
-			["unknown", "unknown", "iq ?"],
+			["unknown", "unknown", "iq ? unknown"],
 			["neutral", "paused", "iq ○ paused"],
 			["neutral", "ended", "iq ○ ended"],
 		]
@@ -131,14 +148,15 @@ describe("strip (spec §4.2 widths)", () => {
 				iq: { glyph, word, ageMs: null, rateBytesPerSec: null },
 				decoders: { up: 7, total: 9, failing: 1, restarting: 1, inWindow: 2 },
 			}
-			for (let w = 59; w <= 70; w++) {
+			for (let w = 59; w <= 79; w++) {
 				const text = lineText(stripLine(input, w))
-				expect(text, `${word} ${w}`).toContain("rx 445.971")
+				for (const re of GLYPH_ONLY)
+					expect(text, `${word} ${w}`).not.toMatch(re)
 				expect(text, `${word} ${w}`).toContain("drops ")
 				expect(lineWidth(stripLine(input, w))).toBeLessThanOrEqual(w)
 			}
 			expect(lineText(stripLine(input, 59))).toContain(short)
-			// With room the full word comes back.
+			expect(lineText(stripLine(input, 79))).toContain("rx 445.971")
 			expect(lineText(stripLine(input, 119))).toContain(
 				`iq ${glyph === "fault" ? "×" : glyph === "unknown" ? "?" : "○"} ${word}`,
 			)

@@ -48,7 +48,7 @@ describe("receiver view-model (spec §6.4)", () => {
 	)
 	it("renders SOURCE, TUNER, RELAY, FANOUT and upstream rows", () => {
 		expect(text).toContain(
-			"SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms · timeout 10 s",
+			"SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4ms · timeout 10s",
 		)
 		expect(text).toContain(
 			"rate      4.1 MB/s (nominal 4.1 MB/s · 2.048 MS/s U8 IQ)   received 1.2 GB   assigned 9 decoders",
@@ -62,12 +62,12 @@ describe("receiver view-model (spec §6.4)", () => {
 		expect(text).toContain(
 			"gain      manual · index 11 (R828D)   rtl agc off   bias-t off   direct sampling off   offset tuning off",
 		)
-		expect(text).toContain("in window dsd-fme  multimon-ng (tuned)")
+		expect(text).toContain("in window tuned  dsd-fme  multimon-ng")
 		expect(text).toContain(
 			"out       rtl433  readsb  acarsdec  ais-catcher  dumpvdl2  direwolf  lora-meshtastic",
 		)
 		expect(text.find(l => l.startsWith("RELAY"))).toBe(
-			"RELAY     listening :4713 · 1 client · max 4 · 545.5 MB sent · exclusive control · last error —",
+			"RELAY     listening :4713 · 1 client · max 4 · 545.5 MB sent · exclusive control",
 		)
 		const at = clock("2026-10-08T18:01:20.000Z")
 		expect(

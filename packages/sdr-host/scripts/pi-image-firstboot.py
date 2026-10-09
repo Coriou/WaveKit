@@ -7,6 +7,7 @@ from pathlib import Path
 import pwd
 import re
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -189,6 +190,8 @@ def main():
             ]:
                 subprocess.run(command, check=True, stdout=log, stderr=log)
             print('WaveKit setup complete; verify dongle streaming separately', file=log)
+            # The setup page on port 80 turns into the receiver status page.
+            print(f'Receiver status: http://{socket.gethostname()}.local/ (also on port 8080)', file=log)
             status('complete', 'done', 0)
             publish_log()
             (STATE / 'firstboot.done').touch()

@@ -137,7 +137,7 @@ describe("R90 I2: core's verdict for tuned types, in every consumer", () => {
 			(decoderCells(f, NOW)["nominal"]?.variants ?? []).map(lineText),
 		).toEqual(["446.525*"])
 		const text = decoderDetail(st, f, 120, NOW).map(lineText).join("\n")
-		expect(text).toContain("446.525 MHz configured")
+		expect(text).toContain("446.525 MHz (configured)")
 		expect(text).not.toContain("not applied by this decoder")
 		expect(text).not.toContain("follows the receiver")
 		expect(text).toContain(
@@ -148,7 +148,7 @@ describe("R90 I2: core's verdict for tuned types, in every consumer", () => {
 		const text = receiverLines(st, initialUi("receiver"), 119, 35, true).map(
 			lineText,
 		)
-		expect(text).toContain("in window multimon-ng (tuned)")
+		expect(text).toContain("in window tuned  multimon-ng")
 		expect(text.find(l => l.startsWith("out "))).toContain("dsd-fme")
 	})
 	it("retune impact: a retune to its target enters, by core's half-width", () => {
@@ -228,6 +228,6 @@ describe("R90 minors", () => {
 		const text = decoderDetail(st, decoderFacts(st)[0]!, 120, NOW)
 			.map(lineText)
 			.join("\n")
-		expect(text).toContain("1090.000 MHz basis ?")
+		expect(text).toContain("1090.000 MHz (basis ?)")
 	})
 })

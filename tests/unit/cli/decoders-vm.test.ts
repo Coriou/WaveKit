@@ -56,7 +56,7 @@ describe("decoders view-model", () => {
 			"drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago",
 		)
 		expect(rows).toContain(
-			"band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window",
+			"band      1090.000 MHz (nominal) · window 444.947–446.995 MHz · out of window",
 		)
 		expect(rows.find(r => r.startsWith("activity"))).toMatch(
 			/decodes\/min · last 30 min · observed since \d\d:\d\d$/,

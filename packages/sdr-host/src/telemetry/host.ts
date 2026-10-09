@@ -5,7 +5,9 @@ import type {
 	Reading,
 	ReadingScope,
 	SdrHostNetworkInterface,
+	SdrHostLastBoot,
 	SdrHostTelemetry,
+	SdrHostTelemetryHistory,
 } from "@wavekit/api-types"
 import {
 	cpuBusyFraction,
@@ -19,6 +21,7 @@ import {
 	type CpuTimes,
 	type InterfaceCounters,
 } from "./procfs.js"
+import { readBootReport } from "./boot-report.js"
 import { readSetupStatus, type SetupStatusValue } from "./setup-status.js"
 
 const USER_HZ = 100
@@ -29,6 +32,7 @@ const DISK_INTERVAL_MS = 30_000
 const RATE_WINDOW_MS = 10_000
 const STALE_AFTER_MS = 30_000
 const DISK_STALE_AFTER_MS = 5 * 60_000
+const HISTORY_MS = 5 * 60_000
 
 interface Slot<T> {
 	scope: ReadingScope
@@ -94,6 +98,9 @@ export class HostCollector {
 	private undervoltageWasActive = false
 	private undervoltageEvents = 0
 	private undervoltageLastAt: number | null = null
+	private eventsAtLastPoint = 0
+	/** Trend points keyed by collection time; ages are computed per response. */
+	private history: SdrHostTelemetryHistory["points"] = []
 
 	private readonly uptime = slot<Value<"uptime">>("host", FAST_INTERVAL_MS)
 	private readonly cpu = slot<Value<"cpu">>("host", FAST_INTERVAL_MS)
@@ -113,6 +120,7 @@ export class HostCollector {
 	)
 	private readonly network = slot<Value<"network">>("host", FAST_INTERVAL_MS)
 	private readonly setup = slot<SetupStatusValue>("host", SETUP_INTERVAL_MS)
+	private readonly lastBoot = slot<SdrHostLastBoot>("host", SETUP_INTERVAL_MS)
 	private readonly undervoltageNow = slot<boolean>("host", POWER_INTERVAL_MS)
 
 	constructor(options: HostCollectorOptions = {}) {
@@ -202,6 +210,14 @@ export class HostCollector {
 			},
 			network: this.render(this.network, at),
 			setup: this.render(this.setup, at),
+			lastBoot: this.render(this.lastBoot, at),
+			history: {
+				intervalMs: FAST_INTERVAL_MS,
+				windowMs: HISTORY_MS,
+				points: this.history
+					.filter(([t]) => at - t <= HISTORY_MS)
+					.map(([t, ...values]) => [Math.round(at - t), ...values]),
+			},
 		}
 	}
 
@@ -279,6 +295,30 @@ export class HostCollector {
 		this.collectContainer(at)
 		this.collectTemperature(at)
 		this.collectNetwork(at)
+		this.recordHistory(at)
+	}
+
+	/** One trend point per fast collection, from values measured just now. */
+	private recordHistory(at: number): void {
+		const fresh = <T>(s: Slot<T>): T | null => (s.at === at ? s.value : null)
+		const memory = fresh(this.memory)
+		this.history.push([
+			at,
+			fresh(this.cpu)?.busyPercent ?? null,
+			memory && memory.totalBytes > 0
+				? Math.round(
+						((memory.totalBytes - memory.availableBytes) / memory.totalBytes) *
+							1000,
+					) / 10
+				: null,
+			fresh(this.temperature)?.celsius ?? null,
+			// Rising edges since the previous point; null while unmeasurable.
+			this.undervoltageNow.value === null
+				? null
+				: this.undervoltageEvents - this.eventsAtLastPoint,
+		])
+		this.eventsAtLastPoint = this.undervoltageEvents
+		while ((this.history[0]?.[0] ?? at) < at - HISTORY_MS) this.history.shift()
 	}
 
 	private collectUptime(at: number): void {
@@ -573,6 +613,8 @@ export class HostCollector {
 			)?.trim() ?? null
 		const result = readSetupStatus(this.statusDir, bootId, this.wallNow())
 		this.set(this.setup, result.value, result.reason, at)
+		const report = readBootReport(this.statusDir, bootId, this.wallNow())
+		this.set(this.lastBoot, report.value, report.reason, at)
 	}
 
 	private collectDisk(): void {

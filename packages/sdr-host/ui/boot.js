@@ -3,15 +3,17 @@ const detail = document.getElementById("setup-detail")
 const screen = document.getElementById("setup-screen")
 const clock = document.getElementById("setup-clock")
 const age = document.getElementById("setup-age")
+const clockRow = document.getElementById("setup-clock-row")
 const note = document.getElementById("setup-note")
 const contact = document.getElementById("contact")
 const contactText = document.getElementById("contact-text")
 const link = document.getElementById("receiver-link")
-const receiverUrl = new URL(window.location.href)
+// Once setup completes and the receiver answers, this same address serves the
+// status page. While setup failed or was cut off, port 80 keeps this page, so
+// the link reaches the receiver directly on its own port.
+const home = new URL("/", window.location.href)
+const receiverUrl = new URL(home)
 receiverUrl.port = "8080"
-receiverUrl.pathname = "/"
-receiverUrl.search = ""
-receiverUrl.hash = ""
 link.href = receiverUrl.href
 document.getElementById("host-name").textContent =
 	window.location.hostname || "This Pi"
@@ -54,6 +56,7 @@ function tick() {
 	clock.textContent = elapsed
 		? formatClock(elapsed.ms + Date.now() - elapsed.at)
 		: "—"
+	clockRow.hidden = !elapsed
 }
 
 /** Same rule as the status page: after 10 s without contact, say how long. */
@@ -79,8 +82,8 @@ function render(record) {
 	contactText.textContent = "Live"
 	let tone = "unknown"
 	let words = [
-		"Waiting for the Pi",
-		"The operating system is still preparing. Receiver installation starts after it finishes.",
+		"Preparing the Pi",
+		"Raspberry Pi OS is applying the settings chosen in Imager. Installing the receiver starts after that.",
 	]
 	if (record.state === "running") {
 		// Progress is healthy: a lit lamp that blinks, not the amber of a fault.
@@ -133,18 +136,19 @@ function render(record) {
 			: "No progress yet"
 	note.hidden = !["running", "waiting", "interrupted"].includes(record.state)
 
-	const current = phases.indexOf(record.phase)
+	// Before the first record, the OS is applying Imager settings: stage one.
+	const waiting = record.state === "waiting"
+	const running = record.state === "running" || waiting
+	const current = phases.indexOf(waiting ? "cloud-init" : record.phase)
+	const known =
+		running || ["complete", "failed", "interrupted"].includes(record.state)
 	for (const item of document.querySelectorAll("[data-phase]")) {
 		const index = phases.indexOf(item.dataset.phase)
-		const known = ["running", "complete", "failed", "interrupted"].includes(
-			record.state,
-		)
 		const done =
 			record.state === "complete" || (known && current >= 0 && index < current)
 		const here = known && !done && index === current
 		let [state, word] = done ? ["ok", "Done"] : ["unknown", "Waiting"]
-		if (here && record.state === "running")
-			[state, word] = ["ok", "In progress"]
+		if (here && running) [state, word] = ["ok", "In progress"]
 		if (here && record.state === "failed") [state, word] = ["fault", "Stopped"]
 		if (here && record.state === "interrupted")
 			[state, word] = ["warn", "Interrupted"]
@@ -155,20 +159,19 @@ function render(record) {
 		)
 			word = "Unknown"
 		item.dataset.state = state
-		if (here && record.state === "running")
-			item.setAttribute("aria-current", "step")
+		if (here && running) item.setAttribute("aria-current", "step")
 		else item.removeAttribute("aria-current")
-		item.querySelector(".stage__word").textContent = word
+		item.querySelector(".step__word").textContent = word
 	}
 	document.getElementById("receiver-link-wrap").hidden =
 		!record.receiverPageReady
 	if (record.state === "complete" && record.receiverPageReady)
-		window.location.replace(receiverUrl.href)
+		window.location.replace(home.href)
 }
 
 async function poll() {
 	try {
-		const response = await fetch("/api/setup", {
+		const response = await fetch("api/setup", {
 			cache: "no-store",
 			signal: AbortSignal.timeout(3000),
 		})
@@ -187,7 +190,7 @@ async function poll() {
 		document.getElementById("receiver-link-wrap").hidden = true
 		for (const item of document.querySelectorAll("[data-phase]")) {
 			item.dataset.state = "unknown"
-			item.querySelector(".stage__word").textContent = "Unknown"
+			item.querySelector(".step__word").textContent = "Unknown"
 			item.removeAttribute("aria-current")
 		}
 	}

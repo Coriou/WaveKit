@@ -1,6 +1,5 @@
-import * as fs from "node:fs"
-import * as path from "node:path"
 import { z } from "zod"
+import { ageMs, readStatusFile } from "./status-file.js"
 
 /**
  * First-boot progress, written by pi-image-firstboot.py as a sanitized,
@@ -9,7 +8,6 @@ import { z } from "zod"
  * is never mounted into the container.
  */
 export const SETUP_STATUS_FILE = "setup.json"
-const MAX_BYTES = 4096
 
 const SetupFileSchema = z.object({
 	schema: z.literal(1),
@@ -37,42 +35,13 @@ export function readSetupStatus(
 	/** Pi wall clock, the same clock firstboot used for updatedAt. */
 	wallNow: number = Date.now(),
 ): { value: SetupStatusValue | null; reason: string | null } {
-	let text: string
-	let fd: number | null = null
-	try {
-		fd = fs.openSync(
-			path.join(dir, SETUP_STATUS_FILE),
-			fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW,
-		)
-		const stat = fs.fstatSync(fd)
-		if (!stat.isFile())
-			return { value: null, reason: "setup status is not a regular file" }
-		if (stat.size > MAX_BYTES)
-			return { value: null, reason: "setup status file too large" }
-		const buffer = Buffer.alloc(stat.size)
-		fs.readSync(fd, buffer, 0, stat.size, 0)
-		text = buffer.toString("utf8")
-	} catch (error) {
-		const code = (error as NodeJS.ErrnoException).code
-		if (code === "ENOENT")
-			return { value: null, reason: "not provided by this install" }
-		if (code === "ELOOP")
-			return { value: null, reason: "setup status is a symlink" }
-		return { value: null, reason: "setup status unreadable" }
-	} finally {
-		if (fd !== null) fs.closeSync(fd)
-	}
-
-	let json: unknown
-	try {
-		json = JSON.parse(text)
-	} catch {
-		return { value: null, reason: "setup status is not valid JSON" }
-	}
-	const parsed = SetupFileSchema.safeParse(json)
-	if (!parsed.success)
-		return { value: null, reason: "setup status has an unknown format" }
-	const file = parsed.data
+	const { value: file, reason } = readStatusFile(
+		dir,
+		SETUP_STATUS_FILE,
+		SetupFileSchema,
+		"setup status",
+	)
+	if (!file) return { value: null, reason }
 	// A "running" record from an earlier boot means setup was cut off by a
 	// reboot or power loss; boot IDs survive the Pi's missing real-time clock.
 	const interrupted =
@@ -85,10 +54,7 @@ export function readSetupStatus(
 			state: interrupted ? "interrupted" : file.state,
 			phase: file.phase,
 			updatedAt: file.updatedAt,
-			updatedAgeMs: (() => {
-				const age = wallNow - Date.parse(file.updatedAt)
-				return Number.isFinite(age) && age >= 0 ? Math.round(age) : null
-			})(),
+			updatedAgeMs: ageMs(file.updatedAt, wallNow),
 			exitCode: file.exitCode,
 		},
 		reason: null,

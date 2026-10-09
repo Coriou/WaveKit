@@ -13,7 +13,7 @@ import {
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
-	DecoderBandRequirements,
+	DecoderBandDeclaration,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -196,22 +196,33 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * With followCenter it decodes the centre itself, and only a configured
 	 * list says which band it follows; without one the band is unknown.
 	 */
-	override getBandRequirements(): DecoderBandRequirements | undefined {
+	override getBandDeclaration(): DecoderBandDeclaration {
 		const configured =
 			this.config.frequencies ?? this.config.options["frequencies"]
 		const isConfigured = Array.isArray(configured) && configured.length > 0
 		if (this.options.followCenter)
 			return isConfigured
 				? {
+						configured: {
+							targetsHz: [...this.options.frequencies],
+							basis: "configured",
+							followCenter: true,
+						},
+					}
+				: {}
+		return isConfigured
+			? {
+					configured: {
 						targetsHz: [...this.options.frequencies],
 						basis: "configured",
-						followCenter: true,
-					}
-				: undefined
-		return {
-			targetsHz: [...this.options.frequencies],
-			basis: isConfigured ? "configured" : "decoder-default",
-		}
+					},
+				}
+			: {
+					intrinsic: {
+						targetsHz: [...this.options.frequencies],
+						basis: "decoder-default",
+					},
+				}
 	}
 
 	/**

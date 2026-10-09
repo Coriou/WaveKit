@@ -24,6 +24,7 @@ import {
 } from "../data/window.js"
 import { fitGroups } from "../ui/fit.js"
 import {
+	counted,
 	formatAge,
 	formatBytes,
 	formatClock,
@@ -33,8 +34,8 @@ import {
 	formatPercent,
 	formatRate,
 	formatSampleAge,
-	formatSps,
 	formatSpaced,
+	formatSps,
 	formatWindow,
 } from "../ui/format.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
@@ -192,8 +193,6 @@ function tunerOf(state: AppState, sourceId: string): TunerState | undefined {
 	return state.tuner.value?.find(x => x.sourceId === sourceId)
 }
 
-/** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
-
 function relayClient(
 	relay: TunerRelayStatus | undefined,
 	full: boolean,
@@ -246,7 +245,7 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				? a.sampleAgeMs === null
 					? null
 					: `last sample ${formatSampleAge(a.sampleAgeMs)} ago`
-				: `sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)} s`
+				: `sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)}s`
 	// The error code alone ("ECONNREFUSED") when the row is narrow; the message when it fits.
 	const code = src.lastError
 		? /\b(E[A-Z]{3,}|UND_ERR_[A-Z_]+)\b/.exec(sanitize(src.lastError))?.[1]
@@ -307,14 +306,14 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				: []),
 		),
 		one(1, txt(`received ${formatBytes(src.bytesReceived)}`, role)),
-		one(3, txt(`assigned ${src.assignments.length} decoders`, role)),
+		one(3, txt(`assigned ${counted(src.assignments.length, "decoder")}`, role)),
 		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
 		...(held.length > 0
 			? [
 					one(
 						1,
 						txt(
-							`held by suspended ${held.slice(0, 2).join(", ")}${held.length > 2 ? ` +${held.length - 2}` : ""}`,
+							`held by suspended ${held.slice(0, 2).join("  ")}${held.length > 2 ? `  +${held.length - 2}` : ""}`,
 							role,
 						),
 					),
@@ -460,7 +459,7 @@ export function tunerConfirm(
 	const terse =
 		n === 1 && first
 			? `send ${COMMAND_NAME[first.field]} ${to}`
-			: `send ${n} commands ${to}`
+			: `send ${counted(n, "command")} ${to}`
 	const listed = new Set<string>(
 		(state ? tunerOf(state, edit.sourceId) : undefined)?.unknownFields ?? [],
 	)
@@ -474,7 +473,10 @@ export function tunerConfirm(
 	const groups: Group[] = [
 		one(
 			0,
-			[sp(`send ${n} ${to}`, "value", true)],
+			// Final review: the count names its noun; at 80 columns beside the bias-t
+			// warning and who moves (R71) the target goes first.
+			[sp(`send ${counted(n, "command")}`, "value", true)],
+			[sp(`send ${counted(n, "command")} ${to}`, "value", true)],
 			[sp(terse, "value", true)],
 			[sp(action, "value", true)],
 		),
@@ -686,11 +688,12 @@ function membershipLists(
 		else if (m === "?") unknown.push(d.id)
 	}
 	const na = glyphs().na
-	// A grid of ids, two spaces apart; the tuned group keeps its own " · " clause.
+	// A grid of ids, two spaces apart; the tuned group keeps its own " · " clause,
+	// label first like the other groups (final review).
 	const grid = (ids: string[]): string => ids.join("  ")
 	const ins = [
 		...(inside.length > 0 ? [grid(inside)] : []),
-		...(tuned.length > 0 ? [`${grid(tuned)} (tuned)`] : []),
+		...(tuned.length > 0 ? [`tuned  ${grid(tuned)}`] : []),
 	]
 	return {
 		inside: ins.join(sep()) || na,
@@ -893,7 +896,7 @@ function tunerBlock(
 					[
 						one(0, txt(owner, role)),
 						...(client ? [one(2, txt(client, role))] : []),
-						one(3, txt(`${t.commandCount} commands`, role)),
+						one(3, txt(counted(t.commandCount, "command"), role)),
 						...(lastText ? [one(1, txt(lastText, role))] : []),
 					],
 					width,
@@ -1046,19 +1049,16 @@ function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 			one(
 				1,
 				txt(
-					`${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}${sep()}max ${relay.maxClients ?? "?"}`,
+					`${counted(relay.clientsConnected, "client")}${sep()}max ${relay.maxClients ?? "?"}`,
 					role,
 				),
 			),
 			one(3, txt(`${formatBytes(relay.bytesSent)} sent`, role)),
 			one(2, txt(`${sanitize(relay.controlPolicy)} control`, role)),
-			one(
-				1,
-				txt(
-					`last error ${relay.lastError ? quoted(relay.lastError) : glyphs().na}`,
-					role,
-				),
-			),
+			// Final review: no "last error —" filler when there is none.
+			...(relay.lastError
+				? [one(1, txt(`last error ${quoted(relay.lastError)}`, role))]
+				: []),
 		],
 		width,
 	)

@@ -6,40 +6,40 @@
 			name="viewport"
 			content="width=device-width, initial-scale=1, viewport-fit=cover"
 		/>
-		<meta name="color-scheme" content="light dark" />
-		<meta
-			name="theme-color"
-			content="#d9dbd5"
-			media="(prefers-color-scheme: light)"
-		/>
-		<meta
-			name="theme-color"
-			content="#1b1e1d"
-			media="(prefers-color-scheme: dark)"
-		/>
+		<meta name="color-scheme" content="dark" />
+		<meta name="theme-color" content="#111c19" />
 		<title>WaveKit Receiver</title>
 		<link
 			rel="preload"
-			href="fonts/barlow-500.woff2"
+			href="brand/D-DINCondensed-Bold.woff2"
 			as="font"
 			type="font/woff2"
 			crossorigin
 		/>
 		<link
 			rel="preload"
-			href="fonts/barlow-semi-condensed-600.woff2"
+			href="brand/NotoSans-Regular.woff2"
 			as="font"
 			type="font/woff2"
 			crossorigin
 		/>
 		<link rel="stylesheet" href="app.css" />
-		<link rel="icon" href="data:," />
+		<link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
 		<script type="module" src="app.js"></script>
 	</head>
-	<body>
+	<body data-empty="true">
 		<div class="panel">
 			<header class="nameplate">
-				<h1 class="nameplate__title">WaveKit <span>Receiver</span></h1>
+				<h1 class="nameplate__title">
+					<img
+						class="nameplate__logo"
+						src="brand/wavekit-wordmark-on-dark.svg"
+						alt="WaveKit"
+						width="680"
+						height="164"
+					/>
+					<span class="nameplate__page">Receiver</span>
+				</h1>
 				<p class="nameplate__host" id="host-name">This Pi</p>
 				<p class="link" id="link" data-state="connecting" role="status">
 					<span class="lamp" aria-hidden="true"></span>
@@ -48,116 +48,126 @@
 			</header>
 
 			<main class="layout">
-				<div class="column">
-					<section class="screen-block" aria-labelledby="flow-heading">
-						<h2 class="legend" id="flow-heading">Upstream sample flow</h2>
-						<div class="screen" id="screen" data-state="unknown">
-							<div class="screen__verdict">
-								<p class="verdict" id="verdict" aria-live="polite">
-									Waiting for data
-								</p>
-								<p class="verdict__detail" id="verdict-detail">
-									No measurement yet
-								</p>
+				<section
+					class="screen screen--status"
+					id="screen"
+					data-state="unknown"
+					aria-labelledby="verdict"
+				>
+					<div class="screen__verdict">
+						<h2 class="verdict" id="verdict" aria-live="polite">
+							Waiting for data
+						</h2>
+						<p class="verdict__detail" id="verdict-detail">
+							No measurement yet.
+						</p>
+					</div>
+					<div class="screen__rate">
+						<p class="rate">
+							<span id="rate-value">—</span>
+							<span class="rate__unit" id="rate-unit"></span>
+						</p>
+						<p class="rate__sub" id="rate-sub"></p>
+					</div>
+
+					<figure
+						class="scope"
+						id="scope"
+						tabindex="0"
+						aria-labelledby="scope-title"
+						aria-describedby="marker-readout"
+					>
+						<figcaption class="visually-hidden" id="scope-title">
+							Sample flow, CPU, memory, SoC temperature and under-voltage over
+							the last five minutes. Use the arrow keys to read values.
+						</figcaption>
+						<div class="channel channel--flow" data-key="flow">
+							<p class="channel__name">Sample flow</p>
+							<p class="channel__value" id="flow-scale"></p>
+							<div class="channel__frame">
+								<svg
+									class="channel__plot"
+									viewBox="0 0 600 160"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+								>
+									<defs>
+										<linearGradient id="flow-fade" x1="0" y1="0" x2="0" y2="1">
+											<stop class="fade-top" offset="0" />
+											<stop class="fade-bottom" offset="1" />
+										</linearGradient>
+									</defs>
+									<g class="graticule" data-rows="5"></g>
+									<path class="plot__area" d="" />
+									<line class="plot__expected" x1="0" x2="600" y1="0" y2="0" />
+									<path class="plot__trace" d="" />
+									<line class="plot__start" x1="0" x2="0" y1="0" y2="160" />
+								</svg>
+								<p class="plot__label plot__label--expected" hidden></p>
+								<p class="plot__label plot__label--start" hidden></p>
 							</div>
-							<div class="screen__rate">
-								<p class="rate">
-									<span id="rate-value">—</span>
-									<span class="rate__unit" id="rate-unit">MB/s</span>
-								</p>
-								<p class="rate__expected" id="rate-expected">Expected —</p>
-							</div>
-							<figure class="plot">
-								<div class="plot__frame" id="plot-frame">
-									<svg
-										id="plot"
-										class="plot__svg"
-										viewBox="0 0 600 200"
-										preserveAspectRatio="none"
-										role="img"
-										tabindex="0"
-										aria-labelledby="plot-label"
-										aria-describedby="marker-readout"
-									>
-										<title id="plot-label">
-											Upstream rate over the last five minutes
-										</title>
-										<defs>
-											<linearGradient
-												id="plot-fade"
-												x1="0"
-												y1="0"
-												x2="0"
-												y2="1"
-											>
-												<stop class="plot__fade-top" offset="0" />
-												<stop class="plot__fade-bottom" offset="1" />
-											</linearGradient>
-										</defs>
-										<g class="graticule" id="graticule"></g>
-										<path class="plot__gap" id="plot-gaps" d="" />
-										<path class="plot__area" id="plot-area" d="" />
-										<line
-											class="plot__expected"
-											id="plot-expected"
-											x1="0"
-											x2="600"
-											y1="-10"
-											y2="-10"
-										/>
-										<path class="plot__trace" id="plot-trace" d="" />
-										<g class="plot__marker" id="plot-marker" hidden>
-											<line id="marker-line" x1="0" x2="0" y1="0" y2="200" />
-											<circle id="marker-dot" r="3.5" cx="0" cy="0" />
-										</g>
-									</svg>
-									<p class="plot__label" id="plot-label-expected" hidden></p>
-									<p class="plot__readout" id="marker-readout" hidden></p>
-								</div>
-								<figcaption class="plot__axis">
-									<span>−5 min</span
-									><span class="plot__scale" id="plot-scale"></span
-									><span>now</span>
-								</figcaption>
-							</figure>
 						</div>
+						<div class="channel" data-key="cpu">
+							<p class="channel__name">CPU</p>
+							<p class="channel__value"></p>
+							<svg
+								class="channel__plot"
+								viewBox="0 0 600 40"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<g class="graticule" data-rows="2"></g>
+								<path class="plot__trace" d="" />
+							</svg>
+						</div>
+						<div class="channel" data-key="memory">
+							<p class="channel__name">Memory</p>
+							<p class="channel__value"></p>
+							<svg
+								class="channel__plot"
+								viewBox="0 0 600 40"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<g class="graticule" data-rows="2"></g>
+								<path class="plot__trace" d="" />
+							</svg>
+						</div>
+						<div class="channel" data-key="temperature">
+							<p class="channel__name">SoC temp.</p>
+							<p class="channel__value"></p>
+							<svg
+								class="channel__plot"
+								viewBox="0 0 600 40"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<g class="graticule" data-rows="2"></g>
+								<path class="plot__trace" d="" />
+							</svg>
+						</div>
+						<div class="channel channel--lane" data-key="dips">
+							<p class="channel__name">Power dips</p>
+							<p class="channel__value"></p>
+							<svg
+								class="channel__plot"
+								viewBox="0 0 600 16"
+								preserveAspectRatio="none"
+								aria-hidden="true"
+							>
+								<line class="lane__base" x1="0" x2="600" y1="15.5" y2="15.5" />
+								<path class="lane__ticks" d="" />
+							</svg>
+						</div>
+						<p class="scope__axis" aria-hidden="true">
+							<span>5 min ago</span><span>now</span>
+						</p>
+						<div class="scope__marker" id="marker" hidden></div>
+						<p class="scope__readout" id="marker-readout" hidden></p>
+					</figure>
+				</section>
 
-						<ol class="chain" aria-label="Receiver chain">
-							<li class="stage" id="stage-dongle" data-state="unknown">
-								<span class="stage__name">Dongle</span>
-								<span class="stage__state"
-									><span class="lamp" aria-hidden="true"></span
-									><span class="stage__word">—</span></span
-								>
-								<span class="stage__fact"></span>
-							</li>
-							<li class="stage" id="stage-rtltcp" data-state="unknown">
-								<span class="stage__name">IQ server</span>
-								<span class="stage__state"
-									><span class="lamp" aria-hidden="true"></span
-									><span class="stage__word">—</span></span
-								>
-								<span class="stage__fact"></span>
-							</li>
-							<li class="stage" id="stage-rtlmux" data-state="unknown">
-								<span class="stage__name">Fan-out</span>
-								<span class="stage__state"
-									><span class="lamp" aria-hidden="true"></span
-									><span class="stage__word">—</span></span
-								>
-								<span class="stage__fact"></span>
-							</li>
-							<li class="stage" id="stage-clients" data-state="unknown">
-								<span class="stage__name">Clients</span>
-								<span class="stage__state"
-									><span class="lamp" aria-hidden="true"></span
-									><span class="stage__word">—</span></span
-								>
-								<span class="stage__fact"></span>
-							</li>
-						</ol>
-					</section>
-
+				<div class="side">
 					<section
 						class="setup"
 						id="setup-section"
@@ -170,110 +180,93 @@
 							<span id="setup-text">—</span>
 						</p>
 					</section>
-				</div>
-				<div class="column">
-					<section class="power" aria-labelledby="power-heading">
-						<h2 class="legend" id="power-heading">Power &amp; throttling</h2>
-						<ul class="annunciators" id="annunciators">
-							<li class="annunciator" data-key="now" data-state="unknown">
-								<span class="lamp" aria-hidden="true"></span
-								><span>Under-voltage</span><small>—</small>
-							</li>
-							<li class="annunciator" data-key="history" data-state="unknown">
-								<span class="lamp" aria-hidden="true"></span
-								><span>Earlier dips</span><small>—</small>
-							</li>
-							<li
-								class="annunciator"
-								data-key="throttling"
-								data-state="unknown"
-							>
-								<span class="lamp" aria-hidden="true"></span
-								><span>Throttling</span><small>—</small>
-							</li>
-						</ul>
-						<p class="note" id="power-note"></p>
+
+					<section aria-labelledby="stream-heading">
+						<h2 class="legend" id="stream-heading">IQ stream</h2>
+						<div class="endpoint">
+							<code class="endpoint__url" id="endpoint">—</code>
+							<button class="endpoint__copy" id="endpoint-copy" type="button">
+								Copy
+							</button>
+						</div>
+						<dl class="rows">
+							<div class="row" id="row-dongle" data-state="unknown">
+								<dt>Dongle</dt>
+								<dd>
+									<span class="row__value"
+										><span class="lamp" aria-hidden="true"></span
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
+								</dd>
+							</div>
+							<div class="row" id="row-tuning">
+								<dt>Tuning</dt>
+								<dd>
+									<span class="row__value"
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
+								</dd>
+							</div>
+							<div class="row">
+								<dt>Clients</dt>
+								<dd>
+									<ul class="clients" id="clients"></ul>
+								</dd>
+							</div>
+						</dl>
 					</section>
 
-					<section class="host" aria-labelledby="host-heading">
-						<h2 class="legend" id="host-heading">Pi host</h2>
-						<dl class="readouts" id="readouts">
-							<div class="readout" data-key="cpu">
-								<dt>CPU</dt>
+					<section aria-labelledby="host-heading">
+						<h2 class="legend" id="host-heading">This Pi</h2>
+						<dl class="rows">
+							<div class="row" id="row-power" data-state="unknown">
+								<dt>Power</dt>
 								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
+									<span class="row__value"
+										><span class="lamp" aria-hidden="true"></span
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
 								</dd>
-								<span class="meter" aria-hidden="true"><span></span></span>
 							</div>
-							<div class="readout" data-key="memory">
-								<dt>Memory</dt>
-								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
-								</dd>
-								<span class="meter" aria-hidden="true"><span></span></span>
-							</div>
-							<div class="readout" data-key="disk">
-								<dt>Storage</dt>
-								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
-								</dd>
-								<span class="meter" aria-hidden="true"><span></span></span>
-							</div>
-							<div class="readout" data-key="temperature">
-								<dt>SoC temp.</dt>
-								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
-								</dd>
-								<span class="meter" aria-hidden="true"><span></span></span>
-							</div>
-							<div class="readout" data-key="network">
+							<div class="row" data-key="network" data-state="unknown">
 								<dt>Network</dt>
 								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
+									<span class="row__value"
+										><span class="bars" aria-hidden="true"
+											><span></span><span></span><span></span
+											><span></span></span
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
 								</dd>
 							</div>
-							<div class="readout" data-key="uptime">
-								<dt>Host uptime</dt>
+							<div class="row" data-key="disk" data-state="unknown">
+								<dt>Storage</dt>
 								<dd>
-									<span class="readout__value">—</span
-									><span class="readout__sub"></span>
+									<span class="row__value"
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
+								</dd>
+							</div>
+							<div class="row" data-key="uptime" data-state="unknown">
+								<dt>Uptime</dt>
+								<dd>
+									<span class="row__value"
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
 								</dd>
 							</div>
 						</dl>
 					</section>
 				</div>
+
 				<details class="diagnostics" id="diagnostics">
 					<summary>Diagnostics</summary>
 					<div class="diagnostics__body">
-						<h3 class="legend">Downstream clients</h3>
-						<table class="clients">
-							<thead>
-								<tr>
-									<th scope="col">Client</th>
-									<th scope="col">Delivery</th>
-									<th scope="col">Dropped</th>
-								</tr>
-							</thead>
-							<tbody id="clients"></tbody>
-						</table>
-						<h3 class="legend">Receiver</h3>
 						<dl class="facts" id="facts-receiver"></dl>
-						<h3 class="legend">Measurement sources</h3>
 						<dl class="facts" id="facts-sources"></dl>
 					</div>
 				</details>
 			</main>
-
-			<footer class="footer">
-				<p>
-					Read-only. Served by the Pi itself, with or without WaveKit running.
-				</p>
-			</footer>
 		</div>
 	</body>
 </html>

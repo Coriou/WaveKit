@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { EventEmitter } from "node:events"
 import type { TunerRelay } from "../../../src/core/tuner-relay.js"
 import { SourceManager } from "../../../src/core/source-manager.js"
+import { SignalLevelTracker } from "../../../src/core/signal-level.js"
 import { LiveDemodulator } from "../../../src/core/live-demodulator.js"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import { createLogger } from "../../../src/utils/logger.js"
@@ -35,6 +36,7 @@ describe("Dynamic Sample Rate Integration", () => {
 				id: "test-source",
 				caps: { sampleRate: 2048000 },
 			},
+			signalLevel: new SignalLevelTracker(),
 		})
 
 		// 3. Setup LiveDemodulator mock

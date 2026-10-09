@@ -1,0 +1,64 @@
+{
+	"schemaVersion": 1,
+	"brand": "WaveKit",
+	"artworkName": "wavekit",
+	"version": "1.0.0",
+	"baseline": "MAKE SENSE OF THE SPECTRUM",
+	"preferred": {
+		"dark": "logos/wavekit-lockup-on-dark.svg",
+		"light": "logos/wavekit-lockup-on-light.svg",
+		"compactDark": "logos/wavekit-wordmark-on-dark.svg",
+		"compactLight": "logos/wavekit-wordmark-on-light.svg"
+	},
+	"minimumWidthCssPx": {
+		"lockup": 320,
+		"wordmark": 120,
+		"mark": 24,
+		"smallMark": 16
+	},
+	"clearspace": {
+		"unit": "visible height of complete artwork in use",
+		"factor": 0.25,
+		"implementation": "Add outside the SVG canvas."
+	},
+	"colors": {
+		"ink": "#111C19",
+		"phosphor": "#7BECC7",
+		"paper": "#F4F7F5",
+		"forest": "#16735C",
+		"muted": "#52645D",
+		"rule": "#E4ECE7"
+	},
+	"typography": {
+		"liveDisplay": "D-DIN Condensed",
+		"liveBody": "Noto Sans",
+		"fontBinariesIncluded": true,
+		"fontFiles": "fonts/ (WOFF2, OFL licences beside them)",
+		"fixedWordmarkOrigin": "Inter Display SemiBold, optically placed outlines",
+		"fixedBaselineOrigin": "Noto Sans Condensed Bold outlines",
+		"fontSetup": "fonts/README.md"
+	},
+	"iconSystem": {
+		"grid": 24,
+		"stroke": 2,
+		"caps": "round",
+		"joins": "round",
+		"family": "Tabler-based + three documented custom extensions",
+		"categories": [
+			"aircraft",
+			"marine",
+			"aviation-data",
+			"voice",
+			"paging",
+			"aprs",
+			"sensors",
+			"mesh"
+		]
+	},
+	"spectrum": {
+		"usage": "decorative only",
+		"labels": false,
+		"liveData": false
+	},
+	"publicDomain": null
+}

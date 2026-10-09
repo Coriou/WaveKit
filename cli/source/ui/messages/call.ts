@@ -71,7 +71,7 @@ export function formatCall(
 		...(ysfCall ? [seg(`CS ${ysfCall}`, 1)] : []),
 		...(isStart ? [seg("call start", 2)] : []),
 		...(duration !== undefined
-			? [seg(`${(duration / 1000).toFixed(1)} s`, 2)]
+			? [seg(`${(duration / 1000).toFixed(1)}s`, 2)]
 			: []),
 		...(isEnd && q !== undefined
 			? [seg(`quality ${qualityPercent(errors)}%`, 3)]
@@ -94,7 +94,7 @@ export function formatCall(
 		...(ur ? [{ label: "ur", value: ur }] : []),
 		...(ysfCall ? [{ label: "callsign", value: ysfCall }] : []),
 		...(duration !== undefined
-			? [{ label: "duration", value: `${(duration / 1000).toFixed(1)} s` }]
+			? [{ label: "duration", value: `${(duration / 1000).toFixed(1)}s` }]
 			: []),
 		...(q !== undefined
 			? [

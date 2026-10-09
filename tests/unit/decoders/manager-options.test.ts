@@ -11,6 +11,10 @@ import pino from "pino"
 import { HealthConfigSchema, loadConfig } from "../../../src/config.js"
 import { createDecoderManagerOptions } from "../../../src/decoders/manager-options.js"
 import { DecoderManager } from "../../../src/decoders/manager.js"
+import {
+	BAND_OVERRIDE_FILE_NAME,
+	BandOverrideStore,
+} from "../../../src/decoders/band-override-store.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import { EventEmitter } from "node:events"
@@ -95,6 +99,76 @@ describe("createDecoderManagerOptions", () => {
 		expect(
 			createDecoderManagerOptions(HealthConfigSchema.parse({})),
 		).not.toHaveProperty("bandSuspension")
+	})
+
+	it("passes the resolved band region through only when given", () => {
+		expect(
+			createDecoderManagerOptions(undefined, {
+				code: "US",
+				source: "guessed:tz",
+			}),
+		).toMatchObject({ bandRegion: { code: "US", source: "guessed:tz" } })
+		expect(createDecoderManagerOptions(undefined)).not.toHaveProperty(
+			"bandRegion",
+		)
+	})
+
+	it("the region and a loaded override store reach the manager", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "wavekit-band-state-"))
+		cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
+		writeFileSync(
+			join(dir, BAND_OVERRIDE_FILE_NAME),
+			JSON.stringify({
+				version: 1,
+				overrides: { x: { targetsHz: [433_920_000] } },
+			}),
+		)
+		const store = new BandOverrideStore({ stateDir: dir, logger })
+		await store.load()
+		const registry = new DecoderRegistry()
+		const iqCaps: DecoderCaps = {
+			input: "iq",
+			output: "text",
+			integrationPattern: "pure_consumer",
+		}
+		registry.register(
+			"stub",
+			config => Object.assign(createStub(config.id), { caps: iqCaps }),
+			iqCaps,
+		)
+		const fanout = new FanoutManager(logger)
+		const manager = new DecoderManager(
+			registry,
+			fanout,
+			logger,
+			createDecoderManagerOptions(undefined, {
+				code: "CA",
+				source: "configured",
+			}),
+			store,
+		)
+		cleanups.push(async () => {
+			await manager.destroy()
+			fanout.destroy()
+		})
+		manager.createDecoder({
+			id: "x",
+			type: "stub",
+			enabled: false,
+			options: {},
+		})
+		expect(manager.getBandSettings("x")).toMatchObject({
+			override: { targetsHz: [433_920_000] },
+			region: { code: "CA", source: "configured" },
+			persisted: true,
+		})
+		const updated = await manager.setBandOverride("x", {
+			bandSuspension: false,
+		})
+		expect(updated).toMatchObject({ persisted: true })
+		expect(
+			JSON.parse(readFileSync(join(dir, BAND_OVERRIDE_FILE_NAME), "utf8")),
+		).toEqual({ version: 1, overrides: { x: { bandSuspension: false } } })
 	})
 
 	it("reports a YAML-configured idle timeout as DecoderStatus.idleTimeoutMs", async () => {

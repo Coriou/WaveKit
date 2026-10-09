@@ -203,10 +203,14 @@ export function helpLines(
 		...pack(entries(ctx, "global")),
 	]
 	body.push("")
+	// R93: every mark the strip and tables still use is explained here (57 columns).
 	body.push(
-		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.attention} now  ${g.unknown} unknown`,
+		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.unknown} unknown`,
 	)
-	body.push(`dim  older than 15 s      ${g.na} not applicable`)
+	body.push(
+		`${g.attention} attention (restarting, backpressure)  ${g.na} not applicable`,
+	)
+	body.push("dim  older than 15s")
 	body.push(
 		`band  core's targets or WaveKit's table ${glyphs().sep} * configured`,
 	)

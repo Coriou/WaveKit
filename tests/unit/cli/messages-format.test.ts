@@ -42,7 +42,7 @@ describe("formatMessage", () => {
 			"SRC 2341234",
 			"slot 1",
 			"CC 1",
-			"8.4 s",
+			"8.4s",
 			"quality 65%",
 			"7 err",
 			"encrypted",
@@ -255,7 +255,7 @@ describe("formatMessage", () => {
 			"dsd-fme",
 		)
 		expect(legacy.category).toBe("voice")
-		expect(segs(legacy)).toEqual(["TG 9", "SRC 3120001", "slot 2", "1.2 s"])
+		expect(segs(legacy)).toEqual(["TG 9", "SRC 3120001", "slot 2", "1.2s"])
 	})
 	it("treats an empty emergency field as no emergency", () => {
 		const a = (emergency: string) =>

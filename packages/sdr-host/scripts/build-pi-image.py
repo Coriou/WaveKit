@@ -25,12 +25,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[2]
 SECTOR = 512
 BOOT_ASSETS = ('boot.html', 'boot.js', 'boot.css', 'app.css',
-               'fonts/barlow-500.woff2', 'fonts/barlow-600.woff2',
-               'fonts/barlow-semi-condensed-600.woff2', 'fonts/OFL.txt')
+               'brand/D-DINCondensed.woff2', 'brand/D-DINCondensed-Bold.woff2',
+               'brand/NotoSans-Regular.woff2', 'brand/wavekit-wordmark-on-dark.svg',
+               'brand/favicon.svg', 'brand/OFL-D-DIN.txt', 'brand/FONTLOG-D-DIN.txt',
+               'brand/OFL-Noto-Sans.txt',
+               'brand/README.md')
 IMAGE_SUPPORT = {
     'pi-boot-status.py': '/usr/local/lib/wavekit/boot-status.py',
     'wavekit-boot-status.service': '/etc/systemd/system/wavekit-boot-status.service',
     'wavekit-wifi-powersave.conf': '/etc/NetworkManager/conf.d/90-wavekit-wifi-powersave.conf',
+    'wavekit-journald.conf': '/etc/systemd/journald.conf.d/90-wavekit.conf',
+    'pi-boot-report.py': '/usr/local/lib/wavekit/boot-report.py',
+    'wavekit-boot-report.service': '/etc/systemd/system/wavekit-boot-report.service',
 }
 
 
@@ -375,6 +381,7 @@ def build(args):
         fs.directory('/var/lib/wavekit/status')
         enable_service(fs, 'cloud-init.target', 'wavekit-firstboot.service')
         enable_service(fs, 'multi-user.target', 'wavekit-boot-status.service')
+        enable_service(fs, 'multi-user.target', 'wavekit-boot-report.service')
         check_clean(root, e2fsck)
         with image.open('r+b') as target, root.open('rb') as source:
             target.seek(begin)
@@ -390,7 +397,7 @@ def build(args):
             for model in (3, 4, 5)
         ]}, 'os_list': [{
             'name': 'WaveKit SDR Host — Raspberry Pi OS Lite 64-bit',
-            'description': 'Configure Wi-Fi, user and SSH in Imager; WaveKit installs automatically at first boot. Internet required for Docker packages.',
+            'description': 'Configure Wi-Fi, user and SSH in Imager; WaveKit installs automatically at first boot, then http://<hostname>.local/ shows setup and receiver status. Internet required for Docker packages.',
             'icon': 'https://downloads.raspberrypi.com/raspios_armhf/Raspberry_Pi_OS_(32-bit).png',
             'url': image_target.as_uri(), 'extract_size': image_size,
             'extract_sha256': image_hash, 'image_download_size': compressed.stat().st_size,

@@ -25,7 +25,11 @@ import type {
 	DecoderHealth,
 	DecoderLastError,
 	DecoderOutput,
+	DecoderBandOverride,
+	DecoderBandRegion,
+	DecoderBandSettings,
 	DecoderRateAssessment,
+	DecoderStartMode,
 	DecoderStatus,
 	DecoderSuspensionReasonCode,
 } from "./types.js"
@@ -34,6 +38,12 @@ import {
 	validateDeclaredRateRequirements,
 } from "./rate-resolver.js"
 import { assessDecoderBand } from "./band-resolver.js"
+import {
+	normalizeBandOverride,
+	resolveBandRequirements,
+	type ResolvedBand,
+} from "./band-defaults.js"
+import { BandOverrideStore } from "./band-override-store.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -79,6 +89,8 @@ export interface DecoderManagerConfig {
 	 * (default: true). The band assessment is reported either way.
 	 */
 	bandSuspension: boolean
+	/** Effective global band region (default: EU, source "default"). */
+	bandRegion: DecoderBandRegion
 }
 
 /**
@@ -122,6 +134,11 @@ interface DecoderState {
 	transition: "suspending" | "resuming" | null
 	/** Bumped by every rate transition, start, stop and remove */
 	rateGeneration: number
+	/**
+	 * Who started the decoder: "operator" (REST start) is never
+	 * band-suspended. Cleared to "auto" by stop; kept by restart.
+	 */
+	startMode: DecoderStartMode
 }
 
 interface DecoderSuspension {
@@ -193,6 +210,12 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 	idleTimeout: 30000,
 	validateVersions: true,
 	bandSuspension: true,
+	bandRegion: { code: "EU", source: "default" },
+}
+
+/** Start intent; an omitted intent keeps the current start mode. */
+export interface DecoderStartIntent {
+	startMode: DecoderStartMode
 }
 
 /**
@@ -229,6 +252,7 @@ export class DecoderManager extends EventEmitter {
 		string,
 		PendingSourceEvaluation
 	>()
+	private readonly bandOverrides: BandOverrideStore
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 
 	constructor(
@@ -236,12 +260,14 @@ export class DecoderManager extends EventEmitter {
 		fanout: FanoutManager,
 		logger: Logger,
 		config?: Partial<DecoderManagerConfig>,
+		bandOverrides?: BandOverrideStore,
 	) {
 		super()
 		this.registry = registry
 		this.fanout = fanout
 		this.log = createComponentLogger(logger, "DecoderManager")
 		this.config = { ...DEFAULT_CONFIG, ...config }
+		this.bandOverrides = bandOverrides ?? BandOverrideStore.inMemory(logger)
 
 		// Start periodic health checks (Requirements 20.1, 20.2, 20.3, 20.4)
 		this.startHealthChecks()
@@ -314,6 +340,7 @@ export class DecoderManager extends EventEmitter {
 			suspension: null,
 			transition: null,
 			rateGeneration: 0,
+			startMode: "auto",
 		}
 
 		this.decoders.set(config.id, state)
@@ -328,9 +355,11 @@ export class DecoderManager extends EventEmitter {
 	 * Wires the decoder to a fanout branch for audio input.
 	 *
 	 * @param id - The decoder ID to start
+	 * @param intent - Start mode to record; omitted keeps the current mode
+	 *   (internal restarts), "operator" ignores the band check
 	 * @throws Error if decoder not found
 	 */
-	async startDecoder(id: string): Promise<void> {
+	async startDecoder(id: string, intent?: DecoderStartIntent): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
 			throw new Error(`Decoder not found: ${id}`)
@@ -341,7 +370,11 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 
-		this.log.info({ decoderId: id }, "Starting decoder")
+		if (intent) state.startMode = intent.startMode
+		this.log.info(
+			{ decoderId: id, startMode: state.startMode },
+			"Starting decoder",
+		)
 
 		// Reset restart tracking
 		state.intentionallyStopped = false
@@ -420,6 +453,7 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = true
 		state.stopRevision++
 		state.desiredRunning = false
+		state.startMode = "auto"
 		state.rateGeneration++
 		state.suspension = null
 		state.transition = null
@@ -453,6 +487,8 @@ export class DecoderManager extends EventEmitter {
 
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
+		// Stop clears the start mode; a restart keeps it.
+		const startMode = state.startMode
 		// Stop first (this marks intentionallyStopped = true)
 		const stopping = this.stopDecoder(id)
 		const revision = state.stopRevision
@@ -466,7 +502,7 @@ export class DecoderManager extends EventEmitter {
 
 		// Reset the flag and start
 		state.intentionallyStopped = false
-		await this.startDecoder(id)
+		await this.startDecoder(id, { startMode })
 	}
 
 	/**
@@ -480,7 +516,7 @@ export class DecoderManager extends EventEmitter {
 		for (const [id, state] of this.decoders) {
 			if (state.config.enabled) {
 				startPromises.push(
-					this.startDecoder(id).catch(err => {
+					this.startDecoder(id, { startMode: "auto" }).catch(err => {
 						this.log.error({ err, decoderId: id }, "Failed to start decoder")
 					}),
 				)
@@ -549,6 +585,7 @@ export class DecoderManager extends EventEmitter {
 			suspended: state.suspension !== null,
 			...(state.suspension ? { suspension: { ...state.suspension } } : {}),
 			...(state.transition ? { transition: state.transition } : {}),
+			...(state.desiredRunning ? { startMode: state.startMode } : {}),
 			...describeDecoderStatusFields({
 				config: state.config,
 				caps: state.decoder.caps,
@@ -1606,7 +1643,7 @@ export class DecoderManager extends EventEmitter {
 			const adapter = resolved
 				? state.decoder.getRateAdapter?.({ sampleRateHz: resolved.sampleRate })
 				: undefined
-			return assessDecoderBand(state.decoder.getBandRequirements?.(), {
+			return assessDecoderBand(this.resolveBand(state).requirements, {
 				centerHz: resolved?.centerFreq,
 				sampleRateHz: resolved?.sampleRate,
 				frontendRateHz: adapter?.frontendRateHz,
@@ -1627,13 +1664,136 @@ export class DecoderManager extends EventEmitter {
 	): Eligibility {
 		const rate = this.assessState(state, caps)
 		const band = this.assessBand(state, caps)
+		// An operator start (pin) and the per-decoder opt-out override only
+		// the band check; an unusable rate still suspends.
+		const bandSuspends =
+			this.config.bandSuspension &&
+			this.decoderBandSuspension(state) &&
+			state.startMode !== "operator"
 		const blockedBy =
 			rate.verdict === "unusable"
 				? (rate.reasonCode ?? "unsupported-sample-rate")
-				: this.config.bandSuspension && band.verdict === "out-of-band"
+				: bandSuspends && band.verdict === "out-of-band"
 					? "frequency-out-of-band"
 					: null
 		return { rate, band, blockedBy }
+	}
+
+	/**
+	 * The one band resolution (spec §3.2): declaration, config and API
+	 * overrides, the region and the built-in table.
+	 */
+	private resolveBand(state: DecoderState): ResolvedBand {
+		return resolveBandRequirements({
+			type: state.config.type,
+			declaration: state.decoder.getBandDeclaration?.(),
+			configOverride: state.config.band,
+			apiOverride: this.bandOverrides.get(state.config.id),
+			region: this.config.bandRegion,
+		})
+	}
+
+	/** Per-decoder `band.bandSuspension` (API over config); true when unset. */
+	private decoderBandSuspension(state: DecoderState): boolean {
+		try {
+			return this.resolveBand(state).bandSuspension
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: state.config.id },
+				"Band resolution failed; band suspension stays enabled",
+			)
+			return true
+		}
+	}
+
+	// ============================================================================
+	// Start mode and band overrides (band defaults spec §1, §5)
+	// ============================================================================
+
+	/**
+	 * Records the start mode of a decoder and re-evaluates it (spec §5.4):
+	 * "operator" resumes a band-suspended decoder, "auto" may band-suspend a
+	 * running one. Returns false when the decoder is unknown.
+	 */
+	setStartMode(id: string, mode: DecoderStartMode): boolean {
+		const state = this.decoders.get(id)
+		if (!state) return false
+		state.startMode = mode
+		this.log.info({ decoderId: id, startMode: mode }, "Decoder start mode set")
+		this.reevaluateBand(state)
+		return true
+	}
+
+	/** Band settings for GET /api/decoders/:id/band; undefined when unknown. */
+	getBandSettings(id: string): DecoderBandSettings | undefined {
+		const state = this.decoders.get(id)
+		if (!state) return undefined
+		return this.describeBandSettings(state, this.bandOverrides.isPersisted())
+	}
+
+	/** Replaces the API band layer, persists it and re-evaluates. */
+	async setBandOverride(
+		id: string,
+		override: DecoderBandOverride,
+	): Promise<DecoderBandSettings | undefined> {
+		if (!this.decoders.has(id)) return undefined
+		const { persisted } = await this.bandOverrides.set(id, override)
+		const state = this.decoders.get(id)
+		if (!state) return undefined
+		this.log.info({ decoderId: id, override, persisted }, "Band override set")
+		this.reevaluateBand(state)
+		return this.describeBandSettings(state, persisted)
+	}
+
+	/** Removes the API band layer (idempotent), persists and re-evaluates. */
+	async deleteBandOverride(
+		id: string,
+	): Promise<DecoderBandSettings | undefined> {
+		if (!this.decoders.has(id)) return undefined
+		const { persisted } = await this.bandOverrides.delete(id)
+		const state = this.decoders.get(id)
+		if (!state) return undefined
+		this.log.info({ decoderId: id, persisted }, "Band override removed")
+		this.reevaluateBand(state)
+		return this.describeBandSettings(state, persisted)
+	}
+
+	private describeBandSettings(
+		state: DecoderState,
+		persisted: boolean,
+	): DecoderBandSettings {
+		const override = this.bandOverrides.get(state.config.id)
+		const config = state.config.band
+		const bandAssessment = state.bandPlan ?? this.assessBand(state)
+		let region: DecoderBandRegion
+		try {
+			region = this.resolveBand(state).region
+		} catch {
+			region = { ...this.config.bandRegion }
+		}
+		return {
+			decoderId: state.config.id,
+			override: override ?? null,
+			configOverride: config ? normalizeBandOverride(config) : null,
+			region,
+			persisted,
+			bandAssessment: structuredClone(bandAssessment),
+		}
+	}
+
+	/**
+	 * Recomputes the band plan with the source's current caps and publishes
+	 * at once; a wanted decoder then gets its suspend/resume decision from
+	 * the serial caps worker, never inline.
+	 */
+	private reevaluateBand(state: DecoderState): void {
+		const external = state.decoder.caps.input === "external"
+		const sourceId = external ? undefined : this.selectedSourceId(state)
+		const caps = sourceId ? this.sourceManager?.getCaps(sourceId) : undefined
+		state.bandPlan = this.assessBand(state, caps)
+		this.emitStatusChanged(state)
+		if (state.desiredRunning && sourceId && caps)
+			this.enqueueSourceEvaluation(sourceId, { caps, adapt: false })
 	}
 
 	private refreshRatePlan(state: DecoderState, caps?: SourceCaps | null): void {

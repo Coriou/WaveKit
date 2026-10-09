@@ -1,69 +1,147 @@
-/* First-boot setup: the same front panel, with the screen reading out the
-   current stage and how long it has run. */
+/* First-boot setup: the status page's screen, reading out the current stage
+   on a three-step track. */
 .boot-panel {
-	max-width: 760px;
+	max-width: 720px;
 }
 .boot-screen {
-	grid-template-areas: "verdict rate";
-	align-items: start;
-	padding: 20px 20px 22px;
-}
-.boot-clock__value {
-	font: 500 2.25rem/1 var(--face);
-	letter-spacing: -0.02em;
-	color: var(--screen-ink);
-	white-space: nowrap;
-}
-.boot-screen[data-state="unknown"] .boot-clock__value {
-	color: var(--screen-ink-2);
+	gap: 26px;
+	padding: 24px 24px 22px;
 }
 
-/* Stages as a lamp chain, three across. */
-.boot-chain {
+/* Steps: a bar per stage, filled when done, half-lit while running. The state
+   word is spoken for every step but shown only where it says something. */
+.steps {
+	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
-	margin-top: 18px;
+	gap: 10px;
 }
-.boot-chain::before {
-	right: calc(100% / 3 - 6px);
+.step {
+	display: grid;
+	align-content: start;
+	gap: 4px;
+	padding-top: 12px;
+	position: relative;
+	color: var(--paper-3);
 }
-.boot-chain [aria-current="step"] .lamp {
-	animation: blink 1.2s steps(2, jump-none) infinite;
+.step::before {
+	content: "";
+	position: absolute;
+	inset: 0 0 auto;
+	height: 4px;
+	border-radius: 2px;
+	background: var(--rule);
+}
+.step__name {
+	font: 700 1.0625rem/1.2 var(--display);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+}
+.step__word {
+	font-size: 0.875rem;
+}
+.step:not([aria-current]):not([data-state="fault"]):not([data-state="warn"])
+	.step__word {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+.step[data-state="ok"] {
+	color: var(--paper);
+}
+.step[data-state="ok"]::before {
+	background: var(--phosphor);
+}
+/* Done: a drawn check before the name. */
+.step[data-state="ok"]:not([aria-current]) .step__name::before {
+	content: "";
+	display: inline-block;
+	width: 5px;
+	height: 10px;
+	margin: 0 10px 0 2px;
+	border-right: 2px solid var(--phosphor);
+	border-bottom: 2px solid var(--phosphor);
+	transform: translateY(-2px) rotate(45deg);
+}
+.step[aria-current] {
+	color: var(--paper);
+}
+.step[aria-current] .step__word {
+	color: var(--paper-2);
+}
+.step[aria-current]::before {
+	background: linear-gradient(
+		to right,
+		var(--phosphor) 0 50%,
+		var(--rule) 50% 100%
+	);
+	animation: running 1.6s ease-in-out infinite alternate;
+}
+@keyframes running {
+	to {
+		opacity: 0.45;
+	}
+}
+.step[data-state="warn"],
+.step[data-state="warn"] .step__word {
+	color: var(--warn);
+}
+.step[data-state="warn"]::before {
+	background: var(--warn);
+}
+.step[data-state="fault"],
+.step[data-state="fault"] .step__word {
+	color: var(--fault);
+}
+.step[data-state="fault"]::before {
+	background: var(--fault);
+}
+
+.boot-clock {
+	display: flex;
+	align-items: baseline;
+	gap: 10px;
+	color: var(--paper-2);
+	font-size: 0.875rem;
+}
+.boot-clock__value {
+	font-size: 1.25rem;
+	color: var(--paper);
 }
 
 .boot-note {
-	margin-top: 24px;
-	padding-top: 14px;
-	border-top: 1px solid var(--rule);
-}
-.boot-note[hidden] {
-	display: none;
+	margin-top: 16px;
+	font-size: 0.9375rem;
+	color: var(--paper-2);
+	max-width: 60ch;
 }
 .boot-open {
-	margin-top: 16px;
-}
-.boot-open[hidden] {
-	display: none;
+	margin-top: 18px;
 }
 .boot-open a {
 	display: inline-flex;
 	align-items: center;
 	min-height: 44px;
+	padding: 0 18px;
+	border-radius: 8px;
+	background: var(--phosphor);
 	color: var(--ink);
-	font-weight: 600;
-	text-underline-offset: 4px;
+	font: 700 1rem/1 var(--display);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	text-decoration: none;
+}
+.boot-open a:hover {
+	background: #a3f3d9;
 }
 
-@media (max-width: 420px) {
-	.boot-screen {
-		grid-template-areas: "verdict" "rate";
-		padding: 16px 14px 18px;
-	}
-}
 @media (max-width: 559px) {
-	.boot-chain {
-		grid-template-columns: 1fr;
+	.boot-screen {
+		padding: 18px 16px;
 	}
-	.boot-chain::before {
-		right: auto;
+	.step__name {
+		font-size: 0.9375rem;
 	}
 }

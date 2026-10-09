@@ -42,6 +42,11 @@ export function formatSpaced(n: N): string {
 	)
 }
 
+/** A count with its noun, singular for exactly one: `1 restart`, `2 restarts`, `? restarts`. */
+export function counted(n: N, one: string, many = `${one}s`): string {
+	return `${formatCount(n)} ${n === 1 ? one : many}`
+}
+
 export function formatCount(n: N): string {
 	if (!isKnown(n)) return UNKNOWN
 	const r = Math.round(n)
@@ -116,7 +121,7 @@ export function formatDuration(sec: N): string {
 export function formatSampleAge(ms: N): string {
 	if (!isKnown(ms)) return UNKNOWN
 	const v = Math.max(0, ms)
-	if (v < 1000) return `${Math.floor(v)} ms`
+	if (v < 1000) return `${Math.floor(v)}ms`
 	if (v < 10_000) return `${(Math.floor(v / 100) / 10).toFixed(1)}s`
 	return formatAge(v)
 }

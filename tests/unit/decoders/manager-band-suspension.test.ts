@@ -4,13 +4,14 @@
  * The fake decoder's frontend is ~48 kHz, so its window is ±19.2 kHz.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import fc from "fast-check"
 import pino from "pino"
 import { DecoderManager } from "../../../src/decoders/manager.js"
 import type { DecoderManagerConfig } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
-import type { DecoderCaps } from "../../../src/decoders/types.js"
+import type { DecoderCaps, DecoderConfig } from "../../../src/decoders/types.js"
 import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
 
 const logger = pino({ level: "silent" })
@@ -59,12 +60,14 @@ function create(
 	id: string,
 	targets: number[] | null = [POCSAG],
 	input: DecoderCaps["input"] = "iq",
+	extra: Partial<DecoderConfig> = {},
 ) {
 	manager.createDecoder({
 		id,
 		type: "rate-test",
 		enabled: true,
 		options: { input, ...(targets ? { targets } : {}) },
+		...extra,
 	})
 	return decoders.get(id)!
 }
@@ -277,5 +280,224 @@ describe("opt-out", () => {
 		await settle()
 		expect(decoder.running).toBe(true)
 		expect(status().suspended).toBe(false)
+	})
+})
+
+describe("operator start (pin)", () => {
+	beforeEach(() => setup())
+
+	it("an operator start runs out of band and reports the assessment", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(decoder.starts).toBe(1)
+		expect(status()).toMatchObject({
+			running: true,
+			suspended: false,
+			startMode: "operator",
+			bandAssessment: { verdict: "out-of-band" },
+		})
+	})
+
+	it("run anyway: an operator start resumes a band-suspended decoder", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "auto" })
+		expect(status()).toMatchObject({ suspended: true, startMode: "auto" })
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(decoder.starts).toBe(1)
+		expect(status()).toMatchObject({
+			running: true,
+			suspended: false,
+			startMode: "operator",
+		})
+		// A later retune keeps it running, out of band.
+		sources.setCenter("rtl", ELSEWHERE + 5_000_000)
+		await settle()
+		expect(decoder.running).toBe(true)
+		expect(status()).toMatchObject({
+			suspended: false,
+			bandAssessment: { verdict: "out-of-band" },
+		})
+	})
+
+	it("returning a running pinned decoder to auto suspends it via the worker", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		const before = statusEvents.length
+		expect(manager.setStartMode("dec", "auto")).toBe(true)
+		// Published at once, suspended only by the serial worker.
+		expect(statusEvents.length).toBeGreaterThan(before)
+		expect(status()).toMatchObject({ running: true, startMode: "auto" })
+		await settle()
+		expect(decoder.running).toBe(false)
+		expect(status()).toMatchObject({
+			suspended: true,
+			suspension: { reasonCode: "frequency-out-of-band" },
+			startMode: "auto",
+		})
+		expect(manager.setStartMode("missing", "auto")).toBe(false)
+	})
+
+	it("pinning a band-suspended decoder through setStartMode resumes it", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		manager.setStartMode("dec", "operator")
+		await settle()
+		expect(decoder.running).toBe(true)
+		expect(status().suspended).toBe(false)
+	})
+
+	it("restart keeps the mode, stop clears it, startAll starts as auto", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		await manager.restartDecoder("dec")
+		expect(decoder.running).toBe(true)
+		expect(status().startMode).toBe("operator")
+
+		await manager.stopDecoder("dec")
+		expect(status().startMode).toBeUndefined() // not sent while unwanted
+		await manager.startDecoder("dec")
+		expect(status()).toMatchObject({ suspended: true, startMode: "auto" })
+
+		await manager.stopDecoder("dec")
+		await manager.startAll()
+		expect(status()).toMatchObject({ suspended: true, startMode: "auto" })
+	})
+
+	it("a crash restart keeps the pin", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(50)
+		expect(decoder.starts).toBe(2)
+		expect(status()).toMatchObject({ startMode: "operator", suspended: false })
+	})
+
+	it("pin never band-suspends; an unusable rate still suspends; auto behaves as before", async () => {
+		// Feature: decoder-band-defaults, Property 6: Pin never band-suspends
+		// Validates: §1
+		const centers = [POCSAG, POCSAG + 5_000, ELSEWHERE, 162_000_000]
+		const rates = [2_400_000, 1_024_000, 20_000]
+		const step = fc.record({
+			center: fc.constantFrom(...centers),
+			rate: fc.constantFrom(...rates),
+		})
+		await fc.assert(
+			fc.asyncProperty(
+				fc.array(step, { minLength: 1, maxLength: 4 }),
+				async steps => {
+					await manager.destroy()
+					setup()
+					sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: POCSAG })
+					create("pinned")
+					create("auto")
+					await manager.startDecoder("pinned", { startMode: "operator" })
+					await manager.startDecoder("auto", { startMode: "auto" })
+					for (const { center, rate } of steps) {
+						sources.caps.set("rtl", {
+							...iqCaps(rate),
+							centerFreq: center,
+						})
+						sources.emit("caps-changed", "rtl", sources.caps.get("rtl"))
+						await settle()
+						const pinned = status("pinned")
+						const auto = status("auto")
+						const rateUnusable = rate < 48_000
+						const outOfBand = Math.abs(center - POCSAG) > 19_200
+						expect(pinned.suspension?.reasonCode).not.toBe(
+							"frequency-out-of-band",
+						)
+						expect(pinned.suspended).toBe(rateUnusable)
+						expect(auto.suspended).toBe(rateUnusable || outOfBand)
+						if (!rateUnusable && outOfBand)
+							expect(auto.suspension?.reasonCode).toBe("frequency-out-of-band")
+					}
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+})
+
+describe("per-decoder band opt-out and overrides", () => {
+	beforeEach(() => setup())
+
+	it("config band.bandSuspension: false reports the band but never suspends", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec", [POCSAG], "iq", {
+			band: { bandSuspension: false },
+		})
+		await manager.startDecoder("dec")
+		expect(decoder.starts).toBe(1)
+		expect(status()).toMatchObject({
+			suspended: false,
+			bandAssessment: { verdict: "out-of-band", basis: "configured" },
+		})
+	})
+
+	it("an API override re-evaluates: in band resumes, DELETE suspends again", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		expect(status().suspended).toBe(true)
+
+		const settings = await manager.setBandOverride("dec", {
+			rangesHz: [
+				{ minHz: ELSEWHERE - 1_000_000, maxHz: ELSEWHERE + 1_000_000 },
+			],
+		})
+		expect(settings).toMatchObject({
+			decoderId: "dec",
+			override: {
+				rangesHz: [
+					{ minHz: ELSEWHERE - 1_000_000, maxHz: ELSEWHERE + 1_000_000 },
+				],
+			},
+			configOverride: null,
+			persisted: false,
+			region: { code: "EU", source: "default" },
+			bandAssessment: {
+				verdict: "in-band",
+				basis: "override",
+				overrideSource: "api",
+			},
+		})
+		await settle()
+		expect(decoder.running).toBe(true)
+
+		const cleared = await manager.deleteBandOverride("dec")
+		expect(cleared).toMatchObject({
+			override: null,
+			bandAssessment: { verdict: "out-of-band", basis: "configured" },
+		})
+		await settle()
+		expect(decoder.running).toBe(false)
+		expect(status().suspension?.reasonCode).toBe("frequency-out-of-band")
+		expect(await manager.setBandOverride("missing", { targetsHz: [1] })).toBe(
+			undefined,
+		)
+	})
+
+	it("an API bandSuspension: false outranks the config layer", async () => {
+		sources.caps.set("rtl", { ...iqCaps(2_400_000), centerFreq: ELSEWHERE })
+		const decoder = create("dec", [POCSAG], "iq", {
+			band: { bandSuspension: true, region: "US" },
+		})
+		await manager.startDecoder("dec")
+		expect(status().suspended).toBe(true)
+		const settings = await manager.setBandOverride("dec", {
+			bandSuspension: false,
+		})
+		expect(settings).toMatchObject({
+			configOverride: { bandSuspension: true, region: "US" },
+			region: { code: "US", source: "decoder" },
+		})
+		await settle()
+		expect(decoder.running).toBe(true)
 	})
 })
