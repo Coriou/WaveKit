@@ -20,6 +20,7 @@ import {
 	type RestInbound,
 	type RestValues,
 	type WriteIntent,
+	type WsEvent,
 } from "./types.js"
 import {
 	BACKOFF_STEPS_MS,
@@ -93,6 +94,31 @@ export function nodeRuntimeDeps(
 		timers: NODE_TIMERS,
 		summarize,
 		explicit,
+	}
+}
+
+/** WS events that refresh periodic state; they carry nothing a user is waiting on (R83). */
+export const BACKGROUND_EVENTS: ReadonlySet<WsEvent["type"]> = new Set([
+	"fanout:snapshot",
+	"metrics",
+	"source:status",
+	"resources:snapshot",
+])
+
+/**
+ * True for inbound items that should reach the screen on the next 200 ms tick.
+ * A queue holding only background items (BACKGROUND_EVENTS and REST answers)
+ * commits on the next whole second instead; any urgent item carries them along.
+ */
+export function isUrgent(item: Inbound): boolean {
+	switch (item.kind) {
+		case "rest":
+		case "rest:cycle":
+			return false
+		case "ws":
+			return !BACKGROUND_EVENTS.has(item.event.type)
+		default:
+			return true
 	}
 }
 
@@ -354,9 +380,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	function tick(): void {
 		const current = store.get()
 		const now = deps.now()
+		// Background items (periodic snapshots, heartbeats, REST answers) wait for the
+		// next whole second, when ages change anyway; anything a user waits on
+		// commits on the next 200 ms tick (D3, spec §15).
 		if (
-			queue.length === 0 &&
-			Math.floor(now / 1000) === Math.floor(current.now / 1000)
+			Math.floor(now / 1000) === Math.floor(current.now / 1000) &&
+			!queue.some(isUrgent)
 		)
 			return
 		const batch = queue.splice(0, queue.length)
