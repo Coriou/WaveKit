@@ -20,6 +20,7 @@ import type {
 import type { SourceCaps } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 import { RegistryError } from "../utils/errors.js"
+import { validateDeclaredRateRequirements } from "./rate-resolver.js"
 
 /**
  * Factory function type for creating decoder instances.
@@ -72,6 +73,12 @@ export class DecoderRegistry {
 		caps: DecoderCaps,
 		versionConstraints?: VersionConstraints,
 	): void {
+		// A malformed declaration must fail registration, never invent eligibility.
+		if (caps.rateRequirements !== undefined)
+			validateDeclaredRateRequirements(
+				caps.rateRequirements,
+				`${type}.caps.rateRequirements`,
+			)
 		this.factories.set(type, {
 			factory,
 			caps,

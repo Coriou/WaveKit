@@ -153,6 +153,29 @@ describe("TunerController", () => {
 		)
 	})
 
+	it("accepts only sample rates librtlsdr can set (225001-300000, 900001-3200000)", async () => {
+		controller.initializeSource("rtl-1", makeCaps())
+		for (const hz of [225_000, 300_001, 600_000, 900_000, 3_200_001]) {
+			await expect(controller.setSampleRate("rtl-1", hz)).rejects.toThrow(
+				TunerValidationError,
+			)
+		}
+		for (const hz of [225_001, 300_000, 900_001, 1_024_000, 3_200_000]) {
+			await controller.setSampleRate("rtl-1", hz)
+			expect(controller.getState("rtl-1")?.sampleRate).toBe(hz)
+		}
+		expect(sourceManager.updateSourceCaps).not.toHaveBeenCalledWith("rtl-1", {
+			sampleRate: 600_000,
+		})
+	})
+
+	it("ignores relay sample rates in the librtlsdr gap", () => {
+		controller.initializeSource("rtl-1", makeCaps())
+		controller.applyExternalCommand("rtl-1", 0x02, 600_000)
+		expect(controller.getState("rtl-1")?.sampleRate).toBe(2_048_000)
+		expect(sourceManager.updateSourceCaps).not.toHaveBeenCalled()
+	})
+
 	it("blocks commands when control mode is external", async () => {
 		controller.initializeSource("rtl-1", makeCaps())
 		controller.setControlMode("rtl-1", "external")

@@ -15,6 +15,7 @@
  */
 
 import { signalDecoder } from "./process-tools.js"
+import { csdrChildEnv } from "./csdr-buffers.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createInterface } from "node:readline"
@@ -144,6 +145,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 		try {
 			this.process = spawn(command, args, {
+				env: csdrChildEnv(),
 				stdio: ["pipe", "pipe", "pipe"],
 				detached: process.platform !== "win32",
 			})

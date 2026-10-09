@@ -1,4 +1,5 @@
 import { z } from "zod"
+import { ConfigValidationError } from "../utils/errors.js"
 import type {
 	DecoderInputType,
 	DecoderRateAssessment,
@@ -45,17 +46,20 @@ const requirementsSchema = z.object({
 	}),
 })
 
+/** What a decoder's stdin pipeline actually delivers for one source rate. */
+export interface DecoderRateAdapter {
+	/** Source-domain rate conversion, before any IQ-to-audio demodulation. */
+	adaptation: "none" | "integer-decimation" | "resample"
+	frontendRateHz?: number
+	decoderInputKind: DecoderInputType
+	decoderInputRateHz?: number
+	decoderInputFormat?: string
+}
+
 /** Actual adapter output supplied by the caller, not a requested target rate. */
 export interface DecoderRateContext {
 	source?: { kind: DecoderInputType; rateHz?: number }
-	adapter?: {
-		/** Source-domain rate conversion, before any IQ-to-audio demodulation. */
-		adaptation: "none" | "integer-decimation" | "resample"
-		frontendRateHz?: number
-		decoderInputKind: DecoderInputType
-		decoderInputRateHz?: number
-		decoderInputFormat?: string
-	}
+	adapter?: DecoderRateAdapter
 }
 
 const contextSchema = z.object({
@@ -145,6 +149,36 @@ export function validateDecoderRateRequirements(
 		)
 	}
 	return parsed
+}
+
+/**
+ * Validates a declaration supplied by a registry entry or decoder instance and
+ * reports any failure as a ConfigValidationError naming `label`.
+ */
+export function validateDeclaredRateRequirements(
+	value: unknown,
+	label: string,
+): DecoderRateRequirements {
+	try {
+		return validateDecoderRateRequirements(value)
+	} catch (err) {
+		if (err instanceof z.ZodError) {
+			throw new ConfigValidationError(
+				new z.ZodError(
+					err.issues.map(issue => ({ ...issue, path: [label, ...issue.path] })),
+				),
+			)
+		}
+		throw new ConfigValidationError(
+			new z.ZodError([
+				{
+					code: "custom",
+					path: [label],
+					message: err instanceof Error ? err.message : String(err),
+				},
+			]),
+		)
+	}
 }
 
 /** Pure reporting: unknown custom requirements never become a hard failure. */

@@ -2,6 +2,7 @@
 // flight at a time, paused while the tab is hidden, backing off on failure.
 import {
 	REQUEST_TIMEOUT_MS,
+	TRACE_AVERAGE_MS,
 	formatAge,
 	formatAgePrecise,
 	formatBytes,
@@ -13,6 +14,7 @@ import {
 	power,
 	readouts,
 	setupLine,
+	smoothTrace,
 	stages,
 	tracePath,
 	verdict,
@@ -126,16 +128,18 @@ function renderScreen() {
 	$("rate-unit").textContent = rate.value === "—" ? "" : rate.unit
 	$("screen").dataset.fresh = String(isFresh())
 	const expected = upstream?.expectedBytesPerSec
+	// The expected figure is printed on its line in the plot; here only the ratio.
 	if (expected && upstream?.bytesPerSec != null && isFresh()) {
 		$("rate-expected").textContent =
-			`${Math.round((upstream.bytesPerSec / expected) * 100)}% of ${formatRateText(expected)}`
+			`${Math.round((upstream.bytesPerSec / expected) * 100)}% of expected`
 	} else if (expected) {
-		$("rate-expected").textContent = `Expected ${formatRateText(expected)}`
+		// The expected rate stays labelled on its line in the plot.
+		$("rate-expected").textContent = "No current reading"
 	} else {
 		$("rate-expected").textContent =
 			upstream?.rateBasis === "client-controlled"
 				? "Rate set by a client"
-				: "Expected —"
+				: "No expected rate"
 	}
 	renderPlot()
 }
@@ -149,7 +153,7 @@ function renderPlot() {
 	// Age the snapshot by the time since it arrived so the trace keeps scrolling honestly.
 	const drift =
 		state.receivedAt == null ? 0 : performance.now() - state.receivedAt
-	const aged = points.map(([age, value]) => [age + drift, value])
+	const aged = smoothTrace(points).map(([age, value]) => [age + drift, value])
 	const trace = tracePath(aged, {
 		windowMs,
 		width: PLOT_W,
@@ -157,6 +161,7 @@ function renderPlot() {
 		max,
 	})
 	$("plot-trace").setAttribute("d", trace.d)
+	$("plot-area").setAttribute("d", trace.area)
 	$("plot-gaps").setAttribute(
 		"d",
 		trace.gaps
@@ -169,9 +174,16 @@ function renderPlot() {
 	const y = expected ? PLOT_H - (expected / max) * PLOT_H : -10
 	$("plot-expected").setAttribute("y1", y.toFixed(1))
 	$("plot-expected").setAttribute("y2", y.toFixed(1))
-	$("plot-scale").textContent =
-		`${Math.round(windowMs / 10 / 1000)} s/div · full scale ${formatRateText(max)}`
-	$("plot-key").hidden = !expected
+	// Label the dashed line where it is drawn, instead of a key below the plot.
+	const label = $("plot-label-expected")
+	label.hidden = !expected
+	label.textContent = expected ? `Expected ${formatRateText(expected)}` : ""
+	label.style.top = `${((y / PLOT_H) * 100).toFixed(2)}%`
+	$("plot-scale").textContent = [
+		`${Math.round(windowMs / 10 / 1000)} s/div`,
+		`${Math.round(TRACE_AVERAGE_MS / 1000)} s average`,
+		...(expected ? [] : [`full scale ${formatRateText(max)}`]),
+	].join(" · ")
 	state.plot = { points: aged, windowMs, max }
 	if (state.marker !== null) placeMarker(state.marker)
 }
@@ -189,14 +201,15 @@ function drawGraticule() {
 		if (i === 0 || i === 10) line.setAttribute("class", "major")
 		g.append(line)
 	}
-	for (let i = 0; i <= 4; i++) {
+	// Five divisions: the expected rate lands on the fourth (see plotMax).
+	for (let i = 0; i <= 5; i++) {
 		const line = document.createElementNS(ns, "line")
-		const yy = (PLOT_H / 4) * i
+		const yy = (PLOT_H / 5) * i
 		line.setAttribute("x1", 0)
 		line.setAttribute("x2", PLOT_W)
 		line.setAttribute("y1", yy)
 		line.setAttribute("y2", yy)
-		if (i === 4) line.setAttribute("class", "major")
+		if (i === 5) line.setAttribute("class", "major")
 		g.append(line)
 	}
 }
@@ -230,6 +243,7 @@ function placeMarker(fraction) {
 	$("marker-dot").style.display = value === null ? "none" : ""
 	// SVG elements have no `hidden` property; toggle the attribute itself.
 	$("plot-marker").removeAttribute("hidden")
+	$("plot-frame").dataset.marker = "on"
 	const readout = $("marker-readout")
 	readout.hidden = false
 	const ago = formatAgePrecise(near ? near[0] : ageAtMarker)
@@ -244,6 +258,7 @@ function hideMarker() {
 	state.marker = null
 	$("plot-marker").setAttribute("hidden", "")
 	$("marker-readout").hidden = true
+	delete $("plot-frame").dataset.marker
 }
 
 function bindPlot() {
@@ -328,6 +343,12 @@ function renderReadouts() {
 function renderSetup() {
 	const line = setupLine(state.host?.setup)
 	const fresh = isFresh()
+	// A finished (or unreported) setup is history: it moves to diagnostics.
+	const setup = state.host?.setup
+	$("setup-section").hidden =
+		!setup?.value ||
+		setup.state === "unavailable" ||
+		setup.value.state === "complete"
 	$("setup").dataset.state = fresh ? line.state : "unknown"
 	$("setup-text").textContent =
 		fresh || !state.host ? line.text : `Last known: ${line.text}`
@@ -363,8 +384,14 @@ function renderDiagnostics() {
 				)),
 	)
 	const s = status.sampling
+	const pid = (name, p) => (p?.pid == null ? null : `${name} ${p.pid}`)
+	const pids = [pid("rtl_tcp", status.rtlTcp), pid("rtlmux", status.rtlmux)]
+		.filter(Boolean)
+		.join(" · ")
 	facts($("facts-receiver"), [
 		["IQ endpoint", status.rtlmux?.endpoint],
+		["Process ids", pids || null],
+		["First-boot setup", state.host ? setupLine(state.host.setup).text : null],
 		[
 			"Configured rate",
 			status.rtlTcp?.config

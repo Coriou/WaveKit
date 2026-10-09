@@ -12,9 +12,15 @@
 
 import {
 	IqDecimateDecoder,
+	iqDecimationRates,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
-import type { DecoderCaps, DecoderConfig, DecoderOutput } from "../types.js"
+import type {
+	DecoderCaps,
+	DecoderConfig,
+	DecoderOutput,
+	DecoderRateRequirements,
+} from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Output format options for rtl_433 */
@@ -71,13 +77,25 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 	 * Calculates the effective target sample rate after integer decimation.
 	 */
 	private calculateEffectiveTargetRate(): number {
-		const inputRate = this.options.inputSampleRate ?? DEFAULT_INPUT_SAMPLE_RATE
-		const targetRate =
-			this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE
+		// Same helper as the pipeline and getRateAdapter(): integer decimation.
+		return iqDecimationRates(this.getIqDecimationConfig()).outputRate
+	}
 
-		// Decimation must be integer, so actual output rate may differ
-		const decimation = Math.round(inputRate / targetRate)
-		return decimation > 0 ? inputRate / decimation : inputRate
+	/**
+	 * rtl_433's capture and protocol needs are an evidence gap (no fixtures),
+	 * so only the stdin domain is declared and the verdict stays unknown.
+	 */
+	getRateRequirements(): DecoderRateRequirements {
+		return {
+			version: 1,
+			sourceKind: "iq",
+			decoderInput: {
+				kind: "iq",
+				format: "cu8",
+				preferredHz:
+					this.options.targetSampleRate ?? DEFAULT_TARGET_SAMPLE_RATE,
+			},
+		}
 	}
 
 	/**

@@ -17,6 +17,12 @@ export function createDecoderManagerOptions(
 			? {
 					idleTimeout: health.idleTimeout,
 					healthCheckInterval: health.checkInterval,
+					...(health.faultAfterFailures !== undefined
+						? { faultAfterFailures: health.faultAfterFailures }
+						: {}),
+					...(health.bandSuspension !== undefined
+						? { bandSuspension: health.bandSuspension }
+						: {}),
 				}
 			: {}),
 	}
