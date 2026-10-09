@@ -64,8 +64,9 @@ def load_period(file: str | None, rate: int, seed: int) -> bytes:
     """The bytes one connection replays: the file trimmed to whole I/Q pairs, or one synthetic second."""
     if not file:
         return synthesize(rate, seed)
-    data = pathlib.Path(file).read_bytes()
-    return data[: len(data) // 2 * 2]
+    path = pathlib.Path(file)
+    with path.open("rb") as f:  # one allocation: fixtures are up to ~80 MB and the container cap is small
+        return f.read(path.stat().st_size // 2 * 2)
 
 
 def next_block(period: bytes, offset: int, loop: bool) -> tuple[bytes, int, bool]:
