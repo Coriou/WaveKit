@@ -18,6 +18,8 @@ import { connect } from "node:net"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { createInterface } from "node:readline"
+import { pipeline } from "node:stream/promises"
+import { setTimeout as sleep } from "node:timers/promises"
 
 /** dsd-fme's channel bandwidth, demod and output rate (DsdFmeDecoder.getDemodConfig). */
 const CHANNEL_BANDWIDTH_HZ = 12_500
@@ -53,6 +55,7 @@ export function parseIqArgs(argv) {
 		offset,
 		front,
 		chanBin: option("--chan-bin") ?? "wavekit-chan",
+		paced: !argv.includes("--unpaced"),
 	}
 }
 
@@ -126,13 +129,38 @@ export function openRequest(offset) {
 }
 
 /**
+ * A pipeline stage that releases the capture at `bytesPerSecond` (real time
+ * for cu8 is 2 bytes per sample), or as fast as it is read when null.
+ */
+export function pace(
+	bytesPerSecond,
+	clock = { now: () => performance.now(), sleep },
+) {
+	return async function* (source) {
+		const start = clock.now()
+		let sent = 0
+		for await (const chunk of source) {
+			yield chunk
+			sent += chunk.length
+			if (bytesPerSecond === null) continue
+			const due = start + (sent * 1000) / bytesPerSecond - clock.now()
+			if (due > 0) await clock.sleep(due)
+		}
+	}
+}
+
+/**
  * Feeds `sink` the channel's cf32 output: spawns wavekit-chan, opens one
  * channel over fd 3, connects to its socket and only then streams the cu8
- * file into stdin, so no IQ passes before the channel exists. The socket is
- * read without backpressure so the channel queue never overflows (paced: no
- * discontinuities expected). Resolves on exit with { discontinuities, error }.
+ * file into stdin, paced at real time unless `paced` is false (delta §8 risk
+ * 4: the voice gate runs paced), so no IQ passes before the channel exists.
+ * The socket is read without backpressure so the channel queue never
+ * overflows (no discontinuities expected). A run passes only if it ends with
+ * `input-eof` counting every fed byte and discarding none, with no `closed`
+ * before it, so a truncated tail cannot pass silently. Resolves on exit with
+ * { discontinuities, error }.
  */
-export function chanFeed({ chanBin, iq, rate, offset }, sink) {
+export function chanFeed({ chanBin, iq, rate, offset, paced }, sink) {
 	const dir = mkdtempSync(join(tmpdir(), "wkchan-"))
 	const chan = spawn(chanBin, chanArgs(rate, dir), {
 		stdio: ["pipe", "pipe", "inherit", "pipe"],
@@ -144,8 +172,23 @@ export function chanFeed({ chanBin, iq, rate, offset }, sink) {
 		chan.kill()
 	}
 	let socket = null
+	let eof = null
+	let fed = 0
+	const feedCapture = () =>
+		pipeline(
+			createReadStream(iq),
+			pace(paced === false ? null : 2 * rate),
+			async function* (source) {
+				for await (const chunk of source) {
+					fed += chunk.length
+					yield chunk
+				}
+			},
+			chan.stdin,
+		).catch(err => fail(`capture: ${err.message}`))
 	sink.on("error", () => {}) // dsd-fme may exit first; its exit code tells
-	chan.stdin.on("error", () => {})
+	chan.stdin.on("error", () => {}) // reported through feedCapture
+	chan.stdio[3]?.on("error", err => fail(`control fd: ${err.message}`))
 	chan.on("error", err => fail(`spawn ${chanBin}: ${err.message}`))
 	createInterface({ input: chan.stdout }).on("line", line => {
 		let event
@@ -155,13 +198,19 @@ export function chanFeed({ chanBin, iq, rate, offset }, sink) {
 			return fail(`unparsable event: ${line}`)
 		}
 		if (event.type === "ready")
-			chan.stdio[3].write(`${JSON.stringify(openRequest(offset))}\n`)
+			chan.stdio[3].write(
+				`${JSON.stringify(openRequest(offset))}\n`,
+				err => err && fail(`control fd: ${err.message}`),
+			)
 		else if (event.type === "rejected")
 			fail(`channel rejected: ${event.reasonCode} ${event.detail}`)
 		else if (event.type === "discontinuity") result.discontinuities++
+		else if (event.type === "input-eof") eof = event
+		else if (event.type === "closed" && !eof)
+			fail(`channel closed before input-eof: ${event.reason}`)
 		else if (event.type === "opened" && !socket) {
 			socket = connect(event.socket)
-			socket.on("connect", () => createReadStream(iq).pipe(chan.stdin))
+			socket.on("connect", () => void feedCapture())
 			socket.on("data", chunk => sink.write(chunk))
 			socket.on("error", err => fail(`channel socket: ${err.message}`))
 			socket.on("close", endSink)
@@ -171,6 +220,11 @@ export function chanFeed({ chanBin, iq, rate, offset }, sink) {
 		chan.on("close", code => {
 			rmSync(dir, { recursive: true, force: true })
 			if (code !== 0) result.error ??= `wavekit-chan exited ${code}`
+			else if (!eof) result.error ??= "wavekit-chan exited without input-eof"
+			else if (eof.discardedBytes !== 0)
+				result.error ??= `input-eof discarded ${eof.discardedBytes} byte(s) (odd-length capture)`
+			else if (eof.inputSamples * 2 !== fed)
+				result.error ??= `input-eof counted ${eof.inputSamples} samples, ${fed / 2} fed`
 			if (!socket) endSink()
 			resolve(result)
 		}),

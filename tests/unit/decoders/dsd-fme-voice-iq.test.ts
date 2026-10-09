@@ -4,7 +4,15 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { PassThrough } from "node:stream"
 import { fileURLToPath } from "node:url"
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest"
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest"
 import pino from "pino"
 import { DsdFmeDecoder } from "../../../src/decoders/builtin/dsd-fme.js"
 import { buildChannelizerArgs } from "../../../src/core/channelizer/channelizer-process.js"
@@ -19,10 +27,15 @@ interface IqOptions {
 	offset: number
 	front: "csdr" | "chan"
 	chanBin: string
+	paced: boolean
 }
 interface FeedResult {
 	discontinuities: number
 	error: string | null
+}
+interface Clock {
+	now(): number
+	sleep(ms: number): Promise<void>
 }
 /** scripts/dsd-fme-voice-iq.mjs (plain JS, no declarations). */
 interface VoiceIq {
@@ -34,6 +47,10 @@ interface VoiceIq {
 	chanArgs(rate: number, socketDir: string): string[]
 	openRequest(offset: number): ChannelizerRequest
 	chanFeed(options: IqOptions, sink: PassThrough): Promise<FeedResult>
+	pace(
+		bytesPerSecond: number | null,
+		clock?: Clock,
+	): (source: AsyncIterable<Buffer>) => AsyncGenerator<Buffer>
 	linkLines(decoded: string): Set<string>
 }
 const scriptUrl = (name: string) =>
@@ -80,6 +97,7 @@ describe("dsd-fme voice A/B IQ mode", () => {
 			offset: 6000,
 			front: "chan",
 			chanBin: "wavekit-chan",
+			paced: true,
 		})
 		expect(
 			iq.parseIqArgs([
@@ -94,6 +112,9 @@ describe("dsd-fme voice A/B IQ mode", () => {
 			]),
 		).toMatchObject({ offset: 0, front: "csdr", chanBin: "/opt/wavekit-chan" })
 		const base = ["--iq", "a.cu8", "--rate", "2048000"]
+		expect(
+			iq.parseIqArgs([...base, "--front", "chan", "--unpaced"]),
+		).toMatchObject({ paced: false })
 		expect(() => iq.parseIqArgs(base)).toThrow(/--front/)
 		expect(() => iq.parseIqArgs([...base, "--front", "sdr"])).toThrow(/--front/)
 		expect(() =>
@@ -176,9 +197,9 @@ describe("dsd-fme voice A/B IQ mode", () => {
 		const bin = join(root, "wavekit-chan")
 		writeExecutable(bin, FAKE_WAVEKIT_CHAN)
 		// The real process queues output until its client is accepted; the fake
-		// drops input until it registers the client, so hold its stdin briefly.
+		// drops input until it registers the client, so hold its stdin for the
+		// stall mode's default 1 500 ms (a wide margin on a loaded host).
 		vi.stubEnv("FAKE_CHAN_MODE", "stall-input")
-		vi.stubEnv("FAKE_CHAN_STALL_MS", "300")
 		const capture = join(root, "capture.cu8")
 		const bytes = randomBytes(64 * 1024)
 		writeFileSync(capture, bytes)
@@ -188,7 +209,14 @@ describe("dsd-fme voice A/B IQ mode", () => {
 			sink.on("data", (c: Buffer) => chunks.push(c))
 			const ended = new Promise(resolve => sink.on("end", resolve))
 			const result = await iq.chanFeed(
-				{ iq: capture, rate: 2_048_000, offset, front: "chan", chanBin: bin },
+				{
+					iq: capture,
+					rate: 2_048_000,
+					offset,
+					front: "chan",
+					chanBin: bin,
+					paced: true,
+				},
 				sink,
 			)
 			await ended
@@ -215,10 +243,136 @@ describe("dsd-fme voice A/B IQ mode", () => {
 				offset: 0,
 				front: "chan",
 				chanBin: join(root, "no-such-wavekit-chan"),
+				paced: true,
 			},
 			sink,
 		)
 		expect(result.error).toMatch(/spawn .*no-such-wavekit-chan/)
 		expect(sink.writableEnded).toBe(true)
+	})
+
+	it("paces the feed at the given byte rate, or not at all when unpaced", async () => {
+		const chunks = Array.from({ length: 5 }, () => Buffer.alloc(1000))
+		const run = async (bytesPerSecond: number | null) => {
+			let t = 0
+			const sleeps: number[] = []
+			const clock: Clock = {
+				now: () => t,
+				sleep: async ms => {
+					sleeps.push(ms)
+					t += ms
+				},
+			}
+			const out: Buffer[] = []
+			for await (const c of iq.pace(
+				bytesPerSecond,
+				clock,
+			)(
+				(async function* () {
+					yield* chunks
+				})(),
+			))
+				out.push(c)
+			expect(Buffer.concat(out).length).toBe(5000)
+			return { t, sleeps }
+		}
+		// 5 000 bytes at 10 000 B/s take 500 ms of wall time, every byte on time.
+		expect((await run(10_000)).t).toBe(500)
+		expect(await run(null)).toEqual({ t: 0, sleeps: [] })
+	})
+
+	describe("against a minimal wavekit-chan", () => {
+		// Opens one channel, counts stdin and ends like runtime.rs (input-eof with
+		// inputSamples / discardedBytes, exit 0) unless MINI_CHAN_MODE says otherwise.
+		const MINI = `#!/usr/bin/env node
+const fs = require("node:fs"), net = require("node:net"), path = require("node:path"), readline = require("node:readline")
+const argv = process.argv.slice(2), dir = argv[argv.indexOf("--socket-dir") + 1], mode = process.env.MINI_CHAN_MODE || "normal"
+const emit = e => process.stdout.write(JSON.stringify({ v: 1, generation: 1, ...e }) + "\\n")
+const quit = () => process.stdout.write("", () => process.exit(0))
+let n = 0, client = null
+if (mode === "epipe") { fs.closeSync(3); emit({ type: "ready", pid: process.pid }); setTimeout(() => {}, 500) }
+else {
+  emit({ type: "ready", pid: process.pid })
+  readline.createInterface({ input: new net.Socket({ fd: 3, readable: true, writable: false }) }).on("line", line => {
+    const r = JSON.parse(line), sock = path.join(dir, r.id + ".sock")
+    const server = net.createServer(c => {
+      client = c; server.close()
+      if (mode === "closed-early") { emit({ type: "closed", id: r.id, reason: "client-gone" }); c.end(); setTimeout(quit, 200) }
+    })
+    server.listen(sock, () => emit({ type: "opened", id: r.id, socket: sock, outputRateHz: 48000, format: "cf32", filterTaps: 11, groupDelaySamples: 5 }))
+  })
+  process.stdin.on("data", b => { n += b.length })
+  process.stdin.on("end", () => {
+    if (mode !== "no-eof") emit({ type: "input-eof", inputSamples: Math.floor(n / 2) - (mode === "short-count" ? 1 : 0), discardedBytes: n % 2 })
+    client?.end(); quit()
+  })
+}
+`
+		const bin = join(root, "mini-wavekit-chan")
+		beforeAll(() => writeExecutable(bin, MINI))
+		const feed = async (mode: string, size: number, rate = 2_048_000) => {
+			vi.stubEnv("MINI_CHAN_MODE", mode)
+			const capture = join(root, `mini-${size}.cu8`)
+			if (size >= 0) writeFileSync(capture, Buffer.alloc(size))
+			const sink = new PassThrough().resume()
+			const started = performance.now()
+			const result = await iq.chanFeed(
+				{
+					iq: size >= 0 ? capture : join(root, "missing.cu8"),
+					rate,
+					offset: 0,
+					front: "chan",
+					chanBin: bin,
+					paced: true,
+				},
+				sink,
+			)
+			return { result, ms: performance.now() - started }
+		}
+
+		it("passes a run that ends with a matching input-eof", async () => {
+			expect((await feed("normal", 4096)).result).toEqual({
+				discontinuities: 0,
+				error: null,
+			})
+		})
+
+		it("paces the capture at 2 bytes per sample in real time by default", async () => {
+			// 48 000 bytes at 48 000 samples/s: half a second of capture.
+			const { result, ms } = await feed("normal", 48_000, 48_000)
+			expect(result.error).toBeNull()
+			expect(ms).toBeGreaterThanOrEqual(450)
+		})
+
+		it("fails on a capture read error instead of throwing", async () => {
+			expect((await feed("normal", -1)).result.error).toMatch(
+				/capture: .*ENOENT/,
+			)
+		})
+
+		it("fails on a control fd write error instead of throwing", async () => {
+			expect((await feed("epipe", 4096)).result.error).toMatch(/control fd: /)
+		})
+
+		it("fails when the channel closes before input-eof", async () => {
+			expect((await feed("closed-early", 4096)).result.error).toMatch(
+				/closed before input-eof: client-gone/,
+			)
+		})
+
+		it("fails when wavekit-chan exits without input-eof", async () => {
+			expect((await feed("no-eof", 4096)).result.error).toMatch(
+				/without input-eof/,
+			)
+		})
+
+		it("fails when input-eof discards bytes or misses samples", async () => {
+			expect((await feed("normal", 4097)).result.error).toMatch(
+				/discarded 1 byte/,
+			)
+			expect((await feed("short-count", 4096)).result.error).toMatch(
+				/input-eof counted 2047 samples, 2048 fed/,
+			)
+		})
 	})
 })

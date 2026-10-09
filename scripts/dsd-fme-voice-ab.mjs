@@ -30,7 +30,7 @@
  * instead of the discriminator output (scripts/dsd-fme-voice-iq.mjs):
  *
  *   ... /w/scripts/dsd-fme-voice-ab.mjs --iq <cu8> --rate <fs> \
- *     --offset <hz> --front csdr|chan [--chan-bin wavekit-chan]
+ *     --offset <hz> --front csdr|chan [--chan-bin wavekit-chan] [--unpaced]
  *
  * --front csdr   the decoder's raw front: convert | shift | matched
  *                firdecimate | fmdemod, then BACK_CHAIN and the WAV wrapper.
@@ -40,6 +40,8 @@
  *                the three-way check; the chan front's TGT/SRC lines must
  *                equal the csdr front's, and its AMBE errors must not exceed
  *                max(1.25 x csdr, csdr + 20) (PROVISIONAL, PF16).
+ * --unpaced     feed the chan front as fast as it reads (default: real time,
+ *                2 bytes per sample, as the voice gate runs paced).
  * Exit code 0 on success, 1 on failure.
  */
 
