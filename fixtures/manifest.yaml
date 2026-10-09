@@ -8,66 +8,97 @@ version: 2
 fixtures: []
 
 candidates:
+  # Probed 2026-10-09 (channelizer T6a). Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
+  # "cu8 sha256" is the file after download.sh `transform: wav-to-cu8` (sox 14.4.2).
   - id: sigid_pocsag
     decoder: multimon-ng
     url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
     license: null
     blockers:
       [
-        "license unverified",
-        "sample rate and centre not verified from file metadata",
+        "license unverified: https://www.sigidwiki.com/wiki/File:POCSAG_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "centre frequency unknown: no metadata chunk, no frequency in the name or on the page",
       ]
+    notes: "archive sha256 45bcba81cd4a0a50d1a0519bf4c484fc7513da18021eb2faed79cb03378c6353 (1242272 B); member POCSAG_IQ.wav: u8 IQ WAV, 128000 Hz, 16.364 s; cu8 sha256 2218e1ce0a3e1e82d3b402a90f2a277eb8d87380e15c14eb0080b97776dc60c1. Role if licensed: tail-golden."
   - id: sigid_flex
     decoder: multimon-ng
     url: https://www.sigidwiki.com/images/e/ec/FLEX_Pager_IQ_20150816_929613kHz_IQ.zip
     license: null
     blockers:
       [
-        "license unverified",
-        "sample rate unverified (centre 929613000 from filename)",
+        "license unverified: https://www.sigidwiki.com/wiki/File:FLEX_Pager_IQ_20150816_929613kHz_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "39062 Hz is below multimon-ng's 48000 Hz capture minimum (insufficient-sample-rate)",
+        "peak level 0.011 FS: wav-to-cu8 without gain leaves about 1.5 LSB of signal",
       ]
+    notes: "archive sha256 68e84a9b0d435cd0d692200f55de1e25d0ec131c0fd133f93fa3666029be9333 (2470938 B); member 'FLEX Pager IQ 20150816_929613kHz_IQ.wav': s16 IQ WAV, 39062 Hz, 28.099 s, centre 929613000 from the file name only (no metadata chunk); cu8 sha256 3152690901c9bfc472ecc1536cc91d0ecd8005409a115dc9fd7421a74159b355."
   - id: sigid_vdlm2_iq
     decoder: dumpvdl2
     url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
     license: null
     blockers:
       [
-        "v1 listed this archive twice (as IQ and as 48 kHz audio); contents must be inspected",
-        "license unverified",
+        "license unverified: https://www.sigidwiki.com/wiki/File:VDL-M2_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "48000 Hz is not a multiple of 105000 Hz, which dumpvdl2 requires",
+        "centre frequency unknown: no metadata chunk",
       ]
+    notes: "archive sha256 c81f78a3b59101eaab0e33739c5b8ea58b9c1b30de688b91b527f85c7399c022 (7187114 B); one member 'VDL2 IQ.wav': s16 2-channel WAV, 48000 Hz, 46.9 s, I/Q uncorrelated (complex IQ, not stereo audio); cu8 sha256 3d629c32ea36432535e51b1a6217ae67a56fd4d6cd2f2c3ed1bb18c83df90c16."
   - id: sigid_acars
     decoder: acarsdec
     url: https://www.sigidwiki.com/images/0/00/ACARS_IQ.zip
     license: null
     blockers:
-      ["135498 Hz f32 narrowband: tail-golden at most", "license unverified"]
+      [
+        "license unverified: https://www.sigidwiki.com/wiki/File:ACARS_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "f32 WAV at full scale (RMS 0.87): wav-to-cu8 clips 611828 of 938770 samples",
+      ]
+    notes: "archive sha256 de9ace984b89d119fe7434ad9bf8bee19846d20514f95d17447580df2ed39d61 (3496378 B); member acars_IQ.wav: f32 IQ WAV, 135498 Hz, 3.464 s, FREQ chunk centre 131726151 Hz (SignalHound BB60C). Role if licensed: tail-golden."
   - id: sdrangel_dsd
     decoder: dsd-fme
     url: https://www.sdrangel.org/iq/dsd.zip
     license: null
-    blockers: ["75 kHz s16: tail-golden at most", "license unverified"]
+    blockers:
+      [
+        "license unverified: https://www.sdrangel.org/iq-files/ states none",
+        "content is YSF digital speech (page), not DMR: needs a dsd-fme YSF mode",
+      ]
+    notes: "archive sha256 fdeb3d0831882a4cf6614c6c43567df01a0c94ba4f876bdc9879cf17ebd99797 (3827980 B); member dsd.2021-12-02T16_44_54_046.wav: s16 IQ WAV, 74999 Hz, 15.943 s, auxi centre 145687500 Hz; cu8 sha256 8d7994696efe0adec16f31e1b41bdf669e683289634c1ddbd60792a65f531343. Role if licensed: tail-golden."
   - id: sdrplay_ais
     decoder: ais-catcher
-    url: https://sdrplay.com/resources/IQ/AIS.zip
+    url: https://sdrplay.com/resources/IQ/ais.zip
     license: null
-    blockers: ["WAV rate/centre unverified", "license unverified"]
+    blockers:
+      [
+        "license unverified: https://www.sdrplay.com/iq-demo-files/ (Wayback 20260712032104) states none, only 'for technical evaluation purposes ... as is without support'",
+        "hosting URL returns 404 on 2026-10-09 (AIS.zip and ais.zip); only a Wayback copy (20220402123107) exists",
+        "62500 Hz capture centred on 161985000 covers AIS channel A only",
+      ]
+    notes: "Wayback archive sha256 8acecdb2c5d37255a84182ec7e819f940d0f8c0e002890eb1801f68293fe1807 (16518385 B); member ais/SDRuno_20200907_184926Z_161985kHz.wav: s16 IQ WAV, 62500 Hz, 75.784 s, auxi centre 161985000 Hz, peak 0.084 FS; cu8 sha256 2adfb46443a9e4966acd5444382dc81da098606d19f533aa645f2b106e044906."
   - id: sdrangel_adsb
     decoder: readsb
     url: https://www.sdrangel.org/iq/adsb.zip
     license: null
     blockers:
-      ["460 MB: readsb raw baseline only (large: true)", "license unverified"]
+      ["license unverified: https://www.sdrangel.org/iq-files/ states none"]
+    notes: "archive sha256 67b99c06fe7ca6b3c21d493f36760bad4b9fb46db4e7a4dade699e7ccdd5a2fb (471265240 B); member adsb.2021-11-26T15_03_30_573.wav: s16 IQ WAV, 2400000 Hz, 102.088 s, auxi centre 1090000000 Hz, member sha256 3daaa515dfe6dfc5573c4a031ce4c0531c4bb7025813b7aef268a424b9351633; cu8 sha256 bded99b1a3d6fe4aa31e2092b631a5b5e3cbbc2d534f4089bd54e89c59ae4b8a (490020864 B). Role if licensed: tail-golden, large: true."
   - id: sdrplay_acars
     decoder: acarsdec
     url: https://sdrplay.com/resources/IQ/acars.zip
     license: null
-    blockers: ["539 MB WAV; rate estimated", "license unverified"]
+    blockers:
+      [
+        "license unverified: https://www.sdrplay.com/iq-demo-files/ (Wayback 20260712032104) states none",
+        "hosting URL returns 404 on 2026-10-09; not downloaded (539 MB Wayback copy only)",
+        "WAV rate and centre unverified",
+      ]
   - id: rtl433_tests_repo
     decoder: rtl433
     url: https://github.com/merbanan/rtl_433_tests
     license: null
     blockers:
-      ["per-sample selection needed; tail-golden (narrow rates, no capture)"]
+      [
+        "license unverified: the repo has no LICENSE file, GitHub reports no license and the README states none",
+      ]
+    notes: "Samples chosen at commit 1aa8c29d6b9383739d1aeed495dbc5069b704392, one tail-golden each, fetched by raw URL: acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8 (d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641), fineoffset/fineoffset_wh32/g001_868.3M_1000k.cu8 (7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e), olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8 (2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d)."
   - id: lora_meshtastic_placeholder
     decoder: lora-meshtastic
     url: null
