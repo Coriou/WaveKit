@@ -1,0 +1,64 @@
+{
+	"schemaVersion": 1,
+	"source": "https://github.com/Coriou/WaveKit/blob/main/.kiro/steering/product.md",
+	"sourceBlobSha": "43bac806a9bb4bf423181b331b7ab6355646acfc",
+	"scope": "Capabilities listed in repository product documentation, not a claim that every decoder is enabled in every deployment.",
+	"categories": [
+		{
+			"id": "aircraft",
+			"label": "Aircraft",
+			"signals": ["ADS-B"],
+			"decoderNamesInternalOnly": ["readsb"],
+			"icon": "icons/mono/aircraft.svg"
+		},
+		{
+			"id": "marine",
+			"label": "Marine",
+			"signals": ["AIS"],
+			"decoderNamesInternalOnly": ["AIS-catcher"],
+			"icon": "icons/mono/marine.svg"
+		},
+		{
+			"id": "aviation-data",
+			"label": "Aviation data",
+			"signals": ["ACARS", "VDL2"],
+			"decoderNamesInternalOnly": ["acarsdec", "dumpvdl2"],
+			"icon": "icons/mono/aviation-data.svg"
+		},
+		{
+			"id": "voice",
+			"label": "Voice",
+			"signals": ["DMR", "P25", "YSF"],
+			"decoderNamesInternalOnly": ["dsd-fme"],
+			"icon": "icons/mono/voice.svg"
+		},
+		{
+			"id": "paging",
+			"label": "Paging",
+			"signals": ["POCSAG", "FLEX"],
+			"decoderNamesInternalOnly": ["multimon-ng"],
+			"icon": "icons/mono/paging.svg"
+		},
+		{
+			"id": "aprs",
+			"label": "APRS",
+			"signals": ["APRS"],
+			"decoderNamesInternalOnly": ["direwolf"],
+			"icon": "icons/mono/aprs.svg"
+		},
+		{
+			"id": "sensors",
+			"label": "Sensors",
+			"signals": ["ISM sensor telemetry"],
+			"decoderNamesInternalOnly": ["rtl_433"],
+			"icon": "icons/mono/sensors.svg"
+		},
+		{
+			"id": "mesh",
+			"label": "Mesh",
+			"signals": ["Meshtastic LoRa"],
+			"decoderNamesInternalOnly": ["lora-meshtastic"],
+			"icon": "icons/mono/mesh.svg"
+		}
+	]
+}

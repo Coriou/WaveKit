@@ -1,0 +1,178 @@
+/* WaveKit live typography: D-DIN Condensed (display) + Noto Sans (body/UI).
+   Font paths are relative to this file and expect the package layout
+   (tokens/ next to fonts/). Keep that layout when vendoring a copy.
+   Logo and board SVGs are outlined and do not depend on this stylesheet.
+   Font licences: fonts/d-din/OFL.txt, fonts/noto-sans/OFL.txt. */
+
+/* D-DIN Condensed: upstream WOFF2, unmodified (Reserved Font Name). */
+@font-face {
+	font-family: "D-DIN Condensed";
+	font-style: normal;
+	font-weight: 400;
+	font-display: fallback;
+	src: url("../fonts/d-din/D-DINCondensed.woff2") format("woff2");
+}
+@font-face {
+	font-family: "D-DIN Condensed";
+	font-style: normal;
+	font-weight: 700;
+	font-display: fallback;
+	src: url("../fonts/d-din/D-DINCondensed-Bold.woff2") format("woff2");
+}
+
+/* Noto Sans 2.015: Latin + status-UI symbol subset (source/subset_fonts.py). */
+@font-face {
+	font-family: "Noto Sans";
+	font-style: normal;
+	font-weight: 400;
+	font-display: fallback;
+	src: url("../fonts/noto-sans/NotoSans-Regular.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Noto Sans";
+	font-style: normal;
+	font-weight: 700;
+	font-display: fallback;
+	src: url("../fonts/noto-sans/NotoSans-Bold.woff2") format("woff2");
+}
+@font-face {
+	font-family: "Noto Sans";
+	font-style: italic;
+	font-weight: 400;
+	font-display: fallback;
+	src: url("../fonts/noto-sans/NotoSans-Italic.woff2") format("woff2");
+}
+
+/* Metric-matched local fallbacks, from the owner's R48 specification
+   (docs/TYPOGRAPHY.md). D-DIN has no U+202F; Noto supplies it. */
+@font-face {
+	font-family: "D-DIN Condensed Repli";
+	src: local("Arial Narrow");
+	font-style: normal;
+	font-weight: 400;
+	font-display: fallback;
+	size-adjust: 77.1%;
+	ascent-override: 107.8%;
+	descent-override: 21.9%;
+	line-gap-override: 11.2%;
+	unicode-range: U+0000-202E, U+2030-10FFFF;
+}
+@font-face {
+	font-family: "D-DIN Condensed Repli";
+	src: local("Arial Narrow Bold");
+	font-style: normal;
+	font-weight: 700;
+	font-display: fallback;
+	size-adjust: 77.1%;
+	ascent-override: 107.8%;
+	descent-override: 21.9%;
+	line-gap-override: 11.2%;
+	unicode-range: U+0000-202E, U+2030-10FFFF;
+}
+@font-face {
+	font-family: "Noto Sans Repli";
+	src: local("Arial");
+	font-style: normal;
+	font-weight: 400;
+	font-display: fallback;
+	size-adjust: 104.5%;
+	ascent-override: 102.3%;
+	descent-override: 28%;
+	line-gap-override: 0%;
+}
+@font-face {
+	font-family: "Noto Sans Repli";
+	src: local("Arial Bold");
+	font-style: normal;
+	font-weight: 700;
+	font-display: fallback;
+	size-adjust: 104.5%;
+	ascent-override: 102.3%;
+	descent-override: 28%;
+	line-gap-override: 0%;
+}
+@font-face {
+	font-family: "Noto Sans Repli";
+	src: local("Arial Italic");
+	font-style: italic;
+	font-weight: 400;
+	font-display: fallback;
+	size-adjust: 104.5%;
+	ascent-override: 102.3%;
+	descent-override: 28%;
+	line-gap-override: 0%;
+}
+
+:root {
+	--wk-font-display:
+		"D-DIN Condensed", "D-DIN Condensed Repli", "Noto Sans", sans-serif;
+	--wk-font-body:
+		"Noto Sans", "Noto Sans Repli", -apple-system, BlinkMacSystemFont,
+		"Segoe UI", sans-serif;
+	--wk-size-body: 1.125rem;
+	--wk-line-body: 1.62;
+	--wk-size-ui: 1rem;
+	--wk-line-ui: 1.45;
+	--wk-size-caption: 0.875rem;
+	--wk-reading-measure: 64ch;
+	--wk-rhythm: clamp(1.25rem, 3vw, 2rem);
+	--wk-gutter: clamp(1.25rem, 5vw, 4.5rem);
+}
+
+.wk-type {
+	font-family: var(--wk-font-body);
+	font-kerning: normal;
+	text-rendering: optimizeLegibility;
+	font-synthesis: none;
+}
+.wk-prose {
+	font: 400 var(--wk-size-body) / var(--wk-line-body) var(--wk-font-body);
+	max-width: var(--wk-reading-measure);
+	overflow-wrap: break-word;
+}
+.wk-prose :is(p, li) {
+	text-wrap: pretty;
+	hyphens: auto;
+	hyphenate-limit-chars: 8 4 4;
+}
+.wk-prose li + li {
+	margin-top: 0.4em;
+}
+.wk-prose p + :is(ul, ol) {
+	margin-top: 0.55em;
+}
+.wk-prose[data-reading-size="large"] {
+	--wk-size-body: 1.375rem;
+	--wk-line-body: 1.56;
+}
+.wk-display {
+	font: 700 clamp(2.6rem, 1rem + 7vw, 6.75rem) / 0.96 var(--wk-font-display);
+	letter-spacing: -0.005em;
+	text-wrap: balance;
+}
+.wk-section-title {
+	font: 700 clamp(2.2rem, 1.5rem + 3vw, 4.25rem) / 1 var(--wk-font-display);
+	letter-spacing: -0.005em;
+	text-wrap: balance;
+}
+.wk-deck {
+	font: 400 clamp(1.25rem, 1rem + 1vw, 1.875rem) / 1.2 var(--wk-font-display);
+	letter-spacing: 0.005em;
+	max-width: 52ch;
+	text-wrap: pretty;
+}
+.wk-label {
+	font: 700 1rem/1.2 var(--wk-font-display);
+	letter-spacing: 0.03em;
+}
+.wk-ui {
+	font: 400 var(--wk-size-ui) / var(--wk-line-ui) var(--wk-font-body);
+}
+.wk-caption {
+	font: 400 var(--wk-size-caption) / 1.5 var(--wk-font-body);
+}
+/* Noto Sans has tabular figures; D-DIN Condensed does not (proportional digits,
+   no tnum feature). Set live-updating numbers in the body face. */
+.wk-numeric {
+	font-variant-numeric: tabular-nums;
+}
