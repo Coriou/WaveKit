@@ -712,3 +712,71 @@ All additive. Details in `docs/DIGITAL-VOICE.md` and `docs/API.md`.
   - New dsd-fme options `voiceSlot`, `perCallRecordingMaxTotalMb`, `perCallRecordingMaxAgeHours`.
   - An explicit `output: "null"` opts a decoder out.
 - **Suggested UI:** a "listen" affordance on dsd-fme rows while `active`, showing TG/source/slot and an encrypted badge.
+
+### Core: proposed contract for the signal discovery scanner — pending review, NOT merged (2026-10-09, design only)
+
+Design-only proposal (ROADMAP §5); nothing is implemented. Spec:
+`docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md` (§12 API, §17 CLI hooks); plan:
+`docs/superpowers/plans/2026-10-09-signal-discovery-scanner.md`. Implementation starts after the core channelizer
+merges; names may still change before merge. Everything is additive and optional. Please ack or comment here.
+- **New types:** `packages/api-types/src/scanner.ts` — `ScanJob`, `ScanJobSpec`, `PlanPreview`, `PlanIssue`, `Impact`,
+  `Discovery`, `Observation`, `ScannerStatus`, `ScannerSettings`, `Bandplan`, WS payloads. Confidence ladder
+  `activity` → `candidate` → `classified` → `decoded`; `encrypted` is a separate sticky flag.
+- **REST** under `/api/scanner`: `GET /` (status), `GET|PATCH /settings`, `GET /bandplans`, `POST /plan` (pure preview:
+  hops, sweep period, POI, CPU/disk, impact, `issues[]` with `error`/`warning`), `POST|GET /jobs`, `GET|PATCH|DELETE
+  /jobs/:id`, `POST /jobs/:id/pause|resume|cancel`, `GET /discoveries` (filters + cursor), `GET|PATCH|DELETE
+  /discoveries/:id`, `GET /discoveries/:id/observations`, `GET /recordings/:id` (WAV), `GET
+  /discoveries/:id/evidence/psd|iq`, `POST /discoveries/:id/listen`.
+- **Errors:** 409 `SCANNER_TAKEOVER_REQUIRED` (body `impact`; resend with `takeover: true`), `SCANNER_SOURCE_BUSY`
+  (SDR++/relay has control), `SCANNER_NO_TUNER_CONTROL`, `OUT_OF_WINDOW`; decoder routes gain 409
+  `DECODER_OWNED_BY_SCANNER` and `SOURCE_HELD_BY_SCANNER`.
+- **WS:** new channel `scanner` (`scanner:job`, `scanner:progress` ≤ 2 Hz/job, `scanner:discovery` coalesced ≤ 1/s per
+  discovery, `scanner:activity` ≤ 10/s, `scanner:monitor`, `scanner:status`; ≤ 10 msg/s in total) and opt-in channel
+  `scanner-spectrum` (`scanner:spectrum`, ≤ 2 Hz, ≤ 512 bins max-hold dBFS, floor, threshold, track spans). `decoders`
+  channel gains `decoder:created` / `decoder:removed` (scanner probes come and go at runtime).
+- **`DecoderStatus`:** optional `owner?: "config" | "scanner"`, `scannerJobId?`, `ephemeral?: true`. Suspension reason
+  `tuner-scanning` (configured decoders on a source are held once for a whole sweep, not re-suspended per hop).
+- **`tuner:command-sent`:** optional `origin?: "rest" | "scanner" | "replay"`.
+- **Digital voice port 8082:** probe streams at `/decoders/<probeId>/stream[.wav]`; listen-scan streams at
+  `/scanner/<jobId>/stream[.wav]` (8 kHz s16 mono). `/stream` stays bound to configured decoders.
+- **Config:** `scanner:` section (on by default, incl. passive in-window discovery per source) and
+  `sources[i].scanner {role: "shared"|"dedicated", passive}`.
+- **Suggested UI:** view `6 Scan` (jobs, hop strip from `plan.hops[]`, spectrum line, discoveries table with
+  `ACT`/`CAND`/`CLASS`/`DEC` and encrypted badges); new-job flow = bandplan preset → range edit → `POST /plan` preview
+  with issues and impact in the confirm bar → `y`; takeover confirmation lists the impact; `rx` lane shows
+  `scanning 412.6 MHz · hop 7/44` / `paused (SDR++)`; Messages preset `discoveries`; hide or group `owner: "scanner"`
+  decoders in the Decoders view.
+
+#### Signal discovery scanner amendment: core `spectrum` channel for waterfalls — 2026-10-09 (still NOT merged)
+
+Requested by WaveKit Main. Supersedes the `scanner-spectrum` channel above.
+- **WS channel `spectrum`** (not scanner-specific), message `spectrum:frame` per source: `{sourceId, epoch,
+  tuningTrust, centerHz, sampleRateHz, binHz, startHz, binEncoding: "u8-halfdb-127.5", bins (base64 Uint8, value =
+  round((dBFS + 127.5) × 2), 0.5 dB steps), floorDbfs, thresholdDb, tracks [{startHz, endHz, flags}], masks {dcHz,
+  spurBins}, at}`, max-hold per display interval. Default 10 Hz × 512 bins; server bounds 0.5–25 Hz and 128–2048 bins
+  (web UI). One server profile today; per-subscription profiles can be added later without changing the frame.
+- Runs whenever a `spectrum` subscriber exists, even with the scanner disabled. Detection runs on the full sample
+  stream; only this feed is decimated.
+- `tuningTrust: "unverified"` means the frequency axis may be wrong (a retune that bypassed the relay); grey out the
+  axis and say so.
+- **REST:** `GET /api/spectrum` (per-source engine status + latest frame), `GET /api/spectrum/occupancy?sourceId&startHz&endHz&sinceMs`
+  (hourly duty per 12.5 kHz bucket, 7 days); `GET|DELETE /api/scanner/captures…` (burst IQ captures with fixtures
+  manifest v2 sidecars).
+- **Cursor tuning** uses existing endpoints: `PATCH /api/live-audio/config {offsetHz}` inside the window, or
+  `POST /api/tuner/:sourceId/frequency` (this preempts a scanner sweep lease; the job pauses and auto-resumes).
+- **Suggested UI:** a waterfall view fed by `spectrum`, with a cursor that listens (offsetHz) or retunes, discovery
+  markers from `scanner:discovery`, and an occupancy strip from `/api/spectrum/occupancy`.
+
+#### Signal discovery scanner amendment: identify mode — 2026-10-09 (still NOT merged)
+
+User-confirmed primary use case: click a signal on the waterfall, every plausible decoder tries it.
+- **REST:** `POST /api/scanner/identify {sourceId, target: {frequencyHz, bandwidthHz?} | {all: true}, timeoutMs?,
+  protocols?, exhaustive?, record?}` → 201 job (`kind: "identify"`); 409 `OUT_OF_WINDOW` when the target is outside
+  the tuned window (tune first). Never retunes.
+- **WS `scanner:identify`:** `{jobId, targetHz, state: "waiting-for-signal"|"trying"|"identified"|"candidate"|
+  "unidentified", trials: [{protocol, decoder, mode, transport, outcome}], result?: {protocol?, confidence, identity?,
+  metadata, discoveryId?, measurements: {centreHz, obwHz, peakDbfs, snrDb, floorDbfs, dutyCycle, class}, artefact?:
+  "dc"|"spur"|"image"|"rfi"}}`.
+- `spectrum:frame` stats gain `blankedFrames`; status warnings `broadband-rfi` (with period) and comb-masked spurs.
+- **Suggested UI:** waterfall click → identify with a live trial list (decoder, outcome) and the result card; an
+  artefact answer explains itself ("DC spike", "receiver spur", "IQ image of 446.194 MHz", "broadband RFI").
