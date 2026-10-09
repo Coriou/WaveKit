@@ -15,6 +15,7 @@ import type {
 } from "./source-manager.js"
 import type {
 	TunerState,
+	TunerStateField,
 	TunerGainMode,
 	TunerDirectSampling,
 	TunerControlMode,
@@ -126,6 +127,22 @@ const COMMAND_FIELDS: Record<number, DesiredField> = {
 	[RTL_TCP_COMMANDS.SET_BIAS_TEE]: "biasTee",
 	[RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN]: "tunerIfGain",
 }
+
+/** Placeholder-capable fields, in TunerState order, for `unknownFields`. */
+const STATE_FIELDS: readonly TunerStateField[] = [
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+	"ppm",
+	"agcMode",
+	"biasTee",
+	"directSampling",
+	"offsetTuning",
+	"ifGain",
+	"tunerIfGain",
+	"testMode",
+]
 
 /**
  * Reconnect replay order (librtlsdr semantics): sampling path, xtals and PPM
@@ -1224,12 +1241,39 @@ export class TunerController extends EventEmitter {
 	}
 
 	private cloneState(state: TunerState): TunerState {
+		const { unknownFields: _stale, ...fields } = state
+		const unknownFields = this.unknownFields(state.sourceId)
 		return {
-			...state,
+			...fields,
 			tunerIfGain: state.tunerIfGain
 				? { ...state.tunerIfGain }
 				: state.tunerIfGain,
+			...(unknownFields.length > 0 ? { unknownFields } : {}),
 		}
+	}
+
+	/**
+	 * Fields backed by nothing: not commanded through the API, not seen in a
+	 * relay client's command (both tracked as accepted desired fields), and
+	 * for frequency/sampleRate not declared by config or the source caps.
+	 */
+	private unknownFields(sourceId: string): TunerStateField[] {
+		const accepted = this.desiredFields.get(sourceId)
+		const baseline = this.baselineCaps.get(sourceId)
+		const declared = new Set<TunerStateField>()
+		if (
+			this.config.defaultFrequency !== undefined ||
+			baseline?.centerFreq !== undefined
+		)
+			declared.add("frequency")
+		if (
+			this.config.defaultSampleRate !== undefined ||
+			baseline?.sampleRate !== undefined
+		)
+			declared.add("sampleRate")
+		return STATE_FIELDS.filter(
+			field => !declared.has(field) && !accepted?.has(field),
+		)
 	}
 
 	private isSameTunerIfGain(

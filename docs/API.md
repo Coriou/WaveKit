@@ -245,6 +245,14 @@ hardware may still be at relay-set values (rtlmux caches client commands and
 replays them to rtl_tcp). Through an rtlmux host, test mode and direct sampling
 commands are dropped, so those two tuner fields may over-claim.
 
+**`unknownFields`** lists the fields whose value is only a placeholder: nothing
+was commanded through this API, no relay client was seen commanding it, and
+(for `frequency`/`sampleRate`) neither the tuner config nor the source caps
+declare it. On a source whose gain was set on the SDR host this reads e.g.
+`["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
+"AGC 0.0 dB". The field values keep their types for older clients. A reset
+reconnect makes them unknown again; the field is absent when everything is known.
+
 ```bash
 curl http://localhost:9000/api/tuner
 ```
@@ -269,7 +277,8 @@ curl http://localhost:9000/api/tuner
 		"testMode": false,
 		"controlMode": "internal",
 		"commandCount": 12,
-		"lastCommandAt": "2024-05-21T03:12:01.123Z"
+		"lastCommandAt": "2024-05-21T03:12:01.123Z",
+		"unknownFields": ["ppm", "biasTee", "testMode"]
 	}
 ]
 ```
