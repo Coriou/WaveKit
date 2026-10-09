@@ -498,6 +498,23 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(pipelineOf(make("ais-catcher"))).toMatch(/^sox /)
 	})
 
+	it("channelised ais-catcher defaults its channel to the 162.000 MHz pair centre (ruling T28-AIS, plan A15)", () => {
+		const input = { sampleRateHz: 2_048_000, centerHz: 161.9e6 }
+		expect(make("ais-catcher").getChannelRequest?.(input)).toMatchObject({
+			centerHz: 162_000_000,
+		})
+		// A configured channelHz wins.
+		expect(
+			make("ais-catcher", { channelHz: 162_025_000 }).getChannelRequest?.(
+				input,
+			),
+		).toMatchObject({ centerHz: 162_025_000 })
+		// The raw path does not read the channel centre.
+		expect(pipelineOf(make("ais-catcher"))).toBe(
+			pipelineOf(make("ais-catcher", { channelHz: 162_025_000 })),
+		)
+	})
+
 	it("dumpvdl2 requests one channel spanning its frequencies and tunes --centerfreq to it", () => {
 		const d = make("dumpvdl2", {
 			frequencies: [136_650_000, 136_975_000],

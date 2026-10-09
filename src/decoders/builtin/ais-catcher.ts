@@ -14,6 +14,7 @@
 
 import {
 	IqDecimateDecoder,
+	readChannelHz,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
@@ -102,6 +103,9 @@ export interface ShipData {
 
 /** AIS channel 1 (87B) and 2 (88B) carriers. */
 export const AIS_CHANNEL_FREQUENCIES_HZ = [161_975_000, 162_025_000] as const
+
+/** Centre of the AIS 1/2 pair: the default channel centre (plan A15). */
+const AIS_PAIR_CENTER_HZ = 162_000_000
 
 /** Default UDP port for AIS-catcher output */
 const DEFAULT_OUTPUT_PORT = 10110
@@ -229,6 +233,8 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 			inputSampleRate: inputRate,
 			targetSampleRate: 384_000, // Well-supported by AIS-catcher
 			filterTransition: 0.05,
+			// Read only by the channel request; a configured channelHz wins.
+			channelHz: readChannelHz(this.config.options) ?? AIS_PAIR_CENTER_HZ,
 		}
 	}
 
