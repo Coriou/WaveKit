@@ -48,6 +48,49 @@ export function styledSegments(line: Line, color: boolean): StyledSegment[] {
 	return out
 }
 
+interface Run extends StyledSegment {
+	key: string
+	plain: boolean
+}
+
+const PLAIN = "|0|0|0"
+const styleKey = (p: InkTextProps): string =>
+	`${p.color ?? ""}|${p.bold === true ? 1 : 0}|${p.dimColor === true ? 1 : 0}|${p.inverse === true ? 1 : 0}`
+
+/**
+ * Segments merged into runs: adjacent segments of one style become one run, and
+ * plain whitespace between two runs of one non-inverse style joins them (M1
+ * needs a plain cell only between different intensities). An unstyled run is
+ * rendered as a bare string: the same output with a fraction of the React
+ * elements, which Ink re-renders on every commit (D3).
+ */
+export function styleRuns(line: Line, color: boolean): Run[] {
+	const out: Run[] = []
+	for (const seg of styledSegments(line, color)) {
+		const key = styleKey(seg.props)
+		const last = out[out.length - 1]
+		const prev = out[out.length - 2]
+		if (last && last.key === key) {
+			last.text += seg.text
+			continue
+		}
+		if (
+			prev &&
+			last &&
+			prev.key === key &&
+			last.plain &&
+			seg.props.inverse !== true &&
+			/^\s*$/.test(last.text)
+		) {
+			prev.text += last.text + seg.text
+			out.pop()
+			continue
+		}
+		out.push({ text: seg.text, props: seg.props, key, plain: key === PLAIN })
+	}
+	return out
+}
+
 export function LineView({
 	line,
 	indent = 1,
@@ -67,14 +110,19 @@ export function LineView({
 			overflow(`line ${used} > ${room} cols: ${lineText(line).slice(0, 40)}`)
 	}
 	if (line.length === 0) return <Text> </Text>
+	const runs = styleRuns(line, color)
 	return (
 		<Text wrap="truncate-end">
 			{" ".repeat(indent)}
-			{styledSegments(line, color).map((seg, i) => (
-				<Text key={i} {...seg.props}>
-					{seg.text}
-				</Text>
-			))}
+			{runs.map((r, i) =>
+				r.plain ? (
+					r.text
+				) : (
+					<Text key={i} {...r.props}>
+						{r.text}
+					</Text>
+				),
+			)}
 		</Text>
 	)
 }

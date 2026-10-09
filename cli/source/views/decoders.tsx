@@ -2,7 +2,11 @@ import { Box } from "ink"
 import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
+import { memoOne } from "../data/memo.js"
 import { decoderConfirm, decodersModel } from "../view-models/decoders.js"
+
+/** keyInfo and the component ask for the same model in one commit: build it once (D3). */
+const model = memoOne(decodersModel)
 import type { ViewModule, ViewProps } from "./types.js"
 
 function DecodersComponent({
@@ -12,7 +16,7 @@ function DecodersComponent({
 	height,
 	heightClass,
 }: ViewProps): ReactElement {
-	const m = decodersModel(state, ui, width, height, heightClass === "roomy")
+	const m = model(state, ui, width, height, heightClass === "roomy")
 	if (m.detail && m.placement.kind === "overlay")
 		return <Lines lines={m.detail} width={width + 1} height={height} />
 	if (m.detail && m.placement.kind === "right") {
@@ -40,7 +44,7 @@ export const decodersView: ViewModule = {
 	title: "Decoders",
 	Component: DecodersComponent,
 	keyInfo: (state, ui, width, height, heightClass) => {
-		const m = decodersModel(state, ui, width, height, heightClass === "roomy")
+		const m = model(state, ui, width, height, heightClass === "roomy")
 		return {
 			rowIds: m.rowIds,
 			pageSize: m.pageSize,

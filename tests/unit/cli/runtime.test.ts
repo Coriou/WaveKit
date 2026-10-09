@@ -5,9 +5,12 @@ import { PLAIN_SUMMARY } from "../../../cli/source/data/reducers.js"
 import { loadScenario } from "../../../cli/source/test/scenarios.js"
 import {
 	FLUSH_MS,
+	BACKGROUND_EVENTS,
 	createRuntime,
+	isUrgent,
 	type Timers,
 } from "../../../cli/source/data/runtime.js"
+import type { Inbound } from "../../../cli/source/data/types.js"
 import type {
 	WsFactory,
 	WsHandlers,
@@ -155,7 +158,8 @@ describe("runtime", () => {
 			explicit: TARGET,
 		})
 		rt.start()
-		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		// REST answers are background items: they commit on the next whole second.
+		await vi.advanceTimersByTimeAsync(1000)
 		const urls = fetchFn.mock.calls.map(c => c[0])
 		for (const p of [
 			"/api/decoders",
@@ -454,7 +458,8 @@ describe("poll cycles (R47 M1, M2)", () => {
 		newer[1]!.answer([decoderRow(false)])
 		await vi.advanceTimersByTimeAsync(0)
 		older.answer([decoderRow(true)])
-		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		// REST answers are background items: they commit on the next whole second.
+		await vi.advanceTimersByTimeAsync(1000)
 		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
 		rt.stop()
 	})
@@ -886,6 +891,152 @@ describe("R55 follow-ups fix", () => {
 		expect(n("/api/live-audio/presets")).toBe(2)
 		expect(n("/api/aircraft")).toBe(2)
 		expect(n("/api/decoders")).toBe(2)
+		rt.stop()
+	})
+})
+
+describe("background items wait for the whole second (D3)", () => {
+	const frame = (type: string, data: unknown) =>
+		JSON.stringify({ type, channel: "x", data })
+	it("a snapshot alone commits at the next second boundary; a decode commits on the next tick", () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		vi.advanceTimersByTime(1000)
+		const h = ws.sockets[0]!
+		const base = rt.store.commits()
+		h.message(
+			frame("metrics", { sourceId: "s", bytesReceived: 1, dataRate: 1 }),
+		)
+		// Inside the same second: background only, nothing to commit yet.
+		vi.advanceTimersByTime(FLUSH_MS)
+		expect(rt.store.commits()).toBe(base)
+		expect(rt.store.get().metrics["s"]).toBeUndefined()
+		// The boundary commits it (ages move anyway).
+		vi.advanceTimersByTime(1000)
+		expect(rt.store.commits()).toBeGreaterThan(base)
+		expect(rt.store.get().metrics["s"]).toBeDefined()
+		// A decode does not wait for the second.
+		const before = rt.store.commits()
+		h.message(
+			frame("decoder:output", {
+				decoderId: "readsb",
+				output: {
+					type: "aircraft",
+					decoder: "readsb",
+					timestamp: "t",
+					data: {},
+				},
+			}),
+		)
+		vi.advanceTimersByTime(FLUSH_MS)
+		expect(rt.store.commits()).toBe(before + 1)
+		rt.stop()
+	})
+	it("classifies every background kind (R83) and keeps the rest urgent", () => {
+		const wsItem = (event: Record<string, unknown>): Inbound =>
+			({ kind: "ws", at: 0, event }) as Inbound
+		for (const type of [
+			"fanout:snapshot",
+			"metrics",
+			"source:status",
+			"resources:snapshot",
+		])
+			expect(isUrgent(wsItem({ type })), type).toBe(false)
+		expect([...BACKGROUND_EVENTS].sort()).toEqual([
+			"fanout:snapshot",
+			"metrics",
+			"resources:snapshot",
+			"source:status",
+		])
+		expect(isUrgent({ kind: "rest:cycle", at: 0, nextAt: 0 })).toBe(false)
+		expect(
+			isUrgent({
+				kind: "rest",
+				endpoint: "status",
+				at: 0,
+				outcome: {
+					ok: false,
+					error: { kind: "network", message: "x", at: 0 },
+				},
+			} as Inbound),
+		).toBe(false)
+		for (const type of [
+			"decoder:output",
+			"decoder:started",
+			"decoder:stopped",
+			"decoder:status",
+			"decoder:health",
+			"source:connected",
+			"source:disconnected",
+			"tuner:state-changed",
+			"live-audio:status",
+			"aircraft:update",
+			"aircraft:stats",
+			"resources:alert",
+		])
+			expect(isUrgent(wsItem({ type })), type).toBe(true)
+		const others: Inbound[] = [
+			{ kind: "ws:open", at: 0 },
+			{ kind: "ws:connecting", at: 0, attempt: 0 },
+			{ kind: "ws:invalid", at: 0 },
+			{
+				kind: "ws:close",
+				at: 0,
+				code: 1006,
+				reason: "",
+				nextRetryAt: null,
+			},
+			{
+				kind: "target",
+				at: 0,
+				base: null,
+				ws: null,
+				discovery: { mode: "probing", tried: [] },
+			},
+			{
+				kind: "action:sent",
+				at: 0,
+				id: 1,
+				key: "audio",
+				intent: { kind: "audio", op: "start" },
+			},
+			{ kind: "action:result", at: 0, id: 1, key: "audio", outcomes: [] },
+		]
+		for (const item of others) expect(isUrgent(item), item.kind).toBe(true)
+	})
+	it("an urgent item carries queued background items into the same commit", () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		vi.advanceTimersByTime(1000)
+		const h = ws.sockets[0]!
+		h.message(
+			frame("metrics", { sourceId: "s", bytesReceived: 1, dataRate: 1 }),
+		)
+		h.message(frame("decoder:started", { decoderId: "readsb" }))
+		const before = rt.store.commits()
+		vi.advanceTimersByTime(FLUSH_MS)
+		expect(rt.store.commits()).toBe(before + 1)
+		expect(rt.store.get().metrics["s"]).toBeDefined()
 		rt.stop()
 	})
 })
