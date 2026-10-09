@@ -350,9 +350,16 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: ["decoders"],
 		keys: ["s"],
-		when: c => c.v.hasSelection && c.v.decoderRunning === false,
+		// R100: core ignores a start on a rate-suspended decoder, so it is not offered.
+		when: c =>
+			c.v.hasSelection &&
+			c.v.decoderRunning === false &&
+			c.v.decoderSuspension !== "rate",
 		action: () => ({ type: "decoder-op", op: "start" }),
-		hint: hint("s", "start"),
+		hint: c => ({
+			keys: "s",
+			label: c.v.decoderSuspension === "band" ? "run anyway" : "start",
+		}),
 	},
 	{
 		mode: "list",
@@ -369,6 +376,15 @@ export const BINDINGS: readonly Binding[] = [
 		when: c => c.v.hasSelection,
 		action: () => ({ type: "decoder-op", op: "restart" }),
 		hint: hint("R", "restart"),
+	},
+	{
+		mode: "list",
+		views: ["decoders"],
+		keys: ["u"],
+		// R100: back to auto mode, POST …/start with { "pin": false }.
+		when: c => c.v.hasSelection && c.v.decoderPinned,
+		action: () => ({ type: "decoder-op", op: "unpin" }),
+		hint: hint("u", "return to auto"),
 	},
 	{
 		mode: "list",

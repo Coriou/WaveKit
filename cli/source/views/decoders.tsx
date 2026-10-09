@@ -3,7 +3,11 @@ import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { memoOne } from "../data/memo.js"
-import { decoderConfirm, decodersModel } from "../view-models/decoders.js"
+import {
+	decoderConfirm,
+	decodersModel,
+	suspensionKind,
+} from "../view-models/decoders.js"
 import type { ViewModule, ViewProps } from "./types.js"
 
 /** keyInfo and the component ask for the same model in one commit: build it once (D3). */
@@ -52,6 +56,8 @@ export const decodersView: ViewModule = {
 				...EMPTY_VIEW_CTX,
 				hasSelection: m.selected !== null,
 				decoderRunning: m.selected ? m.selected.row.running : null,
+				decoderPinned: m.selected?.pinned === true,
+				decoderSuspension: suspensionKind(m.selected),
 			},
 			...(m.notice !== null ? { notice: m.notice } : {}),
 			...(m.detailMaxScroll !== null

@@ -32,6 +32,8 @@ const ctx: KeyContext = {
 	v: {
 		hasSelection: true,
 		decoderRunning: true,
+		decoderPinned: false,
+		decoderSuspension: null,
 		control: null,
 		audioRunning: null,
 		paused: false,
@@ -222,6 +224,8 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 		v: {
 			hasSelection: false,
 			decoderRunning: null,
+			decoderPinned: false,
+			decoderSuspension: null,
 			control: null,
 			audioRunning: null,
 			paused: false,
@@ -233,7 +237,8 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 	it("is not filtered by selection or running state", () => {
 		const t = text(noSel)
 		for (const s of [
-			"start (asks to confirm)",
+			"start / run anyway (asks to confirm)",
+			"return to auto (asks to confirm)",
 			"stop (asks to confirm)",
 			"restart (asks to confirm)",
 			"open detail",
@@ -250,7 +255,8 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 		]) {
 			expect(t).toContain(s)
 		}
-		expect(t).toMatch(/│ s +start \(asks to confirm\)/)
+		expect(t).toMatch(/│ s +start \/ run anyway \(asks to confirm\)/)
+		expect(t).toMatch(/│ u +return to auto \(asks to confirm\)/)
 		expect(t).toMatch(/│ R +restart \(asks to confirm\)/)
 		expect(t).toMatch(/ G +newest/)
 		expect(t).toMatch(/ g +top/)

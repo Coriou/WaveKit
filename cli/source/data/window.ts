@@ -118,6 +118,12 @@ export function membership(
 	if (band?.kind === "tuned") return "in"
 	if (!band || !win) return "?"
 	const half = win.sampleRate / 2
+	if (band.kind === "ranges")
+		return band.rangesHz.some(
+			r => win.centreHz >= r.minHz - half && win.centreHz <= r.maxHz + half,
+		)
+			? "in"
+			: "out"
 	return band.channelsMHz.some(c => Math.abs(c * 1e6 - win.centreHz) <= half)
 		? "in"
 		: "out"
@@ -175,9 +181,18 @@ function coreMembershipAt(
 	to: TunedWindow,
 ): Membership {
 	const t = a.targetsHz
+	const ranges = a.rangesHz
 	const half = coreHalfWidth(a.windowHalfWidthHz, from, to)
-	if (!t || half === null) return "?"
-	if (t.some(hz => Math.abs(hz - to.centreHz) <= half)) return "in"
+	if ((!t && !ranges) || half === null) return "?"
+	// R100: in band near any target, or with the centre within half of any range.
+	if (t?.some(hz => Math.abs(hz - to.centreHz) <= half)) return "in"
+	if (
+		ranges?.some(
+			r => to.centreHz >= r.minHz - half && to.centreHz <= r.maxHz + half,
+		)
+	)
+		return "in"
+	if (!t) return "out"
 	const lo = Math.min(...t) - half
 	const hi = Math.max(...t) + half
 	return to.centreHz >= lo && to.centreHz <= hi ? "?" : "out"

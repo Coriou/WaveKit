@@ -84,6 +84,13 @@ export function isWrite(action: Action): boolean {
 export interface ViewKeyCtx {
 	hasSelection: boolean
 	decoderRunning: boolean | null
+	/** R100: the selected decoder runs pinned (operator start mode). */
+	decoderPinned: boolean
+	/**
+	 * R100: why the selected decoder is suspended: `band` (a start runs it anyway),
+	 * `rate` (a start is a no-op on core), `other` (a newer code), or null.
+	 */
+	decoderSuspension: "band" | "rate" | "other" | null
 	control: "internal" | "external" | null
 	audioRunning: boolean | null
 	paused: boolean
@@ -92,6 +99,8 @@ export interface ViewKeyCtx {
 export const EMPTY_VIEW_CTX: ViewKeyCtx = {
 	hasSelection: false,
 	decoderRunning: null,
+	decoderPinned: false,
+	decoderSuspension: null,
 	control: null,
 	audioRunning: null,
 	paused: false,

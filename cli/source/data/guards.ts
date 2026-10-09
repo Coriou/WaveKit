@@ -38,6 +38,7 @@ import type {
 	SourceRow,
 	WsEvent,
 	BandAssessment,
+	BandRange,
 	DecoderSuspension,
 	RowHealth,
 } from "./types.js"
@@ -185,21 +186,51 @@ const isVerdict = oneOf<BandAssessment["verdict"]>([
 /** More targets than any decoder declares: the list is dropped (spreading it into Math.min would throw). */
 export const MAX_BAND_TARGETS = 64
 
+const isRange = (r: unknown): r is BandRange =>
+	isObj(r) &&
+	isNum(r["minHz"]) &&
+	isNum(r["maxHz"]) &&
+	Number.isFinite(r["minHz"]) &&
+	Number.isFinite(r["maxHz"]) &&
+	r["minHz"] <= r["maxHz"]
+
+/** R100: all or nothing like targets (R41); a range is copied to its two fields only. */
+function guardRanges(v: unknown): BandRange[] | undefined {
+	return Array.isArray(v) &&
+		v.length > 0 &&
+		v.length <= MAX_BAND_TARGETS &&
+		v.every(isRange)
+		? v.map(r => ({ minHz: r.minHz, maxHz: r.maxHz }))
+		: undefined
+}
+
+/** R100: `{ code, source }`, both kept as text; anything else is dropped. */
+function guardRegion(v: unknown): BandAssessment["region"] {
+	if (!isObj(v)) return undefined
+	const code = v["code"]
+	const source = v["source"]
+	return isStr(code) && isStr(source) ? { code, source } : undefined
+}
+
 /** R84: a string verdict this CLI does not know reads "unknown"; any other malformed field is dropped. */
 function guardBandAssessment(v: unknown): BandAssessment | undefined {
 	if (!isObj(v)) return undefined
 	const verdict = v["verdict"]
 	if (!isStr(verdict)) return undefined
 	const targets = v["targetsHz"]
+	const ranges = guardRanges(v["rangesHz"])
+	const region = guardRegion(v["region"])
 	return {
 		verdict: isVerdict(verdict) ? verdict : "unknown",
-		...pick(v, ["reasonCode", "basis"] as const, isStr),
+		...pick(v, ["reasonCode", "basis", "overrideSource"] as const, isStr),
 		...(Array.isArray(targets) &&
 		targets.length > 0 &&
 		targets.length <= MAX_BAND_TARGETS &&
 		targets.every(isFrequency)
 			? { targetsHz: targets }
 			: {}),
+		...(ranges ? { rangesHz: ranges } : {}),
+		...(region ? { region } : {}),
 		...pick(v, ["captureCenterHz", "windowHalfWidthHz"] as const, isFrequency),
 	}
 }
@@ -263,7 +294,7 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 		...(lastError ? { lastError } : {}),
 		...(caps ? { caps } : {}),
 		// R70: core's proposed fields, each optional and typed defensively.
-		...pick(v, ["nextRestartAt"] as const, isStr),
+		...pick(v, ["nextRestartAt", "startMode"] as const, isStr),
 		...pick(v, ["desiredRunning", "suspended"] as const, isBool),
 		...(suspension ? { suspension } : {}),
 		...(bandAssessment ? { bandAssessment } : {}),

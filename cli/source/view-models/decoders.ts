@@ -1,6 +1,6 @@
 import { sparkBuckets } from "../data/rates.js"
-import type { BandOrigin } from "../data/nominal-bands.js"
-import { RATE_REASON_WORDS } from "../data/reason-codes.js"
+import { rangeLabel, type BandOrigin } from "../data/nominal-bands.js"
+import { isRateReason, RATE_REASON_WORDS } from "../data/reason-codes.js"
 import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
@@ -69,6 +69,14 @@ const PAST: Readonly<Record<DecoderOp, string>> = {
 	start: "started",
 	stop: "stopped",
 	restart: "restarted",
+	unpin: "returned to auto",
+}
+/** The op as result lines say it (`return to auto sent 18:07:52`, R100). */
+const OP_WORD: Readonly<Record<DecoderOp, string>> = {
+	start: "start",
+	stop: "stop",
+	restart: "restart",
+	unpin: "return to auto",
 }
 
 /** Own-key lookup for server-chosen keys (R65 M2): "constructor" must not hit the prototype. */
@@ -107,29 +115,99 @@ const words = (map: Readonly<Record<string, string>>, code: string): string =>
 const suspensionReason = (code: string): string =>
 	words(SUSPENSION_REASON, code)
 
-/** R84: the band's basis as the detail names it. */
+/** R84 / R100: the band's basis as the detail names it. */
 const BAND_ORIGIN: Readonly<Record<BandOrigin, string>> = {
 	configured: "configured",
 	protocol: "protocol",
 	"decoder-default": "decoder default",
+	"region-default": "region default",
+	override: "override",
 	nominal: "nominal",
 	core: "basis ?",
 }
 
+/** R100: which layer an override comes from. */
+const OVERRIDE_SOURCE: Readonly<Record<string, string>> = {
+	config: "config",
+	api: "api",
+}
+
+/** R100: where the band plan region came from. */
+const REGION_SOURCE: Readonly<Record<string, string>> = {
+	configured: "configured",
+	decoder: "from decoder",
+	"guessed:tz": "guessed from TZ",
+	"guessed:intl-timezone": "guessed from time zone",
+	"guessed:locale-env": "guessed from locale",
+	"guessed:intl-locale": "guessed from locale",
+	default: "default",
+}
+
 function bandOriginWords(f: DecoderFacts): string {
-	const basis = f.row.bandAssessment?.basis
+	const core = f.row.bandAssessment
+	const basis = core?.basis
 	if (f.bandOrigin === "core" && basis !== undefined)
 		return `basis ${quoted(basis)}`
+	if (f.bandOrigin === "override") {
+		const src = core?.overrideSource
+		return `override${sepText()}${src === undefined ? glyphs().unknown : words(OVERRIDE_SOURCE, src)}`
+	}
 	return BAND_ORIGIN[f.bandOrigin ?? "nominal"]
 }
 
-/** R84: a band suspension resumes on a retune to core's targets, when core names them. Not "waiting for": spec §9 bans it. */
+const sepText = (): string => ` ${glyphs().sep} `
+
+/**
+ * R100: ` · pinned`, or ` · running out of band · pinned` when core's verdict is
+ * out of band; a start mode this CLI does not know is quoted. Empty otherwise.
+ */
+function startModeText(f: DecoderFacts): string {
+	const sep = sepText()
+	const mode = f.row.startMode
+	if (f.pinned)
+		return f.row.bandAssessment?.verdict === "out-of-band"
+			? `${sep}running out of band${sep}pinned`
+			: `${sep}pinned`
+	if (mode !== undefined && mode !== "auto" && mode !== "operator")
+		return `${sep}start mode ${quoted(mode)}`
+	return ""
+}
+
+/** R100: `region EU · guessed from TZ`, or null when core names no region. */
+export function regionText(f: DecoderFacts): string | null {
+	const region = f.row.bandAssessment?.region
+	if (!region) return null
+	const code = /^[A-Z]{2}$/.test(region.code)
+		? region.code
+		: quoted(region.code)
+	return `region ${code}${sepText()}${words(REGION_SOURCE, region.source)}`
+}
+
+/**
+ * The band's frequencies in full: core's targets (`1090.000 MHz`), its ranges
+ * (`433.050–434.790, 868.000–870.000 MHz`, R100), or both; null when neither.
+ */
+function bandValues(f: DecoderFacts): string | null {
+	const core = f.row.bandAssessment
+	const ranges = core?.rangesHz
+	const rangesText =
+		ranges && ranges.length > 0
+			? `${ranges.map(r => rangeLabel(r, glyphs().range)).join(", ")} MHz`
+			: null
+	const targetsText =
+		f.nominal !== "tuned" && f.nominal !== "?" && core?.targetsHz !== undefined
+			? `${f.nominal} MHz`
+			: null
+	if (targetsText && rangesText)
+		return `${targetsText}${sepText()}range ${rangesText}`
+	return targetsText ?? rangesText
+}
+
+/** R84: a band suspension resumes on a retune to core's band, when core names it. Not "waiting for": spec §9 bans it. */
 function suspensionText(f: DecoderFacts, code: string): string {
-	const known = f.nominal !== "tuned" && f.nominal !== "?"
-	return code === "frequency-out-of-band" &&
-		f.row.bandAssessment?.targetsHz !== undefined &&
-		known
-		? `resumes on retune to ${f.nominal} MHz`
+	const values = bandValues(f)
+	return code === "frequency-out-of-band" && values !== null
+		? `resumes on retune to ${values}`
 		: suspensionReason(code)
 }
 
@@ -152,7 +230,8 @@ export function decoderActionText(
 	const g = glyphs()
 	const sep = ` ${g.sep} `
 	const op = rec.intent.op
-	const sent = `${op} sent ${formatClock(rec.sentAt)}`
+	const word = OP_WORD[op]
+	const sent = `${word} sent ${formatClock(rec.sentAt)}`
 	switch (rec.state) {
 		case "sent":
 			return sent
@@ -173,14 +252,14 @@ export function decoderActionText(
 			const status = r?.status ?? r?.code ?? "network"
 			// R65 M4: no server text is an unquoted ?, never an empty quote.
 			const text = r?.message ? quoted(r.message) : g.unknown
-			return `${op} failed${sep}${status}${sep}${text}`
+			return `${word} failed${sep}${status}${sep}${text}`
 		}
 		case "ok": {
 			if (rec.confirmedAt !== null)
 				return `${PAST[op]} ${formatClock(rec.confirmedAt)}`
 			// R65 M6: accepted by core (2xx) but no reconciling event yet; distinct from in flight.
 			const status = rec.outcomes.find(o => o.result !== null)?.result?.status
-			const accepted = `${op} accepted ${formatClock(rec.resultAt ?? rec.sentAt)}`
+			const accepted = `${word} accepted ${formatClock(rec.resultAt ?? rec.sentAt)}`
 			return status !== undefined && status !== null
 				? `${accepted}${sep}${status}`
 				: accepted
@@ -267,7 +346,7 @@ export function decoderDetail(
 	rest.push(
 		...wrapKV(
 			"process",
-			`${processWords(f)}${sep}${counted(r.restartCount, "restart")}${sep}${counted(r.stats.errors, "error")}${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
+			`${processWords(f)}${startModeText(f)}${sep}${counted(r.restartCount, "restart")}${sep}${counted(r.stats.errors, "error")}${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
@@ -368,6 +447,7 @@ export function decoderDetail(
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
 	// R90: under core's assessment a tuned type is placed by core, not assumed to follow.
+	const values = bandValues(f)
 	const band =
 		f.nominal === "tuned"
 			? core
@@ -375,8 +455,15 @@ export function decoderDetail(
 				: "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
-				: `${f.nominal} MHz (${bandOriginWords(f)})`
-	const parts = [band, ...(f.bandNote ? [f.bandNote] : []), windowPart, member]
+				: `${values ?? `${f.nominal} MHz`} (${bandOriginWords(f)})`
+	const region = regionText(f)
+	const parts = [
+		band,
+		...(region ? [region] : []),
+		...(f.bandNote ? [f.bandNote] : []),
+		windowPart,
+		member,
+	]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
 	const from = sess?.firstObservedAt ?? now
@@ -440,11 +527,24 @@ export function decoderConfirm(
 		"—": "own SDR",
 	}[f.membership]
 	const exit = f.row.running ? null : exitText(f.row.lastError, now)
+	const name = sanitize(id)
+	// R100: what the write does to band suspension, said before `y`.
+	const runAnyway = op === "start" && bandSuspended(f)
+	const head = runAnyway
+		? `run ${name} out of band${sep}pinned`
+		: op === "unpin"
+			? `return ${name} to auto`
+			: `${op} ${name}`
+	// The run-anyway head already says why it is down.
 	const parts: Array<[number, string]> = [
-		[0, `${op} ${sanitize(id)}`],
-		[2, processWords(f)],
+		[0, head],
+		...(runAnyway ? [] : ([[2, processWords(f)]] as Array<[number, string]>)),
 		[1, window],
 	]
+	if (op === "start" && !runAnyway && corePins(state))
+		parts.splice(1, 0, [1, "pinned against band suspension"])
+	if (op === "unpin" && f.row.bandAssessment?.verdict === "out-of-band")
+		parts.splice(1, 0, [1, "may suspend out of band"])
 	if (exit !== null) parts.push([1, exit])
 	if (f.dropNow !== null && f.dropNow > 0)
 		parts.push([2, `dropping ${formatPercent(f.dropNow)}`])
@@ -457,10 +557,33 @@ export function decoderConfirm(
 			priority,
 			variants: [[sp(t, "value", true)]],
 		})),
-		yes: op,
+		yes: runAnyway ? "run" : op === "unpin" ? "return" : op,
 		no: "cancel",
 		intent: { kind: "decoder", op, decoderId: id },
 	}
+}
+
+/** R100: suspended because the tuned band covers none of its targets; a start runs it anyway. */
+export function bandSuspended(f: DecoderFacts): boolean {
+	return (
+		f.row.suspended === true &&
+		f.row.suspension?.reasonCode === "frequency-out-of-band"
+	)
+}
+
+/** R100: the keymap's view of a suspension: band (run anyway), rate (core ignores a start), other, or none. */
+export function suspensionKind(
+	f: DecoderFacts | null,
+): "band" | "rate" | "other" | null {
+	if (!f || f.row.suspended !== true) return null
+	const code = f.row.suspension?.reasonCode
+	if (code === "frequency-out-of-band") return "band"
+	return code !== undefined && isRateReason(code) ? "rate" : "other"
+}
+
+/** R100: this core reports start modes, so a bare start pins (any decoder carries startMode). */
+export function corePins(state: AppState): boolean {
+	return (state.decoders.value ?? []).some(d => d.startMode !== undefined)
 }
 
 export interface DecodersModel {
