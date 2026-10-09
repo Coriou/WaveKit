@@ -26,10 +26,10 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    - About 2 s end-to-end latency, even with low-latency ffplay flags. Measure each
      stage: the Pi queue, Wi-Fi, the fanout, the csdr rings and the client buffer.
    - A ~0.75 s noise tail when the squelch closes.
-   - Resolved 2026-10-09: the dsd-fme `call_end.duration` (7.25 s) shorter than
-     the ~11 s between its events was a timeout end (`flags.timeout: true`;
-     duration excludes the 4 s fallback wait). Events now carry
-     `startedAt`/`endedAt` ([DIGITAL-VOICE.md](DIGITAL-VOICE.md#call-duration-vs-event-timing-2026-10-09-anomaly)).
+   - One of the two DMR calls ended by the 4 s fallback timeout because its TLC
+     terminator was not decoded, so its duration stops at the last decoded line.
+     The calls did not split. Call events now carry `startedAt`/`endedAt`
+     ([DIGITAL-VOICE.md](DIGITAL-VOICE.md#call-duration-vs-event-timing-2026-10-09-anomaly)).
    - Lazy pipeline start when no client is connected (deferred).
    - `offsetHz` is set per decoder and is static; the channelizer replaces it.
    - Digital voice audio (§5b): implemented 2026-10-09 on a branch (not merged
