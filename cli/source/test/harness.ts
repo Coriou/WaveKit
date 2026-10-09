@@ -133,9 +133,12 @@ export async function renderAt(
 			exited = true
 		},
 	)
-	// Wait for the first frame. useInput attaches in a passive effect after it;
-	// input sent before that flushes is dropped, hence the extra settle.
+	// Wait for the first frame. Ink attaches its stdin "readable" listener in a
+	// passive effect after it, so press() waits for that listener: a key fed
+	// before it exists is dropped. Waiting here instead would stall every render
+	// of a tree without useInput.
 	await pollUntil(() => stdout.chunks.length > 0)
+	// Other passive effects (e.g. the app's own resize subscription) get a beat too.
 	await settle()
 	/** Wait for a write after `before` chunks, then until no write lands for quietMs. */
 	const afterInput = async (
@@ -168,6 +171,8 @@ export async function renderAt(
 		frame,
 		text: () => frame().join("\n"),
 		press: async (seq, opts) => {
+			if (!(await pollUntil(() => stdin.listenerCount("readable") > 0)))
+				throw new Error("press: no stdin listener (no useInput in the tree)")
 			const before = stdout.chunks.length
 			stdin.feed(seq)
 			await afterInput(before, opts, 15)
