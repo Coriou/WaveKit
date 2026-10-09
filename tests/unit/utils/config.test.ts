@@ -902,6 +902,23 @@ describe("HealthConfigSchema", () => {
 		const result = HealthConfigSchema.safeParse(invalidHealth)
 		expect(result.success).toBe(false)
 	})
+
+	it("accepts optional signal-flat threshold and hold, within bounds", () => {
+		const ok = HealthConfigSchema.safeParse({
+			signalFlatThresholdDbfs: -45,
+			signalFlatHoldMs: 60_000,
+		})
+		expect(ok.success && ok.data.signalFlatThresholdDbfs).toBe(-45)
+		expect(HealthConfigSchema.parse({})).not.toHaveProperty(
+			"signalFlatThresholdDbfs",
+		)
+		expect(
+			HealthConfigSchema.safeParse({ signalFlatThresholdDbfs: 3 }).success,
+		).toBe(false)
+		expect(
+			HealthConfigSchema.safeParse({ signalFlatHoldMs: 500 }).success,
+		).toBe(false)
+	})
 })
 
 describe("Extended DecoderConfigSchema", () => {

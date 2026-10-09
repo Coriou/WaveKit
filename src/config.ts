@@ -259,6 +259,14 @@ export const HealthConfigSchema = z.object({
 	 * tuned window, resuming on a retune back (manager default: true).
 	 */
 	bandSuspension: z.boolean().optional(),
+	/**
+	 * Signal-flat warning on IQ network sources: the subsampled IQ level
+	 * (RMS about zero, dBFS) must stay below this for signalFlatHoldMs
+	 * (source manager default: -40, about 1.3 LSB RMS in u8).
+	 */
+	signalFlatThresholdDbfs: z.number().min(-120).max(0).optional(),
+	/** How long the level must stay low (and, to clear, recovered) (default: 30000). */
+	signalFlatHoldMs: z.number().int().min(1000).max(3_600_000).optional(),
 })
 
 /**

@@ -252,7 +252,10 @@ async function main(): Promise<void> {
 	shutdown.installSignalHandlers()
 
 	// Step 4: Initialize core components
-	const sourceManager = new SourceManager(logger)
+	const sourceManager = new SourceManager(logger, {
+		signalFlatThresholdDbfs: config.health?.signalFlatThresholdDbfs,
+		signalFlatHoldMs: config.health?.signalFlatHoldMs,
+	})
 	const fanoutManager = new FanoutManager(logger)
 	const sourceRouting = new SourceFanoutRouter(
 		sourceManager,

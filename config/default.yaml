@@ -398,12 +398,24 @@ csdr:
 #                   outside the tuned window and resume them on a retune back
 #                   (default: true; decoders without a known target never
 #                   suspend). See docs/API.md "Band check and band suspension".
+#   signalFlatThresholdDbfs - Signal-flat warning on IQ network sources
+#                   (U8_IQ / S16_IQ): the subsampled IQ level (RMS of the
+#                   components about zero, dBFS) must stay below this for
+#                   signalFlatHoldMs before the source reports `signalFlat`
+#                   (default: -40, about 1.3 LSB RMS in u8; a near-zero-gain
+#                   dongle measures about -46, a normal antenna noise floor
+#                   -33 or higher). Range -120..0. Clears after the same hold
+#                   at threshold + 3 dB. See docs/API.md "Signal flat".
+#   signalFlatHoldMs - How long the level must stay low, or recovered to
+#                   clear (default: 30000; 1000-3600000)
 
 # health:
 #   checkInterval: 5000
 #   idleTimeout: 30000
 #   faultAfterFailures: 5
 #   bandSuspension: true
+#   signalFlatThresholdDbfs: -40
+#   signalFlatHoldMs: 30000
 
 # -----------------------------------------------------------------------------
 # Band defaults, region and per-decoder band overrides
