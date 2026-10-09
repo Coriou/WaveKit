@@ -1,5 +1,5 @@
 import type { ApiView, GlyphRole, IqView } from "../data/types.js"
-import { fitGroups } from "./fit.js"
+import { fitGroupsDetailed } from "./fit.js"
 import {
 	formatAge,
 	formatClockShort,
@@ -124,7 +124,11 @@ function iqGroup(iq: IqView, old: boolean): Group {
 	return { priority: 2, variants }
 }
 
-function decodersGroup(d: StripDecoders | null, old: boolean): Group {
+function decodersGroup(
+	d: StripDecoders | null,
+	old: boolean,
+	bare = false,
+): Group {
 	if (d === null)
 		return {
 			priority: 3,
@@ -141,19 +145,26 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 		if (issues.length > 0) issues.push(label(sep))
 		issues.push(value(`${restarting} restarting`, old, "attention"))
 	}
-	const minimal: Line =
-		issues.length > 0
-			? [label("decoders "), ...issues]
-			: [label("decoders "), value(up, old)]
-	const mid: Line =
-		issues.length > 0
-			? [label("decoders "), value(up, old), label(sep), ...issues]
-			: minimal
+	if (issues.length === 0) {
+		const minimal: Line = [label("decoders "), value(up, old)]
+		const rich: Line =
+			d.inWindow !== null
+				? [...minimal, label(sep), value(`${d.inWindow} in window`, old)]
+				: minimal
+		return { priority: 3, variants: [minimal, rich] }
+	}
+	const named: Line = [label("decoders "), ...issues]
+	const mid: Line = [label("decoders "), value(up, old), label(sep), ...issues]
 	const rich: Line =
 		d.inWindow !== null
 			? [...mid, label(sep), value(`${d.inWindow} in window`, old)]
 			: mid
-	return { priority: 3, variants: [minimal, mid, rich] }
+	// R75 `bare`: the count words alone (`1 restarting`) as the minimal variant,
+	// used only when the named lane would cost the drops lane (see stripLine).
+	return {
+		priority: 3,
+		variants: bare ? [issues, named, mid, rich] : [named, mid, rich],
+	}
 }
 
 function dropsGroup(d: StripInput["drops"]): Group {
@@ -209,11 +220,11 @@ function rxGroup(rx: StripRx, old: boolean): Group {
 }
 
 /** Display order: api, iq, rx, decoders, drops, clock (spec §4). */
-export function stripGroups(input: StripInput): Group[] {
+export function stripGroups(input: StripInput, bareDecoders = false): Group[] {
 	const groups: Group[] = [apiGroup(input.api), iqGroup(input.iq, input.old.iq)]
 	if (input.rx) groups.push(rxGroup(input.rx, input.old.rx))
 	groups.push(
-		decodersGroup(input.decoders, input.old.decoders),
+		decodersGroup(input.decoders, input.old.decoders, bareDecoders),
 		dropsGroup(input.drops),
 	)
 	groups.push({
@@ -223,6 +234,22 @@ export function stripGroups(input: StripInput): Group[] {
 	return groups
 }
 
+const DROPS_PRIORITY = 4
+
+/**
+ * Fit the strip. When the decoders lane names its issues and that would drop
+ * the drops lane, retry with the bare count words (`1 restarting`, R75): a
+ * shorter label is better than losing the current drop figure.
+ */
 export function stripLine(input: StripInput, width: number): Line {
-	return fitGroups(stripGroups(input), width, { rightAlignLast: true })
+	const opts = { rightAlignLast: true }
+	const groups = stripGroups(input)
+	const fit = fitGroupsDetailed(groups, width, opts)
+	const dropsLost = groups.some(
+		(g, i) => g.priority === DROPS_PRIORITY && !fit.present[i],
+	)
+	if (!dropsLost) return fit.line
+	const bare = fitGroupsDetailed(stripGroups(input, true), width, opts)
+	const kept = bare.present.every((p, i) => p || !fit.present[i])
+	return kept ? bare.line : fit.line
 }
