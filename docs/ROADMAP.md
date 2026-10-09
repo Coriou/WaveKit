@@ -454,12 +454,15 @@ same view, and a program can do the watching more reliably than a person.
 
 ## 9. Project license
 
-The root `package.json` says ISC. The user wants a copyleft license in the spirit
-of Strudel (AGPL-3.0-or-later): anyone may use and modify WaveKit, and modified
-versions, including ones offered over a network, must publish their source.
-Choose the exact license, add `LICENSE`, and update every workspace `package.json`.
-Check compatibility with the bundled GPL decoders. They run as separate
-processes, so they are aggregated, not linked.
+Done 2026-10-09 (`df7e7ee`): split license. WaveKit is AGPL-3.0-or-later (root
+`LICENSE`; core, `cli`, `shared`, `sdr-host`). `@wavekit/api-types` is MIT, so
+client projects can import the API types and stay closed-source. The README
+says that using WaveKit through its API does not put a program under the AGPL.
+The bundled GPL decoders run as separate processes, so they are aggregated, not
+linked. Open: `packages/brand` has no license field, because its fonts are OFL,
+its icons are MIT, and brand assets are not relicensed silently. The
+`wavekit-chan` crate is still marked ISC on `feat/core-channelizer` and will
+move to AGPL there.
 
 ## 10. Agentic development setup modernisation
 
