@@ -31,6 +31,11 @@ export interface ViewKeyInfo {
 	rowIds: string[]
 	pageSize: number
 	ctx: ViewKeyCtx
+	/**
+	 * A line the footer shows while the view has one (R75), e.g. the Decoders
+	 * write result while the detail is closed. A fresh `ui.notice` wins.
+	 */
+	notice?: string
 }
 
 export interface ViewModule {

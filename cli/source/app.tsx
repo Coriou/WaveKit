@@ -21,7 +21,7 @@ import { chromeRows, heightClass, tooSmall, widthClass } from "./ui/frame.js"
 import type { KeyContext } from "./ui/keymap.js"
 import { applyUiAction } from "./ui/ui-reducer.js"
 import { initialUi, type UiState } from "./ui/ui-state.js"
-import { bannerConditions } from "./view-models/chrome.js"
+import { NOTICE_MS, bannerConditions } from "./view-models/chrome.js"
 import type { Effect, ViewKeyInfo, ViewModule } from "./views/types.js"
 
 export interface AppProps {
@@ -78,6 +78,13 @@ export function App({
 		rows: info.rowIds.length,
 		v: info.ctx,
 	}
+	// R75: a fresh key notice (ui.notice) wins; otherwise the view's standing notice.
+	const footerNotice: UiState["notice"] =
+		ui.notice && state.now - ui.notice.at < NOTICE_MS
+			? ui.notice
+			: info.notice !== undefined
+				? { text: info.notice, at: state.now }
+				: ui.notice
 
 	const applyEffect = (e: Effect): void => {
 		;(writeRaw ?? (s => process.stdout.write(s)))(osc52(e.text))
@@ -202,7 +209,7 @@ export function App({
 					) : (
 						<Footer
 							ctx={ctx}
-							notice={ui.notice}
+							notice={footerNotice}
 							now={state.now}
 							width={width}
 						/>
