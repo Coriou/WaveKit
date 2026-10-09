@@ -54,6 +54,9 @@ export const decodersView: ViewModule = {
 				decoderRunning: m.selected ? m.selected.row.running : null,
 			},
 			...(m.notice !== null ? { notice: m.notice } : {}),
+			...(m.detailMaxScroll !== null
+				? { detailMaxScroll: m.detailMaxScroll }
+				: {}),
 		}
 	},
 	onAction: (action, state, ui) => {
