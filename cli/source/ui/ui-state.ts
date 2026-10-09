@@ -87,8 +87,7 @@ export interface UiState {
 	detail: Record<ViewId, DetailUi>
 	messages: MessagesUi
 	edit: TunerEditState | null
-	/** A key notice; `ms` overrides how long it shows (default NOTICE_MS). */
-	notice: { text: string; at: number; ms?: number } | null
+	notice: { text: string; at: number } | null
 	quit: boolean
 	/** Bumped by `r` after a render error to remount the tree. */
 	epoch: number
