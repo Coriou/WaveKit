@@ -74,6 +74,12 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
     if !input_center.is_finite() {
         return Err("--input-center must be finite".into());
     }
+    let control_fd: i32 = get("control-fd")?
+        .parse()
+        .map_err(|_| "--control-fd must be an integer".to_string())?;
+    if control_fd < 0 {
+        return Err("--control-fd must be >= 0".into());
+    }
     Ok(Command::Run(Args {
         generation: get("generation")?
             .parse()
@@ -83,9 +89,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         usable_fraction,
         block_samples,
         socket_dir: PathBuf::from(get("socket-dir")?),
-        control_fd: get("control-fd")?
-            .parse()
-            .map_err(|_| "--control-fd must be an integer".to_string())?,
+        control_fd,
     }))
 }
 
@@ -122,5 +126,6 @@ mod tests {
         assert!(parse(&v("--generation 1 --input-format cu8 --input-rate 2048000 --input-center 1 --usable-fraction 0.99 --block-samples 16384 --socket-dir /t --control-fd 3")).is_err());
         assert!(parse(&v("--generation 1 --input-format cu8 --input-rate 0 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd 3")).is_err());
         assert!(parse(&v("--bogus 1")).is_err());
+        assert!(parse(&v("--generation 1 --input-format cu8 --input-rate 2048000 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd -1")).is_err());
     }
 }
