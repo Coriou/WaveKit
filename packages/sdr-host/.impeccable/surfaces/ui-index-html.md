@@ -15,8 +15,8 @@ Constraints: read-only; no build step; offline; Pi 3 must serve it for almost no
 ## Direction contract
 
 THESIS: The Pi as an instrument screen — one recessed screen leads with the verdict and measured rate, then small multiples on one five-minute time base (sample flow, CPU, memory, SoC temperature, power dips) read by one cursor. Refuses the equal-card metrics wall and the dev key/value dump.
-OWN-WORLD: WaveKit brand v1.0 dark theme (ink, paper, phosphor), vendored wordmark, D-DIN Condensed labels and verdicts, Noto Sans body and live numbers; phosphor means live, amber/red are semantic only; hairline rows, lamps with words, no shadows, no light theme.
-STORY: Operator sees the verdict and rate, scans the shared-time trends for the cause, then the IQ stream (endpoint to paste, dongle, tuning, clients keeping up) and this Pi (power as one fact, Wi-Fi bars, storage, uptime). Developer detail sits in Diagnostics.
-FIRST VIEWPORT: Wordmark, page name, host and contact pill; the screen with verdict, rate and channels; IQ stream beside it on wide screens.
+OWN-WORLD: WaveKit brand v1.0 dark theme (ink, paper, phosphor), vendored wordmark, D-DIN Condensed labels and verdicts, Noto Sans body and live numbers; phosphor means live, amber/red are semantic only; rows grouped by space not rules, lamps with words, no shadows, no light theme; nothing moves when data changes, except the client list as clients join or leave.
+STORY: Operator sees the verdict and rate, scans the shared-time trends for the cause, then the IQ stream (endpoint to paste, dongle, tuning, clients keeping up, one row each) and this Pi (power as one fact, Wi-Fi bars, storage meter, uptime, setup). Developer detail sits open at the foot of the page in Diagnostics.
+FIRST VIEWPORT: Wordmark, page name, host and contact; the screen with verdict, rate and channels; IQ stream beside it on wide screens (1200px and up).
 FORM: Impeccable's pick, Bench Instrument Front Panel; seed 239cf643. Signature: touch/hover marker reading time and rate off real samples; gaps stay blank.
 FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, DESIGN.md, and every shipping raster carrying its provenance

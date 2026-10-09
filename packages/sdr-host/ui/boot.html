@@ -33,8 +33,8 @@
 				</h1>
 				<p class="nameplate__host" id="host-name">This Pi</p>
 				<p class="link" id="contact" data-state="connecting" role="status">
-					<span class="lamp" aria-hidden="true"></span
-					><span id="contact-text">Connecting</span>
+					<span class="link__text" id="contact-text">Connecting</span
+					><span class="lamp" aria-hidden="true"></span>
 				</p>
 			</header>
 			<main>
@@ -66,18 +66,24 @@
 							<span class="step__word">Waiting</span>
 						</li>
 					</ol>
-					<p class="boot-clock" id="setup-clock-row" hidden>
+					<p class="boot-clock" id="setup-clock-row">
 						<span class="boot-clock__value" id="setup-clock">—</span>
-						<span id="setup-age"></span>
+						<span class="boot-clock__label" id="setup-age"
+							>No progress yet</span
+						>
 					</p>
 				</section>
-				<p class="boot-note" id="setup-note">
-					Setup usually takes several minutes. Keep the Pi powered and online
-					until it finishes.
-				</p>
-				<p class="boot-open" id="receiver-link-wrap" hidden>
-					<a id="receiver-link">Open receiver status</a>
-				</p>
+				<!-- One slot under the screen: the advice while setup runs, the way
+				     on once the receiver page is ready. -->
+				<div class="boot-after">
+					<p class="boot-note" id="setup-note">
+						Setup usually takes several minutes. Keep the Pi powered and online
+						until it finishes.
+					</p>
+					<p class="boot-open" id="receiver-link-wrap" hidden>
+						<a id="receiver-link">Open receiver status</a>
+					</p>
+				</div>
 				<noscript
 					><p class="boot-note">
 						Enable JavaScript to follow live setup progress. Receiver status is

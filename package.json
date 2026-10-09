@@ -39,7 +39,8 @@
 		"dashboard": "pnpm --filter @wavekit/cli build && pnpm --filter @wavekit/cli start",
 		"doctor": "node ./scripts/doctor.mjs",
 		"start:pi": "node ./scripts/run-local.mjs pi",
-		"dev:pi": "node ./scripts/run-local.mjs pi --watch"
+		"dev:pi": "node ./scripts/run-local.mjs pi --watch",
+		"dev:pi-ui": "pnpm --filter @wavekit/sdr-host ui:dev"
 	},
 	"pnpm": {
 		"onlyBuiltDependencies": [

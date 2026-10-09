@@ -61,7 +61,7 @@
 	--paper-2: #b9cac1;
 	--paper-3: #8ba598;
 	--phosphor: #7becc7;
-	--grat: rgb(123 236 199 / 0.06);
+	--grat: rgb(123 236 199 / 0.07);
 	--grat-major: rgb(123 236 199 / 0.16);
 
 	/* Status hues are not brand colours; tuned to sit beside phosphor. */
@@ -74,8 +74,23 @@
 		"D-DIN Condensed", "D-DIN Condensed Repli", "Noto Sans", sans-serif;
 	--body: "Noto Sans", "Noto Sans Repli", -apple-system, "Segoe UI", sans-serif;
 	--mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+	/* One 4 px spacing scale. Groups are made by these gaps, not by lines. */
+	--space-1: 4px;
+	--space-2: 8px;
+	--space-3: 12px;
+	--space-4: 16px;
+	--space-5: 24px;
+	--space-6: 32px;
+	--space-7: 48px;
 	--gutter: 16px;
+
+	/* Fixed columns: content swaps inside them, so nothing beside them moves. */
 	--names: 6.5rem;
+	--row-name: 5.25rem;
+	--glyph: 14px;
+	--rate-col: 12rem;
+	--slot: 2.75rem;
 	color-scheme: dark;
 }
 
@@ -133,6 +148,11 @@ ul {
 	display: none !important;
 }
 
+/* File names in prose break only at spaces, never at their own hyphens. */
+.file {
+	white-space: nowrap;
+}
+
 .visually-hidden {
 	position: absolute;
 	width: 1px;
@@ -146,28 +166,20 @@ ul {
 .panel {
 	max-width: 1180px;
 	margin: 0 auto;
-	padding: max(16px, env(safe-area-inset-top))
+	padding: max(20px, env(safe-area-inset-top))
 		max(var(--gutter), env(safe-area-inset-right))
-		max(32px, env(safe-area-inset-bottom))
+		max(var(--space-7), env(safe-area-inset-bottom))
 		max(var(--gutter), env(safe-area-inset-left));
 }
 
-/* Section legends: short display-face labels with a hairline to the edge. */
+/* Section legends: short display-face labels. Space, not a rule, sets them
+   apart from what they head. */
 .legend {
 	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
 	color: var(--paper-2);
-	display: flex;
-	align-items: center;
-	gap: 12px;
-	margin-bottom: 4px;
-}
-.legend::after {
-	content: "";
-	flex: 1;
-	height: 1px;
-	background: var(--rule);
+	margin-bottom: var(--space-4);
 }
 
 /* Nameplate: the wordmark, the page, the Pi it is served from, and contact. */
@@ -176,16 +188,15 @@ ul {
 	grid-template-columns: auto minmax(0, 1fr) auto;
 	grid-template-areas: "title host link";
 	align-items: center;
-	column-gap: 20px;
-	padding: 4px 0 18px;
-	margin-bottom: 20px;
-	border-bottom: 1px solid var(--rule);
+	column-gap: var(--space-5);
+	padding-top: var(--space-1);
+	margin-bottom: var(--space-6);
 }
 .nameplate__title {
 	grid-area: title;
 	display: flex;
 	align-items: center;
-	gap: 14px;
+	gap: var(--space-4);
 	font: 700 1.25rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
@@ -198,30 +209,36 @@ ul {
 	height: auto;
 }
 .nameplate__page {
-	padding-left: 14px;
-	border-left: 1px solid var(--rule);
 	line-height: 32px;
 }
 .nameplate__host {
 	grid-area: host;
 	color: var(--paper-3);
 	font-size: 0.875rem;
-	overflow-wrap: anywhere;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
 
+/* Contact: a word and its lamp, set right to left in a box wide enough for
+   the longest word, so a change of word never moves anything. */
 .link {
 	grid-area: link;
-	display: inline-flex;
+	display: flex;
 	align-items: center;
-	gap: 8px;
+	justify-content: flex-end;
+	gap: var(--space-2);
+	min-width: 10.5rem;
 	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
-	padding: 8px 12px;
-	border: 1px solid var(--rule);
-	border-radius: 999px;
 	white-space: nowrap;
 	color: var(--paper-2);
+}
+/* The word fills the box and sets right: its box never moves, only its text. */
+.link__text {
+	flex: 1;
+	text-align: right;
 }
 .link[data-state="live"] {
 	color: var(--ok);
@@ -246,7 +263,8 @@ ul {
 	background: transparent;
 }
 [data-state="live"] > .lamp,
-[data-state="ok"] .lamp {
+[data-state="ok"] .lamp,
+[data-tone="ok"] .lamp {
 	--lamp: var(--ok);
 	background: var(--lamp);
 }
@@ -276,33 +294,29 @@ ul {
 }
 
 /* Layout: the screen leads; the stream and the Pi sit beside it on wide
-   screens and below it on phones. */
+   screens and below it otherwise. Every block is drawn from the first paint,
+   so the first reading fills the page in place rather than building it. */
 .layout {
 	display: grid;
-	gap: 28px;
+	gap: var(--space-7) var(--space-6);
 }
 .side {
 	display: grid;
-	gap: 28px;
+	grid-template-columns: minmax(0, 1fr);
+	gap: 40px;
 	align-content: start;
 	min-width: 0;
 }
-body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
-	display: none;
-}
-@media (min-width: 640px) and (max-width: 959px) {
+@media (min-width: 640px) and (max-width: 1199px) {
 	.side {
 		grid-template-columns: repeat(2, minmax(0, 1fr));
-		column-gap: 28px;
-	}
-	.side > .setup {
-		grid-column: 1 / -1;
+		column-gap: var(--space-6);
 	}
 }
-@media (min-width: 960px) {
+@media (min-width: 1200px) {
 	.layout {
 		grid-template-columns: minmax(0, 1fr) 360px;
-		column-gap: 36px;
+		column-gap: 40px;
 		align-items: start;
 	}
 	.diagnostics {
@@ -310,21 +324,22 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	}
 }
 
-/* The screen: a recessed panel shared by both pages. On the status page it
-   holds the verdict, the rate, and every trend on one time base. */
+/* The screen: a recessed well shared by both pages, set into the field by
+   tone alone. On the status page it holds the verdict, the rate, and every
+   trend on one time base. */
 .screen {
 	position: relative;
 	background: var(--well);
-	border: 1px solid var(--rule);
 	border-radius: 12px;
-	padding: 20px 20px 14px;
+	padding: var(--space-5) var(--space-5) var(--space-4);
 	display: grid;
-	gap: 22px 20px;
+	gap: var(--space-5);
 	min-width: 0;
 }
 .screen--status {
-	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-columns: minmax(0, 1fr) var(--rate-col);
 	grid-template-areas: "verdict rate" "scope scope";
+	column-gap: var(--space-5);
 }
 .screen__verdict {
 	min-width: 0;
@@ -336,6 +351,7 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	font: 700 2rem/1 var(--display);
 	letter-spacing: 0.01em;
 	text-wrap: balance;
+	min-height: 1lh;
 }
 .verdict::before {
 	content: "";
@@ -343,7 +359,7 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	width: 12px;
 	height: 12px;
 	border-radius: 50%;
-	margin-right: 12px;
+	margin-right: var(--space-3);
 	vertical-align: 0.12em;
 	border: 2px solid var(--lamp-off);
 }
@@ -359,22 +375,42 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	background: var(--fault);
 	border-color: var(--fault);
 }
+/* Two lines are reserved whatever the verdict says; the measure is the
+   column's, capped near 68 characters where the column runs wider. */
 .verdict__detail {
-	margin-top: 8px;
+	margin-top: var(--space-2);
 	color: var(--paper-2);
 	font-size: 0.9375rem;
-	max-width: 54ch;
+	line-height: 1.45;
+	min-height: 2lh;
+	max-width: 68ch;
 	text-wrap: pretty;
 }
+/* Each line spans the column and sets right, so a shorter figure or word
+   changes text, never a box. */
 .screen__rate {
 	grid-area: rate;
+	display: grid;
+	align-content: start;
 	text-align: right;
+	min-width: 0;
 }
 .rate {
-	font: 400 2.5rem/0.95 var(--body);
+	font: 400 2.5rem/1 var(--body);
 	letter-spacing: -0.01em;
-	color: var(--paper-2);
+	color: var(--paper-3);
 	white-space: nowrap;
+	margin-bottom: var(--space-2);
+}
+/* Fixed-width figure: digits change, the box does not. */
+.rate__value {
+	display: inline-block;
+	/* Four tabular figures in Noto, in em so a font swap cannot resize it. */
+	min-width: 2.3em;
+	text-align: end;
+}
+.screen[data-fresh="true"] .rate {
+	color: var(--paper-2);
 }
 .screen[data-fresh="true"][data-state="ok"] .rate {
 	color: var(--phosphor);
@@ -382,24 +418,41 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 .screen[data-fresh="true"][data-state="warn"] .rate {
 	color: var(--warn);
 }
+/* The unit gets its own box too, so neither a kB/s nor the display face
+   arriving moves the figure. */
 .rate__unit {
+	display: inline-block;
+	width: 2.2em;
+	text-align: left;
 	font: 400 1.25rem/1 var(--display);
 	letter-spacing: 0.02em;
 	color: var(--paper-2);
 }
-.rate__sub {
-	margin-top: 8px;
-	color: var(--paper-2);
+.rate__sub,
+.rate__basis {
 	font-size: 0.875rem;
+	line-height: 1.4;
+	min-height: 1lh;
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	max-width: 100%;
+}
+.rate__sub {
+	color: var(--paper);
+}
+.rate__basis {
+	color: var(--paper-3);
 }
 
-/* Scope: channels share one five-minute time base, read by one cursor. */
+/* Scope: channels share one five-minute time base, read by one cursor. The
+   graticule is reduced to what carries meaning: a faint line each minute and
+   each channel's zero. */
 .scope {
 	grid-area: scope;
 	position: relative;
 	display: grid;
-	gap: 10px;
+	gap: var(--space-3);
 	touch-action: pan-y;
 	cursor: crosshair;
 	min-width: 0;
@@ -412,7 +465,7 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	grid-template-columns: var(--names) minmax(0, 1fr);
 	grid-template-areas: "name plot" "value plot";
 	grid-template-rows: auto 1fr;
-	column-gap: 14px;
+	column-gap: var(--space-4);
 	align-items: start;
 }
 .channel__name {
@@ -427,11 +480,13 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	font: 400 1.0625rem/1.3 var(--body);
 	color: var(--paper);
 	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .channel--flow .channel__value {
 	font: 400 0.875rem/1.3 var(--body);
 	color: var(--paper-3);
-	margin-top: 4px;
+	margin-top: var(--space-1);
 }
 .channel[data-state="warn"] .channel__value {
 	color: var(--warn);
@@ -453,11 +508,11 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 .channel__plot {
 	display: block;
 	width: 100%;
-	height: 38px;
+	height: 40px;
 	overflow: visible;
 }
 .channel--flow .channel__plot {
-	height: clamp(128px, 17vw, 176px);
+	height: clamp(128px, 15vw, 208px);
 }
 .channel--lane .channel__plot {
 	height: 16px;
@@ -519,11 +574,6 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	stroke-dasharray: 2 4;
 	vector-effect: non-scaling-stroke;
 }
-.lane__base {
-	stroke: var(--grat-major);
-	stroke-width: 1;
-	vector-effect: non-scaling-stroke;
-}
 .lane__ticks {
 	stroke: var(--warn);
 	stroke-width: 2;
@@ -556,7 +606,7 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 }
 .plot__label--start {
 	top: 4px;
-	padding: 0 8px;
+	padding: 0 var(--space-2);
 }
 .channel--flow[data-start="late"] .plot__label--start {
 	transform: translateX(-100%);
@@ -570,7 +620,7 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 .scope__axis {
 	display: flex;
 	justify-content: space-between;
-	margin-left: calc(var(--names) + 14px);
+	margin-left: calc(var(--names) + var(--space-4));
 	font: 400 0.8125rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
@@ -582,14 +632,14 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	background: var(--paper);
 	pointer-events: none;
 }
+/* The readout floats on the one raised tone; no outline needed. */
 .scope__readout {
 	position: absolute;
 	display: grid;
 	gap: 2px;
-	padding: 8px 10px;
+	padding: var(--space-2) var(--space-3);
 	border-radius: 8px;
-	background: rgb(11 21 18 / 0.94);
-	border: 1px solid var(--rule);
+	background: var(--surface);
 	font-size: 0.8125rem;
 	line-height: 1.35;
 	white-space: nowrap;
@@ -599,57 +649,63 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	color: var(--paper-2);
 }
 
-/* IQ stream: the address to paste into WaveKit, copyable in one press. */
+/* IQ stream: the address to paste into WaveKit, copyable in one press. The
+   field and its button are two tones of surface split by a hairline of ink. */
 .endpoint {
 	display: flex;
 	align-items: stretch;
-	margin: 12px 0 2px;
-	border: 1px solid var(--rule);
-	border-radius: 8px;
-	background: var(--surface);
+	gap: 2px;
+	margin-bottom: var(--space-5);
 	min-width: 0;
 }
 .endpoint__url {
 	flex: 1;
 	min-width: 0;
-	padding: 11px 12px;
-	font: 400 0.9375rem/1.3 var(--mono);
+	padding: 12px var(--space-3) 12px 14px;
+	border-radius: 8px 0 0 8px;
+	background: var(--surface);
+	font: 400 0.875rem/1.4 var(--mono);
 	color: var(--paper);
-	overflow-wrap: anywhere;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	user-select: all;
 }
 .endpoint__copy {
 	flex: none;
-	min-width: 72px;
+	width: 5.5rem;
 	min-height: 44px;
-	padding: 0 14px;
+	padding: 0 var(--space-3);
 	border: 0;
-	border-left: 1px solid var(--rule);
-	border-radius: 0 7px 7px 0;
-	background: transparent;
+	border-radius: 0 8px 8px 0;
+	background: var(--surface);
 	color: var(--phosphor);
 	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
 	cursor: pointer;
 }
+/* Hover and press lift the surface toward phosphor, as the old outline did. */
 .endpoint__copy:hover {
-	background: rgb(123 236 199 / 0.08);
+	background: color-mix(in srgb, var(--surface), var(--phosphor) 8%);
 }
 .endpoint__copy:active {
-	background: rgb(123 236 199 / 0.14);
+	background: color-mix(in srgb, var(--surface), var(--phosphor) 14%);
 }
 
-/* Rows: name, value, one line of context, separated by hairlines. */
+/* Rows: name, value, one line of context. Every row is exactly two lines;
+   a glyph column (lamp, bars or nothing) keeps every value on one edge. */
+.rows {
+	display: grid;
+	gap: var(--space-3);
+}
 .row {
 	display: grid;
-	grid-template-columns: 5.25rem minmax(0, 1fr);
-	column-gap: 12px;
-	padding: 11px 0;
-	border-bottom: 1px solid var(--rule);
+	grid-template-columns: var(--row-name) minmax(0, 1fr);
+	column-gap: var(--space-3);
 }
 .row dt {
-	font: 400 0.9375rem/1.45 var(--display);
+	font: 400 0.9375rem/1.5rem var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
 	color: var(--paper-2);
@@ -662,17 +718,42 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 .row__value {
 	display: flex;
 	align-items: center;
-	gap: 8px;
+	gap: var(--space-2);
 	min-width: 0;
-	overflow-wrap: anywhere;
+	line-height: 1.5rem;
+	white-space: nowrap;
+}
+.row__text {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.glyph {
+	flex: none;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--glyph);
+	height: 1.5rem;
 }
 .row__sub {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
+	min-height: 1lh;
+	padding-left: calc(var(--glyph) + var(--space-2));
 	font-size: 0.8125rem;
+	line-height: 1.35;
 	color: var(--paper-2);
-	overflow-wrap: anywhere;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	min-width: 0;
 }
-.row__sub:empty {
-	display: none;
+.row__subtext {
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 .row[data-state="warn"] .row__text {
 	color: var(--warn);
@@ -680,20 +761,22 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 .row[data-state="fault"] .row__text {
 	color: var(--fault);
 }
-.row[data-state="stale"] .row__text,
-.row[data-state="unavailable"] .row__text {
-	color: var(--paper-2);
+.row[data-state="stale"] :is(.row__text, .row__sub),
+.row[data-state="unavailable"] :is(.row__text, .row__sub),
+.row[data-empty="true"] .row__text {
+	color: var(--paper-3);
 }
 
 /* Wi-Fi bars: four rising bars, lit from the left by signal strength. */
 .bars {
-	display: none;
+	display: inline-flex;
 	align-items: flex-end;
 	gap: 2px;
 	height: 13px;
+	visibility: hidden;
 }
 .row[data-bars]:not([data-bars="0"]) .bars {
-	display: inline-flex;
+	visibility: visible;
 }
 .bars span {
 	width: 3px;
@@ -726,101 +809,229 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	opacity: 0.4;
 }
 
+/* Meter: a 4 px track with a fill, for a share of a whole (storage used). */
+.meter {
+	flex: none;
+	position: relative;
+	width: 40px;
+	height: 4px;
+	border-radius: 2px;
+	background: var(--rule);
+	overflow: hidden;
+}
+.meter__fill {
+	position: absolute;
+	inset: 0;
+	background: var(--paper-2);
+	transform-origin: left center;
+	transform: scaleX(0);
+}
+.row[data-state="warn"] .meter__fill {
+	background: var(--warn);
+}
+.row[data-state="stale"] .meter,
+.row[data-state="unavailable"] .meter {
+	opacity: 0.4;
+}
+
+/* Clients: one row per client, each a fixed 2.75rem tall so per-poll changes
+   never move anything. Membership is the one allowed reflow: clients join and
+   leave rarely, so the list grows and shrinks rather than reserving empty
+   slots. Beyond three, the last row summarises the rest. */
 .clients {
 	display: grid;
-	gap: 8px;
+	grid-auto-rows: minmax(var(--slot), auto);
+	row-gap: var(--space-2);
+	margin-top: var(--space-3);
 }
 .client {
 	display: grid;
-	grid-template-columns: auto minmax(0, 1fr);
-	column-gap: 8px;
+	grid-template-columns: 10px minmax(0, 1fr) 64px 5.25rem;
+	grid-template-areas: "lamp address spark rate" ". detail detail detail";
+	grid-template-rows: 1.4rem auto;
+	column-gap: 10px;
 	align-items: center;
+	min-width: 0;
+}
+.client .lamp {
+	grid-area: lamp;
 }
 .client__address {
-	overflow-wrap: anywhere;
+	grid-area: address;
+	font-size: 0.9375rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
-.client__sub {
-	grid-column: 1 / -1;
+.client__rate {
+	grid-area: rate;
+	font-size: 0.9375rem;
+	text-align: end;
+	white-space: nowrap;
+}
+.client__detail {
+	grid-area: detail;
 	font-size: 0.8125rem;
+	line-height: 1.35;
 	color: var(--paper-2);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
 }
-.client .lamp + .client__address + .client__sub {
-	grid-column: 2;
-}
-.client[data-state="warn"] .client__sub {
+.client[data-state="warn"] .client__detail {
 	color: var(--warn);
 }
-
-/* Setup, only while first boot is still running or has failed. */
-.setup__line {
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	padding-top: 10px;
+.client[data-state="stale"]
+	:is(.client__address, .client__rate, .client__detail) {
+	color: var(--paper-3);
 }
-.setup__line[data-state="fault"] {
-	color: var(--fault);
-}
-
-/* Diagnostics: developer detail, one press away. */
-.diagnostics {
-	border-top: 1px solid var(--rule);
-	border-bottom: 1px solid var(--rule);
-}
-.diagnostics summary {
-	cursor: pointer;
-	padding: 14px 0;
-	font: 700 0.9375rem/1 var(--display);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
+.client--more .client__address {
 	color: var(--paper-2);
-	list-style: none;
-	display: flex;
-	align-items: center;
-	gap: 10px;
-	min-height: 44px;
 }
-.diagnostics summary::-webkit-details-marker {
-	display: none;
+.client--more :is(.client__spark, .client__rate) {
+	visibility: hidden;
 }
-.diagnostics summary::before {
-	content: "";
-	width: 7px;
-	height: 7px;
-	border-right: 1.5px solid currentColor;
-	border-bottom: 1.5px solid currentColor;
-	transform: rotate(-45deg);
-	transition: transform 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+.clients__empty {
+	align-self: start;
+	padding-left: calc(
+		var(--row-name) + var(--space-3) + var(--glyph) + var(--space-2)
+	);
+	font-size: 0.8125rem;
+	line-height: 1.45;
+	color: var(--paper-3);
+	text-wrap: pretty;
 }
-.diagnostics[open] summary::before {
-	transform: rotate(45deg);
+
+/* Sparkline: a client's delivered rate as this page has seen it, on the
+   same full scale as the sample flow. No axes; the figure sits beside it. */
+.client__spark {
+	grid-area: spark;
+	display: block;
+	width: 100%;
+	height: 16px;
+	overflow: visible;
 }
-.diagnostics summary:hover {
-	color: var(--paper);
+.spark__base {
+	stroke: var(--grat-major);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
 }
-.diagnostics__body {
+.spark__trace {
+	fill: none;
+	stroke: var(--paper-2);
+	stroke-width: 1.5;
+	stroke-linejoin: round;
+	stroke-linecap: round;
+	vector-effect: non-scaling-stroke;
+}
+.client[data-state="ok"] .spark__trace {
+	stroke: var(--phosphor);
+}
+.client[data-state="warn"] .spark__trace {
+	stroke: var(--warn);
+}
+.client[data-state="stale"] .spark__trace {
+	stroke: var(--paper-3);
+	opacity: 0.5;
+}
+
+/* Diagnostics: developer detail, open and quiet. Three fixed groups whose
+   terms never change; values are one line each; static explanations sit in
+   notes at the very end, where they can wrap without moving anything. */
+.diagnostics__groups {
 	display: grid;
-	gap: 18px;
-	padding-bottom: 20px;
+	gap: var(--space-6) var(--space-6);
 }
-@media (min-width: 960px) {
-	.diagnostics__body {
-		grid-template-columns: 1fr 1fr;
-		column-gap: 36px;
+@media (min-width: 640px) {
+	.diagnostics__groups {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+	}
+	.diag-group[data-key="sources"],
+	.diagnostics__notes {
+		grid-column: 1 / -1;
 	}
 }
+@media (min-width: 1200px) {
+	.diagnostics__groups {
+		grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.05fr) minmax(0, 1.05fr);
+		column-gap: 40px;
+	}
+	.diag-group[data-key="sources"] {
+		grid-column: auto;
+	}
+}
+.diag-group {
+	min-width: 0;
+}
+/* Sources read across as one line each; keep the freshness near its source. */
+.diag-group[data-key="sources"] .facts {
+	max-width: 34rem;
+}
+.diag-group__title {
+	font: 400 0.8125rem/1 var(--display);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--paper-3);
+	margin-bottom: var(--space-3);
+}
+/* Terms take the width of the longest term in their group; every fact shares
+   the group's columns, so values line up down the group. */
 .facts {
 	display: grid;
-	grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
-	gap: 6px 16px;
+	grid-template-columns: max-content minmax(0, 1fr);
+	gap: 6px var(--space-4);
 	font-size: 0.875rem;
-	align-content: start;
+	line-height: 1.4;
 }
-.facts dt {
+/* The freshness word changes; its column does not. */
+.diag-group[data-key="sources"] .facts {
+	grid-template-columns: max-content minmax(0, 1fr) 6.5rem;
+}
+.fact {
+	display: grid;
+	grid-column: 1 / -1;
+	grid-template-columns: subgrid;
+	min-width: 0;
+}
+.fact dt {
+	color: var(--paper-2);
+	white-space: nowrap;
+}
+.fact dd {
+	min-width: 0;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+.fact__word {
+	display: flex;
+	align-items: center;
+	gap: var(--space-2);
 	color: var(--paper-2);
 }
-.facts dd {
-	overflow-wrap: anywhere;
+.fact__word .lamp {
+	width: 8px;
+	height: 8px;
+	border-width: 1.5px;
+}
+.fact[data-tone="stale"] .fact__word {
+	color: var(--warn);
+}
+.fact[data-tone="unknown"] :is(.fact__value, .fact__word),
+.fact[data-empty="true"] .fact__value {
+	color: var(--paper-3);
+}
+.diagnostics__notes {
+	display: grid;
+	gap: var(--space-1);
+	font-size: 0.8125rem;
+	line-height: 1.45;
+	color: var(--paper-3);
+	max-width: 80ch;
+	text-wrap: pretty;
+}
+.diagnostics__notes:empty {
+	display: none;
 }
 
 @media (max-width: 559px) {
@@ -828,8 +1039,9 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	.nameplate {
 		grid-template-columns: auto minmax(0, 1fr) auto;
 		grid-template-areas: "logo logo link" "page host host";
-		row-gap: 12px;
-		column-gap: 12px;
+		row-gap: var(--space-3);
+		column-gap: var(--space-3);
+		margin-bottom: var(--space-5);
 	}
 	.nameplate__title {
 		display: contents;
@@ -840,46 +1052,72 @@ body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
 	}
 	.nameplate__page {
 		grid-area: page;
-		padding-left: 0;
-		border-left: 0;
 		line-height: 1;
 	}
 	.nameplate__host {
 		line-height: 1;
 	}
 	.screen {
-		padding: 16px 14px 12px;
-		gap: 16px;
+		padding: var(--space-4) 14px var(--space-3);
+		gap: var(--space-4);
 	}
+	/* Title, then the figure, then the reserved detail lines: any spare line
+	   falls before the scope, where it reads as spacing. */
 	.screen--status {
 		grid-template-columns: minmax(0, 1fr);
-		grid-template-areas: "verdict" "rate" "scope";
+		grid-template-areas: "title" "rate" "detail" "scope";
+	}
+	.screen--status .screen__verdict {
+		display: contents;
+	}
+	.screen--status .verdict {
+		grid-area: title;
+	}
+	.screen--status .verdict__detail {
+		grid-area: detail;
+		margin-top: 0;
 	}
 	.verdict {
 		font-size: 1.75rem;
 	}
+	.verdict__detail {
+		min-height: 3lh;
+	}
+	/* The figure on the left, its two lines stacked beside it. */
 	.screen__rate {
+		grid-template-columns: 9.5rem minmax(0, 1fr);
+		grid-template-areas: "rate sub" "rate basis";
+		align-items: center;
+		column-gap: var(--space-4);
 		text-align: left;
-		display: flex;
-		align-items: baseline;
-		flex-wrap: wrap;
-		gap: 4px 14px;
+	}
+	.rate {
+		grid-area: rate;
+		margin-bottom: 0;
 	}
 	.rate__sub {
-		margin-top: 0;
-		white-space: normal;
+		grid-area: sub;
+	}
+	.rate__basis {
+		grid-area: basis;
 	}
 	/* Each channel: name and value on one line, its trace full width below. */
 	.channel {
-		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-columns: minmax(0, 1fr) 7.5rem;
 		grid-template-areas: "name value" "plot plot";
-		row-gap: 4px;
+		row-gap: var(--space-1);
+	}
+	.channel__value {
+		text-align: end;
 	}
 	.channel--flow .channel__value {
 		margin-top: 0;
 	}
 	.scope__axis {
 		margin-left: 0;
+	}
+	.facts {
+		column-gap: var(--space-3);
 	}
 }
 

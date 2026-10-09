@@ -1,0 +1,51 @@
+:host {
+	all: initial;
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	z-index: 2147483647;
+	font:
+		12px/1.4 system-ui,
+		sans-serif;
+	color: #e6e6e6;
+}
+
+.bar {
+	display: flex;
+	gap: 8px;
+	align-items: center;
+	max-width: min(560px, calc(100vw - 24px));
+	padding: 6px 8px;
+	border: 1px solid #ffffff2e;
+	border-radius: 8px;
+	background: #000000d9;
+	box-shadow: 0 4px 16px #00000080;
+}
+
+.bar.collapsed select,
+.bar.collapsed .now {
+	display: none;
+}
+
+.toggle,
+select {
+	font: inherit;
+	color: inherit;
+	background: #ffffff14;
+	border: 1px solid #ffffff2e;
+	border-radius: 4px;
+	padding: 2px 6px;
+}
+
+.toggle {
+	cursor: pointer;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.now {
+	overflow: hidden;
+	color: #b0b0b0;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}

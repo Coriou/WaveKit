@@ -435,13 +435,18 @@ same-origin CSP), polls every 3 s while visible, and pauses when the tab is
 hidden. See [the setup guide](../../docs/SDR-HOST-SETUP.md#status-page) for what
 each part means. Brand fonts and the wordmark are vendored in `ui/brand/`.
 
-To work on the pages without a Pi, run
-`node packages/sdr-host/scripts/ui-preview.mjs` and open
-`http://127.0.0.1:8090/`: it serves `ui/` unchanged over simulated receivers,
-one scenario per page state (sampling, client-set rate, below rate with
-under-voltage, stalled, dongle missing, zero or several clients, Ethernet, weak
-Wi-Fi, fresh start, first-boot setup, unreachable, lost contact, and every
-setup-page state).
+To work on the pages without a Pi, run `pnpm dev:pi-ui` from the repo root
+(`--port`/`--host` pass through; default `http://127.0.0.1:8090/`). It serves
+`ui/` unchanged under the Pi's CSP over simulated receivers, one scenario per
+page state (sampling, client-set rate, below rate with under-voltage, stalled,
+dongle missing, zero or several clients, Ethernet, weak Wi-Fi, fresh start,
+first-boot setup, unreachable, lost contact, and every setup-page state). The
+`live` and `boot-live` tours loop through those states in real time, so the
+scope shows stalls, dips and rate changes scrolling past. Saving a file in
+`ui/` reloads open pages (CSS swaps in place), editing the fake data in
+`scripts/ui-preview/server.mjs` restarts the server and reloads them, and a
+collapsible switcher in the corner jumps between scenarios. The switcher is
+injected by the preview only and never ships to the Pi.
 
 ### GET /health
 

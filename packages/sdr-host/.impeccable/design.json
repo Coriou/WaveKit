@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 2,
-	"generatedAt": "2026-10-09T12:00:00.000Z",
+	"generatedAt": "2026-10-09T15:30:00.000Z",
 	"title": "Design System: WaveKit Receiver",
 	"extensions": {
 		"colorMeta": {
@@ -142,7 +142,7 @@
 			"grat": {
 				"role": "neutral",
 				"displayName": "Graticule",
-				"canonical": "oklch(86.6% 0.117 170 / 0.06)",
+				"canonical": "oklch(86.6% 0.117 170 / 0.07)",
 				"tonalRamp": [
 					"oklch(15% 0.117 170)",
 					"oklch(26% 0.117 170)",
@@ -237,7 +237,7 @@
 			},
 			"rate": {
 				"displayName": "Rate",
-				"purpose": "The measured MB/s headline figure; unit set in D-DIN 400 1.25rem."
+				"purpose": "The measured MB/s headline figure in a fixed 2.3em box; unit set in D-DIN 400 1.25rem."
 			},
 			"nameplate": {
 				"displayName": "Nameplate",
@@ -249,11 +249,11 @@
 			},
 			"legend": {
 				"displayName": "Legend",
-				"purpose": "Section legends, diagnostics summary, link pill, Copy and setup button words."
+				"purpose": "Section legends, the contact word, Copy and setup button words."
 			},
 			"label": {
 				"displayName": "Label",
-				"purpose": "Channel names and row names."
+				"purpose": "Channel names and row names; Diagnostics group titles at 0.8125rem in paper-3."
 			},
 			"axis": {
 				"displayName": "Axis",
@@ -265,15 +265,15 @@
 			},
 			"body": {
 				"displayName": "Body",
-				"purpose": "Row values, client addresses, base text."
+				"purpose": "Row values and base text; client addresses and rates at 0.9375rem."
 			},
 			"body-sm": {
 				"displayName": "Body Small",
-				"purpose": "Host name, rate sub-line, flow scale, diagnostics facts, step word, clock caption."
+				"purpose": "Host name, the rate's comparison and basis lines, flow scale, diagnostics facts, step word, clock caption."
 			},
 			"caption": {
 				"displayName": "Caption",
-				"purpose": "Row and client sub-lines, cursor readout; plot labels at 0.75rem."
+				"purpose": "Row and client sub-lines, the empty-clients hint, Diagnostics notes, cursor readout; plot labels at 0.75rem."
 			},
 			"mono": {
 				"displayName": "Mono",
@@ -282,11 +282,6 @@
 		},
 		"shadows": [],
 		"motion": [
-			{
-				"name": "ease-instrument",
-				"value": "cubic-bezier(0.22, 1, 0.36, 1)",
-				"purpose": "Diagnostics chevron rotation (0.2s)."
-			},
 			{
 				"name": "lamp-blink",
 				"value": "1.2s steps(2, jump-none) infinite",
@@ -314,65 +309,73 @@
 			},
 			{
 				"name": "two-column",
-				"value": "960px"
+				"value": "1200px"
 			}
 		]
 	},
 	"components": [
 		{
-			"name": "Link Pill",
+			"name": "Contact",
 			"kind": "chip",
-			"refersTo": "link-pill",
-			"description": "Contact state: lamp plus word; live phosphor, stale/reconnecting amber, offline red after 10 s.",
-			"html": "<p class=\"ds-link\" data-state=\"live\"><span class=\"ds-lamp\"></span>Live</p><p class=\"ds-link\" data-state=\"offline\"><span class=\"ds-lamp\"></span>Lost · 16 s ago</p>",
-			"css": ".ds-link{display:inline-flex;align-items:center;gap:8px;margin:0 8px 0 0;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;padding:8px 12px;border:1px solid #2c443b;border-radius:999px;white-space:nowrap;background:#111c19}.ds-link[data-state=\"live\"]{color:#7becc7}.ds-link[data-state=\"offline\"]{color:#ff7a6b}.ds-lamp{width:10px;height:10px;border-radius:50%;border:2px solid var(--l,#52645d)}.ds-link[data-state=\"live\"] .ds-lamp{--l:#7becc7;background:#7becc7}.ds-link[data-state=\"offline\"] .ds-lamp{--l:#ff7a6b;background:#ff7a6b}"
+			"refersTo": "link",
+			"description": "Contact state as a word and its lamp, right-set in a fixed 10.5rem box with no outline, so a change of word never moves anything; live phosphor, stale/reconnecting amber, offline red after 10 s.",
+			"html": "<p class=\"ds-link\" data-state=\"live\"><span class=\"ds-lt\">Live</span><span class=\"ds-lamp\"></span></p><p class=\"ds-link\" data-state=\"offline\"><span class=\"ds-lt\">Lost · 16 s ago</span><span class=\"ds-lamp\"></span></p>",
+			"css": ".ds-link{display:flex;align-items:center;gap:8px;width:10.5rem;margin:0 0 8px;padding:8px 0;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;white-space:nowrap;background:#111c19}.ds-lt{flex:1;text-align:right}.ds-link[data-state=\"live\"]{color:#7becc7}.ds-link[data-state=\"offline\"]{color:#ff7a6b}.ds-lamp{flex:none;width:10px;height:10px;border-radius:50%;border:2px solid var(--l,#52645d)}.ds-link[data-state=\"live\"] .ds-lamp{--l:#7becc7;background:#7becc7}.ds-link[data-state=\"offline\"] .ds-lamp{--l:#ff7a6b;background:#ff7a6b}"
 		},
 		{
 			"name": "Legend",
 			"kind": "custom",
-			"description": "Section legend in D-DIN 700 uppercase with a hairline to the edge.",
+			"description": "Section legend in D-DIN 700 uppercase; space below it, no hairline.",
 			"html": "<h2 class=\"ds-legend\">IQ stream</h2>",
-			"css": ".ds-legend{display:flex;align-items:center;gap:12px;margin:0;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#b9cac1;background:#111c19;padding:8px 0}.ds-legend::after{content:\"\";flex:1;height:1px;background:#2c443b}"
+			"css": ".ds-legend{margin:0 0 16px;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#b9cac1;background:#111c19;padding:8px 0}"
 		},
 		{
 			"name": "Screen",
 			"kind": "card",
 			"refersTo": "screen",
-			"description": "Recessed well with verdict, phosphor rate and sub-line, and the flow channel: round full scale, dashed expected line labelled where drawn, 10 s mean trace over a phosphor wash.",
-			"html": "<section class=\"ds-screen\"><div><p class=\"ds-verdict\">Sampling</p><p class=\"ds-detail\">Fresh samples are arriving from the dongle.</p></div><div class=\"ds-ratebox\"><p class=\"ds-rate\">4.08 <span>MB/s</span></p><p class=\"ds-sub\">2.048 MS/s · 99% of expected</p></div><div class=\"ds-ch\"><p class=\"ds-cn\">Sample flow</p><p class=\"ds-cv\">0–5 MB/s</p><div class=\"ds-fr\"><svg viewBox=\"0 0 600 160\" preserveAspectRatio=\"none\"><defs><linearGradient id=\"ds-fade\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#7becc7\" stop-opacity=\"0.16\"/><stop offset=\"1\" stop-color=\"#7becc7\" stop-opacity=\"0\"/></linearGradient></defs><g stroke=\"rgb(123 236 199 / 0.06)\"><line x1=\"0\" x2=\"600\" y1=\"32\" y2=\"32\"/><line x1=\"0\" x2=\"600\" y1=\"64\" y2=\"64\"/><line x1=\"0\" x2=\"600\" y1=\"96\" y2=\"96\"/><line x1=\"0\" x2=\"600\" y1=\"128\" y2=\"128\"/><line x1=\"120\" x2=\"120\" y1=\"0\" y2=\"160\"/><line x1=\"240\" x2=\"240\" y1=\"0\" y2=\"160\"/><line x1=\"360\" x2=\"360\" y1=\"0\" y2=\"160\"/><line x1=\"480\" x2=\"480\" y1=\"0\" y2=\"160\"/></g><line x1=\"0\" x2=\"600\" y1=\"160\" y2=\"160\" stroke=\"rgb(123 236 199 / 0.16)\"/><path d=\"M0 30 L120 29 L200 31 L200 160 L0 160 Z M240 30 L420 29 L600 30 L600 160 L240 160 Z\" fill=\"url(#ds-fade)\"/><line x1=\"0\" x2=\"600\" y1=\"28.8\" y2=\"28.8\" stroke=\"#8ba598\" stroke-width=\"1.25\" stroke-dasharray=\"6 5\"/><path d=\"M0 30 L120 29 L200 31 M240 30 L420 29 L600 30\" fill=\"none\" stroke=\"#7becc7\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg><p class=\"ds-pl\">Expected 4.10 MB/s</p></div></div></section>",
-			"css": ".ds-screen{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:22px 20px;background:#0b1512;border:1px solid #2c443b;border-radius:12px;padding:20px 20px 14px;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-verdict{margin:0;font:700 2rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.01em}.ds-verdict::before{content:\"\";display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:12px;vertical-align:0.12em;background:#7becc7;border:2px solid #7becc7}.ds-detail{margin:8px 0 0;color:#b9cac1;font-size:0.9375rem;max-width:54ch}.ds-ratebox{text-align:right}.ds-rate{margin:0;font:400 2.5rem/0.95 \"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;letter-spacing:-0.01em;color:#7becc7;white-space:nowrap}.ds-rate span{font:400 1.25rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.02em;color:#b9cac1}.ds-sub{margin:8px 0 0;color:#b9cac1;font-size:0.875rem}.ds-ch{grid-column:1/-1;display:grid;grid-template-columns:6.5rem minmax(0,1fr);grid-template-areas:\"name plot\" \"value plot\";grid-template-rows:auto 1fr;column-gap:14px}.ds-cn{grid-area:name;margin:0;font:400 0.9375rem/1.1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-cv{grid-area:value;margin:4px 0 0;font-size:0.875rem;color:#8ba598}.ds-fr{grid-area:plot;position:relative}.ds-fr svg{display:block;width:100%;height:150px;overflow:visible}.ds-fr svg line{vector-effect:non-scaling-stroke}.ds-pl{position:absolute;left:0;top:18%;transform:translateY(calc(-100% - 5px));margin:0;font-size:0.75rem;color:#8ba598}"
+			"description": "Recessed well set in by tone alone (no outline): verdict with two reserved detail lines, the rate in a fixed 12rem column with its comparison and basis lines, and the flow channel: round full scale, minute lines, dashed expected line labelled where drawn, 10 s mean trace over a phosphor wash.",
+			"html": "<section class=\"ds-screen\"><div><p class=\"ds-verdict\">Sampling</p><p class=\"ds-detail\">Fresh samples are arriving from the dongle.</p></div><div class=\"ds-ratebox\"><p class=\"ds-rate\">4.08 <span>MB/s</span></p>H0% of expected</p><p class=\"ds-basis\">2.048 MS/s configured</p></div><div class=\"ds-ch\"><p class=\"ds-cn\">Sample flow</p><p class=\"ds-cv\">0–5 MB/s</p><div class=\"ds-fr\"><svg viewBox=\"0 0 600 160\" preserveAspectRatio=\"none\"><defs><linearGradient id=\"ds-fade\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#7becc7\" stop-opacity=\"0.16\"/><stop offset=\"1\" stop-color=\"#7becc7\" stop-opacity=\"0\"/></linearGradient></defs><g stroke=\"rgb(123 236 199 / 0.06)\"><line x1=\"0\" x2=\"600\" y1=\"32\" y2=\"32\"/><line x1=\"0\" x2=\"600\" y1=\"64\" y2=\"64\"/><line x1=\"0\" x2=\"600\" y1=\"96\" y2=\"96\"/><line x1=\"0\" x2=\"600\" y1=\"128\" y2=\"128\"/><line x1=\"120\" x2=\"120\" y1=\"0\" y2=\"160\"/><line x1=\"240\" x2=\"240\" y1=\"0\" y2=\"160\"/><line x1=\"360\" x2=\"360\" y1=\"0\" y2=\"160\"/><line x1=\"480\" x2=\"480\" y1=\"0\" y2=\"160\"/></g><line x1=\"0\" x2=\"600\" y1=\"160\" y2=\"160\" stroke=\"rgb(123 236 199 / 0.16)\"/><path d=\"M0 30 L120 29 L200 31 L200 160 L0 160 Z M240 30 L420 29 L600 30 L600 160 L240 160 Z\" fill=\"url(#ds-fade)\"/><line x1=\"0\" x2=\"600\" y1=\"28.8\" y2=\"28.8\" stroke=\"#8ba598\" stroke-width=\"1.25\" stroke-dasharray=\"6 5\"/><path d=\"M0 30 L120 29 L200 31 M240 30 L420 29 L600 30\" fill=\"none\" stroke=\"#7becc7\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg><p class=\"ds-pl\">Expected 4.10 MB/s</p></div></div></section>",
+			"css": ".ds-screen{display:grid;grid-template-columns:minmax(0,1fr) 12rem;gap:24px;background:#0b1512;border-radius:12px;padding:24px 24px 16px;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-verdict{margin:0;font:700 2rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.01em}.ds-verdict::before{content:\"\";display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:12px;vertical-align:0.12em;background:#7becc7;border:2px solid #7becc7}.ds-detail{margin:8px 0 0;color:#b9cac1;font-size:0.9375rem;line-height:1.45;min-height:2lh;max-width:68ch;text-wrap:pretty}.ds-ratebox{text-align:right}.ds-rate{margin:0;font:400 2.5rem/1 \"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;letter-spacing:-0.01em;color:#7becc7;white-space:nowrap}.ds-rate span{font:400 1.25rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.02em;color:#b9cac1}.ds-sub{margin:8px 0 0;color:#f4f7f5;font-size:0.875rem;white-space:nowrap}.ds-basis{margin:0;color:#8ba598;font-size:0.875rem;white-space:nowrap}.ds-ch{grid-column:1/-1;display:grid;grid-template-columns:6.5rem minmax(0,1fr);grid-template-areas:\"name plot\" \"value plot\";grid-template-rows:auto 1fr;column-gap:14px}.ds-cn{grid-area:name;margin:0;font:400 0.9375rem/1.1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-cv{grid-area:value;margin:4px 0 0;font-size:0.875rem;color:#8ba598}.ds-fr{grid-area:plot;position:relative}.ds-fr svg{display:block;width:100%;height:150px;overflow:visible}.ds-fr svg line{vector-effect:non-scaling-stroke}.ds-pl{position:absolute;left:0;top:18%;transform:translateY(calc(-100% - 5px));margin:0;font-size:0.75rem;color:#8ba598}"
 		},
 		{
 			"name": "Host Channel",
 			"kind": "custom",
 			"refersTo": "channel-value",
-			"description": "Small-multiple strip on the shared time base: D-DIN name, Noto value, 1.5px paper-2 trace; warn recolours trace and value.",
+			"description": "Small-multiple strip on the shared time base: D-DIN name, Noto value in a fixed column, 1.5px paper-2 trace over a minute grid and a zero line; warn recolours trace and value.",
 			"html": "<div class=\"ds-hc\"><p class=\"ds-hn\">CPU</p><p class=\"ds-hv\">24%</p><svg viewBox=\"0 0 600 40\" preserveAspectRatio=\"none\"><line x1=\"0\" x2=\"600\" y1=\"20\" y2=\"20\" stroke=\"rgb(123 236 199 / 0.06)\"/><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\" stroke=\"rgb(123 236 199 / 0.16)\"/><path d=\"M0 30 L100 28 L200 31 L300 24 L400 29 L500 27 L600 30\" fill=\"none\" stroke=\"#b9cac1\" stroke-width=\"1.5\"/></svg></div><div class=\"ds-hc\" data-state=\"warn\"><p class=\"ds-hn\">SoC temp.</p><p class=\"ds-hv\">74.2 °C</p><svg viewBox=\"0 0 600 40\" preserveAspectRatio=\"none\"><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\" stroke=\"rgb(123 236 199 / 0.16)\"/><path d=\"M0 12 L200 10 L400 9 L600 8\" fill=\"none\" stroke=\"#f2b84b\" stroke-width=\"1.5\"/></svg></div>",
-			"css": ".ds-hc{display:grid;grid-template-columns:6.5rem minmax(0,1fr);grid-template-areas:\"name plot\" \"value plot\";grid-template-rows:auto 1fr;column-gap:14px;margin-bottom:10px;padding:8px;background:#0b1512;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-hn{grid-area:name;margin:0;font:400 0.9375rem/1.1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-hv{grid-area:value;margin:0;font:400 1.0625rem/1.3 \"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;white-space:nowrap}.ds-hc svg{grid-area:plot;display:block;width:100%;height:38px;overflow:visible}.ds-hc svg *{vector-effect:non-scaling-stroke}.ds-hc[data-state=\"warn\"] .ds-hv{color:#f2b84b}"
+			"css": ".ds-hc{display:grid;grid-template-columns:6.5rem minmax(0,1fr);grid-template-areas:\"name plot\" \"value plot\";grid-template-rows:auto 1fr;column-gap:14px;margin-bottom:10px;padding:8px;background:#0b1512;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-hn{grid-area:name;margin:0;font:400 0.9375rem/1.1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-hv{grid-area:value;margin:0;font:400 1.0625rem/1.3 \"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;white-space:nowrap}.ds-hc svg{grid-area:plot;display:block;width:100%;height:40px;overflow:visible}.ds-hc svg *{vector-effect:non-scaling-stroke}.ds-hc[data-state=\"warn\"] .ds-hv{color:#f2b84b}"
 		},
 		{
 			"name": "Endpoint",
 			"kind": "input",
 			"refersTo": "endpoint",
-			"description": "Copyable tcp address in mono on surface, with a phosphor Copy button at 44px.",
+			"description": "Copyable tcp address in mono on surface, one line, beside a fixed-width Copy button on surface; the two are split by 2px of ink, not a rule.",
 			"html": "<div class=\"ds-ep\"><code>tcp://192.168.1.40:1234</code><button type=\"button\">Copy</button></div>",
-			"css": ".ds-ep{display:flex;align-items:stretch;border:1px solid #2c443b;border-radius:8px;background:#192b24}.ds-ep code{flex:1;min-width:0;padding:11px 12px;font:400 0.9375rem/1.3 ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;color:#f4f7f5;user-select:all}.ds-ep button{min-width:72px;min-height:44px;padding:0 14px;border:0;border-left:1px solid #2c443b;border-radius:0 7px 7px 0;background:transparent;color:#7becc7;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer}.ds-ep button:hover{background:rgb(123 236 199 / 0.08)}.ds-ep button:focus-visible{outline:2px solid #7becc7;outline-offset:3px}"
+			"css": ".ds-ep{display:flex;align-items:stretch;gap:2px;background:#111c19}.ds-ep code{flex:1;min-width:0;padding:12px 12px 12px 14px;border-radius:8px 0 0 8px;background:#192b24;font:400 0.875rem/1.4 ui-monospace,\"SF Mono\",Menlo,Consolas,monospace;color:#f4f7f5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;user-select:all}.ds-ep button{width:5.5rem;min-height:44px;padding:0 12px;border:0;border-radius:0 8px 8px 0;background:#192b24;color:#7becc7;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;cursor:pointer}.ds-ep button:hover{background:color-mix(in srgb,#192b24,#7becc7 8%)}.ds-ep button:focus-visible{outline:2px solid #7becc7;outline-offset:3px}"
 		},
 		{
 			"name": "Row",
 			"kind": "custom",
 			"refersTo": "row",
-			"description": "Name, value and one sub-line, separated by hairlines; Power as one fact, Network with Wi-Fi bars mapped from dBm.",
-			"html": "<dl class=\"ds-rows\"><div class=\"ds-row\" data-state=\"warn\"><dt>Power</dt><dd><span class=\"ds-rv\"><span class=\"ds-lamp\"></span><span class=\"ds-rt\">Fine now</span></span><span class=\"ds-rs\">2 dips in the last 5 min</span></dd></div><div class=\"ds-row\" data-bars=\"3\"><dt>Network</dt><dd><span class=\"ds-rv\"><span class=\"ds-bars\"><span></span><span></span><span></span><span></span></span><span class=\"ds-rt\">Wi-Fi · Good</span></span><span class=\"ds-rs\">-61 dBm · 72 Mb/s</span></dd></div></dl>",
-			"css": ".ds-rows{margin:0;background:#111c19;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-row{display:grid;grid-template-columns:5.25rem minmax(0,1fr);column-gap:12px;padding:11px 0;border-bottom:1px solid #2c443b}.ds-row dt{font:400 0.9375rem/1.45 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-row dd{margin:0;display:grid;gap:2px}.ds-rv{display:flex;align-items:center;gap:8px}.ds-rs{font-size:0.8125rem;color:#b9cac1}.ds-row[data-state=\"warn\"] .ds-rt{color:#f2b84b}.ds-lamp{width:10px;height:10px;border-radius:50%;border:2px solid #f2b84b;background:#f2b84b}.ds-bars{display:inline-flex;align-items:flex-end;gap:2px;height:13px}.ds-bars span{width:3px;border-radius:1px;background:#2c443b}.ds-bars span:nth-child(1){height:4px}.ds-bars span:nth-child(2){height:7px}.ds-bars span:nth-child(3){height:10px}.ds-bars span:nth-child(4){height:13px}.ds-row[data-bars=\"3\"] .ds-bars span:nth-child(-n+3){background:#f4f7f5}"
+			"description": "Exactly two lines: name, a glyph column (lamp, Wi-Fi bars or nothing) and a value, then a one-line sub-line that is reserved even when empty. Rows are grouped by a 12px gap, not rules. Storage carries a meter beside its sub-line.",
+			"html": "<dl class=\"ds-rows\"><div class=\"ds-row\" data-state=\"warn\"><dt>Power</dt><dd><span class=\"ds-rv\"><span class=\"ds-g\"><span class=\"ds-lamp\"></span></span><span class=\"ds-rt\">Fine now</span></span><span class=\"ds-rs\">2 dips in 5 min · 240 in 7 h</span></dd></div><div class=\"ds-row\" data-bars=\"3\"><dt>Network</dt><dd><span class=\"ds-rv\"><span class=\"ds-g\"><span class=\"ds-bars\"><span></span><span></span><span></span><span></span></span></span><span class=\"ds-rt\">Wi-Fi · Good</span></span><span class=\"ds-rs\">−61 dBm · 4.22 MB/s out</span></dd></div><div class=\"ds-row\"><dt>Storage</dt><dd><span class=\"ds-rv\"><span class=\"ds-g\"></span><span class=\"ds-rt\">25.2 GB free</span></span><span class=\"ds-rs\"><span class=\"ds-meter\"><span></span></span>14% of 30.8 GB used</span></dd></div></dl>",
+			"css": ".ds-rows{display:grid;gap:12px;margin:0;background:#111c19;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-row{display:grid;grid-template-columns:5.25rem minmax(0,1fr);column-gap:12px}.ds-row dt{font:400 0.9375rem/1.5rem \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;color:#b9cac1}.ds-row dd{margin:0;display:grid;gap:2px;min-width:0}.ds-rv{display:flex;align-items:center;gap:8px;line-height:1.5rem;white-space:nowrap}.ds-g{flex:none;display:inline-flex;align-items:center;justify-content:center;width:14px;height:1.5rem}.ds-rs{display:flex;align-items:center;gap:8px;min-height:1lh;padding-left:22px;font-size:0.8125rem;line-height:1.35;color:#b9cac1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-row[data-state=\"warn\"] .ds-rt{color:#f2b84b}.ds-lamp{width:10px;height:10px;border-radius:50%;border:2px solid #f2b84b;background:#f2b84b}.ds-bars{display:inline-flex;align-items:flex-end;gap:2px;height:13px}.ds-bars span{width:3px;border-radius:1px;background:#2c443b}.ds-bars span:nth-child(1){height:4px}.ds-bars span:nth-child(2){height:7px}.ds-bars span:nth-child(3){height:10px}.ds-bars span:nth-child(4){height:13px}.ds-row[data-bars=\"3\"] .ds-bars span:nth-child(-n+3){background:#f4f7f5}.ds-meter{position:relative;flex:none;width:40px;height:4px;border-radius:2px;background:#2c443b;overflow:hidden}.ds-meter span{position:absolute;inset:0;background:#b9cac1;transform-origin:left;transform:scaleX(0.14)}"
+		},
+		{
+			"name": "Client Rows",
+			"kind": "custom",
+			"refersTo": "client-row",
+			"description": "One fixed 2.75rem row per connected client, added and removed as clients join and leave (the one allowed reflow): lamp, address, a 64×16 sparkline of the client's delivered rate on the flow's full scale, and the rate; below, its health. Per-poll values never change a row's size. Capped at three rows; beyond that the last row summarises the rest. With nobody connected a single hint row stands in.",
+			"html": "<ul class=\"ds-slots\"><li data-state=\"ok\"><span class=\"ds-lamp\"></span><span class=\"ds-a\">192.168.1.20:53812</span><svg viewBox=\"0 0 64 16\" preserveAspectRatio=\"none\"><path class=\"b\" d=\"M0 15.5H64\"/><path class=\"t\" d=\"M0 4.6L8 4.4L16 4.7L24 4.5L32 4.6L40 4.4L48 4.6L56 4.5L64 4.6\"/></svg><span class=\"ds-r\">4.09 MB/s</span><span class=\"ds-d\">Keeping up · connected 58 min</span></li><li data-state=\"warn\"><span class=\"ds-lamp\"></span><span class=\"ds-a\">192.168.1.31:40122</span><svg viewBox=\"0 0 64 16\" preserveAspectRatio=\"none\"><path class=\"b\" d=\"M0 15.5H64\"/><path class=\"t\" d=\"M0 4.6L8 5L16 6.8L24 7.4L32 7.1L40 7.6L48 7.2L56 7.5L64 7.3\"/></svg><span class=\"ds-r\">3.27 MB/s</span><span class=\"ds-d\">Falling behind · 2.10 MB dropped in 60 s</span></li></ul>",
+			"css": ".ds-slots{display:grid;grid-auto-rows:minmax(2.75rem,auto);row-gap:8px;margin:0;padding:0;list-style:none;background:#111c19;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5;max-width:360px}.ds-slots li{display:grid;grid-template-columns:10px minmax(0,1fr) 64px 5.25rem;grid-template-areas:\"lamp address spark rate\" \". detail detail detail\";grid-template-rows:1.4rem auto;column-gap:10px;align-items:center}.ds-slots .ds-lamp{grid-area:lamp;width:10px;height:10px;border-radius:50%;border:2px solid #7becc7;background:#7becc7}[data-state=\"warn\"] .ds-lamp{border-color:#f2b84b;background:#f2b84b}.ds-a{grid-area:address;font-size:0.9375rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-slots svg{grid-area:spark;display:block;width:100%;height:16px;overflow:visible}.ds-slots svg path{fill:none;vector-effect:non-scaling-stroke}.ds-slots .b{stroke:rgb(123 236 199 / 0.16)}.ds-slots .t{stroke:#7becc7;stroke-width:1.5}[data-state=\"warn\"] .t{stroke:#f2b84b}.ds-r{grid-area:rate;font-size:0.9375rem;text-align:end;white-space:nowrap}.ds-d{grid-area:detail;font-size:0.8125rem;line-height:1.35;color:#b9cac1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}[data-state=\"warn\"] .ds-d{color:#f2b84b}"
 		},
 		{
 			"name": "Setup Step Track",
 			"kind": "custom",
 			"refersTo": "step-bar",
-			"description": "Three bars: done phosphor with drawn check, current half-lit and pulsing, pending dim; state word visible only on current, failed or interrupted.",
+			"description": "Three bars: done phosphor with drawn check, current half-lit and pulsing, pending dim; state word visible only on current, failed or interrupted. The done-check is drawn after the name, the state-word line is always kept, and the clock figure sits above its caption, so moving between stages never shifts the track.",
 			"html": "<ol class=\"ds-steps\"><li data-state=\"ok\"><span class=\"ds-sn\">Pi settings</span><span class=\"ds-sw ds-vh\">Done</span></li><li data-state=\"ok\" aria-current=\"step\"><span class=\"ds-sn\">Receiver</span><span class=\"ds-sw\">In progress</span></li><li data-state=\"unknown\"><span class=\"ds-sn\">Finish</span><span class=\"ds-sw ds-vh\">Waiting</span></li></ol>",
-			"css": ".ds-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0;padding:16px;list-style:none;background:#0b1512;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif}.ds-steps li{position:relative;display:grid;align-content:start;gap:4px;padding-top:12px;color:#8ba598}.ds-steps li::before{content:\"\";position:absolute;inset:0 0 auto;height:4px;border-radius:2px;background:#2c443b}.ds-sn{font:700 1.0625rem/1.2 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase}.ds-sw{font-size:0.875rem;color:#b9cac1}.ds-vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}.ds-steps [data-state=\"ok\"]{color:#f4f7f5}.ds-steps [data-state=\"ok\"]::before{background:#7becc7}.ds-steps [data-state=\"ok\"]:not([aria-current]) .ds-sn::before{content:\"\";display:inline-block;width:5px;height:10px;margin:0 10px 0 2px;border-right:2px solid #7becc7;border-bottom:2px solid #7becc7;transform:translateY(-2px) rotate(45deg)}.ds-steps [aria-current]::before{background:linear-gradient(to right,#7becc7 0 50%,#2c443b 50% 100%);animation:ds-run 1.6s ease-in-out infinite alternate}@keyframes ds-run{to{opacity:0.45}}@media (prefers-reduced-motion:reduce){.ds-steps [aria-current]::before{animation:none}}"
+			"css": ".ds-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:0;padding:16px;list-style:none;background:#0b1512;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif}.ds-steps li{position:relative;display:grid;align-content:start;gap:4px;padding-top:12px;color:#8ba598}.ds-steps li::before{content:\"\";position:absolute;inset:0 0 auto;height:4px;border-radius:2px;background:#2c443b}.ds-sn{font:700 1.0625rem/1.2 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase}.ds-sw{font-size:0.875rem;color:#b9cac1}.ds-vh{opacity:0}.ds-steps [data-state=\"ok\"]{color:#f4f7f5}.ds-steps [data-state=\"ok\"]::before{background:#7becc7}.ds-steps [data-state=\"ok\"]:not([aria-current]) .ds-sn::after{content:\"\";display:inline-block;width:5px;height:10px;margin-left:10px;border-right:2px solid #7becc7;border-bottom:2px solid #7becc7;transform:translateY(-2px) rotate(45deg)}.ds-steps [aria-current]::before{background:linear-gradient(to right,#7becc7 0 50%,#2c443b 50% 100%);animation:ds-run 1.6s ease-in-out infinite alternate}@keyframes ds-run{to{opacity:0.45}}@media (prefers-reduced-motion:reduce){.ds-steps [aria-current]::before{animation:none}}"
 		},
 		{
 			"name": "Open Receiver Button",
@@ -383,32 +386,35 @@
 			"css": ".ds-open{display:inline-flex;align-items:center;min-height:44px;padding:0 18px;border-radius:8px;background:#7becc7;color:#111c19;font:700 1rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.06em;text-transform:uppercase;text-decoration:none}.ds-open:focus-visible{outline:2px solid #7becc7;outline-offset:3px}"
 		},
 		{
-			"name": "Diagnostics Disclosure",
-			"kind": "nav",
-			"description": "Native details between rules with a CSS-drawn chevron; holds developer facts.",
-			"html": "<details class=\"ds-disc\"><summary>Diagnostics</summary><dl><dt>Processes</dt><dd>rtl_tcp 412 · rtlmux 418</dd><dt>Throttling</dt><dd>not measurable · no vcgencmd in container</dd></dl></details>",
-			"css": ".ds-disc{border-top:1px solid #2c443b;border-bottom:1px solid #2c443b;background:#111c19;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5}.ds-disc summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;min-height:44px;padding:14px 0;font:700 0.9375rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#b9cac1}.ds-disc summary::-webkit-details-marker{display:none}.ds-disc summary::before{content:\"\";width:7px;height:7px;border-right:1.5px solid currentColor;border-bottom:1.5px solid currentColor;transform:rotate(-45deg);transition:transform 0.2s cubic-bezier(0.22,1,0.36,1)}.ds-disc[open] summary::before{transform:rotate(45deg)}.ds-disc summary:hover{color:#f4f7f5}.ds-disc dl{display:grid;grid-template-columns:max-content 1fr;gap:6px 16px;margin:0 0 20px;font-size:0.875rem}.ds-disc dt{color:#b9cac1}.ds-disc dd{margin:0}"
+			"name": "Diagnostics",
+			"kind": "custom",
+			"refersTo": null,
+			"description": "Always open at the foot of the page: fixed groups whose terms never change, one-line values sharing the group's columns through subgrid, a fixed freshness column with lamp and word, and static explanations gathered as notes at the end.",
+			"html": "<div class=\"ds-diag\"><section><h3>Measurement sources</h3><dl><div data-tone=\"ok\"><dt>CPU</dt><dd>Pi host</dd><dd class=\"ds-w\"><span class=\"ds-lamp\"></span>Fresh</dd></div><div data-tone=\"stale\"><dt>Storage</dt><dd>Docker storage · read 12 s ago</dd><dd class=\"ds-w\"><span class=\"ds-lamp\"></span>Stale</dd></div><div data-tone=\"unknown\"><dt>Container</dt><dd>Receiver container</dd><dd class=\"ds-w\"><span class=\"ds-lamp\"></span>Unavailable</dd></div></dl></section><ul><li>Container: container memory accounting not visible.</li></ul></div>",
+			"css": ".ds-diag{background:#111c19;font-family:\"Noto Sans\",\"Noto Sans Repli\",-apple-system,\"Segoe UI\",sans-serif;font-variant-numeric:tabular-nums;color:#f4f7f5;padding:8px 0}.ds-diag h3{margin:0 0 12px;font:400 0.8125rem/1 \"D-DIN Condensed\",\"D-DIN Condensed Repli\",\"Noto Sans\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#8ba598}.ds-diag dl{display:grid;grid-template-columns:max-content minmax(0,1fr) 6.5rem;gap:6px 16px;margin:0;font-size:0.875rem;line-height:1.4;max-width:34rem}.ds-diag dl>div{display:grid;grid-column:1/-1;grid-template-columns:subgrid}.ds-diag dt{color:#b9cac1;white-space:nowrap}.ds-diag dd{margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.ds-w{display:flex;align-items:center;gap:8px;color:#b9cac1}.ds-w .ds-lamp{width:8px;height:8px;border-radius:50%;border:1.5px solid #52645d}[data-tone=\"ok\"] .ds-lamp{border-color:#7becc7;background:#7becc7}[data-tone=\"stale\"] .ds-w{color:#f2b84b}[data-tone=\"unknown\"] dd{color:#8ba598}.ds-diag ul{margin:24px 0 0;padding:0;list-style:none;font-size:0.8125rem;line-height:1.45;color:#8ba598}"
 		}
 	],
 	"narrative": {
 		"northStar": "The Phosphor Scope on an Ink Field",
-		"overview": "The two pages served by the Pi are WaveKit brand surfaces in the kit's dark theme (v1.0, vendored unchanged in `ui/brand/`). The page is a dark green-black ink field with paper-coloured text. One recessed well, the screen, carries the verdict, the headline rate and a scope of small multiples that all share one five-minute time base. Phosphor, the brand's signal colour, marks live measured signal and healthy state, and nothing else. Everything the operator might act on sits beside the screen as ruled rows. Developer detail is folded into a single disclosure.\n\nThe status page (`index.html`, served at `/`) answers one question first: are samples flowing from the dongle at the rate expected? The verdict answers in words. The rate gives the figure. The flow trace shows the last five minutes, and CPU, Memory, SoC temperature and Power dips are drawn underneath on the same time base, so a single cursor reads every channel at one moment. The first-boot setup page (`boot.html`, which loads `app.css` plus `boot.css`) uses the same nameplate and screen, cut down to a verdict and a three-step track.\n\nThe page is dark only. The palette has no light variant, and `color-scheme: dark` is declared both in CSS and in a meta tag.\n\nBefore the first status reading arrives, `body[data-empty=\"true\"]` hides the rate, the scope, the side column and the diagnostics, so only the nameplate and the verdict (\"Waiting for data\") show. The page shows no placeholder figures before it has a reading.",
+		"overview": "The two pages served by the Pi are WaveKit brand surfaces in the kit's dark theme (v1.0, vendored unchanged in `ui/brand/`). The page is a dark green-black ink field with paper-coloured text. One recessed well, the screen, carries the verdict, the headline rate and a scope of small multiples that all share one five-minute time base. Phosphor, the brand's signal colour, marks live measured signal and healthy state, and nothing else. Everything the operator might act on sits beside the screen as rows grouped by space. Developer detail sits open and quiet at the foot of the page.\n\nThe status page (`index.html`, served at `/`) answers one question first: are samples flowing from the dongle at the rate expected? The verdict answers in words. The rate gives the figure. The flow trace shows the last five minutes, and CPU, Memory, SoC temperature and Power dips are drawn underneath on the same time base, so a single cursor reads every channel at one moment. The first-boot setup page (`boot.html`, which loads `app.css` plus `boot.css`) uses the same nameplate and screen, cut down to a verdict, a three-step track and a clock.\n\nThe page is dark only. Every block is drawn from the first paint and readings swap text inside boxes of fixed size, so nothing moves as data arrives, changes or goes stale. These pages seed the WaveKit web dashboard's design language: the border policy, the no-jump principle, the mini-chart vocabulary and the measure rules carry over unchanged.",
 		"keyCharacteristics": [
 			"Brand kit applied directly: vendored wordmark, favicon, D-DIN Condensed and Noto Sans, and the dark-theme colour values.",
-			"One ink field plus one recessed well (the screen). There are no other surfaces apart from the endpoint field.",
+			"One ink field plus one recessed well (the screen). The only raised tone is surface: the endpoint field and the cursor readout.",
+			"Grouping by space, alignment and tone. A drawn line is kept only where it carries meaning.",
+			"Nothing moves when data changes. Every block exists from the first paint; readings swap text inside boxes of fixed size. The one allowed reflow is a client joining or leaving.",
 			"Phosphor means live, measured and healthy. Amber and red are semantic hues kept outside the brand palette.",
-			"Small multiples on one shared time base, read by one cursor.",
+			"Small multiples on one shared time base, read by one cursor; mini-charts only where they add a fact.",
 			"State is given by a word, and by a lamp or trace colour as well. Stale data dims and is never shown in a healthy colour."
 		],
 		"rules": [
 			{
 				"name": "The Phosphor Means Live Rule",
-				"body": "Phosphor marks a fresh measurement or a healthy state. When the screen is not fresh (data-fresh=\"false\"), traces and dips ticks are redrawn in paper-3 at 0.5 opacity, the phosphor wash is removed, and the rate falls back to paper-2.",
+				"body": "Phosphor marks a fresh measurement or a healthy state. When the screen is not fresh (data-fresh=\"false\"), traces and dips ticks are redrawn in paper-3 at 0.5 opacity, the phosphor wash is removed, and the rate falls back to paper-3. Rows, client slots and measurement sources say \"Last known\".",
 				"section": "colors"
 			},
 			{
 				"name": "The Verdict Colours the Trace Rule",
-				"body": "The flow trace, its wash and the rate take the screen's verdict hue: phosphor when ok, amber when warn, red when fault. A host channel recolours its own trace and value from its own state.",
+				"body": "The flow trace, its wash and the rate take the screen's verdict hue: phosphor when ok, amber when warn, red when fault. A host channel recolours its own trace and value from its own state. A client's sparkline takes the client's state.",
 				"section": "colors"
 			},
 			{
@@ -423,33 +429,57 @@
 			},
 			{
 				"name": "The Condensed Voice Rule",
-				"body": "Uppercase spaced D-DIN is used for short names only: the page name, section legends, channel and row names, the axis, step names, and button and pill words. It never sets a sentence or a measurement.",
+				"body": "Uppercase spaced D-DIN is used for short names only: the page name, section legends, channel and row names, the axis, step names, and button and contact words. It never sets a sentence or a measurement.",
 				"section": "typography"
 			},
 			{
 				"name": "The Darker Well Rule",
-				"body": "Depth goes down, never up. The screen is set into the field by tone and a hairline. Nothing casts a shadow.",
+				"body": "Depth goes down, never up. The screen is set into the field by tone alone. Nothing casts a shadow.",
 				"section": "elevation"
+			},
+			{
+				"name": "The Still Page Rule",
+				"section": "layout",
+				"body": "Layout never shifts as data arrives, changes, goes stale or disappears, with one stated exception: the client list renders exactly as many rows as there are clients (capped at three, the last summarising the rest), so a client joining or leaving may reflow what follows. Per-poll value changes never may. Draw every block from the first paint; reserve lines instead of adding them (two verdict-detail lines, three below 560px; two-line rows; the rate's two lines); keep each client row a fixed height; swap content, never insert blocks; set changing text in fixed boxes (em-sized figure boxes, stretched right-set lines); keep poll-driven text to one line with an ellipsis safety net; let only static text wrap, where nothing follows it. Verified with a layout-shift observer and bounding-box comparison over a full /live/ loop at 1440, 1024 and 390 px: shifts only at client join/leave moments."
+			},
+			{
+				"name": "The Line Must Mean Something Rule",
+				"section": "layout",
+				"body": "Group with spacing, alignment and tone. Keep a line only when it is data: minute lines and channel zeros on the scope, the flow's full scale, the dashed expected rate, the receiver-start marker, the cursor, lane and sparkline baselines, step bars. No outlines on panels, no rules under rows or legends, no rule between the endpoint field and its button."
+			},
+			{
+				"name": "The Measure Rule",
+				"section": "typography",
+				"body": "Text takes the width of its column; a cap is added only where the column runs past a comfortable line (verdict detail 68ch, notes 80ch). text-wrap: balance for headings and short notes, pretty for detail sentences. Reserve the lines copy needs, then write copy to fit them. File names in prose never break at their hyphens."
+			},
+			{
+				"name": "The Mini-chart Rule",
+				"section": "components",
+				"body": "A small chart is drawn only where it adds a fact the words beside it do not: trace (time on the shared base), lane (event ticks), sparkline (a client's delivered rate as this page saw it, on the flow's full scale), meter (a share of a whole), bars (Wi-Fi). No axes or labels; the state hue colours the mark; stale marks dim; the figure always sits beside the chart."
 			}
 		],
 		"dos": [
 			"Do use the vendored wordmark SVG at 120px or wider, and keep the brand files in `ui/brand/` byte-identical to `packages/brand`.",
-			"Do set live figures in Noto Sans with tabular figures. D-DIN is for names and verdicts.",
+			"Do set live figures in Noto Sans with tabular figures, in boxes that do not change size. D-DIN is for names and verdicts.",
 			"Do keep phosphor for live, healthy signal, and redraw stale data in paper-3 at half opacity.",
 			"Do put every trend on the one shared five-minute time base, so one cursor reads them all.",
 			"Do label a reference line or marker where it is drawn.",
 			"Do leave gaps in a trace blank. Smoothing never spans a missing sample.",
-			"Do keep developer detail (pids, counters, measurement sources) in the diagnostics disclosure.",
+			"Do reserve the space a state needs before the state arrives, and measure `/live/` for layout shift after any layout change.",
+			"Do group with space and tone first; add a line only when it is data.",
+			"Do keep developer detail (pids, counters, measurement sources) in Diagnostics, at the foot of the page.",
 			"Do honour `prefers-reduced-motion`, which turns off every animation and transition."
 		],
 		"donts": [
 			"Don't add a light theme, another typeface, or Barlow back.",
-			"Don't add shadows. The well's darker tone and its hairline are the only depth.",
+			"Don't add shadows or outlines around panels. The well's darker tone is the only depth.",
 			"Don't use amber or red decoratively. They are semantic status hues and not part of the brand palette.",
 			"Don't show a stale, missing or unmeasurable value in phosphor or another healthy colour.",
 			"Don't split power into several indicators. It is one fact with a sub-line.",
-			"Don't reintroduce tiles with meters, annunciator windows, a stage lamp chain or an always-visible clients table. Host trends belong in the scope, and facts belong in rows.",
-			"Don't use glyph or emoji icons. Lamps, bars, the chevron and the check are drawn in CSS."
+			"Don't insert or remove blocks when data changes (client rows joining or leaving are the one exception), hide a section until data arrives, or let a value wrap onto a new line on a poll.",
+			"Don't reintroduce tiles, annunciator windows, a stage lamp chain or an uncapped clients table. Host trends belong in the scope, facts in rows, clients in at most three rows.",
+			"Don't draw a chart that repeats its neighbour without adding a fact.",
+			"Don't use glyph or emoji icons. Lamps, bars, meters and the check are drawn in CSS or SVG."
 		]
 	}
 }

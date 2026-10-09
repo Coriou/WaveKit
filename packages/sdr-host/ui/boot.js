@@ -3,7 +3,6 @@ const detail = document.getElementById("setup-detail")
 const screen = document.getElementById("setup-screen")
 const clock = document.getElementById("setup-clock")
 const age = document.getElementById("setup-age")
-const clockRow = document.getElementById("setup-clock-row")
 const note = document.getElementById("setup-note")
 const contact = document.getElementById("contact")
 const contactText = document.getElementById("contact-text")
@@ -52,11 +51,24 @@ function formatClock(ms) {
 	return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`
 }
 
+// The clock line is always drawn; without an age it reads "—" and says why.
 function tick() {
-	clock.textContent = elapsed
-		? formatClock(elapsed.ms + Date.now() - elapsed.at)
-		: "—"
-	clockRow.hidden = !elapsed
+	const text = elapsed ? formatClock(elapsed.ms + Date.now() - elapsed.at) : "—"
+	if (clock.textContent !== text) clock.textContent = text
+}
+
+/** Same rule as the status page: a hyphenated log name never breaks a line. */
+function setDetail(text) {
+	if (detail.textContent === text) return
+	detail.replaceChildren(
+		...text.split(/(\S+\.log)/).map((part, i) => {
+			if (i % 2 === 0) return part
+			const name = document.createElement("span")
+			name.className = "file"
+			name.textContent = part
+			return name
+		}),
+	)
 }
 
 /** Same rule as the status page: after 10 s without contact, say how long. */
@@ -106,7 +118,7 @@ function render(record) {
 		tone = "fault"
 		words = [
 			"Setup needs attention",
-			`Installation stopped${record.exitCode ? ` (exit ${record.exitCode})` : ""}. Check wavekit-setup.log on the boot partition or the firstboot service log over SSH, then retry setup.`,
+			`Installation stopped${record.exitCode ? ` (exit ${record.exitCode})` : ""}. Check wavekit-setup.log on the boot partition, then retry setup.`,
 		]
 	}
 	if (record.state === "interrupted") {
@@ -123,7 +135,7 @@ function render(record) {
 		]
 	screen.dataset.state = tone
 	title.textContent = words[0]
-	detail.textContent = words[1]
+	setDetail(words[1])
 	elapsed =
 		record.updatedAgeMs === null || !since[record.state]
 			? null
@@ -181,8 +193,9 @@ async function poll() {
 		contactLost()
 		screen.dataset.state = "unknown"
 		title.textContent = "Contact lost"
-		detail.textContent =
-			"The Pi may be restarting or the network may have changed. Reconnecting automatically; setup progress is unknown until contact returns."
+		setDetail(
+			"The Pi may be restarting or the network may have changed. Reconnecting automatically.",
+		)
 		elapsed = null
 		tick()
 		age.textContent = "No current reading"

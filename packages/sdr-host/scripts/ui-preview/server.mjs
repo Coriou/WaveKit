@@ -1,19 +1,28 @@
 #!/usr/bin/env node
-// Local preview of the Pi operator pages over simulated receivers. Serves ui/
-// unchanged under /<scenario>/ with synthetic /api/status, /api/host and
-// /api/setup payloads shaped like a real Pi's, so every page state can be
-// opened and screenshotted without a Pi. Never deploys or contacts a Pi.
+// Local dev server for the Pi operator pages over simulated receivers. Serves
+// ui/ unchanged under /<scenario>/ with synthetic /api/status, /api/host and
+// /api/setup payloads shaped like a real Pi's, under the Pi's own CSP. Edits
+// in ui/ reload the open pages (CSS swaps in place); edits to this script
+// restart the server and reload them too. Never deploys or contacts a Pi.
 //
-//   node packages/sdr-host/scripts/ui-preview.mjs [--port 8090]
-//   open http://127.0.0.1:8090/            (index of scenarios)
+//   pnpm dev:pi-ui                     (from the repo root)
+//   node --watch packages/sdr-host/scripts/ui-preview/server.mjs [--port 8090] [--host 127.0.0.1]
+//   open http://127.0.0.1:8090/        (index of scenarios; /live/ loops through them)
+import { watch } from "node:fs"
 import { readFile } from "node:fs/promises"
 import { createServer } from "node:http"
 import { extname, join, normalize } from "node:path"
 import { fileURLToPath } from "node:url"
+import { CONTENT_SECURITY_POLICY } from "../../src/api/routes/ui.ts"
 
-const UI = fileURLToPath(new URL("../ui/", import.meta.url))
-const portArg = process.argv.indexOf("--port")
-const PORT = portArg > 0 ? Number(process.argv[portArg + 1]) : 8090
+const UI = fileURLToPath(new URL("../../ui/", import.meta.url))
+const CLIENT = fileURLToPath(new URL("./", import.meta.url))
+const arg = (flag, fallback) => {
+	const i = process.argv.indexOf(flag)
+	return i > 0 ? process.argv[i + 1] : fallback
+}
+const PORT = Number(arg("--port", 8090))
+const HOST = arg("--host", "127.0.0.1")
 const TYPES = {
 	".html": "text/html; charset=utf-8",
 	".css": "text/css; charset=utf-8",
@@ -24,8 +33,85 @@ const TYPES = {
 const MB = 1_000_000
 const startedAt = Date.now()
 
+const A = { address: "192.168.1.20:53812" }
+const B = { address: "192.168.1.31:40122" }
+const C = { address: "192.168.1.44:61207" }
+
+/**
+ * The receiver tour: a realistic sequence of states, looped (about 4 min, so
+ * the five-minute scope always holds a whole cycle). Each step overrides the
+ * healthy defaults; history points read the step that was current at their
+ * time, so stalls, dips and rate changes scroll across the scope.
+ */
+const TOUR = [
+	{
+		sec: 35,
+		label: "Sampling at the configured rate, one client",
+		clients: [A],
+	},
+	{ sec: 30, label: "A second client joins", clients: [A, B] },
+	{
+		sec: 10,
+		label: "Under-voltage now, below rate",
+		rate: 3.1 * MB,
+		rateStatus: "low",
+		uvNow: true,
+		temp: 63,
+		cpu: 52,
+		clients: [A, { ...B, dropping: true }],
+	},
+	{
+		sec: 20,
+		label: "Power dips continue, a client falls behind",
+		rate: 3.4 * MB,
+		rateStatus: "low",
+		dipEverySec: 6,
+		temp: 61,
+		cpu: 47,
+		clients: [A, { ...B, dropping: true }],
+	},
+	{
+		sec: 20,
+		label: "Samples stop with the dongle present",
+		sampling: "stale",
+		clients: [A, B],
+	},
+	{
+		sec: 20,
+		label: "Dongle unplugged, rtl_tcp restarting",
+		sampling: "disconnected",
+		reason: "rtl_tcp is not running",
+		dongle: false,
+		rtlTcp: false,
+		clients: [],
+	},
+	{ sec: 30, label: "Back up, nobody connected", clients: [] },
+	{
+		sec: 40,
+		label: "A client tunes and sets its own rate",
+		rate: 4.8 * MB,
+		expected: null,
+		clients: [C],
+	},
+	{
+		sec: 35,
+		label: "Weak Wi-Fi, warm SoC",
+		rate: 4.8 * MB,
+		expected: null,
+		dbm: -79,
+		temp: 69,
+		cpu: 34,
+		clients: [C],
+	},
+]
+const TOUR_SEC = TOUR.reduce((sum, step) => sum + step.sec, 0)
+
 /** Receiver scenarios: overrides on a healthy, configured-rate receiver. */
 const STATUS = {
+	live: {
+		label: `Tour: loops through receiver states every ${TOUR_SEC} s`,
+		tour: true,
+	},
 	streaming: { label: "Sampling at the configured rate, one client, Wi-Fi" },
 	"client-rate": {
 		label: "A client set the rate (rate derived from bytes), recent dips",
@@ -45,7 +131,7 @@ const STATUS = {
 		dipsTotal: 41,
 		temp: 72.4,
 		cpu: 64,
-		clients: [{ address: "192.168.1.20:53812", dropping: true }],
+		clients: [{ ...A, dropping: true }],
 	},
 	stalled: {
 		label: "Samples stopped with dongle and processes present",
@@ -65,8 +151,8 @@ const STATUS = {
 	"multi-clients": {
 		label: "Three clients, one falling behind",
 		clients: [
-			{ address: "192.168.1.20:53812" },
-			{ address: "192.168.1.31:40122", dropping: true },
+			A,
+			{ ...B, dropping: true },
 			{ address: "[fd00::5]:51000", minutes: 2 },
 		],
 	},
@@ -108,7 +194,29 @@ const STATUS = {
 	lost: { label: "Contact lost after the first reading", fail: "after-first" },
 }
 
+/** First-boot setup tour: every running stage in order, then complete, looped. */
+const BOOT_TOUR = [
+	{ sec: 8, label: "No progress record yet", record: null },
+	{
+		sec: 20,
+		label: "Applying Imager settings",
+		record: ["running", "cloud-init"],
+	},
+	{ sec: 40, label: "Installing the receiver", record: ["running", "install"] },
+	{ sec: 12, label: "Finishing", record: ["running", "publish"] },
+	{
+		sec: 15,
+		label: "Complete, status page not up yet",
+		record: ["complete", "done"],
+	},
+]
+const BOOT_TOUR_SEC = BOOT_TOUR.reduce((sum, step) => sum + step.sec, 0)
+
 const SETUP = {
+	"boot-live": {
+		label: `Tour: loops through setup stages every ${BOOT_TOUR_SEC} s`,
+		tour: true,
+	},
 	"boot-waiting": { label: "No progress record yet", record: null },
 	"boot-cloud-init": {
 		label: "Applying Imager settings",
@@ -153,27 +261,55 @@ const jitter = (t, salt) => {
 	return x - Math.floor(x)
 }
 
-function scenario(name) {
-	return {
-		rate: 4.096 * MB,
-		expected: 4.096 * MB,
-		rateStatus: "nominal",
-		sampling: "streaming",
-		reason: null,
-		dongle: true,
-		rtlTcp: true,
-		uvNow: false,
-		dipEverySec: null,
-		dipsTotal: 0,
-		temp: 51.3,
-		cpu: 22,
-		net: "wireless",
-		dbm: -52,
-		serviceSec: 9_000,
-		clients: [{ address: "192.168.1.20:53812" }],
-		setup: { state: "complete", phase: "done", ageMs: 86_400_000 },
-		...STATUS[name],
+/** The tour step current at preview time `at` (seconds, may be negative), and how far into it. */
+function stepAt(steps, cycleSec, at) {
+	let into = ((at % cycleSec) + cycleSec) % cycleSec
+	for (const [index, step] of steps.entries()) {
+		if (into < step.sec) return { index, step, into }
+		into -= step.sec
 	}
+	const index = steps.length - 1
+	return { index, step: steps[index], into: steps[index].sec }
+}
+
+/** Seconds that `holds` has been true for over contiguous tour steps ending at `at`. */
+function heldFor(at, holds) {
+	const { index, step, into } = stepAt(TOUR, TOUR_SEC, at)
+	if (!holds(step)) return 0
+	let sec = into
+	for (let back = 1; back < TOUR.length; back++) {
+		const prev = TOUR[(index - back + TOUR.length) % TOUR.length]
+		if (!holds(prev)) break
+		sec += prev.sec
+	}
+	return sec
+}
+
+const DEFAULTS = {
+	rate: 4.096 * MB,
+	expected: 4.096 * MB,
+	rateStatus: "nominal",
+	sampling: "streaming",
+	reason: null,
+	dongle: true,
+	rtlTcp: true,
+	uvNow: false,
+	dipEverySec: null,
+	dipsTotal: 0,
+	temp: 51.3,
+	cpu: 22,
+	net: "wireless",
+	dbm: -52,
+	serviceSec: 9_000,
+	clients: [A],
+	setup: { state: "complete", phase: "done", ageMs: 86_400_000 },
+}
+
+/** Scenario parameters at preview time `at`; only tours vary with time. */
+function scenarioAt(name, at) {
+	const spec = STATUS[name]
+	if (!spec.tour) return { ...DEFAULTS, ...spec }
+	return { ...DEFAULTS, dipsTotal: 240, ...stepAt(TOUR, TOUR_SEC, at).step }
 }
 
 /** One history point per 2 s poll over five minutes, but never before the service started. */
@@ -182,31 +318,56 @@ function* ages(serviceSec) {
 		yield age
 }
 
+/** Whether samples were arriving at preview time `at`, given the scenario now. */
+function flowingAt(name, s, t, at) {
+	if (STATUS[name].tour) return scenarioAt(name, at).sampling === "streaming"
+	if (s.stalledSec === null) return false
+	return s.stalledSec == null || t - at >= s.stalledSec
+}
+
 function status(name, now) {
-	const s = scenario(name)
 	const t = (now - startedAt) / 1000
+	const tour = STATUS[name].tour === true
+	const s = scenarioAt(name, t)
 	const service = s.serviceSec + t
 	const flowing = s.sampling === "streaming"
+	const stalledSec = tour
+		? flowing
+			? undefined
+			: heldFor(t, step => (step.sampling ?? "streaming") !== "streaming")
+		: s.stalledSec
 	const upstream = flowing ? s.rate * (1 + 0.004 * wave(t, 7)) : 0
 	const points = [...ages(service)].map(age => {
 		const at = t - age / 1000
-		const stalled = s.stalledSec != null && age / 1000 < s.stalledSec
+		const p = tour ? scenarioAt(name, at) : s
 		const missing = s.gapSec != null && Math.abs(age / 1000 - s.gapSec - 3) < 3
-		const low = s.rateStatus === "low" ? 0.85 + 0.15 * wave(at, 40) : 1
-		const v =
-			s.stalledSec === null || stalled
-				? 0
-				: s.rate * low * (0.985 + 0.03 * jitter(Math.round(at / 2), 1))
+		// A starved dongle sags unevenly: slow drift, uneven sags, the odd drop.
+		const low =
+			p.rateStatus === "low"
+				? 0.94 +
+					0.04 * wave(at, 53) +
+					0.03 * wave(at, 17, 1.1) -
+					0.2 * Math.max(0, wave(at, 31, 0.6)) ** 4 -
+					(jitter(Math.round(at / 2), 3) > 0.9 ? 0.12 : 0)
+				: 1
+		const v = flowingAt(name, s, t, at)
+			? p.rate * low * (0.985 + 0.03 * jitter(Math.round(at / 2), 1))
+			: 0
 		return [age, missing ? null : Math.round(v)]
 	})
 	const clients = s.clients.map((c, i) => {
 		const rate = flowing ? upstream * (c.dropping ? 0.8 : 1) : 0
-		const minutes = c.minutes ?? 58 - i * 7
+		const minutes = tour
+			? heldFor(t, step =>
+					step.clients.some(other => other.address === c.address),
+				) / 60
+			: (c.minutes ?? 58 - i * 7)
+		const connectedSec = minutes * 60
 		return {
 			key: `63|${c.address}`,
 			address: c.address,
-			connectedAt: new Date(now - minutes * 60_000).toISOString(),
-			queuedBytes: Math.round(rate * minutes * 60),
+			connectedAt: new Date(now - connectedSec * 1000).toISOString(),
+			queuedBytes: Math.round(rate * connectedSec),
 			queuedBytesPerSec: Math.round(rate),
 			droppedBytes: c.dropping ? 37_748_736 : 0,
 			droppedChunks: c.dropping ? 144 : 0,
@@ -254,10 +415,10 @@ function status(name, now) {
 			reason: s.reason,
 			timeoutMs: 10_000,
 			lastSampleAt:
-				s.stalledSec === null
+				stalledSec === null
 					? null
-					: new Date(now - (s.stalledSec ?? 0.1) * 1000).toISOString(),
-			sampleAgeMs: s.stalledSec === null ? null : (s.stalledSec ?? 0.1) * 1000,
+					: new Date(now - (stalledSec ?? 0.1) * 1000).toISOString(),
+			sampleAgeMs: stalledSec === null ? null : (stalledSec ?? 0.1) * 1000,
 			upstream: {
 				bytesTotal: flowing ? Math.round(s.rate * service) : 9_400_000_000,
 				bytesPerSec: flowing ? Math.round(upstream) : 0,
@@ -316,28 +477,74 @@ function reading(value, now, scope = "host", reason = null) {
 			}
 }
 
+/** Whether the tour logs an under-voltage event on the 2 s poll at `at`. */
+function tourDipAt(at) {
+	const p = scenarioAt("live", at)
+	if (p.uvNow) return true
+	return (
+		p.dipEverySec !== null &&
+		Math.floor(at / 2) % Math.round(p.dipEverySec / 2) === 0
+	)
+}
+
+/** Tour dip events on top of `earlier` ones from before the window, and the newest one's age. */
+function tourDips(t, earlier) {
+	let events = earlier
+	let lastAgeMs = null
+	for (let tick = Math.floor(t / 2); tick >= -150; tick--) {
+		if (!tourDipAt(tick * 2)) continue
+		events += 1
+		lastAgeMs ??= Math.round((t - tick * 2) * 1000)
+	}
+	return { events, lastAgeMs }
+}
+
 function host(name, now) {
-	const s = scenario(name)
 	const t = (now - startedAt) / 1000
+	const tour = STATUS[name].tour === true
+	const s = scenarioAt(name, t)
+	const at = time => (tour ? scenarioAt(name, time) : s)
 	const service = s.serviceSec + t
-	const cpuAt = at =>
-		Math.max(2, s.cpu + 6 * wave(at, 50) + 8 * jitter(Math.round(at / 2), 2))
-	const memAt = at => 29.5 + 0.4 * wave(at, 200)
-	const tempAt = at => s.temp + 1.2 * wave(at, 120)
-	const dipsAt = at =>
-		s.dipEverySec && Math.floor(at / 2) % Math.round(s.dipEverySec / 2) === 0
-			? 1
-			: 0
-	const lastDipAge = s.dipEverySec ? ((t % s.dipEverySec) + 1) * 1000 : null
+	const cpuAt = time =>
+		Math.max(
+			2,
+			at(time).cpu + 6 * wave(time, 50) + 8 * jitter(Math.round(time / 2), 2),
+		)
+	const memAt = time => 29.5 + 0.4 * wave(time, 200)
+	// The SoC warms and cools over about 40 s rather than stepping with the load.
+	const settledTemp = time =>
+		tour
+			? Array.from({ length: 8 }, (_, k) => at(time - k * 5).temp).reduce(
+					(sum, v) => sum + v,
+				) / 8
+			: s.temp
+	const tempAt = time => settledTemp(time) + 1.2 * wave(time, 120)
+	const dipsAt = time =>
+		tour
+			? tourDipAt(Math.floor(time / 2) * 2)
+				? 1
+				: 0
+			: s.dipEverySec &&
+				  Math.floor(time / 2) % Math.round(s.dipEverySec / 2) === 0
+				? 1
+				: 0
+	const dipStats = tour
+		? tourDips(t, s.dipsTotal)
+		: {
+				events:
+					s.dipsTotal + (s.dipEverySec ? Math.floor(t / s.dipEverySec) : 0),
+				lastAgeMs: s.dipEverySec ? ((t % s.dipEverySec) + 1) * 1000 : null,
+			}
+	const lastDipAgeMs = s.uvNow ? 0 : dipStats.lastAgeMs
 	const points = [...ages(service)].map(age => {
-		const at = t - age / 1000
+		const time = t - age / 1000
 		const r = v => Math.round(v * 10) / 10
 		return [
 			age,
-			r(cpuAt(at)),
-			r(memAt(at)),
-			r(tempAt(at)),
-			s.uvNow && age < 20_000 ? 1 : dipsAt(at),
+			r(cpuAt(time)),
+			r(memAt(time)),
+			r(tempAt(time)),
+			!tour && s.uvNow && age < 20_000 ? 1 : dipsAt(time),
 		]
 	})
 	const iface = (n, kind, up, extra) => ({
@@ -363,7 +570,6 @@ function host(name, now) {
 						wireless: { linkQuality: 63, signalDbm: s.dbm },
 					}),
 				]
-	const dips = s.dipsTotal + (s.dipEverySec ? Math.floor(t / s.dipEverySec) : 0)
 	const setup = s.setup && {
 		state: s.setup.state,
 		phase: s.setup.phase,
@@ -424,13 +630,13 @@ function host(name, now) {
 			undervoltageNow: reading(s.uvNow, now),
 			undervoltageObserved: reading(
 				{
-					events: dips,
+					events: dipStats.events,
 					lastAt:
-						lastDipAge === null
+						lastDipAgeMs === null
 							? null
-							: new Date(now - lastDipAge).toISOString(),
+							: new Date(now - lastDipAgeMs).toISOString(),
 					since: new Date(now - service * 1000).toISOString(),
-					lastAgeMs: s.uvNow ? 0 : lastDipAge,
+					lastAgeMs: lastDipAgeMs,
 					coveredMs: Math.round(service * 1000),
 				},
 				now,
@@ -469,7 +675,17 @@ function host(name, now) {
 }
 
 function setupRecord(name, now) {
-	const { record } = SETUP[name]
+	const elapsed = now - startedAt
+	let record
+	let ageMs
+	if (SETUP[name].tour) {
+		const { step, into } = stepAt(BOOT_TOUR, BOOT_TOUR_SEC, elapsed / 1000)
+		record = step.record
+		ageMs = into * 1000
+	} else {
+		record = SETUP[name].record
+		ageMs = Array.isArray(record) ? record[2] * 1000 + elapsed : null
+	}
 	if (!Array.isArray(record))
 		return {
 			state: record === null ? "waiting" : "unavailable",
@@ -479,16 +695,23 @@ function setupRecord(name, now) {
 			exitCode: null,
 			receiverPageReady: false,
 		}
-	const [state, phase, ageSec, exitCode = null] = record
-	const age = ageSec * 1000 + (now - startedAt)
+	const [state, phase, , exitCode = null] = record
 	return {
 		state,
 		phase,
-		updatedAt: new Date(now - age).toISOString(),
-		updatedAgeMs: age,
+		updatedAt: new Date(now - ageMs).toISOString(),
+		updatedAgeMs: ageMs,
 		exitCode,
 		receiverPageReady: false,
 	}
+}
+
+/** What a scenario shows right now: tours name their current step. */
+function currentLabel(name, now) {
+	const t = (now - startedAt) / 1000
+	if (STATUS[name]?.tour) return stepAt(TOUR, TOUR_SEC, t).step.label
+	if (SETUP[name]?.tour) return stepAt(BOOT_TOUR, BOOT_TOUR_SEC, t).step.label
+	return (STATUS[name] ?? SETUP[name])?.label ?? null
 }
 
 const served = new Map()
@@ -500,27 +723,85 @@ function failing(name, spec) {
 	return count >= 2
 }
 
+const escapeHtml = text =>
+	text.replace(
+		/[&<>"]/g,
+		c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
+	)
+
 function index() {
 	const link = (name, spec, page = "") =>
-		`<li><a href="/${name}/${page}">${name}</a> · ${spec.label}</li>`
-	return `<!doctype html><meta charset="utf-8"><title>Pi page preview</title><style>body{font:16px/1.5 system-ui;margin:2rem;max-width:48rem}</style><h1>Pi operator page preview</h1><h2>Receiver status</h2><ul>${Object.entries(
-		STATUS,
-	)
-		.map(([n, s]) => link(n, s))
-		.join("")}</ul><h2>First-boot setup</h2><ul>${Object.entries(SETUP)
-		.map(([n, s]) => link(n, s, "boot.html"))
-		.join("")}</ul>`
+		`<li><a href="/${name}/${page}">${name}</a> · ${escapeHtml(spec.label)}</li>`
+	const list = (specs, page) =>
+		Object.entries(specs)
+			.map(([n, s]) => link(n, s, page))
+			.join("")
+	return `<!doctype html><meta charset="utf-8"><title>Pi page preview</title><link rel="stylesheet" href="/__dev/index.css"><h1>Pi operator page preview</h1><p>Edits in <code>packages/sdr-host/ui/</code> reload open pages; CSS swaps in place. The <code>live</code> tours loop through realistic states. Pages run under the Pi's CSP.</p><h2>Receiver status</h2><ul>${list(STATUS, "")}</ul><h2>First-boot setup</h2><ul>${list(SETUP, "boot.html")}</ul>`
 }
+
+// Live reload: one server-sent event per burst of saves in ui/.
+const listeners = new Set()
+let changed = new Set()
+let flush = null
+watch(UI, { recursive: true }, (_event, file) => {
+	if (!file || !TYPES[extname(file)]) return
+	changed.add(file.split("\\").join("/"))
+	clearTimeout(flush)
+	flush = setTimeout(() => {
+		const data = `data: ${JSON.stringify([...changed])}\n\n`
+		changed = new Set()
+		for (const res of listeners) res.write(data)
+	}, 60)
+})
+
+function events(req, res) {
+	res.writeHead(200, {
+		"content-type": "text/event-stream",
+		"cache-control": "no-store",
+		connection: "keep-alive",
+	})
+	res.write("retry: 500\n\n")
+	listeners.add(res)
+	req.on("close", () => listeners.delete(res))
+}
+
+const INJECT = `<script type="module" src="/__dev/client.js"></script>\n\t</body>`
 
 createServer(async (req, res) => {
 	const url = new URL(req.url ?? "/", "http://preview")
 	const [, name = "", ...rest] = url.pathname.split("/")
 	const file = rest.join("/") || "index.html"
-	const send = (code, type, body) => {
-		res.writeHead(code, { "content-type": type, "cache-control": "no-store" })
+	const send = (code, type, body, headers = {}) => {
+		res.writeHead(code, {
+			"content-type": type,
+			"cache-control": "no-store",
+			"x-content-type-options": "nosniff",
+			...headers,
+		})
 		res.end(body)
 	}
-	if (!name) return send(200, TYPES[".html"], index())
+	const html = { "content-security-policy": CONTENT_SECURITY_POLICY }
+	if (!name) return send(200, TYPES[".html"], index(), html)
+	if (name === "__dev") {
+		if (file === "events") return events(req, res)
+		if (file === "scenarios") {
+			const current = url.searchParams.get("current") ?? ""
+			const entries = specs =>
+				Object.entries(specs).map(([n, s]) => ({ name: n, label: s.label }))
+			return send(
+				200,
+				"application/json",
+				JSON.stringify({
+					receiver: entries(STATUS),
+					setup: entries(SETUP),
+					now: currentLabel(current, Date.now()),
+				}),
+			)
+		}
+		if (!["client.js", "client.css", "index.css"].includes(file))
+			return send(404, "text/plain", "")
+		return send(200, TYPES[extname(file)], await readFile(join(CLIENT, file)))
+	}
 	const spec = STATUS[name] ?? SETUP[name]
 	if (!spec) return send(404, "text/plain", "unknown scenario")
 	if (file.startsWith("api/")) {
@@ -541,14 +822,20 @@ createServer(async (req, res) => {
 	const path = normalize(join(UI, file))
 	if (!path.startsWith(UI)) return send(404, "text/plain", "")
 	try {
+		const body = await readFile(path)
+		if (extname(path) !== ".html")
+			return send(200, TYPES[extname(path)] ?? "application/octet-stream", body)
+		// Each page load gets its own first readings before contact is lost.
+		served.delete(name)
 		send(
 			200,
-			TYPES[extname(path)] ?? "application/octet-stream",
-			await readFile(path),
+			TYPES[".html"],
+			body.toString("utf8").replace("</body>", INJECT),
+			html,
 		)
 	} catch {
 		send(404, "text/plain", "")
 	}
-}).listen(PORT, "127.0.0.1", () => {
-	process.stdout.write(`Pi page preview on http://127.0.0.1:${PORT}/\n`)
+}).listen(PORT, HOST, () => {
+	process.stdout.write(`Pi page preview on http://${HOST}:${PORT}/\n`)
 })

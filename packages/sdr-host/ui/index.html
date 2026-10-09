@@ -27,7 +27,7 @@
 		<link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
 		<script type="module" src="app.js"></script>
 	</head>
-	<body data-empty="true">
+	<body>
 		<div class="panel">
 			<header class="nameplate">
 				<h1 class="nameplate__title">
@@ -42,8 +42,8 @@
 				</h1>
 				<p class="nameplate__host" id="host-name">This Pi</p>
 				<p class="link" id="link" data-state="connecting" role="status">
-					<span class="lamp" aria-hidden="true"></span>
-					<span id="link-text">Connecting</span>
+					<span class="link__text" id="link-text">Connecting</span
+					><span class="lamp" aria-hidden="true"></span>
 				</p>
 			</header>
 
@@ -52,22 +52,22 @@
 					class="screen screen--status"
 					id="screen"
 					data-state="unknown"
+					data-fresh="false"
 					aria-labelledby="verdict"
 				>
 					<div class="screen__verdict">
 						<h2 class="verdict" id="verdict" aria-live="polite">
-							Waiting for data
+							Waiting for the Pi
 						</h2>
-						<p class="verdict__detail" id="verdict-detail">
-							No measurement yet.
-						</p>
+						<p class="verdict__detail" id="verdict-detail">No reading yet.</p>
 					</div>
 					<div class="screen__rate">
 						<p class="rate">
-							<span id="rate-value">—</span>
-							<span class="rate__unit" id="rate-unit"></span>
+							<span class="rate__value" id="rate-value">—</span>
+							<span class="rate__unit" id="rate-unit">MB/s</span>
 						</p>
-						<p class="rate__sub" id="rate-sub"></p>
+						<p class="rate__sub" id="rate-sub">No current reading</p>
+						<p class="rate__basis" id="rate-basis"></p>
 					</div>
 
 					<figure
@@ -83,7 +83,7 @@
 						</figcaption>
 						<div class="channel channel--flow" data-key="flow">
 							<p class="channel__name">Sample flow</p>
-							<p class="channel__value" id="flow-scale"></p>
+							<p class="channel__value" id="flow-scale">—</p>
 							<div class="channel__frame">
 								<svg
 									class="channel__plot"
@@ -97,7 +97,7 @@
 											<stop class="fade-bottom" offset="1" />
 										</linearGradient>
 									</defs>
-									<g class="graticule" data-rows="5"></g>
+									<g class="graticule" data-top="true"></g>
 									<path class="plot__area" d="" />
 									<line class="plot__expected" x1="0" x2="600" y1="0" y2="0" />
 									<path class="plot__trace" d="" />
@@ -107,55 +107,63 @@
 								<p class="plot__label plot__label--start" hidden></p>
 							</div>
 						</div>
-						<div class="channel" data-key="cpu">
+						<div class="channel" data-key="cpu" data-state="unavailable">
 							<p class="channel__name">CPU</p>
-							<p class="channel__value"></p>
+							<p class="channel__value">—</p>
 							<svg
 								class="channel__plot"
 								viewBox="0 0 600 40"
 								preserveAspectRatio="none"
 								aria-hidden="true"
 							>
-								<g class="graticule" data-rows="2"></g>
+								<g class="graticule"></g>
 								<path class="plot__trace" d="" />
 							</svg>
 						</div>
-						<div class="channel" data-key="memory">
+						<div class="channel" data-key="memory" data-state="unavailable">
 							<p class="channel__name">Memory</p>
-							<p class="channel__value"></p>
+							<p class="channel__value">—</p>
 							<svg
 								class="channel__plot"
 								viewBox="0 0 600 40"
 								preserveAspectRatio="none"
 								aria-hidden="true"
 							>
-								<g class="graticule" data-rows="2"></g>
+								<g class="graticule"></g>
 								<path class="plot__trace" d="" />
 							</svg>
 						</div>
-						<div class="channel" data-key="temperature">
+						<div
+							class="channel"
+							data-key="temperature"
+							data-state="unavailable"
+						>
 							<p class="channel__name">SoC temp.</p>
-							<p class="channel__value"></p>
+							<p class="channel__value">—</p>
 							<svg
 								class="channel__plot"
 								viewBox="0 0 600 40"
 								preserveAspectRatio="none"
 								aria-hidden="true"
 							>
-								<g class="graticule" data-rows="2"></g>
+								<g class="graticule"></g>
 								<path class="plot__trace" d="" />
 							</svg>
 						</div>
-						<div class="channel channel--lane" data-key="dips">
+						<div
+							class="channel channel--lane"
+							data-key="dips"
+							data-state="unavailable"
+						>
 							<p class="channel__name">Power dips</p>
-							<p class="channel__value"></p>
+							<p class="channel__value">—</p>
 							<svg
 								class="channel__plot"
 								viewBox="0 0 600 16"
 								preserveAspectRatio="none"
 								aria-hidden="true"
 							>
-								<line class="lane__base" x1="0" x2="600" y1="15.5" y2="15.5" />
+								<g class="graticule"></g>
 								<path class="lane__ticks" d="" />
 							</svg>
 						</div>
@@ -168,20 +176,7 @@
 				</section>
 
 				<div class="side">
-					<section
-						class="setup"
-						id="setup-section"
-						aria-labelledby="setup-heading"
-						hidden
-					>
-						<h2 class="legend" id="setup-heading">First-boot setup</h2>
-						<p class="setup__line" id="setup" data-state="unknown">
-							<span class="lamp" aria-hidden="true"></span>
-							<span id="setup-text">—</span>
-						</p>
-					</section>
-
-					<section aria-labelledby="stream-heading">
+					<section class="group" aria-labelledby="stream-heading">
 						<h2 class="legend" id="stream-heading">IQ stream</h2>
 						<div class="endpoint">
 							<code class="endpoint__url" id="endpoint">—</code>
@@ -194,36 +189,92 @@
 								<dt>Dongle</dt>
 								<dd>
 									<span class="row__value"
-										><span class="lamp" aria-hidden="true"></span
+										><span class="glyph"
+											><span class="lamp" aria-hidden="true"></span></span
 										><span class="row__text">—</span></span
 									><span class="row__sub"></span>
 								</dd>
 							</div>
-							<div class="row" id="row-tuning">
+							<div class="row" id="row-tuning" data-state="unknown">
 								<dt>Tuning</dt>
 								<dd>
 									<span class="row__value"
+										><span class="glyph"></span
 										><span class="row__text">—</span></span
 									><span class="row__sub"></span>
 								</dd>
 							</div>
-							<div class="row">
+							<div class="row" id="row-clients" data-state="unknown">
 								<dt>Clients</dt>
 								<dd>
-									<ul class="clients" id="clients"></ul>
+									<span class="row__value"
+										><span class="glyph"></span
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
 								</dd>
 							</div>
 						</dl>
+						<!-- Up to three client rows, shown as clients connect; with more,
+						     the last summarises the rest. -->
+						<ul class="clients" id="clients" aria-label="Clients">
+							<li class="client" hidden>
+								<span class="lamp" aria-hidden="true"></span
+								><span class="client__address"></span
+								><svg
+									class="client__spark"
+									viewBox="0 0 64 16"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+								>
+									<path class="spark__base" d="M0 15.5H64" />
+									<path class="spark__trace" d="" /></svg
+								><span class="client__rate"></span
+								><span class="client__detail"></span>
+							</li>
+							<li class="client" hidden>
+								<span class="lamp" aria-hidden="true"></span
+								><span class="client__address"></span
+								><svg
+									class="client__spark"
+									viewBox="0 0 64 16"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+								>
+									<path class="spark__base" d="M0 15.5H64" />
+									<path class="spark__trace" d="" /></svg
+								><span class="client__rate"></span
+								><span class="client__detail"></span>
+							</li>
+							<li class="client" hidden>
+								<span class="lamp" aria-hidden="true"></span
+								><span class="client__address"></span
+								><svg
+									class="client__spark"
+									viewBox="0 0 64 16"
+									preserveAspectRatio="none"
+									aria-hidden="true"
+								>
+									<path class="spark__base" d="M0 15.5H64" />
+									<path class="spark__trace" d="" /></svg
+								><span class="client__rate"></span
+								><span class="client__detail"></span>
+							</li>
+							<li class="clients__empty" id="clients-empty">
+								The Pi keeps reading the dongle while nobody is connected. Point
+								WaveKit at the address above to start receiving.
+							</li>
+						</ul>
 					</section>
 
-					<section aria-labelledby="host-heading">
+					<section class="group" aria-labelledby="host-heading">
 						<h2 class="legend" id="host-heading">This Pi</h2>
 						<dl class="rows">
 							<div class="row" id="row-power" data-state="unknown">
 								<dt>Power</dt>
 								<dd>
 									<span class="row__value"
-										><span class="lamp" aria-hidden="true"></span
+										><span class="glyph"
+											><span class="lamp" aria-hidden="true"></span></span
 										><span class="row__text">—</span></span
 									><span class="row__sub"></span>
 								</dd>
@@ -232,9 +283,10 @@
 								<dt>Network</dt>
 								<dd>
 									<span class="row__value"
-										><span class="bars" aria-hidden="true"
-											><span></span><span></span><span></span
-											><span></span></span
+										><span class="glyph"
+											><span class="bars" aria-hidden="true"
+												><span></span><span></span><span></span
+												><span></span></span></span
 										><span class="row__text">—</span></span
 									><span class="row__sub"></span>
 								</dd>
@@ -243,14 +295,30 @@
 								<dt>Storage</dt>
 								<dd>
 									<span class="row__value"
+										><span class="glyph"></span
 										><span class="row__text">—</span></span
-									><span class="row__sub"></span>
+									><span class="row__sub row__sub--meter"
+										><span class="meter" aria-hidden="true"
+											><span class="meter__fill"></span></span
+										><span class="row__subtext"></span
+									></span>
 								</dd>
 							</div>
 							<div class="row" data-key="uptime" data-state="unknown">
 								<dt>Uptime</dt>
 								<dd>
 									<span class="row__value"
+										><span class="glyph"></span
+										><span class="row__text">—</span></span
+									><span class="row__sub"></span>
+								</dd>
+							</div>
+							<div class="row" id="row-setup" data-state="unknown">
+								<dt>Setup</dt>
+								<dd>
+									<span class="row__value"
+										><span class="glyph"
+											><span class="lamp" aria-hidden="true"></span></span
 										><span class="row__text">—</span></span
 									><span class="row__sub"></span>
 								</dd>
@@ -259,13 +327,10 @@
 					</section>
 				</div>
 
-				<details class="diagnostics" id="diagnostics">
-					<summary>Diagnostics</summary>
-					<div class="diagnostics__body">
-						<dl class="facts" id="facts-receiver"></dl>
-						<dl class="facts" id="facts-sources"></dl>
-					</div>
-				</details>
+				<section class="diagnostics" aria-labelledby="diagnostics-heading">
+					<h2 class="legend" id="diagnostics-heading">Diagnostics</h2>
+					<div class="diagnostics__groups" id="diagnostics"></div>
+				</section>
 			</main>
 		</div>
 	</body>

@@ -1,22 +1,28 @@
 // Operator page: polls the Pi's own API (same origin), one request pair in
 // flight at a time, paused while the tab is hidden, backing off on failure.
+//
+// Every block of the page exists from the first paint. Renders only swap
+// text, attributes and drawn paths inside boxes of fixed size, so the page
+// never moves as readings arrive, change or go stale (see DESIGN.md, "The
+// Still Page Rule"). The one exception is the client list, which grows and
+// shrinks as clients join and leave.
 import {
+	CLIENT_SLOTS,
 	REQUEST_TIMEOUT_MS,
+	clientSlots,
+	diagnostics,
 	flowRate,
 	formatAge,
 	formatAgePrecise,
-	formatBytes,
-	formatDuration,
 	formatRate,
 	formatRateText,
-	lastBoot,
 	linkState,
 	nextDelay,
 	plotMax,
 	power,
 	readouts,
 	recentDips,
-	setupLine,
+	setupRow,
 	smoothTrace,
 	stream,
 	tracePath,
@@ -28,6 +34,10 @@ const PLOT_W = 600
 /** SoC temperature strip spans 20–90 °C. */
 const TEMP_MIN = 20
 const TEMP_SPAN = 70
+/** Client sparklines cover the last two minutes this page has seen. */
+const SPARK_MS = 120_000
+const SPARK_W = 64
+const SPARK_H = 16
 const $ = id => document.getElementById(id)
 const channel = key => document.querySelector(`.channel[data-key="${key}"]`)
 
@@ -45,6 +55,8 @@ const state = {
 	flowMax: 1,
 	trends: null,
 	values: null,
+	/** Per-client delivered rate seen by this page: key -> [[at, bytesPerSec]]. */
+	spark: new Map(),
 }
 
 async function getJson(url, signal) {
@@ -84,6 +96,7 @@ async function poll() {
 		state.values = readouts(host)
 		state.receivedAt = performance.now()
 		state.failures = 0
+		recordSparks(status)
 	} catch {
 		if (state.controller !== controller) return
 		state.failures += 1
@@ -115,14 +128,33 @@ function render() {
 	renderScreen()
 	renderStream()
 	renderHost()
-	renderSetup()
 	renderDiagnostics()
+}
+
+/** Set text only when it changed, with the full text as a tooltip for ellipsis. */
+function setText(el, text, title = false) {
+	if (el.textContent !== text) el.textContent = text
+	if (title) el.title = text
+}
+
+/** Prose that may name a log file: the hyphenated name never breaks a line. */
+function setProse(el, text) {
+	if (el.textContent === text) return
+	el.replaceChildren(
+		...text.split(/(\S+\.log)/).map((part, i) => {
+			if (i % 2 === 0) return part
+			const name = document.createElement("span")
+			name.className = "file"
+			name.textContent = part
+			return name
+		}),
+	)
 }
 
 function renderLink() {
 	const link = linkState(linkInput())
 	$("link").dataset.state = link.state
-	$("link-text").textContent = link.text
+	setText($("link-text"), link.text)
 }
 
 let lastVerdictTitle = ""
@@ -134,22 +166,20 @@ function renderScreen() {
 		fresh,
 		failures: state.failures,
 	})
-	// Until a first reading arrives, the screen's verdict is the whole page.
-	document.body.dataset.empty = String(!state.status)
 	$("screen").dataset.state = v.state
-	$("screen").dataset.fresh = String(fresh)
+	$("screen").dataset.fresh = String(fresh && state.status !== null)
 	// Only state changes are announced; numbers update silently.
 	if (v.title !== lastVerdictTitle) {
 		$("verdict").textContent = v.title
 		lastVerdictTitle = v.title
 	}
-	$("verdict-detail").textContent = v.detail
+	setProse($("verdict-detail"), v.detail)
+	// The figure keeps its place: without a current reading it reads "—".
 	const rate = flowRate(state.status, fresh)
-	$("rate-value").textContent = rate.value
-	$("rate-unit").textContent = rate.value === "—" ? "" : rate.unit
-	$("rate-sub").textContent = rate.sub
-	// Without a current figure the verdict already says so; no lone dash.
-	document.querySelector(".screen__rate").hidden = rate.value === "—"
+	setText($("rate-value"), rate.value)
+	setText($("rate-unit"), rate.unit)
+	setText($("rate-sub"), rate.sub, true)
+	setText($("rate-basis"), rate.basis, true)
 	renderScope(fresh)
 }
 
@@ -187,9 +217,10 @@ function renderScope(fresh) {
 	const flowEl = channel("flow")
 	const height = draw(flowEl, flow, { windowMs, max, area: true })
 	const scale = formatRate(max)
-	flowEl.querySelector(".channel__value").textContent = state.status
-		? `0–${Number(scale.value)} ${scale.unit}`
-		: ""
+	setText(
+		flowEl.querySelector(".channel__value"),
+		state.status ? `0–${Number(scale.value)} ${scale.unit}` : "—",
+	)
 
 	// The expected rate is labelled where its line is drawn.
 	const line = flowEl.querySelector(".plot__expected")
@@ -199,7 +230,7 @@ function renderScope(fresh) {
 	line.setAttribute("y1", y.toFixed(1))
 	line.setAttribute("y2", y.toFixed(1))
 	label.hidden = !expected
-	label.textContent = expected ? `Expected ${formatRateText(expected)}` : ""
+	setText(label, expected ? `Expected ${formatRateText(expected)}` : "")
 	label.style.top = `${((y / height) * 100).toFixed(2)}%`
 
 	// Before the receiver started there is no history to show; say so.
@@ -213,9 +244,7 @@ function renderScope(fresh) {
 	start.setAttribute("x2", startX.toFixed(1))
 	const startLabel = flowEl.querySelector(".plot__label--start")
 	startLabel.hidden = !started
-	startLabel.textContent = started
-		? `Receiver started ${formatAge(runningMs)}`
-		: ""
+	setText(startLabel, started ? `Receiver started ${formatAge(runningMs)}` : "")
 	startLabel.style.left = `${((startX / PLOT_W) * 100).toFixed(2)}%`
 	flowEl.dataset.start = !started
 		? "none"
@@ -236,12 +265,11 @@ function renderScope(fresh) {
 		)
 		const r = state.values?.[key]
 		el.dataset.state = !r ? "unavailable" : fresh ? r.state : "stale"
-		el.querySelector(".channel__value").textContent = r ? r.value : "—"
+		setText(el.querySelector(".channel__value"), r ? r.value : "—")
 	}
 
 	series.dips = aged(t?.dips ?? [], shift)
 	const lane = channel("dips")
-	lane.hidden = !t
 	lane.querySelector(".lane__ticks").setAttribute(
 		"d",
 		series.dips
@@ -257,23 +285,24 @@ function renderScope(fresh) {
 		: fresh
 			? power(state.host).state
 			: "stale"
-	lane.querySelector(".channel__value").textContent = !recent
-		? "—"
-		: recent.count === 0
-			? "None"
-			: `${recent.count}`
+	setText(
+		lane.querySelector(".channel__value"),
+		!recent ? "—" : recent.count === 0 ? "None" : `${recent.count}`,
+	)
 
 	state.series = series
 	if (state.marker !== null) placeMarker(state.marker)
 }
 
+/**
+ * The graticule keeps only lines that carry meaning: one each minute, shared
+ * by every channel so the eye can run down the scope, and each channel's zero.
+ * The flow plot also marks its full scale, which its value slot names.
+ */
 function drawGraticules() {
 	const ns = "http://www.w3.org/2000/svg"
 	for (const g of document.querySelectorAll(".graticule")) {
-		const height = Number(
-			g.closest("svg").getAttribute("viewBox").split(" ")[3],
-		)
-		const rows = Number(g.dataset.rows)
+		const height = g.closest("svg").viewBox.baseVal.height
 		const line = (x1, y1, x2, y2, major) => {
 			const el = document.createElementNS(ns, "line")
 			el.setAttribute("x1", x1)
@@ -283,11 +312,10 @@ function drawGraticules() {
 			if (major) el.setAttribute("class", "major")
 			g.append(el)
 		}
-		// One vertical per 30 s; the shared time base of every channel.
-		for (let i = 0; i <= 10; i++)
-			line((PLOT_W / 10) * i, 0, (PLOT_W / 10) * i, height, false)
-		for (let i = 0; i <= rows; i++)
-			line(0, (height / rows) * i, PLOT_W, (height / rows) * i, i === rows)
+		for (let minute = 1; minute < 5; minute++)
+			line((PLOT_W / 5) * minute, 0, (PLOT_W / 5) * minute, height, false)
+		if (g.dataset.top === "true") line(0, 0.5, PLOT_W, 0.5, false)
+		line(0, height - 0.5, PLOT_W, height - 0.5, true)
 	}
 }
 
@@ -312,7 +340,7 @@ function placeMarker(fraction) {
 	}
 	const scope = $("scope")
 	const box = scope.getBoundingClientRect()
-	const plots = [...scope.querySelectorAll(".channel:not([hidden]) svg")]
+	const plots = [...scope.querySelectorAll(".channel svg")]
 	const top = plots[0].getBoundingClientRect()
 	const bottom = plots[plots.length - 1].getBoundingClientRect()
 	const x = top.left - box.left + state.marker * top.width
@@ -391,64 +419,101 @@ function bindScope() {
 /** Fill a row: lamp state, value text and sub-line, dimmed when not current. */
 function setRow(el, row, fresh) {
 	el.dataset.state = !row ? "unknown" : fresh ? (row.state ?? "ok") : "stale"
-	el.querySelector(".row__text").textContent = row
-		? (row.text ?? row.value)
-		: "—"
+	el.dataset.empty = String(!row)
+	setText(
+		el.querySelector(".row__text"),
+		row ? (row.text ?? row.value) : "—",
+		true,
+	)
 	const sub = row?.sub ?? ""
-	el.querySelector(".row__sub").textContent =
-		row && !fresh ? `Last known${sub ? ` · ${sub}` : ""}` : sub
+	setText(
+		el.querySelector(".row__subtext") ?? el.querySelector(".row__sub"),
+		row && !fresh ? `Last known${sub ? ` · ${sub}` : ""}` : sub,
+		true,
+	)
+}
+
+/** Remember each client's delivered rate, to draw what this page has seen. */
+function recordSparks(status) {
+	const now = performance.now()
+	const seen = new Set()
+	for (const c of status.delivery?.clients ?? []) {
+		seen.add(c.key)
+		const points = state.spark.get(c.key) ?? []
+		points.push([now, c.queuedBytesPerSec])
+		while (points.length > 0 && now - points[0][0] > SPARK_MS) points.shift()
+		state.spark.set(c.key, points)
+	}
+	for (const key of state.spark.keys())
+		if (!seen.has(key)) state.spark.delete(key)
+}
+
+/** Sparkline path on the flow's full scale; a missing reading breaks the line. */
+function sparkPath(points, max) {
+	const now = performance.now()
+	let d = ""
+	let pen = false
+	for (const [at, value] of points) {
+		if (value === null) {
+			pen = false
+			continue
+		}
+		const x = SPARK_W - ((now - at) / SPARK_MS) * SPARK_W
+		const y = SPARK_H - 1 - Math.min(1, value / max) * (SPARK_H - 2)
+		d += `${pen ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`
+		pen = true
+	}
+	return d
 }
 
 function renderStream() {
 	const s = stream(state.status, state.host?.generatedAt ?? null)
 	const fresh = isFresh()
-	$("endpoint").textContent = s?.endpoint ?? "—"
-	$("endpoint-copy").hidden = !s?.endpoint
+	setText($("endpoint"), s?.endpoint ?? "—", true)
+	$("endpoint-copy").disabled = !s?.endpoint
 	setRow($("row-dongle"), s?.dongle, fresh)
 	setRow($("row-tuning"), s?.tuning, fresh)
-	const list = $("clients")
-	if (!s || !s.clientsKnown) {
-		list.replaceChildren(item("Unknown", "Delivery counters unavailable"))
-		return
-	}
-	list.replaceChildren(
-		...(s.clients.length === 0
-			? [
-					item(
-						"None connected",
-						"The Pi keeps reading the dongle; point WaveKit at the address above.",
-					),
-				]
-			: s.clients.map(c =>
-					item(
-						c.address,
-						fresh
-							? c.state === "warn"
-								? `${c.health}. ${[c.rate, c.since].join(" · ")}`
-								: [c.rate, c.health, c.since].filter(Boolean).join(" · ")
-							: "Last known",
-						fresh ? c.state : "stale",
-					),
-				)),
-	)
+	setRow($("row-clients"), s?.clientsRow, fresh)
+
+	const { shown, more } = clientSlots(s?.clients ?? [], CLIENT_SLOTS)
+	const slots = [...$("clients").querySelectorAll(".client")]
+	slots.forEach((slot, i) => {
+		const c = shown[i]
+		const last = i === slots.length - 1
+		slot.classList.toggle("client--more", last && more !== null)
+		if (last && more) {
+			fillSlot(slot, {
+				state: fresh ? more.state : "stale",
+				address: more.text,
+				rate: "",
+				detail: more.detail,
+				spark: "",
+			})
+			return
+		}
+		if (!c) {
+			slot.hidden = true
+			return
+		}
+		fillSlot(slot, {
+			state: fresh ? c.state : "stale",
+			address: c.address,
+			rate: fresh ? c.rate : "—",
+			detail: fresh ? c.detail : `Last known · ${c.detail}`,
+			spark: sparkPath(state.spark.get(c.key) ?? [], state.flowMax),
+		})
+	})
+	// With nobody connected, one hint stands in for the list.
+	$("clients-empty").hidden = !s || shown.length > 0
 }
 
-function item(text, sub, tone = "") {
-	const li = document.createElement("li")
-	li.className = "client"
-	if (tone) li.dataset.state = tone
-	const lamp = document.createElement("span")
-	lamp.className = "lamp"
-	lamp.setAttribute("aria-hidden", "true")
-	const name = document.createElement("span")
-	name.className = "client__address"
-	name.textContent = text
-	const detail = document.createElement("span")
-	detail.className = "client__sub"
-	detail.textContent = sub
-	if (tone) li.append(lamp)
-	li.append(name, detail)
-	return li
+function fillSlot(slot, { state: tone, address, rate, detail, spark }) {
+	slot.hidden = false
+	slot.dataset.state = tone
+	setText(slot.querySelector(".client__address"), address, true)
+	setText(slot.querySelector(".client__rate"), rate)
+	setText(slot.querySelector(".client__detail"), detail, true)
+	slot.querySelector(".spark__trace").setAttribute("d", spark)
 }
 
 function renderHost() {
@@ -458,132 +523,81 @@ function renderHost() {
 		const r = state.values?.[el.dataset.key]
 		setRow(el, r ?? null, fresh)
 		if (el.dataset.key === "network") el.dataset.bars = String(r?.bars ?? 0)
+		if (el.dataset.key === "disk")
+			el.querySelector(".meter__fill").style.transform =
+				`scaleX(${r?.meter ?? 0})`
 	}
+	setRow($("row-setup"), state.host ? setupRow(state.host.setup) : null, fresh)
 }
 
-function renderSetup() {
-	const line = setupLine(state.host?.setup)
-	const fresh = isFresh()
-	// A finished (or unreported) setup is history: it moves to diagnostics.
-	const setup = state.host?.setup
-	$("setup-section").hidden =
-		!setup?.value ||
-		setup.state === "unavailable" ||
-		setup.value.state === "complete"
-	$("setup").dataset.state = fresh ? line.state : "unknown"
-	$("setup-text").textContent =
-		fresh || !state.host ? line.text : `Last known: ${line.text}`
-}
-
+/**
+ * Diagnostics keep one shape from the first paint: the same groups and terms
+ * every time, "—" until a value is known. Static explanations are gathered
+ * into notes after the groups, the only place text may wrap.
+ */
 function renderDiagnostics() {
-	const status = state.status
-	if (!status) return
-	const s = status.sampling
-	const proc = (name, p) =>
-		p
-			? `${name} ${p.running ? `pid ${p.pid ?? "?"}` : "stopped"}${p.restartCount ? ` · ${p.restartCount} restarts` : ""}`
-			: null
-	const h = state.host
-	facts($("facts-receiver"), [
-		[
-			"Processes",
-			[proc("rtl_tcp", status.rtlTcp), proc("rtlmux", status.rtlmux)]
-				.filter(Boolean)
-				.join(" · ") || null,
-		],
-		[
-			"Read from dongle",
-			s?.upstream?.bytesTotal != null
-				? formatBytes(s.upstream.bytesTotal)
-				: null,
-		],
-		["Last sample", s?.lastSampleAt ? formatAge(s.sampleAgeMs) : "none yet"],
-		[
-			"Dropped for clients",
-			status.delivery
-				? `${formatBytes(status.delivery.droppedBytesSinceMonitorStart)} since the fan-out started`
-				: null,
-		],
-		[
-			"Counter resets",
-			s?.epoch
-				? `${s.epoch.resets}${s.epoch.lastResetReason ? ` · ${s.epoch.lastResetReason}` : ""}`
-				: null,
-		],
-		[
-			"Fan-out counters",
-			s
-				? `${s.stats.state}${s.stats.lastError ? ` · ${s.stats.lastError}` : ""}`
-				: null,
-		],
-		["First-boot setup", h ? setupLine(h.setup).text : null],
-		["Last reboot", h ? lastBoot(h).text : null],
-		[
-			"Throttling",
-			h?.power.throttling.value
-				? h.power.throttling.value.throttled
-					? "active"
-					: "clear"
-				: h
-					? `not measurable · ${h.power.throttling.reason}`
-					: null,
-		],
-	])
-	if (!h) return
-	const describe = reading =>
-		reading.state === "unavailable"
-			? `unavailable · ${reading.reason}`
-			: `${scopeLabel(reading.scope)} · ${reading.state === "stale" ? `stale, ${formatAge(reading.ageMs)} old` : "fresh"}`
-	facts($("facts-sources"), [
-		["CPU", `${state.values?.cpu.sub ?? ""} · ${describe(h.cpu)}`],
-		["Memory", `${state.values?.memory.sub ?? ""} · ${describe(h.memory)}`],
-		[
-			"Temperature",
-			h.temperature.value
-				? `${describe(h.temperature)} · ${h.temperature.value.zone}`
-				: describe(h.temperature),
-		],
-		["Storage", describe(h.disk)],
-		["Network", describe(h.network)],
-		["Under-voltage", describe(h.power.undervoltageNow)],
-		[
-			"Receiver container",
-			h.container.value
-				? `${formatBytes(h.container.value.memoryBytes)} memory${h.container.value.cpuPercent === null ? "" : ` · ${h.container.value.cpuPercent}% CPU`}`
-				: describe(h.container),
-		],
-		[
-			"Host uptime",
-			h.uptime.value
-				? `${formatDuration(h.uptime.value.hostSec)} · ${describe(h.uptime)}`
-				: describe(h.uptime),
-		],
-	])
-}
-
-function scopeLabel(scope) {
-	return (
-		{
-			host: "Pi host",
-			container: "receiver container",
-			"docker-storage": "Docker storage filesystem",
-			service: "receiver service",
-		}[scope] ?? scope
-	)
-}
-
-function facts(dl, entries) {
-	dl.replaceChildren(
-		...entries
-			.filter(([, value]) => value != null)
-			.flatMap(([term, value]) => {
-				const dt = document.createElement("dt")
-				dt.textContent = term
-				const dd = document.createElement("dd")
-				dd.textContent = value
-				return [dt, dd]
+	const groups = diagnostics({
+		status: state.status,
+		host: state.host,
+		fresh: isFresh(),
+	})
+	const root = $("diagnostics")
+	if (root.childElementCount === 0) buildDiagnostics(root, groups)
+	const notes = []
+	for (const group of groups) {
+		const facts = root.querySelectorAll(
+			`.diag-group[data-key="${group.key}"] .fact`,
+		)
+		group.facts.forEach((fact, i) => {
+			const el = facts[i]
+			if (!el) return
+			if (fact.tone) el.dataset.tone = fact.tone
+			el.dataset.empty = String(fact.value === "—")
+			setText(el.querySelector(".fact__value"), fact.value, true)
+			const word = el.querySelector(".fact__word span:last-child")
+			if (word) setText(word, fact.word ?? "")
+			if (fact.note) notes.push(`${fact.term}: ${fact.note}.`)
+		})
+	}
+	const list = root.querySelector(".diagnostics__notes")
+	if (list.textContent !== notes.join(""))
+		list.replaceChildren(
+			...notes.map(text => {
+				const li = document.createElement("li")
+				li.textContent = text
+				return li
 			}),
-	)
+		)
+}
+
+function buildDiagnostics(root, groups) {
+	const el = (tag, className, text = "") => {
+		const node = document.createElement(tag)
+		if (className) node.className = className
+		if (text) node.textContent = text
+		return node
+	}
+	for (const group of groups) {
+		const section = el("section", "diag-group")
+		section.dataset.key = group.key
+		const title = el("h3", "diag-group__title", group.title)
+		const list = el("dl", "facts")
+		for (const fact of group.facts) {
+			const row = el("div", "fact")
+			row.append(el("dt", "", fact.term), el("dd", "fact__value"))
+			if (fact.word !== undefined) {
+				const word = el("dd", "fact__word")
+				const lamp = el("span", "lamp")
+				lamp.setAttribute("aria-hidden", "true")
+				word.append(lamp, el("span"))
+				row.append(word)
+			}
+			list.append(row)
+		}
+		section.append(title, list)
+		root.append(section)
+	}
+	root.append(el("ul", "diagnostics__notes"))
 }
 
 /** Clipboard needs a secure context; plain http on the LAN falls back to a selection copy. */
@@ -601,8 +615,9 @@ async function copyEndpoint() {
 		selection?.addRange(range)
 		copied = document.execCommand("copy")
 	}
+	// Both words fit the button's fixed width.
 	const button = $("endpoint-copy")
-	button.textContent = copied ? "Copied" : "Select to copy"
+	button.textContent = copied ? "Copied" : "Selected"
 	setTimeout(() => {
 		button.textContent = "Copy"
 	}, 1600)
@@ -627,12 +642,13 @@ $("host-name").textContent = location.hostname || "This Pi"
 $("endpoint-copy").addEventListener("click", () => void copyEndpoint())
 drawGraticules()
 bindScope()
+render()
 // Keep ages, freshness and the scrolling traces honest between polls. When the
 // page's own freshness changes (e.g. contact lost), every section re-renders so
 // no lamp stays green on old data.
 let lastLink = ""
 setInterval(() => {
-	if (document.hidden || !state.status) return
+	if (document.hidden) return
 	const link = linkState(linkInput()).state
 	if (link !== lastLink) {
 		lastLink = link

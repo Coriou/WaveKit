@@ -3,6 +3,8 @@ import type { SdrHostSampling, SdrHostTelemetry } from "@wavekit/api-types"
 import { HostCollector } from "../../src/telemetry/host.js"
 import { SamplingMonitor } from "../../src/telemetry/sampling.js"
 import {
+	clientSlots,
+	diagnostics,
 	flowRate,
 	formatAgePrecise,
 	lastBoot,
@@ -12,6 +14,7 @@ import {
 	power,
 	readouts,
 	setupLine,
+	setupRow,
 	smoothTrace,
 	stream,
 	tracePath,
@@ -174,7 +177,8 @@ describe("operator page verdict", () => {
 		expect(flowRate(status(sampling()), true)).toEqual({
 			value: "4.10",
 			unit: "MB/s",
-			sub: "2.048\u00a0MS/s · 100% of expected",
+			sub: "100% of expected",
+			basis: "2.048\u00a0MS/s configured",
 		})
 		const clientSet = status(
 			sampling(
@@ -187,12 +191,15 @@ describe("operator page verdict", () => {
 				},
 			),
 		)
-		expect(flowRate(clientSet, true).sub).toBe(
-			"≈2.16\u00a0MS/s derived · set by a client",
-		)
+		expect(flowRate(clientSet, true)).toMatchObject({
+			sub: "≈2.16\u00a0MS/s derived",
+			basis: "Rate set by a client",
+		})
+		// Without a current reading the figure says so; what it is set to stays.
 		expect(flowRate(clientSet, false)).toMatchObject({
 			value: "—",
 			sub: "No current reading",
+			basis: "Rate set by a client",
 		})
 	})
 
@@ -216,11 +223,17 @@ describe("operator page verdict", () => {
 			text: "RTL2838UHIDIR",
 			sub: "IQ server restarted 2 times",
 		})
-		expect(idle?.tuning.text).toBe(
-			"446.525\u00a0MHz · 2.048\u00a0MS/s · gain\u00a049\u00a0dB",
-		)
+		// The frequency is the value; rate and gain are its context line.
+		expect(idle?.tuning).toEqual({
+			text: "446.525\u00a0MHz",
+			sub: "2.048\u00a0MS/s · gain\u00a049\u00a0dB",
+		})
 		// Zero clients is idle delivery, not a fault and not a guess.
-		expect(idle).toMatchObject({ clientsKnown: true, clients: [] })
+		expect(idle).toMatchObject({
+			clientsKnown: true,
+			clients: [],
+			clientsRow: { state: "unknown", text: "None connected" },
+		})
 		expect(stream(status(sampling(), false))?.dongle).toMatchObject({
 			state: "fault",
 			text: "Not detected",
@@ -248,15 +261,46 @@ describe("operator page verdict", () => {
 		s.sampling!.upstream.rateBasis = "client-controlled"
 		const busy = stream(s, "2026-10-08T09:58:00.000Z")
 		expect(busy?.tuning).toMatchObject({ text: "Set by a client" })
-		expect(busy?.clients.map(c => [c.state, c.health, c.since])).toEqual([
-			["ok", "keeping up", "for 58 min"],
-			[
-				"warn",
-				"Falling behind · 2.10 MB dropped in the last minute",
-				"for 58 min",
-			],
-			["unknown", "", "for 58 min"],
+		expect(busy?.clients.map(c => [c.state, c.rate, c.detail])).toEqual([
+			["ok", "4.10 MB/s", "Keeping up · connected 58 min"],
+			["warn", "4.10 MB/s", "Falling behind · 2.10 MB dropped in 60 s"],
+			["unknown", "—", "Measuring · connected 58 min"],
 		])
+		expect(busy?.clientsRow).toEqual({
+			state: "warn",
+			text: "3 connected",
+			sub: "1 falling behind",
+		})
+	})
+
+	it("lists every client up to the cap, then puts falling-behind ones first and sums the rest", () => {
+		const client = (address: string, state: "ok" | "warn") => ({
+			key: address,
+			address,
+			state,
+			rate: "4.10 MB/s",
+			bytesPerSec: 4_096_000,
+			detail: "",
+		})
+		const two = [client("a", "ok"), client("b", "warn")]
+		// Below the cap: exactly the clients there are, in connection order.
+		expect(clientSlots(two, 3)).toEqual({ shown: two, more: null })
+		expect(clientSlots([], 3)).toEqual({ shown: [], more: null })
+		const five = [
+			client("a", "ok"),
+			client("b", "ok"),
+			client("c", "warn"),
+			client("d", "ok"),
+			client("e", "warn"),
+		]
+		// Above the cap: the list stops at three rows, the last a summary.
+		const { shown, more } = clientSlots(five, 3)
+		expect(shown.map(c => c.address)).toEqual(["c", "e"])
+		expect(more).toEqual({
+			state: "ok",
+			text: "3 more",
+			detail: "All keeping up",
+		})
 	})
 
 	it("renders the server's real verdict for a live monitor", () => {
@@ -319,14 +363,14 @@ describe("operator page host readouts", () => {
 		expect(power(host)).toEqual({
 			state: "ok",
 			text: "Fine",
-			sub: "3 dips since the receiver started 1 h ago; last 2 min ago",
+			sub: "3 dips in 1 h · last 2 min ago",
 		})
 		// Recent dips: fine this second, but say how often it dips.
 		host.history.points[1]![4] = 2
 		expect(power(host)).toEqual({
 			state: "warn",
 			text: "Fine now",
-			sub: "2 dips in the last 4 s, 3 since the receiver started",
+			sub: "2 dips in 4 s · 3 in 1 h",
 		})
 	})
 
@@ -354,6 +398,8 @@ describe("operator page host readouts", () => {
 		expect(lastBoot(host)).toEqual({
 			unexpected: false,
 			text: "Requested reboot or power-off · last log before it 8 min ago",
+			short: "Requested reboot or power-off",
+			lastLog: "8 min ago",
 		})
 		host.lastBoot = report(false)
 		host.uptime = {
@@ -369,11 +415,15 @@ describe("operator page host readouts", () => {
 				serviceSec: 290,
 			},
 		}
+		// The row names the restart briefly; the full sentence is in `text`.
 		expect(readouts(host)?.uptime).toEqual({
 			state: "warn",
 			value: "6 min",
-			sub: "Unexpected restart · last log before it 8 min ago · under-voltage since this boot",
+			sub: "Unexpected restart · under-voltage",
 		})
+		expect(lastBoot(host).text).toBe(
+			"Unexpected restart · last log before it 8 min ago · under-voltage since this boot",
+		)
 		host.uptime.value!.hostSec = 3 * 86_400
 		expect(readouts(host)?.uptime.state).toBe("ok")
 	})
@@ -405,7 +455,7 @@ describe("operator page host readouts", () => {
 		expect(readouts(host)?.network).toMatchObject({
 			state: "ok",
 			value: "Wi-Fi · Excellent",
-			sub: "\u221247 dBm · 4.50 MB/s out · 192.0.2.23",
+			sub: "\u221247 dBm · 4.50 MB/s out",
 			bars: 4,
 		})
 	})
@@ -635,7 +685,64 @@ describe("operator page review fixes", () => {
 		expect(power(host)).toMatchObject({
 			state: "fault",
 			text: "Under-voltage now",
-			sub: "1 dip since the receiver started 1 h ago",
+			sub: "1 dip in 1 h",
 		})
+	})
+})
+
+describe("operator page keeps its shape", () => {
+	it("reports first-boot setup as a row in every state", () => {
+		const reading = (
+			state: "running" | "complete" | "failed" | "interrupted",
+		): SdrHostTelemetry["setup"] => ({
+			state: "ok",
+			scope: "host",
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value: {
+				state,
+				phase: "install",
+				updatedAt: "2026-10-08T10:00:00Z",
+				updatedAgeMs: 120_000,
+				exitCode: state === "failed" ? 23 : null,
+			},
+		})
+		expect(setupRow(reading("complete"))).toEqual({
+			state: "ok",
+			text: "Complete",
+			sub: "Finished 2 min ago",
+		})
+		expect(setupRow(reading("running"))).toMatchObject({
+			state: "ok",
+			sub: "Installing the receiver for 2 min",
+		})
+		expect(setupRow(reading("failed"))).toMatchObject({
+			state: "fault",
+			text: "Failed (exit 23)",
+		})
+		expect(setupRow(reading("interrupted")).state).toBe("fault")
+		expect(setupRow(emptyHost().setup)).toMatchObject({
+			state: "unknown",
+			text: "Not reported",
+		})
+	})
+
+	it("lists the same diagnostics terms with or without a reading", () => {
+		const empty = diagnostics({ status: null, host: null })
+		const full = diagnostics({ status: status(sampling()), host: emptyHost() })
+		expect(full.map(g => [g.key, g.facts.map(f => f.term)])).toEqual(
+			empty.map(g => [g.key, g.facts.map(f => f.term)]),
+		)
+		// Nothing known yet: every value is a dash, never a guess.
+		for (const group of empty)
+			for (const fact of group.facts) expect(fact.value).toBe("—")
+		// An unmeasurable source says so, with its reason as a note.
+		const sources = full.find(g => g.key === "sources")!.facts
+		expect(sources.find(f => f.term === "CPU")).toMatchObject({
+			tone: "unknown",
+			word: "Unavailable",
+		})
+		expect(sources.find(f => f.term === "CPU")?.note?.length).toBeGreaterThan(0)
 	})
 })

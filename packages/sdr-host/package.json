@@ -17,7 +17,8 @@
 		"typecheck": "pnpm -w exec tsc -p packages/sdr-host/tsconfig.json --noEmit",
 		"lint": "eslint -c ../../eslint.config.js .",
 		"test": "vitest run --passWithNoTests",
-		"start": "node ./dist/index.js"
+		"start": "node ./dist/index.js",
+		"ui:dev": "node --watch ./scripts/ui-preview/server.mjs"
 	},
 	"dependencies": {
 		"@wavekit/api-types": "workspace:*",

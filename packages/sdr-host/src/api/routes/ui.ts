@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url"
 import { gzipSync } from "node:zlib"
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 
-/** Same-origin only: the page needs nothing from any other host. */
-const CONTENT_SECURITY_POLICY = [
+/** Same-origin only: the page needs nothing from any other host. The local UI preview applies it too. */
+export const CONTENT_SECURITY_POLICY = [
 	"default-src 'none'",
 	"script-src 'self'",
 	"style-src 'self'",

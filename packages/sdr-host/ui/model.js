@@ -233,25 +233,35 @@ function formatFrequency(hz) {
 }
 
 /**
- * The headline rate and what it means as a sample rate. A configured rate is
- * quoted as configured; once a client has set its own rate, the sample rate
- * is derived from the measured bytes and labelled as such.
+ * The headline rate and what it means as a sample rate, as two short lines
+ * under the figure: how it compares (`sub`) and what it is set to (`basis`).
+ * A configured rate is quoted as configured; once a client has set its own
+ * rate, the sample rate is derived from the measured bytes and labelled so.
  */
 export function flowRate(status, fresh) {
 	const upstream = status?.sampling?.upstream
 	const measured = fresh ? (upstream?.bytesPerSec ?? null) : null
 	const expected = upstream?.expectedBytesPerSec ?? null
+	const clientSet = upstream?.rateBasis === "client-controlled"
 	let sub = "No current reading"
 	if (measured !== null && expected)
-		sub = `${formatSampleRate(expected / BYTES_PER_SAMPLE)} · ${Math.round((measured / expected) * 100)}% of expected`
-	else if (measured !== null && upstream?.rateBasis === "client-controlled")
+		sub = `${Math.round((measured / expected) * 100)}% of expected`
+	else if (measured !== null && clientSet)
 		sub =
 			measured > 0
-				? `≈${formatSampleRate(measured / BYTES_PER_SAMPLE, 2)} derived · set by a client`
-				: "Rate set by a client"
+				? `≈${formatSampleRate(measured / BYTES_PER_SAMPLE, 2)} derived`
+				: "Nothing measured"
 	else if (measured !== null) sub = "No expected rate"
-	return { ...formatRate(measured), sub }
+	const basis = expected
+		? `${formatSampleRate(expected / BYTES_PER_SAMPLE)} configured`
+		: clientSet
+			? "Rate set by a client"
+			: ""
+	return { ...formatRate(measured), sub, basis }
 }
+
+/** Most client rows the stream section shows; more are summarised in the last. */
+export const CLIENT_SLOTS = 3
 
 /** The IQ stream WaveKit connects to: where, from which dongle, tuned how, to whom. */
 export function stream(status, piNow = null) {
@@ -259,14 +269,46 @@ export function stream(status, piNow = null) {
 	const dongle = status.dongle ?? {}
 	const restarts = status.rtlTcp?.restartCount ?? 0
 	const config = status.rtlTcp?.config
-	const tuned = config
+	const frequency = config ? formatFrequency(config.frequency) : null
+	const settings = config
 		? [
-				formatFrequency(config.frequency),
 				formatSampleRate(config.sampleRate),
 				config.agc ? "AGC" : `gain\u00a0${config.gain}\u00a0dB`,
 			].join(" · ")
-		: null
+		: ""
 	const delivery = status.delivery
+	const clientsKnown = delivery != null && delivery.state !== "unknown"
+	const clients = (delivery?.clients ?? []).map(c => {
+		const behind = c.droppedBytesLast60s > 0
+		const since =
+			piNow && c.connectedAt
+				? Date.parse(piNow) - Date.parse(c.connectedAt)
+				: Number.NaN
+		const connected = Number.isFinite(since)
+			? ` · connected ${formatDuration(Math.max(0, since) / 1000)}`
+			: ""
+		// Connected but receiving nothing is not healthy delivery.
+		const flowing = (c.queuedBytesPerSec ?? 0) > 0
+		return {
+			key: c.key ?? c.address,
+			address: c.address,
+			state: behind ? "warn" : flowing ? "ok" : "unknown",
+			rate:
+				c.queuedBytesPerSec === null
+					? "—"
+					: formatRateText(c.queuedBytesPerSec),
+			bytesPerSec: c.queuedBytesPerSec,
+			detail: behind
+				? `Falling behind · ${formatBytes(c.droppedBytesLast60s)} dropped in 60 s`
+				: flowing
+					? `Keeping up${connected}`
+					: c.queuedBytesPerSec === null
+						? `Measuring${connected}`
+						: `Receiving nothing${connected}`,
+		}
+	})
+	const behind = clients.filter(c => c.state === "warn").length
+	const receiving = clients.filter(c => c.state === "ok").length
 	return {
 		endpoint: status.rtlmux?.endpoint ?? null,
 		dongle: !dongle.present
@@ -291,34 +333,58 @@ export function stream(status, piNow = null) {
 					},
 		tuning:
 			status.sampling?.upstream?.rateBasis === "client-controlled"
-				? { text: "Set by a client", sub: tuned ? `Started at ${tuned}` : "" }
-				: { text: tuned ?? "Not reported", sub: "" },
-		clientsKnown: delivery != null && delivery.state !== "unknown",
-		clients: (delivery?.clients ?? []).map(c => {
-			const behind = c.droppedBytesLast60s > 0
-			const since =
-				piNow && c.connectedAt
-					? Date.parse(piNow) - Date.parse(c.connectedAt)
-					: Number.NaN
-			// Connected but receiving nothing is not healthy delivery.
-			const flowing = (c.queuedBytesPerSec ?? 0) > 0
-			return {
-				address: c.address,
-				state: behind ? "warn" : flowing ? "ok" : "unknown",
-				rate:
-					c.queuedBytesPerSec === null
-						? "Measuring"
-						: formatRateText(c.queuedBytesPerSec),
-				health: behind
-					? `Falling behind · ${formatBytes(c.droppedBytesLast60s)} dropped in the last minute`
-					: flowing
-						? "keeping up"
-						: "",
-				since: Number.isFinite(since)
-					? `for ${formatDuration(Math.max(0, since) / 1000)}`
-					: "",
-			}
-		}),
+				? {
+						text: "Set by a client",
+						sub: frequency ? `Started at ${frequency}` : "",
+					}
+				: { text: frequency ?? "Not reported", sub: settings },
+		clientsKnown,
+		// The count and its health as one row; the clients themselves follow.
+		clientsRow: !clientsKnown
+			? {
+					state: "unknown",
+					text: "Unknown",
+					sub: "Delivery counters unavailable",
+				}
+			: clients.length === 0
+				? { state: "unknown", text: "None connected", sub: "Delivery is idle" }
+				: {
+						state: behind > 0 ? "warn" : receiving > 0 ? "ok" : "unknown",
+						text: `${clients.length} connected`,
+						sub:
+							behind > 0
+								? `${behind} falling behind`
+								: receiving === clients.length
+									? "All keeping up"
+									: receiving === 0
+										? "None receiving samples"
+										: `${receiving} of ${clients.length} receiving`,
+					},
+		clients,
+	}
+}
+
+/**
+ * Cap the client list. Up to CLIENT_SLOTS clients show in connection order;
+ * beyond that the clients falling behind come first and the last row
+ * summarises the rest, so a crowd of clients cannot push the page down.
+ */
+export function clientSlots(clients, slots = CLIENT_SLOTS) {
+	if (clients.length <= slots) return { shown: clients, more: null }
+	const ordered = [
+		...clients.filter(c => c.state === "warn"),
+		...clients.filter(c => c.state !== "warn"),
+	]
+	const shown = ordered.slice(0, slots - 1)
+	const rest = ordered.slice(slots - 1)
+	const behind = rest.filter(c => c.state === "warn").length
+	return {
+		shown,
+		more: {
+			state: behind > 0 ? "warn" : "ok",
+			text: `${rest.length} more`,
+			detail: behind > 0 ? `${behind} falling behind` : "All keeping up",
+		},
 	}
 }
 
@@ -363,13 +429,13 @@ export function power(host) {
 	const recent = recentDips(host)
 	const stale = staleSuffix(now)
 	const dips = n => `${n} ${n === 1 ? "dip" : "dips"}`
+	// Short enough for one line beside the row name on a phone.
 	const lately =
 		recent && recent.count > 0
-			? `${dips(recent.count)} in the last ${formatDuration(recent.spanMs / 1000)}`
+			? `${dips(recent.count)} in ${formatDuration(recent.spanMs / 1000)}`
 			: null
-	const total = observed
-		? `${dips(observed.events)} since the receiver started ${formatDuration(observed.coveredMs / 1000)} ago`
-		: null
+	const covered = observed ? formatDuration(observed.coveredMs / 1000) : ""
+	const total = observed ? `${dips(observed.events)} in ${covered}` : null
 	if (now.value)
 		return {
 			state: "fault",
@@ -380,7 +446,7 @@ export function power(host) {
 		return {
 			state: "warn",
 			text: `Fine now${stale}`,
-			sub: `${lately}${observed ? `, ${observed.events} since the receiver started` : ""}`,
+			sub: `${lately}${observed ? ` · ${observed.events} in ${covered}` : ""}`,
 		}
 	return {
 		state: "ok",
@@ -388,8 +454,8 @@ export function power(host) {
 		sub: !observed
 			? ""
 			: observed.events === 0
-				? `No dips in ${formatDuration(observed.coveredMs / 1000)}`
-				: `${total}; last ${formatAge(observed.lastAgeMs)}`,
+				? `No dips in ${covered}`
+				: `${total} · last ${formatAge(observed.lastAgeMs)}`,
 	}
 }
 
@@ -459,12 +525,16 @@ export function readouts(host) {
 	}
 
 	if (!disk?.value) out.disk = unavailable(disk)
-	else
+	else {
+		const used = disk.value.usedBytes / disk.value.totalBytes
 		out.disk = {
 			state: tone(disk, disk.value.availableBytes < 1e9),
 			value: `${formatBytes(disk.value.availableBytes)} free`,
-			sub: `${Math.round((disk.value.usedBytes / disk.value.totalBytes) * 100)}% of ${formatBytes(disk.value.totalBytes)} used${staleSuffix(disk)}`,
+			sub: `${Math.round(used * 100)}% of ${formatBytes(disk.value.totalBytes)} used${staleSuffix(disk)}`,
+			// Drawn as a meter beside the sub-line.
+			meter: Math.min(1, Math.max(0, used)),
 		}
+	}
 
 	const link = primaryInterface(network)
 	if (!link)
@@ -481,7 +551,7 @@ export function readouts(host) {
 			link.txBytesPerSec === null
 				? null
 				: `${formatRateText(link.txBytesPerSec)} out`,
-			link.addresses[0] ?? link.name,
+			// The address lives in diagnostics; the row keeps to what can change.
 		]
 		out.network = {
 			state: tone(network, wifi?.warn ?? false),
@@ -504,7 +574,7 @@ export function readouts(host) {
 			state: tone(uptime, boot.unexpected && uptime.value.hostSec < 24 * 3600),
 			value: formatDuration(uptime.value.hostSec),
 			sub: boot.unexpected
-				? boot.text
+				? boot.short
 				: `receiver service ${formatDuration(uptime.value.serviceSec)}`,
 		}
 	}
@@ -515,7 +585,8 @@ export function readouts(host) {
  * How the previous boot ended, from the image's boot report: a clean shutdown
  * is a requested reboot or power-off; anything else is unexpected (power loss
  * or crash; the record cannot say which, but under-voltage since this boot and
- * a watchdog reset are named when the firmware reports them).
+ * a watchdog reset are named when the firmware reports them). `text` is the
+ * whole sentence; `short` fits a row and `lastLog` is the journal's last word.
  */
 export function lastBoot(host) {
 	const reading = host?.lastBoot
@@ -523,16 +594,27 @@ export function lastBoot(host) {
 		return {
 			unexpected: false,
 			text: `Not recorded: ${reading?.reason ?? "not reported"}`,
+			short: "Not recorded",
+			lastLog: null,
 		}
 	const { previous, undervoltageSinceBoot, watchdogReset } = reading.value
 	if (!previous)
-		return { unexpected: false, text: "No earlier boot in the journal" }
-	const last =
-		previous.lastEntryAgeMs === null
-			? ""
-			: ` · last log before it ${formatAge(previous.lastEntryAgeMs)}`
+		return {
+			unexpected: false,
+			text: "No earlier boot in the journal",
+			short: "No earlier boot",
+			lastLog: null,
+		}
+	const lastLog =
+		previous.lastEntryAgeMs === null ? null : formatAge(previous.lastEntryAgeMs)
+	const last = lastLog === null ? "" : ` · last log before it ${lastLog}`
 	if (previous.cleanShutdown)
-		return { unexpected: false, text: `Requested reboot or power-off${last}` }
+		return {
+			unexpected: false,
+			text: `Requested reboot or power-off${last}`,
+			short: "Requested reboot or power-off",
+			lastLog,
+		}
 	const signs = [
 		undervoltageSinceBoot ? "under-voltage since this boot" : null,
 		watchdogReset ? "watchdog reset" : null,
@@ -540,6 +622,8 @@ export function lastBoot(host) {
 	return {
 		unexpected: true,
 		text: `Unexpected restart${last}${signs.length ? ` · ${signs.join(" · ")}` : ""}`,
+		short: `Unexpected restart${undervoltageSinceBoot ? " · under-voltage" : watchdogReset ? " · watchdog reset" : ""}`,
+		lastLog,
 	}
 }
 
@@ -585,6 +669,210 @@ export function setupLine(reading) {
 				text: `Failed${v.exitCode ? ` (exit ${v.exitCode})` : ""}${ago}. Details: wavekit-setup.log on the boot partition.`,
 			}
 	}
+}
+
+/** First-boot setup as a row of This Pi: always present, so it never pops in. */
+export function setupRow(reading) {
+	if (!reading || reading.state === "unavailable")
+		return {
+			state: "unknown",
+			text: "Not reported",
+			sub: reading?.reason ?? "unavailable",
+		}
+	const v = reading.value
+	switch (v.state) {
+		case "complete":
+			return {
+				state: "ok",
+				text: "Complete",
+				sub:
+					v.updatedAgeMs == null ? "" : `Finished ${formatAge(v.updatedAgeMs)}`,
+			}
+		case "running":
+			return {
+				state: "ok",
+				text: "In progress",
+				sub: `${capitalize(phaseLabel(v.phase))}${forDuration(v.updatedAgeMs)}`,
+			}
+		case "interrupted":
+			return {
+				state: "fault",
+				text: "Interrupted",
+				sub: "Restart wavekit-firstboot to retry",
+			}
+		default:
+			return {
+				state: "fault",
+				text: `Failed${v.exitCode ? ` (exit ${v.exitCode})` : ""}`,
+				sub: "Details in wavekit-setup.log",
+			}
+	}
+}
+
+const SOURCE_LABELS = {
+	host: "Pi host",
+	container: "Receiver container",
+	"docker-storage": "Docker storage",
+	service: "Receiver service",
+}
+
+/**
+ * Developer detail in three fixed groups. Every term is always present (a
+ * missing value reads "—"), so the panel keeps its shape from the first paint
+ * to the last poll. Values that change on a poll are short, one line each;
+ * `note` carries static explanations (why a reading is unavailable). Once the
+ * page has lost contact, no source is called fresh: it is the last known.
+ */
+export function diagnostics({ status, host, fresh = true }) {
+	const s = status?.sampling
+	const dash = "—"
+	const proc = p =>
+		!p
+			? dash
+			: `${p.running ? `Running · pid ${p.pid ?? "?"}` : "Stopped"}${p.restartCount ? ` · ${p.restartCount} restart${p.restartCount === 1 ? "" : "s"}` : ""}`
+	const boot = host ? lastBoot(host) : null
+	const throttling = host?.power?.throttling
+	const load = host?.load?.value
+	const memory = host?.memory?.value
+	const container = host?.container
+	const link = primaryInterface(host?.network)
+	const source = (term, reading, detail = "") => {
+		if (!reading)
+			return { term, value: dash, tone: "unknown", word: "No reading" }
+		const where = `${SOURCE_LABELS[reading.scope] ?? reading.scope}${detail ? ` · ${detail}` : ""}`
+		if (reading.state === "unavailable")
+			return {
+				term,
+				value: where,
+				tone: "unknown",
+				word: "Unavailable",
+				note: reading.reason ?? "",
+			}
+		if (reading.state === "stale")
+			return {
+				term,
+				value: `${where} · read ${formatAge(reading.ageMs)}`,
+				tone: "stale",
+				word: "Stale",
+			}
+		return fresh
+			? { term, value: where, tone: "ok", word: "Fresh" }
+			: { term, value: where, tone: "stale", word: "Last known" }
+	}
+	return [
+		{
+			key: "receiver",
+			title: "Receiver",
+			facts: [
+				{ term: "rtl_tcp", value: proc(status?.rtlTcp) },
+				{ term: "rtlmux", value: proc(status?.rtlmux) },
+				{
+					term: "Read from dongle",
+					value:
+						s?.upstream?.bytesTotal == null
+							? dash
+							: formatBytes(s.upstream.bytesTotal),
+				},
+				{
+					term: "Last sample",
+					value: !s
+						? dash
+						: s.lastSampleAt
+							? formatAge(s.sampleAgeMs)
+							: "None yet",
+				},
+				{
+					term: "Dropped for clients",
+					value: status?.delivery
+						? `${formatBytes(status.delivery.droppedBytesSinceMonitorStart)} since start`
+						: dash,
+				},
+				{
+					term: "Counter resets",
+					value: s?.epoch
+						? `${s.epoch.resets}${s.epoch.lastResetReason ? ` · ${s.epoch.lastResetReason}` : ""}`
+						: dash,
+				},
+				{
+					term: "Fan-out counters",
+					value: s
+						? `${capitalize(s.stats.state)}${s.stats.lastError ? ` · ${s.stats.lastError}` : ""}`
+						: dash,
+				},
+			],
+		},
+		{
+			key: "host",
+			title: "This Pi",
+			facts: [
+				{ term: "Last reboot", value: boot ? boot.short : dash },
+				{ term: "Last log before it", value: boot?.lastLog ?? dash },
+				{
+					term: "Address",
+					value: link
+						? `${link.addresses[0] ?? "No address"} on ${link.name}`
+						: dash,
+				},
+				{
+					term: "Load average",
+					value: load
+						? `${[load.one, load.five, load.fifteen].map(n => n.toFixed(2)).join(" · ")}${host.cpu?.value ? ` on ${host.cpu.value.cores} cores` : ""}`
+						: dash,
+				},
+				{
+					term: "Memory free",
+					value: memory
+						? `${formatBytes(memory.availableBytes)} of ${formatBytes(memory.totalBytes)}`
+						: dash,
+				},
+				{
+					term: "Receiver service",
+					value: host?.uptime?.value
+						? `Up ${formatDuration(host.uptime.value.serviceSec)}`
+						: dash,
+				},
+				{
+					term: "Receiver container",
+					value: container?.value
+						? `${formatBytes(container.value.memoryBytes)} memory${container.value.cpuPercent === null ? "" : ` · ${container.value.cpuPercent}% CPU`}`
+						: container
+							? "Not visible"
+							: dash,
+				},
+				{
+					term: "Throttling",
+					value: !throttling
+						? dash
+						: throttling.value
+							? throttling.value.throttled
+								? "Active"
+								: "Clear"
+							: "Not measurable",
+					note:
+						throttling && !throttling.value ? (throttling.reason ?? "") : "",
+				},
+			],
+		},
+		{
+			key: "sources",
+			title: "Measurement sources",
+			facts: [
+				source("CPU", host?.cpu),
+				source("Memory", host?.memory),
+				source(
+					"SoC temp.",
+					host?.temperature,
+					host?.temperature?.value?.zone ?? "",
+				),
+				source("Storage", host?.disk),
+				source("Network", host?.network),
+				source("Under-voltage", host?.power?.undervoltageNow),
+				source("Dips count", host?.power?.undervoltageObserved),
+				source("Container", container),
+				source("Uptime", host?.uptime),
+			],
+		},
+	]
 }
 
 function forDuration(ms) {

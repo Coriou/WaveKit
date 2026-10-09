@@ -82,7 +82,7 @@ export function verdict(input: {
 export function flowRate(
 	status: StatusPayload | null,
 	fresh: boolean,
-): { value: string; unit: string; sub: string }
+): { value: string; unit: string; sub: string; basis: string }
 
 export interface Row {
 	state: Tone
@@ -90,12 +90,14 @@ export interface Row {
 	sub: string
 }
 export interface ClientRow {
+	key: string
 	address: string
 	state: "ok" | "warn" | "unknown"
 	rate: string
-	health: string
-	since: string
+	bytesPerSec: number | null
+	detail: string
 }
+export const CLIENT_SLOTS: number
 export function stream(
 	status: StatusPayload | null,
 	piNow?: string | null,
@@ -104,8 +106,16 @@ export function stream(
 	dongle: Row
 	tuning: { text: string; sub: string }
 	clientsKnown: boolean
+	clientsRow: Row
 	clients: ClientRow[]
 } | null
+export function clientSlots(
+	clients: ClientRow[],
+	slots?: number,
+): {
+	shown: ClientRow[]
+	more: { state: "ok" | "warn"; text: string; detail: string } | null
+}
 
 type Series = Array<[number, number | null]>
 export function trends(host: SdrHostTelemetry | null): {
@@ -130,6 +140,8 @@ export interface Readout {
 	value: string
 	sub: string
 	bars?: number | null
+	/** Storage only: used fraction, 0–1, drawn as a meter. */
+	meter?: number
 }
 export function readouts(
 	host: SdrHostTelemetry | null,
@@ -140,6 +152,8 @@ export function readouts(
 export function lastBoot(host: SdrHostTelemetry | null): {
 	unexpected: boolean
 	text: string
+	short: string
+	lastLog: string | null
 }
 export function primaryInterface(
 	network: Reading<SdrHostNetworkInterface[]> | undefined,
@@ -148,6 +162,27 @@ export function setupLine(reading: SdrHostTelemetry["setup"] | undefined): {
 	state: Tone
 	text: string
 }
+export function setupRow(reading: SdrHostTelemetry["setup"] | undefined): Row
+export interface Fact {
+	term: string
+	value: string
+	/** Freshness lamp, for measurement sources. */
+	tone?: "ok" | "stale" | "unknown"
+	word?: string
+	/** Static explanation, gathered into the notes after the groups. */
+	note?: string
+}
+export interface DiagnosticsGroup {
+	key: "receiver" | "host" | "sources"
+	title: string
+	facts: Fact[]
+}
+export function diagnostics(input: {
+	status: StatusPayload | null
+	host: SdrHostTelemetry | null
+	/** False once the page has lost contact: sources read "Last known". */
+	fresh?: boolean
+}): DiagnosticsGroup[]
 export function tracePath(
 	points: Array<[number, number | null]>,
 	options: { windowMs: number; width: number; height: number; max: number },
