@@ -216,9 +216,9 @@ describe("ui/line and ui/text helpers", () => {
 })
 
 describe("test/scenario-types", () => {
-	it("names fourteen scenarios (R43 adds iq-stale, iq-disconnected, decoder-faulted)", () => {
-		expect(SCENARIO_NAMES).toHaveLength(14)
-		expect(new Set(SCENARIO_NAMES).size).toBe(14)
+	it("names sixteen scenarios (R43 adds iq-stale, iq-disconnected, decoder-faulted; R89 contracts, tuner-unknown)", () => {
+		expect(SCENARIO_NAMES).toHaveLength(16)
+		expect(new Set(SCENARIO_NAMES).size).toBe(16)
 	})
 })
 
