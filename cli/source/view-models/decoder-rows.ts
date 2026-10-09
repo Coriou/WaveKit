@@ -1,3 +1,4 @@
+import { noDataText } from "./feed-state.js"
 import type { BranchTelemetry } from "@wavekit/api-types"
 import {
 	decodesFact,
@@ -42,7 +43,6 @@ import { cell, sp, type Cell, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
 import { cellWidth, sanitize } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
-import { bannerConditions } from "./chrome.js"
 
 export interface DecoderFacts {
 	row: DecoderRow
@@ -565,25 +565,6 @@ export function decodersPlaceholder(state: AppState): Line | null {
 		return lane.value.length === 0
 			? [sp("no decoders configured", "label")]
 			: null
-	const sep = ` ${glyphs().sep} `
-	// R57: the banner's rule and wording decide, so the two never disagree (§9):
-	// some-but-not-all endpoints failing is an endpoint failure, all of them is the API.
-	const conds = bannerConditions(state)
-	const ep = conds.find(
-		c => c.kind === "endpoint" && c.path === ENDPOINT_PATHS.decoders,
-	)
-	if (ep?.kind === "endpoint")
-		return [
-			sp(
-				`no data${sep}GET ${ENDPOINT_PATHS.decoders} failing${sep}${ep.reason}`,
-				"label",
-			),
-		]
-	if (
-		conds.some(c => c.kind === "api-down" || c.kind === "rest-down") ||
-		lane.error ||
-		state.conn.rest.firstFailAt !== null
-	)
-		return [sp(`no data${sep}API unreachable`, "label")]
-	return [sp("fetching /api/decoders", "label")]
+	// R82: one no-data copy for every section (R57's endpoint rule included).
+	return [sp(noDataText(state, ENDPOINT_PATHS.decoders), "label")]
 }

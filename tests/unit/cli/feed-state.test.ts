@@ -10,6 +10,10 @@ import {
 	emptyFeedGroups,
 	noDataText,
 } from "../../../cli/source/view-models/feed-state.js"
+import { decodersPlaceholder } from "../../../cli/source/view-models/decoder-rows.js"
+import { receiverLines } from "../../../cli/source/view-models/receiver.js"
+import { receiverSummary } from "../../../cli/source/view-models/overview.js"
+import { initialUi } from "../../../cli/source/ui/ui-state.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -97,5 +101,49 @@ describe("M4: section copy when data is missing", () => {
 		expect(noDataText(initialState(0), "/api/sources")).toBe(
 			"fetching /api/sources",
 		)
+	})
+})
+
+describe("R82: one no-data copy at all three call sites", () => {
+	const noDecoders = (s: S): S => ({
+		...s,
+		decoders: { ...s.decoders, value: undefined },
+	})
+	const noSources = (s: S): S => ({
+		...s,
+		sources: { ...s.sources, value: undefined },
+	})
+	const sites = (s: S) => ({
+		decoders: lineText(decodersPlaceholder(noDecoders(s)) ?? []),
+		overview: lineText(receiverSummary(noSources(s), 199)[0] ?? []).replace(
+			/^RECEIVER +/,
+			"",
+		),
+		receiver: (
+			receiverLines(noSources(s), initialUi("receiver"), 199, 40, true)
+				.map(lineText)
+				.find(l => l.startsWith("SOURCE")) ?? ""
+		).replace(/^SOURCE +/, ""),
+	})
+	it("REST failing while the WS is live", () => {
+		const s = scenarioState("ws-only", deps)
+		const want = "no data · REST failing (timeout 2s) · ws live"
+		expect(sites(s)).toEqual({ decoders: want, overview: want, receiver: want })
+	})
+	it("API unreachable", () => {
+		const want = "no data · API unreachable"
+		expect(sites(scenarioState("api-down", deps))).toEqual({
+			decoders: want,
+			overview: want,
+			receiver: want,
+		})
+	})
+	it("cold start", () => {
+		const s = initialState(Date.parse("2026-10-08T18:07:52Z"))
+		expect(sites(s)).toEqual({
+			decoders: "fetching /api/decoders",
+			overview: "fetching /api/sources",
+			receiver: "fetching /api/sources",
+		})
 	})
 })

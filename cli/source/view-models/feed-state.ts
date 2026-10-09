@@ -3,7 +3,7 @@ import { POLL_ENDPOINTS, type AppState, type LaneError } from "../data/types.js"
 import { formatAge, formatClockShort, formatMHz } from "../ui/format.js"
 import { sp, type Group } from "../ui/line.js"
 import { glyphs } from "../ui/theme.js"
-import { rxValues, windowCount } from "./chrome.js"
+import { bannerConditions, rxValues, windowCount } from "./chrome.js"
 import { decoderFacts } from "./decoder-rows.js"
 
 /** Every polled endpoint failing, or discovery found nothing: core cannot be reached. */
@@ -23,15 +23,27 @@ function reasonOf(err: LaneError | null): string {
 }
 
 /**
- * M4: why a section has no data. REST failing while the WS is live says so rather than
- * "API unreachable", which the live feed two rows away would contradict.
+ * M4, R82: why a section has no data, one copy for every call site (Overview receiver,
+ * Decoders placeholder, Receiver sections):
+ * - only this endpoint failing (R57, the banner's rule): `no data · GET <path> failing · <reason>`
+ * - REST failing while the WS is live: `no data · REST failing (timeout 2s) · ws live`
+ * - core unreachable: `no data · API unreachable`
+ * - otherwise: `fetching <path>`
  */
 export function noDataText(state: AppState, path: string): string {
 	const c = state.conn
 	const sep = ` ${glyphs().sep} `
+	const conds = bannerConditions(state)
+	const ep = conds.find(x => x.kind === "endpoint" && x.path === path)
+	if (ep?.kind === "endpoint")
+		return `no data${sep}GET ${path} failing${sep}${ep.reason}`
 	if (c.ws.state === "open" && c.rest.failing.length > 0)
 		return `no data${sep}REST failing (${reasonOf(c.rest.lastError)})${sep}ws live`
-	if (apiUnreachable(state) || c.rest.firstFailAt !== null)
+	if (
+		apiUnreachable(state) ||
+		conds.some(x => x.kind === "api-down" || x.kind === "rest-down") ||
+		c.rest.firstFailAt !== null
+	)
 		return `no data${sep}API unreachable`
 	return `fetching ${path}`
 }
