@@ -515,6 +515,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			queue.length = 0
 			clearResync()
 			awaitingResync.clear()
+			resyncFailed.clear()
+			lastOk.clear()
+			resyncRetryAt = null
 			discovering = false
 			cycleRunning = false
 			queuedCycle = null
