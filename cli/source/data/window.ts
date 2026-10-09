@@ -143,8 +143,10 @@ const USABLE_FRACTION = 0.8
 /**
  * Core's usable half-width at the draft rate, or null when it cannot be
  * placed. Same rate: core's value. A capture-limited half-width (0.4 × the
- * old rate) scales with the rate; a narrower, frontend-limited one stays,
- * capped by the new capture; anything else is unknown (R90 I3).
+ * old rate) scales down with a lower rate, but never up: core takes
+ * min(rate, frontend) and the API does not send the frontend. A narrower,
+ * frontend-limited one stays, capped by the new capture. Anything else is
+ * unknown (R90 I3, final M1).
  */
 function coreHalfWidth(
 	half: number | undefined,
@@ -155,7 +157,7 @@ function coreHalfWidth(
 	if (to.sampleRate === from.sampleRate) return half
 	const capture = (rate: number) => (rate * USABLE_FRACTION) / 2
 	if (Math.abs(half - capture(from.sampleRate)) <= 1)
-		return capture(to.sampleRate)
+		return to.sampleRate < from.sampleRate ? capture(to.sampleRate) : null
 	if (half < capture(from.sampleRate))
 		return Math.min(half, capture(to.sampleRate))
 	return null

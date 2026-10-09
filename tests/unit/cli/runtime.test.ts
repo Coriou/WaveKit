@@ -147,6 +147,8 @@ describe("runtime", () => {
 	})
 
 	it("polls every endpoint and runs scheduled effects after the commit", async () => {
+		// Mid-second, so only an urgent item can commit before the boundary.
+		vi.setSystemTime(new Date(1_000_000_100))
 		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
 		const rt = createRuntime({
 			fetchFn,
@@ -158,8 +160,8 @@ describe("runtime", () => {
 			explicit: TARGET,
 		})
 		rt.start()
-		// REST answers are background items: they commit on the next whole second.
-		await vi.advanceTimersByTimeAsync(1000)
+		// Final M2: a lane's first answer is urgent, so it commits on the next tick.
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
 		const urls = fetchFn.mock.calls.map(c => c[0])
 		for (const p of [
 			"/api/decoders",
@@ -1045,3 +1047,52 @@ function liveBody(url: string): unknown {
 	const path = new URL(url).pathname
 	return loadScenario("live").rest[path]?.body ?? {}
 }
+
+describe("final M2: REST answers a user waits on are urgent", () => {
+	it("isUrgent honours the runtime's urgent mark on a REST answer", () => {
+		const rest = (urgent: boolean): Inbound =>
+			({
+				kind: "rest",
+				endpoint: "decoders",
+				at: 0,
+				outcome: { ok: true, value: [], rejected: 0 },
+				...(urgent ? { urgent: true } : {}),
+			}) as Inbound
+		expect(isUrgent(rest(true))).toBe(true)
+		expect(isUrgent(rest(false))).toBe(false)
+	})
+	it("the poll after a write commits on the next tick", async () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		let running = true
+		let gets = 0
+		const fetchFn: FetchLike = (url, init) => {
+			if (init?.method === "POST") {
+				running = false
+				return okJson({})
+			}
+			if (url.endsWith("/api/decoders")) {
+				gets++
+				return okJson([decoderRow(running)])
+			}
+			return okJson(bodies(url))
+		}
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(rt.store.get().decoders.value?.[0]?.running).toBe(true)
+		rt.send({ kind: "decoder", op: "stop", decoderId: "readsb" })
+		// Still inside the same second (1_000_000_900 at most).
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 3)
+		expect(gets).toBe(2)
+		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
+		rt.stop()
+	})
+})

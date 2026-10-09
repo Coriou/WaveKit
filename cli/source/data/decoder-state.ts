@@ -9,6 +9,7 @@ export type ProcState =
 	| "crash-loop"
 	| "stopped"
 	| "restarting"
+	| "resuming"
 	| "down"
 	| "starting"
 	| "up"
@@ -27,8 +28,9 @@ export const SUSPEND_PENDING_MS = 10_000
  *   retrying with `nextRestartAt` ("faulted-retry", fault) or while running on
  *   probation ("faulted-retrying", attention).
  * - Not running: stopped (by this CLI, or `desiredRunning: false`), core's
- *   "restarting", else for older cores (no `desiredRunning`) the R15 inference
- *   (`restartCount > 0`), else down.
+ *   "restarting", core's "resuming" transition after a retune or rate change (not a
+ *   fault), an unrecognised transition (?), else for older cores (no
+ *   `desiredRunning`) the R15 inference (`restartCount > 0`), else down.
  * - An unknown health never reads as up.
  * `now` and `suspendingSince` (local first sight of "suspending", kept in the session)
  * are needed only for the pending-suspension timing (M-b).
@@ -57,7 +59,8 @@ export function processState(
 	if (!d.running) {
 		if (stoppedByCli || d.desiredRunning === false) return "stopped"
 		if (d.health === "restarting") return "restarting"
-		if (d.health === "unknown") return "unknown"
+		if (d.transition === "resuming") return "resuming"
+		if (d.health === "unknown" || d.transition === "unknown") return "unknown"
 		if (d.desiredRunning === undefined && d.restartCount > 0)
 			return "restarting"
 		return "down"
@@ -84,6 +87,7 @@ export function procRole(s: ProcState): GlyphRole {
 			return "attention"
 		case "stopped":
 		case "starting":
+		case "resuming":
 		case "suspended":
 			return "neutral"
 		case "up":

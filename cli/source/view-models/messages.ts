@@ -97,6 +97,14 @@ const labelGroup = (priority: number, ...variants: string[]): Group => ({
 	variants: variants.map(v => [sp(v, "label")]),
 })
 
+/** The feed has been live this session (same rule as the Overview header). */
+function everLive(state: AppState): boolean {
+	const ring = state.messages.ring
+	return (
+		state.conn.ws.state === "open" || ring.total > 0 || ring.gaps.length > 0
+	)
+}
+
 /** The open gap at the top of the ring: evidence the feed ran and when it stopped. */
 function openGap(ring: MessageRing): Gap | null {
 	const last = ring.gaps.at(-1)
@@ -129,13 +137,16 @@ export function messagesHeader(
 	const sep = sepText()
 	const groups: Group[] = []
 	const filtered = mu.filterText !== "" || mu.preset !== "all"
+	const ring = state.messages.ring
+	const c = feedCounts(ring, state.now)
+	// MUST 5: "total" is the lifetime count; the ring holds the cached ones.
 	if (!mu.following)
 		groups.push(
 			labelGroup(
 				0,
 				filtered
 					? `paused${sep}${fv.newCount} new`
-					: `paused${sep}${fv.newCount} new${sep}${fv.total} total`,
+					: `paused${sep}${fv.newCount} new${sep}${c.total} total`,
 			),
 		)
 	// User text is sanitised like any payload: a pasted escape must not reach the terminal.
@@ -165,22 +176,24 @@ export function messagesHeader(
 				: labelGroup(2, `preset ${mu.preset}`),
 		)
 	}
-	const ring = state.messages.ring
-	const c = feedCounts(ring, state.now)
 	const gap = openGap(ring)
-	const counts =
-		mu.filterText !== "" || mu.preset !== "all"
-			? `${fv.matching} of ${fv.total}`
-			: state.conn.ws.state === "open"
-				? mu.following
-					? `${in60sText(c)} in 60s${sep}${c.total} total`
-					: null
-				: gap !== null
-					? `feed stopped ${formatClock(gap.from)}${sep}${c.cached} cached`
-					: "live feed connecting"
+	const stopped = gap?.from ?? state.conn.ws.since
+	// MUST 5 (final review): until the feed has been live there are no counts and
+	// the body says why (the Overview's rule).
+	const counts = filtered
+		? `${fv.matching} of ${fv.total} cached`
+		: state.conn.ws.state === "open"
+			? mu.following
+				? `${in60sText(c)} in 60s${sep}${c.total} total`
+				: null
+			: !everLive(state)
+				? null
+				: `feed stopped${stopped !== null ? ` ${formatClock(stopped)}` : ""}${c.cached > 0 ? `${sep}${c.cached} cached` : ""}`
 	if (counts !== null) groups.push(labelGroup(0, counts))
 	const esc = detailOpen ? null : escTarget(mu)
 	if (esc !== null) groups.push(labelGroup(1, `Esc ${esc}`))
+	// Nothing to say beside the title: no padding after it.
+	if (groups.length === 0) return [sp("MESSAGES", "label", true)]
 	return [
 		title(),
 		...fitGroups(groups, Math.max(1, width - LABEL_WIDTH), { sep }),
@@ -242,27 +255,15 @@ function emptyLine(
 							? [`filter ${sanitize(mu.filterText)}`]
 							: []),
 						...(mu.preset !== "all" ? [`preset ${mu.preset}`] : []),
-						"Esc clear",
+						`Esc ${escTarget(mu) ?? "clear"}`,
 					].join(sep),
 					width,
 				),
 				"label",
 			),
 		]
-	// An open gap is the evidence the feed ran; it says when the feed stopped.
-	const gap = openGap(state.messages.ring)
-	if (state.conn.ws.state !== "open" && gap !== null)
-		return [
-			sp(
-				truncate(
-					`no decodes cached${sep}feed stopped ${formatClock(gap.from)}`,
-					width,
-				),
-				"label",
-			),
-		]
-	// M3: otherwise the first broken link of the chain (API, feed, IQ, window), shared
-	// with the Overview.
+	// M3: the first broken link of the chain (API, feed, IQ, window), shared with the
+	// Overview; under "feed stopped" too (final review), the header says when.
 	return fitGroups(emptyFeedGroups(state), width, { sep })
 }
 
@@ -414,7 +415,14 @@ export function messageDetail(
 	const body = detailBody(e, width, lookup)
 	const rows = Math.max(0, height - 1)
 	const start = Math.min(Math.max(0, scroll), Math.max(0, body.length - rows))
-	return height <= 0 ? [] : [head, ...body.slice(start, start + rows)]
+	const view = body.slice(start, start + rows)
+	// Hidden rows are announced in place of the first/last visible row, as in Decoders.
+	const below = body.length - (start + rows)
+	if (below > 0 && view.length > 1)
+		view[view.length - 1] = [sp(`+${below + 1} rows${sep}PgDn`, "label")]
+	if (start > 0 && view.length > 1)
+		view[0] = [sp(`+${start + 1} rows${sep}PgUp`, "label")]
+	return height <= 0 ? [] : [head, ...view]
 }
 
 export interface MessagesModel {

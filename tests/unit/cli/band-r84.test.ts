@@ -305,7 +305,7 @@ describe("R84 retune impact prefers core's assessment", () => {
 			retuneImpact([subject({ verdict: "unknown" })], from, at(CENTRE)).unknown,
 		).toEqual(["x"])
 	})
-	it("a rate change scales core's capture-limited half-width (R90 I3)", () => {
+	it("a higher rate leaves a capture-limited half-width unknown (R90 I3, final M1)", () => {
 		const readsb = {
 			id: "readsb",
 			type: "readsb",
@@ -316,7 +316,7 @@ describe("R84 retune impact prefers core's assessment", () => {
 			} satisfies BandAssessment,
 		}
 		expect(
-			retuneImpact([readsb], from, at(1_090_500_000, 2_400_000)).enters,
+			retuneImpact([readsb], from, at(1_090_500_000, 2_400_000)).unknown,
 		).toEqual(["readsb"])
 	})
 })

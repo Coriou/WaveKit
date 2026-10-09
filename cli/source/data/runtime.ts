@@ -107,12 +107,14 @@ export const BACKGROUND_EVENTS: ReadonlySet<WsEvent["type"]> = new Set([
 
 /**
  * True for inbound items that should reach the screen on the next 200 ms tick.
- * A queue holding only background items (BACKGROUND_EVENTS and REST answers)
- * commits on the next whole second instead; any urgent item carries them along.
+ * A queue holding only background items (BACKGROUND_EVENTS and routine REST
+ * answers) commits on the next whole second instead; any urgent item carries
+ * them along. A REST answer is urgent when the runtime marked it (final M2).
  */
 export function isUrgent(item: Inbound): boolean {
 	switch (item.kind) {
 		case "rest":
+			return item.urgent === true
 		case "rest:cycle":
 			return false
 		case "ws":
@@ -160,6 +162,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	const resyncState = new Map<Endpoint, "pending" | "ok" | "failed">()
 	/** Endpoints a ws:open skipped while their resync GET was still pending. */
 	const awaitingResync = new Set<Endpoint>()
+	/** Endpoints with an applied answer since the last start, reconnect or discovery. */
+	const answeredOnce = new Set<Endpoint>()
 
 	function clearResync(): void {
 		resyncAt = null
@@ -167,6 +171,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	}
 
 	function requestResync(): void {
+		answeredOnce.clear()
 		resyncAt = deps.now()
 		resyncState.clear()
 		for (const e of [...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
@@ -193,13 +198,26 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		endpoint: E,
 		outcome: FetchOutcome<RestValues[E]>,
 		at: number,
+		urgent: boolean,
 	): Inbound {
 		// TS cannot correlate E across the mapped union; the shape is correct by construction.
-		return { kind: "rest", endpoint, outcome, at } as RestInbound
+		return {
+			kind: "rest",
+			endpoint,
+			outcome,
+			at,
+			...(urgent ? { urgent: true } : {}),
+		} as RestInbound
 	}
 
-	/** Resolves true when the server answered at all; a network error or a timeout is no answer (M3). */
-	async function fetchOne(endpoint: Endpoint): Promise<boolean> {
+	/**
+	 * Resolves true when the server answered at all; a network error or a timeout is no
+	 * answer (M3). `afterWrite`: a poll an action:result asked for (final M2).
+	 */
+	async function fetchOne(
+		endpoint: Endpoint,
+		afterWrite = false,
+	): Promise<boolean> {
 		const run = epoch
 		const seq = (issued.get(endpoint) ?? 0) + 1
 		issued.set(endpoint, seq)
@@ -216,7 +234,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		// M2: a response older than one already applied is dropped, never applied over it.
 		if (seq > (applied.get(endpoint) ?? 0)) {
 			applied.set(endpoint, seq)
-			push(restInbound(endpoint, outcome, deps.now()))
+			// Final M2: the first answer since start/reconnect, or one a write waits on, is urgent.
+			const urgent = afterWrite || !answeredOnce.has(endpoint)
+			answeredOnce.add(endpoint)
+			push(restInbound(endpoint, outcome, deps.now(), urgent))
 		}
 		return answered
 	}
@@ -245,7 +266,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	async function pollCycle(endpoints: readonly Endpoint[]): Promise<void> {
 		const run = epoch
 		cycleRunning = true
-		const results = await Promise.allSettled(endpoints.map(fetchOne))
+		const results = await Promise.allSettled(endpoints.map(e => fetchOne(e)))
 		if (run !== epoch) return
 		cycleRunning = false
 		const at = deps.now()
@@ -344,6 +365,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 							error: { kind: "network", message: "no API answered", at },
 						},
 						at,
+						false,
 					),
 				)
 			}
@@ -393,7 +415,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		const fx = next.effects
 		if (fx.polls.length > 0 || (fx.resync?.length ?? 0) > 0) {
 			next = { ...next, effects: { polls: [] } }
-			for (const endpoint of effectFetches(fx, now)) void fetchOne(endpoint)
+			// A poll asked for alongside a write's result is one the user waits on.
+			const afterWrite = batch.some(i => i.kind === "action:result")
+			for (const endpoint of effectFetches(fx, now))
+				void fetchOne(endpoint, afterWrite && fx.polls.includes(endpoint))
 		}
 		store.set(next)
 	}

@@ -8,6 +8,7 @@ import {
 	installExitHandlers,
 	oneLine,
 	osc52,
+	startOrShutdown,
 } from "../../../cli/source/terminal.js"
 
 describe("screen", () => {
@@ -80,5 +81,48 @@ describe("screen", () => {
 	it("keeps the first line of an error and strips whole escape sequences", () => {
 		expect(oneLine(new Error("a\x1b[31mred\x1b[0m\r\nb"))).toBe("ared")
 		expect(oneLine({ toString: () => "\x9b2Jx" })).toBe("x")
+	})
+})
+
+describe("startup failures (final review, lane D)", () => {
+	const harness = () => {
+		const out: string[] = []
+		const screen = createScreen({ isTTY: true, write: s => out.push(s) })
+		const exits: number[] = []
+		const shutdown = createShutdown({
+			unmount: () => undefined,
+			screen,
+			stderr: { write: s => out.push(`stderr:${s}`) },
+			exit: code => exits.push(code),
+		})
+		return { out, screen, exits, shutdown }
+	}
+	it("a throwing render restores the screen before printing one sanitised line", () => {
+		const h = harness()
+		const result = startOrShutdown(() => {
+			h.screen.enter()
+			throw new Error("render failed\x1b[2J\x1b]0;x\x07\nstack line")
+		}, h.shutdown)
+		expect(result).toBeUndefined()
+		expect(h.exits).toEqual([1])
+		const restore = h.out.indexOf(`\x1b[?25h${ALT_EXIT}`)
+		const line = h.out.findIndex(s => s.startsWith("stderr:"))
+		expect(h.out[0]).toBe(ALT_ENTER)
+		expect(restore).toBeGreaterThan(0)
+		expect(line).toBeGreaterThan(restore)
+		expect(h.out[line]).toBe("stderr:wavekit: render failed\n")
+	})
+	it("a throw before the screen is entered still exits 1 with the line", () => {
+		const h = harness()
+		startOrShutdown(() => {
+			throw new Error("runtime.start failed")
+		}, h.shutdown)
+		expect(h.out).toEqual(["stderr:wavekit: runtime.start failed\n"])
+		expect(h.exits).toEqual([1])
+	})
+	it("returns what the steps produce when nothing throws", () => {
+		const h = harness()
+		expect(startOrShutdown(() => 42, h.shutdown)).toBe(42)
+		expect(h.exits).toEqual([])
 	})
 })
