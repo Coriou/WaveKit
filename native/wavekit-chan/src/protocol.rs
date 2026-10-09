@@ -294,6 +294,30 @@ mod tests {
         }
     }
 
+    // JS parses a number literal correctly rounded, as `str::parse::<f64>` does. serde_json's default
+    // fast path misses by one ulp on many 17-digit literals (all of these), which can flip a verdict
+    // that sits on an admission boundary; `float_roundtrip` makes the two agree (Property 1).
+    #[test]
+    fn numbers_parse_exactly_as_js_does() {
+        for x in [
+            "99682904.01506901",
+            "100314340.81832843",
+            "9.999999999999999e5",
+            "28.966552742717226",
+            "0.060001140267409596",
+        ] {
+            let line = format!(
+                r#"{{"v":1,"type":"open","id":"a","centerHz":{x},"bandwidthHz":{x},"transitionHz":1,"outputRateHz":1,"format":"cu8","queueBytes":2}}"#
+            );
+            let Ok(Request::Open(o)) = parse_request(&line) else {
+                panic!("{line}")
+            };
+            let want = x.parse::<f64>().unwrap().to_bits();
+            assert_eq!(o.center_hz.to_bits(), want, "centerHz {x}");
+            assert_eq!(o.bandwidth_hz.to_bits(), want, "bandwidthHz {x}");
+        }
+    }
+
     #[test]
     fn queue_bytes_is_capped() {
         let at = format!(r#""format":"cu8","queueBytes":{MAX_QUEUE_BYTES}"#);
