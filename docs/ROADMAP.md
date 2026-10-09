@@ -57,7 +57,13 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    aircraft; unlicensed public recordings may be used when fetched from their
    source and never redistributed.
 6. **Spectrum and waterfall service** (§8): important, get it right. It feeds
-   the CLI and web waterfalls and the scanner's discovery.
+   the CLI and web waterfalls and the scanner's discovery. It is also the first
+   step toward WaveKit's founding use case: an operator sees a signal on a
+   waterfall, and every suitable decoder tries to identify and decode it.
+   Next session (user, 2026-10-09): identify the many signals visible in SDR++
+   that nothing decodes today. Start with a diagnostic pass that needs no new
+   code (artefact checks, short IQ snapshots, offline decoder attempts), then
+   build the spectrum service, the detector and the scanner's identify mode.
 7. Later: API access/origin policy (prerequisite for host controls and a web
    UI); a stale `caps.centerFreq` after a retune that bypasses the relay can
    miss band suspensions. Also later: project license (§9) and agentic setup
@@ -425,6 +431,14 @@ RF and hardware acceptance are outside what CLI tests can show.
       Use half-block characters in true colour for two pixels per cell.
 
 ## 8. Spectrum and waterfall service, and activity detection
+
+Founding use case (user, 2026-10-09): WaveKit was created so the operator could
+find signals visually in SDR++ and have every decoder try to identify and decode
+them. Today decoders demodulate only the window centre, or a fixed per-decoder
+`offsetHz`, and WaveKit cannot see SDR++'s VFO through rtl_tcp. A signal
+elsewhere in the window therefore reaches no decoder. The fix is to detect
+emissions across the whole window, open a channelizer channel at each one, and
+try the plausible decoders there (identify mode, §5).
 
 Important; get it right. Operators find activity today by watching SDR++'s
 waterfall and waiting for an emitter to key up again. WaveKit should provide the
