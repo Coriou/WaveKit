@@ -673,3 +673,22 @@ Resolved: core anchored the rule as `/data/` in 3fedc84.
   root `vitest run` failed one test in a core file, a different one each run
   (`tests/unit/utils/pi-staging.test.ts`, then
   `tests/unit/core/iq-frame-alignment.test.ts`). Both pass when run alone.
+
+#### Core: live analog audio fixes + dsd-fme call segmentation — MERGED on main 34f56e1 (2026-10-09, not pushed)
+
+These follow the over-the-air voice test, evidence in `output/acceptance/voice-decode-2026-10-09.json`.
+Everything is additive except the defaults. The CLI has no consumer of `/stream` today; this was checked.
+- **Live demod config:**
+  - New optional `offsetHz` (a carrier at center + offsetHz is shifted to DC).
+  - Defaults changed: `gain` 10 → 2; `iqDcBlock` true → false, and the key is now ignored (deprecated).
+  - `squelch` now means **channel power before demod**, in dBFS (0 = open).
+  - `PATCH /api/live-audio/config` returns 400 on invalid values.
+- **Live status:** new `wavUrl`, `pipelineRestarts`, `channelPowerDbfs`, `squelchOpen`.
+- **Stream:**
+  - `/stream` Content-Type is now `application/octet-stream`, plus `X-Audio-Format`, `X-Sample-Rate` (exact) and `X-Channels`.
+  - New `/stream.wav` (`audio/wav`).
+  - Clients are disconnected when the rate or format changes; a center-frequency retune no longer restarts the pipeline.
+- **Decoders:** `offsetHz` option on audio-demod decoders; dsd-fme gets `callTimeoutMs` (fallback 4 s, was 2 s).
+  dsd-fme calls now end on the DMR TLC terminator (`call_end.timeout: false`). A timed-out call's duration ends at its
+  last line. `stats.eventsOut` / `lastOutputAt` now update for timer-driven outputs.
+- **Suggested UI:** show `channelPowerDbfs` / `squelchOpen` next to live audio.
