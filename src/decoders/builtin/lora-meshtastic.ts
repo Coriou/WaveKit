@@ -13,13 +13,14 @@ import {
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
-	DecoderBandRequirements,
+	DecoderBandDeclaration,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
 	DecoderRateRequirements,
 } from "../types.js"
 import { ConfigValidationError } from "../../utils/errors.js"
+import { LORA_REGION_RANGES_HZ } from "../band-defaults.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Meshtastic regional regulatory regions. */
@@ -331,21 +332,33 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 	/**
 	 * The modem decodes the capture centre. Without followCenter the
 	 * configured `frequency` is the channel. With followCenter it decodes any
-	 * centre (the injected centre replaces `frequency`), so only an explicit
-	 * top-level `frequencies` list declares the band it follows; without one
-	 * the band is unknown and the decoder is never suspended for band.
+	 * centre (the injected centre replaces `frequency`): an explicit
+	 * top-level `frequencies` list declares the band it follows, else its
+	 * Meshtastic `region` option does (the firmware region range).
 	 */
-	override getBandRequirements(): DecoderBandRequirements | undefined {
+	override getBandDeclaration(): DecoderBandDeclaration {
 		if (this.config.options["followCenter"] === true) {
 			const band = FollowBand.safeParse(this.config.frequencies)
-			return band.success
-				? { targetsHz: band.data, basis: "configured", followCenter: true }
-				: undefined
+			if (band.success)
+				return {
+					configured: {
+						targetsHz: band.data,
+						basis: "configured",
+						followCenter: true,
+					},
+				}
+			const range = LORA_REGION_RANGES_HZ[this.options.region]
+			return {
+				intrinsic: {
+					rangesHz: [{ minHz: range.minHz, maxHz: range.maxHz }],
+					basis: "decoder-default",
+				},
+			}
 		}
 		const frequency = this.config.options["frequency"]
 		return typeof frequency === "number"
-			? { targetsHz: [frequency], basis: "configured" }
-			: undefined
+			? { configured: { targetsHz: [frequency], basis: "configured" } }
+			: {}
 	}
 
 	/**

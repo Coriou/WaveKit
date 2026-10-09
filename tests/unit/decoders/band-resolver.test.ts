@@ -9,6 +9,8 @@ import fc from "fast-check"
 import {
 	USABLE_WINDOW_FRACTION,
 	assessDecoderBand,
+	distanceToRange,
+	type DecoderBandRequirements,
 } from "../../../src/decoders/band-resolver.js"
 
 const ADSB = { targetsHz: [1_090_000_000], basis: "protocol" as const }
@@ -155,6 +157,164 @@ describe("assessDecoderBand", () => {
 						2
 					const fits = targetsHz.some(t => Math.abs(t - centerHz) <= half)
 					expect(plan.verdict).toBe(fits ? "in-band" : "out-of-band")
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+})
+
+describe("assessDecoderBand ranges (band defaults §2)", () => {
+	const ISM = { minHz: 433_050_000, maxHz: 434_790_000 }
+	const ctx = { sampleRateHz: 2_400_000, frontendRateHz: 48_000 } // ±19.2 kHz
+
+	it("is in band anywhere inside a range and within the window of its edges", () => {
+		const band = { rangesHz: [ISM], basis: "region-default" as const }
+		expect(assessDecoderBand(band, { ...ctx, centerHz: 434_000_000 })).toEqual({
+			verdict: "in-band",
+			rangesHz: [ISM],
+			basis: "region-default",
+			captureCenterHz: 434_000_000,
+			windowHalfWidthHz: 19_200,
+		})
+		expect(
+			assessDecoderBand(band, { ...ctx, centerHz: 433_040_000 }).verdict,
+		).toBe("in-band")
+		expect(
+			assessDecoderBand(band, { ...ctx, centerHz: 433_000_000 }).verdict,
+		).toBe("out-of-band")
+	})
+
+	it("echoes ranges, region and override source, and mixes targets with ranges", () => {
+		const band: DecoderBandRequirements = {
+			targetsHz: [144_800_000],
+			rangesHz: [ISM],
+			basis: "override",
+			overrideSource: "api",
+			region: { code: "EU", source: "guessed:tz" },
+		}
+		expect(
+			assessDecoderBand(band, { ...ctx, centerHz: 144_800_000 }),
+		).toMatchObject({
+			verdict: "in-band",
+			targetsHz: [144_800_000],
+			rangesHz: [ISM],
+			basis: "override",
+			overrideSource: "api",
+			region: { code: "EU", source: "guessed:tz" },
+		})
+		expect(assessDecoderBand(band, { sampleRateHz: 2_400_000 })).toMatchObject({
+			verdict: "unknown",
+			reasonCode: "source-center-unknown",
+			rangesHz: [ISM],
+		})
+	})
+
+	it("treats an inverted or empty range list as no declaration", () => {
+		expect(
+			assessDecoderBand(
+				{ rangesHz: [{ minHz: 2, maxHz: 1 }], basis: "override" },
+				{ ...ctx, centerHz: 1 },
+			),
+		).toEqual({ verdict: "unknown", reasonCode: "no-target-frequency" })
+		expect(
+			assessDecoderBand(
+				{ rangesHz: [], basis: "override" },
+				{ ...ctx, centerHz: 1 },
+			).verdict,
+		).toBe("unknown")
+	})
+
+	const freq = fc.integer({ min: 24_000_000, max: 1_900_000_000 })
+	const rangeArb = fc
+		.tuple(freq, fc.integer({ min: 0, max: 50_000_000 }))
+		.map(([minHz, width]) => ({ minHz, maxHz: minHz + width }))
+	const rate = fc.integer({ min: 225_001, max: 3_200_000 })
+
+	it("admits a range iff the centre is within the half-window of it", () => {
+		// Feature: decoder-band-defaults, Property 1: Range admission
+		// Validates: §2
+		fc.assert(
+			fc.property(rangeArb, freq, rate, (range, centerHz, sampleRateHz) => {
+				const half = (sampleRateHz * USABLE_WINDOW_FRACTION) / 2
+				const plan = assessDecoderBand(
+					{ rangesHz: [range], basis: "override" },
+					{ centerHz, sampleRateHz },
+				)
+				expect(plan.verdict).toBe(
+					distanceToRange(centerHz, range) <= half ? "in-band" : "out-of-band",
+				)
+				const point = range.minHz
+				const degenerate = assessDecoderBand(
+					{ rangesHz: [{ minHz: point, maxHz: point }], basis: "override" },
+					{ centerHz, sampleRateHz },
+				).verdict
+				const target = assessDecoderBand(
+					{ targetsHz: [point], basis: "override" },
+					{ centerHz, sampleRateHz },
+				).verdict
+				expect(degenerate).toBe(target)
+			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	it("is monotone: widening or adding never leaves the band; no centre is never out of band", () => {
+		// Feature: decoder-band-defaults, Property 2: Monotonicity
+		// Validates: §2
+		fc.assert(
+			fc.property(
+				fc.array(rangeArb, { minLength: 1, maxLength: 3 }),
+				fc.array(freq, { maxLength: 3 }),
+				freq,
+				rate,
+				fc.integer({ min: 0, max: 10_000_000 }),
+				rangeArb,
+				freq,
+				(
+					rangesHz,
+					targetsHz,
+					centerHz,
+					sampleRateHz,
+					widen,
+					extra,
+					extraTarget,
+				) => {
+					const ctx2 = { centerHz, sampleRateHz }
+					const base: DecoderBandRequirements = {
+						rangesHz,
+						...(targetsHz.length ? { targetsHz } : {}),
+						basis: "override",
+					}
+					const before = assessDecoderBand(base, ctx2).verdict
+					const widened = assessDecoderBand(
+						{
+							...base,
+							rangesHz: rangesHz.map(r => ({
+								minHz: Math.max(1, r.minHz - widen),
+								maxHz: r.maxHz + widen,
+							})),
+						},
+						ctx2,
+					).verdict
+					const added = assessDecoderBand(
+						{
+							...base,
+							rangesHz: [...rangesHz, extra],
+							targetsHz: [...targetsHz, extraTarget],
+						},
+						ctx2,
+					).verdict
+					if (before === "in-band") {
+						expect(widened).toBe("in-band")
+						expect(added).toBe("in-band")
+					}
+					expect(assessDecoderBand(base, { sampleRateHz }).verdict).not.toBe(
+						"out-of-band",
+					)
+					expect(assessDecoderBand(base, { centerHz }).verdict).not.toBe(
+						"out-of-band",
+					)
 				},
 			),
 			{ numRuns: 100 },

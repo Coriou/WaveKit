@@ -7,6 +7,7 @@ import { PassThrough, type Readable } from "node:stream"
 import type { SourceCaps } from "../../src/core/source-manager.js"
 import type {
 	Decoder,
+	DecoderBandDeclaration,
 	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderRateAdapter,
@@ -53,8 +54,10 @@ export class RateDecoder extends EventEmitter implements Decoder {
 	stopGate: ReturnType<typeof deferred> | null = null
 	failStart = false
 	failStop = false
-	/** Scripted band declaration; undefined = unknown. */
+	/** Scripted configured band; undefined = unknown. */
 	band: DecoderBandRequirements | undefined = undefined
+	/** Full scripted declaration; wins over `band` when set. */
+	bandDeclaration: DecoderBandDeclaration | undefined = undefined
 	readonly output = new PassThrough({ objectMode: true })
 	constructor(
 		readonly id: string,
@@ -132,8 +135,9 @@ export class RateDecoder extends EventEmitter implements Decoder {
 			decoderInputFormat: "s16le",
 		}
 	}
-	getBandRequirements(): DecoderBandRequirements | undefined {
-		return this.band
+	getBandDeclaration(): DecoderBandDeclaration {
+		if (this.bandDeclaration) return this.bandDeclaration
+		return this.band ? { configured: this.band } : {}
 	}
 	crash() {
 		this.running = false
