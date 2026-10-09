@@ -8,7 +8,7 @@ import {
 	type BandSubject,
 	type NominalBand,
 } from "./nominal-bands.js"
-import type { DecoderRow } from "./types.js"
+import type { BandAssessment, DecoderRow } from "./types.js"
 
 export interface TunedWindow {
 	sourceId: string
@@ -122,6 +122,35 @@ export function membership(
 		: "out"
 }
 
+const VERDICT: Readonly<Record<BandAssessment["verdict"], Membership>> = {
+	"in-band": "in",
+	"out-of-band": "out",
+	unknown: "?",
+}
+
+/**
+ * Membership at a draft window by core's own targets and usable half-width
+ * (R84), or null when those do not apply: missing, or a sample-rate change
+ * (the half-width follows the rate). Between targets is `?`: a followCenter
+ * decoder is in band across its targets' span, and the API does not say which
+ * decoders follow the centre.
+ */
+function coreMembershipAt(
+	a: BandAssessment,
+	from: TunedWindow | null,
+	to: TunedWindow,
+): Membership | null {
+	const t = a.targetsHz
+	const half = a.windowHalfWidthHz
+	if (!t || half === undefined || !from || to.sampleRate !== from.sampleRate)
+		return null
+	if (t.some(hz => Math.abs(hz - to.centreHz) <= half)) return "in"
+	const lo = Math.min(...t) - half
+	const hi = Math.max(...t) + half
+	return to.centreHz >= lo && to.centreHz <= hi ? "?" : "out"
+}
+
+/** R84: core's bandAssessment verdict when present (tuned types too); the nominal table otherwise. */
 export function decoderMembership(
 	d: DecoderRow,
 	sources: readonly ExtendedSourceStatus[] | undefined,
@@ -129,6 +158,7 @@ export function decoderMembership(
 	relay: TunerRelayStatus | undefined,
 ): Membership {
 	if (offSharedSource(d, sources)) return "—"
+	if (d.bandAssessment) return VERDICT[d.bandAssessment.verdict]
 	const band = decoderBand(d)?.band
 	if (band?.kind === "tuned") return "in"
 	const sid = rowSourceId(d, sources)
@@ -173,8 +203,11 @@ export function retuneImpact(
 			out.tuned.push(d.id)
 			continue
 		}
-		const before = membership(band, from)
-		const after = membership(band, to)
+		// R84: core's verdict now; its targets and half-width for the draft.
+		const a = d.bandAssessment
+		const before = a ? VERDICT[a.verdict] : membership(band, from)
+		const after =
+			(a ? coreMembershipAt(a, from, to) : null) ?? membership(band, to)
 		if (before === "?" || after === "?") out.unknown.push(d.id)
 		else if (before === "out" && after === "in") out.enters.push(d.id)
 		else if (before === "in" && after === "out") out.leaves.push(d.id)

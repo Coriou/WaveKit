@@ -1,3 +1,5 @@
+import type { BandAssessment } from "./types.js"
+
 export interface TunedBand {
 	kind: "tuned"
 }
@@ -67,7 +69,17 @@ export function bandLabel(band: NominalBand, range: string): string {
 	return `${mhz3(Math.min(...ch))}${range}${mhz3(Math.max(...ch))}`
 }
 
-export type BandOrigin = "configured" | "nominal"
+/**
+ * Where the band comes from: core's bandAssessment basis (R84), `core` when
+ * core sent targets with no basis this CLI knows, else configured targets or
+ * the nominal table (older cores).
+ */
+export type BandOrigin =
+	| "configured"
+	| "protocol"
+	| "decoder-default"
+	| "core"
+	| "nominal"
 
 export interface DecoderBand {
 	band: NominalBand
@@ -80,37 +92,70 @@ export interface DecoderBand {
 export interface BandSubject {
 	type: string
 	targetFrequenciesHz?: readonly number[]
+	bandAssessment?: BandAssessment
 }
 
 /** All-or-nothing like the guards: one malformed target discards the list. */
-function validTargets(d: BandSubject): readonly number[] | undefined {
-	const t = d.targetFrequenciesHz
+function validTargets(
+	t: readonly number[] | undefined,
+): readonly number[] | undefined {
 	if (t === undefined || t.length === 0) return undefined
 	return t.every(hz => Number.isFinite(hz) && hz > 0) ? t : undefined
 }
 
+const BASIS: Readonly<Record<string, BandOrigin>> = {
+	configured: "configured",
+	protocol: "protocol",
+	"decoder-default": "decoder-default",
+}
+
+const sameSet = (a: readonly number[], b: readonly number[]): boolean =>
+	a.length === b.length && a.every(x => b.includes(x))
+
+function channelsFrom(
+	targetsHz: readonly number[],
+	nominal: NominalBand | undefined,
+): ChannelBand {
+	const channelsMHz = [...new Set(targetsHz)]
+		.sort((a, b) => a - b)
+		.map(hz => hz / 1e6)
+	// Core's protocol list for AIS still reads as the table's alternatives.
+	const join =
+		nominal?.kind === "channels" && sameSet(channelsMHz, nominal.channelsMHz)
+			? nominal.join
+			: "span"
+	return { kind: "channels", channelsMHz, join }
+}
+
 /**
- * R15: configured `targetFrequenciesHz` win over the nominal table for
+ * R84: core's bandAssessment targets win, labelled by their basis. R15
+ * (older cores): configured `targetFrequenciesHz` win over the nominal table for
  * channel decoders. R40: tuned types (dsd-fme, multimon-ng) always
  * demodulate the window centre, because core never applies their frequency
  * option, so they stay `tuned` and the targets are only annotated.
  */
 export function decoderBand(d: BandSubject): DecoderBand | undefined {
 	const nominal = bandFor(d.type)
-	const targets = validTargets(d)
+	const targets = validTargets(d.targetFrequenciesHz)
 	if (nominal?.kind === "tuned") {
 		return targets
 			? { band: nominal, origin: "nominal", ignoredTargetsHz: targets }
 			: { band: nominal, origin: "nominal" }
 	}
-	if (targets) {
-		const channelsMHz = [...new Set(targets)]
-			.sort((a, b) => a - b)
-			.map(hz => hz / 1e6)
+	const core = d.bandAssessment
+	const coreTargets = validTargets(core?.targetsHz)
+	if (coreTargets) {
+		const basis = core?.basis
 		return {
-			band: { kind: "channels", channelsMHz, join: "span" },
-			origin: "configured",
+			band: channelsFrom(coreTargets, nominal),
+			origin:
+				basis !== undefined && Object.hasOwn(BASIS, basis)
+					? (BASIS[basis] ?? "core")
+					: "core",
 		}
+	}
+	if (targets) {
+		return { band: channelsFrom(targets, undefined), origin: "configured" }
 	}
 	return nominal ? { band: nominal, origin: "nominal" } : undefined
 }
