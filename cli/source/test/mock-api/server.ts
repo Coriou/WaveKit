@@ -127,7 +127,31 @@ function expandMacros(sc: Obj): void {
 	})
 }
 
-function compose(name: string): { sc: Obj; transforms: Obj[] } {
+const restAgo = (c: Obj): number =>
+	typeof c["restAgoMs"] === "number" ? c["restAgoMs"] : 2000
+const wsAgo = (c: Obj): number =>
+	typeof c["wsAgoMs"] === "number" ? c["wsAgoMs"] : restAgo(c)
+
+/** R58: bodies and frames move back with the scenario's older REST success / WS base. */
+function anchorTimes(sc: Obj, authored: Obj): void {
+	const conn = isObj(sc["conn"]) ? sc["conn"] : {}
+	const restDelta = restAgo(authored) - restAgo(conn)
+	const wsDelta = wsAgo(authored) - wsAgo(conn)
+	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
+	for (const r of Object.values(rest))
+		if (isObj(r) && r["body"] !== undefined && restDelta !== 0)
+			r["body"] = shiftTimes(r["body"], restDelta)
+	if (wsDelta !== 0)
+		sc["ws"] = list(sc["ws"]).map(f =>
+			isObj(f) ? { ...f, data: shiftTimes(f["data"], wsDelta) } : f,
+		)
+}
+
+function compose(name: string): {
+	sc: Obj
+	transforms: Obj[]
+	authored: Obj
+} {
 	const own: unknown = JSON.parse(
 		readFileSync(`${SCENARIO_DIR}${name}.json`, "utf8"),
 	)
@@ -154,12 +178,14 @@ function compose(name: string): { sc: Obj; transforms: Obj[] } {
 	delete sc["transform"]
 	delete sc["wsAppend"]
 	delete sc["extends"]
-	return { sc, transforms: [...(parent?.transforms ?? []), t] }
+	const authored = parent?.authored ?? (isObj(own["conn"]) ? own["conn"] : {})
+	return { sc, transforms: [...(parent?.transforms ?? []), t], authored }
 }
 
 function resolve(name: string): Obj {
-	const { sc, transforms } = compose(name)
+	const { sc, transforms, authored } = compose(name)
 	expandMacros(sc)
+	anchorTimes(sc, authored)
 	// The mock evolves fanout itself: dropPercent only fixes the ratio it evolves with,
 	// and stallIq follows from the source's activity state (no IQ unless streaming).
 	for (const t of transforms) {
