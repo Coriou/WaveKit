@@ -1,7 +1,7 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bottom pane 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drop !21% now  18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
    DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window
@@ -43,7 +43,7 @@ exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bot
 `;
 
 exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right pane 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21% now                                                       18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21%                                                           18:07
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
    DECODERS          process     restarts  errors  decodes          events     IQ in  drop now  lifetime  window  readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —
@@ -95,7 +95,7 @@ exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right 
 `;
 
 exports[`Decoders view (spec §6.2) > golden: crash-loop 120x40 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 failing · 2 in window  drops !21% now    18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 failing · 2 in window  drops !21%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
    DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window

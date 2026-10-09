@@ -30,16 +30,18 @@ const live: StripInput = {
 }
 
 describe("strip (spec §4.2 widths)", () => {
-	it("renders the 200/120/80/60 column variants", () => {
+	it("M2: renders the 200/120/80/60 column variants, keeping rx and drops", () => {
 		expect(lineText(stripLine(live, 199))).toMatch(
-			/^api ● 2s {2}iq ● streaming · 4\.1 MB\/s {2}rx 445\.971 MHz ±1\.024 · external control {2}decoders 8\/9 up · 1 failing · 2 in window {2}drops !34% now +18:07$/,
+			/^api ● 2s {2}iq ● streaming · 4\.1 MB\/s {2}rx 445\.971 MHz ±1\.024 · external control {2}decoders 8\/9 up · 1 failing · 2 in window {2}drops !34% +18:07$/,
 		)
-		// R65 M8: "now" is never dropped, so at 80 the clock goes instead (§4.2's row predates T4's ruling).
+		expect(lineText(stripLine(live, 119))).toBe(
+			"api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 failing · 2 in window  drops !34%",
+		)
 		expect(lineText(stripLine(live, 79))).toBe(
-			"api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 failing  drops !34% now",
+			"api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 8/9 ×1  drops !34%   18:07",
 		)
 		expect(lineText(stripLine(live, 59))).toBe(
-			"api ● 2s  iq ● streaming  decoders 1 failing  drop !34% now",
+			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 ×1  drops !34%",
 		)
 	})
 	it("renders the connectivity variants", () => {
@@ -84,28 +86,46 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(out.find(s => s.text === "backpressure")?.role).toBe("attention")
 		expect(out.find(s => s.text === "?")?.role).toBe("unknown")
 	})
-	it("R65 M8: a known drop figure always keeps its 'now' (T4)", () => {
+	it("M15: the drops lane reads `drops !N%` at every width", () => {
 		for (let w = 40; w <= 220; w++) {
 			const text = lineText(stripLine(live, w))
-			if (/drops? !?\d/.test(text)) expect(text).toMatch(/drops? !?\d+% now/)
+			expect(text).not.toMatch(/\bdrop !|% now/)
+			if (text.includes("drops")) expect(text).toContain("drops !34%")
 		}
-		const s = scenarioState("live")
-		expect(lineText(stripLine(stripInput(s), 119))).toMatch(/drops? !21% now/)
 	})
-	it("R75: at 60 columns the drops lane survives a restarting decoder", () => {
-		const out = lineText(stripLine(stripInput(scenarioState("live")), 59))
-		expect(out).toBe("api ● 2s  iq ● streaming  1 restarting  drops !21% now")
-		// The word comes back as soon as there is room.
-		expect(
-			lineText(stripLine(stripInput(scenarioState("live")), 79)),
-		).toContain("decoders")
-	})
-	it("pins the §4.2 120-column row", () => {
-		const left =
-			"api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 failing · 2 in window  drops !34% now"
-		expect(lineText(stripLine(live, 119))).toBe(
-			left + " ".repeat(119 - left.length - 5) + "18:07",
+	it("M2: rx and drops stay at 60 columns in every scenario that has them", () => {
+		for (const sc of [
+			"live",
+			"ws-only",
+			"rest-only",
+			"iq-stale",
+			"iq-disconnected",
+			"crash-loop",
+			"dropping",
+		] as const) {
+			const input = stripInput(scenarioState(sc))
+			for (const w of [59, 79, 119]) {
+				const text = lineText(stripLine(input, w))
+				expect(text, `${sc} ${w}`).toContain("rx 445.971")
+				expect(text, `${sc} ${w}`).toContain("drops ")
+				expect(lineWidth(stripLine(input, w))).toBeLessThanOrEqual(w)
+			}
+		}
+		expect(lineText(stripLine(stripInput(scenarioState("live")), 59))).toBe(
+			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 !1  drops !21%",
 		)
+	})
+	it("copy sweep: a REST lane with no age says `rest ×`, not `rest × ?`", () => {
+		const t = lineText(
+			stripLine(
+				{
+					...live,
+					api: { kind: "split", ws: true, rest: false, restAgeMs: null },
+				},
+				119,
+			),
+		)
+		expect(t).toMatch(/^api ws ● rest × {2}iq/)
 	})
 	it("shows the IQ rate only while the lane is live (B3 fix 1)", () => {
 		const stale = stripLine(
