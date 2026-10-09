@@ -126,6 +126,14 @@ describe("messages header and states", () => {
 			/^no decodes since \d\d:\d\d \(.+\) · 2 of 9 decoders in window · rx 445\.971 MHz$/m,
 		)
 	})
+	it("fits the empty-feed line to a 60-column frame, dropping the window count first", () => {
+		const idle = scenarioState("idle", deps)
+		const text = listText(idle, initialUi("messages"), 59, 12)
+		expect([...text].length).toBeLessThanOrEqual(59)
+		expect(text).toMatch(
+			/^no decodes since \d\d:\d\d \(.+\) · rx 445\.971 MHz$/,
+		)
+	})
 	it("never claims a quiet live feed when the socket is down or never opened", () => {
 		const idle = scenarioState("idle", deps)
 		const closed: AppState = reduce(

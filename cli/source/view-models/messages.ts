@@ -8,7 +8,8 @@ import {
 	formatMHz,
 } from "../ui/format.js"
 import { listBudget, type DetailPlacement } from "../ui/frame.js"
-import { sp, type Line, type Span } from "../ui/line.js"
+import { fitGroups } from "../ui/fit.js"
+import { sp, type Group, type Line, type Span } from "../ui/line.js"
 import { detailJson } from "../ui/messages/index.js"
 import { cellWidth, padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
@@ -115,7 +116,12 @@ export function inputLine(draft: string, width: number): Line {
  * Spec §6.3 empty states. "no decodes since" is claimed only while the feed is
  * live; a stopped or never-opened socket says so instead (truth rules, §2).
  */
-function emptyLine(state: AppState, mu: MessagesUi, fv: FeedView): Line {
+function emptyLine(
+	state: AppState,
+	mu: MessagesUi,
+	fv: FeedView,
+	width: number,
+): Line {
 	const sep = sepText()
 	if (fv.total > 0) {
 		const what = [
@@ -124,7 +130,7 @@ function emptyLine(state: AppState, mu: MessagesUi, fv: FeedView): Line {
 		]
 			.filter(x => x !== "")
 			.join(" ")
-		return [sp(`0 of ${fv.total} match "${what}"`, "label")]
+		return [sp(truncate(`0 of ${fv.total} match "${what}"`, width), "label")]
 	}
 	const ws = state.conn.ws
 	if (ws.state !== "open") {
@@ -132,9 +138,12 @@ function emptyLine(state: AppState, mu: MessagesUi, fv: FeedView): Line {
 		const gap = state.messages.ring.gaps.at(-1)
 		return [
 			sp(
-				gap !== undefined && gap.to === null
-					? `no decodes cached${sep}feed stopped ${formatClock(gap.from)}`
-					: `no decodes${sep}feed not connected yet`,
+				truncate(
+					gap !== undefined && gap.to === null
+						? `no decodes cached${sep}feed stopped ${formatClock(gap.from)}`
+						: `no decodes${sep}feed not connected yet`,
+					width,
+				),
 				"label",
 			),
 		]
@@ -143,18 +152,27 @@ function emptyLine(state: AppState, mu: MessagesUi, fv: FeedView): Line {
 	const strip = stripInput(state)
 	const since = ws.since ?? state.now
 	const d = strip.decoders
-	return [
-		sp(
-			[
+	// Fitted by priority: the window count goes before rx; the first clause stays.
+	const group = (text: string, priority: number): Group => ({
+		priority,
+		variants: [[sp(text, "label")]],
+	})
+	return fitGroups(
+		[
+			group(
 				`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,
-				...(d !== null && d.inWindow !== null
-					? [`${d.inWindow} of ${d.total} decoders in window`]
-					: []),
-				...(strip.rx !== null ? [`rx ${formatMHz(strip.rx.centreHz)}`] : []),
-			].join(sep),
-			"label",
-		),
-	]
+				0,
+			),
+			...(d !== null && d.inWindow !== null
+				? [group(`${d.inWindow} of ${d.total} decoders in window`, 2)]
+				: []),
+			...(strip.rx !== null
+				? [group(`rx ${formatMHz(strip.rx.centreHz)}`, 1)]
+				: []),
+		],
+		width,
+		{ sep },
+	)
 }
 
 /** Label/value groups packed three spaces apart, wrapping to the pane width. */
@@ -264,7 +282,7 @@ export function messagesModel(
 				? feed(fv.rows)
 				: [
 						...(fv.total === 0 ? feed(fv.rows) : []),
-						emptyLine(state, mu, fv),
+						emptyLine(state, mu, fv, listWidth),
 					].slice(-Math.max(1, b.listRows))
 	// A bottom detail under a short list takes the rows the list leaves free
 	// (body = list + 1 blank + detail); a full list leaves it b.detailRows.
