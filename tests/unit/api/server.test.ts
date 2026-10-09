@@ -294,6 +294,35 @@ describe("API Server", () => {
 			})
 		})
 
+		it("keeps a source signal-flat flag and level in /api/status", async () => {
+			mockSourceManager.getAllStatus.mockReturnValue([
+				{
+					id: "source-1",
+					connected: true,
+					bytesReceived: 1024,
+					dataRate: 10.5,
+					reconnectAttempts: 0,
+					signalFlat: {
+						levelDbfs: -46.5,
+						thresholdDbfs: -40,
+						since: new Date("2026-10-09T01:00:00.000Z"),
+					},
+					signalLevelDbfs: -46.5,
+				},
+			])
+			await apiServer.start()
+			const response = await apiServer
+				.getApp()
+				.inject({ method: "GET", url: "/api/status" })
+			const source = JSON.parse(response.body).sources[0]
+			expect(source.signalFlat).toEqual({
+				levelDbfs: -46.5,
+				thresholdDbfs: -40,
+				since: "2026-10-09T01:00:00.000Z",
+			})
+			expect(source.signalLevelDbfs).toBe(-46.5)
+		})
+
 		it("should return decoders from DecoderManager", async () => {
 			// Setup mock to return some decoders
 			const mockDecoders = [

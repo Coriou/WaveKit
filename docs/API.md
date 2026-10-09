@@ -197,6 +197,25 @@ a negative one can also be loss upstream. Intervals that cannot be trusted are
 skipped: the first after a (re)connect and any in which local backpressure
 paused the socket. Recordings are not checked.
 
+**Signal flat (IQ network sources).** The sibling of rate truth: the right rate
+at a dead level (e.g. an external SDR++ client left the dongle at near-zero
+gain) also decodes nothing. For `kind: "iq"` sources in `U8_IQ` (zero 127.5,
+full scale 127.5) or `S16_IQ` (zero 0, full scale 32768), core reads one IQ
+component every 1021 of the stream (about 4000 reads/s at 2 Msps) and computes
+each 5 s interval's level as the RMS of the components about zero, in dBFS
+(`20·log10(rms / fullScale)`, floored at −150). While measured, the source
+carries `signalLevelDbfs` (latest interval, 0.1 dB). When every measured
+interval for at least `health.signalFlatHoldMs` (default 30 s) is below
+`health.signalFlatThresholdDbfs` (default −40 dBFS, about 1.3 LSB RMS in u8;
+the incident measured about −46.5, a normal antenna noise floor sits at −33 or
+higher), the source gains `signalFlat: { levelDbfs, thresholdDbfs, since }`
+(also on `source:status` and in `/api/status`; `levelDbfs` is the latest
+interval) and core logs a warning. It clears (info log) after the same hold at
+threshold + 3 dB or more, so a level hovering at the threshold does not flap,
+and on a caps rate/format/kind change, (re)connect and disconnect. An interval
+with no bytes (`waiting`/`stale`) breaks a run and never raises it. Audio PCM,
+`auto` formats and recordings are not measured (no `signalLevelDbfs`).
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
@@ -1185,8 +1204,9 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`, rate-truth flag raised/cleared) when the state actually changed
-  (a drifting `rateMismatch.measuredSampleRateHz` alone does not emit);
+  `caps-changed`, rate-truth or signal-flat flag raised/cleared) when the state
+  actually changed (a drifting `rateMismatch.measuredSampleRateHz`,
+  `signalFlat.levelDbfs` or `signalLevelDbfs` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
   `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
