@@ -348,12 +348,12 @@ impl Runtime {
             ch.saturated += r.saturated;
             let first = ch.out_samples;
             ch.out_samples += r.samples;
-            if ch.queue.is_closed() {
+            let p = ch.queue.push(&out);
+            if p.closed {
                 // Only the writer closes a queue while its channel is open: the client is gone and
                 // `closed: client-gone` follows at the next poll. Not an overflow.
                 continue;
             }
-            let p = ch.queue.push(&out);
             // A13: any accepted sample ends the open run; within a push accepted samples precede dropped ones.
             if p.accepted_samples > 0 {
                 events.extend(overflow_event(id, ch));

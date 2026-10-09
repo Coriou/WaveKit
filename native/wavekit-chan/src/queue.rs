@@ -9,6 +9,9 @@ use std::sync::{Condvar, Mutex};
 pub struct PushOutcome {
     pub accepted_samples: u64,
     pub dropped_samples: u64,
+    /// The queue was closed when the push took the lock: nothing was accepted, and the drop is
+    /// not an overflow (the reader is gone).
+    pub closed: bool,
 }
 
 struct State {
@@ -40,7 +43,8 @@ impl ChannelQueue {
     }
 
     /// Accepts the longest whole-sample prefix that fits and drops the rest; accepted samples
-    /// always precede dropped ones (plan A13). A closed queue drops everything.
+    /// always precede dropped ones (plan A13). A closed queue drops everything and says so, read
+    /// under the same lock, so a close racing the push can never pass for an overflow.
     pub fn push(&self, bytes: &[u8]) -> PushOutcome {
         debug_assert!(
             bytes.len().is_multiple_of(self.sample_bytes),
@@ -54,6 +58,7 @@ impl ChannelQueue {
             return PushOutcome {
                 accepted_samples: 0,
                 dropped_samples: total,
+                closed: true,
             };
         }
         let room = (self.capacity - s.buf.len()) / self.sample_bytes;
@@ -67,6 +72,7 @@ impl ChannelQueue {
         PushOutcome {
             accepted_samples: take as u64,
             dropped_samples: total - take as u64,
+            closed: false,
         }
     }
 
@@ -136,10 +142,14 @@ mod tests {
     #[test]
     fn close_drains_what_is_queued_then_ends() {
         let q = ChannelQueue::new(16, 2);
-        q.push(&[1, 2, 3, 4]);
+        assert!(!q.push(&[1, 2, 3, 4]).closed);
         q.close();
         let o = q.push(&[5, 6]);
-        assert_eq!((o.accepted_samples, o.dropped_samples), (0, 1));
+        // The closed state is read under the same lock as the push (no check-then-push race).
+        assert_eq!(
+            (o.accepted_samples, o.dropped_samples, o.closed),
+            (0, 1, true)
+        );
         let mut buf = Vec::new();
         assert!(q.pop_blocking(3, &mut buf));
         assert!(q.pop_blocking(3, &mut buf));
