@@ -1,6 +1,7 @@
 {
 	"name": "@wavekit/cli",
 	"version": "1.0.0",
+	"license": "AGPL-3.0-or-later",
 	"description": "WaveKit CLI Dashboard - Interactive terminal UI for monitoring",
 	"type": "module",
 	"bin": {
