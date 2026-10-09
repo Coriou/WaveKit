@@ -333,7 +333,7 @@ function signedPercent(ratio: number): string {
 	const pct = ratio * 100
 	const a = Math.abs(pct)
 	const text = a < 10 ? a.toFixed(1).replace(/\.0$/, "") : String(Math.round(a))
-	return `${pct < 0 ? "−" : "+"}${text}%`
+	return `${pct < 0 ? glyphs().minus : "+"}${text}%`
 }
 
 /**
@@ -410,12 +410,12 @@ export function changeText(c: PendingChange, from?: string): string {
 		c.field === "gain" && typeof c.to === "number"
 			? formatDb(c.to)
 			: plainValue(c.field, c.to)
-	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} → ${to}`
+	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} ${glyphs().arrow} ${to}`
 }
 
 /** "+10 Hz", "+29.3 kHz", "−1.5 MHz": the unit follows the magnitude, so a small step never reads +0.0. */
 export function deltaText(hz: number): string {
-	const sign = hz < 0 ? "−" : "+"
+	const sign = hz < 0 ? glyphs().minus : "+"
 	const a = Math.abs(hz)
 	const trim = (v: string): string => v.replace(/\.?0+$/, "")
 	if (a < 1000) return `${sign}${Math.round(a)} Hz`
@@ -1227,7 +1227,7 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 							upRole,
 						),
 						txt(
-							`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							`Pi rtlmux ${glyphs().arrow} core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
 							upRole,
 						),
 					),
@@ -1243,8 +1243,21 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 				]
 			: resources && !hasHost
 				? // No SDR host for this source: not applicable.
-					[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
-				: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
+					[
+						one(
+							0,
+							txt(`Pi rtlmux ${glyphs().arrow} core: ${glyphs().na}`, upRole),
+						),
+					]
+				: [
+						one(
+							0,
+							txt(
+								`Pi rtlmux ${glyphs().arrow} core: ? (no SDR host data)`,
+								upRole,
+							),
+						),
+					]
 	return [
 		essential(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),

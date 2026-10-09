@@ -18,7 +18,7 @@ import { listBudget, type DetailPlacement } from "../ui/frame.js"
 import { fitGroups } from "../ui/fit.js"
 import { sp, type Line, type Role } from "../ui/line.js"
 import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
-import { ASCII_GLYPHS, glyphs } from "../ui/theme.js"
+import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
 	decoderFacts,
@@ -235,14 +235,13 @@ export function decoderDetail(
 	const r = f.row
 	const sess = state.session[r.id]
 	const caps = r.caps
-	const arrow = g === ASCII_GLYPHS ? "->" : "→"
 	// S1: pid and version are shown when known; an absent one adds nothing.
 	const identity = [
 		own(PROTOCOL, r.type) ?? sanitize(r.type),
 		...(caps
 			? [
 					own(PATTERN, caps.integrationPattern) ?? g.unknown,
-					`${own(INPUT, caps.input) ?? g.unknown} ${arrow} ${own(OUTPUT, caps.output) ?? g.unknown}`,
+					`${own(INPUT, caps.input) ?? g.unknown} ${g.arrow} ${own(OUTPUT, caps.output) ?? g.unknown}`,
 				]
 			: []),
 		...(r.pid !== null && r.pid !== undefined ? [`pid ${r.pid}`] : []),

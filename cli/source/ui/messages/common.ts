@@ -41,8 +41,8 @@ export function clipMultiline(s: string, max = MAX_TEXT): string {
 /** Non-glyph-table symbols, swapped for ASCII in ASCII glyph mode (R32). */
 export function textGlyphs(): { arrow: string; degree: string } {
 	return glyphs() === ASCII_GLYPHS
-		? { arrow: "->", degree: "" }
-		: { arrow: "→", degree: "°" }
+		? { arrow: glyphs().arrow, degree: "" }
+		: { arrow: glyphs().arrow, degree: "°" }
 }
 
 export function seg(

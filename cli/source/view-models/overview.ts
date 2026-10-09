@@ -15,7 +15,7 @@ import { rxValues } from "./chrome.js"
 import { emptyFeedGroups, noDataText } from "./feed-state.js"
 import { remoteHost } from "./net.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
-import { glyphSpan } from "../ui/strip.js"
+import { glyphSpan, iqWordText } from "../ui/strip.js"
 import { padEnd, sanitize, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
@@ -111,7 +111,7 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const word =
 		iq.ageMs !== null && iq.word === "no samples"
 			? `${iq.word} ${formatAge(iq.ageMs)}`
-			: iq.word
+			: iqWordText(iq.word)
 	// Priorities: activity first, then the source identity, then rates; relay clients are the richest
 	// rate variant so they are the first thing to go (spec §6.1 "relay clients and centre first").
 	const row1: Group[] = [

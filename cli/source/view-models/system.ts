@@ -185,7 +185,12 @@ function containerBlock(state: AppState, width: number): Block {
 						a.alert.severity === "critical" ? "attention" : "value",
 					),
 				]),
-				one(1, txt(`${a.count}× since ${formatClockShort(a.firstAt)}`)),
+				one(
+					1,
+					txt(
+						`${a.count}${glyphs().times} since ${formatClockShort(a.firstAt)}`,
+					),
+				),
 				one(2, txt(`last ${formatAge(now - a.lastAt)} ago`)),
 			],
 			width,

@@ -117,10 +117,15 @@ const IQ_SHORT: Readonly<Record<string, string>> = {
 	unknown: "",
 }
 
+/** The data layer's iq word with its separator in the current glyph mode (ASCII `|`). */
+export function iqWordText(word: string): string {
+	return word.split(" · ").join(` ${glyphs().sep} `)
+}
+
 /** Live: `iq ●` → `iq ● streaming` → `… · 4.1 MB/s`. Other states: short word → full word (→ age). */
 function iqGroup(iq: IqView, old: boolean): Group {
 	const head: Line = [label("iq "), glyphSpan(iq.glyph)]
-	const named: Line = [...head, value(` ${iq.word}`, old)]
+	const named: Line = [...head, value(` ${iqWordText(iq.word)}`, old)]
 	if (iq.word === "no samples")
 		return {
 			priority: 2,
