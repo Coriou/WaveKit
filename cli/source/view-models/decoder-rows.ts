@@ -195,6 +195,7 @@ const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 	"crash-loop": "fault",
 	down: "fault",
 	restarting: "attention",
+	resuming: "neutral",
 	"suspend-pending": "attention",
 	suspended: "neutral",
 	stopped: "neutral",
