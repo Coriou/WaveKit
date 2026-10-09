@@ -6,7 +6,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { Readable } from "node:stream"
 import pino from "pino"
-import { DecoderManager } from "../../../src/decoders/manager.js"
+import {
+	DecoderManager,
+	type DecoderManagerConfig,
+} from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
@@ -73,7 +76,6 @@ function create(
 	opts: {
 		useChannelizer?: boolean
 		band?: number[]
-		bandSuspension?: boolean
 	} = {},
 ) {
 	const config: DecoderConfig = {
@@ -93,7 +95,7 @@ function status(id = "dec") {
 async function settle() {
 	await vi.advanceTimersByTimeAsync(DEBOUNCE)
 }
-function setup(bandSuspension = true) {
+function setup(config: Partial<DecoderManagerConfig> = {}) {
 	vi.useFakeTimers()
 	logLines = []
 	const logger = pino(
@@ -125,7 +127,7 @@ function setup(bandSuspension = true) {
 		restartDelay: 10,
 		maxRestartDelay: 40,
 		validateVersions: false,
-		bandSuspension,
+		...config,
 	})
 	manager.setSourceManager(sources as unknown as SourceManager)
 	provider = new FakeChannelProvider()
@@ -559,6 +561,191 @@ describe("DecoderManager + channelizer (addendum §4, §5)", () => {
 		await manager.destroy()
 		expect(provider.listenerCount("channel-invalidated")).toBe(0)
 		setup() // afterEach destroys a fresh manager
+	})
+})
+
+describe("failure accounting across invalidations (Review Focus 3)", () => {
+	it("an invalidation restart keeps restartCount, the backoff and lastError", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(20)
+		expect(status()).toMatchObject({ running: true, restartCount: 1 })
+		const lastError = status().lastError
+		expect(lastError).toBeDefined()
+		provider.invalidate("rtl", ["dec-g1"])
+		await settle()
+		expect(provider.calls).toHaveLength(3)
+		expect(decoder.input).toBe(provider.streams.get("dec-g2"))
+		expect(status()).toMatchObject({ running: true, restartCount: 1 })
+		expect(status().lastError).toEqual(lastError)
+		// The next crash continues the backoff instead of starting over.
+		decoder.crash()
+		expect(status().restartCount).toBe(2)
+		expect(restarting).toEqual(["dec", "dec"])
+	})
+
+	it("a decoder crashing between invalidations still reaches maxRestarts", async () => {
+		await manager.destroy()
+		setup({ maxRestarts: 2 })
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		const maxed: string[] = []
+		manager.on("decoder:max-restarts", (id: string) => maxed.push(id))
+		const channelId = () =>
+			[...provider.streams].find(([, stream]) => stream === decoder.input)?.[0]
+		for (let i = 0; i < 2; i++) {
+			decoder.crash()
+			await vi.advanceTimersByTimeAsync(50)
+			expect(decoder.running).toBe(true)
+			provider.invalidate("rtl", [channelId()!])
+			await settle()
+			expect(status().restartCount).toBe(i + 1)
+		}
+		decoder.crash()
+		expect(maxed).toEqual(["dec"])
+		expect(status().health).toBe("faulted")
+	})
+
+	it("a raw caps-change restart still resets the accounting", async () => {
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		decoder.crash()
+		await vi.advanceTimersByTimeAsync(20)
+		expect(status().restartCount).toBe(1)
+		sources.setCenter("rtl", CENTER + 1_000)
+		await settle()
+		expect(status()).toMatchObject({ running: true, restartCount: 0 })
+	})
+})
+
+describe("channelizer-unavailable retry (A14, PF6)", () => {
+	const RETRY = 15_000
+
+	it("re-requests after the retry interval with no source event", async () => {
+		provider.results.push({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "crash loop",
+		})
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		await vi.advanceTimersByTimeAsync(RETRY - 1_000)
+		expect(provider.calls).toHaveLength(1)
+		await vi.advanceTimersByTimeAsync(1_000 + DEBOUNCE)
+		expect(provider.calls).toHaveLength(2)
+		expect(status()).toMatchObject({ suspended: false, running: true })
+		expect(decoder.starts).toBe(1)
+	})
+
+	it("keeps one retry per source while still unavailable", async () => {
+		for (let i = 0; i < 4; i++)
+			provider.results.push({
+				ok: false,
+				reasonCode: "channelizer-unavailable",
+				detail: "crash loop",
+			})
+		create("a", { useChannelizer: true })
+		create("b", { useChannelizer: true })
+		await manager.startDecoder("a")
+		await manager.startDecoder("b")
+		expect(provider.calls).toHaveLength(2)
+		await vi.advanceTimersByTimeAsync(RETRY + DEBOUNCE)
+		expect(provider.calls).toHaveLength(4) // one evaluation, each decoder once
+		expect(status("a").suspended).toBe(true)
+		await vi.advanceTimersByTimeAsync(RETRY + DEBOUNCE)
+		expect(provider.calls).toHaveLength(6)
+		expect(status("a")).toMatchObject({ suspended: false, running: true })
+		expect(status("b")).toMatchObject({ suspended: false, running: true })
+		await vi.advanceTimersByTimeAsync(3 * RETRY)
+		expect(provider.calls).toHaveLength(6)
+	})
+
+	it("stop cancels the retry", async () => {
+		provider.results.push({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "x",
+		})
+		create("dec", { useChannelizer: true })
+		const baseline = vi.getTimerCount()
+		await manager.startDecoder("dec")
+		expect(vi.getTimerCount()).toBe(baseline + 1)
+		await manager.stopDecoder("dec")
+		expect(vi.getTimerCount()).toBe(baseline)
+		await vi.advanceTimersByTimeAsync(2 * RETRY)
+		expect(provider.calls).toHaveLength(1)
+		expect(status().suspended).toBe(false)
+	})
+
+	it("source removal cancels the retry", async () => {
+		provider.results.push({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "x",
+		})
+		create("dec", { useChannelizer: true })
+		const baseline = vi.getTimerCount()
+		await manager.startDecoder("dec")
+		sources.remove("rtl")
+		await settle()
+		expect(vi.getTimerCount()).toBe(baseline)
+		await vi.advanceTimersByTimeAsync(2 * RETRY)
+		expect(provider.calls).toHaveLength(1)
+		expect(status().suspended).toBe(true)
+	})
+
+	it("a retune race is held quietly and retried; a later outage still logs once", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		provider.beforeResult = () => {
+			provider.invalidate("rtl", [])
+			provider.beforeResult = () => provider.invalidate("rtl", [])
+		}
+		await manager.startDecoder("dec")
+		expect(provider.calls).toHaveLength(2)
+		expect(status().suspended).toBe(true)
+		expect(logLines.filter(l => l["level"] === 50)).toEqual([])
+		await vi.advanceTimersByTimeAsync(RETRY + DEBOUNCE)
+		expect(status()).toMatchObject({ suspended: false, running: true })
+		expect(decoder.starts).toBe(1)
+		provider.results.push({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "ENOENT",
+		})
+		create("b", { useChannelizer: true })
+		await manager.startDecoder("b")
+		expect(logLines.filter(l => l["level"] === 50)).toHaveLength(1)
+	})
+})
+
+describe("provider swap", () => {
+	it("releases channels to the provider that opened them and re-wires through the new one", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		const old = provider
+		const next = new FakeChannelProvider()
+		manager.setChannelizer(next)
+		expect(decoder.detachedAt).toEqual(["before-destroy"])
+		expect(old.released).toEqual(["dec-g1"])
+		expect(old.listenerCount("channel-invalidated")).toBe(0)
+		await settle()
+		expect(next.calls).toHaveLength(1)
+		expect(decoder.input).toBe(next.streams.get("dec-g1"))
+		await manager.stopDecoder("dec")
+		expect(next.released).toEqual(["dec-g1"])
+		expect(old.released).toEqual(["dec-g1"])
+	})
+
+	it("clearing the provider moves an open channel back to the raw branch", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		manager.setChannelizer(null)
+		expect(provider.released).toEqual(["dec-g1"])
+		await settle()
+		expect(fanout.getBranchIds()).toContain("decoder-dec")
+		expect(decoder.options).toMatchObject({ inputIqFormat: "cu8" })
+		expect(decoder.running).toBe(true)
 	})
 })
 

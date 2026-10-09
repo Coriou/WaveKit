@@ -153,6 +153,11 @@ interface DecoderState {
 	/** The channel was invalidated under a wanted decoder; the worker restarts it */
 	channelStale: boolean
 	/**
+	 * Set by the worker for a restart caused by a channel invalidation: the
+	 * next start keeps restartCount, the backoff and lastError (Review Focus 3).
+	 */
+	keepFailureAccounting: boolean
+	/**
 	 * Who started the decoder: "operator" (REST start) is never
 	 * band-suspended. Cleared to "auto" by stop; kept by restart.
 	 */
@@ -165,6 +170,8 @@ interface DecoderSuspension {
 }
 
 interface OpenChannelRef {
+	/** The provider that opened it; releases go back to it after a swap. */
+	provider: ChannelProvider
 	channelId: string
 	sourceId: string
 	generation: number
@@ -175,6 +182,8 @@ interface OpenChannelRef {
 interface ChannelHold {
 	reasonCode: ChannelAdmissionReason
 	detail: string
+	/** A retune race, not an outage: logged at debug. */
+	race?: true
 }
 
 /** How wiring ended: wired, superseded by a newer transition, or held for a channel reason. */
@@ -305,6 +314,12 @@ export class DecoderManager extends EventEmitter {
 	private channelizer: ChannelProvider | null = null
 	/** Review Focus 4: one error line per outage, not one per decoder. */
 	private channelizerUnavailableLogged = false
+	/** Per source: one pending re-evaluation for decoders held for channelizer-unavailable. */
+	private readonly channelRetryTimers = new Map<
+		string,
+		ReturnType<typeof setTimeout>
+	>()
+	private static readonly CHANNELIZER_RETRY_MS = 15_000
 	private readonly channelInvalidatedHandler = (
 		sourceId: string,
 		_generation: number,
@@ -315,19 +330,7 @@ export class DecoderManager extends EventEmitter {
 			if (!state.channel || !channelIds.includes(state.channel.channelId))
 				continue
 			affected = true
-			// Review Focus 3: detach before the provider destroys the socket, so
-			// the decoder's stdin never sees its EOF.
-			try {
-				state.decoder.detachInput()
-			} catch (err: unknown) {
-				this.log.warn(
-					{ err, decoderId: state.config.id },
-					"detachInput failed on channel invalidation",
-				)
-			}
-			state.branchId = null
-			state.channel = null
-			state.channelStale = true
+			this.dropChannel(state, false)
 		}
 		// The serial worker restarts stale decoders (handleCapsChange); a
 		// rejection there becomes a suspension, a later usable centre resumes.
@@ -362,6 +365,16 @@ export class DecoderManager extends EventEmitter {
 		this.channelizer = provider
 		this.channelizerUnavailableLogged = false
 		provider?.on("channel-invalidated", this.channelInvalidatedHandler)
+		// Channels of a replaced provider would never be invalidated again:
+		// release them and let the worker re-wire their decoders.
+		const sources = new Set<string>()
+		for (const state of this.decoders.values()) {
+			if (!state.channel || state.channel.provider === provider) continue
+			sources.add(state.channel.sourceId)
+			this.dropChannel(state, true)
+		}
+		for (const sourceId of sources) this.recheckStaleChannel(sourceId)
+		if (!provider) this.clearChannelRetries()
 	}
 
 	/**
@@ -433,6 +446,7 @@ export class DecoderManager extends EventEmitter {
 			rateGeneration: 0,
 			channel: null,
 			channelStale: false,
+			keepFailureAccounting: false,
 			startMode: "auto",
 		}
 
@@ -458,6 +472,10 @@ export class DecoderManager extends EventEmitter {
 			throw new Error(`Decoder not found: ${id}`)
 		}
 
+		// Consumed by this start whatever happens next.
+		const keepFailureAccounting = state.keepFailureAccounting
+		state.keepFailureAccounting = false
+
 		if (state.decoder.getStatus().running) {
 			this.log.warn({ decoderId: id }, "Decoder already running")
 			return
@@ -473,10 +491,14 @@ export class DecoderManager extends EventEmitter {
 		state.intentionallyStopped = false
 		state.desiredRunning = true
 		state.rateGeneration++
-		state.restartCount = 0
-		state.consecutiveFailures = 0
-		state.lastError = null
-		state.currentDelay = this.config.restartDelay
+		// A channel-invalidation restart is not a new start: crash accounting
+		// survives it, so a flapping source still reaches maxRestarts/faulted.
+		if (!keepFailureAccounting) {
+			state.restartCount = 0
+			state.consecutiveFailures = 0
+			state.lastError = null
+			state.currentDelay = this.config.restartDelay
+		}
 		this.cancelScheduledRestart(state)
 
 		// Intent is recorded separately from eligibility: an unusable source
@@ -555,6 +577,7 @@ export class DecoderManager extends EventEmitter {
 		state.rateGeneration++
 		state.suspension = null
 		state.transition = null
+		this.clearChannelRetry(this.selectedSourceId(state), true)
 
 		// Cancel any pending restart; "restarting" no longer holds once the
 		// operator stopped the decoder (a fault stays visible until a start).
@@ -764,6 +787,7 @@ export class DecoderManager extends EventEmitter {
 
 		// Stop health checks
 		this.stopHealthChecks()
+		this.clearChannelRetries()
 
 		// Unsubscribe from source caps changes
 		this.unsubscribeFromSourceCapsChanges()
@@ -1163,6 +1187,7 @@ export class DecoderManager extends EventEmitter {
 					superseded: false,
 					reasonCode: "channelizer-unavailable",
 					detail: "channel generation changed during two requests",
+					race: true,
 				}
 			const caps = this.sourceManager?.getCaps(sourceId)
 			if (caps) {
@@ -1187,6 +1212,7 @@ export class DecoderManager extends EventEmitter {
 		state.branchId = result.channelId
 		state.branchFanout = null
 		state.channel = {
+			provider,
 			channelId: result.channelId,
 			sourceId,
 			generation: result.generation,
@@ -1271,11 +1297,30 @@ export class DecoderManager extends EventEmitter {
 		const ref = state.channel
 		if (!ref) return
 		state.channel = null
-		const provider = this.channelizer
-		if (!provider) return
-		provider.releaseChannel(ref.channelId).catch((err: unknown) => {
+		ref.provider.releaseChannel(ref.channelId).catch((err: unknown) => {
 			this.log.warn({ err, channelId: ref.channelId }, "Channel release failed")
 		})
+	}
+
+	/**
+	 * Takes the channel off a wired decoder and marks it stale for the
+	 * worker. Review Focus 3: detach first, so the decoder's stdin never sees
+	 * the socket's EOF; `release` only when the provider is not already
+	 * tearing the channel down.
+	 */
+	private dropChannel(state: DecoderState, release: boolean): void {
+		try {
+			state.decoder.detachInput()
+		} catch (err: unknown) {
+			this.log.warn(
+				{ err, decoderId: state.config.id },
+				"detachInput failed while dropping a channel",
+			)
+		}
+		if (release) this.releaseChannelOf(state)
+		state.branchId = null
+		state.channel = null
+		state.channelStale = true
 	}
 
 	/**
@@ -1297,12 +1342,17 @@ export class DecoderManager extends EventEmitter {
 			detail: outcome.detail,
 		}
 		if (outcome.reasonCode === "channelizer-unavailable") {
-			if (!this.channelizerUnavailableLogged)
-				this.log.error(
-					fields,
-					"Channelizer unavailable; channelised decoders suspended",
-				)
-			this.channelizerUnavailableLogged = true
+			this.scheduleChannelRetry(this.selectedSourceId(state))
+			if (outcome.race) {
+				this.log.debug(fields, "Channel request raced a retune; will retry")
+			} else {
+				if (!this.channelizerUnavailableLogged)
+					this.log.error(
+						fields,
+						"Channelizer unavailable; channelised decoders suspended",
+					)
+				this.channelizerUnavailableLogged = true
+			}
 		} else {
 			this.log.info(fields, "Decoder suspended: channel not admitted")
 		}
@@ -1323,6 +1373,54 @@ export class DecoderManager extends EventEmitter {
 			caps: this.sourceManager?.getCaps(sourceId) ?? null,
 			adapt: false,
 		})
+	}
+
+	/** A wanted decoder on `sourceId` is held because the channelizer is unavailable. */
+	private heldForChannelizer(sourceId: string): boolean {
+		for (const state of this.decoders.values())
+			if (
+				state.desiredRunning &&
+				state.suspension?.reasonCode === "channelizer-unavailable" &&
+				this.selectedSourceId(state) === sourceId
+			)
+				return true
+		return false
+	}
+
+	/**
+	 * PF6/A14: nothing else re-evaluates a source once ChannelizerManager's
+	 * crash-loop window expires, so one bounded retry per source is kept
+	 * while any decoder there is held for channelizer-unavailable.
+	 */
+	private scheduleChannelRetry(sourceId: string | undefined): void {
+		if (!sourceId || this.destroying || this.channelRetryTimers.has(sourceId))
+			return
+		const timer = setTimeout(() => {
+			this.channelRetryTimers.delete(sourceId)
+			if (!this.heldForChannelizer(sourceId)) return
+			this.enqueueSourceEvaluation(sourceId, {
+				caps: this.sourceManager?.getCaps(sourceId) ?? null,
+				adapt: false,
+			})
+		}, DecoderManager.CHANNELIZER_RETRY_MS)
+		this.channelRetryTimers.set(sourceId, timer)
+	}
+
+	/** Cancels the source's retry; with `ifIdle`, only when nothing there is held. */
+	private clearChannelRetry(
+		sourceId: string | undefined,
+		ifIdle = false,
+	): void {
+		if (!sourceId) return
+		const timer = this.channelRetryTimers.get(sourceId)
+		if (!timer || (ifIdle && this.heldForChannelizer(sourceId))) return
+		clearTimeout(timer)
+		this.channelRetryTimers.delete(sourceId)
+	}
+
+	private clearChannelRetries(): void {
+		for (const timer of this.channelRetryTimers.values()) clearTimeout(timer)
+		this.channelRetryTimers.clear()
 	}
 
 	/**
@@ -1427,8 +1525,10 @@ export class DecoderManager extends EventEmitter {
 				adapt: false,
 			})
 		sourceManager.on("connected", connectedEvaluation)
-		this.sourceRemovedHandler = sourceId =>
+		this.sourceRemovedHandler = sourceId => {
+			this.clearChannelRetry(sourceId)
 			this.enqueueSourceEvaluation(sourceId, { caps: null, adapt: false })
+		}
 		this.sourceConnectedEvaluation = connectedEvaluation
 		sourceManager.on("removed", this.sourceRemovedHandler)
 		this.subscribeToSourceCapsChanges()
@@ -1587,7 +1687,9 @@ export class DecoderManager extends EventEmitter {
 		// Restart only pipelines whose input format/rate or tuned arguments changed.
 		for (const decoderId of restartDecoders) {
 			if (!this.capsChangedHandler || this.destroying) break
-			if (this.decoders.get(decoderId)?.intentionallyStopped) continue
+			const state = this.decoders.get(decoderId)
+			if (state?.intentionallyStopped) continue
+			if (state?.channelStale) state.keepFailureAccounting = true
 			try {
 				await this.restartDecoder(decoderId)
 			} catch (err) {
@@ -1595,6 +1697,9 @@ export class DecoderManager extends EventEmitter {
 					{ decoderId, err },
 					"Failed to restart decoder after sample rate change",
 				)
+			} finally {
+				// Not carried into a later operator start if the restart bailed.
+				if (state) state.keepFailureAccounting = false
 			}
 		}
 
@@ -1831,6 +1936,7 @@ export class DecoderManager extends EventEmitter {
 		}
 		state.suspension = null
 		state.transition = "resuming"
+		this.clearChannelRetry(this.selectedSourceId(state), true)
 		this.log.info(
 			{ decoderId: id },
 			"Resuming decoder: source rate and band are usable",
