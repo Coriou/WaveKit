@@ -1,53 +1,90 @@
 import type { DecoderRow, DecoderSession, GlyphRole } from "./types.js"
 
 export type ProcState =
+	| "suspended"
+	| "suspend-pending"
 	| "faulted"
+	| "faulted-retry"
+	| "faulted-retrying"
 	| "crash-loop"
 	| "stopped"
 	| "restarting"
 	| "down"
 	| "starting"
 	| "up"
+	| "unknown"
 
 export const STARTING_UPTIME_S = 10
 export const CRASH_LOOP_INCREMENTS = 2
+/** A "suspending" transition older than this means the stop has not happened (R70). */
+export const SUSPEND_PENDING_MS = 10_000
 
 /**
- * Spec §10.7, evaluated in order. `health` only ever makes a decoder look worse when it is "faulted".
- * R15: `!running` with restarts on record and not faulted is core's automatic-restart backoff
- * ("restarting"); an explicit stop does not reset `restartCount`, so a stop by this CLI wins.
- * Planned core fields (desiredRunning, suspended, suspension) slot in before "restarting":
- * a held or suspended decoder is not restarting.
+ * Spec §10.7, evaluated in order, extended for core's proposed contracts (R70):
+ * - Suspension (intended, rate-driven) is rendered ahead of health; a "suspending"
+ *   transition that has lasted > 10 s means the stop is pending.
+ * - health "faulted": terminal when not running and no restart is scheduled; still
+ *   retrying with `nextRestartAt` ("faulted-retry", fault) or while running on
+ *   probation ("faulted-retrying", attention).
+ * - Not running: stopped (by this CLI, or `desiredRunning: false`), core's
+ *   "restarting", else for older cores (no `desiredRunning`) the R15 inference
+ *   (`restartCount > 0`), else down.
+ * - An unknown health never reads as up.
+ * `now` is needed only for the pending-suspension timing.
  */
 export function processState(
 	d: DecoderRow,
 	restartIncrements5m: number,
 	stoppedByCli: boolean,
+	now?: number,
 ): ProcState {
-	if (d.health === "faulted") return "faulted"
+	if (d.transition === "suspending" && now !== undefined && d.suspension) {
+		const since = Date.parse(d.suspension.since)
+		if (Number.isFinite(since) && now - since > SUSPEND_PENDING_MS)
+			return "suspend-pending"
+	}
+	if (d.suspended === true) return "suspended"
+	if (d.health === "faulted") {
+		if (d.running) return "faulted-retrying"
+		return d.nextRestartAt !== undefined ? "faulted-retry" : "faulted"
+	}
 	if (restartIncrements5m >= CRASH_LOOP_INCREMENTS) return "crash-loop"
 	if (!d.running) {
-		if (stoppedByCli) return "stopped"
-		return d.restartCount > 0 ? "restarting" : "down"
+		if (stoppedByCli || d.desiredRunning === false) return "stopped"
+		if (d.health === "restarting") return "restarting"
+		if (d.health === "unknown") return "unknown"
+		if (d.desiredRunning === undefined && d.restartCount > 0)
+			return "restarting"
+		return "down"
 	}
+	if (d.health === "unknown") return "unknown"
 	if (d.uptime < STARTING_UPTIME_S && d.stats.eventsOut === 0) return "starting"
 	return "up"
 }
 
-/** "restarting" is attention (R31): not running must not look calm, but it is not a fault. */
+/**
+ * "restarting" and a fault that is still retrying while running are attention (R31):
+ * not running must not look calm, but they are not terminal. Suspension is intended.
+ */
 export function procRole(s: ProcState): GlyphRole {
 	switch (s) {
 		case "faulted":
+		case "faulted-retry":
 		case "crash-loop":
 		case "down":
 			return "fault"
 		case "restarting":
+		case "faulted-retrying":
+		case "suspend-pending":
 			return "attention"
 		case "stopped":
 		case "starting":
+		case "suspended":
 			return "neutral"
 		case "up":
 			return "live"
+		case "unknown":
+			return "unknown"
 	}
 }
 

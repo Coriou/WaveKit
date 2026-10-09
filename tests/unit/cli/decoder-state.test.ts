@@ -24,9 +24,10 @@ function row(over: Partial<DecoderRow> = {}): DecoderRow {
 
 describe("processState (§10.7)", () => {
 	it("follows the rule order", () => {
+		// R70 amendment: faulted while running is a crash-loop retry on probation.
 		expect(
 			processState(row({ health: "faulted", running: true }), 5, false),
-		).toBe("faulted")
+		).toBe("faulted-retrying")
 		expect(processState(row({ running: true }), 2, false)).toBe("crash-loop")
 		expect(processState(row({ running: false }), 0, true)).toBe("stopped")
 		// R15: not running with restarts on record and not faulted = automatic-restart backoff.

@@ -73,6 +73,26 @@ const secs = (ms: number): string =>
 const quoted = (text: string): string =>
 	`"${truncate(sanitize(text), SERVER_TEXT_MAX)}"`
 
+/** R70: core's rate reason codes in plain words; an unknown code is shown quoted. */
+const SUSPENSION_REASON: Readonly<Record<string, string>> = {
+	"insufficient-sample-rate": "sample rate too low",
+	"unsupported-sample-rate": "sample rate not supported",
+	"unsupported-input-kind": "input kind not supported",
+	"unsupported-input-format": "input format not supported",
+	"unsupported-frontend-rate": "front-end rate not supported",
+	"unsupported-decoder-input-rate": "decoder input rate not supported",
+	"unknown-requirements": "rate requirements not declared",
+	"source-rate-unknown": "source rate not known",
+	"adaptation-unknown": "rate adaptation not known",
+	"external-input": "external input",
+}
+
+function suspensionReason(code: string): string {
+	return Object.hasOwn(SUSPENSION_REASON, code)
+		? (SUSPENSION_REASON[code] ?? quoted(code))
+		: quoted(code)
+}
+
 /** The minimal process words (`up 51s`, `restarting`); counts are listed beside them. */
 const processText = (f: DecoderFacts, now: number): string =>
 	lineText(decoderCells(f, now)["process"]?.variants[0] ?? [])
@@ -165,13 +185,26 @@ export function decoderDetail(
 	const result = decoderActionText(state, r.id, now)
 	if (result) lines.push(...wrapKV("action", result, width))
 	const prev = sess?.previousHealth
+	// R70: an unrecognised health value is unknown (?), never echoed as a word.
+	const health = (h: string): string => (h === "unknown" ? "?" : h)
 	lines.push(
 		...wrapKV(
 			"process",
-			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}server health ${r.health}${prev ? ` (was ${prev})` : ""}`,
+			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}server health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
+	const susp = r.suspension
+	if (r.suspended === true && susp) {
+		const since = Date.parse(susp.since)
+		lines.push(
+			...wrapKV(
+				"suspended",
+				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionReason(susp.reasonCode)}`,
+				width,
+			),
+		)
+	}
 	const events = `${formatCount(r.stats.eventsOut)} events`
 	const lastOut = f.lastAt === null ? g.na : `${formatAge(now - f.lastAt)} ago`
 	const d = f.decodes

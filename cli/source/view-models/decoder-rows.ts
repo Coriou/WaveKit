@@ -93,7 +93,7 @@ const compute = memoOne(
 		return rows.map(row => {
 			const sess = session[row.id]
 			const inc = restartIncrements(sess?.restarts ?? [], now)
-			const proc = processState(row, inc, stopped.includes(row.id))
+			const proc = processState(row, inc, stopped.includes(row.id), now)
 			const ratePerSec = oldRest ? null : counterRate(sess?.events ?? [])
 			const lastAt = lastDecodeAt(row, sess)
 			const branch =
@@ -154,20 +154,65 @@ export function decoderFacts(state: AppState): DecoderFacts[] {
 
 const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 	faulted: "fault",
+	"faulted-retry": "fault",
+	"faulted-retrying": "attention",
 	"crash-loop": "fault",
 	down: "fault",
 	restarting: "attention",
+	"suspend-pending": "attention",
+	suspended: "neutral",
 	stopped: "neutral",
 	starting: "neutral",
 	up: "value",
+	unknown: "unknown",
 }
 
-function processCell(f: DecoderFacts): Cell {
+function processCell(f: DecoderFacts, now: number): Cell {
 	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
 	const restarts = `${formatCount(n)} restart${n === 1 ? "" : "s"}`
 	const sep = ` ${glyphs().sep} `
 	const up = formatDuration(f.row.uptime)
+	// R70: time to core's next automatic restart (server time; never negative).
+	const next = f.row.nextRestartAt
+		? Date.parse(f.row.nextRestartAt)
+		: Number.NaN
+	const inNext = Number.isFinite(next) ? `in ${formatAge(next - now)}` : null
+	switch (f.proc) {
+		case "unknown":
+			return cell([sp("?", "unknown")])
+		case "suspended":
+			return cell([sp("suspended", role)], [sp(`suspended${sep}rate`, role)])
+		case "suspend-pending":
+			return cell(
+				[sp("suspending", role)],
+				[sp("suspending (stop pending)", role)],
+			)
+		case "faulted-retrying":
+			return cell([sp("faulted", role)], [sp(`faulted${sep}retrying`, role)])
+		case "faulted-retry":
+			return inNext
+				? cell(
+						[sp("faulted", role)],
+						[sp(`faulted${sep}retry ${inNext}`, role)],
+						...(n > 0
+							? [[sp(`faulted${sep}retry ${inNext}${sep}${restarts}`, role)]]
+							: []),
+					)
+				: cell([sp("faulted", role)], [sp(`faulted${sep}retrying`, role)])
+		case "restarting":
+			if (inNext)
+				return cell(
+					[sp("restarting", role)],
+					[sp(`restarting ${inNext}`, role)],
+					...(n > 0
+						? [[sp(`restarting ${inNext}${sep}${restarts}`, role)]]
+						: []),
+				)
+			break
+		default:
+			break
+	}
 	switch (f.proc) {
 		case "up":
 			return n > 0
@@ -290,7 +335,7 @@ export function decoderCells(
 ): Record<string, Cell> {
 	const cells: Record<string, Cell> = {
 		decoder: cell([glyphSpan(f.role), sp(" "), sp(sanitize(f.row.id))]),
-		process: processCell(f),
+		process: processCell(f, now),
 		decodes: decodesCell(f, now),
 		drop: dropCell(f),
 		lifetime: lifetimeCell(f),
