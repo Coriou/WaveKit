@@ -519,6 +519,7 @@ COPY packages/shared/package.json packages/shared/tsconfig.json ./packages/share
 COPY packages/api-types/package.json packages/api-types/tsconfig.json ./packages/api-types/
 COPY cli/package.json cli/tsconfig.json ./cli/
 COPY packages/sdr-host/package.json packages/sdr-host/tsconfig.json ./packages/sdr-host/
+COPY packages/brand/package.json packages/brand/tsconfig.json ./packages/brand/
 
 # Override .npmrc's enable-global-virtual-store=true: keep the virtual store
 # at node_modules/.pnpm/ so symlinks survive the cache-mount unmount.
