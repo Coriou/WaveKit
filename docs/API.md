@@ -1161,9 +1161,7 @@ more than one `decoder:status` per transition; always apply the latest.
 	"type": "source:connected",
 	"channel": "sources",
 	"data": {
-		"id": "sdrpp-main",
-		"host": "192.168.1.69",
-		"port": 5555
+		"sourceId": "sdrpp-main"
 	}
 }
 ```
@@ -1175,7 +1173,7 @@ more than one `decoder:status` per transition; always apply the latest.
 	"type": "source:disconnected",
 	"channel": "sources",
 	"data": {
-		"id": "sdrpp-main",
+		"sourceId": "sdrpp-main",
 		"error": "Connection reset by peer"
 	}
 }
