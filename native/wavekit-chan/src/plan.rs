@@ -24,9 +24,17 @@ pub struct StageSpec {
     pub stop_hz: f64,
 }
 
+/// A planned stage with its prototype. The planner builds every prototype to check the tap
+/// budget, so it hands them on and `ChannelDsp` never designs a filter a second time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedStage {
+    pub spec: StageSpec,
+    pub prototype: Vec<f32>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ChainPlan {
-    pub stages: Vec<StageSpec>,
+    pub stages: Vec<PlannedStage>,
 }
 
 /// The stage's prototype, designed at the upsampled rate `L × in_rate` with DC gain L
@@ -61,9 +69,14 @@ fn estimate_len(s: &StageSpec) -> usize {
     )
 }
 
-/// The tap budget is checked on the prototype `design_stage` actually builds.
-fn fits(s: &StageSpec) -> bool {
-    estimate_len(s) <= MAX_PROTOTYPE_TAPS && design_stage(s).len() <= MAX_PROTOTYPE_TAPS
+/// The stage's prototype when it fits the tap budget. The budget is checked on the prototype
+/// `design_stage` actually builds; the estimate only skips designs that cannot fit.
+fn build(s: StageSpec) -> Option<PlannedStage> {
+    if estimate_len(&s) > MAX_PROTOTYPE_TAPS {
+        return None;
+    }
+    let prototype = design_stage(&s);
+    (prototype.len() <= MAX_PROTOTYPE_TAPS).then_some(PlannedStage { spec: s, prototype })
 }
 
 /// Multiply-accumulates per second: each output costs one polyphase branch of len/L taps.
@@ -90,13 +103,17 @@ pub fn plan_chain(fs: u64, out: u64, bw: f64, tr: f64) -> Result<ChainPlan, Stri
     let mut stages = Vec::new();
     let mut r = fs;
     while r.is_multiple_of(2) && (r / 2) as f64 >= out as f64 * HALFBAND_MIN_RATIO {
-        stages.push(StageSpec {
+        let spec = StageSpec {
             l: 1,
             m: 2,
             in_rate: r as f64,
             out_rate: (r / 2) as f64,
             pass_hz: pass,
             stop_hz: (r / 2) as f64 - guard,
+        };
+        stages.push(PlannedStage {
+            prototype: design_stage(&spec),
+            spec,
         });
         r /= 2;
     }
@@ -110,7 +127,7 @@ pub fn plan_chain(fs: u64, out: u64, bw: f64, tr: f64) -> Result<ChainPlan, Stri
         pass_hz: pass,
         stop_hz: guard,
     };
-    if fits(&last) {
+    if let Some(last) = build(last) {
         stages.push(last);
         return Ok(ChainPlan { stages });
     }
@@ -146,9 +163,9 @@ pub fn plan_chain(fs: u64, out: u64, bw: f64, tr: f64) -> Result<ChainPlan, Stri
         }
     }
     candidates.sort_by(|x, y| x.0.total_cmp(&y.0));
-    let (_, a, b) = candidates
+    let (a, b) = candidates
         .into_iter()
-        .find(|(_, a, b)| fits(a) && fits(b))
+        .find_map(|(_, a, b)| Some((build(a)?, build(b)?)))
         .ok_or_else(|| format!("no feasible rational split for {fs}->{out}"))?;
     stages.push(a);
     stages.push(b);
@@ -160,11 +177,17 @@ mod tests {
     use super::*;
 
     fn halfbands(p: &ChainPlan) -> usize {
-        p.stages.iter().filter(|s| s.l == 1 && s.m == 2).count()
+        p.stages
+            .iter()
+            .filter(|s| s.spec.l == 1 && s.spec.m == 2)
+            .count()
     }
 
     fn ratio(p: &ChainPlan) -> f64 {
-        p.stages.iter().map(|s| s.l as f64 / s.m as f64).product()
+        p.stages
+            .iter()
+            .map(|s| s.spec.l as f64 / s.spec.m as f64)
+            .product()
     }
 
     #[test]
@@ -192,15 +215,17 @@ mod tests {
                 (ratio(&p) - out as f64 / fs as f64).abs() < 1e-12,
                 "{fs}->{out} exact ratio"
             );
-            for s in &p.stages {
+            for PlannedStage { spec: s, prototype } in &p.stages {
                 let n = crate::design::kaiser_len(
                     crate::design::DESIGN_ATTENUATION_DB,
                     (s.stop_hz - s.pass_hz) / (s.l as f64 * s.in_rate),
                 );
                 assert!(n <= MAX_PROTOTYPE_TAPS, "{fs}->{out} prototype {n}");
                 // The budget holds for the prototype actually built, not just Kaiser's estimate.
-                let built = design_stage(s).len();
+                let built = prototype.len();
                 assert!(built <= MAX_PROTOTYPE_TAPS, "{fs}->{out} built {built}");
+                // The carried prototype is the stage's design, so `ChannelDsp` can use it as is.
+                assert_eq!(prototype, &design_stage(s), "{fs}->{out}");
             }
         }
     }
@@ -209,7 +234,7 @@ mod tests {
     fn splits_525_over_1024_into_two_rational_stages() {
         let p = plan_chain(2_048_000, 1_050_000, 997_500.0, 26_250.0).unwrap();
         assert_eq!(p.stages.len(), 2);
-        assert!(p.stages[0].out_rate >= 1_050_000.0 * HALFBAND_MIN_RATIO);
+        assert!(p.stages[0].spec.out_rate >= 1_050_000.0 * HALFBAND_MIN_RATIO);
     }
 
     #[test]
@@ -217,8 +242,8 @@ mod tests {
         // 2.048 Msps -> 1 MHz (ruling PF2): one 125/256 prototype would need ~41 000 taps.
         let p = plan_chain(2_048_000, 1_000_000, 950_000.0, 25_000.0).unwrap();
         assert_eq!(p.stages.len(), 2);
-        assert!(p.stages[0].out_rate >= 1_000_000.0 * HALFBAND_MIN_RATIO);
-        assert_eq!(p.stages[1].out_rate, 1_000_000.0);
+        assert!(p.stages[0].spec.out_rate >= 1_000_000.0 * HALFBAND_MIN_RATIO);
+        assert_eq!(p.stages[1].spec.out_rate, 1_000_000.0);
     }
 
     #[test]

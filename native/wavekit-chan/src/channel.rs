@@ -3,7 +3,7 @@
 
 use crate::{
     convert::f32_to_cu8,
-    plan::{design_stage, plan_chain},
+    plan::plan_chain,
     stages::{Nco, RationalFir},
 };
 
@@ -87,11 +87,12 @@ impl ChannelDsp {
         )?;
         let mut stages = Vec::new();
         let (mut taps, mut delay_s) = (0usize, 0.0f64);
-        for s in &plan.stages {
-            let proto = design_stage(s);
+        // The planner already built every prototype (to check its tap budget); none is designed again.
+        for st in &plan.stages {
+            let (s, proto) = (&st.spec, &st.prototype);
             taps += proto.len();
             delay_s += (proto.len() as f64 - 1.0) / 2.0 / (s.l as f64 * s.in_rate);
-            stages.push(RationalFir::new(s.l, s.m, &proto));
+            stages.push(RationalFir::new(s.l, s.m, proto));
         }
         let g = gcd(spec.output_rate, spec.input_rate);
         Ok(ChannelDsp {
