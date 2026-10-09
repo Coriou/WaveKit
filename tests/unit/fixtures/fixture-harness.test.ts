@@ -4,6 +4,7 @@ import { ConfigSchema } from "../../../src/config.js"
 import { FixtureSchema } from "../../integration/fixtures/manifest.js"
 import {
 	buildFixtureConfig,
+	fixtureApiPort,
 	isSubset,
 	keySet,
 	matchExpected,
@@ -85,6 +86,21 @@ describe("fixture harness helpers", () => {
 		expect(config.stateDir).toBe("/tmp/wk-state-19104")
 		expect(config.liveDemod).toEqual({ enabled: false })
 		expect(config.audio.tcpPort).toBe(19105)
+	})
+	it("strides api ports by 8 so api, audio and digital voice never collide (delta E2)", () => {
+		expect(fixtureApiPort(0, "raw")).toBe(19100)
+		expect(fixtureApiPort(0, "channelizer")).toBe(19104)
+		expect(fixtureApiPort(1, "raw")).toBe(19108)
+		const used = new Set<number>()
+		for (let index = 0; index < 50; index++) {
+			for (const path of ["raw", "channelizer"] as const) {
+				const api = fixtureApiPort(index, path)
+				for (const port of [api, api + 1, api + 2]) {
+					expect(used.has(port), `port ${port}`).toBe(false)
+					used.add(port)
+				}
+			}
+		}
 	})
 	it("passes the app config schema on both paths", () => {
 		for (const path of ["raw", "channelizer"] as const) {

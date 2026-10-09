@@ -12,6 +12,14 @@ export interface ObservedOutput {
 	data: Record<string, unknown>
 }
 
+/**
+ * Stride 8 per fixture, channelizer path at +4: each instance uses api, audio
+ * (+1) and digital voice (+2), so the two paths never overlap (delta E2).
+ */
+export function fixtureApiPort(index: number, path: FixturePath): number {
+	return 19100 + index * 8 + (path === "raw" ? 0 : 4)
+}
+
 export function goldenDecoderId(f: Fixture): string {
 	return `golden-${f.id}`.slice(0, 60)
 }
