@@ -157,18 +157,16 @@ describe("footer, confirm, switcher, help", () => {
 		)
 		expect(l.find(s => s.text === "Decoders")?.role).toBe("selected")
 	})
-	it("draws a 60-column help box with the legend and diagnostics", () => {
-		const lines = helpLines(ctx, 119, 35, {
-			invalidFrames: 2,
-			rejectedItems: 1,
-		}).map(lineText)
+	it("draws a 60-column help box with the legend", () => {
+		const lines = helpLines(ctx, 119, 35).map(lineText)
 		expect(lines[0]).toMatch(/┌─ keys · Decoders ─+┐/)
 		const box = lines.filter(l => l.trim() !== "")
 		for (const l of box) expect(cellWidth(l.trimStart())).toBe(60)
 		expect(lines.join("\n")).toContain(
-			"nominal  band from WaveKit's table · * configured target",
+			"band  core's targets or WaveKit's table · * configured",
 		)
-		expect(lines.join("\n")).toContain("frames rejected 2 · items rejected 1")
+		// The CLI's own counters live in System › CORE (polish C, fa173a5).
+		expect(lines.join("\n")).not.toContain("frames rejected")
 		expect(findBanned(lines.join("\n"))).toEqual([])
 	})
 })
@@ -219,7 +217,6 @@ describe("M6: rx uses windowFor and the age of its actual source", () => {
 
 describe("M11: help lists every binding of the view, from the keymap", () => {
 	afterEach(() => setGlyphMode("utf8"))
-	const diag = { invalidFrames: 0, rejectedItems: 0 }
 	const noSel: KeyContext = {
 		...ctx,
 		v: {
@@ -232,7 +229,7 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 		rows: 0,
 	}
 	const text = (c: KeyContext, height = 40) =>
-		helpLines(c, 119, height, diag).map(lineText).join("\n")
+		helpLines(c, 119, height).map(lineText).join("\n")
 	it("is not filtered by selection or running state", () => {
 		const t = text(noSel)
 		for (const s of [
@@ -279,7 +276,7 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 	})
 	it("never cuts a label, and keeps the 60-column box in ASCII mode", () => {
 		setGlyphMode("ascii")
-		const lines = helpLines(noSel, 119, 40, diag).map(lineText)
+		const lines = helpLines(noSel, 119, 40).map(lineText)
 		const t = lines.join("\n")
 		expect(t).toContain("^v j k")
 		expect(t).not.toContain("...)")
@@ -406,10 +403,7 @@ describe("A8 fix 1: strip counts (I-B, R77) and window count (I-C)", () => {
 
 describe("polish: help copy", () => {
 	it("spells Shift-Tab out", () => {
-		const t = helpLines({ ...ctx, help: true }, 119, 40, {
-			invalidFrames: 0,
-			rejectedItems: 0,
-		})
+		const t = helpLines({ ...ctx, help: true }, 119, 40)
 			.map(lineText)
 			.join("\n")
 		expect(t).toContain("Shift-Tab")

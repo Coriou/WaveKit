@@ -11,6 +11,7 @@ import {
 } from "../data/decoder-state.js"
 import { isFresh, isOld, serverNow } from "../data/freshness.js"
 import { memoOne } from "../data/memo.js"
+import { isRateReason } from "../data/reason-codes.js"
 import {
 	bandLabel,
 	configuredNote,
@@ -57,9 +58,13 @@ export interface DecoderFacts {
 	backpressure: boolean
 	lifetime: number | null
 	membership: Membership
-	/** Band label (`tuned`, `1090.000`, …) or `?`; R40: tuned types always read `tuned`. */
+	/** Band label (`tuned`, `1090.000`, …) or `?`; core's targets when it sends them (R90), else R40: tuned types read `tuned`. */
 	nominal: string
-	/** `configured` when core's targetFrequenciesHz drive the band (R15), else `nominal`; null when unknown. */
+	/**
+	 * Core's basis (`configured`, `protocol`, `decoder-default`) or `core` (no basis this
+	 * CLI knows) under its bandAssessment (R84); else `configured` (R15) or `nominal`; null
+	 * when unknown.
+	 */
 	bandOrigin: BandOrigin | null
 	/** R40 detail annotation for targets a tuned decoder does not apply, else null. */
 	bandNote: string | null
@@ -217,22 +222,9 @@ function countdown(f: DecoderFacts): string | null {
 /** R84: core's reason in one word; a code this CLI does not know adds nothing (the detail quotes it). */
 function suspendedWords(code: string | undefined, sep: string): string {
 	if (code === "frequency-out-of-band") return `suspended${sep}out of band`
-	if (code !== undefined && RATE_CODES.has(code)) return `suspended${sep}rate`
+	if (code !== undefined && isRateReason(code)) return `suspended${sep}rate`
 	return "suspended"
 }
-
-const RATE_CODES: ReadonlySet<string> = new Set([
-	"insufficient-sample-rate",
-	"unsupported-sample-rate",
-	"unsupported-input-kind",
-	"unsupported-input-format",
-	"unsupported-frontend-rate",
-	"unsupported-decoder-input-rate",
-	"unknown-requirements",
-	"source-rate-unknown",
-	"adaptation-unknown",
-	"external-input",
-])
 
 /**
  * The words that tell this process state apart, without restart counts (one text per

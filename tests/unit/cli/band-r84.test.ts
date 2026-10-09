@@ -305,7 +305,7 @@ describe("R84 retune impact prefers core's assessment", () => {
 			retuneImpact([subject({ verdict: "unknown" })], from, at(CENTRE)).unknown,
 		).toEqual(["x"])
 	})
-	it("a rate change falls back to the nominal table (core's half-width no longer applies)", () => {
+	it("a rate change scales core's capture-limited half-width (R90 I3)", () => {
 		const readsb = {
 			id: "readsb",
 			type: "readsb",

@@ -6,7 +6,6 @@ import type {
 	TunerStateField,
 } from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
-import { decoderBand } from "../data/nominal-bands.js"
 import { aggregateDropNow, MIN_DROP_SPAN_MS } from "../data/rates.js"
 import type {
 	AppState,
@@ -16,6 +15,7 @@ import type {
 } from "../data/types.js"
 import {
 	decoderMembership,
+	followsCentre,
 	retuneCandidates,
 	retuneImpact,
 	windowFor,
@@ -670,8 +670,8 @@ function membershipLists(
 		sourceId,
 	)
 	for (const d of decoders) {
-		// R40: tuned types follow the centre whatever their configured targets.
-		if (decoderBand(d)?.band.kind === "tuned") {
+		// R40 for older cores only; under core's assessment it places every type (R90).
+		if (followsCentre(d)) {
 			tuned.push(d.id)
 			continue
 		}
