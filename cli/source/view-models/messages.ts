@@ -1,3 +1,4 @@
+import { memoOne } from "../data/memo.js"
 import { ringNewestSeq } from "../data/ring-buffer.js"
 import type {
 	AircraftLookup,
@@ -429,7 +430,10 @@ interface Layout {
 	detailRows: number
 }
 
-function layout(
+/** messagesKeys and messagesModel run in the same commit with the same arguments: lay out once (D3). */
+const layout = memoOne(layoutOf)
+
+function layoutOf(
 	state: AppState,
 	ui: UiState,
 	width: number,

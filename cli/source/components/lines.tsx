@@ -2,7 +2,7 @@ import { Box, Text } from "ink"
 import { createContext, useContext, type ReactElement } from "react"
 import type { Line } from "../ui/line.js"
 import { lineText, lineWidth } from "../ui/text.js"
-import { roleProps } from "../ui/theme.js"
+import { roleProps, type InkTextProps } from "../ui/theme.js"
 
 export const ColorContext = createContext(true)
 
@@ -15,6 +15,36 @@ export const StrictFitContext = createContext<{ cols: number } | null>(null)
 
 function overflow(what: string): never {
 	throw new Error(`strict fit: ${what}`)
+}
+
+interface Run {
+	text: string
+	props: InkTextProps
+	plain: boolean
+}
+
+const styleKey = (p: InkTextProps): string =>
+	`${p.color ?? ""}|${p.bold === true ? 1 : 0}|${p.dimColor === true ? 1 : 0}|${p.inverse === true ? 1 : 0}`
+
+/**
+ * Adjacent spans that resolve to the same Ink style become one run, and an
+ * unstyled run is a bare string: the same output with a fraction of the React
+ * elements, which Ink re-renders on every commit (D3).
+ */
+export function styleRuns(line: Line, color: boolean): Run[] {
+	const out: Run[] = []
+	let key = ""
+	for (const s of line) {
+		const props = roleProps(s.role, color, s.bold === true)
+		const k = styleKey(props)
+		const last = out[out.length - 1]
+		if (last && k === key) last.text += s.text
+		else {
+			out.push({ text: s.text, props, plain: k === "|0|0|0" })
+			key = k
+		}
+	}
+	return out
 }
 
 export function LineView({
@@ -36,14 +66,19 @@ export function LineView({
 			overflow(`line ${used} > ${room} cols: ${lineText(line).slice(0, 40)}`)
 	}
 	if (line.length === 0) return <Text> </Text>
+	const runs = styleRuns(line, color)
 	return (
 		<Text wrap="truncate-end">
 			{" ".repeat(indent)}
-			{line.map((s, i) => (
-				<Text key={i} {...roleProps(s.role, color, s.bold === true)}>
-					{s.text}
-				</Text>
-			))}
+			{runs.map((r, i) =>
+				r.plain ? (
+					r.text
+				) : (
+					<Text key={i} {...r.props}>
+						{r.text}
+					</Text>
+				),
+			)}
 		</Text>
 	)
 }
