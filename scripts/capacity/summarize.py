@@ -9,14 +9,25 @@ the largest branch queue seen at a sample instant. It is a lower bound, not a
 true high-water mark, because the fanout does not export a peak.
 
 With the channelizer on, "channelizer" reduces the app.log lines inside the
-measurement window (meta "windowWall", else the first and last sampler
-records): dropped and saturated samples are the growth of wavekit-chan's
-cumulative counters over the window (the last "channelizer stats" line in the
-window minus the last one before it), and only queue-overflow discontinuities
-inside the window count. The queue high-water mark is wavekit-chan's maximum
-since the channel opened, so it includes the warm-up;
-"queueHighWaterBytesAtWindowStart" is its value before the window.
+measurement window: dropped and saturated samples are the growth of
+wavekit-chan's cumulative counters over the window (the last "channelizer
+stats" line in the window minus the last one before it; a channel with no line
+before the window opened inside it and counts from zero), and only
+queue-overflow discontinuities inside the window count. The queue high-water
+mark is wavekit-chan's maximum since the channel opened, so it includes the
+warm-up; "queueHighWaterBytesAtWindowStart" is its value before the window.
 "cpuCores.wavekitChan" is the wavekit-chan processes' CPU over the window.
+
+Clock domains: pino's `time` in app.log and the sampler's `ts` both come from
+the container clock (sampler.py runs inside wkcap-app), so the window is the
+first-to-last sampler span. meta "windowWall" is the driver's host clock; it is
+used only if the sampler records carry no `ts`, and its offset from the sampler
+span is reported as "windowCoverage.hostClockSkewS". "windowCoverage" also
+gives the number of stats lines inside the window and how far the first and
+last of them sit from the window edges. With the channelizer on, "warnings"
+flags a window with no stats line, or one whose stats lines leave more than one
+stats interval (plus jitter) uncovered at either edge: its channelizer figures
+would otherwise read as zero.
 """
 
 import collections
@@ -32,6 +43,10 @@ def load(path):
 
 def by_id(rows):
     return {row.get("id"): row for row in rows} if isinstance(rows, list) else {}
+
+
+STATS_INTERVAL_S = 5  # wavekit-chan emits "stats" every 5 s (addendum §11)
+COVERAGE_SLACK_S = STATS_INTERVAL_S + 2
 
 
 def log_seconds(value):
@@ -56,6 +71,7 @@ def channelizer_stats(app_log, window=None):
     high_water, high_water_before, dropped, saturated = {}, {}, {}, {}
     last = {}  # channel id -> (droppedSamples, saturatedSamples) as last reported
     overflows = 0
+    stats_times = []  # times of the stats lines inside the window
     for line in app_log.splitlines():
         try:
             entry = json.loads(line)
@@ -64,8 +80,8 @@ def channelizer_stats(app_log, window=None):
         if not isinstance(entry, dict):
             continue
         inside = True
+        t = log_seconds(entry.get("time"))
         if window is not None:
-            t = log_seconds(entry.get("time"))
             if t is None or t > window[1]:
                 continue
             inside = t >= window[0]
@@ -73,6 +89,8 @@ def channelizer_stats(app_log, window=None):
             if inside:
                 overflows += 1
         elif entry.get("msg") == "channelizer stats":
+            if inside:
+                stats_times.append(t)
             for channel in entry.get("channels") or []:
                 cid = channel.get("id")
                 now = (channel.get("droppedSamples", 0), channel.get("saturatedSamples", 0))
@@ -83,8 +101,27 @@ def channelizer_stats(app_log, window=None):
                 if inside:
                     for totals, value, previous in ((dropped, now[0], before[0]), (saturated, now[1], before[1])):
                         totals[cid] = totals.get(cid, 0) + (value - previous if value >= previous else value)
+    edges = window is not None and stats_times
+    coverage = {"statsLines": len(stats_times),
+                "firstStatsAfterStartS": round(stats_times[0] - window[0], 1) if edges else None,
+                "lastStatsBeforeEndS": round(window[1] - stats_times[-1], 1) if edges else None}
     return {"queueHighWaterBytes": high_water, "queueHighWaterBytesAtWindowStart": high_water_before,
-            "droppedSamples": dropped, "saturatedSamples": saturated, "queueOverflowEvents": overflows}
+            "droppedSamples": dropped, "saturatedSamples": saturated, "queueOverflowEvents": overflows,
+            "windowCoverage": coverage}
+
+
+def coverage_warnings(stats):
+    """Why the window's channelizer figures cannot be trusted (channelizer on), if anything."""
+    coverage = stats["windowCoverage"]
+    if coverage["statsLines"] == 0:
+        return ["channelizer: no channelizer stats line inside the window (clock mismatch, or the "
+                "channelizer not running): its figures read as zero but are not measured"]
+    warnings = []
+    if (coverage["firstStatsAfterStartS"] or 0) > COVERAGE_SLACK_S:
+        warnings.append(f"channelizer: first stats line {coverage['firstStatsAfterStartS']} s after the window start")
+    if (coverage["lastStatsBeforeEndS"] or 0) > COVERAGE_SLACK_S:
+        warnings.append(f"channelizer: last stats line {coverage['lastStatsBeforeEndS']} s before the window end")
+    return warnings
 
 
 def summarize(run):
@@ -159,7 +196,13 @@ def summarize(run):
     chan = groups.get("wavekit-chan", collections.Counter())
     app_log = (run / "app.log").read_text(errors="replace") if (run / "app.log").exists() else ""
     wall = meta.get("windowWall") or {}
-    window = (wall["start"], wall["end"]) if "start" in wall and "end" in wall else (first["ts"], last["ts"])
+    has_wall = isinstance(wall.get("start"), (int, float)) and isinstance(wall.get("end"), (int, float))
+    has_ts = isinstance(first.get("ts"), (int, float)) and isinstance(last.get("ts"), (int, float))
+    window = (first["ts"], last["ts"]) if has_ts else (wall["start"], wall["end"]) if has_wall else None
+    chan_stats = channelizer_stats(app_log, window)
+    chan_stats["windowCoverage"]["hostClockSkewS"] = (
+        round(wall["start"] - first["ts"], 1) if has_wall and has_ts else None)
+    warnings = coverage_warnings(chan_stats) if meta.get("channelizer") == "on" else []
     return {
         "run": run.name,
         "rate": meta["rate"], "buffers": meta["buffers"], "decoders": meta["decoders"],
@@ -192,7 +235,8 @@ def summarize(run):
                          "dropFraction": round(total_dropped / total_written, 6)
                          if total_written else None},
         "branches": branch_rows,
-        "channelizer": channelizer_stats(app_log, window),
+        "channelizer": chan_stats,
+        "warnings": warnings,
         "decoders": decoders,
         "source": fake[-1] if fake else None,
         "sourceConnections": sum(1 for e in fake if e.get("event") == "connected"),

@@ -428,7 +428,8 @@ def main():
                     aborted = f"VM MemAvailable {vm} MiB below {options.min_available_mib}"
                     break
         window_end_wall = time.time()
-        # Host clock; summarize.py restricts the app.log channelizer figures to it.
+        # Host clock. summarize.py windows app.log by the sampler span (container clock, like pino)
+        # and reports this one's offset from it as hostClockSkewS.
         meta["windowWall"] = {"start": window_start_wall, "end": window_end_wall}
         problems = decoder_problems(decoder_statuses(), expected_ids)
         meta["decoderStatus"]["end"] = problems

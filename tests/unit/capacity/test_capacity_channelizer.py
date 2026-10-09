@@ -185,7 +185,8 @@ class ChannelizerSummary(unittest.TestCase):
         ])
         self.assertEqual(s.channelizer_stats(log), {
             "queueHighWaterBytes": {"b-g2": 7}, "queueHighWaterBytesAtWindowStart": {},
-            "droppedSamples": {"b-g2": 2}, "saturatedSamples": {"b-g2": 4}, "queueOverflowEvents": 0})
+            "droppedSamples": {"b-g2": 2}, "saturatedSamples": {"b-g2": 4}, "queueOverflowEvents": 0,
+            "windowCoverage": {"statsLines": 2, "firstStatsAfterStartS": None, "lastStatsBeforeEndS": None}})
 
     def test_summarize_reports_channelizer_and_its_cpu(self):
         s = load("summarize")
@@ -220,7 +221,9 @@ class ChannelizerSummary(unittest.TestCase):
         s = load("summarize")
         self.assertEqual(s.channelizer_stats(""), {"queueHighWaterBytes": {}, "queueHighWaterBytesAtWindowStart": {},
                                                    "droppedSamples": {}, "saturatedSamples": {},
-                                                   "queueOverflowEvents": 0})
+                                                   "queueOverflowEvents": 0,
+                                                   "windowCoverage": {"statsLines": 0, "firstStatsAfterStartS": None,
+                                                                      "lastStatsBeforeEndS": None}})
 
     # Window 1000-1010 s (meta windowWall); pino isoTime stamps. 2001-09-09T01:46:40Z is epoch 1e9.
     WARMUP_AND_TEARDOWN_LOG = "\n".join([
@@ -246,6 +249,7 @@ class ChannelizerSummary(unittest.TestCase):
             "droppedSamples": {"a": 7, "b": 3},  # 47 - 40; b opened inside the window
             "saturatedSamples": {"a": 3, "b": 0},
             "queueOverflowEvents": 1,
+            "windowCoverage": {"statsLines": 2, "firstStatsAfterStartS": 4.0, "lastStatsBeforeEndS": 1.0},
         })
 
     def test_counter_restart_inside_the_window(self):
@@ -259,22 +263,46 @@ class ChannelizerSummary(unittest.TestCase):
         r = s.channelizer_stats(log, (1_000_000_000.0, 1_000_000_010.0))
         self.assertEqual(r["droppedSamples"], {"a": 14})
 
-    def test_summarize_uses_the_window_in_meta(self):
+    def summary(self, ts_span, log, **meta):
         s = load("summarize")
         with tempfile.TemporaryDirectory() as d:
             run = pathlib.Path(d)
-            (run / "meta.json").write_text(json.dumps({
-                "rate": 2048000, "buffers": "on", "decoders": ["a"],
-                "windowWall": {"start": 1_000_000_000.0, "end": 1_000_000_010.0}}))
-            sample = {"ts": 0, "t": 0, "cpu": {"usage_usec": 0, "user_usec": 0, "system_usec": 0,
-                                               "throttled_usec": 0},
+            (run / "meta.json").write_text(json.dumps({"rate": 2048000, "buffers": "on", "decoders": ["a"], **meta}))
+            sample = {"t": 0, "cpu": {"usage_usec": 0, "user_usec": 0, "system_usec": 0, "throttled_usec": 0},
                       "mem": {"current": 1, "peak": 1, "anon": 0, "shmem": 0}, "memEvents": {},
                       "decoders": [], "branches": []}
-            (run / "samples.jsonl").write_text(json.dumps(sample) + "\n" + json.dumps({**sample, "ts": 10, "t": 10}) + "\n")
-            (run / "app.log").write_text(self.WARMUP_AND_TEARDOWN_LOG + "\n")
-            r = s.summarize(run)
-        self.assertEqual((r["channelizer"]["droppedSamples"], r["channelizer"]["queueOverflowEvents"]),
-                         ({"a": 7, "b": 3}, 1))
+            (run / "samples.jsonl").write_text("".join(json.dumps({**sample, "ts": ts}) + "\n" for ts in ts_span))
+            (run / "app.log").write_text(log + "\n")
+            return s.summarize(run)
+
+    def test_window_is_the_sampler_span_despite_host_clock_skew(self):
+        # windowWall (host clock) is an hour off; the sampler ts shares pino's container clock.
+        r = self.summary((1_000_000_000.0, 1_000_000_010.0), self.WARMUP_AND_TEARDOWN_LOG, channelizer="on",
+                         windowWall={"start": 1_000_003_600.0, "end": 1_000_003_610.0})
+        c = r["channelizer"]
+        self.assertEqual((c["droppedSamples"], c["saturatedSamples"], c["queueOverflowEvents"]),
+                         ({"a": 7, "b": 3}, {"a": 3, "b": 0}, 1))
+        self.assertEqual(c["windowCoverage"]["statsLines"], 2)
+        self.assertEqual(c["windowCoverage"]["hostClockSkewS"], 3600.0)
+        self.assertEqual(r["warnings"], [])
+
+    def test_no_stats_line_in_the_window_is_flagged(self):
+        r = self.summary((2_000_000_000.0, 2_000_000_010.0), self.WARMUP_AND_TEARDOWN_LOG, channelizer="on")
+        self.assertEqual(r["channelizer"]["droppedSamples"], {})
+        self.assertEqual(r["channelizer"]["windowCoverage"]["statsLines"], 0)
+        self.assertEqual(len(r["warnings"]), 1)
+        self.assertIn("no channelizer stats line inside the window", r["warnings"][0])
+
+    def test_stats_that_stop_before_the_window_end_are_flagged(self):
+        # Last stats line at +14 s of a 30 s window: 16 s uncovered (> one 5 s interval).
+        r = self.summary((1_000_000_000.0, 1_000_000_030.0), self.WARMUP_AND_TEARDOWN_LOG, channelizer="on")
+        self.assertEqual(r["channelizer"]["windowCoverage"]["lastStatsBeforeEndS"], 16.0)
+        self.assertEqual(len(r["warnings"]), 1)
+        self.assertIn("16.0 s before the window end", r["warnings"][0])
+
+    def test_channelizer_off_needs_no_stats(self):
+        r = self.summary((2_000_000_000.0, 2_000_000_010.0), "", channelizer="off")
+        self.assertEqual(r["warnings"], [])
 
 if __name__ == "__main__":
     unittest.main()
