@@ -27,11 +27,21 @@ fixtures/
 ./fixtures/test-decoders.sh
 ```
 
-## Adding Fixtures
+## Manifest v2
 
-Edit `manifest.yaml` to add new fixtures. Required fields:
+`manifest.yaml` is validated by `tests/integration/fixtures/manifest.ts`
+(`pnpm exec vitest run tests/unit/fixtures/manifest-v2.test.ts`). Each fixture
+records `id`, `role` (`channelizer-golden` | `tail-golden` | `parser-transcript` |
+`negative`), `decoder`, `license`, `provenance`, `fetch`, `file` (under `raw/`),
+`sha256` of that file, `format`, `sample_rate`, `center_hz`, `duration_s` and
+`expected` decodes (`min_count`, `payloads`, `key_fields`). Unverified sources stay
+in `candidates` with `blockers`.
 
-- `id`: Unique identifier
-- `decoder`: Target decoder name
-- `source_url`: Download URL
-- `expected_output`: Pattern or count to validate
+Privacy: own captures contain real identifiers (pager, ACARS, AIS, DMR, VDL2).
+They use `license: private` and `fetch.kind: private`, are trimmed to the
+shortest window holding the expected decodes, and are never committed.
+`download.sh` copies them from `WAVEKIT_PRIVATE_FIXTURES_DIR` (a path or an
+https base URL) and verifies sha256.
+
+Goldens: `tests/integration/iq-fixture-goldens.test.ts` (env-gated; see its header).
+`test-decoders.sh` stays a manual tool and is not a gate.
