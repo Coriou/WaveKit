@@ -134,6 +134,23 @@ pass physical clean-card acceptance before being considered release-ready.
 First boot still needs internet to install system packages. No separate payload
 staging or SSH installation command is part of this workflow.
 
+On the image, `http://<hostname>.local/` is the one address to open: port 80
+shows the setup page while first boot runs (and whenever setup failed or was
+interrupted), then the receiver status page once setup is complete and that
+page answers. The small port-80 server (`scripts/pi-boot-status.py`) starts
+before Docker on every boot and relays to the receiver on port 8080 once it is
+ready, so there is no hand-over gap; if the receiver stops answering, port 80
+falls back to the setup page. Port 8080 keeps serving the status page and API
+directly, for WaveKit's monitoring and the Docker health check.
+
+The image also keeps a persistent system journal, capped for SD cards (48 MB,
+8 MB files, a month, 256 MB kept free), and records once per boot how the
+previous boot ended (`/var/lib/wavekit/status/last-boot.json`): its last
+journal entry, whether it reached a clean shutdown, under-voltage or throttling
+flagged by the firmware since power-on, and a watchdog reset when the driver
+reports one. The status page names an unexpected restart under Uptime and in
+Diagnostics; `journalctl -b -1` shows the previous boot's log.
+
 To build the SD image, first create the ARM64 bundle with `make sdr-host-bundle`.
 Install Python 3, `xz` and e2fsprogs (`debugfs` and `e2fsck`) on the build computer,
 then supply a pristine Raspberry Pi OS Lite ARM64 `.img.xz` and its trusted
@@ -408,11 +425,23 @@ bash ./packages/sdr-host/scripts/docker-cleanup.sh --aggressive --volumes
 
 ## Status page and API
 
-Open `http://<pi-host>:8080/` for the read-only operator page: upstream sample
-flow, receiver chain, power, host readouts and first-boot setup. It is a few
-static files served from memory (gzip, ETag revalidation, strict same-origin
-CSP), polls every 3 s while visible, and pauses when the tab is hidden. See
-[the setup guide](../../docs/SDR-HOST-SETUP.md#status-page) for what each part means.
+Open `http://<pi-host>/` on an image install, or `http://<pi-host>:8080/` on
+any install, for the read-only operator page: the sampling
+verdict and rate, five minutes of sample flow, CPU, memory, SoC temperature and
+power dips on one time base, the IQ endpoint to paste into WaveKit with its
+dongle, tuning and clients, and the Pi's power, network, storage and uptime. It
+is a few static files served from memory (gzip, ETag revalidation, strict
+same-origin CSP), polls every 3 s while visible, and pauses when the tab is
+hidden. See [the setup guide](../../docs/SDR-HOST-SETUP.md#status-page) for what
+each part means. Brand fonts and the wordmark are vendored in `ui/brand/`.
+
+To work on the pages without a Pi, run
+`node packages/sdr-host/scripts/ui-preview.mjs` and open
+`http://127.0.0.1:8090/`: it serves `ui/` unchanged over simulated receivers,
+one scenario per page state (sampling, client-set rate, below rate with
+under-voltage, stalled, dongle missing, zero or several clients, Ethernet, weak
+Wi-Fi, fresh start, first-boot setup, unreachable, lost contact, and every
+setup-page state).
 
 ### GET /health
 
@@ -441,7 +470,10 @@ cached values turn stale after 6 s and are dropped after 30 s.
 Pi host telemetry (`SdrHostTelemetry`), sampled in the background so requests
 cost no I/O. Every section is a `Reading` with `state` (`ok`, `stale`,
 `unavailable`), `scope` (`host`, `container`, `docker-storage`, `service`),
-age and a `reason` when unavailable. The container is not privileged:
+age and a `reason` when unavailable. `history` carries five minutes of CPU,
+memory, temperature and under-voltage dips per 2 s collection for the page's
+trend channels, and `lastBoot` how the previous boot ended (image installs
+only). The container is not privileged:
 throttling flags are reported unavailable, and under-voltage history covers only
 what the service observed since it started.
 
@@ -456,6 +488,7 @@ Returns copy-paste fix commands when issues are detected.
 | 5555 | rtlmux  | IQ data stream (WaveKit connects here) |
 | 5556 | rtlmux  | Stats HTTP endpoint                    |
 | 8080 | API     | Status page, health and status API     |
+| 80   | Image   | Setup page, then the status page       |
 
 ## Troubleshooting
 

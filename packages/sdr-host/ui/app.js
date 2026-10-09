@@ -2,27 +2,34 @@
 // flight at a time, paused while the tab is hidden, backing off on failure.
 import {
 	REQUEST_TIMEOUT_MS,
-	TRACE_AVERAGE_MS,
+	flowRate,
 	formatAge,
 	formatAgePrecise,
 	formatBytes,
+	formatDuration,
 	formatRate,
 	formatRateText,
+	lastBoot,
 	linkState,
 	nextDelay,
 	plotMax,
 	power,
 	readouts,
+	recentDips,
 	setupLine,
 	smoothTrace,
-	stages,
+	stream,
 	tracePath,
+	trends,
 	verdict,
 } from "./model.js"
 
 const PLOT_W = 600
-const PLOT_H = 200
+/** SoC temperature strip spans 20–90 °C. */
+const TEMP_MIN = 20
+const TEMP_SPAN = 70
 const $ = id => document.getElementById(id)
+const channel = key => document.querySelector(`.channel[data-key="${key}"]`)
 
 const state = {
 	status: null,
@@ -33,6 +40,11 @@ const state = {
 	timer: null,
 	controller: null,
 	marker: null,
+	series: null,
+	flow: [],
+	flowMax: 1,
+	trends: null,
+	values: null,
 }
 
 async function getJson(url, signal) {
@@ -62,6 +74,14 @@ async function poll() {
 		])
 		state.status = status
 		state.host = host
+		// Derived once per reading; the one-second tick only scrolls them.
+		state.flow = smoothTrace(status.samplingHistory?.points ?? [])
+		state.flowMax = plotMax(
+			status.sampling?.upstream?.expectedBytesPerSec ?? null,
+			state.flow,
+		)
+		state.trends = trends(host)
+		state.values = readouts(host)
 		state.receivedAt = performance.now()
 		state.failures = 0
 	} catch {
@@ -93,9 +113,8 @@ function linkInput() {
 function render() {
 	renderLink()
 	renderScreen()
-	renderChain()
-	renderPower()
-	renderReadouts()
+	renderStream()
+	renderHost()
 	renderSetup()
 	renderDiagnostics()
 }
@@ -108,171 +127,257 @@ function renderLink() {
 
 let lastVerdictTitle = ""
 function renderScreen() {
+	const fresh = isFresh()
 	const v = verdict({
 		status: state.status,
 		host: state.host,
-		fresh: isFresh(),
+		fresh,
+		failures: state.failures,
 	})
+	// Until a first reading arrives, the screen's verdict is the whole page.
+	document.body.dataset.empty = String(!state.status)
 	$("screen").dataset.state = v.state
+	$("screen").dataset.fresh = String(fresh)
 	// Only state changes are announced; numbers update silently.
 	if (v.title !== lastVerdictTitle) {
 		$("verdict").textContent = v.title
 		lastVerdictTitle = v.title
 	}
 	$("verdict-detail").textContent = v.detail
-
-	const sampling = state.status?.sampling
-	const upstream = sampling?.upstream
-	const rate = formatRate(isFresh() ? upstream?.bytesPerSec : null)
+	const rate = flowRate(state.status, fresh)
 	$("rate-value").textContent = rate.value
 	$("rate-unit").textContent = rate.value === "—" ? "" : rate.unit
-	$("screen").dataset.fresh = String(isFresh())
-	const expected = upstream?.expectedBytesPerSec
-	// The expected figure is printed on its line in the plot; here only the ratio.
-	if (expected && upstream?.bytesPerSec != null && isFresh()) {
-		$("rate-expected").textContent =
-			`${Math.round((upstream.bytesPerSec / expected) * 100)}% of expected`
-	} else if (expected) {
-		// The expected rate stays labelled on its line in the plot.
-		$("rate-expected").textContent = "No current reading"
-	} else {
-		$("rate-expected").textContent =
-			upstream?.rateBasis === "client-controlled"
-				? "Rate set by a client"
-				: "No expected rate"
-	}
-	renderPlot()
+	$("rate-sub").textContent = rate.sub
+	// Without a current figure the verdict already says so; no lone dash.
+	document.querySelector(".screen__rate").hidden = rate.value === "—"
+	renderScope(fresh)
 }
 
-function renderPlot() {
-	const history = state.status?.samplingHistory
-	const points = history?.points ?? []
-	const windowMs = history?.windowMs ?? 300_000
+/** Time since the snapshot arrived; ages grow by it so traces keep scrolling. */
+function drift() {
+	return state.receivedAt == null ? 0 : performance.now() - state.receivedAt
+}
+
+function aged(points, by) {
+	return points.map(([age, value]) => [age + by, value])
+}
+
+/** Draw a channel's trace, scaled to its own SVG viewBox height. */
+function draw(el, points, { windowMs, max, area = false }) {
+	const height = el.querySelector("svg").viewBox.baseVal.height
+	const trace = tracePath(points, { windowMs, width: PLOT_W, height, max })
+	el.querySelector(".plot__trace").setAttribute("d", trace.d)
+	if (area) el.querySelector(".plot__area").setAttribute("d", trace.area)
+	return height
+}
+
+/** Host channels: [key, offset, full scale]. */
+const HOST_CHANNELS = [
+	["cpu", 0, 100],
+	["memory", 0, 100],
+	["temperature", TEMP_MIN, TEMP_SPAN],
+]
+
+function renderScope(fresh) {
+	const windowMs = state.status?.samplingHistory?.windowMs ?? 300_000
 	const expected = state.status?.sampling?.upstream?.expectedBytesPerSec ?? null
-	const max = plotMax(expected, points)
-	// Age the snapshot by the time since it arrived so the trace keeps scrolling honestly.
-	const drift =
-		state.receivedAt == null ? 0 : performance.now() - state.receivedAt
-	const aged = smoothTrace(points).map(([age, value]) => [age + drift, value])
-	const trace = tracePath(aged, {
-		windowMs,
-		width: PLOT_W,
-		height: PLOT_H,
-		max,
-	})
-	$("plot-trace").setAttribute("d", trace.d)
-	$("plot-area").setAttribute("d", trace.area)
-	$("plot-gaps").setAttribute(
+	const shift = drift()
+	const flow = aged(state.flow, shift)
+	const max = state.flowMax
+	const flowEl = channel("flow")
+	const height = draw(flowEl, flow, { windowMs, max, area: true })
+	const scale = formatRate(max)
+	flowEl.querySelector(".channel__value").textContent = state.status
+		? `0–${Number(scale.value)} ${scale.unit}`
+		: ""
+
+	// The expected rate is labelled where its line is drawn.
+	const line = flowEl.querySelector(".plot__expected")
+	const label = flowEl.querySelector(".plot__label--expected")
+	const y = expected ? height - (expected / max) * height : 0
+	line.style.display = expected ? "" : "none"
+	line.setAttribute("y1", y.toFixed(1))
+	line.setAttribute("y2", y.toFixed(1))
+	label.hidden = !expected
+	label.textContent = expected ? `Expected ${formatRateText(expected)}` : ""
+	label.style.top = `${((y / height) * 100).toFixed(2)}%`
+
+	// Before the receiver started there is no history to show; say so.
+	const runningMs =
+		state.status?.uptime == null ? null : state.status.uptime * 1000 + shift
+	const started = runningMs !== null && runningMs < windowMs
+	const startX = started ? PLOT_W - (runningMs / windowMs) * PLOT_W : 0
+	const start = flowEl.querySelector(".plot__start")
+	start.style.display = started ? "" : "none"
+	start.setAttribute("x1", startX.toFixed(1))
+	start.setAttribute("x2", startX.toFixed(1))
+	const startLabel = flowEl.querySelector(".plot__label--start")
+	startLabel.hidden = !started
+	startLabel.textContent = started
+		? `Receiver started ${formatAge(runningMs)}`
+		: ""
+	startLabel.style.left = `${((startX / PLOT_W) * 100).toFixed(2)}%`
+	flowEl.dataset.start = !started
+		? "none"
+		: startX > PLOT_W * 0.6
+			? "late"
+			: "early"
+
+	// Every channel shares the flow's time base.
+	const t = state.trends
+	const series = { windowMs, flow }
+	for (const [key, offset, span] of HOST_CHANNELS) {
+		series[key] = aged(t?.[key] ?? [], shift)
+		const el = channel(key)
+		draw(
+			el,
+			series[key].map(([age, v]) => [age, v === null ? null : v - offset]),
+			{ windowMs, max: span },
+		)
+		const r = state.values?.[key]
+		el.dataset.state = !r ? "unavailable" : fresh ? r.state : "stale"
+		el.querySelector(".channel__value").textContent = r ? r.value : "—"
+	}
+
+	series.dips = aged(t?.dips ?? [], shift)
+	const lane = channel("dips")
+	lane.hidden = !t
+	lane.querySelector(".lane__ticks").setAttribute(
 		"d",
-		trace.gaps
+		series.dips
+			.filter(([age, n]) => n > 0 && age <= windowMs)
 			.map(
-				([a, b]) =>
-					`M${a.toFixed(1)} 0H${b.toFixed(1)}V${PLOT_H}H${a.toFixed(1)}Z`,
+				([age]) => `M${(PLOT_W - (age / windowMs) * PLOT_W).toFixed(1)} 1V15`,
 			)
 			.join(""),
 	)
-	const y = expected ? PLOT_H - (expected / max) * PLOT_H : -10
-	$("plot-expected").setAttribute("y1", y.toFixed(1))
-	$("plot-expected").setAttribute("y2", y.toFixed(1))
-	// Label the dashed line where it is drawn, instead of a key below the plot.
-	const label = $("plot-label-expected")
-	label.hidden = !expected
-	label.textContent = expected ? `Expected ${formatRateText(expected)}` : ""
-	label.style.top = `${((y / PLOT_H) * 100).toFixed(2)}%`
-	$("plot-scale").textContent = [
-		`${Math.round(windowMs / 10 / 1000)} s/div`,
-		`${Math.round(TRACE_AVERAGE_MS / 1000)} s average`,
-		...(expected ? [] : [`full scale ${formatRateText(max)}`]),
-	].join(" · ")
-	state.plot = { points: aged, windowMs, max }
+	const recent = recentDips(state.host)
+	lane.dataset.state = !recent
+		? "unavailable"
+		: fresh
+			? power(state.host).state
+			: "stale"
+	lane.querySelector(".channel__value").textContent = !recent
+		? "—"
+		: recent.count === 0
+			? "None"
+			: `${recent.count}`
+
+	state.series = series
 	if (state.marker !== null) placeMarker(state.marker)
 }
 
-function drawGraticule() {
-	const g = $("graticule")
+function drawGraticules() {
 	const ns = "http://www.w3.org/2000/svg"
-	for (let i = 0; i <= 10; i++) {
-		const line = document.createElementNS(ns, "line")
-		const x = (PLOT_W / 10) * i
-		line.setAttribute("x1", x)
-		line.setAttribute("x2", x)
-		line.setAttribute("y1", 0)
-		line.setAttribute("y2", PLOT_H)
-		if (i === 0 || i === 10) line.setAttribute("class", "major")
-		g.append(line)
-	}
-	// Five divisions: the expected rate lands on the fourth (see plotMax).
-	for (let i = 0; i <= 5; i++) {
-		const line = document.createElementNS(ns, "line")
-		const yy = (PLOT_H / 5) * i
-		line.setAttribute("x1", 0)
-		line.setAttribute("x2", PLOT_W)
-		line.setAttribute("y1", yy)
-		line.setAttribute("y2", yy)
-		if (i === 5) line.setAttribute("class", "major")
-		g.append(line)
+	for (const g of document.querySelectorAll(".graticule")) {
+		const height = Number(
+			g.closest("svg").getAttribute("viewBox").split(" ")[3],
+		)
+		const rows = Number(g.dataset.rows)
+		const line = (x1, y1, x2, y2, major) => {
+			const el = document.createElementNS(ns, "line")
+			el.setAttribute("x1", x1)
+			el.setAttribute("y1", y1)
+			el.setAttribute("x2", x2)
+			el.setAttribute("y2", y2)
+			if (major) el.setAttribute("class", "major")
+			g.append(el)
+		}
+		// One vertical per 30 s; the shared time base of every channel.
+		for (let i = 0; i <= 10; i++)
+			line((PLOT_W / 10) * i, 0, (PLOT_W / 10) * i, height, false)
+		for (let i = 0; i <= rows; i++)
+			line(0, (height / rows) * i, PLOT_W, (height / rows) * i, i === rows)
 	}
 }
 
-/** Marker: read time and rate off the real samples; gaps read as "no data". */
+function nearest(points, age) {
+	let best = null
+	for (const point of points)
+		if (best === null || Math.abs(point[0] - age) < Math.abs(best[0] - age))
+			best = point
+	return best && Math.abs(best[0] - age) < 6000 ? best : null
+}
+
+/** Marker: one cursor across every channel, reading the real samples. */
 function placeMarker(fraction) {
-	const plot = state.plot
-	if (!plot) return
+	const series = state.series
+	if (!series) return
 	state.marker = Math.max(0, Math.min(1, fraction))
-	const ageAtMarker = (1 - state.marker) * plot.windowMs
-	let nearest = null
-	for (const point of plot.points) {
-		if (
-			nearest === null ||
-			Math.abs(point[0] - ageAtMarker) < Math.abs(nearest[0] - ageAtMarker)
-		)
-			nearest = point
+	const age = (1 - state.marker) * series.windowMs
+	const at = nearest(series.flow, age)
+	const reading = (points, format) => {
+		const point = nearest(points, age)
+		return point?.[1] == null ? "no data" : format(point[1])
 	}
-	const near =
-		nearest && Math.abs(nearest[0] - ageAtMarker) < 6000 ? nearest : null
-	const x = near
-		? PLOT_W - (near[0] / plot.windowMs) * PLOT_W
-		: state.marker * PLOT_W
-	const value = near?.[1] ?? null
-	const yy =
-		value === null ? PLOT_H : PLOT_H - Math.min(1, value / plot.max) * PLOT_H
-	$("marker-line").setAttribute("x1", x)
-	$("marker-line").setAttribute("x2", x)
-	$("marker-dot").setAttribute("cx", x)
-	$("marker-dot").setAttribute("cy", yy)
-	$("marker-dot").style.display = value === null ? "none" : ""
-	// SVG elements have no `hidden` property; toggle the attribute itself.
-	$("plot-marker").removeAttribute("hidden")
-	$("plot-frame").dataset.marker = "on"
+	const scope = $("scope")
+	const box = scope.getBoundingClientRect()
+	const plots = [...scope.querySelectorAll(".channel:not([hidden]) svg")]
+	const top = plots[0].getBoundingClientRect()
+	const bottom = plots[plots.length - 1].getBoundingClientRect()
+	const x = top.left - box.left + state.marker * top.width
+	const marker = $("marker")
+	marker.hidden = false
+	marker.style.left = `${x}px`
+	marker.style.top = `${top.top - box.top}px`
+	marker.style.height = `${bottom.bottom - top.top}px`
 	const readout = $("marker-readout")
 	readout.hidden = false
-	const ago = formatAgePrecise(near ? near[0] : ageAtMarker)
-	readout.textContent = `${ago} · ${value === null ? "no data" : formatRateText(value)}`
-	const svg = $("plot")
-	const box = svg.getBoundingClientRect()
-	const px = (x / PLOT_W) * box.width
-	readout.style.left = `${Math.min(Math.max(0, px - readout.offsetWidth / 2), box.width - readout.offsetWidth)}px`
+	const lines = [
+		formatAgePrecise(at ? at[0] : age),
+		`Flow ${reading(series.flow, formatRateText)}`,
+	]
+	if (series.cpu.length > 0)
+		lines.push(
+			`CPU ${reading(series.cpu, v => `${Math.round(v)}%`)}`,
+			`Memory ${reading(series.memory, v => `${Math.round(v)}%`)}`,
+			`SoC ${reading(series.temperature, v => `${v.toFixed(1)} °C`)}`,
+			`Dips ${reading(series.dips, v => String(v))}`,
+		)
+	readout.replaceChildren(
+		...lines.map(text => {
+			const span = document.createElement("span")
+			span.textContent = text
+			return span
+		}),
+	)
+	const width = readout.offsetWidth
+	const left = x + 12 + width > box.width ? x - 12 - width : x + 12
+	readout.style.left = `${Math.max(0, left)}px`
+	readout.style.top = `${top.top - box.top + 6}px`
 }
+
+/** Latest pointer position awaiting a frame; cleared when the cursor hides. */
+let pointerAt = null
 
 function hideMarker() {
+	pointerAt = null
 	state.marker = null
-	$("plot-marker").setAttribute("hidden", "")
+	$("marker").hidden = true
 	$("marker-readout").hidden = true
-	delete $("plot-frame").dataset.marker
 }
 
-function bindPlot() {
-	const svg = $("plot")
+function bindScope() {
+	const scope = $("scope")
 	const fractionOf = event => {
-		const box = svg.getBoundingClientRect()
+		const box = channel("flow").querySelector("svg").getBoundingClientRect()
 		return (event.clientX - box.left) / box.width
 	}
-	svg.addEventListener("pointermove", event => placeMarker(fractionOf(event)))
-	svg.addEventListener("pointerdown", event => placeMarker(fractionOf(event)))
-	svg.addEventListener("pointerleave", event => {
+	// Pointer moves outpace the screen; place the cursor once per frame.
+	let frame = 0
+	const follow = event => {
+		pointerAt = fractionOf(event)
+		frame ||= requestAnimationFrame(() => {
+			frame = 0
+			if (pointerAt !== null) placeMarker(pointerAt)
+		})
+	}
+	scope.addEventListener("pointermove", follow)
+	scope.addEventListener("pointerdown", follow)
+	scope.addEventListener("pointerleave", event => {
 		if (event.pointerType === "mouse") hideMarker()
 	})
-	svg.addEventListener("keydown", event => {
+	scope.addEventListener("keydown", event => {
 		const step = event.shiftKey ? 0.1 : 0.02
 		if (event.key === "ArrowLeft") placeMarker((state.marker ?? 1) - step)
 		else if (event.key === "ArrowRight") placeMarker((state.marker ?? 1) + step)
@@ -280,63 +385,79 @@ function bindPlot() {
 		else return
 		event.preventDefault()
 	})
-	svg.addEventListener("blur", hideMarker)
+	scope.addEventListener("blur", hideMarker)
 }
 
-function renderChain() {
-	const chain = stages(state.status)
+/** Fill a row: lamp state, value text and sub-line, dimmed when not current. */
+function setRow(el, row, fresh) {
+	el.dataset.state = !row ? "unknown" : fresh ? (row.state ?? "ok") : "stale"
+	el.querySelector(".row__text").textContent = row
+		? (row.text ?? row.value)
+		: "—"
+	const sub = row?.sub ?? ""
+	el.querySelector(".row__sub").textContent =
+		row && !fresh ? `Last known${sub ? ` · ${sub}` : ""}` : sub
+}
+
+function renderStream() {
+	const s = stream(state.status, state.host?.generatedAt ?? null)
 	const fresh = isFresh()
-	for (const [key, id] of [
-		["dongle", "stage-dongle"],
-		["rtltcp", "stage-rtltcp"],
-		["rtlmux", "stage-rtlmux"],
-		["clients", "stage-clients"],
-	]) {
-		const el = $(id)
-		const stage = chain?.[key]
-		el.dataset.state = stage && fresh ? stage.state : "unknown"
-		el.querySelector(".stage__word").textContent = stage ? stage.word : "—"
-		el.querySelector(".stage__fact").textContent = stage
-			? fresh
-				? stage.fact
-				: "last known"
-			: ""
+	$("endpoint").textContent = s?.endpoint ?? "—"
+	$("endpoint-copy").hidden = !s?.endpoint
+	setRow($("row-dongle"), s?.dongle, fresh)
+	setRow($("row-tuning"), s?.tuning, fresh)
+	const list = $("clients")
+	if (!s || !s.clientsKnown) {
+		list.replaceChildren(item("Unknown", "Delivery counters unavailable"))
+		return
 	}
+	list.replaceChildren(
+		...(s.clients.length === 0
+			? [
+					item(
+						"None connected",
+						"The Pi keeps reading the dongle; point WaveKit at the address above.",
+					),
+				]
+			: s.clients.map(c =>
+					item(
+						c.address,
+						fresh
+							? c.state === "warn"
+								? `${c.health}. ${[c.rate, c.since].join(" · ")}`
+								: [c.rate, c.health, c.since].filter(Boolean).join(" · ")
+							: "Last known",
+						fresh ? c.state : "stale",
+					),
+				)),
+	)
 }
 
-function renderPower() {
-	const p = power(state.host)
-	for (const window of p.windows) {
-		const el = document.querySelector(`.annunciator[data-key="${window.key}"]`)
-		if (!el) continue
-		el.dataset.state = isFresh() ? window.state : "unknown"
-		el.querySelector("small").textContent = isFresh()
-			? window.text
-			: "No current reading"
-	}
-	$("power-note").textContent = p.note
+function item(text, sub, tone = "") {
+	const li = document.createElement("li")
+	li.className = "client"
+	if (tone) li.dataset.state = tone
+	const lamp = document.createElement("span")
+	lamp.className = "lamp"
+	lamp.setAttribute("aria-hidden", "true")
+	const name = document.createElement("span")
+	name.className = "client__address"
+	name.textContent = text
+	const detail = document.createElement("span")
+	detail.className = "client__sub"
+	detail.textContent = sub
+	if (tone) li.append(lamp)
+	li.append(name, detail)
+	return li
 }
 
-function renderReadouts() {
-	const values = readouts(state.host)
+function renderHost() {
 	const fresh = isFresh()
-	for (const el of document.querySelectorAll(".readout")) {
-		const r = values?.[el.dataset.key]
-		el.dataset.state = !r ? "unavailable" : fresh ? r.state : "stale"
-		el.querySelector(".readout__value").textContent = r ? r.value : "—"
-		el.querySelector(".readout__sub").textContent = r
-			? fresh
-				? r.sub
-				: `last known · ${r.sub}`
-			: ""
-		const meter = el.querySelector(".meter > span")
-		if (meter)
-			meter.style.setProperty(
-				"--fill",
-				r?.fill == null
-					? "0"
-					: String(Math.max(0, Math.min(100, r.fill)) / 100),
-			)
+	setRow($("row-power"), state.host ? power(state.host) : null, fresh)
+	for (const el of document.querySelectorAll(".row[data-key]")) {
+		const r = state.values?.[el.dataset.key]
+		setRow(el, r ?? null, fresh)
+		if (el.dataset.key === "network") el.dataset.bars = String(r?.bars ?? 0)
 	}
 }
 
@@ -357,60 +478,18 @@ function renderSetup() {
 function renderDiagnostics() {
 	const status = state.status
 	if (!status) return
-	const tbody = $("clients")
-	const clients = status.delivery?.clients ?? []
-	tbody.replaceChildren(
-		...(clients.length === 0
-			? [
-					row(
-						[
-							"No downstream clients. rtlmux keeps reading the dongle; WaveKit connects here.",
-							"",
-							"",
-						],
-						true,
-					),
-				]
-			: clients.map(c =>
-					row([
-						c.address,
-						c.queuedBytesPerSec === null
-							? "measuring"
-							: formatRateText(c.queuedBytesPerSec),
-						c.droppedBytes > 0
-							? `${formatBytes(c.droppedBytes)} (${formatBytes(c.droppedBytesLast60s)} / 60 s)`
-							: "none",
-					]),
-				)),
-	)
 	const s = status.sampling
-	const pid = (name, p) => (p?.pid == null ? null : `${name} ${p.pid}`)
-	const pids = [pid("rtl_tcp", status.rtlTcp), pid("rtlmux", status.rtlmux)]
-		.filter(Boolean)
-		.join(" · ")
+	const proc = (name, p) =>
+		p
+			? `${name} ${p.running ? `pid ${p.pid ?? "?"}` : "stopped"}${p.restartCount ? ` · ${p.restartCount} restarts` : ""}`
+			: null
+	const h = state.host
 	facts($("facts-receiver"), [
-		["IQ endpoint", status.rtlmux?.endpoint],
-		["Process ids", pids || null],
-		["First-boot setup", state.host ? setupLine(state.host.setup).text : null],
 		[
-			"Configured rate",
-			status.rtlTcp?.config
-				? `${(status.rtlTcp.config.sampleRate / 1e6).toFixed(3)} MS/s`
-				: null,
-		],
-		[
-			"Initial frequency",
-			status.rtlTcp?.config
-				? `${(status.rtlTcp.config.frequency / 1e6).toFixed(4)} MHz`
-				: null,
-		],
-		[
-			"Gain",
-			status.rtlTcp?.config
-				? status.rtlTcp.config.agc
-					? "AGC"
-					: `${status.rtlTcp.config.gain} dB`
-				: null,
+			"Processes",
+			[proc("rtl_tcp", status.rtlTcp), proc("rtlmux", status.rtlmux)]
+				.filter(Boolean)
+				.join(" · ") || null,
 		],
 		[
 			"Read from dongle",
@@ -420,32 +499,44 @@ function renderDiagnostics() {
 		],
 		["Last sample", s?.lastSampleAt ? formatAge(s.sampleAgeMs) : "none yet"],
 		[
+			"Dropped for clients",
+			status.delivery
+				? `${formatBytes(status.delivery.droppedBytesSinceMonitorStart)} since the fan-out started`
+				: null,
+		],
+		[
 			"Counter resets",
 			s?.epoch
 				? `${s.epoch.resets}${s.epoch.lastResetReason ? ` · ${s.epoch.lastResetReason}` : ""}`
 				: null,
 		],
 		[
-			"Drops since start",
-			status.delivery
-				? formatBytes(status.delivery.droppedBytesSinceMonitorStart)
-				: null,
-		],
-		[
-			"rtlmux counters",
+			"Fan-out counters",
 			s
 				? `${s.stats.state}${s.stats.lastError ? ` · ${s.stats.lastError}` : ""}`
 				: null,
 		],
+		["First-boot setup", h ? setupLine(h.setup).text : null],
+		["Last reboot", h ? lastBoot(h).text : null],
+		[
+			"Throttling",
+			h?.power.throttling.value
+				? h.power.throttling.value.throttled
+					? "active"
+					: "clear"
+				: h
+					? `not measurable · ${h.power.throttling.reason}`
+					: null,
+		],
 	])
-	const h = state.host
 	if (!h) return
 	const describe = reading =>
 		reading.state === "unavailable"
 			? `unavailable · ${reading.reason}`
 			: `${scopeLabel(reading.scope)} · ${reading.state === "stale" ? `stale, ${formatAge(reading.ageMs)} old` : "fresh"}`
 	facts($("facts-sources"), [
-		["CPU, load, memory", describe(h.cpu)],
+		["CPU", `${state.values?.cpu.sub ?? ""} · ${describe(h.cpu)}`],
+		["Memory", `${state.values?.memory.sub ?? ""} · ${describe(h.memory)}`],
 		[
 			"Temperature",
 			h.temperature.value
@@ -455,12 +546,17 @@ function renderDiagnostics() {
 		["Storage", describe(h.disk)],
 		["Network", describe(h.network)],
 		["Under-voltage", describe(h.power.undervoltageNow)],
-		["Throttling", describe(h.power.throttling)],
 		[
 			"Receiver container",
 			h.container.value
 				? `${formatBytes(h.container.value.memoryBytes)} memory${h.container.value.cpuPercent === null ? "" : ` · ${h.container.value.cpuPercent}% CPU`}`
 				: describe(h.container),
+		],
+		[
+			"Host uptime",
+			h.uptime.value
+				? `${formatDuration(h.uptime.value.hostSec)} · ${describe(h.uptime)}`
+				: describe(h.uptime),
 		],
 	])
 }
@@ -476,23 +572,6 @@ function scopeLabel(scope) {
 	)
 }
 
-function row(cells, wide = false) {
-	const tr = document.createElement("tr")
-	if (wide) {
-		const td = document.createElement("td")
-		td.colSpan = 3
-		td.textContent = cells[0]
-		tr.append(td)
-		return tr
-	}
-	for (const cell of cells) {
-		const td = document.createElement("td")
-		td.textContent = cell
-		tr.append(td)
-	}
-	return tr
-}
-
 function facts(dl, entries) {
 	dl.replaceChildren(
 		...entries
@@ -505,6 +584,28 @@ function facts(dl, entries) {
 				return [dt, dd]
 			}),
 	)
+}
+
+/** Clipboard needs a secure context; plain http on the LAN falls back to a selection copy. */
+async function copyEndpoint() {
+	const text = $("endpoint").textContent ?? ""
+	let copied = false
+	try {
+		await navigator.clipboard.writeText(text)
+		copied = true
+	} catch {
+		const range = document.createRange()
+		range.selectNodeContents($("endpoint"))
+		const selection = window.getSelection()
+		selection?.removeAllRanges()
+		selection?.addRange(range)
+		copied = document.execCommand("copy")
+	}
+	const button = $("endpoint-copy")
+	button.textContent = copied ? "Copied" : "Select to copy"
+	setTimeout(() => {
+		button.textContent = "Copy"
+	}, 1600)
 }
 
 document.addEventListener("visibilitychange", () => {
@@ -523,9 +624,10 @@ window.addEventListener("pagehide", () => {
 })
 
 $("host-name").textContent = location.hostname || "This Pi"
-drawGraticule()
-bindPlot()
-// Keep ages, freshness and the scrolling trace honest between polls. When the
+$("endpoint-copy").addEventListener("click", () => void copyEndpoint())
+drawGraticules()
+bindScope()
+// Keep ages, freshness and the scrolling traces honest between polls. When the
 // page's own freshness changes (e.g. contact lost), every section re-renders so
 // no lamp stays green on old data.
 let lastLink = ""

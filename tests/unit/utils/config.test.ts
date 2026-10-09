@@ -902,6 +902,23 @@ describe("HealthConfigSchema", () => {
 		const result = HealthConfigSchema.safeParse(invalidHealth)
 		expect(result.success).toBe(false)
 	})
+
+	it("accepts optional signal-flat threshold and hold, within bounds", () => {
+		const ok = HealthConfigSchema.safeParse({
+			signalFlatThresholdDbfs: -45,
+			signalFlatHoldMs: 60_000,
+		})
+		expect(ok.success && ok.data.signalFlatThresholdDbfs).toBe(-45)
+		expect(HealthConfigSchema.parse({})).not.toHaveProperty(
+			"signalFlatThresholdDbfs",
+		)
+		expect(
+			HealthConfigSchema.safeParse({ signalFlatThresholdDbfs: 3 }).success,
+		).toBe(false)
+		expect(
+			HealthConfigSchema.safeParse({ signalFlatHoldMs: 500 }).success,
+		).toBe(false)
+	})
 })
 
 describe("Extended DecoderConfigSchema", () => {
@@ -1031,5 +1048,99 @@ api:
 		const config = loadConfig(configPath)
 
 		expect(config.health).toBeUndefined()
+	})
+})
+
+describe("band defaults config (region, stateDir, decoders[].band)", () => {
+	let tempDir: string
+	let originalEnv: NodeJS.ProcessEnv
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wavekit-band-config-"))
+		originalEnv = { ...process.env }
+		delete process.env["WAVEKIT_REGION"]
+		delete process.env["WAVEKIT_STATE_DIR"]
+	})
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true })
+		process.env = originalEnv
+	})
+
+	function write(yaml: string): string {
+		const configPath = path.join(tempDir, "config.yaml")
+		fs.writeFileSync(configPath, yaml)
+		return configPath
+	}
+
+	const decoderYaml = (band: string) =>
+		[
+			"decoders:",
+			"  - id: ism",
+			"    type: rtl433",
+			"    enabled: true",
+			"    options: {}",
+			band,
+		].join("\n")
+
+	it("defaults stateDir to data and leaves region unset", () => {
+		const config = loadConfig(write("sources: []\n"))
+		expect(config.stateDir).toBe("data")
+		expect(config.region).toBeUndefined()
+	})
+
+	it("accepts a case-insensitive region and rejects an unknown code", () => {
+		expect(loadConfig(write("region: us\n")).region).toBe("US")
+		expect(() => loadConfig(write("region: XX\n"))).toThrow(
+			ConfigValidationError,
+		)
+	})
+
+	it("reads WAVEKIT_REGION and WAVEKIT_STATE_DIR", () => {
+		process.env["WAVEKIT_REGION"] = "jp"
+		process.env["WAVEKIT_STATE_DIR"] = "/app/data"
+		const config = loadConfig(write("sources: []\n"))
+		expect(config.region).toBe("JP")
+		expect(config.stateDir).toBe("/app/data")
+	})
+
+	it("validates decoders[].band", () => {
+		const config = loadConfig(
+			write(
+				decoderYaml(
+					[
+						"    band:",
+						"      rangesHz:",
+						"        - { minHz: 433050000, maxHz: 434790000 }",
+						"      region: au",
+						"      bandSuspension: false",
+					].join("\n"),
+				),
+			),
+		)
+		expect(config.decoders[0]?.band).toEqual({
+			rangesHz: [{ minHz: 433_050_000, maxHz: 434_790_000 }],
+			region: "AU",
+			bandSuspension: false,
+		})
+		for (const bad of [
+			"    band: {}",
+			"    band: { rangesHz: [{ minHz: 2, maxHz: 1 }] }",
+			"    band: { targetsHz: [0] }",
+			"    band: { other: 1 }",
+		])
+			expect(() => loadConfig(write(decoderYaml(bad))), bad).toThrow(
+				ConfigValidationError,
+			)
+	})
+
+	it("overrides a decoder band scalar through the nested env form", () => {
+		process.env["WAVEKIT_DECODERS__0__BAND__BAND_SUSPENSION"] = "false"
+		process.env["WAVEKIT_DECODERS__0__BAND__REGION"] = "US"
+		const config = loadConfig(write(decoderYaml("")))
+		expect(config.decoders[0]?.band).toEqual({
+			bandSuspension: false,
+			region: "US",
+		})
 	})
 })

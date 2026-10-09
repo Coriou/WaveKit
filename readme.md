@@ -1,3 +1,8 @@
+<picture>
+	<source media="(prefers-color-scheme: dark)" srcset="packages/brand/logos/wavekit-lockup-on-dark.svg">
+	<img src="packages/brand/logos/wavekit-lockup-on-light.svg" width="400" alt="WaveKit — MAKE SENSE OF THE SPECTRUM">
+</picture>
+
 # WaveKit
 
 **Multi-protocol SDR signal decoder with real-time streaming**

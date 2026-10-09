@@ -395,14 +395,15 @@ describe("operator page and telemetry API", () => {
 		expect(script.body).toContain("api/host")
 		const font = await app.inject({
 			method: "GET",
-			url: "/fonts/barlow-500.woff2",
+			url: "/brand/D-DINCondensed.woff2",
 		})
 		expect(font.headers["cache-control"]).toContain("max-age")
 		expect(
 			(await app.inject({ method: "GET", url: "/../src/index.ts" })).statusCode,
 		).toBe(404)
 		expect(
-			(await app.inject({ method: "GET", url: "/fonts/OFL.txt" })).statusCode,
+			(await app.inject({ method: "GET", url: "/brand/OFL-D-DIN.txt" }))
+				.statusCode,
 		).toBe(404)
 	})
 })

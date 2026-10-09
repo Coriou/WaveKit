@@ -63,6 +63,31 @@ export const sourceRateMismatchSchema = {
 	],
 } as const
 
+/**
+ * Present only while the subsampled IQ level of an IQ network source
+ * (U8_IQ / S16_IQ) has stayed below `thresholdDbfs` for the hold time
+ * (default −40 dBFS for 30 s), e.g. an external client left the dongle at
+ * near-zero gain. Cleared after the same time at threshold + 3 dB or more.
+ * Warning only.
+ */
+export interface SourceSignalFlat {
+	/** Latest interval level (RMS of the IQ components about zero, dBFS). */
+	levelDbfs: number
+	thresholdDbfs: number
+	/** ISO-8601: when this low-level run was first observed. */
+	since: string
+}
+
+export const sourceSignalFlatSchema = {
+	type: "object",
+	properties: {
+		levelDbfs: { type: "number" },
+		thresholdDbfs: { type: "number" },
+		since: { type: "string", format: "date-time" },
+	},
+	required: ["levelDbfs", "thresholdDbfs", "since"],
+} as const
+
 export interface SourceCaps {
 	kind: SourceKind
 	sampleRate: number
@@ -87,6 +112,10 @@ export interface SourceStatus {
 	caps?: SourceCaps
 	/** Rate-truth check; see SourceRateMismatch. */
 	rateMismatch?: SourceRateMismatch
+	/** Signal-flat check; see SourceSignalFlat. */
+	signalFlat?: SourceSignalFlat
+	/** Latest measured IQ level (dBFS, 5 s mean); IQ network sources with data only. */
+	signalLevelDbfs?: number
 }
 
 export interface DecoderAssignment {

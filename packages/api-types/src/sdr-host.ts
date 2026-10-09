@@ -153,6 +153,49 @@ export interface SdrHostTelemetry {
 		updatedAgeMs: number | null
 		exitCode: number | null
 	}>
+	/** Recent host trends for the operator page; absent on older receivers. */
+	history?: SdrHostTelemetryHistory
+	/** How the previous boot ended; absent on older receivers. */
+	lastBoot?: Reading<SdrHostLastBoot>
+}
+
+/**
+ * Recorded once per boot on WaveKit images from the persistent journal and the
+ * firmware's flags. Each fact is null when it could not be read.
+ */
+export interface SdrHostLastBoot {
+	/** Null when the journal holds no earlier boot (first boot, or volatile journal). */
+	previous: {
+		/** Time of the previous boot's last journal entry (Pi clock). */
+		lastEntryAt: string
+		lastEntryAgeMs: number | null
+		/** It reached shutdown.target: a requested reboot or power-off. */
+		cleanShutdown: boolean
+	} | null
+	/** Firmware flags read at this boot: seen since power-on. */
+	undervoltageSinceBoot: boolean | null
+	throttledSinceBoot: boolean | null
+	/** True only when the watchdog driver reports a watchdog reset. */
+	watchdogReset: true | null
+}
+
+/**
+ * Per-collection host trends; ages are relative to the response. A null
+ * value was not measurable at that moment. `undervoltageDips` counts rising
+ * edges of the under-voltage alarm seen during that interval.
+ */
+export interface SdrHostTelemetryHistory {
+	intervalMs: number
+	windowMs: number
+	points: Array<
+		[
+			ageMs: number,
+			cpuBusyPercent: number | null,
+			memoryUsedPercent: number | null,
+			celsius: number | null,
+			undervoltageDips: number | null,
+		]
+	>
 }
 
 /** Per-poll upstream rate for the plot; ages are relative to the response. */

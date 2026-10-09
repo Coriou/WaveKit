@@ -14,7 +14,7 @@ import {
 	type NetworkProducerConfig,
 } from "../network-producer-decoder.js"
 import type {
-	DecoderBandRequirements,
+	DecoderBandDeclaration,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -234,9 +234,9 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 	 * Stdin mode demodulates the capture centre and Mode S/ADS-B is 1090 MHz
 	 * by protocol. rtlTcpHost mode tunes its own receiver: nothing to declare.
 	 */
-	getBandRequirements(): DecoderBandRequirements | undefined {
-		if (this.options.rtlTcpHost) return undefined
-		return { targetsHz: [ADSB_FREQUENCY_HZ], basis: "protocol" }
+	getBandDeclaration(): DecoderBandDeclaration {
+		if (this.options.rtlTcpHost) return { ownSource: true }
+		return { intrinsic: { targetsHz: [ADSB_FREQUENCY_HZ], basis: "protocol" } }
 	}
 
 	private getReadsbArgs(): string[] {

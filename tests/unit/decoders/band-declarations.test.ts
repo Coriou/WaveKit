@@ -1,7 +1,8 @@
 /**
- * Band-aware suspension: what each built-in instance declares it must receive.
- * Unknown (no configured or protocol-fixed frequency) must stay undefined so
- * the manager never suspends it for band.
+ * Band-aware suspension: what each built-in instance declares it must
+ * receive (band defaults spec §3.1). Built-in table defaults are added by the
+ * resolver, never by the decoder: a decoder without a configured or
+ * protocol-fixed frequency declares nothing.
  */
 import { describe, expect, it } from "vitest"
 import pino from "pino"
@@ -59,8 +60,8 @@ describe("centre demodulators without a protocol frequency", () => {
 	]
 
 	for (const { name, make } of cases) {
-		it(`${name} is unknown without a configured frequency`, () => {
-			expect(make({}).getBandRequirements?.()).toBeUndefined()
+		it(`${name} declares nothing without a configured frequency`, () => {
+			expect(make({}).getBandDeclaration()).toEqual({})
 		})
 
 		it(`${name} declares its configured frequencies`, () => {
@@ -68,11 +69,15 @@ describe("centre demodulators without a protocol frequency", () => {
 				make(
 					{},
 					{ frequencies: [144_800_000, 144_390_000] },
-				).getBandRequirements?.(),
-			).toEqual({ targetsHz: [144_800_000, 144_390_000], basis: "configured" })
-			expect(make({ frequency: 466_075_000 }).getBandRequirements?.()).toEqual({
-				targetsHz: [466_075_000],
-				basis: "configured",
+				).getBandDeclaration(),
+			).toEqual({
+				configured: {
+					targetsHz: [144_800_000, 144_390_000],
+					basis: "configured",
+				},
+			})
+			expect(make({ frequency: 466_075_000 }).getBandDeclaration()).toEqual({
+				configured: { targetsHz: [466_075_000], basis: "configured" },
 			})
 		})
 	}
@@ -80,7 +85,7 @@ describe("centre demodulators without a protocol frequency", () => {
 	it("acarsdec never declares its metadata-only default list", () => {
 		// The built-in [131.55, 131.725] MHz default is not passed to the process.
 		const decoder = new AcarsdecDecoder(config("acarsdec", {}), logger)
-		expect(decoder.getBandRequirements?.()).toBeUndefined()
+		expect(decoder.getBandDeclaration()).toEqual({})
 	})
 })
 
@@ -90,18 +95,17 @@ describe("protocol-fixed decoders", () => {
 			config("readsb", { outputFormat: "sbs" }),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [1_090_000_000],
-			basis: "protocol",
+		expect(decoder.getBandDeclaration()).toEqual({
+			intrinsic: { targetsHz: [1_090_000_000], basis: "protocol" },
 		})
 	})
 
-	it("readsb in rtlTcpHost mode owns its tuner: no declaration", () => {
+	it("readsb in rtlTcpHost mode owns its source", () => {
 		const decoder = new ReadsbDecoder(
 			config("readsb", { outputFormat: "sbs", rtlTcpHost: "pi.local" }),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toBeUndefined()
+		expect(decoder.getBandDeclaration()).toEqual({ ownSource: true })
 	})
 
 	it("ais-catcher receives AIS 1/2 by protocol unless channels are overridden", () => {
@@ -110,22 +114,20 @@ describe("protocol-fixed decoders", () => {
 				config("ais-catcher", { outputFormat: "json", ...options }),
 				logger,
 			)
-		expect(make({}).getBandRequirements?.()).toEqual({
+		const intrinsic = {
 			targetsHz: [161_975_000, 162_025_000],
 			basis: "protocol",
+		}
+		expect(make({}).getBandDeclaration()).toEqual({ intrinsic })
+		for (const extraArgs of [["-c", "CD"], ["-c CD"], ["-cCD"]])
+			expect(make({ extraArgs }).getBandDeclaration()).toEqual({
+				ownTuning: true,
+				intrinsic,
+			})
+		expect(make({ frequencies: [156_775_000] }).getBandDeclaration()).toEqual({
+			configured: { targetsHz: [156_775_000], basis: "configured" },
+			intrinsic,
 		})
-		expect(
-			make({ extraArgs: ["-c", "CD"] }).getBandRequirements?.(),
-		).toBeUndefined()
-		expect(
-			make({ extraArgs: ["-c CD"] }).getBandRequirements?.(),
-		).toBeUndefined()
-		expect(
-			make({ extraArgs: ["-cCD"] }).getBandRequirements?.(),
-		).toBeUndefined()
-		expect(
-			make({ frequencies: [156_775_000] }).getBandRequirements?.(),
-		).toEqual({ targetsHz: [156_775_000], basis: "configured" })
 	})
 })
 
@@ -135,17 +137,21 @@ describe("dumpvdl2", () => {
 			config("dumpvdl2", {}, { frequencies: [136_725_000, 136_975_000] }),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [136_725_000, 136_975_000],
-			basis: "configured",
+		expect(decoder.getBandDeclaration()).toEqual({
+			configured: {
+				targetsHz: [136_725_000, 136_975_000],
+				basis: "configured",
+			},
 		})
 	})
 
 	it("declares its built-in channel list, which the process really decodes", () => {
 		const decoder = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [136_650_000, 136_700_000, 136_975_000],
-			basis: "decoder-default",
+		expect(decoder.getBandDeclaration()).toEqual({
+			intrinsic: {
+				targetsHz: [136_650_000, 136_700_000, 136_975_000],
+				basis: "decoder-default",
+			},
 		})
 	})
 
@@ -158,19 +164,21 @@ describe("dumpvdl2", () => {
 			),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [136_975_000],
-			basis: "configured",
-			followCenter: true,
+		expect(decoder.getBandDeclaration()).toEqual({
+			configured: {
+				targetsHz: [136_975_000],
+				basis: "configured",
+				followCenter: true,
+			},
 		})
 	})
 
-	it("followCenter without a configured list is unknown", () => {
+	it("followCenter without a configured list declares nothing", () => {
 		const decoder = new Dumpvdl2Decoder(
 			config("dumpvdl2", { followCenter: true }),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toBeUndefined()
+		expect(decoder.getBandDeclaration()).toEqual({})
 	})
 })
 
@@ -187,20 +195,36 @@ describe("lora-meshtastic", () => {
 			config("lora-meshtastic", base),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [869_525_000],
-			basis: "configured",
+		expect(decoder.getBandDeclaration()).toEqual({
+			configured: { targetsHz: [869_525_000], basis: "configured" },
 		})
 	})
 
-	it("followCenter without a declared band list is unknown (it decodes any centre)", () => {
+	it("followCenter without a frequencies list follows its Meshtastic region range", () => {
 		// The modem decodes the injected centre; options.frequency only seeds it.
 		const decoder = new LoraMeshtasticDecoder(
 			config("lora-meshtastic", { ...base, followCenter: true }),
 			logger,
 		)
 		decoder.updateOptions({ inputCenterFreq: 868_100_000 })
-		expect(decoder.getBandRequirements?.()).toBeUndefined()
+		expect(decoder.getBandDeclaration()).toEqual({
+			intrinsic: {
+				rangesHz: [{ minHz: 869_400_000, maxHz: 869_650_000 }],
+				basis: "decoder-default",
+			},
+		})
+		const us = new LoraMeshtasticDecoder(
+			config("lora-meshtastic", {
+				...base,
+				region: "US",
+				frequency: 906_875_000,
+				followCenter: true,
+			}),
+			logger,
+		)
+		expect(us.getBandDeclaration().intrinsic?.rangesHz).toEqual([
+			{ minHz: 902_000_000, maxHz: 928_000_000 },
+		])
 	})
 
 	it("followCenter with a top-level frequencies list follows that band", () => {
@@ -212,10 +236,12 @@ describe("lora-meshtastic", () => {
 			),
 			logger,
 		)
-		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [868_100_000, 869_525_000],
-			basis: "configured",
-			followCenter: true,
+		expect(decoder.getBandDeclaration()).toEqual({
+			configured: {
+				targetsHz: [868_100_000, 869_525_000],
+				basis: "configured",
+				followCenter: true,
+			},
 		})
 	})
 })

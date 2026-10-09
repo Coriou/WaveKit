@@ -3,6 +3,7 @@ import * as fs from "node:fs"
 import * as os from "node:os"
 import * as path from "node:path"
 import { HostCollector } from "../../src/telemetry/host.js"
+import { readBootReport } from "../../src/telemetry/boot-report.js"
 import { readSetupStatus } from "../../src/telemetry/setup-status.js"
 
 const roots: string[] = []
@@ -162,6 +163,36 @@ describe("HostCollector", () => {
 		expect(power.undervoltageObserved.value?.lastAt).not.toBeNull()
 	})
 
+	it("keeps five minutes of host trends with dips per interval", () => {
+		const { proc, sys } = piTree()
+		let mono = 0
+		const collector = new HostCollector({
+			procRoot: proc,
+			sysRoot: sys,
+			statusDir: proc,
+			statfsPath: os.tmpdir(),
+			now: () => mono,
+		})
+		const alarm = path.join("class/hwmon/hwmon0/in0_lcrit_alarm")
+		for (const value of ["0", "1", "1", "0", "1", "0"]) {
+			write(sys, alarm, `${value}\n`)
+			mono += 2000
+			collector.collectAll()
+		}
+		const history = collector.snapshot().history
+		expect(history).toMatchObject({ intervalMs: 2000, windowMs: 300_000 })
+		const points = history?.points ?? []
+		expect(points.map(p => p[0])).toEqual([10_000, 8000, 6000, 4000, 2000, 0])
+		// A dip is counted in the point after the power read that saw it.
+		expect(points.map(p => p[4])).toEqual([null, 0, 1, 0, 0, 1])
+		expect(points[5]?.[2]).toBeCloseTo(44.8)
+		expect(points[5]?.[3]).toBeCloseTo(61.2, 1)
+
+		mono += 301_000
+		collector.collectAll()
+		expect(collector.snapshot().history?.points.map(p => p[0])).toEqual([0])
+	})
+
 	it("marks everything unavailable, with reasons, when nothing is visible", () => {
 		const collector = new HostCollector({
 			procRoot: "/nonexistent/proc",
@@ -297,6 +328,45 @@ describe("readSetupStatus", () => {
 		expect(
 			readSetupStatus(dir, "boot-a", at - 600_000).value?.updatedAgeMs,
 		).toBeNull()
+	})
+
+	it("reads this boot's report of how the previous boot ended", () => {
+		const report = {
+			schema: 1,
+			bootId: "boot-b",
+			writtenAt: "2026-10-09T12:05:00+00:00",
+			previous: {
+				lastEntryAt: "2026-10-09T12:02:00+00:00",
+				cleanShutdown: false,
+			},
+			undervoltageSinceBoot: true,
+			throttledSinceBoot: false,
+			watchdogReset: null,
+			journal: "never exposed",
+		}
+		const dir = tree({ "last-boot.json": JSON.stringify(report) })
+		const now = Date.parse("2026-10-09T12:10:00Z")
+		expect(readBootReport(dir, "boot-b", now)).toEqual({
+			value: {
+				previous: {
+					lastEntryAt: "2026-10-09T12:02:00+00:00",
+					lastEntryAgeMs: 480_000,
+					cleanShutdown: false,
+				},
+				undervoltageSinceBoot: true,
+				throttledSinceBoot: false,
+				watchdogReset: null,
+			},
+			reason: null,
+		})
+		// A report left from an earlier boot is about that boot, not this one.
+		expect(readBootReport(dir, "boot-c", now)).toEqual({
+			value: null,
+			reason: "not recorded for this boot yet",
+		})
+		expect(readBootReport(path.join(dir, "missing"), "boot-b").reason).toBe(
+			"not provided by this install",
+		)
 	})
 
 	it("flags setup interrupted by a reboot using the boot id", () => {

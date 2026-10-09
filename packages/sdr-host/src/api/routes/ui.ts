@@ -26,21 +26,26 @@ const UI_FILES: Record<
 	"/app.css": { file: "app.css", type: "text/css; charset=utf-8" },
 	"/app.js": { file: "app.js", type: "text/javascript; charset=utf-8" },
 	"/model.js": { file: "model.js", type: "text/javascript; charset=utf-8" },
-	"/fonts/barlow-500.woff2": {
-		file: "fonts/barlow-500.woff2",
+	"/brand/D-DINCondensed.woff2": {
+		file: "brand/D-DINCondensed.woff2",
 		type: "font/woff2",
 		immutable: true,
 	},
-	"/fonts/barlow-600.woff2": {
-		file: "fonts/barlow-600.woff2",
+	"/brand/D-DINCondensed-Bold.woff2": {
+		file: "brand/D-DINCondensed-Bold.woff2",
 		type: "font/woff2",
 		immutable: true,
 	},
-	"/fonts/barlow-semi-condensed-600.woff2": {
-		file: "fonts/barlow-semi-condensed-600.woff2",
+	"/brand/NotoSans-Regular.woff2": {
+		file: "brand/NotoSans-Regular.woff2",
 		type: "font/woff2",
 		immutable: true,
 	},
+	"/brand/wavekit-wordmark-on-dark.svg": {
+		file: "brand/wavekit-wordmark-on-dark.svg",
+		type: "image/svg+xml",
+	},
+	"/brand/favicon.svg": { file: "brand/favicon.svg", type: "image/svg+xml" },
 }
 
 interface Asset {

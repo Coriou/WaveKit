@@ -3,16 +3,20 @@ import type { SdrHostSampling, SdrHostTelemetry } from "@wavekit/api-types"
 import { HostCollector } from "../../src/telemetry/host.js"
 import { SamplingMonitor } from "../../src/telemetry/sampling.js"
 import {
+	flowRate,
 	formatAgePrecise,
+	lastBoot,
 	linkState,
 	nextDelay,
+	plotMax,
 	power,
 	readouts,
 	setupLine,
 	smoothTrace,
-	stages,
+	stream,
 	tracePath,
 	verdict,
+	wifiBars,
 	type StatusPayload,
 } from "../../ui/model.js"
 
@@ -166,29 +170,93 @@ describe("operator page verdict", () => {
 		).toBe("Flow not reported")
 	})
 
-	it("names chain stages for the operator and keeps process names as facts", () => {
-		const chain = stages(status(sampling()))
-		expect(chain?.rtltcp).toMatchObject({ word: "Running", fact: "rtl_tcp" })
-		expect(chain?.rtlmux).toMatchObject({ word: "Running", fact: "rtlmux" })
-		const restarted = status(sampling())
-		restarted.rtlTcp = {
-			running: false,
-			pid: null,
-			restartCount: 2,
-			lastRestartAt: null,
-		}
-		expect(stages(restarted)?.rtltcp).toMatchObject({
-			state: "fault",
-			word: "Stopped",
-			fact: "rtl_tcp · 2 restarts",
+	it("quotes a configured sample rate and labels a client-set one as derived", () => {
+		expect(flowRate(status(sampling()), true)).toEqual({
+			value: "4.10",
+			unit: "MB/s",
+			sub: "2.048\u00a0MS/s · 100% of expected",
+		})
+		const clientSet = status(
+			sampling(
+				{},
+				{
+					bytesPerSec: 4_323_000,
+					expectedBytesPerSec: null,
+					rateBasis: "client-controlled",
+					rateStatus: "unknown",
+				},
+			),
+		)
+		expect(flowRate(clientSet, true).sub).toBe(
+			"≈2.16\u00a0MS/s derived · set by a client",
+		)
+		expect(flowRate(clientSet, false)).toMatchObject({
+			value: "—",
+			sub: "No current reading",
 		})
 	})
 
-	it("keeps zero clients as idle delivery, separate from sampling", () => {
-		const chain = stages(status(sampling()))
-		expect(chain?.clients).toMatchObject({ state: "idle", word: "None" })
-		expect(chain?.dongle).toMatchObject({ state: "ok", word: "Present" })
-		expect(stages(status(sampling(), false))?.dongle.state).toBe("fault")
+	it("describes the stream: dongle, tuning and each client's delivery", () => {
+		const s = status(sampling())
+		s.rtlTcp = {
+			...s.rtlTcp!,
+			restartCount: 2,
+			config: {
+				sampleRate: 2_048_000,
+				frequency: 446_524_920,
+				agc: false,
+				gain: 49,
+			},
+		}
+		s.rtlmux = { ...s.rtlmux!, endpoint: "tcp://pi.local:5555" }
+		const idle = stream(s)
+		expect(idle?.endpoint).toBe("tcp://pi.local:5555")
+		expect(idle?.dongle).toMatchObject({
+			state: "ok",
+			text: "RTL2838UHIDIR",
+			sub: "IQ server restarted 2 times",
+		})
+		expect(idle?.tuning.text).toBe(
+			"446.525\u00a0MHz · 2.048\u00a0MS/s · gain\u00a049\u00a0dB",
+		)
+		// Zero clients is idle delivery, not a fault and not a guess.
+		expect(idle).toMatchObject({ clientsKnown: true, clients: [] })
+		expect(stream(status(sampling(), false))?.dongle).toMatchObject({
+			state: "fault",
+			text: "Not detected",
+		})
+		const client = {
+			key: "k",
+			address: "192.0.2.20:53812",
+			connectedAt: "2026-10-08T09:00:00.000Z",
+			queuedBytes: 1,
+			queuedBytesPerSec: 4_096_000,
+			droppedBytes: 0,
+			droppedChunks: 0,
+			droppedBytesLast60s: 0,
+			commandBytes: 30,
+		}
+		s.delivery = {
+			...s.delivery!,
+			state: "dropping",
+			clients: [
+				client,
+				{ ...client, address: "192.0.2.31:1", droppedBytesLast60s: 2_097_152 },
+				{ ...client, address: "192.0.2.40:1", queuedBytesPerSec: null },
+			],
+		}
+		s.sampling!.upstream.rateBasis = "client-controlled"
+		const busy = stream(s, "2026-10-08T09:58:00.000Z")
+		expect(busy?.tuning).toMatchObject({ text: "Set by a client" })
+		expect(busy?.clients.map(c => [c.state, c.health, c.since])).toEqual([
+			["ok", "keeping up", "for 58 min"],
+			[
+				"warn",
+				"Falling behind · 2.10 MB dropped in the last minute",
+				"for 58 min",
+			],
+			["unknown", "", "for 58 min"],
+		])
 	})
 
 	it("renders the server's real verdict for a live monitor", () => {
@@ -209,13 +277,10 @@ describe("operator page host readouts", () => {
 			expect(readout.value).toBe("Unavailable")
 			expect(readout.sub.length).toBeGreaterThan(0)
 		}
-		const p = power(emptyHost())
-		expect(p.windows.map(w => w.state)).toEqual([
-			"unknown",
-			"unknown",
-			"unknown",
-		])
-		expect(p.windows.every(w => w.text === "Not measurable")).toBe(true)
+		expect(power(emptyHost())).toMatchObject({
+			state: "unknown",
+			text: "Not measurable",
+		})
 	})
 
 	it("keeps active under-voltage apart from earlier observed dips", () => {
@@ -242,13 +307,107 @@ describe("operator page host readouts", () => {
 			},
 			reason: null,
 		}
-		const p = power(host)
-		expect(p.windows[0]).toMatchObject({ state: "clear", text: "Clear now" })
-		expect(p.windows[1]).toMatchObject({
-			state: "latched",
-			text: "3 dips · last 2 min ago",
+		// No dips in the trend window: fine, with the service-long count.
+		host.history = {
+			intervalMs: 2000,
+			windowMs: 300_000,
+			points: [
+				[0, 5, 30, 50, 0],
+				[2000, 5, 30, 50, 0],
+			],
+		}
+		expect(power(host)).toEqual({
+			state: "ok",
+			text: "Fine",
+			sub: "3 dips since the receiver started 1 h ago; last 2 min ago",
 		})
-		expect(p.note).toContain("not since boot")
+		// Recent dips: fine this second, but say how often it dips.
+		host.history.points[1]![4] = 2
+		expect(power(host)).toEqual({
+			state: "warn",
+			text: "Fine now",
+			sub: "2 dips in the last 4 s, 3 since the receiver started",
+		})
+	})
+
+	it("tells an unexpected restart from a requested one, and says so only while it is news", () => {
+		const host = emptyHost()
+		expect(lastBoot(host).unexpected).toBe(false)
+		const report = (cleanShutdown: boolean) => ({
+			state: "ok" as const,
+			scope: "host" as const,
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value: {
+				previous: {
+					lastEntryAt: "2026-10-09T12:02:00+00:00",
+					lastEntryAgeMs: 480_000,
+					cleanShutdown,
+				},
+				undervoltageSinceBoot: true,
+				throttledSinceBoot: false,
+				watchdogReset: null,
+			},
+		})
+		host.lastBoot = report(true)
+		expect(lastBoot(host)).toEqual({
+			unexpected: false,
+			text: "Requested reboot or power-off · last log before it 8 min ago",
+		})
+		host.lastBoot = report(false)
+		host.uptime = {
+			state: "ok",
+			scope: "host",
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value: {
+				hostSec: 400,
+				hostBootedAt: "",
+				containerSec: 300,
+				serviceSec: 290,
+			},
+		}
+		expect(readouts(host)?.uptime).toEqual({
+			state: "warn",
+			value: "6 min",
+			sub: "Unexpected restart · last log before it 8 min ago · under-voltage since this boot",
+		})
+		host.uptime.value!.hostSec = 3 * 86_400
+		expect(readouts(host)?.uptime.state).toBe("ok")
+	})
+
+	it("maps Wi-Fi signal to bars at documented thresholds", () => {
+		expect(
+			[-40, -55, -56, -67, -68, -75, -76, -90].map(d => wifiBars(d).bars),
+		).toEqual([4, 4, 3, 3, 2, 2, 1, 1])
+		expect(wifiBars(-70)).toEqual({ bars: 2, word: "Fair", warn: true })
+		const host = emptyHost()
+		host.network = {
+			state: "ok",
+			scope: "host",
+			observedAt: null,
+			ageMs: 0,
+			reason: null,
+			value: [
+				{
+					name: "wlan0",
+					kind: "wireless",
+					operstate: "up",
+					addresses: ["192.0.2.23"],
+					rxBytesPerSec: 0,
+					txBytesPerSec: 4_500_000,
+					wireless: { linkQuality: 60, signalDbm: -47 },
+				},
+			],
+		}
+		expect(readouts(host)?.network).toMatchObject({
+			state: "ok",
+			value: "Wi-Fi · Excellent",
+			sub: "\u221247 dBm · 4.50 MB/s out · 192.0.2.23",
+			bars: 4,
+		})
 	})
 
 	it("explains setup progress, interruption and absence", () => {
@@ -291,6 +450,13 @@ describe("operator page host readouts", () => {
 })
 
 describe("operator page polling and plot", () => {
+	it("scales the flow plot to a round figure above the expected rate", () => {
+		expect(plotMax(4_096_000, [[0, 4_100_000]])).toBe(5_000_000)
+		expect(plotMax(null, [[0, 4_400_000]])).toBe(5_000_000)
+		expect(plotMax(null, [[0, 4_600_000]])).toBe(6_000_000)
+		expect(plotMax(null, [])).toBe(1)
+	})
+
 	it("goes stale, then offline, and backs off boundedly", () => {
 		expect(
 			linkState({
@@ -333,7 +499,7 @@ describe("operator page polling and plot", () => {
 	})
 
 	it("leaves missing measurements as gaps rather than interpolating", () => {
-		const { d, gaps } = tracePath(
+		const { d } = tracePath(
 			[
 				[300_000, 4e6],
 				[200_000, 4e6],
@@ -344,7 +510,6 @@ describe("operator page polling and plot", () => {
 			{ windowMs: 300_000, width: 600, height: 200, max: 5e6 },
 		)
 		expect(d.match(/M/g)).toHaveLength(2)
-		expect(gaps).toEqual([[300, 400]])
 	})
 
 	it("fills under the trace per unbroken run, down to zero, never across a gap", () => {
@@ -441,17 +606,6 @@ describe("operator page review fixes", () => {
 		expect(v.detail).toContain("rtl_tcp is not delivering samples")
 	})
 
-	it("does not light a connected client green when nothing flows out", () => {
-		const s = status(sampling())
-		s.delivery = {
-			...s.delivery!,
-			state: "delivering",
-			clients: [],
-			queuedBytesPerSec: 0,
-		}
-		expect(stages(s)?.clients.state).toBe("idle")
-	})
-
 	it("reads the marker to the second and counts dips in words", () => {
 		expect(formatAgePrecise(84_000)).toBe("1 min 24 s ago")
 		expect(formatAgePrecise(42_400)).toBe("42 s ago")
@@ -478,6 +632,10 @@ describe("operator page review fixes", () => {
 			},
 			reason: null,
 		}
-		expect(power(host).windows[1]?.text).toBe("1 dip · just now")
+		expect(power(host)).toMatchObject({
+			state: "fault",
+			text: "Under-voltage now",
+			sub: "1 dip since the receiver started 1 h ago",
+		})
 	})
 })
