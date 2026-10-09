@@ -83,13 +83,6 @@ const config = (
 	options: { inputSampleRate: 2_048_000, ...options },
 })
 
-// Test-only migrations: flip the flag a migration task (31) flips for real.
-class ChannelisedAcarsdec extends AcarsdecDecoder {
-	protected override channelizerSupported(): boolean {
-		return true
-	}
-}
-
 describe("channel requests (addendum §1, §2)", () => {
 	it("derives the default IQ passband from the output rate", () => {
 		// AIS: the channel centre is the A/B pair centre 162.000 MHz (AIS-catcher expects ±25 kHz around it).
@@ -181,7 +174,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
-		for (const type of ["acarsdec", "lora-meshtastic", "readsb"]) {
+		for (const type of ["lora-meshtastic", "readsb"]) {
 			expect(
 				make(type).getChannelRequest?.({
 					sampleRateHz: 2_048_000,
@@ -264,6 +257,33 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(chan.match(/\bsox /g)).toHaveLength(1)
 		expect(chan).toContain(
 			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme",
+		)
+	})
+
+	it("acarsdec requests 24 kHz cf32 for one channel and, channelised, keeps its 24 000 -> 12 000 Hz sox (Task 31, delta E11)", () => {
+		const input = { sampleRateHz: 2_400_000, centerHz: 131.6e6 }
+		// Two default frequencies (131.550 / 131.725 MHz) and no channelHz.
+		expect(make("acarsdec").getChannelRequest?.(input)).toHaveProperty(
+			"invalid",
+		)
+		expect(
+			make("acarsdec", { channelHz: 131_725_000 }).getChannelRequest?.(input),
+		).toEqual({
+			centerHz: 131_725_000,
+			bandwidthHz: 12_000,
+			transitionHz: 6_000,
+			outputRateHz: 24_000,
+			format: "cf32",
+		})
+		const chan = pipelineOf(
+			make("acarsdec", { inputSampleRate: 24_000, inputIqFormat: "cf32" }),
+		)
+		expect(chan.startsWith("csdr amdemod | ")).toBe(true)
+		for (const stage of ["csdr convert -i char -o float", "firdecimate"])
+			expect(chan).not.toContain(stage)
+		expect(chan.match(/\bsox /g)).toHaveLength(1)
+		expect(chan).toContain(
+			"sox -t raw -r 24000 -e signed -b 16 -c 1 - -t raw -r 12000 - | acarsdec",
 		)
 	})
 
@@ -373,7 +393,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("acarsdec requests its single frequency and rejects several without channelHz", () => {
-		const one = new ChannelisedAcarsdec(
+		const one = new AcarsdecDecoder(
 			config("acarsdec", { frequencies: [131_550_000] }),
 			logger,
 		)
@@ -386,11 +406,11 @@ describe("channel requests (addendum §1, §2)", () => {
 			outputRateHz: 24_000,
 			format: "cf32",
 		})
-		const two = new ChannelisedAcarsdec(config("acarsdec", {}), logger)
+		const two = new AcarsdecDecoder(config("acarsdec", {}), logger)
 		expect(
 			two.getChannelRequest({ sampleRateHz: 2_400_000, centerHz: 131.6e6 }),
 		).toHaveProperty("invalid")
-		const pinned = new ChannelisedAcarsdec(
+		const pinned = new AcarsdecDecoder(
 			config("acarsdec", { channelHz: 131_725_000 }),
 			logger,
 		)

@@ -143,6 +143,14 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 24 kHz; sox still resamples to 12 000 Hz.
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
 	 * The audio tail decodes one AM channel: options.channelHz, else the only
 	 * configured frequency. Several frequencies without channelHz are
 	 * rejected (channel-request-invalid).
