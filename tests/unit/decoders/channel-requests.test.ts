@@ -186,13 +186,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
-		for (const type of [
-			"multimon-ng",
-			"dsd-fme",
-			"acarsdec",
-			"lora-meshtastic",
-			"readsb",
-		]) {
+		for (const type of ["dsd-fme", "acarsdec", "lora-meshtastic", "readsb"]) {
 			expect(
 				make(type).getChannelRequest?.({
 					sampleRateHz: 2_048_000,
@@ -228,6 +222,30 @@ describe("channel requests (addendum §1, §2)", () => {
 			"csdr convert -i char -o float | csdr firdecimate 43 0.012",
 		)
 		expect(raw).toContain("sox -t raw -r 47627.90697674418")
+	})
+
+	it("multimon-ng requests 48 kHz cf32 and, channelised, keeps its 48 000 -> 22 050 Hz sox (Task 31, delta E11)", () => {
+		const r = make("multimon-ng").getChannelRequest?.({
+			sampleRateHz: 2_048_000,
+			centerHz: 466.075e6,
+		})
+		if (!r || "invalid" in r) throw new Error("expected a request")
+		expect(r).toMatchObject({
+			centerHz: 466.075e6,
+			outputRateHz: 48_000,
+			format: "cf32",
+		})
+		expect(r.bandwidthHz).toBeCloseTo(47_424, 6)
+		expect(r.transitionHz).toBeCloseTo(288, 6)
+		const chan = pipelineOf(
+			make("multimon-ng", { inputSampleRate: 48_000, inputIqFormat: "cf32" }),
+		)
+		for (const stage of ["csdr convert -i char -o float", "firdecimate"])
+			expect(chan).not.toContain(stage)
+		expect(chan.match(/\bsox /g)).toHaveLength(1)
+		expect(chan).toContain(
+			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t raw -r 22050 - | multimon-ng",
+		)
 	})
 
 	it("cf32 input drops the leading convert and firdecimate from the audio tail", () => {
