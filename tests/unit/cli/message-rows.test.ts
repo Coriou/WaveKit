@@ -98,12 +98,12 @@ describe("message rows", () => {
 		const now = Date.parse("2026-10-08T18:10:11Z")
 		const from = Date.parse("2026-10-08T18:07:40Z")
 		expect(lineText(gapLine({ afterSeq: 1, from, to: null }, now, 80))).toBe(
-			`── gap since ${hhmmss(from)} · 2m 31s ──`,
+			`── gap since ${hhmmss(from)} · 2m ──`,
 		)
 		const a = Date.parse("2026-10-08T18:08:37Z")
 		const b = Date.parse("2026-10-08T18:10:41Z")
 		expect(lineText(gapLine({ afterSeq: 1, from: a, to: b }, now, 80))).toBe(
-			`── gap ${hhmmss(a)}–${hhmmss(b)} · 2m 04s · not replayed ──`,
+			`── gap ${hhmmss(a)}–${hhmmss(b)} · 2m · not replayed ──`,
 		)
 	})
 

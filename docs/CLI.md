@@ -40,15 +40,15 @@ With nothing set, wavekit tries `http://127.0.0.1:9000`, then `http://127.0.0.1:
 
 Row 1 is the **chain strip**, with one lane per link in the chain:
 
-| Lane       | Examples                                                                                | Meaning                                                                                                                                                                                                                                                               |
-| ---------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `api`      | `api ● 2s` · `api ws ● rest × 45s` · `api × 3m` · `api ○ connecting`                    | `●` appears only when the WebSocket is open **and** REST answered within 15 s. The age is the time since the last REST success.                                                                                                                                       |
-| `iq`       | `iq ● streaming · 4.1 MB/s` · `iq × no samples 23s` · `iq ● receiving` · `iq ? unknown` | `streaming` appears only when core reports the source's activity state as `streaming` and that report is under 15 s old. Older cores show `connected`. `receiving` means only the WS byte-rate heartbeat is available. The rate is shown only while the lane is live. |
-| `rx`       | `rx 445.971 MHz ±1.024 · external control`                                              | Centre frequency, half span, and who controls the tuner. If the sample rate is unknown, only the centre is shown.                                                                                                                                                     |
-| `decoders` | `decoders 8/9 up · 1 failing · 1 restarting · 2 in window`                              | `failing` counts decoders that are faulted, down or crash-looping. `restarting` (yellow) counts decoders that core is restarting. `in window` uses the decoder's configured target frequencies when core reports them, and the **nominal** band table otherwise.      |
-| `drops`    | `drops !34% now` · `drop !34% now` · `drops ? · backpressure`                           | Share of offered IQ dropped over the last 10 s on decoder branches. `!` means a branch is in backpressure right now. `?` means the share cannot be computed. The figure always carries `now`. On a narrow strip the label shortens to `drop`.                         |
+| Lane       | Examples                                                                                | Meaning                                                                                                                                                                                                                                                                     |
+| ---------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api`      | `api ● 2s` · `api ws ● rest × 45s` · `api × 3m` · `api ○ connecting`                    | `●` appears only when the WebSocket is open **and** REST answered within 15 s. The age is the time since the last REST success.                                                                                                                                             |
+| `iq`       | `iq ● streaming · 4.1 MB/s` · `iq × no samples 23s` · `iq ● receiving` · `iq ? unknown` | `streaming` appears only when core reports the source's activity state as `streaming` and that report is under 15 s old. Older cores show `connected`. `receiving` means only the WS byte-rate heartbeat is available. The rate is shown only while the lane is live.       |
+| `rx`       | `rx 445.971 MHz ±1.024 · external control`                                              | Centre frequency, half span, and who controls the tuner. If the sample rate is unknown, only the centre is shown.                                                                                                                                                           |
+| `decoders` | `decoders 8/9 up · 1 failing · 1 restarting · 2 in window` · `dec 8/9 ×1 !1`            | `failing` (`×`) counts decoders that are faulted, down or crash-looping. `restarting` (`!`, yellow) counts decoders that core is restarting. `in window` uses the decoder's configured target frequencies when core reports them, and the **nominal** band table otherwise. |
+| `drops`    | `drops !34%` · `drops ? · backpressure` · `drops ? !`                                   | Share of offered IQ dropped over the last 10 s on decoder branches. `!` means a branch is in backpressure right now. `?` means the share cannot be computed. The strip is always current, so the figure has one spelling at every width.                                    |
 
-The clock sits at the right of the strip. When the strip runs out of room, lanes drop out whole, starting with the clock, then `rx`, then `drops`. A lane is never cut down to fragments of words.
+The clock sits at the right of the strip. When the strip is short of room, every lane keeps its shortest form (`api ●`, `iq ●`, `rx 445.971`, `dec 8/9 ×1`, `drops !34%`) and the clock goes first. Detail is added back as room allows: the api age, `MHz` and the rx span, `streaming`, the decoder words and `in window`, the IQ rate, the tuner owner, then the clock. A lane is never cut down to fragments of words.
 
 **Legend**
 
@@ -65,21 +65,23 @@ The clock sits at the right of the strip. When the strip runs out of room, lanes
 
 - **Dim text** is older than 15 s.
 - **`now` and `lifetime`:** `now` figures cover the last 10 s, and `lifetime` figures are counters. The two are never mixed.
-- **Bands:** _nominal_ bands come from WaveKit's built-in table. A band taken from the decoder's own configuration is marked `*` in the tables, and the column header then reads `nominal MHz *cfg`.
+- **Ages:** seconds below a minute (`52s`), then whole minutes (`6m ago`), then hours and minutes (`1h 3m`), then days (`2d`).
+- **Decodes:** the rate leads, then the age of the last decode when there is room (`2/min · 11s ago`). The rate is core's counter rate, else the count in the message feed over the last minute. A last decode older than a minute reads `none for 6m`; a decoder that never decoded reads `none for <uptime>`; a decoder that is not running reads `—`.
+- **Bands:** the `band MHz` column shows _nominal_ bands from WaveKit's built-in table. A band taken from the decoder's own configuration is marked `*` (the help screen explains the mark).
 - **Tuned decoders:** `dsd-fme` and `multimon-ng` always follow the receiver's tuning. Their band reads `tuned` even when a frequency is configured, because core does not apply that frequency to them.
 
 **Problems and cached data**
 
-- **Banner:** when the API or the live feed has a problem, a one-line banner under the strip says what is wrong, why, when it will retry, and how old the shown data is (`data as of 18:07:40`).
+- **Banner:** when the API or the live feed has a problem, a one-line banner under the strip says what is wrong, why, when it will retry, and how old the shown data is (`data as of 18:07:40`). An unreachable API reads address first, with the error code in words: `! API unreachable · 127.0.0.1:9000 · connection refused (ECONNREFUSED) · retry in 4s · r now`. On a narrow screen the code stands alone.
 - **Cached data** stays on screen, but dim.
-- **Feed gaps:** while the WebSocket is down, the message feed shows a gap row. When the WebSocket reconnects, the row closes as `── gap 18:08:37–18:10:41 · 2m 04s · not replayed ──`.
+- **Feed gaps:** while the WebSocket is down, the message feed shows a gap row. When the WebSocket reconnects, the row closes as `── gap 18:08:37–18:10:41 · 2m · not replayed ──`.
 
 ## Views
 
 | Key | View     | Shows                                                                                                                                                                                                        |
 | --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `1` | Overview | Receiver summary, decoder table, latest messages                                                                                                                                                             |
-| `2` | Decoders | Process state, restarts, errors, decodes, IQ in, and drop now/lifetime per decoder. A detail pane adds identity, band and window, the last error, the last write's result, and a 30-minute decode sparkline. |
+| `2` | Decoders | Process state, restarts, errors, decodes, iq in, and drop now/lifetime per decoder. A detail pane adds identity, band and window, the last error, the last write's result, and a 30-minute decode sparkline. |
 | `3` | Messages | Filterable, pausable feed with per-protocol summaries and a JSON detail. ADS-B rows add registration, type and operator when the aircraft list already has them as the message arrives.                      |
 | `4` | Receiver | Source transport and activity, tuner (with edit mode), relay and its command history, fanout drops, upstream (Pi) drops                                                                                      |
 | `5` | System   | Container CPU and memory, alerts, SDR host processes (and Pi sampling when core reports it), live audio, core version                                                                                        |
@@ -119,7 +121,7 @@ The footer shows only the keys that do something on the current screen.
 
 ## Writes
 
-Navigation never writes. Every write except audio start/stop goes through a confirm bar that names the target, for example `▶ restart readsb · up 51s · pid 1531   y restart  n cancel`.
+Navigation never writes. Every write except audio start/stop goes through a confirm bar that names the target and what the write touches, for example `▶ restart readsb · up 51s · out of window · dropping 38%   y restart  n cancel`. A decoder confirm states whether it decodes the shared window, what it drops now, when it last decoded, and for a stopped decoder its last exit (`exit code 1 · 3m ago`). On a narrow bar the action and the window stay.
 
 - **Confirming:** only `y` sends. `Enter` does not confirm.
 - **Tuner edits:** nothing is sent until you confirm. The changes then go out one command at a time, and sending stops at the first command that fails or gets no reply.

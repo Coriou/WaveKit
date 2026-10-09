@@ -399,7 +399,7 @@ describe("R84 band suspension", () => {
 		expect(r.health).toBe("running")
 		expect(processState(r, 0, false, NOW)).toBe("suspended")
 		expect(facts(r).failing).toBe(false)
-		expect(detail(r)).toContain("server health running")
+		expect(detail(r)).toContain('health "running"')
 		expect(detail(r)).not.toMatch(/up \d/)
 	})
 	it("never uses banned copy", () => {

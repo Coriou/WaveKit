@@ -2,7 +2,7 @@ import { Box, Text } from "ink"
 import { createContext, useContext, type ReactElement } from "react"
 import type { Line } from "../ui/line.js"
 import { lineText, lineWidth } from "../ui/text.js"
-import { roleProps } from "../ui/theme.js"
+import { roleProps, type InkTextProps } from "../ui/theme.js"
 
 export const ColorContext = createContext(true)
 
@@ -15,6 +15,37 @@ export const StrictFitContext = createContext<{ cols: number } | null>(null)
 
 function overflow(what: string): never {
 	throw new Error(`strict fit: ${what}`)
+}
+
+export interface StyledSegment {
+	text: string
+	props: InkTextProps
+}
+
+/**
+ * Spans as Ink segments. Ink re-serialises each line per character, and bold and
+ * dim share their close code (SGR 22), so a bold span next to a dim one lost
+ * its close and every later label stayed dim (M1). Whitespace looks the same
+ * with any intensity, so a span's leading and trailing whitespace is rendered
+ * unstyled: every bold/dim boundary then passes through a plain cell. Inverse
+ * spans keep their whitespace styled (the background shows).
+ */
+export function styledSegments(line: Line, color: boolean): StyledSegment[] {
+	const out: StyledSegment[] = []
+	for (const s of line) {
+		const props = roleProps(s.role, color, s.bold === true)
+		const intensity = props.bold === true || props.dimColor === true
+		const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(s.text)
+		if (!intensity || props.inverse === true || !m) {
+			out.push({ text: s.text, props })
+			continue
+		}
+		const [, lead = "", core = "", trail = ""] = m
+		if (lead) out.push({ text: lead, props: {} })
+		if (core) out.push({ text: core, props })
+		if (trail) out.push({ text: trail, props: {} })
+	}
+	return out
 }
 
 export function LineView({
@@ -39,9 +70,9 @@ export function LineView({
 	return (
 		<Text wrap="truncate-end">
 			{" ".repeat(indent)}
-			{line.map((s, i) => (
-				<Text key={i} {...roleProps(s.role, color, s.bold === true)}>
-					{s.text}
+			{styledSegments(line, color).map((seg, i) => (
+				<Text key={i} {...seg.props}>
+					{seg.text}
 				</Text>
 			))}
 		</Text>

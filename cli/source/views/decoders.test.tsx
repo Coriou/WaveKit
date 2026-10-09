@@ -72,7 +72,7 @@ describe("Decoders view (spec §6.2)", () => {
 		await selectRow(h, 4)
 		await h.press("R")
 		expect(h.frame().at(-1)).toBe(
-			" ▶ restart readsb · up 51s · pid 1531   y restart  n cancel",
+			" ▶ restart readsb · up 51s · out of window · dropping 38%   y restart  n cancel",
 		)
 		await h.press("n")
 		expect(h.runtime.sent).toEqual([])

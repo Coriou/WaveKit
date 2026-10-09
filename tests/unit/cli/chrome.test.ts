@@ -62,8 +62,12 @@ describe("strip input", () => {
 	it("reads crash-loop as failing and REST-down as a split api lane", () => {
 		expect(stripInput(scenarioState("crash-loop")).decoders?.failing).toBe(1)
 		// R15: the WS source:status frame keeps the IQ lane fresh while REST is down.
+		// M2: at 80 the rx span outranks the iq word; the live glyph stays, the word returns at 120.
 		expect(
 			lineText(stripLine(stripInput(scenarioState("ws-only")), 79)),
+		).toMatch(/^api ws ● rest × 45s {2}iq ● /)
+		expect(
+			lineText(stripLine(stripInput(scenarioState("ws-only")), 119)),
 		).toMatch(/^api ws ● rest × 45s {2}iq ● streaming/)
 		expect(
 			lineText(stripLine(stripInput(scenarioState("api-down")), 79)),
