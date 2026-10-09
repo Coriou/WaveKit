@@ -27,6 +27,13 @@ const FetchSchema = z.discriminatedUnion("kind", [
 		})
 		.strict(),
 	z.object({ kind: z.literal("private") }).strict(),
+	// Composed by fixtures/compose.py from the recipe's sources and generators (channelizer T7a)
+	z
+		.object({
+			kind: z.literal("generated"),
+			recipe: z.string().regex(/^recipes\/[a-z0-9][a-z0-9_]*\.json$/),
+		})
+		.strict(),
 ])
 
 const ExpectedSchema = z

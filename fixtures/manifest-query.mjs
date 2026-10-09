@@ -29,6 +29,7 @@ if (command === "list") {
 				f.sha256 ?? "",
 				fetch.archive_sha256 ?? "",
 				String(f.large === true),
+				fetch.recipe ?? "",
 			].join("|") + "\n",
 		)
 	}

@@ -1,5 +1,9 @@
+import { existsSync, readFileSync } from "node:fs"
 import { describe, it, expect } from "vitest"
-import { parseManifest } from "../../integration/fixtures/manifest.js"
+import {
+	loadManifest,
+	parseManifest,
+} from "../../integration/fixtures/manifest.js"
 
 const sha = "a".repeat(64)
 function golden(
@@ -84,9 +88,62 @@ describe("fixture manifest v2", () => {
 			),
 		).toThrow(/negative/)
 	})
-	it("validates the committed manifest", async () => {
-		const { loadManifest } =
-			await import("../../integration/fixtures/manifest.js")
+	it("accepts a generated fixture that names its recipe (channelizer T7a)", () => {
+		const m = parseManifest(
+			manifest([
+				golden({
+					license: "composed: synthetic (WaveKit, AGPL-3.0-or-later)",
+					fetch: {
+						kind: "generated",
+						recipe: "recipes/own_ais_162m_2048k.json",
+					},
+				}),
+			]),
+		)
+		expect(m.fixtures[0]?.fetch).toEqual({
+			kind: "generated",
+			recipe: "recipes/own_ais_162m_2048k.json",
+		})
+	})
+	it("rejects a generated fixture with a stray recipe path, extra keys or a private license", () => {
+		const generated = (fetch: Record<string, unknown>, license = "CC0-1.0") =>
+			manifest([golden({ license, fetch: { kind: "generated", ...fetch } })])
+		expect(() => parseManifest(generated({ recipe: "../x.json" }))).toThrow()
+		expect(() =>
+			parseManifest(generated({ recipe: "recipes/x.yaml" })),
+		).toThrow()
+		expect(() =>
+			parseManifest(
+				generated({ recipe: "recipes/x.json", url: "https://x.test/a" }),
+			),
+		).toThrow()
+		expect(() =>
+			parseManifest(generated({ recipe: "recipes/x.json" }, "private")),
+		).toThrow(/private/)
+	})
+	it("validates the committed manifest", () => {
 		expect(() => loadManifest("fixtures/manifest.yaml")).not.toThrow()
+	})
+	it("keeps every committed generated fixture in step with its recipe", () => {
+		const generated = loadManifest("fixtures/manifest.yaml").fixtures.filter(
+			f => f.fetch.kind === "generated",
+		)
+		expect(generated.length).toBeGreaterThan(0)
+		for (const f of generated) {
+			if (f.fetch.kind !== "generated") continue
+			const path = `fixtures/${f.fetch.recipe}`
+			expect(existsSync(path), path).toBe(true)
+			const recipe = JSON.parse(readFileSync(path, "utf8")) as {
+				id: string
+				sampleRate: number
+				centerHz: number
+				durationS: number
+			}
+			expect(f.file, f.id).toBe(`raw/${recipe.id}.cu8`)
+			expect(f.format, f.id).toBe("cu8")
+			expect(f.sample_rate, f.id).toBe(recipe.sampleRate)
+			expect(f.center_hz, f.id).toBe(recipe.centerHz)
+			expect(f.duration_s, f.id).toBe(recipe.durationS)
+		}
 	})
 })

@@ -3,6 +3,10 @@
 # Usage: ./fixtures/download.sh [--all] [--rtl433] [fixture_id...]
 #   default: every non-large fixture; --all includes large ones.
 #   --rtl433 (separate on purpose) also clones/pulls merbanan/rtl_433_tests; a failure exits 1.
+#   generated fixtures (fetch.kind generated, channelizer T7a) are rebuilt: the recipe's
+#   sources are fetched into <dir>/raw/.sources/ and sha256-checked, then compose.py
+#   (python3 + numpy) writes the file and a <file>.json sidecar. Recipe paths are
+#   relative to the manifest's directory.
 # Env: WAVEKIT_FIXTURES_MANIFEST (default fixtures/manifest.yaml)
 #      WAVEKIT_FIXTURES_DIR      (default fixtures/; files land at <dir>/<file>)
 #      WAVEKIT_PRIVATE_FIXTURES_DIR  path or https:// base for private captures
@@ -12,6 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export WAVEKIT_FIXTURES_MANIFEST="${WAVEKIT_FIXTURES_MANIFEST:-${SCRIPT_DIR}/manifest.yaml}"
 OUT_DIR="${WAVEKIT_FIXTURES_DIR:-${SCRIPT_DIR}}"
 CACHE_DIR="${OUT_DIR}/raw/.archives"
+SOURCES_DIR="${OUT_DIR}/raw/.sources"
 
 log_info() { echo "info: $1"; }
 log_warn() { echo "warn: $1" >&2; }
@@ -26,9 +31,32 @@ fetch_url() { # url dest
 	curl -fsSL --retry 2 -o "$2.part" "$1" && mv "$2.part" "$2"
 }
 
+# Fetches every source a recipe uses, then composes into $3. Returns 0 ok, 1 failed.
+compose_fixture() { # id recipe target
+	local id="$1" recipe="$2" target="$3" listing
+	command -v python3 >/dev/null || { log_error "$id: python3 missing (needed to compose)"; return 1; }
+	[[ -f "$recipe" ]] || { log_error "$id: recipe $recipe not found"; return 1; }
+	# -I: never import from the current or a download directory.
+	listing="$(python3 -I "${SCRIPT_DIR}/compose.py" "$recipe" --list-sources)" || { log_error "$id: bad recipe $recipe"; return 1; }
+	mkdir -p "$SOURCES_DIR"
+	while IFS='|' read -r src_id src_url src_sha src_file; do
+		[[ -z "$src_id" ]] && continue
+		local dest="${SOURCES_DIR}/${src_file}"
+		if [[ ! -f "$dest" || "$(sha256_of "$dest")" != "$src_sha" ]]; then
+			log_info "$id: fetching source $src_id"
+			fetch_url "$src_url" "$dest" || { log_error "$id: source $src_id download failed"; return 1; }
+		fi
+		if [[ "$(sha256_of "$dest")" != "$src_sha" ]]; then
+			log_error "$id: source $src_id: sha256 mismatch"; rm -f "$dest"; return 1
+		fi
+	done <<< "$listing"
+	python3 -I "${SCRIPT_DIR}/compose.py" "$recipe" --sources-dir "$SOURCES_DIR" \
+		--out "$target.part" --sidecar "$target.part.json" || { log_error "$id: compose failed"; rm -f "$target.part" "$target.part.json"; return 1; }
+}
+
 # Returns 0 ok, 1 failed, 2 skipped.
 fetch_fixture() {
-	local id="$1" kind="$2" url="$3" member="$4" transform="$5" file="$6" sha="$7" archive_sha="$8"
+	local id="$1" kind="$2" url="$3" member="$4" transform="$5" file="$6" sha="$7" archive_sha="$8" recipe="$9"
 	local target="${OUT_DIR}/${file}"
 	mkdir -p "$(dirname "$target")" "$CACHE_DIR"
 	if [[ -f "$target" && "$(sha256_of "$target")" == "$sha" ]]; then
@@ -61,12 +89,16 @@ fetch_fixture() {
 		if [[ "$base" =~ ^https:// ]]; then fetch_url "$base/$name" "$target.part" || { log_error "$id: private download failed"; return 1; }
 		else cp "$base/$name" "$target.part" || { log_error "$id: $base/$name not readable"; return 1; }; fi
 		;;
+	generated)
+		compose_fixture "$id" "$(dirname "$WAVEKIT_FIXTURES_MANIFEST")/$recipe" "$target" || return 1
+		;;
 	*) log_error "$id: unknown fetch kind '$kind'"; return 1 ;;
 	esac
 	local actual; actual="$(sha256_of "$target.part")"
 	if [[ "$actual" != "$sha" ]]; then
-		log_error "$id: sha256 mismatch (expected $sha, got $actual)"; rm -f "$target.part"; return 1
+		log_error "$id: sha256 mismatch (expected $sha, got $actual)"; rm -f "$target.part" "$target.part.json"; return 1
 	fi
+	[[ -f "$target.part.json" ]] && mv "$target.part.json" "$target.json"
 	mv "$target.part" "$target"
 	log_info "$id: verified ${file}"
 }
@@ -95,7 +127,7 @@ main() {
 	local listing
 	listing="$(node "${SCRIPT_DIR}/manifest-query.mjs" list)" || { log_error "cannot read $WAVEKIT_FIXTURES_MANIFEST"; exit 1; }
 	local failed=0
-	while IFS='|' read -r id kind url member transform file sha archive_sha large; do
+	while IFS='|' read -r id kind url member transform file sha archive_sha large recipe; do
 		[[ -z "$id" ]] && continue
 		if [[ ${#ids[@]} -gt 0 ]]; then
 			local wanted=false; for w in "${ids[@]}"; do [[ "$w" == "$id" ]] && wanted=true; done
@@ -103,7 +135,7 @@ main() {
 		elif [[ "$large" == "true" && "$all" != true ]]; then
 			log_info "$id: large, skipped (use --all)"; continue
 		fi
-		set +e; fetch_fixture "$id" "$kind" "$url" "$member" "$transform" "$file" "$sha" "$archive_sha"; local rc=$?; set -e
+		set +e; fetch_fixture "$id" "$kind" "$url" "$member" "$transform" "$file" "$sha" "$archive_sha" "$recipe"; local rc=$?; set -e
 		[[ $rc -eq 1 ]] && failed=$((failed + 1))
 	done <<< "$listing"
 	if [[ "$rtl433" == true ]]; then

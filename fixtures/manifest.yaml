@@ -5,21 +5,225 @@
 # Private own captures: license "private", fetch.kind "private", never committed.
 version: 2
 
-fixtures: []
+fixtures:
+  # Composed wideband goldens (channelizer T7a): fixtures/compose.py builds each from
+  # fixtures/recipes/<id>.json; download.sh fetches the recipe's sources and regenerates it.
+  # sha256 is from compose.py with numpy 2.5.3 on macOS (see README: regenerate if it differs).
+  # expected is a placeholder (ruling PF1) until the quiet-host record on a built image.
+  - id: composed_ais_162m_2048k
+    role: channelizer-golden
+    decoder: ais-catcher
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta
+      notes: "Real AIS A (161.975 MHz) and B (162.025 MHz), IQEngine Fort Smallwood (RTL-SDR V3, 2024-09-08), first 17.476 s of each, at -/+25 kHz around the pair centre (plan A15). Local check 2026-10-10: 14 (A) + 39 (B) CRC-valid frames with a throwaway demod (sources alone: 15 + 40). ais-catcher: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2048k.json }
+    file: raw/composed_ais_162m_2048k.cu8
+    sha256: cf2c944b6a895d3e7187b4ec99175da5f3fb1e2f71805d4f0d42435f5895c638
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 162000000
+    duration_s: 17
+    expected:
+      { min_count: 1, payloads: [], key_fields: ["mmsi", "messageType"] }
+
+  - id: composed_ais_162m_2400k
+    role: channelizer-golden
+    decoder: ais-catcher
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730/meta
+      notes: "As composed_ais_162m_2048k at 2.4 Msps. Local check 2026-10-10: 14 (A) + 39 (B) CRC-valid frames. ais-catcher: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2400k.json }
+    file: raw/composed_ais_162m_2400k.cu8
+    sha256: b7017e3542160ff399fe4a2a998d6d50c1e8d77ff7948835fae044bba9c6dd78
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 162000000
+    duration_s: 17
+    expected:
+      { min_count: 1, payloads: [], key_fields: ["mmsi", "messageType"] }
+
+  - id: composed_pocsag_466075k_2048k
+    role: channelizer-golden
+    decoder: multimon-ng
+    decoder_options:
+      { offsetHz: -225000, modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
+    license: "composed: synthetic (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      notes: "Synthetic POCSAG: 466.075 MHz carries 4 pages (512 and 1200 bps, alpha and numeric), 465.970 MHz carries 3 adjacent-channel pages with other addresses; both keyed throughout. offsetHz selects 466.075 MHz on both paths (delta E7). Local check 2026-10-10 (FM demod + multimon-ng 1.2.0): 4/4 pages on 466.075 MHz, 3/3 on 465.970 MHz, no false decodes."
+    fetch:
+      { kind: generated, recipe: recipes/composed_pocsag_466075k_2048k.json }
+    file: raw/composed_pocsag_466075k_2048k.cu8
+    sha256: 2747fa821c929ac7755747756b8efd41d21509dce7877792d6c33e8eeb1a32fc
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 466300000
+    duration_s: 12
+    expected:
+      { min_count: 1, payloads: [], key_fields: ["address", "function"] }
+
+  - id: composed_aprs_144800k_2048k
+    role: channelizer-golden
+    decoder: direwolf
+    decoder_options: { offsetHz: -400000 }
+    license: "composed: CC0-1.0 (sdr-flex aprs-afsk1200) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/livethisdream/sdr-flex/tree/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/aprs-afsk1200
+      notes: "sdr-flex APRS render (N0CALL>APRS, KC1ABC>APRS; FM 3 kHz deviation) at 144.800 MHz, 4 repeats. Local check 2026-10-10 (FM demod + multimon-ng AFSK1200): 8/8 frames. direwolf: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_aprs_144800k_2048k.json }
+    file: raw/composed_aprs_144800k_2048k.cu8
+    sha256: 55e76d0dd37231287afaa50843a77c335419ddc826e6a229897af00c3ce57862
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 145200000
+    duration_s: 12
+    expected:
+      { min_count: 1, payloads: [], key_fields: ["source", "destination"] }
+
+  - id: composed_acars_131725k_2048k
+    role: channelizer-golden
+    decoder: acarsdec
+    decoder_options: { offsetHz: 325000, frequencies: [131725000] }
+    license: "composed: synthetic (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      notes: "Synthetic plain-old ACARS: 4 downlinks on 131.725 MHz, 2 adjacent on 131.525 MHz. offsetHz and frequencies agree on 131.725 MHz for both paths. Local check 2026-10-10 (AM demod + a Python port of acarsdec msk.c/acars.c, which decodes acarsdec's own test.wav): 4/4 and 2/2 frames, CRC and parity valid. acarsdec: verify in image."
+    fetch:
+      { kind: generated, recipe: recipes/composed_acars_131725k_2048k.json }
+    file: raw/composed_acars_131725k_2048k.cu8
+    sha256: 48c31b7b7f41c6e767e2bb896e83aebfa1bd076828490e11789c21c53a5fe6a1
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 131400000
+    duration_s: 12
+    expected: { min_count: 1, payloads: [], key_fields: ["tail", "label"] }
+
+  - id: composed_ism_433920k_2048k
+    role: channelizer-golden
+    decoder: rtl433
+    license: "composed: unstated (rtl_433_tests Acurite sample; fetched from origin; not redistributed; local test use only) + CC0-1.0 (sdr-flex rtl433-ook-pwm) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02
+      notes: "rtl_433_tests Acurite 3-in-1 capture (signal near 433.93 MHz, 4 repeats) and the sdr-flex OOK PWM render at 433.95 MHz (3 repeats; rtl_433 decodes it only with its flex spec, which the rtl433 decoder cannot pass). Local check 2026-10-10 (rtl_433 25.12): Acurite-3n1 id 7992 8/8 on the 433.92 MHz channel and on a 1.024 Msps decimation of the whole capture; OOK codes with -X."
+    fetch: { kind: generated, recipe: recipes/composed_ism_433920k_2048k.json }
+    file: raw/composed_ism_433920k_2048k.cu8
+    sha256: d9937b2523a95a6c491314f4c780603d4b2c256891e8cab216679c6da72bd05f
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 433720000
+    duration_s: 10
+    channel: { center_hz: 433920000 }
+    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+
+  # Public recordings without a stated license (Ruling T6-LIC): fetched from origin at test
+  # time, never committed or redistributed. Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
+  - id: sdrangel_adsb
+    role: tail-golden
+    decoder: readsb
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://www.sdrangel.org/iq-files/
+      notes: "SDRangel ADS-B example, 2021-11-26, London area; auxi centre 1090000000 Hz. readsb raw baseline (readsb does not migrate)."
+    fetch:
+      kind: public
+      url: https://www.sdrangel.org/iq/adsb.zip
+      archive_sha256: 67b99c06fe7ca6b3c21d493f36760bad4b9fb46db4e7a4dade699e7ccdd5a2fb
+      member: adsb.2021-11-26T15_03_30_573.wav
+      transform: wav-to-cu8
+    file: raw/sdrangel_adsb.cu8
+    sha256: bded99b1a3d6fe4aa31e2092b631a5b5e3cbbc2d534f4089bd54e89c59ae4b8a
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 1090000000
+    duration_s: 102.088
+    large: true
+    expected: { min_count: 1, payloads: [], key_fields: ["icao"] }
+
+  - id: sigid_pocsag
+    role: tail-golden
+    decoder: multimon-ng
+    decoder_options: { modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://www.sigidwiki.com/wiki/File:POCSAG_IQ.zip
+      notes: "SigIDWiki POCSAG IQ sample (Admin, 2015-02-10). 128 kHz u8 IQ WAV; centre not recorded."
+    fetch:
+      kind: public
+      url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
+      archive_sha256: 45bcba81cd4a0a50d1a0519bf4c484fc7513da18021eb2faed79cb03378c6353
+      member: POCSAG_IQ.wav
+      transform: wav-to-cu8
+    file: raw/sigid_pocsag.cu8
+    sha256: 2218e1ce0a3e1e82d3b402a90f2a277eb8d87380e15c14eb0080b97776dc60c1
+    format: cu8
+    sample_rate: 128000
+    duration_s: 16.364
+    expected:
+      { min_count: 1, payloads: [], key_fields: ["address", "function"] }
+
+  - id: rtl433_acurite_3n1_g001
+    role: tail-golden
+    decoder: rtl433
+    decoder_options: { inputSampleRate: 250000, targetSampleRate: 250000 }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02
+      notes: "rtl_433_tests sample; upstream .json: Acurite-3n1 id 7992 (x2). decoder_options unverified (T6a)."
+    fetch:
+      kind: public
+      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8
+      archive_sha256: d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641
+    file: raw/rtl433_acurite_3n1_g001.cu8
+    sha256: d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641
+    format: cu8
+    sample_rate: 250000
+    center_hz: 433920000
+    duration_s: 0.262
+    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+
+  - id: rtl433_fineoffset_wh32_g001
+    role: tail-golden
+    decoder: rtl433
+    decoder_options: { inputSampleRate: 1000000, targetSampleRate: 1000000 }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/fineoffset/fineoffset_wh32
+      notes: "rtl_433_tests sample; upstream .json: Fineoffset-WH32 id 248. decoder_options unverified (T6a)."
+    fetch:
+      kind: public
+      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/fineoffset/fineoffset_wh32/g001_868.3M_1000k.cu8
+      archive_sha256: 7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e
+    file: raw/rtl433_fineoffset_wh32_g001.cu8
+    sha256: 7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e
+    format: cu8
+    sample_rate: 1000000
+    center_hz: 868300000
+    duration_s: 0.131
+    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+
+  - id: rtl433_olympia_9571_2048k
+    role: tail-golden
+    decoder: rtl433
+    decoder_options: { inputSampleRate: 2048000 }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571
+      notes: "rtl_433_tests sample; upstream .json: Olympia-9571 id 5103419 state open (x2). Has the channelizer-golden shape (cu8, 2.048 Msps, centre known); tail-golden as T6a proposed."
+    fetch:
+      kind: public
+      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8
+      archive_sha256: 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d
+    file: raw/rtl433_olympia_9571_2048k.cu8
+    sha256: 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 868400000
+    duration_s: 0.128
+    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
 
 candidates:
   # Probed 2026-10-09 (channelizer T6a). Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
   # "cu8 sha256" is the file after download.sh `transform: wav-to-cu8` (sox 14.4.2).
-  - id: sigid_pocsag
-    decoder: multimon-ng
-    url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
-    license: null
-    blockers:
-      [
-        "license unverified: https://www.sigidwiki.com/wiki/File:POCSAG_IQ.zip states none; the site disclaimer says contributors keep their rights",
-        "centre frequency unknown: no metadata chunk, no frequency in the name or on the page",
-      ]
-    notes: "archive sha256 45bcba81cd4a0a50d1a0519bf4c484fc7513da18021eb2faed79cb03378c6353 (1242272 B); member POCSAG_IQ.wav: u8 IQ WAV, 128000 Hz, 16.364 s; cu8 sha256 2218e1ce0a3e1e82d3b402a90f2a277eb8d87380e15c14eb0080b97776dc60c1. Role if licensed: tail-golden."
   - id: sigid_flex
     decoder: multimon-ng
     url: https://www.sigidwiki.com/images/e/ec/FLEX_Pager_IQ_20150816_929613kHz_IQ.zip
@@ -73,13 +277,6 @@ candidates:
         "62500 Hz capture centred on 161985000 covers AIS channel A only",
       ]
     notes: "Wayback archive sha256 8acecdb2c5d37255a84182ec7e819f940d0f8c0e002890eb1801f68293fe1807 (16518385 B); member ais/SDRuno_20200907_184926Z_161985kHz.wav: s16 IQ WAV, 62500 Hz, 75.784 s, auxi centre 161985000 Hz, peak 0.084 FS; cu8 sha256 2adfb46443a9e4966acd5444382dc81da098606d19f533aa645f2b106e044906."
-  - id: sdrangel_adsb
-    decoder: readsb
-    url: https://www.sdrangel.org/iq/adsb.zip
-    license: null
-    blockers:
-      ["license unverified: https://www.sdrangel.org/iq-files/ states none"]
-    notes: "archive sha256 67b99c06fe7ca6b3c21d493f36760bad4b9fb46db4e7a4dade699e7ccdd5a2fb (471265240 B); member adsb.2021-11-26T15_03_30_573.wav: s16 IQ WAV, 2400000 Hz, 102.088 s, auxi centre 1090000000 Hz, member sha256 3daaa515dfe6dfc5573c4a031ce4c0531c4bb7025813b7aef268a424b9351633; cu8 sha256 bded99b1a3d6fe4aa31e2092b631a5b5e3cbbc2d534f4089bd54e89c59ae4b8a (490020864 B). Role if licensed: tail-golden, large: true."
   - id: sdrplay_acars
     decoder: acarsdec
     url: https://sdrplay.com/resources/IQ/acars.zip
@@ -90,15 +287,6 @@ candidates:
         "hosting URL returns 404 on 2026-10-09; not downloaded (539 MB Wayback copy only)",
         "WAV rate and centre unverified",
       ]
-  - id: rtl433_tests_repo
-    decoder: rtl433
-    url: https://github.com/merbanan/rtl_433_tests
-    license: null
-    blockers:
-      [
-        "license unverified: the repo has no LICENSE file, GitHub reports no license and the README states none",
-      ]
-    notes: "Samples chosen at commit 1aa8c29d6b9383739d1aeed495dbc5069b704392, one tail-golden each, fetched by raw URL: acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8 (d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641), fineoffset/fineoffset_wh32/g001_868.3M_1000k.cu8 (7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e), olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8 (2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d)."
   - id: lora_meshtastic_placeholder
     decoder: lora-meshtastic
     url: null

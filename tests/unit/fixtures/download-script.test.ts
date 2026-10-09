@@ -41,7 +41,29 @@ describe("manifest-query.mjs", () => {
 		)
 		expect(r.status, r.stderr).toBe(0)
 		expect(r.stdout.trim()).toBe(
-			`a_fix|private|||none|raw/a.cu8|${"b".repeat(64)}||false`,
+			`a_fix|private|||none|raw/a.cu8|${"b".repeat(64)}||false|`,
+		)
+	})
+	it("lists a generated fixture's recipe in the last column (channelizer T7a)", () => {
+		const { path } = tempManifest([
+			{
+				id: "g_fix",
+				fetch: { kind: "generated", recipe: "recipes/g_fix.json" },
+				file: "raw/g_fix.cu8",
+				sha256: "c".repeat(64),
+			},
+		])
+		const r = spawnSync(
+			"node",
+			[resolve("fixtures/manifest-query.mjs"), "list"],
+			{
+				encoding: "utf8",
+				env: { ...process.env, WAVEKIT_FIXTURES_MANIFEST: path },
+			},
+		)
+		expect(r.status, r.stderr).toBe(0)
+		expect(r.stdout.trim()).toBe(
+			`g_fix|generated|||none|raw/g_fix.cu8|${"c".repeat(64)}||false|recipes/g_fix.json`,
 		)
 	})
 	it("rejects a v1 manifest", () => {
@@ -64,6 +86,77 @@ describe("manifest-query.mjs", () => {
 function sha(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
+/** A tiny recipe: one file:// cu8 tone source composed at 256 kS/s for 20 ms. */
+function generatedSetup(sourceSha?: string) {
+	const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+	const tone = join(src, "tone.cu8")
+	const n = 640
+	const bytes = Buffer.alloc(2 * n)
+	for (let i = 0; i < n; i++) {
+		bytes[2 * i] = Math.round(128 + 60 * Math.cos((2 * Math.PI * i) / 16))
+		bytes[2 * i + 1] = Math.round(128 + 60 * Math.sin((2 * Math.PI * i) / 16))
+	}
+	writeFileSync(tone, bytes)
+	const recipe = {
+		id: "unit_gen",
+		sampleRate: 256_000,
+		centerHz: 100_000_000,
+		durationS: 0.02,
+		seed: 3,
+		noiseDbfs: -40,
+		sources: [
+			{
+				id: "tone",
+				url: `file://${tone}`,
+				sha256: sourceSha ?? sha(tone),
+				format: "cu8",
+				sampleRate: 32_000,
+				license: "test",
+			},
+		],
+		components: [{ name: "t", source: "tone", offsetHz: 50_000, levelDb: -10 }],
+	}
+	const { path, dir } = tempManifest([])
+	mkdirSync(join(dir, "recipes"))
+	writeFileSync(join(dir, "recipes/unit_gen.json"), JSON.stringify(recipe))
+	return { path, dir, src, tone }
+}
+function composeDirect(dir: string, src: string): string {
+	const out = join(dir, "direct.cu8")
+	const r = spawnSync(
+		"python3",
+		[
+			"-I",
+			resolve("fixtures/compose.py"),
+			join(dir, "recipes/unit_gen.json"),
+			"--out",
+			out,
+			"--sources-dir",
+			src,
+		],
+		{ encoding: "utf8", timeout: 30000 },
+	)
+	expect(r.status, r.stderr).toBe(0)
+	return sha(out)
+}
+function generatedManifest(path: string, digest: string) {
+	writeFileSync(
+		path,
+		JSON.stringify({
+			version: 2,
+			fixtures: [
+				{
+					id: "unit_gen",
+					fetch: { kind: "generated", recipe: "recipes/unit_gen.json" },
+					file: "raw/unit_gen.cu8",
+					sha256: digest,
+				},
+			],
+			candidates: [],
+		}),
+	)
+}
+
 function runDownload(
 	manifest: string,
 	outDir: string,
@@ -143,6 +236,39 @@ describe("download.sh v2", () => {
 		})
 		expect(fetched.status, fetched.stderr).toBe(0)
 		expect(sha(join(dir, "raw/own.cu8"))).toBe(digest)
+	})
+	it("regenerates a generated fixture from its fetched sources and verifies it (channelizer T7a)", () => {
+		const { path, dir, src } = generatedSetup()
+		generatedManifest(path, composeDirect(dir, src))
+		const r = runDownload(path, dir)
+		expect(r.status, r.stdout + r.stderr).toBe(0)
+		expect(sha(join(dir, "raw/unit_gen.cu8"))).toBe(
+			sha(join(dir, "direct.cu8")),
+		)
+		expect(sha(join(dir, "raw/.sources/tone.cu8"))).toBe(
+			sha(join(src, "tone.cu8")),
+		)
+		const sidecar = JSON.parse(
+			readFileSync(join(dir, "raw/unit_gen.cu8.json"), "utf8"),
+		) as { sha256: string; components: { absoluteHz: number }[] }
+		expect(sidecar.sha256).toBe(sha(join(dir, "raw/unit_gen.cu8")))
+		expect(sidecar.components[0]?.absoluteHz).toBe(100_050_000)
+		const again = runDownload(path, dir)
+		expect(again.stdout).toMatch(/present and verified/)
+	})
+	it("refuses a generated fixture whose source or output sha256 does not match", () => {
+		const bad = generatedSetup("0".repeat(64))
+		generatedManifest(bad.path, "1".repeat(64))
+		const r = runDownload(bad.path, bad.dir)
+		expect(r.status).toBe(1)
+		expect(r.stdout + r.stderr).toMatch(/source tone: sha256 mismatch/)
+		expect(existsSync(join(bad.dir, "raw/unit_gen.cu8"))).toBe(false)
+		const good = generatedSetup()
+		generatedManifest(good.path, "2".repeat(64))
+		const out = runDownload(good.path, good.dir)
+		expect(out.status).toBe(1)
+		expect(out.stdout + out.stderr).toMatch(/sha256 mismatch/)
+		expect(existsSync(join(good.dir, "raw/unit_gen.cu8"))).toBe(false)
 	})
 	it("skips large fixtures unless --all", () => {
 		const { path, dir } = tempManifest([

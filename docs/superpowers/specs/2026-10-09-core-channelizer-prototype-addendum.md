@@ -18,7 +18,7 @@ bands they cannot decode.
 | Decision | Taken | Alternative if flipped |
 |---|---|---|
 | D1 Language | Rust: `rustfft` + own FIR/polyphase resampler; binary `wavekit-chan`; new Dockerfile stage on a Rust bookworm image; amd64/arm64 via `docker/bake.hcl`; no runtime deps. | C++ + libcsdr (GPL-3, integer-only decimation) or C + liquid-dsp (MIT, new dep to build and pin). Only § 10 and the crate list change. |
-| D2 Fixture sourcing | Hybrid: public corpora with license recorded per fixture; short own RTL-SDR captures at 2.048/2.4 Msps for POCSAG, DMR, LoRa (`fixtures/lora/README.md` procedure, `scripts/auto-capture.mjs`/`.py`), kept out of git under `fixtures/raw/` (already gitignored, `.gitignore:79`) and fetched by `download.sh` with sha256; synthetic only for DSP property tests. | Public-only (gaps stay uncovered) or own-only (no provenance diversity). Only § 8's acquisition list changes. |
+| D2 Fixture sourcing | Hybrid: public corpora with license recorded per fixture; short own RTL-SDR captures at 2.048/2.4 Msps for POCSAG, DMR, LoRa (`fixtures/lora/README.md` procedure, `scripts/auto-capture.mjs`/`.py`), kept out of git under `fixtures/raw/` (already gitignored, `.gitignore:79`) and fetched by `download.sh` with sha256; synthetic only for DSP property tests. **Amended 2026-10-09 (user decision):** synthetic IQ is also allowed for AIS, POCSAG, APRS and ACARS goldens, composed to 2.048/2.4 Msps by `fixtures/compose.py` (§ 8); DMR, analog voice, rtl_433 sensors and aircraft stay real captures; unlicensed public recordings may be used only when fetched from their origin at test time and never redistributed. | Public-only (gaps stay uncovered) or own-only (no provenance diversity). Only § 8's acquisition list changes. |
 | D3 Transport | One raw Unix socket per channel under `channelizer.socketDir` plus a JSON-lines control protocol (requests on stdin, events on stdout). Node connects per channel and passes the socket `Readable` to `decoder.attachInput()` (`base-decoder.ts:307-321`), so `DecoderManager` contracts do not change. | In-band framed blocks de-framed in Node (extra copy, Node CPU) or fixed extra pipe fds at spawn (cannot add a channel without a restart). Only § 4 and § 11 change. |
 
 Everything under RESOLVED in the parent and rate-model specs stays as decided:
@@ -291,6 +291,18 @@ SDRangel ADS-B 2.4 Msps (readsb raw baseline only), SigIDwiki POCSAG/FLEX
 decodes; pager, ACARS and AIS captures contain real identifiers and stay
 private. `rtl_433_tests` samples are `tail-golden` (narrow rates, no capture).
 A fixture is a channelizer golden only at ≥ 2.048 Msps CU8 with a known centre.
+
+Amendment (2026-10-09, D2 as amended, channelizer T7a): no licensed public recording
+at 2.048/2.4 Msps carries confirmed traffic, so the AIS, POCSAG, APRS, ACARS and
+rtl_433 channelizer goldens are composed: `fixtures/compose.py` resamples narrowband
+sources (IQEngine AIS, CC BY 4.0; sdr-flex APRS and OOK, CC0; an rtl_433_tests capture,
+unstated license, fetched from origin) and WaveKit POCSAG/ACARS generators to the
+capture rate, places them at offsets, adds seeded noise, an IQ image and a DC spike,
+and quantises to CU8. The manifest marks them `fetch: { kind: generated, recipe }`;
+`download.sh` fetches the sources and regenerates the file (sha256-checked).
+Property 15 is an equality gate, so it needs a known centre and known offsets, not
+real-world impairments. Own captures remain for DMR, analog voice, rtl_433 sensors and
+aircraft.
 
 ## 9. Capacity tooling (batch 5)
 
