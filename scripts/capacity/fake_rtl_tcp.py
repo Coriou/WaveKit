@@ -14,11 +14,17 @@ buffer) on an absolute schedule. Every --report seconds it prints one JSON line
 to stdout with bytes sent and the largest delay behind schedule. A blocked
 socket shows up as growing lag, which means the consumer read side did not keep
 up.
+
+With --file the server replays a CU8 recording instead (trimmed to an even
+byte count), once by default or forever with --loop. --pacing unpaced sends
+as fast as the consumer reads, which measures throughput rather than real-time
+delivery.
 """
 
 import argparse
 import json
 import math
+import pathlib
 import socket
 import struct
 import sys
@@ -54,6 +60,26 @@ def synthesize(rate: int, seed: int) -> bytes:
     return bytes(out)
 
 
+def load_period(file: str | None, rate: int, seed: int) -> bytes:
+    """The bytes one connection replays: the file trimmed to whole I/Q pairs, or one synthetic second."""
+    if not file:
+        return synthesize(rate, seed)
+    data = pathlib.Path(file).read_bytes()
+    return data[: len(data) // 2 * 2]
+
+
+def next_block(period: bytes, offset: int, loop: bool) -> tuple[bytes, int, bool]:
+    """The next block from `offset`, the new offset, and whether a non-looping replay is done."""
+    if loop:
+        block = period[offset:offset + BLOCK]
+        while len(block) < BLOCK:  # cross the loop seam without copying the whole period
+            block += period[:BLOCK - len(block)]
+        return block, (offset + BLOCK) % len(period), False
+    block = period[offset:offset + BLOCK]
+    end = offset + len(block)
+    return block, end, end >= len(period)
+
+
 def drain_commands(conn: socket.socket) -> None:
     try:
         while conn.recv(5):
@@ -63,12 +89,14 @@ def drain_commands(conn: socket.socket) -> None:
 
 
 def serve(args: argparse.Namespace) -> None:
-    period = synthesize(args.rate, args.seed)
-    looped = period + period[:BLOCK]  # lets any block cross the loop seam
+    period = load_period(args.file, args.rate, args.seed)
+    if not period:
+        raise SystemExit(f"{args.file}: no complete I/Q pair to replay")
     bytes_per_second = args.rate * 2
     listener = socket.create_server(("0.0.0.0", args.port), reuse_port=False)
     print(json.dumps({"event": "listening", "port": args.port, "rate": args.rate,
-                      "synthetic": True, "seed": args.seed}), flush=True)
+                      "synthetic": not args.file, "seed": args.seed, "file": args.file,
+                      "loop": args.loop, "pacing": args.pacing}), flush=True)
     server_deadline = time.monotonic() + args.duration
     listener.settimeout(1.0)
     connection = 0
@@ -81,8 +109,8 @@ def serve(args: argparse.Namespace) -> None:
         except socket.timeout:
             continue
         connection += 1
-        stream(conn, peer, connection, looped, len(period), bytes_per_second,
-               server_deadline, args.report)
+        stream(conn, peer, connection, period, args.loop, args.pacing == "unpaced",
+               bytes_per_second, server_deadline, args.report)
     listener.close()
 
 
@@ -91,7 +119,7 @@ def emit(event: dict) -> None:
     print(json.dumps(event), flush=True)
 
 
-def stream(conn, peer, connection, looped, period_len, bytes_per_second, deadline, report):
+def stream(conn, peer, connection, period, loop, unpaced, bytes_per_second, deadline, report):
     conn.settimeout(None)
     conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     start = time.monotonic()
@@ -109,20 +137,23 @@ def stream(conn, peer, connection, looped, period_len, bytes_per_second, deadlin
                 break
             due = start + sent / bytes_per_second
             if due > now:
-                time.sleep(min(due, deadline) - now)
-                if time.monotonic() >= deadline:
-                    break
+                if not unpaced:  # unpaced sends as fast as the client reads
+                    time.sleep(min(due, deadline) - now)
+                    if time.monotonic() >= deadline:
+                        break
             else:
                 max_lag = max(max_lag, now - due)
-            conn.sendall(looped[offset:offset + BLOCK])
-            sent += BLOCK
-            offset = (offset + BLOCK) % period_len
+            block, offset, done = next_block(period, offset, loop)
+            conn.sendall(block)
+            sent += len(block)
             if time.monotonic() >= next_report:
                 elapsed = time.monotonic() - start
                 emit({"event": "progress", "connection": connection, "t": round(elapsed, 1),
                       "bytes": sent, "expectedBytes": int(elapsed * bytes_per_second),
                       "maxLagSeconds": round(max_lag, 3)})
                 next_report += report
+            if done:
+                break
     except (BrokenPipeError, ConnectionResetError, OSError) as error:
         emit({"event": "disconnected", "connection": connection, "error": str(error)})
     finally:
@@ -140,6 +171,10 @@ def main() -> None:
     parser.add_argument("--duration", type=float, default=300)
     parser.add_argument("--seed", type=int, default=0x5EED1234)
     parser.add_argument("--report", type=float, default=5)
+    parser.add_argument("--file", help="replay this CU8 file instead of the synthetic signal")
+    parser.add_argument("--loop", action="store_true", help="replay the period forever")
+    parser.add_argument("--pacing", choices=["paced", "unpaced"], default="paced",
+                        help="paced = real time at --rate; unpaced = as fast as the client reads")
     serve(parser.parse_args())
 
 
