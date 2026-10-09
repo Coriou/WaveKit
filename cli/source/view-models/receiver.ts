@@ -53,7 +53,7 @@ import type {
 	TunerEditState,
 	UiState,
 } from "../ui/ui-state.js"
-import { keep, optional, gapRow, shed, type Row } from "./shed.js"
+import { essential, gapRow, keep, optional, shed, type Row } from "./shed.js"
 
 const RESULT_MS = 10_000
 const LABEL_W = 10
@@ -236,7 +236,7 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 		one(3, txt(`assigned ${src.assignments.length} decoders`, role)),
 	]
 	return [
-		keep(fitRow(lbl("SOURCE", true), row1, width)),
+		essential(fitRow(lbl("SOURCE", true), row1, width)),
 		optional(fitRow(lbl("rate"), row2, width), 2),
 	]
 }
@@ -553,7 +553,7 @@ function tunerBlock(
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
-			keep([
+			essential([
 				...lbl("TUNER", true),
 				sp("EDIT", "edit", true),
 				sp(
@@ -578,7 +578,7 @@ function tunerBlock(
 				? `last ${sanitize(last.command)} ${formatAge(now - last.at)} ago`
 				: null
 		rows.push(
-			keep(
+			essential(
 				fitDot(
 					lbl("TUNER", true),
 					[
@@ -799,7 +799,7 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 	const f = state.fanout.value
 	if (!f)
 		return [
-			keep(
+			essential(
 				clipped(
 					lbl("FANOUT", true),
 					noData(state, "/api/telemetry/fanout"),
@@ -897,7 +897,7 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 				[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
 			: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
 	return [
-		keep(fitDot(lbl("FANOUT", true), head, width)),
+		essential(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),
 		optional(fitDot(lbl("upstream"), upGroups, width), 4),
 	]
@@ -918,7 +918,7 @@ export function receiverLines(
 	const source = src
 		? sourceBlock(state, src, width)
 		: [
-				keep(
+				essential(
 					clipped(
 						lbl("SOURCE", true),
 						noData(state, "/api/sources"),
@@ -930,7 +930,7 @@ export function receiverLines(
 	const tuner = t
 		? tunerBlock(state, ui, t, relay, width)
 		: [
-				keep(
+				essential(
 					clipped(
 						lbl("TUNER", true),
 						noData(state, "/api/tuner"),
@@ -939,7 +939,7 @@ export function receiverLines(
 					),
 				),
 			]
-	const relayHead = keep(
+	const relayHead = essential(
 		relay
 			? relayHeader(
 					relay,

@@ -16,7 +16,15 @@ import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest } from "../ui/ui-state.js"
-import { gapRow, grouped, keep, optional, shed, type Row } from "./shed.js"
+import {
+	essential,
+	gapRow,
+	grouped,
+	keep,
+	optional,
+	shed,
+	type Row,
+} from "./shed.js"
 
 const RESULT_MS = 10_000
 const LABEL_W = 10
@@ -30,16 +38,17 @@ const MAX_NOTES = 2
 const DROP = {
 	gap: 9,
 	component: 8,
-	warning: 7,
-	error: 6,
-	alert: 6,
-	dongle: 5,
-	demod: 5,
-	sampling: 4,
-	mem: 4,
-	firstAlert: 3,
-	proc: 2,
-	cpu: 1,
+	alert: 7,
+	dongle: 6,
+	demod: 6,
+	sampling: 5,
+	mem: 5,
+	proc: 4,
+	cpu: 4,
+	// Preflight warnings and errors outrank routine rows (they explain a fault).
+	warning: 3,
+	error: 2,
+	firstAlert: 1,
 } as const
 const MODULATIONS: readonly LiveAudioConfig["modulation"][] = [
 	"nfm",
@@ -107,7 +116,7 @@ function containerBlock(state: AppState, width: number): Block {
 	if (!r)
 		return {
 			rows: [
-				keep(
+				essential(
 					kv(
 						"CONTAINER",
 						noData(state, "/api/resources"),
@@ -128,7 +137,7 @@ function containerBlock(state: AppState, width: number): Block {
 			? "?"
 			: formatAge(now - state.resources.receivedAt)
 	const rows: Row[] = [
-		keep([
+		essential([
 			...lbl("CONTAINER", true),
 			sp(
 				`${c.available ? `cgroup ${c.cgroupVersion}` : "no cgroup data"}${sep()}as of ${age} ago`,
@@ -229,7 +238,7 @@ function hostBlock(
 		? `${formatAge(now - Date.parse(h.lastFetchedAt))} ago`
 		: "?"
 	const rows: Row[] = [
-		keep(
+		essential(
 			fitDot(
 				lbl("SDR HOST", true),
 				[
@@ -393,7 +402,7 @@ function audioBlock(state: AppState, width: number): Row[] {
 	const a = state.audio.value
 	if (!a)
 		return [
-			keep(
+			essential(
 				kv(
 					"AUDIO",
 					noData(state, "/api/live-audio/status"),
@@ -426,7 +435,7 @@ function audioBlock(state: AppState, width: number): Row[] {
 		t => t.sourceId === a.sourceId,
 	)?.frequency
 	const rows: Row[] = [
-		keep(
+		essential(
 			fitDot(
 				lbl("AUDIO", true),
 				[
@@ -481,11 +490,11 @@ function coreBlock(state: AppState, width: number): Row[] {
 	const s = state.status.value
 	if (!s)
 		return [
-			keep(kv("CORE", noData(state, "/api/status"), width, "label", true)),
+			essential(kv("CORE", noData(state, "/api/status"), width, "label", true)),
 		]
 	const role: Role = isOld(state.status, state.now) ? "old" : "value"
 	const rows: Row[] = [
-		keep(
+		essential(
 			fitDot(
 				lbl("CORE", true),
 				[
@@ -535,7 +544,7 @@ export function systemLines(
 		hosts.length > 0
 			? hosts.flatMap((b, i) => [...(i > 0 ? gap() : []), ...b.rows])
 			: [
-					keep(
+					essential(
 						kv(
 							"SDR HOST",
 							state.resources.value
