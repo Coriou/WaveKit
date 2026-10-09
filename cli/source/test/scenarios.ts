@@ -255,8 +255,13 @@ const wsAgo = (c: Obj): number =>
  */
 function anchorTimes(sc: Obj, authored: Obj): void {
 	const conn = isObj(sc["conn"]) ? sc["conn"] : {}
-	const restDelta = restAgo(authored) - restAgo(conn)
-	const wsDelta = wsAgo(authored) - wsAgo(conn)
+	const restOnly = restAgo(authored) - restAgo(conn)
+	const wsOnly = wsAgo(authored) - wsAgo(conn)
+	// When both feeds are older (cached), move both by the larger shift so a REST
+	// lastOutputAt is never newer than the newest cached message (I9).
+	const both = restOnly < 0 && wsOnly < 0 ? Math.min(restOnly, wsOnly) : null
+	const restDelta = both ?? restOnly
+	const wsDelta = both ?? wsOnly
 	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
 	for (const r of Object.values(rest))
 		if (isObj(r) && r["body"] !== undefined)

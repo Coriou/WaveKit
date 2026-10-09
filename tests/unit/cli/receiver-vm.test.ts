@@ -722,4 +722,46 @@ describe("receiver view-model (spec §6.4)", () => {
 			expect(relay).toMatch(/^RELAY {5}disabled · /)
 		})
 	})
+
+	describe("C3 fix round 3", () => {
+		const live = scenarioState("live")
+		it("fits the relay compatibility row to the width and dims it on an old lane", () => {
+			const relay = {
+				...live.relay.value!,
+				compatibility: "unsupported-format" as const,
+				compatibilityMessage: `Source format ${"S16_AUDIO ".repeat(20)}is not IQ`,
+			}
+			const fresh = {
+				...live,
+				relay: laneOk(relay, live.now - 2000, "rest" as const),
+			}
+			for (const w of [59, 79, 119]) {
+				for (const l of receiverLines(
+					fresh,
+					initialUi("receiver"),
+					w,
+					30,
+					true,
+				))
+					expect(cellWidth(lineText(l)), lineText(l)).toBeLessThanOrEqual(w)
+			}
+			const old = {
+				...live,
+				relay: { ...laneOk(relay, live.now - 60_000, "rest" as const) },
+			}
+			const row = receiverLines(old, initialUi("receiver"), 79, 30, true).find(
+				l => lineText(l).includes("S16_AUDIO"),
+			)
+			expect(row?.some(span => span.role === "old")).toBe(true)
+		})
+		it("controlConfirm fits by priority: the safety clause before the full remote", () => {
+			const c = controlConfirm(live)
+			expect(c?.groups?.map(g => g.priority)).toEqual([0, 1])
+			const clause = c?.groups?.[1]?.variants.map(lineText)
+			expect(clause).toEqual([
+				"its next command is refused",
+				"its next tuning command is refused",
+			])
+		})
+	})
 })

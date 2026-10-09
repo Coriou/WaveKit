@@ -135,8 +135,13 @@ const wsAgo = (c: Obj): number =>
 /** R58: bodies and frames move back with the scenario's older REST success / WS base. */
 function anchorTimes(sc: Obj, authored: Obj): void {
 	const conn = isObj(sc["conn"]) ? sc["conn"] : {}
-	const restDelta = restAgo(authored) - restAgo(conn)
-	const wsDelta = wsAgo(authored) - wsAgo(conn)
+	const restOnly = restAgo(authored) - restAgo(conn)
+	const wsOnly = wsAgo(authored) - wsAgo(conn)
+	// When both feeds are older (cached), move both by the larger shift so a REST
+	// lastOutputAt is never newer than the newest cached message (I9).
+	const both = restOnly < 0 && wsOnly < 0 ? Math.min(restOnly, wsOnly) : null
+	const restDelta = both ?? restOnly
+	const wsDelta = both ?? wsOnly
 	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
 	for (const r of Object.values(rest))
 		if (isObj(r) && r["body"] !== undefined && restDelta !== 0)
@@ -180,6 +185,11 @@ function compose(name: string): {
 	delete sc["extends"]
 	const authored = parent?.authored ?? (isObj(own["conn"]) ? own["conn"] : {})
 	return { sc, transforms: [...(parent?.transforms ?? []), t], authored }
+}
+
+/** The resolved scenario before the shift to load time; exported for the loader-agreement test. */
+export function resolveScenario(name: string): Obj {
+	return resolve(name)
 }
 
 function resolve(name: string): Obj {
