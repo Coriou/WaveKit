@@ -128,22 +128,18 @@ function channelsFrom(
 }
 
 /**
- * R84: core's bandAssessment targets win, labelled by their basis. R15
- * (older cores): configured `targetFrequenciesHz` win over the nominal table for
- * channel decoders. R40: tuned types (dsd-fme, multimon-ng) always
- * demodulate the window centre, because core never applies their frequency
- * option, so they stay `tuned` and the targets are only annotated.
+ * R84 / R90: core's bandAssessment targets win for every type, labelled by
+ * their basis. Older cores (no assessment): R15, configured
+ * `targetFrequenciesHz` win over the nominal table for channel decoders; R40,
+ * tuned types (dsd-fme, multimon-ng) stay `tuned` and their targets are only
+ * annotated.
  */
 export function decoderBand(d: BandSubject): DecoderBand | undefined {
 	const nominal = bandFor(d.type)
 	const targets = validTargets(d.targetFrequenciesHz)
-	if (nominal?.kind === "tuned") {
-		return targets
-			? { band: nominal, origin: "nominal", ignoredTargetsHz: targets }
-			: { band: nominal, origin: "nominal" }
-	}
 	const core = d.bandAssessment
 	const coreTargets = validTargets(core?.targetsHz)
+	// R90: core band-checks every type, tuned ones included, with its own targets.
 	if (coreTargets) {
 		const basis = core?.basis
 		return {
@@ -153,6 +149,12 @@ export function decoderBand(d: BandSubject): DecoderBand | undefined {
 					? (BASIS[basis] ?? "core")
 					: "core",
 		}
+	}
+	if (nominal?.kind === "tuned") {
+		// The R40 note is for older cores only: a current core applies the targets.
+		return targets && !core
+			? { band: nominal, origin: "nominal", ignoredTargetsHz: targets }
+			: { band: nominal, origin: "nominal" }
 	}
 	if (targets) {
 		return { band: channelsFrom(targets, undefined), origin: "configured" }

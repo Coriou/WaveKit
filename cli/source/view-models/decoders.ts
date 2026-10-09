@@ -1,5 +1,6 @@
 import { sparkBuckets } from "../data/rates.js"
 import type { BandOrigin } from "../data/nominal-bands.js"
+import { RATE_REASON_WORDS } from "../data/reason-codes.js"
 import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
@@ -87,16 +88,7 @@ const quoted = (text: string): string =>
 
 /** R70 / R84: core's suspension reason codes in plain words; an unknown code is shown quoted. */
 const SUSPENSION_REASON: Readonly<Record<string, string>> = {
-	"insufficient-sample-rate": "sample rate too low",
-	"unsupported-sample-rate": "sample rate not supported",
-	"unsupported-input-kind": "input kind not supported",
-	"unsupported-input-format": "input format not supported",
-	"unsupported-frontend-rate": "front-end rate not supported",
-	"unsupported-decoder-input-rate": "decoder input rate not supported",
-	"unknown-requirements": "rate requirements not declared",
-	"source-rate-unknown": "source rate not known",
-	"adaptation-unknown": "rate adaptation not known",
-	"external-input": "external input",
+	...RATE_REASON_WORDS,
 	"frequency-out-of-band": "out of band",
 }
 
@@ -119,13 +111,13 @@ const BAND_ORIGIN: Readonly<Record<BandOrigin, string>> = {
 	protocol: "protocol",
 	"decoder-default": "decoder default",
 	nominal: "nominal",
-	core: "",
+	core: "basis ?",
 }
 
 function bandOriginWords(f: DecoderFacts): string {
 	const basis = f.row.bandAssessment?.basis
-	if (f.bandOrigin === "core")
-		return basis !== undefined ? `basis ${quoted(basis)}` : ""
+	if (f.bandOrigin === "core" && basis !== undefined)
+		return `basis ${quoted(basis)}`
 	return BAND_ORIGIN[f.bandOrigin ?? "nominal"]
 }
 
@@ -374,13 +366,15 @@ export function decoderDetail(
 		"?": `window ?${why}`,
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
-	const origin = bandOriginWords(f)
+	// R90: under core's assessment a tuned type is placed by core, not assumed to follow.
 	const band =
 		f.nominal === "tuned"
-			? "tuned (follows the receiver)"
+			? core
+				? "tuned"
+				: "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
-				: `${f.nominal} MHz${origin ? ` ${origin}` : ""}`
+				: `${f.nominal} MHz ${bandOriginWords(f)}`
 	const parts = [band, ...(f.bandNote ? [f.bandNote] : []), windowPart, member]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
