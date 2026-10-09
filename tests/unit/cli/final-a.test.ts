@@ -150,3 +150,26 @@ describe("final M3: targetsHz is capped at 64", () => {
 	})
 })
 
+describe("final M4: sessions follow the REST decoder list", () => {
+	const T0 = 1_000_000
+	const rest = (at: number, rows: DecoderRow[]): Inbound =>
+		({
+			kind: "rest",
+			endpoint: "decoders",
+			outcome: { ok: true, value: rows, rejected: 0 },
+			at,
+		}) as RestInbound
+	const status = (at: number, id: string): Inbound => ({
+		kind: "ws",
+		at,
+		event: { type: "decoder:status", decoder: row({ id, type: "x" }) },
+	})
+	it("drops sessions of decoders the last full list no longer has", () => {
+		let s = reduce(initialState(T0), [rest(T0, [row()])], T0)
+		for (let i = 0; i < 50; i++)
+			s = reduce(s, [status(T0 + i, `ghost-${i}`)], T0 + i)
+		expect(Object.keys(s.session)).toHaveLength(51)
+		s = reduce(s, [rest(T0 + 100, [row()])], T0 + 100)
+		expect(Object.keys(s.session)).toEqual(["readsb"])
+	})
+})
