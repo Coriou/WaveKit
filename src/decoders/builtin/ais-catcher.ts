@@ -217,6 +217,11 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 		}
 	}
 
+	/** Migrated to the opt-in core channelizer (addendum §7 step 1). */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
 	protected override getIqDecimationConfig(): IqDecimationConfig {
 		const inputRate = this.options.inputSampleRate ?? 2_400_000
 		return {

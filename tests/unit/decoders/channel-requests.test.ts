@@ -192,7 +192,6 @@ describe("channel requests (addendum §1, §2)", () => {
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
 		for (const type of [
-			"ais-catcher",
 			"dumpvdl2",
 			"rtl433",
 			"direwolf",
@@ -399,5 +398,29 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(
 			follow.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 136.5e6 }),
 		).toMatchObject({ centerHz: 136.5e6 })
+	})
+
+	it("ais-catcher requests 384 kHz cu8 at its channelHz and, channelised, runs AIS-catcher directly without sox", () => {
+		// The AIS channel centre is the A/B pair centre 162.000 MHz; AIS-catcher demodulates A and B at ±25 kHz from it.
+		const d = make("ais-catcher", {
+			channelHz: 162_000_000,
+			inputCenterFreq: 161.9e6,
+		})
+		expect(
+			d.getChannelRequest?.({ sampleRateHz: 2_048_000, centerHz: 161.9e6 }),
+		).toEqual({
+			centerHz: 162_000_000,
+			bandwidthHz: 364_800,
+			transitionHz: 9_600,
+			outputRateHz: 384_000,
+			format: "cu8",
+		})
+		const chan = pipelineOf(
+			make("ais-catcher", { inputSampleRate: 384_000, inputIqFormat: "cu8" }),
+		)
+		expect(chan).not.toMatch(/sox/)
+		expect(chan.startsWith("AIS-catcher -r CU8 . -s 384000")).toBe(true)
+		// The raw path still resamples the capture with SoX.
+		expect(pipelineOf(make("ais-catcher"))).toMatch(/^sox /)
 	})
 })
