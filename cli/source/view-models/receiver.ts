@@ -40,7 +40,7 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
-import { glyphSpan } from "../ui/strip.js"
+import { glyphSpan, iqWordText } from "../ui/strip.js"
 import {
 	padEnd,
 	padStart,
@@ -256,9 +256,15 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 		...(both ? [one(0, [glyphSpan(link), sp(` ${linkWord}`, role)])] : []),
 		one(
 			0,
-			[glyphSpan(iq.glyph), sp(` ${iq.word}`, role)],
+			// The data layer's word carries " · "; ASCII mode needs its separator.
+			[glyphSpan(iq.glyph), sp(` ${iqWordText(iq.word)}`, role)],
 			...(detail
-				? [[glyphSpan(iq.glyph), sp(` ${iq.word}${sep()}${detail}`, role)]]
+				? [
+						[
+							glyphSpan(iq.glyph),
+							sp(` ${iqWordText(iq.word)}${sep()}${detail}`, role),
+						],
+					]
 				: []),
 		),
 		// Core resets both on connect: a count or an error belongs to the current state.

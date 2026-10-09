@@ -59,4 +59,44 @@ describe("ASCII glyph mode: every view at 120x40, every scenario, is 7-bit clean
 			}
 			expect(problems).toEqual([])
 		})
+	// A11 re-review: a waiting source's word ("connected · no samples") goes through
+	// the glyph separator in the Receiver and the Overview too.
+	it("live with a waiting source", async () => {
+		const base = scenarioState("live", deps)
+		const src = base.sources.value![0]!
+		const state = {
+			...base,
+			sources: {
+				...base.sources,
+				value: [
+					{
+						...src,
+						activity: {
+							state: "waiting" as const,
+							lastSampleAt: null,
+							sampleAgeMs: null,
+							timeoutMs: 10_000,
+						},
+					},
+				],
+			},
+		}
+		const problems: string[] = []
+		for (const view of ["overview", "receiver"] as const) {
+			const h = await renderApp({
+				state,
+				views: VIEWS,
+				view,
+				cols: 120,
+				rows: 40,
+			})
+			try {
+				problems.push(...nonAscii(h.frame(), `waiting ${view}`))
+				expect(h.frame().join("\n")).toContain("connected | no samples")
+			} finally {
+				h.unmount()
+			}
+		}
+		expect(problems).toEqual([])
+	})
 })
