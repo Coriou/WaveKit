@@ -28,6 +28,13 @@ export function wrapKV(
 ): Line[] {
 	const sep = ` ${glyphs().sep} `
 	const labelW = cellWidth(label)
+	// N4: an id that leaves under 10 columns for the value gets a row of its own
+	// (cut to the pane), and the value wraps under the 10-column gutter.
+	if (wideLabel && labelW + 2 > LABEL_WIDTH && width - (labelW + 2) < 10)
+		return [
+			[sp(truncate(label, Math.max(1, width)), bold ? "value" : "label", bold)],
+			...wrapKV("", text, width),
+		]
 	const firstGutter =
 		wideLabel && labelW + 2 > LABEL_WIDTH
 			? Math.min(width, labelW + 2)

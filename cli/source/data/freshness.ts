@@ -195,3 +195,23 @@ export function iqSummary(
 		rateBytesPerSec: total,
 	}
 }
+
+/**
+ * The server's "now", skew-corrected from the lanes that carry a server timestamp
+ * (fanout, resources): local now plus the offset (server time − local receipt).
+ * Transport latency only makes an offset smaller, so the largest one is the best
+ * estimate. Null when no such lane exists, so countdowns to server times are not guessed.
+ */
+export function serverNow(
+	now: number,
+	lanes: ReadonlyArray<{ iso: string | undefined; receivedAt: number | null }>,
+): number | null {
+	let offset: number | null = null
+	for (const l of lanes) {
+		const t = l.iso !== undefined ? Date.parse(l.iso) : Number.NaN
+		if (!Number.isFinite(t) || l.receivedAt === null) continue
+		const o = t - l.receivedAt
+		if (offset === null || o > offset) offset = o
+	}
+	return offset === null ? null : now + offset
+}

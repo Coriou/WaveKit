@@ -140,6 +140,21 @@ function put<T>(
 	return next
 }
 
+/** R70 M-b: remember when "suspending" was first seen; forget it once the transition ends. */
+function trackSuspending(
+	sess: DecoderSession,
+	row: DecoderRow,
+	at: number,
+): DecoderSession {
+	if (row.transition === "suspending")
+		return sess.suspendingSince !== undefined
+			? sess
+			: { ...sess, suspendingSince: at }
+	if (sess.suspendingSince === undefined) return sess
+	const { suspendingSince: _s, ...rest } = sess
+	return rest
+}
+
 function newSession(at: number): DecoderSession {
 	return {
 		lastWsOutputAt: null,
@@ -212,7 +227,7 @@ function updateSessions(
 ): Record<string, DecoderSession> {
 	const next = Object.assign(record<DecoderSession>(), prev)
 	for (const d of rows) {
-		const cur = own(prev, d.id) ?? newSession(at)
+		const cur = trackSuspending(own(prev, d.id) ?? newSession(at), d, at)
 		const sample = { t: at, v: d.stats.eventsOut }
 		next[d.id] = {
 			...cur,
@@ -455,10 +470,16 @@ function reduceWs(
 								? list.map(x => (x.id === d.id ? d : x))
 								: [...list, d],
 						}
-			const sess = own(s.session, d.id) ?? newSession(at)
-			const session =
+			const known = own(s.session, d.id)
+			const base = known ?? newSession(at)
+			const tracked = trackSuspending(base, d, at)
+			const sess =
 				prev !== undefined && prev.health !== d.health
-					? put(s.session, d.id, { ...sess, previousHealth: prev.health })
+					? { ...tracked, previousHealth: prev.health }
+					: tracked
+			const session =
+				sess !== base || known === undefined
+					? put(s.session, d.id, sess)
 					: s.session
 			return observe(
 				{ ...s, decoders, session },

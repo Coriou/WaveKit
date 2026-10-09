@@ -5,6 +5,10 @@ import {
 	formatMessage,
 } from "../../../cli/source/ui/messages/index.js"
 import { setGlyphMode } from "../../../cli/source/ui/theme.js"
+import type { MessageEntry } from "../../../cli/source/data/types.js"
+import { lineText } from "../../../cli/source/ui/text.js"
+import { summaryLine } from "../../../cli/source/view-models/message-rows.js"
+import { messageDetail } from "../../../cli/source/view-models/messages.js"
 
 const out = (type: string, decoder: string, data: unknown): DecoderOutput => ({
 	type,
@@ -821,5 +825,40 @@ describe("R62 operator enrichment", () => {
 			Math.max(...m.segments.slice(0, -1).map(x => x.priority)),
 		)
 		expect(m.fields.find(f => f.label === "operator")?.value).toBe("Ryanair")
+	})
+})
+
+describe("R76 multi-line bodies", () => {
+	const acars = formatMessage(
+		out("acars", "acarsdec", {
+			frequency: 131_550_000,
+			label: "H1",
+			tail: ".EI-DCL",
+			text: "END\r\nPOS N51\x1b[2J",
+		}),
+		"acarsdec",
+	)
+	it("keeps the line break in the text and sanitises each line", () => {
+		expect(acars.text).toBe("END\nPOS N51")
+		expect(acars.searchText).toContain("end pos n51")
+	})
+	it("reads 'END POS' on a single-line row", () => {
+		expect(lineText(summaryLine(acars, 80))).toContain(
+			"H1  131.550 MHz  END POS N51",
+		)
+	})
+	it("keeps the break in the detail body, wrapping per line", () => {
+		const entry: MessageEntry = {
+			seq: 1,
+			decoderId: "acarsdec",
+			type: "acars",
+			receivedAt: 0,
+			output: out("acars", "acarsdec", {}),
+			formatted: acars,
+		}
+		const rows = messageDetail(entry, 60, 30, 0).map(lineText)
+		const i = rows.findIndex(r => r.startsWith("text"))
+		expect(rows[i]?.trimEnd()).toBe("text      END")
+		expect(rows[i + 1]?.trimEnd()).toBe("          POS N51")
 	})
 })

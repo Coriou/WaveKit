@@ -4,6 +4,7 @@ import {
 	cellWidth,
 	padEnd,
 	sanitize,
+	sanitizeMultiline,
 	stripAnsi,
 	stripSequences,
 	truncate,
@@ -27,7 +28,8 @@ describe("cellWidth", () => {
 
 describe("sanitize", () => {
 	it("strips controls, expands tabs and replaces emoji", () => {
-		expect(sanitize("a\tb\x1b[2Jc\r\nd\u0085e")).toBe("a bcde")
+		// R76: the CR LF reads as one space on a single line.
+		expect(sanitize("a\tb\x1b[2Jc\r\nd\u0085e")).toBe("a bc de")
 		expect(sanitize("hi 🚀")).toBe("hi ?")
 	})
 	it("strips whole CSI, OSC and string sequences, leaving no residue (R27)", () => {
@@ -58,6 +60,39 @@ describe("sanitize", () => {
 		const r = stripSequences(mixed)
 		expect(r.text).toBe("ab".repeat(5_000))
 		expect(r.steps).toBeLessThanOrEqual(3 * mixed.length)
+	})
+
+	it("R76: newlines become one space on a single line; the multiline form keeps them", () => {
+		expect(sanitize("END\nPOS")).toBe("END POS")
+		expect(sanitize("END\r\n\r\nPOS\r")).toBe("END POS ")
+		expect(sanitizeMultiline("END\r\nPOS\x1b[2J\rNEXT\t1")).toBe(
+			"END\nPOS\nNEXT 1",
+		)
+		expect(sanitizeMultiline("a\u2028b\x9b2Jc")).toBe("abc")
+	})
+
+	// Feature: cli-dashboard-overhaul, Property 7: sanitize and truncate
+	// Validates: spec §5.2
+	it("P7 (R76): both forms are idempotent; only the multiline form keeps \\n", () => {
+		fc.assert(
+			fc.property(
+				fc
+					.array(fc.constantFrom(...ESCAPE_BITS, "\n", "\r", "\r\n", "\t"), {
+						maxLength: 40,
+					})
+					.map(a => a.join("")),
+				s => {
+					const one = sanitize(s)
+					expect(sanitize(one)).toBe(one)
+					expect(CONTROL.test(one)).toBe(false)
+					const multi = sanitizeMultiline(s)
+					expect(sanitizeMultiline(multi)).toBe(multi)
+					expect(CONTROL.test(multi.replace(/\n/g, ""))).toBe(false)
+					expect(multi.includes("\r")).toBe(false)
+				},
+			),
+			{ numRuns: 100 },
+		)
 	})
 
 	const ESCAPE_BITS = [
