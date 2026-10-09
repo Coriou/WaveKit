@@ -450,8 +450,10 @@ perf_run() { # name view burstPerSecond pause seconds heap
 run_perf() {
 	printf 'Sampled at 120x40 after a %s s warm-up; load is the 1-min average at the start and end of the window.\n\n' "$PERF_WARMUP_S" >"$OUT/perf.md"
 	printf '| run | load | frames/s | ESC[2J | CPU avg | RSS growth | RSS max | retained heap | key→frame | window |\n|---|---|---|---|---|---|---|---|---|---|\n' >>"$OUT/perf.md"
-	# R87: retained-heap growth is judged over 100 s idle (forced GC every 5 s, idle run only).
-	perf_run idle-live overview 0 no "${WAVEKIT_VALIDATE_IDLE_SECONDS:-100}" yes
+	# CPU is judged without forced GCs; R87's retained-heap growth over 100 s idle has
+	# its own run (a forced GC every 5 s, which costs CPU of its own).
+	perf_run idle-live overview 0 no
+	perf_run idle-heap overview 0 no "${WAVEKIT_VALIDATE_IDLE_SECONDS:-100}" yes
 	perf_run burst-50 overview 50 no
 	perf_run burst-500 messages 500 no
 	perf_run burst-500-paused messages 500 yes
