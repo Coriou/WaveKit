@@ -21,7 +21,7 @@
 
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
-import * as http from "node:http"
+import type * as http from "node:http"
 import type { Readable, Transform } from "node:stream"
 import {
 	LiveDemodConfigSchema,
@@ -31,7 +31,14 @@ import {
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
 import { WaveKitError } from "../utils/errors.js"
-import { liveAudioClientQueueLimit } from "./client-buffer.js"
+import {
+	AudioClientRegistry,
+	AudioHttpServer,
+	parseStreamPath,
+	type AudioClient,
+	type AudioRoute,
+	type StreamFormat,
+} from "./audio-stream-server.js"
 import { csdrChildEnv } from "../decoders/csdr-buffers.js"
 import { signalDecoder } from "../decoders/process-tools.js"
 import {
@@ -96,27 +103,6 @@ export interface LiveDemodulatorOptions {
 	clientStallTimeoutMs?: number
 }
 
-type AudioFormat = LiveDemodConfig["audioFormat"]
-
-interface StreamFormat {
-	rate: number
-	format: AudioFormat
-}
-
-interface HttpClientState {
-	id: string
-	response: http.ServerResponse
-	remoteAddress: string
-	connectedAt: Date
-	bytesWritten: number
-	stream: StreamFormat
-	queue: Buffer[]
-	queuedBytes: number
-	droppedBytes: number
-	waitingDrain: boolean
-	lastProgressAt: number
-}
-
 interface PipelineRun {
 	front: ChildProcess
 	back: ChildProcess
@@ -147,42 +133,7 @@ const DEFAULTS: Required<LiveDemodulatorOptions> = {
 	clientStallTimeoutMs: 30_000,
 }
 
-function frameBytes(format: AudioFormat): number {
-	return format === "s16le" ? 2 : 4
-}
-
-/** 44-byte WAV header for an unbounded stream (sizes set to 0xFFFFFFFF). */
-export function wavStreamHeader(stream: StreamFormat): Buffer {
-	const bytesPerSample = frameBytes(stream.format)
-	const rate = Math.max(1, Math.round(stream.rate))
-	const header = Buffer.alloc(44)
-	header.write("RIFF", 0, "ascii")
-	header.writeUInt32LE(0xffffffff, 4)
-	header.write("WAVE", 8, "ascii")
-	header.write("fmt ", 12, "ascii")
-	header.writeUInt32LE(16, 16)
-	header.writeUInt16LE(stream.format === "s16le" ? 1 : 3, 20)
-	header.writeUInt16LE(1, 22)
-	header.writeUInt32LE(rate, 24)
-	header.writeUInt32LE(rate * bytesPerSample, 28)
-	header.writeUInt16LE(bytesPerSample, 32)
-	header.writeUInt16LE(bytesPerSample * 8, 34)
-	header.write("data", 36, "ascii")
-	header.writeUInt32LE(0xffffffff, 40)
-	return header
-}
-
-/** Headers describing the raw stream, sent on both endpoints. */
-export function streamHeaders(stream: StreamFormat): Record<string, string> {
-	return {
-		"X-Audio-Format": stream.format,
-		"X-Sample-Rate": String(stream.rate),
-		"X-Channels": "1",
-		"Cache-Control": "no-cache, no-store",
-		"Access-Control-Expose-Headers":
-			"X-Audio-Format, X-Sample-Rate, X-Channels",
-	}
-}
+export { streamHeaders, wavStreamHeader } from "./audio-stream-server.js"
 
 export class LiveDemodulator extends EventEmitter {
 	private readonly log: Logger
@@ -190,20 +141,15 @@ export class LiveDemodulator extends EventEmitter {
 	private readonly fanoutManager: FanoutManager
 	private readonly options: Required<LiveDemodulatorOptions>
 	private config: LiveDemodConfig
-	private httpServer: http.Server | null = null
+	private readonly http: AudioHttpServer
+	private readonly audio: AudioClientRegistry
 	private run: PipelineRun | null = null
 	private branchId: string | null = null
 	private branchStream: Readable | null = null
 	private branchErrorHandler: ((err: Error) => void) | null = null
-	private clients: Map<string, HttpClientState> = new Map()
-	private clientIdCounter = 0
-	private bytesStreamed = 0
 	private pipelineHealth: LiveDemodStatus["pipelineHealth"] = "stopped"
 	private lastError: string | null = null
 	private activeSourceId: string | null = null
-	private audioRemainder: Buffer = Buffer.alloc(0)
-	private audioFrameBytes: number
-	private clientQueueLimit: number
 	private consecutiveFailures = 0
 	private pipelineRestarts = 0
 	private restartTimer: ReturnType<typeof setTimeout> | null = null
@@ -226,15 +172,27 @@ export class LiveDemodulator extends EventEmitter {
 		this.fanoutManager = fanoutManager
 		this.config = config
 		this.options = { ...DEFAULTS, ...options }
-		this.audioFrameBytes = frameBytes(config.audioFormat)
-		this.clientQueueLimit = liveAudioClientQueueLimit(
-			this.plannedStream().rate,
-			this.audioFrameBytes,
+		this.audio = new AudioClientRegistry(this.log, {
+			stallTimeoutMs: this.options.clientStallTimeoutMs,
+			label: "Live audio",
+			stream: this.plannedStream(),
+		})
+		this.audio.on("client-connected", (id: string) =>
+			this.emit("client-connected", id),
+		)
+		this.audio.on("client-disconnected", (id: string) =>
+			this.emit("client-disconnected", id),
+		)
+		this.http = new AudioHttpServer(
+			this.log,
+			"Live demodulator",
+			req => this.resolveRoute(req),
+			err => this.emitError(err),
 		)
 	}
 
 	async start(): Promise<void> {
-		if (this.httpServer) {
+		if (this.http.listening) {
 			if (this.run) {
 				this.log.warn("Live demodulator already running")
 				return
@@ -273,7 +231,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
-		if (!this.httpServer && !this.run) {
+		if (!this.http.listening && !this.run) {
 			this.log.warn("Live demodulator not running")
 			return
 		}
@@ -284,7 +242,7 @@ export class LiveDemodulator extends EventEmitter {
 		this.pipelineHealth = "stopped"
 		this.detachBranch()
 		this.activeSourceId = null
-		this.closeAllClients("stop", true)
+		this.audio.closeAll("stop", true)
 		await this.closeHttpServer()
 		// A failure that was still being cleaned up may have scheduled a restart.
 		this.clearRestartTimer()
@@ -304,7 +262,7 @@ export class LiveDemodulator extends EventEmitter {
 		const pipelineChanged = (
 			Object.keys(validated) as Array<keyof LiveDemodConfig>
 		).some(key => !NODE_ONLY_KEYS.has(key) && validated[key] !== previous[key])
-		const active = this.httpServer !== null || this.run !== null
+		const active = this.http.listening || this.run !== null
 
 		// Fail before touching the running pipeline if the new plan is invalid.
 		if (active && pipelineChanged && !sourceChanged && this.activeSourceId) {
@@ -328,7 +286,7 @@ export class LiveDemodulator extends EventEmitter {
 			await this.restartPipeline("configuration changed")
 		}
 
-		if (portChanged && this.httpServer) {
+		if (portChanged && this.http.listening) {
 			await this.restartHttpServer()
 		}
 
@@ -350,7 +308,7 @@ export class LiveDemodulator extends EventEmitter {
 
 		const status: LiveDemodStatus = {
 			enabled: this.config.enabled,
-			running: this.httpServer !== null,
+			running: this.http.listening,
 			sourceId,
 			sourceConnected: sourceStatus?.connected ?? false,
 			sourceIqSampleRate: rateInfo.iqSampleRate,
@@ -359,8 +317,8 @@ export class LiveDemodulator extends EventEmitter {
 			decimationFactor: rateInfo.decimation,
 			httpUrl: `http://localhost:${this.config.httpPort}/stream`,
 			wavUrl: `http://localhost:${this.config.httpPort}/stream.wav`,
-			clientCount: this.clients.size,
-			bytesStreamed: this.bytesStreamed,
+			clientCount: this.audio.size,
+			bytesStreamed: this.audio.bytesStreamed,
 			pipelineHealth: this.pipelineHealth,
 			pipelineRestarts: this.pipelineRestarts,
 		}
@@ -469,7 +427,7 @@ export class LiveDemodulator extends EventEmitter {
 		sourceId: string,
 		caps: SourceCaps,
 	): Promise<void> {
-		if (!this.httpServer || !this.capsNeedRestart(caps)) return
+		if (!this.http.listening || !this.capsNeedRestart(caps)) return
 		if (this.restartTimer) {
 			// A crashed pipeline is backing off; that restart reads the new caps.
 			this.log.info(
@@ -552,7 +510,7 @@ export class LiveDemodulator extends EventEmitter {
 			const error = err instanceof Error ? err : new Error(String(err))
 			this.lastError = error.message
 			this.pipelineHealth = "error"
-			if (!this.httpServer) this.detachBranch()
+			if (!this.http.listening) this.detachBranch()
 			this.emitError(error)
 			throw error
 		}
@@ -611,12 +569,7 @@ export class LiveDemodulator extends EventEmitter {
 			failed: false,
 		}
 		this.run = run
-		this.audioRemainder = Buffer.alloc(0)
-		this.audioFrameBytes = frameBytes(stream.format)
-		this.clientQueueLimit = liveAudioClientQueueLimit(
-			stream.rate,
-			this.audioFrameBytes,
-		)
+		this.audio.configure(stream)
 
 		this.wireRun(run)
 		this.pipelineHealth = "running"
@@ -684,7 +637,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private scheduleRestart(lastRunMs: number): void {
-		if (!this.httpServer || this.run || this.restartTimer) return
+		if (!this.http.listening || this.run || this.restartTimer) return
 		if (lastRunMs >= this.options.stableRunMs) this.consecutiveFailures = 0
 		this.consecutiveFailures++
 		if (this.consecutiveFailures > this.options.maxRestartAttempts) {
@@ -710,7 +663,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private async restartAfterFailure(): Promise<void> {
-		if (!this.httpServer || this.run) return
+		if (!this.http.listening || this.run) return
 		this.pipelineRestarts++
 		try {
 			await this.restartPipeline("automatic restart")
@@ -742,14 +695,13 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.run) await this.stopRun(this.run)
 		await this.startPipeline()
 		const stream = this.plannedStream()
-		for (const client of [...this.clients.values()]) {
-			if (
+		this.audio.closeWhere(
+			client =>
 				client.stream.rate !== stream.rate ||
-				client.stream.format !== stream.format
-			) {
-				this.closeClient(client, "stream format changed", false)
-			}
-		}
+				client.stream.format !== stream.format,
+			"stream format changed",
+			false,
+		)
 	}
 
 	/**
@@ -817,251 +769,42 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private async startHttpServer(): Promise<void> {
-		const server = http.createServer((req, res) =>
-			this.handleHttpRequest(req, res),
-		)
-		this.httpServer = server
-
-		server.on("error", err => {
-			this.log.error({ err }, "Live demodulator HTTP server error")
-			this.emitError(err)
-		})
-
-		await new Promise<void>((resolve, reject) => {
-			server.once("error", reject)
-			server.listen(this.config.httpPort, "0.0.0.0", () => {
-				server.off("error", reject)
-				resolve()
-			})
-		})
+		await this.http.start(this.config.httpPort)
 	}
 
 	/** Closes the server without waiting on streaming clients (they are destroyed). */
 	private async closeHttpServer(): Promise<void> {
-		const server = this.httpServer
-		if (!server) return
-		this.closeAllClients("server closing", true)
-		server.closeAllConnections()
-		await new Promise<void>(resolve => {
-			server.close(err => {
-				if (err) {
-					this.log.warn({ err }, "Error closing live demodulator server")
-				}
-				resolve()
-			})
-		})
-		if (this.httpServer === server) this.httpServer = null
+		if (!this.http.listening) return
+		this.audio.closeAll("server closing", true)
+		await this.http.close()
 	}
 
 	private async restartHttpServer(): Promise<void> {
-		if (!this.httpServer) return
+		if (!this.http.listening) return
 		await this.closeHttpServer()
 		await this.startHttpServer()
 	}
 
-	private handleHttpRequest(
-		req: http.IncomingMessage,
-		res: http.ServerResponse,
-	): void {
-		const path = (req.url ?? "").split("?")[0]
-		if (
-			req.method !== "GET" ||
-			(path !== "/stream" && path !== "/stream.wav")
-		) {
-			res.statusCode = 404
-			res.end("Not Found")
-			return
-		}
-
-		const stream = this.plannedStream()
-		const wav = path === "/stream.wav"
-		res.writeHead(200, {
-			"Content-Type": wav ? "audio/wav" : "application/octet-stream",
-			Connection: "keep-alive",
-			...streamHeaders(stream),
-		})
-		req.socket.setNoDelay(true)
-		if (wav) res.write(wavStreamHeader(stream))
-		else res.flushHeaders()
-
-		const remoteAddress = `${req.socket.remoteAddress ?? "unknown"}:${req.socket.remotePort ?? "?"}`
-		this.registerClient(res, remoteAddress, stream)
+	private resolveRoute(req: http.IncomingMessage): AudioRoute | null {
+		const { base, wav } = parseStreamPath(req.url)
+		if (base !== "/stream") return null
+		return { registry: this.audio, stream: this.plannedStream(), wav }
 	}
 
+	/** Registers a streaming response (also used by tests with a stand-in). */
 	private registerClient(
 		response: http.ServerResponse,
 		remoteAddress: string,
 		stream: StreamFormat = this.plannedStream(),
-	): HttpClientState {
-		const clientId = `client-${++this.clientIdCounter}`
-		const client: HttpClientState = {
-			id: clientId,
-			response,
-			remoteAddress,
-			connectedAt: new Date(),
-			bytesWritten: 0,
-			stream,
-			queue: [],
-			queuedBytes: 0,
-			droppedBytes: 0,
-			waitingDrain: false,
-			lastProgressAt: Date.now(),
-		}
-		this.clients.set(clientId, client)
-		this.emit("client-connected", clientId)
-		this.log.info(
-			{ clientId, remoteAddress, totalClients: this.clients.size, stream },
-			"Live audio client connected",
-		)
-
-		response.on("close", () => this.cleanupClient(clientId))
-		response.on("error", err => {
-			this.log.debug({ clientId, err }, "Live audio client error")
-		})
-		return client
+	): AudioClient {
+		return this.audio.register(response, remoteAddress, stream)
 	}
 
-	private cleanupClient(clientId: string): void {
-		const client = this.clients.get(clientId)
-		if (!client) return
-		this.clients.delete(clientId)
-		client.queue = []
-		client.queuedBytes = 0
-		this.emit("client-disconnected", clientId)
-		this.log.info(
-			{
-				clientId,
-				bytesWritten: client.bytesWritten,
-				droppedBytes: client.droppedBytes,
-				totalClients: this.clients.size,
-			},
-			"Live audio client disconnected",
-		)
-	}
-
-	private closeClient(
-		client: HttpClientState,
-		reason: string,
-		destroy: boolean,
-	): void {
-		this.log.debug({ clientId: client.id, reason }, "Closing live audio client")
-		try {
-			if (destroy) client.response.destroy()
-			else client.response.end()
-		} catch {
-			// Ignore
-		}
-		this.cleanupClient(client.id)
-	}
-
-	private closeAllClients(reason: string, destroy: boolean): void {
-		for (const client of [...this.clients.values()]) {
-			this.closeClient(client, reason, destroy)
-		}
-	}
-
-	/** Keeps every dispatched chunk a whole number of samples. */
-	private alignAudio(chunk: Buffer): Buffer | null {
-		const frame = this.audioFrameBytes
-		const data =
-			this.audioRemainder.length > 0
-				? Buffer.concat([this.audioRemainder, chunk])
-				: chunk
-		const usable = data.length - (data.length % frame)
-		this.audioRemainder =
-			usable === data.length
-				? Buffer.alloc(0)
-				: Buffer.from(data.subarray(usable))
-		return usable > 0 ? data.subarray(0, usable) : null
+	private get clients(): Map<string, AudioClient> {
+		return this.audio.clients
 	}
 
 	private handleAudioData(chunk: Buffer): void {
-		const aligned = this.alignAudio(chunk)
-		if (!aligned || this.clients.size === 0) return
-		for (const client of [...this.clients.values()]) {
-			this.enqueueClient(client, aligned)
-		}
-	}
-
-	private enqueueClient(client: HttpClientState, payload: Buffer): void {
-		const response = client.response
-		if (response.writableEnded || response.destroyed) {
-			this.cleanupClient(client.id)
-			return
-		}
-		if (
-			client.waitingDrain &&
-			Date.now() - client.lastProgressAt > this.options.clientStallTimeoutMs
-		) {
-			this.log.warn(
-				{ clientId: client.id, droppedBytes: client.droppedBytes },
-				"Disconnecting stalled live audio client",
-			)
-			this.closeClient(client, "stalled", true)
-			return
-		}
-		client.queue.push(payload)
-		client.queuedBytes += payload.length
-		this.flushClient(client)
-		this.trimClientQueue(client)
-	}
-
-	/** Drops the oldest queued audio beyond about one second. */
-	private trimClientQueue(client: HttpClientState): void {
-		let excess = client.queuedBytes - this.clientQueueLimit
-		if (excess <= 0) return
-		const frame = this.audioFrameBytes
-		excess = Math.ceil(excess / frame) * frame
-		if (client.droppedBytes === 0) {
-			this.log.warn(
-				{ clientId: client.id, limitBytes: this.clientQueueLimit },
-				"Live audio client is slow; dropping its oldest audio",
-			)
-		}
-		while (excess > 0 && client.queue.length > 0) {
-			const head = client.queue[0]!
-			if (head.length <= excess) {
-				client.queue.shift()
-				excess -= head.length
-				client.queuedBytes -= head.length
-				client.droppedBytes += head.length
-			} else {
-				client.queue[0] = head.subarray(excess)
-				client.queuedBytes -= excess
-				client.droppedBytes += excess
-				excess = 0
-			}
-		}
-	}
-
-	private flushClient(client: HttpClientState): void {
-		const response = client.response
-		while (!client.waitingDrain && client.queue.length > 0) {
-			const next = client.queue.shift()!
-			client.queuedBytes -= next.length
-			let accepted: boolean
-			try {
-				accepted = response.write(next)
-			} catch (err) {
-				this.log.debug(
-					{ clientId: client.id, err },
-					"Error writing live audio chunk",
-				)
-				this.cleanupClient(client.id)
-				return
-			}
-			client.bytesWritten += next.length
-			this.bytesStreamed += next.length
-			if (accepted) {
-				client.lastProgressAt = Date.now()
-			} else {
-				client.waitingDrain = true
-				response.once("drain", () => {
-					client.waitingDrain = false
-					client.lastProgressAt = Date.now()
-					if (this.clients.get(client.id) === client) this.flushClient(client)
-				})
-			}
-		}
+		this.audio.write(chunk)
 	}
 }
