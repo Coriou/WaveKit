@@ -541,7 +541,8 @@ export function decoderConfirm(
 		...(runAnyway ? [] : ([[2, processWords(f)]] as Array<[number, string]>)),
 		[1, window],
 	]
-	if (op === "start" && !runAnyway && corePins(state))
+	// R101: a suspension this CLI cannot read (an older core's band one, a newer code) claims nothing.
+	if (op === "start" && suspensionKind(f) === null && corePins(state))
 		parts.splice(1, 0, [1, "pinned against band suspension"])
 	if (op === "unpin" && f.row.bandAssessment?.verdict === "out-of-band")
 		parts.splice(1, 0, [1, "may suspend out of band"])
@@ -563,11 +564,16 @@ export function decoderConfirm(
 	}
 }
 
-/** R100: suspended because the tuned band covers none of its targets; a start runs it anyway. */
+/**
+ * R100: suspended because the tuned band covers none of its targets, on a core
+ * that runs it anyway on a start. R101: only a core that sends this row's
+ * startMode does; before 87f9f06 that start is a 200 no-op, so it is not claimed.
+ */
 export function bandSuspended(f: DecoderFacts): boolean {
 	return (
 		f.row.suspended === true &&
-		f.row.suspension?.reasonCode === "frequency-out-of-band"
+		f.row.suspension?.reasonCode === "frequency-out-of-band" &&
+		f.row.startMode !== undefined
 	)
 }
 
@@ -577,7 +583,7 @@ export function suspensionKind(
 ): "band" | "rate" | "other" | null {
 	if (!f || f.row.suspended !== true) return null
 	const code = f.row.suspension?.reasonCode
-	if (code === "frequency-out-of-band") return "band"
+	if (bandSuspended(f)) return "band"
 	return code !== undefined && isRateReason(code) ? "rate" : "other"
 }
 

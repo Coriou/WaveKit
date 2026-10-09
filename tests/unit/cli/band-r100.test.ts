@@ -293,6 +293,42 @@ describe("R100 view-model copy (band-defaults scenario)", () => {
 			"pinned",
 		)
 	})
+	it("fix 1: an older core's band suspension claims no pin and no run anyway", () => {
+		const older = scenarioState("contracts")
+		const dsd = fact(older, "dsd-fme")
+		expect(dsd.row.startMode).toBeUndefined()
+		expect(suspensionKind(dsd)).toBe("other")
+		const c = decoderConfirm(older, "dsd-fme", "start")
+		expect(c?.prompt).toMatch(/^start dsd-fme · /)
+		expect(c?.prompt).not.toContain("pinned")
+		expect(c?.prompt).not.toMatch(/^run /)
+		expect(c?.yes).toBe("start")
+		// The same suspension on a current core runs anyway.
+		expect(suspensionKind(fact(s, "readsb"))).toBe("band")
+	})
+	it("fix 2: a suspension with a newer code claims no pin", () => {
+		const odd = withRow("readsb", {
+			suspension: { reasonCode: "solar-flare", since: "x" },
+		})
+		expect(corePins(odd)).toBe(true)
+		expect(decoderConfirm(odd, "readsb", "start")?.prompt).not.toContain(
+			"pinned",
+		)
+	})
+	it("fix 3: a configured multi-range band keeps its * in every form", () => {
+		const st = withRow("rtl433", {
+			bandAssessment: {
+				...fact(s, "rtl433").row.bandAssessment!,
+				basis: "configured",
+			},
+		})
+		const variants =
+			decoderCells(fact(st, "rtl433"), st.now)["nominal"]?.variants.map(
+				lineText,
+			) ?? []
+		expect(variants.length).toBeGreaterThan(1)
+		for (const v of variants) expect(v.endsWith("*")).toBe(true)
+	})
 	it("sorts suspensions for the keymap", () => {
 		expect(suspensionKind(fact(s, "readsb"))).toBe("band")
 		expect(suspensionKind(fact(s, "ais-catcher"))).toBe("rate")

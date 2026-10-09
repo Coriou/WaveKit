@@ -408,14 +408,18 @@ function nominalCell(f: DecoderFacts): Cell {
 	const a = f.row.bandAssessment
 	const ranges = a?.targetsHz === undefined ? a?.rangesHz : undefined
 	const first = ranges?.[0]
+	// R101: a configured band keeps its mark in every form (R15/T7).
+	const mark =
+		f.bandOrigin === "configured" ? [sp(CONFIGURED_MARK, "label")] : []
 	if (ranges && first && ranges.length > 1)
 		return cell(
 			[
 				sp(
 					`${(first.minHz / 1e6).toFixed(3)}${glyphs().ellipsis} +${ranges.length - 1}`,
 				),
+				...mark,
 			],
-			[sp(f.nominal)],
+			[sp(f.nominal), ...mark],
 		)
 	if (f.bandOrigin !== "configured") return cell([sp(f.nominal)])
 	return cell([sp(f.nominal), sp(CONFIGURED_MARK, "label")])

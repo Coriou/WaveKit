@@ -147,6 +147,22 @@ describe("Decoders view (spec §6.2)", () => {
 			expect(h.frame().at(-1)).not.toContain("▶")
 			h.unmount()
 		})
+		it("fix 1: an older core's band suspension offers a plain start, no pin claim", async () => {
+			const h = await renderApp({
+				state: scenarioState("contracts", deps),
+				views,
+				view: "decoders",
+				cols: 120,
+				rows: 40,
+			})
+			await selectRow(h, 1)
+			expect(h.frame().at(-1)).toContain("s start")
+			expect(h.frame().at(-1)).not.toContain("run anyway")
+			await h.press("s")
+			expect(h.frame().at(-1)).toMatch(/^ ▶ start dsd-fme · /)
+			expect(h.frame().at(-1)).not.toContain("pinned")
+			h.unmount()
+		})
 		it("returns a pinned decoder to auto with u", async () => {
 			const h = await open()
 			await selectRow(h, 3)
