@@ -8,7 +8,7 @@ import {
 	type Endpoint,
 	type LaneError,
 } from "../data/types.js"
-import { decoderMembership, windowFor } from "../data/window.js"
+import { decoderMembership } from "../data/window.js"
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
@@ -60,27 +60,41 @@ export function stripInput(state: AppState): StripInput {
 		: null
 	const tuner = state.tuner.value?.[0]
 	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
-	// M6: one rule for the window (first positive centre and rate), shared with
-	// the decoder membership column, so a frequency of 0 is never shown.
-	const win =
-		sourceId === undefined
-			? null
-			: windowFor(
-					sourceId,
-					state.tuner.value,
-					state.sources.value,
-					state.relay.value,
-				)
 	const src = state.sources.value?.find(x => x.id === sourceId)
-	// Dim rx by the lane its centre actually came from.
+	const relay = state.relay.value
+	const relayFreq =
+		relay && (relay.sourceId === undefined || relay.sourceId === sourceId)
+			? relay.lastFrequency
+			: undefined
+	// windowFor's rule (first positive value), kept per field so a known centre
+	// still shows when the rate is unknown (R53), and each value remembers its lane.
+	type Lane = "tuner" | "sources" | "relay"
+	const pick = (
+		cands: ReadonlyArray<[number | undefined, Lane]>,
+	): { v: number; lane: Lane } | null => {
+		for (const [v, lane] of cands)
+			if (v !== undefined && Number.isFinite(v) && v > 0) return { v, lane }
+		return null
+	}
+	const centre = pick([
+		[tuner?.frequency, "tuner"],
+		[src?.caps.centerFreq, "sources"],
+		[relayFreq, "relay"],
+	])
+	const rate = pick([
+		[tuner?.sampleRate, "tuner"],
+		[src?.caps.sampleRate, "sources"],
+	])
+	const laneOld = (l: Lane): boolean =>
+		l === "tuner"
+			? isOld(state.tuner, now)
+			: l === "sources"
+				? isOld(state.sources, now)
+				: isOld(state.relay, now)
+	// Item 8: rx dims when the lane of its centre or of its rate is old.
 	const rxOld =
-		win === null
-			? false
-			: tuner !== undefined && tuner.frequency === win.centreHz
-				? isOld(state.tuner, now)
-				: src?.caps.centerFreq === win.centreHz
-					? isOld(state.sources, now)
-					: isOld(state.relay, now)
+		centre !== null &&
+		(laneOld(centre.lane) || (rate !== null && laneOld(rate.lane)))
 	return {
 		api: apiView(state.conn, now),
 		iq: iqSummary(state.sources, state.metrics, now),
@@ -90,11 +104,11 @@ export function stripInput(state: AppState): StripInput {
 			backpressure: (agg?.backpressure ?? 0) > 0,
 		},
 		rx:
-			win === null
+			centre === null
 				? null
 				: {
-						centreHz: win.centreHz,
-						halfSpanHz: win.sampleRate / 2,
+						centreHz: centre.v,
+						halfSpanHz: rate === null ? null : rate.v / 2,
 						control: tuner
 							? tuner.controlMode === "external"
 								? "external"

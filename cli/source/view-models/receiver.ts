@@ -2,7 +2,7 @@ import type { TunerRelayStatus, TunerState } from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import { decoderBand } from "../data/nominal-bands.js"
 import { aggregateDropNow, MIN_DROP_SPAN_MS } from "../data/rates.js"
-import type { AppState, SourceRow } from "../data/types.js"
+import type { AppState, FanoutSample, SourceRow } from "../data/types.js"
 import {
 	decoderMembership,
 	retuneCandidates,
@@ -53,6 +53,7 @@ import type {
 	TunerEditState,
 	UiState,
 } from "../ui/ui-state.js"
+import { keep, optional, gapRow, shed, type Row } from "./shed.js"
 
 const RESULT_MS = 10_000
 const LABEL_W = 10
@@ -80,18 +81,6 @@ const own = <T>(
 	key: string,
 ): T | undefined =>
 	Object.prototype.hasOwnProperty.call(rec, key) ? rec[key] : undefined
-
-/**
- * A rendered row. `drop` marks rows that may go when the view is short: the
- * highest number goes first; rows without it stay (relay history is sized to
- * what is left, so it goes before any of these).
- */
-interface Row {
-	line: Line
-	drop?: number
-}
-const keep = (line: Line): Row => ({ line })
-const optional = (line: Line, drop: number): Row => ({ line, drop })
 
 function fitRow(label: Line, groups: Group[], width: number): Line {
 	return [
@@ -136,11 +125,42 @@ function noData(state: AppState, path: string): string {
 		: `fetching ${path}`
 }
 
+/** The source the Receiver renders (the first), and the tuner for it: used everywhere (M5). */
+export function receiverTuner(state: AppState): TunerState | undefined {
+	const src = state.sources.value?.[0]
+	return (
+		state.tuner.value?.find(x => x.sourceId === src?.id) ??
+		state.tuner.value?.[0]
+	)
+}
+
 export function receiverControl(
 	state: AppState,
 ): "internal" | "external" | null {
-	const t = state.tuner.value?.[0]
-	return t ? t.controlMode : null
+	return receiverTuner(state)?.controlMode ?? null
+}
+
+/** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
+export function remoteHost(remote: string): string {
+	const r = remote.trim()
+	const bracket = /^\[([^\]]+)\](?::\d+)?$/.exec(r)
+	const host = bracket
+		? (bracket[1] ?? r)
+		: /:\d+$/.test(r)
+			? r.slice(0, r.lastIndexOf(":"))
+			: r
+	return sanitize(host.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, ""))
+}
+
+function relayClient(
+	relay: TunerRelayStatus | undefined,
+	full: boolean,
+): string | null {
+	if (!relay?.controlClientId) return null
+	const id = sanitize(relay.controlClientId)
+	const remote = relay.controlClientRemote
+	if (!remote) return `relay ${id}`
+	return `relay ${id} ${full ? sanitize(remote) : remoteHost(remote)}`
 }
 
 function quoted(text: string, max = 40): string {
@@ -149,6 +169,7 @@ function quoted(text: string, max = 40): string {
 
 function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	const now = state.now
+	const extraSources = (state.sources.value?.length ?? 1) - 1
 	const role: Role = isOld(state.sources, now) ? "old" : "value"
 	const iq = iqView(
 		src,
@@ -184,6 +205,17 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 		...(src.available
 			? []
 			: [one(2, txt("no assignment capacity", "attention"))]),
+		...(extraSources > 0
+			? [
+					one(
+						1,
+						txt(
+							`+${extraSources} source${extraSources === 1 ? "" : "s"}`,
+							role,
+						),
+					),
+				]
+			: []),
 	]
 	const rate = formatRate(iq.rateBytesPerSec)
 	const row2: Group[] = [
@@ -262,17 +294,26 @@ export function confirmItem(c: PendingChange): string {
 	return `${FIELD_LABEL[c.field]} ${plainValue(c.field, c.to)}`
 }
 
-/** The review confirm; null when nothing changed or a field is out of core's range. */
-export function tunerConfirm(edit: TunerEditState): ConfirmRequest | null {
+/**
+ * The review confirm; null when nothing changed or a field is out of core's range.
+ * With `state`, the extra names the blast radius (spec §10.9) after any bias-t warning;
+ * the confirm bar cuts it to the width.
+ */
+export function tunerConfirm(
+	edit: TunerEditState,
+	state?: AppState,
+): ConfirmRequest | null {
 	const commands = pendingCommands(edit)
 	if (commands.length === 0 || outOfRange(edit).length > 0) return null
 	const n = commands.length
+	const extras = [
+		...(turnsBiasTeeOn(edit) ? ["bias-t supplies DC on the antenna port"] : []),
+		...(state ? [`affects ${editAffects(state, edit)}`] : []),
+	]
 	return {
 		kind: "tuner",
 		prompt: `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}: ${pendingChanges(edit).map(confirmItem).join(", ")}`,
-		...(turnsBiasTeeOn(edit)
-			? { extra: "bias-t supplies DC on the antenna port" }
-			: {}),
+		...(extras.length > 0 ? { extra: extras.join(sep()) } : {}),
 		yes: "send",
 		no: "back",
 		intent: { kind: "tuner", sourceId: edit.sourceId, commands },
@@ -288,13 +329,10 @@ export function reviewHeldNotice(edit: TunerEditState): string {
 }
 
 export function controlConfirm(state: AppState): ConfirmRequest | null {
-	const t = state.tuner.value?.[0]
+	const t = receiverTuner(state)
 	if (!t) return null
-	const relay = state.relay.value
 	const toInternal = t.controlMode === "external"
-	const who = relay?.controlClientId
-		? `relay ${relay.controlClientId}${relay.controlClientRemote ? ` ${relay.controlClientRemote.split(":")[0] ?? ""}` : ""}`
-		: "external clients"
+	const who = relayClient(state.relay.value, false) ?? "external clients"
 	return {
 		kind: "control",
 		prompt: toInternal
@@ -353,7 +391,8 @@ export function tunerResultText(
 	return `${rec.state === "ok" ? `sent${sep()}` : ""}${parts.join(sep())}`
 }
 
-function withCursor(freq: number, digit: number): Line {
+function withCursor(freq: number, digit: number, focused: boolean): Line {
+	const role: Role = focused ? "accent" : "value"
 	const s = formatSpaced(freq)
 	let count = -1
 	let idx = s.length
@@ -367,9 +406,9 @@ function withCursor(freq: number, digit: number): Line {
 	// A cursor left of the leading digit sits before the number.
 	if (count < digit) idx = 0
 	return [
-		sp(s.slice(0, idx), "accent"),
-		sp(glyphs().cursor, "edit"),
-		sp(`${s.slice(idx)} Hz`, "accent"),
+		sp(s.slice(0, idx), role),
+		...(focused ? [sp(glyphs().cursor, "edit")] : []),
+		sp(`${s.slice(idx)} Hz`, role),
 	]
 }
 
@@ -381,8 +420,11 @@ function membershipLists(
 	const inside: string[] = []
 	const outside: string[] = []
 	const unknown: string[] = []
+	// The decoders lane has never answered: membership is unknown, not empty (M4).
+	if (state.decoders.value === undefined)
+		return { inside: "?", outside: "?", unknown: "" }
 	const decoders = retuneCandidates(
-		state.decoders.value ?? [],
+		state.decoders.value,
 		state.sources.value,
 		sourceId,
 	)
@@ -433,6 +475,40 @@ function affectsText(impact: RetuneImpact, fromKnown: boolean): string {
 	return parts.join(sep())
 }
 
+/** The window the draft would tune to. */
+function draftWindow(edit: TunerEditState): TunedWindow {
+	const w = editWindow(edit)
+	return {
+		sourceId: edit.sourceId,
+		centreHz: w.centreHz,
+		sampleRate: w.sampleRate,
+		loHz: w.centreHz - w.sampleRate / 2,
+		hiHz: w.centreHz + w.sampleRate / 2,
+	}
+}
+
+/** Who a retune to the draft moves, from what is known: "decoders ?" when the lane is unknown. */
+export function editAffects(state: AppState, edit: TunerEditState): string {
+	if (state.decoders.value === undefined) return "decoders ?"
+	const current = windowFor(
+		edit.sourceId,
+		state.tuner.value,
+		state.sources.value,
+		state.relay.value,
+	)
+	const candidates = retuneCandidates(
+		state.decoders.value,
+		state.sources.value,
+		edit.sourceId,
+	)
+	const impact: RetuneImpact = retuneImpact(
+		candidates,
+		current,
+		draftWindow(edit),
+	)
+	return affectsText(impact, current !== null)
+}
+
 function pendingLine(edit: TunerEditState, width: number): Line {
 	const changes = pendingChanges(edit)
 	if (changes.length === 0)
@@ -467,23 +543,12 @@ function tunerBlock(
 		state.sources.value,
 		relay,
 	)
-	const win: TunedWindow | null = edit
-		? (() => {
-				const w = editWindow(edit)
-				return {
-					sourceId: t.sourceId,
-					centreHz: w.centreHz,
-					sampleRate: w.sampleRate,
-					loHz: w.centreHz - w.sampleRate / 2,
-					hiHz: w.centreHz + w.sampleRate / 2,
-				}
-			})()
-		: current
+	const win: TunedWindow | null = edit ? draftWindow(edit) : current
 	const focus = (f: EditField): Role =>
 		edit && edit.field === f ? "accent" : role
 	const d = edit?.draft
 	const freqCell: Line = edit
-		? withCursor(edit.draft.frequency, edit.digit)
+		? withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
 		: txt(formatHz(t.frequency), role)
 	const rows: Row[] = []
 	if (edit) {
@@ -501,9 +566,7 @@ function tunerBlock(
 		const owner =
 			t.controlMode === "external" ? "external control" : "wavekit control"
 		const client =
-			t.controlMode === "external" && relay?.controlClientId
-				? `relay ${relay.controlClientId}${relay.controlClientRemote ? ` ${relay.controlClientRemote}` : ""}`
-				: null
+			t.controlMode === "external" ? relayClient(relay, true) : null
 		const ws = own(state.tunerLastCommand, t.sourceId)
 		const last =
 			ws ??
@@ -564,8 +627,11 @@ function tunerBlock(
 				: t.tunerGainIndex !== undefined && t.gain === 0
 					? `manual${sep()}index ${t.tunerGainIndex}${tunerType ? ` (${tunerType})` : ""}`
 					: `manual${sep()}${formatDb(t.gain)}`
+	const gainRow = (line: Line): Row =>
+		// While editing, the gain row shows draft values and is kept (M8).
+		edit ? keep(line) : optional(line, 1)
 	rows.push(
-		optional(
+		gainRow(
 			fitRow(
 				lbl("gain"),
 				[
@@ -600,29 +666,11 @@ function tunerBlock(
 				],
 				width,
 			),
-			// While editing, the field being edited may be the gain row.
-			edit ? 0 : 1,
 		),
 	)
 	if (edit) {
 		rows.push(keep(pendingLine(edit, width)))
-		const candidates = retuneCandidates(
-			state.decoders.value ?? [],
-			state.sources.value,
-			t.sourceId,
-		)
-		const impact: RetuneImpact = win
-			? retuneImpact(candidates, current, win)
-			: { tuned: [], enters: [], leaves: [], unknown: [] }
-		rows.push(
-			keep(
-				clipped(
-					lbl("affects"),
-					affectsText(impact, current !== null && win !== null),
-					width,
-				),
-			),
-		)
+		rows.push(keep(clipped(lbl("affects"), editAffects(state, edit), width)))
 		return rows
 	}
 	if (
@@ -654,24 +702,31 @@ function tunerBlock(
 	return rows
 }
 
-function relayHeader(relay: TunerRelayStatus, width: number): Line {
+function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 	return fitDot(
 		lbl("RELAY", true),
 		[
 			one(
 				0,
-				txt(relay.listening ? `listening :${relay.port}` : "not listening"),
+				txt(
+					relay.listening ? `listening :${relay.port}` : "not listening",
+					role,
+				),
 			),
 			one(
 				1,
-				txt(`${relay.clientsConnected} of ${relay.maxClients ?? "?"} clients`),
+				txt(
+					`${relay.clientsConnected} of ${relay.maxClients ?? "?"} clients`,
+					role,
+				),
 			),
-			one(3, txt(`${formatBytes(relay.bytesSent)} sent`)),
-			one(2, txt(`${relay.controlPolicy} control`)),
+			one(3, txt(`${formatBytes(relay.bytesSent)} sent`, role)),
+			one(2, txt(`${sanitize(relay.controlPolicy)} control`, role)),
 			one(
 				1,
 				txt(
 					`last error ${relay.lastError ? quoted(relay.lastError) : glyphs().na}`,
+					role,
 				),
 			),
 		],
@@ -703,21 +758,40 @@ function historyRows(
 	})
 }
 
+/** Decoder-branch counters went down between two samples (a core or branch restart). */
+function counterReset(history: readonly FanoutSample[]): boolean {
+	const prev = new Map<string, { offered?: number; dropped: number }>()
+	for (const h of history) {
+		for (const [id, b] of Object.entries(h.branches)) {
+			if (b.decoderId === undefined) continue
+			const p = prev.get(id)
+			if (
+				p &&
+				(b.dropped < p.dropped ||
+					(p.offered !== undefined &&
+						b.offered !== undefined &&
+						b.offered < p.offered))
+			)
+				return true
+			prev.set(id, b)
+		}
+	}
+	return false
+}
+
 /** Why drop now cannot be computed (truth rule: unknown says why, never 0). */
 function dropUnknownReason(state: AppState): string {
 	const f = state.fanout.value
 	if (!isFresh(state.fanout, state.now)) return "no fanout sample in 15s"
-	if (
-		f &&
-		f.branches.some(
-			b => b.decoderId !== undefined && b.totalBytesWritten === undefined,
-		)
-	)
+	const dec = f?.branches.filter(b => b.decoderId !== undefined) ?? []
+	if (dec.length === 0) return "no decoder branches"
+	if (dec.some(b => b.totalBytesWritten === undefined))
 		return "core reports no offered bytes"
 	const h = state.fanoutHistory
 	const span = h.length >= 2 ? (h[h.length - 1]?.t ?? 0) - (h[0]?.t ?? 0) : 0
 	if (h.length < 2 || span < MIN_DROP_SPAN_MS) return "needs 2 snapshots in 10s"
-	return "a counter was reset"
+	if (counterReset(h)) return "a counter was reset"
+	return "no IQ offered in 10s"
 }
 
 function fanoutBlock(state: AppState, width: number): Row[] {
@@ -789,16 +863,18 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 		one(2, txt(`relay branch ${formatBytes(relayDropped)} dropped`, role)),
 	]
 	const src = state.sources.value?.[0]
+	const resources = state.resources.value
 	const up = src
-		? state.resources.value?.sourceBackpressure.find(b => b.sourceId === src.id)
+		? resources?.sourceBackpressure.find(b => b.sourceId === src.id)
 		: undefined
-	const upRole: Role = isOld(state.resources, now) ? "old" : "value"
+	const upOld = isOld(state.resources, now)
+	const upRole: Role = upOld ? "old" : "value"
 	const upGroups: Group[] = up
 		? [
 				one(
 					0,
 					txt(
-						`${formatBytes(up.bytesDroppedUpstream)} dropped (${up.dropPercent.toFixed(2)}%)`,
+						`${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
 						upRole,
 					),
 					txt(
@@ -806,7 +882,8 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 						upRole,
 					),
 				),
-				one(1, txt(`${formatRate(up.dropRate)} now`, upRole)),
+				// A rate "now" from an old lane is unknown, not a dimmed number (T6).
+				one(1, txt(`${upOld ? "?" : formatRate(up.dropRate)} now`, upRole)),
 				one(
 					2,
 					txt(
@@ -815,7 +892,10 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 					),
 				),
 			]
-		: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
+		: resources
+			? // Core reports SDR hosts but none for this source: not applicable.
+				[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
+			: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
 	return [
 		keep(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),
@@ -833,10 +913,8 @@ export function receiverLines(
 ): Line[] {
 	const src = state.sources.value?.[0]
 	const relay = state.relay.value
-	const t =
-		state.tuner.value?.find(x => x.sourceId === src?.id) ??
-		state.tuner.value?.[0]
-	const gap = (): Row[] => (roomy ? [optional([], 5)] : [])
+	const t = receiverTuner(state)
+	const gap = (): Row[] => (roomy ? [gapRow(9)] : [])
 	const source = src
 		? sourceBlock(state, src, width)
 		: [
@@ -863,7 +941,11 @@ export function receiverLines(
 			]
 	const relayHead = keep(
 		relay
-			? relayHeader(relay, width)
+			? relayHeader(
+					relay,
+					width,
+					isOld(state.relay, state.now) ? "old" : "value",
+				)
 			: clipped(
 					lbl("RELAY", true),
 					noData(state, "/api/tuner-relay"),
@@ -872,20 +954,15 @@ export function receiverLines(
 				),
 	)
 	const fanout = fanoutBlock(state, width)
-	const fixed: Row[] = [...source, ...gap(), ...tuner, ...gap(), relayHead]
-	const tail: Row[] = [...gap(), ...fanout]
-	// Short views shed optional rows, highest drop number first.
-	let rows = [...fixed, ...tail]
-	while (rows.length > height) {
-		const worst = rows.reduce((m, r) => Math.max(m, r.drop ?? -1), -1)
-		if (worst < 0) break
-		const at = rows.map(r => r.drop ?? -1).lastIndexOf(worst)
-		rows = rows.filter((_, i) => i !== at)
-	}
-	const room = height - rows.length
+	// Short views shed optional rows (with a "+N rows hidden" marker); relay history
+	// fills whatever height is left.
+	const lines = shed(
+		[...source, ...gap(), ...tuner, ...gap(), relayHead, ...gap(), ...fanout],
+		height,
+	)
+	const room = height - lines.length
 	const history = relay && room > 0 ? historyRows(relay, room, width) : []
-	const relayAt = rows.indexOf(relayHead)
-	const lines = rows.map(r => r.line)
+	const relayAt = lines.indexOf(relayHead.line)
 	if (relayAt >= 0) lines.splice(relayAt + 1, 0, ...history)
 	return lines.slice(0, height)
 }

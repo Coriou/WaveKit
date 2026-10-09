@@ -1,6 +1,15 @@
 import { isStr } from "../../data/guards.js"
 import type { FormattedMessage } from "../../data/types.js"
-import { asObj, finish, num, obj, seg, str, textGlyphs } from "./common.js"
+import {
+	asObj,
+	finish,
+	knownOr,
+	num,
+	obj,
+	seg,
+	str,
+	textGlyphs,
+} from "./common.js"
 
 /** direwolf emits type "aprs" with APRSData: source/destination callsigns, path, dataType, optional position, message and weather. */
 export function formatAprs(
@@ -13,9 +22,7 @@ export function formatAprs(
 	const destination = str(o, "destination")
 	const path = Array.isArray(o["path"]) ? o["path"].filter(isStr) : []
 	// direwolf's default "Unknown" is an unknown value (R44).
-	const rawType = str(o, "dataType")
-	const dataType =
-		rawType !== undefined && /^unknown$/i.test(rawType.trim()) ? "?" : rawType
+	const dataType = knownOr(str(o, "dataType"))
 	const lat = num(o, "lat")
 	const lon = num(o, "lon")
 	const speed = num(o, "speed")

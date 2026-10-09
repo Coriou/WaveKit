@@ -18,7 +18,10 @@ export interface TunedWindow {
 	hiHz: number
 }
 
-/** centre ± sampleRate/2. Centre: TunerState → caps.centerFreq → relay.lastFrequency. Rate: TunerState → caps. */
+/**
+ * centre ± sampleRate/2, each the first positive value of: centre TunerState →
+ * caps.centerFreq → relay.lastFrequency; rate TunerState → caps. A 0 means unknown (R44).
+ */
 export function windowFor(
 	sourceId: string,
 	tuners: readonly TunerState[] | undefined,

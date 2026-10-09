@@ -127,7 +127,12 @@ export function formatAis(
 				? [{ label: "speed", value: "?" }]
 				: []),
 		...(cog !== undefined
-			? [{ label: "course", value: `${Math.round(cog)}${textGlyphs().degree}` }]
+			? [
+					{
+						label: "course",
+						value: `${Math.round(cog) % 360}${textGlyphs().degree}`,
+					},
+				]
 			: rawCog !== undefined
 				? [{ label: "course", value: "?" }]
 				: []),

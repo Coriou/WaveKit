@@ -4,6 +4,7 @@ import { reduce } from "../../../cli/source/data/reducers.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { SCENARIO_NAMES } from "../../../cli/source/test/scenario-types.js"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
+import { formatClockShort } from "../../../cli/source/ui/format.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import {
 	audioResultText,
@@ -11,9 +12,6 @@ import {
 	presetNames,
 	systemLines,
 } from "../../../cli/source/view-models/system.js"
-
-// Module level: the describe body below renders at collection time, before any beforeAll.
-process.env["TZ"] = "UTC"
 
 describe("system view-model (spec §6.5)", () => {
 	const s = scenarioState("live")
@@ -23,7 +21,8 @@ describe("system view-model (spec §6.5)", () => {
 		expect(text).toContain("cpu       240%   throttled —   oom kills 0")
 		expect(text).toContain("mem       1.94 GB · no limit")
 		expect(text).toContain(
-			'alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since 18:07 · last 3s ago',
+			// Clock text from the same local getters as the view (no TZ mutation, M9).
+			`alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since ${formatClockShort(Date.parse("2026-10-08T18:07:49.000Z"))} · last 3s ago`,
 		)
 		expect(text).toContain(
 			"SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m 51s",
@@ -43,7 +42,7 @@ describe("system view-model (spec §6.5)", () => {
 		expect(text).toContain(
 			'CORE      v1.0.0 · uptime 7m 40s · reports "degraded"',
 		)
-		expect(text).toContain('          api up "API server is responding"')
+		expect(text).toContain('          api "up" "API server is responding"')
 		expect(text.some(l => l.includes("acarsdec"))).toBe(false)
 		for (const l of text) {
 			expect(cellWidth(l)).toBeLessThanOrEqual(119)
@@ -277,5 +276,147 @@ describe("system view-model (spec §6.5)", () => {
 			t0,
 		)
 		expect(audioResultText(ok, t0 + 1000)).toBe("audio started · 0 clients")
+	})
+
+	describe("C3 fix round 1", () => {
+		const live = scenarioState("live")
+		const r = live.resources.value!
+		const host = r.sdrHosts[0]!
+		const at = (st: typeof live, w = 119, h = 35) =>
+			systemLines(st, w, h, true).map(lineText)
+		const withHosts = (
+			hosts: typeof r.sdrHosts,
+			receivedAt = live.now - 2000,
+		) => ({
+			...live,
+			resources: laneOk({ ...r, sdrHosts: hosts }, receivedAt, "rest" as const),
+		})
+		it("keeps CORE and AUDIO with many host warnings and two hosts at 59x12, with markers", () => {
+			const warnings = Array.from(
+				{ length: 6 },
+				(_, i) => `preflight warning ${i}`,
+			)
+			const st = withHosts([
+				{ ...host, warnings },
+				{
+					...host,
+					sourceId: "usb-iq",
+					apiUrl: "http://192.0.2.24:8080",
+					warnings,
+				},
+			])
+			const lines = systemLines(st, 59, 12, false).map(lineText)
+			expect(lines.length).toBeLessThanOrEqual(12)
+			expect(lines.some(l => l.startsWith("CORE"))).toBe(true)
+			expect(lines.some(l => l.startsWith("AUDIO"))).toBe(true)
+			expect(lines.filter(l => l.startsWith("SDR HOST"))).toHaveLength(2)
+			expect(lines.some(l => /^ {10}\+\d+ (more|rows? hidden)$/.test(l))).toBe(
+				true,
+			)
+			const roomy = at(st)
+			expect(roomy.filter(l => l.startsWith("warning"))).toHaveLength(4)
+			expect(roomy.filter(l => l === "          +4 more")).toHaveLength(2)
+		})
+		it("keeps the alerts marker true after shedding", () => {
+			const alert = live.alerts[0]!
+			const st = {
+				...live,
+				alerts: Array.from({ length: 5 }, (_, i) => ({
+					...alert,
+					key: `k${i}`,
+					lastAt: alert.lastAt - i,
+				})),
+			}
+			expect(at(st)).toContain("          +2 more")
+			const short = systemLines(st, 79, 12, false).map(lineText)
+			const shown = short.filter(l => l.includes("container-cpu")).length
+			expect(short).toContain(`          +${5 - shown} more`)
+		})
+		it("says ? for an old lane's rate, unknown sampling, unknown pid and memory percent (M7, T6)", () => {
+			const old = withHosts([host], live.now - 60_000)
+			expect(at(old).find(l => l.startsWith("rtlmux"))).toContain("· ? ·")
+			const odd = withHosts([
+				{
+					...host,
+					rtlTcp: { ...host.rtlTcp!, pid: null },
+					sampling: {
+						state: "unknown" as const,
+						reason: null,
+						timeoutMs: 5000,
+						lastSampleAt: null,
+						sampleAgeMs: null,
+						upstream: {
+							bytesTotal: null,
+							bytesPerSec: null,
+							windowMs: null,
+							expectedBytesPerSec: null,
+							rateBasis: "configured" as const,
+							rateStatus: "unknown" as const,
+						},
+						epoch: {
+							rtlmuxPid: null,
+							rtlTcpPid: null,
+							startedAt: null,
+							resets: 0,
+							lastResetReason: null,
+						},
+						stats: {
+							state: "stale" as const,
+							observedAt: null,
+							ageMs: null,
+							lastError: null,
+						},
+					},
+				},
+			])
+			const lines = at(odd)
+			expect(lines.find(l => l.startsWith("rtl_tcp"))).toContain("pid ?")
+			expect(lines.find(l => l.startsWith("sampling"))).toMatch(
+				/^sampling {2}\? \?/,
+			)
+			const limited = {
+				...live,
+				resources: laneOk(
+					{
+						...r,
+						container: {
+							...r.container,
+							memoryLimitBytes: 4e9,
+							memoryUsagePercent: null,
+						},
+					},
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(at(limited)).toContain("mem       1.94 GB of 4.00 GB (?)")
+		})
+		it("dims the SDR HOST header when core cannot reach the Pi (M3)", () => {
+			const st = withHosts([{ ...host, fetchError: "connect ETIMEDOUT" }])
+			const head = systemLines(st, 119, 35, true).find(l =>
+				lineText(l).startsWith("SDR HOST"),
+			)
+			expect(
+				head
+					?.slice(1)
+					.every(span => span.role === "old" || span.role === "label"),
+			).toBe(true)
+		})
+		it("shows a pending audio write so a second a is not blind (M6)", () => {
+			const st = reduce(
+				live,
+				[
+					{
+						kind: "action:sent",
+						id: 3,
+						at: live.now,
+						key: "audio",
+						intent: { kind: "audio", op: "start" },
+					},
+				],
+				live.now,
+			)
+			expect(at(st)).toContain("result    audio start sending")
+		})
 	})
 })
