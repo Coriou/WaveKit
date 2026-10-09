@@ -19,6 +19,7 @@ coverage
 **/coverage
 .tsc-cache
 **/.tsc-cache
+native/wavekit-chan/target
 
 # IDE
 .vscode

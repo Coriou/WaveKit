@@ -90,3 +90,6 @@ __pycache__/
 # Impeccable local review captures and decision-page logs
 **/.impeccable/review/
 **/.impeccable/questions/
+
+# wavekit-chan cargo build output
+native/wavekit-chan/target/
