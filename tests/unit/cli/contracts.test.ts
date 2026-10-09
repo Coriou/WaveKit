@@ -71,6 +71,8 @@ describe("ui/actions", () => {
 		expect(EMPTY_VIEW_CTX).toEqual({
 			hasSelection: false,
 			decoderRunning: null,
+			decoderPinned: false,
+			decoderSuspension: null,
 			control: null,
 			audioRunning: null,
 			paused: false,
@@ -216,9 +218,9 @@ describe("ui/line and ui/text helpers", () => {
 })
 
 describe("test/scenario-types", () => {
-	it("names sixteen scenarios (R43 adds iq-stale, iq-disconnected, decoder-faulted; R89 contracts, tuner-unknown)", () => {
-		expect(SCENARIO_NAMES).toHaveLength(16)
-		expect(new Set(SCENARIO_NAMES).size).toBe(16)
+	it("names seventeen scenarios (R43 adds iq-stale, iq-disconnected, decoder-faulted; R89 contracts, tuner-unknown; R100 band-defaults)", () => {
+		expect(SCENARIO_NAMES).toHaveLength(17)
+		expect(new Set(SCENARIO_NAMES).size).toBe(17)
 	})
 })
 

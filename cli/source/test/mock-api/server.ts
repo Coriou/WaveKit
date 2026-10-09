@@ -1089,9 +1089,88 @@ export async function startMockServer(
 		})
 	}
 
+	/**
+	 * R100 (core 87f9f06), for scenarios whose decoders carry startMode: a bare
+	 * start pins (operator); `{ pin }` sets the mode on a running decoder; a start
+	 * runs a band-suspended decoder anyway; a rate-suspended one is a 200 no-op.
+	 * Returns true when it answered the request.
+	 */
+	function startModeWrite(
+		d: Obj,
+		id: string,
+		op: string,
+		body: unknown,
+		res: ServerResponse,
+	): boolean {
+		if (!st.decoders.some(x => "startMode" in x)) return false
+		if (op === "stop") {
+			delete d["startMode"]
+			d["desiredRunning"] = false
+			delete d["suspended"]
+			delete d["suspension"]
+			return false
+		}
+		if (op !== "start") return false
+		const bodyOk =
+			body === undefined ||
+			(isObj(body) &&
+				Object.keys(body).every(k => k === "pin") &&
+				(body["pin"] === undefined || typeof body["pin"] === "boolean"))
+		if (!bodyOk) {
+			send(res, 400, {
+				error: "BadRequest",
+				code: "INVALID_START_REQUEST",
+				message: "Body must be { pin?: boolean }",
+			})
+			return true
+		}
+		const pin =
+			isObj(body) && typeof body["pin"] === "boolean" ? body["pin"] : null
+		const status = (message: string): true => {
+			later(300, () => decoderStatus(id))
+			send(res, 200, {
+				message,
+				decoder: decodersNow(st).find(x => x["id"] === id),
+			})
+			return true
+		}
+		const assessment = isObj(d["bandAssessment"]) ? d["bandAssessment"] : {}
+		const outOfBand = assessment["verdict"] === "out-of-band"
+		if (d["running"] === true && pin !== null) {
+			d["startMode"] = pin ? "operator" : "auto"
+			if (!pin && outOfBand) {
+				d["running"] = false
+				delete d["pid"]
+				d["suspended"] = true
+				d["suspension"] = {
+					reasonCode: "frequency-out-of-band",
+					since: new Date().toISOString(),
+				}
+				st.decoderUptimeAt.delete(id)
+			}
+			return status(`Decoder '${id}' start mode ${String(d["startMode"])}`)
+		}
+		const susp = isObj(d["suspension"]) ? d["suspension"] : null
+		if (d["suspended"] === true && susp) {
+			if (susp["reasonCode"] !== "frequency-out-of-band" || pin === false)
+				return status(`Decoder '${id}' is already wanted`)
+			// Run anyway: pin it and resume.
+			delete d["suspended"]
+			delete d["suspension"]
+			d["startMode"] = "operator"
+			return false
+		}
+		if (d["running"] !== true) {
+			d["startMode"] = pin === false ? "auto" : "operator"
+			d["desiredRunning"] = true
+		}
+		return false
+	}
+
 	function handleDecoderWrite(
 		id: string,
 		op: string,
+		body: unknown,
 		res: ServerResponse,
 	): void {
 		const d = st.decoders.find(x => x["id"] === id)
@@ -1101,6 +1180,7 @@ export async function startMockServer(
 				code: "DECODER_NOT_FOUND",
 				message: `Decoder with id '${id}' not found`,
 			})
+		if (startModeWrite(d, id, op, body, res)) return
 		if (op === "start" && d["running"] === true) {
 			return send(res, 409, {
 				error: "Conflict",
@@ -1336,6 +1416,7 @@ export async function startMockServer(
 			return handleDecoderWrite(
 				decodeURIComponent(dec[1] ?? ""),
 				dec[2] ?? "",
+				body,
 				res,
 			)
 		if (method === "POST" && tun)
