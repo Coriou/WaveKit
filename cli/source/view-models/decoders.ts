@@ -82,7 +82,7 @@ const secs = (ms: number): string =>
 const quoted = (text: string): string =>
 	`"${truncate(sanitize(text), SERVER_TEXT_MAX)}"`
 
-/** R70: core's rate reason codes in plain words; an unknown code is shown quoted. */
+/** R70 / R84: core's suspension reason codes in plain words; an unknown code is shown quoted. */
 const SUSPENSION_REASON: Readonly<Record<string, string>> = {
 	"insufficient-sample-rate": "sample rate too low",
 	"unsupported-sample-rate": "sample rate not supported",
@@ -94,6 +94,7 @@ const SUSPENSION_REASON: Readonly<Record<string, string>> = {
 	"source-rate-unknown": "source rate not known",
 	"adaptation-unknown": "rate adaptation not known",
 	"external-input": "external input",
+	"frequency-out-of-band": "out of band",
 }
 
 /** R84: why core cannot place a decoder in or out of the window. */
@@ -123,6 +124,16 @@ function bandOriginWords(f: DecoderFacts): string {
 	if (f.bandOrigin === "core")
 		return basis !== undefined ? `basis ${quoted(basis)}` : ""
 	return BAND_ORIGIN[f.bandOrigin ?? "nominal"]
+}
+
+/** R84: a band suspension resumes on a retune to core's targets, when core names them. Not "waiting for": spec §9 bans it. */
+function suspensionText(f: DecoderFacts, code: string): string {
+	const known = f.nominal !== "tuned" && f.nominal !== "?"
+	return code === "frequency-out-of-band" &&
+		f.row.bandAssessment?.targetsHz !== undefined &&
+		known
+		? `resumes on retune to ${f.nominal} MHz`
+		: suspensionReason(code)
 }
 
 /**
@@ -253,7 +264,7 @@ export function decoderDetail(
 		rest.push(
 			...wrapKV(
 				"suspended",
-				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionReason(susp.reasonCode)}`,
+				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionText(f, susp.reasonCode)}`,
 				width,
 			),
 		)

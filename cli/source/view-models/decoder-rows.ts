@@ -202,6 +202,26 @@ function countdown(f: DecoderFacts): string | null {
 		: null
 }
 
+/** R84: core's reason in one word; a code this CLI does not know adds nothing (the detail quotes it). */
+function suspendedWords(code: string | undefined, sep: string): string {
+	if (code === "frequency-out-of-band") return `suspended${sep}out of band`
+	if (code !== undefined && RATE_CODES.has(code)) return `suspended${sep}rate`
+	return "suspended"
+}
+
+const RATE_CODES: ReadonlySet<string> = new Set([
+	"insufficient-sample-rate",
+	"unsupported-sample-rate",
+	"unsupported-input-kind",
+	"unsupported-input-format",
+	"unsupported-frontend-rate",
+	"unsupported-decoder-input-rate",
+	"unknown-requirements",
+	"source-rate-unknown",
+	"adaptation-unknown",
+	"external-input",
+])
+
 /**
  * The words that tell this process state apart, without restart counts (one text per
  * state, M-d). The Decoders detail prints these beside its own counts (I-A).
@@ -218,7 +238,7 @@ export function processWords(f: DecoderFacts): string {
 		case "starting":
 			return `starting ${up}`
 		case "suspended":
-			return `suspended${sep}rate`
+			return suspendedWords(f.row.suspension?.reasonCode, sep)
 		case "suspend-pending":
 			return "suspending (stop pending)"
 		case "faulted-retrying":
@@ -252,7 +272,9 @@ function processCell(f: DecoderFacts): Cell {
 			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
 			return cell([sp("starting", role)], [sp(words, role)])
 		case "suspended":
-			return cell([sp("suspended", role)], [sp(words, role)])
+			return words === "suspended"
+				? cell([sp(words, role)])
+				: cell([sp("suspended", role)], [sp(words, role)])
 		case "suspend-pending":
 			return cell([sp("suspending", role)], [sp(words, role)])
 		case "faulted-retrying":

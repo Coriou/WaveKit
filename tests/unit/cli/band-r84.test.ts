@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, it } from "vitest"
 import { laneOk } from "../../../cli/source/data/freshness.js"
+import { processState } from "../../../cli/source/data/decoder-state.js"
 import { guardDecoder } from "../../../cli/source/data/guards.js"
 import type {
 	BandAssessment,
@@ -12,6 +13,7 @@ import {
 	type TunedWindow,
 } from "../../../cli/source/data/window.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
+import { findBanned } from "../../../cli/source/ui/copy-rules.js"
 import { lineText } from "../../../cli/source/ui/text.js"
 import {
 	decoderCells,
@@ -316,5 +318,93 @@ describe("R84 retune impact prefers core's assessment", () => {
 		expect(
 			retuneImpact([readsb], from, at(1_090_500_000, 2_400_000)).enters,
 		).toEqual(["readsb"])
+	})
+})
+
+describe("R84 band suspension", () => {
+	const suspended = (over: Partial<DecoderRow> = {}): DecoderRow => ({
+		...liveRow("readsb"),
+		running: false,
+		health: "running",
+		desiredRunning: true,
+		suspended: true,
+		suspension: {
+			reasonCode: "frequency-out-of-band",
+			since: "2026-10-08T18:00:00.000Z",
+		},
+		bandAssessment: {
+			verdict: "out-of-band",
+			reasonCode: "frequency-out-of-band",
+			targetsHz: [1_090_000_000],
+			basis: "protocol",
+		},
+		...over,
+	})
+	it("the process cell reads suspended · out of band, in the neutral role", () => {
+		const r = suspended()
+		expect(cellText(r, "process")).toEqual([
+			"suspended",
+			"suspended · out of band",
+		])
+		const cell = decoderCells(facts(r), NOW)["process"]!
+		for (const v of cell.variants)
+			for (const s of v) expect(s.role).toBe("neutral")
+	})
+	it('the detail names the retune that resumes it (spec §9 bans "Waiting for")', () => {
+		expect(detail(suspended())).toContain(
+			"suspended since 18:00:00 · resumes on retune to 1090.000 MHz",
+		)
+		expect(
+			detail(
+				suspended({
+					bandAssessment: {
+						verdict: "out-of-band",
+						targetsHz: [136_650_000, 136_975_000],
+					},
+				}),
+			),
+		).toContain(
+			"suspended since 18:00:00 · resumes on retune to 136.650–136.975 MHz",
+		)
+	})
+	it("without core's targets it says out of band only", () => {
+		expect(
+			detail(suspended({ bandAssessment: { verdict: "out-of-band" } })),
+		).toContain("suspended since 18:00:00 · out of band")
+	})
+	it("a rate suspension still reads rate (core sends the reason that wins)", () => {
+		const r = suspended({
+			suspension: {
+				reasonCode: "insufficient-sample-rate",
+				since: "2026-10-08T18:00:00.000Z",
+			},
+		})
+		expect(cellText(r, "process")).toEqual(["suspended", "suspended · rate"])
+		expect(detail(r)).toContain(
+			"suspended since 18:00:00 · sample rate too low",
+		)
+	})
+	it("an unknown code reads plain suspended, with the code quoted in the detail", () => {
+		const r = suspended({
+			suspension: {
+				reasonCode: "solar-flare",
+				since: "2026-10-08T18:00:00.000Z",
+			},
+		})
+		expect(cellText(r, "process")).toEqual(["suspended"])
+		expect(detail(r)).toContain('suspended since 18:00:00 · "solar-flare"')
+	})
+	it("keeps health running, and suspended renders first", () => {
+		const r = suspended()
+		expect(r.health).toBe("running")
+		expect(processState(r, 0, false, NOW)).toBe("suspended")
+		expect(facts(r).failing).toBe(false)
+		expect(detail(r)).toContain("server health running")
+		expect(detail(r)).not.toMatch(/up \d/)
+	})
+	it("never uses banned copy", () => {
+		const r = suspended()
+		for (const t of [...cellText(r, "process"), detail(r)])
+			expect(findBanned(t)).toEqual([])
 	})
 })
