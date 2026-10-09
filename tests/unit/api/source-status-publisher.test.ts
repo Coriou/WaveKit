@@ -258,9 +258,47 @@ describe("SourceStatusPublisher", () => {
 		).not.toHaveProperty("rateMismatch")
 	})
 
+	it("publishes a signal-flat flag immediately and its clearing too", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses[0]!.signalFlat = {
+			levelDbfs: -46.5,
+			thresholdDbfs: -40,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.statuses[0]!.signalLevelDbfs = -46.5
+		sourceManager.emit("signal-flat-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl"])
+		expect(broadcaster.broadcastSourceStatus.mock.calls[0]![0]).toMatchObject({
+			signalFlat: {
+				levelDbfs: -46.5,
+				thresholdDbfs: -40,
+				since: "2026-10-09T01:00:00.000Z",
+			},
+			signalLevelDbfs: -46.5,
+		})
+		// A drifting level alone is not a state change.
+		sourceManager.statuses[0]!.signalFlat.levelDbfs = -47
+		sourceManager.statuses[0]!.signalLevelDbfs = -47
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl"])
+		delete sourceManager.statuses[0]!.signalFlat
+		sourceManager.emit("signal-flat-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl", "rtl"])
+		expect(
+			broadcaster.broadcastSourceStatus.mock.calls[1]![0],
+		).not.toHaveProperty("signalFlat")
+	})
+
 	it("carries exactly the fields of the REST GET /api/sources item", async () => {
 		vi.useRealTimers()
 		sourceManager.statuses[0]!.lastError = "connection reset"
+		sourceManager.statuses[0]!.signalFlat = {
+			levelDbfs: -46.5,
+			thresholdDbfs: -40,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.statuses[0]!.signalLevelDbfs = -46.5
 		sourceManager.statuses[0]!.rateMismatch = {
 			declaredSampleRateHz: 2_048_000,
 			measuredSampleRateHz: 2_160_000,
@@ -290,6 +328,12 @@ describe("SourceStatusPublisher", () => {
 				measuredSampleRateHz: 2_160_000,
 				since: "2026-10-09T01:00:00.000Z",
 			},
+			signalFlat: {
+				levelDbfs: -46.5,
+				thresholdDbfs: -40,
+				since: "2026-10-09T01:00:00.000Z",
+			},
+			signalLevelDbfs: -46.5,
 		})
 	})
 })
