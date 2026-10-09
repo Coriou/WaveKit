@@ -28,8 +28,51 @@ function run(squelch: ChannelSquelch, chunks: Buffer[]): Buffer {
 	return Buffer.concat(out)
 }
 
-function isZero(buf: Buffer): boolean {
-	return buf.every(byte => byte === 0)
+/** Muted output: a constant complex vector at about -80 dBFS. */
+function isMuted(buf: Buffer): boolean {
+	if (buf.length < 8) return true
+	const i0 = buf.readFloatLE(0)
+	const q0 = buf.readFloatLE(4)
+	if (Math.hypot(i0, q0) > 1.01e-4) return false
+	for (let offset = 0; offset + 8 <= buf.length; offset += 8) {
+		if (buf.readFloatLE(offset) !== i0 || buf.readFloatLE(offset + 4) !== q0)
+			return false
+	}
+	return true
+}
+
+/** Model of `csdr fmdemod` (dphase / pi, phase state starting at 0). */
+function fmdemod(buf: Buffer): number[] {
+	const out: number[] = []
+	let last = 0
+	for (let offset = 0; offset + 8 <= buf.length; offset += 8) {
+		const phase = Math.atan2(
+			buf.readFloatLE(offset + 4),
+			buf.readFloatLE(offset),
+		)
+		let d = phase - last
+		while (d < -Math.PI) d += 2 * Math.PI
+		while (d > Math.PI) d -= 2 * Math.PI
+		out.push(d / Math.PI)
+		last = phase
+	}
+	return out
+}
+
+/** Same signal up to a constant phase rotation (what FM ignores). */
+function sameUpToRotation(a: Buffer, b: Buffer): boolean {
+	if (a.length !== b.length) return false
+	const da = fmdemod(a).slice(1)
+	const db = fmdemod(b).slice(1)
+	for (let n = 0; n < da.length; n++) {
+		if (Math.abs(da[n]! - db[n]!) > 1e-4) return false
+	}
+	for (let offset = 0; offset + 8 <= a.length; offset += 8) {
+		const ma = Math.hypot(a.readFloatLE(offset), a.readFloatLE(offset + 4))
+		const mb = Math.hypot(b.readFloatLE(offset), b.readFloatLE(offset + 4))
+		if (Math.abs(ma - mb) > 1e-6) return false
+	}
+	return true
 }
 
 // -20 dBFS power = amplitude 0.1; -60 dBFS = amplitude 0.001.
@@ -52,11 +95,11 @@ describe("ChannelSquelch", () => {
 	it("mutes the channel below the threshold and opens above it", () => {
 		const squelch = new ChannelSquelch({ sampleRate: RATE, thresholdDbfs: -40 })
 		const noise = run(squelch, [tone(QUIET, 200)])
-		expect(isZero(noise)).toBe(true)
+		expect(isMuted(noise)).toBe(true)
 		expect(squelch.open).toBe(false)
 		const signal = tone(LOUD, 200)
 		const passed = run(squelch, [signal])
-		expect(passed.equals(signal)).toBe(true)
+		expect(sameUpToRotation(passed, signal)).toBe(true)
 		expect(squelch.open).toBe(true)
 	})
 
@@ -69,12 +112,12 @@ describe("ChannelSquelch", () => {
 		run(squelch, [tone(LOUD, 100)])
 		// 240 ms below threshold, delivered as one burst: still within the hang.
 		const tail = run(squelch, [tone(QUIET, 240)])
-		expect(isZero(tail)).toBe(false)
+		expect(isMuted(tail)).toBe(false)
 		expect(squelch.open).toBe(true)
 		// Another 20 ms crosses the 250 ms hang.
 		run(squelch, [tone(QUIET, 20)])
 		expect(squelch.open).toBe(false)
-		expect(isZero(run(squelch, [tone(QUIET, 50)]))).toBe(true)
+		expect(isMuted(run(squelch, [tone(QUIET, 50)]))).toBe(true)
 	})
 
 	it("uses hysteresis: a level just under the threshold keeps an open gate open", () => {
@@ -89,14 +132,14 @@ describe("ChannelSquelch", () => {
 		const amp = Math.sqrt(10 ** (-41 / 10))
 		const held = run(squelch, [tone(amp, 1000)])
 		expect(squelch.open).toBe(true)
-		expect(isZero(held)).toBe(false)
+		expect(isMuted(held)).toBe(false)
 		// A closed gate does not open at -41 dBFS.
 		const closed = new ChannelSquelch({
 			sampleRate: RATE,
 			thresholdDbfs: -40,
 			hysteresisDb: 3,
 		})
-		expect(isZero(run(closed, [tone(amp, 200)]))).toBe(true)
+		expect(isMuted(run(closed, [tone(amp, 200)]))).toBe(true)
 	})
 
 	it("timing does not depend on how the stream is chunked", () => {
@@ -144,6 +187,38 @@ describe("ChannelSquelch", () => {
 		)
 	})
 
+	it("never steps the phase at a squelch transition (no click after fmdemod)", () => {
+		// Feature: live-analog-fixes, Property 4: squelch transitions are click-free
+		fc.assert(
+			fc.property(
+				fc.double({ min: -Math.PI, max: Math.PI, noNaN: true }),
+				fc.double({ min: -Math.PI, max: Math.PI, noNaN: true }),
+				// Whole 10 ms blocks: B's phase jump lands while the gate is closed.
+				fc.integer({ min: 0, max: 20 }).map(blocks => blocks * 10),
+				(phaseA, phaseB, gapMs) => {
+					const squelch = new ChannelSquelch({
+						sampleRate: RATE,
+						thresholdDbfs: -40,
+						hangMs: 50,
+					})
+					const out = Buffer.concat([
+						run(squelch, [tone(QUIET, 30)]),
+						run(squelch, [tone(LOUD, 100, phaseA)]),
+						// Phase-continuous with A: the gate is still open in its hang.
+						run(squelch, [
+							tone(QUIET, 100 + gapMs, phaseA + 2 * Math.PI * 100 * 0.1),
+						]),
+						run(squelch, [tone(LOUD, 100, phaseB)]),
+					])
+					// The 1 kHz test tone itself moves 0.08 per sample at 25 kHz.
+					const demod = fmdemod(out).slice(1)
+					expect(Math.max(...demod.map(Math.abs))).toBeLessThan(0.0802)
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
 	it("changes the threshold live without losing alignment", () => {
 		const squelch = new ChannelSquelch({
 			sampleRate: RATE,
@@ -151,10 +226,10 @@ describe("ChannelSquelch", () => {
 		})
 		run(squelch, [tone(QUIET, 50)])
 		squelch.setThreshold(-30)
-		expect(isZero(run(squelch, [tone(QUIET, 50)]))).toBe(true)
+		expect(isMuted(run(squelch, [tone(QUIET, 50)]))).toBe(true)
 		squelch.setThreshold(null)
 		const input = tone(QUIET, 50)
-		expect(run(squelch, [input]).equals(input)).toBe(true)
+		expect(sameUpToRotation(run(squelch, [input]), input)).toBe(true)
 	})
 
 	it("reports a floor instead of -Infinity for an all-zero channel", () => {

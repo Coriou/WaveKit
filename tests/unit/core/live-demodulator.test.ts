@@ -334,12 +334,17 @@ describe("LiveDemodulator", () => {
 		const [front, back] = processes
 		const toBack: Buffer[] = []
 		back!.stdin.on("data", chunk => toBack.push(chunk))
-		// A -80 dBFS channel stays muted: the back process receives zeros.
+		// A -80 dBFS channel stays muted: the back process receives the muted
+		// carrier (a constant vector at -80 dBFS), not the channel IQ.
 		const quiet = Buffer.alloc(250 * 8)
 		for (let i = 0; i < 500; i++) quiet.writeFloatLE(1e-4, i * 4)
 		front!.stdout.write(quiet)
 		await waitFor(() => toBack.length > 0)
-		expect(Buffer.concat(toBack).every(byte => byte === 0)).toBe(true)
+		const muted = Buffer.concat(toBack)
+		for (let offset = 0; offset < muted.length; offset += 8) {
+			expect(muted.readFloatLE(offset)).toBeCloseTo(1e-4, 9)
+			expect(muted.readFloatLE(offset + 4)).toBe(0)
+		}
 		expect(liveDemod.getStatus().squelchOpen).toBe(false)
 	})
 

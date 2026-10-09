@@ -11,6 +11,13 @@
  * an FM discriminator noise is louder than a quieted carrier, so a level
  * squelch on the audio can never work.
  *
+ * Click-free transitions: a closed gate does not output zeros (arg(0) = 0
+ * makes the discriminator jump by -last_phase, a full-scale click). It holds
+ * the last passed sample's phase at -80 dBFS (|z| = 1e-4), so the phase does
+ * not move on close; on reopen the passed IQ is rotated by a constant so its
+ * first sample continues that phase. A constant rotation does not change FM,
+ * AM or SSB demodulation.
+ *
  * Threshold semantics (config `squelch`): dBFS of channel power relative to a
  * full-scale complex IQ sample (|z| = 1 → 0 dBFS). The gate opens on the first
  * block at or above the threshold, stays open while blocks remain within
@@ -36,6 +43,8 @@ export interface ChannelSquelchOptions {
 export const CHANNEL_POWER_FLOOR_DBFS = -160
 
 const BYTES_PER_COMPLEX_SAMPLE = 8
+/** Magnitude of the muted carrier (-80 dBFS). */
+const MUTED_MAGNITUDE = 1e-4
 /** Time constant of the reported (smoothed) channel power. */
 const REPORT_SMOOTHING_MS = 100
 
@@ -50,6 +59,16 @@ export class ChannelSquelch {
 	private lastAboveMs = Number.NEGATIVE_INFINITY
 	private gateOpen: boolean
 	private smoothedPower: number | null = null
+	/** Gate state of the previous output block (to detect transitions). */
+	private outputOpen: boolean
+	/** Constant rotation applied to passed IQ since the last reopen. */
+	private rotCos = 1
+	private rotSin = 0
+	/** Muted vector: the last passed sample's phase at MUTED_MAGNITUDE. */
+	private fillI = MUTED_MAGNITUDE
+	private fillQ = 0
+	private lastI = 0
+	private lastQ = 0
 
 	constructor(options: ChannelSquelchOptions) {
 		const blockSamples = Math.max(
@@ -62,6 +81,7 @@ export class ChannelSquelch {
 		this.hangMs = options.hangMs ?? 250
 		this.thresholdDbfs = normalizeThreshold(options.thresholdDbfs)
 		this.gateOpen = this.thresholdDbfs === null
+		this.outputOpen = this.gateOpen
 	}
 
 	/** Current gate state (always true while disabled). */
@@ -101,7 +121,7 @@ export class ChannelSquelch {
 		if (this.remainder.length === 0) return []
 		const tail = this.remainder
 		this.remainder = Buffer.alloc(0)
-		return [this.gateOpen ? tail : Buffer.alloc(tail.length)]
+		return [this.emitBlock(tail)]
 	}
 
 	private gateBlock(block: Buffer): Buffer {
@@ -115,7 +135,7 @@ export class ChannelSquelch {
 						Math.min(1, this.blockMs / REPORT_SMOOTHING_MS)
 
 		const threshold = this.thresholdDbfs
-		if (threshold === null) return block
+		if (threshold === null) return this.emitBlock(block)
 
 		const levelDbfs = toDbfs(power)
 		if (levelDbfs >= threshold) {
@@ -128,7 +148,52 @@ export class ChannelSquelch {
 				this.gateOpen = false
 			}
 		}
-		return this.gateOpen ? block : Buffer.alloc(block.length)
+		return this.emitBlock(block)
+	}
+
+	/** Passes (rotated) IQ or the muted vector, keeping the phase continuous. */
+	private emitBlock(block: Buffer): Buffer {
+		const samples = Math.floor(block.length / BYTES_PER_COMPLEX_SAMPLE)
+		if (!this.gateOpen) {
+			if (this.outputOpen) {
+				const magnitude = Math.hypot(this.lastI, this.lastQ)
+				if (magnitude > 0) {
+					this.fillI = (this.lastI / magnitude) * MUTED_MAGNITUDE
+					this.fillQ = (this.lastQ / magnitude) * MUTED_MAGNITUDE
+				}
+				this.outputOpen = false
+			}
+			const muted = Buffer.alloc(block.length)
+			for (let n = 0; n < samples; n++) {
+				muted.writeFloatLE(this.fillI, n * 8)
+				muted.writeFloatLE(this.fillQ, n * 8 + 4)
+			}
+			return muted
+		}
+
+		if (samples === 0) return block
+		if (!this.outputOpen) {
+			// Rotate so the first passed sample continues the muted phase.
+			const first = Math.atan2(block.readFloatLE(4), block.readFloatLE(0))
+			const rotation = Math.atan2(this.fillQ, this.fillI) - first
+			this.rotCos = Math.cos(rotation)
+			this.rotSin = Math.sin(rotation)
+			this.outputOpen = true
+		}
+		let out = block
+		if (this.rotCos !== 1 || this.rotSin !== 0) {
+			out = Buffer.from(block)
+			for (let n = 0; n < samples; n++) {
+				const i = block.readFloatLE(n * 8)
+				const q = block.readFloatLE(n * 8 + 4)
+				out.writeFloatLE(i * this.rotCos - q * this.rotSin, n * 8)
+				out.writeFloatLE(i * this.rotSin + q * this.rotCos, n * 8 + 4)
+			}
+		}
+		const last = (samples - 1) * 8
+		this.lastI = out.readFloatLE(last)
+		this.lastQ = out.readFloatLE(last + 4)
+		return out
 	}
 }
 
