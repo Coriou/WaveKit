@@ -153,6 +153,70 @@ describe("Messages view (spec §6.3)", () => {
 		h.unmount()
 	})
 
+	it("PgUp answers at once after scrolling past the end of the detail (R73 M3)", async () => {
+		const live = scenarioState("live", deps)
+		const at = live.now
+		const data = Object.fromEntries(
+			Array.from({ length: 60 }, (_, i) => [`key${i}`, i]),
+		)
+		const tall: Inbound = {
+			kind: "ws",
+			at,
+			event: {
+				type: "decoder:output",
+				decoderId: "rtl433",
+				output: {
+					type: "signal",
+					decoder: "rtl433",
+					timestamp: new Date(at).toISOString(),
+					data,
+				},
+			},
+		}
+		const h = await renderApp({
+			state: reduce(live, [tall], at, deps),
+			views,
+			view: "messages",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		for (let i = 0; i < 20; i++)
+			await h.press(KEYS.pgdn, { expectWrite: false })
+		expect(h.text()).toContain('"key59": 59')
+		const bottom = h.text()
+		await h.press(KEYS.pgup)
+		expect(h.text()).not.toBe(bottom)
+		expect(h.text()).not.toContain('"key59": 59')
+		h.unmount()
+	})
+
+	it("keeps M of N and the input cursor visible with the detail on the right (200x50)", async () => {
+		const h = await renderApp({
+			state: scenarioState("burst", deps),
+			views,
+			view: "messages",
+			cols: 200,
+			rows: 50,
+			strict: true,
+		})
+		// A long applied filter that still matches (an OR alternative) and a long draft.
+		await h.press("/")
+		await typeText(h, `readsb,ais,${"z".repeat(100)}`)
+		await h.press(KEYS.enter)
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		await h.press("/")
+		await typeText(h, " " + "x".repeat(120))
+		const text = h.text()
+		expect(text).not.toContain("render error")
+		expect(text).toMatch(/MESSAGES {2}.*\d+ of \d+/)
+		expect(text).toMatch(/x▏/)
+		expect(text).toMatch(/readsb · aircraft · \d\d:\d\d:\d\d\.\d{3}/)
+		h.unmount()
+	})
+
 	it("walks the whole Esc chain: detail, selection, filter (M9)", async () => {
 		const h = await renderApp({
 			state: scenarioState("live", deps),
@@ -199,7 +263,9 @@ describe("Messages view (spec §6.3)", () => {
 		await h.press("/")
 		await typeText(h, "nothing-matches")
 		await h.press(KEYS.enter)
-		expect(h.text()).toMatch(/0 of \d+ match "nothing-matches"/)
+		expect(h.text()).toMatch(
+			/0 of \d+ match · filter nothing-matches · Esc clear/,
+		)
 		await h.press(KEYS.esc)
 		expect(h.text()).not.toContain("nothing-matches")
 		h.unmount()

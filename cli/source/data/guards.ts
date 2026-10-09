@@ -19,9 +19,11 @@ import type {
 	SourceActivity,
 	SourceBackpressure,
 	SourceCaps,
+	SourceRateMismatch,
 	TunerRelayCommandHistoryEntry,
 	TunerRelayStatus,
 	TunerState,
+	TunerStateField,
 } from "@wavekit/api-types"
 import type {
 	AircraftSnapshot,
@@ -338,6 +340,23 @@ function guardAssignment(v: unknown): DecoderAssignment | undefined {
 	return { decoderId, sourceId, assignedAt }
 }
 
+/** R85: kept only when all four fields are valid; a bad one never rejects the row. */
+function guardRateMismatch(v: unknown): SourceRateMismatch | undefined {
+	if (!isObj(v)) return undefined
+	const declaredSampleRateHz = v["declaredSampleRateHz"]
+	const measuredSampleRateHz = v["measuredSampleRateHz"]
+	const deviation = v["deviation"]
+	const since = v["since"]
+	if (
+		!isNum(declaredSampleRateHz) ||
+		!isNum(measuredSampleRateHz) ||
+		!isNum(deviation) ||
+		!isStr(since)
+	)
+		return undefined
+	return { declaredSampleRateHz, measuredSampleRateHz, deviation, since }
+}
+
 export function guardSource(v: unknown): SourceRow | undefined {
 	if (!isObj(v)) return undefined
 	const id = v["id"]
@@ -364,6 +383,7 @@ export function guardSource(v: unknown): SourceRow | undefined {
 	}
 	const rawActivity = v["activity"]
 	const activity = guardActivity(rawActivity)
+	const rateMismatch = guardRateMismatch(v["rateMismatch"])
 	return {
 		id,
 		connected,
@@ -379,6 +399,7 @@ export function guardSource(v: unknown): SourceRow | undefined {
 		...(!activity && rawActivity !== undefined
 			? { activityUnrecognised: true as const }
 			: {}),
+		...(rateMismatch ? { rateMismatch } : {}),
 	}
 }
 
@@ -387,6 +408,20 @@ export function guardSource(v: unknown): SourceRow | undefined {
 const isGainMode = oneOf<TunerState["gainMode"]>(["manual", "agc"])
 const isDirect = oneOf<TunerState["directSampling"]>(["off", "i", "q"])
 const isControl = oneOf<TunerState["controlMode"]>(["internal", "external"])
+const isStateField = oneOf<TunerStateField>([
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+	"ppm",
+	"agcMode",
+	"biasTee",
+	"directSampling",
+	"offsetTuning",
+	"ifGain",
+	"tunerIfGain",
+	"testMode",
+])
 
 export function guardTuner(v: unknown): TunerState | undefined {
 	if (!isObj(v)) return undefined
@@ -404,6 +439,9 @@ export function guardTuner(v: unknown): TunerState | undefined {
 	const testMode = v["testMode"]
 	const controlMode = v["controlMode"]
 	const commandCount = v["commandCount"]
+	const unknownFields = Array.isArray(v["unknownFields"])
+		? [...new Set(v["unknownFields"].filter(isStateField))]
+		: []
 	const tig = v["tunerIfGain"]
 	const tunerIfGain =
 		tig === null
@@ -448,6 +486,8 @@ export function guardTuner(v: unknown): TunerState | undefined {
 		commandCount,
 		...pick(v, ["rtlXtal", "tunerXtal", "tunerGainIndex"] as const, isNum),
 		...pick(v, ["lastCommandAt", "lastError"] as const, isStr),
+		// R85: names this CLI does not know are dropped; the rest render as unknown.
+		...(unknownFields.length > 0 ? { unknownFields } : {}),
 	}
 }
 

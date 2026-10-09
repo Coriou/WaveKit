@@ -8,6 +8,7 @@ import {
 	guardPresets,
 	guardResources,
 	guardSource,
+	guardTuner,
 	parseServerMessage,
 	readHostSampling,
 } from "../../../cli/source/data/guards.js"
@@ -587,6 +588,93 @@ describe("A8 / R70: core's proposed health and suspension contracts", () => {
 		expect(e).toMatchObject({
 			type: "decoder:status",
 			decoder: { health: "restarting" },
+		})
+	})
+})
+
+describe("R85: tuner unknownFields and source rateMismatch", () => {
+	const tuner = {
+		sourceId: "pi-iq",
+		frequency: 100_000_000,
+		sampleRate: 2_400_000,
+		gainMode: "manual",
+		gain: 0,
+		ppm: 0,
+		agcMode: false,
+		biasTee: false,
+		directSampling: "off",
+		offsetTuning: false,
+		ifGain: 0,
+		tunerIfGain: null,
+		testMode: false,
+		controlMode: "internal",
+		commandCount: 0,
+	}
+	const src = {
+		id: "pi-iq",
+		connected: true,
+		consumers: 2,
+		bytesReceived: 1,
+		dataRate: 4800,
+		reconnectAttempts: 0,
+		available: true,
+		caps: {
+			kind: "iq",
+			sampleRate: 2048000,
+			format: "U8_IQ",
+			exclusive: false,
+		},
+		assignments: [],
+	}
+	const mismatch = {
+		declaredSampleRateHz: 2_048_000,
+		measuredSampleRateHz: 1_024_000,
+		deviation: -0.5,
+		since: "2026-10-08T18:07:52.000Z",
+	}
+	it("keeps known field names, drops unknown ones and never rejects the row", () => {
+		expect(
+			guardTuner({
+				...tuner,
+				unknownFields: ["frequency", "gain", "futureField", 7, "gain"],
+			})?.unknownFields,
+		).toEqual(["frequency", "gain"])
+		const none = guardTuner({ ...tuner, unknownFields: ["futureField"] })
+		expect(none).toBeDefined()
+		expect(none && "unknownFields" in none).toBe(false)
+		const bad = guardTuner({ ...tuner, unknownFields: "gain" })
+		expect(bad).toBeDefined()
+		expect(bad && "unknownFields" in bad).toBe(false)
+		expect(guardTuner(tuner) && "unknownFields" in guardTuner(tuner)!).toBe(
+			false,
+		)
+	})
+	it("keeps rateMismatch only when all four fields are valid", () => {
+		expect(
+			guardSource({ ...src, rateMismatch: mismatch })?.rateMismatch,
+		).toEqual(mismatch)
+		for (const rateMismatch of [
+			{ ...mismatch, deviation: "−50%" },
+			{ ...mismatch, since: undefined },
+			null,
+			"mismatch",
+		]) {
+			const g = guardSource({ ...src, rateMismatch })
+			expect(g).toBeDefined()
+			expect(g && "rateMismatch" in g).toBe(false)
+		}
+	})
+	it("passes unknownFields through tuner:state-changed", () => {
+		const msg = parseServerMessage({
+			type: "tuner:state-changed",
+			data: {
+				sourceId: "pi-iq",
+				state: { ...tuner, unknownFields: ["gain"] },
+			},
+		})
+		expect(msg).toMatchObject({
+			type: "tuner:state-changed",
+			state: { unknownFields: ["gain"] },
 		})
 	})
 })

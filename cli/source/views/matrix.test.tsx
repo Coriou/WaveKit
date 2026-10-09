@@ -1,5 +1,5 @@
 import { Box } from "ink"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { LineView, Lines } from "../components/lines.js"
 import type { AppState } from "../data/types.js"
 import { renderApp } from "../test/app-harness.js"
@@ -102,8 +102,16 @@ const fake = (Component: ViewModule["Component"]): ViewModule => ({
 
 describe("P22 check is not vacuous", () => {
 	const state = scenarioState("live", { summarize: formatMessage })
-	const check = (v: ViewModule) =>
-		frameProblems(state, { overview: v }, "overview", 80, 24)
+	// These views throw on purpose; React reports each caught error through
+	// console.error, which is noise here.
+	const check = async (v: ViewModule): Promise<string[]> => {
+		const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined)
+		try {
+			return await frameProblems(state, { overview: v }, "overview", 80, 24)
+		} finally {
+			quiet.mockRestore()
+		}
+	}
 	it("an over-wide line inside a box fails", async () => {
 		const wide = fake(({ width, height }) => (
 			<Lines

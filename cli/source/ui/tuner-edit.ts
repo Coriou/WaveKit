@@ -221,6 +221,13 @@ const VALUE: Readonly<
 	offsetTuning: d => d.offsetTuning,
 }
 
+export function fieldValue(
+	d: TunerDraft,
+	field: EditField,
+): number | string | boolean {
+	return VALUE[field](d)
+}
+
 /** Changed fields in SEND_ORDER. Gain is left out when the draft is in AGC mode. */
 export function pendingChanges(s: TunerEditState): PendingChange[] {
 	const out: PendingChange[] = []
@@ -233,44 +240,64 @@ export function pendingChanges(s: TunerEditState): PendingChange[] {
 	return out
 }
 
+/**
+ * The rtl_tcp command core relays for each field: the names the relay history shows,
+ * so the confirm bar and the result line use the operator's vocabulary (polish M6).
+ */
+export const COMMAND_NAME: Readonly<Record<EditField, string>> = {
+	frequency: "set-frequency",
+	sampleRate: "set-sample-rate",
+	gainMode: "set-gain-mode",
+	gain: "set-gain",
+	ppm: "set-freq-correction",
+	agc: "set-agc-mode",
+	biasTee: "set-bias-tee",
+	directSampling: "set-direct-sampling",
+	offsetTuning: "set-offset-tuning",
+}
+
 /** Bodies follow src/api/routes/tuner.ts. */
 const COMMAND: Readonly<Record<EditField, (d: TunerDraft) => TunerCommand>> = {
 	frequency: d => ({
 		setting: "frequency",
 		body: { hz: d.frequency },
-		label: "frequency",
+		label: COMMAND_NAME.frequency,
 	}),
 	sampleRate: d => ({
 		setting: "sample-rate",
 		body: { hz: d.sampleRate },
-		label: "sample rate",
+		label: COMMAND_NAME.sampleRate,
 	}),
 	gainMode: d => ({
 		setting: "gain-mode",
 		body: { mode: d.gainMode },
-		label: "gain mode",
+		label: COMMAND_NAME.gainMode,
 	}),
 	gain: d => ({
 		setting: "gain",
 		body: { tenthsDb: d.gainTenthsDb },
-		label: "gain",
+		label: COMMAND_NAME.gain,
 	}),
-	ppm: d => ({ setting: "ppm", body: { ppm: d.ppm }, label: "ppm" }),
-	agc: d => ({ setting: "agc", body: { enabled: d.agc }, label: "rtl agc" }),
+	ppm: d => ({ setting: "ppm", body: { ppm: d.ppm }, label: COMMAND_NAME.ppm }),
+	agc: d => ({
+		setting: "agc",
+		body: { enabled: d.agc },
+		label: COMMAND_NAME.agc,
+	}),
 	biasTee: d => ({
 		setting: "bias-tee",
 		body: { enabled: d.biasTee },
-		label: "bias-t",
+		label: COMMAND_NAME.biasTee,
 	}),
 	directSampling: d => ({
 		setting: "direct-sampling",
 		body: { mode: d.directSampling },
-		label: "direct sampling",
+		label: COMMAND_NAME.directSampling,
 	}),
 	offsetTuning: d => ({
 		setting: "offset-tuning",
 		body: { enabled: d.offsetTuning },
-		label: "offset tuning",
+		label: COMMAND_NAME.offsetTuning,
 	}),
 }
 

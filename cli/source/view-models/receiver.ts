@@ -1,9 +1,18 @@
 import { remoteHost } from "./net.js"
 import { noDataText } from "./feed-state.js"
-import type { TunerRelayStatus, TunerState } from "@wavekit/api-types"
+import type {
+	TunerRelayStatus,
+	TunerState,
+	TunerStateField,
+} from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import { aggregateDropNow, MIN_DROP_SPAN_MS } from "../data/rates.js"
-import type { AppState, FanoutSample, SourceRow } from "../data/types.js"
+import type {
+	AppState,
+	FanoutSample,
+	GlyphRole,
+	SourceRow,
+} from "../data/types.js"
 import {
 	decoderMembership,
 	followsCentre,
@@ -19,7 +28,6 @@ import {
 	formatBytes,
 	formatClock,
 	formatDb,
-	formatDeltaHz,
 	formatHz,
 	formatMSps,
 	formatPercent,
@@ -40,9 +48,11 @@ import {
 } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import {
+	COMMAND_NAME,
 	FREQ_MAX,
 	FREQ_MIN,
 	editWindow,
+	fieldValue,
 	outOfRange,
 	pendingChanges,
 	pendingCommands,
@@ -68,6 +78,13 @@ const TUNER_TYPES: Readonly<Record<number, string>> = {
 	4: "FC2580",
 	5: "R820T",
 	6: "R828D",
+}
+/** Bytes per sample (per channel) by wire format; "auto" has no nominal rate. */
+const BYTES_PER_SAMPLE: Readonly<Record<string, number>> = {
+	U8_IQ: 2,
+	S16_IQ: 4,
+	S16LE: 2,
+	FLOAT32LE: 4,
 }
 const sep = (): string => ` ${glyphs().sep} `
 const lbl = (t: string, bold = false): Line => [
@@ -142,6 +159,39 @@ export function receiverControl(
 	return receiverTuner(state)?.controlMode ?? null
 }
 
+/** The TunerState field behind each edit field (R84 unknownFields). */
+const STATE_FIELD: Readonly<Record<EditField, TunerStateField>> = {
+	frequency: "frequency",
+	sampleRate: "sampleRate",
+	gain: "gain",
+	ppm: "ppm",
+	gainMode: "gainMode",
+	agc: "agcMode",
+	biasTee: "biasTee",
+	directSampling: "directSampling",
+	offsetTuning: "offsetTuning",
+}
+
+/**
+ * Fields core never commanded or observed (R84): their value is a placeholder and reads
+ * "?". In edit mode a field stays unknown until the draft changes it, so an unknown
+ * field is only sent when the operator sets it.
+ */
+function unknownOf(
+	t: TunerState | undefined,
+	edit: TunerEditState | null,
+): (f: EditField) => boolean {
+	const listed = new Set<string>(t?.unknownFields ?? [])
+	return f =>
+		listed.has(STATE_FIELD[f]) &&
+		(edit === null ||
+			fieldValue(edit.draft, f) === fieldValue(edit.original, f))
+}
+
+function tunerOf(state: AppState, sourceId: string): TunerState | undefined {
+	return state.tuner.value?.find(x => x.sourceId === sourceId)
+}
+
 /** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
 
 function relayClient(
@@ -179,29 +229,47 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	)
 	const host = hostOf(src.url)
 	const a = src.activity
-	const g = glyphs()
 	const where = `${src.id}${sep()}${src.type ?? "source"}${host ? ` ${host}` : ""}`
+	// One state, one glyph: transport and activity collapse when they agree (M8).
+	const link: GlyphRole = src.connected ? "live" : "fault"
+	const linkWord = src.connected ? "connected" : "disconnected"
+	const both = iq.glyph !== link && !iq.word.startsWith(linkWord)
+	const detail =
+		a === undefined
+			? null
+			: iq.word === "disconnected"
+				? a.sampleAgeMs === null
+					? null
+					: `last sample ${formatSampleAge(a.sampleAgeMs)} ago`
+				: `sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)} s`
+	// The error code alone ("ECONNREFUSED") when the row is narrow; the message when it fits.
+	const code = src.lastError
+		? /\b(E[A-Z]{3,}|UND_ERR_[A-Z_]+)\b/.exec(sanitize(src.lastError))?.[1]
+		: undefined
 	const row1: Group[] = [
 		one(0, txt(src.id, role), txt(where, role)),
-		one(0, [
-			glyphSpan(src.connected ? "live" : "fault"),
-			sp(src.connected ? " connected" : " disconnected", role),
-		]),
+		...(both ? [one(0, [glyphSpan(link), sp(` ${linkWord}`, role)])] : []),
 		one(
-			1,
+			0,
 			[glyphSpan(iq.glyph), sp(` ${iq.word}`, role)],
-			...(a
-				? [
-						[
-							glyphSpan(iq.glyph),
-							sp(
-								` ${iq.word}${sep()}sample age ${formatSampleAge(a.sampleAgeMs)}${sep()}timeout ${Math.round(a.timeoutMs / 1000)} s`,
-								role,
-							),
-						],
-					]
+			...(detail
+				? [[glyphSpan(iq.glyph), sp(` ${iq.word}${sep()}${detail}`, role)]]
 				: []),
 		),
+		// Core resets both on connect: a count or an error belongs to the current state.
+		...(src.reconnectAttempts > 0
+			? [one(1, txt(`reconnect #${src.reconnectAttempts}`, role))]
+			: []),
+		...(src.lastError
+			? [
+					one(
+						1,
+						...(code ? [txt(`"${code}"`, role)] : []),
+						txt(quoted(src.lastError, 24), role),
+						txt(quoted(src.lastError, 60), role),
+					),
+				]
+			: []),
 		...(src.available
 			? []
 			: [one(2, txt("no assignment capacity", "attention"))]),
@@ -218,21 +286,22 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 			: []),
 	]
 	const rate = formatRate(iq.rateBytesPerSec)
+	const fmt = `${formatMSps(src.caps.sampleRate)} ${src.caps.format.replace("_", " ")}`
+	const perSample = own(BYTES_PER_SAMPLE, src.caps.format)
+	const nominal =
+		perSample === undefined
+			? null
+			: formatRate(src.caps.sampleRate * perSample * (src.caps.channels ?? 1))
 	const row2: Group[] = [
 		one(
 			0,
 			txt(rate, role),
-			txt(
-				`${rate} (${formatMSps(src.caps.sampleRate)} ${src.caps.format.replace("_", " ")})`,
-				role,
-			),
+			txt(`${rate} (${fmt})`, role),
+			...(nominal
+				? [txt(`${rate} (nominal ${nominal}${sep()}${fmt})`, role)]
+				: []),
 		),
 		one(1, txt(`received ${formatBytes(src.bytesReceived)}`, role)),
-		one(2, txt(`reconnects ${src.reconnectAttempts}`, role)),
-		one(
-			1,
-			txt(`last error ${src.lastError ? quoted(src.lastError) : g.na}`, role),
-		),
 		one(3, txt(`assigned ${src.assignments.length} decoders`, role)),
 		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
 		...(held.length > 0
@@ -249,7 +318,49 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	]
 	return [
 		essential(fitRow(lbl("SOURCE", true), row1, width)),
+		...(src.rateMismatch ? [keep(mismatchLine(src, width, role))] : []),
 		optional(fitRow(lbl("rate"), row2, width), 2),
+	]
+}
+
+/** "−50%", "+2.5%": the sign always, one decimal below 10 %. */
+function signedPercent(ratio: number): string {
+	const pct = ratio * 100
+	const a = Math.abs(pct)
+	const text = a < 10 ? a.toFixed(1).replace(/\.0$/, "") : String(Math.round(a))
+	return `${pct < 0 ? "−" : "+"}${text}%`
+}
+
+/**
+ * R84 rate-truth check, a warning only (core never corrects caps from it):
+ * "rate mismatch · measured 1.024 MS/s vs declared 2.048 MS/s (−50%) since 18:07:52".
+ */
+function mismatchLine(src: SourceRow, width: number, role: Role): Line {
+	const m = src.rateMismatch
+	if (!m) return []
+	const since = Date.parse(m.since)
+	const lineRole: Role = role === "old" ? "old" : "attention"
+	return [
+		...lbl(""),
+		glyphSpan("attention"),
+		...fitGroups(
+			[
+				one(0, txt(" rate mismatch", lineRole)),
+				one(
+					0,
+					txt(`measured ${formatMSps(m.measuredSampleRateHz)}`, lineRole),
+					txt(
+						`measured ${formatMSps(m.measuredSampleRateHz)} vs declared ${formatMSps(m.declaredSampleRateHz)} (${signedPercent(m.deviation)})`,
+						lineRole,
+					),
+				),
+				...(Number.isFinite(since)
+					? [one(1, txt(`since ${formatClock(since)}`, lineRole))]
+					: []),
+			],
+			Math.max(1, width - LABEL_W - 1),
+			{ sep: sep() },
+		),
 	]
 }
 
@@ -284,33 +395,52 @@ function rangeNote(): string {
 	return `outside ${FREQ_MIN / 1e6}${glyphs().range}${formatSpaced(FREQ_MAX / 1e6)} MHz`
 }
 
-/** Pending row item: "frequency 445 970 700 → 446 000 000", "gain 0.0 → 20.7 dB". */
-export function changeText(c: PendingChange): string {
+/**
+ * Pending row item: "frequency 445 970 700 → 446 000 000", "gain 0.0 → 20.7 dB".
+ * `from` replaces a placeholder: "?" for a field core does not know, "index 11" for a
+ * gain core gave only as an index, never "0.0" (M7, R84).
+ */
+export function changeText(c: PendingChange, from?: string): string {
 	const to =
 		c.field === "gain" && typeof c.to === "number"
 			? formatDb(c.to)
 			: plainValue(c.field, c.to)
-	return `${FIELD_LABEL[c.field]} ${plainValue(c.field, c.from)} → ${to}`
+	return `${FIELD_LABEL[c.field]} ${from ?? plainValue(c.field, c.from)} → ${to}`
 }
 
-/** Confirm item: "frequency 446 000 000 Hz (+29.3 kHz)", "gain 20.7 dB". */
-export function confirmItem(c: PendingChange): string {
-	if (
-		c.field === "frequency" &&
-		typeof c.to === "number" &&
-		typeof c.from === "number"
-	)
-		return `frequency ${formatHz(c.to)} (${formatDeltaHz(c.to - c.from)})`
-	if (c.field === "gain" && typeof c.to === "number")
-		return `gain ${formatDb(c.to)}`
-	return `${FIELD_LABEL[c.field]} ${plainValue(c.field, c.to)}`
+/** "+10 Hz", "+29.3 kHz", "−1.5 MHz": the unit follows the magnitude, so a small step never reads +0.0. */
+export function deltaText(hz: number): string {
+	const sign = hz < 0 ? "−" : "+"
+	const a = Math.abs(hz)
+	const trim = (v: string): string => v.replace(/\.?0+$/, "")
+	if (a < 1000) return `${sign}${Math.round(a)} Hz`
+	const khz = (a / 1e3).toFixed(1)
+	if (Number(khz) < 1000) return `${sign}${trim(khz)} kHz`
+	return `${sign}${trim((a / 1e6).toFixed(3))} MHz`
+}
+
+/** The value a command sends: "446 000 000 Hz (+29.3 kHz)", "20.7 dB", "on". */
+function confirmValue(c: PendingChange, fromKnown: boolean): string {
+	if (c.field === "frequency" && typeof c.to === "number") {
+		// No delta from a frequency core does not know (R84).
+		return fromKnown && typeof c.from === "number"
+			? `${formatHz(c.to)} (${deltaText(c.to - c.from)})`
+			: formatHz(c.to)
+	}
+	if (c.field === "gain" && typeof c.to === "number") return formatDb(c.to)
+	return plainValue(c.field, c.to)
+}
+
+/** Confirm item, named by the command core relays: "set-frequency 446 000 000 Hz (+29.3 kHz)". */
+export function confirmItem(c: PendingChange, fromKnown = true): string {
+	return `${COMMAND_NAME[c.field]} ${confirmValue(c, fromKnown)}`
 }
 
 /**
  * The review confirm; null when nothing changed or a field is out of core's range.
  * With `state` it also names the blast radius (spec §10.9). `groups` fit the bar by
  * priority (R71): the action, then a safety warning, then who enters or leaves, then
- * the field details, then the tuned list.
+ * the tuned list. The y/n keys are reserved by confirmLine and never clipped (M6).
  */
 export function tunerConfirm(
 	edit: TunerEditState,
@@ -318,9 +448,18 @@ export function tunerConfirm(
 ): ConfirmRequest | null {
 	const commands = pendingCommands(edit)
 	if (commands.length === 0 || outOfRange(edit).length > 0) return null
+	const changes = pendingChanges(edit)
 	const n = commands.length
-	const action = `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}`
-	const details = pendingChanges(edit).map(confirmItem).join(", ")
+	const to = `to ${edit.sourceId}`
+	const first = changes[0]
+	const terse =
+		n === 1 && first
+			? `send ${COMMAND_NAME[first.field]} ${to}`
+			: `send ${n} commands ${to}`
+	const listed = new Set<string>(
+		(state ? tunerOf(state, edit.sourceId) : undefined)?.unknownFields ?? [],
+	)
+	const action = `send ${changes.map(c => confirmItem(c, !listed.has(STATE_FIELD[c.field]))).join(", ")} ${to}`
 	const bias = turnsBiasTeeOn(edit)
 	const affects = state ? editImpact(state, edit) : null
 	const extras = [
@@ -330,9 +469,9 @@ export function tunerConfirm(
 	const groups: Group[] = [
 		one(
 			0,
-			[sp(`send ${n} to ${edit.sourceId}`, "value", true)],
+			[sp(`send ${n} ${to}`, "value", true)],
+			[sp(terse, "value", true)],
 			[sp(action, "value", true)],
-			[sp(`${action}: ${details}`, "value", true)],
 		),
 		...(bias
 			? [
@@ -359,7 +498,7 @@ export function tunerConfirm(
 	]
 	return {
 		kind: "tuner",
-		prompt: `${action}: ${details}`,
+		prompt: action,
 		...(extras.length > 0 ? { extra: extras.join(sep()) } : {}),
 		yes: "send",
 		no: "back",
@@ -381,28 +520,40 @@ export function controlConfirm(state: AppState): ConfirmRequest | null {
 	if (!t) return null
 	const toInternal = t.controlMode === "external"
 	const relay = state.relay.value
-	const who = relayClient(relay, false) ?? "external clients"
+	const client = relayClient(relay, false)
+	const who = client ?? "external clients"
 	const id = relay?.controlClientId
 		? `relay ${sanitize(relay.controlClientId)}`
 		: who
-	const full = relayClient(relay, true) ?? who
 	const shortWho = relay?.controlClientId
 		? sanitize(relay.controlClientId)
 		: "external clients"
-	// R71: the action, then the safety clause, then the full remote, fitted to the bar.
+	const its = client ? "its" : "their"
+	// Spec §6.4 at its widest; R71: narrower bars shorten the action before the safety
+	// clause, down to a bare "take control?", so the clause survives any client id.
+	const ask = (q: string, clause: string): Line => [
+		sp(`${q} `, "value", true),
+		sp(clause, "attention", true),
+	]
+	const prompt = `take tuner control from ${who}? ${its} next tuning command is refused`
 	const groups: Group[] = toInternal
 		? [
 				one(
 					0,
-					[sp(`take control from ${shortWho}?`, "value", true)],
-					[sp(`take tuner control from ${id}?`, "value", true)],
-					[sp(`take tuner control from ${who}?`, "value", true)],
-					[sp(`take tuner control from ${full}?`, "value", true)],
-				),
-				one(
-					1,
-					[sp("its next command is refused", "attention", true)],
-					[sp("its next tuning command is refused", "attention", true)],
+					ask("take control?", "next command refused"),
+					ask("take control?", `${its} next command is refused`),
+					ask(
+						`take control from ${shortWho}?`,
+						`${its} next command is refused`,
+					),
+					ask(
+						`take tuner control from ${id}?`,
+						`${its} next tuning command is refused`,
+					),
+					ask(
+						`take tuner control from ${who}?`,
+						`${its} next tuning command is refused`,
+					),
 				),
 			]
 		: [
@@ -412,9 +563,7 @@ export function controlConfirm(state: AppState): ConfirmRequest | null {
 			]
 	return {
 		kind: "control",
-		prompt: toInternal
-			? `take tuner control from ${who}? its next tuning command is refused`
-			: "release tuner control to external clients?",
+		prompt: toInternal ? prompt : "release tuner control to external clients?",
 		groups,
 		yes: toInternal ? "take" : "release",
 		no: "cancel",
@@ -435,8 +584,9 @@ export function controlConfirm(state: AppState): ConfirmRequest | null {
 /**
  * Result line in CLI words (R29), by action state:
  * sent → "sending 18:07:52"; unknown (R23, awaiting a reconciling event) →
- * "frequency sent · no reply in 10s"; no-reply (terminal) → "frequency sent · no reply";
- * ok → "sent · frequency ok 18:07:52"; failed → `frequency failed · 409 · "…" · gain not sent`.
+ * "set-frequency sent · no reply in 10s"; no-reply (terminal) → "set-frequency sent · no
+ * reply"; ok → "set-frequency ok 18:07:52", "control taken 18:07:52"; failed →
+ * `set-frequency failed · 409 · "…" · set-gain not sent`.
  * Terminal states show for 10 s after doneAt; unknown shows until it resolves.
  */
 export function tunerResultText(
@@ -452,13 +602,21 @@ export function tunerResultText(
 		(rec.doneAt === null || now - rec.doneAt > RESULT_MS)
 	)
 		return null
+	const control =
+		rec.intent.kind === "tuner"
+			? rec.intent.commands.find(c => c.setting === "control-mode")
+			: undefined
 	const parts = rec.outcomes.map((o, i) => {
 		const r = o.result
 		if (r === null) return `${o.label} not sent`
 		// An unknown command that an event confirmed reads ok, at the confirmation time.
 		if (r.outcome === "ok" || (r.outcome === "unknown" && rec.state === "ok")) {
 			const at = r.outcome === "ok" ? o.at : rec.confirmedAt
-			return `${o.label} ok${i === 0 && at !== null ? ` ${formatClock(at)}` : ""}`
+			const done =
+				control !== undefined
+					? `control ${control.body["mode"] === "internal" ? "taken" : "released"}`
+					: `${o.label} ok`
+			return `${done}${i === 0 && at !== null ? ` ${formatClock(at)}` : ""}`
 		}
 		if (r.outcome === "unknown")
 			return rec.state === "no-reply"
@@ -466,7 +624,7 @@ export function tunerResultText(
 				: `${o.label} sent${sep()}no reply in ${Math.round(RESULT_MS / 1000)}s`
 		return `${o.label} failed${sep()}${r.status ?? "network"}${sep()}${quoted(r.message, 60)}`
 	})
-	return `${rec.state === "ok" ? `sent${sep()}` : ""}${parts.join(sep())}`
+	return parts.join(sep())
 }
 
 function withCursor(freq: number, digit: number, focused: boolean): Line {
@@ -523,14 +681,16 @@ function membershipLists(
 		else if (m === "?") unknown.push(d.id)
 	}
 	const na = glyphs().na
+	// A grid of ids, two spaces apart; the tuned group keeps its own " · " clause.
+	const grid = (ids: string[]): string => ids.join("  ")
 	const ins = [
-		...inside,
-		...(tuned.length > 0 ? [`${tuned.join(", ")} (tuned)`] : []),
+		...(inside.length > 0 ? [grid(inside)] : []),
+		...(tuned.length > 0 ? [`${grid(tuned)} (tuned)`] : []),
 	]
 	return {
-		inside: ins.join(", ") || na,
-		outside: outside.join(", ") || na,
-		unknown: unknown.join(", "),
+		inside: ins.join(sep()) || na,
+		outside: grid(outside) || na,
+		unknown: grid(unknown),
 	}
 }
 
@@ -631,17 +791,27 @@ function editImpact(state: AppState, edit: TunerEditState): Affects {
 	return affectsParts(impact, current !== null)
 }
 
-function pendingLine(edit: TunerEditState, width: number): Line {
+function pendingLine(
+	edit: TunerEditState,
+	width: number,
+	fromText: (f: EditField) => string | undefined,
+): Line {
 	const changes = pendingChanges(edit)
 	if (changes.length === 0)
-		return clipped(lbl("pending"), "nothing changed", width)
+		return clipped(lbl("pending"), glyphs().na, width, "label")
 	const bad = new Set(outOfRange(edit))
 	const spans: Line = []
 	changes.forEach((c, i) => {
 		if (i > 0) spans.push(sp(sep(), "label"))
 		if (bad.has(c.field))
-			spans.push(sp(`${changeText(c)} (${rangeNote()})`, "attention", true))
-		else spans.push(sp(changeText(c), "value"))
+			spans.push(
+				sp(
+					`${changeText(c, fromText(c.field))} (${rangeNote()})`,
+					"attention",
+					true,
+				),
+			)
+		else spans.push(sp(changeText(c, fromText(c.field)), "value"))
 	})
 	return [
 		...lbl("pending"),
@@ -659,19 +829,31 @@ function tunerBlock(
 	const now = state.now
 	const role: Role = isOld(state.tuner, now) ? "old" : "value"
 	const edit = ui.edit && ui.edit.sourceId === t.sourceId ? ui.edit : null
+	// "?" for a field core never commanded or observed, until the draft sets it (R84).
+	const unknown = unknownOf(t, edit)
+	const placeholder = unknownOf(t, null)
+	// windowFor skips listed fields itself (R86), falling back to caps or the relay.
 	const current = windowFor(
 		t.sourceId,
 		state.tuner.value,
 		state.sources.value,
 		relay,
 	)
-	const win: TunedWindow | null = edit ? draftWindow(edit) : current
+	const draftKnown = !unknown("frequency") && !unknown("sampleRate")
+	const win: TunedWindow | null =
+		edit && draftKnown ? draftWindow(edit) : current
 	const focus = (f: EditField): Role =>
 		edit && edit.field === f ? "accent" : role
 	const d = edit?.draft
+	const q = (f: EditField, text: string): string => (unknown(f) ? "?" : text)
 	const freqCell: Line = edit
-		? withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
-		: txt(formatHz(t.frequency), role)
+		? unknown("frequency")
+			? [
+					...(edit.field === "frequency" ? [sp(glyphs().cursor, "edit")] : []),
+					sp("? Hz", edit.field === "frequency" ? "accent" : role),
+				]
+			: withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
+		: txt(unknown("frequency") ? "? Hz" : formatHz(t.frequency), role)
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
@@ -727,11 +909,11 @@ function tunerBlock(
 					one(
 						1,
 						txt(
-							`sample rate ${formatSps(d?.sampleRate ?? t.sampleRate)}`,
+							`sample rate ${q("sampleRate", formatSps(d?.sampleRate ?? t.sampleRate))}`,
 							focus("sampleRate"),
 						),
 					),
-					one(2, txt(`ppm ${d?.ppm ?? t.ppm}`, focus("ppm"))),
+					one(2, txt(`ppm ${q("ppm", String(d?.ppm ?? t.ppm))}`, focus("ppm"))),
 				],
 				width,
 			),
@@ -741,14 +923,24 @@ function tunerBlock(
 	const tunerType = relay?.rtlTcpHeader
 		? own(TUNER_TYPES, String(relay.rtlTcpHeader.tunerType))
 		: undefined
-	const gainText =
-		gainMode === "agc"
+	const indexText =
+		t.tunerGainIndex !== undefined
+			? `index ${t.tunerGainIndex}${tunerType ? ` (${tunerType})` : ""}`
+			: undefined
+	// A core without unknownFields reports a gain set by index as 0 dB: the dB value is
+	// unknown there too. The editor keeps the view's text until the gain changes (M7).
+	const gainUnchanged = !d || d.gainTenthsDb === edit?.original.gainTenthsDb
+	const dbUnknown =
+		unknown("gain") ||
+		(t.tunerGainIndex !== undefined && t.gain === 0 && gainUnchanged)
+	const dbText = dbUnknown
+		? (indexText ?? "?")
+		: formatDb(d ? d.gainTenthsDb : t.gain)
+	const gainText = unknown("gainMode")
+		? `mode ?${sep()}${dbText}`
+		: gainMode === "agc"
 			? "agc"
-			: d
-				? `manual${sep()}${formatDb(d.gainTenthsDb)}`
-				: t.tunerGainIndex !== undefined && t.gain === 0
-					? `manual${sep()}index ${t.tunerGainIndex}${tunerType ? ` (${tunerType})` : ""}`
-					: `manual${sep()}${formatDb(t.gain)}`
+			: `manual${sep()}${dbText}`
 	const gainRow = (line: Line): Row =>
 		// While editing, the gain row shows draft values and is kept (M8).
 		edit ? keep(line) : optional(line, 1)
@@ -766,22 +958,31 @@ function tunerBlock(
 								: role,
 						),
 					),
-					one(1, txt(`rtl agc ${onOff(d?.agc ?? t.agcMode)}`, focus("agc"))),
 					one(
 						1,
-						txt(`bias-t ${onOff(d?.biasTee ?? t.biasTee)}`, focus("biasTee")),
+						txt(
+							`rtl agc ${q("agc", onOff(d?.agc ?? t.agcMode))}`,
+							focus("agc"),
+						),
+					),
+					one(
+						1,
+						txt(
+							`bias-t ${q("biasTee", onOff(d?.biasTee ?? t.biasTee))}`,
+							focus("biasTee"),
+						),
 					),
 					one(
 						2,
 						txt(
-							`direct sampling ${d?.directSampling ?? t.directSampling}`,
+							`direct sampling ${q("directSampling", d?.directSampling ?? t.directSampling)}`,
 							focus("directSampling"),
 						),
 					),
 					one(
 						2,
 						txt(
-							`offset tuning ${onOff(d?.offsetTuning ?? t.offsetTuning)}`,
+							`offset tuning ${q("offsetTuning", onOff(d?.offsetTuning ?? t.offsetTuning))}`,
 							focus("offsetTuning"),
 						),
 					),
@@ -791,28 +992,26 @@ function tunerBlock(
 		),
 	)
 	if (edit) {
-		rows.push(keep(pendingLine(edit, width)))
-		rows.push(keep(clipped(lbl("affects"), editAffects(state, edit), width)))
-		return rows
-	}
-	if (
-		relay?.lastFrequency !== undefined &&
-		relay.lastFrequency !== t.frequency
-	) {
-		const at = relay.lastCommandAt
-			? ` ${formatClock(Date.parse(relay.lastCommandAt))}`
-			: ""
+		const byIndexFrom =
+			t.tunerGainIndex !== undefined && t.gain === 0
+				? `index ${t.tunerGainIndex}`
+				: undefined
 		rows.push(
-			optional(
-				clipped(
-					lbl("relay set"),
-					`${formatHz(relay.lastFrequency)}${at}`,
-					width,
-					role,
+			keep(
+				pendingLine(edit, width, f =>
+					f === "gain" && (placeholder("gain") || byIndexFrom)
+						? (byIndexFrom ??
+							(t.tunerGainIndex !== undefined
+								? `index ${t.tunerGainIndex}`
+								: "?"))
+						: placeholder(f)
+							? "?"
+							: undefined,
 				),
-				1,
 			),
 		)
+		rows.push(keep(clipped(lbl("affects"), editAffects(state, edit), width)))
+		return rows
 	}
 	const result = tunerResultText(state, t.sourceId, now)
 	if (result) rows.push(keep(clipped(lbl("result"), result, width)))
@@ -842,7 +1041,7 @@ function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 			one(
 				1,
 				txt(
-					`${relay.clientsConnected} of ${relay.maxClients ?? "?"} clients`,
+					`${relay.clientsConnected} client${relay.clientsConnected === 1 ? "" : "s"}${sep()}max ${relay.maxClients ?? "?"}`,
 					role,
 				),
 			),

@@ -2,14 +2,14 @@
 
 exports[`Receiver view (spec §6.4) > golden: 80x24 1`] = `
 " api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 8/9 !1  drops !21%   18:07
- SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● connected   ● streaming
- rate      4.1 MB/s   received 1.2 GB   reconnects 0   last error —
+ SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming
+ rate      4.1 MB/s (2.048 MS/s U8 IQ)   received 1.2 GB   assigned 9 decoders
  TUNER     external control · last set-frequency 6m ago
  frequency 445 970 700 Hz   window 444.947–446.995 MHz
  gain      manual · index 11 (R828D)   rtl agc off   bias-t off
- in window dsd-fme, multimon-ng (tuned)
- out       rtl433, readsb, acarsdec, ais-catcher, dumpvdl2, direwolf, lora-mesh…
- RELAY     listening :4713 · 1 of 4 clients · exclusive control · last error —
+ in window dsd-fme  multimon-ng (tuned)
+ out       rtl433  readsb  acarsdec  ais-catcher  dumpvdl2  direwolf  lora-mesh…
+ RELAY     listening :4713 · 1 client · max 4 · exclusive control · last error —
  18:01:20  client-3 192.0.2.1:59430  set-frequency          445 970 700
  18:00:56  client-3 192.0.2.1:59430  set-frequency          446 860 476
  18:00:50  client-3 192.0.2.1:59430  set-tuner-gain-index            11
@@ -30,16 +30,16 @@ exports[`Receiver view (spec §6.4) > golden: 120x40 under external control 1`] 
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
- SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● connected   ● streaming · sample age 4 ms · timeout 10 s
- rate      4.1 MB/s (2.048 MS/s U8 IQ)   received 1.2 GB   reconnects 0   last error —   assigned 9 decoders
+ SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms · timeout 10 s
+ rate      4.1 MB/s (nominal 4.1 MB/s · 2.048 MS/s U8 IQ)   received 1.2 GB   assigned 9 decoders
 
  TUNER     external control · relay client-3 192.0.2.1:59430 · 42 commands · last set-frequency 6m ago
  frequency 445 970 700 Hz   window 444.947–446.995 MHz   sample rate 2 048 000 S/s   ppm 0
  gain      manual · index 11 (R828D)   rtl agc off   bias-t off   direct sampling off   offset tuning off
- in window dsd-fme, multimon-ng (tuned)
- out       rtl433, readsb, acarsdec, ais-catcher, dumpvdl2, direwolf, lora-meshtastic
+ in window dsd-fme  multimon-ng (tuned)
+ out       rtl433  readsb  acarsdec  ais-catcher  dumpvdl2  direwolf  lora-meshtastic
 
- RELAY     listening :4713 · 1 of 4 clients · 545.5 MB sent · exclusive control · last error —
+ RELAY     listening :4713 · 1 client · max 4 · 545.5 MB sent · exclusive control · last error —
  18:01:20  client-3 192.0.2.1:59430  set-frequency          445 970 700
  18:00:56  client-3 192.0.2.1:59430  set-frequency          446 860 476
  18:00:50  client-3 192.0.2.1:59430  set-tuner-gain-index            11

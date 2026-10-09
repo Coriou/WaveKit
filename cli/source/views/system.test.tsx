@@ -55,10 +55,10 @@ describe("System view (spec §6.5)", () => {
 		})
 		await h.press("P")
 		expect(h.frame().at(-1)).toBe(
-			' ▶ apply audio preset "wfm" (wfm 150 kHz)?   y apply  n cancel  P next',
+			" ▶ audio preset wfm · 150 kHz   y apply  n cancel  P next",
 		)
 		await h.press("P")
-		expect(h.frame().at(-1)).toContain('apply audio preset "am" (am 10 kHz)?')
+		expect(h.frame().at(-1)).toContain("audio preset am · 10 kHz")
 		expect(h.runtime.sent).toEqual([])
 		await h.press("y")
 		expect(h.runtime.sent).toEqual([
