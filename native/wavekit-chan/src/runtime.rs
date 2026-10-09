@@ -27,7 +27,9 @@ const STATS_EVERY: Duration = Duration::from_secs(5);
 const CLOSE_JOIN_BUDGET: Duration = Duration::from_millis(500);
 const EOF_DRAIN_BUDGET: Duration = Duration::from_secs(2);
 const WRITE_CHUNK: usize = 1 << 16;
-const ACCEPT_POLL: Duration = Duration::from_millis(5);
+/// accept() polling backs off from the first to the second, so a channel whose client never
+/// connects costs ~20 wakeups/s, while a prompt client is still taken within a few ms.
+const ACCEPT_POLL: (Duration, Duration) = (Duration::from_millis(5), Duration::from_millis(50));
 
 /// Bounded main channel (≤ 2 input blocks in flight). ClientGone is NOT on it: a writer must never
 /// block on a channel the stdin thread may have filled while the main thread waits on that writer.
@@ -64,7 +66,7 @@ struct Open {
     saturated: u64,
     /// The open queue-overflow run (plan A13): (sampleIndex, droppedSamples).
     run: Option<(u64, u64)>,
-    /// Input bytes received when the channel opened; a gap marked before this never reached it.
+    /// Input bytes received when the channel opened; a gap marked at or before this never reached it.
     opened_at_byte: u64,
 }
 
@@ -314,8 +316,9 @@ impl Runtime {
         let fs = self.args.input_rate;
         let mut events = Vec::new();
         for (id, ch) in self.channels.iter_mut() {
-            if ch.opened_at_byte > at {
-                continue; // opened after the gap (the mark arrived late): its stream has no seam
+            if ch.opened_at_byte >= at {
+                // Opened at or after the marked byte (a late mark): no input before the gap, no seam.
+                continue;
             }
             events.extend(overflow_event(id, ch)); // A13: an open run is reported before the gap
             ch.dsp.reset(); // NCO index, filter history, polyphase phase and the A12 schedule
@@ -343,17 +346,23 @@ impl Runtime {
             out.clear();
             let r = ch.dsp.process(i, q, &mut out);
             ch.saturated += r.saturated;
+            let first = ch.out_samples;
+            ch.out_samples += r.samples;
+            if ch.queue.is_closed() {
+                // Only the writer closes a queue while its channel is open: the client is gone and
+                // `closed: client-gone` follows at the next poll. Not an overflow.
+                continue;
+            }
             let p = ch.queue.push(&out);
             // A13: any accepted sample ends the open run; within a push accepted samples precede dropped ones.
             if p.accepted_samples > 0 {
                 events.extend(overflow_event(id, ch));
             }
             if p.dropped_samples > 0 {
-                let first = ch.out_samples + p.accepted_samples;
+                let first = first + p.accepted_samples;
                 ch.run.get_or_insert((first, 0)).1 += p.dropped_samples;
                 ch.dropped += p.dropped_samples;
             }
-            ch.out_samples += r.samples;
         }
         for e in events {
             self.emit(e);
@@ -396,9 +405,10 @@ impl Runtime {
         let mut writers = Vec::new();
         let mut events = Vec::new();
         for (id, mut ch) in std::mem::take(&mut self.channels) {
-            events.extend(overflow_event(&id, &mut ch)); // A13: before input-eof
-                                                         // A connected writer (or one whose client is already in the backlog) drains the queue
-                                                         // to the end; one with no client exits.
+            // A13: an open run is reported before input-eof.
+            events.extend(overflow_event(&id, &mut ch));
+            // A connected writer (or one whose client is already in the backlog) drains the queue
+            // to the end; one with no client exits.
             ch.conn.lock().unwrap().draining = true;
             ch.queue.close();
             let _ = std::fs::remove_file(&ch.socket);
@@ -448,6 +458,7 @@ fn writer(
     // The listener is non-blocking: accept() is polled so close() and EOF never need a wake-up
     // connection, which EOF could not tell apart from a real client. The flags are read before
     // each attempt, so a client that connected before EOF is still taken from the backlog.
+    let mut nap = ACCEPT_POLL.0;
     let stream = loop {
         let draining = {
             let c = conn.lock().unwrap();
@@ -458,14 +469,18 @@ fn writer(
         };
         match listener.accept() {
             Ok((s, _)) => break s,
-            Err(e) if e.kind() == ErrorKind::WouldBlock && !draining => thread::sleep(ACCEPT_POLL),
+            Err(e) if e.kind() == ErrorKind::WouldBlock && !draining => {
+                thread::sleep(nap);
+                nap = (nap * 2).min(ACCEPT_POLL.1);
+            }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(_) => return,
         }
     };
     drop(listener);
-    let _ = std::fs::remove_file(&path); // exactly one client per socket
-                                         // BSD/macOS accept() inherits O_NONBLOCK from the listener; the writes below must block.
+    // Exactly one client per socket.
+    let _ = std::fs::remove_file(&path);
+    // BSD/macOS accept() inherits O_NONBLOCK from the listener; the writes below must block.
     if stream.set_nonblocking(false).is_err() {
         return;
     }
@@ -494,6 +509,32 @@ fn writer(
         buf.clear();
     }
     conn.lock().unwrap().stream = None;
+}
+
+/// Parses control lines until EOF, an I/O error, or `send` returning false. A line that is not
+/// UTF-8 is a malformed request like any other (Property 14), so it never ends control.
+fn read_control<R: BufRead>(
+    mut r: R,
+    mut send: impl FnMut(Result<Request, (String, String)>) -> bool,
+) -> std::io::Result<()> {
+    let mut raw = Vec::new();
+    loop {
+        raw.clear();
+        match r.read_until(b'\n', &mut raw) {
+            Ok(0) => return Ok(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+        let req = match std::str::from_utf8(&raw) {
+            Ok(l) if l.trim().is_empty() => continue,
+            Ok(l) => parse_request(l),
+            Err(e) => Err((String::new(), format!("invalid UTF-8: {e}"))),
+        };
+        if !send(req) {
+            return Ok(());
+        }
+    }
 }
 
 /// The process main loop. Returns the exit code.
@@ -532,19 +573,9 @@ pub fn run(args: Args) -> i32 {
         thread::spawn(move || {
             // SAFETY: the parent passes an open pipe at this fd (A1); this thread owns it from here on.
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
-            for line in BufReader::new(file).lines() {
-                match line {
-                    Ok(l) if l.trim().is_empty() => continue,
-                    Ok(l) => {
-                        if tx.send(Msg::Control(parse_request(&l))).is_err() {
-                            return;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("wavekit-chan: control fd {fd}: {e}");
-                        break;
-                    }
-                }
+            if let Err(e) = read_control(BufReader::new(file), |r| tx.send(Msg::Control(r)).is_ok())
+            {
+                eprintln!("wavekit-chan: control fd {fd}: {e}");
             }
             let _ = tx.send(Msg::ControlEof);
         });
@@ -1016,6 +1047,66 @@ mod tests {
             (Some("early"), Some(48))
         );
         r.on_eof_no_exit_for_test();
+    }
+
+    // Property 14: a line that is not UTF-8 is a malformed request (`rejected`), not the end of control.
+    #[test]
+    fn control_reader_rejects_bad_utf8_and_keeps_reading() {
+        let input: &[u8] = b"\xff\xfe{\n\n  \r\n{\"v\":1,\"type\":\"shutdown\"}\r\n{\"v\":1,\"type\":\"shutdown\"}";
+        let mut got = Vec::new();
+        read_control(std::io::Cursor::new(input), |r| {
+            got.push(r);
+            true
+        })
+        .unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
+        let (id, detail) = got[0].clone().unwrap_err();
+        assert_eq!(id, "");
+        assert!(detail.contains("UTF-8"), "{detail}");
+        assert_eq!(got[1], Ok(Request::Shutdown));
+        assert_eq!(got[2], Ok(Request::Shutdown));
+    }
+
+    // A channel opened exactly at the marked byte has no pre-gap input, so it has no seam.
+    #[test]
+    fn mark_at_the_open_byte_is_not_a_gap() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_input(&[9u8; 4_096]);
+        r.on_request(open("c", 162e6, 1 << 20));
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(4_096),
+            dropped_input_bytes: Some(0),
+        });
+        r.on_input(&[9u8; 4_096]);
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        r.on_eof_no_exit_for_test();
+    }
+
+    // After its client is gone the writer closes the queue; output produced before the main loop
+    // handles the notice is not a queue overflow.
+    #[test]
+    fn output_after_a_failed_write_is_not_an_overflow() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("x", 162e6, 1 << 20));
+        drop(UnixStream::connect(sock(&ev)).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !r.channels["x"].queue.is_closed() && Instant::now() < deadline {
+            r.on_input(&vec![128u8; 2 * 4_096]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(r.channels["x"].queue.is_closed(), "the writer never failed");
+        for _ in 0..3 {
+            r.on_input(&vec![128u8; 2 * 4_096]);
+        }
+        r.poll_client_gone();
+        assert_eq!(last(&ev)["reason"], "client-gone");
+        assert!(
+            of_cause(&ev, "queue-overflow").is_empty(),
+            "{:?}",
+            of_cause(&ev, "queue-overflow")
+        );
     }
 
     // Review Focus 7: close() must not hang on a writer blocked in write_all (client stopped reading) or on a

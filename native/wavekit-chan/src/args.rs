@@ -77,8 +77,8 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
     let control_fd: i32 = get("control-fd")?
         .parse()
         .map_err(|_| "--control-fd must be an integer".to_string())?;
-    if control_fd < 0 {
-        return Err("--control-fd must be >= 0".into());
+    if control_fd < 3 {
+        return Err("--control-fd must be >= 3 (0-2 carry IQ, events and logs)".into());
     }
     Ok(Command::Run(Args {
         generation: get("generation")?
@@ -127,5 +127,9 @@ mod tests {
         assert!(parse(&v("--generation 1 --input-format cu8 --input-rate 0 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd 3")).is_err());
         assert!(parse(&v("--bogus 1")).is_err());
         assert!(parse(&v("--generation 1 --input-format cu8 --input-rate 2048000 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd -1")).is_err());
+        for fd in 0..3 {
+            let line = format!("--generation 1 --input-format cu8 --input-rate 2048000 --input-center 1 --usable-fraction 0.8 --block-samples 16384 --socket-dir /t --control-fd {fd}");
+            assert!(parse(&v(&line)).is_err(), "fd {fd} would take over stdio");
+        }
     }
 }

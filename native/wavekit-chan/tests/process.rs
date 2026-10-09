@@ -223,3 +223,27 @@ fn control_eof_is_a_shutdown() {
     assert_eq!(p.next(2)["type"], "closed");
     assert_eq!(p.wait_exit(), Some(0));
 }
+
+// Feature: core-channelizer, Property 14: Protocol validity (process)
+// Validates: addendum §11, §12.14
+#[test]
+fn a_non_utf8_control_line_is_rejected_not_fatal() {
+    let mut p = Proc::spawn(4);
+    assert_eq!(p.next(4)["type"], "ready");
+    p.control
+        .as_mut()
+        .unwrap()
+        .write_all(b"\xff\xfe\x80\n")
+        .unwrap();
+    let e = p.next(4);
+    assert_eq!(
+        (e["type"].as_str(), e["reasonCode"].as_str()),
+        (Some("rejected"), Some("channel-request-invalid")),
+        "{e}"
+    );
+    p.send(OPEN);
+    assert_eq!(p.next(4)["type"], "opened", "control is still being read");
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.next(4)["type"], "closed");
+    assert_eq!(p.wait_exit(), Some(0));
+}

@@ -99,6 +99,10 @@ impl ChannelQueue {
         n
     }
 
+    pub fn is_closed(&self) -> bool {
+        self.state.lock().unwrap().closed
+    }
+
     /// Most bytes ever queued at once; never exceeds `capacity`.
     pub fn high_water(&self) -> usize {
         self.state.lock().unwrap().high_water
