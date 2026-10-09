@@ -62,7 +62,7 @@ coverage/
 # -----------------------------------------------------------------------------
 decoded_calls/
 # Runtime state (WAVEKIT_STATE_DIR / stateDir: API band overrides)
-data/
+/data/
 debug_audio/
 debug_iq_output/
 output/
