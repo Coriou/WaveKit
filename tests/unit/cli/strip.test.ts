@@ -5,6 +5,8 @@ import { apiView, iqView } from "../../../cli/source/data/freshness.js"
 import type { ConnState } from "../../../cli/source/data/types.js"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
 import { stripLine, type StripInput } from "../../../cli/source/ui/strip.js"
+import { scenarioState } from "../../../cli/source/test/fixtures.js"
+import { stripInput } from "../../../cli/source/view-models/chrome.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
 
 beforeAll(() => {
@@ -32,11 +34,12 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(lineText(stripLine(live, 199))).toMatch(
 			/^api ● 2s {2}iq ● streaming · 4\.1 MB\/s {2}rx 445\.971 MHz ±1\.024 · external control {2}decoders 8\/9 up · 1 failing · 2 in window {2}drops !34% now +18:07$/,
 		)
-		expect(lineText(stripLine(live, 79))).toMatch(
-			/^api ● 2s {2}iq ● streaming {2}rx 445\.971 MHz {2}decoders 1 failing {2}drops !34% +18:07$/,
+		// R65 M8: "now" is never dropped, so at 80 the clock goes instead (§4.2's row predates T4's ruling).
+		expect(lineText(stripLine(live, 79))).toBe(
+			"api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 failing  drops !34% now",
 		)
 		expect(lineText(stripLine(live, 59))).toBe(
-			"api ● 2s  iq ● streaming  decoders 1 failing  drops !34%",
+			"api ● 2s  iq ● streaming  decoders 1 failing  drop !34% now",
 		)
 	})
 	it("renders the connectivity variants", () => {
@@ -80,6 +83,14 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(lineText(out)).toContain("drops ? · backpressure")
 		expect(out.find(s => s.text === "backpressure")?.role).toBe("attention")
 		expect(out.find(s => s.text === "?")?.role).toBe("unknown")
+	})
+	it("R65 M8: a known drop figure always keeps its 'now' (T4)", () => {
+		for (let w = 40; w <= 220; w++) {
+			const text = lineText(stripLine(live, w))
+			if (/drops? !?\d/.test(text)) expect(text).toMatch(/drops? !?\d+% now/)
+		}
+		const s = scenarioState("live")
+		expect(lineText(stripLine(stripInput(s), 119))).toMatch(/drops? !21% now/)
 	})
 	it("pins the §4.2 120-column row", () => {
 		const left =

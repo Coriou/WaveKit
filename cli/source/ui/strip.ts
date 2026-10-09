@@ -178,10 +178,13 @@ function dropsGroup(d: StripInput["drops"]): Group {
 	const v: Span = d.backpressure
 		? { text: `${glyphs().attention}${pct}`, role: "attention", bold: true }
 		: value(pct)
+	// R65 M8 (T4): a drop figure is always labelled `now`; the strip fits by
+	// shortening or dropping other lanes, never by losing the word.
+	// The minimal variant says "drop" so `drop !34% now` still fits the 60-column strip.
 	return {
 		priority: 4,
 		variants: [
-			[label("drops "), v],
+			[label("drop "), v, label(" now")],
 			[label("drops "), v, label(" now")],
 		],
 	}
