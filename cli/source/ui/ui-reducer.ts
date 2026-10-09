@@ -69,11 +69,25 @@ function clearMessagesSelection(ui: UiState): UiState {
 	}
 }
 
+/** M10: leave a paused Messages feed — no selection, no detail, following again. */
+const resumeMessages = (ui: UiState): UiState =>
+	clearMessagesSelection(resume(ui))
+
 function moveBy(ui: UiState, ctx: UiCtx, delta: number, now: number): UiState {
 	const rows = ctx.rowIds
 	if (rows.length === 0) return ui
+	const cur = ui.selected[ui.view]
+	// M9: the feed is newest first, so the first ↑ or ↓ selects the newest row
+	// (index 0) and pauses; ↑ past the newest row resumes, like G.
+	if (
+		ui.view === "messages" &&
+		delta === -1 &&
+		!ui.messages.following &&
+		cur !== null &&
+		rows.indexOf(cur) === 0
+	)
+		return resumeMessages(ui)
 	const base = autoPause(ui, ctx, now)
-	const cur = base.selected[base.view]
 	const idx = cur === null ? -1 : rows.indexOf(cur)
 	const next = idx < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + delta))
 	return select(base, rows[next] ?? null)
@@ -115,7 +129,7 @@ export function applyUiAction(
 		}
 		case "newest":
 			return v === "messages"
-				? clearMessagesSelection(resume(ui))
+				? resumeMessages(ui)
 				: select(ui, ctx.rowIds[ctx.rowIds.length - 1] ?? null)
 		case "open": {
 			const id = ui.selected[v] ?? ctx.rowIds[0] ?? null
@@ -136,10 +150,17 @@ export function applyUiAction(
 					...ui,
 					detail: { ...ui.detail, [v]: { open: false, scroll: 0 } },
 				}
-			if (ui.selected[v] !== null) return select(ui, null)
-			if (v === "messages" && ui.messages.filterText !== "") {
-				return { ...ui, messages: { ...ui.messages, filterText: "" } }
+			// M10, Messages: detail → selection and pause → filter text → preset.
+			if (v === "messages") {
+				if (ui.selected.messages !== null || !ui.messages.following)
+					return resumeMessages(ui)
+				if (ui.messages.filterText !== "")
+					return { ...ui, messages: { ...ui.messages, filterText: "" } }
+				if (ui.messages.preset !== "all")
+					return { ...ui, messages: { ...ui.messages, preset: "all" } }
+				return ui
 			}
+			if (ui.selected[v] !== null) return select(ui, null)
 			return ui
 		}
 		case "detail-scroll": {

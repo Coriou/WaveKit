@@ -105,7 +105,7 @@ describe("messages header and states", () => {
 		// Every readsb and ais-catcher row of the fixture (4 + 3) arrived after seq -1.
 		expect(fv.newCount).toBe(7)
 		expect(lineText(messagesHeader(s, mu, fv, 119))).toBe(
-			`MESSAGES  paused · 7 new · filter readsb,ais · ${fv.matching} of ${fv.total}`,
+			`MESSAGES  paused · 7 new · filter readsb,ais · ${fv.matching} of ${fv.total} · Esc resume`,
 		)
 	})
 	it("adds aircraft tracker stats for the aircraft preset", () => {
@@ -123,7 +123,7 @@ describe("messages header and states", () => {
 	it("explains an empty filter result and an empty feed", () => {
 		expect(
 			listText(s, withMessages({ filterText: "nothing-matches" })),
-		).toMatch(/0 of \d+ match "nothing-matches"/)
+		).toMatch(/0 of \d+ match · filter nothing-matches · Esc clear/)
 		const idle = scenarioState("idle", deps)
 		expect(listText(idle, initialUi("messages"))).toMatch(
 			// M3: a healthy chain says for how long, the window count, rx, then when.
@@ -317,7 +317,8 @@ describe("T40 fix round 1: header truth", () => {
 		const mu = { ...following, filterText: "readsb ".repeat(30).trim() }
 		const h = headerOf(s, mu, 59)
 		expect([...h].length).toBeLessThanOrEqual(59)
-		expect(h).toMatch(/\d+ of \d+$/)
+		// M10: the Esc hint outlives the filter text.
+		expect(h).toMatch(/\d+ of \d+ · Esc clear$/)
 	})
 })
 
@@ -461,5 +462,46 @@ describe("T40 fix round 1 addendum: right-placement header", () => {
 		const input = lineText(m.input!)
 		expect([...input].length).toBeLessThanOrEqual(m.listWidth)
 		expect(input.endsWith("▏")).toBe(true)
+	})
+})
+
+describe("design polish: header and empty state (M10, S8)", () => {
+	const s = scenarioState("burst", deps)
+	it("M10: a paused feed keeps its total and names Esc resume", () => {
+		const mu = { ...following, following: false, pausedAtSeq: -1 }
+		expect(headerOf(s, mu)).toBe(
+			"MESSAGES  paused · 12 new · 12 total · Esc resume",
+		)
+	})
+	it("M10: with the detail open the header names no Esc layer", () => {
+		const mu = { ...following, following: false, pausedAtSeq: -1 }
+		const fv = feedView(s.messages.ring, mu)
+		expect(lineText(messagesHeader(s, mu, fv, 119, true))).not.toContain("Esc")
+	})
+	it("S8: aircraft counts are left out while there is nothing to count", () => {
+		const st = s.aircraft.stats.value
+		if (!st) throw new Error("fixture has aircraft stats")
+		const empty: AppState = {
+			...s,
+			aircraft: {
+				...s.aircraft,
+				stats: {
+					...s.aircraft.stats,
+					value: { ...st, aircraftCount: 0, withPosition: 0 },
+				},
+			},
+		}
+		const mu = { ...following, preset: "aircraft" as const }
+		const h = headerOf(empty, mu)
+		expect(h).toContain("preset aircraft")
+		expect(h).not.toContain("tracked")
+		expect(h).not.toContain("with position")
+		expect(h).toMatch(/ · Esc clear$/)
+	})
+	it("S8: an empty match names the filter and preset and the way out", () => {
+		const mu = { ...following, filterText: "dsd", preset: "aircraft" as const }
+		expect(listText(s, withMessages(mu))).toMatch(
+			/^0 of 12 match · filter dsd · preset aircraft · Esc clear$/m,
+		)
 	})
 })
