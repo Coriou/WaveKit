@@ -24,7 +24,7 @@ SOCK_PATH="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK"
 PERF_SECONDS="${WAVEKIT_VALIDATE_PERF_SECONDS:-60}"
 PERF_WARMUP_S="${WAVEKIT_VALIDATE_PERF_WARMUP:-15}"
 SESSION="wkv"
-SCENARIOS=(live idle api-down api-down-cached ws-only rest-only dropping crash-loop legacy long-text burst iq-stale iq-disconnected decoder-faulted)
+SCENARIOS=(live idle api-down api-down-cached ws-only rest-only dropping crash-loop legacy long-text burst iq-stale iq-disconnected decoder-faulted contracts tuner-unknown)
 VIEWS=(overview decoders messages receiver system)
 SIZES=(60x16 60x20 80x24 120x40 200x50)
 # Optional subsets for quick runs, e.g. WAVEKIT_VALIDATE_SCENARIOS="live burst" WAVEKIT_VALIDATE_SIZES="80x24"

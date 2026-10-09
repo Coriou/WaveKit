@@ -193,12 +193,7 @@ export function App({
 					{chrome.blank === 1 ? <Text> </Text> : null}
 					<Box flexDirection="column" height={chrome.content} overflow="hidden">
 						{ui.help ? (
-							<HelpOverlay
-								ctx={ctx}
-								state={state}
-								width={width}
-								height={chrome.content}
-							/>
+							<HelpOverlay ctx={ctx} width={width} height={chrome.content} />
 						) : view ? (
 							<view.Component
 								state={state}

@@ -1,0 +1,225 @@
+{
+	"extends": "live",
+	"name": "contracts",
+	"description": "Core contracts of roadmap item 8 at once, with bandSuspension on: dsd-fme configured off-centre is suspended out of band (health stays running), readsb is suspending, lora is suspended for its rate, multimon-ng is restarting, direwolf is faulted and retrying, rtl433 is faulted for good; every decoder has a bandAssessment; the source rate mismatches; the tuner lists fields core never saw.",
+	"wsAppend": [
+		{
+			"offsetMs": 0,
+			"type": "metrics",
+			"channel": "metrics",
+			"data": {
+				"sourceId": "pi-iq",
+				"bytesReceived": 1200000000,
+				"dataRate": 2000
+			}
+		}
+	],
+	"restPatch": {
+		"/api/decoders": {
+			"dsd-fme": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"targetFrequenciesHz": [446500000],
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [446500000],
+					"basis": "configured",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 19200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:45.000Z"
+				}
+			},
+			"multimon-ng": {
+				"desiredRunning": true,
+				"suspended": false,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"health": "restarting",
+				"restartCount": 2,
+				"nextRestartAt": "2026-10-08T18:07:55.000Z",
+				"lastError": {
+					"kind": "exit",
+					"message": "Process exited unexpectedly (code 1)",
+					"at": "2026-10-08T18:07:50.000Z"
+				},
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"rtl433": {
+				"desiredRunning": true,
+				"suspended": false,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"health": "faulted",
+				"restartCount": 20,
+				"lastError": {
+					"kind": "exit",
+					"message": "Process exited unexpectedly (code 1)",
+					"at": "2026-10-08T18:04:31.000Z"
+				},
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"readsb": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"transition": "suspending",
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [1090000000],
+					"basis": "protocol",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:50.000Z"
+				}
+			},
+			"acarsdec": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [131550000, 131725000, 131825000],
+					"basis": "configured",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 19200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:12.000Z"
+				}
+			},
+			"ais-catcher": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [161975000, 162025000],
+					"basis": "protocol",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 115200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:12.000Z"
+				}
+			},
+			"dumpvdl2": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [136650000, 136700000, 136975000],
+					"basis": "configured",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 420000
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:12.000Z"
+				}
+			},
+			"direwolf": {
+				"desiredRunning": true,
+				"suspended": false,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"health": "faulted",
+				"restartCount": 6,
+				"nextRestartAt": "2026-10-08T18:08:17.000Z",
+				"lastError": {
+					"kind": "exit",
+					"message": "Process exited unexpectedly (code 1)",
+					"at": "2026-10-08T18:07:47.000Z"
+				},
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"lora-meshtastic": {
+				"desiredRunning": true,
+				"suspended": true,
+				"health": "running",
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [869525000],
+					"basis": "configured",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 200000
+				},
+				"rateAssessment": {
+					"verdict": "unusable",
+					"sourceKind": "iq",
+					"sourceRateHz": 2048000,
+					"reasonCode": "unsupported-sample-rate"
+				},
+				"suspension": {
+					"reasonCode": "unsupported-sample-rate",
+					"since": "2026-10-08T18:06:02.000Z"
+				}
+			}
+		},
+		"/api/sources": {
+			"pi-iq": {
+				"dataRate": 2000,
+				"rateMismatch": {
+					"declaredSampleRateHz": 2048000,
+					"measuredSampleRateHz": 1024000,
+					"deviation": -0.5,
+					"since": "2026-10-08T18:06:17.000Z"
+				}
+			}
+		},
+		"/api/tuner": {
+			"pi-iq": {
+				"unknownFields": [
+					"gain",
+					"ppm",
+					"agcMode",
+					"biasTee",
+					"directSampling",
+					"offsetTuning",
+					"ifGain",
+					"tunerIfGain",
+					"testMode"
+				]
+			}
+		}
+	}
+}

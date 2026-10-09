@@ -4,6 +4,7 @@ import { formatAge, formatClockShort, formatMHz } from "../ui/format.js"
 import { sp, type Group } from "../ui/line.js"
 import { glyphs } from "../ui/theme.js"
 import { bannerConditions, rxValues, windowCount } from "./chrome.js"
+import { followsCentre } from "../data/window.js"
 import { decoderFacts } from "./decoder-rows.js"
 
 /** Every polled endpoint failing, or discovery found nothing: core cannot be reached. */
@@ -90,7 +91,7 @@ export function emptyFeedGroups(state: AppState): Group[] {
 	const win = windowCount(
 		facts.map(f => ({
 			membership: f.membership,
-			tuned: f.nominal === "tuned",
+			followsCentre: followsCentre(f.row),
 		})),
 	)
 	const centre = rxValues(
@@ -98,16 +99,21 @@ export function emptyFeedGroups(state: AppState): Group[] {
 		state.sources.value?.[0]?.id ?? state.tuner.value?.[0]?.sourceId,
 	).centre?.v
 	const rx = centre !== undefined ? [group(`rx ${formatMHz(centre)}`, 1)] : []
+	// R90 I1: decoders whose membership is ? are left out of both counts, and said.
+	const unknown =
+		win && win.unknown > 0 ? ` ${glyphs().sep} ${win.unknown} unknown` : ""
 	if (win && win.inWindow === 0)
 		return [
 			group("no decodes", 0),
-			group(`0 of ${win.counted} decoders in window`, 0),
+			group(`0 of ${win.counted} decoders in window${unknown}`, 0),
 			...rx,
 		]
 	const since = c.ws.since ?? now
 	return [
 		group(`no decodes for ${formatAge(now - since)}`, 0),
-		...(win ? [group(`${win.inWindow} of ${win.counted} in window`, 2)] : []),
+		...(win
+			? [group(`${win.inWindow} of ${win.counted} in window${unknown}`, 2)]
+			: []),
 		...rx,
 		group(`since ${formatClockShort(since)}`, 3),
 	]
