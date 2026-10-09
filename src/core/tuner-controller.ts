@@ -7,6 +7,7 @@
 
 import { EventEmitter } from "node:events"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
+import { WaveKitError } from "../utils/errors.js"
 import type {
 	SourceCaps,
 	SourceConfig,
@@ -14,14 +15,35 @@ import type {
 } from "./source-manager.js"
 import type {
 	TunerState,
+	TunerStateField,
 	TunerGainMode,
 	TunerDirectSampling,
 	TunerControlMode,
 } from "@wavekit/api-types"
 
+/**
+ * Sample rates the RTL2832U accepts. librtlsdr's rtlsdr_set_sample_rate()
+ * rejects 300 001-900 000 Hz, so the overall 225 001-3 200 000 bound is not
+ * enough: a gap rate would be recorded in caps and replayed on reconnect
+ * while the dongle keeps its previous rate.
+ */
+export const RTL_SAMPLE_RATE_RANGES = [
+	{ min: 225_001, max: 300_000 },
+	{ min: 900_001, max: 3_200_000 },
+] as const
+
+/** True when librtlsdr can set `hz` (an integer in one of the RTL ranges). */
+export function isValidRtlSampleRate(hz: number): boolean {
+	return (
+		Number.isInteger(hz) &&
+		RTL_SAMPLE_RATE_RANGES.some(range => hz >= range.min && hz <= range.max)
+	)
+}
+
 // Validation constants
 const VALIDATION = {
 	frequency: { min: 24_000_000, max: 1_900_000_000 },
+	/** Outer bound only; see RTL_SAMPLE_RATE_RANGES for the gap. */
 	sampleRate: { min: 225_001, max: 3_200_000 },
 	gain: { min: 0, max: 500 },
 	ppm: { min: -500, max: 500 },
@@ -70,6 +92,106 @@ const COMMAND_NAMES: Record<number, string> = {
 	0x0f: "set-tuner-if-gain",
 }
 
+/** Tuner fields that can hold an accepted (commanded) desired value. */
+type DesiredField =
+	| "frequency"
+	| "sampleRate"
+	| "gainMode"
+	| "gain"
+	| "ppm"
+	| "ifGain"
+	| "testMode"
+	| "agcMode"
+	| "directSampling"
+	| "offsetTuning"
+	| "rtlXtal"
+	| "tunerXtal"
+	| "tunerGainIndex"
+	| "biasTee"
+	| "tunerIfGain"
+
+const COMMAND_FIELDS: Record<number, DesiredField> = {
+	[RTL_TCP_COMMANDS.SET_FREQUENCY]: "frequency",
+	[RTL_TCP_COMMANDS.SET_SAMPLE_RATE]: "sampleRate",
+	[RTL_TCP_COMMANDS.SET_GAIN_MODE]: "gainMode",
+	[RTL_TCP_COMMANDS.SET_GAIN]: "gain",
+	[RTL_TCP_COMMANDS.SET_FREQ_CORRECTION]: "ppm",
+	[RTL_TCP_COMMANDS.SET_IF_GAIN]: "ifGain",
+	[RTL_TCP_COMMANDS.SET_TEST_MODE]: "testMode",
+	[RTL_TCP_COMMANDS.SET_AGC_MODE]: "agcMode",
+	[RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING]: "directSampling",
+	[RTL_TCP_COMMANDS.SET_OFFSET_TUNING]: "offsetTuning",
+	[RTL_TCP_COMMANDS.SET_RTL_XTAL]: "rtlXtal",
+	[RTL_TCP_COMMANDS.SET_TUNER_XTAL]: "tunerXtal",
+	[RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX]: "tunerGainIndex",
+	[RTL_TCP_COMMANDS.SET_BIAS_TEE]: "biasTee",
+	[RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN]: "tunerIfGain",
+}
+
+/** Relay commands from which applyExternalCommand infers manual gain mode. */
+const MANUAL_GAIN_COMMANDS: ReadonlySet<number> = new Set([
+	RTL_TCP_COMMANDS.SET_GAIN,
+	RTL_TCP_COMMANDS.SET_IF_GAIN,
+	RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
+	RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
+])
+
+/** Placeholder-capable fields, in TunerState order, for `unknownFields`. */
+const STATE_FIELDS: readonly TunerStateField[] = [
+	"frequency",
+	"sampleRate",
+	"gainMode",
+	"gain",
+	"ppm",
+	"agcMode",
+	"biasTee",
+	"directSampling",
+	"offsetTuning",
+	"ifGain",
+	"tunerIfGain",
+	"testMode",
+]
+
+/**
+ * Reconnect replay order (librtlsdr semantics): sampling path, xtals and PPM
+ * first, rate before center, then front-end toggles, then the gain group in
+ * acceptance order, then test mode.
+ */
+const REPLAY_PHASES: ReadonlyArray<{
+	fields: readonly DesiredField[]
+	byAcceptance: boolean
+}> = [
+	{
+		fields: ["directSampling", "offsetTuning", "rtlXtal", "tunerXtal", "ppm"],
+		byAcceptance: false,
+	},
+	{ fields: ["sampleRate", "frequency"], byAcceptance: false },
+	{ fields: ["biasTee", "agcMode"], byAcceptance: false },
+	{
+		fields: ["gainMode", "gain", "tunerGainIndex", "ifGain", "tunerIfGain"],
+		byAcceptance: true,
+	},
+	{ fields: ["testMode"], byAcceptance: false },
+]
+
+/**
+ * What happens to accepted tuner state when an rtl_tcp source reconnects:
+ * "restore" re-sends it, "reset" discards it and falls back to the configured
+ * baseline without writing anything to the receiver.
+ */
+export type TunerReconnectPolicy = "restore" | "reset"
+
+/** Outcome of synchronizing a source after it (re)connects. */
+export interface TunerConnectSyncResult {
+	policy: TunerReconnectPolicy
+	/** Command names written upstream, in wire order (no hardware acknowledgement). */
+	commands: string[]
+	/** True when accepted state was discarded under the "reset" policy. */
+	reset: boolean
+	/** Write failure that stopped the replay; the next connection replays again. */
+	error?: string
+}
+
 export interface TunerControllerEvents {
 	"state-changed": (sourceId: string, state: TunerState) => void
 	"command-sent": (sourceId: string, command: string, value: number) => void
@@ -80,6 +202,8 @@ export interface TunerControllerEvents {
 export interface TunerControllerConfig {
 	defaultFrequency?: number
 	defaultSampleRate?: number
+	/** Reconnect behaviour for accepted tuner state (default "restore"). */
+	reconnectPolicy?: TunerReconnectPolicy
 }
 
 type ControlModeOrigin = "user" | "relay"
@@ -130,6 +254,13 @@ export class TunerController extends EventEmitter {
 	private readonly config: TunerControllerConfig
 	private tunerStates: Map<string, TunerState> = new Map()
 	private controlModeOrigins: Map<string, ControlModeOrigin> = new Map()
+	/** Accepted desired fields per source, keyed to their acceptance sequence. */
+	private desiredFields: Map<string, Map<DesiredField, number>> = new Map()
+	/** Fields inferred from observed relay commands (known, never replayed). */
+	private inferredFields: Map<string, Set<TunerStateField>> = new Map()
+	private acceptanceSeq = 0
+	/** Caps metadata as first registered, before any accepted command. */
+	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
 
 	constructor(
 		logger: Logger,
@@ -164,16 +295,11 @@ export class TunerController extends EventEmitter {
 			return
 		}
 
-		const defaultFrequency =
-			this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
-		const defaultSampleRate =
-			this.config.defaultSampleRate ?? caps?.sampleRate ?? DEFAULT_SAMPLE_RATE
-
 		// Default state: sensible defaults for immediate use
 		const state: TunerState = {
 			sourceId,
-			frequency: defaultFrequency,
-			sampleRate: defaultSampleRate,
+			frequency: DEFAULT_FREQUENCY,
+			sampleRate: DEFAULT_SAMPLE_RATE,
 			gainMode: "agc",
 			gain: 0,
 			ppm: 0,
@@ -187,7 +313,9 @@ export class TunerController extends EventEmitter {
 			controlMode: "internal",
 			commandCount: 0,
 		}
+		this.applyBaselineFields(state, caps)
 
+		this.baselineCaps.set(sourceId, caps ? { ...caps } : undefined)
 		this.tunerStates.set(sourceId, state)
 		this.controlModeOrigins.set(sourceId, "user")
 		this.log.info({ sourceId }, "Tuner source initialized")
@@ -198,6 +326,9 @@ export class TunerController extends EventEmitter {
 		if (!this.tunerStates.has(sourceId)) return
 		this.tunerStates.delete(sourceId)
 		this.controlModeOrigins.delete(sourceId)
+		this.desiredFields.delete(sourceId)
+		this.inferredFields.delete(sourceId)
+		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 	}
 
@@ -279,7 +410,7 @@ export class TunerController extends EventEmitter {
 				}
 				break
 			case RTL_TCP_COMMANDS.SET_SAMPLE_RATE:
-				if (this.isWithinRange(value, VALIDATION.sampleRate)) {
+				if (isValidRtlSampleRate(value)) {
 					state.sampleRate = value
 					updated = true
 					try {
@@ -441,6 +572,14 @@ export class TunerController extends EventEmitter {
 		state.lastCommandAt = now
 
 		if (updated) {
+			this.markAccepted(sourceId, command)
+			// Gain commands imply manual mode on the relay path (state above).
+			if (
+				command !== RTL_TCP_COMMANDS.SET_GAIN_MODE &&
+				state.gainMode === "manual" &&
+				MANUAL_GAIN_COMMANDS.has(command)
+			)
+				this.markInferred(sourceId, "gainMode")
 			delete state.lastError
 			this.log.debug(
 				{ sourceId, command: cmdName, value },
@@ -465,6 +604,11 @@ export class TunerController extends EventEmitter {
 	async setSampleRate(sourceId: string, hz: number): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("sampleRate", hz, VALIDATION.sampleRate)
+		if (!isValidRtlSampleRate(hz)) {
+			throw new TunerValidationError(
+				`sampleRate ${hz} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
+			)
+		}
 		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz)
 		state.sampleRate = hz
 		try {
@@ -698,6 +842,7 @@ export class TunerController extends EventEmitter {
 		) {
 			if (updates.tunerIfGain === null) {
 				state.tunerIfGain = null
+				this.desiredFields.get(sourceId)?.delete("tunerIfGain")
 				this.emitStateChanged(sourceId)
 			} else {
 				await this.setTunerIfGain(
@@ -711,6 +856,141 @@ export class TunerController extends EventEmitter {
 		if (updates.controlMode === "external") {
 			this.setControlMode(sourceId, "external")
 		}
+	}
+
+	// === Reconnect Synchronization ===
+
+	/**
+	 * Synchronize tuner state and source metadata for a new source session.
+	 * Wired to the session's first payload (see core/tuner-wiring.ts).
+	 *
+	 * rtl_tcp cannot report the receiver's rate or center, so after a reconnect
+	 * the receiver may be at its own defaults. Policy (config `tuner.reconnectPolicy`):
+	 * - "restore": re-send fields accepted through the API or relay (never config
+	 *   defaults). Frames are written synchronously before any event fires, so a
+	 *   later API/relay command is always written after the batch and wins.
+	 * - "reset": write nothing; discard accepted state and fall back to the
+	 *   configured baseline, exactly as after a fresh start.
+	 * Either way source caps are then reconciled with what the tuner state can
+	 * back, so stale metadata is never kept silently. Success means "written",
+	 * never "applied": rtl_tcp has no acknowledgement or readback.
+	 */
+	synchronizeOnConnect(sourceId: string): TunerConnectSyncResult {
+		const policy = this.config.reconnectPolicy ?? "restore"
+		const state = this.tunerStates.get(sourceId)
+		if (!state) return { policy, commands: [], reset: false }
+		const desired = this.desiredFields.get(sourceId)
+
+		if (policy === "reset") {
+			const reset = desired !== undefined && desired.size > 0
+			this.desiredFields.delete(sourceId)
+			this.inferredFields.delete(sourceId)
+			if (reset) {
+				this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
+				this.log.warn(
+					{ sourceId },
+					"Source reconnected: discarded accepted tuner state (reconnectPolicy=reset); receiver state unconfirmed",
+				)
+			}
+			const capsChanged = this.reconcileCaps(sourceId, state)
+			if (reset || capsChanged) this.emitStateChanged(sourceId)
+			return { policy, commands: [], reset }
+		}
+
+		const written: Array<{ value: number; name: string }> = []
+		let failure: Error | undefined
+		const plan = desired ? this.buildReplayPlan(state, desired) : []
+		for (const [cmd, value] of plan) {
+			try {
+				this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			} catch (err) {
+				failure =
+					err instanceof Error
+						? err
+						: new WaveKitError(String(err), "TUNER_RESTORE_FAILED")
+				break
+			}
+			const name = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
+			written.push({ value, name })
+		}
+
+		if (written.length > 0) {
+			state.commandCount += written.length
+			state.lastCommandAt = new Date().toISOString()
+		}
+		if (failure) {
+			state.lastError = `Tuner state restore failed: ${failure.message}`
+		} else if (written.length > 0) {
+			delete state.lastError
+		}
+
+		const capsChanged = this.reconcileCaps(sourceId, state)
+
+		const commands = written.map(entry => entry.name)
+		if (failure) {
+			this.log.warn(
+				{ sourceId, commands, err: failure.message },
+				"Tuner state restore interrupted; will retry on next connection",
+			)
+		} else if (commands.length > 0) {
+			this.log.info({ sourceId, commands }, "Restored desired tuner state")
+		}
+
+		for (const { name, value } of written) {
+			this.emit("command-sent", sourceId, name, value)
+		}
+		if (failure) this.emit("error", sourceId, failure)
+		if (plan.length > 0 || capsChanged) this.emitStateChanged(sourceId)
+
+		return failure
+			? {
+					policy,
+					commands,
+					reset: false,
+					error: state.lastError ?? failure.message,
+				}
+			: { policy, commands, reset: false }
+	}
+
+	/**
+	 * Align source caps with what the tuner state backs: accepted values for
+	 * commanded fields, otherwise the configured baseline. One caps-changed at
+	 * most, and none when metadata already matches (no decoder restart storm).
+	 */
+	private reconcileCaps(sourceId: string, state: TunerState): boolean {
+		const desired = this.desiredFields.get(sourceId)
+		const baseline = this.baselineCaps.get(sourceId)
+		const current = this.sourceManager.getCaps(sourceId)
+		if (!current) return false
+
+		const sampleRate = desired?.has("sampleRate")
+			? state.sampleRate
+			: (baseline?.sampleRate ?? current.sampleRate)
+		const centerFreq = desired?.has("frequency")
+			? state.frequency
+			: baseline
+				? baseline.centerFreq
+				: current.centerFreq
+		if (current.sampleRate === sampleRate && current.centerFreq === centerFreq)
+			return false
+
+		this.log.warn(
+			{
+				sourceId,
+				staleSampleRate: current.sampleRate,
+				staleCenterFreq: current.centerFreq,
+				sampleRate,
+				centerFreq,
+			},
+			"Reconciling source tuning metadata after reconnect",
+		)
+		try {
+			this.sourceManager.setTuningCaps(sourceId, { sampleRate, centerFreq })
+		} catch (err) {
+			this.log.warn({ sourceId, err }, "Failed to reconcile source caps")
+			return false
+		}
+		return true
 	}
 
 	// === State Accessors ===
@@ -818,17 +1098,144 @@ export class TunerController extends EventEmitter {
 		return value > 0x7fffffff ? value - 0x100000000 : value
 	}
 
+	/** Reset tunable fields to the startup baseline (control mode/counters kept). */
+	private applyBaselineFields(state: TunerState, caps?: SourceCaps): void {
+		state.frequency =
+			this.config.defaultFrequency ?? caps?.centerFreq ?? DEFAULT_FREQUENCY
+		state.sampleRate =
+			this.config.defaultSampleRate ?? caps?.sampleRate ?? DEFAULT_SAMPLE_RATE
+		state.gainMode = "agc"
+		state.gain = 0
+		state.ppm = 0
+		state.agcMode = true
+		state.biasTee = false
+		state.directSampling = "off"
+		state.offsetTuning = false
+		state.ifGain = 0
+		state.tunerIfGain = null
+		state.testMode = false
+		delete state.rtlXtal
+		delete state.tunerXtal
+		delete state.tunerGainIndex
+	}
+
+	private markInferred(sourceId: string, field: TunerStateField): void {
+		let inferred = this.inferredFields.get(sourceId)
+		if (!inferred) {
+			inferred = new Set()
+			this.inferredFields.set(sourceId, inferred)
+		}
+		inferred.add(field)
+	}
+
+	private markAccepted(sourceId: string, cmd: number): void {
+		const field = COMMAND_FIELDS[cmd]
+		if (!field) return
+		let desired = this.desiredFields.get(sourceId)
+		if (!desired) {
+			desired = new Map()
+			this.desiredFields.set(sourceId, desired)
+		}
+		desired.set(field, ++this.acceptanceSeq)
+	}
+
+	private buildReplayPlan(
+		state: TunerState,
+		desired: ReadonlyMap<DesiredField, number>,
+	): Array<[number, number]> {
+		const plan: Array<[number, number]> = []
+		for (const phase of REPLAY_PHASES) {
+			const fields = phase.fields.filter(field => desired.has(field))
+			if (phase.byAcceptance) {
+				fields.sort((a, b) => (desired.get(a) ?? 0) - (desired.get(b) ?? 0))
+			}
+			for (const field of fields) {
+				const frame = this.encodeDesiredField(state, field)
+				if (frame) plan.push(frame)
+			}
+		}
+		return plan
+	}
+
+	private encodeDesiredField(
+		state: TunerState,
+		field: DesiredField,
+	): [number, number] | null {
+		const flag = (enabled: boolean) => (enabled ? 1 : 0)
+		switch (field) {
+			case "frequency":
+				return [RTL_TCP_COMMANDS.SET_FREQUENCY, state.frequency]
+			case "sampleRate":
+				return [RTL_TCP_COMMANDS.SET_SAMPLE_RATE, state.sampleRate]
+			case "gainMode":
+				return [
+					RTL_TCP_COMMANDS.SET_GAIN_MODE,
+					flag(state.gainMode === "manual"),
+				]
+			case "gain":
+				return [RTL_TCP_COMMANDS.SET_GAIN, state.gain]
+			case "ppm":
+				return [
+					RTL_TCP_COMMANDS.SET_FREQ_CORRECTION,
+					this.encodeSignedInt32(state.ppm),
+				]
+			case "ifGain":
+				return [RTL_TCP_COMMANDS.SET_IF_GAIN, state.ifGain]
+			case "testMode":
+				return [RTL_TCP_COMMANDS.SET_TEST_MODE, flag(state.testMode)]
+			case "agcMode":
+				return [RTL_TCP_COMMANDS.SET_AGC_MODE, flag(state.agcMode)]
+			case "directSampling":
+				return [
+					RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING,
+					state.directSampling === "off"
+						? 0
+						: state.directSampling === "i"
+							? 1
+							: 2,
+				]
+			case "offsetTuning":
+				return [RTL_TCP_COMMANDS.SET_OFFSET_TUNING, flag(state.offsetTuning)]
+			case "biasTee":
+				return [RTL_TCP_COMMANDS.SET_BIAS_TEE, flag(state.biasTee)]
+			case "rtlXtal":
+				return state.rtlXtal === undefined
+					? null
+					: [RTL_TCP_COMMANDS.SET_RTL_XTAL, state.rtlXtal]
+			case "tunerXtal":
+				return state.tunerXtal === undefined
+					? null
+					: [RTL_TCP_COMMANDS.SET_TUNER_XTAL, state.tunerXtal]
+			case "tunerGainIndex":
+				return state.tunerGainIndex === undefined
+					? null
+					: [RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX, state.tunerGainIndex]
+			case "tunerIfGain":
+				return state.tunerIfGain === null
+					? null
+					: [
+							RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
+							(state.tunerIfGain.stage << 16) |
+								(state.tunerIfGain.gain & 0xffff),
+						]
+		}
+	}
+
+	private encodeFrame(cmd: number, value: number): Buffer {
+		const buf = Buffer.alloc(5)
+		buf.writeUInt8(cmd, 0)
+		buf.writeUInt32BE(value >>> 0, 1)
+		return buf
+	}
+
 	private async sendCommand(
 		sourceId: string,
 		cmd: number,
 		value: number,
 	): Promise<void> {
-		const buf = Buffer.alloc(5)
-		buf.writeUInt8(cmd, 0)
-		buf.writeUInt32BE(value >>> 0, 1)
-
 		try {
-			this.sourceManager.writeToSource(sourceId, buf)
+			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
+			this.markAccepted(sourceId, cmd)
 			const state = this.tunerStates.get(sourceId)
 			if (state) {
 				state.commandCount++
@@ -862,12 +1269,41 @@ export class TunerController extends EventEmitter {
 	}
 
 	private cloneState(state: TunerState): TunerState {
+		const { unknownFields: _stale, ...fields } = state
+		const unknownFields = this.unknownFields(state.sourceId)
 		return {
-			...state,
+			...fields,
 			tunerIfGain: state.tunerIfGain
 				? { ...state.tunerIfGain }
 				: state.tunerIfGain,
+			...(unknownFields.length > 0 ? { unknownFields } : {}),
 		}
+	}
+
+	/**
+	 * Fields backed by nothing: not commanded through the API, not seen in a
+	 * relay client's command (both tracked as accepted desired fields), and
+	 * for frequency/sampleRate not declared by config or the source caps.
+	 */
+	private unknownFields(sourceId: string): TunerStateField[] {
+		const accepted = this.desiredFields.get(sourceId)
+		const inferred = this.inferredFields.get(sourceId)
+		const baseline = this.baselineCaps.get(sourceId)
+		const declared = new Set<TunerStateField>()
+		if (
+			this.config.defaultFrequency !== undefined ||
+			baseline?.centerFreq !== undefined
+		)
+			declared.add("frequency")
+		if (
+			this.config.defaultSampleRate !== undefined ||
+			baseline?.sampleRate !== undefined
+		)
+			declared.add("sampleRate")
+		return STATE_FIELDS.filter(
+			field =>
+				!declared.has(field) && !accepted?.has(field) && !inferred?.has(field),
+		)
 	}
 
 	private isSameTunerIfGain(

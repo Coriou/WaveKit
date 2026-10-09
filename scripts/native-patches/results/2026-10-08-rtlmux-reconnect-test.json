@@ -1,0 +1,136 @@
+{
+	"description": "rtlmux reconnect use-after-free regression harness (scripts/native-patches/test_rtlmux_reconnect.py via run-rtlmux-tests.sh). Fake rtl_tcp on loopback; no radio.",
+	"date": "2026-10-09",
+	"upstream": "https://gitlab.com/slepp/rtlmux.git 60bc8de9cc4085603463801d6d1fe20da7c28484",
+	"patch": "scripts/native-patches/rtlmux-server-reconnect.patch",
+	"sourceCommit": "9d111fc",
+	"scenarios": {
+		"down": "SET_RATE live, then rtl_tcp stopped; 8 SET_FREQ over ~3.6 s across reconnect cycles; no crash; latest freq + rate replayed on the new session; IQ resumes",
+		"retune": "two live retunes forwarded; rtl_tcp restarted; new session receives only the latest freq",
+		"header": "server with bad magic; 6 SET_FREQ while rtlmux drops it; nothing sent to bad sessions; replay once a valid server returns"
+	},
+	"runs": {
+		"asan": {
+			"command": "bash scripts/native-patches/run-rtlmux-tests.sh memory (pass 1)",
+			"build": "debian:bookworm-slim linux/amd64, gcc -O1 -g -fsanitize=address, system libevent 2.1.12 (uninstrumented)",
+			"candidate": {
+				"down": {
+					"pass": true,
+					"seconds": 5.61
+				},
+				"retune": {
+					"pass": true,
+					"seconds": 2.06
+				},
+				"header": {
+					"pass": true,
+					"seconds": 4.62
+				}
+			},
+			"baseline": {
+				"down": {
+					"pass": false,
+					"memoryError": "==4065==ERROR: AddressSanitizer: SEGV on unknown address 0x000100000065 (pc 0x7ff791340acf bp 0x000100000045 sp 0x7ff78f9feaf0 T1)",
+					"stack": [
+						"==4065==ERROR: AddressSanitizer: SEGV on unknown address 0x000100000065 (pc 0x7ff791340acf bp 0x000100000045 sp 0x7ff78f9feaf0 T1)",
+						"==4065==The signal is caused by a READ memory access.",
+						"#0 0x7ff791340acf in evbuffer_add (/lib/x86_64-linux-gnu/libevent-2.1.so.7+0x14acf)",
+						"#1 0x7ff7913425cf in bufferevent_write (/lib/x86_64-linux-gnu/libevent-2.1.so.7+0x165cf)",
+						"#2 0x5620b53629e1 in serverSendCommand /src/base-asan/rtlmux.c:298"
+					]
+				},
+				"retune": {
+					"pass": true,
+					"seconds": 2.02
+				},
+				"header": {
+					"pass": false,
+					"memoryError": "==4082==ERROR: AddressSanitizer: SEGV on unknown address 0x000100000065 (pc 0x7f7be3448acf bp 0x000100000045 sp 0x7f7be19feaf0 T1)",
+					"stack": [
+						"==4082==ERROR: AddressSanitizer: SEGV on unknown address 0x000100000065 (pc 0x7f7be3448acf bp 0x000100000045 sp 0x7f7be19feaf0 T1)",
+						"==4082==The signal is caused by a READ memory access.",
+						"#0 0x7f7be3448acf in evbuffer_add (/lib/x86_64-linux-gnu/libevent-2.1.so.7+0x14acf)",
+						"#1 0x7f7be344a5cf in bufferevent_write (/lib/x86_64-linux-gnu/libevent-2.1.so.7+0x165cf)",
+						"#2 0x559342c029e1 in serverSendCommand /src/base-asan/rtlmux.c:298"
+					]
+				}
+			},
+			"result": "pass",
+			"baselineMemoryErrorDetected": true
+		},
+		"valgrind": {
+			"command": "bash scripts/native-patches/run-rtlmux-tests.sh memory (pass 2)",
+			"build": "debian:bookworm-slim linux/amd64, gcc -O1 -g, valgrind memcheck; one scoped suppression for the pre-existing uninitialised sa_mask in upstream main.c sigaction",
+			"candidate": {
+				"down": {
+					"pass": true,
+					"seconds": 8.0
+				},
+				"retune": {
+					"pass": true,
+					"seconds": 5.12
+				},
+				"header": {
+					"pass": true,
+					"seconds": 8.41
+				}
+			},
+			"baseline": {
+				"down": {
+					"pass": false,
+					"memoryError": "==4129== Invalid read of size 8",
+					"stack": [
+						"==4129== Invalid read of size 8",
+						"==4129==    at 0x486B5C4: bufferevent_write (in /usr/lib/x86_64-linux-gnu/libevent-2.1.so.7.0.1)",
+						"==4129==    by 0x10BC17: serverSendCommand (rtlmux.c:298)",
+						"==4129==    by 0x10BCCF: clientReadCB (rtlmux.c:326)",
+						"==4129==    by 0x486BF37: bufferevent_run_readcb_ (in /usr/lib/x86_64-linux-gnu/libevent-2.1.so.7.0.1)"
+					]
+				},
+				"retune": {
+					"pass": true,
+					"seconds": 9.45
+				},
+				"header": {
+					"pass": false,
+					"memoryError": "==4146== Invalid read of size 8",
+					"stack": [
+						"==4146== Invalid read of size 8",
+						"==4146==    at 0x486B5C4: bufferevent_write (in /usr/lib/x86_64-linux-gnu/libevent-2.1.so.7.0.1)",
+						"==4146==    by 0x10BC17: serverSendCommand (rtlmux.c:298)",
+						"==4146==    by 0x10BCCF: clientReadCB (rtlmux.c:326)",
+						"==4146==    by 0x486BF37: bufferevent_run_readcb_ (in /usr/lib/x86_64-linux-gnu/libevent-2.1.so.7.0.1)"
+					]
+				}
+			},
+			"result": "pass",
+			"baselineMemoryErrorDetected": true
+		},
+		"releaseArm64": {
+			"command": "bash scripts/native-patches/run-rtlmux-tests.sh release wavekit-sdr-host:operator-20261008b",
+			"binary": "/usr/local/bin/rtlmux from wavekit-sdr-host:operator-20261008b (ARM64, run under emulation, functional only)",
+			"binarySha256": "69e53b9f7f7099f91f96615f3dbd062bacdd0f8735f2b6d585477775cb048ab9",
+			"candidate": {
+				"down": {
+					"pass": true,
+					"seconds": 5.57
+				},
+				"retune": {
+					"pass": true,
+					"seconds": 3.62
+				},
+				"header": {
+					"pass": true,
+					"seconds": 5.63
+				}
+			},
+			"result": "pass"
+		}
+	},
+	"notes": [
+		"Unpatched builds fault in serverSendCommand (rtlmux.c:298) -> bufferevent_write on the freed upstream bufferevent; retune is a regression guard and passes on both.",
+		"rtlmux binds its stats HTTP listener to \"::\" with AI_ADDRCONFIG, so test containers need a non-loopback IPv6 address (dedicated IPv6 bridge network). Production uses network_mode: host.",
+		"Fable pre-merge review: MERGE-WITH-NITS, no material findings; harness nits applied."
+	],
+	"result": "pass"
+}

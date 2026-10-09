@@ -227,9 +227,46 @@ describe("SourceStatusPublisher", () => {
 		expect(sourceManager.listenerCount("connected")).toBe(0)
 	})
 
+	it("publishes a rate-truth flag immediately and its clearing too", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses[0]!.rateMismatch = {
+			declaredSampleRateHz: 2_048_000,
+			measuredSampleRateHz: 2_160_000,
+			deviation: 0.0547,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.emit("rate-truth-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl"])
+		expect(
+			broadcaster.broadcastSourceStatus.mock.calls[0]![0].rateMismatch,
+		).toEqual({
+			declaredSampleRateHz: 2_048_000,
+			measuredSampleRateHz: 2_160_000,
+			deviation: 0.0547,
+			since: "2026-10-09T01:00:00.000Z",
+		})
+		// A drifting measurement alone is not a state change.
+		sourceManager.statuses[0]!.rateMismatch.measuredSampleRateHz = 2_161_000
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl"])
+		delete sourceManager.statuses[0]!.rateMismatch
+		sourceManager.emit("rate-truth-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl", "rtl"])
+		expect(
+			broadcaster.broadcastSourceStatus.mock.calls[1]![0],
+		).not.toHaveProperty("rateMismatch")
+	})
+
 	it("carries exactly the fields of the REST GET /api/sources item", async () => {
 		vi.useRealTimers()
 		sourceManager.statuses[0]!.lastError = "connection reset"
+		sourceManager.statuses[0]!.rateMismatch = {
+			declaredSampleRateHz: 2_048_000,
+			measuredSampleRateHz: 2_160_000,
+			deviation: 0.0547,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
 		const app = Fastify()
 		await app.register(sourceRoutes, {
 			sourceManager: sourceManager as never,
@@ -248,6 +285,11 @@ describe("SourceStatusPublisher", () => {
 			consumers: 2,
 			assignments: [{ decoderId: "dmr" }],
 			lastError: "connection reset",
+			rateMismatch: {
+				declaredSampleRateHz: 2_048_000,
+				measuredSampleRateHz: 2_160_000,
+				since: "2026-10-09T01:00:00.000Z",
+			},
 		})
 	})
 })

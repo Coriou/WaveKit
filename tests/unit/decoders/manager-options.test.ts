@@ -74,6 +74,29 @@ describe("createDecoderManagerOptions", () => {
 		).toMatchObject({ idleTimeout: 120_000, healthCheckInterval: 2000 })
 	})
 
+	it("passes health.faultAfterFailures through only when configured", () => {
+		expect(
+			createDecoderManagerOptions(
+				HealthConfigSchema.parse({ faultAfterFailures: 3 }),
+			),
+		).toMatchObject({ faultAfterFailures: 3 })
+		expect(
+			createDecoderManagerOptions(HealthConfigSchema.parse({})),
+		).not.toHaveProperty("faultAfterFailures")
+		expect(() => HealthConfigSchema.parse({ faultAfterFailures: 0 })).toThrow()
+	})
+
+	it("passes health.bandSuspension through only when configured", () => {
+		expect(
+			createDecoderManagerOptions(
+				HealthConfigSchema.parse({ bandSuspension: false }),
+			),
+		).toMatchObject({ bandSuspension: false })
+		expect(
+			createDecoderManagerOptions(HealthConfigSchema.parse({})),
+		).not.toHaveProperty("bandSuspension")
+	})
+
 	it("reports a YAML-configured idle timeout as DecoderStatus.idleTimeoutMs", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "wavekit-health-"))
 		cleanups.push(() => rmSync(dir, { recursive: true, force: true }))

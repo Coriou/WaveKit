@@ -65,6 +65,25 @@ export type TunerGainMode = "manual" | "agc"
 export type TunerDirectSampling = "off" | "i" | "q"
 export type TunerControlMode = "internal" | "external"
 
+/**
+ * Always-present TunerState fields whose value can be a placeholder: rtl_tcp
+ * has no readback, so the core only knows what it commanded, what it saw a
+ * relay client command, or (frequency, sampleRate) what the config declares.
+ */
+export type TunerStateField =
+	| "frequency"
+	| "sampleRate"
+	| "gainMode"
+	| "gain"
+	| "ppm"
+	| "agcMode"
+	| "biasTee"
+	| "directSampling"
+	| "offsetTuning"
+	| "ifGain"
+	| "tunerIfGain"
+	| "testMode"
+
 export interface TunerState {
 	sourceId: string
 	frequency: number // Hz
@@ -86,6 +105,12 @@ export interface TunerState {
 	lastCommandAt?: string
 	lastError?: string
 	commandCount: number
+	/**
+	 * Fields whose value above is a placeholder the core never commanded or
+	 * observed (e.g. gain set on the SDR host): render them as unknown.
+	 * Absent when every field is known.
+	 */
+	unknownFields?: TunerStateField[]
 }
 
 // API request/response types
@@ -127,5 +152,12 @@ export interface SetXtalRequest {
 	hz: number
 }
 export interface TunerConfigUpdate extends Partial<
-	Omit<TunerState, "sourceId" | "lastCommandAt" | "lastError" | "commandCount">
+	Omit<
+		TunerState,
+		| "sourceId"
+		| "lastCommandAt"
+		| "lastError"
+		| "commandCount"
+		| "unknownFields"
+	>
 > {}

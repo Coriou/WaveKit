@@ -1,57 +1,69 @@
+/* First-boot setup: the same front panel, with the screen reading out the
+   current stage and how long it has run. */
 .boot-panel {
-	max-width: 720px;
+	max-width: 760px;
 }
 .boot-screen {
-	padding: 24px;
+	grid-template-areas: "verdict rate";
+	align-items: start;
+	padding: 20px 20px 22px;
 }
-.boot-screen .verdict {
-	font-size: 1.625rem;
+.boot-clock__value {
+	font: 500 2.25rem/1 var(--face);
+	letter-spacing: -0.02em;
+	color: var(--screen-ink);
+	white-space: nowrap;
 }
-.boot-screen .verdict__detail {
-	margin-top: 12px;
-	max-width: 52ch;
-}
-.boot-age {
+.boot-screen[data-state="unknown"] .boot-clock__value {
 	color: var(--screen-ink-2);
-	font-size: 0.8125rem;
-	margin-top: 20px;
 }
-.boot-steps {
-	margin: 24px 0 16px;
+
+/* Stages as a lamp chain, three across. */
+.boot-chain {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	margin-top: 18px;
 }
-.boot-steps li {
-	display: grid;
-	grid-template-columns: 24px 1fr auto;
-	gap: 12px;
-	align-items: center;
-	padding: 16px 0;
-	border-bottom: 1px solid var(--rule);
+.boot-chain::before {
+	right: calc(100% / 3 - 6px);
 }
-.boot-steps li > span,
-.boot-steps small {
-	color: var(--ink-2);
+.boot-chain [aria-current="step"] .lamp {
+	animation: blink 1.2s steps(2, jump-none) infinite;
 }
-.boot-steps [aria-current="step"] {
-	font-weight: 600;
+
+.boot-note {
+	margin-top: 24px;
+	padding-top: 14px;
+	border-top: 1px solid var(--rule);
 }
-.boot-steps [aria-current="step"] small {
-	color: var(--warn-ink);
+.boot-note[hidden] {
+	display: none;
 }
 .boot-open {
-	margin-top: 20px;
+	margin-top: 16px;
+}
+.boot-open[hidden] {
+	display: none;
 }
 .boot-open a {
 	display: inline-flex;
 	align-items: center;
 	min-height: 44px;
 	color: var(--ink);
+	font-weight: 600;
 	text-underline-offset: 4px;
 }
-@media (max-width: 400px) {
+
+@media (max-width: 420px) {
 	.boot-screen {
-		padding: 18px;
+		grid-template-areas: "verdict" "rate";
+		padding: 16px 14px 18px;
 	}
-	.boot-steps li {
-		gap: 8px;
+}
+@media (max-width: 559px) {
+	.boot-chain {
+		grid-template-columns: 1fr;
+	}
+	.boot-chain::before {
+		right: auto;
 	}
 }
