@@ -5,6 +5,7 @@ import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { receiverExternalNotice } from "../ui/keymap.js"
 import { applyEditKey, startEdit } from "../ui/tuner-edit.js"
 import type { UiState } from "../ui/ui-state.js"
+import { CONTROL_NOTICE_MS } from "../view-models/chrome.js"
 import {
 	controlConfirm,
 	receiverControl,
@@ -51,7 +52,17 @@ export const receiverView: ViewModule = {
 				const t = receiverTuner(state)
 				if (!t) return notice("tuner state ?")
 				if (t.controlMode !== "internal")
-					return notice(receiverExternalNotice(receiverController(state)))
+					return {
+						ui: {
+							...ui,
+							notice: {
+								text: receiverExternalNotice(receiverController(state)),
+								at: state.now,
+								ms: CONTROL_NOTICE_MS,
+							},
+						},
+						effects: [],
+					}
 				return { ui: { ...ui, edit: startEdit(t) }, effects: [] }
 			}
 			case "edit-key":

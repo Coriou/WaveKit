@@ -16,6 +16,12 @@ import {
 	type KeyContext,
 } from "../../../cli/source/ui/keymap.js"
 import { lineText } from "../../../cli/source/ui/text.js"
+import {
+	CONTROL_NOTICE_MS,
+	NOTICE_MS,
+	footerWithNotice,
+	noticeShown,
+} from "../../../cli/source/view-models/chrome.js"
 
 const base: KeyContext = {
 	view: "overview",
@@ -351,5 +357,23 @@ describe("design polish: S5 external-control notice", () => {
 		expect(hints()).toContain("c take control")
 		expect(hints(text)).not.toContain("c take control")
 		expect(hints(text)).toContain("r reconnect")
+	})
+	it("shows for 3 s, then the footer has its own c take control back", () => {
+		const notice = {
+			text: receiverExternalNotice("relay client-3 192.0.2.1"),
+			at: 1000,
+			ms: CONTROL_NOTICE_MS,
+		}
+		const at = (t: number): string =>
+			lineText(footerWithNotice(ext, notice, t, 119))
+		expect(at(3999)).toBe(
+			"tuner controlled by relay client-3 192.0.2.1 · c take control  r reconnect  q quit  ? help",
+		)
+		expect(at(4000)).toBe("c take control  r reconnect  q quit  ? help")
+		// Other key notices keep the default lifetime.
+		expect(noticeShown({ text: "x", at: 1000 }, 1000 + NOTICE_MS - 1)).toBe(
+			true,
+		)
+		expect(noticeShown({ text: "x", at: 1000 }, 1000 + NOTICE_MS)).toBe(false)
 	})
 })
