@@ -1,61 +1,43 @@
 # Reliability and portable receiver roadmap
 
-Updated 2026-10-08. The immediate software sequence is below; numbered sections
+Updated 2026-10-09. The immediate software sequence is below; numbered sections
 track related work and acceptance rather than blocking all work on hardware.
 Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate software priorities (re-ordered 2026-10-08 evening)
+## Immediate priorities (re-ordered 2026-10-09)
 
-1. **Deploy the merged core on the Mac.** Tuner-state reconnect
-   synchronization and the rtl_tcp stall watchdog are merged; rebuild the Mac image with all merged core work and
-   redeploy it with the hardware profile. Then repeat end-to-end Pi reboot and
-   USB hotplug recovery through the Mac (a runtime result, separate from the
-   clean-card image claims) and announce the new events to the CLI team.
-   Run the bounded CSDR rings on the live Mac app as an explicit, reversible
-   trial (`csdr.boundedBuffers: true`) to gather real-RF evidence.
-2. **Make the full test suite trustworthy.** Pi script tests time out under
-   host load and one source-routing ownership test is intermittently flaky;
-   fix them so a full-suite pass is meaningful again.
-3. **Rate model, batches B1–B4** per the
-   [instance/suspension addendum](superpowers/specs/2026-10-08-rate-model-instances-and-suspension.md):
-   B1 adapter truth, per-instance declarations, the decimation-factor clamp and
-   rejection of tuner rates librtlsdr cannot run; B2 reversible manager
-   suspension; B3 REST/WebSocket contracts (announced to the CLI team before
-   merge; published through `decoder:status`); B4 wiring and docs.
-4. **Streaming stability on stable power** (replacement supply expected
-   2026-10-09): 30-minute continuous baseline, overnight bounded-CSDR soak with
-   decode counts compared to baseline, quiet-host matched capacity comparison,
-   then decide whether bounded rings become the default.
-5. **Next Pi image** (pulled forward 2026-10-09; the rate model is Mac-side
-   only): carry an rtlmux patch for a use-after-free on commands sent while its
-   upstream is down, include the polished operator and setup pages, and re-run
-   clean-card acceptance including Ethernet.
-6. **Core channelizer** — implementation planning started 2026-10-09 in a
-   dedicated design session (plan only; code after the rate model's
-   suspension lands): real IQ fixture baselines, then the opt-in prototype
-   ([sample-rate/channelizer design](superpowers/specs/2026-10-08-sample-rate-and-channelizer-design.md)).
-   Live evidence 2026-10-09 (loaded Mac, all nine decoders, 2.048 Msps): the
-   app used ~7.5 of 8 cores and every branch dropped 8–36%; four per-decoder
-   `sox rate -h` IQ resamplers alone cost ~1.5 cores. The user chose the
-   channelizer ahead of cheaper per-decoder resampling, which it largely
-   subsumes (raw-fanout readsb keeps its resample; a 2.4 Msps capture removes it).
-7. Later: API access/origin policy (prerequisite for host controls and a web
-   UI).
-8. **Follow-ups from the 2026-10-09 overnight run:**
-   - Rate-truth check: compare a source's measured byte rate with
-     `caps.sampleRate` and flag a mismatch (an external SDR++ client left the
-     dongle at ~2.16 Msps for 8 h while caps said 2.048 Msps, silently breaking
-     decodes).
-   - Band-aware suspension: suspension today reacts to sample rate only;
-     decoders whose band the center frequency no longer covers (followCenter
-     included) should also suspend, the main CPU saving at a single tuned band.
-   - Tuner state over-claims gain (`agc`/0 dB reported, Pi runs manual 49 dB)
-     because the core reports defaults it never set; report unknown instead.
-   - Pi rebooted ~2 min after a dongle re-plug on battery power (no persistent
-     journal); enable a persistent journal or boot reason capture on the image
-     to tell brownout from crash.
+Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
+and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
+reversible suspension, `restarting`/crash-loop `faulted` health); bounded CSDR
+rings default on (overnight soak: 0.0 % decoder loss, ~18 MiB vs ~5 GiB); the
+2026-10-09 overnight follow-ups (rate-truth `rateMismatch`, band-aware
+suspension, tuner `unknownFields`, persistent journal and boot report on the
+Pi image); decoder band defaults with regions, persisted per-decoder band
+overrides and operator-start pinning; `source:removed`; the signal-flat source
+warning; the Pi operator page redesign on a single port 80 and the brand kit.
+
+1. **Voice decode test**: an analog radio and a DMR radio transmitting on a chosen
+   frequency. Test dsd-fme (DMR) and live-demod NFM audio with bounded rings,
+   with the operator start pin keeping dsd-fme running off its default band if needed.
+2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
+   only): clean-card flash on stable power, port 80 page, deliberate reboot with
+   the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,
+   Mac auto-reconnect and tuner replay. Waiting on the replacement power supply.
+3. **Streaming stability on stable power**: 30-minute continuous baseline, then an
+   overnight soak with decode counts and no external SDR++ client during it.
+4. **CLI overhaul merge** (CLI team, branch `cli-overhaul`): consumes the
+   2026-10-09 contracts; lands as one merge touching only CLI paths.
+5. **Core channelizer**: plan written 2026-10-09
+   ([plan](superpowers/plans/2026-10-09-core-channelizer.md)); implement in a
+   dedicated session after the CLI merge. Live evidence 2026-10-09 (loaded
+   Mac, all nine decoders, 2.048 Msps): ~7.5 of 8 cores, every branch dropped
+   8–36 %; four per-decoder `sox rate -h` resamplers cost ~1.5 cores. Band-aware
+   suspension and pinning reduce load at a single tuned band in the meantime.
+6. Later: API access/origin policy (prerequisite for host controls and a web
+   UI); a stale `caps.centerFreq` after a retune that bypasses the relay can
+   miss band suspensions.
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
