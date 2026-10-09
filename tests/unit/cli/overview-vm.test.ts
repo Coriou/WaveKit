@@ -65,7 +65,8 @@ describe("overview view-model", () => {
 			.join("\n")
 		expect(text).toContain("MESSAGES  feed stopped")
 		expect(text).toMatch(/── gap since \d\d:\d\d:\d\d · 2m ──/)
-		expect(text).toMatch(/dsd-fme .* ago/)
+		// M12: a last decode older than a minute reads as a ticking `none for` age.
+		expect(text).toMatch(/dsd-fme .*none (for )?2m/)
 	})
 	it("explains a cold start with the API down", () => {
 		const text = overviewModel(

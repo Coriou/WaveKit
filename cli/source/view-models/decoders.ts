@@ -460,7 +460,7 @@ export function decodersModel(
 	const result = open ? null : latestDecoderResult(state, state.now)
 	const table = decoderTable(
 		facts,
-		"decoders",
+		open && b.placement.kind === "right" ? "decoders-pane" : "decoders",
 		listWidth,
 		b.listRows,
 		selected?.row.id ?? null,

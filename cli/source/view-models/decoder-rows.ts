@@ -71,6 +71,8 @@ export interface DecoderFacts {
 	oldFanout: boolean
 	/** Sources or tuner lane older than the TTL: window and band render dim. */
 	oldWindow: boolean
+	/** Decodes of this decoder in the message feed over the last 60 s (M12). */
+	feed60: number
 }
 
 const compute = memoOne(
@@ -83,9 +85,16 @@ const compute = memoOne(
 		tuner: AppState["tuner"],
 		relay: AppState["relay"],
 		stopped: readonly string[],
+		ring: AppState["messages"]["ring"],
+		_ringVersion: number,
 		now: number,
 	): DecoderFacts[] => {
 		const rows = decoders.value ?? []
+		// M12: decodes per decoder in the feed's last minute (local receipt times).
+		const feed60: Record<string, number> = Object.create(null)
+		for (const e of ring.entries)
+			if (e.receivedAt >= now - 60_000)
+				feed60[e.decoderId] = (feed60[e.decoderId] ?? 0) + 1
 		const oldRest = isOld(decoders, now)
 		const fanoutFresh = isFresh(fanout, now)
 		const oldFanout = isOld(fanout, now)
@@ -133,6 +142,7 @@ const compute = memoOne(
 				fanoutFresh,
 				oldFanout,
 				oldWindow,
+				feed60: feed60[row.id] ?? 0,
 			}
 		})
 	},
@@ -148,6 +158,8 @@ export function decoderFacts(state: AppState): DecoderFacts[] {
 		state.tuner,
 		state.relay,
 		state.actions.stoppedByCli,
+		state.messages.ring,
+		state.messages.version,
 		state.now,
 	)
 }
@@ -236,33 +248,38 @@ function processCell(f: DecoderFacts, now: number): Cell {
 	}
 }
 
+/**
+ * M12: the rate leads (`2/min`), the age is added when there is room
+ * (`2/min · 25s ago`). The rate is core's counter rate, else the feed's count
+ * over the last minute. A last decode older than a minute reads
+ * `none for 6m`; never decoded: `none for <uptime>`.
+ */
 function decodesCell(f: DecoderFacts, now: number): Cell {
 	const d = f.decodes
+	const sep = ` ${glyphs().sep} `
 	const ago = (at: number): string => `${formatAge(now - at)} ago`
-	switch (d.kind) {
-		case "na":
-			return cell([sp(glyphs().na, "label")])
-		case "rate": {
-			const rate = formatEventRate(d.perSec)
-			return d.lastAt === null
-				? cell([sp(rate)])
-				: cell(
-						[sp(ago(d.lastAt))],
-						[sp(`${rate} ${glyphs().sep} ${ago(d.lastAt)}`)],
-					)
-		}
-		case "last":
-			return cell([sp(ago(d.lastAt))])
-		case "none": {
-			const dur = formatDuration(d.uptimeSec)
-			return cell(
-				[sp(`none ${dur}`, "neutral")],
-				[sp(`none for ${dur}`, "neutral")],
-			)
-		}
-		case "total":
-			return cell([sp(`${formatCount(d.count)} total`)])
+	const none = (age: string): Cell =>
+		cell([sp(`none ${age}`, "neutral")], [sp(`none for ${age}`, "neutral")])
+	if (d.kind === "na") return cell([sp(glyphs().na, "label")])
+	if (d.kind === "none") return none(formatDuration(d.uptimeSec))
+	if (d.kind === "total") return cell([sp(`${formatCount(d.count)} total`)])
+	const lastAt = d.lastAt
+	const rate =
+		d.kind === "rate"
+			? formatEventRate(d.perSec)
+			: f.feed60 > 0
+				? `${formatCount(f.feed60)}/min`
+				: null
+	if (rate === null) {
+		if (lastAt !== null && now - lastAt > 60_000)
+			return none(formatAge(now - lastAt))
+		return lastAt !== null
+			? cell([sp(ago(lastAt))])
+			: cell([sp("?", "unknown")])
 	}
+	return lastAt === null
+		? cell([sp(rate)])
+		: cell([sp(rate)], [sp(`${rate}${sep}${ago(lastAt)}`)])
 }
 
 const NA = (): Cell => cell([sp(glyphs().na, "label")])
@@ -388,7 +405,7 @@ export const OVERVIEW_COLUMNS: ColumnSpec[] = [
 	col("decodes", 16, 16, 1, "left", header("decodes")),
 	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
 	col("lifetime", 8, 8, 4, "right", header("lifetime")),
-	col("nominal", 15, 15, 3, "left", header("nominal MHz")),
+	col("nominal", 15, 15, 3, "left", header("band MHz")),
 	col("window", 6, 6, 2, "left", header("window")),
 ]
 
@@ -404,10 +421,10 @@ export const DECODERS_COLUMNS: ColumnSpec[] = [
 	col("errors", 6, 6, 5, "right", header("errors")),
 	col("decodes", 15, 15, 1, "left", header("decodes")),
 	col("events", 6, 6, 6, "right", header("events")),
-	col("iq", 8, 9, 6, "right", header("IQ in")),
+	col("iq", 8, 9, 6, "right", header("iq in")),
 	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
 	col("lifetime", 8, 8, 4, "right", header("lifetime")),
-	col("nominal", 15, 15, 7, "left", header("nominal MHz")),
+	col("nominal", 15, 15, 7, "left", header("band MHz")),
 	col("window", 6, 6, 2, "left", header("window")),
 ]
 
@@ -423,7 +440,15 @@ const NARROW_COLUMNS: ColumnSpec[] = [
 const NARROW_BELOW = 79
 
 /** Which table a view lays out; the kind, not a column array, selects the narrow set (R52 m4). */
-export type DecoderTableKind = "overview" | "decoders"
+/**
+ * S10: beside a right detail pane (~111 columns at 200) the band column
+ * outranks the counters, so events and iq in go first and the band stays.
+ */
+const DECODERS_PANE_COLUMNS: ColumnSpec[] = DECODERS_COLUMNS.map(c =>
+	c.id === "nominal" ? { ...c, priority: 3 } : c,
+)
+
+export type DecoderTableKind = "overview" | "decoders" | "decoders-pane"
 
 /** The columns a table lays out at `width`: its standard set, or the narrow set below 79 columns. */
 export function decoderColumns(
@@ -431,7 +456,8 @@ export function decoderColumns(
 	width: number,
 ): readonly ColumnSpec[] {
 	if (width < NARROW_BELOW) return NARROW_COLUMNS
-	return kind === "overview" ? OVERVIEW_COLUMNS : DECODERS_COLUMNS
+	if (kind === "overview") return OVERVIEW_COLUMNS
+	return kind === "decoders-pane" ? DECODERS_PANE_COLUMNS : DECODERS_COLUMNS
 }
 
 /** With a configured band on screen the band column gains a column for the mark and says what it means (I1). */
@@ -446,7 +472,8 @@ function withConfiguredMark(
 	const widest = Math.max(
 		...configured.map(f => cellWidth(f.nominal) + CONFIGURED_MARK.length),
 	)
-	const headText = `nominal MHz ${CONFIGURED_MARK}cfg`
+	// M13: the header stays `band MHz`; the `*` is explained by the help legend.
+	const headText = "band MHz"
 	return cols.map(c => {
 		if (c.id !== "nominal") return c
 		const w = Math.max(c.pref + 1, widest, cellWidth(headText))
