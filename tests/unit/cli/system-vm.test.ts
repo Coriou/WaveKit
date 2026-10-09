@@ -372,7 +372,7 @@ describe("system view-model (spec §6.5)", () => {
 			const lines = at(odd)
 			expect(lines.find(l => l.startsWith("rtl_tcp"))).toContain("pid ?")
 			expect(lines.find(l => l.startsWith("sampling"))).toMatch(
-				/^sampling {2}\? \?/,
+				/^sampling {2}\? · sample age \?/,
 			)
 			const limited = {
 				...live,
@@ -417,6 +417,54 @@ describe("system view-model (spec §6.5)", () => {
 				live.now,
 			)
 			expect(at(st)).toContain("result    audio start sending")
+		})
+	})
+
+	describe("C3 fix round 2", () => {
+		const live = scenarioState("live")
+		const r = live.resources.value!
+		const host = r.sdrHosts[0]!
+		const sampling = {
+			state: "streaming" as const,
+			reason: null,
+			timeoutMs: 5000,
+			lastSampleAt: null,
+			sampleAgeMs: 200,
+			upstream: {
+				bytesTotal: 1,
+				bytesPerSec: 4096000,
+				windowMs: 2000,
+				expectedBytesPerSec: 4096000,
+				rateBasis: "configured" as const,
+				rateStatus: "nominal" as const,
+			},
+			epoch: {
+				rtlmuxPid: 63,
+				rtlTcpPid: 58,
+				startedAt: null,
+				resets: 0,
+				lastResetReason: null,
+			},
+			stats: {
+				state: "ok" as const,
+				observedAt: null,
+				ageMs: 200,
+				lastError: null,
+			},
+		}
+		it("sampling upstream rate reads ? on an old lane (T6)", () => {
+			const st = {
+				...live,
+				resources: laneOk(
+					{ ...r, sdrHosts: [{ ...host, sampling }] },
+					live.now - 60_000,
+					"rest" as const,
+				),
+			}
+			const line = systemLines(st, 119, 35, true)
+				.map(lineText)
+				.find(l => l.startsWith("sampling"))
+			expect(line).toContain("· ? upstream (nominal) ·")
 		})
 	})
 })

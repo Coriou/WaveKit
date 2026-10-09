@@ -788,10 +788,23 @@ function dropUnknownReason(state: AppState): string {
 	if (dec.some(b => b.totalBytesWritten === undefined))
 		return "core reports no offered bytes"
 	const h = state.fanoutHistory
-	const span = h.length >= 2 ? (h[h.length - 1]?.t ?? 0) - (h[0]?.t ?? 0) : 0
+	const oldest = h[0]
+	const newest = h[h.length - 1]
+	const span = oldest && newest ? newest.t - oldest.t : 0
 	if (h.length < 2 || span < MIN_DROP_SPAN_MS) return "needs 2 snapshots in 10s"
 	if (counterReset(h)) return "a counter was reset"
-	return "no IQ offered in 10s"
+	// Branches in both the oldest and the newest sample (the aggregate's rule, R4).
+	const both = Object.entries(newest?.branches ?? {}).filter(
+		([id, b]) =>
+			b.decoderId !== undefined && oldest?.branches[id] !== undefined,
+	)
+	if (both.length === 0) return "no branch in both samples"
+	const offered = both.reduce(
+		(sum, [id, b]) =>
+			sum + (b.offered ?? 0) - (oldest?.branches[id]?.offered ?? 0),
+		0,
+	)
+	return offered <= 0 ? "no IQ offered in 10s" : "too few samples per branch"
 }
 
 function fanoutBlock(state: AppState, width: number): Row[] {
@@ -869,33 +882,39 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 		: undefined
 	const upOld = isOld(state.resources, now)
 	const upRole: Role = upOld ? "old" : "value"
-	const upGroups: Group[] = up
-		? [
-				one(
-					0,
-					txt(
-						`${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
-						upRole,
+	// Core sends one entry per source; available: false means no rtlmux stats. With
+	// no SDR host for the source that is not applicable (—); with one it is unknown (?).
+	const hasHost =
+		src !== undefined &&
+		(resources?.sdrHosts.some(h => h.sourceId === src.id) ?? false)
+	const upGroups: Group[] =
+		up?.available === true
+			? [
+					one(
+						0,
+						txt(
+							`${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							upRole,
+						),
+						txt(
+							`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							upRole,
+						),
 					),
-					txt(
-						`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
-						upRole,
+					// A rate "now" from an old lane is unknown, not a dimmed number (T6).
+					one(1, txt(`${upOld ? "?" : formatRate(up.dropRate)} now`, upRole)),
+					one(
+						2,
+						txt(
+							`checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`,
+							upRole,
+						),
 					),
-				),
-				// A rate "now" from an old lane is unknown, not a dimmed number (T6).
-				one(1, txt(`${upOld ? "?" : formatRate(up.dropRate)} now`, upRole)),
-				one(
-					2,
-					txt(
-						`checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`,
-						upRole,
-					),
-				),
-			]
-		: resources
-			? // Core reports SDR hosts but none for this source: not applicable.
-				[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
-			: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
+				]
+			: resources && !hasHost
+				? // No SDR host for this source: not applicable.
+					[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
+				: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
 	return [
 		essential(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),

@@ -302,8 +302,9 @@ function hostBlock(
 					: smp.state === "unknown"
 						? "unknown"
 						: "fault"
+		// A rate from an old lane is unknown, not a dimmed number (T6).
 		const rate =
-			smp.upstream.bytesPerSec === null
+			smp.upstream.bytesPerSec === null || old
 				? "?"
 				: formatRate(smp.upstream.bytesPerSec)
 		rows.push(
@@ -311,10 +312,13 @@ function hostBlock(
 				fitDot(
 					lbl("sampling"),
 					[
-						one(0, [
-							glyphSpan(glyph),
-							sp(` ${smp.state === "unknown" ? "?" : smp.state}`, role),
-						]),
+						// An unknown state is the ? glyph alone, not "? ?".
+						one(
+							0,
+							smp.state === "unknown"
+								? [glyphSpan(glyph)]
+								: [glyphSpan(glyph), sp(` ${smp.state}`, role)],
+						),
 						one(1, txt(`sample age ${formatSampleAge(smp.sampleAgeMs)}`, role)),
 						one(2, txt(`${rate} upstream (${smp.upstream.rateStatus})`, role)),
 						one(3, txt(`${smp.epoch.resets} resets`, role)),

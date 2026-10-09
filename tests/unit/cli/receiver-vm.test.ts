@@ -6,6 +6,7 @@ import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { SCENARIO_NAMES } from "../../../cli/source/test/scenario-types.js"
 import { findBanned } from "../../../cli/source/ui/copy-rules.js"
 import { formatClock } from "../../../cli/source/ui/format.js"
+import { stripInput } from "../../../cli/source/view-models/chrome.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { applyEditKey, startEdit } from "../../../cli/source/ui/tuner-edit.js"
 import type { EditKey } from "../../../cli/source/ui/actions.js"
@@ -479,7 +480,7 @@ describe("receiver view-model (spec §6.4)", () => {
 			const noHost = {
 				...live,
 				resources: laneOk(
-					{ ...live.resources.value!, sourceBackpressure: [] },
+					{ ...live.resources.value!, sdrHosts: [], sourceBackpressure: [] },
 					live.now - 2000,
 					"rest" as const,
 				),
@@ -606,6 +607,83 @@ describe("receiver view-model (spec §6.4)", () => {
 			}
 			expect(at(two).find(l => l.startsWith("SOURCE"))).toContain("+1 source")
 			expect(controlConfirm(two)?.yes).toBe("take")
+		})
+	})
+
+	describe("C3 fix round 2", () => {
+		const live = scenarioState("live")
+		const at = (st: AppState) =>
+			receiverLines(st, initialUi("receiver"), 119, 35, true).map(lineText)
+		const res = live.resources.value!
+		it("an upstream entry without rtlmux stats is ? with a host, — without (never 0 B)", () => {
+			const unavailable = res.sourceBackpressure.map(b => ({
+				...b,
+				available: false,
+				bytesDroppedUpstream: 0,
+				dropPercent: 0,
+			}))
+			const withHost = {
+				...live,
+				resources: laneOk(
+					{ ...res, sourceBackpressure: unavailable },
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(at(withHost).find(l => l.startsWith("upstream"))).toBe(
+				"upstream  Pi rtlmux → core: ? (no SDR host data)",
+			)
+			const noHost = {
+				...live,
+				resources: laneOk(
+					{ ...res, sdrHosts: [], sourceBackpressure: unavailable },
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(at(noHost).find(l => l.startsWith("upstream"))).toBe(
+				"upstream  Pi rtlmux → core: —",
+			)
+		})
+		it("says no branch is in both samples when the branch set changed", () => {
+			const st = scenarioState("iq-stale")
+			const [first, ...rest] = st.fanoutHistory
+			const renamed = first
+				? {
+						...first,
+						branches: Object.fromEntries(
+							Object.entries(first.branches).map(([id, b]) => [`old-${id}`, b]),
+						),
+					}
+				: undefined
+			const moved = {
+				...st,
+				fanoutHistory: renamed ? [renamed, ...rest] : rest,
+			}
+			expect(at(moved).find(l => l.startsWith("FANOUT"))).toContain(
+				"drop now ? · no branch in both samples",
+			)
+			expect(at(st).find(l => l.startsWith("FANOUT"))).toContain(
+				"drop now ? · no IQ offered in 10s",
+			)
+		})
+		it("the strip's rx uses the same tuner as the Receiver (item 5)", () => {
+			const src = live.sources.value![0]!
+			const other = {
+				...live.tuner.value![0]!,
+				sourceId: "usb-iq",
+				frequency: 162_000_000,
+			}
+			const st = {
+				...live,
+				tuner: laneOk(
+					[other, live.tuner.value![0]!],
+					live.now - 2000,
+					"rest" as const,
+				),
+			}
+			expect(stripInput(st).rx?.centreHz).toBe(445_970_700)
+			expect(src.id).toBe("pi-iq")
 		})
 	})
 })

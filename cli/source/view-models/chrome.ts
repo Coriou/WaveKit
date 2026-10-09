@@ -18,6 +18,7 @@ import type { StripInput } from "../ui/strip.js"
 import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
+import { receiverTuner } from "./receiver.js"
 
 export function stripInput(state: AppState): StripInput {
 	const now = state.now
@@ -58,7 +59,8 @@ export function stripInput(state: AppState): StripInput {
 	const agg = isFresh(state.fanout, now)
 		? aggregateDropNow(state.fanoutHistory)
 		: null
-	const tuner = state.tuner.value?.[0]
+	// The same tuner the Receiver shows: the one for the rendered source (R72 item 5).
+	const tuner = receiverTuner(state)
 	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
 	const src = state.sources.value?.find(x => x.id === sourceId)
 	const relay = state.relay.value
