@@ -83,18 +83,13 @@ const config = (
 	options: { inputSampleRate: 2_048_000, ...options },
 })
 
-// Test-only migrations: flip the flag a migration task (28–31) flips for real.
+// Test-only migrations: flip the flag a migration task (31) flips for real.
 class ChannelisedDsdFme extends DsdFmeDecoder {
 	protected override channelizerSupported(): boolean {
 		return true
 	}
 }
 class ChannelisedAcarsdec extends AcarsdecDecoder {
-	protected override channelizerSupported(): boolean {
-		return true
-	}
-}
-class ChannelisedDumpvdl2 extends Dumpvdl2Decoder {
 	protected override channelizerSupported(): boolean {
 		return true
 	}
@@ -192,7 +187,6 @@ describe("channel requests (addendum §1, §2)", () => {
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
 		for (const type of [
-			"dumpvdl2",
 			"rtl433",
 			"direwolf",
 			"multimon-ng",
@@ -346,7 +340,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("dumpvdl2 requests the span midpoint, wide enough for every frequency", () => {
-		const d = new ChannelisedDumpvdl2(
+		const d = new Dumpvdl2Decoder(
 			config("dumpvdl2", {
 				// 950 kHz span + 50 kHz exceeds the default 997 500 Hz passband
 				frequencies: [136_000_000, 136_950_000],
@@ -371,7 +365,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			admitChannel(req, { sampleRateHz: 2_048_000, centerHz: 136.5e6 }, 0.9),
 		).toEqual({ admitted: true, offsetHz: -25_000 })
 		// A span that leaves no room for a transition band is invalid.
-		const wide = new ChannelisedDumpvdl2(
+		const wide = new Dumpvdl2Decoder(
 			config("dumpvdl2", {
 				frequencies: [136_000_000, 137_000_000],
 				targetSampleRate: 1_050_000,
@@ -384,14 +378,14 @@ describe("channel requests (addendum §1, §2)", () => {
 			invalid: "frequency span 1000000 Hz needs targetSampleRate > 1050000",
 		})
 		// The default VDL2 list (325 kHz span) keeps the §2 default passband.
-		const defaults = new ChannelisedDumpvdl2(config("dumpvdl2", {}), logger)
+		const defaults = new Dumpvdl2Decoder(config("dumpvdl2", {}), logger)
 		expect(
 			defaults.getChannelRequest({
 				sampleRateHz: 2_048_000,
 				centerHz: 136.8e6,
 			}),
 		).toMatchObject({ bandwidthHz: 997_500, transitionHz: 26_250 })
-		const follow = new ChannelisedDumpvdl2(
+		const follow = new Dumpvdl2Decoder(
 			config("dumpvdl2", { followCenter: true }),
 			logger,
 		)
@@ -422,5 +416,32 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(chan.startsWith("AIS-catcher -r CU8 . -s 384000")).toBe(true)
 		// The raw path still resamples the capture with SoX.
 		expect(pipelineOf(make("ais-catcher"))).toMatch(/^sox /)
+	})
+
+	it("dumpvdl2 requests one channel spanning its frequencies and tunes --centerfreq to it", () => {
+		const d = make("dumpvdl2", {
+			frequencies: [136_650_000, 136_975_000],
+			inputCenterFreq: 136.8e6,
+		})
+		expect(
+			d.getChannelRequest?.({ sampleRateHz: 2_048_000, centerHz: 136.8e6 }),
+		).toEqual({
+			centerHz: 136_812_500,
+			bandwidthHz: 997_500,
+			transitionHz: 26_250,
+			outputRateHz: 1_050_000,
+			format: "cu8",
+		})
+		// The manager injects the delivered rate and the channel centre.
+		const chan = pipelineOf(
+			make("dumpvdl2", {
+				frequencies: [136_650_000],
+				inputSampleRate: 1_050_000,
+				inputCenterFreq: 136_812_500,
+			}),
+		)
+		expect(chan).toContain("--centerfreq 136812500")
+		expect(chan).not.toMatch(/sox/)
+		expect(chan.startsWith("dumpvdl2 ")).toBe(true)
 	})
 })

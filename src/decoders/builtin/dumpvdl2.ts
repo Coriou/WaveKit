@@ -228,6 +228,11 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 				}
 	}
 
+	/** Migrated to the opt-in core channelizer (addendum §7 step 2). */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
 	/**
 	 * dumpvdl2 channelises internally, so one channel wide enough for the
 	 * whole frequency span is requested, centred on the span midpoint
