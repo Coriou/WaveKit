@@ -30,7 +30,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 " api × 2m 31s  iq ? unknown  rx 445.971 MHz  decoders 1 restarting  drops ?
  ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   ? · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 9m 02s ago
+ window    444.947–446.995 MHz   external control   last cmd 9m 02s ago
    DECODERS          process             decodes           drop now  window
  ● dsd-fme           up 52s              2m 41s ago               ?  in
  ● multimon-ng       up 51s              3m 02s ago               ?  in
@@ -77,7 +77,7 @@ exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
 exports[`Overview goldens (spec §6.1) > live 80x24 1`] = `
 " api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 restarting  drops !21% now
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 6m 32s ago
+ window    444.947–446.995 MHz   external control   last cmd 6m 32s ago
    DECODERS          process             decodes           drop now  window
  ● dsd-fme           up 52s              2/min · 11s ago        12%  in
  ● multimon-ng       up 51s              1/min · 32s ago        14%  in
@@ -105,7 +105,7 @@ exports[`Overview goldens (spec §6.1) > live 120x40 1`] = `
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client
- window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago
+ window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m 32s ago
 
    DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window
  ● dsd-fme           up 52s              2/min · 11s ago        12%       36%  tuned             in
@@ -147,7 +147,7 @@ exports[`Overview goldens (spec §6.1) > live 200x50 1`] = `
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s                MESSAGES  3 in 60s · 7 total
- window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago         18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  quality 65%  encrypted  …
+ window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m 32s ago             18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  quality 65%  encrypted  …
                                                                                                                   18:07:20  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG STREET…
    DECODERS          process             decodes           drop now  lifetime  nominal MHz *cfg  window           18:07:02  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  2 err  …
  ● dsd-fme           up 52s              2/min · 11s ago        12%       36%  tuned             in               18:05:44  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
@@ -198,7 +198,7 @@ exports[`Overview goldens (spec §6.1) > ws-only (REST down) 80x24 1`] = `
 " api ws ● rest × 45s  iq ● streaming  decoders 1 restarting  drops !21% now
  ! REST failing · timeout 2s · retry in 4s · REST data as of 18:07:07
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 7m 15s ago
+ window    444.947–446.995 MHz   external control   last cmd 7m 15s ago
    DECODERS          process             decodes           drop now  window
  ● dsd-fme           up 52s              10s ago                12%  in
  ● multimon-ng       up 51s              31s ago                14%  in

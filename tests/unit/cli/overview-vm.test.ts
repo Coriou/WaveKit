@@ -27,7 +27,7 @@ describe("overview view-model", () => {
 			"RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client",
 		)
 		expect(b).toBe(
-			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago",
+			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m 32s ago",
 		)
 		const [c, d] = receiverSummary(s, 59).map(lineText)
 		expect(c?.startsWith("RECEIVER  pi-iq   ● streaming")).toBe(true)
@@ -281,9 +281,7 @@ describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
 		for (const t of ["external control", "444.947–446.995 MHz"]) {
 			expect(row2!.find(sp => sp.text.includes(t))?.role).toBe("old")
 		}
-		expect(row2!.find(sp => sp.text.startsWith("last command"))?.role).toBe(
-			"old",
-		)
+		expect(row2!.find(sp => sp.text.startsWith("last cmd"))?.role).toBe("old")
 		const [, fresh] = rows(s)
 		expect(
 			fresh!.find(sp => sp.text.includes("external control"))?.role,

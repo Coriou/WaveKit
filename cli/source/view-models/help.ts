@@ -109,7 +109,7 @@ function keyText(keys: readonly string[]): string {
 		"<enter>": "Enter",
 		"<esc>": "Esc",
 		"<tab>": "Tab",
-		"<shift-tab>": "S-Tab",
+		"<shift-tab>": "Shift-Tab",
 		"<space>": "Space",
 		"<backspace>": "Bksp",
 	}
@@ -208,7 +208,7 @@ export function helpLines(
 		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.attention} now  ${g.unknown} unknown`,
 	)
 	body.push(`dim  older than 15 s      ${g.na} not applicable`)
-	body.push("nominal  band from WaveKit's built-in table, not the API")
+	body.push("nominal  band from WaveKit's table · * configured target")
 	body.push(
 		`frames rejected ${diag.invalidFrames} ${g.sep} items rejected ${diag.rejectedItems}`,
 	)

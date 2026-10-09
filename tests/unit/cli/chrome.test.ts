@@ -162,7 +162,7 @@ describe("footer, confirm, switcher, help", () => {
 		const box = lines.filter(l => l.trim() !== "")
 		for (const l of box) expect(cellWidth(l.trimStart())).toBe(60)
 		expect(lines.join("\n")).toContain(
-			"nominal  band from WaveKit's built-in table, not the API",
+			"nominal  band from WaveKit's table · * configured target",
 		)
 		expect(lines.join("\n")).toContain("frames rejected 2 · items rejected 1")
 		expect(findBanned(lines.join("\n"))).toEqual([])
@@ -397,5 +397,18 @@ describe("A8 fix 1: strip counts (I-B, R77) and window count (I-C)", () => {
 			"in window",
 		)
 		expect(stripInput(s).decoders?.inWindow).toBe(2)
+	})
+})
+
+describe("polish: help copy", () => {
+	it("spells Shift-Tab out", () => {
+		const t = helpLines({ ...ctx, help: true }, 119, 40, {
+			invalidFrames: 0,
+			rejectedItems: 0,
+		})
+			.map(lineText)
+			.join("\n")
+		expect(t).toContain("Shift-Tab")
+		expect(t).not.toContain("S-Tab")
 	})
 })

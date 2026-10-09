@@ -242,7 +242,7 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 						variants: [
 							[
 								{
-									text: `last command ${formatAge(now - lastCmd)} ago`,
+									text: `last cmd ${formatAge(now - lastCmd)} ago`,
 									role: role("label", tunerLaneOld),
 								},
 							],
