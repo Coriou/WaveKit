@@ -1,11 +1,12 @@
 {
 	"extends": "live",
 	"name": "decoder-faulted",
-	"description": "acarsdec exhausted its restarts (20) and is faulted; core no longer restarts it.",
+	"description": "acarsdec exhausted its restarts (20) and is faulted: terminal (not running, no restart scheduled) until an explicit start.",
 	"restPatch": {
 		"/api/decoders": {
 			"acarsdec": {
 				"health": "faulted",
+				"nextRestartAt": "$delete",
 				"restartCount": 20,
 				"lastError": {
 					"kind": "exit",

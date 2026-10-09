@@ -13,6 +13,8 @@ export type ScenarioName =
 	| "iq-stale"
 	| "iq-disconnected"
 	| "decoder-faulted"
+	| "contracts"
+	| "tuner-unknown"
 
 export const SCENARIO_NAMES: readonly ScenarioName[] = [
 	"live",
@@ -29,6 +31,8 @@ export const SCENARIO_NAMES: readonly ScenarioName[] = [
 	"iq-stale",
 	"iq-disconnected",
 	"decoder-faulted",
+	"contracts",
+	"tuner-unknown",
 ]
 
 export interface ScenarioRest {
