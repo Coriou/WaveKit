@@ -27,6 +27,7 @@ import {
 	readChannelHz,
 } from "../../../src/decoders/iq-decimate-decoder.js"
 import { audioChannelRequest } from "../../../src/decoders/audio-demod-decoder.js"
+import { admitChannel } from "../../../src/core/channelizer/admission.js"
 
 const logger = pino({ level: "silent" })
 // src/decoders/registry.ts has no default-registry helper; src/index.ts registers these same factories inline.
@@ -282,6 +283,10 @@ describe("channel requests (addendum §1, §2)", () => {
 		})
 		// Pure: computing the request leaves the raw pipeline untouched.
 		expect(pipelineOf(d)).toBe(raw)
+		// The relative offset follows a retune of the same instance.
+		expect(
+			d.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 1.5e8 }),
+		).toMatchObject({ centerHz: 150_006_000 })
 	})
 
 	it("lets channelHz win over offsetHz with one warning (delta E7)", () => {
@@ -344,21 +349,49 @@ describe("channel requests (addendum §1, §2)", () => {
 	it("dumpvdl2 requests the span midpoint, wide enough for every frequency", () => {
 		const d = new ChannelisedDumpvdl2(
 			config("dumpvdl2", {
-				// 1 MHz span + 50 kHz exceeds the default 997 500 Hz passband
+				// 950 kHz span + 50 kHz exceeds the default 997 500 Hz passband
+				frequencies: [136_000_000, 136_950_000],
+				targetSampleRate: 1_050_000,
+			}),
+			logger,
+		)
+		const req = d.getChannelRequest({
+			sampleRateHz: 2_048_000,
+			centerHz: 136.5e6,
+		})
+		// Widened passband, transition shrunk so bw/2 + tr = out/2 (addendum §6).
+		expect(req).toEqual({
+			centerHz: 136_475_000,
+			bandwidthHz: 1_000_000,
+			transitionHz: 25_000,
+			outputRateHz: 1_050_000,
+			format: "cu8",
+		})
+		if (!req || "invalid" in req) throw new Error("expected a request")
+		expect(
+			admitChannel(req, { sampleRateHz: 2_048_000, centerHz: 136.5e6 }, 0.9),
+		).toEqual({ admitted: true, offsetHz: -25_000 })
+		// A span that leaves no room for a transition band is invalid.
+		const wide = new ChannelisedDumpvdl2(
+			config("dumpvdl2", {
 				frequencies: [136_000_000, 137_000_000],
 				targetSampleRate: 1_050_000,
 			}),
 			logger,
 		)
 		expect(
-			d.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 136.5e6 }),
+			wide.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 136.5e6 }),
 		).toEqual({
-			centerHz: 136_500_000,
-			bandwidthHz: 1_050_000,
-			transitionHz: 26_250,
-			outputRateHz: 1_050_000,
-			format: "cu8",
+			invalid: "frequency span 1000000 Hz needs targetSampleRate > 1050000",
 		})
+		// The default VDL2 list (325 kHz span) keeps the §2 default passband.
+		const defaults = new ChannelisedDumpvdl2(config("dumpvdl2", {}), logger)
+		expect(
+			defaults.getChannelRequest({
+				sampleRateHz: 2_048_000,
+				centerHz: 136.8e6,
+			}),
+		).toMatchObject({ bandwidthHz: 997_500, transitionHz: 26_250 })
 		const follow = new ChannelisedDumpvdl2(
 			config("dumpvdl2", { followCenter: true }),
 			logger,

@@ -153,9 +153,8 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 	}): DecoderChannelRequestResult | undefined {
 		if (!this.channelizerSupported()) return undefined
 		const freqs = this.options.frequencies ?? []
-		const channelHz =
-			readChannelHz(this.config.options) ??
-			(freqs.length === 1 ? freqs[0] : undefined)
+		const pinnedHz = readChannelHz(this.config.options)
+		const channelHz = pinnedHz ?? (freqs.length === 1 ? freqs[0] : undefined)
 		if (channelHz === undefined)
 			return {
 				invalid: `acarsdec decodes one AM channel; set options.channelHz (frequencies: ${freqs.join(",")})`,
@@ -163,7 +162,11 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 		return audioChannelRequest(
 			{
 				...this.getDemodConfig(),
-				channelHz: this.resolveChannelHz(channelHz, input),
+				channelHz: this.resolveChannelHz(
+					channelHz,
+					input,
+					pinnedHz !== undefined ? "channelHz" : "frequencies",
+				),
 			},
 			input,
 		)

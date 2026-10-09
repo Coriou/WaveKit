@@ -233,6 +233,8 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 	 * whole frequency span is requested, centred on the span midpoint
 	 * (followCenter: the capture centre). `--centerfreq` follows
 	 * options.inputCenterFreq, which the manager sets to the channel centre.
+	 * Widening shrinks the transition so bw/2 + tr stays within out/2
+	 * (addendum §6 admission); a span that leaves no room is invalid.
 	 */
 	override getChannelRequest(input: {
 		sampleRateHz: number
@@ -253,7 +255,20 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 			},
 			input,
 		)
-		return { ...base, bandwidthHz: Math.max(base.bandwidthHz, span + 50_000) }
+		const neededHz = span + 50_000
+		if (neededHz <= base.bandwidthHz) return base
+		if (neededHz >= base.outputRateHz)
+			return {
+				invalid: `frequency span ${span} Hz needs targetSampleRate > ${neededHz}`,
+			}
+		return {
+			...base,
+			bandwidthHz: neededHz,
+			transitionHz: Math.min(
+				base.transitionHz,
+				(base.outputRateHz - neededHz) / 2,
+			),
+		}
 	}
 
 	/**

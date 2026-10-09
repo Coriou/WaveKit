@@ -341,19 +341,21 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	 * Channel centre (delta E7): an explicit channelHz wins; otherwise
 	 * offsetHz is absorbed as capture centre + offsetHz, which follows
 	 * retunes because every caps change recomputes the request. Undefined
-	 * (offset 0) when the capture centre is unknown.
+	 * (offset 0) when the capture centre is unknown. `source` names where an
+	 * explicit centre came from, for the override warning.
 	 */
 	protected resolveChannelHz(
 		channelHz: number | undefined,
 		input: { centerHz?: number },
+		source = "channelHz",
 	): number | undefined {
 		const offsetHz = this.getOffsetHz()
 		if (channelHz !== undefined) {
 			if (offsetHz !== 0 && !this.channelOverridesOffsetLogged) {
 				this.channelOverridesOffsetLogged = true
 				this.logger.warn(
-					{ channelHz, offsetHz },
-					"channelHz and offsetHz are both set; the channel uses channelHz",
+					{ channelHz, offsetHz, source },
+					"The channel centre overrides offsetHz",
 				)
 			}
 			return channelHz
