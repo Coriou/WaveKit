@@ -55,9 +55,25 @@ describe("csdr bounded ring policy (stage builder)", () => {
 			"csdr gain 3",
 			"csdr limit",
 			"csdr realpart",
+			"csdr shift -0.0029296875",
+			"csdr shift 0.0052083333",
 		]) {
 			expect(boundCsdrStage(stage, on)).toBe(prefix + stage)
 		}
+	})
+
+	it("keeps shift on the upstream ring below its 2050-element minimum", () => {
+		// FixedLengthModule: up to 1024 unread elements plus a 1024 read (harness
+		// 2026-10-09: the patch rejects 2048, 2050 is byte-identical).
+		const stage = "csdr shift -0.0029296875"
+		const small = { enabled: true, elements: 2048 }
+		expect(boundCsdrStage(stage, small)).toBe(stage)
+		expect(boundCsdrStages([stage], small).firFallbacks).toEqual([
+			{ stage, minimumElements: 2050, configuredElements: 2048 },
+		])
+		expect(boundCsdrStage(stage, { enabled: true, elements: 2050 })).toBe(
+			`${CSDR_BUFFER_ENV}=2050 ${stage}`,
+		)
 	})
 
 	it("keeps upstream defaults for stages the harness does not size", () => {
@@ -68,7 +84,6 @@ describe("csdr bounded ring policy (stage builder)", () => {
 			"csdr deemphasis --nfm 48000",
 			"csdr deemphasis --wfm 48000 0.00005",
 			"csdr fft 4096 4096",
-			"csdr shift 0.1",
 			"csdr --async firdecimate 45 0.05",
 			"csdr --async convert -i char -o float",
 			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -",
