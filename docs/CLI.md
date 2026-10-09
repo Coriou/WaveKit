@@ -45,29 +45,29 @@ Row 1 is the **chain strip**, with one lane per link in the chain:
 | `api`      | `api ● 2s` · `api ws ● rest × 45s` · `api × 3m` · `api ○ connecting`                    | `●` appears only when the WebSocket is open **and** REST answered within 15 s. The age is the time since the last REST success.                                                                                                                                       |
 | `iq`       | `iq ● streaming · 4.1 MB/s` · `iq × no samples 23s` · `iq ● receiving` · `iq ? unknown` | `streaming` appears only when core reports the source's activity state as `streaming` and that report is under 15 s old. Older cores show `connected`. `receiving` means only the WS byte-rate heartbeat is available. The rate is shown only while the lane is live. |
 | `rx`       | `rx 445.971 MHz ±1.024 · external control`                                              | Centre frequency, half span, and who controls the tuner. If the sample rate is unknown, only the centre is shown.                                                                                                                                                     |
-| `decoders` | `decoders 8/9 up · 1 failing · 1 restarting · 2 in window` · `dec 8/9 ×1 !1`            | `failing` (`×`) counts decoders that are faulted, down or crash-looping. `restarting` (`!`, yellow) counts decoders that core is restarting. `in window` uses core's band assessment when core sends one, and the **nominal** band table otherwise (older cores).     |
-| `drops`    | `drops !34%` · `drops ? · backpressure` · `drops ? !`                                   | Share of offered IQ dropped over the last 10 s on decoder branches. `!` means a branch is in backpressure right now. `?` means the share cannot be computed. The strip is always current, so the figure has one spelling at every width.                              |
+| `decoders` | `decoders 8/9 up · 1 failing · 1 restarting · 2 in window` · `dec 1 failing`            | `failing` (`×`) counts decoders that are faulted, down or crash-looping. `restarting` (`!`, yellow) counts decoders that core is restarting. `in window` uses core's band assessment when core sends one, and the **nominal** band table otherwise (older cores).     |
+| `drops`    | `drops !34%` · `drops ? · backpressure`                                                 | Share of offered IQ dropped over the last 10 s on decoder branches. `!` means a branch is in backpressure right now. `?` means the share cannot be computed. The strip is always current, so the figure has one spelling at every width.                              |
 
-The clock sits at the right of the strip. When the strip is short of room, every lane keeps its shortest form (`api ●`, `iq ●` or `iq × down`, `iq ○ no samples`, `iq ?`, `rx 445.971`, `dec 8/9 ×1`, `drops !34%` or `drops ? !`) and the clock goes first. If even those do not fit, the decoders lane goes next, then drops, so `rx` outlives both. Detail is added back as room allows: the api age, `MHz` and the rx span, the full iq word, the drops words (`drops ? · backpressure`), the decoder words and `in window`, the IQ rate, the tuner owner, then the clock. A lane is never cut down to fragments of words.
+The clock sits at the right of the strip. Every glyph in the strip keeps a word beside it; nothing is abbreviated into glyph clusters. When the strip is short of room, every lane keeps its shortest worded form (`api ● 2s`, `iq ● streaming`, `iq × down`, `iq ○ no samples`, `rx 445.971`, `dec 1 failing`, `dec 1 restarting` or `dec 8/9 up`, `drops !34%`) and the clock goes first. If even those do not fit, whole lanes go in this order: `rx`, then drops, then decoders. Detail is added back as room allows: `MHz` and the rx span, the full iq word, the decoder words and `in window`, the IQ rate, the tuner owner, then the clock.
 
 **Legend**
 
-| Mark | Meaning                                             |
-| ---- | --------------------------------------------------- |
-| `●`  | live                                                |
-| `○`  | idle or off                                         |
-| `×`  | fault                                               |
-| `!`  | attention now (backpressure, emergency, restarting) |
-| `?`  | unknown                                             |
-| `—`  | not applicable                                      |
+| Mark | Meaning                                         |
+| ---- | ----------------------------------------------- |
+| `●`  | live                                            |
+| `○`  | idle or off                                     |
+| `×`  | fault                                           |
+| `!`  | attention (restarting, backpressure, emergency) |
+| `?`  | unknown                                         |
+| `—`  | not applicable                                  |
 
 **How to read the values**
 
 - **Dim text** is older than 15 s.
 - **`now` and `lifetime`:** `now` figures cover the last 10 s, and `lifetime` figures are counters. The two are never mixed.
 - **Ages:** seconds below a minute (`52s`), then whole minutes (`6m ago`), then hours and minutes (`1h 3m`), then days (`2d`).
-- **Decodes:** the rate leads, then the age of the last decode when there is room (`2/min · 11s ago`). The rate is core's counter rate, else the count in the message feed over the last minute. A last decode older than a minute reads `none for 6m`; a decoder that never decoded reads `none for <uptime>`; a decoder that is not running reads `—`.
-- **Bands:** the `band MHz` column shows core's target band when core sends one, else the _nominal_ band from WaveKit's built-in table. A band from the decoder's own configuration is marked `*` (the help screen explains the mark).
+- **Decodes:** the rate leads, then the age of the last decode when there is room (`2/min · 11s ago`). The rate is core's counter rate, else, while the live feed is open, the count in the message feed over the last minute; with the feed down only the age shows. A last decode older than a minute reads `none for 6m`; a decoder that never decoded reads `none for <uptime>`; a decoder that is not running reads `—`.
+- **Bands:** the `band MHz` column shows core's target band when core sends one, else the _nominal_ band from WaveKit's built-in table. A band from the decoder's own configuration is marked `*` (the help screen explains the mark). The Decoders detail names the basis in parentheses, e.g. `1090.000 MHz (protocol)`.
 - **Tuned decoders:** with an older core (no band assessment), `dsd-fme` and `multimon-ng` read `tuned` and count as in window. Current cores place them like any other decoder.
 
 **Problems and cached data**
