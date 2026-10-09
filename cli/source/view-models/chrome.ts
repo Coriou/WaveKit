@@ -128,10 +128,10 @@ export function stripInput(state: AppState): StripInput {
 				state.session[d.id]?.suspendingSince,
 			)
 			if (p === "up" || p === "starting") up++
-			// R77: failing counts faults and anything still failing to settle.
-			if (isFailing(p) || p === "faulted-retrying" || p === "suspend-pending")
-				failing++
-			if (p === "restarting") restarting++
+			// R96: "N failing" is exactly the × rows; a fault retrying while running
+			// (the ! row) is restarting.
+			if (isFailing(p)) failing++
+			if (p === "restarting" || p === "faulted-retrying") restarting++
 			memberships.push({
 				membership: decoderMembership(
 					d,

@@ -80,10 +80,11 @@ export function procRole(s: ProcState): GlyphRole {
 		case "faulted-retry":
 		case "crash-loop":
 		case "down":
+		// R96: a stop that has not completed after 10 s is a fault, not a wait.
+		case "suspend-pending":
 			return "fault"
 		case "restarting":
 		case "faulted-retrying":
-		case "suspend-pending":
 			return "attention"
 		case "stopped":
 		case "starting":

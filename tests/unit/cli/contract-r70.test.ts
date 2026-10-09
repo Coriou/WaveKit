@@ -121,7 +121,7 @@ describe("R70 processState", () => {
 		expect(procRole("faulted-retrying")).toBe("attention")
 		expect(isFailing("faulted-retrying")).toBe(false)
 	})
-	it("renders suspended ahead of health; a long suspending transition is attention", () => {
+	it("renders suspended ahead of health; a long suspending transition is a fault (R96)", () => {
 		const susp = {
 			suspended: true,
 			desiredRunning: true,
@@ -148,7 +148,8 @@ describe("R70 processState", () => {
 				NOW - 60_000,
 			),
 		).toBe("suspend-pending")
-		expect(procRole("suspend-pending")).toBe("attention")
+		// R96: a stop still pending after 10 s is a fault (×).
+		expect(procRole("suspend-pending")).toBe("fault")
 		const fresh = {
 			...susp,
 			suspension: { ...susp.suspension, since: iso(NOW - 2_000) },
