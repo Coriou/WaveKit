@@ -66,7 +66,10 @@ const managers: ChannelizerManager[] = []
 function manager(
 	overrides: Partial<ReturnType<typeof ChannelizerConfigSchema.parse>> = {},
 	extra: Partial<
-		Pick<ChannelizerManagerDeps, "createProcess" | "connect" | "now" | "logger">
+		Pick<
+			ChannelizerManagerDeps,
+			"createProcess" | "connect" | "now" | "logger" | "openTimeoutMs"
+		>
 	> = {},
 ) {
 	const m = new ChannelizerManager({
@@ -104,6 +107,39 @@ function recordingProcess(
 		procs.push(p)
 		return p
 	}
+}
+/**
+ * Real processes around the fake whose first `start()` resolves only after `release()`: the window in which a
+ * caps change, a source loss or `destroy()` races a spawn. Records each spawn's options and each exit's generation.
+ */
+function holdFirstStart() {
+	let release = () => {}
+	const gate = new Promise<void>(resolve => {
+		release = resolve
+	})
+	let markStarted = () => {}
+	const started = new Promise<void>(resolve => {
+		markStarted = resolve
+	})
+	const spawns: ChannelizerProcessOptions[] = []
+	const exits: number[] = []
+	const createProcess = (
+		o: ChannelizerProcessOptions,
+		l: Logger,
+	): ChannelizerProcessLike => {
+		const p = new ChannelizerProcess(o, l)
+		p.once("exit", () => exits.push(o.generation))
+		if (spawns.push(o) === 1) {
+			const start = p.start.bind(p)
+			p.start = () =>
+				start().then(() => {
+					markStarted()
+					return gate
+				})
+		}
+		return p
+	}
+	return { createProcess, release: () => release(), started, spawns, exits }
 }
 beforeAll(() => {
 	rmSync(root, { recursive: true, force: true })
@@ -308,7 +344,7 @@ describe("ChannelizerManager", () => {
 	// Validates: addendum §4, §12.12; plan A2
 	it("sends mark-gap at the seam after real branch drops", async () => {
 		process.env["FAKE_CHAN_MODE"] = "stall-input"
-		process.env["FAKE_CHAN_STALL_MS"] = "1500"
+		process.env["FAKE_CHAN_STALL_MS"] = "3000"
 		const sent: ChannelizerRequest[] = []
 		const src = new PassThrough()
 		try {
@@ -327,7 +363,7 @@ describe("ChannelizerManager", () => {
 			const gaps: unknown[][] = []
 			m.on("channel-discontinuity", (...args: unknown[]) => gaps.push(args))
 			fanout.attachSource(src)
-			// The fake reads nothing for 1.5 s after `opened`. The OS pipe, the child stdin and the 64 KiB branch fill up
+			// The fake reads nothing for 3 s after `opened`. The OS pipe, the child stdin and the 64 KiB branch fill up
 			// after a few hundred KiB, then FanoutManager drops. 4 MiB is far past that.
 			const chunk = 65_536
 			const chunks = 64
@@ -588,5 +624,147 @@ describe("ChannelizerManager", () => {
 			reasonCode: "channelizer-unavailable",
 		})
 		expect(procs).toHaveLength(1)
+	})
+	it("cleans up even when a channel-invalidated listener throws, without throwing into the source emitter", async () => {
+		const exits: number[] = []
+		const m = manager(
+			{},
+			{
+				createProcess: (o, l) => {
+					const p = new ChannelizerProcess(o, l)
+					p.once("exit", () => exits.push(o.generation))
+					return p
+				},
+			},
+		)
+		const a = await m.requestChannel("rtl", "ais", req(), caps())
+		if (!a.ok) throw new Error("expected ok")
+		m.on("channel-invalidated", () => {
+			throw new Error("listener bug")
+		})
+		expect(() => sources.emit("disconnected", "rtl")).not.toThrow()
+		expect(a.stream.destroyed).toBe(true)
+		expect(fanout.getBranchIds()).toEqual([])
+		expect(released).toEqual(["rtl"])
+		await vi.waitFor(() => expect(exits).toEqual([1]))
+	})
+	it("keeps source and decoder ids that sanitise alike apart", async () => {
+		sources.caps.set("a/b", caps())
+		sources.caps.set("a_b", caps())
+		const dirs: string[] = []
+		const m = manager(
+			{},
+			{
+				createProcess: (o, l) => {
+					dirs.push(o.socketDir)
+					return new ChannelizerProcess(o, l)
+				},
+			},
+		)
+		const bySource = await Promise.all([
+			m.requestChannel("a/b", "ais", req(), caps()),
+			m.requestChannel("a_b", "ais", req(), caps()),
+		])
+		expect(bySource.map(r => r.ok)).toEqual([true, true])
+		expect(new Set(dirs).size).toBe(2) // two live processes never share (and so never rm) one socket dir
+		expect(dirs.find(d => d.endsWith("/a_b-g1"))).toBeDefined() // an already-safe id is kept as is
+		const long = "d".repeat(60)
+		const byDecoder = await Promise.all(
+			["x/y", "x_y", long, `${long.slice(1)}e`].map((id, k) =>
+				m.requestChannel("rtl", id, req(162e6 + k * 100e3), caps()),
+			),
+		)
+		const ids = byDecoder.map(r => (r.ok ? r.channelId : r.detail))
+		expect(ids[0]).toMatch(/^x_y-[0-9a-f]{8}-g1$/)
+		expect(ids[1]).toBe("x_y-g1")
+		expect(new Set(ids).size).toBe(4)
+		for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9._-]{1,64}$/)
+	})
+	it("supersedes a spawn that raced a caps change and retries against the new caps", async () => {
+		const h = holdFirstStart()
+		const m = manager({}, { createProcess: h.createProcess })
+		const pending = m.requestChannel("rtl", "ais", req(), caps())
+		await h.started
+		sources.caps.set("rtl", caps(2_400_000))
+		sources.emit("caps-changed", "rtl", caps(2_400_000))
+		h.release()
+		expect(await pending).toMatchObject({
+			ok: true,
+			generation: 2,
+			channelId: "ais-g2",
+		})
+		expect(h.spawns.map(o => o.inputRateHz)).toEqual([2_048_000, 2_400_000])
+		expect(fanout.getBranchIds()).toEqual(["channelizer-rtl"])
+		await vi.waitFor(() => expect(h.exits).toEqual([1]))
+	})
+	it("supersedes a spawn that raced a disconnect", async () => {
+		const h = holdFirstStart()
+		const m = manager({}, { createProcess: h.createProcess })
+		const pending = m.requestChannel("rtl", "ais", req(), caps())
+		await h.started
+		sources.emit("disconnected", "rtl")
+		h.release()
+		expect(await pending).toMatchObject({ ok: true, generation: 2 })
+		await vi.waitFor(() => expect(h.exits).toEqual([1]))
+	})
+	it("drops a spawn that raced the source's removal", async () => {
+		const h = holdFirstStart()
+		const m = manager({}, { createProcess: h.createProcess })
+		const pending = m.requestChannel("rtl", "ais", req(), caps())
+		await h.started
+		sources.caps.delete("rtl")
+		sources.emit("removed", "rtl")
+		h.release()
+		expect(await pending).toMatchObject({
+			ok: false,
+			reasonCode: "channel-request-invalid",
+		}) // the retry finds no source
+		expect(m.currentGeneration("rtl")).toBe(1)
+		expect(fanout.getBranchIds()).toEqual([])
+		expect(released).toEqual(["rtl"])
+		await vi.waitFor(() => expect(h.exits).toEqual([1]))
+	})
+	it("retires a spawn that completes after destroy() began, and destroy() awaits its exit", async () => {
+		const h = holdFirstStart()
+		const m = manager({}, { createProcess: h.createProcess })
+		const pending = m.requestChannel("rtl", "ais", req(), caps())
+		await h.started
+		const destroyed = m.destroy()
+		h.release()
+		expect(await pending).toMatchObject({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: expect.stringMatching(/destroyed/),
+		})
+		await destroyed
+		expect(h.exits).toEqual([1])
+		expect(fanout.getBranchIds()).toEqual([])
+	})
+	it("closes the orphaned channel and stops the idle process when open times out", async () => {
+		const sent: ChannelizerRequest[] = []
+		const exits: number[] = []
+		const createProcess = (
+			o: ChannelizerProcessOptions,
+			l: Logger,
+		): ChannelizerProcessLike => {
+			const p = new ChannelizerProcess(o, l)
+			p.once("exit", () => exits.push(o.generation))
+			const send = p.send.bind(p)
+			p.send = r => {
+				sent.push(r)
+				if (r.type !== "open") send(r) // the process never answers the open
+			}
+			return p
+		}
+		const m = manager({}, { createProcess, openTimeoutMs: 300 })
+		expect(await m.requestChannel("rtl", "ais", req(), caps())).toMatchObject({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "no opened/rejected within 300 ms",
+		})
+		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
+		expect(fanout.getBranchIds()).toEqual([])
+		expect(released).toEqual(["rtl"])
+		await vi.waitFor(() => expect(exits).toEqual([1]))
 	})
 })

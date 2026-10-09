@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { mkdirSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
@@ -36,7 +37,17 @@ export const CRASH_LIMIT = 5
 export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
-const sanitize = (s: string) => s.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 48)
+const MAX_NAME = 48
+/**
+ * A socket-safe name of at most 48 characters, so `${name}-g${generation}` stays a valid 64-character channel id.
+ * When the id had to be rewritten or cut, 8 hex of its sha1 keep distinct ids apart (`a/b` vs `a_b`).
+ */
+function sanitize(id: string): string {
+	const safe = id.replace(/[^A-Za-z0-9._-]/g, "_")
+	if (safe === id && id.length > 0 && id.length <= MAX_NAME) return id
+	const hash = createHash("sha1").update(id).digest("hex").slice(0, 8)
+	return `${safe.slice(0, MAX_NAME - 9)}-${hash}`
+}
 
 export interface ChannelizerManagerDeps {
 	sourceManager: Pick<SourceManager, "getCaps" | "on" | "off">
@@ -50,6 +61,8 @@ export interface ChannelizerManagerDeps {
 	connect?: (socketPath: string) => Promise<Readable>
 	/** Injectable clock for the crash-loop window (tests). */
 	now?: () => number
+	/** How long a request waits for `opened`/`rejected` (default 5 s; tests). */
+	openTimeoutMs?: number
 }
 
 /** `socket` is the process's Unix socket; `stream` is what the decoder gets (fed with end: false). */
@@ -128,6 +141,7 @@ export class ChannelizerManager
 	>
 	private readonly connect: NonNullable<ChannelizerManagerDeps["connect"]>
 	private readonly now: () => number
+	private readonly openTimeoutMs: number
 	private destroyed = false
 	private readonly onCaps = (sourceId: string, caps: SourceCaps) => {
 		const s = this.active.get(sourceId)
@@ -145,6 +159,7 @@ export class ChannelizerManager
 			deps.createProcess ?? ((o, l) => new ChannelizerProcess(o, l))
 		this.connect = deps.connect ?? defaultConnect
 		this.now = deps.now ?? Date.now
+		this.openTimeoutMs = deps.openTimeoutMs ?? OPEN_TIMEOUT_MS
 		deps.sourceManager.on("caps-changed", this.onCaps)
 		deps.sourceManager.on("disconnected", this.onGone)
 		deps.sourceManager.on("removed", this.onGone)
@@ -343,7 +358,7 @@ export class ChannelizerManager
 		s.pending++
 		try {
 			const reply = new Promise<OpenReply>(resolve => {
-				const timer = setTimeout(() => resolve(null), OPEN_TIMEOUT_MS)
+				const timer = setTimeout(() => resolve(null), this.openTimeoutMs)
 				s.waiters.set(channelId, e => {
 					clearTimeout(timer)
 					resolve(e)
@@ -356,7 +371,7 @@ export class ChannelizerManager
 			if (event === "superseded") return await superseded()
 			if (event === null) {
 				s.process.send({ v: 1, type: "close", id: channelId })
-				return unavailable(`no opened/rejected within ${OPEN_TIMEOUT_MS} ms`)
+				return unavailable(`no opened/rejected within ${this.openTimeoutMs} ms`)
 			}
 			if (event.type === "rejected")
 				return { ok: false, reasonCode: event.reasonCode, detail: event.detail }
@@ -603,7 +618,9 @@ export class ChannelizerManager
 
 	/**
 	 * Property 10: `channel-invalidated` first and once (listeners detach synchronously), then the sockets and the
-	 * decoder-facing streams are destroyed, pending requests are superseded, and the process is stopped.
+	 * decoder-facing streams are destroyed, pending requests are superseded, and the process is stopped. A throwing
+	 * listener is logged, never rethrown into the foreign emitter (SourceManager, ChannelizerProcess) that called us,
+	 * and never skips the cleanup.
 	 */
 	private invalidate(sourceId: string, cause: string): void {
 		const s = this.active.get(sourceId)
@@ -611,8 +628,15 @@ export class ChannelizerManager
 		s.invalidated = true
 		this.active.delete(sourceId)
 		const ids = [...s.channels.keys()]
-		if (ids.length > 0)
-			this.emit("channel-invalidated", sourceId, s.generation, ids)
+		try {
+			if (ids.length > 0)
+				this.emit("channel-invalidated", sourceId, s.generation, ids)
+		} catch (err: unknown) {
+			this.log.error(
+				{ err, sourceId, generation: s.generation },
+				"channel-invalidated listener threw",
+			)
+		}
 		for (const ch of s.channels.values()) {
 			ch.socket.destroy()
 			ch.stream.destroy()
