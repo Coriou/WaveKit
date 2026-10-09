@@ -124,12 +124,16 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	/**
 	 * The runtime's own POLL+RESYNC request (start, reconnect, discovery) and how each of
 	 * its endpoints fared. The ws:open that follows asks for the same set (effects.resync);
-	 * an endpoint still pending or answered (any HTTP reply) within POLL_MS is covered and
-	 * not fetched again; one that got no answer (network error, timeout: core restarting)
-	 * is (R55: one set of GETs per reconnect, never a lost resync).
+	 * an endpoint still pending or applied OK (2xx and accepted by its guard) within
+	 * POLL_MS is covered and not fetched again; any other outcome (5xx, invalid body,
+	 * network error, timeout: core restarting) is. A covered endpoint still pending
+	 * when the ws:open arrives is fetched again if its GET then fails (R55: one set of
+	 * GETs per reconnect, never a lost resync).
 	 */
 	let resyncAt: number | null = null
-	const resyncState = new Map<Endpoint, "pending" | "answered" | "unanswered">()
+	const resyncState = new Map<Endpoint, "pending" | "ok" | "failed">()
+	/** Endpoints a ws:open skipped while their resync GET was still pending. */
+	const awaitingResync = new Set<Endpoint>()
 
 	function clearResync(): void {
 		resyncAt = null
@@ -180,7 +184,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			outcome.ok ||
 			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
 		if (resyncState.get(endpoint) === "pending")
-			resyncState.set(endpoint, answered ? "answered" : "unanswered")
+			resyncState.set(endpoint, outcome.ok ? "ok" : "failed")
+		// A ws:open counted on this GET; it failed, so that resync is done now (I3).
+		if (awaitingResync.delete(endpoint) && !outcome.ok) void fetchOne(endpoint)
 		// M2: a response older than one already applied is dropped, never applied over it.
 		if (seq > (applied.get(endpoint) ?? 0)) {
 			applied.set(endpoint, seq)
@@ -338,7 +344,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		const fresh = resyncAt !== null && now - resyncAt <= POLL_MS
 		for (const e of resync) {
 			const st = resyncState.get(e)
-			if (!(fresh && (st === "pending" || st === "answered"))) out.add(e)
+			if (fresh && st === "pending") awaitingResync.add(e)
+			else if (!(fresh && st === "ok")) out.add(e)
 		}
 		clearResync()
 		return [...out]
@@ -426,6 +433,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			// Queued inbound belongs to the stopped session.
 			queue.length = 0
 			clearResync()
+			awaitingResync.clear()
 			discovering = false
 			cycleRunning = false
 			queuedCycle = null
