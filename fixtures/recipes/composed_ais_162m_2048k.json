@@ -1,0 +1,52 @@
+{
+	"id": "composed_ais_162m_2048k",
+	"description": "Real AIS A (161.975 MHz) and B (162.025 MHz) recordings at +-25 kHz around the pair centre (plan A15), as one RTL-SDR capture.",
+	"sampleRate": 2048000,
+	"centerHz": 162000000,
+	"durationS": 17,
+	"seed": 16201,
+	"noiseDbfs": -45,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 40,
+		"phaseDeg": 8
+	},
+	"sources": [
+		{
+			"id": "iqengine_ais_161975k",
+			"url": "https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730/iq-data?block_indexes_str=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63&block_size=65536&format=ci16_le",
+			"sha256": "673716ad9e79811f9ba078087f01b3220bd13a05fcabfc4ddb57a329cac43f85",
+			"format": "cs16",
+			"sampleRate": 240000,
+			"centerHz": 161975000,
+			"license": "CC-BY-4.0",
+			"attribution": "Gary Schafer, AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730 (IQEngine, RTL-SDR V3, 2024-09-08), CC BY 4.0. Blocks 0-63 of 65536 samples: the first 17.476 s.",
+			"origin": "https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730/meta"
+		},
+		{
+			"id": "iqengine_ais_162025k",
+			"url": "https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/iq-data?block_indexes_str=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60,61,62,63&block_size=65536&format=ci16_le",
+			"sha256": "39fe45998c816a564220557c1814238d64dab3a531b16bfd20f74a5f70af866e",
+			"format": "cs16",
+			"sampleRate": 240000,
+			"centerHz": 162025000,
+			"license": "CC-BY-4.0",
+			"attribution": "Gary Schafer, AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730 (IQEngine, RTL-SDR V3, 2024-09-08), CC BY 4.0. Blocks 0-63 of 65536 samples: the first 17.476 s.",
+			"origin": "https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta"
+		}
+	],
+	"components": [
+		{
+			"name": "ais_a",
+			"source": "iqengine_ais_161975k",
+			"offsetHz": -25000,
+			"levelDb": -9
+		},
+		{
+			"name": "ais_b",
+			"source": "iqengine_ais_162025k",
+			"offsetHz": 25000,
+			"levelDb": -9
+		}
+	]
+}

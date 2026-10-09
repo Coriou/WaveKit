@@ -1,0 +1,84 @@
+{
+	"id": "composed_pocsag_466075k_2048k",
+	"description": "Synthetic POCSAG on the two German e*Message channels: 466.075 MHz (512 and 1200 bps, decoded) and 465.970 MHz (adjacent-channel traffic with other addresses). Both transmitters stay keyed, so no noise-only stretch makes multimon-ng invent pages.",
+	"sampleRate": 2048000,
+	"centerHz": 466300000,
+	"durationS": 12,
+	"seed": 46601,
+	"noiseDbfs": -32,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 35,
+		"phaseDeg": 8
+	},
+	"components": [
+		{
+			"name": "pocsag_466075k",
+			"generator": "pocsag",
+			"offsetHz": -225000,
+			"levelDb": -15,
+			"params": {
+				"continuous": true,
+				"startS": 0.05,
+				"gapS": 0.3,
+				"pages": [
+					{
+						"baud": 1200,
+						"address": 1234567,
+						"function": 3,
+						"alpha": "WAVEKIT CHANNELIZER TEST 1200"
+					},
+					{
+						"baud": 512,
+						"address": 1122334,
+						"function": 0,
+						"numeric": "0123456789"
+					},
+					{
+						"baud": 1200,
+						"address": 1500001,
+						"function": 0,
+						"numeric": "466075"
+					},
+					{
+						"baud": 512,
+						"address": 2000016,
+						"function": 3,
+						"alpha": "POCSAG 512 OK"
+					}
+				]
+			}
+		},
+		{
+			"name": "pocsag_465970k",
+			"generator": "pocsag",
+			"offsetHz": -330000,
+			"levelDb": -15,
+			"params": {
+				"continuous": true,
+				"startS": 0.3,
+				"gapS": 1.5,
+				"pages": [
+					{
+						"baud": 1200,
+						"address": 1654321,
+						"function": 3,
+						"alpha": "ADJACENT CHANNEL A"
+					},
+					{
+						"baud": 1200,
+						"address": 300002,
+						"function": 3,
+						"alpha": "ADJACENT CHANNEL B"
+					},
+					{
+						"baud": 1200,
+						"address": 300010,
+						"function": 0,
+						"numeric": "465970"
+					}
+				]
+			}
+		}
+	]
+}

@@ -1,0 +1,88 @@
+{
+	"id": "composed_acars_131725k_2048k",
+	"description": "Synthetic plain-old ACARS downlinks on 131.725 MHz (European primary, decoded) and 131.525 MHz (adjacent traffic).",
+	"sampleRate": 2048000,
+	"centerHz": 131400000,
+	"durationS": 12,
+	"seed": 13171,
+	"noiseDbfs": -32,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 35,
+		"phaseDeg": 8
+	},
+	"components": [
+		{
+			"name": "acars_131725k",
+			"generator": "acars",
+			"offsetHz": 325000,
+			"levelDb": -15,
+			"params": {
+				"startS": 0.5,
+				"gapS": 1.5,
+				"messages": [
+					{
+						"tail": "D-AWKT",
+						"label": "H1",
+						"blockId": "1",
+						"msgno": "M01A",
+						"flight": "WK0001",
+						"text": "WAVEKIT CHANNELIZER ACARS TEST"
+					},
+					{
+						"tail": "G-WKIT",
+						"label": "5Z",
+						"blockId": "2",
+						"msgno": "M02A",
+						"flight": "WK0002",
+						"text": "FL350 FUEL 8.2"
+					},
+					{
+						"tail": "F-WKCH",
+						"label": "H1",
+						"blockId": "3",
+						"msgno": "M03A",
+						"flight": "WK0003",
+						"text": "ETA 1823Z"
+					},
+					{
+						"tail": "EI-WKT",
+						"label": "Q0",
+						"blockId": "4",
+						"msgno": "M04A",
+						"flight": "WK0004",
+						"text": ""
+					}
+				]
+			}
+		},
+		{
+			"name": "acars_131525k",
+			"generator": "acars",
+			"offsetHz": 125000,
+			"levelDb": -15,
+			"params": {
+				"startS": 1.2,
+				"gapS": 2.5,
+				"messages": [
+					{
+						"tail": "N12345",
+						"label": "H1",
+						"blockId": "5",
+						"msgno": "M05A",
+						"flight": "ADJ001",
+						"text": "ADJACENT CHANNEL"
+					},
+					{
+						"tail": "N67890",
+						"label": "H1",
+						"blockId": "6",
+						"msgno": "M06A",
+						"flight": "ADJ002",
+						"text": "ADJACENT CHANNEL"
+					}
+				]
+			}
+		}
+	]
+}

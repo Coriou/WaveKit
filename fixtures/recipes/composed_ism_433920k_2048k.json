@@ -1,0 +1,70 @@
+{
+	"id": "composed_ism_433920k_2048k",
+	"description": "Two 250 kS/s ISM recordings around 433.92 MHz: an rtl_433_tests Acurite 3-in-1 capture (default rtl_433 decoders) and the CC0 sdr-flex OOK PWM render (flex decoder only).",
+	"sampleRate": 2048000,
+	"centerHz": 433720000,
+	"durationS": 10,
+	"seed": 43392,
+	"noiseDbfs": -38,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 35,
+		"phaseDeg": 8
+	},
+	"sources": [
+		{
+			"id": "rtl433_tests_acurite_3n1_g001",
+			"url": "https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8",
+			"sha256": "d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641",
+			"format": "cu8",
+			"sampleRate": 250000,
+			"centerHz": 433920000,
+			"license": "unstated (fetched from origin; not redistributed; local test use only)",
+			"attribution": "merbanan/rtl_433_tests @ 1aa8c29 tests/acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8; the repo states no license.",
+			"origin": "https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02"
+		},
+		{
+			"id": "sdrflex_rtl433_ook_pwm",
+			"url": "https://raw.githubusercontent.com/livethisdream/sdr-flex/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/rtl433-ook-pwm/capture.sigmf-data",
+			"sha256": "1e58ad137fb8f7e42151b7ef7c41829ccf073b9abb0024ded531812951058a21",
+			"format": "cu8",
+			"sampleRate": 250000,
+			"centerHz": 433920000,
+			"license": "CC0-1.0",
+			"attribution": "livethisdream/sdr-flex fixtures/rtl433-ook-pwm @ ded403a (synthetic, SigMF core:license CC0-1.0).",
+			"origin": "https://github.com/livethisdream/sdr-flex/tree/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/rtl433-ook-pwm"
+		}
+	],
+	"components": [
+		{
+			"name": "acurite_3n1",
+			"source": "rtl433_tests_acurite_3n1_g001",
+			"offsetHz": 145000,
+			"levelDb": -12,
+			"startS": 0.5,
+			"repeatEveryS": 3.0,
+			"rampS": 0.002,
+			"expected": [
+				{
+					"model": "Acurite-3n1",
+					"id": 7992
+				}
+			]
+		},
+		{
+			"name": "ook_pwm_433950k",
+			"source": "sdrflex_rtl433_ook_pwm",
+			"offsetHz": 230000,
+			"levelDb": -14,
+			"startS": 2.0,
+			"repeatEveryS": 3.0,
+			"rampS": 0.002,
+			"expected": [
+				{
+					"flex": "n=sdrflex_fixture,m=OOK_PWM,s=252,l=500,g=800,r=6248",
+					"codes": ["{24}4cca99", "{24}3559a6"]
+				}
+			]
+		}
+	]
+}
