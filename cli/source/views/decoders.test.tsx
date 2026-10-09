@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { reduce } from "../data/reducers.js"
 import { renderApp } from "../test/app-harness.js"
 import { scenarioState } from "../test/fixtures.js"
 import { KEYS } from "../test/harness.js"
@@ -119,5 +120,74 @@ describe("Decoders view (spec §6.2)", () => {
 				expect(line.length).toBeLessThanOrEqual(cols)
 			h.unmount()
 		}
+	})
+
+	it("R64: a write from the list shows its result under the list, failures included", async () => {
+		const h = await renderApp({
+			state: scenarioState("live", deps),
+			views,
+			view: "decoders",
+			cols: 120,
+			rows: 40,
+		})
+		await selectRow(h, 4)
+		await h.press("R")
+		await h.press("y")
+		expect(h.runtime.sent).toEqual([
+			{ kind: "decoder", op: "restart", decoderId: "readsb" },
+		])
+		const st = h.runtime.store.get()
+		const intent = {
+			kind: "decoder",
+			op: "restart",
+			decoderId: "readsb",
+		} as const
+		h.runtime.store.set(
+			reduce(
+				st,
+				[
+					{
+						kind: "action:sent",
+						at: st.now,
+						id: 1,
+						key: "decoder:readsb",
+						intent,
+					},
+				],
+				st.now,
+			),
+		)
+		await h.waitFor(f => f.some(l => l.includes("readsb · restart sent")))
+		const sent = h.runtime.store.get()
+		h.runtime.store.set(
+			reduce(
+				sent,
+				[
+					{
+						kind: "action:result",
+						at: sent.now + 10,
+						id: 1,
+						key: "decoder:readsb",
+						outcomes: [
+							{
+								label: "restart",
+								result: {
+									ok: false,
+									outcome: "failed",
+									status: 502,
+									message: "bad gateway",
+								},
+								at: sent.now + 10,
+							},
+						],
+					},
+				],
+				sent.now + 10,
+			),
+		)
+		await h.waitFor(f =>
+			f.some(l => l.includes('readsb · restart failed · 502 · "bad gateway"')),
+		)
+		h.unmount()
 	})
 })

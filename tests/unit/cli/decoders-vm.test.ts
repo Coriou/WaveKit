@@ -356,3 +356,206 @@ describe("R65 M2: server-chosen types are plain keys", () => {
 		}
 	})
 })
+
+describe("B5 fix round 1", () => {
+	const s = scenarioState("live")
+	const fact = (st: AppState, id: string): DecoderFacts => {
+		const f = decoderFacts(st).find(x => x.row.id === id)
+		if (!f) throw new Error(`no ${id}`)
+		return f
+	}
+	const sent = reduce(
+		s,
+		[
+			{
+				kind: "action:sent",
+				at: s.now,
+				id: 7,
+				key: "decoder:readsb",
+				intent: RESTART,
+			},
+		],
+		s.now,
+	)
+	const open = (id: string) => {
+		const b = initialUi("decoders")
+		return {
+			...b,
+			selected: { ...b.selected, decoders: id },
+			detail: { ...b.detail, decoders: { open: true, scroll: 0 } },
+		}
+	}
+
+	it("I1: the last decoder write shows under the list while the detail is closed", () => {
+		const m = decodersModel(sent, initialUi("decoders"), 119, 35, true)
+		expect(lineText(m.list.at(-1) ?? [])).toBe(
+			`readsb · restart sent ${clock(s.now)}`,
+		)
+		const withDetail = decodersModel(sent, open("readsb"), 119, 35, true)
+		expect(
+			withDetail.list.map(lineText).some(l => l.includes("restart sent")),
+		).toBe(false)
+		expect(
+			withDetail.detail?.map(lineText).some(l => l.includes("restart sent")),
+		).toBe(true)
+	})
+
+	it("I2: a stale detail is dim per lane and never claims no backpressure", () => {
+		const stale = reduce(s, [], s.now + 20_000)
+		const rows = decoderDetail(stale, fact(stale, "readsb"), 119, stale.now)
+		const iq = rows.find(r => lineText(r).startsWith("IQ")) ?? []
+		expect(lineText(iq)).toContain("backpressure ?")
+		expect(lineText(iq)).not.toContain("no backpressure")
+		for (const label of [
+			"readsb",
+			"process",
+			"decodes",
+			"IQ",
+			"drops",
+			"band",
+		]) {
+			const row = rows.find(r => lineText(r).startsWith(label)) ?? []
+			expect(row.slice(1).every(x => x.role === "old")).toBe(true)
+		}
+	})
+
+	it("I3: a stopped decoder with a branch reads drop now — (R8)", () => {
+		const r = fact(s, "readsb")
+		const stopped: DecoderFacts = {
+			...r,
+			row: { ...r.row, running: false },
+			proc: "stopped",
+			role: "neutral",
+			dropNow: null,
+		}
+		const drops = decoderDetail(s, stopped, 119, s.now)
+			.map(lineText)
+			.find(l => l.startsWith("drops"))
+		expect(drops).toMatch(/^drops {5}— now · 44% lifetime/)
+	})
+
+	it("I4: hidden detail rows are marked and reachable by scrolling (59x14, 80x30)", () => {
+		const at = new Date(s.now - 5000).toISOString()
+		const withErr = {
+			...s,
+			decoders: laneOk(
+				(s.decoders.value ?? []).map(d =>
+					d.id === "readsb"
+						? {
+								...d,
+								lastError: {
+									kind: "exit" as const,
+									message: "exited code 1",
+									at,
+								},
+							}
+						: d,
+				),
+				s.now - 1000,
+				"rest",
+			),
+		}
+		for (const [w, h, roomy] of [
+			[59, 14, false],
+			[80, 30, true],
+			[59, 10, false],
+		] as const) {
+			const first =
+				decodersModel(withErr, open("readsb"), w, h, roomy).detail?.map(
+					lineText,
+				) ?? []
+			const ui = {
+				...open("readsb"),
+				detail: {
+					...open("readsb").detail,
+					decoders: { open: true, scroll: 999 },
+				},
+			}
+			const last =
+				decodersModel(withErr, ui, w, h, roomy).detail?.map(lineText) ?? []
+			expect(last.some(l => l.startsWith("activity"))).toBe(true)
+			expect(last.some(l => l.startsWith("error"))).toBe(true)
+			// A marker appears exactly when rows are hidden (at 59x10 they are).
+			const hidden = !first.some(l => l.startsWith("error"))
+			expect(/^\+\d+ rows · PgDn$/.test(first.at(-1) ?? "")).toBe(hidden)
+			expect(/^\+\d+ rows · PgUp$/.test(last[0] ?? "")).toBe(hidden)
+			if (h === 10) expect(hidden).toBe(true)
+			for (const l of [...first, ...last])
+				expect(cellWidth(l)).toBeLessThanOrEqual(w)
+		}
+	})
+
+	it("I5: the detail header shows the full id, two spaces, then the identity", () => {
+		for (const id of ["multimon-ng", "ais-catcher", "lora-meshtastic"]) {
+			const head = lineText(decoderDetail(s, fact(s, id), 119, s.now)[0] ?? [])
+			expect(head.startsWith(`${id}  `)).toBe(true)
+			expect(head).not.toContain("…")
+		}
+	})
+
+	it("M3: a last-decode-only fact does not repeat 'last … · last output …'", () => {
+		const f = fact(s, "dsd-fme")
+		const last: DecoderFacts = {
+			...f,
+			decodes: { kind: "last", lastAt: s.now - 5000 },
+			lastAt: s.now - 5000,
+		}
+		const row =
+			decoderDetail(s, last, 119, s.now)
+				.map(lineText)
+				.find(l => l.startsWith("decodes")) ?? ""
+		expect(row).toBe("decodes   3 events · last output 5s ago")
+	})
+
+	it("M4/M6: no outcome text reads an unquoted ?; accepted without an event says so", () => {
+		const failed = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 7,
+					at: s.now + 10,
+					key: "decoder:readsb",
+					outcomes: [{ label: "restart", result: null, at: null }],
+				},
+			],
+			s.now + 10,
+		)
+		expect(decoderActionText(failed, "readsb", s.now + 20)).toBe(
+			"restart failed · network · ?",
+		)
+		const ok = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 7,
+					at: s.now + 300,
+					key: "decoder:readsb",
+					outcomes: [
+						{
+							label: "restart",
+							result: { ok: true, outcome: "ok", status: 200, message: "" },
+							at: s.now + 300,
+						},
+					],
+				},
+			],
+			s.now + 300,
+		)
+		expect(decoderActionText(ok, "readsb", s.now + 400)).toBe(
+			`restart accepted ${clock(s.now + 300)} · 200`,
+		)
+	})
+
+	it("M5: a long quoted server text is cut inside its quotes", () => {
+		const rows = wrapKV(
+			"error",
+			`exit · "${"x".repeat(200)}" · 5s ago`,
+			60,
+		).map(lineText)
+		const quotedRow = rows.find(r => r.includes('"')) ?? ""
+		expect(quotedRow.trimEnd().endsWith('…"')).toBe(true)
+		for (const r of rows) expect(cellWidth(r)).toBeLessThanOrEqual(60)
+	})
+})
