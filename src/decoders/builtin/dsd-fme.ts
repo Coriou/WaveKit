@@ -859,6 +859,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 48 kHz and starts at fmdemod; only the sox WAV
+	 * wrapper remains. No DC removal or AGC in the channel path (delta §8 risk 5).
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
 	 * Returns the decoder command.
 	 * Note: This is only used for getDecoderArgs(), we override buildPipelineCommand()
 	 * to handle the sox WAV wrapper needed by dsd-fme.

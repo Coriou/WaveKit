@@ -84,11 +84,6 @@ const config = (
 })
 
 // Test-only migrations: flip the flag a migration task (31) flips for real.
-class ChannelisedDsdFme extends DsdFmeDecoder {
-	protected override channelizerSupported(): boolean {
-		return true
-	}
-}
 class ChannelisedAcarsdec extends AcarsdecDecoder {
 	protected override channelizerSupported(): boolean {
 		return true
@@ -186,7 +181,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
-		for (const type of ["dsd-fme", "acarsdec", "lora-meshtastic", "readsb"]) {
+		for (const type of ["acarsdec", "lora-meshtastic", "readsb"]) {
 			expect(
 				make(type).getChannelRequest?.({
 					sampleRateHz: 2_048_000,
@@ -245,6 +240,30 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(chan.match(/\bsox /g)).toHaveLength(1)
 		expect(chan).toContain(
 			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t raw -r 22050 - | multimon-ng",
+		)
+	})
+
+	it("dsd-fme requests 48 kHz cf32 at the matched passband and, channelised, keeps only its WAV wrapper sox (Task 31, delta E11)", () => {
+		expect(
+			make("dsd-fme").getChannelRequest?.({
+				sampleRateHz: 2_048_000,
+				centerHz: 438.5e6,
+			}),
+		).toEqual({
+			centerHz: 438.5e6,
+			bandwidthHz: 12_500,
+			transitionHz: 6_250,
+			outputRateHz: 48_000,
+			format: "cf32",
+		})
+		const chan = pipelineOf(
+			make("dsd-fme", { inputSampleRate: 48_000, inputIqFormat: "cf32" }),
+		)
+		for (const stage of ["csdr convert -i char -o float", "firdecimate"])
+			expect(chan).not.toContain(stage)
+		expect(chan.match(/\bsox /g)).toHaveLength(1)
+		expect(chan).toContain(
+			"sox -t raw -r 48000 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme",
 		)
 	})
 
@@ -308,7 +327,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	it("absorbs offsetHz into the channel centre (delta E7)", () => {
 		const options = { offsetHz: 6000 }
 		const raw = pipelineOf(make("dsd-fme", options))
-		const d = new ChannelisedDsdFme(config("dsd-fme", options), logger)
+		const d = new DsdFmeDecoder(config("dsd-fme", options), logger)
 		expect(
 			d.getChannelRequest({ sampleRateHz: 2_048_000, centerHz: 1e8 }),
 		).toEqual({
@@ -332,7 +351,7 @@ describe("channel requests (addendum §1, §2)", () => {
 			child: () => spyLogger,
 			warn,
 		})
-		const d = new ChannelisedDsdFme(
+		const d = new DsdFmeDecoder(
 			config("dsd-fme", { offsetHz: 6000, channelHz: 100_025_000 }),
 			spyLogger,
 		)
@@ -347,10 +366,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("requests offset 0 when the capture centre is unknown (PF12)", () => {
-		const d = new ChannelisedDsdFme(
-			config("dsd-fme", { offsetHz: 6000 }),
-			logger,
-		)
+		const d = new DsdFmeDecoder(config("dsd-fme", { offsetHz: 6000 }), logger)
 		expect(d.getChannelRequest({ sampleRateHz: 2_048_000 })).toMatchObject({
 			centerHz: 0,
 		})
