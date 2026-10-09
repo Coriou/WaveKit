@@ -1,5 +1,5 @@
 import { sparkBuckets } from "../data/rates.js"
-import type { AppState, DecoderOp } from "../data/types.js"
+import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
 	formatAge,
@@ -161,6 +161,16 @@ export function decoderActionText(
 				: accepted
 		}
 	}
+}
+
+/** S4: core's last error, short: `exit code 1 · 3m ago`, `spawn · 5s ago`. */
+function exitText(core: DecoderRow["lastError"], now: number): string | null {
+	if (!core) return null
+	const at = Date.parse(core.at)
+	const age = Number.isFinite(at) ? `${formatAge(now - at)} ago` : "?"
+	const m = core.kind === "exit" ? EXIT_DETAIL.exec(core.message) : null
+	const what = m?.[1] !== undefined ? `exit ${m[1]}` : sanitize(core.kind)
+	return `${what} ${glyphs().sep} ${age}`
 }
 
 function errorText(
@@ -385,10 +395,34 @@ export function decoderConfirm(
 ): ConfirmRequest | null {
 	const f = decoderFacts(state).find(x => x.row.id === id)
 	if (!f) return null
+	const now = state.now
 	const sep = ` ${glyphs().sep} `
+	// S4 (R59): the blast radius — whether it decodes the shared window, what it
+	// drops or last decoded, or why it is down — rather than its pid.
+	const window = {
+		in: "in window",
+		out: "out of window",
+		"?": "window ?",
+		"—": "own SDR",
+	}[f.membership]
+	const exit = f.row.running ? null : exitText(f.row.lastError, now)
+	const parts: Array<[number, string]> = [
+		[0, `${op} ${sanitize(id)}`],
+		[2, processText(f, now)],
+		[1, window],
+	]
+	if (exit !== null) parts.push([1, exit])
+	if (f.dropNow !== null && f.dropNow > 0)
+		parts.push([2, `dropping ${formatPercent(f.dropNow)}`])
+	if (f.lastAt !== null)
+		parts.push([3, `decoded ${formatAge(now - f.lastAt)} ago`])
 	return {
 		kind: "decoder",
-		prompt: `${op} ${sanitize(id)}${sep}${processText(f, state.now)}${sep}pid ${f.row.pid ?? glyphs().na}`,
+		prompt: parts.map(([, t]) => t).join(sep),
+		groups: parts.map(([priority, t]) => ({
+			priority,
+			variants: [[sp(t, "value", true)]],
+		})),
 		yes: op,
 		no: "cancel",
 		intent: { kind: "decoder", op, decoderId: id },

@@ -5,6 +5,7 @@ import type { AppState, DecoderRow } from "../../../cli/source/data/types.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { initialUi } from "../../../cli/source/ui/ui-state.js"
+import { confirmLine } from "../../../cli/source/view-models/chrome.js"
 import {
 	decoderFacts,
 	type DecoderFacts,
@@ -124,11 +125,46 @@ describe("decoders view-model", () => {
 	it("builds confirm prompts that name the target", () => {
 		expect(decoderConfirm(s, "readsb", "restart")).toMatchObject({
 			kind: "decoder",
-			prompt: "restart readsb · up 51s · pid 1531",
+			prompt: "restart readsb · up 51s · out of window · dropping 38%",
 			yes: "restart",
 			no: "cancel",
 			intent: RESTART,
 		})
+	})
+
+	it("S4: confirm prompts state the blast radius, fitted by priority", () => {
+		const stop = decoderConfirm(s, "dsd-fme", "stop")
+		expect(stop?.prompt).toBe(
+			"stop dsd-fme · up 52s · in window · dropping 12% · decoded 11s ago",
+		)
+		// Narrow: the action and the window survive; drops and ages go first.
+		expect(lineText(confirmLine(stop!, 60))).toBe(
+			"▶ stop dsd-fme · up 52s · in window   y stop  n cancel",
+		)
+		const at = new Date(s.now - 183_000).toISOString()
+		const faulted = {
+			...s,
+			decoders: laneOk(
+				(s.decoders.value ?? []).map(d =>
+					d.id === "acarsdec"
+						? {
+								...d,
+								running: false,
+								lastError: {
+									kind: "exit" as const,
+									message: "Process exited unexpectedly (code 1)",
+									at,
+								},
+							}
+						: d,
+				),
+				s.now - 1000,
+				"rest",
+			),
+		}
+		expect(decoderConfirm(faulted, "acarsdec", "start")?.prompt).toMatch(
+			/^start acarsdec · .* · exit code 1 · 3m ago$/,
+		)
 	})
 
 	it("reports sent → restarted → cleared, and failures with the status quoted", () => {
