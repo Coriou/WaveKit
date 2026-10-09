@@ -1258,3 +1258,111 @@ describe("R55 follow-ups", () => {
 		}
 	})
 })
+
+describe("R55 follow-ups fix", () => {
+	const send = (intent: WriteIntent): Inbound => ({
+		kind: "action:sent",
+		at: T0,
+		id: 1,
+		key: "tuner:pi-iq",
+		intent,
+	})
+	const res = (outcomes: CommandOutcome[], at = T0 + 10): Inbound => ({
+		kind: "action:result",
+		at,
+		id: 1,
+		key: "tuner:pi-iq",
+		outcomes,
+	})
+	const unknownOf = (label: string): CommandOutcome => ({
+		label,
+		at: T0 + 10,
+		result: {
+			ok: false,
+			outcome: "unknown",
+			status: null,
+			message: "sent · no reply in 10s",
+		},
+	})
+	const seq: WriteIntent = {
+		kind: "tuner",
+		sourceId: "pi-iq",
+		commands: [
+			{ setting: "frequency", body: { hz: 446_000_000 }, label: "frequency" },
+			{ setting: "gain", body: { tenthsDb: 207 }, label: "gain" },
+		],
+	}
+
+	it("a sequence whose last command was never sent is not confirmed by an in-flight event", () => {
+		const s = reduce(
+			initialState(T0),
+			[
+				send(seq),
+				// A foreign client happens to set the same gain while ours is in flight.
+				ws(T0 + 5, {
+					type: "tuner:command-sent",
+					sourceId: "pi-iq",
+					command: "set-gain",
+					value: 207,
+				}),
+				res([
+					unknownOf("frequency"),
+					{ label: "gain", result: null, at: null },
+				]),
+			],
+			T0 + 10,
+		)
+		expect(s.actions.byKey["tuner:pi-iq"]).toMatchObject({
+			state: "unknown",
+			confirmedAt: null,
+		})
+		const later = reduce(
+			s,
+			[
+				ws(T0 + 20, {
+					type: "tuner:command-sent",
+					sourceId: "pi-iq",
+					command: "set-gain",
+					value: 207,
+				}),
+			],
+			T0 + 20,
+		)
+		expect(later.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
+	})
+
+	it("tuner:control-mode-changed reconciles a control-mode write to that mode", () => {
+		const control = (mode: string): WriteIntent => ({
+			kind: "tuner",
+			sourceId: "pi-iq",
+			commands: [{ setting: "control-mode", body: { mode }, label: "control" }],
+		})
+		const changed = (at: number, mode: "internal" | "external"): Inbound =>
+			ws(at, { type: "tuner:control-mode-changed", sourceId: "pi-iq", mode })
+		let s = reduce(
+			initialState(T0),
+			[send(control("internal")), res([unknownOf("control")])],
+			T0 + 10,
+		)
+		s = reduce(s, [changed(T0 + 20, "external")], T0 + 20)
+		expect(s.actions.byKey["tuner:pi-iq"]?.state).toBe("unknown")
+		s = reduce(s, [changed(T0 + 30, "internal")], T0 + 30)
+		expect(s.actions.byKey["tuner:pi-iq"]).toMatchObject({
+			state: "ok",
+			confirmedAt: T0 + 30,
+		})
+	})
+
+	it("ws:open asks for the resync set separately from event polls", () => {
+		const s = reduce(
+			initialState(T0),
+			[
+				{ kind: "ws:open", at: T0 },
+				ws(T0, { type: "decoder:started", decoderId: "readsb" }),
+			],
+			T0,
+		)
+		expect(s.effects.polls).toEqual(["decoders"])
+		expect(s.effects.resync).toHaveLength(10)
+	})
+})

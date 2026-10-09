@@ -26,6 +26,7 @@ import {
 	type ActionState,
 	type AircraftLookup,
 	type AppState,
+	type CommandOutcome,
 	type ConnState,
 	type DecoderOp,
 	type DecoderRow,
@@ -161,7 +162,17 @@ function withPolls(s: AppState, endpoints: readonly Endpoint[]): AppState {
 	const polls = addUnique(s.effects.polls, endpoints)
 	return polls.length === s.effects.polls.length
 		? s
-		: { ...s, effects: { polls } }
+		: { ...s, effects: { ...s.effects, polls } }
+}
+
+function withResync(s: AppState, endpoints: readonly Endpoint[]): AppState {
+	return {
+		...s,
+		effects: {
+			...s.effects,
+			resync: addUnique(s.effects.resync ?? [], endpoints),
+		},
+	}
 }
 
 function patchList<T>(
@@ -602,9 +613,27 @@ function reduceWs(
 				t => t.sourceId === ev.sourceId,
 				t => ({ ...t, controlMode: ev.mode }),
 			)
-			return patched === s.tuner
-				? s
-				: { ...s, tuner: { ...patched, receivedAt: at, origin: "ws" } }
+			const next =
+				patched === s.tuner
+					? s
+					: {
+							...s,
+							tuner: { ...patched, receivedAt: at, origin: "ws" as const },
+						}
+			// It also reconciles a control-mode write to that mode (R55 minor 3).
+			return observe(
+				next,
+				actionKey({ kind: "tuner", sourceId: ev.sourceId }),
+				at,
+				rec => {
+					const cmds = rec.intent.kind === "tuner" ? rec.intent.commands : []
+					const only = cmds.length === 1 ? cmds[0] : undefined
+					return only?.setting === "control-mode" &&
+						only.body["mode"] === ev.mode
+						? "confirms"
+						: "nothing"
+				},
+			)
 		}
 		case "tuner:command-sent":
 			return observe(
@@ -677,7 +706,7 @@ function reduceWsOpen(s: AppState, at: number): AppState {
 	const session = record<DecoderSession>()
 	for (const [id, sess] of Object.entries(s.session))
 		session[id] = { ...sess, events: [] }
-	return withPolls(
+	return withResync(
 		{
 			...s,
 			conn: {
@@ -787,12 +816,19 @@ function rtlCommand(cmd: TunerCommand): { name: string; value: number } | null {
  * the value sent: a single command, or the end of a sequence that ran to the end (R55).
  * A sequence halted before its last command is never confirmed by an earlier one.
  */
+/** The result says the sequence's last command was not sent (an earlier one halted it). */
+function lastUnsent(outcomes: readonly CommandOutcome[]): boolean {
+	return outcomes.length > 0 && outcomes[outcomes.length - 1]?.result === null
+}
+
 function tunerSeen(
 	command: string,
 	value: unknown,
 ): (rec: ActionRecord) => Seen {
 	return rec => {
 		if (rec.intent.kind !== "tuner") return "nothing"
+		// A sequence whose last command was never sent cannot be confirmed (R55 minor 2).
+		if (lastUnsent(rec.outcomes)) return "nothing"
 		const last = rec.intent.commands[rec.intent.commands.length - 1]
 		const want = last ? rtlCommand(last) : null
 		return want !== null && want.name === command && want.value === value
@@ -902,10 +938,16 @@ function reduceActionResult(
 	const failed =
 		results.every(r => r === null) || results.some(r => r?.outcome === "failed")
 	const unknown = !failed && results.some(r => r?.outcome === "unknown")
+	// A confirmation seen in flight does not count for a sequence halted before its
+	// last command: an earlier or foreign command-sent cannot vouch for it (R55 minor 2).
+	const confirmedAt =
+		rec.intent.kind === "tuner" && lastUnsent(item.outcomes)
+			? null
+			: rec.confirmedAt
 	// R23: no reply is not a failure; it waits as "unknown" until an event confirms it.
 	const state: ActionState = failed
 		? "failed"
-		: unknown && rec.confirmedAt === null
+		: unknown && confirmedAt === null
 			? "unknown"
 			: "ok"
 	const intent = rec.intent
@@ -920,6 +962,7 @@ function reduceActionResult(
 				byKey: put(s.actions.byKey, item.key, {
 					...rec,
 					state,
+					confirmedAt,
 					outcomes: item.outcomes,
 					resultAt: item.at,
 					doneAt: state === "unknown" ? null : item.at,
