@@ -115,6 +115,34 @@ describe("strip (spec §4.2 widths)", () => {
 			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 !1  drops !21%",
 		)
 	})
+	it("final fix: non-live iq states have short words, so rx survives at 59", () => {
+		const states: Array<[StripInput["iq"]["glyph"], string, string]> = [
+			["fault", "disconnected", "iq × down"],
+			["neutral", "connected · no samples", "iq ○ no samples"],
+			["unknown", "unknown", "iq ?"],
+			["neutral", "paused", "iq ○ paused"],
+			["neutral", "ended", "iq ○ ended"],
+		]
+		for (const [glyph, word, short] of states) {
+			const input: StripInput = {
+				...live,
+				api: { kind: "split", ws: true, rest: false, restAgeMs: 45_000 },
+				iq: { glyph, word, ageMs: null, rateBytesPerSec: null },
+				decoders: { up: 7, total: 9, failing: 1, restarting: 1, inWindow: 2 },
+			}
+			for (let w = 59; w <= 70; w++) {
+				const text = lineText(stripLine(input, w))
+				expect(text, `${word} ${w}`).toContain("rx 445.971")
+				expect(text, `${word} ${w}`).toContain("drops ")
+				expect(lineWidth(stripLine(input, w))).toBeLessThanOrEqual(w)
+			}
+			expect(lineText(stripLine(input, 59))).toContain(short)
+			// With room the full word comes back.
+			expect(lineText(stripLine(input, 119))).toContain(
+				`iq ${glyph === "fault" ? "×" : glyph === "unknown" ? "?" : "○"} ${word}`,
+			)
+		}
+	})
 	it("copy sweep: a REST lane with no age says `rest ×`, not `rest × ?`", () => {
 		const t = lineText(
 			stripLine(

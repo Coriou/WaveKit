@@ -106,7 +106,18 @@ function apiGroup(a: ApiView): Group {
 	}
 }
 
-/** Live: `iq ●` → `iq ● streaming` → `… · 4.1 MB/s`. Other states keep their word (the glyph does not say which fault). */
+/**
+ * Short words for the non-live states, so a narrow strip keeps rx beside them
+ * (the glyph alone does not say which fault): `iq × down`, `iq ○ no samples`,
+ * `iq ?`. The full word comes back with room.
+ */
+const IQ_SHORT: Readonly<Record<string, string>> = {
+	"connected · no samples": "no samples",
+	disconnected: "down",
+	unknown: "",
+}
+
+/** Live: `iq ●` → `iq ● streaming` → `… · 4.1 MB/s`. Other states: short word → full word (→ age). */
 function iqGroup(iq: IqView, old: boolean): Group {
 	const head: Line = [label("iq "), glyphSpan(iq.glyph)]
 	const named: Line = [...head, value(` ${iq.word}`, old)]
@@ -118,7 +129,18 @@ function iqGroup(iq: IqView, old: boolean): Group {
 				[...head, value(` no samples ${formatAge(iq.ageMs)}`, old)],
 			],
 		}
-	if (iq.glyph !== "live") return { priority: 2, variants: [named] }
+	if (iq.glyph !== "live") {
+		const short = Object.hasOwn(IQ_SHORT, iq.word)
+			? IQ_SHORT[iq.word]
+			: undefined
+		return {
+			priority: 2,
+			variants:
+				short === undefined
+					? [named]
+					: [short === "" ? head : [...head, value(` ${short}`, old)], named],
+		}
+	}
 	const variants: Line[] = [head, named]
 	// A rate beside a stalled or dropped lane reads as flow, so it shows only while live.
 	if (iq.rateBytesPerSec !== null)
@@ -134,7 +156,7 @@ function iqGroup(iq: IqView, old: boolean): Group {
 function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 	if (d === null)
 		return {
-			priority: 3,
+			priority: 5,
 			variants: [
 				[label("dec "), { text: "?", role: "unknown" }],
 				[label("decoders "), { text: "?", role: "unknown" }],
@@ -159,7 +181,7 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 	const variants: Line[] = [compact, named]
 	if (d.inWindow !== null)
 		variants.push([...named, label(sep), value(`${d.inWindow} in window`, old)])
-	return { priority: 3, variants }
+	return { priority: 5, variants }
 }
 
 /**
@@ -214,7 +236,7 @@ function rxGroup(rx: StripRx, old: boolean): Group {
 				: null
 	if (owner)
 		variants.push([...span, label(` ${glyphs().sep} `), value(owner, old)])
-	return { priority: 5, variants }
+	return { priority: 3, variants }
 }
 
 /** Display order: api, iq, rx, decoders, drops, clock (spec §4). */
@@ -239,7 +261,8 @@ const SEP_W = 2
  * so `rx` and `drops` stay at 60 columns. Room is then spent in a fixed order,
  * most useful first: the REST age, the rx span, the iq word, the drops words, the named
  * decoders lane, its in-window count, the iq rate, the rx owner, the clock.
- * Should even the minimal forms not fit, the priority fitter decides.
+ * Should even the minimal forms not fit, the priority fitter decides: the
+ * decoders lane goes first, then drops, so rx outlives both.
  */
 export function stripLine(input: StripInput, width: number): Line {
 	const groups = stripGroups(input)
