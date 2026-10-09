@@ -9,11 +9,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms))
 
 for (;;) {
 	if (Date.now() > deadline) {
-		process.stderr.write("app never became healthy\n")
+		process.stderr.write("app HTTP never came up\n")
 		process.exit(2)
 	}
+	// Liveness, not /health: /health is 503 while the only decoder is down (e.g. suspended),
+	// and the status fetch below must still capture that suspension.
 	try {
-		if ((await fetch(`${base}/health`)).ok) break
+		if ((await fetch(`${base}/health/live`)).ok) break
 	} catch {
 		// not up yet
 	}

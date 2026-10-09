@@ -64,6 +64,17 @@ function exec(
 	return r
 }
 
+/** A setup step that must succeed; its stderr explains the failure. */
+function execOk(
+	what: string,
+	args: string[],
+	options: { input?: string; timeoutMs?: number } = {},
+) {
+	const r = exec(args, options)
+	expect(r.status, `${what} failed: ${r.stderr}`).toBe(0)
+	return r
+}
+
 interface PathResult {
 	observed: ObservedOutput[]
 	status: Record<string, unknown> | undefined
@@ -80,7 +91,7 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 	const logPath = `/tmp/wk-${tag}.log`
 	const pidPath = `/tmp/wk-${tag}.pid`
 	const seconds = runSeconds(f)
-	exec(["sh", "-c", `cat > '${configPath}'`], {
+	execOk("config write", ["sh", "-c", `cat > '${configPath}'`], {
 		input: buildFixtureConfig({
 			fixture: f,
 			path,
@@ -88,31 +99,41 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 			paddedPath: padded,
 		}),
 	})
-	exec(
-		["sh", "-c", padCommand(f, `${CONTAINER_FIXTURES_DIR}/${f.file}`, padded)],
-		{ timeoutMs: 120000 },
-	)
-	// $! is the `timeout` process (nohup execs it); `timeout` forwards SIGTERM to node, which stops its decoders.
-	exec([
-		"sh",
-		"-c",
-		`WAVEKIT_CONFIG='${configPath}' nohup timeout -s TERM ${Math.ceil(seconds + 20)} node /app/dist/index.js > '${logPath}' 2>&1 & echo $! > '${pidPath}'`,
-	])
-	const collected = exec(
-		["node", COLLECTOR, String(apiPort), String(seconds), goldenDecoderId(f)],
-		{ timeoutMs: (seconds + 30) * 1000 },
-	)
-	// No match-by-command-line kill: bookworm-slim has no procps, and the config path is in the env, not on the command line.
-	// Stop this instance by pid and wait (bounded, 20 s) for it to exit before the next path starts, so two app
-	// instances never overlap (doubled decoders, port collisions, a corrupted Property 15 comparison).
-	exec(
-		[
+	let collected: ReturnType<typeof exec>
+	try {
+		execOk(
+			"pad",
+			[
+				"sh",
+				"-c",
+				padCommand(f, `${CONTAINER_FIXTURES_DIR}/${f.file}`, padded),
+			],
+			{ timeoutMs: 120000 },
+		)
+		// $! is the `timeout` process (nohup execs it); `timeout` forwards SIGTERM to node, which stops its decoders.
+		execOk("app launch", [
 			"sh",
 			"-c",
-			`pid=$(cat '${pidPath}'); kill -TERM "$pid" 2>/dev/null; i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; kill -KILL "$pid" 2>/dev/null; rm -f '${padded}' '${pidPath}'`,
-		],
-		{ timeoutMs: 30000 },
-	)
+			`WAVEKIT_CONFIG='${configPath}' nohup timeout -s TERM ${Math.ceil(seconds + 20)} node /app/dist/index.js > '${logPath}' 2>&1 & echo $! > '${pidPath}'`,
+		])
+		collected = exec(
+			["node", COLLECTOR, String(apiPort), String(seconds), goldenDecoderId(f)],
+			{ timeoutMs: (seconds + 30) * 1000 },
+		)
+	} finally {
+		// Runs even when setup or the collector throws, so the padded capture (hundreds of MB) never leaks.
+		// No match-by-command-line kill: bookworm-slim has no procps, and the config path is in the env, not on the command line.
+		// Stop this instance by pid and wait (bounded, 20 s) for it to exit before the next path starts, so two app
+		// instances never overlap (doubled decoders, port collisions, a corrupted Property 15 comparison).
+		exec(
+			[
+				"sh",
+				"-c",
+				`pid=$(cat '${pidPath}' 2>/dev/null); kill -TERM "$pid" 2>/dev/null; i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; kill -KILL "$pid" 2>/dev/null; rm -f '${padded}' '${pidPath}'`,
+			],
+			{ timeoutMs: 30000 },
+		)
+	}
 	const observed: ObservedOutput[] = []
 	let status: Record<string, unknown> | undefined
 	for (const line of collected.stdout.split("\n")) {
