@@ -76,14 +76,12 @@ function apiGroup(a: ApiView): Group {
 				priority: 1,
 				variants: [[label("api "), glyphSpan("neutral"), value(" connecting")]],
 			}
-		case "ok": {
-			// A healthy API's age is the first thing a narrow strip gives up (it returns first).
-			const lane: Line = [label("api "), glyphSpan("live")]
+		case "ok":
+			// R93: the glyph keeps its age beside it (`api ● 2s`, spec §4.1).
 			return {
 				priority: 1,
-				variants: [lane, [...lane, ...ageSpan(a.restAgeMs)]],
+				variants: [[label("api "), glyphSpan("live"), ...ageSpan(a.restAgeMs)]],
 			}
-		}
 		case "split": {
 			// The REST age is added back first (stripLine), so a narrow strip keeps rx.
 			const lane: Line = [
@@ -107,14 +105,12 @@ function apiGroup(a: ApiView): Group {
 }
 
 /**
- * Short words for the non-live states, so a narrow strip keeps rx beside them
- * (the glyph alone does not say which fault): `iq × down`, `iq ○ no samples`,
- * `iq ?`. The full word comes back with room.
+ * Short words for the long non-live states (`iq × down`, `iq ○ no samples`);
+ * the full word comes back with room. R93: never a bare glyph.
  */
 const IQ_SHORT: Readonly<Record<string, string>> = {
 	"connected · no samples": "no samples",
 	disconnected: "down",
-	unknown: "",
 }
 
 /** The data layer's iq word with its separator in the current glyph mode (ASCII `|`). */
@@ -122,7 +118,7 @@ export function iqWordText(word: string): string {
 	return word.split(" · ").join(` ${glyphs().sep} `)
 }
 
-/** Live: `iq ●` → `iq ● streaming` → `… · 4.1 MB/s`. Other states: short word → full word (→ age). */
+/** Live: `iq ● streaming` → `… · 4.1 MB/s` (R93). Other states: short word → full word (→ age). */
 function iqGroup(iq: IqView, old: boolean): Group {
 	const head: Line = [label("iq "), glyphSpan(iq.glyph)]
 	const named: Line = [...head, value(` ${iqWordText(iq.word)}`, old)]
@@ -143,10 +139,10 @@ function iqGroup(iq: IqView, old: boolean): Group {
 			variants:
 				short === undefined
 					? [named]
-					: [short === "" ? head : [...head, value(` ${short}`, old)], named],
+					: [[...head, value(` ${short}`, old)], named],
 		}
 	}
-	const variants: Line[] = [head, named]
+	const variants: Line[] = [named]
 	// A rate beside a stalled or dropped lane reads as flow, so it shows only while live.
 	if (iq.rateBytesPerSec !== null)
 		variants.push([
@@ -157,11 +153,15 @@ function iqGroup(iq: IqView, old: boolean): Group {
 	return { priority: 2, variants }
 }
 
-/** `dec 8/9 ×1 !1` → `decoders 8/9 up · 1 failing · 1 restarting` → `… · 2 in window` (M2: the up-count is the fact). */
+/**
+ * `dec 1 failing` (or `dec 1 restarting`, `dec 8/9 up`) → `decoders 8/9 up ·
+ * 1 failing · 1 restarting` → `… · 2 in window`. R93 / spec §4.1: words, not
+ * glyph counts; failing outranks restarting in the shortest form.
+ */
 function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 	if (d === null)
 		return {
-			priority: 5,
+			priority: 3,
 			variants: [
 				[label("dec "), { text: "?", role: "unknown" }],
 				[label("decoders "), { text: "?", role: "unknown" }],
@@ -170,14 +170,12 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 	const g = glyphs()
 	const sep = ` ${g.sep} `
 	const restarting = d.restarting ?? 0
-	const compact: Line = [label("dec "), value(`${d.up}/${d.total}`, old)]
-	if (d.failing > 0)
-		compact.push(label(" "), value(`${g.fault}${d.failing}`, old, "fault"))
-	if (restarting > 0)
-		compact.push(
-			label(" "),
-			value(`${g.attention}${restarting}`, old, "attention"),
-		)
+	const compact: Line =
+		d.failing > 0
+			? [label("dec "), value(`${d.failing} failing`, old, "fault")]
+			: restarting > 0
+				? [label("dec "), value(`${restarting} restarting`, old, "attention")]
+				: [label("dec "), value(`${d.up}/${d.total} up`, old)]
 	const named: Line = [label("decoders "), value(`${d.up}/${d.total} up`, old)]
 	if (d.failing > 0)
 		named.push(label(sep), value(`${d.failing} failing`, old, "fault"))
@@ -186,7 +184,7 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
 	const variants: Line[] = [compact, named]
 	if (d.inWindow !== null)
 		variants.push([...named, label(sep), value(`${d.inWindow} in window`, old)])
-	return { priority: 5, variants }
+	return { priority: 3, variants }
 }
 
 /**
@@ -200,13 +198,9 @@ function dropsGroup(d: StripInput["drops"]): Group {
 		const unknown: Line = [label("drops "), { text: "?", role: "unknown" }]
 		return {
 			priority: 4,
+			// R93: backpressure is said in words, never as a bare `!`.
 			variants: d.backpressure
 				? [
-						[
-							...unknown,
-							label(" "),
-							{ text: g.attention, role: "attention", bold: true },
-						],
 						[
 							...unknown,
 							label(` ${g.sep} `),
@@ -241,7 +235,7 @@ function rxGroup(rx: StripRx, old: boolean): Group {
 				: null
 	if (owner)
 		variants.push([...span, label(` ${glyphs().sep} `), value(owner, old)])
-	return { priority: 3, variants }
+	return { priority: 5, variants }
 }
 
 /** Display order: api, iq, rx, decoders, drops, clock (spec §4). */
@@ -266,8 +260,8 @@ const SEP_W = 2
  * so `rx` and `drops` stay at 60 columns. Room is then spent in a fixed order,
  * most useful first: the REST age, the rx span, the iq word, the drops words, the named
  * decoders lane, its in-window count, the iq rate, the rx owner, the clock.
- * Should even the minimal forms not fit, the priority fitter decides: the
- * decoders lane goes first, then drops, so rx outlives both.
+ * Should even the minimal forms not fit, whole lanes go in spec §4.2 order
+ * (rx, then drops, then decoders), never a glyph-only form (R93).
  */
 export function stripLine(input: StripInput, width: number): Line {
 	const groups = stripGroups(input)
@@ -308,11 +302,13 @@ export function stripLine(input: StripInput, width: number): Line {
 	const rxSpanIdx = rxOwnerIdx >= 0 ? rxVariants - 2 : rxVariants - 1
 	upgrade(0, [1])
 	upgrade(rx, [rxSpanIdx, 1])
-	upgrade(1, [1])
+	// A live iq lane's only richer form is its rate; other states add their word, then age.
+	const liveIq = input.iq.glyph === "live"
+	if (!liveIq) upgrade(1, [1])
 	upgrade(drops, [1])
 	upgrade(dec, [1])
 	upgrade(dec, [2])
-	upgrade(1, [2])
+	upgrade(1, [liveIq ? 1 : 2])
 	upgrade(rx, [rxOwnerIdx])
 	present[clock] = true
 	if (total() > width) present[clock] = false
