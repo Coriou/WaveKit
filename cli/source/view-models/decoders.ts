@@ -16,7 +16,7 @@ import { listBudget, type DetailPlacement } from "../ui/frame.js"
 import { fitGroups } from "../ui/fit.js"
 import { sp, type Line, type Role } from "../ui/line.js"
 import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
-import { glyphs } from "../ui/theme.js"
+import { ASCII_GLYPHS, glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
 	decoderCells,
@@ -25,7 +25,7 @@ import {
 	decodersPlaceholder,
 	type DecoderFacts,
 } from "./decoder-rows.js"
-import { LABEL_WIDTH, sparkline, wrapKV } from "./detail.js"
+import { LABEL_WIDTH, sparkSpans, wrapKV } from "./detail.js"
 
 export const RESULT_MS = 10_000
 /** Server error text in a result or error row is cut here; the detail row wraps the rest of the line. */
@@ -48,16 +48,19 @@ const PATTERN = {
 	external_sdr: "external SDR",
 } as const
 const INPUT = {
-	iq: "IQ in",
-	audio_pcm: "audio in",
+	iq: "iq",
+	audio_pcm: "audio",
 	external: "own SDR",
 } as const
 const OUTPUT = {
-	jsonl: "JSON lines out",
-	text: "text out",
-	nmea: "NMEA out",
-	beast: "Beast out",
+	jsonl: "jsonl",
+	text: "text",
+	nmea: "nmea",
+	beast: "beast",
 } as const
+/** The exit detail core appends to an exit message: "(code 1)", "(signal SIGKILL)", "(code 1, signal …)". */
+const EXIT_DETAIL =
+	/\s*\(((?:code -?\d+|signal [A-Z0-9]+)(?:, (?:code -?\d+|signal [A-Z0-9]+))?)\)$/
 const PAST: Readonly<Record<DecoderOp, string>> = {
 	start: "started",
 	stop: "stopped",
@@ -170,6 +173,10 @@ function errorText(
 	if (core) {
 		const at = Date.parse(core.at)
 		const age = Number.isFinite(at) ? `${formatAge(now - at)} ago` : "?"
+		// The exit code is the fact: "exit code 1 · \"Process exited unexpectedly\"".
+		const m = core.kind === "exit" ? EXIT_DETAIL.exec(core.message) : null
+		if (m?.[1] !== undefined)
+			return `exit ${m[1]}${sep}${quoted(core.message.slice(0, m.index))}${sep}${age}`
 		return `${core.kind}${sep}${quoted(core.message)}${sep}${age}`
 	}
 	const ws = state.session[f.row.id]?.lastError
@@ -195,16 +202,18 @@ export function decoderDetail(
 	const r = f.row
 	const sess = state.session[r.id]
 	const caps = r.caps
+	const arrow = g === ASCII_GLYPHS ? "->" : "→"
+	// S1: pid and version are shown when known; an absent one adds nothing.
 	const identity = [
 		own(PROTOCOL, r.type) ?? sanitize(r.type),
 		...(caps
 			? [
 					own(PATTERN, caps.integrationPattern) ?? g.unknown,
-					`${own(INPUT, caps.input) ?? g.unknown}, ${own(OUTPUT, caps.output) ?? g.unknown}`,
+					`${own(INPUT, caps.input) ?? g.unknown} ${arrow} ${own(OUTPUT, caps.output) ?? g.unknown}`,
 				]
 			: []),
-		`pid ${r.pid ?? g.na}`,
-		`version ${r.version !== undefined ? sanitize(r.version) : g.na}`,
+		...(r.pid !== null && r.pid !== undefined ? [`pid ${r.pid}`] : []),
+		...(r.version !== undefined ? [`version ${sanitize(r.version)}`] : []),
 	].join(sep)
 	// R65 I5: the header shows the whole id, then two spaces.
 	const idRows = wrapKV(sanitize(r.id), identity, width, true, true)
@@ -219,11 +228,12 @@ export function decoderDetail(
 	const rest: Line[] = []
 	const prev = sess?.previousHealth
 	// R70: an unrecognised health value is unknown (?), never echoed as a word.
-	const health = (h: string): string => (h === "unknown" ? "?" : h)
+	// S2: a known one is core's word, quoted.
+	const health = (h: string): string => (h === "unknown" ? "?" : quoted(h))
 	rest.push(
 		...wrapKV(
 			"process",
-			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}server health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
+			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
@@ -238,29 +248,28 @@ export function decoderDetail(
 			),
 		)
 	}
-	const events = `${formatCount(r.stats.eventsOut)} events`
-	const lastOut = f.lastAt === null ? g.na : `${formatAge(now - f.lastAt)} ago`
 	const d = f.decodes
-	// R65 M3: a last-decode-only fact is said once, as "last output".
-	const head =
+	// S1 / M12: the rate (core's counter, else the feed's last minute) and the
+	// last decode, each once; never decoded reads "none since start".
+	const last =
+		f.lastAt === null ? [] : [`last ${formatAge(now - f.lastAt)} ago`]
+	const rate =
+		d.kind === "rate"
+			? formatEventRate(d.perSec)
+			: f.feed60 > 0
+				? `${formatCount(f.feed60)}/min`
+				: null
+	const decodes =
 		d.kind === "none"
-			? `none since start (${formatDuration(d.uptimeSec)})`
-			: d.kind === "rate"
-				? formatEventRate(d.perSec)
-				: d.kind === "total"
-					? `${formatCount(d.count)} total`
-					: d.kind === "na"
-						? g.na
-						: null
-	rest.push(
-		...wrapKV(
-			"decodes",
-			[...(head !== null ? [head] : []), events, `last output ${lastOut}`].join(
-				sep,
-			),
-			width,
-		),
-	)
+			? [`none since start (${formatDuration(d.uptimeSec)})`]
+			: d.kind === "total"
+				? [`${formatCount(d.count)} total`, ...last]
+				: d.kind === "na"
+					? last.length > 0
+						? last
+						: ["none"]
+					: [...(rate !== null ? [rate] : []), ...last]
+	rest.push(...wrapKV("decodes", decodes.join(sep), width))
 	const fanout: Line[] = []
 	const b = f.branch
 	const snapT = Date.parse(state.fanout.value?.timestamp ?? "")
@@ -274,12 +283,12 @@ export function decoderDetail(
 		const bp = !f.fanoutFresh
 			? `backpressure ${g.unknown}`
 			: f.backpressure
-				? `in backpressure ${since(b.backpressureSince)}`
-				: "no backpressure now"
+				? `backpressure ${since(b.backpressureSince)}`
+				: "no backpressure"
 		fanout.push(
 			...wrapKV(
-				"IQ",
-				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)}, high-water ${formatBytes(b.highWaterMark)}${sep}${bp}, ${formatCount(b.backpressureEnterCount)}× total`,
+				"iq",
+				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)} / ${formatBytes(b.highWaterMark)} hwm${sep}${bp}${sep}${formatCount(b.backpressureEnterCount)} episodes`,
 				width,
 			),
 		)
@@ -296,7 +305,7 @@ export function decoderDetail(
 	} else {
 		fanout.push(
 			...wrapKV(
-				"IQ",
+				"iq",
 				`${formatBytes(r.stats.bytesIn)} in${sep}no fanout branch`,
 				width,
 			),
@@ -326,10 +335,9 @@ export function decoderDetail(
 	]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
-	const observed = buckets.filter(x => x !== undefined).length
 	const from = sess?.firstObservedAt ?? now
 	// Fitted, not left to Ink's truncation: the sparkline stays, the caption shortens.
-	const caption = `decodes/min since ${formatClockShort(from)}`
+	const caption = `decodes/min${sep}last 30 min`
 	const activity = fitGroups(
 		[
 			{
@@ -337,7 +345,7 @@ export function decoderDetail(
 				variants: [
 					[
 						sp(padEnd("activity", LABEL_WIDTH), "label"),
-						sp(sparkline(buckets)),
+						...sparkSpans(buckets),
 					],
 				],
 			},
@@ -346,7 +354,12 @@ export function decoderDetail(
 				variants: [
 					[sp("decodes/min", "label")],
 					[sp(caption, "label")],
-					[sp(`${caption} (${observed} of 30 min observed)`, "label")],
+					[
+						sp(
+							`${caption}${sep}observed since ${formatClockShort(from)}`,
+							"label",
+						),
+					],
 				],
 			},
 		],

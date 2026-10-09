@@ -301,7 +301,7 @@ describe("R70 decoder detail", () => {
 		expect(text).toContain('suspended since 18:00:00 · "solar-flare"')
 	})
 	it("shows ? for an unknown server health", () => {
-		expect(detail(row({ health: "unknown" }))).toContain("server health ?")
+		expect(detail(row({ health: "unknown" }))).toContain("health ?")
 	})
 })
 

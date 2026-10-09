@@ -15,13 +15,13 @@ exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bot
  ● direwolf          up 50s             0       0  none for 50s          0   750.7 MB       11%       35%  out
  ● lora-meshtastic   up 50s             0       0  none for 50s          0   116.4 MB        9%       30%  out
 
- readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —
- process   up 51s · 0 restarts · 6 errors · server health idle
- decodes   none since start (51s) · 0 events · last output —
- IQ        570.6 MB in · branch decoder-readsb · buffer 389.1 KB, high-water 262.1 KB · in backpressure 0.2s, 121× total
+ readsb    ADS-B · network producer · iq → jsonl · pid 1531
+ process   up 51s · 0 restarts · 6 errors · health "idle"
+ decodes   none since start (51s)
+ iq        570.6 MB in · branch decoder-readsb · buffer 389.1 KB / 262.1 KB hwm · backpressure 0.2s · 121 episodes
  drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago
  band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window
- activity                              ▁▁  decodes/min since 18:06 (2 of 30 min observed)
+ activity  ····························▁▁  decodes/min · last 30 min · observed since 18:06
 
 
 
@@ -46,14 +46,14 @@ exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right 
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21%                                                           18:07
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
-   DECODERS          process     restarts  errors  decodes          drop now  lifetime  band MHz          window  readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —
- ● dsd-fme           up 52s             0       0  2/min · 11s ago       12%       36%  tuned             in      process   up 51s · 0 restarts · 6 errors · server health idle
- ● multimon-ng       up 51s             0       0  1/min · 32s ago       14%       39%  tuned             in      decodes   none since start (51s) · 0 events · last output —
- ● rtl433            up 51s             0       0  none for 51s         !15%       41%  433.920           out     IQ        570.6 MB in · branch decoder-readsb · buffer 389.1 KB, high-water 262.1 KB
- ● readsb            up 51s             0       6  none for 51s         !38%       44%  1090.000          out               in backpressure 0.2s, 121× total
+   DECODERS          process     restarts  errors  decodes          drop now  lifetime  band MHz          window  readsb    ADS-B · network producer · iq → jsonl · pid 1531
+ ● dsd-fme           up 52s             0       0  2/min · 11s ago       12%       36%  tuned             in      process   up 51s · 0 restarts · 6 errors · health "idle"
+ ● multimon-ng       up 51s             0       0  1/min · 32s ago       14%       39%  tuned             in      decodes   none since start (51s)
+ ● rtl433            up 51s             0       0  none for 51s         !15%       41%  433.920           out     iq        570.6 MB in · branch decoder-readsb · buffer 389.1 KB / 262.1 KB hwm
+ ● readsb            up 51s             0       6  none for 51s         !38%       44%  1090.000          out               backpressure 0.2s · 121 episodes
  ! acarsdec          restarting        13       0  —                       —         —  131.550–131.825*  out     drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago
  ● ais-catcher       up 51s             0       0  none for 51s         !31%       36%  161.975/162.025   out     band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window
- ● dumpvdl2          up 50s             0       0  none for 50s         !40%       41%  136.650–136.975*  out     activity                              ▁▁  decodes/min since 18:06
+ ● dumpvdl2          up 50s             0       0  none for 50s         !40%       41%  136.650–136.975*  out     activity  ····························▁▁  decodes/min · last 30 min
  ● direwolf          up 50s             0       0  none for 50s          11%       35%  144.390/144.800   out
  ● lora-meshtastic   up 50s             0       0  none for 50s           9%       30%  869.525/906.875   out
 
