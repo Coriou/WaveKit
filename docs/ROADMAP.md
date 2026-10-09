@@ -51,9 +51,17 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    Mac, all nine decoders, 2.048 Msps): ~7.5 of 8 cores, every branch dropped
    8–36 %; four per-decoder `sox rate -h` resamplers cost ~1.5 cores. Band-aware
    suspension and pinning reduce load at a single tuned band in the meantime.
-6. Later: API access/origin policy (prerequisite for host controls and a web
+   In progress since 2026-10-09 on branch `feat/core-channelizer`. Fixture
+   sourcing (user, 2026-10-09): synthetic IQ for AIS, POCSAG, APRS and ACARS;
+   real captures for DMR and analog voice (operator's radio), rtl_433 sensors and
+   aircraft; unlicensed public recordings may be used when fetched from their
+   source and never redistributed.
+6. **Spectrum and waterfall service** (§8): important, get it right. It feeds
+   the CLI and web waterfalls and the scanner's discovery.
+7. Later: API access/origin policy (prerequisite for host controls and a web
    UI); a stale `caps.centerFreq` after a retune that bypasses the relay can
-   miss band suspensions.
+   miss band suspensions. Also later: project license (§9) and agentic setup
+   modernisation (§10).
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
@@ -411,3 +419,57 @@ RF and hardware acceptance are outside what CLI tests can show.
       Agree on shared contracts before editing them, preserve concurrent work,
       and stage only each team's files. UI work must preserve the distinctions
       between clean-card acceptance, patched-runtime tests and streaming stability.
+- [ ] Follow-up (user, 2026-10-09): the tuner controls are weak. Add a waterfall
+      view on the §8 `spectrum` channel with cursor-based tuning: arrow keys move
+      a cursor over the spectrum, Enter listens or decodes there, and a key zooms.
+      Use half-block characters in true colour for two pixels per cell.
+
+## 8. Spectrum and waterfall service, and activity detection
+
+Important; get it right. Operators find activity today by watching SDR++'s
+waterfall and waiting for an emitter to key up again. WaveKit should provide the
+same view, and a program can do the watching more reliably than a person.
+
+- [ ] A core spectrum service, independent of scanner jobs. It computes an
+      averaged FFT of each source's IQ as a raw fanout consumer and publishes it
+      on a general `spectrum` WebSocket channel. Rate and bins must suit a
+      waterfall: 10 Hz or more and 1024 or more bins for the web; lower for the
+      CLI. Late-joining clients get a snapshot.
+- [ ] An activity detector on the full sample stream, not on display frames,
+      so short TDMA or pager bursts are not missed. It keeps a per-bin noise
+      floor and an N dB threshold, and merges adjacent bins into emissions with a
+      centre, bandwidth, first and last seen times and a duty cycle. A persistent
+      occupancy history keeps intermittent emitters known while they are idle.
+- [ ] Receiver artefact masking: the DC spike at the tuned centre, IQ mirror
+      images (a weaker copy at −f), and learned always-on spurs.
+- [ ] Hand-off to the scanner (§5): classification by bandwidth and band plan, a
+      channel opened at the emission centre, likely decoders tried, and a decode
+      as confirmation. Recording IQ around detected bursts also gives
+      automatic fixture capture for decoder goldens.
+- [ ] Keep the engine behind an interface so a native backend can take over.
+      `wavekit-chan` already reads the full CU8 stream per source.
+- [ ] A stale `caps.centerFreq` (a retune from SDR++ that bypasses the relay)
+      puts the frequency axis and every emission centre on the wrong RF. Fix it
+      or show it as untrusted.
+
+## 9. Project license
+
+Done 2026-10-09 (`df7e7ee`): split license. WaveKit is AGPL-3.0-or-later (root
+`LICENSE`; core, `cli`, `shared`, `sdr-host`). `@wavekit/api-types` is MIT, so
+client projects can import the API types and stay closed-source. The README
+says that using WaveKit through its API does not put a program under the AGPL.
+The bundled GPL decoders run as separate processes, so they are aggregated, not
+linked. Open: `packages/brand` has no license field, because its fonts are OFL,
+its icons are MIT, and brand assets are not relicensed silently. The
+`wavekit-chan` crate is still marked ISC on `feat/core-channelizer` and will
+move to AGPL there.
+
+## 10. Agentic development setup modernisation
+
+The repo has `.kiro/` (specs, steering), `.vscode/`, `CLAUDE.md`, private
+memories and per-session handoffs, but no `AGENTS.md`. Replace this with one
+cross-harness setup that has no duplication. It should heal itself when it drifts
+from the code, and it should load only the context each task needs rather than
+injecting every skill, rule and constraint into every model. Decide what stays
+(`.kiro` specs or `docs/superpowers`), consolidate the conventions into one
+source, and add checks so the instructions cannot rot silently.

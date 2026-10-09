@@ -9,7 +9,7 @@
 		"decoder",
 		"streaming"
 	],
-	"license": "ISC",
+	"license": "AGPL-3.0-or-later",
 	"author": "",
 	"type": "module",
 	"main": "dist/index.js",
