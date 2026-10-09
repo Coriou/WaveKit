@@ -8,14 +8,19 @@ is subtracted using its last per-process snapshot. "maxSampledBufferBytes" is
 the largest branch queue seen at a sample instant. It is a lower bound, not a
 true high-water mark, because the fanout does not export a peak.
 
-With the channelizer on, "channelizer" reduces app.log: the per-channel queue
-high-water mark (max over the window), dropped and saturated samples (last
-cumulative value) from the "channelizer stats" lines, and the number of
-queue-overflow discontinuities. "cpuCores.wavekitChan" is the wavekit-chan
-processes' CPU over the window.
+With the channelizer on, "channelizer" reduces the app.log lines inside the
+measurement window (meta "windowWall", else the first and last sampler
+records): dropped and saturated samples are the growth of wavekit-chan's
+cumulative counters over the window (the last "channelizer stats" line in the
+window minus the last one before it), and only queue-overflow discontinuities
+inside the window count. The queue high-water mark is wavekit-chan's maximum
+since the channel opened, so it includes the warm-up;
+"queueHighWaterBytesAtWindowStart" is its value before the window.
+"cpuCores.wavekitChan" is the wavekit-chan processes' CPU over the window.
 """
 
 import collections
+import datetime
 import json
 import sys
 from pathlib import Path
@@ -29,9 +34,27 @@ def by_id(rows):
     return {row.get("id"): row for row in rows} if isinstance(rows, list) else {}
 
 
-def channelizer_stats(app_log):
-    """Reduce the pino lines of a WaveKit log to channelizer queue, drop and saturation figures."""
-    high_water, dropped, saturated = {}, {}, {}
+def log_seconds(value):
+    """A pino `time` (isoTime string, or epoch ms) in epoch seconds, or None."""
+    if isinstance(value, (int, float)):
+        return value / 1000
+    if isinstance(value, str):
+        try:
+            return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def channelizer_stats(app_log, window=None):
+    """Reduce the pino lines of a WaveKit log to channelizer queue, drop and saturation figures.
+
+    `window` is (start, end) in epoch seconds; without it every line is inside. Lines after the
+    window are ignored. A cumulative counter that goes down restarted (a new wavekit-chan
+    generation) and counts again from zero.
+    """
+    high_water, high_water_before, dropped, saturated = {}, {}, {}, {}
+    last = {}  # channel id -> (droppedSamples, saturatedSamples) as last reported
     overflows = 0
     for line in app_log.splitlines():
         try:
@@ -40,16 +63,28 @@ def channelizer_stats(app_log):
             continue
         if not isinstance(entry, dict):
             continue
+        inside = True
+        if window is not None:
+            t = log_seconds(entry.get("time"))
+            if t is None or t > window[1]:
+                continue
+            inside = t >= window[0]
         if entry.get("msg") == "Channel discontinuity" and entry.get("cause") == "queue-overflow":
-            overflows += 1
+            if inside:
+                overflows += 1
         elif entry.get("msg") == "channelizer stats":
             for channel in entry.get("channels") or []:
                 cid = channel.get("id")
-                high_water[cid] = max(high_water.get(cid, 0), channel.get("queueHighWaterBytes", 0))
-                dropped[cid] = channel.get("droppedSamples", 0)  # cumulative: the last line wins
-                saturated[cid] = channel.get("saturatedSamples", 0)
-    return {"queueHighWaterBytes": high_water, "droppedSamples": dropped,
-            "saturatedSamples": saturated, "queueOverflowEvents": overflows}
+                now = (channel.get("droppedSamples", 0), channel.get("saturatedSamples", 0))
+                before = last.get(cid, (0, 0))
+                last[cid] = now
+                peaks = high_water if inside else high_water_before
+                peaks[cid] = max(peaks.get(cid, 0), channel.get("queueHighWaterBytes", 0))
+                if inside:
+                    for totals, value, previous in ((dropped, now[0], before[0]), (saturated, now[1], before[1])):
+                        totals[cid] = totals.get(cid, 0) + (value - previous if value >= previous else value)
+    return {"queueHighWaterBytes": high_water, "queueHighWaterBytesAtWindowStart": high_water_before,
+            "droppedSamples": dropped, "saturatedSamples": saturated, "queueOverflowEvents": overflows}
 
 
 def summarize(run):
@@ -123,6 +158,8 @@ def summarize(run):
     total_dropped = sum(r["droppedBytes"] for r in branch_rows.values())
     chan = groups.get("wavekit-chan", collections.Counter())
     app_log = (run / "app.log").read_text(errors="replace") if (run / "app.log").exists() else ""
+    wall = meta.get("windowWall") or {}
+    window = (wall["start"], wall["end"]) if "start" in wall and "end" in wall else (first["ts"], last["ts"])
     return {
         "run": run.name,
         "rate": meta["rate"], "buffers": meta["buffers"], "decoders": meta["decoders"],
@@ -155,7 +192,7 @@ def summarize(run):
                          "dropFraction": round(total_dropped / total_written, 6)
                          if total_written else None},
         "branches": branch_rows,
-        "channelizer": channelizer_stats(app_log),
+        "channelizer": channelizer_stats(app_log, window),
         "decoders": decoders,
         "source": fake[-1] if fake else None,
         "sourceConnections": sum(1 for e in fake if e.get("event") == "connected"),
