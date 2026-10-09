@@ -772,16 +772,12 @@ function editImpact(state: AppState, edit: TunerEditState): Affects {
 			short: "decoders ?",
 			count: "decoders ?",
 		}
-	const unknown = unknownOf(tunerOf(state, edit.sourceId), null)
-	const current =
-		unknown("frequency") || unknown("sampleRate")
-			? null
-			: windowFor(
-					edit.sourceId,
-					state.tuner.value,
-					state.sources.value,
-					state.relay.value,
-				)
+	const current = windowFor(
+		edit.sourceId,
+		state.tuner.value,
+		state.sources.value,
+		state.relay.value,
+	)
 	const candidates = retuneCandidates(
 		state.decoders.value,
 		state.sources.value,
@@ -836,12 +832,16 @@ function tunerBlock(
 	// "?" for a field core never commanded or observed, until the draft sets it (R84).
 	const unknown = unknownOf(t, edit)
 	const placeholder = unknownOf(t, null)
-	const windowKnown = !unknown("frequency") && !unknown("sampleRate")
-	const current = windowKnown
-		? windowFor(t.sourceId, state.tuner.value, state.sources.value, relay)
-		: null
+	// windowFor skips listed fields itself (R86), falling back to caps or the relay.
+	const current = windowFor(
+		t.sourceId,
+		state.tuner.value,
+		state.sources.value,
+		relay,
+	)
+	const draftKnown = !unknown("frequency") && !unknown("sampleRate")
 	const win: TunedWindow | null =
-		edit && windowKnown ? draftWindow(edit) : current
+		edit && draftKnown ? draftWindow(edit) : current
 	const focus = (f: EditField): Role =>
 		edit && edit.field === f ? "accent" : role
 	const d = edit?.draft
@@ -1015,10 +1015,7 @@ function tunerBlock(
 	}
 	const result = tunerResultText(state, t.sourceId, now)
 	if (result) rows.push(keep(clipped(lbl("result"), result, width)))
-	// Membership against an unknown window is unknown (R84).
-	const lists = windowKnown
-		? membershipLists(state, t.sourceId)
-		: { inside: "?", outside: "?", unknown: "" }
+	const lists = membershipLists(state, t.sourceId)
 	rows.push(optional(clipped(lbl("in window"), lists.inside, width, role), 3))
 	rows.push(optional(clipped(lbl("out"), lists.outside, width, role), 3))
 	if (lists.unknown)

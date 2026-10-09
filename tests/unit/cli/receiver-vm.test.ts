@@ -924,15 +924,24 @@ describe("receiver view-model (spec §6.4)", () => {
 				commands: [{ setting: "bias-tee", body: { enabled: true } }],
 			})
 		})
-		it("an unknown frequency has no window, no membership and no delta (R84)", () => {
+		it("a placeholder frequency never makes a window; caps or ? stand in (R84, R86)", () => {
 			const t = live.tuner.value![0]!
+			const src = live.sources.value![0]!
+			const relay = live.relay.value!
+			const noRelayFreq = { ...relay }
+			delete noRelayFreq.lastFrequency
+			const noCentre = { ...src, caps: { ...src.caps } }
+			delete noCentre.caps.centerFreq
 			const st = internal({
 				...live,
+				// Core's placeholder is 100 MHz (DEFAULT_FREQUENCY) when nothing declares one.
 				tuner: laneOk(
-					[{ ...t, unknownFields: ["frequency"] }],
+					[{ ...t, frequency: 100_000_000, unknownFields: ["frequency"] }],
 					live.now - 1000,
 					"rest" as const,
 				),
+				sources: laneOk([noCentre], live.now - 1000, "rest" as const),
+				relay: laneOk(noRelayFreq, live.now - 1000, "rest" as const),
 			})
 			const view = receiverLines(st, initialUi("receiver"), 119, 35, true).map(
 				lineText,
@@ -940,10 +949,24 @@ describe("receiver view-model (spec §6.4)", () => {
 			expect(view.find(l => l.startsWith("frequency"))).toMatch(
 				/^frequency \? Hz {3}window \? {3}/,
 			)
-			expect(view).toContain("in window ?")
+			expect(view.join("\n")).not.toMatch(/\b(98\.8|100\.000|101\.2)/)
+			expect(stripInput(st).rx).toBeNull()
+			// With a declared centre in the source caps, that stands in for the tuner.
+			const withCaps = { ...st, sources: live.sources }
+			expect(stripInput(withCaps).rx?.centreHz).toBe(src.caps.centerFreq)
+			const capsView = receiverLines(
+				withCaps,
+				initialUi("receiver"),
+				119,
+				35,
+				true,
+			).map(lineText)
+			expect(capsView.find(l => l.startsWith("frequency"))).toMatch(
+				/^frequency \? Hz {3}window 444\.947–446\.995 MHz/,
+			)
 			const edit = editAfter(st, ["up"])
 			expect(tunerConfirm(edit, st)?.prompt).toBe(
-				"send set-frequency 445 971 700 Hz to pi-iq",
+				"send set-frequency 100 001 000 Hz to pi-iq",
 			)
 			const lines = receiverLines(
 				st,
@@ -952,7 +975,7 @@ describe("receiver view-model (spec §6.4)", () => {
 				35,
 				true,
 			).map(lineText)
-			expect(lines).toContain("pending   frequency ? → 445 971 700")
+			expect(lines).toContain("pending   frequency ? → 100 001 000")
 		})
 		it("warns of a rate mismatch on the SOURCE block, never as an error (R84)", () => {
 			const src = live.sources.value![0]!

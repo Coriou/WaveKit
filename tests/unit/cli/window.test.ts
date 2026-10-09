@@ -112,6 +112,37 @@ describe("window", () => {
 		).toBe(100_000_000)
 		expect(windowFor("pi-iq", [], [], undefined)).toBeNull()
 	})
+	it("skips a frequency or sample rate the tuner lists as unknown (R86)", () => {
+		// Core's placeholder: 100 MHz / 2.4 MS/s, listed in unknownFields.
+		const placeholder = {
+			sourceId: "pi-iq",
+			frequency: 100_000_000,
+			sampleRate: 2_400_000,
+			unknownFields: ["frequency", "sampleRate"],
+		} as TunerState
+		expect(windowFor("pi-iq", [placeholder], [], undefined)).toBeNull()
+		const fromCaps = windowFor(
+			"pi-iq",
+			[placeholder],
+			[src("pi-iq", 445_970_700, [])],
+			undefined,
+		)
+		expect(fromCaps?.centreHz).toBe(445_970_700)
+		expect(fromCaps?.sampleRate).toBe(2_048_000)
+		// Only the listed field is skipped.
+		const rateKnown = {
+			...placeholder,
+			unknownFields: ["frequency"],
+		} as TunerState
+		expect(
+			windowFor(
+				"pi-iq",
+				[rateKnown],
+				[src("pi-iq", 445_970_700, [])],
+				undefined,
+			)?.sampleRate,
+		).toBe(2_400_000)
+	})
 	it("treats a centre at or below 0 Hz as no window (R41)", () => {
 		expect(windowFor("a", [], [src("a", 0, [])], undefined)).toBeNull()
 		expect(windowFor("a", [], [src("a", -5, [])], undefined)).toBeNull()
