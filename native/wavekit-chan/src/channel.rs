@@ -119,6 +119,10 @@ impl ChannelDsp {
         self.group_delay
     }
 
+    pub fn output_rate(&self) -> u64 {
+        self.spec.output_rate
+    }
+
     pub fn format(&self) -> Format {
         self.spec.format
     }

@@ -90,6 +90,15 @@ impl ChannelQueue {
         self.cv.notify_all();
     }
 
+    /// Non-blocking drain of everything queued (tests stand in for a reader that caught up).
+    #[cfg(test)]
+    pub fn try_pop_for_test(&self, out: &mut Vec<u8>) -> usize {
+        let mut s = self.state.lock().unwrap();
+        let n = s.buf.len();
+        out.extend(s.buf.drain(..));
+        n
+    }
+
     /// Most bytes ever queued at once; never exceeds `capacity`.
     pub fn high_water(&self) -> usize {
         self.state.lock().unwrap().high_water
