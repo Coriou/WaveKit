@@ -1,4 +1,5 @@
 import { WaveKitError } from "../../utils/errors.js"
+import { MAX_GAIN, MIN_GAIN } from "./protocol.js"
 import type { DecoderChannelRequest } from "./types.js"
 
 /**
@@ -62,9 +63,11 @@ export function admitChannel(
 		)
 	if (
 		req.gain !== undefined &&
-		(req.format !== "cu8" || !(req.gain > 0) || !Number.isFinite(req.gain))
+		(req.format !== "cu8" || !(req.gain >= MIN_GAIN && req.gain <= MAX_GAIN))
 	)
-		return invalid("gain is cu8 only and must be > 0")
+		return invalid(
+			`gain is cu8 only and must be within ${MIN_GAIN}..=${MAX_GAIN}`,
+		)
 	const halfOccupied = req.bandwidthHz / 2 + req.transitionHz
 	if (halfOccupied > req.outputRateHz / 2 + ADMISSION_EPSILON_HZ)
 		return invalid(

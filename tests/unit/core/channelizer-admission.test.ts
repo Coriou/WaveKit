@@ -134,12 +134,20 @@ describe("admitChannel", () => {
 		).toBe("channel-request-invalid")
 	})
 
-	it("mirrors the process's gain rule: cu8 only, finite and > 0", () => {
+	it("mirrors the process's gain rule: cu8 only, within [1e-6, 1e6]", () => {
 		const cu8 = { ...base, format: "cu8" as const }
-		expect(admitChannel({ ...cu8, gain: 2.5 }, capture, 0.8).admitted).toBe(
-			true,
-		)
-		for (const gain of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		for (const gain of [2.5, 1e-6, 1e6])
+			expect(admitChannel({ ...cu8, gain }, capture, 0.8).admitted).toBe(true)
+		for (const gain of [
+			0,
+			-1,
+			Number.NaN,
+			Number.POSITIVE_INFINITY,
+			9.9e-7,
+			1e-39,
+			1_000_000.0001,
+			1e39,
+		]) {
 			const v = admitChannel({ ...cu8, gain }, capture, 0.8)
 			expect(v.admitted ? "admitted" : v.reasonCode).toBe(
 				"channel-request-invalid",

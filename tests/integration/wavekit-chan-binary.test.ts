@@ -320,6 +320,8 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 			{ ...good, format: "cs16" },
 			{ ...good, gain: 2 },
 			{ ...good, format: "cu8", gain: 0 },
+			{ ...good, format: "cu8", gain: 1e7 }, // above MAX_GAIN (protocol.rs)
+			{ ...good, format: "cu8", gain: 1e-39 }, // below MIN_GAIN: an f32 subnormal
 			{ ...good, queueBytes: 0 },
 			{ ...good, queueBytes: 4 }, // below one cf32 sample
 			{ ...good, queueBytes: 64 * 1024 * 1024 + 1 },

@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import { WaveKitError } from "../../../src/utils/errors.js"
 import {
+	MAX_GAIN,
 	MAX_QUEUE_BYTES,
+	MIN_GAIN,
 	PROTOCOL_VERSION,
 	encodeRequest,
 	parseEventLine,
@@ -54,12 +56,16 @@ describe("channelizer protocol v1", () => {
 
 	it("mirrors the process's open-request checks (Property 1)", () => {
 		expect(MAX_QUEUE_BYTES).toBe(64 * 1024 * 1024)
+		// protocol.rs MIN_GAIN / MAX_GAIN
+		expect([MIN_GAIN, MAX_GAIN]).toEqual([1e-6, 1e6])
 		const accepted: ChannelizerRequest[] = [
 			open,
 			{ ...open, queueBytes: MAX_QUEUE_BYTES },
 			{ ...open, queueBytes: 2 },
 			{ ...open, format: "cf32", queueBytes: 8 },
 			{ ...open, gain: 2.5 },
+			{ ...open, gain: MIN_GAIN },
+			{ ...open, gain: MAX_GAIN },
 			{ ...open, id: "a".repeat(64) },
 		]
 		for (const req of accepted) expect(() => encodeRequest(req)).not.toThrow()
@@ -73,6 +79,11 @@ describe("channelizer protocol v1", () => {
 			{ ...open, format: "cf32", gain: 2 }, // gain is cu8 only
 			{ ...open, gain: 0 },
 			{ ...open, gain: -1 },
+			// Outside the finite normal f32 range the process keeps gain in.
+			{ ...open, gain: 9.9e-7 },
+			{ ...open, gain: 1e-39 },
+			{ ...open, gain: 1_000_000.0001 },
+			{ ...open, gain: 1e39 },
 			{ ...open, format: "cs16" },
 			{ ...open, outputRateHz: 48_000.5 },
 			{ ...open, outputRateHz: -1 },

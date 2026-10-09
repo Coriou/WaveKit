@@ -8,6 +8,12 @@ use serde_json::{Map, Value};
 /// of 48 kHz cf32 and far above every §6 budget; Task 16's Node schema mirrors it.
 pub const MAX_QUEUE_BYTES: usize = 64 << 20;
 
+/// Accepted cu8 `gain` range, inclusive. Both ends are normal f32 values, so the parsed f64 never
+/// becomes `inf` (above f32::MAX) or a subnormal or 0 (below f32::MIN_POSITIVE) as an f32; ±120 dB
+/// is far beyond any useful cu8 scaling. Node's schema and `admitChannel` use the same range.
+pub const MIN_GAIN: f64 = 1e-6;
+pub const MAX_GAIN: f64 = 1e6;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenReq {
     pub id: String,
@@ -111,15 +117,18 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
                 .and_then(Value::as_str)
                 .and_then(Format::parse)
                 .ok_or_else(|| err("format must be cu8|cf32".into()))?;
-            // Same rule as Node's admitChannel (Task 16): gain is cu8 only and must be > 0.
+            // Same rule as Node's admitChannel (Task 16): gain is cu8 only, within MIN_GAIN..=MAX_GAIN.
             let gain = match obj.get("gain") {
                 None => 1.0,
                 Some(_) if format != Format::Cu8 => return Err(err("gain is cu8 only".into())),
                 Some(g) => g
                     .as_f64()
-                    .filter(|g| *g > 0.0 && g.is_finite())
-                    .ok_or_else(|| err("gain must be a number > 0".into()))?
-                    as f32,
+                    .filter(|g| (MIN_GAIN..=MAX_GAIN).contains(g))
+                    .ok_or_else(|| {
+                        err(format!(
+                            "gain must be a number within {MIN_GAIN}..={MAX_GAIN}"
+                        ))
+                    })? as f32,
             };
             let queue_bytes = uint("queueBytes")?;
             if queue_bytes == 0 || queue_bytes > MAX_QUEUE_BYTES as u64 {
@@ -256,6 +265,33 @@ mod tests {
         }
         let missing = r#"{"v":1,"type":"open","id":"a","bandwidthHz":1,"transitionHz":1,"outputRateHz":1,"format":"cu8","queueBytes":2}"#;
         assert!(parse_request(missing).is_err());
+    }
+
+    // Node's schema and admitChannel use the same range (Property 1).
+    #[test]
+    fn gain_is_bounded_to_a_finite_normal_f32_range() {
+        for g in ["1e-6", "0.000001", "1e6", "1000000", "2.5"] {
+            let Ok(Request::Open(o)) =
+                open_with(&format!(r#""format":"cu8","gain":{g},"queueBytes":2"#))
+            else {
+                panic!("gain {g} must parse")
+            };
+            assert!(o.gain.is_normal() && o.gain > 0.0, "{g} -> {}", o.gain);
+        }
+        assert_eq!((MIN_GAIN, MAX_GAIN), (1e-6, 1e6));
+        // Above f32::MAX the cast gave inf; below f32::MIN_POSITIVE it gave a subnormal or 0.
+        for g in [
+            "1000000.0001",
+            "1e7",
+            "1e39",
+            "1e300",
+            "9.9e-7",
+            "1e-39",
+            "1e-300",
+        ] {
+            let e = open_with(&format!(r#""format":"cu8","gain":{g},"queueBytes":2"#)).unwrap_err();
+            assert!(e.1.contains("gain"), "{g}: {}", e.1);
+        }
     }
 
     #[test]

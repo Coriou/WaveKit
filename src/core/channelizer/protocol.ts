@@ -11,6 +11,12 @@ export const PROTOCOL_VERSION = 1
 
 /** Largest `queueBytes` the process accepts; mirrors `MAX_QUEUE_BYTES` in protocol.rs. */
 export const MAX_QUEUE_BYTES = 64 * 1024 * 1024
+/**
+ * Accepted cu8 `gain` range, inclusive; mirrors `MIN_GAIN`/`MAX_GAIN` in protocol.rs. Both ends are
+ * normal f32 values, so the process's f32 gain is never `inf`, subnormal or 0.
+ */
+export const MIN_GAIN = 1e-6
+export const MAX_GAIN = 1e6
 /** Bytes per IQ sample; the process refuses a queue that cannot hold one (runtime.rs `open`). */
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
 
@@ -32,7 +38,7 @@ export const ChannelizerRequestSchema = z
 				transitionHz: z.number().positive().finite(),
 				outputRateHz: z.number().int().positive(),
 				format,
-				gain: z.number().positive().finite().optional(),
+				gain: z.number().min(MIN_GAIN).max(MAX_GAIN).optional(),
 				queueBytes: z.number().int().min(1).max(MAX_QUEUE_BYTES),
 			})
 			.strict(),
