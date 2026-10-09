@@ -73,6 +73,13 @@ Per-decoder dsd-fme options:
 | `voiceSlot`                                                             | Overrides `digitalVoice.voiceSlot` for this decoder                                                                                                        |
 | `enablePerCallRecording`, `perCallRecordingDir`                         | Per-call WAVs alongside the stream (`-7 <dir> -P`), default off                                                                                            |
 | `perCallRecordingMaxTotalMb` (512), `perCallRecordingMaxAgeHours` (168) | Retention: expired files are deleted, then the oldest until the total fits; files written in the last 10 s are kept. Runs at start and 2 s after each call |
+| `extraArgs`                                                             | Passed through, except `-f*` (mode), `-o` (output) and `-y` (float audio), which are dropped with a warning: they would desync the stream format           |
+
+Relative recording directories are resolved to absolute paths. Retention only
+deletes files dsd-fme named (`dsd_file.c` in the pinned build):
+`<YYYYMMDD>_<HHMMSS>_<5 digits>_<sysid>_<GROUP|PRIVATE>_TGT_<tgt>_SRC_<src>.wav`
+and the in-progress `TEMP_<YYYYMMDD>_<HHMMSS>_<4 hex>.wav` that a crash leaves
+behind. Other WAV files in the directory are never touched.
 
 Only decoders configured at startup are routed (the API cannot create decoders).
 `digitalVoice.enabled: false` keeps dsd-fme on `-o null`, and `POST
@@ -94,21 +101,34 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
 - **Jitter buffer**: after silence, a burst plays once `jitterBufferMs` of voice
   is queued or the first datagram has waited that long. Beyond `maxBufferMs` the
   oldest voice is dropped (`droppedSamples`). `underruns` counts the times the
-  buffer ran dry while playing (at most once per call is normal: its end).
+  buffer ran dry inside a tick during an active call: gaps in a call's audio.
+  The clock is monotonic (`performance.now()`), so a wall-clock step such as an
+  NTP correction cannot stall or burst the output.
 - **Mixing**: in auto and DMR modes datagrams are stereo, slot 1 left and
-  slot 2 right. Identical channels (one slot active, or a non-TDMA call) pass
-  through, a zero channel (a muted slot) is ignored, and two active slots are
-  averaged so they cannot clip. Per-slot streams are deferred; use `voiceSlot` to
-  pick one.
+  slot 2 right. dsd-fme copies a lone active slot to both channels and
+  zero-fills a muted one. Per datagram, identical channels pass through once;
+  otherwise the channels are summed and clamped. Each slot therefore keeps its
+  own level when the other slot joins or leaves (averaging would drop it 6 dB);
+  the cost is that two loud simultaneous calls can clip. Per-slot streams are
+  deferred; use `voiceSlot` to pick one. A frame-aligned datagram of an
+  unexpected size (not a multiple of 640 bytes in stereo, 320 in mono) is
+  played but logged once: it means the mode or output format was overridden.
 - **Call state**: the decoder's `call_start` / `call_end` stay authoritative.
   dsd-fme publishes a `voice-call` event in the same tick as each of them
   (`emitOutput`), plus one when a running call turns out encrypted. The stream
   maps these to `digital-voice:call` (`decoderId`, `callId`, `protocol`,
   `talkgroup`, `source`, `slot`, `encrypted`, `active`, `startedAt`, `endedAt`).
-- **Encryption**: DMR from the link control (`Encrypted`, service option bit
-  0x40, or a non-zero `ALG ID`), P25 from `ALG ID` (0x80 means clear). While the
-  current call is encrypted, its datagrams are discarded and queued voice is
-  cleared. dsd-fme also mutes encrypted voice by default.
+- **Encryption**: DMR from the voice link control line, where `dmr_flco.c`
+  appends `Encrypted ` after `TGT=… SRC=…` (only on a line with TGT/SRC, so
+  `Slot N - Encrypted PDU` data bursts do not count), or from a non-zero
+  `ALG ID: %02X;` in the PI header or late entry (`dmr_pi.c`, `dmr_le.c`; no
+  `0x`). `SVC=0x..` is also parsed but only appears with `-Z`, which is not
+  passed. P25 from `ALG ID` (0x80 means clear). While the current call is
+  encrypted, queued voice is cleared; in stereo only that call's slot channel is
+  silenced, so a clear call on the other slot keeps playing (a datagram whose
+  channels are identical is silenced whole), and in mono or with the slot
+  unknown whole datagrams are discarded. dsd-fme also mutes encrypted voice by
+  default (it zero-fills the encrypted slot).
 
 ## Spike: dsd-fme UDP format (2026-10-09)
 

@@ -83,13 +83,21 @@ const DMR_END_HINT =
 /** BS-mode burst slot marker: the current slot is bracketed, e.g. "[slot1]". */
 const DMR_CURRENT_SLOT = /\[slot(?<slot>[12])\]/i
 /**
- * DMR privacy: dmr_flco.c prints "Encrypted " for service option bit 0x40;
- * the PI header and late entry print a non-zero "ALG ID: 0x..".
+ * DMR privacy. dmr_flco.c prints "Encrypted " for service option bit 0x40 on
+ * the voice link control line (after "TGT=%u SRC=%u ", same line), so it only
+ * counts on a line with TGT/SRC: "Slot N - Encrypted PDU" (dmr_block.c) is a
+ * data burst. The PI header and late entry print "ALG ID: %02X;" without 0x
+ * (dmr_pi.c, dmr_le.c). "SVC=0x.." only appears with -Z, which is not passed.
  */
 const DMR_ENCRYPTED = /\bEncrypted\b/i
-const ALG_ID = /\bALG(?:\s+ID)?:\s*0x(?<alg>[0-9A-F]+)\b/i
+const ALG_ID = /\bALG(?:\s+ID)?:\s*(?:0x)?(?<alg>[0-9A-F]{2,4})\b/i
 /** DMR service options: bit 0x40 is privacy (ETSI TS 102 361-2). */
 const DMR_SVC_PRIVACY = 0x40
+/**
+ * extraArgs that would change the decoder mode or the audio output format
+ * (and so desync the voice stream): -f* (mode), -o (output), -y (float audio).
+ */
+const RESERVED_EXTRA_ARG = /^-(?:f|o|y$)/
 
 // --- P25 Phase 1 Patterns ---
 /** P25 Phase 1 sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -113,7 +121,7 @@ const P25P2_VCH =
  * so the algorithm decides; an MI line alone does not.
  */
 const P25_CRYPTO =
-	/\bALG\s+ID:\s*0x(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*0x(?<key>[0-9A-F]+)\b|\bMI\b/i
+	/\bALG\s+ID:\s*(?:0x)?(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*(?:0x)?(?<key>[0-9A-F]+)\b|\bMI\b/i
 
 // --- YSF Patterns ---
 /** YSF sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -500,7 +508,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			wavDir: options["wavDir"] as string | undefined,
 			udpHost: options["udpHost"] as string | undefined,
 			udpPort: options["udpPort"] as number | undefined,
-			extraArgs: options["extraArgs"] as string[] | undefined,
+			extraArgs: this.parseExtraArgs(options["extraArgs"]),
 			inputSampleRate: options["inputSampleRate"] as number | undefined,
 			fmGain: options["fmGain"] as number | undefined,
 			enableIqAgc: options["enableIqAgc"] as boolean | undefined,
@@ -537,17 +545,50 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		return undefined
 	}
 
-	/** Directory for per-call WAV files, or null when recording is off. */
+	/**
+	 * Drops extraArgs that set the mode or the audio output (-f*, -o and its
+	 * value, -y): WaveKit owns both, and the voice stream depends on them.
+	 */
+	private parseExtraArgs(value: unknown): string[] | undefined {
+		if (!Array.isArray(value)) return undefined
+		const kept: string[] = []
+		const dropped: string[] = []
+		for (let i = 0; i < value.length; i++) {
+			const arg = String(value[i])
+			if (RESERVED_EXTRA_ARG.test(arg)) {
+				dropped.push(arg)
+				// "-o <device>": the device is the next argument.
+				if (arg === "-o" && i + 1 < value.length)
+					dropped.push(String(value[++i]))
+				continue
+			}
+			kept.push(arg)
+		}
+		if (dropped.length > 0) {
+			this.logger.warn(
+				{ dropped },
+				"Ignoring extraArgs that set the dsd-fme mode or audio output",
+			)
+		}
+		return kept
+	}
+
+	/**
+	 * Absolute directory for per-call WAV files, or null when recording is off.
+	 * Absolute because dsd-fme runs after `cd <dir>`: a relative -7 would nest.
+	 */
 	private recordingDir(): string | null {
 		if (this.options.output === "wav") {
-			return (
+			return path.resolve(
 				this.options.wavDir ??
-				this.options.perCallRecordingDir ??
-				"/app/decoded_calls"
+					this.options.perCallRecordingDir ??
+					"/app/decoded_calls",
 			)
 		}
 		if (this.options.enablePerCallRecording) {
-			return this.options.perCallRecordingDir ?? "/app/decoded_calls"
+			return path.resolve(
+				this.options.perCallRecordingDir ?? "/app/decoded_calls",
+			)
 		}
 		return null
 	}
@@ -1311,7 +1352,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		const svc = tlcMatch?.groups?.["svc"]
 		const alg = ALG_ID.exec(line)?.groups?.["alg"]
 		const encrypted =
-			DMR_ENCRYPTED.test(line) ||
+			(tgt !== null && DMR_ENCRYPTED.test(line)) ||
 			(svc !== undefined && (parseInt(svc, 16) & DMR_SVC_PRIVACY) !== 0) ||
 			(alg !== undefined && !isClearAlgorithm(alg))
 

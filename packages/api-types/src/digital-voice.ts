@@ -55,7 +55,10 @@ export interface DigitalVoiceDecoderStatus {
 	datagramsReceived: number
 	/** Malformed datagrams (not whole sample frames, or oversized). */
 	datagramsRejected: number
-	/** Datagrams discarded because the call is encrypted. */
+	/**
+	 * Datagrams muted because the call is encrypted: discarded (mono, or slot
+	 * unknown) or with that call's slot silenced (stereo).
+	 */
 	encryptedDatagramsDropped: number
 	/** Queued voice dropped by the bounded jitter buffer. */
 	droppedSamples: number

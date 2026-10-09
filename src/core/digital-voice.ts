@@ -11,8 +11,8 @@
  *   only while a stream has clients; without one, voice is discarded.
  * - Call state comes from the decoder's "voice-call" events, published in
  *   the same tick as its call_start / call_end outputs. Audio of a call
- *   flagged encrypted is discarded (dsd-fme also mutes it): silence plus
- *   `encrypted: true`.
+ *   flagged encrypted is muted (dsd-fme also mutes it): silence plus
+ *   `encrypted: true`. In stereo only that call's slot is silenced.
  *
  * Endpoints on httpPort (default 8082): /stream and /stream.wav serve the
  * first dsd-fme decoder; /decoders/<id>/stream[.wav] serve each decoder.
@@ -44,6 +44,7 @@ import {
 import {
 	DSD_FME_VOICE_SAMPLE_RATE,
 	downmixDsdFmeDatagram,
+	dsdFmeDatagramBytes,
 	type VoiceChannels,
 } from "./dsd-fme-voice-format.js"
 import { PacedPcmStream } from "./paced-pcm-stream.js"
@@ -152,6 +153,8 @@ interface VoiceChannel {
 	lastCall: DigitalVoiceCall | null
 	datagrams: number
 	rejected: number
+	/** Datagrams of an unexpected (but frame-aligned) size: logged once. */
+	oddSized: number
 	encryptedDropped: number
 	lastDatagramAt: Date | null
 	detach: (() => void) | null
@@ -212,7 +215,18 @@ export class DigitalVoiceService extends EventEmitter {
 				prepared.push(config)
 				continue
 			}
-			const channel = await this.createChannel(config)
+			let channel: VoiceChannel
+			try {
+				channel = await this.createChannel(config)
+			} catch (err) {
+				// The decoder still runs, with call metadata only (-o null).
+				this.log.error(
+					{ err, decoderId: config.id },
+					"Could not bind a digital voice UDP socket; voice disabled for this decoder",
+				)
+				prepared.push(config)
+				continue
+			}
 			this.channels.set(config.id, channel)
 			const voiceSlot = config.options["voiceSlot"] ?? this.config.voiceSlot
 			prepared.push({
@@ -373,6 +387,7 @@ export class DigitalVoiceService extends EventEmitter {
 			lastCall: null,
 			datagrams: 0,
 			rejected: 0,
+			oddSized: 0,
 			encryptedDropped: 0,
 			lastDatagramAt: null,
 			detach: null,
@@ -402,7 +417,35 @@ export class DigitalVoiceService extends EventEmitter {
 		channel.datagrams++
 		channel.lastDatagramAt = new Date()
 		if (!this.running || !channel.paced.running) return
-		const mono = downmixDsdFmeDatagram(datagram, channel.channels)
+		const call = channel.call
+		const encrypted = call?.active === true && call.encrypted
+		const slot = call?.slot
+		if (encrypted && (channel.channels === 1 || (slot !== 1 && slot !== 2))) {
+			// Mono, or the slot is unknown: the whole datagram may be that call.
+			channel.encryptedDropped++
+			return
+		}
+		const mono = downmixDsdFmeDatagram(
+			datagram,
+			channel.channels,
+			// Stereo: mute only the encrypted call's slot; a clear call on the
+			// other slot keeps playing (dsd-fme zero-fills the muted slot too).
+			encrypted && (slot === 1 || slot === 2) ? { muteSlot: slot } : {},
+		)
+		if (mono && datagram.length % dsdFmeDatagramBytes(channel.channels) !== 0) {
+			if (channel.oddSized === 0) {
+				this.log.warn(
+					{
+						decoderId: channel.decoderId,
+						bytes: datagram.length,
+						expectedMultipleOf: dsdFmeDatagramBytes(channel.channels),
+						channels: channel.channels,
+					},
+					"Unexpected dsd-fme voice datagram size: is the mode or output format overridden?",
+				)
+			}
+			channel.oddSized++
+		}
 		if (!mono) {
 			if (channel.rejected === 0) {
 				this.log.warn(
@@ -417,10 +460,7 @@ export class DigitalVoiceService extends EventEmitter {
 			channel.rejected++
 			return
 		}
-		if (channel.call?.active && channel.call.encrypted) {
-			channel.encryptedDropped++
-			return
-		}
+		if (encrypted) channel.encryptedDropped++
 		channel.paced.push(mono)
 	}
 
@@ -446,6 +486,7 @@ export class DigitalVoiceService extends EventEmitter {
 			startedAt: state.startedAt,
 			...(state.endedAt !== undefined ? { endedAt: state.endedAt } : {}),
 		}
+		channel.paced.setCallActive(call.active)
 		if (call.active) {
 			channel.call = call
 			// Never play audio of an encrypted call, even if some was queued.

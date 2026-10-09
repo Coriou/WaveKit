@@ -31,17 +31,34 @@ function clamp16(value: number): number {
 	return value > 32767 ? 32767 : value < -32768 ? -32768 : value
 }
 
+/** Expected datagram size: one 20 ms frame of `channels` channels. */
+export function dsdFmeDatagramBytes(channels: VoiceChannels): number {
+	return DSD_FME_DATAGRAM_FRAMES * channels * 2
+}
+
+export interface DownmixOptions {
+	/**
+	 * Stereo only: silence this TDMA slot's channel (1 = left, 2 = right)
+	 * before mixing, e.g. an encrypted call. A datagram whose channels are
+	 * identical carries one slot copied to both and is silenced entirely.
+	 */
+	muteSlot?: 1 | 2 | undefined
+}
+
 /**
  * Validates one datagram and returns it as mono s16le, or null when it is not
  * a whole number of sample frames (or empty / oversized).
  *
- * Stereo is mixed per datagram: identical channels (one active slot or a
- * non-TDMA call) pass unchanged, a silent channel is ignored, and two active
- * slots are averaged so simultaneous calls cannot clip.
+ * Stereo mix (per datagram, so each slot keeps a stable level): identical
+ * channels (dsd-fme copies a lone active slot to both, or a non-TDMA call)
+ * pass through once; otherwise the channels are summed and clamped. A muted
+ * slot is zero-filled by dsd-fme, so a lone call keeps its level when the
+ * other slot joins or leaves; two loud simultaneous calls may clip.
  */
 export function downmixDsdFmeDatagram(
 	datagram: Buffer,
 	channels: VoiceChannels,
+	options: DownmixOptions = {},
 ): Buffer | null {
 	const frameBytes = channels * 2
 	if (
@@ -55,27 +72,25 @@ export function downmixDsdFmeDatagram(
 
 	const frames = datagram.length / 4
 	let identical = true
-	let leftSilent = true
-	let rightSilent = true
-	for (let i = 0; i < frames; i++) {
-		const left = datagram.readInt16LE(i * 4)
-		const right = datagram.readInt16LE(i * 4 + 2)
-		if (left !== right) identical = false
-		if (left !== 0) leftSilent = false
-		if (right !== 0) rightSilent = false
+	for (let i = 0; i < frames && identical; i++) {
+		if (datagram.readInt16LE(i * 4) !== datagram.readInt16LE(i * 4 + 2)) {
+			identical = false
+		}
 	}
-	const useLeft = identical || rightSilent
-	const useRight = !useLeft && leftSilent
 	const mono = Buffer.alloc(frames * 2)
+	if (identical) {
+		if (options.muteSlot !== undefined) return mono
+		for (let i = 0; i < frames; i++) {
+			mono.writeInt16LE(datagram.readInt16LE(i * 4), i * 2)
+		}
+		return mono
+	}
+	const keepLeft = options.muteSlot !== 1
+	const keepRight = options.muteSlot !== 2
 	for (let i = 0; i < frames; i++) {
-		const left = datagram.readInt16LE(i * 4)
-		const right = datagram.readInt16LE(i * 4 + 2)
-		const sample = useLeft
-			? left
-			: useRight
-				? right
-				: clamp16(Math.round((left + right) / 2))
-		mono.writeInt16LE(sample, i * 2)
+		const left = keepLeft ? datagram.readInt16LE(i * 4) : 0
+		const right = keepRight ? datagram.readInt16LE(i * 4 + 2) : 0
+		mono.writeInt16LE(clamp16(left + right), i * 2)
 	}
 	return mono
 }

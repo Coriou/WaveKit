@@ -121,6 +121,41 @@ describe("PacedPcmStream", () => {
 		expect(voice.at(-1)).toBe(100)
 	})
 
+	it("keeps its rate when the wall clock steps backwards (NTP)", () => {
+		const stream = new PacedPcmStream({
+			sampleRate: RATE,
+			jitterBufferMs: 0,
+			maxBufferMs: 1000,
+		})
+		const chunks = collect(stream)
+		stream.start()
+		vi.advanceTimersByTime(200)
+		vi.setSystemTime(Date.now() - 60_000)
+		vi.advanceTimersByTime(800)
+		stream.stop()
+		expect(samples(chunks)).toHaveLength(RATE)
+	})
+
+	it("counts underruns only for gaps inside an active call", () => {
+		const stream = new PacedPcmStream({
+			sampleRate: RATE,
+			jitterBufferMs: 0,
+			maxBufferMs: 1000,
+		})
+		collect(stream)
+		stream.start()
+		// A burst ending between calls is not an underrun.
+		stream.push(tone(100, 1))
+		vi.advanceTimersByTime(100)
+		expect(stream.stats.underruns).toBe(0)
+		// The same gap during a call is.
+		stream.setCallActive(true)
+		stream.push(tone(100, 1))
+		vi.advanceTimersByTime(100)
+		expect(stream.stats.underruns).toBe(1)
+		stream.stop()
+	})
+
 	it("clear() turns queued voice into silence", () => {
 		const stream = new PacedPcmStream({
 			sampleRate: RATE,
@@ -137,17 +172,19 @@ describe("PacedPcmStream", () => {
 	})
 
 	it("resynchronises after an event-loop stall instead of bursting seconds of audio", () => {
+		let clock = 0
 		const stream = new PacedPcmStream({
 			sampleRate: RATE,
 			jitterBufferMs: 0,
 			maxBufferMs: 1000,
+			now: () => clock + performance.now(),
 		})
 		const chunks = collect(stream)
 		stream.start()
 		vi.advanceTimersByTime(100)
 		const before = samples(chunks).length
-		// The clock jumps 5 s without timers firing (a blocked event loop).
-		vi.setSystemTime(Date.now() + 5000)
+		// 5 s pass without timers firing (a blocked event loop).
+		clock += 5000
 		vi.advanceTimersByTime(20)
 		const burst = samples(chunks).length - before
 		expect(burst).toBeLessThanOrEqual(0.04 * RATE)

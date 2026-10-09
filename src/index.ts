@@ -367,9 +367,12 @@ async function main(): Promise<void> {
 
 	// Step 7: Create decoders from configuration. dsd-fme decoders are first
 	// pointed at the digital voice stream (-o udp to a local socket).
-	const decoderConfigs = await digitalVoice.prepareDecoderConfigs(
-		config.decoders,
-	)
+	let decoderConfigs = config.decoders
+	try {
+		decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
+	} catch (err) {
+		log.error({ err }, "Digital voice setup failed; decoders keep their output")
+	}
 	for (const decoderConfig of decoderConfigs) {
 		try {
 			const decoder = decoderManager.createDecoder(decoderConfig)

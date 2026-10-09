@@ -1,6 +1,13 @@
 /**
  * Retention for dsd-fme per-call WAV recordings (`-7 <dir> -P`).
  *
+ * Only files named by dsd-fme are touched (dsd_file.c, pinned ed1d1d6):
+ * close_and_rename_wav_file writes
+ * `<YYYYMMDD>_<HHMMSS>_<%05d random>_<sysid>_<GROUP|PRIVATE>_TGT_<tgt>_SRC_<src>.wav`
+ * and open_wav_file writes the in-progress `TEMP_<YYYYMMDD>_<HHMMSS>_<%04X>.wav`
+ * (left behind if dsd-fme dies mid-call). Any other WAV in the directory
+ * (a user's own files, other tools) is never deleted.
+ *
  * Files older than the age limit are deleted, then the oldest remaining files
  * are deleted until the directory total fits the size limit. Files modified
  * in the last few seconds are never touched: dsd-fme may still be writing
@@ -23,6 +30,16 @@ export interface PruneResult {
 	keptBytes: number
 }
 
+/** dsd-fme's final per-call recording name. */
+export const DSD_FME_CALL_WAV = /^\d{8}_\d{6}_\d{5}_.*_TGT_.*_SRC_.*\.wav$/
+/** dsd-fme's in-progress recording name. */
+export const DSD_FME_TEMP_WAV = /^TEMP_\d{8}_\d{6}_[0-9A-F]{4}\.wav$/
+
+/** True for a WAV file named by dsd-fme's per-call recorder. */
+export function isDsdFmeRecording(name: string): boolean {
+	return DSD_FME_CALL_WAV.test(name) || DSD_FME_TEMP_WAV.test(name)
+}
+
 /** A recording modified this recently may still be open in dsd-fme. */
 export const RECORDING_IN_PROGRESS_MS = 10_000
 
@@ -42,7 +59,7 @@ async function listWavFiles(dir: string): Promise<RecordingFile[]> {
 	}
 	const files: RecordingFile[] = []
 	for (const name of names) {
-		if (!name.toLowerCase().endsWith(".wav")) continue
+		if (!isDsdFmeRecording(name)) continue
 		const file = path.join(dir, name)
 		try {
 			const stat = await fs.stat(file)
@@ -56,7 +73,7 @@ async function listWavFiles(dir: string): Promise<RecordingFile[]> {
 	return files
 }
 
-/** Applies the retention policy to the WAV files directly in `dirs`. */
+/** Applies the retention policy to the dsd-fme recordings directly in `dirs`. */
 export async function pruneCallRecordings(
 	dirs: readonly string[],
 	retention: CallRecordingRetention,

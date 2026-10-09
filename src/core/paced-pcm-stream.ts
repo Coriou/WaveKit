@@ -19,6 +19,11 @@ export interface PacedPcmStreamOptions {
 	jitterBufferMs: number
 	/** Queue bound; older audio beyond it is dropped. */
 	maxBufferMs: number
+	/**
+	 * Monotonic clock in ms (default performance.now()): a wall-clock step,
+	 * e.g. an NTP correction, must not stall or burst the output.
+	 */
+	now?: () => number
 }
 
 export interface PacedPcmStats {
@@ -28,7 +33,10 @@ export interface PacedPcmStats {
 	silenceSamples: number
 	/** Queued samples dropped because the queue was full. */
 	droppedSamples: number
-	/** Times the queue ran dry while playing (the end of every burst counts). */
+	/**
+	 * Times the queue ran dry mid-tick while playing during an active call
+	 * (see setCallActive): gaps inside a call, not the end of a burst after it.
+	 */
 	underruns: number
 }
 
@@ -52,6 +60,8 @@ export class PacedPcmStream extends EventEmitter {
 	private timer: ReturnType<typeof setInterval> | null = null
 	private startedAt = 0
 	private emittedSamples = 0
+	private callActive = false
+	private readonly now: () => number
 	readonly stats: PacedPcmStats = {
 		voiceSamples: 0,
 		silenceSamples: 0,
@@ -63,6 +73,7 @@ export class PacedPcmStream extends EventEmitter {
 		super()
 		this.sampleRate = options.sampleRate
 		this.tickMs = options.tickMs ?? 20
+		this.now = options.now ?? (() => performance.now())
 		this.jitterSamples = Math.round(
 			(options.sampleRate * options.jitterBufferMs) / 1000,
 		)
@@ -83,7 +94,7 @@ export class PacedPcmStream extends EventEmitter {
 
 	start(): void {
 		if (this.timer) return
-		this.startedAt = Date.now()
+		this.startedAt = this.now()
 		this.emittedSamples = 0
 		this.timer = setInterval(() => this.tick(), this.tickMs)
 	}
@@ -103,11 +114,16 @@ export class PacedPcmStream extends EventEmitter {
 				? pcm
 				: pcm.subarray(0, samples * BYTES_PER_SAMPLE)
 		if (this.queuedSamples === 0 && !this.playing) {
-			this.firstQueuedAt = Date.now()
+			this.firstQueuedAt = this.now()
 		}
 		this.queue.push(chunk)
 		this.queuedSamples += samples
 		this.dropOldest()
+	}
+
+	/** Whether a call is in progress (running dry then counts as an underrun). */
+	setCallActive(active: boolean): void {
+		this.callActive = active
 	}
 
 	/** Discards queued voice: the output is silence from the next tick. */
@@ -138,7 +154,7 @@ export class PacedPcmStream extends EventEmitter {
 	}
 
 	private tick(): void {
-		const now = Date.now()
+		const now = this.now()
 		let due =
 			Math.floor(((now - this.startedAt) * this.sampleRate) / 1000) -
 			this.emittedSamples
@@ -176,7 +192,7 @@ export class PacedPcmStream extends EventEmitter {
 			}
 			if (this.queuedSamples === 0) {
 				// Ran dry: re-buffer before the next burst plays.
-				if (filled < due) this.stats.underruns++
+				if (filled < due && this.callActive) this.stats.underruns++
 				this.playing = false
 				this.firstQueuedAt = null
 			}

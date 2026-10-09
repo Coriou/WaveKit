@@ -68,10 +68,33 @@ describe("downmixDsdFmeDatagram", () => {
 		])
 	})
 
-	it("averages two active slots so simultaneous calls cannot clip", () => {
+	it("sums two active slots (clamped) so a call keeps its level when the other slot joins", () => {
+		// Slot 1 alone: dsd-fme copies it to both channels.
 		expect(
-			mono(downmixDsdFmeDatagram(stereo([32767, 100], [32767, -50]), 2)!),
-		).toEqual([32767, 25])
+			mono(downmixDsdFmeDatagram(stereo([100, -40], [100, -40]), 2)!),
+		).toEqual([100, -40])
+		// Slot 2 joins: slot 1 is still at its own level inside the mix.
+		expect(mono(downmixDsdFmeDatagram(stereo([100, -40], [7, 3]), 2)!)).toEqual(
+			[107, -37],
+		)
+		expect(
+			mono(downmixDsdFmeDatagram(stereo([32000, -32000], [2000, -2000]), 2)!),
+		).toEqual([32767, -32768])
+	})
+
+	it("silences an encrypted slot's channel but keeps a clear call on the other slot", () => {
+		const both = stereo([100, 200], [5, 6])
+		expect(mono(downmixDsdFmeDatagram(both, 2, { muteSlot: 1 })!)).toEqual([
+			5, 6,
+		])
+		expect(mono(downmixDsdFmeDatagram(both, 2, { muteSlot: 2 })!)).toEqual([
+			100, 200,
+		])
+		// One slot copied to both channels: it may be the encrypted one, so all of it is muted.
+		const copied = stereo([100, 200], [100, 200])
+		expect(mono(downmixDsdFmeDatagram(copied, 2, { muteSlot: 2 })!)).toEqual([
+			0, 0,
+		])
 	})
 
 	it("rejects empty, partial-frame and oversized datagrams", () => {
@@ -81,9 +104,9 @@ describe("downmixDsdFmeDatagram", () => {
 		expect(downmixDsdFmeDatagram(Buffer.alloc(8192), 2)).toBeNull()
 	})
 
-	// Feature: digital-voice, Property 2: stereo downmix stays in range and preserves length
+	// Feature: digital-voice, Property 2: stereo downmix is a stable clamped mix, one sample per frame
 	// Validates: ROADMAP 5b one mixed mono stream
-	it("produces one in-range mono sample per stereo frame", () => {
+	it("produces one clamped mono sample per stereo frame", () => {
 		fc.assert(
 			fc.property(
 				fc.array(
@@ -99,11 +122,12 @@ describe("downmixDsdFmeDatagram", () => {
 					const out = mono(downmixDsdFmeDatagram(stereo(left, right), 2)!)
 					expect(out).toHaveLength(frames.length)
 					for (const [i, sample] of out.entries()) {
-						const lo = Math.min(left[i]!, right[i]!)
-						const hi = Math.max(left[i]!, right[i]!)
-						// One channel verbatim or the rounded average: within [lo, hi].
-						expect(sample).toBeGreaterThanOrEqual(lo)
-						expect(sample).toBeLessThanOrEqual(hi)
+						const identical = left.every((l, k) => l === right[k])
+						const expected = identical
+							? left[i]!
+							: Math.max(-32768, Math.min(32767, left[i]! + right[i]!))
+						// One copy of a duplicated channel, else the clamped sum.
+						expect(sample).toBe(expected)
 					}
 				},
 			),

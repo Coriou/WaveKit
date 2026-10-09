@@ -19,6 +19,8 @@ import type {
 class FakeSocket extends EventEmitter {
 	static created: FakeSocket[] = []
 	static nextPort = 41_000
+	/** Ids whose bind fails (EADDRINUSE). */
+	static failBind = 0
 	port = FakeSocket.nextPort++
 	closed = false
 	constructor(readonly options: unknown) {
@@ -26,6 +28,11 @@ class FakeSocket extends EventEmitter {
 		FakeSocket.created.push(this)
 	}
 	bind(_port: number, _host: string, cb: () => void): void {
+		if (FakeSocket.failBind > 0) {
+			FakeSocket.failBind--
+			setImmediate(() => this.emit("error", new Error("EADDRINUSE")))
+			return
+		}
 		setImmediate(cb)
 	}
 	address(): { port: number } {
@@ -191,6 +198,32 @@ describe("DigitalVoiceService", () => {
 			)
 		})
 
+		it("gives each decoder its own port, and destroy() closes the sockets", async () => {
+			const prepared = await service.prepareDecoderConfigs([
+				dsd("dsd-a"),
+				dsd("dsd-b"),
+			])
+			const ports = prepared.map(c => c.options["udpPort"])
+			expect(new Set(ports).size).toBe(2)
+			expect(ports).toEqual(FakeSocket.created.map(s => s.port))
+			await service.destroy()
+			expect(FakeSocket.created.every(s => s.closed)).toBe(true)
+			expect(service.getStatus().decoders).toEqual([])
+		})
+
+		it("keeps a decoder on metadata only when its socket cannot bind", async () => {
+			FakeSocket.failBind = 1
+			const prepared = await service.prepareDecoderConfigs([
+				dsd("dsd-a"),
+				dsd("dsd-b"),
+			])
+			expect(prepared[0]).toEqual(dsd("dsd-a"))
+			expect(prepared[1]!.options["output"]).toBe("udp")
+			expect(service.getStatus().decoders.map(d => d.decoderId)).toEqual([
+				"dsd-b",
+			])
+		})
+
 		it("bounds each socket's kernel receive queue", async () => {
 			await service.prepareDecoderConfigs([dsd("dsd-fme")])
 			expect(socket().options).toMatchObject({ recvBufferSize: 32 * 1024 })
@@ -210,7 +243,9 @@ describe("DigitalVoiceService", () => {
 	describe("paced stream", () => {
 		beforeEach(async () => {
 			await service.prepareDecoderConfigs([dsd("dsd-fme")])
-			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] })
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "Date", "performance"],
+			})
 			await service.start()
 		})
 
@@ -223,6 +258,29 @@ describe("DigitalVoiceService", () => {
 			const client = connect()
 			expect(vi.getTimerCount()).toBe(1)
 			client.destroy()
+		})
+
+		it("restarts pacing when a client reconnects after the last one left", async () => {
+			const first = connect()
+			vi.advanceTimersByTime(100)
+			first.destroy()
+			await new Promise(resolve => setImmediate(resolve))
+			expect(vi.getTimerCount()).toBe(0)
+			const second = connect()
+			expect(vi.getTimerCount()).toBe(1)
+			vi.advanceTimersByTime(200)
+			expect(second.samples()).toHaveLength(1600)
+		})
+
+		it("accepts but flags frame-aligned datagrams of an unexpected size", () => {
+			connect()
+			socket().emit("message", Buffer.alloc(320, 1))
+			const internals = service as unknown as {
+				channels: Map<string, { oddSized: number }>
+			}
+			expect(internals.channels.get("dsd-fme")!.oddSized).toBe(1)
+			expect(service.getStatus().decoders[0]!.datagramsRejected).toBe(0)
+			expect(service.getStatus().decoders[0]!.bufferedMs).toBe(10)
 		})
 
 		it("streams exact silence at 8 kHz when no voice arrives", () => {
@@ -274,7 +332,9 @@ describe("DigitalVoiceService", () => {
 			service.attachDecoder("dsd-fme", decoder)
 			calls = []
 			service.on("call", (call: DigitalVoiceCall) => calls.push(call))
-			vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] })
+			vi.useFakeTimers({
+				toFake: ["setInterval", "clearInterval", "Date", "performance"],
+			})
 			await service.start()
 		})
 
@@ -319,6 +379,30 @@ describe("DigitalVoiceService", () => {
 			const status = service.getStatus()
 			expect(status.decoders[0]!.encryptedDatagramsDropped).toBe(20)
 			expect(status.call?.encrypted).toBe(true)
+		})
+
+		it("mutes only the encrypted call's slot: a clear call on the other slot keeps playing", () => {
+			const client = connect()
+			decoder.emit("voice-call", state({ encrypted: true, slot: 1 }))
+			const both = Buffer.alloc(640)
+			for (let i = 0; i < 160; i++) {
+				both.writeInt16LE(500, i * 4) // slot 1, encrypted
+				both.writeInt16LE(300, i * 4 + 2) // slot 2, clear
+			}
+			for (let n = 0; n < 10; n++) socket().emit("message", both)
+			vi.advanceTimersByTime(800)
+			const voice = client.samples().filter(s => s !== 0)
+			expect(voice).toHaveLength(1600)
+			expect(voice.every(s => s === 300)).toBe(true)
+		})
+
+		it("counts an underrun for a gap inside an active call", () => {
+			connect()
+			decoder.emit("voice-call", state())
+			// 12.5 ms of voice: it runs dry inside a 20 ms tick.
+			socket().emit("message", Buffer.alloc(400, 1))
+			vi.advanceTimersByTime(300)
+			expect(service.getStatus().decoders[0]!.underruns).toBe(1)
 		})
 
 		it("mutes voice already queued when a running call turns out encrypted", () => {

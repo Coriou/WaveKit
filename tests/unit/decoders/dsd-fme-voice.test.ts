@@ -120,6 +120,42 @@ describe("dsd-fme voice output arguments", () => {
 		expect(dsdFmeVoiceSlotArg(slot === "1" ? 1 : slot)).toBe(expected)
 	})
 
+	it("resolves a relative recording dir once, so cd + -7 cannot nest it", () => {
+		const decoder = createDecoder({
+			enablePerCallRecording: true,
+			perCallRecordingDir: "./decoded_calls",
+		}) as unknown as Internals
+		const absolute = path.resolve("./decoded_calls")
+		const out = decoder.getDecoderArgs()
+		expect(out[out.indexOf("-7") + 1]).toBe(absolute)
+		const pipeline = decoder.buildPipelineCommand()
+		expect(pipeline).toContain(`cd ${absolute} &&`)
+		expect(pipeline).not.toContain("./decoded_calls")
+	})
+
+	it("drops extraArgs that would change the mode or the audio format", () => {
+		const out = args({
+			output: "udp",
+			udpHost: "127.0.0.1",
+			udpPort: 40000,
+			extraArgs: [
+				"-fy",
+				"-o",
+				"pulse",
+				"-oudp:1.2.3.4:5",
+				"-y",
+				"-l",
+				"-u",
+				"4",
+			],
+		})
+		expect(out.filter(a => a.startsWith("-f"))).toEqual(["-fa"])
+		expect(out.filter(a => a === "-o")).toHaveLength(1)
+		expect(out).not.toContain("pulse")
+		expect(out).not.toContain("-y")
+		expect(out.slice(-3)).toEqual(["-l", "-u", "4"])
+	})
+
 	it("ignores an invalid voiceSlot", () => {
 		expect(args({ voiceSlot: 3 })).not.toContain("-V")
 	})
@@ -261,6 +297,35 @@ describe("dsd-fme call ids and voice-call events", () => {
 		expect(voice[0]!.callId).toBe(voice[1]!.callId)
 	})
 
+	it("flags a DMR call encrypted from the PI header ALG ID, printed without 0x", () => {
+		const lines = [
+			{
+				atMs: 0,
+				text: "12:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC ",
+			},
+			{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call " },
+			{
+				atMs: 1000,
+				text: " Slot 1 DMR PI H- ALG ID: 21; KEY ID: 01; MI(32): 12345678;",
+			},
+		]
+		const { voice } = replay(createDecoder(), lines, 1500)
+		expect(voice.map(v => v.encrypted)).toEqual([false, true])
+	})
+
+	it("does not take an encrypted data PDU for an encrypted voice call", () => {
+		const lines = [
+			{
+				atMs: 0,
+				text: "12:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC ",
+			},
+			{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call " },
+			{ atMs: 500, text: " Slot 1 - Encrypted PDU;" },
+		]
+		const { voice } = replay(createDecoder(), lines, 1500)
+		expect(voice.map(v => v.encrypted)).toEqual([false])
+	})
+
 	it("treats P25 ALG ID 0x80 as clear and other algorithms as encrypted", () => {
 		const clear = replay(
 			createDecoder({ mode: "p25" }),
@@ -295,6 +360,11 @@ describe("per-call recording retention", () => {
 		rmSync(dir, { recursive: true, force: true })
 	})
 
+	/** A dsd-fme per-call file name (dsd_file.c close_and_rename_wav_file). */
+	function call(tag: number): string {
+		return `20261009_133838_${String(10000 + tag)}_DMR_CC_1_GROUP_TGT_9_SRC_${tag}.wav`
+	}
+
 	function wav(name: string, bytes: number, ageMs: number, now: number): void {
 		const file = path.join(dir, name)
 		writeFileSync(file, Buffer.alloc(bytes))
@@ -305,10 +375,10 @@ describe("per-call recording retention", () => {
 	it("deletes expired files, then the oldest until the size limit fits", async () => {
 		const now = Date.now()
 		const mb = 1024 * 1024
-		wav("a.wav", mb, 10 * 3_600_000, now) // expired
-		wav("b.wav", mb, 3 * 60_000, now)
-		wav("c.wav", mb, 2 * 60_000, now)
-		wav("d.wav", mb, 60_000, now)
+		wav(call(1), mb, 10 * 3_600_000, now) // expired
+		wav(call(2), mb, 3 * 60_000, now)
+		wav(call(3), mb, 2 * 60_000, now)
+		wav(call(4), mb, 60_000, now)
 		writeFileSync(path.join(dir, "notes.txt"), "keep")
 		const result = await pruneCallRecordings(
 			[dir, path.join(dir, "WAV")],
@@ -316,23 +386,47 @@ describe("per-call recording retention", () => {
 			now,
 		)
 		expect(result.deleted.map(f => path.basename(f)).sort()).toEqual([
-			"a.wav",
-			"b.wav",
+			call(1),
+			call(2),
 		])
-		expect(readdirSync(dir).sort()).toEqual(["c.wav", "d.wav", "notes.txt"])
+		expect(readdirSync(dir).sort()).toEqual([call(3), call(4), "notes.txt"])
 		expect(result.keptBytes).toBe(2 * mb)
+	})
+
+	it("never touches WAV files dsd-fme did not name, however old or large", async () => {
+		const now = Date.now()
+		const mb = 1024 * 1024
+		const foreign = [
+			"a.wav",
+			"recording.WAV",
+			"20261009_133838_DMR.wav",
+			"TEMP_notes.wav",
+		]
+		for (const name of foreign) wav(name, 2 * mb, 30 * 24 * 3_600_000, now)
+		wav(call(1), mb, 30 * 24 * 3_600_000, now)
+		wav("TEMP_20261009_133838_1A2B.wav", mb, 30 * 24 * 3_600_000, now)
+		const result = await pruneCallRecordings(
+			[dir],
+			{ maxTotalMb: 1, maxAgeHours: 1 },
+			now,
+		)
+		expect(result.deleted.map(f => path.basename(f)).sort()).toEqual([
+			call(1),
+			"TEMP_20261009_133838_1A2B.wav",
+		])
+		expect(readdirSync(dir).sort()).toEqual([...foreign].sort())
 	})
 
 	it("never deletes a recording dsd-fme may still be writing", async () => {
 		const now = Date.now()
-		wav("current.wav", 3 * 1024 * 1024, 1000, now)
+		wav(call(1), 3 * 1024 * 1024, 1000, now)
 		const result = await pruneCallRecordings(
 			[dir],
 			{ maxTotalMb: 1, maxAgeHours: 1 },
 			now,
 		)
 		expect(result.deleted).toEqual([])
-		expect(statSync(path.join(dir, "current.wav")).size).toBe(3 * 1024 * 1024)
+		expect(statSync(path.join(dir, call(1))).size).toBe(3 * 1024 * 1024)
 	})
 
 	// Feature: digital-voice, Property 3: retention keeps the newest files within the limit
@@ -350,7 +444,7 @@ describe("per-call recording retention", () => {
 					dir = mkdtempSync(path.join(tmpdir(), "wavekit-calls-"))
 					const now = Date.now()
 					sizesKb.forEach((kb, i) =>
-						wav(`f${i}.wav`, kb * 1024, (sizesKb.length - i) * 60_000, now),
+						wav(call(i), kb * 1024, (sizesKb.length - i) * 60_000, now),
 					)
 					const result = await pruneCallRecordings(
 						[dir],
@@ -358,7 +452,7 @@ describe("per-call recording retention", () => {
 						now,
 					)
 					const kept = readdirSync(dir)
-						.map(name => Number(name.slice(1, -4)))
+						.map(name => Number(/_SRC_(\d+)\.wav$/.exec(name)![1]))
 						.sort((a, b) => a - b)
 					const total = kept.reduce((sum, i) => sum + sizesKb[i]! * 1024, 0)
 					expect(total).toBeLessThanOrEqual(limitKb * 1024)
@@ -376,5 +470,5 @@ describe("per-call recording retention", () => {
 			),
 			{ numRuns: 100 },
 		)
-	})
+	}, 30_000) // 100 runs of real file I/O: slow on a loaded machine
 })
