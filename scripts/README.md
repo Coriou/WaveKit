@@ -32,6 +32,18 @@ A shell script to test the manual demodulation pipeline on recorded IQ files. Us
 /scripts/demod-test.sh /data/debug_audio/iq_capture_2026xxxx.u8
 ```
 
+### `dsd-fme-voice-ab.mjs`
+
+Real-binary regression check for digital voice. It runs in the core image on a
+recorded DMR discriminator capture. The decode must be identical with voice
+output on (`-o udp`) and off (`-o null`), and the decoded voice must not be
+chopped. See `docs/DIGITAL-VOICE.md`.
+
+```bash
+docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
+  wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs [--chain "..."] [--decoded-wav /out/x.wav]
+```
+
 ## Python Analysis Tools
 
 - **`auto-capture.py`**: Core capture logic. Connects to `rtlmux` TCP stream, detects signals based on standard deviation threshold block-by-block, and saves IQ data.

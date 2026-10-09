@@ -228,6 +228,63 @@ voice call state uses the same values. The open question is why the terminator
 was missed on that call (signal at the end of the PTT); it is a decode issue,
 not a parser one.
 
+## Chopped DMR voice: no DC blocker before dsd-fme (2026-10-09)
+
+Over the air (runs 8 and 9) the decoded DMR voice was "robotic": about 20 % of
+it was exact silence, as runs of 25-30 ms about six times a second (muted
+AMBE frames). Call metadata still decoded, so it went unnoticed.
+
+**Cause.** dsd-fme's input chain ran `csdr fmdemod | csdr dcblock | csdr gain 2
+| csdr limit`. A DMR handheld (MS/direct mode) transmits in TDMA bursts: 30 ms
+on, 30 ms off. Between bursts the discriminator follows the receiver's own DC
+spike, which `offsetHz` moves to -6 kHz, still inside the channel filter. On
+run 8 the idle level is -5997 Hz and the burst level -463 Hz, so every burst
+starts with a step of about 5.5 kHz. `csdr dcblock` (R = 0.998, time constant
+about 10 ms at 47.6 kHz) turns that step into a transient. Over the first 10 ms
+of each burst the baseline is off by a median 2.42 times the 4FSK decision
+half-spacing (648 Hz); without the DC blocker it is off by 0.27 times. The eye
+was closed at the start of all 373 bursts with the blocker and open at the
+start of 99 % without it. dsd-fme already tracks the symbol levels per burst,
+so the blocker only did harm. The pre-34f56e1 decimation filter
+(`firdecimate 43 0.05`) shows the same failure (2.27 times the half-spacing),
+so the channel-matched filter was not the cause. Varying `gain` (0.5-5) or
+removing `limit` made no difference.
+
+**Fix.** The dsd-fme chain no longer has `csdr dcblock`
+(`skipDcBlock: true`).
+
+| run 8, two PTTs, exact core chain          | before (dcblock) | after |
+| ------------------------------------------ | ---------------- | ----- |
+| Muted voice (exact zeros)                  | 20.5 %           | 1.1 % |
+| Gaps of 15 ms or more                      | 134              | 4     |
+| dsd-fme AMBE errors ("Total audio errors") | 2460             | 86    |
+| FEC ERR lines                              | 56               | 6     |
+| Link control lines decoded (TGT/SRC)       | 35               | 62    |
+| CRC errors                                 | 0                | 0     |
+
+The decoded voice is in `output/voice-test-20261009/run8-decoded-before.wav`
+and `run8-decoded-fixed.wav` (not in git). The run 9 taps were recorded after
+the DC blocker, so their damage cannot be undone: decoding them at other gains
+does not help (0.5x: 21.0 % muted; 4x: worse).
+
+**Regression check.** `scripts/dsd-fme-voice-ab.mjs` runs the real dsd-fme in
+the core image on a committed 13 s discriminator capture of one run 8 PTT
+(`tests/mocks/fixtures/dsd-fme/run8-dmr-tx2-fmdemod.s16`, 1.2 MB). It applies
+the rest of the chain and requires: an identical decode with `-o null`,
+`-o udp -V 3` and `-o udp`; less than 5 % muted voice; fewer than 300 AMBE
+errors. Current chain: 0.7 % muted, 6 AMBE errors. The old chain fails it
+(20.3 %, 1262). A unit test keeps the script's chain equal to the decoder's.
+
+```bash
+docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
+  wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs
+```
+
+The `-o udp` A/B regression suspected on 2026-10-09 (runs 6 and 7) was ruled
+out: offline, every input path decoded identically with voice on and off, and
+the run 9 live A/B on a clean channel matched exactly. Run 7 had co-channel
+analog interference.
+
 ## Limits and follow-ups
 
 - DMR voice audio has not yet been heard over the air: acceptance with the lab
