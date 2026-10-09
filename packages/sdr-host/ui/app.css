@@ -27,6 +27,7 @@
 	--ok-ink: #1d7347;
 	--warn-ink: #855600;
 	--fault-ink: #b02a1f;
+	--fault-face: #ecd3cc;
 
 	/* Screen: always dark, like the instrument's display. */
 	--screen: #0d1210;
@@ -60,6 +61,7 @@
 		--ok-ink: #5fd39a;
 		--warn-ink: #f2b33d;
 		--fault-ink: #ff8073;
+		--fault-face: #34201d;
 		--lamp-off: #5c6460;
 		--focus: #7fb0ff;
 		color-scheme: dark;
@@ -351,10 +353,13 @@ ul {
 	position: relative;
 	touch-action: pan-y;
 }
+.plot__frame {
+	position: relative;
+}
 .plot__svg {
 	display: block;
 	width: 100%;
-	height: clamp(150px, 34vw, 260px);
+	height: clamp(140px, 22vw, 200px);
 	overflow: visible;
 	cursor: crosshair;
 }
@@ -371,6 +376,18 @@ ul {
 	stroke-width: 1.25;
 	stroke-dasharray: 6 5;
 	vector-effect: non-scaling-stroke;
+}
+/* A faint wash under the trace, fading out before the baseline. */
+.plot__area {
+	fill: url(#plot-fade);
+}
+.plot__fade-top {
+	stop-color: var(--trace);
+	stop-opacity: 0.13;
+}
+.plot__fade-bottom {
+	stop-color: var(--trace);
+	stop-opacity: 0;
 }
 .plot__trace {
 	fill: none;
@@ -390,31 +407,35 @@ ul {
 	stroke: var(--screen-ink-2);
 	opacity: 0.55;
 }
-.screen[data-fresh="false"] .plot__expected {
+.screen[data-fresh="false"] .plot__area {
+	opacity: 0;
+}
+.screen[data-fresh="false"] .plot__expected,
+.screen[data-fresh="false"] .plot__label {
 	opacity: 0.5;
 }
 .screen[data-fresh="false"] .rate {
 	color: var(--screen-ink-2);
 }
-.plot__scale {
-	display: inline-flex;
-	gap: 12px;
-	align-items: center;
+/* The expected line is labelled where it is drawn. */
+.plot__label {
+	position: absolute;
+	left: 0;
+	transform: translateY(calc(-100% - 5px));
+	font: 600 0.6875rem/1 var(--legend);
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--expected);
+	pointer-events: none;
 }
-.plot__key::before {
-	content: "";
-	display: inline-block;
-	width: 18px;
-	margin-right: 6px;
-	vertical-align: 0.25em;
-	border-top: 1.25px dashed var(--expected);
-}
-.plot__key[hidden] {
-	display: none;
+/* The marker readout takes the top of the plot while it is shown. */
+.plot__frame[data-marker] .plot__label {
+	visibility: hidden;
 }
 /* SVG ignores the hidden attribute; honour it explicitly. */
 .plot__marker[hidden],
-.plot__readout[hidden] {
+.plot__readout[hidden],
+.plot__label[hidden] {
 	display: none;
 }
 .plot__marker line {
@@ -460,7 +481,7 @@ ul {
 	content: "";
 	position: absolute;
 	left: 6px;
-	right: 12.5%;
+	right: calc(25% - 6px);
 	top: 35px;
 	height: 1px;
 	background: var(--rule);
@@ -519,7 +540,7 @@ ul {
 	gap: 6px;
 }
 .annunciator {
-	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-columns: auto minmax(0, 1fr) auto;
 	align-items: center;
 }
 .annunciator small {
@@ -531,16 +552,17 @@ ul {
 		gap: 8px;
 	}
 	.annunciator {
-		grid-template-columns: 1fr;
-		align-items: start;
+		grid-template-columns: auto minmax(0, 1fr);
+		align-items: center;
 	}
 	.annunciator small {
+		grid-column: 1 / -1;
 		text-align: left;
 	}
 }
 .annunciator {
 	display: grid;
-	gap: 4px;
+	gap: 4px 10px;
 	padding: 10px 12px;
 	border: 1px solid var(--rule);
 	border-radius: 6px;
@@ -548,7 +570,7 @@ ul {
 	min-height: 46px;
 	align-content: center;
 }
-.annunciator span {
+.annunciator > span:not(.lamp) {
 	font: 600 0.8125rem/1.1 var(--legend);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
@@ -557,14 +579,26 @@ ul {
 	font-size: 0.8125rem;
 	color: var(--ink-2);
 }
-.annunciator[data-state="clear"] span {
+.annunciator[data-state="clear"] > span:not(.lamp) {
 	color: var(--ink-2);
+}
+.annunciator[data-state="clear"] .lamp {
+	--lamp: var(--ok);
+	background: var(--lamp);
+}
+.annunciator[data-state="latched"] .lamp {
+	--lamp: var(--warn);
+	background: var(--lamp);
+}
+.annunciator[data-state="active"] .lamp {
+	--lamp: var(--fault);
+	background: var(--lamp);
 }
 .annunciator[data-state="unknown"] {
 	border-style: dashed;
 	background: transparent;
 }
-.annunciator[data-state="unknown"] span {
+.annunciator[data-state="unknown"] > span:not(.lamp) {
 	color: var(--ink-2);
 }
 .annunciator[data-state="latched"] {
@@ -574,12 +608,11 @@ ul {
 	color: var(--warn-ink);
 }
 .annunciator[data-state="active"] {
-	background: var(--fault);
-	border-color: var(--fault);
-	color: #1a0a08;
+	background: var(--fault-face);
+	border-color: var(--fault-ink);
 }
 .annunciator[data-state="active"] small {
-	color: #2a0e0b;
+	color: var(--fault-ink);
 	font-weight: 600;
 }
 .note {
@@ -643,14 +676,9 @@ ul {
 /* A ruled scale under the value: the instrument's bar meter. */
 .meter {
 	display: block;
-	height: 4px;
-	margin-top: 8px;
-	background: repeating-linear-gradient(
-		to right,
-		var(--rule) 0 1px,
-		transparent 1px 10%
-	);
-	border-bottom: 1px solid var(--rule);
+	height: 3px;
+	margin-top: 10px;
+	background: var(--rule);
 	position: relative;
 }
 .meter span {
@@ -795,7 +823,7 @@ ul {
 	.plot__scale {
 		order: 3;
 		width: 100%;
-		justify-content: center;
+		text-align: center;
 	}
 }
 

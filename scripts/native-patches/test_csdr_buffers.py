@@ -24,6 +24,15 @@ Example from the repository root (wavekit:local-core must use the pinned CSDR):
       --candidate /tmp/csdr-candidate --baseline /usr/local/bin/csdr
   docker rm -f csdr-verify
 
+To check a full runtime image (for example wavekit:csdr-activate-test built
+with `docker build --target final-core`), run the harness inside that image.
+Use its /usr/local/bin/csdr as --candidate and a copy of an unpatched csdr as
+--baseline, for example one extracted with `docker cp` from an older image.
+
+The "boundedStages" section covers every stage that WaveKit bounds when
+csdr.boundedBuffers is enabled (src/decoders/csdr-buffers.ts), with the app's
+argument forms. Odd-sized writes wrap both 2048- and 65536-element rings.
+
 WAVEKIT_CSDR_BUFFER_ELEMENTS=65536 selects 65536 input elements per CSDR CLI
 process (512 KiB for complex<float>, plus its mirrored virtual mapping). Unset
 keeps upstream defaults, including the FIR's 104857600-element ring. The patch
@@ -223,6 +232,46 @@ def main():
                 current = output
             results.append(current)
         assert_same(*results)
+
+        # Every stage WaveKit bounds (src/decoders/csdr-buffers.ts), using the
+        # app's own argument forms. Odd-sized writes wrap a minimum ring and a
+        # 65536-element ring, and the output is compared with unpatched CSDR.
+        s16 = root / "input.s16"
+        s16.write_bytes(cu8.read_bytes()[:131072])
+        app_firs = [(factor, transition) for factor in (2, 8, 10, 43, 45, 50, 85, 90, 100)
+                    for transition in ("0.05", "0.012")]
+        stage_cases = [
+            (["convert", "-i", "char", "-o", "float"], cu8),
+            (["convert", "-i", "s16", "-o", "float"], s16),
+            (["convert", "-i", "float", "-o", "char"], fragmented),
+            (["convert", "-i", "float", "-o", "s16"], fragmented),
+            (["fmdemod"], fragmented),
+            (["amdemod"], fragmented),
+            (["agc", "-f", "complex", "-p", "slow", "-r", "0.7"], fragmented),
+            (["agc", "-f", "float", "-p", "fast", "-r", "0.8"], fragmented),
+            (["agc", "-f", "float", "-p", "slow", "-r", "0.7"], fragmented),
+            (["dcblock"], fragmented),
+            (["gain", "3"], fragmented),
+            (["gain", "10.0"], fragmented),
+            (["limit"], fragmented),
+            (["realpart"], fragmented),
+            (["firdecimate", "45", "0.05", "--cutoff", "0.4"], fragmented),
+            *[(["firdecimate", str(f), t], fragmented) for f, t in app_firs],
+        ]
+        report["boundedStages"] = []
+        for args, source in stage_cases:
+            reference = root / "stage-reference"
+            assert execute(options.baseline, args, source, reference)["exit"] == 0
+            for setting in (2048, 65536):
+                if args[0] == "firdecimate":
+                    taps = math.ceil(4 / struct.unpack("f", struct.pack("f", float(args[2])))[0]) + 1
+                    if setting < taps + int(args[1]) + 1024:
+                        continue  # WaveKit keeps the upstream ring for this pair.
+                output = root / f"stage-{setting}"
+                result = execute(options.candidate, args, source, output, setting, [17, 1023, 8191])
+                assert result["exit"] == 0, (args, setting, result["stderr"])
+                assert_same(reference, output)
+            report["boundedStages"].append(" ".join(args))
 
         # An unrelated command retains its unmodified default environment/path.
         args = ["fft", "4096", "4096"]

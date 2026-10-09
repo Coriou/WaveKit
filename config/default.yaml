@@ -40,6 +40,14 @@
 #     channels   - Number of channels (optional, default: 1)
 #     centerFreq - Center frequency in Hz for IQ sources (optional)
 #     exclusive  - Whether source can only be used by one decoder (default: false)
+#   stallTimeoutMs - rtl_tcp U8_IQ sources only: once a session has streamed, a
+#                payload gap this long drops the (possibly half-open) connection
+#                and reconnects with backoff (default: 15000; 0 disables;
+#                otherwise 1000-600000). Not applied to recordings, sdrpp-network
+#                or audio sources, other rtl_tcp formats, a session that has not
+#                streamed yet, or while paused by local backpressure. TCP
+#                keepalive (5 s) is also enabled but only detects a dead peer,
+#                not a live rtlmux whose upstream dongle/rtl_tcp is gone.
 #
 # Example configurations:
 #
@@ -97,6 +105,15 @@ sources: []
 #   enabled   - Whether the decoder should start automatically
 #   sourceId  - Source to attach to (for pure_consumer decoders)
 #   options   - Decoder-specific configuration options
+#
+# Sample rates: do not set options.inputSampleRate for decoders reading a
+# WaveKit source. The manager injects the source's caps.sampleRate (and
+# centerFreq) before every start and on every caps change; per-decoder
+# defaults (2048000 or 2400000) apply only when no source caps exist. Each
+# decoder reports its instance rate plan as `rateAssessment`; a decoder whose
+# source rate is below its minimum (48 kHz for audio decoders, 24 kHz for
+# acarsdec, the bandwidth for LoRa) is suspended instead of crash-looping and
+# resumes when the rate is usable (see docs/API.md).
 #
 # For external SDR decoders (external_sdr pattern):
 #   deviceSerial - RTL-SDR device serial number
@@ -226,6 +243,22 @@ tunerRelay:
   port: 1234
   commandHistoryLimit: 200
 
+# Tuner control (API + relay). rtl_tcp cannot read back rate/center, so after a
+# source reconnect the receiver may be at its own defaults:
+#   reconnectPolicy: restore - re-send the last accepted tuner state (default)
+#   reconnectPolicy: reset   - send nothing; reset tuner state and source caps
+#                              to the configured baseline (shared/remote hosts
+#                              another operator may own after an outage)
+# The reset baseline is the source's configured caps (sampleRate/centerFreq)
+# plus AGC/zero gain; it must mirror the receiver's startup args (Pi:
+# SDR_HOST_RTL_TCP__SAMPLE_RATE, SDR_HOST_RTL_TCP__FREQUENCY and its gain mode,
+# SDR_HOST_RTL_TCP__GAIN/AGC) or caps will claim values nobody commanded.
+# Caps reconciliation is not readback: after a core-only restart nothing is
+# written, yet rtlmux may still hold relay-set values it replays to rtl_tcp.
+# Env override: WAVEKIT_TUNER__RECONNECT_POLICY=reset
+tuner:
+  reconnectPolicy: restore
+
 # -----------------------------------------------------------------------------
 # Live Demodulator (HTTP Audio Stream)
 # -----------------------------------------------------------------------------
@@ -317,22 +350,60 @@ logging:
   # dir: "./logs"  # Uncomment to enable file logging
 
 # -----------------------------------------------------------------------------
+# CSDR ring buffers
+# -----------------------------------------------------------------------------
+# Upstream CSDR keeps one shared-memory ring per pipeline stage: 80 MiB for a
+# complex stage, 40 MiB for a float stage and 800 MiB for each firdecimate. The
+# kernel keeps those pages resident once the stream has wrapped them. With
+# boundedBuffers enabled, WaveKit's patched CSDR uses bufferElements instead,
+# but only for stages that the native harness has validated:
+# convert, firdecimate, fmdemod, amdemod, agc, dcblock, gain, limit and
+# realpart. Others, including lowpass, deemphasis and bandpass, keep upstream
+# rings. See src/decoders/csdr-buffers.ts.
+# A firdecimate whose filter needs more than bufferElements
+# (ceil(4/transition)+1 + decimation + 1024) keeps its 800 MiB upstream ring
+# instead of failing; WaveKit logs that fallback at info level.
+#
+# Options:
+#   boundedBuffers - false keeps upstream rings everywhere (default: true)
+#   bufferElements - ring size in elements, 2048..10485760 (default: 65536)
+#
+# Env: WAVEKIT_CSDR__BOUNDED_BUFFERS=false, WAVEKIT_CSDR__BUFFER_ELEMENTS=65536.
+# Setting the native WAVEKIT_CSDR_BUFFER_ELEMENTS on the container has no
+# effect. WaveKit strips it from child shells.
+
+csdr:
+  boundedBuffers: true
+  bufferElements: 65536
+
+# -----------------------------------------------------------------------------
 # Health Monitoring
 # -----------------------------------------------------------------------------
 # Configure decoder health monitoring. Decoders transition through health states:
 #   running  - Decoder is running and producing output
 #   idle     - Decoder is running but hasn't produced output recently
 #              (normal when nothing is transmitting)
-#   faulted  - Decoder has crashed and exceeded restart limits
+#   restarting - Decoder exited unexpectedly; an automatic restart is
+#              scheduled (API: `nextRestartAt`)
+#   faulted  - Crash loop (retries continue at the max backoff) or restart
+#              limit exhausted (terminal until an explicit start)
 #
 # Options:
 #   checkInterval - Interval between health checks in ms (default: 5000)
 #   idleTimeout   - Time without output before idle state in ms (default: 30000);
 #                   reported per decoder as `idleTimeoutMs` in the API
+#   faultAfterFailures - Consecutive unstable runs (no output, under 30 s)
+#                   before a decoder is reported faulted (default: 5)
+#   bandSuspension - Suspend wanted decoders whose target frequencies are all
+#                   outside the tuned window and resume them on a retune back
+#                   (default: true; decoders without a known target never
+#                   suspend). See docs/API.md "Band check and band suspension".
 
 # health:
 #   checkInterval: 5000
 #   idleTimeout: 30000
+#   faultAfterFailures: 5
+#   bandSuspension: true
 
 # =============================================================================
 # EXAMPLE: Multi-Source Setup for Decoder Expansion

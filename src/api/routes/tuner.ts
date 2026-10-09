@@ -54,6 +54,7 @@ const tunerStateSchema = {
 		lastCommandAt: { type: "string", format: "date-time" },
 		lastError: { type: "string" },
 		commandCount: { type: "integer" },
+		unknownFields: { type: "array", items: { type: "string" } },
 	},
 	required: [
 		"sourceId",

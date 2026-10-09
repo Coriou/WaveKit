@@ -182,6 +182,39 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
+**Rate truth (network sources).** Every 5 s metrics interval compares the bytes
+actually received with `caps.sampleRate` × bytes per sample (2 for `U8_IQ`, 4 for
+`S16_IQ`, 2/4 × channels for `S16LE`/`FLOAT32LE`; `auto` is not checked). When
+every trusted interval for at least 30 s deviates by more than 2 % in the same
+direction (an interval with no bytes at all is a `waiting`/`stale` source, not a
+rate, and is not trusted), the source gains
+`rateMismatch: { declaredSampleRateHz, measuredSampleRateHz, deviation, since }`
+(also on `source:status` and in `/api/status`) and core logs a warning; it
+disappears after 30 s of agreement, on a caps rate/format change and on
+disconnect. Caps are never corrected from it. A positive `deviation` means the
+dongle runs faster than declared (an external tuner client changed its rate);
+a negative one can also be loss upstream. Intervals that cannot be trusted are
+skipped: the first after a (re)connect and any in which local backpressure
+paused the socket. Recordings are not checked.
+
+**Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
+it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
+(source config, default 15000, `0` disables) means the peer is dead or the
+connection is half-open, e.g. a rebooted host that never sent FIN. Core then drops
+the connection: `connected` becomes `false`, `lastError` reads
+`No data from source for <n>ms (stall watchdog <timeout>ms); reconnecting`, and
+the normal reconnect/backoff path runs. A successful reconnect clears `lastError`
+and resets `reconnectAttempts`. Tuner sync runs on the new session's first payload
+(not on connect), so nothing is written to an rtlmux whose upstream is still down.
+Without this, such a source stayed `connected: true` with activity `stale`
+indefinitely. TCP keepalive is enabled too, but it only detects a dead peer, not a
+live rtlmux with a dead upstream. The watchdog does not apply to recordings,
+`sdrpp-network` or audio sources, rtl_tcp sources with a format other than
+`U8_IQ`, a session that has not streamed yet (it stays connected and reports
+`stale`), or time spent `paused` by local backpressure. `POST /api/sources`
+accepts `stallTimeoutMs` (integer, `0` or 1000–600000) and validates the whole
+body with the config schema (`400 VALIDATION_ERROR` on failure).
+
 ### Tuner
 
 #### GET /api/tuner
@@ -191,6 +224,37 @@ List tuner states for all RTL-TCP sources.
 Relay-driven RTL-TCP commands (from SDR++ via the tuner relay) update these
 states and will automatically switch control mode to `external` while the relay
 has an active control client.
+
+Tuner values are the last _commanded_ desired values, not hardware readback:
+rtl_tcp has no positive acknowledgement. When an rtl_tcp source reconnects, the
+`tuner.reconnectPolicy` config decides what happens. With `restore` (the default),
+core re-sends the fields that were accepted through this API or the relay (never
+config defaults) and counts them in `commandCount`/`lastCommandAt`; a failed
+restore sets `lastError` and is retried on the next connection. Relay commands
+received while the source is down become desired state and are sent on
+reconnect. With `reset`, core sends nothing and returns tuner state and source
+caps to the configured baseline. With either policy, source caps
+(`sampleRate`/`centerFreq`) are reconciled to values backed by an accepted
+command or the configured baseline (the `reset` baseline must mirror the
+receiver's startup arguments). A relay rate the controller rejects never
+changes source caps. Combine with the source `connected` flag to tell sent from
+pending.
+
+Reconciliation is not readback. After a core-only restart nothing has been
+accepted, so nothing is written and caps show the configured baseline, while the
+hardware may still be at relay-set values (rtlmux caches client commands and
+replays them to rtl_tcp). Through an rtlmux host, test mode and direct sampling
+commands are dropped, so those two tuner fields may over-claim.
+
+**`unknownFields`** lists the fields whose value is only a placeholder: nothing
+was commanded through this API, no relay client was seen commanding it, and
+(for `frequency`/`sampleRate`) neither the tuner config nor the source caps
+declare it. On a source whose gain was set on the SDR host this reads e.g.
+`["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
+"AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
+counts as observed (it is not replayed on reconnect). The field values keep
+their types for older clients. A reset
+reconnect makes them unknown again; the field is absent when everything is known.
 
 ```bash
 curl http://localhost:9000/api/tuner
@@ -216,7 +280,8 @@ curl http://localhost:9000/api/tuner
 		"testMode": false,
 		"controlMode": "internal",
 		"commandCount": 12,
-		"lastCommandAt": "2024-05-21T03:12:01.123Z"
+		"lastCommandAt": "2024-05-21T03:12:01.123Z",
+		"unknownFields": ["ppm", "biasTee", "testMode"]
 	}
 ]
 ```
@@ -551,11 +616,103 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `targetFrequenciesHz` | Target frequencies declared in config: top-level `frequencies`, else `options.frequencies`, else `options.frequency`. Absent when the config declares none (the decoder then decodes whatever its source is tuned to, or a built-in default that is not reported).                                             |
 | `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
 | `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
+| `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
 
-`running` and `health` are independent: during automatic-restart backoff a
-decoder reports `running: false` while `health` keeps its last value (usually
-`"running"`) until it is restarted or `maxRestarts` is exhausted (`"faulted"`).
-Use `restartCount` and `lastError` to explain that state.
+`health` after an unexpected exit:
+
+- `"restarting"`: the process exited without being asked to stop and an
+  automatic restart is scheduled at `nextRestartAt`. The restarted run reports
+  `"running"` (then `"idle"` as usual).
+- `"faulted"` with `nextRestartAt` (or with `running: true`): crash loop.
+  `health.faultAfterFailures` (default 5) consecutive runs ended without output
+  and before 30 s. Retries continue at the maximum backoff (30 s); a retry run
+  stays `"faulted"` on probation until it produces output or stays up 30 s,
+  then returns to `"running"`.
+- `"faulted"` with `running: false` and no `nextRestartAt`: terminal. The
+  restart budget (`maxRestarts`, unlimited by default) is exhausted, an explicit
+  start failed, or the operator stopped a faulted decoder; an explicit
+  start/restart is required.
+
+An explicit stop cancels a pending restart; a `"restarting"` decoder then
+reports `"running"` with `running: false` (a fault stays visible until the next
+explicit start). Use `restartCount` and `lastError` to explain these states.
+
+##### Rate plan and reversible suspension
+
+`rateAssessment` is the decoder instance's plan for its source's current
+sample rate: `verdict` (`best` | `acceptable` | `unusable` | `unknown`), the
+observed `sourceRateHz`, `frontendRateHz` (IQ rate after the decoder's own
+decimation/resampling) and `decoderInputRateHz` (what the program reads on
+stdin), the `adaptation`, and for `unusable` the `reasonCode`,
+`requiredMinimumHz` and `requirementBasis`. Built-in minimums are
+implementation facts (`"implementation"`): the audio decoders need at least
+their demod rate (48 kHz; 24 kHz for acarsdec), LoRa at least its bandwidth.
+readsb, AIS-catcher, dumpvdl2 and rtl_433 report `unknown` with observed rates
+until fixture-verified requirements exist; external-input decoders report
+`external-input`.
+
+| Field            | Meaning                                                                                                                                                                         |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason or `"frequency-out-of-band"`.                                                  |
+| `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
+
+A decoder that is running is suspended when its source changes to an unusable
+rate and resumed when the rate becomes usable again (or the source reconnects
+with a usable rate). Suspension does not set `lastError` or count restarts,
+and leaves `health` unchanged except that a pending automatic restart is
+cancelled (`"restarting"` becomes `"running"`, as on an explicit stop). A removed source leaves a suspended decoder suspended and a
+running decoder running. Render `suspended` ahead of `health`.
+
+##### Band check and band suspension
+
+`bandAssessment` says whether the source centre lets the instance receive any
+of its targets: `verdict` (`in-band` | `out-of-band` | `unknown`),
+`targetsHz`, `basis`, `captureCenterHz` and `windowHalfWidthHz`. A target is in
+band when it lies within `windowHalfWidthHz` of the centre: 0.8 of half the
+span the pipeline really sees, i.e. the capture or, when narrower, the
+decoder's own frontend (an audio demodulator keeps only about ±19 kHz at a
+48 kHz demod rate, acarsdec about ±9.6 kHz; a resampler never adds span).
+
+| Decoder | Targets (`basis`) |
+| --- | --- |
+| multimon-ng, direwolf, dsd-fme, acarsdec, rtl_433 | configured `frequencies` / `options.frequencies` / `options.frequency` (`configured`); none configured → `unknown` |
+| readsb (stdin) | 1 090 MHz (`protocol`); rtlTcpHost mode is external |
+| ais-catcher | 161.975 and 162.025 MHz (`protocol`); configured frequencies win; a `-c…` channel override in `extraArgs` → `unknown` |
+| dumpvdl2 | its channel list, configured or the built-in default the process actually decodes (`configured` / `decoder-default`) |
+| dumpvdl2 `followCenter` | the configured list bounds the band it follows; no configured list → `unknown` |
+| lora-meshtastic | configured `frequency` (`configured`) |
+| lora-meshtastic `followCenter` | a top-level `frequencies` list bounds the band it follows; without one → `unknown` (`options.frequency` only seeds the centre it follows) |
+
+A `followCenter` decoder decodes the source centre itself, so it is in band
+anywhere from its lowest to its highest declared frequency, widened by the
+window, not only near one of them.
+
+A wanted decoder whose targets are all out of band is suspended with reason
+`"frequency-out-of-band"` (same semantics as a rate suspension) and resumes
+when a retune brings a target back. An unusable rate takes precedence as the
+reason. `unknown` (no target, a source without `centerFreq`, external input)
+never suspends. The check trusts `caps.centerFreq`, which only follows retunes made
+through the tuner API or the relay; a client retuning the receiver some other
+way leaves it stale (decoders then stay as they were, never newly suspended).
+Centre changes are applied by the same debounced serial worker
+as rate changes. `health.bandSuspension: false` keeps the assessment but never
+suspends for band. The rate preview stays rate-only.
+
+#### GET /api/decoders/rate-preview
+
+Each decoder's `rateAssessment` for a source as if it ran at `sampleRateHz`.
+Pure: nothing is tuned, no caps change, no decoder starts or stops.
+
+```bash
+curl 'http://localhost:9000/api/decoders/rate-preview?sourceId=rtl-pi&sampleRateHz=1024000'
+```
+
+**Response** (200 OK): `[{ "decoderId": "acars", "assessment": { "verdict": "acceptable", ... } }]`
+for every decoder selecting that source. 404 for an unknown source; 400 for a
+non-positive or non-integer rate and, for `rtl_tcp` sources, for rates
+librtlsdr rejects (valid: 225001–300000 and 900001–3200000 Hz).
 
 #### GET /api/decoders/:id
 
@@ -597,7 +754,11 @@ curl http://localhost:9000/api/decoders/dsd-main
 
 #### POST /api/decoders/:id/start
 
-Start a decoder.
+Start a decoder. On an unusable source rate (or a band covering none of its
+targets) the start is recorded instead:
+200 with the full status (`suspended: true`, `suspension`, `rateAssessment`),
+never 409; starting a suspended decoder again is a 200 no-op. The same applies
+to `/restart`.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/start
@@ -616,7 +777,10 @@ curl -X POST http://localhost:9000/api/decoders/dsd-main/start
 
 #### POST /api/decoders/:id/stop
 
-Stop a decoder.
+Stop a decoder. Also accepted (200) for a decoder that is not running but
+still wanted: suspended, waiting in restart backoff, or terminally faulted. 409 only when neither
+running nor wanted. Stopping clears intent and any suspension and releases the
+source reservation.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/stop
@@ -929,7 +1093,8 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`) when the state actually changed;
+  `caps-changed`, rate-truth flag raised/cleared) when the state actually changed
+  (a drifting `rateMismatch.measuredSampleRateHz` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
   `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;

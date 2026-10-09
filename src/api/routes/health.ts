@@ -10,7 +10,10 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
-import { sourceActivitySchema } from "@wavekit/api-types"
+import {
+	sourceActivitySchema,
+	sourceRateMismatchSchema,
+} from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderStatus } from "../../decoders/types.js"
@@ -207,6 +210,7 @@ const sourceStatusSchema = {
 		dataRate: { type: "number" },
 		lastError: { type: "string" },
 		reconnectAttempts: { type: "number" },
+		rateMismatch: sourceRateMismatchSchema,
 	},
 	required: [
 		"id",
