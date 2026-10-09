@@ -51,7 +51,8 @@ function labelOf(a: Action, mode: ModeName): string | null {
 		case "preset-cycle":
 			return "filter preset"
 		case "decoder-op":
-			return `${a.op}${ASKS}`
+			// R100: `s` also runs a band-suspended decoder anyway; `u` returns a pinned one to auto.
+			return `${a.op === "unpin" ? "return to auto" : a.op === "start" ? "start / run anyway" : a.op}${ASKS}`
 		case "edit-open":
 			return "edit tuner"
 		case "control-toggle":

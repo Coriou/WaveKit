@@ -15,6 +15,7 @@ export type ScenarioName =
 	| "decoder-faulted"
 	| "contracts"
 	| "tuner-unknown"
+	| "band-defaults"
 
 export const SCENARIO_NAMES: readonly ScenarioName[] = [
 	"live",
@@ -33,6 +34,7 @@ export const SCENARIO_NAMES: readonly ScenarioName[] = [
 	"decoder-faulted",
 	"contracts",
 	"tuner-unknown",
+	"band-defaults",
 ]
 
 export interface ScenarioRest {

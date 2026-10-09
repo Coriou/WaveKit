@@ -178,6 +178,54 @@ describe("mock core", () => {
 				.status,
 		).toBe(200)
 	})
+	it("R100 band-defaults: start pins, run anyway, { pin: false }, rate no-op, 400 and 409", async () => {
+		await control("scenario", { name: "band-defaults" })
+		const decoder = async (id: string) =>
+			(await get<Array<Record<string, unknown>>>("/api/decoders")).find(
+				d => d["id"] === id,
+			)
+		try {
+			// A bare start on a running decoder is still a conflict.
+			expect((await post("/api/decoders/rtl433/start")).status).toBe(409)
+			// A bad body is a 400 with core's code.
+			const bad = await post("/api/decoders/rtl433/start", { pin: "yes" })
+			expect(bad.status).toBe(400)
+			expect(((await bad.json()) as { code?: string }).code).toBe(
+				"INVALID_START_REQUEST",
+			)
+			// { pin: false } returns a pinned decoder to auto; out of band it suspends.
+			expect(
+				(await post("/api/decoders/rtl433/start", { pin: false })).status,
+			).toBe(200)
+			expect(await decoder("rtl433")).toMatchObject({
+				startMode: "auto",
+				running: false,
+				suspended: true,
+			})
+			// Run anyway: a start on a band-suspended decoder pins and resumes it.
+			expect((await post("/api/decoders/readsb/start")).status).toBe(200)
+			expect(await decoder("readsb")).toMatchObject({
+				startMode: "operator",
+				running: true,
+			})
+			expect((await decoder("readsb"))?.["suspended"]).toBeUndefined()
+			// A rate-suspended decoder: 200 and nothing changes.
+			expect((await post("/api/decoders/ais-catcher/start")).status).toBe(200)
+			expect(await decoder("ais-catcher")).toMatchObject({
+				running: false,
+				suspended: true,
+				startMode: "auto",
+			})
+			// A bare start on a stopped decoder pins it.
+			expect((await post("/api/decoders/dumpvdl2/start")).status).toBe(200)
+			expect(await decoder("dumpvdl2")).toMatchObject({
+				startMode: "operator",
+				running: true,
+			})
+		} finally {
+			await control("scenario", { name: "live" })
+		}
+	})
 	it("switches REST failure modes", async () => {
 		await control("rest", { mode: "500" })
 		expect((await fetch(`${base()}/api/status`)).status).toBe(500)

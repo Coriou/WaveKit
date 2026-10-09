@@ -30,6 +30,8 @@ const base: KeyContext = {
 	v: {
 		hasSelection: false,
 		decoderRunning: null,
+		decoderPinned: false,
+		decoderSuspension: null,
 		control: null,
 		audioRunning: null,
 		paused: false,
@@ -220,6 +222,13 @@ const arbCtx: fc.Arbitrary<KeyContext> = fc.record({
 	v: fc.record({
 		hasSelection: fc.boolean(),
 		decoderRunning: fc.constantFrom(null, true, false),
+		decoderPinned: fc.boolean(),
+		decoderSuspension: fc.constantFrom(
+			null,
+			"band",
+			"rate",
+			"other",
+		) as fc.Arbitrary<KeyContext["v"]["decoderSuspension"]>,
 		control: fc.constantFrom(null, "internal", "external") as fc.Arbitrary<
 			KeyContext["v"]["control"]
 		>,

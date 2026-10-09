@@ -240,8 +240,14 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 
 	return {
 		get,
+		// R100: a bare start pins the decoder (operator mode); only a return to auto
+		// sends a body, `{ "pin": false }`.
 		decoder: (id, op) =>
-			send("POST", `/api/decoders/${encodeURIComponent(id)}/${op}`),
+			op === "unpin"
+				? send("POST", `/api/decoders/${encodeURIComponent(id)}/start`, {
+						pin: false,
+					})
+				: send("POST", `/api/decoders/${encodeURIComponent(id)}/${op}`),
 		tuner: (sourceId, cmd) =>
 			send(
 				"POST",

@@ -100,7 +100,86 @@ describe("Decoders view (spec §6.2)", () => {
 		expect(h.frame().at(-1)).not.toContain("▶")
 		await h.press("s")
 		expect(h.frame().at(-1)).toContain("▶ start acarsdec")
+		// R100: this core reports no start mode, so the confirm claims no pin.
+		expect(h.frame().at(-1)).not.toContain("pinned")
 		h.unmount()
+	})
+
+	describe("R100 band defaults and the operator pin", () => {
+		/** band-defaults rows: dsd-fme, multimon-ng, rtl433, readsb, acarsdec, ais-catcher, dumpvdl2, direwolf, lora-meshtastic. */
+		const open = () =>
+			renderApp({
+				state: scenarioState("band-defaults", deps),
+				views,
+				view: "decoders",
+				cols: 120,
+				rows: 40,
+			})
+		it("says a start pins when this core reports start modes", async () => {
+			const h = await open()
+			await selectRow(h, 7)
+			expect(h.frame().at(-1)).toContain("s start")
+			await h.press("s")
+			expect(h.frame().at(-1)).toMatch(
+				/^ ▶ start dumpvdl2 · pinned against band suspension · .* {3}y start {2}n cancel$/,
+			)
+			await h.press("y")
+			expect(h.runtime.sent).toEqual([
+				{ kind: "decoder", op: "start", decoderId: "dumpvdl2" },
+			])
+			h.unmount()
+		})
+		it("runs a band-suspended decoder anyway, and never offers a start on a rate suspension", async () => {
+			const h = await open()
+			await selectRow(h, 4)
+			expect(h.frame().at(-1)).toContain("s run anyway")
+			await h.press("s")
+			expect(h.frame().at(-1)).toBe(
+				" ▶ run readsb out of band · pinned · out of window   y run  n cancel",
+			)
+			await h.press("y")
+			expect(h.runtime.sent).toEqual([
+				{ kind: "decoder", op: "start", decoderId: "readsb" },
+			])
+			await selectRow(h, 2)
+			expect(h.frame().at(-1)).not.toMatch(/\bs (start|run anyway)/)
+			await h.press("s", { expectWrite: false })
+			expect(h.frame().at(-1)).not.toContain("▶")
+			h.unmount()
+		})
+		it("fix 1: an older core's band suspension offers a plain start, no pin claim", async () => {
+			const h = await renderApp({
+				state: scenarioState("contracts", deps),
+				views,
+				view: "decoders",
+				cols: 120,
+				rows: 40,
+			})
+			await selectRow(h, 1)
+			expect(h.frame().at(-1)).toContain("s start")
+			expect(h.frame().at(-1)).not.toContain("run anyway")
+			await h.press("s")
+			expect(h.frame().at(-1)).toMatch(/^ ▶ start dsd-fme · /)
+			expect(h.frame().at(-1)).not.toContain("pinned")
+			h.unmount()
+		})
+		it("returns a pinned decoder to auto with u", async () => {
+			const h = await open()
+			await selectRow(h, 3)
+			expect(h.frame().at(-1)).toContain("u return to auto")
+			await h.press("u")
+			expect(h.frame().at(-1)).toMatch(
+				/^ ▶ return rtl433 to auto · may suspend out of band · .* {3}y return {2}n cancel$/,
+			)
+			await h.press("n")
+			expect(h.runtime.sent).toEqual([])
+			await h.press("u")
+			await h.press("y")
+			expect(h.runtime.sent).toEqual([
+				{ kind: "decoder", op: "unpin", decoderId: "rtl433" },
+			])
+			h.unmount()
+		})
 	})
 
 	it("fits 60x16 and 80x24 without wrapping", async () => {

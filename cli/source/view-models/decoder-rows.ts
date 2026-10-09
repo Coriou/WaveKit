@@ -82,6 +82,8 @@ export interface DecoderFacts {
 	oldFanout: boolean
 	/** Window and band lane older than the TTL (decoders lane under core's bandAssessment, else sources or tuner): they render dim. */
 	oldWindow: boolean
+	/** R100: running in operator mode, so band suspension cannot stop it. */
+	pinned: boolean
 	/** Decodes of this decoder in the message feed over the last 60 s (M12); 0 while the feed is not open. */
 	feed60: number
 }
@@ -169,6 +171,7 @@ const compute = memoOne(
 				// R84: core's verdict rides the decoders lane.
 				oldWindow: row.bandAssessment ? oldRest : oldLanes,
 				feed60: feed60[row.id] ?? 0,
+				pinned: row.running && row.startMode === "operator",
 			}
 		})
 	},
@@ -263,6 +266,22 @@ export function processWords(f: DecoderFacts): string {
 	}
 }
 
+/**
+ * R100: a pinned decoder says so at every width, never by colour alone:
+ * `pinned` → `up 51s · pinned`; running out of band: `pinned` →
+ * `out of band · pinned` → `up 51s · out of band · pinned` (attention).
+ */
+function pinnedCell(f: DecoderFacts, words: string, role: Role): Cell {
+	const sep = ` ${glyphs().sep} `
+	if (f.row.bandAssessment?.verdict === "out-of-band")
+		return cell(
+			[sp("pinned", "attention")],
+			[sp(`out of band${sep}pinned`, "attention")],
+			[sp(`${words}${sep}out of band${sep}pinned`, "attention")],
+		)
+	return cell([sp("pinned", role)], [sp(`${words}${sep}pinned`, role)])
+}
+
 function processCell(f: DecoderFacts): Cell {
 	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
@@ -276,6 +295,7 @@ function processCell(f: DecoderFacts): Cell {
 		case "stopped":
 			return cell([sp("stopped", role)])
 		case "up":
+			if (f.pinned) return pinnedCell(f, words, role)
 			return cell([sp(words, role)], ...withCount)
 		case "starting":
 			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
@@ -384,6 +404,23 @@ export const CONFIGURED_MARK = "*"
 
 function nominalCell(f: DecoderFacts): Cell {
 	if (f.nominal === "?") return cell([sp("?", "unknown")])
+	// R100: several ranges and no targets: `433.050… +1` where `433.050–434.790 +1` does not fit.
+	const a = f.row.bandAssessment
+	const ranges = a?.targetsHz === undefined ? a?.rangesHz : undefined
+	const first = ranges?.[0]
+	// R101: a configured band keeps its mark in every form (R15/T7).
+	const mark =
+		f.bandOrigin === "configured" ? [sp(CONFIGURED_MARK, "label")] : []
+	if (ranges && first && ranges.length > 1)
+		return cell(
+			[
+				sp(
+					`${(first.minHz / 1e6).toFixed(3)}${glyphs().ellipsis} +${ranges.length - 1}`,
+				),
+				...mark,
+			],
+			[sp(f.nominal), ...mark],
+		)
 	if (f.bandOrigin !== "configured") return cell([sp(f.nominal)])
 	return cell([sp(f.nominal), sp(CONFIGURED_MARK, "label")])
 }

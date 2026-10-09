@@ -1,0 +1,195 @@
+{
+	"extends": "live",
+	"name": "band-defaults",
+	"description": "R100 (core 87f9f06): every decoder reports startMode, so a bare start pins. dsd-fme runs pinned in its region-default PMR446 range; rtl433 runs pinned out of band (region default ranges, EU guessed from TZ); readsb and lora-meshtastic are band-suspended (run anyway); acarsdec is band-suspended under an API override; ais-catcher is rate-suspended (a start is a no-op); dumpvdl2 is stopped (override from config); direwolf carries a newer start mode and region source, shown quoted; multimon-ng has no band.",
+	"restPatch": {
+		"/api/decoders": {
+			"dsd-fme": {
+				"desiredRunning": true,
+				"startMode": "operator",
+				"bandAssessment": {
+					"verdict": "in-band",
+					"rangesHz": [
+						{
+							"minHz": 446000000,
+							"maxHz": 446200000
+						}
+					],
+					"basis": "region-default",
+					"region": {
+						"code": "EU",
+						"source": "guessed:tz"
+					},
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				}
+			},
+			"multimon-ng": {
+				"desiredRunning": true,
+				"startMode": "auto",
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"rtl433": {
+				"desiredRunning": true,
+				"startMode": "operator",
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"rangesHz": [
+						{
+							"minHz": 433050000,
+							"maxHz": 434790000
+						},
+						{
+							"minHz": 868000000,
+							"maxHz": 870000000
+						}
+					],
+					"basis": "region-default",
+					"region": {
+						"code": "EU",
+						"source": "guessed:tz"
+					},
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				}
+			},
+			"readsb": {
+				"desiredRunning": true,
+				"startMode": "auto",
+				"suspended": true,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [1090000000],
+					"basis": "protocol",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:40.000Z"
+				}
+			},
+			"acarsdec": {
+				"desiredRunning": true,
+				"startMode": "auto",
+				"suspended": true,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"health": "running",
+				"restartCount": 0,
+				"lastError": "$delete",
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"rangesHz": [
+						{
+							"minHz": 131500000,
+							"maxHz": 131900000
+						}
+					],
+					"basis": "override",
+					"overrideSource": "api",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:12.000Z"
+				}
+			},
+			"ais-catcher": {
+				"desiredRunning": true,
+				"startMode": "auto",
+				"suspended": true,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [161975000, 162025000],
+					"basis": "protocol",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				},
+				"suspension": {
+					"reasonCode": "insufficient-sample-rate",
+					"since": "2026-10-08T18:07:30.000Z"
+				}
+			},
+			"dumpvdl2": {
+				"desiredRunning": false,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"startMode": "$delete",
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"targetsHz": [136975000],
+					"basis": "override",
+					"overrideSource": "config",
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				}
+			},
+			"direwolf": {
+				"desiredRunning": true,
+				"startMode": "scheduled",
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"rangesHz": [
+						{
+							"minHz": 144800000,
+							"maxHz": 144800000
+						}
+					],
+					"basis": "region-default",
+					"region": {
+						"code": "EU",
+						"source": "guessed:moon-phase"
+					}
+				}
+			},
+			"lora-meshtastic": {
+				"desiredRunning": true,
+				"startMode": "auto",
+				"suspended": true,
+				"running": false,
+				"pid": "$delete",
+				"uptime": 0,
+				"bandAssessment": {
+					"verdict": "out-of-band",
+					"reasonCode": "frequency-out-of-band",
+					"rangesHz": [
+						{
+							"minHz": 869400000,
+							"maxHz": 869650000
+						}
+					],
+					"basis": "region-default",
+					"region": {
+						"code": "EU",
+						"source": "decoder"
+					},
+					"captureCenterHz": 445970700,
+					"windowHalfWidthHz": 819200
+				},
+				"suspension": {
+					"reasonCode": "frequency-out-of-band",
+					"since": "2026-10-08T18:07:20.000Z"
+				}
+			}
+		}
+	}
+}

@@ -487,7 +487,7 @@ function reduceWs(
 				{ ...s, decoders, session },
 				actionKey({ kind: "decoder", decoderId: d.id }),
 				at,
-				decoderSeen(d.running, false),
+				decoderSeen(d.running, false, d.startMode),
 			)
 		}
 		case "decoder:health": {
@@ -889,10 +889,13 @@ function tunerSeen(
  * A decoder event, read against a pending decoder action: stop needs not running, start
  * needs running. A restart is confirmed only by decoder:started, or by running after a
  * not-running observation for this send (R47 M4): a stale running status says nothing.
+ * R100: a return to auto is confirmed by a status that reads startMode "auto" (it may
+ * then be band-suspended, so running says nothing); lifecycle events never confirm it.
  */
 function decoderSeen(
 	running: boolean,
 	started: boolean,
+	startMode?: string,
 ): (rec: ActionRecord) => Seen {
 	return rec => {
 		if (rec.intent.kind !== "decoder") return "nothing"
@@ -904,6 +907,8 @@ function decoderSeen(
 			case "restart":
 				if (!running) return "not-running"
 				return started || rec.sawNotRunning ? "confirms" : "nothing"
+			case "unpin":
+				return startMode === "auto" ? "confirms" : "nothing"
 		}
 	}
 }

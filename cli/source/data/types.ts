@@ -47,10 +47,22 @@ export interface BandAssessment {
 	reasonCode?: string
 	/** All or nothing: positive Hz. */
 	targetsHz?: number[]
-	/** "configured" | "protocol" | "decoder-default", or a newer basis. */
+	/** R100: all or nothing like targets; every range finite with minHz <= maxHz. */
+	rangesHz?: BandRange[]
+	/** "configured" | "protocol" | "decoder-default" | "region-default" | "override", or a newer basis. */
 	basis?: string
+	/** R100: the band plan region and where it came from, kept as text. */
+	region?: { code: string; source: string }
+	/** R100: "config" | "api" when basis is "override", or a newer layer shown quoted. */
+	overrideSource?: string
 	captureCenterHz?: number
 	windowHalfWidthHz?: number
+}
+
+/** An absolute RF interval in Hz (R100). */
+export interface BandRange {
+	minHz: number
+	maxHz: number
 }
 
 /** Core's health and suspension fields (R70, R84), guarded; optional for older cores. */
@@ -63,6 +75,11 @@ export interface DecoderContractFields {
 	transition?: "suspending" | "resuming" | "unknown"
 	/** When present, the truth for window membership (R84); older cores send none. */
 	bandAssessment?: BandAssessment
+	/**
+	 * R100: "auto" | "operator" (pinned against band suspension), or a newer
+	 * mode kept as text and shown quoted. Its presence anywhere says this core pins.
+	 */
+	startMode?: string
 }
 
 /**
@@ -268,7 +285,8 @@ export type WsEvent =
 
 // ---------- writes ----------
 
-export type DecoderOp = "start" | "stop" | "restart"
+/** `unpin`: POST …/start with `{ "pin": false }`, back to auto mode (R100). */
+export type DecoderOp = "start" | "stop" | "restart" | "unpin"
 export type TunerSetting =
 	| "frequency"
 	| "gain"
