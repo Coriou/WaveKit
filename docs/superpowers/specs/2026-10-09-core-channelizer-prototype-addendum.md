@@ -414,3 +414,15 @@ SDR-host placement and framed network transport; moving demod/AGC into the
 process; FFT versus direct comparison; protocol-aware scanning and power
 estimates; readsb migration; automatic retune; public API/CLI exposure of
 channel status.
+
+## 14. Deviations adopted by the implementation plan (2026-10-09)
+
+The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this addendum except for the five points below. Each is bounded to the plan tasks named in its assumption.
+
+| Deviation | Addendum section | What the plan does instead | Why |
+|---|---|---|---|
+| A1: control on fd 3 | § 11 (requests on stdin) | IQ stays on stdin; control requests go on fd 3 (`--control-fd 3`, a fourth `stdio` pipe); events on stdout, logs on stderr. | § 4 already pipes IQ to stdin, and one stream cannot carry both IQ and JSON lines; keeping IQ on stdin preserves the `input-eof` semantics. |
+| A3: omit the whole `suspension` object | § 5 (omit only `reasonCode`) | For a channel reason, `getStatus()` emits `suspended: true` and no `suspension` object at all; internally the reason is kept. | After B3, `suspension.reasonCode` is a required rate-union enum in api-types and the Fastify schema, so an object without it fails the contract. |
+| A5: no `rustfft` | § 10 (crate list) | Crates are `serde` and `serde_json`, with `proptest` as a dev-dependency only. | The direct FIR path (halfband cascade plus rational polyphase) needs no FFT; tone tests use correlation and filter design uses a hand-written Kaiser window. |
+| A10: spread over the admissible range | § 9 (spread at `center + usable × ((k + 0.5)/N − 0.5)`) | The formula is applied to the admissible centre range `±L`, `L = ⌊fs·F/2 − (bw/2 + tr)⌋`; clustered placements are shifted inside `±L`. | Applied literally, wide channels (AIS at N = 8) land outside § 6's own admission rule, get `channel-outside-capture`, and the gate silently runs fewer channels. |
+| AIS channel centre | § 8 fixture example (`channel: { center_hz: 161975000 }`) | AIS goldens, harness tests and capacity placements use the A/B pair centre 162 000 000 Hz as the channel centre. | AIS-catcher expects its input centred between channels A and B (±25 kHz); centring on channel A shifts baseband by 25 kHz and mis-tunes both channels. |
