@@ -135,6 +135,7 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"enabled",
 	"httpPort",
 	"squelch",
+	"iqDcBlock",
 ])
 
 const DEFAULTS: Required<LiveDemodulatorOptions> = {
@@ -469,13 +470,20 @@ export class LiveDemodulator extends EventEmitter {
 		caps: SourceCaps,
 	): Promise<void> {
 		if (!this.httpServer || !this.capsNeedRestart(caps)) return
+		if (this.restartTimer) {
+			// A crashed pipeline is backing off; that restart reads the new caps.
+			this.log.info(
+				{ sourceId, newSampleRate: caps.sampleRate, format: caps.format },
+				"Source caps changed during restart backoff; the pending restart will use them",
+			)
+			return
+		}
 		this.log.info(
 			{ sourceId, newSampleRate: caps.sampleRate, format: caps.format },
 			"Source sample rate or format changed, restarting pipeline",
 		)
 
 		try {
-			this.consecutiveFailures = 0
 			await this.restartPipeline("source caps changed")
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))

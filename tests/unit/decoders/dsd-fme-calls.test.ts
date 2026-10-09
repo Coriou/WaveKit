@@ -143,6 +143,62 @@ describe("dsd-fme call segmentation", () => {
 		expect(ends[0]!.timestamp.getTime() - T0).toBeGreaterThan(9_700 + 3_000)
 	})
 
+	it("starts a new call when the same radio re-keys 1 s after its terminator", () => {
+		const decoder = createDecoder()
+		const ptt = (atMs: number) => [
+			{
+				atMs,
+				text: "12:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC ",
+			},
+			{ atMs, text: " SLOT 1 TGT=9 SRC=2060945 Group Call " },
+		]
+		const lines = [
+			...ptt(0),
+			{
+				atMs: 2000,
+				text: "12:13:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC ",
+			},
+			// The terminator's link control failed FEC, so no trailer line
+			// consumes the suppression window before the radio re-keys.
+			...ptt(3000),
+			{
+				atMs: 5000,
+				text: "12:13:38 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC ",
+			},
+			{ atMs: 5000, text: " SLOT 1 TGT=9 SRC=2060945 Group Call " },
+		]
+		const outputs = replay(decoder, lines, 8000)
+		expect(calls(outputs, "call_start")).toHaveLength(2)
+		expect(calls(outputs, "call_end")).toHaveLength(2)
+	})
+
+	it("ignores the other slot's terminator in BS (repeater) mode", () => {
+		const decoder = createDecoder()
+		const lines = [
+			{
+				atMs: 0,
+				text: "12:13:33 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VLC ",
+			},
+			{ atMs: 0, text: " SLOT 1 TGT=9 SRC=100 Group Call " },
+			{
+				atMs: 1000,
+				text: "12:13:34 Sync: +DMR   slot1  [slot2] | Color Code=01 | TLC ",
+			},
+			{
+				atMs: 2000,
+				text: "12:13:35 Sync: +DMR  [slot1]  slot2  | Color Code=01 | TLC ",
+			},
+		]
+		const outputs = replay(decoder, lines, 1500)
+		expect(calls(outputs, "call_end")).toHaveLength(0)
+		const ended = replay(decoder, lines.slice(3), 2500)
+		expect(calls(ended, "call_end")).toHaveLength(1)
+		expect(
+			(calls(ended, "call_end")[0]!.data as { flags: { timeout: boolean } })
+				.flags.timeout,
+		).toBe(false)
+	})
+
 	it("honours a configured callTimeoutMs", () => {
 		const decoder = createDecoder({ callTimeoutMs: 1500 })
 		const outputs = replay(decoder, FIXTURE, 30_000)

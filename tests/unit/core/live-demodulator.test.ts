@@ -440,6 +440,60 @@ describe("LiveDemodulator", () => {
 		expect(liveDemod.getStatus().pipelineHealth).toBe("running")
 	})
 
+	it("does not restart CSDR for a PATCH of the ignored iqDcBlock key", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ iqDcBlock: true })
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+		expect(liveDemod.getStatus().config.iqDcBlock).toBe(true)
+	})
+
+	it("lets a sample-rate change wait for a pending restart backoff", async () => {
+		vi.useFakeTimers()
+		liveDemod = create({}, { stableRunMs: 60_000 })
+		const starting = liveDemod.start()
+		await vi.advanceTimersByTimeAsync(0)
+		await starting
+
+		processes[0]!.exit(1)
+		await vi.advanceTimersByTimeAsync(10)
+		sourceManager.emitCaps({ sampleRate: 2_048_000 })
+		// Past the 300 ms caps debounce but before the 1 s backoff.
+		await vi.advanceTimersByTimeAsync(500)
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+		await vi.advanceTimersByTimeAsync(600)
+		expect(spawnMock).toHaveBeenCalledTimes(4)
+		// The restart uses the new rate, and counts as the first retry.
+		expect(processes[2]!.command).toContain("csdr firdecimate 82 ")
+		expect(liveDemod.getStatus().pipelineRestarts).toBe(1)
+
+		// The failure count was not reset: the next crash backs off 2 s.
+		processes[2]!.exit(1)
+		await vi.advanceTimersByTimeAsync(1500)
+		expect(spawnMock).toHaveBeenCalledTimes(4)
+		await vi.advanceTimersByTimeAsync(600)
+		expect(spawnMock).toHaveBeenCalledTimes(6)
+	})
+
+	it("leaves no restart scheduled when stop() overlaps a failure's cleanup", async () => {
+		await liveDemod.start()
+		const internals = liveDemod as unknown as {
+			closeHttpServer(): Promise<void>
+			scheduleRestart(lastRunMs: number): void
+			restartTimer: unknown
+		}
+		const close = internals.closeHttpServer.bind(liveDemod)
+		// A crash whose cleanup finishes while stop() is closing the server.
+		internals.closeHttpServer = async () => {
+			processes[0]!.exit(1)
+			internals.scheduleRestart(0)
+			await close()
+		}
+		await liveDemod.stop()
+		expect(internals.restartTimer).toBeNull()
+		await delay(1200)
+		expect(spawnMock).toHaveBeenCalledTimes(2)
+	})
+
 	it("serves raw and WAV streams with self-describing headers", async () => {
 		await liveDemod.start()
 		const get = (path: string) =>

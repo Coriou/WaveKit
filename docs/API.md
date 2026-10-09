@@ -475,8 +475,11 @@ Configuration notes:
 - `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
   at the threshold, stays open within 2 dB below it and closes 250 ms after the
   level drops further. While closed the stream carries silence at the nominal rate.
-- `gain` — audio gain after demodulation (default 2; for FM, ±5 kHz deviation at
-  0.8 full scale at a 25 kHz demod rate).
+- `gain` — audio gain after demodulation (default 2, formerly 10; for FM, ±5 kHz
+  deviation at 0.8 full scale at a 25 kHz demod rate). Modes without AGC follow the
+  gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
+  explicitly. AM/SSB use an AGC whose reference dropped from 0.8 to 0.4, so with the
+  default gain they peak around 0.8 instead of hard-clipping.
 - `offsetHz` — channel offset from the tuned centre (default 0). A carrier at
   centre + `offsetHz` is shifted to DC before the channel filter, so the receiver's
   DC spike can be kept out of the channel by tuning a few kHz off the carrier.

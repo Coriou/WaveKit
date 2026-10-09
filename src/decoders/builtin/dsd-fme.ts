@@ -300,9 +300,10 @@ const CALL_TIMEOUT_MS = 4000
 
 /**
  * After a terminator, dsd-fme prints the terminator's link control (same
- * TGT/SRC) on the next line; it must not start a new call.
+ * TGT/SRC) on the very next line; it must not start a new call. The window
+ * is short so a fast re-key by the same radio still starts a new call.
  */
-const TERMINATOR_TRAILER_MS = 1500
+const TERMINATOR_TRAILER_MS = 700
 
 const PositiveMsSchema = z.number().finite().positive()
 
