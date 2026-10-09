@@ -240,6 +240,9 @@ drops_unknown() { grep -Eq "$DROP_UNKNOWN" "$1.txt"; }
 # SGR sequences that switch on dim (parameter 2) in an -e capture.
 dim_count() { perl -ne 'while (/\e\[([0-9;]*)m/g) { $n++ if grep { $_ eq "2" } split /;/, $1 } END { print $n + 0 }' "$1.ansi"; }
 
+# Any banner claim of a failing lane or endpoint (R98: a stale one must clear too).
+# shellcheck disable=SC2329 # called through await
+no_failure_banner() { ! grep -Eq "failing|unreachable|ws closed|live feed down" "$1.txt"; }
 # shellcheck disable=SC2329 # called through await
 gap_closed() { grep -q "not replayed" "$1.txt" && ! grep -q "gap since" "$1.txt"; }
 # Captures $1 every second until "$3 $1" holds or $2 seconds pass; logs how long it took.
@@ -308,12 +311,11 @@ run_transitions() {
 	#    numeric again within two snapshots (about 3 s).
 	mock ws '{"mode":"up"}'
 	await "$t-6-ws-only-recovered" "$WS_BACK_S" drops_numeric || fail "transitions: drop cells not numeric within backoff + 2 WS snapshots, REST still down"
-	# 7. REST back too: banner gone, still numeric.
+	# 7. REST back too: every failure banner clears, including an endpoint whose last
+	#    attempt failed during the outage (R98: re-requested after the next good cycle).
 	mock rest '{"mode":"ok"}'
-	sleep 8
-	capture "$t-7-recovered"
+	await "$t-7-recovered" 15 no_failure_banner || fail "transitions: a failure banner still shown 15 s after full recovery"
 	drops_numeric "$t-7-recovered" || fail "transitions: drop cells not numeric after recovery"
-	if grep -q "REST failing" "$t-7-recovered.txt"; then fail "transitions: REST banner still shown after full recovery"; fi
 	return 0
 }
 
