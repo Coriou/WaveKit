@@ -313,6 +313,12 @@ list_downloaded() {
 }
 
 main() {
+    if [[ "${1:-}" == "--wav-to-cu8" ]]; then
+        # Deterministic: no dither (-D), repeatable (-R); signed → offset-binary u8.
+        # -t wav: download.sh passes "$target.part", which has no .wav extension for sox to infer the type from.
+        sox -D -R -t wav "$2" -t raw -e unsigned-integer -b 8 "$3"
+        return 0
+    fi
     check_deps
     mkdir -p "$PROCESSED_DIR"
     
