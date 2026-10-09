@@ -8,7 +8,8 @@
 #   4. Point WaveKit to tcp://<this-host-ip>:5555
 #
 # Troubleshooting:
-#   - Status page: http://<this-host>:8080/ (read-only)
+#   - Status page: http://<this-host>:8080/ (read-only; on the WaveKit SD
+#     image, http://<this-host>/ serves it too once first-boot setup is done)
 #   - Status API: curl http://localhost:8080/api/status
 #   - rtlmux stats: curl http://localhost:5556/stats.json
 #   - Logs: docker compose logs -f

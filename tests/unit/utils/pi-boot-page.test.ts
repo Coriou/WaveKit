@@ -56,13 +56,14 @@ const completed = {
 }
 
 describe("Pi first-boot browser handoff", () => {
-	it("waits for an actual receiver page, then opens the same host without query data", () => {
+	it("waits for an actual receiver page, then reloads the same address without query data", () => {
 		const { context, replace, get } = page()
 		context["render"](completed)
 		expect(replace).not.toHaveBeenCalled()
 		expect(get("setup-title").textContent).toBe("Setup complete")
 		context["render"]({ ...completed, receiverPageReady: true })
-		expect(replace).toHaveBeenCalledWith("http://[::1]:8080/")
+		// Port 80 serves the status page itself once setup is complete.
+		expect(replace).toHaveBeenCalledWith("http://[::1]/")
 	})
 
 	it("keeps failures visible even if the receiver page exists", () => {
@@ -77,6 +78,8 @@ describe("Pi first-boot browser handoff", () => {
 		expect(get("setup-title").textContent).toBe("Setup needs attention")
 		expect(get("setup-detail").textContent).toContain("exit 23")
 		expect(get("receiver-link-wrap").hidden).toBe(false)
+		// Port 80 keeps the setup page after a failure; the link goes direct.
+		expect(get("receiver-link").href).toBe("http://[::1]:8080/")
 	})
 
 	it("does not present old progress as live after contact is lost", async () => {

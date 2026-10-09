@@ -1,0 +1,28 @@
+{
+	"name": "WaveKit",
+	"short_name": "WaveKit",
+	"start_url": "/",
+	"display": "standalone",
+	"background_color": "#111C19",
+	"theme_color": "#111C19",
+	"icons": [
+		{
+			"src": "/brand/exports/wavekit-app-192.png",
+			"sizes": "192x192",
+			"type": "image/png",
+			"purpose": "any"
+		},
+		{
+			"src": "/brand/exports/wavekit-app-512.png",
+			"sizes": "512x512",
+			"type": "image/png",
+			"purpose": "any"
+		},
+		{
+			"src": "/brand/exports/wavekit-maskable-512.png",
+			"sizes": "512x512",
+			"type": "image/png",
+			"purpose": "maskable"
+		}
+	]
+}

@@ -7,7 +7,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export default [
 	{
-		ignores: ["**/dist/**", "**/node_modules/**"],
+		ignores: ["**/dist/**", "**/node_modules/**", "**/.claude/worktrees/**"],
 	},
 	{
 		files: ["**/*.ts", "**/*.tsx"],

@@ -1,0 +1,15 @@
+{
+	"$schema": "https://turbo.build/schema.json",
+	"extends": ["//"],
+	"tasks": {
+		"typecheck": {
+			"inputs": ["react/**", "tsconfig.json"]
+		},
+		"lint": {
+			"inputs": ["react/**", "../../eslint.config.js"]
+		},
+		"test": {
+			"inputs": ["react/**"]
+		}
+	}
+}

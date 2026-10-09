@@ -1,71 +1,82 @@
+/* WaveKit brand faces, vendored in brand/ (see brand/README.md). The Repli
+   faces are the brand's metric-matched fallbacks while the woff2 loads.
+   D-DIN has no tabular figures, so live numbers are set in Noto Sans. Values
+   follow packages/brand/tokens/typography.css; colours follow brand.css. */
 @font-face {
-	font-family: "Barlow";
-	font-weight: 500;
-	font-display: swap;
-	src: url("fonts/barlow-500.woff2") format("woff2");
+	font-family: "D-DIN Condensed";
+	font-weight: 400;
+	font-display: fallback;
+	src: url("brand/D-DINCondensed.woff2") format("woff2");
 }
 @font-face {
-	font-family: "Barlow";
-	font-weight: 600;
-	font-display: swap;
-	src: url("fonts/barlow-600.woff2") format("woff2");
+	font-family: "D-DIN Condensed";
+	font-weight: 700;
+	font-display: fallback;
+	src: url("brand/D-DINCondensed-Bold.woff2") format("woff2");
 }
 @font-face {
-	font-family: "Barlow Semi Condensed";
-	font-weight: 600;
-	font-display: swap;
-	src: url("fonts/barlow-semi-condensed-600.woff2") format("woff2");
+	font-family: "Noto Sans";
+	font-weight: 400;
+	font-display: fallback;
+	src: url("brand/NotoSans-Regular.woff2") format("woff2");
+}
+@font-face {
+	font-family: "D-DIN Condensed Repli";
+	src: local("Arial Narrow");
+	font-weight: 400;
+	size-adjust: 77.1%;
+	ascent-override: 107.8%;
+	descent-override: 21.9%;
+	line-gap-override: 11.2%;
+	unicode-range: U+0000-202E, U+2030-10FFFF;
+}
+@font-face {
+	font-family: "D-DIN Condensed Repli";
+	src: local("Arial Narrow Bold");
+	font-weight: 700;
+	size-adjust: 77.1%;
+	ascent-override: 107.8%;
+	descent-override: 21.9%;
+	line-gap-override: 11.2%;
+	unicode-range: U+0000-202E, U+2030-10FFFF;
+}
+@font-face {
+	font-family: "Noto Sans Repli";
+	src: local("Arial");
+	font-weight: 400;
+	size-adjust: 104.5%;
+	ascent-override: 102.3%;
+	descent-override: 28%;
+	line-gap-override: 0%;
 }
 
 :root {
-	/* Bezel: lab-grey enamel by day, graphite at night. */
-	--bezel: #d9dbd5;
-	--bezel-raised: #e4e6e0;
-	--ink: #1c201e;
-	--ink-2: #4a524e;
-	--rule: #a7ada6;
-	--ok-ink: #1d7347;
-	--warn-ink: #855600;
-	--fault-ink: #b02a1f;
-	--fault-face: #ecd3cc;
+	/* Brand dark theme: ink field, paper text, phosphor for live signal. */
+	--ink: #111c19;
+	--well: #0b1512;
+	--surface: #192b24;
+	--rule: #2c443b;
+	--rule-strong: #8ba598;
+	--paper: #f4f7f5;
+	--paper-2: #b9cac1;
+	--paper-3: #8ba598;
+	--phosphor: #7becc7;
+	--grat: rgb(123 236 199 / 0.06);
+	--grat-major: rgb(123 236 199 / 0.16);
 
-	/* Screen: always dark, like the instrument's display. */
-	--screen: #0d1210;
-	--screen-ink: #dde5e0;
-	--screen-ink-2: #8f9d96;
-	--grat: rgb(160 190 175 / 0.09);
-	--grat-major: rgb(160 190 175 / 0.2);
-	--trace: #f2b33d;
-	--expected: #7f9a8c;
+	/* Status hues are not brand colours; tuned to sit beside phosphor. */
+	--ok: var(--phosphor);
+	--warn: #f2b84b;
+	--fault: #ff7a6b;
+	--lamp-off: #52645d;
 
-	/* Lamps. */
-	--ok: #3dbe7e;
-	--warn: #f2b33d;
-	--fault: #ef5b4c;
-	--lamp-off: #9aa19c;
-
-	--focus: #2f6fd6;
-	--face: "Barlow", ui-sans-serif, system-ui, sans-serif;
-	--legend: "Barlow Semi Condensed", "Barlow", ui-sans-serif, sans-serif;
+	--display:
+		"D-DIN Condensed", "D-DIN Condensed Repli", "Noto Sans", sans-serif;
+	--body: "Noto Sans", "Noto Sans Repli", -apple-system, "Segoe UI", sans-serif;
+	--mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 	--gutter: 16px;
-	color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-	:root {
-		--bezel: #1b1e1d;
-		--bezel-raised: #222625;
-		--ink: #e3e7e2;
-		--ink-2: #9ba49f;
-		--rule: #3b423f;
-		--ok-ink: #5fd39a;
-		--warn-ink: #f2b33d;
-		--fault-ink: #ff8073;
-		--fault-face: #34201d;
-		--lamp-off: #5c6460;
-		--focus: #7fb0ff;
-		color-scheme: dark;
-	}
+	--names: 6.5rem;
+	color-scheme: dark;
 }
 
 *,
@@ -81,20 +92,21 @@ html {
 
 body {
 	margin: 0;
-	background: var(--bezel);
-	color: var(--ink);
-	font: 500 1rem/1.4 var(--face);
+	background: var(--ink);
+	color: var(--paper);
+	font: 400 1rem/1.45 var(--body);
 	font-variant-numeric: tabular-nums;
+	font-synthesis: none;
 	-webkit-font-smoothing: antialiased;
 }
 
 ::selection {
-	background: var(--trace);
-	color: #1c201e;
+	background: var(--phosphor);
+	color: var(--ink);
 }
 
 :focus-visible {
-	outline: 2px solid var(--focus);
+	outline: 2px solid var(--phosphor);
 	outline-offset: 3px;
 	border-radius: 2px;
 }
@@ -117,25 +129,39 @@ ul {
 	list-style: none;
 }
 
+[hidden] {
+	display: none !important;
+}
+
+.visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0 0 0 0);
+	white-space: nowrap;
+}
+
 .panel {
 	max-width: 1180px;
 	margin: 0 auto;
-	padding: max(12px, env(safe-area-inset-top))
+	padding: max(16px, env(safe-area-inset-top))
 		max(var(--gutter), env(safe-area-inset-right))
-		max(24px, env(safe-area-inset-bottom))
+		max(32px, env(safe-area-inset-bottom))
 		max(var(--gutter), env(safe-area-inset-left));
 }
 
-/* Silk-screened legends: the instrument's only labelling voice. */
+/* Section legends: short display-face labels with a hairline to the edge. */
 .legend {
-	font: 600 0.75rem/1 var(--legend);
-	letter-spacing: 0.09em;
+	font: 700 0.9375rem/1 var(--display);
+	letter-spacing: 0.08em;
 	text-transform: uppercase;
-	color: var(--ink-2);
+	color: var(--paper-2);
 	display: flex;
 	align-items: center;
-	gap: 10px;
-	margin-bottom: 12px;
+	gap: 12px;
+	margin-bottom: 4px;
 }
 .legend::after {
 	content: "";
@@ -144,29 +170,41 @@ ul {
 	background: var(--rule);
 }
 
-/* Nameplate */
+/* Nameplate: the wordmark, the page, the Pi it is served from, and contact. */
 .nameplate {
 	display: grid;
-	grid-template-columns: 1fr auto;
-	grid-template-areas: "title link" "host link";
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	grid-template-areas: "title host link";
 	align-items: center;
-	column-gap: 16px;
-	padding: 6px 0 16px;
-	border-bottom: 1px solid var(--rule);
+	column-gap: 20px;
+	padding: 4px 0 18px;
 	margin-bottom: 20px;
+	border-bottom: 1px solid var(--rule);
 }
 .nameplate__title {
 	grid-area: title;
-	font: 600 1.0625rem/1.2 var(--legend);
-	letter-spacing: 0.08em;
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	font: 700 1.25rem/1 var(--display);
+	letter-spacing: 0.06em;
 	text-transform: uppercase;
+	color: var(--paper-2);
 }
-.nameplate__title span {
-	color: var(--ink-2);
+/* The wordmark keeps its 120 px minimum; clearspace comes from the gap. */
+.nameplate__logo {
+	display: block;
+	width: 132px;
+	height: auto;
+}
+.nameplate__page {
+	padding-left: 14px;
+	border-left: 1px solid var(--rule);
+	line-height: 32px;
 }
 .nameplate__host {
 	grid-area: host;
-	color: var(--ink-2);
+	color: var(--paper-3);
 	font-size: 0.875rem;
 	overflow-wrap: anywhere;
 }
@@ -176,26 +214,28 @@ ul {
 	display: inline-flex;
 	align-items: center;
 	gap: 8px;
-	font: 600 0.8125rem/1 var(--legend);
+	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
 	padding: 8px 12px;
 	border: 1px solid var(--rule);
 	border-radius: 999px;
 	white-space: nowrap;
+	color: var(--paper-2);
 }
 .link[data-state="live"] {
-	color: var(--ok-ink);
+	color: var(--ok);
 }
 .link[data-state="stale"],
 .link[data-state="reconnecting"] {
-	color: var(--warn-ink);
+	color: var(--warn);
 }
 .link[data-state="offline"] {
-	color: var(--fault-ink);
+	color: var(--fault);
 }
 
-/* Lamps: filled when lit, a hollow ring when dark or unknown. */
+/* Lamps: filled when lit, a hollow ring when dark or unknown. Never alone:
+   every lamp sits beside a word. */
 .lamp {
 	--lamp: var(--lamp-off);
 	flex: none;
@@ -221,8 +261,9 @@ ul {
 	--lamp: var(--fault);
 	background: var(--lamp);
 }
-[data-state="idle"] .lamp {
-	--lamp: var(--ok);
+[data-state="stale"] .lamp {
+	--lamp: var(--lamp-off);
+	background: transparent;
 }
 [data-state="connecting"] > .lamp,
 [data-state="reconnecting"] > .lamp {
@@ -234,36 +275,34 @@ ul {
 	}
 }
 
-/* Layout */
+/* Layout: the screen leads; the stream and the Pi sit beside it on wide
+   screens and below it on phones. */
 .layout {
 	display: grid;
 	gap: 28px;
 }
-/* Narrow screens read flow, power, host, then setup; the column wrappers only
-   matter side by side. */
-.column {
-	display: contents;
+.side {
+	display: grid;
+	gap: 28px;
+	align-content: start;
+	min-width: 0;
 }
-.setup {
-	order: 1;
+body[data-empty="true"] :is(.side, .diagnostics, .scope, .screen__rate) {
+	display: none;
 }
-.diagnostics {
-	order: 2;
-}
-@media (min-width: 900px) {
-	.column {
-		display: grid;
-		gap: 28px;
-		align-content: start;
-		min-width: 0;
+@media (min-width: 640px) and (max-width: 959px) {
+	.side {
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		column-gap: 28px;
 	}
-	.setup {
-		order: 0;
+	.side > .setup {
+		grid-column: 1 / -1;
 	}
+}
+@media (min-width: 960px) {
 	.layout {
-		grid-template-columns: minmax(0, 8fr) minmax(0, 4fr);
-		column-gap: 40px;
-		row-gap: 28px;
+		grid-template-columns: minmax(0, 1fr) 360px;
+		column-gap: 36px;
 		align-items: start;
 	}
 	.diagnostics {
@@ -271,28 +310,32 @@ ul {
 	}
 }
 
-/* The screen */
+/* The screen: a recessed panel shared by both pages. On the status page it
+   holds the verdict, the rate, and every trend on one time base. */
 .screen {
 	position: relative;
-	background: var(--screen);
-	color: var(--screen-ink);
-	border-radius: 14px;
-	padding: 18px 18px 12px;
+	background: var(--well);
+	border: 1px solid var(--rule);
+	border-radius: 12px;
+	padding: 20px 20px 14px;
 	display: grid;
-	grid-template-columns: 1fr auto;
-	grid-template-areas: "verdict rate" "plot plot";
-	gap: 14px 16px;
-	box-shadow:
-		inset 0 0 0 1px rgb(255 255 255 / 0.04),
-		inset 0 2px 10px rgb(0 0 0 / 0.5);
-}
-.screen__verdict {
-	grid-area: verdict;
+	gap: 22px 20px;
 	min-width: 0;
 }
+.screen--status {
+	grid-template-columns: minmax(0, 1fr) auto;
+	grid-template-areas: "verdict rate" "scope scope";
+}
+.screen__verdict {
+	min-width: 0;
+}
+.screen--status .screen__verdict {
+	grid-area: verdict;
+}
 .verdict {
-	font: 600 1.625rem/1.1 var(--face);
-	letter-spacing: -0.01em;
+	font: 700 2rem/1 var(--display);
+	letter-spacing: 0.01em;
+	text-wrap: balance;
 }
 .verdict::before {
 	content: "";
@@ -300,9 +343,9 @@ ul {
 	width: 12px;
 	height: 12px;
 	border-radius: 50%;
-	margin-right: 10px;
-	vertical-align: 0.08em;
-	border: 2px solid var(--screen-ink-2);
+	margin-right: 12px;
+	vertical-align: 0.12em;
+	border: 2px solid var(--lamp-off);
 }
 .screen[data-state="ok"] .verdict::before {
 	background: var(--ok);
@@ -317,51 +360,107 @@ ul {
 	border-color: var(--fault);
 }
 .verdict__detail {
-	margin-top: 6px;
-	color: var(--screen-ink-2);
+	margin-top: 8px;
+	color: var(--paper-2);
 	font-size: 0.9375rem;
-	max-width: 46ch;
+	max-width: 54ch;
+	text-wrap: pretty;
 }
 .screen__rate {
 	grid-area: rate;
 	text-align: right;
 }
 .rate {
-	font: 500 2.25rem/1 var(--face);
-	letter-spacing: -0.02em;
-	color: var(--trace);
+	font: 400 2.5rem/0.95 var(--body);
+	letter-spacing: -0.01em;
+	color: var(--paper-2);
 	white-space: nowrap;
 }
-.screen[data-state="unknown"] .rate,
-.screen[data-state="fault"] .rate {
-	color: var(--screen-ink-2);
+.screen[data-fresh="true"][data-state="ok"] .rate {
+	color: var(--phosphor);
+}
+.screen[data-fresh="true"][data-state="warn"] .rate {
+	color: var(--warn);
 }
 .rate__unit {
-	font-size: 0.9375rem;
-	letter-spacing: 0;
-	color: var(--screen-ink-2);
+	font: 400 1.25rem/1 var(--display);
+	letter-spacing: 0.02em;
+	color: var(--paper-2);
 }
-.rate__expected {
-	margin-top: 6px;
-	color: var(--screen-ink-2);
+.rate__sub {
+	margin-top: 8px;
+	color: var(--paper-2);
 	font-size: 0.875rem;
 	white-space: nowrap;
 }
 
-.plot {
-	grid-area: plot;
+/* Scope: channels share one five-minute time base, read by one cursor. */
+.scope {
+	grid-area: scope;
 	position: relative;
+	display: grid;
+	gap: 10px;
 	touch-action: pan-y;
+	cursor: crosshair;
+	min-width: 0;
 }
-.plot__frame {
+.scope:focus-visible {
+	outline-offset: 6px;
+}
+.channel {
+	display: grid;
+	grid-template-columns: var(--names) minmax(0, 1fr);
+	grid-template-areas: "name plot" "value plot";
+	grid-template-rows: auto 1fr;
+	column-gap: 14px;
+	align-items: start;
+}
+.channel__name {
+	grid-area: name;
+	font: 400 0.9375rem/1.1 var(--display);
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--paper-2);
+}
+.channel__value {
+	grid-area: value;
+	font: 400 1.0625rem/1.3 var(--body);
+	color: var(--paper);
+	white-space: nowrap;
+}
+.channel--flow .channel__value {
+	font: 400 0.875rem/1.3 var(--body);
+	color: var(--paper-3);
+	margin-top: 4px;
+}
+.channel[data-state="warn"] .channel__value {
+	color: var(--warn);
+}
+.channel[data-state="fault"] .channel__value {
+	color: var(--fault);
+}
+.channel[data-state="stale"] .channel__value,
+.channel[data-state="unavailable"] .channel__value {
+	color: var(--paper-3);
+}
+.channel__plot,
+.channel__frame {
+	grid-area: plot;
+}
+.channel__frame {
 	position: relative;
 }
-.plot__svg {
+.channel__plot {
 	display: block;
 	width: 100%;
-	height: clamp(140px, 22vw, 200px);
+	height: 38px;
 	overflow: visible;
-	cursor: crosshair;
+}
+.channel--flow .channel__plot {
+	height: clamp(128px, 17vw, 176px);
+}
+.channel--lane .channel__plot {
+	height: 16px;
 }
 .graticule line {
 	stroke: var(--grat);
@@ -371,347 +470,299 @@ ul {
 .graticule line.major {
 	stroke: var(--grat-major);
 }
-.plot__expected {
-	stroke: var(--expected);
-	stroke-width: 1.25;
-	stroke-dasharray: 6 5;
-	vector-effect: non-scaling-stroke;
-}
-/* A faint wash under the trace, fading out before the baseline. */
-.plot__area {
-	fill: url(#plot-fade);
-}
-.plot__fade-top {
-	stop-color: var(--trace);
-	stop-opacity: 0.13;
-}
-.plot__fade-bottom {
-	stop-color: var(--trace);
-	stop-opacity: 0;
-}
 .plot__trace {
 	fill: none;
-	stroke: var(--trace);
-	stroke-width: 2;
+	stroke: var(--paper-2);
+	stroke-width: 1.5;
 	stroke-linejoin: round;
 	stroke-linecap: round;
 	vector-effect: non-scaling-stroke;
 }
-/* Missing measurements stay blank; the broken trace is the signal. */
-.plot__gap {
-	fill: none;
-	stroke: none;
+.channel--flow .plot__trace {
+	stroke: var(--phosphor);
+	stroke-width: 2;
 }
-/* A reading the page cannot confirm is drawn in stale ink, never amber. */
-.screen[data-fresh="false"] .plot__trace {
-	stroke: var(--screen-ink-2);
-	opacity: 0.55;
+.screen[data-state="warn"] .channel--flow .plot__trace,
+.channel[data-state="warn"] .plot__trace {
+	stroke: var(--warn);
+}
+.screen[data-state="fault"] .channel--flow .plot__trace,
+.channel[data-state="fault"] .plot__trace {
+	stroke: var(--fault);
+}
+.plot__area {
+	fill: url(#flow-fade);
+}
+.screen[data-state="warn"] .fade-top {
+	stop-color: var(--warn);
+}
+.screen[data-state="fault"] .fade-top {
+	stop-color: var(--fault);
+}
+.fade-top {
+	stop-color: var(--phosphor);
+	stop-opacity: 0.16;
+}
+.fade-bottom {
+	stop-color: var(--phosphor);
+	stop-opacity: 0;
+}
+.plot__expected {
+	stroke: var(--rule-strong);
+	stroke-width: 1.25;
+	stroke-dasharray: 6 5;
+	vector-effect: non-scaling-stroke;
+}
+.plot__start {
+	stroke: var(--paper-3);
+	stroke-width: 1;
+	stroke-dasharray: 2 4;
+	vector-effect: non-scaling-stroke;
+}
+.lane__base {
+	stroke: var(--grat-major);
+	stroke-width: 1;
+	vector-effect: non-scaling-stroke;
+}
+.lane__ticks {
+	stroke: var(--warn);
+	stroke-width: 2;
+	vector-effect: non-scaling-stroke;
+}
+.channel--lane[data-state="fault"] .lane__ticks {
+	stroke: var(--fault);
+}
+/* A reading the page cannot confirm is drawn dim, never in signal colour. */
+.screen[data-fresh="false"] .plot__trace,
+.screen[data-fresh="false"] .lane__ticks {
+	stroke: var(--paper-3);
+	opacity: 0.5;
 }
 .screen[data-fresh="false"] .plot__area {
 	opacity: 0;
 }
-.screen[data-fresh="false"] .plot__expected,
-.screen[data-fresh="false"] .plot__label {
-	opacity: 0.5;
-}
-.screen[data-fresh="false"] .rate {
-	color: var(--screen-ink-2);
-}
-/* The expected line is labelled where it is drawn. */
+
+/* Reference lines are labelled where they are drawn. */
 .plot__label {
 	position: absolute;
+	font: 400 0.75rem/1 var(--body);
+	color: var(--paper-3);
+	pointer-events: none;
+	white-space: nowrap;
+}
+.plot__label--expected {
 	left: 0;
 	transform: translateY(calc(-100% - 5px));
-	font: 600 0.6875rem/1 var(--legend);
-	letter-spacing: 0.08em;
+}
+.plot__label--start {
+	top: 4px;
+	padding: 0 8px;
+}
+.channel--flow[data-start="late"] .plot__label--start {
+	transform: translateX(-100%);
+}
+/* A start marker near the left edge takes that corner; the expected label moves right. */
+.channel--flow[data-start="early"] .plot__label--expected {
+	left: auto;
+	right: 0;
+}
+
+.scope__axis {
+	display: flex;
+	justify-content: space-between;
+	margin-left: calc(var(--names) + 14px);
+	font: 400 0.8125rem/1 var(--display);
+	letter-spacing: 0.06em;
 	text-transform: uppercase;
-	color: var(--expected);
+	color: var(--paper-3);
+}
+.scope__marker {
+	position: absolute;
+	width: 1px;
+	background: var(--paper);
 	pointer-events: none;
 }
-/* The marker readout takes the top of the plot while it is shown. */
-.plot__frame[data-marker] .plot__label {
-	visibility: hidden;
-}
-/* SVG ignores the hidden attribute; honour it explicitly. */
-.plot__marker[hidden],
-.plot__readout[hidden],
-.plot__label[hidden] {
-	display: none;
-}
-.plot__marker line {
-	stroke: var(--screen-ink);
-	stroke-width: 1;
-	vector-effect: non-scaling-stroke;
-}
-.plot__marker circle {
-	fill: var(--screen);
-	stroke: var(--trace);
-	stroke-width: 2;
-	vector-effect: non-scaling-stroke;
-}
-.plot__readout {
+.scope__readout {
 	position: absolute;
-	top: 6px;
-	padding: 4px 8px;
-	border-radius: 6px;
-	background: rgb(13 18 16 / 0.92);
-	border: 1px solid var(--grat-major);
+	display: grid;
+	gap: 2px;
+	padding: 8px 10px;
+	border-radius: 8px;
+	background: rgb(11 21 18 / 0.94);
+	border: 1px solid var(--rule);
 	font-size: 0.8125rem;
+	line-height: 1.35;
 	white-space: nowrap;
 	pointer-events: none;
 }
-.plot__axis {
-	display: flex;
-	justify-content: space-between;
-	margin-top: 8px;
-	font: 600 0.6875rem/1 var(--legend);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--screen-ink-2);
+.scope__readout span:first-child {
+	color: var(--paper-2);
 }
 
-/* Receiver chain: presence per stage, the flow itself lives on the screen. */
-.chain {
-	display: grid;
-	grid-template-columns: repeat(4, minmax(0, 1fr));
-	margin-top: 16px;
-	position: relative;
-}
-.chain::before {
-	content: "";
-	position: absolute;
-	left: 6px;
-	right: calc(25% - 6px);
-	top: 35px;
-	height: 1px;
-	background: var(--rule);
-}
-.stage {
-	position: relative;
-	display: grid;
-	gap: 6px;
-	padding-right: 8px;
+/* IQ stream: the address to paste into WaveKit, copyable in one press. */
+.endpoint {
+	display: flex;
+	align-items: stretch;
+	margin: 12px 0 2px;
+	border: 1px solid var(--rule);
+	border-radius: 8px;
+	background: var(--surface);
 	min-width: 0;
 }
-.stage__name {
-	font: 600 0.75rem/1 var(--legend);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--ink-2);
-	padding-bottom: 10px;
-}
-.stage__state {
-	display: flex;
-	align-items: center;
-	gap: 7px;
-	font-weight: 600;
-	font-size: 0.9375rem;
-	background: var(--bezel);
-	width: max-content;
-	max-width: 100%;
-	padding-right: 6px;
-	position: relative;
-}
-.stage__state .lamp {
-	box-shadow: 0 0 0 4px var(--bezel);
-}
-.stage__word {
-	overflow: hidden;
-	text-overflow: ellipsis;
-}
-.stage__fact {
-	color: var(--ink-2);
-	font-size: 0.8125rem;
+.endpoint__url {
+	flex: 1;
+	min-width: 0;
+	padding: 11px 12px;
+	font: 400 0.9375rem/1.3 var(--mono);
+	color: var(--paper);
 	overflow-wrap: anywhere;
+	user-select: all;
 }
-.stage[data-state="fault"] .stage__word {
-	color: var(--fault-ink);
-}
-.stage[data-state="warn"] .stage__word {
-	color: var(--warn-ink);
-}
-
-/* Annunciator windows */
-/* Full-width rows keep labels whole; three across only in the mid band where
-   the power section spans the page. */
-.annunciators {
-	display: grid;
-	grid-template-columns: 1fr;
-	gap: 6px;
-}
-.annunciator {
-	grid-template-columns: auto minmax(0, 1fr) auto;
-	align-items: center;
-}
-.annunciator small {
-	text-align: right;
-}
-@media (min-width: 560px) and (max-width: 899px) {
-	.annunciators {
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-		gap: 8px;
-	}
-	.annunciator {
-		grid-template-columns: auto minmax(0, 1fr);
-		align-items: center;
-	}
-	.annunciator small {
-		grid-column: 1 / -1;
-		text-align: left;
-	}
-}
-.annunciator {
-	display: grid;
-	gap: 4px 10px;
-	padding: 10px 12px;
-	border: 1px solid var(--rule);
-	border-radius: 6px;
-	background: var(--bezel-raised);
-	min-height: 46px;
-	align-content: center;
-}
-.annunciator > span:not(.lamp) {
-	font: 600 0.8125rem/1.1 var(--legend);
+.endpoint__copy {
+	flex: none;
+	min-width: 72px;
+	min-height: 44px;
+	padding: 0 14px;
+	border: 0;
+	border-left: 1px solid var(--rule);
+	border-radius: 0 7px 7px 0;
+	background: transparent;
+	color: var(--phosphor);
+	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.06em;
 	text-transform: uppercase;
+	cursor: pointer;
 }
-.annunciator small {
-	font-size: 0.8125rem;
-	color: var(--ink-2);
+.endpoint__copy:hover {
+	background: rgb(123 236 199 / 0.08);
 }
-.annunciator[data-state="clear"] > span:not(.lamp) {
-	color: var(--ink-2);
-}
-.annunciator[data-state="clear"] .lamp {
-	--lamp: var(--ok);
-	background: var(--lamp);
-}
-.annunciator[data-state="latched"] .lamp {
-	--lamp: var(--warn);
-	background: var(--lamp);
-}
-.annunciator[data-state="active"] .lamp {
-	--lamp: var(--fault);
-	background: var(--lamp);
-}
-.annunciator[data-state="unknown"] {
-	border-style: dashed;
-	background: transparent;
-}
-.annunciator[data-state="unknown"] > span:not(.lamp) {
-	color: var(--ink-2);
-}
-.annunciator[data-state="latched"] {
-	border-color: var(--warn-ink);
-}
-.annunciator[data-state="latched"] small {
-	color: var(--warn-ink);
-}
-.annunciator[data-state="active"] {
-	background: var(--fault-face);
-	border-color: var(--fault-ink);
-}
-.annunciator[data-state="active"] small {
-	color: var(--fault-ink);
-	font-weight: 600;
-}
-.note {
-	margin-top: 10px;
-	font-size: 0.8125rem;
-	color: var(--ink-2);
+.endpoint__copy:active {
+	background: rgb(123 236 199 / 0.14);
 }
 
-/* Host readouts */
-.readouts {
+/* Rows: name, value, one line of context, separated by hairlines. */
+.row {
 	display: grid;
-	grid-template-columns: repeat(2, minmax(0, 1fr));
-	border-top: 1px solid var(--rule);
-}
-@media (min-width: 560px) and (max-width: 899px) {
-	.readouts {
-		grid-template-columns: repeat(3, minmax(0, 1fr));
-	}
-}
-.readout {
-	position: relative;
-	padding: 12px 12px 14px 0;
+	grid-template-columns: 5.25rem minmax(0, 1fr);
+	column-gap: 12px;
+	padding: 11px 0;
 	border-bottom: 1px solid var(--rule);
-	min-width: 0;
 }
-.readout dt {
-	font: 600 0.6875rem/1 var(--legend);
-	letter-spacing: 0.08em;
+.row dt {
+	font: 400 0.9375rem/1.45 var(--display);
+	letter-spacing: 0.06em;
 	text-transform: uppercase;
-	color: var(--ink-2);
-	margin-bottom: 6px;
+	color: var(--paper-2);
 }
-.readout dd {
+.row dd {
 	display: grid;
 	gap: 2px;
+	min-width: 0;
 }
-.readout__value {
-	font-size: 1.375rem;
-	line-height: 1.1;
-	letter-spacing: -0.01em;
+.row__value {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
 	overflow-wrap: anywhere;
 }
-.readout__sub {
+.row__sub {
 	font-size: 0.8125rem;
-	color: var(--ink-2);
+	color: var(--paper-2);
 	overflow-wrap: anywhere;
 }
-.readout[data-state="unavailable"] .readout__value,
-.readout[data-state="stale"] .readout__value {
-	color: var(--ink-2);
-	font-size: 1rem;
-	line-height: 1.5;
+.row__sub:empty {
+	display: none;
 }
-.readout[data-state="warn"] .readout__value {
-	color: var(--warn-ink);
+.row[data-state="warn"] .row__text {
+	color: var(--warn);
 }
-.readout[data-state="fault"] .readout__value {
-	color: var(--fault-ink);
+.row[data-state="fault"] .row__text {
+	color: var(--fault);
+}
+.row[data-state="stale"] .row__text,
+.row[data-state="unavailable"] .row__text {
+	color: var(--paper-2);
 }
 
-/* A ruled scale under the value: the instrument's bar meter. */
-.meter {
-	display: block;
-	height: 3px;
-	margin-top: 10px;
+/* Wi-Fi bars: four rising bars, lit from the left by signal strength. */
+.bars {
+	display: none;
+	align-items: flex-end;
+	gap: 2px;
+	height: 13px;
+}
+.row[data-bars]:not([data-bars="0"]) .bars {
+	display: inline-flex;
+}
+.bars span {
+	width: 3px;
+	border-radius: 1px;
 	background: var(--rule);
-	position: relative;
 }
-.meter span {
-	position: absolute;
-	inset: 0;
-	background: var(--ink);
-	transform: scaleX(var(--fill, 0));
-	transform-origin: left center;
-	transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+.bars span:nth-child(1) {
+	height: 4px;
 }
-.readout[data-state="warn"] .meter span {
-	background: var(--warn-ink);
+.bars span:nth-child(2) {
+	height: 7px;
 }
-.readout[data-state="fault"] .meter span {
-	background: var(--fault-ink);
+.bars span:nth-child(3) {
+	height: 10px;
 }
-.readout[data-state="unavailable"] .meter,
-.readout[data-state="stale"] .meter span {
-	opacity: 0.35;
+.bars span:nth-child(4) {
+	height: 13px;
+}
+.row[data-bars="1"] .bars span:nth-child(-n + 1),
+.row[data-bars="2"] .bars span:nth-child(-n + 2),
+.row[data-bars="3"] .bars span:nth-child(-n + 3),
+.row[data-bars="4"] .bars span:nth-child(-n + 4) {
+	background: var(--paper);
+}
+.row[data-state="warn"][data-bars="1"] .bars span:nth-child(-n + 1),
+.row[data-state="warn"][data-bars="2"] .bars span:nth-child(-n + 2) {
+	background: var(--warn);
+}
+.row[data-state="stale"] .bars {
+	opacity: 0.4;
 }
 
-/* Setup */
+.clients {
+	display: grid;
+	gap: 8px;
+}
+.client {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr);
+	column-gap: 8px;
+	align-items: center;
+}
+.client__address {
+	overflow-wrap: anywhere;
+}
+.client__sub {
+	grid-column: 1 / -1;
+	font-size: 0.8125rem;
+	color: var(--paper-2);
+}
+.client .lamp + .client__address + .client__sub {
+	grid-column: 2;
+}
+.client[data-state="warn"] .client__sub {
+	color: var(--warn);
+}
+
+/* Setup, only while first boot is still running or has failed. */
 .setup__line {
 	display: flex;
 	align-items: center;
 	gap: 10px;
-	font-size: 0.9375rem;
+	padding-top: 10px;
 }
 .setup__line[data-state="fault"] {
-	color: var(--fault-ink);
+	color: var(--fault);
 }
 
-/* Diagnostics */
+/* Diagnostics: developer detail, one press away. */
 .diagnostics {
 	border-top: 1px solid var(--rule);
 	border-bottom: 1px solid var(--rule);
@@ -719,10 +770,10 @@ ul {
 .diagnostics summary {
 	cursor: pointer;
 	padding: 14px 0;
-	font: 600 0.8125rem/1 var(--legend);
+	font: 700 0.9375rem/1 var(--display);
 	letter-spacing: 0.08em;
 	text-transform: uppercase;
-	color: var(--ink-2);
+	color: var(--paper-2);
 	list-style: none;
 	display: flex;
 	align-items: center;
@@ -745,119 +796,90 @@ ul {
 	transform: rotate(45deg);
 }
 .diagnostics summary:hover {
-	color: var(--ink);
+	color: var(--paper);
 }
 .diagnostics__body {
 	display: grid;
-	gap: 8px;
+	gap: 18px;
 	padding-bottom: 20px;
 }
-.diagnostics__body .legend {
-	margin-top: 12px;
-	margin-bottom: 4px;
-}
-.clients {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 0.875rem;
-}
-.clients th {
-	text-align: left;
-	font: 600 0.6875rem/1 var(--legend);
-	letter-spacing: 0.08em;
-	text-transform: uppercase;
-	color: var(--ink-2);
-	padding: 6px 8px 6px 0;
-}
-.clients td {
-	padding: 8px 8px 8px 0;
-	border-top: 1px solid var(--rule);
-	overflow-wrap: anywhere;
-}
-.clients th:not(:first-child),
-.clients td:not(:first-child) {
-	text-align: right;
+@media (min-width: 960px) {
+	.diagnostics__body {
+		grid-template-columns: 1fr 1fr;
+		column-gap: 36px;
+	}
 }
 .facts {
 	display: grid;
 	grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
 	gap: 6px 16px;
 	font-size: 0.875rem;
+	align-content: start;
 }
 .facts dt {
-	color: var(--ink-2);
+	color: var(--paper-2);
 }
 .facts dd {
 	overflow-wrap: anywhere;
 }
 
-.footer {
-	margin-top: 28px;
-	font-size: 0.8125rem;
-	color: var(--ink-2);
-}
-
-@media (max-width: 420px) {
+@media (max-width: 559px) {
+	/* Logo and contact on top; the page name and host underneath. */
+	.nameplate {
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		grid-template-areas: "logo logo link" "page host host";
+		row-gap: 12px;
+		column-gap: 12px;
+	}
+	.nameplate__title {
+		display: contents;
+	}
+	.nameplate__logo {
+		grid-area: logo;
+		width: 120px;
+	}
+	.nameplate__page {
+		grid-area: page;
+		padding-left: 0;
+		border-left: 0;
+		line-height: 1;
+	}
+	.nameplate__host {
+		line-height: 1;
+	}
 	.screen {
-		grid-template-columns: 1fr;
-		grid-template-areas: "verdict" "rate" "plot";
-		padding: 16px 14px 10px;
+		padding: 16px 14px 12px;
+		gap: 16px;
+	}
+	.screen--status {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-areas: "verdict" "rate" "scope";
+	}
+	.verdict {
+		font-size: 1.75rem;
 	}
 	.screen__rate {
 		text-align: left;
 		display: flex;
 		align-items: baseline;
-		gap: 12px;
 		flex-wrap: wrap;
+		gap: 4px 14px;
 	}
-	.verdict {
-		font-size: 1.5rem;
+	.rate__sub {
+		margin-top: 0;
+		white-space: normal;
 	}
-}
-
-@media (max-width: 559px) {
-	.plot__axis {
-		flex-wrap: wrap;
-		row-gap: 8px;
+	/* Each channel: name and value on one line, its trace full width below. */
+	.channel {
+		grid-template-columns: minmax(0, 1fr) auto;
+		grid-template-areas: "name value" "plot plot";
+		row-gap: 4px;
 	}
-	.plot__scale {
-		order: 3;
-		width: 100%;
-		text-align: center;
+	.channel--flow .channel__value {
+		margin-top: 0;
 	}
-}
-
-/* Phones: the chain reads top to bottom, lamps on one connecting rule, and
-   annunciators become full-width rows so their words never break. */
-@media (max-width: 559px) {
-	.chain {
-		grid-template-columns: 1fr;
-	}
-	.chain::before {
-		left: calc(5.5rem + 5px);
-		right: auto;
-		top: 22px;
-		bottom: 30px;
-		width: 1px;
-		height: auto;
-	}
-	.stage {
-		grid-template-columns: 5.5rem minmax(0, 1fr);
-		grid-template-areas: "name state" ". fact";
-		row-gap: 2px;
-		padding: 8px 0;
-	}
-	.stage__name {
-		grid-area: name;
-		padding-bottom: 0;
-		align-self: center;
-	}
-	.stage__state {
-		grid-area: state;
-	}
-	.stage__fact {
-		grid-area: fact;
-		padding-left: 17px;
+	.scope__axis {
+		margin-left: 0;
 	}
 }
 
