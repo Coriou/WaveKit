@@ -225,6 +225,19 @@ export const BINDINGS: readonly Binding[] = [
 		keys: ["<pgdn>"],
 		action: () => ({ type: "detail-scroll", delta: 1 }),
 	},
+	// Decoders detail scrolls too (R65 I4); no footer hint (§6.2), the pane marks hidden rows.
+	{
+		mode: "detail",
+		views: ["decoders"],
+		keys: ["<pgup>"],
+		action: () => ({ type: "detail-scroll", delta: -1 }),
+	},
+	{
+		mode: "detail",
+		views: ["decoders"],
+		keys: ["<pgdn>"],
+		action: () => ({ type: "detail-scroll", delta: 1 }),
+	},
 	{
 		mode: "detail",
 		views: ["messages"],

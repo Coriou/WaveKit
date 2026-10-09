@@ -64,6 +64,14 @@ const PAST: Readonly<Record<DecoderOp, string>> = {
 	restart: "restarted",
 }
 
+/** Own-key lookup for server-chosen keys (R65 M2): "constructor" must not hit the prototype. */
+function own<T>(
+	table: Readonly<Record<string, T>>,
+	key: string,
+): T | undefined {
+	return Object.hasOwn(table, key) ? table[key] : undefined
+}
+
 /** Sub-10 s server-relative durations in tenths, floored like the ages ("0.2s", assumption 18). */
 const secs = (ms: number): string =>
 	ms < 10_000
@@ -113,7 +121,8 @@ export function decoderActionText(
 ): string | null {
 	const rec = state.actions.byKey[`decoder:${id}`]
 	if (!rec || rec.intent.kind !== "decoder") return null
-	const sep = ` ${glyphs().sep} `
+	const g = glyphs()
+	const sep = ` ${g.sep} `
 	const op = rec.intent.op
 	const sent = `${op} sent ${formatClock(rec.sentAt)}`
 	switch (rec.state) {
@@ -134,12 +143,20 @@ export function decoderActionText(
 				rec.outcomes.find(o => o.result?.outcome === "failed")?.result ??
 				rec.outcomes[0]?.result
 			const status = r?.status ?? r?.code ?? "network"
-			return `${op} failed${sep}${status}${sep}${quoted(r?.message ?? "?")}`
+			// R65 M4: no server text is an unquoted ?, never an empty quote.
+			const text = r?.message ? quoted(r.message) : g.unknown
+			return `${op} failed${sep}${status}${sep}${text}`
 		}
-		case "ok":
-			return rec.confirmedAt !== null
-				? `${PAST[op]} ${formatClock(rec.confirmedAt)}`
-				: sent
+		case "ok": {
+			if (rec.confirmedAt !== null)
+				return `${PAST[op]} ${formatClock(rec.confirmedAt)}`
+			// R65 M6: accepted by core (2xx) but no reconciling event yet; distinct from in flight.
+			const status = rec.outcomes.find(o => o.result !== null)?.result?.status
+			const accepted = `${op} accepted ${formatClock(rec.resultAt ?? rec.sentAt)}`
+			return status !== undefined && status !== null
+				? `${accepted}${sep}${status}`
+				: accepted
+		}
 	}
 }
 
@@ -159,6 +176,14 @@ function errorText(
 	return ws ? `${quoted(ws.message)}${sep}${formatAge(now - ws.at)} ago` : null
 }
 
+/** Every span but the label gutter in the `old` role (stale lane, T6). */
+function dimmed(lines: readonly Line[], old: boolean): Line[] {
+	if (!old) return [...lines]
+	return lines.map(l =>
+		l.map((x, k) => (k === 0 ? x : { ...x, role: "old" as const })),
+	)
+}
+
 export function decoderDetail(
 	state: AppState,
 	f: DecoderFacts,
@@ -171,23 +196,24 @@ export function decoderDetail(
 	const sess = state.session[r.id]
 	const caps = r.caps
 	const identity = [
-		PROTOCOL[r.type] ?? sanitize(r.type),
+		own(PROTOCOL, r.type) ?? sanitize(r.type),
 		...(caps
 			? [
-					PATTERN[caps.integrationPattern],
-					`${INPUT[caps.input]}, ${OUTPUT[caps.output]}`,
+					own(PATTERN, caps.integrationPattern) ?? g.unknown,
+					`${own(INPUT, caps.input) ?? g.unknown}, ${own(OUTPUT, caps.output) ?? g.unknown}`,
 				]
 			: []),
 		`pid ${r.pid ?? g.na}`,
 		`version ${r.version !== undefined ? sanitize(r.version) : g.na}`,
 	].join(sep)
-	const lines: Line[] = [...wrapKV(sanitize(r.id), identity, width, true)]
+	// R65 I5: the header shows the whole id, then two spaces.
+	const rest: Line[] = [...wrapKV(sanitize(r.id), identity, width, true, true)]
 	const result = decoderActionText(state, r.id, now)
-	if (result) lines.push(...wrapKV("action", result, width))
+	if (result) rest.push(...wrapKV("action", result, width))
 	const prev = sess?.previousHealth
 	// R70: an unrecognised health value is unknown (?), never echoed as a word.
 	const health = (h: string): string => (h === "unknown" ? "?" : h)
-	lines.push(
+	rest.push(
 		...wrapKV(
 			"process",
 			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}server health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
@@ -197,7 +223,7 @@ export function decoderDetail(
 	const susp = r.suspension
 	if (r.suspended === true && susp) {
 		const since = Date.parse(susp.since)
-		lines.push(
+		rest.push(
 			...wrapKV(
 				"suspended",
 				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionReason(susp.reasonCode)}`,
@@ -208,6 +234,7 @@ export function decoderDetail(
 	const events = `${formatCount(r.stats.eventsOut)} events`
 	const lastOut = f.lastAt === null ? g.na : `${formatAge(now - f.lastAt)} ago`
 	const d = f.decodes
+	// R65 M3: a last-decode-only fact is said once, as "last output".
 	const head =
 		d.kind === "none"
 			? `none since start (${formatDuration(d.uptimeSec)})`
@@ -215,16 +242,19 @@ export function decoderDetail(
 				? formatEventRate(d.perSec)
 				: d.kind === "total"
 					? `${formatCount(d.count)} total`
-					: d.kind === "last"
-						? `last ${lastOut}`
-						: g.na
-	lines.push(
+					: d.kind === "na"
+						? g.na
+						: null
+	rest.push(
 		...wrapKV(
 			"decodes",
-			`${head}${sep}${events}${sep}last output ${lastOut}`,
+			[...(head !== null ? [head] : []), events, `last output ${lastOut}`].join(
+				sep,
+			),
 			width,
 		),
 	)
+	const fanout: Line[] = []
 	const b = f.branch
 	const snapT = Date.parse(state.fanout.value?.timestamp ?? "")
 	/** Server-time delta to the snapshot, so local clock skew cannot affect it. */
@@ -233,10 +263,13 @@ export function decoderDetail(
 		return Number.isFinite(t) && Number.isFinite(snapT) ? secs(snapT - t) : "?"
 	}
 	if (b) {
-		const bp = f.backpressure
-			? `in backpressure ${since(b.backpressureSince)}`
-			: "no backpressure now"
-		lines.push(
+		// R65 I2: without a fresh fanout sample, backpressure now is unknown, not absent.
+		const bp = !f.fanoutFresh
+			? `backpressure ${g.unknown}`
+			: f.backpressure
+				? `in backpressure ${since(b.backpressureSince)}`
+				: "no backpressure now"
+		fanout.push(
 			...wrapKV(
 				"IQ",
 				`${formatBytes(r.stats.bytesIn)} in${sep}branch ${sanitize(b.id)}${sep}buffer ${formatBytes(b.bufferBytes)}, high-water ${formatBytes(b.highWaterMark)}${sep}${bp}, ${formatCount(b.backpressureEnterCount)}× total`,
@@ -244,15 +277,17 @@ export function decoderDetail(
 			),
 		)
 		const drain = b.lastDrainAt ? `${since(b.lastDrainAt)} ago` : g.na
-		lines.push(
+		// R8 / R65 I3: a decoder that is not running has no drop now.
+		const now_ = r.running ? formatPercent(f.dropNow) : g.na
+		fanout.push(
 			...wrapKV(
 				"drops",
-				`${formatPercent(f.dropNow)} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${formatCount(b.droppedChunksTotal)} chunks${sep}last drain ${drain}`,
+				`${now_} now${sep}${formatPercent(f.lifetime)} lifetime${sep}${formatBytes(b.droppedBytesTotal)} in ${formatCount(b.droppedChunksTotal)} chunks${sep}last drain ${drain}`,
 				width,
 			),
 		)
 	} else {
-		lines.push(
+		fanout.push(
 			...wrapKV(
 				"IQ",
 				`${formatBytes(r.stats.bytesIn)} in${sep}no fanout branch`,
@@ -282,39 +317,43 @@ export function decoderDetail(
 		`window ${win ? formatWindow(win.loHz, win.hiHz) : "?"}`,
 		member,
 	]
-	lines.push(...wrapKV("band", parts.join(sep), width))
+	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
 	const observed = buckets.filter(x => x !== undefined).length
 	const from = sess?.firstObservedAt ?? now
 	// Fitted, not left to Ink's truncation: the sparkline stays, the caption shortens.
 	const caption = `decodes/min since ${formatClockShort(from)}`
-	lines.push(
-		fitGroups(
-			[
-				{
-					priority: 0,
-					variants: [
-						[
-							sp(padEnd("activity", LABEL_WIDTH), "label"),
-							sp(sparkline(buckets)),
-						],
+	const activity = fitGroups(
+		[
+			{
+				priority: 0,
+				variants: [
+					[
+						sp(padEnd("activity", LABEL_WIDTH), "label"),
+						sp(sparkline(buckets)),
 					],
-				},
-				{
-					priority: 1,
-					variants: [
-						[sp("decodes/min", "label")],
-						[sp(caption, "label")],
-						[sp(`${caption} (${observed} of 30 min observed)`, "label")],
-					],
-				},
-			],
-			width,
-		),
+				],
+			},
+			{
+				priority: 1,
+				variants: [
+					[sp("decodes/min", "label")],
+					[sp(caption, "label")],
+					[sp(`${caption} (${observed} of 30 min observed)`, "label")],
+				],
+			},
+		],
+		width,
 	)
 	const err = errorText(state, f, now)
-	if (err) lines.push(...wrapKV("error", err, width))
-	return lines
+	// R65 I2: each row dims with the lane it comes from.
+	return [
+		...dimmed(rest, f.oldRest),
+		...dimmed(fanout, f.oldFanout),
+		...dimmed(windowRows, f.oldWindow),
+		activity,
+		...dimmed(err ? wrapKV("error", err, width) : [], f.oldRest),
+	]
 }
 
 export function decoderConfirm(
@@ -345,6 +384,43 @@ export interface DecodersModel {
 	selected: DecoderFacts | null
 }
 
+/** The most recent decoder write that still has a result line, as `<id> · <text>` (R64). */
+export function latestDecoderResult(state: AppState, now: number): Line | null {
+	let best: { id: string; at: number; text: string } | null = null
+	for (const rec of Object.values(state.actions.byKey)) {
+		if (rec.intent.kind !== "decoder") continue
+		const text = decoderActionText(state, rec.intent.decoderId, now)
+		if (text === null || (best && best.at >= rec.sentAt)) continue
+		best = { id: rec.intent.decoderId, at: rec.sentAt, text }
+	}
+	if (!best) return null
+	const failed = best.text.includes(" failed ")
+	return [
+		sp(sanitize(best.id), "label"),
+		sp(` ${glyphs().sep} `, "label"),
+		sp(best.text, failed ? "fault" : "value"),
+	]
+}
+
+/**
+ * Detail rows from `scroll`, clamped so the last page stays full. Hidden rows
+ * are announced in place of the first/last visible row: `+N rows · PgUp` and
+ * `+N rows · PgDn` (R65 I4).
+ */
+function detailWindow(all: Line[], scroll: number, rows: number): Line[] {
+	if (rows <= 0) return []
+	if (all.length <= rows) return all
+	const top = Math.min(Math.max(0, scroll), all.length - rows)
+	const view = all.slice(top, top + rows)
+	const sep = ` ${glyphs().sep} `
+	const below = all.length - (top + rows)
+	if (below > 0 && view.length > 1)
+		view[view.length - 1] = [sp(`+${below + 1} rows${sep}PgDn`, "label")]
+	if (top > 0 && view.length > 1)
+		view[0] = [sp(`+${top + 1} rows${sep}PgUp`, "label")]
+	return view
+}
+
 export function decodersModel(
 	state: AppState,
 	ui: UiState,
@@ -359,11 +435,13 @@ export function decodersModel(
 	const listWidth =
 		open && b.placement.kind === "right" ? width - b.placement.width - 2 : width
 	const detailWidth = b.placement.kind === "right" ? b.placement.width : width
+	// R64: with the detail closed, the last write's result stays visible under the list.
+	const result = open ? null : latestDecoderResult(state, state.now)
 	const table = decoderTable(
 		facts,
 		"decoders",
 		listWidth,
-		b.listRows,
+		Math.max(1, b.listRows - (result ? 1 : 0)),
 		selected?.row.id ?? null,
 		state.now,
 	)
@@ -371,14 +449,17 @@ export function decodersModel(
 	const list =
 		open && b.placement.kind === "overlay"
 			? []
-			: placeholder
-				? [table.header, placeholder]
-				: [table.header, ...table.rows]
+			: [
+					table.header,
+					...(placeholder ? [placeholder] : table.rows),
+					...(result ? [result] : []),
+				]
 	const detail =
 		open && selected
-			? decoderDetail(state, selected, detailWidth, state.now).slice(
+			? detailWindow(
+					decoderDetail(state, selected, detailWidth, state.now),
 					ui.detail.decoders.scroll,
-					ui.detail.decoders.scroll + b.detailRows,
+					b.detailRows,
 				)
 			: null
 	return {

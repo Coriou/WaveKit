@@ -1,0 +1,155 @@
+# WaveKit CLI dashboard
+
+`wavekit` is the terminal dashboard for a running WaveKit core. It reads the core's REST API and WebSocket feed. It shows the receive chain in the order an operator checks it:
+
+1. Is the API reachable?
+2. Is IQ arriving?
+3. What is the receiver tuned to?
+4. Which decoders are up, and which of them can hear the tuned window?
+5. Is anything decoding?
+6. How much IQ is being dropped right now?
+
+The dashboard never gives a verdict. You will not see "OK", "healthy" or "stable". Every value is evidence with an age, and anything unknown is shown as `?`.
+
+## Running
+
+```bash
+pnpm dashboard                       # build and start
+wavekit                              # after a build: node cli/dist/cli.js
+wavekit --view receiver              # open a view first (-v works too)
+wavekit --api http://192.0.2.10:9000
+wavekit --help
+```
+
+The views are `overview`, `decoders`, `messages`, `receiver` and `system`. The old view names still work as aliases: `dashboard`, `output`, `backpressure`, `sources`, `tuner`, `live-audio` and `resources`. An unknown view prints the valid names and exits with status 2.
+
+| Variable                             | Meaning                                                                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `WAVEKIT_API_URL`                    | API base URL. The WebSocket URL is derived as `ws://host/ws`.                                                             |
+| `WAVEKIT_WS_URL` / `WAVEKIT_WS_URLS` | WebSocket URL (the first entry of a comma-separated list). The API base is derived from it.                               |
+| `NO_COLOR`                           | Turns off colour. Bold, dim and inverse are kept.                                                                         |
+| `WAVEKIT_ASCII=1`                    | Uses ASCII glyphs (`* o x ! ? - ...`) instead of `● ○ × ! ? — …`. ASCII is also used when the locale does not name UTF-8. |
+
+Precedence is `--api`, then `WAVEKIT_API_URL`, then `WAVEKIT_WS_URL` / `WAVEKIT_WS_URLS`.
+
+With nothing set, wavekit tries `http://127.0.0.1:9000`, then `http://127.0.0.1:3000`. It accepts a candidate only if it answers `/health` like a WaveKit core. A different service on the port does not count. If no candidate answers, wavekit tries again every 15 s, and the banner lists the addresses it tried.
+
+`localhost` is read as `127.0.0.1`. Port 4713 is refused, because that is the RTL-TCP relay, not the API.
+
+## Reading the screen
+
+Row 1 is the **chain strip**, with one lane per link in the chain:
+
+| Lane       | Examples                                                                                | Meaning                                                                                                                                                                                                                                                          |
+| ---------- | --------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `api`      | `api ● 2s` · `api ws ● rest × 45s` · `api × 3m` · `api ○ connecting`                    | `●` appears only when the WebSocket is open **and** REST answered within 15 s. The age is the time since the last REST success.                                                                                                                                  |
+| `iq`       | `iq ● streaming · 4.1 MB/s` · `iq × no samples 23s` · `iq ● receiving` · `iq ? unknown` | `streaming` appears only when the source's activity is fresh. Older cores show `connected`. `receiving` means only the WS byte-rate heartbeat is available. The rate is shown only while the lane is live.                                                       |
+| `rx`       | `rx 445.971 MHz ±1.024 · external control`                                              | Centre frequency, half span, and who controls the tuner. If the sample rate is unknown, only the centre is shown.                                                                                                                                                |
+| `decoders` | `decoders 8/9 up · 1 failing · 1 restarting · 2 in window`                              | `failing` counts decoders that are faulted, down or crash-looping. `restarting` (yellow) counts decoders that core is restarting. `in window` uses the decoder's configured target frequencies when core reports them, and the **nominal** band table otherwise. |
+| `drops`    | `drops !34% now` · `drop !34% now` · `drops ? · backpressure`                           | Share of offered IQ dropped over the last 10 s on decoder branches. `!` means a branch is in backpressure right now. `?` means the share cannot be computed. The figure always carries `now`. On a narrow strip the label shortens to `drop`.                    |
+
+The clock sits at the right of the strip. When the strip runs out of room, lanes drop out whole, starting with the clock, then `rx`, then `drops`. A lane is never cut down to fragments of words.
+
+**Legend**
+
+| Mark | Meaning                                             |
+| ---- | --------------------------------------------------- |
+| `●`  | live                                                |
+| `○`  | idle or off                                         |
+| `×`  | fault                                               |
+| `!`  | attention now (backpressure, emergency, restarting) |
+| `?`  | unknown                                             |
+| `—`  | not applicable                                      |
+
+**How to read the values**
+
+- **Dim text** is older than 15 s.
+- **`now` and `lifetime`:** `now` figures cover the last 10 s, and `lifetime` figures are counters. The two are never mixed.
+- **Bands:** _nominal_ bands come from WaveKit's built-in table. A band taken from the decoder's own configuration is marked `*` in the tables, and the column header then reads `nominal MHz *cfg`.
+- **Tuned decoders:** `dsd-fme` and `multimon-ng` always decode whatever the receiver is tuned to. Their band reads `tuned` even when a frequency is configured, because core does not apply that frequency to them.
+
+**Problems and cached data**
+
+- **Banner:** when the API or the live feed has a problem, a one-line banner under the strip says what is wrong, why, when it will retry, and how old the shown data is (`data as of 18:07:40`).
+- **Cached data** stays on screen, but dim.
+- **Feed gaps:** while the WebSocket is down, the message feed shows a gap row. When the WebSocket reconnects, the row closes as `── gap 18:08:37–18:10:41 · 2m 04s · not replayed ──`.
+
+## Views
+
+| Key | View     | Shows                                                                                                                                                                                                        |
+| --- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `1` | Overview | Receiver summary, decoder table, latest messages                                                                                                                                                             |
+| `2` | Decoders | Process state, restarts, errors, decodes, IQ in, and drop now/lifetime per decoder. A detail pane adds identity, band and window, the last error, the last write's result, and a 30-minute decode sparkline. |
+| `3` | Messages | Filterable, pausable feed with per-protocol summaries and a JSON detail. ADS-B rows add registration, type and operator from the aircraft list.                                                              |
+| `4` | Receiver | Source transport and activity, tuner (with edit mode), relay and its command history, fanout drops, upstream (Pi) drops                                                                                      |
+| `5` | System   | Container CPU and memory, alerts, SDR host processes (and Pi sampling when core reports it), live audio, core version                                                                                        |
+
+The detail pane sits to the right on wide terminals (160 columns or more) and below the list on tall ones (30 rows or more). Otherwise it covers the list. When the pane cannot show everything, it marks the hidden rows with `+N rows · PgDn` or `+N rows · PgUp`.
+
+## Keys
+
+| Key                            | Where           | Action                                                                                                                                                 |
+| ------------------------------ | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `1`–`5`, `Tab`, `Shift-Tab`    | anywhere        | Switch view                                                                                                                                            |
+| `?`                            | anywhere        | Help overlay (any key closes it)                                                                                                                       |
+| `q`, `Ctrl-C`                  | anywhere        | Quit and restore the terminal. Inside the filter, `q` is typed instead.                                                                                |
+| `r`                            | anywhere        | Reconnect now and refetch everything                                                                                                                   |
+| `↑↓` `j k`, `PgUp PgDn`, `g G` | lists           | Move, page, jump to the top or the newest                                                                                                              |
+| `Enter` / `Esc`                | lists           | `Enter` opens the detail. On the Overview it opens that decoder in view 2. `Esc` closes the detail, then clears the selection, then clears the filter. |
+| `PgUp PgDn`                    | detail pane     | Scroll the detail                                                                                                                                      |
+| `/`, `p`, `F`                  | Messages        | Filter, pause or resume, cycle presets (`all → aircraft → voice → pager → data`)                                                                       |
+| `y`                            | Messages detail | Copy the JSON (OSC 52)                                                                                                                                 |
+| `s` `x` `R`                    | Decoders        | Start, stop or restart the selected decoder (asks for confirmation)                                                                                    |
+| `e`, `c`                       | Receiver        | Edit the tuner (WaveKit control only); take or release control (asks for confirmation)                                                                 |
+| `a`, `P`                       | System          | Start or stop live audio; apply an audio preset (asks for confirmation)                                                                                |
+
+The footer shows only the keys that do something on the current screen.
+
+**Filter grammar**
+
+- Words are AND-ed.
+- A comma inside a word means OR (`readsb,ais`).
+- `!emerg` keeps emergencies only. Inside a comma group it is one of the alternatives (`ais,!emerg`).
+
+## Writes
+
+Navigation never writes. Every write except audio start/stop goes through a confirm bar that names the target, for example `▶ restart readsb · up 51s · pid 1531   y restart  n cancel`.
+
+- **Confirming:** only `y` sends. `Enter` does not confirm.
+- **Tuner edits:** nothing is sent until you confirm. The changes then go out one command at a time, and sending stops at the first command that fails or gets no reply.
+
+Results are reported in the dashboard's own words, never in the server's success text:
+
+| Result                                 | Example                                                                 |
+| -------------------------------------- | ----------------------------------------------------------------------- |
+| Sent, waiting for a reply              | `restart sent 18:07:52`                                                 |
+| No reply within 10 s                   | `restart sent 18:07:52 · no reply in 10s`                               |
+| Still unconfirmed after a further 10 s | `restart sent 18:07:52 · no reply · not confirmed`                      |
+| Accepted, waiting for core to confirm  | `restart accepted 18:07:52 · 200`                                       |
+| Confirmed by core                      | `restarted 18:07:53`                                                    |
+| Failed                                 | `restart failed · 502 · "<server text>"` (server text is always quoted) |
+
+A result line clears 10 s after the write completes.
+
+## Terminal requirements
+
+- **Size:** at least 60×16. Smaller terminals show one line saying so, and the view comes back when the terminal grows.
+- **Screen:** the dashboard uses the alternate screen. It restores your terminal on exit, Ctrl-C, SIGTERM and crashes.
+- **Frame height:** the frame is one row shorter than the terminal, so the terminal never has to clear and scroll.
+- **Copy:** OSC 52 copy works only where the terminal allows it (in tmux, `set -g set-clipboard on`). The CLI reports `copy sent (OSC 52)` because it cannot see whether the copy arrived.
+
+## Development
+
+```bash
+pnpm --filter @wavekit/cli test                    # Ink render tests (cli/source/**/*.test.tsx)
+pnpm exec vitest run tests/unit/cli                # pure logic + fast-check properties
+node cli/source/test/mock-api/server.ts --port 9100 --scenario live   # mock core
+WAVEKIT_API_URL=http://127.0.0.1:9100 node cli/dist/cli.js
+cli/tools/validate/matrix.sh all                   # tmux matrix, resize, transitions, esc, perf
+```
+
+- **Writes:** the mock core is the only target for write actions. Never point write tests at a live core.
+- **Pure code:** `cli/source/data`, `ui` and `view-models` must never import Ink, React or `.tsx`. Root tests compile them under the strictest flags.
+- **Mock scenarios:** they live in `cli/tools/mock-api/scenarios/`. They use the real decoder wire shapes and documentation addresses only.
+
+Pending API requests that would remove CLI fallbacks are tracked in `docs/CLI-COORDINATION.md`.
