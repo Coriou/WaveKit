@@ -195,9 +195,9 @@ describe("csdr child environment", () => {
 })
 
 describe("csdr config schema", () => {
-	it("defaults to off with a 65536-element ring", () => {
+	it("defaults to on with a 65536-element ring", () => {
 		expect(CsdrConfigSchema.parse({})).toEqual({
-			boundedBuffers: false,
+			boundedBuffers: true,
 			bufferElements: 65536,
 		})
 	})
@@ -218,11 +218,11 @@ describe("csdr config schema", () => {
 			const dir = mkdtempSync(join(tmpdir(), "wavekit-csdr-config-"))
 			const file = join(dir, "config.yaml")
 			writeFileSync(file, "logging:\n  level: error\n")
-			process.env["WAVEKIT_CSDR__BOUNDED_BUFFERS"] = "true"
+			process.env["WAVEKIT_CSDR__BOUNDED_BUFFERS"] = "false"
 			process.env["WAVEKIT_CSDR__BUFFER_ELEMENTS"] = "131072"
 			const config = loadConfig(file)
 			expect(config.csdr).toEqual({
-				boundedBuffers: true,
+				boundedBuffers: false,
 				bufferElements: 131072,
 			})
 		} finally {

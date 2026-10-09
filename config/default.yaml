@@ -365,15 +365,15 @@ logging:
 # instead of failing; WaveKit logs that fallback at info level.
 #
 # Options:
-#   boundedBuffers - false keeps upstream rings everywhere (default: false)
+#   boundedBuffers - false keeps upstream rings everywhere (default: true)
 #   bufferElements - ring size in elements, 2048..10485760 (default: 65536)
 #
-# Env: WAVEKIT_CSDR__BOUNDED_BUFFERS=true, WAVEKIT_CSDR__BUFFER_ELEMENTS=65536.
+# Env: WAVEKIT_CSDR__BOUNDED_BUFFERS=false, WAVEKIT_CSDR__BUFFER_ELEMENTS=65536.
 # Setting the native WAVEKIT_CSDR_BUFFER_ELEMENTS on the container has no
 # effect. WaveKit strips it from child shells.
 
 csdr:
-  boundedBuffers: false
+  boundedBuffers: true
   bufferElements: 65536
 
 # -----------------------------------------------------------------------------

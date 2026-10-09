@@ -255,11 +255,13 @@ export const ResourcesConfigSchema = z.object({
  * Schema for CSDR DSP stage tuning.
  * `boundedBuffers` caps the per-process ring of harness-validated streaming
  * stages (see src/decoders/csdr-buffers.ts); false keeps upstream rings.
+ * Default on since 2026-10-09: an overnight interleaved real-RF A/B showed
+ * 0% fanout loss and ~18 MiB shmem bounded versus ~1% loss and ~5 GiB upstream.
  * Limits mirror the native WAVEKIT_CSDR_BUFFER_ELEMENTS validation.
  */
 export const CsdrConfigSchema = z.object({
-	/** Enable bounded rings for validated stages (default: false = upstream) */
-	boundedBuffers: z.boolean().default(false),
+	/** Enable bounded rings for validated stages (default: true; false = upstream) */
+	boundedBuffers: z.boolean().default(true),
 	/** Ring size in input elements for bounded stages */
 	bufferElements: z
 		.number()

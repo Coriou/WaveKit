@@ -6,7 +6,9 @@ artifacts stay in `output/capacity/`, which is gitignored.
 
 ## What changed
 
-`csdr.boundedBuffers` defaults to `false` (env `WAVEKIT_CSDR__BOUNDED_BUFFERS`).
+`csdr.boundedBuffers` defaults to `true` since 2026-10-09 (env
+`WAVEKIT_CSDR__BOUNDED_BUFFERS=false` restores upstream rings); see the
+overnight A/B below.
 `csdr.bufferElements` defaults to 65536 and accepts 2048..10485760, the same
 range as the native validation. When the flag is on, the IQ-decimate,
 audio-demod, dsd-fme and live-demod builders prefix only validated stages with
@@ -175,3 +177,20 @@ bytes divided by bytes offered to the branch.
 - Only one source connection was made in each run, with no disconnects. One
   readsb restart in each bounded run is unexplained, and so is the late
   source start at 2.4 Msps upstream.
+
+## Overnight real-RF A/B (2026-10-08/09) — default flipped to on
+
+Live Mac app, Pi rtl_tcp source over Wi-Fi, all nine decoders, hourly blocks
+alternating bounded OFF/ON (4 each, 22:43–06:45 UTC), the same six-band rotation
+inside every block, quiet host after ~23:30 (load1 median ~4.5–4.9 in both modes).
+
+| Mode | Decoder-branch fanout loss | Container shmem | VM MemAvailable | Crashes |
+| ---- | -------------------------- | --------------- | --------------- | ------- |
+| Bounded ON | 0.0% on every branch | ~18 MiB | ~6.6 GiB | none |
+| Upstream OFF | 0.6–1.6% per branch | ~5.1 GiB | ~1.5 GiB | none |
+
+Caveat: from 23:06 UTC the dongle ran at ~2.16 Msps (set by an operator SDR++
+session) while the app assumed 2.048 Msps, so decode counts were near zero in
+both modes and say nothing about decode equivalence. Equivalence rests on the
+native harness (byte-identical output for every bounded stage form, including
+the dsd-fme voice chain). Raw samples stay in `output/soak-20261008/`.

@@ -54,7 +54,7 @@ fixture evidence. Exploratory research is not a final implementation spec.
   events and additive `DecoderStatus` fields (`sourceId`, `targetFrequenciesHz`,
   `lastError`, `idleTimeoutMs`, `deviceSerial`). Configured `health.idleTimeout`
   and `checkInterval` now reach the decoder manager.
-- Bounded CSDR rings are merged behind `csdr.boundedBuffers` (default off) for
+- Bounded CSDR rings are merged behind `csdr.boundedBuffers` (default **on** since 2026-10-09) for
   harness-validated stages only. Native outputs are byte-identical to upstream;
   the live app's CSDR ring memory was measured at about 5 GiB versus about
   9 MiB when bounded. A synthetic all-decoder run on a heavily loaded host was
