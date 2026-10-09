@@ -100,4 +100,25 @@ describe("shed (spec §5.1)", () => {
 			"CORE",
 		])
 	})
+	it("at height 2 with group markers left, folds them into one marker under the last head", () => {
+		const rows = [
+			essential([sp("CONTAINER")]),
+			grouped([sp("a1")], "alerts", 1),
+			essential([sp("HOST")]),
+			grouped([sp("w1")], "warn", 3),
+			grouped([sp("e1")], "err", 2),
+			essential([sp("CORE")]),
+			opt("cli", 8),
+		]
+		const capped = { alerts: 2, warn: 1, err: 3 }
+		// Heads really are cut: CONTAINER and HOST go, CORE stays with every hidden count.
+		expect(text(rows, 2, capped)).toEqual(["CORE", "          +12 rows hidden"])
+		expect(text(rows, 1, capped)).toEqual(["CORE"])
+		// Height 3: the markers fold before another head is cut.
+		expect(text(rows, 3, capped)).toEqual([
+			"CONTAINER",
+			"CORE",
+			"          +11 rows hidden",
+		])
+	})
 })

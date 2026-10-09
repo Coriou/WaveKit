@@ -7,7 +7,6 @@ import type {
 	MessageEntry,
 	MessageRing,
 } from "../data/types.js"
-import { emptyFeedGroups } from "./feed-state.js"
 import { applyFilter, parseFilter, type FilterSubject } from "../ui/filter.js"
 import { formatClock, formatClockMs } from "../ui/format.js"
 import { listBudget, type DetailPlacement } from "../ui/frame.js"
@@ -18,6 +17,7 @@ import { cellWidth, charWidth, padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { MessagesUi, UiState } from "../ui/ui-state.js"
 import { LABEL_WIDTH } from "./detail.js"
+import { emptyFeedGroups } from "./feed-state.js"
 import {
 	aircraftLookup,
 	feedCounts,
@@ -104,20 +104,40 @@ function openGap(ring: MessageRing): Gap | null {
 }
 
 /**
+ * M10: what the next Esc does once the detail is closed — resume a paused feed,
+ * else clear the filter or preset; null when Esc has nothing left to undo.
+ */
+export function escTarget(mu: MessagesUi): "resume" | "clear" | null {
+	if (!mu.following) return "resume"
+	return mu.filterText !== "" || mu.preset !== "all" ? "clear" : null
+}
+
+/**
  * Spec §6.3 header, fitted to `width` (M6): the pause and the counts never drop;
  * the filter text shrinks, then goes. Counts are claimed only for a live feed
  * (I1); a stopped feed says when, from its gap (I2); a full ring reads 1000+ (I4).
+ * M10: a paused feed keeps its total, and the header names the next Esc layer
+ * while the detail is closed.
  */
 export function messagesHeader(
 	state: AppState,
 	mu: MessagesUi,
 	fv: FeedView,
 	width: number,
+	detailOpen = false,
 ): Line {
 	const sep = sepText()
 	const groups: Group[] = []
+	const filtered = mu.filterText !== "" || mu.preset !== "all"
 	if (!mu.following)
-		groups.push(labelGroup(0, `paused${sep}${fv.newCount} new`))
+		groups.push(
+			labelGroup(
+				0,
+				filtered
+					? `paused${sep}${fv.newCount} new`
+					: `paused${sep}${fv.newCount} new${sep}${fv.total} total`,
+			),
+		)
 	// User text is sanitised like any payload: a pasted escape must not reach the terminal.
 	if (mu.filterText !== "") {
 		const f = sanitize(mu.filterText)
@@ -125,12 +145,22 @@ export function messagesHeader(
 	}
 	if (mu.preset !== "all") {
 		const st = state.aircraft.stats.value
-		groups.push(
+		// S8: aircraft counts only when there is something to count.
+		const stats =
 			mu.preset === "aircraft" && st
+				? [
+						...(st.aircraftCount > 0 ? [`${st.aircraftCount} tracked`] : []),
+						...(st.withPosition > 0
+							? [`${st.withPosition} with position`]
+							: []),
+					]
+				: []
+		groups.push(
+			stats.length > 0
 				? labelGroup(
 						2,
-						"preset aircraft",
-						`preset aircraft${sep}${st.aircraftCount} tracked${sep}${st.withPosition} with position`,
+						`preset ${mu.preset}`,
+						[`preset ${mu.preset}`, ...stats].join(sep),
 					)
 				: labelGroup(2, `preset ${mu.preset}`),
 		)
@@ -149,6 +179,8 @@ export function messagesHeader(
 					? `feed stopped ${formatClock(gap.from)}${sep}${c.cached} cached`
 					: "live feed connecting"
 	if (counts !== null) groups.push(labelGroup(0, counts))
+	const esc = detailOpen ? null : escTarget(mu)
+	if (esc !== null) groups.push(labelGroup(1, `Esc ${esc}`))
 	return [
 		title(),
 		...fitGroups(groups, Math.max(1, width - LABEL_WIDTH), { sep }),
@@ -199,15 +231,24 @@ function emptyLine(
 				"label",
 			),
 		]
-	if (fv.total > 0) {
-		const what = [
-			sanitize(mu.filterText),
-			...(mu.preset !== "all" ? [`preset ${mu.preset}`] : []),
+	// S8: the filter and preset as the header names them, then the way out.
+	if (fv.total > 0)
+		return [
+			sp(
+				truncate(
+					[
+						`0 of ${fv.total} match`,
+						...(mu.filterText !== ""
+							? [`filter ${sanitize(mu.filterText)}`]
+							: []),
+						...(mu.preset !== "all" ? [`preset ${mu.preset}`] : []),
+						"Esc clear",
+					].join(sep),
+					width,
+				),
+				"label",
+			),
 		]
-			.filter(x => x !== "")
-			.join(" ")
-		return [sp(truncate(`0 of ${fv.total} match "${what}"`, width), "label")]
-	}
 	// An open gap is the evidence the feed ran; it says when the feed stopped.
 	const gap = openGap(state.messages.ring)
 	if (state.conn.ws.state !== "open" && gap !== null)
@@ -521,7 +562,7 @@ export function messagesModel(
 	return {
 		// Header and input sit in the list column; with the detail on the right that
 		// column is narrower than the view.
-		header: messagesHeader(state, mu, fv, listWidth),
+		header: messagesHeader(state, mu, fv, listWidth, open),
 		input: mu.draft !== null ? inputLine(mu.draft, listWidth) : null,
 		list,
 		detail:

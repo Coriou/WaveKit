@@ -17,6 +17,7 @@ import { padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest } from "../ui/ui-state.js"
 import { LABEL_WIDTH } from "./detail.js"
+import { noDataText } from "./feed-state.js"
 import {
 	essential,
 	gapRow,
@@ -40,6 +41,7 @@ const MAX_NOTES = 2
 const DROP = {
 	gap: 9,
 	component: 8,
+	cli: 8,
 	alert: 7,
 	dongle: 6,
 	demod: 6,
@@ -107,10 +109,9 @@ function fitDot(label: Line, groups: Group[], width: number): Line {
 	]
 }
 
+/** R82: one no-data copy for every section. */
 function noData(state: AppState, path: string): string {
-	return state.conn.rest.firstFailAt !== null
-		? `no data${sep()}API unreachable`
-		: `fetching ${path}`
+	return noDataText(state, path)
 }
 
 function containerBlock(state: AppState, width: number): Block {
@@ -165,11 +166,11 @@ function containerBlock(state: AppState, width: number): Block {
 			DROP.cpu,
 		),
 	)
-	const used = formatBytes(c.memoryUsageBytes, 2)
+	const used = formatBytes(c.memoryUsageBytes)
 	const mem =
 		c.memoryLimitBytes === null
 			? `${used}${sep()}no limit`
-			: `${used} of ${formatBytes(c.memoryLimitBytes, 2)} (${memPct(c.memoryUsagePercent)})`
+			: `${used} of ${formatBytes(c.memoryLimitBytes)} (${memPct(c.memoryUsagePercent)})`
 	rows.push(optional(kv("mem", mem, width, role), DROP.mem))
 	const alerts = [...state.alerts].sort((a, b) => b.lastAt - a.lastAt)
 	alerts.slice(0, MAX_ALERTS).forEach((a, i) => {
@@ -440,9 +441,11 @@ function audioBlock(state: AppState, width: number): Row[] {
 		// Not a URL: shown sanitised as received.
 	}
 	const c = a.config
-	const centre = state.tuner.value?.find(
-		t => t.sourceId === a.sourceId,
-	)?.frequency
+	const tuner = state.tuner.value?.find(t => t.sourceId === a.sourceId)
+	// A frequency core never commanded or observed is a placeholder (R84).
+	const centre = tuner?.unknownFields?.includes("frequency")
+		? undefined
+		: tuner?.frequency
 	const rows: Row[] = [
 		essential(
 			fitDot(
@@ -495,11 +498,26 @@ function audioBlock(state: AppState, width: number): Row[] {
 	return rows
 }
 
+/** The CLI's own boundary counters: debug figures, so dim, under CORE (polish copy sweep). */
+function cliRow(state: AppState, width: number): Row {
+	const c = state.conn
+	return optional(
+		kv(
+			"",
+			`cli  frames rejected ${c.invalidFrames}${sep()}items rejected ${c.rejectedItems}`,
+			width,
+			"label",
+		),
+		DROP.cli,
+	)
+}
+
 function coreBlock(state: AppState, width: number): Row[] {
 	const s = state.status.value
 	if (!s)
 		return [
 			essential(kv("CORE", noData(state, "/api/status"), width, "label", true)),
+			cliRow(state, width),
 		]
 	const role: Role = isOld(state.status, state.now) ? "old" : "value"
 	const rows: Row[] = [
@@ -523,14 +541,16 @@ function coreBlock(state: AppState, width: number): Row[] {
 				optional(
 					kv(
 						"",
-						// Status and message are server text: both quoted (assumption 9, M7).
-						`${sanitize(c.name)} ${quote(c.status, 16)} ${quote(c.message)}`,
+						// Status and message are server text: both quoted (assumption 9, M7),
+						// a separator between them (polish S2).
+						`${sanitize(c.name)} ${quote(c.status, 16)}${sep()}${quote(c.message)}`,
 						width,
 						"label",
 					),
 					DROP.component,
 				),
 			)
+	rows.push(cliRow(state, width))
 	return rows
 }
 
@@ -606,7 +626,8 @@ export function presetConfirm(
 	if (!p) return null
 	return {
 		kind: "preset",
-		prompt: `apply audio preset "${name}" (${name} ${kHz(p.bandwidth)})?`,
+		// Core restarts a running demod pipeline on any config change (reconfigure()).
+		prompt: `audio preset ${name}${sep()}${kHz(p.bandwidth)}${state.audio.value?.running === true ? `${sep()}demod restarts` : ""}`,
 		yes: "apply",
 		no: "cancel",
 		presetIndex: i,

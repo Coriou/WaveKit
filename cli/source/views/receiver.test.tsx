@@ -56,7 +56,7 @@ describe("Receiver view (spec §6.4)", () => {
 		)
 		await h.press("c")
 		expect(h.frame().at(-1)).toBe(
-			" ▶ take tuner control from relay client-3 192.0.2.1:59430? · its next tuning command is refused   y take  n cancel",
+			" ▶ take tuner control from relay client-3 192.0.2.1? its next tuning command is refused   y take  n cancel",
 		)
 		expect(h.runtime.sent).toEqual([])
 		await h.press("y")
@@ -90,7 +90,7 @@ describe("Receiver view (spec §6.4)", () => {
 		await h.press(KEYS.up)
 		await h.press(KEYS.enter)
 		expect(h.frame().at(-1)).toContain(
-			"▶ send 1 command to pi-iq: frequency 445 971 700 Hz (+1.0 kHz)",
+			"▶ send set-frequency 445 971 700 Hz (+1 kHz) to pi-iq",
 		)
 		await h.press("n")
 		expect(h.text()).toContain("EDIT · wavekit control")
@@ -106,7 +106,11 @@ describe("Receiver view (spec §6.4)", () => {
 				kind: "tuner",
 				sourceId: "pi-iq",
 				commands: [
-					{ setting: "frequency", body: { hz: 445971700 }, label: "frequency" },
+					{
+						setting: "frequency",
+						body: { hz: 445971700 },
+						label: "set-frequency",
+					},
 				],
 			},
 		])

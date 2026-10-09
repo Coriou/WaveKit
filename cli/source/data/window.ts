@@ -36,9 +36,18 @@ export function windowFor(
 			: undefined
 	const positive = (x: number | undefined): x is number =>
 		x !== undefined && Number.isFinite(x) && x > 0
-	// A tuner that reports 0 does not know its frequency (R44): fall through.
-	const centreHz = [t?.frequency, s?.caps.centerFreq, relayFreq].find(positive)
-	const sampleRate = [t?.sampleRate, s?.caps.sampleRate].find(positive)
+	// A tuner that reports 0 does not know its frequency (R44), nor does one that lists
+	// the field in unknownFields (a placeholder, R86): fall through.
+	const unknown = new Set<string>(t?.unknownFields ?? [])
+	const centreHz = [
+		unknown.has("frequency") ? undefined : t?.frequency,
+		s?.caps.centerFreq,
+		relayFreq,
+	].find(positive)
+	const sampleRate = [
+		unknown.has("sampleRate") ? undefined : t?.sampleRate,
+		s?.caps.sampleRate,
+	].find(positive)
 	if (!positive(centreHz) || !positive(sampleRate)) return null
 	return {
 		sourceId,

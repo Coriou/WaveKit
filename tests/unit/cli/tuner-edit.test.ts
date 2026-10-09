@@ -126,8 +126,12 @@ describe("tuner edit", () => {
 		)
 		expect(s.field).toBe("gain")
 		expect(pendingCommands(s)).toEqual([
-			{ setting: "gain-mode", body: { mode: "manual" }, label: "gain mode" },
-			{ setting: "gain", body: { tenthsDb: 2 }, label: "gain" },
+			{
+				setting: "gain-mode",
+				body: { mode: "manual" },
+				label: "set-gain-mode",
+			},
+			{ setting: "gain", body: { tenthsDb: 2 }, label: "set-gain" },
 		])
 	})
 	it("cycles direct sampling off → i → q → off and toggles booleans with arrows too", () => {

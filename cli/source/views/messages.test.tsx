@@ -263,7 +263,9 @@ describe("Messages view (spec §6.3)", () => {
 		await h.press("/")
 		await typeText(h, "nothing-matches")
 		await h.press(KEYS.enter)
-		expect(h.text()).toMatch(/0 of \d+ match "nothing-matches"/)
+		expect(h.text()).toMatch(
+			/0 of \d+ match · filter nothing-matches · Esc clear/,
+		)
 		await h.press(KEYS.esc)
 		expect(h.text()).not.toContain("nothing-matches")
 		h.unmount()

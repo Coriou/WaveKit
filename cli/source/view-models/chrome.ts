@@ -87,14 +87,16 @@ export function rxValues(
 				return { v, lane, old: old[lane] }
 		return null
 	}
+	// A field the tuner lists in unknownFields is a placeholder (R86): fall through.
+	const unknown = new Set<string>(tuner?.unknownFields ?? [])
 	return {
 		centre: pick([
-			[tuner?.frequency, "tuner"],
+			[unknown.has("frequency") ? undefined : tuner?.frequency, "tuner"],
 			[src?.caps.centerFreq, "sources"],
 			[relayFreq, "relay"],
 		]),
 		rate: pick([
-			[tuner?.sampleRate, "tuner"],
+			[unknown.has("sampleRate") ? undefined : tuner?.sampleRate, "tuner"],
 			[src?.caps.sampleRate, "sources"],
 		]),
 	}
