@@ -3,6 +3,7 @@
 // stall-input: stdin is not read until FAKE_CHAN_STALL_MS (default 1500) after the first channel opens, then resumes,
 // so the fanout branch really drops and then really drains (Task 21). Anchoring to `opened` keeps slow spawns out of the window.
 // ignore-shutdown: `shutdown`, control EOF and input EOF are all ignored, so only a signal ends it (stop escalation).
+// Like the real binary there is no signal handler: SIGTERM ends it with (null, "SIGTERM").
 // Channels are identity pass-through, so a discontinuity's output sampleIndex equals the input sample index.
 // Like runtime.rs, `shutdown` and control EOF close every channel with reason "requested" and exit 0; every exit
 // waits for stdout to flush so no event line is lost, and the first of shutdown / control EOF / input EOF wins.
@@ -35,5 +36,4 @@ readline.createInterface({ input: new net.Socket({ fd: 3, readable: true, writab
 process.stdin.on("data", b => { inputBytes += b.length; for (const c of clients.values()) c.write(b) })
 if (mode === "stall-input") process.stdin.pause() // resumed by the timer armed on the first \`opened\`
 process.stdin.on("end", () => { if (exiting || mode === "ignore-shutdown") return; exiting = true; emit({ type: "input-eof", inputSamples: Math.floor(inputBytes / 2), discardedBytes: inputBytes % 2 }); for (const c of clients.values()) c.end(); setTimeout(() => quit(0), 20) })
-process.on("SIGTERM", () => process.exit(143))
 `

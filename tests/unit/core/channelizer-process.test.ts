@@ -101,18 +101,29 @@ describe("ChannelizerProcess", { timeout: 15_000 }, () => {
 		expect(await opened).toMatchObject({ id: "a", generation: 4 })
 		await p.stop()
 		expect(await r.exit).toEqual([0, null])
-		// Like runtime.rs, shutdown closes every open channel before exiting; every line passed the v1 schema.
-		expect(r.log).toEqual(["ready", "opened:a", "closed:a", "exit"])
+		// stop() writes shutdown, then ends stdin and control: the child sees whichever arrives first (runtime.rs
+		// races them on one channel too). Shutdown closes every open channel; input EOF reports input-eof.
+		expect([
+			["ready", "opened:a", "closed:a", "exit"],
+			["ready", "opened:a", "input-eof", "exit"],
+		]).toContainEqual(r.log)
+		// Every line passed the v1 schema.
 		expect(r.protocolErrors).toEqual([])
 	})
 
 	it("rejects with CHANNELIZER_UNAVAILABLE when the binary is missing or never ready", async () => {
-		await expect(
-			new ChannelizerProcess(
-				opts({ binaryPath: "/nonexistent/wavekit-chan" }),
-				logger,
-			).start(),
-		).rejects.toMatchObject({ code: "CHANNELIZER_UNAVAILABLE" })
+		const missing = new ChannelizerProcess(
+			opts({ binaryPath: "/nonexistent/wavekit-chan" }),
+			logger,
+		)
+		const exits: unknown[] = []
+		missing.on("exit", (...args: unknown[]) => exits.push(args))
+		await expect(missing.start()).rejects.toMatchObject({
+			code: "CHANNELIZER_UNAVAILABLE",
+		})
+		// No process ever existed, so Node's trailing `close` (code -2) is not reported as an exit.
+		await new Promise(resolve => setTimeout(resolve, 100))
+		expect(exits).toEqual([])
 		process.env["FAKE_CHAN_MODE"] = "no-ready"
 		const p = new ChannelizerProcess(opts({ readyTimeoutMs: 300 }), logger)
 		const r = record(p)
@@ -164,8 +175,7 @@ describe("ChannelizerProcess", { timeout: 15_000 }, () => {
 		await p.start()
 		const started = Date.now()
 		await Promise.all([p.stop(), p.stop()])
-		// The fake answers SIGTERM with exit(143).
-		expect(await r.exit).toEqual([143, null])
+		expect(await r.exit).toEqual([null, "SIGTERM"])
 		expect(Date.now() - started).toBeGreaterThanOrEqual(150)
 	})
 

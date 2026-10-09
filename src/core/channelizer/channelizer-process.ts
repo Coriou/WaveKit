@@ -30,7 +30,9 @@ export interface ChannelizerProcessOptions {
 
 /**
  * Events: "event" (ChannelizerEvent), "protocol-error" (line, error), and "exit" (code, signal),
- * emitted on the child's `close`, so after its last stdout line has been parsed.
+ * emitted on the child's `close`, so after its last stdout line has been parsed. "exit" is emitted
+ * only for a process that was actually spawned: a spawn failure (ENOENT, EACCES) rejects `start()`
+ * and emits no "exit". A process that started but never sent `ready` does emit one, after the rejection.
  */
 export interface ChannelizerProcessLike extends EventEmitter {
 	readonly generation: number
@@ -38,7 +40,10 @@ export interface ChannelizerProcessLike extends EventEmitter {
 	/** Resolves on `ready`; rejects with `CHANNELIZER_UNAVAILABLE`. */
 	start(): Promise<void>
 	send(req: ChannelizerRequest): void
-	/** shutdown → end input → stopTimeout → SIGTERM → 5 s → SIGKILL. */
+	/**
+	 * shutdown → end input → stopTimeout → SIGTERM → 5 s → SIGKILL. The process sees whichever of
+	 * shutdown and input EOF arrives first, so a stop ends with either `closed` lines or `input-eof`.
+	 */
 	stop(): Promise<void>
 }
 
@@ -180,7 +185,8 @@ export class ChannelizerProcess
 				child.stdin?.destroy()
 				this.control?.destroy()
 				this.log.debug({ pid: child.pid, code, signal }, "wavekit-chan exited")
-				this.emit("exit", code, signal)
+				// Node closes a never-spawned child too (code -2); there was no process to report.
+				if (child.pid !== undefined) this.emit("exit", code, signal)
 				unavailable(
 					`wavekit-chan exited before ready (code ${String(code)}, signal ${String(signal)})${lastStderr ? `: ${lastStderr}` : ""}`,
 				)
