@@ -1263,13 +1263,29 @@ export class SourceManager extends EventEmitter {
 	}
 
 	/**
-	 * Disconnects from a source and cleans up resources.
+	 * Disconnects from a source, cleans up resources and removes it. Emits
+	 * "removed" (internal teardown signal, also fired by reconnect) and then
+	 * "source-removed" (the source is gone for good) with the removal time.
 	 *
 	 * @param id - Source ID to disconnect
 	 */
 	async disconnect(id: string): Promise<void> {
+		// A permanent removal is announced by "source-removed" alone: clear the
+		// connected flag first so the socket's late close event cannot emit a
+		// "disconnected" for an id clients have already dropped.
 		const state = this.sources.get(id)
-		if (!state) return
+		if (state) state.connected = false
+		if (!this.teardown(id)) return
+		this.emit("source-removed", id, new Date())
+	}
+
+	/**
+	 * Tears a source down and emits "removed". Returns false when the source
+	 * is unknown. Shared by disconnect (permanent), reconnect and shutdown.
+	 */
+	private teardown(id: string): boolean {
+		const state = this.sources.get(id)
+		if (!state) return false
 
 		state.stopping = true
 
@@ -1299,6 +1315,7 @@ export class SourceManager extends EventEmitter {
 
 		this.logger.info({ sourceId: id }, "Source disconnected and cleaned up")
 		this.emit("removed", id)
+		return true
 	}
 
 	/**
@@ -1314,8 +1331,8 @@ export class SourceManager extends EventEmitter {
 
 		const config = state.config
 
-		// Disconnect first
-		await this.disconnect(id)
+		// Tear down first (not a removal: the same id comes straight back)
+		this.teardown(id)
 
 		// Reconnect with same config
 		await this.connect(config)
@@ -1827,6 +1844,6 @@ export class SourceManager extends EventEmitter {
 	 */
 	async disconnectAll(): Promise<void> {
 		const ids = Array.from(this.sources.keys())
-		await Promise.all(ids.map(id => this.disconnect(id)))
+		for (const id of ids) this.teardown(id)
 	}
 }

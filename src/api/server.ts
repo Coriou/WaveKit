@@ -344,6 +344,12 @@ export class ApiServer {
 			this.wsBroadcaster.broadcastSourceDisconnected(sourceId, error?.message)
 		})
 
+		// Every permanent removal goes through SourceManager.disconnect(), which
+		// emits "source-removed" once. reconnect() and shutdown do not.
+		this.sourceManager.on("source-removed", (sourceId, removedAt) => {
+			this.wsBroadcaster.broadcastSourceRemoved(sourceId, removedAt)
+		})
+
 		this.sourceManager.on("error", (sourceId, error) => {
 			this.wsBroadcaster.broadcastSourceError(sourceId, error.message)
 		})
