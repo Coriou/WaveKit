@@ -56,7 +56,7 @@ describe("Receiver view (spec §6.4)", () => {
 		)
 		await h.press("c")
 		expect(h.frame().at(-1)).toBe(
-			" ▶ take tuner control from relay client-3 192.0.2.1? its next tuning command is refused   y take  n cancel",
+			" ▶ take tuner control from relay client-3 192.0.2.1:59430? · its next tuning command is refused   y take  n cancel",
 		)
 		expect(h.runtime.sent).toEqual([])
 		await h.press("y")
@@ -165,4 +165,39 @@ describe("Receiver view (spec §6.4)", () => {
 			h.unmount()
 		})
 	}
+	it("keeps the take-over safety clause at 80x24 (R71)", async () => {
+		const h = await renderApp({
+			state: scenarioState("live"),
+			views,
+			view: "receiver",
+			cols: 80,
+			rows: 24,
+		})
+		await h.press("c")
+		const bar = h.frame().at(-1) ?? ""
+		expect([...bar].length).toBeLessThanOrEqual(80)
+		expect(bar).toMatch(/take (tuner )?control from (relay )?client-3/)
+		expect(bar).toMatch(/its next (tuning )?command is refused/)
+		expect(bar).toMatch(/y take {2}n cancel$/)
+		h.unmount()
+	})
+	it("counts movers when names do not fit at 80x24 (I7)", async () => {
+		const h = await renderApp({
+			state: internal(scenarioState("live")),
+			views,
+			view: "receiver",
+			cols: 80,
+			rows: 24,
+		})
+		await h.press("e")
+		for (let i = 0; i < 5; i++) await h.press(KEYS.left, { expectWrite: false })
+		for (const d of "869525") await h.press(d)
+		for (let i = 0; i < 6; i++) await h.press(KEYS.tab, { expectWrite: false })
+		await h.press(KEYS.space)
+		await h.press(KEYS.enter)
+		const bar = h.frame().at(-1) ?? ""
+		expect(bar).toMatch(/bias-t/)
+		expect(bar).toMatch(/lora-meshtastic enters|1 decoder moves/)
+		h.unmount()
+	})
 })
