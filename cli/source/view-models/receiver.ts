@@ -205,6 +205,11 @@ function relayClient(
 	return `relay ${id} ${full ? sanitize(remote) : remoteHost(remote)}`
 }
 
+/** The relay client holding tuner control (`relay client-3 192.0.2.1`), else null (S5). */
+export function receiverController(state: AppState): string | null {
+	return relayClient(state.relay.value, false)
+}
+
 function quoted(text: string, max = 40): string {
 	return `"${truncate(sanitize(text), max)}"`
 }

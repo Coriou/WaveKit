@@ -6,8 +6,9 @@ import {
 	type ViewId,
 } from "../../../cli/source/ui/actions.js"
 import {
-	RECEIVER_EXTERNAL_NOTICE,
 	RECEIVER_UNKNOWN_NOTICE,
+	footerGroups,
+	receiverExternalNotice,
 	footerHints,
 	footerLine,
 	keyName,
@@ -87,16 +88,14 @@ describe("resolveKey", () => {
 		).toEqual({ type: "decoder-op", op: "start" })
 		expect(resolveKey(d, "R")).toEqual({ type: "decoder-op", op: "restart" })
 	})
-	it("reports external control on e instead of editing", () => {
+	it("sends e to the Receiver view, which refuses under external control (S5)", () => {
 		const r = {
 			...base,
 			view: "receiver" as ViewId,
 			v: { ...base.v, control: "external" as const },
 		}
-		expect(resolveKey(r, "e")).toEqual({
-			type: "notice",
-			text: "controlled externally · c to take control",
-		})
+		// The view answers with the controller's name (receiver.test.tsx).
+		expect(resolveKey(r, "e")).toEqual({ type: "edit-open" })
 		expect(
 			resolveKey({ ...r, v: { ...r.v, control: "internal" } }, "e"),
 		).toEqual({ type: "edit-open" })
@@ -116,9 +115,9 @@ describe("fix round 1", () => {
 		})
 		expect(RECEIVER_UNKNOWN_NOTICE).not.toMatch(/\bc\b/)
 		expect(resolveKey(receiver(null), "c")).toBeUndefined()
+		// S5: the Receiver view refuses the edit and names the controller.
 		expect(resolveKey(receiver("external"), "e")).toEqual({
-			type: "notice",
-			text: RECEIVER_EXTERNAL_NOTICE,
+			type: "edit-open",
 		})
 		expect(lineText(footerLine(receiver(null), 119))).toBe(
 			"r reconnect  q quit  ? help",
@@ -328,5 +327,29 @@ describe("P20", () => {
 			}),
 			{ numRuns: 100 },
 		)
+	})
+})
+
+describe("design polish: S5 external-control notice", () => {
+	const ext: KeyContext = {
+		...base,
+		view: "receiver",
+		v: { ...base.v, control: "external" },
+	}
+	it("names the controller, or says externally when none is known", () => {
+		expect(receiverExternalNotice("relay client-3 192.0.2.1")).toBe(
+			"tuner controlled by relay client-3 192.0.2.1 · c take control",
+		)
+		expect(receiverExternalNotice(null)).toBe(
+			"tuner controlled externally · c take control",
+		)
+	})
+	it("drops the footer's own c take control while the notice says it", () => {
+		const text = receiverExternalNotice(null)
+		const hints = (notice?: string): string[] =>
+			footerGroups(ext, notice).map(g => lineText(g.variants[0] ?? []))
+		expect(hints()).toContain("c take control")
+		expect(hints(text)).not.toContain("c take control")
+		expect(hints(text)).toContain("r reconnect")
 	})
 })

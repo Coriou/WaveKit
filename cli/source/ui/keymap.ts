@@ -93,8 +93,14 @@ export interface Binding {
 	when?: (ctx: KeyContext) => boolean
 }
 
-export const RECEIVER_EXTERNAL_NOTICE =
-	"controlled externally · c to take control"
+/**
+ * S5: `e` under external control names who holds the tuner and the way out,
+ * once; the footer drops its own `c take control` while this shows.
+ */
+export function receiverExternalNotice(who: string | null): string {
+	const sep = ` ${glyphs().sep} `
+	return `${who !== null ? `tuner controlled by ${who}` : "tuner controlled externally"}${sep}c take control`
+}
 /** Control state not read yet: names no key, because `c` is not bound until it is known. */
 export const RECEIVER_UNKNOWN_NOTICE = "tuner control unknown"
 const ANY = "*any"
@@ -377,7 +383,8 @@ export const BINDINGS: readonly Binding[] = [
 		views: ["receiver"],
 		keys: ["e"],
 		when: c => c.v.control === "external",
-		action: () => ({ type: "notice", text: RECEIVER_EXTERNAL_NOTICE }),
+		// The view refuses the edit and names the controller (S5).
+		action: () => ({ type: "edit-open" }),
 	},
 	{
 		mode: "list",
@@ -524,7 +531,11 @@ function hintLine(keys: string, label: string): Line {
 }
 
 /** Footer priorities (spec §7): ? help 0, mode keys 1, switcher (compact) 2, q quit 3, r reconnect 4. */
-export function footerGroups(ctx: KeyContext): Group[] {
+/**
+ * `notice`: the key notice on screen, if any. A mode hint it already spells
+ * out (`c take control`) is left out, so the footer never says it twice (S5).
+ */
+export function footerGroups(ctx: KeyContext, notice?: string): Group[] {
 	const groups: Group[] = []
 	const modal = ctx.confirm !== null || ctx.help || ctx.input || ctx.edit
 	if (ctx.heightClass === "compact" && !modal) {
@@ -546,6 +557,7 @@ export function footerGroups(ctx: KeyContext): Group[] {
 		hints.filter(h => h.mode === "global" && h.key === k),
 	)
 	for (const h of mode) {
+		if (notice?.includes(`${h.hint.keys} ${h.hint.label}`) === true) continue
 		const variants = [hintLine(h.hint.keys, h.hint.label)]
 		if (h.hint.rich !== undefined)
 			variants.push(hintLine(h.hint.keys, h.hint.rich))
