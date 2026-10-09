@@ -30,10 +30,10 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 " api × 2m 31s  iq ? unknown  rx 445.971 MHz  decoders 1 restarting  drops ?
  ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   ? · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 9m 01s ago
+ window    444.947–446.995 MHz   external control   last command 9m 02s ago
    DECODERS          process             decodes           drop now  window
- ● dsd-fme           up 52s              2m 40s ago               ?  in
- ● multimon-ng       up 51s              3m 01s ago               ?  in
+ ● dsd-fme           up 52s              2m 41s ago               ?  in
+ ● multimon-ng       up 51s              3m 02s ago               ?  in
  ● rtl433            up 51s              none for 51s             ?  out
  ● readsb            up 51s              none for 51s             ?  out
  ! acarsdec          restarting ×13      —                        —  out
@@ -53,7 +53,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 `;
 
 exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  decoders 1 restarting
+" api ● 2s  iq ● streaming  1 restarting  drops !21% now
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s
  window    444.947–446.995 MHz   external control
    DECODERS         process     decodes       drop  window

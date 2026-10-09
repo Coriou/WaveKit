@@ -114,7 +114,8 @@ describe("banner copy (spec §9)", () => {
 		const out = t([
 			{ kind: "endpoint", path: "/api/x\x1b[2J", reason: "5\r00\x9b" },
 		])
-		expect(out).toBe("! GET /api/x failing · 500 · other endpoints answering")
+		// R76: a CR reads as one space on a single line; it never moves the cursor.
+		expect(out).toBe("! GET /api/x failing · 5 00 · other endpoints answering")
 	})
 
 	describe("fix round 1", () => {

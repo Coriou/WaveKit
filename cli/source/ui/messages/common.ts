@@ -4,7 +4,7 @@ import type {
 	MessageCategory,
 	MessageSegment,
 } from "../../data/types.js"
-import { sanitize } from "../text.js"
+import { sanitize, sanitizeMultiline } from "../text.js"
 import { ASCII_GLYPHS, glyphs } from "../theme.js"
 
 export const MAX_TEXT = 2000
@@ -31,6 +31,11 @@ export function knownOr(s: string | undefined): string | undefined {
 
 export function clip(s: string, max = MAX_TEXT): string {
 	return cutAt(sanitize(cutAt(s, max * 2)), max)
+}
+
+/** clip for free-text bodies: line breaks are kept as "\n" (R76); single-line renderers flatten them. */
+export function clipMultiline(s: string, max = MAX_TEXT): string {
+	return cutAt(sanitizeMultiline(cutAt(s, max * 2)), max)
 }
 
 /** Non-glyph-table symbols, swapped for ASCII in ASCII glyph mode (R32). */
@@ -85,7 +90,7 @@ export function finish(
 	fields: FormattedMessage["fields"],
 	extra: { text?: string; emergency?: boolean } = {},
 ): FormattedMessage {
-	const text = extra.text !== undefined ? clip(extra.text) : undefined
+	const text = extra.text !== undefined ? clipMultiline(extra.text) : undefined
 	const search = [
 		decoderId,
 		protocol,

@@ -1,5 +1,13 @@
 import type { FormattedMessage } from "../../data/types.js"
-import { asObj, clip, finish, num, seg, str, textGlyphs } from "./common.js"
+import {
+	asObj,
+	clipMultiline,
+	finish,
+	num,
+	seg,
+	str,
+	textGlyphs,
+} from "./common.js"
 
 const BROADCAST = 0xffffffff
 const PORTS: Readonly<Record<number, string>> = {
@@ -63,7 +71,7 @@ export function formatMesh(
 	let text: string | undefined
 	if (port === 1) {
 		try {
-			text = clip(
+			text = clipMultiline(
 				Buffer.from(str(o, "payloadB64") ?? "", "base64").toString("utf8"),
 			).trim()
 		} catch {

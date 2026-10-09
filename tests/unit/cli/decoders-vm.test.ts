@@ -14,6 +14,7 @@ import {
 	decoderConfirm,
 	decoderDetail,
 	decodersModel,
+	latestDecoderResult,
 } from "../../../cli/source/view-models/decoders.js"
 import { sparkline, wrapKV } from "../../../cli/source/view-models/detail.js"
 
@@ -386,12 +387,14 @@ describe("B5 fix round 1", () => {
 		}
 	}
 
-	it("I1: the last decoder write shows under the list while the detail is closed", () => {
+	it("I1/R75: the last decoder write is the footer notice while the detail is closed", () => {
 		const m = decodersModel(sent, initialUi("decoders"), 119, 35, true)
-		expect(lineText(m.list.at(-1) ?? [])).toBe(
-			`readsb · restart sent ${clock(s.now)}`,
+		expect(m.notice).toBe(`readsb · restart sent ${clock(s.now)}`)
+		expect(m.list.map(lineText).some(l => l.includes("restart sent"))).toBe(
+			false,
 		)
 		const withDetail = decodersModel(sent, open("readsb"), 119, 35, true)
+		expect(withDetail.notice).toBeNull()
 		expect(
 			withDetail.list.map(lineText).some(l => l.includes("restart sent")),
 		).toBe(false)
@@ -557,5 +560,100 @@ describe("B5 fix round 1", () => {
 		const quotedRow = rows.find(r => r.includes('"')) ?? ""
 		expect(quotedRow.trimEnd().endsWith('…"')).toBe(true)
 		for (const r of rows) expect(cellWidth(r)).toBeLessThanOrEqual(60)
+	})
+})
+
+describe("B6 docfix: B5 minors", () => {
+	const s = scenarioState("live")
+	const fact = (st: AppState, id: string): DecoderFacts => {
+		const f = decoderFacts(st).find(x => x.row.id === id)
+		if (!f) throw new Error(`no ${id}`)
+		return f
+	}
+	const sentAt = s.now
+	const sent = reduce(
+		s,
+		[
+			{
+				kind: "action:sent",
+				at: sentAt,
+				id: 9,
+				key: "decoder:readsb",
+				intent: RESTART,
+			},
+		],
+		sentAt,
+	)
+	it("N3: the CLI's own action row is not dimmed with a stale REST lane", () => {
+		const stale = reduce(sent, [], sentAt + 20_000)
+		const rows = decoderDetail(stale, fact(stale, "readsb"), 119, stale.now)
+		const action = rows.find(r => lineText(r).startsWith("action")) ?? []
+		expect(action.length).toBeGreaterThan(0)
+		expect(action.slice(1).every(x => x.role !== "old")).toBe(true)
+		const proc = rows.find(r => lineText(r).startsWith("process")) ?? []
+		expect(proc.slice(1).every(x => x.role === "old")).toBe(true)
+	})
+	it("N4: a very long id never overflows; the identity moves under it", () => {
+		const long = "x".repeat(70)
+		const rows = wrapKV(long, "ADS-B · pid 1", 40, true, true).map(lineText)
+		for (const r of rows) expect(cellWidth(r)).toBeLessThanOrEqual(40)
+		expect(rows[0]?.endsWith("…")).toBe(true)
+		expect(rows[1]).toBe("          ADS-B · pid 1")
+	})
+	it("N5: the result role follows the action state, not the text", () => {
+		const failed = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 9,
+					at: sentAt + 10,
+					key: "decoder:readsb",
+					outcomes: [
+						{
+							label: "restart",
+							result: {
+								ok: false,
+								outcome: "failed",
+								status: 409,
+								message: "x",
+							},
+							at: sentAt + 10,
+						},
+					],
+				},
+			],
+			sentAt + 10,
+		)
+		expect(latestDecoderResult(failed, sentAt + 20)?.at(-1)?.role).toBe("fault")
+		const unknown = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 9,
+					at: sentAt + 10_000,
+					key: "decoder:readsb",
+					outcomes: [
+						{
+							label: "restart",
+							result: {
+								ok: false,
+								outcome: "unknown",
+								status: null,
+								message: "",
+							},
+							at: sentAt + 10_000,
+						},
+					],
+				},
+			],
+			sentAt + 10_000,
+		)
+		const noReply = reduce(unknown, [], sentAt + 21_000)
+		const line = latestDecoderResult(noReply, sentAt + 21_000)
+		expect(lineText(line ?? [])).toContain("no reply · not confirmed")
+		expect(line?.at(-1)?.role).toBe("attention")
+		expect(latestDecoderResult(sent, sentAt)?.at(-1)?.role).toBe("value")
 	})
 })

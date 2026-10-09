@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest"
 import { connect } from "node:net"
 import WebSocket from "ws"
-import { startMockServer } from "./server.js"
+import { loadScenario } from "../scenarios.js"
+import { SCENARIO_NAMES } from "../scenario-types.js"
+import { resolveScenario, startMockServer } from "./server.js"
 
 let server: { port: number; close(): Promise<void> }
 const base = () => `http://127.0.0.1:${server.port}`
@@ -405,6 +407,27 @@ describe("mock core", () => {
 			expect(acars.restartCount).toBe(0)
 		} finally {
 			await crash.close()
+		}
+	})
+	it("resolves scenario times exactly like the loader (I9)", () => {
+		for (const name of SCENARIO_NAMES) {
+			const mock = resolveScenario(name) as {
+				rest: Record<string, { body?: unknown }>
+				ws: Array<{ type: string; data: unknown }>
+			}
+			const loader = loadScenario(name)
+			for (const path of [
+				"/api/decoders",
+				"/api/sources",
+				"/api/tuner-relay",
+				"/api/live-audio/status",
+			])
+				expect(mock.rest[path]?.body, `${name} ${path}`).toEqual(
+					loader.rest[path]?.body,
+				)
+			const outputs = (ws: Array<{ type: string; data: unknown }>) =>
+				ws.filter(f => f.type === "decoder:output").map(f => f.data)
+			expect(outputs(mock.ws), name).toEqual(outputs(loader.ws))
 		}
 	})
 })

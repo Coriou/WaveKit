@@ -31,7 +31,10 @@ describe("R46: restarting decoders are visible in the strip", () => {
 		)
 		expect(lineText(at(base, 120))).toContain("decoders 8/9 up · 1 restarting")
 		expect(lineText(at(base, 80))).toContain("decoders 1 restarting")
-		expect(lineText(at(base, 60))).toContain("decoders 1 restarting")
+		// R75: at 60 the bare count keeps the drops lane on the strip.
+		expect(lineText(at(base, 60))).toBe(
+			"api ● 2s  iq ● streaming  1 restarting  drops !21% now",
+		)
 		for (const cols of [200, 120, 80, 60]) {
 			const line = at(base, cols)
 			expect(lineWidth(line)).toBeLessThanOrEqual(cols - 1)

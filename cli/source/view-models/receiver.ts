@@ -54,10 +54,11 @@ import type {
 	TunerEditState,
 	UiState,
 } from "../ui/ui-state.js"
+import { LABEL_WIDTH } from "./detail.js"
 import { essential, gapRow, keep, optional, shed, type Row } from "./shed.js"
 
 const RESULT_MS = 10_000
-const LABEL_W = 10
+const LABEL_W = LABEL_WIDTH
 /** rtl_tcp header tuner types (librtlsdr enum rtlsdr_tuner). */
 const TUNER_TYPES: Readonly<Record<number, string>> = {
 	1: "E4000",
@@ -346,6 +347,7 @@ export function tunerConfirm(
 			? [
 					one(
 						2,
+						[sp(affects.count, "value")],
 						[sp(affects.short, "value")],
 						[sp(affects.moves, "value")],
 						...(affects.tuned === null
@@ -378,12 +380,42 @@ export function controlConfirm(state: AppState): ConfirmRequest | null {
 	const t = receiverTuner(state)
 	if (!t) return null
 	const toInternal = t.controlMode === "external"
-	const who = relayClient(state.relay.value, false) ?? "external clients"
+	const relay = state.relay.value
+	const who = relayClient(relay, false) ?? "external clients"
+	const id = relay?.controlClientId
+		? `relay ${sanitize(relay.controlClientId)}`
+		: who
+	const full = relayClient(relay, true) ?? who
+	const shortWho = relay?.controlClientId
+		? sanitize(relay.controlClientId)
+		: "external clients"
+	// R71: the action, then the safety clause, then the full remote, fitted to the bar.
+	const groups: Group[] = toInternal
+		? [
+				one(
+					0,
+					[sp(`take control from ${shortWho}?`, "value", true)],
+					[sp(`take tuner control from ${id}?`, "value", true)],
+					[sp(`take tuner control from ${who}?`, "value", true)],
+					[sp(`take tuner control from ${full}?`, "value", true)],
+				),
+				one(
+					1,
+					[sp("its next command is refused", "attention", true)],
+					[sp("its next tuning command is refused", "attention", true)],
+				),
+			]
+		: [
+				one(0, [
+					sp("release tuner control to external clients?", "value", true),
+				]),
+			]
 	return {
 		kind: "control",
 		prompt: toInternal
 			? `take tuner control from ${who}? its next tuning command is refused`
 			: "release tuner control to external clients?",
+		groups,
 		yes: toInternal ? "take" : "release",
 		no: "cancel",
 		intent: {
@@ -510,12 +542,20 @@ interface Affects {
 	moves: string
 	/** The same, terse for a narrow confirm bar ("no decoder enters or leaves"). */
 	short: string
+	/** Tersest: a count ("3 decoders move"), so a move never vanishes at 80 columns. */
+	count: string
 }
 
 function affectsParts(impact: RetuneImpact, fromKnown: boolean): Affects {
 	const tuned =
 		impact.tuned.length > 0 ? `${impact.tuned.join(", ")} (tuned)` : null
-	if (!fromKnown) return { tuned, moves: "window now ?", short: "window now ?" }
+	if (!fromKnown)
+		return {
+			tuned,
+			moves: "window now ?",
+			short: "window now ?",
+			count: "window now ?",
+		}
 	const parts: string[] = []
 	const moves = [
 		...impact.enters.map(x => `${x} enters`),
@@ -526,10 +566,21 @@ function affectsParts(impact: RetuneImpact, fromKnown: boolean): Affects {
 		parts.push("no decoder enters or leaves the window")
 	if (impact.unknown.length > 0) parts.push(`${impact.unknown.join(", ")} ?`)
 	const moved = moves.length > 0 || impact.unknown.length > 0
+	const n = moves.length
+	const unknownNote =
+		impact.unknown.length > 0 ? `${impact.unknown.length} ?` : ""
 	return {
 		tuned,
 		moves: parts.join(sep()),
 		short: moved ? parts.join(sep()) : "no decoder enters or leaves",
+		count: moved
+			? [
+					n > 0 ? `${n} decoder${n === 1 ? " moves" : "s move"}` : "",
+					unknownNote,
+				]
+					.filter(Boolean)
+					.join(sep())
+			: "no decoder enters or leaves",
 	}
 }
 
@@ -555,7 +606,12 @@ export function editAffects(state: AppState, edit: TunerEditState): string {
 
 function editImpact(state: AppState, edit: TunerEditState): Affects {
 	if (state.decoders.value === undefined)
-		return { tuned: null, moves: "decoders ?", short: "decoders ?" }
+		return {
+			tuned: null,
+			moves: "decoders ?",
+			short: "decoders ?",
+			count: "decoders ?",
+		}
 	const current = windowFor(
 		edit.sourceId,
 		state.tuner.value,
@@ -1043,16 +1099,17 @@ export function receiverLines(
 				),
 	)
 	// Core says why the relay cannot serve this source, whether or not it listens (R72).
+	const compatRole: Role = isOld(state.relay, state.now) ? "old" : "attention"
 	const compat =
 		relay?.compatibility !== undefined && relay.compatibility !== "ok"
-			? keep([
-					...lbl(""),
-					glyphSpan("attention"),
-					sp(
-						` ${quoted(relay.compatibilityMessage ?? relay.compatibility, 80)}`,
-						"attention",
+			? keep(
+					clipped(
+						[...lbl(""), glyphSpan("attention")],
+						` ${quoted(relay.compatibilityMessage ?? relay.compatibility, 200)}`,
+						width - 1,
+						compatRole,
 					),
-				])
+				)
 			: null
 	const fanout = fanoutBlock(state, width)
 	// Short views shed optional rows (with a "+N rows hidden" marker); relay history

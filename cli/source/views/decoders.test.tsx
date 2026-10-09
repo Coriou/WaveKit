@@ -122,7 +122,7 @@ describe("Decoders view (spec §6.2)", () => {
 		}
 	})
 
-	it("R64: a write from the list shows its result under the list, failures included", async () => {
+	it("R64/R75: a write from the list shows its result in the footer, failures included", async () => {
 		const h = await renderApp({
 			state: scenarioState("live", deps),
 			views,
@@ -157,7 +157,8 @@ describe("Decoders view (spec §6.2)", () => {
 				st.now,
 			),
 		)
-		await h.waitFor(f => f.some(l => l.includes("readsb · restart sent")))
+		// R75: the result is the footer (the last frame row), not a list row.
+		await h.waitFor(f => (f.at(-1) ?? "").includes("readsb · restart sent"))
 		const sent = h.runtime.store.get()
 		h.runtime.store.set(
 			reduce(
@@ -186,8 +187,14 @@ describe("Decoders view (spec §6.2)", () => {
 			),
 		)
 		await h.waitFor(f =>
-			f.some(l => l.includes('readsb · restart failed · 502 · "bad gateway"')),
+			(f.at(-1) ?? "").includes(
+				'readsb · restart failed · 502 · "bad gateway"',
+			),
 		)
+		// With the detail open the result sits in the detail, and the footer shows keys.
+		await h.press(KEYS.enter)
+		expect(h.frame().at(-1)).not.toContain("restart failed")
+		expect(h.text()).toContain('action    restart failed · 502 · "bad gateway"')
 		h.unmount()
 	})
 })

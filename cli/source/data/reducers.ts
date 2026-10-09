@@ -832,16 +832,16 @@ function rtlCommand(cmd: TunerCommand): { name: string; value: number } | null {
 	}
 }
 
-/**
- * tuner:command-sent confirms a tuner write when it is the intent's last command with
- * the value sent: a single command, or the end of a sequence that ran to the end (R55).
- * A sequence halted before its last command is never confirmed by an earlier one.
- */
 /** The result says the sequence's last command was not sent (an earlier one halted it). */
 function lastUnsent(outcomes: readonly CommandOutcome[]): boolean {
 	return outcomes.length > 0 && outcomes[outcomes.length - 1]?.result === null
 }
 
+/**
+ * tuner:command-sent confirms a tuner write when it is the intent's last command with
+ * the value sent: a single command, or the end of a sequence that ran to the end (R55).
+ * A sequence halted before its last command is never confirmed by an earlier one.
+ */
 function tunerSeen(
 	command: string,
 	value: unknown,

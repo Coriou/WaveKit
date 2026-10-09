@@ -354,7 +354,14 @@ export function messageDetail(
 	const text = e.formatted.text
 	const body: Line[] = [
 		...packFields(e.formatted.fields, width),
-		...(text !== undefined ? wrappedField("text", text, width, "value") : []),
+		// R76: the body keeps its line breaks; each line wraps on its own.
+		...(text !== undefined
+			? text
+					.split("\n")
+					.flatMap((line, i) =>
+						wrappedField(i === 0 ? "text" : "", line, width, "value"),
+					)
+			: []),
 		...jsonLines(e.output.data, width),
 	]
 	const rows = Math.max(0, height - 1)
