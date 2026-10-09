@@ -145,6 +145,25 @@ describe("fix round 1", () => {
 	})
 })
 
+describe("B5 fix round 1", () => {
+	it("I4: PgUp/PgDn scroll the Decoders detail; the §6.2 footer is unchanged", () => {
+		const d = {
+			...base,
+			view: "decoders" as ViewId,
+			detail: true,
+			v: { ...base.v, hasSelection: true, decoderRunning: true },
+		}
+		expect(resolveKey(d, "<pgdn>")).toEqual({ type: "detail-scroll", delta: 1 })
+		expect(resolveKey(d, "<pgup>")).toEqual({
+			type: "detail-scroll",
+			delta: -1,
+		})
+		expect(lineText(footerLine(d, 119))).toBe(
+			"↑↓ select  Esc close  x stop  R restart  r reconnect  q quit  ? help",
+		)
+	})
+})
+
 describe("footer", () => {
 	it("matches the spec footers", () => {
 		expect(lineText(footerLine(base, 119))).toBe(
