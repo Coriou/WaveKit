@@ -47,10 +47,26 @@ const RANK: Readonly<Record<BannerCondition["kind"], number>> = {
 
 /**
  * Priorities (lower survives longer): the head, then `+N`, then the reason,
- * then the retry countdown, then the trailing context. `+N` therefore never
- * goes before the reason.
+ * then the retry countdown, then the trailing context, then the key hint.
+ * `+N` therefore never goes before the reason.
  */
-const P = { head: 0, more: 1, reason: 2, retry: 3, tail: 4 } as const
+const P = { head: 0, more: 1, reason: 2, retry: 3, tail: 4, key: 5 } as const
+
+/** Network error codes in words; the code is kept beside them (M5). */
+const CODE_WORDS: Readonly<Record<string, string>> = {
+	ECONNREFUSED: "connection refused",
+	ECONNRESET: "connection reset",
+	ECONNABORTED: "connection aborted",
+	EPIPE: "connection reset",
+	ETIMEDOUT: "connect timed out",
+	UND_ERR_CONNECT_TIMEOUT: "connect timed out",
+	UND_ERR_SOCKET: "connection closed",
+	UND_ERR_CLOSED: "connection closed",
+	ENOTFOUND: "host not found",
+	EAI_AGAIN: "name lookup failed",
+	EHOSTUNREACH: "host unreachable",
+	ENETUNREACH: "network unreachable",
+}
 
 /** Free text longer than this also gets a clipped minimal variant, so it cannot push out the countdown. */
 const CLIP_COLS = 24
@@ -67,6 +83,16 @@ const plain = (text: string, priority: number): Group => ({
 	priority,
 	variants: variantsOf(text).map(v => [{ text: v, role: "value" }]),
 })
+
+/** A bare known code reads `connection refused (ECONNREFUSED)` where it fits, else the code alone. */
+function reason(raw: string): Group {
+	const words = Object.hasOwn(CODE_WORDS, raw) ? CODE_WORDS[raw] : undefined
+	if (words === undefined) return plain(raw, P.reason)
+	return {
+		priority: P.reason,
+		variants: [raw, `${words} (${raw})`].map(v => [{ text: v, role: "value" }]),
+	}
+}
 
 function head(prefix: string, raw: string, suffix: string): Group {
 	return {
@@ -95,20 +121,24 @@ function hostOf(url: string): string {
 function groupsFor(c: BannerCondition, now: number): Group[] {
 	switch (c.kind) {
 		case "api-down": {
+			// M5: one sentence, address first. With cached data on screen, the
+			// as-of time outlives the address.
 			const out: Group[] = [head("", "API unreachable", "")]
+			if (c.target !== null)
+				out.push(plain(hostOf(c.target), c.asOf !== null ? P.tail : P.reason))
 			if (c.target === null && c.tried.length > 0)
 				out.push(plain(`tried ${c.tried.join(", ")}`, P.reason))
-			else out.push(plain(c.reason, P.reason))
+			else out.push(reason(c.reason))
 			out.push(...retry(c.retryAt, now))
 			if (c.asOf !== null)
-				out.push(plain(`data as of ${formatClock(c.asOf)}`, P.tail))
-			else if (c.target !== null) out.push(plain(hostOf(c.target), P.tail))
+				out.push(plain(`data as of ${formatClock(c.asOf)}`, P.retry))
+			if (c.retryAt !== null) out.push(plain("r now", P.key))
 			return out
 		}
 		case "rest-down": {
 			const out: Group[] = [
 				head("", "REST failing", ""),
-				plain(c.reason, P.reason),
+				reason(c.reason),
 				...retry(c.retryAt, now),
 			]
 			if (c.asOf !== null)
