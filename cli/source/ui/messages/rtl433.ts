@@ -38,5 +38,6 @@ export function formatRtl433(
 		...(hum !== undefined ? [{ label: "humidity", value: `${hum}%` }] : []),
 		...(battery === 0 ? [{ label: "battery", value: "low" }] : []),
 	]
-	return finish(decoderId, type, "433", "data", segments, fields)
+	// M14: the column is a protocol tag; "433" read as a frequency.
+	return finish(decoderId, type, "ISM", "data", segments, fields)
 }

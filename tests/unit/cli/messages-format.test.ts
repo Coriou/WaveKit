@@ -460,7 +460,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 		expect(pos.category).toBe("data")
 		expect(segs(pos)).toEqual([
 			"N0CALL-9",
-			"Position with messaging",
+			"position+msg",
 			"51.50,-0.12",
 			"35 mph",
 		])
@@ -476,7 +476,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"direwolf",
 		)
-		expect(segs(msg)).toEqual(["N0CALL", "to BLN1", "Message"])
+		expect(segs(msg)).toEqual(["N0CALL", "to BLN1", "message"])
 		expect(msg.text).toBe("NET TONIGHT")
 		const wx = formatMessage(
 			out("aprs", "direwolf", {
@@ -489,13 +489,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"direwolf",
 		)
-		expect(segs(wx)).toEqual([
-			"WX1",
-			"Positionless weather",
-			"20.0°C",
-			"40%",
-			"wind 5 mph",
-		])
+		expect(segs(wx)).toEqual(["WX1", "weather", "20.0°C", "40%", "wind 5 mph"])
 	})
 	it("rtl433: type signal with raw rtl_433 JSON", () => {
 		const m = formatMessage(
@@ -511,7 +505,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"rtl433",
 		)
-		expect(m.protocol).toBe("433")
+		expect(m.protocol).toBe("ISM") // M14: a protocol tag, not a frequency
 		expect(segs(m)).toEqual(["Acurite-Tower", "#1234", "ch A", "21.3°C", "40%"])
 	})
 	it("lora-meshtastic: rxRssi/rxSnr of 0 mean unavailable, not 0 dBm", () => {

@@ -11,6 +11,28 @@ import {
 	textGlyphs,
 } from "./common.js"
 
+/** direwolf's APRS data type names (src/decoders/builtin/direwolf.ts) as short row words (copy sweep). */
+const APRS_TYPE: Readonly<Record<string, string>> = {
+	Position: "position",
+	"Position with messaging": "position+msg",
+	"Position with timestamp": "position+time",
+	"Position with timestamp and messaging": "position+time+msg",
+	Object: "object",
+	Item: "item",
+	"Mic-E": "mic-e",
+	"Mic-E (old)": "mic-e",
+	Message: "message",
+	Status: "status",
+	Capabilities: "capabilities",
+	Query: "query",
+	Telemetry: "telemetry",
+	"Peet Bros weather": "weather",
+	"Positionless weather": "weather",
+	"Raw GPS/NMEA": "nmea",
+	"User-defined": "user-defined",
+	"Third-party": "third-party",
+}
+
 /** direwolf emits type "aprs" with APRSData: source/destination callsigns, path, dataType, optional position, message and weather. */
 export function formatAprs(
 	data: unknown,
@@ -22,7 +44,11 @@ export function formatAprs(
 	const destination = str(o, "destination")
 	const path = Array.isArray(o["path"]) ? o["path"].filter(isStr) : []
 	// direwolf's default "Unknown" is an unknown value (R44).
-	const dataType = knownOr(str(o, "dataType"))
+	const known = knownOr(str(o, "dataType"))
+	const dataType =
+		known !== undefined && Object.hasOwn(APRS_TYPE, known)
+			? APRS_TYPE[known]
+			: known
 	const lat = num(o, "lat")
 	const lon = num(o, "lon")
 	const speed = num(o, "speed")
