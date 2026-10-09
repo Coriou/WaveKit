@@ -18,17 +18,19 @@ Pi image); decoder band defaults with regions, persisted per-decoder band
 overrides and operator-start pinning; `source:removed`; the signal-flat source
 warning; the Pi operator page redesign on a single port 80 and the brand kit.
 
-1. **Live analog audio fixes** (voice decode test done 2026-10-09, evidence in
-   `output/acceptance/voice-decode-2026-10-09.json`). A lab handheld on PMR446
-   showed that DMR decodes with dsd-fme (TG/source/slot/CC, 0 CRC errors), and that
-   NFM voice is clear only with non-default settings (audio gain 2, `iqDcBlock` off,
-   and the dongle tuned 6 kHz off the carrier). With the defaults (gain 10, I/Q
-   dcblock on, demodulation at the tuned center) the voice was unintelligible. Fix
-   the defaults and the review findings (gain, I/Q dcblock, channel offset/shift,
-   pre-demod squelch, decimation filter, NFM de-emphasis rate, stream headers,
-   restart on retune, crash recovery, process cleanup, client buffer). Also fix the
-   dsd-fme `eventsOut`/`lastOutputAt` counters and calls that split on timeout.
-   Then repeat the over-the-air runs.
+1. **Live audio follow-ups**. The live analog fixes and dsd-fme call segmentation
+   were merged and verified over the air on 2026-10-09 (main 34f56e1). Evidence:
+   `output/acceptance/voice-decode-2026-10-09.json`. Results: squelch silent when
+   idle, clear NFM voice with `offsetHz`, and 2 PTT presses giving 2 DMR calls with
+   0 CRC errors. Still open:
+   - About 2 s end-to-end latency, even with low-latency ffplay flags. Measure each
+     stage: the Pi queue, Wi-Fi, the fanout, the csdr rings and the client buffer.
+   - A ~0.75 s noise tail when the squelch closes.
+   - A dsd-fme `call_end.duration` (7.25 s) shorter than the time between its
+     `call_start` and `call_end` (~11 s).
+   - Lazy pipeline start when no client is connected (deferred).
+   - `offsetHz` is set per decoder and is static; the channelizer replaces it.
+   - Digital voice audio (§5b).
 2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
    only): clean-card flash on stable power, port 80 page, deliberate reboot with
    the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,

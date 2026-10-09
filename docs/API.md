@@ -516,6 +516,11 @@ dropped); a client that accepts nothing for 30 s is disconnected.
 # Self-describing: no format flags
 ffplay -nodisp -autoexit http://localhost:8081/stream.wav
 
+# Low latency: ffplay's default probing and buffering add several seconds
+# (measured 2026-10-09: ~5 s with the defaults above, ~2 s end to end with these flags)
+ffplay -nodisp -fflags nobuffer -flags low_delay -probesize 32 -analyzeduration 0 \
+  http://localhost:8081/stream.wav
+
 # Raw: read X-Sample-Rate first, round it for ffplay
 curl -sI http://localhost:8081/stream | grep -i x-sample-rate
 ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:8081/stream
