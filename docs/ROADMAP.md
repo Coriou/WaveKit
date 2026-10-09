@@ -326,12 +326,16 @@ bits are cleared by the kernel's own polling and throttling flags need
 service since it started" and throttling is reported as not measurable. Setup
 progress appears only on images whose first boot writes the sanitized
 `/var/lib/wavekit/status/setup.json`. Updated images also serve an independent
-early setup page on port 80 before Docker installation, opening the full page
-on port 8080 only after setup completes and that page responds. Reboot/shutdown
+early setup page on port 80 before Docker installation; once setup completes
+and the full page responds, port 80 relays to it (8080 keeps serving it directly). Reboot/shutdown
 controls remain deliberately absent until authentication, authorization and
 origin/CSRF protection exist.
 
-**Next (low priority, Pi UI): one address for the user.** Two ports (80 for
+**Pi UI: one address for the user** (implemented 2026-10-09; ships
+with the next image and its clean-card acceptance). Shape chosen: the port-80
+service stays the owner and relays to the receiver after setup, instead of
+handing the port over, so there is no gap and a stopped receiver falls back to
+the setup page. Original request: Two ports (80 for
 setup, 8080 for status) confuse operators. Goal: typing `http://<pi>/` always
 shows the right page — the setup page while installing, the status page once
 setup completes. Preferred shape: the status service takes over port 80 when

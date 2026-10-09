@@ -142,40 +142,79 @@ after a reboot. Before the first progress record appears, it reports that it is
 waiting; it does not infer that cloud-init succeeded. Network configuration must
 work before any browser can reach the Pi.
 
-The setup page opens the full receiver page automatically once installation
-finishes and that page responds. If installation fails or Docker is unavailable,
-the entry page stays reachable. Port 80 serves only bundled assets and sanitized
-setup state, with no account settings, raw logs, file browsing or control routes.
-It runs as a restricted dynamic system user; existing Imager account and sudo
-choices are preserved. The automatic link uses the image's default API port
-8080; if you customize that port, open your chosen receiver URL directly.
+The same address then becomes the receiver status page: once installation
+finishes and the receiver's own page answers on port 8080, the port-80 service
+relays every request to it, so `http://<pi-host>/` stays the one address to
+open, also after a reboot. There is no hand-over gap, because the port-80
+service never gives up the port; if the receiver stops answering, port 80 shows
+the setup page again until it returns. If installation fails or is interrupted,
+port 80 keeps the setup page and links to the receiver on port 8080 when that
+answers. Port 80 serves only bundled assets, sanitized setup state and, after
+setup, GET/HEAD relays to the receiver's fixed routes on the Pi's loopback; no
+account settings, raw logs, file browsing or control routes. It runs as a
+restricted dynamic system user; existing Imager account and sudo choices are
+preserved. The relay assumes the image's default API port 8080; if you
+customize that port, open your chosen receiver URL directly.
 
-Open `http://<pi-host>:8080/` from a phone or computer on the same network. The
-page is served by the Pi itself and works without WaveKit running on your
-computer. It is read-only.
+Port 8080 keeps serving the status page and API directly on every install, for
+WaveKit's monitoring of the Pi and the Docker health check. Installs without the
+SD image (bundle or manual) have no port-80 service: open
+`http://<pi-host>:8080/`. The page is served by the Pi itself and works without
+WaveKit running on your computer. It is read-only.
 
-- **Upstream sample flow** leads: "Sampling" appears only when rtlmux's count of
-  bytes read from the dongle keeps growing. A detected dongle and running
-  processes alone never count. The plot shows the last five minutes against the
-  expected rate (2 bytes per sample); gaps mean no measurement, not zero.
-- **Receiver chain** shows presence of the dongle, `rtl_tcp`, `rtlmux` and
-  downstream clients. No clients means delivery is idle; sampling continues.
-  "Dropping" means rtlmux skipped data for a client that fell over 4 MiB behind
-  (slow client or network); it is not loss at the antenna.
-- **Power**: under-voltage now (from the kernel's `rpi_volt` sensor) is shown
-  separately from dips observed since the receiver service started. Throttling
-  flags need `vcgencmd`, which the container is deliberately not given, so they
-  are shown as not measurable rather than guessed.
-- **Pi host**: CPU, memory, storage backing Docker, SoC temperature, network and
-  uptime. Every value is marked stale or unavailable when it cannot be read.
-- **First-boot setup** appears on images whose first boot writes
-  `/var/lib/wavekit/status/setup.json`; compose mounts only that directory,
-  read-only. The boot partition is never mounted into the container.
+- **The screen** leads with the verdict: "Sampling" appears only when rtlmux's
+  count of bytes read from the dongle keeps growing. A detected dongle and
+  running processes alone never count. Beside it is the measured rate and what
+  it means as a sample rate (2 bytes per sample): the configured rate, or a
+  rate derived from the bytes once a client has set its own.
+- **Trends** share one five-minute time base: sample flow against the expected
+  rate, CPU, memory, SoC temperature and under-voltage dips. Gaps mean no
+  measurement, not zero. One cursor (pointer, touch or arrow keys) reads every
+  channel at the same moment.
+- **IQ stream**: the endpoint to paste into WaveKit, the dongle, the tuning and
+  each client. "Falling behind" means rtlmux skipped data for a client more
+  than 4 MiB behind (slow client or network); it is not loss at the antenna. No
+  clients means delivery is idle; sampling continues.
+- **This Pi**: power (under-voltage now, from the kernel's `rpi_volt` sensor,
+  and dips counted since the receiver service started), network (Wi-Fi signal
+  as bars with the dBm value), storage backing Docker and uptime. On images,
+  Uptime also names an unexpected restart (see below). Every value is marked
+  stale or unavailable when it cannot be read.
+- **Diagnostics** holds process ids, counter resets, measurement sources,
+  throttling (needs `vcgencmd`, which the container is deliberately not given,
+  so it is shown as not measurable), the last reboot and first-boot setup.
+- **First-boot setup** appears while setup runs or after it failed, on images
+  whose first boot writes `/var/lib/wavekit/status/setup.json`; compose mounts
+  only that directory, read-only. The boot partition is never mounted into the
+  container.
 
 The same data is available as JSON: `GET /api/status` (receiver, `sampling`,
 `delivery`) and `GET /api/host` (host telemetry). The API no longer allows
 cross-origin browser reads by default; set `SDR_HOST_API__CORS_ORIGINS` to a
 comma-separated list of origins if another web app must read it.
+
+### Persistent journal and reboot reasons on dedicated images
+
+The image keeps the system journal on the card
+(`/etc/systemd/journald.conf.d/90-wavekit.conf`: `Storage=persistent`, at most
+48 MB in 8 MB files, a month of history, 256 MB always left free), so the log
+of a boot survives the next one. Kernel writeback usually reaches the card
+within about 30 s, which bounds what a sudden power loss can drop.
+
+Once per boot, `wavekit-boot-report` records how the previous boot ended in
+`/var/lib/wavekit/status/last-boot.json`: the time of its last journal entry,
+whether it reached a clean shutdown (a requested reboot or power-off), whether
+the firmware flagged under-voltage or throttling since this boot's power-on,
+and a watchdog reset when the watchdog driver reports one. It cannot tell a
+power loss from a crash by itself; under-voltage since power-on is the clue the
+firmware offers. The status page shows "Unexpected restart" under Uptime for a
+day and in Diagnostics. For the full story:
+
+```bash
+cat /var/lib/wavekit/status/last-boot.json
+journalctl -b -1 -n 50        # the end of the previous boot
+journalctl --list-boots
+```
 
 ### Wi-Fi power saving on dedicated images
 
@@ -191,8 +230,9 @@ Verify on the freshly flashed Pi, then after a reboot:
 
 ```bash
 iw dev wlan0 get power_save
-systemctl status wavekit-boot-status wavekit-firstboot
+systemctl status wavekit-boot-status wavekit-firstboot wavekit-boot-report
 curl -fsS http://localhost/api/setup
+curl -fsS http://localhost/        # the status page once setup is complete
 curl -fsS http://localhost:8080/
 ```
 
