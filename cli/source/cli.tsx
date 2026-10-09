@@ -1,30 +1,18 @@
 #!/usr/bin/env node
-/**
- * WaveKit CLI entry point. `wavekit --help` lists views, options and env vars.
- * Phase 1: renders the legacy App until the new shell replaces it (Task 37).
- */
+/** WaveKit CLI entry point. `wavekit --help` lists views, options and env vars. */
 import { render } from "ink"
-import { App as LegacyApp } from "./legacy-app.js"
+import { App } from "./app.js"
 import { helpText, parseArgs } from "./args.js"
-import { resolveExplicit } from "./data/config.js"
+import { resolveExplicit, type ApiTarget } from "./data/config.js"
+import { createRuntime, nodeRuntimeDeps } from "./data/runtime.js"
 import {
 	createScreen,
 	createShutdown,
 	installExitHandlers,
 } from "./terminal.js"
-import type { ViewId } from "./ui/actions.js"
-import { detectGlyphMode, setGlyphMode } from "./ui/theme.js"
-
-const LEGACY_VIEW: Record<
-	ViewId,
-	"dashboard" | "decoders" | "output" | "sources" | "resources"
-> = {
-	overview: "dashboard",
-	decoders: "decoders",
-	messages: "output",
-	receiver: "sources",
-	system: "resources",
-}
+import { formatMessage } from "./ui/messages/index.js"
+import { detectColor, detectGlyphMode, setGlyphMode } from "./ui/theme.js"
+import { VIEWS } from "./views/registry.js"
 
 // Glyph mode first, so help and usage errors honour WAVEKIT_ASCII and the locale.
 setGlyphMode(detectGlyphMode(process.env))
@@ -37,15 +25,10 @@ if (parsed.kind === "error") {
 	process.stderr.write(`${parsed.message}\n`)
 	process.exit(2)
 }
+
+let explicit: ApiTarget | null
 try {
-	const target = resolveExplicit(parsed.api, process.env)
-	if (target) {
-		// TEMPORARY, removed in T43 with the legacy App: it reads only env vars, so hand it the
-		// resolved target. WAVEKIT_WS_URLS collapses to the one resolved URL (the first in the list).
-		process.env["WAVEKIT_API_URL"] = target.base
-		process.env["WAVEKIT_WS_URLS"] = target.ws
-		process.env["WAVEKIT_WS_URL"] = target.ws
-	}
+	explicit = resolveExplicit(parsed.api, process.env)
 } catch (err: unknown) {
 	process.stderr.write(
 		`wavekit: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -53,10 +36,21 @@ try {
 	process.exit(2)
 }
 
+// The UI owns the terminal. React reports errors caught by the boundary (which
+// already shows them as one line) through the console error method, and any write
+// would land on the alternate screen and corrupt the frame, so all are dropped.
+const drop = (): void => undefined
+for (const m of ["log", "info", "warn", "error", "debug"] as const)
+	console[m] = drop
+
+const runtime = createRuntime(nodeRuntimeDeps(explicit, formatMessage))
 const screen = createScreen(process.stdout)
 let instance: ReturnType<typeof render> | null = null
 const shutdown = createShutdown({
-	unmount: () => instance?.unmount(),
+	unmount: () => {
+		runtime.stop()
+		instance?.unmount()
+	},
 	screen,
 	stderr: process.stderr,
 	exit: code => process.exit(code),
@@ -64,5 +58,14 @@ const shutdown = createShutdown({
 // Handlers first, so a crash during enter() or the first render still restores the screen.
 installExitHandlers(process, screen, shutdown)
 screen.enter()
-instance = render(<LegacyApp initialView={LEGACY_VIEW[parsed.view]} />)
+runtime.start()
+instance = render(
+	<App
+		runtime={runtime}
+		views={VIEWS}
+		initialView={parsed.view}
+		color={detectColor(process.env, process.stdout.isTTY === true)}
+	/>,
+	{ exitOnCtrlC: false, patchConsole: false },
+)
 void instance.waitUntilExit().then(() => shutdown(0))

@@ -17,7 +17,7 @@ exports[`Receiver view (spec §6.4) > golden: 80x24 1`] = `
  18:00:20  client-3 192.0.2.1:59430  set-frequency          446 524 920
  FANOUT    21% dropped now · 4 of 8 in backpressure · 4.1 MB/s offered each
  lifetime  1.9 GB offered per branch · 5.7 GB dropped across branches (38%)
- upstream  3.5 MB dropped (0.29%) · 0 B/s now · checked 2s ago
+ upstream  3.5 MB dropped lifetime (0.29%) · 0 B/s now · checked 2s ago
 
 
 
