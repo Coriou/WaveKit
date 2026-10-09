@@ -1,3 +1,4 @@
+import type { AircraftState } from "@wavekit/api-types"
 import { memoOne } from "../data/memo.js"
 import { aircraftKey } from "../data/ring-buffer.js"
 import type {
@@ -161,14 +162,24 @@ export function aircraftLookup(state: AppState): AircraftLookup {
 
 const enriched = new WeakMap<
 	MessageEntry,
-	{ lookup: AircraftLookup; fm: FormattedMessage }
+	{ ac: AircraftState | undefined; fm: FormattedMessage }
 >()
+
+/** The ICAO an ADS-B entry is about, as the aircraft formatter reads it. */
+function entryIcao(e: MessageEntry): string | undefined {
+	const d = e.output.data
+	if (typeof d !== "object" || d === null) return undefined
+	const o = d as Record<string, unknown>
+	const v = typeof o["icao"] === "string" ? o["icao"] : o["hex"]
+	return typeof v === "string" ? v : undefined
+}
 
 /**
  * The summary to render. ADS-B entries re-read the aircraft map with `lookup`,
  * so registration, type and operator learned after ingest still show (R62,
  * spec §6.3); the formatter stays pure and the result is cached per entry
- * until the lookup (aircraft version) changes. Without a lookup: the
+ * until that entry's own aircraft state changes, so one aircraft's update
+ * re-formats only its rows (MUST 1, final review). Without a lookup: the
  * ingest-time summary.
  */
 export function formattedFor(
@@ -177,10 +188,12 @@ export function formattedFor(
 ): FormattedMessage {
 	if (lookup === undefined || e.formatted.protocol !== "ADS-B")
 		return e.formatted
+	const icao = entryIcao(e)
+	const ac = icao !== undefined ? lookup(icao) : undefined
 	const hit = enriched.get(e)
-	if (hit && hit.lookup === lookup) return hit.fm
+	if (hit && hit.ac === ac) return hit.fm
 	const fm = formatMessage(e.output, e.decoderId, lookup)
-	enriched.set(e, { lookup, fm })
+	enriched.set(e, { ac, fm })
 	return fm
 }
 

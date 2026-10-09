@@ -63,6 +63,9 @@ export function applyFilter<T>(
 	preset: PresetName,
 	subject: (t: T) => FilterSubject,
 ): T[] {
+	// Nothing to match: no subject is built (MUST 1, final review: building one can
+	// re-format an ADS-B row).
+	if (preset === "all" && f.terms.length === 0 && !f.emerg) return [...items]
 	return items.filter(x => {
 		const s = subject(x)
 		return matchesPreset(preset, s.category) && matchesFilter(f, s)
