@@ -133,6 +133,8 @@ export interface SourceManagerEvents {
 		metrics: { bytesReceived: number; dataRate: number },
 	) => void
 	ended: (sourceId: string) => void // For recording sources
+	/** Internal teardown signal: permanent removal, reconnect and shutdown (see teardown()). */
+	removed: (sourceId: string) => void
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
 	"rate-truth-changed": (sourceId: string) => void
