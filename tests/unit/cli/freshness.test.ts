@@ -12,6 +12,7 @@ import {
 	laneFail,
 	laneOk,
 	restFresh,
+	serverNow,
 } from "../../../cli/source/data/freshness.js"
 import { memoOne } from "../../../cli/source/data/memo.js"
 import type {
@@ -311,5 +312,26 @@ describe("A1 fix round 1", () => {
 			iqSummary(laneOk([source(), source({ id: "b" })], 1000, "rest"), {}, 2000)
 				.rateBytesPerSec,
 		).toBe(2 * 3994 * 1024)
+	})
+})
+
+describe("serverNow (A8 fix M-a)", () => {
+	it("adds the largest server offset to local now; null without a timestamped lane", () => {
+		const iso = (ms: number) => new Date(ms).toISOString()
+		expect(
+			serverNow(10_000, [
+				{ iso: iso(4_000), receivedAt: 5_000 },
+				{ iso: iso(5_000), receivedAt: 5_000 },
+			]),
+		).toBe(10_000)
+		expect(serverNow(10_000, [{ iso: iso(1_000), receivedAt: 61_000 }])).toBe(
+			-50_000,
+		)
+		expect(
+			serverNow(10_000, [
+				{ iso: "t", receivedAt: 5_000 },
+				{ iso: undefined, receivedAt: null },
+			]),
+		).toBeNull()
 	})
 })

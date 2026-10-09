@@ -365,3 +365,123 @@ describe("R70 readsb with its own rtl_tcp (caps.input external)", () => {
 		).toEqual(["—"])
 	})
 })
+
+describe("A8 fix 1: I-A detail lines and M-a/M-c/M-d countdowns", () => {
+	const detailOf = (st: ReturnType<typeof stateWith>) =>
+		decoderDetail(st, decoderFacts(st)[0]!, 100, st.now)
+			.map(lineText)
+			.join("\n")
+	it("I-A: the detail distinguishes each process state", () => {
+		const cases: Array<[Partial<DecoderRow>, RegExp]> = [
+			[
+				{ running: false, health: "faulted", restartCount: 13 },
+				/process +faulted · 13 restarts/,
+			],
+			[
+				{
+					running: false,
+					health: "faulted",
+					restartCount: 13,
+					nextRestartAt: iso(NOW + 30_000),
+				},
+				/process +faulted · retry in 30s · 13 restarts/,
+			],
+			[
+				{ running: true, health: "faulted", restartCount: 13 },
+				/process +faulted · retrying · 13 restarts/,
+			],
+			[
+				{
+					running: false,
+					health: "restarting",
+					restartCount: 13,
+					desiredRunning: true,
+					nextRestartAt: iso(NOW + 12_000),
+				},
+				/process +restarting in 12s · 13 restarts/,
+			],
+			[
+				{
+					running: true,
+					suspended: true,
+					transition: "suspending",
+					suspension: {
+						reasonCode: "insufficient-sample-rate",
+						since: iso(NOW - 60_000),
+					},
+				},
+				/process +suspending \(stop pending\)/,
+			],
+		]
+		for (const [over, re] of cases)
+			expect(detailOf(stateWith([row(over)]))).toMatch(re)
+	})
+	it("M-a: countdowns use the server clock, not the local one", () => {
+		const SERVER = NOW - 3_600_000
+		const st = stateWith([
+			row({
+				running: false,
+				health: "restarting",
+				restartCount: 2,
+				desiredRunning: true,
+				nextRestartAt: iso(SERVER + 12_000),
+			}),
+		])
+		const snap = { ...st.fanout.value!, timestamp: iso(SERVER) }
+		// One server, one clock: both server-timestamped lanes are an hour behind.
+		const res = { ...st.resources.value!, timestamp: iso(SERVER) }
+		const skewed = {
+			...st,
+			fanout: laneOk(snap, NOW, "ws"),
+			resources: laneOk(res, NOW, "ws"),
+		}
+		const f = decoderFacts(skewed)[0]!
+		expect(
+			(decoderCells(f, skewed.now)["process"]?.variants ?? []).map(lineText),
+		).toContain("restarting in 12s")
+	})
+	it("M-a: without a server clock there is no countdown", () => {
+		const st = stateWith([
+			row({
+				running: false,
+				health: "restarting",
+				restartCount: 2,
+				desiredRunning: true,
+				nextRestartAt: iso(NOW + 12_000),
+			}),
+		])
+		const noClock = {
+			...st,
+			fanout: { ...st.fanout, value: undefined },
+			resources: { ...st.resources, value: undefined },
+		}
+		const f = decoderFacts(noClock)[0]!
+		expect(
+			(decoderCells(f, noClock.now)["process"]?.variants ?? []).map(lineText),
+		).toEqual(["restarting", "restarting ×2", "restarting · 2 restarts"])
+	})
+	it("M-c: a passed nextRestartAt reads plain restarting", () => {
+		const v = processVariants(
+			row({
+				running: false,
+				health: "restarting",
+				restartCount: 2,
+				desiredRunning: true,
+				nextRestartAt: iso(NOW - 5_000),
+			}),
+		)
+		expect(v.join(" ")).not.toMatch(/in <1s|in \d/)
+		expect(v[0]).toBe("restarting")
+	})
+	it("M-d: faulted with an unparseable retry time reads retry pending", () => {
+		const v = processVariants(
+			row({
+				running: false,
+				health: "faulted",
+				restartCount: 3,
+				nextRestartAt: "soon",
+			}),
+		)
+		expect(v).toContain("faulted · retry pending")
+	})
+})
