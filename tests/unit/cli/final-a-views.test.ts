@@ -60,3 +60,103 @@ describe("views MUST 3: an answered empty lane says what came back", () => {
 		expect(line).toMatch(/^TUNER +fetching \/api\/tuner$/)
 	})
 })
+
+describe("views minors", () => {
+	it("noDataText reads only its own endpoint", () => {
+		const s: S = {
+			...live,
+			conn: {
+				...live.conn,
+				rest: {
+					...live.conn.rest,
+					failing: ["decoders"],
+					firstFailAt: live.now - 5000,
+				},
+			},
+		}
+		expect(noDataText(s, "/api/tuner")).toBe("fetching /api/tuner")
+		expect(noDataText(s, "/api/decoders")).toMatch(
+			/^no data · GET \/api\/decoders failing/,
+		)
+	})
+	it("a closed ws reads ws closed, even before REST ever answered", () => {
+		const s: S = {
+			...live,
+			conn: {
+				...live.conn,
+				ws: { ...live.conn.ws, state: "closed", code: 1006 },
+				rest: { ...live.conn.rest, lastOkAt: null, failing: [] },
+			},
+		}
+		expect(groupsText(s)).toBe("no feed · ws closed 1006")
+	})
+	it("names the in-window decoders when all of them are faulted", () => {
+		const rows = live.decoders.value!.map(
+			(d): DecoderRow =>
+				d.id === "dsd-fme" || d.id === "multimon-ng"
+					? { ...d, running: false, health: "faulted" }
+					: d,
+		)
+		const s = { ...live, decoders: laneOk(rows, live.now - 1000, "rest") }
+		const text = groupsText(s)
+		expect(text).toMatch(/^no decodes · dsd-fme, multimon-ng faulted/)
+		expect(findBanned(text)).toEqual([])
+	})
+	it("one form: N of M in window", () => {
+		const rows = live.decoders.value!.map(
+			(d): DecoderRow =>
+				d.id === "dsd-fme" || d.id === "multimon-ng"
+					? { ...d, bandAssessment: { verdict: "out-of-band" } }
+					: d,
+		)
+		const s = { ...live, decoders: laneOk(rows, live.now - 1000, "rest") }
+		expect(groupsText(s)).toMatch(/^no decodes · 0 of 9 in window/)
+	})
+	it("the strip and the Overview read rx from the same source", () => {
+		const s = withTuner(live, [
+			{ ...live.tuner.value![0]!, sourceId: "other", frequency: 100_000_000 },
+		])
+		const centre = live.sources.value![0]!.caps.centerFreq
+		expect(stripInput(s).rx?.centreHz).toBe(centre)
+		expect(stripInput(s).rx?.control).toBeNull()
+	})
+	it("the Overview marks the declared rate under rateMismatch", () => {
+		const src = live.sources.value![0]!
+		const s = {
+			...live,
+			sources: {
+				...live.sources,
+				value: [
+					{
+						...src,
+						rateMismatch: {
+							declaredSampleRateHz: 2_048_000,
+							measuredSampleRateHz: 1_024_000,
+							deviation: -0.5,
+							since: "2026-10-08T18:07:00.000Z",
+						},
+					},
+				],
+			},
+		}
+		const text = receiverSummary(s, 199).map(lineText).join("\n")
+		expect(text).toContain("2.048 MS/s declared · rate mismatch")
+		const span = receiverSummary(s, 199)
+			.flat()
+			.find(x => x.text.includes("rate mismatch"))
+		expect(span?.role).toBe("attention")
+	})
+	it("DECODERS without data puts the reason beside the title, no column header", () => {
+		const s = scenarioState("api-down", deps)
+		const ov = overviewModel(s, initialUi("overview"), 119, 30, true)
+			.left.map(lineText)
+			.join("\n")
+		expect(ov).toMatch(/^ *DECODERS +no data · API unreachable$/m)
+		expect(ov).not.toMatch(/DECODERS +process/)
+		const dv = decodersModel(s, initialUi("decoders"), 119, 30, true).list.map(
+			lineText,
+		)
+		expect(dv).toHaveLength(1)
+		expect(dv[0]).toMatch(/^ *DECODERS +no data · API unreachable$/)
+	})
+})

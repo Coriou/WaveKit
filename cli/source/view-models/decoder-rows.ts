@@ -623,6 +623,19 @@ export function decoderTable(
 	}
 }
 
+/**
+ * Final views: with no rows the column header says nothing, so the reason sits beside
+ * the title: `   DECODERS  no data · API unreachable`.
+ */
+export function titled(header: Line, placeholder: Line): Line {
+	const i = header.findIndex(s => s.text.includes("DECODERS"))
+	if (i < 0) return placeholder
+	const head = header.slice(0, i + 1)
+	const last = head[i]
+	if (last) head[i] = { ...last, text: last.text.trimEnd() }
+	return [...head, sp("  ", "label"), ...placeholder]
+}
+
 /** Spec §9: cold start, API down without cache, REST 200 with []. */
 export function decodersPlaceholder(state: AppState): Line | null {
 	const lane = state.decoders
