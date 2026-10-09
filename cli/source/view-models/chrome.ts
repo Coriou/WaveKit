@@ -252,6 +252,13 @@ export function bannerConditions(state: AppState): BannerCondition[] {
 }
 
 export const NOTICE_MS = 5000
+/** S5: the external-control notice repeats a footer hint, so it gives the footer back sooner. */
+export const CONTROL_NOTICE_MS = 3000
+
+/** Whether a key notice is still on screen at `now`. */
+export function noticeShown(notice: UiState["notice"], now: number): boolean {
+	return notice !== null && now - notice.at < (notice.ms ?? NOTICE_MS)
+}
 
 export function footerWithNotice(
 	ctx: KeyContext,
@@ -259,7 +266,7 @@ export function footerWithNotice(
 	now: number,
 	width: number,
 ): Line {
-	const shown = notice && now - notice.at < NOTICE_MS ? notice : null
+	const shown = noticeShown(notice, now) ? notice : null
 	const groups = footerGroups(ctx, shown?.text)
 	if (shown)
 		groups.unshift({ priority: 0, variants: [[sp(shown.text, "attention")]] })
