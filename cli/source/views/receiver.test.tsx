@@ -131,4 +131,38 @@ describe("Receiver view (spec §6.4)", () => {
 		expect(h.runtime.sent).toEqual([])
 		h.unmount()
 	})
+	for (const [cols, rows] of [
+		[80, 24],
+		[120, 40],
+	] as const) {
+		it(`confirm bar keeps the action, the bias-t warning and who enters at ${cols}x${rows} (R71)`, async () => {
+			const h = await renderApp({
+				state: internal(scenarioState("live")),
+				views,
+				view: "receiver",
+				cols,
+				rows,
+			})
+			await h.press("e")
+			for (let i = 0; i < 5; i++)
+				await h.press(KEYS.left, { expectWrite: false })
+			for (const d of "433920") await h.press(d)
+			for (let i = 0; i < 6; i++)
+				await h.press(KEYS.tab, { expectWrite: false })
+			await h.press(KEYS.space)
+			await h.press(KEYS.enter)
+			const bar = h.frame().at(-1) ?? ""
+			expect([...bar].length).toBeLessThanOrEqual(cols)
+			expect(bar).toMatch(/send 2 (commands )?to pi-iq/)
+			expect(bar).toMatch(
+				/bias-t (DC on antenna|supplies DC on the antenna port)/,
+			)
+			expect(bar).toContain("rtl433 enters")
+			expect(bar).toMatch(/y send {2}n back$/)
+			if (cols >= 120)
+				expect(bar).toContain("bias-t supplies DC on the antenna port")
+			expect(h.runtime.sent).toEqual([])
+			h.unmount()
+		})
+	}
 })

@@ -1,4 +1,5 @@
 import type { WriteIntent } from "../data/types.js"
+import type { Group } from "./line.js"
 import { VIEW_ORDER, type ViewId } from "./actions.js"
 
 export type PresetName = "all" | "aircraft" | "voice" | "pager" | "data"
@@ -53,6 +54,11 @@ export interface ConfirmRequest {
 	extra?: string
 	intent: WriteIntent
 	presetIndex?: number
+	/**
+	 * The prompt as priority groups (R71): when present the confirm bar fits these to
+	 * the width (spec §4.2) instead of cutting `prompt · extra` at the tail.
+	 */
+	groups?: Group[]
 }
 
 export interface MessagesUi {

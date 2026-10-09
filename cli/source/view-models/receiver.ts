@@ -296,8 +296,9 @@ export function confirmItem(c: PendingChange): string {
 
 /**
  * The review confirm; null when nothing changed or a field is out of core's range.
- * With `state`, the extra names the blast radius (spec §10.9) after any bias-t warning;
- * the confirm bar cuts it to the width.
+ * With `state` it also names the blast radius (spec §10.9). `groups` fit the bar by
+ * priority (R71): the action, then a safety warning, then who enters or leaves, then
+ * the field details, then the tuned list.
  */
 export function tunerConfirm(
 	edit: TunerEditState,
@@ -306,17 +307,51 @@ export function tunerConfirm(
 	const commands = pendingCommands(edit)
 	if (commands.length === 0 || outOfRange(edit).length > 0) return null
 	const n = commands.length
+	const action = `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}`
+	const details = pendingChanges(edit).map(confirmItem).join(", ")
+	const bias = turnsBiasTeeOn(edit)
+	const affects = state ? editImpact(state, edit) : null
 	const extras = [
-		...(turnsBiasTeeOn(edit) ? ["bias-t supplies DC on the antenna port"] : []),
-		...(state ? [`affects ${editAffects(state, edit)}`] : []),
+		...(bias ? ["bias-t supplies DC on the antenna port"] : []),
+		...(affects ? [`affects ${affectsJoin(affects)}`] : []),
+	]
+	const groups: Group[] = [
+		one(
+			0,
+			[sp(`send ${n} to ${edit.sourceId}`, "value", true)],
+			[sp(action, "value", true)],
+			[sp(`${action}: ${details}`, "value", true)],
+		),
+		...(bias
+			? [
+					one(
+						1,
+						[sp("bias-t DC on antenna", "attention", true)],
+						[sp("bias-t supplies DC on the antenna port", "attention", true)],
+					),
+				]
+			: []),
+		...(affects
+			? [
+					one(
+						2,
+						[sp(affects.short, "value")],
+						[sp(affects.moves, "value")],
+						...(affects.tuned === null
+							? []
+							: [[sp(`affects ${affectsJoin(affects)}`, "value")]]),
+					),
+				]
+			: []),
 	]
 	return {
 		kind: "tuner",
-		prompt: `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}: ${pendingChanges(edit).map(confirmItem).join(", ")}`,
+		prompt: `${action}: ${details}`,
 		...(extras.length > 0 ? { extra: extras.join(sep()) } : {}),
 		yes: "send",
 		no: "back",
 		intent: { kind: "tuner", sourceId: edit.sourceId, commands },
+		groups,
 	}
 }
 
@@ -457,13 +492,20 @@ function membershipLists(
 }
 
 /** "dsd-fme, multimon-ng (tuned) · lora-meshtastic enters"; never claims more than is known. */
-function affectsText(impact: RetuneImpact, fromKnown: boolean): string {
+interface Affects {
+	/** "dsd-fme, multimon-ng (tuned)", or null when no tuned decoder is on the source. */
+	tuned: string | null
+	/** Who enters or leaves, or what is unknown: "lora-meshtastic enters", "window now ?". */
+	moves: string
+	/** The same, terse for a narrow confirm bar ("no decoder enters or leaves"). */
+	short: string
+}
+
+function affectsParts(impact: RetuneImpact, fromKnown: boolean): Affects {
+	const tuned =
+		impact.tuned.length > 0 ? `${impact.tuned.join(", ")} (tuned)` : null
+	if (!fromKnown) return { tuned, moves: "window now ?", short: "window now ?" }
 	const parts: string[] = []
-	if (impact.tuned.length > 0) parts.push(`${impact.tuned.join(", ")} (tuned)`)
-	if (!fromKnown) {
-		parts.push(`window now ?`)
-		return parts.join(sep())
-	}
 	const moves = [
 		...impact.enters.map(x => `${x} enters`),
 		...impact.leaves.map(x => `${x} leaves`),
@@ -472,8 +514,16 @@ function affectsText(impact: RetuneImpact, fromKnown: boolean): string {
 	else if (impact.unknown.length === 0)
 		parts.push("no decoder enters or leaves the window")
 	if (impact.unknown.length > 0) parts.push(`${impact.unknown.join(", ")} ?`)
-	return parts.join(sep())
+	const moved = moves.length > 0 || impact.unknown.length > 0
+	return {
+		tuned,
+		moves: parts.join(sep()),
+		short: moved ? parts.join(sep()) : "no decoder enters or leaves",
+	}
 }
+
+const affectsJoin = (a: Affects): string =>
+	a.tuned === null ? a.moves : `${a.tuned}${sep()}${a.moves}`
 
 /** The window the draft would tune to. */
 function draftWindow(edit: TunerEditState): TunedWindow {
@@ -489,7 +539,12 @@ function draftWindow(edit: TunerEditState): TunedWindow {
 
 /** Who a retune to the draft moves, from what is known: "decoders ?" when the lane is unknown. */
 export function editAffects(state: AppState, edit: TunerEditState): string {
-	if (state.decoders.value === undefined) return "decoders ?"
+	return affectsJoin(editImpact(state, edit))
+}
+
+function editImpact(state: AppState, edit: TunerEditState): Affects {
+	if (state.decoders.value === undefined)
+		return { tuned: null, moves: "decoders ?", short: "decoders ?" }
 	const current = windowFor(
 		edit.sourceId,
 		state.tuner.value,
@@ -506,7 +561,7 @@ export function editAffects(state: AppState, edit: TunerEditState): string {
 		current,
 		draftWindow(edit),
 	)
-	return affectsText(impact, current !== null)
+	return affectsParts(impact, current !== null)
 }
 
 function pendingLine(edit: TunerEditState, width: number): Line {
