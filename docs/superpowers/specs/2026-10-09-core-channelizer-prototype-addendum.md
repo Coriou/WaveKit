@@ -73,9 +73,11 @@ Derivation is pure and lives beside the existing adapter helpers
 (`audioDemodRateAdapter`, `iqDecimateRateAdapter`, rate-model § 2.2) so the
 pipeline string and the request cannot disagree. Default passband when the
 decoder declares nothing narrower: `t = filterTransition ?? 0.05`,
-`transitionHz = outputRateHz × t / 2`, `bandwidthHz = outputRateHz × (1 − t)`,
-which reproduces today's `firdecimate` cut at the output Nyquist
-(`iq-decimate-decoder.ts:175`, `audio-demod-decoder.ts:217, 235`).
+`transitionHz = outputRateHz × t / 2`, `bandwidthHz = outputRateHz × (1 − t)`.
+That reproduces today's `firdecimate` cut at the output Nyquist only when the
+decoder sets `filterTransition` (multimon-ng, direwolf, the IQ family). A
+decoder without it (dsd-fme, acarsdec) uses the channel-matched raw filter, and
+its request derives the passband from the same `channelFilterPlan` (§ 14 A16).
 `DemodulationConfig.bandwidth` stays informational, as it is today.
 
 | Instance | outputRateHz | format | Change versus today |
@@ -83,7 +85,7 @@ which reproduces today's `firdecimate` cut at the output Nyquist
 | ais-catcher | 384 000 | cu8 | replaces `sox rate -h` (`iqResampleCommand`, `process-tools.ts:32-70`) |
 | dumpvdl2 | `targetSampleRate` (1 050 000) | cu8 (`U8` in dumpvdl2 terms) | replaces sox; `bandwidthHz = max(default, span + 50 000)` |
 | rtl_433 | `targetSampleRate` exactly (250 000 default) | cu8 | integer `fs/k` becomes exact; adapter reports `resample` |
-| multimon-ng, direwolf, dsd-fme | `demodSampleRate ?? sampleRate` (48 000) | cf32 | k=43 → 47 627.9 Hz at 2.048 Msps becomes exactly 48 000; sox after demod disappears for direwolf and dsd-fme |
+| multimon-ng, direwolf, dsd-fme | `demodSampleRate ?? sampleRate` (48 000) | cf32 | k=43 → 47 627.9 Hz at 2.048 Msps becomes exactly 48 000; sox after demod disappears for direwolf; dsd-fme keeps its WAV wrapper |
 | acarsdec | 24 000 | cf32 | as above, exact |
 
 `frontendIq` in each `DecoderRateRequirements` (rate-model § 2.3) is unchanged:
@@ -350,13 +352,19 @@ Spawn: `wavekit-chan --generation G --input-format cu8 --input-rate FS
 --input-center C --usable-fraction F --block-samples B --socket-dir DIR`.
 Requests on stdin, events on stdout, one JSON object per line, every line with
 `v: 1`. Zod schemas in `src/core/channelizer/protocol.ts`; unknown request
-`type` yields `rejected` with `channel-request-invalid`, never an exit.
+`type` yields `rejected` with `channel-request-invalid`, never an exit. As
+implemented (`native/wavekit-chan/src/protocol.rs`): requests arrive on fd 3
+(§ 14 A1); `queueBytes` is within 1..=64 MiB and at least one sample;
+`gain` (cu8 only) is within 1e-6..=1e6; `mark-gap` without `atInputByte`
+marks the gap at the bytes received so far; `shutdown` has no event of its
+own: it emits `closed` (`requested`) for every open channel, then the process
+exits 0.
 
 ```ts
 // requests
 { v: 1, type: "open", id, centerHz, bandwidthHz, transitionHz, outputRateHz, format: "cu8" | "cf32", gain?, queueBytes }
 { v: 1, type: "close", id }
-{ v: 1, type: "mark-gap" }                 // Node saw an input-branch drop
+{ v: 1, type: "mark-gap", atInputByte?, droppedInputBytes? }  // Node saw an input-branch drop (plan A2)
 { v: 1, type: "shutdown" }
 // events
 { v: 1, type: "ready", generation, pid }
@@ -429,7 +437,7 @@ channel status.
 
 ## 14. Deviations adopted by the implementation plan (2026-10-09)
 
-The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this addendum except for the five points below. Each is bounded to the plan tasks named in its assumption.
+The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this addendum except for the points below; A16–A18 come from the plan's delta (`2026-10-09-core-channelizer-delta.md`, E7, E9, E10c). Each is bounded to the plan tasks named in its assumption.
 
 | Deviation | Addendum section | What the plan does instead | Why |
 |---|---|---|---|
@@ -438,3 +446,6 @@ The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this ad
 | A5: no `rustfft` | § 10 (crate list) | Crates are `serde` and `serde_json`, with `proptest` as a dev-dependency only. | The direct FIR path (halfband cascade plus rational polyphase) needs no FFT; tone tests use correlation and filter design uses a hand-written Kaiser window. |
 | A10: spread over the admissible range | § 9 (spread at `center + usable × ((k + 0.5)/N − 0.5)`) | The formula is applied to the admissible centre range `±L`, `L = ⌊fs·F/2 − (bw/2 + tr)⌋`; clustered placements are shifted inside `±L`. | Applied literally, wide channels (AIS at N = 8) land outside § 6's own admission rule, get `channel-outside-capture`, and the gate silently runs fewer channels. |
 | AIS channel centre | § 8 fixture example (`channel: { center_hz: 161975000 }`) | AIS goldens, harness tests and capacity placements use the A/B pair centre 162 000 000 Hz as the channel centre. | AIS-catcher expects its input centred between channels A and B (±25 kHz); centring on channel A shifts baseband by 25 kHz and mis-tunes both channels. |
+| A16: matched passband | § 2 (default `t = filterTransition ?? 0.05`) | Without `filterTransition`, the request takes its passband from `channelFilterPlan(outputRateHz, 1, bandwidth)`: `bandwidthHz = 2·passbandHz`, `transitionHz = stopbandHz − passbandHz` (dsd-fme 12 500 / 6 250, acarsdec 12 000 / 6 000). With it, the § 2 formula holds. | The raw path now uses a channel-matched `firdecimate` for these decoders; the § 2 default would be about 3.6 times wider than raw. |
+| A17: `offsetHz` absorbed | § 1 (centre per instance) | The request centre is `channelHz ?? (capture centre + offsetHz)`; `channelHz` wins when both are set (warned once). The cf32 tail has no `csdr shift`, and `offsetHz` is not validated against the output rate. | The channel is already centred; a shift would move it twice, and the raw-path offset bound would cause a start-failure loop. |
+| A18: band at the channel centre | § 1, § 5 | A decoder with a valid channel request is band-assessed at `request.centerHz` with `frontendRateHz = request.outputRateHz`, not at the capture centre. | Otherwise a channel away from the capture centre is band-suspended although the channelizer could serve it. |

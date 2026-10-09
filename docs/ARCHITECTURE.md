@@ -115,6 +115,25 @@ Multiplexes a single audio stream to multiple decoder consumers.
 - `branch-added` — New branch created
 - `branch-removed` — Branch removed
 
+### Core channelizer (opt-in)
+
+Cuts exact-rate channels out of a source's IQ in one native process instead of one csdr front end per decoder. Spec: [channelizer addendum](superpowers/specs/2026-10-09-core-channelizer-prototype-addendum.md).
+
+**Location**: `src/core/channelizer/` (`ChannelizerManager`), `native/wavekit-chan/` (Rust)
+
+- **Opt-in twice**: `channelizer.enabled: true` constructs the manager in `src/index.ts`, and each decoder instance opts in with `useChannelizer: true`. Both default to false; with either off the decoder reads its raw fanout branch exactly as before. A decoder with `useChannelizer` but no channel request (not yet migrated, addendum §7) also stays on raw fanout. readsb and lora-meshtastic are never channelised.
+- **One `wavekit-chan` per source**, spawned lazily on the first channel request and stopped when its last channel is released. It reads raw CU8 from fanout branch `channelizer-<sourceId>` on stdin, takes JSON-line requests on fd 3 (`--control-fd 3`) and emits events on stdout. Each channel is a Unix socket `<channelizer.socketDir>/<sourceId>-g<generation>/<channelId>.sock`; the decoder gets a stream fed from it.
+- **Admission failures are suspensions, not crashes**: `channel-outside-capture`, `channel-request-invalid`, `channelizer-unavailable` (core-internal; the status DTO shows `suspended: true` without a `suspension` object). `channelizer-unavailable` decoders are retried every 15 s; after 5 unexpected `wavekit-chan` exits within 60 s a source gets no respawn until the oldest exit leaves the window.
+- **Shutdown**: the channelizer is destroyed after `decoderManager.destroy()` has released every channel.
+
+**Known limitations**:
+
+- Every channel invalidation (caps change, source disconnect/remove, `wavekit-chan` exit) restarts the channelised decoder. dsd-fme's `stop()` emits `call_end`, so a PTT spanning a retune is split and the digital-voice stream (:8082) has a gap.
+- An input-branch drop sends `mark-gap`, which resets the channel filter state without a restart; expect AMBE errors around branch drops.
+- A stale `caps.centerFreq` (SDR++ retuning the Pi without going through the relay) puts every channel centre on the wrong RF. Rate-truth only warns.
+- With the capture centre unknown, mixing a decoder pinned to an absolute frequency with a centre-relative one is order-dependent.
+- There is no DC removal or AGC anywhere in the channel path (FIR, NCO, polyphase only). Keep it that way: an IIR high-pass or fast AGC chops TDMA bursts (the `9ff133d` dsd-fme lesson).
+
 ### DecoderManager
 
 Orchestrates decoder process lifecycles.
