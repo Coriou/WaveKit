@@ -32,6 +32,11 @@ import { SourceConnectionError, WaveKitError } from "../utils/errors.js"
 import type { SourceConfig, SourceCaps } from "../config.js"
 import { detectAudioFormat } from "../utils/audio-analyzer.js"
 import { convertFloat32ToS16LE } from "../utils/converters.js"
+import {
+	RateTruthTracker,
+	bytesPerSampleFor,
+	type RateMismatch,
+} from "./rate-truth.js"
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
@@ -79,6 +84,8 @@ export interface SourceStatus {
 	lastError?: string | undefined
 	reconnectAttempts: number
 	caps: SourceCaps
+	/** Present only while the measured rate disagrees with caps (rate-truth check). */
+	rateMismatch?: RateMismatch | undefined
 }
 
 /**
@@ -111,6 +118,8 @@ export interface SourceManagerEvents {
 	) => void
 	ended: (sourceId: string) => void // For recording sources
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
+	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
+	"rate-truth-changed": (sourceId: string) => void
 	/**
 	 * First payload bytes of a session (after rtl_tcp header stripping), once
 	 * per connection. Through rtlmux this means the upstream dongle is back.
@@ -164,6 +173,12 @@ interface SourceState {
 	bytesReceivedSinceLastMetric: number
 	lastMetricTime: number
 	dataRate: number
+	/** Measured versus declared rate; network sources only. */
+	rateTruth: RateTruthTracker
+	/** The socket was paused for backpressure during the current metrics interval. */
+	pausedSinceLastMetric: boolean
+	/** Metrics intervals completed in this session (the first one is partial). */
+	metricTicksSinceConnect: number
 	lastError?: string | undefined
 	reconnectAttempts: number
 	reconnectTimer: ReturnType<typeof setTimeout> | null
@@ -286,6 +301,9 @@ export class SourceManager extends EventEmitter {
 			bytesReceived: 0,
 			sessionBytesReceived: 0,
 			bytesReceivedSinceLastMetric: 0,
+			rateTruth: new RateTruthTracker(),
+			pausedSinceLastMetric: false,
+			metricTicksSinceConnect: 0,
 			lastMetricTime: Date.now(),
 			dataRate: 0,
 			reconnectAttempts: 0,
@@ -369,7 +387,10 @@ export class SourceManager extends EventEmitter {
 		let canWrite = true
 		if (!state.stream.destroyed) {
 			canWrite = state.stream.write(chunk)
-			if (!canWrite) state.socket?.pause()
+			if (!canWrite) {
+				state.socket?.pause()
+				state.pausedSinceLastMetric = true
+			}
 		}
 		this.emit("data", id, chunk)
 		if (firstPayload) this.emit("payload-started", id)
@@ -778,6 +799,9 @@ export class SourceManager extends EventEmitter {
 				state.dataRate = 0
 				state.bytesReceivedSinceLastMetric = 0
 				state.lastMetricTime = Date.now()
+				state.metricTicksSinceConnect = 0
+				state.pausedSinceLastMetric = false
+				this.resetRateTruth(id, state)
 				state.reconnectAttempts = 0
 				state.lastError = undefined
 
@@ -1169,6 +1193,13 @@ export class SourceManager extends EventEmitter {
 			state.dataRate = state.bytesReceivedSinceLastMetric / 1024 / elapsed
 		}
 
+		this.checkRateTruth(
+			id,
+			state,
+			state.bytesReceivedSinceLastMetric,
+			now - state.lastMetricTime,
+			now,
+		)
 		state.bytesReceivedSinceLastMetric = 0
 		state.lastMetricTime = now
 
@@ -1176,6 +1207,59 @@ export class SourceManager extends EventEmitter {
 			bytesReceived: state.bytesReceived,
 			dataRate: state.dataRate,
 		})
+	}
+
+	/**
+	 * Feeds one metrics interval to the rate-truth check. Network sources
+	 * only (recordings are paced by playback speed). Intervals that cannot be
+	 * trusted (first after connect, backpressure pause) are skipped.
+	 */
+	private checkRateTruth(
+		id: string,
+		state: SourceState,
+		bytes: number,
+		elapsedMs: number,
+		now: number,
+	): void {
+		if (state.config.type === "recording") return
+		if (!state.connected) {
+			this.resetRateTruth(id, state)
+			return
+		}
+		const caps = state.config.caps
+		const bytesPerSample = bytesPerSampleFor(caps)
+		const stable =
+			state.metricTicksSinceConnect > 0 &&
+			!state.pausedSinceLastMetric &&
+			!state.socket?.isPaused()
+		state.metricTicksSinceConnect++
+		state.pausedSinceLastMetric = false
+		if (bytesPerSample === undefined) return
+
+		const transition = state.rateTruth.observe({
+			atMs: now,
+			elapsedMs,
+			bytes,
+			declaredSampleRateHz: caps.sampleRate,
+			bytesPerSample,
+			stable,
+		})
+		if (transition === "flagged") {
+			this.logger.warn(
+				{ sourceId: id, ...state.rateTruth.mismatch },
+				"Source delivers a different sample rate than its caps declare; caps left unchanged (check external tuner clients)",
+			)
+		} else if (transition === "cleared") {
+			this.logger.info(
+				{ sourceId: id, declaredSampleRateHz: caps.sampleRate },
+				"Source rate matches its caps again",
+			)
+		}
+		if (transition) this.emit("rate-truth-changed", id)
+	}
+
+	private resetRateTruth(id: string, state: SourceState): void {
+		if (state.rateTruth.reset()) this.emit("rate-truth-changed", id)
 	}
 
 	/**
@@ -1258,6 +1342,9 @@ export class SourceManager extends EventEmitter {
 			lastError: state.lastError,
 			reconnectAttempts: state.reconnectAttempts,
 			caps: state.config.caps,
+			...(state.rateTruth.mismatch
+				? { rateMismatch: state.rateTruth.mismatch }
+				: {}),
 		}
 	}
 
