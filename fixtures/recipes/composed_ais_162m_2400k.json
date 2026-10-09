@@ -40,13 +40,15 @@
 			"name": "ais_a",
 			"source": "iqengine_ais_161975k",
 			"offsetHz": -25000,
-			"levelDb": -9
+			"levelDb": -9,
+			"bandwidthHz": 20000
 		},
 		{
 			"name": "ais_b",
 			"source": "iqengine_ais_162025k",
 			"offsetHz": 25000,
-			"levelDb": -9
+			"levelDb": -9,
+			"bandwidthHz": 20000
 		}
 	]
 }

@@ -3,7 +3,8 @@
 
 Channelizer T7a (addendum §8, D2 as amended 2026-10-09). The output is what an RTL-SDR
 tuned to the recipe's centre would have recorded: every component is resampled to the
-output rate (polyphase, Kaiser window, 90 dB stopband), mixed to its offset and summed,
+output rate (polyphase, Kaiser window, passband to 0.8x and 90 dB stopband from 1.2x the
+lower Nyquist), mixed to its offset and summed,
 then seeded complex Gaussian noise, an optional IQ image and DC spike are added and the
 result is quantised to cu8 as floor(127.5 * x + 128), saturated to 0..255 (the A6 cu8
 mapping). The run aborts if more than 0.01 % of the I/Q values saturate.
@@ -21,11 +22,16 @@ Recipe (JSON), see fixtures/recipes/ and fixtures/README.md:
   sources        [{id, url, sha256, format: cu8|cs8|cs16|cf32|wav, sampleRate,
                    centerHz?, file?, license, attribution?}]
   components     [{name, source | generator (+ params), offsetHz, levelDb,
-                   startS?, repeatEveryS?, trimS?: [from, to], rampS?, expected?}]
+                   shiftHz?, bandwidthHz?, startS?, repeatEveryS?, trimS?: [from, to],
+                   rampS?, expected?}]
 levelDb places the component's envelope reference (99.9th percentile of |x| over its
 nonzero samples) at that many dB below full scale. offsetHz is where the component's
-own baseband 0 Hz lands, relative to centerHz. rampS tapers a source snippet's ends
-(raised cosine) so a repeated short recording does not key on with a click.
+own baseband 0 Hz lands, relative to centerHz. shiftHz (integer) first mixes a source
+component at its native rate, to bring a wanted signal that is off the source's centre
+to 0 Hz. bandwidthHz then low-passes it at its native rate (passband +-bandwidthHz/2,
+90 dB stopband from 1.5x that edge), so a wide source contributes only its own channel.
+rampS tapers a source snippet's ends (raised cosine) so a repeated short recording does
+not key on with a click.
 
 Determinism: same recipe, seed and numpy major version give the same bytes on one
 platform; libm or numpy differences can change the last bit of a float and so the sha256.
@@ -48,7 +54,9 @@ GENERATORS = {'pocsag': pocsag.generate, 'acars': acars.generate}
 FORMATS = {'cu8', 'cs8', 'cs16', 'cf32', 'wav'}
 CHUNK = 1 << 20
 STOPBAND_DB = 90.0
-PASS_FRACTION = 0.8
+PASS_FRACTION = 0.8  # resampler passband edge; the stopband starts at (2 - PASS_FRACTION) x Nyquist
+BAND_STOP_RATIO = 1.5  # bandwidthHz filter: stopband edge / passband edge
+FFT_BLOCK = 1 << 18
 MAX_CLIP_FRACTION = 1e-4
 
 
@@ -130,6 +138,33 @@ def quantise_cu8(iq):
     return np.clip(q, 0, 255).astype(np.uint8), clipped
 
 
+def kaiser_taps(f_pass, f_stop, fs):
+    """Odd-length Kaiser low-pass (unity DC gain) for STOPBAND_DB, cutoff midway."""
+    beta = 0.1102 * (STOPBAND_DB - 8.7)
+    n = math.ceil((STOPBAND_DB - 7.95) / (2.285 * 2 * math.pi * (f_stop - f_pass) / fs)) + 1
+    n += 1 - n % 2
+    fc = (f_pass + f_stop) / 2 / fs
+    t = np.arange(n) - (n - 1) / 2
+    return 2 * fc * np.sinc(2 * fc * t) * np.kaiser(n, beta)
+
+
+def band_limit(x, fs, bandwidth_hz):
+    """Zero-delay complex low-pass to +-bandwidth_hz/2 (FFT overlap-add); same length as x."""
+    half = bandwidth_hz / 2
+    if not 0 < half * BAND_STOP_RATIO < fs / 2:
+        raise RecipeError(f'bandwidthHz {bandwidth_hz} does not fit a {fs} Hz source')
+    h = kaiser_taps(half, half * BAND_STOP_RATIO, fs)
+    n_fft = max(FFT_BLOCK, 1 << (2 * len(h) - 1).bit_length())
+    step = n_fft - len(h) + 1
+    spectrum = np.fft.fft(h, n_fft)
+    y = np.zeros(len(x) + len(h) - 1, dtype=np.complex128)
+    for i in range(0, len(x), step):
+        block = x[i : i + step]
+        y[i : i + len(block) + len(h) - 1] += np.fft.ifft(np.fft.fft(block, n_fft) * spectrum)[: len(block) + len(h) - 1]
+    delay = (len(h) - 1) // 2
+    return y[delay : delay + len(x)]
+
+
 class Resampler:
     """Rational L/M polyphase resampler with a Kaiser-windowed sinc and zero group delay."""
 
@@ -186,6 +221,8 @@ def load_recipe(path):
         if s.get('format') not in FORMATS:
             raise RecipeError(f"source {s['id']}: format must be one of {sorted(FORMATS)}")
         s.setdefault('file', f"{s['id']}.{s['format']}")
+        if Path(s['file']).is_absolute() or '..' in Path(s['file']).parts:
+            raise RecipeError(f"source {s['id']}: file must be relative to the sources directory, without '..'")
     for c in recipe['components']:
         if ('source' in c) == ('generator' in c):
             raise RecipeError(f"component {c.get('name')}: exactly one of source / generator")
@@ -195,6 +232,10 @@ def load_recipe(path):
             raise RecipeError(f"component {c['name']}: unknown generator {c['generator']}")
         if int(c['offsetHz']) != c['offsetHz'] or abs(c['offsetHz']) >= recipe['sampleRate'] / 2:
             raise RecipeError(f"component {c['name']}: offsetHz must be an integer inside the capture")
+        if int(c.get('shiftHz', 0)) != c.get('shiftHz', 0):
+            raise RecipeError(f"component {c['name']}: shiftHz must be an integer")
+        if 'generator' in c and ('shiftHz' in c or 'bandwidthHz' in c):
+            raise RecipeError(f"component {c['name']}: shiftHz / bandwidthHz are for source components")
     recipe['_sources'] = sources
     return recipe
 
@@ -221,6 +262,13 @@ def build_component(recipe, comp, sources_dir):
         if 'trimS' in comp:
             a, b = comp['trimS']
             x = x[int(round(a * fs_in)) : int(round(b * fs_in))]
+        if comp.get('shiftHz'):
+            n = np.arange(len(x), dtype=np.int64)
+            x = x * np.exp(2j * np.pi * ((n * int(comp['shiftHz'])) % fs_in) / fs_in)
+            info['shiftHz'] = comp['shiftHz']
+        if comp.get('bandwidthHz'):
+            x = band_limit(x, fs_in, comp['bandwidthHz'])
+            info['bandwidthHz'] = comp['bandwidthHz']
         if comp.get('rampS'):
             x = x * keyed_envelope(len(x), fs_in, comp['rampS'])
         expected = comp.get('expected', [])
@@ -250,6 +298,19 @@ def build_component(recipe, comp, sources_dir):
 
 
 def compose(recipe, out_path, sources_dir, sidecar_path=None):
+    """Writes out_path (and sidecar_path) via temporary names, renamed only when the clip guard passes."""
+    tmp_out = Path(f'{out_path}.tmp')
+    try:
+        sidecar = render(recipe, tmp_out, sources_dir)
+        if sidecar_path:
+            Path(sidecar_path).write_text(json.dumps(sidecar, indent=2) + '\n')
+        tmp_out.replace(out_path)
+    finally:
+        tmp_out.unlink(missing_ok=True)
+    return sidecar
+
+
+def render(recipe, out_path, sources_dir):
     fs = int(recipe['sampleRate'])
     n_total = int(round(recipe['durationS'] * fs))
     parts = [build_component(recipe, c, sources_dir) for c in recipe['components']]
@@ -280,7 +341,9 @@ def compose(recipe, out_path, sources_dir, sidecar_path=None):
             digest.update(q.tobytes())
             out.write(q.tobytes())
     fraction = clipped / (2 * n_total)
-    sidecar = {
+    if fraction > MAX_CLIP_FRACTION:
+        raise RecipeError(f'{clipped} of {2 * n_total} I/Q values saturate ({fraction:.2e} > {MAX_CLIP_FRACTION}); lower levelDb')
+    return {
         'id': recipe['id'],
         'composer': 'fixtures/compose.py',
         'numpy': np.__version__,
@@ -299,11 +362,6 @@ def compose(recipe, out_path, sources_dir, sidecar_path=None):
         'sha256': digest.hexdigest(),
         'components': [info for info, _, _ in parts],
     }
-    if sidecar_path:
-        Path(sidecar_path).write_text(json.dumps(sidecar, indent=2) + '\n')
-    if fraction > MAX_CLIP_FRACTION:
-        raise RecipeError(f'{clipped} of {2 * n_total} I/Q values saturate ({fraction:.2e} > {MAX_CLIP_FRACTION}); lower levelDb')
-    return sidecar
 
 
 def main(argv=None):

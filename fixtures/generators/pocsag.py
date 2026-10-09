@@ -109,15 +109,16 @@ def continuous(pages, fs, deviation_hz, duration_s, start_s, gap_s):
     start, end = int(round(start_s * fs)), total - int(round(start_s * fs))
     freqs, starts, pos = [], [], start
     for i, page in enumerate(pages):
-        baud = int(page['baud'])
-        extra = [1, 0] * int(round(gap_s * baud / 2)) if i else []
+        page_baud = int(page['baud'])
+        extra = [1, 0] * int(round(gap_s * page_baud / 2)) if i else []
         starts.append(pos / fs)
-        freqs.append(fsk_freq(extra + page_bits(page), baud, fs, deviation_hz))
+        freqs.append(fsk_freq(extra + page_bits(page), page_baud, fs, deviation_hz))
         pos += len(freqs[-1])
     if pos > end:
         raise ValueError(f'pages end at {pos / fs:.3f} s, past {end / fs:.3f} s')
-    idle = (bits_msb_first(SYNC, 32) + bits_msb_first(IDLE, 32) * 16) * (1 + (end - pos) * baud // (fs * 544))
-    freqs.append(fsk_freq(idle, baud, fs, deviation_hz)[: end - pos])
+    tail_baud = int(pages[-1]['baud'])  # the idle batches continue at the last page's rate
+    idle = (bits_msb_first(SYNC, 32) + bits_msb_first(IDLE, 32) * 16) * (1 + (end - pos) * tail_baud // (fs * 544))
+    freqs.append(fsk_freq(idle, tail_baud, fs, deviation_hz)[: end - pos])
     freq = np.concatenate(freqs)
     iq = np.zeros(total, dtype=np.complex128)
     iq[start:end] = keyed_envelope(len(freq), fs, 0.001) * np.exp(1j * cpfsk_phase(freq, fs))
@@ -127,6 +128,8 @@ def continuous(pages, fs, deviation_hz, duration_s, start_s, gap_s):
 def generate(params, duration_s):
     fs = int(params.get('sampleRate', 48000))
     deviation = float(params.get('deviationHz', 4500))
+    if not params.get('pages'):
+        raise ValueError('pocsag: pages is empty (nothing to transmit)')
     bursts, expected = [], []
     for page in params['pages']:
         baud = int(page['baud'])

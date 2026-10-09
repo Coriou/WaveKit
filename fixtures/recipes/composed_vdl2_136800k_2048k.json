@@ -1,0 +1,65 @@
+{
+	"id": "composed_vdl2_136800k_2048k",
+	"description": "VDL2 on 136.725 / 136.875 / 136.975 MHz in one 2.048 Msps RTL-SDR capture centred on 136.650 MHz: both channels of the real pyVDL2 recording (each shifted to its own frequency and band-limited) and the synthetic dumpvdl2 test burst. The three frequencies fit one dumpvdl2 channel request (span midpoint 136.850 MHz).",
+	"sampleRate": 2048000,
+	"centerHz": 136650000,
+	"durationS": 10,
+	"seed": 13680,
+	"noiseDbfs": -45,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 40,
+		"phaseDeg": 8
+	},
+	"sources": [
+		{
+			"id": "pyvdl2_sample_iqdata_rtlsdr",
+			"url": "https://raw.githubusercontent.com/junzis/pyVDL2/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data/sample_iqdata_rtlsdr.dat",
+			"sha256": "0f17927ceb075c644db951f934d8ce92122c316907882f523b15d04ef5f0a233",
+			"format": "cu8",
+			"sampleRate": 1050000,
+			"centerHz": 136975000,
+			"license": "GPL-3.0 (junzis/pyVDL2 repository license; no per-file grant)",
+			"attribution": "junzis/pyVDL2 @ d57de3b tests/data/sample_iqdata_rtlsdr.dat: real RTL-SDR recording, 10 s, decoded upstream with channel_freq 136975000 (tests/test_vdl2_decoding.py), so centerHz is nominal. Its bursts sit at -10.45 kHz (2.58, 5.50, 8.20 s) and +39.74 kHz (2.78, 3.02, 6.04 s) from the file's 0 Hz.",
+			"origin": "https://github.com/junzis/pyVDL2/tree/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data"
+		},
+		{
+			"id": "dumpvdl2_vdl2_model_16b_1050k",
+			"url": "https://raw.githubusercontent.com/szpajder/dumpvdl2/686e87f2294ef6275855ba7364bd4bb9a0f8f56a/test/vdl2_model_16b_1050kHz.wav",
+			"sha256": "50a8dc2b270362d0f85f92c7dcf458fb3706e2ce0221ba2dfa86b6a5128a124b",
+			"format": "wav",
+			"sampleRate": 1050000,
+			"license": "GPL-3.0 (szpajder/dumpvdl2 repository license; synthetic test vector)",
+			"attribution": "szpajder/dumpvdl2 @ 686e87f test/vdl2_model_16b_1050kHz.wav: synthetic S16 I/Q, one burst at 0 Hz in 0.377 s. The WAV header says 44100 Hz; the samples are 1.05 Msps (dumpvdl2 README: oversample 10), so sampleRate overrides the header.",
+			"origin": "https://github.com/szpajder/dumpvdl2/tree/686e87f2294ef6275855ba7364bd4bb9a0f8f56a/test"
+		}
+	],
+	"components": [
+		{
+			"name": "pyvdl2_136975k",
+			"source": "pyvdl2_sample_iqdata_rtlsdr",
+			"shiftHz": 10455,
+			"bandwidthHz": 25000,
+			"offsetHz": 325000,
+			"levelDb": -12
+		},
+		{
+			"name": "pyvdl2_136875k",
+			"source": "pyvdl2_sample_iqdata_rtlsdr",
+			"shiftHz": -39741,
+			"bandwidthHz": 25000,
+			"offsetHz": 225000,
+			"levelDb": -12
+		},
+		{
+			"name": "dumpvdl2_model_136725k",
+			"source": "dumpvdl2_vdl2_model_16b_1050k",
+			"bandwidthHz": 25000,
+			"offsetHz": 75000,
+			"levelDb": -12,
+			"startS": 0.5,
+			"repeatEveryS": 2.0,
+			"rampS": 0.005
+		}
+	]
+}

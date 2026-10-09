@@ -13,13 +13,14 @@ fixtures:
   - id: composed_ais_162m_2048k
     role: channelizer-golden
     decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
     license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
     provenance:
       url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta
-      notes: "Real AIS A (161.975 MHz) and B (162.025 MHz), IQEngine Fort Smallwood (RTL-SDR V3, 2024-09-08), first 17.476 s of each, at -/+25 kHz around the pair centre (plan A15). Local check 2026-10-10: 14 (A) + 39 (B) CRC-valid frames with a throwaway demod (sources alone: 15 + 40). ais-catcher: verify in image."
+      notes: "Real AIS A (161.975 MHz) and B (162.025 MHz), IQEngine Fort Smallwood (RTL-SDR V3, 2024-09-08), first 17.476 s of each, at -/+25 kHz around the pair centre (plan A15), each low-passed to its own 20 kHz channel (bandwidthHz) so the other channel in each 240 kS/s recording is not added twice. channelHz pins the pair centre on both paths. Local check 2026-10-10 (T7c): 15 (A) + 41 (B) CRC-valid frames with a throwaway demod (sources alone: 16 + 43 with the same demod). ais-catcher: verify in image."
     fetch: { kind: generated, recipe: recipes/composed_ais_162m_2048k.json }
     file: raw/composed_ais_162m_2048k.cu8
-    sha256: cf2c944b6a895d3e7187b4ec99175da5f3fb1e2f71805d4f0d42435f5895c638
+    sha256: 9a2c4432135e49bc661f47ad6c99b270e44eb7c89322ee3a6720696df0c63166
     format: cu8
     sample_rate: 2048000
     center_hz: 162000000
@@ -30,13 +31,14 @@ fixtures:
   - id: composed_ais_162m_2400k
     role: channelizer-golden
     decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
     license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
     provenance:
       url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730/meta
-      notes: "As composed_ais_162m_2048k at 2.4 Msps. Local check 2026-10-10: 14 (A) + 39 (B) CRC-valid frames. ais-catcher: verify in image."
+      notes: "As composed_ais_162m_2048k at 2.4 Msps. Local check 2026-10-10 (T7c): 15 (A) + 41 (B) CRC-valid frames. ais-catcher: verify in image."
     fetch: { kind: generated, recipe: recipes/composed_ais_162m_2400k.json }
     file: raw/composed_ais_162m_2400k.cu8
-    sha256: b7017e3542160ff399fe4a2a998d6d50c1e8d77ff7948835fae044bba9c6dd78
+    sha256: 1e137e2d08ef14fa276367a94ca92269fc681b3e39c29f960cd256e18a1d3470
     format: cu8
     sample_rate: 2400000
     center_hz: 162000000
@@ -114,6 +116,46 @@ fixtures:
     duration_s: 10
     channel: { center_hz: 433920000 }
     expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+
+  - id: composed_vdl2_136800k_2048k
+    role: channelizer-golden
+    decoder: dumpvdl2
+    decoder_options: { frequencies: [136725000, 136875000, 136975000] }
+    license: "composed: GPL-3.0 (junzis/pyVDL2 sample_iqdata_rtlsdr.dat and szpajder/dumpvdl2 vdl2_model_16b_1050kHz.wav; repository licenses, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/junzis/pyVDL2/tree/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data
+      notes: "Real pyVDL2 RTL-SDR recording (1.05 Msps cu8): its two VDL2 channels (bursts at -10.45 and +39.74 kHz in the file) each shifted to 0 Hz, low-passed to 25 kHz and placed at 136.975 and 136.875 MHz; the synthetic dumpvdl2 test burst (S16 WAV, header rate 44.1 kHz overridden to 1.05 Msps) at 136.725 MHz, 5 repeats. The span midpoint 136.850 MHz is +200 kHz from the 136.650 MHz centre, so the channelizer shifts and every frequency is also inside the raw path's 1.05 Msps window. Local check 2026-10-10 (T7c): FFT placement, every burst carrier within 31 Hz of its frequency and nothing at +-50 kHz. dumpvdl2: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_vdl2_136800k_2048k.json }
+    file: raw/composed_vdl2_136800k_2048k.cu8
+    sha256: 98aab5aa3886fb5b53cf275e97371c0bb0db7f4213be6f7165a9c041d2931ed7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 136650000
+    duration_s: 10
+    expected: { min_count: 1, payloads: [], key_fields: ["icao", "msgType"] }
+
+  - id: composed_dmr_446m_2048k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: "composed: AGPL-3.0 (Newspicel/sdrmm dmr_call_48k; repository license, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/Newspicel/sdrmm/tree/4869fb8304138328dd7c8c82223c0d23fbd1fba6/fixtures
+      notes: "Real DMR direct-mode call (sdrmm dmr_call_48k, PMR446 channel 1, 48 kS/s cf32, 1.7 s; colour code 1, radio 12345678 to talkgroup 12345678) at 446.19375 MHz, +6 kHz from the 446.18775 MHz centre as in run 8, 4 repeats. Polyphase upsampling and one fixed gain only. Extra coverage next to the mandatory own DMR capture. Local check 2026-10-10 (T7c; csdr is not on this host, so its chain was emulated in numpy: shift, 12.5 kHz-matched FIR /43, fmdemod, gain 2, limit, then sox and dsd-fme AW 2025-217-g83d7460 -fs): 24 TGT=12345678 SRC=12345678 lines, 28 audio errors (the source repeated alone at 48 kS/s: 24 lines, 38 errors). dsd-fme with csdr: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_dmr_446m_2048k.json }
+    file: raw/composed_dmr_446m_2048k.cu8
+    sha256: 207493345b3237c9eb2ee34709d8012ed495329b52ea5772344c0d5e4de637ba
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 446187750
+    duration_s: 10
+    expected:
+      {
+        min_count: 1,
+        payloads: [],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
 
   # Public recordings without a stated license (Ruling T6-LIC): fetched from origin at test
   # time, never committed or redistributed. Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md

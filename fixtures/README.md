@@ -72,12 +72,21 @@ A recipe gives the output `sampleRate`, `centerHz`, `durationS` and `seed`, then
 components. Each component has one source (a cu8 / cs8 / cs16 / cf32 file or a
 2-channel WAV IQ file at a stated rate) or a built-in generator (`pocsag`,
 `acars`), an `offsetHz` from the centre and a `levelDb` (dBFS of the component's
-99.9th-percentile envelope). The composer resamples each component to the output rate
-(rational polyphase, Kaiser window, 90 dB stopband), mixes it to its offset, sums,
+99.9th-percentile envelope). A source component may also carry `shiftHz` (an integer
+mix at the source's own rate, to bring a signal that is off the source's centre to 0 Hz)
+and `bandwidthHz` (a complex low-pass at the source's own rate, passband
+±`bandwidthHz`/2 and 90 dB stopband from 1.5× that edge), so a wide recording
+contributes only its own channel: each 240 kS/s IQEngine AIS recording also covers the
+other AIS channel at ±50 kHz. The composer then resamples each component to the output
+rate (rational polyphase, Kaiser window; flat to 0.8× and 90 dB down from 1.2× the lower
+of the two Nyquist frequencies), mixes it to its offset, sums,
 adds seeded complex Gaussian noise (`noiseDbfs`), an optional IQ image
 (`iqImage.rejectionDb`) and DC spike (`dcSpikeDbfs`), and quantises to cu8 as
 `floor(127.5 x + 128)` saturated to 0..255 (the addendum §3 mapping). It refuses to
-write a file where more than 0.01 % of I/Q values saturate. Keep components clear of
+write a file where more than 0.01 % of I/Q values saturate: the output is written under a
+temporary name and renamed only when that check passes, so a refused compose leaves no
+file or sidecar. A source `file` must be relative to the sources directory, without
+`..` (`compose.py` and `download.sh` both check). Keep components clear of
 the DC spike and inside the channelizer's usable fraction (0.8 of the span).
 
 Determinism: the same recipe, seed and numpy major version give the same bytes on one
@@ -85,6 +94,11 @@ platform. A different libm or numpy can change the last bit of a float and so th
 sha256; if `download.sh` reports a mismatch after an upgrade, regenerate, check the
 local decodes, and update the manifest sha256. Recorded shas come from numpy 2.5.3 on
 macOS.
+
+Digital voice (`composed_dmr_446m_2048k`) is only upsampled and scaled by one fixed
+gain: no AGC, DC removal or ramps, because dsd-fme tracks the 4FSK levels per 30 ms
+TDMA burst and a step or transient at a burst edge costs voice frames (see
+`docs/DIGITAL-VOICE.md`).
 
 Generators keep FM transmitters keyed for the whole file (`continuous`) where the
 decoder invents messages from noise (multimon-ng POCSAG), so the raw and channelizer
@@ -95,7 +109,12 @@ paths see the same decodes. The ACARS generator differentially codes its MSK ton
 
 - Synthetic IQ (WaveKit generators) is allowed for AIS, POCSAG, APRS and ACARS
   (user decision 2026-10-09; relaxes addendum D2). DMR, analog voice, rtl_433 sensors
-  and aircraft (VDL2 / ACARS / ADS-B) stay real captures.
+  and aircraft (VDL2 / ACARS / ADS-B) stay real captures; the composed VDL2 and DMR
+  fixtures are extra coverage next to them, not replacements.
+- A recording from a GPL or AGPL repository with no per-file grant carries the
+  repository's license with that caveat, e.g.
+  `"GPL-3.0 (junzis/pyVDL2 repository license; no per-file grant)"`, and is likewise
+  fetched from its origin and never committed.
 - A public recording without a stated license may be used only when fetched from its
   origin at test time and never committed or redistributed. Its `license` reads
   `"unstated (fetched from origin; not redistributed; local test use only)"`.

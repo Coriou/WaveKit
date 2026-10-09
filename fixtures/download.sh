@@ -41,6 +41,9 @@ compose_fixture() { # id recipe target
 	mkdir -p "$SOURCES_DIR"
 	while IFS='|' read -r src_id src_url src_sha src_file; do
 		[[ -z "$src_id" ]] && continue
+		if [[ -z "$src_file" || "$src_file" == /* || "/$src_file/" == */../* ]]; then
+			log_error "$id: source $src_id: file '$src_file' must be relative, without '..'"; return 1
+		fi
 		local dest="${SOURCES_DIR}/${src_file}"
 		if [[ ! -f "$dest" || "$(sha256_of "$dest")" != "$src_sha" ]]; then
 			log_info "$id: fetching source $src_id"

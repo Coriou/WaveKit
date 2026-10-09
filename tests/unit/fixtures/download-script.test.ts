@@ -4,6 +4,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	writeFileSync,
 } from "node:fs"
@@ -86,8 +87,16 @@ describe("manifest-query.mjs", () => {
 function sha(path: string): string {
 	return createHash("sha256").update(readFileSync(path)).digest("hex")
 }
+interface UnitRecipe {
+	noiseDbfs: number
+	sources: Record<string, unknown>[]
+	components: Record<string, unknown>[]
+}
 /** A tiny recipe: one file:// cu8 tone source composed at 256 kS/s for 20 ms. */
-function generatedSetup(sourceSha?: string) {
+function generatedSetup(
+	sourceSha?: string,
+	edit: (recipe: UnitRecipe) => void = () => undefined,
+) {
 	const src = mkdtempSync(join(tmpdir(), "wk-src-"))
 	const tone = join(src, "tone.cu8")
 	const n = 640
@@ -114,8 +123,11 @@ function generatedSetup(sourceSha?: string) {
 				license: "test",
 			},
 		],
-		components: [{ name: "t", source: "tone", offsetHz: 50_000, levelDb: -10 }],
+		components: [
+			{ name: "t", source: "tone", offsetHz: 50_000, levelDb: -10 },
+		] as Record<string, unknown>[],
 	}
+	edit(recipe)
 	const { path, dir } = tempManifest([])
 	mkdirSync(join(dir, "recipes"))
 	writeFileSync(join(dir, "recipes/unit_gen.json"), JSON.stringify(recipe))
@@ -269,6 +281,45 @@ describe("download.sh v2", () => {
 		expect(out.status).toBe(1)
 		expect(out.stdout + out.stderr).toMatch(/sha256 mismatch/)
 		expect(existsSync(join(good.dir, "raw/unit_gen.cu8"))).toBe(false)
+	})
+	it("reports a recipe compose.py rejects and a compose that fails, leaving nothing behind (channelizer T7c)", () => {
+		const unknown = generatedSetup(undefined, r => {
+			r.components = [
+				{ name: "g", generator: "nonexistent", offsetHz: 0, levelDb: -10 },
+			]
+		})
+		generatedManifest(unknown.path, "3".repeat(64))
+		const bad = runDownload(unknown.path, unknown.dir)
+		expect(bad.status).toBe(1)
+		expect(bad.stdout + bad.stderr).toMatch(/unit_gen: bad recipe/)
+		expect(bad.stderr).toMatch(/unknown generator nonexistent/)
+		expect(existsSync(join(unknown.dir, "raw/unit_gen.cu8"))).toBe(false)
+
+		// Passes --list-sources but trips the clip guard while composing.
+		const loud = generatedSetup(undefined, r => {
+			r.noiseDbfs = 0
+		})
+		generatedManifest(loud.path, "4".repeat(64))
+		const failed = runDownload(loud.path, loud.dir)
+		expect(failed.status).toBe(1)
+		expect(failed.stdout + failed.stderr).toMatch(/unit_gen: compose failed/)
+		expect(failed.stderr).toMatch(/saturate/)
+		expect(
+			readdirSync(join(loud.dir, "raw")).filter(f => f.startsWith("unit_gen")),
+		).toEqual([])
+	})
+	it("refuses a recipe source file outside the sources directory (channelizer T7c)", () => {
+		for (const file of ["../escape.cu8", "/tmp/escape.cu8"]) {
+			const { path, dir } = generatedSetup(undefined, r => {
+				r.sources = r.sources.map(s => ({ ...s, file }))
+			})
+			generatedManifest(path, "5".repeat(64))
+			const r = runDownload(path, dir)
+			expect(r.status).toBe(1)
+			expect(r.stderr).toMatch(/without '\.\.'/)
+			expect(existsSync(join(dir, "raw/escape.cu8"))).toBe(false)
+			expect(existsSync(join(dir, "raw/unit_gen.cu8"))).toBe(false)
+		}
 	})
 	it("skips large fixtures unless --all", () => {
 		const { path, dir } = tempManifest([

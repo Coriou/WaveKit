@@ -141,6 +141,61 @@ class ComposeTest(unittest.TestCase):
         self.assertAlmostEqual(freqs[np.argmax(np.abs(np.fft.fft(x)))], -210_000, delta=50)
         self.assertEqual(side['components'][0]['resample'], '64/3')
 
+    def test_failed_clip_guard_leaves_nothing_behind(self):
+        with self.assertRaisesRegex(compose.RecipeError, 'saturate'):
+            self.run_compose(self.recipe(noiseDbfs=0), 'clipped')
+        self.assertEqual(sorted(p.name for p in Path(self.dir).iterdir() if p.name.startswith('clipped')), [])
+
+    def test_rejects_absolute_and_parent_source_paths(self):
+        for bad in ('/etc/passwd', '../tone.cf32', 'sub/../../tone.cf32'):
+            src = dict(tone_source(self.dir, 'tone', 48_000, 5_000, 0.01), file=bad)
+            with self.assertRaisesRegex(compose.RecipeError, 'file'):
+                self.recipe(sources=[src])
+
+    def test_bandwidth_keeps_only_the_components_own_channel(self):
+        # Two tones in one 240 kS/s source, like an IQEngine AIS recording holding both channels.
+        fs, n = 240_000, np.arange(int(240_000 * 0.2))
+        iq = 0.4 * np.exp(2j * np.pi * 1_000 * n / fs) + 0.4 * np.exp(2j * np.pi * 50_000 * n / fs)
+        path = Path(self.dir) / 'two.cf32'
+        values = np.empty(2 * len(iq), np.float32)
+        values[0::2], values[1::2] = iq.real, iq.imag
+        path.write_bytes(values.tobytes())
+        src = {'id': 'two', 'url': f'file://{path}', 'sha256': hashlib.sha256(path.read_bytes()).hexdigest(),
+               'format': 'cf32', 'sampleRate': fs, 'license': 'test'}
+        comp = {'name': 'a', 'source': 'two', 'offsetHz': -200_000, 'levelDb': -10}
+        spectra = {}
+        for bw in (None, 20_000):
+            c = dict(comp, **({'bandwidthHz': bw} if bw else {}))
+            out, side = self.run_compose(self.recipe(durationS=0.2, sources=[src], components=[c]), f'bw{bw}')
+            x = read_cu8(out)[40_000:360_000]
+            spectra[bw] = 20 * np.log10(np.abs(np.fft.fft(x * np.kaiser(len(x), 14))) + 1e-12)
+            freqs = np.fft.fftfreq(len(x), 1 / 2_048_000)
+        own = np.abs(freqs - -199_000) < 500
+        other = np.abs(freqs - -150_000) < 500
+        self.assertGreater(spectra[None][other].max(), spectra[None][own].max() - 3)
+        self.assertLess(spectra[20_000][other].max(), spectra[20_000][own].max() - 45)  # cu8 floor
+        self.assertEqual(side['components'][0]['bandwidthHz'], 20_000)
+
+    def test_bandwidth_filter_in_float(self):
+        fs, n = 240_000, np.arange(48_000)
+        x = np.exp(2j * np.pi * 8_000 * n / fs) + np.exp(2j * np.pi * -15_000 * n / fs) + np.exp(2j * np.pi * 50_000 * n / fs)
+        y = compose.band_limit(x, fs, 20_000)[4_000:-4_000]
+        spectrum = np.abs(np.fft.fft(y * np.kaiser(len(y), 14)))
+        freqs = np.fft.fftfreq(len(y), 1 / fs)
+        level = lambda f: 20 * np.log10(spectrum[np.abs(freqs - f) < 100].max())
+        self.assertLess(level(-15_000), level(8_000) - 85)  # stopband from 1.5x the passband edge
+        self.assertLess(level(50_000), level(8_000) - 85)
+        self.assertAlmostEqual(float(np.mean(np.abs(compose.band_limit(np.exp(2j * np.pi * 8_000 * n / fs), fs, 20_000)[4_000:-4_000]))), 1.0, delta=0.002)
+
+    def test_shift_moves_the_wanted_signal_to_the_offset(self):
+        src = tone_source(self.dir, 'off', 48_000, -10_000, 0.05)
+        recipe = self.recipe(sources=[src], components=[{'name': 's', 'source': 'off', 'offsetHz': 300_000, 'levelDb': -10, 'shiftHz': 10_000, 'bandwidthHz': 12_000}])
+        out, side = self.run_compose(recipe)
+        x = read_cu8(out)
+        freqs = np.fft.fftfreq(len(x), 1 / 2_048_000)
+        self.assertAlmostEqual(freqs[np.argmax(np.abs(np.fft.fft(x * np.hanning(len(x)))))], 300_000, delta=2_048_000 / len(x))
+        self.assertEqual(side['components'][0]['shiftHz'], 10_000)
+
     def test_identity_rate_and_repeat(self):
         src = tone_source(self.dir, 'fast', 2_048_000, 0, 0.01)
         recipe = self.recipe(sources=[src], components=[{'name': 'f', 'source': 'fast', 'offsetHz': 100_000, 'levelDb': -6, 'repeatEveryS': 0.02}])
@@ -177,6 +232,16 @@ class GeneratorTest(unittest.TestCase):
         self.assertGreater(float(keyed.min()), 0.99)
         self.assertEqual(float(np.abs(iq[: int(0.09 * fs)]).max()), 0.0)
         self.assertEqual([e['protocol'] for e in expected], ['POCSAG1200', 'POCSAG512'])
+        # the idle tail runs at the last page's baud: a 512 bps idle batch is 1.0625 s of keyed signal
+        f = np.angle(iq[1:] * np.conj(iq[:-1])) * fs / (2 * np.pi)
+        tail = np.sign(f[int(5.0 * fs) : int(5.85 * fs)])
+        runs = np.diff(np.flatnonzero(np.diff(tail) != 0))
+        self.assertEqual(int(runs.min()) // 10, (fs // 512) // 10)
+
+    def test_pocsag_refuses_an_empty_page_list(self):
+        for continuous in (False, True):
+            with self.assertRaisesRegex(ValueError, 'pages'):
+                pocsag.generate({'continuous': continuous, 'pages': []}, 2.0)
 
     def test_acars_bcs_is_crc16_kermit(self):
         self.assertEqual(acars.crc16_kermit(b'123456789'), 0x2189)

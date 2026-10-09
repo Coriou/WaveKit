@@ -146,4 +146,39 @@ describe("fixture manifest v2", () => {
 			expect(f.duration_s, f.id).toBe(recipe.durationS)
 		}
 	})
+	it("points every composed fixture's channel options at a recipe component (channelizer T7c)", () => {
+		const fixtures = loadManifest("fixtures/manifest.yaml").fixtures
+		const byId = new Map(fixtures.map(f => [f.id, f]))
+		for (const f of fixtures) {
+			if (f.fetch.kind !== "generated") continue
+			const recipe = JSON.parse(
+				readFileSync(`fixtures/${f.fetch.recipe}`, "utf8"),
+			) as { centerHz: number; components: { offsetHz: number }[] }
+			const offsets = recipe.components.map(c => c.offsetHz)
+			const absolute = offsets.map(o => recipe.centerHz + o)
+			const o = f.decoder_options
+			if (o["offsetHz"] !== undefined)
+				expect(offsets, f.id).toContain(o["offsetHz"])
+			for (const hz of (o["frequencies"] as number[] | undefined) ?? [])
+				expect(absolute, f.id).toContain(hz)
+		}
+		for (const id of ["composed_ais_162m_2048k", "composed_ais_162m_2400k"])
+			expect(byId.get(id)?.decoder_options["channelHz"], id).toBe(162_000_000)
+		const vdl2 = byId.get("composed_vdl2_136800k_2048k")
+		expect(vdl2?.decoder).toBe("dumpvdl2")
+		expect(vdl2?.role).toBe("channelizer-golden")
+		expect(vdl2?.decoder_options["frequencies"]).toEqual([
+			136_725_000, 136_875_000, 136_975_000,
+		])
+		const dmr = byId.get("composed_dmr_446m_2048k")
+		expect(dmr?.decoder).toBe("dsd-fme")
+		expect(dmr?.role).toBe("channelizer-golden")
+		expect(dmr?.decoder_options).toEqual({ offsetHz: 6000 })
+		expect(dmr?.expected).toEqual({
+			min_count: 1,
+			payloads: [],
+			output_types: ["call_start"],
+			key_fields: ["talkgroup", "source"],
+		})
+	})
 })
