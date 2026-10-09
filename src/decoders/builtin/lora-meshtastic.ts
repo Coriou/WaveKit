@@ -221,6 +221,7 @@ export interface MeshtasticPacket {
 }
 
 const FiniteNumber = z.number().finite()
+const FollowBand = z.array(z.number().finite().positive()).min(1)
 
 const PacketWireSchema = z
 	.object({
@@ -328,11 +329,19 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 	}
 
 	/**
-	 * The modem decodes the capture centre. The configured `frequency` is the
-	 * channel; with followCenter it is the band the decoder follows (the
-	 * injected centre only relabels packets), so it is the target either way.
+	 * The modem decodes the capture centre. Without followCenter the
+	 * configured `frequency` is the channel. With followCenter it decodes any
+	 * centre (the injected centre replaces `frequency`), so only an explicit
+	 * top-level `frequencies` list declares the band it follows; without one
+	 * the band is unknown and the decoder is never suspended for band.
 	 */
 	override getBandRequirements(): DecoderBandRequirements | undefined {
+		if (this.config.options["followCenter"] === true) {
+			const band = FollowBand.safeParse(this.config.frequencies)
+			return band.success
+				? { targetsHz: band.data, basis: "configured", followCenter: true }
+				: undefined
+		}
 		const frequency = this.config.options["frequency"]
 		return typeof frequency === "number"
 			? { targetsHz: [frequency], basis: "configured" }

@@ -1616,7 +1616,7 @@ export class DecoderManager extends EventEmitter {
 				{ err, decoderId: state.config.id },
 				"Band assessment failed; reporting unknown",
 			)
-			return { verdict: "unknown", reasonCode: "no-target-frequency" }
+			return { verdict: "unknown" }
 		}
 	}
 

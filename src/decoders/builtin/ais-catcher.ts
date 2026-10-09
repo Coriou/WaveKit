@@ -205,7 +205,8 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	override getBandRequirements(): DecoderBandRequirements | undefined {
 		const configured = configuredBandRequirements(this.config)
 		if (configured) return configured
-		if (this.options.extraArgs?.includes("-c")) return undefined
+		if (this.options.extraArgs?.some(arg => arg.trimStart().startsWith("-c")))
+			return undefined
 		return { targetsHz: [...AIS_CHANNEL_FREQUENCIES_HZ], basis: "protocol" }
 	}
 

@@ -26,6 +26,12 @@ export interface DecoderBandRequirements {
 	/** Absolute RF frequencies in Hz; in band when any one fits. */
 	targetsHz: number[]
 	basis: DecoderBandBasis
+	/**
+	 * The decoder decodes the capture centre itself (followCenter): the
+	 * targets bound the band it follows, so it is in band anywhere from the
+	 * lowest to the highest target (widened by the window), not only near one.
+	 */
+	followCenter?: true
 }
 
 /** Facts about the current capture and the instance pipeline. */
@@ -47,6 +53,7 @@ export function assessDecoderBand(
 	if (!requirements || !targets.success)
 		return { verdict: "unknown", reasonCode: "no-target-frequency" }
 	const declared = { targetsHz: [...targets.data], basis: requirements.basis }
+	const follow = requirements.followCenter === true
 
 	const center = Hz.safeParse(context.centerHz)
 	const rate = Hz.safeParse(context.sampleRateHz)
@@ -60,9 +67,12 @@ export function assessDecoderBand(
 	const frontend = Hz.safeParse(context.frontendRateHz)
 	const span = frontend.success ? Math.min(rate.data, frontend.data) : rate.data
 	const windowHalfWidthHz = (span * USABLE_WINDOW_FRACTION) / 2
-	const fits = targets.data.some(
-		target => Math.abs(target - center.data) <= windowHalfWidthHz,
-	)
+	const fits = follow
+		? center.data >= Math.min(...targets.data) - windowHalfWidthHz &&
+			center.data <= Math.max(...targets.data) + windowHalfWidthHz
+		: targets.data.some(
+				target => Math.abs(target - center.data) <= windowHalfWidthHz,
+			)
 	return {
 		verdict: fits ? "in-band" : "out-of-band",
 		...(fits ? {} : { reasonCode: "frequency-out-of-band" as const }),

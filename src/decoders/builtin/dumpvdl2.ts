@@ -202,7 +202,11 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 		const isConfigured = Array.isArray(configured) && configured.length > 0
 		if (this.options.followCenter)
 			return isConfigured
-				? { targetsHz: [...this.options.frequencies], basis: "configured" }
+				? {
+						targetsHz: [...this.options.frequencies],
+						basis: "configured",
+						followCenter: true,
+					}
 				: undefined
 		return {
 			targetsHz: [...this.options.frequencies],

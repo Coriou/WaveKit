@@ -118,6 +118,12 @@ describe("protocol-fixed decoders", () => {
 			make({ extraArgs: ["-c", "CD"] }).getBandRequirements?.(),
 		).toBeUndefined()
 		expect(
+			make({ extraArgs: ["-c CD"] }).getBandRequirements?.(),
+		).toBeUndefined()
+		expect(
+			make({ extraArgs: ["-cCD"] }).getBandRequirements?.(),
+		).toBeUndefined()
+		expect(
 			make({ frequencies: [156_775_000] }).getBandRequirements?.(),
 		).toEqual({ targetsHz: [156_775_000], basis: "configured" })
 	})
@@ -155,6 +161,7 @@ describe("dumpvdl2", () => {
 		expect(decoder.getBandRequirements?.()).toEqual({
 			targetsHz: [136_975_000],
 			basis: "configured",
+			followCenter: true,
 		})
 	})
 
@@ -186,15 +193,29 @@ describe("lora-meshtastic", () => {
 		})
 	})
 
-	it("followCenter keeps the configured frequency, not the injected centre", () => {
+	it("followCenter without a declared band list is unknown (it decodes any centre)", () => {
+		// The modem decodes the injected centre; options.frequency only seeds it.
 		const decoder = new LoraMeshtasticDecoder(
 			config("lora-meshtastic", { ...base, followCenter: true }),
 			logger,
 		)
-		decoder.updateOptions({ inputCenterFreq: 1_090_000_000 })
+		decoder.updateOptions({ inputCenterFreq: 868_100_000 })
+		expect(decoder.getBandRequirements?.()).toBeUndefined()
+	})
+
+	it("followCenter with a top-level frequencies list follows that band", () => {
+		const decoder = new LoraMeshtasticDecoder(
+			config(
+				"lora-meshtastic",
+				{ ...base, followCenter: true },
+				{ frequencies: [868_100_000, 869_525_000] },
+			),
+			logger,
+		)
 		expect(decoder.getBandRequirements?.()).toEqual({
-			targetsHz: [869_525_000],
+			targetsHz: [868_100_000, 869_525_000],
 			basis: "configured",
+			followCenter: true,
 		})
 	})
 })

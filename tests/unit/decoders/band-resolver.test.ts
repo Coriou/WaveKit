@@ -93,6 +93,25 @@ describe("assessDecoderBand", () => {
 		).toBe(819_200)
 	})
 
+	it("followCenter: in band anywhere across the declared span, not just near a target", () => {
+		const follow = {
+			targetsHz: [868_100_000, 869_525_000],
+			basis: "configured" as const,
+			followCenter: true as const,
+		}
+		const ctx = { sampleRateHz: 2_048_000, frontendRateHz: 1_000_000 }
+		// ±400 kHz window; 868.8 MHz is ≥700 kHz from either channel but inside the span.
+		expect(
+			assessDecoderBand(follow, { ...ctx, centerHz: 868_800_000 }).verdict,
+		).toBe("in-band")
+		expect(
+			assessDecoderBand(follow, { ...ctx, centerHz: 870_000_000 }).verdict,
+		).toBe("out-of-band")
+		expect(
+			assessDecoderBand(follow, { ...ctx, centerHz: 869_900_000 }).verdict,
+		).toBe("in-band")
+	})
+
 	it("treats an invalid declaration as unknown", () => {
 		expect(
 			assessDecoderBand(
