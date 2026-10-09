@@ -14,7 +14,7 @@ import {
 } from "../ui/format.js"
 import { listBudget, type DetailPlacement } from "../ui/frame.js"
 import { fitGroups } from "../ui/fit.js"
-import { sp, type Line } from "../ui/line.js"
+import { sp, type Line, type Role } from "../ui/line.js"
 import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
@@ -207,9 +207,16 @@ export function decoderDetail(
 		`version ${r.version !== undefined ? sanitize(r.version) : g.na}`,
 	].join(sep)
 	// R65 I5: the header shows the whole id, then two spaces.
-	const rest: Line[] = [...wrapKV(sanitize(r.id), identity, width, true, true)]
+	const idRows = wrapKV(sanitize(r.id), identity, width, true, true)
+	// N3: the CLI's own write result is not REST data, so it never dims with that lane.
 	const result = decoderActionText(state, r.id, now)
-	if (result) rest.push(...wrapKV("action", result, width))
+	const role = decoderActionRole(state, r.id)
+	const action = result
+		? wrapKV("action", result, width).map(l =>
+				l.map((x, k) => (k === 0 ? x : { ...x, role })),
+			)
+		: []
+	const rest: Line[] = []
 	const prev = sess?.previousHealth
 	// R70: an unrecognised health value is unknown (?), never echoed as a word.
 	const health = (h: string): string => (h === "unknown" ? "?" : h)
@@ -348,6 +355,8 @@ export function decoderDetail(
 	const err = errorText(state, f, now)
 	// R65 I2: each row dims with the lane it comes from.
 	return [
+		...dimmed(idRows, f.oldRest),
+		...action,
 		...dimmed(rest, f.oldRest),
 		...dimmed(fanout, f.oldFanout),
 		...dimmed(windowRows, f.oldWindow),
@@ -386,6 +395,17 @@ export interface DecodersModel {
 	notice: string | null
 }
 
+/** N5: the result line's role from the action state: failed is a fault, an unconfirmed no-reply needs attention. */
+export function decoderActionRole(state: AppState, id: string): Role {
+	const rec = state.actions.byKey[`decoder:${id}`]
+	if (!rec) return "value"
+	return rec.state === "failed"
+		? "fault"
+		: rec.state === "no-reply"
+			? "attention"
+			: "value"
+}
+
 /** The most recent decoder write that still has a result line, as `<id> · <text>` (R64). */
 export function latestDecoderResult(state: AppState, now: number): Line | null {
 	let best: { id: string; at: number; text: string } | null = null
@@ -396,11 +416,10 @@ export function latestDecoderResult(state: AppState, now: number): Line | null {
 		best = { id: rec.intent.decoderId, at: rec.sentAt, text }
 	}
 	if (!best) return null
-	const failed = best.text.includes(" failed ")
 	return [
 		sp(sanitize(best.id), "label"),
 		sp(` ${glyphs().sep} `, "label"),
-		sp(best.text, failed ? "fault" : "value"),
+		sp(best.text, decoderActionRole(state, best.id)),
 	]
 }
 
