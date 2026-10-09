@@ -298,6 +298,10 @@ audio.
 - [x] Mark encrypted calls as encrypted and never attempt to decode them. Silence
       plus `encrypted: true`; no key options are passed. (Licensing note waived
       by the user on 2026-10-09.)
+- [ ] Mixed analog/digital channels, like a dual-mode handheld: detect per transmission whether a
+      channel carries analog FM or a digital mode, and route it to live analog audio or digital
+      voice automatically, with the detected mode in the call metadata. Observed 2026-10-09: an
+      analog user shared PMR446 channel 8 with the DMR test.
 - [ ] Over-the-air acceptance with the lab handheld: DMR voice is intelligible, and a call
       is not split while PTT is held.
 
