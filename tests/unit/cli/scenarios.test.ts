@@ -7,6 +7,7 @@ import {
 	loadScenario,
 	mergeById,
 } from "../../../cli/source/test/scenarios.js"
+import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { SCENARIO_NAMES } from "../../../cli/source/test/scenario-types.js"
 import type { Scenario } from "../../../cli/source/test/scenario-types.js"
 
@@ -346,6 +347,8 @@ describe("scenario loader", () => {
 describe("R58: cached data is never newer than its receipt", () => {
 	const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
 	function times(v: unknown, key = ""): number[] {
+		// A scheduled restart is a future time by contract, not data the core received.
+		if (key === "nextRestartAt") return []
 		if (typeof v === "string" && ISO.test(v)) return [Date.parse(v)]
 		if (typeof v === "number" && key === "timestamp" && v > 1e12) return [v]
 		if (Array.isArray(v)) return v.flatMap(x => times(x))
@@ -395,5 +398,61 @@ describe("R58: cached data is never newer than its receipt", () => {
 				),
 		)
 		expect(last).toBeLessThanOrEqual(newest)
+	})
+})
+
+describe("R89: scenarios carry the merged core contracts through the guards", () => {
+	it("contracts: suspension, transition, restarting, faulted, band, rate mismatch, unknown fields", () => {
+		const s = scenarioState("contracts")
+		const byId = new Map((s.decoders.value ?? []).map(d => [d.id, d]))
+		const dsd = byId.get("dsd-fme")
+		expect(dsd).toMatchObject({
+			health: "running",
+			running: false,
+			suspended: true,
+			suspension: { reasonCode: "frequency-out-of-band" },
+			bandAssessment: { verdict: "out-of-band", basis: "configured" },
+		})
+		expect(byId.get("readsb")).toMatchObject({
+			transition: "suspending",
+			running: true,
+			health: "running",
+		})
+		expect(byId.get("lora-meshtastic")?.suspension?.reasonCode).toBe(
+			"unsupported-sample-rate",
+		)
+		expect(byId.get("multimon-ng")?.health).toBe("restarting")
+		expect(byId.get("multimon-ng")?.nextRestartAt).toBeDefined()
+		// Faulted: retrying (a restart is scheduled) and terminal (none is).
+		expect(byId.get("direwolf")).toMatchObject({ health: "faulted" })
+		expect(byId.get("direwolf")?.nextRestartAt).toBeDefined()
+		expect(byId.get("rtl433")).toMatchObject({
+			health: "faulted",
+			running: false,
+		})
+		expect(byId.get("rtl433")?.nextRestartAt).toBeUndefined()
+		for (const d of byId.values()) {
+			expect(d.bandAssessment, d.id).toBeDefined()
+			expect(d.desiredRunning, d.id).toBe(true)
+		}
+		expect(s.sources.value?.[0]?.rateMismatch?.deviation).toBe(-0.5)
+		expect(s.tuner.value?.[0]?.unknownFields).toContain("gain")
+	})
+	it("tuner-unknown: the 100 MHz placeholder is listed and no centre is declared", () => {
+		const s = scenarioState("tuner-unknown")
+		const t = s.tuner.value?.[0]
+		expect(t?.frequency).toBe(100_000_000)
+		expect(t?.unknownFields).toContain("frequency")
+		expect(s.sources.value?.[0]?.caps.centerFreq).toBeUndefined()
+		expect(s.relay.value?.lastFrequency).toBeUndefined()
+		for (const d of s.decoders.value ?? [])
+			expect(d.bandAssessment?.verdict, d.id).toBe("unknown")
+	})
+	it("decoder-faulted stays terminal: no restart is scheduled", () => {
+		const acars = scenarioState("decoder-faulted").decoders.value?.find(
+			d => d.id === "acarsdec",
+		)
+		expect(acars?.health).toBe("faulted")
+		expect(acars?.nextRestartAt).toBeUndefined()
 	})
 })
