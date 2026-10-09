@@ -43,6 +43,19 @@ continuous IQ reception, correct RF decoding, or unattended installation.
    subsumes (raw-fanout readsb keeps its resample; a 2.4 Msps capture removes it).
 7. Later: API access/origin policy (prerequisite for host controls and a web
    UI).
+8. **Follow-ups from the 2026-10-09 overnight run:**
+   - Rate-truth check: compare a source's measured byte rate with
+     `caps.sampleRate` and flag a mismatch (an external SDR++ client left the
+     dongle at ~2.16 Msps for 8 h while caps said 2.048 Msps, silently breaking
+     decodes).
+   - Band-aware suspension: suspension today reacts to sample rate only;
+     decoders whose band the center frequency no longer covers (followCenter
+     included) should also suspend, the main CPU saving at a single tuned band.
+   - Tuner state over-claims gain (`agc`/0 dB reported, Pi runs manual 49 dB)
+     because the core reports defaults it never set; report unknown instead.
+   - Pi rebooted ~2 min after a dongle re-plug on battery power (no persistent
+     journal); enable a persistent journal or boot reason capture on the image
+     to tell brownout from crash.
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
