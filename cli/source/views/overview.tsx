@@ -1,9 +1,7 @@
 import { Box } from "ink"
 import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
-import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
-import type { UiState } from "../ui/ui-state.js"
 import { overviewKeys, overviewModel } from "../view-models/overview.js"
 import type { ViewModule, ViewProps } from "./types.js"
 
@@ -30,9 +28,9 @@ export const overviewView: ViewModule = {
 	id: "overview",
 	title: "Overview",
 	Component: OverviewComponent,
-	keyInfo: (state: AppState, ui: UiState, width: number, height: number) => {
-		// Roomy means rows ≥ 30, which leaves content ≥ 25 without a banner.
-		const k = overviewKeys(state, width, height, height >= 25)
+	// D: the app's height class; A6 M8: row ids and page size without the whole model.
+	keyInfo: (state, ui, width, height, heightClass) => {
+		const k = overviewKeys(state, width, height, heightClass === "roomy")
 		return {
 			rowIds: k.rowIds,
 			pageSize: k.pageSize,

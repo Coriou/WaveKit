@@ -23,6 +23,18 @@ function LateEcho() {
 	return <Text>last {last}</Text>
 }
 
+/** Input turns on only after mount + 60 ms, like a passive effect on a loaded host. */
+function LateListener() {
+	const [active, setActive] = useState(false)
+	const [last, setLast] = useState("none")
+	useEffect(() => {
+		const t = setTimeout(() => setActive(true), 60)
+		return () => clearTimeout(t)
+	}, [])
+	useInput(input => setLast(`input:${input}`), { isActive: active })
+	return <Text>last {last}</Text>
+}
+
 function Ticker() {
 	const [n, setN] = useState(0)
 	useEffect(() => {
@@ -93,6 +105,15 @@ describe("render harness", () => {
 		expect(h.text()).toBe("cols 80")
 		await h.resize(40, 24)
 		expect(h.text()).toBe("cols 40")
+		h.unmount()
+	})
+})
+
+describe("press waits for Ink's stdin listener (R69 M2)", () => {
+	it("a key pressed before useInput is active is not dropped", async () => {
+		const h = await renderAt(<LateListener />, { cols: 40, rows: 5 })
+		await h.press("x")
+		expect(h.text()).toContain("last input:x")
 		h.unmount()
 	})
 })

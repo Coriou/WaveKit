@@ -94,10 +94,12 @@ describe("Messages view (spec §6.3)", () => {
 		h.unmount()
 	})
 
-	it("copies JSON with OSC 52 and walks the Esc chain", async () => {
+	it("copies the selected entry's JSON with OSC 52 (M9)", async () => {
 		const writeRaw = vi.fn()
+		const state = scenarioState("live", deps)
+		const newest = state.messages.ring.entries.at(-1)!
 		const h = await renderApp({
-			state: scenarioState("live", deps),
+			state,
 			views,
 			view: "messages",
 			cols: 120,
@@ -107,14 +109,82 @@ describe("Messages view (spec §6.3)", () => {
 		await h.press(KEYS.down)
 		await h.press(KEYS.enter)
 		await h.press("y")
-		expect(String(writeRaw.mock.calls[0]?.[0])).toMatch(/^\u001b\]52;c;/)
+		const raw = String(writeRaw.mock.calls[0]?.[0])
+		const m = /^\u001b\]52;c;([A-Za-z0-9+/=]+)\u0007$/.exec(raw)
+		expect(m).not.toBeNull()
+		expect(Buffer.from(m![1]!, "base64").toString("utf8")).toBe(
+			JSON.stringify(newest.output.data, null, 2),
+		)
 		expect(h.frame().at(-1)).toContain("copy sent (OSC 52)")
-		const detailHead = /^ \S+ · \S+ · \d\d:\d\d:\d\d\.\d{3}\s*$/m
-		expect(h.text()).toMatch(detailHead)
-		// Esc: detail, then selection, then (with a filter) the filter.
+		h.unmount()
+	})
+
+	it("does not send a copy over 100 KB and says so (R67 M1)", async () => {
+		const writeRaw = vi.fn()
+		const live = scenarioState("live", deps)
+		const at = live.now
+		const big: Inbound = {
+			kind: "ws",
+			at,
+			event: {
+				type: "decoder:output",
+				decoderId: "multimon-ng",
+				output: {
+					type: "message",
+					decoder: "multimon-ng",
+					timestamp: new Date(at).toISOString(),
+					data: { message: "x".repeat(150_000) },
+				},
+			},
+		}
+		const h = await renderApp({
+			state: reduce(live, [big], at, deps),
+			views,
+			view: "messages",
+			cols: 120,
+			rows: 40,
+			writeRaw,
+		})
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		await h.press("y")
+		expect(writeRaw).not.toHaveBeenCalled()
+		expect(h.frame().at(-1)).toMatch(/copy not sent · 150\.\d KB over 100 KB/)
+		h.unmount()
+	})
+
+	it("walks the whole Esc chain: detail, selection, filter (M9)", async () => {
+		const h = await renderApp({
+			state: scenarioState("live", deps),
+			views,
+			view: "messages",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press("/")
+		await typeText(h, "dsd")
+		await h.press(KEYS.enter)
+		const head = (): string | undefined =>
+			/(\S+ · \S+ · \d\d:\d\d:\d\d\.\d{3})/.exec(h.text())?.[1]
+		// Select the second row and open it.
+		await h.press(KEYS.down)
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		const second = head()
+		expect(second).toBeDefined()
 		await h.press(KEYS.esc)
-		expect(h.text()).not.toMatch(detailHead)
-		expect(h.text()).toContain("paused")
+		expect(head()).toBeUndefined()
+		// Esc clears the selection: Enter now opens the first row, not the second.
+		await h.press(KEYS.esc, { expectWrite: false })
+		await h.press(KEYS.enter)
+		const first = head()
+		expect(first).toBeDefined()
+		expect(first).not.toBe(second)
+		await h.press(KEYS.esc)
+		await h.press(KEYS.esc, { expectWrite: false })
+		expect(h.text()).toContain("filter dsd")
+		await h.press(KEYS.esc)
+		expect(h.text()).not.toContain("filter dsd")
 		h.unmount()
 	})
 

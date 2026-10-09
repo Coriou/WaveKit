@@ -40,7 +40,24 @@ try {
 // already shows them as one line) through the console error method, and any write
 // would land on the alternate screen and corrupt the frame, so all are dropped.
 const drop = (): void => undefined
-for (const m of ["log", "info", "warn", "error", "debug"] as const)
+for (const m of [
+	"log",
+	"info",
+	"warn",
+	"error",
+	"debug",
+	"trace",
+	"dir",
+	"dirxml",
+	"table",
+	"group",
+	"groupCollapsed",
+	"groupEnd",
+	"count",
+	"assert",
+	"timeLog",
+	"timeEnd",
+] as const)
 	console[m] = drop
 
 const runtime = createRuntime(nodeRuntimeDeps(explicit, formatMessage))

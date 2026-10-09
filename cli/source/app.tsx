@@ -65,7 +65,7 @@ export function App({
 	const view = views[ui.view]
 	// Computed outside the boundary, so a throw here must not take the app down.
 	const info = view
-		? safe(() => view.keyInfo(state, ui, width, chrome.content), NO_INFO)
+		? safe(() => view.keyInfo(state, ui, width, chrome.content, hc), NO_INFO)
 		: NO_INFO
 	const ctx: KeyContext = {
 		view: ui.view,
