@@ -217,6 +217,8 @@ export interface DecoderConfig {
 	minVersion?: string | undefined
 	/** Maximum allowed version for this decoder */
 	maxVersion?: string | undefined
+	/** Route through the core channelizer (opt-in) */
+	useChannelizer?: boolean | undefined
 	/** Band admission override (config layer); never changes process arguments. */
 	band?: BandOverrideInput | undefined
 }

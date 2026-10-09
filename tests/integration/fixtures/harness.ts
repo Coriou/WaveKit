@@ -25,8 +25,8 @@ export function goldenDecoderId(f: Fixture): string {
 }
 
 /**
- * One recording source + one decoder. Unknown keys (channelizer,
- * useChannelizer) are stripped by Zod before batch 4. Ports derive from
+ * One recording source + one decoder; `channelizer.enabled` and the
+ * decoder's `useChannelizer` select the path. Ports derive from
  * apiPort: audio +1, digital voice +2. Band suspension is off so a capture
  * tuned off its band still records what the decoder hears (delta E1).
  */

@@ -121,6 +121,10 @@ describe("fixture harness helpers", () => {
 			})
 			expect(config.stateDir).toBe("/tmp/wk-state-19100")
 			expect(config.sources[0]?.caps.centerFreq).toBe(162_100_000)
+			// The channelizer keys survive the parse (channelizer T19, addendum §6, §7)
+			const channelised = path === "channelizer"
+			expect(config.channelizer.enabled).toBe(channelised)
+			expect(config.decoders[0]?.useChannelizer).toBe(channelised)
 		}
 	})
 	it("pads lead and tail with 0x7f bytes sized by the fixture rate", () => {

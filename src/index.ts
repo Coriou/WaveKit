@@ -79,7 +79,7 @@ import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
-import type { Decoder } from "./decoders/types.js"
+import type { Decoder, DecoderConfig } from "./decoders/types.js"
 
 /**
  * Application startup time for uptime calculation.
@@ -367,7 +367,7 @@ async function main(): Promise<void> {
 
 	// Step 7: Create decoders from configuration. dsd-fme decoders are first
 	// pointed at the digital voice stream (-o udp to a local socket).
-	let decoderConfigs = config.decoders
+	let decoderConfigs: DecoderConfig[] = config.decoders
 	try {
 		decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
 	} catch (err) {
