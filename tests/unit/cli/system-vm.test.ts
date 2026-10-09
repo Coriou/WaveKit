@@ -467,4 +467,19 @@ describe("system view-model (spec §6.5)", () => {
 			expect(line).toContain("· ? upstream (nominal) ·")
 		})
 	})
+
+	it("says disabled for live audio disabled in config (R72)", () => {
+		const live = scenarioState("live")
+		const st = {
+			...live,
+			audio: laneOk(
+				{ ...live.audio.value!, enabled: false, running: false },
+				live.now - 2000,
+				"rest" as const,
+			),
+		}
+		expect(systemLines(st, 119, 35, true).map(lineText)).toContain(
+			"AUDIO     ○ disabled · 0 clients · 127.0.0.1:8081/stream",
+		)
+	})
 })

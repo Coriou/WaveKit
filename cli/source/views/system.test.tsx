@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { laneOk } from "../data/freshness.js"
 import { renderApp } from "../test/app-harness.js"
 import { scenarioState } from "../test/fixtures.js"
 import { systemView } from "./system.js"
@@ -67,6 +68,28 @@ describe("System view (spec §6.5)", () => {
 				patch: { modulation: "am", bandwidth: 10000, deEmphasis: false },
 			},
 		])
+		h.unmount()
+	})
+	it("offers no start key while audio is disabled (R72)", async () => {
+		const live = scenarioState("live")
+		const state = {
+			...live,
+			audio: laneOk(
+				{ ...live.audio.value!, enabled: false, running: false },
+				live.now - 2000,
+				"rest" as const,
+			),
+		}
+		const h = await renderApp({
+			state,
+			views,
+			view: "system",
+			cols: 120,
+			rows: 40,
+		})
+		expect(h.frame().at(-1)).not.toContain("start audio")
+		await h.press("a", { expectWrite: false })
+		expect(h.runtime.sent).toEqual([])
 		h.unmount()
 	})
 })

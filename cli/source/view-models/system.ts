@@ -419,14 +419,17 @@ function audioBlock(state: AppState, width: number): Row[] {
 	const role: Role = isOld(state.audio, state.now) ? "old" : "value"
 	const glyph =
 		a.pipelineHealth === "error" ? "fault" : a.running ? "live" : "neutral"
+	// Disabled in config is not the same as stopped: `a` cannot start it (R72).
 	const word =
 		a.pipelineHealth === "error"
 			? "error"
 			: a.running
 				? "running"
-				: a.pipelineHealth === "starting"
-					? "starting"
-					: "stopped"
+				: !a.enabled
+					? "disabled"
+					: a.pipelineHealth === "starting"
+						? "starting"
+						: "stopped"
 	let url = sanitize(a.httpUrl)
 	try {
 		const u = new URL(a.httpUrl)

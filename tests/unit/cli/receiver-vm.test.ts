@@ -686,4 +686,40 @@ describe("receiver view-model (spec §6.4)", () => {
 			expect(src.id).toBe("pi-iq")
 		})
 	})
+
+	describe("R72 (T44 review)", () => {
+		const live = scenarioState("live")
+		const withRelay = (patch: Record<string, unknown>) => ({
+			...live,
+			relay: laneOk(
+				{ ...live.relay.value!, ...patch },
+				live.now - 2000,
+				"rest" as const,
+			),
+		})
+		const lines = (st: AppState) =>
+			receiverLines(st, initialUi("receiver"), 119, 35, true)
+		it("shows core's compatibility message under RELAY, quoted and in the attention role", () => {
+			const st = withRelay({
+				compatibility: "unsupported-format",
+				compatibilityMessage: "Source format S16_AUDIO is not IQ \u001b[2J",
+				listening: false,
+			})
+			const out = lines(st)
+			const i = out.findIndex(l => lineText(l).startsWith("RELAY"))
+			expect(lineText(out[i + 1] ?? [])).toBe(
+				'          ! "Source format S16_AUDIO is not IQ "',
+			)
+			expect(out[i + 1]?.some(sp => sp.role === "attention")).toBe(true)
+			expect(lineText(out[i] ?? [])).toContain("not listening")
+			// History follows the compatibility row.
+			expect(lineText(out[i + 2] ?? [])).toMatch(/set-frequency/)
+		})
+		it("says disabled, not 'not listening', for a disabled relay", () => {
+			const relay = lines(withRelay({ enabled: false, listening: false }))
+				.map(lineText)
+				.find(l => l.startsWith("RELAY"))
+			expect(relay).toMatch(/^RELAY {5}disabled · /)
+		})
+	})
 })

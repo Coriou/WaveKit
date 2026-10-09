@@ -764,7 +764,11 @@ function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 			one(
 				0,
 				txt(
-					relay.listening ? `listening :${relay.port}` : "not listening",
+					!relay.enabled
+						? "disabled"
+						: relay.listening
+							? `listening :${relay.port}`
+							: "not listening",
 					role,
 				),
 			),
@@ -1027,16 +1031,39 @@ export function receiverLines(
 					"label",
 				),
 	)
+	// Core says why the relay cannot serve this source, whether or not it listens (R72).
+	const compat =
+		relay?.compatibility !== undefined && relay.compatibility !== "ok"
+			? keep([
+					...lbl(""),
+					glyphSpan("attention"),
+					sp(
+						` ${quoted(relay.compatibilityMessage ?? relay.compatibility, 80)}`,
+						"attention",
+					),
+				])
+			: null
 	const fanout = fanoutBlock(state, width)
 	// Short views shed optional rows (with a "+N rows hidden" marker); relay history
 	// fills whatever height is left.
 	const lines = shed(
-		[...source, ...gap(), ...tuner, ...gap(), relayHead, ...gap(), ...fanout],
+		[
+			...source,
+			...gap(),
+			...tuner,
+			...gap(),
+			relayHead,
+			...(compat ? [compat] : []),
+			...gap(),
+			...fanout,
+		],
 		height,
 	)
 	const room = height - lines.length
 	const history = relay && room > 0 ? historyRows(relay, room, width) : []
-	const relayAt = lines.indexOf(relayHead.line)
+	const anchor =
+		compat && lines.includes(compat.line) ? compat.line : relayHead.line
+	const relayAt = lines.indexOf(anchor)
 	if (relayAt >= 0) lines.splice(relayAt + 1, 0, ...history)
 	return lines.slice(0, height)
 }
