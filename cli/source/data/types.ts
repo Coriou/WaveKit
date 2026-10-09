@@ -38,6 +38,21 @@ export interface DecoderSuspension {
 	since: string
 }
 
+/**
+ * Core's DecoderBandAssessment, guarded (R84): a newer verdict reads "unknown";
+ * a newer reasonCode or basis is kept as text and shown quoted.
+ */
+export interface BandAssessment {
+	verdict: "in-band" | "out-of-band" | "unknown"
+	reasonCode?: string
+	/** All or nothing: positive Hz. */
+	targetsHz?: number[]
+	/** "configured" | "protocol" | "decoder-default", or a newer basis. */
+	basis?: string
+	captureCenterHz?: number
+	windowHalfWidthHz?: number
+}
+
 /** Core's health and suspension fields (R70, R84), guarded; optional for older cores. */
 export interface DecoderContractFields {
 	/** ISO-8601, present while an automatic restart is scheduled. */
@@ -46,6 +61,8 @@ export interface DecoderContractFields {
 	suspended?: boolean
 	suspension?: DecoderSuspension
 	transition?: "suspending" | "resuming" | "unknown"
+	/** When present, the truth for window membership (R84); older cores send none. */
+	bandAssessment?: BandAssessment
 }
 
 /**
@@ -54,7 +71,7 @@ export interface DecoderContractFields {
  */
 export type DecoderRow = Omit<
 	DecoderStatus,
-	"rateAssessment" | "bandAssessment" | "health" | keyof DecoderContractFields
+	"rateAssessment" | "health" | keyof DecoderContractFields
 > &
 	DecoderContractFields & {
 		health: RowHealth

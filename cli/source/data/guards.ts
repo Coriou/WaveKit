@@ -34,6 +34,7 @@ import type {
 	SdrHostView,
 	SourceRow,
 	WsEvent,
+	BandAssessment,
 	DecoderSuspension,
 	RowHealth,
 } from "./types.js"
@@ -172,6 +173,30 @@ function guardStats(v: unknown): DecoderStats | undefined {
 
 const isFrequency = (v: unknown): v is number => isNum(v) && v > 0
 
+const isVerdict = oneOf<BandAssessment["verdict"]>([
+	"in-band",
+	"out-of-band",
+	"unknown",
+])
+
+/** R84: a string verdict this CLI does not know reads "unknown"; any other malformed field is dropped. */
+function guardBandAssessment(v: unknown): BandAssessment | undefined {
+	if (!isObj(v)) return undefined
+	const verdict = v["verdict"]
+	if (!isStr(verdict)) return undefined
+	const targets = v["targetsHz"]
+	return {
+		verdict: isVerdict(verdict) ? verdict : "unknown",
+		...pick(v, ["reasonCode", "basis"] as const, isStr),
+		...(Array.isArray(targets) &&
+		targets.length > 0 &&
+		targets.every(isFrequency)
+			? { targetsHz: targets }
+			: {}),
+		...pick(v, ["captureCenterHz", "windowHalfWidthHz"] as const, isFrequency),
+	}
+}
+
 const isErrorKind = oneOf<DecoderLastError["kind"]>(["error", "exit"])
 
 function guardLastError(v: unknown): DecoderLastError | undefined {
@@ -209,6 +234,7 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 	const lastError = guardLastError(v["lastError"])
 	const suspension = guardSuspension(v["suspension"])
 	const transition = v["transition"]
+	const bandAssessment = guardBandAssessment(v["bandAssessment"])
 	return {
 		id,
 		type,
@@ -233,6 +259,7 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 		...pick(v, ["nextRestartAt"] as const, isStr),
 		...pick(v, ["desiredRunning", "suspended"] as const, isBool),
 		...(suspension ? { suspension } : {}),
+		...(bandAssessment ? { bandAssessment } : {}),
 		...(transition !== undefined
 			? {
 					transition: isTransition(transition)

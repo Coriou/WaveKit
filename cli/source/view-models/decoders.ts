@@ -1,4 +1,5 @@
 import { sparkBuckets } from "../data/rates.js"
+import type { BandOrigin } from "../data/nominal-bands.js"
 import type { AppState, DecoderOp, DecoderRow } from "../data/types.js"
 import { rowSourceId, windowFor } from "../data/window.js"
 import {
@@ -84,7 +85,7 @@ const secs = (ms: number): string =>
 const quoted = (text: string): string =>
 	`"${truncate(sanitize(text), SERVER_TEXT_MAX)}"`
 
-/** R70: core's rate reason codes in plain words; an unknown code is shown quoted. */
+/** R70 / R84: core's suspension reason codes in plain words; an unknown code is shown quoted. */
 const SUSPENSION_REASON: Readonly<Record<string, string>> = {
 	"insufficient-sample-rate": "sample rate too low",
 	"unsupported-sample-rate": "sample rate not supported",
@@ -96,12 +97,46 @@ const SUSPENSION_REASON: Readonly<Record<string, string>> = {
 	"source-rate-unknown": "source rate not known",
 	"adaptation-unknown": "rate adaptation not known",
 	"external-input": "external input",
+	"frequency-out-of-band": "out of band",
 }
 
-function suspensionReason(code: string): string {
-	return Object.hasOwn(SUSPENSION_REASON, code)
-		? (SUSPENSION_REASON[code] ?? quoted(code))
-		: quoted(code)
+/** R84: why core cannot place a decoder in or out of the window. */
+const BAND_REASON: Readonly<Record<string, string>> = {
+	"no-target-frequency": "no target frequency",
+	"source-center-unknown": "source centre unknown",
+	"external-input": "external input",
+}
+
+const words = (map: Readonly<Record<string, string>>, code: string): string =>
+	Object.hasOwn(map, code) ? (map[code] ?? quoted(code)) : quoted(code)
+
+const suspensionReason = (code: string): string =>
+	words(SUSPENSION_REASON, code)
+
+/** R84: the band's basis as the detail names it. */
+const BAND_ORIGIN: Readonly<Record<BandOrigin, string>> = {
+	configured: "configured",
+	protocol: "protocol",
+	"decoder-default": "decoder default",
+	nominal: "nominal",
+	core: "",
+}
+
+function bandOriginWords(f: DecoderFacts): string {
+	const basis = f.row.bandAssessment?.basis
+	if (f.bandOrigin === "core")
+		return basis !== undefined ? `basis ${quoted(basis)}` : ""
+	return BAND_ORIGIN[f.bandOrigin ?? "nominal"]
+}
+
+/** R84: a band suspension resumes on a retune to core's targets, when core names them. Not "waiting for": spec §9 bans it. */
+function suspensionText(f: DecoderFacts, code: string): string {
+	const known = f.nominal !== "tuned" && f.nominal !== "?"
+	return code === "frequency-out-of-band" &&
+		f.row.bandAssessment?.targetsHz !== undefined &&
+		known
+		? `resumes on retune to ${f.nominal} MHz`
+		: suspensionReason(code)
 }
 
 /**
@@ -249,7 +284,7 @@ export function decoderDetail(
 		rest.push(
 			...wrapKV(
 				"suspended",
-				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionReason(susp.reasonCode)}`,
+				`since ${Number.isFinite(since) ? formatClock(since) : "?"}${sep}${suspensionText(f, susp.reasonCode)}`,
 				width,
 			),
 		)
@@ -321,24 +356,32 @@ export function decoderDetail(
 	const win = sid
 		? windowFor(sid, state.tuner.value, state.sources.value, state.relay.value)
 		: null
+	// R84: core's usable window (filter margin applied) when it sends one, else centre ± rate/2.
+	const core = r.bandAssessment
+	const centre = core?.captureCenterHz
+	const halfWidth = core?.windowHalfWidthHz
+	const windowPart =
+		centre !== undefined && halfWidth !== undefined
+			? `usable ${formatWindow(centre - halfWidth, centre + halfWidth)}`
+			: `window ${win ? formatWindow(win.loHz, win.hiHz) : "?"}`
+	const why =
+		core?.verdict === "unknown" && core.reasonCode !== undefined
+			? ` (${words(BAND_REASON, core.reasonCode)})`
+			: ""
 	const member = {
 		in: "in window",
 		out: "out of window",
-		"?": "window ?",
+		"?": `window ?${why}`,
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
+	const origin = bandOriginWords(f)
 	const band =
 		f.nominal === "tuned"
 			? "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
-				: `${f.nominal} MHz ${f.bandOrigin ?? "nominal"}`
-	const parts = [
-		band,
-		...(f.bandNote ? [f.bandNote] : []),
-		`window ${win ? formatWindow(win.loHz, win.hiHz) : "?"}`,
-		member,
-	]
+				: `${f.nominal} MHz${origin ? ` ${origin}` : ""}`
+	const parts = [band, ...(f.bandNote ? [f.bandNote] : []), windowPart, member]
 	const windowRows = wrapKV("band", parts.join(sep), width)
 	const buckets = sparkBuckets(sess?.spark ?? {}, now)
 	const from = sess?.firstObservedAt ?? now
