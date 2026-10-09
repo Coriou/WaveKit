@@ -488,7 +488,28 @@ const DECODERS_PANE_COLUMNS: ColumnSpec[] = DECODERS_COLUMNS.map(c =>
 	c.id === "nominal" ? { ...c, priority: 3 } : c,
 )
 
-export type DecoderTableKind = "overview" | "decoders" | "decoders-pane"
+/**
+ * S10: the ultra Overview's left column (~111 at 200 columns) adds restarts
+ * and errors to the Overview set; process narrows to the Decoders view's
+ * width so the band column stays beside them.
+ */
+const OVERVIEW_COLUMNS_SET: ColumnSpec[] = [
+	col("decoder", 18, 18, 0, "left", TITLE),
+	col("process", 10, 18, 0, "left", header("process")),
+	col("restarts", 8, 8, 5, "right", header("restarts")),
+	col("errors", 6, 6, 5, "right", header("errors")),
+	col("decodes", 15, 16, 1, "left", header("decodes")),
+	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
+	col("lifetime", 8, 8, 4, "right", header("lifetime")),
+	col("nominal", 15, 15, 3, "left", header("band MHz")),
+	col("window", 6, 6, 2, "left", header("window")),
+]
+
+export type DecoderTableKind =
+	| "overview"
+	| "overview-columns"
+	| "decoders"
+	| "decoders-pane"
 
 /** The columns a table lays out at `width`: its standard set, or the narrow set below 79 columns. */
 export function decoderColumns(
@@ -497,6 +518,7 @@ export function decoderColumns(
 ): readonly ColumnSpec[] {
 	if (width < NARROW_BELOW) return NARROW_COLUMNS
 	if (kind === "overview") return OVERVIEW_COLUMNS
+	if (kind === "overview-columns") return OVERVIEW_COLUMNS_SET
 	return kind === "decoders-pane" ? DECODERS_PANE_COLUMNS : DECODERS_COLUMNS
 }
 

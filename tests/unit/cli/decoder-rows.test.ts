@@ -506,5 +506,18 @@ describe("decoder rows (live fixture)", () => {
 			expect(lineText(t.header)).toContain("band MHz")
 			for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(111)
 		})
+		it("S10: the ultra Overview's left column adds restarts and errors and keeps the band", () => {
+			const t = decoderTable(facts, "overview-columns", 111, 20, null, s.now)
+			const head = lineText(t.header)
+			for (const h of ["restarts", "errors", "decodes", "band MHz", "window"])
+				expect(head).toContain(h)
+			for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(111)
+			// Below the narrow threshold the kind still picks the narrow set.
+			expect(
+				lineText(
+					decoderTable(facts, "overview-columns", 60, 20, null, s.now).header,
+				),
+			).not.toContain("restarts")
+		})
 	})
 })
