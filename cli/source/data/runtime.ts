@@ -162,6 +162,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	const resyncState = new Map<Endpoint, "pending" | "ok" | "failed">()
 	/** Endpoints a ws:open skipped while their resync GET was still pending. */
 	const awaitingResync = new Set<Endpoint>()
+	/**
+	 * R98: resync-only endpoints whose last applied answer failed. Nothing polls them,
+	 * so a poll cycle that gets an OK answer retries them, at most once per POLL_MS.
+	 */
+	const resyncFailed = new Set<Endpoint>()
+	let resyncRetryAt: number | null = null
+	/** Endpoints whose last applied answer was OK (2xx and accepted by its guard). */
+	const lastOk = new Set<Endpoint>()
 	/** Endpoints with an applied answer since the last start, reconnect, discovery or ws:open. */
 	const answeredOnce = new Set<Endpoint>()
 
@@ -237,6 +245,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			// Final M2: the first answer since start/reconnect, or one a write waits on, is urgent.
 			const urgent = afterWrite || !answeredOnce.has(endpoint)
 			answeredOnce.add(endpoint)
+			if (outcome.ok) lastOk.add(endpoint)
+			else lastOk.delete(endpoint)
+			if (RESYNC_ENDPOINTS.includes(endpoint)) {
+				if (outcome.ok) resyncFailed.delete(endpoint)
+				else resyncFailed.add(endpoint)
+			}
 			push(restInbound(endpoint, outcome, deps.now(), urgent))
 		}
 		return answered
@@ -272,6 +286,16 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		const at = deps.now()
 		push({ kind: "rest:cycle", at, nextAt: at + POLL_MS })
 		const answered = results.some(r => r.status === "fulfilled" && r.value)
+		// R98: REST is back; resync endpoints that failed while it hung get one more GET.
+		if (
+			resyncFailed.size > 0 &&
+			endpoints.some(e => lastOk.has(e)) &&
+			(resyncRetryAt === null || at - resyncRetryAt >= POLL_MS)
+		) {
+			resyncRetryAt = at
+			for (const e of [...resyncFailed])
+				if (!endpoints.includes(e)) void fetchOne(e)
+		}
 		if (answered) {
 			unreachableSince = null
 			clearRediscover()
