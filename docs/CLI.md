@@ -167,3 +167,101 @@ cli/tools/validate/matrix.sh all                   # tmux matrix, resize, transi
 - **Mock scenarios:** they live in `cli/tools/mock-api/scenarios/`. They use the real decoder wire shapes and documentation addresses only.
 
 Pending API requests that would remove CLI fallbacks are tracked in `docs/CLI-COORDINATION.md`.
+
+## Validation
+
+The final validation pass (T45) was run on 2026-10-09 with `cli/tools/validate/matrix.sh`. The script drives the mock core inside a private tmux server. The machine was a development Mac that other test runs were using at the same time, so CPU figures carry the 1-minute load average measured at the start and end of each run.
+
+Heads measured:
+
+- **`10913e3`, the shipped head:** the `band-defaults` scenario and a 50 msg/s perf check.
+- **`df9d86e`:** transitions and perf.
+- **`0de4ca5` / `df9d86e`:** the 16-scenario matrix. Captures 1–242 ran on `0de4ca5` and the rest on `df9d86e`. The two heads differ only in `runtime.ts` (R98).
+- **`311d69a`:** resize and Esc. Every later change was to copy or the runtime, not to layout or input.
+
+### Render matrix
+
+425 captures, 0 failed. They cover 17 scenarios × 5 views × 5 sizes (60×16, 60×20, 80×24, 120×40, 200×50). Every capture fits its width, leaves the last row free, and contains no banned copy.
+
+Besides the original audit states, the scenarios cover the core contracts dated 2026-10-09:
+
+- **`contracts`:**
+  - health `restarting` with `nextRestartAt`;
+  - faulted and retrying vs. faulted for good;
+  - suspended for rate and for `frequency-out-of-band`, with health still `running`;
+  - a `suspending` transition;
+  - a `bandAssessment` on every decoder, including a dsd-fme configured off-centre;
+  - a source `rateMismatch`;
+  - tuner `unknownFields`.
+- **`tuner-unknown`:** core's 100 MHz placeholder centre. The strip shows no `rx`, and the Receiver reads `frequency ? Hz   window ?`.
+- **`band-defaults`:** band defaults with the operator start pin.
+
+`live` is the core as it was before those contracts.
+
+### Resize
+
+The sequence was 120×40 → 60×20 → 200×50 → 80×24 → 59×15 → 120×40. Each step was captured after 0.3 s and after 2 s, for 12 captures and 0 failures.
+
+- At 59×15 the screen shows only `wavekit: terminal 59×15 is too small (minimum 60×16)`.
+- No residue is left after any step, and the view comes back at 120×40.
+
+### Transitions
+
+The checks use polling waits, because the WebSocket client backs off before it reconnects. 0 checks failed.
+
+| Step                           | What the screen did                                                                                                                                                                     |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| WS drops, REST fresh           | Within 2 s the banner shows `! live feed down · ws closed 1006 · REST every 5s · retry in …` and a gap row opens. `drops` stays a number, because REST keeps fetching fanout every 5 s. |
+| WS up                          | 12 s after the mock accepted again (client backoff), the gap row closes `· not replayed`. Drop figures were numeric again 2 s later.                                                    |
+| REST hangs, WS live            | Banner `! REST failing · timeout 2s · retry in … · REST data as of …`. REST-fed cells dim, and `drops` stays numeric from WS snapshots.                                                 |
+| REST back                      | The banner clears.                                                                                                                                                                      |
+| WS and REST both down for 20 s | `api ×`, `iq ? unknown`, `drops ?`, and banner `! API unreachable · … · data as of … · r now`.                                                                                          |
+| WS back, REST still down       | `drops` numeric again 12 s later, from WS snapshots alone.                                                                                                                              |
+| Both back                      | Every failure banner clears within 5 s (see R98 under Misses).                                                                                                                          |
+
+### Sustained flow and cost (120×40)
+
+Each run sampled the process once a second, after a 15 s warm-up. `idle-heap` forces a GC every 5 s to measure the retained heap, so its CPU figure is not the idle figure. Except where marked, the numbers are from `df9d86e`.
+
+| Run                                  | Load (1 min) | Frames/s | `ESC[2J` | CPU    | RSS growth | RSS max | Retained heap         | Key→frame |
+| ------------------------------------ | ------------ | -------- | -------- | ------ | ---------- | ------- | --------------------- | --------- |
+| idle, Overview, 60 s                 | 6.3–9.4      | 1.0      | 0        | 1.5 %  | 6 MB       | 153 MB  | —                     | 140 ms    |
+| idle-heap, Overview, 100 s           | 9.1–19.1     | 1.0      | 0        | 2.5 %  | 21 MB      | 171 MB  | +0.8 MB (19.5 → 20.3) | 197 ms    |
+| 50 msg/s, Overview, 60 s             | 24.0–11.1    | 4.9      | 0        | 8.6 %  | 107 MB     | 252 MB  | —                     | 56 ms     |
+| 50 msg/s, Overview, 60 s (`10913e3`) | 8.1–6.5      | 4.9      | 0        | 8.7 %  | 102 MB     | 250 MB  | —                     | 49 ms     |
+| 500 msg/s, Messages, 60 s            | 8.9–16.7     | 4.9      | 0        | 13.8 % | 147 MB     | 293 MB  | —                     | 116 ms    |
+| 500 msg/s, Messages paused, 60 s     | 13.4–8.0     | 4.9      | 0        | 6.6 %  | 98 MB      | 247 MB  | —                     | 138 ms    |
+
+| Measure                                | Budget             | Result                                  |
+| -------------------------------------- | ------------------ | --------------------------------------- |
+| Frames/s                               | ≤ 5                | met (4.9 at most)                       |
+| `ESC[2J` outside resize                | 0                  | met (0 in every run)                    |
+| CPU, idle                              | < 2 %              | met (1.5 %)                             |
+| CPU, 50 msg/s                          | < 8 %              | **missed** (8.6–8.7 %)                  |
+| CPU, 500 msg/s                         | key→frame < 300 ms | met (116 ms)                            |
+| Retained heap growth, 100 s idle (R87) | ≤ 5 MB             | met (+0.8 MB)                           |
+| RSS plateau, 50 msg/s (R87)            | ≤ 300 MB           | met (250–252 MB)                        |
+| RSS growth over 60 s (original spec)   | < 20 MB            | **missed**; replaced by R87 (see below) |
+
+### Live core (read-only)
+
+Run against the running core at `127.0.0.1:9000` on `311d69a`, using only the view keys 1, 2 and 4. Overview, Decoders and Receiver were captured at 120×40 and 80×24. All six fit their size, leave the last row free, and contain no banned copy.
+
+At capture time:
+
+- The core's IQ source was disconnected. The strip read `iq × disconnected` and `drops ?`, and the empty feed read `no decodes · iq disconnected`.
+- Six decoders read `○ suspended · out of band` with `out` in the window column; dsd-fme and rtl433 read `in`.
+- The Receiver showed `?` for each tuner field core lists in `unknownFields` (`ppm`, `bias-t`, `direct sampling`, `offset tuning`).
+
+### Misses
+
+- **CPU at 50 msg/s:** 8.6–8.7 % against a budget of 8 %, at load 6–24. Each of the 5 commits per second makes Ink rebuild the whole frame. The CLI keeps that rate down by coalescing commits and not writing unchanged frames, but it cannot change how much work one Ink rebuild costs.
+- **RSS growth:** "RSS growth < 20 MB in 60 s" cannot be met by a Node process with V8's default heap sizing. RSS rises to a plateau because the heap expands lazily, not because memory leaks. With `--max-old-space-size=40` the CLI held about 170 MB for 3 minutes at 50 msg/s. R87 replaced the budget with the retained-heap and plateau measures above, and both are met.
+- **R98 (fixed before shipping):** on `311d69a`, an endpoint that is fetched only on resync (presets, aircraft) kept its `GET … failing` banner after a full recovery. The banner would stay until the next WebSocket reconnect. `df9d86e` re-requests those endpoints after the next good poll cycle. The transitions check now fails if any failure banner is still shown 15 s after recovery.
+
+### Terminal limitations
+
+- **Esc followed by an arrow in one write:** Ink reads this as Alt+arrow. Esc pressed on its own works at every layer: it closes the detail, clears the selection, then clears the filter. A terminal, tmux or a script that delivers Esc and ↓ in the same read gets Alt+↓, and the detail stays open. A tmux `escape-time` above 0 does not help, because Ink receives the bytes as one chunk.
+- **OSC 52 copy:** in tmux with `set -g set-clipboard on`, the copied JSON reached the tmux buffer. With it off, nothing arrived. Either way the CLI says `copy sent (OSC 52)`, because a terminal never confirms the copy.
+- **Ambiguous-width glyphs:** `●`, `○`, `×`, `·`, `▏`, `…`, `±` and `→` are each counted as one cell. A terminal that renders East-Asian ambiguous-width characters as wide misaligns the columns. `WAVEKIT_ASCII=1` switches to ASCII glyphs.
+- **16 colours:** every state pairs its colour with a glyph or a word, so nothing depends on colour alone. `NO_COLOR` turns colour off entirely.

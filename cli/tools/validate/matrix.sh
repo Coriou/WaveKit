@@ -13,6 +13,7 @@
 #        WAVEKIT_VALIDATE_SCENARIOS / WAVEKIT_VALIDATE_SIZES  space-separated matrix subsets
 #        WAVEKIT_VALIDATE_PERF_SECONDS  length of each perf run (default 60, the spec's budget window)
 #        WAVEKIT_VALIDATE_IDLE_SECONDS  length of the idle run (default 100, the R87 heap window)
+#        WAVEKIT_VALIDATE_PERF_RUNS     space-separated subset of perf runs, e.g. "burst-50"
 # tmux runs on a private socket (-L) so other tmux sessions are never touched;
 # the socket's server and the mock are killed on exit, INT and TERM.
 set -euo pipefail
@@ -25,7 +26,7 @@ SOCK_PATH="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/$SOCK"
 PERF_SECONDS="${WAVEKIT_VALIDATE_PERF_SECONDS:-60}"
 PERF_WARMUP_S="${WAVEKIT_VALIDATE_PERF_WARMUP:-15}"
 SESSION="wkv"
-SCENARIOS=(live idle api-down api-down-cached ws-only rest-only dropping crash-loop legacy long-text burst iq-stale iq-disconnected decoder-faulted contracts tuner-unknown)
+SCENARIOS=(live idle api-down api-down-cached ws-only rest-only dropping crash-loop legacy long-text burst iq-stale iq-disconnected decoder-faulted contracts tuner-unknown band-defaults)
 VIEWS=(overview decoders messages receiver system)
 SIZES=(60x16 60x20 80x24 120x40 200x50)
 # Optional subsets for quick runs, e.g. WAVEKIT_VALIDATE_SCENARIOS="live burst" WAVEKIT_VALIDATE_SIZES="80x24"
@@ -390,6 +391,7 @@ loadavg() { sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || uptime | awk 
 
 perf_run() { # name view burstPerSecond pause seconds heap
 	local name="$1" view="$2" rate="$3" pause="$4" secs="${5:-$PERF_SECONDS}" heap="${6:-no}"
+	if [ -n "${WAVEKIT_VALIDATE_PERF_RUNS:-}" ] && [[ " $WAVEKIT_VALIDATE_PERF_RUNS " != *" $name "* ]]; then return 0; fi
 	local log="$OUT/perf-$1.tty" samples="$OUT/perf-$1.samples" heapf="$OUT/perf-$1.heap"
 	: >"$log"
 	: >"$log.times"
