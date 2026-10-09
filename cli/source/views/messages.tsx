@@ -2,18 +2,11 @@ import { Box } from "ink"
 import type { ReactElement } from "react"
 import { InputLine } from "../components/input-line.js"
 import { LineView, Lines } from "../components/lines.js"
-import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { formatBytes } from "../ui/format.js"
 import type { UiState } from "../ui/ui-state.js"
 import { messagesKeys, messagesModel } from "../view-models/messages.js"
 import type { ViewModule, ViewOutcome, ViewProps } from "./types.js"
-
-/**
- * keyInfo has the content height only; the app's roomy class is rows ≥ 30,
- * which leaves at least 25 content rows (spec §5.1).
- */
-const ROOMY_CONTENT = 25
 
 /** Terminals drop large OSC 52 writes silently; above this nothing is sent (R67 M1). */
 export const COPY_MAX_BYTES = 100_000
@@ -67,8 +60,8 @@ export const messagesView: ViewModule = {
 	id: "messages",
 	title: "Messages",
 	Component: MessagesComponent,
-	keyInfo: (state: AppState, ui: UiState, width: number, height: number) => {
-		const k = messagesKeys(state, ui, width, height, height >= ROOMY_CONTENT)
+	keyInfo: (state, ui, width, height, heightClass) => {
+		const k = messagesKeys(state, ui, width, height, heightClass === "roomy")
 		return {
 			rowIds: k.rowIds,
 			pageSize: k.pageSize,

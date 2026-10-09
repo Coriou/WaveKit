@@ -42,6 +42,8 @@ export interface ViewModule {
 		ui: UiState,
 		width: number,
 		height: number,
+		/** The app's class (rows ≥ 30 is roomy); content height alone cannot tell. */
+		heightClass: HeightClass,
 	): ViewKeyInfo
 	/** View-specific actions. Return undefined to fall back to applyUiAction. */
 	onAction?(

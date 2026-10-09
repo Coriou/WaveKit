@@ -1,14 +1,9 @@
 import { Box } from "ink"
 import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
-import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
-import type { UiState } from "../ui/ui-state.js"
 import { decoderConfirm, decodersModel } from "../view-models/decoders.js"
 import type { ViewModule, ViewProps } from "./types.js"
-
-/** keyInfo gets content rows only; roomy terminals (≥ 30 rows) leave ≥ 25 content rows. Affects pageSize only. */
-const ROOMY_CONTENT = 25
 
 function DecodersComponent({
 	state,
@@ -44,8 +39,8 @@ export const decodersView: ViewModule = {
 	id: "decoders",
 	title: "Decoders",
 	Component: DecodersComponent,
-	keyInfo: (state: AppState, ui: UiState, width: number, height: number) => {
-		const m = decodersModel(state, ui, width, height, height >= ROOMY_CONTENT)
+	keyInfo: (state, ui, width, height, heightClass) => {
+		const m = decodersModel(state, ui, width, height, heightClass === "roomy")
 		return {
 			rowIds: m.rowIds,
 			pageSize: m.pageSize,

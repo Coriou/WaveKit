@@ -7,7 +7,7 @@ import { scenarioState } from "../test/fixtures.js"
 import { SCENARIO_NAMES } from "../test/scenario-types.js"
 import { EMPTY_VIEW_CTX, VIEW_ORDER, type ViewId } from "../ui/actions.js"
 import { findBanned } from "../ui/copy-rules.js"
-import { chromeRows } from "../ui/frame.js"
+import { chromeRows, heightClass } from "../ui/frame.js"
 import { sp } from "../ui/line.js"
 import { formatMessage } from "../ui/messages/index.js"
 import { cellWidth } from "../ui/text.js"
@@ -66,6 +66,7 @@ async function frameProblems(
 				initialUi(view),
 				cols - 1,
 				chromeRows(rows, false).content,
+				heightClass(rows),
 			)
 		} catch (err: unknown) {
 			out.push(`${at}: keyInfo threw ${String(err)}`)

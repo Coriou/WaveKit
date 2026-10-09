@@ -1,9 +1,7 @@
 import { Box } from "ink"
 import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
-import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
-import type { UiState } from "../ui/ui-state.js"
 import { overviewModel } from "../view-models/overview.js"
 import type { ViewModule, ViewProps } from "./types.js"
 
@@ -30,8 +28,8 @@ export const overviewView: ViewModule = {
 	id: "overview",
 	title: "Overview",
 	Component: OverviewComponent,
-	keyInfo: (state: AppState, ui: UiState, width: number, height: number) => {
-		const m = overviewModel(state, ui, width, height, height >= 25)
+	keyInfo: (state, ui, width, height, heightClass) => {
+		const m = overviewModel(state, ui, width, height, heightClass === "roomy")
 		return {
 			rowIds: m.rowIds,
 			pageSize: m.pageSize,
