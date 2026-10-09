@@ -74,7 +74,7 @@ export interface DecoderFacts {
 	fanoutFresh: boolean
 	/** Fanout lane older than the TTL: drop and lifetime render dim. */
 	oldFanout: boolean
-	/** Sources or tuner lane older than the TTL: window and band render dim. */
+	/** Window and band lane older than the TTL (decoders lane under core's bandAssessment, else sources or tuner): they render dim. */
 	oldWindow: boolean
 }
 
@@ -99,7 +99,7 @@ const compute = memoOne(
 		const oldRest = isOld(decoders, now)
 		const fanoutFresh = isFresh(fanout, now)
 		const oldFanout = isOld(fanout, now)
-		const oldWindow = isOld(sources, now) || isOld(tuner, now)
+		const oldLanes = isOld(sources, now) || isOld(tuner, now)
 		return rows.map(row => {
 			const sess = session[row.id]
 			const inc = restartIncrements(sess?.restarts ?? [], now)
@@ -149,7 +149,8 @@ const compute = memoOne(
 				oldRest,
 				fanoutFresh,
 				oldFanout,
-				oldWindow,
+				// R84: core's verdict rides the decoders lane.
+				oldWindow: row.bandAssessment ? oldRest : oldLanes,
 			}
 		})
 	},
