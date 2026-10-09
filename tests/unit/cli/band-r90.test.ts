@@ -217,3 +217,17 @@ describe("R90 I3: a rate change never claims enters from ±rate/2", () => {
 		])
 	})
 })
+
+describe("R90 minors", () => {
+	it("M3: core's targets with no basis read basis ?", () => {
+		const r: DecoderRow = {
+			...liveRow("readsb"),
+			bandAssessment: { verdict: "out-of-band", targetsHz: [1_090_000_000] },
+		}
+		const st = withRows([r])
+		const text = decoderDetail(st, decoderFacts(st)[0]!, 120, NOW)
+			.map(lineText)
+			.join("\n")
+		expect(text).toContain("1090.000 MHz basis ?")
+	})
+})

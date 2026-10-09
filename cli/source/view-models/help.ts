@@ -208,7 +208,7 @@ export function helpLines(
 		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.attention} now  ${g.unknown} unknown`,
 	)
 	body.push(`dim  older than 15 s      ${g.na} not applicable`)
-	body.push("nominal  band from WaveKit's table · * configured target")
+	body.push("band  core's targets or WaveKit's table · * configured")
 	body.push(
 		`frames rejected ${diag.invalidFrames} ${g.sep} items rejected ${diag.rejectedItems}`,
 	)

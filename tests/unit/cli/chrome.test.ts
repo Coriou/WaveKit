@@ -166,7 +166,7 @@ describe("footer, confirm, switcher, help", () => {
 		const box = lines.filter(l => l.trim() !== "")
 		for (const l of box) expect(cellWidth(l.trimStart())).toBe(60)
 		expect(lines.join("\n")).toContain(
-			"nominal  band from WaveKit's table · * configured target",
+			"band  core's targets or WaveKit's table · * configured",
 		)
 		expect(lines.join("\n")).toContain("frames rejected 2 · items rejected 1")
 		expect(findBanned(lines.join("\n"))).toEqual([])
