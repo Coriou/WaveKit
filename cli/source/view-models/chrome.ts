@@ -8,7 +8,8 @@ import {
 	type Endpoint,
 	type LaneError,
 } from "../data/types.js"
-import { decoderMembership } from "../data/window.js"
+import { decoderMembership, type Membership } from "../data/window.js"
+import { decoderBand } from "../data/nominal-bands.js"
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
@@ -19,6 +20,33 @@ import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import { receiverTuner } from "./receiver.js"
+
+export interface WindowItem {
+	membership: Membership
+	/** Tuned types follow the centre, so they say nothing about whether the window is known. */
+	tuned: boolean
+}
+
+/**
+ * "N in window" (strip) and "N of M decoders in window" (Overview) share one rule (I4,
+ * I-C): only when every non-tuned decoder's membership is known; decoders with no
+ * window (—) are not counted. Null otherwise.
+ */
+export function windowCount(
+	items: readonly WindowItem[],
+): { inWindow: number; counted: number } | null {
+	const counted = items.filter(i => i.membership !== "—")
+	const others = counted.filter(i => !i.tuned)
+	if (
+		others.length === 0 ||
+		!others.every(i => i.membership === "in" || i.membership === "out")
+	)
+		return null
+	return {
+		inWindow: counted.filter(i => i.membership === "in").length,
+		counted: counted.length,
+	}
+}
 
 export type RxLane = "tuner" | "sources" | "relay"
 export interface RxValue {
@@ -80,8 +108,7 @@ export function stripInput(state: AppState): StripInput {
 		let up = 0
 		let failing = 0
 		let restarting = 0
-		let inWindow = 0
-		let known = 0
+		const memberships: WindowItem[] = []
 		for (const d of rows) {
 			const p = processState(
 				d,
@@ -91,23 +118,27 @@ export function stripInput(state: AppState): StripInput {
 				state.session[d.id]?.suspendingSince,
 			)
 			if (p === "up" || p === "starting") up++
-			if (isFailing(p)) failing++
+			// R77: failing counts faults and anything still failing to settle.
+			if (isFailing(p) || p === "faulted-retrying" || p === "suspend-pending")
+				failing++
 			if (p === "restarting") restarting++
-			const m = decoderMembership(
-				d,
-				state.sources.value,
-				state.tuner.value,
-				state.relay.value,
-			)
-			if (m === "in") inWindow++
-			if (m === "in" || m === "out") known++
+			memberships.push({
+				membership: decoderMembership(
+					d,
+					state.sources.value,
+					state.tuner.value,
+					state.relay.value,
+				),
+				tuned: decoderBand(d)?.band.kind === "tuned",
+			})
 		}
+		const win = windowCount(memberships)
 		decoders = {
 			up,
 			total: rows.length,
 			failing,
 			restarting,
-			inWindow: known > 0 ? inWindow : null,
+			inWindow: win?.inWindow ?? null,
 		}
 	}
 	const agg = isFresh(state.fanout, now)

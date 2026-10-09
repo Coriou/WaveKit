@@ -13,7 +13,7 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { overviewBudget } from "../ui/frame.js"
-import { rxValues } from "./chrome.js"
+import { rxValues, windowCount } from "./chrome.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncateLine } from "../ui/text.js"
@@ -328,14 +328,13 @@ function feedPlaceholder(state: AppState): Line {
 export function emptyFeedLine(state: AppState): Line {
 	const facts = decoderFacts(state)
 	const since = state.conn.ws.since ?? state.now
-	// I4: decoders with no window (—) are not counted; tuned decoders are always "in", so
-	// the count is shown only when every other decoder's membership is known.
-	const counted = facts.filter(f => f.membership !== "—")
-	const inWin = counted.filter(f => f.membership === "in").length
-	const others = counted.filter(f => f.nominal !== "tuned")
-	const windowKnown =
-		others.length > 0 &&
-		others.every(f => f.membership === "in" || f.membership === "out")
+	// I4: one rule with the strip (windowCount): tuned decoders prove nothing; — is not counted.
+	const win = windowCount(
+		facts.map(f => ({
+			membership: f.membership,
+			tuned: f.nominal === "tuned",
+		})),
+	)
 	// R44/R53: the centre on its own (first positive), for the receiver row's source (M7).
 	const centre = rxValues(
 		state,
@@ -344,9 +343,7 @@ export function emptyFeedLine(state: AppState): Line {
 	const sep = ` ${glyphs().sep} `
 	const parts = [
 		`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,
-		...(windowKnown
-			? [`${inWin} of ${counted.length} decoders in window`]
-			: []),
+		...(win ? [`${win.inWindow} of ${win.counted} decoders in window`] : []),
 		...(centre !== undefined ? [`rx ${formatMHz(centre)}`] : []),
 	]
 	return [sp(parts.join(sep), "label")]
