@@ -25,6 +25,7 @@ import {
 	decodersPlaceholder,
 } from "./decoder-rows.js"
 import {
+	aircraftLookup,
 	feedCounts,
 	feedLines,
 	in60sText,
@@ -361,6 +362,18 @@ export interface OverviewModel {
 	pageSize: number
 }
 
+/** M8: what keyInfo needs (row ids, page size) without building the whole model. */
+export function overviewKeys(
+	state: AppState,
+	width: number,
+	height: number,
+	roomy: boolean,
+): { rowIds: string[]; pageSize: number } {
+	const facts = decoderFacts(state)
+	const b = overviewBudget(width + 1, height, roomy, facts.length)
+	return { rowIds: facts.map(f => f.row.id), pageSize: b.decoderRows }
+}
+
 export function overviewModel(
 	state: AppState,
 	ui: UiState,
@@ -393,7 +406,15 @@ export function overviewModel(
 	const feedOld = state.conn.ws.state !== "open"
 	const feed =
 		rows.length > 0
-			? feedLines(rows, msgWidth, b.messageRows, null, state.now, feedOld).lines
+			? feedLines(
+					rows,
+					msgWidth,
+					b.messageRows,
+					null,
+					state.now,
+					feedOld,
+					aircraftLookup(state),
+				).lines
 			: state.conn.ws.state === "open"
 				? [emptyFeedLine(state)]
 				: [feedPlaceholder(state)]

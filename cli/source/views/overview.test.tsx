@@ -46,6 +46,31 @@ describe("Overview goldens (spec §6.1)", () => {
 			h.unmount()
 		})
 	}
+	it("M10: the selection survives a refresh", async () => {
+		const st = scenarioState("live", deps)
+		const h = await renderApp({
+			state: st,
+			views,
+			view: "overview",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press(KEYS.down)
+		await h.press(KEYS.down)
+		// A REST refresh: new row objects, a later clock.
+		h.runtime.store.set({
+			...st,
+			now: st.now + 5000,
+			decoders: {
+				...st.decoders,
+				value: st.decoders.value!.map(d => ({ ...d })),
+				receivedAt: st.now + 5000,
+			},
+		})
+		await h.press(KEYS.enter)
+		expect(h.text()).toContain("decoders selected=multimon-ng detail=true")
+		h.unmount()
+	})
 	it("selects a decoder and opens it in view 2", async () => {
 		const h = await renderApp({
 			state: scenarioState("live", deps),

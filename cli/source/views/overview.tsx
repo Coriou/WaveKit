@@ -4,7 +4,7 @@ import { Lines } from "../components/lines.js"
 import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import type { UiState } from "../ui/ui-state.js"
-import { overviewModel } from "../view-models/overview.js"
+import { overviewKeys, overviewModel } from "../view-models/overview.js"
 import type { ViewModule, ViewProps } from "./types.js"
 
 function OverviewComponent({
@@ -31,25 +31,13 @@ export const overviewView: ViewModule = {
 	title: "Overview",
 	Component: OverviewComponent,
 	keyInfo: (state: AppState, ui: UiState, width: number, height: number) => {
-		const m = overviewModel(state, ui, width, height, height >= 25)
+		// Roomy means rows ≥ 30, which leaves content ≥ 25 without a banner.
+		const k = overviewKeys(state, width, height, height >= 25)
 		return {
-			rowIds: m.rowIds,
-			pageSize: m.pageSize,
+			rowIds: k.rowIds,
+			pageSize: k.pageSize,
 			ctx: { ...EMPTY_VIEW_CTX, hasSelection: ui.selected.overview !== null },
 		}
 	},
-	onAction: (action, _state, ui) => {
-		if (action.type !== "open") return undefined
-		const id = ui.selected.overview
-		if (id === null) return undefined
-		return {
-			ui: {
-				...ui,
-				view: "decoders",
-				selected: { ...ui.selected, decoders: id },
-				detail: { ...ui.detail, decoders: { open: true, scroll: 0 } },
-			},
-			effects: [],
-		}
-	},
+	// M9: Enter is applyUiAction's "open", which takes Overview to the Decoders detail.
 }

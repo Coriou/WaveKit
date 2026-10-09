@@ -7,6 +7,7 @@ import { initialUi } from "../../../cli/source/ui/ui-state.js"
 import {
 	emptyFeedLine,
 	feedHeader,
+	overviewKeys,
 	overviewModel,
 	receiverSummary,
 } from "../../../cli/source/view-models/overview.js"
@@ -400,5 +401,33 @@ describe("A6 fix 1: I4 in-window count", () => {
 			},
 		}
 		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 decoders in window/)
+	})
+})
+
+describe("A6 fix 1: M8 keyInfo inputs", () => {
+	it("overviewKeys matches the model's rows and page size without building it", () => {
+		const s = scenarioState("live", deps)
+		for (const [w, h, roomy] of [
+			[59, 13, false],
+			[79, 21, false],
+			[119, 35, true],
+			[199, 45, true],
+		] as const) {
+			const m = overviewModel(s, initialUi("overview"), w, h, roomy)
+			expect(overviewKeys(s, w, h, roomy)).toEqual({
+				rowIds: m.rowIds,
+				pageSize: m.pageSize,
+			})
+		}
+	})
+})
+
+describe("R62: Overview latest messages read the aircraft map", () => {
+	it("an ADS-B row shows registration from the live map", () => {
+		const burst = scenarioState("burst", deps)
+		const m = overviewModel(burst, initialUi("overview"), 199, 45, true)
+		const all = [...m.left, ...m.right].map(lineText)
+		const row = all.find(l => l.includes("4CA9D2")) ?? ""
+		expect(row).toContain("EI-DCL")
 	})
 })
