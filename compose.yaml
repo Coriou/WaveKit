@@ -16,6 +16,8 @@ services:
       WAVEKIT_CONFIG: ${WAVEKIT_APP_CONFIG:-/app/config/docker.yaml}
       WAVEKIT_API__HOST: "0.0.0.0"
       WAVEKIT_API__PORT: "9000"
+      # Runtime state (API band overrides); config/ stays read-only.
+      WAVEKIT_STATE_DIR: /app/data
     ports:
       - "127.0.0.1:9000:9000"
       - "127.0.0.1:8080:8080"
@@ -27,6 +29,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./decoded_calls:/app/decoded_calls
+      - ./data:/app/data
       - ./fixtures:/app/fixtures:ro
     logging:
       driver: local
@@ -87,6 +90,8 @@ services:
       WAVEKIT_LOG_LEVEL: debug
       NODE_ENV: development
       SDR_SOURCE: "tcp://sdrpp-server:5259"
+      # Runtime state (API band overrides); config/ stays read-only.
+      WAVEKIT_STATE_DIR: /app/data
     # config/default.yaml has api.port=3000 (the historical container-internal
     # port); host port 9000 is mapped to container 3000 to match the previous
     # `make dev-up -p 9000:3000` workflow. The same translation applies to the
@@ -102,6 +107,7 @@ services:
       - ./config:/app/config:ro
       - ./logs:/var/log/wavekit
       - ./decoded_calls:/app/decoded_calls
+      - ./data:/app/data
     # Container-internal port is 3000 (config/default.yaml api.port); host port
     # 9000 is mapped above. The healthcheck runs inside the container, so probe
     # localhost:3000. The user-facing curl http://localhost:9000/health works.

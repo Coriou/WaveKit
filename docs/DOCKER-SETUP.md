@@ -274,10 +274,25 @@ Common runtime env vars consumed by the wavekit-api container:
 | `WAVEKIT_TUNER_RELAY__ENABLED`   | false   | Expose RTL-TCP relay                   |
 | `SDR_SOURCE`                     | -       | Convenience: `tcp://host:port` URL     |
 | `NODE_ENV`                       | -       | `development` or `production`          |
+| `WAVEKIT_REGION`                 | guessed | Band plan region (EU, US, CA, AU, NZ, JP, CN) |
+| `WAVEKIT_STATE_DIR`              | data    | Runtime state directory (`/app/data` in compose) |
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
 (see `CLAUDE.md` "Config" section).
+
+### State volume
+
+`config/` is mounted read-only. Runtime state that core writes itself (API
+band overrides from `PUT /api/decoders/:id/band`, file
+`decoder-band-overrides.json`) lives in `WAVEKIT_STATE_DIR`; the `app` and
+`dev` profiles mount `./data:/app/data` and set `WAVEKIT_STATE_DIR=/app/data`
+so overrides survive a container restart (`data/` is git-ignored). If the
+directory is missing or not writable (read-only mount, permissions), core keeps
+running: overrides apply in memory only, a warning is logged and
+`GET /api/decoders/:id/band` reports `persisted: false`. Inside a container
+without `TZ` or a locale, the region guess falls back to `EU`; set
+`WAVEKIT_REGION` (or `region:` in YAML) elsewhere.
 
 ## Health checks
 

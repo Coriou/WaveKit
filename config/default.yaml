@@ -405,6 +405,47 @@ csdr:
 #   faultAfterFailures: 5
 #   bandSuspension: true
 
+# -----------------------------------------------------------------------------
+# Band defaults, region and per-decoder band overrides
+# -----------------------------------------------------------------------------
+# Band suspension works out of the box: decoders without a configured
+# frequency get a built-in band (acarsdec, dsd-fme, direwolf and rtl433 per
+# region, followCenter LoRa from its Meshtastic `region` option); ADS-B, AIS
+# and VDL2 keep their protocol/decoder defaults; multimon-ng stays unknown
+# unless configured. A decoder started by hand (POST /api/decoders/:id/start)
+# is never band-suspended. See docs/API.md "Band check and band suspension".
+#
+#   region   - Band plan for the regional defaults: EU, US, CA, AU, NZ, JP or
+#              CN (case-insensitive; EU = CEPT / IARU Region 1, incl. UK, CH,
+#              NO). Unset: guessed from TZ, the system time zone, then the
+#              locale, else EU. Env: WAVEKIT_REGION.
+#   stateDir - Directory for runtime state (API band overrides, file
+#              decoder-band-overrides.json). Relative to the working
+#              directory (default: data). Env: WAVEKIT_STATE_DIR. When it is
+#              not writable, overrides apply in memory only (`persisted: false`).
+#
+# region: EU
+# stateDir: data
+#
+# Per decoder, `band` corrects where the decoder is useful (admission only;
+# the process arguments never change). It outranks configured frequencies
+# and built-in defaults; PUT /api/decoders/:id/band outranks it field-wise.
+#   rangesHz       - Absolute RF ranges [{ minHz, maxHz }]; in band when the
+#                    capture centre is within the usable window of a range
+#   targetsHz      - Point targets in Hz
+#   region         - Region for this decoder's regional default
+#   bandSuspension - false: never band-suspend this decoder (durable "pin")
+#
+# decoders:
+#   - id: ism-433
+#     type: rtl433
+#     enabled: true
+#     options: {}
+#     band:
+#       rangesHz:
+#         - { minHz: 433050000, maxHz: 434790000 }
+#       bandSuspension: false
+
 # =============================================================================
 # EXAMPLE: Multi-Source Setup for Decoder Expansion
 # =============================================================================
