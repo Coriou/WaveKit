@@ -431,3 +431,23 @@ describe("R62: Overview latest messages read the aircraft map", () => {
 		expect(row).toContain("EI-DCL")
 	})
 })
+
+describe("A8 fix 1: Overview leftovers", () => {
+	it("a feed that was live, now down with nothing cached, says when it stopped", () => {
+		const s = scenarioState("api-down-cached", deps)
+		const ring = { ...s.messages.ring, entries: [] }
+		const empty = { ...s, messages: { version: s.messages.version + 1, ring } }
+		const gap = ring.gaps.find(g => g.to === null)!
+		const header = lineText(feedHeader(empty))
+		expect(header).toBe(`MESSAGES  feed stopped ${formatClock(gap.from)}`)
+		expect(header).not.toMatch(/0 in 60s|0 cached/)
+	})
+	it("the centre text dims with the window", () => {
+		const s = scenarioState("live", deps)
+		const tunerOld = { ...s, tuner: { ...s.tuner, receivedAt: s.now - 60_000 } }
+		const [, row2] = receiverSummary(tunerOld, 119)
+		expect(row2!.find(x => x.text.includes("centre"))?.role).toBe("old")
+		const [, fresh] = receiverSummary(s, 119)
+		expect(fresh!.find(x => x.text.includes("centre"))?.role).not.toBe("old")
+	})
+})

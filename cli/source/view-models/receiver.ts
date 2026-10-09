@@ -1,3 +1,4 @@
+import { remoteHost } from "./net.js"
 import type { TunerRelayStatus, TunerState } from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import { decoderBand } from "../data/nominal-bands.js"
@@ -141,16 +142,6 @@ export function receiverControl(
 }
 
 /** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
-export function remoteHost(remote: string): string {
-	const r = remote.trim()
-	const bracket = /^\[([^\]]+)\](?::\d+)?$/.exec(r)
-	const host = bracket
-		? (bracket[1] ?? r)
-		: /:\d+$/.test(r)
-			? r.slice(0, r.lastIndexOf(":"))
-			: r
-	return sanitize(host.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, ""))
-}
 
 function relayClient(
 	relay: TunerRelayStatus | undefined,
@@ -1087,3 +1078,5 @@ export function receiverLines(
 	if (relayAt >= 0) lines.splice(relayAt + 1, 0, ...history)
 	return lines.slice(0, height)
 }
+
+export { remoteHost }

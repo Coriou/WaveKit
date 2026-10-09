@@ -14,6 +14,7 @@ import {
 } from "../ui/format.js"
 import { overviewBudget } from "../ui/frame.js"
 import { rxValues, windowCount } from "./chrome.js"
+import { remoteHost } from "./net.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncateLine } from "../ui/text.js"
@@ -52,22 +53,6 @@ function hostOf(url: string | undefined): string | null {
 	} catch {
 		return null
 	}
-}
-
-/** M4: the address part of a remote (`192.0.2.1:5555`, `::ffff:192.0.2.1:5555`, `[2001:db8::1]:5555`). */
-function remoteHost(remote: string | undefined): string | null {
-	if (remote === undefined) return null
-	const r = sanitize(remote).trim()
-	let host: string
-	if (r.startsWith("[")) {
-		const close = r.indexOf("]")
-		host = close > 0 ? r.slice(1, close) : r
-	} else {
-		const i = r.lastIndexOf(":")
-		host = i > 0 ? r.slice(0, i) : r
-	}
-	host = host.replace(/^::ffff:/i, "")
-	return host === "" ? null : host
 }
 
 /** The Overview's source: the first listed one (the receiver row and the empty-feed line agree). */
@@ -193,7 +178,8 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 			? "external control"
 			: "wavekit control"
 		: null
-	const ownerIp = remoteHost(relay?.controlClientRemote)
+	const remote = relay?.controlClientRemote
+	const ownerIp = remote !== undefined ? remoteHost(remote) || null : null
 	const lastCmd = tuner?.lastCommandAt
 		? Date.parse(tuner.lastCommandAt)
 		: Number.NaN
@@ -217,7 +203,7 @@ export function receiverSummary(state: AppState, width: number): [Line, Line] {
 							text: formatWindow(centre.v - rate.v / 2, centre.v + rate.v / 2),
 							role: role("value", winOld),
 						},
-						sp(`${sep}${centreText ?? ""}`, "label"),
+						{ text: `${sep}${centreText ?? ""}`, role: role("label", winOld) },
 					],
 				]
 			: centre
@@ -297,12 +283,13 @@ export function feedHeader(state: AppState): Line {
 	}
 	// I2: the open gap's start is when the feed stopped; ws.since moves on every retry.
 	const openGap = state.messages.ring.gaps.findLast(g => g.to === null)
-	if (state.conn.ws.state !== "open" && c.cached > 0) {
+	// The feed was live and is down: say when it stopped, with or without a cache.
+	if (state.conn.ws.state !== "open") {
 		const stopped = openGap?.from ?? state.conn.ws.since
 		return [
 			...title("MESSAGES"),
 			sp(
-				`feed stopped${stopped !== null ? ` ${formatClock(stopped)}` : ""}${sep}${c.cached} cached`,
+				`feed stopped${stopped !== null ? ` ${formatClock(stopped)}` : ""}${c.cached > 0 ? `${sep}${c.cached} cached` : ""}`,
 				"label",
 			),
 		]
