@@ -207,10 +207,9 @@ export function helpLines(
 	body.push(
 		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.unknown} unknown`,
 	)
-	body.push(
-		`${g.attention} attention (restarting, backpressure)  ${g.na} not applicable`,
-	)
-	body.push("dim  older than 15s")
+	// `!` marks restarting decoders, backpressure and emergencies (squawk !7700).
+	body.push(`${g.attention} attention (restarting, backpressure, emergency)`)
+	body.push(`${g.na} not applicable  dim  older than 15s`)
 	body.push(
 		`band  core's targets or WaveKit's table ${glyphs().sep} * configured`,
 	)

@@ -271,10 +271,10 @@ export function stripGroups(input: StripInput): Group[] {
 const SEP_W = 2
 
 /**
- * M2: every lane starts at its minimal form and only the clock may be removed,
- * so `rx` and `drops` stay at 60 columns. Room is then spent in a fixed order,
- * most useful first: the REST age, the rx span, the iq word, the drops words, the named
- * decoders lane, its in-window count, the iq rate, the rx owner, the clock.
+ * M2: every lane starts at its minimal worded form and the clock goes first.
+ * Room is then spent in a fixed order, most useful first: the REST age of a
+ * split api lane, the rx unit and span, the full iq word, the named decoders
+ * lane, its in-window count, the iq rate, the rx owner, the clock.
  * Should even the minimal forms not fit, whole lanes go in spec §4.2 order
  * (rx, then drops, then decoders), never a glyph-only form (R93).
  */

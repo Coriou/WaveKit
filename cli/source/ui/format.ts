@@ -124,7 +124,7 @@ export function formatDuration(sec: N): string {
 	return isKnown(sec) ? formatAge(sec * 1000) : UNKNOWN
 }
 
-/** Server-relative sample age: "4 ms", "1.2s", then the age buckets. Floors, like formatAge. */
+/** Server-relative sample age: "4ms", "1.2s", then the age buckets. Floors, like formatAge. */
 export function formatSampleAge(ms: N): string {
 	if (!isKnown(ms)) return UNKNOWN
 	const v = Math.max(0, ms)
