@@ -123,7 +123,12 @@ impl ChannelDsp {
         self.spec.format
     }
 
-    /// Samples produced by the chain but not yet due under the A12 schedule (≤ stages.len()).
+    /// Number of filter stages in the planned chain (0 for pass-through).
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+    /// Samples produced by the chain but not yet due under the A12 schedule (≤ `stage_count()`).
     pub fn held_samples(&self) -> usize {
         self.held_i.len()
     }

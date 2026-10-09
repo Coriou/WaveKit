@@ -7,6 +7,12 @@ use crate::design::{kaiser_len, lowpass, DESIGN_ATTENUATION_DB};
 pub const HALFBAND_MIN_RATIO: f64 = 1.1;
 pub const MAX_PROTOTYPE_TAPS: usize = 16_384;
 
+/// Slack, in Hz, on the `bw/2 + tr <= out/2` boundary (addendum §12.2). The §2 default passband
+/// (bw = out·(1−t), tr = out·t/2) can round one ulp past out/2. Task 14's `admission.rs` must
+/// import this constant (and Task 16's `admission.ts` use the same value) so the planner never
+/// rejects a channel admission accepted.
+pub const ADMISSION_EPSILON_HZ: f64 = 1e-6;
+
 /// One L/M stage. Rates are in Hz; `pass_hz`/`stop_hz` are the prototype's band edges.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StageSpec {
@@ -72,7 +78,7 @@ pub fn plan_chain(fs: u64, out: u64, bw: f64, tr: f64) -> Result<ChainPlan, Stri
         return Err(format!("output rate {out} must be within 1..={fs}"));
     }
     let (pass, guard) = (bw / 2.0, bw / 2.0 + tr);
-    if !(bw > 0.0 && tr > 0.0 && guard <= out as f64 / 2.0) {
+    if !(bw > 0.0 && tr > 0.0 && guard <= out as f64 / 2.0 + ADMISSION_EPSILON_HZ) {
         return Err(format!(
             "bandwidth {bw} and transition {tr} must be positive with bw/2 + tr <= {}",
             out as f64 / 2.0
@@ -231,5 +237,21 @@ mod tests {
         assert!(plan_chain(2_048_000, 48_000, 48_000.0, 1_000.0).is_err());
         assert!(plan_chain(2_048_000, 48_000, 0.0, 1_000.0).is_err());
         assert!(plan_chain(2_048_000, 48_000, 40_000.0, 0.0).is_err());
+        // Beyond the admission epsilon.
+        assert!(plan_chain(2_048_000, 250_000, 230_000.0, 10_001.0).is_err());
+    }
+
+    #[test]
+    fn accepts_the_default_passband_rounding_overshoot() {
+        // §2 default passband at t = 0.18: guard = 125 000.000…01, one ulp over out/2.
+        // Admission accepts it (ADMISSION_EPSILON_HZ), so the planner must too.
+        let (out, t) = (250_000u64, 0.18);
+        let (bw, tr) = (out as f64 * (1.0 - t), out as f64 * t / 2.0);
+        assert!(bw / 2.0 + tr > out as f64 / 2.0, "the case must overshoot");
+        assert!(plan_chain(2_048_000, out, bw, tr).is_ok());
+        for &(out, t) in &[(1_000_000u64, 0.41), (2_048_000, 0.42), (250_000, 0.43)] {
+            let (bw, tr) = (out as f64 * (1.0 - t), out as f64 * t / 2.0);
+            assert!(plan_chain(2_048_000, out, bw, tr).is_ok(), "{out} t={t}");
+        }
     }
 }

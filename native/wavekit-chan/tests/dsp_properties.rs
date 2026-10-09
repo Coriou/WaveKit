@@ -72,7 +72,9 @@ proptest! {
             let ideal = (fed as u128 * out as u128 / fs as u128) as u64;
             // The addendum allows ±1. The A12 schedule is exact at every chunk boundary, so assert equality.
             prop_assert_eq!(got, ideal, "{}->{} after {} samples", fs, out, fed);
-            prop_assert!(dsp.held_samples() <= MAX_STAGES);
+            // Plan A12 bounds the hold-back by this chain's own stage count.
+            prop_assert!(dsp.held_samples() <= dsp.stage_count());
+            prop_assert!(dsp.stage_count() <= MAX_STAGES);
         }
     }
 
@@ -197,6 +199,7 @@ fn ceiling_accumulation_cases_are_exact() {
             n as u64 * out / fs,
             "{fs}->{out} n={n}"
         );
-        assert!(dsp.held_samples() <= MAX_STAGES);
+        assert!(dsp.held_samples() <= dsp.stage_count());
+        assert!(dsp.stage_count() <= MAX_STAGES);
     }
 }
