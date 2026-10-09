@@ -285,6 +285,8 @@ export class LiveDemodulator extends EventEmitter {
 		this.activeSourceId = null
 		this.closeAllClients("stop", true)
 		await this.closeHttpServer()
+		// A failure that was still being cleaned up may have scheduled a restart.
+		this.clearRestartTimer()
 
 		this.emit("stopped")
 		this.log.info("Live demodulator stopped")
