@@ -5,38 +5,58 @@ export interface UiCtx {
 	/** Selectable row ids in display order (Messages: seq strings, newest first). */
 	rowIds: readonly string[]
 	pageSize: number
+	/** Last scroll offset at which the open detail still fills its pane (R73, M3). */
+	detailMaxScroll?: number
+	/** Messages: the ring's newest seq, so a pause with no visible rows still freezes (R73, M4). */
+	newestSeq?: number | null
 }
 
+/** A new selection starts its open detail at the top (R73, M3). */
 function select(ui: UiState, id: string | null): UiState {
-	return { ...ui, selected: { ...ui.selected, [ui.view]: id } }
+	const v = ui.view
+	const d = ui.detail[v]
+	return {
+		...ui,
+		selected: { ...ui.selected, [v]: id },
+		...(id !== ui.selected[v] && d.scroll !== 0
+			? { detail: { ...ui.detail, [v]: { ...d, scroll: 0 } } }
+			: {}),
+	}
 }
 
-/** Freeze the Messages slice at its newest visible seq so the selected row cannot move. */
-function pause(ui: UiState, ctx: UiCtx): UiState {
+/**
+ * Freeze the Messages slice at its newest visible seq so the selected row cannot
+ * move; with no visible rows, at the ring's newest seq (M4). `pausedAt` lets the
+ * frozen slice leave out gaps that open later (M5).
+ */
+function pause(ui: UiState, ctx: UiCtx, now: number): UiState {
 	const seqs = ctx.rowIds.map(Number).filter(Number.isFinite)
 	return {
 		...ui,
 		messages: {
 			...ui.messages,
 			following: false,
-			pausedAtSeq: seqs.length > 0 ? Math.max(...seqs) : null,
+			pausedAtSeq:
+				seqs.length > 0 ? Math.max(...seqs) : (ctx.newestSeq ?? null),
+			pausedAt: now,
 		},
 	}
 }
 
 function resume(ui: UiState): UiState {
+	const { pausedAt: _pausedAt, ...rest } = ui.messages
 	return {
 		...ui,
-		messages: { ...ui.messages, following: true, pausedAtSeq: null },
+		messages: { ...rest, following: true, pausedAtSeq: null },
 	}
 }
 
 /** Selecting a Messages row while following freezes the feed (§6.3); an empty list has nothing to hold. */
-function autoPause(ui: UiState, ctx: UiCtx): UiState {
+function autoPause(ui: UiState, ctx: UiCtx, now: number): UiState {
 	return ui.view === "messages" &&
 		ui.messages.following &&
 		ctx.rowIds.length > 0
-		? pause(ui, ctx)
+		? pause(ui, ctx, now)
 		: ui
 }
 
@@ -49,11 +69,25 @@ function clearMessagesSelection(ui: UiState): UiState {
 	}
 }
 
-function moveBy(ui: UiState, ctx: UiCtx, delta: number): UiState {
+/** M10: leave a paused Messages feed — no selection, no detail, following again. */
+const resumeMessages = (ui: UiState): UiState =>
+	clearMessagesSelection(resume(ui))
+
+function moveBy(ui: UiState, ctx: UiCtx, delta: number, now: number): UiState {
 	const rows = ctx.rowIds
 	if (rows.length === 0) return ui
-	const base = autoPause(ui, ctx)
-	const cur = base.selected[base.view]
+	const cur = ui.selected[ui.view]
+	// M9: the feed is newest first, so the first ↑ or ↓ selects the newest row
+	// (index 0) and pauses; ↑ past the newest row resumes, like G.
+	if (
+		ui.view === "messages" &&
+		delta === -1 &&
+		!ui.messages.following &&
+		cur !== null &&
+		rows.indexOf(cur) === 0
+	)
+		return resumeMessages(ui)
+	const base = autoPause(ui, ctx, now)
 	const idx = cur === null ? -1 : rows.indexOf(cur)
 	const next = idx < 0 ? 0 : Math.min(rows.length - 1, Math.max(0, idx + delta))
 	return select(base, rows[next] ?? null)
@@ -86,23 +120,23 @@ export function applyUiAction(
 		case "quit":
 			return { ...ui, quit: true }
 		case "move":
-			return moveBy(ui, ctx, action.delta)
+			return moveBy(ui, ctx, action.delta, now)
 		case "page":
-			return moveBy(ui, ctx, action.delta * Math.max(1, ctx.pageSize))
+			return moveBy(ui, ctx, action.delta * Math.max(1, ctx.pageSize), now)
 		case "top": {
 			if (ctx.rowIds.length === 0) return ui
-			return select(autoPause(ui, ctx), ctx.rowIds[0] ?? null)
+			return select(autoPause(ui, ctx, now), ctx.rowIds[0] ?? null)
 		}
 		case "newest":
 			return v === "messages"
-				? clearMessagesSelection(resume(ui))
+				? resumeMessages(ui)
 				: select(ui, ctx.rowIds[ctx.rowIds.length - 1] ?? null)
 		case "open": {
 			const id = ui.selected[v] ?? ctx.rowIds[0] ?? null
 			if (id === null) return ui
 			// Overview has no detail pane: Enter opens the decoder in the Decoders view (spec §7).
 			const target = v === "overview" ? "decoders" : v
-			const base = autoPause(ui, ctx)
+			const base = autoPause(ui, ctx, now)
 			return {
 				...base,
 				view: target,
@@ -116,10 +150,17 @@ export function applyUiAction(
 					...ui,
 					detail: { ...ui.detail, [v]: { open: false, scroll: 0 } },
 				}
-			if (ui.selected[v] !== null) return select(ui, null)
-			if (v === "messages" && ui.messages.filterText !== "") {
-				return { ...ui, messages: { ...ui.messages, filterText: "" } }
+			// M10, Messages: detail → selection and pause → filter text → preset.
+			if (v === "messages") {
+				if (ui.selected.messages !== null || !ui.messages.following)
+					return resumeMessages(ui)
+				if (ui.messages.filterText !== "")
+					return { ...ui, messages: { ...ui.messages, filterText: "" } }
+				if (ui.messages.preset !== "all")
+					return { ...ui, messages: { ...ui.messages, preset: "all" } }
+				return ui
 			}
+			if (ui.selected[v] !== null) return select(ui, null)
 			return ui
 		}
 		case "detail-scroll": {
@@ -128,7 +169,16 @@ export function applyUiAction(
 				...ui,
 				detail: {
 					...ui.detail,
-					[v]: { ...d, scroll: Math.max(0, d.scroll + action.delta * 5) },
+					[v]: {
+						...d,
+						scroll: Math.max(
+							0,
+							Math.min(
+								ctx.detailMaxScroll ?? Number.POSITIVE_INFINITY,
+								d.scroll + action.delta * 5,
+							),
+						),
+					},
 				},
 			}
 		}
@@ -169,7 +219,7 @@ export function applyUiAction(
 		case "filter-cancel":
 			return { ...ui, messages: { ...ui.messages, draft: null } }
 		case "pause-toggle":
-			return ui.messages.following ? pause(ui, ctx) : resume(ui)
+			return ui.messages.following ? pause(ui, ctx, now) : resume(ui)
 		case "preset-cycle": {
 			const i = PRESET_ORDER.indexOf(ui.messages.preset)
 			return {

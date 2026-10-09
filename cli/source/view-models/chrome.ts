@@ -256,9 +256,10 @@ export function footerWithNotice(
 	now: number,
 	width: number,
 ): Line {
-	const groups = footerGroups(ctx)
-	if (notice && now - notice.at < NOTICE_MS)
-		groups.unshift({ priority: 0, variants: [[sp(notice.text, "attention")]] })
+	const shown = notice && now - notice.at < NOTICE_MS ? notice : null
+	const groups = footerGroups(ctx, shown?.text)
+	if (shown)
+		groups.unshift({ priority: 0, variants: [[sp(shown.text, "attention")]] })
 	return fitGroups(groups, width)
 }
 

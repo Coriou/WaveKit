@@ -2,12 +2,13 @@ import type { ReactElement } from "react"
 import { Lines } from "../components/lines.js"
 import type { AppState } from "../data/types.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
-import { RECEIVER_EXTERNAL_NOTICE } from "../ui/keymap.js"
+import { receiverExternalNotice } from "../ui/keymap.js"
 import { applyEditKey, startEdit } from "../ui/tuner-edit.js"
 import type { UiState } from "../ui/ui-state.js"
 import {
 	controlConfirm,
 	receiverControl,
+	receiverController,
 	receiverLines,
 	receiverTuner,
 	reviewHeldNotice,
@@ -50,7 +51,7 @@ export const receiverView: ViewModule = {
 				const t = receiverTuner(state)
 				if (!t) return notice("tuner state ?")
 				if (t.controlMode !== "internal")
-					return notice(RECEIVER_EXTERNAL_NOTICE)
+					return notice(receiverExternalNotice(receiverController(state)))
 				return { ui: { ...ui, edit: startEdit(t) }, effects: [] }
 			}
 			case "edit-key":

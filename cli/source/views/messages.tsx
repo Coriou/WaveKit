@@ -1,6 +1,5 @@
 import { Box } from "ink"
 import type { ReactElement } from "react"
-import { InputLine } from "../components/input-line.js"
 import { LineView, Lines } from "../components/lines.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { formatBytes } from "../ui/format.js"
@@ -23,10 +22,8 @@ function MessagesComponent({
 		return <Lines lines={m.detail} width={width + 1} height={height} />
 	const head = (
 		<>
-			<LineView line={m.header} />
-			{ui.messages.draft !== null ? (
-				<InputLine text={ui.messages.draft} width={width} />
-			) : null}
+			<LineView line={m.header} width={m.listWidth + 1} />
+			{m.input ? <LineView line={m.input} width={m.listWidth + 1} /> : null}
 		</>
 	)
 	const body = m.input ? height - 2 : height - 1
@@ -65,6 +62,10 @@ export const messagesView: ViewModule = {
 		return {
 			rowIds: k.rowIds,
 			pageSize: k.pageSize,
+			newestSeq: k.newestSeq,
+			...(k.detailMaxScroll !== undefined
+				? { detailMaxScroll: k.detailMaxScroll }
+				: {}),
 			ctx: {
 				...EMPTY_VIEW_CTX,
 				hasSelection: k.hasSelection,
