@@ -15,6 +15,11 @@ export interface Glyphs {
 	confirm: string
 	cursor: string
 	range: string
+	/** Final review: every non-ASCII symbol the CLI writes itself has an ASCII form. */
+	plusMinus: string
+	minus: string
+	arrow: string
+	times: string
 	spark: readonly string[]
 }
 
@@ -33,6 +38,10 @@ export const UTF8_GLYPHS: Glyphs = {
 	confirm: "▶",
 	cursor: "▏",
 	range: "–",
+	plusMinus: "±",
+	minus: "−",
+	arrow: "→",
+	times: "×",
 	spark: ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"],
 }
 
@@ -51,6 +60,10 @@ export const ASCII_GLYPHS: Glyphs = {
 	confirm: ">",
 	cursor: "|",
 	range: "-",
+	plusMinus: "+-",
+	minus: "-",
+	arrow: "->",
+	times: "x",
 	spark: ["_", ".", "-", "=", "+", "*", "#", "@"],
 }
 

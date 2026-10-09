@@ -1,4 +1,5 @@
 import type { HeightClass, WidthClass } from "./line.js"
+import { glyphs } from "./theme.js"
 
 export const MIN_COLS = 60
 export const MIN_ROWS = 16
@@ -9,10 +10,11 @@ export function tooSmall(cols: number, rows: number): boolean {
 
 /** One line that always fits (spec §5.1); the 52-column full text does not fit a 50-column terminal. */
 export function tooSmallText(cols: number, rows: number): string {
+	const x = glyphs().times
 	const variants = [
-		`wavekit: terminal ${cols}×${rows} is too small (minimum ${MIN_COLS}×${MIN_ROWS})`,
-		`wavekit: ${cols}×${rows} too small (min ${MIN_COLS}×${MIN_ROWS})`,
-		`min ${MIN_COLS}×${MIN_ROWS}`,
+		`wavekit: terminal ${cols}${x}${rows} is too small (minimum ${MIN_COLS}${x}${MIN_ROWS})`,
+		`wavekit: ${cols}${x}${rows} too small (min ${MIN_COLS}${x}${MIN_ROWS})`,
+		`min ${MIN_COLS}${x}${MIN_ROWS}`,
 	]
 	return variants.find(v => [...v].length <= cols) ?? variants[2] ?? ""
 }

@@ -8,6 +8,7 @@ import { stripLine, type StripInput } from "../../../cli/source/ui/strip.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { stripInput } from "../../../cli/source/view-models/chrome.js"
 import { lineText, lineWidth } from "../../../cli/source/ui/text.js"
+import { setGlyphMode } from "../../../cli/source/ui/theme.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -114,6 +115,58 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(lineText(stripLine(stripInput(scenarioState("live")), 59))).toBe(
 			"api ● 2s  iq ●  rx 445.971 MHz  dec 8/9 !1  drops !21%",
 		)
+	})
+	it("final fix: non-live iq states have short words, so rx survives at 59", () => {
+		const states: Array<[StripInput["iq"]["glyph"], string, string]> = [
+			["fault", "disconnected", "iq × down"],
+			["neutral", "connected · no samples", "iq ○ no samples"],
+			["unknown", "unknown", "iq ?"],
+			["neutral", "paused", "iq ○ paused"],
+			["neutral", "ended", "iq ○ ended"],
+		]
+		for (const [glyph, word, short] of states) {
+			const input: StripInput = {
+				...live,
+				api: { kind: "split", ws: true, rest: false, restAgeMs: 45_000 },
+				iq: { glyph, word, ageMs: null, rateBytesPerSec: null },
+				decoders: { up: 7, total: 9, failing: 1, restarting: 1, inWindow: 2 },
+			}
+			for (let w = 59; w <= 70; w++) {
+				const text = lineText(stripLine(input, w))
+				expect(text, `${word} ${w}`).toContain("rx 445.971")
+				expect(text, `${word} ${w}`).toContain("drops ")
+				expect(lineWidth(stripLine(input, w))).toBeLessThanOrEqual(w)
+			}
+			expect(lineText(stripLine(input, 59))).toContain(short)
+			// With room the full word comes back.
+			expect(lineText(stripLine(input, 119))).toContain(
+				`iq ${glyph === "fault" ? "×" : glyph === "unknown" ? "?" : "○"} ${word}`,
+			)
+		}
+	})
+	it("final review: ASCII mode writes no UTF-8 in the strip, iq words included", () => {
+		setGlyphMode("ascii")
+		try {
+			const input: StripInput = {
+				...live,
+				iq: {
+					glyph: "neutral",
+					word: "connected · no samples",
+					ageMs: null,
+					rateBytesPerSec: null,
+				},
+			}
+			for (const w of [59, 79, 119, 199]) {
+				const text = lineText(stripLine(input, w))
+				expect(text, `${w}`).toMatch(/^[\x20-\x7e]*$/)
+			}
+			expect(lineText(stripLine(input, 199))).toContain(
+				"iq o connected | no samples",
+			)
+			expect(lineText(stripLine(live, 199))).toContain("rx 445.971 MHz +-1.024")
+		} finally {
+			setGlyphMode("utf8")
+		}
 	})
 	it("copy sweep: a REST lane with no age says `rest ×`, not `rest × ?`", () => {
 		const t = lineText(

@@ -197,4 +197,45 @@ describe("Decoders view (spec §6.2)", () => {
 		expect(h.text()).toContain('action    restart failed · 502 · "bad gateway"')
 		h.unmount()
 	})
+
+	it("PgUp answers at once after scrolling past the end of the detail (final review)", async () => {
+		const live = scenarioState("live", deps)
+		// A long core error wraps over several rows, so the 60x16 detail scrolls.
+		const words = Array.from({ length: 40 }, (_, i) => `word${i}`).join(" ")
+		const state = {
+			...live,
+			decoders: {
+				...live.decoders,
+				value: (live.decoders.value ?? []).map(d =>
+					d.id === "readsb"
+						? {
+								...d,
+								lastError: {
+									kind: "exit" as const,
+									message: words,
+									at: new Date(live.now - 5000).toISOString(),
+								},
+							}
+						: d,
+				),
+			},
+		}
+		const h = await renderApp({
+			state,
+			views,
+			view: "decoders",
+			cols: 60,
+			rows: 16,
+		})
+		await selectRow(h, 4)
+		await h.press(KEYS.enter)
+		expect(h.text()).toMatch(/rows · PgDn/)
+		for (let i = 0; i < 20; i++)
+			await h.press(KEYS.pgdn, { expectWrite: false })
+		const bottom = h.text()
+		expect(bottom).not.toMatch(/rows · PgDn/)
+		await h.press(KEYS.pgup)
+		expect(h.text()).not.toBe(bottom)
+		h.unmount()
+	})
 })

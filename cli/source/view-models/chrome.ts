@@ -16,8 +16,8 @@ import {
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
-import { footerGroups, type KeyContext } from "../ui/keymap.js"
-import { sp, type Line } from "../ui/line.js"
+import { footerGroups, footerHints, type KeyContext } from "../ui/keymap.js"
+import { sp, type Group, type Line } from "../ui/line.js"
 import type { StripInput } from "../ui/strip.js"
 import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
@@ -265,10 +265,32 @@ export function footerWithNotice(
 	width: number,
 ): Line {
 	const shown = notice && now - notice.at < NOTICE_MS ? notice : null
-	const groups = footerGroups(ctx, shown?.text)
-	if (shown)
-		groups.unshift({ priority: 0, variants: [[sp(shown.text, "attention")]] })
-	return fitGroups(groups, width)
+	if (!shown) return fitGroups(footerGroups(ctx), width)
+	// S5 (final review): a notice that ends with a footer hint, matched as a whole
+	// ` · `-part (so quoted server text cannot trigger it), takes that hint's place.
+	// Its context shortens first and the key itself is never cut.
+	const sep = ` ${glyphs().sep} `
+	const parts = shown.text.split(sep)
+	const last = parts.length > 1 ? parts[parts.length - 1] : undefined
+	const said =
+		last !== undefined &&
+		footerHints(ctx).some(
+			h => h.mode !== "global" && `${h.hint.keys} ${h.hint.label}` === last,
+		)
+			? last
+			: undefined
+	const lead: Group = { priority: 0, variants: [] }
+	const text = (t: string): Line => [sp(t, "attention")]
+	if (said !== undefined) {
+		// Minimal keeps a stub of the context (`tuner contr… · c take control`), so
+		// the notice never reads as a bare footer hint.
+		const head = parts.slice(0, -1).join(sep)
+		for (const n of [12, 20, 28, 36, 44])
+			if (n < cellWidth(head))
+				lead.variants.push(text(`${truncate(head, n)}${sep}${said}`))
+	}
+	lead.variants.push(text(shown.text))
+	return fitGroups([lead, ...footerGroups(ctx, said)], width)
 }
 
 /** ▶ prompt, cut so the y/n hints always fit (spec §6.2, §6.4, §6.5). */

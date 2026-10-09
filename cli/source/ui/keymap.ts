@@ -532,10 +532,11 @@ function hintLine(keys: string, label: string): Line {
 
 /** Footer priorities (spec §7): ? help 0, mode keys 1, switcher (compact) 2, q quit 3, r reconnect 4. */
 /**
- * `notice`: the key notice on screen, if any. A mode hint it already spells
- * out (`c take control`) is left out, so the footer never says it twice (S5).
+ * `said`: a mode hint the on-screen notice ends with (`c take control`),
+ * matched exactly; that hint is left out so the footer never says it twice
+ * (S5). The notice keeps the key at every width (footerWithNotice).
  */
-export function footerGroups(ctx: KeyContext, notice?: string): Group[] {
+export function footerGroups(ctx: KeyContext, said?: string): Group[] {
 	const groups: Group[] = []
 	const modal = ctx.confirm !== null || ctx.help || ctx.input || ctx.edit
 	if (ctx.heightClass === "compact" && !modal) {
@@ -557,7 +558,8 @@ export function footerGroups(ctx: KeyContext, notice?: string): Group[] {
 		hints.filter(h => h.mode === "global" && h.key === k),
 	)
 	for (const h of mode) {
-		if (notice?.includes(`${h.hint.keys} ${h.hint.label}`) === true) continue
+		if (said !== undefined && said === `${h.hint.keys} ${h.hint.label}`)
+			continue
 		const variants = [hintLine(h.hint.keys, h.hint.label)]
 		if (h.hint.rich !== undefined)
 			variants.push(hintLine(h.hint.keys, h.hint.rich))

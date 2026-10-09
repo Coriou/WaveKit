@@ -16,6 +16,7 @@ import {
 	type KeyContext,
 } from "../../../cli/source/ui/keymap.js"
 import { lineText } from "../../../cli/source/ui/text.js"
+import { footerWithNotice } from "../../../cli/source/view-models/chrome.js"
 
 const base: KeyContext = {
 	view: "overview",
@@ -344,12 +345,35 @@ describe("design polish: S5 external-control notice", () => {
 			"tuner controlled externally · c take control",
 		)
 	})
-	it("drops the footer's own c take control while the notice says it", () => {
-		const text = receiverExternalNotice(null)
-		const hints = (notice?: string): string[] =>
-			footerGroups(ext, notice).map(g => lineText(g.variants[0] ?? []))
+	it("drops the footer's own c take control only on an exact match", () => {
+		const hints = (said?: string): string[] =>
+			footerGroups(ext, said).map(g => lineText(g.variants[0] ?? []))
 		expect(hints()).toContain("c take control")
-		expect(hints(text)).not.toContain("c take control")
-		expect(hints(text)).toContain("r reconnect")
+		expect(hints("c take control")).not.toContain("c take control")
+		expect(hints("c take control")).toContain("r reconnect")
+		expect(hints("tuner controlled · c take control")).toContain(
+			"c take control",
+		)
+	})
+	const footer = (text: string, w: number): string =>
+		lineText(footerWithNotice(ext, { text, at: 0 }, 1000, w))
+	const count = (hay: string, needle: string): number =>
+		hay.split(needle).length - 1
+	it("final review: c take control is said exactly once at 60 and 79 cols, IPv6 remote", () => {
+		const text = receiverExternalNotice("relay client-3 2001:db8::1")
+		for (const w of [59, 79, 119]) {
+			const out = footer(text, w)
+			expect([...out].length, `${w}`).toBeLessThanOrEqual(w)
+			expect(count(out, "c take control"), `${w}: ${out}`).toBe(1)
+		}
+		expect(footer(text, 119)).toBe(
+			"tuner controlled by relay client-3 2001:db8::1 · c take control  r reconnect  q quit  ? help",
+		)
+		// Narrow: the context shortens, the key stays whole.
+		expect(footer(text, 59)).toMatch(/… · c take control {2}/)
+	})
+	it("final review: quoted server text never hides a hint", () => {
+		const out = footer('restart failed · 502 · "c take control"', 119)
+		expect(out).toContain('"c take control"  c take control')
 	})
 })

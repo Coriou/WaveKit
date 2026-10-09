@@ -36,7 +36,7 @@ export function kibToBytes(kib: number): number {
 
 export function formatSpaced(n: N): string {
 	if (!isKnown(n)) return UNKNOWN
-	const sign = n < 0 ? "−" : ""
+	const sign = n < 0 ? glyphs().minus : ""
 	return (
 		sign + String(Math.round(Math.abs(n))).replace(/\B(?=(\d{3})+(?!\d))/g, " ")
 	)
@@ -74,7 +74,9 @@ export function formatWindow(loHz: N, hiHz: N): string {
 }
 
 export function formatHalfSpan(sampleRate: N): string {
-	return isKnown(sampleRate) ? `±${(sampleRate / 2e6).toFixed(3)}` : UNKNOWN
+	return isKnown(sampleRate)
+		? `${glyphs().plusMinus}${(sampleRate / 2e6).toFixed(3)}`
+		: UNKNOWN
 }
 
 /** Integer percent; a nonzero ratio never reads 0% and a partial one never reads 100% (T4). */
@@ -135,7 +137,7 @@ export function formatDb(tenths: N): string {
 
 export function formatDeltaHz(hz: N): string {
 	if (!isKnown(hz)) return UNKNOWN
-	const sign = hz < 0 ? "−" : "+"
+	const sign = hz < 0 ? glyphs().minus : "+"
 	const a = Math.abs(hz)
 	const khz = (a / 1e3).toFixed(1)
 	return Number(khz) >= 1000

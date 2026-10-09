@@ -1,6 +1,7 @@
 import { Text } from "ink"
 import { Component, type ReactNode } from "react"
 import { sanitize } from "../ui/text.js"
+import { glyphs } from "../ui/theme.js"
 
 interface Props {
 	children: ReactNode
@@ -35,7 +36,7 @@ export class ErrorBoundary extends Component<Props, State> {
 		if (this.state.message !== null) {
 			return (
 				<Text wrap="truncate-end">
-					{` wavekit: render error · ${this.state.message} · q quit`}
+					{` wavekit: render error ${glyphs().sep} ${this.state.message} ${glyphs().sep} q quit`}
 				</Text>
 			)
 		}

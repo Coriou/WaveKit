@@ -207,7 +207,9 @@ export function helpLines(
 		`${g.live} live  ${g.neutral} idle or off  ${g.fault} fault  ${g.attention} now  ${g.unknown} unknown`,
 	)
 	body.push(`dim  older than 15 s      ${g.na} not applicable`)
-	body.push("band  core's targets or WaveKit's table · * configured")
+	body.push(
+		`band  core's targets or WaveKit's table ${glyphs().sep} * configured`,
+	)
 	const title = `${b.h} keys ${g.sep} ${VIEW_TITLES[ctx.view]} `
 	const top = `${b.tl}${title}${b.h.repeat(Math.max(0, w - 2 - title.length))}${b.tr}`
 	const rows = body.map(

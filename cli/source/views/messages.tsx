@@ -3,6 +3,7 @@ import type { ReactElement } from "react"
 import { LineView, Lines } from "../components/lines.js"
 import { EMPTY_VIEW_CTX } from "../ui/actions.js"
 import { formatBytes } from "../ui/format.js"
+import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
 import { messagesKeys, messagesModel } from "../view-models/messages.js"
 import type { ViewModule, ViewOutcome, ViewProps } from "./types.js"
@@ -88,7 +89,7 @@ export const messagesView: ViewModule = {
 		if (bytes > COPY_MAX_BYTES)
 			return {
 				ui: notice(
-					`copy not sent · ${formatBytes(bytes)} over ${formatBytes(COPY_MAX_BYTES, 0)}`,
+					`copy not sent ${glyphs().sep} ${formatBytes(bytes)} over ${formatBytes(COPY_MAX_BYTES, 0)}`,
 				),
 				effects: [],
 			}
