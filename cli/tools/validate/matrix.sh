@@ -12,6 +12,7 @@
 #        WAVEKIT_VALIDATE_SKIP_BUILD=1  use the existing cli/dist build
 #        WAVEKIT_VALIDATE_SCENARIOS / WAVEKIT_VALIDATE_SIZES  space-separated matrix subsets
 #        WAVEKIT_VALIDATE_PERF_SECONDS  length of each perf run (default 60, the spec's budget window)
+#        WAVEKIT_VALIDATE_IDLE_SECONDS  length of the idle run (default 100, the R87 heap window)
 # tmux runs on a private socket (-L) so other tmux sessions are never touched;
 # the socket's server and the mock are killed on exit, INT and TERM.
 set -euo pipefail
@@ -113,10 +114,10 @@ wait_frame() {
 	done
 	sleep "${1:-1.5}"
 }
-start_cli() { # cols rows view
+start_cli() { # cols rows view [node flags] [env assignments]
 	tm kill-session -t "$SESSION" 2>/dev/null || true
 	tm new-session -d -s "$SESSION" -x "$1" -y "$2" \
-		"exec env -u WAVEKIT_WS_URL -u WAVEKIT_WS_URLS -u WAVEKIT_API_URL -u NO_COLOR -u WAVEKIT_ASCII LC_ALL=en_US.UTF-8 node '$ROOT/cli/dist/cli.js' --api '$API' --view '$3'"
+		"exec env -u WAVEKIT_WS_URL -u WAVEKIT_WS_URLS -u WAVEKIT_API_URL -u NO_COLOR -u WAVEKIT_ASCII LC_ALL=en_US.UTF-8 ${5:-} node ${4:-} '$ROOT/cli/dist/cli.js' --api '$API' --view '$3'"
 	wait_frame
 }
 cli_pid() { tm list-panes -t "$SESSION" -F '#{pane_pid}' | head -1; }
@@ -368,28 +369,52 @@ while (my $n = sysread(STDIN, $buf, 65536)) {
 }
 PL
 
-perf_run() { # name view burstPerSecond pause
-	local name="$1" view="$2" rate="$3" pause="$4"
-	local log="$OUT/perf-$1.tty" samples="$OUT/perf-$1.samples"
+# R87 heap budget: retained heap (heapUsed right after a forced GC), logged every 5 s.
+# Only the idle run loads it: forced GCs would flatter the RSS of the burst runs.
+HEAPLOG="$OUT/heaplog.mjs"
+cat >"$HEAPLOG" <<'JS'
+import { appendFileSync } from "node:fs"
+const file = process.env["WK_HEAPLOG"]
+if (file && typeof globalThis.gc === "function") {
+	const t0 = Date.now()
+	setInterval(() => {
+		globalThis.gc()
+		const m = process.memoryUsage()
+		appendFileSync(file, `${Date.now() - t0} ${(m.heapUsed / 1048576).toFixed(1)} ${(m.rss / 1048576).toFixed(0)}\n`)
+	}, 5000).unref()
+}
+JS
+loadavg() { sysctl -n vm.loadavg 2>/dev/null | awk '{print $2}' || uptime | awk -F'load averages?: ' '{print $2}' | awk '{print $1}'; }
+
+perf_run() { # name view burstPerSecond pause seconds heap
+	local name="$1" view="$2" rate="$3" pause="$4" secs="${5:-$PERF_SECONDS}" heap="${6:-no}"
+	local log="$OUT/perf-$1.tty" samples="$OUT/perf-$1.samples" heapf="$OUT/perf-$1.heap"
 	: >"$log"
 	: >"$log.times"
 	: >"$samples"
+	: >"$heapf"
 	load live
-	start_cli 120 40 "$view"
+	if [ "$heap" = "yes" ]; then
+		start_cli 120 40 "$view" "--expose-gc --import '$HEAPLOG'" "WK_HEAPLOG='$heapf'"
+	else
+		start_cli 120 40 "$view"
+	fi
 	# Startup heap growth is not a leak: sample after a warm-up (reported in perf.md).
 	sleep "$PERF_WARMUP_S"
 	if [ "$pause" = "yes" ]; then key p; fi
 	local w0 w1
 	w0="$(ms)"
 	tm pipe-pane -o -t "$SESSION" "perl '$TAP' '$log' '$log.times'"
-	if [ "$rate" -gt 0 ]; then mock burst "{\"perSecond\":$rate,\"seconds\":$PERF_SECONDS}"; fi
-	local pid
+	if [ "$rate" -gt 0 ]; then mock burst "{\"perSecond\":$rate,\"seconds\":$secs}"; fi
+	local pid load0 load1
 	pid="$(cli_pid)"
-	for _ in $(seq 1 "$PERF_SECONDS"); do
+	load0="$(loadavg)"
+	for _ in $(seq 1 "$secs"); do
 		ps -o %cpu=,rss= -p "$pid" >>"$samples" || true
 		sleep 1
 	done
 	w1="$(ms)"
+	load1="$(loadavg)"
 	# R3: key 4 opens Receiver; FANOUT appears on no other view.
 	local t0 tries=0
 	t0="$(ms)"
@@ -405,7 +430,7 @@ perf_run() { # name view burstPerSecond pause
 	fi
 	tm pipe-pane -t "$SESSION"
 	sleep 0.3
-	local frames clears cpu rss0 rss1 window
+	local frames clears cpu rss0 rss1 rssmax heapgrow window
 	# Bursts before the key press, over the measured window (not the nominal one).
 	frames=$(awk -v end="$w1" '$1 * 1000 <= end { if (n == 0 || $1 - prev > 0.020) n++; prev = $1 } END { print n + 0 }' "$log.times")
 	window=$(awk -v a="$w0" -v b="$w1" 'BEGIN { printf "%.1f", (b - a) / 1000 }')
@@ -414,14 +439,19 @@ perf_run() { # name view burstPerSecond pause
 	cpu=$(awk '{s+=$1} END {printf "%.1f", (NR ? s/NR : 0)}' "$samples")
 	rss0=$(head -1 "$samples" | awk '{print $2}')
 	rss1=$(tail -1 "$samples" | awk '{print $2}')
-	printf '| %s | %s | %s | %s %% | %s MB | %s | %s s |\n' "$name" "$(awk -v f="$frames" -v s="$window" 'BEGIN {printf "%.1f", (s > 0 ? f / s : 0)}')" "$clears" "$cpu" \
-		"$(((${rss1:-0} - ${rss0:-0}) / 1024))" "$latency" "$window" >>"$OUT/perf.md"
+	rssmax=$(awk '$2 > m {m = $2} END {print int(m / 1024)}' "$samples")
+	# Retained heap: last post-GC sample minus the first one inside the window.
+	heapgrow=$(awk -v from="$((PERF_WARMUP_S * 1000))" '$1 >= from { if (!n++) h0 = $2; h1 = $2 } END {if (n >= 2) printf "%+.1f MB (%.1f → %.1f)", h1 - h0, h0, h1; else print "—"}' "$heapf")
+	printf '| %s | %s–%s | %s | %s | %s %% | %s MB | %s MB | %s | %s | %s s |\n' "$name" "$load0" "$load1" \
+		"$(awk -v f="$frames" -v s="$window" 'BEGIN {printf "%.1f", (s > 0 ? f / s : 0)}')" "$clears" "$cpu" \
+		"$(((${rss1:-0} - ${rss0:-0}) / 1024))" "$rssmax" "$heapgrow" "$latency" "$window" >>"$OUT/perf.md"
 }
 
 run_perf() {
-	printf 'Sampled for %s s at 120x40 after a %s s warm-up.\n\n' "$PERF_SECONDS" "$PERF_WARMUP_S" >"$OUT/perf.md"
-	printf '| run | frames/s | ESC[2J | CPU avg | RSS growth | key→frame | window |\n|---|---|---|---|---|---|---|\n' >>"$OUT/perf.md"
-	perf_run idle-live overview 0 no
+	printf 'Sampled at 120x40 after a %s s warm-up; load is the 1-min average at the start and end of the window.\n\n' "$PERF_WARMUP_S" >"$OUT/perf.md"
+	printf '| run | load | frames/s | ESC[2J | CPU avg | RSS growth | RSS max | retained heap | key→frame | window |\n|---|---|---|---|---|---|---|---|---|---|\n' >>"$OUT/perf.md"
+	# R87: retained-heap growth is judged over 100 s idle (forced GC every 5 s, idle run only).
+	perf_run idle-live overview 0 no "${WAVEKIT_VALIDATE_IDLE_SECONDS:-100}" yes
 	perf_run burst-50 overview 50 no
 	perf_run burst-500 messages 500 no
 	perf_run burst-500-paused messages 500 yes
