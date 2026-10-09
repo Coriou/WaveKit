@@ -1,0 +1,137 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bottom pane 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drops !21%     18:07
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+   DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window
+ ● dsd-fme           up 52s             0       0  2/min · 11s ago       3   831.5 MB       12%       36%  in
+ ● multimon-ng       up 51s             0       0  1/min · 32s ago       2   761.1 MB       14%       39%  in
+ ● rtl433            up 51s             0       0  none for 51s          0   625.9 MB      !15%       41%  out
+ ● readsb            up 51s             0       6  none for 51s          0   570.6 MB      !38%       44%  out
+ ! acarsdec          restarting        13       0  —                     0    43.5 MB         —         —  out
+ ● ais-catcher       up 51s             0       0  none for 51s          0   832.5 MB      !31%       36%  out
+ ● dumpvdl2          up 50s             0       0  none for 50s          0   656.8 MB      !40%       41%  out
+ ● direwolf          up 50s             0       0  none for 50s          0   750.7 MB       11%       35%  out
+ ● lora-meshtastic   up 50s             0       0  none for 50s          0   116.4 MB        9%       30%  out
+
+ readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —
+ process   up 51s · 0 restarts · 6 errors · server health idle
+ decodes   none since start (51s) · 0 events · last output —
+ IQ        570.6 MB in · branch decoder-readsb · buffer 389.1 KB, high-water 262.1 KB · in backpressure 0.2s, 121× total
+ drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago
+ band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window
+ activity                              ▁▁  decodes/min since 18:06 (2 of 30 min observed)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  Esc close  x stop  R restart  r reconnect  q quit  ? help"
+`;
+
+exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right pane 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21% now                                                       18:07
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+   DECODERS          process     restarts  errors  decodes          events     IQ in  drop now  lifetime  window  readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —
+ ● dsd-fme           up 52s             0       0  2/min · 11s ago       3  831.5 MB       12%       36%  in      process   up 51s · 0 restarts · 6 errors · server health idle
+ ● multimon-ng       up 51s             0       0  1/min · 32s ago       2  761.1 MB       14%       39%  in      decodes   none since start (51s) · 0 events · last output —
+ ● rtl433            up 51s             0       0  none for 51s          0  625.9 MB      !15%       41%  out     IQ        570.6 MB in · branch decoder-readsb · buffer 389.1 KB, high-water 262.1 KB
+ ● readsb            up 51s             0       6  none for 51s          0  570.6 MB      !38%       44%  out               in backpressure 0.2s, 121× total
+ ! acarsdec          restarting        13       0  —                     0   43.5 MB         —         —  out     drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago
+ ● ais-catcher       up 51s             0       0  none for 51s          0  832.5 MB      !31%       36%  out     band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window
+ ● dumpvdl2          up 50s             0       0  none for 50s          0  656.8 MB      !40%       41%  out     activity                              ▁▁  decodes/min since 18:06
+ ● direwolf          up 50s             0       0  none for 50s          0  750.7 MB       11%       35%  out
+ ● lora-meshtastic   up 50s             0       0  none for 50s          0  116.4 MB        9%       30%  out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  Esc close  x stop  R restart  r reconnect  q quit  ? help"
+`;
+
+exports[`Decoders view (spec §6.2) > golden: crash-loop 120x40 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 failing · 2 in window  drops !21% now    18:07
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+   DECODERS          process     restarts  errors  decodes          events      IQ in  drop now  lifetime  window
+ ● dsd-fme           up 52s             0       0  2/min · 11s ago       3   831.5 MB       12%       36%  in
+ ● multimon-ng       up 51s             0       0  1/min · 32s ago       2   761.1 MB       14%       39%  in
+ ● rtl433            up 51s             0       0  none for 51s          0   625.9 MB      !15%       41%  out
+ ● readsb            up 51s             0       6  none for 51s          0   570.6 MB      !38%       44%  out
+ × acarsdec          crash-loop        13       0  —                     0    43.5 MB         —         —  out
+ ● ais-catcher       up 51s             0       0  none for 51s          0   832.5 MB      !31%       36%  out
+ ● dumpvdl2          up 50s             0       0  none for 50s          0   656.8 MB      !40%       41%  out
+ ● direwolf          up 50s             0       0  none for 50s          0   750.7 MB       11%       35%  out
+ ● lora-meshtastic   up 50s             0       0  none for 50s          0   116.4 MB        9%       30%  out
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  Enter open  r reconnect  q quit  ? help"
+`;

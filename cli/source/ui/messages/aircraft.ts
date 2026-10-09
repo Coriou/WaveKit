@@ -31,6 +31,9 @@ export function formatAircraft(
 		str(o, "typeCode") ??
 		str(o, "t") ??
 		known?.identification?.typeCode
+	// R62: operator from the enriched aircraft map when present (never invented).
+	const operator =
+		str(ident, "operator")?.trim() ?? known?.identification?.operator?.trim()
 	const flight = (str(o, "callsign") ?? str(o, "flight"))?.trim()
 	const squawk = str(o, "squawk")
 	const alt = obj(o, "altitude")
@@ -85,12 +88,15 @@ export function formatAircraft(
 		...(emergency && squawk
 			? [seg(`${g.attention}${squawk}`, 0, "attention")]
 			: []),
+		// Last and lowest priority: it drops first and never displaces the mockup's segments.
+		...(operator ? [seg(operator, 7)] : []),
 	]
 	const fields: FormattedMessage["fields"] = [
 		{ label: "icao", value: icao },
 		...(reg ? [{ label: "reg", value: reg }] : []),
 		...(flight ? [{ label: "flight", value: flight }] : []),
 		...(typeCode ? [{ label: "type", value: typeCode }] : []),
+		...(operator ? [{ label: "operator", value: operator }] : []),
 		...(squawk
 			? [
 					{

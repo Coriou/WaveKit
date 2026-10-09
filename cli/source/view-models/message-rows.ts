@@ -1,4 +1,9 @@
+import { memoOne } from "../data/memo.js"
+import { aircraftKey } from "../data/ring-buffer.js"
 import type {
+	AircraftEntry,
+	AircraftLookup,
+	AppState,
 	FormattedMessage,
 	Gap,
 	MessageEntry,
@@ -22,6 +27,7 @@ import {
 	type Span,
 } from "../ui/line.js"
 import { cellWidth, sanitize, truncate, truncateLine } from "../ui/text.js"
+import { formatMessage } from "../ui/messages/index.js"
 import { glyphs } from "../ui/theme.js"
 
 const hdr = (v: string): Cell => ({ variants: [[sp(v, "label")]] })
@@ -126,11 +132,54 @@ export function summaryLine(fm: FormattedMessage, width: number): Line {
 	if (groups.length === 0) return [sp(truncate(fm.text, width))]
 	const textW = cellWidth(fm.text)
 	const reserve = SEP.length + Math.min(textW, TEXT_RESERVE)
-	const fit = fitGroupsDetailed(groups, Math.max(0, width - reserve))
+	// The marker's width is part of the fit (R57); it is then moved to the end of the line.
+	const marker = ellipsis()
+	const fit = fitGroupsDetailed(groups, Math.max(0, width - reserve), {
+		dropMarker: marker,
+	})
 	const dropped = fit.present.some(p => !p)
-	const line: Line = [...fit.line, sp(SEP, "label"), sp(fm.text)]
-	if (dropped) line.push(sp(SEP, "label"), ellipsis())
+	// fitGroups appends [sep, marker] when it drops; strip exactly that pair (a truncated fit keeps its own …).
+	const last = fit.line[fit.line.length - 1]
+	const segs = dropped && last === marker ? fit.line.slice(0, -2) : fit.line
+	const line: Line = [...segs, sp(SEP, "label"), sp(fm.text)]
+	if (dropped) line.push(sp(SEP, "label"), marker)
 	return truncateLine(line, width)
+}
+
+const lookupFor = memoOne(
+	(_version: number, map: Map<string, AircraftEntry>): AircraftLookup =>
+		icao =>
+			map.get(aircraftKey(icao))?.state,
+)
+
+/** A lookup over the live aircraft map, stable until the map's version changes (R62). */
+export function aircraftLookup(state: AppState): AircraftLookup {
+	return lookupFor(state.aircraft.version, state.aircraft.map)
+}
+
+const enriched = new WeakMap<
+	MessageEntry,
+	{ lookup: AircraftLookup; fm: FormattedMessage }
+>()
+
+/**
+ * The summary to render. ADS-B entries re-read the aircraft map with `lookup`,
+ * so registration, type and operator learned after ingest still show (R62,
+ * spec §6.3); the formatter stays pure and the result is cached per entry
+ * until the lookup (aircraft version) changes. Without a lookup: the
+ * ingest-time summary.
+ */
+export function formattedFor(
+	e: MessageEntry,
+	lookup?: AircraftLookup,
+): FormattedMessage {
+	if (lookup === undefined || e.formatted.protocol !== "ADS-B")
+		return e.formatted
+	const hit = enriched.get(e)
+	if (hit && hit.lookup === lookup) return hit.fm
+	const fm = formatMessage(e.output, e.decoderId, lookup)
+	enriched.set(e, { lookup, fm })
+	return fm
 }
 
 export function messageRow(
@@ -138,10 +187,11 @@ export function messageRow(
 	layout: readonly ColumnLayout[],
 	selected: boolean,
 	old: boolean,
+	lookup?: AircraftLookup,
 ): Line {
 	const roleOf = (r: Role): Role => (selected ? "selected" : old ? "old" : r)
 	const summaryWidth = layout.find(c => c.id === "summary")?.width ?? 10
-	const summary = summaryLine(e.formatted, summaryWidth)
+	const summary = summaryLine(formattedFor(e, lookup), summaryWidth)
 	const cells: Record<string, Cell> = {
 		time: cell(
 			[sp(formatClockShort(e.receivedAt), roleOf("label"))],
@@ -199,6 +249,7 @@ export function feedLines(
 	selectedSeq: number | null,
 	now: number,
 	old: boolean,
+	lookup?: AircraftLookup,
 ): { lines: Line[]; shownSeqs: number[] } {
 	const layout = messageLayout(width)
 	const sel =
@@ -211,7 +262,7 @@ export function feedLines(
 		lines: slice.map(r =>
 			r.kind === "gap"
 				? gapLine(r.gap, now, width)
-				: messageRow(r.entry, layout, r.entry.seq === selectedSeq, old),
+				: messageRow(r.entry, layout, r.entry.seq === selectedSeq, old, lookup),
 		),
 		shownSeqs: slice.flatMap(r => (r.kind === "msg" ? [r.entry.seq] : [])),
 	}

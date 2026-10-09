@@ -205,6 +205,52 @@ describe("App shell", () => {
 	})
 })
 
+describe("q while too small (A5 fix 2, item 6)", () => {
+	it("quits even with a hidden confirm pending", async () => {
+		const h = await renderApp({
+			state: scenarioState("live"),
+			views,
+			view: "decoders",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press("R")
+		await h.resize(50, 12)
+		await h.press("q", QUIET)
+		await h.waitFor(() => h.exited())
+		expect(h.runtime.sent).toEqual([])
+		h.unmount()
+	})
+	it("quits even with a hidden filter draft open (q is not typed)", async () => {
+		const h = await renderApp({
+			state: scenarioState("live"),
+			views,
+			view: "messages",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press("/")
+		await h.resize(60, 15)
+		await h.press("q", QUIET)
+		await h.waitFor(() => h.exited())
+		h.unmount()
+	})
+	it("quits even with help open", async () => {
+		const h = await renderApp({
+			state: scenarioState("live"),
+			views,
+			view: "overview",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press("?")
+		await h.resize(50, 12)
+		await h.press("q", QUIET)
+		await h.waitFor(() => h.exited())
+		h.unmount()
+	})
+})
+
 describe("App error boundary (spec §6.6)", () => {
 	let spy: ReturnType<typeof vi.spyOn>
 	beforeEach(() => {

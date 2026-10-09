@@ -50,6 +50,9 @@ describe("R46: restarting decoders are visible in the strip", () => {
 		expect(lineText(at(both, 60))).toContain(
 			"decoders 2 failing · 1 restarting",
 		)
+		const narrow = at(both, 60)
+		expect(lineWidth(narrow)).toBeLessThanOrEqual(59)
+		expect(findBanned(lineText(narrow))).toEqual([])
 		const line = at(both, 200)
 		expect(line.find(s => s.text === "2 failing")?.role).toBe("fault")
 		expect(line.find(s => s.text === "1 restarting")?.role).toBe("attention")

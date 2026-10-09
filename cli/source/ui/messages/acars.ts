@@ -1,6 +1,6 @@
 import type { Obj } from "../../data/guards.js"
 import type { FormattedMessage } from "../../data/types.js"
-import { asObj, finish, num, obj, seg, str } from "./common.js"
+import { asObj, finish, knownOr, num, obj, seg, str } from "./common.js"
 
 const positive = (x: number | undefined): number | undefined =>
 	x !== undefined && x > 0 ? x : undefined
@@ -30,10 +30,6 @@ const freqField = (hz: number | "?" | undefined): FormattedMessage["fields"] =>
 	hz === undefined
 		? []
 		: [{ label: "frequency", value: hz === "?" ? "?" : mhzText(hz) }]
-
-/** Server default strings ("unknown", "Unknown") are unknown values (R44). */
-const known = (s: string | undefined): string | undefined =>
-	s !== undefined && /^unknown$/i.test(s.trim()) ? "?" : s
 
 interface AcarsParts {
 	reg: string | undefined
@@ -99,7 +95,7 @@ export function formatVdl2(
 	const p = acarsParts(a)
 	const hasAcars = Object.keys(a).length > 0
 	const icao = str(o, "icao")?.toUpperCase()
-	const msgType = known(str(o, "msgType"))
+	const msgType = knownOr(str(o, "msgType"))
 	const station = str(o, "station")
 	const hz = frequencyHz(o)
 	const text = p.text ?? str(o, "text")

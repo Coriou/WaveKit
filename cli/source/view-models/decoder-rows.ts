@@ -17,7 +17,12 @@ import {
 	type BandOrigin,
 } from "../data/nominal-bands.js"
 import { branchDropNow, counterRate, restartIncrements } from "../data/rates.js"
-import type { AppState, DecoderRow, GlyphRole } from "../data/types.js"
+import {
+	ENDPOINT_PATHS,
+	type AppState,
+	type DecoderRow,
+	type GlyphRole,
+} from "../data/types.js"
 import { decoderMembership, type Membership } from "../data/window.js"
 import {
 	layoutColumns,
@@ -35,8 +40,9 @@ import {
 } from "../ui/format.js"
 import { cell, sp, type Cell, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
-import { sanitize } from "../ui/text.js"
+import { cellWidth, sanitize } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
+import { bannerConditions } from "./chrome.js"
 
 export interface DecoderFacts {
 	row: DecoderRow
@@ -388,17 +394,19 @@ function withConfiguredMark(
 	cols: readonly ColumnSpec[],
 	facts: readonly DecoderFacts[],
 ): readonly ColumnSpec[] {
-	if (!facts.some(f => f.bandOrigin === "configured")) return cols
-	return cols.map(c =>
-		c.id === "nominal"
-			? {
-					...c,
-					min: c.min + 1,
-					pref: c.pref + 1,
-					header: header(`nominal MHz ${CONFIGURED_MARK}cfg`),
-				}
-			: c,
+	const configured = facts.filter(f => f.bandOrigin === "configured")
+	if (configured.length === 0) return cols
+	// min = pref = the widest marked label, so the column shows whole or drops whole:
+	// layout never truncates the mark away (R57).
+	const widest = Math.max(
+		...configured.map(f => cellWidth(f.nominal) + CONFIGURED_MARK.length),
 	)
+	const headText = `nominal MHz ${CONFIGURED_MARK}cfg`
+	return cols.map(c => {
+		if (c.id !== "nominal") return c
+		const w = Math.max(c.pref + 1, widest, cellWidth(headText))
+		return { ...c, min: w, pref: w, header: header(headText) }
+	})
 }
 
 export interface DecoderTable {
@@ -473,12 +481,24 @@ export function decodersPlaceholder(state: AppState): Line | null {
 			? [sp("no decoders configured", "label")]
 			: null
 	const sep = ` ${glyphs().sep} `
-	// R52 m7: other endpoints answering means this endpoint is failing, not the API (§9).
-	if (lane.error && state.conn.rest.lastOkAt !== null) {
-		const why = lane.error.status ?? lane.error.kind
-		return [sp(`no data${sep}GET /api/decoders failing${sep}${why}`, "label")]
-	}
-	if (lane.error || state.conn.rest.firstFailAt !== null)
+	// R57: the banner's rule and wording decide, so the two never disagree (§9):
+	// some-but-not-all endpoints failing is an endpoint failure, all of them is the API.
+	const conds = bannerConditions(state)
+	const ep = conds.find(
+		c => c.kind === "endpoint" && c.path === ENDPOINT_PATHS.decoders,
+	)
+	if (ep?.kind === "endpoint")
+		return [
+			sp(
+				`no data${sep}GET ${ENDPOINT_PATHS.decoders} failing${sep}${ep.reason}`,
+				"label",
+			),
+		]
+	if (
+		conds.some(c => c.kind === "api-down" || c.kind === "rest-down") ||
+		lane.error ||
+		state.conn.rest.firstFailAt !== null
+	)
 		return [sp(`no data${sep}API unreachable`, "label")]
 	return [sp("fetching /api/decoders", "label")]
 }
