@@ -10,16 +10,25 @@ function page() {
 			hidden: boolean
 			href: string
 			dataset: Record<string, string>
+			replaceChildren: (...nodes: (string | { textContent: string })[]) => void
 		}
 	>()
 	const get = (id: string) => {
-		if (!elements.has(id))
-			elements.set(id, {
+		if (!elements.has(id)) {
+			const element = {
 				textContent: "",
 				hidden: false,
 				href: "",
 				dataset: {},
-			})
+				// Enough of Element.replaceChildren for boot.js: keep the visible text.
+				replaceChildren(...nodes: (string | { textContent: string })[]) {
+					element.textContent = nodes
+						.map(node => (typeof node === "string" ? node : node.textContent))
+						.join("")
+				},
+			}
+			elements.set(id, element)
+		}
 		return elements.get(id)!
 	}
 	const phases = ["cloud-init", "install", "publish"].map(phase => ({
@@ -33,7 +42,11 @@ function page() {
 	}))
 	const replace = vi.fn()
 	const context = createContext({
-		document: { getElementById: get, querySelectorAll: () => phases },
+		document: {
+			getElementById: get,
+			querySelectorAll: () => phases,
+			createElement: () => ({ className: "", textContent: "" }),
+		},
 		window: {
 			location: { href: "http://[::1]/?private=value", replace },
 			setTimeout: vi.fn(),
