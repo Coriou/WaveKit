@@ -125,3 +125,28 @@ describe("final M1: a capture-limited half-width never scales up", () => {
 	})
 })
 
+describe("final M3: targetsHz is capped at 64", () => {
+	const raw = (n: number) => ({
+		id: "readsb",
+		type: "readsb",
+		running: true,
+		health: "running",
+		uptime: 1,
+		stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
+		restartCount: 0,
+		bandAssessment: {
+			verdict: "out-of-band",
+			targetsHz: Array.from({ length: n }, (_, i) => 100_000_000 + i),
+		},
+	})
+	it("keeps 64 and drops a longer list, never the assessment", () => {
+		expect(guardDecoder(raw(64))?.bandAssessment?.targetsHz).toHaveLength(64)
+		expect(guardDecoder(raw(65))?.bandAssessment).toEqual({
+			verdict: "out-of-band",
+		})
+		expect(guardDecoder(raw(200_000))?.bandAssessment).toEqual({
+			verdict: "out-of-band",
+		})
+	})
+})
+
