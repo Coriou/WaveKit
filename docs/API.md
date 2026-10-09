@@ -182,6 +182,20 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
+**Rate truth (network sources).** Every 5 s metrics interval compares the bytes
+actually received with `caps.sampleRate` × bytes per sample (2 for `U8_IQ`, 4 for
+`S16_IQ`, 2/4 × channels for `S16LE`/`FLOAT32LE`; `auto` is not checked). When
+every trusted interval for at least 30 s deviates by more than 2 % in the same
+direction, the source gains
+`rateMismatch: { declaredSampleRateHz, measuredSampleRateHz, deviation, since }`
+(also on `source:status` and in `/api/status`) and core logs a warning; it
+disappears after 30 s of agreement, on a caps rate/format change and on
+disconnect. Caps are never corrected from it. A positive `deviation` means the
+dongle runs faster than declared (an external tuner client changed its rate);
+a negative one can also be loss upstream. Intervals that cannot be trusted are
+skipped: the first after a (re)connect and any in which local backpressure
+paused the socket. Recordings are not checked.
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
@@ -1059,7 +1073,8 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`) when the state actually changed;
+  `caps-changed`, rate-truth flag raised/cleared) when the state actually changed
+  (a drifting `rateMismatch.measuredSampleRateHz` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
   `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;

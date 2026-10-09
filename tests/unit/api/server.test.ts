@@ -266,6 +266,34 @@ describe("API Server", () => {
 			expect(mockSourceManager.getAllStatus).toHaveBeenCalled()
 		})
 
+		it("keeps a source rate-truth mismatch in /api/status", async () => {
+			mockSourceManager.getAllStatus.mockReturnValue([
+				{
+					id: "source-1",
+					connected: true,
+					bytesReceived: 1024,
+					dataRate: 10.5,
+					reconnectAttempts: 0,
+					rateMismatch: {
+						declaredSampleRateHz: 2_048_000,
+						measuredSampleRateHz: 2_160_000,
+						deviation: 0.0547,
+						since: new Date("2026-10-09T01:00:00.000Z"),
+					},
+				},
+			])
+			await apiServer.start()
+			const response = await apiServer
+				.getApp()
+				.inject({ method: "GET", url: "/api/status" })
+			expect(JSON.parse(response.body).sources[0].rateMismatch).toEqual({
+				declaredSampleRateHz: 2_048_000,
+				measuredSampleRateHz: 2_160_000,
+				deviation: 0.0547,
+				since: "2026-10-09T01:00:00.000Z",
+			})
+		})
+
 		it("should return decoders from DecoderManager", async () => {
 			// Setup mock to return some decoders
 			const mockDecoders = [
