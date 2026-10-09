@@ -1,0 +1,18 @@
+{
+	"extends": "live",
+	"name": "iq-stale",
+	"description": "Source connected but no IQ for 12.4 s (activity stale): counters frozen, so drop now is unknown.",
+	"restPatch": {
+		"/api/sources": {
+			"pi-iq": {
+				"activity": {
+					"state": "stale",
+					"lastSampleAt": "2026-10-08T18:07:37.600Z",
+					"sampleAgeMs": 12400
+				},
+				"dataRate": 0
+			}
+		}
+	},
+	"transform": { "stallIq": true }
+}

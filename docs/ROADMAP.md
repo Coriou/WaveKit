@@ -35,8 +35,9 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    Mac auto-reconnect and tuner replay. Waiting on the replacement power supply.
 3. **Streaming stability on stable power**: 30-minute continuous baseline, then an
    overnight soak with decode counts and no external SDR++ client during it.
-4. **CLI overhaul merge** (CLI team, branch `cli-overhaul`): consumes the
-   2026-10-09 contracts; lands as one merge touching only CLI paths.
+4. **CLI overhaul merge** (CLI team): done 2026-10-09, fast-forwarded on local
+   `main` to `1baa845` (not pushed). Consumes the 2026-10-09 contracts up to
+   87f9f06; only CLI paths changed. Rebuild `cli/dist` to pick it up.
 5. **Core channelizer**: plan written 2026-10-09
    ([plan](superpowers/plans/2026-10-09-core-channelizer.md)); implement in a
    dedicated session after the CLI merge. Live evidence 2026-10-09 (loaded
@@ -367,20 +368,25 @@ Run this as a dedicated design/implementation team alongside core reliability an
 Pi operator-page work. Use Opus agents for implementation and review, with Fable
 as a consultant for difficult product/design decisions and critical review.
 
-- [ ] Audit the current dashboard with realistic live, idle, disconnected, stale,
+Done 2026-10-09 (`1baa845`): user guide and validation in `docs/CLI.md`; rulings in
+`docs/superpowers/plans/2026-10-08-cli-dashboard-overhaul-decisions.md`. Open: CPU at
+50 msg/s is 8.6–8.7 % against an 8 % budget; band-override editing is not in the CLI;
+RF and hardware acceptance are outside what CLI tests can show.
+
+- [x] Audit the current dashboard with realistic live, idle, disconnected, stale,
       dropping and partially failing receiver/decoder states; establish a clear
       information hierarchy and operator workflows before redesigning.
-- [ ] Improve layout, typography, spacing, navigation, keyboard interaction,
+- [x] Improve layout, typography, spacing, navigation, keyboard interaction,
       discoverability and readable status/event presentation across terminal sizes.
-- [ ] Make tuning, source ownership, decoder activity and decoded results easy to
+- [x] Make tuning, source ownership, decoder activity and decoded results easy to
       understand; distinguish API connectivity, IQ freshness, decoder process
       health, successful decoding and historical counters.
-- [ ] Support useful detail views and filters without overwhelming the overview;
+- [x] Support useful detail views and filters without overwhelming the overview;
       handle empty states, reconnection, errors and unavailable measurements.
-- [ ] Validate with representative fixtures and real terminal sessions, including
+- [x] Validate with representative fixtures and real terminal sessions, including
       narrow terminals, resize, keyboard use, long text and sustained event flow.
       Document any terminal/accessibility limitations and check rendering cost.
-- [ ] Coordinate shared API/event changes with the core team. CLI team owns `cli/`;
+- [x] Coordinate shared API/event changes with the core team. CLI team owns `cli/`;
       Pi team owns `packages/sdr-host/`; core team owns core/API/decoder changes.
       Agree on shared contracts before editing them, preserve concurrent work,
       and stage only each team's files. UI work must preserve the distinctions

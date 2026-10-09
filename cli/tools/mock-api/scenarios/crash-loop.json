@@ -1,0 +1,34 @@
+{
+	"extends": "live",
+	"name": "crash-loop",
+	"description": "acarsdec restarted 3 times in the last 4 minutes; the mock replays the history and keeps it restarting.",
+	"restHistory": [
+		{
+			"offsetMs": -240000,
+			"path": "/api/decoders",
+			"merge": {
+				"acarsdec": { "restartCount": 10 },
+				"dsd-fme": { "stats": { "eventsOut": 0 } },
+				"multimon-ng": { "stats": { "eventsOut": 0 } }
+			}
+		},
+		{
+			"offsetMs": -120000,
+			"path": "/api/decoders",
+			"merge": {
+				"acarsdec": { "restartCount": 11 },
+				"dsd-fme": { "stats": { "eventsOut": 0 } },
+				"multimon-ng": { "stats": { "eventsOut": 0 } }
+			}
+		},
+		{
+			"offsetMs": -60000,
+			"path": "/api/decoders",
+			"merge": {
+				"acarsdec": { "restartCount": 12 },
+				"dsd-fme": { "stats": { "eventsOut": 1 } },
+				"multimon-ng": { "stats": { "eventsOut": 1 } }
+			}
+		}
+	]
+}

@@ -1,0 +1,85 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then paused + filtered + detail open > following 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz ±1.024  decoders 8/9 up · 1 restarting · 3 in window  drops 0%
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+ MESSAGES  11 in 60s · 12 total
+ 18:07:48  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL370 ↓  451 kt  51.47,-0.45  SE  !7700
+ 18:07:46  direwolf      APRS    G4ABC-9  position+msg  51.48,-0.00  mobile 145.800
+ 18:07:44  dsd-fme       DMR     TG 2350  SRC 2341234  slot 1  CC 1  call start
+ 18:07:42  ais-catcher   AIS     235012345  51.50,-0.12  12.1 kn
+ 18:07:39  dumpvdl2      VDL2    .EI-DCL  FR4KT  H1  136.975 MHz  REQ PWI DES
+ 18:07:36  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL375 ↓  449 kt  51.49,-0.47  SE  !7700
+ 18:07:30  rtl433        ISM     Acurite-Tower  #12345  ch A  18.2°C  64%
+ 18:07:20  lora-meshta…  MESH    !12345678→BCAST  TEXT  -92 dBm  SNR 6.5  0/3 hops  hello mesh
+ 18:07:09  readsb        ADS-B   3C6444  D-AIUE  DLH4XP  A320  FL120 ↑  312 kt  51.21,-0.31  NE
+ 18:07:08  ais-catcher   AIS     244660123  EEMS SPIRIT  cargo  PBXY  dest ROTTERDAM
+ 18:07:07  ais-catcher   AIS     235012345  SEA PRINCESS OF THE NORTHERN WATERS  passenger  MXYZ7  dest SOUTHAMPTON
+ 18:06:40  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL380 ↓  447 kt  51.51,-0.49  SE  !7700
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  Enter open  / filter  p pause  F preset  r reconnect  q quit  ? help"
+`;
+
+exports[`Messages view (spec §6.3) > golden: burst 120x40 following, then paused + filtered + detail open > paused-filtered-detail 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 1090.000 MHz ±1.024  decoders 8/9 up · 1 restarting · 3 in window  drops 0%
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+ MESSAGES  paused · 0 new · filter readsb,ais · 7 of 12 cached
+ 18:07:48  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL370 ↓  451 kt  51.47,-0.45  SE  !7700
+ 18:07:42  ais-catcher   AIS     235012345  51.50,-0.12  12.1 kn
+ 18:07:36  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL375 ↓  449 kt  51.49,-0.47  SE  !7700
+ 18:07:09  readsb        ADS-B   3C6444  D-AIUE  DLH4XP  A320  FL120 ↑  312 kt  51.21,-0.31  NE
+ 18:07:08  ais-catcher   AIS     244660123  EEMS SPIRIT  cargo  PBXY  dest ROTTERDAM
+ 18:07:07  ais-catcher   AIS     235012345  SEA PRINCESS OF THE NORTHERN WATERS  passenger  MXYZ7  dest SOUTHAMPTON
+ 18:06:40  readsb        ADS-B   4CA9D2  EI-DCL  RYR4KT  B738  FL380 ↓  447 kt  51.51,-0.49  SE  !7700
+
+ readsb · aircraft · 18:07:48.000
+ icao 4CA9D2   reg EI-DCL   flight RYR4KT   type B738   squawk !7700 emergency   alt 37 000 ft ↓ 1 216 ft/min
+ speed 451 kt   track 134° SE   position 51.4712, -0.4521   messages 1 204
+ {
+   "icao": "4CA9D2",
+   "callsign": "RYR4KT",
+   "altitude": 37000,
+   "groundSpeed": 451.2,
+   "track": 134.1,
+   "lat": 51.4712,
+   "lon": -0.4521,
+   "verticalRate": -1216,
+   "squawk": "7700",
+   "lastSeen": "2026-10-08T18:07:48.000Z",
+   "messageCount": 1204
+ }
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  PgUp PgDn scroll  y copy JSON  Esc close  / filter  p resume  G newest  F preset  q quit  ? help"
+`;

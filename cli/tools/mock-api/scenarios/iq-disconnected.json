@@ -1,0 +1,23 @@
+{
+	"extends": "live",
+	"name": "iq-disconnected",
+	"description": "Source disconnected for 95 s after 4 reconnect attempts; decoders keep running with no IQ.",
+	"restPatch": {
+		"/api/sources": {
+			"pi-iq": {
+				"connected": false,
+				"activity": {
+					"state": "disconnected",
+					"lastSampleAt": "2026-10-08T18:06:17.000Z",
+					"sampleAgeMs": 95000
+				},
+				"dataRate": 0,
+				"reconnectAttempts": 4,
+				"lastError": "connect ECONNREFUSED 192.0.2.23:5555"
+			}
+		},
+		"/api/tuner-relay": { "sourceConnected": false },
+		"/api/live-audio/status": { "sourceConnected": false }
+	},
+	"transform": { "stallIq": true }
+}

@@ -1,0 +1,735 @@
+import { noDataText } from "./feed-state.js"
+import type { BranchTelemetry } from "@wavekit/api-types"
+import {
+	decodesFact,
+	isFailing,
+	lastDecodeAt,
+	procRole,
+	processState,
+	type DecodesFact,
+	type ProcState,
+} from "../data/decoder-state.js"
+import { isFresh, isOld, serverNow } from "../data/freshness.js"
+import { memoOne } from "../data/memo.js"
+import { isRateReason } from "../data/reason-codes.js"
+import {
+	bandLabel,
+	configuredNote,
+	decoderBand,
+	type BandOrigin,
+} from "../data/nominal-bands.js"
+import { branchDropNow, counterRate, restartIncrements } from "../data/rates.js"
+import {
+	ENDPOINT_PATHS,
+	type AppState,
+	type DecoderRow,
+	type GlyphRole,
+} from "../data/types.js"
+import { decoderMembership, type Membership } from "../data/window.js"
+import {
+	layoutColumns,
+	renderHeader,
+	renderRow,
+	type ColumnSpec,
+} from "../ui/columns.js"
+import {
+	counted,
+	formatAge,
+	formatBytes,
+	formatCount,
+	formatDuration,
+	formatEventRate,
+	formatPercent,
+} from "../ui/format.js"
+import { cell, sp, type Cell, type Line, type Role } from "../ui/line.js"
+import { glyphSpan } from "../ui/strip.js"
+import { cellWidth, sanitize } from "../ui/text.js"
+import { glyphs } from "../ui/theme.js"
+
+export interface DecoderFacts {
+	row: DecoderRow
+	proc: ProcState
+	role: GlyphRole
+	failing: boolean
+	decodes: DecodesFact
+	ratePerSec: number | null
+	lastAt: number | null
+	branch: BranchTelemetry | null
+	dropNow: number | null
+	backpressure: boolean
+	lifetime: number | null
+	membership: Membership
+	/** Band label (`tuned`, `1090.000`, …) or `?`; core's targets when it sends them (R90), else R40: tuned types read `tuned`. */
+	nominal: string
+	/**
+	 * Core's basis (`configured`, `protocol`, `decoder-default`) or `core` (no basis this
+	 * CLI knows) under its bandAssessment (R84); else `configured` (R15) or `nominal`; null
+	 * when unknown.
+	 */
+	bandOrigin: BandOrigin | null
+	/** R40 detail annotation for targets a tuned decoder does not apply, else null. */
+	bandNote: string | null
+	/**
+	 * R70 M-a: ms until core's scheduled restart by the server's clock; null when there is
+	 * no nextRestartAt, it does not parse, or no server clock is known; ≤ 0 once passed.
+	 */
+	restartInMs: number | null
+	/** REST decoders lane older than the TTL: every REST-fed cell renders dim (T6). */
+	oldRest: boolean
+	/** Fanout lane is fresh: a running decoder without a branch then has no drop (—), not an unknown one. */
+	fanoutFresh: boolean
+	/** Fanout lane older than the TTL: drop and lifetime render dim. */
+	oldFanout: boolean
+	/** Window and band lane older than the TTL (decoders lane under core's bandAssessment, else sources or tuner): they render dim. */
+	oldWindow: boolean
+	/** R100: running in operator mode, so band suspension cannot stop it. */
+	pinned: boolean
+	/** Decodes of this decoder in the message feed over the last 60 s (M12); 0 while the feed is not open. */
+	feed60: number
+}
+
+const compute = memoOne(
+	(
+		decoders: AppState["decoders"],
+		session: AppState["session"],
+		fanout: AppState["fanout"],
+		history: AppState["fanoutHistory"],
+		sources: AppState["sources"],
+		tuner: AppState["tuner"],
+		relay: AppState["relay"],
+		stopped: readonly string[],
+		ring: AppState["messages"]["ring"],
+		_ringVersion: number,
+		now: number,
+		resources: AppState["resources"],
+		wsOpen: boolean,
+	): DecoderFacts[] => {
+		const server = serverNow(now, [
+			{ iso: fanout.value?.timestamp, receivedAt: fanout.receivedAt },
+			{ iso: resources.value?.timestamp, receivedAt: resources.receivedAt },
+		])
+		const rows = decoders.value ?? []
+		// M12: decodes per decoder in the feed's last minute (local receipt times).
+		// Only while the feed is live: a closed socket would make it decay (T4).
+		const feed60: Record<string, number> = Object.create(null)
+		for (const e of wsOpen ? ring.entries : [])
+			if (e.receivedAt >= now - 60_000)
+				feed60[e.decoderId] = (feed60[e.decoderId] ?? 0) + 1
+		const oldRest = isOld(decoders, now)
+		const fanoutFresh = isFresh(fanout, now)
+		const oldFanout = isOld(fanout, now)
+		const oldLanes = isOld(sources, now) || isOld(tuner, now)
+		return rows.map(row => {
+			const sess = session[row.id]
+			const inc = restartIncrements(sess?.restarts ?? [], now)
+			const proc = processState(
+				row,
+				inc,
+				stopped.includes(row.id),
+				now,
+				sess?.suspendingSince,
+			)
+			const ratePerSec = oldRest ? null : counterRate(sess?.events ?? [])
+			const lastAt = lastDecodeAt(row, sess)
+			const branch =
+				fanout.value?.branches.find(b => b.decoderId === row.id) ?? null
+			// R8: a stopped decoder keeps its lifetime %, but has no drop now.
+			const dropNow =
+				branch && row.running && fanoutFresh
+					? branchDropNow(history, branch.id)
+					: null
+			const offered = branch?.totalBytesWritten
+			const band = decoderBand(row)
+			return {
+				row,
+				proc,
+				role: procRole(proc),
+				failing: isFailing(proc),
+				decodes: decodesFact(row, ratePerSec, lastAt),
+				ratePerSec,
+				lastAt,
+				branch,
+				dropNow,
+				backpressure: branch?.backpressureActive === true && fanoutFresh,
+				lifetime:
+					branch && offered !== undefined && offered > 0
+						? branch.droppedBytesTotal / offered
+						: null,
+				membership: decoderMembership(
+					row,
+					sources.value,
+					tuner.value,
+					relay.value,
+				),
+				nominal: band ? bandLabel(band.band, glyphs().range) : "?",
+				bandOrigin: band?.origin ?? null,
+				bandNote: band ? configuredNote(band) : null,
+				restartInMs: restartIn(row.nextRestartAt, server),
+				oldRest,
+				fanoutFresh,
+				oldFanout,
+				// R84: core's verdict rides the decoders lane.
+				oldWindow: row.bandAssessment ? oldRest : oldLanes,
+				feed60: feed60[row.id] ?? 0,
+				pinned: row.running && row.startMode === "operator",
+			}
+		})
+	},
+)
+
+export function decoderFacts(state: AppState): DecoderFacts[] {
+	return compute(
+		state.decoders,
+		state.session,
+		state.fanout,
+		state.fanoutHistory,
+		state.sources,
+		state.tuner,
+		state.relay,
+		state.actions.stoppedByCli,
+		state.messages.ring,
+		state.messages.version,
+		state.now,
+		state.resources,
+		state.conn.ws.state === "open",
+	)
+}
+
+const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
+	faulted: "fault",
+	"faulted-retry": "fault",
+	"faulted-retrying": "attention",
+	"crash-loop": "fault",
+	down: "fault",
+	restarting: "attention",
+	resuming: "neutral",
+	"suspend-pending": "fault",
+	suspended: "neutral",
+	stopped: "neutral",
+	starting: "neutral",
+	up: "value",
+	unknown: "unknown",
+}
+
+function restartIn(
+	iso: string | undefined,
+	server: number | null,
+): number | null {
+	if (iso === undefined || server === null) return null
+	const t = Date.parse(iso)
+	return Number.isFinite(t) ? t - server : null
+}
+
+/** A countdown still ahead ("in 12s"), or null once passed or unknown (M-c). */
+function countdown(f: DecoderFacts): string | null {
+	return f.restartInMs !== null && f.restartInMs > 0
+		? `in ${formatAge(f.restartInMs)}`
+		: null
+}
+
+/** R84: core's reason in one word; a code this CLI does not know adds nothing (the detail quotes it). */
+function suspendedWords(code: string | undefined, sep: string): string {
+	if (code === "frequency-out-of-band") return `suspended${sep}out of band`
+	if (code !== undefined && isRateReason(code)) return `suspended${sep}rate`
+	return "suspended"
+}
+
+/**
+ * The words that tell this process state apart, without restart counts (one text per
+ * state, M-d). The Decoders detail prints these beside its own counts (I-A).
+ */
+export function processWords(f: DecoderFacts): string {
+	const sep = ` ${glyphs().sep} `
+	const up = formatDuration(f.row.uptime)
+	const inNext = countdown(f)
+	switch (f.proc) {
+		case "unknown":
+			return "?"
+		case "up":
+			return `up ${up}`
+		case "starting":
+			return `starting ${up}`
+		case "suspended":
+			return suspendedWords(f.row.suspension?.reasonCode, sep)
+		case "suspend-pending":
+			return "suspending (stop pending)"
+		case "faulted-retrying":
+			return `faulted${sep}retrying`
+		case "faulted-retry":
+			return inNext
+				? `faulted${sep}retry ${inNext}`
+				: `faulted${sep}retry pending`
+		case "restarting":
+			return inNext ? `restarting ${inNext}` : "restarting"
+		default:
+			return f.proc
+	}
+}
+
+/**
+ * R100: a pinned decoder says so at every width, never by colour alone:
+ * `pinned` → `up 51s · pinned`; running out of band: `pinned` →
+ * `out of band · pinned` → `up 51s · out of band · pinned` (attention).
+ */
+function pinnedCell(f: DecoderFacts, words: string, role: Role): Cell {
+	const sep = ` ${glyphs().sep} `
+	if (f.row.bandAssessment?.verdict === "out-of-band")
+		return cell(
+			[sp("pinned", "attention")],
+			[sp(`out of band${sep}pinned`, "attention")],
+			[sp(`${words}${sep}out of band${sep}pinned`, "attention")],
+		)
+	return cell([sp("pinned", role)], [sp(`${words}${sep}pinned`, role)])
+}
+
+function processCell(f: DecoderFacts): Cell {
+	const role = PROC_ROLE[f.proc]
+	const n = f.row.restartCount
+	const restarts = counted(n, "restart")
+	const sep = ` ${glyphs().sep} `
+	const words = processWords(f)
+	const withCount = n > 0 ? [[sp(`${words}${sep}${restarts}`, role)]] : []
+	switch (f.proc) {
+		case "unknown":
+			return cell([sp("?", "unknown")])
+		case "stopped":
+			return cell([sp("stopped", role)])
+		case "up":
+			if (f.pinned) return pinnedCell(f, words, role)
+			return cell([sp(words, role)], ...withCount)
+		case "starting":
+			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
+			return cell([sp("starting", role)], [sp(words, role)])
+		case "suspended":
+			// MUST 4: `suspended · band` fits where `… out of band` does not.
+			return words === "suspended"
+				? cell([sp(words, role)])
+				: words.endsWith("out of band")
+					? cell(
+							[sp("suspended", role)],
+							[sp(`suspended${sep}band`, role)],
+							[sp(words, role)],
+						)
+					: cell([sp("suspended", role)], [sp(words, role)])
+		case "suspend-pending":
+			return cell([sp("suspending", role)], [sp(words, role)])
+		// MUST 4: a retrying fault never reads like the terminal `faulted ×13`; the
+		// narrowest form names the retry, the 15-column one both.
+		case "faulted-retrying":
+			return cell([sp("retrying", role)], [sp(words, role)])
+		case "faulted-retry":
+			return cell(
+				[sp("retry", role)],
+				[sp(`faulted${sep}retry`, role)],
+				[sp(words, role)],
+				...withCount,
+			)
+		case "restarting":
+			if (countdown(f) !== null)
+				return cell([sp("restarting", role)], [sp(words, role)], ...withCount)
+			break
+		default:
+			break
+	}
+	// R50: keep the restart evidence as width allows (min, mid, rich); none without restarts.
+	// The multiplication sign is the fault glyph, so ASCII mode reads `x13`.
+	return n > 0
+		? cell(
+				[sp(f.proc, role)],
+				[sp(`${f.proc} ${glyphs().fault}${formatCount(n)}`, role)],
+				[sp(`${f.proc}${sep}${restarts}`, role)],
+			)
+		: cell([sp(f.proc, role)])
+}
+
+/**
+ * M12: the rate leads (`2/min`), the age is added when there is room
+ * (`2/min · 25s ago`). The rate is core's counter rate, else the feed's count
+ * over the last minute. A last decode older than a minute reads
+ * `none for 6m`; never decoded: `none for <uptime>`.
+ */
+function decodesCell(f: DecoderFacts, now: number): Cell {
+	const d = f.decodes
+	const sep = ` ${glyphs().sep} `
+	const ago = (at: number): string => `${formatAge(now - at)} ago`
+	const none = (age: string): Cell =>
+		cell([sp(`none ${age}`, "neutral")], [sp(`none for ${age}`, "neutral")])
+	if (d.kind === "na") return cell([sp(glyphs().na, "label")])
+	if (d.kind === "none") return none(formatDuration(d.uptimeSec))
+	if (d.kind === "total") return cell([sp(`${formatCount(d.count)} total`)])
+	const lastAt = d.lastAt
+	const rate =
+		d.kind === "rate"
+			? formatEventRate(d.perSec)
+			: f.feed60 > 0
+				? `${formatCount(f.feed60)}/min`
+				: null
+	if (rate === null) {
+		if (lastAt !== null && now - lastAt > 60_000)
+			return none(formatAge(now - lastAt))
+		return lastAt !== null
+			? cell([sp(ago(lastAt))])
+			: cell([sp("?", "unknown")])
+	}
+	return lastAt === null
+		? cell([sp(rate)])
+		: cell([sp(rate)], [sp(`${rate}${sep}${ago(lastAt)}`)])
+}
+
+const NA = (): Cell => cell([sp(glyphs().na, "label")])
+
+function dropCell(f: DecoderFacts): Cell {
+	if (!f.row.running) return NA()
+	// R52 m5: no branch while fanout is fresh means nothing to drop, not an unknown drop.
+	if (f.branch === null && f.fanoutFresh) return NA()
+	if (f.dropNow === null)
+		return f.backpressure
+			? cell([sp("?", "unknown"), sp(" "), sp(glyphs().attention, "attention")])
+			: cell([sp("?", "unknown")])
+	const pct = formatPercent(f.dropNow)
+	return f.backpressure
+		? cell([sp(glyphs().attention, "attention"), sp(pct, "attention")])
+		: cell([sp(pct)])
+}
+
+function lifetimeCell(f: DecoderFacts): Cell {
+	if (f.lifetime !== null) return cell([sp(formatPercent(f.lifetime))])
+	return f.branch === null && (f.fanoutFresh || !f.row.running)
+		? NA()
+		: cell([sp("?", "unknown")])
+}
+
+/** Marks a configured band in every variant, so it never passes as nominal (R15, T7). */
+export const CONFIGURED_MARK = "*"
+
+function nominalCell(f: DecoderFacts): Cell {
+	if (f.nominal === "?") return cell([sp("?", "unknown")])
+	// R100: several ranges and no targets: `433.050… +1` where `433.050–434.790 +1` does not fit.
+	const a = f.row.bandAssessment
+	const ranges = a?.targetsHz === undefined ? a?.rangesHz : undefined
+	const first = ranges?.[0]
+	// R101: a configured band keeps its mark in every form (R15/T7).
+	const mark =
+		f.bandOrigin === "configured" ? [sp(CONFIGURED_MARK, "label")] : []
+	if (ranges && first && ranges.length > 1)
+		return cell(
+			[
+				sp(
+					`${(first.minHz / 1e6).toFixed(3)}${glyphs().ellipsis} +${ranges.length - 1}`,
+				),
+				...mark,
+			],
+			[sp(f.nominal), ...mark],
+		)
+	if (f.bandOrigin !== "configured") return cell([sp(f.nominal)])
+	return cell([sp(f.nominal), sp(CONFIGURED_MARK, "label")])
+}
+
+function windowCell(f: DecoderFacts): Cell {
+	const m = f.membership
+	if (m === "—") return NA()
+	return cell([sp(m, m === "?" ? "unknown" : "value")])
+}
+
+/** Every span of the cell in the `old` role (stale lane, T6). */
+function dim(c: Cell): Cell {
+	return {
+		variants: c.variants.map(v => v.map(x => ({ ...x, role: "old" as const }))),
+	}
+}
+
+const REST_CELLS = [
+	"decoder",
+	"process",
+	"decodes",
+	"restarts",
+	"errors",
+	"events",
+	"iq",
+] as const
+const FANOUT_CELLS = ["drop", "lifetime"] as const
+const WINDOW_CELLS = ["window", "nominal"] as const
+
+/**
+ * Cells for one decoder row. Each cell dims (role `old`) when the lane it comes
+ * from is older than the TTL (T6): REST cells by the decoders lane, drop and
+ * lifetime by the fanout lane, window and band by the sources/tuner lanes.
+ * `dimAll` dims every cell (spec §6.1: everything below the banner is dim).
+ */
+export function decoderCells(
+	f: DecoderFacts,
+	now: number,
+	dimAll = false,
+): Record<string, Cell> {
+	const cells: Record<string, Cell> = {
+		decoder: cell([glyphSpan(f.role), sp(" "), sp(sanitize(f.row.id))]),
+		process: processCell(f),
+		decodes: decodesCell(f, now),
+		drop: dropCell(f),
+		lifetime: lifetimeCell(f),
+		nominal: nominalCell(f),
+		window: windowCell(f),
+		restarts: cell([sp(formatCount(f.row.restartCount))]),
+		errors: cell([sp(formatCount(f.row.stats.errors))]),
+		events: cell([sp(formatCount(f.row.stats.eventsOut))]),
+		iq: cell([sp(formatBytes(f.row.stats.bytesIn))]),
+	}
+	const groups: ReadonlyArray<[boolean, readonly string[]]> = [
+		[dimAll || f.oldRest, REST_CELLS],
+		[dimAll || f.oldFanout, FANOUT_CELLS],
+		[dimAll || f.oldWindow, WINDOW_CELLS],
+	]
+	for (const [old, ids] of groups) {
+		if (!old) continue
+		for (const id of ids) {
+			const c = cells[id]
+			if (c) cells[id] = dim(c)
+		}
+	}
+	return cells
+}
+
+const header = (...variants: string[]): Cell => ({
+	variants: variants.map(v => [sp(v, "label")]),
+})
+const col = (
+	id: string,
+	min: number,
+	pref: number,
+	priority: number,
+	align: "left" | "right",
+	head: Cell,
+): ColumnSpec => ({ id, min, pref, priority, align, header: head })
+/** The title sits over the names, after the glyph and its space (spec §6.1 `   DECODERS`). */
+const TITLE: Cell = { variants: [[sp("  DECODERS", "label", true)]] }
+
+/**
+ * Spec §5.3 at standard width and up. The decoder column carries the state
+ * glyph (`● dsd-fme`, one space, as in the mockups), so its widths are the
+ * name's plus 2. Like the Decoders view (assumption 18), the core columns use
+ * their pref widths as minimums, so at 80 columns lifetime and nominal drop
+ * whole instead of squeezing process to `restar…` (§6.1 80×24).
+ */
+export const OVERVIEW_COLUMNS: ColumnSpec[] = [
+	col("decoder", 18, 18, 0, "left", TITLE),
+	col("process", 18, 24, 0, "left", header("process")),
+	col("decodes", 16, 16, 1, "left", header("decodes")),
+	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
+	col("lifetime", 8, 8, 4, "right", header("lifetime")),
+	col("nominal", 15, 15, 3, "left", header("band MHz")),
+	col("window", 6, 6, 2, "left", header("window")),
+]
+
+/**
+ * Decoders view adds restarts/errors/events/IQ in. Nominal gets priority 7 so it drops first; its
+ * band moves to the detail pane. The core columns use their pref widths as minimums, so the 120-column
+ * layout matches spec §6.2 (nominal gone, every other column present).
+ */
+export const DECODERS_COLUMNS: ColumnSpec[] = [
+	col("decoder", 18, 18, 0, "left", TITLE),
+	col("process", 10, 10, 0, "left", header("process")),
+	col("restarts", 8, 8, 5, "right", header("restarts")),
+	col("errors", 6, 6, 5, "right", header("errors")),
+	col("decodes", 15, 15, 1, "left", header("decodes")),
+	col("events", 6, 6, 6, "right", header("events")),
+	col("iq", 8, 9, 6, "right", header("iq in")),
+	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
+	col("lifetime", 8, 8, 4, "right", header("lifetime")),
+	col("nominal", 15, 15, 7, "left", header("band MHz")),
+	col("window", 6, 6, 2, "left", header("window")),
+]
+
+/** Narrow width class (< 79 content columns, spec §6.1 60×20): lifetime and nominal gone, minimal cells. */
+const NARROW_COLUMNS: ColumnSpec[] = [
+	col("decoder", 14, 17, 0, "left", TITLE),
+	col("process", 6, 10, 0, "left", header("process")),
+	col("decodes", 8, 12, 1, "left", header("decodes")),
+	col("drop", 4, 4, 1, "right", header("drop", "drop now")),
+	col("window", 6, 6, 2, "left", header("window")),
+]
+
+const NARROW_BELOW = 79
+
+/** Which table a view lays out; the kind, not a column array, selects the narrow set (R52 m4). */
+/**
+ * S10: beside a right detail pane (~111 columns at 200) the band column
+ * outranks the counters, so events and iq in go first and the band stays.
+ */
+const DECODERS_PANE_COLUMNS: ColumnSpec[] = DECODERS_COLUMNS.map(c =>
+	c.id === "nominal" ? { ...c, priority: 3 } : c,
+)
+
+/**
+ * S10: the ultra Overview's left column (~111 at 200 columns) adds restarts
+ * and errors to the Overview set; process narrows to the Decoders view's
+ * width so the band column stays beside them.
+ */
+const OVERVIEW_COLUMNS_SET: ColumnSpec[] = [
+	col("decoder", 18, 18, 0, "left", TITLE),
+	col("process", 10, 24, 0, "left", header("process")),
+	col("restarts", 8, 8, 5, "right", header("restarts")),
+	col("errors", 6, 6, 5, "right", header("errors")),
+	col("decodes", 15, 16, 1, "left", header("decodes")),
+	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
+	col("lifetime", 8, 8, 4, "right", header("lifetime")),
+	col("nominal", 15, 15, 3, "left", header("band MHz")),
+	col("window", 6, 6, 2, "left", header("window")),
+]
+
+export type DecoderTableKind =
+	| "overview"
+	| "overview-columns"
+	| "decoders"
+	| "decoders-pane"
+
+/** The columns a table lays out at `width`: its standard set, or the narrow set below 79 columns. */
+export function decoderColumns(
+	kind: DecoderTableKind,
+	width: number,
+): readonly ColumnSpec[] {
+	if (width < NARROW_BELOW) return NARROW_COLUMNS
+	if (kind === "overview") return OVERVIEW_COLUMNS
+	if (kind === "overview-columns") return OVERVIEW_COLUMNS_SET
+	return kind === "decoders-pane" ? DECODERS_PANE_COLUMNS : DECODERS_COLUMNS
+}
+
+/** At this width and up the Decoders view shows each process state in full words (signoff item 3). */
+const DECODERS_RICH_FROM = 99
+
+/**
+ * Signoff item 3: from 100 columns the Decoders view widens its process column to
+ * the longest state on screen (`faulted · retry in 12s`, `suspended · out of band`,
+ * at most 24), so the full words show; the counters (events, iq in) yield first.
+ * Restart counts stay in their own column, so they never claim the room.
+ */
+function withRichProcess(
+	cols: readonly ColumnSpec[],
+	kind: DecoderTableKind | readonly ColumnSpec[],
+	facts: readonly DecoderFacts[],
+	width: number,
+): readonly ColumnSpec[] {
+	if (
+		(kind !== "decoders" && kind !== "decoders-pane") ||
+		width < DECODERS_RICH_FROM
+	)
+		return cols
+	const need = Math.min(
+		24,
+		Math.max(0, ...facts.map(f => cellWidth(processWords(f)))),
+	)
+	return cols.map(c =>
+		c.id === "process" && need > c.min ? { ...c, min: need, pref: need } : c,
+	)
+}
+
+/** With a configured band on screen the band column gains a column for the mark and says what it means (I1). */
+function withConfiguredMark(
+	cols: readonly ColumnSpec[],
+	facts: readonly DecoderFacts[],
+): readonly ColumnSpec[] {
+	const configured = facts.filter(f => f.bandOrigin === "configured")
+	if (configured.length === 0) return cols
+	// min = pref = the widest marked label, so the column shows whole or drops whole:
+	// layout never truncates the mark away (R57).
+	const widest = Math.max(
+		...configured.map(f => cellWidth(f.nominal) + CONFIGURED_MARK.length),
+	)
+	// M13: the header stays `band MHz`; the `*` is explained by the help legend.
+	const headText = "band MHz"
+	return cols.map(c => {
+		if (c.id !== "nominal") return c
+		const w = Math.max(c.pref + 1, widest, cellWidth(headText))
+		return { ...c, min: w, pref: w, header: header(headText) }
+	})
+}
+
+export interface DecoderTable {
+	header: Line
+	rows: Line[]
+	shownIds: string[]
+}
+
+export interface DecoderTableOptions {
+	/** Dim every row (spec §6.1: with a cached view under the banner, everything below it is dim). */
+	dim?: boolean
+}
+
+/**
+ * maxRows includes the "+N more" marker row; the selected row is always kept visible.
+ * `columns` is a table kind (standard set, narrow set below 79 columns) or an
+ * explicit column array laid out as given at every width.
+ */
+export function decoderTable(
+	facts: readonly DecoderFacts[],
+	columns: DecoderTableKind | readonly ColumnSpec[],
+	width: number,
+	maxRows: number,
+	selectedId: string | null,
+	now: number,
+	opts: DecoderTableOptions = {},
+): DecoderTable {
+	const base =
+		typeof columns === "string" ? decoderColumns(columns, width) : columns
+	const cols = withConfiguredMark(
+		withRichProcess(base, columns, facts, width),
+		facts,
+	)
+	const layout = layoutColumns(width, cols)
+	const fits = facts.length <= maxRows
+	const visible = fits ? facts.length : Math.max(0, maxRows - 1)
+	const sel =
+		selectedId === null ? -1 : facts.findIndex(f => f.row.id === selectedId)
+	const start =
+		fits || sel < visible
+			? 0
+			: Math.min(sel - visible + 1, facts.length - visible)
+	const shown = facts.slice(start, start + visible)
+	const rows = shown.map(f => {
+		const cells = decoderCells(f, now, opts.dim === true)
+		// Spec §6.2: the selected row is inverse on the glyph and the name.
+		if (f.row.id === selectedId) {
+			cells["decoder"] = cell([
+				{ ...glyphSpan(f.role), role: "selected" },
+				sp(" ", "selected"),
+				sp(sanitize(f.row.id), "selected", true),
+			])
+		}
+		return renderRow(layout, cells)
+	})
+	if (!fits)
+		rows.push([
+			sp(
+				`  +${facts.length - shown.length} more`,
+				opts.dim === true ? "old" : "label",
+			),
+		])
+	return {
+		header: renderHeader(layout, cols),
+		rows,
+		shownIds: shown.map(f => f.row.id),
+	}
+}
+
+/**
+ * Final views: with no rows the column header says nothing, so the reason sits beside
+ * the title: `   DECODERS  no data · API unreachable`.
+ */
+export function titled(header: Line, placeholder: Line): Line {
+	const i = header.findIndex(s => s.text.includes("DECODERS"))
+	if (i < 0) return placeholder
+	const head = header.slice(0, i + 1)
+	const last = head[i]
+	if (last) head[i] = { ...last, text: last.text.trimEnd() }
+	return [...head, sp("  ", "label"), ...placeholder]
+}
+
+/** Spec §9: cold start, API down without cache, REST 200 with []. */
+export function decodersPlaceholder(state: AppState): Line | null {
+	const lane = state.decoders
+	if (lane.value !== undefined)
+		return lane.value.length === 0
+			? [sp("no decoders configured", "label")]
+			: null
+	// R82: one no-data copy for every section (R57's endpoint rule included).
+	return [sp(noDataText(state, ENDPOINT_PATHS.decoders), "label")]
+}

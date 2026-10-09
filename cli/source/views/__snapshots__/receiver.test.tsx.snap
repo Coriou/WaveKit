@@ -1,0 +1,69 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Receiver view (spec §6.4) > golden: 80x24 1`] = `
+" api ● 2s  iq ● streaming  rx 445.971 MHz ±1.024  dec 1 restarting  drops !21%
+ SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming
+ rate      4.1 MB/s (2.048 MS/s U8 IQ)   received 1.2 GB   assigned 9 decoders
+ TUNER     external control · last set-frequency 6m ago
+ frequency 445 970 700 Hz   window 444.947–446.995 MHz
+ gain      manual · index 11 (R828D)   rtl agc off   bias-t off
+ in window tuned  dsd-fme  multimon-ng
+ out       rtl433  readsb  acarsdec  ais-catcher  dumpvdl2  direwolf  lora-mesh…
+ RELAY     listening :4713 · 1 client · max 4 · exclusive control
+ 18:01:20  client-3 192.0.2.1:59430  set-frequency          445 970 700
+ 18:00:56  client-3 192.0.2.1:59430  set-frequency          446 860 476
+ 18:00:50  client-3 192.0.2.1:59430  set-tuner-gain-index            11
+ 18:00:38  client-3 192.0.2.1:59430  set-frequency          446 860 476
+ 18:00:20  client-3 192.0.2.1:59430  set-frequency          446 524 920
+ FANOUT    21% dropped now · 4 of 8 in backpressure · 4.1 MB/s offered each
+ lifetime  1.9 GB offered per branch · 5.7 GB dropped across branches (38%)
+ upstream  3.5 MB dropped lifetime (0.29%) · 0 B/s now · checked 2s ago
+
+
+
+
+
+ Receiver · 1-5 views  c take control  r reconnect  q quit  ? help"
+`;
+
+exports[`Receiver view (spec §6.4) > golden: 120x40 under external control 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+
+ SOURCE    pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4ms · timeout 10s
+ rate      4.1 MB/s (nominal 4.1 MB/s · 2.048 MS/s U8 IQ)   received 1.2 GB   assigned 9 decoders
+
+ TUNER     external control · relay client-3 192.0.2.1:59430 · 42 commands · last set-frequency 6m ago
+ frequency 445 970 700 Hz   window 444.947–446.995 MHz   sample rate 2 048 000 S/s   ppm 0
+ gain      manual · index 11 (R828D)   rtl agc off   bias-t off   direct sampling off   offset tuning off
+ in window tuned  dsd-fme  multimon-ng
+ out       rtl433  readsb  acarsdec  ais-catcher  dumpvdl2  direwolf  lora-meshtastic
+
+ RELAY     listening :4713 · 1 client · max 4 · 545.5 MB sent · exclusive control
+ 18:01:20  client-3 192.0.2.1:59430  set-frequency          445 970 700
+ 18:00:56  client-3 192.0.2.1:59430  set-frequency          446 860 476
+ 18:00:50  client-3 192.0.2.1:59430  set-tuner-gain-index            11
+ 18:00:38  client-3 192.0.2.1:59430  set-frequency          446 860 476
+ 18:00:20  client-3 192.0.2.1:59430  set-frequency          446 524 920
+
+ FANOUT    decoder branches: 21% of offered IQ dropped now · 4 of 8 in backpressure · 4.1 MB/s offered each
+ lifetime  1.9 GB offered per branch · 5.7 GB dropped across branches (38%) · relay branch 0 B dropped
+ upstream  Pi rtlmux → core: 3.5 MB dropped lifetime (0.29%) · 0 B/s now · checked 2s ago
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ c take control  r reconnect  q quit  ? help"
+`;

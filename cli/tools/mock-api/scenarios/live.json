@@ -1,0 +1,1086 @@
+{
+	"name": "live",
+	"description": "Audit fixture: pi-iq streaming 2.048 MS/s at 445.9707 MHz, acarsdec down (13 restarts), 4 branches in backpressure, 7 cached messages. Core before the 2026-10-09 health/suspension/band contracts (R91); see contracts and tuner-unknown.",
+	"now": "2026-10-08T18:07:52.000Z",
+	"conn": { "rest": "ok", "ws": "open", "cached": true, "restAgoMs": 2000 },
+	"rest": {
+		"/health": {
+			"status": 200,
+			"body": { "status": "ok", "timestamp": "2026-10-08T18:07:50.000Z" }
+		},
+		"/api/decoders": {
+			"status": 200,
+			"body": [
+				{
+					"id": "dsd-fme",
+					"type": "dsd-fme",
+					"running": true,
+					"health": "running",
+					"pid": 1490,
+					"uptime": 52,
+					"stats": { "bytesIn": 831500000, "eventsOut": 3, "errors": 0 },
+					"lastOutputAt": "2026-10-08T18:07:41.000Z",
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "text",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false,
+						"preferredSampleRates": [48000]
+					}
+				},
+				{
+					"id": "multimon-ng",
+					"type": "multimon-ng",
+					"running": true,
+					"health": "running",
+					"pid": 1495,
+					"uptime": 51,
+					"stats": { "bytesIn": 761100000, "eventsOut": 2, "errors": 0 },
+					"lastOutputAt": "2026-10-08T18:07:20.000Z",
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "text",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false,
+						"preferredSampleRates": [22050, 48000]
+					}
+				},
+				{
+					"id": "rtl433",
+					"type": "rtl433",
+					"running": true,
+					"health": "idle",
+					"pid": 1501,
+					"uptime": 51,
+					"stats": { "bytesIn": 625900000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "jsonl",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false,
+						"preferredSampleRates": [250000, 1000000]
+					}
+				},
+				{
+					"id": "readsb",
+					"type": "readsb",
+					"running": true,
+					"health": "idle",
+					"pid": 1531,
+					"uptime": 51,
+					"stats": { "bytesIn": 570600000, "eventsOut": 0, "errors": 6 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "jsonl",
+						"integrationPattern": "network_producer",
+						"wantsExclusiveSource": false
+					}
+				},
+				{
+					"id": "acarsdec",
+					"type": "acarsdec",
+					"running": false,
+					"health": "running",
+					"uptime": 0,
+					"stats": { "bytesIn": 43500000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 13,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"targetFrequenciesHz": [131550000, 131725000, 131825000],
+					"lastError": {
+						"kind": "exit",
+						"message": "Process exited unexpectedly (code 1)",
+						"at": "2026-10-08T18:07:47.000Z"
+					},
+					"caps": {
+						"input": "iq",
+						"output": "jsonl",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false
+					}
+				},
+				{
+					"id": "ais-catcher",
+					"type": "ais-catcher",
+					"running": true,
+					"health": "idle",
+					"pid": 1540,
+					"uptime": 51,
+					"stats": { "bytesIn": 832500000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "nmea",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false
+					}
+				},
+				{
+					"id": "dumpvdl2",
+					"type": "dumpvdl2",
+					"running": true,
+					"health": "idle",
+					"pid": 1550,
+					"uptime": 50,
+					"stats": { "bytesIn": 656800000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"targetFrequenciesHz": [136650000, 136700000, 136975000],
+					"caps": {
+						"input": "iq",
+						"output": "jsonl",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false
+					}
+				},
+				{
+					"id": "direwolf",
+					"type": "direwolf",
+					"running": true,
+					"health": "idle",
+					"pid": 1560,
+					"uptime": 50,
+					"stats": { "bytesIn": 750700000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "text",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false,
+						"preferredSampleRates": [48000]
+					}
+				},
+				{
+					"id": "lora-meshtastic",
+					"type": "lora-meshtastic",
+					"running": true,
+					"health": "idle",
+					"pid": 1570,
+					"uptime": 50,
+					"stats": { "bytesIn": 116400000, "eventsOut": 0, "errors": 0 },
+					"lastOutputAt": null,
+					"restartCount": 0,
+					"sourceId": "pi-iq",
+					"idleTimeoutMs": 30000,
+					"caps": {
+						"input": "iq",
+						"output": "jsonl",
+						"integrationPattern": "pure_consumer",
+						"wantsExclusiveSource": false
+					}
+				}
+			]
+		},
+		"/api/sources": {
+			"status": 200,
+			"body": [
+				{
+					"id": "pi-iq",
+					"type": "rtl_tcp",
+					"url": "192.0.2.23:5555",
+					"connected": true,
+					"activity": {
+						"state": "streaming",
+						"lastSampleAt": "2026-10-08T18:07:49.996Z",
+						"sampleAgeMs": 4,
+						"timeoutMs": 10000
+					},
+					"consumers": 9,
+					"bytesReceived": 1200000000,
+					"dataRate": 3994,
+					"reconnectAttempts": 0,
+					"caps": {
+						"kind": "iq",
+						"sampleRate": 2048000,
+						"format": "U8_IQ",
+						"exclusive": false,
+						"centerFreq": 445970700
+					},
+					"available": true,
+					"assignments": [
+						{
+							"decoderId": "dsd-fme",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:00.000Z"
+						},
+						{
+							"decoderId": "multimon-ng",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:00.000Z"
+						},
+						{
+							"decoderId": "rtl433",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:01.000Z"
+						},
+						{
+							"decoderId": "readsb",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:01.000Z"
+						},
+						{
+							"decoderId": "acarsdec",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:01.000Z"
+						},
+						{
+							"decoderId": "ais-catcher",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:01.000Z"
+						},
+						{
+							"decoderId": "dumpvdl2",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:02.000Z"
+						},
+						{
+							"decoderId": "direwolf",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:02.000Z"
+						},
+						{
+							"decoderId": "lora-meshtastic",
+							"sourceId": "pi-iq",
+							"assignedAt": "2026-10-08T18:07:02.000Z"
+						}
+					]
+				}
+			]
+		},
+		"/api/tuner": {
+			"status": 200,
+			"body": [
+				{
+					"sourceId": "pi-iq",
+					"frequency": 445970700,
+					"sampleRate": 2048000,
+					"gainMode": "manual",
+					"gain": 0,
+					"ppm": 0,
+					"agcMode": false,
+					"biasTee": false,
+					"directSampling": "off",
+					"offsetTuning": false,
+					"ifGain": 0,
+					"tunerIfGain": null,
+					"testMode": false,
+					"tunerGainIndex": 11,
+					"controlMode": "external",
+					"lastCommandAt": "2026-10-08T18:01:20.000Z",
+					"commandCount": 42
+				}
+			]
+		},
+		"/api/tuner-relay": {
+			"status": 200,
+			"body": {
+				"enabled": true,
+				"listening": true,
+				"host": "0.0.0.0",
+				"port": 4713,
+				"sourceId": "pi-iq",
+				"sourceConnected": true,
+				"sourceKind": "iq",
+				"sourceFormat": "U8_IQ",
+				"compatibility": "ok",
+				"clientsConnected": 1,
+				"controlClientId": "client-3",
+				"controlClientRemote": "192.0.2.1:59430",
+				"controlPolicy": "exclusive",
+				"maxClients": 4,
+				"bytesSent": 545500000,
+				"bytesReceived": 840,
+				"lastCommand": "set-frequency",
+				"lastCommandAt": "2026-10-08T18:01:20.000Z",
+				"lastCommandValue": 445970700,
+				"lastFrequency": 445970700,
+				"lastSampleRate": 2048000,
+				"lastPpm": 0,
+				"commandHistoryLimit": 200,
+				"rtlTcpHeader": { "magic": "RTL0", "tunerType": 6, "gainCount": 29 },
+				"commandStats": [
+					{
+						"id": 1,
+						"name": "set-frequency",
+						"count": 15,
+						"lastValue": 445970700,
+						"lastSeenAt": "2026-10-08T18:01:20.000Z"
+					},
+					{
+						"id": 2,
+						"name": "set-sample-rate",
+						"count": 3,
+						"lastValue": 2048000,
+						"lastSeenAt": "2026-10-08T18:00:06.000Z"
+					},
+					{
+						"id": 3,
+						"name": "set-gain-mode",
+						"count": 3,
+						"lastValue": 1,
+						"lastSeenAt": "2026-10-08T18:00:06.000Z"
+					},
+					{
+						"id": 13,
+						"name": "set-tuner-gain-index",
+						"count": 6,
+						"lastValue": 11,
+						"lastSeenAt": "2026-10-08T18:00:50.000Z"
+					}
+				],
+				"commandHistory": [
+					{
+						"id": 1,
+						"name": "set-frequency",
+						"value": 446524920,
+						"at": "2026-10-08T18:00:20.000Z",
+						"clientId": "client-3",
+						"clientRemote": "192.0.2.1:59430"
+					},
+					{
+						"id": 1,
+						"name": "set-frequency",
+						"value": 446860476,
+						"at": "2026-10-08T18:00:38.000Z",
+						"clientId": "client-3",
+						"clientRemote": "192.0.2.1:59430"
+					},
+					{
+						"id": 13,
+						"name": "set-tuner-gain-index",
+						"value": 11,
+						"at": "2026-10-08T18:00:50.000Z",
+						"clientId": "client-3",
+						"clientRemote": "192.0.2.1:59430"
+					},
+					{
+						"id": 1,
+						"name": "set-frequency",
+						"value": 446860476,
+						"at": "2026-10-08T18:00:56.000Z",
+						"clientId": "client-3",
+						"clientRemote": "192.0.2.1:59430"
+					},
+					{
+						"id": 1,
+						"name": "set-frequency",
+						"value": 445970700,
+						"at": "2026-10-08T18:01:20.000Z",
+						"clientId": "client-3",
+						"clientRemote": "192.0.2.1:59430"
+					}
+				]
+			}
+		},
+		"/api/telemetry/fanout": {
+			"status": 200,
+			"body": {
+				"timestamp": "2026-10-08T18:07:49.000Z",
+				"backpressureActiveCount": 4,
+				"droppedBytesTotal": 5738000000,
+				"droppedChunksTotal": 101397,
+				"totalBytesWritten": 15745500000,
+				"branches": [
+					{
+						"id": "tuner-relay-pi-iq",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 0,
+						"droppedBytesTotal": 0,
+						"droppedChunksTotal": 0,
+						"bufferBytes": 0,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 545500000
+					},
+					{
+						"id": "decoder-dsd-fme",
+						"decoderId": "dsd-fme",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 12,
+						"droppedBytesTotal": 684000000,
+						"droppedChunksTotal": 13680,
+						"bufferBytes": 65536,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"lastBackpressureAt": "2026-10-08T18:07:46.100Z",
+						"lastDrainAt": "2026-10-08T18:07:46.300Z"
+					},
+					{
+						"id": "decoder-multimon-ng",
+						"decoderId": "multimon-ng",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 14,
+						"droppedBytesTotal": 741000000,
+						"droppedChunksTotal": 14820,
+						"bufferBytes": 98304,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"lastBackpressureAt": "2026-10-08T18:07:47.200Z",
+						"lastDrainAt": "2026-10-08T18:07:47.500Z"
+					},
+					{
+						"id": "decoder-rtl433",
+						"decoderId": "rtl433",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 41,
+						"droppedBytesTotal": 779000000,
+						"droppedChunksTotal": 15580,
+						"bufferBytes": 300000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"backpressureSince": "2026-10-08T18:07:48.600Z",
+						"lastBackpressureAt": "2026-10-08T18:07:48.600Z",
+						"lastDrainAt": "2026-10-08T18:07:48.400Z"
+					},
+					{
+						"id": "decoder-readsb",
+						"decoderId": "readsb",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 121,
+						"droppedBytesTotal": 836000000,
+						"droppedChunksTotal": 3357,
+						"bufferBytes": 389120,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"backpressureSince": "2026-10-08T18:07:48.800Z",
+						"lastBackpressureAt": "2026-10-08T18:07:48.800Z",
+						"lastDrainAt": "2026-10-08T18:07:48.700Z"
+					},
+					{
+						"id": "decoder-ais-catcher",
+						"decoderId": "ais-catcher",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 88,
+						"droppedBytesTotal": 684000000,
+						"droppedChunksTotal": 13680,
+						"bufferBytes": 310000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"backpressureSince": "2026-10-08T18:07:48.500Z",
+						"lastBackpressureAt": "2026-10-08T18:07:48.500Z",
+						"lastDrainAt": "2026-10-08T18:07:48.300Z"
+					},
+					{
+						"id": "decoder-dumpvdl2",
+						"decoderId": "dumpvdl2",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 97,
+						"droppedBytesTotal": 779000000,
+						"droppedChunksTotal": 15580,
+						"bufferBytes": 330000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"backpressureSince": "2026-10-08T18:07:48.700Z",
+						"lastBackpressureAt": "2026-10-08T18:07:48.700Z",
+						"lastDrainAt": "2026-10-08T18:07:48.200Z"
+					},
+					{
+						"id": "decoder-direwolf",
+						"decoderId": "direwolf",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 10,
+						"droppedBytesTotal": 665000000,
+						"droppedChunksTotal": 13300,
+						"bufferBytes": 40960,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"lastBackpressureAt": "2026-10-08T18:07:45.900Z",
+						"lastDrainAt": "2026-10-08T18:07:46.000Z"
+					},
+					{
+						"id": "decoder-lora-meshtastic",
+						"decoderId": "lora-meshtastic",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 7,
+						"droppedBytesTotal": 570000000,
+						"droppedChunksTotal": 11400,
+						"bufferBytes": 32768,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1900000000,
+						"lastBackpressureAt": "2026-10-08T18:07:44.800Z",
+						"lastDrainAt": "2026-10-08T18:07:45.000Z"
+					}
+				]
+			}
+		},
+		"/api/resources": {
+			"status": 200,
+			"body": {
+				"timestamp": "2026-10-08T18:07:50.000Z",
+				"container": {
+					"available": true,
+					"cpuUsagePercent": 240,
+					"cpuThrottledPercent": null,
+					"memoryUsageBytes": 1940000000,
+					"memoryLimitBytes": null,
+					"memoryUsagePercent": null,
+					"oomKillCount": 0,
+					"cgroupVersion": "v2"
+				},
+				"sdrHosts": [
+					{
+						"available": true,
+						"sourceId": "pi-iq",
+						"apiUrl": "http://192.0.2.23:8080",
+						"uptime": 291,
+						"rtlTcp": {
+							"running": true,
+							"pid": 58,
+							"restartCount": 0,
+							"lastRestartAt": null,
+							"config": {
+								"sampleRate": 2048000,
+								"frequency": 445970700,
+								"gain": 0,
+								"agc": false
+							}
+						},
+						"rtlmux": {
+							"running": true,
+							"pid": 63,
+							"restartCount": 0,
+							"lastRestartAt": null,
+							"clients": 1,
+							"bytesPerSec": 4194304,
+							"totalBytesSent": 1194754048,
+							"clientDetails": [
+								{
+									"id": 1,
+									"address": "192.0.2.10:50122",
+									"bytesDropped": 3506176
+								}
+							]
+						},
+						"dongle": {
+							"found": true,
+							"vendor": null,
+							"product": "RTLSDRBlog Blog V4",
+							"serial": null
+						},
+						"warnings": [],
+						"errors": [],
+						"lastFetchedAt": "2026-10-08T18:07:50.000Z",
+						"fetchError": null
+					}
+				],
+				"sourceBackpressure": [
+					{
+						"sourceId": "pi-iq",
+						"available": true,
+						"bytesDroppedUpstream": 3506176,
+						"totalBytesSent": 1194754048,
+						"dropRate": 0,
+						"dropPercent": 0.29,
+						"lastCheckedAt": "2026-10-08T18:07:50.000Z"
+					}
+				]
+			}
+		},
+		"/api/live-audio/status": {
+			"status": 200,
+			"body": {
+				"enabled": true,
+				"running": false,
+				"sourceId": "pi-iq",
+				"sourceConnected": true,
+				"sourceIqSampleRate": 2048000,
+				"effectiveSampleRate": 24975.60975609756,
+				"decimationFactor": 82,
+				"httpUrl": "http://127.0.0.1:8081/stream",
+				"clientCount": 0,
+				"bytesStreamed": 0,
+				"pipelineHealth": "stopped",
+				"config": {
+					"enabled": true,
+					"sourceId": "pi-iq",
+					"httpPort": 8081,
+					"modulation": "nfm",
+					"bandwidth": 12500,
+					"squelch": 0,
+					"noiseReduction": "off",
+					"lowPass": 0,
+					"highPass": 0,
+					"gain": 10,
+					"deEmphasis": false,
+					"deEmphasisTau": 50,
+					"audioFormat": "s16le",
+					"iqDcBlock": true
+				}
+			}
+		},
+		"/api/live-audio/presets": {
+			"status": 200,
+			"body": {
+				"nfm": { "bandwidth": 12500, "deEmphasis": false },
+				"wfm": { "bandwidth": 150000, "deEmphasis": true, "deEmphasisTau": 50 },
+				"am": { "bandwidth": 10000, "deEmphasis": false },
+				"usb": { "bandwidth": 2400, "deEmphasis": false },
+				"lsb": { "bandwidth": 2400, "deEmphasis": false },
+				"dsb": { "bandwidth": 6000, "deEmphasis": false },
+				"cw": { "bandwidth": 500, "deEmphasis": false },
+				"raw": { "bandwidth": 0, "deEmphasis": false }
+			}
+		},
+		"/api/status": {
+			"status": 200,
+			"body": {
+				"status": "degraded",
+				"uptime": 460,
+				"version": "1.0.0",
+				"sources": [],
+				"decoders": [],
+				"audio": {
+					"outputPort": 8080,
+					"clientsConnected": 0,
+					"format": "S16LE",
+					"sampleRate": 48000
+				},
+				"health": {
+					"status": "degraded",
+					"timestamp": "2026-10-08T18:07:50.000Z",
+					"uptime": 460,
+					"components": {
+						"api": {
+							"status": "up",
+							"lastCheck": "2026-10-08T18:07:50.000Z",
+							"message": "API server is responding"
+						},
+						"source": {
+							"status": "up",
+							"lastCheck": "2026-10-08T18:07:50.000Z"
+						},
+						"decoders": {
+							"acarsdec": {
+								"status": "down",
+								"lastCheck": "2026-10-08T18:07:50.000Z",
+								"message": "Decoder acarsdec is not running"
+							}
+						}
+					}
+				}
+			}
+		},
+		"/api/aircraft": {
+			"status": 200,
+			"body": {
+				"aircraft": [],
+				"timestamp": 1791482870000,
+				"stats": {
+					"aircraftCount": 0,
+					"withPosition": 0,
+					"withCallsign": 0,
+					"enrichedCount": 0,
+					"messagesProcessed": 0,
+					"messagesPerSecond": 0,
+					"enrichmentCache": { "hits": 0, "misses": 0, "size": 0 }
+				}
+			}
+		}
+	},
+	"restHistory": [
+		{
+			"offsetMs": -60000,
+			"path": "/api/decoders",
+			"merge": {
+				"dsd-fme": { "stats": { "eventsOut": 1 } },
+				"multimon-ng": { "stats": { "eventsOut": 1 } }
+			}
+		}
+	],
+	"ws": [
+		{
+			"offsetMs": -6000,
+			"type": "fanout:snapshot",
+			"channel": "fanout",
+			"data": {
+				"timestamp": "2026-10-08T18:07:44.000Z",
+				"backpressureActiveCount": 4,
+				"droppedBytesTotal": 5703236224,
+				"droppedChunksTotal": 100750,
+				"totalBytesWritten": 15561456480,
+				"branches": [
+					{
+						"id": "tuner-relay-pi-iq",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 0,
+						"droppedBytesTotal": 0,
+						"droppedChunksTotal": 0,
+						"bufferBytes": 0,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 525050720
+					},
+					{
+						"id": "decoder-dsd-fme",
+						"decoderId": "dsd-fme",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 12,
+						"droppedBytesTotal": 681546086,
+						"droppedChunksTotal": 13600,
+						"bufferBytes": 65536,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"lastBackpressureAt": "2026-10-08T18:07:41.100Z",
+						"lastDrainAt": "2026-10-08T18:07:41.300Z"
+					},
+					{
+						"id": "decoder-multimon-ng",
+						"decoderId": "multimon-ng",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 14,
+						"droppedBytesTotal": 738137101,
+						"droppedChunksTotal": 14740,
+						"bufferBytes": 98304,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"lastBackpressureAt": "2026-10-08T18:07:42.200Z",
+						"lastDrainAt": "2026-10-08T18:07:42.500Z"
+					},
+					{
+						"id": "decoder-rtl433",
+						"decoderId": "rtl433",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 40,
+						"droppedBytesTotal": 775932608,
+						"droppedChunksTotal": 15500,
+						"bufferBytes": 300000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"backpressureSince": "2026-10-08T18:07:43.600Z",
+						"lastBackpressureAt": "2026-10-08T18:07:43.600Z",
+						"lastDrainAt": "2026-10-08T18:07:43.400Z"
+					},
+					{
+						"id": "decoder-readsb",
+						"decoderId": "readsb",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 120,
+						"droppedBytesTotal": 828229274,
+						"droppedChunksTotal": 3320,
+						"bufferBytes": 389120,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"backpressureSince": "2026-10-08T18:07:43.800Z",
+						"lastBackpressureAt": "2026-10-08T18:07:43.800Z",
+						"lastDrainAt": "2026-10-08T18:07:43.700Z"
+					},
+					{
+						"id": "decoder-ais-catcher",
+						"decoderId": "ais-catcher",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 87,
+						"droppedBytesTotal": 677660723,
+						"droppedChunksTotal": 13560,
+						"bufferBytes": 310000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"backpressureSince": "2026-10-08T18:07:43.500Z",
+						"lastBackpressureAt": "2026-10-08T18:07:43.500Z",
+						"lastDrainAt": "2026-10-08T18:07:43.300Z"
+					},
+					{
+						"id": "decoder-dumpvdl2",
+						"decoderId": "dumpvdl2",
+						"sourceId": "pi-iq",
+						"backpressureActive": true,
+						"backpressureEnterCount": 96,
+						"droppedBytesTotal": 770820288,
+						"droppedChunksTotal": 15420,
+						"bufferBytes": 330000,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"backpressureSince": "2026-10-08T18:07:43.700Z",
+						"lastBackpressureAt": "2026-10-08T18:07:43.700Z",
+						"lastDrainAt": "2026-10-08T18:07:43.200Z"
+					},
+					{
+						"id": "decoder-direwolf",
+						"decoderId": "direwolf",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 10,
+						"droppedBytesTotal": 662750579,
+						"droppedChunksTotal": 13250,
+						"bufferBytes": 40960,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"lastBackpressureAt": "2026-10-08T18:07:40.900Z",
+						"lastDrainAt": "2026-10-08T18:07:41.000Z"
+					},
+					{
+						"id": "decoder-lora-meshtastic",
+						"decoderId": "lora-meshtastic",
+						"sourceId": "pi-iq",
+						"backpressureActive": false,
+						"backpressureEnterCount": 7,
+						"droppedBytesTotal": 568159565,
+						"droppedChunksTotal": 11360,
+						"bufferBytes": 32768,
+						"highWaterMark": 262144,
+						"totalBytesWritten": 1879550720,
+						"lastBackpressureAt": "2026-10-08T18:07:39.800Z",
+						"lastDrainAt": "2026-10-08T18:07:40.000Z"
+					}
+				]
+			}
+		},
+		{
+			"offsetMs": -6000,
+			"type": "metrics",
+			"channel": "metrics",
+			"data": {
+				"sourceId": "pi-iq",
+				"bytesReceived": 1179550720,
+				"dataRate": 3994
+			}
+		},
+		{
+			"offsetMs": -1000,
+			"type": "fanout:snapshot",
+			"channel": "fanout",
+			"data": "$fanoutRest"
+		},
+		{
+			"offsetMs": -1000,
+			"type": "metrics",
+			"channel": "metrics",
+			"data": {
+				"sourceId": "pi-iq",
+				"bytesReceived": 1200000000,
+				"dataRate": 3994
+			}
+		},
+		{
+			"offsetMs": -1000,
+			"type": "resources:alert",
+			"channel": "resources",
+			"data": {
+				"type": "container-cpu",
+				"severity": "critical",
+				"message": "High CPU usage: 273.5%",
+				"timestamp": "2026-10-08T18:07:49.000Z"
+			}
+		},
+		{
+			"offsetMs": -3000,
+			"type": "decoder:status",
+			"channel": "decoders",
+			"data": "$decoderStatus:acarsdec"
+		},
+		{
+			"offsetMs": 0,
+			"type": "source:status",
+			"channel": "sources",
+			"data": "$sourceStatus:pi-iq"
+		},
+		{
+			"offsetMs": -9000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dsd-fme",
+				"output": {
+					"type": "call_end",
+					"decoder": "dsd-fme",
+					"timestamp": "2026-10-08T18:07:41.000Z",
+					"data": {
+						"protocol": "dmr",
+						"talkgroup": 2350,
+						"source": 2341234,
+						"slot": 1,
+						"duration": 8400,
+						"dmr": { "cc": 1 },
+						"quality": { "crcErrs": 4, "fecErrs": 3 },
+						"flags": {
+							"encrypted": true,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -30000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "multimon-ng",
+				"output": {
+					"type": "message",
+					"decoder": "multimon-ng",
+					"timestamp": "2026-10-08T18:07:20.000Z",
+					"data": {
+						"protocol": "POCSAG1200",
+						"address": 1234567,
+						"function": 3,
+						"messageType": "alpha",
+						"message": "FIRE ALARM ACTIVATION - 12 LONG STREET UNIT 4B - ZONE 3 SMOKE DETECTOR - RESPOND"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -48000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dsd-fme",
+				"output": {
+					"type": "call_end",
+					"decoder": "dsd-fme",
+					"timestamp": "2026-10-08T18:07:02.000Z",
+					"data": {
+						"protocol": "dmr",
+						"talkgroup": 2350,
+						"source": 2340001,
+						"slot": 2,
+						"duration": 3100,
+						"dmr": { "cc": 1 },
+						"quality": { "crcErrs": 2, "fecErrs": 0 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -126000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "multimon-ng",
+				"output": {
+					"type": "message",
+					"decoder": "multimon-ng",
+					"timestamp": "2026-10-08T18:05:44.000Z",
+					"data": {
+						"protocol": "POCSAG1200",
+						"address": 7654321,
+						"function": 0,
+						"messageType": "numeric",
+						"message": "0207 555 0101"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -220000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dsd-fme",
+				"output": {
+					"type": "call_end",
+					"decoder": "dsd-fme",
+					"timestamp": "2026-10-08T18:04:10.000Z",
+					"data": {
+						"protocol": "dmr",
+						"talkgroup": 9,
+						"source": 2341001,
+						"slot": 1,
+						"duration": 1200,
+						"dmr": { "cc": 1 },
+						"quality": { "crcErrs": 1, "fecErrs": 1 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -232000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "multimon-ng",
+				"output": {
+					"type": "message",
+					"decoder": "multimon-ng",
+					"timestamp": "2026-10-08T18:03:58.000Z",
+					"data": {
+						"protocol": "FLEX",
+						"mode": "1600/2/A",
+						"frequency": "03.058",
+						"capcode": "1234567",
+						"messageType": "ALN",
+						"message": "TEST PAGE 03:58"
+					}
+				}
+			}
+		},
+		{
+			"offsetMs": -398000,
+			"type": "decoder:output",
+			"channel": "decoders",
+			"data": {
+				"decoderId": "dsd-fme",
+				"output": {
+					"type": "call_end",
+					"decoder": "dsd-fme",
+					"timestamp": "2026-10-08T18:01:12.000Z",
+					"data": {
+						"protocol": "dmr",
+						"talkgroup": 2350,
+						"source": 2341234,
+						"slot": 1,
+						"duration": 12000,
+						"dmr": { "cc": 1 },
+						"quality": { "crcErrs": 3, "fecErrs": 2 },
+						"flags": {
+							"encrypted": false,
+							"timeout": false,
+							"badSignal": false,
+							"falsePositiveSuppressed": false
+						}
+					}
+				}
+			}
+		}
+	]
+}

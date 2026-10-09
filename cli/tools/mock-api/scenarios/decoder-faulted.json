@@ -1,0 +1,19 @@
+{
+	"extends": "live",
+	"name": "decoder-faulted",
+	"description": "acarsdec exhausted its restarts (20) and is faulted: terminal (not running, no restart scheduled) until an explicit start.",
+	"restPatch": {
+		"/api/decoders": {
+			"acarsdec": {
+				"health": "faulted",
+				"nextRestartAt": "$delete",
+				"restartCount": 20,
+				"lastError": {
+					"kind": "exit",
+					"message": "Process exited unexpectedly (code 1)",
+					"at": "2026-10-08T18:05:12.000Z"
+				}
+			}
+		}
+	}
+}

@@ -1,0 +1,16 @@
+{
+	"extends": "live",
+	"name": "api-down-cached",
+	"description": "API unreachable for 2m 31s with cached data; the feed gap is open.",
+	"conn": {
+		"rest": "down",
+		"ws": "closed",
+		"cached": true,
+		"restAgoMs": 151000,
+		"wsAgoMs": 152000,
+		"downForMs": 151000,
+		"wsClosedAgoMs": 151000,
+		"restError": "ECONNREFUSED",
+		"closeCode": 1006
+	}
+}

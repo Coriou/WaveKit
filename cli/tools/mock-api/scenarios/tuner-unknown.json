@@ -1,0 +1,129 @@
+{
+	"extends": "live",
+	"name": "tuner-unknown",
+	"description": "Fresh core, nothing declares a centre: the tuner frequency is core's 100 MHz placeholder (listed in unknownFields), no relay client has tuned, and every band check is unknown.",
+	"restPatch": {
+		"/api/sources": { "pi-iq": { "caps": { "centerFreq": "$delete" } } },
+		"/api/tuner": {
+			"pi-iq": {
+				"frequency": 100000000,
+				"controlMode": "internal",
+				"commandCount": 0,
+				"lastCommandAt": "$delete",
+				"tunerGainIndex": "$delete",
+				"unknownFields": [
+					"frequency",
+					"gainMode",
+					"gain",
+					"ppm",
+					"agcMode",
+					"biasTee",
+					"directSampling",
+					"offsetTuning",
+					"ifGain",
+					"tunerIfGain",
+					"testMode"
+				]
+			}
+		},
+		"/api/tuner-relay": {
+			"clientsConnected": 0,
+			"controlClientId": "$delete",
+			"controlClientRemote": "$delete",
+			"lastCommand": "$delete",
+			"lastCommandAt": "$delete",
+			"lastCommandValue": "$delete",
+			"lastFrequency": "$delete",
+			"lastSampleRate": "$delete",
+			"lastPpm": "$delete",
+			"commandStats": [],
+			"commandHistory": []
+		},
+		"/api/decoders": {
+			"dsd-fme": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"multimon-ng": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"rtl433": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"readsb": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"targetsHz": [1090000000],
+					"basis": "protocol"
+				}
+			},
+			"acarsdec": {
+				"desiredRunning": true,
+				"suspended": false,
+				"health": "restarting",
+				"nextRestartAt": "2026-10-08T18:07:55.000Z",
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"targetsHz": [131550000, 131725000, 131825000],
+					"basis": "configured"
+				}
+			},
+			"ais-catcher": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"targetsHz": [161975000, 162025000],
+					"basis": "protocol"
+				}
+			},
+			"dumpvdl2": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"targetsHz": [136650000, 136700000, 136975000],
+					"basis": "configured"
+				}
+			},
+			"direwolf": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "no-target-frequency"
+				}
+			},
+			"lora-meshtastic": {
+				"desiredRunning": true,
+				"suspended": false,
+				"bandAssessment": {
+					"verdict": "unknown",
+					"reasonCode": "source-center-unknown",
+					"targetsHz": [869525000],
+					"basis": "configured"
+				}
+			}
+		}
+	}
+}
