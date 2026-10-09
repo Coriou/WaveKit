@@ -36,6 +36,8 @@ interface Layout {
 	lines: Line[]
 	/** Hidden rows outside groups (already in the trailing marker, if any). */
 	hidden: number
+	/** Every hidden row and capped item, groups included: the combined marker's count. */
+	total: number
 }
 
 function layout(
@@ -68,7 +70,9 @@ function layout(
 	for (const [g, n] of hiddenIn)
 		if (!lastOf.has(g) && n > 0) lines.push(moreMarker(n))
 	if (hidden > 0) lines.push(hiddenMarker(hidden))
-	return { lines, hidden }
+	let total = hidden
+	for (const n of hiddenIn.values()) total += n
+	return { lines, hidden, total }
 }
 
 /** Index of the next row to hide: highest `drop`, the last such row on ties. */
@@ -114,8 +118,9 @@ function nextEssential(
  * 2. then plain kept rows, last first;
  * 3. then essential heads, middle ones first, keeping the last head.
  * A group's hidden rows fold into its "+N more" marker; any other hidden row is
- * counted in one "+N rows hidden" line at the end. If even the last head and the
- * marker do not fit (height 1), the last head alone stays.
+ * counted in one "+N rows hidden" line at the end. When only heads are left and the
+ * markers still do not fit, they fold into one combined "+N rows hidden" before any
+ * head is cut (never hidden silently); at height 1 the last head alone stays.
  */
 export function shed(
 	rows: readonly Row[],
@@ -129,14 +134,18 @@ export function shed(
 		if (out.lines.length <= height) return out.lines
 		let pick = nextDroppable(rows, shown)
 		if (pick < 0) pick = nextKept(rows, shown)
-		if (pick < 0) pick = nextEssential(rows, shown)
+		if (pick < 0) {
+			// Only heads are left: before cutting one, fold every marker into one line.
+			const heads = rows.filter((r, i) => shown[i] && r.gap !== true)
+			if (out.total > 0 && heads.length + 1 <= height)
+				return [...heads.map(r => r.line), hiddenMarker(out.total)]
+			pick = nextEssential(rows, shown)
+		}
 		if (pick >= 0) {
 			shown[pick] = false
 			continue
 		}
-		const last = rows.findIndex((_, i) => shown[i])
-		return last >= 0 && rows[last]
-			? [rows[last].line]
-			: out.lines.slice(0, height)
+		const head = rows.find((r, i) => shown[i] && r.gap !== true)
+		return head ? [head.line] : out.lines.slice(0, height)
 	}
 }
