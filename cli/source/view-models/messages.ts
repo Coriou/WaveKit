@@ -542,8 +542,10 @@ export function messagesModel(
 						emptyLine(state, mu, fv, listWidth),
 					].slice(-Math.max(1, b.listRows))
 	return {
-		header: messagesHeader(state, mu, fv, width),
-		input: mu.draft !== null ? inputLine(mu.draft, width) : null,
+		// Header and input sit in the list column; with the detail on the right that
+		// column is narrower than the view.
+		header: messagesHeader(state, mu, fv, listWidth),
+		input: mu.draft !== null ? inputLine(mu.draft, listWidth) : null,
 		list,
 		detail:
 			open && selected

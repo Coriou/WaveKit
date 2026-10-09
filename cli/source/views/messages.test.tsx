@@ -192,6 +192,31 @@ describe("Messages view (spec §6.3)", () => {
 		h.unmount()
 	})
 
+	it("keeps M of N and the input cursor visible with the detail on the right (200x50)", async () => {
+		const h = await renderApp({
+			state: scenarioState("burst", deps),
+			views,
+			view: "messages",
+			cols: 200,
+			rows: 50,
+			strict: true,
+		})
+		// A long applied filter that still matches (an OR alternative) and a long draft.
+		await h.press("/")
+		await typeText(h, `readsb,ais,${"z".repeat(100)}`)
+		await h.press(KEYS.enter)
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		await h.press("/")
+		await typeText(h, " " + "x".repeat(120))
+		const text = h.text()
+		expect(text).not.toContain("render error")
+		expect(text).toMatch(/MESSAGES {2}.*\d+ of \d+/)
+		expect(text).toMatch(/x▏/)
+		expect(text).toMatch(/readsb · aircraft · \d\d:\d\d:\d\d\.\d{3}/)
+		h.unmount()
+	})
+
 	it("walks the whole Esc chain: detail, selection, filter (M9)", async () => {
 		const h = await renderApp({
 			state: scenarioState("live", deps),

@@ -429,3 +429,37 @@ describe("T40 fix round 1: R73 / R66", () => {
 		expect(detail.join("\n")).toContain("EI-ZZQ")
 	})
 })
+
+describe("T40 fix round 1 addendum: right-placement header", () => {
+	it("fits the header and the input to the list column when the detail sits on the right", () => {
+		const s = scenarioState("burst", deps)
+		const filterText = "readsb,ais " + "x".repeat(150)
+		const fv = feedView(s.messages.ring, {
+			...following,
+			filterText: "readsb,ais",
+		})
+		const e = fv.visible[0]!
+		const base = initialUi("messages")
+		const ui: UiState = {
+			...base,
+			messages: {
+				...base.messages,
+				following: false,
+				pausedAtSeq: 1e9,
+				filterText: "readsb,ais",
+				draft: filterText,
+			},
+			selected: { ...base.selected, messages: String(e.seq) },
+			detail: { ...base.detail, messages: { open: true, scroll: 0 } },
+		}
+		const m = messagesModel(s, ui, 199, 45, true)
+		expect(m.placement.kind).toBe("right")
+		expect(m.listWidth).toBeLessThan(199)
+		const header = lineText(m.header)
+		expect([...header].length).toBeLessThanOrEqual(m.listWidth)
+		expect(header).toMatch(/\d+ of \d+$/)
+		const input = lineText(m.input!)
+		expect([...input].length).toBeLessThanOrEqual(m.listWidth)
+		expect(input.endsWith("▏")).toBe(true)
+	})
+})
