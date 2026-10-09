@@ -36,7 +36,7 @@ Folded into the tasks below (the spec was amended the same day; § 3 units table
 - **Do not change** the channelizer's public names (`ChannelProvider`, `DecoderChannelRequest`, `admitChannel`, `CoreSuspensionReason` semantics) — extend `CoreSuspensionReason` with `tuner-scanning` only, in the same union, following plan A3's DTO mapping if the shared enum is not extended.
 - **Honesty and safety.** Never add decryption, key handling, or key-related decoder options. Encrypted → `encrypted: true`, no audio kept. Test-mode retune markers are never accepted tuner state (spec § 4.6).
 - **Code conventions** (CLAUDE.md, enforced): strict TS (`noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `verbatimModuleSyntax`), ESM with `.js` relative imports, `import type`, no floating promises (`void` + `.catch`), tabs, no semicolons, `x => …` single-arg arrows, no `any`. Component loggers (`createComponentLogger`), never `console.log` in `src/`. Throw `WaveKitError` (`src/utils/errors.ts`) with a code. Streams: `pipeline()` from `stream/promises`, an `error` handler on every stream, `.destroy()` on shutdown. Zod at every boundary (config, REST bodies, persisted files, worker messages from disk-loaded state).
-- **Tests.** Every test file imports what it uses (`describe`, `it`, `expect`, `vi`, `beforeEach`, …) from `"vitest"` explicitly (typecheck covers tests; never rely on globals); fast-check `numRuns: 100` (`import fc from "fast-check"` or `import * as fc from "fast-check"`, both used in the repo); each property test carries `// Feature: signal-discovery-scanner, Property N: <name>` and `// Validates: spec § X`. Numbers N are the spec's P1–P25 (spec § 13), mapped to tasks: P1 Hop coverage, P2 DC safety → 13; P3 Exclusions and truncation → 15; P4 Detector on synthetic signals → 10; P5 Lease discipline → 33; P6 Epoch and gap accounting → 4, 10, 32; P7 Identity and dedupe, P8 Monotone confidence, sticky flags → 15; P9 Job transitions → 19, 20; P10 Double-match acceptance → 18; P11 Bounded state → 8, 15, 34, 40; P12 WS rate limits → 21, 37; P13 Persistence round trip → 16; P14 Retention → 16, 17; P15 Preview agreement → 14; P16 Priority → 35; P17 Epoch-bound evidence → 34; P18 No neighbour ghosts → 11; P19 No IQ-image ghosts → 11a; P20 Short bursts → 10a; P21 Occupancy bounds → 17a; P22 Capture sidecars → 34a; P23 Impulse blanking → 10 (end to end; the blanker module and its unit tests are Task 7a's); P24 Comb masking → 7a (module half), 10 (end to end); P25 Identify trials → 35a. Heavy pipeline simulations carry an explicit `it` timeout (60–180 s). On the loaded Mac one such property can take 20–50 s (P4's OBW property measured 19–48 s), so they are not "well under a minute": a file whose synchronous tests add up to more than about 30 s yields a macrotask between tests (`beforeEach(() => new Promise<void>(resolve => setImmediate(resolve)))`), and a long property is an `fc.asyncProperty` that awaits such a yield per run. Otherwise vitest's worker RPC times out (`Timeout calling "onTaskUpdate"`) and the run exits 1 with every test green. Seeded randomness only (`mulberry32` from `tests/mocks/scanner/signals.ts`); no `Math.random` in tests. Never test wiring, forwarding, mock echoes or source text.
+- **Tests.** Every test file imports what it uses (`describe`, `it`, `expect`, `vi`, `beforeEach`, …) from `"vitest"` explicitly (typecheck covers tests; never rely on globals); fast-check `numRuns: 100` (`import fc from "fast-check"` or `import * as fc from "fast-check"`, both used in the repo); each property test carries `// Feature: signal-discovery-scanner, Property N: <name>` and `// Validates: spec § X`. Numbers N are the spec's P1–P25 (spec § 13), mapped to tasks: P1 Hop coverage, P2 DC safety → 13; P3 Exclusions and truncation → 15; P4 Detector on synthetic signals → 10; P5 Lease discipline → 33; P6 Epoch and gap accounting → 4, 10, 32; P7 Identity and dedupe, P8 Monotone confidence, sticky flags → 15; P9 Job transitions → 19, 20; P10 Double-match acceptance → 18; P11 Bounded state → 8, 15, 34, 40; P12 WS rate limits → 21, 37; P13 Persistence round trip → 16; P14 Retention → 16, 17; P15 Preview agreement → 14; P16 Priority → 35; P17 Epoch-bound evidence → 34; P18 No neighbour ghosts → 11; P19 No IQ-image ghosts → 11a; P20 Short bursts → 10a; P21 Occupancy bounds → 17a; P22 Capture sidecars → 34a; P23 Impulse blanking → 10 (end to end; the blanker module and its unit tests are Task 7a's); P24 Comb masking → 7a (module half), 10 (end to end, including the within-one-window bound), 15 (store level: no discovery remains once the teeth are spur-flagged); P25 Identify trials → 35a. Heavy pipeline simulations carry an explicit `it` timeout (60–180 s). On the loaded Mac one such property can take 20–50 s (P4's OBW property measured 19–48 s), so they are not "well under a minute": a file whose synchronous tests add up to more than about 30 s yields a macrotask between tests (`beforeEach(() => new Promise<void>(resolve => setImmediate(resolve)))`), and a long property is an `fc.asyncProperty` that awaits such a yield per run. Otherwise vitest's worker RPC times out (`Timeout calling "onTaskUpdate"`) and the run exits 1 with every test green. Seeded randomness only (`mulberry32` from `tests/mocks/scanner/signals.ts`); no `Math.random` in tests. Never test wiring, forwarding, mock echoes or source text.
 - **This Mac is heavily loaded and the disk is ~95 % full.** Never run benchmarks, the full suite (`pnpm test`), or image builds here. Verify with single files (`pnpm exec vitest run <file>`), `pnpm run typecheck`, `pnpm run lint`. Hardware and soak tasks (S4) run only with the user, SDR++ closed, and never capture raw IQ over Wi-Fi in parallel with the core.
 - **Commits.** The worktree is shared by several sessions. Stage explicit paths only: `git add <paths> && git commit -m "…" -- <paths>`. Never `git add -A`, never push, never run prettier on `docs/CLI-COORDINATION.md`.
 - **Fixture privacy.** Own captures contain real identifiers: gitignored `fixtures/raw/`, fetched by `download.sh` with sha256 from the private location, never committed.
@@ -1494,7 +1494,7 @@ S1-A (pure, new files only):
 12. Bandplans, raster union, snapping, frequency keys
 13. Hop planner — P1, P2
 14. Plan preview (validation, derived defaults, provenance, POI, estimates, issues) — P15
-15. Discovery store (sticky association, keys, merge rules, surfacing filter incl. bursts, IQ images and `spur` (like `iqImage`), ladder, caps, re-key, bounds) — P3, P7, P8, P11
+15. Discovery store (sticky association, keys, merge rules, surfacing filter incl. bursts, IQ images and `spur` (like `iqImage`), ladder, caps, re-key, bounds) — P3, P7, P8, P11, P24 (store level)
 16. Persistence (snapshot, seq journal, replay, jobs + lease, settings, engine state; `EngineStateSchema`) — P13
 17. Evidence store (probe WAV linking, PSD/IQ, retention, free-disk guard) — P14
 17a. Occupancy history (persistent per-frequency hourly duty, 7 days)
@@ -14969,7 +14969,7 @@ git add src/core/scanner/plan/cost.ts src/core/scanner/plan/plan-preview.ts test
 
 ### Task 15: Discovery store (association, keys, merge rules, surfacing, ladder, caps, re-key, bounds)
 
-**Spec:** § 5.2, § 6.2 (truncated/edge), § 7.1, § 7.2, § 7.3, § 7.4 (correction input, snapshot of corrections, pure estimator), § 8 (journal payload), § 9 (memory), § 13 P3 (store part), P7, P8, P11 (store part), P17 (store part: `Observation.decode`). **Depends on:** Tasks 1, 2, 11 (`familyOf`), 12 (`snapToRaster`, `frequencyKey`, `rasterToleranceHz`, `gridToleranceHz`). **Batch:** S1-A
+**Spec:** § 5.2, § 6.2 (truncated/edge), § 7.1, § 7.2, § 7.3, § 7.4 (correction input, snapshot of corrections, pure estimator), § 8 (journal payload), § 9 (memory), § 13 P3 (store part), P7, P8, P11 (store part), P17 (store part: `Observation.decode`), P24 (store level). **Depends on:** Tasks 1, 2, 11 (`familyOf`), 12 (`snapToRaster`, `frequencyKey`, `rasterToleranceHz`, `gridToleranceHz`). **Batch:** S1-A
 
 **Files:**
 - Create: `src/core/scanner/store/schemas.ts`, `src/core/scanner/store/discovery-store.ts` (class `DiscoveryStore` plus the pure § 7.4 estimator `estimateFrequencyError`), `tests/mocks/scanner/observations.ts`
@@ -14979,7 +14979,7 @@ Design notes (read before coding):
 
 - **Observation → protocol.** `ObservationInput` never carries an identity (decodes arrive later through `applyEvidence`). The observed protocol is the top hypothesis when its score is ≥ 0.5, else `analog-fm`/`carrier` from the class, else `unknown`; the family is `familyOf(protocol)`. An observation whose track has `flags.edge` (in-window truncation, § 6.2) counts as protocol `unknown` and confidence `activity` ("edge activity").
 - **Rejected before association (P3, store part):** an observation with `jobIds.length === 0` (no job's scope covers it), `track.flags.truncated`, `track.flags.iqImage` or `track.flags.spur` (§ 4.9) is a transient and never touches the store; it is also dropped from the pending single-block hits, so rule (d) never counts it.
-- **Re-ingest of a known id (P3, § 4.9).** `truncated`, `iqImage` and `spur` are sticky flags that can be raised after a track surfaced (Task 11a, Task 10; Task 7a: a comb tooth surfaces in its first 30 s, then is flagged). A re-ingest that carries either flag **unlinks** the observation: the discovery loses its count and airtime, and it is deleted when no observation is left and it holds no decode evidence (`decoded`, an identity, `encrypted` or decoded metadata) and is not `keep`; all of it is one `"observation"` journal entry (`removedObservations` + `deleted`), and the call returns `transient`. A re-ingest with `jobIds: []` is **not** a rejection: the covering job ended or was re-scoped while the track was open, which does not make the earlier emission false, so the record keeps the union of its job credits (spec § 7.1: credited to every job that covered it).
+- **Re-ingest of a known id (P3, § 4.9).** `truncated`, `iqImage` and `spur` are sticky flags that can be raised after a track surfaced (Task 11a, Task 10; Task 7a: a comb tooth's track can be linked to a discovery before the comb is promoted, then is flagged `spur`; P24 at the store level is that no discovery remains for it afterwards). A re-ingest that carries either flag **unlinks** the observation: the discovery loses its count and airtime, and it is deleted when no observation is left and it holds no decode evidence (`decoded`, an identity, `encrypted` or decoded metadata) and is not `keep`; all of it is one `"observation"` journal entry (`removedObservations` + `deleted`), and the call returns `transient`. A re-ingest with `jobIds: []` is **not** a rejection: the covering job ended or was re-scoped while the track was open, which does not make the earlier emission false, so the record keeps the union of its job credits (spec § 7.1: credited to every job that covered it).
 - **Association (§ 7.2) in order:** (1) sticky: nearest discovery on the same source with the same family whose median measured centre (last 64 observations) is within `tol` of the observation centre (`tol` = `rasterToleranceHz(min spacing)` when the source has rasters at that frequency, else `gridToleranceHz(obw)`); (2) key lookup by `(frequencyKey, family)`: one → merge; several → most recently active with the same class, else the one without identity, else a new discovery cross-linked to them (this keeps `(key, family, identity)` unique, P7); (3) none with the family: an `unknown`-family observation merges into the single non-`carrier` discovery at the key; a known-family observation merges into a lone `unknown`-family discovery at the key (and makes it more specific); otherwise a new discovery cross-linked (`coChannel`) with every discovery at the key (rule 3: analog and digital on one channel stay two discoveries).
 - **Surfacing filter (creation only):** (a) `track.blocks ≥ minSurfaceBlocks`; (b) `singleBlockSurfacingAllowed` and `track.maxBlockSnrDb ≥ track.thresholdDb + 6`; (c) a classification attached (top hypothesis ≥ 0.5 for a protocol other than `unknown`/`carrier`, or a class other than `unknown`/`carrier`/`wideband`); (d) the third single-block hit on the same `${sourceId}|${frequencyKey}` within 10 minutes of observation time creates the discovery and merges all three. Pending hits are in-memory only (≤ 4096 keys × 2 hits) and are lost on restart.
 - **Derived fields** (`frequencyHz`, `frequencyKey`, `measuredOffsetHz`, `bandwidthHz`) are recomputed after every merge from the medians of the discovery's last 64 observations (kept in a canonical `(startedAt, id)` order, so they do not depend on arrival order). After any recompute, identity adoption or family change, `settle()` merges discoveries that collide on `(source, key, family, identity)`; the survivor is the one first seen (ties: smaller id).
@@ -15992,6 +15992,39 @@ describe("DiscoveryStore properties", () => {
 				for (const d of after.discoveries) expect(idsAfterFirst.has(d.id)).toBe(true)
 				if (first.change === "created") expect(store.get(first.discoveryId ?? "")).toBeUndefined()
 			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	// Feature: signal-discovery-scanner, Property 24: Comb masking
+	// Validates: spec § 4.9, § 7.1 (store level: once the teeth are spur-flagged, no discovery remains for them)
+	it("leaves no discovery for any comb tooth once its track is spur-flagged", () => {
+		fc.assert(
+			fc.property(
+				fc.array(opArb, { minLength: 0, maxLength: 30 }),
+				fc.integer({ min: 3, max: 7 }),
+				fc.integer({ min: 8, max: 40 }),
+				fc.boolean(),
+				(ops, teeth, spacingSlots, open) => {
+					const store = newStore()
+					ops.forEach((op, i) => apply(store, op, i))
+					const before = new Set(store.snapshot().discoveries.map(d => d.id))
+					// 2 MHz above the ops' slots: the teeth never associate with an earlier discovery
+					const tooth = (k: number) => ({
+						id: `tooth-${k}`,
+						centreHz: CH + 2_000_000 + k * spacingSlots * 6_250,
+						startedAt: T0 + 1e6,
+						cls: "carrier" as const,
+						hypotheses: [["carrier", 1]] as [ScannerProtocol, number][],
+					})
+					for (let k = 0; k < teeth; k++) store.ingest(makeObs({ ...tooth(k), open }))
+					for (let k = 0; k < teeth; k++) {
+						expect(store.ingest(makeObs({ ...tooth(k), spur: true }))).toEqual({ discoveryId: null, change: "transient" })
+					}
+					for (let k = 0; k < teeth; k++) expect(store.discoveryIdOf(`tooth-${k}`)).toBeUndefined()
+					expect(store.snapshot().discoveries.filter(d => !before.has(d.id))).toEqual([])
+				},
+			),
 			{ numRuns: 100 },
 		)
 	})
@@ -17374,7 +17407,7 @@ export function estimateFrequencyError(discoveries: readonly Discovery[], source
 - [ ] **Step 6: Run the tests and watch them pass**
 
 Run: `pnpm exec vitest run tests/unit/core/scanner/discovery-store.test.ts tests/unit/core/scanner/discovery-store.property.test.ts`
-Expected: PASS (all unit tests, including the § 7.4 estimator cases; seven properties at 100 runs each plus the documented P7 counterexample case).
+Expected: PASS (all unit tests, including the § 7.4 estimator cases; eight properties at 100 runs each (the eighth is the P24 store-level property) plus the documented P7 counterexample case).
 
 If the rule-4 test fails because Task 11's `familyOf("unknown")` is not `"unknown"`, fix Task 11, not the store: § 7.2 rule 4 is defined on family `unknown`.
 
@@ -22594,7 +22627,7 @@ grep -rc "fc.assert" tests/unit/core/scanner tests/unit/core/spectrum | grep -v 
 grep -rL "Feature: signal-discovery-scanner, Property" $(grep -rl "fc.assert" tests/unit/core/scanner tests/unit/core/spectrum | grep -vE '/(ids|bandplan|fft|noise-floor|detector|segmenter)\.test\.ts$')   # must print nothing: every file testing a spec property P1–P25 carries the header (the six excluded files hold module properties outside P1–P25 and rightly carry none)
 ```
 
-Expected: 0 typecheck/lint errors; every spectrum and scanner unit file PASS; the checks print nothing (or matching counts). The property files cover P1–P4, P6–P15, P18–P21, P23 and P24 as the head's Tests mapping assigns them (P5, P16, P17, P22 and P25 come with Tasks 33, 35, 34, 34a and 35a in S1-B). `pipeline-artefacts.test.ts` (P23, P24) takes about 40 s on this Mac.
+Expected: 0 typecheck/lint errors; every spectrum and scanner unit file PASS; the checks print nothing (or matching counts). The property files cover P1–P4, P6–P15, P18–P21, P23 and P24 (module, pipeline and store levels) as the head's Tests mapping assigns them (P5, P16, P17, P22 and P25 come with Tasks 33, 35, 34, 34a and 35a in S1-B). `pipeline-artefacts.test.ts` (P23, P24) takes about 40 s on this Mac.
 
 On failure: fix inside the owning S1-A task's files (one `fix(scanner): … (Task N)` or `fix(spectrum): … (Task N)` commit per task). Do not start S1-B until CHECKPOINT A is green and Task 23's re-check passes. A property that fails only for some seeds near a statistical boundary gets a fixed seed per spec § 13 ("seeds are fixed where a property sits near a statistical boundary"), never a looser bound.
 

@@ -1290,10 +1290,11 @@ Each test carries `// Feature: signal-discovery-scanner, Property N: <name>` and
   `sha256` matches the file, and its sample range lies inside the ring at write time. (§ 8)
 - **P23 Impulse blanking.** Periodic broadband impulses (2 ms every 100 ms, +20 dB over 90 % of
   bins) never open a track and lift the floor by ≤ 0.5 dB. (§ 4.9)
-- **P24 Comb masking.** A 7-tooth spur comb is masked within 30 s of settled data; a tooth that
-  surfaced before then is unlinked at that point (its discovery deleted unless it holds decode
-  evidence), no tooth surfaces once masked, and a restart with persisted spur state starts masked;
-  a real 9 kHz emission between teeth is still detected. (§ 4.9)
+- **P24 Comb masking.** A 7-tooth spur comb is masked within 30 s of settled data, and from then
+  on no discovery remains for any tooth: `spur` is sticky like `iqImage`, so a tooth observation
+  linked before promotion is unlinked and a discovery that rested on it is deleted (§ 7.1); with
+  persisted spur state a restart starts masked. A real 9 kHz emission between teeth is still
+  detected. (§ 4.9)
 - **P25 Identify trials.** Trials cover exactly the protocols with prior > 0 (minus `protocols`
   restrictions) in score order; an artefact target never starts a trial; the result always carries
   measurements. (§ 10.8)
