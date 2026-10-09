@@ -86,3 +86,42 @@ describe("final I1: core's resume path is not a fault", () => {
 	})
 })
 
+describe("final M1: a capture-limited half-width never scales up", () => {
+	const from = windowFor(
+		"pi-iq",
+		base.tuner.value,
+		base.sources.value,
+		base.relay.value,
+	)!
+	const at = (centreHz: number, sampleRate: number): TunedWindow => ({
+		sourceId: "pi-iq",
+		centreHz,
+		sampleRate,
+		loHz: centreHz - sampleRate / 2,
+		hiHz: centreHz + sampleRate / 2,
+	})
+	const readsb = {
+		id: "readsb",
+		type: "readsb",
+		bandAssessment: {
+			verdict: "out-of-band",
+			targetsHz: [1_090_000_000],
+			windowHalfWidthHz: 0.4 * from.sampleRate,
+		} satisfies BandAssessment,
+	}
+	it("a higher rate is unknown: core caps it by a frontend the API does not send", () => {
+		const up = retuneImpact([readsb], from, at(1_089_000_000, 3_200_000))
+		expect(up.enters).toEqual([])
+		expect(up.unknown).toEqual(["readsb"])
+	})
+	it("a lower rate scales down", () => {
+		// 0.4 × 1.024 MS/s = 409.6 kHz.
+		expect(
+			retuneImpact([readsb], from, at(1_089_700_000, 1_024_000)).enters,
+		).toEqual(["readsb"])
+		const off = retuneImpact([readsb], from, at(1_089_500_000, 1_024_000))
+		expect(off.enters).toEqual([])
+		expect(off.unknown).toEqual([])
+	})
+})
+

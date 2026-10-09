@@ -172,8 +172,8 @@ describe("R90 I3: a rate change never claims enters from ±rate/2", () => {
 		type,
 		bandAssessment: a,
 	})
-	it("scales a capture-limited half-width with the rate", () => {
-		// readsb: 0.4 × 2.048 MS/s; 1.1 MHz off at 2.4 MS/s is outside 0.4 × 2.4 MS/s.
+	it("never claims enters at a higher rate (final M1: the half-width does not scale up)", () => {
+		// readsb: 0.4 × 2.048 MS/s; at 2.4 MS/s core caps it by a frontend the API does not send.
 		const readsb = subject("readsb", {
 			verdict: "out-of-band",
 			targetsHz: [1_090_000_000],
@@ -181,10 +181,10 @@ describe("R90 I3: a rate change never claims enters from ±rate/2", () => {
 		})
 		const off = retuneImpact([readsb], from, at(1_088_900_000, 2_400_000))
 		expect(off.enters).toEqual([])
-		expect(off.unknown).toEqual([])
-		expect(
-			retuneImpact([readsb], from, at(1_089_100_000, 2_400_000)).enters,
-		).toEqual(["readsb"])
+		expect(off.unknown).toEqual(["readsb"])
+		const near = retuneImpact([readsb], from, at(1_089_100_000, 2_400_000))
+		expect(near.enters).toEqual([])
+		expect(near.unknown).toEqual(["readsb"])
 	})
 	it("keeps a frontend-limited half-width", () => {
 		const direwolf = subject("direwolf", {
