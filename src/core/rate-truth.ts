@@ -110,7 +110,9 @@ export class RateTruthTracker {
 		const valid =
 			sample.stable &&
 			sample.elapsedMs > 0 &&
-			sample.bytes >= 0 &&
+			// Nothing delivered is a waiting/stale source, not a rate: activity
+			// already reports it, and it must not read as -100 %.
+			sample.bytes > 0 &&
 			sample.declaredSampleRateHz > 0 &&
 			sample.bytesPerSample > 0
 		if (!valid) {

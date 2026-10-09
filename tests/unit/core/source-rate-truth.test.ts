@@ -82,6 +82,17 @@ describe("source rate truth", () => {
 		expect(changes).toEqual(["iq", "iq"])
 	}, 20_000)
 
+	it("does not flag a connected source that sends nothing (e.g. rtlmux without dongle)", async () => {
+		await connect()
+		for (let i = 0; i < 10; i++) {
+			now += TICK
+			;(manager as unknown as { emitMetrics(id: string): void }).emitMetrics(
+				"iq",
+			)
+		}
+		expect(manager.getStatus("iq")!.rateMismatch).toBeUndefined()
+	}, 20_000)
+
 	it("clears the flag when the declared rate changes", async () => {
 		await connect()
 		for (let i = 0; i < 7; i++) await interval(2_160_000)

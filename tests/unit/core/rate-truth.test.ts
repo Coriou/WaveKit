@@ -92,6 +92,16 @@ describe("RateTruthTracker", () => {
 		expect(tracker.mismatch?.deviation).toBeCloseTo(-0.1, 6)
 	})
 
+	it("never flags a connected source that delivers nothing (waiting/stale, not a rate)", () => {
+		const tracker = new RateTruthTracker()
+		expect(run(tracker, 0, 12, 0)).not.toContain("flagged")
+		expect(tracker.mismatch).toBeUndefined()
+		// Silence also breaks a pending run.
+		run(tracker, 12 * TICK, 5, 2_160_000)
+		tick(tracker, 17 * TICK, 0)
+		expect(tick(tracker, 18 * TICK, 2_160_000)).toBeNull()
+	})
+
 	it("skips unstable intervals (backpressure, reconnect) without clearing a flag", () => {
 		const tracker = new RateTruthTracker()
 		run(tracker, 0, 6, 2_160_000)
