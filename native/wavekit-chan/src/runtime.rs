@@ -448,13 +448,24 @@ fn overflow_event(id: &str, ch: &mut Open) -> Option<Value> {
     })
 }
 
-fn writer(
-    listener: UnixListener,
-    path: PathBuf,
-    q: Arc<ChannelQueue>,
-    conn: ConnSlot,
-    (gone, id, serial): (mpsc::Sender<(String, u64)>, String, u64),
-) {
+/// The writer can no longer serve a client (none could be accepted, or a write failed): it closes
+/// the queue, so later output is not counted as overflow, and reports the channel gone unless
+/// close() is already under way, so the main loop closes it as `client-gone`.
+fn abandon(q: &ChannelQueue, conn: &ConnSlot, (gone, id, serial): Gone) {
+    q.close();
+    let closing = {
+        let mut c = conn.lock().unwrap();
+        c.stream = None;
+        c.closing
+    };
+    if !closing {
+        let _ = gone.send((id, serial)); // unbounded: never blocks, even mid-close()
+    }
+}
+
+type Gone = (mpsc::Sender<(String, u64)>, String, u64);
+
+fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: ConnSlot, gone: Gone) {
     // The listener is non-blocking: accept() is polled so close() and EOF never need a wake-up
     // connection, which EOF could not tell apart from a real client. The flags are read before
     // each attempt, so a client that connected before EOF is still taken from the backlog.
@@ -469,20 +480,26 @@ fn writer(
         };
         match listener.accept() {
             Ok((s, _)) => break s,
-            Err(e) if e.kind() == ErrorKind::WouldBlock && !draining => {
+            // EOF with no client in the backlog: nothing to drain.
+            Err(e) if e.kind() == ErrorKind::WouldBlock && draining => return,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(nap);
                 nap = (nap * 2).min(ACCEPT_POLL.1);
             }
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
-            Err(_) => return,
+            Err(e) => {
+                eprintln!("wavekit-chan: channel {}: accept: {e}", gone.1);
+                return abandon(&q, &conn, gone);
+            }
         }
     };
     drop(listener);
     // Exactly one client per socket.
     let _ = std::fs::remove_file(&path);
     // BSD/macOS accept() inherits O_NONBLOCK from the listener; the writes below must block.
-    if stream.set_nonblocking(false).is_err() {
-        return;
+    if let Err(e) = stream.set_nonblocking(false) {
+        eprintln!("wavekit-chan: channel {}: set_nonblocking: {e}", gone.1);
+        return abandon(&q, &conn, gone);
     }
     {
         let mut c = conn.lock().unwrap();
@@ -495,16 +512,7 @@ fn writer(
     let mut buf = Vec::with_capacity(WRITE_CHUNK);
     while q.pop_blocking(WRITE_CHUNK, &mut buf) {
         if stream.write_all(&buf).is_err() {
-            q.close();
-            let closing = {
-                let mut c = conn.lock().unwrap();
-                c.stream = None;
-                c.closing
-            };
-            if !closing {
-                let _ = gone.send((id, serial)); // unbounded: never blocks, even mid-close()
-            }
-            return;
+            return abandon(&q, &conn, gone);
         }
         buf.clear();
     }
@@ -1107,6 +1115,30 @@ mod tests {
             "{:?}",
             of_cause(&ev, "queue-overflow")
         );
+    }
+
+    // A writer that can never serve a client (here accept() fails: the "listener" is not a socket)
+    // closes its queue and reports its channel gone, so the channel closes instead of overflowing.
+    #[test]
+    fn writer_that_cannot_accept_reports_its_channel_gone() {
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        let dir = TempDir::new();
+        let file = std::fs::File::create(dir.0.join("not-a-socket")).unwrap();
+        // SAFETY: the fd is open and owned by nothing else once into_raw_fd has released it.
+        let listener = unsafe { UnixListener::from_raw_fd(file.into_raw_fd()) };
+        let q = Arc::new(ChannelQueue::new(64, 8));
+        let (tx, rx) = mpsc::channel();
+        let w = {
+            let (q, conn) = (q.clone(), ConnSlot::default());
+            let path = dir.0.join("x.sock");
+            std::thread::spawn(move || writer(listener, path, q, conn, (tx, "x".into(), 3)))
+        };
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(5)),
+            Ok(("x".to_string(), 3))
+        );
+        w.join().unwrap();
+        assert!(q.push(&[0; 8]).closed, "later output is not an overflow");
     }
 
     // Review Focus 7: close() must not hang on a writer blocked in write_all (client stopped reading) or on a
