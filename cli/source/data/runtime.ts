@@ -4,12 +4,7 @@ import {
 	type ApiTarget,
 	type FetchLike,
 } from "./config.js"
-import {
-	endpointsFor,
-	initialState,
-	reduce,
-	type ReduceDeps,
-} from "./reducers.js"
+import { initialState, reduce, type ReduceDeps } from "./reducers.js"
 import { createStore, type Store } from "./store.js"
 import {
 	POLL_ENDPOINTS,
@@ -18,6 +13,7 @@ import {
 	type ActionResult,
 	type AppState,
 	type CommandOutcome,
+	type Effects,
 	type Endpoint,
 	type FetchOutcome,
 	type Inbound,
@@ -126,15 +122,25 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	const issued = new Map<Endpoint, number>()
 	const applied = new Map<Endpoint, number>()
 	/**
-	 * When the runtime itself last requested a full POLL+RESYNC cycle (start, reconnect,
-	 * discovery). The ws:open that follows asks for the same set; within POLL_MS it is
-	 * already covered, so its effect polls are dropped (one set of GETs, not two, R55).
+	 * The runtime's own POLL+RESYNC request (start, reconnect, discovery) and how each of
+	 * its endpoints fared. The ws:open that follows asks for the same set (effects.resync);
+	 * an endpoint still pending or answered (any HTTP reply) within POLL_MS is covered and
+	 * not fetched again; one that got no answer (network error, timeout: core restarting)
+	 * is (R55: one set of GETs per reconnect, never a lost resync).
 	 */
 	let resyncAt: number | null = null
-	const RESYNC_SET = new Set<Endpoint>([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+	const resyncState = new Map<Endpoint, "pending" | "answered" | "unanswered">()
+
+	function clearResync(): void {
+		resyncAt = null
+		resyncState.clear()
+	}
 
 	function requestResync(): void {
 		resyncAt = deps.now()
+		resyncState.clear()
+		for (const e of [...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			resyncState.set(e, "pending")
 		requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
 	}
 
@@ -170,15 +176,17 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		const outcome = await api.get(endpoint)
 		// Work started before stop() ends silently: nothing reaches the next session.
 		if (run !== epoch) return false
+		const answered =
+			outcome.ok ||
+			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
+		if (resyncState.get(endpoint) === "pending")
+			resyncState.set(endpoint, answered ? "answered" : "unanswered")
 		// M2: a response older than one already applied is dropped, never applied over it.
 		if (seq > (applied.get(endpoint) ?? 0)) {
 			applied.set(endpoint, seq)
 			push(restInbound(endpoint, outcome, deps.now()))
 		}
-		return (
-			outcome.ok ||
-			(outcome.error.kind !== "network" && outcome.error.kind !== "timeout")
-		)
+		return answered
 	}
 
 	function schedulePoll(): void {
@@ -214,7 +222,11 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		if (answered) {
 			unreachableSince = null
 			clearRediscover()
-		} else unreachableSince ??= at
+		} else {
+			unreachableSince ??= at
+			// Nothing answered: a ws:open after this must resync everything itself.
+			clearResync()
+		}
 		maybeRediscover(at)
 		const next = queuedCycle
 		queuedCycle = null
@@ -273,8 +285,13 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			})
 			// The socket may already be back on this target by itself; reconnecting it
 			// would record a false gap and wipe the rate and fanout histories.
-			if (!same || !ws.connected()) ws.reconnectNow()
-			requestResync()
+			if (!same || !ws.connected()) {
+				ws.reconnectNow()
+				requestResync()
+			} else {
+				// No ws:open follows on an open socket: nothing to dedupe against.
+				requestCycle([...POLL_ENDPOINTS, ...RESYNC_ENDPOINTS])
+			}
 			return
 		}
 		push({
@@ -310,35 +327,21 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	}
 
 	/**
-	 * The effect polls to run. A ws:open soon after a runtime-requested resync asks for
-	 * endpoints that cycle already covers; those are dropped unless a write result in the
-	 * same batch needs them (its poll must see the state after the write).
+	 * What to fetch after a commit: every effect poll (writes and events), plus the
+	 * resync a ws:open asks for minus what the runtime's own resync covers. A ws:open
+	 * consumes the runtime's resync record.
 	 */
-	function effectPolls(
-		before: AppState,
-		batch: readonly Inbound[],
-		polls: readonly Endpoint[],
-		now: number,
-	): Endpoint[] {
-		if (polls.length === 0) return []
-		const covered =
-			resyncAt !== null &&
-			now - resyncAt <= POLL_MS &&
-			batch.some(i => i.kind === "ws:open")
-		if (!covered) return [...polls]
-		resyncAt = null
-		const needed = new Set<Endpoint>()
-		for (const item of batch) {
-			if (item.kind !== "action:result") continue
-			const rec = Object.prototype.hasOwnProperty.call(
-				before.actions.byKey,
-				item.key,
-			)
-				? before.actions.byKey[item.key]
-				: undefined
-			if (rec) for (const e of endpointsFor(rec.intent)) needed.add(e)
+	function effectFetches(effects: Effects, now: number): Endpoint[] {
+		const out = new Set<Endpoint>(effects.polls)
+		const resync = effects.resync ?? []
+		if (resync.length === 0) return [...out]
+		const fresh = resyncAt !== null && now - resyncAt <= POLL_MS
+		for (const e of resync) {
+			const st = resyncState.get(e)
+			if (!(fresh && (st === "pending" || st === "answered"))) out.add(e)
 		}
-		return polls.filter(e => !RESYNC_SET.has(e) || needed.has(e))
+		clearResync()
+		return [...out]
 	}
 
 	function tick(): void {
@@ -351,10 +354,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			return
 		const batch = queue.splice(0, queue.length)
 		let next = reduce(current, batch, now, reduceDeps)
-		const polls = effectPolls(current, batch, next.effects.polls, now)
-		if (next.effects.polls.length > 0) {
+		const fx = next.effects
+		if (fx.polls.length > 0 || (fx.resync?.length ?? 0) > 0) {
 			next = { ...next, effects: { polls: [] } }
-			for (const endpoint of polls) void fetchOne(endpoint)
+			for (const endpoint of effectFetches(fx, now)) void fetchOne(endpoint)
 		}
 		store.set(next)
 	}
@@ -422,7 +425,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			epoch++
 			// Queued inbound belongs to the stopped session.
 			queue.length = 0
-			resyncAt = null
+			clearResync()
 			discovering = false
 			cycleRunning = false
 			queuedCycle = null
@@ -445,8 +448,11 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		send: intent => {
 			const key = actionKey(intent)
 			const id = ++sendSeq
+			const run = epoch
 			push({ kind: "action:sent", at: deps.now(), id, key, intent })
 			void execute(intent).then(outcomes => {
+				// A write answered after stop() belongs to no session (R55 minor 4).
+				if (run !== epoch) return
 				push({ kind: "action:result", at: deps.now(), id, key, outcomes })
 			})
 		},

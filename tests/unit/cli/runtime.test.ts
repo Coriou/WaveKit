@@ -725,3 +725,91 @@ describe("R55 runtime follow-ups", () => {
 		expect(rt.store.get().messages.ring.entries).toHaveLength(0)
 	})
 })
+
+describe("R55 follow-ups fix", () => {
+	const ack = (h: WsHandlers): void => {
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+	}
+	const make = (fetchFn: FetchLike, ws = wsFake()) =>
+		createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+	const count = (fn: ReturnType<typeof vi.fn<FetchLike>>, path: string) =>
+		fn.mock.calls.filter(c => c[0] === `${TARGET.base}${path}`).length
+
+	it("core restarting: resync GETs fail fast, ws:open within 1 s refetches presets and aircraft", async () => {
+		let up = false
+		const fetchFn = vi.fn<FetchLike>(url =>
+			up ? okJson(bodies(url)) : Promise.reject(new TypeError("fetch failed")),
+		)
+		const ws = wsFake()
+		const rt = make(fetchFn, ws)
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(count(fetchFn, "/api/live-audio/presets")).toBe(1)
+		up = true
+		ack(ws.sockets[0]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(count(fetchFn, "/api/live-audio/presets")).toBe(2)
+		expect(count(fetchFn, "/api/aircraft")).toBe(2)
+		rt.stop()
+	})
+
+	it("never drops an event's poll that shares a batch with ws:open", async () => {
+		const held = heldFetch()
+		const ws = wsFake()
+		const rt = make(held.fetchFn, ws)
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(held.pending).toHaveLength(10)
+		const h = ws.sockets[0]!
+		ack(h)
+		h.message(
+			JSON.stringify({
+				type: "decoder:started",
+				channel: "decoders",
+				data: { decoderId: "readsb" },
+			}),
+		)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		// The resync is still in flight (covered), but decoder:started's poll runs.
+		expect(held.pending.map(p => p.url)).toEqual([
+			...Array.from({ length: 10 }, () => expect.any(String)),
+			`${TARGET.base}/api/decoders`,
+		])
+		rt.stop()
+	})
+
+	it("a write answered after stop() is not applied", async () => {
+		let answer: (() => void) | null = null
+		const fetchFn: FetchLike = (url, init) =>
+			init?.method === "POST"
+				? new Promise(resolve => {
+						answer = () =>
+							resolve({
+								ok: true,
+								status: 200,
+								statusText: "OK",
+								json: () => Promise.resolve({}),
+							})
+					})
+				: new Promise(() => undefined)
+		const rt = make(fetchFn)
+		rt.start()
+		rt.send({ kind: "audio", op: "start" })
+		rt.tick()
+		expect(rt.store.get().actions.byKey["audio"]?.state).toBe("sent")
+		rt.stop()
+		;(answer as (() => void) | null)?.()
+		await vi.advanceTimersByTimeAsync(0)
+		rt.tick()
+		expect(rt.store.get().actions.byKey["audio"]?.state).toBe("sent")
+	})
+})
