@@ -554,6 +554,18 @@ export class ChannelizerManager
 				s.waiters.get(e.id)?.(e)
 				break
 			case "discontinuity":
+				// Task 35 counts queue-overflow causes from this line.
+				this.log.warn(
+					{
+						sourceId: s.sourceId,
+						channelId: e.id,
+						generation: e.generation,
+						sampleIndex: e.sampleIndex,
+						droppedSamples: e.droppedSamples,
+						cause: e.cause,
+					},
+					"Channel discontinuity",
+				)
 				this.emit(
 					"channel-discontinuity",
 					e.id,

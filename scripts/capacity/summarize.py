@@ -7,6 +7,12 @@ Window figures use the first and last sampler records. The sampler's own CPU
 is subtracted using its last per-process snapshot. "maxSampledBufferBytes" is
 the largest branch queue seen at a sample instant. It is a lower bound, not a
 true high-water mark, because the fanout does not export a peak.
+
+With the channelizer on, "channelizer" reduces app.log: the per-channel queue
+high-water mark (max over the window), dropped and saturated samples (last
+cumulative value) from the "channelizer stats" lines, and the number of
+queue-overflow discontinuities. "cpuCores.wavekitChan" is the wavekit-chan
+processes' CPU over the window.
 """
 
 import collections
@@ -21,6 +27,29 @@ def load(path):
 
 def by_id(rows):
     return {row.get("id"): row for row in rows} if isinstance(rows, list) else {}
+
+
+def channelizer_stats(app_log):
+    """Reduce the pino lines of a WaveKit log to channelizer queue, drop and saturation figures."""
+    high_water, dropped, saturated = {}, {}, {}
+    overflows = 0
+    for line in app_log.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("msg") == "Channel discontinuity" and entry.get("cause") == "queue-overflow":
+            overflows += 1
+        elif entry.get("msg") == "channelizer stats":
+            for channel in entry.get("channels") or []:
+                cid = channel.get("id")
+                high_water[cid] = max(high_water.get(cid, 0), channel.get("queueHighWaterBytes", 0))
+                dropped[cid] = channel.get("droppedSamples", 0)  # cumulative: the last line wins
+                saturated[cid] = channel.get("saturatedSamples", 0)
+    return {"queueHighWaterBytes": high_water, "droppedSamples": dropped,
+            "saturatedSamples": saturated, "queueOverflowEvents": overflows}
 
 
 def summarize(run):
@@ -38,6 +67,12 @@ def summarize(run):
         first_sampler = sum(p["utime"] + p["stime"] for p in snapshots[0]["procs"]
                             if p["cmd"] == "python sampler.py")
         sampler_cpu -= first_sampler
+    chan_cpu = 0.0
+    if snapshots:
+        before = {p["pid"]: p["utime"] + p["stime"] for p in snapshots[0]["procs"]
+                  if p["cmd"] == "wavekit-chan"}
+        chan_cpu = sum(p["utime"] + p["stime"] - before.get(p["pid"], 0.0)
+                       for p in snapshots[-1]["procs"] if p["cmd"] == "wavekit-chan")
 
     def cpu(key):
         return (last["cpu"][key] - first["cpu"][key]) / 1e6
@@ -86,14 +121,20 @@ def summarize(run):
     first_oom = next((s["t"] for s in samples if s["memEvents"].get("oom_kill", 0) > 0), None)
     total_written = sum(r["offeredBytes"] for r in branch_rows.values())
     total_dropped = sum(r["droppedBytes"] for r in branch_rows.values())
+    chan = groups.get("wavekit-chan", collections.Counter())
+    app_log = (run / "app.log").read_text(errors="replace") if (run / "app.log").exists() else ""
     return {
         "run": run.name,
         "rate": meta["rate"], "buffers": meta["buffers"], "decoders": meta["decoders"],
+        "matrix": {k: meta.get(k) for k in ("channelizer", "channels", "placement", "placements",
+                                            "fixture", "playback", "wavekitChanVersion")},
+        "decoderStatus": meta.get("decoderStatus"),
         "windowSeconds": round(seconds, 1), "aborted": meta.get("aborted"),
         "cpuCores": {"total": round((cpu("usage_usec") - sampler_cpu) / seconds, 3),
                      "user": round(cpu("user_usec") / seconds, 3),
                      "system": round(cpu("system_usec") / seconds, 3),
                      "samplerCores": round(sampler_cpu / seconds, 4),
+                     "wavekitChan": round(chan_cpu / seconds, 3),
                      "throttledSeconds": round(cpu("throttled_usec"), 2)},
         "memoryMiB": {"cgroupMax": round(max(s["mem"]["current"] for s in samples) / 2**20),
                       "cgroupPeakSinceStart": round(last["mem"]["peak"] / 2**20),
@@ -102,6 +143,7 @@ def summarize(run):
                       "csdrProcs": csdr["n"],
                       "csdrRss": round(csdr["rssKiB"] / 1024), "csdrPss": round(csdr["pssKiB"] / 1024),
                       "csdrPssShmem": round(csdr["pssShmemKiB"] / 1024),
+                      "wavekitChanProcs": chan["n"], "wavekitChanPss": round(chan["pssKiB"] / 1024),
                       "allPss": round(sum(g["pssKiB"] for g in groups.values()) / 1024)},
         "pssByCommandMiB": {k: round(v["pssKiB"] / 1024, 1) for k, v in
                             sorted(groups.items(), key=lambda kv: -kv[1]["pssKiB"])[:16]},
@@ -113,6 +155,7 @@ def summarize(run):
                          "dropFraction": round(total_dropped / total_written, 6)
                          if total_written else None},
         "branches": branch_rows,
+        "channelizer": channelizer_stats(app_log),
         "decoders": decoders,
         "source": fake[-1] if fake else None,
         "sourceConnections": sum(1 for e in fake if e.get("event") == "connected"),

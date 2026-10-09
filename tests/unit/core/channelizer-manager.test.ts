@@ -435,6 +435,45 @@ describe("ChannelizerManager", () => {
 			inputSamples: 42,
 		})
 	})
+	it("logs channel discontinuities at warn with the cause", async () => {
+		const lines: Record<string, unknown>[] = []
+		const sink = new Writable({
+			write(chunk: Buffer, _enc, done) {
+				lines.push(JSON.parse(chunk.toString()) as Record<string, unknown>)
+				done()
+			},
+		})
+		const procs: ChannelizerProcessLike[] = []
+		const m = manager(
+			{},
+			{
+				logger: pino({ level: "info" }, sink),
+				createProcess: recordingProcess([], procs),
+			},
+		)
+		expect((await m.requestChannel("rtl", "ais", req(), caps())).ok).toBe(true)
+		// Task 35 (scripts/capacity/summarize.py) counts these lines by cause.
+		procs[0]!.emit("event", {
+			v: 1,
+			type: "discontinuity",
+			id: "ais-g1",
+			generation: 1,
+			sampleIndex: 4096,
+			droppedSamples: 512,
+			cause: "queue-overflow",
+		})
+		expect(lines.find(l => l["msg"] === "Channel discontinuity")).toMatchObject(
+			{
+				level: 40,
+				sourceId: "rtl",
+				channelId: "ais-g1",
+				generation: 1,
+				sampleIndex: 4096,
+				droppedSamples: 512,
+				cause: "queue-overflow",
+			},
+		)
+	})
 	it("stops the process and frees the branch when the last channel is released", async () => {
 		const sent: ChannelizerRequest[] = []
 		const procs: ChannelizerProcessLike[] = []

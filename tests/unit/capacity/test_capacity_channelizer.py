@@ -1,4 +1,4 @@
-import importlib.util, os, pathlib, sys, tempfile, unittest
+import importlib.util, json, os, pathlib, sys, tempfile, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[3] / "scripts" / "capacity"
 def load(name):
     spec = importlib.util.spec_from_file_location(name, ROOT / f"{name}.py")
@@ -119,6 +119,70 @@ class WriteConfig(unittest.TestCase):
         self.assertNotIn("useChannelizer", off)
         self.assertNotIn("channelizer:", off)
         self.assertIn('"channelHz": 162000000', off)
+
+class ChannelizerSummary(unittest.TestCase):
+    def test_parses_stats_lines(self):
+        s = load("summarize")
+        log = "\n".join([
+            '{"msg":"channelizer stats","channels":[{"id":"a-g1","queueHighWaterBytes":1000,"droppedSamples":0,"saturatedSamples":2}]}',
+            '{"msg":"channelizer stats","channels":[{"id":"a-g1","queueHighWaterBytes":4000,"droppedSamples":5,"saturatedSamples":3}]}',
+            '{"msg":"Channel discontinuity","cause":"queue-overflow","channelId":"a-g1"}',
+            'not json',
+        ])
+        r = s.channelizer_stats(log)
+        self.assertEqual(r["queueHighWaterBytes"], {"a-g1": 4000})
+        self.assertEqual(r["droppedSamples"], {"a-g1": 5})
+        self.assertEqual(r["queueOverflowEvents"], 1)
+    def test_sampler_labels_the_channelizer(self):
+        sampler = load("sampler")
+        self.assertTrue(hasattr(sampler, "label"))
+        sampler.read = lambda path: "/usr/local/bin/wavekit-chan\0--socket\0/var/run/wavekit/chan/rtl.sock\0"
+        self.assertEqual(sampler.label(1), "wavekit-chan")
+
+    def test_stats_ignore_other_lines(self):
+        s = load("summarize")
+        log = "\n".join([
+            '{"msg":"Channel discontinuity","cause":"input-gap","channelId":"a-g1"}',
+            '{"msg":"something else","channels":[{"id":"x","queueHighWaterBytes":9}]}',
+            '{"msg":"channelizer stats","channels":[{"id":"b-g2","queueHighWaterBytes":7,"droppedSamples":1,"saturatedSamples":0}]}',
+            '{"msg":"channelizer stats","channels":[{"id":"b-g2","queueHighWaterBytes":3,"droppedSamples":2,"saturatedSamples":4}]}',
+        ])
+        self.assertEqual(s.channelizer_stats(log), {
+            "queueHighWaterBytes": {"b-g2": 7}, "droppedSamples": {"b-g2": 2},
+            "saturatedSamples": {"b-g2": 4}, "queueOverflowEvents": 0})
+
+    def test_summarize_reports_channelizer_and_its_cpu(self):
+        s = load("summarize")
+
+        def proc(pid, cmd, cpu):
+            return {"pid": pid, "cmd": cmd, "rssKiB": 2048, "pssKiB": 1024, "pssAnonKiB": 512,
+                    "pssShmemKiB": 0, "utime": cpu, "stime": 0.0}
+
+        def sample(t, usage, chan_cpu):
+            return {"ts": 1000.0 + t, "t": t, "cpu": {"usage_usec": usage, "user_usec": usage,
+                                                     "system_usec": 0, "throttled_usec": 0},
+                    "mem": {"current": 2**20, "peak": 2**20, "anon": 0, "shmem": 0},
+                    "memEvents": {}, "decoders": [], "branches": [],
+                    "procs": [proc(7, "wavekit-chan", chan_cpu), proc(9, "python sampler.py", 0.0)]}
+
+        with tempfile.TemporaryDirectory() as d:
+            run = pathlib.Path(d)
+            (run / "meta.json").write_text('{"rate": 2048000, "buffers": "on", "decoders": ["a"], '
+                                           '"channelizer": "on", "channels": 4}')
+            (run / "samples.jsonl").write_text(
+                json.dumps(sample(0, 0, 1.0)) + "\n" + json.dumps(sample(10, 5_000_000, 3.0)) + "\n")
+            (run / "app.log").write_text(
+                '{"msg":"channelizer stats","channels":[{"id":"a-g1","queueHighWaterBytes":64,'
+                '"droppedSamples":0,"saturatedSamples":0}]}\n')
+            r = s.summarize(run)
+        self.assertEqual(r["cpuCores"]["wavekitChan"], 0.2)  # 2 CPU-seconds over a 10 s window
+        self.assertEqual(r["channelizer"]["queueHighWaterBytes"], {"a-g1": 64})
+        self.assertEqual((r["matrix"]["channelizer"], r["matrix"]["channels"]), ("on", 4))
+
+    def test_summarize_without_app_log(self):
+        s = load("summarize")
+        self.assertEqual(s.channelizer_stats(""), {"queueHighWaterBytes": {}, "droppedSamples": {},
+                                                   "saturatedSamples": {}, "queueOverflowEvents": 0})
 
 if __name__ == "__main__":
     unittest.main()
