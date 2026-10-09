@@ -2,6 +2,8 @@
 name = "wavekit-chan"
 version = "0.1.0"
 edition = "2021"
+# slice::as_chunks (1.88) and unsigned is_multiple_of (1.87); the rest builds on 1.85.
+rust-version = "1.88"
 license = "AGPL-3.0-or-later"
 publish = false
 
