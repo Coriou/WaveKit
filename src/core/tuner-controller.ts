@@ -128,6 +128,14 @@ const COMMAND_FIELDS: Record<number, DesiredField> = {
 	[RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN]: "tunerIfGain",
 }
 
+/** Relay commands from which applyExternalCommand infers manual gain mode. */
+const MANUAL_GAIN_COMMANDS: ReadonlySet<number> = new Set([
+	RTL_TCP_COMMANDS.SET_GAIN,
+	RTL_TCP_COMMANDS.SET_IF_GAIN,
+	RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
+	RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
+])
+
 /** Placeholder-capable fields, in TunerState order, for `unknownFields`. */
 const STATE_FIELDS: readonly TunerStateField[] = [
 	"frequency",
@@ -248,6 +256,8 @@ export class TunerController extends EventEmitter {
 	private controlModeOrigins: Map<string, ControlModeOrigin> = new Map()
 	/** Accepted desired fields per source, keyed to their acceptance sequence. */
 	private desiredFields: Map<string, Map<DesiredField, number>> = new Map()
+	/** Fields inferred from observed relay commands (known, never replayed). */
+	private inferredFields: Map<string, Set<TunerStateField>> = new Map()
 	private acceptanceSeq = 0
 	/** Caps metadata as first registered, before any accepted command. */
 	private baselineCaps: Map<string, SourceCaps | undefined> = new Map()
@@ -317,6 +327,7 @@ export class TunerController extends EventEmitter {
 		this.tunerStates.delete(sourceId)
 		this.controlModeOrigins.delete(sourceId)
 		this.desiredFields.delete(sourceId)
+		this.inferredFields.delete(sourceId)
 		this.baselineCaps.delete(sourceId)
 		this.log.info({ sourceId }, "Tuner source removed")
 	}
@@ -562,6 +573,13 @@ export class TunerController extends EventEmitter {
 
 		if (updated) {
 			this.markAccepted(sourceId, command)
+			// Gain commands imply manual mode on the relay path (state above).
+			if (
+				command !== RTL_TCP_COMMANDS.SET_GAIN_MODE &&
+				state.gainMode === "manual" &&
+				MANUAL_GAIN_COMMANDS.has(command)
+			)
+				this.markInferred(sourceId, "gainMode")
 			delete state.lastError
 			this.log.debug(
 				{ sourceId, command: cmdName, value },
@@ -866,6 +884,7 @@ export class TunerController extends EventEmitter {
 		if (policy === "reset") {
 			const reset = desired !== undefined && desired.size > 0
 			this.desiredFields.delete(sourceId)
+			this.inferredFields.delete(sourceId)
 			if (reset) {
 				this.applyBaselineFields(state, this.baselineCaps.get(sourceId))
 				this.log.warn(
@@ -1100,6 +1119,15 @@ export class TunerController extends EventEmitter {
 		delete state.tunerGainIndex
 	}
 
+	private markInferred(sourceId: string, field: TunerStateField): void {
+		let inferred = this.inferredFields.get(sourceId)
+		if (!inferred) {
+			inferred = new Set()
+			this.inferredFields.set(sourceId, inferred)
+		}
+		inferred.add(field)
+	}
+
 	private markAccepted(sourceId: string, cmd: number): void {
 		const field = COMMAND_FIELDS[cmd]
 		if (!field) return
@@ -1259,6 +1287,7 @@ export class TunerController extends EventEmitter {
 	 */
 	private unknownFields(sourceId: string): TunerStateField[] {
 		const accepted = this.desiredFields.get(sourceId)
+		const inferred = this.inferredFields.get(sourceId)
 		const baseline = this.baselineCaps.get(sourceId)
 		const declared = new Set<TunerStateField>()
 		if (
@@ -1272,7 +1301,8 @@ export class TunerController extends EventEmitter {
 		)
 			declared.add("sampleRate")
 		return STATE_FIELDS.filter(
-			field => !declared.has(field) && !accepted?.has(field),
+			field =>
+				!declared.has(field) && !accepted?.has(field) && !inferred?.has(field),
 		)
 	}
 

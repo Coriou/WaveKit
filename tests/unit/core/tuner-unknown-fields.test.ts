@@ -101,8 +101,16 @@ describe("TunerState.unknownFields", () => {
 		const state = controller.getState("rtl")!
 		expect(state.gain).toBe(490)
 		expect(state.unknownFields).not.toContain("gain")
-		// set-gain implies nothing observed about the mode itself.
-		expect(state.unknownFields).toContain("gainMode")
+		// The relay path infers manual mode from a gain command; the state
+		// must not show that inference while also calling it unknown.
+		expect(state.gainMode).toBe("manual")
+		expect(state.unknownFields).not.toContain("gainMode")
+	})
+
+	it("an inferred gain mode is not replayed as a command on reconnect", () => {
+		controller.applyExternalCommand("rtl", 0x04, 490)
+		const result = controller.synchronizeOnConnect("rtl")
+		expect(result.commands).toEqual(["set-gain"])
 	})
 
 	it("is unknown again after a reconnect with reconnectPolicy reset", () => {
