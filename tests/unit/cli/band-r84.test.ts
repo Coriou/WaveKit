@@ -344,6 +344,7 @@ describe("R84 band suspension", () => {
 		const r = suspended()
 		expect(cellText(r, "process")).toEqual([
 			"suspended",
+			"suspended · band",
 			"suspended · out of band",
 		])
 		const cell = decoderCells(facts(r), NOW)["process"]!

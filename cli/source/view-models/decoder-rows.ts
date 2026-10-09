@@ -280,15 +280,29 @@ function processCell(f: DecoderFacts): Cell {
 			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
 			return cell([sp("starting", role)], [sp(words, role)])
 		case "suspended":
+			// MUST 4: `suspended · band` fits where `… out of band` does not.
 			return words === "suspended"
 				? cell([sp(words, role)])
-				: cell([sp("suspended", role)], [sp(words, role)])
+				: words.endsWith("out of band")
+					? cell(
+							[sp("suspended", role)],
+							[sp(`suspended${sep}band`, role)],
+							[sp(words, role)],
+						)
+					: cell([sp("suspended", role)], [sp(words, role)])
 		case "suspend-pending":
 			return cell([sp("suspending", role)], [sp(words, role)])
+		// MUST 4: a retrying fault never reads like the terminal `faulted ×13`; the
+		// narrowest form names the retry, the 15-column one both.
 		case "faulted-retrying":
-			return cell([sp("faulted", role)], [sp(words, role)])
+			return cell([sp("retrying", role)], [sp(words, role)])
 		case "faulted-retry":
-			return cell([sp("faulted", role)], [sp(words, role)], ...withCount)
+			return cell(
+				[sp("retry", role)],
+				[sp(`faulted${sep}retry`, role)],
+				[sp(words, role)],
+				...withCount,
+			)
 		case "restarting":
 			if (countdown(f) !== null)
 				return cell([sp("restarting", role)], [sp(words, role)], ...withCount)
@@ -460,7 +474,7 @@ const TITLE: Cell = { variants: [[sp("  DECODERS", "label", true)]] }
  */
 export const OVERVIEW_COLUMNS: ColumnSpec[] = [
 	col("decoder", 18, 18, 0, "left", TITLE),
-	col("process", 18, 18, 0, "left", header("process")),
+	col("process", 18, 24, 0, "left", header("process")),
 	col("decodes", 16, 16, 1, "left", header("decodes")),
 	col("drop", 8, 8, 1, "right", header("drop", "drop now")),
 	col("lifetime", 8, 8, 4, "right", header("lifetime")),
@@ -514,7 +528,7 @@ const DECODERS_PANE_COLUMNS: ColumnSpec[] = DECODERS_COLUMNS.map(c =>
  */
 const OVERVIEW_COLUMNS_SET: ColumnSpec[] = [
 	col("decoder", 18, 18, 0, "left", TITLE),
-	col("process", 10, 18, 0, "left", header("process")),
+	col("process", 10, 24, 0, "left", header("process")),
 	col("restarts", 8, 8, 5, "right", header("restarts")),
 	col("errors", 6, 6, 5, "right", header("errors")),
 	col("decodes", 15, 16, 1, "left", header("decodes")),
