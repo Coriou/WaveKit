@@ -64,6 +64,8 @@ struct Open {
     saturated: u64,
     /// The open queue-overflow run (plan A13): (sampleIndex, droppedSamples).
     run: Option<(u64, u64)>,
+    /// Input bytes received when the channel opened; a gap marked before this never reached it.
+    opened_at_byte: u64,
 }
 
 pub struct Runtime {
@@ -134,6 +136,11 @@ impl Runtime {
         self.reject(id, "channel-request-invalid", detail)
     }
 
+    /// Input bytes received so far, including a held odd byte.
+    fn received_bytes(&self) -> u64 {
+        self.asm.consumed_bytes + self.asm.discarded()
+    }
+
     /// Returns the exit code when the request ends the process.
     pub fn on_request(&mut self, req: Request) -> Option<i32> {
         match req {
@@ -144,7 +151,7 @@ impl Runtime {
                 dropped_input_bytes,
             } => {
                 // A2: without a position the gap is at the bytes received so far.
-                let at = at_input_byte.unwrap_or(self.asm.consumed_bytes + self.asm.discarded());
+                let at = at_input_byte.unwrap_or(self.received_bytes());
                 self.pending_gaps
                     .push_back((at, dropped_input_bytes.unwrap_or(0)));
             }
@@ -232,6 +239,7 @@ impl Runtime {
                 dropped: 0,
                 saturated: 0,
                 run: None,
+                opened_at_byte: self.received_bytes(),
             },
         );
         self.emit(json!({
@@ -296,16 +304,19 @@ impl Runtime {
             self.feed(&i[start..seam], &q[start..seam]);
             start = seam;
             self.pending_gaps.pop_front();
-            self.input_gap(dropped_in);
+            self.input_gap(at, dropped_in);
         }
         self.feed(&i[start..], &q[start..]);
     }
 
-    /// Resets every channel to a fresh start and reports the gap (Property 12).
-    fn input_gap(&mut self, dropped_in: u64) {
+    /// Resets every channel that saw byte `at` to a fresh start and reports the gap (Property 12).
+    fn input_gap(&mut self, at: u64, dropped_in: u64) {
         let fs = self.args.input_rate;
         let mut events = Vec::new();
         for (id, ch) in self.channels.iter_mut() {
+            if ch.opened_at_byte > at {
+                continue; // opened after the gap (the mark arrived late): its stream has no seam
+            }
             events.extend(overflow_event(id, ch)); // A13: an open run is reported before the gap
             ch.dsp.reset(); // NCO index, filter history, polyphase phase and the A12 schedule
             let dropped = (dropped_in / 2) as u128 * ch.dsp.output_rate() as u128 / fs as u128;
@@ -571,6 +582,7 @@ pub fn run(args: Args) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use std::io::Read;
     use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
@@ -785,6 +797,74 @@ mod tests {
         );
     }
 
+    #[derive(Debug, Clone)]
+    enum Op {
+        Input(usize),
+        Drain,
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(100))]
+        // Feature: core-channelizer, Property 8: Bounded queue (drop runs)
+        // Validates: addendum §12.8; plan A13
+        #[test]
+        fn every_dropped_sample_is_reported_once_in_monotonic_runs(
+            cap_samples in 1usize..400,
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    (0usize..40_000).prop_map(Op::Input),
+                    Just(Op::Drain),
+                ],
+                1..30,
+            ),
+        ) {
+            let dir = TempDir::new();
+            let (mut r, ev) = rt(&dir.0);
+            r.on_request(open("q", 162e6, cap_samples * 8)); // nobody connects: only Drain empties it
+            // Model: the A12 schedule gives ⌊N·48000/2048000⌋ = ⌊3N/128⌋ samples after N inputs.
+            let (mut n_in, mut out, mut level) = (0u64, 0u64, 0u64);
+            let mut runs: Vec<(u64, u64)> = Vec::new();
+            let mut open_run: Option<(u64, u64)> = None;
+            for op in &ops {
+                match *op {
+                    Op::Input(n) => {
+                        r.on_input(&vec![128u8; 2 * n]);
+                        let k = (n_in + n as u64) * 3 / 128 - n_in * 3 / 128;
+                        n_in += n as u64;
+                        let acc = k.min(cap_samples as u64 - level);
+                        if acc > 0 {
+                            runs.extend(open_run.take());
+                        }
+                        if k > acc {
+                            open_run.get_or_insert((out + acc, 0)).1 += k - acc;
+                        }
+                        level += acc;
+                        out += k;
+                    }
+                    Op::Drain => {
+                        r.drain_queue_for_test("q");
+                        level = 0;
+                    }
+                }
+            }
+            r.maybe_stats(Instant::now() + STATS_EVERY);
+            let stats = last(&ev)["channels"][0].clone();
+            r.on_eof_no_exit_for_test();
+            runs.extend(open_run.take());
+            let got: Vec<(u64, u64)> = of_cause(&ev, "queue-overflow")
+                .iter()
+                .map(|e| (e["sampleIndex"].as_u64().unwrap(), e["droppedSamples"].as_u64().unwrap()))
+                .collect();
+            prop_assert_eq!(&got, &runs);
+            for w in got.windows(2) {
+                prop_assert!(w[0].0 + w[0].1 < w[1].0, "runs overlap or touch: {:?}", w);
+            }
+            prop_assert_eq!(stats["outputSamples"].as_u64(), Some(out));
+            prop_assert_eq!(stats["droppedSamples"].as_u64(), Some(got.iter().map(|g| g.1).sum::<u64>()));
+            prop_assert!(stats["queueHighWaterBytes"].as_u64().unwrap() <= cap_samples as u64 * 8);
+        }
+    }
+
     // Plan A13: an open run is reported before the event that ends the channel's stream position.
     #[test]
     fn open_drop_run_is_reported_before_gap_and_close() {
@@ -912,6 +992,29 @@ mod tests {
         // seam 1: first whole sample at or after byte 1001 is sample 501 → ⌊501·48/2048⌋ = 11
         // seam 2: sample 1500 → 11 + ⌊999·48/2048⌋ = 11 + 23
         assert_eq!(got, vec![(Some(11), Some(0)), (Some(34), Some(48_000))]);
+        r.on_eof_no_exit_for_test();
+    }
+
+    // A mark that reaches the process after its byte resets the channels that saw that byte, at the
+    // current position; a channel opened after the byte never saw the gap and is left alone.
+    #[test]
+    fn late_mark_skips_channels_opened_after_its_byte() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("early", 162e6, 1 << 20));
+        r.on_input(&[9u8; 4_096]);
+        r.on_request(open("late", 162e6, 1 << 20));
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(1_000),
+            dropped_input_bytes: Some(0),
+        });
+        r.on_input(&[9u8; 4_096]);
+        let gaps = of_cause(&ev, "input-gap");
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(
+            (gaps[0]["id"].as_str(), gaps[0]["sampleIndex"].as_u64()),
+            (Some("early"), Some(48))
+        );
         r.on_eof_no_exit_for_test();
     }
 
