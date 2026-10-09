@@ -245,6 +245,39 @@ export const LiveDemodConfigSchema = z
 	})
 
 /**
+ * Digital voice audio is on by default: dsd-fme `-o udp` measured +0.2 %
+ * of one core over `-o null` (docs/DIGITAL-VOICE.md). Flip this one value
+ * to change the default.
+ */
+export const DIGITAL_VOICE_ENABLED_DEFAULT = true
+
+/**
+ * Schema for the digital voice stream (decoded dsd-fme voice as PCM).
+ * Applies to every configured dsd-fme decoder whose options leave `output`
+ * unset (or "udp" without a port).
+ */
+export const DigitalVoiceConfigSchema = z
+	.object({
+		enabled: z.boolean().default(DIGITAL_VOICE_ENABLED_DEFAULT),
+		httpPort: z.number().int().min(1).max(65535).default(8082),
+		/** TDMA slots to synthesise (dsd-fme -V); a decoder's own voiceSlot option wins. */
+		voiceSlot: z
+			.preprocess(
+				value => (value === "1" ? 1 : value === "2" ? 2 : value),
+				z.union([z.literal(1), z.literal(2), z.literal("both")]),
+			)
+			.default("both"),
+		/** Voice buffered (or waited for) before a burst plays: absorbs UDP burstiness. */
+		jitterBufferMs: z.number().int().min(0).max(2000).default(250),
+		/** Bound on queued voice per stream; the oldest is dropped beyond it. */
+		maxBufferMs: z.number().int().min(100).max(10_000).default(1000),
+	})
+	.refine(value => value.maxBufferMs >= value.jitterBufferMs, {
+		message: "maxBufferMs must be at least jitterBufferMs",
+		path: ["maxBufferMs"],
+	})
+
+/**
  * Schema for API server configuration.
  */
 export const ApiConfigSchema = z.object({
@@ -351,6 +384,7 @@ export const ConfigSchema = z.object({
 	tunerRelay: TunerRelayConfigSchema.default({}),
 	tuner: TunerConfigSchema.default({}),
 	liveDemod: LiveDemodConfigSchema.optional(),
+	digitalVoice: DigitalVoiceConfigSchema.optional(),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
@@ -379,6 +413,7 @@ export type DecoderConfig = z.infer<typeof DecoderConfigSchema>
 export type AudioConfig = z.infer<typeof AudioConfigSchema>
 export type TunerRelayConfig = z.infer<typeof TunerRelayConfigSchema>
 export type LiveDemodConfig = z.infer<typeof LiveDemodConfigSchema>
+export type DigitalVoiceConfig = z.infer<typeof DigitalVoiceConfigSchema>
 export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>

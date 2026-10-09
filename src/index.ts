@@ -15,7 +15,12 @@
 import "./bootstrap.js"
 
 import { PassThrough } from "node:stream"
-import { loadConfig, LiveDemodConfigSchema, type Config } from "./config.js"
+import {
+	loadConfig,
+	DigitalVoiceConfigSchema,
+	LiveDemodConfigSchema,
+	type Config,
+} from "./config.js"
 import {
 	CSDR_BUFFER_ENV,
 	configureCsdrBuffers,
@@ -30,6 +35,7 @@ import { TunerRelay } from "./core/tuner-relay.js"
 import { TunerController } from "./core/tuner-controller.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
+import { DigitalVoiceService } from "./core/digital-voice.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -286,6 +292,10 @@ async function main(): Promise<void> {
 		fanoutManager,
 		liveDemodConfig,
 	)
+	const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
+		config.digitalVoice ?? {},
+	)
+	const digitalVoice = new DigitalVoiceService(logger, digitalVoiceConfig)
 
 	// Initialize tuner controller for configured RTL-TCP sources
 	for (const sourceConfig of config.sources) {
@@ -355,10 +365,15 @@ async function main(): Promise<void> {
 		"Built-in decoders registered",
 	)
 
-	// Step 7: Create decoders from configuration
-	for (const decoderConfig of config.decoders) {
+	// Step 7: Create decoders from configuration. dsd-fme decoders are first
+	// pointed at the digital voice stream (-o udp to a local socket).
+	const decoderConfigs = await digitalVoice.prepareDecoderConfigs(
+		config.decoders,
+	)
+	for (const decoderConfig of decoderConfigs) {
 		try {
-			decoderManager.createDecoder(decoderConfig)
+			const decoder = decoderManager.createDecoder(decoderConfig)
+			digitalVoice.attachDecoder(decoderConfig.id, decoder)
 			log.info(
 				{ decoderId: decoderConfig.id, type: decoderConfig.type },
 				"Decoder created",
@@ -498,6 +513,7 @@ async function main(): Promise<void> {
 			tunerRelay,
 			tunerController,
 			liveDemod,
+			digitalVoice,
 			resourceAggregator,
 			aircraftTracker: aircraftTrackingManager.getTracker(),
 			logger,
@@ -542,6 +558,16 @@ async function main(): Promise<void> {
 		handler: async () => {
 			log.info("Shutting down live demodulator")
 			await liveDemod.stop()
+		},
+		timeout: 2000,
+	})
+
+	// Shutdown digital voice stream (releases its UDP sockets)
+	shutdown.register({
+		name: "digital-voice",
+		handler: async () => {
+			log.info("Shutting down digital voice stream")
+			await digitalVoice.destroy()
 		},
 		timeout: 2000,
 	})
@@ -649,6 +675,21 @@ async function main(): Promise<void> {
 		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
 	})
 
+	// Wire digital voice call state and status to WebSocket broadcaster
+	const broadcastDigitalVoiceStatus = () =>
+		wsBroadcaster.broadcastDigitalVoiceStatus(digitalVoice.getStatus())
+	digitalVoice.on("call", call => {
+		wsBroadcaster.broadcastDigitalVoiceCall(call)
+		broadcastDigitalVoiceStatus()
+	})
+	digitalVoice.on("started", broadcastDigitalVoiceStatus)
+	digitalVoice.on("stopped", broadcastDigitalVoiceStatus)
+	digitalVoice.on("clients-changed", broadcastDigitalVoiceStatus)
+	digitalVoice.on("error", err => {
+		log.warn({ err }, "Digital voice stream error")
+		broadcastDigitalVoiceStatus()
+	})
+
 	// Step 11: Start audio output server
 	await audioOutput.start()
 
@@ -722,6 +763,17 @@ async function main(): Promise<void> {
 		} catch (err) {
 			log.error({ err }, "Failed to start live demodulator")
 		}
+	}
+
+	// Step 14c: Start the digital voice stream (if any dsd-fme decoder feeds it)
+	if (digitalVoice.getStatus().decoders.length > 0) {
+		try {
+			await digitalVoice.start()
+		} catch (err) {
+			log.error({ err }, "Failed to start digital voice stream")
+		}
+	} else if (digitalVoiceConfig.enabled) {
+		log.info("Digital voice enabled but no dsd-fme decoder streams voice")
 	}
 
 	// Step 15: Start enabled decoders

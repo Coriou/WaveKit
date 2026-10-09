@@ -31,6 +31,7 @@ import type { AudioOutput } from "../core/audio-output.js"
 import type { TunerRelay } from "../core/tuner-relay.js"
 import type { TunerController } from "../core/tuner-controller.js"
 import type { LiveDemodulator } from "../core/live-demodulator.js"
+import type { DigitalVoiceService } from "../core/digital-voice.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
@@ -40,6 +41,7 @@ import { telemetryRoutes } from "./routes/telemetry.js"
 import { tunerRelayRoutes } from "./routes/tuner-relay.js"
 import { tunerRoutes } from "./routes/tuner.js"
 import { liveAudioRoutes } from "./routes/live-audio.js"
+import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
@@ -74,6 +76,7 @@ export interface ApiServerDependencies {
 	tunerRelay?: TunerRelay | undefined
 	tunerController?: TunerController | undefined
 	liveDemod?: LiveDemodulator | undefined
+	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
 	logger: Logger
@@ -102,6 +105,7 @@ export class ApiServer {
 	private readonly tunerRelay?: TunerRelay | undefined
 	private readonly tunerController?: TunerController | undefined
 	private readonly liveDemod?: LiveDemodulator | undefined
+	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly audioConfig?: AudioConfig | undefined
@@ -120,6 +124,7 @@ export class ApiServer {
 		this.tunerRelay = dependencies.tunerRelay
 		this.tunerController = dependencies.tunerController
 		this.liveDemod = dependencies.liveDemod
+		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.audioConfig = dependencies.audioConfig
@@ -720,6 +725,12 @@ export class ApiServer {
 		if (this.liveDemod) {
 			await this.app.register(liveAudioRoutes, {
 				liveDemod: this.liveDemod,
+			})
+		}
+
+		if (this.digitalVoice) {
+			await this.app.register(digitalVoiceRoutes, {
+				digitalVoice: this.digitalVoice,
 			})
 		}
 
