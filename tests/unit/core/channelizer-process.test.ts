@@ -143,6 +143,27 @@ describe("ChannelizerProcess", { timeout: 15_000 }, () => {
 		await p.stop()
 	})
 
+	it("stops a process whose stdout runs past 64 KiB without a newline", async () => {
+		process.env["FAKE_CHAN_MODE"] = "runaway-line"
+		const p = new ChannelizerProcess(opts(), logger)
+		const r = record(p)
+		const errors: [string, string][] = []
+		p.on("protocol-error", (line: string, error: string) =>
+			errors.push([line, error]),
+		)
+		await p.start()
+		// The process is stopped (shutdown, then signals) instead of growing a line without bound.
+		await r.exit
+		expect(errors).toHaveLength(1)
+		const [line, error] = errors[0]!
+		expect(error).toMatch(/no newline within 65536 bytes/)
+		// Only a prefix of the runaway line is reported.
+		expect(line.length).toBeLessThanOrEqual(256)
+		expect(line.startsWith("xxxx")).toBe(true)
+		expect(r.log).toEqual(["ready", "exit"])
+		await p.stop()
+	})
+
 	it("reports the exit after the last event line, so input-eof precedes an exit 0", async () => {
 		const p = new ChannelizerProcess(opts(), logger)
 		const r = record(p)

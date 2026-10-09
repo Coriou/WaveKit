@@ -1,8 +1,9 @@
 // Protocol-faithful stand-in for wavekit-chan (A1: control on fd 3). Behaviour via env:
-// FAKE_CHAN_MODE = normal | no-ready | crash-after-open | garbage | stall-input | ignore-shutdown
+// FAKE_CHAN_MODE = normal | no-ready | crash-after-open | garbage | stall-input | ignore-shutdown | runaway-line
 // stall-input: stdin is not read until FAKE_CHAN_STALL_MS (default 1500) after the first channel opens, then resumes,
 // so the fanout branch really drops and then really drains (Task 21). Anchoring to `opened` keeps slow spawns out of the window.
 // ignore-shutdown: `shutdown`, control EOF and input EOF are all ignored, so only a signal ends it (stop escalation).
+// runaway-line: after \`ready\`, stdout gets one endless line (never a newline) until the process ends.
 // Like the real binary there is no signal handler: SIGTERM ends it with (null, "SIGTERM").
 // Channels are identity pass-through, so a discontinuity's output sampleIndex equals the input sample index.
 // Like runtime.rs, `shutdown` and control EOF close every channel with reason "requested" and exit 0; every exit
@@ -19,6 +20,7 @@ const shutdown = () => { if (exiting || mode === "ignore-shutdown") return; exit
 if (mode === "ignore-shutdown") setInterval(() => {}, 1 << 30)
 if (mode === "garbage") process.stdout.write("not json\\n")
 if (mode !== "no-ready") emit({ type: "ready", pid: process.pid })
+if (mode === "runaway-line") { const chunk = "x".repeat(16384); const spew = () => { if (!exiting) process.stdout.write(chunk, spew) }; spew() }
 readline.createInterface({ input: new net.Socket({ fd: 3, readable: true, writable: false }) }).on("line", line => {
   let r; try { r = JSON.parse(line) } catch { return emit({ type: "rejected", id: "", reasonCode: "channel-request-invalid", detail: "json" }) }
   if (r.type === "open") {

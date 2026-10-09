@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { createInterface } from "node:readline"
-import type { Writable } from "node:stream"
+import type { Readable, Writable } from "node:stream"
 import { signalDecoder } from "../../decoders/process-tools.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
@@ -29,7 +29,8 @@ export interface ChannelizerProcessOptions {
 }
 
 /**
- * Events: "event" (ChannelizerEvent), "protocol-error" (line, error), and "exit" (code, signal),
+ * Events: "event" (ChannelizerEvent), "protocol-error" (line, error; for a line longer than
+ * `MAX_EVENT_LINE_BYTES` it carries the line's start, and the process is stopped), and "exit" (code, signal),
  * emitted on the child's `close`, so after its last stdout line has been parsed. "exit" is emitted
  * only for a process that was actually spawned: a spawn failure (ENOENT, EACCES) rejects `start()`
  * and emits no "exit". A process that started but never sent `ready` does emit one, after the rejection.
@@ -47,10 +48,62 @@ export interface ChannelizerProcessLike extends EventEmitter {
 	stop(): Promise<void>
 }
 
+/** Longest event line accepted; a child that writes more without a newline is stopped, so it cannot grow memory. */
+export const MAX_EVENT_LINE_BYTES = 64 * 1024
+/** How much of a runaway line "protocol-error" carries. */
+const RUNAWAY_PREFIX_CHARS = 256
 const CONTROL_FD = 3
 const DEFAULT_READY_TIMEOUT_MS = 5000
 const DEFAULT_STOP_TIMEOUT_MS = 5000
 const KILL_AFTER_MS = 5000
+
+/**
+ * Splits the child's stdout into `\n`-terminated lines (a trailing `\r` dropped, an unterminated last
+ * line delivered at the end), like readline but bounded: past `MAX_EVENT_LINE_BYTES` without a newline it
+ * calls `onRunaway` once with the line's start and discards everything after it.
+ */
+function splitEventLines(
+	stdout: Readable,
+	onLine: (line: string) => void,
+	onRunaway: (prefix: string) => void,
+): void {
+	let pending: Buffer[] = []
+	let pendingBytes = 0
+	let runaway = false
+	const take = (tail: Buffer) => {
+		const line = Buffer.concat([...pending, tail]).toString("utf8")
+		pending = []
+		pendingBytes = 0
+		return line.endsWith("\r") ? line.slice(0, -1) : line
+	}
+	stdout.on("data", (chunk: Buffer) => {
+		// Still drained after a runaway, so the child is never blocked on a full pipe while it stops.
+		if (runaway) return
+		let start = 0
+		for (let nl = chunk.indexOf(0x0a); ; nl = chunk.indexOf(0x0a, start)) {
+			const end = nl === -1 ? chunk.length : nl
+			if (pendingBytes + end - start > MAX_EVENT_LINE_BYTES) {
+				runaway = true
+				const prefix = take(chunk.subarray(start, end)).slice(
+					0,
+					RUNAWAY_PREFIX_CHARS,
+				)
+				onRunaway(prefix)
+				return
+			}
+			if (nl === -1) break
+			onLine(take(chunk.subarray(start, nl)))
+			start = nl + 1
+		}
+		if (start < chunk.length) {
+			pending.push(chunk.subarray(start))
+			pendingBytes += chunk.length - start
+		}
+	})
+	stdout.on("end", () => {
+		if (!runaway && pendingBytes > 0) onLine(take(Buffer.alloc(0)))
+	})
+}
 
 export function buildChannelizerArgs(o: ChannelizerProcessOptions): string[] {
 	return [
@@ -199,19 +252,33 @@ export class ChannelizerProcess
 					this.log.warn({ line }, "wavekit-chan stderr")
 				})
 			if (child.stdout)
-				createInterface({ input: child.stdout }).on("line", line => {
-					const parsed = parseEventLine(line)
-					if (!parsed.ok) {
+				splitEventLines(
+					child.stdout,
+					line => {
+						const parsed = parseEventLine(line)
+						if (!parsed.ok) {
+							this.log.warn(
+								{ line, error: parsed.error },
+								"Invalid channelizer event line",
+							)
+							this.emit("protocol-error", line, parsed.error)
+							return
+						}
+						if (parsed.event.type === "ready") settle()
+						this.emit("event", parsed.event)
+					},
+					prefix => {
+						const error = `no newline within ${MAX_EVENT_LINE_BYTES} bytes`
 						this.log.warn(
-							{ line, error: parsed.error },
-							"Invalid channelizer event line",
+							{ pid: child.pid, prefix },
+							"Runaway channelizer event line, stopping wavekit-chan",
 						)
-						this.emit("protocol-error", line, parsed.error)
-						return
-					}
-					if (parsed.event.type === "ready") settle()
-					this.emit("event", parsed.event)
-				})
+						this.emit("protocol-error", prefix, error)
+						this.stop().catch((err: unknown) =>
+							this.log.warn({ err }, "Stopping a runaway wavekit-chan failed"),
+						)
+					},
+				)
 		})
 	}
 
