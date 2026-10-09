@@ -23,8 +23,10 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    `output/acceptance/voice-decode-2026-10-09.json`. Results: squelch silent when
    idle, clear NFM voice with `offsetHz`, and 2 PTT presses giving 2 DMR calls with
    0 CRC errors. Still open:
-   - About 2 s end-to-end latency, even with low-latency ffplay flags. Measure each
-     stage: the Pi queue, Wi-Fi, the fanout, the csdr rings and the client buffer.
+   - Latency: on 2026-10-09 most of the ~2-5 s lag was ffplay's own buffering.
+     `curl | play --buffer 512` sounded almost instant (user). Measure the remaining
+     stages (Pi queue, Wi-Fi, fanout, csdr rings, the 400 ms digital-voice jitter
+     buffer) only if a real client needs lower latency.
    - A ~0.75 s noise tail when the squelch closes.
    - One of the two DMR calls ended by the 4 s fallback timeout because its TLC
      terminator was not decoded, so its duration stops at the last decoded line.
@@ -32,8 +34,8 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
      ([DIGITAL-VOICE.md](DIGITAL-VOICE.md#call-duration-vs-event-timing-2026-10-09-anomaly)).
    - Lazy pipeline start when no client is connected (deferred).
    - `offsetHz` is set per decoder and is static; the channelizer replaces it.
-   - Digital voice audio (§5b): implemented 2026-10-09 on a branch (not merged
-     or deployed); over-the-air DMR voice acceptance pending.
+   - Digital voice audio (§5b): merged and verified over the air (main 9ff133d,
+     run10: 2 calls, CRC 0, FEC 0, 0.4 % muted, intelligible).
 2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
    only): clean-card flash on stable power, port 80 page, deliberate reboot with
    the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,
@@ -302,8 +304,10 @@ audio.
       channel carries analog FM or a digital mode, and route it to live analog audio or digital
       voice automatically, with the detected mode in the call metadata. Observed 2026-10-09: an
       analog user shared PMR446 channel 8 with the DMR test.
-- [ ] Over-the-air acceptance with the lab handheld: DMR voice is intelligible, and a call
-      is not split while PTT is held.
+- [x] Over-the-air acceptance with the lab handheld: DMR voice is intelligible, and a call
+      is not split while PTT is held. Done 2026-10-09 (run10) after dropping `csdr dcblock`
+      from the dsd-fme input chain (it muted the start of every TDMA burst; regression check
+      `scripts/dsd-fme-voice-ab.mjs`). Evidence: `output/acceptance/voice-decode-2026-10-09.json`.
 
 ## 6. Lightweight Pi operator page
 

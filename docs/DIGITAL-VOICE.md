@@ -24,6 +24,8 @@ decoder whose options leave `output` unset streams voice:
 ffplay -nodisp -fflags nobuffer -flags low_delay http://localhost:8082/stream.wav
 # or raw PCM
 curl -s http://localhost:8082/stream | ffplay -f s16le -ar 8000 -ch_layout mono -i -
+# Lowest latency (verified 2026-10-09: near-instant vs ~5 s with ffplay)
+curl -sN http://localhost:8082/stream | play -q --buffer 512 -t raw -r 8000 -e signed -b 16 -c 1 -
 ```
 
 | Endpoint (port `digitalVoice.httpPort`, default 8082) | Serves                                              |
