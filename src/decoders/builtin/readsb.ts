@@ -14,6 +14,7 @@ import {
 	type NetworkProducerConfig,
 } from "../network-producer-decoder.js"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -22,6 +23,9 @@ import type {
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
 import type { RawAircraftMessage } from "@wavekit/api-types"
+
+/** Mode S / ADS-B carrier (1090ES). */
+export const ADSB_FREQUENCY_HZ = 1_090_000_000
 
 /** readsb's fixed ADS-B sample rate; stdin mode adapts the source to it. */
 export const READSB_SAMPLE_RATE = 2_400_000
@@ -224,6 +228,15 @@ export class ReadsbDecoder extends NetworkProducerDecoder {
 		sampleRateHz: number
 	}): DecoderRateAdapter | undefined {
 		return readsbRateAdapter(this.options, input.sampleRateHz)
+	}
+
+	/**
+	 * Stdin mode demodulates the capture centre and Mode S/ADS-B is 1090 MHz
+	 * by protocol. rtlTcpHost mode tunes its own receiver: nothing to declare.
+	 */
+	getBandRequirements(): DecoderBandRequirements | undefined {
+		if (this.options.rtlTcpHost) return undefined
+		return { targetsHz: [ADSB_FREQUENCY_HZ], basis: "protocol" }
 	}
 
 	private getReadsbArgs(): string[] {

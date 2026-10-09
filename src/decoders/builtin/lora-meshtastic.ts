@@ -13,6 +13,7 @@ import {
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -324,6 +325,18 @@ export class LoraMeshtasticDecoder extends IqDecimateDecoder {
 
 	protected override onOptionsUpdated(): void {
 		this.options = parseLoraMeshtasticOptions(this.config.options)
+	}
+
+	/**
+	 * The modem decodes the capture centre. The configured `frequency` is the
+	 * channel; with followCenter it is the band the decoder follows (the
+	 * injected centre only relabels packets), so it is the target either way.
+	 */
+	override getBandRequirements(): DecoderBandRequirements | undefined {
+		const frequency = this.config.options["frequency"]
+		return typeof frequency === "number"
+			? { targetsHz: [frequency], basis: "configured" }
+			: undefined
 	}
 
 	/**

@@ -6,6 +6,7 @@
 import { z } from "zod"
 import { DECODER_LAST_ERROR_MAX_LENGTH } from "@wavekit/api-types"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderLastError,
@@ -76,6 +77,17 @@ export function resolveDecoderTargetFrequencies(
 		return parsed.success ? parsed.data : undefined
 	}
 	return undefined
+}
+
+/**
+ * Band declaration for a pipeline centred on the capture centre: the
+ * configured target frequencies, else unknown (built-in defaults never count).
+ */
+export function configuredBandRequirements(
+	config: DecoderConfig,
+): DecoderBandRequirements | undefined {
+	const targetsHz = resolveDecoderTargetFrequencies(config)
+	return targetsHz ? { targetsHz, basis: "configured" } : undefined
 }
 
 /**

@@ -22,8 +22,10 @@ import type {
 	DecoderRateRequirements,
 } from "@wavekit/api-types"
 import type { DecoderRateAdapter } from "./rate-resolver.js"
+import type { DecoderBandRequirements } from "./band-resolver.js"
 
 export type { DecoderRateAdapter } from "./rate-resolver.js"
+export type { DecoderBandRequirements } from "./band-resolver.js"
 
 export type {
 	DecoderRateAssessment,
@@ -413,4 +415,10 @@ export interface Decoder extends EventEmitter {
 	getRateAdapter?(input: {
 		sampleRateHz: number
 	}): DecoderRateAdapter | undefined
+
+	/**
+	 * Frequencies this instance must receive (band-aware suspension).
+	 * Undefined means unknown, which is never treated as out of band.
+	 */
+	getBandRequirements?(): DecoderBandRequirements | undefined
 }
