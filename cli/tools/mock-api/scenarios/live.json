@@ -1,6 +1,6 @@
 {
 	"name": "live",
-	"description": "Audit fixture: pi-iq streaming 2.048 MS/s at 445.9707 MHz, acarsdec down (13 restarts), 4 branches in backpressure, 7 cached messages.",
+	"description": "Audit fixture: pi-iq streaming 2.048 MS/s at 445.9707 MHz, acarsdec down (13 restarts), 4 branches in backpressure, 7 cached messages. Core before the 2026-10-09 health/suspension/band contracts (R91); see contracts and tuner-unknown.",
 	"now": "2026-10-08T18:07:52.000Z",
 	"conn": { "rest": "ok", "ws": "open", "cached": true, "restAgoMs": 2000 },
 	"rest": {
