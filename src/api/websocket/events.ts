@@ -28,13 +28,14 @@ import type {
 	AircraftTrackerStats,
 	DecoderStatusEventData,
 	SourceStatusEventData,
+	SourceRemovedEventData,
 } from "@wavekit/api-types"
 
 /**
  * Supported WebSocket channels for subscription.
  * - decoders: Decoder output, started, stopped, error, status events
  * - metrics: Source metrics events
- * - sources: Source connected, disconnected, error, status events
+ * - sources: Source connected, disconnected, error, status, removed events
  * - health: Decoder health state change events (Requirement 20.4)
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  * - live-audio: Live demodulation status and config events
@@ -76,6 +77,7 @@ export interface ServerMessage {
 		| "source:error"
 		| "source:caps-changed"
 		| "source:status"
+		| "source:removed"
 		| "metrics"
 		| "fanout:snapshot"
 		| "fanout:backpressure"
@@ -562,6 +564,21 @@ export class WebSocketEventBroadcaster {
 			type: "source:status",
 			data: status,
 		})
+	}
+
+	/**
+	 * Broadcasts that a source was removed. Sent once per removal; clients drop
+	 * the row and any cached `source:status`.
+	 *
+	 * @param sourceId - The source that was removed
+	 * @param removedAt - Removal time (defaults to now)
+	 */
+	broadcastSourceRemoved(sourceId: string, removedAt: Date = new Date()): void {
+		const data: SourceRemovedEventData = {
+			sourceId,
+			removedAt: removedAt.toISOString(),
+		}
+		this.broadcast("sources", { type: "source:removed", data })
 	}
 
 	/**

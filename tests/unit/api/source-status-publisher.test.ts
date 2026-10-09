@@ -219,6 +219,27 @@ describe("SourceStatusPublisher", () => {
 		expect(sentIds()).toEqual(["rtl", "pi"])
 	})
 
+	it("stops publishing a removed source, forgets it and holds no per-source timers", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl", "pi"])
+		broadcaster.broadcastSourceStatus.mockClear()
+		// a single poll timer, however many sources there are
+		const timers = vi.getTimerCount()
+		sourceManager.statuses.splice(0, 1)
+		sourceManager.emit("removed", "rtl")
+		// late lifecycle events for the removed id publish nothing
+		sourceManager.emit("disconnected", "rtl")
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_HEARTBEAT_MS * 3)
+		expect(sentIds()).not.toContain("rtl")
+		expect(sentIds().length).toBeGreaterThan(0)
+		expect(vi.getTimerCount()).toBe(timers)
+		// the same id added again later starts a fresh lifecycle
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses.push(makeStatus("rtl"))
+		sourceManager.emit("connected", "rtl")
+		expect(sentIds()).toEqual(["rtl"])
+	})
+
 	it("stops polling and detaches listeners on stop()", async () => {
 		publisher.stop()
 		sourceManager.emit("connected", "rtl")

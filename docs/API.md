@@ -1243,6 +1243,25 @@ Emitted when source capabilities change dynamically (e.g., sample rate changed v
 }
 ```
 
+#### source:removed
+
+Sent once on the `sources` channel when a source is removed (`DELETE
+/api/sources/:id`). Clients drop the row and any cached `source:status`. No
+further `source:status` or `source:disconnected` follows for that `sourceId`
+(a later `POST /api/sources` with the same id starts a fresh lifecycle).
+`removedAt` is an ISO 8601 timestamp. A reconnect or shutdown does not emit it.
+
+```json
+{
+	"type": "source:removed",
+	"channel": "sources",
+	"data": {
+		"sourceId": "rtl-pi",
+		"removedAt": "2026-10-09T12:34:56.789Z"
+	}
+}
+```
+
 #### metrics
 
 Emitted every ~5 seconds.
