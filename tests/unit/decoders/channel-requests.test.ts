@@ -187,7 +187,6 @@ describe("channel requests (addendum §1, §2)", () => {
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
 		for (const type of [
-			"rtl433",
 			"direwolf",
 			"multimon-ng",
 			"dsd-fme",
@@ -443,5 +442,38 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(chan).toContain("--centerfreq 136812500")
 		expect(chan).not.toMatch(/sox/)
 		expect(chan.startsWith("dumpvdl2 ")).toBe(true)
+	})
+
+	it("rtl433 requests its target rate at the capture centre and, channelised, runs rtl_433 directly", () => {
+		const input = { sampleRateHz: 2_048_000, centerHz: 433.92e6 }
+		// Default target: 1 MHz.
+		expect(make("rtl433").getChannelRequest?.(input)).toEqual({
+			centerHz: 433.92e6,
+			bandwidthHz: 950_000,
+			transitionHz: 25_000,
+			outputRateHz: 1_000_000,
+			format: "cu8",
+		})
+		// Exact 250 kHz, where the raw path decimates 2.048 Msps by 8 to 256 kHz.
+		expect(
+			make("rtl433", { targetSampleRate: 250_000 }).getChannelRequest?.(input),
+		).toEqual({
+			centerHz: 433.92e6,
+			bandwidthHz: 237_500,
+			transitionHz: 6_250,
+			outputRateHz: 250_000,
+			format: "cu8",
+		})
+		for (const rate of [1_000_000, 250_000]) {
+			const chan = pipelineOf(
+				make("rtl433", {
+					targetSampleRate: rate,
+					inputSampleRate: rate,
+					inputIqFormat: "cu8",
+				}),
+			)
+			expect(chan.startsWith(`rtl_433 -r cu8:- -s ${rate} `)).toBe(true)
+			expect(chan).not.toContain("csdr")
+		}
 	})
 })
