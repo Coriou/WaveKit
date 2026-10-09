@@ -1031,6 +1031,111 @@ curl -X PATCH http://localhost:9000/api/decoders/dsd-main \
 }
 ```
 
+### Digital Voice
+
+Decoded dsd-fme voice (DMR verified; P25, YSF, D-STAR, NXDN and ProVoice
+unverified) as a continuous audio stream. See
+[DIGITAL-VOICE.md](DIGITAL-VOICE.md) for the format, endpoints and limits.
+
+Audio is served on `digitalVoice.httpPort` (default 8082), not on the API port:
+
+- `GET /stream`, `GET /stream.wav`: the first dsd-fme decoder.
+- `GET /decoders/<decoderId>/stream`, `GET /decoders/<decoderId>/stream.wav`:
+  one decoder (URL-encode the id).
+
+Mono s16le at 8000 Hz for the stream's life (`X-Audio-Format: s16le`,
+`X-Sample-Rate: 8000`, `X-Channels: 1`). Exact silence between calls and during
+encrypted calls; clients are never disconnected between calls. A slow client
+keeps about one second of audio (older audio is dropped); a client that accepts
+nothing for 30 s is disconnected.
+
+```bash
+ffplay -nodisp -fflags nobuffer -flags low_delay http://localhost:8082/stream.wav
+```
+
+#### GET /api/digital-voice/status
+
+```bash
+curl http://localhost:9000/api/digital-voice/status
+```
+
+**Response** (`DigitalVoiceStatus` in `@wavekit/api-types`):
+
+```json
+{
+	"enabled": true,
+	"running": true,
+	"config": {
+		"enabled": true,
+		"httpPort": 8082,
+		"voiceSlot": "both",
+		"jitterBufferMs": 400,
+		"maxBufferMs": 1000
+	},
+	"sampleRate": 8000,
+	"audioFormat": "s16le",
+	"channels": 1,
+	"httpUrl": "http://localhost:8082/decoders/dsd-fme/stream",
+	"wavUrl": "http://localhost:8082/decoders/dsd-fme/stream.wav",
+	"clientCount": 1,
+	"bytesStreamed": 160000,
+	"decoders": [
+		{
+			"decoderId": "dsd-fme",
+			"mode": "auto",
+			"udpPort": 41234,
+			"httpUrl": "http://localhost:8082/decoders/dsd-fme/stream",
+			"wavUrl": "http://localhost:8082/decoders/dsd-fme/stream.wav",
+			"clientCount": 1,
+			"bytesStreamed": 160000,
+			"datagramsReceived": 412,
+			"datagramsRejected": 0,
+			"encryptedDatagramsDropped": 0,
+			"droppedSamples": 0,
+			"underruns": 3,
+			"bufferedMs": 60,
+			"lastDatagramAt": "2026-10-09T13:38:45.120Z",
+			"call": {
+				"decoderId": "dsd-fme",
+				"callId": "dsd-fme-mg1x2abc-2",
+				"protocol": "dmr",
+				"talkgroup": 9,
+				"source": 2060945,
+				"slot": 1,
+				"encrypted": false,
+				"active": true,
+				"startedAt": "2026-10-09T13:38:38.413Z"
+			}
+		}
+	],
+	"call": {
+		"decoderId": "dsd-fme",
+		"callId": "dsd-fme-mg1x2abc-2",
+		"protocol": "dmr",
+		"talkgroup": 9,
+		"source": 2060945,
+		"slot": 1,
+		"encrypted": false,
+		"active": true,
+		"startedAt": "2026-10-09T13:38:38.413Z"
+	}
+}
+```
+
+`call` is the first active call on any decoder (else `null`); each decoder also
+reports `lastCall` once a call has ended. Counters are cumulative since startup.
+
+#### POST /api/digital-voice/start
+
+Starts the stream server. `409` (`DIGITAL_VOICE_UNAVAILABLE`) when no dsd-fme
+decoder streams voice: digital voice was disabled at startup, or every dsd-fme
+decoder sets its own `output`.
+
+#### POST /api/digital-voice/stop
+
+Stops the stream server and disconnects its clients. dsd-fme keeps decoding
+call metadata.
+
 ## WebSocket API
 
 Each connection has a 1 MiB outbound payload budget across the application queue
@@ -1066,6 +1171,7 @@ ws.onopen = () => {
 				"health",
 				"fanout",
 				"live-audio",
+				"digital-voice",
 				"resources",
 				"tuner",
 			],
@@ -1093,6 +1199,7 @@ ws.onmessage = event => {
 		"health",
 		"fanout",
 		"live-audio",
+		"digital-voice",
 		"resources",
 		"tuner"
 	]
@@ -1136,6 +1243,42 @@ Emitted when a decoder produces output.
 ```
 
 The `output.type` field is the discriminator — switch on it to route per-decoder payloads. Known values include `call`, `call_start`, `call_end`, `signal`, `aircraft`, `ship`, `acars`, `vdl2`, `aprs`, `meshtastic`, plus generic `sync`, `decode`, `error`, `stats`.
+
+##### dsd-fme calls (types: `call_start`, `call_end`)
+
+Both carry `callId` (shared by the pair and by `digital-voice:call`) and
+`startedAt` (ISO 8601, the call's first decoded line). `call_start` also carries
+`encrypted`; `call_end` carries `endedAt` and `flags.encrypted`. `duration` is
+exactly `endedAt - startedAt`. A call ended by the fallback timeout
+(`flags.timeout: true`) has `endedAt` at its last decoded line, so the event is
+published about `callTimeoutMs` (4 s) after `endedAt`: compare the fields, not
+event arrival times.
+
+```json
+{
+	"type": "call_end",
+	"decoder": "dsd-fme",
+	"timestamp": "2026-10-09T13:38:49.726Z",
+	"data": {
+		"callId": "dsd-fme-mg1x2abc-2",
+		"startedAt": "2026-10-09T13:38:38.413Z",
+		"endedAt": "2026-10-09T13:38:45.665Z",
+		"protocol": "dmr",
+		"talkgroup": 9,
+		"source": 2060945,
+		"slot": 1,
+		"duration": 7252,
+		"dmr": { "cc": 1 },
+		"quality": { "crcErrs": 0, "fecErrs": 12 },
+		"flags": {
+			"encrypted": false,
+			"timeout": true,
+			"badSignal": false,
+			"falsePositiveSuppressed": false
+		}
+	}
+}
+```
 
 ##### Meshtastic packet (type: `meshtastic`)
 
@@ -1410,6 +1553,37 @@ Backpressure status snapshot.
 	}
 }
 ```
+
+#### digital-voice:call
+
+On the `digital-voice` channel: a dsd-fme call started, turned out encrypted, or
+ended (`DigitalVoiceCall`). Published in the same tick as the decoder's
+`call_start` / `call_end` (same `callId`).
+
+```json
+{
+	"type": "digital-voice:call",
+	"channel": "digital-voice",
+	"data": {
+		"decoderId": "dsd-fme",
+		"callId": "dsd-fme-mg1x2abc-2",
+		"protocol": "dmr",
+		"talkgroup": 9,
+		"source": 2060945,
+		"slot": 1,
+		"encrypted": false,
+		"active": false,
+		"startedAt": "2026-10-09T13:38:38.413Z",
+		"endedAt": "2026-10-09T13:38:45.665Z"
+	}
+}
+```
+
+#### digital-voice:status
+
+On the `digital-voice` channel: the full `GET /api/digital-voice/status` body,
+sent on start/stop, on client connect/disconnect and after every
+`digital-voice:call`.
 
 #### subscribed
 

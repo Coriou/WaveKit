@@ -139,8 +139,15 @@ sources: []
 #     sourceId: "rtl-pi"
 #     options:
 #       mode: "auto"           # auto, dmr, p25, ysf, dstar, nxdn, provoice
-#       output: "wav"          # null, wav, udp
-#       wavDir: "./decoded_calls"
+#       # output: leave unset to stream decoded voice to the digital voice
+#       # stream (digitalVoice below). "null" = call metadata only; "wav" =
+#       # per-call WAV files in wavDir and no live audio; "udp" + udpHost +
+#       # udpPort sends voice to your own listener.
+#       voiceSlot: "both"      # DMR TDMA slots to synthesise: 1, 2 or "both"
+#       enablePerCallRecording: false  # per-call WAVs (dsd-fme -7 <dir> -P)
+#       perCallRecordingDir: "/app/decoded_calls"
+#       perCallRecordingMaxTotalMb: 512   # retention: prune oldest beyond this
+#       perCallRecordingMaxAgeHours: 168  # retention: delete older files
 #       offsetHz: 0            # channel at tuned centre + offsetHz is shifted to
 #                              # DC before demodulation (any audio-demod decoder:
 #                              # dsd-fme, multimon-ng, direwolf)
@@ -316,6 +323,29 @@ liveDemod:
   audioFormat: "s16le"
   offsetHz: 0
   iqDcBlock: false
+
+# -----------------------------------------------------------------------------
+# Digital Voice (decoded dsd-fme voice)
+# -----------------------------------------------------------------------------
+# Decoded DMR (verified) and P25/YSF/D-STAR/NXDN/ProVoice (unverified) voice
+# as a continuous mono s16le 8000 Hz stream: exact silence between calls and
+# during encrypted calls (never decrypted). Every dsd-fme decoder whose
+# options leave `output` unset streams here (dsd-fme -o udp to a local
+# socket). Call metadata: GET /api/digital-voice/status and the
+# `digital-voice` WebSocket channel. See docs/DIGITAL-VOICE.md.
+#
+#   http://<host>:8082/stream            raw PCM (first dsd-fme decoder)
+#   http://<host>:8082/stream.wav        same, streaming WAV header
+#   http://<host>:8082/decoders/<id>/stream[.wav]   one decoder
+#
+# Env overrides: WAVEKIT_DIGITAL_VOICE__ENABLED=false,
+# WAVEKIT_DIGITAL_VOICE__HTTP_PORT=8082, WAVEKIT_DIGITAL_VOICE__VOICE_SLOT=1
+digitalVoice:
+  enabled: true # default true (one constant: DIGITAL_VOICE_ENABLED_DEFAULT)
+  httpPort: 8082
+  voiceSlot: "both" # 1 | 2 | "both" (dsd-fme -V); a decoder's voiceSlot wins
+  jitterBufferMs: 400 # voice buffered before a burst plays (UDP is bursty)
+  maxBufferMs: 1000 # bound per stream; oldest voice dropped beyond it
 
 # -----------------------------------------------------------------------------
 # API Server

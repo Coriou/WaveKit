@@ -33,6 +33,7 @@ import {
 	type AudioDecoderStdin,
 } from "../audio-demod-decoder.js"
 import { deemphasisStage } from "../csdr-stages.js"
+import { pruneCallRecordings } from "./call-recordings.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -81,6 +82,22 @@ const DMR_END_HINT =
 	/\|\s*TLC\b|\b(Terminator|Call\s+Termination|GC\s+End|UC\s+End|End\s+Voice)\b/i
 /** BS-mode burst slot marker: the current slot is bracketed, e.g. "[slot1]". */
 const DMR_CURRENT_SLOT = /\[slot(?<slot>[12])\]/i
+/**
+ * DMR privacy. dmr_flco.c prints "Encrypted " for service option bit 0x40 on
+ * the voice link control line (after "TGT=%u SRC=%u ", same line), so it only
+ * counts on a line with TGT/SRC: "Slot N - Encrypted PDU" (dmr_block.c) is a
+ * data burst. The PI header and late entry print "ALG ID: %02X;" without 0x
+ * (dmr_pi.c, dmr_le.c). "SVC=0x.." only appears with -Z, which is not passed.
+ */
+const DMR_ENCRYPTED = /\bEncrypted\b/i
+const ALG_ID = /\bALG(?:\s+ID)?:\s*(?:0x)?(?<alg>[0-9A-F]{2,4})\b/i
+/** DMR service options: bit 0x40 is privacy (ETSI TS 102 361-2). */
+const DMR_SVC_PRIVACY = 0x40
+/**
+ * extraArgs that would change the decoder mode or the audio output format
+ * (and so desync the voice stream): -f* (mode), -o (output), -y (float audio).
+ */
+const RESERVED_EXTRA_ARG = /^-(?:f|o|y$)/
 
 // --- P25 Phase 1 Patterns ---
 /** P25 Phase 1 sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -99,9 +116,12 @@ const P25_CALL_TERM = /\b(Call\s+Termination|TDULC)\b/i
 /** P25 Phase 2 VCH: "VCH 0 - TG 7070 SRC 40820" */
 const P25P2_VCH =
 	/\bVCH\s+(?<vch>[01])\s*-\s*TG\s+(?<tg>\d+)\s+SRC\s+(?<src>\d+)\b/i
-/** P25 encryption indicators */
+/**
+ * P25 encryption indicators. ALG ID 0x80 is "unencrypted" (TIA-102.AAAD),
+ * so the algorithm decides; an MI line alone does not.
+ */
 const P25_CRYPTO =
-	/\bALG\s+ID:\s*0x(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*0x(?<key>[0-9A-F]+)\b|\bMI\b/i
+	/\bALG\s+ID:\s*(?:0x)?(?<alg>[0-9A-F]+)\b|\bKEY\s+ID:\s*(?:0x)?(?<key>[0-9A-F]+)\b|\bMI\b/i
 
 // --- YSF Patterns ---
 /** YSF sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -150,8 +170,55 @@ export type DsdFmeMode =
 	| "nxdn"
 	| "provoice"
 
-/** Audio output destination options */
+/**
+ * Audio output destination options. "udp" streams decoded voice to
+ * udpHost:udpPort (the digital voice stream binds it); "wav" writes per-call
+ * WAV files to wavDir (dsd-fme `-7 <dir> -P`) with no live audio.
+ */
 export type DsdFmeOutputType = "null" | "wav" | "udp"
+
+/** TDMA voice slots to synthesise (dsd-fme `-V 1|2|3`). */
+export type DsdFmeVoiceSlot = 1 | 2 | "both"
+
+const VoiceSlotSchema = z.preprocess(
+	value => (value === "1" ? 1 : value === "2" ? 2 : value),
+	z.union([z.literal(1), z.literal(2), z.literal("both")]),
+)
+
+/** dsd-fme `-V` argument for a voice slot selection. */
+export function dsdFmeVoiceSlotArg(slot: DsdFmeVoiceSlot): "1" | "2" | "3" {
+	return slot === 1 ? "1" : slot === 2 ? "2" : "3"
+}
+
+/**
+ * Channels in dsd-fme's `-o udp` voice datagrams for a mode (measured on the
+ * pinned build, see docs/DIGITAL-VOICE.md): stereo (slot 1 left, slot 2
+ * right) for auto and DMR, mono for the single-channel protocols.
+ */
+export function dsdFmeUdpChannels(mode: DsdFmeMode): 1 | 2 {
+	return mode === "auto" || mode === "dmr" ? 2 : 1
+}
+
+/**
+ * Voice call state published on the decoder's "voice-call" event, in the
+ * same tick as the call_start / call_end outputs (and when a running call
+ * turns out to be encrypted). Times are ISO 8601.
+ */
+export interface DsdFmeVoiceCallState {
+	callId: string
+	protocol: Exclude<DsdFmeProtocol, null> | null
+	talkgroup: number | null
+	source: number | null
+	slot: number | null
+	encrypted: boolean
+	active: boolean
+	startedAt: string
+	endedAt?: string
+}
+
+/** Default per-call recording retention. */
+export const PER_CALL_RECORDING_MAX_TOTAL_MB = 512
+export const PER_CALL_RECORDING_MAX_AGE_HOURS = 168
 
 /** Protocol types detected by sync pattern */
 export type DsdFmeProtocol =
@@ -222,6 +289,8 @@ interface CallFlags {
  * This captures the complete state of an active call.
  */
 interface DsdFmeCallState {
+	/** Stable id shared by call_start, call_end and voice-call events. */
+	callId: string
 	protocol: DsdFmeProtocol
 	talkgroup: number | null
 	source: number | null
@@ -249,7 +318,7 @@ export interface DsdFmeOptions {
 	mode: DsdFmeMode
 	/** Audio output destination */
 	output: DsdFmeOutputType
-	/** Directory for WAV file output (when output is 'wav') */
+	/** Directory for per-call WAV files when output is 'wav' (default: perCallRecordingDir) */
 	wavDir?: string | undefined
 	/** UDP host for audio output (when output is 'udp') */
 	udpHost?: string | undefined
@@ -275,6 +344,12 @@ export interface DsdFmeOptions {
 	callStartDelayMs?: number | undefined
 	/** Fallback call end after this long without any line from the call (default: 4000) */
 	callTimeoutMs?: number | undefined
+	/** TDMA voice slots to synthesise (`-V`); omitted leaves dsd-fme's default (both) */
+	voiceSlot?: DsdFmeVoiceSlot | undefined
+	/** Per-call recordings: prune oldest beyond this total size (default: 512 MB) */
+	perCallRecordingMaxTotalMb: number
+	/** Per-call recordings: delete files older than this (default: 168 h) */
+	perCallRecordingMaxAgeHours: number
 }
 
 /** All supported DSD-FME modes */
@@ -318,6 +393,28 @@ const CALL_TIMEOUT_CHECK_INTERVAL_MS = 500
 
 /** Delay before emitting call_start to accumulate metadata (ms) */
 const CALL_START_DELAY_MS = 100
+
+/** Prune per-call recordings this long after a call ends (dsd-fme closes the file). */
+const RECORDING_PRUNE_DELAY_MS = 2000
+
+/** Algorithm ids that mean "no encryption" (P25 0x80, DMR/none 0x00). */
+function isClearAlgorithm(alg: string): boolean {
+	const value = parseInt(alg, 16)
+	return value === 0x80 || value === 0
+}
+
+/** Fields of the call_start / call_end data this decoder publishes. */
+interface CallEventData {
+	callId?: string
+	startedAt?: string
+	endedAt?: string
+	encrypted?: boolean
+	protocol?: DsdFmeProtocol
+	talkgroup?: number | null
+	source?: number | null
+	slot?: number | undefined
+	flags?: { encrypted?: boolean; wavFileUpdate?: boolean }
+}
 
 /** Error event for rolling window tracking */
 interface ErrorEvent {
@@ -369,6 +466,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private callTimeoutTimer: NodeJS.Timeout | null = null
 
 	// Call that just ended on a terminator (suppresses its trailing LC line)
+	// Per-decoder call sequence (part of callId)
+	private callSeq = 0
+
+	// Debounced per-call recording retention
+	private pruneTimer: NodeJS.Timeout | null = null
+	private pruning = false
+
 	private recentlyTerminated: {
 		protocol: DsdFmeProtocol
 		talkgroup: number | null
@@ -404,7 +508,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			wavDir: options["wavDir"] as string | undefined,
 			udpHost: options["udpHost"] as string | undefined,
 			udpPort: options["udpPort"] as number | undefined,
-			extraArgs: options["extraArgs"] as string[] | undefined,
+			extraArgs: this.parseExtraArgs(options["extraArgs"]),
 			inputSampleRate: options["inputSampleRate"] as number | undefined,
 			fmGain: options["fmGain"] as number | undefined,
 			enableIqAgc: options["enableIqAgc"] as boolean | undefined,
@@ -420,7 +524,73 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			callTimeoutMs:
 				PositiveMsSchema.safeParse(options["callTimeoutMs"]).data ??
 				CALL_TIMEOUT_MS,
+			voiceSlot: this.parseVoiceSlot(options["voiceSlot"]),
+			perCallRecordingMaxTotalMb:
+				PositiveMsSchema.safeParse(options["perCallRecordingMaxTotalMb"])
+					.data ?? PER_CALL_RECORDING_MAX_TOTAL_MB,
+			perCallRecordingMaxAgeHours:
+				PositiveMsSchema.safeParse(options["perCallRecordingMaxAgeHours"])
+					.data ?? PER_CALL_RECORDING_MAX_AGE_HOURS,
 		}
+	}
+
+	private parseVoiceSlot(value: unknown): DsdFmeVoiceSlot | undefined {
+		if (value === undefined) return undefined
+		const parsed = VoiceSlotSchema.safeParse(value)
+		if (parsed.success) return parsed.data
+		this.logger.warn(
+			{ voiceSlot: value },
+			'Invalid voiceSlot (expected 1, 2 or "both"); using the dsd-fme default',
+		)
+		return undefined
+	}
+
+	/**
+	 * Drops extraArgs that set the mode or the audio output (-f*, -o and its
+	 * value, -y): WaveKit owns both, and the voice stream depends on them.
+	 */
+	private parseExtraArgs(value: unknown): string[] | undefined {
+		if (!Array.isArray(value)) return undefined
+		const kept: string[] = []
+		const dropped: string[] = []
+		for (let i = 0; i < value.length; i++) {
+			const arg = String(value[i])
+			if (RESERVED_EXTRA_ARG.test(arg)) {
+				dropped.push(arg)
+				// "-o <device>": the device is the next argument.
+				if (arg === "-o" && i + 1 < value.length)
+					dropped.push(String(value[++i]))
+				continue
+			}
+			kept.push(arg)
+		}
+		if (dropped.length > 0) {
+			this.logger.warn(
+				{ dropped },
+				"Ignoring extraArgs that set the dsd-fme mode or audio output",
+			)
+		}
+		return kept
+	}
+
+	/**
+	 * Absolute directory for per-call WAV files, or null when recording is off.
+	 * Absolute because dsd-fme runs after `cd <dir>`: a relative -7 would nest.
+	 */
+	private recordingDir(): string | null {
+		if (this.options.output === "wav") {
+			return path.resolve(
+				this.options.wavDir ??
+					this.options.perCallRecordingDir ??
+					"/app/decoded_calls",
+			)
+		}
+		if (this.options.enablePerCallRecording) {
+			return path.resolve(
+				this.options.perCallRecordingDir ?? "/app/decoded_calls",
+			)
+		}
+		return null
 	}
 
 	/**
@@ -449,6 +619,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}, CALL_TIMEOUT_CHECK_INTERVAL_MS)
 
 		this.logger.debug("Call timeout timer started")
+		this.schedulePrune(0)
 	}
 
 	/**
@@ -461,6 +632,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			clearInterval(this.callTimeoutTimer)
 			this.callTimeoutTimer = null
 			this.logger.debug("Call timeout timer stopped")
+		}
+
+		if (this.pruneTimer) {
+			clearTimeout(this.pruneTimer)
+			this.pruneTimer = null
 		}
 
 		// End any active or pending call before stopping
@@ -478,6 +654,99 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		await super.stop()
+	}
+
+	/**
+	 * Publishes an output and, for call_start / call_end, the matching
+	 * "voice-call" state in the same tick (the digital voice stream's call
+	 * metadata is derived from exactly these events).
+	 */
+	protected override emitOutput(output: DecoderOutput): void {
+		super.emitOutput(output)
+		if (output.type !== "call_start" && output.type !== "call_end") return
+		const data = output.data as CallEventData
+		if (data.flags?.wavFileUpdate || data.callId === undefined) return
+		const active = output.type === "call_start"
+		const state: DsdFmeVoiceCallState = {
+			callId: data.callId,
+			protocol: data.protocol ?? null,
+			talkgroup: data.talkgroup ?? null,
+			source: data.source ?? null,
+			slot: data.slot ?? null,
+			encrypted: active
+				? data.encrypted === true
+				: data.flags?.encrypted === true,
+			active,
+			startedAt: data.startedAt ?? output.timestamp.toISOString(),
+			...(data.endedAt !== undefined ? { endedAt: data.endedAt } : {}),
+		}
+		this.emit("voice-call", state)
+		if (!active) this.schedulePrune(RECORDING_PRUNE_DELAY_MS)
+	}
+
+	/**
+	 * Flags a call encrypted. An already announced call publishes the change
+	 * on "voice-call" so its audio is muted from now on.
+	 */
+	private markEncrypted(call: DsdFmeCallState): void {
+		if (call.flags.encrypted) return
+		call.flags.encrypted = true
+		this.logger.info(
+			{
+				callId: call.callId,
+				protocol: call.protocol,
+				talkgroup: call.talkgroup,
+			},
+			"Encrypted call: voice stays muted",
+		)
+		if (call !== this.callState) return
+		const state: DsdFmeVoiceCallState = {
+			callId: call.callId,
+			protocol: call.protocol,
+			talkgroup: call.talkgroup,
+			source: call.source,
+			slot: call.slot ?? null,
+			encrypted: true,
+			active: true,
+			startedAt: call.startTime.toISOString(),
+		}
+		this.emit("voice-call", state)
+	}
+
+	/** Runs per-call recording retention after `delayMs` (debounced). */
+	private schedulePrune(delayMs: number): void {
+		const dir = this.recordingDir()
+		if (dir === null || this.pruneTimer) return
+		this.pruneTimer = setTimeout(() => {
+			this.pruneTimer = null
+			void this.pruneRecordings(dir)
+		}, delayMs)
+		this.pruneTimer.unref()
+	}
+
+	private async pruneRecordings(dir: string): Promise<void> {
+		if (this.pruning) return
+		this.pruning = true
+		try {
+			const result = await pruneCallRecordings([dir, path.join(dir, "WAV")], {
+				maxTotalMb: this.options.perCallRecordingMaxTotalMb,
+				maxAgeHours: this.options.perCallRecordingMaxAgeHours,
+			})
+			if (result.deleted.length > 0) {
+				this.logger.info(
+					{
+						deleted: result.deleted.length,
+						keptFiles: result.keptFiles,
+						keptBytes: result.keptBytes,
+					},
+					"Pruned per-call recordings",
+				)
+			}
+		} catch (err) {
+			this.logger.warn({ err, dir }, "Per-call recording retention failed")
+		} finally {
+			this.pruning = false
+		}
 	}
 
 	/**
@@ -534,6 +803,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			decoder: this.id,
 			type: "call_start",
 			data: {
+				callId: this.callState.callId,
+				startedAt: this.callState.startTime.toISOString(),
+				encrypted: this.callState.flags.encrypted,
 				protocol: this.callState.protocol,
 				talkgroup: this.callState.talkgroup,
 				source: this.callState.source,
@@ -675,8 +947,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		let dsdFmeCommand = shellCommand("dsd-fme", dsdFmeArgs)
 
 		// If per-call recording is enabled, ensure we run in the correct directory
-		if (this.options.enablePerCallRecording) {
-			const dir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+		const dir = this.recordingDir()
+		if (dir !== null) {
 			// We ensure directory exists and cd into it
 			dsdFmeCommand = `(mkdir -p ${shellArg(dir)} && cd ${shellArg(dir)} && ${dsdFmeCommand})`
 		}
@@ -723,9 +995,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// Input from stdin (receives WAV stream from sox)
 		args.push("-i", "/dev/stdin")
 
-		// Enable per-call recording if configured
-		if (this.options.enablePerCallRecording) {
-			args.push("-P")
+		// Per-call WAV files: -7 <dir> must precede -P (-w is one static file).
+		const recordingDir = this.recordingDir()
+		if (recordingDir !== null) {
+			args.push("-7", recordingDir, "-P")
 		}
 
 		// Set decoder mode with explicit flag
@@ -758,23 +1031,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				break
 		}
 
-		// Set output destination
-		switch (this.options.output) {
-			case "wav":
-				if (this.options.wavDir) {
-					args.push("-w", this.options.wavDir)
-				}
-				break
-			case "udp":
-				if (this.options.udpHost && this.options.udpPort) {
-					args.push("-o", `udp:${this.options.udpHost}:${this.options.udpPort}`)
-				}
-				break
-			case "null":
-			default:
-				// Disable audio output to avoid PulseAudio issues
-				args.push("-o", "null")
-				break
+		// Set output destination. Never leave -o unset: dsd-fme defaults to
+		// PulseAudio, which the container does not have.
+		if (
+			this.options.output === "udp" &&
+			this.options.udpHost &&
+			this.options.udpPort
+		) {
+			args.push("-o", `udp:${this.options.udpHost}:${this.options.udpPort}`)
+		} else {
+			if (this.options.output === "udp") {
+				this.logger.warn(
+					{ udpHost: this.options.udpHost, udpPort: this.options.udpPort },
+					"output udp needs udpHost and udpPort; voice output disabled",
+				)
+			}
+			args.push("-o", "null")
+		}
+
+		// TDMA voice slot selection (dsd-fme default is both).
+		if (this.options.voiceSlot !== undefined) {
+			args.push("-V", dsdFmeVoiceSlotArg(this.options.voiceSlot))
 		}
 
 		// Add any extra arguments
@@ -1072,10 +1349,27 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				? { cc }
 				: undefined
 
+		const svc = tlcMatch?.groups?.["svc"]
+		const alg = ALG_ID.exec(line)?.groups?.["alg"]
+		const encrypted =
+			(tgt !== null && DMR_ENCRYPTED.test(line)) ||
+			(svc !== undefined && (parseInt(svc, 16) & DMR_SVC_PRIVACY) !== 0) ||
+			(alg !== undefined && !isClearAlgorithm(alg))
+
 		// If we have TGT+SRC, process call state
 		if (tgt !== null && src !== null) {
-			return this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
+			const event = this.processCallMetadata(
+				now,
+				"dmr",
+				tgt,
+				src,
+				slot,
+				dmrMeta,
+			)
+			if (encrypted) this.markDmrEncrypted(slot)
+			return event
 		}
+		if (encrypted) this.markDmrEncrypted(slot)
 
 		// Any DMR line (voice superframe, data burst) keeps the call alive.
 		const ongoing = this.callState ?? this.pendingCall?.state ?? null
@@ -1090,6 +1384,29 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		return null
+	}
+
+	/** Marks the ongoing DMR call encrypted (unless the line is for the other slot). */
+	private markDmrEncrypted(slot: number | undefined): void {
+		const call = this.callState ?? this.pendingCall?.state ?? null
+		if (!call || call.protocol !== "dmr") return
+		if (slot !== undefined && call.slot !== undefined && slot !== call.slot) {
+			return
+		}
+		this.markEncrypted(call)
+	}
+
+	/** Applies a P25 crypto line (ALG/KEY ID) to the ongoing call of `protocol`. */
+	private applyP25Crypto(line: string, protocol: "p25p1" | "p25p2"): void {
+		const cryptoMatch = P25_CRYPTO.exec(line)
+		if (!cryptoMatch) return
+		const call = this.callState ?? this.pendingCall?.state ?? null
+		if (!call || call.protocol !== protocol) return
+		const alg = ALG_ID.exec(line)?.groups?.["alg"]
+		const keyId = cryptoMatch.groups?.["key"]
+		if (alg !== undefined) call.p25 = { ...call.p25, alg }
+		if (keyId !== undefined) call.p25 = { ...call.p25, keyId }
+		if (alg !== undefined && !isClearAlgorithm(alg)) this.markEncrypted(call)
 	}
 
 	/**
@@ -1123,22 +1440,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		// Check for encryption indicators
-		const cryptoMatch = P25_CRYPTO.exec(line)
-		if (cryptoMatch && this.callState?.protocol === "p25p1") {
-			this.callState.flags.encrypted = true
-			if (cryptoMatch.groups?.["alg"]) {
-				this.callState.p25 = {
-					...this.callState.p25,
-					alg: cryptoMatch.groups["alg"],
-				}
-			}
-			if (cryptoMatch.groups?.["key"]) {
-				this.callState.p25 = {
-					...this.callState.p25,
-					keyId: cryptoMatch.groups["key"],
-				}
-			}
-		}
+		this.applyP25Crypto(line, "p25p1")
 
 		return null
 	}
@@ -1166,10 +1468,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		// Check encryption
-		const cryptoMatch = P25_CRYPTO.exec(line)
-		if (cryptoMatch && this.callState?.protocol === "p25p2") {
-			this.callState.flags.encrypted = true
-		}
+		this.applyP25Crypto(line, "p25p2")
 
 		return null
 	}
@@ -1561,6 +1860,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		this.pendingCall = {
 			state: {
+				callId: `${this.id}-${nowMs.toString(36)}-${++this.callSeq}`,
 				protocol,
 				talkgroup: tgt,
 				source: src,
@@ -1605,9 +1905,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		call: DsdFmeCallState,
 		callEndTime: Date,
 	): string | undefined {
-		if (!this.options.enablePerCallRecording) return undefined
-
-		const baseDir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+		const baseDir = this.recordingDir()
+		if (baseDir === null) return undefined
 
 		// dsd-fme creates a WAV subdirectory inside the output directory
 		// Search in both the base directory and common subdirectories
@@ -1631,9 +1930,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Emits a wav_file event when the file is found.
 	 */
 	private findWavFileAsync(call: DsdFmeCallState, callEndTime: Date): void {
-		if (!this.options.enablePerCallRecording) return
-
-		const baseDir = this.options.perCallRecordingDir ?? "/app/decoded_calls"
+		const baseDir = this.recordingDir()
+		if (baseDir === null) return
 
 		// dsd-fme creates a WAV subdirectory inside the output directory
 		const dirsToSearch = [
@@ -1659,6 +1957,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 						decoder: this.id,
 						type: "call_end",
 						data: {
+							callId: call.callId,
+							startedAt: call.startTime.toISOString(),
+							endedAt: callEndTime.toISOString(),
 							protocol: call.protocol,
 							talkgroup: call.talkgroup,
 							source: call.source,
@@ -1850,12 +2151,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		// Try to find the WAV file immediately
-		const wavFile = this.findWavFile(callInfo, now)
+		const wavFile = this.findWavFile(callInfo, endTime)
 
 		// Also trigger async search with retries - dsd-fme may still be writing
 		// This will emit an update event if the file is found later
 		if (!wavFile) {
-			this.findWavFileAsync(callInfo, now)
+			this.findWavFileAsync(callInfo, endTime)
 		}
 
 		// Clear state
@@ -1882,6 +2183,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			decoder: this.id,
 			type: "call_end",
 			data: {
+				callId: callInfo.callId,
+				startedAt: callInfo.startTime.toISOString(),
+				endedAt: endTime.toISOString(),
 				protocol: callInfo.protocol,
 				talkgroup: callInfo.talkgroup,
 				source: callInfo.source,

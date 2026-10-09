@@ -29,6 +29,8 @@ import type {
 	DecoderStatusEventData,
 	SourceStatusEventData,
 	SourceRemovedEventData,
+	DigitalVoiceCallEventData,
+	DigitalVoiceStatus,
 } from "@wavekit/api-types"
 
 /**
@@ -39,6 +41,7 @@ import type {
  * - health: Decoder health state change events (Requirement 20.4)
  * - fanout: Fanout backpressure telemetry (snapshots, backpressure, drain)
  * - live-audio: Live demodulation status and config events
+ * - digital-voice: Digital voice stream status and per-call state
  * - resources: Container, SDR host, and source backpressure monitoring
  * - tuner: RTL-TCP tuner control events
  */
@@ -49,6 +52,7 @@ export type WebSocketChannel =
 	| "health"
 	| "fanout"
 	| "live-audio"
+	| "digital-voice"
 	| "resources"
 	| "tuner"
 	| "aircraft"
@@ -87,6 +91,8 @@ export interface ServerMessage {
 		| "live-audio:started"
 		| "live-audio:stopped"
 		| "live-audio:error"
+		| "digital-voice:call"
+		| "digital-voice:status"
 		| "resources:snapshot"
 		| "resources:alert"
 		| "tuner:state-changed"
@@ -135,6 +141,7 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "health" ||
 		channel === "fanout" ||
 		channel === "live-audio" ||
+		channel === "digital-voice" ||
 		channel === "resources" ||
 		channel === "tuner" ||
 		channel === "aircraft"
@@ -705,6 +712,26 @@ export class WebSocketEventBroadcaster {
 	broadcastLiveAudioStatus(status: LiveDemodStatus): void {
 		this.broadcast("live-audio", {
 			type: "live-audio:status",
+			data: status,
+		})
+	}
+
+	/**
+	 * Broadcasts digital voice call state (start, encryption change, end).
+	 */
+	broadcastDigitalVoiceCall(call: DigitalVoiceCallEventData): void {
+		this.broadcast("digital-voice", {
+			type: "digital-voice:call",
+			data: call,
+		})
+	}
+
+	/**
+	 * Broadcasts digital voice stream status (same body as GET /api/digital-voice/status).
+	 */
+	broadcastDigitalVoiceStatus(status: DigitalVoiceStatus): void {
+		this.broadcast("digital-voice", {
+			type: "digital-voice:status",
 			data: status,
 		})
 	}

@@ -28,10 +28,12 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    - A ~0.75 s noise tail when the squelch closes.
    - One of the two DMR calls ended by the 4 s fallback timeout because its TLC
      terminator was not decoded, so its duration stops at the last decoded line.
-     The calls did not split.
+     The calls did not split. Call events now carry `startedAt`/`endedAt`
+     ([DIGITAL-VOICE.md](DIGITAL-VOICE.md#call-duration-vs-event-timing-2026-10-09-anomaly)).
    - Lazy pipeline start when no client is connected (deferred).
    - `offsetHz` is set per decoder and is static; the channelizer replaces it.
-   - Digital voice audio (§5b).
+   - Digital voice audio (§5b): implemented 2026-10-09 on a branch (not merged
+     or deployed); over-the-air DMR voice acceptance pending.
 2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
    only): clean-card flash on stable power, port 80 page, deliberate reboot with
    the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,
@@ -281,14 +283,21 @@ DMR call metadata (talkgroup, source, slot, color code, error counts), but nobod
 hear the decoded voice. Make digital voice a first-class audio stream, like live analog
 audio.
 
-- [ ] Output decoded voice from dsd-fme (AMBE+2/IMBE via mbelib) for DMR first, then
+- [x] Output decoded voice from dsd-fme (AMBE+2/IMBE via mbelib) for DMR first, then
       P25 phase 1/2, NXDN, dPMR, D-STAR and YSF where dsd-fme supports them. Stream it
       over the same HTTP/WS audio path as live demod, with per-call metadata
-      (protocol, talkgroup, source, slot) attached.
+      (protocol, talkgroup, source, slot) attached. Done 2026-10-09: dsd-fme
+      `-o udp` into a paced 8 kHz mono stream on port 8082, `digital-voice` WS
+      channel, `/api/digital-voice/*`, on by default
+      ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)). YSF datagrams verified on the
+      fixture; P25/NXDN/D-STAR unverified; dPMR not mapped.
 - [ ] Per-slot/per-talkgroup selection and a short per-call recording buffer, with bounded
-      memory and an explicit retention setting.
-- [ ] Mark encrypted calls as encrypted and never attempt to decode them. Document the codec
-      licensing position (mbelib/AMBE) before shipping it in the image.
+      memory and an explicit retention setting. Done: `voiceSlot` (`-V`) and
+      per-call WAV files (`-7 <dir> -P`, default off) with size and age
+      retention. Open: per-slot streams and talkgroup selection.
+- [x] Mark encrypted calls as encrypted and never attempt to decode them. Silence
+      plus `encrypted: true`; no key options are passed. (Licensing note waived
+      by the user on 2026-10-09.)
 - [ ] Over-the-air acceptance with the lab handheld: DMR voice is intelligible, and a call
       is not split while PTT is held.
 
