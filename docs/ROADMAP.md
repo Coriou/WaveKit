@@ -18,9 +18,17 @@ Pi image); decoder band defaults with regions, persisted per-decoder band
 overrides and operator-start pinning; `source:removed`; the signal-flat source
 warning; the Pi operator page redesign on a single port 80 and the brand kit.
 
-1. **Voice decode test**: an analog radio and a DMR radio transmitting on a chosen
-   frequency. Test dsd-fme (DMR) and live-demod NFM audio with bounded rings,
-   with the operator start pin keeping dsd-fme running off its default band if needed.
+1. **Live analog audio fixes** (voice decode test done 2026-10-09, evidence in
+   `output/acceptance/voice-decode-2026-10-09.json`). A lab handheld on PMR446
+   showed that DMR decodes with dsd-fme (TG/source/slot/CC, 0 CRC errors), and that
+   NFM voice is clear only with non-default settings (audio gain 2, `iqDcBlock` off,
+   and the dongle tuned 6 kHz off the carrier). With the defaults (gain 10, I/Q
+   dcblock on, demodulation at the tuned center) the voice was unintelligible. Fix
+   the defaults and the review findings (gain, I/Q dcblock, channel offset/shift,
+   pre-demod squelch, decimation filter, NFM de-emphasis rate, stream headers,
+   restart on retune, crash recovery, process cleanup, client buffer). Also fix the
+   dsd-fme `eventsOut`/`lastOutputAt` counters and calls that split on timeout.
+   Then repeat the over-the-air runs.
 2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
    only): clean-card flash on stable power, port 80 page, deliberate reboot with
    the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,
@@ -261,6 +269,24 @@ activity, not merely stop on a strong signal.
       shared API/events so CLI and future web clients have equivalent capabilities.
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
       or identifying every signal. Treat encrypted/undecodable activity honestly.
+
+## 5b. Digital voice audio
+
+Requested by the user on 2026-10-09. Today dsd-fme runs with `output: "null"`: it reports
+DMR call metadata (talkgroup, source, slot, color code, error counts), but nobody can
+hear the decoded voice. Make digital voice a first-class audio stream, like live analog
+audio.
+
+- [ ] Output decoded voice from dsd-fme (AMBE+2/IMBE via mbelib) for DMR first, then
+      P25 phase 1/2, NXDN, dPMR, D-STAR and YSF where dsd-fme supports them. Stream it
+      over the same HTTP/WS audio path as live demod, with per-call metadata
+      (protocol, talkgroup, source, slot) attached.
+- [ ] Per-slot/per-talkgroup selection and a short per-call recording buffer, with bounded
+      memory and an explicit retention setting.
+- [ ] Mark encrypted calls as encrypted and never attempt to decode them. Document the codec
+      licensing position (mbelib/AMBE) before shipping it in the image.
+- [ ] Over-the-air acceptance with the lab handheld: DMR voice is intelligible, and a call
+      is not split while PTT is held.
 
 ## 6. Lightweight Pi operator page
 
