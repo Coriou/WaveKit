@@ -35,6 +35,11 @@ export interface ViewKeyInfo {
 	detailMaxScroll?: number
 	/** Messages: the ring's newest seq, for a pause with no visible rows (R73). */
 	newestSeq?: number | null
+	/**
+	 * A line the footer shows while the view has one (R75), e.g. the Decoders
+	 * write result while the detail is closed. A fresh `ui.notice` wins.
+	 */
+	notice?: string
 }
 
 export interface ViewModule {

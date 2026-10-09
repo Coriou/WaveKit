@@ -386,12 +386,14 @@ describe("B5 fix round 1", () => {
 		}
 	}
 
-	it("I1: the last decoder write shows under the list while the detail is closed", () => {
+	it("I1/R75: the last decoder write is the footer notice while the detail is closed", () => {
 		const m = decodersModel(sent, initialUi("decoders"), 119, 35, true)
-		expect(lineText(m.list.at(-1) ?? [])).toBe(
-			`readsb · restart sent ${clock(s.now)}`,
+		expect(m.notice).toBe(`readsb · restart sent ${clock(s.now)}`)
+		expect(m.list.map(lineText).some(l => l.includes("restart sent"))).toBe(
+			false,
 		)
 		const withDetail = decodersModel(sent, open("readsb"), 119, 35, true)
+		expect(withDetail.notice).toBeNull()
 		expect(
 			withDetail.list.map(lineText).some(l => l.includes("restart sent")),
 		).toBe(false)

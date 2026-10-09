@@ -49,6 +49,7 @@ export const decodersView: ViewModule = {
 				hasSelection: m.selected !== null,
 				decoderRunning: m.selected ? m.selected.row.running : null,
 			},
+			...(m.notice !== null ? { notice: m.notice } : {}),
 		}
 	},
 	onAction: (action, state, ui) => {

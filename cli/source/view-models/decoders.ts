@@ -382,6 +382,8 @@ export interface DecodersModel {
 	rowIds: string[]
 	pageSize: number
 	selected: DecoderFacts | null
+	/** The last write's result for the footer while the detail is closed (R64, R75), else null. */
+	notice: string | null
 }
 
 /** The most recent decoder write that still has a result line, as `<id> · <text>` (R64). */
@@ -435,13 +437,13 @@ export function decodersModel(
 	const listWidth =
 		open && b.placement.kind === "right" ? width - b.placement.width - 2 : width
 	const detailWidth = b.placement.kind === "right" ? b.placement.width : width
-	// R64: with the detail closed, the last write's result stays visible under the list.
+	// R64/R75: with the detail closed, the last write's result goes to the footer.
 	const result = open ? null : latestDecoderResult(state, state.now)
 	const table = decoderTable(
 		facts,
 		"decoders",
 		listWidth,
-		Math.max(1, b.listRows - (result ? 1 : 0)),
+		b.listRows,
 		selected?.row.id ?? null,
 		state.now,
 	)
@@ -449,11 +451,7 @@ export function decodersModel(
 	const list =
 		open && b.placement.kind === "overlay"
 			? []
-			: [
-					table.header,
-					...(placeholder ? [placeholder] : table.rows),
-					...(result ? [result] : []),
-				]
+			: [table.header, ...(placeholder ? [placeholder] : table.rows)]
 	const detail =
 		open && selected
 			? detailWindow(
@@ -471,5 +469,6 @@ export function decodersModel(
 		rowIds: facts.map(f => f.row.id),
 		pageSize: Math.max(1, b.listRows),
 		selected,
+		notice: result ? lineText(result) : null,
 	}
 }

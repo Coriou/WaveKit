@@ -53,7 +53,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 `;
 
 exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  decoders 1 restarting
+" api ● 2s  iq ● streaming  1 restarting  drops !21% now
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s
  window    444.947–446.995 MHz   external control
    DECODERS         process     decodes       drop  window

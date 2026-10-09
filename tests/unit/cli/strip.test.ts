@@ -92,6 +92,14 @@ describe("strip (spec §4.2 widths)", () => {
 		const s = scenarioState("live")
 		expect(lineText(stripLine(stripInput(s), 119))).toMatch(/drops? !21% now/)
 	})
+	it("R75: at 60 columns the drops lane survives a restarting decoder", () => {
+		const out = lineText(stripLine(stripInput(scenarioState("live")), 59))
+		expect(out).toBe("api ● 2s  iq ● streaming  1 restarting  drops !21% now")
+		// The word comes back as soon as there is room.
+		expect(
+			lineText(stripLine(stripInput(scenarioState("live")), 79)),
+		).toContain("decoders")
+	})
 	it("pins the §4.2 120-column row", () => {
 		const left =
 			"api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 failing · 2 in window  drops !34% now"
