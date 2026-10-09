@@ -780,3 +780,68 @@ User-confirmed primary use case: click a signal on the waterfall, every plausibl
 - `spectrum:frame` stats gain `blankedFrames`; status warnings `broadband-rfi` (with period) and comb-masked spurs.
 - **Suggested UI:** waterfall click → identify with a live trial list (decoder, outcome) and the result card; an
   artefact answer explains itself ("DC spike", "receiver spur", "IQ image of 446.194 MHz", "broadband RFI").
+
+#### Signal discovery scanner amendment: identify mode details — 2026-10-10 (still NOT merged)
+
+Refines the 2026-10-09 identify amendment (plan Task 35a); everything is additive to it.
+- **Request:** `bandwidthHz` sets the match tolerance `max(1 kHz, bw/2)` around `frequencyHz`, so a waterfall click should
+  send the display's click width (e.g. 12 500). `timeoutMs` 1000–120000 (default 15000). `record` is a boolean (default
+  true: voice, analog and data recordings of the trials). Exactly one of `frequencyHz` or `all: true`, else 400.
+- **Errors:** 409 `OUT_OF_WINDOW` carries `details.window {startHz, endHz}`; 409 `SCANNER_SOURCE_BUSY` while a sweep holds
+  the source's tuner; 503 `SCANNER_DISABLED`. The job is a normal job (`spec.kind: "identify"`, listed, cancellable,
+  deletable when ended) but `pause`/`resume` answer 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
+  `SCANNER_IDENTIFY_NOT_EDITABLE`; `POST /api/scanner/jobs` does not accept `kind: "identify"`. Identify jobs are not kept
+  across a core restart; the last 50 ended ones stay listed.
+- **`ScanJob.identify`:** `{target, timeoutMs, protocols, exhaustive, record, targets: ScannerIdentifyEventData[]}`, so a
+  client that missed WS messages refetches the job.
+- **`scanner:identify`:** one stream per target; `all: true` sends one per surfaced emission with `targetHz` = its centre.
+  Coalesced to ≤ 1/s per (job, target), latest state always delivered.
+- **Trials:** `decoder`, `mode` and `transport` are null for an `unsupported` trial, which carries `reason`:
+  `"no-decoder"|"needs-channelizer"|"unsupported-format"`. `outcome` adds `"pending"|"running"` (while trying),
+  `"not-needed"` (an earlier trial decoded and `exhaustive` is false) and `"cancelled"`. Trials are per protocol; one
+  dsd-fme run covers DMR, P25, YSF and D-STAR, so those share an outcome source.
+- **Result:** adds `observationId?`. `measurements` adds `source: "track"|"spectrum"` (`spectrum` = no track resolved, read
+  from the last spectrum block at the target), `acf30?`, `acf60?`; `obwHz`, `peakDbfs`, `snrDb`, `floorDbfs` and
+  `dutyCycle` may be null. `artefact: "rfi"` is reported only after the wait found no signal; `dc`, `spur` and `image`
+  answer at once with no trial.
+
+#### Signal discovery scanner amendment: artefact and spectrum shapes, corrected — 2026-10-10 (still NOT merged)
+
+Final shapes after the second plan review. This entry **corrects** the 2026-10-09 "core `spectrum` channel" and
+"identify mode" amendments and the 2026-10-10 "identify mode details" amendment where they differ; where this entry
+says nothing, they stand.
+- **`spectrum:frame` masks** (corrects the spectrum amendment): `masks: {dcHz, dcGuardHz, spurRanges: [{startHz,
+  endHz}]}`. `spurBins` is **renamed `spurRanges`** and carries RF ranges in Hz (what a waterfall draws), not bin
+  indices. `spurRanges` holds every masked spur line: baseband spurs plus the fast-path provisional and comb lines.
+  The frame also carries `profile` (`"<hz>:<bins>"`) and `binCount`. Frame `tracks[].flags` stay `{burst, iqImage,
+  edge}`.
+- **Impulse blanking and broadband RFI** (corrects the identify amendment's line "`spectrum:frame` stats gain
+  `blankedFrames`; status warnings `broadband-rfi` (with period) and comb-masked spurs", which is **retracted**):
+  `spectrum:frame` has no stats, and there is no `broadband-rfi` warning (`SpectrumWarning.code` stays
+  `"untracked-retune" | "host-centre-mismatch"`). Both are reported per engine in `GET /api/scanner` and
+  `scanner:status`, `engines[]` (`ScannerEngineStatus`):
+  - `blankedFrames: number`: the frames blanked as broadband impulses;
+  - `broadbandRfi: {periodMs: number} | null`: non-null while periodic broadband RFI is active.
+
+  Show "broadband RFI every N ms" from `broadbandRfi`. Comb-masked spurs appear only as `masks.spurRanges`.
+- **`ScannerEngineStatus`** (`GET /api/scanner` `engines[]`), all fields: `sourceId`, `state`, `rbwHz`, `fftSize`,
+  `kByRange[]`, `floorDbfs`, `floorOccupied`, `overload`, `settleMode`, `settleMs`, `settleMeasured`,
+  `markerSupported`, `stuckTestMode`, `staleAfterSettle`, **`blankedFrames`**, **`broadbandRfi`**, `passive
+  {enabled, disabledReason?}`, `frequencyError {hz, ppm, discoveries} | null`, `lastError?`. The bold fields are the
+  additions for artefact rejection.
+- **`TrackFlags.spur`** is a core-internal sticky track flag (a track on a spur line: baseband, provisional or comb).
+  It is not in any DTO. Clients see spur lines only as `masks.spurRanges`; such a track never surfaces and never
+  gets a probe. On a fresh install a comb tooth can surface as a `carrier` discovery in its first 30 s, until the
+  comb is masked. It is then unlinked, and its discovery is deleted (`scanner:discovery` `change: "deleted"`)
+  unless it holds decode evidence. After a restart the persisted spur state starts masked.
+- **Identify trials** (corrects the identify details amendment): `mode` and `transport` are null for an `unsupported`
+  trial, which carries `reason`. `decoder` names the decoder that would run the trial (e.g. `rtl433` with
+  `needs-channelizer`), or is null when none exists (`no-decoder`).
+- **Identify verdict:** `identified` means this identify's own trials decoded an identity (H2). A discovery decoded
+  earlier, by another transmission or by passive discovery, with no decode in this job gives `candidate`, with the
+  stored identity in `result.identity`.
+- **Identify timing:** `timeoutMs` bounds only the wait for a signal. A transmission that keys up inside it is still
+  tried. If `all: true` finds no surfaced emission within `timeoutMs`, the job completes with `identify.targets: []`
+  and sends no `scanner:identify` message; clients see only `scanner:job` `completed`.
+- **IQ image answer:** `artefact: "image"` carries no partner field. The UI text "IQ image of <f>" uses
+  `f = 2 × masks.dcHz − targetHz` from the latest frame.

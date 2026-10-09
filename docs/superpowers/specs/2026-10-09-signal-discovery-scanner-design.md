@@ -412,7 +412,8 @@ to at least `preMs/1000 + 1` s while it runs.
 - **Broadband impulses** (periodic RFI from switching supplies and the like): a frame whose power
   rises ≥ 6 dB over the per-bin floor on ≥ 50 % of usable bins is blanked (left out of integration,
   counted as `blankedFrames`). ≥ 3 blanked frames at a stable interval (± 10 %) are reported as
-  `broadband-rfi` with the period. A block with more than half its frames blanked is excluded from
+  broadband RFI with the period (engine status `broadbandRfi {periodMs}`, § 12.1). A block with
+  more than half its frames blanked is excluded from
   floor learning and FA accounting, so periodic RFI neither opens tracks nor lifts the floor.
 - A pure `artefactOf(centreHz, epoch, masks)` answers `dc` / `spur` / `image` / `rfi` / none for any
   frequency, so identify mode (§ 10.8) can say why a cursor target is not an emission.
@@ -570,6 +571,11 @@ intermodulation appear well below ADC clipping (run8's handheld was +69.9 dB per
 
 - The segmenter keeps a raster-split segment only if it has its own local peak and is no more than
   30 dB below an adjacent track; otherwise it is marked `skirt` and merged into the parent.
+- A separate weak segment (a hole in the on-bins kept it from merging) more than 50 dB below a
+  segment whose peak is within ±31.25 kHz (±2 channels of a 12.5 kHz raster) is that emitter's
+  spectral regrowth or phase-noise skirt: it is dropped and the strong segment marked `skirt`.
+  Segments at the strong one's mirror about DC are left for the IQ-image check (§ 4.9), and
+  intermod products (≈ 40 dBc) stay to be capped below.
 - After a decode, if the same identity is already decoded at another frequency in the same window
   with ≥ 20 dB more power, or the frequency matches `2f1 − f2` (± 1 RBW) of two stronger tracks, the
   observation is flagged `adjacentLeak` or `suspectedIntermod` and its discovery is capped at
@@ -1089,14 +1095,17 @@ it. `kind: "identify"` is a first-class job (also `POST /api/scanner/identify`):
   Identify never takes a tuner lease; a target outside the window is 409 `OUT_OF_WINDOW` (tune
   first, e.g. by cursor).
 - Flow: (1) resolve the target to a live track within `max(1 kHz, bw/2)`, waiting up to `timeoutMs`
-  for it to transmit (`waiting-for-signal`); a target on an artefact mask ends at once as
+  for it to transmit (`waiting-for-signal`; a track that resolves in time is tried even if it settles
+  after the timeout); a target on an artefact mask ends at once as
   `unidentified` with `artefact` (§ 4.9). (2) **Plausible decoders** = every protocol with a prior
   > 0 from the bandwidth class, the bandplan and the spectral features, ordered by score (not only the
   top hypothesis). (3) **Trials**: before the channelizer, sequential `offset` probes with pre-roll at
   the highest scanner priority (they preempt passive probes), each for its `confirmHoldMs`; after it,
   parallel `channel` probes within `maxProbes.channel`. Stop at the first accepted decode (H2) unless
-  `exhaustive`. (4) **Result**: `identified` (decoded), `candidate` (classified or spectral score
-  ≥ 0.5) or `unidentified`, always with measurements (centre, OBW, peak, SNR, floor, duty, ACF,
+  `exhaustive`. (4) **Result**: `identified` (decoded by this identify's own trials; a discovery
+  decoded earlier, by another transmission or by passive discovery, gives `candidate` with its stored
+  identity), `candidate` (classified or spectral score ≥ 0.5) or `unidentified`, always with
+  measurements (centre, OBW, peak, SNR, floor, duty, ACF,
   class) and the trial list (`protocol, decoder, mode, transport, outcome`: `decoded` / `no-sync` /
   `crc-errors` / `timeout` / `skipped-budget` / `unsupported`). The observation feeds the discovery
   store like any other.
@@ -1120,7 +1129,7 @@ All additive. DTOs live in `packages/api-types/src/scanner.ts`. Errors use the e
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/scanner` | status: enabled; engines per source (`state`, RBW, `k` per range, `faPerMhzMin`, `floorDbfs`, `floorOccupied`, `overload`, `settleMode`, `settleMs` + `measured`, `markerSupported`); channelizer availability; budgets in use; CPU guard metric; frequency-error estimate; disk state |
+| `GET /api/scanner` | status: enabled; engines per source (`state`, RBW, `k` per range, `faPerMhzMin`, `floorDbfs`, `floorOccupied`, `overload`, `settleMode`, `settleMs` + `measured`, `markerSupported`, `blankedFrames`, `broadbandRfi {periodMs} \| null` (§ 4.9)); channelizer availability; budgets in use; CPU guard metric; frequency-error estimate; disk state |
 | `GET /api/scanner/settings` | effective runtime settings with provenance (`config`, `runtime`, `default`) and JSON-schema-like bounds for UI forms |
 | `PATCH /api/scanner/settings` | runtime-safe keys: `passive` per source, `cpuBudgetCores`, `maxProbes`, detection defaults, storage caps, WS rates; persisted in `settings.json` |
 | `GET /api/scanner/bandplans` | built-in bandplans for the effective region |
@@ -1161,7 +1170,8 @@ Channel `spectrum` (opt-in by subscription; user decision, generalised on the ma
 into a core feed for CLI and web waterfalls): `spectrum:frame` `{sourceId, epoch, tuningTrust,
 centerHz, sampleRateHz, binHz, startHz, binEncoding: "u8-halfdb-127.5", bins: <base64 Uint8,
 value = clamp(round((dBFS + 127.5) × 2), 0, 255)>, floorDbfs, thresholdDb, tracks: [{startHz,
-endHz, flags}], masks: {dcHz, spurBins}, at}`, max-hold over the display interval. Rate and bins come
+endHz, flags}], masks: {dcHz, dcGuardHz, spurRanges: [{startHz, endHz}]}, at}` (plus `profile` and
+`binCount`; spurs as RF ranges, which is what a waterfall draws), max-hold over the display interval. Rate and bins come
 from a frame **profile** (today one, from settings: 10 Hz × 512); frames are generated per profile
 key so per-subscription profiles (e.g. a web UI at 25 Hz × 2048) can be added without redesign.
 Engines run while any consumer exists (scanner jobs, passive jobs, `spectrum` subscribers), even
@@ -1236,7 +1246,9 @@ Each test carries `// Feature: signal-discovery-scanner, Property N: <name>` and
   streams; absolute sample indices stay consistent across drops. (§ 4.1, § 4.6)
 - **P7 Identity and dedupe.** For any observation sequence: no two discoveries share
   `(key, family, identity)`; with fixed-grid keys, sticky association and per-key order preserved,
-  any arrival order yields the same set of discovery keys and counts; merging is idempotent on
+  any arrival order yields the same set of discovery keys and counts, provided every two emitters'
+  centres are more than `tol + 2·J` apart (`J` = the larger centre jitter; sticky association compares
+  with a discovery's median centre, so closer emitters can associate order-dependently); merging is idempotent on
   repeated observation ids; a re-key migration leaves no colliding pair. (§ 5.2, § 7.2)
 - **P8 Monotone confidence, sticky flags.** Confidence never decreases (except to a cap set by a
   leak/intermod flag before it was decoded); `encrypted` never goes true → false; a decoded
@@ -1278,8 +1290,10 @@ Each test carries `// Feature: signal-discovery-scanner, Property N: <name>` and
   `sha256` matches the file, and its sample range lies inside the ring at write time. (§ 8)
 - **P23 Impulse blanking.** Periodic broadband impulses (2 ms every 100 ms, +20 dB over 90 % of
   bins) never open a track and lift the floor by ≤ 0.5 dB. (§ 4.9)
-- **P24 Comb masking.** A 7-tooth spur comb is masked within 30 s of settled data and never
-  surfaces, while a real 9 kHz emission between teeth is still detected. (§ 4.9)
+- **P24 Comb masking.** A 7-tooth spur comb is masked within 30 s of settled data; a tooth that
+  surfaced before then is unlinked at that point (its discovery deleted unless it holds decode
+  evidence), no tooth surfaces once masked, and a restart with persisted spur state starts masked;
+  a real 9 kHz emission between teeth is still detected. (§ 4.9)
 - **P25 Identify trials.** Trials cover exactly the protocols with prior > 0 (minus `protocols`
   restrictions) in score order; an artefact target never starts a trial; the result always carries
   measurements. (§ 10.8)
