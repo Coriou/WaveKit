@@ -178,16 +178,19 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 	// Validates: addendum §11, §12.1
 	it("agrees with admitChannel on random requests", async () => {
 		const OUT_RATES = [12_000, 24_000, 48_000, 250_000, 384_000, 1_050_000]
-		// A uniform integer rate rarely has a rational split for these outputs (PF5), so a uniform
-		// whole-kHz rate is checked too, to see admitted channels open away from the pinned rates.
+		// A uniform integer rate rarely has a rational split for these outputs (PF5), so a whole-kHz
+		// rate with no prime factor above 5 is checked too, to see admitted channels open away from the
+		// pinned rates. Each one plans every OUT_RATES at the narrowest transition drawn below
+		// (1875 kHz is 5-smooth too, but has no feasible split to 384 kHz).
+		const SMOOTH_KHZ = [
+			1_800, 1_920, 1_944, 2_000, 2_025, 2_048, 2_160, 2_187, 2_250, 2_304,
+			2_400, 2_430, 2_500, 2_560, 2_592, 2_700,
+		]
 		const [randomFs = 2_000_000] = fc.sample(
 			fc.noBias(fc.integer({ min: 1_800_000, max: 2_800_000 })),
 			1,
 		)
-		const [randomKhz = 2_000] = fc.sample(
-			fc.noBias(fc.integer({ min: 1_800, max: 2_800 })),
-			1,
-		)
+		const [randomKhz = 2_000] = fc.sample(fc.constantFrom(...SMOOTH_KHZ), 1)
 		const rates = [
 			["2.048", 2_048_000],
 			["2.4", 2_400_000],
@@ -240,50 +243,60 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 							// Some rates need a long prototype, designed on the process's main thread.
 							15_000,
 						)
-						const verdict = admitChannel(
-							req,
-							{ sampleRateHz: fs, centerHz: CENTER },
-							FRACTION,
-						)
-						// PF5: away from the two pinned rates the process may find no rational split for an admitted
-						// request. Its verdict is final there (the manager suspends the channel), so count it.
-						if (
-							kind.startsWith("random") &&
-							verdict.admitted &&
-							e.type === "rejected" &&
-							e.detail.includes("no feasible rational split")
-						) {
-							tally.noFeasibleSplit++
-							return
+						try {
+							const verdict = admitChannel(
+								req,
+								{ sampleRateHz: fs, centerHz: CENTER },
+								FRACTION,
+							)
+							// PF5: at a uniform random rate the process may find no rational split for an admitted
+							// request. Its verdict is final there (the manager suspends the channel), so count it.
+							if (
+								kind === "random" &&
+								verdict.admitted &&
+								e.type === "rejected" &&
+								e.reasonCode === "channel-request-invalid" &&
+								e.detail.includes("no feasible rational split")
+							) {
+								tally.noFeasibleSplit++
+								return
+							}
+							const expected = verdict.admitted ? "opened" : verdict.reasonCode
+							const actual = e.type === "opened" ? "opened" : e.reasonCode
+							expect(
+								actual,
+								`fs=${fs} ${JSON.stringify(req)} ${e.type === "rejected" ? e.detail : ""}`,
+							).toBe(expected)
+							if (e.type === "rejected") {
+								tally[
+									e.reasonCode === "channel-outside-capture"
+										? "outside"
+										: "invalid"
+								]++
+								return
+							}
+							tally.opened++
+							expect(e).toMatchObject({
+								generation: 1,
+								outputRateHz: c.out,
+								format: c.format,
+							})
+						} finally {
+							// Also on a failed run, so channels do not pile up while fast-check shrinks.
+							if (e.type === "opened") {
+								chan.p.send({ v: 1, type: "close", id })
+								expect(await chan.next(is("closed", id))).toMatchObject({
+									reason: "requested",
+								})
+							}
 						}
-						const expected = verdict.admitted ? "opened" : verdict.reasonCode
-						const actual = e.type === "opened" ? "opened" : e.reasonCode
-						expect(
-							actual,
-							`fs=${fs} ${JSON.stringify(req)} ${e.type === "rejected" ? e.detail : ""}`,
-						).toBe(expected)
-						if (e.type === "rejected") {
-							tally[
-								e.reasonCode === "channel-outside-capture"
-									? "outside"
-									: "invalid"
-							]++
-							return
-						}
-						tally.opened++
-						expect(e).toMatchObject({
-							generation: 1,
-							outputRateHz: c.out,
-							format: c.format,
-						})
-						chan.p.send({ v: 1, type: "close", id })
-						expect(await chan.next(is("closed", id))).toMatchObject({
-							reason: "requested",
-						})
 					},
 				),
 				{ numRuns: 100 },
 			)
+			// Not vacuous: admitted channels really opened at every rate but the uniform random one.
+			if (kind !== "random")
+				expect(tally.opened, `fs=${fs} (${kind})`).toBeGreaterThan(0)
 			// Agreement stats for the run log (the random rate changes every run).
 			process.stdout.write(
 				`[Property 1] fs=${fs} (${kind}) ${JSON.stringify(tally)}\n`,
@@ -360,9 +373,12 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 			control.write(Buffer.concat([bytes, Buffer.from("\n")]))
 			chan.p.send(fence(id))
 			await chan.next(is("rejected", id))
+			const at = chan.events.findIndex(
+				(e, k) => k >= from && e.type === "rejected" && e.id === id,
+			)
 			// `stats` arrives every 5 s whatever the control traffic.
 			return chan.events
-				.slice(from, -1)
+				.slice(from, at)
 				.filter(e => e.type !== "stats")
 				.map(e => e.type)
 		}
@@ -439,7 +455,12 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 			// The fast channel has every sample once the process has read the whole input.
 			await until(() => fast.bytes() === total * 8, 15_000, "fast output")
 			if (withStalled) {
-				const stats = await chan.next(is("stats"), 8_000)
+				// The first stats event after the whole input was read (an earlier one predates the drops).
+				const stats = await chan.next(
+					(e): e is Ev<"stats"> =>
+						e.type === "stats" && e.inputSamples === 2 * FS,
+					8_000,
+				)
 				const ofSlow = stats.channels.find(c => c.id === "slow")
 				const ofFast = stats.channels.find(c => c.id === "fast")
 				expect(ofSlow?.queueHighWaterBytes).toBeLessThanOrEqual(slowQueue)
@@ -561,7 +582,9 @@ describe.skipIf(!bin)("wavekit-chan binary", () => {
 		expect(await chan.next(is("closed", "gone"))).toMatchObject({
 			reason: "client-gone",
 		})
-		await new Promise(r => setTimeout(r, 300)) // the stalled writer is blocked in write_all by now
+		// Once the live client has the whole block, the stalled channel has been handed its 384 000 B too,
+		// far past its socket buffer: its writer is blocked in write_all.
+		await until(() => live.bytes() === 48_000 * 8, 10_000, "live output")
 		const t = Date.now()
 		chan.p.send({ v: 1, type: "close", id: "stalled" })
 		expect(await chan.next(is("closed", "stalled"))).toMatchObject({
