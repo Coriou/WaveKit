@@ -901,10 +901,10 @@ function tunerBlock(
 		? unknown("frequency")
 			? [
 					...(edit.field === "frequency" ? [sp(glyphs().cursor, "edit")] : []),
-					sp("? Hz", edit.field === "frequency" ? "accent" : role),
+					sp("?", edit.field === "frequency" ? "accent" : role),
 				]
 			: withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
-		: txt(unknown("frequency") ? "? Hz" : formatHz(t.frequency), role)
+		: txt(unknown("frequency") ? "?" : formatHz(t.frequency), role)
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
@@ -987,8 +987,11 @@ function tunerBlock(
 	const dbText = dbUnknown
 		? (indexText ?? "?")
 		: formatDb(d ? d.gainTenthsDb : t.gain)
+	// Sign-off item 4: nothing known about the gain reads one "?".
 	const gainText = unknown("gainMode")
-		? `mode ?${sep()}${dbText}`
+		? dbText === "?"
+			? "?"
+			: `mode ?${sep()}${dbText}`
 		: gainMode === "agc"
 			? "agc"
 			: `manual${sep()}${dbText}`

@@ -345,16 +345,16 @@ describe("A8 fix 1: strip counts (I-B, R77) and window count (I-C)", () => {
 			},
 		}
 	}
-	it("I-B: a running faulted decoder counts as failing; restarting stays apart", () => {
+	it("R96: a running faulted decoder (the ! row) counts as restarting, not failing", () => {
 		const st = withRows(d =>
 			d.id === "readsb"
 				? { running: true, health: "faulted", restartCount: 7 }
 				: {},
 		)
 		const dec = stripInput(st).decoders!
-		expect(dec.failing).toBe(1)
-		expect(dec.restarting).toBe(1)
-		expect(lineText(stripLine(stripInput(st), 199))).toContain("1 failing")
+		expect(dec.failing).toBe(0)
+		expect(dec.restarting).toBe(2)
+		expect(lineText(stripLine(stripInput(st), 199))).toContain("2 restarting")
 	})
 	it("I-B: a pending suspension counts as failing", () => {
 		const st = withRows(d =>

@@ -97,14 +97,15 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const age = src.activity?.sampleAgeMs
 	const relay = state.relay.value
 	const { centre, rate } = rxValues(state, src.id)
-	const rateLine: Line = [v(formatRate(iq.rateBytesPerSec))]
+	// Sign-off item 5: a byte rate beside a lane that is not live reads as flow,
+	// so it shows only while IQ is live (as in the strip).
+	const rateLine: Line =
+		iq.glyph === "live" ? [v(formatRate(iq.rateBytesPerSec))] : []
 	// M1: the sample rate follows the window rule; unknown is left out, never 0.
 	// Final views: core measures another rate, so this one is only declared.
 	const mismatch = src.rateMismatch !== undefined
-	const rateRich: Line | null = rate
+	const msps: Line | null = rate
 		? [
-				...rateLine,
-				sp(sep, "label"),
 				mismatch
 					? {
 							text: `${formatMSps(rate.v)} declared${sep}rate mismatch`,
@@ -113,11 +114,31 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 					: { text: formatMSps(rate.v), role: role("value", rate.old) },
 			]
 		: null
+	const rateRich: Line | null = msps
+		? rateLine.length > 0
+			? [...rateLine, sp(sep, "label"), ...msps]
+			: msps
+		: null
 	// M5: a disabled relay has no clients to report.
 	const relayText =
 		relay && relay.enabled
 			? `relay ${counted(relay.clientsConnected, "client")}`
 			: null
+	const rateVariants: Line[] = [
+		rateLine,
+		...(rateRich ? [rateRich] : []),
+		...(relayText
+			? [
+					[
+						...(rateRich ?? rateLine),
+						sp(
+							`${(rateRich ?? rateLine).length > 0 ? GROUP_SEP : ""}${relayText}`,
+							"label",
+						),
+					],
+				]
+			: []),
+	].filter(l => l.length > 0)
 	const others = (state.sources.value?.length ?? 1) - 1
 	// M2: a stale source keeps its sample age ("no samples 23s", §9).
 	const word =
@@ -167,21 +188,9 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 					},
 				]
 			: []),
-		{
-			priority: 2,
-			variants: [
-				rateLine,
-				...(rateRich ? [rateRich] : []),
-				...(relayText
-					? [
-							[
-								...(rateRich ?? rateLine),
-								sp(`${GROUP_SEP}${relayText}`, "label"),
-							],
-						]
-					: []),
-			],
-		},
+		...(rateVariants.length > 0
+			? [{ priority: 2, variants: rateVariants }]
+			: []),
 		// M7: further sources are counted, not hidden.
 		...(others > 0
 			? [

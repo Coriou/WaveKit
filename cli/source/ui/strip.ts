@@ -33,7 +33,8 @@ export interface StripInput {
 	api: ApiView
 	iq: IqView
 	decoders: StripDecoders | null
-	drops: { ratio: number | null; backpressure: boolean }
+	/** `idle`: no source streams, so there is no current drop to report (—), sign-off item 5. */
+	drops: { ratio: number | null; backpressure: boolean; idle?: true }
 	rx: StripRx | null
 	clockMs: number
 	old: { iq: boolean; decoders: boolean; rx: boolean }
@@ -209,6 +210,11 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
  */
 function dropsGroup(d: StripInput["drops"]): Group {
 	const g = glyphs()
+	if (d.idle)
+		return {
+			priority: 4,
+			variants: [[label("drops "), { text: g.na, role: "label" }]],
+		}
 	if (d.ratio === null) {
 		const unknown: Line = [label("drops "), { text: "?", role: "unknown" }]
 		return {

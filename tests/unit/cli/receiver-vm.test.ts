@@ -947,7 +947,7 @@ describe("receiver view-model (spec §6.4)", () => {
 				lineText,
 			)
 			expect(view.find(l => l.startsWith("frequency"))).toMatch(
-				/^frequency \? Hz {3}window \? {3}/,
+				/^frequency \? {3}window \? {3}/,
 			)
 			expect(view.join("\n")).not.toMatch(/\b(98\.8|100\.000|101\.2)/)
 			expect(stripInput(st).rx).toBeNull()
@@ -962,7 +962,7 @@ describe("receiver view-model (spec §6.4)", () => {
 				true,
 			).map(lineText)
 			expect(capsView.find(l => l.startsWith("frequency"))).toMatch(
-				/^frequency \? Hz {3}window 444\.947–446\.995 MHz/,
+				/^frequency \? {3}window 444\.947–446\.995 MHz/,
 			)
 			const edit = editAfter(st, ["up"])
 			expect(tunerConfirm(edit, st)?.prompt).toBe(
