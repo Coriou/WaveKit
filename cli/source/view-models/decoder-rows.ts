@@ -103,7 +103,13 @@ const compute = memoOne(
 		return rows.map(row => {
 			const sess = session[row.id]
 			const inc = restartIncrements(sess?.restarts ?? [], now)
-			const proc = processState(row, inc, stopped.includes(row.id), now)
+			const proc = processState(
+				row,
+				inc,
+				stopped.includes(row.id),
+				now,
+				sess?.suspendingSince,
+			)
 			const ratePerSec = oldRest ? null : counterRate(sess?.events ?? [])
 			const lastAt = lastDecodeAt(row, sess)
 			const branch =

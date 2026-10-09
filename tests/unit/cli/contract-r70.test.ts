@@ -145,6 +145,7 @@ describe("R70 processState", () => {
 				0,
 				false,
 				NOW,
+				NOW - 60_000,
 			),
 		).toBe("suspend-pending")
 		expect(procRole("suspend-pending")).toBe("attention")
@@ -158,6 +159,7 @@ describe("R70 processState", () => {
 				0,
 				false,
 				NOW,
+				NOW - 2_000,
 			),
 		).toBe("suspended")
 	})
@@ -175,12 +177,22 @@ describe("R70 processState", () => {
 	})
 })
 
-function stateWith(rows: DecoderRow[]) {
+/** `suspendingSince`: local first sight of "suspending" for every row (M-b). */
+function stateWith(rows: DecoderRow[], suspendingSince?: number) {
 	const s = scenarioState("live")
-	return { ...s, now: NOW, decoders: laneOk(rows, NOW - 1000, "rest") }
+	const session =
+		suspendingSince === undefined
+			? s.session
+			: Object.fromEntries(
+					rows.map(r => [r.id, { ...s.session["dsd-fme"]!, suspendingSince }]),
+				)
+	return { ...s, now: NOW, decoders: laneOk(rows, NOW - 1000, "rest"), session }
 }
 const processVariants = (r: DecoderRow) => {
-	const st = stateWith([r])
+	const st = stateWith(
+		[r],
+		r.transition === "suspending" ? NOW - 60_000 : undefined,
+	)
 	const f = decoderFacts(st)[0]!
 	return (decoderCells(f, st.now)["process"]?.variants ?? []).map(lineText)
 }
@@ -414,7 +426,14 @@ describe("A8 fix 1: I-A detail lines and M-a/M-c/M-d countdowns", () => {
 			],
 		]
 		for (const [over, re] of cases)
-			expect(detailOf(stateWith([row(over)]))).toMatch(re)
+			expect(
+				detailOf(
+					stateWith(
+						[row(over)],
+						over.transition === "suspending" ? NOW - 60_000 : undefined,
+					),
+				),
+			).toMatch(re)
 	})
 	it("M-a: countdowns use the server clock, not the local one", () => {
 		const SERVER = NOW - 3_600_000
@@ -483,5 +502,53 @@ describe("A8 fix 1: I-A detail lines and M-a/M-c/M-d countdowns", () => {
 			}),
 		)
 		expect(v).toContain("faulted · retry pending")
+	})
+})
+
+describe("A8 fix 1: M-b suspend-pending timed from first sight", () => {
+	it("a long-standing suspension that only now shows suspending is not pending yet", () => {
+		const old = {
+			suspended: true,
+			transition: "suspending" as const,
+			suspension: { reasonCode: "x", since: iso(NOW - 3_600_000) },
+		}
+		expect(
+			processState(row({ running: true, ...old }), 0, false, NOW, NOW - 1_000),
+		).toBe("suspended")
+		expect(
+			processState(row({ running: true, ...old }), 0, false, NOW, NOW - 11_000),
+		).toBe("suspend-pending")
+		expect(processState(row({ running: true, ...old }), 0, false, NOW)).toBe(
+			"suspended",
+		)
+	})
+	it("the reducer records when it first saw suspending and clears it after", async () => {
+		const { initialState, reduce } =
+			await import("../../../cli/source/data/reducers.js")
+		const T = NOW
+		const rest = (at: number, transition?: "suspending") => ({
+			kind: "rest" as const,
+			endpoint: "decoders" as const,
+			at,
+			outcome: {
+				ok: true as const,
+				rejected: 0,
+				value: [
+					row({
+						running: true,
+						suspended: true,
+						...(transition ? { transition } : {}),
+					}),
+				],
+			},
+		})
+		let st = reduce(initialState(T), [rest(T, "suspending")], T)
+		expect(st.session["acarsdec"]?.suspendingSince).toBe(T)
+		st = reduce(st, [rest(T + 5_000, "suspending")], T + 5_000)
+		expect(st.session["acarsdec"]?.suspendingSince).toBe(T)
+		st = reduce(st, [rest(T + 12_000, "suspending")], T + 12_000)
+		expect(decoderFacts(st)[0]?.proc).toBe("suspend-pending")
+		st = reduce(st, [rest(T + 15_000)], T + 15_000)
+		expect(st.session["acarsdec"]?.suspendingSince).toBeUndefined()
 	})
 })

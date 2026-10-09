@@ -88,6 +88,7 @@ export function stripInput(state: AppState): StripInput {
 				restartIncrements(state.session[d.id]?.restarts ?? [], now),
 				state.actions.stoppedByCli.includes(d.id),
 				now,
+				state.session[d.id]?.suspendingSince,
 			)
 			if (p === "up" || p === "starting") up++
 			if (isFailing(p)) failing++
