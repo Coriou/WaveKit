@@ -1,3 +1,4 @@
+import { WaveKitError } from "../../utils/errors.js"
 import type { DecoderChannelRequest } from "./types.js"
 
 /**
@@ -26,12 +27,18 @@ const invalid = (detail: string): AdmissionVerdict => ({
  * Pure. Never touches a tuner. Same check order and arithmetic as native/wavekit-chan/src/admission.rs
  * (Property 1); the integer-rate and gain checks are the ones the process makes while parsing the
  * `open` request (protocol.rs), so they also classify as `channel-request-invalid` ahead of the span.
+ * A usable fraction outside (0, 1] is a caller bug (config allows 0.5–0.95), so it throws.
  */
 export function admitChannel(
 	req: DecoderChannelRequest,
 	capture: { sampleRateHz: number; centerHz: number },
 	usableFraction: number,
 ): AdmissionVerdict {
+	if (!(usableFraction > 0 && usableFraction <= 1))
+		throw new WaveKitError(
+			`usableFraction must be within (0, 1], got ${usableFraction}`,
+			"CHANNELIZER_USABLE_FRACTION_INVALID",
+		)
 	const finite = [
 		req.centerHz,
 		req.bandwidthHz,

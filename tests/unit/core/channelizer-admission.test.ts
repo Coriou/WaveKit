@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
+import { WaveKitError } from "../../../src/utils/errors.js"
 import {
 	ADMISSION_EPSILON_HZ,
 	admitChannel,
@@ -73,6 +74,36 @@ describe("admitChannel", () => {
 		expect(v.admitted ? "admitted" : v.reasonCode).toBe(
 			"channel-request-invalid",
 		)
+		// Pins the slack itself on both inequalities: +0.5 µHz is admitted, +2 µHz is not.
+		const over = (extra: number) => ({
+			...base,
+			bandwidthHz: 2 * (24_000 - 1_200 + extra),
+		})
+		expect(over(0.5e-6).bandwidthHz / 2 + 1_200).toBeGreaterThan(24_000)
+		expect(admitChannel(over(0.5e-6), capture, 0.8).admitted).toBe(true)
+		const rate = admitChannel(over(2e-6), capture, 0.8)
+		expect(rate.admitted ? "admitted" : rate.reasonCode).toBe(
+			"channel-request-invalid",
+		)
+		const edge = 819_200 - 24_000
+		expect(
+			admitChannel({ ...base, centerHz: 162e6 + edge + 0.5e-6 }, capture, 0.8)
+				.admitted,
+		).toBe(true)
+		const span = admitChannel(
+			{ ...base, centerHz: 162e6 + edge + 2e-6 },
+			capture,
+			0.8,
+		)
+		expect(span.admitted ? "admitted" : span.reasonCode).toBe(
+			"channel-outside-capture",
+		)
+	})
+
+	it("throws on a usable fraction outside (0, 1]: a programming error, not a verdict", () => {
+		for (const f of [Number.NaN, 0, -0.5, 1.01, Number.POSITIVE_INFINITY])
+			expect(() => admitChannel(base, capture, f)).toThrow(WaveKitError)
+		expect(admitChannel(base, capture, 1).admitted).toBe(true)
 	})
 
 	it("classifies invalid requests", () => {

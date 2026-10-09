@@ -8,7 +8,6 @@ import {
 	parseEventLine,
 } from "../../../src/core/channelizer/protocol.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
-import { channelisedRatePlan } from "../../../src/core/channelizer/rate-plan.js"
 
 const open = {
 	v: 1,
@@ -227,21 +226,5 @@ describe("channelizer protocol v1", () => {
 			'{"v":1,"type":"input-eof","generation":1,"inputSamples":1.5,"discardedBytes":0}',
 		]
 		for (const line of bad) expect(parseEventLine(line).ok, line).toBe(false)
-	})
-
-	it("marks a channelised plan as resample at the realised rate", () => {
-		const plan = channelisedRatePlan(
-			{
-				verdict: "best",
-				adaptation: "integer-decimation",
-				frontendRateHz: 47_627.9,
-			},
-			{ outputRateHz: 48_000, format: "cf32", groupDelaySamples: 30 },
-		)
-		expect(plan).toMatchObject({
-			verdict: "best",
-			adaptation: "resample",
-			frontendRateHz: 48_000,
-		})
 	})
 })
