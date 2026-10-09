@@ -258,6 +258,45 @@ describe("dsd-fme pipeline", () => {
 		expect(pipeline).not.toContain("0.05")
 	})
 
+	// Over the air (run 8/9, 2026-10-09): DMR MS bursts are 30 ms on, 30 ms
+	// off, and between bursts the discriminator sits on the receiver's DC
+	// spike (-offsetHz). csdr dcblock (tau ~10 ms) turned each burst's step
+	// into a transient of ~2.4x the 4FSK decision half-spacing over its
+	// first 10 ms: ~20 % of decoded voice muted. dsd-fme tracks levels itself.
+	it("feeds dsd-fme the discriminator without a DC blocker", () => {
+		const pipeline = (
+			createDecoder({
+				inputSampleRate: 2_048_000,
+				offsetHz: 6000,
+			}) as unknown as Internals
+		).buildPipelineCommand()
+		expect(pipeline).toContain(
+			"csdr shift -0.0029296875 | csdr firdecimate 43 0.003052 --cutoff 0.1968 | csdr fmdemod | csdr gain 2 | csdr limit | csdr convert -i float -o s16 | sox -t raw -r 47627.90697674418 -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme -i /dev/stdin -fa",
+		)
+		expect(pipeline).not.toContain("dcblock")
+	})
+
+	it("matches the chain the real-binary regression script checks", () => {
+		// scripts/dsd-fme-voice-ab.mjs feeds a recorded discriminator output
+		// through BACK_CHAIN + the sox WAV wrapper into dsd-fme; it must test
+		// exactly what the decoder runs after `csdr fmdemod`.
+		const script = readFileSync(
+			fileURLToPath(
+				new URL("../../../scripts/dsd-fme-voice-ab.mjs", import.meta.url),
+			),
+			"utf8",
+		)
+		const backChain = /export const BACK_CHAIN = "([^"]+)"/.exec(script)?.[1]
+		expect(backChain).toBeDefined()
+		expect(script).toContain("export const DEMOD_RATE = 2048000 / 43")
+		const pipeline = (
+			createDecoder({ inputSampleRate: 2_048_000 }) as unknown as Internals
+		).buildPipelineCommand()
+		expect(pipeline).toContain(
+			`csdr fmdemod | ${backChain} | csdr convert -i float -o s16 | sox -t raw -r ${2_048_000 / 43} -e signed -b 16 -c 1 - -t wav -r 48000 - | dsd-fme`,
+		)
+	})
+
 	it("shifts an off-centre channel to DC when offsetHz is set", () => {
 		const pipeline = (
 			createDecoder({

@@ -848,7 +848,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			// No filterTransition: the decimation filter is matched to the 12.5 kHz
 			// channel (a fixed 0.05 was ~102 kHz wide at 2.048 Msps).
 			enableIqAgc: this.options.enableIqAgc ?? true, // Try IQ AGC for weak signals
-			// DC block is REQUIRED for DMR - centers 4FSK symbol levels
+			// No DC blocker: TDMA (DMR) arrives in 30 ms bursts, and between bursts
+			// the discriminator sits on the receiver's DC spike (-offsetHz). csdr
+			// dcblock (R 0.998, tau ~10 ms at 47.6 kHz) turned every burst's step
+			// into a transient of ~2.4x the 4FSK decision half-spacing over its
+			// first 10 ms (run8: AMBE errors 2460 vs 88, decoded voice 20.6 % vs
+			// 1.0 % muted). dsd-fme tracks the symbol levels per burst itself.
+			skipDcBlock: true,
 		}
 	}
 
