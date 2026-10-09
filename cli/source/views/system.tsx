@@ -25,6 +25,13 @@ function SystemComponent({
 	)
 }
 
+function audioKey(state: AppState): boolean | null {
+	const a = state.audio.value
+	if (!a) return null
+	if (a.running) return true
+	return a.enabled ? false : null
+}
+
 export const systemView: ViewModule = {
 	id: "system",
 	title: "System",
@@ -34,7 +41,8 @@ export const systemView: ViewModule = {
 		pageSize: 1,
 		ctx: {
 			...EMPTY_VIEW_CTX,
-			audioRunning: state.audio.value ? state.audio.value.running : null,
+			// null hides `a` (and its footer hint) while audio is disabled and not running.
+			audioRunning: audioKey(state),
 		},
 	}),
 	onAction: (action, state, ui): ViewOutcome | undefined => {

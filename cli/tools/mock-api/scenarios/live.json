@@ -6,7 +6,7 @@
 	"rest": {
 		"/health": {
 			"status": 200,
-			"body": { "status": "ok", "timestamp": "2026-10-08T18:07:52.000Z" }
+			"body": { "status": "ok", "timestamp": "2026-10-08T18:07:50.000Z" }
 		},
 		"/api/decoders": {
 			"status": 200,
@@ -904,7 +904,7 @@
 			"data": "$decoderStatus:acarsdec"
 		},
 		{
-			"offsetMs": -1000,
+			"offsetMs": 0,
 			"type": "source:status",
 			"channel": "sources",
 			"data": "$sourceStatus:pi-iq"

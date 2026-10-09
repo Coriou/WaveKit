@@ -18,6 +18,7 @@ import type { StripInput } from "../ui/strip.js"
 import { cellWidth, lineWidth, truncate, truncateLine } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
+import { receiverTuner } from "./receiver.js"
 
 export type RxLane = "tuner" | "sources" | "relay"
 export interface RxValue {
@@ -111,7 +112,8 @@ export function stripInput(state: AppState): StripInput {
 	const agg = isFresh(state.fanout, now)
 		? aggregateDropNow(state.fanoutHistory)
 		: null
-	const tuner = state.tuner.value?.[0]
+	// The same tuner the Receiver shows: the one for the rendered source (R72 item 5).
+	const tuner = receiverTuner(state)
 	const sourceId = tuner?.sourceId ?? state.sources.value?.[0]?.id
 	const { centre, rate } = rxValues(state, sourceId)
 	// Item 8: rx dims when the lane of its centre or of its rate is old.
@@ -239,15 +241,23 @@ export function confirmLine(c: ConfirmRequest, width: number): Line {
 			: []),
 	]
 	const head = `${glyphs().confirm} `
-	const prompt = c.extra ? `${c.prompt} ${glyphs().sep} ${c.extra}` : c.prompt
-	const room = width - lineWidth(hints) - cellWidth(head) - 3
+	const room = Math.max(1, width - lineWidth(hints) - cellWidth(head) - 3)
+	// R71: groups fit by priority, so the action, a safety warning and who a change
+	// moves stay visible before field details; y/n always fit.
+	const body: Line = c.groups
+		? fitGroups(c.groups, room, { sep: ` ${glyphs().sep} ` })
+		: [
+				sp(
+					truncate(
+						c.extra ? `${c.prompt} ${glyphs().sep} ${c.extra}` : c.prompt,
+						room,
+					),
+					"value",
+					true,
+				),
+			]
 	return truncateLine(
-		[
-			sp(head, "edit"),
-			sp(truncate(prompt, Math.max(1, room)), "value", true),
-			sp("   ", "label"),
-			...hints,
-		],
+		[sp(head, "edit"), ...body, sp("   ", "label"), ...hints],
 		width,
 	)
 }

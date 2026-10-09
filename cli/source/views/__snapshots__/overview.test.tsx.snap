@@ -30,10 +30,10 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 " api × 2m 31s  iq ? unknown  rx 445.971 MHz  decoders 1 restarting  drops ?
  ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   ? · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 6m 32s ago
+ window    444.947–446.995 MHz   external control   last command 9m 01s ago
    DECODERS          process             decodes           drop now  window
- ● dsd-fme           up 52s              11s ago                  ?  in
- ● multimon-ng       up 51s              32s ago                  ?  in
+ ● dsd-fme           up 52s              2m 40s ago               ?  in
+ ● multimon-ng       up 51s              3m 01s ago               ?  in
  ● rtl433            up 51s              none for 51s             ?  out
  ● readsb            up 51s              none for 51s             ?  out
  ! acarsdec          restarting ×13      —                        —  out
@@ -41,8 +41,8 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
  ● dumpvdl2          up 50s              none for 50s             ?  out
  ● direwolf          up 50s              none for 50s             ?  out
  ● lora-meshtastic   up 50s              none for 50s             ?  out
- MESSAGES  feed stopped 18:05:19 · 7 cached
- ── gap since 18:05:19 · 2m 33s ──
+ MESSAGES  feed stopped 18:05:20 · 7 cached
+ ── gap since 18:05:20 · 2m 32s ──
  18:05:11  dsd-fme       DMR     TG 2350  SRC 2341234  8.4 s  encrypted  …
  18:04:50  multimon-ng   POCSAG  1234567  fn 3  FIRE ALARM ACTIVATION - 12 LONG…
  18:04:32  dsd-fme       DMR     TG 2350  SRC 2340001  3.1 s  quality 90%  …
@@ -198,10 +198,10 @@ exports[`Overview goldens (spec §6.1) > ws-only (REST down) 80x24 1`] = `
 " api ws ● rest × 45s  iq ● streaming  decoders 1 restarting  drops !21% now
  ! REST failing · timeout 2s · retry in 4s · REST data as of 18:07:07
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
- window    444.947–446.995 MHz   external control   last command 6m 32s ago
+ window    444.947–446.995 MHz   external control   last command 7m 15s ago
    DECODERS          process             decodes           drop now  window
- ● dsd-fme           up 52s              11s ago                12%  in
- ● multimon-ng       up 51s              32s ago                14%  in
+ ● dsd-fme           up 52s              10s ago                12%  in
+ ● multimon-ng       up 51s              31s ago                14%  in
  ● rtl433            up 51s              none for 51s          !15%  out
  ● readsb            up 51s              none for 51s          !38%  out
  ! acarsdec          restarting ×13      —                        —  out

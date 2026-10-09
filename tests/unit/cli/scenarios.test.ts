@@ -342,3 +342,44 @@ describe("scenario loader", () => {
 			expect(readdirSync(SCENARIO_DIR)).toContain(`${name}.json`)
 	})
 })
+
+describe("R58: cached data is never newer than its receipt", () => {
+	const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+	function times(v: unknown, key = ""): number[] {
+		if (typeof v === "string" && ISO.test(v)) return [Date.parse(v)]
+		if (typeof v === "number" && key === "timestamp" && v > 1e12) return [v]
+		if (Array.isArray(v)) return v.flatMap(x => times(x))
+		if (v !== null && typeof v === "object")
+			return Object.entries(v).flatMap(([k, x]) => times(x, k))
+		return []
+	}
+	it("REST bodies are at or before the last REST success; WS frame data at or before the frame", () => {
+		for (const name of SCENARIO_NAMES) {
+			const sc = loadScenario(name)
+			const now = Date.parse(sc.now)
+			const restAt = now - (sc.conn.restAgoMs ?? 2000)
+			const wsBase = now - (sc.conn.wsAgoMs ?? sc.conn.restAgoMs ?? 2000)
+			for (const [path, r] of Object.entries(sc.rest))
+				for (const t of times(r.body))
+					expect(
+						t,
+						`${name} ${path} ${new Date(t).toISOString()}`,
+					).toBeLessThanOrEqual(restAt)
+			for (const f of sc.ws)
+				for (const t of times(f.data))
+					expect(
+						t,
+						`${name} ${f.type} ${new Date(t).toISOString()}`,
+					).toBeLessThanOrEqual(wsBase + f.offsetMs)
+		}
+	})
+	it("api-down-cached decode ages follow its 151 s old REST success", () => {
+		const sc = loadScenario("api-down-cached")
+		const dsd = (sc.rest["/api/decoders"]?.body as Obj[]).find(
+			d => d["id"] === "dsd-fme",
+		)
+		const restAt = Date.parse(sc.now) - 151_000
+		// Live: 9 s before its REST success; the same 9 s here.
+		expect(restAt - Date.parse(String(dsd?.["lastOutputAt"]))).toBe(9_000)
+	})
+})

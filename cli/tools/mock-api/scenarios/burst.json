@@ -11,7 +11,7 @@
 		"/api/aircraft": {
 			"status": 200,
 			"body": {
-				"timestamp": 1791483130000,
+				"timestamp": 1791482870000,
 				"aircraft": [
 					{
 						"icao": "4CA9D2",

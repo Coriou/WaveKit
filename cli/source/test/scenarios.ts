@@ -188,11 +188,21 @@ function applyStallIq(sc: Obj): void {
 			]) {
 				if (rest[k] !== undefined) data[k] = rest[k]
 			}
-			data["branches"] = list(data["branches"]).map(b =>
-				isObj(b) && byId.has(String(b["id"]))
-					? structuredClone(byId.get(String(b["id"])))
-					: b,
-			)
+			// Counters from REST (nothing moved); each frame keeps its own times.
+			data["branches"] = list(data["branches"]).map(b => {
+				const r = isObj(b) ? byId.get(String(b["id"])) : undefined
+				if (!isObj(b) || !r) return b
+				const out: Obj = {
+					...b,
+					backpressureActive: false,
+					droppedBytesTotal: r["droppedBytesTotal"],
+					droppedChunksTotal: r["droppedChunksTotal"],
+				}
+				if (r["totalBytesWritten"] !== undefined)
+					out["totalBytesWritten"] = r["totalBytesWritten"]
+				delete out["backpressureSince"]
+				return out
+			})
 		}
 		if (fr["type"] === "metrics") {
 			const src = list(restBody(sc, "/api/sources")).find(
@@ -211,6 +221,49 @@ function applyStallIq(sc: Obj): void {
 interface Composed {
 	sc: Obj
 	transforms: Obj[]
+	/** The conn the REST bodies and WS frames were authored for: the root scenario's. */
+	authored: Obj
+}
+
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/
+
+/** Moves every ISO timestamp (and Unix-ms `timestamp`) by `delta` ms. */
+function shiftTimes(v: unknown, delta: number, key = ""): unknown {
+	if (delta === 0) return v
+	if (typeof v === "string")
+		return ISO.test(v) ? new Date(Date.parse(v) + delta).toISOString() : v
+	if (typeof v === "number")
+		return key === "timestamp" && v > 1e12 ? v + delta : v
+	if (Array.isArray(v)) return v.map(x => shiftTimes(x, delta))
+	if (isObj(v)) {
+		const out: Obj = {}
+		for (const [k, x] of Object.entries(v)) out[k] = shiftTimes(x, delta, k)
+		return out
+	}
+	return v
+}
+
+const restAgo = (c: Obj): number =>
+	typeof c["restAgoMs"] === "number" ? c["restAgoMs"] : 2000
+const wsAgo = (c: Obj): number =>
+	typeof c["wsAgoMs"] === "number" ? c["wsAgoMs"] : restAgo(c)
+
+/**
+ * R58: bodies and frames are authored for the root scenario's conn. A scenario whose
+ * last REST success (or WS frame base) is older moves their timestamps back by the
+ * same amount, so a cached body never holds a time newer than its own receipt.
+ */
+function anchorTimes(sc: Obj, authored: Obj): void {
+	const conn = isObj(sc["conn"]) ? sc["conn"] : {}
+	const restDelta = restAgo(authored) - restAgo(conn)
+	const wsDelta = wsAgo(authored) - wsAgo(conn)
+	const rest = isObj(sc["rest"]) ? sc["rest"] : {}
+	for (const r of Object.values(rest))
+		if (isObj(r) && r["body"] !== undefined)
+			r["body"] = shiftTimes(r["body"], restDelta)
+	sc["ws"] = list(sc["ws"]).map(f =>
+		isObj(f) ? { ...f, data: shiftTimes(f["data"], wsDelta) } : f,
+	)
 }
 
 /** extends, restPatch, noOutputs (inherited outputs only) and wsAppend, level by level; transforms are collected. */
@@ -238,12 +291,14 @@ function compose(name: string): Composed {
 	delete sc["transform"]
 	delete sc["wsAppend"]
 	delete sc["extends"]
-	return { sc, transforms: [...(parent?.transforms ?? []), t] }
+	const authored = parent?.authored ?? (isObj(own["conn"]) ? own["conn"] : {})
+	return { sc, transforms: [...(parent?.transforms ?? []), t], authored }
 }
 
 function resolve(name: string): Obj {
-	const { sc, transforms } = compose(name)
+	const { sc, transforms, authored } = compose(name)
 	expandMacros(sc)
+	anchorTimes(sc, authored)
 	const last = <T>(pick: (t: Obj) => T | undefined): T | undefined =>
 		transforms.reduce<T | undefined>((acc, t) => pick(t) ?? acc, undefined)
 	const pct = last(t =>

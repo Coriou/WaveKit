@@ -469,7 +469,13 @@ export interface ConnState {
 }
 
 export interface Effects {
+	/** Endpoints to fetch after this commit (writes, events). */
 	polls: Endpoint[]
+	/**
+	 * The full POLL+RESYNC set a ws:open asks for. The runtime skips endpoints its own
+	 * resync already has in flight or answered OK (R55), so one reconnect is one set.
+	 */
+	resync?: Endpoint[]
 }
 
 export interface AppState {

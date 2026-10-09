@@ -53,7 +53,7 @@ import type {
 	TunerEditState,
 	UiState,
 } from "../ui/ui-state.js"
-import { keep, optional, gapRow, shed, type Row } from "./shed.js"
+import { essential, gapRow, keep, optional, shed, type Row } from "./shed.js"
 
 const RESULT_MS = 10_000
 const LABEL_W = 10
@@ -256,7 +256,7 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 			: []),
 	]
 	return [
-		keep(fitRow(lbl("SOURCE", true), row1, width)),
+		essential(fitRow(lbl("SOURCE", true), row1, width)),
 		optional(fitRow(lbl("rate"), row2, width), 2),
 	]
 }
@@ -316,8 +316,9 @@ export function confirmItem(c: PendingChange): string {
 
 /**
  * The review confirm; null when nothing changed or a field is out of core's range.
- * With `state`, the extra names the blast radius (spec §10.9) after any bias-t warning;
- * the confirm bar cuts it to the width.
+ * With `state` it also names the blast radius (spec §10.9). `groups` fit the bar by
+ * priority (R71): the action, then a safety warning, then who enters or leaves, then
+ * the field details, then the tuned list.
  */
 export function tunerConfirm(
 	edit: TunerEditState,
@@ -326,17 +327,51 @@ export function tunerConfirm(
 	const commands = pendingCommands(edit)
 	if (commands.length === 0 || outOfRange(edit).length > 0) return null
 	const n = commands.length
+	const action = `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}`
+	const details = pendingChanges(edit).map(confirmItem).join(", ")
+	const bias = turnsBiasTeeOn(edit)
+	const affects = state ? editImpact(state, edit) : null
 	const extras = [
-		...(turnsBiasTeeOn(edit) ? ["bias-t supplies DC on the antenna port"] : []),
-		...(state ? [`affects ${editAffects(state, edit)}`] : []),
+		...(bias ? ["bias-t supplies DC on the antenna port"] : []),
+		...(affects ? [`affects ${affectsJoin(affects)}`] : []),
+	]
+	const groups: Group[] = [
+		one(
+			0,
+			[sp(`send ${n} to ${edit.sourceId}`, "value", true)],
+			[sp(action, "value", true)],
+			[sp(`${action}: ${details}`, "value", true)],
+		),
+		...(bias
+			? [
+					one(
+						1,
+						[sp("bias-t DC on antenna", "attention", true)],
+						[sp("bias-t supplies DC on the antenna port", "attention", true)],
+					),
+				]
+			: []),
+		...(affects
+			? [
+					one(
+						2,
+						[sp(affects.short, "value")],
+						[sp(affects.moves, "value")],
+						...(affects.tuned === null
+							? []
+							: [[sp(`affects ${affectsJoin(affects)}`, "value")]]),
+					),
+				]
+			: []),
 	]
 	return {
 		kind: "tuner",
-		prompt: `send ${n} command${n === 1 ? "" : "s"} to ${edit.sourceId}: ${pendingChanges(edit).map(confirmItem).join(", ")}`,
+		prompt: `${action}: ${details}`,
 		...(extras.length > 0 ? { extra: extras.join(sep()) } : {}),
 		yes: "send",
 		no: "back",
 		intent: { kind: "tuner", sourceId: edit.sourceId, commands },
+		groups,
 	}
 }
 
@@ -477,13 +512,20 @@ function membershipLists(
 }
 
 /** "dsd-fme, multimon-ng (tuned) · lora-meshtastic enters"; never claims more than is known. */
-function affectsText(impact: RetuneImpact, fromKnown: boolean): string {
+interface Affects {
+	/** "dsd-fme, multimon-ng (tuned)", or null when no tuned decoder is on the source. */
+	tuned: string | null
+	/** Who enters or leaves, or what is unknown: "lora-meshtastic enters", "window now ?". */
+	moves: string
+	/** The same, terse for a narrow confirm bar ("no decoder enters or leaves"). */
+	short: string
+}
+
+function affectsParts(impact: RetuneImpact, fromKnown: boolean): Affects {
+	const tuned =
+		impact.tuned.length > 0 ? `${impact.tuned.join(", ")} (tuned)` : null
+	if (!fromKnown) return { tuned, moves: "window now ?", short: "window now ?" }
 	const parts: string[] = []
-	if (impact.tuned.length > 0) parts.push(`${impact.tuned.join(", ")} (tuned)`)
-	if (!fromKnown) {
-		parts.push(`window now ?`)
-		return parts.join(sep())
-	}
 	const moves = [
 		...impact.enters.map(x => `${x} enters`),
 		...impact.leaves.map(x => `${x} leaves`),
@@ -492,8 +534,16 @@ function affectsText(impact: RetuneImpact, fromKnown: boolean): string {
 	else if (impact.unknown.length === 0)
 		parts.push("no decoder enters or leaves the window")
 	if (impact.unknown.length > 0) parts.push(`${impact.unknown.join(", ")} ?`)
-	return parts.join(sep())
+	const moved = moves.length > 0 || impact.unknown.length > 0
+	return {
+		tuned,
+		moves: parts.join(sep()),
+		short: moved ? parts.join(sep()) : "no decoder enters or leaves",
+	}
 }
+
+const affectsJoin = (a: Affects): string =>
+	a.tuned === null ? a.moves : `${a.tuned}${sep()}${a.moves}`
 
 /** The window the draft would tune to. */
 function draftWindow(edit: TunerEditState): TunedWindow {
@@ -509,7 +559,12 @@ function draftWindow(edit: TunerEditState): TunedWindow {
 
 /** Who a retune to the draft moves, from what is known: "decoders ?" when the lane is unknown. */
 export function editAffects(state: AppState, edit: TunerEditState): string {
-	if (state.decoders.value === undefined) return "decoders ?"
+	return affectsJoin(editImpact(state, edit))
+}
+
+function editImpact(state: AppState, edit: TunerEditState): Affects {
+	if (state.decoders.value === undefined)
+		return { tuned: null, moves: "decoders ?", short: "decoders ?" }
 	const current = windowFor(
 		edit.sourceId,
 		state.tuner.value,
@@ -526,7 +581,7 @@ export function editAffects(state: AppState, edit: TunerEditState): string {
 		current,
 		draftWindow(edit),
 	)
-	return affectsText(impact, current !== null)
+	return affectsParts(impact, current !== null)
 }
 
 function pendingLine(edit: TunerEditState, width: number): Line {
@@ -573,7 +628,7 @@ function tunerBlock(
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
-			keep([
+			essential([
 				...lbl("TUNER", true),
 				sp("EDIT", "edit", true),
 				sp(
@@ -598,7 +653,7 @@ function tunerBlock(
 				? `last ${sanitize(last.command)} ${formatAge(now - last.at)} ago`
 				: null
 		rows.push(
-			keep(
+			essential(
 				fitDot(
 					lbl("TUNER", true),
 					[
@@ -729,7 +784,11 @@ function relayHeader(relay: TunerRelayStatus, width: number, role: Role): Line {
 			one(
 				0,
 				txt(
-					relay.listening ? `listening :${relay.port}` : "not listening",
+					!relay.enabled
+						? "disabled"
+						: relay.listening
+							? `listening :${relay.port}`
+							: "not listening",
 					role,
 				),
 			),
@@ -808,10 +867,23 @@ function dropUnknownReason(state: AppState): string {
 	if (dec.some(b => b.totalBytesWritten === undefined))
 		return "core reports no offered bytes"
 	const h = state.fanoutHistory
-	const span = h.length >= 2 ? (h[h.length - 1]?.t ?? 0) - (h[0]?.t ?? 0) : 0
+	const oldest = h[0]
+	const newest = h[h.length - 1]
+	const span = oldest && newest ? newest.t - oldest.t : 0
 	if (h.length < 2 || span < MIN_DROP_SPAN_MS) return "needs 2 snapshots in 10s"
 	if (counterReset(h)) return "a counter was reset"
-	return "no IQ offered in 10s"
+	// Branches in both the oldest and the newest sample (the aggregate's rule, R4).
+	const both = Object.entries(newest?.branches ?? {}).filter(
+		([id, b]) =>
+			b.decoderId !== undefined && oldest?.branches[id] !== undefined,
+	)
+	if (both.length === 0) return "no branch in both samples"
+	const offered = both.reduce(
+		(sum, [id, b]) =>
+			sum + (b.offered ?? 0) - (oldest?.branches[id]?.offered ?? 0),
+		0,
+	)
+	return offered <= 0 ? "no IQ offered in 10s" : "too few samples per branch"
 }
 
 function fanoutBlock(state: AppState, width: number): Row[] {
@@ -819,7 +891,7 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 	const f = state.fanout.value
 	if (!f)
 		return [
-			keep(
+			essential(
 				clipped(
 					lbl("FANOUT", true),
 					noData(state, "/api/telemetry/fanout"),
@@ -889,35 +961,41 @@ function fanoutBlock(state: AppState, width: number): Row[] {
 		: undefined
 	const upOld = isOld(state.resources, now)
 	const upRole: Role = upOld ? "old" : "value"
-	const upGroups: Group[] = up
-		? [
-				one(
-					0,
-					txt(
-						`${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
-						upRole,
+	// Core sends one entry per source; available: false means no rtlmux stats. With
+	// no SDR host for the source that is not applicable (—); with one it is unknown (?).
+	const hasHost =
+		src !== undefined &&
+		(resources?.sdrHosts.some(h => h.sourceId === src.id) ?? false)
+	const upGroups: Group[] =
+		up?.available === true
+			? [
+					one(
+						0,
+						txt(
+							`${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							upRole,
+						),
+						txt(
+							`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
+							upRole,
+						),
 					),
-					txt(
-						`Pi rtlmux → core: ${formatBytes(up.bytesDroppedUpstream)} dropped lifetime (${up.dropPercent.toFixed(2)}%)`,
-						upRole,
+					// A rate "now" from an old lane is unknown, not a dimmed number (T6).
+					one(1, txt(`${upOld ? "?" : formatRate(up.dropRate)} now`, upRole)),
+					one(
+						2,
+						txt(
+							`checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`,
+							upRole,
+						),
 					),
-				),
-				// A rate "now" from an old lane is unknown, not a dimmed number (T6).
-				one(1, txt(`${upOld ? "?" : formatRate(up.dropRate)} now`, upRole)),
-				one(
-					2,
-					txt(
-						`checked ${formatAge(now - Date.parse(up.lastCheckedAt))} ago`,
-						upRole,
-					),
-				),
-			]
-		: resources
-			? // Core reports SDR hosts but none for this source: not applicable.
-				[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
-			: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
+				]
+			: resources && !hasHost
+				? // No SDR host for this source: not applicable.
+					[one(0, txt(`Pi rtlmux → core: ${glyphs().na}`, upRole))]
+				: [one(0, txt("Pi rtlmux → core: ? (no SDR host data)", upRole))]
 	return [
-		keep(fitDot(lbl("FANOUT", true), head, width)),
+		essential(fitDot(lbl("FANOUT", true), head, width)),
 		optional(fitDot(lbl("lifetime"), life, width), 4),
 		optional(fitDot(lbl("upstream"), upGroups, width), 4),
 	]
@@ -938,7 +1016,7 @@ export function receiverLines(
 	const source = src
 		? sourceBlock(state, src, width)
 		: [
-				keep(
+				essential(
 					clipped(
 						lbl("SOURCE", true),
 						noData(state, "/api/sources"),
@@ -950,7 +1028,7 @@ export function receiverLines(
 	const tuner = t
 		? tunerBlock(state, ui, t, relay, width)
 		: [
-				keep(
+				essential(
 					clipped(
 						lbl("TUNER", true),
 						noData(state, "/api/tuner"),
@@ -959,7 +1037,7 @@ export function receiverLines(
 					),
 				),
 			]
-	const relayHead = keep(
+	const relayHead = essential(
 		relay
 			? relayHeader(
 					relay,
@@ -973,16 +1051,39 @@ export function receiverLines(
 					"label",
 				),
 	)
+	// Core says why the relay cannot serve this source, whether or not it listens (R72).
+	const compat =
+		relay?.compatibility !== undefined && relay.compatibility !== "ok"
+			? keep([
+					...lbl(""),
+					glyphSpan("attention"),
+					sp(
+						` ${quoted(relay.compatibilityMessage ?? relay.compatibility, 80)}`,
+						"attention",
+					),
+				])
+			: null
 	const fanout = fanoutBlock(state, width)
 	// Short views shed optional rows (with a "+N rows hidden" marker); relay history
 	// fills whatever height is left.
 	const lines = shed(
-		[...source, ...gap(), ...tuner, ...gap(), relayHead, ...gap(), ...fanout],
+		[
+			...source,
+			...gap(),
+			...tuner,
+			...gap(),
+			relayHead,
+			...(compat ? [compat] : []),
+			...gap(),
+			...fanout,
+		],
 		height,
 	)
 	const room = height - lines.length
 	const history = relay && room > 0 ? historyRows(relay, room, width) : []
-	const relayAt = lines.indexOf(relayHead.line)
+	const anchor =
+		compat && lines.includes(compat.line) ? compat.line : relayHead.line
+	const relayAt = lines.indexOf(anchor)
 	if (relayAt >= 0) lines.splice(relayAt + 1, 0, ...history)
 	return lines.slice(0, height)
 }
