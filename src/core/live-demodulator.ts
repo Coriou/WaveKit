@@ -2,13 +2,27 @@
  * Live Demodulator - Real-time IQ demodulation with HTTP audio streaming
  *
  * Streams demodulated audio from IQ sources via an embedded HTTP server.
+ *
+ * Pipeline (see live-demod-pipeline.ts): a "front" CSDR process turns capture
+ * IQ into channel IQ (optional shift, channel-matched decimation), Node gates
+ * that IQ with a channel-power squelch, and a "back" CSDR process demodulates
+ * it to audio. Each process runs in its own process group so stop/restart
+ * signals reach every CSDR stage, not only /bin/sh.
+ *
+ * Streams:
+ * - GET /stream      raw PCM (s16le or f32le, mono), described by the
+ *                    X-Audio-Format / X-Sample-Rate / X-Channels headers.
+ * - GET /stream.wav  the same audio behind a streaming WAV header, so players
+ *                    need no format flags.
+ * Clients are disconnected when the stream's rate or format changes, so they
+ * reconnect with correct parameters. A slow client keeps at most about one
+ * second of queued audio; older audio is dropped (latency beats completeness).
  */
 
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import * as http from "node:http"
-import type { Readable } from "node:stream"
-import { PassThrough } from "node:stream"
+import type { Readable, Transform } from "node:stream"
 import {
 	LiveDemodConfigSchema,
 	type LiveDemodConfig,
@@ -16,8 +30,20 @@ import {
 } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 import { createComponentLogger } from "../utils/logger.js"
-import { MAX_CLIENT_BUFFER_BYTES } from "./client-buffer.js"
-import { boundCsdrPipeline, csdrChildEnv } from "../decoders/csdr-buffers.js"
+import { WaveKitError } from "../utils/errors.js"
+import { liveAudioClientQueueLimit } from "./client-buffer.js"
+import { csdrChildEnv } from "../decoders/csdr-buffers.js"
+import { signalDecoder } from "../decoders/process-tools.js"
+import {
+	ChannelSquelch,
+	createChannelSquelchTransform,
+} from "./channel-squelch.js"
+import {
+	DEFAULT_IQ_SAMPLE_RATE,
+	liveDemodRates,
+	planLiveDemodPipeline,
+	type DemodRateInfo,
+} from "./live-demod-pipeline.js"
 import type { FanoutManager } from "./fanout-manager.js"
 import type { SourceManager } from "./source-manager.js"
 
@@ -33,9 +59,17 @@ export interface LiveDemodStatus {
 	effectiveSampleRate: number
 	decimationFactor: number
 	httpUrl: string
+	/** Same audio with a streaming WAV header (self-describing). */
+	wavUrl: string
 	clientCount: number
 	bytesStreamed: number
 	pipelineHealth: "running" | "starting" | "stopped" | "error"
+	/** Automatic pipeline restarts since the last manual start. */
+	pipelineRestarts: number
+	/** Smoothed channel power before demodulation (dBFS), while running. */
+	channelPowerDbfs?: number
+	/** Squelch gate state, while running (always true with squelch off). */
+	squelchOpen?: boolean
 	lastError?: string
 }
 
@@ -48,64 +82,131 @@ export interface LiveDemodEvents {
 	"client-disconnected": (clientId: string) => void
 }
 
+export interface LiveDemodulatorOptions {
+	/** First automatic restart delay; doubles per consecutive failure. */
+	restartBaseDelayMs?: number
+	restartMaxDelayMs?: number
+	/** Consecutive failed runs before giving up (until start/reconfigure). */
+	maxRestartAttempts?: number
+	/** A run at least this long resets the failure count. */
+	stableRunMs?: number
+	/** SIGTERM → SIGKILL escalation for the CSDR process groups. */
+	stopTimeoutMs?: number
+	/** A client that accepts nothing for this long is disconnected. */
+	clientStallTimeoutMs?: number
+}
+
+type AudioFormat = LiveDemodConfig["audioFormat"]
+
+interface StreamFormat {
+	rate: number
+	format: AudioFormat
+}
+
 interface HttpClientState {
 	id: string
 	response: http.ServerResponse
 	remoteAddress: string
 	connectedAt: Date
 	bytesWritten: number
+	stream: StreamFormat
+	queue: Buffer[]
+	queuedBytes: number
+	droppedBytes: number
+	waitingDrain: boolean
+	lastProgressAt: number
 }
 
-interface DemodRateInfo {
-	iqSampleRate: number
-	decimation: number
-	effectiveSampleRate: number
+interface PipelineRun {
+	front: ChildProcess
+	back: ChildProcess
+	squelch: ChannelSquelch
+	squelchStream: Transform
+	startedAt: number
+	sourceSampleRate: number
+	sourceFormat: SourceCaps["format"] | undefined
+	stream: StreamFormat
+	stopping: boolean
+	failed: boolean
 }
 
-interface FilterSettings {
-	lowPass: number
-	highPass: number
+/** Config keys that only affect Node-side behaviour (no CSDR restart). */
+const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
+	"enabled",
+	"httpPort",
+	"squelch",
+	"iqDcBlock",
+])
+
+const DEFAULTS: Required<LiveDemodulatorOptions> = {
+	restartBaseDelayMs: 1000,
+	restartMaxDelayMs: 30_000,
+	maxRestartAttempts: 10,
+	stableRunMs: 30_000,
+	stopTimeoutMs: 3000,
+	clientStallTimeoutMs: 30_000,
 }
 
-const DEFAULT_IQ_SAMPLE_RATE = 2_400_000
-const DEFAULT_FILTER_TRANSITION = 0.05
+function frameBytes(format: AudioFormat): number {
+	return format === "s16le" ? 2 : 4
+}
 
-const NOISE_REDUCTION_PRESETS: Record<
-	LiveDemodConfig["noiseReduction"],
-	FilterSettings
-> = {
-	off: { lowPass: 0, highPass: 0 },
-	voice: { lowPass: 3000, highPass: 300 },
-	"noaa-apt": { lowPass: 2400, highPass: 0 },
-	"narrow-band": { lowPass: 2000, highPass: 300 },
+/** 44-byte WAV header for an unbounded stream (sizes set to 0xFFFFFFFF). */
+export function wavStreamHeader(stream: StreamFormat): Buffer {
+	const bytesPerSample = frameBytes(stream.format)
+	const rate = Math.max(1, Math.round(stream.rate))
+	const header = Buffer.alloc(44)
+	header.write("RIFF", 0, "ascii")
+	header.writeUInt32LE(0xffffffff, 4)
+	header.write("WAVE", 8, "ascii")
+	header.write("fmt ", 12, "ascii")
+	header.writeUInt32LE(16, 16)
+	header.writeUInt16LE(stream.format === "s16le" ? 1 : 3, 20)
+	header.writeUInt16LE(1, 22)
+	header.writeUInt32LE(rate, 24)
+	header.writeUInt32LE(rate * bytesPerSample, 28)
+	header.writeUInt16LE(bytesPerSample, 32)
+	header.writeUInt16LE(bytesPerSample * 8, 34)
+	header.write("data", 36, "ascii")
+	header.writeUInt32LE(0xffffffff, 40)
+	return header
+}
+
+/** Headers describing the raw stream, sent on both endpoints. */
+export function streamHeaders(stream: StreamFormat): Record<string, string> {
+	return {
+		"X-Audio-Format": stream.format,
+		"X-Sample-Rate": String(stream.rate),
+		"X-Channels": "1",
+		"Cache-Control": "no-cache, no-store",
+		"Access-Control-Expose-Headers":
+			"X-Audio-Format, X-Sample-Rate, X-Channels",
+	}
 }
 
 export class LiveDemodulator extends EventEmitter {
 	private readonly log: Logger
 	private readonly sourceManager: SourceManager
 	private readonly fanoutManager: FanoutManager
+	private readonly options: Required<LiveDemodulatorOptions>
 	private config: LiveDemodConfig
 	private httpServer: http.Server | null = null
-	private csdrProcess: ChildProcess | null = null
+	private run: PipelineRun | null = null
 	private branchId: string | null = null
 	private branchStream: Readable | null = null
 	private branchErrorHandler: ((err: Error) => void) | null = null
-	private readonly audioStream: PassThrough
 	private clients: Map<string, HttpClientState> = new Map()
 	private clientIdCounter = 0
 	private bytesStreamed = 0
 	private pipelineHealth: LiveDemodStatus["pipelineHealth"] = "stopped"
 	private lastError: string | null = null
 	private activeSourceId: string | null = null
-	private sourceIqSampleRate = DEFAULT_IQ_SAMPLE_RATE
-	private effectiveSampleRate = 0
-	private decimationFactor = 1
-	private stoppingPipeline = false
-	private squelchThresholdDbfs: number | null = null
-	private squelchGateOpen = true
-	private squelchLastOpenAtMs = 0
-	private readonly squelchHysteresisDb = 2.0
-	private readonly squelchHangTimeMs = 250
+	private audioRemainder: Buffer = Buffer.alloc(0)
+	private audioFrameBytes: number
+	private clientQueueLimit: number
+	private consecutiveFailures = 0
+	private pipelineRestarts = 0
+	private restartTimer: ReturnType<typeof setTimeout> | null = null
 	private capsChangedHandler:
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
@@ -117,52 +218,51 @@ export class LiveDemodulator extends EventEmitter {
 		sourceManager: SourceManager,
 		fanoutManager: FanoutManager,
 		config: LiveDemodConfig,
+		options: LiveDemodulatorOptions = {},
 	) {
 		super()
 		this.log = createComponentLogger(logger, "LiveDemodulator")
 		this.sourceManager = sourceManager
 		this.fanoutManager = fanoutManager
 		this.config = config
-		this.audioStream = new PassThrough({ highWaterMark: 256 * 1024 })
-
-		this.audioStream.on("data", chunk => this.handleAudioData(chunk))
-		this.audioStream.on("error", err => {
-			this.log.error({ err }, "Audio stream error")
-		})
-
-		this.updateSquelchThreshold()
+		this.options = { ...DEFAULTS, ...options }
+		this.audioFrameBytes = frameBytes(config.audioFormat)
+		this.clientQueueLimit = liveAudioClientQueueLimit(
+			this.plannedStream().rate,
+			this.audioFrameBytes,
+		)
 	}
 
 	async start(): Promise<void> {
 		if (this.httpServer) {
-			this.log.warn("Live demodulator already running")
+			if (this.run) {
+				this.log.warn("Live demodulator already running")
+				return
+			}
+			// The HTTP server is up but the pipeline died (or gave up): restart it.
+			this.clearRestartTimer()
+			this.consecutiveFailures = 0
+			this.pipelineRestarts = 0
+			if (!this.branchStream) {
+				const sourceId = this.resolveSourceId()
+				if (!sourceId) throw this.noSourceError()
+				this.activeSourceId = sourceId
+				this.attachBranch(sourceId)
+			}
+			await this.startPipelineOrFail()
+			this.emit("started")
+			this.log.info("Live demodulation pipeline restarted on request")
 			return
 		}
 
 		const sourceId = this.resolveSourceId()
-		if (!sourceId) {
-			const err = new Error("No IQ source available for live demodulator")
-			this.lastError = err.message
-			this.pipelineHealth = "error"
-			this.log.error({ err }, "Cannot start live demodulator")
-			this.emit("error", err)
-			throw err
-		}
+		if (!sourceId) throw this.noSourceError()
 
 		this.activeSourceId = sourceId
+		this.consecutiveFailures = 0
+		this.pipelineRestarts = 0
 		this.attachBranch(sourceId)
-
-		try {
-			await this.startPipeline()
-		} catch (err) {
-			const error = err instanceof Error ? err : new Error(String(err))
-			this.lastError = error.message
-			this.pipelineHealth = "error"
-			this.detachBranch()
-			this.emit("error", error)
-			throw error
-		}
-
+		await this.startPipelineOrFail()
 		await this.startHttpServer()
 		this.subscribeToSourceCapsChanges()
 		this.emit("started")
@@ -173,46 +273,46 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	async stop(): Promise<void> {
-		if (!this.httpServer && !this.csdrProcess) {
+		if (!this.httpServer && !this.run) {
 			this.log.warn("Live demodulator not running")
 			return
 		}
 
+		this.clearRestartTimer()
 		this.unsubscribeFromSourceCapsChanges()
-		await this.stopPipeline({ keepBranch: false })
+		if (this.run) await this.stopRun(this.run)
+		this.pipelineHealth = "stopped"
 		this.detachBranch()
-		this.closeAllClients()
-
-		if (!this.httpServer) {
-			this.emit("stopped")
-			this.log.info("Live demodulator stopped")
-			return
-		}
-
-		await new Promise<void>((resolve, reject) => {
-			this.httpServer!.close(err => {
-				if (err) {
-					this.log.error({ err }, "Error closing live demodulator server")
-					reject(err)
-					return
-				}
-				this.httpServer = null
-				resolve()
-			})
-		})
+		this.activeSourceId = null
+		this.closeAllClients("stop", true)
+		await this.closeHttpServer()
+		// A failure that was still being cleaned up may have scheduled a restart.
+		this.clearRestartTimer()
 
 		this.emit("stopped")
 		this.log.info("Live demodulator stopped")
 	}
 
 	async reconfigure(newConfig: Partial<LiveDemodConfig>): Promise<void> {
-		const merged = { ...this.config, ...newConfig }
-		const validated = LiveDemodConfigSchema.parse(merged)
-		const portChanged = validated.httpPort !== this.config.httpPort
-		const sourceChanged = validated.sourceId !== this.config.sourceId
+		const validated = LiveDemodConfigSchema.parse({
+			...this.config,
+			...newConfig,
+		})
+		const previous = this.config
+		const portChanged = validated.httpPort !== previous.httpPort
+		const sourceChanged = validated.sourceId !== previous.sourceId
+		const pipelineChanged = (
+			Object.keys(validated) as Array<keyof LiveDemodConfig>
+		).some(key => !NODE_ONLY_KEYS.has(key) && validated[key] !== previous[key])
+		const active = this.httpServer !== null || this.run !== null
+
+		// Fail before touching the running pipeline if the new plan is invalid.
+		if (active && pipelineChanged && !sourceChanged && this.activeSourceId) {
+			this.planFor(this.activeSourceId, validated)
+		}
 
 		this.config = validated
-		this.updateSquelchThreshold()
+		this.run?.squelch.setThreshold(validated.squelch)
 
 		if (sourceChanged && this.activeSourceId) {
 			this.detachBranch()
@@ -223,9 +323,9 @@ export class LiveDemodulator extends EventEmitter {
 			}
 		}
 
-		if (this.httpServer || this.csdrProcess) {
-			await this.stopPipeline({ keepBranch: true })
-			await this.startPipeline()
+		if (active && (pipelineChanged || sourceChanged)) {
+			this.consecutiveFailures = 0
+			await this.restartPipeline("configuration changed")
 		}
 
 		if (portChanged && this.httpServer) {
@@ -258,16 +358,38 @@ export class LiveDemodulator extends EventEmitter {
 			effectiveSampleRate: rateInfo.effectiveSampleRate,
 			decimationFactor: rateInfo.decimation,
 			httpUrl: `http://localhost:${this.config.httpPort}/stream`,
+			wavUrl: `http://localhost:${this.config.httpPort}/stream.wav`,
 			clientCount: this.clients.size,
 			bytesStreamed: this.bytesStreamed,
 			pipelineHealth: this.pipelineHealth,
+			pipelineRestarts: this.pipelineRestarts,
 		}
 
-		if (this.lastError) {
-			return { ...status, lastError: this.lastError }
+		const run = this.run
+		if (run) {
+			status.squelchOpen = run.squelch.open
+			const power = run.squelch.powerDbfs
+			if (power !== null) status.channelPowerDbfs = Math.round(power * 10) / 10
 		}
+		if (this.lastError) status.lastError = this.lastError
 
 		return status
+	}
+
+	private noSourceError(): WaveKitError {
+		const err = new WaveKitError(
+			"No IQ source available for live demodulator",
+			"LIVE_DEMOD_NO_SOURCE",
+		)
+		this.lastError = err.message
+		this.pipelineHealth = "error"
+		this.log.error({ err }, "Cannot start live demodulator")
+		this.emitError(err)
+		return err
+	}
+
+	private emitError(err: Error): void {
+		if (this.listenerCount("error") > 0) this.emit("error", err)
 	}
 
 	private resolveSourceId(): string | null {
@@ -304,22 +426,26 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	/**
-	 * Subscribes to source caps changes and restarts pipeline when needed.
-	 * This enables dynamic sample rate adaptation when SDR++ users change rates.
-	 * Uses debouncing to prevent rapid successive restarts.
+	 * Restarts the pipeline only when the IQ the pipeline was built for
+	 * changes (sample rate, format, kind). A centre-frequency retune keeps the
+	 * running pipeline: the audio continues without a gap.
 	 */
 	private subscribeToSourceCapsChanges(): void {
-		if (this.capsChangedHandler) return // Already subscribed
+		if (this.capsChangedHandler) return
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
-			// Only react if this is our active source
 			if (sourceId !== this.activeSourceId) return
+			if (!this.capsNeedRestart(caps)) {
+				this.log.debug(
+					{ sourceId, centerFreq: caps.centerFreq },
+					"Source tuning changed; live pipeline kept running",
+				)
+				return
+			}
 
-			// Debounce rapid changes - SDR++ may send multiple rate changes quickly
 			if (this.capsChangeDebounceTimer) {
 				clearTimeout(this.capsChangeDebounceTimer)
 			}
-
 			this.capsChangeDebounceTimer = setTimeout(() => {
 				this.capsChangeDebounceTimer = null
 				void this.handleCapsChange(sourceId, caps)
@@ -329,18 +455,36 @@ export class LiveDemodulator extends EventEmitter {
 		this.sourceManager.on("caps-changed", this.capsChangedHandler)
 	}
 
+	private capsNeedRestart(caps: SourceCaps): boolean {
+		const run = this.run
+		if (!run) return true
+		return (
+			caps.kind !== "iq" ||
+			caps.sampleRate !== run.sourceSampleRate ||
+			caps.format !== run.sourceFormat
+		)
+	}
+
 	private async handleCapsChange(
 		sourceId: string,
 		caps: SourceCaps,
 	): Promise<void> {
+		if (!this.httpServer || !this.capsNeedRestart(caps)) return
+		if (this.restartTimer) {
+			// A crashed pipeline is backing off; that restart reads the new caps.
+			this.log.info(
+				{ sourceId, newSampleRate: caps.sampleRate, format: caps.format },
+				"Source caps changed during restart backoff; the pending restart will use them",
+			)
+			return
+		}
 		this.log.info(
-			{ sourceId, newSampleRate: caps.sampleRate },
-			"Source caps changed, restarting pipeline with new sample rate",
+			{ sourceId, newSampleRate: caps.sampleRate, format: caps.format },
+			"Source sample rate or format changed, restarting pipeline",
 		)
 
 		try {
-			// Reconfigure triggers stop + start of pipeline with new rates
-			await this.reconfigure({})
+			await this.restartPipeline("source caps changed")
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))
 			this.log.error(
@@ -349,13 +493,10 @@ export class LiveDemodulator extends EventEmitter {
 			)
 			this.lastError = error.message
 			this.pipelineHealth = "error"
-			this.emit("error", error)
+			this.emitError(error)
 		}
 	}
 
-	/**
-	 * Unsubscribes from source caps changes.
-	 */
 	private unsubscribeFromSourceCapsChanges(): void {
 		if (this.capsChangeDebounceTimer) {
 			clearTimeout(this.capsChangeDebounceTimer)
@@ -367,340 +508,354 @@ export class LiveDemodulator extends EventEmitter {
 		}
 	}
 
-	private updateSquelchThreshold(): void {
-		// Squelch is expressed as a negative dBFS threshold (e.g. -18.5).
-		// 0 disables squelch ("open").
-		if (this.config.squelch >= 0) {
-			this.squelchThresholdDbfs = null
-			this.squelchGateOpen = true
-			this.squelchLastOpenAtMs = 0
-			return
-		}
-		this.squelchThresholdDbfs = this.config.squelch
-	}
-
 	private calculateRates(
 		sourceId: string,
 		config: LiveDemodConfig,
 	): DemodRateInfo {
 		const caps = this.sourceManager.getCaps(sourceId)
-		const iqSampleRate = caps?.sampleRate ?? DEFAULT_IQ_SAMPLE_RATE
-		const bandwidth =
-			config.bandwidth > 0 ? config.bandwidth : Math.max(1, iqSampleRate / 2)
-		const nyquistRate = Math.max(1, bandwidth * 2)
-		let decimation = Math.round(iqSampleRate / nyquistRate)
-		if (decimation < 1) decimation = 1
-		return {
-			iqSampleRate,
-			decimation,
-			effectiveSampleRate: iqSampleRate / decimation,
-		}
+		return liveDemodRates(caps?.sampleRate ?? DEFAULT_IQ_SAMPLE_RATE, config)
 	}
 
-	private resolveFilters(effectiveSampleRate: number): FilterSettings {
-		let lowPass = this.config.lowPass
-		let highPass = this.config.highPass
-
-		if (this.config.noiseReduction !== "off") {
-			const preset = NOISE_REDUCTION_PRESETS[this.config.noiseReduction]
-			if (lowPass <= 0) lowPass = preset.lowPass
-			if (highPass <= 0) highPass = preset.highPass
-		}
-
-		const nyquist = effectiveSampleRate / 2
-		if (lowPass > 0) lowPass = Math.min(lowPass, Math.max(0, nyquist - 1))
-		if (highPass > 0) highPass = Math.min(highPass, Math.max(0, nyquist - 1))
-
-		if (lowPass > 0 && highPass > 0 && highPass >= lowPass) {
-			highPass = 0
-		}
-
-		return { lowPass, highPass }
+	/** Stream format a new client is told about (current run, else planned). */
+	private plannedStream(): StreamFormat {
+		if (this.run) return this.run.stream
+		const sourceId = this.activeSourceId ?? this.config.sourceId
+		const rate = sourceId
+			? this.calculateRates(sourceId, this.config).effectiveSampleRate
+			: liveDemodRates(DEFAULT_IQ_SAMPLE_RATE, this.config).effectiveSampleRate
+		return { rate, format: this.config.audioFormat }
 	}
 
-	private buildPipelineCommand(
-		sourceId: string,
-		rateInfo: DemodRateInfo,
-	): string {
+	private planFor(sourceId: string, config: LiveDemodConfig) {
 		const caps = this.sourceManager.getCaps(sourceId)
 		if (caps?.kind !== "iq") {
-			throw new Error(
+			throw new WaveKitError(
 				`Source ${sourceId} is not IQ-capable (kind=${caps?.kind ?? "unknown"})`,
+				"LIVE_DEMOD_SOURCE_NOT_IQ",
 			)
 		}
+		const rateInfo = liveDemodRates(caps.sampleRate, config)
+		const plan = planLiveDemodPipeline({
+			config,
+			iqSampleRate: rateInfo.iqSampleRate,
+			iqFormat: caps.format,
+			decimation: rateInfo.decimation,
+			logger: this.log,
+		})
+		return { caps, rateInfo, plan }
+	}
 
-		const inputFormat =
-			caps?.format === "S16_IQ"
-				? "s16"
-				: caps?.format === "U8_IQ" || !caps?.format
-					? "char"
-					: "char"
-
-		if (caps?.format && caps.format !== "U8_IQ" && caps.format !== "S16_IQ") {
-			this.log.warn(
-				{ sourceId, format: caps.format },
-				"Unsupported IQ format, defaulting to U8",
-			)
+	private async startPipelineOrFail(): Promise<void> {
+		try {
+			await this.startPipeline()
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err))
+			this.lastError = error.message
+			this.pipelineHealth = "error"
+			if (!this.httpServer) this.detachBranch()
+			this.emitError(error)
+			throw error
 		}
-
-		const { decimation, effectiveSampleRate, iqSampleRate } = rateInfo
-		const filters = this.resolveFilters(effectiveSampleRate)
-		const transition = DEFAULT_FILTER_TRANSITION
-		const csdrStages: string[] = [`csdr convert -i ${inputFormat} -o float`]
-
-		if (this.config.iqDcBlock) {
-			csdrStages.push("csdr dcblock")
-		}
-
-		csdrStages.push(`csdr firdecimate ${decimation} ${transition}`)
-
-		switch (this.config.modulation) {
-			case "am":
-			case "cw":
-			case "dsb":
-				csdrStages.push("csdr amdemod", "csdr agc -f float -p fast -r 0.8")
-				break
-			case "usb":
-			case "lsb": {
-				const sidebandWidth = Math.min(
-					0.5,
-					Math.max(0.01, this.config.bandwidth / effectiveSampleRate),
-				)
-				const low = this.config.modulation === "lsb" ? -sidebandWidth : 0
-				const high = this.config.modulation === "lsb" ? 0 : sidebandWidth
-				csdrStages.push(
-					`csdr bandpass --fft --low ${low.toFixed(4)} --high ${high.toFixed(4)} ${transition}`,
-					"csdr realpart",
-					"csdr agc -f float -p fast -r 0.8",
-				)
-				break
-			}
-			case "raw":
-				csdrStages.push("csdr realpart")
-				break
-			case "wfm":
-			case "nfm":
-			default:
-				csdrStages.push("csdr fmdemod")
-				break
-		}
-
-		const useSox = filters.highPass > 0
-
-		if (!useSox && filters.lowPass > 0) {
-			const normalizedCutoff = filters.lowPass / effectiveSampleRate
-			csdrStages.push(`csdr lowpass -f float ${normalizedCutoff.toFixed(4)}`)
-		}
-
-		csdrStages.push(
-			"csdr dcblock",
-			`csdr gain ${this.config.gain}`,
-			"csdr limit",
-		)
-
-		if (this.config.deEmphasis) {
-			if (this.config.modulation === "wfm") {
-				const tauSeconds = (this.config.deEmphasisTau ?? 50) / 1_000_000
-				csdrStages.push(
-					`csdr deemphasis --wfm ${effectiveSampleRate} ${tauSeconds}`,
-				)
-			} else if (this.config.modulation === "nfm") {
-				csdrStages.push(`csdr deemphasis --nfm ${effectiveSampleRate}`)
-			}
-		}
-
-		if (!useSox && this.config.audioFormat === "s16le") {
-			csdrStages.push("csdr convert -i float -o s16")
-		}
-
-		let pipeline = boundCsdrPipeline(csdrStages, this.log)
-
-		if (useSox) {
-			const outputFormat =
-				this.config.audioFormat === "s16le"
-					? "-e signed -b 16"
-					: "-e floating-point -b 32"
-			const effects: string[] = []
-			if (filters.highPass > 0) effects.push(`highpass ${filters.highPass}`)
-			if (filters.lowPass > 0) effects.push(`lowpass ${filters.lowPass}`)
-			const effectsStr = effects.join(" ")
-			const sox = [
-				"sox",
-				"-t raw",
-				`-r ${effectiveSampleRate}`,
-				"-e floating-point -b 32 -c 1",
-				"-",
-				"-t raw",
-				`-r ${effectiveSampleRate}`,
-				`${outputFormat} -c 1`,
-				"-",
-				effectsStr,
-			]
-				.filter(Boolean)
-				.join(" ")
-
-			pipeline = `${pipeline} | ${sox}`
-		}
-
-		this.log.debug(
-			{
-				sourceId,
-				iqSampleRate,
-				effectiveSampleRate,
-				decimation,
-				modulation: this.config.modulation,
-				audioFormat: this.config.audioFormat,
-				filters,
-				pipeline,
-			},
-			"Built live demodulator pipeline",
-		)
-
-		return pipeline
 	}
 
 	private async startPipeline(): Promise<void> {
-		if (this.csdrProcess) {
+		if (this.run) {
 			this.log.warn("Live demodulation pipeline already running")
 			return
 		}
-
 		if (!this.branchStream || !this.activeSourceId) {
-			throw new Error("Live demodulator branch not initialized")
+			throw new WaveKitError(
+				"Live demodulator branch not initialized",
+				"LIVE_DEMOD_NO_BRANCH",
+			)
 		}
 
-		const rateInfo = this.calculateRates(this.activeSourceId, this.config)
-		this.sourceIqSampleRate = rateInfo.iqSampleRate
-		this.effectiveSampleRate = rateInfo.effectiveSampleRate
-		this.decimationFactor = rateInfo.decimation
-
-		const pipeline = this.buildPipelineCommand(this.activeSourceId, rateInfo)
+		const { caps, rateInfo, plan } = this.planFor(
+			this.activeSourceId,
+			this.config,
+		)
+		for (const warning of plan.warnings) this.log.warn(warning)
 
 		this.pipelineHealth = "starting"
 		this.lastError = null
-
 		this.log.info(
 			{
 				sourceId: this.activeSourceId,
 				decimation: rateInfo.decimation,
 				effectiveSampleRate: rateInfo.effectiveSampleRate,
+				offsetHz: this.config.offsetHz,
+				front: plan.front,
+				back: plan.back,
 			},
 			"Starting live demodulation pipeline",
 		)
 
-		this.csdrProcess = spawn("/bin/sh", ["-c", pipeline], {
-			env: csdrChildEnv(),
-			stdio: ["pipe", "pipe", "pipe"],
-		})
-
-		this.csdrProcess.on("error", err => {
-			this.log.error({ err }, "Live demodulation process error")
-			this.lastError = err.message
-			this.pipelineHealth = "error"
-			this.emit("error", err)
-		})
-
-		this.csdrProcess.on("exit", (code, signal) => {
-			this.csdrProcess = null
-			if (this.stoppingPipeline) {
-				this.pipelineHealth = "stopped"
-				return
-			}
-			this.pipelineHealth = "error"
-			const err = new Error(
-				`Live demodulation process exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-			)
-			this.lastError = err.message
-			this.emit("error", err)
-			this.log.error({ code, signal }, "Live demodulation process exited")
-		})
-
-		if (this.csdrProcess.stdout) {
-			this.csdrProcess.stdout.pipe(this.audioStream, { end: false })
+		const stream: StreamFormat = {
+			rate: plan.channelSampleRate,
+			format: this.config.audioFormat,
 		}
-
-		if (this.csdrProcess.stderr) {
-			this.csdrProcess.stderr.on("data", data => {
-				const message = data.toString().trim()
-				if (!message) return
-				this.lastError = message
-				this.log.warn({ message }, "Live demodulation stderr")
-			})
+		const squelch = new ChannelSquelch({
+			sampleRate: plan.channelSampleRate,
+			thresholdDbfs: this.config.squelch,
+		})
+		const run: PipelineRun = {
+			front: this.spawnStage(plan.front),
+			back: this.spawnStage(plan.back),
+			squelch,
+			squelchStream: createChannelSquelchTransform(squelch),
+			startedAt: Date.now(),
+			sourceSampleRate: caps.sampleRate,
+			sourceFormat: caps.format,
+			stream,
+			stopping: false,
+			failed: false,
 		}
+		this.run = run
+		this.audioRemainder = Buffer.alloc(0)
+		this.audioFrameBytes = frameBytes(stream.format)
+		this.clientQueueLimit = liveAudioClientQueueLimit(
+			stream.rate,
+			this.audioFrameBytes,
+		)
 
-		if (this.csdrProcess.stdin) {
-			this.branchStream.pipe(this.csdrProcess.stdin)
-
-			this.csdrProcess.stdin.on("error", err => {
-				this.log.debug({ err }, "Live demodulation stdin error")
-			})
-		}
-
+		this.wireRun(run)
 		this.pipelineHealth = "running"
 	}
 
-	private async stopPipeline(options: { keepBranch: boolean }): Promise<void> {
-		if (!this.csdrProcess) {
-			this.pipelineHealth = "stopped"
+	private spawnStage(command: string): ChildProcess {
+		return spawn("/bin/sh", ["-c", command], {
+			env: csdrChildEnv(),
+			stdio: ["pipe", "pipe", "pipe"],
+			detached: process.platform !== "win32",
+		})
+	}
+
+	private wireRun(run: PipelineRun): void {
+		const { front, back, squelchStream } = run
+		const ignore = (role: string) => (err: Error) =>
+			this.log.debug({ err, role }, "Live demodulation stream error")
+
+		for (const [role, proc] of [
+			["front", front],
+			["back", back],
+		] as const) {
+			proc.on("error", err => {
+				this.log.error({ err, role }, "Live demodulation process error")
+				this.handleRunFailure(run, `${role} process error: ${err.message}`)
+			})
+			proc.once("exit", (code, signal) => {
+				if (run.stopping) return
+				this.handleRunFailure(
+					run,
+					`Live demodulation ${role} process exited (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+				)
+			})
+			proc.stdin?.on("error", ignore(`${role}.stdin`))
+			proc.stdout?.on("error", ignore(`${role}.stdout`))
+			proc.stderr?.on("error", ignore(`${role}.stderr`))
+			proc.stderr?.on("data", (data: Buffer) => {
+				const message = data.toString().trim()
+				if (!message) return
+				this.lastError = message
+				this.log.warn({ message, role }, "Live demodulation stderr")
+			})
+		}
+		squelchStream.on("error", ignore("squelch"))
+
+		if (this.branchStream && front.stdin) this.branchStream.pipe(front.stdin)
+		if (front.stdout && back.stdin) {
+			front.stdout.pipe(squelchStream).pipe(back.stdin)
+		}
+		back.stdout?.on("data", (chunk: Buffer) => {
+			if (this.run === run) this.handleAudioData(chunk)
+		})
+	}
+
+	private handleRunFailure(run: PipelineRun, reason: string): void {
+		if (this.run !== run || run.stopping || run.failed) return
+		run.failed = true
+		this.run = null
+		this.pipelineHealth = "error"
+		this.lastError = reason
+		this.log.error({ reason }, "Live demodulation pipeline failed")
+		this.emitError(new WaveKitError(reason, "LIVE_DEMOD_PIPELINE_EXIT"))
+		const runtimeMs = Date.now() - run.startedAt
+		void this.stopRun(run).finally(() => this.scheduleRestart(runtimeMs))
+	}
+
+	private scheduleRestart(lastRunMs: number): void {
+		if (!this.httpServer || this.run || this.restartTimer) return
+		if (lastRunMs >= this.options.stableRunMs) this.consecutiveFailures = 0
+		this.consecutiveFailures++
+		if (this.consecutiveFailures > this.options.maxRestartAttempts) {
+			this.lastError = `Live demodulation pipeline gave up after ${this.options.maxRestartAttempts} restart attempts; POST /api/live-audio/start to retry`
+			this.log.error(
+				{ attempts: this.options.maxRestartAttempts },
+				"Live demodulation pipeline restart limit reached",
+			)
 			return
 		}
+		const delay = Math.min(
+			this.options.restartMaxDelayMs,
+			this.options.restartBaseDelayMs * 2 ** (this.consecutiveFailures - 1),
+		)
+		this.log.warn(
+			{ delayMs: delay, attempt: this.consecutiveFailures },
+			"Scheduling live demodulation pipeline restart",
+		)
+		this.restartTimer = setTimeout(() => {
+			this.restartTimer = null
+			void this.restartAfterFailure()
+		}, delay)
+	}
 
-		const proc = this.csdrProcess
-		this.stoppingPipeline = true
-
-		if (this.branchStream && proc.stdin) {
-			this.branchStream.unpipe(proc.stdin)
-		}
-		if (proc.stdout) {
-			proc.stdout.unpipe(this.audioStream)
-		}
-
-		await new Promise<void>(resolve => {
-			const timeout = setTimeout(() => {
-				if (!proc.killed) {
-					proc.kill("SIGKILL")
-				}
-			}, 5000)
-
-			proc.once("exit", () => {
-				clearTimeout(timeout)
-				resolve()
-			})
-
-			proc.kill("SIGTERM")
-		})
-
-		this.csdrProcess = null
-		this.pipelineHealth = "stopped"
-		this.stoppingPipeline = false
-
-		if (!options.keepBranch) {
-			this.activeSourceId = null
+	private async restartAfterFailure(): Promise<void> {
+		if (!this.httpServer || this.run) return
+		this.pipelineRestarts++
+		try {
+			await this.restartPipeline("automatic restart")
+			this.log.info(
+				{ restarts: this.pipelineRestarts },
+				"Live demodulation pipeline restarted",
+			)
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err))
+			this.lastError = error.message
+			this.pipelineHealth = "error"
+			this.log.error({ err: error }, "Live demodulation restart failed")
+			this.scheduleRestart(0)
 		}
 	}
 
+	private clearRestartTimer(): void {
+		if (this.restartTimer) {
+			clearTimeout(this.restartTimer)
+			this.restartTimer = null
+		}
+	}
+
+	/** Stops the current run (if any), starts a new one, and disconnects
+	 * clients whose advertised rate/format no longer matches. */
+	private async restartPipeline(reason: string): Promise<void> {
+		this.clearRestartTimer()
+		this.log.info({ reason }, "Restarting live demodulation pipeline")
+		if (this.run) await this.stopRun(this.run)
+		await this.startPipeline()
+		const stream = this.plannedStream()
+		for (const client of [...this.clients.values()]) {
+			if (
+				client.stream.rate !== stream.rate ||
+				client.stream.format !== stream.format
+			) {
+				this.closeClient(client, "stream format changed", false)
+			}
+		}
+	}
+
+	/**
+	 * Stops one run: unpipes, destroys every pipe handle, SIGTERMs both
+	 * process groups and escalates to SIGKILL for any group still alive.
+	 */
+	private async stopRun(run: PipelineRun): Promise<void> {
+		run.stopping = true
+		if (this.run === run) this.run = null
+		if (this.branchStream && run.front.stdin) {
+			this.branchStream.unpipe(run.front.stdin)
+		}
+		run.front.stdout?.unpipe()
+		run.squelchStream.unpipe()
+		for (const stream of [
+			run.front.stdin,
+			run.front.stdout,
+			run.front.stderr,
+			run.back.stdin,
+			run.back.stdout,
+			run.back.stderr,
+		]) {
+			stream?.destroy()
+		}
+		run.squelchStream.destroy()
+
+		await Promise.all([run.front, run.back].map(proc => this.killGroup(proc)))
+		if (!this.run && !run.failed) this.pipelineHealth = "stopped"
+	}
+
+	private killGroup(proc: ChildProcess): Promise<void> {
+		const exited = () => proc.exitCode !== null || proc.signalCode !== null
+		if (exited() || proc.pid === undefined) return Promise.resolve()
+		return new Promise<void>(resolve => {
+			let settled = false
+			const finish = () => {
+				if (settled) return
+				settled = true
+				clearTimeout(escalate)
+				clearTimeout(giveUp)
+				resolve()
+			}
+			proc.once("exit", finish)
+			const send = (signal: NodeJS.Signals) => {
+				try {
+					signalDecoder(proc, signal)
+				} catch (err) {
+					this.log.warn(
+						{ err, pid: proc.pid, signal },
+						"Failed to signal live demodulation process group",
+					)
+				}
+			}
+			const escalate = setTimeout(() => {
+				if (exited()) return
+				this.log.warn(
+					{ pid: proc.pid },
+					"Live demodulation process group ignored SIGTERM, sending SIGKILL",
+				)
+				send("SIGKILL")
+			}, this.options.stopTimeoutMs)
+			const giveUp = setTimeout(finish, this.options.stopTimeoutMs + 2000)
+			send("SIGTERM")
+		})
+	}
+
 	private async startHttpServer(): Promise<void> {
-		this.httpServer = http.createServer((req, res) =>
+		const server = http.createServer((req, res) =>
 			this.handleHttpRequest(req, res),
 		)
+		this.httpServer = server
 
-		this.httpServer.on("error", err => {
+		server.on("error", err => {
 			this.log.error({ err }, "Live demodulator HTTP server error")
-			this.emit("error", err)
+			this.emitError(err)
 		})
 
 		await new Promise<void>((resolve, reject) => {
-			this.httpServer!.listen(this.config.httpPort, "0.0.0.0", () => resolve())
-			this.httpServer!.once("error", err => reject(err))
+			server.once("error", reject)
+			server.listen(this.config.httpPort, "0.0.0.0", () => {
+				server.off("error", reject)
+				resolve()
+			})
 		})
+	}
+
+	/** Closes the server without waiting on streaming clients (they are destroyed). */
+	private async closeHttpServer(): Promise<void> {
+		const server = this.httpServer
+		if (!server) return
+		this.closeAllClients("server closing", true)
+		server.closeAllConnections()
+		await new Promise<void>(resolve => {
+			server.close(err => {
+				if (err) {
+					this.log.warn({ err }, "Error closing live demodulator server")
+				}
+				resolve()
+			})
+		})
+		if (this.httpServer === server) this.httpServer = null
 	}
 
 	private async restartHttpServer(): Promise<void> {
 		if (!this.httpServer) return
-		await new Promise<void>(resolve => {
-			this.httpServer!.close(() => resolve())
-		})
-		this.httpServer = null
+		await this.closeHttpServer()
 		await this.startHttpServer()
 	}
 
@@ -708,159 +863,205 @@ export class LiveDemodulator extends EventEmitter {
 		req: http.IncomingMessage,
 		res: http.ServerResponse,
 	): void {
-		if (req.method !== "GET" || req.url !== "/stream") {
+		const path = (req.url ?? "").split("?")[0]
+		if (
+			req.method !== "GET" ||
+			(path !== "/stream" && path !== "/stream.wav")
+		) {
 			res.statusCode = 404
 			res.end("Not Found")
 			return
 		}
 
-		const clientId = `client-${++this.clientIdCounter}`
-		const remoteAddress = `${req.socket.remoteAddress ?? "unknown"}:${req.socket.remotePort ?? "?"}`
-		const contentType =
-			this.config.audioFormat === "s16le"
-				? `audio/L16;rate=${Math.round(this.effectiveSampleRate)};channels=1`
-				: `audio/L32;rate=${Math.round(this.effectiveSampleRate)};channels=1`
-
+		const stream = this.plannedStream()
+		const wav = path === "/stream.wav"
 		res.writeHead(200, {
-			"Content-Type": contentType,
-			"Transfer-Encoding": "chunked",
-			"Cache-Control": "no-cache",
+			"Content-Type": wav ? "audio/wav" : "application/octet-stream",
 			Connection: "keep-alive",
+			...streamHeaders(stream),
 		})
+		req.socket.setNoDelay(true)
+		if (wav) res.write(wavStreamHeader(stream))
+		else res.flushHeaders()
 
-		const clientState: HttpClientState = {
+		const remoteAddress = `${req.socket.remoteAddress ?? "unknown"}:${req.socket.remotePort ?? "?"}`
+		this.registerClient(res, remoteAddress, stream)
+	}
+
+	private registerClient(
+		response: http.ServerResponse,
+		remoteAddress: string,
+		stream: StreamFormat = this.plannedStream(),
+	): HttpClientState {
+		const clientId = `client-${++this.clientIdCounter}`
+		const client: HttpClientState = {
 			id: clientId,
-			response: res,
+			response,
 			remoteAddress,
 			connectedAt: new Date(),
 			bytesWritten: 0,
+			stream,
+			queue: [],
+			queuedBytes: 0,
+			droppedBytes: 0,
+			waitingDrain: false,
+			lastProgressAt: Date.now(),
 		}
-
-		this.clients.set(clientId, clientState)
+		this.clients.set(clientId, client)
 		this.emit("client-connected", clientId)
 		this.log.info(
-			{ clientId, remoteAddress, totalClients: this.clients.size },
+			{ clientId, remoteAddress, totalClients: this.clients.size, stream },
 			"Live audio client connected",
 		)
 
-		res.on("close", () => this.cleanupClient(clientId))
-		res.on("error", err => {
+		response.on("close", () => this.cleanupClient(clientId))
+		response.on("error", err => {
 			this.log.debug({ clientId, err }, "Live audio client error")
 		})
+		return client
 	}
 
 	private cleanupClient(clientId: string): void {
 		const client = this.clients.get(clientId)
 		if (!client) return
 		this.clients.delete(clientId)
+		client.queue = []
+		client.queuedBytes = 0
 		this.emit("client-disconnected", clientId)
 		this.log.info(
 			{
 				clientId,
 				bytesWritten: client.bytesWritten,
+				droppedBytes: client.droppedBytes,
 				totalClients: this.clients.size,
 			},
 			"Live audio client disconnected",
 		)
 	}
 
-	private closeAllClients(): void {
-		for (const [clientId, client] of this.clients) {
-			this.log.debug({ clientId }, "Closing live audio client")
-			try {
-				client.response.end()
-			} catch {
-				// Ignore
-			}
+	private closeClient(
+		client: HttpClientState,
+		reason: string,
+		destroy: boolean,
+	): void {
+		this.log.debug({ clientId: client.id, reason }, "Closing live audio client")
+		try {
+			if (destroy) client.response.destroy()
+			else client.response.end()
+		} catch {
+			// Ignore
 		}
-		this.clients.clear()
+		this.cleanupClient(client.id)
+	}
+
+	private closeAllClients(reason: string, destroy: boolean): void {
+		for (const client of [...this.clients.values()]) {
+			this.closeClient(client, reason, destroy)
+		}
+	}
+
+	/** Keeps every dispatched chunk a whole number of samples. */
+	private alignAudio(chunk: Buffer): Buffer | null {
+		const frame = this.audioFrameBytes
+		const data =
+			this.audioRemainder.length > 0
+				? Buffer.concat([this.audioRemainder, chunk])
+				: chunk
+		const usable = data.length - (data.length % frame)
+		this.audioRemainder =
+			usable === data.length
+				? Buffer.alloc(0)
+				: Buffer.from(data.subarray(usable))
+		return usable > 0 ? data.subarray(0, usable) : null
 	}
 
 	private handleAudioData(chunk: Buffer): void {
-		if (this.clients.size === 0) return
+		const aligned = this.alignAudio(chunk)
+		if (!aligned || this.clients.size === 0) return
+		for (const client of [...this.clients.values()]) {
+			this.enqueueClient(client, aligned)
+		}
+	}
 
-		const payload = this.applySquelch(chunk)
+	private enqueueClient(client: HttpClientState, payload: Buffer): void {
+		const response = client.response
+		if (response.writableEnded || response.destroyed) {
+			this.cleanupClient(client.id)
+			return
+		}
+		if (
+			client.waitingDrain &&
+			Date.now() - client.lastProgressAt > this.options.clientStallTimeoutMs
+		) {
+			this.log.warn(
+				{ clientId: client.id, droppedBytes: client.droppedBytes },
+				"Disconnecting stalled live audio client",
+			)
+			this.closeClient(client, "stalled", true)
+			return
+		}
+		client.queue.push(payload)
+		client.queuedBytes += payload.length
+		this.flushClient(client)
+		this.trimClientQueue(client)
+	}
 
-		for (const [clientId, client] of this.clients) {
-			if (client.response.writableEnded || client.response.destroyed) {
-				this.cleanupClient(clientId)
-				continue
+	/** Drops the oldest queued audio beyond about one second. */
+	private trimClientQueue(client: HttpClientState): void {
+		let excess = client.queuedBytes - this.clientQueueLimit
+		if (excess <= 0) return
+		const frame = this.audioFrameBytes
+		excess = Math.ceil(excess / frame) * frame
+		if (client.droppedBytes === 0) {
+			this.log.warn(
+				{ clientId: client.id, limitBytes: this.clientQueueLimit },
+				"Live audio client is slow; dropping its oldest audio",
+			)
+		}
+		while (excess > 0 && client.queue.length > 0) {
+			const head = client.queue[0]!
+			if (head.length <= excess) {
+				client.queue.shift()
+				excess -= head.length
+				client.queuedBytes -= head.length
+				client.droppedBytes += head.length
+			} else {
+				client.queue[0] = head.subarray(excess)
+				client.queuedBytes -= excess
+				client.droppedBytes += excess
+				excess = 0
 			}
-			if (
-				client.response.writableLength + payload.length >
-				MAX_CLIENT_BUFFER_BYTES
-			) {
-				this.log.warn(
-					{ clientId },
-					"Disconnecting slow live audio client (buffer limit reached)",
-				)
-				client.response.destroy()
-				this.cleanupClient(clientId)
-				continue
-			}
+		}
+	}
+
+	private flushClient(client: HttpClientState): void {
+		const response = client.response
+		while (!client.waitingDrain && client.queue.length > 0) {
+			const next = client.queue.shift()!
+			client.queuedBytes -= next.length
+			let accepted: boolean
 			try {
-				client.response.write(payload)
-				client.bytesWritten += payload.length
-				this.bytesStreamed += payload.length
+				accepted = response.write(next)
 			} catch (err) {
-				this.log.debug({ clientId, err }, "Error writing live audio chunk")
-				this.cleanupClient(clientId)
+				this.log.debug(
+					{ clientId: client.id, err },
+					"Error writing live audio chunk",
+				)
+				this.cleanupClient(client.id)
+				return
+			}
+			client.bytesWritten += next.length
+			this.bytesStreamed += next.length
+			if (accepted) {
+				client.lastProgressAt = Date.now()
+			} else {
+				client.waitingDrain = true
+				response.once("drain", () => {
+					client.waitingDrain = false
+					client.lastProgressAt = Date.now()
+					if (this.clients.get(client.id) === client) this.flushClient(client)
+				})
 			}
 		}
-	}
-
-	private applySquelch(chunk: Buffer): Buffer {
-		if (this.squelchThresholdDbfs == null) return chunk
-
-		const rms = this.calculateChunkRms(chunk)
-		const rmsDbfs = rms > 0 ? 20 * Math.log10(rms) : Number.NEGATIVE_INFINITY
-		const openThreshold = this.squelchThresholdDbfs + this.squelchHysteresisDb
-		const closeThreshold = this.squelchThresholdDbfs - this.squelchHysteresisDb
-		const nowMs = Date.now()
-
-		if (rmsDbfs >= openThreshold) {
-			this.squelchGateOpen = true
-			this.squelchLastOpenAtMs = nowMs
-			return chunk
-		}
-
-		if (this.squelchGateOpen) {
-			// Hold open briefly after the last strong-enough chunk to avoid chattering.
-			if (
-				this.squelchLastOpenAtMs > 0 &&
-				nowMs - this.squelchLastOpenAtMs < this.squelchHangTimeMs
-			) {
-				return chunk
-			}
-			if (rmsDbfs < closeThreshold) {
-				this.squelchGateOpen = false
-			}
-		}
-
-		return this.squelchGateOpen ? chunk : Buffer.alloc(chunk.length)
-	}
-
-	private calculateChunkRms(chunk: Buffer): number {
-		if (this.config.audioFormat === "s16le") {
-			const sampleCount = Math.floor(chunk.length / 2)
-			if (sampleCount <= 0) return 0
-			const view = new Int16Array(chunk.buffer, chunk.byteOffset, sampleCount)
-			let sumSquares = 0
-			for (let i = 0; i < view.length; i++) {
-				const normalized = view[i]! / 32768
-				sumSquares += normalized * normalized
-			}
-			return Math.sqrt(sumSquares / sampleCount)
-		}
-
-		const sampleCount = Math.floor(chunk.length / 4)
-		if (sampleCount <= 0) return 0
-		const view = new Float32Array(chunk.buffer, chunk.byteOffset, sampleCount)
-		let sumSquares = 0
-		for (let i = 0; i < view.length; i++) {
-			const normalized = view[i] ?? 0
-			sumSquares += normalized * normalized
-		}
-		return Math.sqrt(sumSquares / sampleCount)
 	}
 }

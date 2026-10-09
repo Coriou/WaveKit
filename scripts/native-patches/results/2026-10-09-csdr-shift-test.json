@@ -1,0 +1,97 @@
+{
+	"date": "2026-10-09",
+	"purpose": "Bound csdr shift (offsetHz) and the channel-matched firdecimate forms",
+	"image": "wavekit:local-core (pinned csdr 1f15b8c with csdr-buffer-elements.patch), throwaway --rm container, --network none",
+	"baseline": "same binary without WAVEKIT_CSDR_BUFFER_ELEMENTS (upstream ring); candidate with 2048/2050/65536-element rings and fragmented writes [17, 1023, 8191]",
+	"finding": "shift at a 2048-element ring is rejected by the patch's retained-window guard (FixedLengthModule keeps up to 1024 unread elements plus a 1024 read); 2050 and 65536 are byte-identical to the upstream ring",
+	"result": {
+		"equivalence": [
+			{
+				"factor": 2,
+				"transition": "0.05",
+				"bytes": 4194040
+			},
+			{
+				"factor": 43,
+				"transition": "0.05",
+				"bytes": 195064
+			},
+			{
+				"factor": 43,
+				"transition": "0.012",
+				"bytes": 195024
+			},
+			{
+				"factor": 85,
+				"transition": "0.05",
+				"bytes": 98680
+			}
+		],
+		"validationCases": 16,
+		"boundedStages": [
+			"convert -i char -o float",
+			"convert -i s16 -o float",
+			"convert -i float -o char",
+			"convert -i float -o s16",
+			"fmdemod",
+			"amdemod",
+			"agc -f complex -p slow -r 0.7",
+			"agc -f float -p fast -r 0.8",
+			"agc -f float -p slow -r 0.7",
+			"dcblock",
+			"gain 3",
+			"gain 10.0",
+			"limit",
+			"realpart",
+			"firdecimate 45 0.05 --cutoff 0.4",
+			"firdecimate 2 0.05",
+			"firdecimate 2 0.012",
+			"firdecimate 8 0.05",
+			"firdecimate 8 0.012",
+			"firdecimate 10 0.05",
+			"firdecimate 10 0.012",
+			"firdecimate 43 0.05",
+			"firdecimate 43 0.012",
+			"firdecimate 45 0.05",
+			"firdecimate 45 0.012",
+			"firdecimate 50 0.05",
+			"firdecimate 50 0.012",
+			"firdecimate 85 0.05",
+			"firdecimate 85 0.012",
+			"firdecimate 90 0.05",
+			"firdecimate 90 0.012",
+			"firdecimate 100 0.05",
+			"firdecimate 100 0.012",
+			"firdecimate 82 0.003046 --cutoff 0.3751",
+			"firdecimate 96 0.002604 --cutoff 0.3750",
+			"firdecimate 43 0.003052 --cutoff 0.1968",
+			"firdecimate 50 0.002604 --cutoff 0.1953",
+			"shift -0.0029296875",
+			"shift 0.0052083333"
+		],
+		"memory": {
+			"inputMiB": 64,
+			"baseline": {
+				"exit": 0,
+				"stderr": "",
+				"bytes": 1560608,
+				"peakRssKiB": 70976,
+				"sampledNativePeakRssKiB": 70976,
+				"wallSeconds": 0.3011,
+				"userSeconds": 0.0399,
+				"systemSeconds": 0.2525
+			},
+			"bounded": {
+				"exit": 0,
+				"stderr": "",
+				"bytes": 1560608,
+				"peakRssKiB": 23452,
+				"sampledNativePeakRssKiB": 6132,
+				"wallSeconds": 0.0643,
+				"userSeconds": 0.0258,
+				"systemSeconds": 0.0348
+			}
+		},
+		"blockedConsumerPeakRssKiB": 5496
+	}
+}

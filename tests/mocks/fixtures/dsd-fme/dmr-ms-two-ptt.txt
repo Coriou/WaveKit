@@ -1,0 +1,102 @@
+# dsd-fme (lwvmobile ed1d1d6) stderr for two DMR MS/direct-mode PTT presses,
+# synthesised from the source's print formats (dmr_ms.c dmrMSBootstrap/dmrMSData,
+# dmr_dburst.c burst labels, dmr_flco.c link control), ANSI colours stripped.
+# Format: <ms since start><TAB><line>. One voice superframe = 360 ms.
+# PTT 1: 0-10.1 s with a 2.5 s sync hole at 4.0-6.5 s; terminator (TLC) at 10.1 s.
+# PTT 2: 11.6-19.9 s, no hole; terminator at 19.9 s.
+0	13:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC 
+0	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+60	13:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+360	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+420	13:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+720	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+780	13:13:33 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+1080	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+1140	13:13:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+1440	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+1500	13:13:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+1800	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+1860	13:13:34 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+2160	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+2220	13:13:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+2520	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+2580	13:13:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+2880	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+2940	13:13:35 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+3240	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+3300	13:13:36 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+3600	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+3660	13:13:36 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+3960	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+6540	13:13:39 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+6840	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+6900	13:13:39 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+7200	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+7260	13:13:40 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+7560	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+7620	13:13:40 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+7920	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+7980	13:13:40 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+8280	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+8340	13:13:41 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+8640	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+8700	13:13:41 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+9000	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+9060	13:13:42 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+9360	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+9420	13:13:42 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+9720	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+9780	13:13:42 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+10080	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+10100	13:13:43 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC 
+10100	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+11600	13:13:44 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VLC 
+11600	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+11660	13:13:44 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+11960	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+12020	13:13:45 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+12320	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+12380	13:13:45 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+12680	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+12740	13:13:45 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+13040	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+13100	13:13:46 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+13400	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+13460	13:13:46 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+13760	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+13820	13:13:46 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+14120	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+14180	13:13:47 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+14480	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+14540	13:13:47 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+14840	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+14900	13:13:47 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+15200	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+15260	13:13:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+15560	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+15620	13:13:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+15920	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+15980	13:13:48 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+16280	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+16340	13:13:49 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+16640	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+16700	13:13:49 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+17000	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+17060	13:13:50 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+17360	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+17420	13:13:50 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+17720	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+17780	13:13:50 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+18080	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+18140	13:13:51 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+18440	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+18500	13:13:51 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+18800	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+18860	13:13:51 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+19160	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+19220	13:13:52 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+19520	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+19580	13:13:52 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | VC* 
+19880	 SLOT 1 TGT=9 SRC=2060945 Group Call 
+19900	13:13:52 Sync: +DMR MS/DM MODE/MONO | Color Code=01 | TLC 
+19900	 SLOT 1 TGT=9 SRC=2060945 Group Call 

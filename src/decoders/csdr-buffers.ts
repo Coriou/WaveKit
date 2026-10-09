@@ -18,10 +18,16 @@
  *   builders log that fallback at info (boundCsdrPipeline).
  * - `convert`, `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`,
  *   `realpart` — CSDR AnyLengthModule stages with no retained input window.
+ * - `shift` (offsetHz mixer, ShiftAddfast) — a FixedLengthModule of 1024
+ *   samples with no filter window. canProcess needs more than 1024 elements,
+ *   so up to 1024 stay unread while the runner reads 1024 more: the patch
+ *   rejects a 2048 ring, and 2050+ was byte-identical to upstream
+ *   (scripts/native-patches/results/2026-10-09-csdr-shift-test.json). Below
+ *   2050 it keeps the upstream ring (reported like a firdecimate fallback).
  *
  * Stages left at the upstream default, and why:
  * - `lowpass`, `deemphasis` (NFM is a FIR FilterModule), `bandpass --fft`,
- *   `fft`, `shift` and anything else: either they retain a filter/FFT window
+ *   `fft` and anything else: either they retain a filter/FFT window
  *   the patch does not size (only the runtime overrun guard protects them) or
  *   the harness does not cover them. Fixed WFM deemphasis is excluded with the
  *   NFM form to keep one rule per command.
@@ -39,6 +45,9 @@ export const CSDR_BUFFER_MAX_ELEMENTS = 10_485_760
 
 /** CSDR's synchronous runner reads at most this many elements per iteration. */
 const CSDR_READ_BATCH = 1024
+
+/** `csdr shift` ring minimum: 1024 unread + a 1024 read + the empty slot (+1). */
+export const CSDR_SHIFT_MINIMUM_ELEMENTS = 2050
 
 export interface CsdrBufferPolicy {
 	enabled: boolean
@@ -101,6 +110,11 @@ function classifyStage(stage: string, elements: number): StageDecision {
 	if (command === undefined || command.startsWith("-")) return upstream
 	if (tokens.includes("--async")) return upstream
 	if (STREAMING_COMMANDS.has(command)) return { kind: "bounded" }
+	if (command === "shift") {
+		return elements >= CSDR_SHIFT_MINIMUM_ELEMENTS
+			? { kind: "bounded" }
+			: { kind: "firFallback", minimum: CSDR_SHIFT_MINIMUM_ELEMENTS }
+	}
 	if (command !== "firdecimate") return upstream
 	const decimation = parseNumber(tokens[2])
 	// Upstream default transition when omitted.
@@ -130,7 +144,10 @@ export function boundCsdrStage(
 		: stage
 }
 
-/** A firdecimate kept on its upstream ring because bufferElements is too small. */
+/**
+ * A stage (firdecimate or shift) kept on its upstream ring because
+ * bufferElements is below its minimum.
+ */
 export interface CsdrFirFallback {
 	stage: string
 	/** Elements the native patch requires for this filter. */
@@ -168,7 +185,7 @@ export function boundCsdrStages(
 
 /**
  * Bounds a pipeline's stages and returns them joined with " | ". Logs at info
- * for each firdecimate that stays on its 800 MiB upstream ring while the
+ * for each firdecimate or shift that stays on its upstream ring while the
  * policy is enabled, so the fallback is never silent.
  */
 export function boundCsdrPipeline(
@@ -180,7 +197,7 @@ export function boundCsdrPipeline(
 	for (const fallback of result.firFallbacks) {
 		logger.info(
 			fallback,
-			"csdr firdecimate keeps the upstream ring: csdr.bufferElements is below its lookahead minimum",
+			"csdr stage keeps the upstream ring: csdr.bufferElements is below its minimum",
 		)
 	}
 	return result.stages.join(" | ")

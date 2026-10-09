@@ -444,6 +444,24 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 	}
 
 	/**
+	 * Publishes one decoder output: counts it in stats.eventsOut, stamps
+	 * lastOutputAt, writes the output stream and emits "output". Subclasses
+	 * that produce events outside parseOutput (timers, async lookups) must use
+	 * this instead of emitting "output" directly, or REST status never moves.
+	 */
+	protected emitOutput(output: DecoderOutput): void {
+		this.stats.eventsOut++
+		this.lastOutputAt = new Date()
+		this.outputStream.write(output)
+		this.emit("output", output)
+
+		// Update health to running when we receive output (Requirement 20.1)
+		if (this._health === "idle") {
+			this.setHealth("running")
+		}
+	}
+
+	/**
 	 * Handles a line of output from stdout or stderr.
 	 * Calls the subclass parseOutput method and emits the result.
 	 * Updates lastOutputAt and health state on successful output.
@@ -455,17 +473,7 @@ export abstract class BaseDecoder extends EventEmitter implements Decoder {
 
 		try {
 			const output = this.parseOutput(line)
-			if (output) {
-				this.stats.eventsOut++
-				this.lastOutputAt = new Date()
-				this.outputStream.write(output)
-				this.emit("output", output)
-
-				// Update health to running when we receive output (Requirement 20.1)
-				if (this._health === "idle") {
-					this.setHealth("running")
-				}
-			}
+			if (output) this.emitOutput(output)
 		} catch (err) {
 			this.logger.warn({ line, err }, "Failed to parse decoder output")
 			this.stats.errors++

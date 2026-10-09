@@ -131,7 +131,11 @@ export interface DemodulationConfig {
 	 * This allows for tighter filtering (e.g. 12kHz bw) while outputting higher rate audio.
 	 */
 	demodSampleRate?: number | undefined
-	/** Optional custom transition bandwidth for FIR filter (default: 0.05) */
+	/**
+	 * Optional custom transition bandwidth for the decimating FIR filter,
+	 * normalised to the input rate. Default: a filter matched to `bandwidth`
+	 * (csdr-stages.ts channelDecimationStage).
+	 */
 	filterTransition?: number
 	/** Optional custom cutoff for FIR filter (0.0-0.5, default: 0.5) */
 	filterCutoff?: number

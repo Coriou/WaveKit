@@ -7,6 +7,7 @@ import Fastify, { type FastifyInstance } from "fastify"
 import { EventEmitter } from "node:events"
 import { liveAudioRoutes } from "../../../src/api/routes/live-audio.js"
 import type { LiveDemodStatus } from "../../../src/core/live-demodulator.js"
+import { WaveKitError } from "../../../src/utils/errors.js"
 
 function createMockLiveDemodulator() {
 	const mock = new EventEmitter()
@@ -32,13 +33,18 @@ function createMockLiveDemodulator() {
 			deEmphasisTau: 50,
 			audioFormat: "s16le",
 			iqDcBlock: true,
+			offsetHz: 0,
 		},
 		effectiveSampleRate: 25000,
 		decimationFactor: 96,
 		httpUrl: "http://localhost:8081/stream",
+		wavUrl: "http://localhost:8081/stream.wav",
 		clientCount: 1,
 		bytesStreamed: 123456,
 		pipelineHealth: "running",
+		pipelineRestarts: 0,
+		channelPowerDbfs: -62.5,
+		squelchOpen: false,
 	}
 
 	return Object.assign(mock, {
@@ -115,6 +121,42 @@ describe("Live Audio Routes", () => {
 			modulation: "am",
 			bandwidth: 10000,
 		})
+	})
+
+	it("GET /api/live-audio/status includes the additive stream fields", async () => {
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/live-audio/status",
+		})
+		const body = JSON.parse(response.body) as LiveDemodStatus
+		expect(body.wavUrl).toBe("http://localhost:8081/stream.wav")
+		expect(body.pipelineRestarts).toBe(0)
+		expect(body.channelPowerDbfs).toBe(-62.5)
+		expect(body.squelchOpen).toBe(false)
+		expect(body.config.offsetHz).toBe(0)
+	})
+
+	it("PATCH /api/live-audio/config forwards offsetHz", async () => {
+		const response = await app.inject({
+			method: "PATCH",
+			url: "/api/live-audio/config",
+			payload: { offsetHz: 6000 },
+		})
+		expect(response.statusCode).toBe(200)
+		expect(mockLiveDemod.reconfigure).toHaveBeenCalledWith({ offsetHz: 6000 })
+	})
+
+	it("PATCH /api/live-audio/config answers 400 for an offset outside the capture", async () => {
+		mockLiveDemod.reconfigure.mockRejectedValueOnce(
+			new WaveKitError("offsetHz too large", "CHANNEL_OFFSET_OUT_OF_RANGE"),
+		)
+		const response = await app.inject({
+			method: "PATCH",
+			url: "/api/live-audio/config",
+			payload: { offsetHz: 5_000_000 },
+		})
+		expect(response.statusCode).toBe(400)
+		expect(JSON.parse(response.body).message).toMatch(/offsetHz/)
 	})
 
 	it("GET /api/live-audio/presets returns presets", async () => {

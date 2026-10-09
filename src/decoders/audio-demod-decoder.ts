@@ -21,8 +21,15 @@
  * The decoder will use `tee` to save the audio to WAV files at different pipeline stages.
  */
 
+import { z } from "zod"
 import { shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
+import {
+	channelDecimationStage,
+	deemphasisStage,
+	shiftStage,
+	validateChannelOffset,
+} from "./csdr-stages.js"
 import { BaseDecoder } from "./base-decoder.js"
 import { configuredBandRequirements } from "./status-fields.js"
 import type {
@@ -43,6 +50,9 @@ interface DebugRecordingOptions {
 	/** Which stages to record: 'demod' (after FM demod), 'final' (after all processing), 'both' */
 	stages?: "demod" | "final" | "both"
 }
+
+/** Decoder option `offsetHz`: channel offset from the tuned centre in Hz. */
+const OffsetHzSchema = z.number().finite().optional()
 
 /**
  * Default IQ sample rate from rtlmux (2.4 Msps)
@@ -171,6 +181,7 @@ function getDebugFilename(
 export abstract class AudioDemodDecoder extends BaseDecoder {
 	/** Debug recording options if enabled */
 	protected debugRecording?: DebugRecordingOptions
+	private invalidOffsetLogged = false
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -244,6 +255,56 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			this.getDecoderStdin(),
 			input.sampleRateHz,
 		)
+	}
+
+	/**
+	 * Decoder option `offsetHz` (default 0): a carrier at centre + offsetHz is
+	 * shifted to DC before decimation, away from the receiver's DC spike.
+	 * A non-numeric value is ignored with a warning.
+	 */
+	protected getOffsetHz(): number {
+		const parsed = OffsetHzSchema.safeParse(this.config.options["offsetHz"])
+		if (parsed.success) return parsed.data ?? 0
+		if (!this.invalidOffsetLogged) {
+			this.invalidOffsetLogged = true
+			this.logger.warn(
+				{ offsetHz: this.config.options["offsetHz"] },
+				"Ignoring invalid offsetHz option (expected a number of Hz)",
+			)
+		}
+		return 0
+	}
+
+	/**
+	 * Front of every IQ-to-audio chain: U8 IQ → float, optional shift of
+	 * offsetHz to DC, then the decimating channel filter. An explicit
+	 * filterTransition keeps the legacy firdecimate; otherwise the filter is
+	 * matched to the channel bandwidth (see csdr-stages.ts).
+	 */
+	protected buildIqFrontStages(
+		config: DemodulationConfig,
+		inputSampleRate: number,
+		decimation: number,
+	): { convert: string; shift: string | null; decimate: string } {
+		const offsetHz = this.getOffsetHz()
+		if (offsetHz !== 0) {
+			validateChannelOffset(offsetHz, inputSampleRate, config.bandwidth)
+		}
+		const cutoffArg = config.filterCutoff
+			? ` --cutoff ${config.filterCutoff}`
+			: ""
+		return {
+			convert: "csdr convert -i char -o float",
+			shift: shiftStage(offsetHz, inputSampleRate),
+			decimate:
+				config.filterTransition !== undefined
+					? `csdr firdecimate ${decimation} ${config.filterTransition}${cutoffArg}`
+					: channelDecimationStage(
+							inputSampleRate,
+							decimation,
+							config.bandwidth,
+						),
+		}
 	}
 
 	/**
@@ -326,14 +387,9 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// 8. Apply gain (real)
 		// 9. Limit amplitude to prevent clipping (real)
 
-		const transition = config.filterTransition ?? 0.05
-		const cutoffArg = config.filterCutoff
-			? ` --cutoff ${config.filterCutoff}`
-			: ""
-
-		const csdrStages: string[] = [
-			"csdr convert -i char -o float", // U8 IQ -> complex float
-		]
+		const front = this.buildIqFrontStages(config, inputSampleRate, decimation)
+		const csdrStages: string[] = [front.convert] // U8 IQ -> complex float
+		if (front.shift) csdrStages.push(front.shift) // offsetHz -> DC
 
 		// Optional IQ-level AGC - applied BEFORE decimation and FM demod
 		// This normalizes the complex envelope without affecting FM frequency content.
@@ -343,9 +399,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			csdrStages.push("csdr agc -f complex -p slow -r 0.7")
 		}
 
-		csdrStages.push(
-			`csdr firdecimate ${decimation} ${transition}${cutoffArg}`, // Decimate + filter (complex)
-		)
+		csdrStages.push(front.decimate) // Decimate + filter (complex)
 
 		if (config.modulation === "am") {
 			csdrStages.push(
@@ -383,8 +437,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 
 		// Optional de-emphasis for analog signals
 		if (config.deEmphasis) {
-			// csdr deemphasis takes sample rate
-			csdrStages.push(`csdr deemphasis ${actualDemodRate}`)
+			// Never a fractional/unsupported rate (the NFM FIR only exists at 5 rates)
+			csdrStages.push(deemphasisStage("nfm", actualDemodRate).stage)
 		}
 
 		// Final conversion to S16LE (at demodRate)

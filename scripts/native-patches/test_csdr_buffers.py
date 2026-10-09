@@ -257,12 +257,26 @@ def main():
             (["realpart"], fragmented),
             (["firdecimate", "45", "0.05", "--cutoff", "0.4"], fragmented),
             *[(["firdecimate", str(f), t], fragmented) for f, t in app_firs],
+            # Channel-matched filters (src/decoders/csdr-stages.ts) at 2.048 and
+            # 2.4 Msps: live NFM and dsd-fme.
+            (["firdecimate", "82", "0.003046", "--cutoff", "0.3751"], fragmented),
+            (["firdecimate", "96", "0.002604", "--cutoff", "0.3750"], fragmented),
+            (["firdecimate", "43", "0.003052", "--cutoff", "0.1968"], fragmented),
+            (["firdecimate", "50", "0.002604", "--cutoff", "0.1953"], fragmented),
+            # offsetHz mixer (ShiftAddfast, fixed 1024-sample blocks); a 2048
+            # ring is rejected by the patch, so WaveKit bounds it from 2050.
+            (["shift", "-0.0029296875"], fragmented),
+            (["shift", "0.0052083333"], fragmented),
         ]
         report["boundedStages"] = []
         for args, source in stage_cases:
             reference = root / "stage-reference"
             assert execute(options.baseline, args, source, reference)["exit"] == 0
-            for setting in (2048, 65536):
+            # shift is a FixedLengthModule: canProcess needs more than 1024
+            # elements, so up to 1024 stay unread while the runner reads 1024
+            # more; the patch's guard needs a ring of at least 2050 elements.
+            settings = (2050, 65536) if args[0] == "shift" else (2048, 65536)
+            for setting in settings:
                 if args[0] == "firdecimate":
                     taps = math.ceil(4 / struct.unpack("f", struct.pack("f", float(args[2])))[0]) + 1
                     if setting < taps + int(args[1]) + 1024:

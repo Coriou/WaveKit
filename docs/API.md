@@ -7,7 +7,7 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **REST API**: `http://localhost:9000`
 - **WebSocket**: `ws://localhost:9000/ws`
 - **Audio Stream**: `tcp://localhost:8080`
-- **Live Audio Stream**: `http://localhost:8081/stream`
+- **Live Audio Stream**: `http://localhost:8081/stream` (raw PCM) and `http://localhost:8081/stream.wav` (WAV-wrapped)
 
 ## REST Endpoints
 
@@ -423,35 +423,108 @@ curl http://localhost:9000/api/live-audio/status
 	"running": true,
 	"sourceId": "rtl-pi",
 	"sourceConnected": true,
-	"sourceIqSampleRate": 2400000,
+	"sourceIqSampleRate": 2048000,
 	"config": {
 		"enabled": true,
 		"sourceId": "rtl-pi",
 		"httpPort": 8081,
 		"modulation": "nfm",
 		"bandwidth": 12500,
-		"squelch": 0,
+		"squelch": -40,
 		"noiseReduction": "off",
 		"lowPass": 0,
 		"highPass": 0,
-		"gain": 10,
+		"gain": 2,
 		"deEmphasis": false,
 		"deEmphasisTau": 50,
 		"audioFormat": "s16le",
-		"iqDcBlock": true
+		"iqDcBlock": false,
+		"offsetHz": 6000
 	},
-	"effectiveSampleRate": 25000,
-	"decimationFactor": 96,
+	"effectiveSampleRate": 24975.60975609756,
+	"decimationFactor": 82,
 	"httpUrl": "http://localhost:8081/stream",
+	"wavUrl": "http://localhost:8081/stream.wav",
 	"clientCount": 1,
 	"bytesStreamed": 1234567,
-	"pipelineHealth": "running"
+	"pipelineHealth": "running",
+	"pipelineRestarts": 0,
+	"channelPowerDbfs": -61.3,
+	"squelchOpen": false
 }
+```
+
+Fields:
+
+- `effectiveSampleRate` — demodulation and audio sample rate in Hz (source rate /
+  `decimationFactor`; usually fractional).
+- `wavUrl` — the audio stream behind a streaming WAV header.
+- `pipelineHealth` — `running`, `starting`, `stopped` or `error`. A crashed CSDR
+  pipeline restarts automatically with exponential backoff (1 s doubling to 30 s,
+  10 consecutive attempts; a run of 30 s resets the count). `pipelineRestarts`
+  counts automatic restarts since the last manual start; after the last attempt
+  `lastError` says so and `POST /api/live-audio/start` restarts it.
+- `channelPowerDbfs` — smoothed channel power before demodulation, relative to a
+  full-scale IQ sample (present while the pipeline runs). This is the level the
+  `squelch` threshold compares against.
+- `squelchOpen` — squelch gate state while the pipeline runs (`true` with squelch
+  off).
+
+Configuration notes:
+
+- `squelch` — dBFS threshold on `channelPowerDbfs`; `0` disables it. The gate opens
+  at the threshold, stays open within 2 dB below it and closes 250 ms after the
+  level drops further. While closed the stream carries silence at the nominal rate.
+- `gain` — audio gain after demodulation (default 2, formerly 10; for FM, ±5 kHz
+  deviation at 0.8 full scale at a 25 kHz demod rate). Modes without AGC follow the
+  gain directly: `raw` is about 5× (14 dB) quieter than before unless `gain` is set
+  explicitly. AM/SSB use an AGC whose reference dropped from 0.8 to 0.4, so with the
+  default gain they peak around 0.8 instead of hard-clipping.
+- `offsetHz` — channel offset from the tuned centre (default 0). A carrier at
+  centre + `offsetHz` is shifted to DC before the channel filter, so the receiver's
+  DC spike can be kept out of the channel by tuning a few kHz off the carrier.
+  Values that put the channel outside the capture are rejected with 400.
+- `iqDcBlock` — deprecated and ignored (it corrupted interleaved I/Q).
+- Retuning the centre frequency does not restart the pipeline; a sample-rate or
+  IQ-format change does, and disconnects stream clients so they reconnect with the
+  new rate.
+
+#### GET http://localhost:8081/stream and /stream.wav
+
+The audio itself is served by the live demodulator's own HTTP server
+(`config.httpPort`), not the API port. Mono, little-endian.
+
+- `/stream` — raw PCM, `Content-Type: application/octet-stream`.
+- `/stream.wav` — `Content-Type: audio/wav`: a 44-byte WAV header (PCM 16-bit for
+  `s16le`, IEEE float 32-bit for `f32le`, sample rate rounded to an integer, RIFF
+  and data sizes `0xFFFFFFFF`) followed by the same audio.
+
+Both send:
+
+| Header           | Example             | Meaning                              |
+| ---------------- | ------------------- | ------------------------------------ |
+| `X-Audio-Format` | `s16le`             | `s16le` or `f32le`                   |
+| `X-Sample-Rate`  | `24975.60975609756` | exact rate in Hz (may be fractional) |
+| `X-Channels`     | `1`                 | always mono                          |
+
+When the rate or format changes (sample-rate change, `audioFormat` change) the
+server ends existing streams; reconnect to get the new parameters. A client that
+falls behind keeps at most about one second of queued audio (the oldest audio is
+dropped); a client that accepts nothing for 30 s is disconnected.
+
+```bash
+# Self-describing: no format flags
+ffplay -nodisp -autoexit http://localhost:8081/stream.wav
+
+# Raw: read X-Sample-Rate first, round it for ffplay
+curl -sI http://localhost:8081/stream | grep -i x-sample-rate
+ffplay -nodisp -autoexit -f s16le -ar 24976 -ch_layout mono http://localhost:8081/stream
 ```
 
 #### POST /api/live-audio/start
 
-Start live demodulation.
+Start live demodulation. If the stream server is already up but the pipeline has
+died (for example after the automatic restarts gave up), this restarts the pipeline.
 
 ```bash
 curl -X POST http://localhost:9000/api/live-audio/start
@@ -479,15 +552,17 @@ curl -X POST http://localhost:9000/api/live-audio/stop
 
 #### PATCH /api/live-audio/config
 
-Update live demodulator configuration (hot-restart pipeline).
+Update live demodulator configuration. DSP changes restart the pipeline; a `squelch`
+change applies immediately without a restart; an `httpPort` change moves the stream
+server (connected clients are disconnected). Invalid values (for example an
+`offsetHz` outside the capture) return 400 and leave the running pipeline untouched.
 
 ```bash
 curl -X PATCH http://localhost:9000/api/live-audio/config \
   -H "Content-Type: application/json" \
   -d '{
-    "modulation": "am",
-    "bandwidth": 10000,
-    "gain": 8.0
+    "offsetHz": 6000,
+    "squelch": -40
   }'
 ```
 

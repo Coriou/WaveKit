@@ -201,18 +201,38 @@ export const LiveDemodConfigSchema = z
 			.enum(["nfm", "wfm", "am", "usb", "lsb", "dsb", "cw", "raw"])
 			.default("nfm"),
 		bandwidth: z.number().int().min(0).default(12500),
-		// Squelch threshold in dBFS (negative). 0 disables squelch (open).
+		/**
+		 * Squelch threshold in dBFS (negative) of channel power measured before
+		 * demodulation (|IQ| = 1 is 0 dBFS). 0 disables squelch (open).
+		 */
 		squelch: z.number().min(-160).max(0).default(0),
 		noiseReduction: z
 			.enum(["off", "voice", "noaa-apt", "narrow-band"])
 			.default("off"),
 		lowPass: z.number().int().min(0).max(20000).default(0),
 		highPass: z.number().int().min(0).max(5000).default(0),
-		gain: z.number().min(0.1).max(100).default(10.0),
+		/**
+		 * Audio gain after demodulation. For FM, CSDR's discriminator gives full
+		 * scale at a deviation of half the demod rate (12.5 kHz at 25 kHz), so 2
+		 * puts ±5 kHz deviation at 0.8 full scale. The former default of 10
+		 * hard-clipped NFM noise and voice.
+		 */
+		gain: z.number().min(0.1).max(100).default(2.0),
 		deEmphasis: z.boolean().default(false),
 		deEmphasisTau: z.union([z.literal(50), z.literal(75)]).default(50),
 		audioFormat: z.enum(["s16le", "f32le"]).default("s16le"),
-		iqDcBlock: z.boolean().default(true),
+		/**
+		 * Deprecated, accepted for compatibility and ignored. `csdr dcblock` is
+		 * real-only: on interleaved I/Q it mixed I and Q. Use offsetHz to move
+		 * the channel away from the receiver's DC spike instead.
+		 */
+		iqDcBlock: z.boolean().default(false),
+		/**
+		 * Channel offset from the tuned centre in Hz: a carrier at
+		 * centre + offsetHz is shifted to DC before decimation. 0 demodulates
+		 * at the tuned centre.
+		 */
+		offsetHz: z.number().finite().min(-10_000_000).max(10_000_000).default(0),
 	})
 	.superRefine((value, ctx) => {
 		if (value.modulation !== "raw" && value.bandwidth <= 0) {

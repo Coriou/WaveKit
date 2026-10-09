@@ -135,15 +135,16 @@ liveDemod:
   httpPort: 8081
   modulation: nfm
   bandwidth: 12500
-  squelch: -120
+  squelch: 0
   noiseReduction: off
   lowPass: 0
   highPass: 0
-  gain: 10.0
+  gain: 2.0
   deEmphasis: false
   deEmphasisTau: 50
   audioFormat: s16le
-  iqDcBlock: true
+  offsetHz: 0
+  iqDcBlock: false
 
 api:
   host: 0.0.0.0

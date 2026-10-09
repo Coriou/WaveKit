@@ -15,12 +15,16 @@
  * Call Handling Philosophy:
  * - Sync is a CANDIDATE context, not an event. We track the protocol but don't emit call_start on sync alone.
  * - Calls require minimum metadata (TGT+SRC for DMR/P25/NXDN, callsigns for D-Star, etc.)
- * - Calls end via explicit terminator, protocol switch, or 2-second metadata timeout.
+ * - Calls end via explicit terminator (DMR TLC, P25 TDULC), protocol switch, or a
+ *   fallback timeout without any line from the call (default 4 s, callTimeoutMs).
+ *   DMR prints at least one line per 360 ms voice superframe; the fallback bridges
+ *   short sync losses inside one transmission.
  * - Short calls (< 250ms) with weak metadata are suppressed as likely false positives.
  */
 
 import * as fs from "node:fs"
 import * as path from "node:path"
+import { z } from "zod"
 import { shellArg, shellCommand } from "../process-tools.js"
 import { boundCsdrPipeline } from "../csdr-buffers.js"
 import {
@@ -28,6 +32,7 @@ import {
 	audioDemodRates,
 	type AudioDecoderStdin,
 } from "../audio-demod-decoder.js"
+import { deemphasisStage } from "../csdr-stages.js"
 import type {
 	DecoderCaps,
 	DecoderConfig,
@@ -68,11 +73,14 @@ const DMR_VOICE_EVENT =
 const DMR_TLC_FIELDS =
 	/\bFLCO=0x(?<flco>[0-9A-F]+)\b.*\bFID=0x(?<fid>[0-9A-F]+)\b.*\bSVC=0x(?<svc>[0-9A-F]+)\b/i
 /**
- * DMR call termination hints - stricter than just "TLC" which appears in non-termination contexts.
- * Look for explicit terminator keywords or call end indicators.
+ * DMR call termination. dsd-fme labels each data burst in a "| <type>" column
+ * (dmr_dburst.c); "| TLC" is the Terminator with Link Control that ends every
+ * voice transmission. Keyword forms are kept for other builds.
  */
 const DMR_END_HINT =
-	/\b(Terminator|Call\s+Termination|GC\s+End|UC\s+End|End\s+Voice)\b/i
+	/\|\s*TLC\b|\b(Terminator|Call\s+Termination|GC\s+End|UC\s+End|End\s+Voice)\b/i
+/** BS-mode burst slot marker: the current slot is bracketed, e.g. "[slot1]". */
+const DMR_CURRENT_SLOT = /\[slot(?<slot>[12])\]/i
 
 // --- P25 Phase 1 Patterns ---
 /** P25 Phase 1 sync (reserved - protocol detection uses SYNC_PATTERN) */
@@ -265,6 +273,8 @@ export interface DsdFmeOptions {
 	emitDebugEvents?: boolean | undefined
 	/** Delay in ms before emitting call_start to accumulate metadata (default: 100) */
 	callStartDelayMs?: number | undefined
+	/** Fallback call end after this long without any line from the call (default: 4000) */
+	callTimeoutMs?: number | undefined
 }
 
 /** All supported DSD-FME modes */
@@ -281,8 +291,21 @@ export const DSD_FME_MODES: readonly DsdFmeMode[] = [
 /** Minimum call duration threshold (ms) - calls shorter than this are likely false positives */
 const MIN_CALL_DURATION_MS = 250
 
-/** Call metadata timeout (ms) - if no metadata received for this long, end the call */
-const CALL_TIMEOUT_MS = 2000
+/**
+ * Fallback call end (ms) when no line from the call arrives for this long. Calls
+ * normally end on the protocol terminator; this only bridges decode holes. The
+ * former 2 s split one 10 s PTT into two calls on a 2.5 s sync loss.
+ */
+const CALL_TIMEOUT_MS = 4000
+
+/**
+ * After a terminator, dsd-fme prints the terminator's link control (same
+ * TGT/SRC) on the very next line; it must not start a new call. The window
+ * is short so a fast re-key by the same radio still starts a new call.
+ */
+const TERMINATOR_TRAILER_MS = 700
+
+const PositiveMsSchema = z.number().finite().positive()
 
 /** Error rate threshold - if > 80% frames have errors, mark as bad signal */
 const BAD_SIGNAL_ERROR_RATE = 0.8
@@ -345,6 +368,14 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	// Timer for periodic call timeout checking
 	private callTimeoutTimer: NodeJS.Timeout | null = null
 
+	// Call that just ended on a terminator (suppresses its trailing LC line)
+	private recentlyTerminated: {
+		protocol: DsdFmeProtocol
+		talkgroup: number | null
+		source: number | null
+		untilMs: number
+	} | null = null
+
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 		this.options = this.parseOptions(config.options)
@@ -386,6 +417,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			emitDebugEvents: (options["emitDebugEvents"] as boolean) ?? false,
 			callStartDelayMs:
 				(options["callStartDelayMs"] as number) ?? CALL_START_DELAY_MS,
+			callTimeoutMs:
+				PositiveMsSchema.safeParse(options["callTimeoutMs"]).data ??
+				CALL_TIMEOUT_MS,
 		}
 	}
 
@@ -439,7 +473,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (this.callState) {
 			const endEvent = this.endCall(now, true)
 			if (endEvent) {
-				this.emit("output", endEvent)
+				this.emitOutput(endEvent)
 			}
 		}
 
@@ -457,13 +491,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// First, check if pending call should be promoted to active
 		const promotedEvent = this.checkPendingCallEmission(now, nowMs)
 		if (promotedEvent) {
-			this.emit("output", promotedEvent)
+			this.emitOutput(promotedEvent)
 		}
 
 		// Then check for call timeout
 		const timeoutEvent = this.checkCallTimeout(now)
 		if (timeoutEvent) {
-			this.emit("output", timeoutEvent)
+			this.emitOutput(timeoutEvent)
 		}
 	}
 
@@ -539,7 +573,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			inputSampleRate: this.options.inputSampleRate ?? 2_400_000,
 			deEmphasis: false, // Critical: no de-emphasis for digital signals
 			fmGain: this.options.fmGain ?? 2.0, // Tuned: balanced gain minimizes clipping + FEC errors
-			filterTransition: 0.05,
+			// No filterTransition: the decimation filter is matched to the 12.5 kHz
+			// channel (a fixed 0.05 was ~102 kHz wide at 2.048 Msps).
 			enableIqAgc: this.options.enableIqAgc ?? true, // Try IQ AGC for weak signals
 			// DC block is REQUIRED for DMR - centers 4FSK symbol levels
 		}
@@ -582,12 +617,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			: null
 
 		// Build csdr pipeline stages (Using jketterl/csdr v0.18+ syntax)
-		const transition = config.filterTransition ?? 0.05
-		const csdrStages: string[] = [
-			"csdr convert -i char -o float", // U8 IQ -> complex float
-			`csdr firdecimate ${decimation} ${transition}`, // Decimate + filter (complex)
+		const front = this.buildIqFrontStages(config, inputSampleRate, decimation)
+		const csdrStages: string[] = [front.convert] // U8 IQ -> complex float
+		if (front.shift) csdrStages.push(front.shift) // offsetHz -> DC
+		csdrStages.push(
+			front.decimate, // Channel-matched decimation (complex)
 			"csdr fmdemod", // FM demod: complex -> real audio
-		]
+		)
 
 		// Optional DC block (skip for digital signals as it distorts them)
 		if (!config.skipDcBlock) {
@@ -601,7 +637,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// Optional de-emphasis (should be false for digital voice)
 		if (config.deEmphasis) {
-			csdrStages.push(`csdr deemphasis ${actualDemodRate}`)
+			csdrStages.push(deemphasisStage("nfm", actualDemodRate).stage)
 		}
 
 		// Convert to S16LE audio
@@ -780,12 +816,11 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		// STEP 1: Strip ANSI escape codes from colored output
 		const cleanLine = line.replace(ANSI_ESCAPE, "")
 
-		// STEP 2: Check for stale calls (timeout-based call end)
+		// STEP 2: Check for stale calls (timeout-based call end). Publish the
+		// end now and keep parsing: this line may start the next call.
 		const timeoutEvent = this.checkCallTimeout(now)
 		if (timeoutEvent) {
-			// Re-process this line after emitting the timeout event
-			// The line might contain the start of a new call
-			return timeoutEvent
+			this.emitOutput(timeoutEvent)
 		}
 
 		// STEP 3: Track errors for quality metrics (rolling window)
@@ -840,7 +875,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (this.pendingCall && !this.callState) {
 			const pendingSilence =
 				now.getTime() - this.pendingCall.state.lastUpdate.getTime()
-			if (pendingSilence > CALL_TIMEOUT_MS) {
+			if (pendingSilence > this.callTimeoutMs()) {
 				// Promote pending to active and end it
 				this.callState = this.pendingCall.state
 				this.pendingCall = null
@@ -852,9 +887,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		if (!this.callState) return null
 
 		const silenceDuration = now.getTime() - this.callState.lastUpdate.getTime()
-		if (silenceDuration <= CALL_TIMEOUT_MS) return null
+		if (silenceDuration <= this.callTimeoutMs()) return null
 
 		return this.endCall(now, true)
+	}
+
+	private callTimeoutMs(): number {
+		return this.options.callTimeoutMs ?? CALL_TIMEOUT_MS
 	}
 
 	/**
@@ -931,7 +970,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			}
 		}
 
-		return null // Suppress sync from user-facing output
+		// Keep parsing: a sync line also carries the burst type (VLC/VC*/TLC).
+		return undefined
 	}
 
 	/**
@@ -1037,15 +1077,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			return this.processCallMetadata(now, "dmr", tgt, src, slot, dmrMeta)
 		}
 
-		// Update existing call with additional metadata
-		if (this.callState && this.callState.protocol === "dmr") {
-			if (cc !== undefined && !this.callState.dmr?.cc) {
-				this.callState.dmr = { ...this.callState.dmr, cc }
+		// Any DMR line (voice superframe, data burst) keeps the call alive.
+		const ongoing = this.callState ?? this.pendingCall?.state ?? null
+		if (ongoing && ongoing.protocol === "dmr") {
+			if (cc !== undefined && !ongoing.dmr?.cc) {
+				ongoing.dmr = { ...ongoing.dmr, cc }
 			}
-			if (slot !== undefined && this.callState.slot === undefined) {
-				this.callState.slot = slot
+			if (slot !== undefined && ongoing.slot === undefined) {
+				ongoing.slot = slot
 			}
-			this.callState.lastUpdate = now
+			ongoing.lastUpdate = now
 		}
 
 		return null
@@ -1290,9 +1331,16 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		let isTerminator = false
 
 		switch (targetCall.protocol) {
-			case "dmr":
-				isTerminator = DMR_END_HINT.test(line)
+			case "dmr": {
+				// In BS (repeater) mode only the bracketed slot's terminator counts.
+				const burstSlot = DMR_CURRENT_SLOT.exec(line)?.groups?.["slot"]
+				isTerminator =
+					DMR_END_HINT.test(line) &&
+					(burstSlot === undefined ||
+						targetCall.slot === undefined ||
+						Number(burstSlot) === targetCall.slot)
 				break
+			}
 			case "p25p1":
 			case "p25p2":
 				isTerminator = P25_CALL_TERM.test(line)
@@ -1307,6 +1355,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			if (this.pendingCall && !this.callState) {
 				this.callState = this.pendingCall.state
 				this.pendingCall = null
+			}
+			this.recentlyTerminated = {
+				protocol: targetCall.protocol,
+				talkgroup: targetCall.talkgroup,
+				source: targetCall.source,
+				untilMs: now.getTime() + TERMINATOR_TRAILER_MS,
 			}
 			return this.endCall(now, false)
 		}
@@ -1408,6 +1462,21 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				}
 			}
 			return null // No new event, metadata accumulated in pending call
+		}
+
+		// The terminator's own link control (same key, right after it) is not a new call.
+		const trailer = this.recentlyTerminated
+		if (
+			!this.callState &&
+			!this.pendingCall &&
+			trailer &&
+			nowMs <= trailer.untilMs &&
+			trailer.protocol === protocol &&
+			trailer.talkgroup === tgt &&
+			trailer.source === src
+		) {
+			this.recentlyTerminated = null
+			return null
 		}
 
 		// Case 3: Different call detected - end previous, start new pending
@@ -1585,7 +1654,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				const wavFile = this.searchForWavFile(call, callEndTime, dir)
 				if (wavFile) {
 					// Found it! Emit an event so the UI can update
-					this.emit("output", {
+					this.emitOutput({
 						timestamp: new Date(),
 						decoder: this.id,
 						type: "call_end",
@@ -1753,7 +1822,9 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	private endCall(now: Date, timeout: boolean): DecoderOutput | null {
 		if (!this.callState) return null
 
-		const duration = now.getTime() - this.callState.startTime.getTime()
+		// A timeout is detected late: the call really ended at its last line.
+		const endTime = timeout ? this.callState.lastUpdate : now
+		const duration = endTime.getTime() - this.callState.startTime.getTime()
 		const callInfo = this.callState
 
 		// Calculate error rate

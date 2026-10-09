@@ -14,15 +14,20 @@ range as the native validation. When the flag is on, the IQ-decimate,
 audio-demod, dsd-fme and live-demod builders prefix only validated stages with
 `WAVEKIT_CSDR_BUFFER_ELEMENTS=<n>` (`src/decoders/csdr-buffers.ts`).
 
-| Bounded (harness-validated)                                         | Upstream ring kept                       | Why kept                                                |
-| ------------------------------------------------------------------- | ---------------------------------------- | ------------------------------------------------------- |
-| `convert` (char/s16→float, float→char/s16)                          | `lowpass`                                | FIR FilterModule; the patch does not size its lookahead |
-| `firdecimate` when ring ≥ ceil(4/float(tbw))+1+M+1024               | `deemphasis` (nfm and wfm)               | NFM is a FIR FilterModule; one rule per command         |
-| `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`, `realpart` | `bandpass --fft`, `fft`, `shift`, others | Window not sized, or not covered by the harness         |
-|                                                                     | any `--async` stage                      | The patch rejects asynchronous mode                     |
+| Bounded (harness-validated)                                         | Upstream ring kept              | Why kept                                                |
+| ------------------------------------------------------------------- | ------------------------------- | ------------------------------------------------------- |
+| `convert` (char/s16→float, float→char/s16)                          | `lowpass`                       | FIR FilterModule; the patch does not size its lookahead |
+| `firdecimate` when ring ≥ ceil(4/float(tbw))+1+M+1024               | `deemphasis` (nfm and wfm)      | NFM is a FIR FilterModule; one rule per command         |
+| `fmdemod`, `amdemod`, `agc`, `dcblock`, `gain`, `limit`, `realpart` | `bandpass --fft`, `fft`, others | Window not sized, or not covered by the harness         |
+| `shift` when ring ≥ 2050 (2026-10-09)                               | `shift` below 2050              | The patch rejects a 2048 ring for it                    |
+|                                                                     | any `--async` stage             | The patch rejects asynchronous mode                     |
 
-The bounded commands other than `firdecimate` are CSDR `AnyLengthModule`s,
-which keep no input window. The Dockerfile and s6 overlay build no CSDR
+The bounded commands other than `firdecimate` and `shift` are CSDR
+`AnyLengthModule`s, which keep no input window. `shift` (the `offsetHz` mixer)
+is a 1024-sample `FixedLengthModule` with no filter window: up to 1024 elements
+stay unread while the runner reads 1024 more, so it needs a 2050-element ring
+(`scripts/native-patches/results/2026-10-09-csdr-shift-test.json`: 2050 and
+65536 byte-identical to the upstream ring). The Dockerfile and s6 overlay build no CSDR
 pipelines; only the Node app spawns them.
 
 Operational notes:
@@ -184,10 +189,10 @@ Live Mac app, Pi rtl_tcp source over Wi-Fi, all nine decoders, hourly blocks
 alternating bounded OFF/ON (4 each, 22:43–06:45 UTC), the same six-band rotation
 inside every block, quiet host after ~23:30 (load1 median ~4.5–4.9 in both modes).
 
-| Mode | Decoder-branch fanout loss | Container shmem | VM MemAvailable | Crashes |
-| ---- | -------------------------- | --------------- | --------------- | ------- |
-| Bounded ON | 0.0% on every branch | ~18 MiB | ~6.6 GiB | none |
-| Upstream OFF | 0.6–1.6% per branch | ~5.1 GiB | ~1.5 GiB | none |
+| Mode         | Decoder-branch fanout loss | Container shmem | VM MemAvailable | Crashes |
+| ------------ | -------------------------- | --------------- | --------------- | ------- |
+| Bounded ON   | 0.0% on every branch       | ~18 MiB         | ~6.6 GiB        | none    |
+| Upstream OFF | 0.6–1.6% per branch        | ~5.1 GiB        | ~1.5 GiB        | none    |
 
 Caveat: from 23:06 UTC the dongle ran at ~2.16 Msps (set by an operator SDR++
 session) while the app assumed 2.048 Msps, so decode counts were near zero in
