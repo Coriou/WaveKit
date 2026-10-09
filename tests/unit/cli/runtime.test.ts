@@ -5,6 +5,7 @@ import { PLAIN_SUMMARY } from "../../../cli/source/data/reducers.js"
 import { loadScenario } from "../../../cli/source/test/scenarios.js"
 import {
 	FLUSH_MS,
+	POLL_MS,
 	BACKGROUND_EVENTS,
 	createRuntime,
 	isUrgent,
@@ -1128,6 +1129,79 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		// Still inside the same second: only an urgent answer commits.
 		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
 		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
+		rt.stop()
+	})
+})
+
+describe("R98: failed resync endpoints retry once REST recovers", () => {
+	it("REST hangs, ws:open resync fails, REST recovers: the presets banner clears within one poll cycle", async () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		let up = false
+		const calls: string[] = []
+		const fetchFn: FetchLike = url => {
+			calls.push(url)
+			if (!up) return Promise.reject(new DOMException("t", "TimeoutError"))
+			if (url.endsWith("/api/live-audio/presets")) return okJson({})
+			return okJson(bodies(url))
+		}
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		// The WS comes back while REST still hangs: its resync GETs fail too.
+		const h = ws.sockets[0]!
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(rt.store.get().conn.rest.failing).toContain("presets")
+		// REST recovers; nothing reconnects.
+		up = true
+		const before = calls.filter(u => u.endsWith("/api/aircraft")).length
+		await vi.advanceTimersByTimeAsync(POLL_MS + 1_000)
+		expect(rt.store.get().conn.rest.failing).not.toContain("presets")
+		expect(
+			calls.filter(u => u.endsWith("/api/aircraft")).length,
+		).toBeGreaterThan(before)
+		rt.stop()
+	})
+	it("a REST that keeps hanging retries the resync endpoints at most once per poll", async () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		const calls: string[] = []
+		// Poll endpoints answer, the resync ones keep failing.
+		const fetchFn: FetchLike = url => {
+			calls.push(url)
+			if (
+				url.endsWith("/api/live-audio/presets") ||
+				url.endsWith("/api/aircraft")
+			)
+				return Promise.reject(new DOMException("t", "TimeoutError"))
+			return okJson(bodies(url))
+		}
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(POLL_MS * 4)
+		const presets = calls.filter(u =>
+			u.endsWith("/api/live-audio/presets"),
+		).length
+		// The start resync, then at most one retry per poll cycle.
+		expect(presets).toBeGreaterThan(1)
+		expect(presets).toBeLessThanOrEqual(1 + 4)
 		rt.stop()
 	})
 })
