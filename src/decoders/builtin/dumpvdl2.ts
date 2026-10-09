@@ -10,11 +10,14 @@
 
 import {
 	IqDecimateDecoder,
+	iqChannelRequest,
+	readChannelHz,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
 	DecoderBandDeclaration,
 	DecoderCaps,
+	DecoderChannelRequestResult,
 	DecoderConfig,
 	DecoderOutput,
 	DecoderRateRequirements,
@@ -223,6 +226,34 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 						basis: "decoder-default",
 					},
 				}
+	}
+
+	/**
+	 * dumpvdl2 channelises internally, so one channel wide enough for the
+	 * whole frequency span is requested, centred on the span midpoint
+	 * (followCenter: the capture centre). `--centerfreq` follows
+	 * options.inputCenterFreq, which the manager sets to the channel centre.
+	 */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		if (!this.channelizerSupported()) return undefined
+		const freqs = this.options.frequencies
+		const span = freqs.length > 0 ? Math.max(...freqs) - Math.min(...freqs) : 0
+		const channelHz =
+			readChannelHz(this.config.options) ??
+			(this.options.followCenter || freqs.length === 0
+				? undefined
+				: (Math.min(...freqs) + Math.max(...freqs)) / 2)
+		const base = iqChannelRequest(
+			{
+				...this.getIqDecimationConfig(),
+				...(channelHz !== undefined ? { channelHz } : {}),
+			},
+			input,
+		)
+		return { ...base, bandwidthHz: Math.max(base.bandwidthHz, span + 50_000) }
 	}
 
 	/**

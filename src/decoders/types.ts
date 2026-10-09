@@ -27,6 +27,10 @@ import type {
 import type { DecoderRateAdapter } from "./rate-resolver.js"
 import type { DecoderBandDeclaration } from "./band-resolver.js"
 import type { BandOverrideInput } from "./band-defaults.js"
+import type {
+	ChannelAdmissionReason,
+	DecoderChannelRequestResult,
+} from "../core/channelizer/types.js"
 
 export type { DecoderRateAdapter } from "./rate-resolver.js"
 export type {
@@ -48,6 +52,19 @@ export type {
 	DecoderRateRequirements,
 	DecoderRateSet,
 } from "@wavekit/api-types"
+
+export type {
+	DecoderChannelRequest,
+	DecoderChannelRequestResult,
+} from "../core/channelizer/types.js"
+
+/**
+ * Every reason the core can hold a decoder back: the shared rate and band
+ * codes plus the core-internal channel admission codes (addendum §5).
+ */
+export type CoreSuspensionReason =
+	| DecoderSuspensionReasonCode
+	| ChannelAdmissionReason
 
 // ============================================================================
 // Decoder Capabilities (Requirements 17.1, 17.2, 17.3, 17.4)
@@ -114,6 +131,11 @@ export interface DemodulationConfig {
 	modulation?: "fm" | "am"
 	/** FM bandwidth in Hz (e.g., 12500 for NFM, 15000 for wider signals) */
 	bandwidth: number
+	/**
+	 * Absolute RF centre the decoder wants from the core channelizer
+	 * (addendum §1). Absent: the capture centre plus `offsetHz`.
+	 */
+	channelHz?: number | undefined
 	/** Target audio sample rate in Hz (e.g., 48000, 22050) */
 	sampleRate: number
 	/** IQ input sample rate in Hz from the source (e.g., 2400000) */
@@ -443,6 +465,15 @@ export interface Decoder extends EventEmitter {
 	getRateAdapter?(input: {
 		sampleRateHz: number
 	}): DecoderRateAdapter | undefined
+
+	/**
+	 * The channel this instance wants from the core channelizer (addendum §2).
+	 * Undefined: not channelisable (raw fanout). Pure: no spawn, no option change.
+	 */
+	getChannelRequest?(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined
 
 	/**
 	 * What this instance itself knows about the band it must receive
