@@ -43,6 +43,17 @@ export function toApiDecoderStatus(
 						...(status.bandAssessment.targetsHz
 							? { targetsHz: [...status.bandAssessment.targetsHz] }
 							: {}),
+						...(status.bandAssessment.rangesHz
+							? {
+									rangesHz: status.bandAssessment.rangesHz.map(range => ({
+										minHz: range.minHz,
+										maxHz: range.maxHz,
+									})),
+								}
+							: {}),
+						...(status.bandAssessment.region
+							? { region: { ...status.bandAssessment.region } }
+							: {}),
 					},
 				}
 			: {}),
@@ -83,6 +94,7 @@ export function toApiDecoderStatus(
 		...(status.transition !== undefined
 			? { transition: status.transition }
 			: {}),
+		...(status.startMode !== undefined ? { startMode: status.startMode } : {}),
 	}
 }
 

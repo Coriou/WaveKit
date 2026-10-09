@@ -1,13 +1,16 @@
 /**
  * Builds DecoderManager options from application config, so YAML `health`
- * settings (idleTimeout, checkInterval) actually reach the manager.
+ * settings (idleTimeout, checkInterval) and the resolved band region
+ * actually reach the manager.
  */
 
 import type { HealthConfig } from "../config.js"
+import type { DecoderBandRegion } from "./band-region.js"
 import type { DecoderManagerConfig } from "./manager.js"
 
 export function createDecoderManagerOptions(
 	health: HealthConfig | undefined,
+	bandRegion?: DecoderBandRegion,
 ): Partial<DecoderManagerConfig> {
 	return {
 		restartDelay: 2000,
@@ -25,5 +28,6 @@ export function createDecoderManagerOptions(
 						: {}),
 				}
 			: {}),
+		...(bandRegion ? { bandRegion: { ...bandRegion } } : {}),
 	}
 }

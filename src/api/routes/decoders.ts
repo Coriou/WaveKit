@@ -13,6 +13,7 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
+import { z } from "zod"
 import type { DecoderManager } from "../../decoders/manager.js"
 import type { DecoderRegistry } from "../../decoders/registry.js"
 import type {
@@ -91,6 +92,15 @@ const decoderActionResponseSchema = {
 	},
 	required: ["message", "decoder"],
 } as const
+
+/**
+ * Optional POST /start body (band defaults spec §1.1). `pin` defaults to
+ * true: an operator start is never band-suspended.
+ */
+const StartBodySchema = z
+	.object({ pin: z.boolean().optional() })
+	.strict()
+	.nullish()
 
 /**
  * Decoder config update schema for PATCH request
@@ -286,6 +296,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 	 */
 	fastify.post<{
 		Params: { id: string }
+		Body: unknown
 		Reply: DecoderActionResponse | ErrorResponse
 	}>(
 		"/api/decoders/:id/start",
@@ -293,7 +304,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			schema: {
 				tags: ["decoders"],
 				summary: "Start decoder",
-				description: "Starts the specified decoder",
+				description:
+					"Starts the specified decoder. Optional body { pin?: boolean } (default true): a pinned (operator) decoder is never band-suspended; on a running decoder a body changes the start mode.",
 				params: {
 					type: "object",
 					properties: {
@@ -303,6 +315,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				},
 				response: {
 					200: decoderActionResponseSchema,
+					400: errorResponseSchema,
 					404: errorResponseSchema,
 					409: errorResponseSchema,
 					500: errorResponseSchema,
@@ -322,18 +335,47 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				})
 			}
 
-			// Check if already running
+			const body = StartBodySchema.safeParse(request.body)
+			if (!body.success) {
+				return reply.status(400).send({
+					error: "BadRequest",
+					code: "INVALID_START_REQUEST",
+					message: body.error.issues
+						.map(issue => `${issue.path.join(".") || "body"}: ${issue.message}`)
+						.join("; "),
+				})
+			}
+			const startMode = (body.data?.pin ?? true) ? "operator" : "auto"
+
+			// A bare start on a running decoder is a conflict; a body is an
+			// explicit start-mode change (pin / return to auto).
 			const currentStatus = decoder.getStatus()
 			if (currentStatus.running) {
-				return reply.status(409).send({
-					error: "Conflict",
-					code: "DECODER_ALREADY_RUNNING",
-					message: `Decoder '${id}' is already running`,
-				})
+				if (body.data === undefined || body.data === null) {
+					return reply.status(409).send({
+						error: "Conflict",
+						code: "DECODER_ALREADY_RUNNING",
+						message: `Decoder '${id}' is already running`,
+					})
+				}
+				decoderManager.setStartMode(id, startMode)
+				const status = decoderManager.getStatus(id)
+				if (!status) {
+					return reply.status(500).send({
+						error: "InternalServerError",
+						code: "DECODER_STATUS_ERROR",
+						message:
+							"Decoder start mode was set but status could not be retrieved",
+					})
+				}
+				return {
+					message: `Decoder '${id}' is running; start mode set to '${startMode}'`,
+					decoder: toApiDecoderStatus(status),
+				}
 			}
 
 			try {
-				await decoderManager.startDecoder(id)
+				await decoderManager.startDecoder(id, { startMode })
 
 				const status = decoderManager.getStatus(id)
 				if (!status) {
