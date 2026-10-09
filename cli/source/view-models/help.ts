@@ -171,7 +171,6 @@ export function helpLines(
 	ctx: KeyContext,
 	width: number,
 	height: number,
-	diag: { invalidFrames: number; rejectedItems: number },
 ): Line[] {
 	const b = boxChars()
 	const g = glyphs()
@@ -209,9 +208,6 @@ export function helpLines(
 	)
 	body.push(`dim  older than 15 s      ${g.na} not applicable`)
 	body.push("band  core's targets or WaveKit's table · * configured")
-	body.push(
-		`frames rejected ${diag.invalidFrames} ${g.sep} items rejected ${diag.rejectedItems}`,
-	)
 	const title = `${b.h} keys ${g.sep} ${VIEW_TITLES[ctx.view]} `
 	const top = `${b.tl}${title}${b.h.repeat(Math.max(0, w - 2 - title.length))}${b.tr}`
 	const rows = body.map(
