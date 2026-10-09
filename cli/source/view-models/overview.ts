@@ -66,9 +66,11 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 	const sep = ` ${glyphs().sep} `
 	if (!src) {
 		// M4/M5: one row saying why (REST failing vs API unreachable); no label without a value.
-		return [
-			[...title("RECEIVER"), sp(noDataText(state, "/api/sources"), "label")],
-		]
+		// Final views (MUST 3): an answered empty list is not "fetching".
+		const why = state.sources.value
+			? "no sources configured"
+			: noDataText(state, "/api/sources")
+		return [[...title("RECEIVER"), sp(why, "label")]]
 	}
 	const old = isOld(state.sources, now)
 	const role = (r: Role, isOldLane: boolean): Role => (isOldLane ? "old" : r)
