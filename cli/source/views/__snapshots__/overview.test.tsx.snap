@@ -29,7 +29,7 @@ exports[`Overview goldens (spec §6.1) > api-down cold (no cache) 80x24 1`] = `
 exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 " api × 2m  iq ? unknown  rx 445.971 MHz ±1.024  dec 1 restarting  drops ?  18:07
  ! API unreachable · ECONNREFUSED · retry in 4s · data as of 18:05:21
- RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   ? · 2.048 MS/s
+ RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ? unknown   2.048 MS/s
  window    444.947–446.995 MHz   external control · 192.0.2.1   last cmd 9m ago
    DECODERS          process                  decodes           drop now  window
  ● dsd-fme           up 52s                   none for 2m              ?  in

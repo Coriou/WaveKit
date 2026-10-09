@@ -1,5 +1,11 @@
 import { isFailing, processState } from "../data/decoder-state.js"
-import { apiView, iqSummary, isFresh, isOld } from "../data/freshness.js"
+import {
+	apiView,
+	iqSummary,
+	iqView,
+	isFresh,
+	isOld,
+} from "../data/freshness.js"
 import { aggregateDropNow, restartIncrements } from "../data/rates.js"
 import {
 	ENDPOINT_PATHS,
@@ -151,9 +157,19 @@ export function stripInput(state: AppState): StripInput {
 			inWindow: win?.inWindow ?? null,
 		}
 	}
-	const agg = isFresh(state.fanout, now)
-		? aggregateDropNow(state.fanoutHistory)
-		: null
+	const iq = iqSummary(state.sources, state.metrics, now)
+	// Sign-off item 5: the windowed drop % still holds the last seconds before a
+	// disconnect; with no source streaming there is no current drop (—).
+	// Only a fresh source list can say so; otherwise the drop stays as known (?).
+	const list = state.sources.value ?? []
+	const idle =
+		isFresh(state.sources, now) &&
+		list.length > 0 &&
+		!list.some(x => iqView(x, true, state.metrics[x.id], now).glyph === "live")
+	const agg =
+		!idle && isFresh(state.fanout, now)
+			? aggregateDropNow(state.fanoutHistory)
+			: null
 	// The same source as the Overview and the tuner the Receiver shows for it (R72 item 5).
 	const tuner = receiverTuner(state)
 	const sourceId = rxSourceId(state)
@@ -162,11 +178,12 @@ export function stripInput(state: AppState): StripInput {
 	const rxOld = centre !== null && (centre.old || rate?.old === true)
 	return {
 		api: apiView(state.conn, now),
-		iq: iqSummary(state.sources, state.metrics, now),
+		iq,
 		decoders,
 		drops: {
 			ratio: agg?.ratio ?? null,
 			backpressure: (agg?.backpressure ?? 0) > 0,
+			...(idle ? { idle: true as const } : {}),
 		},
 		rx:
 			centre === null

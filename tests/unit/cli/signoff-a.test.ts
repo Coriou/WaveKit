@@ -51,3 +51,35 @@ describe("sign-off item 4: unknown tuner fields read ?", () => {
 		)
 	})
 })
+
+describe("sign-off item 5: rate and drops only while IQ flows", () => {
+	const live = scenarioState("live", deps)
+	const down: AppState = {
+		...live,
+		sources: laneOk(
+			live.sources.value!.map(x => ({
+				...x,
+				connected: false,
+				activity: {
+					state: "disconnected" as const,
+					lastSampleAt: null,
+					sampleAgeMs: null,
+					timeoutMs: 10_000,
+				},
+			})),
+			live.now - 500,
+			"rest",
+		),
+	}
+	it("the Overview shows no byte rate beside a disconnected source", () => {
+		const text = receiverSummary(down, 199).map(lineText).join("\n")
+		expect(text).toContain("disconnected")
+		expect(text).not.toMatch(/[KM]B\/s/)
+		expect(receiverSummary(live, 199).map(lineText).join("\n")).toMatch(/MB\/s/)
+	})
+	it("the strip's drops read — while no source streams, not the last window's %", () => {
+		const line = lineText(stripLine(stripInput(down), 200))
+		expect(line).toContain("drops —")
+		expect(line).not.toMatch(/drops !?\d/)
+	})
+})
