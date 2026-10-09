@@ -344,7 +344,7 @@ digitalVoice:
   enabled: true # default true (one constant: DIGITAL_VOICE_ENABLED_DEFAULT)
   httpPort: 8082
   voiceSlot: "both" # 1 | 2 | "both" (dsd-fme -V); a decoder's voiceSlot wins
-  jitterBufferMs: 250 # voice buffered before a burst plays (UDP is bursty)
+  jitterBufferMs: 400 # voice buffered before a burst plays (UDP is bursty)
   maxBufferMs: 1000 # bound per stream; oldest voice dropped beyond it
 
 # -----------------------------------------------------------------------------

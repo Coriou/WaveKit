@@ -268,7 +268,7 @@ export const DigitalVoiceConfigSchema = z
 			)
 			.default("both"),
 		/** Voice buffered (or waited for) before a burst plays: absorbs UDP burstiness. */
-		jitterBufferMs: z.number().int().min(0).max(2000).default(250),
+		jitterBufferMs: z.number().int().min(0).max(2000).default(400),
 		/** Bound on queued voice per stream; the oldest is dropped beyond it. */
 		maxBufferMs: z.number().int().min(100).max(10_000).default(1000),
 	})

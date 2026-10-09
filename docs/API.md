@@ -1069,7 +1069,7 @@ curl http://localhost:9000/api/digital-voice/status
 		"enabled": true,
 		"httpPort": 8082,
 		"voiceSlot": "both",
-		"jitterBufferMs": 250,
+		"jitterBufferMs": 400,
 		"maxBufferMs": 1000
 	},
 	"sampleRate": 8000,
@@ -1092,6 +1092,7 @@ curl http://localhost:9000/api/digital-voice/status
 			"datagramsRejected": 0,
 			"encryptedDatagramsDropped": 0,
 			"droppedSamples": 0,
+			"underruns": 3,
 			"bufferedMs": 60,
 			"lastDatagramAt": "2026-10-09T13:38:45.120Z",
 			"call": {

@@ -75,6 +75,7 @@ export interface DigitalVoiceDecoderStatus {
 	datagramsRejected: number
 	encryptedDatagramsDropped: number
 	droppedSamples: number
+	underruns: number
 	bufferedMs: number
 	lastDatagramAt?: string
 	call: DigitalVoiceCall | null
@@ -489,6 +490,7 @@ export class DigitalVoiceService extends EventEmitter {
 			datagramsRejected: channel.rejected,
 			encryptedDatagramsDropped: channel.encryptedDropped,
 			droppedSamples: channel.paced.stats.droppedSamples,
+			underruns: channel.paced.stats.underruns,
 			bufferedMs: channel.paced.bufferedMs,
 			call: channel.call,
 		}

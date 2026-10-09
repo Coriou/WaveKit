@@ -59,6 +59,7 @@ const status: DigitalVoiceStatus = {
 			datagramsRejected: 0,
 			encryptedDatagramsDropped: 0,
 			droppedSamples: 0,
+			underruns: 1,
 			bufferedMs: 40,
 			lastDatagramAt: "2026-10-09T13:38:39.000Z",
 			call,

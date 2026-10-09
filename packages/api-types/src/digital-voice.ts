@@ -59,6 +59,11 @@ export interface DigitalVoiceDecoderStatus {
 	encryptedDatagramsDropped: number
 	/** Queued voice dropped by the bounded jitter buffer. */
 	droppedSamples: number
+	/**
+	 * Times the jitter buffer ran dry while playing. A call ends with at most
+	 * one; more than one per call means gaps: raise jitterBufferMs.
+	 */
+	underruns: number
 	/** Voice waiting in the jitter buffer. */
 	bufferedMs: number
 	/** ISO 8601 */

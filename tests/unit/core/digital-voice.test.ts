@@ -244,6 +244,8 @@ describe("DigitalVoiceService", () => {
 			expect(voice.slice(-160).every(s => s === 1000)).toBe(true)
 			expect(client.samples()).toHaveLength(4800)
 			expect(service.getStatus().decoders[0]!.datagramsReceived).toBe(10)
+			// 10 whole ticks of voice: the burst ended exactly, never ran dry mid-tick.
+			expect(service.getStatus().decoders[0]!.underruns).toBe(0)
 		})
 
 		it("bounds the jitter buffer, dropping the oldest voice", () => {

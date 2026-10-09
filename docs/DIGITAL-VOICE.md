@@ -54,7 +54,7 @@ digitalVoice:
   enabled: true # DIGITAL_VOICE_ENABLED_DEFAULT
   httpPort: 8082
   voiceSlot: "both" # 1 | 2 | "both" -> dsd-fme -V 1|2|3
-  jitterBufferMs: 250 # voice buffered (or waited for) before a burst plays
+  jitterBufferMs: 400 # voice buffered (or waited for) before a burst plays
   maxBufferMs: 1000 # bound per stream; the oldest voice is dropped beyond it
 ```
 
@@ -93,7 +93,8 @@ dsd-fme stderr --> call_start / call_end + "voice-call" event --> call state
   stream has a client; with no client, datagrams are counted and discarded.
 - **Jitter buffer**: after silence, a burst plays once `jitterBufferMs` of voice
   is queued or the first datagram has waited that long. Beyond `maxBufferMs` the
-  oldest voice is dropped (`droppedSamples`).
+  oldest voice is dropped (`droppedSamples`). `underruns` counts the times the
+  buffer ran dry while playing (at most once per call is normal: its end).
 - **Mixing**: in auto and DMR modes datagrams are stereo, slot 1 left and
   slot 2 right. Identical channels (one slot active, or a non-TDMA call) pass
   through, a zero channel (a muted slot) is ignored, and two active slots are
@@ -146,6 +147,25 @@ is zero-filled, and nothing is sent when both slots are muted. `-V` sets
 `slot1_on` / `slot2_on` (default both). If dsd-fme cannot open the UDP socket it
 falls back to PulseAudio; on loopback that cannot happen in practice.
 
+**End to end** (same container, real dsd-fme with the arguments the decoder
+builds, `-i /dev/stdin -fa -o udp:127.0.0.1:<port> -V 3`, into
+`DigitalVoiceService`, read back from `/stream.wav`): 22.6 s of stream at exactly
+16 000 B/s, 355 datagrams received, 0 rejected, 0 dropped, and all 7.1 s of
+decoded voice played. Whether the voice played without gaps depended on the
+jitter target (the stream compared byte for byte with the received datagrams):
+
+| `jitterBufferMs` | Voice contiguous                      | Underruns (1 = the call's end) |
+| ---------------- | ------------------------------------- | ------------------------------ |
+| 100              | no                                    | 6                              |
+| 250 (two runs)   | no: one 40 ms gap 0.5 s into the call | 2, 2                           |
+| 400              | yes                                   | 1                              |
+| 500              | yes                                   | 1                              |
+
+The default is therefore 400 ms. DMR sends a 60 ms burst per voice frame and
+may tolerate less; tune it with the `underruns` status counter once DMR voice
+has been measured over the air. The 250 ms capture is in
+`output/voice-test-20261009/digital-voice-e2e-ysf.wav` (not in git).
+
 ### CPU cost
 
 dsd-fme CPU was measured in the same container: utime + stime from
@@ -196,7 +216,7 @@ not a parser one.
   capture. A two-slot repeater capture would verify the mixing.
 - One mixed mono stream per decoder; per-slot and per-talkgroup selection beyond
   `voiceSlot` is deferred.
-- Latency: `jitterBufferMs` (250 ms) adds to the existing pipeline latency (see
+- Latency: `jitterBufferMs` (400 ms) adds to the existing pipeline latency (see
   the live audio latency item in the roadmap).
 - The core channelizer plan rewrites dsd-fme's input stages; this feature only
   touched dsd-fme's output arguments, call state and the new audio path.
