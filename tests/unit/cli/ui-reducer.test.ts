@@ -194,7 +194,7 @@ describe("R73: detail scroll and empty pause (T40 fix round 1 M3/M4)", () => {
 		const m = { rowIds: ["42", "41", "40"], pageSize: 5 }
 		const act = (ui: ReturnType<typeof initialUi>, type: "escape" | "newest") =>
 			applyUiAction(ui, { type }, m, 0)
-		const move = (ui: ReturnType<typeof initialUi>, delta: number) =>
+		const move = (ui: ReturnType<typeof initialUi>, delta: 1 | -1) =>
 			applyUiAction(ui, { type: "move", delta }, m, 0)
 		it("M9: the first ↑ selects the newest row; ↑ past it resumes the feed", () => {
 			let ui = move(initialUi("messages"), -1)
