@@ -18,8 +18,10 @@
 import type { EventEmitter } from "node:events"
 import type { Readable } from "node:stream"
 import type {
+	DecoderBandAssessment,
 	DecoderRateAssessment,
 	DecoderRateRequirements,
+	DecoderSuspensionReasonCode,
 } from "@wavekit/api-types"
 import type { DecoderRateAdapter } from "./rate-resolver.js"
 import type { DecoderBandRequirements } from "./band-resolver.js"
@@ -28,6 +30,8 @@ export type { DecoderRateAdapter } from "./rate-resolver.js"
 export type { DecoderBandRequirements } from "./band-resolver.js"
 
 export type {
+	DecoderBandAssessment,
+	DecoderSuspensionReasonCode,
 	DecoderRateAssessment,
 	DecoderRateRequirements,
 	DecoderRateSet,
@@ -272,6 +276,8 @@ export interface DecoderStatus {
 	version?: string | undefined
 	/** Reporting only; independent of process health and operator intent. */
 	rateAssessment?: DecoderRateAssessment | undefined
+	/** Band check against the source centre; reporting plus suspension input. */
+	bandAssessment?: DecoderBandAssessment | undefined
 	/** Live source assignment while wired, else the configured sourceId; absent for external input. */
 	sourceId?: string | undefined
 	/** Configured device serial of an external-input decoder; never inferred. */
@@ -286,7 +292,7 @@ export interface DecoderStatus {
 	nextRestartAt?: Date | undefined
 	/** Operator intent (start recorded, not stopped); set by the manager. */
 	desiredRunning?: boolean | undefined
-	/** Wanted but held back because the source rate is unusable; set by the manager. */
+	/** Wanted but held back (unusable rate or no target in band); set by the manager. */
 	suspended?: boolean | undefined
 	/** Why and since when the decoder is suspended. */
 	suspension?: DecoderSuspensionStatus | undefined
@@ -294,9 +300,9 @@ export interface DecoderStatus {
 	transition?: "suspending" | "resuming" | undefined
 }
 
-/** Why and since when a decoder is suspended for its source rate. */
+/** Why and since when a decoder is suspended for its source rate or band. */
 export interface DecoderSuspensionStatus {
-	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	reasonCode: DecoderSuspensionReasonCode
 	since: Date
 }
 

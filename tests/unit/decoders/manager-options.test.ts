@@ -86,6 +86,17 @@ describe("createDecoderManagerOptions", () => {
 		expect(() => HealthConfigSchema.parse({ faultAfterFailures: 0 })).toThrow()
 	})
 
+	it("passes health.bandSuspension through only when configured", () => {
+		expect(
+			createDecoderManagerOptions(
+				HealthConfigSchema.parse({ bandSuspension: false }),
+			),
+		).toMatchObject({ bandSuspension: false })
+		expect(
+			createDecoderManagerOptions(HealthConfigSchema.parse({})),
+		).not.toHaveProperty("bandSuspension")
+	})
+
 	it("reports a YAML-configured idle timeout as DecoderStatus.idleTimeoutMs", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "wavekit-health-"))
 		cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
