@@ -51,8 +51,9 @@ describe("Receiver view (spec §6.4)", () => {
 			rows: 40,
 		})
 		await h.press("e")
-		expect(h.frame().at(-1)).toContain(
-			"controlled externally · c to take control",
+		// S5: who holds the tuner and the way out, said once.
+		expect(h.frame().at(-1)).toBe(
+			" tuner controlled by relay client-3 192.0.2.1 · c take control  r reconnect  q quit  ? help",
 		)
 		await h.press("c")
 		expect(h.frame().at(-1)).toBe(
