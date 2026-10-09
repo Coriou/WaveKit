@@ -333,3 +333,35 @@ describe("R70 source reservation in the Receiver", () => {
 		expect(recv(s)).not.toContain("held by suspended")
 	})
 })
+
+describe("R70 readsb with its own rtl_tcp (caps.input external)", () => {
+	it("has no window (—), not in or out", () => {
+		const s = scenarioState("live")
+		const rows = s.decoders.value!.map(d => {
+			if (d.id !== "readsb") return d
+			const { sourceId: _s, ...rest } = d
+			return {
+				...rest,
+				caps: {
+					input: "external" as const,
+					output: "beast" as const,
+					integrationPattern: "network_producer" as const,
+				},
+			}
+		})
+		const sources = s.sources.value!.map(x => ({
+			...x,
+			assignments: x.assignments.filter(a => a.decoderId !== "readsb"),
+		}))
+		const st = {
+			...s,
+			decoders: { ...s.decoders, value: rows },
+			sources: { ...s.sources, value: sources },
+		}
+		const f = decoderFacts(st).find(x => x.row.id === "readsb")!
+		expect(f.membership).toBe("—")
+		expect(
+			(decoderCells(f, st.now)["window"]?.variants ?? []).map(lineText),
+		).toEqual(["—"])
+	})
+})
