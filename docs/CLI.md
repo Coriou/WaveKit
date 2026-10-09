@@ -50,6 +50,8 @@ Row 1 is the **chain strip**, with one lane per link in the chain:
 
 The clock sits at the right of the strip. Every glyph in the strip keeps a word beside it; nothing is abbreviated into glyph clusters. When the strip is short of room, every lane keeps its shortest worded form (`api ● 2s`, `iq ● streaming`, `iq × down`, `iq ○ no samples`, `rx 445.971`, `dec 1 failing`, `dec 1 restarting` or `dec 8/9 up`, `drops !34%`) and the clock goes first. If even those do not fit, whole lanes go in this order: `rx`, then drops, then decoders. Detail is added back as room allows: `MHz` and the rx span, the full iq word, the decoder words and `in window`, the IQ rate, the tuner owner, then the clock.
 
+When core flags a source's signal as flat, IQ still reads `streaming` (bytes are arriving) and the iq lane adds the warning in words: `iq ! flat` → `iq ● streaming · flat` → `iq ● streaming · signal flat −46 dBFS`. The Receiver SOURCE row adds `signal flat · −46.0 dBFS below −40 dBFS · since HH:MM:SS · check gain`, and its rate row shows the measured `level` when core reports one.
+
 **Legend**
 
 | Mark | Meaning                                         |

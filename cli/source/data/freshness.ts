@@ -122,7 +122,13 @@ export function iqView(
 		if (a) {
 			switch (a.state) {
 				case "streaming":
-					return view("live", "streaming")
+					// A11: bytes arrive, so streaming stays true; the flat level rides along.
+					return source.signalFlat
+						? {
+								...view("live", "streaming"),
+								flatDbfs: source.signalFlat.levelDbfs,
+							}
+						: view("live", "streaming")
 				case "waiting":
 					return view("neutral", "connected · no samples")
 				case "stale":
@@ -188,11 +194,15 @@ export function iqSummary(
 	const total = rates.every((r): r is number => r !== null)
 		? rates.reduce((a, b) => a + b, 0)
 		: null
+	const flats = views
+		.map(v => v.flatDbfs)
+		.filter((x): x is number => x !== undefined)
 	return {
 		glyph: worst.glyph,
 		word,
 		ageMs: null,
 		rateBytesPerSec: total,
+		...(flats.length > 0 ? { flatDbfs: Math.min(...flats) } : {}),
 	}
 }
 

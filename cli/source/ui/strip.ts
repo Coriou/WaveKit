@@ -3,6 +3,7 @@ import { fitGroups } from "./fit.js"
 import {
 	formatAge,
 	formatClockShort,
+	formatDbfs,
 	formatHalfSpan,
 	formatMHz,
 	formatMHzBare,
@@ -140,6 +141,20 @@ function iqGroup(iq: IqView, old: boolean): Group {
 				short === undefined
 					? [named]
 					: [[...head, value(` ${short}`, old)], named],
+		}
+	}
+	// A11 (R95): IQ is arriving, so streaming stays; flat is said beside it, never as a
+	// bare glyph: `iq ! flat` → `iq ● streaming · flat` → `… · signal flat −46 dBFS`.
+	if (iq.flatDbfs !== undefined) {
+		const flat = (t: string): Span => ({ text: t, role: "attention" })
+		const sepSpan = label(` ${glyphs().sep} `)
+		return {
+			priority: 2,
+			variants: [
+				[label("iq "), glyphSpan("attention"), flat(" flat")],
+				[...named, sepSpan, flat("flat")],
+				[...named, sepSpan, flat(`signal flat ${formatDbfs(iq.flatDbfs, 0)}`)],
+			],
 		}
 	}
 	const variants: Line[] = [named]
@@ -302,8 +317,9 @@ export function stripLine(input: StripInput, width: number): Line {
 	const rxSpanIdx = rxOwnerIdx >= 0 ? rxVariants - 2 : rxVariants - 1
 	upgrade(0, [1])
 	upgrade(rx, [rxSpanIdx, 1])
-	// A live iq lane's only richer form is its rate; other states add their word, then age.
-	const liveIq = input.iq.glyph === "live"
+	// A live iq lane's only richer form is its rate; other states (and a flat signal,
+	// A11) add their word, then the detail.
+	const liveIq = input.iq.glyph === "live" && input.iq.flatDbfs === undefined
 	if (!liveIq) upgrade(1, [1])
 	upgrade(drops, [1])
 	upgrade(dec, [1])

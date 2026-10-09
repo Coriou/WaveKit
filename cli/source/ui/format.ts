@@ -42,6 +42,13 @@ export function formatSpaced(n: N): string {
 	)
 }
 
+/** `−46.0 dBFS` (or `−46 dBFS` with 0 digits); the minus follows the glyph mode (ASCII `-`). */
+export function formatDbfs(n: N, digits = 1): string {
+	if (!isKnown(n)) return UNKNOWN
+	const sign = n < 0 ? glyphs().minus : ""
+	return `${sign}${Math.abs(n).toFixed(digits)} dBFS`
+}
+
 /** A count with its noun, singular for exactly one: `1 restart`, `2 restarts`, `? restarts`. */
 export function counted(n: N, one: string, many = `${one}s`): string {
 	return `${formatCount(n)} ${n === 1 ? one : many}`

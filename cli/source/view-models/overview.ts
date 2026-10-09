@@ -5,6 +5,7 @@ import {
 	counted,
 	formatAge,
 	formatClock,
+	formatDbfs,
 	formatMHzBare,
 	formatMSps,
 	formatRate,
@@ -150,6 +151,22 @@ export function receiverSummary(state: AppState, width: number): Line[] {
 					: []),
 			],
 		},
+		// A11 (R95): IQ streams but the level is flat; said beside the activity.
+		...(src.signalFlat
+			? [
+					{
+						priority: 0,
+						variants: [
+							[
+								{
+									text: `signal flat ${formatDbfs(src.signalFlat.levelDbfs, 0)}`,
+									role: role("attention", old),
+								},
+							],
+						],
+					},
+				]
+			: []),
 		{
 			priority: 2,
 			variants: [

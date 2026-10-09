@@ -134,3 +134,58 @@ describe("A11 source:removed", () => {
 		expect(s.sources.value).toEqual(live.sources.value)
 	})
 })
+
+describe("A11 rendering", () => {
+	it("Receiver: an attention line and the level as a plain fact", () => {
+		const text = receiverLines(flat, initialUi("receiver"), 199, 40, true).map(
+			lineText,
+		)
+		const line = text.find(l => l.includes("signal flat"))
+		expect(line).toMatch(
+			/! signal flat · −46\.0 dBFS below −40 dBFS · since \d\d:\d\d:\d\d · check gain$/,
+		)
+		expect(text.find(l => l.startsWith("rate"))).toContain("level −46.0 dBFS")
+		// IQ keeps saying streaming: bytes are arriving.
+		expect(text.find(l => l.startsWith("SOURCE"))).toContain("streaming")
+		expect(findBanned(text.join("\n"))).toEqual([])
+	})
+	it("Receiver: the level alone, without the warning", () => {
+		const text = receiverLines(
+			withSource({ signalLevelDbfs: -23.44 }),
+			initialUi("receiver"),
+			199,
+			40,
+			true,
+		).map(lineText)
+		expect(text.find(l => l.startsWith("rate"))).toContain("level −23.4 dBFS")
+		expect(text.join("\n")).not.toContain("signal flat")
+	})
+	it("strip: streaming stays, flat is said beside it, never a bare glyph", () => {
+		const input = stripInput(flat)
+		expect(lineText(stripLine(input, 200))).toContain(
+			"iq ● streaming · signal flat −46 dBFS",
+		)
+		const narrow = lineText(stripLine(input, 60))
+		expect(narrow).toMatch(/iq (! flat|● streaming · flat)/)
+		setGlyphMode("ascii")
+		try {
+			expect(lineText(stripLine(stripInput(flat), 200))).toContain(
+				"signal flat -46 dBFS",
+			)
+		} finally {
+			setGlyphMode("utf8")
+		}
+	})
+	it("Overview RECEIVER: a terse attention fact", () => {
+		const lines = receiverSummary(flat, 199)
+		expect(lines.map(lineText).join("\n")).toContain("signal flat −46 dBFS")
+		const span = lines.flat().find(x => x.text.includes("signal flat"))
+		expect(span?.role).toBe("attention")
+	})
+	it("empty feed: signal flat is the first broken link", () => {
+		const text = emptyFeedGroups(flat)
+			.map(g => g.variants[0]?.map(x => x.text).join("") ?? "")
+			.join(" · ")
+		expect(text).toBe("no decodes · signal flat −46 dBFS · check gain")
+	})
+})

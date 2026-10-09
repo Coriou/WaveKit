@@ -28,6 +28,7 @@ import {
 	formatAge,
 	formatBytes,
 	formatClock,
+	formatDbfs,
 	formatDb,
 	formatHz,
 	formatMSps,
@@ -306,6 +307,10 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				: []),
 		),
 		one(1, txt(`received ${formatBytes(src.bytesReceived)}`, role)),
+		// A11: the measured level is a plain fact; the warning has its own line.
+		...(src.signalLevelDbfs !== undefined
+			? [one(1, txt(`level ${formatDbfs(src.signalLevelDbfs)}`, role))]
+			: []),
 		one(3, txt(`assigned ${counted(src.assignments.length, "decoder")}`, role)),
 		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
 		...(held.length > 0
@@ -323,7 +328,39 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	return [
 		essential(fitRow(lbl("SOURCE", true), row1, width)),
 		...(src.rateMismatch ? [keep(mismatchLine(src, width, role))] : []),
+		...(src.signalFlat ? [keep(flatLine(src, width, role))] : []),
 		optional(fitRow(lbl("rate"), row2, width), 2),
+	]
+}
+
+/** A11 (R95): "signal flat · −46.0 dBFS below −40 dBFS · since 18:07:00 · check gain". */
+function flatLine(src: SourceRow, width: number, role: Role): Line {
+	const f = src.signalFlat
+	if (!f) return []
+	const since = Date.parse(f.since)
+	const lineRole: Role = role === "old" ? "old" : "attention"
+	return [
+		...lbl(""),
+		glyphSpan("attention"),
+		...fitGroups(
+			[
+				one(0, txt(" signal flat", lineRole)),
+				one(
+					0,
+					txt(formatDbfs(f.levelDbfs), lineRole),
+					txt(
+						`${formatDbfs(f.levelDbfs)} below ${formatDbfs(f.thresholdDbfs, 0)}`,
+						lineRole,
+					),
+				),
+				...(Number.isFinite(since)
+					? [one(2, txt(`since ${formatClock(since)}`, lineRole))]
+					: []),
+				one(1, txt("check gain", lineRole)),
+			],
+			Math.max(1, width - LABEL_W - 1),
+			{ sep: sep() },
+		),
 	]
 }
 
