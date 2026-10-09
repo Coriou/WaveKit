@@ -33,3 +33,21 @@ describe("sign-off item 2 (R96): N failing equals the × rows", () => {
 		for (const f of pending) expect(f.role).toBe("fault")
 	})
 })
+
+describe("sign-off item 4: unknown tuner fields read ?", () => {
+	it("frequency ? and gain ?", () => {
+		const text = receiverLines(
+			scenarioState("tuner-unknown", deps),
+			initialUi("receiver"),
+			199,
+			40,
+			true,
+		).map(lineText)
+		expect(text.find(l => l.startsWith("frequency"))).toMatch(
+			/^frequency \? {2,}window/,
+		)
+		expect(text.find(l => l.startsWith("gain"))).toMatch(
+			/^gain +\? {2,}rtl agc/,
+		)
+	})
+})
