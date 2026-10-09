@@ -692,3 +692,23 @@ Everything is additive except the defaults. The CLI has no consumer of `/stream`
   dsd-fme calls now end on the DMR TLC terminator (`call_end.timeout: false`). A timed-out call's duration ends at its
   last line. `stats.eventsOut` / `lastOutputAt` now update for timer-driven outputs.
 - **Suggested UI:** show `channelPowerDbfs` / `squelchOpen` next to live audio.
+
+#### Core: digital voice audio — MERGED on main 0f4c14c (2026-10-09, not pushed)
+
+ROADMAP §5b. Decoded dsd-fme voice (DMR verified next over the air; P25/NXDN/YSF/D-STAR unverified) as an audio stream.
+All additive. Details in `docs/DIGITAL-VOICE.md` and `docs/API.md`.
+- **New types:** `packages/api-types/src/digital-voice.ts` (`DigitalVoiceSlot`, `DigitalVoiceConfig`, `DigitalVoiceCall`,
+  `DigitalVoiceCallEventData`, `DigitalVoiceDecoderStatus`, `DigitalVoiceStatus`), exported from the index.
+- **Audio server on port 8082:**
+  - `/stream` and `/stream.wav` serve the first dsd-fme decoder; `/decoders/<id>/stream[.wav]` serve each one.
+  - 8 kHz s16le mono, constant rate. Exact silence between calls and during encrypted calls.
+  - The same headers as live audio (`X-Audio-Format`, `X-Sample-Rate`, `X-Channels`) and the same ~1 s client queue.
+- **REST:** `GET /api/digital-voice/status`, `POST /api/digital-voice/start|stop`.
+- **WS:** a new `digital-voice` channel with `digital-voice:call` and `digital-voice:status` (call data: decoderId, protocol,
+  talkgroup, source, slot, encrypted, callId, active).
+- **dsd-fme events:** `call_start` gains `callId`, `startedAt`, `encrypted`; `call_end` gains `callId`, `startedAt`, `endedAt`.
+- **Config:**
+  - New `digitalVoice.{enabled (default true), httpPort 8082, voiceSlot, jitterBufferMs 400, maxBufferMs 1000}`.
+  - New dsd-fme options `voiceSlot`, `perCallRecordingMaxTotalMb`, `perCallRecordingMaxAgeHours`.
+  - An explicit `output: "null"` opts a decoder out.
+- **Suggested UI:** a "listen" affordance on dsd-fme rows while `active`, showing TG/source/slot and an encrypted badge.
