@@ -516,6 +516,51 @@ describe("decoder rows (live fixture)", () => {
 			expect(lineText(t.header)).toContain("band MHz")
 			for (const r of t.rows) expect(lineWidth(r)).toBeLessThanOrEqual(111)
 		})
+		it("signoff item 3: from 100 columns the Decoders view shows process states in full", () => {
+			const retry: DecoderFacts = {
+				...by("readsb"),
+				proc: "faulted-retry",
+				restartInMs: 12_000,
+				row: { ...by("readsb").row, running: false, restartCount: 13 },
+			}
+			const band: DecoderFacts = {
+				...by("rtl433"),
+				proc: "suspended",
+				row: {
+					...by("rtl433").row,
+					running: false,
+					suspended: true,
+					suspension: {
+						reasonCode: "frequency-out-of-band",
+						since: new Date(s.now).toISOString(),
+					},
+				},
+			}
+			const mixed = facts.map(f =>
+				f.row.id === "readsb" ? retry : f.row.id === "rtl433" ? band : f,
+			)
+			const row = (w: number, id: string): string =>
+				lineText(
+					decoderTable(mixed, "decoders", w, 20, null, s.now).rows.find(r =>
+						lineText(r).includes(id),
+					) ?? [],
+				)
+			for (const w of [99, 119, 199]) {
+				expect(row(w, "readsb"), `${w}`).toContain("faulted · retry in 12s ")
+				expect(row(w, "rtl433"), `${w}`).toContain("suspended · out of band ")
+				for (const r of decoderTable(mixed, "decoders", w, 20, null, s.now)
+					.rows)
+					expect(lineWidth(r)).toBeLessThanOrEqual(w)
+			}
+			// Below 100 the narrow forms stay.
+			expect(row(79, "readsb")).not.toContain("retry in 12s")
+			// Without such a state the 120-column layout is unchanged.
+			expect(
+				lineText(decoderTable(facts, "decoders", 119, 20, null, s.now).header),
+			).toBe(
+				"  DECODERS          process     restarts  errors  decodes          events      iq in  drop now  lifetime  window",
+			)
+		})
 		it("S10: the ultra Overview's left column adds restarts and errors and keeps the band", () => {
 			const t = decoderTable(facts, "overview-columns", 111, 20, null, s.now)
 			const head = lineText(t.header)
