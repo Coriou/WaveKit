@@ -35,6 +35,7 @@ import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
+import { decoderBandRoutes } from "./routes/decoder-band.js"
 import { telemetryRoutes } from "./routes/telemetry.js"
 import { tunerRelayRoutes } from "./routes/tuner-relay.js"
 import { tunerRoutes } from "./routes/tuner.js"
@@ -687,6 +688,10 @@ export class ApiServer {
 		await this.app.register(decoderRoutes, {
 			decoderManager: this.decoderManager,
 			decoderRegistry: this.decoderRegistry,
+		})
+		// Band overrides (band defaults spec §5.2)
+		await this.app.register(decoderBandRoutes, {
+			decoderManager: this.decoderManager,
 		})
 
 		// Register telemetry routes (Fanout backpressure monitoring)
