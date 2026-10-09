@@ -5,7 +5,6 @@ import type {
 	ContainerResources,
 	DecoderAssignment,
 	DecoderCaps,
-	DecoderHealth,
 	DecoderLastError,
 	DecoderOutput,
 	DecoderStats,
@@ -35,6 +34,8 @@ import type {
 	SdrHostView,
 	SourceRow,
 	WsEvent,
+	DecoderSuspension,
+	RowHealth,
 } from "./types.js"
 
 // ---------- primitives ----------
@@ -107,7 +108,27 @@ function pick<K extends string, V>(
 
 // ---------- decoders ----------
 
-const isHealth = oneOf<DecoderHealth>(["running", "idle", "faulted"])
+const isKnownHealth = oneOf<Exclude<RowHealth, "unknown">>([
+	"running",
+	"idle",
+	"faulted",
+	"restarting",
+])
+/** R70: a new or malformed health value keeps the row and reads "unknown" (rendered ?). */
+function readHealth(v: unknown): RowHealth {
+	return isKnownHealth(v) ? v : "unknown"
+}
+const isTransition = oneOf<"suspending" | "resuming">([
+	"suspending",
+	"resuming",
+])
+
+function guardSuspension(v: unknown): DecoderSuspension | undefined {
+	if (!isObj(v)) return undefined
+	const reasonCode = v["reasonCode"]
+	const since = v["since"]
+	return isStr(reasonCode) && isStr(since) ? { reasonCode, since } : undefined
+}
 const isInput = oneOf<DecoderCaps["input"]>(["audio_pcm", "iq", "external"])
 const isOutFmt = oneOf<DecoderCaps["output"]>([
 	"jsonl",
@@ -168,7 +189,7 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 	const id = v["id"]
 	const type = v["type"]
 	const running = v["running"]
-	const health = v["health"]
+	const health = readHealth(v["health"])
 	const uptime = v["uptime"]
 	const restartCount = v["restartCount"]
 	const stats = guardStats(v["stats"])
@@ -176,7 +197,6 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 		!isStr(id) ||
 		!isStr(type) ||
 		!isBool(running) ||
-		!isHealth(health) ||
 		!isNum(uptime) ||
 		!isNum(restartCount) ||
 		!stats
@@ -187,6 +207,8 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 	const caps = guardDecoderCaps(v["caps"])
 	const targets = v["targetFrequenciesHz"]
 	const lastError = guardLastError(v["lastError"])
+	const suspension = guardSuspension(v["suspension"])
+	const transition = v["transition"]
 	return {
 		id,
 		type,
@@ -207,6 +229,17 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 			: {}),
 		...(lastError ? { lastError } : {}),
 		...(caps ? { caps } : {}),
+		// R70: core's proposed fields, each optional and typed defensively.
+		...pick(v, ["nextRestartAt"] as const, isStr),
+		...pick(v, ["desiredRunning", "suspended"] as const, isBool),
+		...(suspension ? { suspension } : {}),
+		...(transition !== undefined
+			? {
+					transition: isTransition(transition)
+						? transition
+						: ("unknown" as const),
+				}
+			: {}),
 	}
 }
 
@@ -1301,10 +1334,9 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 		}
 		case "decoder:health": {
 			const decoderId = s("decoderId")
-			const health = data["health"]
-			return decoderId !== undefined && isHealth(health)
-				? { type, decoderId, health }
-				: undefined
+			// R70: an unknown health value is carried as "unknown", never dropped.
+			const health = readHealth(data["health"])
+			return decoderId !== undefined ? { type, decoderId, health } : undefined
 		}
 		case "source:status": {
 			const source = guardSource(d)

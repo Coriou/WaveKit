@@ -22,9 +22,35 @@ import type {
 // ---------- DTO views (what guards produce) ----------
 
 /** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
-export type DecoderRow = Omit<DecoderStatus, "rateAssessment"> & {
-	caps?: DecoderCaps
+/**
+ * Health as the CLI reads it (R70): core's values, its proposed "restarting", or
+ * "unknown" for any other string, so a row is never dropped for a new value.
+ */
+export type RowHealth = DecoderHealth | "restarting" | "unknown"
+
+export interface DecoderSuspension {
+	/** A DecoderRateAssessment reasonCode; unknown codes are shown quoted. */
+	reasonCode: string
+	/** ISO-8601. */
+	since: string
 }
+
+/** Core's proposed health and rate-suspension fields (R70); optional for older cores. */
+export interface DecoderContractFields {
+	/** ISO-8601, present while an automatic restart is scheduled. */
+	nextRestartAt?: string
+	desiredRunning?: boolean
+	suspended?: boolean
+	suspension?: DecoderSuspension
+	transition?: "suspending" | "resuming" | "unknown"
+}
+
+/** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
+export type DecoderRow = Omit<DecoderStatus, "rateAssessment" | "health"> &
+	DecoderContractFields & {
+		health: RowHealth
+		caps?: DecoderCaps
+	}
 
 /**
  * A guarded source. `activityUnrecognised` is set when a (newer) core sent
@@ -183,7 +209,7 @@ export type WsEvent =
 	| { type: "decoder:started"; decoderId: string }
 	| { type: "decoder:stopped"; decoderId: string }
 	| { type: "decoder:error"; decoderId: string; error: string }
-	| { type: "decoder:health"; decoderId: string; health: DecoderHealth }
+	| { type: "decoder:health"; decoderId: string; health: RowHealth }
 	/** One GET /api/decoders/:id body; several per transition, apply the latest. */
 	| { type: "decoder:status"; decoder: DecoderRow }
 	/** One GET /api/sources item incl. activity; apply the latest per id. */
@@ -376,7 +402,7 @@ export interface DecoderSession {
 	 */
 	lastWsOutputAt: number | null
 	lastError: { message: string; at: number } | null
-	previousHealth: DecoderHealth | null
+	previousHealth: RowHealth | null
 	/** eventsOut samples, trailing 60 s (decode rate). */
 	events: CounterSample[]
 	/** restartCount samples, trailing 5 min (crash-loop). */

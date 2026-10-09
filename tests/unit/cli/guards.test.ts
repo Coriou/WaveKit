@@ -45,7 +45,6 @@ describe("guardDecoder", () => {
 	})
 	it("rejects a missing or mistyped required field", () => {
 		expect(guardDecoder({ ...decoder, running: "yes" })).toBeUndefined()
-		expect(guardDecoder({ ...decoder, health: "degraded" })).toBeUndefined()
 		expect(guardDecoder(null)).toBeUndefined()
 	})
 	it("filters arrays element by element and counts rejects", () => {
@@ -488,6 +487,106 @@ describe("A1 fix round 1", () => {
 				type: "source:status",
 				source: { activityUnrecognised: true },
 			})
+		})
+	})
+})
+
+describe("A8 / R70: core's proposed health and suspension contracts", () => {
+	it("keeps a row whose health is restarting, carrying nextRestartAt", () => {
+		const g = guardDecoder({
+			...decoder,
+			running: false,
+			health: "restarting",
+			restartCount: 3,
+			nextRestartAt: "2026-10-08T18:08:04.000Z",
+		})
+		expect(g).toMatchObject({
+			id: "readsb",
+			health: "restarting",
+			nextRestartAt: "2026-10-08T18:08:04.000Z",
+		})
+	})
+	it("never drops a row for an unknown health string; it becomes unknown", () => {
+		for (const health of ["frobnicating", "degraded", 42, null, undefined]) {
+			const g = guardDecoder({ ...decoder, health })
+			expect(g).toBeDefined()
+			expect(g?.health).toBe("unknown")
+		}
+		expect(
+			guardList(
+				[decoder, { ...decoder, id: "x", health: "frobnicating" }],
+				guardDecoder,
+			),
+		).toMatchObject({ rejected: 0 })
+	})
+	it("carries the suspension fields when well-typed", () => {
+		const g = guardDecoder({
+			...decoder,
+			running: false,
+			desiredRunning: true,
+			suspended: true,
+			suspension: {
+				reasonCode: "insufficient-sample-rate",
+				since: "2026-10-08T18:00:00.000Z",
+			},
+			transition: "suspending",
+		})
+		expect(g).toMatchObject({
+			desiredRunning: true,
+			suspended: true,
+			suspension: {
+				reasonCode: "insufficient-sample-rate",
+				since: "2026-10-08T18:00:00.000Z",
+			},
+			transition: "suspending",
+		})
+	})
+	it("drops malformed suspension fields and maps an unknown transition", () => {
+		const g = guardDecoder({
+			...decoder,
+			desiredRunning: "yes",
+			suspended: 1,
+			suspension: { reasonCode: 5 },
+			nextRestartAt: 12,
+			transition: "teleporting",
+		})
+		expect(g).toBeDefined()
+		for (const k of [
+			"desiredRunning",
+			"suspended",
+			"suspension",
+			"nextRestartAt",
+		])
+			expect(g && k in g).toBe(false)
+		expect(g?.transition).toBe("unknown")
+	})
+	it("decoder:health frames keep restarting and map unknown values", () => {
+		const frame = (health: unknown) =>
+			parseServerMessage({
+				type: "decoder:health",
+				channel: "health",
+				data: { decoderId: "readsb", health },
+			})
+		expect(frame("restarting")).toEqual({
+			type: "decoder:health",
+			decoderId: "readsb",
+			health: "restarting",
+		})
+		expect(frame("frobnicating")).toEqual({
+			type: "decoder:health",
+			decoderId: "readsb",
+			health: "unknown",
+		})
+	})
+	it("decoder:status with a new health value still parses", () => {
+		const e = parseServerMessage({
+			type: "decoder:status",
+			channel: "decoders",
+			data: { ...decoder, health: "restarting", running: false },
+		})
+		expect(e).toMatchObject({
+			type: "decoder:status",
+			decoder: { health: "restarting" },
 		})
 	})
 })
