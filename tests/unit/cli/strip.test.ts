@@ -51,7 +51,7 @@ describe("strip (spec §4.2 widths)", () => {
 		expect(
 			t({ kind: "split", ws: false, rest: true, restAgeMs: 2000 }),
 		).toMatch(/^api ws × rest ● 2s/)
-		expect(t({ kind: "down", sinceMs: 151000 })).toMatch(/^api × 2m 31s/)
+		expect(t({ kind: "down", sinceMs: 151000 })).toMatch(/^api × 2m {2}/)
 		expect(t({ kind: "connecting" })).toMatch(/^api ○ connecting/)
 	})
 	it("never shows 0 for unknowns", () => {

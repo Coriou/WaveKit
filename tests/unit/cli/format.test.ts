@@ -38,9 +38,13 @@ describe("formatters (spec §8)", () => {
 		expect(f.formatAge(-5000)).toBe("<1s")
 		expect(f.formatAge(400)).toBe("<1s")
 		expect(f.formatAge(9_000)).toBe("9s")
-		expect(f.formatAge(160_000)).toBe("2m 40s")
-		expect(f.formatAge(124_000)).toBe("2m 04s")
+		// R79 (M11): seconds below a minute, then minute precision, never zero-padded.
+		expect(f.formatAge(59_999)).toBe("59s")
+		expect(f.formatAge(160_000)).toBe("2m")
+		expect(f.formatAge(124_000)).toBe("2m")
 		expect(f.formatAge(720_000)).toBe("12m")
+		expect(f.formatAge(3_780_000)).toBe("1h 3m")
+		expect(f.formatAge(7_200_000)).toBe("2h")
 		expect(f.formatAge(7_800_000)).toBe("2h 10m")
 		expect(f.formatAge(3 * 86_400_000)).toBe("3d")
 		expect(f.formatDuration(52)).toBe("52s")
@@ -114,6 +118,8 @@ describe("formatters (spec §8)", () => {
 		if (m) return Number(m[1]) * 60
 		m = /^(\d+)h (\d+)m$/.exec(s)
 		if (m) return Number(m[1]) * 3600 + Number(m[2]) * 60
+		m = /^(\d+)h$/.exec(s)
+		if (m) return Number(m[1]) * 3600
 		m = /^(\d+)d$/.exec(s)
 		if (m) return Number(m[1]) * 86400
 		throw new Error(`unparseable age ${s}`)

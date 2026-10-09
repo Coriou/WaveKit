@@ -50,7 +50,7 @@ describe("receiver view-model (spec §6.4)", () => {
 			"rate      4.1 MB/s (2.048 MS/s U8 IQ)   received 1.2 GB   reconnects 0   last error —   assigned 9 decoders",
 		)
 		expect(text.find(l => l.startsWith("TUNER"))).toMatch(
-			/^TUNER {5}external control · relay client-3 192\.0\.2\.1:59430 · 42 commands · last set-frequency 6m 32s ago$/,
+			/^TUNER {5}external control · relay client-3 192\.0\.2\.1:59430 · 42 commands · last set-frequency 6m ago$/,
 		)
 		expect(text).toContain(
 			"frequency 445 970 700 Hz   window 444.947–446.995 MHz   sample rate 2 048 000 S/s   ppm 0",

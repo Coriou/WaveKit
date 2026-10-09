@@ -88,16 +88,21 @@ export function formatPercent(ratio: N): string {
 
 const pad2 = (n: number): string => String(n).padStart(2, "0")
 
-/** <1s, 9s, 2m 04s (under 10 min), 12m, 2h 10m, 3d. Negative ages (clock skew) render <1s. */
+/**
+ * R79 (M11): `<1s`, `9s`, `52s`, then minute precision with no zero-padding:
+ * `2m`, `12m`, `1h 3m`, `2h`, `3d`. Negative ages (clock skew) render `<1s`.
+ */
 export function formatAge(ms: N): string {
 	if (!isKnown(ms)) return UNKNOWN
 	const s = Math.floor(Math.max(0, ms) / 1000)
 	if (s < 1) return "<1s"
 	if (s < 60) return `${s}s`
-	if (s < 600) return `${Math.floor(s / 60)}m ${pad2(s % 60)}s`
 	if (s < 3600) return `${Math.floor(s / 60)}m`
-	if (s < 86400)
-		return `${Math.floor(s / 3600)}h ${pad2(Math.floor((s % 3600) / 60))}m`
+	if (s < 86400) {
+		const h = Math.floor(s / 3600)
+		const m = Math.floor((s % 3600) / 60)
+		return m > 0 ? `${h}h ${m}m` : `${h}h`
+	}
 	return `${Math.floor(s / 86400)}d`
 }
 
