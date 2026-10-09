@@ -1,7 +1,9 @@
 import fc from "fast-check"
 import { beforeAll, describe, expect, it } from "vitest"
+import type { AircraftState } from "@wavekit/api-types"
 import { reduce } from "../../../cli/source/data/reducers.js"
 import {
+	aircraftUpsert,
 	createRing,
 	ringNewestSeq,
 	ringPush,
@@ -22,6 +24,7 @@ import {
 	messagesHeader,
 	messagesModel,
 } from "../../../cli/source/view-models/messages.js"
+import { aircraftLookup } from "../../../cli/source/view-models/message-rows.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -215,7 +218,7 @@ describe("detail placement", () => {
 		}
 		const m = messagesModel(s, ui, 119, 35, true)
 		expect(m.placement.kind).toBe("bottom")
-		const full = messageDetail(first, 119, 1000, 0)
+		const full = messageDetail(first, 119, 1000, 0, aircraftLookup(s))
 		// 7 list rows + 1 blank leave 26 of the 34 body rows: the whole detail fits.
 		expect(m.list).toHaveLength(7)
 		expect(m.detail?.map(lineText)).toEqual(full.map(lineText))
@@ -376,5 +379,53 @@ describe("T40 fix round 1: input and detail", () => {
 		for (const w of words.slice(0, 50)) expect(joined).toContain(w)
 		// The JSON string holding the same text is wrapped, not cut with an ellipsis.
 		expect(lines.filter(l => l.endsWith("…")).length).toBe(0)
+	})
+})
+
+describe("T40 fix round 1: R73 / R66", () => {
+	it("M5: a gap opened after the pause stays out even directly above the frozen row", () => {
+		const ring = createRing()
+		for (const d of ["d1", "d2"]) ringPush(ring, entry(d))
+		ring.gaps.push({ afterSeq: 1, from: 500, to: null })
+		const mu = { ...following, following: false, pausedAtSeq: 1 }
+		const gaps = (pausedAt: number) =>
+			feedView(ring, { ...mu, pausedAt }).rows.filter(r => r.kind === "gap")
+		expect(gaps(400)).toHaveLength(0)
+		// A gap already open at the pause is part of the frozen slice.
+		expect(gaps(600)).toHaveLength(1)
+	})
+	it("I6: rows, the detail and the filter use the aircraft lane's identification", () => {
+		const s = scenarioState("burst", deps)
+		const icao = "4CA9D2"
+		aircraftUpsert(
+			s.aircraft.map,
+			{
+				icao,
+				seen: 0,
+				messages: 1,
+				firstSeen: 0,
+				lastUpdated: 0,
+				identification: { registration: "EI-ZZQ", typeCode: "B38M" },
+			} as AircraftState,
+			s.now,
+		)
+		const st: AppState = {
+			...s,
+			aircraft: { ...s.aircraft, version: s.aircraft.version + 1 },
+		}
+		expect(listText(st, initialUi("messages"))).toContain("EI-ZZQ")
+		const filtered = listText(st, withMessages({ filterText: "ei-zzq" }))
+		expect(filtered).toContain("readsb")
+		expect(filtered).not.toMatch(/0 of \d+ match/)
+		const e = st.messages.ring.entries.find(x => x.decoderId === "readsb")!
+		const base = initialUi("messages")
+		const ui: UiState = {
+			...base,
+			messages: { ...base.messages, following: false, pausedAtSeq: 1e9 },
+			selected: { ...base.selected, messages: String(e.seq) },
+			detail: { ...base.detail, messages: { open: true, scroll: 0 } },
+		}
+		const detail = messagesModel(st, ui, 119, 35, true).detail!.map(lineText)
+		expect(detail.join("\n")).toContain("EI-ZZQ")
 	})
 })

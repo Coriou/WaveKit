@@ -65,6 +65,10 @@ export const messagesView: ViewModule = {
 		return {
 			rowIds: k.rowIds,
 			pageSize: k.pageSize,
+			newestSeq: k.newestSeq,
+			...(k.detailMaxScroll !== undefined
+				? { detailMaxScroll: k.detailMaxScroll }
+				: {}),
 			ctx: {
 				...EMPTY_VIEW_CTX,
 				hasSelection: k.hasSelection,

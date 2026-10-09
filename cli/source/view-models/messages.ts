@@ -1,4 +1,11 @@
-import type { AppState, Gap, MessageEntry, MessageRing } from "../data/types.js"
+import { ringNewestSeq } from "../data/ring-buffer.js"
+import type {
+	AircraftLookup,
+	AppState,
+	Gap,
+	MessageEntry,
+	MessageRing,
+} from "../data/types.js"
 import { applyFilter, parseFilter, type FilterSubject } from "../ui/filter.js"
 import {
 	formatAge,
@@ -17,8 +24,10 @@ import type { MessagesUi, UiState } from "../ui/ui-state.js"
 import { stripInput } from "./chrome.js"
 import { LABEL_WIDTH } from "./detail.js"
 import {
+	aircraftLookup,
 	feedCounts,
 	feedLines,
+	formattedFor,
 	in60sText,
 	interleave,
 	newestFirst,
@@ -33,31 +42,50 @@ export interface FeedView {
 	newCount: number
 }
 
-const subject = (e: MessageEntry): FilterSubject => ({
-	text: `${e.decoderId} ${e.formatted.protocol} ${e.formatted.searchText}`,
-	emergency: e.formatted.emergency,
-	category: e.formatted.category,
-})
+/** Filter terms match the rendered row (spec §6.3), so readsb rows match their enrichment (R66). */
+const subjectWith =
+	(lookup: AircraftLookup | undefined) =>
+	(e: MessageEntry): FilterSubject => {
+		const f = formattedFor(e, lookup)
+		return {
+			text: `${e.decoderId} ${f.protocol} ${f.searchText}`,
+			emergency: f.emergency,
+			category: f.category,
+		}
+	}
 
 /**
  * Pause freezes the slice at pausedAtSeq; evicted rows simply disappear, nothing
  * is replaced in place (spec §6.3). A pause with nothing to freeze at (an empty
  * list) freezes an empty slice, so header and rows agree (M4).
  */
-export function feedView(ring: MessageRing, mu: MessagesUi): FeedView {
+export function feedView(
+	ring: MessageRing,
+	mu: MessagesUi,
+	lookup?: AircraftLookup,
+): FeedView {
 	const entries = newestFirst(ring)
 	const matched = applyFilter(
 		entries,
 		parseFilter(mu.filterText),
 		mu.preset,
-		subject,
+		subjectWith(lookup),
 	)
 	const cut = mu.following ? null : (mu.pausedAtSeq ?? -1)
 	const visible = cut === null ? matched : matched.filter(e => e.seq <= cut)
 	const newCount = cut === null ? 0 : matched.length - visible.length
-	// M5: a gap above the newest frozen row (afterSeq > cut) opened after the pause.
+	// M5: gaps that opened after the pause stay out of the frozen slice: any above
+	// the newest frozen row, and one directly above it that started after pausedAt.
+	const pausedAt = mu.pausedAt
 	const gaps =
-		cut === null ? ring.gaps : ring.gaps.filter(g => g.afterSeq <= cut)
+		cut === null
+			? ring.gaps
+			: ring.gaps.filter(
+					g =>
+						g.afterSeq < cut ||
+						(g.afterSeq === cut &&
+							(pausedAt === undefined || g.from <= pausedAt)),
+				)
 	return {
 		rows: interleave(visible, gaps),
 		visible,
@@ -334,11 +362,28 @@ function jsonLines(data: unknown, width: number): Line[] {
  * Head row, protocol fields, the text body, then the bounded JSON; everything
  * wraps to `width` (spec §8). At most `height` lines; scroll clamped to the last page.
  */
+/** Fields, the text body and the JSON, wrapped to `width`; readsb fields carry the enrichment (R66). */
+function detailBody(
+	e: MessageEntry,
+	width: number,
+	lookup?: AircraftLookup,
+): Line[] {
+	const f = formattedFor(e, lookup)
+	return [
+		...packFields(f.fields, width),
+		...(f.text !== undefined
+			? wrappedField("text", f.text, width, "value")
+			: []),
+		...jsonLines(e.output.data, width),
+	]
+}
+
 export function messageDetail(
 	e: MessageEntry,
 	width: number,
 	height: number,
 	scroll: number,
+	lookup?: AircraftLookup,
 ): Line[] {
 	const sep = sepText()
 	const head: Line = [
@@ -351,12 +396,7 @@ export function messageDetail(
 			true,
 		),
 	]
-	const text = e.formatted.text
-	const body: Line[] = [
-		...packFields(e.formatted.fields, width),
-		...(text !== undefined ? wrappedField("text", text, width, "value") : []),
-		...jsonLines(e.output.data, width),
-	]
+	const body = detailBody(e, width, lookup)
 	const rows = Math.max(0, height - 1)
 	const start = Math.min(Math.max(0, scroll), Math.max(0, body.length - rows))
 	return height <= 0 ? [] : [head, ...body.slice(start, start + rows)]
@@ -376,11 +416,17 @@ export interface MessagesModel {
 }
 
 interface Layout {
+	lookup: AircraftLookup
 	fv: FeedView
 	selected: MessageEntry | null
 	open: boolean
 	headerRows: number
 	b: ReturnType<typeof listBudget>
+	listWidth: number
+	detailWidth: number
+	/** Rows the list block shows (messagesModel builds exactly this many). */
+	listCount: number
+	detailRows: number
 }
 
 function layout(
@@ -391,30 +437,76 @@ function layout(
 	roomy: boolean,
 ): Layout {
 	const mu = ui.messages
-	const fv = feedView(state.messages.ring, mu)
+	const lookup = aircraftLookup(state)
+	const fv = feedView(state.messages.ring, mu, lookup)
 	const selSeq =
 		ui.selected.messages === null ? null : Number(ui.selected.messages)
 	const selected = fv.visible.find(e => e.seq === selSeq) ?? null
 	const open = ui.detail.messages.open && selected !== null
 	const headerRows = mu.draft !== null ? 2 : 1
 	const b = listBudget(width + 1, height, roomy, headerRows, open)
-	return { fv, selected, open, headerRows, b }
+	const listWidth =
+		open && b.placement.kind === "right" ? width - b.placement.width - 2 : width
+	const detailWidth = b.placement.kind === "right" ? b.placement.width : width
+	const rowsOf = (n: number): number => Math.min(n, Math.max(0, b.listRows))
+	// Mirrors messagesModel's list: feed rows, or the empty line (under gap rows
+	// when nothing was ever received).
+	const listCount =
+		open && b.placement.kind === "overlay"
+			? 0
+			: fv.visible.length > 0
+				? rowsOf(fv.rows.length)
+				: Math.min(
+						1 + (fv.total === 0 ? rowsOf(fv.rows.length) : 0),
+						Math.max(1, b.listRows),
+					)
+	// A bottom detail under a short list takes the rows the list leaves free
+	// (body = list + 1 blank + detail); a full list leaves it b.detailRows.
+	const detailRows =
+		b.placement.kind === "bottom"
+			? Math.max(b.detailRows, height - headerRows - listCount - b.gapRows)
+			: b.detailRows
+	return {
+		lookup,
+		fv,
+		selected,
+		open,
+		headerRows,
+		b,
+		listWidth,
+		detailWidth,
+		listCount,
+		detailRows,
+	}
 }
 
-/** What the key layer needs, without building any lines (M2). */
+export interface MessagesKeys {
+	rowIds: string[]
+	pageSize: number
+	hasSelection: boolean
+	/** Set while the detail is open: the last scroll that still fills its pane (R73, M3). */
+	detailMaxScroll?: number
+	newestSeq: number | null
+}
+
+/** What the key layer needs; builds detail lines only while the detail is open (M2). */
 export function messagesKeys(
 	state: AppState,
 	ui: UiState,
 	width: number,
 	height: number,
 	roomy: boolean,
-): { rowIds: string[]; pageSize: number; hasSelection: boolean } {
-	const { fv, selected, b } = layout(state, ui, width, height, roomy)
-	return {
-		rowIds: fv.visible.map(e => String(e.seq)),
-		pageSize: Math.max(1, b.listRows),
-		hasSelection: selected !== null,
+): MessagesKeys {
+	const L = layout(state, ui, width, height, roomy)
+	const out: MessagesKeys = {
+		rowIds: L.fv.visible.map(e => String(e.seq)),
+		pageSize: Math.max(1, L.b.listRows),
+		hasSelection: L.selected !== null,
+		newestSeq: ringNewestSeq(state.messages.ring),
 	}
+	if (!L.open || L.selected === null) return out
+	const body = detailBody(L.selected, L.detailWidth, L.lookup).length
+	return { ...out, detailMaxScroll: Math.max(0, body - (L.detailRows - 1)) }
 }
 
 export function messagesModel(
@@ -425,16 +517,8 @@ export function messagesModel(
 	roomy: boolean,
 ): MessagesModel {
 	const mu = ui.messages
-	const { fv, selected, open, headerRows, b } = layout(
-		state,
-		ui,
-		width,
-		height,
-		roomy,
-	)
-	const listWidth =
-		open && b.placement.kind === "right" ? width - b.placement.width - 2 : width
-	const detailWidth = b.placement.kind === "right" ? b.placement.width : width
+	const { lookup, fv, selected, open, b, listWidth, detailWidth, detailRows } =
+		layout(state, ui, width, height, roomy)
 	const old = state.conn.ws.state !== "open"
 	const feed = (rows: readonly FeedRow[]): Line[] =>
 		feedLines(
@@ -444,6 +528,7 @@ export function messagesModel(
 			selected?.seq ?? null,
 			state.now,
 			old,
+			lookup,
 		).lines
 	// No message rows: the explanation always shows. Gap rows stay above it only
 	// when nothing was ever received; under a filter they would be noise.
@@ -456,12 +541,6 @@ export function messagesModel(
 						...(fv.total === 0 ? feed(fv.rows) : []),
 						emptyLine(state, mu, fv, listWidth),
 					].slice(-Math.max(1, b.listRows))
-	// A bottom detail under a short list takes the rows the list leaves free
-	// (body = list + 1 blank + detail); a full list leaves it b.detailRows.
-	const detailRows =
-		b.placement.kind === "bottom"
-			? Math.max(b.detailRows, height - headerRows - list.length - b.gapRows)
-			: b.detailRows
 	return {
 		header: messagesHeader(state, mu, fv, width),
 		input: mu.draft !== null ? inputLine(mu.draft, width) : null,
@@ -473,6 +552,7 @@ export function messagesModel(
 						detailWidth,
 						detailRows,
 						ui.detail.messages.scroll,
+						lookup,
 					)
 				: null,
 		placement: b.placement,
