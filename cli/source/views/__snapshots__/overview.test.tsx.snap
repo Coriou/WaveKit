@@ -27,7 +27,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
 `;
 
 exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
-" api ● 2s  iq ● streaming  decoders 1 restarting  drops !21%
+" api ● 2s  iq ● streaming · 4.1 MB/s  decoders 1 restarting
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s
  window    444.947–446.995 MHz   external control
    DECODERS         process     decodes       drop  window
@@ -75,7 +75,7 @@ exports[`Overview goldens (spec §6.1) > live 80x24 1`] = `
 `;
 
 exports[`Overview goldens (spec §6.1) > live 120x40 1`] = `
-" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drops !21%     18:07
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz  decoders 8/9 up · 1 restarting · 2 in window  drop !21% now  18:07
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
 
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client
@@ -169,7 +169,7 @@ exports[`Overview goldens (spec §6.1) > live 200x50 1`] = `
 `;
 
 exports[`Overview goldens (spec §6.1) > ws-only (REST down) 80x24 1`] = `
-" api ws ● rest × 45s  iq ● streaming  decoders 8/9 up · 1 restarting  drops !21%
+" api ws ● rest × 45s  iq ● streaming  decoders 1 restarting  drops !21% now
  ! REST failing · timeout 2s · retry in 4s · REST data as of 18:07:07
  RECEIVER  pi-iq   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s
  window    444.947–446.995 MHz   external control   last command 6m 32s ago
