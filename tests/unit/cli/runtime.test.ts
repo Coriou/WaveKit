@@ -1095,4 +1095,39 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
 		rt.stop()
 	})
+	it("after a ws auto-reconnect the resync answers are urgent again (A11 re-review)", async () => {
+		vi.setSystemTime(new Date(1_000_000_100))
+		let running = true
+		const fetchFn: FetchLike = url =>
+			okJson(
+				url.endsWith("/api/decoders") ? [decoderRow(running)] : bodies(url),
+			)
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		const openAndAck = (h: WsHandlers) => {
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		}
+		rt.start()
+		openAndAck(ws.sockets[0]!)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(rt.store.get().decoders.value?.[0]?.running).toBe(true)
+		running = false
+		// The socket drops; the ws client's own backoff reopens it (no runtime resync).
+		ws.sockets[0]!.close(1006, "")
+		await vi.advanceTimersByTimeAsync(2_000)
+		openAndAck(ws.sockets[ws.sockets.length - 1]!)
+		// Still inside the same second: only an urgent answer commits.
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		expect(rt.store.get().decoders.value?.[0]?.running).toBe(false)
+		rt.stop()
+	})
 })
