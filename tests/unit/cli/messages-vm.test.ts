@@ -123,16 +123,15 @@ describe("messages header and states", () => {
 		).toMatch(/0 of \d+ match "nothing-matches"/)
 		const idle = scenarioState("idle", deps)
 		expect(listText(idle, initialUi("messages"))).toMatch(
-			/^no decodes since \d\d:\d\d \(.+\) · 2 of 9 decoders in window · rx 445\.971 MHz$/m,
+			// M3: a healthy chain says for how long, the window count, rx, then when.
+			/^no decodes for .+ · 2 of 9 in window · rx 445\.971 MHz · since \d\d:\d\d$/m,
 		)
 	})
 	it("fits the empty-feed line to a 60-column frame, dropping the window count first", () => {
 		const idle = scenarioState("idle", deps)
 		const text = listText(idle, initialUi("messages"), 59, 12)
 		expect([...text].length).toBeLessThanOrEqual(59)
-		expect(text).toMatch(
-			/^no decodes since \d\d:\d\d \(.+\) · rx 445\.971 MHz$/,
-		)
+		expect(text).toMatch(/^no decodes for .+ · rx 445\.971 MHz$/)
 	})
 	it("never claims a quiet live feed when the socket is down or never opened", () => {
 		const idle = scenarioState("idle", deps)
@@ -165,8 +164,9 @@ describe("messages header and states", () => {
 				ws: { ...fresh.conn.ws, state: "connecting", since: null },
 			},
 		}
+		// M3: the first broken link is the live feed itself.
 		expect(listText(never, initialUi("messages"))).toMatch(
-			/^no decodes · live feed connecting/,
+			/^no feed · connecting to \/ws/,
 		)
 		// Failed connects leave the socket "closed" too, but it never ran: not "stopped".
 		const failed: AppState = {
@@ -177,7 +177,7 @@ describe("messages header and states", () => {
 			},
 		}
 		expect(listText(failed, initialUi("messages"))).toMatch(
-			/^no decodes · live feed connecting/,
+			/^no feed · ws closed( \d+)? · polling REST/,
 		)
 	})
 	it("renders the aircraft detail with label/value rows and bounded JSON", () => {

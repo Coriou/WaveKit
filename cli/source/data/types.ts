@@ -46,7 +46,10 @@ export interface DecoderContractFields {
 }
 
 /** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
-export type DecoderRow = Omit<DecoderStatus, "rateAssessment" | "health"> &
+export type DecoderRow = Omit<
+	DecoderStatus,
+	"rateAssessment" | "health" | keyof DecoderContractFields
+> &
 	DecoderContractFields & {
 		health: RowHealth
 		caps?: DecoderCaps
@@ -412,6 +415,8 @@ export interface DecoderSession {
 	/** The last eventsOut sample the sparkline counted from; unlike `events`, kept across ws:open (R47 M12). */
 	sparkPrev?: CounterSample
 	firstObservedAt: number
+	/** Local time the row was first seen with transition "suspending" (R70 M-b); absent otherwise. */
+	suspendingSince?: number
 }
 export interface MetricBeat {
 	bytesReceived: number

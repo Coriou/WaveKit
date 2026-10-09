@@ -1,12 +1,7 @@
+import { emptyFeedGroups } from "./feed-state.js"
 import type { AppState, Gap, MessageEntry, MessageRing } from "../data/types.js"
 import { applyFilter, parseFilter, type FilterSubject } from "../ui/filter.js"
-import {
-	formatAge,
-	formatClock,
-	formatClockMs,
-	formatClockShort,
-	formatMHz,
-} from "../ui/format.js"
+import { formatClock, formatClockMs } from "../ui/format.js"
 import { listBudget, type DetailPlacement } from "../ui/frame.js"
 import { fitGroups } from "../ui/fit.js"
 import { sp, type Group, type Line, type Span } from "../ui/line.js"
@@ -14,7 +9,6 @@ import { detailJson } from "../ui/messages/index.js"
 import { cellWidth, charWidth, padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { MessagesUi, UiState } from "../ui/ui-state.js"
-import { stripInput } from "./chrome.js"
 import { LABEL_WIDTH } from "./detail.js"
 import {
 	feedCounts,
@@ -185,47 +179,21 @@ function emptyLine(
 			.join(" ")
 		return [sp(truncate(`0 of ${fv.total} match "${what}"`, width), "label")]
 	}
-	const ws = state.conn.ws
-	if (ws.state !== "open") {
-		// An open gap is the evidence the feed ran; failed connects also read "closed".
-		const gap = openGap(state.messages.ring)
+	// An open gap is the evidence the feed ran; it says when the feed stopped.
+	const gap = openGap(state.messages.ring)
+	if (state.conn.ws.state !== "open" && gap !== null)
 		return [
 			sp(
 				truncate(
-					gap !== null
-						? `no decodes cached${sep}feed stopped ${formatClock(gap.from)}`
-						: `no decodes${sep}live feed connecting`,
+					`no decodes cached${sep}feed stopped ${formatClock(gap.from)}`,
 					width,
 				),
 				"label",
 			),
 		]
-	}
-	// One rule with the strip for "in window" and the rx centre.
-	const strip = stripInput(state)
-	const since = ws.since ?? state.now
-	const d = strip.decoders
-	// Fitted by priority: the window count goes before rx; the first clause stays.
-	const group = (text: string, priority: number): Group => ({
-		priority,
-		variants: [[sp(text, "label")]],
-	})
-	return fitGroups(
-		[
-			group(
-				`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,
-				0,
-			),
-			...(d !== null && d.inWindow !== null
-				? [group(`${d.inWindow} of ${d.total} decoders in window`, 2)]
-				: []),
-			...(strip.rx !== null
-				? [group(`rx ${formatMHz(strip.rx.centreHz)}`, 1)]
-				: []),
-		],
-		width,
-		{ sep },
-	)
+	// M3: otherwise the first broken link of the chain (API, feed, IQ, window), shared
+	// with the Overview.
+	return fitGroups(emptyFeedGroups(state), width, { sep })
 }
 
 /** Word wrap to `width` cells; words longer than a row are broken (spec §8: the detail pane wraps). */

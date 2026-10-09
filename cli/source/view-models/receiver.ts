@@ -1,3 +1,5 @@
+import { remoteHost } from "./net.js"
+import { noDataText } from "./feed-state.js"
 import type { TunerRelayStatus, TunerState } from "@wavekit/api-types"
 import { iqView, isFresh, isOld } from "../data/freshness.js"
 import { decoderBand } from "../data/nominal-bands.js"
@@ -120,10 +122,9 @@ function hostOf(url: string | undefined): string | null {
 	return sanitize(url)
 }
 
+/** R82: one no-data copy for every section. */
 function noData(state: AppState, path: string): string {
-	return state.conn.rest.firstFailAt !== null
-		? `no data${sep()}API unreachable`
-		: `fetching ${path}`
+	return noDataText(state, path)
 }
 
 /** The source the Receiver renders (the first), and the tuner for it: used everywhere (M5). */
@@ -142,16 +143,6 @@ export function receiverControl(
 }
 
 /** Host of "192.0.2.1:59430", "[2001:db8::1]:59430", "2001:db8::1:59430" or "::ffff:192.0.2.1:59430". */
-export function remoteHost(remote: string): string {
-	const r = remote.trim()
-	const bracket = /^\[([^\]]+)\](?::\d+)?$/.exec(r)
-	const host = bracket
-		? (bracket[1] ?? r)
-		: /:\d+$/.test(r)
-			? r.slice(0, r.lastIndexOf(":"))
-			: r
-	return sanitize(host.replace(/^::ffff:(?=\d+\.\d+\.\d+\.\d+$)/i, ""))
-}
 
 function relayClient(
 	relay: TunerRelayStatus | undefined,
@@ -1144,3 +1135,5 @@ export function receiverLines(
 	if (relayAt >= 0) lines.splice(relayAt + 1, 0, ...history)
 	return lines.slice(0, height)
 }
+
+export { remoteHost }

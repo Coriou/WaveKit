@@ -1,6 +1,9 @@
 const title = document.getElementById("setup-title")
 const detail = document.getElementById("setup-detail")
+const screen = document.getElementById("setup-screen")
+const clock = document.getElementById("setup-clock")
 const age = document.getElementById("setup-age")
+const note = document.getElementById("setup-note")
 const contact = document.getElementById("contact")
 const contactText = document.getElementById("contact-text")
 const link = document.getElementById("receiver-link")
@@ -10,78 +13,152 @@ receiverUrl.pathname = "/"
 receiverUrl.search = ""
 receiverUrl.hash = ""
 link.href = receiverUrl.href
+document.getElementById("host-name").textContent =
+	window.location.hostname || "This Pi"
 
 const phases = ["cloud-init", "install", "publish", "done"]
 const copy = {
 	"cloud-init": [
-		"Configuring the Pi",
-		"Applying the account and network settings selected in Imager.",
+		"Applying Pi settings",
+		"Applying the account and network settings chosen in Imager.",
 	],
 	install: [
 		"Installing the receiver",
-		"Installing required packages, loading the bundled receiver and starting its services. This may take several minutes.",
+		"Installing packages, loading the bundled receiver and starting its services.",
 	],
 	publish: [
 		"Finishing setup",
 		"Saving the receiver configuration for your account.",
 	],
 }
+// What the elapsed figure counts from, per state.
+const since = {
+	running: "in this stage",
+	complete: "since setup finished",
+	failed: "since setup stopped",
+	interrupted: "since the last update",
+}
+
+/** Pi-measured age at the last poll, advanced locally until the next one. */
+let elapsed = null
+
+function formatClock(ms) {
+	const s = Math.floor(ms / 1000)
+	const pad = n => String(n).padStart(2, "0")
+	const h = Math.floor(s / 3600)
+	const m = Math.floor((s % 3600) / 60)
+	return h > 0 ? `${h}:${pad(m)}:${pad(s % 60)}` : `${m}:${pad(s % 60)}`
+}
+
+function tick() {
+	clock.textContent = elapsed
+		? formatClock(elapsed.ms + Date.now() - elapsed.at)
+		: "—"
+}
+
+/** Same rule as the status page: after 10 s without contact, say how long. */
+const CONTACT_STALE_MS = 10_000
+let lastContact = null
+
+function contactLost() {
+	const lost = lastContact === null ? null : Date.now() - lastContact
+	if (lost === null || lost <= CONTACT_STALE_MS) {
+		contact.dataset.state = lastContact === null ? "offline" : "reconnecting"
+		contactText.textContent =
+			lastContact === null ? "Pi unreachable" : "Reconnecting"
+		return
+	}
+	const s = Math.floor(lost / 1000)
+	contact.dataset.state = "offline"
+	contactText.textContent = `Lost · ${s < 60 ? `${s} s` : `${Math.floor(s / 60)} min`} ago`
+}
 
 function render(record) {
+	lastContact = Date.now()
 	contact.dataset.state = "live"
-	contactText.textContent = "Connected"
+	contactText.textContent = "Live"
+	let tone = "unknown"
 	let words = [
-		"Waiting for Pi setup",
-		"The operating system is preparing your Pi. Receiver installation begins after this completes.",
+		"Waiting for the Pi",
+		"The operating system is still preparing. Receiver installation starts after it finishes.",
 	]
-	if (record.state === "running")
+	if (record.state === "running") {
+		// Progress is healthy: a lit lamp that blinks, not the amber of a fault.
+		tone = "ok"
 		words = copy[record.phase] ?? [
 			"Setup in progress",
 			"Waiting for the next installation stage.",
 		]
-	if (record.state === "complete")
+	}
+	if (record.state === "complete") {
+		tone = "ok"
 		words = [
 			"Setup complete",
 			record.receiverPageReady
 				? "Opening receiver status…"
-				: "Waiting for the receiver status page to start. Installation completion does not confirm radio reception.",
+				: "Waiting for the receiver status page to start. Finishing setup does not confirm radio reception.",
 		]
-	if (record.state === "failed")
+	}
+	if (record.state === "failed") {
+		tone = "fault"
 		words = [
 			"Setup needs attention",
 			`Installation stopped${record.exitCode ? ` (exit ${record.exitCode})` : ""}. Check wavekit-setup.log on the boot partition or the firstboot service log over SSH, then retry setup.`,
 		]
-	if (record.state === "interrupted")
+	}
+	if (record.state === "interrupted") {
+		tone = "warn"
 		words = [
 			"Setup was interrupted",
 			"The Pi restarted before setup finished. Waiting for installation to resume.",
 		]
+	}
 	if (record.state === "unavailable")
 		words = [
 			"Setup status unavailable",
 			"The progress record could not be read. The Pi is reachable; installation status is unknown.",
 		]
+	screen.dataset.state = tone
 	title.textContent = words[0]
 	detail.textContent = words[1]
-	age.textContent =
-		record.updatedAgeMs === null
-			? record.updatedAt
-				? "Stage update time unavailable"
-				: "No progress update yet"
-			: `Last stage update ${Math.floor(record.updatedAgeMs / 1000)} s ago`
+	elapsed =
+		record.updatedAgeMs === null || !since[record.state]
+			? null
+			: { ms: record.updatedAgeMs, at: Date.now() }
+	tick()
+	age.textContent = elapsed
+		? since[record.state]
+		: record.updatedAt
+			? "Stage time unavailable"
+			: "No progress yet"
+	note.hidden = !["running", "waiting", "interrupted"].includes(record.state)
+
 	const current = phases.indexOf(record.phase)
 	for (const item of document.querySelectorAll("[data-phase]")) {
 		const index = phases.indexOf(item.dataset.phase)
-		const active = record.state === "running" && index === current
-		if (active) item.setAttribute("aria-current", "step")
+		const known = ["running", "complete", "failed", "interrupted"].includes(
+			record.state,
+		)
+		const done =
+			record.state === "complete" || (known && current >= 0 && index < current)
+		const here = known && !done && index === current
+		let [state, word] = done ? ["ok", "Done"] : ["unknown", "Waiting"]
+		if (here && record.state === "running")
+			[state, word] = ["ok", "In progress"]
+		if (here && record.state === "failed") [state, word] = ["fault", "Stopped"]
+		if (here && record.state === "interrupted")
+			[state, word] = ["warn", "Interrupted"]
+		// A failure record does not name its stage; unfinished stages are unknown.
+		if (
+			record.state === "unavailable" ||
+			(record.state === "failed" && current < 0)
+		)
+			word = "Unknown"
+		item.dataset.state = state
+		if (here && record.state === "running")
+			item.setAttribute("aria-current", "step")
 		else item.removeAttribute("aria-current")
-		item.querySelector("small").textContent =
-			record.state === "complete" ||
-			(record.state === "running" && index < current)
-				? "Done"
-				: active
-					? "In progress"
-					: "Waiting"
+		item.querySelector(".stage__word").textContent = word
 	}
 	document.getElementById("receiver-link-wrap").hidden =
 		!record.receiverPageReady
@@ -98,20 +175,24 @@ async function poll() {
 		if (!response.ok) throw new Error("Unavailable")
 		render(await response.json())
 	} catch {
-		contact.dataset.state = "reconnecting"
-		contactText.textContent = "Reconnecting"
+		contactLost()
+		screen.dataset.state = "unknown"
 		title.textContent = "Contact lost"
 		detail.textContent =
 			"The Pi may be restarting or the network may have changed. Reconnecting automatically; setup progress is unknown until contact returns."
-		age.textContent = "Previous status is no longer current"
+		elapsed = null
+		tick()
+		age.textContent = "No current reading"
+		note.hidden = true
 		document.getElementById("receiver-link-wrap").hidden = true
 		for (const item of document.querySelectorAll("[data-phase]")) {
-			item.querySelector("small").textContent = "Unknown"
-		}
-		for (const item of document.querySelectorAll("[aria-current]"))
+			item.dataset.state = "unknown"
+			item.querySelector(".stage__word").textContent = "Unknown"
 			item.removeAttribute("aria-current")
+		}
 	}
 	window.setTimeout(poll, 2000)
 }
 
+window.setInterval(tick, 1000)
 poll()

@@ -1,3 +1,4 @@
+import { noDataText } from "./feed-state.js"
 import type { BranchTelemetry } from "@wavekit/api-types"
 import {
 	decodesFact,
@@ -8,7 +9,7 @@ import {
 	type DecodesFact,
 	type ProcState,
 } from "../data/decoder-state.js"
-import { isFresh, isOld } from "../data/freshness.js"
+import { isFresh, isOld, serverNow } from "../data/freshness.js"
 import { memoOne } from "../data/memo.js"
 import {
 	bandLabel,
@@ -42,7 +43,6 @@ import { cell, sp, type Cell, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
 import { cellWidth, sanitize } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
-import { bannerConditions } from "./chrome.js"
 
 export interface DecoderFacts {
 	row: DecoderRow
@@ -63,6 +63,11 @@ export interface DecoderFacts {
 	bandOrigin: BandOrigin | null
 	/** R40 detail annotation for targets a tuned decoder does not apply, else null. */
 	bandNote: string | null
+	/**
+	 * R70 M-a: ms until core's scheduled restart by the server's clock; null when there is
+	 * no nextRestartAt, it does not parse, or no server clock is known; ≤ 0 once passed.
+	 */
+	restartInMs: number | null
 	/** REST decoders lane older than the TTL: every REST-fed cell renders dim (T6). */
 	oldRest: boolean
 	/** Fanout lane is fresh: a running decoder without a branch then has no drop (—), not an unknown one. */
@@ -88,7 +93,12 @@ const compute = memoOne(
 		ring: AppState["messages"]["ring"],
 		_ringVersion: number,
 		now: number,
+		resources: AppState["resources"],
 	): DecoderFacts[] => {
+		const server = serverNow(now, [
+			{ iso: fanout.value?.timestamp, receivedAt: fanout.receivedAt },
+			{ iso: resources.value?.timestamp, receivedAt: resources.receivedAt },
+		])
 		const rows = decoders.value ?? []
 		// M12: decodes per decoder in the feed's last minute (local receipt times).
 		const feed60: Record<string, number> = Object.create(null)
@@ -102,7 +112,13 @@ const compute = memoOne(
 		return rows.map(row => {
 			const sess = session[row.id]
 			const inc = restartIncrements(sess?.restarts ?? [], now)
-			const proc = processState(row, inc, stopped.includes(row.id), now)
+			const proc = processState(
+				row,
+				inc,
+				stopped.includes(row.id),
+				now,
+				sess?.suspendingSince,
+			)
 			const ratePerSec = oldRest ? null : counterRate(sess?.events ?? [])
 			const lastAt = lastDecodeAt(row, sess)
 			const branch =
@@ -138,6 +154,7 @@ const compute = memoOne(
 				nominal: band ? bandLabel(band.band, glyphs().range) : "?",
 				bandOrigin: band?.origin ?? null,
 				bandNote: band ? configuredNote(band) : null,
+				restartInMs: restartIn(row.nextRestartAt, server),
 				oldRest,
 				fanoutFresh,
 				oldFanout,
@@ -161,6 +178,7 @@ export function decoderFacts(state: AppState): DecoderFacts[] {
 		state.messages.ring,
 		state.messages.version,
 		state.now,
+		state.resources,
 	)
 }
 
@@ -179,73 +197,95 @@ const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 	unknown: "unknown",
 }
 
-function processCell(f: DecoderFacts, now: number): Cell {
+function restartIn(
+	iso: string | undefined,
+	server: number | null,
+): number | null {
+	if (iso === undefined || server === null) return null
+	const t = Date.parse(iso)
+	return Number.isFinite(t) ? t - server : null
+}
+
+/** A countdown still ahead ("in 12s"), or null once passed or unknown (M-c). */
+function countdown(f: DecoderFacts): string | null {
+	return f.restartInMs !== null && f.restartInMs > 0
+		? `in ${formatAge(f.restartInMs)}`
+		: null
+}
+
+/**
+ * The words that tell this process state apart, without restart counts (one text per
+ * state, M-d). The Decoders detail prints these beside its own counts (I-A).
+ */
+export function processWords(f: DecoderFacts): string {
+	const sep = ` ${glyphs().sep} `
+	const up = formatDuration(f.row.uptime)
+	const inNext = countdown(f)
+	switch (f.proc) {
+		case "unknown":
+			return "?"
+		case "up":
+			return `up ${up}`
+		case "starting":
+			return `starting ${up}`
+		case "suspended":
+			return `suspended${sep}rate`
+		case "suspend-pending":
+			return "suspending (stop pending)"
+		case "faulted-retrying":
+			return `faulted${sep}retrying`
+		case "faulted-retry":
+			return inNext
+				? `faulted${sep}retry ${inNext}`
+				: `faulted${sep}retry pending`
+		case "restarting":
+			return inNext ? `restarting ${inNext}` : "restarting"
+		default:
+			return f.proc
+	}
+}
+
+function processCell(f: DecoderFacts): Cell {
 	const role = PROC_ROLE[f.proc]
 	const n = f.row.restartCount
 	const restarts = `${formatCount(n)} restart${n === 1 ? "" : "s"}`
 	const sep = ` ${glyphs().sep} `
-	const up = formatDuration(f.row.uptime)
-	// R70: time to core's next automatic restart (server time; never negative).
-	const next = f.row.nextRestartAt
-		? Date.parse(f.row.nextRestartAt)
-		: Number.NaN
-	const inNext = Number.isFinite(next) ? `in ${formatAge(next - now)}` : null
+	const words = processWords(f)
+	const withCount = n > 0 ? [[sp(`${words}${sep}${restarts}`, role)]] : []
 	switch (f.proc) {
 		case "unknown":
 			return cell([sp("?", "unknown")])
-		case "suspended":
-			return cell([sp("suspended", role)], [sp(`suspended${sep}rate`, role)])
-		case "suspend-pending":
-			return cell(
-				[sp("suspending", role)],
-				[sp("suspending (stop pending)", role)],
-			)
-		case "faulted-retrying":
-			return cell([sp("faulted", role)], [sp(`faulted${sep}retrying`, role)])
-		case "faulted-retry":
-			return inNext
-				? cell(
-						[sp("faulted", role)],
-						[sp(`faulted${sep}retry ${inNext}`, role)],
-						...(n > 0
-							? [[sp(`faulted${sep}retry ${inNext}${sep}${restarts}`, role)]]
-							: []),
-					)
-				: cell([sp("faulted", role)], [sp(`faulted${sep}retrying`, role)])
-		case "restarting":
-			if (inNext)
-				return cell(
-					[sp("restarting", role)],
-					[sp(`restarting ${inNext}`, role)],
-					...(n > 0
-						? [[sp(`restarting ${inNext}${sep}${restarts}`, role)]]
-						: []),
-				)
-			break
-		default:
-			break
-	}
-	switch (f.proc) {
-		case "up":
-			return n > 0
-				? cell([sp(`up ${up}`, role)], [sp(`up ${up}${sep}${restarts}`, role)])
-				: cell([sp(`up ${up}`, role)])
-		case "starting":
-			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
-			return cell([sp("starting", role)], [sp(`starting ${up}`, role)])
 		case "stopped":
 			return cell([sp("stopped", role)])
+		case "up":
+			return cell([sp(words, role)], ...withCount)
+		case "starting":
+			// R52 m2: the minimal variant fits the Decoders view's 10 columns.
+			return cell([sp("starting", role)], [sp(words, role)])
+		case "suspended":
+			return cell([sp("suspended", role)], [sp(words, role)])
+		case "suspend-pending":
+			return cell([sp("suspending", role)], [sp(words, role)])
+		case "faulted-retrying":
+			return cell([sp("faulted", role)], [sp(words, role)])
+		case "faulted-retry":
+			return cell([sp("faulted", role)], [sp(words, role)], ...withCount)
+		case "restarting":
+			if (countdown(f) !== null)
+				return cell([sp("restarting", role)], [sp(words, role)], ...withCount)
+			break
 		default:
-			// R50: keep the restart evidence as width allows (min, mid, rich); none without restarts.
-			// The multiplication sign is the fault glyph, so ASCII mode reads `x13`.
-			return n > 0
-				? cell(
-						[sp(f.proc, role)],
-						[sp(`${f.proc} ${glyphs().fault}${formatCount(n)}`, role)],
-						[sp(`${f.proc}${sep}${restarts}`, role)],
-					)
-				: cell([sp(f.proc, role)])
+			break
 	}
+	// R50: keep the restart evidence as width allows (min, mid, rich); none without restarts.
+	// The multiplication sign is the fault glyph, so ASCII mode reads `x13`.
+	return n > 0
+		? cell(
+				[sp(f.proc, role)],
+				[sp(`${f.proc} ${glyphs().fault}${formatCount(n)}`, role)],
+				[sp(`${f.proc}${sep}${restarts}`, role)],
+			)
+		: cell([sp(f.proc, role)])
 }
 
 /**
@@ -352,7 +392,7 @@ export function decoderCells(
 ): Record<string, Cell> {
 	const cells: Record<string, Cell> = {
 		decoder: cell([glyphSpan(f.role), sp(" "), sp(sanitize(f.row.id))]),
-		process: processCell(f, now),
+		process: processCell(f),
 		decodes: decodesCell(f, now),
 		drop: dropCell(f),
 		lifetime: lifetimeCell(f),
@@ -552,25 +592,6 @@ export function decodersPlaceholder(state: AppState): Line | null {
 		return lane.value.length === 0
 			? [sp("no decoders configured", "label")]
 			: null
-	const sep = ` ${glyphs().sep} `
-	// R57: the banner's rule and wording decide, so the two never disagree (§9):
-	// some-but-not-all endpoints failing is an endpoint failure, all of them is the API.
-	const conds = bannerConditions(state)
-	const ep = conds.find(
-		c => c.kind === "endpoint" && c.path === ENDPOINT_PATHS.decoders,
-	)
-	if (ep?.kind === "endpoint")
-		return [
-			sp(
-				`no data${sep}GET ${ENDPOINT_PATHS.decoders} failing${sep}${ep.reason}`,
-				"label",
-			),
-		]
-	if (
-		conds.some(c => c.kind === "api-down" || c.kind === "rest-down") ||
-		lane.error ||
-		state.conn.rest.firstFailAt !== null
-	)
-		return [sp(`no data${sep}API unreachable`, "label")]
-	return [sp("fetching /api/decoders", "label")]
+	// R82: one no-data copy for every section (R57's endpoint rule included).
+	return [sp(noDataText(state, ENDPOINT_PATHS.decoders), "label")]
 }

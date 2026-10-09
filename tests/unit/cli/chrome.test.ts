@@ -166,7 +166,7 @@ describe("footer, confirm, switcher, help", () => {
 		const box = lines.filter(l => l.trim() !== "")
 		for (const l of box) expect(cellWidth(l.trimStart())).toBe(60)
 		expect(lines.join("\n")).toContain(
-			"nominal  band from WaveKit's built-in table, not the API",
+			"nominal  band from WaveKit's table · * configured target",
 		)
 		expect(lines.join("\n")).toContain("frames rejected 2 · items rejected 1")
 		expect(findBanned(lines.join("\n"))).toEqual([])
@@ -326,5 +326,93 @@ describe("R53: rx shows the centre alone when the rate is unknown", () => {
 		expect(stripInput(st).rx?.halfSpanHz).toBe(1_024_000)
 		expect(stripInput(st).old.rx).toBe(true)
 		expect(stripInput({ ...st, sources: s.sources }).old.rx).toBe(false)
+	})
+})
+
+describe("A8 fix 1: strip counts (I-B, R77) and window count (I-C)", () => {
+	const NOW = scenarioState("live").now
+	const iso = (ms: number) => new Date(ms).toISOString()
+	const withRows = (
+		f: (
+			d: NonNullable<
+				ReturnType<typeof scenarioState>["decoders"]["value"]
+			>[number],
+		) => object,
+	) => {
+		const s = scenarioState("live")
+		return {
+			...s,
+			decoders: {
+				...s.decoders,
+				value: s.decoders.value!.map(d => ({ ...d, ...f(d) })),
+			},
+		}
+	}
+	it("I-B: a running faulted decoder counts as failing; restarting stays apart", () => {
+		const st = withRows(d =>
+			d.id === "readsb"
+				? { running: true, health: "faulted", restartCount: 7 }
+				: {},
+		)
+		const dec = stripInput(st).decoders!
+		expect(dec.failing).toBe(1)
+		expect(dec.restarting).toBe(1)
+		expect(lineText(stripLine(stripInput(st), 199))).toContain("1 failing")
+	})
+	it("I-B: a pending suspension counts as failing", () => {
+		const st = withRows(d =>
+			d.id === "readsb"
+				? {
+						running: true,
+						suspended: true,
+						transition: "suspending",
+						suspension: { reasonCode: "x", since: iso(NOW) },
+					}
+				: {},
+		)
+		const pending = {
+			...st,
+			session: {
+				...st.session,
+				readsb: { ...st.session["readsb"]!, suspendingSince: NOW - 20_000 },
+			},
+		}
+		expect(stripInput(pending).decoders?.failing).toBe(1)
+	})
+	it("I-C: no in-window count when the window is unknown, even with tuned decoders", () => {
+		const s = scenarioState("live")
+		const noWindow = {
+			...s,
+			tuner: {
+				...s.tuner,
+				value: s.tuner.value!.map(t => ({ ...t, frequency: 0 })),
+			},
+			sources: {
+				...s.sources,
+				value: s.sources.value!.map(x => ({
+					...x,
+					caps: { ...x.caps, centerFreq: 0 },
+				})),
+			},
+			relay: { ...s.relay, value: { ...s.relay.value!, lastFrequency: 0 } },
+		}
+		expect(stripInput(noWindow).decoders?.inWindow).toBeNull()
+		expect(lineText(stripLine(stripInput(noWindow), 199))).not.toContain(
+			"in window",
+		)
+		expect(stripInput(s).decoders?.inWindow).toBe(2)
+	})
+})
+
+describe("polish: help copy", () => {
+	it("spells Shift-Tab out", () => {
+		const t = helpLines({ ...ctx, help: true }, 119, 40, {
+			invalidFrames: 0,
+			rejectedItems: 0,
+		})
+			.map(lineText)
+			.join("\n")
+		expect(t).toContain("Shift-Tab")
+		expect(t).not.toContain("S-Tab")
 	})
 })

@@ -19,10 +19,10 @@ import { lineText, padEnd, sanitize, truncate } from "../ui/text.js"
 import { ASCII_GLYPHS, glyphs } from "../ui/theme.js"
 import type { ConfirmRequest, UiState } from "../ui/ui-state.js"
 import {
-	decoderCells,
 	decoderFacts,
 	decoderTable,
 	decodersPlaceholder,
+	processWords,
 	type DecoderFacts,
 } from "./decoder-rows.js"
 import { LABEL_WIDTH, sparkSpans, wrapKV } from "./detail.js"
@@ -103,10 +103,6 @@ function suspensionReason(code: string): string {
 		? (SUSPENSION_REASON[code] ?? quoted(code))
 		: quoted(code)
 }
-
-/** The minimal process words (`up 51s`, `restarting`); counts are listed beside them. */
-const processText = (f: DecoderFacts, now: number): string =>
-	lineText(decoderCells(f, now)["process"]?.variants[0] ?? [])
 
 /**
  * Result line for the last decoder write (spec §6.2), CLI-owned copy only (R29):
@@ -243,7 +239,7 @@ export function decoderDetail(
 	rest.push(
 		...wrapKV(
 			"process",
-			`${processText(f, now)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
+			`${processWords(f)}${sep}${formatCount(r.restartCount)} restarts${sep}${formatCount(r.stats.errors)} errors${sep}health ${health(r.health)}${prev ? ` (was ${health(prev)})` : ""}`,
 			width,
 		),
 	)
@@ -408,7 +404,7 @@ export function decoderConfirm(
 	const exit = f.row.running ? null : exitText(f.row.lastError, now)
 	const parts: Array<[number, string]> = [
 		[0, `${op} ${sanitize(id)}`],
-		[2, processText(f, now)],
+		[2, processWords(f)],
 		[1, window],
 	]
 	if (exit !== null) parts.push([1, exit])

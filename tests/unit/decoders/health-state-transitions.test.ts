@@ -7,7 +7,9 @@
  * For any decoder D, health transitions should follow:
  * - running → degraded (after timeout without output)
  * - degraded → running (on output received)
- * - running/degraded → faulted (on crash loop)
+ * - running/degraded → restarting (unexpected exit, retry scheduled)
+ * - restarting → running (retry started)
+ * - running/degraded/restarting → faulted (on crash loop)
  * - health events should be emitted for each transition
  */
 
@@ -582,9 +584,14 @@ describe("Property-Based Tests", () => {
 					fanout.detachSource()
 
 					// Validate all transitions are valid
+					// "restarting" covers the backoff between an exit and the retry.
 					const validTransitions = [
 						["running", "idle"],
 						["idle", "running"],
+						["running", "restarting"],
+						["idle", "restarting"],
+						["restarting", "running"],
+						["restarting", "faulted"],
 						["running", "faulted"],
 						["idle", "faulted"],
 					]

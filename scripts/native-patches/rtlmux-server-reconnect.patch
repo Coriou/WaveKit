@@ -1,0 +1,65 @@
+diff --git a/rtlmux.c b/rtlmux.c
+index 1db4edf..b2b7294 100644
+--- a/rtlmux.c
++++ b/rtlmux.c
+@@ -193,14 +193,24 @@ static void connectToServerCB(int a, short b, void *arg) {
+ }
+ 
+ static void connectToServerSoon(void *ctx) {
+-  struct event *ev;
+   struct timeval tv;
+ 
+   tv.tv_sec = 1;
+   tv.tv_usec = 0;
+ 
+-  ev = evtimer_new(event_base, connectToServerCB, ctx);
+-  evtimer_add(ev, &tv);
++  // WaveKit: one-shot timer that libevent frees after it fires. evtimer_new()
++  // leaked one struct event per reconnect attempt while rtl_tcp was down.
++  if(event_base_once(event_base, -1, EV_TIMEOUT, connectToServerCB, ctx, &tv) != 0)
++    slog(LOG_ERROR, SLOG_ERROR, "Failed to schedule server reconnect.");
++}
++
++// WaveKit: free the upstream connection and clear the global handle so that
++// serverSendCommand() never writes to a freed bufferevent while reconnecting.
++static void releaseServerConnection(struct bufferevent *bev, void *ctx) {
++  if(ctx == &serverConnection && serverConnection == bev)
++    serverConnection = NULL;
++  bufferevent_free(bev);
++  serverInfo.state = SERVER_NEW;
+ }
+ 
+ static void serverReadCB(struct bufferevent *bev, void *ctx) {
+@@ -215,7 +225,7 @@ static void serverReadCB(struct bufferevent *bev, void *ctx) {
+       slog(LOG_INFO, SLOG_INFO, "Connected to server.");
+     } else { // Failed to receive the magic header
+       slog(LOG_ERROR, SLOG_ERROR, "Failed to receive magic header from server.");
+-      bufferevent_free(bev);
++      releaseServerConnection(bev, ctx);
+       connectToServerSoon(ctx);
+       return;
+     }
+@@ -265,9 +275,8 @@ static void serverErrorEventCB(struct bufferevent *bev, short events, void *ctx)
+   if (events & BEV_EVENT_ERROR)
+     slog(LOG_ERROR, SLOG_ERROR, "Error from server side bufferevent: %s", strerror(errno));
+   if (events & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+-    bufferevent_free(bev);
++    releaseServerConnection(bev, ctx);
+     slog(LOG_INFO, SLOG_INFO, "Disconnecting server.");
+-    serverInfo.state = SERVER_NEW;
+     connectToServerSoon(ctx);
+   }
+ }
+@@ -293,6 +302,12 @@ static void errorEventCB(struct bufferevent *bev, short events, void *ctx) {
+ void serverSendCommand(struct command cmd) {
+   serverInfo.params[cmd.cmd-1].value = cmd.param;
+   serverInfo.params[cmd.cmd-1].set = 1;
++  // WaveKit: always record the parameter (replayed after the next RTL0 header),
++  // but only write while a live, header-verified upstream connection exists.
++  if(serverConnection == NULL || serverInfo.state != SERVER_CONNECTED) {
++    slog(LOG_INFO, SLOG_INFO, "Server not connected; command %d stored for replay on reconnect", cmd.cmd);
++    return;
++  }
+   slog(LOG_LIVE, SLOG_DEBUG, "Sending command to server: %d: %lu", cmd.cmd, ntohl(cmd.param));
+   serverInfo.data.out += sizeof(cmd);
+   bufferevent_write(serverConnection, &cmd, sizeof(cmd));

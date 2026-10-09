@@ -1366,3 +1366,31 @@ describe("R55 follow-ups fix", () => {
 		expect(s.effects.resync).toHaveLength(10)
 	})
 })
+
+describe("A8 fix M-e: decoder:health with a value the CLI does not know", () => {
+	it("patches the row to unknown and records the previous health", () => {
+		let s = reduce(
+			initialState(T0),
+			[restOk(T0, [decoder({ health: "running" })])],
+			T0,
+		)
+		s = reduce(
+			s,
+			[
+				{
+					kind: "ws",
+					at: T0 + 1,
+					event: {
+						type: "decoder:health",
+						decoderId: "readsb",
+						health: "unknown",
+					},
+				},
+			],
+			T0 + 1,
+		)
+		expect(s.decoders.value?.[0]?.health).toBe("unknown")
+		expect(s.session["readsb"]?.previousHealth).toBe("running")
+		expect(s.decoders.value).toHaveLength(1)
+	})
+})

@@ -1,6 +1,6 @@
 {
 	"schemaVersion": 2,
-	"generatedAt": "2026-10-08T16:46:53.073Z",
+	"generatedAt": "2026-10-08T20:42:49.000Z",
 	"title": "Design System: WaveKit Receiver",
 	"extensions": {
 		"colorMeta": {
@@ -124,6 +124,21 @@
 					"oklch(95% 0.172 29)"
 				]
 			},
+			"fault-face": {
+				"role": "status",
+				"displayName": "Fault Window Tint",
+				"canonical": "oklch(88.6% 0.030 36)",
+				"tonalRamp": [
+					"oklch(15% 0.030 36)",
+					"oklch(26% 0.030 36)",
+					"oklch(38% 0.030 36)",
+					"oklch(50% 0.030 36)",
+					"oklch(62% 0.030 36)",
+					"oklch(74% 0.030 36)",
+					"oklch(85% 0.030 36)",
+					"oklch(95% 0.030 36)"
+				]
+			},
 			"bezel-night": {
 				"role": "neutral",
 				"displayName": "Graphite",
@@ -227,6 +242,21 @@
 					"oklch(74% 0.157 27)",
 					"oklch(85% 0.157 27)",
 					"oklch(95% 0.157 27)"
+				]
+			},
+			"fault-face-night": {
+				"role": "status",
+				"displayName": "Fault Window Tint (night)",
+				"canonical": "oklch(26.8% 0.032 29)",
+				"tonalRamp": [
+					"oklch(15% 0.032 29)",
+					"oklch(26% 0.032 29)",
+					"oklch(38% 0.032 29)",
+					"oklch(50% 0.032 29)",
+					"oklch(62% 0.032 29)",
+					"oklch(74% 0.032 29)",
+					"oklch(85% 0.032 29)",
+					"oklch(95% 0.032 29)"
 				]
 			},
 			"screen": {
@@ -413,11 +443,11 @@
 		"typographyMeta": {
 			"display": {
 				"displayName": "Display",
-				"purpose": "The live rate figure on the screen."
+				"purpose": "The live rate figure on the screen; the elapsed clock on the setup page."
 			},
 			"headline": {
 				"displayName": "Headline",
-				"purpose": "The one-line flow verdict."
+				"purpose": "The one-line verdict on either page; 1.5rem on phones."
 			},
 			"title": {
 				"displayName": "Title",
@@ -425,11 +455,11 @@
 			},
 			"body": {
 				"displayName": "Body",
-				"purpose": "Stage words, verdict detail, setup line."
+				"purpose": "Base size for running text."
 			},
 			"body-sm": {
 				"displayName": "Body Small",
-				"purpose": "Sub-facts, notes, footer, marker readout."
+				"purpose": "Stage facts, readout sub-facts, annunciator values, notes, footer, marker readout."
 			},
 			"nameplate": {
 				"displayName": "Nameplate",
@@ -441,7 +471,7 @@
 			},
 			"label-sm": {
 				"displayName": "Legend Small",
-				"purpose": "Plot axis, readout names, table heads."
+				"purpose": "Plot axis caption, expected-line label, readout names, table heads."
 			}
 		},
 		"shadows": [
@@ -465,7 +495,7 @@
 			{
 				"name": "lamp-blink",
 				"value": "1.2s steps(2, jump-none) infinite",
-				"purpose": "Connecting and reconnecting lamps; disabled under reduced motion."
+				"purpose": "Connecting and reconnecting lamps, and the in-progress setup stage; disabled under reduced motion."
 			}
 		],
 		"breakpoints": [
@@ -515,25 +545,32 @@
 			"name": "Screen",
 			"kind": "card",
 			"refersTo": "screen",
-			"description": "Always-dark recessed display: verdict, amber rate, graticule plot with dashed expected line.",
-			"html": "<div class=\"ds-screen\"><div><p class=\"ds-verdict\">Sampling</p><p class=\"ds-detail\">Fresh samples are arriving from the dongle.</p></div><p class=\"ds-rate\">4.08 <small>MB/s</small></p><svg class=\"ds-plot\" viewBox=\"0 0 600 160\" preserveAspectRatio=\"none\"><g stroke=\"rgb(160 190 175 / 0.2)\"><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\"/><line x1=\"0\" x2=\"600\" y1=\"80\" y2=\"80\"/><line x1=\"0\" x2=\"600\" y1=\"120\" y2=\"120\"/><line x1=\"150\" x2=\"150\" y1=\"0\" y2=\"160\"/><line x1=\"300\" x2=\"300\" y1=\"0\" y2=\"160\"/><line x1=\"450\" x2=\"450\" y1=\"0\" y2=\"160\"/></g><line x1=\"0\" x2=\"600\" y1=\"50\" y2=\"50\" stroke=\"#7f9a8c\" stroke-width=\"1.25\" stroke-dasharray=\"6 5\"/><path d=\"M0 52 L80 51 L160 53 L200 52 M240 51 L400 52 L520 50 L600 53\" fill=\"none\" stroke=\"#f2b33d\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg></div>",
-			"css": ".ds-screen{display:grid;grid-template-columns:1fr auto;gap:14px 16px;background:#0d1210;color:#dde5e0;border-radius:14px;padding:18px 18px 12px;box-shadow:inset 0 0 0 1px rgb(255 255 255 / 0.04),inset 0 2px 10px rgb(0 0 0 / 0.5);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums}.ds-verdict{margin:0;font:600 1.625rem/1.1 \"Barlow\",sans-serif;letter-spacing:-0.01em}.ds-verdict::before{content:\"\";display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:10px;background:#3dbe7e;border:2px solid #3dbe7e}.ds-detail{margin:6px 0 0;color:#8f9d96;font-size:0.9375rem}.ds-rate{margin:0;font:500 2.25rem/1 \"Barlow\",sans-serif;letter-spacing:-0.02em;color:#f2b33d}.ds-rate small{font-size:0.9375rem;color:#8f9d96;letter-spacing:0}.ds-plot{grid-column:1/-1;width:100%;height:160px;border:1px solid rgb(160 190 175 / 0.2)}"
+			"description": "Always-dark recessed display: verdict, amber rate, five-division graticule with the expected line on the fourth, 10 s mean trace over an amber wash, expected label at the line.",
+			"html": "<div class=\"ds-screen\"><div><p class=\"ds-verdict\">Sampling</p><p class=\"ds-detail\">Fresh samples are arriving from the dongle.</p></div><div class=\"ds-ratebox\"><p class=\"ds-rate\">4.08 <small>MB/s</small></p><p class=\"ds-sub\">99% of expected</p></div><div class=\"ds-plot\"><svg viewBox=\"0 0 600 200\" preserveAspectRatio=\"none\"><defs><linearGradient id=\"ds-fade\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"><stop offset=\"0\" stop-color=\"#f2b33d\" stop-opacity=\"0.13\"/><stop offset=\"1\" stop-color=\"#f2b33d\" stop-opacity=\"0\"/></linearGradient></defs><g stroke=\"rgb(160 190 175 / 0.09)\"><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\"/><line x1=\"0\" x2=\"600\" y1=\"80\" y2=\"80\"/><line x1=\"0\" x2=\"600\" y1=\"120\" y2=\"120\"/><line x1=\"0\" x2=\"600\" y1=\"160\" y2=\"160\"/><line x1=\"150\" x2=\"150\" y1=\"0\" y2=\"200\"/><line x1=\"300\" x2=\"300\" y1=\"0\" y2=\"200\"/><line x1=\"450\" x2=\"450\" y1=\"0\" y2=\"200\"/></g><path d=\"M0 41 L80 40 L160 42 L200 41 L200 200 L0 200 Z M240 40 L400 41 L520 39 L600 41 L600 200 L240 200 Z\" fill=\"url(#ds-fade)\"/><line x1=\"0\" x2=\"600\" y1=\"40\" y2=\"40\" stroke=\"#7f9a8c\" stroke-width=\"1.25\" stroke-dasharray=\"6 5\"/><path d=\"M0 41 L80 40 L160 42 L200 41 M240 40 L400 41 L520 39 L600 41\" fill=\"none\" stroke=\"#f2b33d\" stroke-width=\"2\" stroke-linejoin=\"round\"/></svg><p class=\"ds-plabel\">Expected 4.10 MB/s</p><p class=\"ds-axis\"><span>−5 min</span><span>30 s/div · 10 s average</span><span>now</span></p></div></div>",
+			"css": ".ds-screen{display:grid;grid-template-columns:1fr auto;gap:14px 16px;background:#0d1210;color:#dde5e0;border-radius:14px;padding:18px 18px 12px;box-shadow:inset 0 0 0 1px rgb(255 255 255 / 0.04),inset 0 2px 10px rgb(0 0 0 / 0.5);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums}.ds-verdict{margin:0;font:600 1.625rem/1.1 \"Barlow\",sans-serif;letter-spacing:-0.01em}.ds-verdict::before{content:\"\";display:inline-block;width:12px;height:12px;border-radius:50%;margin-right:10px;background:#3dbe7e;border:2px solid #3dbe7e}.ds-detail{margin:6px 0 0;color:#8f9d96;font-size:0.9375rem;max-width:46ch}.ds-ratebox{text-align:right}.ds-rate{margin:0;font:500 2.25rem/1 \"Barlow\",sans-serif;letter-spacing:-0.02em;color:#f2b33d;white-space:nowrap}.ds-rate small{font-size:0.9375rem;color:#8f9d96;letter-spacing:0}.ds-sub{margin:6px 0 0;color:#8f9d96;font-size:0.875rem}.ds-plot{grid-column:1/-1;position:relative}.ds-plot svg{display:block;width:100%;height:clamp(140px,22vw,200px);border-left:1px solid rgb(160 190 175 / 0.2);border-right:1px solid rgb(160 190 175 / 0.2);border-bottom:1px solid rgb(160 190 175 / 0.2)}.ds-plot svg line{vector-effect:non-scaling-stroke}.ds-plabel{position:absolute;left:0;top:20%;transform:translateY(calc(-100% - 5px));margin:0;font:600 0.6875rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#7f9a8c}.ds-axis{display:flex;justify-content:space-between;margin:8px 0 0;font:600 0.6875rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:#8f9d96}.ds-plot svg:focus-visible{outline:2px solid #2f6fd6;outline-offset:3px}"
+		},
+		{
+			"name": "Lamp Chain",
+			"kind": "custom",
+			"description": "Stages joined by a hairline through their lamps, ending at the last lamp; the receiver chain on the status page and the setup stages on the setup page (in progress blinks).",
+			"html": "<ol class=\"ds-chain\"><li data-state=\"ok\"><span class=\"ds-cn\">Pi settings</span><span class=\"ds-cs\"><span class=\"ds-cl\"></span>Done</span><span class=\"ds-cf\">account and network</span></li><li data-state=\"ok\" aria-current=\"step\"><span class=\"ds-cn\">Receiver</span><span class=\"ds-cs\"><span class=\"ds-cl\"></span>In progress</span><span class=\"ds-cf\">packages and services</span></li><li data-state=\"unknown\"><span class=\"ds-cn\">Finish</span><span class=\"ds-cs\"><span class=\"ds-cl\"></span>Waiting</span><span class=\"ds-cf\">save configuration</span></li></ol>",
+			"css": ".ds-chain{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:0;padding:0;list-style:none;position:relative;font-family:\"Barlow\",sans-serif;color:var(--ink,#1c201e);background:var(--bezel,#d9dbd5)}.ds-chain::before{content:\"\";position:absolute;left:6px;right:calc(100% / 3 - 6px);top:35px;height:1px;background:var(--rule,#a7ada6)}.ds-chain li{position:relative;display:grid;gap:6px;padding-right:8px;min-width:0}.ds-cn{font:600 0.75rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-2,#4a524e);padding-bottom:10px}.ds-cs{display:flex;align-items:center;gap:7px;font-weight:600;font-size:0.9375rem;background:var(--bezel,#d9dbd5);width:max-content;padding-right:6px;position:relative}.ds-cl{width:10px;height:10px;border-radius:50%;border:2px solid var(--lamp,#9aa19c);box-shadow:0 0 0 4px var(--bezel,#d9dbd5)}.ds-chain [data-state=\"ok\"] .ds-cl{--lamp:#3dbe7e;background:#3dbe7e}.ds-chain [aria-current=\"step\"] .ds-cl{animation:ds-blink 1.2s steps(2,jump-none) infinite}@keyframes ds-blink{50%{opacity:0.25}}.ds-cf{color:var(--ink-2,#4a524e);font-size:0.8125rem}@media (prefers-reduced-motion:reduce){.ds-chain [aria-current=\"step\"] .ds-cl{animation:none}}"
 		},
 		{
 			"name": "Annunciator Window",
 			"kind": "card",
 			"refersTo": "annunciator-clear",
-			"description": "Power window: clear, unknown (dashed), latched (warn border), active (solid red face).",
-			"html": "<ul class=\"ds-ann\"><li data-state=\"clear\"><span>Under-voltage</span><small>Clear now</small></li><li data-state=\"latched\"><span>Earlier dips</span><small>Seen 18:40</small></li><li data-state=\"unknown\"><span>Throttling</span><small>Not measurable</small></li><li data-state=\"active\"><span>Under-voltage</span><small>Active now</small></li></ul>",
-			"css": ".ds-ann{display:grid;gap:6px;margin:0;padding:0;list-style:none}.ds-ann li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;min-height:46px;padding:10px 12px;border:1px solid var(--rule,#a7ada6);border-radius:6px;background:var(--bezel-raised,#e4e6e0);color:var(--ink,#1c201e)}.ds-ann span{font:600 0.8125rem/1.1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.06em;text-transform:uppercase}.ds-ann small{font:500 0.8125rem/1.4 \"Barlow\",sans-serif;color:var(--ink-2,#4a524e);text-align:right}.ds-ann [data-state=\"clear\"] span,.ds-ann [data-state=\"unknown\"] span{color:var(--ink-2,#4a524e)}.ds-ann [data-state=\"unknown\"]{border-style:dashed;background:transparent}.ds-ann [data-state=\"latched\"]{border-color:var(--warn-ink,#855600)}.ds-ann [data-state=\"latched\"] small{color:var(--warn-ink,#855600)}.ds-ann [data-state=\"active\"]{background:#ef5b4c;border-color:#ef5b4c;color:#1a0a08}.ds-ann [data-state=\"active\"] small{color:#2a0e0b;font-weight:600}"
+			"description": "Power window with a lamp: clear (filled ok), latched (warn border and lamp), unknown (dashed, hollow lamp), active (fault tint, fault-ink border and value).",
+			"html": "<ul class=\"ds-ann\"><li data-state=\"clear\"><span class=\"ds-al\"></span><span>Under-voltage</span><small>Clear now</small></li><li data-state=\"latched\"><span class=\"ds-al\"></span><span>Earlier dips</span><small>Seen 18:40</small></li><li data-state=\"unknown\"><span class=\"ds-al\"></span><span>Throttling</span><small>Not measurable</small></li><li data-state=\"active\"><span class=\"ds-al\"></span><span>Under-voltage</span><small>Active now</small></li></ul>",
+			"css": ".ds-ann{display:grid;gap:6px;margin:0;padding:0;list-style:none}.ds-ann li{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 10px;align-items:center;min-height:46px;padding:10px 12px;border:1px solid var(--rule,#a7ada6);border-radius:6px;background:var(--bezel-raised,#e4e6e0);color:var(--ink,#1c201e)}.ds-al{width:10px;height:10px;border-radius:50%;border:2px solid var(--lamp,#9aa19c);background:transparent}.ds-ann span:not(.ds-al){font:600 0.8125rem/1.1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.06em;text-transform:uppercase}.ds-ann small{font:500 0.8125rem/1.4 \"Barlow\",sans-serif;color:var(--ink-2,#4a524e);text-align:right}.ds-ann [data-state=\"clear\"] span:not(.ds-al),.ds-ann [data-state=\"unknown\"] span:not(.ds-al){color:var(--ink-2,#4a524e)}.ds-ann [data-state=\"clear\"] .ds-al{--lamp:#3dbe7e;background:#3dbe7e}.ds-ann [data-state=\"latched\"] .ds-al{--lamp:#f2b33d;background:#f2b33d}.ds-ann [data-state=\"active\"] .ds-al{--lamp:#ef5b4c;background:#ef5b4c}.ds-ann [data-state=\"unknown\"]{border-style:dashed;background:transparent}.ds-ann [data-state=\"latched\"]{border-color:var(--warn-ink,#855600)}.ds-ann [data-state=\"latched\"] small{color:var(--warn-ink,#855600)}.ds-ann [data-state=\"active\"]{background:var(--fault-face,#ecd3cc);border-color:var(--fault-ink,#b02a1f)}.ds-ann [data-state=\"active\"] small{color:var(--fault-ink,#b02a1f);font-weight:600}"
 		},
 		{
 			"name": "Host Readout",
 			"kind": "custom",
 			"refersTo": "readout",
-			"description": "Ruled readout: legend name, tabular value, sub-fact, ruled bar meter.",
+			"description": "Ruled readout: legend name, tabular value, sub-fact, plain 3px bar meter.",
 			"html": "<dl class=\"ds-readout\"><dt>CPU</dt><dd><span class=\"ds-v\">24%</span><span class=\"ds-s\">load 0.62 · 4 cores</span></dd><span class=\"ds-meter\"><span style=\"--fill:0.24\"></span></span></dl>",
-			"css": ".ds-readout{margin:0;max-width:200px;padding:12px 12px 14px 0;border-top:1px solid var(--rule,#a7ada6);border-bottom:1px solid var(--rule,#a7ada6);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums;color:var(--ink,#1c201e)}.ds-readout dt{font:600 0.6875rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-2,#4a524e);margin-bottom:6px}.ds-readout dd{margin:0;display:grid;gap:2px}.ds-v{font-size:1.375rem;line-height:1.1;letter-spacing:-0.01em}.ds-s{font-size:0.8125rem;color:var(--ink-2,#4a524e)}.ds-meter{display:block;position:relative;height:4px;margin-top:8px;background:repeating-linear-gradient(to right,var(--rule,#a7ada6) 0 1px,transparent 1px 10%);border-bottom:1px solid var(--rule,#a7ada6)}.ds-meter span{position:absolute;inset:0;background:var(--ink,#1c201e);transform:scaleX(var(--fill,0));transform-origin:left center;transition:transform 0.25s cubic-bezier(0.22,1,0.36,1)}.ds-readout:hover .ds-meter span{--fill:0.6}"
+			"css": ".ds-readout{margin:0;max-width:200px;padding:12px 12px 14px 0;border-top:1px solid var(--rule,#a7ada6);border-bottom:1px solid var(--rule,#a7ada6);font-family:\"Barlow\",sans-serif;font-variant-numeric:tabular-nums;color:var(--ink,#1c201e)}.ds-readout dt{font:600 0.6875rem/1 \"Barlow Semi Condensed\",\"Barlow\",sans-serif;letter-spacing:0.08em;text-transform:uppercase;color:var(--ink-2,#4a524e);margin-bottom:6px}.ds-readout dd{margin:0;display:grid;gap:2px}.ds-v{font-size:1.375rem;line-height:1.1;letter-spacing:-0.01em}.ds-s{font-size:0.8125rem;color:var(--ink-2,#4a524e)}.ds-meter{display:block;position:relative;height:3px;margin-top:10px;background:var(--rule,#a7ada6)}.ds-meter span{position:absolute;inset:0;background:var(--ink,#1c201e);transform:scaleX(var(--fill,0));transform-origin:left center;transition:transform 0.25s cubic-bezier(0.22,1,0.36,1)}.ds-readout:hover .ds-meter span{--fill:0.6}"
 		},
 		{
 			"name": "Diagnostics Disclosure",
@@ -545,7 +582,7 @@
 	],
 	"narrative": {
 		"northStar": "The Bench Instrument Front Panel",
-		"overview": "The page is a piece of test equipment, not a dashboard. A painted bezel carries silk-screened legends and hairline rules; set into it is one always-dark display screen with a fine graticule, plotting measured flow as a single amber trace against a dashed expected line. Everything else (the receiver chain, power annunciators, host readouts) is printed or mounted on the bezel around that screen, the way legends and lamps surround a scope's CRT.\n\nThe bezel follows the system theme: lab-grey enamel by day, graphite at night. The screen does not; it stays dark in both. Density is instrument-like: small condensed capitals for labels, tabular figures everywhere, values large only where a glance needs them. State is spoken twice, by a lamp and by a word, and absence is drawn honestly: hollow lamps, dashed windows, blank gaps in the trace, stale ink instead of amber.\n\nThe world refuses the equal-card metrics wall. There is one screen, one trace, one accent.",
+		"overview": "The page is a piece of test equipment, not a dashboard. A painted bezel carries silk-screened legends and hairline rules; set into it is one always-dark display screen with a fine graticule, plotting measured flow as a single amber trace against a dashed expected line. Everything else (the receiver chain, power annunciators, host readouts) is printed or mounted on the bezel around that screen, the way legends and lamps surround a scope's CRT.\n\nThe same instrument has two faces. The status page (served at `/`) is the full panel. The first-boot setup page (`boot.html`, served by the Pi before Docker starts, loading `app.css` plus `boot.css`) is the same panel cut down: the same nameplate and contact pill, the same screen carrying a verdict and an elapsed clock in place of the rate, and the same lamp chain naming the setup stages.\n\nThe bezel follows the system theme: lab-grey enamel by day, graphite at night. The screen does not; it stays dark in both. Density is instrument-like: small condensed capitals for labels, tabular figures everywhere, values large only where a glance needs them. State is spoken twice, by a lamp and by a word, and absence is drawn honestly: hollow lamps, dashed windows, blank gaps in the trace, stale ink instead of amber.\n\nThe world refuses the equal-card metrics wall. There is one screen, one trace, one accent.",
 		"keyCharacteristics": [
 			"Two materials: a theme-following bezel and an always-dark screen.",
 			"One amber trace as the only chromatic accent; status hues live in lamps and state words.",
@@ -556,7 +593,7 @@
 		"rules": [
 			{
 				"name": "The One Trace Rule",
-				"body": "Amber on the screen means a fresh measurement. A reading the page cannot confirm is redrawn in dim phosphor at reduced opacity, never amber.",
+				"body": "Amber on the screen means a fresh measurement. A reading the page cannot confirm is redrawn in dim phosphor at reduced opacity, never amber, and its amber wash is removed.",
 				"section": "colors"
 			},
 			{
@@ -571,7 +608,7 @@
 			},
 			{
 				"name": "The Silkscreen Voice Rule",
-				"body": "Uppercase spaced condensed type is reserved for printed panel labels naming a real section, stage, window or axis. It never decorates a headline or carries a value.",
+				"body": "Uppercase spaced condensed type is reserved for printed panel labels: a real section, stage, window or axis, the scale annotations an instrument prints on its graticule (time per division, the expected line), and the link pill's state word. It never decorates a headline or sets a live measurement.",
 				"section": "typography"
 			},
 			{
@@ -583,9 +620,11 @@
 		"dos": [
 			"Do pair every lamp with a word, and draw unknown as a hollow lamp or dashed window.",
 			"Do keep amber for fresh measurement only; redraw stale readings in dim phosphor.",
-			"Do leave gaps in a trace blank where samples are missing.",
+			"Do leave gaps in a trace blank where samples are missing; smoothing never averages across a gap.",
 			"Do name sections with a silk-screened legend whose hairline runs to the edge.",
 			"Do keep the screen dark in both themes and the bezel following the system theme.",
+			"Do label a reference line where it is drawn rather than in a separate key.",
+			"Do give both pages the same nameplate, contact rule and lamp vocabulary.",
 			"Do honour `prefers-reduced-motion` by stopping blink and transitions."
 		],
 		"donts": [
@@ -593,7 +632,8 @@
 			"Don't add drop shadows to anything on the bezel; the screen recess is the only depth.",
 			"Don't introduce a second accent hue on the screen or a third typeface.",
 			"Don't use glyph or emoji icons; lamps, rules and CSS-drawn marks carry the visual signals.",
-			"Don't show a stale, missing or unmeasurable value in healthy colour."
+			"Don't show a stale, missing or unmeasurable value in healthy colour.",
+			"Don't fill a bezel surface with a lamp hue; an alarm window is tinted (fault-face), never painted solid red."
 		]
 	}
 }

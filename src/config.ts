@@ -2,6 +2,10 @@ import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
 import { ConfigValidationError } from "./utils/errors.js"
+import {
+	CSDR_BUFFER_MAX_ELEMENTS,
+	CSDR_BUFFER_MIN_ELEMENTS,
+} from "./decoders/csdr-buffers.js"
 
 // ============================================================================
 // Zod Schemas
@@ -33,6 +37,15 @@ export const SourceConfigSchema = z.object({
 	loop: z.boolean().default(false), // For recording sources
 	playbackSpeed: z.number().positive().default(1.0), // For recording sources
 	caps: SourceCapsSchema,
+	/**
+	 * Stall watchdog (rtl_tcp U8_IQ sources only): once a session has streamed,
+	 * a payload gap this long drops the connection and reconnects. Default
+	 * 15000; 0 disables. Ignored for recordings, SDR++ network sources and other
+	 * rtl_tcp formats.
+	 */
+	stallTimeoutMs: z
+		.union([z.literal(0), z.number().int().min(1000).max(600_000)])
+		.optional(),
 	/** Optional SDR host endpoint for resource monitoring (per-source) */
 	sdrHost: z
 		.object({
@@ -129,6 +142,18 @@ export const TunerRelayConfigSchema = z.object({
 })
 
 /**
+ * Schema for tuner control behaviour (shared by the tuner API and relay).
+ */
+export const TunerConfigSchema = z.object({
+	/**
+	 * On rtl_tcp reconnect: "restore" re-sends the last accepted tuner state;
+	 * "reset" sends nothing and resets tuner state/source caps to the configured
+	 * baseline (use when another operator may own the receiver after an outage).
+	 */
+	reconnectPolicy: z.enum(["restore", "reset"]).default("restore"),
+})
+
+/**
  * Schema for live demodulation configuration.
  */
 export const LiveDemodConfigSchema = z
@@ -188,6 +213,16 @@ export const HealthConfigSchema = z.object({
 	checkInterval: z.number().int().positive().default(5000),
 	/** Milliseconds without output before a decoder is considered idle (default: 30000ms) */
 	idleTimeout: z.number().int().positive().default(30000),
+	/**
+	 * Consecutive unstable runs (no output and under 30 s) before a decoder is
+	 * reported "faulted" while retries continue (manager default: 5).
+	 */
+	faultAfterFailures: z.number().int().positive().optional(),
+	/**
+	 * Suspend wanted decoders whose target frequencies are all outside the
+	 * tuned window, resuming on a retune back (manager default: true).
+	 */
+	bandSuspension: z.boolean().optional(),
 })
 
 /**
@@ -222,6 +257,26 @@ export const ResourcesConfigSchema = z.object({
 })
 
 /**
+ * Schema for CSDR DSP stage tuning.
+ * `boundedBuffers` caps the per-process ring of harness-validated streaming
+ * stages (see src/decoders/csdr-buffers.ts); false keeps upstream rings.
+ * Default on since 2026-10-09: an overnight interleaved real-RF A/B showed
+ * 0% fanout loss and ~18 MiB shmem bounded versus ~1% loss and ~5 GiB upstream.
+ * Limits mirror the native WAVEKIT_CSDR_BUFFER_ELEMENTS validation.
+ */
+export const CsdrConfigSchema = z.object({
+	/** Enable bounded rings for validated stages (default: true; false = upstream) */
+	boundedBuffers: z.boolean().default(true),
+	/** Ring size in input elements for bounded stages */
+	bufferElements: z
+		.number()
+		.int()
+		.min(CSDR_BUFFER_MIN_ELEMENTS)
+		.max(CSDR_BUFFER_MAX_ELEMENTS)
+		.default(65536),
+})
+
+/**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
@@ -230,11 +285,13 @@ export const ConfigSchema = z.object({
 	decoders: z.array(DecoderConfigSchema).default([]),
 	audio: AudioConfigSchema.default({}),
 	tunerRelay: TunerRelayConfigSchema.default({}),
+	tuner: TunerConfigSchema.default({}),
 	liveDemod: LiveDemodConfigSchema.optional(),
 	api: ApiConfigSchema.default({}),
 	logging: LoggingConfigSchema.default({}),
 	health: HealthConfigSchema.optional(),
 	resources: ResourcesConfigSchema.default({}),
+	csdr: CsdrConfigSchema.default({}),
 })
 
 // ============================================================================
@@ -252,6 +309,7 @@ export type ApiConfig = z.infer<typeof ApiConfigSchema>
 export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
+export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================
