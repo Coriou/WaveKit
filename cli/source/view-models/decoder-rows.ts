@@ -81,7 +81,7 @@ export interface DecoderFacts {
 	oldFanout: boolean
 	/** Window and band lane older than the TTL (decoders lane under core's bandAssessment, else sources or tuner): they render dim. */
 	oldWindow: boolean
-	/** Decodes of this decoder in the message feed over the last 60 s (M12). */
+	/** Decodes of this decoder in the message feed over the last 60 s (M12); 0 while the feed is not open. */
 	feed60: number
 }
 
@@ -99,6 +99,7 @@ const compute = memoOne(
 		_ringVersion: number,
 		now: number,
 		resources: AppState["resources"],
+		wsOpen: boolean,
 	): DecoderFacts[] => {
 		const server = serverNow(now, [
 			{ iso: fanout.value?.timestamp, receivedAt: fanout.receivedAt },
@@ -106,8 +107,9 @@ const compute = memoOne(
 		])
 		const rows = decoders.value ?? []
 		// M12: decodes per decoder in the feed's last minute (local receipt times).
+		// Only while the feed is live: a closed socket would make it decay (T4).
 		const feed60: Record<string, number> = Object.create(null)
-		for (const e of ring.entries)
+		for (const e of wsOpen ? ring.entries : [])
 			if (e.receivedAt >= now - 60_000)
 				feed60[e.decoderId] = (feed60[e.decoderId] ?? 0) + 1
 		const oldRest = isOld(decoders, now)
@@ -185,6 +187,7 @@ export function decoderFacts(state: AppState): DecoderFacts[] {
 		state.messages.version,
 		state.now,
 		state.resources,
+		state.conn.ws.state === "open",
 	)
 }
 

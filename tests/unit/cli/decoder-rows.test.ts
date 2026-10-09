@@ -480,6 +480,15 @@ describe("decoder rows (live fixture)", () => {
 				lineText(narrow.rows.find(r => lineText(r).includes("dsd-fme")) ?? []),
 			).toMatch(/^● dsd-fme +up 52s +2\/min +12%/)
 		})
+		it("final review MUST 2: the feed count is used only while the WS is open", () => {
+			const live = facts.reduce((n, f) => n + f.feed60, 0)
+			expect(live).toBeGreaterThan(0)
+			const closed = {
+				...s,
+				conn: { ...s.conn, ws: { ...s.conn.ws, state: "closed" as const } },
+			}
+			for (const f of decoderFacts(closed)) expect(f.feed60).toBe(0)
+		})
 		it("M12: a decode older than 60 s reads none for its age; the feed count stands in for a missing rate", () => {
 			const f = by("dsd-fme")
 			const stale: DecoderFacts = {
