@@ -169,6 +169,14 @@ function quoted(text: string, max = 40): string {
 
 function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	const now = state.now
+	const held = (state.decoders.value ?? [])
+		.filter(
+			d =>
+				d.suspended === true &&
+				(d.sourceId === src.id ||
+					src.assignments.some(a => a.decoderId === d.id)),
+		)
+		.map(d => sanitize(d.id))
 	const extraSources = (state.sources.value?.length ?? 1) - 1
 	const role: Role = isOld(state.sources, now) ? "old" : "value"
 	const iq = iqView(
@@ -234,6 +242,18 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 			txt(`last error ${src.lastError ? quoted(src.lastError) : g.na}`, role),
 		),
 		one(3, txt(`assigned ${src.assignments.length} decoders`, role)),
+		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
+		...(held.length > 0
+			? [
+					one(
+						1,
+						txt(
+							`held by suspended ${held.slice(0, 2).join(", ")}${held.length > 2 ? ` +${held.length - 2}` : ""}`,
+							role,
+						),
+					),
+				]
+			: []),
 	]
 	return [
 		keep(fitRow(lbl("SOURCE", true), row1, width)),

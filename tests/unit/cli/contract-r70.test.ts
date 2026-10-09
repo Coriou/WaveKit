@@ -14,6 +14,8 @@ import {
 	decoderFacts,
 } from "../../../cli/source/view-models/decoder-rows.js"
 import { decoderDetail } from "../../../cli/source/view-models/decoders.js"
+import { receiverLines } from "../../../cli/source/view-models/receiver.js"
+import { initialUi } from "../../../cli/source/ui/ui-state.js"
 
 beforeAll(() => {
 	process.env["TZ"] = "UTC"
@@ -300,5 +302,34 @@ describe("R70 decoder detail", () => {
 	})
 	it("shows ? for an unknown server health", () => {
 		expect(detail(row({ health: "unknown" }))).toContain("server health ?")
+	})
+})
+
+describe("R70 source reservation in the Receiver", () => {
+	const recv = (st: ReturnType<typeof scenarioState>) =>
+		receiverLines(st, initialUi("receiver"), 119, 35, true)
+			.map(lineText)
+			.join("\n")
+	it("names the suspended decoder that holds the source", () => {
+		const s = scenarioState("live")
+		const src = s.sources.value![0]!
+		const rows = s.decoders.value!.map(d =>
+			d.id === "dsd-fme"
+				? {
+						...d,
+						running: false,
+						suspended: true,
+						desiredRunning: true,
+						sourceId: src.id,
+						suspension: {
+							reasonCode: "insufficient-sample-rate",
+							since: iso(s.now - 60_000),
+						},
+					}
+				: d,
+		)
+		const st = { ...s, decoders: { ...s.decoders, value: rows } }
+		expect(recv(st)).toContain("held by suspended dsd-fme")
+		expect(recv(s)).not.toContain("held by suspended")
 	})
 })
