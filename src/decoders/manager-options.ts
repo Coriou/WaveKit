@@ -20,6 +20,9 @@ export function createDecoderManagerOptions(
 					...(health.faultAfterFailures !== undefined
 						? { faultAfterFailures: health.faultAfterFailures }
 						: {}),
+					...(health.bandSuspension !== undefined
+						? { bandSuspension: health.bandSuspension }
+						: {}),
 				}
 			: {}),
 	}

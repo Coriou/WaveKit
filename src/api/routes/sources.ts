@@ -11,7 +11,10 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync } from "fastify"
-import { sourceActivitySchema } from "@wavekit/api-types"
+import {
+	sourceActivitySchema,
+	sourceRateMismatchSchema,
+} from "@wavekit/api-types"
 import { SourceConfigSchema } from "../../config.js"
 import type {
 	SourceManager,
@@ -117,6 +120,7 @@ const extendedSourceStatusSchema = {
 		lastError: { type: "string" },
 		reconnectAttempts: { type: "number" },
 		caps: sourceCapsResponseSchema,
+		rateMismatch: sourceRateMismatchSchema,
 		assignments: {
 			type: "array",
 			items: decoderAssignmentSchema,
@@ -152,6 +156,7 @@ const sourceStatusSchema = {
 		lastError: { type: "string" },
 		reconnectAttempts: { type: "number" },
 		caps: sourceCapsResponseSchema,
+		rateMismatch: sourceRateMismatchSchema,
 	},
 	required: [
 		"id",

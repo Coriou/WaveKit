@@ -76,6 +76,39 @@ export interface DecoderRateAssessment {
 	requirementBasis?: "implementation" | "verified-rf"
 }
 
+/**
+ * Where an instance wants to receive, as declared by the decoder:
+ * "configured" from config, "protocol" fixed by the protocol (ADS-B 1090 MHz,
+ * AIS 161.975/162.025 MHz), "decoder-default" a built-in list the process is
+ * actually told to decode.
+ */
+export type DecoderBandBasis = "configured" | "protocol" | "decoder-default"
+
+/**
+ * Whether the source centre lets this instance receive any of its targets:
+ * in band when some target lies within `windowHalfWidthHz` of
+ * `captureCenterHz`. The window is the RF span the pipeline actually sees
+ * (capture, or the narrower demodulator frontend), times a usable fraction
+ * of 0.8 for filter margin. `unknown` is never out of band.
+ */
+export interface DecoderBandAssessment {
+	verdict: "in-band" | "out-of-band" | "unknown"
+	reasonCode?:
+		| "frequency-out-of-band"
+		| "no-target-frequency"
+		| "source-center-unknown"
+		| "external-input"
+	targetsHz?: number[]
+	basis?: DecoderBandBasis
+	captureCenterHz?: number
+	windowHalfWidthHz?: number
+}
+
+/** Rate reasons, or the tuned band no longer covering any target. */
+export type DecoderSuspensionReasonCode =
+	| NonNullable<DecoderRateAssessment["reasonCode"]>
+	| "frequency-out-of-band"
+
 export interface DecoderCaps {
 	input: DecoderInputType
 	wantsExclusiveSource?: boolean
@@ -116,6 +149,8 @@ export interface DecoderStatus {
 	restartCount: number
 	version?: string
 	rateAssessment?: DecoderRateAssessment
+	/** Band check against the source centre; always sent by current cores. */
+	bandAssessment?: DecoderBandAssessment
 	/**
 	 * WaveKit source this decoder reads: the live assignment while wired,
 	 * otherwise the configured `sourceId`. Absent for external-input decoders
@@ -136,7 +171,7 @@ export interface DecoderStatus {
 	desiredRunning?: boolean
 	/**
 	 * Wanted but held back because the source rate makes this instance
-	 * unusable. The source reservation and `sourceId` are kept; no lastError,
+	 * unusable, or the tuned band covers none of its targets. The source reservation and `sourceId` are kept; no lastError,
 	 * no health change, no restart counted. Always sent by current cores.
 	 */
 	suspended?: boolean
@@ -149,9 +184,9 @@ export interface DecoderStatus {
 	transition?: "suspending" | "resuming"
 }
 
-/** Why and since when a decoder is suspended for its source rate. */
+/** Why and since when a decoder is suspended for its source rate or band. */
 export interface DecoderSuspension {
-	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	reasonCode: DecoderSuspensionReasonCode
 	/** ISO-8601 */
 	since: string
 }

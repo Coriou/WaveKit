@@ -24,7 +24,9 @@
 import { shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
+import { configuredBandRequirements } from "./status-fields.js"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -225,6 +227,11 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			this.getDemodConfig(),
 			this.getDecoderStdin(),
 		)
+	}
+
+	/** The pipeline keeps the capture centre: only configured targets are known. */
+	getBandRequirements(): DecoderBandRequirements | undefined {
+		return configuredBandRequirements(this.config)
 	}
 
 	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {

@@ -218,6 +218,11 @@ export const HealthConfigSchema = z.object({
 	 * reported "faulted" while retries continue (manager default: 5).
 	 */
 	faultAfterFailures: z.number().int().positive().optional(),
+	/**
+	 * Suspend wanted decoders whose target frequencies are all outside the
+	 * tuned window, resuming on a retune back (manager default: true).
+	 */
+	bandSuspension: z.boolean().optional(),
 })
 
 /**

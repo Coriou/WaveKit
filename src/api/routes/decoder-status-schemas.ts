@@ -1,7 +1,8 @@
 import { DECODER_LAST_ERROR_MAX_LENGTH } from "@wavekit/api-types"
 import {
+	decoderBandAssessmentSchema,
 	decoderRateAssessmentSchema,
-	decoderRateReasonCodes,
+	decoderSuspensionReasonCodes,
 } from "./decoder-rate-schemas.js"
 
 /**
@@ -45,12 +46,14 @@ export const decoderStatusExtensionProperties = {
 	suspension: {
 		type: "object",
 		properties: {
-			reasonCode: { type: "string", enum: decoderRateReasonCodes },
+			reasonCode: { type: "string", enum: decoderSuspensionReasonCodes },
 			since: { type: "string", format: "date-time" },
 		},
 		required: ["reasonCode", "since"],
 	},
 	transition: { type: "string", enum: ["suspending", "resuming"] },
+	// Band-aware suspension (roadmap item 8).
+	bandAssessment: decoderBandAssessmentSchema,
 } as const
 
 /** Every DecoderHealth value; Fastify schemas share this one list. */

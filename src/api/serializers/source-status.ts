@@ -66,5 +66,15 @@ export function toApiExtendedSourceStatus(
 		...(status.type !== undefined ? { type: status.type } : {}),
 		...(status.url !== undefined ? { url: status.url } : {}),
 		...(status.lastError !== undefined ? { lastError: status.lastError } : {}),
+		...(status.rateMismatch !== undefined
+			? {
+					rateMismatch: {
+						declaredSampleRateHz: status.rateMismatch.declaredSampleRateHz,
+						measuredSampleRateHz: status.rateMismatch.measuredSampleRateHz,
+						deviation: status.rateMismatch.deviation,
+						since: status.rateMismatch.since.toISOString(),
+					},
+				}
+			: {}),
 	}
 }

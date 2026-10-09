@@ -182,6 +182,21 @@ curl http://localhost:9000/api/sources
 ]
 ```
 
+**Rate truth (network sources).** Every 5 s metrics interval compares the bytes
+actually received with `caps.sampleRate` × bytes per sample (2 for `U8_IQ`, 4 for
+`S16_IQ`, 2/4 × channels for `S16LE`/`FLOAT32LE`; `auto` is not checked). When
+every trusted interval for at least 30 s deviates by more than 2 % in the same
+direction (an interval with no bytes at all is a `waiting`/`stale` source, not a
+rate, and is not trusted), the source gains
+`rateMismatch: { declaredSampleRateHz, measuredSampleRateHz, deviation, since }`
+(also on `source:status` and in `/api/status`) and core logs a warning; it
+disappears after 30 s of agreement, on a caps rate/format change and on
+disconnect. Caps are never corrected from it. A positive `deviation` means the
+dongle runs faster than declared (an external tuner client changed its rate);
+a negative one can also be loss upstream. Intervals that cannot be trusted are
+skipped: the first after a (re)connect and any in which local backpressure
+paused the socket. Recordings are not checked.
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
@@ -231,6 +246,16 @@ hardware may still be at relay-set values (rtlmux caches client commands and
 replays them to rtl_tcp). Through an rtlmux host, test mode and direct sampling
 commands are dropped, so those two tuner fields may over-claim.
 
+**`unknownFields`** lists the fields whose value is only a placeholder: nothing
+was commanded through this API, no relay client was seen commanding it, and
+(for `frequency`/`sampleRate`) neither the tuner config nor the source caps
+declare it. On a source whose gain was set on the SDR host this reads e.g.
+`["gainMode", "gain", "ppm", …]`; render those fields as unknown instead of
+"AGC 0.0 dB". A gain mode the relay path infers from a client's gain command
+counts as observed (it is not replayed on reconnect). The field values keep
+their types for older clients. A reset
+reconnect makes them unknown again; the field is absent when everything is known.
+
 ```bash
 curl http://localhost:9000/api/tuner
 ```
@@ -255,7 +280,8 @@ curl http://localhost:9000/api/tuner
 		"testMode": false,
 		"controlMode": "internal",
 		"commandCount": 12,
-		"lastCommandAt": "2024-05-21T03:12:01.123Z"
+		"lastCommandAt": "2024-05-21T03:12:01.123Z",
+		"unknownFields": ["ppm", "biasTee", "testMode"]
 	}
 ]
 ```
@@ -628,8 +654,8 @@ until fixture-verified requirements exist; external-input decoders report
 | Field            | Meaning                                                                                                                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
-| `suspended`      | Wanted but held back because the source rate makes this instance `unusable`. The decoder keeps its source reservation and `sourceId` and is never moved to another source.      |
-| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended.                                                                                                               |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason or `"frequency-out-of-band"`.                                                  |
 | `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
 
 A decoder that is running is suspended when its source changes to an unusable
@@ -638,6 +664,41 @@ with a usable rate). Suspension does not set `lastError` or count restarts,
 and leaves `health` unchanged except that a pending automatic restart is
 cancelled (`"restarting"` becomes `"running"`, as on an explicit stop). A removed source leaves a suspended decoder suspended and a
 running decoder running. Render `suspended` ahead of `health`.
+
+##### Band check and band suspension
+
+`bandAssessment` says whether the source centre lets the instance receive any
+of its targets: `verdict` (`in-band` | `out-of-band` | `unknown`),
+`targetsHz`, `basis`, `captureCenterHz` and `windowHalfWidthHz`. A target is in
+band when it lies within `windowHalfWidthHz` of the centre: 0.8 of half the
+span the pipeline really sees, i.e. the capture or, when narrower, the
+decoder's own frontend (an audio demodulator keeps only about ±19 kHz at a
+48 kHz demod rate, acarsdec about ±9.6 kHz; a resampler never adds span).
+
+| Decoder | Targets (`basis`) |
+| --- | --- |
+| multimon-ng, direwolf, dsd-fme, acarsdec, rtl_433 | configured `frequencies` / `options.frequencies` / `options.frequency` (`configured`); none configured → `unknown` |
+| readsb (stdin) | 1 090 MHz (`protocol`); rtlTcpHost mode is external |
+| ais-catcher | 161.975 and 162.025 MHz (`protocol`); configured frequencies win; a `-c…` channel override in `extraArgs` → `unknown` |
+| dumpvdl2 | its channel list, configured or the built-in default the process actually decodes (`configured` / `decoder-default`) |
+| dumpvdl2 `followCenter` | the configured list bounds the band it follows; no configured list → `unknown` |
+| lora-meshtastic | configured `frequency` (`configured`) |
+| lora-meshtastic `followCenter` | a top-level `frequencies` list bounds the band it follows; without one → `unknown` (`options.frequency` only seeds the centre it follows) |
+
+A `followCenter` decoder decodes the source centre itself, so it is in band
+anywhere from its lowest to its highest declared frequency, widened by the
+window, not only near one of them.
+
+A wanted decoder whose targets are all out of band is suspended with reason
+`"frequency-out-of-band"` (same semantics as a rate suspension) and resumes
+when a retune brings a target back. An unusable rate takes precedence as the
+reason. `unknown` (no target, a source without `centerFreq`, external input)
+never suspends. The check trusts `caps.centerFreq`, which only follows retunes made
+through the tuner API or the relay; a client retuning the receiver some other
+way leaves it stale (decoders then stay as they were, never newly suspended).
+Centre changes are applied by the same debounced serial worker
+as rate changes. `health.bandSuspension: false` keeps the assessment but never
+suspends for band. The rate preview stays rate-only.
 
 #### GET /api/decoders/rate-preview
 
@@ -693,7 +754,8 @@ curl http://localhost:9000/api/decoders/dsd-main
 
 #### POST /api/decoders/:id/start
 
-Start a decoder. On an unusable source rate the start is recorded instead:
+Start a decoder. On an unusable source rate (or a band covering none of its
+targets) the start is recorded instead:
 200 with the full status (`suspended: true`, `suspension`, `rateAssessment`),
 never 409; starting a suspended decoder again is a 200 no-op. The same applies
 to `/restart`.
@@ -1031,7 +1093,8 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`) when the state actually changed;
+  `caps-changed`, rate-truth flag raised/cleared) when the state actually changed
+  (a drifting `rateMismatch.measuredSampleRateHz` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
   `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;

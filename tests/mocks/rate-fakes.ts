@@ -7,6 +7,7 @@ import { PassThrough, type Readable } from "node:stream"
 import type { SourceCaps } from "../../src/core/source-manager.js"
 import type {
 	Decoder,
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderRateAdapter,
 	DecoderRateRequirements,
@@ -52,6 +53,8 @@ export class RateDecoder extends EventEmitter implements Decoder {
 	stopGate: ReturnType<typeof deferred> | null = null
 	failStart = false
 	failStop = false
+	/** Scripted band declaration; undefined = unknown. */
+	band: DecoderBandRequirements | undefined = undefined
 	readonly output = new PassThrough({ objectMode: true })
 	constructor(
 		readonly id: string,
@@ -129,6 +132,9 @@ export class RateDecoder extends EventEmitter implements Decoder {
 			decoderInputFormat: "s16le",
 		}
 	}
+	getBandRequirements(): DecoderBandRequirements | undefined {
+		return this.band
+	}
 	crash() {
 		this.running = false
 		this.emit("exit", 1, null)
@@ -167,6 +173,13 @@ export class FakeSources extends EventEmitter {
 	}
 	setRate(id: string, sampleRate: number) {
 		const caps = { ...this.caps.get(id)!, sampleRate }
+		this.caps.set(id, caps)
+		this.emit("caps-changed", id, caps)
+	}
+	setCenter(id: string, centerFreq: number | undefined) {
+		const { centerFreq: _old, ...rest } = this.caps.get(id)!
+		const caps: SourceCaps =
+			centerFreq === undefined ? rest : { ...rest, centerFreq }
 		this.caps.set(id, caps)
 		this.emit("caps-changed", id, caps)
 	}

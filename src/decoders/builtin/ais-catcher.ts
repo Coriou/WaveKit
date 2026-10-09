@@ -17,11 +17,13 @@ import {
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
 	DecoderRateRequirements,
 } from "../types.js"
+import { configuredBandRequirements } from "../status-fields.js"
 import type { Logger } from "../../utils/logger.js"
 
 /** Supported output formats for AIS-catcher (Requirement 25.3) */
@@ -97,6 +99,9 @@ export interface ShipData {
 	/** AIS message type (1-27) */
 	messageType: number
 }
+
+/** AIS channel 1 (87B) and 2 (88B) carriers. */
+export const AIS_CHANNEL_FREQUENCIES_HZ = [161_975_000, 162_025_000] as const
 
 /** Default UDP port for AIS-catcher output */
 const DEFAULT_OUTPUT_PORT = 10110
@@ -190,6 +195,19 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 			frontendIq: { preferredHz: rate, accepted },
 			decoderInput: { kind: "iq", format: "cu8", preferredHz: rate, accepted },
 		}
+	}
+
+	/**
+	 * AIS-catcher expects the capture centred on 162.000 MHz and decodes AIS
+	 * channels 1/2 (161.975/162.025 MHz) by protocol. Configured frequencies
+	 * win; a `-c` channel override in extraArgs makes the band unknown.
+	 */
+	override getBandRequirements(): DecoderBandRequirements | undefined {
+		const configured = configuredBandRequirements(this.config)
+		if (configured) return configured
+		if (this.options.extraArgs?.some(arg => arg.trimStart().startsWith("-c")))
+			return undefined
+		return { targetsHz: [...AIS_CHANNEL_FREQUENCIES_HZ], basis: "protocol" }
 	}
 
 	protected override getIqDecimationConfig(): IqDecimationConfig {

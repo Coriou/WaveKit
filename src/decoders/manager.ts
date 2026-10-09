@@ -20,17 +20,20 @@
 import { EventEmitter } from "node:events"
 import type {
 	Decoder,
+	DecoderBandAssessment,
 	DecoderConfig,
 	DecoderHealth,
 	DecoderLastError,
 	DecoderOutput,
 	DecoderRateAssessment,
 	DecoderStatus,
+	DecoderSuspensionReasonCode,
 } from "./types.js"
 import {
 	assessDecoderRate,
 	validateDeclaredRateRequirements,
 } from "./rate-resolver.js"
+import { assessDecoderBand } from "./band-resolver.js"
 import {
 	createDecoderExitError,
 	createDecoderLastError,
@@ -71,6 +74,11 @@ export interface DecoderManagerConfig {
 	idleTimeout: number
 	/** Whether to validate decoder versions at startup (default: true) */
 	validateVersions: boolean
+	/**
+	 * Suspend wanted decoders whose targets are all outside the tuned window
+	 * (default: true). The band assessment is reported either way.
+	 */
+	bandSuspension: boolean
 }
 
 /**
@@ -104,9 +112,11 @@ interface DecoderState {
 	lastStartedAt: Date | null
 	/** Cached instance rate plan; recomputed on wire, caps change, connect/remove */
 	ratePlan: DecoderRateAssessment | undefined
+	/** Cached band check; recomputed with ratePlan */
+	bandPlan: DecoderBandAssessment | undefined
 	/** Operator intent: set by start, cleared by stop/remove */
 	desiredRunning: boolean
-	/** Set while the source rate makes the instance unusable (reversible) */
+	/** Set while the source rate or band makes the instance unusable (reversible) */
 	suspension: DecoderSuspension | null
 	/** An in-flight suspend (stop pending or failed) or resume */
 	transition: "suspending" | "resuming" | null
@@ -115,8 +125,15 @@ interface DecoderState {
 }
 
 interface DecoderSuspension {
-	reasonCode: NonNullable<DecoderRateAssessment["reasonCode"]>
+	reasonCode: DecoderSuspensionReasonCode
 	since: Date
+}
+
+/** Rate and band plans for one caps snapshot, and what (if anything) blocks. */
+interface Eligibility {
+	rate: DecoderRateAssessment
+	band: DecoderBandAssessment
+	blockedBy: DecoderSuspensionReasonCode | null
 }
 
 /** Result of DecoderManager.previewRates. */
@@ -175,6 +192,7 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 	healthCheckInterval: 5000,
 	idleTimeout: 30000,
 	validateVersions: true,
+	bandSuspension: true,
 }
 
 /**
@@ -291,6 +309,7 @@ export class DecoderManager extends EventEmitter {
 			lastError: null,
 			lastStartedAt: null,
 			ratePlan: undefined,
+			bandPlan: undefined,
 			desiredRunning: false,
 			suspension: null,
 			transition: null,
@@ -335,17 +354,19 @@ export class DecoderManager extends EventEmitter {
 		this.cancelScheduledRestart(state)
 
 		// Intent is recorded separately from eligibility: an unusable source
-		// rate suspends the instance instead of spawning a failing pipeline.
+		// rate, or a band covering none of its targets, suspends the instance
+		// instead of spawning a pipeline that cannot decode.
 		if (state.decoder.caps.input !== "external") {
 			const sourceId = this.selectedSourceId(state)
-			const plan = this.assessState(
+			const eligibility = this.assessEligibility(
 				state,
 				(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined) ?? null,
 			)
-			state.ratePlan = plan
-			if (plan.verdict === "unusable") {
+			state.ratePlan = eligibility.rate
+			state.bandPlan = eligibility.band
+			if (eligibility.blockedBy !== null) {
 				state.suspension = {
-					reasonCode: plan.reasonCode ?? "unsupported-sample-rate",
+					reasonCode: eligibility.blockedBy,
 					since: state.suspension?.since ?? new Date(),
 				}
 				state.transition = null
@@ -360,7 +381,7 @@ export class DecoderManager extends EventEmitter {
 				}
 				this.log.info(
 					{ decoderId: id, reasonCode: state.suspension.reasonCode },
-					"Start recorded; decoder suspended until the source rate is usable",
+					"Start recorded; decoder suspended until the source rate and band are usable",
 				)
 				this.emitStatusChanged(state)
 				return
@@ -522,6 +543,7 @@ export class DecoderManager extends EventEmitter {
 			health: state.lastHealth,
 			restartCount: state.restartCount,
 			...(state.ratePlan ? { rateAssessment: state.ratePlan } : {}),
+			...(state.bandPlan ? { bandAssessment: state.bandPlan } : {}),
 			...(state.nextRestartAt ? { nextRestartAt: state.nextRestartAt } : {}),
 			desiredRunning: state.desiredRunning,
 			suspended: state.suspension !== null,
@@ -1256,6 +1278,7 @@ export class DecoderManager extends EventEmitter {
 	private rateKey(state: DecoderState): string {
 		return JSON.stringify([
 			state.ratePlan,
+			state.bandPlan,
 			state.suspension,
 			state.transition,
 			state.desiredRunning,
@@ -1285,7 +1308,9 @@ export class DecoderManager extends EventEmitter {
 		caps: SourceCaps | null,
 	): Promise<boolean> {
 		const before = this.rateKey(state)
-		const plan = this.assessState(state, caps)
+		const eligibility = this.assessEligibility(state, caps)
+		const plan = eligibility.rate
+		state.bandPlan = eligibility.band
 		const external = state.decoder.caps.input === "external"
 		const running = state.decoder.getStatus().running
 		const terminalFault =
@@ -1302,14 +1327,13 @@ export class DecoderManager extends EventEmitter {
 			if (caps === null) {
 				state.ratePlan = plan
 				this.publishIfRateChanged(state, before)
-			} else if (plan.verdict !== "unusable") {
+			} else if (eligibility.blockedBy === null) {
 				await this.resume(state, plan)
 			} else if (state.transition === "suspending") {
-				await this.suspend(state, plan) // retry a failed stop
+				await this.suspend(state, eligibility) // retry a failed stop
 			} else {
 				state.ratePlan = plan
-				state.suspension.reasonCode =
-					plan.reasonCode ?? state.suspension.reasonCode
+				state.suspension.reasonCode = eligibility.blockedBy
 				// Removal drops assignments; a returning source is held again.
 				this.ensureReservation(state)
 				this.publishIfRateChanged(state, before)
@@ -1317,8 +1341,8 @@ export class DecoderManager extends EventEmitter {
 			return false
 		}
 
-		if (caps !== null && plan.verdict === "unusable" && !terminalFault) {
-			await this.suspend(state, plan)
+		if (caps !== null && eligibility.blockedBy !== null && !terminalFault) {
+			await this.suspend(state, eligibility)
 			return false
 		}
 
@@ -1335,22 +1359,23 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private async suspend(
 		state: DecoderState,
-		plan: DecoderRateAssessment,
+		eligibility: Eligibility,
 	): Promise<void> {
 		const id = state.config.id
 		state.rateGeneration++
 		state.suspension = {
-			reasonCode: plan.reasonCode ?? "unsupported-sample-rate",
+			reasonCode: eligibility.blockedBy ?? "unsupported-sample-rate",
 			since: state.suspension?.since ?? new Date(),
 		}
 		state.transition = "suspending"
-		state.ratePlan = plan
+		state.ratePlan = eligibility.rate
+		state.bandPlan = eligibility.band
 		this.cancelScheduledRestart(state)
 		if (state.lastHealth === "restarting")
 			this.updateDecoderHealth(state, "running")
 		this.log.info(
 			{ decoderId: id, reasonCode: state.suspension.reasonCode },
-			"Suspending decoder: source rate is unusable",
+			"Suspending decoder: source rate or band is unusable",
 		)
 		this.emitStatusChanged(state)
 
@@ -1386,7 +1411,7 @@ export class DecoderManager extends EventEmitter {
 		this.emitStatusChanged(state)
 	}
 
-	/** Rewires and starts a suspended decoder whose source rate is usable again. */
+	/** Rewires and starts a suspended decoder whose source rate and band are usable again. */
 	private async resume(
 		state: DecoderState,
 		plan: DecoderRateAssessment,
@@ -1412,7 +1437,10 @@ export class DecoderManager extends EventEmitter {
 		}
 		state.suspension = null
 		state.transition = "resuming"
-		this.log.info({ decoderId: id }, "Resuming decoder: source rate is usable")
+		this.log.info(
+			{ decoderId: id },
+			"Resuming decoder: source rate and band are usable",
+		)
 		this.emitStatusChanged(state)
 
 		const abandon = async (startedProcess: boolean) => {
@@ -1515,15 +1543,7 @@ export class DecoderManager extends EventEmitter {
 		state: DecoderState,
 		caps?: SourceCaps | null,
 	): DecoderRateAssessment {
-		const sourceId = this.selectedSourceId(state)
-		// inputCaps describe the running pipeline only while it is wired; a
-		// stopped decoder's old inputCaps must not outlive later caps changes.
-		const resolved =
-			caps === null
-				? undefined
-				: (caps ??
-					(state.branchId ? state.inputCaps : undefined) ??
-					(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined))
+		const resolved = this.resolveCaps(state, caps)
 		try {
 			const requirements =
 				state.decoder.getRateRequirements?.() ??
@@ -1552,8 +1572,73 @@ export class DecoderManager extends EventEmitter {
 		}
 	}
 
+	/**
+	 * Caps to assess against: undefined resolves the pipeline's input caps,
+	 * else the selected source's caps; null means unknown (source removed).
+	 */
+	private resolveCaps(
+		state: DecoderState,
+		caps?: SourceCaps | null,
+	): SourceCaps | undefined {
+		if (caps === null) return undefined
+		const sourceId = this.selectedSourceId(state)
+		// inputCaps describe the running pipeline only while it is wired; a
+		// stopped decoder's old inputCaps must not outlive later caps changes.
+		return (
+			caps ??
+			(state.branchId ? state.inputCaps : undefined) ??
+			(sourceId ? this.sourceManager?.getCaps(sourceId) : undefined)
+		)
+	}
+
+	/**
+	 * Band check for `caps` (same resolution as assessState). The window is
+	 * what the instance pipeline keeps around the centre. Never throws.
+	 */
+	private assessBand(
+		state: DecoderState,
+		caps?: SourceCaps | null,
+	): DecoderBandAssessment {
+		if (state.decoder.caps.input === "external")
+			return { verdict: "unknown", reasonCode: "external-input" }
+		const resolved = this.resolveCaps(state, caps)
+		try {
+			const adapter = resolved
+				? state.decoder.getRateAdapter?.({ sampleRateHz: resolved.sampleRate })
+				: undefined
+			return assessDecoderBand(state.decoder.getBandRequirements?.(), {
+				centerHz: resolved?.centerFreq,
+				sampleRateHz: resolved?.sampleRate,
+				frontendRateHz: adapter?.frontendRateHz,
+			})
+		} catch (err) {
+			this.log.error(
+				{ err, decoderId: state.config.id },
+				"Band assessment failed; reporting unknown",
+			)
+			return { verdict: "unknown" }
+		}
+	}
+
+	/** Rate first: an unusable rate outranks the band as suspension reason. */
+	private assessEligibility(
+		state: DecoderState,
+		caps?: SourceCaps | null,
+	): Eligibility {
+		const rate = this.assessState(state, caps)
+		const band = this.assessBand(state, caps)
+		const blockedBy =
+			rate.verdict === "unusable"
+				? (rate.reasonCode ?? "unsupported-sample-rate")
+				: this.config.bandSuspension && band.verdict === "out-of-band"
+					? "frequency-out-of-band"
+					: null
+		return { rate, band, blockedBy }
+	}
+
 	private refreshRatePlan(state: DecoderState, caps?: SourceCaps | null): void {
 		state.ratePlan = this.assessState(state, caps)
+		state.bandPlan = this.assessBand(state, caps)
 	}
 
 	// ============================================================================
