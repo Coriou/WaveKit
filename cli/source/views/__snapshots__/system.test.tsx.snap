@@ -4,7 +4,7 @@ exports[`System view (spec §6.5) > golden: 80x24 1`] = `
 " api ● 2s  iq ● streaming  rx 445.971 MHz  decoders 1 restarting  drops !21% now
  CONTAINER cgroup v2 · as of 2s ago
  cpu       240%   throttled —   oom kills 0
- mem       1.94 GB · no limit
+ mem       1.9 GB · no limit
  alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since 18:07
  SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago
  rtl_tcp   ● running · pid 58 · 0 restarts
@@ -13,8 +13,8 @@ exports[`System view (spec §6.5) > golden: 80x24 1`] = `
  AUDIO     ○ stopped · 0 clients · 127.0.0.1:8081/stream
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · 25 kHz s16le
  CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
-           api "up" "API server is responding"
-
+           api "up" · "API server is responding"
+           cli  frames rejected 0 · items rejected 0
 
 
 
@@ -32,7 +32,7 @@ exports[`System view (spec §6.5) > golden: 120x40 1`] = `
 
  CONTAINER cgroup v2 · as of 2s ago
  cpu       240%   throttled —   oom kills 0
- mem       1.94 GB · no limit
+ mem       1.9 GB · no limit
  alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since 18:07 · last 3s ago
 
  SDR HOST  pi-iq · http://192.0.2.23:8080 · polled by core 2s ago · uptime 4m 51s
@@ -44,8 +44,8 @@ exports[`System view (spec §6.5) > golden: 120x40 1`] = `
  demod     pi-iq at 445.9707 MHz · nfm 12.5 kHz · squelch 0 · gain 10 · 25 kHz s16le
 
  CORE      v1.0.0 · uptime 7m 40s · reports "degraded"
-           api "up" "API server is responding"
-
+           api "up" · "API server is responding"
+           cli  frames rejected 0 · items rejected 0
 
 
 

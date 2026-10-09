@@ -19,7 +19,7 @@ describe("system view-model (spec §6.5)", () => {
 	it("renders container, alerts, SDR host, audio and core", () => {
 		expect(text).toContain("CONTAINER cgroup v2 · as of 2s ago")
 		expect(text).toContain("cpu       240%   throttled —   oom kills 0")
-		expect(text).toContain("mem       1.94 GB · no limit")
+		expect(text).toContain("mem       1.9 GB · no limit")
 		expect(text).toContain(
 			// Clock text from the same local getters as the view (no TZ mutation, M9).
 			`alerts    ! container-cpu critical "High CPU usage: 273.5%" · 1× since ${formatClockShort(Date.parse("2026-10-08T18:07:49.000Z"))} · last 3s ago`,
@@ -42,7 +42,11 @@ describe("system view-model (spec §6.5)", () => {
 		expect(text).toContain(
 			'CORE      v1.0.0 · uptime 7m 40s · reports "degraded"',
 		)
-		expect(text).toContain('          api "up" "API server is responding"')
+		expect(text).toContain('          api "up" · "API server is responding"')
+		// The CLI's boundary counters live here, dim, not in the keys box (polish copy sweep).
+		expect(text).toContain(
+			"          cli  frames rejected 0 · items rejected 0",
+		)
 		expect(text.some(l => l.includes("acarsdec"))).toBe(false)
 		for (const l of text) {
 			expect(cellWidth(l)).toBeLessThanOrEqual(119)
@@ -150,7 +154,7 @@ describe("system view-model (spec §6.5)", () => {
 		])
 		expect(presetConfirm(s, 1)).toMatchObject({
 			kind: "preset",
-			prompt: 'apply audio preset "wfm" (wfm 150 kHz)?',
+			prompt: "audio preset wfm · 150 kHz",
 			yes: "apply",
 			no: "cancel",
 			presetIndex: 1,
@@ -166,6 +170,16 @@ describe("system view-model (spec §6.5)", () => {
 			},
 		})
 		expect(presetConfirm(s, 9)?.presetIndex).toBe(1)
+	})
+	it("says the demod restarts when a preset hits a running pipeline (S7)", () => {
+		const a = s.audio.value!
+		const running = {
+			...s,
+			audio: laneOk({ ...a, running: true }, s.now - 1000, "rest" as const),
+		}
+		expect(presetConfirm(running, 1)?.prompt).toBe(
+			"audio preset wfm · 150 kHz · demod restarts",
+		)
 	})
 	it("reports audio results for 10 s", () => {
 		const t0 = s.now
@@ -389,7 +403,7 @@ describe("system view-model (spec §6.5)", () => {
 					"rest" as const,
 				),
 			}
-			expect(at(limited)).toContain("mem       1.94 GB of 4.00 GB (?)")
+			expect(at(limited)).toContain("mem       1.9 GB of 4.0 GB (?)")
 		})
 		it("dims the SDR HOST header when core cannot reach the Pi (M3)", () => {
 			const st = withHosts([{ ...host, fetchError: "connect ETIMEDOUT" }])
