@@ -379,7 +379,21 @@ describe("R58: cached data is never newer than its receipt", () => {
 			d => d["id"] === "dsd-fme",
 		)
 		const restAt = Date.parse(sc.now) - 151_000
-		// Live: 9 s before its REST success; the same 9 s here.
-		expect(restAt - Date.parse(String(dsd?.["lastOutputAt"]))).toBe(9_000)
+		// Both feeds are cached, so both move by the larger shift (WS, 150 s): the REST
+		// lastOutputAt equals the newest cached dsd-fme message, never newer (I9).
+		const last = Date.parse(String(dsd?.["lastOutputAt"]))
+		expect(restAt - last).toBe(10_000)
+		const newest = Math.max(
+			...sc.ws
+				.filter(
+					f =>
+						f.type === "decoder:output" &&
+						(f.data as Obj)["decoderId"] === "dsd-fme",
+				)
+				.map(f =>
+					Date.parse(String(((f.data as Obj)["output"] as Obj)["timestamp"])),
+				),
+		)
+		expect(last).toBeLessThanOrEqual(newest)
 	})
 })

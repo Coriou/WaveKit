@@ -94,33 +94,49 @@ function nextKept(rows: readonly Row[], shown: readonly boolean[]): number {
 }
 
 /**
+ * When only essential heads remain: the middle heads go first (nearest the end), then
+ * the first; the last head (CORE, FANOUT) stays (I4).
+ */
+function nextEssential(
+	rows: readonly Row[],
+	shown: readonly boolean[],
+): number {
+	const heads = rows
+		.map((r, i) => (shown[i] && r.essential === true ? i : -1))
+		.filter(i => i >= 0)
+	if (heads.length <= 1) return -1
+	return heads.length > 2 ? (heads[heads.length - 2] ?? -1) : (heads[0] ?? -1)
+}
+
+/**
  * Fit rows to `height` (spec §5.1) without hiding anything silently:
  * 1. shed droppable rows, highest `drop` first (the last such row on ties);
  * 2. then plain kept rows, last first;
- * 3. if essential heads alone still overflow, keep the first height − 1 lines.
+ * 3. then essential heads, middle ones first, keeping the last head.
  * A group's hidden rows fold into its "+N more" marker; any other hidden row is
- * counted in one "+N rows hidden" line at the end, which every path keeps.
+ * counted in one "+N rows hidden" line at the end. If even the last head and the
+ * marker do not fit (height 1), the last head alone stays.
  */
 export function shed(
 	rows: readonly Row[],
 	height: number,
 	capped: GroupHidden = {},
 ): Line[] {
+	if (height <= 0) return []
 	const shown = rows.map(() => true)
 	for (;;) {
 		const out = layout(rows, shown, capped)
 		if (out.lines.length <= height) return out.lines
 		let pick = nextDroppable(rows, shown)
 		if (pick < 0) pick = nextKept(rows, shown)
+		if (pick < 0) pick = nextEssential(rows, shown)
 		if (pick >= 0) {
 			shown[pick] = false
 			continue
 		}
-		if (height <= 0) return []
-		// Only essential heads and markers remain: cut, and count the cut lines.
-		const kept = out.lines.slice(0, height - 1)
-		const trailing = out.hidden > 0 ? 1 : 0
-		const cut = out.lines.length - trailing - kept.length
-		return [...kept, hiddenMarker(out.hidden + cut)]
+		const last = rows.findIndex((_, i) => shown[i])
+		return last >= 0 && rows[last]
+			? [rows[last].line]
+			: out.lines.slice(0, height)
 	}
 }

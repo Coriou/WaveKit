@@ -108,7 +108,12 @@ export function setupLine(reading: SdrHostTelemetry["setup"] | undefined): {
 export function tracePath(
 	points: Array<[number, number | null]>,
 	options: { windowMs: number; width: number; height: number; max: number },
-): { d: string; gaps: Array<[number, number]> }
+): { d: string; area: string; gaps: Array<[number, number]> }
+export const TRACE_AVERAGE_MS: number
+export function smoothTrace(
+	points: Array<[number, number | null]>,
+	spanMs?: number,
+): Array<[number, number | null]>
 export function plotMax(
 	expected: number | null,
 	points: Array<[number, number | null]>,

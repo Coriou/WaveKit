@@ -23,7 +23,7 @@ function page() {
 		return elements.get(id)!
 	}
 	const phases = ["cloud-init", "install", "publish"].map(phase => ({
-		dataset: { phase },
+		dataset: { phase } as Record<string, string>,
 		small: { textContent: "" },
 		setAttribute: vi.fn(),
 		removeAttribute: vi.fn(),
@@ -37,6 +37,7 @@ function page() {
 		window: {
 			location: { href: "http://[::1]/?private=value", replace },
 			setTimeout: vi.fn(),
+			setInterval: vi.fn(),
 		},
 		URL,
 		AbortSignal,
@@ -86,15 +87,76 @@ describe("Pi first-boot browser handoff", () => {
 			phase: "install",
 			updatedAgeMs: null,
 		})
-		expect(get("setup-age").textContent).toBe("Stage update time unavailable")
+		expect(get("setup-age").textContent).toBe("Stage time unavailable")
+		expect(get("setup-clock").textContent).toBe("—")
 		context["fetch"] = () => Promise.reject(new Error("offline"))
 		await context["poll"]()
 		expect(get("setup-title").textContent).toBe("Contact lost")
+		expect(get("contact").dataset["state"]).toBe("reconnecting")
 		expect(get("receiver-link-wrap").hidden).toBe(true)
 		expect(phases.map(phase => phase.small.textContent)).toEqual([
 			"Unknown",
 			"Unknown",
 			"Unknown",
 		])
+		expect(phases.map(phase => phase.dataset["state"])).toEqual([
+			"unknown",
+			"unknown",
+			"unknown",
+		])
+		expect(get("setup-clock").textContent).toBe("—")
+	})
+
+	it("lights finished stages, marks the current one and times it from the Pi's clock", () => {
+		const { context, get, phases } = page()
+		context["render"]({
+			...completed,
+			state: "running",
+			phase: "install",
+			updatedAgeMs: 89_400,
+		})
+		expect(phases.map(phase => phase.small.textContent)).toEqual([
+			"Done",
+			"In progress",
+			"Waiting",
+		])
+		expect(phases.map(phase => phase.dataset["state"])).toEqual([
+			"ok",
+			"ok",
+			"unknown",
+		])
+		expect(phases[1]?.setAttribute).toHaveBeenCalledWith("aria-current", "step")
+		expect(get("setup-clock").textContent).toBe("1:29")
+		expect(get("setup-age").textContent).toBe("in this stage")
+		expect(get("setup-note").hidden).toBe(false)
+	})
+
+	it("escalates lost contact after ten seconds, as the status page does", async () => {
+		const { context, get } = page()
+		let now = 1_000_000
+		context["Date"] = { now: () => now }
+		context["render"]({ ...completed, state: "running", phase: "install" })
+		context["fetch"] = () => Promise.reject(new Error("offline"))
+		now += 12_000
+		await context["poll"]()
+		expect(get("contact").dataset["state"]).toBe("offline")
+		expect(get("contact-text").textContent).toBe("Lost · 12 s ago")
+	})
+
+	it("does not guess which stage a failure stopped in", () => {
+		const { context, get, phases } = page()
+		context["render"]({
+			...completed,
+			state: "failed",
+			phase: null,
+			exitCode: 1,
+		})
+		expect(get("setup-screen").dataset["state"]).toBe("fault")
+		expect(phases.map(phase => phase.small.textContent)).toEqual([
+			"Unknown",
+			"Unknown",
+			"Unknown",
+		])
+		expect(get("setup-note").hidden).toBe(true)
 	})
 })

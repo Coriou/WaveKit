@@ -1,9 +1,8 @@
-import { afterEach, beforeEach, expect, it } from "vitest"
+import { afterEach, beforeEach, expect, it, vi } from "vitest"
 import {
 	mkdtempSync,
 	writeFileSync,
 	rmSync,
-	chmodSync,
 	mkdirSync,
 	copyFileSync,
 	realpathSync,
@@ -12,6 +11,11 @@ import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { pathToFileURL } from "node:url"
 import { spawnSync } from "node:child_process"
+import { writeExecutable } from "../../mocks/executables.js"
+
+// Every test spawns real subprocesses (node/bash); their wall time scales with
+// host load and suite parallelism, so allow headroom beyond the 5 s default.
+vi.setConfig({ testTimeout: 15000 })
 
 let dir: string
 beforeEach(() => {
@@ -71,8 +75,7 @@ it("rejects missing images and unverified catalogs before launch", () => {
 
 function fakeImager(body: string) {
 	const executable = join(dir, "fake imager")
-	writeFileSync(executable, `#!/bin/sh\n${body}\n`)
-	chmodSync(executable, 0o755)
+	writeExecutable(executable, `#!/bin/sh\n${body}\n`)
 	return executable
 }
 

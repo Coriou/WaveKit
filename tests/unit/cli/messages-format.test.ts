@@ -5,6 +5,10 @@ import {
 	formatMessage,
 } from "../../../cli/source/ui/messages/index.js"
 import { setGlyphMode } from "../../../cli/source/ui/theme.js"
+import type { MessageEntry } from "../../../cli/source/data/types.js"
+import { lineText } from "../../../cli/source/ui/text.js"
+import { summaryLine } from "../../../cli/source/view-models/message-rows.js"
+import { messageDetail } from "../../../cli/source/view-models/messages.js"
 
 const out = (type: string, decoder: string, data: unknown): DecoderOutput => ({
 	type,
@@ -456,7 +460,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 		expect(pos.category).toBe("data")
 		expect(segs(pos)).toEqual([
 			"N0CALL-9",
-			"Position with messaging",
+			"position+msg",
 			"51.50,-0.12",
 			"35 mph",
 		])
@@ -472,7 +476,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"direwolf",
 		)
-		expect(segs(msg)).toEqual(["N0CALL", "to BLN1", "Message"])
+		expect(segs(msg)).toEqual(["N0CALL", "to BLN1", "message"])
 		expect(msg.text).toBe("NET TONIGHT")
 		const wx = formatMessage(
 			out("aprs", "direwolf", {
@@ -485,13 +489,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"direwolf",
 		)
-		expect(segs(wx)).toEqual([
-			"WX1",
-			"Positionless weather",
-			"20.0°C",
-			"40%",
-			"wind 5 mph",
-		])
+		expect(segs(wx)).toEqual(["WX1", "weather", "20.0°C", "40%", "wind 5 mph"])
 	})
 	it("rtl433: type signal with raw rtl_433 JSON", () => {
 		const m = formatMessage(
@@ -507,7 +505,7 @@ describe("real wire shapes, one per decoder (B3 fix 1)", () => {
 			}),
 			"rtl433",
 		)
-		expect(m.protocol).toBe("433")
+		expect(m.protocol).toBe("ISM") // M14: a protocol tag, not a frequency
 		expect(segs(m)).toEqual(["Acurite-Tower", "#1234", "ch A", "21.3°C", "40%"])
 	})
 	it("lora-meshtastic: rxRssi/rxSnr of 0 mean unavailable, not 0 dBm", () => {
@@ -821,5 +819,40 @@ describe("R62 operator enrichment", () => {
 			Math.max(...m.segments.slice(0, -1).map(x => x.priority)),
 		)
 		expect(m.fields.find(f => f.label === "operator")?.value).toBe("Ryanair")
+	})
+})
+
+describe("R76 multi-line bodies", () => {
+	const acars = formatMessage(
+		out("acars", "acarsdec", {
+			frequency: 131_550_000,
+			label: "H1",
+			tail: ".EI-DCL",
+			text: "END\r\nPOS N51\x1b[2J",
+		}),
+		"acarsdec",
+	)
+	it("keeps the line break in the text and sanitises each line", () => {
+		expect(acars.text).toBe("END\nPOS N51")
+		expect(acars.searchText).toContain("end pos n51")
+	})
+	it("reads 'END POS' on a single-line row", () => {
+		expect(lineText(summaryLine(acars, 80))).toContain(
+			"H1  131.550 MHz  END POS N51",
+		)
+	})
+	it("keeps the break in the detail body, wrapping per line", () => {
+		const entry: MessageEntry = {
+			seq: 1,
+			decoderId: "acarsdec",
+			type: "acars",
+			receivedAt: 0,
+			output: out("acars", "acarsdec", {}),
+			formatted: acars,
+		}
+		const rows = messageDetail(entry, 60, 30, 0).map(lineText)
+		const i = rows.findIndex(r => r.startsWith("text"))
+		expect(rows[i]?.trimEnd()).toBe("text      END")
+		expect(rows[i + 1]?.trimEnd()).toBe("          POS N51")
 	})
 })

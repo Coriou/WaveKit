@@ -5,6 +5,7 @@ import type { AppState, DecoderRow } from "../../../cli/source/data/types.js"
 import { scenarioState } from "../../../cli/source/test/fixtures.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { initialUi } from "../../../cli/source/ui/ui-state.js"
+import { confirmLine } from "../../../cli/source/view-models/chrome.js"
 import {
 	decoderFacts,
 	type DecoderFacts,
@@ -14,6 +15,7 @@ import {
 	decoderConfirm,
 	decoderDetail,
 	decodersModel,
+	latestDecoderResult,
 } from "../../../cli/source/view-models/decoders.js"
 import { sparkline, wrapKV } from "../../../cli/source/view-models/detail.js"
 
@@ -41,16 +43,14 @@ describe("decoders view-model", () => {
 	it("builds the readsb detail rows (spec §6.2)", () => {
 		const rows = decoderDetail(s, fact(s, "readsb"), 119, s.now).map(lineText)
 		expect(rows[0]).toBe(
-			"readsb    ADS-B · network producer · IQ in, JSON lines out · pid 1531 · version —",
+			"readsb    ADS-B · network producer · iq → jsonl · pid 1531",
 		)
 		expect(rows).toContain(
-			"process   up 51s · 0 restarts · 6 errors · server health idle",
+			'process   up 51s · 0 restarts · 6 errors · health "idle"',
 		)
-		expect(rows).toContain(
-			"decodes   none since start (51s) · 0 events · last output —",
-		)
-		expect(rows.find(r => r.startsWith("IQ"))).toBe(
-			"IQ        570.6 MB in · branch decoder-readsb · buffer 389.1 KB, high-water 262.1 KB · in backpressure 0.2s, 121× total",
+		expect(rows).toContain("decodes   none since start (51s)")
+		expect(rows.find(r => r.startsWith("iq"))).toBe(
+			"iq        570.6 MB in · branch decoder-readsb · buffer 389.1 KB / 262.1 KB hwm · backpressure 0.2s · 121 episodes",
 		)
 		expect(rows.find(r => r.startsWith("drops"))).toBe(
 			"drops     38% now · 44% lifetime · 836.0 MB in 3 357 chunks · last drain 0.3s ago",
@@ -59,14 +59,14 @@ describe("decoders view-model", () => {
 			"band      1090.000 MHz nominal · window 444.947–446.995 MHz · out of window",
 		)
 		expect(rows.find(r => r.startsWith("activity"))).toMatch(
-			/decodes\/min since \d\d:\d\d \(\d+ of 30 min observed\)/,
+			/decodes\/min · last 30 min · observed since \d\d:\d\d$/,
 		)
 	})
 
 	it("shows a restarting decoder with its evidence and the server's health verbatim", () => {
 		const rows = decoderDetail(s, fact(s, "acarsdec"), 119, s.now).map(lineText)
 		expect(rows).toContain(
-			"process   restarting · 13 restarts · 0 errors · server health running",
+			'process   restarting · 13 restarts · 0 errors · health "running"',
 		)
 	})
 
@@ -125,11 +125,46 @@ describe("decoders view-model", () => {
 	it("builds confirm prompts that name the target", () => {
 		expect(decoderConfirm(s, "readsb", "restart")).toMatchObject({
 			kind: "decoder",
-			prompt: "restart readsb · up 51s · pid 1531",
+			prompt: "restart readsb · up 51s · out of window · dropping 38%",
 			yes: "restart",
 			no: "cancel",
 			intent: RESTART,
 		})
+	})
+
+	it("S4: confirm prompts state the blast radius, fitted by priority", () => {
+		const stop = decoderConfirm(s, "dsd-fme", "stop")
+		expect(stop?.prompt).toBe(
+			"stop dsd-fme · up 52s · in window · dropping 12% · decoded 11s ago",
+		)
+		// Narrow: the action and the window survive; drops and ages go first.
+		expect(lineText(confirmLine(stop!, 60))).toBe(
+			"▶ stop dsd-fme · up 52s · in window   y stop  n cancel",
+		)
+		const at = new Date(s.now - 183_000).toISOString()
+		const faulted = {
+			...s,
+			decoders: laneOk(
+				(s.decoders.value ?? []).map(d =>
+					d.id === "acarsdec"
+						? {
+								...d,
+								running: false,
+								lastError: {
+									kind: "exit" as const,
+									message: "Process exited unexpectedly (code 1)",
+									at,
+								},
+							}
+						: d,
+				),
+				s.now - 1000,
+				"rest",
+			),
+		}
+		expect(decoderConfirm(faulted, "acarsdec", "start")?.prompt).toMatch(
+			/^start acarsdec · .* · exit code 1 · 3m ago$/,
+		)
 	})
 
 	it("reports sent → restarted → cleared, and failures with the status quoted", () => {
@@ -323,8 +358,9 @@ describe("detail helpers", () => {
 		expect(rows).toEqual(["IQ        aaaa · bbbb", "          cccc"])
 	})
 	it("leaves unobserved minutes blank in the sparkline", () => {
-		expect(sparkline([undefined, 0, 4, 8])).toBe(" ▁▅█")
-		expect(sparkline([undefined, 0, 0])).toBe(" ▁▁")
+		// S3: unobserved minutes are a dim dot, not a gap.
+		expect(sparkline([undefined, 0, 4, 8])).toBe("·▁▅█")
+		expect(sparkline([undefined, 0, 0])).toBe("·▁▁")
 	})
 })
 
@@ -352,7 +388,8 @@ describe("R65 M2: server-chosen types are plain keys", () => {
 			const f = decoderFacts(st).find(x => x.row.id === odd.id)
 			expect(f?.nominal).toBe("?")
 			const rows = f ? decoderDetail(st, f, 119, s.now).map(lineText) : []
-			expect(rows[0]).toContain(`${type} · pid —`)
+			// S1: an absent pid is omitted, not shown as —.
+			expect(rows[0]).toBe(`odd-${type}  ${type}`)
 		}
 	})
 })
@@ -405,14 +442,14 @@ describe("B5 fix round 1", () => {
 	it("I2: a stale detail is dim per lane and never claims no backpressure", () => {
 		const stale = reduce(s, [], s.now + 20_000)
 		const rows = decoderDetail(stale, fact(stale, "readsb"), 119, stale.now)
-		const iq = rows.find(r => lineText(r).startsWith("IQ")) ?? []
+		const iq = rows.find(r => lineText(r).startsWith("iq")) ?? []
 		expect(lineText(iq)).toContain("backpressure ?")
 		expect(lineText(iq)).not.toContain("no backpressure")
 		for (const label of [
 			"readsb",
 			"process",
 			"decodes",
-			"IQ",
+			"iq",
 			"drops",
 			"band",
 		]) {
@@ -501,12 +538,13 @@ describe("B5 fix round 1", () => {
 			...f,
 			decodes: { kind: "last", lastAt: s.now - 5000 },
 			lastAt: s.now - 5000,
+			feed60: 0,
 		}
 		const row =
 			decoderDetail(s, last, 119, s.now)
 				.map(lineText)
 				.find(l => l.startsWith("decodes")) ?? ""
-		expect(row).toBe("decodes   3 events · last output 5s ago")
+		expect(row).toBe("decodes   last 5s ago")
 	})
 
 	it("M4/M6: no outcome text reads an unquoted ?; accepted without an event says so", () => {
@@ -559,5 +597,178 @@ describe("B5 fix round 1", () => {
 		const quotedRow = rows.find(r => r.includes('"')) ?? ""
 		expect(quotedRow.trimEnd().endsWith('…"')).toBe(true)
 		for (const r of rows) expect(cellWidth(r)).toBeLessThanOrEqual(60)
+	})
+})
+
+describe("B6 docfix: B5 minors", () => {
+	const s = scenarioState("live")
+	const fact = (st: AppState, id: string): DecoderFacts => {
+		const f = decoderFacts(st).find(x => x.row.id === id)
+		if (!f) throw new Error(`no ${id}`)
+		return f
+	}
+	const sentAt = s.now
+	const sent = reduce(
+		s,
+		[
+			{
+				kind: "action:sent",
+				at: sentAt,
+				id: 9,
+				key: "decoder:readsb",
+				intent: RESTART,
+			},
+		],
+		sentAt,
+	)
+	it("N3: the CLI's own action row is not dimmed with a stale REST lane", () => {
+		const stale = reduce(sent, [], sentAt + 20_000)
+		const rows = decoderDetail(stale, fact(stale, "readsb"), 119, stale.now)
+		const action = rows.find(r => lineText(r).startsWith("action")) ?? []
+		expect(action.length).toBeGreaterThan(0)
+		expect(action.slice(1).every(x => x.role !== "old")).toBe(true)
+		const proc = rows.find(r => lineText(r).startsWith("process")) ?? []
+		expect(proc.slice(1).every(x => x.role === "old")).toBe(true)
+	})
+	it("N4: a very long id never overflows; the identity moves under it", () => {
+		const long = "x".repeat(70)
+		const rows = wrapKV(long, "ADS-B · pid 1", 40, true, true).map(lineText)
+		for (const r of rows) expect(cellWidth(r)).toBeLessThanOrEqual(40)
+		expect(rows[0]?.endsWith("…")).toBe(true)
+		expect(rows[1]).toBe("          ADS-B · pid 1")
+	})
+	it("N5: the result role follows the action state, not the text", () => {
+		const failed = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 9,
+					at: sentAt + 10,
+					key: "decoder:readsb",
+					outcomes: [
+						{
+							label: "restart",
+							result: {
+								ok: false,
+								outcome: "failed",
+								status: 409,
+								message: "x",
+							},
+							at: sentAt + 10,
+						},
+					],
+				},
+			],
+			sentAt + 10,
+		)
+		expect(latestDecoderResult(failed, sentAt + 20)?.at(-1)?.role).toBe("fault")
+		const unknown = reduce(
+			sent,
+			[
+				{
+					kind: "action:result",
+					id: 9,
+					at: sentAt + 10_000,
+					key: "decoder:readsb",
+					outcomes: [
+						{
+							label: "restart",
+							result: {
+								ok: false,
+								outcome: "unknown",
+								status: null,
+								message: "",
+							},
+							at: sentAt + 10_000,
+						},
+					],
+				},
+			],
+			sentAt + 10_000,
+		)
+		const noReply = reduce(unknown, [], sentAt + 21_000)
+		const line = latestDecoderResult(noReply, sentAt + 21_000)
+		expect(lineText(line ?? [])).toContain("no reply · not confirmed")
+		expect(line?.at(-1)?.role).toBe("attention")
+		expect(latestDecoderResult(sent, sentAt)?.at(-1)?.role).toBe("value")
+	})
+})
+
+describe("design polish: decoder detail (S1–S3, copy sweep)", () => {
+	const s = scenarioState("live")
+	const fact = (st: AppState, id: string): DecoderFacts => {
+		const f = decoderFacts(st).find(x => x.row.id === id)
+		if (!f) throw new Error(`no ${id}`)
+		return f
+	}
+	const rowOf = (f: DecoderFacts, label: string): string =>
+		decoderDetail(s, f, 119, s.now)
+			.map(lineText)
+			.find(l => l.startsWith(label)) ?? ""
+
+	it("leads with the exit code and quotes the rest of core's message", () => {
+		const at = new Date(s.now - 183_000).toISOString()
+		const withErr = {
+			...s,
+			decoders: laneOk(
+				(s.decoders.value ?? []).map(d =>
+					d.id === "acarsdec"
+						? {
+								...d,
+								lastError: {
+									kind: "exit" as const,
+									message: "Process exited unexpectedly (code 1)",
+									at,
+								},
+							}
+						: d,
+				),
+				s.now - 1000,
+				"rest",
+			),
+		}
+		const rows = decoderDetail(
+			withErr,
+			fact(withErr, "acarsdec"),
+			119,
+			s.now,
+		).map(lineText)
+		expect(rows).toContain(
+			'error     exit code 1 · "Process exited unexpectedly" · 3m ago',
+		)
+	})
+
+	it("states the feed's last-minute rate when core has none", () => {
+		const f = fact(s, "dsd-fme")
+		const fed: DecoderFacts = {
+			...f,
+			decodes: { kind: "last", lastAt: s.now - 11_000 },
+			lastAt: s.now - 11_000,
+			feed60: 2,
+		}
+		expect(rowOf(fed, "decodes")).toBe("decodes   2/min · last 11s ago")
+	})
+
+	it("a stopped decoder with no known last decode reads none", () => {
+		const f = fact(s, "dsd-fme")
+		const stopped: DecoderFacts = {
+			...f,
+			decodes: { kind: "na" },
+			lastAt: null,
+			feed60: 0,
+		}
+		expect(rowOf(stopped, "decodes")).toBe("decodes   none")
+	})
+
+	it("draws unobserved minutes as dim dots beside the observed ones", () => {
+		const f = fact(s, "readsb")
+		const activity =
+			decoderDetail(s, f, 119, s.now).find(l =>
+				lineText(l).startsWith("activity"),
+			) ?? []
+		const dots = activity.filter(x => /^·+$/.test(x.text))
+		expect(dots.length).toBeGreaterThan(0)
+		for (const d of dots) expect(d.role).toBe("label")
 	})
 })

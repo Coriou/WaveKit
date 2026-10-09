@@ -16,6 +16,7 @@ import { glyphSpan } from "../ui/strip.js"
 import { padEnd, sanitize, truncate } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { ConfirmRequest } from "../ui/ui-state.js"
+import { LABEL_WIDTH } from "./detail.js"
 import {
 	essential,
 	gapRow,
@@ -27,13 +28,14 @@ import {
 } from "./shed.js"
 
 const RESULT_MS = 10_000
-const LABEL_W = 10
+const LABEL_W = LABEL_WIDTH
 const MAX_ALERTS = 3
 /** Host warnings or errors shown per host before "+N more". */
 const MAX_NOTES = 2
 /**
- * Shedding order on short views (highest first). Heads (CONTAINER, SDR HOST, AUDIO,
- * CORE), the unreachable line and audio results/errors always stay.
+ * Shedding order on short views (highest first). Rows without a DROP entry (the
+ * unreachable line, audio results and errors) go next, last first, and the heads
+ * (CONTAINER, SDR HOST, AUDIO, CORE) last of all, CORE staying (shed.ts).
  */
 const DROP = {
 	gap: 9,

@@ -36,6 +36,16 @@ export function toApiDecoderStatus(
 			verdict: "unknown",
 			reasonCode: "unknown-requirements",
 		},
+		...(status.bandAssessment !== undefined
+			? {
+					bandAssessment: {
+						...status.bandAssessment,
+						...(status.bandAssessment.targetsHz
+							? { targetsHz: [...status.bandAssessment.targetsHz] }
+							: {}),
+					},
+				}
+			: {}),
 		...(status.sourceId !== undefined ? { sourceId: status.sourceId } : {}),
 		...(status.deviceSerial !== undefined
 			? { deviceSerial: status.deviceSerial }
@@ -54,6 +64,24 @@ export function toApiDecoderStatus(
 			: {}),
 		...(status.idleTimeoutMs !== undefined
 			? { idleTimeoutMs: status.idleTimeoutMs }
+			: {}),
+		...(status.nextRestartAt !== undefined
+			? { nextRestartAt: status.nextRestartAt.toISOString() }
+			: {}),
+		...(status.desiredRunning !== undefined
+			? { desiredRunning: status.desiredRunning }
+			: {}),
+		...(status.suspended !== undefined ? { suspended: status.suspended } : {}),
+		...(status.suspension !== undefined
+			? {
+					suspension: {
+						reasonCode: status.suspension.reasonCode,
+						since: status.suspension.since.toISOString(),
+					},
+				}
+			: {}),
+		...(status.transition !== undefined
+			? { transition: status.transition }
 			: {}),
 	}
 }

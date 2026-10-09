@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest"
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
 import {
-	chmodSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
@@ -12,8 +11,11 @@ import {
 import { tmpdir } from "node:os"
 import { delimiter, join, resolve } from "node:path"
 import { gzipSync } from "node:zlib"
+import { writeExecutable } from "../../mocks/executables.js"
 
-describe("Pi installation privilege modes", () => {
+// Every test spawns real subprocesses (node/bash); their wall time scales with
+// host load and suite parallelism, so allow headroom beyond the 5 s default.
+describe("Pi installation privilege modes", { timeout: 15000 }, () => {
 	let temp: string
 	let bin: string
 	let calls: string
@@ -56,8 +58,7 @@ esac
 			"usermod",
 			"chown",
 		]) {
-			writeFileSync(join(bin, name), shim)
-			chmodSync(join(bin, name), 0o755)
+			writeExecutable(join(bin, name), shim)
 		}
 	})
 

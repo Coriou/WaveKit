@@ -50,7 +50,7 @@ describe("receiver view-model (spec §6.4)", () => {
 			"rate      4.1 MB/s (2.048 MS/s U8 IQ)   received 1.2 GB   reconnects 0   last error —   assigned 9 decoders",
 		)
 		expect(text.find(l => l.startsWith("TUNER"))).toMatch(
-			/^TUNER {5}external control · relay client-3 192\.0\.2\.1:59430 · 42 commands · last set-frequency 6m 32s ago$/,
+			/^TUNER {5}external control · relay client-3 192\.0\.2\.1:59430 · 42 commands · last set-frequency 6m ago$/,
 		)
 		expect(text).toContain(
 			"frequency 445 970 700 Hz   window 444.947–446.995 MHz   sample rate 2 048 000 S/s   ppm 0",
@@ -720,6 +720,48 @@ describe("receiver view-model (spec §6.4)", () => {
 				.map(lineText)
 				.find(l => l.startsWith("RELAY"))
 			expect(relay).toMatch(/^RELAY {5}disabled · /)
+		})
+	})
+
+	describe("C3 fix round 3", () => {
+		const live = scenarioState("live")
+		it("fits the relay compatibility row to the width and dims it on an old lane", () => {
+			const relay = {
+				...live.relay.value!,
+				compatibility: "unsupported-format" as const,
+				compatibilityMessage: `Source format ${"S16_AUDIO ".repeat(20)}is not IQ`,
+			}
+			const fresh = {
+				...live,
+				relay: laneOk(relay, live.now - 2000, "rest" as const),
+			}
+			for (const w of [59, 79, 119]) {
+				for (const l of receiverLines(
+					fresh,
+					initialUi("receiver"),
+					w,
+					30,
+					true,
+				))
+					expect(cellWidth(lineText(l)), lineText(l)).toBeLessThanOrEqual(w)
+			}
+			const old = {
+				...live,
+				relay: { ...laneOk(relay, live.now - 60_000, "rest" as const) },
+			}
+			const row = receiverLines(old, initialUi("receiver"), 79, 30, true).find(
+				l => lineText(l).includes("S16_AUDIO"),
+			)
+			expect(row?.some(span => span.role === "old")).toBe(true)
+		})
+		it("controlConfirm fits by priority: the safety clause before the full remote", () => {
+			const c = controlConfirm(live)
+			expect(c?.groups?.map(g => g.priority)).toEqual([0, 1])
+			const clause = c?.groups?.[1]?.variants.map(lineText)
+			expect(clause).toEqual([
+				"its next command is refused",
+				"its next tuning command is refused",
+			])
 		})
 	})
 })

@@ -68,43 +68,55 @@
 								<p class="rate__expected" id="rate-expected">Expected —</p>
 							</div>
 							<figure class="plot">
-								<svg
-									id="plot"
-									class="plot__svg"
-									viewBox="0 0 600 200"
-									preserveAspectRatio="none"
-									role="img"
-									tabindex="0"
-									aria-labelledby="plot-label"
-									aria-describedby="marker-readout"
-								>
-									<title id="plot-label">
-										Upstream rate over the last five minutes
-									</title>
-									<g class="graticule" id="graticule"></g>
-									<path class="plot__gap" id="plot-gaps" d="" />
-									<line
-										class="plot__expected"
-										id="plot-expected"
-										x1="0"
-										x2="600"
-										y1="-10"
-										y2="-10"
-									/>
-									<path class="plot__trace" id="plot-trace" d="" />
-									<g class="plot__marker" id="plot-marker" hidden>
-										<line id="marker-line" x1="0" x2="0" y1="0" y2="200" />
-										<circle id="marker-dot" r="3.5" cx="0" cy="0" />
-									</g>
-								</svg>
-								<p class="plot__readout" id="marker-readout" hidden></p>
+								<div class="plot__frame" id="plot-frame">
+									<svg
+										id="plot"
+										class="plot__svg"
+										viewBox="0 0 600 200"
+										preserveAspectRatio="none"
+										role="img"
+										tabindex="0"
+										aria-labelledby="plot-label"
+										aria-describedby="marker-readout"
+									>
+										<title id="plot-label">
+											Upstream rate over the last five minutes
+										</title>
+										<defs>
+											<linearGradient
+												id="plot-fade"
+												x1="0"
+												y1="0"
+												x2="0"
+												y2="1"
+											>
+												<stop class="plot__fade-top" offset="0" />
+												<stop class="plot__fade-bottom" offset="1" />
+											</linearGradient>
+										</defs>
+										<g class="graticule" id="graticule"></g>
+										<path class="plot__gap" id="plot-gaps" d="" />
+										<path class="plot__area" id="plot-area" d="" />
+										<line
+											class="plot__expected"
+											id="plot-expected"
+											x1="0"
+											x2="600"
+											y1="-10"
+											y2="-10"
+										/>
+										<path class="plot__trace" id="plot-trace" d="" />
+										<g class="plot__marker" id="plot-marker" hidden>
+											<line id="marker-line" x1="0" x2="0" y1="0" y2="200" />
+											<circle id="marker-dot" r="3.5" cx="0" cy="0" />
+										</g>
+									</svg>
+									<p class="plot__label" id="plot-label-expected" hidden></p>
+									<p class="plot__readout" id="marker-readout" hidden></p>
+								</div>
 								<figcaption class="plot__axis">
 									<span>−5 min</span
-									><span class="plot__scale"
-										><span id="plot-scale"></span
-										><span class="plot__key" id="plot-key" hidden
-											>expected</span
-										></span
+									><span class="plot__scale" id="plot-scale"></span
 									><span>now</span>
 								</figcaption>
 							</figure>
@@ -120,7 +132,7 @@
 								<span class="stage__fact"></span>
 							</li>
 							<li class="stage" id="stage-rtltcp" data-state="unknown">
-								<span class="stage__name">rtl_tcp</span>
+								<span class="stage__name">IQ server</span>
 								<span class="stage__state"
 									><span class="lamp" aria-hidden="true"></span
 									><span class="stage__word">—</span></span
@@ -128,7 +140,7 @@
 								<span class="stage__fact"></span>
 							</li>
 							<li class="stage" id="stage-rtlmux" data-state="unknown">
-								<span class="stage__name">rtlmux</span>
+								<span class="stage__name">Fan-out</span>
 								<span class="stage__state"
 									><span class="lamp" aria-hidden="true"></span
 									><span class="stage__word">—</span></span
@@ -146,7 +158,12 @@
 						</ol>
 					</section>
 
-					<section class="setup" aria-labelledby="setup-heading">
+					<section
+						class="setup"
+						id="setup-section"
+						aria-labelledby="setup-heading"
+						hidden
+					>
 						<h2 class="legend" id="setup-heading">First-boot setup</h2>
 						<p class="setup__line" id="setup" data-state="unknown">
 							<span class="lamp" aria-hidden="true"></span>
@@ -159,17 +176,20 @@
 						<h2 class="legend" id="power-heading">Power &amp; throttling</h2>
 						<ul class="annunciators" id="annunciators">
 							<li class="annunciator" data-key="now" data-state="unknown">
-								<span>Under-voltage</span><small>—</small>
+								<span class="lamp" aria-hidden="true"></span
+								><span>Under-voltage</span><small>—</small>
 							</li>
 							<li class="annunciator" data-key="history" data-state="unknown">
-								<span>Earlier dips</span><small>—</small>
+								<span class="lamp" aria-hidden="true"></span
+								><span>Earlier dips</span><small>—</small>
 							</li>
 							<li
 								class="annunciator"
 								data-key="throttling"
 								data-state="unknown"
 							>
-								<span>Throttling</span><small>—</small>
+								<span class="lamp" aria-hidden="true"></span
+								><span>Throttling</span><small>—</small>
 							</li>
 						</ul>
 						<p class="note" id="power-note"></p>
@@ -251,7 +271,7 @@
 
 			<footer class="footer">
 				<p>
-					Read-only. Served by the Pi; works without WaveKit on your computer.
+					Read-only. Served by the Pi itself, with or without WaveKit running.
 				</p>
 			</footer>
 		</div>

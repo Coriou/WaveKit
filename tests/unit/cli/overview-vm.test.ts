@@ -27,7 +27,7 @@ describe("overview view-model", () => {
 			"RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4 ms   4.1 MB/s · 2.048 MS/s   relay 1 client",
 		)
 		expect(b).toBe(
-			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last command 6m 32s ago",
+			"window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m ago",
 		)
 		const [c, d] = receiverSummary(s, 59).map(lineText)
 		expect(c?.startsWith("RECEIVER  pi-iq   ● streaming")).toBe(true)
@@ -64,8 +64,9 @@ describe("overview view-model", () => {
 			.left.map(lineText)
 			.join("\n")
 		expect(text).toContain("MESSAGES  feed stopped")
-		expect(text).toMatch(/── gap since \d\d:\d\d:\d\d · 2m 3\ds ──/)
-		expect(text).toMatch(/dsd-fme .* ago/)
+		expect(text).toMatch(/── gap since \d\d:\d\d:\d\d · 2m ──/)
+		// M12: a last decode older than a minute reads as a ticking `none for` age.
+		expect(text).toMatch(/dsd-fme .*none (for )?2m/)
 	})
 	it("explains a cold start with the API down", () => {
 		const text = overviewModel(
@@ -92,7 +93,7 @@ describe("overview truth details", () => {
 			},
 		}
 		const text = lineText(emptyFeedLine(zero))
-		expect(text).toMatch(/^no decodes since /)
+		expect(text).toMatch(/^no decodes for /)
 		expect(text).not.toContain("0.000 MHz")
 		expect(lineText(emptyFeedLine(s))).toContain("rx 445.971 MHz")
 	})
@@ -199,7 +200,7 @@ describe("A6 fix 1: feed truth", () => {
 	})
 	it("I1: a cold start with the API down shows §9 copy, never 0 counts or no decodes since", () => {
 		const text = feedText(scenarioState("api-down", deps))
-		expect(text).toContain("MESSAGES  ? in 60s · ? total")
+		expect(text).toContain("MESSAGES  no feed · API unreachable")
 		expect(text).not.toMatch(/\b0 in 60s|0 total|no decodes since/)
 		expect(
 			text.split("\n").filter(l => l.includes("no data · API unreachable"))
@@ -209,12 +210,11 @@ describe("A6 fix 1: feed truth", () => {
 	it("I1: a cold start before any answer says so without counts", () => {
 		const cold = initialState(Date.parse("2026-10-08T18:07:52Z"))
 		const text = feedText(cold)
-		expect(text).toContain("MESSAGES  ? in 60s · ? total")
-		expect(text).toContain("connecting to /ws")
+		expect(text).toContain("MESSAGES  no feed · connecting to /ws")
 		expect(text).not.toMatch(/no decodes since|0 total/)
 	})
 	it("the empty state line still shows while the feed is live and empty", () => {
-		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes since/)
+		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes for /)
 	})
 })
 
@@ -282,9 +282,7 @@ describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
 		for (const t of ["external control", "444.947–446.995 MHz"]) {
 			expect(row2!.find(sp => sp.text.includes(t))?.role).toBe("old")
 		}
-		expect(row2!.find(sp => sp.text.startsWith("last command"))?.role).toBe(
-			"old",
-		)
+		expect(row2!.find(sp => sp.text.startsWith("last cmd"))?.role).toBe("old")
 		const [, fresh] = rows(s)
 		expect(
 			fresh!.find(sp => sp.text.includes("external control"))?.role,
@@ -344,16 +342,18 @@ describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
 		}
 		expect(text(two, 199)[0]).toContain("+1 source")
 	})
-	it("an unknown window reads ?, never an empty row", () => {
-		const [, b] = text(scenarioState("api-down", deps), 79)
-		expect(b).toMatch(/^window +\?$/)
+	it("M5: with no source there is one row saying why, no dangling window label", () => {
+		const rowsCold = receiverSummary(scenarioState("api-down", deps), 79).map(
+			lineText,
+		)
+		expect(rowsCold).toEqual(["RECEIVER  no data · API unreachable"])
 	})
 })
 
 describe("A6 fix 1: I4 in-window count", () => {
 	it("shows the count only when the window is known for the non-tuned decoders", () => {
 		const s = scenarioState("idle", deps)
-		expect(lineText(emptyFeedLine(s))).toMatch(/\d+ of 9 decoders in window/)
+		expect(lineText(emptyFeedLine(s))).toMatch(/\d+ of 9 in window/)
 		const noWindow = {
 			...s,
 			tuner: {
@@ -370,7 +370,7 @@ describe("A6 fix 1: I4 in-window count", () => {
 			relay: { ...s.relay, value: { ...s.relay.value!, lastFrequency: 0 } },
 		}
 		const text = lineText(emptyFeedLine(noWindow))
-		expect(text).toMatch(/^no decodes since /)
+		expect(text).toMatch(/^no decodes for /)
 		expect(text).not.toContain("in window")
 	})
 	it("leaves decoders with no window (—) out of the total", () => {
@@ -400,7 +400,7 @@ describe("A6 fix 1: I4 in-window count", () => {
 				})),
 			},
 		}
-		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 decoders in window/)
+		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 in window/)
 	})
 })
 
@@ -429,5 +429,25 @@ describe("R62: Overview latest messages read the aircraft map", () => {
 		const all = [...m.left, ...m.right].map(lineText)
 		const row = all.find(l => l.includes("4CA9D2")) ?? ""
 		expect(row).toContain("EI-DCL")
+	})
+})
+
+describe("A8 fix 1: Overview leftovers", () => {
+	it("a feed that was live, now down with nothing cached, says when it stopped", () => {
+		const s = scenarioState("api-down-cached", deps)
+		const ring = { ...s.messages.ring, entries: [] }
+		const empty = { ...s, messages: { version: s.messages.version + 1, ring } }
+		const gap = ring.gaps.find(g => g.to === null)!
+		const header = lineText(feedHeader(empty))
+		expect(header).toBe(`MESSAGES  feed stopped ${formatClock(gap.from)}`)
+		expect(header).not.toMatch(/0 in 60s|0 cached/)
+	})
+	it("the centre text dims with the window", () => {
+		const s = scenarioState("live", deps)
+		const tunerOld = { ...s, tuner: { ...s.tuner, receivedAt: s.now - 60_000 } }
+		const [, row2] = receiverSummary(tunerOld, 119)
+		expect(row2!.find(x => x.text.includes("centre"))?.role).toBe("old")
+		const [, fresh] = receiverSummary(s, 119)
+		expect(fresh!.find(x => x.text.includes("centre"))?.role).not.toBe("old")
 	})
 })

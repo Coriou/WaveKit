@@ -71,13 +71,33 @@ describe("shed (spec §5.1)", () => {
 			"          +2 rows hidden",
 		])
 	})
-	it("when essential heads alone overflow, keeps the first lines and still ends with a marker", () => {
+	it("when heads alone overflow, cuts middle heads first and keeps the last head and the marker (I4)", () => {
 		const rows = [
-			essential([sp("A")]),
-			essential([sp("B")]),
-			essential([sp("C")]),
+			essential([sp("CONTAINER")]),
+			essential([sp("SDR HOST")]),
+			essential([sp("AUDIO")]),
+			essential([sp("CORE")]),
 		]
-		expect(text(rows, 2)).toEqual(["A", "          +2 rows hidden"])
+		expect(text(rows, 3)).toEqual([
+			"CONTAINER",
+			"CORE",
+			"          +2 rows hidden",
+		])
+		expect(text(rows, 2)).toEqual(["CORE", "          +3 rows hidden"])
+		expect(text(rows, 1)).toEqual(["CORE"])
 		expect(text(rows, 0)).toEqual([])
+	})
+	it("counts a group's real hidden rows when heads are cut too", () => {
+		const rows = [
+			essential([sp("HOST")]),
+			grouped([sp("w1")], "warn", 5),
+			grouped([sp("w2")], "warn", 5),
+			essential([sp("CORE")]),
+		]
+		expect(text(rows, 3, { warn: 4 })).toEqual([
+			"HOST",
+			"          +6 more",
+			"CORE",
+		])
 	})
 })

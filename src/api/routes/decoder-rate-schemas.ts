@@ -71,6 +71,51 @@ export const decoderRateRequirementsSchema = {
 	required: ["version", "sourceKind", "decoderInput"],
 } as const
 
+export const decoderRateReasonCodes = [
+	"insufficient-sample-rate",
+	"unsupported-sample-rate",
+	"unsupported-input-kind",
+	"unsupported-input-format",
+	"unsupported-frontend-rate",
+	"unsupported-decoder-input-rate",
+	"unknown-requirements",
+	"source-rate-unknown",
+	"adaptation-unknown",
+	"external-input",
+] as const
+
+/** Rate reasons plus the band reason; the suspension reasonCode enum. */
+export const decoderSuspensionReasonCodes = [
+	...decoderRateReasonCodes,
+	"frequency-out-of-band",
+] as const
+
+const frequency = { type: "number", exclusiveMinimum: 0 } as const
+
+export const decoderBandAssessmentSchema = {
+	type: "object",
+	properties: {
+		verdict: { type: "string", enum: ["in-band", "out-of-band", "unknown"] },
+		reasonCode: {
+			type: "string",
+			enum: [
+				"frequency-out-of-band",
+				"no-target-frequency",
+				"source-center-unknown",
+				"external-input",
+			],
+		},
+		targetsHz: { type: "array", items: frequency },
+		basis: {
+			type: "string",
+			enum: ["configured", "protocol", "decoder-default"],
+		},
+		captureCenterHz: frequency,
+		windowHalfWidthHz: frequency,
+	},
+	required: ["verdict"],
+} as const
+
 export const decoderRateAssessmentSchema = {
 	type: "object",
 	properties: {
@@ -87,21 +132,7 @@ export const decoderRateAssessmentSchema = {
 			type: "string",
 			enum: ["none", "integer-decimation", "resample"],
 		},
-		reasonCode: {
-			type: "string",
-			enum: [
-				"insufficient-sample-rate",
-				"unsupported-sample-rate",
-				"unsupported-input-kind",
-				"unsupported-input-format",
-				"unsupported-frontend-rate",
-				"unsupported-decoder-input-rate",
-				"unknown-requirements",
-				"source-rate-unknown",
-				"adaptation-unknown",
-				"external-input",
-			],
-		},
+		reasonCode: { type: "string", enum: decoderRateReasonCodes },
 		requiredMinimumHz: rate,
 		requirementBasis: {
 			type: "string",

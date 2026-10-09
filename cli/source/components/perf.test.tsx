@@ -22,11 +22,21 @@ describe("D3 performance guards", () => {
 			sp("  ", "value"),
 			sp("iq ", "label"),
 		]
-		expect(styleRuns(line, false)).toEqual([
-			{ text: "api ● ", props: { dimColor: true }, plain: false },
-			{ text: "2s  ", props: {}, plain: true },
-			{ text: "iq ", props: { dimColor: true }, plain: false },
-		])
+		// M1 (B) splits whitespace off dim spans; between two dim runs it rejoins them.
+		expect(styleRuns(line, false).map(r => [r.text, r.plain, r.props])).toEqual(
+			[
+				["api ●", false, { dimColor: true }],
+				[" 2s  ", true, {}],
+				["iq", false, { dimColor: true }],
+				[" ", true, {}],
+			],
+		)
+		// A bold/dim boundary still passes through a plain cell (M1).
+		expect(
+			styleRuns([sp("a ", "label"), sp("B", "value", true)], false).map(
+				r => r.text,
+			),
+		).toEqual(["a", " ", "B"])
 		// With colour, live and value differ, so they stay apart.
 		expect(
 			styleRuns([sp("●", "live"), sp(" up", "value")], true).map(r => r.text),

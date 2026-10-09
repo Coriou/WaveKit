@@ -22,7 +22,7 @@ export const SUSPEND_PENDING_MS = 10_000
 /**
  * Spec §10.7, evaluated in order, extended for core's proposed contracts (R70):
  * - Suspension (intended, rate-driven) is rendered ahead of health; a "suspending"
- *   transition that has lasted > 10 s means the stop is pending.
+ *   transition seen for > 10 s means the stop is pending.
  * - health "faulted": terminal when not running and no restart is scheduled; still
  *   retrying with `nextRestartAt` ("faulted-retry", fault) or while running on
  *   probation ("faulted-retrying", attention).
@@ -30,19 +30,24 @@ export const SUSPEND_PENDING_MS = 10_000
  *   "restarting", else for older cores (no `desiredRunning`) the R15 inference
  *   (`restartCount > 0`), else down.
  * - An unknown health never reads as up.
- * `now` is needed only for the pending-suspension timing.
+ * `now` and `suspendingSince` (local first sight of "suspending", kept in the session)
+ * are needed only for the pending-suspension timing (M-b).
  */
 export function processState(
 	d: DecoderRow,
 	restartIncrements5m: number,
 	stoppedByCli: boolean,
 	now?: number,
+	/** Local time "suspending" was first seen (session), M-b. */
+	suspendingSince?: number,
 ): ProcState {
-	if (d.transition === "suspending" && now !== undefined && d.suspension) {
-		const since = Date.parse(d.suspension.since)
-		if (Number.isFinite(since) && now - since > SUSPEND_PENDING_MS)
-			return "suspend-pending"
-	}
+	if (
+		d.transition === "suspending" &&
+		now !== undefined &&
+		suspendingSince !== undefined &&
+		now - suspendingSince > SUSPEND_PENDING_MS
+	)
+		return "suspend-pending"
 	if (d.suspended === true) return "suspended"
 	if (d.health === "faulted") {
 		if (d.running) return "faulted-retrying"

@@ -1,6 +1,6 @@
 import { sp, type Line } from "../ui/line.js"
 import { cellWidth, padEnd, truncate } from "../ui/text.js"
-import { glyphs } from "../ui/theme.js"
+import { ASCII_GLYPHS, glyphs } from "../ui/theme.js"
 
 export const LABEL_WIDTH = 10
 
@@ -28,6 +28,13 @@ export function wrapKV(
 ): Line[] {
 	const sep = ` ${glyphs().sep} `
 	const labelW = cellWidth(label)
+	// N4: an id that leaves under 10 columns for the value gets a row of its own
+	// (cut to the pane), and the value wraps under the 10-column gutter.
+	if (wideLabel && labelW + 2 > LABEL_WIDTH && width - (labelW + 2) < 10)
+		return [
+			[sp(truncate(label, Math.max(1, width)), bold ? "value" : "label", bold)],
+			...wrapKV("", text, width),
+		]
 	const firstGutter =
 		wideLabel && labelW + 2 > LABEL_WIDTH
 			? Math.min(width, labelW + 2)
@@ -61,19 +68,43 @@ export function wrapKV(
 	})
 }
 
-/** 30 one-minute buckets; unobserved minutes are blank, not ▁ (spec §6.2). */
-export function sparkline(buckets: ReadonlyArray<number | undefined>): string {
+/**
+ * 30 one-minute buckets; an unobserved minute is a dot, not ▁ (spec §6.2,
+ * S3). In ASCII, where "." is a level, it stays blank.
+ */
+function sparkChars(
+	buckets: ReadonlyArray<number | undefined>,
+): Array<string | null> {
 	const levels = glyphs().spark
 	const max = Math.max(
 		0,
 		...buckets.filter((b): b is number => b !== undefined),
 	)
-	return buckets
-		.map(b => {
-			if (b === undefined) return " "
-			if (max === 0) return levels[0] ?? " "
-			const i = Math.round((b / max) * (levels.length - 1))
-			return levels[Math.min(levels.length - 1, i)] ?? " "
-		})
+	return buckets.map(b => {
+		if (b === undefined) return null
+		if (max === 0) return levels[0] ?? " "
+		const i = Math.round((b / max) * (levels.length - 1))
+		return levels[Math.min(levels.length - 1, i)] ?? " "
+	})
+}
+
+const unobserved = (): string => (glyphs() === ASCII_GLYPHS ? " " : "·")
+
+export function sparkline(buckets: ReadonlyArray<number | undefined>): string {
+	return sparkChars(buckets)
+		.map(c => c ?? unobserved())
 		.join("")
+}
+
+/** The sparkline as spans: unobserved minutes dim (`label`), observed ones plain. */
+export function sparkSpans(buckets: ReadonlyArray<number | undefined>): Line {
+	const out: Line = []
+	for (const c of sparkChars(buckets)) {
+		const role = c === null ? "label" : "value"
+		const text = c ?? unobserved()
+		const prev = out[out.length - 1]
+		if (prev && prev.role === role) prev.text += text
+		else out.push(sp(text, role))
+	}
+	return out
 }

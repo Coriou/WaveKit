@@ -22,11 +22,16 @@
  */
 
 import { shellCommand } from "./process-tools.js"
+import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
+import { configuredBandRequirements } from "./status-fields.js"
 import type {
+	DecoderBandRequirements,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
+	DecoderRateAdapter,
+	DecoderRateRequirements,
 	DemodulationConfig,
 } from "./types.js"
 import type { Logger } from "../utils/logger.js"
@@ -43,6 +48,88 @@ interface DebugRecordingOptions {
  * Default IQ sample rate from rtlmux (2.4 Msps)
  */
 const DEFAULT_IQ_SAMPLE_RATE = 2_400_000
+
+/** What the decoder program reads on stdin after the demod pipeline. */
+export interface AudioDecoderStdin {
+	/** e.g. "s16le" (raw S16LE mono) or "wav-s16le" (sox WAV wrapper) */
+	format: string
+	rateHz: number
+}
+
+/**
+ * Integer decimation the audio pipeline really performs. The factor is
+ * clamped to 1: below half the demod rate round() would give 0, an invalid
+ * `csdr firdecimate 0` and a sox rate of Infinity (a crash loop).
+ */
+export function audioDemodRates(config: DemodulationConfig): {
+	inputSampleRate: number
+	targetDemodRate: number
+	decimation: number
+	actualDemodRate: number
+} {
+	const targetDemodRate = config.demodSampleRate ?? config.sampleRate
+	const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
+	const decimation = Math.max(1, Math.round(inputSampleRate / targetDemodRate))
+	return {
+		inputSampleRate,
+		targetDemodRate,
+		decimation,
+		actualDemodRate: inputSampleRate / decimation,
+	}
+}
+
+/** Adapter facts for a candidate source rate `fs`; pure. */
+export function audioDemodRateAdapter(
+	config: DemodulationConfig,
+	stdin: AudioDecoderStdin,
+	fs: number,
+): DecoderRateAdapter {
+	return {
+		adaptation: "integer-decimation",
+		frontendRateHz: audioDemodRates({ ...config, inputSampleRate: fs })
+			.actualDemodRate,
+		decoderInputKind: "audio_pcm",
+		decoderInputRateHz: stdin.rateHz,
+		decoderInputFormat: stdin.format,
+	}
+}
+
+/** Rate at which every built-in audio demod rate divides exactly. */
+const PREFERRED_CAPTURE_RATE = 2_400_000
+
+/**
+ * Declaration for the audio family. The only capture minimum is the adapter
+ * fact: below the demod rate the decimator is 1, the demodulator runs at the
+ * source rate and sox upsamples, so the demod bandwidth is not realised.
+ */
+export function audioDemodRateRequirements(
+	config: DemodulationConfig,
+	stdin: AudioDecoderStdin,
+): DecoderRateRequirements {
+	const demodRate = config.demodSampleRate ?? config.sampleRate
+	return {
+		version: 1,
+		sourceKind: "iq",
+		capture: {
+			accepted: [{ kind: "range", minHz: demodRate }],
+			preferredHz:
+				PREFERRED_CAPTURE_RATE % demodRate === 0
+					? [PREFERRED_CAPTURE_RATE]
+					: [],
+			minimum: {
+				hz: demodRate,
+				basis: "implementation",
+				evidence: `audio-demod-decoder.ts audioDemodRates: below the ${demodRate} Hz demod rate the integer decimator is 1, the demodulator runs at the source rate and sox upsamples, so the ${demodRate} Hz demod bandwidth is not realised.`,
+			},
+		},
+		decoderInput: {
+			kind: "audio_pcm",
+			format: stdin.format,
+			preferredHz: stdin.rateHz,
+			accepted: [{ kind: "discrete", valuesHz: [stdin.rateHz] }],
+		},
+	}
+}
 
 /**
  * Generates a timestamped filename for debug recordings.
@@ -128,6 +215,34 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	protected abstract getDecoderArgs(): string[]
 
 	/**
+	 * What the decoder program reads on stdin: raw S16LE mono at the demod
+	 * config's output rate. Subclasses that wrap the audio override this.
+	 */
+	protected getDecoderStdin(): AudioDecoderStdin {
+		return { format: "s16le", rateHz: this.getDemodConfig().sampleRate }
+	}
+
+	getRateRequirements(): DecoderRateRequirements {
+		return audioDemodRateRequirements(
+			this.getDemodConfig(),
+			this.getDecoderStdin(),
+		)
+	}
+
+	/** The pipeline keeps the capture centre: only configured targets are known. */
+	getBandRequirements(): DecoderBandRequirements | undefined {
+		return configuredBandRequirements(this.config)
+	}
+
+	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {
+		return audioDemodRateAdapter(
+			this.getDemodConfig(),
+			this.getDecoderStdin(),
+			input.sampleRateHz,
+		)
+	}
+
+	/**
 	 * Returns the shell command for pipeline execution.
 	 * Uses /bin/sh to execute the csdr pipeline string.
 	 */
@@ -172,19 +287,13 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// Determine the rate at which demodulation happens (and thus the filter cutoff)
 		// If demodSampleRate is provided, use it. Otherwise use output sampleRate.
 		// This split allows tight filtering (low demod rate) with high output rate.
-		const targetDemodRate = config.demodSampleRate ?? config.sampleRate
 		const outputRate = config.sampleRate
 
-		// Calculate decimation factor for the heavy lifting (firdecimate)
-		// Input is IQ sample rate, output is demod/intermediate rate
-		// IMPORTANT: csdr firdecimate requires integer decimation factor
-		const inputSampleRate = config.inputSampleRate || DEFAULT_IQ_SAMPLE_RATE
-		const decimation = Math.round(inputSampleRate / targetDemodRate)
-
-		// CRITICAL: Calculate ACTUAL demod rate after integer decimation
-		// This may differ from targetDemodRate due to rounding
-		// sox must use the ACTUAL rate, not the configured rate
-		const actualDemodRate = inputSampleRate / decimation
+		// Integer decimation (csdr firdecimate) to the ACTUAL demod rate; sox
+		// must use that rate, not the configured one. Shared with the rate
+		// adapter so the reported plan and the pipeline cannot diverge.
+		const { inputSampleRate, targetDemodRate, decimation, actualDemodRate } =
+			audioDemodRates(config)
 
 		// Generate debug filenames if debug recording is enabled
 		const debugDemodFile = this.debugRecording
@@ -278,7 +387,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		csdrStages.push("csdr convert -i float -o s16")
 
 		// Join csdr stages
-		let pipelineStr = csdrStages.join(" | ")
+		let pipelineStr = boundCsdrPipeline(csdrStages, this.logger)
 
 		// DEBUG: Record audio right after csdr demodulation (at demodRate)
 		// Using simple tee to avoid bash-specific process substitution

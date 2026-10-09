@@ -130,12 +130,29 @@ export function stripSequences(s: string): { text: string; steps: number } {
 	return { text: parts.join(""), steps }
 }
 
-/** Payload strings only: strip ESC sequences, C0/C1/DEL, bidi controls and U+2028/9, tabs → space, emoji → "?". Idempotent. */
-export function sanitize(s: string): string {
-	const t = stripSequences(s).text
+/** Tabs → space, then C0/C1/DEL, bidi and U+2028/9 removed, then emoji → "?". */
+function clean(t: string): string {
 	// Order matters for idempotence: removing a control could otherwise join a
 	// pictograph and U+FE0F into a new emoji sequence.
 	return t.replace(/\t/g, " ").replace(CONTROL_RE, "").replace(EMOJI_RE, "?")
+}
+
+/**
+ * Payload strings for one row: strip ESC sequences, a run of line breaks
+ * becomes one space (R76: "END\nPOS" reads "END POS"), then C0/C1/DEL, bidi
+ * controls and U+2028/9 go, tabs → space, emoji → "?". Idempotent.
+ */
+export function sanitize(s: string): string {
+	return clean(stripSequences(s).text.replace(/[\r\n]+/g, " "))
+}
+
+/** Like sanitize, but keeps line breaks (CR LF and CR become "\n") for bodies that wrap per line (R76). Idempotent. */
+export function sanitizeMultiline(s: string): string {
+	return stripSequences(s)
+		.text.replace(/\r\n?/g, "\n")
+		.split("\n")
+		.map(clean)
+		.join("\n")
 }
 
 /** Width ≤ w; ends with the ellipsis glyph iff the input was wider than w. */

@@ -2,6 +2,7 @@ import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { FetchLike } from "../../../cli/source/data/config.js"
 import { PLAIN_SUMMARY } from "../../../cli/source/data/reducers.js"
+import { loadScenario } from "../../../cli/source/test/scenarios.js"
 import {
 	FLUSH_MS,
 	BACKGROUND_EVENTS,
@@ -659,7 +660,8 @@ describe("R55 runtime follow-ups", () => {
 		})
 
 	it("start and reconnect each fetch one set of endpoints, not one per trigger plus one per ws:open", async () => {
-		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		// Valid bodies: only an applied-OK answer covers the ws:open's resync (I2).
+		const fetchFn = vi.fn<FetchLike>(url => okJson(liveBody(url)))
 		const ws = wsFake()
 		const rt = make(fetchFn, ws)
 		rt.start()
@@ -817,6 +819,80 @@ describe("R55 follow-ups fix", () => {
 		rt.tick()
 		expect(rt.store.get().actions.byKey["audio"]?.state).toBe("sent")
 	})
+
+	it("I2: a resync answered 500 or with an invalid body is fetched again on ws:open", async () => {
+		const fetchFn = vi.fn<FetchLike>(url =>
+			url.endsWith("/api/aircraft")
+				? Promise.resolve({
+						ok: false,
+						status: 500,
+						statusText: "x",
+						json: () => Promise.resolve({}),
+					})
+				: okJson(liveBody(url)),
+		)
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		ws.sockets[0]!.open()
+		ws.sockets[0]!.message(
+			JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+		)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS * 2)
+		const n = (p: string) =>
+			fetchFn.mock.calls.filter(c => c[0] === `${TARGET.base}${p}`).length
+		expect(n("/api/aircraft")).toBe(2)
+		expect(n("/api/live-audio/presets")).toBe(1)
+		rt.stop()
+	})
+
+	it("I3: a resync GET still pending at ws:open is fetched again when it then fails", async () => {
+		const pending: Array<{ url: string; fail: () => void }> = []
+		const urls: string[] = []
+		const fetchFn: FetchLike = url => {
+			urls.push(url)
+			return new Promise((_, reject) => {
+				pending.push({ url, fail: () => reject(new TypeError("fetch failed")) })
+			})
+		}
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(0)
+		expect(urls).toHaveLength(10)
+		ws.sockets[0]!.open()
+		ws.sockets[0]!.message(
+			JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+		)
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		// Covered while pending: nothing new yet.
+		expect(urls).toHaveLength(10)
+		// Core is restarting: the pending GETs now fail.
+		for (const p of pending.splice(0)) p.fail()
+		await vi.advanceTimersByTimeAsync(0)
+		const n = (p: string) => urls.filter(u => u === `${TARGET.base}${p}`).length
+		expect(n("/api/live-audio/presets")).toBe(2)
+		expect(n("/api/aircraft")).toBe(2)
+		expect(n("/api/decoders")).toBe(2)
+		rt.stop()
+	})
 })
 
 describe("background items wait for the whole second (D3)", () => {
@@ -964,3 +1040,8 @@ describe("background items wait for the whole second (D3)", () => {
 		rt.stop()
 	})
 })
+
+function liveBody(url: string): unknown {
+	const path = new URL(url).pathname
+	return loadScenario("live").rest[path]?.body ?? {}
+}

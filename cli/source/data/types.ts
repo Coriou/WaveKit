@@ -21,21 +21,24 @@ import type {
 
 // ---------- DTO views (what guards produce) ----------
 
-/** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
 /**
- * Health as the CLI reads it (R70): core's values, its proposed "restarting", or
- * "unknown" for any other string, so a row is never dropped for a new value.
+ * Health as the CLI reads it (R70): core's values, or "unknown" for any other
+ * string, so a row is never dropped for a new value.
  */
-export type RowHealth = DecoderHealth | "restarting" | "unknown"
+export type RowHealth = DecoderHealth | "unknown"
 
+/**
+ * Core's DecoderSuspension with the code widened to string: a code newer than
+ * this CLI keeps the row suspended and is shown quoted.
+ */
 export interface DecoderSuspension {
-	/** A DecoderRateAssessment reasonCode; unknown codes are shown quoted. */
+	/** A DecoderSuspensionReasonCode, or a newer code shown quoted. */
 	reasonCode: string
 	/** ISO-8601. */
 	since: string
 }
 
-/** Core's proposed health and rate-suspension fields (R70); optional for older cores. */
+/** Core's health and suspension fields (R70, R84), guarded; optional for older cores. */
 export interface DecoderContractFields {
 	/** ISO-8601, present while an automatic restart is scheduled. */
 	nextRestartAt?: string
@@ -45,8 +48,14 @@ export interface DecoderContractFields {
 	transition?: "suspending" | "resuming" | "unknown"
 }
 
-/** rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). */
-export type DecoderRow = Omit<DecoderStatus, "rateAssessment" | "health"> &
+/**
+ * rateAssessment is omitted: the CLI prints no verdicts (spec §2, R13). The
+ * contract fields are replaced by their guarded, widened forms.
+ */
+export type DecoderRow = Omit<
+	DecoderStatus,
+	"rateAssessment" | "bandAssessment" | "health" | keyof DecoderContractFields
+> &
 	DecoderContractFields & {
 		health: RowHealth
 		caps?: DecoderCaps
@@ -412,6 +421,8 @@ export interface DecoderSession {
 	/** The last eventsOut sample the sparkline counted from; unlike `events`, kept across ws:open (R47 M12). */
 	sparkPrev?: CounterSample
 	firstObservedAt: number
+	/** Local time the row was first seen with transition "suspending" (R70 M-b); absent otherwise. */
+	suspendingSince?: number
 }
 export interface MetricBeat {
 	bytesReceived: number
