@@ -145,6 +145,21 @@ importers:
         specifier: ^3.2.4
         version: 3.2.4(@types/node@25.0.6)(yaml@2.8.2)
 
+  packages/brand:
+    devDependencies:
+      "@types/react":
+        specifier: ^18.3.18
+        version: 18.3.27
+      react:
+        specifier: ^18.3.1
+        version: 18.3.1
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@25.0.6)(yaml@2.8.2)
+
   packages/sdr-host:
     dependencies:
       "@fastify/cors":

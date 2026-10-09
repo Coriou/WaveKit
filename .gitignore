@@ -61,6 +61,8 @@ coverage/
 # Project-Specific: Runtime Data
 # -----------------------------------------------------------------------------
 decoded_calls/
+# Runtime state (WAVEKIT_STATE_DIR / stateDir: API band overrides)
+data/
 debug_audio/
 debug_iq_output/
 output/

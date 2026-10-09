@@ -54,6 +54,8 @@ export const decoderStatusExtensionProperties = {
 	transition: { type: "string", enum: ["suspending", "resuming"] },
 	// Band-aware suspension (roadmap item 8).
 	bandAssessment: decoderBandAssessmentSchema,
+	// Band defaults + operator override: who started the decoder.
+	startMode: { type: "string", enum: ["auto", "operator"] },
 } as const
 
 /** Every DecoderHealth value; Fastify schemas share this one list. */

@@ -4,6 +4,7 @@ import type { Inbound } from "../data/types.js"
 import { renderApp } from "../test/app-harness.js"
 import { scenarioState } from "../test/fixtures.js"
 import { KEYS } from "../test/harness.js"
+import { formatClockMs } from "../ui/format.js"
 import { formatMessage } from "../ui/messages/index.js"
 import { messagesView } from "./messages.js"
 
@@ -91,6 +92,31 @@ describe("Messages view (spec §6.3)", () => {
 		await h.press("G")
 		expect(h.text()).toMatch(/MESSAGES {2}\d+ in 60s · \d+ total/)
 		expect(h.text()).not.toContain("paused")
+		h.unmount()
+	})
+
+	it("signoff M9 (burst): the first ↑ selects the newest entry, at the top, and pauses", async () => {
+		const state = scenarioState("burst", deps)
+		const entries = state.messages.ring.entries
+		const newest = entries.reduce((a, b) => (b.seq > a.seq ? b : a))
+		// The newest by receipt is also the newest by the decoder's own time.
+		const time = (e: typeof newest): number =>
+			Date.parse(String((e.output as { timestamp?: unknown }).timestamp))
+		expect(Math.max(...entries.map(time))).toBe(time(newest))
+		const h = await renderApp({
+			state,
+			views,
+			view: "messages",
+			cols: 120,
+			rows: 40,
+		})
+		await h.press(KEYS.up)
+		expect(h.text()).toContain("MESSAGES  paused")
+		await h.press(KEYS.enter)
+		// The detail head names the selected entry: the newest one.
+		expect(h.text()).toContain(
+			`${newest.decoderId} · ${newest.output.type} · ${formatClockMs(newest.receivedAt)}`,
+		)
 		h.unmount()
 	})
 

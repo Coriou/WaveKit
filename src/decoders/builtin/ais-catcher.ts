@@ -17,7 +17,7 @@ import {
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
-	DecoderBandRequirements,
+	DecoderBandDeclaration,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -202,12 +202,19 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 	 * channels 1/2 (161.975/162.025 MHz) by protocol. Configured frequencies
 	 * win; a `-c` channel override in extraArgs makes the band unknown.
 	 */
-	override getBandRequirements(): DecoderBandRequirements | undefined {
+	override getBandDeclaration(): DecoderBandDeclaration {
 		const configured = configuredBandRequirements(this.config)
-		if (configured) return configured
-		if (this.options.extraArgs?.some(arg => arg.trimStart().startsWith("-c")))
-			return undefined
-		return { targetsHz: [...AIS_CHANNEL_FREQUENCIES_HZ], basis: "protocol" }
+		const ownTuning = this.options.extraArgs?.some(arg =>
+			arg.trimStart().startsWith("-c"),
+		)
+		return {
+			...(configured ? { configured } : {}),
+			...(ownTuning ? { ownTuning: true as const } : {}),
+			intrinsic: {
+				targetsHz: [...AIS_CHANNEL_FREQUENCIES_HZ],
+				basis: "protocol",
+			},
+		}
 	}
 
 	protected override getIqDecimationConfig(): IqDecimationConfig {

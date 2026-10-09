@@ -13,6 +13,7 @@ import type { FastifyInstance, FastifyPluginAsync } from "fastify"
 import {
 	sourceActivitySchema,
 	sourceRateMismatchSchema,
+	sourceSignalFlatSchema,
 } from "@wavekit/api-types"
 import type { SourceManager, SourceStatus } from "../../core/source-manager.js"
 import type { DecoderManager } from "../../decoders/manager.js"
@@ -211,6 +212,8 @@ const sourceStatusSchema = {
 		lastError: { type: "string" },
 		reconnectAttempts: { type: "number" },
 		rateMismatch: sourceRateMismatchSchema,
+		signalFlat: sourceSignalFlatSchema,
+		signalLevelDbfs: { type: "number" },
 	},
 	required: [
 		"id",

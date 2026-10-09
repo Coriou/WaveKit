@@ -104,6 +104,37 @@ describe("start on an unusable rate", () => {
 		expect(decoder.starts).toBe(0)
 		expect(status().suspension?.since).toBe(since)
 	})
+
+	it("an operator start (pin) is still a no-op; the pin holds when the rate recovers", async () => {
+		sources.caps.set("rtl", iqCaps(20_000))
+		const decoder = create("dec")
+		await manager.startDecoder("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(decoder.starts).toBe(0)
+		expect(status()).toMatchObject({
+			suspended: true,
+			suspension: { reasonCode: "insufficient-sample-rate" },
+			startMode: "operator",
+		})
+		sources.setRate("rtl", 2_400_000)
+		await settle()
+		expect(decoder.starts).toBe(1)
+		expect(status()).toMatchObject({ suspended: false, startMode: "operator" })
+	})
+
+	it("a pinned running decoder still rate-suspends and keeps its mode", async () => {
+		const decoder = create("dec")
+		await manager.startDecoder("dec", { startMode: "operator" })
+		expect(decoder.running).toBe(true)
+		sources.setRate("rtl", 20_000)
+		await settle()
+		expect(decoder.running).toBe(false)
+		expect(status()).toMatchObject({
+			suspended: true,
+			suspension: { reasonCode: "insufficient-sample-rate" },
+			startMode: "operator",
+		})
+	})
 })
 
 describe("caps-driven suspension", () => {

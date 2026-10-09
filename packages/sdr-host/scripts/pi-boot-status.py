@@ -1,8 +1,14 @@
 #!/usr/bin/python3
-"""Bounded read-only setup page available before cloud-init and Docker finish.
+"""Port 80 for the Pi: the setup page first, then the receiver status page.
 
-Only fixed static assets and a sanitized status record are public. This is not
-a general file server or API proxy; boot configuration and logs are never read.
+Before and during first-boot setup (and whenever setup failed or was cut off)
+it serves only fixed static assets and a sanitized status record. Once setup is
+complete and the receiver's own page answers on port 8080, every request except
+/api/setup is relayed to that loopback server, so http://<pi>/ shows the status
+page with no hand-over gap; if the receiver stops answering, the setup page
+returns. Only GET and HEAD are relayed, to a fixed loopback port; the receiver
+serves the same fixed routes directly on 8080. Boot configuration and logs are
+never read.
 """
 import datetime
 import gzip
@@ -25,11 +31,20 @@ ASSETS = {
     '/boot.js': ('boot.js', 'text/javascript; charset=utf-8'),
     '/boot.css': ('boot.css', 'text/css; charset=utf-8'),
     '/app.css': ('app.css', 'text/css; charset=utf-8'),
-    '/fonts/barlow-500.woff2': ('fonts/barlow-500.woff2', 'font/woff2'),
-    '/fonts/barlow-600.woff2': ('fonts/barlow-600.woff2', 'font/woff2'),
-    '/fonts/barlow-semi-condensed-600.woff2': ('fonts/barlow-semi-condensed-600.woff2', 'font/woff2'),
+    '/brand/D-DINCondensed.woff2': ('brand/D-DINCondensed.woff2', 'font/woff2'),
+    '/brand/D-DINCondensed-Bold.woff2': ('brand/D-DINCondensed-Bold.woff2', 'font/woff2'),
+    '/brand/NotoSans-Regular.woff2': ('brand/NotoSans-Regular.woff2', 'font/woff2'),
+    '/brand/wavekit-wordmark-on-dark.svg': ('brand/wavekit-wordmark-on-dark.svg', 'image/svg+xml'),
+    '/brand/favicon.svg': ('brand/favicon.svg', 'image/svg+xml'),
 }
-CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+# Relayed request headers: content negotiation and revalidation only. Host is
+# passed too, because the receiver names its IQ endpoint after it.
+RELAY_REQUEST_HEADERS = ('Accept', 'Accept-Encoding', 'If-None-Match', 'Host')
+RELAY_RESPONSE_HEADERS = ('Content-Type', 'Content-Encoding', 'Cache-Control', 'ETag',
+                          'Content-Security-Policy', 'X-Frame-Options', 'X-Content-Type-Options',
+                          'Referrer-Policy', 'Vary')
+RELAY_MAX_BYTES = 4 * 1024 * 1024
+CSP = "default-src 'none'; script-src 'self'; style-src 'self'; font-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 
 def setup_status(path=STATUS, boot_path=BOOT_ID):
@@ -110,6 +125,11 @@ class StatusServer(ThreadingMixIn, HTTPServer):
         self.slots = threading.BoundedSemaphore(8)
         super().__init__(address, StatusHandler)
 
+    def relaying(self):
+        """Hand port 80 to the receiver only after setup completed and its page answers."""
+        return (setup_status(self.status_path, self.boot_id_path)['state'] == 'complete'
+                and self.probe.available())
+
     def get_request(self):
         connection, address = super().get_request()
         connection.settimeout(3)
@@ -145,6 +165,9 @@ class StatusHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = self.path.split('?', 1)[0]
+        if route != '/api/setup' and route.startswith('/') and self.server.relaying():
+            if self.relay():
+                return
         compressed = False
         if route == '/api/setup':
             record = setup_status(self.server.status_path, self.server.boot_id_path)
@@ -171,6 +194,35 @@ class StatusHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if self.command != 'HEAD':
             self.wfile.write(body)
+
+    def relay(self):
+        """Answer from the receiver; False lets a local asset or 404 stand in."""
+        headers = {name: self.headers[name] for name in RELAY_REQUEST_HEADERS if self.headers.get(name)}
+        connection = http.client.HTTPConnection('127.0.0.1', self.server.probe.port, timeout=3)
+        try:
+            connection.request(self.command, self.path, headers=headers)
+            response = connection.getresponse()
+            body = response.read(RELAY_MAX_BYTES + 1)
+        except (OSError, http.client.HTTPException):
+            return False
+        finally:
+            connection.close()
+        route = self.path.split('?', 1)[0]
+        # Setup-page files the receiver does not have (e.g. boot.js in a page
+        # loaded just before the switch) still come from here.
+        if len(body) > RELAY_MAX_BYTES or (response.status == 404 and route in self.server.assets):
+            return False
+        self.send_response(response.status)
+        for name in RELAY_RESPONSE_HEADERS:
+            if response.getheader(name):
+                self.send_header(name, response.getheader(name))
+        length = response.getheader('Content-Length') if self.command == 'HEAD' else str(len(body))
+        if length:
+            self.send_header('Content-Length', length)
+        self.end_headers()
+        if self.command != 'HEAD':
+            self.wfile.write(body)
+        return True
 
 
 def main():

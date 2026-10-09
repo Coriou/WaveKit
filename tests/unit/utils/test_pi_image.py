@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import gzip
 import http.client
+from http.server import BaseHTTPRequestHandler, HTTPServer
 import importlib.util
 import io
 import json
@@ -31,6 +32,7 @@ def load(name, filename):
 builder = load('pi_image_builder', 'build-pi-image.py')
 firstboot = load('pi_image_firstboot', 'pi-image-firstboot.py')
 boot_status = load('pi_boot_status', 'pi-boot-status.py')
+boot_report = load('pi_boot_report', 'pi-boot-report.py')
 
 
 class ImageBuilderTests(unittest.TestCase):
@@ -361,8 +363,8 @@ class BootStatusTests(unittest.TestCase):
         for change in ({'updatedAt': '2026-01-01'}, {'phase': 'fixture-secret'}, {'exitCode': True}):
             self.assertEqual(self.read(**change)['state'], 'unavailable')
 
-    def server(self):
-        probe = types.SimpleNamespace(available=lambda: False)
+    def server(self, probe=None):
+        probe = probe or types.SimpleNamespace(available=lambda: False, port=1)
         server = boot_status.StatusServer(('127.0.0.1', 0), ROOT / 'packages/sdr-host/ui', self.status, self.boot, probe)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -393,6 +395,84 @@ class BootStatusTests(unittest.TestCase):
         self.assertEqual(self.request(server, '/api/setup', method='POST')[0], 501)
         self.assertEqual(self.request(server, '/', method='HEAD')[2], b'')
 
+    def receiver(self):
+        """A stand-in for the receiver's own server on its loopback port."""
+        seen = []
+
+        class Receiver(BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                seen.append((self.command, self.path, self.headers.get('Host'), self.headers.get('Cookie')))
+                if self.headers.get('If-None-Match') == '"v1"':
+                    self.send_response(304)
+                    self.send_header('ETag', '"v1"')
+                    self.end_headers()
+                    return
+                routes = {'/': (b'<!doctype html>status page', 'text/html; charset=utf-8'),
+                          '/api/status': (json.dumps({'host': self.headers.get('Host')}).encode(), 'application/json')}
+                if self.path not in routes:
+                    self.send_error(404)
+                    return
+                body, content_type = routes[self.path]
+                self.send_response(200)
+                self.send_header('Content-Type', content_type)
+                self.send_header('ETag', '"v1"')
+                self.send_header('Content-Security-Policy', "default-src 'none'; receiver")
+                self.send_header('Set-Cookie', 'never=relayed')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                if self.command != 'HEAD':
+                    self.wfile.write(body)
+
+            do_HEAD = do_GET
+
+        upstream = HTTPServer(('127.0.0.1', 0), Receiver)
+        threading.Thread(target=upstream.serve_forever, daemon=True).start()
+        self.addCleanup(upstream.server_close)
+        self.addCleanup(upstream.shutdown)
+        return upstream, seen
+
+    def test_port_80_relays_the_receiver_only_after_setup_completes(self):
+        upstream, seen = self.receiver()
+        probe = types.SimpleNamespace(available=lambda: True, port=upstream.server_port)
+        server = self.server(probe)
+        # Running, failed or interrupted setup keeps the setup page even when
+        # the receiver answers.
+        for state in ({}, {'state': 'failed', 'phase': None, 'exitCode': 1}, {'bootId': 'previous-boot'}):
+            self.read(**state)
+            self.assertIn(b'First-boot setup', self.request(server, '/')[2])
+            self.assertEqual(self.request(server, '/api/status')[0], 404)
+        self.assertEqual(seen, [])
+        self.read(state='complete', phase='done', exitCode=0)
+        code, headers, body = self.request(server, '/', headers={'Host': 'wavekit-pi.local', 'Cookie': 'x=1'})
+        self.assertEqual((code, body), (200, b'<!doctype html>status page'))
+        self.assertIn('receiver', headers['Content-Security-Policy'])
+        self.assertNotIn('Set-Cookie', headers)
+        self.assertEqual(seen[-1], ('GET', '/', 'wavekit-pi.local', None))
+        # The receiver names its IQ endpoint after the address the browser used.
+        body = self.request(server, '/api/status', headers={'Host': 'wavekit-pi.local'})[2]
+        self.assertEqual(json.loads(body), {'host': 'wavekit-pi.local'})
+        self.assertEqual(self.request(server, '/', headers={'If-None-Match': '"v1"'})[0], 304)
+        self.assertEqual(self.request(server, '/', method='HEAD')[2], b'')
+        # Setup state stays local, and so do setup-page files the receiver lacks.
+        self.assertEqual(json.loads(self.request(server, '/api/setup')[2])['state'], 'complete')
+        self.assertEqual(self.request(server, '/boot.js')[0], 200)
+        self.assertEqual(self.request(server, '/api/status', method='POST')[0], 501)
+
+    def test_port_80_falls_back_to_the_setup_page_when_the_receiver_stops(self):
+        upstream, _ = self.receiver()
+        port = upstream.server_port
+        upstream.shutdown()
+        upstream.server_close()
+        server = self.server(types.SimpleNamespace(available=lambda: True, port=port))
+        self.read(state='complete', phase='done', exitCode=0)
+        code, _, body = self.request(server, '/')
+        self.assertEqual(code, 200)
+        self.assertIn(b'First-boot setup', body)
+        self.assertEqual(self.request(server, '/api/host')[0], 404)
+
     def test_receiver_probe_checks_a_real_html_page_and_caches_bounded_requests(self):
         server = self.server()
         probe = boot_status.ReceiverProbe(server.server_port)
@@ -419,6 +499,67 @@ class BootStatusTests(unittest.TestCase):
         policy = (script_dir / 'wavekit-wifi-powersave.conf').read_text()
         self.assertIn('[connection]\nwifi.powersave=2', policy)
 
+
+
+class BootReportTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='wavekit-boot-report-')
+        self.root = Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        (self.root / 'boot_id').write_text('boot-b\n')
+        (self.root / 'bootstatus').write_text('0\n')
+
+    def runner(self, journal, throttled='throttled=0x50000\n'):
+        def run(command):
+            if command[0] == 'vcgencmd':
+                return throttled
+            self.assertIn('-1', command)  # Only the previous boot is read.
+            return journal
+        return run
+
+    def entries(self, *extra):
+        rows = [{'__REALTIME_TIMESTAMP': '1791547200000000', '_PID': '812', 'MESSAGE': 'fixture-private'}, *extra]
+        return ''.join(json.dumps(row) + '\n' for row in rows)
+
+    def report(self, runner):
+        return boot_report.report(runner, self.root / 'boot_id', self.root / 'missing', self.root / 'bootstatus')
+
+    def test_tells_a_requested_shutdown_from_a_power_loss_or_crash(self):
+        clean = self.entries({'__REALTIME_TIMESTAMP': '1791547260000000', '_PID': '1', 'UNIT': 'shutdown.target'})
+        record = self.report(self.runner(clean))
+        self.assertEqual(record['previous'], {'lastEntryAt': '2026-10-09T12:01:00+00:00', 'cleanShutdown': True})
+        self.assertEqual(record['bootId'], 'boot-b')
+        record = self.report(self.runner(self.entries()))
+        self.assertEqual(record['previous'], {'lastEntryAt': '2026-10-09T12:00:00+00:00', 'cleanShutdown': False})
+        self.assertNotIn('fixture-private', json.dumps(record))
+        # Firmware bit 16: under-voltage since power-on; bit 18: throttled.
+        self.assertEqual((record['undervoltageSinceBoot'], record['throttledSinceBoot']), (True, True))
+        self.assertIsNone(record['watchdogReset'])
+
+    def test_unreadable_facts_stay_unknown(self):
+        record = self.report(lambda command: None)
+        self.assertIsNone(record['previous'])
+        self.assertIsNone(record['undervoltageSinceBoot'])
+        (self.root / 'bootstatus').write_text('32\n')
+        self.assertTrue(self.report(self.runner('not json')).get('watchdogReset'))
+        self.assertIsNone(self.report(self.runner('not json'))['previous'])
+
+    def test_writes_a_world_readable_record_atomically(self):
+        status = self.root / 'status'
+        boot_report.write({'schema': 1}, status)
+        self.assertEqual(json.loads((status / 'last-boot.json').read_text()), {'schema': 1})
+        self.assertEqual((status / 'last-boot.json').stat().st_mode & 0o777, 0o644)
+        self.assertEqual(sorted(path.name for path in status.iterdir()), ['last-boot.json'])
+
+    def test_image_keeps_a_capped_persistent_journal(self):
+        conf = (ROOT / 'packages/sdr-host/scripts/wavekit-journald.conf').read_text()
+        for line in ('Storage=persistent', 'SystemMaxUse=48M', 'SystemMaxFileSize=8M', 'SystemKeepFree=256M'):
+            self.assertIn(line + '\n', conf)
+        # Sorts after Raspberry Pi OS's own journald drop-ins, so it wins.
+        self.assertEqual(builder.IMAGE_SUPPORT['wavekit-journald.conf'], '/etc/systemd/journald.conf.d/90-wavekit.conf')
+        unit = (ROOT / 'packages/sdr-host/scripts/wavekit-boot-report.service').read_text()
+        self.assertIn('After=systemd-journald.service systemd-journal-flush.service', unit)
+        self.assertIn('WantedBy=multi-user.target', unit)
 
 if __name__ == '__main__':
     unittest.main()

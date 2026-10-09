@@ -6,7 +6,12 @@ import {
 	type Endpoint,
 	type LaneError,
 } from "../data/types.js"
-import { formatAge, formatClockShort, formatMHz } from "../ui/format.js"
+import {
+	formatAge,
+	formatClockShort,
+	formatDbfs,
+	formatMHz,
+} from "../ui/format.js"
 import { sp, type Group } from "../ui/line.js"
 import { sanitize } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
@@ -117,6 +122,13 @@ export function emptyFeedGroups(state: AppState): Group[] {
 			group(`iq ${iq.word}${age !== null ? ` ${formatAge(age)}` : ""}`, 0),
 		]
 	}
+	// A11 (R95): IQ arrives but carries no signal: nothing downstream can decode.
+	if (iq.flatDbfs !== undefined)
+		return [
+			group("no decodes", 0),
+			group(`signal flat ${formatDbfs(iq.flatDbfs, 0)}`, 0),
+			group("check gain", 1),
+		]
 	const facts = decoderFacts(state)
 	const win = windowCount(
 		facts.map(f => ({

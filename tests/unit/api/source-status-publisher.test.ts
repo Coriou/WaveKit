@@ -219,6 +219,27 @@ describe("SourceStatusPublisher", () => {
 		expect(sentIds()).toEqual(["rtl", "pi"])
 	})
 
+	it("stops publishing a removed source, forgets it and holds no per-source timers", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl", "pi"])
+		broadcaster.broadcastSourceStatus.mockClear()
+		// a single poll timer, however many sources there are
+		const timers = vi.getTimerCount()
+		sourceManager.statuses.splice(0, 1)
+		sourceManager.emit("removed", "rtl")
+		// late lifecycle events for the removed id publish nothing
+		sourceManager.emit("disconnected", "rtl")
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_HEARTBEAT_MS * 3)
+		expect(sentIds()).not.toContain("rtl")
+		expect(sentIds().length).toBeGreaterThan(0)
+		expect(vi.getTimerCount()).toBe(timers)
+		// the same id added again later starts a fresh lifecycle
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses.push(makeStatus("rtl"))
+		sourceManager.emit("connected", "rtl")
+		expect(sentIds()).toEqual(["rtl"])
+	})
+
 	it("stops polling and detaches listeners on stop()", async () => {
 		publisher.stop()
 		sourceManager.emit("connected", "rtl")
@@ -258,9 +279,47 @@ describe("SourceStatusPublisher", () => {
 		).not.toHaveProperty("rateMismatch")
 	})
 
+	it("publishes a signal-flat flag immediately and its clearing too", async () => {
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		broadcaster.broadcastSourceStatus.mockClear()
+		sourceManager.statuses[0]!.signalFlat = {
+			levelDbfs: -46.5,
+			thresholdDbfs: -40,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.statuses[0]!.signalLevelDbfs = -46.5
+		sourceManager.emit("signal-flat-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl"])
+		expect(broadcaster.broadcastSourceStatus.mock.calls[0]![0]).toMatchObject({
+			signalFlat: {
+				levelDbfs: -46.5,
+				thresholdDbfs: -40,
+				since: "2026-10-09T01:00:00.000Z",
+			},
+			signalLevelDbfs: -46.5,
+		})
+		// A drifting level alone is not a state change.
+		sourceManager.statuses[0]!.signalFlat.levelDbfs = -47
+		sourceManager.statuses[0]!.signalLevelDbfs = -47
+		await vi.advanceTimersByTimeAsync(SOURCE_STATUS_POLL_MS)
+		expect(sentIds()).toEqual(["rtl"])
+		delete sourceManager.statuses[0]!.signalFlat
+		sourceManager.emit("signal-flat-changed", "rtl")
+		expect(sentIds()).toEqual(["rtl", "rtl"])
+		expect(
+			broadcaster.broadcastSourceStatus.mock.calls[1]![0],
+		).not.toHaveProperty("signalFlat")
+	})
+
 	it("carries exactly the fields of the REST GET /api/sources item", async () => {
 		vi.useRealTimers()
 		sourceManager.statuses[0]!.lastError = "connection reset"
+		sourceManager.statuses[0]!.signalFlat = {
+			levelDbfs: -46.5,
+			thresholdDbfs: -40,
+			since: new Date("2026-10-09T01:00:00.000Z"),
+		}
+		sourceManager.statuses[0]!.signalLevelDbfs = -46.5
 		sourceManager.statuses[0]!.rateMismatch = {
 			declaredSampleRateHz: 2_048_000,
 			measuredSampleRateHz: 2_160_000,
@@ -290,6 +349,12 @@ describe("SourceStatusPublisher", () => {
 				measuredSampleRateHz: 2_160_000,
 				since: "2026-10-09T01:00:00.000Z",
 			},
+			signalFlat: {
+				levelDbfs: -46.5,
+				thresholdDbfs: -40,
+				since: "2026-10-09T01:00:00.000Z",
+			},
+			signalLevelDbfs: -46.5,
 		})
 	})
 })

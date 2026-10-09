@@ -574,6 +574,31 @@ function reduceWs(
 				},
 				["sources"],
 			)
+		case "source:removed": {
+			// A11 (R95): the row, its tuner and its live counters go; a later
+			// source:status or REST list brings it back (latest wins).
+			const id = ev.sourceId
+			const has =
+				s.sources.value?.some(x => x.id === id) === true ||
+				s.tuner.value?.some(t => t.sourceId === id) === true ||
+				own(s.metrics, id) !== undefined
+			if (!has) return s
+			const metrics = record<AppState["metrics"][string]>()
+			for (const [k, m] of Object.entries(s.metrics)) if (k !== id) metrics[k] = m
+			return {
+				...s,
+				sources: s.sources.value
+					? { ...s.sources, value: s.sources.value.filter(x => x.id !== id) }
+					: s.sources,
+				tuner: s.tuner.value
+					? {
+							...s.tuner,
+							value: s.tuner.value.filter(t => t.sourceId !== id),
+						}
+					: s.tuner,
+				metrics,
+			}
+		}
 		case "source:caps-changed":
 			return {
 				...s,

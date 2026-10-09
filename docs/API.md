@@ -197,6 +197,25 @@ a negative one can also be loss upstream. Intervals that cannot be trusted are
 skipped: the first after a (re)connect and any in which local backpressure
 paused the socket. Recordings are not checked.
 
+**Signal flat (IQ network sources).** The sibling of rate truth: the right rate
+at a dead level (e.g. an external SDR++ client left the dongle at near-zero
+gain) also decodes nothing. For `kind: "iq"` sources in `U8_IQ` (zero 127.5,
+full scale 127.5) or `S16_IQ` (zero 0, full scale 32768), core reads one IQ
+component every 1021 of the stream (about 4000 reads/s at 2 Msps) and computes
+each 5 s interval's level as the RMS of the components about zero, in dBFS
+(`20·log10(rms / fullScale)`, floored at −150). While measured, the source
+carries `signalLevelDbfs` (latest interval, 0.1 dB). When every measured
+interval for at least `health.signalFlatHoldMs` (default 30 s) is below
+`health.signalFlatThresholdDbfs` (default −40 dBFS, about 1.3 LSB RMS in u8;
+the incident measured about −46.5, a normal antenna noise floor sits at −33 or
+higher), the source gains `signalFlat: { levelDbfs, thresholdDbfs, since }`
+(also on `source:status` and in `/api/status`; `levelDbfs` is the latest
+interval) and core logs a warning. It clears (info log) after the same hold at
+threshold + 3 dB or more, so a level hovering at the threshold does not flap,
+and on a caps rate/format/kind change, (re)connect and disconnect. An interval
+with no bytes (`waiting`/`stale`) breaks a run and never raises it. Audio PCM,
+`auto` formats and recordings are not measured (no `signalLevelDbfs`).
+
 **Stall watchdog (rtl_tcp U8_IQ sources).** An rtl_tcp IQ stream never pauses while
 it is healthy. After a session has delivered payload, a gap of `stallTimeoutMs`
 (source config, default 15000, `0` disables) means the peer is dead or the
@@ -657,6 +676,7 @@ until fixture-verified requirements exist; external-input decoders report
 | `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
 | `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason or `"frequency-out-of-band"`.                                                  |
 | `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
+| `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`. |
 
 A decoder that is running is suspended when its source changes to an unusable
 rate and resumed when the rate becomes usable again (or the source reconnects
@@ -667,38 +687,121 @@ running decoder running. Render `suspended` ahead of `health`.
 
 ##### Band check and band suspension
 
-`bandAssessment` says whether the source centre lets the instance receive any
-of its targets: `verdict` (`in-band` | `out-of-band` | `unknown`),
-`targetsHz`, `basis`, `captureCenterHz` and `windowHalfWidthHz`. A target is in
-band when it lies within `windowHalfWidthHz` of the centre: 0.8 of half the
-span the pipeline really sees, i.e. the capture or, when narrower, the
-decoder's own frontend (an audio demodulator keeps only about ±19 kHz at a
-48 kHz demod rate, acarsdec about ±9.6 kHz; a resampler never adds span).
+`bandAssessment` says whether the source centre lets the instance receive its
+band: `verdict` (`in-band` | `out-of-band` | `unknown`), `targetsHz` and/or
+`rangesHz` (`[{ minHz, maxHz }]`), `basis`, `captureCenterHz` and
+`windowHalfWidthHz`, plus `region` (`{ code, source }`, when a regional default
+produced the band) and `overrideSource` (`"config"` | `"api"`, when `basis` is
+`"override"`). The window half-width `h` is 0.8 of half the span the pipeline
+really sees, i.e. the capture or, when narrower, the decoder's own frontend
+(an audio demodulator keeps only about ±19 kHz at a 48 kHz demod rate,
+acarsdec about ±9.6 kHz; a resampler never adds span). With `c` the capture
+centre:
 
-| Decoder | Targets (`basis`) |
+- a target `t` fits when `|t − c| ≤ h`;
+- a range fits when `minHz − h ≤ c ≤ maxHz + h` (a range `{ t, t }` is target `t`);
+- in band when any target or range fits. With neither: `unknown` /
+  `no-target-frequency`; a missing centre or rate: `unknown` /
+  `source-center-unknown`.
+
+**Precedence** (first match wins; `basis` in parentheses):
+
+1. The decoder reads its own SDR (readsb `rtlTcpHost`) → `unknown`.
+2. API band override, `PUT /api/decoders/:id/band` (`override`, `overrideSource: "api"`).
+3. Config band override, `decoders[].band` (`override`, `overrideSource: "config"`).
+4. Configured `frequencies` / `options.frequencies` / `options.frequency` (`configured`).
+5. The decoder picks its own channels (ais-catcher `-c…` in `extraArgs`) → `unknown`.
+6. Built-in default for the decoder type and region (`region-default`).
+7. The decoder's protocol or own default (`protocol` / `decoder-default`).
+
+The API and config override layers merge field-wise (API wins per field): the
+band (`rangesHz` + `targetsHz` as one unit), `region` and `bandSuspension`. An
+override changes band admission only, never the process arguments.
+
+| Decoder | Band without a configured frequency or override |
 | --- | --- |
-| multimon-ng, direwolf, dsd-fme, acarsdec, rtl_433 | configured `frequencies` / `options.frequencies` / `options.frequency` (`configured`); none configured → `unknown` |
+| acarsdec | 129–137 MHz (`region-default`) |
+| dsd-fme | 136–174, 380–512, 764–941 MHz (`region-default`) |
+| direwolf | APRS per region: EU 144.800, US/CA 144.390, AU 145.175, NZ 144.575, JP/CN 144.640 MHz, plus 145.825 MHz ISS (`region-default`) |
+| rtl433 | ISM/SRD ranges per region, e.g. EU 433.05–434.79 and 863–870 MHz (`region-default`) |
+| multimon-ng | none → `unknown` (paging plans are country specific) |
 | readsb (stdin) | 1 090 MHz (`protocol`); rtlTcpHost mode is external |
-| ais-catcher | 161.975 and 162.025 MHz (`protocol`); configured frequencies win; a `-c…` channel override in `extraArgs` → `unknown` |
-| dumpvdl2 | its channel list, configured or the built-in default the process actually decodes (`configured` / `decoder-default`) |
+| ais-catcher | 161.975 and 162.025 MHz (`protocol`) |
+| dumpvdl2 | its channel list: configured, else the built-in default the process actually decodes (`decoder-default`) |
 | dumpvdl2 `followCenter` | the configured list bounds the band it follows; no configured list → `unknown` |
 | lora-meshtastic | configured `frequency` (`configured`) |
-| lora-meshtastic `followCenter` | a top-level `frequencies` list bounds the band it follows; without one → `unknown` (`options.frequency` only seeds the centre it follows) |
+| lora-meshtastic `followCenter` | a top-level `frequencies` list bounds the band it follows (`configured`); without one, the Meshtastic firmware range of its `options.region` (`decoder-default`, e.g. EU_868 869.4–869.65 MHz) |
 
 A `followCenter` decoder decodes the source centre itself, so it is in band
 anywhere from its lowest to its highest declared frequency, widened by the
 window, not only near one of them.
 
-A wanted decoder whose targets are all out of band is suspended with reason
+**Region.** `region` (YAML) or `WAVEKIT_REGION`: `EU`, `US`, `CA`, `AU`, `NZ`,
+`JP`, `CN` (case-insensitive; codes name band plans: `EU` is CEPT / IARU
+Region 1, incl. the UK, Switzerland, Norway). Unset, core guesses once at
+startup from `TZ`, the system time zone, then `LC_ALL` / `LC_CTYPE` / `LANG`,
+then the Intl locale, else `EU` (`source`: `configured`, `guessed:tz`,
+`guessed:intl-timezone`, `guessed:locale-env`, `guessed:intl-locale`,
+`default`). A decoder `band.region` gives that decoder `source: "decoder"`.
+The effective region is logged at startup and always shown by
+`GET /api/decoders/:id/band`, so a wrong guess is visible and fixable.
+
+A wanted decoder whose band is out of band is suspended with reason
 `"frequency-out-of-band"` (same semantics as a rate suspension) and resumes
-when a retune brings a target back. An unusable rate takes precedence as the
-reason. `unknown` (no target, a source without `centerFreq`, external input)
-never suspends. The check trusts `caps.centerFreq`, which only follows retunes made
+when a retune brings it back. An unusable rate takes precedence as the
+reason. `unknown` (no band, a source without `centerFreq`, external input)
+never suspends. A decoder started by hand (`startMode: "operator"`) is never
+band-suspended, and `band.bandSuspension: false` (config or API) is the
+durable per-decoder opt-out. The check trusts `caps.centerFreq`, which only follows retunes made
 through the tuner API or the relay; a client retuning the receiver some other
 way leaves it stale (decoders then stay as they were, never newly suspended).
 Centre changes are applied by the same debounced serial worker
 as rate changes. `health.bandSuspension: false` keeps the assessment but never
 suspends for band. The rate preview stays rate-only.
+
+#### GET /api/decoders/:id/band
+
+The decoder's band override layers, effective region and current assessment
+(`DecoderBandSettings`):
+
+```json
+{
+	"decoderId": "ism",
+	"override": { "rangesHz": [{ "minHz": 433050000, "maxHz": 434790000 }], "bandSuspension": false },
+	"configOverride": null,
+	"region": { "code": "EU", "source": "guessed:tz" },
+	"persisted": true,
+	"bandAssessment": { "verdict": "in-band", "basis": "override", "overrideSource": "api", "...": "..." }
+}
+```
+
+`override` is the API layer, `configOverride` the `decoders[].band` layer.
+`persisted: false` means the API layer lives only in memory (the state file is
+not writable, or was written by a newer core and is left untouched).
+
+#### PUT /api/decoders/:id/band
+
+Replaces the API layer. Body `{ rangesHz?, targetsHz?, region?,
+bandSuspension? }` with at least one key (`rangesHz`: 1–32 ranges with
+`minHz ≤ maxHz`; `targetsHz`: 1–64 positive Hz). Persisted by core to
+`<stateDir>/decoder-band-overrides.json` and survives a restart. The band
+plan is recomputed and published at once; a wanted decoder then suspends or
+resumes through the serial worker (`decoder:status` again ≈300 ms later).
+
+```bash
+curl -X PUT http://localhost:9000/api/decoders/ism/band \
+  -H "Content-Type: application/json" \
+  -d '{ "rangesHz": [{ "minHz": 433050000, "maxHz": 434790000 }] }'
+```
+
+**Response** (200 OK): `DecoderBandSettings`. Errors: 400
+`INVALID_BAND_OVERRIDE`, 404 `DECODER_NOT_FOUND`, 409
+`DECODER_BAND_NOT_APPLICABLE` (external-input decoders own their device).
+
+#### DELETE /api/decoders/:id/band
+
+Removes the API layer (idempotent). **Response** (200 OK):
+`DecoderBandSettings` with `override: null`. Same errors as PUT (no 400).
 
 #### GET /api/decoders/rate-preview
 
@@ -754,11 +857,21 @@ curl http://localhost:9000/api/decoders/dsd-main
 
 #### POST /api/decoders/:id/start
 
-Start a decoder. On an unusable source rate (or a band covering none of its
-targets) the start is recorded instead:
-200 with the full status (`suspended: true`, `suspension`, `rateAssessment`),
-never 409; starting a suspended decoder again is a 200 no-op. The same applies
-to `/restart`.
+Start a decoder. Optional body `{ "pin": boolean }` (default `true`; no body
+behaves as `pin: true`). A pinned start records `startMode: "operator"`: the
+decoder runs wherever the source is tuned and is never band-suspended. On an
+unusable source rate the start is recorded instead: 200 with the full status
+(`suspended: true`, `suspension`, `rateAssessment`), never 409.
+
+| Decoder state | No body | `{ "pin": true }` | `{ "pin": false }` |
+| --- | --- | --- | --- |
+| stopped | start as `"operator"` | same | start as `"auto"` (may band-suspend at once) |
+| band-suspended | pin + resume ("run anyway") | same | 200 no-op, stays `"auto"` |
+| rate-suspended | 200 no-op, pin recorded (holds when the rate recovers) | same | 200 no-op, mode `"auto"` |
+| running | 409 `DECODER_ALREADY_RUNNING` | 200, mode → `"operator"` | 200, mode → `"auto"`; band re-evaluated, may suspend |
+
+An invalid body is 400 `INVALID_START_REQUEST`. `/restart` keeps the current
+mode; `/stop` clears it.
 
 ```bash
 curl -X POST http://localhost:9000/api/decoders/dsd-main/start
@@ -1067,9 +1180,7 @@ more than one `decoder:status` per transition; always apply the latest.
 	"type": "source:connected",
 	"channel": "sources",
 	"data": {
-		"id": "sdrpp-main",
-		"host": "192.168.1.69",
-		"port": 5555
+		"sourceId": "sdrpp-main"
 	}
 }
 ```
@@ -1081,7 +1192,7 @@ more than one `decoder:status` per transition; always apply the latest.
 	"type": "source:disconnected",
 	"channel": "sources",
 	"data": {
-		"id": "sdrpp-main",
+		"sourceId": "sdrpp-main",
 		"error": "Connection reset by peer"
 	}
 }
@@ -1093,8 +1204,9 @@ Full source status including `activity` (sample freshness). `data` is identical
 to one `GET /api/sources` item. Cadence, per source:
 
 - on a lifecycle event (`connected`, `disconnected`, `error`, `ended`,
-  `caps-changed`, rate-truth flag raised/cleared) when the state actually changed
-  (a drifting `rateMismatch.measuredSampleRateHz` alone does not emit);
+  `caps-changed`, rate-truth or signal-flat flag raised/cleared) when the state
+  actually changed (a drifting `rateMismatch.measuredSampleRateHz`,
+  `signalFlat.levelDbfs` or `signalLevelDbfs` alone does not emit);
 - within 1 s of a time-based state change (`connected`, `activity.state`,
   `lastError`, `reconnectAttempts`, `caps`, `available`, assignments) — changes
   in counters such as `bytesReceived` or `activity.sampleAgeMs` alone do not emit;
@@ -1145,6 +1257,25 @@ Emitted when source capabilities change dynamically (e.g., sample rate changed v
 			"format": "U8_IQ",
 			"exclusive": false
 		}
+	}
+}
+```
+
+#### source:removed
+
+Sent once on the `sources` channel when a source is removed (`DELETE
+/api/sources/:id`). Clients drop the row and any cached `source:status`. No
+further `source:status` or `source:disconnected` follows for that `sourceId`
+(a later `POST /api/sources` with the same id starts a fresh lifecycle).
+`removedAt` is an ISO 8601 timestamp. A reconnect or shutdown does not emit it.
+
+```json
+{
+	"type": "source:removed",
+	"channel": "sources",
+	"data": {
+		"sourceId": "rtl-pi",
+		"removedAt": "2026-10-09T12:34:56.789Z"
 	}
 }
 ```

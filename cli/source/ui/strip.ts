@@ -3,6 +3,7 @@ import { fitGroups } from "./fit.js"
 import {
 	formatAge,
 	formatClockShort,
+	formatDbfs,
 	formatHalfSpan,
 	formatMHz,
 	formatMHzBare,
@@ -32,7 +33,8 @@ export interface StripInput {
 	api: ApiView
 	iq: IqView
 	decoders: StripDecoders | null
-	drops: { ratio: number | null; backpressure: boolean }
+	/** `idle`: no source streams, so there is no current drop to report (—), sign-off item 5. */
+	drops: { ratio: number | null; backpressure: boolean; idle?: true }
 	rx: StripRx | null
 	clockMs: number
 	old: { iq: boolean; decoders: boolean; rx: boolean }
@@ -142,6 +144,20 @@ function iqGroup(iq: IqView, old: boolean): Group {
 					: [[...head, value(` ${short}`, old)], named],
 		}
 	}
+	// A11 (R95): IQ is arriving, so streaming stays; flat is said beside it, never as a
+	// bare glyph: `iq ! flat` → `iq ● streaming · flat` → `… · signal flat −46 dBFS`.
+	if (iq.flatDbfs !== undefined) {
+		const flat = (t: string): Span => ({ text: t, role: "attention" })
+		const sepSpan = label(` ${glyphs().sep} `)
+		return {
+			priority: 2,
+			variants: [
+				[label("iq "), glyphSpan("attention"), flat(" flat")],
+				[...named, sepSpan, flat("flat")],
+				[...named, sepSpan, flat(`signal flat ${formatDbfs(iq.flatDbfs, 0)}`)],
+			],
+		}
+	}
 	const variants: Line[] = [named]
 	// A rate beside a stalled or dropped lane reads as flow, so it shows only while live.
 	if (iq.rateBytesPerSec !== null)
@@ -194,6 +210,11 @@ function decodersGroup(d: StripDecoders | null, old: boolean): Group {
  */
 function dropsGroup(d: StripInput["drops"]): Group {
 	const g = glyphs()
+	if (d.idle)
+		return {
+			priority: 4,
+			variants: [[label("drops "), { text: g.na, role: "label" }]],
+		}
 	if (d.ratio === null) {
 		const unknown: Line = [label("drops "), { text: "?", role: "unknown" }]
 		return {
@@ -256,10 +277,10 @@ export function stripGroups(input: StripInput): Group[] {
 const SEP_W = 2
 
 /**
- * M2: every lane starts at its minimal form and only the clock may be removed,
- * so `rx` and `drops` stay at 60 columns. Room is then spent in a fixed order,
- * most useful first: the REST age, the rx span, the iq word, the drops words, the named
- * decoders lane, its in-window count, the iq rate, the rx owner, the clock.
+ * M2: every lane starts at its minimal worded form and the clock goes first.
+ * Room is then spent in a fixed order, most useful first: the REST age of a
+ * split api lane, the rx unit and span, the full iq word, the named decoders
+ * lane, its in-window count, the iq rate, the rx owner, the clock.
  * Should even the minimal forms not fit, whole lanes go in spec §4.2 order
  * (rx, then drops, then decoders), never a glyph-only form (R93).
  */
@@ -302,8 +323,9 @@ export function stripLine(input: StripInput, width: number): Line {
 	const rxSpanIdx = rxOwnerIdx >= 0 ? rxVariants - 2 : rxVariants - 1
 	upgrade(0, [1])
 	upgrade(rx, [rxSpanIdx, 1])
-	// A live iq lane's only richer form is its rate; other states add their word, then age.
-	const liveIq = input.iq.glyph === "live"
+	// A live iq lane's only richer form is its rate; other states (and a flat signal,
+	// A11) add their word, then the detail.
+	const liveIq = input.iq.glyph === "live" && input.iq.flatDbfs === undefined
 	if (!liveIq) upgrade(1, [1])
 	upgrade(drops, [1])
 	upgrade(dec, [1])

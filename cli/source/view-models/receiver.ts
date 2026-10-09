@@ -28,6 +28,7 @@ import {
 	formatAge,
 	formatBytes,
 	formatClock,
+	formatDbfs,
 	formatDb,
 	formatHz,
 	formatMSps,
@@ -39,7 +40,7 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
-import { glyphSpan } from "../ui/strip.js"
+import { glyphSpan, iqWordText } from "../ui/strip.js"
 import {
 	padEnd,
 	padStart,
@@ -255,9 +256,15 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 		...(both ? [one(0, [glyphSpan(link), sp(` ${linkWord}`, role)])] : []),
 		one(
 			0,
-			[glyphSpan(iq.glyph), sp(` ${iq.word}`, role)],
+			// The data layer's word carries " · "; ASCII mode needs its separator.
+			[glyphSpan(iq.glyph), sp(` ${iqWordText(iq.word)}`, role)],
 			...(detail
-				? [[glyphSpan(iq.glyph), sp(` ${iq.word}${sep()}${detail}`, role)]]
+				? [
+						[
+							glyphSpan(iq.glyph),
+							sp(` ${iqWordText(iq.word)}${sep()}${detail}`, role),
+						],
+					]
 				: []),
 		),
 		// Core resets both on connect: a count or an error belongs to the current state.
@@ -306,6 +313,10 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 				: []),
 		),
 		one(1, txt(`received ${formatBytes(src.bytesReceived)}`, role)),
+		// A11: the measured level is a plain fact; the warning has its own line.
+		...(src.signalLevelDbfs !== undefined
+			? [one(1, txt(`level ${formatDbfs(src.signalLevelDbfs)}`, role))]
+			: []),
 		one(3, txt(`assigned ${counted(src.assignments.length, "decoder")}`, role)),
 		// R70: a suspended decoder keeps its reservation and sourceId; say who holds it.
 		...(held.length > 0
@@ -323,7 +334,39 @@ function sourceBlock(state: AppState, src: SourceRow, width: number): Row[] {
 	return [
 		essential(fitRow(lbl("SOURCE", true), row1, width)),
 		...(src.rateMismatch ? [keep(mismatchLine(src, width, role))] : []),
+		...(src.signalFlat ? [keep(flatLine(src, width, role))] : []),
 		optional(fitRow(lbl("rate"), row2, width), 2),
+	]
+}
+
+/** A11 (R95): "signal flat · −46.0 dBFS below −40 dBFS · since 18:07:00 · check gain". */
+function flatLine(src: SourceRow, width: number, role: Role): Line {
+	const f = src.signalFlat
+	if (!f) return []
+	const since = Date.parse(f.since)
+	const lineRole: Role = role === "old" ? "old" : "attention"
+	return [
+		...lbl(""),
+		glyphSpan("attention"),
+		...fitGroups(
+			[
+				one(0, txt(" signal flat", lineRole)),
+				one(
+					0,
+					txt(formatDbfs(f.levelDbfs), lineRole),
+					txt(
+						`${formatDbfs(f.levelDbfs)} below ${formatDbfs(f.thresholdDbfs, 0)}`,
+						lineRole,
+					),
+				),
+				...(Number.isFinite(since)
+					? [one(2, txt(`since ${formatClock(since)}`, lineRole))]
+					: []),
+				one(1, txt("check gain", lineRole)),
+			],
+			Math.max(1, width - LABEL_W - 1),
+			{ sep: sep() },
+		),
 	]
 }
 
@@ -858,10 +901,10 @@ function tunerBlock(
 		? unknown("frequency")
 			? [
 					...(edit.field === "frequency" ? [sp(glyphs().cursor, "edit")] : []),
-					sp("? Hz", edit.field === "frequency" ? "accent" : role),
+					sp("?", edit.field === "frequency" ? "accent" : role),
 				]
 			: withCursor(edit.draft.frequency, edit.digit, edit.field === "frequency")
-		: txt(unknown("frequency") ? "? Hz" : formatHz(t.frequency), role)
+		: txt(unknown("frequency") ? "?" : formatHz(t.frequency), role)
 	const rows: Row[] = []
 	if (edit) {
 		rows.push(
@@ -944,8 +987,11 @@ function tunerBlock(
 	const dbText = dbUnknown
 		? (indexText ?? "?")
 		: formatDb(d ? d.gainTenthsDb : t.gain)
+	// Sign-off item 4: nothing known about the gain reads one "?".
 	const gainText = unknown("gainMode")
-		? `mode ?${sep()}${dbText}`
+		? dbText === "?"
+			? "?"
+			: `mode ?${sep()}${dbText}`
 		: gainMode === "agc"
 			? "agc"
 			: `manual${sep()}${dbText}`

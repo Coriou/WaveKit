@@ -21,16 +21,28 @@ import type {
 	DecoderBandAssessment,
 	DecoderRateAssessment,
 	DecoderRateRequirements,
+	DecoderStartMode,
 	DecoderSuspensionReasonCode,
 } from "@wavekit/api-types"
 import type { DecoderRateAdapter } from "./rate-resolver.js"
-import type { DecoderBandRequirements } from "./band-resolver.js"
+import type { DecoderBandDeclaration } from "./band-resolver.js"
+import type { BandOverrideInput } from "./band-defaults.js"
 
 export type { DecoderRateAdapter } from "./rate-resolver.js"
-export type { DecoderBandRequirements } from "./band-resolver.js"
+export type {
+	DecoderBandDeclaration,
+	DecoderBandRequirements,
+} from "./band-resolver.js"
 
 export type {
+	BandRegion,
+	BandRegionSource,
 	DecoderBandAssessment,
+	DecoderBandOverride,
+	DecoderBandRange,
+	DecoderBandRegion,
+	DecoderBandSettings,
+	DecoderStartMode,
 	DecoderSuspensionReasonCode,
 	DecoderRateAssessment,
 	DecoderRateRequirements,
@@ -201,6 +213,8 @@ export interface DecoderConfig {
 	minVersion?: string | undefined
 	/** Maximum allowed version for this decoder */
 	maxVersion?: string | undefined
+	/** Band admission override (config layer); never changes process arguments. */
+	band?: BandOverrideInput | undefined
 }
 
 /**
@@ -298,6 +312,8 @@ export interface DecoderStatus {
 	suspension?: DecoderSuspensionStatus | undefined
 	/** An in-flight rate transition. */
 	transition?: "suspending" | "resuming" | undefined
+	/** Who started the decoder; set by the manager while desiredRunning. */
+	startMode?: DecoderStartMode | undefined
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */
@@ -423,8 +439,10 @@ export interface Decoder extends EventEmitter {
 	}): DecoderRateAdapter | undefined
 
 	/**
-	 * Frequencies this instance must receive (band-aware suspension).
-	 * Undefined means unknown, which is never treated as out of band.
+	 * What this instance itself knows about the band it must receive
+	 * (band-aware suspension). The manager resolves it with overrides, the
+	 * region and the built-in table; nothing declared means unknown, which
+	 * is never treated as out of band.
 	 */
-	getBandRequirements?(): DecoderBandRequirements | undefined
+	getBandDeclaration?(): DecoderBandDeclaration
 }

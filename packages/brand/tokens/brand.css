@@ -1,0 +1,138 @@
+/* WaveKit brand tokens — colours, spacing and the light/dark themes.
+   Single source of truth; tokens.json mirrors these values and
+   source/validate.py fails if the two drift or a theme pair loses contrast.
+   No font or network dependency (fonts live in typography.css). */
+
+:root {
+	/* Brand palette (brand.config.json). Do not add colours here without brand review. */
+	--wk-ink: #111c19;
+	--wk-phosphor: #7becc7;
+	--wk-paper: #f4f7f5;
+	--wk-forest: #16735c;
+	--wk-muted: #52645d;
+	--wk-rule: #e4ece7;
+
+	/* Theme-specific values supplied by the kit (docs/ACCESSIBILITY.md). */
+	--wk-light-surface: #ffffff;
+	--wk-light-accent-ink: #ffffff;
+	--wk-dark-surface: #192b24;
+	--wk-dark-fg-muted: #b9cac1;
+	--wk-dark-border-decorative: #2c443b;
+	--wk-dark-border-control: #8ba598;
+
+	--wk-space-1: 0.25rem;
+	--wk-space-2: 0.5rem;
+	--wk-space-3: 0.75rem;
+	--wk-space-4: 1rem;
+	--wk-space-6: 1.5rem;
+	--wk-space-8: 2rem;
+	--wk-space-12: 3rem;
+	--wk-space-16: 4rem;
+	--wk-radius-control: 0.5rem;
+	--wk-radius-panel: 0.75rem;
+	--wk-transition: 150ms ease;
+	--wk-focus-width: 3px;
+	--wk-focus-offset: 3px;
+	--wk-target-min: 44px;
+}
+
+/* Themes. Light and dark are equals: each is pinned by data-wavekit-theme on any
+   element (usually <html>); with no attribute, the page follows the OS preference.
+   Dark-first surfaces should set data-wavekit-theme="dark" explicitly.
+   The two dark blocks below must stay identical (validate.py checks this). */
+
+:root,
+[data-wavekit-theme="light"] {
+	color-scheme: light;
+	--wk-bg: var(--wk-paper);
+	--wk-surface: var(--wk-light-surface);
+	--wk-fg: var(--wk-ink);
+	--wk-fg-muted: var(--wk-muted);
+	--wk-accent: var(--wk-forest);
+	--wk-accent-ink: var(--wk-light-accent-ink);
+	--wk-border-decorative: var(--wk-rule);
+	--wk-border-control: var(--wk-muted);
+	--wk-focus-ring: var(--wk-forest);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-wavekit-theme="light"]) {
+		color-scheme: dark;
+		--wk-bg: var(--wk-ink);
+		--wk-surface: var(--wk-dark-surface);
+		--wk-fg: var(--wk-paper);
+		--wk-fg-muted: var(--wk-dark-fg-muted);
+		--wk-accent: var(--wk-phosphor);
+		--wk-accent-ink: var(--wk-ink);
+		--wk-border-decorative: var(--wk-dark-border-decorative);
+		--wk-border-control: var(--wk-dark-border-control);
+		--wk-focus-ring: var(--wk-phosphor);
+	}
+}
+
+[data-wavekit-theme="dark"] {
+	color-scheme: dark;
+	--wk-bg: var(--wk-ink);
+	--wk-surface: var(--wk-dark-surface);
+	--wk-fg: var(--wk-paper);
+	--wk-fg-muted: var(--wk-dark-fg-muted);
+	--wk-accent: var(--wk-phosphor);
+	--wk-accent-ink: var(--wk-ink);
+	--wk-border-decorative: var(--wk-dark-border-decorative);
+	--wk-border-control: var(--wk-dark-border-control);
+	--wk-focus-ring: var(--wk-phosphor);
+}
+
+/* Opt-in helpers. Nothing below styles bare elements. */
+
+.wk-surface {
+	background: var(--wk-bg);
+	color: var(--wk-fg);
+}
+.wk-panel {
+	background: var(--wk-surface);
+	color: var(--wk-fg);
+	border: 1px solid var(--wk-border-decorative);
+	border-radius: var(--wk-radius-panel);
+}
+.wk-icon {
+	display: inline-block;
+	flex: none;
+	vertical-align: -0.125em;
+}
+.wk-logo {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	flex: none;
+}
+.wk-focus:focus-visible {
+	outline: var(--wk-focus-width) solid var(--wk-focus-ring);
+	outline-offset: var(--wk-focus-offset);
+}
+.wk-button {
+	min-height: var(--wk-target-min);
+	padding: 0.7rem 1.1rem;
+	border: 1px solid transparent;
+	border-radius: var(--wk-radius-control);
+	background: var(--wk-accent);
+	color: var(--wk-accent-ink);
+	font: 700 1rem/1.2 var(--wk-font-body);
+}
+.wk-visually-hidden {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	padding: 0;
+	margin: -1px;
+	overflow: hidden;
+	clip: rect(0, 0, 0, 0);
+	white-space: nowrap;
+	border: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+	.wk-animated {
+		animation: none !important;
+		transition: none !important;
+	}
+}

@@ -3,27 +3,34 @@
 	<head>
 		<meta charset="utf-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1" />
-		<meta name="color-scheme" content="light dark" />
-		<meta
-			name="theme-color"
-			content="#d9dbd5"
-			media="(prefers-color-scheme: light)"
-		/>
-		<meta
-			name="theme-color"
-			content="#1b1e1d"
-			media="(prefers-color-scheme: dark)"
-		/>
+		<meta name="color-scheme" content="dark" />
+		<meta name="theme-color" content="#111c19" />
 		<title>WaveKit Receiver · Setup</title>
+		<link
+			rel="preload"
+			href="brand/D-DINCondensed-Bold.woff2"
+			as="font"
+			type="font/woff2"
+			crossorigin
+		/>
 		<link rel="stylesheet" href="app.css" />
 		<link rel="stylesheet" href="boot.css" />
-		<link rel="icon" href="data:," />
+		<link rel="icon" href="brand/favicon.svg" type="image/svg+xml" />
 		<script type="module" src="boot.js"></script>
 	</head>
 	<body>
 		<div class="panel boot-panel">
 			<header class="nameplate">
-				<h1 class="nameplate__title">WaveKit <span>Receiver</span></h1>
+				<h1 class="nameplate__title">
+					<img
+						class="nameplate__logo"
+						src="brand/wavekit-wordmark-on-dark.svg"
+						alt="WaveKit"
+						width="680"
+						height="164"
+					/>
+					<span class="nameplate__page">Setup</span>
+				</h1>
 				<p class="nameplate__host" id="host-name">This Pi</p>
 				<p class="link" id="contact" data-state="connecting" role="status">
 					<span class="lamp" aria-hidden="true"></span
@@ -31,66 +38,52 @@
 				</p>
 			</header>
 			<main>
-				<section aria-labelledby="setup-heading">
-					<h2 class="legend" id="setup-heading">First-boot setup</h2>
-					<div
-						class="screen boot-screen"
-						id="setup-screen"
-						data-state="unknown"
-					>
-						<div class="screen__verdict">
-							<p class="verdict" id="setup-title" aria-live="polite">
-								Checking setup
-							</p>
-							<p class="verdict__detail" id="setup-detail">
-								The Pi reports its progress here.
-							</p>
-						</div>
-						<div class="screen__rate boot-clock">
-							<p class="boot-clock__value" id="setup-clock">—</p>
-							<p class="rate__expected" id="setup-age">No progress yet</p>
-						</div>
+				<section
+					class="screen boot-screen"
+					id="setup-screen"
+					data-state="unknown"
+				>
+					<h2 class="visually-hidden">First-boot setup</h2>
+					<div class="screen__verdict">
+						<p class="verdict" id="setup-title" aria-live="polite">
+							Checking setup
+						</p>
+						<p class="verdict__detail" id="setup-detail">
+							The Pi reports its progress here.
+						</p>
 					</div>
-					<ol class="chain boot-chain" aria-label="Setup stages">
-						<li class="stage" data-phase="cloud-init" data-state="unknown">
-							<span class="stage__name">Pi settings</span>
-							<span class="stage__state"
-								><span class="lamp" aria-hidden="true"></span
-								><span class="stage__word">Waiting</span></span
-							>
-							<span class="stage__fact">account and network</span>
+					<ol class="steps" aria-label="Setup stages">
+						<li class="step" data-phase="cloud-init" data-state="unknown">
+							<span class="step__name">Pi settings</span>
+							<span class="step__word">Waiting</span>
 						</li>
-						<li class="stage" data-phase="install" data-state="unknown">
-							<span class="stage__name">Receiver</span>
-							<span class="stage__state"
-								><span class="lamp" aria-hidden="true"></span
-								><span class="stage__word">Waiting</span></span
-							>
-							<span class="stage__fact">packages and services</span>
+						<li class="step" data-phase="install" data-state="unknown">
+							<span class="step__name">Receiver</span>
+							<span class="step__word">Waiting</span>
 						</li>
-						<li class="stage" data-phase="publish" data-state="unknown">
-							<span class="stage__name">Finish</span>
-							<span class="stage__state"
-								><span class="lamp" aria-hidden="true"></span
-								><span class="stage__word">Waiting</span></span
-							>
-							<span class="stage__fact">save configuration</span>
+						<li class="step" data-phase="publish" data-state="unknown">
+							<span class="step__name">Finish</span>
+							<span class="step__word">Waiting</span>
 						</li>
 					</ol>
-					<p class="note boot-note" id="setup-note">
-						Setup usually takes several minutes. Keep the Pi powered and online
-						until it finishes.
+					<p class="boot-clock" id="setup-clock-row" hidden>
+						<span class="boot-clock__value" id="setup-clock">—</span>
+						<span id="setup-age"></span>
 					</p>
-					<p class="boot-open" id="receiver-link-wrap" hidden>
-						<a id="receiver-link">Open receiver status</a>
-					</p>
-					<noscript
-						><p class="note">
-							Enable JavaScript to follow live setup progress. Receiver status
-							is available on this Pi at port 8080 after installation.
-						</p></noscript
-					>
 				</section>
+				<p class="boot-note" id="setup-note">
+					Setup usually takes several minutes. Keep the Pi powered and online
+					until it finishes.
+				</p>
+				<p class="boot-open" id="receiver-link-wrap" hidden>
+					<a id="receiver-link">Open receiver status</a>
+				</p>
+				<noscript
+					><p class="boot-note">
+						Enable JavaScript to follow live setup progress. Receiver status is
+						available on this Pi at port 8080 after installation.
+					</p></noscript
+				>
 			</main>
 		</div>
 	</body>

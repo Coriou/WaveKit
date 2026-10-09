@@ -92,6 +92,42 @@ export const decoderSuspensionReasonCodes = [
 
 const frequency = { type: "number", exclusiveMinimum: 0 } as const
 
+/** Every BandRegion code; shared by the assessment and band route schemas. */
+export const bandRegionCodes = [
+	"EU",
+	"US",
+	"CA",
+	"AU",
+	"NZ",
+	"JP",
+	"CN",
+] as const
+
+export const bandRegionSources = [
+	"configured",
+	"decoder",
+	"guessed:tz",
+	"guessed:intl-timezone",
+	"guessed:locale-env",
+	"guessed:intl-locale",
+	"default",
+] as const
+
+export const decoderBandRangeSchema = {
+	type: "object",
+	properties: { minHz: frequency, maxHz: frequency },
+	required: ["minHz", "maxHz"],
+} as const
+
+export const decoderBandRegionSchema = {
+	type: "object",
+	properties: {
+		code: { type: "string", enum: bandRegionCodes },
+		source: { type: "string", enum: bandRegionSources },
+	},
+	required: ["code", "source"],
+} as const
+
 export const decoderBandAssessmentSchema = {
 	type: "object",
 	properties: {
@@ -106,10 +142,19 @@ export const decoderBandAssessmentSchema = {
 			],
 		},
 		targetsHz: { type: "array", items: frequency },
+		rangesHz: { type: "array", items: decoderBandRangeSchema },
 		basis: {
 			type: "string",
-			enum: ["configured", "protocol", "decoder-default"],
+			enum: [
+				"configured",
+				"protocol",
+				"decoder-default",
+				"region-default",
+				"override",
+			],
 		},
+		region: decoderBandRegionSchema,
+		overrideSource: { type: "string", enum: ["config", "api"] },
 		captureCenterHz: frequency,
 		windowHalfWidthHz: frequency,
 	},

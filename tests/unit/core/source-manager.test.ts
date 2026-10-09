@@ -373,6 +373,55 @@ describe("Source Manager", () => {
 			}
 		})
 
+		it("emits source-removed once on disconnect, with no trailing disconnected", async () => {
+			const mockServer = await createMockServer()
+			try {
+				const config = createSourceConfig("test-source", mockServer.port)
+				await sourceManager.connect(config)
+				const removed = vi.fn()
+				const sourceRemoved = vi.fn()
+				const disconnected = vi.fn()
+				sourceManager.on("removed", removed)
+				sourceManager.on("source-removed", sourceRemoved)
+				sourceManager.on("disconnected", disconnected)
+
+				const before = Date.now()
+				await sourceManager.disconnect("test-source")
+				await sourceManager.disconnect("test-source")
+				// let the destroyed socket's close event land
+				await new Promise(resolve => setTimeout(resolve, 50))
+
+				expect(removed).toHaveBeenCalledTimes(1)
+				expect(sourceRemoved).toHaveBeenCalledTimes(1)
+				expect(sourceRemoved.mock.calls[0]?.[0]).toBe("test-source")
+				const removedAt = sourceRemoved.mock.calls[0]?.[1] as Date
+				expect(removedAt.getTime()).toBeGreaterThanOrEqual(before)
+				expect(disconnected).not.toHaveBeenCalled()
+			} finally {
+				await mockServer.close()
+			}
+		})
+
+		it("reconnect() tears down for reuse without announcing a removal", async () => {
+			const mockServer = await createMockServer()
+			try {
+				const config = createSourceConfig("test-source", mockServer.port)
+				await sourceManager.connect(config)
+				const removed = vi.fn()
+				const sourceRemoved = vi.fn()
+				sourceManager.on("removed", removed)
+				sourceManager.on("source-removed", sourceRemoved)
+
+				await sourceManager.reconnect("test-source")
+
+				expect(removed).toHaveBeenCalledTimes(1)
+				expect(sourceRemoved).not.toHaveBeenCalled()
+				expect(sourceManager.getStatus("test-source")).toBeDefined()
+			} finally {
+				await mockServer.close()
+			}
+		})
+
 		it("should emit disconnected event when server closes connection", async () => {
 			const mockServer = await createMockServer()
 			const clientSockets: net.Socket[] = []

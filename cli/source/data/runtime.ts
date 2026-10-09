@@ -162,7 +162,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	const resyncState = new Map<Endpoint, "pending" | "ok" | "failed">()
 	/** Endpoints a ws:open skipped while their resync GET was still pending. */
 	const awaitingResync = new Set<Endpoint>()
-	/** Endpoints with an applied answer since the last start, reconnect or discovery. */
+	/** Endpoints with an applied answer since the last start, reconnect, discovery or ws:open. */
 	const answeredOnce = new Set<Endpoint>()
 
 	function clearResync(): void {
@@ -411,6 +411,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		)
 			return
 		const batch = queue.splice(0, queue.length)
+		// A ws:open (the runtime's own or the ws client's auto-reconnect) starts a
+		// resync: each endpoint's next answer is a first answer again (final M2).
+		if (batch.some(i => i.kind === "ws:open")) answeredOnce.clear()
 		let next = reduce(current, batch, now, reduceDeps)
 		const fx = next.effects
 		if (fx.polls.length > 0 || (fx.resync?.length ?? 0) > 0) {

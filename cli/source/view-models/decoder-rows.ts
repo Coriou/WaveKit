@@ -200,7 +200,7 @@ const PROC_ROLE: Readonly<Record<ProcState, Role>> = {
 	down: "fault",
 	restarting: "attention",
 	resuming: "neutral",
-	"suspend-pending": "attention",
+	"suspend-pending": "fault",
 	suspended: "neutral",
 	stopped: "neutral",
 	starting: "neutral",
@@ -556,6 +556,35 @@ export function decoderColumns(
 	return kind === "decoders-pane" ? DECODERS_PANE_COLUMNS : DECODERS_COLUMNS
 }
 
+/** At this width and up the Decoders view shows each process state in full words (signoff item 3). */
+const DECODERS_RICH_FROM = 99
+
+/**
+ * Signoff item 3: from 100 columns the Decoders view widens its process column to
+ * the longest state on screen (`faulted · retry in 12s`, `suspended · out of band`,
+ * at most 24), so the full words show; the counters (events, iq in) yield first.
+ * Restart counts stay in their own column, so they never claim the room.
+ */
+function withRichProcess(
+	cols: readonly ColumnSpec[],
+	kind: DecoderTableKind | readonly ColumnSpec[],
+	facts: readonly DecoderFacts[],
+	width: number,
+): readonly ColumnSpec[] {
+	if (
+		(kind !== "decoders" && kind !== "decoders-pane") ||
+		width < DECODERS_RICH_FROM
+	)
+		return cols
+	const need = Math.min(
+		24,
+		Math.max(0, ...facts.map(f => cellWidth(processWords(f)))),
+	)
+	return cols.map(c =>
+		c.id === "process" && need > c.min ? { ...c, min: need, pref: need } : c,
+	)
+}
+
 /** With a configured band on screen the band column gains a column for the mark and says what it means (I1). */
 function withConfiguredMark(
 	cols: readonly ColumnSpec[],
@@ -604,7 +633,10 @@ export function decoderTable(
 ): DecoderTable {
 	const base =
 		typeof columns === "string" ? decoderColumns(columns, width) : columns
-	const cols = withConfiguredMark(base, facts)
+	const cols = withConfiguredMark(
+		withRichProcess(base, columns, facts, width),
+		facts,
+	)
 	const layout = layoutColumns(width, cols)
 	const fits = facts.length <= maxRows
 	const visible = fits ? facts.length : Math.max(0, maxRows - 1)

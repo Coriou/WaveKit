@@ -20,6 +20,7 @@ import type {
 	SourceBackpressure,
 	SourceCaps,
 	SourceRateMismatch,
+	SourceSignalFlat,
 	TunerRelayCommandHistoryEntry,
 	TunerRelayStatus,
 	TunerState,
@@ -361,6 +362,17 @@ function guardRateMismatch(v: unknown): SourceRateMismatch | undefined {
 	return { declaredSampleRateHz, measuredSampleRateHz, deviation, since }
 }
 
+/** A11 (R95): all or nothing. */
+function guardSignalFlat(v: unknown): SourceSignalFlat | undefined {
+	if (!isObj(v)) return undefined
+	const levelDbfs = v["levelDbfs"]
+	const thresholdDbfs = v["thresholdDbfs"]
+	const since = v["since"]
+	if (!isNum(levelDbfs) || !isNum(thresholdDbfs) || !isStr(since))
+		return undefined
+	return { levelDbfs, thresholdDbfs, since }
+}
+
 export function guardSource(v: unknown): SourceRow | undefined {
 	if (!isObj(v)) return undefined
 	const id = v["id"]
@@ -388,6 +400,7 @@ export function guardSource(v: unknown): SourceRow | undefined {
 	const rawActivity = v["activity"]
 	const activity = guardActivity(rawActivity)
 	const rateMismatch = guardRateMismatch(v["rateMismatch"])
+	const signalFlat = guardSignalFlat(v["signalFlat"])
 	return {
 		id,
 		connected,
@@ -404,6 +417,8 @@ export function guardSource(v: unknown): SourceRow | undefined {
 			? { activityUnrecognised: true as const }
 			: {}),
 		...(rateMismatch ? { rateMismatch } : {}),
+		...(signalFlat ? { signalFlat } : {}),
+		...pick(v, ["signalLevelDbfs"] as const, isNum),
 	}
 }
 
@@ -1414,6 +1429,10 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 			return source ? { type, source } : undefined
 		}
 		case "source:connected": {
+			const sourceId = s("sourceId")
+			return sourceId !== undefined ? { type, sourceId } : undefined
+		}
+		case "source:removed": {
 			const sourceId = s("sourceId")
 			return sourceId !== undefined ? { type, sourceId } : undefined
 		}

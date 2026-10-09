@@ -77,17 +77,84 @@ export interface DecoderRateAssessment {
 }
 
 /**
- * Where an instance wants to receive, as declared by the decoder:
+ * Where an instance wants to receive:
  * "configured" from config, "protocol" fixed by the protocol (ADS-B 1090 MHz,
  * AIS 161.975/162.025 MHz), "decoder-default" a built-in list the process is
- * actually told to decode.
+ * actually told to decode (or its own option default, e.g. the Meshtastic
+ * region of a followCenter LoRa decoder), "region-default" the built-in band
+ * table for the decoder type (and region), "override" an operator band
+ * override (`decoders[].band` or `PUT /api/decoders/:id/band`).
+ * New members may be added; treat unknown values as opaque.
  */
-export type DecoderBandBasis = "configured" | "protocol" | "decoder-default"
+export type DecoderBandBasis =
+	| "configured"
+	| "protocol"
+	| "decoder-default"
+	| "region-default"
+	| "override"
+
+/** Absolute RF interval in Hz, `minHz <= maxHz`. */
+export interface DecoderBandRange {
+	minHz: number
+	maxHz: number
+}
+
+/**
+ * Band plan region codes. They name band plans, not polities: `EU` is
+ * CEPT / IARU Region 1 (includes the UK, Switzerland, Norway).
+ */
+export type BandRegion = "EU" | "US" | "CA" | "AU" | "NZ" | "JP" | "CN"
+
+/** Where the effective band region came from. */
+export type BandRegionSource =
+	| "configured"
+	| "decoder"
+	| "guessed:tz"
+	| "guessed:intl-timezone"
+	| "guessed:locale-env"
+	| "guessed:intl-locale"
+	| "default"
+
+export interface DecoderBandRegion {
+	code: BandRegion
+	source: BandRegionSource
+}
+
+/** Operator band override (config `decoders[].band` or the API layer). */
+export interface DecoderBandOverride {
+	rangesHz?: DecoderBandRange[]
+	targetsHz?: number[]
+	region?: BandRegion
+	/** false: never band-suspend this decoder (the durable form of a pin). */
+	bandSuspension?: boolean
+}
+
+/** GET/PUT/DELETE /api/decoders/:id/band response. */
+export interface DecoderBandSettings {
+	decoderId: string
+	/** API layer (persisted by core); null when none is set. */
+	override: DecoderBandOverride | null
+	/** Config layer (`decoders[].band`); null when none is set. */
+	configOverride: DecoderBandOverride | null
+	/** Effective region for this decoder. */
+	region: DecoderBandRegion
+	/** false while the API layer lives only in memory (state file not writable). */
+	persisted: boolean
+	bandAssessment: DecoderBandAssessment
+}
+
+/**
+ * Who started a wanted decoder: "auto" at boot (or `{ pin: false }`),
+ * "operator" via `POST /api/decoders/:id/start`. An operator decoder is
+ * never band-suspended; a rate suspension still applies.
+ */
+export type DecoderStartMode = "auto" | "operator"
 
 /**
  * Whether the source centre lets this instance receive any of its targets:
  * in band when some target lies within `windowHalfWidthHz` of
- * `captureCenterHz`. The window is the RF span the pipeline actually sees
+ * `captureCenterHz`, or the centre lies within `windowHalfWidthHz` of some
+ * range in `rangesHz`. The window is the RF span the pipeline actually sees
  * (capture, or the narrower demodulator frontend), times a usable fraction
  * of 0.8 for filter margin. `unknown` is never out of band.
  */
@@ -99,7 +166,12 @@ export interface DecoderBandAssessment {
 		| "source-center-unknown"
 		| "external-input"
 	targetsHz?: number[]
+	rangesHz?: DecoderBandRange[]
 	basis?: DecoderBandBasis
+	/** Present when a region-dependent default produced the band. */
+	region?: DecoderBandRegion
+	/** Present when basis is "override": which layer supplied the band. */
+	overrideSource?: "config" | "api"
 	captureCenterHz?: number
 	windowHalfWidthHz?: number
 }
@@ -182,6 +254,8 @@ export interface DecoderStatus {
 	 * failed and the process may still run (`running` stays truthful).
 	 */
 	transition?: "suspending" | "resuming"
+	/** Who started the decoder; sent while `desiredRunning` is true. */
+	startMode?: DecoderStartMode
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */

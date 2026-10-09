@@ -189,7 +189,9 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 			})
 		} catch (err: unknown) {
 			// R23: no reply in time, or a reset after sending, means the request may
-			// have landed: the outcome is unknown, never a failure.
+			// have landed: the outcome is unknown, never a failure. These two messages
+			// never render: the views word an unknown outcome themselves (sent · no
+			// reply …) and quote a result's message only when it failed.
 			if (isTimeout(err)) {
 				return {
 					ok: false,

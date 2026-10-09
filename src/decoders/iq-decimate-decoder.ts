@@ -25,7 +25,7 @@ import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
 import { configuredBandRequirements } from "./status-fields.js"
 import type {
-	DecoderBandRequirements,
+	DecoderBandDeclaration,
 	DecoderCaps,
 	DecoderConfig,
 	DecoderOutput,
@@ -159,9 +159,13 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 		return "cu8"
 	}
 
-	/** The pipeline keeps the capture centre: only configured targets are known. */
-	getBandRequirements(): DecoderBandRequirements | undefined {
-		return configuredBandRequirements(this.config)
+	/**
+	 * The pipeline keeps the capture centre: only configured targets are
+	 * declared; the manager adds overrides and built-in defaults.
+	 */
+	getBandDeclaration(): DecoderBandDeclaration {
+		const configured = configuredBandRequirements(this.config)
+		return configured ? { configured } : {}
 	}
 
 	getRateAdapter(input: { sampleRateHz: number }): DecoderRateAdapter {

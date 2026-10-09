@@ -37,6 +37,11 @@ import {
 	bytesPerSampleFor,
 	type RateMismatch,
 } from "./rate-truth.js"
+import {
+	SignalLevelTracker,
+	iqComponentFormatFor,
+	type SignalFlat,
+} from "./signal-level.js"
 
 // Bound startup/reconnect waits without treating quiet connected sources as failures.
 export const SOURCE_CONNECT_TIMEOUT_MS = 5000
@@ -86,6 +91,17 @@ export interface SourceStatus {
 	caps: SourceCaps
 	/** Present only while the measured rate disagrees with caps (rate-truth check). */
 	rateMismatch?: RateMismatch | undefined
+	/** Present only while the IQ level has stayed implausibly low (signal-flat check). */
+	signalFlat?: SignalFlat | undefined
+	/** Latest measured IQ level (dBFS); IQ network sources with data only. */
+	signalLevelDbfs?: number | undefined
+}
+
+export interface SourceManagerOptions {
+	/** Signal-flat threshold in dBFS (default SIGNAL_FLAT_THRESHOLD_DBFS). */
+	signalFlatThresholdDbfs?: number | undefined
+	/** Signal-flat hold time in ms (default SIGNAL_FLAT_HOLD_MS). */
+	signalFlatHoldMs?: number | undefined
 }
 
 /**
@@ -120,6 +136,8 @@ export interface SourceManagerEvents {
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
 	"rate-truth-changed": (sourceId: string) => void
+	/** The signal-flat flag was raised or cleared (see getStatus().signalFlat). */
+	"signal-flat-changed": (sourceId: string) => void
 	/**
 	 * First payload bytes of a session (after rtl_tcp header stripping), once
 	 * per connection. Through rtlmux this means the upstream dongle is back.
@@ -175,6 +193,8 @@ interface SourceState {
 	dataRate: number
 	/** Measured versus declared rate; network sources only. */
 	rateTruth: RateTruthTracker
+	/** Subsampled IQ level; IQ network sources only. */
+	signalLevel: SignalLevelTracker
 	/** The socket was paused for backpressure during the current metrics interval. */
 	pausedSinceLastMetric: boolean
 	/** Metrics intervals completed in this session (the first one is partial). */
@@ -257,10 +277,12 @@ export class SourceManager extends EventEmitter {
 	private sources: Map<string, SourceState> = new Map()
 	private decoderAssignments: Map<string, DecoderAssignment> = new Map()
 	private logger: Logger
+	private readonly options: SourceManagerOptions
 
-	constructor(logger: Logger) {
+	constructor(logger: Logger, options: SourceManagerOptions = {}) {
 		super()
 		this.logger = logger.child({ component: "SourceManager" })
+		this.options = options
 	}
 
 	/**
@@ -302,6 +324,7 @@ export class SourceManager extends EventEmitter {
 			sessionBytesReceived: 0,
 			bytesReceivedSinceLastMetric: 0,
 			rateTruth: new RateTruthTracker(),
+			signalLevel: this.createSignalLevelTracker(config),
 			pausedSinceLastMetric: false,
 			metricTicksSinceConnect: 0,
 			lastMetricTime: Date.now(),
@@ -381,6 +404,8 @@ export class SourceManager extends EventEmitter {
 			chunk = input.subarray(0, length)
 			if (!chunk.length) return true
 		}
+
+		if (state.config.type !== "recording") state.signalLevel.feed(chunk)
 
 		const firstPayload = chunk.length > 0 && state.lastSampleAt === null
 		if (chunk.length > 0) state.lastSampleAt = Date.now()
@@ -802,6 +827,7 @@ export class SourceManager extends EventEmitter {
 				state.metricTicksSinceConnect = 0
 				state.pausedSinceLastMetric = false
 				this.resetRateTruth(id, state)
+				this.resetSignalLevel(id, state)
 				state.reconnectAttempts = 0
 				state.lastError = undefined
 
@@ -1200,6 +1226,7 @@ export class SourceManager extends EventEmitter {
 			now - state.lastMetricTime,
 			now,
 		)
+		this.checkSignalLevel(id, state, now - state.lastMetricTime, now)
 		state.bytesReceivedSinceLastMetric = 0
 		state.lastMetricTime = now
 
@@ -1262,14 +1289,96 @@ export class SourceManager extends EventEmitter {
 		if (state.rateTruth.reset()) this.emit("rate-truth-changed", id)
 	}
 
+	private createSignalLevelTracker(config: SourceConfig): SignalLevelTracker {
+		const tracker = new SignalLevelTracker({
+			thresholdDbfs: this.options.signalFlatThresholdDbfs,
+			holdMs: this.options.signalFlatHoldMs,
+		})
+		// Recordings are not live gain settings; like rate truth, not checked.
+		if (config.type !== "recording")
+			tracker.setFormat(iqComponentFormatFor(config.caps))
+		return tracker
+	}
+
 	/**
-	 * Disconnects from a source and cleans up resources.
+	 * Closes one metrics interval of the signal-flat check. IQ network sources
+	 * only (formats it cannot interpret are never measured); an interval
+	 * without data (waiting/stale) never raises the flag.
+	 */
+	private checkSignalLevel(
+		id: string,
+		state: SourceState,
+		elapsedMs: number,
+		now: number,
+	): void {
+		if (state.config.type === "recording") return
+		if (!state.connected) {
+			this.resetSignalLevel(id, state)
+			return
+		}
+		const transition = state.signalLevel.observe({ atMs: now, elapsedMs })
+		if (transition === "flagged") {
+			this.logger.warn(
+				{ sourceId: id, ...state.signalLevel.flat },
+				"Source IQ level is flat (near-zero gain?); decoders will hear nothing (check external tuner clients)",
+			)
+		} else if (transition === "cleared") {
+			this.logger.info(
+				{ sourceId: id, levelDbfs: state.signalLevel.levelDbfs },
+				"Source IQ level recovered",
+			)
+		}
+		if (transition) this.emit("signal-flat-changed", id)
+	}
+
+	private resetSignalLevel(id: string, state: SourceState): void {
+		if (state.signalLevel.reset()) this.emit("signal-flat-changed", id)
+	}
+
+	/** A rate, format or kind change restarts the signal-flat check. */
+	private onCapsChangedForSignalLevel(
+		id: string,
+		state: SourceState,
+		oldCaps: SourceCaps,
+	): void {
+		const caps = state.config.caps
+		if (
+			oldCaps.sampleRate === caps.sampleRate &&
+			oldCaps.format === caps.format &&
+			oldCaps.kind === caps.kind
+		)
+			return
+		const format =
+			state.config.type === "recording" ? undefined : iqComponentFormatFor(caps)
+		const cleared = state.signalLevel.setFormat(format)
+		if (cleared || state.signalLevel.reset())
+			this.emit("signal-flat-changed", id)
+	}
+
+	/**
+	 * Disconnects from a source, cleans up resources and removes it. Emits
+	 * "removed" (internal teardown signal, also fired by reconnect) and then
+	 * "source-removed" (the source is gone for good) with the removal time.
 	 *
 	 * @param id - Source ID to disconnect
 	 */
 	async disconnect(id: string): Promise<void> {
+		// A permanent removal is announced by "source-removed" alone: clear the
+		// connected flag first so the socket's late close event cannot emit a
+		// "disconnected" for an id clients have already dropped.
 		const state = this.sources.get(id)
-		if (!state) return
+		if (state) state.connected = false
+		if (!this.teardown(id)) return
+		this.emit("source-removed", id, new Date())
+	}
+
+	/**
+	 * Tears a source down and emits "removed". Returns false when the source
+	 * is unknown. Shared by disconnect (permanent), reconnect and shutdown.
+	 */
+	private teardown(id: string): boolean {
+		const state = this.sources.get(id)
+		if (!state) return false
 
 		state.stopping = true
 
@@ -1299,6 +1408,7 @@ export class SourceManager extends EventEmitter {
 
 		this.logger.info({ sourceId: id }, "Source disconnected and cleaned up")
 		this.emit("removed", id)
+		return true
 	}
 
 	/**
@@ -1314,8 +1424,8 @@ export class SourceManager extends EventEmitter {
 
 		const config = state.config
 
-		// Disconnect first
-		await this.disconnect(id)
+		// Tear down first (not a removal: the same id comes straight back)
+		this.teardown(id)
 
 		// Reconnect with same config
 		await this.connect(config)
@@ -1344,6 +1454,10 @@ export class SourceManager extends EventEmitter {
 			caps: state.config.caps,
 			...(state.rateTruth.mismatch
 				? { rateMismatch: state.rateTruth.mismatch }
+				: {}),
+			...(state.signalLevel.flat ? { signalFlat: state.signalLevel.flat } : {}),
+			...(state.signalLevel.levelDbfs !== undefined
+				? { signalLevelDbfs: state.signalLevel.levelDbfs }
 				: {}),
 		}
 	}
@@ -1539,6 +1653,7 @@ export class SourceManager extends EventEmitter {
 			)
 		}
 
+		this.onCapsChangedForSignalLevel(id, state, oldCaps)
 		this.emit("caps-changed", id, nextCaps)
 		return nextCaps
 	}
@@ -1581,6 +1696,7 @@ export class SourceManager extends EventEmitter {
 			},
 			"Source tuning metadata reconciled",
 		)
+		this.onCapsChangedForSignalLevel(id, state, oldCaps)
 		this.emit("caps-changed", id, nextCaps)
 		return nextCaps
 	}
@@ -1827,6 +1943,6 @@ export class SourceManager extends EventEmitter {
 	 */
 	async disconnectAll(): Promise<void> {
 		const ids = Array.from(this.sources.keys())
-		await Promise.all(ids.map(id => this.disconnect(id)))
+		for (const id of ids) this.teardown(id)
 	}
 }

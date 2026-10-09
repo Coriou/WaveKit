@@ -76,5 +76,17 @@ export function toApiExtendedSourceStatus(
 					},
 				}
 			: {}),
+		...(status.signalFlat !== undefined
+			? {
+					signalFlat: {
+						levelDbfs: status.signalFlat.levelDbfs,
+						thresholdDbfs: status.signalFlat.thresholdDbfs,
+						since: status.signalFlat.since.toISOString(),
+					},
+				}
+			: {}),
+		...(status.signalLevelDbfs !== undefined
+			? { signalLevelDbfs: status.signalLevelDbfs }
+			: {}),
 	}
 }

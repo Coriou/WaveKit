@@ -244,6 +244,8 @@ export type WsEvent =
 	| { type: "source:disconnected"; sourceId: string; error?: string }
 	| { type: "source:error"; sourceId: string; error: string }
 	| { type: "source:caps-changed"; sourceId: string; caps: SourceCaps }
+	/** A11 (R95): the source is gone; drop its row, tuner and metrics. */
+	| { type: "source:removed"; sourceId: string }
 	| WsMetricsEvent
 	| { type: "fanout:snapshot"; snapshot: FanoutSnapshot }
 	| WsBackpressureEvent
@@ -609,4 +611,6 @@ export interface IqView {
 	/** For "no samples": server-relative sample age. */
 	ageMs: number | null
 	rateBytesPerSec: number | null
+	/** A11: streaming, but core flags the signal flat at this level (dBFS); absent otherwise. */
+	flatDbfs?: number
 }

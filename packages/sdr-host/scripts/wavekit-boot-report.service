@@ -1,0 +1,24 @@
+[Unit]
+Description=WaveKit boot report (how the previous boot ended)
+After=systemd-journald.service systemd-journal-flush.service local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/python3 /usr/local/lib/wavekit/boot-report.py
+TimeoutStartSec=90
+# Root only to read the journal and the firmware throttle flags (vcgencmd).
+StateDirectory=wavekit/status
+StateDirectoryMode=0755
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+NoNewPrivileges=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+MemoryMax=64M
+
+[Install]
+WantedBy=multi-user.target

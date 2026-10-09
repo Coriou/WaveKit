@@ -6,6 +6,7 @@ import {
 	CSDR_BUFFER_MAX_ELEMENTS,
 	CSDR_BUFFER_MIN_ELEMENTS,
 } from "./decoders/csdr-buffers.js"
+import { BAND_REGIONS } from "./decoders/band-region.js"
 
 // ============================================================================
 // Zod Schemas
@@ -78,6 +79,36 @@ export const DecoderCapsSchema = z.object({
 	]),
 })
 
+export { BAND_REGIONS }
+
+/** Band plan region code; case-insensitive in YAML and env. */
+export const RegionSchema = z.preprocess(
+	v => (typeof v === "string" ? v.toUpperCase() : v),
+	z.enum(BAND_REGIONS),
+)
+const HzSchema = z.number().finite().positive()
+const BandRangeSchema = z
+	.object({ minHz: HzSchema, maxHz: HzSchema })
+	.strict()
+	.refine(r => r.minHz <= r.maxHz, "minHz must not exceed maxHz")
+
+/**
+ * Operator band override (config `decoders[].band` and
+ * `PUT /api/decoders/:id/band`); at least one key.
+ */
+export const DecoderBandOverrideSchema = z
+	.object({
+		rangesHz: z.array(BandRangeSchema).min(1).max(32).optional(),
+		targetsHz: z.array(HzSchema).min(1).max(64).optional(),
+		region: RegionSchema.optional(),
+		bandSuspension: z.boolean().optional(),
+	})
+	.strict()
+	.refine(
+		o => Object.keys(o).length > 0,
+		"empty band override; omit it or DELETE",
+	)
+
 /**
  * Schema for decoder configuration.
  * Each decoder has a type that maps to a registered factory.
@@ -112,6 +143,11 @@ export const DecoderConfigSchema = z.object({
 	minVersion: z.string().optional(),
 	/** Maximum allowed version for this decoder */
 	maxVersion: z.string().optional(),
+	/**
+	 * Band admission override (band defaults spec §3): where this decoder is
+	 * useful. Never changes the process arguments.
+	 */
+	band: DecoderBandOverrideSchema.optional(),
 })
 
 /**
@@ -223,6 +259,14 @@ export const HealthConfigSchema = z.object({
 	 * tuned window, resuming on a retune back (manager default: true).
 	 */
 	bandSuspension: z.boolean().optional(),
+	/**
+	 * Signal-flat warning on IQ network sources: the subsampled IQ level
+	 * (RMS about zero, dBFS) must stay below this for signalFlatHoldMs
+	 * (source manager default: -40, about 1.3 LSB RMS in u8).
+	 */
+	signalFlatThresholdDbfs: z.number().min(-120).max(0).optional(),
+	/** How long the level must stay low (and, to clear, recovered) (default: 30000). */
+	signalFlatHoldMs: z.number().int().min(1000).max(3_600_000).optional(),
 })
 
 /**
@@ -292,6 +336,16 @@ export const ConfigSchema = z.object({
 	health: HealthConfigSchema.optional(),
 	resources: ResourcesConfigSchema.default({}),
 	csdr: CsdrConfigSchema.default({}),
+	/**
+	 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
+	 * case-insensitive). Absent: guessed from TZ / locale, else EU.
+	 */
+	region: RegionSchema.optional(),
+	/**
+	 * Directory for runtime state (API band overrides). Relative paths
+	 * resolve against the process working directory.
+	 */
+	stateDir: z.string().min(1).default("data"),
 })
 
 // ============================================================================
@@ -345,6 +399,8 @@ const LEGACY_ENV_MAPPINGS: Record<
 	WAVEKIT_AUDIO_SAMPLE_RATE: { path: ["audio", "sampleRate"], type: "number" },
 	WAVEKIT_LOG_LEVEL: { path: ["logging", "level"], type: "string" },
 	WAVEKIT_LOG_DIR: { path: ["logging", "dir"], type: "string" },
+	WAVEKIT_REGION: { path: ["region"], type: "string" },
+	WAVEKIT_STATE_DIR: { path: ["stateDir"], type: "string" },
 }
 
 /**
