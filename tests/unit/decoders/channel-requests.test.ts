@@ -187,7 +187,6 @@ describe("channel requests (addendum §1, §2)", () => {
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
 		for (const type of [
-			"direwolf",
 			"multimon-ng",
 			"dsd-fme",
 			"acarsdec",
@@ -201,6 +200,34 @@ describe("channel requests (addendum §1, §2)", () => {
 				}),
 			).toBeUndefined()
 		}
+	})
+
+	it("direwolf requests 48 kHz cf32 and, channelised, demodulates at 48 kHz without sox (Task 31, delta E11)", () => {
+		const r = make("direwolf").getChannelRequest?.({
+			sampleRateHz: 2_048_000,
+			centerHz: 144.8e6,
+		})
+		if (!r || "invalid" in r) throw new Error("expected a request")
+		// filterTransition 0.012 keeps the plan formula (plan A11)
+		expect(r).toMatchObject({
+			centerHz: 144.8e6,
+			outputRateHz: 48_000,
+			format: "cf32",
+		})
+		expect(r.bandwidthHz).toBeCloseTo(47_424, 6)
+		expect(r.transitionHz).toBeCloseTo(288, 6)
+		const chan = pipelineOf(
+			make("direwolf", { inputSampleRate: 48_000, inputIqFormat: "cf32" }),
+		)
+		expect(chan.startsWith("csdr fmdemod | ")).toBe(true)
+		for (const stage of ["csdr convert -i char -o float", "firdecimate", "sox"])
+			expect(chan).not.toContain(stage)
+		// The raw path still decimates 2.048 Msps by 43 and resamples 47 628 Hz to 48 kHz.
+		const raw = pipelineOf(make("direwolf"))
+		expect(raw).toContain(
+			"csdr convert -i char -o float | csdr firdecimate 43 0.012",
+		)
+		expect(raw).toContain("sox -t raw -r 47627.90697674418")
 	})
 
 	it("cf32 input drops the leading convert and firdecimate from the audio tail", () => {
