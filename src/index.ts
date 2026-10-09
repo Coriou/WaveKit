@@ -33,6 +33,8 @@ import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
+import { resolveProcessBandRegion } from "./decoders/band-region.js"
+import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
 import {
 	createDsdFmeDecoder,
@@ -302,12 +304,25 @@ async function main(): Promise<void> {
 	})
 
 	// Step 5: Initialize decoder system
+	// Band region (built-in band defaults) and persisted API band overrides;
+	// the store is loaded before startAll so the first check sees them.
+	const bandRegion = resolveProcessBandRegion(config.region)
+	log.info(
+		{ region: bandRegion.code, source: bandRegion.source },
+		"Band region",
+	)
+	const bandOverrides = new BandOverrideStore({
+		stateDir: config.stateDir,
+		logger,
+	})
+	await bandOverrides.load()
 	const decoderRegistry = new DecoderRegistry()
 	const decoderManager = new DecoderManager(
 		decoderRegistry,
 		fanoutManager,
 		logger,
-		createDecoderManagerOptions(config.health),
+		createDecoderManagerOptions(config.health, bandRegion),
+		bandOverrides,
 	)
 
 	// Wire DecoderManager to SourceManager for dynamic sample rate handling
