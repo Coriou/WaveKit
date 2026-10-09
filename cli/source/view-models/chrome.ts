@@ -8,8 +8,11 @@ import {
 	type Endpoint,
 	type LaneError,
 } from "../data/types.js"
-import { decoderMembership, type Membership } from "../data/window.js"
-import { decoderBand } from "../data/nominal-bands.js"
+import {
+	decoderMembership,
+	followsCentre,
+	type Membership,
+} from "../data/window.js"
 import { VIEW_ORDER, VIEW_TITLES, type ViewId } from "../ui/actions.js"
 import type { BannerCondition } from "../ui/banner.js"
 import { fitGroups } from "../ui/fit.js"
@@ -23,28 +26,28 @@ import { receiverTuner } from "./receiver.js"
 
 export interface WindowItem {
 	membership: Membership
-	/** Tuned types follow the centre, so they say nothing about whether the window is known. */
-	tuned: boolean
+	/** Follows the centre (R40, older cores): always in, so it says nothing about whether the window is known. */
+	followsCentre: boolean
 }
 
 /**
  * "N in window" (strip) and "N of M decoders in window" (Overview) share one rule (I4,
- * I-C): only when every non-tuned decoder's membership is known; decoders with no
- * window (—) are not counted. Null otherwise.
+ * I-C, R90 I1): N and M count the decoders whose membership is known, so a `?` is never
+ * counted as not in; `unknown` says how many were left out. Decoders with no window (—)
+ * are not counted. Null when no decoder that tells about the window is known.
  */
 export function windowCount(
 	items: readonly WindowItem[],
-): { inWindow: number; counted: number } | null {
-	const counted = items.filter(i => i.membership !== "—")
-	const others = counted.filter(i => !i.tuned)
-	if (
-		others.length === 0 ||
-		!others.every(i => i.membership === "in" || i.membership === "out")
+): { inWindow: number; counted: number; unknown: number } | null {
+	const placed = items.filter(i => i.membership !== "—")
+	const known = placed.filter(
+		i => i.membership === "in" || i.membership === "out",
 	)
-		return null
+	if (!known.some(i => !i.followsCentre)) return null
 	return {
-		inWindow: counted.filter(i => i.membership === "in").length,
-		counted: counted.length,
+		inWindow: known.filter(i => i.membership === "in").length,
+		counted: known.length,
+		unknown: placed.length - known.length,
 	}
 }
 
@@ -129,7 +132,7 @@ export function stripInput(state: AppState): StripInput {
 					state.tuner.value,
 					state.relay.value,
 				),
-				tuned: decoderBand(d)?.band.kind === "tuned",
+				followsCentre: followsCentre(d),
 			})
 		}
 		const win = windowCount(memberships)

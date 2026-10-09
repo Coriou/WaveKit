@@ -375,9 +375,12 @@ export function decoderDetail(
 		"—": "own SDR, not on the shared window",
 	}[f.membership]
 	const origin = bandOriginWords(f)
+	// R90: under core's assessment a tuned type is placed by core, not assumed to follow.
 	const band =
 		f.nominal === "tuned"
-			? "tuned (follows the receiver)"
+			? core
+				? "tuned"
+				: "tuned (follows the receiver)"
 			: f.nominal === "?"
 				? "band ?"
 				: `${f.nominal} MHz${origin ? ` ${origin}` : ""}`

@@ -4,6 +4,7 @@ import type {
 	TunerState,
 } from "@wavekit/api-types"
 import {
+	bandFor,
 	decoderBand,
 	type BandSubject,
 	type NominalBand,
@@ -120,21 +121,51 @@ const VERDICT: Readonly<Record<BandAssessment["verdict"], Membership>> = {
 }
 
 /**
+ * Older cores only (no bandAssessment): a tuned type demodulates the window
+ * centre (R40). Under core's assessment every type is placed by core (R90).
+ */
+export function followsCentre(d: BandSubject): boolean {
+	return d.bandAssessment === undefined && bandFor(d.type)?.kind === "tuned"
+}
+
+/** Core's usable fraction of a window (src/decoders/band-resolver.ts USABLE_WINDOW_FRACTION). */
+const USABLE_FRACTION = 0.8
+
+/**
+ * Core's usable half-width at the draft rate, or null when it cannot be
+ * placed. Same rate: core's value. A capture-limited half-width (0.4 × the
+ * old rate) scales with the rate; a narrower, frontend-limited one stays,
+ * capped by the new capture; anything else is unknown (R90 I3).
+ */
+function coreHalfWidth(
+	half: number | undefined,
+	from: TunedWindow | null,
+	to: TunedWindow,
+): number | null {
+	if (half === undefined || !from) return null
+	if (to.sampleRate === from.sampleRate) return half
+	const capture = (rate: number) => (rate * USABLE_FRACTION) / 2
+	if (Math.abs(half - capture(from.sampleRate)) <= 1)
+		return capture(to.sampleRate)
+	if (half < capture(from.sampleRate))
+		return Math.min(half, capture(to.sampleRate))
+	return null
+}
+
+/**
  * Membership at a draft window by core's own targets and usable half-width
- * (R84), or null when those do not apply: missing, or a sample-rate change
- * (the half-width follows the rate). Between targets is `?`: a followCenter
- * decoder is in band across its targets' span, and the API does not say which
- * decoders follow the centre.
+ * (R84), never by ±rate/2: `?` when they are missing or cannot be placed.
+ * Between targets is `?` too: a followCenter decoder is in band across its
+ * targets' span, and the API does not say which decoders follow the centre.
  */
 function coreMembershipAt(
 	a: BandAssessment,
 	from: TunedWindow | null,
 	to: TunedWindow,
-): Membership | null {
+): Membership {
 	const t = a.targetsHz
-	const half = a.windowHalfWidthHz
-	if (!t || half === undefined || !from || to.sampleRate !== from.sampleRate)
-		return null
+	const half = coreHalfWidth(a.windowHalfWidthHz, from, to)
+	if (!t || half === null) return "?"
 	if (t.some(hz => Math.abs(hz - to.centreHz) <= half)) return "in"
 	const lo = Math.min(...t) - half
 	const hi = Math.max(...t) + half
@@ -158,7 +189,7 @@ export function decoderMembership(
 }
 
 export interface RetuneImpact {
-	/** Tuned types: they follow the centre, whatever their configured targets (R40). */
+	/** Tuned types under an older core: they follow the centre, whatever their configured targets (R40, `followsCentre`). */
 	tuned: string[]
 	enters: string[]
 	leaves: string[]
@@ -189,16 +220,15 @@ export function retuneImpact(
 ): RetuneImpact {
 	const out: RetuneImpact = { tuned: [], enters: [], leaves: [], unknown: [] }
 	for (const d of decoders) {
-		const band = decoderBand(d)?.band
-		if (band?.kind === "tuned") {
+		// R90: core's verdict now and core's targets for the draft, for every type.
+		if (followsCentre(d)) {
 			out.tuned.push(d.id)
 			continue
 		}
-		// R84: core's verdict now; its targets and half-width for the draft.
 		const a = d.bandAssessment
+		const band = decoderBand(d)?.band
 		const before = a ? VERDICT[a.verdict] : membership(band, from)
-		const after =
-			(a ? coreMembershipAt(a, from, to) : null) ?? membership(band, to)
+		const after = a ? coreMembershipAt(a, from, to) : membership(band, to)
 		if (before === "?" || after === "?") out.unknown.push(d.id)
 		else if (before === "out" && after === "in") out.enters.push(d.id)
 		else if (before === "in" && after === "out") out.leaves.push(d.id)
