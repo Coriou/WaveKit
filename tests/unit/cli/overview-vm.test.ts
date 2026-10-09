@@ -92,7 +92,7 @@ describe("overview truth details", () => {
 			},
 		}
 		const text = lineText(emptyFeedLine(zero))
-		expect(text).toMatch(/^no decodes since /)
+		expect(text).toMatch(/^no decodes for /)
 		expect(text).not.toContain("0.000 MHz")
 		expect(lineText(emptyFeedLine(s))).toContain("rx 445.971 MHz")
 	})
@@ -199,7 +199,7 @@ describe("A6 fix 1: feed truth", () => {
 	})
 	it("I1: a cold start with the API down shows §9 copy, never 0 counts or no decodes since", () => {
 		const text = feedText(scenarioState("api-down", deps))
-		expect(text).toContain("MESSAGES  ? in 60s · ? total")
+		expect(text).toContain("MESSAGES  no feed · API unreachable")
 		expect(text).not.toMatch(/\b0 in 60s|0 total|no decodes since/)
 		expect(
 			text.split("\n").filter(l => l.includes("no data · API unreachable"))
@@ -209,12 +209,11 @@ describe("A6 fix 1: feed truth", () => {
 	it("I1: a cold start before any answer says so without counts", () => {
 		const cold = initialState(Date.parse("2026-10-08T18:07:52Z"))
 		const text = feedText(cold)
-		expect(text).toContain("MESSAGES  ? in 60s · ? total")
-		expect(text).toContain("connecting to /ws")
+		expect(text).toContain("MESSAGES  no feed · connecting to /ws")
 		expect(text).not.toMatch(/no decodes since|0 total/)
 	})
 	it("the empty state line still shows while the feed is live and empty", () => {
-		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes since/)
+		expect(feedText(scenarioState("idle", deps))).toMatch(/no decodes for /)
 	})
 })
 
@@ -344,16 +343,18 @@ describe("A6 fix 1: receiver rows (I3, R60 M1-M7)", () => {
 		}
 		expect(text(two, 199)[0]).toContain("+1 source")
 	})
-	it("an unknown window reads ?, never an empty row", () => {
-		const [, b] = text(scenarioState("api-down", deps), 79)
-		expect(b).toMatch(/^window +\?$/)
+	it("M5: with no source there is one row saying why, no dangling window label", () => {
+		const rowsCold = receiverSummary(scenarioState("api-down", deps), 79).map(
+			lineText,
+		)
+		expect(rowsCold).toEqual(["RECEIVER  no data · API unreachable"])
 	})
 })
 
 describe("A6 fix 1: I4 in-window count", () => {
 	it("shows the count only when the window is known for the non-tuned decoders", () => {
 		const s = scenarioState("idle", deps)
-		expect(lineText(emptyFeedLine(s))).toMatch(/\d+ of 9 decoders in window/)
+		expect(lineText(emptyFeedLine(s))).toMatch(/\d+ of 9 in window/)
 		const noWindow = {
 			...s,
 			tuner: {
@@ -370,7 +371,7 @@ describe("A6 fix 1: I4 in-window count", () => {
 			relay: { ...s.relay, value: { ...s.relay.value!, lastFrequency: 0 } },
 		}
 		const text = lineText(emptyFeedLine(noWindow))
-		expect(text).toMatch(/^no decodes since /)
+		expect(text).toMatch(/^no decodes for /)
 		expect(text).not.toContain("in window")
 	})
 	it("leaves decoders with no window (—) out of the total", () => {
@@ -400,7 +401,7 @@ describe("A6 fix 1: I4 in-window count", () => {
 				})),
 			},
 		}
-		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 decoders in window/)
+		expect(lineText(emptyFeedLine(ext))).toMatch(/\d+ of 8 in window/)
 	})
 })
 

@@ -4,8 +4,6 @@ import { fitGroups } from "../ui/fit.js"
 import {
 	formatAge,
 	formatClock,
-	formatClockShort,
-	formatMHz,
 	formatMHzBare,
 	formatMSps,
 	formatRate,
@@ -13,7 +11,8 @@ import {
 	formatWindow,
 } from "../ui/format.js"
 import { overviewBudget } from "../ui/frame.js"
-import { rxValues, windowCount } from "./chrome.js"
+import { rxValues } from "./chrome.js"
+import { emptyFeedGroups, noDataText } from "./feed-state.js"
 import { remoteHost } from "./net.js"
 import { sp, type Group, type Line, type Role } from "../ui/line.js"
 import { glyphSpan } from "../ui/strip.js"
@@ -61,18 +60,14 @@ function primarySource(state: AppState) {
 }
 
 /** Spec §6.1 receiver rows: groups drop by priority (relay clients and centre first). */
-export function receiverSummary(state: AppState, width: number): [Line, Line] {
+export function receiverSummary(state: AppState, width: number): Line[] {
 	const now = state.now
 	const src = primarySource(state)
 	const sep = ` ${glyphs().sep} `
 	if (!src) {
-		const why =
-			state.sources.error || state.conn.rest.firstFailAt !== null
-				? `no data${sep}API unreachable`
-				: "fetching /api/sources"
+		// M4/M5: one row saying why (REST failing vs API unreachable); no label without a value.
 		return [
-			[...title("RECEIVER"), sp(why, "label")],
-			[...label("window"), sp("?", "unknown")],
+			[...title("RECEIVER"), sp(noDataText(state, "/api/sources"), "label")],
 		]
 	}
 	const old = isOld(state.sources, now)
@@ -274,12 +269,15 @@ function feedEverLive(state: AppState): boolean {
 }
 
 /** MESSAGES header: live counts, or "feed stopped" while the WS is down (spec §6.1). */
-export function feedHeader(state: AppState): Line {
+export function feedHeader(state: AppState, width = 200): Line {
 	const c = feedCounts(state.messages.ring, state.now)
 	const sep = ` ${glyphs().sep} `
-	// I1: counts are unknown until the feed has been live; never "0 in 60s".
+	// I1/M5: until the feed has been live there are no counts; the header says why (M3).
 	if (!feedEverLive(state)) {
-		return [...title("MESSAGES"), sp(`? in 60s${sep}? total`, "label")]
+		return [
+			...title("MESSAGES"),
+			...fitGroups(emptyFeedGroups(state), width, { sep }),
+		]
 	}
 	// I2: the open gap's start is when the feed stopped; ws.since moves on every retry.
 	const openGap = state.messages.ring.gaps.findLast(g => g.to === null)
@@ -300,40 +298,9 @@ export function feedHeader(state: AppState): Line {
 	]
 }
 
-/** §9 copy for an empty feed that is not live: the empty-state line needs a live feed (§6.3). */
-function feedPlaceholder(state: AppState): Line {
-	const c = state.conn
-	const sep = ` ${glyphs().sep} `
-	const apiDown = c.rest.firstFailAt !== null || c.discovery.mode === "failed"
-	if (apiDown) return [sp(`no data${sep}API unreachable`, "label")]
-	if (c.ws.state === "closed")
-		return [sp(`no data${sep}live feed down`, "label")]
-	return [sp("connecting to /ws", "label")]
-}
-
-/** Spec §6.3 empty state: no decodes since … · n of m decoders in window · rx …. */
-export function emptyFeedLine(state: AppState): Line {
-	const facts = decoderFacts(state)
-	const since = state.conn.ws.since ?? state.now
-	// I4: one rule with the strip (windowCount): tuned decoders prove nothing; — is not counted.
-	const win = windowCount(
-		facts.map(f => ({
-			membership: f.membership,
-			tuned: f.nominal === "tuned",
-		})),
-	)
-	// R44/R53: the centre on its own (first positive), for the receiver row's source (M7).
-	const centre = rxValues(
-		state,
-		primarySource(state)?.id ?? state.tuner.value?.[0]?.sourceId,
-	).centre?.v
-	const sep = ` ${glyphs().sep} `
-	const parts = [
-		`no decodes since ${formatClockShort(since)} (${formatAge(state.now - since)})`,
-		...(win ? [`${win.inWindow} of ${win.counted} decoders in window`] : []),
-		...(centre !== undefined ? [`rx ${formatMHz(centre)}`] : []),
-	]
-	return [sp(parts.join(sep), "label")]
+/** Spec §6.3 empty state, M3: the first broken link of the chain (shared with Messages). */
+export function emptyFeedLine(state: AppState, width = 200): Line {
+	return fitGroups(emptyFeedGroups(state), width, { sep: ` ${glyphs().sep} ` })
 }
 
 export interface OverviewModel {
@@ -399,10 +366,10 @@ export function overviewModel(
 					feedOld,
 					aircraftLookup(state),
 				).lines
-			: state.conn.ws.state === "open"
-				? [emptyFeedLine(state)]
-				: [feedPlaceholder(state)]
-	const messages = [feedHeader(state), ...feed].map(l =>
+			: feedEverLive(state)
+				? [emptyFeedLine(state, msgWidth)]
+				: []
+	const messages = [feedHeader(state, msgWidth), ...feed].map(l =>
 		truncateLine(l, msgWidth),
 	)
 	const left = [

@@ -4,11 +4,11 @@ exports[`Overview goldens (spec §6.1) > api-down cold (no cache) 80x24 1`] = `
 " api × 2m 31s  iq ? unknown  decoders ?  drops ?                           18:07
  ! API unreachable · ECONNREFUSED · retry in 4s · 127.0.0.1:9000
  RECEIVER  no data · API unreachable
- window    ?
    DECODERS          process             decodes           drop now  window
  no data · API unreachable
- MESSAGES  ? in 60s · ? total
- no data · API unreachable
+ MESSAGES  no feed · API unreachable
+
+
 
 
 
