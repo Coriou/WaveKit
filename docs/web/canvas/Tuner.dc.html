@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tuner island</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+	<div style="height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 16px; border-radius: 18px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<svg width="26" height="26" viewBox="0 0 256 256" fill="none" role="img" aria-label="WaveKit" style="color: #7becc7; flex: none"><path d="M28 68C72 68 34 188 78 188C112 188 94 104 128 104C162 104 144 188 178 188C222 188 184 68 228 68" stroke="currentColor" stroke-width="26" stroke-linejoin="round"></path></svg>
+		<div style="width: 1px; height: 24px; background: rgba(123,236,199,.16); flex: none"></div>
+
+		<sc-if value="{{typing}}" hint-placeholder-val="{{false}}">
+			<input ref="{{focusRef}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onEntryKey}}" aria-label="Type a frequency, channel or saved name" placeholder="161.15 · ch 16 · +25k" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 40px; box-sizing: border-box; padding: 0 10px; border-radius: 10px; border: 1px solid rgba(123,236,199,.5); background: rgba(11,21,18,.6); color: #f4f7f5; font: inherit; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; outline: none; caret-color: #7becc7">
+			<button onClick="{{cancelEntry}}" aria-label="Cancel typing" style="font: inherit; cursor: pointer; height: 38px; padding: 0 10px; border: 0; border-radius: 10px; background: transparent; color: #8ba598; font-size: 12.5px">Esc</button>
+		</sc-if>
+
+		<sc-if value="{{notTyping}}" hint-placeholder-val="{{true}}">
+			<div role="group" aria-label="Frequency. Click the top or bottom half of a digit, scroll, or use arrow keys. Type a number to enter one." style="display: flex; align-items: center; font-variant-numeric: tabular-nums">
+				<sc-for list="{{digits}}" as="d" hint-placeholder-count="10">
+					<button onClick="{{d.pick}}" onWheel="{{d.wheel}}" onKeyDown="{{d.key}}" onMouseEnter="{{d.enter}}" onMouseLeave="{{leave}}" aria-label="{{d.aria}}" style="font: inherit; font-size: 26px; font-weight: 700; line-height: 38px; width: 17px; padding: 0; border: 0; border-radius: 4px; cursor: ns-resize; text-align: center; color: {{d.color}}; background: {{d.bg}}; box-shadow: {{d.ring}}">{{d.ch}}</button>
+					<sc-if value="{{d.sep}}" hint-placeholder-val="{{false}}"><span style="width: 7px; text-align: center; color: #52645d; font-size: 20px" aria-hidden="true">.</span></sc-if>
+				</sc-for>
+			</div>
+			<button onClick="{{startEntry}}" aria-label="Type a frequency" title="Type a frequency" style="font: inherit; cursor: pointer; width: 34px; height: 34px; flex: none; border: 0; border-radius: 9px; display: grid; place-items: center; background: transparent; color: #8ba598">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 8a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z"></path><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"></path></svg>
+			</button>
+			<button onClick="{{toggle}}" aria-expanded="{{expanded}}" aria-label="Tuning options" style="font: inherit; cursor: pointer; height: 38px; padding: 0 8px 0 10px; border: 0; border-radius: 10px; background: {{chipBg}}; color: #b9cac1; display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap">
+				<span style="font-weight: 700; color: #f4f7f5">{{mode}}</span>{{bwText}}
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{chev}}deg); transition: transform .2s"><path d="M6 9l6 6l6 -6"></path></svg>
+			</button>
+		</sc-if>
+	</div>
+
+	<sc-if value="{{typing}}" hint-placeholder-val="{{false}}">
+		<div style="box-sizing: border-box; padding: 8px; border-radius: 18px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column">
+			<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid rgba(123,236,199,.1)">
+				<sc-if value="{{parsedOk}}" hint-placeholder-val="{{true}}">
+					<div style="display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums">
+						<span style="font-size: 24px; font-weight: 700">{{pMain}}</span>
+						<span style="font-size: 24px; color: #52645d">{{pSub}}</span>
+						<span style="font-size: 13px; color: #8ba598">MHz</span>
+						<div style="flex: 1"></div>
+						<span style="font-size: 12px; color: #8ba598; border: 1px solid #2c443b; border-radius: 6px; padding: 1px 7px">Enter</span>
+					</div>
+					<span style="font-size: 13px; color: #b9cac1">{{pHint}}</span>
+				</sc-if>
+				<sc-if value="{{parsedErr}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 13px; color: #f2b84b">{{pErr}}</span>
+				</sc-if>
+				<sc-if value="{{parsedNone}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 13px; color: #8ba598">Type MHz (161.15), kHz (161150k), a channel (ch 16, pmr 3), a saved name, or a step from here (+25k).</span>
+				</sc-if>
+			</div>
+			<div role="listbox" aria-label="Suggestions" style="display: flex; flex-direction: column; padding-top: 6px; max-height: 300px; overflow-y: auto">
+				<sc-for list="{{sugg}}" as="s" hint-placeholder-count="5">
+					<button role="option" aria-selected="{{s.on}}" onClick="{{s.pick}}" onMouseEnter="{{s.enter}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; height: 44px; padding: 0 12px; border: 0; border-radius: 10px; background: {{s.bg}}">
+						<span style="width: 8px; height: 8px; border-radius: 50%; flex: none; background: {{s.dot}}"></span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+							<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.label}}</span>
+						</span>
+						<span style="color: #8ba598; font-size: 12px">{{s.kind}}</span>
+						<span style="width: 84px; text-align: right; color: #b9cac1; font-size: 13px; font-variant-numeric: tabular-nums">{{s.freq}}</span>
+					</button>
+				</sc-for>
+			</div>
+			<div style="display: flex; gap: 14px; padding: 10px 12px 6px; font-size: 12px; color: #8ba598">
+				<span>↑↓ choose</span><span>Enter tune</span><span>Esc cancel</span>
+			</div>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{showPanel}}" hint-placeholder-val="{{true}}">
+		<div style="box-sizing: border-box; max-height: {{maxH}}; overflow-y: auto; padding: 20px; border-radius: 18px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
+			<div style="display: flex; flex-direction: column; gap: 10px">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Mode</span>
+				<div role="radiogroup" aria-label="Demodulation mode" style="display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 11px; background: rgba(11,21,18,.7)">
+					<sc-for list="{{modes}}" as="m" hint-placeholder-count="7">
+						<button role="radio" aria-checked="{{m.on}}" onClick="{{m.pick}}" style="font: inherit; cursor: pointer; height: 34px; border: 0; border-radius: 8px; font-size: 12.5px; font-weight: 700; background: {{m.bg}}; color: {{m.fg}}">{{m.id}}</button>
+					</sc-for>
+				</div>
+			</div>
+
+			<sc-if value="{{hasBw}}" hint-placeholder-val="{{true}}">
+				<div style="display: flex; flex-direction: column; gap: 6px">
+					<div style="display: flex; justify-content: space-between; align-items: baseline">
+						<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Bandwidth</span>
+						<span style="font-variant-numeric: tabular-nums; font-weight: 700">{{bwText}}</span>
+					</div>
+					<div style="position: relative; height: 28px">
+						<div style="position: absolute; left: 0; right: 0; top: 12px; height: 4px; border-radius: 2px; background: #22362f"></div>
+						<div style="position: absolute; left: 0; top: 12px; height: 4px; border-radius: 2px; background: #7becc7; width: {{bwPct}}%"></div>
+						<div style="position: absolute; top: 6px; left: {{bwPct}}%; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 0 0 4px rgba(123,236,199,.18)"></div>
+						<input type="range" min="{{bwMin}}" max="{{bwMax}}" step="{{bwStep}}" value="{{bw}}" onChange="{{onBw}}" aria-label="Bandwidth" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
+					</div>
+					<span style="font-size: 12.5px; color: #8ba598">Zoom the spectrum in (⌘ + scroll) to drag the band edges directly.</span>
+				</div>
+			</sc-if>
+
+			<div style="display: flex; flex-direction: column; gap: 10px">
+				<div style="display: flex; justify-content: space-between; align-items: baseline">
+					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Tuning step</span>
+					<span style="font-size: 12.5px; color: #8ba598">Scroll the spectrum to step</span>
+				</div>
+				<div style="display: flex; flex-wrap: wrap; gap: 6px">
+					<sc-for list="{{steps}}" as="s" hint-placeholder-count="7">
+						<button aria-pressed="{{s.on}}" onClick="{{s.pick}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 11px; border-radius: 8px; font-size: 12.5px; font-variant-numeric: tabular-nums; border: 1px solid {{s.border}}; background: {{s.bg}}; color: {{s.fg}}">{{s.label}}</button>
+					</sc-for>
+				</div>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 4px">
+				<div style="display: flex; justify-content: space-between; align-items: center">
+					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Saved</span>
+					<sc-if value="{{canSave}}" hint-placeholder-val="{{true}}">
+						<button onClick="{{openSave}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #7becc7; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg>Save this frequency
+						</button>
+					</sc-if>
+				</div>
+				<sc-if value="{{saving}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; flex-direction: column; gap: 10px; padding: 14px; margin: 4px 0 8px; border-radius: 12px; background: rgba(25,43,36,.8)">
+						<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: #8ba598">Name
+							<input value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{onSaveKey}}" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 9px; border: 1px solid #2c443b; background: rgba(11,21,18,.7); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
+						</label>
+						<div style="display: flex; flex-wrap: wrap; gap: 6px" role="radiogroup" aria-label="Group">
+							<sc-for list="{{groups}}" as="g" hint-placeholder-count="4">
+								<button role="radio" aria-checked="{{g.on}}" onClick="{{g.pick}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; border: 1px solid {{g.border}}; background: {{g.bg}}; color: {{g.fg}}">{{g.label}}</button>
+							</sc-for>
+						</div>
+						<span style="font-size: 12px; color: #8ba598">Saves {{saveWhat}}. Shared with every WaveKit client.</span>
+						<div style="display: flex; gap: 8px; justify-content: flex-end">
+							<button onClick="{{closeSave}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 14px; border: 0; border-radius: 9px; background: transparent; color: #b9cac1">Cancel</button>
+							<button onClick="{{doSave}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 16px; border: 0; border-radius: 9px; background: #7becc7; color: #111c19; font-weight: 700">Save</button>
+						</div>
+					</div>
+				</sc-if>
+				<sc-for list="{{savedRows}}" as="r" hint-placeholder-count="4">
+					<div style="display: flex; align-items: center; border-radius: 10px; background: {{r.bg}}; margin: 0 -10px">
+						<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; height: 46px; padding: 0 4px 0 10px; border: 0; background: transparent">
+							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+								<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.label}}</span>
+								<span style="font-size: 12px; color: #8ba598">{{r.meta}}</span>
+							</span>
+							<span style="color: #b9cac1; font-size: 13px; font-variant-numeric: tabular-nums">{{r.freq}}</span>
+						</button>
+						<button onClick="{{r.remove}}" aria-label="Remove {{r.label}} from saved" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: #7becc7; display: grid; place-items: center">
+							<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg>
+						</button>
+					</div>
+				</sc-for>
+			</div>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"$preview":{"width":460,"height":600}}'>
+const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
+const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
+const STEPS = [[1000, '1k'], [5000, '5k'], [6250, '6.25k'], [8330, '8.33k'], [12500, '12.5k'], [25000, '25k'], [100000, '100k']];
+const GROUPS = ['Local', 'Marine', 'Aviation', 'Utility'];
+const BANDS = [
+	{ from: 87.5e6, to: 108e6, label: 'FM broadcast', mode: 'WFM' },
+	{ from: 108e6, to: 137e6, label: 'Airband', mode: 'AM' },
+	{ from: 144e6, to: 146e6, label: '2 m amateur', mode: 'NFM' },
+	{ from: 156e6, to: 162.025e6, label: 'Marine VHF', mode: 'NFM' },
+	{ from: 162.025e6, to: 163.5e6, label: 'Land mobile', mode: 'NFM' },
+	{ from: 430e6, to: 440e6, label: '70 cm amateur · ISM 433', mode: 'NFM' },
+	{ from: 446e6, to: 446.2e6, label: 'PMR446', mode: 'NFM' },
+	{ from: 863e6, to: 870e6, label: 'SRD 868', mode: 'NFM' },
+	{ from: 1089e6, to: 1091e6, label: 'ADS-B', mode: 'RAW' }
+];
+const CHANNELS = [
+	{ f: 156.8e6, label: 'Marine ch 16 · distress', keys: ['16', 'ch 16', 'ch16', 'marine 16', 'distress'] },
+	{ f: 156.6e6, label: 'Marine ch 12 · port ops', keys: ['12', 'ch 12', 'ch12', 'marine 12'] },
+	{ f: 161.975e6, label: 'AIS channel A', keys: ['ais', 'ais a', 'ais 1'] },
+	{ f: 162.025e6, label: 'AIS channel B', keys: ['ais', 'ais b', 'ais 2'] },
+	{ f: 144.8e6, label: 'APRS Europe', keys: ['aprs'] },
+	{ f: 433.92e6, label: 'ISM 433.92 · sensors', keys: ['ism', '433', 'sensor'] },
+	{ f: 869.525e6, label: 'Meshtastic EU', keys: ['mesh', 'lora', 'meshtastic'] },
+	{ f: 93.5e6, label: 'FM broadcast 93.5', keys: ['fm', 'broadcast', 'radio'] },
+	{ f: 118.1e6, label: 'Airband · tower', keys: ['tower', 'airband', 'atc'] },
+	{ f: 121.5e6, label: 'Airband guard 121.5', keys: ['guard', 'emergency', '121.5'] },
+	{ f: 131.725e6, label: 'ACARS Europe', keys: ['acars'] },
+	{ f: 136.975e6, label: 'VDL2 · 136.975', keys: ['vdl2', 'vdl', 'cpdlc'] },
+	{ f: 161.15e6, label: 'DMR · TG 2081', keys: ['dmr'] },
+	{ f: 163.0875e6, label: 'P25 · TG 1201', keys: ['p25'] },
+	{ f: 868.3e6, label: 'ISM 868 · sensors', keys: ['868', 'ism 868'] },
+	{ f: 868.95e6, label: 'wM-Bus meters', keys: ['wmbus', 'wm-bus', 'meters'] },
+	{ f: 1090e6, label: 'ADS-B 1090', keys: ['adsb', 'ads-b', '1090'] }
+].concat(Array.from({ length: 8 }, (_, i) => ({ f: 446.00625e6 + i * 12500, label: 'PMR446 ch ' + (i + 1), keys: ['pmr ' + (i + 1), 'pmr' + (i + 1), 'pmr'] })));
+const kfmt = hz => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? (hz % 100 ? 2 : 1) : 0) + ' kHz' : hz + ' Hz';
+const mfmt = f => (f / 1e6).toFixed(f % 1000 ? 5 : 3);
+const bandOf = f => BANDS.find(b => f >= b.from && f <= b.to);
+
+function parse(q, cur) {
+	const s = q.trim().toLowerCase().replace(',', '.');
+	if (!s) return { none: true };
+	const m = /^([+-])?\s*(\d+(?:\.\d*)?)\s*(hz|k|khz|m|mhz|g|ghz)?$/.exec(s);
+	if (!m) return { none: true };
+	const v = parseFloat(m[2]);
+	const unit = m[3] || '';
+	let mult = unit.startsWith('k') ? 1e3 : unit.startsWith('m') ? 1e6 : unit.startsWith('g') ? 1e9 : unit === 'hz' ? 1 : 0;
+	if (m[1]) {
+		const d = v * (mult || 1e3);
+		const f = cur + (m[1] === '+' ? d : -d);
+		return { f, hint: (m[1] === '+' ? 'Up ' : 'Down ') + kfmt(d) + ' from here' };
+	}
+	if (!mult) mult = v >= 24e6 ? 1 : v >= 24000 ? 1e3 : v >= 24 ? 1e6 : v < 2 ? 1e9 : 0;
+	if (!mult) return { err: 'Below 24 MHz. The RTL-SDR needs direct sampling for HF. Turn it on in Receiver › Advanced.' };
+	const f = Math.round(v * mult);
+	if (f < 24e6 || f > 1.9e9) return { err: 'Out of range. This receiver tunes 24 MHz to 1.9 GHz.' };
+	return { f };
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {
+			freq: 161150000, mode: 'NFM', bw: 12500, step: 12500, open: true, hover: -1,
+			saved: [{ f: 161150000, label: 'DMR repeater', group: 'Local', mode: 'NFM', bw: 12500 }, { f: 161975000, label: 'AIS channel A', group: 'Marine', mode: 'NFM', bw: 25000 }, { f: 156800000, label: 'Marine ch 16', group: 'Marine', mode: 'NFM', bw: 12500 }],
+			typing: false, q: '', sel: 0, saving: false, saveName: '', saveGroup: 'Local'
+		};
+		this.leave = () => this.setState({ hover: -1 });
+		this.focusRef = el => { if (el && el !== this.inputEl) { this.inputEl = el; el.focus(); } };
+	}
+	get(k) { const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k]; }
+	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v }); }
+	tune(f, mode) {
+		this.set('freq', f);
+		if (mode && mode !== this.get('mode')) { this.set('mode', mode); if (BW[mode]) this.set('bw', BW[mode][3]); }
+	}
+	nudge(place, dir) { this.set('freq', Math.min(1.9e9, Math.max(24e6, this.get('freq') + dir * place))); }
+	suggestions() {
+		const q = this.state.q.trim().toLowerCase();
+		const saved = this.get('saved').map(s => ({ f: s.f, label: s.label, kind: s.group, saved: true, mode: s.mode }));
+		const all = saved.concat(CHANNELS.map(c => ({ f: c.f, label: c.label, kind: 'Channel', keys: c.keys })));
+		if (!q) return saved.slice(0, 6);
+		const num = q.replace(/[^0-9.]/g, '');
+		return all.filter(x => x.label.toLowerCase().includes(q) || (x.keys || []).some(k => k.startsWith(q)) || (num.length >= 2 && mfmt(x.f).replace('.', '').startsWith(num.replace('.', '')))).slice(0, 6);
+	}
+	commit() {
+		const p = parse(this.state.q, this.get('freq'));
+		const list = this.suggestions();
+		if (p.f) { const b = bandOf(p.f); this.tune(p.f, b && b.mode !== this.get('mode') && !this.state.q.trim().match(/^[+-]/) ? b.mode : null); }
+		else if (list[this.state.sel]) { const s = list[this.state.sel]; this.tune(s.f, s.mode || (bandOf(s.f) || {}).mode); }
+		else return;
+		this.setState({ typing: false, q: '' });
+	}
+	renderVals() {
+		const freq = this.get('freq'), mode = this.get('mode'), bw = this.get('bw'), step = this.get('step'), saved = this.get('saved');
+		const expanded = this.props.onToggle ? !!this.props.expanded : this.state.open;
+		const typing = this.state.typing;
+		const str = String(Math.round(freq)).padStart(10, '0');
+		const first = str.search(/[1-9]/);
+		const digits = str.split('').map((ch, i) => {
+			const place = Math.pow(10, 9 - i);
+			return {
+				ch, sep: i === 0 || i === 3 || i === 6,
+				aria: 'Digit worth ' + kfmt(place) + ', currently ' + ch,
+				color: i < first ? '#2c443b' : i >= 7 ? '#8ba598' : '#f4f7f5',
+				bg: this.state.hover === i ? 'rgba(123,236,199,.1)' : 'transparent',
+				ring: this.state.hover === i ? 'inset 0 -2px 0 #7becc7' : 'none',
+				enter: () => this.setState({ hover: i }),
+				pick: e => { const r = e.currentTarget.getBoundingClientRect(); this.nudge(place, e.clientY < r.top + r.height / 2 ? 1 : -1); },
+				wheel: e => this.nudge(place, e.deltaY < 0 ? 1 : -1),
+				key: e => {
+					if (e.key === 'ArrowUp') { e.preventDefault(); this.nudge(place, 1); }
+					else if (e.key === 'ArrowDown') { e.preventDefault(); this.nudge(place, -1); }
+					else if (/^[0-9.+-]$/.test(e.key)) { e.preventDefault(); this.setState({ typing: true, q: e.key, sel: 0 }); }
+				}
+			};
+		});
+		const p = parse(this.state.q, freq);
+		const sugg = this.suggestions().map((s, i) => ({
+			label: s.label, kind: s.kind, freq: mfmt(s.f),
+			on: i === this.state.sel,
+			bg: i === this.state.sel ? 'rgba(123,236,199,.1)' : 'transparent',
+			dot: s.saved ? '#7becc7' : '#2c443b',
+			enter: () => this.setState({ sel: i }),
+			pick: () => { this.tune(s.f, s.mode || (bandOf(s.f) || {}).mode); this.setState({ typing: false, q: '' }); }
+		}));
+		const pb = p.f ? bandOf(p.f) : null;
+		const r = BW[mode];
+		const isSaved = saved.some(s => s.f === freq);
+		const curBand = bandOf(freq);
+		return {
+			width: expanded || typing ? '440px' : 'max-content',
+			maxH: 'calc(100vh - 110px)',
+			digits, leave: this.leave,
+			typing, notTyping: !typing,
+			q: this.state.q,
+			focusRef: this.focusRef,
+			onQ: e => this.setState({ q: e.target.value, sel: 0 }),
+			onEntryKey: e => {
+				const n = sugg.length;
+				if (e.key === 'Escape') { e.preventDefault(); this.setState({ typing: false, q: '' }); }
+				else if (e.key === 'Enter') { e.preventDefault(); this.commit(); }
+				else if (e.key === 'ArrowDown' && n) { e.preventDefault(); this.setState({ sel: (this.state.sel + 1) % n }); }
+				else if (e.key === 'ArrowUp' && n) { e.preventDefault(); this.setState({ sel: (this.state.sel - 1 + n) % n }); }
+			},
+			startEntry: () => this.setState({ typing: true, q: '', sel: 0 }),
+			cancelEntry: () => this.setState({ typing: false, q: '' }),
+			parsedOk: !!p.f, parsedErr: !!p.err, parsedNone: !!p.none && !this.state.q.trim(),
+			pErr: p.err || '',
+			pMain: p.f ? (p.f / 1e6).toFixed(3) : '',
+			pSub: p.f ? String(Math.round(p.f % 1000)).padStart(3, '0') : '',
+			pHint: p.f ? [p.hint, pb ? pb.label : 'No band plan entry', pb && pb.mode !== mode ? 'switches to ' + pb.mode : null].filter(Boolean).join(' · ') : '',
+			sugg,
+			showPanel: expanded && !typing,
+			expanded,
+			chev: expanded ? 180 : 0,
+			chipBg: expanded ? 'rgba(123,236,199,.1)' : 'transparent',
+			toggle: () => this.props.onToggle ? this.props.onToggle() : this.setState({ open: !this.state.open }),
+			mode, bw,
+			bwText: mode === 'RAW' ? 'full span' : kfmt(bw),
+			hasBw: mode !== 'RAW',
+			bwMin: r[0], bwMax: r[1], bwStep: r[2],
+			bwPct: r[1] > r[0] ? (bw - r[0]) / (r[1] - r[0]) * 100 : 0,
+			onBw: e => this.set('bw', Number(e.target.value)),
+			modes: MODES.map(id => ({ id, on: id === mode, bg: id === mode ? '#7becc7' : 'transparent', fg: id === mode ? '#111c19' : '#b9cac1', pick: () => { this.set('mode', id); this.set('bw', BW[id][3]); } })),
+			steps: STEPS.map(([v, label]) => ({ label, on: v === step, bg: v === step ? 'rgba(123,236,199,.12)' : 'transparent', border: v === step ? 'rgba(123,236,199,.6)' : '#2c443b', fg: v === step ? '#7becc7' : '#b9cac1', pick: () => this.set('step', v) })),
+			canSave: !isSaved && !this.state.saving,
+			saving: this.state.saving,
+			openSave: () => this.setState({ saving: true, saveName: this.get('detected') || (curBand ? curBand.label : 'Saved ' + mfmt(freq)), saveGroup: curBand && /Marine|AIS/.test(curBand.label) ? 'Marine' : 'Local' }),
+			closeSave: () => this.setState({ saving: false }),
+			saveName: this.state.saveName,
+			onSaveName: e => this.setState({ saveName: e.target.value }),
+			onSaveKey: e => { if (e.key === 'Enter') { e.preventDefault(); this.doSave(); } if (e.key === 'Escape') this.setState({ saving: false }); },
+			saveWhat: mfmt(freq) + ' MHz · ' + mode + ' · ' + kfmt(bw),
+			groups: GROUPS.map(g => { const on = g === this.state.saveGroup; return { label: g, on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ saveGroup: g }) }; }),
+			doSave: () => this.doSave(),
+			savedRows: saved.map(s => ({
+				label: s.label, meta: s.group + ' · ' + s.mode + ' · ' + kfmt(s.bw), freq: mfmt(s.f),
+				bg: s.f === freq ? 'rgba(123,236,199,.08)' : 'transparent',
+				pick: () => { this.tune(s.f, s.mode); this.set('bw', s.bw); },
+				remove: () => this.set('saved', saved.filter(x => x !== s))
+			}))
+		};
+	}
+	doSave() {
+		const name = this.state.saveName.trim();
+		if (!name) return;
+		this.set('saved', this.get('saved').concat([{ f: this.get('freq'), label: name, group: this.state.saveGroup, mode: this.get('mode'), bw: this.get('bw') }]));
+		this.setState({ saving: false });
+	}
+}
+</script>
+</body>
+</html>

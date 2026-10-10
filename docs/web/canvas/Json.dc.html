@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JSON viewer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="box-sizing: border-box; width: 100%; border-radius: 12px; background: rgba(7,15,13,.82); border: 1px solid rgba(123,236,199,.1); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+	<div style="display: flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid rgba(123,236,199,.08)">
+		<span style="font-size: 12px; font-weight: 700; color: #b9cac1">JSON</span>
+		<span style="font-size: 12px; color: #52645d; margin-left: 6px; font-variant-numeric: tabular-nums">{{meta}}</span>
+		<div style="flex: 1"></div>
+		<button aria-pressed="{{wrap}}" onClick="{{toggleWrap}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 7px; font-size: 12px; background: {{wrapBg}}; color: {{wrapFg}}; display: flex; align-items: center; gap: 5px">
+			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4l2 -2m0 4l-2 -2M4 18h5"></path></svg>Wrap
+		</button>
+		<button onClick="{{copyLine}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 7px; font-size: 12px; background: transparent; color: #8ba598">Copy one line</button>
+		<button onClick="{{copy}}" aria-live="polite" style="font: inherit; cursor: pointer; height: 26px; padding: 0 9px; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; background: {{copyBg}}; color: {{copyFg}}; display: flex; align-items: center; gap: 5px">
+			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{copyIcon}}"></path></svg>{{copyLabel}}
+		</button>
+	</div>
+	<div style="max-height: {{maxH}}px; overflow: auto; padding: 8px 0; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
+		<code style="display: block; min-width: {{minW}}; font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 12.5px; line-height: 1.6">
+			<sc-for list="{{lines}}" as="l" hint-placeholder-count="6">
+				<div style="display: flex; padding: 0 12px 0 0">
+					<span aria-hidden="true" style="width: 34px; flex: none; text-align: right; padding-right: 12px; color: #2c443b; user-select: none">{{l.n}}</span>
+					<span style="flex: 1; min-width: 0; white-space: {{ws}}; overflow-wrap: anywhere; padding-left: {{l.indent}}ch; text-indent: 0"><sc-for list="{{l.tokens}}" as="t"><span style="color: {{t.c}}; font-style: {{t.i}}">{{t.s}}</span></sc-for></span>
+				</div>
+			</sc-for>
+		</code>
+	</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"data":{"editor":null},"maxHeight":{"editor":"int","default":260},"$preview":{"width":380,"height":300}}'>
+const C = { key: '#7becc7', str: '#f4f7f5', num: '#f2b84b', lit: '#b9cac1', punc: '#52645d' };
+const RE = /("(?:\\.|[^"\\])*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b|([{}\[\],:])/g;
+const CHECK = 'M5 12l5 5l10 -10';
+const COPY = 'M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2zM16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2';
+const SAMPLE = { protocol: 'POCSAG1200', address: 1234567, function: 3, messageType: 'alpha', message: 'Test page — system check 0412. Reply not required.', decodedAt: '2026-10-10T14:02:39.412Z', ok: true, rssi: null };
+
+function tokenize(line) {
+	const out = [];
+	let last = 0, m;
+	RE.lastIndex = 0;
+	while ((m = RE.exec(line))) {
+		if (m.index > last) out.push({ s: line.slice(last, m.index), c: C.punc, i: 'normal' });
+		if (m[1]) { out.push({ s: m[1], c: m[2] ? C.key : C.str, i: 'normal' }); if (m[2]) out.push({ s: m[2], c: C.punc, i: 'normal' }); }
+		else if (m[3]) out.push({ s: m[3], c: C.num, i: 'normal' });
+		else if (m[4]) out.push({ s: m[4], c: C.lit, i: 'italic' });
+		else out.push({ s: m[5], c: C.punc, i: 'normal' });
+		last = RE.lastIndex;
+	}
+	if (last < line.length) out.push({ s: line.slice(last), c: C.punc, i: 'normal' });
+	return out;
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { wrap: true, copied: '' };
+	}
+	write(text, which) {
+		try { if (navigator.clipboard) navigator.clipboard.writeText(text); } catch (e) {}
+		this.setState({ copied: which });
+		clearTimeout(this.t);
+		this.t = setTimeout(() => this.setState({ copied: '' }), 1600);
+	}
+	componentWillUnmount() { clearTimeout(this.t); }
+	renderVals() {
+		const data = this.props.data ?? SAMPLE;
+		const text = JSON.stringify(data, null, 2);
+		const raw = text.split('\n');
+		const lines = raw.map((l, i) => {
+			const indent = l.length - l.trimStart().length;
+			return { n: i + 1, indent, tokens: tokenize(l.trimStart()) };
+		});
+		const wrap = this.state.wrap;
+		const copied = this.state.copied === 'pretty';
+		return {
+			lines,
+			meta: raw.length + ' lines · ' + new Blob([text]).size + ' B',
+			ws: wrap ? 'pre-wrap' : 'pre',
+			minW: wrap ? '0' : 'max-content',
+			maxH: this.props.maxHeight ?? 260,
+			wrap,
+			wrapBg: wrap ? 'rgba(123,236,199,.12)' : 'transparent',
+			wrapFg: wrap ? '#7becc7' : '#8ba598',
+			toggleWrap: () => this.setState({ wrap: !wrap }),
+			copy: () => this.write(text, 'pretty'),
+			copyLine: () => this.write(JSON.stringify(data), 'line'),
+			copyLabel: copied ? 'Copied' : this.state.copied === 'line' ? 'Copied line' : 'Copy',
+			copyIcon: this.state.copied ? CHECK : COPY,
+			copyBg: this.state.copied ? 'rgba(123,236,199,.16)' : '#192b24',
+			copyFg: this.state.copied ? '#7becc7' : '#f4f7f5'
+		};
+	}
+}
+</script>
+</body>
+</html>

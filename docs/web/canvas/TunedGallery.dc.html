@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tuned card, every signal type</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="box-sizing: border-box; min-height: 100%; padding: 40px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; display: flex; flex-direction: column; gap: 36px">
+	<sc-for list="{{groups}}" as="g" hint-placeholder-count="4">
+		<section style="display: flex; flex-direction: column; gap: 14px">
+			<div style="display: flex; align-items: baseline; gap: 12px">
+				<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 24px">{{g.title}}</h2>
+				<span style="font-size: 13px; color: #8ba598">{{g.sub}}</span>
+			</div>
+			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 320px)); gap: 24px; align-items: start">
+				<sc-for list="{{g.cards}}" as="c" hint-placeholder-count="4">
+					<dc-import name="Tuned" freq="{{c}}" variant="floating" hint-size="320px,360px"></dc-import>
+				</sc-for>
+			</div>
+		</section>
+	</sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":2000}}'>
+class Component extends DCLogic {
+	renderVals() {
+		return {
+			groups: [
+				{ title: 'Voice', sub: 'Digital calls and analog transmissions. Live, quiet and encrypted states. CTCSS and DCS tones when detected.', cards: [161150000, 163087500, 160625000, 118100000, 156800000, 446006250, 161425000, 145637500] },
+				{ title: 'Positions and fleets', sub: 'Many stations on one channel. The card summarises, the map holds the detail.', cards: [161975000, 1090000000, 144800000] },
+				{ title: 'Messages and data', sub: 'Last message in full (three lines at most), earlier ones below.', cards: [160450000, 131725000, 136975000, 869525000] },
+				{ title: 'Sensors and meters', sub: 'Readings as chips. Unknown rtl_433 models fall back to humanised JSON.', cards: [433920000, 868300000, 868950000] },
+				{ title: 'Nothing to decode', sub: 'Audio only, or not identified yet.', cards: [93500000, 466025000] }
+			]
+		};
+	}
+}
+</script>
+</body>
+</html>

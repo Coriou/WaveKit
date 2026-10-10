@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Listen island</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="display: flex; flex-direction: {{dir}}; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+	<div style="height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 10px 0 10px; border-radius: 18px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<button onClick="{{toggleListen}}" aria-pressed="{{listening}}" aria-label="{{listenLabel}}" style="font: inherit; cursor: pointer; width: 44px; height: 44px; flex: none; border-radius: 13px; display: grid; place-items: center; border: 1px solid {{btnBorder}}; background: {{btnBg}}; color: {{btnFg}}; transition: background .15s">
+			<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z"></path><path d="M15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z"></path><path d="M4 15v-3a8 8 0 0 1 16 0v3"></path></svg>
+		</button>
+		<div style="flex: 1; min-width: 120px; display: flex; flex-direction: column; gap: 6px">
+			<div style="display: flex; align-items: baseline; gap: 8px; white-space: nowrap">
+				<span style="font-weight: 700">{{title}}</span>
+				<span style="font-size: 12.5px; color: #8ba598; overflow: hidden; text-overflow: ellipsis">{{subtitle}}</span>
+			</div>
+			<div style="position: relative; height: 6px; border-radius: 3px; background: #192b24; overflow: hidden" aria-hidden="true">
+				<div style="position: absolute; left: 0; top: 0; bottom: 0; width: {{lvlPct}}%; background: {{lvlColor}}; transition: width .09s linear"></div>
+				<div style="position: absolute; top: 0; bottom: 0; left: {{sqPct}}%; width: 2px; background: #f2b84b"></div>
+			</div>
+		</div>
+		<button onClick="{{toggle}}" aria-expanded="{{expanded}}" aria-label="Audio options" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; display: grid; place-items: center; color: #8ba598; background: {{chipBg}}">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{chev}}deg); transition: transform .2s"><path d="M6 15l6 -6l6 6"></path></svg>
+		</button>
+	</div>
+
+	<sc-if value="{{expanded}}" hint-placeholder-val="{{true}}">
+		<div style="box-sizing: border-box; max-height: calc(100vh - 120px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 18px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
+
+			<div style="display: flex; flex-direction: column; gap: 10px">
+				<div style="display: flex; align-items: center; gap: 8px">
+					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Squelch</span>
+					<span style="height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 700; line-height: 22px; background: {{stateBg}}; color: {{stateFg}}">{{sqState}}</span>
+					<div style="flex: 1"></div>
+					<button aria-pressed="{{sqAuto}}" onClick="{{autoSq}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 700; border: 1px solid {{autoBorder}}; background: {{autoBg}}; color: {{autoFg}}">Auto</button>
+					<button onClick="{{offSq}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 700; border: 1px solid #2c443b; background: transparent; color: #b9cac1">Off</button>
+				</div>
+				<div style="position: relative; height: 44px; border-radius: 10px; background: #0b1512; overflow: hidden">
+					<div style="position: absolute; left: 0; top: 0; bottom: 0; width: {{lvlPct}}%; background: {{meterFill}}; transition: width .09s linear"></div>
+					<div style="position: absolute; left: 0; top: 0; bottom: 0; width: {{sqPct}}%; background: repeating-linear-gradient(135deg, rgba(11,21,18,.55) 0 6px, rgba(11,21,18,.25) 6px 12px)"></div>
+					<div style="position: absolute; top: 0; bottom: 0; left: {{sqPct}}%; width: 2px; margin-left: -1px; background: #f2b84b"></div>
+					<div style="position: absolute; top: 50%; left: {{sqPct}}%; width: 14px; height: 24px; margin: -12px 0 0 -7px; border-radius: 5px; background: #f2b84b"></div>
+					<input type="range" min="-120" max="-20" step="1" value="{{sq}}" onChange="{{onSq}}" aria-label="Squelch threshold" aria-valuetext="{{sqText}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
+				</div>
+				<div style="display: flex; justify-content: space-between; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">
+					<span>{{sqText}}</span>
+					<span>Signal {{lvlText}}</span>
+				</div>
+				<span style="font-size: 12.5px; color: #8ba598; line-height: 1.45">Drag the line just above the noise to silence it. Auto keeps it 6 dB over the noise floor as conditions change.</span>
+				<sc-if value="{{hasTone}}" hint-placeholder-val="{{false}}">
+					<button aria-pressed="{{toneSq}}" onClick="{{toggleToneSq}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 8px 12px; border: 0; border-radius: 10px; background: #192b24">
+						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700">Tone squelch <span style="font-weight: 400; color: #7becc7">· {{toneText}} detected</span></span>
+							<span style="font-size: 12.5px; color: #8ba598">{{toneSub}}</span>
+						</span>
+						<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{toneTrack}}"><span style="position: absolute; top: 2px; left: {{toneKnob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5"></span></span>
+					</button>
+				</sc-if>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 6px">
+				<div style="display: flex; justify-content: space-between">
+					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Volume</span>
+					<span style="font-weight: 700; font-variant-numeric: tabular-nums">{{vol}}%</span>
+				</div>
+				<div style="position: relative; height: 28px">
+					<div style="position: absolute; left: 0; right: 0; top: 12px; height: 4px; border-radius: 2px; background: #22362f"></div>
+					<div style="position: absolute; left: 0; top: 12px; height: 4px; border-radius: 2px; background: #7becc7; width: {{vol}}%"></div>
+					<div style="position: absolute; top: 6px; left: {{vol}}%; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 0 0 4px rgba(123,236,199,.18)"></div>
+					<input type="range" min="0" max="100" step="1" value="{{vol}}" onChange="{{onVol}}" aria-label="Volume" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
+				</div>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 10px">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">What you hear</span>
+				<div role="radiogroup" aria-label="Audio source" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 2px; padding: 3px; border-radius: 11px; background: #0b1512">
+					<sc-for list="{{srcs}}" as="s" hint-placeholder-count="3">
+						<button role="radio" aria-checked="{{s.on}}" onClick="{{s.pick}}" style="font: inherit; cursor: pointer; height: 34px; border: 0; border-radius: 8px; font-size: 13px; font-weight: 700; background: {{s.bg}}; color: {{s.fg}}">{{s.label}}</button>
+					</sc-for>
+				</div>
+				<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #192b24; font-size: 13px; color: #b9cac1">
+					<span style="width: 7px; height: 7px; border-radius: 50%; flex: none; background: #7becc7"></span>
+					<span>{{srcHint}}</span>
+				</div>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 12px">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Sound</span>
+				<sc-for list="{{segs}}" as="g" hint-placeholder-count="2">
+					<div style="display: flex; align-items: center; gap: 12px">
+						<span style="flex: 1; font-weight: 700">{{g.label}}</span>
+						<div role="radiogroup" aria-label="{{g.label}}" style="display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: #0b1512">
+							<sc-for list="{{g.opts}}" as="o" hint-placeholder-count="3">
+								<button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 11px; border: 0; border-radius: 7px; font-size: 12.5px; font-weight: 700; background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button>
+							</sc-for>
+						</div>
+					</div>
+				</sc-for>
+				<sc-for list="{{toggles}}" as="t" hint-placeholder-count="2">
+					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 44px; border: 0; background: transparent; padding: 0">
+						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700">{{t.label}}</span>
+							<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
+						</span>
+						<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{t.track}}">
+							<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5"></span>
+						</span>
+					</button>
+				</sc-for>
+			</div>
+
+			<div style="display: flex; align-items: center; gap: 12px; padding-top: 4px; border-top: 1px solid #22362f">
+				<button aria-pressed="{{rec}}" onClick="{{toggleRec}}" style="font: inherit; cursor: pointer; height: 40px; padding: 0 14px 0 12px; margin-top: 12px; border-radius: 10px; border: 1px solid {{recBorder}}; background: {{recBg}}; color: #f4f7f5; display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 13px">
+					<span style="width: 10px; height: 10px; border-radius: 50%; background: #ff7a6b"></span>{{recLabel}}
+				</button>
+				<div style="flex: 1"></div>
+				<span style="margin-top: 12px; font-size: 12.5px; color: #8ba598; font-variant-numeric: tabular-nums">Latency ≈ 180 ms</span>
+			</div>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"$preview":{"width":440,"height":760}}'>
+const FLOOR = -108;
+const pc = db => Math.max(0, Math.min(100, (db + 120) / 100 * 100));
+const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
+const sw = on => ({ on, track: on ? '#7becc7' : '#2c443b', knob: on ? 18 : 2 });
+const seg = (cur, id) => ({ on: cur === id, bg: cur === id ? '#192b24' : 'transparent', fg: cur === id ? '#7becc7' : '#8ba598' });
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { listening: true, vol: 72, sq: -102, sqAuto: true, src: 'auto', agc: 'slow', deemph: 'off', hp: true, nr: false, rec: false, toneSq: false, tone: '', base: -57, digital: true, call: 'TG 2081 · radio 2081045', modeLabel: 'NFM', open: true, lvl: -60 };
+	}
+	get(k) { const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k]; }
+	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v }); }
+	componentDidMount() {
+		this.timer = setInterval(() => {
+			const base = this.get('base');
+			const on = base > -100 && Math.sin(Date.now() / 1700) > -0.35;
+			const target = on ? base + (Math.random() - 0.5) * 7 : FLOOR + (Math.random() - 0.5) * 5;
+			this.setState({ lvl: this.state.lvl * 0.55 + target * 0.45 });
+		}, 90);
+	}
+	componentWillUnmount() { clearInterval(this.timer); }
+	renderVals() {
+		const listening = this.get('listening'), sqAuto = this.get('sqAuto');
+		const sq = sqAuto ? FLOOR + 6 : this.get('sq');
+		const lvl = this.state.lvl;
+		const off = sq <= -120;
+		const open = off || lvl > sq;
+		const digital = this.get('digital'), src = this.get('src');
+		const playsDigital = src === 'digital' || (src === 'auto' && digital);
+		const expanded = this.props.onToggle ? !!this.props.expanded : this.state.open;
+		const agc = this.get('agc'), de = this.get('deemph');
+		const rec = this.get('rec');
+		const flag = (k, label, sub) => ({ label, sub, ...sw(this.get(k)), pick: () => this.set(k, !this.get(k)) });
+		return {
+			dir: this.props.direction === 'up' ? 'column-reverse' : 'column',
+			width: expanded ? '420px' : '340px',
+			expanded,
+			chev: this.props.direction === 'up' ? (expanded ? 180 : 0) : (expanded ? 0 : 180),
+			chipBg: expanded ? '#192b24' : 'transparent',
+			toggle: () => this.props.onToggle ? this.props.onToggle() : this.setState({ open: !this.state.open }),
+			listening,
+			listenLabel: listening ? 'Stop listening' : 'Listen',
+			toggleListen: () => this.set('listening', !listening),
+			btnBg: listening ? '#7becc7' : 'transparent',
+			btnFg: listening ? '#111c19' : '#7becc7',
+			btnBorder: listening ? '#7becc7' : '#2c443b',
+			title: !listening ? 'Listen' : open ? 'Listening' : 'Squelched',
+			subtitle: !listening ? 'Audio is off' : playsDigital ? (digital ? 'DMR voice · ' + this.get('call') : 'Waiting for digital voice') : this.get('modeLabel') + ' audio',
+			lvlPct: pc(lvl),
+			lvlColor: open && listening ? '#7becc7' : '#52645d',
+			meterFill: open ? 'rgba(123,236,199,.55)' : 'rgba(82,100,93,.6)',
+			lvlText: dbt(lvl),
+			sq,
+			sqPct: pc(sq),
+			sqText: off ? 'Squelch off' : (sqAuto ? 'Auto · ' : 'Threshold ') + dbt(sq),
+			sqState: off ? 'Off' : open ? 'Open' : 'Closed',
+			stateBg: open ? 'rgba(123,236,199,.14)' : '#192b24',
+			stateFg: open ? '#7becc7' : '#8ba598',
+			sqAuto,
+			autoSq: () => this.set('sqAuto', !sqAuto),
+			offSq: () => { this.set('sqAuto', false); this.set('sq', -120); },
+			onSq: e => { this.set('sqAuto', false); this.set('sq', Number(e.target.value)); },
+			autoBorder: sqAuto ? 'rgba(123,236,199,.6)' : '#2c443b',
+			autoBg: sqAuto ? 'rgba(123,236,199,.12)' : 'transparent',
+			autoFg: sqAuto ? '#7becc7' : '#b9cac1',
+			vol: this.get('vol'),
+			onVol: e => this.set('vol', Number(e.target.value)),
+			srcs: [['auto', 'Auto'], ['analog', 'Analog'], ['digital', 'Decoded voice']].map(([id, label]) => ({ label, ...seg(src, id), pick: () => this.set('src', id) })),
+			srcHint: playsDigital ? (digital ? 'DMR detected. Playing decoded voice, slot 1.' : 'No digital voice on this channel yet.') : src === 'auto' ? 'No digital voice detected. Playing ' + this.get('modeLabel') + ' audio.' : 'Playing demodulated ' + this.get('modeLabel') + ' audio.',
+			hasTone: !!this.get('tone'),
+			toneText: this.get('tone') || '',
+			toneSq: !!this.get('toneSq'),
+			toneSub: this.get('toneSq') ? 'Opens only for ' + this.get('tone') + '. Other users on this channel stay silent.' : 'Open only for this tone, ignore other users sharing the channel.',
+			toneTrack: this.get('toneSq') ? '#7becc7' : '#2c443b', toneKnob: this.get('toneSq') ? 18 : 2,
+			toggleToneSq: () => this.set('toneSq', !this.get('toneSq')),
+			segs: [
+				{ label: 'Level control', opts: [['off', 'Off'], ['slow', 'Slow'], ['fast', 'Fast']].map(([id, label]) => ({ label, ...seg(agc, id), pick: () => this.set('agc', id) })) },
+				{ label: 'De-emphasis', opts: [['off', 'Off'], ['50', '50 µs'], ['75', '75 µs']].map(([id, label]) => ({ label, ...seg(de, id), pick: () => this.set('deemph', id) })) }
+			],
+			toggles: [
+				flag('hp', 'Cut low rumble', 'High-pass at 300 Hz'),
+				flag('nr', 'Noise reduction', 'Softens hiss between words')
+			],
+			rec,
+			recLabel: rec ? 'Recording · 0:07' : 'Record audio',
+			toggleRec: () => this.set('rec', !rec),
+			recBorder: rec ? 'rgba(255,122,107,.6)' : '#2c443b',
+			recBg: rec ? 'rgba(255,122,107,.12)' : 'transparent'
+		};
+	}
+}
+</script>
+</body>
+</html>

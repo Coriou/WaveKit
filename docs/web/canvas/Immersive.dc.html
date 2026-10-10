@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WaveKit — Immersive shell</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer}
+button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-offset:2px}
+.wk-ghost:hover{background:#192b24;color:#f4f7f5}
+@media (max-width:1100px){.wk-float{display:none}}
+@media (max-width:760px){.wk-dock{display:none}}
+</style>
+</helmet>
+<div style="position: relative; height: 100vh; min-height: 760px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+	<dc-import name="Spectrum" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" hint-size="100%,100%"></dc-import>
+
+	<div style="position: absolute; top: 16px; left: 16px; z-index: 3">
+		<dc-import name="Tuner" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hint-size="440px,56px"></dc-import>
+	</div>
+
+	<div style="position: absolute; top: 16px; right: 16px; z-index: 3">
+		<dc-import name="Receiver" values="{{rxVals}}" on-set="{{set}}" expanded="{{rxOpen}}" on-toggle="{{toggleRx}}" hint-size="300px,56px"></dc-import>
+	</div>
+
+	<sc-if value="{{showCard}}" hint-placeholder-val="{{true}}">
+		<div class="wk-float" style="position: absolute; right: 16px; bottom: 100px; width: 320px; z-index: 1">
+			<dc-import name="Tuned" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" hint-size="320px,300px"></dc-import>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
+		<div class="wk-float" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: {{actW}}; z-index: 4; transition: width .25s ease">
+			<dc-import name="Activity" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
+		</div>
+	</sc-if>
+
+	<div style="position: absolute; left: 16px; bottom: 20px; z-index: 3">
+		<dc-import name="Listen" values="{{listenVals}}" on-set="{{set}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" hint-size="340px,64px"></dc-import>
+	</div>
+
+	<nav class="wk-dock" aria-label="Primary" style="position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); height: 60px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-radius: 20px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); z-index: 2">
+		<sc-for list="{{nav}}" as="item" hint-placeholder-count="5">
+			<button class="wk-ghost" aria-label="{{item.label}}" onClick="{{item.pick}}" style="height: 44px; padding: 0 12px; border-radius: 12px; display: flex; align-items: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+				<sc-if value="{{item.on}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
+			</button>
+		</sc-for>
+		<div style="width: 1px; height: 26px; background: #2c443b; margin: 0 4px"></div>
+		<button class="wk-ghost" onClick="{{openPal}}" aria-haspopup="dialog" aria-expanded="{{palOpen}}" aria-label="Commands (⌘K)" style="height: 44px; padding: 0 12px; border-radius: 12px; display: flex; align-items: center; gap: 6px; color: #8ba598; font-size: 13px">
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9a2 2 0 1 1 2 -2v10a2 2 0 1 1 -2 -2h10a2 2 0 1 1 -2 2v-10a2 2 0 1 1 2 2h-10"></path></svg>K
+		</button>
+	</nav>
+
+	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+		<div role="status" style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 14px; background: rgba(25,43,36,.88); border: 1px solid rgba(123,236,199,.18); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13.5px">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+			<span>{{toastText}}</span>
+			<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
+				<button onClick="{{undo}}" style="height: 32px; padding: 0 12px; border-radius: 9px; background: rgba(123,236,199,.14); color: #7becc7; font-weight: 700; font-size: 13px">Undo</button>
+			</sc-if>
+			<sc-if value="{{noUndo}}" hint-placeholder-val="{{false}}"><span style="width: 10px"></span></sc-if>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{palOpen}}" hint-placeholder-val="{{false}}">
+		<div style="position: absolute; inset: 0; z-index: 10">
+			<dc-import name="Palette" values="{{palVals}}" recent="{{recent}}" on-commit="{{commit}}" on-preview="{{preview}}" on-nav="{{goNav}}" on-activity="{{goActivity}}" on-used="{{used}}" on-close="{{closePal}}" hint-size="100%,100%"></dc-import>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+const DETECTED = { 161150000: 'DMR · TG 2081', 163087500: 'P25 · TG 1201', 160450000: 'POCSAG pager', 160625000: 'NFM voice', 161975000: 'AIS channel A', 162025000: 'AIS channel B', 156800000: 'Marine ch 16', 144800000: 'APRS', 433920000: 'ISM sensors', 868300000: 'ISM 868 sensors', 868950000: 'wM-Bus meters', 869525000: 'Meshtastic', 446006250: 'PMR446 ch 1', 118100000: 'Airband tower', 131725000: 'ACARS', 136975000: 'VDL2', 93500000: 'FM broadcast', 1090000000: 'ADS-B' };
+const TONE = { 160625000: 'CTCSS 88.5 Hz', 446006250: 'CTCSS 77.0 Hz', 161425000: 'DCS 023N', 145637500: 'CTCSS 123.0 Hz' };
+const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {
+			freq: 161150000, mode: 'NFM', bw: 12500, step: 12500,
+			rate: 2.4, gainIdx: 20, gainAuto: false, rtlAgc: false, biasT: false, offsetTuning: false, ppm: 0, direct: 'off', dcBlock: true, iqCorr: false,
+			listening: true, toneSq: false, vol: 72, sq: -102, sqAuto: true, src: 'auto', agc: 'slow', deemph: 'off', hp: true, nr: false, rec: false,
+			open: null, nav: 'spectrum', palette: 'phosphor',
+			pal: false, preview: null, actCmd: null, toast: null,
+			recent: [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'palette:amber', n: 2 }],
+			saved: [{ f: 161150000, label: 'DMR repeater', group: 'Local', mode: 'NFM', bw: 12500 }, { f: 161975000, label: 'AIS channel A', group: 'Marine', mode: 'NFM', bw: 25000 }, { f: 156800000, label: 'Marine ch 16', group: 'Marine', mode: 'NFM', bw: 12500 }]
+		};
+		this.set = (k, v) => this.setState({ [k]: v });
+		this.setBw = bw => this.setState({ bw });
+		this.closeActivity = () => this.setState({ nav: 'spectrum' });
+		this.setActMode = m => this.setState({ actMode: m });
+		this.tune = f => this.setState({ freq: f });
+		const tog = id => () => this.setState({ open: this.state.open === id ? null : id });
+		this.openPal = () => this.setState({ pal: true, preview: null });
+		this.closePal = () => this.setState({ pal: false, preview: null });
+		this.preview = p => this.setState({ preview: p });
+		this.commit = (patch, text) => {
+			const prev = patch ? Object.keys(patch).reduce((o, k) => { o[k] = this.state[k]; return o; }, {}) : null;
+			clearTimeout(this.tt);
+			this.setState(Object.assign({}, patch || {}, { pal: false, preview: null, toast: text ? { text, prev } : null }));
+			this.tt = setTimeout(() => this.setState({ toast: null }), 6000);
+		};
+		this.undo = () => { const t = this.state.toast; if (t && t.prev) this.setState(Object.assign({}, t.prev, { toast: null })); };
+		this.goNav = id => this.setState({ nav: id, pal: false, preview: null, open: null });
+		this.goActivity = cmd => this.setState({ nav: 'activity', actCmd: Object.assign({ n: Date.now() }, cmd), pal: false, preview: null, open: this.state.open === 'rx' ? null : this.state.open });
+		this.cardAction = (id, f) => {
+			const fv = (f / 1e6).toFixed(3), tok = [{ type: 'freq', v: fv, kind: 'Frequency', value: fv + ' MHz' }];
+			if (id === 'activity' || id === 'open') this.goActivity({ tokens: tok });
+			else if (id === 'replay') this.goActivity({ tokens: tok, play: true });
+			else if (id === 'map') this.goNav('map');
+			else if (id === 'scan') this.goNav('scanner');
+			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
+		};
+		this.used = id => {
+			const r = this.state.recent, old = r.find(x => x.id === id);
+			this.setState({ recent: [{ id, n: (old ? old.n : 0) + 1 }].concat(r.filter(x => x.id !== id)).slice(0, 12) });
+		};
+		this.toggleTuner = tog('tuner');
+		this.toggleRx = tog('rx');
+		this.toggleListen = tog('listen');
+	}
+	componentWillUnmount() { clearTimeout(this.tt); }
+	renderVals() {
+		const base = this.state;
+		const s = Object.assign({}, base, base.preview || {});
+		const NAV = [
+			{ id: 'spectrum', label: 'Spectrum', d: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
+			{ id: 'activity', label: 'Activity', d: ['M3 12h4l3 8l4 -16l3 8h4'] },
+			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
+			{ id: 'scanner', label: 'Scanner', d: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'] },
+			{ id: 'recordings', label: 'Recordings', d: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'] }
+		];
+		return {
+			freq: s.freq, bw: s.bw, step: s.step,
+			wfPalette: s.palette,
+			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,
+			palVals: base, recent: base.recent,
+			commit: this.commit, preview: this.preview, cardAction: this.cardAction, goNav: this.goNav, goActivity: this.goActivity, used: this.used,
+			actCmd: base.actCmd,
+			hasToast: !!base.toast, toastText: base.toast ? base.toast.text : '', canUndo: !!(base.toast && base.toast.prev), noUndo: !!(base.toast && !base.toast.prev), undo: this.undo,
+			tune: this.tune, set: this.set,
+			specH: 300, inset: 84,
+			sqLine: s.listening ? (s.sqAuto ? -102 : s.sq) : -200,
+			tunerVals: { freq: s.freq, mode: s.mode, bw: s.bw, step: s.step, saved: s.saved, detected: DETECTED[s.freq] },
+			setBw: this.setBw,
+			rateHz: s.rate * 1e6,
+			savedMarks: s.saved.map(x => ({ f: x.f, label: x.label })),
+			showActivity: s.nav === 'activity' && s.open !== 'rx',
+			closeActivity: this.closeActivity,
+			actMode: s.actMode || 'drawer',
+			setActMode: this.setActMode,
+			actW: (s.actMode || 'drawer') === 'wide' ? 'min(1240px, calc(100% - 32px))' : '420px',
+			rxVals: { rate: s.rate, gainIdx: s.gainIdx, gainAuto: s.gainAuto, rtlAgc: s.rtlAgc, biasT: s.biasT, offsetTuning: s.offsetTuning, ppm: s.ppm, direct: s.direct, dcBlock: s.dcBlock, iqCorr: s.iqCorr },
+			listenVals: {
+				listening: s.listening, vol: s.vol, sq: s.sq, sqAuto: s.sqAuto, src: s.src, agc: s.agc, deemph: s.deemph, hp: s.hp, nr: s.nr, rec: s.rec,
+				toneSq: s.toneSq, tone: TONE[s.freq] || '',
+				base: LEVEL[s.freq] ?? -112, digital: s.freq === 161150000, call: 'TG 2081 · radio 2081045', modeLabel: s.mode
+			},
+			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
+			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
+			showCard: s.open !== 'rx' && s.nav !== 'activity',
+			nav: NAV.map(n => {
+				const on = n.id === s.nav;
+				return { ...n, on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598', pick: () => this.setState({ nav: n.id }) };
+			})
+		};
+	}
+}
+</script>
+</body>
+</html>

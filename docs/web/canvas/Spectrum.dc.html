@@ -1,0 +1,547 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Spectrum and waterfall</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0}
+</style>
+</helmet>
+<div style="position: absolute; inset: 0; display: flex; flex-direction: column; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden; user-select: none; touch-action: none">
+	<div ref="{{refs.box}}" onPointerDown="{{onDown}}" onPointerMove="{{onMove}}" onPointerUp="{{onUp}}" onPointerCancel="{{onUp}}" onPointerLeave="{{onLeave}}" style="position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; cursor: {{cursor}}">
+		<div style="height: {{topInset}}px; flex: none"></div>
+		<div style="position: relative; height: {{specH}}px; flex: none">
+			<canvas ref="{{refs.spec}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
+			<sc-for list="{{dbLabels}}" as="l" hint-placeholder-count="4">
+				<span style="position: absolute; left: 10px; top: {{l.top}}px; transform: translateY(-50%); font-size: 11px; color: rgba(185,202,193,.5); font-variant-numeric: tabular-nums; pointer-events: none">{{l.text}}</span>
+			</sc-for>
+			<sc-for list="{{markers}}" as="m" hint-placeholder-count="4">
+				<div style="position: absolute; left: {{m.left}}%; top: {{m.top}}px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center">
+					<button onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="font: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px; border-radius: 9px; background: rgba(17,28,25,.55); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08); color: #f4f7f5; font-size: 12px; white-space: nowrap; backdrop-filter: blur(10px) saturate(160%)">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+						<span style="font-weight: 700">{{m.label}}</span>
+						<span style="color: #8ba598">{{m.sub}}</span>
+					</button>
+					<span style="width: 1px; height: 12px; background: rgba(123,236,199,.45)"></span>
+				</div>
+			</sc-for>
+			<sc-if value="{{hasSq}}" hint-placeholder-val="{{false}}">
+				<div style="position: absolute; left: {{vfoLeft}}%; top: {{sqTop}}px; width: max(180px, {{vfoWidth}}%); transform: translateX(-50%); border-top: 1px dashed rgba(242,184,75,.75); pointer-events: none">
+					<span style="position: absolute; right: 0; top: -17px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; color: #f2b84b">SQUELCH</span>
+				</div>
+			</sc-if>
+			<div style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 4px; border-radius: 11px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(12px) saturate(160%)" onPointerDown="{{stop}}">
+				<button onClick="{{zoomOut}}" aria-label="Zoom out" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 16px">−</button>
+				<div style="position: relative; width: 84px; height: 6px; border-radius: 3px; background: #22362f" aria-hidden="true">
+					<div style="position: absolute; top: 0; bottom: 0; left: {{ovLeft}}%; width: max(3px, {{ovWidth}}%); border-radius: 3px; background: #7becc7"></div>
+				</div>
+				<button onClick="{{zoomIn}}" aria-label="Zoom in" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 16px">+</button>
+				<button onClick="{{zoomFit}}" aria-label="Show the whole capture" style="font: inherit; cursor: pointer; height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 44px">{{zoomText}}</button>
+			</div>
+		</div>
+		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid #1a2b25; background: #0b1512; overflow: hidden">
+			<sc-for list="{{ticks}}" as="t" hint-placeholder-count="12">
+				<span style="position: absolute; left: {{t.left}}%; top: 8px; transform: translateX(-50%); font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{t.text}}</span>
+			</sc-for>
+			<sc-if value="{{vfoVisible}}" hint-placeholder-val="{{true}}">
+				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 5px; background: #7becc7; color: #111c19; font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
+			</sc-if>
+		</div>
+		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid #1a2b25; overflow: hidden">
+			<sc-for list="{{bands}}" as="b" hint-placeholder-count="3">
+				<div style="position: absolute; left: {{b.left}}%; width: {{b.width}}%; top: 4px; height: 16px; border-top: 2px solid rgba(123,236,199,.28); box-sizing: border-box">
+					<span style="position: absolute; left: 6px; top: 1px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8ba598; white-space: nowrap">{{b.label}}</span>
+				</div>
+			</sc-for>
+			<sc-for list="{{saved}}" as="s" hint-placeholder-count="2">
+				<button onPointerDown="{{stop}}" onClick="{{s.pick}}" aria-label="Saved: {{s.label}}" style="font: inherit; cursor: pointer; position: absolute; left: {{s.left}}%; top: 3px; height: 18px; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 4px; border: 0; border-radius: 5px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 11px; font-weight: 700; white-space: nowrap">
+					<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg>{{s.label}}
+				</button>
+			</sc-for>
+		</div>
+		<div style="position: relative; flex: 1; min-height: 0">
+			<canvas ref="{{refs.wf}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
+		</div>
+
+		<sc-if value="{{vfoVisible}}" hint-placeholder-val="{{true}}">
+			<div style="position: absolute; top: {{topInset}}px; bottom: 0; left: {{vfoLeft}}%; width: max(7px, {{vfoWidth}}%); transform: translateX(-50%); background: rgba(123,236,199,.10); pointer-events: none">
+				<div onPointerDown="{{grabVfo}}" title="Drag to tune" style="position: absolute; top: 0; bottom: 0; left: 0; right: 0; pointer-events: auto; cursor: grab"></div>
+				<div style="position: absolute; top: 0; bottom: 0; left: 50%; width: 1px; background: rgba(123,236,199,.75); pointer-events: none"></div>
+				<sc-if value="{{edges}}" hint-placeholder-val="{{false}}">
+					<div onPointerDown="{{grabL}}" title="Drag to change bandwidth" style="position: absolute; top: 0; bottom: 0; left: -5px; width: 10px; pointer-events: auto; cursor: ew-resize; display: flex; justify-content: center"><span style="width: 2px; height: 100%; background: rgba(123,236,199,.55)"></span></div>
+					<div onPointerDown="{{grabR}}" title="Drag to change bandwidth" style="position: absolute; top: 0; bottom: 0; right: -5px; width: 10px; pointer-events: auto; cursor: ew-resize; display: flex; justify-content: center"><span style="width: 2px; height: 100%; background: rgba(123,236,199,.55)"></span></div>
+				</sc-if>
+			</div>
+		</sc-if>
+		<sc-if value="{{hovering}}" hint-placeholder-val="{{false}}">
+			<div style="position: absolute; top: {{topInset}}px; bottom: 0; left: {{hoverLeft}}%; width: 1px; background: rgba(244,247,245,.28); pointer-events: none">
+				<span style="position: absolute; top: 10px; left: 8px; padding: 3px 8px; border-radius: 7px; background: rgba(17,28,25,.7); border: 1px solid rgba(123,236,199,.14); backdrop-filter: blur(10px); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
+			</div>
+		</sc-if>
+	</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["phosphor","amber","mono"],"default":"phosphor"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"$preview":{"width":1440,"height":640}}'>
+const BINS = 4096, HIST = 900, RATE = 24, MIN_SPAN = 100e3, LO = 24e6, HI = 1.9e9;
+const ICON = {
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	analog: ['M3 12c2 -6 4 -6 6 0s4 6 6 0s4 -6 6 0'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0']
+};
+const SIG = [
+	// FM broadcast: wide, always on, no decoder (audio only)
+	{ f: 88.600e6, bw: 180e3, p: -60, kind: 'wfm' },
+	{ f: 93.500e6, bw: 180e3, p: -50, kind: 'wfm', cat: 'analog', label: 'WFM', sub: 'broadcast' },
+	{ f: 96.200e6, bw: 180e3, p: -63, kind: 'wfm' },
+	{ f: 99.800e6, bw: 180e3, p: -54, kind: 'wfm' },
+	{ f: 104.300e6, bw: 180e3, p: -61, kind: 'wfm' },
+	// Airband voice (AM: carrier only while keyed) and ATIS (continuous)
+	{ f: 118.100e6, bw: 6e3, p: -66, kind: 'am', on: 4, per: 14, ph: 2, cat: 'analog', label: 'AM', sub: 'Tower' },
+	{ f: 119.700e6, bw: 6e3, p: -74, kind: 'am', on: 3, per: 19, ph: 6 },
+	{ f: 124.550e6, bw: 6e3, p: -78, kind: 'am', on: 5, per: 23, ph: 11 },
+	{ f: 127.300e6, bw: 6e3, p: -80, kind: 'am', on: 1, per: 1 },
+	// ACARS (AM-MSK bursts) and VDL2 (D8PSK bursts)
+	{ f: 131.525e6, bw: 5e3, p: -77, kind: 'burst', on: 0.35, per: 13, ph: 4 },
+	{ f: 131.725e6, bw: 5e3, p: -64, kind: 'burst', on: 0.4, per: 6, ph: 1, cat: 'aviation', label: 'ACARS', sub: '2400 bd' },
+	{ f: 131.825e6, bw: 5e3, p: -79, kind: 'burst', on: 0.3, per: 17, ph: 9 },
+	{ f: 136.725e6, bw: 16e3, p: -78, kind: 'burst', on: 0.25, per: 9, ph: 3 },
+	{ f: 136.775e6, bw: 16e3, p: -75, kind: 'burst', on: 0.25, per: 11, ph: 7 },
+	{ f: 136.875e6, bw: 16e3, p: -73, kind: 'burst', on: 0.25, per: 7, ph: 2 },
+	{ f: 136.975e6, bw: 16e3, p: -66, kind: 'burst', on: 0.3, per: 4, ph: 0, cat: 'aviation', label: 'VDL2', sub: 'CPDLC' },
+	// 2 m amateur
+	{ f: 144.800e6, bw: 12e3, p: -63, kind: 'burst', on: 0.7, per: 9, ph: 1, cat: 'aprs', label: 'APRS', sub: '1200 bd' },
+	{ f: 145.500e6, bw: 11e3, p: -72, kind: 'voice', on: 3, per: 40, ph: 12 },
+	{ f: 145.6375e6, bw: 11e3, p: -68, kind: 'voice', on: 6, per: 30, ph: 18, cat: 'analog', label: 'Rptr', sub: 'CTCSS 123' },
+	// Marine VHF, paging, land mobile
+	{ f: 156.600e6, bw: 11e3, p: -71, kind: 'voice', on: 3, per: 12, ph: 7 },
+	{ f: 156.800e6, bw: 11e3, p: -62, kind: 'voice', on: 4, per: 15, ph: 3, cat: 'analog', label: 'Ch 16', sub: 'Marine' },
+	{ f: 160.450e6, bw: 12.5e3, p: -60, kind: 'burst', on: 1.4, per: 7, ph: 0.5, cat: 'paging', label: 'POCSAG', sub: '1200' },
+	{ f: 160.625e6, bw: 11e3, p: -65, kind: 'voice', on: 5, per: 11, ph: 2, cat: 'analog', label: 'NFM', sub: 'CTCSS 88.5' },
+	{ f: 160.900e6, bw: 2.5e3, p: -84, kind: 'steady' },
+	{ f: 161.150e6, bw: 9e3, p: -57, kind: 'tdma', on: 9, per: 13, ph: 0, cat: 'voice', label: 'DMR', sub: 'TG 2081' },
+	{ f: 161.425e6, bw: 11e3, p: -76, kind: 'voice', on: 3, per: 9, ph: 5, cat: 'analog', label: 'NFM', sub: 'DCS 023' },
+	{ f: 161.975e6, bw: 20e3, p: -61, kind: 'ais', ph: 0, cat: 'marine', label: 'AIS', sub: '14 vessels' },
+	{ f: 162.025e6, bw: 20e3, p: -63, kind: 'ais', ph: 0.9 },
+	{ f: 162.400e6, bw: 14e3, p: -70, kind: 'steady' },
+	{ f: 163.0875e6, bw: 11e3, p: -66, kind: 'voice', on: 5, per: 17, ph: 4, cat: 'voice', label: 'P25', sub: 'TG 1201' },
+	// UHF: LPD, ISM 433, PMR446, French pager network (not decoded here)
+	{ f: 433.075e6, bw: 11e3, p: -79, kind: 'voice', on: 2, per: 25, ph: 8 },
+	{ f: 433.920e6, bw: 60e3, p: -58, kind: 'burst', on: 0.3, per: 5, ph: 2, cat: 'sensors', label: 'ISM', sub: '433 sensors' },
+	{ f: 446.00625e6, bw: 11e3, p: -60, kind: 'voice', on: 6, per: 20, ph: 0, cat: 'analog', label: 'PMR 1', sub: 'voice' },
+	{ f: 446.03125e6, bw: 11e3, p: -71, kind: 'voice', on: 4, per: 27, ph: 9 },
+	{ f: 446.09375e6, bw: 11e3, p: -77, kind: 'voice', on: 2, per: 33, ph: 15 },
+	{ f: 466.025e6, bw: 12.5e3, p: -62, kind: 'burst', on: 1.2, per: 10, ph: 3 },
+	// SRD 868: LoRaWAN, rtl_433 sensors, wM-Bus meters, Meshtastic
+	{ f: 868.100e6, bw: 125e3, p: -80, kind: 'burst', on: 0.2, per: 8, ph: 5 },
+	{ f: 868.300e6, bw: 50e3, p: -70, kind: 'burst', on: 0.15, per: 6, ph: 1, cat: 'sensors', label: 'ISM', sub: '868 sensors' },
+	{ f: 868.950e6, bw: 60e3, p: -72, kind: 'burst', on: 0.1, per: 9, ph: 4, cat: 'sensors', label: 'wM-Bus', sub: 'meters' },
+	{ f: 869.525e6, bw: 250e3, p: -75, kind: 'burst', on: 0.4, per: 11, ph: 3, cat: 'mesh', label: 'LoRa', sub: 'Meshtastic' },
+	// ADS-B / Mode S: dense short pulses, about 2 MHz wide
+	{ f: 1090.000e6, bw: 2e6, p: -62, kind: 'pulse', cat: 'aircraft', label: 'ADS-B', sub: '34 aircraft' }
+];
+const BANDS = [
+	{ from: 87.5e6, to: 108e6, label: 'FM broadcast' },
+	{ from: 118e6, to: 131.4e6, label: 'Airband voice' },
+	{ from: 131.4e6, to: 137e6, label: 'Aviation data' },
+	{ from: 144e6, to: 146e6, label: '2 m amateur' },
+	{ from: 156e6, to: 161.9625e6, label: 'Marine VHF' },
+	{ from: 161.9625e6, to: 162.0375e6, label: 'AIS' },
+	{ from: 433.05e6, to: 434.79e6, label: 'ISM 433' },
+	{ from: 446.0e6, to: 446.2e6, label: 'PMR446' },
+	{ from: 466.0e6, to: 466.25e6, label: 'Pagers' },
+	{ from: 863e6, to: 870e6, label: 'SRD 868' },
+	{ from: 1089e6, to: 1091e6, label: 'ADS-B' }
+];
+const STEPS = [1e3, 2e3, 5e3, 10e3, 20e3, 25e3, 50e3, 100e3, 200e3, 250e3, 500e3, 1e6];
+const PAL = {
+	phosphor: [[0, [11, 21, 18]], [0.3, [13, 40, 34]], [0.5, [22, 115, 92]], [0.7, [62, 190, 150]], [0.86, [123, 236, 199]], [1, [244, 247, 245]]],
+	amber: [[0, [11, 21, 18]], [0.35, [40, 34, 54]], [0.6, [130, 60, 82]], [0.82, [242, 184, 75]], [1, [255, 246, 222]]],
+	mono: [[0, [11, 21, 18]], [0.55, [70, 92, 84]], [1, [244, 247, 245]]]
+};
+const yOf = (db, h) => (-40 - db) / 80 * h;
+function tickList(l, span, w) {
+	const want = Math.max(4, Math.floor(w / 120));
+	const step = STEPS.find(s => span / s <= want) || 1e6;
+	const dec = step >= 1e6 ? 0 : step >= 100e3 ? 1 : step >= 10e3 ? 2 : 3;
+	const out = [];
+	for (let f = Math.ceil(l / step) * step; f < l + span; f += step) out.push({ f, text: (f / 1e6).toFixed(dec) });
+	return out;
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		const cap = props.sampleRate ?? 2.4e6;
+		const c = 161.5e6;
+		this.state = { vfo: 161150000, hover: null, center: c, viewL: c - cap / 2, viewSpan: cap, dragging: null };
+		this.hist = new Float32Array(HIST * BINS);
+		this.histC = new Float64Array(HIST);
+		this.head = -1; this.count = 0; this.maps = new Map(); this.dirty = true; this.wheelAcc = 0;
+		this.onWheel = this.onWheel.bind(this);
+		this.refsObj = {
+			box: el => { if (el && el !== this.boxEl) el.addEventListener('wheel', this.onWheel, { passive: false }); this.boxEl = el; },
+			spec: el => { this.specEl = el; },
+			wf: el => { this.wfEl = el; }
+		};
+		this.frame = this.frame.bind(this);
+		this.stop = e => e.stopPropagation();
+		const grab = kind => e => { this.drag = { kind, x: e.clientX, moved: false }; };
+		this.grabVfo = grab('vfo'); this.grabL = grab('edge'); this.grabR = grab('edge');
+		this.onDown = e => {
+			if (e.button !== 0 || !this.boxEl) return;
+			if (!this.drag) this.drag = { kind: 'pan', x: e.clientX, moved: false, viewL: this.state.viewL };
+			this.boxEl.setPointerCapture(e.pointerId);
+			this.setState({ dragging: this.drag.kind });
+		};
+		this.onMove = e => {
+			const d = this.drag;
+			if (d) {
+				if (Math.abs(e.clientX - d.x) > 3) d.moved = true;
+				if (!d.moved) return;
+				if (d.kind === 'pan') {
+					const w = this.boxEl.clientWidth;
+					this.setView(d.viewL - (e.clientX - d.x) / w * this.state.viewSpan, this.state.viewSpan);
+				} else if (d.kind === 'vfo') {
+					const step = this.props.step ?? 12500;
+					this.tuneTo(Math.round(this.fAt(e.clientX) / step) * step);
+				} else if (d.kind === 'edge' && this.props.onBandwidth) {
+					const bw = Math.round(Math.abs(this.fAt(e.clientX) - this.vfo()) * 2 / 100) * 100;
+					this.props.onBandwidth(Math.max(500, Math.min(250000, bw)));
+				}
+				return;
+			}
+			this.hoverAt(e.clientX);
+		};
+		this.onUp = e => {
+			const d = this.drag;
+			this.drag = null;
+			if (this.boxEl && this.boxEl.hasPointerCapture && this.boxEl.hasPointerCapture(e.pointerId)) this.boxEl.releasePointerCapture(e.pointerId);
+			this.setState({ dragging: null });
+			if (d && d.kind === 'pan' && !d.moved && e.type === 'pointerup') this.clickTune(e.clientX);
+		};
+		this.onLeave = () => { if (!this.drag) this.setState({ hover: null }); };
+		this.zoomBy = k => {
+			const s = this.state, v = this.vfo();
+			const anchor = v >= s.viewL && v <= s.viewL + s.viewSpan ? v : s.viewL + s.viewSpan / 2;
+			const span = this.clampSpan(s.viewSpan * k);
+			const frac = (anchor - s.viewL) / s.viewSpan;
+			this.setView(anchor - frac * span, span);
+		};
+		this.zoomIn = () => this.zoomBy(0.5);
+		this.zoomOut = () => this.zoomBy(2);
+		this.zoomFit = () => { const cap = this.cap(); this.setView(this.state.center - cap / 2, cap); };
+	}
+	cap() { return this.props.sampleRate ?? 2.4e6; }
+	vfo() { return this.props.vfo ?? this.state.vfo; }
+	clampSpan(span) { return Math.min(this.cap(), Math.max(MIN_SPAN, span)); }
+	fAt(clientX) {
+		const r = this.boxEl.getBoundingClientRect();
+		return this.state.viewL + (clientX - r.left) / r.width * this.state.viewSpan;
+	}
+	setView(viewL, span, center) {
+		const cap = this.cap();
+		span = this.clampSpan(span);
+		let c = center ?? this.state.center;
+		if (viewL < c - cap / 2) c = viewL + cap / 2;
+		if (viewL + span > c + cap / 2) c = viewL + span - cap / 2;
+		c = Math.min(HI - cap / 2, Math.max(LO + cap / 2, Math.round(c / 1000) * 1000));
+		viewL = Math.min(c + cap / 2 - span, Math.max(c - cap / 2, viewL));
+		this.dirty = true;
+		this.setState({ center: c, viewL, viewSpan: span });
+	}
+	ensureVisible(f) {
+		const cap = this.cap(), s = this.state, margin = cap * 0.02;
+		if (f < s.center - cap / 2 + margin || f > s.center + cap / 2 - margin) this.setView(f - s.viewSpan / 2, s.viewSpan, f);
+		else if (f < s.viewL || f > s.viewL + s.viewSpan) this.setView(f - s.viewSpan / 2, s.viewSpan);
+	}
+	tuneTo(f) {
+		f = Math.min(HI, Math.max(LO, f));
+		if (this.props.onTune) this.props.onTune(f);
+		else { this.setState({ vfo: f }); this.ensureVisible(f); }
+	}
+	clickTune(x) {
+		const f = this.fAt(x), tol = this.state.viewSpan / 60;
+		let best = null;
+		for (const s of SIG) if (Math.abs(s.f - f) < tol && (!best || Math.abs(s.f - f) < Math.abs(best.f - f))) best = s;
+		const step = this.props.step ?? 12500;
+		this.tuneTo(best ? best.f : Math.round(f / step) * step);
+	}
+	hoverAt(x) {
+		if (!this.boxEl) return;
+		const r = this.boxEl.getBoundingClientRect();
+		const frac = Math.min(1, Math.max(0, (x - r.left) / r.width));
+		const f = this.state.viewL + frac * this.state.viewSpan;
+		let db = null;
+		if (this.avg) {
+			const b = Math.floor((f - (this.state.center - this.cap() / 2)) / (this.cap() / BINS));
+			if (b >= 0 && b < BINS) db = Math.round(this.avg[b]);
+		}
+		this.setState({ hover: { left: frac * 100, text: (f / 1e6).toFixed(4) + ' MHz' + (db === null ? '' : '  ·  ' + String(db).replace('-', '−') + ' dB') } });
+	}
+	onWheel(e) {
+		e.preventDefault();
+		const s = this.state;
+		if (e.ctrlKey || e.metaKey) {
+			const f0 = this.fAt(e.clientX), frac = (f0 - s.viewL) / s.viewSpan;
+			const span = this.clampSpan(s.viewSpan * Math.exp(e.deltaY * 0.004));
+			this.setView(f0 - frac * span, span);
+		} else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+			const dx = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+			this.setView(s.viewL + dx / this.boxEl.clientWidth * s.viewSpan, s.viewSpan);
+		} else {
+			this.wheelAcc += e.deltaY;
+			if (Math.abs(this.wheelAcc) < 40) return;
+			const step = this.props.step ?? 12500;
+			const dir = this.wheelAcc < 0 ? 1 : -1;
+			this.wheelAcc = 0;
+			this.tuneTo(Math.round((this.vfo() + dir * step) / step) * step);
+		}
+	}
+	componentDidMount() { this.raf = requestAnimationFrame(this.frame); }
+	componentWillUnmount() { cancelAnimationFrame(this.raf); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
+	componentDidUpdate(prev) {
+		if ((prev.sampleRate ?? 2.4e6) !== this.cap()) {
+			this.count = 0; this.avg = null;
+			this.setView(this.state.center - this.cap() / 2, this.cap());
+		} else if (this.props.vfo != null && prev.vfo !== this.props.vfo && !(this.drag && this.drag.kind === 'vfo')) {
+			this.ensureVisible(this.props.vfo);
+		}
+	}
+
+	active(s, t) {
+		const ph = s.ph || 0;
+		if (s.kind === 'steady' || s.kind === 'wfm') return true;
+		if (s.kind === 'pulse') return Math.random() < 0.5;
+		if (s.kind === 'ais') return ((t + ph) * 1000) % 2300 < 45;
+		const on = ((t + ph) % s.per) < s.on;
+		if (s.kind === 'tdma') return on && Math.random() > 0.12;
+		return on;
+	}
+	gen(t, center, out) {
+		const cap = this.cap(), binHz = cap / BINS, capL = center - cap / 2;
+		for (let i = 0; i < BINS; i++) {
+			const r = Math.random() + Math.random() + Math.random() - 1.5;
+			const x = (i / BINS - 0.5) * 2;
+			out[i] = -113 + r * 3.4 - 9 * Math.pow(Math.abs(x), 12);
+		}
+		out[BINS / 2] = Math.max(out[BINS / 2], -93 + Math.random() * 2);
+		for (const s of SIG) {
+			const reach = s.bw * 1.5;
+			if (s.f + reach < capL || s.f - reach > capL + cap || !this.active(s, t)) continue;
+			const half = s.bw / 2;
+			const i0 = Math.max(0, Math.floor((s.f - reach - capL) / binHz));
+			const i1 = Math.min(BINS - 1, Math.ceil((s.f + reach - capL) / binHz));
+			for (let i = i0; i <= i1; i++) {
+				const d = Math.abs(capL + (i + 0.5) * binHz - s.f);
+				let v;
+				if (s.kind === 'am' && d < binHz * 1.5) v = s.p + 7 + Math.random();
+				else if (s.kind === 'am' && d <= half) v = s.p - 9 - 9 * (d / half) + (Math.random() - 0.5) * 7;
+				else if (s.kind === 'wfm' && d <= half) v = s.p - 5 * (d / half) * (d / half) + (Math.random() - 0.5) * 6 + (Math.abs(d - 19e3) < binHz ? 3 : 0);
+				else if (s.kind === 'pulse' && d <= half) v = s.p - 14 * (d / half) * (d / half) + (Math.random() - 0.5) * 8;
+				else if (d <= half) v = s.kind === 'steady' ? s.p + (Math.random() - 0.5) : s.p - 4 * (d / half) * (d / half) + (Math.random() - 0.5) * 5;
+				else v = s.p - 10 - 34 * (d - half) / s.bw + (Math.random() - 0.5) * 3;
+				if (v > out[i]) out[i] = v;
+			}
+		}
+	}
+	buildLut() {
+		const stops = PAL[this.props.palette] || PAL.phosphor;
+		const lut = new Uint8ClampedArray(256 * 3);
+		for (let i = 0; i < 256; i++) {
+			const t = i / 255;
+			let k = 0;
+			while (k < stops.length - 2 && t > stops[k + 1][0]) k++;
+			const a = stops[k], b = stops[k + 1];
+			const u = Math.min(1, Math.max(0, (t - a[0]) / (b[0] - a[0])));
+			for (let j = 0; j < 3; j++) lut[i * 3 + j] = a[1][j] + (b[1][j] - a[1][j]) * u;
+		}
+		this.lut = lut; this.lutName = this.props.palette;
+	}
+	mapFor(center) {
+		const s = this.state, key = center + '|' + s.viewL + '|' + s.viewSpan + '|' + this.w;
+		let m = this.maps.get(key);
+		if (m) return m;
+		if (this.maps.size > 64) this.maps.clear();
+		const cap = this.cap(), binHz = cap / BINS, capL = center - cap / 2, w = this.w;
+		const b0 = new Int32Array(w), b1 = new Int32Array(w);
+		for (let x = 0; x < w; x++) {
+			const fa = s.viewL + x / w * s.viewSpan, fb = s.viewL + (x + 1) / w * s.viewSpan;
+			let a = Math.floor((fa - capL) / binHz), b = Math.floor((fb - capL) / binHz);
+			if (b < a) b = a;
+			if (b < 0 || a >= BINS) { b0[x] = -1; continue; }
+			b0[x] = Math.max(0, a); b1[x] = Math.min(BINS - 1, b);
+		}
+		m = { b0, b1 };
+		this.maps.set(key, m);
+		return m;
+	}
+	paintRow(data, offset, src, srcOff, m) {
+		const lut = this.lut;
+		for (let x = 0; x < this.w; x++) {
+			const o = (offset + x) * 4;
+			if (m.b0[x] < 0) { data[o] = 7; data[o + 1] = 15; data[o + 2] = 13; data[o + 3] = 255; continue; }
+			let v = -200;
+			for (let b = m.b0[x]; b <= m.b1[x]; b++) { const q = src[srcOff + b]; if (q > v) v = q; }
+			v = (v + 112) / 60;
+			v = v < 0 ? 0 : v > 1 ? 1 : Math.pow(v, 1.15);
+			const k = (v * 255) | 0;
+			data[o] = lut[k * 3]; data[o + 1] = lut[k * 3 + 1]; data[o + 2] = lut[k * 3 + 2]; data[o + 3] = 255;
+		}
+	}
+	pushRow(t) {
+		this.head = (this.head + 1) % HIST;
+		const c = this.state.center;
+		this.histC[this.head] = c;
+		this.gen(t, c, this.row || (this.row = new Float32Array(BINS)));
+		this.hist.set(this.row, this.head * BINS);
+		this.count = Math.min(HIST, this.count + 1);
+	}
+	renderAll() {
+		const w = this.w, h = this.wh, img = this.wctx.createImageData(w, h);
+		for (let y = 0; y < h; y++) {
+			if (y >= this.count) { for (let x = 0; x < w; x++) { const o = (y * w + x) * 4; img.data[o] = 7; img.data[o + 1] = 15; img.data[o + 2] = 13; img.data[o + 3] = 255; } continue; }
+			const idx = (this.head - y + HIST) % HIST;
+			this.paintRow(img.data, y * w, this.hist, idx * BINS, this.mapFor(this.histC[idx]));
+		}
+		this.wctx.putImageData(img, 0, 0);
+		this.dirty = false;
+	}
+	resize() {
+		const dpr = Math.min(2, window.devicePixelRatio || 1);
+		const w = this.specEl.clientWidth, sh = this.specEl.clientHeight, wh = this.wfEl.clientHeight;
+		if (!w || !sh || !wh) return false;
+		if (w === this.w && sh === this.sh && wh === this.wh && dpr === this.dpr && this.lutName === this.props.palette) return true;
+		this.w = w; this.sh = sh; this.wh = wh; this.dpr = dpr;
+		this.buildLut();
+		this.maps.clear();
+		this.specEl.width = Math.round(w * dpr); this.specEl.height = Math.round(sh * dpr);
+		this.wfEl.width = w; this.wfEl.height = wh;
+		this.sctx = this.specEl.getContext('2d');
+		this.wctx = this.wfEl.getContext('2d');
+		this.rowImg = this.wctx.createImageData(w, 1);
+		const now = performance.now() / 1000;
+		if (this.count === 0) for (let y = Math.min(HIST, wh) - 1; y >= 0; y--) this.pushRow(now - y / RATE);
+		this.last = now;
+		this.dirty = true;
+		return true;
+	}
+	frame(ms) {
+		this.raf = requestAnimationFrame(this.frame);
+		if (!this.specEl || !this.wfEl || !this.resize()) return;
+		const t = ms / 1000;
+		if (this.count === 0) { for (let y = Math.min(HIST, this.wh) - 1; y >= 0; y--) this.pushRow(t - y / RATE); this.dirty = true; }
+		if (t - this.last > 1) this.last = t - 1 / RATE;
+		let rows = 0;
+		while (t - this.last >= 1 / RATE && rows < 4) {
+			this.last += 1 / RATE;
+			this.pushRow(this.last);
+			if (!this.dirty) {
+				this.wctx.drawImage(this.wfEl, 0, 0, this.w, this.wh - 1, 0, 1, this.w, this.wh - 1);
+				this.paintRow(this.rowImg.data, 0, this.hist, this.head * BINS, this.mapFor(this.state.center));
+				this.wctx.putImageData(this.rowImg, 0, 0);
+			}
+			if (!this.avg || this.avgC !== this.state.center) { this.avg = Float32Array.from(this.row); this.peak = Float32Array.from(this.row); this.avgC = this.state.center; }
+			else for (let i = 0; i < BINS; i++) { this.avg[i] += (this.row[i] - this.avg[i]) * 0.35; this.peak[i] = Math.max(this.peak[i] - 0.12, this.avg[i]); }
+			rows++;
+		}
+		const viewDirty = this.dirty;
+		if (this.dirty) this.renderAll();
+		if (rows || viewDirty) this.draw();
+	}
+	trace(c, arr, m, W, H, n) {
+		c.beginPath();
+		let pen = false;
+		for (let x = 0; x < n; x++) {
+			if (m.b0[x] < 0) { pen = false; continue; }
+			let v = -200;
+			for (let b = m.b0[x]; b <= m.b1[x]; b++) if (arr[b] > v) v = arr[b];
+			const px = x / (n - 1) * W, py = yOf(v, H);
+			if (pen) c.lineTo(px, py); else { c.moveTo(px, py); pen = true; }
+		}
+	}
+	draw() {
+		if (!this.avg) return;
+		const c = this.sctx, W = this.specEl.width, H = this.specEl.height, d = this.dpr, n = this.w, s = this.state;
+		const m = this.mapFor(s.center);
+		c.clearRect(0, 0, W, H);
+		c.lineWidth = 1;
+		c.strokeStyle = 'rgba(123,236,199,0.065)';
+		c.beginPath();
+		for (let db = -50; db >= -110; db -= 10) { const y = Math.round(yOf(db, H)) + 0.5; c.moveTo(0, y); c.lineTo(W, y); }
+		for (const t of tickList(s.viewL, s.viewSpan, n)) { const x = Math.round((t.f - s.viewL) / s.viewSpan * W) + 0.5; c.moveTo(x, 0); c.lineTo(x, H); }
+		c.stroke();
+		this.trace(c, this.avg, m, W, H, n);
+		c.lineTo(W, H); c.lineTo(0, H); c.closePath();
+		const g = c.createLinearGradient(0, 0, 0, H);
+		g.addColorStop(0, 'rgba(123,236,199,0.30)'); g.addColorStop(0.7, 'rgba(123,236,199,0.06)'); g.addColorStop(1, 'rgba(123,236,199,0.02)');
+		c.fillStyle = g; c.fill();
+		this.trace(c, this.peak, m, W, H, n);
+		c.strokeStyle = 'rgba(244,247,245,0.16)'; c.lineWidth = d; c.stroke();
+		this.trace(c, this.avg, m, W, H, n);
+		c.strokeStyle = '#7becc7'; c.lineWidth = 1.25 * d; c.lineJoin = 'round'; c.stroke();
+	}
+	renderVals() {
+		const s = this.state, cap = this.cap();
+		const specH = this.props.specHeight ?? 260;
+		const inset = this.props.topInset ?? 0;
+		const vfo = this.vfo();
+		const L = s.viewL, span = s.viewSpan, R = L + span;
+		const pct = f => (f - L) / span * 100;
+		const w = this.w || 1200;
+		const bw = this.props.bandwidth ?? 12500;
+		const inView = f => f >= L && f <= R;
+		const markers = (this.props.showMarkers ?? true) ? SIG.filter(x => x.label && inView(x.f)).map(x => ({
+			left: pct(x.f), top: Math.max(4, yOf(x.p, specH) - 46), label: x.label, sub: x.sub, freq: (x.f / 1e6).toFixed(3), icon: ICON[x.cat],
+			border: x.f === vfo ? 'rgba(123,236,199,.7)' : 'rgba(123,236,199,.16)',
+			pick: e => { e.stopPropagation(); this.tuneTo(x.f); }
+		})) : [];
+		const saved = (this.props.saved || []).filter(x => inView(x.f)).map(x => ({ left: pct(x.f), label: x.label, pick: e => { e.stopPropagation(); this.tuneTo(x.f); } }));
+		const zoom = cap / span;
+		const h = s.hover;
+		return {
+			refs: this.refsObj,
+			onDown: this.onDown, onMove: this.onMove, onUp: this.onUp, onLeave: this.onLeave, stop: this.stop,
+			grabVfo: this.grabVfo, grabL: this.grabL, grabR: this.grabR,
+			cursor: s.dragging === 'pan' ? 'grabbing' : s.dragging === 'edge' ? 'ew-resize' : s.dragging === 'vfo' ? 'grabbing' : 'crosshair',
+			topInset: inset,
+			specH,
+			dbLabels: [-50, -70, -90, -110].map(db => ({ top: yOf(db, specH), text: String(db).replace('-', '−') })),
+			markers,
+			saved,
+			ticks: tickList(L, span, w).map(t => ({ left: pct(t.f), text: t.text })),
+			bands: BANDS.filter(b => b.to > L && b.from < R).map(b => { const a = Math.max(b.from, L), z = Math.min(b.to, R); return { left: pct(a), width: (z - a) / span * 100, label: b.label }; }),
+			vfoVisible: inView(vfo),
+			vfoLeft: pct(vfo),
+			vfoWidth: bw / span * 100,
+			edges: bw / span * w >= 24 && !!this.props.onBandwidth,
+			vfoText: (vfo / 1e6).toFixed(span < 400e3 ? 4 : 3),
+			hasSq: typeof this.props.squelch === 'number' && this.props.squelch > -120 && inView(vfo),
+			sqTop: typeof this.props.squelch === 'number' ? yOf(this.props.squelch, specH) : 0,
+			zoomIn: this.zoomIn, zoomOut: this.zoomOut, zoomFit: this.zoomFit,
+			zoomText: zoom < 1.05 ? 'Fit' : (zoom < 10 ? zoom.toFixed(1) : Math.round(zoom)) + '×',
+			ovLeft: (L - (s.center - cap / 2)) / cap * 100,
+			ovWidth: span / cap * 100,
+			hovering: !!h && !s.dragging,
+			hoverLeft: h ? h.left : 0,
+			hoverText: h ? h.text : ''
+		};
+	}
+}
+</script>
+</body>
+</html>

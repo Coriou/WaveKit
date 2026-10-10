@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Decoded message card</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<article style="box-sizing: border-box; width: 100%; padding: {{cardPad}}; border-radius: 16px; background: {{cardBg}}; border: {{cardBorder}}; box-shadow: {{cardShadow}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 12px">
+	<header style="display: flex; align-items: center; gap: 10px">
+		<span style="width: 30px; height: 30px; flex: none; border-radius: 9px; background: #192b24; display: grid; place-items: center">
+			<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+		</span>
+		<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; color: #b9cac1">{{m.proto}}</span>
+		<sc-for list="{{badges}}" as="b" hint-placeholder-count="1">
+			<span style="height: 20px; padding: 0 7px; border-radius: 10px; font-size: 11.5px; font-weight: 700; line-height: 20px; background: {{b.bg}}; color: {{b.fg}}">{{b.label}}</span>
+		</sc-for>
+		<div style="flex: 1"></div>
+		<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{m.time}}</span>
+	</header>
+
+	<div style="display: flex; flex-direction: column; gap: 2px">
+		<span style="font-family: {{titleFont}}; font-weight: 700; font-size: {{titleSize}}; line-height: 1.15; overflow-wrap: anywhere">{{m.title}}</span>
+		<span style="font-size: 13px; color: #8ba598">{{m.sub}}</span>
+	</div>
+
+	<sc-if value="{{hasText}}" hint-placeholder-val="{{false}}">
+		<p style="margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(11,21,18,.7); font-family: {{textFont}}; font-size: 14px; line-height: 1.5; color: #f4f7f5; white-space: pre-wrap; overflow-wrap: anywhere">{{m.text}}</p>
+	</sc-if>
+	<sc-if value="{{toneOnly}}" hint-placeholder-val="{{false}}">
+		<span style="font-size: 13px; color: #8ba598; font-style: italic">Tone only. No message body.</span>
+	</sc-if>
+
+	<sc-if value="{{hasAudio}}" hint-placeholder-val="{{false}}">
+		<div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 8px; border-radius: 12px; background: rgba(11,21,18,.7)">
+			<button onClick="{{play}}" aria-label="{{playLabel}}" style="font: inherit; cursor: pointer; width: 34px; height: 34px; flex: none; border: 0; border-radius: 50%; display: grid; place-items: center; background: #7becc7; color: #111c19">
+				<sc-if value="{{isPlaying}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
+				<sc-if value="{{notPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
+			</button>
+			<div style="flex: 1; display: flex; align-items: center; gap: 2px; height: 28px" aria-hidden="true">
+				<sc-for list="{{bars}}" as="b" hint-placeholder-count="40"><span style="flex: 1; height: {{b.h}}%; min-height: 2px; border-radius: 1px; background: {{b.c}}"></span></sc-for>
+			</div>
+			<span style="font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums; white-space: nowrap">{{audioTime}}</span>
+		</div>
+	</sc-if>
+	<sc-if value="{{hasTranscript}}" hint-placeholder-val="{{false}}">
+		<div style="display: flex; flex-direction: column; gap: 4px">
+			<span style="font-size: 11.5px; color: #8ba598; display: flex; align-items: center; gap: 6px">
+				<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h14"></path></svg>Transcript · automatic</span>
+			<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #f4f7f5">“{{m.transcript}}”</p>
+		</div>
+	</sc-if>
+	<sc-if value="{{transcribing}}" hint-placeholder-val="{{false}}">
+		<span style="font-size: 12.5px; color: #8ba598">Transcribing…</span>
+	</sc-if>
+	<sc-if value="{{hasAudioNote}}" hint-placeholder-val="{{false}}">
+		<span style="font-size: 12.5px; color: #8ba598">{{m.audioNote}}</span>
+	</sc-if>
+
+	<sc-if value="{{hasFields}}" hint-placeholder-val="{{true}}">
+		<dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 1px; border-radius: 10px; overflow: hidden; background: rgba(123,236,199,.08)">
+			<sc-for list="{{fields}}" as="f" hint-placeholder-count="4">
+				<div style="background: rgba(17,28,25,.92); padding: 8px 10px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
+					<dt style="font-size: 11.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.k}}</dt>
+					<dd style="margin: 0; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{f.c}}">{{f.v}}</dd>
+				</div>
+			</sc-for>
+		</dl>
+	</sc-if>
+
+	<sc-if value="{{hasPos}}" hint-placeholder-val="{{false}}">
+		<div style="position: relative; height: 96px; border-radius: 10px; overflow: hidden; background-color: #0b1512; background-image: linear-gradient(rgba(123,236,199,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(123,236,199,.07) 1px, transparent 1px); background-size: 24px 24px">
+			<span style="position: absolute; left: {{px}}%; top: {{py}}%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: #7becc7; box-shadow: 0 0 0 5px rgba(123,236,199,.18)"></span>
+			<span style="position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums">{{posText}}</span>
+			<span style="position: absolute; right: 10px; bottom: 8px; font-size: 12px; font-weight: 700; color: #7becc7">Open on map</span>
+		</div>
+	</sc-if>
+
+	<footer style="display: flex; align-items: center; gap: 4px; margin: 0 -6px -6px">
+		<button onClick="{{tune}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; font-size: 12.5px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 6px">
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>{{m.freq}} MHz
+		</button>
+		<div style="flex: 1"></div>
+		<button onClick="{{toggleRaw}}" aria-expanded="{{showRaw}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: {{rawBg}}; color: #8ba598; font-size: 12.5px">{{rawLabel}}</button>
+	</footer>
+	<sc-if value="{{showRaw}}" hint-placeholder-val="{{false}}">
+		<dc-import name="Json" data="{{rawData}}" max-height="{{jsonH}}" hint-size="100%,220px"></dc-import>
+	</sc-if>
+</article>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"msg":{"editor":null},"onTune":{"editor":null},"onPlay":{"editor":null},"flat":{"editor":null},"playing":{"editor":null},"playPos":{"editor":null},"jsonHeight":{"editor":null},"$preview":{"width":380,"height":340}}'>
+const ICON = {
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0']
+};
+const UNITS = [['_C', ' °C'], ['_F', ' °F'], ['_kPa', ' kPa'], ['_hPa', ' hPa'], ['_mm', ' mm'], ['_km_h', ' km/h'], ['_m_s', ' m/s'], ['_mph', ' mph'], ['_dB', ' dB'], ['_V', ' V'], ['_W', ' W'], ['_kWh', ' kWh'], ['_deg', '°'], ['_lux', ' lx'], ['_ppm', ' ppm']];
+const fmtS = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+const SKIP = ['time', 'model', 'id', 'channel', 'mic', 'type', 'protocol', 'subtype'];
+function auto(raw) {
+	return Object.keys(raw || {}).filter(k => !SKIP.includes(k) && raw[k] !== null && typeof raw[k] !== 'object').map(k => {
+		let v = raw[k], key = k, unit = '';
+		const u = UNITS.find(([s]) => key.endsWith(s));
+		if (u) { key = key.slice(0, -u[0].length); unit = u[1]; }
+		if (k === 'humidity' || k.endsWith('_pct')) unit = ' %';
+		if (k === 'battery_ok') return { k: 'Battery', v: v ? 'OK' : 'Low', c: v ? '#7becc7' : '#f2b84b' };
+		if (typeof v === 'number' && !Number.isInteger(v)) v = Math.round(v * 10) / 10;
+		const label = key.replace(/_/g, ' ').replace(/^\w/, c => c.toUpperCase());
+		return { k: label, v: String(v) + unit, c: '#f4f7f5' };
+	});
+}
+const SAMPLE = { kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Acurite-Tower', sub: 'ID 12345 · channel A', time: '14:02:39', freq: '433.920', raw: { time: '2026-10-10 14:02:39', model: 'Acurite-Tower', id: 12345, channel: 'A', battery_ok: 1, temperature_C: 18.4, humidity: 61, mic: 'CHECKSUM' } };
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { raw: false };
+		this.bars = Array.from({ length: 40 }, (_, i) => ({ h: Math.min(100, 18 + Math.abs(Math.sin(i * 1.7) * 60 + Math.sin(i * 0.43) * 22)), c: i < 26 ? '#7becc7' : '#2c443b' }));
+	}
+	renderVals() {
+		const m = this.props.msg || SAMPLE;
+		const fields = m.fields ? m.fields.map(([k, v, c]) => ({ k, v, c: c || '#f4f7f5' })) : (m.kind === 'json' ? auto(m.raw) : []);
+		const badges = [];
+		if (m.live) badges.push({ label: 'Live', bg: '#7becc7', fg: '#111c19' });
+		if (m.encrypted) badges.push({ label: 'Encrypted', bg: 'rgba(242,184,75,.16)', fg: '#f2b84b' });
+		if (m.badge) badges.push({ label: m.badge, bg: '#192b24', fg: '#b9cac1' });
+		const pos = m.pos;
+		return {
+			m,
+			icon: ICON[m.cat] || ICON.sensors,
+			cardPad: this.props.flat ? '4px 6px' : '16px',
+			cardBg: this.props.flat ? 'transparent' : 'rgba(17,28,25,.72)',
+			cardBorder: this.props.flat ? '0' : '1px solid ' + (m.live ? 'rgba(123,236,199,.45)' : 'rgba(123,236,199,.12)'),
+			cardShadow: this.props.flat ? 'none' : 'inset 0 1px 0 rgba(255,255,255,.06)',
+			badges,
+			titleFont: m.kind === 'call' || m.kind === 'aircraft' ? "'D-DIN Condensed', 'Noto Sans', sans-serif" : "'Noto Sans', sans-serif",
+			titleSize: m.kind === 'call' || m.kind === 'aircraft' ? '28px' : '17px',
+			hasText: !!m.text,
+			textFont: m.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : "'Noto Sans', sans-serif",
+			toneOnly: !!m.toneOnly,
+			hasAudio: typeof m.audio === 'number',
+			isPlaying: !!this.props.playing,
+			notPlaying: !this.props.playing,
+			playLabel: this.props.playing ? 'Pause' : 'Play recording',
+			play: () => this.props.onPlay && this.props.onPlay(m.id),
+			audioTime: typeof m.audio === 'number' ? (this.props.playing || this.props.playPos ? fmtS((this.props.playPos || 0) * m.audio) + ' / ' : '') + fmtS(m.audio) : '',
+			hasTranscript: !!m.transcript,
+			transcribing: m.transcriptState === 'pending',
+			hasAudioNote: !!m.audioNote,
+			bars: this.bars.map((b, i) => ({ h: b.h, c: i / this.bars.length < (this.props.playPos || 0) ? '#7becc7' : m.live && i > 30 ? 'rgba(255,122,107,.5)' : '#2c443b' })),
+			hasFields: fields.length > 0,
+			fields,
+			hasPos: !!pos,
+			px: pos ? 30 + ((pos[1] * 7.3) % 40) : 50,
+			py: pos ? 30 + ((pos[0] * 5.1) % 40) : 50,
+			posText: pos ? Math.abs(pos[0]).toFixed(4) + '° ' + (pos[0] >= 0 ? 'N' : 'S') + '  ' + Math.abs(pos[1]).toFixed(4) + '° ' + (pos[1] >= 0 ? 'E' : 'W') : '',
+			tune: () => this.props.onTune && this.props.onTune(Math.round(parseFloat(m.freq) * 1e6)),
+			showRaw: this.state.raw,
+			rawBg: this.state.raw ? '#192b24' : 'transparent',
+			rawLabel: this.state.raw ? 'Hide JSON' : 'JSON',
+			toggleRaw: () => this.setState({ raw: !this.state.raw }),
+			rawData: m.raw || { decoder: m.proto, title: m.title, text: m.text },
+			jsonH: this.props.jsonHeight ?? 240
+		};
+	}
+}
+</script>
+</body>
+</html>

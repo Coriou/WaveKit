@@ -23,6 +23,9 @@ session and every machine can pick the work up.
 - A board is **frozen** only when the owner says so; frozen boards are not redesigned
   without an explicit ask.
 - The canvas boards (`*.dc.html`) are interactive references, not production code.
+- After every canvas update, the boards are copied to [canvas/](canvas/) and committed
+  with the docs, so the design has history and a backup. The canvas stays the source of
+  truth; the copies are read-only snapshots.
 
 ## Goal
 

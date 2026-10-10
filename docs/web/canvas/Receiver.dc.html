@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Receiver island</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 18px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
+		<span style="width: 8px; height: 8px; border-radius: 50%; background: #7becc7; flex: none"></span>
+		<span style="font-weight: 700; white-space: nowrap">Pi receiver</span>
+		<span style="flex: 1; color: #8ba598; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap">{{summary}}</span>
+		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{chev}}deg); transition: transform .2s"><path d="M6 9l6 6l6 -6"></path></svg>
+	</button>
+
+	<sc-if value="{{expanded}}" hint-placeholder-val="{{true}}">
+		<div style="box-sizing: border-box; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 18px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
+
+			<div style="display: flex; align-items: center; gap: 12px">
+				<div style="flex: 1; min-width: 0">
+					<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; line-height: 1.1">RTL-SDR · R820T</div>
+					<div style="color: #8ba598; font-size: 13px; margin-top: 2px">Raspberry Pi · rtl_tcp over Wi‑Fi</div>
+				</div>
+				<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 12px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12px; font-weight: 700"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>Streaming</span>
+			</div>
+			<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 12px; overflow: hidden; background: #22362f">
+				<sc-for list="{{stats}}" as="s" hint-placeholder-count="3">
+					<div style="background: #111c19; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px">
+						<span style="font-size: 12px; color: #8ba598">{{s.k}}</span>
+						<span style="font-weight: 700; font-variant-numeric: tabular-nums">{{s.v}}</span>
+					</div>
+				</sc-for>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 10px">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Sample rate</span>
+				<div role="radiogroup" aria-label="Sample rate" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px">
+					<sc-for list="{{rates}}" as="r" hint-placeholder-count="9">
+						<button role="radio" aria-checked="{{r.on}}" onClick="{{r.pick}}" style="font: inherit; cursor: pointer; height: 34px; border-radius: 8px; font-size: 13px; font-variant-numeric: tabular-nums; border: 1px solid {{r.border}}; background: {{r.bg}}; color: {{r.fg}}">{{r.label}}</button>
+					</sc-for>
+				</div>
+				<sc-if value="{{rateWarn}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 12.5px; color: #f2b84b">Above 2.4 MS/s the Pi link may drop samples. Watch the Dropped counter.</span>
+				</sc-if>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 8px">
+				<div style="display: flex; align-items: center; gap: 10px">
+					<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Gain</span>
+					<span style="font-weight: 700; font-variant-numeric: tabular-nums; color: {{gainColor}}">{{gainText}}</span>
+					<button aria-pressed="{{auto}}" onClick="{{toggleAuto}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 700; border: 1px solid {{autoBorder}}; background: {{autoBg}}; color: {{autoFg}}">Auto</button>
+				</div>
+				<div style="position: relative; height: 34px; opacity: {{gainOpacity}}">
+					<div style="position: absolute; left: 0; right: 0; top: 10px; height: 4px; border-radius: 2px; background: #22362f"></div>
+					<div style="position: absolute; left: 0; top: 10px; height: 4px; border-radius: 2px; background: #7becc7; width: {{gainPct}}%"></div>
+					<div style="position: absolute; left: 0; right: 0; top: 22px; display: flex; justify-content: space-between" aria-hidden="true">
+						<sc-for list="{{gainTicks}}" as="t" hint-placeholder-count="29"><span style="width: 1px; height: {{t.h}}px; background: {{t.c}}"></span></sc-for>
+					</div>
+					<div style="position: absolute; top: 4px; left: {{gainPct}}%; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 0 0 4px rgba(123,236,199,.18)"></div>
+					<input type="range" min="0" max="28" step="1" value="{{gainIdx}}" onChange="{{onGain}}" aria-label="Tuner gain" aria-valuetext="{{gainText}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
+				</div>
+				<span style="font-size: 12.5px; color: #8ba598">Steps follow the tuner's own gain table.</span>
+			</div>
+
+			<div style="display: flex; flex-direction: column">
+				<sc-for list="{{toggles}}" as="t" hint-placeholder-count="3">
+					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 6px 0; border: 0; border-bottom: 1px solid #1a2b25; background: transparent">
+						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700">{{t.label}}</span>
+							<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
+						</span>
+						<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{t.track}}; transition: background .15s">
+							<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span>
+						</span>
+					</button>
+				</sc-for>
+				<div style="display: flex; align-items: center; gap: 14px; min-height: 52px">
+					<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+						<span style="font-weight: 700">Frequency correction</span>
+						<span style="font-size: 12.5px; color: #8ba598">Crystal error in parts per million</span>
+					</span>
+					<div style="display: flex; align-items: center; border: 1px solid #2c443b; border-radius: 9px">
+						<button onClick="{{ppmDown}}" aria-label="Decrease correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">−</button>
+						<span style="min-width: 40px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums">{{ppm}}</span>
+						<button onClick="{{ppmUp}}" aria-label="Increase correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">+</button>
+					</div>
+				</div>
+			</div>
+
+			<div style="display: flex; flex-direction: column; gap: 4px">
+				<button onClick="{{toggleAdv}}" aria-expanded="{{adv}}" style="font: inherit; color: #8ba598; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0; border: 0; background: transparent; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{advChev}}deg); transition: transform .2s"><path d="M9 6l6 6l-6 6"></path></svg>Advanced
+				</button>
+				<sc-if value="{{adv}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; flex-direction: column; gap: 12px; padding-top: 6px">
+						<div style="display: flex; align-items: center; gap: 12px">
+							<span style="flex: 1; font-weight: 700">Direct sampling</span>
+							<div role="radiogroup" aria-label="Direct sampling" style="display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: #0b1512">
+								<sc-for list="{{ds}}" as="d" hint-placeholder-count="3">
+									<button role="radio" aria-checked="{{d.on}}" onClick="{{d.pick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 12px; border: 0; border-radius: 7px; font-size: 12.5px; font-weight: 700; background: {{d.bg}}; color: {{d.fg}}">{{d.label}}</button>
+								</sc-for>
+							</div>
+						</div>
+						<sc-for list="{{advToggles}}" as="t" hint-placeholder-count="2">
+							<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 44px; border: 0; background: transparent">
+								<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
+									<span style="font-weight: 700">{{t.label}}</span>
+									<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
+								</span>
+								<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{t.track}}">
+									<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5"></span>
+								</span>
+							</button>
+						</sc-for>
+					</div>
+				</sc-if>
+			</div>
+
+			<div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; background: #192b24; font-size: 13px; color: #b9cac1">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 8v4l2 2"></path></svg>
+				<span style="flex: 1">WaveKit has control. SDR++ can take over through the relay on port 1234.</span>
+			</div>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"$preview":{"width":440,"height":860}}'>
+const RATES = [0.25, 1.024, 1.4, 1.8, 2.048, 2.4, 2.56, 2.88, 3.2];
+const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
+const sw = on => ({ on, track: on ? '#7becc7' : '#2c443b', knob: on ? 18 : 2 });
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { rate: 2.4, gainIdx: 20, gainAuto: false, rtlAgc: false, biasT: false, offsetTuning: false, ppm: 0, direct: 'off', dcBlock: true, iqCorr: false, adv: true, open: true };
+	}
+	get(k) { const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k]; }
+	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v }); }
+	renderVals() {
+		const rate = this.get('rate'), gi = this.get('gainIdx'), auto = this.get('gainAuto');
+		const expanded = this.props.onToggle ? !!this.props.expanded : this.state.open;
+		const gainText = auto ? 'Auto' : GAINS[gi].toFixed(1) + ' dB';
+		const flag = (k, label, sub) => ({ label, sub, ...sw(this.get(k)), pick: () => this.set(k, !this.get(k)) });
+		return {
+			width: expanded ? '420px' : 'max-content',
+			expanded,
+			chev: expanded ? 180 : 0,
+			toggle: () => this.props.onToggle ? this.props.onToggle() : this.setState({ open: !this.state.open }),
+			summary: rate + ' MS/s · ' + gainText,
+			stats: [{ k: 'Throughput', v: (rate * 2).toFixed(1) + ' MB/s' }, { k: 'Dropped', v: '0' }, { k: 'Level', v: '−31 dBFS' }],
+			rates: RATES.map(r => {
+				const on = r === rate;
+				return { label: String(r), on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.set('rate', r) };
+			}),
+			rateWarn: rate > 2.4,
+			auto,
+			gainIdx: gi,
+			gainText,
+			gainColor: auto ? '#8ba598' : '#f4f7f5',
+			gainPct: gi / 28 * 100,
+			gainOpacity: auto ? 0.35 : 1,
+			gainTicks: GAINS.map((g, i) => ({ h: i % 7 === 0 ? 6 : 3, c: i <= gi && !auto ? 'rgba(123,236,199,.6)' : '#2c443b' })),
+			onGain: e => { this.set('gainIdx', Number(e.target.value)); if (auto) this.set('gainAuto', false); },
+			toggleAuto: () => this.set('gainAuto', !auto),
+			autoBorder: auto ? 'rgba(123,236,199,.6)' : '#2c443b',
+			autoBg: auto ? 'rgba(123,236,199,.12)' : 'transparent',
+			autoFg: auto ? '#7becc7' : '#b9cac1',
+			toggles: [
+				flag('rtlAgc', 'RTL AGC', 'Digital gain inside the RTL2832'),
+				flag('biasT', 'Bias‑T', 'Powers an LNA through the antenna port'),
+				flag('offsetTuning', 'Offset tuning', 'Moves the DC spike out of the band (E4000)')
+			],
+			ppm: (this.get('ppm') > 0 ? '+' : '') + this.get('ppm'),
+			ppmDown: () => this.set('ppm', Math.max(-500, this.get('ppm') - 1)),
+			ppmUp: () => this.set('ppm', Math.min(500, this.get('ppm') + 1)),
+			adv: this.state.adv,
+			advChev: this.state.adv ? 90 : 0,
+			toggleAdv: () => this.setState({ adv: !this.state.adv }),
+			ds: [['off', 'Off'], ['i', 'I'], ['q', 'Q']].map(([id, label]) => {
+				const on = this.get('direct') === id;
+				return { label, on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598', pick: () => this.set('direct', id) };
+			}),
+			advToggles: [
+				flag('dcBlock', 'Remove DC spike', 'Filters the centre spike out of the IQ'),
+				flag('iqCorr', 'IQ correction', 'Balances I/Q to suppress mirror images')
+			]
+		};
+	}
+}
+</script>
+</body>
+</html>

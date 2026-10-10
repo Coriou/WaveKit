@@ -1,0 +1,829 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Command palette</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+.wk-cmd-list::-webkit-scrollbar{width:8px}
+.wk-cmd-list::-webkit-scrollbar-thumb{background:#22362f;border-radius:4px}
+input::placeholder{color:#6d857a}
+</style>
+</helmet>
+<div style="position: {{rootPos}}; inset: {{rootInset}}; width: {{rootW}}; height: {{rootH}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; background: {{rootBg}}; overflow: hidden">
+
+	<sc-if value="{{embedded}}" hint-placeholder-val="{{false}}">
+		<button onClick="{{close}}" aria-label="Close commands" tabindex="-1" style="position: absolute; inset: 0; border: 0; margin: 0; padding: 0; background: rgba(5,10,8,.28); cursor: default"></button>
+	</sc-if>
+
+	<sc-if value="{{isOpen}}" hint-placeholder-val="{{true}}">
+		<div role="dialog" aria-modal="true" aria-label="Commands" style="position: absolute; top: {{top}}; left: 50%; transform: translateX(-50%); width: min(640px, calc(100% - 32px)); box-sizing: border-box; border-radius: 20px; background: rgba(17,28,25,.82); border: 1px solid rgba(123,236,199,.16); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 24px 64px rgba(0,0,0,.5); backdrop-filter: blur(28px) saturate(170%); display: flex; flex-direction: column; overflow: hidden">
+
+			<div style="height: 60px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid rgba(123,236,199,.1)">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"></path><path d="M21 21l-6 -6"></path></svg>
+				<sc-if value="{{hasScope}}" hint-placeholder-val="{{false}}">
+					<button onClick="{{popScope}}" aria-label="Back to all commands" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 8px 0 10px; border: 1px solid rgba(123,236,199,.4); border-radius: 9px; background: rgba(123,236,199,.12); color: #7becc7; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; white-space: nowrap">{{scopeTitle}}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg></button>
+				</sc-if>
+				<input ref="{{focusRef}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" placeholder="{{placeholder}}" aria-label="Command, frequency or search" role="combobox" aria-expanded="true" aria-controls="wk-cmd-list" aria-activedescendant="{{activeId}}" aria-autocomplete="list" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 40px; border: 0; padding: 0; background: transparent; color: #f4f7f5; font: inherit; font-size: 17px; outline: none; caret-color: #7becc7">
+				<button onClick="{{close}}" aria-label="Close" style="font: inherit; cursor: pointer; flex: none; height: 24px; padding: 0 7px; border: 1px solid #2c443b; border-radius: 6px; background: rgba(11,21,18,.6); color: #8ba598; font-size: 11.5px">esc</button>
+			</div>
+
+			<div id="wk-cmd-list" class="wk-cmd-list" role="listbox" aria-label="Commands" style="max-height: {{listMax}}; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 8px">
+				<sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+					<div role="group" aria-label="{{g.label}}" style="display: flex; flex-direction: column">
+						<div style="height: 30px; display: flex; align-items: flex-end; padding: 0 10px 6px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{g.label}}</div>
+						<sc-for list="{{g.items}}" as="it" hint-placeholder-count="3">
+							<button id="{{it.domId}}" role="option" aria-selected="{{it.on}}" ref="{{it.ref}}" onClick="{{it.pick}}" onMouseDown="{{keepFocus}}" onMouseMove="{{it.enter}}" tabindex="-1" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; min-height: 46px; padding: 6px 10px; border: 0; border-radius: 11px; background: {{it.bg}}; box-shadow: {{it.ring}}">
+								<span style="width: 30px; height: 30px; flex: none; border-radius: 9px; display: grid; place-items: center; background: {{it.iconBg}}; color: {{it.iconC}}">
+									<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{it.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+								</span>
+								<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+									<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: {{it.titleSize}}; font-variant-numeric: tabular-nums; color: {{it.titleC}}"><sc-for list="{{it.parts}}" as="p" hint-placeholder-count="1"><span style="color: {{p.c}}">{{p.t}}</span></sc-for></span>
+									<sc-if value="{{it.hasSub}}" hint-placeholder-val="{{true}}"><span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{it.sub}}</span></sc-if>
+								</span>
+								<sc-if value="{{it.hasValue}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-size: 13px; color: {{it.valueC}}; font-variant-numeric: tabular-nums; white-space: nowrap">{{it.value}}</span></sc-if>
+								<sc-if value="{{it.cur}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 22px; padding: 0 8px; border-radius: 11px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12px; font-weight: 700; line-height: 22px">Current</span></sc-if>
+								<sc-if value="{{it.isToggle}}" hint-placeholder-val="{{false}}">
+									<span aria-hidden="true" style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{it.track}}"><span style="position: absolute; top: 2px; left: {{it.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: #f4f7f5"></span></span>
+								</sc-if>
+								<sc-if value="{{it.hasKbd}}" hint-placeholder-val="{{false}}">
+									<span style="flex: none; display: flex; gap: 3px" aria-hidden="true"><sc-for list="{{it.kbd}}" as="k" hint-placeholder-count="1"><span style="min-width: 20px; height: 20px; box-sizing: border-box; padding: 0 5px; border: 1px solid #2c443b; border-radius: 5px; background: rgba(11,21,18,.6); color: #b9cac1; font-size: 11.5px; line-height: 18px; text-align: center">{{k}}</span></sc-for></span>
+								</sc-if>
+								<sc-if value="{{it.scope}}" hint-placeholder-val="{{false}}">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
+								</sc-if>
+							</button>
+						</sc-for>
+					</div>
+				</sc-for>
+				<sc-if value="{{empty}}" hint-placeholder-val="{{false}}">
+					<div style="padding: 28px 16px; text-align: center; display: flex; flex-direction: column; gap: 4px">
+						<span style="font-weight: 700">Nothing matches</span>
+						<span style="font-size: 13px; color: #8ba598">{{emptyText}}</span>
+					</div>
+				</sc-if>
+			</div>
+
+			<sc-if value="{{hasEffect}}" hint-placeholder-val="{{true}}">
+				<div role="status" aria-live="polite" style="flex: none; display: flex; flex-direction: column; gap: 6px; padding: 11px 18px; border-top: 1px solid rgba(123,236,199,.1); background: rgba(11,21,18,.45)">
+					<div style="display: flex; align-items: center; gap: 10px; min-width: 0">
+						<span style="flex: none; height: 22px; padding: 0 8px; border-radius: 11px; font-size: 12px; font-weight: 700; line-height: 22px; display: flex; align-items: center; gap: 6px; background: {{effPillBg}}; color: {{effPillFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{effPill}}</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; font-variant-numeric: tabular-nums">
+							<sc-for list="{{effRows}}" as="e" hint-placeholder-count="1">
+								<span style="white-space: nowrap"><span style="color: #8ba598">{{e.label}}</span> <sc-if value="{{e.hasFrom}}" hint-placeholder-val="{{true}}"><span style="color: #8ba598">{{e.from}}</span> <span style="color: #52645d">→</span> </sc-if><span style="font-weight: 700">{{e.to}}</span></span>
+							</sc-for>
+						</span>
+					</div>
+					<sc-if value="{{hasWarn}}" hint-placeholder-val="{{false}}">
+						<span style="font-size: 12.5px; color: #f2b84b; line-height: 1.4">{{warn}}</span>
+					</sc-if>
+				</div>
+			</sc-if>
+
+			<div style="flex: none; height: 38px; display: flex; align-items: center; gap: 14px; padding: 0 18px; border-top: 1px solid rgba(123,236,199,.1); font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden">
+				<sc-for list="{{hints}}" as="h" hint-placeholder-count="4">
+					<span style="display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid #2c443b; border-radius: 5px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">{{h.k}}</span>{{h.t}}</span>
+				</sc-for>
+				<div style="flex: 1"></div>
+				<button onClick="{{openKeys}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #8ba598; font-size: 12px; display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid #2c443b; border-radius: 5px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">?</span>Shortcuts</button>
+			</div>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{showReopen}}" hint-placeholder-val="{{false}}">
+		<div style="position: absolute; top: 40px; left: 50%; transform: translateX(-50%)">
+			<button onClick="{{reopen}}" style="font: inherit; color: #f4f7f5; cursor: pointer; height: 48px; padding: 0 12px 0 16px; border-radius: 16px; border: 1px solid rgba(123,236,199,.16); background: rgba(17,28,25,.6); display: flex; align-items: center; gap: 10px; font-weight: 700">Open commands<span style="height: 22px; padding: 0 7px; border: 1px solid #2c443b; border-radius: 6px; color: #b9cac1; font-size: 12px; font-weight: 400; line-height: 20px">⌘K</span></button>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+		<div role="status" style="position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 14px; background: rgba(25,43,36,.92); border: 1px solid rgba(123,236,199,.18); box-shadow: 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13.5px">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+			<span>{{toastText}}</span>
+			<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
+				<button onClick="{{undo}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 12px; border: 0; border-radius: 9px; background: rgba(123,236,199,.14); color: #7becc7; font-weight: 700; font-size: 13px">Undo</button>
+			</sc-if>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{standalone}}" hint-placeholder-val="{{true}}">
+		<div style="position: absolute; left: 16px; right: 16px; bottom: 16px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
+			<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598; margin-right: 4px">Receiver now</span>
+			<sc-for list="{{strip}}" as="c" hint-placeholder-count="8">
+				<span style="height: 28px; box-sizing: border-box; padding: 0 10px; border-radius: 8px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; background: {{c.bg}}; border: 1px solid {{c.border}}"><span style="color: #8ba598">{{c.k}}</span><span style="font-weight: 700; color: {{c.fg}}">{{c.v}}</span></span>
+			</sc-for>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"recent":{"editor":null},"onCommit":{"editor":null},"onPreview":{"editor":null},"onNav":{"editor":null},"onActivity":{"editor":null},"onUsed":{"editor":null},"onClose":{"editor":null},"$preview":{"width":760,"height":700}}'>
+const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
+const MODE_DESC = { NFM: 'Narrow FM · land mobile, marine, PMR', AM: 'Airband and broadcast AM', WFM: 'Broadcast FM', USB: 'Upper sideband · SSB voice', LSB: 'Lower sideband · SSB voice', CW: 'Morse', RAW: 'No audio · decoders only' };
+const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
+const BWP = { NFM: [6250, 8330, 12500, 16000, 25000], AM: [5000, 8330, 10000, 20000], WFM: [100000, 150000, 200000, 250000], USB: [1800, 2400, 3000, 4000], LSB: [1800, 2400, 3000, 4000], CW: [100, 250, 500, 1000], RAW: [] };
+const STEPS = [1000, 5000, 6250, 8330, 12500, 25000, 100000];
+const RATES = [0.25, 1.024, 1.4, 1.8, 2.048, 2.4, 2.56, 2.88, 3.2];
+const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
+const GROUPS = ['Local', 'Marine', 'Aviation', 'Utility'];
+const FLOOR = -108;
+const BANDS = [
+	{ from: 87.5e6, to: 108e6, label: 'FM broadcast', mode: 'WFM' },
+	{ from: 108e6, to: 137e6, label: 'Airband', mode: 'AM' },
+	{ from: 144e6, to: 146e6, label: '2 m amateur', mode: 'NFM' },
+	{ from: 156e6, to: 162.025e6, label: 'Marine VHF', mode: 'NFM' },
+	{ from: 162.025e6, to: 163.5e6, label: 'Land mobile', mode: 'NFM' },
+	{ from: 430e6, to: 440e6, label: '70 cm amateur · ISM 433', mode: 'NFM' },
+	{ from: 446e6, to: 446.2e6, label: 'PMR446', mode: 'NFM' },
+	{ from: 863e6, to: 870e6, label: 'SRD 868', mode: 'NFM' },
+	{ from: 1089e6, to: 1091e6, label: 'ADS-B', mode: 'RAW' }
+];
+const CHANNELS = [
+	{ f: 156.8e6, label: 'Marine ch 16 · distress', keys: ['16', 'ch 16', 'ch16', 'marine 16', 'distress'] },
+	{ f: 156.6e6, label: 'Marine ch 12 · port ops', keys: ['12', 'ch 12', 'ch12', 'marine 12'] },
+	{ f: 161.975e6, label: 'AIS channel A', keys: ['ais', 'ais a', 'ais 1'] },
+	{ f: 162.025e6, label: 'AIS channel B', keys: ['ais', 'ais b', 'ais 2'] },
+	{ f: 144.8e6, label: 'APRS Europe', keys: ['aprs'] },
+	{ f: 433.92e6, label: 'ISM 433.92 · sensors', keys: ['ism', '433', 'sensor'] },
+	{ f: 869.525e6, label: 'Meshtastic EU', keys: ['mesh', 'lora', 'meshtastic'] },
+	{ f: 93.5e6, label: 'FM broadcast 93.5', keys: ['fm', 'broadcast', 'radio'] },
+	{ f: 118.1e6, label: 'Airband · tower', keys: ['tower', 'airband', 'atc'] },
+	{ f: 121.5e6, label: 'Airband guard 121.5', keys: ['guard', 'emergency', '121.5'] },
+	{ f: 131.725e6, label: 'ACARS Europe', keys: ['acars'] },
+	{ f: 136.975e6, label: 'VDL2 · 136.975', keys: ['vdl2', 'vdl', 'cpdlc'] },
+	{ f: 161.15e6, label: 'DMR · TG 2081', keys: ['dmr'] },
+	{ f: 163.0875e6, label: 'P25 · TG 1201', keys: ['p25'] },
+	{ f: 868.3e6, label: 'ISM 868 · sensors', keys: ['868', 'ism 868'] },
+	{ f: 868.95e6, label: 'wM-Bus meters', keys: ['wmbus', 'wm-bus', 'meters'] },
+	{ f: 1090e6, label: 'ADS-B 1090', keys: ['adsb', 'ads-b', '1090'] }
+].concat(Array.from({ length: 8 }, (_, i) => ({ f: 446.00625e6 + i * 12500, label: 'PMR446 ch ' + (i + 1), keys: ['pmr ' + (i + 1), 'pmr' + (i + 1), 'pmr'] })));
+const TG_INFO = { '2081': ['DMR · last call 14:02 · 0:06', true], '9': ['DMR · last call 13:51 · 0:41', true], '1201': ['P25 · encrypted, nothing was recorded', false] };
+const P = {
+	antenna: ['M20 4v8', 'M16 4.5v7', 'M12 5v16', 'M8 5.5v5', 'M4 6v4', 'M20 8h-16'],
+	up: ['M12 5v14', 'M18 11l-6 -6', 'M6 11l6 -6'],
+	down: ['M12 5v14', 'M18 13l-6 6', 'M6 13l6 6'],
+	mode: ['M4 10a2 2 0 1 0 4 0a2 2 0 0 0 -4 0', 'M6 4v4', 'M6 12v8', 'M10 16a2 2 0 1 0 4 0a2 2 0 0 0 -4 0', 'M12 4v10', 'M12 18v2', 'M16 7a2 2 0 1 0 4 0a2 2 0 0 0 -4 0', 'M18 4v1', 'M18 9v11'],
+	bw: ['M7 8l-4 4l4 4', 'M17 8l4 4l-4 4', 'M3 12h18'],
+	step: ['M22 5h-5v5h-5v5h-5v5h-5'],
+	gain: ['M6 18v-3', 'M10 18v-6', 'M14 18v-9', 'M18 18v-12'],
+	rate: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M13.41 10.59l2.59 -2.59', 'M7 12a5 5 0 0 1 5 -5'],
+	squelch: ['M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5', 'M16 10l4 4m0 -4l-4 4'],
+	volume: ['M15 8a5 5 0 0 1 0 8', 'M17.7 5a9 9 0 0 1 0 14', 'M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5'],
+	listen: ['M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z', 'M15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2z', 'M4 15v-3a8 8 0 0 1 16 0v3'],
+	rec: ['M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0', 'M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'],
+	bookmark: ['M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z'],
+	palette: ['M12 21a9 9 0 0 1 0 -18c4.97 0 9 3.582 9 8c0 1.06 -.474 2.078 -1.318 2.828c-.844 .75 -1.989 1.172 -3.182 1.172h-2.5a2 2 0 0 0 -1 3.75a1.3 1.3 0 0 1 -1 2.25', 'M7.5 10.5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M11.5 7.5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M15.5 10.5a1 1 0 1 0 2 0a1 1 0 1 0 -2 0'],
+	bolt: ['M13 3v7h6l-8 11v-7h-6l8 -11'],
+	chip: ['M5 6a1 1 0 0 1 1 -1h12a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-12a1 1 0 0 1 -1 -1z', 'M9 9h6v6h-6z', 'M3 10h2M3 14h2M10 3v2M14 3v2M21 10h-2M21 14h-2M14 21v-2M10 21v-2'],
+	sound: ['M3 12h2l3 -7l4 14l4 -10l2 3h3'],
+	play: ['M7 4v16l13 -8z'],
+	activity: ['M3 12h4l3 8l4 -16l3 8h4'],
+	search: ['M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M21 21l-6 -6'],
+	copy: ['M7 9.667a2.667 2.667 0 0 1 2.667 -2.667h8.666a2.667 2.667 0 0 1 2.667 2.667v8.666a2.667 2.667 0 0 1 -2.667 2.667h-8.666a2.667 2.667 0 0 1 -2.667 -2.667z', 'M4.012 16.737a2 2 0 0 1 -1.012 -1.737v-10c0 -1.1 .9 -2 2 -2h10c.75 0 1.158 .385 1.5 1'],
+	link: ['M9 15l6 -6', 'M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464', 'M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463'],
+	keys: ['M2 8a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z', 'M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10'],
+	go: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
+	alert: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z', 'M12 16h.01'],
+	tag: ['M7.5 7.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M3 6v5.172a2 2 0 0 0 .586 1.414l7.71 7.71a2.41 2.41 0 0 0 3.408 0l5.592 -5.592a2.41 2.41 0 0 0 0 -3.408l-7.71 -7.71a2 2 0 0 0 -1.414 -.586h-5.172a3 3 0 0 0 -3 3z']
+};
+const CAT = {
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314']
+};
+const VIEWS = [
+	{ id: 'spectrum', label: 'Spectrum', key: 'S', icon: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
+	{ id: 'activity', label: 'Activity', key: 'A', icon: P.activity },
+	{ id: 'map', label: 'Map', key: 'M', icon: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
+	{ id: 'scanner', label: 'Scanner', key: 'C', icon: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'] },
+	{ id: 'recordings', label: 'Recordings', key: 'R', icon: P.rec }
+];
+const DECODERS = [
+	{ id: 'adsb', title: 'ADS-B', sub: 'readsb · 1090 MHz · 34 aircraft', cat: 'aircraft' },
+	{ id: 'ais', title: 'AIS', sub: 'AIS-catcher · channels A and B · 12 vessels', cat: 'marine' },
+	{ id: 'acars', title: 'ACARS', sub: 'acarsdec · 131.725 MHz', cat: 'aviation' },
+	{ id: 'vdl2', title: 'VDL2', sub: 'dumpvdl2 · 136.975 MHz', cat: 'aviation' },
+	{ id: 'dmr', title: 'DMR and P25', sub: 'dsd-fme · on the tuned channel', cat: 'voice' },
+	{ id: 'pocsag', title: 'POCSAG', sub: 'multimon-ng · 160.450 MHz', cat: 'paging' },
+	{ id: 'aprs', title: 'APRS', sub: 'Direwolf · 144.800 MHz', cat: 'aprs' },
+	{ id: 'ism', title: 'ISM sensors', sub: 'rtl_433 · 433.92 and 868 MHz', cat: 'sensors' }
+];
+const OPTS = {
+	src: [['auto', 'Auto', 'Decoded voice when present, otherwise analog'], ['analog', 'Analog', 'Always the demodulated audio'], ['digital', 'Decoded voice', 'Only DMR, P25 and other digital voice']],
+	agc: [['off', 'Off', 'Fixed level'], ['slow', 'Slow', 'Smooth, for voice'], ['fast', 'Fast', 'Follows quick fades']],
+	direct: [['off', 'Off', 'Normal tuning, 24 MHz and up'], ['i', 'I branch', 'HF below 24 MHz on a modified dongle'], ['q', 'Q branch', 'HF on RTL-SDR Blog V3 and V4']],
+	palette: [['phosphor', 'Phosphor', 'Ink to phosphor green'], ['amber', 'Amber', 'Warmer, easier on the eyes at night'], ['mono', 'Mono', 'Greyscale, best for faint signals']]
+};
+const SCOPES = {
+	tune: { title: 'Tune', ph: 'Type or paste a frequency · 161.15 · 446.00625 MHz · +25k · ch 16' },
+	mode: { title: 'Mode', ph: 'Choose a mode', key: 'mode' },
+	bw: { title: 'Bandwidth', ph: 'Choose, or type one (25k)', prefix: 'bw', key: 'bw' },
+	step: { title: 'Tuning step', ph: 'Choose, or type one (6.25k)', prefix: 'step', key: 'step' },
+	gain: { title: 'Gain', ph: 'Choose, or type a gain in dB', prefix: 'gain', key: 'gainIdx' },
+	rate: { title: 'Sample rate', ph: 'Choose a sample rate', prefix: 'rate', key: 'rate' },
+	sq: { title: 'Squelch', ph: 'Choose, or type a level (−90)', prefix: 'sq', key: 'sq' },
+	vol: { title: 'Volume', ph: 'Choose, or type a level (60)', prefix: 'vol', key: 'vol' },
+	src: { title: 'What you hear', ph: 'Choose an audio source', key: 'src' },
+	agc: { title: 'Level control', ph: 'Choose how audio level is held', key: 'agc' },
+	direct: { title: 'Direct sampling', ph: 'Choose a branch', key: 'direct' },
+	palette: { title: 'Waterfall palette', ph: 'Choose a palette', key: 'palette' },
+	saved: { title: 'Saved frequencies', ph: 'Find a saved frequency' },
+	save: { title: 'Save', ph: 'Name it, then pick a group', raw: true },
+	go: { title: 'Go to', ph: 'Choose a view' },
+	dec: { title: 'Decoders', ph: 'Find a decoder' },
+	keys: { title: 'Keyboard shortcuts', ph: 'Find a shortcut' }
+};
+const DEEP = ['mode', 'bw', 'step', 'rate', 'src', 'agc', 'direct', 'palette', 'dec'];
+const LABEL = { freq: 'Frequency', mode: 'Mode', bw: 'Bandwidth', step: 'Step', rate: 'Sample rate', gain: 'Gain', sq: 'Squelch', vol: 'Volume', src: 'What you hear', agc: 'Level control', direct: 'Direct sampling', palette: 'Waterfall', listening: 'Listen', rec: 'Recording', nr: 'Noise reduction', hp: 'Cut low rumble', biasT: 'Bias-T', rtlAgc: 'RTL AGC', dcBlock: 'Remove DC spike', iqCorr: 'IQ correction', sqAuto: 'Auto squelch', saved: 'Saved' };
+const SEED_RECENT = [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'palette:amber', n: 2 }];
+
+const kfmt = hz => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? (hz % 100 ? 2 : 1) : 0) + ' kHz' : hz + ' Hz';
+const mfmt = f => (f / 1e6).toFixed(f % 1000 ? 5 : 3);
+const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
+const bandOf = f => BANDS.find(b => f >= b.from && f <= b.to);
+const optLabel = (k, id) => { const o = (OPTS[k] || []).find(x => x[0] === id); return o ? o[1] : String(id); };
+const gainText = v => v.gainAuto ? 'Auto' : GAINS[v.gainIdx].toFixed(1) + ' dB';
+const sqText = v => v.sqAuto ? 'Auto' : v.sq <= -120 ? 'Off' : dbt(v.sq);
+const WS = /[\s·›(\-]/;
+
+function parse(q, cur) {
+	const s = q.trim().toLowerCase().replace(',', '.');
+	if (!s) return { none: true };
+	const m = /^([+-])?\s*(\d+(?:\.\d*)?)\s*(hz|k|khz|m|mhz|g|ghz)?$/.exec(s);
+	if (!m) return { none: true };
+	const v = parseFloat(m[2]);
+	const unit = m[3] || '';
+	let mult = unit.startsWith('k') ? 1e3 : unit.startsWith('m') ? 1e6 : unit.startsWith('g') ? 1e9 : unit === 'hz' ? 1 : 0;
+	if (m[1]) {
+		const d = v * (mult || 1e3);
+		return { f: cur + (m[1] === '+' ? d : -d), rel: m[1], hint: (m[1] === '+' ? 'Up ' : 'Down ') + kfmt(d) + ' from here' };
+	}
+	if (!mult) mult = v >= 24e6 ? 1 : v >= 24000 ? 1e3 : v >= 24 ? 1e6 : v < 2 ? 1e9 : 0;
+	if (!mult) return { err: 'Below 24 MHz. Turn on direct sampling for HF.' };
+	const f = Math.round(v * mult);
+	if (f < 24e6) return { err: 'Below 24 MHz. Turn on direct sampling for HF.' };
+	if (f > 1.9e9) return { err: 'Out of range. This receiver tunes 24 MHz to 1.9 GHz.' };
+	return { f };
+}
+
+const CMD_WORD = /^(gain|g|sq|squelch|sql|bw|bandwidth|filter|step|rate|sr|vol|volume|mode|tg|talkgroup|cap|capcode|pager|mmsi)\b/;
+// Pasted or copied text: "161.150.000", "161 150 kHz", "446,00625 MHz", "Freq: 156.800 MHz NFM 12.5 kHz".
+function parsePasted(q, cur) {
+	const s = q.trim().toLowerCase();
+	if (!s || CMD_WORD.test(s)) return { none: true };
+	const modeM = /\b(nfm|wfm|am|usb|lsb|cw|fm)\b/.exec(s);
+	const re = /(\d[\d\s.,']*\d|\d)\s*(ghz|mhz|khz|hz|g|m|k)?(?![a-z])/g;
+	const nums = [];
+	let m;
+	while ((m = re.exec(s))) nums.push({ raw: m[1], unit: m[2] || '' });
+	if (!nums.length) return { none: true };
+	const fullUnit = /(ghz|mhz|khz|hz)/.test(s);
+	const grouped = /\d[.,' ]\d{3}[.,' ]\d{3}/.test(s) || /\d \d{3}/.test(s);
+	if (!modeM && !fullUnit && !grouped && nums.length === 1 && s === nums[0].raw + nums[0].unit) return { none: true };
+	if (!modeM && !fullUnit && !grouped) return { none: true };
+	const norm = raw => {
+		let t = raw.replace(/[\s']/g, '');
+		const seps = (t.match(/[.,]/g) || []).length;
+		if (seps > 1) t = t.replace(/[.,]/g, '');
+		else t = t.replace(',', '.');
+		return t;
+	};
+	const first = nums[0];
+	let num = norm(first.raw), unit = first.unit;
+	if (!unit && /^\d{7,10}$/.test(num)) unit = 'hz';
+	const p = parse(num + unit, cur);
+	if (!p.f) return p.err ? p : { none: true };
+	const out = { f: p.f, pasted: true };
+	if (modeM) out.mode = modeM[1] === 'fm' ? 'NFM' : modeM[1].toUpperCase();
+	const bwN = nums.slice(1).find(n => n.unit === 'k' || n.unit === 'khz');
+	if (bwN) out.bw = Math.round(parseFloat(norm(bwN.raw)) * 1000);
+	return out;
+}
+
+function fuzzy(q, text) {
+	const t = text.toLowerCase();
+	const at = t.indexOf(q);
+	const span = (a, b) => Array.from({ length: b - a }, (_, i) => a + i);
+	if (at === 0) return { score: 100 - t.length * 0.1, idx: span(0, q.length) };
+	if (at > 0) return { score: (WS.test(t[at - 1]) ? 80 : 50) - at * 0.3, idx: span(at, at + q.length) };
+	const qs = q.replace(/\s+/g, '');
+	let i = 0, last = -2, score = 0;
+	const idx = [];
+	for (let j = 0; j < t.length && i < qs.length; j++) {
+		if (t[j] !== qs[i]) continue;
+		score += j === 0 || WS.test(t[j - 1]) ? 6 : j === last + 1 ? 3 : 0.5;
+		idx.push(j); last = j; i++;
+	}
+	if (i < qs.length || score < qs.length * 2) return null;
+	return { score: 20 + score - (idx[idx.length - 1] - idx[0]) * 0.2, idx };
+}
+
+function effects(patch, cur) {
+	if (!patch) return [];
+	const nxt = Object.assign({}, cur, patch), out = [], seen = {};
+	const desc = (k, x) => {
+		if (k === 'freq') return mfmt(x) + ' MHz';
+		if (k === 'bw' || k === 'step') return kfmt(x);
+		if (k === 'rate') return x + ' MS/s';
+		if (k === 'vol') return x + ' %';
+		if (k === 'mode') return x;
+		if (OPTS[k]) return optLabel(k, x);
+		if (k === 'saved') return String(x.length);
+		return x ? 'On' : 'Off';
+	};
+	Object.keys(patch).forEach(k => {
+		let key = k, a, b;
+		if (k === 'gainIdx' || k === 'gainAuto') { key = 'gain'; a = gainText(cur); b = gainText(nxt); }
+		else if (k === 'sq' || k === 'sqAuto') { key = 'sq'; a = sqText(cur); b = sqText(nxt); }
+		else { a = desc(k, cur[k]); b = desc(k, nxt[k]); }
+		if (seen[key] || a === b) return;
+		seen[key] = 1;
+		out.push({ key, label: LABEL[key] || key, from: a, to: b });
+	});
+	return out;
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {
+			q: '', sel: 0, scope: null, open: true, preview: null, toast: null, recent: SEED_RECENT,
+			vals: {
+				freq: 161150000, mode: 'NFM', bw: 12500, step: 12500, rate: 2.4, gainIdx: 15, gainAuto: false, rtlAgc: false, biasT: false, dcBlock: true, iqCorr: false, direct: 'off',
+				listening: true, vol: 72, sq: -102, sqAuto: true, src: 'auto', agc: 'slow', hp: true, nr: false, rec: false, palette: 'phosphor', nav: 'spectrum',
+				saved: [{ f: 161975000, label: 'AIS channel A', group: 'Marine', mode: 'NFM', bw: 25000 }, { f: 156800000, label: 'Marine ch 16', group: 'Marine', mode: 'NFM', bw: 12500 }, { f: 446006250, label: 'PMR446 ch 1', group: 'Local', mode: 'NFM', bw: 12500 }]
+			}
+		};
+		this.focusRef = el => { if (el && el !== this.inputEl) { this.inputEl = el; if (this.embedded() || this.reopened) el.focus(); } };
+		this.keepFocus = e => e.preventDefault();
+		this.scrollRef = el => { if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' }); };
+		this.lastPrev = 'null';
+	}
+	componentWillUnmount() { clearTimeout(this.tt); }
+	embedded() { return !!this.props.onCommit; }
+	v() { return this.embedded() && this.props.values ? this.props.values : this.state.vals; }
+	recent() { return this.embedded() && this.props.recent ? this.props.recent : this.state.recent; }
+	boost(id) { const r = this.recent().find(x => x.id === id); return r ? Math.min(24, 9 * Math.log2(1 + r.n)) : 0; }
+
+	// ---------- items ----------
+	tuneItem(f, o) {
+		const v = this.v(), b = bandOf(f), opt = o || {};
+		const mode = opt.mode || (b && b.mode) || v.mode;
+		const patch = { freq: f };
+		if (mode !== v.mode) { patch.mode = mode; patch.bw = opt.bw || BW[mode][3]; }
+		else if (opt.bw && opt.bw !== v.bw) patch.bw = opt.bw;
+		return {
+			id: opt.id || 'tune:' + f, title: opt.title || 'Tune to ' + mfmt(f) + ' MHz', keys: opt.keys,
+			sub: opt.sub || [b ? b.label : 'No band plan entry', mode !== v.mode ? 'switches to ' + mode : mode].join(' · '),
+			icon: opt.icon || P.antenna, value: opt.title ? mfmt(f) : '', patch, cur: f === v.freq,
+			label: 'Tuned to ' + (opt.title ? opt.title + ' · ' : '') + mfmt(f) + ' MHz'
+		};
+	}
+	savedItem(x) { return this.tuneItem(x.f, { id: 'saved:' + x.f, title: x.label, sub: x.group + ' · ' + x.mode + ' · ' + kfmt(x.bw), mode: x.mode, bw: x.bw, icon: P.bookmark }); }
+	modeItem(m) { const v = this.v(); return { id: 'mode:' + m, title: m, sub: MODE_DESC[m], icon: P.mode, patch: { mode: m, bw: BW[m][3] }, cur: v.mode === m }; }
+	bwItem(hz) { return { id: 'bw:' + hz, title: kfmt(hz), icon: P.bw, patch: { bw: hz }, cur: this.v().bw === hz }; }
+	stepItem(hz) { return { id: 'step:' + hz, title: kfmt(hz), sub: hz === 8330 ? 'Airband channel spacing' : hz === 6250 ? 'Narrow land mobile, PMR446' : hz === 12500 ? 'Land mobile, marine' : '', icon: P.step, patch: { step: hz }, cur: this.v().step === hz }; }
+	gainItem(i) {
+		const v = this.v();
+		if (i === 'auto') return { id: 'gain:auto', title: 'Auto', sub: 'Tuner AGC picks the gain', icon: P.gain, patch: { gainAuto: true }, cur: v.gainAuto };
+		return { id: 'gain:' + i, title: GAINS[i].toFixed(1) + ' dB', icon: P.gain, patch: { gainIdx: i, gainAuto: false }, cur: !v.gainAuto && v.gainIdx === i };
+	}
+	rateItem(r) {
+		const warn = r > 2.4 ? 'Above 2.4 MS/s the Pi link may drop samples.' : '';
+		return { id: 'rate:' + r, title: r + ' MS/s', sub: warn || r + ' MHz of spectrum', icon: P.rate, patch: { rate: r }, cur: this.v().rate === r, noPreview: true, warn: warn ? warn + ' Decoders and listeners reconnect when the rate changes.' : 'Decoders and listeners reconnect when the rate changes.' };
+	}
+	sqItem(x) {
+		const v = this.v();
+		if (x === 'auto') return { id: 'sq:auto', title: 'Auto', sub: '6 dB over the noise floor, follows conditions', icon: P.squelch, patch: { sqAuto: true }, cur: v.sqAuto };
+		if (x === 'off') return { id: 'sq:off', title: 'Off', sub: 'Always open, you hear the noise', icon: P.squelch, patch: { sqAuto: false, sq: -120 }, cur: !v.sqAuto && v.sq <= -120 };
+		return { id: 'sq:' + x, title: dbt(x), sub: x <= FLOOR ? 'At or below the noise floor (' + dbt(FLOOR) + '), stays open' : x - FLOOR + ' dB over the noise floor', icon: P.squelch, patch: { sqAuto: false, sq: x }, cur: !v.sqAuto && v.sq === x };
+	}
+	volItem(n) { return { id: 'vol:' + n, title: n + ' %', icon: P.volume, patch: { vol: n }, cur: this.v().vol === n }; }
+	optItem(k, o) {
+		const extra = k === 'direct' && o[0] !== 'off' ? { noPreview: true, warn: 'Retunes to the HF range. VHF decoders stop until you turn it off.' } : {};
+		return Object.assign({ id: k + ':' + o[0], title: o[1], sub: o[2], icon: k === 'palette' ? P.palette : k === 'direct' ? P.chip : P.sound, patch: { [k]: o[0] }, cur: this.v()[k] === o[0] }, extra);
+	}
+	viewItem(x) { return { id: 'view:' + x.id, title: 'Go to ' + x.label, icon: x.icon, kbd: ['G', x.key], cur: this.v().nav === x.id, act: () => this.nav(x.id, x.label), does: 'Opens ' + x.label }; }
+	decItem(d) { return { id: 'dec:' + d.id, title: d.title, sub: d.sub, icon: CAT[d.cat], value: 'Running', valueC: '#7becc7', act: () => this.activity({ cats: [d.cat] }, 'Showing ' + d.title + ' in Activity'), does: 'Opens Activity showing only ' + d.title }; }
+	playTg(n) {
+		const info = TG_INFO[n];
+		const tok = { type: 'tg', v: n, kind: 'Talkgroup', value: n };
+		if (info && !info[1]) return { id: 'play:tg' + n, info: true, title: 'TG ' + n + ' has nothing to play', sub: info[0], icon: P.alert };
+		return { id: 'play:tg' + n, title: 'Play the last call on TG ' + n, sub: info ? info[0] : 'Newest recording, then keeps playing new calls', icon: P.play, act: () => this.activity({ tokens: [tok], play: true }, 'Playing the last call on TG ' + n), does: 'Opens Activity on TG ' + n + ' and plays its newest recording' };
+	}
+	tuneScopeItem() {
+		const v = this.v();
+		return { id: 'scope:tune', title: 'Tune to a frequency…', sub: 'Type or paste it: MHz, kHz, Hz, a channel or a step', icon: P.antenna, value: mfmt(v.freq), kbd: ['T'], scope: 'tune', keys: ['frequency', 'freq', 'go to frequency', 'paste'] };
+	}
+	saveScopeItem() {
+		const v = this.v();
+		return { id: 'scope:save', title: 'Save ' + mfmt(v.freq) + ' MHz', sub: 'Name it and file it in a group', icon: P.bookmark, kbd: ['S'], scope: 'save' };
+	}
+	defaultName() {
+		const v = this.v(), b = bandOf(v.freq);
+		if (v.freq === 161150000) return 'DMR · TG 2081';
+		const ch = CHANNELS.find(c => c.f === v.freq);
+		return ch ? ch.label : b ? b.label + ' ' + mfmt(v.freq) : 'Saved ' + mfmt(v.freq);
+	}
+
+	rootCommands() {
+		const v = this.v();
+		const sc = (id, title, value, icon, kbd, keys) => ({ id: 'scope:' + id, title, value, icon, kbd, keys, scope: id });
+		const tog = (k, title, icon, extra) => Object.assign({ id: 'tog:' + k, title, icon, isToggle: true, on: !!v[k], patch: { [k]: !v[k] } }, extra || {});
+		const savedHere = v.saved.find(x => x.f === v.freq);
+		return [
+			this.tuneScopeItem(),
+			{ id: 'step:up', title: 'Step up', sub: 'By ' + kfmt(v.step) + ' to ' + mfmt(v.freq + v.step), icon: P.up, kbd: [']'], patch: { freq: v.freq + v.step }, keys: ['next channel', 'up'] },
+			{ id: 'step:down', title: 'Step down', sub: 'By ' + kfmt(v.step) + ' to ' + mfmt(v.freq - v.step), icon: P.down, kbd: ['['], patch: { freq: v.freq - v.step }, keys: ['previous channel', 'down'] },
+			sc('mode', 'Mode', v.mode, P.mode, ['M'], ['demodulation', 'nfm am wfm usb lsb cw']),
+			sc('bw', 'Bandwidth', v.mode === 'RAW' ? 'Full span' : kfmt(v.bw), P.bw, null, ['filter', 'width']),
+			sc('step', 'Tuning step', kfmt(v.step), P.step, null, ['channel spacing']),
+			savedHere ? Object.assign(sc('saved', 'Saved as “' + savedHere.label + '”', savedHere.group, P.bookmark, ['B']), { id: 'scope:savedhere' }) : this.saveScopeItem(),
+			sc('saved', 'Saved frequencies', String(v.saved.length), P.bookmark, ['B'], ['bookmarks', 'favourites', 'favorites', 'memories']),
+			tog('listening', v.listening ? 'Stop listening' : 'Listen', P.listen, { kbd: ['L'], keys: ['mute', 'audio', 'unmute'], noPreview: true }),
+			tog('rec', v.rec ? 'Stop recording' : 'Record audio', P.rec, { kbd: ['R'], noPreview: true, label: v.rec ? 'Recording stopped' : 'Recording audio' }),
+			sc('sq', 'Squelch', sqText(v), P.squelch, ['Q'], ['threshold', 'sql']),
+			tog('sqAuto', 'Auto squelch', P.squelch, { keys: ['squelch auto'] }),
+			sc('vol', 'Volume', v.vol + ' %', P.volume, null, ['loudness']),
+			sc('src', 'What you hear', optLabel('src', v.src), P.sound, null, ['audio source', 'analog', 'decoded voice', 'digital']),
+			sc('agc', 'Level control', optLabel('agc', v.agc), P.sound, null, ['agc', 'audio agc']),
+			tog('nr', 'Noise reduction', P.sound, { keys: ['hiss', 'denoise'] }),
+			tog('hp', 'Cut low rumble', P.sound, { keys: ['high-pass', 'highpass', 'filter'] }),
+			sc('gain', 'Gain', gainText(v), P.gain, null, ['rf gain', 'lna']),
+			sc('rate', 'Sample rate', v.rate + ' MS/s', P.rate, null, ['span', 'bandwidth sdr']),
+			tog('biasT', 'Bias-T', P.bolt, { keys: ['lna power', 'bias tee'], noPreview: true, warn: v.biasT ? '' : 'Puts 4.5 V on the antenna port. Only with an LNA or active antenna.' }),
+			tog('rtlAgc', 'RTL AGC', P.gain, { keys: ['digital gain'] }),
+			tog('dcBlock', 'Remove DC spike', P.chip, { keys: ['dc', 'centre spike'] }),
+			tog('iqCorr', 'IQ correction', P.chip, { keys: ['mirror', 'image'] }),
+			sc('direct', 'Direct sampling', optLabel('direct', v.direct), P.chip, null, ['hf', 'shortwave']),
+			sc('palette', 'Waterfall palette', optLabel('palette', v.palette), P.palette, null, ['colours', 'colors', 'theme']),
+			{ id: 'activity', title: 'Search Activity', sub: 'Talkgroups, callsigns, messages, transcripts', icon: P.search, kbd: ['/'], act: () => this.activity({}, 'Opened Activity'), does: 'Opens Activity with the search field focused' }
+		].concat(VIEWS.map(x => this.viewItem(x)), [
+			sc('dec', 'Decoders', DECODERS.length + ' running', P.chip, null, ['adsb ais acars vdl2 dmr pocsag aprs ism']),
+			{ id: 'copy:freq', title: 'Copy frequency', sub: mfmt(v.freq) + ' MHz', icon: P.copy, act: () => this.toast('Copied ' + mfmt(v.freq) + ' MHz'), does: 'Copies “' + mfmt(v.freq) + ' MHz” to the clipboard' },
+			{ id: 'copy:link', title: 'Copy link to this frequency', sub: 'Opens WaveKit tuned here, same mode and bandwidth', icon: P.link, act: () => this.toast('Link copied'), does: 'Copies a link for ' + mfmt(v.freq) + ' MHz · ' + v.mode + ' · ' + kfmt(v.bw), keys: ['share', 'url'] },
+			sc('keys', 'Keyboard shortcuts', '', P.keys, ['?'], ['help', 'hotkeys'])
+		]);
+	}
+	scopeItems(id) {
+		const v = this.v();
+		if (id === 'mode') return MODES.map(m => this.modeItem(m));
+		if (id === 'bw') return BWP[v.mode].map(hz => this.bwItem(hz));
+		if (id === 'step') return STEPS.map(hz => this.stepItem(hz));
+		if (id === 'gain') return [this.gainItem('auto')].concat(GAINS.map((g, i) => this.gainItem(i)).reverse());
+		if (id === 'rate') return RATES.map(r => this.rateItem(r));
+		if (id === 'sq') return [this.sqItem('auto'), this.sqItem('off')].concat([-110, -105, -100, -95, -90, -85, -80, -70, -60].map(x => this.sqItem(x)));
+		if (id === 'vol') return [100, 90, 80, 70, 60, 50, 40, 30, 20, 10, 0].map(n => this.volItem(n));
+		if (OPTS[id]) return OPTS[id].map(o => this.optItem(id, o));
+		if (id === 'saved') return (v.saved.some(x => x.f === v.freq) ? [] : [this.saveScopeItem()]).concat(v.saved.map(x => this.savedItem(x)));
+		if (id === 'go') return VIEWS.map(x => this.viewItem(x));
+		if (id === 'dec') return DECODERS.map(d => this.decItem(d));
+		if (id === 'keys') return this.rootCommands().filter(c => c.kbd);
+		if (id === 'save') {
+			const here = v.saved.find(x => x.f === v.freq);
+			if (here) return [{ id: 'info:saved', info: true, title: 'Already saved as “' + here.label + '”', sub: here.group + ' · ' + mfmt(here.f) + ' MHz', icon: P.bookmark }];
+			const name = this.state.q.trim() || this.defaultName();
+			return GROUPS.map(g => ({
+				id: 'save:' + g, title: 'Save as “' + name + '” in ' + g, sub: mfmt(v.freq) + ' MHz · ' + v.mode + ' · ' + kfmt(v.bw), icon: P.bookmark, noPreview: true,
+				patch: { saved: v.saved.concat([{ f: v.freq, label: name, group: g, mode: v.mode, bw: v.bw }]) },
+				effect: '“' + name + '” in ' + g, label: 'Saved “' + name + '” in ' + g
+			}));
+		}
+		return [];
+	}
+	deepItems() {
+		const out = [];
+		DEEP.forEach(id => this.scopeItems(id).forEach(it => out.push(Object.assign({}, it, { title: SCOPES[id].title + ' › ' + it.title }))));
+		return out;
+	}
+	tuneTargets() {
+		const saved = this.v().saved;
+		return saved.map(x => this.savedItem(x)).concat(CHANNELS.filter(c => !saved.some(x => x.f === c.f)).map(c => this.tuneItem(c.f, { id: 'tune:' + c.f, title: c.label, keys: c.keys })));
+	}
+	lookup(id) {
+		if (id.startsWith('tune:')) { const f = Number(id.slice(5)); const ch = CHANNELS.find(c => c.f === f); return this.tuneItem(f, ch ? { title: ch.label } : null); }
+		if (id.startsWith('saved:')) { const x = this.v().saved.find(s => 'saved:' + s.f === id); return x ? this.savedItem(x) : null; }
+		if (id.startsWith('play:tg')) return this.playTg(id.slice(7));
+		let hit = this.rootCommands().find(c => c.id === id);
+		if (hit) return hit;
+		Object.keys(SCOPES).some(s => { if (s === 'save' || s === 'keys') return false; hit = this.scopeItems(s).find(c => c.id === id); if (hit) hit = Object.assign({}, hit, { title: SCOPES[s].title + ' › ' + hit.title }); return !!hit; });
+		return hit || null;
+	}
+	suggested() {
+		const v = this.v(), out = [this.tuneScopeItem()];
+		if (!v.saved.some(x => x.f === v.freq)) out.push(this.saveScopeItem());
+		if (v.freq === 161150000) out.push(this.playTg('2081'));
+		const fv = mfmt(v.freq);
+		out.push({ id: 'find:freq', title: 'Everything heard on ' + fv + ' MHz', sub: 'Calls, messages and decodes on this frequency', icon: P.activity, act: () => this.activity({ tokens: [{ type: 'freq', v: fv, kind: 'Frequency', value: fv + ' MHz' }] }, 'Showing ' + fv + ' MHz in Activity'), does: 'Opens Activity filtered to ' + fv + ' MHz' });
+		return out;
+	}
+	recentItems() {
+		return this.recent().slice().sort((a, b) => b.n - a.n).map(r => this.lookup(r.id)).filter(Boolean).slice(0, 4);
+	}
+	rank(items, q) {
+		const lq = q.toLowerCase();
+		const out = [];
+		items.forEach(it => {
+			let best = fuzzy(lq, it.title);
+			(it.keys || []).forEach(k => { const m = fuzzy(lq, k); if (m && (!best || m.score * 0.85 > best.score)) best = { score: m.score * 0.85, idx: [] }; });
+			if (best) out.push(Object.assign({}, it, { _score: best.score + this.boost(it.id), _idx: best.idx }));
+		});
+		return out.sort((a, b) => b._score - a._score);
+	}
+	intents(q) {
+		const v = this.v(), s = q.trim().toLowerCase(), out = { tune: [], cmd: [], act: [] };
+		const hit = it => Object.assign(it, { _score: 1000 });
+		let m;
+		let p = parse(s, v.freq);
+		if (!p.f) { const pp = parsePasted(q, v.freq); if (pp.f || (pp.err && !p.err)) p = pp; }
+		if (p.f && p.pasted) {
+			const mode = p.mode || null;
+			const bw = mode && p.bw && BW[mode] && p.bw >= BW[mode][0] && p.bw <= BW[mode][1] ? p.bw : null;
+			const it = this.tuneItem(p.f, { mode: mode || undefined, bw: bw || undefined });
+			it.title = 'Tune to ' + mfmt(p.f) + ' MHz';
+			it.sub = 'From pasted text · ' + [(bandOf(p.f) || { label: 'no band plan entry' }).label, mode || null, bw ? kfmt(bw) : null].filter(Boolean).join(' · ');
+			it.big = true;
+			out.tune.push(hit(it));
+		} else if (p.f) {
+			const it = this.tuneItem(p.f, p.rel ? { mode: v.mode, sub: p.hint + ' · ' + (bandOf(p.f) || { label: 'no band plan entry' }).label } : null);
+			if (p.rel) it.title = (p.rel === '+' ? 'Step up to ' : 'Step down to ') + mfmt(p.f) + ' MHz';
+			it.big = true;
+			out.tune.push(hit(it));
+		} else if (p.err && /[.a-z]/.test(s)) out.tune.push(hit({ id: 'info:range', info: true, title: p.err, icon: P.alert }));
+		if ((m = /^(?:gain|g)\s*(auto|\d+(?:\.\d+)?)\s*(?:db)?$/.exec(s))) {
+			if (m[1] === 'auto') out.cmd.push(hit(Object.assign(this.gainItem('auto'), { title: 'Gain › Auto' })));
+			else {
+				const x = parseFloat(m[1]);
+				let bi = 0;
+				GAINS.forEach((g, i) => { if (Math.abs(g - x) < Math.abs(GAINS[bi] - x)) bi = i; });
+				const it = this.gainItem(bi);
+				it.title = 'Gain › ' + it.title;
+				if (GAINS[bi] !== x) it.sub = 'Nearest step to ' + x + ' dB in this tuner’s gain table';
+				out.cmd.push(hit(it));
+			}
+		}
+		if ((m = /^(?:sq|squelch|sql)\s*(auto|off|-?\d+)\s*(?:db)?$/.exec(s))) {
+			const x = m[1] === 'auto' || m[1] === 'off' ? m[1] : -Math.abs(parseInt(m[1], 10));
+			if (typeof x === 'string' || (x >= -120 && x <= -20)) { const it = this.sqItem(x); it.title = 'Squelch › ' + it.title; out.cmd.push(hit(it)); }
+			else out.cmd.push(hit({ id: 'info:sq', info: true, title: 'Squelch goes from −120 dB to −20 dB', icon: P.alert }));
+		}
+		if ((m = /^(?:bw|bandwidth|filter)\s*(\d+(?:\.\d+)?)\s*(k|khz|hz)?$/.exec(s))) {
+			const raw = parseFloat(m[1]);
+			const hz = Math.round(m[2] === 'hz' ? raw : m[2] || raw < 1000 ? raw * 1000 : raw);
+			const r = BW[v.mode];
+			if (v.mode === 'RAW') out.cmd.push(hit({ id: 'info:bw', info: true, title: 'RAW mode uses the full span', sub: 'Switch to a voice mode to set a bandwidth', icon: P.alert }));
+			else if (hz < r[0] || hz > r[1]) out.cmd.push(hit({ id: 'info:bw', info: true, title: v.mode + ' allows ' + kfmt(r[0]) + ' to ' + kfmt(r[1]), icon: P.alert }));
+			else { const it = this.bwItem(hz); it.title = 'Bandwidth › ' + it.title; out.cmd.push(hit(it)); }
+		}
+		if ((m = /^(?:step)\s*(\d+(?:\.\d+)?)\s*(k|khz|hz)?$/.exec(s))) {
+			const raw = parseFloat(m[1]);
+			const hz = Math.round(m[2] === 'hz' ? raw : m[2] || raw < 1000 ? raw * 1000 : raw);
+			const it = this.stepItem(hz); it.title = 'Tuning step › ' + it.title; out.cmd.push(hit(it));
+		}
+		if ((m = /^(?:rate|sr|sample rate)\s*(\d+(?:\.\d+)?)$/.exec(s))) {
+			const x = parseFloat(m[1]);
+			let br = RATES[0];
+			RATES.forEach(r => { if (Math.abs(r - x) < Math.abs(br - x)) br = r; });
+			const it = this.rateItem(br); it.title = 'Sample rate › ' + it.title; out.cmd.push(hit(it));
+		}
+		if ((m = /^(?:vol|volume)\s*(\d{1,3})\s*%?$/.exec(s))) {
+			const n = Math.min(100, parseInt(m[1], 10));
+			const it = this.volItem(n); it.title = 'Volume › ' + it.title; out.cmd.push(hit(it));
+		}
+		if ((m = /^(?:mode\s+)?(nfm|am|wfm|usb|lsb|cw|raw|fm)$/.exec(s))) {
+			const id = m[1] === 'fm' ? 'NFM' : m[1].toUpperCase();
+			const it = this.modeItem(id); it.title = 'Mode › ' + id; out.cmd.push(hit(it));
+		}
+		if ((m = /^(?:tg|talkgroup)\s*(\d{1,7})$/.exec(s)) || (/^\d{1,7}$/.test(s) && (m = [s, s]))) {
+			const n = m[1];
+			const known = !!TG_INFO[n] || !p.f;
+			const lift = it => Object.assign(it, { _score: known ? 1001 : 500 });
+			out.act.push(lift(this.playTg(n)));
+			out.act.push(Object.assign({ id: 'find:tg' + n, title: 'Show TG ' + n + ' in Activity', sub: 'Every call on this talkgroup', icon: P.activity, act: () => this.activity({ tokens: [{ type: 'tg', v: n, kind: 'Talkgroup', value: n }] }, 'Showing TG ' + n + ' in Activity'), does: 'Opens Activity filtered to TG ' + n }, { _score: known ? 1001 : 500 }));
+		}
+		if ((m = /^(?:cap|capcode|pager)\s*(\d{1,7})$/.exec(s)) || (/^\d{7}$/.test(s) && (m = [s, s]))) {
+			const n = m[1];
+			out.act.push(hit({ id: 'find:cap' + n, title: 'Show pages to capcode ' + n, sub: 'POCSAG and FLEX messages', icon: CAT.paging, act: () => this.activity({ tokens: [{ type: 'cap', v: n, kind: 'Capcode', value: n }] }, 'Showing capcode ' + n + ' in Activity'), does: 'Opens Activity filtered to capcode ' + n }));
+		}
+		if ((m = /^(?:mmsi\s*)?(\d{9})$/.exec(s))) {
+			const n = m[1];
+			out.act.push(hit({ id: 'find:mmsi' + n, title: 'Show vessel MMSI ' + n, sub: 'AIS positions and voyage data', icon: CAT.marine, act: () => this.activity({ tokens: [{ type: 'mmsi', v: n, kind: 'MMSI', value: n }] }, 'Showing MMSI ' + n + ' in Activity'), does: 'Opens Activity filtered to MMSI ' + n }));
+		}
+		if (s.length >= 2) out.act.push(Object.assign({ id: 'search:' + s, title: 'Search Activity for “' + q.trim() + '”', sub: 'Messages, callsigns, transcripts', icon: P.search, act: () => this.activity({ tokens: [{ type: 'text', v: q.trim(), kind: 'Contains', value: '“' + q.trim() + '”' }] }, 'Searching Activity for “' + q.trim() + '”'), does: 'Opens Activity with this search' }, { _score: 1 }));
+		return out;
+	}
+	build() {
+		const s = this.state, v = this.v(), q = s.q.trim();
+		const groups = [];
+		const seen = {};
+		const push = (label, items, top) => {
+			const list = items.filter(it => { if (seen[it.id]) return false; seen[it.id] = 1; return true; });
+			if (list.length) groups.push({ label, items: list, top: top === undefined ? Math.max.apply(null, list.map(x => x._score || 0)) : top });
+		};
+		if (s.scope === 'tune') {
+			if (!q) {
+				push('Recent', this.recent().filter(r => r.id.startsWith('tune:')).map(r => this.lookup(r.id)).filter(Boolean), 0);
+				push('Saved frequencies', v.saved.map(x => this.savedItem(x)), 0);
+			} else {
+				const it = this.intents(q).tune;
+				push('Tune', it.concat(this.rank(this.tuneTargets(), q).slice(0, 6)));
+			}
+		} else if (s.scope) {
+			const meta = SCOPES[s.scope];
+			const items = this.scopeItems(s.scope);
+			if (meta.raw || !q) push(meta.title, items, 0);
+			else {
+				if (meta.prefix) { const it = this.intents(meta.prefix + ' ' + q).cmd; push('Set', it.map(x => Object.assign({}, x, { title: x.title.replace(/^.* › /, '') }))); }
+				push(meta.title, this.rank(items, q));
+			}
+		} else if (!q) {
+			push('Suggested', this.suggested(), 4);
+			push('Recent', this.recentItems(), 3);
+			push('Saved frequencies', v.saved.slice(0, 4).map(x => this.savedItem(x)), 2);
+			push('All commands', this.rootCommands(), 1);
+		} else {
+			const it = this.intents(q);
+			push('Tune', it.tune.concat(this.rank(this.tuneTargets(), q).slice(0, 4)));
+			push('Commands', it.cmd.concat(this.rank(this.rootCommands().concat(q.length >= 2 ? this.deepItems() : []), q).slice(0, 8)));
+			push('Activity', it.act);
+			groups.sort((a, b) => b.top - a.top);
+		}
+		const flat = [];
+		groups.forEach(g => g.items.forEach(x => flat.push(x)));
+		return { groups, flat };
+	}
+	selected() { const { flat } = this.build(); return flat[Math.max(0, Math.min(this.state.sel, flat.length - 1))]; }
+
+	// ---------- behaviour ----------
+	emitPreview() {
+		const it = this.selected();
+		const p = it && it.patch && !it.noPreview ? it.patch : null;
+		const key = JSON.stringify(p);
+		if (key === this.lastPrev) return;
+		this.lastPrev = key;
+		if (this.props.onPreview) this.props.onPreview(p); else this.setState({ preview: p });
+	}
+	select(i) { if (i !== this.state.sel) this.setState({ sel: i }, () => this.emitPreview()); }
+	setQ(q) { this.setState({ q, sel: 0 }, () => this.emitPreview()); }
+	enter(scope) {
+		this.setState({ scope, q: '', sel: 0 }, () => {
+			const i = this.build().flat.findIndex(x => x.cur);
+			if (i > 0) this.setState({ sel: i }, () => this.emitPreview()); else this.emitPreview();
+		});
+	}
+	pop() { this.setState({ scope: null, q: '', sel: 0 }, () => this.emitPreview()); }
+	used(id) {
+		if (this.props.onUsed) return this.props.onUsed(id);
+		const r = this.state.recent.filter(x => x.id !== id);
+		const old = this.state.recent.find(x => x.id === id);
+		this.setState({ recent: [{ id, n: (old ? old.n : 0) + 1 }].concat(r).slice(0, 12) });
+	}
+	run(it) {
+		if (!it || it.info) return;
+		if (it.scope) return this.enter(it.scope);
+		this.used(it.id);
+		if (it.patch) this.commit(it.patch, it.label || effects(it.patch, this.v()).map(e => e.label + ' ' + e.to).join(' · '));
+		else if (it.act) it.act();
+	}
+	commit(patch, label) {
+		this.lastPrev = 'null';
+		if (this.embedded()) return this.props.onCommit(patch, label);
+		const vals = this.state.vals, prev = {};
+		Object.keys(patch).forEach(k => { prev[k] = vals[k]; });
+		this.setState({ vals: Object.assign({}, vals, patch), preview: null, q: '', scope: null, sel: 0 });
+		this.toast(label, prev);
+	}
+	toast(text, prev) {
+		if (this.embedded()) return this.props.onCommit(null, text);
+		clearTimeout(this.tt);
+		this.setState({ toast: { text, prev: prev || null } });
+		this.tt = setTimeout(() => this.setState({ toast: null }), 6000);
+	}
+	activity(cmd, label) {
+		if (this.props.onActivity) return this.props.onActivity(cmd);
+		this.setState({ q: '', scope: null, sel: 0 });
+		this.toast(label);
+	}
+	nav(id, label) {
+		if (this.props.onNav) return this.props.onNav(id);
+		this.setState({ vals: Object.assign({}, this.state.vals, { nav: id }), q: '', scope: null, sel: 0 });
+		this.toast('Opened ' + label);
+	}
+	close() {
+		this.lastPrev = 'null';
+		if (this.props.onClose) return this.props.onClose();
+		this.setState({ open: false, preview: null, q: '', scope: null, sel: 0 });
+	}
+
+	// ---------- view ----------
+	row(it, i, on) {
+		const title = it.title, idx = it._idx || [];
+		const parts = [];
+		for (let j = 0; j < title.length; j++) {
+			const h = idx.indexOf(j) >= 0;
+			const last = parts[parts.length - 1];
+			if (last && last.h === h) last.t += title[j]; else parts.push({ t: title[j], h });
+		}
+		return {
+			domId: 'wk-cmd-' + i,
+			on: on ? 'true' : 'false',
+			ref: on ? this.scrollRef : null,
+			parts: parts.map(p => ({ t: p.t, c: p.h ? '#7becc7' : 'inherit' })),
+			titleC: it.info ? '#f2b84b' : '#f4f7f5',
+			titleSize: it.big ? '18px' : '14px',
+			sub: it.sub || '', hasSub: !!it.sub,
+			icon: it.icon || P.go,
+			iconC: it.info ? '#f2b84b' : on ? '#7becc7' : '#b9cac1',
+			iconBg: on ? 'rgba(123,236,199,.14)' : 'rgba(123,236,199,.06)',
+			value: it.value || '', hasValue: !!it.value, valueC: it.valueC || '#8ba598',
+			cur: !!it.cur,
+			isToggle: !!it.isToggle, track: it.on ? '#7becc7' : '#2c443b', knob: it.on ? 16 : 2,
+			kbd: it.kbd || [], hasKbd: !!(it.kbd && it.kbd.length),
+			scope: !!it.scope,
+			bg: on ? 'rgba(123,236,199,.11)' : 'transparent',
+			ring: on ? 'inset 0 0 0 1px rgba(123,236,199,.22)' : 'none',
+			enter: () => this.select(i),
+			pick: () => { this.select(i); this.run(it); }
+		};
+	}
+	renderVals() {
+		const s = this.state, v = this.v(), emb = this.embedded();
+		const { groups, flat } = this.build();
+		const sel = Math.max(0, Math.min(s.sel, flat.length - 1));
+		const cur = flat[sel];
+		let k = 0;
+		const vg = groups.map(g => ({ label: g.label, items: g.items.map(it => { const i = k++; return this.row(it, i, i === sel); }) }));
+		const eff = cur && cur.patch ? (cur.effect ? [{ label: 'Save', from: '', to: cur.effect }] : effects(cur.patch, v)) : cur && cur.does ? [{ label: '', from: '', to: cur.does }] : [];
+		const live = !!(cur && cur.patch && !cur.noPreview && eff.length);
+		const warn = cur && cur.warn ? cur.warn : '';
+		const shown = Object.assign({}, v, emb ? {} : s.preview || {});
+		const changed = emb ? [] : effects(s.preview, v).map(e => e.key);
+		const chip = (key, k2, val) => { const c = changed.indexOf(key) >= 0; return { k: k2, v: val, bg: c ? 'rgba(242,184,75,.12)' : 'rgba(17,28,25,.7)', border: c ? 'rgba(242,184,75,.55)' : '#22362f', fg: c ? '#f2b84b' : '#f4f7f5' }; };
+		const meta = s.scope ? SCOPES[s.scope] : null;
+		return {
+			embedded: emb, standalone: !emb,
+			rootPos: emb ? 'absolute' : 'relative', rootInset: emb ? '0' : 'auto',
+			rootW: emb ? 'auto' : '760px', rootH: emb ? 'auto' : '700px', rootBg: emb ? 'transparent' : '#0b1512',
+			top: emb ? '16px' : '40px',
+			listMax: emb ? 'min(440px, calc(100vh - 200px))' : '384px',
+			isOpen: emb || s.open, showReopen: !emb && !s.open,
+			reopen: () => { this.reopened = true; this.setState({ open: true }); },
+			keepFocus: this.keepFocus,
+			close: () => this.close(),
+			hasScope: !!meta, scopeTitle: meta ? meta.title : '',
+			popScope: () => this.pop(),
+			placeholder: meta ? meta.ph : 'Type a frequency, a setting, or search activity…',
+			q: s.q,
+			focusRef: this.focusRef,
+			onQ: e => this.setQ(e.target.value),
+			onKey: e => {
+				const n = flat.length;
+				if (e.key === 'ArrowDown') { e.preventDefault(); if (n) this.select((sel + 1) % n); }
+				else if (e.key === 'ArrowUp') { e.preventDefault(); if (n) this.select((sel - 1 + n) % n); }
+				else if (e.key === 'Enter') { e.preventDefault(); this.run(cur); }
+				else if (e.key === 'Tab') { e.preventDefault(); if (cur && cur.scope) this.enter(cur.scope); }
+				else if (e.key === 'Backspace' && !s.q && s.scope) { e.preventDefault(); this.pop(); }
+				else if (e.key === 'Escape') { e.preventDefault(); if (s.scope) this.pop(); else this.close(); }
+			},
+			activeId: cur ? 'wk-cmd-' + sel : '',
+			groups: vg,
+			empty: flat.length === 0,
+			emptyText: s.scope === 'tune' ? 'Not a frequency yet. Try 161.15, 161150k, 446.00625 MHz or ch 16.' : s.scope ? 'Press Backspace to go back to all commands.' : 'Try a frequency, a talkgroup or a setting name.',
+			hasEffect: eff.length > 0 || !!warn,
+			effRows: eff.slice(0, 3).map(e => ({ label: e.label, from: e.from, to: e.to, hasFrom: !!e.from })),
+			effPill: live ? 'Live preview' : cur && cur.patch ? 'On Enter' : 'Action',
+			effPillBg: live ? 'rgba(123,236,199,.14)' : '#192b24',
+			effPillFg: live ? '#7becc7' : '#b9cac1',
+			hasWarn: !!warn, warn,
+			hints: s.scope ? [{ k: '↑↓', t: 'move' }, { k: '↵', t: 'choose' }, { k: '⌫', t: 'back' }, { k: 'esc', t: live ? 'revert' : 'back' }] : [{ k: '↑↓', t: 'move' }, { k: '↵', t: 'run' }, { k: '⇥', t: 'open' }, { k: 'esc', t: live ? 'revert and close' : 'close' }],
+			openKeys: () => this.enter('keys'),
+			hasToast: !emb && !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.prev),
+			undo: () => { const t = s.toast; if (t && t.prev) this.setState({ vals: Object.assign({}, s.vals, t.prev), toast: null }); },
+			strip: [
+				chip('freq', 'Freq', mfmt(shown.freq)),
+				chip('mode', 'Mode', shown.mode),
+				chip('bw', 'BW', kfmt(shown.bw)),
+				chip('gain', 'Gain', gainText(shown)),
+				chip('sq', 'Squelch', sqText(shown)),
+				chip('vol', 'Volume', shown.vol + ' %'),
+				chip('palette', 'Waterfall', optLabel('palette', shown.palette)),
+				chip('src', 'Hear', optLabel('src', shown.src))
+			]
+		};
+	}
+}
+</script>
+</body>
+</html>

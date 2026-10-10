@@ -1,0 +1,192 @@
+{
+	"v": 3,
+	"createdOnFiles": {
+		"v": 1,
+		"at": "2026-10-10T10:00:00Z"
+	},
+	"title": "WaveKit Web — App Shell",
+	"launch": {
+		"view": "canvas"
+	},
+	"pages": [],
+	"boards": {
+		"Main.dc.html": {
+			"x": 0,
+			"y": 0,
+			"w": 1440,
+			"h": 900,
+			"title": "A · Instrument — decodes on the spectrum, inspector on the right",
+			"expand": "fill",
+			"is_interactive": true
+		},
+		"Console.dc.html": {
+			"x": 1520,
+			"y": 0,
+			"w": 1440,
+			"h": 900,
+			"title": "B · Console — spectrum above decoded activity",
+			"expand": "fill",
+			"is_interactive": true
+		},
+		"Immersive.dc.html": {
+			"x": 3040,
+			"y": 0,
+			"w": 1440,
+			"h": 900,
+			"title": "C · Immersive — the signal is the app, chrome floats",
+			"expand": "fill",
+			"is_interactive": true
+		},
+		"Spectrum.dc.html": {
+			"x": 0,
+			"y": 1300,
+			"w": 1440,
+			"h": 640,
+			"title": "Spectrum + waterfall (shared, live mock) — every decoded signal type at a realistic frequency",
+			"expand": "fill",
+			"is_interactive": true
+		},
+		"Tuned.dc.html": {
+			"x": 1520,
+			"y": 1300,
+			"w": 344,
+			"h": 860,
+			"title": "Tuned-signal card (shared) — one anatomy for every signal",
+			"is_interactive": true
+		},
+		"Tuner.dc.html": {
+			"x": 0,
+			"y": 2580,
+			"w": 460,
+			"h": 600,
+			"title": "Tuner island — expanded",
+			"is_interactive": true
+		},
+		"Receiver.dc.html": {
+			"x": 540,
+			"y": 2580,
+			"w": 440,
+			"h": 860,
+			"title": "Receiver island — expanded",
+			"is_interactive": true
+		},
+		"Listen.dc.html": {
+			"x": 1060,
+			"y": 2580,
+			"w": 440,
+			"h": 760,
+			"title": "Listen island — expanded",
+			"is_interactive": true
+		},
+		"Messages.dc.html": {
+			"x": 0,
+			"y": 3840,
+			"w": 1440,
+			"h": 1500,
+			"title": "Decoded messages — every decoder, one card anatomy",
+			"is_interactive": true
+		},
+		"Decode.dc.html": {
+			"x": 1520,
+			"y": 3840,
+			"w": 380,
+			"h": 340,
+			"title": "Decode card (unknown rtl_433 JSON fallback)",
+			"is_interactive": true
+		},
+		"Json.dc.html": {
+			"x": 1980,
+			"y": 3840,
+			"w": 380,
+			"h": 340,
+			"title": "JSON viewer",
+			"is_interactive": true
+		},
+		"Activity.dc.html": {
+			"x": 0,
+			"y": 5700,
+			"w": 1240,
+			"h": 820,
+			"title": "Activity — search, columns, detail, replay",
+			"is_interactive": true
+		},
+		"Palette.dc.html": {
+			"x": 1320,
+			"y": 5700,
+			"w": 760,
+			"h": 700,
+			"title": "Command palette (⌘K) — tune, set, act, with live preview",
+			"is_interactive": true
+		},
+		"TunedGallery.dc.html": {
+			"x": 2440,
+			"y": 1300,
+			"w": 1440,
+			"h": 2900,
+			"title": "Tuned card — every signal type WaveKit decodes",
+			"is_interactive": true
+		}
+	},
+	"order": [
+		"Main.dc.html",
+		"Console.dc.html",
+		"Immersive.dc.html",
+		"Spectrum.dc.html",
+		"Tuned.dc.html",
+		"TunedGallery.dc.html",
+		"Tuner.dc.html",
+		"Receiver.dc.html",
+		"Listen.dc.html",
+		"Messages.dc.html",
+		"Decode.dc.html",
+		"Json.dc.html",
+		"Activity.dc.html",
+		"Palette.dc.html"
+	],
+	"notes": {
+		"shells": {
+			"x": 0,
+			"y": -300,
+			"text": "App shell — three directions",
+			"kind": "title1",
+			"maxW": 4480
+		},
+		"parts": {
+			"x": 0,
+			"y": 1020,
+			"text": "Shared parts",
+			"kind": "title1",
+			"maxW": 3880
+		},
+		"activity": {
+			"x": 0,
+			"y": 5420,
+			"text": "Activity and commands",
+			"kind": "title1",
+			"maxW": 2080
+		},
+		"messages": {
+			"x": 0,
+			"y": 3560,
+			"text": "Decoded messages",
+			"kind": "title1",
+			"maxW": 1900
+		},
+		"islands": {
+			"x": 0,
+			"y": 2300,
+			"text": "Floating controls (direction C)",
+			"kind": "title1",
+			"maxW": 1940
+		},
+		"gaps": {
+			"x": 1580,
+			"y": 2580,
+			"w": 360,
+			"maxH": 680,
+			"fill": "orange",
+			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up"
+		}
+	},
+	"designSystems": []
+}

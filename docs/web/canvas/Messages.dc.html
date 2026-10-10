@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Decoded messages</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="box-sizing: border-box; width: 100%; height: {{rootH}}; display: flex; flex-direction: column; gap: 14px; padding: {{pad}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; background: {{rootBg}}; border-radius: {{rootRadius}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootBlur}}">
+	<header style="display: flex; align-items: center; gap: 10px; flex: none">
+		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
+		<span style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</span>
+		<div style="flex: 1"></div>
+		<button onClick="{{togglePause}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 1px solid #2c443b; border-radius: 9px; background: transparent; color: #b9cac1; font-size: 12.5px">{{pauseLabel}}</button>
+		<sc-if value="{{feed}}" hint-placeholder-val="{{false}}">
+			<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
+			</button>
+		</sc-if>
+	</header>
+	<div role="radiogroup" aria-label="Show" style="display: flex; flex-wrap: wrap; gap: 6px; flex: none">
+		<sc-for list="{{chips}}" as="c" hint-placeholder-count="9">
+			<button role="radio" aria-checked="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.label}}" title="{{c.label}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}">
+				<sc-if value="{{c.hasIcon}}" hint-placeholder-val="{{true}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg></sc-if>
+				<sc-if value="{{c.showText}}" hint-placeholder-val="{{true}}"><span>{{c.text}}</span></sc-if>
+				<span style="font-weight: 400; color: #8ba598; font-variant-numeric: tabular-nums">{{c.count}}</span>
+			</button>
+		</sc-for>
+	</div>
+	<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin: 0 -4px; padding: 0 4px">
+		<div style="columns: {{cols}}; column-gap: 14px">
+			<sc-for list="{{items}}" as="x" hint-placeholder-count="6">
+				<div style="break-inside: avoid; margin-bottom: 14px">
+					<dc-import name="Decode" msg="{{x}}" on-tune="{{tune}}" hint-size="100%,240px"></dc-import>
+				</div>
+			</sc-for>
+		</div>
+	</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"variant":{"editor":"enum","options":["gallery","feed"],"default":"gallery"},"onTune":{"editor":null},"onClose":{"editor":null},"$preview":{"width":1440,"height":1500}}'>
+const CATS = [
+	['voice', 'Voice', ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0']],
+	['aircraft', 'Aircraft', ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7']],
+	['marine', 'Marine', ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1']],
+	['aviation', 'Aviation data', ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2']],
+	['paging', 'Paging', ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01']],
+	['aprs', 'APRS', ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0']],
+	['sensors', 'Sensors', ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314']],
+	['mesh', 'Mesh', ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0']]
+];
+const MSGS = [
+	{ kind: 'call', cat: 'voice', proto: 'DMR', title: 'TG 2081', sub: 'From radio 2081045 · slot 1 · colour code 1', time: '14:02:41', freq: '161.150', live: true, fields: [['Duration', '0:12'], ['Errors', '0.4 %'], ['Talker alias', 'Port ops 3']], raw: { type: 'call_start', protocol: 'DMR', talkgroup: 2081, source: 2081045, slot: 1, colorCode: 1, encrypted: false } },
+	{ kind: 'aircraft', cat: 'aircraft', proto: 'ADS-B', title: 'AFR1234', sub: 'ICAO 3944EF · Airbus A320', time: '14:02:40', freq: '1090.000', fields: [['Altitude', '36 000 ft'], ['Speed', '452 kn'], ['Heading', '284°'], ['Squawk', '4721'], ['Vertical', '0 ft/min'], ['Seen', '1 s ago']], pos: [48.7312, -3.4627], raw: { icao: '3944EF', callsign: 'AFR1234', altitude: 36000, groundSpeed: 452, track: 284, squawk: '4721', lat: 48.7312, lon: -3.4627 } },
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 1200', title: 'Capcode 1234567', sub: 'Function 3 · alphanumeric', time: '14:02:39', freq: '160.450', text: 'Test page — system check 0412. Reply not required.', raw: { protocol: 'POCSAG1200', address: 1234567, function: 3, messageType: 'alpha', message: 'Test page — system check 0412. Reply not required.' } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Acurite-Tower', sub: 'ID 12345 · channel A', time: '14:02:39', freq: '433.920', raw: { time: '2026-10-10 14:02:39', model: 'Acurite-Tower', id: 12345, channel: 'A', battery_ok: 1, temperature_C: 18.4, humidity: 61, mic: 'CHECKSUM' } },
+	{ kind: 'vessel', cat: 'marine', proto: 'AIS', title: 'Kerlouan', sub: 'MMSI 227006760 · fishing vessel', time: '14:02:38', freq: '161.975', badge: 'Type 1', fields: [['Speed', '11.4 kn'], ['Course', '284°'], ['Status', 'Under way'], ['Destination', 'Roscoff']], pos: [48.7261, -3.9853], raw: { mmsi: 227006760, name: 'KERLOUAN', msgType: 1, sog: 11.4, cog: 284, navStatus: 0, lat: 48.7261, lon: -3.9853, destination: 'ROSCOFF' } },
+	{ kind: 'text', cat: 'aviation', proto: 'ACARS', title: 'F-HBXA · flight XK4521', sub: 'Label H1 · block 4 · downlink', time: '14:02:30', freq: '131.725', mono: true, text: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2', raw: { tail: 'F-HBXA', flight: 'XK4521', label: 'H1', blockId: '4', text: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2' } },
+	{ kind: 'call', cat: 'voice', proto: 'P25', title: 'TG 1201', sub: 'From radio 4410022 · phase 1', time: '14:02:12', freq: '163.088', encrypted: true, fields: [['Duration', '0:08'], ['Algorithm', 'AES-256'], ['NAC', '293']], raw: { type: 'call_end', protocol: 'P25', talkgroup: 1201, source: 4410022, encrypted: true, durationMs: 8120 } },
+	{ kind: 'text', cat: 'mesh', proto: 'Meshtastic', title: 'Harbour relay', sub: 'Node !a3f2c1 → everyone · LongFast', time: '14:01:58', freq: '869.525', text: 'Anyone on the coast tonight? Signal is great from the lighthouse.', fields: [['Hops', '2 of 3'], ['SNR', '6.5 dB'], ['RSSI', '−97 dBm']], raw: { from: '!a3f2c1', to: '^all', channel: 'LongFast', portnum: 'TEXT_MESSAGE_APP', payload: 'Anyone on the coast tonight?', hopsAway: 2, snr: 6.5, rssi: -97 } },
+	{ kind: 'position', cat: 'aprs', proto: 'APRS', title: 'F4ABC-9', sub: 'Mobile · via WIDE1-1, WIDE2-1', time: '14:01:44', freq: '144.800', text: 'On the way home. QRV 145.500', fields: [['Speed', '52 km/h'], ['Course', '112°'], ['Altitude', '38 m']], pos: [48.3904, -4.4861], raw: { source: 'F4ABC-9', destination: 'APDR16', path: ['WIDE1-1', 'WIDE2-1'], lat: 48.3904, lon: -4.4861, speed: 52, course: 112, comment: 'On the way home. QRV 145.500' } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Toyota TPMS', sub: 'ID a1b2c3d4', time: '14:01:40', freq: '433.920', raw: { time: '2026-10-10 14:01:40', model: 'Toyota', type: 'TPMS', id: 'a1b2c3d4', pressure_kPa: 232.5, temperature_C: 21, status: 128, mic: 'CRC' } },
+	{ kind: 'text', cat: 'aviation', proto: 'VDL2 · CPDLC', title: 'F-GZTB · flight XK8801', sub: 'Uplink from ground station LFRB', time: '14:01:33', freq: '136.975', mono: true, text: 'CLIMB TO AND MAINTAIN FL360', raw: { tail: 'F-GZTB', flight: 'XK8801', app: 'CPDLC', direction: 'uplink', msg: 'CLIMB TO AND MAINTAIN FL360' } },
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 512', title: 'Capcode 1234560', sub: 'Function 0 · numeric', time: '14:01:20', freq: '160.450', mono: true, text: '0612 44 18', raw: { protocol: 'POCSAG512', address: 1234560, function: 0, messageType: 'numeric', message: '0612 44 18' } },
+	{ kind: 'telemetry', cat: 'aprs', proto: 'APRS weather', title: 'F6XYZ-13', sub: 'Weather station · Brest', time: '14:00:59', freq: '144.800', fields: [['Temperature', '14.2 °C'], ['Humidity', '78 %'], ['Wind', '18 km/h W'], ['Gusts', '31 km/h'], ['Pressure', '1012.4 hPa'], ['Rain 1 h', '0.3 mm']], raw: { source: 'F6XYZ-13', weather: { temperature: 14.2, humidity: 78, windSpeed: 18, windDir: 270, gust: 31, pressure: 1012.4, rain1h: 0.3 } } },
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 1200', title: 'Capcode 1234567', sub: 'Function 1 · tone only', time: '14:00:41', freq: '160.450', toneOnly: true, raw: { protocol: 'POCSAG1200', address: 1234567, function: 1, messageType: 'tone' } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Generic-Remote', sub: 'Unknown device · no renderer yet', time: '14:00:17', freq: '433.920', raw: { time: '2026-10-10 14:00:17', model: 'Generic-Remote', id: 4128, cmd: 5, tristate: 'ZZX0FX10ZZ' } },
+	{ kind: 'text', cat: 'paging', proto: 'DTMF', title: 'Digits', sub: 'In-band tones on 160.625', time: '13:59:52', freq: '160.625', mono: true, text: '*72#1405', raw: { protocol: 'DTMF', digits: '*72#1405' } }
+];
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { cat: 'all', paused: false };
+	}
+	renderVals() {
+		const feed = this.props.variant === 'feed';
+		const cat = this.state.cat;
+		const count = id => MSGS.filter(m => id === 'all' || m.cat === id).length;
+		const chip = (id, label, icon) => {
+			const on = cat === id;
+			return { label, text: label, icon: icon || [], hasIcon: !!icon, showText: !feed || !icon, count: String(count(id)), on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ cat: id }) };
+		};
+		return {
+			feed,
+			rootH: feed ? '100%' : 'auto',
+			pad: feed ? '18px' : '40px',
+			rootBg: feed ? 'rgba(17,28,25,.62)' : '#0b1512',
+			rootRadius: feed ? '20px' : '0',
+			rootBorder: feed ? '1px solid rgba(123,236,199,.14)' : '0',
+			rootShadow: feed ? 'inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4)' : 'none',
+			rootBlur: feed ? 'blur(24px) saturate(170%)' : 'none',
+			cols: feed ? '1' : '3 340px',
+			chips: [chip('all', 'All')].concat(CATS.map(([id, label, icon]) => chip(id, label, icon))),
+			items: MSGS.filter(m => cat === 'all' || m.cat === cat),
+			tune: f => this.props.onTune && this.props.onTune(f),
+			close: () => this.props.onClose && this.props.onClose(),
+			liveText: this.state.paused ? 'Paused' : 'Live',
+			liveFg: this.state.paused ? '#f2b84b' : '#7becc7',
+			pauseLabel: this.state.paused ? 'Resume' : 'Pause',
+			togglePause: () => this.setState({ paused: !this.state.paused })
+		};
+	}
+}
+</script>
+</body>
+</html>

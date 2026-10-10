@@ -1,0 +1,555 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Activity</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+.wk-play:focus-visible{outline:none}
+.wk-play:focus-visible>span:first-child{box-shadow:0 0 0 2px #0e1815,0 0 0 4px #7becc7}
+</style>
+</helmet>
+<div style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 22px; overflow: hidden; background: rgba(17,28,25,.58); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+
+	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px 18px">
+		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
+		<button onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 0; border-radius: 13px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
+		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 13px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; background: transparent; color: #b9cac1"><span style="width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span>{{recText}}</button>
+		<div style="flex: 1"></div>
+		<button onClick="{{toggleMode}}" aria-label="{{modeLabel}}" title="{{modeLabel}}" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; display: grid; place-items: center; background: transparent; color: #8ba598">
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{modeIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+		</button>
+		<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; display: grid; place-items: center; background: transparent; color: #8ba598">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
+		</button>
+	</header>
+
+	<div style="flex: none; padding: 0 14px; position: relative; z-index: 2">
+		<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 46px; box-sizing: border-box; padding: 6px 8px 6px 14px; border-radius: 14px; background: rgba(7,15,13,.55); border: 1px solid {{searchBorder}}; transition: border-color .15s">
+			<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>
+			<sc-for list="{{tokens}}" as="t" hint-placeholder-count="0">
+				<span style="display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 10px; border-radius: 8px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap"><span style="font-weight: 400; color: #8ba598; margin-right: 4px">{{t.kind}}</span>{{t.value}}
+					<button onClick="{{t.remove}}" aria-label="Remove filter {{t.kind}} {{t.value}}" style="font: inherit; cursor: pointer; width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: #7becc7; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				</span>
+			</sc-for>
+			<input value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search activity" placeholder="{{placeholder}}" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 160px; height: 32px; border: 0; outline: none; background: transparent; color: #f4f7f5; font: inherit; font-size: 14.5px">
+			<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
+				<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{resultCount}}</span>
+				<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 12.5px">Clear all</button>
+			</sc-if>
+		</div>
+		<sc-if value="{{showSugg}}" hint-placeholder-val="{{false}}">
+			<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 52px; max-width: 560px; padding: 6px; border-radius: 14px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
+				<sc-for list="{{sugg}}" as="s" hint-placeholder-count="3">
+					<button role="option" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}" style="font: inherit; color: inherit; cursor: pointer; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 12px; border: 0; border-radius: 9px; background: {{s.bg}}">
+						<span style="font-size: 12px; color: #8ba598; width: 104px; flex: none">{{s.kind}}</span>
+						<span style="flex: 1; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.value}}</span>
+						<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{s.count}}</span>
+					</button>
+				</sc-for>
+				<div style="display: flex; gap: 14px; padding: 8px 12px 4px; font-size: 12px; color: #52645d"><span>↑↓ choose</span><span>Enter add filter</span><span>⌫ remove last</span></div>
+			</div>
+		</sc-if>
+	</div>
+
+	<div role="group" aria-label="Quick filters" style="flex: none; display: flex; flex-wrap: {{chipWrap}}; align-items: center; gap: 6px; padding: 10px 14px 12px; overflow-x: auto; scrollbar-width: none">
+		<sc-for list="{{cats}}" as="c" hint-placeholder-count="8">
+			<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+				<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><span>{{c.label}}</span></sc-if>
+				<span style="font-weight: 400; font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums">{{c.count}}</span>
+			</button>
+		</sc-for>
+		<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: rgba(123,236,199,.14); flex: none; margin: 0 2px"></div></sc-if>
+		<button aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{audioBorder}}; background: {{audioBg}}; color: {{audioFg}}">
+			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>With audio
+		</button>
+		<button style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; border: 1px solid #2c443b; background: transparent; color: #b9cac1">Today
+			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg>
+		</button>
+	</div>
+
+	<div style="flex: 1; min-height: 0; display: flex; gap: 8px; padding: 0 10px 10px">
+		<sc-if value="{{showLists}}" hint-placeholder-val="{{true}}">
+			<div style="flex: 1; min-width: 0; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
+				<sc-for list="{{columns}}" as="col" hint-placeholder-count="1">
+					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34); outline: none">
+						<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
+							<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: #b9cac1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
+							<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{col.count}}</span>
+							<div style="flex: 1"></div>
+							<sc-if value="{{col.removable}}" hint-placeholder-val="{{false}}">
+								<button onClick="{{col.remove}}" aria-label="Remove column {{col.title}}" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #52645d; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+							</sc-if>
+						</header>
+						<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
+							<sc-if value="{{col.empty}}" hint-placeholder-val="{{false}}">
+								<div style="display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 36px 16px; text-align: center">
+									<span style="font-weight: 700; color: #b9cac1">{{col.emptyTitle}}</span>
+									<span style="font-size: 13px; color: #8ba598; line-height: 1.5">{{col.emptyText}}</span>
+									<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
+										<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(123,236,199,.4); border-radius: 9px; background: transparent; color: #7becc7; font-size: 13px; font-weight: 700">Clear filters</button>
+									</sc-if>
+								</div>
+							</sc-if>
+							<sc-for list="{{col.groups}}" as="g" hint-placeholder-count="2">
+								<div style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: #8ba598; font-variant-numeric: tabular-nums; background: linear-gradient(rgba(14,24,21,.96) 70%, rgba(14,24,21,0))">{{g.label}}</div>
+								<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
+									<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 12px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
+										<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 12px">
+											<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 10px; background: #192b24; display: grid; place-items: center">
+												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+												<sc-if value="{{r.rec}}" hint-placeholder-val="{{false}}"><span title="Recording now" style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: #ff7a6b; box-shadow: 0 0 0 2px #0e1815"></span></sc-if>
+											</span>
+											<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+												<span style="display: flex; align-items: baseline; gap: 10px; min-width: 0">
+													<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
+													<span style="flex: 1"></span>
+													<span style="flex: none; font-size: 12px; color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
+												</span>
+												<span style="display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 1px; font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden">
+													<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-label="Encrypted"><path d="M5 11h14v10h-14zM8 11v-4a4 4 0 1 1 8 0v4"></path></svg></sc-if>
+													<span style="overflow: hidden; text-overflow: ellipsis">{{r.meta}}</span>
+												</span>
+												<span style="margin-top: 5px; font-size: 13.5px; line-height: 1.45; color: {{r.prevC}}; font-style: {{r.prevI}}; font-family: {{r.prevF}}; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{r.preview}}</span>
+												<sc-if value="{{r.isCurrent}}" hint-placeholder-val="{{false}}">
+													<span style="display: block; height: 3px; border-radius: 2px; background: #22362f; margin-top: 8px; overflow: hidden"><span style="display: block; height: 100%; width: {{r.pos}}%; background: #7becc7"></span></span>
+												</sc-if>
+											</span>
+										</button>
+										<sc-if value="{{r.hasAudio}}" hint-placeholder-val="{{false}}">
+											<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 12px">
+												<span style="width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}">
+													<sc-if value="{{r.playing}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
+													<sc-if value="{{r.notPlaying}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
+												</span>
+												<span style="font-size: 11px; color: {{r.durC}}; font-variant-numeric: tabular-nums">{{r.dur}}</span>
+											</button>
+										</sc-if>
+										<sc-if value="{{r.notRecorded}}" hint-placeholder-val="{{false}}">
+											<span title="Recording was off" style="flex: none; width: 54px; display: flex; align-items: center; justify-content: center; font-size: 11px; color: #52645d; text-align: center; line-height: 1.2">Not<br>recorded</span>
+										</sc-if>
+									</div>
+								</sc-for>
+							</sc-for>
+						</div>
+					</section>
+				</sc-for>
+				<sc-if value="{{canAdd}}" hint-placeholder-val="{{false}}">
+					<div style="flex: none; width: 176px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 16px; border: 1px dashed rgba(123,236,199,.18)">
+						<span style="font-size: 12px; font-weight: 700; color: #b9cac1; padding: 4px 4px 2px">Add a column</span>
+						<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
+							<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 9px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
+						</sc-if>
+						<sc-for list="{{presets}}" as="p" hint-placeholder-count="2">
+							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 9px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 13px; text-align: left">+ {{p.title}}</button>
+						</sc-for>
+						<span style="font-size: 12px; color: #52645d; padding: 4px; line-height: 1.45">Columns sync to every device signed in to this WaveKit.</span>
+					</div>
+				</sc-if>
+			</div>
+		</sc-if>
+
+		<sc-if value="{{showDetail}}" hint-placeholder-val="{{false}}">
+			<aside aria-label="Details" style="flex: {{detailFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34)">
+				<header style="flex: none; display: flex; align-items: center; gap: 4px; height: 44px; padding: 0 6px">
+					<button onClick="{{closeDetail}}" aria-label="{{backLabel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px 0 6px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; display: flex; align-items: center; gap: 4px; font-size: 13px">
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{backIcon}}"></path></svg>{{backText}}
+					</button>
+					<div style="flex: 1"></div>
+					<button onClick="{{copySel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 13px">{{copyText}}</button>
+					<button onClick="{{tuneSel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 13px; font-weight: 700">Tune {{selFreq}}</button>
+				</header>
+				<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 14px; display: flex; flex-direction: column; gap: 18px; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
+					<dc-import name="Decode" msg="{{sel}}" flat="{{true}}" on-tune="{{tune}}" on-play="{{playId}}" playing="{{selPlaying}}" play-pos="{{selPos}}" json-height="{{jsonH}}" hint-size="100%,360px"></dc-import>
+					<sc-if value="{{hasRelated}}" hint-placeholder-val="{{false}}">
+						<section style="display: flex; flex-direction: column; gap: 2px; border-top: 1px solid rgba(123,236,199,.08); padding-top: 14px">
+							<div style="display: flex; align-items: center; margin: 0 4px 6px">
+								<h4 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{relatedTitle}}</h4>
+								<sc-if value="{{canPlayAll}}" hint-placeholder-val="{{false}}">
+									<button onClick="{{playAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #7becc7; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg>Play conversation</button>
+								</sc-if>
+							</div>
+							<sc-for list="{{related}}" as="r" hint-placeholder-count="3">
+								<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 4px 8px; border: 0; border-radius: 9px; background: {{r.bg}}">
+									<span style="width: 40px; flex: none; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.time}}</span>
+									<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #d9e4de">{{r.preview}}</span>
+									<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.dur}}</span>
+								</button>
+							</sc-for>
+						</section>
+					</sc-if>
+				</div>
+			</aside>
+		</sc-if>
+	</div>
+
+	<sc-if value="{{hasPlayer}}" hint-placeholder-val="{{false}}">
+		<div style="flex: none; margin: 0 10px 10px; padding: 8px 10px 8px 8px; border-radius: 16px; background: rgba(7,15,13,.72); border: 1px solid rgba(123,236,199,.12); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
+			<div style="display: flex; align-items: center; gap: 2px; flex: none">
+				<button onClick="{{prev}}" aria-label="Previous recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: {{prevC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14h-2zM20 5v14l-10 -7z"></path></svg></button>
+				<button onClick="{{togglePlay}}" aria-label="{{playerLabel}}" style="font: inherit; cursor: pointer; width: 40px; height: 40px; border: 0; border-radius: 50%; background: #7becc7; color: #111c19; display: grid; place-items: center">
+					<sc-if value="{{pPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
+					<sc-if value="{{pPaused}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
+				</button>
+				<button onClick="{{next}}" aria-label="Next recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: {{nextC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l10 -7z"></path></svg></button>
+			</div>
+			<div style="flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
+				<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
+					<button onClick="{{revealPlaying}}" style="font: inherit; color: #f4f7f5; cursor: pointer; padding: 0; border: 0; background: transparent; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pTitle}}</button>
+					<span style="font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{pSub}}</span>
+					<span style="flex: 1"></span>
+					<span style="font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums; white-space: nowrap">{{pTime}}</span>
+				</div>
+				<div style="position: relative; height: 14px">
+					<div style="position: absolute; left: 0; right: 0; top: 5px; height: 4px; border-radius: 2px; background: #22362f"></div>
+					<div style="position: absolute; left: 0; top: 5px; height: 4px; border-radius: 2px; background: #7becc7; width: {{pPos}}%"></div>
+					<div style="position: absolute; top: 1px; left: {{pPos}}%; width: 12px; height: 12px; margin-left: -6px; border-radius: 50%; background: #f4f7f5"></div>
+					<input type="range" min="0" max="1000" step="1" value="{{pPosK}}" onChange="{{seek}}" aria-label="Seek" aria-valuetext="{{pTime}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer">
+				</div>
+			</div>
+			<div style="flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px">
+			<button onClick="{{cycleSpeed}}" aria-label="Playback speed {{speedText}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; min-width: 44px; padding: 0 8px; border: 1px solid #2c443b; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 12.5px; font-variant-numeric: tabular-nums">{{speedText}}</button>
+			<button aria-pressed="{{autoNext}}" onClick="{{toggleAutoNext}}" title="Play the next recording in this list when one ends" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border-radius: 8px; border: 1px solid {{anBorder}}; background: {{anBg}}; color: {{anFg}}; font-size: 12.5px">Auto-next</button>
+			<button onClick="{{stopPlay}}" aria-label="Close player and resume live audio" title="Close and resume live audio" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			</div>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"mode":{"editor":"enum","options":["drawer","wide"],"default":"wide"},"onMode":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"command":{"editor":null},"$preview":{"width":1240,"height":820}}'>
+const I = {
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0']
+};
+const CATS = [['voice', 'Voice'], ['aircraft', 'Aircraft'], ['marine', 'Marine'], ['aviation', 'Aviation data'], ['paging', 'Paging'], ['aprs', 'APRS'], ['sensors', 'Sensors'], ['mesh', 'Mesh']];
+const PRESETS = [
+	{ id: 'all', title: 'All activity' },
+	{ id: 'voice', title: 'Voice', cats: ['voice'] },
+	{ id: 'msgs', title: 'Messages', cats: ['paging', 'aviation', 'mesh'] },
+	{ id: 'pos', title: 'Positions', cats: ['aircraft', 'marine', 'aprs'] },
+	{ id: 'sensors', title: 'Sensors', cats: ['sensors'] }
+];
+const tg = (n, src, dur, t, time, extra) => Object.assign({ kind: 'call', cat: 'voice', proto: 'DMR', title: 'TG ' + n, sub: 'From radio ' + src + ' · slot 1', time, freq: '161.150', audio: dur, transcript: t, raw: { type: 'call_end', protocol: 'DMR', talkgroup: n, source: src, slot: 1, durationMs: dur * 1000, encrypted: false } }, extra || {});
+const SEED = [
+	tg(2081, 2081045, 6, '…copy that, berth four is clear, bring her in', '14:02:41', { live: true, sub: 'From radio 2081045 · slot 1' }),
+	{ kind: 'call', cat: 'voice', proto: 'NFM', title: 'Marine ch 16', sub: 'Analog voice', time: '14:02:40', freq: '156.800', audio: 9, transcript: 'Roscoff port control, Roscoff port control, this is Kerlouan, channel one two.', raw: { type: 'transmission', mode: 'NFM', frequency: 156800000, durationMs: 9100, peakDbfs: -18 } },
+	{ kind: 'aircraft', cat: 'aircraft', proto: 'ADS-B', title: 'AFR1234', sub: 'ICAO 3944EF · Airbus A320', time: '14:02:40', freq: '1090.000', fields: [['Altitude', '36 000 ft'], ['Speed', '452 kn'], ['Heading', '284°'], ['Squawk', '4721']], pos: [48.7312, -3.4627], raw: { icao: '3944EF', callsign: 'AFR1234', altitude: 36000, groundSpeed: 452, track: 284, squawk: '4721', lat: 48.7312, lon: -3.4627 } },
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 1200', title: 'Capcode 1234567', sub: 'Alphanumeric · function 3', time: '14:02:39', freq: '160.450', text: 'Test page — system check 0412. Reply not required.', raw: { protocol: 'POCSAG1200', address: 1234567, function: 3, messageType: 'alpha', message: 'Test page — system check 0412. Reply not required.' } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Acurite-Tower', sub: 'ID 12345 · channel A', time: '14:02:39', freq: '433.920', summary: '18.4 °C · 61 % · battery OK', raw: { time: '2026-10-10 14:02:39', model: 'Acurite-Tower', id: 12345, channel: 'A', battery_ok: 1, temperature_C: 18.4, humidity: 61, mic: 'CHECKSUM' } },
+	{ kind: 'vessel', cat: 'marine', proto: 'AIS', title: 'Kerlouan', sub: 'MMSI 227006760 · fishing', time: '14:02:38', freq: '161.975', fields: [['Speed', '11.4 kn'], ['Course', '284°'], ['Status', 'Under way'], ['Destination', 'Roscoff']], pos: [48.7261, -3.9853], raw: { mmsi: 227006760, name: 'KERLOUAN', msgType: 1, sog: 11.4, cog: 284, lat: 48.7261, lon: -3.9853, destination: 'ROSCOFF' } },
+	{ kind: 'text', cat: 'aviation', proto: 'ACARS', title: 'F-HBXA · XK4521', sub: 'Label H1 · block 4 · downlink', time: '14:02:30', freq: '131.725', mono: true, text: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2', raw: { tail: 'F-HBXA', flight: 'XK4521', label: 'H1', blockId: '4', text: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2' } },
+	{ kind: 'call', cat: 'voice', proto: 'P25', title: 'TG 1201', sub: 'From radio 4410022 · phase 1', time: '14:02:12', freq: '163.088', encrypted: true, audioNote: 'Encrypted. There is no audio to record.', fields: [['Duration', '0:08'], ['Algorithm', 'AES-256']], raw: { type: 'call_end', protocol: 'P25', talkgroup: 1201, source: 4410022, encrypted: true, durationMs: 8120 } },
+	tg(2081, 2081012, 24, 'Port ops, crane two is down for maintenance until sixteen hundred.', '14:02:02'),
+	{ kind: 'text', cat: 'mesh', proto: 'Meshtastic', title: 'Harbour relay', sub: 'Node !a3f2c1 → everyone · LongFast', time: '14:01:58', freq: '869.525', text: 'Anyone on the coast tonight? Signal is great from the lighthouse.', fields: [['Hops', '2 of 3'], ['SNR', '6.5 dB']], raw: { from: '!a3f2c1', to: '^all', channel: 'LongFast', portnum: 'TEXT_MESSAGE_APP', payload: 'Anyone on the coast tonight? Signal is great from the lighthouse.', hopsAway: 2, snr: 6.5, rssi: -97 } },
+	{ kind: 'position', cat: 'aprs', proto: 'APRS', title: 'F4ABC-9', sub: 'Mobile · via WIDE1-1, WIDE2-1', time: '14:01:44', freq: '144.800', text: 'On the way home. QRV 145.500', fields: [['Speed', '52 km/h'], ['Course', '112°']], pos: [48.3904, -4.4861], raw: { source: 'F4ABC-9', path: ['WIDE1-1', 'WIDE2-1'], lat: 48.3904, lon: -4.4861, speed: 52, course: 112, comment: 'On the way home. QRV 145.500' } },
+	{ kind: 'call', cat: 'voice', proto: 'NFM', title: 'PMR446 ch 1', sub: 'Analog voice · CTCSS 77.0 Hz', time: '14:01:40', freq: '446.006', audio: 14, transcriptState: 'pending', raw: { type: 'transmission', mode: 'NFM', frequency: 446006250, durationMs: 14200, ctcssHz: 77 } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Toyota TPMS', sub: 'ID a1b2c3d4', time: '14:01:40', freq: '433.920', summary: '232.5 kPa · 21 °C', raw: { time: '2026-10-10 14:01:40', model: 'Toyota', type: 'TPMS', id: 'a1b2c3d4', pressure_kPa: 232.5, temperature_C: 21, status: 128, mic: 'CRC' } },
+	{ kind: 'text', cat: 'aviation', proto: 'VDL2 · CPDLC', title: 'F-GZTB · XK8801', sub: 'Uplink from LFRB', time: '14:01:33', freq: '136.975', mono: true, text: 'CLIMB TO AND MAINTAIN FL360', raw: { tail: 'F-GZTB', flight: 'XK8801', app: 'CPDLC', direction: 'uplink', msg: 'CLIMB TO AND MAINTAIN FL360' } },
+	tg(2081, 2081045, 9, 'Roger, standing by on two zero eight one.', '14:01:20'),
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 512', title: 'Capcode 1234560', sub: 'Numeric · function 0', time: '14:01:20', freq: '160.450', mono: true, text: '0612 44 18', raw: { protocol: 'POCSAG512', address: 1234560, function: 0, messageType: 'numeric', message: '0612 44 18' } },
+	{ kind: 'telemetry', cat: 'aprs', proto: 'APRS weather', title: 'F6XYZ-13', sub: 'Weather station', time: '14:00:59', freq: '144.800', fields: [['Temperature', '14.2 °C'], ['Humidity', '78 %'], ['Wind', '18 km/h W'], ['Pressure', '1012.4 hPa']], raw: { source: 'F6XYZ-13', weather: { temperature: 14.2, humidity: 78, windSpeed: 18, windDir: 270, pressure: 1012.4 } } },
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 1200', title: 'Capcode 1234567', sub: 'Tone only · function 1', time: '14:00:41', freq: '160.450', toneOnly: true, raw: { protocol: 'POCSAG1200', address: 1234567, function: 1, messageType: 'tone' } },
+	{ kind: 'call', cat: 'voice', proto: 'NFM', title: 'Analog voice', sub: 'Narrowband FM · CTCSS 88.5 Hz', time: '14:00:22', freq: '160.625', audio: 5, unrecorded: true, raw: { type: 'transmission', mode: 'NFM', frequency: 160625000, durationMs: 5000, ctcssHz: 88.5 } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Generic-Remote', sub: 'Unknown device · ID 4128', time: '14:00:17', freq: '433.920', raw: { time: '2026-10-10 14:00:17', model: 'Generic-Remote', id: 4128, cmd: 5, tristate: 'ZZX0FX10ZZ' } },
+	{ kind: 'text', cat: 'paging', proto: 'DTMF', title: 'DTMF digits', sub: 'In-band tones on 160.625', time: '13:59:52', freq: '160.625', mono: true, text: '*72#1405', raw: { protocol: 'DTMF', digits: '*72#1405' } },
+	{ kind: 'call', cat: 'voice', proto: 'NFM', title: 'Analog voice', sub: 'Narrowband FM · DCS 023N', time: '13:59:31', freq: '161.425', audio: 7, transcriptState: 'pending', raw: { type: 'transmission', mode: 'NFM', frequency: 161425000, durationMs: 7000, dcs: '023N' } },
+	tg(9, 2081045, 41, 'Network test, please acknowledge on talkgroup nine.', '13:51:08', { sub: 'From radio 2081045 · slot 2' })
+];
+const LATER = [
+	{ kind: 'text', cat: 'paging', proto: 'POCSAG 1200', title: 'Capcode 1234567', sub: 'Alphanumeric · function 3', freq: '160.450', text: 'Crane 2 maintenance window confirmed 14:30–16:00.', raw: { protocol: 'POCSAG1200', address: 1234567, function: 3, messageType: 'alpha', message: 'Crane 2 maintenance window confirmed 14:30–16:00.' } },
+	{ kind: 'vessel', cat: 'marine', proto: 'AIS', title: 'Belle Étoile', sub: 'MMSI 228237700 · passenger', freq: '162.025', fields: [['Speed', '0.1 kn'], ['Status', 'Moored'], ['Destination', 'Île de Batz']], pos: [48.7183, -3.9661], raw: { mmsi: 228237700, name: 'BELLE ETOILE', msgType: 5, navStatus: 5, destination: 'ILE DE BATZ' } },
+	{ kind: 'json', cat: 'sensors', proto: 'rtl_433', title: 'Acurite-Tower', sub: 'ID 12345 · channel A', freq: '433.920', summary: '18.5 °C · 60 % · battery OK', raw: { model: 'Acurite-Tower', id: 12345, channel: 'A', battery_ok: 1, temperature_C: 18.5, humidity: 60 } },
+	{ kind: 'call', cat: 'voice', proto: 'NFM', title: 'Marine ch 16', sub: 'Analog voice', freq: '156.800', audio: 6, transcript: 'Kerlouan, Roscoff port control, go ahead on twelve.', raw: { type: 'transmission', mode: 'NFM', frequency: 156800000, durationMs: 6000 } },
+	{ kind: 'aircraft', cat: 'aircraft', proto: 'ADS-B', title: 'EZY48KT', sub: 'ICAO 406B8A · Airbus A319', freq: '1090.000', fields: [['Altitude', '11 250 ft'], ['Speed', '286 kn'], ['Heading', '052°']], pos: [48.52, -3.81], raw: { icao: '406B8A', callsign: 'EZY48KT', altitude: 11250, groundSpeed: 286, track: 52 } }
+];
+const fmtS = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+const hay = x => x._h || (x._h = JSON.stringify(x).toLowerCase());
+function preview(x) {
+	if (x.transcript) return '“' + x.transcript + (x.live ? '…' : '') + '”';
+	if (x.transcriptState === 'pending') return 'Transcribing…';
+	if (x.text) return x.text;
+	if (x.toneOnly) return 'Tone only. No message body.';
+	if (x.audioNote) return x.audioNote;
+	if (x.summary) return x.summary;
+	if (x.fields) return x.fields.slice(0, 3).map(f => f[1]).join(' · ');
+	const r = x.raw || {};
+	return Object.keys(r).filter(k => !['time', 'model', 'id', 'mic'].includes(k)).slice(0, 3).map(k => k.replace(/_/g, ' ') + ' ' + r[k]).join(' · ');
+}
+function tokenMatch(t, x) {
+	const r = x.raw || {};
+	if (t.type === 'tg') return String(r.talkgroup) === t.v;
+	if (t.type === 'cap') return String(r.address) === t.v;
+	if (t.type === 'mmsi') return String(r.mmsi) === t.v;
+	if (t.type === 'freq') return x.freq.startsWith(t.v);
+	if (t.type === 'tone') return String(r.ctcssHz) === t.v || r.dcs === t.v;
+	if (t.type === 'call') return x.title.toLowerCase().includes(t.v.toLowerCase());
+	return hay(x).includes(t.v.toLowerCase());
+}
+const clock = s => { const t = 14 * 3600 + 2 * 60 + 45 + s; return [Math.floor(t / 3600), Math.floor(t / 60) % 60, t % 60].map(n => String(n).padStart(2, '0')).join(':'); };
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {
+			items: SEED.map((x, i) => Object.assign({ id: 'm' + i }, x)), pending: [], tick: 0, later: 0,
+			q: '', tokens: [], focus: false, sugg: 0, cats: [], audioOnly: false, paused: false, recording: true,
+			cols: ['all', 'voice', 'msgs'], sel: null, play: null, pos: 0, playing: false, speed: 1, autoNext: true, mode: 'wide', copied: false
+		};
+	}
+	componentDidMount() {
+		this.timer = setInterval(() => this.step(), 200);
+		this.applyCommand(this.props.command);
+	}
+	componentDidUpdate(prev) {
+		const c = this.props.command;
+		if (c && (!prev.command || prev.command.n !== c.n)) this.applyCommand(c);
+	}
+	applyCommand(c) {
+		if (!c) return;
+		this.setState({ tokens: c.tokens || [], cats: c.cats || [], q: '', sel: null, audioOnly: false }, () => {
+			if (!c.play) return;
+			const q = this.queue(), done = q.filter(x => !x.live);
+			const it = done[done.length - 1] || q[q.length - 1];
+			if (it) this.setState({ sel: it.id, play: it.id, pos: 0, playing: true });
+		});
+	}
+	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.ct); }
+	step() {
+		const s = this.state, next = {};
+		const tick = s.tick + 1;
+		next.tick = tick;
+		if (s.play && s.playing) {
+			const it = s.items.find(x => x.id === s.play);
+			const pos = s.pos + 0.2 * s.speed / Math.max(1, it.audio);
+			if (pos < 1 || it.live) next.pos = Math.min(pos, it.live ? 0.98 : 1);
+			else {
+				const nx = s.autoNext ? this.neighbour(1) : null;
+				if (nx) { next.play = nx.id; next.pos = 0; } else { next.pos = 1; next.playing = false; }
+			}
+		}
+		if (tick % 5 === 0) {
+			next.items = s.items.map(x => {
+				if (!x.live) return x.fresh && tick - x.fresh > 12 ? Object.assign({}, x, { fresh: 0 }) : x;
+				const audio = x.audio + 1;
+				return audio >= 18 ? Object.assign({}, x, { audio, live: false, transcript: x.transcript + ' slowly.', _h: null }) : Object.assign({}, x, { audio });
+			});
+		}
+		if (tick % 45 === 0 && s.later < LATER.length) {
+			const it = Object.assign({ id: 'n' + tick, time: clock(Math.round(tick / 5)), fresh: tick }, LATER[s.later]);
+			next.later = s.later + 1;
+			if (s.paused) next.pending = s.pending.concat([it]);
+			else next.items = [it].concat(next.items || s.items);
+		}
+		this.setState(next);
+	}
+	mode() { return this.props.onMode ? (this.props.mode || 'drawer') : this.state.mode; }
+	matches(x, extra) {
+		const s = this.state;
+		if (s.cats.length && !s.cats.includes(x.cat)) return false;
+		if (s.audioOnly && typeof x.audio !== 'number') return false;
+		if (!s.tokens.every(t => tokenMatch(t, x))) return false;
+		if (s.q.trim() && !hay(x).includes(s.q.trim().toLowerCase())) return false;
+		if (extra && extra.cats && !extra.cats.includes(x.cat)) return false;
+		if (extra && extra.tokens && !extra.tokens.every(t => tokenMatch(t, x))) return false;
+		return true;
+	}
+	playable(x) { return typeof x.audio === 'number' && !x.unrecorded && this.state.recording; }
+	queue() { return this.state.items.filter(x => this.playable(x) && this.matches(x)).slice().reverse(); }
+	neighbour(d) {
+		const q = this.queue(), i = q.findIndex(x => x.id === this.state.play);
+		return i < 0 ? null : q[i + d] || null;
+	}
+	playId(id) {
+		const s = this.state;
+		if (s.play === id) this.setState({ playing: !s.playing, pos: s.pos >= 1 ? 0 : s.pos });
+		else this.setState({ play: id, pos: 0, playing: true });
+	}
+	suggestions() {
+		const q = this.state.q.trim();
+		if (!q) return [];
+		const out = [], items = this.state.items;
+		const add = (t, kind, value) => { const n = items.filter(x => tokenMatch(t, x)).length; if (n) out.push({ t, kind, value, n }); };
+		if (/^\d{1,7}$/.test(q)) { add({ type: 'tg', v: q, kind: 'Talkgroup', value: q }, 'Talkgroup', q); add({ type: 'cap', v: q, kind: 'Capcode', value: q }, 'Pager capcode', q); }
+		if (/^\d{9}$/.test(q)) add({ type: 'mmsi', v: q, kind: 'MMSI', value: q }, 'Vessel MMSI', q);
+		if (/^\d{2,4}\.\d*$/.test(q)) add({ type: 'freq', v: q, kind: 'Frequency', value: q + ' MHz' }, 'Frequency', q + ' MHz');
+		let tm;
+		if ((tm = /^(?:ctcss|tone|pl)?\s*(\d{2,3}\.\d)$/i.exec(q))) add({ type: 'tone', v: String(parseFloat(tm[1])), kind: 'CTCSS', value: tm[1] + ' Hz' }, 'CTCSS tone', tm[1] + ' Hz');
+		if ((tm = /^dcs\s*(\d{3})\s*([ni])?$/i.exec(q))) add({ type: 'tone', v: tm[1] + (tm[2] || 'n').toUpperCase(), kind: 'DCS', value: tm[1] + (tm[2] || 'n').toUpperCase() }, 'DCS code', tm[1] + (tm[2] || 'n').toUpperCase());
+		if (/^[a-z][a-z0-9 -]{2,}$/i.test(q)) add({ type: 'call', v: q, kind: 'Name', value: q }, 'Callsign or name', q);
+		add({ type: 'text', v: q, kind: 'Contains', value: '“' + q + '”' }, 'Anywhere', '“' + q + '”');
+		return out;
+	}
+	addToken(t) { this.setState({ tokens: this.state.tokens.concat([t]), q: '', sugg: 0 }); }
+	resume() { const s = this.state; this.setState({ paused: false, pending: [], items: s.pending.slice().reverse().concat(s.items) }); }
+	renderVals() {
+		const s = this.state, mode = this.mode(), wide = mode === 'wide';
+		const items = s.items;
+		const sugg = this.suggestions();
+		const selItem = s.sel ? items.find(x => x.id === s.sel) : null;
+		const colIds = wide ? s.cols : ['all'];
+		const pre = id => PRESETS.find(p => p.id === id) || PRESETS[0];
+		const hasQuery = !!(s.q.trim() || s.tokens.length || s.cats.length || s.audioOnly);
+		const row = x => {
+			const isCur = s.play === x.id, isPlay = isCur && s.playing;
+			const audioItem = typeof x.audio === 'number';
+			const hasAudio = audioItem && this.playable(x);
+			return {
+				title: x.title, time: x.time.slice(0, 5), timeC: x.fresh ? '#7becc7' : '#8ba598',
+				meta: x.proto + (x.encrypted ? ' · encrypted' : '') + ' · ' + x.sub,
+				locked: !!x.encrypted,
+				preview: preview(x),
+				prevC: x.transcript ? '#e3ece7' : x.text ? '#d0dcd5' : '#a3b6ad',
+				prevI: x.transcriptState === 'pending' || x.toneOnly ? 'italic' : 'normal',
+				prevF: x.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit',
+				icon: I[x.cat], rec: !!x.live,
+				selected: s.sel === x.id ? 'true' : 'false',
+				bg: s.sel === x.id ? 'rgba(123,236,199,.11)' : x.fresh ? 'rgba(123,236,199,.07)' : isCur ? 'rgba(123,236,199,.05)' : 'transparent',
+				ring: s.sel === x.id ? 'inset 0 0 0 1px rgba(123,236,199,.28)' : 'none',
+				hasAudio, notRecorded: audioItem && !hasAudio && !x.encrypted,
+				dur: x.live ? fmtS(x.audio) : fmtS(x.audio || 0), durC: x.live ? '#ff7a6b' : '#8ba598',
+				isCurrent: isCur, playing: isPlay, notPlaying: !isPlay, pos: isCur ? s.pos * 100 : 0,
+				playLabel: (isPlay ? 'Pause ' : 'Play ') + x.title + (x.live ? ' (recording now)' : ''),
+				pBorder: isCur ? '#7becc7' : 'rgba(123,236,199,.4)', pBg: isPlay ? '#7becc7' : 'transparent', pFg: isPlay ? '#111c19' : '#7becc7',
+				pick: () => this.setState({ sel: s.sel === x.id ? null : x.id }),
+				play: () => this.playId(x.id)
+			};
+		};
+		const columns = colIds.map(id => {
+			const p = pre(id);
+			const list = items.filter(x => this.matches(x, p));
+			const groups = [];
+			list.forEach(x => {
+				const label = x.time.slice(0, 5);
+				const g = groups[groups.length - 1];
+				if (g && g.key === label) g.rows.push(row(x)); else groups.push({ key: label, label: groups.length === 0 && label >= clock(Math.round(s.tick / 5)).slice(0, 5) ? 'Just now' : label, rows: [row(x)] });
+			});
+			return {
+				title: p.title, count: String(list.length), groups, empty: list.length === 0,
+				emptyTitle: hasQuery ? 'Nothing matches' : 'Quiet so far',
+				emptyText: hasQuery ? 'No ' + p.title.toLowerCase() + ' matches these filters.' : 'New ' + p.title.toLowerCase() + ' will appear here as WaveKit decodes it.',
+				removable: wide && colIds.length > 1,
+				remove: () => this.setState({ cols: s.cols.filter(c => c !== id) }),
+				key: e => {
+					const i = list.findIndex(x => x.id === s.sel);
+					if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const n = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; if (n) this.setState({ sel: n.id }); }
+					else if (e.key === ' ' && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.playId(list[i].id); }
+					else if (e.key === 'Escape') this.setState({ sel: null });
+				}
+			};
+		});
+		const related = selItem ? items.filter(x => x !== selItem && x.title === selItem.title && x.proto === selItem.proto) : [];
+		const playItem = s.play ? items.find(x => x.id === s.play) : null;
+		const total = items.filter(x => this.matches(x)).length;
+		return {
+			wide, hasQuery,
+			paused: s.paused,
+			liveText: s.paused ? (s.pending.length ? 'Paused · ' + s.pending.length + ' new' : 'Paused') : 'Live',
+			pauseTitle: s.paused ? 'Resume and show new activity' : 'Pause the feed while you read',
+			liveBg: s.paused ? 'rgba(242,184,75,.14)' : 'rgba(123,236,199,.12)', liveFg: s.paused ? '#f2b84b' : '#7becc7',
+			togglePause: () => s.paused ? this.resume() : this.setState({ paused: true }),
+			recording: s.recording, recText: s.recording ? 'Recording all audio' : 'Recording off',
+			recTitle: s.recording ? 'Every analog transmission and digital call is saved' : 'Audio is not being saved',
+			recDot: s.recording ? '#ff7a6b' : '#52645d', recBorder: 'transparent',
+			toggleRec: () => this.setState({ recording: !s.recording }),
+			modeIcon: wide ? ['M4 4h16v16h-16z', 'M14 4v16'] : ['M4 4h16v16h-16z', 'M9 4v16', 'M15 4v16'],
+			modeLabel: wide ? 'Narrow to one list' : 'Widen to columns',
+			toggleMode: () => this.props.onMode ? this.props.onMode(wide ? 'drawer' : 'wide') : this.setState({ mode: wide ? 'drawer' : 'wide' }),
+			close: () => this.props.onClose && this.props.onClose(),
+			q: s.q,
+			resultCount: total + (total === 1 ? ' result' : ' results'),
+			placeholder: s.tokens.length ? 'Narrow further…' : 'Search talkgroups, callsigns, messages, transcripts…',
+			searchBorder: s.focus ? 'rgba(123,236,199,.5)' : 'rgba(123,236,199,.12)',
+			onQ: e => this.setState({ q: e.target.value, sugg: 0 }),
+			onFocus: () => this.setState({ focus: true }),
+			onBlur: () => this.setState({ focus: false }),
+			onKey: e => {
+				if (e.key === 'Enter' && sugg[s.sugg]) { e.preventDefault(); this.addToken(sugg[s.sugg].t); }
+				else if (e.key === 'ArrowDown' && sugg.length) { e.preventDefault(); this.setState({ sugg: (s.sugg + 1) % sugg.length }); }
+				else if (e.key === 'ArrowUp' && sugg.length) { e.preventDefault(); this.setState({ sugg: (s.sugg - 1 + sugg.length) % sugg.length }); }
+				else if (e.key === 'Backspace' && !s.q && s.tokens.length) this.setState({ tokens: s.tokens.slice(0, -1) });
+				else if (e.key === 'Escape') { if (s.q) this.setState({ q: '' }); else e.target.blur(); }
+			},
+			tokens: s.tokens.map(t => ({ kind: t.kind, value: t.value, remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
+			showSugg: s.focus && sugg.length > 0,
+			sugg: sugg.map((x, i) => ({ kind: x.kind, value: x.value, count: x.n + (x.n === 1 ? ' result' : ' results'), on: i === s.sugg, bg: i === s.sugg ? 'rgba(123,236,199,.10)' : 'transparent', enter: () => this.setState({ sugg: i }), pick: e => { e.preventDefault(); this.addToken(x.t); } })),
+			clearAll: () => this.setState({ q: '', tokens: [], cats: [], audioOnly: false }),
+			cats: CATS.map(([id, label]) => {
+				const on = s.cats.includes(id), n = items.filter(x => x.cat === id).length;
+				return { label, aria: label + ', ' + n, icon: I[id], count: String(n), on, op: n ? 1 : 0.45, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ cats: on ? s.cats.filter(c => c !== id) : s.cats.concat([id]) }) };
+			}),
+			audioOnly: s.audioOnly, toggleAudio: () => this.setState({ audioOnly: !s.audioOnly }),
+			audioBorder: s.audioOnly ? 'rgba(123,236,199,.6)' : '#2c443b', audioBg: s.audioOnly ? 'rgba(123,236,199,.12)' : 'transparent', audioFg: s.audioOnly ? '#7becc7' : '#b9cac1',
+			showLists: wide || !selItem,
+			columns,
+			colMin: wide ? '250px' : '0',
+			chipWrap: wide ? 'nowrap' : 'wrap',
+			canAdd: wide && s.cols.length < 5,
+			presets: PRESETS.filter(p => !s.cols.includes(p.id)).map(p => ({ title: p.title, add: () => this.setState({ cols: s.cols.concat([p.id]) }) })),
+			canPin: s.tokens.length > 0 || s.cats.length > 0,
+			pinSearch: () => {
+				const id = 'pin' + s.tick;
+				const title = s.tokens.map(t => t.value).concat(s.cats.map(c => CATS.find(x => x[0] === c)[1])).join(' + ');
+				PRESETS.push({ id, title, tokens: s.tokens, cats: s.cats.length ? s.cats : undefined });
+				this.setState({ cols: s.cols.concat([id]), tokens: [], cats: [] });
+			},
+			showDetail: !!selItem,
+			detailFlex: wide ? '0 0 380px' : '1 1 auto',
+			backText: wide ? '' : 'Back', backLabel: wide ? 'Close details' : 'Back to the list',
+			backIcon: wide ? 'M6 6l12 12M18 6l-12 12' : 'M15 6l-6 6l6 6',
+			closeDetail: () => this.setState({ sel: null }),
+			sel: selItem || items[0],
+			selFreq: selItem ? selItem.freq : '',
+			copyText: s.copied ? 'Copied' : 'Copy',
+			copySel: () => { if (!selItem) return; try { navigator.clipboard.writeText(selItem.title + ' · ' + selItem.proto + ' · ' + selItem.time + ' · ' + selItem.freq + ' MHz\n' + preview(selItem)); } catch (e) {} this.setState({ copied: true }); clearTimeout(this.ct); this.ct = setTimeout(() => this.setState({ copied: false }), 1500); },
+			tune: f => this.props.onTune && this.props.onTune(f),
+			tuneSel: () => selItem && this.props.onTune && this.props.onTune(Math.round(parseFloat(selItem.freq) * 1e6)),
+			playId: id => this.playId(id),
+			selPlaying: !!selItem && s.play === selItem.id && s.playing,
+			selPos: selItem && s.play === selItem.id ? s.pos : 0,
+			jsonH: 320,
+			hasRelated: related.length > 0,
+			relatedTitle: 'Earlier on ' + (selItem ? selItem.title : ''),
+			related: related.map(x => ({ time: x.time.slice(0, 5), preview: preview(x), dur: typeof x.audio === 'number' ? fmtS(x.audio) : '', bg: s.play === x.id ? 'rgba(123,236,199,.06)' : 'transparent', pick: () => this.setState({ sel: x.id }) })),
+			canPlayAll: !!selItem && this.playable(selItem) && related.some(x => this.playable(x)),
+			playAll: () => {
+				const conv = [selItem].concat(related).filter(x => this.playable(x)).sort((a, b) => a.time < b.time ? -1 : 1);
+				this.setState({ play: conv[0].id, pos: 0, playing: true, autoNext: true, tokens: [{ type: 'call', v: selItem.title, kind: 'Name', value: selItem.title }] });
+			},
+			hasPlayer: !!playItem,
+			pPlaying: s.playing, pPaused: !s.playing, playerLabel: s.playing ? 'Pause' : 'Play',
+			togglePlay: () => this.setState({ playing: !s.playing, pos: s.pos >= 1 ? 0 : s.pos }),
+			prevC: this.neighbour(-1) ? '#b9cac1' : '#52645d', nextC: this.neighbour(1) ? '#b9cac1' : '#52645d',
+			prev: () => { const n = this.neighbour(-1); if (s.pos > 0.15 || !n) this.setState({ pos: 0 }); else this.setState({ play: n.id, pos: 0, playing: true }); },
+			next: () => { const n = this.neighbour(1); if (n) this.setState({ play: n.id, pos: 0, playing: true }); },
+			revealPlaying: () => playItem && this.setState({ sel: playItem.id }),
+			pTitle: playItem ? playItem.title : '',
+			pSub: playItem ? playItem.proto + ' · ' + playItem.time.slice(0, 5) + ' · ' + playItem.freq + ' · live audio paused' : '',
+			pPos: s.pos * 100, pPosK: Math.round(s.pos * 1000),
+			seek: e => this.setState({ pos: Number(e.target.value) / 1000 }),
+			pTime: playItem ? fmtS(s.pos * playItem.audio) + ' / ' + fmtS(playItem.audio) : '',
+			speedText: s.speed + '×', cycleSpeed: () => this.setState({ speed: s.speed === 1 ? 1.5 : s.speed === 1.5 ? 2 : 1 }),
+			autoNext: s.autoNext, toggleAutoNext: () => this.setState({ autoNext: !s.autoNext }),
+			anBorder: s.autoNext ? 'rgba(123,236,199,.6)' : '#2c443b', anBg: s.autoNext ? 'rgba(123,236,199,.12)' : 'transparent', anFg: s.autoNext ? '#7becc7' : '#b9cac1',
+			stopPlay: () => this.setState({ play: null, playing: false, pos: 0 })
+		};
+	}
+}
+</script>
+</body>
+</html>

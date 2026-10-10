@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tuned signal card</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+.wk-tc-act:hover{background:#192b24;color:#f4f7f5}
+.wk-tc-row:hover{background:rgba(123,236,199,.06)}
+</style>
+</helmet>
+<div style="box-sizing: border-box; width: 100%; padding: {{pad}}; background: {{bg}}; border: {{border}}; border-radius: {{radius}}; box-shadow: {{shadow}}; backdrop-filter: {{blur}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 14px">
+
+	<div style="display: flex; align-items: center; gap: 10px; min-width: 0">
+		<div style="width: 34px; height: 34px; flex: none; border-radius: 10px; background: {{tileBg}}; color: {{tileFg}}; display: grid; place-items: center">
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+		</div>
+		<div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+			<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 19px; line-height: 1.1; white-space: nowrap">{{proto}}</span>
+				<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{protoSub}}</span>
+			</div>
+			<div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{stateFg}}; white-space: nowrap; overflow: hidden">
+				<span style="width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; opacity: {{dotOpacity}}"></span>
+				<span style="overflow: hidden; text-overflow: ellipsis">{{stateText}}</span>
+			</div>
+		</div>
+		<div style="flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px" title="{{levelTitle}}">
+			<span style="font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700">{{freqText}}</span>
+			<span style="display: flex; align-items: flex-end; gap: 2px; height: 10px" role="img" aria-label="{{levelTitle}}">
+				<sc-for list="{{sigBars}}" as="b" hint-placeholder-count="5"><span style="width: 3px; height: {{b.h}}px; border-radius: 1px; background: {{b.c}}"></span></sc-for>
+			</span>
+		</div>
+	</div>
+
+	<div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 12px; border-radius: 14px; background: rgba(11,21,18,.5)">
+		<sc-if value="{{hasEyebrow}}" hint-placeholder-val="{{true}}">
+			<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{eyebrow}}</span>
+		</sc-if>
+		<sc-if value="{{hasTitle}}" hint-placeholder-val="{{false}}">
+			<span style="font-weight: 700; font-size: 14px; line-height: 1.35">{{titleText}}</span>
+		</sc-if>
+		<sc-if value="{{hasBig}}" hint-placeholder-val="{{true}}">
+		<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
+			<sc-if value="{{locked}}" hint-placeholder-val="{{false}}">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-label="Encrypted" role="img" style="flex: none; align-self: center"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>
+			</sc-if>
+			<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: {{bigSize}}; line-height: 1.05; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{big}}</span>
+			<sc-if value="{{hasBigUnit}}" hint-placeholder-val="{{false}}"><span style="font-size: 14px; color: #b9cac1; white-space: nowrap">{{bigUnit}}</span></sc-if>
+			<div style="flex: 1"></div>
+			<sc-if value="{{hasTimer}}" hint-placeholder-val="{{false}}"><span style="font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700; color: {{timerC}}">{{timer}}</span></sc-if>
+		</div>
+		</sc-if>
+		<sc-if value="{{hasLine}}" hint-placeholder-val="{{true}}">
+			<span style="font-size: 13px; color: #b9cac1; line-height: 1.4">{{line}}</span>
+		</sc-if>
+		<sc-if value="{{hasBody}}" hint-placeholder-val="{{false}}">
+			<p style="margin: 2px 0 0; font-size: {{bodySize}}; line-height: 1.45; color: {{bodyC}}; font-family: {{bodyFont}}; font-style: {{bodyStyle}}; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere">{{body}}</p>
+		</sc-if>
+		<sc-if value="{{hasChips}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px">
+				<sc-for list="{{chips}}" as="c" hint-placeholder-count="3"><span style="height: 24px; box-sizing: border-box; padding: 0 8px; border-radius: 7px; background: #192b24; font-size: 12.5px; line-height: 24px; font-variant-numeric: tabular-nums; white-space: nowrap"><span style="color: #8ba598">{{c.k}}</span> {{c.v}}</span></sc-for>
+			</div>
+		</sc-if>
+		<sc-if value="{{hasWave}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; align-items: center; gap: 2px; height: 26px; margin-top: 4px" aria-hidden="true">
+				<sc-for list="{{wave}}" as="b" hint-placeholder-count="40"><span style="flex: 1; height: {{b.h}}%; min-height: 2px; border-radius: 1px; background: {{b.c}}; transition: height .12s linear"></span></sc-for>
+			</div>
+		</sc-if>
+		<sc-if value="{{hasRate}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; align-items: flex-end; gap: 8px; margin-top: 4px">
+				<div style="flex: 1; display: flex; align-items: flex-end; gap: 2px; height: 22px" aria-hidden="true">
+					<sc-for list="{{rateBars}}" as="b" hint-placeholder-count="30"><span style="flex: 1; height: {{b.h}}%; min-height: 2px; border-radius: 1px; background: {{b.c}}"></span></sc-for>
+				</div>
+				<span style="flex: none; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{rate}}</span>
+			</div>
+		</sc-if>
+	</div>
+
+	<sc-if value="{{hasRecent}}" hint-placeholder-val="{{true}}">
+		<section aria-label="Recent on this frequency" style="display: flex; flex-direction: column">
+			<h3 style="margin: 0 0 2px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{recentTitle}}</h3>
+			<sc-for list="{{recent}}" as="r" hint-placeholder-count="2">
+				<button class="wk-tc-row" onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 8px; margin: 0 -8px; border: 0; border-radius: 9px; background: {{r.bg}}; font-size: 13px">
+					<span style="width: 40px; flex: none; color: #8ba598; font-variant-numeric: tabular-nums">{{r.t}}</span>
+					<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">{{r.a}}</span>
+					<span style="flex: none; color: #8ba598; font-variant-numeric: tabular-nums">{{r.b}}</span>
+					<sc-if value="{{r.audio}}" hint-placeholder-val="{{false}}">
+						<span style="width: 24px; height: 24px; flex: none; border-radius: 50%; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}; display: grid; place-items: center" aria-label="{{r.playLabel}}" role="img">
+							<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="{{r.pIcon}}"></path></svg>
+						</span>
+					</sc-if>
+				</button>
+			</sc-for>
+		</section>
+	</sc-if>
+
+	<div style="display: flex; gap: 6px; flex-wrap: nowrap; min-width: 0">
+		<sc-for list="{{actions}}" as="a" hint-placeholder-count="3">
+			<button class="wk-tc-act" onClick="{{a.pick}}" aria-pressed="{{a.pressed}}" title="{{a.title}}" style="font: inherit; cursor: pointer; flex: {{a.flex}}; min-width: 0; height: 36px; padding: 0 10px; border-radius: 10px; border: 1px solid {{a.border}}; background: {{a.bg}}; color: {{a.fg}}; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 13px; font-weight: 700; white-space: nowrap">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{a.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+				<sc-if value="{{a.hasLabel}}" hint-placeholder-val="{{true}}"><span>{{a.label}}</span></sc-if>
+			</button>
+		</sc-for>
+	</div>
+
+	<sc-if value="{{full}}" hint-placeholder-val="{{false}}">
+		<section aria-label="Also in view" style="display: flex; flex-direction: column; padding-top: 6px; border-top: 1px solid #1a2b25">
+			<h3 style="margin: 8px 0 2px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Also in view</h3>
+			<sc-for list="{{others}}" as="o" hint-placeholder-count="3">
+				<button class="wk-tc-row" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 8px; margin: 0 -8px; border: 0; border-radius: 10px; background: transparent">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{o.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+					<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+						<span style="font-weight: 700; font-size: 14px">{{o.label}}</span>
+						<span style="color: #8ba598; font-size: 12px">{{o.sub}}</span>
+					</span>
+					<span style="color: #b9cac1; font-size: 13px; font-variant-numeric: tabular-nums">{{o.freq}}</span>
+				</button>
+			</sc-for>
+		</section>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"$preview":{"width":344,"height":860}}'>
+const ICON = {
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	analog: ['M3 12c2 -6 4 -6 6 0s4 6 6 0s4 -6 6 0'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0'],
+	broadcast: ['M18.364 19.364a9 9 0 1 0 -12.728 0', 'M15.536 16.536a5 5 0 1 0 -7.072 0', 'M11 13a1 1 0 1 0 2 0a1 1 0 1 0 -2 0'],
+	unknown: ['M3 12h4l3 8l4 -16l3 8h4']
+};
+const A = {
+	play: ['M7 4v16l13 -8z'],
+	activity: ['M3 12h4l3 8l4 -16l3 8h4'],
+	map: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'],
+	save: ['M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z'],
+	pin: ['M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4', 'M9 15l-4.5 4.5', 'M14.5 4l5.5 5.5'],
+	scan: ['M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M21 21l-6 -6']
+};
+const PLAY = 'M7 4v16l13 -8z', PAUSE = 'M6 5h4v14h-4zM14 5h4v14h-4z';
+
+// One entry per signal the spectrum mock draws a label for. Same frequencies as Spectrum.dc.html.
+const INFO = {
+	161150000: { kind: 'call', proto: 'DMR', protoSub: 'Tier II · slot 1 · CC 1', icon: ICON.voice, decoder: 'dsd-fme', level: -57, snr: 31, live: true,
+		big: 'TG 2081', line: 'From radio 2081045', transcript: '…copy that, berth four is clear, bring her in', start: 12,
+		recent: [['14:02', 'TG 2081 · radio 2081012', '0:24', 24], ['13:51', 'TG 9 · radio 2081045', '0:41', 41], ['13:47', 'TG 2081 · radio 2081045', '0:09', 9]] },
+	163087500: { kind: 'call', proto: 'P25', protoSub: 'Phase 1 · NAC 293', icon: ICON.voice, decoder: 'dsd-fme', level: -66, snr: 24, live: false, locked: true,
+		big: 'TG 1201', line: 'From radio 4410022 · AES-256', body: 'Encrypted. There is no audio to play or record.', quiet: 'Quiet · last call 14:02 · 0:08',
+		recent: [['14:02', 'TG 1201 · radio 4410022', 'encrypted'], ['13:40', 'TG 1201 · radio 4410019', 'encrypted']] },
+	160625000: { kind: 'tx', proto: 'NFM', protoSub: 'Analog voice · 12.5 kHz', icon: ICON.analog, decoder: 'Audio only', level: -65, snr: 22, live: true,
+		eyebrow: 'Transmission', big: 'Analog voice', line: 'Squelch open · auto threshold −102 dB', tone: ['CTCSS', '88.5 Hz'], start: 3,
+		recent: [['14:00', 'Transmission', '0:05', 5], ['13:59', 'DTMF *72#1405', 'tones']] },
+	156800000: { kind: 'tx', proto: 'Marine ch 16', protoSub: 'NFM · distress and calling', icon: ICON.analog, decoder: 'Audio only', level: -62, snr: 27, live: false,
+		eyebrow: 'Last transmission', big: 'Ch 16', line: '14:02:40 · 0:09', body: '“Roscoff port control, Roscoff port control, this is Kerlouan, channel one two.”', bodyQuote: true, quiet: 'Quiet · last heard 22 s ago',
+		recent: [['14:02', 'Transmission · transcribed', '0:09', 9], ['13:58', 'Transmission · transcribed', '0:06', 6]] },
+	446006250: { kind: 'tx', proto: 'PMR446', protoSub: 'Channel 1 · NFM', icon: ICON.analog, decoder: 'Audio only', level: -60, snr: 29, live: false,
+		eyebrow: 'Last transmission', big: 'Ch 1', line: '14:01:40 · 0:14', tone: ['CTCSS', '77.0 Hz · code 4'], body: 'Transcribing…', bodyPending: true, quiet: 'Quiet · last heard 1 min ago',
+		recent: [['14:01', 'Transmission', '0:14', 14], ['13:55', 'Transmission', '0:07', 7]] },
+	161425000: { kind: 'tx', proto: 'NFM', protoSub: 'Analog voice · 12.5 kHz', icon: ICON.analog, decoder: 'Audio only', level: -76, snr: 14, live: false,
+		eyebrow: 'Last transmission', big: 'Analog voice', line: '13:59:31 · 0:07', tone: ['DCS', '023 normal'], body: 'Transcribing…', bodyPending: true, quiet: 'Quiet · last heard 3 min ago',
+		recent: [['13:59', 'Transmission · DCS 023N', '0:07', 7], ['13:41', 'Transmission · DCS 023N', '0:05', 5]] },
+	145637500: { kind: 'tx', proto: '2 m repeater', protoSub: 'NFM · −600 kHz shift', icon: ICON.analog, decoder: 'Audio only', level: -68, snr: 20, live: false,
+		eyebrow: 'Last transmission', big: 'F4ABC', bigUnit: 'via repeater', line: '13:52:10 · 0:21', tone: ['CTCSS', '123.0 Hz'], body: '“…QSY to 145.500, see you there, seventy-three.”', quiet: 'Quiet · last heard 10 min ago',
+		recent: [['13:52', 'Transmission · CTCSS 123.0', '0:21', 21], ['13:50', 'Courtesy beep · ident', '0:02', 2]] },
+	118100000: { kind: 'tx', proto: 'Airband', protoSub: 'AM · 8.33 kHz', icon: ICON.analog, decoder: 'Audio only', level: -66, snr: 25, live: true,
+		eyebrow: 'Transmission', big: '118.100', bigUnit: 'Tower', line: 'Squelch open · AM carrier −59 dB', start: 2,
+		recent: [['14:02', 'Transmission', '0:04', 4], ['14:01', 'Transmission', '0:06', 6]] },
+	161975000: { kind: 'count', proto: 'AIS', protoSub: 'Channel A · GMSK 9600', icon: ICON.marine, decoder: 'AIS-catcher', level: -61, snr: 28, live: true,
+		eyebrow: 'Vessels in range', big: '14', bigUnit: 'vessels', line: 'Latest: Kerlouan · fishing · 11.4 kn · 284°', rate: '22 msg/min', state: 'Receiving · last report 2 s ago', map: true,
+		recent: [['14:02', 'Kerlouan · MMSI 227006760', 'position'], ['14:02', 'Belle Étoile · MMSI 228237700', 'static']] },
+	1090000000: { kind: 'count', proto: 'ADS-B', protoSub: 'Mode S · 1090 MHz', icon: ICON.aircraft, decoder: 'readsb', level: -62, snr: 19, live: true,
+		eyebrow: 'Aircraft in range', big: '34', bigUnit: 'aircraft', line: 'Nearest: AFR1234 · A320 · FL360 · 12 km', rate: '412 msg/s', state: 'Receiving · max range 286 km', map: true,
+		recent: [['14:02', 'AFR1234 · 36 000 ft · 452 kn', 'position'], ['14:02', 'EZY48KT · 11 250 ft · climbing', 'position']] },
+	160450000: { kind: 'msg', proto: 'POCSAG', protoSub: '1200 baud', icon: ICON.paging, decoder: 'multimon-ng', level: -60, snr: 30, live: false,
+		eyebrow: 'Capcode 1234567 · alpha', big: '', line: '', body: 'Test page — system check 0412. Reply not required.', quiet: 'Listening · last page 38 s ago',
+		recent: [['14:01', 'Capcode 1234560 · numeric', '0612 44 18'], ['14:00', 'Capcode 1234567', 'tone only']] },
+	131725000: { kind: 'msg', proto: 'ACARS', protoSub: 'VHF · 2400 baud', icon: ICON.aviation, decoder: 'acarsdec', level: -64, snr: 21, live: false,
+		eyebrow: 'F-HBXA · XK4521 · label H1', body: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2', mono: true, quiet: 'Listening · last message 12 s ago',
+		recent: [['14:01', 'F-GKXN · AF7300 · Q0', 'link test'], ['13:58', 'F-HBXA · XK4521 · 5Z', 'downlink']] },
+	136975000: { kind: 'msg', proto: 'VDL2', protoSub: 'Mode 2 · CPDLC', icon: ICON.aviation, decoder: 'dumpvdl2', level: -66, snr: 18, live: false,
+		eyebrow: 'F-GZTB · XK8801 · uplink from LFRB', body: 'CLIMB TO AND MAINTAIN FL360', mono: true, quiet: 'Listening · last frame 4 s ago',
+		recent: [['14:01', 'F-GZTB · XK8801', 'CPDLC'], ['14:00', 'D-AIZB · LH1029', 'ACARS over AVLC']] },
+	144800000: { kind: 'msg', proto: 'APRS', protoSub: 'AX.25 · 1200 baud', icon: ICON.aprs, decoder: 'Direwolf', level: -63, snr: 26, live: false,
+		eyebrow: 'F4ABC-9 · mobile · via WIDE1-1', body: 'On the way home. QRV 145.500', chips: [['', '52 km/h'], ['', '112°'], ['', '2.4 km away']], quiet: 'Listening · last packet 1 min ago', map: true,
+		recent: [['14:00', 'F6XYZ-13 · weather', '14.2 °C'], ['13:58', 'F1ZZZ-1 · digipeater', 'beacon']] },
+	433920000: { kind: 'msg', proto: 'ISM 433', protoSub: 'rtl_433 · 3 devices', icon: ICON.sensors, decoder: 'rtl_433', level: -58, snr: 33, live: false,
+		eyebrow: 'Acurite-Tower · ID 12345 · ch A', body: '', chips: [['', '18.4 °C'], ['', '61 %'], ['Battery', 'OK']], quiet: 'Listening · last reading 4 s ago',
+		recent: [['14:01', 'Toyota TPMS · a1b2c3d4', '232.5 kPa'], ['14:00', 'Generic-Remote · 4128', 'unknown']] },
+	868300000: { kind: 'msg', proto: 'ISM 868', protoSub: 'rtl_433 · 2 devices', icon: ICON.sensors, decoder: 'rtl_433', level: -70, snr: 24, live: false,
+		eyebrow: 'LaCrosse-TX29IT · ID 47', body: '', chips: [['', '16.9 °C'], ['Battery', 'OK']], quiet: 'Listening · last reading 9 s ago',
+		recent: [['14:01', 'Fineoffset-WH51 · soil', '38 %']] },
+	868950000: { kind: 'msg', proto: 'wM-Bus', protoSub: 'Mode T1 · rtl_433', icon: ICON.sensors, decoder: 'rtl_433', level: -72, snr: 20, live: false,
+		eyebrow: 'Water meter · ID 41526375', body: '', chips: [['Total', '1 284.6 m³'], ['Flow', '0.0 l/h']], quiet: 'Listening · last frame 31 s ago',
+		recent: [['13:59', 'Heat meter · ID 70031188', '3.42 MWh']] },
+	869525000: { kind: 'msg', proto: 'Meshtastic', protoSub: 'LoRa · LongFast', icon: ICON.mesh, decoder: 'Meshtastic', level: -75, snr: 7, live: false,
+		eyebrow: 'Harbour relay · !a3f2c1 → everyone', body: 'Anyone on the coast tonight? Signal is great from the lighthouse.', chips: [['Hops', '2 of 3'], ['SNR', '6.5 dB']], quiet: 'Listening · last message 3 min ago',
+		recent: [['13:52', 'Lighthouse · !9be011', 'position']] },
+	93500000: { kind: 'audio', proto: 'WFM', protoSub: 'Broadcast · stereo pilot', icon: ICON.broadcast, decoder: 'none', level: -50, snr: 42, live: true,
+		eyebrow: 'Broadcast FM', big: '93.500', bigUnit: 'MHz', line: 'No decoder for this signal. Audio only.', state: 'Audio', recent: [] }
+};
+const ORDER = [161150000, 161975000, 160450000, 160625000];
+const fmt = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { freq: 161150000, tick: 0, play: null, saved: false, pinned: false };
+	}
+	componentDidMount() { this.timer = setInterval(() => this.setState({ tick: this.state.tick + 1 }), 140); }
+	componentWillUnmount() { clearInterval(this.timer); }
+	componentDidUpdate(prev) { if (prev.freq !== this.props.freq) this.setState({ play: null, saved: false, pinned: false }); }
+	tune(f) { if (this.props.onTune) this.props.onTune(f); else this.setState({ freq: f }); }
+	act(id, f) { if (this.props.onAction) this.props.onAction(id, f); }
+	renderVals() {
+		const freq = this.props.freq ?? this.state.freq;
+		const floating = this.props.variant === 'floating';
+		const t = this.state.tick;
+		const x = INFO[freq] || { kind: 'unknown', proto: 'Unidentified', protoSub: (freq / 1e6).toFixed(4) + ' MHz', icon: ICON.unknown, decoder: 'none', level: -96, snr: 9, live: false,
+			eyebrow: 'Signal', big: 'Not decoded', line: 'About 12 kHz wide · bursts roughly every 10 s', body: 'No decoder is running here. Try the scanner to identify it.', quiet: 'Nothing decoded on this frequency', recent: [] };
+		const voice = x.kind === 'call' || x.kind === 'tx';
+		const live = !!x.live;
+		const lvl = live || x.kind === 'count' || x.kind === 'audio' ? x.level : -108;
+		const snr = live || x.kind === 'count' || x.kind === 'audio' ? x.snr : 3;
+		const strength = Math.max(0, Math.min(5, Math.round(snr / 7)));
+		const secs = (x.start || 0) + Math.floor(t * 0.14);
+		const stateText = live ? (x.state || (voice ? (x.kind === 'call' ? 'Call in progress · ' : 'Transmitting · ') + fmt(secs) : 'Receiving')) : x.quiet || 'Quiet';
+		const stateFg = live ? '#7becc7' : x.locked ? '#f2b84b' : '#8ba598';
+		const wave = Array.from({ length: 40 }, (_, i) => {
+			const h = live ? 15 + Math.abs(Math.sin(i * 1.7 + t * 0.9) * 55 + Math.sin(i * 0.43 + t * 0.37) * 25) : 6 + Math.abs(Math.sin(i * 1.7) * 30);
+			return { h: Math.min(100, h), c: live ? '#7becc7' : '#2c443b' };
+		});
+		const rateBars = Array.from({ length: 30 }, (_, i) => ({ h: 25 + Math.abs(Math.sin(i * 0.9 + (x.big || '').length) * 55 + Math.sin(i * 0.31) * 20), c: i === 29 ? '#7becc7' : 'rgba(123,236,199,.35)' }));
+		const recent = (x.recent || []).slice(0, floating ? 2 : 4).map((r, i) => {
+			const id = freq + ':' + i, audio = typeof r[3] === 'number', on = this.state.play === id;
+			return {
+				t: r[0], a: r[1], b: r[2], audio,
+				bg: on ? 'rgba(123,236,199,.08)' : 'transparent',
+				pBorder: on ? '#7becc7' : 'rgba(123,236,199,.4)', pBg: on ? '#7becc7' : 'transparent', pFg: on ? '#111c19' : '#7becc7', pIcon: on ? PAUSE : PLAY,
+				playLabel: on ? 'Playing' : 'Play recording',
+				pick: () => { if (audio) this.setState({ play: on ? null : id }); else this.act('open', freq); }
+			};
+		});
+		const btn = (id, label, icon, opt) => {
+			const o = opt || {};
+			return {
+				label, icon, hasLabel: !o.iconOnly, title: o.title || label, flex: o.iconOnly ? '0 0 36px' : '1 1 auto', pressed: o.pressed ? 'true' : 'false',
+				border: o.primary ? '#7becc7' : o.pressed ? 'rgba(123,236,199,.6)' : '#2c443b',
+				bg: o.primary ? '#7becc7' : o.pressed ? 'rgba(123,236,199,.12)' : 'transparent',
+				fg: o.primary ? '#111c19' : o.pressed ? '#7becc7' : '#b9cac1',
+				pick: o.pick || (() => this.act(id, freq))
+			};
+		};
+		const actions = [];
+		if (x.kind === 'call' && !x.locked) actions.push(btn('replay', live ? 'From start' : 'Play last', A.play, { primary: !live, title: live ? 'Replay this call from the start' : 'Play the last call' }));
+		if (x.kind === 'tx' && !live) actions.push(btn('replay', 'Play last', A.play, { primary: true }));
+		if (x.map) actions.push(btn('map', 'Map', A.map));
+		if (x.kind === 'unknown') actions.push(btn('scan', 'Identify', A.scan, { primary: true }));
+		if (x.kind !== 'audio' && x.kind !== 'unknown') actions.push(btn('activity', 'Activity', A.activity));
+		actions.push(btn('save', this.state.saved ? 'Saved' : 'Save', A.save, { iconOnly: actions.length >= 1, title: this.state.saved ? 'Saved' : 'Save this frequency', pressed: this.state.saved, pick: () => { this.setState({ saved: !this.state.saved }); this.act('save', freq); } }));
+		actions.push(btn('pin', 'Pin', A.pin, { iconOnly: true, title: this.state.pinned ? 'Unpin card' : 'Pin this card. It keeps showing this frequency when you tune away.', pressed: this.state.pinned, pick: () => { this.setState({ pinned: !this.state.pinned }); this.act('pin', freq); } }));
+		const body = x.transcript && live ? '“' + x.transcript + '”' : x.body || '';
+		const msg = x.kind === 'msg';
+		return {
+			icon: x.icon, proto: x.proto, protoSub: x.protoSub,
+			tileBg: live ? 'rgba(123,236,199,.14)' : '#192b24', tileFg: live ? '#7becc7' : x.kind === 'unknown' ? '#8ba598' : '#b9cac1',
+			stateText, stateFg, dotOpacity: live ? (t % 8 < 5 ? 1 : 0.35) : 1,
+			freqText: (freq / 1e6).toFixed(freq % 1000 ? 4 : 3),
+			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder,
+			sigBars: [2, 4, 6, 8, 10].map((h, i) => ({ h, c: i < strength ? '#7becc7' : '#2c443b' })),
+			hasEyebrow: !!x.eyebrow && !msg, eyebrow: x.eyebrow || '',
+			hasTitle: msg, titleText: x.eyebrow || '',
+			hasBig: !msg && !!x.big,
+			big: msg ? '' : x.big || '', bigSize: x.kind === 'count' ? '40px' : '30px',
+			hasBigUnit: !!x.bigUnit && !msg, bigUnit: x.bigUnit || '',
+			locked: !!x.locked,
+			hasTimer: false, timer: '', timerC: '#ff7a6b',
+			hasLine: !!x.line && !msg, line: x.line || '',
+			hasBody: !!body, body,
+			bodySize: msg && !x.mono ? '15px' : '13.5px',
+			bodyC: x.bodyPending ? '#8ba598' : msg ? '#f4f7f5' : '#e3ece7',
+			bodyFont: x.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit',
+			bodyStyle: x.bodyPending ? 'italic' : 'normal',
+			hasChips: !!((x.chips && x.chips.length) || x.tone), chips: (x.tone ? [x.tone] : []).concat(x.chips || []).map(c => ({ k: c[0], v: c[1] })),
+			hasWave: voice && !x.locked, wave,
+			hasRate: x.kind === 'count', rateBars, rate: x.rate || '',
+			hasRecent: recent.length > 0, recent,
+			recentTitle: voice ? 'Earlier on this frequency' : 'Earlier',
+			actions,
+			full: !floating,
+			others: ORDER.filter(f => f !== freq).map(f => ({ label: INFO[f].proto, sub: INFO[f].big || INFO[f].eyebrow, icon: INFO[f].icon, freq: (f / 1e6).toFixed(3), pick: () => this.tune(f) })),
+			pad: floating ? '16px' : '24px',
+			bg: floating ? 'rgba(17,28,25,.55)' : '#111c19',
+			border: floating ? '1px solid rgba(123,236,199,.14)' : '0',
+			radius: floating ? '18px' : '0',
+			shadow: floating ? 'inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35)' : 'none',
+			blur: floating ? 'blur(22px) saturate(170%)' : 'none'
+		};
+	}
+}
+</script>
+</body>
+</html>
