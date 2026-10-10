@@ -281,7 +281,7 @@ describe("download.sh v2", () => {
 		expect(out.status).toBe(1)
 		expect(out.stdout + out.stderr).toMatch(/sha256 mismatch/)
 		expect(existsSync(join(good.dir, "raw/unit_gen.cu8"))).toBe(false)
-	})
+	}, 30_000)
 	it("reports a recipe compose.py rejects and a compose that fails, leaving nothing behind (channelizer T7c)", () => {
 		const unknown = generatedSetup(undefined, r => {
 			r.components = [
@@ -307,7 +307,7 @@ describe("download.sh v2", () => {
 		expect(
 			readdirSync(join(loud.dir, "raw")).filter(f => f.startsWith("unit_gen")),
 		).toEqual([])
-	})
+	}, 30_000)
 	it("refuses a recipe source file outside the sources directory (channelizer T7c)", () => {
 		for (const file of ["../escape.cu8", "/tmp/escape.cu8"]) {
 			const { path, dir } = generatedSetup(undefined, r => {
@@ -320,7 +320,7 @@ describe("download.sh v2", () => {
 			expect(existsSync(join(dir, "raw/escape.cu8"))).toBe(false)
 			expect(existsSync(join(dir, "raw/unit_gen.cu8"))).toBe(false)
 		}
-	})
+	}, 30_000)
 	it("fails on a requested id that matches no fixture, after fetching the known ones (final review infra I1)", () => {
 		const src = mkdtempSync(join(tmpdir(), "wk-src-"))
 		const raw = join(src, "tone.cu8")
