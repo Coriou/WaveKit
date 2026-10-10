@@ -1,4 +1,14 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
+import {
+	afterAll,
+	afterEach,
+	beforeAll,
+	describe,
+	expect,
+	it,
+	vi,
+} from "vitest"
+import { spawn } from "node:child_process"
+import type * as ChildProcessModule from "node:child_process"
 import { mkdirSync, rmSync } from "node:fs"
 import pino from "pino"
 import {
@@ -8,6 +18,11 @@ import {
 import type { ChannelizerEvent } from "../../../src/core/channelizer/protocol.js"
 import { writeExecutable } from "../../mocks/executables.js"
 import { FAKE_WAVEKIT_CHAN } from "../../mocks/fake-wavekit-chan.js"
+
+vi.mock("node:child_process", async importOriginal => {
+	const actual = await importOriginal<typeof ChildProcessModule>()
+	return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const logger = pino({ level: "silent" })
 // Short and under /tmp: macOS caps a Unix socket path at ~104 bytes.
@@ -20,6 +35,7 @@ beforeAll(() => {
 })
 afterAll(() => rmSync(root, { recursive: true, force: true }))
 afterEach(() => {
+	vi.unstubAllEnvs()
 	delete process.env["FAKE_CHAN_MODE"]
 })
 
@@ -67,6 +83,36 @@ function record(p: ChannelizerProcess) {
 }
 
 describe("ChannelizerProcess", { timeout: 15_000 }, () => {
+	it("filters access credentials at the actual spawn without changing control pipes or native settings", async () => {
+		// Validates: core-access-policy Requirement 6.4.
+		vi.stubEnv("WAVEKIT_ACCESS_MACHINE_TOKEN", "private-machine-token")
+		vi.stubEnv("WaveKit_Access_Future_Secret", "private-future-secret")
+		vi.stubEnv("WAVEKIT_ACCESSORY", "unrelated")
+		vi.stubEnv("WAVEKIT_CSDR_BUFFER_ELEMENTS", "2048")
+		vi.stubEnv("LD_LIBRARY_PATH", "/channelizer/test/lib")
+		const p = new ChannelizerProcess(opts(), logger)
+		try {
+			await p.start()
+			const call = vi.mocked(spawn).mock.lastCall
+			expect(call?.[0]).toBe(bin)
+			expect(call?.[1]).toEqual(buildChannelizerArgs(opts()))
+			expect(call?.[2]?.stdio).toEqual(["pipe", "pipe", "pipe", "pipe"])
+			expect(call?.[2]?.detached).toBe(process.platform !== "win32")
+			const env = call?.[2]?.env
+			expect(env).not.toHaveProperty("WAVEKIT_ACCESS_MACHINE_TOKEN")
+			expect(env).not.toHaveProperty("WaveKit_Access_Future_Secret")
+			expect(env?.["WAVEKIT_ACCESSORY"]).toBe("unrelated")
+			expect(env?.["WAVEKIT_CSDR_BUFFER_ELEMENTS"]).toBe("2048")
+			expect(env?.["LD_LIBRARY_PATH"]).toBe("/channelizer/test/lib")
+			expect(process.env["WAVEKIT_ACCESS_MACHINE_TOKEN"]).toBe(
+				"private-machine-token",
+			)
+			expect(process.env["WAVEKIT_CSDR_BUFFER_ELEMENTS"]).toBe("2048")
+		} finally {
+			await p.stop()
+		}
+	})
+
 	it("builds the addendum §11 spawn line plus --control-fd 3", () => {
 		expect(buildChannelizerArgs(opts())).toEqual([
 			"--generation",

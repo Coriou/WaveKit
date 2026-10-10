@@ -34,6 +34,7 @@
  * - Any stage using `--async`: the patch rejects asynchronous mode.
  */
 
+import { childAccessEnvironment } from "../access/runtime-hygiene.js"
 import type { Logger } from "../utils/logger.js"
 
 /** Native setting read by the patched CSDR binary. */
@@ -221,11 +222,12 @@ export function getCsdrBufferPolicy(): CsdrBufferPolicy {
 /**
  * Environment for decoder/DSP shells. An inherited native setting would apply
  * to every CSDR stage, including unvalidated ones, so it is removed; bounded
- * stages receive it explicitly via boundCsdrStage().
+ * stages receive it explicitly via boundCsdrStage(). Access credentials are also
+ * removed before the decoder/DSP shell inherits the environment.
  */
 export function csdrChildEnv(
 	env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-	const { [CSDR_BUFFER_ENV]: _ignored, ...rest } = env
+	const { [CSDR_BUFFER_ENV]: _ignored, ...rest } = childAccessEnvironment(env)
 	return rest
 }

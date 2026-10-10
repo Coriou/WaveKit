@@ -14,6 +14,7 @@
  */
 
 import { EventEmitter } from "node:events"
+import { childAccessEnvironment } from "../access/runtime-hygiene.js"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createInterface } from "node:readline"
 import { PassThrough, type Readable } from "node:stream"
@@ -181,6 +182,7 @@ export abstract class ExternalSdrDecoder
 		try {
 			// External SDR decoders don't receive stdin input (Requirement 19.2)
 			this.process = spawn(command, args, {
+				env: childAccessEnvironment(process.env),
 				stdio: ["ignore", "pipe", "pipe"],
 			})
 		} catch (err) {

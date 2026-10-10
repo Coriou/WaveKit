@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
+import type * as ChildProcessModule from "node:child_process"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { once } from "node:events"
+import { EventEmitter, once } from "node:events"
 import { PassThrough } from "node:stream"
 import { createServer } from "node:net"
 import { createSocket } from "node:dgram"
@@ -9,6 +11,12 @@ import { BaseDecoder } from "../../../src/decoders/base-decoder.js"
 import { ExternalSdrDecoder } from "../../../src/decoders/external-sdr-decoder.js"
 import { NetworkProducerDecoder } from "../../../src/decoders/network-producer-decoder.js"
 import type { DecoderCaps, DecoderOutput } from "../../../src/decoders/types.js"
+
+// Existing lifecycle cases still use real children; only the environment cases substitute spawn.
+vi.mock("node:child_process", async importOriginal => {
+	const actual = await importOriginal<typeof ChildProcessModule>()
+	return { ...actual, spawn: vi.fn(actual.spawn) }
+})
 
 const logger = pino({ level: "silent" })
 const caps: DecoderCaps = {
@@ -114,6 +122,7 @@ class Network extends NetworkProducerDecoder {
 const active: Array<Consumer | External | Network> = []
 afterEach(async () => {
 	vi.useRealTimers()
+	vi.unstubAllEnvs()
 	for (const decoder of active.splice(0)) {
 		decoder.forceKill()
 		await decoder.stop()
@@ -254,3 +263,60 @@ it.skipIf(process.platform === "win32")(
 		})
 	},
 )
+
+for (const Decoder of [Consumer, External, Network]) {
+	it(`${Decoder.name} actual spawn excludes access credentials while preserving its existing options`, async () => {
+		// Validates: core-access-policy Requirement 6.4.
+		vi.stubEnv("WAVEKIT_ACCESS", "private-access-state")
+		vi.stubEnv("WAVEKIT_ACCESS_MACHINE_TOKEN", "private-machine-token")
+		vi.stubEnv("wavekit_access_future_secret", "private-future-secret")
+		vi.stubEnv("WAVEKIT_ACCESSORY", "unrelated")
+		vi.stubEnv("WAVEKIT_CSDR_BUFFER_ELEMENTS", "2048")
+		vi.stubEnv("LD_LIBRARY_PATH", "/decoder/test/lib")
+		const child = Object.assign(new EventEmitter(), {
+			stdin: new PassThrough(),
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+			pid: 4_000_000,
+			exitCode: null,
+			signalCode: null,
+		})
+		vi.mocked(spawn).mockReturnValueOnce(child as unknown as ChildProcess)
+		const decoder = new Decoder()
+		try {
+			const started = decoder.start()
+			child.emit("spawn")
+			await started
+			const call = vi.mocked(spawn).mock.lastCall
+			expect(call?.[0]).toBe(process.execPath)
+			expect(call?.[1]).toEqual(["-e", program])
+			const options = call?.[2]
+			expect(options?.stdio).toEqual(
+				Decoder === External
+					? ["ignore", "pipe", "pipe"]
+					: ["pipe", "pipe", "pipe"],
+			)
+			if (Decoder === External) expect(options).not.toHaveProperty("detached")
+			else expect(options?.detached).toBe(process.platform !== "win32")
+			const env = options?.env
+			expect(env).not.toHaveProperty("WAVEKIT_ACCESS")
+			expect(env).not.toHaveProperty("WAVEKIT_ACCESS_MACHINE_TOKEN")
+			expect(env).not.toHaveProperty("wavekit_access_future_secret")
+			expect(env?.["WAVEKIT_ACCESSORY"]).toBe("unrelated")
+			expect(env?.["LD_LIBRARY_PATH"]).toBe("/decoder/test/lib")
+			if (Decoder === Consumer)
+				expect(env).not.toHaveProperty("WAVEKIT_CSDR_BUFFER_ELEMENTS")
+			else expect(env?.["WAVEKIT_CSDR_BUFFER_ELEMENTS"]).toBe("2048")
+			expect(process.env["WAVEKIT_ACCESS_MACHINE_TOKEN"]).toBe(
+				"private-machine-token",
+			)
+			expect(process.env["WAVEKIT_CSDR_BUFFER_ELEMENTS"]).toBe("2048")
+		} finally {
+			child.emit("exit", 0, null)
+			child.stdin.destroy()
+			child.stdout.destroy()
+			child.stderr.destroy()
+			await decoder.stop()
+		}
+	})
+}

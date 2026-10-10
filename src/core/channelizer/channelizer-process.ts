@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process"
 import { EventEmitter } from "node:events"
 import { createInterface } from "node:readline"
 import type { Readable, Writable } from "node:stream"
+import { childAccessEnvironment } from "../../access/runtime-hygiene.js"
 import { signalDecoder } from "../../decoders/process-tools.js"
 import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
@@ -191,6 +192,7 @@ export class ChannelizerProcess
 					this.options.binaryPath,
 					buildChannelizerArgs(this.options),
 					{
+						env: childAccessEnvironment(process.env),
 						detached: process.platform !== "win32",
 						stdio: ["pipe", "pipe", "pipe", "pipe"],
 					},

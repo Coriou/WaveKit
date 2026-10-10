@@ -203,6 +203,31 @@ describe("csdr bounded ring policy (stage builder)", () => {
 })
 
 describe("csdr child environment", () => {
+	it("removes both reserved access credentials and inherited CSDR settings without changing the parent", () => {
+		// Validates: core-access-policy Requirement 6.4.
+		const parent = Object.freeze({
+			PATH: "/bin",
+			LD_LIBRARY_PATH: "/decoder/lib",
+			WAVEKIT_ACCESS: "private-access-state",
+			WAVEKIT_ACCESS_MACHINE_TOKEN: "private-machine-token",
+			wavekit_access_future_secret: "private-future-secret",
+			WAVEKIT_ACCESSORY: "unrelated",
+			WAVEKIT_CSDR__BUFFER_ELEMENTS: "65536",
+			[CSDR_BUFFER_ENV]: "2048",
+		})
+		const child = csdrChildEnv(parent)
+		expect(child).toEqual({
+			PATH: "/bin",
+			LD_LIBRARY_PATH: "/decoder/lib",
+			WAVEKIT_ACCESSORY: "unrelated",
+			WAVEKIT_CSDR__BUFFER_ELEMENTS: "65536",
+		})
+		expect(parent.WAVEKIT_ACCESS_MACHINE_TOKEN).toBe("private-machine-token")
+		expect(parent[CSDR_BUFFER_ENV]).toBe("2048")
+		child["PATH"] = "/child-only"
+		expect(parent.PATH).toBe("/bin")
+	})
+
 	it("strips an inherited native setting so unlisted stages stay upstream", () => {
 		const env = csdrChildEnv({ PATH: "/bin", [CSDR_BUFFER_ENV]: "2048" })
 		expect(env).toEqual({ PATH: "/bin" })
