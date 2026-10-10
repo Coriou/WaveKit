@@ -122,6 +122,9 @@ lock excludes any other opener (including same PID); after crash offline repair
 must establish no writer before removing lock. No PID-only liveness guessing.
 Files use 0600 and exclusive temp creation, no symlink-following on final file.
 State read is at most byte limit+1 before parsing; reject invalid/oversize/version.
+After validating an existing state file, sync operator-data itself before exposing
+the snapshot: visible bytes may be a prior uncertain rename. Recovery-sync failure
+rejects open, preserves state and releases only this opener's settled ownership.
 Missing file is durably initialized under lock. Directory and file identity/types
 are checked; local trusted parent assumption excludes hostile path replacement,
 NFS and cross-host writers. Temporary leftovers are not authoritative state and
@@ -253,17 +256,25 @@ No second bus/subscriber registry or mounted integration in this checkpoint.
 
 ## Foundation verification sample (before independent code review)
 
-Domain/storage/service are independent and unmounted. Four unit files pass97
+Domain/storage/service are independent and unmounted. Four unit files pass99
 tests; Properties1–9 (excluding integration-only10) run100 cases each where
 applicable. Repository typecheck and lint pass (59 existing warnings,0errors).
 Test globals imports/UID mock typing initially failed root typecheck and were fixed
 in owned tests; no source or shared configuration changes were needed.
 Synthetic maximum state on Darwin24.6.0/x64 Intel i5-1038NG7 Node25.2.1:
 256presets +64ranking keys encode275522bytes (275540 after preferences). Ten serial
-actual-fsync mutations including snapshot capture:124.99/142.62/167.92ms
+actual-fsync mutations including snapshot capture:132.28/163.36/214.41ms
 minimum/median/maximum in the parent combined touched run. This is bounded local
 latency/size evidence, not sustained multi-client transport or power-loss acceptance.
 Admission is one active +32waiting; response loss does not cancel admitted work.
 Close rejects new work and drains accepted operations before releasing ownership.
 Operational admission/lease checks at mounting and slow-reader/network recovery
 remain Main/client integration gates; no client or mounted capability is claimed.
+
+## Foundation review round 4 resolution (pending re-review)
+
+P1: previously reopening visible renamed state completed only stateDir parent
+sync. Existing-file recovery now also syncs operator-data before availability;
+failure rejects open while preserving the file. Storage ordering/recovery failure
+and service uncertain-rename/no-op regression coverage were added. No rollback
+or physical storage guarantee is claimed. Exact corrected code awaits re-review.

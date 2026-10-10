@@ -89,6 +89,10 @@ describe("dedicated operator-data storage", () => {
 		expect(second.snapshot().storeId).toBe(initial.storeId)
 		expect(stages).toContain("parent-sync:after")
 		expect(stages).not.toContain("temp-open:before")
+		expect(stages.indexOf("read-close:after")).toBeLessThan(
+			stages.indexOf("directory-sync:before"),
+		)
+		expect(stages.at(-1)).toBe("directory-sync:after")
 	})
 
 	// Feature: operator-data, Property 6: Recovery preservation
@@ -313,6 +317,27 @@ describe("dedicated operator-data storage", () => {
 			expect(recovered.isAvailable()).toBe(true)
 		},
 	)
+
+	it("rejects failed recovery directory sync without exposing or replacing visible state", async () => {
+		const path = await root()
+		const first = await open(path)
+		const previous = await readFile(file(path), "utf8")
+		await first.close()
+		let synced = false
+		await expect(
+			open(path, (stage, phase) => {
+				if (stage === "directory-sync" && phase === "before") {
+					synced = true
+					throw new Error("recovery sync")
+				}
+			}),
+		).rejects.toMatchObject(unavailable)
+		expect(synced).toBe(true)
+		expect(await readFile(file(path), "utf8")).toBe(previous)
+		await expect(lstat(lock(path))).rejects.toMatchObject({ code: "ENOENT" })
+		const recovered = await open(path)
+		expect(recovered.snapshot()).toEqual(JSON.parse(previous))
+	})
 
 	it("parent-sync failure on reopen preserves exact state", async () => {
 		const path = await root()

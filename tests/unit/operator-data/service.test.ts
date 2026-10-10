@@ -406,6 +406,45 @@ describe("bounded durable operator-data service", () => {
 		},
 	)
 
+	it("cannot acknowledge a recovered no-op until the prior uncertain rename is directory-synced", async () => {
+		const path = await root()
+		let armed = false
+		const first = await open(path, {
+			storageStage: (stage, phase) => {
+				if (armed && stage === "directory-sync" && phase === "before")
+					throw new Error("uncertain rename")
+			},
+		})
+		const mutation = patch(first.snapshot())
+		armed = true
+		await expect(first.mutate(mutation)).rejects.toMatchObject(unavailable)
+		await first.close()
+		const visible = await readFile(file(path), "utf8")
+		await expect(
+			open(path, {
+				storageStage: (stage, phase) => {
+					if (stage === "directory-sync" && phase === "before")
+						throw new Error("recovery sync")
+				},
+			}),
+		).rejects.toMatchObject(unavailable)
+		expect(await readFile(file(path), "utf8")).toBe(visible)
+		let syncComplete = false
+		const recovered = await open(path, {
+			storageStage: (stage, phase) => {
+				if (stage === "directory-sync" && phase === "after") syncComplete = true
+			},
+		})
+		expect(syncComplete).toBe(true)
+		await expect(
+			recovered.mutate(patch(recovered.snapshot())),
+		).resolves.toMatchObject({
+			changed: false,
+			delivery: "not-needed",
+			snapshot: { revision: 1 },
+		})
+	})
+
 	it("preserves corrupt startup data without returning a fake empty snapshot", async () => {
 		const path = await root()
 		const service = await open(path)

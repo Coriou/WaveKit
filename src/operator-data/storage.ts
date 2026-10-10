@@ -277,6 +277,10 @@ export class OperatorDataStorage {
 		} finally {
 			await this.closeHandle(handle, "read-close")
 		}
+		// Visible state may be a previously uncertain rename. Complete that
+		// directory's durability before exposing it, including to no-op writes.
+		if (!this.directoryHandle) throw unavailable()
+		await this.perform("directory-sync", () => this.directoryHandle!.sync())
 	}
 	private async write(encoded: string): Promise<void> {
 		const temp = join(this.directory, `.state-${randomUUID()}.tmp`)
