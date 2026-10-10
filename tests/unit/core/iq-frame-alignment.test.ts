@@ -25,6 +25,7 @@ describe("IQ source frame boundaries", () => {
 			throw new Error("Missing address")
 		const manager = new SourceManager(pino({ level: "silent" }))
 		try {
+			const accepted = once(server, "connection")
 			const stream = await manager.connect({
 				id: "iq",
 				type: "rtl_tcp",
@@ -40,6 +41,7 @@ describe("IQ source frame boundaries", () => {
 					exclusive: false,
 				},
 			})
+			await accepted
 			const chunks: Buffer[] = []
 			stream.on("data", chunk => chunks.push(Buffer.from(chunk)))
 			const changed = vi.fn()
@@ -71,10 +73,11 @@ describe("IQ source frame boundaries", () => {
 			peer.write(Buffer.from([0xff]))
 			await new Promise(resolve => setTimeout(resolve, 20))
 			const reconnected = once(manager, "connected")
+			const acceptedReconnect = once(server, "connection")
 			const previousPeer = peer
 			peer.destroy()
-			await reconnected
-			await vi.waitFor(() => expect(peer).not.toBe(previousPeer))
+			await Promise.all([reconnected, acceptedReconnect])
+			expect(peer).not.toBe(previousPeer)
 			peer.write(Buffer.concat([header, Buffer.from([0x10, 0x20])]))
 			await vi.waitFor(() =>
 				expect(Buffer.concat(chunks)).toEqual(
