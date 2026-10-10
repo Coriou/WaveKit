@@ -301,7 +301,7 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Keyboard (list focused):* ↑↓ move, Enter open/close, Space play, J / L ±5 s, K
     pause, I / O trim, Delete remove, Esc close.
 
-- **Recordings polish (2026-10-10, checked on the rendered canvas at 1440 and 390 px).**
+- **Recordings polish (2026-10-10, issues found on the rendered canvas at 1440 and 390 px; fixes not yet re-checked visually).**
   An open row no longer repeats itself: the name and note become editable in place
   (the name's placeholder is the automatic title; a chevron or the type tile closes it)
   instead of a separate Name / Note form. Audio rows lose the second Play button (the
