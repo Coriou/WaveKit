@@ -178,4 +178,38 @@ describe("agents-setup", () => {
 			join(sandbox, "gone"),
 		)
 	})
+
+	it("refuses a memory directory that a repository could commit", () => {
+		const docs = join(main, "docs")
+		mkdirSync(docs)
+
+		const result = setup(worktree, [], { WAVEKIT_AGENT_MEMORY_DIR: docs })
+		expect(result.status).toBe(1)
+		expect(result.stderr).toContain("trackable")
+		expect(existsSync(join(worktree, ".agents"))).toBe(false)
+	})
+
+	it("refuses an ignored memory directory that still tracks files", () => {
+		const shared = join(main, "private")
+		mkdirSync(shared)
+		writeFileSync(join(shared, "MEMORY.md"), "- leaked\n")
+		git(main, "add", "private/MEMORY.md")
+		git(main, "commit", "-q", "-m", "track")
+		writeFileSync(join(main, ".gitignore"), "/.agents/\n/private/\n")
+
+		const result = setup(main, [], { WAVEKIT_AGENT_MEMORY_DIR: shared })
+		expect(result.status).toBe(1)
+		expect(existsSync(join(main, ".agents"))).toBe(false)
+	})
+
+	it("flags an existing link whose target is trackable", () => {
+		const docs = join(main, "docs")
+		mkdirSync(docs)
+		mkdirSync(join(worktree, ".agents"))
+		symlinkSync(docs, join(worktree, ".agents/memory"), "dir")
+
+		const result = setup(worktree, ["--check"])
+		expect(result.status).toBe(1)
+		expect(readlinkSync(join(worktree, ".agents/memory"))).toBe(docs)
+	})
 })

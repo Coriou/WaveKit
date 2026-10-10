@@ -2,8 +2,9 @@
 // Links this worktree's `.agents/memory` to the shared local agent memory so
 // every harness (and every git worktree) reads the same memory index.
 //
-// Idempotent: an existing `.agents/memory` is never replaced. Refuses to create
-// the link unless git ignores it, because this repository is public.
+// Idempotent: an existing `.agents/memory` is never replaced. Refuses (exit 1)
+// unless git ignores the link and the memory directory itself can't be
+// committed to any repository, because this repository is public.
 //
 // Memory source, first match wins:
 //   1. $WAVEKIT_AGENT_MEMORY_DIR
@@ -22,7 +23,7 @@ import {
 	symlinkSync,
 } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 
 const check = process.argv.includes("--check")
 
@@ -55,6 +56,39 @@ try {
 
 const linkPath = join(root, ".agents", "memory")
 
+// A memory directory must never be publishable: refuse one inside a git work
+// tree unless that repository ignores it and tracks nothing beneath it.
+function exposingRepo(dir) {
+	let top
+	try {
+		top = git("-C", dir, "rev-parse", "--show-toplevel")
+	} catch {
+		return null
+	}
+	const path = relative(top, dir) || "."
+	try {
+		git("-C", top, "check-ignore", "-q", path)
+	} catch {
+		return top
+	}
+	return git("-C", top, "ls-files", "--", path) === "" ? null : top
+}
+
+function requirePrivate(target) {
+	try {
+		git("-C", root, "check-ignore", "-q", ".agents/memory")
+	} catch {
+		fail(
+			".agents/ is not git-ignored here; refusing to link private memory into a tracked path",
+		)
+	}
+	const repo = exposingRepo(target)
+	if (repo)
+		fail(
+			`${target} is trackable by the git repository at ${repo}; choose a private directory`,
+		)
+}
+
 let existing = null
 try {
 	existing = lstatSync(linkPath)
@@ -67,20 +101,14 @@ if (existing) {
 		fail(
 			`${linkPath} exists but does not resolve to a directory; fix or remove it by hand`,
 		)
-	console.log(`agents-setup: ok, .agents/memory -> ${realpathSync(linkPath)}`)
+	const target = realpathSync(linkPath)
+	requirePrivate(target)
+	console.log(`agents-setup: ok, .agents/memory -> ${target}`)
 	process.exit(0)
 }
 
 if (check)
 	fail(".agents/memory is missing; run `node scripts/agents-setup.mjs`")
-
-try {
-	git("-C", root, "check-ignore", "-q", ".agents/memory")
-} catch {
-	fail(
-		".agents/ is not git-ignored here; refusing to link private memory into a tracked path",
-	)
-}
 
 const mainRoot = git("-C", root, "worktree", "list", "--porcelain")
 	.split("\n")
@@ -112,6 +140,7 @@ if (!source) {
 }
 
 const target = realpathSync(source)
+requirePrivate(target)
 if (!existsSync(join(root, ".agents"))) mkdirSync(join(root, ".agents"))
 symlinkSync(target, linkPath, "dir")
 console.log(`agents-setup: linked .agents/memory -> ${target}`)

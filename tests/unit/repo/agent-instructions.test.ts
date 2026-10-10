@@ -19,7 +19,11 @@ const git = (...args: string[]) =>
 const tracked = git("ls-files").split("\n").filter(Boolean)
 
 const agents = read("AGENTS.md")
-const instructionDocs = ["AGENTS.md", "docs/specs/README.md"]
+const instructionDocs = [
+	"AGENTS.md",
+	"docs/AGENT-SETUP.md",
+	"docs/specs/README.md",
+]
 
 function withoutFences(markdown: string) {
 	return markdown.replace(/```[\s\S]*?```/g, "")
@@ -44,7 +48,7 @@ describe("agent instructions", () => {
 			expect(agents.length).toBeLessThanOrEqual(10_000)
 		})
 
-		it("has no second instruction file at the repository root", () => {
+		it("has no competing instruction file", () => {
 			// CLAUDE.md may only exist as the documented one-line import of AGENTS.md.
 			if (existsSync(join(root, "CLAUDE.md"))) {
 				expect(read("CLAUDE.md").trim()).toBe("@AGENTS.md")
@@ -57,10 +61,16 @@ describe("agent instructions", () => {
 				/^\.(cursorrules|windsurfrules|clinerules)$/,
 				/^\.cursor\/rules\//,
 				/^\.claude\/(CLAUDE|AGENTS)\.md$/,
+				/^\.claude\/rules\//,
+				// Claude reads a CLAUDE.md or CLAUDE.local.md *instead of* AGENTS.md.
+				/(^|\/)CLAUDE(\.local)?\.md$/,
+				/(^|\/)AGENTS\.override\.md$/,
 			]
-			expect(tracked.filter(file => legacy.some(re => re.test(file)))).toEqual(
-				[],
-			)
+			// Nested AGENTS.md files (e.g. packages/brand/) are scoped context, not competitors.
+			const competing = tracked
+				.filter(file => file !== "CLAUDE.md")
+				.filter(file => legacy.some(re => re.test(file)))
+			expect(competing).toEqual([])
 		})
 	})
 
@@ -97,12 +107,23 @@ describe("agent instructions", () => {
 	})
 
 	describe("paths", () => {
-		const topLevel = new Set(tracked.map(file => file.split("/")[0]!))
+		// A code span is checked when it looks like a repository path, whether or not
+		// it still exists. Placeholders, globs, relative and non-repo specifiers are skipped.
+		const notRepoPath = [
+			/[\s<>{}*=]|\.\.\.|path\/to/,
+			/^(\.\.?\/|@|~|\/|\.agents\/|dist\/|stream\/)/,
+			/^(requirements|design|tasks)\.md$/,
+			// Harness files named only to say they must not exist.
+			/^(\.claude\/)?CLAUDE(\.local)?\.md$/,
+		]
+		const looksLikePath = (span: string) =>
+			(span.includes("/") ||
+				/^[\w-][\w.-]*\.(md|json|ya?ml|ts|mjs|js)$/.test(span)) &&
+			!notRepoPath.some(re => re.test(span))
 
 		it.each(instructionDocs)("repository paths named in %s exist", doc => {
 			const missing = codeSpans(read(doc))
-				.filter(span => !/[\s<>{}*]|\.\.\.|path\/to/.test(span))
-				.filter(span => topLevel.has(span.replace(/\/$/, "").split("/")[0]!))
+				.filter(looksLikePath)
 				.filter(span => {
 					const path = join(root, span)
 					// Docs name runtime ESM specifiers (`.js`) for TypeScript sources.
@@ -136,13 +157,15 @@ describe("agent instructions", () => {
 					compilerOptions: Record<string, unknown>
 				}
 			).compilerOptions
-			const flags = codeSpans(agents).filter(span => span in options)
-			expect(flags).toEqual(
-				expect.arrayContaining([
-					"noUncheckedIndexedAccess",
-					"verbatimModuleSyntax",
-				]),
-			)
+			const flags = [
+				"noUncheckedIndexedAccess",
+				"exactOptionalPropertyTypes",
+				"useUnknownInCatchVariables",
+				"verbatimModuleSyntax",
+				"isolatedModules",
+			]
+			const documented = codeSpans(agents)
+			expect(flags.filter(flag => !documented.includes(flag))).toEqual([])
 			expect(flags.filter(flag => options[flag] !== true)).toEqual([])
 		})
 
@@ -206,6 +229,10 @@ describe("agent instructions", () => {
 				.split("\n")
 				.map(line => line.trim())
 			expect(ignored).toEqual(expect.arrayContaining([".agents", ".claude"]))
+			// A later negation would silently re-include them.
+			expect(
+				ignored.filter(line => /^!.*\.(agents|claude)/.test(line)),
+			).toEqual([])
 		})
 
 		it.each(instructionDocs)("%s names no machine-specific home paths", doc => {

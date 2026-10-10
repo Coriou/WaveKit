@@ -1,9 +1,11 @@
 # AGENTS.md
 
-The one instruction file for every coding agent and human contributor in this repository
-(Codex, Claude Code, Grok, omp and others read it natively). Keep it short and true:
-`tests/unit/repo/agent-instructions.test.ts` fails when a command, path or convention here
-drifts from the code. Detail lives in the linked docs; read them only when your task needs them.
+The one instruction file for every coding agent and human contributor in this repository.
+Codex, Claude Code, Grok CLI and omp were tested loading it natively; versions, caveats and
+the shared-memory setup are in [`docs/AGENT-SETUP.md`](docs/AGENT-SETUP.md). Keep it short
+and true: `tests/unit/repo/agent-instructions.test.ts` fails when a command, repository path,
+link or tool-enforced setting named here drifts from the code. Detail lives in the linked
+docs; read them only when your task needs them.
 
 ## Start of every task
 
@@ -43,7 +45,7 @@ pnpm workspaces + Turborepo. The root `package.json` is both the workspace root 
 - `packages/sdr-host`: Raspberry Pi dongle host (rtlmux fanout + status API), own Dockerfile.
 - `packages/brand`: brand assets; read `packages/brand/AGENTS.md` before changing it.
 - `native/wavekit-chan`: Rust channelizer crate (`make chan-build`, `make chan-test`).
-- `config/`: YAML configs (`default.yaml` canonical). `docker/`: overlay, bake file, scripts.
+- `config/`: YAML configs (`config/default.yaml` canonical). `docker/`: overlay, bake file, scripts.
 
 A new `packages/*` manifest must also be copied in the root `Dockerfile` node-build stage.
 
@@ -76,9 +78,10 @@ backpressure), which feeds decoder adapters managed by `DecoderManager` (lifecyc
 restart); REST, WebSocket and audio output sit on top. `LiveDemodulator`, the tuner and the
 optional channelizer tap the same source stream.
 
-Decoder adapters extend one of the bases in `src/decoders/` (`base-decoder.ts`,
-`audio-demod-decoder.ts`, `iq-decimate-decoder.ts`, `network-producer-decoder.ts`,
-`external-sdr-decoder.ts`); built-ins are registered in `src/index.ts`. Read the base you
+Decoder adapters extend one of the bases in `src/decoders/`
+(`src/decoders/base-decoder.ts`, `src/decoders/audio-demod-decoder.ts`,
+`src/decoders/iq-decimate-decoder.ts`, `src/decoders/network-producer-decoder.ts`,
+`src/decoders/external-sdr-decoder.ts`); built-ins are registered in `src/index.ts`. Read the base you
 extend for its required hooks before adding one.
 
 Config: YAML validated by `ConfigSchema` in `src/config.ts` at startup. Env overrides use
@@ -105,7 +108,7 @@ Policy (reviewed, not tool-enforced):
   `const log = createComponentLogger(parentLogger, "Name")` from `src/utils/logger.js`.
 - Throw the classes exported by `src/utils/errors.ts` (`WaveKitError`,
   `SourceConnectionError`, `DecoderSpawnError`, `ConfigValidationError`), not bare `Error`.
-- Streams: attach `error` handlers, prefer `pipeline()` from `stream/promises`,
+- Streams: attach `error` handlers, use `pipeline()` from `stream/promises` for piping,
   `.destroy()` on shutdown.
 - Validate external data with Zod at the boundary (config, API requests, parsed decoder output).
 
@@ -125,9 +128,9 @@ Policy (reviewed, not tool-enforced):
 
 Several agents work in this repository at once.
 
-- Commit only your own paths: `git commit -m "..." -- <path>...`. Never `git add -A`,
-  never a bare `git stash` (tag it), never commit unrelated changes. Do not push unless
-  your brief says so.
+- Stage and commit only your own paths: `git commit -m "..." -- <path>...`. Never
+  `git add -A`, never stage or commit unrelated changes, never `git stash` without a
+  unique tag. Do not push unless your brief says so.
 - Prefer your own git worktree for multi-file work; never build Docker images from the
   shared checkout.
 - Never run Prettier on `docs/CLI-COORDINATION.md` (append-only, hand-formatted).
