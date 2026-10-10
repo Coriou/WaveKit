@@ -572,29 +572,45 @@ export class ProbePool extends EventEmitter {
 	// === streams ===
 
 	/**
-	 * Watches the engine's `"stream"` events. On a thread host `currentEpoch().stream`
-	 * lags the ring right after a reconnect boundary: a stream newer than the epoch's
-	 * means the epoch's sample indices no longer address the ring.
+	 * Subscribes to the engine's `"stream"` events from its open, so the lag guard
+	 * knows every boundary (ScannerService calls it at engine open, Task 35; again
+	 * after Task 37a's engine re-plumbing). Idempotent; a new engine instance for the
+	 * source replaces the old subscription. Without it the pool subscribes on first use.
+	 */
+	watchEngine(sourceId: string, engine: ProbeEngineView): void {
+		if (this.destroyed) return
+		this.watch(sourceId, engine)
+	}
+
+	private watch(sourceId: string, engine: ProbeEngineView): StreamWatch {
+		let watch = this.watches.get(sourceId)
+		if (watch?.engine === engine) return watch
+		watch?.off()
+		const onStream = (stream: number, reason: EngineStreamReason): void =>
+			this.onStream(sourceId, stream, reason)
+		engine.on("stream", onStream)
+		watch = {
+			engine,
+			latest: null,
+			stopped: false,
+			off: () => engine.off("stream", onStream),
+		}
+		this.watches.set(sourceId, watch)
+		return watch
+	}
+
+	/**
+	 * Lag guard. On a thread host `currentEpoch().stream` lags the ring right after a
+	 * reconnect boundary: a stream newer than the epoch's means the epoch's sample
+	 * indices no longer address the ring. Subscribes on first use when watchEngine
+	 * was not called.
 	 */
 	private streamCurrent(
 		sourceId: string,
 		engine: ProbeEngineView,
 		epoch: EngineEpoch,
 	): boolean {
-		let watch = this.watches.get(sourceId)
-		if (watch?.engine !== engine) {
-			watch?.off()
-			const onStream = (stream: number, reason: EngineStreamReason): void =>
-				this.onStream(sourceId, stream, reason)
-			engine.on("stream", onStream)
-			watch = {
-				engine,
-				latest: null,
-				stopped: false,
-				off: () => engine.off("stream", onStream),
-			}
-			this.watches.set(sourceId, watch)
-		}
+		const watch = this.watch(sourceId, engine)
 		return (
 			!watch.stopped && (watch.latest === null || watch.latest <= epoch.stream)
 		)

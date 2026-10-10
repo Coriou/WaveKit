@@ -495,4 +495,25 @@ describe("ProbePool", () => {
 			{ kind: "pocsag-capcode", value: "1234567" },
 		])
 	})
+
+	it("watches an engine's streams from its open, so a first request during a lag is stale", () => {
+		const h = poolHarness()
+		h.pool.watchEngine("rtl", h.engine)
+		h.pool.watchEngine("rtl", h.engine)
+		expect(h.engine.listenerCount("stream")).toBe(1)
+		h.engine.push(2000)
+		// reconnect boundary before any request: the epoch still names the old stream
+		h.engine.newStream()
+		expect(h.pool.request(probeRequest({ preRollFromSample: 1000 }))).toEqual({
+			deferred: "stale-epoch",
+		})
+		h.engine.setEpoch(2, 446_100_000, 1)
+		expect(h.pool.request(probeRequest({ epoch: 2 }))).toHaveProperty("started")
+		expect(h.engine.listenerCount("stream")).toBe(1)
+		// a replaced engine instance takes over the subscription
+		const replacement = new FakeEngineView()
+		h.pool.watchEngine("rtl", replacement)
+		expect(h.engine.listenerCount("stream")).toBe(0)
+		expect(replacement.listenerCount("stream")).toBe(1)
+	})
 })

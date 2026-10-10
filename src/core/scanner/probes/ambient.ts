@@ -2,9 +2,10 @@
  * Evidence from configured, always-on decoders (spec § 6.4 "Ambient
  * evidence"): the same interpreters with origin "ambient", stamped with the
  * current engine epoch of the decoder's source. A decoder's acceptance memory
- * lasts one epoch and pairs only outputs at most 2 s apart (the § 6.4 ± 2 s
- * span). Matching to observations by frequency and time is done by
- * ScannerService.
+ * lasts one epoch; multimon capcodes pair only outputs at most 2 s apart
+ * (§ 6.4 "two decodes … within the hold", ± 2 s), so a 30–60 s ISM sensor
+ * still double-matches within its epoch. Matching to observations by
+ * frequency and time is done by ScannerService.
  */
 import { EventEmitter } from "node:events"
 import type { DsdFmeLinkLine } from "../../../decoders/builtin/dsd-fme-link.js"
@@ -46,7 +47,7 @@ export interface AmbientDeps {
 	now?: () => number
 }
 
-/** Acceptance memory of one decoder: recreated on a new epoch or after a pairing gap. */
+/** Acceptance memory of one decoder: recreated on a new epoch, or after a multimon pairing gap. */
 interface AmbientState {
 	interp: InterpreterState
 	lastAt: number
@@ -125,11 +126,12 @@ export class AmbientEvidence extends EventEmitter {
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
 		const now = this.now()
+		const type = this.types.get(decoderId)
 		let entry = this.states.get(decoderId)
 		if (
 			!entry ||
 			entry.interp.epoch !== epoch ||
-			now - entry.lastAt > PAIRING_GAP_MS
+			(type === "multimon-ng" && now - entry.lastAt > PAIRING_GAP_MS)
 		) {
 			entry = {
 				interp: createInterpreterState({
@@ -144,7 +146,6 @@ export class AmbientEvidence extends EventEmitter {
 		}
 		entry.lastAt = now
 		const state = entry.interp
-		const type = this.types.get(decoderId)
 		let evs: DecodeEvidence[] = []
 		if (type === "dsd-fme")
 			evs = interpretDsdFme(

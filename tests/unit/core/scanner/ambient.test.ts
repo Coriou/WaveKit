@@ -139,4 +139,45 @@ describe("AmbientEvidence", () => {
 		})
 		ambient.stop()
 	})
+
+	it("keeps rtl433 acceptance memory for the whole epoch (no 2 s pairing gap)", () => {
+		const decoders = new EventEmitter() as EventEmitter &
+			Record<string, unknown>
+		decoders["getAllStatus"] = () => [
+			{ id: "ism-cfg", type: "rtl433", sourceId: "rtl", owner: "config" },
+		]
+		decoders["getDecoder"] = () => undefined
+		const clock = { now: 10_000 }
+		const ambient = new AmbientEvidence({
+			decoders: decoders as never,
+			targetOf: id =>
+				id === "ism-cfg" ? { sourceId: "rtl", hz: 433_920_000 } : null,
+			epochOf: () => 3,
+			logger: pino({ level: "silent" }),
+			now: () => clock.now,
+		})
+		const got: AmbientEvidenceEvent[] = []
+		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
+		ambient.start()
+		const decode = () =>
+			decoders.emit("decoder:output", "ism-cfg", {
+				type: "signal",
+				timestamp: new Date(clock.now),
+				data: { model: "Acurite-Tower", id: 1234, mic: "CHECKSUM" },
+			})
+		decode()
+		expect(got).toEqual([])
+		clock.now += 40_000
+		decode()
+		expect(got).toHaveLength(1)
+		expect(got[0]).toMatchObject({
+			decoderId: "ism-cfg",
+			ev: {
+				origin: "ambient",
+				epoch: 3,
+				identity: { kind: "ism-model", value: "Acurite-Tower:1234" },
+			},
+		})
+		ambient.stop()
+	})
 })
