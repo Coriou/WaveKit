@@ -187,4 +187,34 @@ describe("planHops worked examples", () => {
 			planHops(input({ ranges: pmr([9000, 11_000]) })).hops[0],
 		)
 	})
+
+	it("keeps the greedy centre for free-only hops in a mixed plan while raster hops get DC placement", () => {
+		const plan = planHops(
+			input({
+				ranges: [
+					{ startHz: MHz(433.05), endHz: MHz(434.79), obwHz: [] },
+					{
+						startHz: MHz(446.0),
+						endHz: MHz(447.0),
+						rasters: [{ spacingHz: 12_500, firstChannelHz: MHz(446.00625) }],
+						obwHz: [9000],
+					},
+				],
+			}),
+		)
+		// M = H − s = 806.7 kHz, step = 2H − w_max − 2s = 1588.4 kHz
+		expect(plan.hops.map(h => h.centreHz)).toEqual([
+			MHz(433.0375) + 806_700,
+			MHz(433.0375) + 806_700 + 1_588_400,
+			MHz(446.8125),
+		])
+		const [free1, free2, raster] = plan.hops
+		for (const h of [free1!, free2!]) {
+			expect(h.channelCount).toBe(0)
+			expect(h.dcMinEdgeHz).toBe(plan.usableHalfSpanHz)
+		}
+		// greedy 446.8067 MHz moves to the nearest half-raster point
+		expect((raster!.centreHz - MHz(446.00625)) % 12_500).toBe(6250)
+		expect(raster!.dcMinEdgeHz).toBe(1750)
+	})
 })

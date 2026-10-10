@@ -348,7 +348,8 @@ export function planHops(input: HopPlanInput): HopPlan {
 	if ((items.length === 0 && spans.length === 0) || wMax >= 2 * (H - slack))
 		return finish([])
 	const hops = greedyCentres(items, spans, H, slack, wMax).map((hG, index) => {
-		let centre: number
+		// Free-only hops (no raster channel nearby) keep the greedy centre.
+		let centre = clamp(hG, input.tunerRange)
 		if (slack > 0) {
 			const from = lowerBound(items, hG - H - slack)
 			const near: PlanItem[] = []
@@ -357,9 +358,8 @@ export function planHops(input: HopPlanInput): HopPlan {
 				if (!i || i.hz > hG + H + slack) break
 				near.push(i)
 			}
-			centre = placeDc(hG, slack, near, main, input.tunerRange).centreHz
-		} else {
-			centre = clamp(hG, input.tunerRange)
+			if (near.length > 0)
+				centre = placeDc(hG, slack, near, main, input.tunerRange).centreHz
 		}
 		return hopAt(index, centre, items, input, H, g)
 	})
