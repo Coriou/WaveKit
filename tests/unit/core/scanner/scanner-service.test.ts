@@ -822,6 +822,34 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
+	it("never turns a malformed discovery id into a path (Task 36 review)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		// a file outside evidence/ that a traversal would reach
+		mkdirSync(join(h.dir, "secret"), { recursive: true })
+		writeFileSync(join(h.dir, "secret", "psd.json"), "{}")
+		mkdirSync(join(h.dir, "evidence", "keep"), { recursive: true })
+		for (const id of ["../secret", "d_../../secret", "d_x/..", ""]) {
+			await expect(h.service.evidencePath(id, "psd")).rejects.toMatchObject({
+				statusCode: 404,
+				code: "SCANNER_DISCOVERY_NOT_FOUND",
+			})
+			await expect(h.service.evidencePath(id, "iq")).rejects.toMatchObject({
+				statusCode: 404,
+			})
+		}
+		await expect(
+			h.service.deleteDiscovery("../evidence"),
+		).rejects.toMatchObject({
+			statusCode: 404,
+			code: "SCANNER_DISCOVERY_NOT_FOUND",
+		})
+		expect(existsSync(join(h.dir, "evidence", "keep"))).toBe(true)
+		// a well-formed id without evidence is simply absent
+		await expect(h.service.evidencePath("d_01ABC", "psd")).resolves.toBeNull()
+		await h.service.stop()
+	})
+
 	it("answers an invalid settings patch with 400 and rolls back a patch it could not save (finding 7)", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()

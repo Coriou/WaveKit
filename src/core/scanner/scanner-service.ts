@@ -85,7 +85,11 @@ import {
 	estimateFrequencyError,
 	type DiscoveryFilter,
 } from "./store/discovery-store.js"
-import { EvidenceStore, type StorageCaps } from "./store/evidence-store.js"
+import {
+	DISCOVERY_ID,
+	EvidenceStore,
+	type StorageCaps,
+} from "./store/evidence-store.js"
 import {
 	ScannerPersistence,
 	type LoadedState,
@@ -850,6 +854,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	async deleteDiscovery(id: string): Promise<boolean> {
+		requireDiscoveryIdFormat(id)
 		const discovery = this.store.get(id)
 		if (!discovery || !this.store.delete(id)) return false
 		this.emit("discovery", {
@@ -879,6 +884,8 @@ export class ScannerService extends EventEmitter {
 		discoveryId: string,
 		kind: "psd" | "iq",
 	): Promise<string | null> {
+		// Before any path join: an id is never a path fragment (Task 36 review).
+		requireDiscoveryIdFormat(discoveryId)
 		const dir = join(this.storageDir, "evidence", discoveryId)
 		if (kind === "psd") {
 			const path = join(dir, "psd.json")
@@ -2621,6 +2628,16 @@ export class ScannerService extends EventEmitter {
 			}, reject)
 		})
 	}
+}
+
+/** A discovery id becomes a folder name: anything but the S1-A `DISCOVERY_ID` format is not found. */
+function requireDiscoveryIdFormat(id: string): void {
+	if (!DISCOVERY_ID.test(id))
+		throw new ScannerApiError(
+			`Discovery ${id} not found`,
+			"SCANNER_DISCOVERY_NOT_FOUND",
+			404,
+		)
 }
 
 /** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
