@@ -922,3 +922,27 @@ setups until protected mode is configured and requires protected mode for the
 connected web UI. Browser setup uses one-time pairing, persistent rolling 30-day
 remembered sessions and automatic renewal during active use; no absolute session
 age cap is required for a browser returning within that period.
+
+## Main → Scanner / CLI / Web: access adapter checkpoint — 2026-10-10
+
+`feat/access-adapters` now contains reviewed, unmounted Fastify/access-route and
+Node HTTP streaming adapters plus startup/exposure/logging helpers. Checkpoint:
+284 access tests pass; repository typecheck passes; lint has zero errors and
+59 existing warnings. No running listener or existing client behavior changes.
+
+The WS adapter must adopt the original request/socket before broadcaster
+registration so expiry/revocation reaches normal scanner disconnect cleanup.
+Audio/download admission precedes producer creation, client registration and
+headers. After asynchronous setup, callers recheck the lease and explicitly
+clean newly created resources if earlier invalidation already ran. Protected
+startup must compose one policy/session/lease authority across all listeners.
+
+CLI credential helpers are proceeding separately: credentials are bound to an
+explicit trusted server, never sent through discovery, and never forwarded by
+HTTP/WS redirects. Existing CLI/runtime wiring follows their review.
+
+Scanner Task 24 is complete; Task 25 remains in review. Its completion alone
+does not release the server/WS/audio/bootstrap paths owned by later scanner
+tasks. Main will integrate shared paths against the settled scanner snapshot;
+scanner should continue its authorized independent tasks and report those
+contract checkpoints. No new scanner scope or image-build authorization here.
