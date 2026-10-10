@@ -294,7 +294,10 @@ export class DiscoveryStore extends EventEmitter {
 	private readonly byDiscovery = new Map<string, Observation[]>()
 	private readonly bySource = new Map<string, Set<string>>()
 	private readonly pending = new Map<string, ObservationInput[]>()
-	/** Observation ids seen with truncated/iqImage/spur (in-memory, newest 4096): the flags are sticky OR per id. */
+	/**
+	 * Observation ids seen with truncated/iqImage/spur (in-memory, newest 4096). Defence in depth: the
+	 * tracker never clears these flags, so a later snapshot always carries them; the store does not rely on it.
+	 */
 	private readonly flaggedIds = new Set<string>()
 	private readonly corrections = new Map<string, number>()
 	private appliedSeq = 0
@@ -309,7 +312,7 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	ingest(input: ObservationInput): Ingested {
-		const flagged = this.stickyFlagged(input) // may be raised late (P3, § 4.9)
+		const flagged = this.rememberStickyFlags(input) // may be raised late (P3, § 4.9)
 		const known = this.observationIndex.get(input.id)
 		if (known !== undefined)
 			return flagged ? this.retract(known) : this.reingest(known, input)
@@ -359,7 +362,8 @@ export class DiscoveryStore extends EventEmitter {
 	 * (Task 35): it is recorded before the decode, so a capped decode leaves the discovery at `candidate`
 	 * (§ 6.2); it is ignored once the discovery is `decoded` (P8). The discovery may be merged away by
 	 * `settle()`; use `discoveryIdOf(observationId)` for the survivor. Only evidence that carries an
-	 * identity confirms (`decoded`, § 6.6); evidence without one still records protocol, metadata and `encrypted`.
+	 * identity confirms (`decoded`, § 6.6); evidence without one records metadata and `encrypted` and may
+	 * only refine the protocol (as a classification does).
 	 */
 	applyEvidence(
 		discoveryId: string,
@@ -945,8 +949,11 @@ export class DiscoveryStore extends EventEmitter {
 		return TRANSIENT
 	}
 
-	/** truncated, iqImage and spur merge with OR over an observation's snapshots: once seen, always flagged. */
-	private stickyFlagged(obs: ObservationInput): boolean {
+	/**
+	 * Records and reports truncated/iqImage/spur, merged with OR over an observation's snapshots: once
+	 * seen, always flagged (defence in depth, see `flaggedIds`).
+	 */
+	private rememberStickyFlags(obs: ObservationInput): boolean {
 		const f = obs.track.flags
 		if (!f.truncated && !f.iqImage && !f.spur && !this.flaggedIds.has(obs.id))
 			return false
@@ -960,9 +967,10 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	/**
-	 * `burst` is the one track flag that clears (Task 10a: true → false), so it merges with AND over an
-	 * observation's snapshots: a pending hit whose earlier snapshot was not a burst is never a burst again.
-	 * Only pending hits matter, because surfacing is decided at creation.
+	 * Defence in depth: `burst` is the one track flag that clears, and the pipeline only moves it true →
+	 * false (Task 10a), so its latest value already is the AND over the track's snapshots. The store keeps
+	 * that AND without relying on it: a pending hit whose earlier snapshot was not a burst is never a burst
+	 * again. Only pending hits matter, because surfacing is decided at creation.
 	 */
 	private withPendingBurst(obs: ObservationInput): ObservationInput {
 		if (!obs.track.flags.burst) return obs
@@ -1022,7 +1030,13 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private decodeInto(d: Discovery, ev: DecodeEvidence): void {
-		if (d.protocol !== ev.protocol) {
+		// evidence without an identity is no confirm (§ 6.6): it may only refine the protocol, never switch the
+		// family, or settle() could merge an analog discovery into its co-channel digital twin irreversibly
+		const adopt =
+			ev.identity !== undefined
+				? d.protocol !== ev.protocol
+				: moreSpecific(d.protocol, ev.protocol)
+		if (adopt) {
 			d.protocol = ev.protocol
 			d.family = familyOf(ev.protocol)
 		}

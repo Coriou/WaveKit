@@ -289,7 +289,8 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 			})
 		expect(store.ingest(snap(true, 9)).change).toBe("transient")
 		expect(store.ingest(snap(false, 9)).change).toBe("transient")
-		expect(store.ingest(snap(true, 30)).change).toBe("transient") // AND over snapshots, not the latest value
+		// defensive: the pipeline never turns burst false → true (Task 10a); the store keeps the AND anyway
+		expect(store.ingest(snap(true, 30)).change).toBe("transient")
 		expect(store.ingest(snap(false, 9, 2)).change).toBe("created")
 	})
 
@@ -456,6 +457,44 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 			store.applyEvidence(id, evidence("dmr", T0 + 20, { identity: dmrCc(1) })),
 		).toBe("upgraded")
 		expect(store.get(id)?.confidence).toBe("decoded")
+	})
+
+	it("lets evidence without an identity only refine the protocol: an analog discovery keeps its family and is not merged into its DMR twin", () => {
+		const { store } = newStore({ rasters: PMR })
+		const fm =
+			store.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH,
+					startedAt: T0,
+					cls: "analog-fm",
+					hypotheses: [["analog-fm", 0.8]],
+				}),
+			).discoveryId ?? ""
+		const dmr = store.ingest(dmrObs("o2", CH, T0 + 1_000)).discoveryId ?? ""
+		store.applyEvidence(fm, evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }))
+		expect(store.get(fm)?.protocol).toBe("analog-fm")
+		expect(store.get(fm)?.family).toBe("analog")
+		expect(store.get(fm)?.confidence).not.toBe("decoded")
+		expect(
+			store
+				.snapshot()
+				.discoveries.map(d => d.id)
+				.sort(),
+		).toEqual([fm, dmr].sort())
+		expect(store.discoveryIdOf("o1")).toBe(fm)
+
+		const unk =
+			store.ingest(
+				makeObs({
+					id: "o3",
+					centreHz: CH + 1_000_000,
+					startedAt: T0,
+					cls: "fsk4-12k5",
+				}),
+			).discoveryId ?? ""
+		store.applyEvidence(unk, evidence("dmr", T0 + 2_000, { talkgroups: ["9"] }))
+		expect(store.get(unk)?.protocol).toBe("dmr") // unknown → dmr is a refinement
 	})
 
 	it("ignores evidence that is not CRC-clean", () => {
