@@ -1,9 +1,16 @@
 /**
  * Burst IQ capture (Task 34a): [observation start − preMs, end + postMs] from
  * the IQ ring plus live bytes, written as cu8 (wideband or a ~48 kHz channel)
- * with a manifest v2 entry. Gap-free or nothing; one stream and one epoch.
+ * with a manifest v2 entry. Gap-free or nothing; one stream and one epoch: the
+ * pre-roll never reaches before the capture's epoch, and a retune or new stream
+ * cuts a closed capture back to its track end.
+ *
+ * Phases: `recording` (tapping the engine) → the window is complete → kept at once,
+ * or, with `onlyDecoded` and no decode yet, `parked` until the ambient pairing
+ * window after the close has passed (§ 6.3 ambient evidence arrives late). A
+ * `capped` capture (MAX_CAPTURE_SECONDS reached before its track closed) has a
+ * complete file and waits for the close.
  */
-import { createHash, type Hash } from "node:crypto"
 import { EventEmitter } from "node:events"
 import { createWriteStream, type WriteStream } from "node:fs"
 import type { ScannerCapture } from "@wavekit/api-types"
@@ -15,14 +22,24 @@ import type {
 	SpectrumEngine,
 } from "../../spectrum/spectrum-engine.js"
 import type { TuningTrust } from "../../spectrum/types.js"
-import type { CaptureSpec, Identity, ScannerProtocol } from "../types.js"
+import {
+	AMBIENT_PAIR_MS,
+	type CaptureSpec,
+	type DecodeEvidence,
+	type Identity,
+	type ScannerProtocol,
+} from "../types.js"
 import type { CaptureStore } from "./capture-store.js"
 import { buildFixtureEntry, type CaptureFacts } from "./fixture-entry.js"
 import { ChannelDecimator } from "./iq-decimate.js"
 
 export const MAX_CAPTURE_SECONDS = 20
 export const MAX_ACTIVE_PER_SOURCE = 2
+/** Bytes queued in a capture's WriteStream beyond which the disk is not keeping up: discard. */
+export const MAX_PENDING_WRITE_BYTES = 32 * 1024 * 1024
 const HOUR_MS = 3_600_000
+/** Accepted evidence kept per capture (the observation's own decodes, § 7.1). */
+const EVIDENCE_KEEP = 16
 
 /**
  * `accounting().stream` is the ring's stream (sample indices restart at each one); the
@@ -55,8 +72,12 @@ export interface CaptureRequest {
 	spec: CaptureSpec
 }
 
+/**
+ * What the sidecar needs from the observation; built when the capture is kept (a thunk at
+ * close), so a decode that lands after the close is in it. `metadata`/`identity` are the
+ * fallback: the capture's own accepted evidence (`evidence()`) wins.
+ */
 export interface CaptureCloseInfo {
-	endSample: number
 	discoveryId: string | null
 	protocol: ScannerProtocol
 	identity?: Identity
@@ -73,6 +94,8 @@ export interface CaptureRecorderDeps {
 	diskOk: () => boolean
 	logger: Logger
 	now: () => number
+	/** How long after the close an undecoded `onlyDecoded` capture waits for a decode; default AMBIENT_PAIR_MS. */
+	decodeWaitMs?: number
 }
 
 type DiscardReason =
@@ -85,43 +108,74 @@ type DiscardReason =
 	| "invalid-entry"
 	| "write-error"
 
+type Phase = "recording" | "capped" | "parked" | "done"
+
 interface Recording {
 	id: string
 	req: CaptureRequest
 	fs: number
 	centreHz: number
+	/** Where the pre-roll was asked to start (before the epoch and ring clamps). */
 	requestedFrom: number
 	startSample: number
 	expectNext: number
-	/** End of the input samples actually written; the sidecar range is [startSample, writtenEnd). */
+	/** End of the input samples written to the file. */
 	writtenEnd: number
+	/** End of the input samples the capture keeps (≤ writtenEnd; a retune cuts it to the track end). */
+	keepEnd: number
+	closeEnd: number | null
 	endTarget: number | null
+	closedAt: number | null
 	maxEnd: number
 	file: WriteStream
-	hash: Hash
+	fileDone: Promise<void> | null
 	outBytes: number
 	decimator: ChannelDecimator | null
 	untap: () => void
 	unwatch: () => void
 	decoded: boolean
-	info: CaptureCloseInfo | null
-	/** MAX_CAPTURE_SECONDS written before the close: the window is complete, the capture waits for its close. */
-	capped: boolean
-	finishing: boolean
+	evidence: DecodeEvidence[]
+	infoOf: (() => CaptureCloseInfo) | null
+	phase: Phase
+	parkTimer: NodeJS.Timeout | null
 	failed: boolean
+}
+
+/** Metadata of the capture's own accepted evidence, most recent value first per field. */
+function metadataOf(evidence: DecodeEvidence[]): CaptureFacts["metadata"] {
+	const out: CaptureFacts["metadata"] = {
+		talkgroups: [],
+		sources: [],
+		capcodes: [],
+		callsigns: [],
+		ismModels: [],
+	}
+	for (const ev of [...evidence].sort((a, b) => b.at - a.at)) {
+		for (const key of Object.keys(out) as (keyof typeof out)[]) {
+			for (const v of ev.metadata[key] ?? [])
+				if (!out[key].includes(v)) out[key].push(v)
+		}
+	}
+	return out
 }
 
 export class CaptureRecorder extends EventEmitter {
 	private readonly log: Logger
 	private readonly active = new Map<string, Recording>()
+	private readonly decodeWaitMs: number
 
 	constructor(private readonly deps: CaptureRecorderDeps) {
 		super()
 		this.log = createComponentLogger(deps.logger, "CaptureRecorder")
+		this.decodeWaitMs = deps.decodeWaitMs ?? AMBIENT_PAIR_MS
 	}
 
 	activeCount(): number {
 		return this.active.size
+	}
+
+	has(observationId: string): boolean {
+		return this.active.has(observationId)
 	}
 
 	open(req: CaptureRequest): boolean {
@@ -133,16 +187,20 @@ export class CaptureRecorder extends EventEmitter {
 			return false
 		const now = this.deps.now()
 		const recordings = [...this.active.values()]
-		const inflight = recordings.filter(r => r.req.jobId === req.jobId).length
+		// A capped capture's window is complete: it frees its slot and budget until it is kept.
+		const inflight = recordings.filter(
+			r => r.req.jobId === req.jobId && r.phase !== "capped",
+		).length
 		if (
 			this.deps.store.countSince(req.jobId, now - HOUR_MS) + inflight >=
 			req.spec.maxPerHour
 		)
 			return false
-		// A capped capture no longer reads the source; it only waits for its track to close.
+		// Only recording captures read the source.
 		if (
-			recordings.filter(r => r.req.sourceId === req.sourceId && !r.capped)
-				.length >= MAX_ACTIVE_PER_SOURCE
+			recordings.filter(
+				r => r.req.sourceId === req.sourceId && r.phase === "recording",
+			).length >= MAX_ACTIVE_PER_SOURCE
 		)
 			return false
 		const view = this.deps.engines(req.sourceId)
@@ -152,6 +210,12 @@ export class CaptureRecorder extends EventEmitter {
 		// The ring may already hold a newer stream than the epoch reports: its indices are not the track's.
 		if (view.accounting().stream !== req.stream) return false
 		const fs = epoch.sampleRateHz
+		const requestedFrom = Math.max(
+			0,
+			req.startSample - Math.round((req.spec.preMs * fs) / 1000),
+		)
+		// Never before the capture's epoch: older samples are another centre frequency.
+		const from = Math.max(requestedFrom, epoch.startSample ?? 0)
 		const id = `cap_${ulid(now).toLowerCase()}`
 		const file = createWriteStream(this.deps.store.tempPath(id))
 		const rec: Recording = {
@@ -159,17 +223,17 @@ export class CaptureRecorder extends EventEmitter {
 			req,
 			fs,
 			centreHz: epoch.centreHz,
-			requestedFrom: Math.max(
-				0,
-				req.startSample - Math.round((req.spec.preMs * fs) / 1000),
-			),
+			requestedFrom,
 			startSample: 0,
 			expectNext: 0,
 			writtenEnd: 0,
+			keepEnd: 0,
+			closeEnd: null,
 			endTarget: null,
+			closedAt: null,
 			maxEnd: 0,
 			file,
-			hash: createHash("sha256"),
+			fileDone: null,
 			outBytes: 0,
 			decimator:
 				req.spec.mode === "channel"
@@ -181,9 +245,10 @@ export class CaptureRecorder extends EventEmitter {
 			untap: () => undefined,
 			unwatch: () => undefined,
 			decoded: false,
-			info: null,
-			capped: false,
-			finishing: false,
+			evidence: [],
+			infoOf: null,
+			phase: "recording",
+			parkTimer: null,
 			failed: false,
 		}
 		file.on("error", (err: Error) => {
@@ -193,13 +258,13 @@ export class CaptureRecorder extends EventEmitter {
 		// Ring read and tap in one synchronous block: nothing lost or repeated. The read runs to the
 		// ring's end, not liveEdge(): an inline pipeline delivers the track-open while the engine is
 		// still ingesting a chunk that is in the ring and tapped, before liveEdge() moves past it.
-		const pre = view.readRing(rec.requestedFrom, Number.MAX_SAFE_INTEGER)
-		rec.startSample = pre?.startSample ?? view.liveEdge()
+		const pre = view.readRing(from, Number.MAX_SAFE_INTEGER)
+		rec.startSample = pre?.startSample ?? Math.max(from, view.liveEdge())
 		rec.expectNext = rec.startSample
 		rec.writtenEnd = rec.startSample
 		rec.maxEnd = rec.startSample + MAX_CAPTURE_SECONDS * fs
 		this.active.set(req.observationId, rec)
-		const onStream = (): void => this.streamEnded(rec)
+		const onStream = (): void => this.ended(rec, "stream")
 		view.on("stream", onStream)
 		rec.unwatch = () => view.off("stream", onStream)
 		rec.untap = view.tap((start, bytes) => this.accept(rec, start, bytes))
@@ -207,22 +272,45 @@ export class CaptureRecorder extends EventEmitter {
 		return true
 	}
 
+	/** The observation's own accepted evidence (CRC-clean, its epoch): the expected payload's source. */
+	evidence(observationId: string, ev: DecodeEvidence): void {
+		const rec = this.active.get(observationId)
+		if (!rec) return
+		rec.evidence.push(ev)
+		if (rec.evidence.length > EVIDENCE_KEEP) rec.evidence.shift()
+	}
+
+	/** An accepted decode of the observation: keeps a parked capture. */
 	decoded(observationId: string): void {
 		const rec = this.active.get(observationId)
-		if (rec) rec.decoded = true
+		if (!rec) return
+		rec.decoded = true
+		if (rec.phase === "parked") void this.commit(rec)
 	}
 
-	close(observationId: string, info: CaptureCloseInfo): void {
+	/** The track closed at `endSample`; `infoOf` is evaluated only if the capture is kept. */
+	close(
+		observationId: string,
+		endSample: number,
+		infoOf: () => CaptureCloseInfo,
+	): void {
 		const rec = this.active.get(observationId)
-		if (!rec || rec.finishing) return
-		rec.info = info
+		if (!rec || rec.infoOf || rec.phase === "done") return
+		rec.infoOf = infoOf
+		rec.closeEnd = endSample
+		rec.closedAt = this.deps.now()
 		rec.endTarget =
-			info.endSample + Math.round((rec.req.spec.postMs * rec.fs) / 1000)
-		if (rec.capped || rec.expectNext >= Math.min(rec.endTarget, rec.maxEnd))
-			void this.finish(rec)
+			endSample + Math.round((rec.req.spec.postMs * rec.fs) / 1000)
+		if (
+			rec.phase === "capped" ||
+			rec.expectNext >= Math.min(rec.endTarget, rec.maxEnd)
+		) {
+			rec.keepEnd = Math.min(rec.writtenEnd, rec.endTarget)
+			this.complete(rec)
+		}
 	}
 
-	/** A retune inside a capture: finish closed captures early, abort the rest. */
+	/** A retune inside a capture: cut closed captures back to their track end, abort the rest. */
 	epochChanged(sourceId: string, epoch: number): void {
 		for (const rec of [...this.active.values()]) {
 			if (rec.req.sourceId !== sourceId || rec.req.epoch === epoch) continue
@@ -238,20 +326,23 @@ export class CaptureRecorder extends EventEmitter {
 
 	// === internals ===
 
-	/** The engine started a new stream or stopped: the ring no longer continues this capture. */
-	private streamEnded(rec: Recording): void {
-		this.ended(rec, "stream")
-	}
-
-	/** A complete (capped) window is unaffected; a closed capture keeps its truncated post-roll. */
+	/**
+	 * The engine started a new stream or stopped, or the epoch changed. A complete window
+	 * (capped or parked) is unaffected. A closed capture keeps [start, track end): its
+	 * post-roll may already hold the transient and the new centre.
+	 */
 	private ended(rec: Recording, reason: "epoch" | "stream"): void {
-		if (rec.finishing || rec.capped) return
-		if (rec.info) void this.finish(rec)
-		else void this.discard(rec, reason)
+		if (rec.phase !== "recording") return
+		if (rec.closeEnd === null) {
+			void this.discard(rec, reason)
+			return
+		}
+		rec.keepEnd = Math.min(rec.writtenEnd, rec.closeEnd)
+		this.complete(rec)
 	}
 
 	private accept(rec: Recording, start: number, bytes: Uint8Array): void {
-		if (rec.finishing || rec.capped) return
+		if (rec.phase !== "recording") return
 		if (start !== rec.expectNext) {
 			void this.discard(rec, "gap")
 			return
@@ -263,62 +354,113 @@ export class CaptureRecorder extends EventEmitter {
 			const piece = bytes.subarray(0, samples * 2)
 			const out = rec.decimator ? rec.decimator.push(piece) : piece
 			if (out.length > 0) {
-				rec.hash.update(out)
 				rec.outBytes += out.length
 				// A copy: the engine reuses its chunk buffers after the tap returns.
 				rec.file.write(Buffer.from(out))
+				if (rec.file.writableLength > MAX_PENDING_WRITE_BYTES) {
+					this.log.warn(
+						{ id: rec.id, pendingBytes: rec.file.writableLength },
+						"Capture writes are not keeping up",
+					)
+					void this.discard(rec, "write-error")
+					return
+				}
 			}
 		}
 		rec.expectNext = start + bytes.length / 2
 		if (rec.expectNext < limit) return
-		if (rec.info) {
-			void this.finish(rec)
+		rec.keepEnd = rec.writtenEnd
+		if (rec.infoOf) {
+			this.complete(rec)
 			return
 		}
-		// MAX_CAPTURE_SECONDS reached before the track closed: stop reading and wait for the close.
-		rec.capped = true
+		// MAX_CAPTURE_SECONDS reached before the track closed: the file is complete; wait for the close.
+		rec.phase = "capped"
+		this.stopReading(rec)
+		void this.endFile(rec)
+	}
+
+	/** The window is final ([startSample, keepEnd)): keep it now, or park it for a late decode. */
+	private complete(rec: Recording): void {
+		this.stopReading(rec)
+		void this.endFile(rec)
+		if (!rec.req.spec.onlyDecoded || rec.decoded) {
+			void this.commit(rec)
+			return
+		}
+		rec.phase = "parked"
+		const waited = this.deps.now() - (rec.closedAt ?? this.deps.now())
+		rec.parkTimer = setTimeout(
+			() => void this.discard(rec, "not-decoded"),
+			Math.max(0, this.decodeWaitMs - waited),
+		)
+		rec.parkTimer.unref()
+	}
+
+	private stopReading(rec: Recording): void {
 		rec.untap()
 		rec.unwatch()
 	}
 
-	private async closeFile(rec: Recording): Promise<void> {
-		rec.untap()
-		rec.unwatch()
-		await new Promise<void>(resolve => rec.file.end(() => resolve()))
+	private endFile(rec: Recording): Promise<void> {
+		rec.fileDone ??= new Promise<void>(resolve => rec.file.end(() => resolve()))
+		return rec.fileDone
 	}
 
 	private async discard(rec: Recording, reason: DiscardReason): Promise<void> {
-		if (rec.finishing) return
-		rec.finishing = true
+		if (rec.phase === "done") return
+		rec.phase = "done"
+		if (rec.parkTimer) clearTimeout(rec.parkTimer)
 		this.active.delete(rec.req.observationId)
-		await this.closeFile(rec)
+		this.stopReading(rec)
+		await this.endFile(rec)
 		await this.deps.store.discard(rec.id).catch(() => undefined)
 		this.emit("discarded", rec.req.observationId, reason)
 	}
 
-	private async finish(rec: Recording): Promise<void> {
-		if (rec.finishing) return
-		const info = rec.info
-		if (!info) return this.discard(rec, "aborted")
-		if (rec.req.spec.onlyDecoded && !rec.decoded)
-			return this.discard(rec, "not-decoded")
-		if (rec.outBytes === 0) return this.discard(rec, "empty")
-		if (rec.failed) return this.discard(rec, "write-error")
-		rec.finishing = true
+	/** Output bytes of the input range [startSample, keepEnd): the decimator emits one sample per D inputs. */
+	private keptBytes(rec: Recording): number {
+		const inputs = rec.keepEnd - rec.startSample
+		const samples = rec.decimator
+			? Math.floor(inputs / rec.decimator.plan.decimation)
+			: inputs
+		return Math.min(rec.outBytes, 2 * Math.max(0, samples))
+	}
+
+	private async commit(rec: Recording): Promise<void> {
+		if (rec.phase === "done") return
+		const infoOf = rec.infoOf
+		if (!infoOf) return this.discard(rec, "aborted")
+		const bytes = this.keptBytes(rec)
+		if (bytes === 0) return this.discard(rec, "empty")
+		rec.phase = "done"
+		if (rec.parkTimer) clearTimeout(rec.parkTimer)
 		this.active.delete(rec.req.observationId)
-		await this.closeFile(rec)
-		if (rec.failed) {
+		await this.endFile(rec)
+		const fail = async (reason: DiscardReason, err?: unknown) => {
+			if (err !== undefined)
+				this.log.warn({ err, id: rec.id }, `Capture ${reason}`)
 			await this.deps.store.discard(rec.id).catch(() => undefined)
-			this.emit("discarded", rec.req.observationId, "write-error")
-			return
+			this.emit("discarded", rec.req.observationId, reason)
 		}
+		if (rec.failed) return fail("write-error")
+		let sha256: string
+		try {
+			// Cut to the kept window, hash what is on disk, fsync before the rename.
+			sha256 = await this.deps.store.seal(rec.id, bytes)
+		} catch (err) {
+			return fail("write-error", err)
+		}
+		const info = infoOf()
+		const metadata =
+			rec.evidence.length > 0 ? metadataOf(rec.evidence) : info.metadata
+		const identity =
+			[...rec.evidence].reverse().find(ev => ev.identity)?.identity ??
+			info.identity
 		const sampleRateHz = rec.decimator
 			? rec.decimator.plan.outputRateHz
 			: rec.fs
-		// What the file holds: the pre-roll already reaches the live edge when a track closed
-		// behind it, so the range can extend past endTarget; short of it = truncated post-roll.
-		const endSample = rec.writtenEnd
-		const postTruncated = rec.endTarget !== null && endSample < rec.endTarget
+		const endSample = rec.keepEnd
 		const createdAt = new Date(this.deps.now()).toISOString()
 		let entry
 		try {
@@ -328,27 +470,21 @@ export class CaptureRecorder extends EventEmitter {
 				sampleRateHz,
 				sourceCentreHz: rec.centreHz,
 				targetHz: rec.req.targetHz,
-				durationS: rec.outBytes / 2 / sampleRateHz,
-				sha256: rec.hash.digest("hex"),
-				bytes: rec.outBytes,
+				durationS: bytes / 2 / sampleRateHz,
+				sha256,
+				bytes,
 				decoderType: info.decoderType,
 				decoderOptions: info.decoderOptions,
 				protocol: info.protocol,
 				decoded: rec.decoded,
-				metadata: info.metadata,
-				...(info.identity ? { identity: info.identity } : {}),
+				metadata,
+				...(identity ? { identity } : {}),
 				jobId: rec.req.jobId,
 				sourceId: rec.req.sourceId,
 				createdAt,
 			})
 		} catch (err) {
-			this.log.warn(
-				{ err, id: rec.id },
-				"Capture manifest entry failed validation",
-			)
-			await this.deps.store.discard(rec.id).catch(() => undefined)
-			this.emit("discarded", rec.req.observationId, "invalid-entry")
-			return
+			return fail("invalid-entry", err)
 		}
 		const capture: ScannerCapture = {
 			id: rec.id,
@@ -363,7 +499,7 @@ export class CaptureRecorder extends EventEmitter {
 					? "channelizer-golden"
 					: "tail-golden",
 			protocol: info.protocol,
-			...(info.identity ? { identity: info.identity } : {}),
+			...(identity ? { identity } : {}),
 			decoded: rec.decoded,
 			encrypted: info.encrypted,
 			tuningTrust: info.tuningTrust,
@@ -375,18 +511,15 @@ export class CaptureRecorder extends EventEmitter {
 			startSample: rec.startSample,
 			endSample,
 			preRollClippedMs: ((rec.startSample - rec.requestedFrom) / rec.fs) * 1000,
-			postTruncated,
+			postTruncated: rec.endTarget !== null && endSample < rec.endTarget,
 			durationS: entry.duration_s,
-			bytes: rec.outBytes,
+			bytes,
 			files: { iq: `${rec.id}.cu8`, manifest: `${rec.id}.json` },
 		}
 		try {
 			await this.deps.store.commit(entry, capture)
 		} catch (err) {
-			this.log.warn({ err, id: rec.id }, "Capture commit failed")
-			await this.deps.store.discard(rec.id).catch(() => undefined)
-			this.emit("discarded", rec.req.observationId, "write-error")
-			return
+			return fail("write-error", err)
 		}
 		this.log.info(
 			{

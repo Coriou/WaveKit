@@ -3,11 +3,13 @@
  * <id>.scanner.json (ScannerCapture extras). Atomic JSON writes (tmp + fsync +
  * rename, the BandOverrideStore pattern); oldest-first retention.
  */
+import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
 import { mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises"
 import { join } from "node:path"
 import type { ScannerCapture } from "@wavekit/api-types"
 import { z } from "zod"
+import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../../utils/logger.js"
 import type { Fixture } from "../../fixtures/manifest-schema.js"
 import type { Assert, SchemaMatches } from "../../spectrum/types.js"
@@ -17,6 +19,7 @@ import { ScannerProtocolSchema } from "../store/schemas.js"
 export const CAPTURE_ID = /^cap_[a-z0-9]+$/
 const CAPTURE_FILE = /^(cap_[a-z0-9]+)\.(?:cu8|json)$/
 const KEEP_RECENT_MS = 10_000
+const SEAL_CHUNK_BYTES = 1024 * 1024
 
 const ExtrasSchema = z.object({
 	id: z.string().regex(CAPTURE_ID),
@@ -116,6 +119,38 @@ export class CaptureStore {
 
 	tempPath(id: string): string {
 		return join(this.opts.dir, ".tmp", `${id}.cu8`)
+	}
+
+	/**
+	 * Cuts the finished temp IQ to `bytes`, fsyncs it and returns its sha256 (of what is on
+	 * disk), so a committed sidecar never points at a short file after a power loss.
+	 */
+	async seal(id: string, bytes: number): Promise<string> {
+		const handle = await open(this.tempPath(id), "r+")
+		try {
+			if ((await handle.stat()).size > bytes) await handle.truncate(bytes)
+			const hash = createHash("sha256")
+			const buf = Buffer.alloc(Math.min(SEAL_CHUNK_BYTES, Math.max(1, bytes)))
+			for (let pos = 0; pos < bytes; ) {
+				const { bytesRead } = await handle.read(
+					buf,
+					0,
+					Math.min(buf.length, bytes - pos),
+					pos,
+				)
+				if (bytesRead === 0)
+					throw new WaveKitError(
+						`Capture ${id} is shorter than ${bytes} bytes`,
+						"SCANNER_CAPTURE_SHORT",
+					)
+				hash.update(buf.subarray(0, bytesRead))
+				pos += bytesRead
+			}
+			await handle.sync()
+			return hash.digest("hex")
+		} finally {
+			await handle.close()
+		}
 	}
 
 	/** IQ first, then the manifest entry; the sidecar last, so an indexed capture is always complete. */

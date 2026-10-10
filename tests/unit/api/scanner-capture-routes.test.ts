@@ -82,4 +82,16 @@ describe("scanner capture routes", () => {
 			).statusCode,
 		).toBe(404)
 	})
+
+	it("rejects a malformed capture id on DELETE before it reaches the service", async () => {
+		deleteCapture.mockClear()
+		for (const id of ["CAP-1", "cap_..%2Fetc", "d_01abc"]) {
+			const res = await app.inject({
+				method: "DELETE",
+				url: `/api/scanner/captures/${id}`,
+			})
+			expect(res.statusCode).toBe(400)
+		}
+		expect(deleteCapture).not.toHaveBeenCalled()
+	})
 })

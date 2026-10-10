@@ -157,6 +157,7 @@ import type {
 	ScannerSettings,
 	UndecodedReason,
 } from "./types.js"
+import { AMBIENT_PAIR_MS } from "./types.js"
 
 export interface ScannerServiceDeps {
 	settings: ScannerSettings
@@ -405,6 +406,14 @@ export class ScannerService extends EventEmitter {
 			diskOk: () => this.disk === "ok",
 			logger: deps.logger,
 			now: this.now,
+		})
+		// Each capture can be ~100 MB: enforce the cap at once, not only at the 5 min maintenance.
+		this.recorder.on("captured", () => {
+			this.captures
+				.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
+				.catch((err: unknown) =>
+					this.log.warn({ err }, "Capture retention failed"),
+				)
 		})
 		this.arbiter = new TunerArbiter({
 			tuner: deps.tuner,
@@ -1337,7 +1346,10 @@ export class ScannerService extends EventEmitter {
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
-		this.recorder.close(live.observationId, this.captureCloseInfo(live, track))
+		const closed = live
+		this.recorder.close(live.observationId, track.lastSample, () =>
+			this.captureCloseInfo(closed, track),
+		)
 		this.live.delete(track.trackId)
 		live.endedAt = now
 		this.recent.push(live)
@@ -1575,6 +1587,11 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
+	/**
+	 * Evaluated when a capture is kept (after a late decode too). The expected payload comes from
+	 * this observation's own accepted evidence (CaptureRecorder.evidence); the discovery-wide
+	 * metadata LRU is never used, since its values may belong to other transmissions.
+	 */
 	private captureCloseInfo(
 		live: LiveObservation,
 		track: TrackSnapshot,
@@ -1587,19 +1604,17 @@ export class ScannerService extends EventEmitter {
 			protocol === "unknown" ? [] : [protocol],
 		)[0]
 		return {
-			endSample: track.lastSample,
 			discoveryId: live.discoveryId,
 			protocol,
 			...(d?.identity ? { identity: d.identity } : {}),
 			metadata: {
-				talkgroups:
-					d?.metadata.talkgroups ?? (live.talkgroup ? [live.talkgroup] : []),
-				sources: d?.metadata.sources ?? (live.source ? [live.source] : []),
-				capcodes: d?.metadata.capcodes ?? [],
-				callsigns: d?.metadata.callsigns ?? [],
-				ismModels: d?.metadata.ismModels ?? [],
+				talkgroups: live.talkgroup ? [live.talkgroup] : [],
+				sources: live.source ? [live.source] : [],
+				capcodes: [],
+				callsigns: [],
+				ismModels: [],
 			},
-			encrypted: d?.encrypted ?? live.encrypted,
+			encrypted: live.encrypted,
 			tuningTrust: track.tuningTrust,
 			decoderType: mode?.decoderType ?? null,
 			decoderOptions: mode?.options ?? {},
@@ -1671,7 +1686,8 @@ export class ScannerService extends EventEmitter {
 			if (Math.abs(t.centreHz - e.hz) > Math.max(1500, t.obwHz / 2))
 				return false
 			return (
-				e.ev.at >= o.startedAt - 2000 && e.ev.at <= (o.endedAt ?? now) + 2000
+				e.ev.at >= o.startedAt - AMBIENT_PAIR_MS &&
+				e.ev.at <= (o.endedAt ?? now) + AMBIENT_PAIR_MS
 			)
 		})
 		for (const live of candidates) this.applyEvidence(live, e.ev)
@@ -1685,8 +1701,10 @@ export class ScannerService extends EventEmitter {
 		const discoveryId = live.discoveryId
 		if (!discoveryId) return
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
-		if (this.store.appendObservationEvidence(live.observationId, ev))
+		if (this.store.appendObservationEvidence(live.observationId, ev)) {
 			this.dirty = true
+			this.recorder.evidence(live.observationId, ev)
+		}
 		// § 6.2: leak/intermod caps are decided before the decode is applied, so a capped decode never reaches `decoded`.
 		const cap = ev.identity ? this.capFor(live, ev.identity) : undefined
 		const wasDecoded = this.store.get(discoveryId)?.confidence === "decoded"

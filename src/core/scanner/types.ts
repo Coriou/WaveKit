@@ -366,6 +366,12 @@ export interface ScanJobSpec {
 	capture?: Partial<CaptureSpec> & { enabled: boolean }
 }
 
+/**
+ * Ambient evidence pairs with an observation from 2 s before its start to 2 s after its end
+ * (§ 6.3); an `onlyDecoded` burst capture waits as long after the close for a late decode.
+ */
+export const AMBIENT_PAIR_MS = 2000
+
 export interface CaptureSpec {
 	enabled: boolean
 	mode: "wideband" | "channel"
