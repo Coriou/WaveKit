@@ -33,7 +33,8 @@ Format: `- [ ] item` — tick (`- [x]`) once it is in core on `main`.
 - [ ] Auto-record all audio (analog transmissions and digital calls), retention, playback by id with seek.
 - [ ] Analog transmission events (start, end, duration) from squelch.
 - [ ] Transcription pipeline (future): per-recording transcript and status.
-- [ ] Operator settings in core, synced to every client including mobile.
+- [ ] Operator settings in core, synced to every client including mobile (also command
+  history for palette ranking).
 - [ ] Live event push with replay from a cursor, so paused or reconnecting clients catch up.
 - [ ] DMR talker alias and error rate in call events (verify what dsd-fme exposes).
 - [ ] Authentication and origin policy before any browser UI ships (already on the roadmap).

@@ -46,6 +46,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
+| Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
 ## Decision log
@@ -84,7 +85,38 @@ Condensed + Noto Sans, Tabler-based icons).
   pause with "N new" count; keyboard navigation.
 - **Search is allowed in Activity.** The early "no text filters" rule applies to the
   rest of the UI; Activity search is explicitly wanted.
-- **Commands** behind ⌘K (palette not designed yet).
+- **Command palette (⌘K), first pass.** One field that understands intent, not just
+  command names:
+  - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits
+    also offer the talkgroup, 7 digits a capcode, 9 digits an MMSI.
+  - *Set with a value:* `gain 30` (snaps to the nearest step in the gain table),
+    `sq 90` (read as −90 dB), `bw 25k` (checked against the mode's range), `vol 60`,
+    `rate 2.048`, `step 6.25k`, `am`, `amber`.
+  - *Act:* "Play the last call on TG 2081" opens Activity on that talkgroup and plays
+    the newest finished recording; show capcode / MMSI / frequency; search Activity
+    for anything as the last row.
+  - *Nested scopes:* Mode, Bandwidth, Step, Gain, Sample rate, Squelch, Volume, What you
+    hear, Level control, Direct sampling, Waterfall palette, Saved, Save, Go to,
+    Decoders, Shortcuts. The scope shows as a chip in the field; Tab or Enter opens it,
+    Backspace or Esc goes back. The cursor starts on the current value. Deep search
+    finds scope values from the root ("amber" → Waterfall palette › Amber).
+  - *Live preview:* the highlighted choice is applied to the real view (spectrum,
+    islands, waterfall) under a light scrim; Enter keeps it, Esc reverts. Effect bar
+    shows `Gain 28.0 dB → 32.8 dB`. Anything with hardware or stream side effects is
+    "On Enter" only, never previewed: Bias-T (with a warning), sample rate (clients
+    reconnect), direct sampling, listen, record, save.
+  - *Ranking:* empty field shows Suggested (context: save this frequency, play the
+    talkgroup heard here, everything on this frequency), Recent (frecency), Saved, then
+    All commands. Typed results are grouped Tune / Commands / Activity, groups ordered by
+    best match; exact intents always win; usage boosts the score.
+  - *After running:* the palette closes and a toast confirms with Undo (patch-based
+    commands). Copy frequency and copy deep link are commands too.
+  - *Shortcuts shown on rows:* `[` `]` step, `M` mode, `S` save, `B` saved, `L` listen,
+    `R` record, `Q` squelch, `/` search Activity, `G` then a letter for views
+    (S, A, M, C scanner, R), `?` shortcuts. Single keys only when no field has focus.
+  *Why:* the operator's fastest path to everything, and the one place every setting is
+  reachable by name. Previewing makes trying gains, squelch levels or palettes a
+  matter of arrowing through them.
 
 ## Open questions and next topics
 
@@ -93,8 +125,11 @@ Condensed + Noto Sans, Tabler-based icons).
   leaning yes. Not drawn yet.
 - Activity follow-ups: unread state and watched talkgroups/capcodes, real time-range
   picker and jump-to-time, bulk actions (export, copy, audio clip).
-- Right-click menus on signals (Listen, Decode as…, Save).
-- ⌘K command palette.
+- Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
+  commands so both stay in sync.
+- Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a
+  ghost VFO only? Owner to judge after trying it. Palette on mobile (bottom sheet?).
+  Single-key shortcuts and `G` chords need a design pass with the full keymap.
 - Map view, Scanner, Recordings, Settings.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
@@ -105,18 +140,13 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: command palette (⌘K).** A state-of-the-art palette is the operator's fastest
-path to everything. Scope to explore:
-- Tune instantly: type a frequency, channel, relative step or saved name (reuse the
-  Tuner's parser and suggestions).
-- Jump to saved frequencies and recent tunes; save the current one.
-- Change any setting by name: mode, bandwidth, step, gain, sample rate, squelch,
-  AGC, bias-T, recording, waterfall palette.
-- Act on Activity: search, play the last call on a talkgroup, open a decoder.
-- Navigate views (spectrum, activity, map, scanner, recordings, settings).
-- Nested modes, previews of the effect before committing, keyboard-only flow,
-  recent and frecency ranking, discoverable shortcuts shown on each command.
-- Design as a new board on the canvas, then wire it into C · Immersive (⌘K button in the dock).
+**Topic: right-click menus on signals and markers.** Scope to explore:
+- Right-click (and long-press) on a signal, a saved-frequency tag, the VFO, a band
+  edge and an Activity row.
+- Reuse the palette's command model so the menu and ⌘K offer the same actions
+  (Listen, Decode as…, Save, Show in Activity, Copy link, Set bandwidth to signal).
+- "Decode as…" for an unknown emission; what WaveKit can try on the fly.
+- First, read the canvas comments on the Command palette board.
 
 ## Handoff to the dev team (later)
 
