@@ -92,28 +92,22 @@ function localStampMs(date: string, time: string): number | null {
 	return Number.isFinite(ms) ? ms : null
 }
 
-function nearestCandidate(
+/** Candidates whose TG/SRC and time window match, nearest `startedAt` first (stable for ties). */
+function matchingCandidates(
 	candidates: readonly LinkCandidate[],
 	at: number,
 	tg?: string,
 	src?: string,
-): LinkCandidate | undefined {
-	let best: LinkCandidate | undefined
-	let bestDiff = Number.POSITIVE_INFINITY
-	for (const c of candidates) {
-		if (at < c.startedAt - MATCH_SLACK_MS || at > c.endedAt + MATCH_SLACK_MS)
-			continue
-		if (tg !== undefined && c.talkgroup !== undefined && c.talkgroup !== tg)
-			continue
-		if (src !== undefined && c.source !== undefined && c.source !== src)
-			continue
-		const diff = Math.abs(at - c.startedAt)
-		if (diff < bestDiff) {
-			best = c
-			bestDiff = diff
-		}
-	}
-	return best
+): LinkCandidate[] {
+	return candidates
+		.filter(
+			c =>
+				at >= c.startedAt - MATCH_SLACK_MS &&
+				at <= c.endedAt + MATCH_SLACK_MS &&
+				(tg === undefined || c.talkgroup === undefined || c.talkgroup === tg) &&
+				(src === undefined || c.source === undefined || c.source === src),
+		)
+		.sort((a, b) => Math.abs(at - a.startedAt) - Math.abs(at - b.startedAt))
 }
 
 function errorCode(err: unknown): string | undefined {
@@ -178,6 +172,8 @@ export class EvidenceStore {
 	private readonly now: () => number
 	private readonly statfs: (p: string) => Promise<{ freeBytes: number }>
 	private caps: StorageCaps
+	/** Per-discovery tail of pending evidence writes (`serialise`); never rejects. */
+	private readonly writeChains = new Map<string, Promise<void>>()
 
 	constructor(opts: {
 		dir: string
@@ -276,7 +272,8 @@ export class EvidenceStore {
 			const temp = TEMP_WAV.exec(f.name)
 			if (temp !== null) {
 				const at = localStampMs(temp[1] ?? "", temp[2] ?? "")
-				const c = at === null ? undefined : nearestCandidate(candidates, at)
+				const c =
+					at === null ? undefined : matchingCandidates(candidates, at)[0]
 				if (c !== undefined && !cut.includes(c.observationId))
 					cut.push(c.observationId)
 				await rm(f.path, { force: true })
@@ -285,18 +282,21 @@ export class EvidenceStore {
 			const call = CALL_WAV.exec(f.name)
 			const at =
 				call === null ? null : localStampMs(call[1] ?? "", call[2] ?? "")
-			const c =
+			const matches =
 				call === null || at === null
-					? undefined
-					: nearestCandidate(candidates, at, call[3], call[4])
-			if (c === undefined || low) {
+					? []
+					: matchingCandidates(candidates, at, call[3], call[4])
+			// encrypted → no audio kept: any encrypted match wins over a nearer clear one, and is reported even while the disk is low
+			const encrypted = matches.find(m => m.encrypted)
+			if (encrypted !== undefined) {
 				await rm(f.path, { force: true })
+				if (!droppedEncrypted.includes(encrypted.observationId))
+					droppedEncrypted.push(encrypted.observationId)
 				continue
 			}
-			if (c.encrypted) {
+			const c = matches[0]
+			if (c === undefined || low) {
 				await rm(f.path, { force: true })
-				if (!droppedEncrypted.includes(c.observationId))
-					droppedEncrypted.push(c.observationId)
 				continue
 			}
 			const target = join(this.root, "recordings", "dv", c.discoveryId)
@@ -315,34 +315,60 @@ export class EvidenceStore {
 		}
 	}
 
+	/**
+	 * Runs `task` after every earlier evidence task of the same discovery has settled. Overlapping
+	 * writes would otherwise share `atomicWrite`'s `<file>.<pid>.tmp` and race the PSD's
+	 * read-compare-write. A failed task rejects its own caller only; the chain carries on.
+	 */
+	private serialise<T>(
+		discoveryId: string,
+		task: () => Promise<T>,
+	): Promise<T> {
+		const run = (this.writeChains.get(discoveryId) ?? Promise.resolve()).then(
+			task,
+		)
+		const tail = run.then(
+			() => undefined,
+			() => undefined,
+		)
+		this.writeChains.set(discoveryId, tail)
+		void tail.then(() => {
+			if (this.writeChains.get(discoveryId) === tail)
+				this.writeChains.delete(discoveryId)
+		})
+		return run
+	}
+
 	async writePsd(
 		discoveryId: string,
 		psd: { startHz: number; binHz: number; bins: number[]; snrDb: number },
 	): Promise<boolean> {
 		assertDiscoveryId(discoveryId)
-		if ((await this.diskState()) === "disk-low") return false
-		const file = join(this.root, "evidence", discoveryId, "psd.json")
-		try {
-			const existing = PsdFileSchema.safeParse(
-				JSON.parse(await readFile(file, "utf8")) as unknown,
-			)
-			if (existing.success && existing.data.snrDb >= psd.snrDb) return false
-		} catch (err) {
-			if (errorCode(err) !== "ENOENT")
-				this.log.debug(
-					{ err, file },
-					"Replacing an unreadable PSD evidence file",
+		return this.serialise(discoveryId, async () => {
+			if ((await this.diskState()) === "disk-low") return false
+			const file = join(this.root, "evidence", discoveryId, "psd.json")
+			try {
+				const existing = PsdFileSchema.safeParse(
+					JSON.parse(await readFile(file, "utf8")) as unknown,
 				)
-		}
-		await atomicWrite(
-			file,
-			JSON.stringify({
-				version: 1,
-				savedAt: new Date(this.now()).toISOString(),
-				...psd,
-			}),
-		)
-		return true
+				if (existing.success && existing.data.snrDb >= psd.snrDb) return false
+			} catch (err) {
+				if (errorCode(err) !== "ENOENT")
+					this.log.debug(
+						{ err, file },
+						"Replacing an unreadable PSD evidence file",
+					)
+			}
+			await atomicWrite(
+				file,
+				JSON.stringify({
+					version: 1,
+					savedAt: new Date(this.now()).toISOString(),
+					...psd,
+				}),
+			)
+			return true
+		})
 	}
 
 	async writeIq(
@@ -351,24 +377,33 @@ export class EvidenceStore {
 		meta: { sampleRateHz: number; centreHz: number },
 	): Promise<string | null> {
 		assertDiscoveryId(discoveryId)
-		if ((await this.diskState()) === "disk-low") return null
-		const at = this.now()
-		const limit = Math.max(2, Math.floor(meta.sampleRateHz) * 2)
-		const body = bytes.length > limit ? bytes.subarray(0, limit) : bytes
-		const dir = join(this.root, "evidence", discoveryId)
-		const name = `iq-${at}.cu8`
-		await atomicWrite(join(dir, name), body)
-		await atomicWrite(
-			join(dir, `iq-${at}.json`),
-			JSON.stringify({
-				version: 1,
-				sampleRateHz: meta.sampleRateHz,
-				centreHz: meta.centreHz,
-				savedAt: new Date(at).toISOString(),
-				bytes: body.length,
-			}),
-		)
-		return name
+		return this.serialise(discoveryId, async () => {
+			if ((await this.diskState()) === "disk-low") return null
+			const savedAt = this.now()
+			const limit = Math.max(2, Math.floor(meta.sampleRateHz) * 2)
+			const body = bytes.length > limit ? bytes.subarray(0, limit) : bytes
+			const dir = join(this.root, "evidence", discoveryId)
+			// the name keeps the `iq-<ms>` contract: a snippet saved in an already-used millisecond takes the next free one
+			let at = savedAt
+			while (
+				existsSync(join(dir, `iq-${at}.cu8`)) ||
+				existsSync(join(dir, `iq-${at}.json`))
+			)
+				at++
+			const name = `iq-${at}.cu8`
+			await atomicWrite(join(dir, name), body)
+			await atomicWrite(
+				join(dir, `iq-${at}.json`),
+				JSON.stringify({
+					version: 1,
+					sampleRateHz: meta.sampleRateHz,
+					centreHz: meta.centreHz,
+					savedAt: new Date(savedAt).toISOString(),
+					bytes: body.length,
+				}),
+			)
+			return name
+		})
 	}
 
 	recordingPath(recordingId: string): string | null {
@@ -393,15 +428,18 @@ export class EvidenceStore {
 
 	async removeDiscovery(discoveryId: string): Promise<void> {
 		assertDiscoveryId(discoveryId)
-		await rm(join(this.root, "evidence", discoveryId), {
-			recursive: true,
-			force: true,
-		})
-		for (const kind of RECORDING_KINDS)
-			await rm(join(this.root, "recordings", kind, discoveryId), {
+		// behind pending evidence writes, so none of them recreates the folder afterwards
+		await this.serialise(discoveryId, async () => {
+			await rm(join(this.root, "evidence", discoveryId), {
 				recursive: true,
 				force: true,
 			})
+			for (const kind of RECORDING_KINDS)
+				await rm(join(this.root, "recordings", kind, discoveryId), {
+					recursive: true,
+					force: true,
+				})
+		})
 	}
 
 	async retention(

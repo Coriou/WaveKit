@@ -211,6 +211,76 @@ describe("EvidenceStore.linkProbeRecordings", () => {
 		})
 	})
 
+	it("drops an encrypted call's WAV even when a nearer clear wildcard candidate also matches", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0 + 60_000,
+				statfs: plentyOfDisk,
+			})
+			const probe = await probeDirWith(root, [callWav(T0 + 1_000, "9", "2001")])
+			const result = await store.linkProbeRecordings(probe, [
+				{
+					observationId: "o-enc",
+					discoveryId: "d_ONE",
+					talkgroup: "9",
+					source: "2001",
+					startedAt: T0,
+					endedAt: T0 + 3_000,
+					encrypted: true,
+				},
+				// no TG/SRC (matches any call) and starts exactly at the file stamp: nearest, but clear
+				{
+					observationId: "o-clear",
+					discoveryId: "d_TWO",
+					startedAt: T0 + 1_000,
+					endedAt: T0 + 3_000,
+					encrypted: false,
+				},
+			])
+			expect(result).toEqual({
+				linked: [],
+				cut: [],
+				droppedEncrypted: ["o-enc"],
+			})
+			expect(existsSync(join(root, "recordings", "dv", "d_ONE"))).toBe(false)
+			expect(existsSync(join(root, "recordings", "dv", "d_TWO"))).toBe(false)
+			expect(existsSync(probe)).toBe(false)
+		})
+	})
+
+	it("reports an encrypted call as dropped while the disk is low", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0,
+				statfs: lowDisk,
+			})
+			const probe = await probeDirWith(root, [callWav(T0, "9", "2001")])
+			const result = await store.linkProbeRecordings(probe, [
+				{
+					observationId: "o-enc",
+					discoveryId: "d_ONE",
+					talkgroup: "9",
+					source: "2001",
+					startedAt: T0,
+					endedAt: T0 + 3_000,
+					encrypted: true,
+				},
+			])
+			expect(result).toEqual({
+				linked: [],
+				cut: [],
+				droppedEncrypted: ["o-enc"],
+			})
+			expect(existsSync(probe)).toBe(false)
+		})
+	})
+
 	it("rejects recording ids that could escape the storage directory", async () => {
 		await withDir(async root => {
 			const store = new EvidenceStore({
@@ -310,6 +380,73 @@ describe("EvidenceStore PSD and IQ", () => {
 					snrDb: 50,
 				}),
 			).toBe(false)
+		})
+	})
+
+	it("keeps the higher-SNR PSD when two writes for one discovery overlap, in either order", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0,
+				statfs: plentyOfDisk,
+			})
+			const psd = (snrDb: number) => ({
+				startHz: 446e6,
+				binHz: 1000,
+				bins: [-90, -90 + snrDb, -90],
+				snrDb,
+			})
+			expect(
+				await Promise.all([
+					store.writePsd("d_ONE", psd(30)),
+					store.writePsd("d_ONE", psd(20)),
+				]),
+			).toEqual([true, false])
+			expect(
+				await Promise.all([
+					store.writePsd("d_TWO", psd(20)),
+					store.writePsd("d_TWO", psd(30)),
+				]),
+			).toEqual([true, true])
+			for (const id of ["d_ONE", "d_TWO"]) {
+				const saved = JSON.parse(
+					await readFile(store.evidencePath(id, "psd.json") ?? "", "utf8"),
+				) as { snrDb: number }
+				expect(saved.snrDb).toBe(30)
+			}
+		})
+	})
+
+	it("keeps both IQ snippets when two writes for one discovery land in the same millisecond", async () => {
+		await withDir(async root => {
+			const store = new EvidenceStore({
+				dir: root,
+				caps: CAPS,
+				logger,
+				now: () => T0,
+				statfs: plentyOfDisk,
+			})
+			const meta = { sampleRateHz: 48_000, centreHz: 446_006_250 }
+			const names = await Promise.all([
+				store.writeIq("d_ONE", new Uint8Array(1_000).fill(1), meta),
+				store.writeIq("d_ONE", new Uint8Array(2_000).fill(2), meta),
+			])
+			expect(names[0]).not.toBeNull()
+			expect(names[1]).not.toBeNull()
+			expect(names[0]).not.toBe(names[1])
+			const sizes = await Promise.all(
+				names.map(
+					async n =>
+						(await stat(store.evidencePath("d_ONE", n ?? "") ?? "")).size,
+				),
+			)
+			expect(sizes).toEqual([1_000, 2_000])
+			for (const n of names)
+				expect(
+					store.evidencePath("d_ONE", (n ?? "").replace(/\.cu8$/, ".json")),
+				).not.toBeNull()
 		})
 	})
 
