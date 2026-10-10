@@ -746,6 +746,7 @@ merges; names may still change before merge. Everything is additive and optional
   with issues and impact in the confirm bar → `y`; takeover confirmation lists the impact; `rx` lane shows
   `scanning 412.6 MHz · hop 7/44` / `paused (SDR++)`; Messages preset `discoveries`; hide or group `owner: "scanner"`
   decoders in the Decoders view.
+- Core note (2026-10-10): the GET /api/scanner/settings DTO is ScannerSettingsView { effective, passiveBySource, provenance, bounds }; ScannerSettingsValues is the bare settings object.
 
 #### Signal discovery scanner amendment: core `spectrum` channel for waterfalls — 2026-10-09 (still NOT merged)
 
