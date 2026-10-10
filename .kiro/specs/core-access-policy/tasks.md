@@ -62,3 +62,24 @@ The next batch is actively implementing unmounted Fastify/access-route and Node
 HTTP adapters on `feat/access-adapters`, based on `dbca1cc`. Shared existing core
 configuration/server/broadcaster/audio/bootstrap edits remain gated by task 4's
 scanner contract window. Do not claim that these commits protect running listeners.
+
+## Unmounted runtime adapter checkpoint — 2026-10-10
+
+Node HTTP admission/stream leases: `b155fd7`; Fastify root hooks/access routes:
+`abb8882`; startup, raw-listener and environment/logging policy helpers:
+`a72aa3d`; shared lease-authority identity and secure cookie-prefix guards:
+`7a7d116`. Independent Astra reviews approved the adapters and independent
+Sol/root reviews approved the runtime helpers.
+
+Combined access suite: 17 files, 284 passing tests, including real HTTP/audio/WS
+transport lifecycle regressions and 100-run properties. Repository typecheck
+passed after correcting two missing returns in test handlers; the changed
+Fastify file was retested (17 passing tests). Repository lint passed with zero
+errors and 59 existing warnings outside access; focused lint is clean.
+
+Tasks 6–8 remain incomplete: these implementations are not mounted. Scanner
+Task 24 is complete; Task 25 is still in review, and later scanner tasks retain
+ownership of shared server/WS/audio/bootstrap paths. Mount against a settled
+scanner snapshot in a coordinated window. CLI credential/transport helpers are
+now being prepared independently on `feat/access-cli-transport`; live CLI wiring,
+first-use command/UI, container exposure and browser acceptance remain pending.
