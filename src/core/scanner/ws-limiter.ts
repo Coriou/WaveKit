@@ -32,6 +32,8 @@ export class WsLimiter<T> {
 	private timerAt = Number.POSITIVE_INFINITY
 	private seq = 0
 	private destroyed = false
+	/** Latest emission time; above `now` only after a backward wall-clock step. */
+	private newestEmit = Number.NEGATIVE_INFINITY
 
 	constructor(opts: {
 		maxPerSecond: number
@@ -100,6 +102,7 @@ export class WsLimiter<T> {
 	private emit(key: string, msg: T, now: number): void {
 		this.window.push(now)
 		this.lastEmit.set(key, now)
+		this.newestEmit = Math.max(this.newestEmit, now)
 		this.emitFn(msg)
 	}
 
@@ -151,6 +154,14 @@ export class WsLimiter<T> {
 	}
 
 	private prune(now: number): void {
+		// a backward clock step (NTP after a fake-hwclock boot) leaves emissions in the future; kept, they would
+		// hold the window and every key's interval closed for the length of the step
+		if (this.newestEmit > now) {
+			while ((this.window.at(-1) ?? now) > now) this.window.pop()
+			for (const [key, at] of this.lastEmit)
+				if (at > now) this.lastEmit.delete(key)
+			this.newestEmit = now
+		}
 		while (this.window.length > 0 && now - (this.window[0] ?? now) >= WINDOW_MS)
 			this.window.shift()
 		if (this.lastEmit.size > LAST_EMIT_PRUNE_SIZE)

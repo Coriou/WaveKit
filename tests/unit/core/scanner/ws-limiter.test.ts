@@ -7,8 +7,10 @@ interface Msg {
 	version: number
 }
 
+/** `t` is monotonic (timers run on it, like setTimeout); `now()` is the wall clock, which can be stepped. */
 class FakeClock {
 	t = 0
+	wallOffset = 0
 	private seq = 0
 	private tasks: {
 		at: number
@@ -16,7 +18,7 @@ class FakeClock {
 		fn: () => void
 		cancelled: boolean
 	}[] = []
-	now = (): number => this.t
+	now = (): number => this.t + this.wallOffset
 	schedule = (fn: () => void, ms: number): { cancel(): void } => {
 		const task = { at: this.t + ms, seq: this.seq++, fn, cancelled: false }
 		this.tasks.push(task)
@@ -91,6 +93,28 @@ describe("WsLimiter", () => {
 		limiter.offer("d5", { key: "d5", version: 1 }, "state")
 		clock.advanceTo(10_000)
 		expect(emitted.map(e => e.msg.key)).toEqual(["d1", "d2"])
+	})
+
+	it("keeps emitting after the wall clock steps back 60 s", () => {
+		const { clock, emitted, limiter } = setup(2, 1_000)
+		clock.advanceTo(100_000)
+		limiter.offer("d1", { key: "d1", version: 1 }, "state")
+		limiter.offer("d2", { key: "d2", version: 1 }, "state")
+		clock.wallOffset = -60_000 // NTP correction after a boot on a fake hwclock
+		clock.advanceTo(100_100)
+		limiter.offer("d1", { key: "d1", version: 2 }, "state")
+		limiter.offer("d3", { key: "d3", version: 1 }, "state")
+		// and the per-key limit applies again from the stepped clock on
+		clock.advanceTo(100_500)
+		limiter.offer("d1", { key: "d1", version: 3 }, "state")
+		clock.advanceTo(110_000)
+		expect(emitted).toEqual([
+			{ at: 100_000, msg: { key: "d1", version: 1 } },
+			{ at: 100_000, msg: { key: "d2", version: 1 } },
+			{ at: 100_100, msg: { key: "d1", version: 2 } },
+			{ at: 100_100, msg: { key: "d3", version: 1 } },
+			{ at: 101_100, msg: { key: "d1", version: 3 } },
+		])
 	})
 
 	it("applies a runtime maxPerSecond change", () => {
