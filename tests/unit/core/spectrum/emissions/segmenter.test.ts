@@ -37,6 +37,36 @@ function opts(over: Partial<SegmentOptions> = {}): SegmentOptions {
 	}
 }
 
+/** Synthetic measured spectrum: a weak rising skirt, a masked hole, and its strong parent. */
+function maskedSkirt(
+	over: {
+		mirror?: boolean
+		shift?: number
+		rejection?: number
+		prominence?: number
+	} = {},
+): { power: Float32Array; floor: Float32Array; on: Uint8Array } {
+	const { power, floor, on } = blank()
+	const rejection = over.rejection ?? 49.5
+	const bin = (i: number) => (over.mirror ? N - 1 - i : i) + (over.shift ?? 0)
+	const set = (i: number, db: number, active: boolean) => {
+		power[bin(i)] = db
+		on[bin(i)] = active ? 1 : 0
+	}
+	for (let i = 92; i <= 95; i++) set(i, -rejection - (95 - i) * 3, true)
+	for (let i = 96; i <= 100; i++) set(i, -rejection + (i - 95) * 8, false)
+	if ((over.prominence ?? 0) > 0) set(97, -rejection - over.prominence!, false)
+	for (let i = 101; i <= 107; i++)
+		set(i, i === 104 ? 0 : -Math.abs(104 - i), true)
+	return { power, floor, on }
+}
+function skirtOpts(reachBins = 9): SegmentOptions {
+	return opts({
+		farSkirt: { reachBins, minDb: 50, dcBin: 128 },
+		inWindow: true,
+	})
+}
+
 describe("segment", () => {
 	it("returns one segment with its peak and power-weighted centroid", () => {
 		const { power, floor } = blank()
@@ -185,6 +215,15 @@ describe("segment", () => {
 			[126, false],
 			[171, false],
 		]) // only 45 dB down: an emitter (or an intermod product) of its own
+		expect(run(-50, far)).toEqual([
+			[100, false],
+			[126, false],
+			[171, false],
+		]) // exactly minDb: retain the independent peak
+		expect(run(-50.01, far)).toEqual([
+			[100, true],
+			[171, false],
+		])
 		expect(run(-55, { ...far, dcBin: 113.5 })).toEqual([
 			[100, false],
 			[126, false],
@@ -195,6 +234,107 @@ describe("segment", () => {
 			[126, false],
 			[171, false],
 		]) // off without farSkirt
+	})
+
+	it.each([false, true])(
+		"drops a 49.5 dB mask-separated skirt with no independent peak (mirror=%s)",
+		mirror => {
+			const { power, floor, on } = maskedSkirt({ mirror })
+			const segs = segment(on, power, floor, skirtOpts())
+			expect(segs).toHaveLength(1)
+			expect(segs[0]?.peakDb).toBe(0)
+			expect(segs[0]?.flags.skirt).toBe(true)
+		},
+	)
+
+	it.each([
+		[30, 9, 0, 2], // exactly skirtDb: retain
+		[30.01, 9, 0, 1],
+		[49.5, 8, 0, 2], // beyond reach: retain
+		[49.5, 9, 0, 1], // exactly reach: reject
+		[49.5, 9, 6, 2], // exactly PROMINENCE_DB: retain
+		[49.5, 9, 6.01, 2],
+		[49.5, 9, 5.99, 1],
+	])(
+		"respects rejection/prominence/reach boundaries (%s dB, %s bins, %s dB valley)",
+		(rejection, reach, prominence, count) => {
+			const { power, floor, on } = maskedSkirt({ rejection, prominence })
+			expect(segment(on, power, floor, skirtOpts(reach))).toHaveLength(count)
+		},
+	)
+
+	it.each([false, true])(
+		"a masked DC spike alone cannot erase an independent weak peak (mirror=%s)",
+		mirror => {
+			const { power, floor, on } = maskedSkirt({ mirror, prominence: 6 })
+			// The masked first bin rises above the weak boundary, but the next valley
+			// retains the independent emitter's 6 dB prominence before the parent.
+			const spike = mirror ? N - 1 - 96 : 96
+			power[spike] = 10
+			const segs = segment(on, power, floor, skirtOpts())
+			expect(segs).toHaveLength(2)
+			expect(segs.every(s => !s.flags.skirt)).toBe(true)
+		},
+	)
+
+	it.each([NaN, Infinity, -Infinity, FLOOR])(
+		"retains a weak peak when gap power is unknown or reaches the noise floor (%s)",
+		gapPower => {
+			const { power, floor, on } = maskedSkirt()
+			power[98] = gapPower
+			expect(segment(on, power, floor, skirtOpts())).toHaveLength(2)
+		},
+	)
+
+	it("does not apply boundary rejection without far-skirt geometry", () => {
+		const { power, floor, on } = maskedSkirt()
+		expect(segment(on, power, floor, opts())).toHaveLength(2)
+	})
+
+	it.each([-49.5, -50])(
+		"retains a boundary peak when the next masked bin does not keep rising (%s)",
+		gapPower => {
+			const { power, floor, on } = maskedSkirt()
+			power[96] = gapPower
+			expect(segment(on, power, floor, skirtOpts())).toHaveLength(2)
+		},
+	)
+
+	it("keeps real weak local peaks, including IQ mirrors and intermod-strength emitters", () => {
+		for (const rejection of [40, 49.5, 55]) {
+			const { power, floor, on } = maskedSkirt({ rejection })
+			power[94] = -rejection + 1 // own interior peak, not a mask boundary maximum
+			const geometry = skirtOpts()
+			geometry.farSkirt!.dcBin = (94 + 104) / 2
+			expect(segment(on, power, floor, geometry)).toHaveLength(2)
+		}
+	})
+
+	it("rejects only the peakless side of a masked hole across translated and mirrored spectra", () => {
+		// Feature: signal-discovery-scanner, Property 18: No neighbour ghosts
+		// Validates: spec § 6.2
+		fc.assert(
+			fc.property(
+				fc.integer({ min: -40, max: 40 }),
+				fc.boolean(),
+				fc.double({ min: 31, max: 49.5, noNaN: true }),
+				fc.double({ min: 6, max: 10, noNaN: true }),
+				(shift, mirror, rejection, prominence) => {
+					for (const valley of [0, prominence]) {
+						const { power, floor, on } = maskedSkirt({
+							shift,
+							mirror,
+							rejection,
+							prominence: valley,
+						})
+						const segs = segment(on, power, floor, skirtOpts())
+						expect(segs).toHaveLength(valley === 0 ? 1 : 2)
+						if (valley === 0) expect(segs[0]?.flags.skirt).toBe(true)
+					}
+				},
+			),
+			{ numRuns: 100, seed: 20261011 },
+		)
 	})
 
 	it("partitions every usable on-bin into exactly one disjoint, ordered segment", () => {

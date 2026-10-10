@@ -26,7 +26,9 @@ export interface SegmentOptions {
 	 * channels out can show up as a separate weak segment, because a hole in the on-bins keeps it from
 	 * merging. A segment more than `minDb` below one whose peak is within `reachBins` is dropped and that
 	 * segment flagged `skirt`, unless it sits at the strong one's mirror about `dcBin` (an IQ image,
-	 * Task 11a flags those). Absent: off.
+	 * Task 11a flags those). A weaker boundary piece with no independent peak across the hole is
+	 * also dropped, using skirtDb and PROMINENCE_DB; measured masked-bin power is not zeroed.
+	 * Absent: off.
 	 */
 	farSkirt?: { reachBins: number; minDb: number; dcBin: number }
 }
@@ -58,27 +60,79 @@ export function segment(
 			out.push(finish(piece, powerDb, floorDb, opts))
 		}
 	}
-	return opts.farSkirt ? dropFarSkirts(out, opts.farSkirt) : out
+	return opts.farSkirt
+		? dropFarSkirts(out, opts.farSkirt, powerDb, opts.skirtDb)
+		: out
 }
 
 function dropFarSkirts(
 	segs: Segment[],
 	far: NonNullable<SegmentOptions["farSkirt"]>,
+	powerDb: Float32Array,
+	skirtDb: number,
 ): Segment[] {
 	const parents = new Set<Segment>()
-	const kept = segs.filter(s => {
-		const parent = segs.find(
+	const kept = segs.filter((s, index) => {
+		// Adjacent peak intervals are disjoint. The extra valley scans visit each bin at most
+		// twice over the whole list, rather than scanning every pair of nearby segments.
+		const boundaryParent = [segs[index - 1], segs[index + 1]].find(
 			q =>
-				q !== s &&
-				q.peakDb - s.peakDb > far.minDb &&
-				Math.abs(q.peakBin - s.peakBin) <= far.reachBins &&
-				Math.abs(q.peakBin + s.peakBin - 2 * far.dcBin) > MIRROR_SLACK_BINS,
+				q !== undefined &&
+				isBoundarySkirt(s, q, powerDb, skirtDb, far.reachBins),
 		)
+		const parent =
+			boundaryParent ??
+			segs.find(
+				q =>
+					q !== s &&
+					q.peakDb - s.peakDb > far.minDb &&
+					Math.abs(q.peakBin - s.peakBin) <= far.reachBins &&
+					Math.abs(q.peakBin + s.peakBin - 2 * far.dcBin) > MIRROR_SLACK_BINS,
+			)
 		if (parent !== undefined) parents.add(parent)
 		return parent === undefined
 	})
 	for (const p of parents) p.flags.skirt = true
 	return kept
+}
+
+/**
+ * A mask may cut a monotone skirt into two on-runs. Its boundary maximum is not a
+ * local peak when the next measured bin toward the parent is still rising. Require
+ * a strong nearby parent AND less than 6 dB prominence along the entire path: a DC
+ * spike alone cannot erase a genuine peak with a valley of its own. Unknown/nonfinite
+ * power is insufficient evidence to reject a segment. Real mirror peaks retain the
+ * ordinary far-skirt IQ-image exemption; this rule only removes pieces without a peak.
+ */
+function isBoundarySkirt(
+	s: Segment,
+	parent: Segment,
+	powerDb: Float32Array,
+	skirtDb: number,
+	reachBins: number,
+): boolean {
+	if (
+		!Number.isFinite(s.peakDb) ||
+		!Number.isFinite(parent.peakDb) ||
+		parent.peakDb - s.peakDb <= skirtDb ||
+		Math.abs(parent.peakBin - s.peakBin) > reachBins
+	)
+		return false
+	const step = parent.peakBin > s.peakBin ? 1 : -1
+	if (s.peakBin !== (step > 0 ? s.endBin - 1 : s.startBin)) return false
+	const next = powerDb[s.peakBin + step]
+	if (next === undefined || !Number.isFinite(next) || next <= s.peakDb)
+		return false
+	for (let bin = s.peakBin + step; bin !== parent.peakBin; bin += step) {
+		const power = powerDb[bin]
+		if (
+			power === undefined ||
+			!Number.isFinite(power) ||
+			s.peakDb - power >= PROMINENCE_DB
+		)
+			return false
+	}
+	return true
 }
 
 function findRuns(on: Uint8Array, opts: SegmentOptions): [number, number][] {
