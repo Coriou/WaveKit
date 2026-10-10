@@ -135,6 +135,8 @@ export interface SourceManagerEvents {
 	ended: (sourceId: string) => void // For recording sources
 	/** Internal teardown signal: permanent removal, reconnect and shutdown (see teardown()). */
 	removed: (sourceId: string) => void
+	/** Permanent removal only (disconnect()); never on reconnect or shutdown. */
+	"source-removed": (sourceId: string, removedAt: Date) => void
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
 	"rate-truth-changed": (sourceId: string) => void

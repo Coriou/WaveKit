@@ -105,7 +105,7 @@ export interface EngineMasks {
 	inWindow: boolean
 }
 
-/** Trust warning (§ 4.7). Task 37a adds the `host-centre-mismatch` source. */
+/** Trust warning (§ 4.7): the pipeline's untracked retune, or a host-reported centre mismatch. */
 export interface EngineWarning {
 	code: "untracked-retune" | "host-centre-mismatch"
 	deltaHz: number | null
@@ -127,6 +127,17 @@ export interface EpochClock {
 	currentEpoch(): EngineEpoch
 	readonly markerSupported: boolean | null
 }
+
+/** Host-side truth about the tuner centre (sdr-host status); null = unknown. */
+export interface HostCentreReader {
+	read(sourceId: string): Promise<number | null>
+}
+
+export const nullHostCentreReader: HostCentreReader = {
+	read: () => Promise.resolve(null),
+}
+
+const HOST_CENTRE_TOLERANCE_HZ = 1000
 
 /** Why a `"stream"` event fired: a new stream starts, or the engine stopped (the last stream ended). */
 export type EngineStreamReason = "restart" | "stop"
@@ -162,6 +173,8 @@ export interface SpectrumEngineDeps {
 		handlers: PipelineHostHandlers,
 	) => PipelineHost
 	batchBytes?: number
+	hostCentre?: HostCentreReader
+	hostCentrePollMs?: number
 }
 
 export function isScannerIqFormat(
@@ -301,6 +314,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private spectrumFeed = false
 	private lastStats: PipelineStats | null = null
 	private readonly warningList: EngineWarning[] = []
+	private centreOverride: number | null = null
+	private hostTimer: NodeJS.Timeout | null = null
 
 	constructor(private readonly deps: SpectrumEngineDeps) {
 		super()
@@ -376,6 +391,14 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.pendingMeta.clear()
 		this.openingStreams.length = 0
 		this.beginStream(this.initialTrust())
+		const reader = this.deps.hostCentre ?? nullHostCentreReader
+		if (reader !== nullHostCentreReader) {
+			this.hostTimer = setInterval(
+				() => void this.checkHostCentre(reader),
+				this.deps.hostCentrePollMs ?? 5000,
+			)
+			this.hostTimer.unref()
+		}
 		this.log.info(
 			{ format: this.fmt, sampleRateHz: caps.sampleRate },
 			"Spectrum engine started",
@@ -386,6 +409,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	async stop(): Promise<EngineState | null> {
 		if (!this.running) return null
 		this.running = false
+		if (this.hostTimer) clearInterval(this.hostTimer)
+		this.hostTimer = null
 		this.flushBatch()
 		this.unsubscribe()
 		if (this.flushTimer) clearTimeout(this.flushTimer)
@@ -959,7 +984,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					...this.current,
 					epoch: ev.epoch,
 					startSample: null,
-					centreHz: caps?.centerFreq ?? this.current.centreHz,
+					centreHz:
+						this.centreOverride ?? caps?.centerFreq ?? this.current.centreHz,
 					tuningTrust: "unverified",
 					settleMode: null,
 				})
@@ -1092,11 +1118,34 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.emit("warning", code, deltaHz)
 	}
 
+	/** § 4.7: a host-reported centre that disagrees with caps makes new data unverified. */
+	private async checkHostCentre(reader: HostCentreReader): Promise<void> {
+		if (!this.running) return
+		const reported = await reader.read(this.sourceId).catch(() => null)
+		if (reported === null || !this.running) return
+		const caps = this.deps.sources.getCaps(this.sourceId)?.centerFreq
+		if (caps === undefined) return
+		const mismatch = Math.abs(reported - caps) > HOST_CENTRE_TOLERANCE_HZ
+		if (!mismatch) {
+			this.centreOverride = null
+			return
+		}
+		if (this.centreOverride === reported) return
+		this.centreOverride = reported
+		this.warn("host-centre-mismatch", reported - caps)
+		this.queueExternal("unverified")
+	}
+
 	/** Captures the command position now; posts at its microtask or at the next branch delivery, whichever comes first. */
 	private queueExternal(trust: TuningTrust): void {
 		if (!this.running) return
 		if (this.externalPending) {
-			if (trust === "relay") this.externalPending.trust = "relay"
+			if (
+				trust === "unverified" ||
+				(trust === "relay" && this.externalPending.trust !== "unverified")
+			) {
+				this.externalPending.trust = trust
+			}
 			return
 		}
 		const clock = this.sampleClock()
@@ -1120,7 +1169,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		}
 		const fs = caps.sampleRate
 		const s = this.deps.settings()
-		const centreHz = caps.centerFreq ?? this.current.centreHz
+		const centreHz =
+			this.centreOverride ?? caps.centerFreq ?? this.current.centreHz
 		this.submitEpoch({
 			epoch: this.allocateEpoch(),
 			commandSample: pending.commandSample,
