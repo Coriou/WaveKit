@@ -176,7 +176,7 @@ describe("fixture manifest v2", () => {
 		expect(dmr?.decoder_options).toEqual({ offsetHz: 6000 })
 		expect(dmr?.expected).toEqual({
 			min_count: 1,
-			payloads: [],
+			payloads: [{ talkgroup: 12_345_678, source: 12_345_678 }],
 			output_types: ["call_start"],
 			key_fields: ["talkgroup", "source"],
 		})

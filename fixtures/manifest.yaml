@@ -9,7 +9,7 @@ fixtures:
   # Composed wideband goldens (channelizer T7a): fixtures/compose.py builds each from
   # fixtures/recipes/<id>.json; download.sh fetches the recipe's sources and regenerates it.
   # sha256 is from compose.py with numpy 2.5.3 on macOS (see README: regenerate if it differs).
-  # expected is a placeholder (ruling PF1) until the quiet-host record on a built image.
+  # expected: quiet-host raw record 2026-10-10 on wavekit:local-core, min_count = max(1, floor(0.8 x count)); see GOLDENS.md.
   - id: composed_ais_162m_2048k
     role: channelizer-golden
     decoder: ais-catcher
@@ -26,7 +26,16 @@ fixtures:
     center_hz: 162000000
     duration_s: 17
     expected:
-      { min_count: 1, payloads: [], key_fields: ["mmsi", "messageType"] }
+      {
+        min_count: 46,
+        payloads:
+          [
+            { mmsi: "338155151", messageType: 18 },
+            { mmsi: "367165450", messageType: 1 },
+            { mmsi: "368007230", messageType: 24 },
+          ],
+        key_fields: ["mmsi", "messageType"],
+      }
 
   # Negatives (plan Task 7 step 4): the composed fixture with only channel.center_hz moved to
   # center_hz + 0.49 x sample_rate, outside the usable span. Channelizer path only (the raw path
@@ -66,7 +75,16 @@ fixtures:
     center_hz: 162000000
     duration_s: 17
     expected:
-      { min_count: 1, payloads: [], key_fields: ["mmsi", "messageType"] }
+      {
+        min_count: 49,
+        payloads:
+          [
+            { mmsi: "338155151", messageType: 18 },
+            { mmsi: "367165450", messageType: 1 },
+            { mmsi: "368007230", messageType: 24 },
+          ],
+        key_fields: ["mmsi", "messageType"],
+      }
 
   - id: composed_pocsag_466075k_2048k
     role: channelizer-golden
@@ -85,7 +103,16 @@ fixtures:
     center_hz: 466300000
     duration_s: 12
     expected:
-      { min_count: 1, payloads: [], key_fields: ["address", "function"] }
+      {
+        min_count: 4,
+        payloads:
+          [
+            { address: 1234567, function: 3 },
+            { address: 1122334, function: 0 },
+            { address: 2000016, function: 3 },
+          ],
+        key_fields: ["address", "function"],
+      }
 
   - id: composed_aprs_144800k_2048k
     role: channelizer-golden
@@ -103,7 +130,15 @@ fixtures:
     center_hz: 145200000
     duration_s: 12
     expected:
-      { min_count: 1, payloads: [], key_fields: ["source", "destination"] }
+      {
+        min_count: 6,
+        payloads:
+          [
+            { source: "N0CALL", destination: "APRS" },
+            { source: "KC1ABC", destination: "APRS" },
+          ],
+        key_fields: ["source", "destination"],
+      }
 
   - id: composed_acars_131725k_2048k
     role: channelizer-golden
@@ -120,7 +155,17 @@ fixtures:
     sample_rate: 2048000
     center_hz: 131400000
     duration_s: 12
-    expected: { min_count: 1, payloads: [], key_fields: ["tail", "label"] }
+    expected:
+      {
+        min_count: 3,
+        payloads:
+          [
+            { tail: "D-AWKT", label: "H1" },
+            { tail: "G-WKIT", label: "5Z" },
+            { tail: "EI-WKT", label: "Q0" },
+          ],
+        key_fields: ["tail", "label"],
+      }
 
   - id: composed_ism_433920k_2048k
     role: channelizer-golden
@@ -137,7 +182,12 @@ fixtures:
     center_hz: 433720000
     duration_s: 10
     channel: { center_hz: 433920000 }
-    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+    expected:
+      {
+        min_count: 6,
+        payloads: [{ model: "Acurite-3n1", id: 7992 }],
+        key_fields: ["model", "id"],
+      }
 
   - id: composed_vdl2_136800k_2048k
     role: channelizer-golden
@@ -154,7 +204,17 @@ fixtures:
     sample_rate: 2048000
     center_hz: 136650000
     duration_s: 10
-    expected: { min_count: 1, payloads: [], key_fields: ["icao", "msgType"] }
+    expected:
+      {
+        min_count: 17,
+        payloads:
+          [
+            { icao: "345678", msgType: "I" },
+            { icao: "3944EE", msgType: "S" },
+            { icao: "400D91", msgType: "I" },
+          ],
+        key_fields: ["icao", "msgType"],
+      }
 
   # Negative copy (see composed_ais_162m_2048k_outside) until T7b delivers a VDL2 capture.
   - id: composed_vdl2_136800k_2048k_outside
@@ -194,7 +254,7 @@ fixtures:
     expected:
       {
         min_count: 1,
-        payloads: [],
+        payloads: [{ talkgroup: 12345678, source: 12345678 }],
         output_types: ["call_start"],
         key_fields: ["talkgroup", "source"],
       }
@@ -217,7 +277,7 @@ fixtures:
     duration_s: 29
     expected:
       {
-        min_count: 1,
+        min_count: 2,
         payloads: [],
         output_types: ["call_start"],
         key_fields: ["talkgroup", "source"],
@@ -239,7 +299,7 @@ fixtures:
     duration_s: 31
     expected:
       {
-        min_count: 1,
+        min_count: 2,
         payloads: [],
         output_types: ["call_start"],
         key_fields: ["talkgroup", "source"],
@@ -272,11 +332,12 @@ fixtures:
   - id: sigid_pocsag
     role: tail-golden
     decoder: multimon-ng
-    decoder_options: { modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
+    decoder_options:
+      { offsetHz: -11000, modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
     license: "unstated (fetched from origin; not redistributed; local test use only)"
     provenance:
       url: https://www.sigidwiki.com/wiki/File:POCSAG_IQ.zip
-      notes: "SigIDWiki POCSAG IQ sample (Admin, 2015-02-10). 128 kHz u8 IQ WAV; centre not recorded."
+      notes: "SigIDWiki POCSAG IQ sample (Admin, 2015-02-10). 128 kHz u8 IQ WAV; centre not recorded. Nothing at DC: FSK carriers near -11 kHz (decodes) and +13 kHz (nothing decodes), so offsetHz -11000 selects the paging channel (quiet-host record 2026-10-10)."
     fetch:
       kind: public
       url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
@@ -289,7 +350,16 @@ fixtures:
     sample_rate: 128000
     duration_s: 16.364
     expected:
-      { min_count: 1, payloads: [], key_fields: ["address", "function"] }
+      {
+        min_count: 4,
+        payloads:
+          [
+            { address: 1234567, function: 3 },
+            { address: 1126640, function: 3 },
+            { address: 1121802, function: 3 },
+          ],
+        key_fields: ["address", "function"],
+      }
 
   - id: rtl433_acurite_3n1_g001
     role: tail-golden
@@ -309,7 +379,12 @@ fixtures:
     sample_rate: 250000
     center_hz: 433920000
     duration_s: 0.262
-    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+    expected:
+      {
+        min_count: 1,
+        payloads: [{ model: "Acurite-3n1", id: 7992 }],
+        key_fields: ["model", "id"],
+      }
 
   - id: rtl433_fineoffset_wh32_g001
     role: tail-golden
@@ -329,27 +404,12 @@ fixtures:
     sample_rate: 1000000
     center_hz: 868300000
     duration_s: 0.131
-    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
-
-  - id: rtl433_olympia_9571_2048k
-    role: tail-golden
-    decoder: rtl433
-    decoder_options: { inputSampleRate: 2048000 }
-    license: "unstated (fetched from origin; not redistributed; local test use only)"
-    provenance:
-      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571
-      notes: "rtl_433_tests sample; upstream .json: Olympia-9571 id 5103419 state open (x2). Has the channelizer-golden shape (cu8, 2.048 Msps, centre known); tail-golden as T6a proposed."
-    fetch:
-      kind: public
-      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8
-      archive_sha256: 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d
-    file: raw/rtl433_olympia_9571_2048k.cu8
-    sha256: 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d
-    format: cu8
-    sample_rate: 2048000
-    center_hz: 868400000
-    duration_s: 0.128
-    expected: { min_count: 1, payloads: [], key_fields: ["model", "id"] }
+    expected:
+      {
+        min_count: 1,
+        payloads: [{ model: "Fineoffset-WH32", id: 248 }],
+        key_fields: ["model", "id"],
+      }
 
 candidates:
   # Probed 2026-10-09 (channelizer T6a). Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
@@ -436,3 +496,14 @@ candidates:
         "generator command line and packet list not recorded yet",
       ]
     notes: "Kept from v1 (format: generated, generator: gen_packets). The only deterministic APRS source; no download needed."
+  # Demoted from fixtures at the 2026-10-10 quiet-host record: decodes 0 on the raw path.
+  - id: rtl433_olympia_9571_2048k
+    decoder: rtl433
+    url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8
+    license: null
+    blockers:
+      [
+        "no Olympia-9571 decoder in rtl_433: absent from `-R help` in the image build (202605052147, 283/320 registered) and in rtl_433 25.12; `rtl_433 -r cu8:<file> -s 2048000` alone yields 0 events (2026-10-10)",
+        "license unstated (fetched from origin; not redistributed; local test use only)",
+      ]
+    notes: "rtl_433_tests sample; upstream .json: Olympia-9571 id 5103419 state open (x2). cu8, 2048000 Hz, centre 868400000, 0.128 s; sha256 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d. Promote back (tail-golden) once rtl_433 ships the decoder."
