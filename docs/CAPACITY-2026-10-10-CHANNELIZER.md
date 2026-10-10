@@ -18,6 +18,11 @@ baseline (delta E13).
 | Decoded set on the signal channel equals the bounded-CSDR run, covers payloads  | **Strict: 4/12 paced cells equal. Under QH-11/QH-14: 12/12 PASS**: every paced cell covers the three expected payloads, count ≥ `min_count`, and every raw-only key is in `expected.marginal_keys`; channelizer-only keys are CRC-checked AIS frames |
 | Unpaced runs complete without unbounded memory                                  | **PASS**: 24/24 complete; cgroup max ≤ 967 MiB under the 1 GiB cap at N = 8                                                                                                                                                                          |
 
+Orchestrator rulings (2026-10-10):
+
+- **QH-15:** the paced decoded-set criterion is read under QH-11/QH-14 → 12/12 PASS (strict equal still reported per cell).
+- **QH-16:** N=1 and N=4 PASS; N=8 "passes §9, conditional" — not recommended on a ≤4-core host or under a CPU quota until a follow-up raises the default inputHighWaterMark and/or adds the AVX2/FMA path or per-channel DSP threads, then re-measure N=8 on a dedicated host.
+
 Two findings need a reader's attention:
 
 1. **Input-branch drops at N = 8 under the 4-CPU quota.** The channelizer's
@@ -251,10 +256,7 @@ comparisons carried an error.
 
 ## Follow-ups
 
-- **Orchestrator ruling:** whether the paced decoded-set criterion is read
-  strictly (4/12) or under QH-11/QH-14 (12/12), and whether the N = 8 input
-  drops under the 4-CPU quota (no `queue-overflow`, zero with 6 CPUs) count
-  against the gate.
+- **Rulings:** QH-15 and QH-16 (see the verdict).
 - **N = 8 headroom:** consider a larger default
   `channelizer.inputHighWaterMark` (about 64 ms today) to ride out
   throttling stalls, and research [3]'s AVX2/FMA `target_feature` path or
