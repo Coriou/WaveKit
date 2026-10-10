@@ -44,6 +44,8 @@ import { liveAudioRoutes } from "./routes/live-audio.js"
 import { digitalVoiceRoutes } from "./routes/digital-voice.js"
 import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
+import { scannerRoutes } from "./routes/scanner.js"
+import type { ScannerService } from "../core/scanner/scanner-service.js"
 import { WebSocketEventBroadcaster } from "./websocket/events.js"
 import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
@@ -79,6 +81,7 @@ export interface ApiServerDependencies {
 	digitalVoice?: DigitalVoiceService | undefined
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
+	scanner?: ScannerService | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -108,6 +111,7 @@ export class ApiServer {
 	private readonly digitalVoice?: DigitalVoiceService | undefined
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
+	private readonly scanner?: ScannerService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private readonly sourceStatusPublisher: SourceStatusPublisher
@@ -127,6 +131,7 @@ export class ApiServer {
 		this.digitalVoice = dependencies.digitalVoice
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
+		this.scanner = dependencies.scanner
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -478,6 +483,10 @@ export class ApiServer {
 					{ name: "tuner", description: "RTL-TCP tuner control endpoints" },
 					{ name: "tuner-relay", description: "RTL-TCP tuner relay endpoints" },
 					{ name: "resources", description: "Resource monitoring endpoints" },
+					{
+						name: "scanner",
+						description: "Signal discovery scanner endpoints",
+					},
 				],
 			},
 		})
@@ -746,6 +755,11 @@ export class ApiServer {
 			await this.app.register(aircraftRoutes, {
 				tracker: this.aircraftTracker,
 			})
+		}
+
+		// Signal discovery scanner (spec § 12.1)
+		if (this.scanner) {
+			await this.app.register(scannerRoutes, { scanner: this.scanner })
 		}
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)

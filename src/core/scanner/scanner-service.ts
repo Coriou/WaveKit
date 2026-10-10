@@ -36,6 +36,11 @@ import { ScannerApiError } from "./errors.js"
 import { ulid } from "./ids.js"
 import { isTerminal } from "./job-state.js"
 import {
+	liveAudioListen,
+	type ListenResult,
+	type ListenStrategy,
+} from "./listen.js"
+import {
 	JobRunner,
 	chooseLeaseHolder,
 	impactGrew,
@@ -141,6 +146,8 @@ export interface ScannerServiceDeps {
 	now?: () => number
 	engineHost?: "thread" | "inline"
 	transports?: readonly TransportStrategy[]
+	/** Default liveAudioListen; Task 46 passes the monitor strategy. */
+	listen?: ListenStrategy
 	cpuMeter?: {
 		start(): void
 		stop(): void
@@ -875,6 +882,31 @@ export class ScannerService extends EventEmitter {
 			.filter(f => f.startsWith("iq-") && f.endsWith(".cu8"))
 			.sort()
 		return iq.length > 0 ? join(dir, iq[iq.length - 1]!) : null
+	}
+
+	async listen(discoveryId: string): Promise<ListenResult> {
+		const discovery = this.store.get(discoveryId)
+		if (!discovery)
+			throw new ScannerApiError(
+				`Discovery ${discoveryId} not found`,
+				"SCANNER_DISCOVERY_NOT_FOUND",
+				404,
+			)
+		if (discovery.operator?.lockout) {
+			throw new ScannerApiError(
+				"The discovery is locked out",
+				"SCANNER_DISCOVERY_LOCKED_OUT",
+				409,
+			)
+		}
+		const sourceId = discovery.sourceIds[0]
+		const caps = sourceId ? this.deps.sources.getCaps(sourceId) : undefined
+		const strategy = this.deps.listen ?? liveAudioListen
+		return strategy(discovery, {
+			caps,
+			usableHalfSpanHz: caps ? (caps.sampleRate * USABLE_FRACTION) / 2 : 0,
+			liveDemod: this.deps.liveDemod,
+		})
 	}
 
 	// === engines ===
