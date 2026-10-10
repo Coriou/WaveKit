@@ -1,0 +1,520 @@
+/**
+ * Evidence store (spec § 6.5 Recording, § 8): probe recordings, PSD and IQ evidence, retention.
+ *
+ * Layout under the scanner storage dir: `recordings/dv/<discoveryId>/*.wav` (dsd-fme per-call WAVs
+ * moved in from a probe's `recordings/dv/probe-<probeId>/`), `recordings/analog/<discoveryId>/`
+ * (post-channelizer), `evidence/<discoveryId>/psd.json` and `iq-<ms>.cu8` (+ `.json` metadata).
+ * Retention deletes expired files first, then the oldest per category until under its cap; files
+ * from the last 10 s and files of `keep` discoveries are never deleted. Writes stop while free disk
+ * is below `minFreeDiskMb`.
+ */
+import { existsSync } from "node:fs"
+import {
+	copyFile,
+	mkdir,
+	readdir,
+	readFile,
+	realpath,
+	rename,
+	rm,
+	rmdir,
+	stat,
+	statfs,
+} from "node:fs/promises"
+import { join, relative, resolve } from "node:path"
+import { z } from "zod"
+import { RECORDING_IN_PROGRESS_MS } from "../../../decoders/builtin/call-recordings.js"
+import { WaveKitError } from "../../../utils/errors.js"
+import { createComponentLogger } from "../../../utils/logger.js"
+import type { Logger } from "../../../utils/logger.js"
+import { atomicWrite } from "./persistence.js"
+
+export interface StorageCaps {
+	maxRecordingsMb: number
+	maxEvidenceMb: number
+	maxAgeDays: number
+	minFreeDiskMb: number
+}
+
+/** `${discoveryId}~${fileName}`; the file lives in recordings/{dv,analog}/<discoveryId>/. */
+export const RECORDING_ID = /^(d_[0-9A-Za-z]+)~([A-Za-z0-9_.-]+\.wav)$/
+const DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
+/** `recordings/dv/probe-<probeId>/`: a live probe's recording folder (probes are never persisted). */
+const PROBE_DIR = /^probe-[0-9A-Za-z._-]+$/
+const EVIDENCE_NAME = /^(?:psd\.json|iq-\d+\.(?:cu8|json))$/
+/** dsd-fme close_and_rename_wav_file (call-recordings.ts, dsd-fme.ts searchForWavFile). */
+const CALL_WAV =
+	/^(\d{8})_(\d{6})_\d{5}_.+_(?:GROUP|PRIVATE|UNIT)_TGT_([^_]+)_SRC_([^_.]+)\.wav$/
+/** dsd-fme open_wav_file, left behind when the call is cut. */
+const TEMP_WAV = /^TEMP_(\d{8})_(\d{6})_[0-9A-F]{4}\.wav$/
+const RECORDING_KINDS = ["dv", "analog"] as const
+const MATCH_SLACK_MS = 2_000
+const MIB = 1024 * 1024
+const DAY_MS = 86_400_000
+
+export interface LinkCandidate {
+	observationId: string
+	discoveryId: string
+	talkgroup?: string
+	source?: string
+	startedAt: number
+	endedAt: number
+	encrypted: boolean
+}
+
+interface StoredFile {
+	path: string
+	rel: string
+	category: "recordings" | "evidence"
+	/** The discovery folder, or the `probe-*` folder for a probe's not-yet-linked files. */
+	discoveryId: string
+	/** In a live probe's folder: counted against the cap, never deleted (linking moves or drops it). */
+	probe: boolean
+	bytes: number
+	mtimeMs: number
+}
+
+const PsdFileSchema = z.object({ snrDb: z.number() }).passthrough()
+
+/** dsd-fme stamps are local time (dsd-fme.ts parseFilenameTimestamp). */
+function localStampMs(date: string, time: string): number | null {
+	const d = /^(\d{4})(\d{2})(\d{2})$/.exec(date)
+	const t = /^(\d{2})(\d{2})(\d{2})$/.exec(time)
+	if (d === null || t === null) return null
+	const ms = new Date(
+		Number(d[1]),
+		Number(d[2]) - 1,
+		Number(d[3]),
+		Number(t[1]),
+		Number(t[2]),
+		Number(t[3]),
+	).getTime()
+	return Number.isFinite(ms) ? ms : null
+}
+
+function nearestCandidate(
+	candidates: readonly LinkCandidate[],
+	at: number,
+	tg?: string,
+	src?: string,
+): LinkCandidate | undefined {
+	let best: LinkCandidate | undefined
+	let bestDiff = Number.POSITIVE_INFINITY
+	for (const c of candidates) {
+		if (at < c.startedAt - MATCH_SLACK_MS || at > c.endedAt + MATCH_SLACK_MS)
+			continue
+		if (tg !== undefined && c.talkgroup !== undefined && c.talkgroup !== tg)
+			continue
+		if (src !== undefined && c.source !== undefined && c.source !== src)
+			continue
+		const diff = Math.abs(at - c.startedAt)
+		if (diff < bestDiff) {
+			best = c
+			bestDiff = diff
+		}
+	}
+	return best
+}
+
+function errorCode(err: unknown): string | undefined {
+	if (err !== null && typeof err === "object" && "code" in err) {
+		const code = (err as { code: unknown }).code
+		return typeof code === "string" ? code : undefined
+	}
+	return undefined
+}
+
+async function listDir(dir: string): Promise<string[]> {
+	try {
+		return await readdir(dir)
+	} catch (err) {
+		if (errorCode(err) === "ENOENT" || errorCode(err) === "ENOTDIR") return []
+		throw err
+	}
+}
+
+/** `<dir>`, `<dir>/WAV`, `<dir>/wav` (as `findWavFileAsync`), deduplicated by real path; missing ones are skipped. */
+async function wavDirs(dir: string): Promise<string[]> {
+	const seen = new Set<string>()
+	const out: string[] = []
+	for (const d of [dir, join(dir, "WAV"), join(dir, "wav")]) {
+		let real: string
+		try {
+			real = await realpath(d)
+		} catch (err) {
+			if (errorCode(err) === "ENOENT" || errorCode(err) === "ENOTDIR") continue
+			throw err
+		}
+		if (seen.has(real)) continue
+		seen.add(real)
+		out.push(d)
+	}
+	return out
+}
+
+async function moveFile(from: string, to: string): Promise<void> {
+	try {
+		await rename(from, to)
+	} catch (err) {
+		if (errorCode(err) !== "EXDEV") throw err
+		await copyFile(from, to)
+		await rm(from, { force: true })
+	}
+}
+
+function assertDiscoveryId(id: string): void {
+	if (!DISCOVERY_ID.test(id))
+		throw new WaveKitError(`Invalid discovery id: ${id}`, "SCANNER_INVALID_ID")
+}
+
+async function defaultStatfs(p: string): Promise<{ freeBytes: number }> {
+	const s = await statfs(p)
+	return { freeBytes: s.bavail * s.bsize }
+}
+
+export class EvidenceStore {
+	private readonly root: string
+	private readonly log: Logger
+	private readonly now: () => number
+	private readonly statfs: (p: string) => Promise<{ freeBytes: number }>
+	private caps: StorageCaps
+
+	constructor(opts: {
+		dir: string
+		caps: StorageCaps
+		logger: Logger
+		now: () => number
+		statfs?: (p: string) => Promise<{ freeBytes: number }>
+	}) {
+		this.root = resolve(opts.dir)
+		this.caps = { ...opts.caps }
+		this.log = createComponentLogger(opts.logger, "EvidenceStore")
+		this.now = opts.now
+		this.statfs = opts.statfs ?? defaultStatfs
+	}
+
+	setCaps(caps: StorageCaps): void {
+		this.caps = { ...caps }
+	}
+
+	async linkProbeRecordings(
+		probeDir: string,
+		candidates: LinkCandidate[],
+	): Promise<{
+		linked: { observationId: string; recordingId: string }[]
+		cut: string[]
+		droppedEncrypted: string[]
+	}> {
+		for (const c of candidates) assertDiscoveryId(c.discoveryId)
+		const linked: { observationId: string; recordingId: string }[] = []
+		const cut: string[] = []
+		const droppedEncrypted: string[] = []
+		const low = (await this.diskState()) === "disk-low"
+		const files: { path: string; name: string }[] = []
+		// WAV and wav are one directory on case-insensitive disks (APFS, macOS bind mounts): list each real directory once
+		for (const dir of await wavDirs(probeDir))
+			for (const name of await listDir(dir))
+				if (name.endsWith(".wav")) files.push({ path: join(dir, name), name })
+		files.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+		try {
+			await this.linkFiles(files, candidates, low, {
+				linked,
+				cut,
+				droppedEncrypted,
+			})
+		} finally {
+			// never leave a probe folder behind, even when a move fails part-way
+			await rm(probeDir, { recursive: true, force: true })
+		}
+		if (files.length > 0)
+			this.log.debug(
+				{
+					probeDir,
+					files: files.length,
+					linked: linked.length,
+					cut: cut.length,
+					droppedEncrypted: droppedEncrypted.length,
+					low,
+				},
+				"Processed probe recordings",
+			)
+		return { linked, cut, droppedEncrypted }
+	}
+
+	/**
+	 * Probes are never persisted, so at start every `recordings/dv/probe-*` folder is a crash
+	 * leftover. Call once before the probe pool starts; returns the removed folder names.
+	 */
+	async removeOrphanProbeDirs(): Promise<string[]> {
+		const base = join(this.root, "recordings", "dv")
+		const removed: string[] = []
+		for (const name of await listDir(base)) {
+			if (!PROBE_DIR.test(name)) continue
+			await rm(join(base, name), { recursive: true, force: true })
+			removed.push(name)
+		}
+		if (removed.length > 0)
+			this.log.info(
+				{ removed: removed.length },
+				"Removed orphaned probe recording folders",
+			)
+		return removed
+	}
+
+	private async linkFiles(
+		files: readonly { path: string; name: string }[],
+		candidates: readonly LinkCandidate[],
+		low: boolean,
+		out: {
+			linked: { observationId: string; recordingId: string }[]
+			cut: string[]
+			droppedEncrypted: string[]
+		},
+	): Promise<void> {
+		const { linked, cut, droppedEncrypted } = out
+		for (const f of files) {
+			const temp = TEMP_WAV.exec(f.name)
+			if (temp !== null) {
+				const at = localStampMs(temp[1] ?? "", temp[2] ?? "")
+				const c = at === null ? undefined : nearestCandidate(candidates, at)
+				if (c !== undefined && !cut.includes(c.observationId))
+					cut.push(c.observationId)
+				await rm(f.path, { force: true })
+				continue
+			}
+			const call = CALL_WAV.exec(f.name)
+			const at =
+				call === null ? null : localStampMs(call[1] ?? "", call[2] ?? "")
+			const c =
+				call === null || at === null
+					? undefined
+					: nearestCandidate(candidates, at, call[3], call[4])
+			if (c === undefined || low) {
+				await rm(f.path, { force: true })
+				continue
+			}
+			if (c.encrypted) {
+				await rm(f.path, { force: true })
+				if (!droppedEncrypted.includes(c.observationId))
+					droppedEncrypted.push(c.observationId)
+				continue
+			}
+			const target = join(this.root, "recordings", "dv", c.discoveryId)
+			await mkdir(target, { recursive: true })
+			try {
+				await moveFile(f.path, join(target, f.name))
+			} catch (err) {
+				// already handled through another listing of the same directory
+				if (errorCode(err) === "ENOENT") continue
+				throw err
+			}
+			linked.push({
+				observationId: c.observationId,
+				recordingId: `${c.discoveryId}~${f.name}`,
+			})
+		}
+	}
+
+	async writePsd(
+		discoveryId: string,
+		psd: { startHz: number; binHz: number; bins: number[]; snrDb: number },
+	): Promise<boolean> {
+		assertDiscoveryId(discoveryId)
+		if ((await this.diskState()) === "disk-low") return false
+		const file = join(this.root, "evidence", discoveryId, "psd.json")
+		try {
+			const existing = PsdFileSchema.safeParse(
+				JSON.parse(await readFile(file, "utf8")) as unknown,
+			)
+			if (existing.success && existing.data.snrDb >= psd.snrDb) return false
+		} catch (err) {
+			if (errorCode(err) !== "ENOENT")
+				this.log.debug(
+					{ err, file },
+					"Replacing an unreadable PSD evidence file",
+				)
+		}
+		await atomicWrite(
+			file,
+			JSON.stringify({
+				version: 1,
+				savedAt: new Date(this.now()).toISOString(),
+				...psd,
+			}),
+		)
+		return true
+	}
+
+	async writeIq(
+		discoveryId: string,
+		bytes: Uint8Array,
+		meta: { sampleRateHz: number; centreHz: number },
+	): Promise<string | null> {
+		assertDiscoveryId(discoveryId)
+		if ((await this.diskState()) === "disk-low") return null
+		const at = this.now()
+		const limit = Math.max(2, Math.floor(meta.sampleRateHz) * 2)
+		const body = bytes.length > limit ? bytes.subarray(0, limit) : bytes
+		const dir = join(this.root, "evidence", discoveryId)
+		const name = `iq-${at}.cu8`
+		await atomicWrite(join(dir, name), body)
+		await atomicWrite(
+			join(dir, `iq-${at}.json`),
+			JSON.stringify({
+				version: 1,
+				sampleRateHz: meta.sampleRateHz,
+				centreHz: meta.centreHz,
+				savedAt: new Date(at).toISOString(),
+				bytes: body.length,
+			}),
+		)
+		return name
+	}
+
+	recordingPath(recordingId: string): string | null {
+		const m = RECORDING_ID.exec(recordingId)
+		const discoveryId = m?.[1]
+		const file = m?.[2]
+		if (discoveryId === undefined || file === undefined || file.includes(".."))
+			return null
+		for (const kind of RECORDING_KINDS) {
+			const path = join(this.root, "recordings", kind, discoveryId, file)
+			if (existsSync(path)) return path
+		}
+		return null
+	}
+
+	evidencePath(discoveryId: string, name: string): string | null {
+		if (!DISCOVERY_ID.test(discoveryId) || !EVIDENCE_NAME.test(name))
+			return null
+		const path = join(this.root, "evidence", discoveryId, name)
+		return existsSync(path) ? path : null
+	}
+
+	async removeDiscovery(discoveryId: string): Promise<void> {
+		assertDiscoveryId(discoveryId)
+		await rm(join(this.root, "evidence", discoveryId), {
+			recursive: true,
+			force: true,
+		})
+		for (const kind of RECORDING_KINDS)
+			await rm(join(this.root, "recordings", kind, discoveryId), {
+				recursive: true,
+				force: true,
+			})
+	}
+
+	async retention(
+		keepDiscoveryIds: ReadonlySet<string>,
+	): Promise<{ deleted: string[] }> {
+		const now = this.now()
+		const files = await this.collect()
+		const isProtected = (f: StoredFile): boolean =>
+			f.probe ||
+			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||
+			keepDiscoveryIds.has(f.discoveryId)
+		const byAge = [...files].sort(
+			(a, b) =>
+				a.mtimeMs - b.mtimeMs || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0),
+		)
+		const gone = new Set<string>()
+		const deleted: string[] = []
+		const remove = async (f: StoredFile): Promise<void> => {
+			await rm(f.path, { force: true })
+			gone.add(f.path)
+			deleted.push(f.rel)
+		}
+		const maxAgeMs = this.caps.maxAgeDays * DAY_MS
+		for (const f of byAge)
+			if (!isProtected(f) && now - f.mtimeMs > maxAgeMs) await remove(f)
+		const caps: [StoredFile["category"], number][] = [
+			["recordings", this.caps.maxRecordingsMb * MIB],
+			["evidence", this.caps.maxEvidenceMb * MIB],
+		]
+		for (const [category, capBytes] of caps) {
+			let total = 0
+			for (const f of files)
+				if (f.category === category && !gone.has(f.path)) total += f.bytes
+			for (const f of byAge) {
+				if (total <= capBytes) break
+				if (f.category !== category || gone.has(f.path) || isProtected(f))
+					continue
+				await remove(f)
+				total -= f.bytes
+			}
+		}
+		await this.removeEmptyDirs()
+		if (deleted.length > 0)
+			this.log.info(
+				{ deleted: deleted.length },
+				"Scanner retention removed files",
+			)
+		return { deleted }
+	}
+
+	async diskState(): Promise<"ok" | "disk-low"> {
+		try {
+			await mkdir(this.root, { recursive: true })
+			const { freeBytes } = await this.statfs(this.root)
+			return freeBytes < this.caps.minFreeDiskMb * MIB ? "disk-low" : "ok"
+		} catch (err) {
+			this.log.debug(
+				{ err, dir: this.root },
+				"Free-disk metric unavailable; treating the disk as ok",
+			)
+			return "ok"
+		}
+	}
+
+	private async collect(): Promise<StoredFile[]> {
+		const out: StoredFile[] = []
+		const scan = async (
+			base: string,
+			category: StoredFile["category"],
+		): Promise<void> => {
+			for (const discoveryId of await listDir(base)) {
+				const probe = category === "recordings" && PROBE_DIR.test(discoveryId)
+				if (!probe && !DISCOVERY_ID.test(discoveryId)) continue
+				const top = join(base, discoveryId)
+				// a probe's dsd-fme may write into WAV/ or wav/ (Task 17 linking); those bytes count against the cap too
+				for (const dir of probe ? await wavDirs(top) : [top])
+					for (const name of await listDir(dir)) {
+						const path = join(dir, name)
+						try {
+							const s = await stat(path)
+							if (s.isFile())
+								out.push({
+									path,
+									rel: relative(this.root, path),
+									category,
+									discoveryId,
+									probe,
+									bytes: s.size,
+									mtimeMs: s.mtimeMs,
+								})
+						} catch (err) {
+							if (errorCode(err) !== "ENOENT") throw err
+						}
+					}
+			}
+		}
+		for (const kind of RECORDING_KINDS)
+			await scan(join(this.root, "recordings", kind), "recordings")
+		await scan(join(this.root, "evidence"), "evidence")
+		return out
+	}
+
+	private async removeEmptyDirs(): Promise<void> {
+		const bases = [
+			...RECORDING_KINDS.map(k => join(this.root, "recordings", k)),
+			join(this.root, "evidence"),
+		]
+		for (const base of bases)
+			for (const discoveryId of await listDir(base)) {
+				if (!DISCOVERY_ID.test(discoveryId)) continue
+				const dir = join(base, discoveryId)
+				if ((await listDir(dir)).length === 0)
+					await rmdir(dir).catch(() => undefined)
+			}
+	}
+}
