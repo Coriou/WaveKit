@@ -15,6 +15,7 @@ import type {
 	Bandplan as BandplanDto,
 	ScanJob,
 	ScannerActivityEventData,
+	ScannerCapture,
 	ScannerDiscoveryEventData,
 	ScannerEngineStatus,
 	ScannerIdentifyRequest,
@@ -40,6 +41,11 @@ import {
 } from "./bandplan/index.js"
 import { classifySpectral, leakOrIntermod } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
+import {
+	CaptureRecorder,
+	type CaptureCloseInfo,
+} from "./evidence/capture-recorder.js"
+import { CaptureStore } from "./evidence/capture-store.js"
 import { ulid } from "./ids.js"
 import {
 	IDENTIFY_KEEP_JOBS,
@@ -276,6 +282,8 @@ export class ScannerService extends EventEmitter {
 	private readonly ambient: AmbientEvidence
 	/** Core spectrum service (engines, frames, occupancy); also served at /api/spectrum. */
 	readonly spectrum: SpectrumService
+	private readonly captures: CaptureStore
+	private readonly recorder: CaptureRecorder
 	private readonly jobs = new Map<string, JobRecord>()
 	private readonly drivers = new Map<string, JobDriver>()
 	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
@@ -383,6 +391,18 @@ export class ScannerService extends EventEmitter {
 		this.evidence = new EvidenceStore({
 			dir: this.storageDir,
 			caps: storageCaps(deps.settings),
+			logger: deps.logger,
+			now: this.now,
+		})
+		this.captures = new CaptureStore({
+			dir: join(this.storageDir, "captures"),
+			logger: deps.logger,
+			now: this.now,
+		})
+		this.recorder = new CaptureRecorder({
+			store: this.captures,
+			engines: sourceId => this.spectrum.engine(sourceId),
+			diskOk: () => this.disk === "ok",
 			logger: deps.logger,
 			now: this.now,
 		})
@@ -506,6 +526,11 @@ export class ScannerService extends EventEmitter {
 		this.spectrum.on("stream", this.onEngineStream)
 		this.spectrum.on("released", this.onEngineReleased)
 		await this.spectrum.start()
+		await this.captures
+			.init()
+			.catch((err: unknown) =>
+				this.log.warn({ err }, "Reading the burst captures failed"),
+			)
 		this.arbiter.on("lease-lost", this.onLeaseLost)
 		this.arbiter.on("source-down", this.onSourceDown)
 		this.arbiter.on("source-up", this.onSourceUp)
@@ -577,6 +602,7 @@ export class ScannerService extends EventEmitter {
 				)
 		this.ambient.stop()
 		this.deps.cpuMeter?.stop()
+		await this.recorder.stop()
 		await this.spectrum.stop()
 		this.spectrum.off("pipeline", this.onSpectrumPipeline)
 		this.spectrum.off("stream", this.onEngineStream)
@@ -809,6 +835,7 @@ export class ScannerService extends EventEmitter {
 			"revisit",
 			"record",
 			"protocols",
+			"capture",
 		]
 		const merged: ScanJobSpec = { ...toJobSpec(record.spec) }
 		for (const key of allowed)
@@ -1052,6 +1079,18 @@ export class ScannerService extends EventEmitter {
 		return iq.length > 0 ? join(dir, iq[iq.length - 1]!) : null
 	}
 
+	listCaptures(): ScannerCapture[] {
+		return this.captures.list()
+	}
+
+	capturePath(id: string, kind: "cu8" | "json"): string | null {
+		return this.captures.path(id, kind)
+	}
+
+	deleteCapture(id: string): Promise<boolean> {
+		return this.captures.delete(id)
+	}
+
 	async listen(discoveryId: string): Promise<ListenResult> {
 		const discovery = this.store.get(discoveryId)
 		if (!discovery)
@@ -1170,6 +1209,7 @@ export class ScannerService extends EventEmitter {
 			// § 6.2: in-window while no sweep lease holds the source (truncated segments → `edge`).
 			inWindow: this.arbiter.holder(sourceId) === undefined,
 		})
+		this.updateRing(sourceId)
 	}
 
 	private rastersAt(sourceId: string, hz: number) {
@@ -1190,6 +1230,7 @@ export class ScannerService extends EventEmitter {
 		const drivers = this.driversOn(sourceId)
 		switch (ev.kind) {
 			case "epoch-started":
+				this.recorder.epochChanged(sourceId, ev.epoch)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)
 					.catch((err: unknown) =>
@@ -1245,6 +1286,7 @@ export class ScannerService extends EventEmitter {
 			d.covers(sourceId, track.centreHz),
 		)
 		let live = this.live.get(track.trackId)
+		const opened = !live
 		if (!live) {
 			if (covering.length === 0) return
 			live = {
@@ -1268,6 +1310,8 @@ export class ScannerService extends EventEmitter {
 		}
 		for (const d of covering)
 			if (!live.jobIds.includes(d.record.id)) live.jobIds.push(d.record.id)
+		// After the job ids: the capture-enabled covering job decides (Task 34a).
+		if (opened) this.openCapture(live, track)
 		live.lastTrack = track
 		live.lastActivityAt = now
 		if (ev.kind !== "track-open")
@@ -1293,6 +1337,7 @@ export class ScannerService extends EventEmitter {
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
 		this.probes.trackClosed(track.trackId)
+		this.recorder.close(live.observationId, this.captureCloseInfo(live, track))
 		this.live.delete(track.trackId)
 		live.endedAt = now
 		this.recent.push(live)
@@ -1508,6 +1553,76 @@ export class ScannerService extends EventEmitter {
 		this.store.attachRecordings(observationId, recordingIds, state)
 	}
 
+	/** Task 34a: a burst capture for a new observation of a capture-enabled covering job. */
+	private openCapture(live: LiveObservation, track: TrackSnapshot): void {
+		const job = live.jobIds
+			.map(id => this.jobs.get(id))
+			.find(j => j?.spec.capture.enabled)
+		if (!job) return
+		const discovery = live.discoveryId
+			? this.store.get(live.discoveryId)
+			: undefined
+		if (discovery?.operator?.lockout) return
+		this.recorder.open({
+			observationId: live.observationId,
+			jobId: job.id,
+			sourceId: live.sourceId,
+			stream: track.stream,
+			epoch: track.epoch,
+			startSample: track.startSample,
+			targetHz: track.centreHz,
+			spec: job.spec.capture,
+		})
+	}
+
+	private captureCloseInfo(
+		live: LiveObservation,
+		track: TrackSnapshot,
+	): CaptureCloseInfo {
+		const d = live.discoveryId ? this.store.get(live.discoveryId) : undefined
+		const protocol =
+			d?.protocol ?? live.classification.hypotheses[0]?.protocol ?? "unknown"
+		const mode = probeModesFor(
+			d?.class ?? live.classification.class,
+			protocol === "unknown" ? [] : [protocol],
+		)[0]
+		return {
+			endSample: track.lastSample,
+			discoveryId: live.discoveryId,
+			protocol,
+			...(d?.identity ? { identity: d.identity } : {}),
+			metadata: {
+				talkgroups:
+					d?.metadata.talkgroups ?? (live.talkgroup ? [live.talkgroup] : []),
+				sources: d?.metadata.sources ?? (live.source ? [live.source] : []),
+				capcodes: d?.metadata.capcodes ?? [],
+				callsigns: d?.metadata.callsigns ?? [],
+				ismModels: d?.metadata.ismModels ?? [],
+			},
+			encrypted: d?.encrypted ?? live.encrypted,
+			tuningTrust: track.tuningTrust,
+			decoderType: mode?.decoderType ?? null,
+			decoderOptions: mode?.options ?? {},
+		}
+	}
+
+	/** Ring ≥ max(ringSeconds, preMs/1000 + 1) while a capture job is active on the source. */
+	private updateRing(sourceId: string): void {
+		const engine = this.spectrum.engine(sourceId)
+		if (!engine) return
+		const capturing = [...this.jobs.values()].filter(
+			j =>
+				j.spec.sourceId === sourceId &&
+				!isTerminal(j.state) &&
+				j.spec.capture.enabled,
+		)
+		const preMs = capturing.reduce(
+			(max, j) => Math.max(max, j.spec.capture.preMs),
+			0,
+		)
+		engine.setRingSeconds(capturing.length > 0 ? preMs / 1000 + 1 : 0)
+	}
+
 	private emitActivity(
 		live: LiveObservation,
 		track: TrackSnapshot,
@@ -1583,6 +1698,7 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return
 		live.decoded = true
+		this.recorder.decoded(live.observationId)
 		this.lastConfirm.set(survivor, this.now())
 		if (!wasDecoded) this.updateFrequencyError(live.sourceId, { rekey: true })
 	}
@@ -2770,6 +2886,11 @@ export class ScannerService extends EventEmitter {
 		await this.evidence
 			.retention(keep)
 			.catch((err: unknown) => this.log.warn({ err }, "Retention failed"))
+		await this.captures
+			.retention(s.storage.maxCapturesMb * 1024 * 1024)
+			.catch((err: unknown) =>
+				this.log.warn({ err }, "Capture retention failed"),
+			)
 		if (this.stateLoaded) {
 			await this.persistence
 				.pruneJournal({

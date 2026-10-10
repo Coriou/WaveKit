@@ -31,8 +31,10 @@ import type {
 	ScannerProtocol,
 } from "../../core/scanner/types.js"
 import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
+import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import {
+	captureIdParamsSchema,
 	discoveryIdParamsSchema,
 	discoveryPatchSchema,
 	discoveryQuerySchema,
@@ -69,6 +71,9 @@ export type ScannerRouteService = Pick<
 	| "evidencePath"
 	| "listen"
 	| "identify"
+	| "listCaptures"
+	| "capturePath"
+	| "deleteCapture"
 >
 
 export interface ScannerRoutesOptions {
@@ -577,6 +582,58 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			},
 		)
 	}
+
+	fastify.get(
+		"/api/scanner/captures",
+		{ schema: { tags, summary: "Burst IQ captures (newest first)" } },
+		async () => scanner.listCaptures(),
+	)
+
+	fastify.get<{ Params: { file: string } }>(
+		"/api/scanner/captures/:file",
+		{
+			schema: {
+				tags,
+				summary: "Download <id>.cu8 or its manifest entry <id>.json",
+				response: { 404: errorResponseSchema },
+			},
+		},
+		async (request, reply) => {
+			const { file } = request.params
+			const dot = file.lastIndexOf(".")
+			const id = file.slice(0, dot)
+			const kind = file.slice(dot + 1)
+			// Malformed ids never reach the filesystem lookup.
+			const path =
+				dot > 0 && CAPTURE_ID.test(id) && (kind === "cu8" || kind === "json")
+					? scanner.capturePath(id, kind)
+					: null
+			if (!path) return notFound(reply, "Capture file", file)
+			const stream = createReadStream(path)
+			stream.on("error", (err: Error) =>
+				request.log.warn({ err }, "Capture stream error"),
+			)
+			return reply
+				.type(kind === "cu8" ? "application/octet-stream" : "application/json")
+				.send(stream)
+		},
+	)
+
+	fastify.delete<{ Params: { id: string } }>(
+		"/api/scanner/captures/:id",
+		{
+			schema: {
+				tags,
+				summary: "Delete a capture",
+				params: captureIdParamsSchema,
+				response: { 404: errorResponseSchema },
+			},
+		},
+		async (request, reply) =>
+			(await scanner.deleteCapture(request.params.id))
+				? reply.code(204).send()
+				: notFound(reply, "Capture", request.params.id),
+	)
 
 	fastify.post<{ Params: { id: string } }>(
 		"/api/scanner/discoveries/:id/listen",

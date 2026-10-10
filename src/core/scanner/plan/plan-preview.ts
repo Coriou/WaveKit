@@ -22,6 +22,7 @@ import type {
 } from "../types.js"
 import { CPU_COST, probeCores } from "./cost.js"
 import { describeHop, planHops } from "./hop-planner.js"
+import { normaliseCapture } from "../evidence/capture-spec.js"
 import type { HopPlanInput } from "./hop-planner.js"
 
 /**
@@ -624,6 +625,7 @@ export function normaliseSpec(
 	pv("resume.autoAfterIdleMs", spec.resume?.autoAfterIdleMs !== undefined)
 	pv("txDurationHintMs", spec.txDurationHintMs !== undefined)
 	pv("kind", spec.kind !== undefined)
+	pv("capture", spec.capture !== undefined)
 
 	const n: NormalisedJobSpec = {
 		sourceId: source.id,
@@ -673,6 +675,7 @@ export function normaliseSpec(
 			onBoot: spec.resume?.onBoot ?? false,
 		},
 		txDurationHintMs: spec.txDurationHintMs ?? DEFAULT_TX_HINT_MS,
+		capture: normaliseCapture(spec.capture),
 		provenance: prov,
 	}
 	return { spec: n, source, issues }
@@ -932,6 +935,7 @@ export function toJobSpec(n: NormalisedJobSpec): ScanJobSpec {
 			onBoot: n.resume.onBoot,
 		},
 		txDurationHintMs: n.txDurationHintMs,
+		capture: { ...n.capture },
 	}
 	if (uniform && out.hold && first !== undefined) out.hold.confirmHoldMs = first
 	if (n.revisit.maxIntervalMs !== null && out.revisit)

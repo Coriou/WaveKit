@@ -41,6 +41,7 @@ import type {
 	SchemaMatches,
 } from "../../spectrum/types.js"
 import { EngineStateSchema } from "../../spectrum/engine-state.js"
+import { DEFAULT_CAPTURE } from "../evidence/capture-spec.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
 import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
 import type { OccupancyState } from "../../spectrum/occupancy.js"
@@ -177,6 +178,17 @@ export const NormalisedJobSpecSchema = z.object({
 		onBoot: z.boolean(),
 	}),
 	txDurationHintMs: z.number().nonnegative(),
+	// Jobs persisted before Task 34a carry no capture option and load with the default (off)
+	capture: z
+		.object({
+			enabled: z.boolean(),
+			mode: z.enum(["wideband", "channel"]),
+			preMs: z.number().int().min(0).max(5000),
+			postMs: z.number().int().min(0).max(10_000),
+			onlyDecoded: z.boolean(),
+			maxPerHour: z.number().int().min(1).max(60),
+		})
+		.default(() => ({ ...DEFAULT_CAPTURE })),
 	provenance: z.record(
 		z.enum(["operator", "bandplan", "measured", "config", "default"]),
 	),

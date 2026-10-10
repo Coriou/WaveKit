@@ -362,6 +362,17 @@ export interface ScanJobSpec {
 	/** For POI warnings; default 5000. */
 	txDurationHintMs?: number
 	monitor?: MonitorSpec
+	/** Burst IQ capture (Task 34a); default off. */
+	capture?: Partial<CaptureSpec> & { enabled: boolean }
+}
+
+export interface CaptureSpec {
+	enabled: boolean
+	mode: "wideband" | "channel"
+	preMs: number
+	postMs: number
+	onlyDecoded: boolean
+	maxPerHour: number
 }
 
 export interface NormalisedJobSpec extends Required<
@@ -401,6 +412,7 @@ export interface NormalisedJobSpec extends Required<
 	takeover: boolean
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
+	capture: CaptureSpec
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.

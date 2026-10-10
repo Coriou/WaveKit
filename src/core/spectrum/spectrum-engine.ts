@@ -263,6 +263,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	> | null = null
 	private branch: Readable | null = null
 	private ring: IqRing | null = null
+	/** The ring's sample rate and capacity (samples), set with the ring. */
+	private ringRateHz = 0
+	private ringCapacity = 0
+	/** Floor on the ring length from setRingSeconds (burst capture pre-roll); 0 = settings only. */
+	private ringSecondsMin = 0
 	private bps = 2
 	private fmt: IqFormat = "U8_IQ"
 	private running = false
@@ -524,6 +529,34 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return () => this.taps.delete(listener)
 	}
 
+	/**
+	 * Keeps at least `seconds` of IQ (burst capture pre-roll; 0 = the `ringSeconds` setting only).
+	 * Resizes the current ring in place, keeping its newest contiguous samples.
+	 */
+	setRingSeconds(seconds: number): void {
+		this.ringSecondsMin = seconds
+		if (!this.ring || this.ringRateHz === 0) return
+		const capacity = Math.max(
+			1,
+			Math.round(
+				Math.max(this.deps.settings().ringSeconds, seconds) * this.ringRateHz,
+			),
+		)
+		if (capacity === this.ringCapacity) return
+		const newest = this.ring.newestSample
+		const next = new IqRing({
+			bytesPerSample: this.bps,
+			capacitySamples: capacity,
+		})
+		const keep = this.ring.read(
+			Math.max(this.ring.oldestSample, newest - capacity),
+			newest,
+		)
+		if (keep) next.write(keep.startSample, keep.bytes)
+		this.ring = next
+		this.ringCapacity = capacity
+	}
+
 	setMasks(masks: EngineMasks): void {
 		this.masks = masks
 		this.send({ kind: "masks", ...masks })
@@ -664,10 +697,15 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.skipBytes = 0
 		// The old stream's pendingMeta stays until this stream's own epoch-started (onEvents).
 		this.externalPending = null
-		const ringSeconds = this.deps.settings().ringSeconds
+		const ringSeconds = Math.max(
+			this.deps.settings().ringSeconds,
+			this.ringSecondsMin,
+		)
+		this.ringRateHz = sampleRateHz
+		this.ringCapacity = Math.max(1, Math.round(ringSeconds * sampleRateHz))
 		this.ring = new IqRing({
 			bytesPerSample: this.bps,
-			capacitySamples: Math.max(1, Math.round(ringSeconds * sampleRateHz)),
+			capacitySamples: this.ringCapacity,
 		})
 		const gainKey = gainKeyOf(this.deps.tuner?.getState(this.sourceId))
 		this.lastEpoch += 1

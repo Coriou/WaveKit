@@ -3,6 +3,7 @@ import type {
 	HopPlan,
 	NormalisedJobSpec,
 } from "../../../src/core/scanner/types.js"
+import { DEFAULT_CAPTURE } from "../../../src/core/scanner/evidence/capture-spec.js"
 
 export function makeNormalisedSpec(
 	patch: Partial<NormalisedJobSpec> = {},
@@ -47,6 +48,7 @@ export function makeNormalisedSpec(
 		takeover: true,
 		resume: { autoAfterIdleMs: 60_000, onBoot: false },
 		txDurationHintMs: 5_000,
+		capture: { ...DEFAULT_CAPTURE },
 		provenance: { dwellMs: "default" },
 		...patch,
 	}

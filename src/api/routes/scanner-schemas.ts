@@ -1,5 +1,6 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
 import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
+import { CAPTURE_ID } from "../../core/scanner/evidence/capture-store.js"
 
 const protocolEnum = [
 	"analog-fm",
@@ -179,6 +180,19 @@ export const scanJobSpecSchema = {
 		},
 		txDurationHintMs: { type: "integer", minimum: 100, maximum: 600000 },
 		monitor: looseObjectSchema,
+		capture: {
+			type: "object",
+			properties: {
+				enabled: { type: "boolean" },
+				mode: { type: "string", enum: ["wideband", "channel"] },
+				preMs: { type: "integer", minimum: 0, maximum: 5000 },
+				postMs: { type: "integer", minimum: 0, maximum: 10000 },
+				onlyDecoded: { type: "boolean" },
+				maxPerHour: { type: "integer", minimum: 1, maximum: 60 },
+			},
+			required: ["enabled"],
+			additionalProperties: false,
+		},
 	},
 	additionalProperties: false,
 } as const
@@ -194,6 +208,15 @@ export const discoveryIdParamsSchema = {
 	type: "object",
 	properties: {
 		id: { type: "string", maxLength: 64, pattern: DISCOVERY_ID.source },
+	},
+	required: ["id"],
+} as const
+
+/** A burst capture id (Task 34a): it reaches the filesystem, so it matches the store's pattern. */
+export const captureIdParamsSchema = {
+	type: "object",
+	properties: {
+		id: { type: "string", maxLength: 64, pattern: CAPTURE_ID.source },
 	},
 	required: ["id"],
 } as const

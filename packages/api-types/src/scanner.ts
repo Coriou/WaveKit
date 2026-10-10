@@ -281,6 +281,16 @@ export interface ScanJobSpec {
 	resume?: { autoAfterIdleMs?: number | null; onBoot?: boolean }
 	txDurationHintMs?: number
 	monitor?: MonitorSpec
+	capture?: Partial<CaptureSpec> & { enabled: boolean }
+}
+
+export interface CaptureSpec {
+	enabled: boolean
+	mode: "wideband" | "channel"
+	preMs: number
+	postMs: number
+	onlyDecoded: boolean
+	maxPerHour: number
 }
 
 export interface NormalisedJobSpec {
@@ -320,6 +330,7 @@ export interface NormalisedJobSpec {
 	takeover: boolean
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
+	capture: CaptureSpec
 	/**
 	 * Field key → where its value came from:
 	 * - `operator`: set in the job spec.
@@ -694,4 +705,34 @@ export interface ScannerMonitorEventData {
 	slot?: number
 	encrypted: boolean
 	active: boolean
+}
+
+/** A burst IQ capture (Task 34a): the scanner extras beside its manifest v2 entry. */
+export interface ScannerCapture {
+	id: string
+	createdAt: string
+	jobId: string
+	sourceId: string
+	observationId: string
+	discoveryId: string | null
+	mode: "wideband" | "channel"
+	role: "channelizer-golden" | "tail-golden"
+	protocol: ScannerProtocol
+	identity?: { kind: IdentityKind; value: string }
+	decoded: boolean
+	encrypted: boolean
+	tuningTrust: TuningTrust
+	sampleRateHz: number
+	centreHz: number
+	targetHz: number
+	stream: number
+	epoch: number
+	/** Input sample range [startSample, endSample) of the source stream. */
+	startSample: number
+	endSample: number
+	preRollClippedMs: number
+	postTruncated: boolean
+	durationS: number
+	bytes: number
+	files: { iq: string; manifest: string }
 }
