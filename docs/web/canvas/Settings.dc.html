@@ -21,22 +21,50 @@ body{margin:0;background:#0b1512}
 .wk-s .wk-field{border:1px solid rgba(123,236,199,.18);transition:border-color .15s}
 .wk-s .wk-field:hover{border-color:rgba(123,236,199,.32)}
 .wk-s .wk-field:focus{border-color:rgba(123,236,199,.55);outline:none}
-.wk-s .wk-field::placeholder{color:#52645d}
+.wk-s .wk-field::placeholder{color:#758b81}
 .wk-s .wk-bad,.wk-s .wk-bad:hover,.wk-s .wk-bad:focus{border-color:rgba(255,122,107,.55)}
-.wk-s select{appearance:none;-webkit-appearance:none}
+.wk-s select{appearance:none;-webkit-appearance:none;text-overflow:ellipsis}
 .wk-s select option{background:#111c19;color:#f4f7f5}
-.wk-s .wk-reset,.wk-s .wk-more{opacity:0;transition:opacity .15s}
+.wk-s ::selection{background:rgba(123,236,199,.28);color:#f4f7f5}
+.wk-s input{caret-color:#7becc7}
+.wk-s .wk-reset,.wk-s .wk-more{opacity:0;transition:opacity .15s,color .15s}
 .wk-s .wk-row:hover .wk-reset,.wk-s .wk-row:focus-within .wk-reset,.wk-s .wk-row:hover .wk-more,.wk-s .wk-row:focus-within .wk-more,.wk-s .wk-more[aria-expanded="true"],.wk-s .wk-reset:focus-visible,.wk-s .wk-more:focus-visible{opacity:1}
+.wk-s .wk-reset:hover{color:#7becc7;text-decoration:underline;text-underline-offset:2px}
 .wk-s .wk-rail:hover{background:rgba(123,236,199,.06);color:#f4f7f5}
-.wk-s .wk-scroll{scrollbar-width:thin;scrollbar-color:#2c443b transparent}
+.wk-s .wk-rail[aria-current="true"]:hover{background:#192b24;color:#7becc7}
+.wk-s .wk-scroll{scrollbar-width:thin;scrollbar-color:rgba(123,236,199,.18) transparent}
 .wk-s .wk-scroll:focus-visible{outline-offset:-2px}
-.wk-s input[type=range]{accent-color:#7becc7}
+.wk-s input[type=range]{accent-color:#7becc7;height:28px;cursor:ew-resize}
+.wk-s .wk-amb:hover{background:rgba(242,184,75,.12)}
+.wk-s .wk-out:hover{border-color:rgba(123,236,199,.32);background:rgba(123,236,199,.06)}
 .wk-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.wk-rg{display:grid;grid-template-columns:minmax(0,1fr) auto 28px;column-gap:10px;align-items:center}
+.wk-rg>.wk-lab{grid-column:1;grid-row:1;min-width:0}
+.wk-rg>.wk-ctl{grid-column:2;grid-row:1;justify-self:end;display:flex;align-items:center;min-width:0}
+.wk-rg>.wk-more{grid-column:3;grid-row:1;justify-self:end}
+.wk-rg>.wk-note{grid-column:1/3;grid-row:2;margin-top:8px}
+.wk-rg.is-wide>.wk-ctl{grid-column:1/3;grid-row:2;justify-self:stretch;margin-top:10px}
+.wk-rg.is-wide>.wk-more{align-self:start;margin-top:-6px}
+.wk-rg.is-wide>.wk-note{grid-row:3}
+.wk-seg{display:inline-flex;gap:2px;padding:3px;border-radius:6px;background:#0b1512;border:1px solid rgba(123,236,199,.08)}
+.wk-seg>button{height:28px;padding:0 10px;border-radius:4px;font-size:12.5px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;transition:background .15s,color .15s}
+.wk-seg>button[aria-checked="false"]:hover{color:#f4f7f5}
+.is-wide .wk-seg{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr)}
+.is-wide .wk-seg>button{padding:0 6px;overflow:hidden;text-overflow:ellipsis}
+.wk-phone .wk-rg{grid-template-columns:minmax(0,1fr) auto 36px}
+.wk-phone .wk-seg>button{height:36px}
+.wk-phone .wk-stepb{width:44px !important;height:40px !important}
+.wk-phone .wk-rg>.wk-more{height:44px !important;width:36px !important}
+.wk-phone select{max-width:156px !important;height:40px !important}
+.wk-phone .wk-tall{height:40px !important}
+@keyframes wkrise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+@keyframes wktoast{from{opacity:0;transform:translate(-50%,6px)}to{opacity:1;transform:translate(-50%,0)}}
+.wk-rise{animation:wkrise .22s cubic-bezier(.16,1,.3,1)}
 @media (hover:none){.wk-s .wk-reset,.wk-s .wk-more{opacity:1}}
-@media (prefers-reduced-motion:reduce){.wk-s *{transition:none !important}}
+@media (prefers-reduced-motion:reduce){.wk-s *{transition:none !important;animation:none !important}}
 </style>
 </helmet>
-<div class="wk-s" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{radius}}; overflow: hidden; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-s {{rootClass}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{radius}}; overflow: hidden; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px {{headPad}}">
 		<sc-if value="{{hasBack}}" hint-placeholder-val="{{false}}">
@@ -75,7 +103,7 @@ body{margin:0;background:#0b1512}
 						<button onClick="{{t.remove}}" aria-label="Remove filter {{t.label}}" style="width: 24px; height: 24px; border-radius: 4px; color: #7becc7; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 					</span>
 				</sc-for>
-				<input id="{{searchId}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onSearchKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search settings" placeholder="Search settings · squelch, ppm, retention…" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 140px; height: 32px; border: 0; outline: none; background: transparent; color: #f4f7f5; font: inherit; font-size: 14px">
+				<input id="{{searchId}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onSearchKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search settings" placeholder="{{ph}}" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 140px; height: 32px; border: 0; outline: none; background: transparent; color: #f4f7f5; font: inherit; font-size: 14px">
 			</div>
 		</div>
 	</sc-if>
@@ -87,7 +115,7 @@ body{margin:0;background:#0b1512}
 					<button class="wk-rail" onClick="{{g.pick}}" aria-current="{{g.current}}" style="height: 36px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 9px; text-align: left; font-size: 13px; font-weight: {{g.weight}}; color: {{g.fg}}; background: {{g.bg}}">
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{g.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.short}}</span>
-						<sc-if value="{{g.hasDot}}" hint-placeholder-val="{{false}}"><span aria-label="{{g.dotLabel}}" style="width: 6px; height: 6px; border-radius: 50%; background: {{g.dotC}}; flex: none"></span></sc-if>
+						<sc-if value="{{g.hasDot}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{g.dotC}}; flex: none"></span><span class="wk-sr">{{g.dotLabel}}</span></sc-if>
 					</button>
 				</sc-for>
 			</nav>
@@ -97,161 +125,182 @@ body{margin:0;background:#0b1512}
 			<sc-for list="{{items}}" as="r" hint-placeholder-count="6">
 
 				<sc-if value="{{r.isH}}" hint-placeholder-val="{{false}}">
-					<div id="{{r.domId}}" style="padding: {{r.pad}} 6px 6px 10px">
-						<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .02em; color: #f4f7f5">{{r.label}}</h3>
-						<div style="margin-top: 2px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+					<div id="{{r.domId}}" style="margin-top: {{r.mt}}; padding: {{r.pt}} 4px 10px 16px; border-top: 1px solid {{r.line}}">
+						<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; line-height: 24px; letter-spacing: .02em; color: #f4f7f5">{{r.label}}</h3>
+						<div style="margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: #8ba598">{{r.desc}}</div>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isDesc}}" hint-placeholder-val="{{false}}">
-					<div style="padding: 2px 10px 8px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+					<div style="padding: 2px 16px 10px; font-size: 12.5px; line-height: 1.45; color: #8ba598">{{r.desc}}</div>
 				</sc-if>
 
 				<sc-if value="{{r.isCount}}" hint-placeholder-val="{{false}}">
-					<div role="status" style="padding: 4px 10px 6px; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.text}}</div>
+					<div role="status" style="padding: 6px 16px 8px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598; font-variant-numeric: tabular-nums">{{r.text}}</div>
 				</sc-if>
 
 				<sc-if value="{{r.isFs}}" hint-placeholder-val="{{false}}">
-					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px; border-radius: 8px; text-align: left; font-size: 13.5px">
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z"></path></svg>
-						<span style="flex: 1">Show <b>{{r.label}}</b></span>
+					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 10px; min-height: 44px; margin-bottom: 2px; padding: 0 12px 0 16px; border-radius: 8px; text-align: left; font-size: 13.5px; color: #b9cac1">
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z"></path></svg>
+						<span style="flex: 1; min-width: 0">Show only <b style="color: #f4f7f5">{{r.label}}</b></span>
 						<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.count}}</span>
+						<kbd aria-hidden="true" style="font: inherit; font-size: 11px; padding: 1px 5px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); color: #8ba598; display: {{r.kbdDisplay}}">↵</kbd>
 					</button>
 				</sc-if>
 
 				<sc-if value="{{r.isEmpty}}" hint-placeholder-val="{{false}}">
-					<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 56px 24px 0">
-						<span style="font-weight: 700; color: #b9cac1">No setting matches “{{r.q}}”</span>
+					<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px; padding: 64px 24px 0">
+						<span style="font-weight: 700; color: #f4f7f5">Nothing matches “{{r.q}}”</span>
 						<span style="font-size: 13px; color: #8ba598; line-height: 1.5; max-width: 300px">Search looks in names, descriptions and values. Commands such as Tune or Record are in <kbd style="font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); color: #b9cac1">⌘K</kbd>.</span>
-						<button onClick="{{r.clear}}" style="margin-top: 4px; height: 34px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Clear search</button>
+						<button class="wk-out" onClick="{{r.clear}}" style="margin-top: 8px; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Clear search</button>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isSub}}" hint-placeholder-val="{{false}}">
-					<div style="margin: 18px 0 4px; padding: 12px 10px 0; border-top: 1px solid rgba(123,236,199,.08)">
-						<div style="display: flex; align-items: center; gap: 8px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">
+					<div style="margin: 14px 0 2px; padding: 16px 4px 6px 16px; border-top: 1px solid rgba(123,236,199,.08)">
+						<div style="display: flex; align-items: center; gap: 8px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #b9cac1">
 							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-10z"></path><path d="M7 20h10"></path><path d="M9 16v4"></path><path d="M15 16v4"></path></svg>{{r.label}}
 						</div>
-						<div style="margin-top: 3px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+						<div style="margin-top: 4px; font-size: 12.5px; line-height: 1.45; color: #8ba598">{{r.desc}}</div>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isMeter}}" hint-placeholder-val="{{false}}">
-					<div style="margin: 4px 0 8px; padding: 14px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid {{r.edge}}">
-						<div style="display: flex; align-items: baseline; gap: 8px">
+					<div style="margin: 2px 4px 10px; padding: 14px 12px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid {{r.edge}}">
+						<div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap">
 							<span style="font-weight: 700">{{r.head}}</span>
 							<span style="flex: 1"></span>
 							<span style="font-size: 12.5px; color: {{r.freeC}}; font-variant-numeric: tabular-nums">{{r.free}}</span>
 						</div>
-						<div role="img" aria-label="{{r.aria}}" style="display: flex; gap: 2px; height: 8px; margin-top: 10px; border-radius: 3px; overflow: hidden; background: #22362f">
-							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="width: {{s.w}}%; background: {{s.c}}"></span></sc-for>
+						<div role="img" aria-label="{{r.aria}}" style="display: flex; gap: 2px; height: 8px; margin-top: 12px; border-radius: 3px; overflow: hidden; background: #22362f">
+							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="width: {{s.w}}%; min-width: {{s.minW}}; background: {{s.c}}"></span></sc-for>
 						</div>
 						<div style="display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums">
-							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 2px; background: {{s.c}}"></span>{{s.label}}</span></sc-for>
+							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 2px; background: {{s.c}}; box-shadow: {{s.ring}}"></span>{{s.label}}</span></sc-for>
 						</div>
 						<sc-if value="{{r.low}}" hint-placeholder-val="{{false}}">
-							<div style="margin-top: 10px; font-size: 12.5px; color: #f2b84b">{{r.lowText}}</div>
+							<div style="margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(242,184,75,.14); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; line-height: 1.45; color: #f7dca4">
+								<span style="flex: 1 1 200px; min-width: 0">{{r.lowText}}</span>
+								<button class="wk-ghost" onClick="{{r.toCap}}" style="flex: none; height: 30px; padding: 0 10px; border-radius: 6px; color: #f2b84b; font-size: 12.5px; font-weight: 700">Change the limit</button>
+							</div>
 						</sc-if>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isTiles}}" hint-placeholder-val="{{false}}">
-					<div style="margin: 4px 0 8px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 12px 12px 14px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid rgba(123,236,199,.08)">
+					<div style="margin: 2px 4px 10px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid rgba(123,236,199,.08)">
 						<span style="width: 36px; height: 36px; flex: none; border-radius: 6px; background: rgba(123,236,199,.10); display: grid; place-items: center">
 							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13"></path><path d="M9 4v13"></path><path d="M15 7v13"></path></svg>
 						</span>
-						<span style="flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+						<span style="flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
 							<span style="font-weight: 700">Offline map · Brittany and the Channel</span>
 							<span style="font-size: 12.5px; color: #8ba598; font-variant-numeric: tabular-nums">400 km around the station · 412 MB · updated 12 Sep</span>
 						</span>
-						<span style="display: flex; gap: 6px; margin-left: auto">
-							<button onClick="{{r.update}}" style="height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Update</button>
-							<button class="wk-ghost" onClick="{{r.remove}}" style="height: 32px; padding: 0 10px; border-radius: 6px; color: #b9cac1; font-size: 13px">Remove</button>
+						<span style="display: flex; gap: 4px; margin-left: auto">
+							<button class="wk-out wk-tall" onClick="{{r.update}}" style="height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Update</button>
+							<button class="wk-ghost wk-tall" onClick="{{r.remove}}" style="height: 32px; padding: 0 10px; border-radius: 6px; color: #b9cac1; font-size: 13px">Remove</button>
 						</span>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isGlink}}" hint-placeholder-val="{{false}}">
-					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 8px 8px 10px; border-radius: 8px; text-align: left; border-bottom: 1px solid rgba(123,236,199,.08)">
-						<span style="width: 32px; height: 32px; flex: none; border-radius: 6px; background: #192b24; display: grid; place-items: center; color: #7becc7">
+					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 60px; margin-bottom: 2px; padding: 8px 12px 8px 12px; border-radius: 8px; text-align: left">
+						<span style="width: 34px; height: 34px; flex: none; border-radius: 6px; background: #192b24; display: grid; place-items: center; color: #7becc7">
 							<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						</span>
-						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
 							<span style="font-weight: 700">{{r.label}}</span>
 							<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.summary}}</span>
 						</span>
-						<sc-if value="{{r.hasDot}}" hint-placeholder-val="{{false}}"><span aria-label="{{r.dotLabel}}" style="width: 7px; height: 7px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span></sc-if>
-						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#52645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg>
+						<sc-if value="{{r.hasDot}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 7px; height: 7px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span><span class="wk-sr">{{r.dotLabel}}</span></sc-if>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#758b81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
 					</button>
 				</sc-if>
 
 				<sc-if value="{{r.isDec}}" hint-placeholder-val="{{false}}">
-					<div class="wk-row" style="display: flex; align-items: center; gap: 4px; margin-bottom: 2px; border-radius: 8px">
-						<button onClick="{{r.open}}" aria-label="{{r.name}} settings" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 9px 4px 9px 10px; border-radius: 8px; text-align: left">
+					<div class="wk-row" style="display: flex; align-items: center; gap: 2px; margin-bottom: 2px; padding-right: 4px; border-radius: 8px">
+						<button onClick="{{r.open}}" aria-label="{{r.name}} settings · {{r.line}}" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 4px 8px 12px; border-radius: 8px; text-align: left">
 							<span style="width: 32px; height: 32px; flex: none; border-radius: 6px; background: {{r.tileBg}}; display: grid; place-items: center; color: {{r.tileFg}}">
 								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 							</span>
-							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
-								<span style="display: flex; align-items: baseline; gap: 8px; min-width: 0"><span style="font-weight: 700; white-space: nowrap">{{r.name}}</span><span style="font-size: 12px; color: #52645d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.tool}}</span></span>
-								<span style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span><span style="color: {{r.statC}}; overflow: hidden; text-overflow: ellipsis">{{r.line}}</span></span>
+							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+								<span style="display: flex; align-items: baseline; gap: 8px; min-width: 0"><span style="font-weight: 700; white-space: nowrap">{{r.name}}</span><span style="font-size: 12px; color: #758b81; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.tool}}</span></span>
+								<span style="display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 12.5px; white-space: nowrap; font-variant-numeric: tabular-nums"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span><span style="color: {{r.statC}}; overflow: hidden; text-overflow: ellipsis">{{r.line}}</span></span>
 							</span>
-							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#52645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#758b81" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
 						</button>
-						<button role="switch" aria-checked="{{r.on}}" aria-label="{{r.name}} enabled" onClick="{{r.toggle}}" style="flex: none; width: 52px; height: 44px; display: grid; place-items: center; border-radius: 6px">
-							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span></span>
+						<span aria-hidden="true" style="width: 1px; height: 24px; background: rgba(123,236,199,.08); flex: none"></span>
+						<button role="switch" aria-checked="{{r.on}}" aria-label="{{r.name}} on" onClick="{{r.toggle}}" style="flex: none; width: 52px; height: 44px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
 						</button>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isDecHead}}" hint-placeholder-val="{{false}}">
-					<div style="display: flex; align-items: center; gap: 12px; padding: 4px 10px 14px">
+					<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px; padding: 6px 4px 16px 16px; border-bottom: 1px solid rgba(123,236,199,.08)">
 						<span style="width: 40px; height: 40px; flex: none; border-radius: 6px; background: {{r.tileBg}}; display: grid; place-items: center; color: {{r.tileFg}}">
 							<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						</span>
-						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
-							<span style="font-size: 12.5px; color: #8ba598">{{r.tool}} · {{r.where}}</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.tool}}</span>
+							<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.where}}</span>
 						</span>
-						<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 4px; background: {{r.pillBg}}; color: {{r.pillFg}}; font-size: 12px; font-weight: 700; white-space: nowrap"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{r.stateLabel}}</span>
+						<span style="display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border-radius: 4px; background: {{r.pillBg}}; color: {{r.pillFg}}; font-size: 12px; font-weight: 700; white-space: nowrap"><span aria-hidden="true" style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{r.stateLabel}}</span>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isStatus}}" hint-placeholder-val="{{false}}">
-					<div style="margin-top: 18px; padding: 14px 10px 0; border-top: 1px solid rgba(123,236,199,.08); display: flex; flex-direction: column; gap: 12px">
-						<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Status</div>
+					<div style="margin-top: 14px; padding: 16px 4px 0 16px; border-top: 1px solid rgba(123,236,199,.08); display: flex; flex-direction: column; gap: 12px">
+						<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #b9cac1">Status</div>
 						<sc-if value="{{r.fault}}" hint-placeholder-val="{{false}}">
-							<div role="alert" style="padding: 10px 12px; border-radius: 8px; background: rgba(255,122,107,.08); border: 1px solid rgba(255,122,107,.32); font-size: 13px; line-height: 1.5; color: #ffc2bb">{{r.faultText}}</div>
+							<div role="alert" style="display: flex; gap: 10px; padding: 10px 12px; border-radius: 8px; background: rgba(255,122,107,.08); border: 1px solid rgba(255,122,107,.32); font-size: 13px; line-height: 1.5; color: #ffc2bb">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ff7a6b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 2px"><path d="M12 9v4"></path><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"></path><path d="M12 16h.01"></path></svg>
+								<span style="flex: 1; min-width: 0">{{r.faultText}}</span>
+							</div>
 						</sc-if>
-						<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: rgba(123,236,199,.08)">
+						<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: rgba(123,236,199,.08); border: 1px solid rgba(123,236,199,.08)">
 							<sc-for list="{{r.stats}}" as="s" hint-placeholder-count="3">
-								<div style="background: #111c19; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0">
+								<div style="background: rgba(10,19,16,.92); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0">
 									<span style="font-size: 12px; color: #8ba598">{{s.k}}</span>
-									<span style="font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.v}}</span>
+									<span style="font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: {{s.c}}">{{s.v}}</span>
 								</div>
 							</sc-for>
 						</div>
-						<div style="display: flex; gap: 8px; flex-wrap: wrap">
-							<button onClick="{{r.restart}}" style="height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px">
-								<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"></path></svg>Restart decoder
+						<div style="display: flex; gap: 6px; flex-wrap: wrap">
+							<button class="wk-out wk-tall" onClick="{{r.restart}}" style="height: 36px; padding: 0 14px 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px">
+								<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"></path></svg>{{r.restartLabel}}
 							</button>
-							<button class="wk-ghost" onClick="{{r.logs}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #b9cac1; font-size: 13px">Show log</button>
+							<button class="wk-ghost wk-tall" onClick="{{r.logs}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #b9cac1; font-size: 13px">Show log</button>
 						</div>
 					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isFold}}" hint-placeholder-val="{{false}}">
-					<button class="wk-ghost" onClick="{{r.toggle}}" aria-expanded="{{r.open}}" style="margin: 2px 0 0 4px; height: 32px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; color: #8ba598; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase">
-						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{r.chev}}deg); transition: transform .2s"><path d="M9 6l6 6l-6 6"></path></svg>{{r.label}}
-					</button>
+					<div style="margin-top: {{r.mt}}; padding-top: {{r.pt}}; border-top: 1px solid {{r.line}}">
+						<sc-if value="{{r.open}}" hint-placeholder-val="{{false}}">
+							<button class="wk-row" onClick="{{r.toggle}}" aria-expanded="true" aria-label="Hide {{r.count}} more {{r.of}}" style="width: 100%; min-height: 36px; padding: 0 12px 0 16px; border-radius: 8px; display: flex; align-items: center; gap: 8px; text-align: left">
+								<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #b9cac1">More</span>
+								<span style="display: flex; align-items: center; gap: 4px; font-size: 12.5px; color: #8ba598">Hide<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 15l6 -6l6 6"></path></svg></span>
+							</button>
+						</sc-if>
+						<sc-if value="{{r.closed}}" hint-placeholder-val="{{true}}">
+							<button class="wk-row" onClick="{{r.toggle}}" aria-expanded="false" aria-label="Show {{r.count}} more {{r.of}}" style="width: 100%; min-height: 44px; padding: 0 12px 0 16px; border-radius: 8px; display: flex; align-items: center; gap: 8px; text-align: left; font-size: 13px">
+								<span style="flex: none; font-weight: 700; color: #b9cac1; font-variant-numeric: tabular-nums">{{r.count}} more</span>
+								<span style="flex: 1; min-width: 0; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.names}}</span>
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M6 9l6 6l6 -6"></path></svg>
+							</button>
+						</sc-if>
+					</div>
 				</sc-if>
 
 				<sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
-					<div id="{{r.domId}}" class="wk-row" style="position: relative; margin-bottom: 2px; padding: 11px 6px 11px 16px; border-radius: 8px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .6s ease, box-shadow .6s ease">
-						<sc-if value="{{r.hasBar}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: 5px; top: 13px; bottom: 13px; width: 3px; border-radius: 2px; background: {{r.barC}}"></span></sc-if>
-						<sc-if value="{{r.hasCrumb}}" hint-placeholder-val="{{false}}"><div style="font-size: 11.5px; color: #8ba598; margin-bottom: 3px">{{r.crumb}}</div></sc-if>
-						<div style="display: flex; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px">
-							<div style="flex: 1 1 150px; min-width: 0">
-								<div style="display: flex; align-items: center; gap: 6px">
-									<span id="{{r.labelId}}" style="font-weight: 700; font-size: 14px">{{r.label}}</span>
+					<div id="{{r.domId}}" class="wk-row {{r.rise}}" style="position: relative; margin-bottom: 2px; padding: 12px 4px 12px 16px; border-radius: 8px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .6s ease, box-shadow .6s ease">
+						<sc-if value="{{r.hasBar}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: 6px; top: 14px; bottom: 14px; width: 2px; border-radius: 1px; background: {{r.barC}}"></span></sc-if>
+						<div class="wk-rg {{r.wideClass}}">
+							<div class="wk-lab">
+								<sc-if value="{{r.hasCrumb}}" hint-placeholder-val="{{false}}"><div style="margin-bottom: 3px; font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.crumb}}</div></sc-if>
+								<div style="display: flex; align-items: center; flex-wrap: wrap; column-gap: 6px; row-gap: 2px; min-height: 20px">
+									<span id="{{r.labelId}}" style="font-weight: 700; font-size: 14px; line-height: 20px">{{r.label}}</span>
 									<sc-if value="{{r.hasEff}}" hint-placeholder-val="{{false}}">
 										<span title="{{r.effText}}" style="display: inline-grid; place-items: center; color: {{r.effC}}">
 											<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.effIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
@@ -259,117 +308,119 @@ body{margin:0;background:#0b1512}
 										</span>
 									</sc-if>
 									<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}">
-										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Locked"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z"></path><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>
+										<span title="{{r.lockTitle}}" style="display: inline-grid; place-items: center; color: #8ba598">
+											<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z"></path><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>
+											<span class="wk-sr">Locked</span>
+										</span>
+									</sc-if>
+									<sc-if value="{{r.canReset}}" hint-placeholder-val="{{false}}">
+										<button class="wk-reset" onClick="{{r.reset}}" style="margin-left: 2px; padding: 0 2px; font-size: 12px; line-height: 20px; color: #8ba598; border-radius: 4px">Reset to {{r.defText}}</button>
 									</sc-if>
 								</div>
 								<sc-if value="{{r.hasSub}}" hint-placeholder-val="{{true}}"><div style="margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: #8ba598; text-wrap: pretty">{{r.sub}}</div></sc-if>
-								<sc-if value="{{r.hasNote}}" hint-placeholder-val="{{false}}">
-									<div role="{{r.noteRole}}" style="margin-top: 4px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 12.5px; line-height: 1.45; color: {{r.noteC}}">
-										<span>{{r.note}}</span>
-										<sc-if value="{{r.hasNoteBtn}}" hint-placeholder-val="{{false}}"><button onClick="{{r.noteAct}}" style="font-weight: 700; color: inherit; text-decoration: underline; text-underline-offset: 2px">{{r.noteBtn}}</button></sc-if>
-									</div>
-								</sc-if>
-								<sc-if value="{{r.canReset}}" hint-placeholder-val="{{false}}">
-									<button class="wk-reset" onClick="{{r.reset}}" style="margin-top: 3px; font-size: 12px; color: #7becc7; font-weight: 700; border-radius: 4px">Reset to {{r.defText}}</button>
-								</sc-if>
 							</div>
 
-							<div style="flex: 0 1 auto; max-width: 100%; margin-left: auto; display: flex; align-items: center; gap: 2px">
+							<div class="wk-ctl">
 
 								<sc-if value="{{r.isSw}}" hint-placeholder-val="{{false}}">
-									<button role="switch" aria-checked="{{r.on}}" aria-labelledby="{{r.labelId}}" onClick="{{r.toggle}}" style="width: 52px; height: 36px; display: grid; place-items: center; border-radius: 6px">
-										<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span></span>
+									<button role="switch" aria-checked="{{r.on}}" aria-labelledby="{{r.labelId}}" onClick="{{r.toggle}}" style="width: 52px; height: 40px; margin-right: -8px; display: grid; place-items: center; border-radius: 6px">
+										<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
 									</button>
 								</sc-if>
 
 								<sc-if value="{{r.isSeg}}" hint-placeholder-val="{{false}}">
-									<div role="radiogroup" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 6px; background: #0b1512; border: 1px solid rgba(123,236,199,.08)">
+									<div role="radiogroup" aria-labelledby="{{r.labelId}}" class="wk-seg" style="flex: 1">
 										<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3">
-											<button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="height: 28px; padding: 0 10px; border-radius: 4px; font-size: 12.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button>
+											<button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button>
 										</sc-for>
 									</div>
 								</sc-if>
 
 								<sc-if value="{{r.isSel}}" hint-placeholder-val="{{false}}">
-									<span style="position: relative; display: inline-flex">
-										<select class="wk-field" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="height: 34px; max-width: 220px; padding: 0 30px 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 13px; cursor: pointer">
+									<span style="position: relative; display: inline-flex; min-width: 0">
+										<select class="wk-field" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="height: 34px; min-width: 96px; max-width: 200px; padding: 0 30px 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 13px; cursor: pointer">
 											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}">{{o.label}}</option></sc-for>
 										</select>
-										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 10px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 50%; margin-top: -7px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
 									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isStep}}" hint-placeholder-val="{{false}}">
 									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; align-items: center; border: 1px solid rgba(123,236,199,.18); border-radius: 6px">
-										<button onClick="{{r.dec}}" aria-label="Decrease {{r.label}}" style="width: 34px; height: 32px; color: #b9cac1; font-size: 16px">−</button>
-										<span aria-live="polite" style="min-width: 64px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{r.valText}}</span>
-										<button onClick="{{r.inc}}" aria-label="Increase {{r.label}}" style="width: 34px; height: 32px; color: #b9cac1; font-size: 16px">+</button>
+										<button class="wk-ghost wk-stepb" onClick="{{r.dec}}" aria-label="Decrease {{r.label}}" aria-disabled="{{r.atMin}}" style="width: 32px; height: 32px; border-radius: 5px 0 0 5px; color: {{r.decC}}; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
+										<span aria-live="polite" style="min-width: 60px; padding: 0 4px; text-align: center; font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{r.valText}}</span>
+										<button class="wk-ghost wk-stepb" onClick="{{r.inc}}" aria-label="Increase {{r.label}}" aria-disabled="{{r.atMax}}" style="width: 32px; height: 32px; border-radius: 0 5px 5px 0; color: {{r.incC}}; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
 									</div>
 								</sc-if>
 
 								<sc-if value="{{r.isSlider}}" hint-placeholder-val="{{false}}">
-									<span style="display: flex; align-items: center; gap: 10px">
-										<input type="range" min="{{r.min}}" max="{{r.max}}" step="{{r.step}}" value="{{r.val}}" onChange="{{r.onSlide}}" aria-labelledby="{{r.labelId}}" aria-valuetext="{{r.valText}}" style="width: 140px; margin: 0">
-										<span style="min-width: 62px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums">{{r.valText}}</span>
+									<span style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px">
+										<input type="range" min="{{r.min}}" max="{{r.max}}" step="{{r.step}}" value="{{r.val}}" onChange="{{r.onSlide}}" aria-labelledby="{{r.labelId}}" aria-valuetext="{{r.valText}}" style="flex: 1; min-width: 0; margin: 0">
+										<span style="min-width: 64px; text-align: right; font-size: 13.5px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.valText}}</span>
 									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isText}}" hint-placeholder-val="{{false}}">
-									<input class="wk-field {{r.badClass}}" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" spellcheck="false" autocomplete="off" style="width: 168px; max-width: 100%; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 13.5px">
+									<input class="wk-field {{r.badClass}} wk-tall" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" spellcheck="false" autocomplete="off" style="width: 100%; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 14px">
 								</sc-if>
 
 								<sc-if value="{{r.isSecret}}" hint-placeholder-val="{{false}}">
-									<span style="display: flex; align-items: center; gap: 4px">
-										<input class="wk-field {{r.badClass}}" type="{{r.inType}}" value="{{r.val}}" onChange="{{r.onText}}" placeholder="Paste the key" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" spellcheck="false" autocomplete="off" style="width: 150px; max-width: 100%; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px">
-										<button class="wk-ghost" onClick="{{r.reveal}}" aria-pressed="{{r.shown}}" style="height: 34px; padding: 0 10px; border-radius: 6px; color: #b9cac1; font-size: 12.5px">{{r.revealLabel}}</button>
+									<span style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px">
+										<input class="wk-field {{r.badClass}} wk-tall" type="{{r.inType}}" value="{{r.val}}" onChange="{{r.onText}}" placeholder="Paste the key" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font-family: ui-monospace, Menlo, monospace; font-size: 13px">
+										<button class="wk-out wk-tall" onClick="{{r.reveal}}" aria-pressed="{{r.shown}}" style="flex: none; height: 36px; width: 72px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #b9cac1; font-size: 12.5px; font-weight: 700">{{r.revealLabel}}</button>
 									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isLink}}" hint-placeholder-val="{{false}}">
-									<button class="wk-ghost" onClick="{{r.act}}" style="height: 34px; padding: 0 6px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 2px; color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{r.linkText}}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
+									<button class="wk-ghost" onClick="{{r.act}}" style="height: 34px; margin-right: -4px; padding: 0 4px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 2px; color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{r.linkText}}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
 								</sc-if>
 
 								<sc-if value="{{r.isRead}}" hint-placeholder-val="{{false}}">
-									<span style="padding: 0 6px; font-size: 13px; color: #b9cac1; font-variant-numeric: tabular-nums; white-space: nowrap">{{r.readText}}</span>
+									<span style="max-width: 190px; font-size: 13.5px; line-height: 1.4; color: #b9cac1; text-align: right; font-variant-numeric: tabular-nums">{{r.readText}}</span>
 								</sc-if>
 
 								<sc-if value="{{r.isBtns}}" hint-placeholder-val="{{false}}">
-									<span style="display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end">
+									<span style="display: flex; gap: 6px; justify-content: flex-end">
 										<sc-for list="{{r.btns}}" as="b" hint-placeholder-count="1">
-											<button onClick="{{b.act}}" style="height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{b.label}}</button>
+											<button class="wk-out wk-tall" onClick="{{b.act}}" style="height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{b.label}}</button>
 										</sc-for>
 									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isChips}}" hint-placeholder-val="{{false}}">
-									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 280px">
+									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 6px">
 										<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="3">
-											<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}">{{c.label}}</button>
+											<button class="wk-tall" aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; transition: background .15s, border-color .15s"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{c.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{c.label}}</button>
 										</sc-for>
 									</div>
 								</sc-if>
 
 								<sc-if value="{{r.isFreqs}}" hint-placeholder-val="{{false}}">
-									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 300px">
+									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px">
 										<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="3">
-											<span style="display: flex; align-items: center; gap: 1px; height: 28px; padding: 0 2px 0 9px; border-radius: 4px; background: #192b24; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{c.label}}
-												<button onClick="{{c.remove}}" aria-label="Remove {{c.label}} MHz" style="width: 24px; height: 24px; border-radius: 4px; color: #8ba598; display: grid; place-items: center"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+											<span class="wk-tall" style="display: flex; align-items: center; gap: 2px; height: 32px; box-sizing: border-box; padding: 0 2px 0 10px; border-radius: 6px; background: #192b24; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{c.label}}
+												<button class="wk-ghost" onClick="{{c.remove}}" aria-label="Remove {{c.label}} MHz" style="width: 28px; height: 28px; border-radius: 4px; color: #8ba598; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 											</span>
 										</sc-for>
-										<input class="wk-field" onKeyDown="{{r.addKey}}" placeholder="+ Add" aria-label="Add a frequency in MHz" spellcheck="false" autocomplete="off" style="width: 76px; height: 28px; box-sizing: border-box; padding: 0 8px; border-radius: 4px; background: transparent; color: #f4f7f5; font: inherit; font-size: 12.5px">
+										<input class="wk-field wk-tall" onKeyDown="{{r.addKey}}" placeholder="Add MHz" aria-label="Add a frequency in MHz, then press Enter" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 92px; height: 32px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: transparent; color: #f4f7f5; font: inherit; font-size: 13px; font-variant-numeric: tabular-nums">
 									</div>
 								</sc-if>
+							</div>
 
-								<button class="wk-more wk-ghost" onClick="{{r.toggleMenu}}" aria-haspopup="menu" aria-expanded="{{r.menuOpen}}" aria-label="More for {{r.label}}" style="width: 30px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: #8ba598; flex: none">
-									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M17 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
-								</button>
+							<button class="wk-more wk-ghost" onClick="{{r.toggleMenu}}" aria-haspopup="menu" aria-expanded="{{r.menuOpen}}" aria-label="More for {{r.label}}" style="width: 28px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: #8ba598">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M17 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
+							</button>
+
+							<div id="{{r.noteId}}" class="wk-note" role="{{r.noteRole}}" style="display: {{r.noteDisplay}}; align-items: baseline; flex-wrap: wrap; gap: 2px 10px; font-size: 12.5px; line-height: 1.45; color: {{r.noteC}}">
+								<span style="min-width: 0">{{r.note}}</span>
+								<sc-if value="{{r.hasNoteBtn}}" hint-placeholder-val="{{false}}"><button onClick="{{r.noteAct}}" style="font-weight: 700; color: inherit; text-decoration: underline; text-underline-offset: 2px; border-radius: 4px">{{r.noteBtn}}</button></sc-if>
 							</div>
 						</div>
 
 						<sc-if value="{{r.menuOpen}}" hint-placeholder-val="{{false}}">
-							<div role="menu" aria-label="{{r.label}}" style="position: absolute; right: 6px; top: 44px; z-index: 6; min-width: 196px; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
+							<div role="menu" aria-label="{{r.label}}" class="wk-rise" onKeyDown="{{r.menuKey}}" style="position: absolute; right: 4px; top: {{r.menuTop}}; z-index: 6; min-width: 200px; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
 								<sc-for list="{{r.menu}}" as="m" hint-placeholder-count="3">
-									<button role="menuitem" class="wk-ghost" onClick="{{m.act}}" aria-disabled="{{m.disabled}}" style="width: 100%; height: 36px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 10px; text-align: left; font-size: 13px; color: {{m.fg}}">
+									<button role="menuitem" class="wk-ghost" onClick="{{m.act}}" aria-disabled="{{m.disabled}}" autoFocus="{{m.first}}" style="width: 100%; height: 36px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 10px; text-align: left; font-size: 13px; color: {{m.fg}}">
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>{{m.label}}
 									</button>
 								</sc-for>
@@ -383,15 +434,17 @@ body{margin:0;background:#0b1512}
 	</div>
 
 	<sc-if value="{{hasPending}}" hint-placeholder-val="{{false}}">
-		<div role="region" aria-label="Changes waiting to be applied" style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 12px 12px 18px; border-top: 1px solid rgba(242,184,75,.32); background: rgba(48,37,12,.55)">
-			<span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #f2b84b; flex: none"></span>
-			<span style="flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 1px">
-				<span style="font-weight: 700; color: #f7dca4">{{pendingTitle}}</span>
-				<span style="font-size: 12.5px; color: #c9b27f">{{pendingSub}}</span>
+		<div role="region" aria-label="Changes waiting to be applied" class="wk-rise" style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px 12px; padding: 12px 12px 12px 16px; border-top: 1px solid rgba(242,184,75,.32); background: rgba(48,37,12,.62)">
+			<span style="flex: 1 1 220px; min-width: 0; display: flex; align-items: flex-start; gap: 10px">
+				<span aria-hidden="true" style="width: 8px; height: 8px; margin-top: 6px; border-radius: 50%; background: #f2b84b; box-shadow: 0 0 0 3px rgba(242,184,75,.18); flex: none"></span>
+				<span style="min-width: 0; display: flex; flex-direction: column; gap: 2px">
+					<span style="font-weight: 700; color: #f7dca4; font-variant-numeric: tabular-nums">{{pendingTitle}}</span>
+					<span style="font-size: 12.5px; line-height: 1.45; color: #d4bd8a">{{pendingSub}}</span>
+				</span>
 			</span>
 			<span style="display: flex; gap: 6px; margin-left: auto">
-				<button class="wk-ghost" onClick="{{discard}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #f7dca4; font-size: 13px">Discard</button>
-				<button onClick="{{apply}}" style="height: 36px; padding: 0 16px; border-radius: 6px; background: #f2b84b; color: #1a1406; font-size: 13px; font-weight: 700">Apply</button>
+				<button class="wk-amb wk-tall" onClick="{{discard}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #f7dca4; font-size: 13px">Discard</button>
+				<button class="wk-tall" onClick="{{apply}}" style="height: 36px; padding: 0 18px; border-radius: 6px; background: #f2b84b; color: #1a1406; font-size: 13px; font-weight: 700">{{applyLabel}}</button>
 			</span>
 		</div>
 	</sc-if>
@@ -401,8 +454,8 @@ body{margin:0;background:#0b1512}
 	</sc-if>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}; transform: translateX(-50%); z-index: 8; max-width: calc(100% - 32px); height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-radius: 12px; background: rgba(25,43,36,.96); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13px">
-			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}; transform: translateX(-50%); animation: wktoast .24s cubic-bezier(.16,1,.3,1); z-index: 8; max-width: calc(100% - 32px); height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-radius: 12px; background: rgba(25,43,36,.96); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13px">
+			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{{toastC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{toastIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 			<span style="overflow: hidden; text-overflow: ellipsis">{{toastText}}</span>
 		</div>
 	</sc-if>
@@ -455,14 +508,14 @@ const DECS = [
 	{ id: 'mesh', name: 'Meshtastic', tool: 'LoRa decoder', where: '869.525 MHz', state: 'fault', stat: 'Stopped · channel key rejected', icon: I.mesh, up: '—', last: '2 h ago' }
 ];
 const MHZ = v => (+v).toFixed(3);
-const callsignErr = v => !v || /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i.test(v) ? '' : 'Letters and digits, with an optional SSID: F4ABC-9';
+const callsignErr = v => !v || /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i.test(v) ? '' : 'Use letters and digits only, like F4ABC or F4ABC-9';
 const keyErr = v => !v || (/^[A-Za-z0-9+/]+={0,2}$/.test(v) && (v.length === 4 || v.length === 24 || v.length === 44)) ? '' : 'Not a valid key. Expected 16 or 32 bytes in base64, as the Meshtastic app shares it.';
 const restarts = name => ({ eff: 'restart', effText: 'Restarts ' + name, effShort: 'restarts ' + name });
 const S = (id, g, label, o) => Object.assign({ id, g, label }, o);
 const ON = [['on', 'On'], ['off', 'Off']];
 const R = [
 	S('station.name', 'station', 'Station name', { kind: 'text', def: 'WaveKit', init: 'Roscoff station', ph: 'WaveKit', sub: 'Shown in the tab title and on your other devices', alias: 'title' }),
-	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never sent anywhere.', alias: 'position latitude longitude coordinates maidenhead locator gps qth' }),
+	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never shared.', alias: 'position latitude longitude coordinates maidenhead locator gps qth' }),
 	S('station.region', 'station', 'Region', { kind: 'sel', opts: [['EU', 'Europe'], ['US', 'United States'], ['CA', 'Canada'], ['AU', 'Australia'], ['NZ', 'New Zealand'], ['JP', 'Japan']], def: 'EU', lock: 'WAVEKIT_REGION', sub: 'Band plans, channel names and legal limits', alias: 'country band plan' }),
 	S('station.callsign', 'station', 'Callsign', Object.assign({ kind: 'text', def: '', ph: 'Optional', sub: 'For APRS and the map', validate: callsignErr, alias: 'call sign ham amateur licence' }, restarts('APRS'))),
 	S('station.saved', 'station', 'Saved frequencies', { kind: 'link', text: '3 saved', act: 'tuner', sub: 'Managed in the Tuner, shared by every device', alias: 'bookmarks memories favourites channels' }),
@@ -598,6 +651,10 @@ const FILTERS = [
 ];
 const TOKEN = { changed: 'Changed', restart: 'Restarts something', hw: 'Touches hardware', locked: 'Locked' };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const WIDE = { text: 1, secret: 1, freqs: 1, chips: 1, slider: 1 };
+const segWidth = opts => opts.reduce((a, o) => a + String(o[1]).length * 7.4 + 22, 8);
+const CHECK = ['M5 12l5 5l10 -10'];
+const WARN = ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z', 'M12 16h.01'];
 const sw = on => ({ on, track: on ? '#7becc7' : '#2c443b', knob: on ? 18 : 2 });
 const segc = on => ({ on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598' });
 const decState = (d, on) => !on ? { label: 'Off', c: '#52645d', bg: 'rgba(139,165,152,.12)', fg: '#8ba598' } : d.state === 'fault' ? { label: 'Stopped', c: '#ff7a6b', bg: 'rgba(255,122,107,.14)', fg: '#ff9d92' } : d.state === 'idle' ? { label: 'Idle', c: '#8ba598', bg: 'rgba(139,165,152,.14)', fg: '#b9cac1' } : { label: 'Running', c: '#7becc7', bg: 'rgba(123,236,199,.14)', fg: '#7becc7' };
@@ -627,7 +684,7 @@ class Component extends DCLogic {
 			this.setState({ pending: sc === 'pending' ? { 'rx.rate': 3.2, 'rx.biasT': true } : {}, offline: sc === 'offline', failed: {} });
 		}
 	}
-	componentWillUnmount() { clearTimeout(this.tt); clearTimeout(this.pt); }
+	componentWillUnmount() { clearTimeout(this.tt); clearTimeout(this.pt); clearTimeout(this.st); }
 	phone() { return this.props.layout === 'phone'; }
 	linked(d) { const v = this.props.values; return d.key && v && v[d.key] !== undefined; }
 	committed(id) { const d = BY[id]; return this.linked(d) ? this.props.values[d.key] : this.state.vals[id]; }
@@ -637,9 +694,9 @@ class Component extends DCLogic {
 		if (id in s.pending) return s.pending[id];
 		return this.committed(id);
 	}
-	toast(text) {
+	toast(text, warn) {
 		clearTimeout(this.tt);
-		this.setState({ toast: text });
+		this.setState({ toast: text, toastWarn: !!warn });
 		this.tt = setTimeout(() => this.setState({ toast: null }), 3200);
 	}
 	commitLive(d, v, st) {
@@ -671,10 +728,10 @@ class Component extends DCLogic {
 	}
 	apply() {
 		const s = this.state, st = { pending: {} }, n = Object.keys(s.pending).length;
-		const fx = this.pendingFx();
 		Object.keys(s.pending).forEach(id => this.commitLive(BY[id], s.pending[id], st));
 		this.setState(st);
-		this.toast(s.offline ? 'Not applied · your WaveKit is unreachable' : 'Applied ' + n + (n === 1 ? ' change' : ' changes') + (fx ? ' · ' + fx : ''));
+		if (s.offline) return this.toast('Not applied · your WaveKit is unreachable', true);
+		this.toast('Applied ' + n + (n === 1 ? ' change' : ' changes'));
 	}
 	pendingFx() {
 		const seen = [];
@@ -685,19 +742,37 @@ class Component extends DCLogic {
 	scrollTo(domId, pulse) {
 		const c = document.getElementById(this.scrollId), el = document.getElementById(domId);
 		if (!c || !el) return;
-		c.scrollTo({ top: Math.max(0, c.scrollTop + el.getBoundingClientRect().top - c.getBoundingClientRect().top - (pulse ? 60 : 4)), behavior: 'smooth' });
+		const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		const cr = c.getBoundingClientRect(), k = c.offsetHeight ? cr.height / c.offsetHeight : 1;
+		const target = Math.min(c.scrollHeight - c.clientHeight, Math.max(0, c.scrollTop + (el.getBoundingClientRect().top - cr.top) / (k || 1) - (pulse ? 72 : 0)));
+		const far = Math.abs(target - c.scrollTop) > c.clientHeight * 1.5;
+		if (reduce || far) c.scrollTop = target;
+		else c.scrollTo({ top: target, behavior: 'smooth' });
+		clearTimeout(this.sf);
+		this.sf = setTimeout(() => { const n = document.getElementById(this.scrollId); if (n && Math.abs(n.scrollTop - target) > 2) n.scrollTop = target; }, 600);
 		if (pulse) {
 			clearTimeout(this.pt);
 			this.setState({ pulse: pulse });
 			this.pt = setTimeout(() => this.setState({ pulse: null }), 1800);
 		}
 	}
+	spy() {
+		const s = this.state;
+		if (s.dec || s.q.trim() || s.tokens.length || this.phone() || Date.now() < (this.spyLock || 0)) return;
+		const c = document.getElementById(this.scrollId);
+		if (!c) return;
+		const top = c.getBoundingClientRect().top, line = c.getBoundingClientRect().height * 0.3;
+		let active = GROUPS[0].id;
+		GROUPS.forEach(g => { const el = document.getElementById(this.rowDom('g:' + g.id)); if (el && el.getBoundingClientRect().top - top <= line) active = g.id; });
+		if (c.scrollTop > 0 && c.scrollTop + c.clientHeight >= c.scrollHeight - 4) active = GROUPS[GROUPS.length - 1].id;
+		if (active !== this.state.active) this.setState({ active });
+	}
 	rowDom(id) { return this.uid + '-' + id.replace(/[.:]/g, '-'); }
 	goGroup(id) {
 		const phone = this.phone();
 		this.setState({ q: '', tokens: [], dec: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
 			if (phone) { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }
-			else this.scrollTo(this.rowDom('g:' + id));
+			else { this.spyLock = Date.now() + 900; this.scrollTo(this.rowDom('g:' + id)); }
 		}, 30));
 	}
 	openDec(id) {
@@ -721,7 +796,7 @@ class Component extends DCLogic {
 		this.toast(T[a] || a);
 	}
 	label(d, v) {
-		if (d.opts) { const o = d.opts.find(x => eq(x[0], v)); if (o) return o[1]; }
+		if (d.opts) { const o = d.opts.find(x => eq(x[0], v)); if (o) return o[1] + (d.kind === 'seg' && d.unit ? d.unit : ''); }
 		if (d.fmt) return d.fmt(v);
 		if (d.kind === 'sw') return v ? 'On' : 'Off';
 		if (d.kind === 'step') return (v > 0 && d.min < 0 ? '+' : '') + v + (d.unit || '');
@@ -746,12 +821,14 @@ class Component extends DCLogic {
 		let note = '', noteC = '#8ba598', noteBtn = '', noteAct = null, noteRole = 'note';
 		if (err) { note = err; noteC = '#ff9d92'; noteRole = 'alert'; }
 		else if (x.failed) { note = 'Not saved yet'; noteC = '#f2b84b'; noteBtn = 'Retry'; noteAct = () => this.retry(); }
-		else if (x.pending) { note = 'Waiting for Apply · ' + d.effText; noteC = '#f2b84b'; noteBtn = 'Undo'; noteAct = () => { const p = Object.assign({}, s.pending); delete p[id]; this.setState({ pending: p }); }; }
+		else if (x.pending) { note = (warn ? warn + '. ' : '') + 'Waiting for Apply · ' + d.effText; noteC = '#f2b84b'; noteBtn = 'Undo'; noteAct = () => { const p = Object.assign({}, s.pending); delete p[id]; this.setState({ pending: p }); }; }
 		else if (warn) { note = warn; noteC = '#f2b84b'; }
-		else if (locked) note = d.lockNote || 'Set by ' + d.lock + ' · change it in the environment';
+		else if (locked) note = d.lockNote || 'Set by ' + d.lock + '. Change it in the environment.';
 		const barC = err ? '#ff7a6b' : (x.pending || x.failed) ? '#f2b84b' : x.changed ? '#7becc7' : '';
 		const kind = locked ? 'read' : d.kind;
 		const pulse = s.pulse === id;
+		const amber = (x.pending || x.failed) && !err;
+		const wide = !!WIDE[kind] || (kind === 'seg' && segWidth(d.opts) > (this.phone() ? 150 : 184));
 		const opts = (d.opts || []).map(o => Object.assign({ v: String(o[0]), label: o[1], pick: () => this.setVal(id, o[0]) }, segc(eq(o[0], v))));
 		const r = {
 			isRow: true, domId: this.rowDom(id), labelId: this.rowDom(id) + '-l', label: d.label,
@@ -759,11 +836,15 @@ class Component extends DCLogic {
 			hasSub: !!d.sub, sub: d.sub || '',
 			hasNote: !!note, note, noteC, noteRole, hasNoteBtn: !!noteBtn, noteBtn, noteAct,
 			hasBar: !!barC, barC,
-			bg: pulse ? 'rgba(123,236,199,.10)' : 'transparent',
-			ring: pulse ? 'inset 0 0 0 1px rgba(123,236,199,.55)' : 'inset 0 0 0 1px transparent',
+			bg: pulse ? 'rgba(123,236,199,.10)' : amber ? 'rgba(242,184,75,.06)' : 'transparent',
+			ring: pulse ? 'inset 0 0 0 1px rgba(123,236,199,.55)' : amber ? 'inset 0 0 0 1px rgba(242,184,75,.14)' : 'inset 0 0 0 1px transparent',
+			wideClass: wide ? 'is-wide' : '', rise: '',
+			noteDisplay: note ? 'flex' : 'none', noteId: this.rowDom(id) + '-n',
+			lockTitle: locked ? (d.lockNote || 'Set by ' + d.lock) : '',
+			menuTop: wide ? '36px' : '50px',
 			hasEff: !!d.eff, effText: d.effText || '', effIcon: d.eff === 'hw' ? I.plug : I.restart, effC: x.pending ? '#f2b84b' : '#8ba598',
-			locked,
-			canReset: x.changed && !x.pending && !locked, defText: d.def !== undefined ? this.label(d, d.def) : '', reset: () => this.reset(id),
+			locked, ...sw(!!v),
+			canReset: x.changed && !x.pending && !x.failed && !locked, defText: d.def !== undefined ? this.label(d, d.def) : '', reset: () => this.reset(id),
 			isSw: kind === 'sw', isSeg: kind === 'seg', isSel: kind === 'sel', isStep: kind === 'step', isSlider: kind === 'slider', isText: kind === 'text', isSecret: kind === 'secret', isLink: kind === 'link', isRead: kind === 'read', isBtns: kind === 'btns', isChips: kind === 'chips', isFreqs: kind === 'freqs',
 			opts, selVal: String(v),
 			onSel: e => { const o = (d.opts || []).find(o => String(o[0]) === e.target.value); if (o) this.setVal(id, o[0]); },
@@ -771,6 +852,8 @@ class Component extends DCLogic {
 			val: v === undefined ? '' : v, valText: v !== undefined ? this.label(d, v) : '',
 			min: d.min, max: d.max, step: d.step,
 			dec: () => this.setVal(id, Math.max(d.min, v - d.step)), inc: () => this.setVal(id, Math.min(d.max, v + d.step)),
+			atMin: kind === 'step' && v <= d.min, atMax: kind === 'step' && v >= d.max,
+			decC: kind === 'step' && v <= d.min ? '#52645d' : '#b9cac1', incC: kind === 'step' && v >= d.max ? '#52645d' : '#b9cac1',
 			onSlide: e => this.setVal(id, Number(e.target.value)),
 			onText: e => this.setVal(id, e.target.value), ph: d.ph || '',
 			invalid: !!err, badClass: err ? 'wk-bad' : '',
@@ -781,24 +864,26 @@ class Component extends DCLogic {
 			btns: (d.btns || []).map(b => ({ label: b[0], act: () => this.act(b[1]) })),
 			menuOpen: s.menu === id, toggleMenu: () => this.setState({ menu: s.menu === id ? null : id })
 		};
-		if (kind === 'chips') r.chips = d.opts.map(o => { const on = v.indexOf(o[0]) >= 0; return { label: o[1], on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setVal(id, on ? v.filter(y => y !== o[0]) : d.opts.map(z => z[0]).filter(z => z === o[0] || v.indexOf(z) >= 0)) }; });
+		if (kind === 'chips') r.chips = d.opts.map(o => { const on = v.indexOf(o[0]) >= 0; return { label: o[1], on, tick: on ? 1 : 0.35, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setVal(id, on ? v.filter(y => y !== o[0]) : d.opts.map(z => z[0]).filter(z => z === o[0] || v.indexOf(z) >= 0)) }; });
 		if (kind === 'freqs') {
 			r.chips = v.map(f => ({ label: f, remove: () => this.setVal(id, v.filter(y => y !== f)) }));
 			r.addKey = e => {
 				if (e.key !== 'Enter') return;
 				const n = parseFloat(String(e.target.value).replace(',', '.'));
-				if (!(n >= 24 && n <= 1766)) return this.toast('Type a frequency in MHz, 24 to 1766');
+				if (!(n >= 24 && n <= 1766)) return this.toast('Type a frequency in MHz, 24 to 1766', true);
 				const f = MHZ(n);
 				e.target.value = '';
 				if (v.indexOf(f) < 0) this.setVal(id, v.concat([f]).sort((a, b) => a - b));
 			};
 		}
 		const yaml = id.replace(/^dec\.([a-z0-9]+)\./, 'decoders.$1.') + ': ' + (v === undefined ? '' : JSON.stringify(v));
+		r.menuKey = e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); this.setState({ menu: null }); } };
 		r.menu = [
 			{ label: r.canReset ? 'Reset to ' + r.defText : 'Already the default', icon: I.reset, disabled: !r.canReset, fg: r.canReset ? '#f4f7f5' : '#52645d', act: () => r.canReset ? this.reset(id) : this.setState({ menu: null }) },
 			{ label: 'Copy link', icon: I.link, disabled: false, fg: '#f4f7f5', act: () => { this.copy('https://wavekit.local/settings/' + id); this.setState({ menu: null }); this.toast('Link copied · /settings/' + id); } },
 			{ label: 'Copy as YAML', icon: I.code, disabled: false, fg: '#f4f7f5', act: () => { this.copy(yaml); this.setState({ menu: null }); this.toast('Copied · ' + yaml); } }
 		];
+		r.menu.forEach((m, i) => { m.first = i === (r.canReset ? 0 : 1); });
 		return r;
 	}
 	copy(t) { try { if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {}); } catch (e) { /* clipboard unavailable */ } }
@@ -815,29 +900,33 @@ class Component extends DCLogic {
 	}
 	groupItems(gid, withHead, first) {
 		const s = this.state, g = GID[gid], out = [], parts = this.groupRows(gid);
-		if (withHead) out.push({ isH: true, domId: this.rowDom('g:' + gid), label: g.label, desc: g.desc, pad: first ? '4px' : '26px' });
+		if (withHead) out.push({ isH: true, domId: this.rowDom('g:' + gid), label: g.label, desc: g.desc, mt: first ? '0' : '26px', pt: first ? '6px' : '22px', line: first ? 'transparent' : 'rgba(123,236,199,.08)' });
 		else out.push({ isDesc: true, desc: g.desc });
 		if (gid === 'storage') out.push(this.meter());
 		if (gid === 'map') out.push({ isTiles: true, update: () => this.toast('Updating the offline map · 412 MB'), remove: () => this.toast('The offline map would be removed (412 MB)') });
 		if (gid === 'decoders') DECS.forEach(d => out.push(this.decItem(d)));
 		parts.ess.forEach(d => out.push(this.row(d)));
+		this.fold(out, gid, parts.more, g.label.toLowerCase() + ' settings', !parts.ess.length && gid !== 'decoders');
 		if (parts.dev.length) {
 			out.push({ isSub: true, label: 'On this device', desc: 'Not synced. Each screen keeps its own.' });
 			parts.dev.forEach(d => out.push(this.row(d)));
 		}
-		if (parts.more.length) {
-			const open = !!s.more[gid];
-			out.push({ isFold: true, open, chev: open ? 90 : 0, label: open ? 'Fewer' : 'More · ' + parts.more.length, toggle: () => this.setState({ more: Object.assign({}, s.more, { [gid]: !open }) }) });
-			if (open) parts.more.forEach(d => out.push(this.row(d)));
-		}
 		return out;
+	}
+	fold(out, key, rows, of, flush) {
+		if (!rows.length) return;
+		const s = this.state, open = !!s.more[key];
+		const names = rows.map(d => d.label).join(', ');
+		out.push({ isFold: true, open, closed: !open, count: rows.length, of, names, mt: open ? '10px' : '2px', pt: open ? '10px' : '0', line: open && !flush ? 'rgba(123,236,199,.08)' : 'transparent', toggle: () => { this.setState({ more: Object.assign({}, s.more, { [key]: !open }), justOpened: open ? null : key }); } });
+		if (open) rows.forEach(d => { const r = this.row(d); if (s.justOpened === key) r.rise = 'wk-rise'; out.push(r); });
 	}
 	meter() {
 		const low = this.props.storage === 'low';
-		const segs = low
-			? [{ w: 2, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 47, c: 'rgba(123,236,199,.45)', label: 'Automatic 27 GB' }, { w: 44, c: '#3d6356', label: 'Other files 26 GB' }, { w: 7, c: 'transparent', label: 'Free 4.1 GB' }]
-			: [{ w: 1, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 8, c: 'rgba(123,236,199,.45)', label: 'Automatic 18.4 GB' }, { w: 0.5, c: '#3d6356', label: 'Other 0.3 GB' }, { w: 90.5, c: 'transparent', label: 'Free 212 GB' }];
-		return { isMeter: true, head: 'USB drive on the Pi', free: low ? '4.1 GB free of 58 GB' : '212 GB free of 232 GB', freeC: low ? '#f2b84b' : '#8ba598', edge: low ? 'rgba(242,184,75,.32)' : 'rgba(123,236,199,.08)', segs, low, lowText: 'Space is low, so calls now expire after 2 days instead of 7.', aria: segs.map(x => x.label).join(', ') };
+		const free = { c: 'transparent', ring: 'inset 0 0 0 1px rgba(123,236,199,.32)', minW: '0' };
+		const segs = (low
+			? [{ w: 2, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 47, c: 'rgba(123,236,199,.45)', label: 'Automatic 27 GB' }, { w: 44, c: '#3d6356', label: 'Other files 26 GB' }, Object.assign({ w: 7, label: 'Free 4.1 GB' }, free)]
+			: [{ w: 0.5, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 8, c: 'rgba(123,236,199,.45)', label: 'Automatic 18.4 GB' }, { w: 0.2, c: '#3d6356', label: 'Other files 0.3 GB' }, Object.assign({ w: 91.3, label: 'Free 212 GB' }, free)]).map(x => Object.assign({ ring: 'none', minW: '3px' }, x));
+		return { isMeter: true, head: 'USB drive on the Pi', free: low ? '4.1 GB free of 58 GB' : '212 GB free of 232 GB', freeC: low ? '#f2b84b' : '#8ba598', edge: low ? 'rgba(242,184,75,.32)' : 'rgba(123,236,199,.08)', segs, low, lowText: 'Space is low, so calls now expire after 2 days instead of 7.', toCap: () => this.navTo('st.cap'), aria: segs.map(x => x.label).join(', ') };
 	}
 	decPage(id) {
 		const d = DECS.find(x => x.id === id), s = this.state, out = [];
@@ -846,13 +935,10 @@ class Component extends DCLogic {
 		out.push(Object.assign({ isDecHead: true, icon: d.icon, tool: d.tool, where: d.where, stateLabel: st.label, pillBg: st.bg, pillFg: st.fg }, tile));
 		const parts = this.groupRows('dec:' + id);
 		parts.ess.forEach(x => out.push(this.row(x)));
-		if (parts.more.length) {
-			const k = 'dec:' + id, open = !!s.more[k];
-			out.push({ isFold: true, open, chev: open ? 90 : 0, label: open ? 'Fewer' : 'More · ' + parts.more.length, toggle: () => this.setState({ more: Object.assign({}, s.more, { [k]: !open }) }) });
-			if (open) parts.more.forEach(x => out.push(this.row(x)));
-		}
+		this.fold(out, 'dec:' + id, parts.more, d.name + ' settings', false);
 		const fault = on && d.state === 'fault';
-		out.push({ isStatus: true, fault, faultText: 'Stopped after 5 failed starts. The decoder rejected the channel key; fix it above and restart.', stats: [{ k: 'Running for', v: on ? d.up : '—' }, { k: 'Messages', v: on && d.state === 'run' ? d.stat : '—' }, { k: 'Last message', v: d.last }], restart: () => this.toast('Restarting ' + d.name + '…'), logs: () => this.toast('Opens the ' + d.name + ' log') });
+		const hasKey = !!BY['dec.' + id + '.key'];
+		out.push({ isStatus: true, fault, faultText: hasKey ? 'Stopped after 5 failed starts: the channel key was rejected. Fix the key above, then start it again.' : 'Stopped after 5 failed starts. Show the log for the last error.', restartLabel: fault ? 'Start again' : 'Restart decoder', stats: [{ k: 'Running for', v: on && !fault ? d.up : '—', c: '#f4f7f5' }, { k: 'Messages', v: on && d.state === 'run' ? d.stat : '—', c: '#f4f7f5' }, { k: 'Last message', v: d.last, c: fault ? '#ff9d92' : '#f4f7f5' }], restart: () => this.toast((fault ? 'Starting ' : 'Restarting ') + d.name + '…'), logs: () => this.toast('Opens the ' + d.name + ' log') });
 		return out;
 	}
 	searchItems() {
@@ -861,7 +947,7 @@ class Component extends DCLogic {
 		if (q.length >= 2) FILTERS.forEach(f => {
 			if (s.tokens.indexOf(f.id) >= 0 || !f.words.some(w => w.indexOf(q) === 0)) return;
 			const n = R.filter(d => f.test(d, this.info(d))).length;
-			out.push({ isFs: true, label: f.label, count: String(n), pick: () => this.setState({ tokens: s.tokens.concat([f.id]), q: '' }) });
+			out.push({ isFs: true, kbdDisplay: out.length ? 'none' : 'inline-block', label: f.label, count: String(n), pick: () => this.setState({ tokens: s.tokens.concat([f.id]), q: '' }) });
 		});
 		const decHits = !tests.length && words.length ? DECS.filter(d => words.every(w => (d.name + ' ' + d.tool + ' ' + d.where).toLowerCase().indexOf(w) >= 0)) : [];
 		const hits = R.filter(d => {
@@ -875,7 +961,7 @@ class Component extends DCLogic {
 		});
 		const n = hits.length + decHits.length;
 		if (!n && !out.length) { out.push({ isEmpty: true, q: s.q.trim() || 'these filters', clear: () => this.setState({ q: '', tokens: [] }) }); return out; }
-		out.push({ isCount: true, text: n === 1 ? '1 setting' : n + ' settings' });
+		out.push({ isCount: true, text: n === 1 ? '1 result' : n + ' results' });
 		decHits.forEach(d => out.push(this.decItem(d)));
 		hits.forEach(d => {
 			const isDec = d.g.indexOf('dec:') === 0, dec = isDec ? DECS.find(z => 'dec:' + z.id === d.g) : null;
@@ -887,8 +973,8 @@ class Component extends DCLogic {
 		const v = id => this.label(BY[id], this.val(id));
 		const run = DECS.filter(d => this.decOn(d) && d.state === 'run').length, stop = DECS.filter(d => this.decOn(d) && d.state === 'fault').length;
 		return {
-			station: this.val('station.name') + ' · Roscoff',
-			receiver: 'Pi receiver · ' + v('rx.rate') + ' MS/s · ' + v('rx.gain'),
+			station: (this.val('station.name') || 'WaveKit') + ' · ' + v('station.region'),
+			receiver: 'Pi receiver · ' + v('rx.rate') + ' · ' + v('rx.gain'),
 			audio: v('au.src') + ' · squelch +' + this.val('au.margin') + ' dB',
 			decoders: run + ' running' + (stop ? ' · ' + stop + ' stopped' : ''),
 			storage: v('st.keep') + ' · ' + (this.props.storage === 'low' ? '4.1 GB free' : '212 GB free'),
@@ -922,7 +1008,9 @@ class Component extends DCLogic {
 		const hasBack = !!dec || (phone && !!s.phoneGroup);
 		const backLabel = dec ? 'Decoders' : 'Settings';
 		return {
-			radius: phone ? '0' : '12px',
+			radius: phone ? '0' : '12px', rootClass: phone ? 'wk-phone' : '',
+			applyLabel: 'Apply',
+			toastC: s.toastWarn ? '#f2b84b' : '#7becc7', toastIcon: s.toastWarn ? WARN : CHECK,
 			headPad: hasBack ? '8px' : '18px',
 			title, hasBack, backLabel,
 			back: () => {
@@ -930,12 +1018,12 @@ class Component extends DCLogic {
 				else this.setState({ phoneGroup: null });
 			},
 			hasClose: !!this.props.onClose, close: () => this.props.onClose && this.props.onClose(),
-			showChangedChip: changedN > 0 && !dec, changedText: changedN + ' changed', changedOn,
+			showChangedChip: changedN > 0 && !dec && !(phone && s.phoneGroup), changedText: changedN + ' changed', changedOn,
 			chipFg: changedOn ? '#7becc7' : '#b9cac1', chipBg: changedOn ? 'rgba(123,236,199,.12)' : 'transparent', chipBorder: changedOn ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
 			toggleChanged: () => this.setState({ tokens: changedOn ? s.tokens.filter(t => t !== 'changed') : s.tokens.concat(['changed']), dec: null, phoneGroup: null }),
 			offline: s.offline, retry: () => this.retry(),
 			showSearch: !dec && !(phone && s.phoneGroup),
-			searchId: this.searchId, q: s.q,
+			searchId: this.searchId, q: s.q, ph: s.tokens.length ? 'Narrow down' : 'Search settings · squelch, ppm, retention…',
 			searchBorder: s.focus ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
 			tokens: s.tokens.map(t => ({ label: TOKEN[t], remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
 			onQ: e => this.setState({ q: e.target.value }),
@@ -952,14 +1040,10 @@ class Component extends DCLogic {
 			}),
 			scrollId: this.scrollId, padX: phone ? '8px' : '8px',
 			onScroll: () => {
-				if (s.dec || searching || phone) return;
-				const c = document.getElementById(this.scrollId);
-				if (!c) return;
-				const top = c.getBoundingClientRect().top;
-				let active = GROUPS[0].id;
-				GROUPS.forEach(g => { const el = document.getElementById(this.rowDom('g:' + g.id)); if (el && el.getBoundingClientRect().top - top <= 80) active = g.id; });
-				if (c.scrollTop + c.clientHeight >= c.scrollHeight - 4) active = GROUPS[GROUPS.length - 1].id;
-				if (active !== s.active) this.setState({ active });
+				if (s.dec || searching || phone || Date.now() < (this.spyLock || 0)) return;
+				this.spy();
+				clearTimeout(this.st);
+				this.st = setTimeout(() => this.spy(), 140);
 			},
 			items,
 			hasPending: pendN > 0,

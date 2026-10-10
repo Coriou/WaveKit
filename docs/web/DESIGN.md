@@ -426,10 +426,50 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Board tweaks:* `scenario` (normal / pending / offline), `storage` (ok / low),
     `openAt` (deep link to a group, a decoder page or one row, which pulses), `layout`
     (drawer / phone).
-  Checked on the rendered canvas inside C at 1440 px: the drawer, rail, Changed filter
-  and alias search work; text fields were narrowed afterwards so they sit beside their
-  label (not re-checked). The phone board and the Apply flow have not been looked at
-  rendered yet.
+  First render check found bare switch knobs (no track) and text fields dropping under
+  their label; both fixed in the polish pass below.
+
+- **Settings polish (2026-10-10, dedicated review pass, checked rendered at 1440 px and on
+  the phone board).**
+  - *Row grid:* label, control, `⋯` in three columns, so every control sits on one right
+    edge. Compact controls (switch, select, stepper, link, buttons, read-only, short
+    segmented) stay on the label line and are centred on label plus help. Text, secret,
+    frequency lists, chips, sliders and segmented controls wider than 184 px (150 px on a
+    phone) go full width under the label on purpose. Notes (waiting, error, warning,
+    locked) take their own full-width line; errors sit under the field.
+  - *Changed and pending:* "Reset to …" is a quiet grey inline link after the label
+    (phosphor on hover, shown on hover or focus, always on touch). The changed bar is
+    2 px with 14 px insets. Waiting and not-saved rows also get an amber tint and an
+    inset ring at .14. Resets carry units ("Reset to 2.4 MS/s").
+  - *More fold:* closed, one row "10 more · Direct sampling, Offset tuning…"; open, a
+    small MORE heading with a hairline and "Hide". "On this device" ends Display, after
+    More.
+  - *Rhythm:* one 16 px left edge for headings, rows, cards and folds; groups separated by
+    a hairline and 26 / 22 px.
+  - *Rail:* scroll-spy switches at 30 % of the height and settles after scrolling; a rail
+    click locks the spy while it scrolls, long jumps are instant.
+  - *Search:* "Narrow down" placeholder once a filter is set; the first filter suggestion
+    shows ↵ and reads "Show only …"; result count as a small uppercase label.
+  - *Decoders:* tool names pass contrast (#758b81); page header on two lines (tool, then
+    where) above a hairline; the fault box has an icon and says "Fix the key above, then
+    start it again"; the button reads "Start again" when stopped.
+  - *Storage meter:* thin segments stay visible, Free is an outline swatch; when space is
+    low it adds "Change the limit", which deep-links to "Use at most".
+  - *Apply:* warnings show together with "Waiting for Apply" (3.2 MS/s); the bar rises in;
+    the toast is just "Applied N changes"; warning toasts get an amber icon.
+  - *Accessibility and motion:* the row menu focuses its first item and closes on Escape;
+    placeholders, selection, caret and scrollbar themed and in contrast; 44 px targets on
+    the phone; motion limited to menu and row rise, toast slide and the switch knob, all
+    off under reduced motion.
+  - *Not checked rendered:* the `openAt` and `pending` tweaks themselves (same code paths
+    were exercised by hand), Escape on the row menu, the islands' "All … settings" links,
+    upward rail jumps.
+  - *Owner to decide:* (1) steppers and selects stay inline on a phone, which squeezes
+    some labels to two lines; or make them full width there. (2) The changed marker is a
+    2 px left bar as recorded; a dot by the label would be quieter. (3) Which segmented
+    controls go full width is decided by measured width; it could be a per-setting hint
+    instead. (4) "N changed" counts saved changes only; waiting ones show in the Apply bar
+    and the rail dots.
 
 ## Open questions and next topics
 
@@ -471,8 +511,8 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Owner review of the Settings board (drawer in C, the Settings board's tweaks, the phone
-board), and a rendered check of the Apply flow and the phone layout. Then pick the next
+Owner review of the polished Settings (drawer in C, the board's tweaks, the phone board)
+and the four "owner to decide" points in the Settings polish entry. Then pick the next
 topic from the open questions (Scanner, or the Settings follow-ups).
 
 ## Handoff to the dev team (later)

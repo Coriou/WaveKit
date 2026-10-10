@@ -1,209 +1,215 @@
 {
-	"v": 3,
-	"createdOnFiles": {
-		"v": 1,
-		"at": "2026-10-10T10:00:00Z"
-	},
-	"title": "WaveKit Web — App Shell",
-	"launch": {
-		"view": "canvas"
-	},
-	"pages": [],
-	"boards": {
-		"Immersive.dc.html": {
-			"x": 0,
-			"y": 0,
-			"w": 1440,
-			"h": 900,
-			"title": "C · Immersive — the signal is the app, chrome floats",
-			"expand": "fill",
-			"is_interactive": true
-		},
-		"Spectrum.dc.html": {
-			"x": 0,
-			"y": 1300,
-			"w": 1440,
-			"h": 640,
-			"title": "Spectrum + waterfall (shared, live mock) — every decoded signal type at a realistic frequency",
-			"expand": "fill",
-			"is_interactive": true
-		},
-		"Tuned.dc.html": {
-			"x": 1520,
-			"y": 1300,
-			"w": 344,
-			"h": 860,
-			"title": "Tuned-signal card (shared) — one anatomy for every signal",
-			"is_interactive": true
-		},
-		"Tuner.dc.html": {
-			"x": 0,
-			"y": 2580,
-			"w": 460,
-			"h": 600,
-			"title": "Tuner island — expanded",
-			"is_interactive": true
-		},
-		"Receiver.dc.html": {
-			"x": 540,
-			"y": 2580,
-			"w": 440,
-			"h": 860,
-			"title": "Receiver island — expanded",
-			"is_interactive": true
-		},
-		"Listen.dc.html": {
-			"x": 1060,
-			"y": 2580,
-			"w": 440,
-			"h": 760,
-			"title": "Listen island — expanded",
-			"is_interactive": true
-		},
-		"Messages.dc.html": {
-			"x": 0,
-			"y": 3840,
-			"w": 1440,
-			"h": 1500,
-			"title": "Decoded messages — every decoder, one card anatomy",
-			"is_interactive": true
-		},
-		"Decode.dc.html": {
-			"x": 1520,
-			"y": 3840,
-			"w": 380,
-			"h": 340,
-			"title": "Decode card (unknown rtl_433 JSON fallback)",
-			"is_interactive": true
-		},
-		"Json.dc.html": {
-			"x": 1980,
-			"y": 3840,
-			"w": 380,
-			"h": 340,
-			"title": "JSON viewer",
-			"is_interactive": true
-		},
-		"Activity.dc.html": {
-			"x": 0,
-			"y": 5700,
-			"w": 1240,
-			"h": 820,
-			"title": "Activity — search, columns, detail, replay",
-			"is_interactive": true
-		},
-		"Palette.dc.html": {
-			"x": 1320,
-			"y": 5700,
-			"w": 760,
-			"h": 700,
-			"title": "Command palette (⌘K) — tune, set, act, with live preview",
-			"is_interactive": true
-		},
-		"TunedGallery.dc.html": {
-			"x": 2440,
-			"y": 1300,
-			"w": 1440,
-			"h": 2900,
-			"title": "Tuned card — every signal type WaveKit decodes",
-			"is_interactive": true
-		},
-		"Map.dc.html": {
-			"x": 0,
-			"y": 6640,
-			"w": 1440,
-			"h": 900,
-			"title": "Map — everything with a position, around your station",
-			"expand": "fill",
-			"is_interactive": true
-		},
-		"Recordings.dc.html": {
-			"x": 2160,
-			"y": 5700,
-			"w": 420,
-			"h": 820,
-			"title": "Recordings — what you kept: calls, manual recordings, IQ captures",
-			"is_interactive": true
-		},
-		"Settings.dc.html": {
-			"x": 2660,
-			"y": 5700,
-			"w": 560,
-			"h": 820,
-			"title": "Settings — one registry: search, groups, decoder pages, Apply for disruptive changes",
-			"is_interactive": true
-		},
-		"SettingsPhone.dc.html": {
-			"x": 3300,
-			"y": 5700,
-			"w": 390,
-			"h": 844,
-			"title": "Settings on a phone — groups push in",
-			"is_interactive": true
-		}
-	},
-	"order": [
-		"Immersive.dc.html",
-		"Spectrum.dc.html",
-		"Tuned.dc.html",
-		"TunedGallery.dc.html",
-		"Tuner.dc.html",
-		"Receiver.dc.html",
-		"Listen.dc.html",
-		"Messages.dc.html",
-		"Decode.dc.html",
-		"Json.dc.html",
-		"Activity.dc.html",
-		"Palette.dc.html",
-		"Map.dc.html",
-		"Recordings.dc.html",
-		"Settings.dc.html",
-		"SettingsPhone.dc.html"
-	],
-	"notes": {
-		"shells": {
-			"x": 0,
-			"y": -300,
-			"text": "App shell — direction C",
-			"kind": "title1",
-			"maxW": 1440
-		},
-		"parts": {
-			"x": 0,
-			"y": 1020,
-			"text": "Shared parts",
-			"kind": "title1",
-			"maxW": 3880
-		},
-		"activity": {
-			"x": 0,
-			"y": 5420,
-			"text": "Activity, recordings, commands and settings",
-			"kind": "title1",
-			"maxW": 3690
-		},
-		"messages": {
-			"x": 0,
-			"y": 3560,
-			"text": "Decoded messages",
-			"kind": "title1",
-			"maxW": 1900
-		},
-		"islands": {
-			"x": 0,
-			"y": 2300,
-			"text": "Floating controls (direction C)",
-			"kind": "title1",
-			"maxW": 1940
-		},
-		"gaps": {
-			"x": 1580,
-			"y": 2580,
-			"w": 360,
-			"maxH": 820,
-			"fill": "orange",
-			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up\n\nRecordings\n• Keep (star) a recording: exempt from retention, synced to every client\n• Manual recordings with name, note and non-destructive trim (in/out)\n• IQ capture of the viewed span + IQ playback as a source (spectrum, audio, decoders), SigMF export\n• Storage usage and retention endpoint (kept, auto, free)\n• Recording deep links and download (Opus / WAV transcode, trimmed)\n\nMap\n• Station location in core (lat, lon, altitude), passed to readsb; estimate when unset; gpsd later\n• Position history (trails, last-hour replay) with a time cursor\n• Coverage: max range per bearing over 24 h (ADS-B, AIS)\n• Map tiles: regional PMTiles extract served by core, glyphs and style; OpenFreeMap fallback\n• Positions from ACARS / VDL2 (ADS-C, POS) and AIS aids to navigation\n\nSettings\n• Settings store in core: saved over the YAML, validated writes, live push to every client; each value says where it comes from (default, YAML, env, UI)\n• One settings schema for core and every decoder (Zod + UI hints: label, help, group, essential or More, effect, aliases, widget, unit), served to clients\n• Decoder options validated and editable at runtime (PATCH is 501 today); batched apply with restart orchestration\n• Station identity (name, location, altitude, region, callsign) owned by core and passed to decoders\n• New settings: units, time format, language, FFT size and averaging, auto-squelch margin, global retention and size cap\n• Config export / import (YAML), update check, signed-in devices"
-		}
-	},
-	"designSystems": []
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Activity.dc.html": {
+      "h": 820,
+      "is_interactive": true,
+      "title": "Activity — search, columns, detail, replay",
+      "w": 1240,
+      "x": 0,
+      "y": 5700
+    },
+    "Decode.dc.html": {
+      "h": 340,
+      "is_interactive": true,
+      "title": "Decode card (unknown rtl_433 JSON fallback)",
+      "w": 380,
+      "x": 1520,
+      "y": 3840
+    },
+    "Immersive.dc.html": {
+      "expand": "fill",
+      "h": 900,
+      "is_interactive": true,
+      "title": "C · Immersive — the signal is the app, chrome floats",
+      "w": 1440,
+      "x": 0,
+      "y": 0
+    },
+    "Json.dc.html": {
+      "h": 340,
+      "is_interactive": true,
+      "title": "JSON viewer",
+      "w": 380,
+      "x": 1980,
+      "y": 3840
+    },
+    "Listen.dc.html": {
+      "h": 760,
+      "is_interactive": true,
+      "title": "Listen island — expanded",
+      "w": 440,
+      "x": 1060,
+      "y": 2580
+    },
+    "Map.dc.html": {
+      "expand": "fill",
+      "h": 900,
+      "is_interactive": true,
+      "title": "Map — everything with a position, around your station",
+      "w": 1440,
+      "x": 0,
+      "y": 6640
+    },
+    "Messages.dc.html": {
+      "h": 1500,
+      "is_interactive": true,
+      "title": "Decoded messages — every decoder, one card anatomy",
+      "w": 1440,
+      "x": 0,
+      "y": 3840
+    },
+    "Palette.dc.html": {
+      "h": 700,
+      "is_interactive": true,
+      "title": "Command palette (⌘K) — tune, set, act, with live preview",
+      "w": 760,
+      "x": 1320,
+      "y": 5700
+    },
+    "Receiver.dc.html": {
+      "h": 860,
+      "is_interactive": true,
+      "title": "Receiver island — expanded",
+      "w": 440,
+      "x": 540,
+      "y": 2580
+    },
+    "Recordings.dc.html": {
+      "h": 820,
+      "is_interactive": true,
+      "title": "Recordings — what you kept: calls, manual recordings, IQ captures",
+      "w": 420,
+      "x": 2160,
+      "y": 5700
+    },
+    "Settings.dc.html": {
+      "h": 820,
+      "is_interactive": true,
+      "title": "Settings — one registry: search, groups, decoder pages, Apply for disruptive changes",
+      "w": 560,
+      "x": 2660,
+      "y": 5700
+    },
+    "SettingsPhone.dc.html": {
+      "h": 844,
+      "is_interactive": true,
+      "title": "Settings on a phone — groups push in",
+      "w": 390,
+      "x": 3300,
+      "y": 5700
+    },
+    "Spectrum.dc.html": {
+      "expand": "fill",
+      "h": 640,
+      "is_interactive": true,
+      "title": "Spectrum + waterfall (shared, live mock) — every decoded signal type at a realistic frequency",
+      "w": 1440,
+      "x": 0,
+      "y": 1300
+    },
+    "Tuned.dc.html": {
+      "h": 860,
+      "is_interactive": true,
+      "title": "Tuned-signal card (shared) — one anatomy for every signal",
+      "w": 344,
+      "x": 1520,
+      "y": 1300
+    },
+    "TunedGallery.dc.html": {
+      "h": 2900,
+      "is_interactive": true,
+      "title": "Tuned card — every signal type WaveKit decodes",
+      "w": 1440,
+      "x": 2440,
+      "y": 1300
+    },
+    "Tuner.dc.html": {
+      "h": 600,
+      "is_interactive": true,
+      "title": "Tuner island — expanded",
+      "w": 460,
+      "x": 0,
+      "y": 2580
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-10-10T10:00:00Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "canvas"
+  },
+  "notes": {
+    "activity": {
+      "kind": "title1",
+      "maxW": 3690,
+      "text": "Activity, recordings, commands and settings",
+      "w": 240,
+      "x": 0,
+      "y": 5420
+    },
+    "gaps": {
+      "fill": "orange",
+      "maxH": 820,
+      "text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up\n\nRecordings\n• Keep (star) a recording: exempt from retention, synced to every client\n• Manual recordings with name, note and non-destructive trim (in/out)\n• IQ capture of the viewed span + IQ playback as a source (spectrum, audio, decoders), SigMF export\n• Storage usage and retention endpoint (kept, auto, free)\n• Recording deep links and download (Opus / WAV transcode, trimmed)\n\nMap\n• Station location in core (lat, lon, altitude), passed to readsb; estimate when unset; gpsd later\n• Position history (trails, last-hour replay) with a time cursor\n• Coverage: max range per bearing over 24 h (ADS-B, AIS)\n• Map tiles: regional PMTiles extract served by core, glyphs and style; OpenFreeMap fallback\n• Positions from ACARS / VDL2 (ADS-C, POS) and AIS aids to navigation\n\nSettings\n• Settings store in core: saved over the YAML, validated writes, live push to every client; each value says where it comes from (default, YAML, env, UI)\n• One settings schema for core and every decoder (Zod + UI hints: label, help, group, essential or More, effect, aliases, widget, unit), served to clients\n• Decoder options validated and editable at runtime (PATCH is 501 today); batched apply with restart orchestration\n• Station identity (name, location, altitude, region, callsign) owned by core and passed to decoders\n• New settings: units, time format, language, FFT size and averaging, auto-squelch margin, global retention and size cap\n• Config export / import (YAML), update check, signed-in devices",
+      "w": 360,
+      "x": 1580,
+      "y": 2580
+    },
+    "islands": {
+      "kind": "title1",
+      "maxW": 1940,
+      "text": "Floating controls (direction C)",
+      "w": 240,
+      "x": 0,
+      "y": 2300
+    },
+    "messages": {
+      "kind": "title1",
+      "maxW": 1900,
+      "text": "Decoded messages",
+      "w": 240,
+      "x": 0,
+      "y": 3560
+    },
+    "parts": {
+      "kind": "title1",
+      "maxW": 3880,
+      "text": "Shared parts",
+      "w": 240,
+      "x": 0,
+      "y": 1020
+    },
+    "shells": {
+      "kind": "title1",
+      "maxW": 1440,
+      "text": "App shell — direction C",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    }
+  },
+  "order": [
+    "Immersive.dc.html",
+    "Spectrum.dc.html",
+    "Tuned.dc.html",
+    "TunedGallery.dc.html",
+    "Tuner.dc.html",
+    "Receiver.dc.html",
+    "Listen.dc.html",
+    "Messages.dc.html",
+    "Decode.dc.html",
+    "Json.dc.html",
+    "Activity.dc.html",
+    "Palette.dc.html",
+    "Map.dc.html",
+    "Recordings.dc.html",
+    "Settings.dc.html",
+    "SettingsPhone.dc.html"
+  ],
+  "pages": [],
+  "title": "WaveKit Web — App Shell"
 }
