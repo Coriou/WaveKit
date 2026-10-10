@@ -199,6 +199,52 @@ fixtures:
         key_fields: ["talkgroup", "source"],
       }
 
+  # Own DMR captures (channelizer T7b, mandatory before dsd-fme migrates: delta D2/E4).
+  # Private: real radio identifiers; copied from WAVEKIT_PRIVATE_FIXTURES_DIR, never committed.
+  - id: own_dmr_446m_2048k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: private
+    provenance:
+      notes: "Own capture 2026-10-10 09:35 CEST: lab handheld, DMR direct mode, PMR446 channel 16 (446.19375 MHz), +6 kHz from the 446.18775 MHz centre as in run 8; RTL-SDR Blog V4 on the Pi via rtlmux, gain 0, core stopped. 3 PTTs, trimmed to 18..47 s of the 60 s take. Offline csdr front in wavekit:local-core (main 9ff133d): 3 calls ending on TLC, CRC 0, FEC 8, AMBE errors 19, 1.1 % muted."
+    fetch: { kind: private }
+    file: raw/own_dmr_446m_2048k.cu8
+    sha256: 52986b809787b6b9227ebd945de3ee034ef8131bc38ac9ce122857ae7b9b6cc7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 446187750
+    duration_s: 29
+    expected:
+      {
+        min_count: 1,
+        payloads: [],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
+
+  - id: own_dmr_446m_2400k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: private
+    provenance:
+      notes: "Own capture 2026-10-10 09:37 CEST, as own_dmr_446m_2048k but at 2.4 Msps; 3 PTTs, trimmed to 14..45 s of the 60 s take. Offline csdr front: 3 calls ending on TLC, CRC 2, FEC 4, AMBE errors 18, 0.9 % muted."
+    fetch: { kind: private }
+    file: raw/own_dmr_446m_2400k.cu8
+    sha256: 8551d0f4d6804ab341ea61a9de2d6cac9f4a94f861a2212fd512ebd5c427ed9d
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 446187750
+    duration_s: 31
+    expected:
+      {
+        min_count: 1,
+        payloads: [],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
+
   # Public recordings without a stated license (Ruling T6-LIC): fetched from origin at test
   # time, never committed or redistributed. Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
   - id: sdrangel_adsb

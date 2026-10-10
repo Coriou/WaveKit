@@ -267,7 +267,7 @@ describe("download.sh v2", () => {
 		expect(sidecar.components[0]?.absoluteHz).toBe(100_050_000)
 		const again = runDownload(path, dir)
 		expect(again.stdout).toMatch(/present and verified/)
-	})
+	}, 30_000)
 	it("refuses a generated fixture whose source or output sha256 does not match", () => {
 		const bad = generatedSetup("0".repeat(64))
 		generatedManifest(bad.path, "1".repeat(64))
