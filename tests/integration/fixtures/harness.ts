@@ -193,8 +193,11 @@ export function stopCommand(pidPath: string, paddedPath: string): string {
 	].join("; ")
 }
 
+/** Whole seconds: spawnSync rejects a fractional timeout (sigid_pocsag, 16.364 s). */
 export function runSeconds(f: Fixture): number {
-	return LEAD_SECONDS + f.duration_s / f.playback_speed + TAIL_SECONDS + 10
+	return Math.ceil(
+		LEAD_SECONDS + f.duration_s / f.playback_speed + TAIL_SECONDS + 10,
+	)
 }
 
 export function isSubset(expected: unknown, actual: unknown): boolean {

@@ -135,6 +135,7 @@ describe("fixture harness helpers", () => {
 		expect(cmd).toContain(`head -c ${5 * 2_048_000 * 2} /dev/zero`)
 		expect(cmd).toContain(`head -c ${3 * 2_048_000 * 2} /dev/zero`)
 		expect(runSeconds(fixture)).toBe(5 + 20 + 3 + 10)
+		expect(runSeconds({ ...fixture, duration_s: 16.364 })).toBe(35)
 	})
 	it("stops the app by pid and KILLs its whole process group as the fallback (final review infra M3)", () => {
 		const cmd = stopCommand("/tmp/x.pid", "/tmp/x.cu8")
