@@ -134,51 +134,51 @@ These are the failure modes the addendum implies but leaves unspecified. Each ha
 ## Task index (Kiro-style checklist)
 
 **Batch 3: fixture baselines (first; no gate)**
-- [ ] 1. Manifest v2 schema and loader. _Requirements: §8_
-- [ ] 2. Repair `fixtures/manifest.yaml` to v2 and add `manifest-query.mjs`. _Requirements: §8 (D2: candidates list)_
-- [ ] 3. `download.sh` v2 with sha256 and private fetch; `convert.sh --wav-to-cu8`. _Requirements: §8, D2_
-- [ ] 4. Harness pure helpers. _Requirements: §8; Property 15_
-- [ ] 5. Collector and env-gated golden harness. _Requirements: §8; Property 15_
-- [ ] 6. **[D2]** Acquire and verify public fixtures. _Requirements: §8 acquisition_
-- [ ] 7. **[D2]** Own private captures. _Requirements: §8 acquisition_
-- [ ] 8. **CHECKPOINT: batch 3 gate** (quiet host): every fixture passes on the raw path.
+- [x] 1. Manifest v2 schema and loader. _Requirements: §8_
+- [x] 2. Repair `fixtures/manifest.yaml` to v2 and add `manifest-query.mjs`. _Requirements: §8 (D2: candidates list)_
+- [x] 3. `download.sh` v2 with sha256 and private fetch; `convert.sh --wav-to-cu8`. _Requirements: §8, D2_
+- [x] 4. Harness pure helpers. _Requirements: §8; Property 15_
+- [x] 5. Collector and env-gated golden harness. _Requirements: §8; Property 15_
+- [x] 6. **[D2]** Acquire and verify public fixtures. _Requirements: §8 acquisition_
+- [x] 7. **[D2]** Own private captures. _Requirements: §8 acquisition_
+- [x] 8. **CHECKPOINT: batch 3 gate** (quiet host): every fixture passes on the raw path.
 
 **Batch 4A: standalone process and pure Node pieces (no gate; parallel with batch 3)**
-- [ ] 9. **[D1]** Crate scaffold, args, `--version`, Makefile targets. _Requirements: §10, §11 spawn line_
-- [ ] 10. **[D1]** CU8/f32 conversion and the input assembler. _Property 7, Property 4 (byte splits)_
-- [ ] 11. **[D1]** Kaiser FIR design. _Property 6 (design level)_
-- [ ] 12. **[D1]** NCO and rational polyphase stage. _Properties 4, 5_
-- [ ] 13. **[D1]** Chain planner and per-channel DSP. _Properties 3, 4, 5, 6, 7; plan A12_
-- [ ] 14. **[D1]** Rust admission and bounded queue. _Properties 2, 8; Review Focus 1_
-- [ ] 15. **[D1][D3]** Protocol and process runtime. _Properties 8, 12, 13, 14; §11; plan A12, A13; Review Focus 7_
-- [ ] 16. Node `types.ts`, `protocol.ts`, `admission.ts`, `rate-plan.ts`. _Properties 2, 14; §2, §5, §11; Review Focus 1_
-- [ ] 17. **CHECKPOINT 4A.**
+- [x] 9. **[D1]** Crate scaffold, args, `--version`, Makefile targets. _Requirements: §10, §11 spawn line_
+- [x] 10. **[D1]** CU8/f32 conversion and the input assembler. _Property 7, Property 4 (byte splits)_
+- [x] 11. **[D1]** Kaiser FIR design. _Property 6 (design level)_
+- [x] 12. **[D1]** NCO and rational polyphase stage. _Properties 4, 5_
+- [x] 13. **[D1]** Chain planner and per-channel DSP. _Properties 3, 4, 5, 6, 7; plan A12_
+- [x] 14. **[D1]** Rust admission and bounded queue. _Properties 2, 8; Review Focus 1_
+- [x] 15. **[D1][D3]** Protocol and process runtime. _Properties 8, 12, 13, 14; §11; plan A12, A13; Review Focus 7_
+- [x] 16. Node `types.ts`, `protocol.ts`, `admission.ts`, `rate-plan.ts`. _Properties 2, 14; §2, §5, §11; Review Focus 1_
+- [x] 17. **CHECKPOINT 4A.**
 
 **Batch 4B: integration (after the Task 18 re-check)**
-- [ ] 18. **RE-CHECK:** rate-model symbols present on `main`; fresh worktree from `main`; coordination request drafted. _Requirements: rate-model §6_
-- [ ] 19. Channelizer config and `useChannelizer`. _Requirements: §6, §7_
-- [ ] 20. **[D3]** `ChannelizerProcess` and the fake binary. _Requirements: §4, §11_
-- [ ] 21. **[D3]** `ChannelizerManager`. _Properties 9, 10, 12; §4, §6; Review Focus 2, 3, 5, 6_
-- [ ] 22. **[D1][D3]** Env-gated real-binary tests. _Properties 1, 8, 12, 13, 14; Review Focus 7_
-- [ ] 23. Decoder-side requests and the cf32 tail (no behaviour change). _Requirements: §1, §2, §3_
-- [ ] 24. `DecoderManager` channel integration. _Property 11; §4, §5; Review Focus 3, 4, 5_
-- [ ] 25. `index.ts` wiring and docs. _Requirements: §4, §6_
-- [ ] 26. **[D1]** Docker `chan-build` stage and bake cache chain. _Requirements: §10_
-- [ ] 27. **CHECKPOINT 4B.**
+- [x] 18. **RE-CHECK:** rate-model symbols present on `main`; fresh worktree from `main`; coordination request drafted. _Requirements: rate-model §6_
+- [x] 19. Channelizer config and `useChannelizer`. _Requirements: §6, §7_
+- [x] 20. **[D3]** `ChannelizerProcess` and the fake binary. _Requirements: §4, §11_
+- [x] 21. **[D3]** `ChannelizerManager`. _Properties 9, 10, 12; §4, §6; Review Focus 2, 3, 5, 6_
+- [x] 22. **[D1][D3]** Env-gated real-binary tests. _Properties 1, 8, 12, 13, 14; Review Focus 7_
+- [x] 23. Decoder-side requests and the cf32 tail (no behaviour change). _Requirements: §1, §2, §3_
+- [x] 24. `DecoderManager` channel integration. _Property 11; §4, §5; Review Focus 3, 4, 5_
+- [x] 25. `index.ts` wiring and docs. _Requirements: §4, §6_
+- [x] 26. **[D1]** Docker `chan-build` stage and bake cache chain. _Requirements: §10_
+- [x] 27. **CHECKPOINT 4B.**
 
 **Batch 4C: migrations (each gated by Property 15)**
-- [ ] 28. ais-catcher. _§7 step 1; Property 15_
-- [ ] 29. dumpvdl2. _§1, §7 step 2; Property 15_
-- [ ] 30. rtl_433. _§7 step 3; Property 15_
-- [ ] 31. Audio family (direwolf, multimon-ng, dsd-fme, acarsdec). _§3, §7 step 4; Property 15_
-- [ ] 32. **CHECKPOINT: batch 4 complete.**
+- [x] 28. ais-catcher. _§7 step 1; Property 15_
+- [x] 29. dumpvdl2. _§1, §7 step 2; Property 15_
+- [x] 30. rtl_433. _§7 step 3; Property 15_
+- [x] 31. Audio family (direwolf, multimon-ng, dsd-fme, acarsdec). _§3, §7 step 4; Property 15_
+- [x] 32. **CHECKPOINT: batch 4 complete.**
 
 **Batch 5: capacity gate**
-- [ ] 33. `fake_rtl_tcp.py --file/--loop/--pacing`. _§9_
-- [ ] 34. `run_capacity.py` channel matrix, admissible placements, decoder-running check, meta. _§9, §6; plan A10_
-- [ ] 35. `summarize.py` channelizer reporting; sampler label check. _§9_
-- [ ] 36. **[quiet host]** Capacity gate run and results doc. _§9 gate; plan A10_
-- [ ] 37. **CHECKPOINT: final.**
+- [x] 33. `fake_rtl_tcp.py --file/--loop/--pacing`. _§9_
+- [x] 34. `run_capacity.py` channel matrix, admissible placements, decoder-running check, meta. _§9, §6; plan A10_
+- [x] 35. `summarize.py` channelizer reporting; sampler label check. _§9_
+- [x] 36. **[quiet host]** Capacity gate run and results doc. _§9 gate; plan A10_
+- [x] 37. **CHECKPOINT: final.**
 
 ---
 
