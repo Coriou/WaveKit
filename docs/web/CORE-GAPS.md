@@ -42,6 +42,19 @@ Format: `- [ ] item` — tick (`- [x]`) once it is in core on `main`.
 - [ ] DMR talker alias and error rate in call events (verify what dsd-fme exposes).
 - [ ] Authentication and origin policy before any browser UI ships (already on the roadmap).
 
+**Recordings**
+- [ ] Keep (star) a recording: exempt from retention, synced to every client; un-keeping
+  returns it to normal retention.
+- [ ] Manual recordings (Listen › Record) with name, note and a non-destructive trim
+  (in/out points stored on the item, applied on play and download).
+- [ ] IQ capture of the viewed span (8-bit IQ, ~4.8 MB/s at 2.4 MS/s) and IQ playback as a
+  source: spectrum, audio and every decoder run on the capture as if live, with "back to
+  live". Export as SigMF.
+- [ ] Storage endpoint: bytes kept, bytes used by auto-recordings, free space, current
+  retention (and whether it was shortened because space is low).
+- [ ] Recording deep links (open one recording in any client) and download with Opus / WAV
+  transcode of the trimmed part.
+
 **Map**
 - [ ] Station location in core config (lat, lon, altitude; set from the UI), passed to
   readsb as `--lat/--lon`; approximate location estimated from received positions when

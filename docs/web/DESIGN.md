@@ -51,6 +51,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
+| Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
 | Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
@@ -258,6 +259,48 @@ Condensed + Noto Sans, Tabler-based icons).
   reachable by name. Previewing makes trying gains, squelch levels or palettes a
   matter of arrowing through them.
 
+- **Recordings, first pass (2026-10-10).** Owner brief: very important, super refined,
+  super simple, clutter free. Settled with the owner before drawing:
+  - *What it is:* Activity is **what happened** (every call, auto-recorded, expires after
+    the retention period); Recordings is **what you kept**. Three ways in: **Keep** a call
+    in Activity (star in the detail header, `S` on the focused list; a small star marks
+    kept rows), **Record** in Listen, and **IQ capture**. Kept items never expire.
+  - *IQ captures are designed now, built later:* a kept item kind with its own row (amber
+    `IQ` tag, centre frequency and span) and a thumbnail where time runs left to right and
+    frequency bottom to top, so trim works the same as on audio. Playing one is **play as
+    source**: the spectrum retunes to the capture, an amber "Playing capture · name · time ·
+    Back to live" chip sits at the top centre of the shell, and audio and decoders run on
+    the capture. The player bar turns amber and swaps close for "Back to live". Amber is
+    the shell's "not live" colour, shared with Map replay.
+  - *Placement:* the right drawer, same slot and width (420 px) as Activity, spectrum
+    visible behind; full width below 1100 px and on a phone.
+  - *Anatomy:* header (title, count, close), one search field (Activity's typed-chip
+    model, scoped to kept items: Talkgroup, Frequency, Kind "IQ captures", Anywhere; it
+    also matches names and notes), one list grouped by day, the shared player, one footer
+    line. No toolbar, no filter chips. Rows reuse the Activity / tuned-card anatomy: type
+    tile, name (or the automatic title), time, frequency + mode line, one line of note or
+    transcript, play circle with the kept duration.
+  - *Open in place, no second pane:* clicking a row opens it inside the list: waveform with
+    two trim handles (drag, arrow keys, or `I` / `O` at the playhead; non-destructive,
+    "Keeping 0:12 of 0:42 · Reset"), transcript or "Decoded in this capture" chips for IQ,
+    Name and Note fields (the name's placeholder is the automatic title), then one action
+    row: Play (shows the kept length when trimmed) / Play as source, Download, Copy link,
+    and `⋯` (Tune to, Show in Activity, Remove / Delete). Arrows move a cursor; if a row is
+    open the next one opens instead, so reading through is one key.
+  - *Remove vs delete:* a kept call is *removed* (it goes back to Activity and expires
+    normally); a manual recording or IQ capture is *deleted*. Both have Undo in a toast.
+  - *Download:* audio as Opus (default) or WAV; IQ as SigMF (opens in SDR++ and GNU Radio)
+    or the tuned channel's audio. Downloads are the trimmed part and say so.
+  - *Storage:* one quiet footer line, "Kept 1.6 GB · calls expire after 7 days · 212 GB
+    free"; when space is short it turns amber ("4.1 GB free · calls now expire after 2 days
+    instead of 7"). It links to Settings › Storage. Tweak `storage` shows both.
+  - *Live recording:* while Listen › Record is on, a red row at the top shows the
+    frequency, a timer and Stop; the recording lands at the top of Today, highlighted,
+    with "Transcribing…".
+  - *Empty state:* one line on how to keep something, with "Open Activity" (tweak `view`).
+  - *Keyboard (list focused):* ↑↓ move, Enter open/close, Space play, J / L ±5 s, K
+    pause, I / O trim, Delete remove, Esc close.
+
 ## Open questions and next topics
 
 - Auto band map: remember what was decoded where and keep it labelled on the
@@ -276,7 +319,13 @@ Condensed + Noto Sans, Tabler-based icons).
 - Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a
   ghost VFO only? Owner to judge after trying it. Palette on mobile (bottom sheet?).
   Single-key shortcuts and `G` chords need a design pass with the full keymap.
-- Map view, Scanner, Recordings, Settings.
+- Recordings follow-ups: where "Capture IQ" starts (palette command and Receiver island
+  are the candidates; not drawn), capture length / size limits, and whether a running
+  capture shows in the shell like the red recording row. Playlists or folders are out on
+  purpose; revisit only if search plus day grouping stops being enough. `S` means *keep*
+  in a focused Activity list but *save frequency* in the palette keymap: settle in the
+  keymap pass. Recordings at phone width needs a look on a real phone layout.
+- Map view, Scanner, Settings.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
 
@@ -286,43 +335,11 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: the Recordings screen (dock → Recordings).** Owner brief (2026-10-10): very
-important, and the UX must be super refined, super simple, clutter free. Fewer
-controls than feels necessary; every element has to earn its place.
-
-What already exists and must stay consistent:
-- Core auto-records all audio (analog transmissions from squelch, digital calls) with
-  retention; see CORE-GAPS "Auto-record all audio" and "Transcription pipeline".
-- Activity already replays recordings inline (player with speed and auto-next, live
-  audio pauses while replaying, transcript slot, "Play conversation").
-- Listen island has a manual Record toggle; the tuned card has Play last / Replay.
-- Decision: no text filters outside Activity. Recordings must justify any search it
-  has, or reuse Activity's search model and chips rather than inventing another.
-
-Settle first, with the owner, before drawing:
-1. How Recordings differs from Activity filtered to "With audio". Proposal to test:
-   Activity is *what happened*; Recordings is *what you kept*: manual recordings,
-   starred clips, and (later) IQ/baseband captures you can re-tune and re-decode.
-   Auto-recorded calls stay in Activity and are promoted by starring them.
-2. IQ/baseband recording (SDR++-style: record a slice of spectrum, play it back
-   through the whole app as if live). In scope now or later? It would be the strongest
-   reason for a separate screen. Likely a new core gap.
-3. Storage and retention: where the operator sees space used and what expires; one
-   quiet line, not a settings page.
-4. Export and share (clip a segment, download WAV/Opus, copy a link for other
-   clients).
-
-Design constraints to hold: one list, one player, no toolbars of icons; grouping by
-day; the row is the anatomy of the tuned card's earlier items (who/what, frequency,
-duration, transcript snippet) so nothing new to learn; playback reuses the Activity
-player. Keyboard: space play/pause, arrows move, J/K/L scrub. Works on the Immersive
-shell (spectrum stays visible behind, or Recordings takes the full stage like Map?)
-and on a phone width.
-
-Start by reading the Activity and Tuned boards (`canvas/Activity.dc.html`,
-`canvas/Tuned.dc.html`) and the Activity entries in the decision log above. Map
-follow-ups (label density per zoom, altitude ramp on real traffic, phone layout) wait
-for the owner's review.
+Recordings first pass is drawn and waits for the owner's review on the canvas (board
+"Recordings", and the dock in C · Immersive: open Recordings, play the "Harbour band" IQ
+capture to see the shell's capture state, turn on Record in Listen to see the live row).
+Pick the next topic from the open questions; Scanner and Settings are the remaining
+screens behind the dock.
 
 ## Handoff to the dev team (later)
 

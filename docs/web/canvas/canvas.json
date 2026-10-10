@@ -134,6 +134,14 @@
 			"title": "Map — everything with a position, around your station",
 			"expand": "fill",
 			"is_interactive": true
+		},
+		"Recordings.dc.html": {
+			"x": 2160,
+			"y": 5700,
+			"w": 420,
+			"h": 820,
+			"title": "Recordings — what you kept: calls, manual recordings, IQ captures",
+			"is_interactive": true
 		}
 	},
 	"order": [
@@ -151,7 +159,8 @@
 		"Json.dc.html",
 		"Activity.dc.html",
 		"Palette.dc.html",
-		"Map.dc.html"
+		"Map.dc.html",
+		"Recordings.dc.html"
 	],
 	"notes": {
 		"shells": {
@@ -171,9 +180,9 @@
 		"activity": {
 			"x": 0,
 			"y": 5420,
-			"text": "Activity and commands",
+			"text": "Activity, recordings and commands",
 			"kind": "title1",
-			"maxW": 2080
+			"maxW": 2580
 		},
 		"messages": {
 			"x": 0,
@@ -193,9 +202,9 @@
 			"x": 1580,
 			"y": 2580,
 			"w": 360,
-			"maxH": 680,
+			"maxH": 820,
 			"fill": "orange",
-			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up"
+			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up\n\nRecordings\n• Keep (star) a recording: exempt from retention, synced to every client\n• Manual recordings with name, note and non-destructive trim (in/out)\n• IQ capture of the viewed span + IQ playback as a source (spectrum, audio, decoders), SigMF export\n• Storage usage and retention endpoint (kept, auto, free)\n• Recording deep links and download (Opus / WAV transcode, trimmed)"
 		}
 	},
 	"designSystems": []

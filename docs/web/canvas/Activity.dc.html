@@ -82,7 +82,7 @@ body{margin:0;background:#0b1512}
 		<sc-if value="{{showLists}}" hint-placeholder-val="{{true}}">
 			<div style="flex: 1; min-width: 0; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
 				<sc-for list="{{columns}}" as="col" hint-placeholder-count="1">
-					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34); outline: none">
+					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34); outline: none">
 						<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
 							<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: #b9cac1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
 							<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{col.count}}</span>
@@ -114,6 +114,7 @@ body{margin:0;background:#0b1512}
 												<span style="display: flex; align-items: baseline; gap: 10px; min-width: 0">
 													<span style="flex: 0 1 auto; min-width: 0; font-weight: 700; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.title}}</span>
 													<span style="flex: 1"></span>
+													<sc-if value="{{r.kept}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="#7becc7" stroke="#7becc7" stroke-width="1.5" stroke-linejoin="round" role="img" aria-label="Kept in Recordings" style="flex: none; align-self: center"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg></sc-if>
 													<span style="flex: none; font-size: 12px; color: {{r.timeC}}; font-variant-numeric: tabular-nums">{{r.time}}</span>
 												</span>
 												<span style="display: flex; align-items: center; gap: 5px; min-width: 0; margin-top: 1px; font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden">
@@ -166,6 +167,9 @@ body{margin:0;background:#0b1512}
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{backIcon}}"></path></svg>{{backText}}
 					</button>
 					<div style="flex: 1"></div>
+					<sc-if value="{{selCanKeep}}" hint-placeholder-val="{{false}}">
+						<button onClick="{{toggleKeep}}" aria-pressed="{{selKept}}" title="{{keepTitle}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: {{keepFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="{{keepFill}}" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>{{keepText}}</button>
+					</sc-if>
 					<button onClick="{{copySel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 13px">{{copyText}}</button>
 					<button onClick="{{tuneSel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 13px; font-weight: 700">Tune {{selFreq}}</button>
 				</header>
@@ -309,7 +313,7 @@ class Component extends DCLogic {
 		this.state = {
 			items: SEED.map((x, i) => Object.assign({ id: 'm' + i }, x)), pending: [], tick: 0, later: 0,
 			q: '', tokens: [], focus: false, sugg: 0, cats: [], audioOnly: false, paused: false, recording: true,
-			cols: ['all', 'voice', 'msgs'], sel: null, play: null, pos: 0, playing: false, speed: 1, autoNext: true, mode: 'wide', copied: false
+			cols: ['all', 'voice', 'msgs'], kept: ['m8'], sel: null, play: null, pos: 0, playing: false, speed: 1, autoNext: true, mode: 'wide', copied: false
 		};
 	}
 	componentDidMount() {
@@ -395,6 +399,7 @@ class Component extends DCLogic {
 		add({ type: 'text', v: q, kind: 'Contains', value: '“' + q + '”' }, 'Anywhere', '“' + q + '”');
 		return out;
 	}
+	toggleKeep(id) { const k = this.state.kept; this.setState({ kept: k.includes(id) ? k.filter(x => x !== id) : k.concat([id]) }); }
 	addToken(t) { this.setState({ tokens: this.state.tokens.concat([t]), q: '', sugg: 0 }); }
 	resume() { const s = this.state; this.setState({ paused: false, pending: [], items: s.pending.slice().reverse().concat(s.items) }); }
 	renderVals() {
@@ -417,7 +422,7 @@ class Component extends DCLogic {
 				prevC: x.transcript ? '#e3ece7' : x.text ? '#d0dcd5' : '#a3b6ad',
 				prevI: x.transcriptState === 'pending' || x.toneOnly ? 'italic' : 'normal',
 				prevF: x.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit',
-				icon: I[x.cat], rec: !!x.live,
+				icon: I[x.cat], rec: !!x.live, kept: s.kept.includes(x.id),
 				selected: s.sel === x.id ? 'true' : 'false',
 				bg: s.sel === x.id ? 'rgba(123,236,199,.11)' : x.fresh ? 'rgba(123,236,199,.07)' : isCur ? 'rgba(123,236,199,.05)' : 'transparent',
 				ring: s.sel === x.id ? 'inset 0 0 0 1px rgba(123,236,199,.28)' : 'none',
@@ -449,6 +454,7 @@ class Component extends DCLogic {
 					const i = list.findIndex(x => x.id === s.sel);
 					if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); const n = list[Math.max(0, Math.min(list.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1)))]; if (n) this.setState({ sel: n.id }); }
 					else if (e.key === ' ' && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.playId(list[i].id); }
+					else if ((e.key === 's' || e.key === 'S') && i >= 0 && this.playable(list[i])) { e.preventDefault(); this.toggleKeep(list[i].id); }
 					else if (e.key === 'Escape') this.setState({ sel: null });
 				}
 			};
@@ -516,6 +522,13 @@ class Component extends DCLogic {
 			sel: selItem || items[0],
 			selFreq: selItem ? selItem.freq : '',
 			copyText: s.copied ? 'Copied' : 'Copy',
+			selCanKeep: !!selItem && this.playable(selItem) && !selItem.live,
+			selKept: !!selItem && s.kept.includes(selItem.id),
+			keepText: selItem && s.kept.includes(selItem.id) ? 'Kept' : 'Keep',
+			keepFg: selItem && s.kept.includes(selItem.id) ? '#7becc7' : '#b9cac1',
+			keepFill: selItem && s.kept.includes(selItem.id) ? 'currentColor' : 'none',
+			keepTitle: selItem && s.kept.includes(selItem.id) ? 'Kept in Recordings. Click to let it expire with other calls (S)' : 'Keep in Recordings so it never expires (S)',
+			toggleKeep: () => selItem && this.toggleKeep(selItem.id),
 			copySel: () => { if (!selItem) return; try { navigator.clipboard.writeText(selItem.title + ' · ' + selItem.proto + ' · ' + selItem.time + ' · ' + selItem.freq + ' MHz\n' + preview(selItem)); } catch (e) {} this.setState({ copied: true }); clearTimeout(this.ct); this.ct = setTimeout(() => this.setState({ copied: false }), 1500); },
 			tune: f => this.props.onTune && this.props.onTune(f),
 			tuneSel: () => selItem && this.props.onTune && this.props.onTune(Math.round(parseFloat(selItem.freq) * 1e6)),

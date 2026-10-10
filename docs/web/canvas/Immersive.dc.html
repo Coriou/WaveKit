@@ -51,6 +51,20 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 		</div>
 	</sc-if>
 
+	<sc-if value="{{showRecordings}}" hint-placeholder-val="{{false}}">
+		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 420px; z-index: 4">
+			<dc-import name="Recordings" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" hint-size="100%,100%"></dc-import>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
+		<div role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 14px; background: rgba(48,37,12,.62); border: 1px solid rgba(242,184,75,.32); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13px; color: #f7dca4">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>
+			<span><b style="color: #f2b84b">Playing capture</b> · {{sourceText}}</span>
+			<button onClick="{{backToLive}}" style="height: 32px; padding: 0 12px; border-radius: 9px; background: rgba(242,184,75,.18); color: #f2b84b; font-weight: 700; font-size: 12.5px">Back to live</button>
+		</div>
+	</sc-if>
+
 	<div style="position: absolute; left: 16px; bottom: 20px; z-index: 3">
 		<dc-import name="Listen" values="{{listenVals}}" on-set="{{set}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" hint-size="340px,64px"></dc-import>
 	</div>
@@ -129,6 +143,14 @@ class Component extends DCLogic {
 			else if (id === 'scan') this.goNav('scanner');
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
 		};
+		this.setSource = src => this.setState({ source: src });
+		this.backToLive = () => this.setState({ source: null, srcStop: Date.now() });
+		this.stopRec = () => this.setState({ rec: false });
+		this.recActivity = x => {
+			if (!x) return this.goNav('activity');
+			const tok = x.tg ? { type: 'tg', v: x.tg, kind: 'Talkgroup', value: x.tg } : { type: 'freq', v: (x.freq / 1e6).toFixed(3), kind: 'Frequency', value: (x.freq / 1e6).toFixed(3) + ' MHz' };
+			this.goActivity({ tokens: [tok] });
+		};
 		this.mapAction = (id, tok) => { if (id === 'activity') this.goActivity({ tokens: [tok] }); };
 		this.used = id => {
 			const r = this.state.recent, old = r.find(x => x.id === id);
@@ -165,6 +187,11 @@ class Component extends DCLogic {
 			rateHz: s.rate * 1e6,
 			savedMarks: s.saved.map(x => ({ f: x.f, label: x.label })),
 			showActivity: s.nav === 'activity' && s.open !== 'rx',
+			showRecordings: s.nav === 'recordings' && s.open !== 'rx',
+			recOn: !!s.rec, recLabel: (s.freq / 1e6).toFixed(3) + ' ' + s.mode,
+			srcStop: base.srcStop || 0, setSource: this.setSource, stopRec: this.stopRec, recActivity: this.recActivity,
+			hasSource: !!base.source, backToLive: this.backToLive,
+			sourceText: base.source ? base.source.title + ' · ' + base.source.time : '',
 			closeActivity: this.closeActivity,
 			actMode: s.actMode || 'drawer',
 			setActMode: this.setActMode,
@@ -177,7 +204,7 @@ class Component extends DCLogic {
 			},
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
-			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'map',
+			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'recordings' && s.nav !== 'map',
 			showMap: s.nav === 'map', mapAction: this.mapAction,
 			nav: NAV.map(n => {
 				const on = n.id === s.nav;
