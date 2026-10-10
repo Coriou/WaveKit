@@ -341,16 +341,16 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 | name | type/value | why |
 |---|---|---|
 | `scanner.ws.spectrumSummaryBins` | int, default **2048 (provisional)**, bounds 512–2048, config/env only (absent from `RuntimeSettingsOverridesSchema` and `NUMERIC_BOUNDS`) | **Role:** the engine's summary-detail budget, read only by `buildPipelineConfig` → `PipelineConfig.spectrumBins`. It is never per client and never PATCHable, so no display choice can rebuild a pipeline. **Why 2048:** it equals the largest client request, and at the default `fftSize` ≤ 2048 it is native (d = 1). **Provisional:** Step 9a's measurement fixes the final value; the fallback is 1024, then 512. |
-| `scanner.ws.spectrumMaxProfiles` | int, default **4**, bounds 1–16, config/env only | **Cap:** the size of U, the reserved set: distinct non-default `(sourceId, key)` pairs over every client's `current` and `next` selection. **Exempt:** only the *current* default key; pairs from a former default start counting, and the excess is remapped (M2). **Bounds:** built profiles ≤ engines + cap at all times; reserved ≤ cap + 1 during one transition (M3). |
+| `scanner.ws.spectrumMaxProfiles` | int, default **4**, bounds 1–16, config/env only | **Cap:** the size of U, the reserved set: distinct non-default `(sourceId, key)` pairs over every client's `current` and `next` selection. **Exempt:** only the *current* default key; pairs from a former default start counting, and the excess is remapped (M2). **Bounds:** built profiles ≤ engines + cap at all times; reserved ≤ cap + 1 while a switch is in flight (M3). |
 | Client profile bounds | `hz`: `clamp(round(hz × 2) / 2, 0.5, 25)`; `bins`: `clamp(round(bins), 128, 2048)` (`PROFILE_LIMITS`) | Same bounds as `ws.spectrumHz`/`ws.spectrumBins` and spec § 9. The 0.5 Hz step lets near-equal requests share a profile. |
-| Over-limit outcome | **nearest admissible profile, reported**; never rejected for size | **One rule.** Out-of-range values become the nearest bound. Past the cap, a request maps to a shareable active profile on its source or the current default; it prefers candidates ≤ the request on both axes, then the metric (finding 14). **Why:** frames are self-describing (`profile`, `binCount`, `binHz`), and `adjusted` makes the substitution testable. Clamping alone cannot enforce a count cap, and rejection blanks a waterfall over a soft limit. **Rejected with a code:** only requests that cannot be served at all. Main accepted this (32fc238). |
+| Over-limit outcome | **nearest admissible profile, reported**; never rejected for size | **One rule.** Out-of-range values become the nearest bound. Past the cap, a request maps to a profile already active on its source or the current default; it prefers candidates ≤ the request on both axes, then the metric (finding 14). **Why:** frames are self-describing (`profile`, `binCount`, `binHz`), and `adjusted` makes the substitution testable. Clamping alone cannot enforce a count cap, and rejection blanks a waterfall over a soft limit. **Rejected with a code:** only requests that cannot be served at all. Main accepted this (32fc238). |
 | Nearest metric | `abs(log2(bins / b)) + abs(log2(hz / h))`; ties: fewer bins, then lower hz, then key order | Scale-invariant and deterministic; ties go to the cheaper profile. |
 | Selection model | One selection per client: **default** (no options: the default profile on every eligible source) or **one source** with one profile | The option-less contract is unchanged and the cost per client is bounded. |
 | Demand | Display consumer `ws:<clientId>` in the source entry's `displays` set; scanner consumers `job:<id>` in `jobs` (R2). The engine runs while either is non-empty | Engines stay shared, and display and scanner demand stay separate. |
 | Per-client requests (M4) | At most **1 running + 1 pending** operation per client; a newer request replaces the pending one. A running operation is superseded when a newer request, a disconnect, `stop()` or a removal of its source arrives. A superseded or failed operation sends no ack or snapshot and releases what it acquired | Bounded work. A stale ack or stale demand is impossible. |
 | Commit order (finding 1) | Commit sets `current`, then synchronously emits `"profile"(clientId, ack, snapshots)`, which the wiring sends at once. Only after that are unneeded sources released | **Guarantee:** ack → snapshot(s) → live frames, per client. |
-| Make-before-break (M3) | The old selection keeps receiving frames until commit. When U is full, a switch whose old pair belongs to that client alone may use the single global **transition slot** | Exact bounds: built (`current`) non-default pairs ≤ cap at all times; reserved (`current` ∪ `next`) ≤ cap + 1. |
-| Permanent removal (M1) | `SourceManager` `"source-removed"(sourceId, removedAt)`. `disconnect()` emits it once (`src/core/source-manager.ts` :1400-1408, called by `DELETE /api/sources/:id`, `src/api/routes/sources.ts` :494). `reconnect()` and shutdown emit only the internal `"removed"` (:1411-1446; the comment is at `src/api/server.ts` :351-356) | **Distinguishes permanent removal:** Task 35's `ScannerService` already listens to `"source-removed"` (task-35-brief l.1922). No new signal is needed; 37a adds the event to the documentary `SourceManagerEvents` interface (one line). |
+| Make-before-break (M3) | The old selection keeps receiving frames until commit. Admission counts every **other** client's `current` and `next`. The client's own `current` is left out only because commit replaces it atomically. **Transition allowance:** 0 extra built profiles. **Engines:** at most 1 extra engine per cross-source switch, bounded by the eligible source count. | Exact bounds: built (`current`) non-default pairs ≤ cap at all times. Reserved pairs (`current` ∪ `next`) ≤ cap + 1, because each admission bounds U without the admitting client's old pair by cap, and later admissions count that pair. This follows the reviewer's M3 rule and needs no global slot state. |
+| Permanent removal (M1) | `SourceManager` `"source-removed"(sourceId, removedAt)`. `disconnect()` emits it once (`src/core/source-manager.ts` :1400-1408, called by `DELETE /api/sources/:id`, `src/api/routes/sources.ts` :494). `reconnect()` (:1454, `teardown` at :1463) and shutdown (`disconnectAll()` :1979-1981) emit only the internal `"removed"` (`teardown()` :1411-1446, emit at :1445). The comment is at `src/api/server.ts` :352-356. `SourceFanoutRouter` drops the fanout on `"removed"` (`source-fanout-router.ts` :45). A permanent `disconnect()` emits no `disconnected` (:1401-1405) | **Distinguishes permanent removal:** Task 35's `ScannerService` already listens to `"source-removed"` (task-35-brief l.1922). No new signal is needed; 37a adds the event to the documentary `SourceManagerEvents` interface (one line). |
 | Wire format | The existing `subscribe` message gains optional `options: { spectrum: SpectrumSubscribeOptions }` | **Switching:** re-subscribe; `subscribe` without options returns to default. **Release:** `unsubscribe` or disconnect. No new client message type, no WS tuning, no command bus. |
 | Routing | `"frame"(frame, clientIds)` → `sendToClients` (serialises once) | Each profile is built once per summary group and delivered only to its clients. |
 | Snapshot | Sent at commit, for each source the client receives: the last block summary reduced to its profile, `snapshot: true`. Only when the summary's `(stream, epoch)` equals `engine.currentEpoch()`; otherwise none | It matches its profile and epoch. REST `latestFrame` (default profile) stays. |
@@ -543,7 +543,6 @@ interface ClientState {
 }
 // SpectrumService fields
 private readonly clients = new Map<string, ClientState>()
-private transitionHolder: string | null = null          // M3: at most one over-cap switch in flight
 private defaultKey: string | null = null                // M2: last default key seen by syncDefault()
 private readonly removedSources = new Set<string>()     // M1: permanently removed until "connected" again
 private readonly sourceGen = new Map<string, number>()  // M1: bumped on each permanent removal
@@ -580,17 +579,16 @@ Each running op captures `mySeq = state.seq`. It is **superseded** when, after a
 3. Normalise: `{profile, adjusted} = normaliseProfile(opts, def)`.
 4. Admission, for a source selection with `profile.key !== def.key` (finding 8, M2, M3):
    - **Pairs.** Let P = `(sourceId, profile.key)`.
-   - **U.** U is the set of distinct non-default pairs (key ≠ `def.key`) over every client's `current` and `next`.
-   - **Leaving pair.** Let L be this client's own `current` pair if it is non-default and no other client's `current`
-     or `next` uses it. L leaves U at commit.
-   - **Shareable.** Shareable pairs are U minus the transition holder's leaving pair.
-   - **Admit** when one of these holds:
-     - P is shareable;
-     - `|U| < cap`;
-     - L exists and `transitionHolder === null`. In this case set `transitionHolder = clientId`.
-   - **Otherwise map** P with `profile = nearestProfile(profile, [def, ...shareable profiles on sourceId])` and push
-     `"profile-limit"`.
+   - **Others.** O is the set of distinct non-default pairs (key ≠ `def.key` at check time) over the `current` and
+     `next` of every **other** client.
+   - **Admit** iff `|O ∪ {P}| ≤ cap`. This covers sharing: a P already in O adds nothing. The client's own `current`
+     is left out because commit replaces it atomically.
+   - **Otherwise map** P with `profile = nearestProfile(profile, [def, ...candidates])` and push
+     `"profile-limit"`. Candidates are the pairs of O on `sourceId` that are themselves admissible, i.e.
+     `|O| ≤ cap`. While another switch holds the reserve at cap + 1, the only candidate is the default, so a
+     substitute can never be a pair that is about to leave.
    - Default-key and default selections always pass.
+   - **Invariants (M3).** Built pairs (over `current`) ≤ cap. Reserved pairs U = all `current` ∪ `next` ≤ cap + 1.
 5. Set `next`. The sources it needs are every non-removed `eligibleSources()` entry for the default selection, else
    `[sourceId]`.
 6. For each needed source the client does not hold, `await this.acquireDisplay(source, clientId, state)`. If the op is
@@ -600,17 +598,15 @@ Each running op captures `mySeq = state.seq`. It is **superseded** when, after a
      and `code` `SPECTRUM_SOURCE_REMOVED` or `SPECTRUM_ENGINE_ERROR`.
 7. **Commit** (synchronous):
    - `current = next`, `next = null`;
-   - if `transitionHolder === clientId`, then `transitionHolder = null`;
    - build the ack (`outcome`: `default`, `exact` when `adjusted` is empty, else `nearest`), with `effectiveHz` from the
      engine config;
    - build the snapshots (below);
    - `this.emit("profile", clientId, ack, snapshots)`.
 8. Release the held sources the new `current` does not need, through `releaseDisplay`, awaited in order.
 
-**Abort.** `next = null`, and the transition slot is freed if this client holds it. Every held source that `current`
-does not need is released. Abort never emits `"profile"`, except for the not-superseded rejections in step 6.
+**Abort.** `next = null`. Every held source that `current` does not need is released. Abort never emits `"profile"`, except for the not-superseded rejections in step 6.
 
-**Unsubscribe op.** It sets `current = next = null`, frees the transition slot if held, and releases every held source.
+**Unsubscribe op.** It sets `current = next = null` and releases every held source.
 It emits nothing: the broadcaster has already sent `unsubscribed`.
 
 **`acquireDisplay(sourceId, clientId, state)`.**
@@ -645,9 +641,9 @@ It emits nothing: the broadcaster has already sent `unsubscribed`.
      - If `next.sourceId === sourceId` and the op is in flight, run `seq++` so the op is superseded. The op's own
        not-superseded check would then fail too, so the client gets nothing for that op. Instead, the client gets the
        `outcome: "removed"` notice right away, with `selection` describing `current`.
-     - Delete `sourceId` from `held`. The transition slot is freed by the aborting op as usual, or at the holder's
-       commit.
-  3. It then runs `void this.dropDisplays(sourceId)`. That method clears the entry's `displays`, drops its holds, and
+     - Delete `sourceId` from `held`.
+  3. It then runs `void this.dropDisplays(sourceId)`. That method clears the entry's `displays`, drops its `holds` and
+     `lastSummary` (so no snapshot can name the removed source), and
      stops the engine if `jobs` is empty (through the `closing` map). `stopEngine` removes the fanout branch
      `scanner-<sourceId>`, and a missing branch or router fanout is tolerated.
   4. If `jobs` is not empty, the engine stays up until Task 35's own `"source-removed"` handler fails those jobs and
@@ -671,14 +667,27 @@ summary before `recipients()`.
    - emit `"profile"` with `{selection: "source", sourceId, profile: def, outcome: "nearest", adjusted: ["profile-limit"], …}`.
      This goes for `current` only. A remapped `next` reports in its commit ack.
 
-The invariant is restored: |U| ≤ cap, plus 1 while a transition is in flight. It holds over any PATCH sequence.
+The invariant is restored: |U| ≤ cap, plus 1 while a switch is in flight. It holds over any PATCH sequence.
+
+**Why not "follow the default" (the reviewer's M2 fix).** The reviewer proposed storing a request equal to the
+default as "follows the default" and counting non-default keys at check time. Counting at check time is already
+step 4. "Follow the default" alone is not enough. A custom key can *become* the default through a PATCH, and its
+freed slot can be refilled; a later PATCH away from that key then makes it non-default again, which puts |U| over the
+cap. Example with cap 1:
+1. `c2` holds `10:512`.
+2. A PATCH makes `10:512` the default.
+3. `c3` takes `20:1024`.
+4. A PATCH makes `10:256` the default, and |U| = 2.
+`syncDefault`'s remap closes that path, and test S16 step 5 covers it. A request equal to the default still keeps the
+key it asked for, unless the cap forces a remap.
 
 **Frames and decimation (M5, findings 4 and 9).** On `block-summary`:
 1. Call `syncDefault()`, then `recipients(sourceId)`. Default clients that hold the source go under `def.key`; source
    clients go under `current.profile.key`.
 2. Drop holds of absent keys.
 3. If `entry.engine.config()` is null, skip.
-4. Compute `blockHz = 1000 / cfg.integrationMs` and `n = summariesPerFrame(blockHz, profile.hz)`.
+4. Compute `blockHz = 1000 / cfg.integrationMs` and `n = summariesPerFrame(blockHz, profile.hz)` =
+   `max(1, ceil(blockHz / hz − 1e-9))`.
 5. `hold = accumulateHold(…)`, unchanged except that its `count` survives a reset. Then `hold.count += 1`.
 6. When `hold.count >= n`, emit `"frame"(frame, clientIds)` and set `hold.bins = null`, `hold.count = 0`.
 
@@ -703,7 +712,8 @@ The snapshot is `{ ...frame(…, reduceMaxHold(lastSummary.bins, profile.bins)),
 **`stop()` (M4).**
 1. `stopping = true`. For every client, run `seq++` and set `pending = null`.
 2. `await Promise.allSettled(running ops)`. Each op aborts at its next check and releases what it holds.
-3. Clear `clients`, set `transitionHolder = null`, and stop the engines as before.
+3. Clear `clients` and stop the engines as before. A `subscribe` after `stop()` is a no-op: it sends nothing and
+   acquires nothing.
 
 **Never** call `reconfigure`, `refreshTuning`, `setSpectrumFeed(false)` or read client values into a `PipelineConfig`
 on any display path.
@@ -882,8 +892,11 @@ S11. "coalesces requests to one running and one pending; superseded requests sen
        synchronously.
      - B is never acquired and A's acquisition is released.
      - Exactly one ack arrives, for C. The `displays` sets end as `rtl: {ws:c1}` and `air: {}`.
-S12. "stop() cancels in-flight subscribes". `stop()` during a gated acquire produces no ack, `clients.size` 0, and no
-     engine or branch remains.
+     - 10 subscribes in one tick lead to ≤ 2 acquisitions (the running one and the last) and one ack, for the last
+       request.
+S12. "stop() cancels in-flight subscribes". `stop()` during a gated acquire with a pending request produces no ack,
+     `clients.size` 0, and no engine or branch remains. A `subscribe` after `stop()` sends nothing and acquires
+     nothing.
 S13. "an acquire waits for a closing engine of the same source" (finding 3).
      - `c1` holds rtl alone; the fake host's `close()` is held.
      - `unsubscribe(c1)` and `subscribe(c2, {rtl})` run without an await between them.
@@ -894,6 +907,8 @@ S14. "permanent removal releases display demand and notifies affected clients; a
        - `c1 {rtl}` gets `outcome "removed"`, `selection "none"`, `removedSourceId "rtl"`;
        - default client `c2` gets `outcome "removed"`, `selection "default"`, and keeps its air frames.
      - With no job, the rtl engine and its branch are gone. No `"stream"` or `"released"` event fires.
+     - `status().profiles` has no rtl entry, and the cap count is 0.
+     - A later default subscribe (`c3`) acquires only air.
      - With `job:a` also holding rtl, the engine stays until `release("rtl", "job:a")`.
      - A new `{rtl}` subscribe is rejected with `SPECTRUM_SOURCE_REMOVED`.
      - After `sources.emit("connected", "rtl")`, the same subscribe succeeds.
@@ -907,17 +922,26 @@ S16. "the profile cap stays bounded across default PATCH changes" (M2). Cap 1, d
      - `c2 {rtl, 10, 256}` is exempt.
      - PATCH to C = `10:128`, then let the next summary or admission run `syncDefault`. The pair B no longer fits.
        `c2` is remapped to C with a `nearest`/`profile-limit` notice, and `c1` keeps A (it already counted).
-     - After every step, |U| ≤ 1 and the status shows at most 1 non-default profile.
-S17. "make-before-break uses one bounded transition slot" (M3). Cap 1.
-     - `c1 {rtl, 20, 1024}` gives |U| = 1.
-     - `c1` switches to `{air, 25, 2048}` with `loadEngine(air)` gated. It takes the slot, so reserved |U| = 2 = cap + 1,
-       while built non-default profiles stay 1 (the status shows only `rtl 20:1024`).
-     - During the hold, `c2 {rtl, 15, 256}` and `c3 {rtl, 20, 1024}` are both mapped to `10:512` (`profile-limit`).
-       `c3` is mapped because the leaving pair is not shareable.
-     - After the gate opens: |U| = 1 and the slot is free.
+     - Step 5 is the reverse transition that defeats a follow-the-default-only fix.
+       - `c1` and `c2` leave. `c4 {rtl, 20, 1024}` is admitted (|U| = 1).
+       - PATCH to D = `20:1024`: `c4`'s key is now the default and |U| = 0.
+       - `c5 {rtl, 25, 2048}` is admitted (|U| = 1).
+       - PATCH to E = `10:512`: `c4` is remapped to E with a notice, and `c5` keeps its pair.
+     - After every step, |U| ≤ 1, and ≤ 1 non-default key appears among the `"frame"` keys of one summary.
+S17. "make-before-break never builds more than the cap, and reserves at most cap + 1" (M3). Cap 1.
+     - Sharing: `c1` and `c2` share P1 = `rtl 20:1024`. `c1 → {rtl, 25, 2048}` maps to the nearest, which is P1.
+       `c2` leaves; `c1`'s switch to `{rtl, 25, 2048}` is then admitted.
+     - Cross-source switch: `c1` on `rtl 20:1024` switches to `{air, 25, 2048}` with `loadEngine(air)` gated. It is
+       admitted, and reserved |U| = 2 = cap + 1.
+     - During the hold:
+       - `c2 {rtl, 15, 256}` and `c3 {rtl, 20, 1024}` are both mapped to `10:512` (`profile-limit`). For `c3`, no
+         non-default candidate is admissible while the reserve is at cap + 1.
+       - The `"frame"` keys of each summary carry ≤ 1 non-default key.
+     - After the gate opens: |U| = 1.
 S18. "the reported effective rate equals the delivered cadence" (M5; fake host, `integrationMs` 50).
-     - 40 summaries delivered to profiles of 15, 25 and 7 Hz give 20, 40 and 13 frames.
-     - `summariesPerFrame` is 2, 1 and 3, and `effectiveHz` is 10, 20 and 6.667.
+     - 40 summaries delivered to profiles of 15, 25, 7 and 0.5 Hz give 20, 40, 13 and 1 frames.
+     - `summariesPerFrame` is 2, 1, 3 and 40, and `effectiveHz` is 10, 20, 6.667 and 0.5.
+     - With `sensitivity: "high"` (100 ms blocks), 15 Hz gives `effectiveHz` 10 (n = 1).
      - Each satisfies `frames === floor(40 / summariesPerFrame)` and
        `effectiveHz === frames / (40 / blockHz)` (± 1 frame).
 S19. "display choices never restart the engine or reach the detector".
@@ -1117,5 +1141,9 @@ and access integration boundary") and needs no further product approval:
    `profilesFrom`, `setSubscribers`, `broadcastSpectrumFrame`, the `"frame"` signature and the wiring `opts`.
    `"profile"` and `ChannelObserver` are new.
 
-Main's prerequisites M1–M5 are resolved in this section: M1 removal, M2 `syncDefault`, M3 the transition slot,
-M4 requests, M5 decimation.
+Main's prerequisites M1–M5 are resolved in this section: M1 removal, M2 `syncDefault`, M3 others-only admission
+with admissible substitutes, M4 requests, M5 decimation. The reviewer's M1–M5 fixes in `amend-review.md` are adopted,
+with three recorded departures (see `amend-spectrum-report.md`, fix round 1 addendum):
+- M1's notice uses `outcome "removed"` and `SPECTRUM_SOURCE_REMOVED`, and default clients get a notice too.
+- M2 adds the `syncDefault` remap, because follow-the-default alone is not bounded.
+- M4 delivers acks through the synchronous `"profile"` event, not a promise result.
