@@ -77,6 +77,18 @@ interface EpochState {
 	staleRef: Uint8Array | null
 }
 
+/**
+ * Id prefixes of the main and the wideband tracker. Ids are prefix + base-36 sequence, so the wideband prefix
+ * extends the main one with a character outside base 36 ("w" alone made main track 1153 "…-w1").
+ */
+export function trackIdPrefixes(
+	sourceId: string,
+	atMs: number,
+): { main: string; wideband: string } {
+	const main = `${sourceId}-${atMs.toString(36)}-`
+	return { main, wideband: `${main}w-` }
+}
+
 function parseKey(key: string): FreqRange {
 	const [a, b] = key.split(":")
 	return { startHz: Number(a ?? 0), endHz: Number(b ?? 0) }
@@ -278,7 +290,7 @@ export class SpectrumPipeline {
 						rbwHz: this.binHz,
 						integrationMs: shortMs,
 					})
-		const idPrefix = `${cfg.sourceId}-${now().toString(36)}-`
+		const idPrefix = trackIdPrefixes(cfg.sourceId, now())
 		const maxTrackBlocks = Math.max(1, Math.ceil(cfg.maxTrackMs / this.blockMs))
 		this.tracker = new Tracker({
 			sourceId: cfg.sourceId,
@@ -287,7 +299,7 @@ export class SpectrumPipeline {
 			hangBlocks,
 			maxTracks: Math.max(1, cfg.maxTracks - 1), // one slot is the wideband tracker's (P11)
 			maxTrackBlocks,
-			idPrefix,
+			idPrefix: idPrefix.main,
 		})
 		this.wideband = new Tracker({
 			sourceId: cfg.sourceId,
@@ -296,7 +308,7 @@ export class SpectrumPipeline {
 			hangBlocks,
 			maxTracks: 1,
 			maxTrackBlocks,
-			idPrefix: `${idPrefix}w`,
+			idPrefix: idPrefix.wideband,
 		})
 		this.frameAcc = new Float64Array(this.n)
 		this.blockAcc = new Float64Array(this.n)
