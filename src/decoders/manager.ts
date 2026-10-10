@@ -1326,12 +1326,17 @@ export class DecoderManager extends EventEmitter {
 	/**
 	 * A rejected channel is a suspension, never a failure (addendum §5,
 	 * Property 11): no restart budget, no backoff, no lastError, `enabled`
-	 * untouched. The source reservation from wiring is kept.
+	 * untouched. The source reservation from wiring is kept. `heldSince`
+	 * carries the since of a suspension that a resume attempt cleared.
 	 */
-	private holdForChannel(state: DecoderState, outcome: ChannelHold): void {
+	private holdForChannel(
+		state: DecoderState,
+		outcome: ChannelHold,
+		heldSince?: Date,
+	): void {
 		state.suspension = {
 			reasonCode: outcome.reasonCode,
-			since: state.suspension?.since ?? new Date(),
+			since: state.suspension?.since ?? heldSince ?? new Date(),
 		}
 		state.transition = null
 		if (state.lastHealth === "restarting")
@@ -1934,13 +1939,25 @@ export class DecoderManager extends EventEmitter {
 			}
 			if (!this.stillWanted(state, generation) || !state.suspension) return
 		}
+		// A channel hold re-requests its channel on every evaluation (A14, PF6):
+		// that is not a resume until the channel opens, and a repeated hold
+		// keeps the suspension's since.
+		const prior = state.suspension
+		const channelRetry =
+			prior !== null && isChannelAdmissionReason(prior.reasonCode)
 		state.suspension = null
 		state.transition = "resuming"
 		this.clearChannelRetry(this.selectedSourceId(state), true)
-		this.log.info(
-			{ decoderId: id },
-			"Resuming decoder: source rate and band are usable",
-		)
+		if (channelRetry)
+			this.log.debug(
+				{ decoderId: id, reasonCode: prior.reasonCode },
+				"Re-requesting channel for a held decoder",
+			)
+		else
+			this.log.info(
+				{ decoderId: id },
+				"Resuming decoder: source rate and band are usable",
+			)
 		this.emitStatusChanged(state)
 
 		const abandon = async (startedProcess: boolean) => {
@@ -1965,7 +1982,7 @@ export class DecoderManager extends EventEmitter {
 			if (!this.stillWanted(state, generation)) return await abandon(false)
 			if (!outcome.wired) {
 				if (outcome.superseded) return await abandon(false)
-				this.holdForChannel(state, outcome)
+				this.holdForChannel(state, outcome, prior?.since)
 				return
 			}
 			await state.decoder.start()
@@ -1979,6 +1996,8 @@ export class DecoderManager extends EventEmitter {
 			return
 		}
 		if (!this.stillWanted(state, generation)) return await abandon(true)
+		if (channelRetry)
+			this.log.info({ decoderId: id }, "Resuming decoder: channel opened")
 		state.transition = null
 		this.emitStatusChanged(state)
 		this.recheckStaleChannel(this.selectedSourceId(state), state)

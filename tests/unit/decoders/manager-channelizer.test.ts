@@ -324,6 +324,66 @@ describe("DecoderManager + channelizer (addendum §4, §5)", () => {
 		expect(decoder.listenerCount("voice-call")).toBe(voiceListeners)
 	})
 
+	it("restarts only the decoder whose channel died on its own (client gone / socket error)", async () => {
+		// Final review core I2: ChannelizerManager invalidates just that channel, same generation.
+		const a = create("a", { useChannelizer: true })
+		const b = create("b", { useChannelizer: true })
+		await manager.startDecoder("a")
+		await manager.startDecoder("b")
+		const bInput = b.input
+		provider.emit("channel-invalidated", "rtl", 1, ["a-g1"])
+		expect(a.input).toBeNull()
+		await settle()
+		expect(provider.calls.map(c => c.decoderId)).toEqual(["a", "b", "a"])
+		expect(a.input).toBe(provider.streams.get("a-g1"))
+		expect(status("a")).toMatchObject({
+			running: true,
+			suspended: false,
+			restartCount: 0,
+		})
+		expect(b.input).toBe(bInput)
+		expect(b.starts).toBe(1)
+		expect(restarting).toEqual([])
+	})
+
+	it("source removal then reconnect restarts and rewires the channelised decoder; raw decoders survive", async () => {
+		// Final review core triage (T24): SourceManager.teardown() fires `removed` on every reconnect too.
+		// The fake provider reacts like ChannelizerManager.onGone: every open channel on the source is invalidated.
+		sources.on("removed", (id: string) =>
+			provider.invalidate(
+				id,
+				[...provider.streams].filter(([, s]) => !s.destroyed).map(([k]) => k),
+			),
+		)
+		const chan = create("chan", { useChannelizer: true })
+		const raw = create("raw")
+		await manager.startDecoder("chan")
+		await manager.startDecoder("raw")
+		const rawInput = raw.input
+		expect(rawInput).not.toBeNull()
+		expect(fanout.getBranchIds()).toContain("decoder-raw")
+		sources.remove("rtl")
+		expect(chan.detachedAt).toEqual(["before-destroy"])
+		expect(chan.input).toBeNull()
+		await settle()
+		sources.caps.set("rtl", { ...iqCaps(2_048_000), centerFreq: CENTER })
+		sources.emit("connected", "rtl")
+		await settle()
+		expect(provider.calls.map(c => c.decoderId)).toEqual(["chan", "chan"])
+		expect(chan.input).toBe(provider.streams.get("chan-g2"))
+		expect(status("chan")).toMatchObject({
+			running: true,
+			suspended: false,
+			restartCount: 0,
+		})
+		expect(sources.assignments.get("chan")).toBe("rtl")
+		expect(raw.starts).toBe(1)
+		expect(raw.stops).toBe(0)
+		expect(raw.input).toBe(rawInput)
+		expect(status("raw")).toMatchObject({ running: true, suspended: false })
+		expect(restarting).toEqual([])
+	})
+
 	it("ignores invalidations for channels it does not hold", async () => {
 		const decoder = create("dec", { useChannelizer: true })
 		await manager.startDecoder("dec")
@@ -636,6 +696,39 @@ describe("channelizer-unavailable retry (A14, PF6)", () => {
 		expect(provider.calls).toHaveLength(2)
 		expect(status()).toMatchObject({ suspended: false, running: true })
 		expect(decoder.starts).toBe(1)
+	})
+
+	it("a retry that is still unavailable logs no resume and keeps the suspension's since", async () => {
+		// Final review core I3
+		for (let i = 0; i < 2; i++)
+			provider.results.push({
+				ok: false,
+				reasonCode: "channelizer-unavailable",
+				detail: "ENOENT",
+			})
+		create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		const since = (
+			manager as unknown as {
+				decoders: Map<string, { suspension: { since: Date } | null }>
+			}
+		).decoders.get("dec")!.suspension!.since
+		await vi.advanceTimersByTimeAsync(RETRY + DEBOUNCE)
+		expect(provider.calls).toHaveLength(2)
+		expect(status().suspended).toBe(true)
+		const held = (
+			manager as unknown as {
+				decoders: Map<string, { suspension: { since: Date } | null }>
+			}
+		).decoders.get("dec")!.suspension!
+		expect(held.since).toBe(since)
+		const resuming = () =>
+			logLines.filter(l => String(l["msg"]).startsWith("Resuming decoder"))
+		expect(resuming()).toEqual([])
+		// The retry that finally opens the channel is the one that logs the resume.
+		await vi.advanceTimersByTimeAsync(RETRY + DEBOUNCE)
+		expect(status()).toMatchObject({ suspended: false, running: true })
+		expect(resuming()).toHaveLength(1)
 	})
 
 	it("keeps one retry per source while still unavailable", async () => {
