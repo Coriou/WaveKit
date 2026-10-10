@@ -100,7 +100,36 @@ function endActions(s: From): JobAction[] {
 		: ["stop-probes"]
 }
 
-export function transition(s: From, e: JobEvent): Result {
+/**
+ * A lease lost while paused (Task 35 fix round): the operator's pause never auto-resumes (it stays
+ * `paused(operator)` without the lease); a source-down pause becomes the preemption. Probes are
+ * already stopped in both.
+ */
+function pausedLeaseLost(
+	s: From,
+	lost: "preempted-operator" | "preempted-relay",
+): Result {
+	if (s.state !== "paused") return INVALID
+	if (s.reason === "operator")
+		return to("paused", ["release-lease", "release-decoders"], "operator")
+	if (s.reason === "source-down")
+		return to("paused", ["release-lease", "release-decoders"], lost)
+	return INVALID
+}
+
+/**
+ * Runner context the table cannot see (Task 35 fix round). `leaseHeld: false` marks a sweep whose
+ * lease was revoked while it stayed `paused(operator)`: its resume re-acquires the lease.
+ */
+export interface TransitionContext {
+	leaseHeld?: boolean
+}
+
+export function transition(
+	s: From,
+	e: JobEvent,
+	ctx: TransitionContext = {},
+): Result {
 	if (TERMINAL.has(s.state)) return INVALID
 	const active = s.state === "running" || s.state === "holding"
 	const pausedFor = (reason: PauseReason): boolean =>
@@ -139,7 +168,7 @@ export function transition(s: From, e: JobEvent): Result {
 						["stop-probes", "release-lease", "release-decoders"],
 						"preempted-operator",
 					)
-				: INVALID
+				: pausedLeaseLost(s, "preempted-operator")
 		case "relay-external":
 			return active
 				? to(
@@ -147,7 +176,7 @@ export function transition(s: From, e: JobEvent): Result {
 						["stop-probes", "release-lease", "release-decoders"],
 						"preempted-relay",
 					)
-				: INVALID
+				: pausedLeaseLost(s, "preempted-relay")
 		case "preempted-job":
 			if (active)
 				return to("paused", ["stop-probes", "release-lease"], "preempted-job")
@@ -165,7 +194,10 @@ export function transition(s: From, e: JobEvent): Result {
 				? to("paused", ["report-impact", "release-decoders"], "resume-blocked")
 				: to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
 		case "resume":
-			if (pausedFor("operator")) return to("running", ["resend-hop"])
+			if (pausedFor("operator"))
+				return ctx.leaseHeld === false
+					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
+					: to("running", ["resend-hop"])
 			if (pausedFor("resume-blocked"))
 				return e.takeover
 					? to("running", ["acquire-lease", "hold-decoders", "resend-hop"])

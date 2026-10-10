@@ -22,7 +22,7 @@ import type {
 	EngineEpoch,
 	SpectrumEngine,
 } from "../spectrum/spectrum-engine.js"
-import type { Lease, TunerArbiter } from "./tuner-arbiter.js"
+import type { Lease, LeaseLostReason, TunerArbiter } from "./tuner-arbiter.js"
 import type {
 	Classification,
 	DecodeEvidence,
@@ -103,6 +103,11 @@ export interface JobDriver {
 	/** § 4.7: the source moved without a command the core saw (pipeline `untracked-retune`). */
 	onUntrackedRetune(): void
 	onEvidence(probeId: string, ev: DecodeEvidence): void
+	/**
+	 * The arbiter revoked `lease`. The job event is chosen inside the dispatch chain from the state
+	 * the job has then (R1: a REST or relay loss while `starting` is a `tuner-error`).
+	 */
+	leaseLost(lease: Lease, reason: LeaseLostReason): Promise<void>
 	replan(spec: NormalisedJobSpec, plan: HopPlan): void
 	dispose(): Promise<void>
 }
@@ -293,6 +298,11 @@ export class JobRunner implements JobDriver {
 		return this.record.spec.sourceId
 	}
 
+	/** States that drive the scheduler and the tuner; a paused sweep holds still (§ 10.1 pause row). */
+	private get driving(): boolean {
+		return ACTIVE.has(this.record.state)
+	}
+
 	async start(): Promise<void> {
 		await this.dispatch({ type: "start" })
 	}
@@ -305,6 +315,23 @@ export class JobRunner implements JobDriver {
 
 	idle(): Promise<void> {
 		return Promise.all([this.chain, this.actionChain]).then(() => undefined)
+	}
+
+	leaseLost(lease: Lease, reason: LeaseLostReason): Promise<void> {
+		const run = this.chain.then(() => {
+			if (this.lease === lease) this.lease = null
+			const type =
+				this.record.state === "starting" && reason !== "preempted-job"
+					? "tuner-error"
+					: reason === "preempted-operator"
+						? "rest-write"
+						: reason === "preempted-relay"
+							? "relay-external"
+							: "preempted-job"
+			return this.apply({ type })
+		})
+		this.chain = run.catch(() => undefined)
+		return run
 	}
 
 	covers(sourceId: string, hz: number): boolean {
@@ -398,21 +425,31 @@ export class JobRunner implements JobDriver {
 		if (this.record.state === "starting" && (!this.sweep || own))
 			this.queueEvent({ type: "engine-ready" })
 		if (!this.sweep) return
+		if (!this.driving) {
+			this.epochOwn = false
+			return
+		}
 		this.epochOwn = own && epoch.tuningTrust === "commanded"
 		if (this.epochOwn && epoch.startSample !== null && this.scheduler) {
 			this.exec(this.scheduler.onEpochStarted(epoch.startSample))
+			return
 		}
+		// A new stream the job did not start (a rate-change restart dropped the hop's pending epoch,
+		// a reconfigure, a reconnect): re-send the hop so it gets a normal pending epoch of its own.
+		if (!own && epoch.settleMode === "none") this.onUntrackedRetune()
 	}
 
 	onBlock(endSample: number, overload: boolean): void {
-		if (!this.sweep || !this.epochOwn || !this.scheduler) return
+		if (!this.sweep || !this.driving || !this.epochOwn || !this.scheduler)
+			return
 		if (overload && this.hopIndex !== undefined)
 			this.scheduler.onOverload(this.hopIndex)
 		this.exec(this.scheduler.onBlock(endSample))
 	}
 
 	onStale(blocks: number): void {
-		if (this.sweep && this.epochOwn) this.scheduler?.onStale(blocks)
+		if (this.sweep && this.driving && this.epochOwn)
+			this.scheduler?.onStale(blocks)
 	}
 
 	onTrack(
@@ -595,11 +632,22 @@ export class JobRunner implements JobDriver {
 		}
 		if (this.holdingDecoders) {
 			this.holdingDecoders = false
-			await this.deps.decoders.releaseSource(this.sourceId, this.record.id)
+			await this.deps.decoders
+				.releaseSource(this.sourceId, this.record.id)
+				.catch((err: unknown) =>
+					this.log.warn(
+						{ err },
+						"Releasing the decoder hold on dispose failed",
+					),
+				)
 		}
 		if (this.engineOpened) {
 			this.engineOpened = false
-			await this.deps.closeEngine(this.sourceId)
+			await this.deps
+				.closeEngine(this.sourceId)
+				.catch((err: unknown) =>
+					this.log.warn({ err }, "Closing the engine on dispose failed"),
+				)
 		}
 	}
 
@@ -676,7 +724,8 @@ export class JobRunner implements JobDriver {
 			record.reason === undefined
 				? { state: record.state }
 				: { state: record.state, reason: record.reason }
-		const t = transition(from, e)
+		const leaseHeld = this.lease !== null
+		const t = transition(from, e, this.sweep ? { leaseHeld } : {})
 		if ("invalid" in t) {
 			throw new ScannerApiError(
 				`Job ${record.id} cannot handle "${e.type}" in state ${record.state}`,
@@ -703,7 +752,17 @@ export class JobRunner implements JobDriver {
 				this.sourceId,
 				record.spec.priority,
 			)
-			if (!r.ok) throw new ScannerApiError(r.detail, r.code, 409)
+			if (!r.ok) {
+				// An operator pause whose lease was revoked cannot go back to running without one.
+				if (
+					e.type === "resume" &&
+					record.state === "paused" &&
+					record.reason === "operator" &&
+					!leaseHeld
+				)
+					await this.blockResume()
+				throw new ScannerApiError(r.detail, r.code, 409)
+			}
 			this.lease = r.lease
 		}
 		const now = this.deps.now()
@@ -723,9 +782,29 @@ export class JobRunner implements JobDriver {
 			await this.rollback(before, prev)
 			throw err
 		}
+		if (!this.driving) this.epochOwn = false
 		if (isTerminal(t.state)) {
 			record.endedAt = now
 			await this.teardown()
+		}
+		this.deps.persist()
+		this.deps.changed("state")
+	}
+
+	/** Resume refused (another job holds the lease): `paused(resume-blocked)`, as a grown impact would. */
+	private async blockResume(): Promise<void> {
+		const { record } = this
+		record.state = "paused"
+		record.reason = "resume-blocked"
+		record.impact = this.deps.impact()
+		record.updatedAt = this.deps.now()
+		if (this.holdingDecoders) {
+			this.holdingDecoders = false
+			await this.deps.decoders
+				.releaseSource(this.sourceId, record.id)
+				.catch((err: unknown) =>
+					this.log.warn({ err }, "Releasing the decoder hold failed"),
+				)
 		}
 		this.deps.persist()
 		this.deps.changed("state")
@@ -861,7 +940,7 @@ export class JobRunner implements JobDriver {
 					break
 				case "start-probe": {
 					const t = this.tracks.get(a.trackId)
-					if (!t) break
+					if (!t || !this.driving) break
 					this.requestProbe(t.live, t.track, a.holdMs)
 					if (this.record.state === "running") this.queueEvent({ type: "hold" })
 					break
@@ -890,6 +969,8 @@ export class JobRunner implements JobDriver {
 		this.hopIndex = a.hopIndex
 		this.hopCentre = a.centreHz
 		this.epochOwn = false
+		// Paused: the hop is remembered and sent by the resume's resend-hop.
+		if (!this.driving) return
 		this.retunes += 1
 		try {
 			const pending = await this.deps.arbiter.retune(lease, {

@@ -124,6 +124,31 @@ const ROWS: [string[], string, string, string[]][] = [
 		"paused(preempted-job)",
 		["release-lease"],
 	],
+	// a lease lost while paused (Task 35 fix round): the operator's pause stays, a source-down pause is preempted
+	[
+		["paused(operator)"],
+		"rest-write",
+		"paused(operator)",
+		["release-lease", "release-decoders"],
+	],
+	[
+		["paused(operator)"],
+		"relay-external",
+		"paused(operator)",
+		["release-lease", "release-decoders"],
+	],
+	[
+		["paused(source-down)"],
+		"rest-write",
+		"paused(preempted-operator)",
+		["release-lease", "release-decoders"],
+	],
+	[
+		["paused(source-down)"],
+		"relay-external",
+		"paused(preempted-relay)",
+		["release-lease", "release-decoders"],
+	],
 	[ACTIVE, "source-down", "paused(source-down)", ["stop-probes"]],
 	[["paused(source-down)"], "source-up", "running", ["resend-hop"]],
 	[
@@ -350,6 +375,43 @@ describe("job transition table (§ 10.1)", () => {
 		).toEqual({
 			state: "running",
 			actions: ["acquire-lease", "hold-decoders", "resend-hop"],
+		})
+	})
+
+	it("keeps an operator pause when the lease is lost and re-acquires it on resume", () => {
+		const paused: S = { state: "paused", reason: "operator" }
+		expect(transition(paused, { type: "rest-write" })).toEqual({
+			state: "paused",
+			reason: "operator",
+			actions: ["release-lease", "release-decoders"],
+		})
+		// the runner knows it no longer holds the lease
+		expect(
+			transition(
+				paused,
+				{ type: "resume", takeover: false },
+				{ leaseHeld: false },
+			),
+		).toEqual({
+			state: "running",
+			actions: ["acquire-lease", "hold-decoders", "resend-hop"],
+		})
+		expect(
+			transition(
+				paused,
+				{ type: "resume", takeover: false },
+				{ leaseHeld: true },
+			),
+		).toEqual({ state: "running", actions: ["resend-hop"] })
+		expect(
+			transition(
+				{ state: "paused", reason: "source-down" },
+				{ type: "relay-external" },
+			),
+		).toEqual({
+			state: "paused",
+			reason: "preempted-relay",
+			actions: ["release-lease", "release-decoders"],
 		})
 	})
 

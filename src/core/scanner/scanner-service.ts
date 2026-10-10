@@ -9,6 +9,7 @@ import { EventEmitter } from "node:events"
 import { readdir, rm } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
+import { ZodError } from "zod"
 import type {
 	Bandplan as BandplanDto,
 	ScanJob,
@@ -197,6 +198,8 @@ interface EngineEntry {
 	refs: number
 	openedAt: number
 	lastSummary: BlockSummary | null
+	/** § 10.7: the passive cost rule ran for this engine instance (once, at openedAt + 60 s). */
+	costChecked: boolean
 }
 
 function intersectRanges(sets: FreqRange[][]): FreqRange[] {
@@ -285,6 +288,16 @@ export class ScannerService extends EventEmitter {
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
+	/**
+	 * False when even jobs, settings and engine state could not be read (`loadConfig` rejected): their
+	 * files are never written this run, and sweeps and settings changes are refused (503).
+	 */
+	private configLoaded = true
+	/** Lease arbitration per source, serialised (P16). */
+	private readonly arbitrations = new Map<string, Promise<void>>()
+	private readonly arbitrationQueued = new Set<string>()
+	/** Jobs whose lease an operator or relay write took: their end is not handed over at once. */
+	private readonly operatorLost = new Set<string>()
 	private timer: NodeJS.Timeout | null = null
 	private lastSnapshotAt = 0
 	private lastMaintenanceAt = 0
@@ -400,9 +413,18 @@ export class ScannerService extends EventEmitter {
 			// journal and snapshot writes until a load succeeds, which keeps the unread files intact.
 			this.log.error(
 				{ err, storageDir: this.storageDir },
-				"Reading the scanner state failed; starting empty without the discovery journal and snapshot this run",
+				"Reading the scanner state failed; starting without discoveries, and without the discovery journal and snapshot this run",
 			)
 			loaded = emptyLoadedState()
+			try {
+				loaded = { ...loaded, ...(await this.persistence.loadConfig()) }
+			} catch (configErr) {
+				this.configLoaded = false
+				this.log.error(
+					{ err: configErr, storageDir: this.storageDir },
+					"Reading the scanner jobs and settings failed; they are not written this run, and sweeps and settings changes are refused",
+				)
+			}
 		}
 		this.store.restore({
 			discoveries: loaded.discoveries,
@@ -445,7 +467,10 @@ export class ScannerService extends EventEmitter {
 		for (const lease of leases) this.persistedLeases.set(lease.sourceId, lease)
 		this.arbiter.recoverPersistedLeases(leases)
 		for (const pj of loaded.jobs) await this.restoreJob(pj)
-		this.disk = await this.evidence.diskState().catch(() => "ok" as const)
+		this.disk = await this.evidence.diskState().catch((err: unknown) => {
+			this.log.warn({ err }, "Free disk check failed")
+			return "ok" as const
+		})
 		// Disabled: jobs are listed (paused core-restart) but nothing resumes, ticks or touches the tuner.
 		if (this.settings().enabled) {
 			await this.ensurePassiveJobs()
@@ -473,6 +498,7 @@ export class ScannerService extends EventEmitter {
 		this.deps.sources.off("caps-changed", this.onSourceAvailable)
 		await this.passiveChain
 		await Promise.all([...this.drivers.values()].map(d => d.idle()))
+		await Promise.all(this.arbitrations.values())
 		for (const sourceId of this.engines.keys()) {
 			const lease = this.arbiter.holder(sourceId)
 			if (lease) {
@@ -487,17 +513,21 @@ export class ScannerService extends EventEmitter {
 			}
 		}
 		await this.probes.destroy()
-		for (const d of this.drivers.values()) await d.dispose()
+		// One failing driver never stops the shutdown before the engines, the snapshot and jobs.json.
+		for (const d of this.drivers.values())
+			await d
+				.dispose()
+				.catch((err: unknown) =>
+					this.log.warn({ err, jobId: d.record.id }, "Disposing a job failed"),
+				)
 		this.ambient.stop()
 		this.deps.cpuMeter?.stop()
 		for (const [sourceId, entry] of this.engines) {
-			const state = await entry.engine.stop()
-			if (state)
-				await this.persistence
-					.writeEngine(sourceId, state)
-					.catch((err: unknown) =>
-						this.log.warn({ err, sourceId }, "Engine state write failed"),
-					)
+			const state = await entry.engine.stop().catch((err: unknown) => {
+				this.log.warn({ err, sourceId }, "Stopping a spectrum engine failed")
+				return null
+			})
+			if (state) await this.writeEngineState(sourceId, state)
 		}
 		this.engines.clear()
 		this.arbiter.dispose()
@@ -562,10 +592,37 @@ export class ScannerService extends EventEmitter {
 	async patchSettings(
 		patch: RuntimeSettingsOverrides,
 	): Promise<ScannerSettingsView> {
-		this.overrides = applySettingsPatch(this.overrides, patch)
+		if (!this.configLoaded) throw this.stateUnavailable()
+		let next: RuntimeSettingsOverrides
+		try {
+			next = applySettingsPatch(this.overrides, patch)
+		} catch (err) {
+			if (err instanceof ZodError)
+				throw new ScannerApiError(
+					"Invalid scanner settings patch",
+					"SCANNER_SETTINGS_INVALID",
+					400,
+					{ issues: err.issues },
+				)
+			throw err
+		}
+		const previous = this.overrides
+		this.overrides = next
 		this.recomputeSettings()
-		await this.persistence.writeSettings(this.overrides)
-		await this.ensurePassiveJobs()
+		try {
+			await this.persistence.writeSettings(next)
+		} catch (err) {
+			// Never keep a change in memory that the next boot would not see.
+			this.overrides = previous
+			this.recomputeSettings()
+			this.log.warn({ err }, "Writing settings.json failed; patch not applied")
+			throw new ScannerApiError(
+				"Saving the scanner settings failed",
+				"SCANNER_SETTINGS_WRITE_FAILED",
+				500,
+			)
+		}
+		await this.refreshPassive()
 		this.emitStatus(true)
 		return this.settingsView()
 	}
@@ -601,6 +658,7 @@ export class ScannerService extends EventEmitter {
 		const preview = this.preview(spec)
 		this.rejectErrors(preview.issues)
 		const n = preview.spec
+		if (n.mode === "sweep" && !this.configLoaded) throw this.stateUnavailable()
 		if (n.mode === "sweep") {
 			const impact = this.arbiter.impact(n.sourceId, n)
 			if (this.impactNonEmpty(impact) && !n.takeover) {
@@ -640,9 +698,17 @@ export class ScannerService extends EventEmitter {
 		} catch (err) {
 			this.jobs.delete(record.id)
 			this.drivers.delete(record.id)
-			await driver.dispose()
+			// The start's own error is what the caller gets.
+			await driver
+				.dispose()
+				.catch((disposeErr: unknown) =>
+					this.log.warn(
+						{ err: disposeErr, jobId: record.id },
+						"Disposing a job that failed to start failed",
+					),
+				)
 			// A start that took the lease by hand-over and then failed frees it: the preempted job gets it back (P16).
-			await this.arbitrateLeases(n.sourceId)
+			await this.arbitrate(n.sourceId)
 			throw err
 		}
 		this.updateMasks(n.sourceId)
@@ -698,6 +764,8 @@ export class ScannerService extends EventEmitter {
 	}
 
 	async resumeJob(id: string, opts: { takeover: boolean }): Promise<ScanJob> {
+		if (this.requireJob(id).spec.mode === "sweep" && !this.configLoaded)
+			throw this.stateUnavailable()
 		return this.lifecycle(id, { type: "resume", takeover: opts.takeover })
 	}
 
@@ -836,6 +904,7 @@ export class ScannerService extends EventEmitter {
 			refs: 1,
 			openedAt: this.now(),
 			lastSummary: null,
+			costChecked: false,
 		}
 		this.engines.set(sourceId, entry)
 		engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) =>
@@ -880,11 +949,7 @@ export class ScannerService extends EventEmitter {
 		}
 		if (state) {
 			this.persistedEngines[sourceId] = state
-			await this.persistence
-				.writeEngine(sourceId, state)
-				.catch((err: unknown) =>
-					this.log.warn({ err, sourceId }, "Engine state write failed"),
-				)
+			await this.writeEngineState(sourceId, state)
 		}
 	}
 
@@ -1269,7 +1334,13 @@ export class ScannerService extends EventEmitter {
 		if (!wants) return
 		const written = await this.evidence
 			.writePsd(live.discoveryId, best)
-			.catch(() => false)
+			.catch((err: unknown) => {
+				this.log.warn(
+					{ err, discoveryId: live.discoveryId },
+					"PSD evidence write failed",
+				)
+				return false
+			})
 		if (written) this.store.setEvidenceFlags(live.discoveryId, { psd: true })
 	}
 
@@ -1553,25 +1624,24 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		const driver = this.drivers.get(lease.jobId)
 		if (!driver) return
-		// Ruling R1: a REST or relay write while the holder is still starting fails it (tuner-unavailable);
-		// `rest-write` / `relay-external` are invalid from `starting`. The arbiter never hands a starting lease over.
-		const type =
-			driver.record.state === "starting" && reason !== "preempted-job"
-				? "tuner-error"
-				: reason === "preempted-operator"
-					? "rest-write"
-					: reason === "preempted-relay"
-						? "relay-external"
-						: "preempted-job"
+		// An operator or relay write is not handed to a waiting job at once (operator-idle tick).
+		if (reason !== "preempted-job") this.operatorLost.add(lease.jobId)
+		// The event is chosen inside the job's dispatch chain, from its state then (R1).
 		driver
-			.dispatch({ type })
-			.catch((err: unknown) =>
-				this.log.warn(
-					{ err, jobId: lease.jobId, reason, event: type },
+			.leaseLost(lease, reason)
+			.catch((err: unknown) => {
+				const invalid =
+					err instanceof ScannerApiError &&
+					err.code === "SCANNER_INVALID_TRANSITION"
+				this.log[invalid ? "debug" : "warn"](
+					{ err, jobId: lease.jobId, reason },
 					"Lease loss could not be applied to the job",
-				),
-			)
-			.finally(() => this.updateMasks(lease.sourceId))
+				)
+			})
+			.finally(() => {
+				this.operatorLost.delete(lease.jobId)
+				this.updateMasks(lease.sourceId)
+			})
 	}
 
 	private readonly onSourceDown = (sourceId: string): void => {
@@ -1596,11 +1666,17 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onSourceAvailable = (): void => {
 		if (!this.started || !this.settings().enabled) return
-		this.passiveChain = this.passiveChain
-			.then(() => this.ensurePassiveJobs())
-			.catch((err: unknown) =>
-				this.log.warn({ err }, "Refreshing passive jobs failed"),
-			)
+		// refreshPassive logs a failure on the chain itself.
+		this.refreshPassive().catch(() => undefined)
+	}
+
+	/** ensurePassiveJobs, serialised on passiveChain (stop() awaits it). */
+	private refreshPassive(): Promise<void> {
+		const run = this.passiveChain.then(() => this.ensurePassiveJobs())
+		this.passiveChain = run.catch((err: unknown) =>
+			this.log.warn({ err }, "Refreshing passive jobs failed"),
+		)
+		return run
 	}
 
 	/** Recovery settled (restored, or adopted by a job's acquire with empty lists, Task 33). */
@@ -1697,8 +1773,21 @@ export class ScannerService extends EventEmitter {
 			awaitRestoredCaps: (sourceId, snapshot, restored) =>
 				this.awaitRestoredCaps(sourceId, snapshot, restored),
 			persist: () => void this.persistJobs(),
-			changed: kind =>
-				kind === "state" ? this.emitJob(record) : this.emitProgressFor(record),
+			changed: kind => {
+				if (kind !== "state") {
+					this.emitProgressFor(record)
+					return
+				}
+				this.emitJob(record)
+				// P16: a sweep that ended (stop condition, tuner error, source removed, cancel) frees the
+				// lease; a waiting preempted job gets it. Not after an operator or relay write.
+				if (
+					record.spec.mode === "sweep" &&
+					isTerminal(record.state) &&
+					!this.operatorLost.has(record.id)
+				)
+					this.queueArbitration(record.spec.sourceId)
+			},
 			logger: this.deps.logger,
 			now: this.now,
 		})
@@ -1710,20 +1799,57 @@ export class ScannerService extends EventEmitter {
 	): Promise<ScanJob> {
 		const record = this.requireJob(id)
 		await this.requireDriver(id).dispatch(e)
-		await this.arbitrateLeases(record.spec.sourceId)
+		await this.arbitrate(record.spec.sourceId)
 		this.updateMasks(record.spec.sourceId)
 		return this.toDto(record)
 	}
 
-	/** P16: hand a free lease to the best runnable job that lost it to another job. */
-	private async arbitrateLeases(sourceId: string): Promise<void> {
+	/** Runs arbitrateLeases on the source's serialised chain; never rejects. */
+	private arbitrate(
+		sourceId: string,
+		eligible?: (r: JobRecord) => boolean,
+	): Promise<void> {
+		const run = (this.arbitrations.get(sourceId) ?? Promise.resolve())
+			.then(() => {
+				this.arbitrationQueued.delete(sourceId)
+				return this.arbitrateLeases(sourceId, eligible)
+			})
+			.catch((err: unknown) =>
+				this.log.warn({ err, sourceId }, "Lease arbitration failed"),
+			)
+		this.arbitrations.set(sourceId, run)
+		return run
+	}
+
+	/** Like arbitrate, from a callback; coalesced while one is queued for the source. */
+	private queueArbitration(
+		sourceId: string,
+		eligible?: (r: JobRecord) => boolean,
+	): void {
+		if (!this.started || this.arbitrationQueued.has(sourceId)) return
+		this.arbitrationQueued.add(sourceId)
+		void this.arbitrate(sourceId, eligible)
+	}
+
+	/**
+	 * P16: hand a free lease to the best runnable job that lost it to another job. Waits for the
+	 * source's jobs to apply what is already queued (a preempted-job dispatch may still be pending).
+	 * `eligible` narrows the candidates (operator-idle tick).
+	 */
+	private async arbitrateLeases(
+		sourceId: string,
+		eligible?: (r: JobRecord) => boolean,
+	): Promise<void> {
+		if (!this.started) return
+		await Promise.all(this.driversOn(sourceId).map(d => d.idle()))
 		if (this.arbiter.holder(sourceId)) return
 		const waiting = [...this.jobs.values()].filter(
 			j =>
 				j.spec.sourceId === sourceId &&
 				j.spec.mode === "sweep" &&
 				j.state === "paused" &&
-				j.reason === "preempted-job",
+				j.reason === "preempted-job" &&
+				(eligible?.(j) ?? true),
 		)
 		const best = chooseLeaseHolder(
 			waiting.map(j => ({
@@ -1745,11 +1871,47 @@ export class ScannerService extends EventEmitter {
 			.catch((err: unknown) =>
 				this.log.warn({ err, jobId: best }, "Lease hand-back refused"),
 			)
+		this.updateMasks(sourceId)
+	}
+
+	/**
+	 * § 10.3 auto-resume for jobs waiting on another job's lease: when the lease is free after an
+	 * operator or relay write, the best `preempted-job` waiter whose `resume.autoAfterIdleMs` has
+	 * elapsed since the operator's last command gets it.
+	 */
+	private resumeIdleWaiters(now: number): void {
+		const sources = new Set(
+			[...this.jobs.values()]
+				.filter(
+					j =>
+						j.spec.mode === "sweep" &&
+						j.state === "paused" &&
+						j.reason === "preempted-job",
+				)
+				.map(j => j.spec.sourceId),
+		)
+		for (const sourceId of sources) {
+			if (this.arbiter.holder(sourceId)) continue
+			const idleSince = this.arbiter.operatorIdleSince(sourceId)
+			if (idleSince === null) continue
+			const ready = (r: JobRecord): boolean =>
+				r.spec.resume.autoAfterIdleMs !== null &&
+				now - idleSince >= r.spec.resume.autoAfterIdleMs
+			const any = [...this.jobs.values()].some(
+				j =>
+					j.spec.sourceId === sourceId &&
+					j.state === "paused" &&
+					j.reason === "preempted-job" &&
+					ready(j),
+			)
+			if (any) this.queueArbitration(sourceId, ready)
+		}
 	}
 
 	private async restoreJob(pj: PersistedJob): Promise<void> {
 		if (pj.id.startsWith("passive-")) return
 		let plan: HopPlan
+		let failed = false
 		try {
 			plan = planForSpec(pj.spec, this.previewContext())
 		} catch (err) {
@@ -1758,6 +1920,7 @@ export class ScannerService extends EventEmitter {
 				"Persisted job no longer plans; marking failed",
 			)
 			plan = { hops: [], usableHalfSpanHz: 0, dcGuardHz: 0, ppmMarginHz: 0 }
+			failed = true
 		}
 		const record: JobRecord = {
 			id: pj.id,
@@ -1769,10 +1932,12 @@ export class ScannerService extends EventEmitter {
 			issues: [],
 			impact: null,
 			consentedImpact: null,
-			state: pj.state,
-			...(pj.reason ? { reason: pj.reason } : {}),
+			...(failed
+				? { state: "failed" as const, reason: "invalid" as const }
+				: { state: pj.state, ...(pj.reason ? { reason: pj.reason } : {}) }),
 			createdAt: Date.parse(pj.createdAt),
-			updatedAt: Date.parse(pj.updatedAt),
+			updatedAt: failed ? this.now() : Date.parse(pj.updatedAt),
+			...(failed ? { endedAt: this.now() } : {}),
 			unrestorable: [],
 			counts: { observations: 0, transients: 0 },
 		}
@@ -2170,6 +2335,7 @@ export class ScannerService extends EventEmitter {
 
 	/** Never rejects (a failed write is logged). */
 	private async persistJobs(): Promise<void> {
+		if (!this.configLoaded) return
 		const jobs: PersistedJob[] = [...this.jobs.values()]
 			.filter(r => !r.passive)
 			.map(r => {
@@ -2193,6 +2359,7 @@ export class ScannerService extends EventEmitter {
 	private tick(): void {
 		const now = this.now()
 		for (const d of this.drivers.values()) d.tick(now)
+		this.resumeIdleWaiters(now)
 		// cpu- and budget-deferred probe requests start once the meter drops, not only when another probe stops
 		this.probes.pump()
 		this.recent = this.recent.filter(
@@ -2230,11 +2397,11 @@ export class ScannerService extends EventEmitter {
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
 		for (const [sourceId, entry] of this.engines) {
-			const state = await entry.engine.exportState().catch(() => null)
-			if (state)
-				await this.persistence
-					.writeEngine(sourceId, state)
-					.catch(() => undefined)
+			const state = await entry.engine.exportState().catch((err: unknown) => {
+				this.log.warn({ err, sourceId }, "Engine state export failed")
+				return null
+			})
+			if (state) await this.writeEngineState(sourceId, state)
 		}
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
@@ -2277,17 +2444,22 @@ export class ScannerService extends EventEmitter {
 				})
 				.catch((err: unknown) => this.log.warn({ err }, "Journal prune failed"))
 		}
-		this.disk = await this.evidence.diskState().catch(() => this.disk)
+		this.disk = await this.evidence.diskState().catch((err: unknown) => {
+			this.log.warn({ err }, "Free disk check failed")
+			return this.disk
+		})
 	}
 
-	/** § 10.7: passive off for a source whose engine costs > 25 % of a core over its first minute. */
+	/**
+	 * § 10.7: passive off for a source whose engine costs > 25 % of a core over its first minute.
+	 * Evaluated once per engine instance, at openedAt + 60 s (later load from sweeps never counts).
+	 */
 	private async checkPassiveCost(now: number): Promise<void> {
 		for (const [sourceId, entry] of this.engines) {
-			if (
-				this.passiveDisabled.has(sourceId) ||
-				now - entry.openedAt < PASSIVE_COST_WINDOW_MS
-			)
+			if (entry.costChecked || now - entry.openedAt < PASSIVE_COST_WINDOW_MS)
 				continue
+			entry.costChecked = true
+			if (this.passiveDisabled.has(sourceId)) continue
 			if (!this.jobs.has(`passive-${sourceId}`)) continue
 			const utilization = entry.engine.utilization()
 			if (utilization === null || utilization <= PASSIVE_COST_LIMIT) continue
@@ -2299,8 +2471,29 @@ export class ScannerService extends EventEmitter {
 				{ sourceId, utilization },
 				"Passive scanning disabled: spectrum engine too costly on this host",
 			)
-			await this.ensurePassiveJobs()
+			await this.refreshPassive()
 		}
+	}
+
+	/** Engine state is never written when the persisted state could not be read at all. */
+	private async writeEngineState(
+		sourceId: string,
+		state: EngineState,
+	): Promise<void> {
+		if (!this.configLoaded) return
+		await this.persistence
+			.writeEngine(sourceId, state)
+			.catch((err: unknown) =>
+				this.log.warn({ err, sourceId }, "Engine state write failed"),
+			)
+	}
+
+	private stateUnavailable(): ScannerApiError {
+		return new ScannerApiError(
+			"The scanner state could not be read; sweeps and settings changes are unavailable until a restart reads it",
+			"SCANNER_STATE_UNAVAILABLE",
+			503,
+		)
 	}
 
 	private allocatePort(): Promise<number> {

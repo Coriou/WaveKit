@@ -68,6 +68,25 @@ export function serviceHarness(
 	tuner.addSource("rtl")
 	tuner.states.get("rtl")!.sampleRate = FS
 	tuner.states.get("rtl")!.frequency = CENTRE
+	// Like TunerController: a successful frequency or rate write updates the source caps before it resolves.
+	tuner.setFrequency = async (sourceId, hz, writeOpts) => {
+		await ArbiterFakeTuner.prototype.setFrequency.call(
+			tuner,
+			sourceId,
+			hz,
+			writeOpts,
+		)
+		if (sources.getCaps(sourceId)) sources.setCaps(sourceId, { centerFreq: hz })
+	}
+	tuner.setSampleRate = async (sourceId, hz, writeOpts) => {
+		await ArbiterFakeTuner.prototype.setSampleRate.call(
+			tuner,
+			sourceId,
+			hz,
+			writeOpts,
+		)
+		if (sources.getCaps(sourceId)) sources.setCaps(sourceId, { sampleRate: hz })
+	}
 	const decoders = new ServiceFakeDecoders()
 	const settings = testSettings(s => {
 		s.sweep.markers = false

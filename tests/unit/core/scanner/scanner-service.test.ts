@@ -1,9 +1,10 @@
 import type { EventEmitter } from "node:events"
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it } from "vitest"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
+import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScanJob } from "@wavekit/api-types"
 import {
 	CENTRE,
@@ -358,11 +359,15 @@ describe("ScannerService", () => {
 		await untilRunning(h, job.id)
 		const scanHz = h.tuner.states.get("rtl")!.frequency
 		expect(scanHz).not.toBe(CENTRE)
-		// The real controller updates the caps after each write; here they follow 80 ms late.
-		h.sources.caps.set("rtl", { ...h.configCaps, centerFreq: scanHz })
-		const setFrequency = h.tuner.setFrequency.bind(h.tuner)
+		// The harness tuner updates the caps with each write, like the real controller; here they follow 80 ms late.
+		expect(h.sources.getCaps("rtl")?.centerFreq).toBe(scanHz)
 		h.tuner.setFrequency = async (sourceId, hz, opts) => {
-			await setFrequency(sourceId, hz, opts)
+			await ArbiterFakeTuner.prototype.setFrequency.call(
+				h.tuner,
+				sourceId,
+				hz,
+				opts,
+			)
 			setTimeout(() => h.sources.setCaps(sourceId, { centerFreq: hz }), 80)
 		}
 		const releaseSource = h.decoders.releaseSource.bind(h.decoders)
@@ -514,6 +519,308 @@ describe("ScannerService", () => {
 		expect(h.service.getJob(job.id)?.state).toBe("running")
 		expect(h.service.getJob("passive-rtl")?.state).toBe("running")
 		await h.service.stop()
+	})
+
+	// ---- Task 35 fix round 1 ----
+
+	const noPassive = (s: { passive: { enabled: boolean } }): void => {
+		s.passive.enabled = false
+	}
+	const unreadableJournal = (dir: string): void => {
+		mkdirSync(join(dir, "journal", "observations-20261010.jsonl"), {
+			recursive: true,
+		})
+	}
+	const internalsOf = (h: Harness) =>
+		h.service as unknown as {
+			persistence: { loadConfig(): Promise<unknown> }
+			drivers: Map<string, { dispose(): Promise<void> }>
+			engines: Map<
+				string,
+				{ engine: { utilization(): number | null }; openedAt: number }
+			>
+			checkPassiveCost(now: number): Promise<void>
+		}
+
+	it("keeps jobs, the persisted lease and settings when only the journal is unreadable (finding 1)", async () => {
+		const a = serviceHarness({ patch: noPassive })
+		await a.service.start()
+		const job = await a.service.createJob(sweep(50))
+		await untilRunning(a, job.id)
+		await a.service.patchSettings({ detection: { sensitivity: "high" } })
+		await tick(20)
+		// the state a crash during the sweep leaves: the job with its lease
+		const crashedJobs = readFileSync(join(a.dir, "jobs.json"), "utf8")
+		expect(JSON.parse(crashedJobs).jobs[0].lease.jobId).toBe(job.id)
+		await a.service.stop()
+		writeFileSync(join(a.dir, "jobs.json"), crashedJobs)
+		unreadableJournal(a.dir)
+		const b = serviceHarness({ dir: a.dir, patch: noPassive })
+		await b.service.start()
+		expect(b.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "core-restart",
+		})
+		// the persisted lease is recovered: the pre-crash centre is restored on connection
+		b.tuner.states.get("rtl")!.frequency = 450_100_000
+		b.sources.emit("payload-started", "rtl")
+		await tick(20)
+		expect(
+			b.tuner.sent.filter(
+				c => c.origin === "scanner" && c.name === "set-frequency",
+			),
+		).toEqual([expect.objectContaining({ value: CENTRE })])
+		// PATCH merges with the overrides read from settings.json
+		await b.service.patchSettings({ storage: { maxRecordingsMb: 100 } })
+		const saved = JSON.parse(
+			readFileSync(join(a.dir, "settings.json"), "utf8"),
+		).settings
+		expect(saved).toEqual({
+			detection: { sensitivity: "high" },
+			storage: { maxRecordingsMb: 100 },
+		})
+		await b.service.stop()
+	})
+
+	it("never writes jobs, settings or engine state when none of the state can be read (finding 1 backstop)", async () => {
+		const a = serviceHarness({ patch: noPassive })
+		await a.service.start()
+		await a.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+		})
+		await a.service.patchSettings({ detection: { sensitivity: "high" } })
+		await a.service.stop()
+		unreadableJournal(a.dir)
+		const files = ["jobs.json", "settings.json", join("engine", "rtl.json")]
+		const before = files.map(f => readFileSync(join(a.dir, f), "utf8"))
+		const b = serviceHarness({ dir: a.dir, patch: noPassive })
+		internalsOf(b).persistence.loadConfig = () =>
+			Promise.reject(new Error("unreadable"))
+		await b.service.start()
+		await expect(b.service.createJob(sweep(50))).rejects.toMatchObject({
+			statusCode: 503,
+			code: "SCANNER_STATE_UNAVAILABLE",
+		})
+		await expect(
+			b.service.patchSettings({ storage: { maxRecordingsMb: 100 } }),
+		).rejects.toMatchObject({ statusCode: 503 })
+		const inWindow = await b.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+		})
+		await tick(20)
+		expect(b.service.getJob(inWindow.id)?.state).toBe("running")
+		await b.service.cancelJob(inWindow.id)
+		await b.service.stop()
+		expect(files.map(f => readFileSync(join(a.dir, f), "utf8"))).toEqual(before)
+	})
+
+	it("holds a paused multi-hop sweep still and moves on after resume (finding 2)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			ranges: [{ startHz: 450_000_000, endHz: 452_400_000 }],
+		})
+		expect(job.plan.hops.length).toBeGreaterThan(1)
+		await untilRunning(h, job.id)
+		const centres = () =>
+			new Set(
+				h.tuner.sent
+					.filter(c => c.origin === "scanner" && c.name === "set-frequency")
+					.map(c => c.value),
+			)
+		for (let i = 0; i < 40 && centres().size < 2; i++) {
+			feedTone(h.fanout, 0.1, 0, 0, 40 + i)
+			await tick(5)
+		}
+		expect(centres().size).toBeGreaterThan(1)
+		await h.service.pauseJob(job.id)
+		await tick(20)
+		const sent = h.tuner.sent.length
+		for (let i = 0; i < 15; i++) {
+			feedTone(h.fanout, 0.1, 0, 0, 90 + i)
+			await tick(5)
+		}
+		expect(h.tuner.sent.length).toBe(sent)
+		expect(h.service.getJob(job.id)?.progress.probes).toEqual([])
+		await h.service.resumeJob(job.id, { takeover: false })
+		for (let i = 0; i < 10; i++) {
+			feedTone(h.fanout, 0.1, 0, 0, 120 + i)
+			await tick(5)
+		}
+		expect(h.tuner.sent.length).toBeGreaterThan(sent)
+		await h.service.stop()
+	})
+
+	it("hands the lease back when the preemptor completes on its stop condition (finding 4)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const low = await h.service.createJob(sweep(30))
+		await untilRunning(h, low.id)
+		const high = await h.service.createJob({
+			...sweep(60),
+			stop: { afterSweeps: 1 },
+		})
+		await tick(20)
+		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
+		for (
+			let i = 0;
+			i < 60 && h.service.getJob(high.id)?.state !== "completed";
+			i++
+		) {
+			feedTone(h.fanout, 0.1, 0, 0, 200 + i)
+			await tick(5)
+		}
+		expect(h.service.getJob(high.id)?.state).toBe("completed")
+		await tick(50)
+		expect(h.service.getJob(low.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(low.id)
+		await h.service.stop()
+	})
+
+	it("keeps an operator pause when a REST write takes the lease, and re-acquires it on resume (finding 5)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		await h.service.pauseJob(job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await tick(20)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "operator",
+		})
+		expect(holderOf(h)).toBeUndefined()
+		expect(h.decoders.isSourceHeld("rtl")).toBe(false)
+		await h.service.resumeJob(job.id, { takeover: false })
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(job.id)
+		expect(h.decoders.isSourceHeld("rtl")).toBe(true)
+		await h.service.stop()
+	})
+
+	it("blocks the resume of an operator pause whose lease another sweep took (finding 5)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(30))
+		await untilRunning(h, job.id)
+		await h.service.pauseJob(job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await tick(20)
+		const other = await h.service.createJob(sweep(60))
+		await untilRunning(h, other.id)
+		await expect(
+			h.service.resumeJob(job.id, { takeover: false }),
+		).rejects.toMatchObject({ statusCode: 409, code: "SCANNER_SOURCE_BUSY" })
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resume-blocked",
+		})
+		expect(holderOf(h)).toBe(other.id)
+		await h.service.stop()
+	})
+
+	it("answers an invalid settings patch with 400 and rolls back a patch it could not save (finding 7)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		await expect(
+			h.service.patchSettings({ cpuBudgetCores: -1 }),
+		).rejects.toMatchObject({
+			statusCode: 400,
+			code: "SCANNER_SETTINGS_INVALID",
+		})
+		const internals = h.service as unknown as {
+			persistence: { writeSettings(): Promise<void> }
+		}
+		internals.persistence.writeSettings = () =>
+			Promise.reject(new Error("disk full"))
+		await expect(
+			h.service.patchSettings({ detection: { sensitivity: "high" } }),
+		).rejects.toMatchObject({
+			statusCode: 500,
+			code: "SCANNER_SETTINGS_WRITE_FAILED",
+		})
+		const view = h.service.settingsView()
+		expect(view.effective.detection.sensitivity).toBe("normal")
+		expect(view.provenance["detection.sensitivity"]).not.toBe("runtime")
+		await h.service.stop()
+	})
+
+	it("finishes the shutdown when a job fails to dispose, and a failed start keeps its own error (finding 8)", async () => {
+		const h = serviceHarness({ liveCaps: false, patch: noPassive })
+		const svc = h.service as unknown as {
+			createDriver(r: unknown): { dispose(): Promise<void> }
+		}
+		const createDriver = svc.createDriver.bind(h.service)
+		svc.createDriver = r => {
+			const d = createDriver(r)
+			d.dispose = () => Promise.reject(new Error("dispose failed"))
+			return d
+		}
+		await h.service.start()
+		await expect(h.service.createJob(sweep(50))).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_NOT_IQ",
+		})
+		h.sources.caps.set("rtl", h.configCaps)
+		const job = await h.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+		})
+		await h.service.stop()
+		const jobs = JSON.parse(readFileSync(join(h.dir, "jobs.json"), "utf8"))
+			.jobs as { id: string }[]
+		expect(jobs.map(j => j.id)).toEqual([job.id])
+		expect(existsSync(join(h.dir, "discoveries.json"))).toBe(true)
+	})
+
+	it("marks a persisted job that no longer plans as failed (finding 9)", async () => {
+		const a = serviceHarness({ patch: noPassive })
+		await a.service.start()
+		const job = await a.service.createJob({
+			sourceId: "rtl",
+			mode: "in-window",
+			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+		})
+		await a.service.stop()
+		const file = JSON.parse(readFileSync(join(a.dir, "jobs.json"), "utf8"))
+		file.jobs[0].spec.sourceId = "gone"
+		writeFileSync(join(a.dir, "jobs.json"), JSON.stringify(file))
+		const b = serviceHarness({ dir: a.dir, patch: noPassive })
+		await b.service.start()
+		expect(b.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "failed",
+			reason: "invalid",
+		})
+		await b.service.stop()
+	})
+
+	it("judges an engine's passive cost once, over its first minute (finding 10)", async () => {
+		const h = serviceHarness()
+		await h.service.start()
+		const internals = internalsOf(h)
+		const entry = internals.engines.get("rtl")!
+		entry.engine.utilization = () => 0.1
+		await internals.checkPassiveCost(entry.openedAt + 61_000)
+		// later sweep load on the shared engine never disables passive scanning
+		entry.engine.utilization = () => 0.9
+		await internals.checkPassiveCost(entry.openedAt + 3_600_000)
+		expect(h.service.getJob("passive-rtl")).toBeDefined()
+		await h.service.stop()
+		const costly = serviceHarness()
+		await costly.service.start()
+		const e2 = internalsOf(costly).engines.get("rtl")!
+		e2.engine.utilization = () => 0.9
+		await internalsOf(costly).checkPassiveCost(e2.openedAt + 61_000)
+		expect(costly.service.getJob("passive-rtl")).toBeUndefined()
+		expect(costly.service.status().engines[0]?.passive.disabledReason).toMatch(
+			/engine-cpu 90 %/,
+		)
+		await costly.service.stop()
 	})
 
 	it("creates the passive job once the source connects when its caps were absent at boot", async () => {

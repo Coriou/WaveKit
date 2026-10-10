@@ -16,6 +16,7 @@ import type {
 import type {
 	EngineState,
 	PipelineEvent,
+	PendingEpoch,
 	PipelineInput,
 } from "../../../../src/core/spectrum/types.js"
 import {
@@ -285,17 +286,65 @@ describe("SpectrumEngine sample accounting", () => {
 		await engine.stop()
 	})
 
+	/** The arbiter's retune: the scanner's own epoch is submitted inside the suppression window. */
+	const scannerEpoch = (
+		engine: SpectrumEngine,
+		centreHz: number,
+	): PendingEpoch => {
+		const clock = engine.sampleClock()
+		return {
+			epoch: engine.allocateEpoch(),
+			commandSample: clock.commandSample,
+			bufferedSamples: clock.bufferedSamples,
+			settleSamples: 1000,
+			expectMarker: false,
+			markerTimeoutSamples: 0,
+			pllSettleSamples: 0,
+			centreHz,
+			sampleRateHz: 1_024_000,
+			gainKey: "m:296",
+			tuningTrust: "commanded",
+			centreChanged: true,
+		}
+	}
+
 	it("ignores the scanner's own commands while suppressed", async () => {
 		const { engine, sources, tuner, hosts } = makeEngine()
 		await engine.start()
 		engine.suppressExternal(true)
+		engine.submitEpoch(scannerEpoch(engine, 446_500_000))
 		tuner.emit("command-sent", "rtl", "set-frequency", 446_500_000, "scanner")
 		sources.setCaps("rtl", { centerFreq: 446_500_000 })
 		engine.suppressExternal(false)
 		await settle()
+		// only the scanner's own epoch: no external one
+		const pendings = hosts[0]!.inputs.filter(i => i.kind === "pending-epoch")
+		expect(pendings).toHaveLength(1)
+		expect(pendings[0]).toMatchObject({
+			pending: { centreHz: 446_500_000, tuningTrust: "commanded" },
+		})
+		await engine.stop()
+	})
+
+	it("posts an external epoch for a REST write that landed inside the scanner's window", async () => {
+		const { engine, sources, tuner, hosts } = makeEngine()
+		await engine.start()
+		engine.suppressExternal(true)
+		engine.submitEpoch(scannerEpoch(engine, 446_500_000))
+		tuner.emit("command-sent", "rtl", "set-frequency", 446_500_000, "scanner")
+		// the operator's write lands before the window closes: suppressed, so no epoch yet
+		tuner.emit("command-sent", "rtl", "set-frequency", 433_920_000, "rest")
+		sources.setCaps("rtl", { centerFreq: 433_920_000 })
 		expect(
 			hosts[0]!.inputs.filter(i => i.kind === "pending-epoch"),
-		).toHaveLength(0)
+		).toHaveLength(1)
+		engine.suppressExternal(false)
+		await settle()
+		const pendings = hosts[0]!.inputs.filter(i => i.kind === "pending-epoch")
+		expect(pendings).toHaveLength(2)
+		expect(pendings[1]).toMatchObject({
+			pending: { centreHz: 433_920_000, tuningTrust: "commanded" },
+		})
 		await engine.stop()
 	})
 

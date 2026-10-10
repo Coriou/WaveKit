@@ -472,6 +472,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	suppressExternal(on: boolean): void {
 		this.suppressed = Math.max(0, this.suppressed + (on ? 1 : -1))
+		if (!on && this.suppressed === 0) this.checkSuppressedCentre()
 	}
 
 	currentEpoch(): EngineEpoch {
@@ -1056,6 +1057,21 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		) {
 			this.queueExternal(this.externalTrust())
 		}
+	}
+
+	/**
+	 * A write that landed inside the scanner's suppression window (a REST write during a retune)
+	 * posted no epoch: when the window closes, a caps centre other than the latest submitted one
+	 * (or the current epoch's) gets an external epoch (Task 35 fix round, review finding 14).
+	 */
+	private checkSuppressedCentre(): void {
+		if (!this.running || this.restarting) return
+		const caps = this.deps.sources.getCaps(this.sourceId)
+		if (caps?.centerFreq === undefined) return
+		let expected = this.current.centreHz
+		for (const meta of this.openingStreams) expected = meta.centreHz
+		for (const meta of this.pendingMeta.values()) expected = meta.centreHz
+		if (caps.centerFreq !== expected) this.queueExternal(this.externalTrust())
 	}
 
 	private externalTrust(): TuningTrust {

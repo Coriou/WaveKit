@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import {
 	appendFile,
+	mkdir,
 	mkdtemp,
 	readdir,
 	readFile,
@@ -318,6 +319,30 @@ describe("ScannerPersistence lifecycle files", () => {
 				ws: { spectrumHz: 1 },
 			})
 			expect(loaded.engines).toEqual({ "rtl/one": engine })
+		})
+	})
+
+	it("loadConfig reads jobs, settings and engine state when the journal is unreadable, and stays unloaded", async () => {
+		await withDir(async dir => {
+			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
+			await p.writeJobs([job])
+			await p.writeSettings({ cpuBudgetCores: 0.5 })
+			await p.writeEngine("rtl", engine)
+			// a journal "file" that is a directory: load() rejects (EISDIR)
+			await mkdir(join(dir, "journal", "observations-20261009.jsonl"), {
+				recursive: true,
+			})
+			const q = new ScannerPersistence({ dir, logger, now: () => T0 })
+			await expect(q.load()).rejects.toThrow()
+			await expect(q.loadConfig()).resolves.toEqual({
+				jobs: [job],
+				settings: { cpuBudgetCores: 0.5 },
+				engines: { rtl: engine },
+			})
+			await expect(q.append(entry(T0))).rejects.toBeInstanceOf(WaveKitError)
+			await expect(
+				q.writeSnapshot({ discoveries: [], observations: [], corrections: [] }),
+			).rejects.toBeInstanceOf(WaveKitError)
 		})
 	})
 

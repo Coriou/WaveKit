@@ -465,6 +465,20 @@ export class ScannerPersistence {
 		}
 	}
 
+	/**
+	 * Jobs, runtime settings and engine state alone, independent of the snapshot and the journal:
+	 * ScannerService's fallback when load() rejects (Task 35 fix round). The readers never throw.
+	 * Never marks the state loaded, so journal and snapshot writes stay refused.
+	 */
+	async loadConfig(): Promise<
+		Pick<LoadedState, "jobs" | "settings" | "engines">
+	> {
+		const jobs = await this.readJobs()
+		const settings = await this.readSettings()
+		const engines = await this.readEngines()
+		return { jobs, settings, engines }
+	}
+
 	append(entry: Omit<JournalEntry, "seq">): Promise<number> {
 		if (!this.loaded) return Promise.reject(notLoaded())
 		const seq = this.nextSeq++
