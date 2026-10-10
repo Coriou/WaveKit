@@ -1,6 +1,8 @@
 #!/bin/sh
 # Health check script for WaveKit container
 # Used by Docker HEALTHCHECK and monitoring
+# The public /health response includes system health; detailed /api/status
+# remains protected and is not queried by this credential-free probe.
 #
 # Requirements:
 # - 4.4: Return exit code 0 when all checks pass and exit code 1 when any check fails
@@ -64,32 +66,6 @@ check_services() {
     return 0
 }
 
-# Check all configured decoders via the API status endpoint
-check_decoders() {
-    # Get detailed status from API
-    status_response=$(timeout "${TIMEOUT}s" curl -sf "http://${API_HOST}:${API_PORT}/api/status" 2>/dev/null)
-    curl_exit=$?
-
-    if [ $curl_exit -ne 0 ]; then
-        # Can't reach API, but that's already checked in check_wavekit_api
-        return 0
-    fi
-
-    # Check overall health status from the response
-    # Using grep to check if status is "unhealthy"
-    if echo "$status_response" | grep -q '"status":"unhealthy"'; then
-        echo "❌ System status: unhealthy"
-        return 1
-    fi
-
-    if echo "$status_response" | grep -q '"status":"degraded"'; then
-        echo "⚠️  System status: degraded"
-        # Degraded is not a failure, just a warning
-    fi
-
-    return 0
-}
-
 # Main health check logic
 main() {
     # Track overall health
@@ -102,11 +78,6 @@ main() {
 
     # Check WaveKit API health endpoint (Requirement 4.1, 4.4)
     if ! check_wavekit_api; then
-        healthy=false
-    fi
-
-    # Check decoder status via API (Requirement 4.2)
-    if ! check_decoders; then
         healthy=false
     fi
 
