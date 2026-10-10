@@ -663,3 +663,15 @@ csdr:
 #   checkInterval: 5000
 #   idleTimeout: 30000
 # ---
+
+# Core channelizer (opt-in prototype; docs/superpowers/specs/2026-10-09-core-channelizer-prototype-addendum.md).
+# Off by default. When on, decoders with `useChannelizer: true` get exact-rate IQ
+# from one wavekit-chan process per source; raw fanout is unchanged.
+# channelizer:
+#   enabled: false
+#   binaryPath: wavekit-chan
+#   socketDir: /var/run/wavekit/chan
+#   usableFraction: 0.8
+#   channelQueueMs: 250
+#   inputHighWaterMark: 262144
+#   blockSamples: 16384

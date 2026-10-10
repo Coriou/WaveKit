@@ -241,8 +241,12 @@ separate decision, made only after the channelizer becomes default-on.
    decoded, < 5 % muted, < 300 AMBE errors, an identical decode across the
    three output modes). The `chan` front's set of `TGT=…  SRC=…` lines must
    equal the `csdr` front's set, which is Property 15 at the dsd-fme level.
-   **Proposed** tolerance: `chan` AMBE errors must not exceed
-   `max(1.25 × csdr, csdr + 20)`; confirm it with the user at Task 31. Log both
+   Only CRC-valid lines are compared; dsd-fme's `(CRC ERR)` lines are reported,
+   never compared (ruling QH-12). Tolerance (PF16, accepted by the user):
+   `chan` AMBE errors must not exceed `max(1.25 × csdr, csdr + 20)`. The gate
+   inputs are `own_dmr_*` only. `composed_dmr_446m_2048k` is not a voice-gate
+   input: its 1.7 s source clip has no terminator, so both fronts miss the
+   absolute limits (QH-12). It stays a Property 15 harness golden. Log both
    fronts in GOLDENS.md with the image id, HEAD and `wavekit-chan --version`.
    If the `.mjs` client turns out heavier than about 80 lines, the fallback is
    a harness-only check: run the app with `debugRecordPath` on both paths and

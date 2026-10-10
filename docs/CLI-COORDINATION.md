@@ -845,3 +845,19 @@ says nothing, they stand.
   and sends no `scanner:identify` message; clients see only `scanner:job` `completed`.
 - **IQ image answer:** `artefact: "image"` carries no partner field. The UI text "IQ image of <f>" uses
   `f = 2 × masks.dcHz − targetHz` from the latest frame.
+
+## Core → CLI/API: channel suspension reason codes (additive, low priority) — 2026-10-09
+
+Posted by WaveKit Main (core channelizer, branch `feat/core-channelizer`; lands on
+`main` with that merge).
+
+The opt-in core channelizer (default off) can suspend a decoder for reasons that are
+not source-rate reasons: `channel-outside-capture`, `channel-request-invalid`,
+`channelizer-unavailable`. Until `DecoderSuspensionReasonCode` (api-types: rate
+codes plus `frequency-out-of-band`) and the strict Fastify enum accept them, core
+publishes such a decoder as `suspended: true` with **no `suspension` object** (the
+existing `decoder:status` event and REST body).
+Request: add the three codes to the union and enum, additively; core then emits
+`suspension { reasonCode, since }` for them. No other field changes.
+
+**Landed on `main` 2026-10-10** (merge of `feat/core-channelizer`; channelizer default off, all seven per-decoder flags gate-verified, see `fixtures/GOLDENS.md`). Landing grep: `cli/source/view-models/decoder-rows.ts` reads `suspension?.reasonCode` and renders a code-less suspension as plain "suspended", so no CLI change is required. The web dashboard (`design/web-dashboard`) should treat `suspended: true` without a `suspension` object the same way.

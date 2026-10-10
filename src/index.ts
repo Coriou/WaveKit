@@ -36,6 +36,7 @@ import { TunerController } from "./core/tuner-controller.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
+import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -79,7 +80,7 @@ import { ResourceAggregator } from "./core/resource-aggregator.js"
 import { AircraftTrackingManager } from "./core/aircraft-tracking-manager.js"
 import { AircraftEnrichmentService } from "./services/aircraft-enrichment-service.js"
 import type { Logger } from "./utils/logger.js"
-import type { Decoder } from "./decoders/types.js"
+import type { Decoder, DecoderConfig } from "./decoders/types.js"
 
 /**
  * Application startup time for uptime calculation.
@@ -341,6 +342,18 @@ async function main(): Promise<void> {
 	// Wire DecoderManager to SourceManager for dynamic sample rate handling
 	decoderManager.setSourceManager(sourceManager, sourceRouting)
 
+	// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
+	// on the first channel request. Off by default, so no manager exists.
+	const channelizer = config.channelizer.enabled
+		? new ChannelizerManager({
+				sourceManager,
+				routing: sourceRouting,
+				config: config.channelizer,
+				logger,
+			})
+		: null
+	decoderManager.setChannelizer(channelizer)
+
 	// Step 6: Register built-in decoders with capabilities
 	decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
 	decoderRegistry.register("multimon-ng", createMultimonDecoder, MULTIMON_CAPS)
@@ -367,7 +380,7 @@ async function main(): Promise<void> {
 
 	// Step 7: Create decoders from configuration. dsd-fme decoders are first
 	// pointed at the digital voice stream (-o udp to a local socket).
-	let decoderConfigs = config.decoders
+	let decoderConfigs: DecoderConfig[] = config.decoders
 	try {
 		decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
 	} catch (err) {
@@ -584,6 +597,19 @@ async function main(): Promise<void> {
 		},
 		timeout: 2000,
 	})
+
+	// Shutdown the channelizer after the decoders (LIFO: registered first, so
+	// it runs once decoderManager.destroy() has released every channel)
+	if (channelizer) {
+		shutdown.register({
+			name: "channelizer",
+			handler: async () => {
+				log.info("Shutting down channelizer")
+				await channelizer.destroy()
+			},
+			timeout: 5000,
+		})
+	}
 
 	// Shutdown decoders
 	shutdown.register({

@@ -2,7 +2,7 @@
 # =============================================================================
 # WaveKit Multi-Stage Dockerfile
 #
-# Architecture: 20 named, narrow-purpose stages. Each decoder builds on
+# Architecture: 21 named, narrow-purpose stages. Each decoder builds on
 # `base-build` (thin toolchain image) and installs only its own apt deps with
 # `--mount=type=cache,target=/var/cache/apt,sharing=locked`. Upstream sources
 # are pinned to SHAs via top-of-file `ARG <NAME>_REF` declarations so a bump
@@ -34,6 +34,10 @@ ARG READSB_REF=b499ecbd18dc4a2ec6098c31de31508017fa6190
 ARG SOAPY_RTLTCP_REF=75a53aa251b1ef63850abea81b7617ef6978a15e
 ARG CSDR_REF=1f15b8c5177cb348602da19e82bf0d62426ab8eb
 ARG GR_LORA_SDR_REF=862746dd1cf635c9c8a4bfbaa2c3a0ec3a5306c9
+# Rust toolchain for chan-build, pinned by version and index digest (bookworm
+# so the binary's glibc matches runtime-base). Must satisfy the crate's
+# rust-version in native/wavekit-chan/Cargo.toml.
+ARG RUST_IMAGE=rust:1.98.1-slim-bookworm@sha256:ff521445a372125ed4f76e1453a1f8098f2d05332d1601d30db1c1f62757e730
 
 # ============================================================================
 # Stage: base-build
@@ -546,6 +550,26 @@ RUN --mount=type=cache,target=/root/.local/share/pnpm/store,sharing=locked \
 RUN ls -la dist/ && head -1 dist/index.js
 
 # ============================================================================
+# Stage: chan-build
+# Purpose: Build wavekit-chan, the core channelizer (Rust, AGPL-3.0-or-later;
+#          native/wavekit-chan). Builds per platform under buildx with the
+#          committed Cargo.lock; cargo registry and target/ are cache mounts.
+# ============================================================================
+FROM ${RUST_IMAGE} AS chan-build
+
+ARG TARGETARCH
+
+WORKDIR /src/wavekit-chan
+
+COPY native/wavekit-chan/Cargo.toml native/wavekit-chan/Cargo.lock ./
+COPY native/wavekit-chan/src ./src
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=chan-cargo-registry-${TARGETARCH} \
+    --mount=type=cache,target=/src/wavekit-chan/target,id=chan-target-${TARGETARCH} \
+    cargo build --release --locked && \
+    install -m 0755 target/release/wavekit-chan /usr/local/bin/wavekit-chan
+
+# ============================================================================
 # Stage: final-base
 # Purpose: Common ancestor of `final` and `final-core`. Holds every artifact
 #          shared by both: python runtime, every decoder binary + library,
@@ -597,6 +621,11 @@ COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
 COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
 
+# wavekit-chan core channelizer (opt-in via channelizer.enabled), with the
+# third-party notices of the crates linked into it
+COPY --from=chan-build /usr/local/bin/wavekit-chan /usr/local/bin/
+COPY native/wavekit-chan/LICENSES.md /usr/share/doc/wavekit-chan/LICENSES.md
+
 # SoapyRTLTCP module so acarsdec / dumpvdl2 can stream from rtl_tcp
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
 
@@ -628,7 +657,11 @@ RUN echo "Verifying decoder installations..." && \
     csdr --help > /dev/null 2>&1 && \
     python3 -c "from gnuradio import lora_sdr; print(lora_sdr.__file__)" && \
     python3 /usr/local/bin/lora_meshtastic_decode.py --help > /dev/null && \
-    echo "All 9 decoders + csdr verified successfully"
+    wavekit-chan --version && \
+    { ldd /usr/local/bin/wavekit-chan | awk '{print $1}' | grep -Ev '^(linux-vdso\.so\.1|/lib.*/ld-linux.*|libc\.so\.6|libm\.so\.6|libgcc_s\.so\.1|libpthread\.so\.0|libdl\.so\.2|librt\.so\.1)$' > /tmp/chan-libs || true; } && \
+    { if [ -s /tmp/chan-libs ]; then echo "unexpected wavekit-chan libs:"; cat /tmp/chan-libs; exit 1; fi; } && \
+    rm -f /tmp/chan-libs && \
+    echo "All 9 decoders + csdr + wavekit-chan verified successfully"
 
 # Node runtime + app dist + workspace packages + config
 COPY --from=node-build /usr/local/bin/node /usr/local/bin/

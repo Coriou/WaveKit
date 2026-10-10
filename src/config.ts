@@ -143,6 +143,8 @@ export const DecoderConfigSchema = z.object({
 	minVersion: z.string().optional(),
 	/** Maximum allowed version for this decoder */
 	maxVersion: z.string().optional(),
+	/** Route this instance through the core channelizer (addendum §7) */
+	useChannelizer: z.boolean().default(false),
 	/**
 	 * Band admission override (band defaults spec §3): where this decoder is
 	 * useful. Never changes the process arguments.
@@ -374,6 +376,31 @@ export const CsdrConfigSchema = z.object({
 })
 
 /**
+ * Opt-in core channelizer (addendum §6). Off by default: every pipeline stays
+ * byte-identical. One supervised wavekit-chan process per source.
+ * usableFraction and blockSamples mirror the wavekit-chan argument validation.
+ */
+export const ChannelizerConfigSchema = z.object({
+	enabled: z.boolean().default(false),
+	binaryPath: z.string().min(1).default("wavekit-chan"),
+	socketDir: z.string().min(1).default("/var/run/wavekit/chan"),
+	usableFraction: z.number().min(0.5).max(0.95).default(0.8),
+	channelQueueMs: z.number().int().min(50).max(2000).default(250),
+	inputHighWaterMark: z
+		.number()
+		.int()
+		.min(65_536)
+		.max(16 * 1024 * 1024)
+		.default(262_144),
+	blockSamples: z
+		.number()
+		.int()
+		.min(256)
+		.max(1 << 20)
+		.default(16_384),
+})
+
+/**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
@@ -390,6 +417,7 @@ export const ConfigSchema = z.object({
 	health: HealthConfigSchema.optional(),
 	resources: ResourcesConfigSchema.default({}),
 	csdr: CsdrConfigSchema.default({}),
+	channelizer: ChannelizerConfigSchema.default({}),
 	/**
 	 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
 	 * case-insensitive). Absent: guessed from TZ / locale, else EU.
@@ -419,6 +447,7 @@ export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
 export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
+export type ChannelizerConfig = z.infer<typeof ChannelizerConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================

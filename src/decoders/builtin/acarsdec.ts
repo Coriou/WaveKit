@@ -11,9 +11,14 @@
  * using csdr, feeding raw audio to f00b4r0/acarsdec fork via stdin.
  */
 
-import { AudioDemodDecoder } from "../audio-demod-decoder.js"
+import {
+	AudioDemodDecoder,
+	audioChannelRequest,
+} from "../audio-demod-decoder.js"
+import { readChannelHz } from "../iq-decimate-decoder.js"
 import type {
 	DecoderCaps,
+	DecoderChannelRequestResult,
 	DecoderConfig,
 	DecoderOutput,
 	DemodulationConfig,
@@ -135,6 +140,44 @@ export class AcarsdecDecoder extends AudioDemodDecoder {
 			fmGain: 1.0, // Default gain
 			// skipDcBlock: true - removed to enable DC block (needed to remove carrier from AM envelope)
 		}
+	}
+
+	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 24 kHz; sox still resamples to 12 000 Hz.
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
+	 * The audio tail decodes one AM channel: options.channelHz, else the only
+	 * configured frequency. Several frequencies without channelHz are
+	 * rejected (channel-request-invalid).
+	 */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		if (!this.channelizerSupported()) return undefined
+		const freqs = this.options.frequencies ?? []
+		const pinnedHz = readChannelHz(this.config.options)
+		const channelHz = pinnedHz ?? (freqs.length === 1 ? freqs[0] : undefined)
+		if (channelHz === undefined)
+			return {
+				invalid: `acarsdec decodes one AM channel; set options.channelHz (frequencies: ${freqs.join(",")})`,
+			}
+		return audioChannelRequest(
+			{
+				...this.getDemodConfig(),
+				channelHz: this.resolveChannelHz(
+					channelHz,
+					input,
+					pinnedHz !== undefined ? "channelHz" : "frequencies",
+				),
+			},
+			input,
+		)
 	}
 
 	/**

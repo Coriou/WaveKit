@@ -1,0 +1,46 @@
+{
+	"id": "composed_dmr_446m_2048k",
+	"description": "A real DMR direct-mode call (sdrmm dmr_call_48k) at +6 kHz from a 446.18775 MHz centre, as in run 8: the channel sits next to the DC spike. Upsampled by the polyphase resampler only, with one fixed gain (no AGC, DC removal or ramps), so the 30 ms TDMA bursts keep their timing and keying gaps.",
+	"sampleRate": 2048000,
+	"centerHz": 446187750,
+	"durationS": 10,
+	"seed": 44619,
+	"noiseDbfs": -45,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 40,
+		"phaseDeg": 8
+	},
+	"sources": [
+		{
+			"id": "sdrmm_dmr_call_48k",
+			"url": "https://raw.githubusercontent.com/Newspicel/sdrmm/4869fb8304138328dd7c8c82223c0d23fbd1fba6/fixtures/dmr_call_48k.sigmf-data",
+			"sha256": "c103f3122a6cee61e8ed2f3f798ebd2a53a35769a4315a19a2d80b03d4a898f7",
+			"format": "cf32",
+			"sampleRate": 48000,
+			"centerHz": 446006250,
+			"license": "AGPL-3.0 (Newspicel/sdrmm repository license; no per-file grant)",
+			"attribution": "Newspicel/sdrmm @ 4869fb8 fixtures/dmr_call_48k: real DMR direct-mode call on PMR446 channel 1, Nooelec NESDR SMArt v5 at 2.048 Msps down-converted to 48 kS/s, 2026-08-11, 1.7 s. Upstream expected output: colour code 1, group call, radio 12345678 to talkgroup 12345678.",
+			"origin": "https://github.com/Newspicel/sdrmm/tree/4869fb8304138328dd7c8c82223c0d23fbd1fba6/fixtures"
+		}
+	],
+	"components": [
+		{
+			"name": "dmr_call_446193750",
+			"source": "sdrmm_dmr_call_48k",
+			"offsetHz": 6000,
+			"levelDb": -12,
+			"startS": 0.5,
+			"repeatEveryS": 2.5,
+			"expected": [
+				{
+					"protocol": "DMR",
+					"colourCode": 1,
+					"callType": "group",
+					"talkgroup": 12345678,
+					"source": 12345678
+				}
+			]
+		}
+	]
+}

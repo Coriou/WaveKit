@@ -15,7 +15,8 @@
 	sdr-host-logs sdr-host-status sdr-host-health sdr-host-compose-update \
 	sdr-host-clean \
 	fixtures-download fixtures-download-all fixtures-convert \
-	fixtures-test fixtures-test-local
+	fixtures-test fixtures-test-local \
+	chan-build chan-test
 
 # SDR-host variables (preserved from prior Makefile)
 SDR_HOST_TAG ?= latest
@@ -194,3 +195,11 @@ fixtures-test: ## Run decoder tests against fixtures (in container)
 
 fixtures-test-local: ## Run decoder tests locally (if decoders installed)
 	@./fixtures/test-decoders.sh
+
+# === Channelizer ===
+
+chan-build: ## Build wavekit-chan on the host (needs a Rust toolchain)
+	@cargo build --release --locked --manifest-path native/wavekit-chan/Cargo.toml
+
+chan-test: ## Run wavekit-chan unit/property tests (crate only; no benches)
+	@cargo test --release --locked --manifest-path native/wavekit-chan/Cargo.toml

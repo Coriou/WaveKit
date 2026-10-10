@@ -1,0 +1,22 @@
+[package]
+name = "wavekit-chan"
+version = "0.1.0"
+edition = "2021"
+# slice::as_chunks (1.88) and unsigned is_multiple_of (1.87); the rest builds on 1.85.
+rust-version = "1.88"
+license = "AGPL-3.0-or-later"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+proptest = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.test]
+opt-level = 3

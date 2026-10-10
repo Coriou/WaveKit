@@ -859,6 +859,15 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 48 kHz and starts at fmdemod; only the sox WAV
+	 * wrapper remains. No DC removal or AGC in the channel path (delta §8 risk 5).
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
 	 * Returns the decoder command.
 	 * Note: This is only used for getDecoderArgs(), we override buildPipelineCommand()
 	 * to handle the sox WAV wrapper needed by dsd-fme.
@@ -895,13 +904,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			: null
 
 		// Build csdr pipeline stages (Using jketterl/csdr v0.18+ syntax)
+		// Channel IQ (cf32) has no front stages and starts at fmdemod.
 		const front = this.buildIqFrontStages(config, inputSampleRate, decimation)
-		const csdrStages: string[] = [front.convert] // U8 IQ -> complex float
+		const csdrStages: string[] = []
+		if (front.convert) csdrStages.push(front.convert) // U8 IQ -> complex float
 		if (front.shift) csdrStages.push(front.shift) // offsetHz -> DC
-		csdrStages.push(
-			front.decimate, // Channel-matched decimation (complex)
-			"csdr fmdemod", // FM demod: complex -> real audio
-		)
+		if (front.decimate) csdrStages.push(front.decimate) // Channel-matched decimation (complex)
+		csdrStages.push("csdr fmdemod") // FM demod: complex -> real audio
 
 		// Optional DC block (skip for digital signals as it distorts them)
 		if (!config.skipDcBlock) {

@@ -10,11 +10,14 @@
 
 import {
 	IqDecimateDecoder,
+	iqChannelRequest,
+	readChannelHz,
 	type IqDecimationConfig,
 } from "../iq-decimate-decoder.js"
 import type {
 	DecoderBandDeclaration,
 	DecoderCaps,
+	DecoderChannelRequestResult,
 	DecoderConfig,
 	DecoderOutput,
 	DecoderRateRequirements,
@@ -223,6 +226,54 @@ export class Dumpvdl2Decoder extends IqDecimateDecoder {
 						basis: "decoder-default",
 					},
 				}
+	}
+
+	/** Migrated to the opt-in core channelizer (addendum §7 step 2). */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
+	 * dumpvdl2 channelises internally, so one channel wide enough for the
+	 * whole frequency span is requested, centred on the span midpoint
+	 * (followCenter: the capture centre). `--centerfreq` follows
+	 * options.inputCenterFreq, which the manager sets to the channel centre.
+	 * Widening shrinks the transition so bw/2 + tr stays within out/2
+	 * (addendum §6 admission); a span that leaves no room is invalid.
+	 */
+	override getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		if (!this.channelizerSupported()) return undefined
+		const freqs = this.options.frequencies
+		const span = freqs.length > 0 ? Math.max(...freqs) - Math.min(...freqs) : 0
+		const channelHz =
+			readChannelHz(this.config.options) ??
+			(this.options.followCenter || freqs.length === 0
+				? undefined
+				: (Math.min(...freqs) + Math.max(...freqs)) / 2)
+		const base = iqChannelRequest(
+			{
+				...this.getIqDecimationConfig(),
+				...(channelHz !== undefined ? { channelHz } : {}),
+			},
+			input,
+		)
+		const neededHz = span + 50_000
+		if (neededHz <= base.bandwidthHz) return base
+		if (neededHz >= base.outputRateHz)
+			return {
+				invalid: `frequency span ${span} Hz needs targetSampleRate > ${neededHz}`,
+			}
+		return {
+			...base,
+			bandwidthHz: neededHz,
+			transitionHz: Math.min(
+				base.transitionHz,
+				(base.outputRateHz - neededHz) / 2,
+			),
+		}
 	}
 
 	/**

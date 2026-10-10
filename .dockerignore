@@ -19,6 +19,7 @@ coverage
 **/coverage
 .tsc-cache
 **/.tsc-cache
+native/wavekit-chan/target
 
 # IDE
 .vscode
@@ -33,6 +34,9 @@ coverage
 docs
 *.md
 README.md
+# Third-party notices shipped with wavekit-chan (Dockerfile final-base); kept
+# explicit so a widened markdown pattern cannot drop them
+!native/wavekit-chan/LICENSES.md
 .github
 
 # Development
