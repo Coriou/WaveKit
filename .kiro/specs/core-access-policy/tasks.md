@@ -3,7 +3,9 @@
 Foundation and integration have separate checkpoints. Tasks 4 and 5 may proceed
 in parallel: prepare adapter contracts while implementing independent provisioning
 and persistence. Task 6 requires both completed session flows and a coordinated
-scanner integration window. Scanner owns its current shared-file work.
+scanner integration window. Scanner owns its current shared-file work. Independent
+CLI wiring and runtime hygiene portions of task 7 may proceed before task 6
+when they preserve legacy defaults and do not modify scanner-owned paths.
 
 - [x] 1. Implement exact authority/origin, raw-header and canonical credential policy.
   _Requirements: 2.1–2.3, 3.1–3.4_
@@ -97,3 +99,22 @@ set: 64 passing tests. Actual shell health probe: four passing tests covering
 its sole public request and exit statuses; real s6 service state was not tested.
 Repository typecheck and lint passed; lint retains 59 existing warnings and zero
 errors. Focused lint and shell syntax validation passed. Tasks 7–9 remain open.
+
+## Unmounted CLI transport checkpoint — 2026-10-10
+
+CLI helper implementation: `6cba790` (assembled here as `e006f3f`). Private
+credential reads do not acquire the core writer lock. Transport credentials
+are bound to an explicit canonical target; redirects cannot forward them.
+Credential lookup respects cancellation and WS deadlines; errors contain only
+safe status/denial projections. Credential-free discovery preserves the existing
+503 public-health signal. No existing CLI runtime wiring changed in this batch.
+
+Independent Astra/root reviews approved the final helper and discovery fixes.
+Targeted tests: 80, including a 100-run token property. Full CLI suite: 17 files,
+289 tests. Repository typecheck and lint passed; lint retains 59 existing
+warnings and zero errors, with focused lint clean.
+
+Next: actual CLI credential-file/target composition and authentication retry
+pausing on `feat/access-cli-wiring`. Task 7 remains incomplete: core logging,
+public audio origins and coordinated runtime acceptance still need integration.
+Tasks 24/25 scanner contracts are reviewed; later scanner task ownership remains.
