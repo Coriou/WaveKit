@@ -46,7 +46,12 @@ import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
-import { WebSocketEventBroadcaster } from "./websocket/events.js"
+import {
+	WebSocketEventBroadcaster,
+	type ServerMessage,
+} from "./websocket/events.js"
+import { wireScannerBroadcasts } from "./websocket/scanner-broadcast.js"
+import type { WsLimiter } from "../core/scanner/ws-limiter.js"
 import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
@@ -116,6 +121,8 @@ export class ApiServer {
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private readonly sourceStatusPublisher: SourceStatusPublisher
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
+	private scannerLimiter: WsLimiter<ServerMessage> | null = null
+	private scannerWiring: { dispose(): void } | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.sourceManager = dependencies.sourceManager
@@ -207,6 +214,9 @@ export class ApiServer {
 				this.telemetryInterval = null
 			}
 			this.sourceStatusPublisher.stop()
+			this.scannerWiring?.dispose()
+			this.scannerWiring = null
+			this.scannerLimiter = null
 
 			// Close all WebSocket connections first
 			this.wsBroadcaster.closeAll()
@@ -342,6 +352,24 @@ export class ApiServer {
 		] as const)
 			this.decoderManager.on(event, publishDecoderStatus)
 
+		// Runtime decoders (scanner probes, spec § 6.5 / § 12.2)
+		this.decoderManager.on("decoder:created", (decoderId: string) => {
+			const status = this.decoderManager.getStatus(decoderId)
+			if (!status) return
+			this.wsBroadcaster.broadcastDecoderCreated({
+				decoderId,
+				decoder: toApiDecoderInfo(status, this.decoderRegistry),
+			})
+		})
+		this.decoderManager.on("decoder:removed", (decoderId: string) => {
+			this.wsBroadcaster.broadcastDecoderRemoved({
+				decoderId,
+				removedAt: new Date().toISOString(),
+			})
+		})
+
+		if (this.scanner) this.setupScannerBroadcasting(this.scanner)
+
 		// Source status with activity (same body as a GET /api/sources item)
 		this.sourceStatusPublisher.start()
 
@@ -401,9 +429,17 @@ export class ApiServer {
 				this.wsBroadcaster.broadcastTunerStateChanged(sourceId, state)
 			})
 
-			this.tunerController.on("command-sent", (sourceId, command, value) => {
-				this.wsBroadcaster.broadcastTunerCommandSent(sourceId, command, value)
-			})
+			this.tunerController.on(
+				"command-sent",
+				(sourceId, command, value, origin) => {
+					this.wsBroadcaster.broadcastTunerCommandSent(
+						sourceId,
+						command,
+						value,
+						origin,
+					)
+				},
+			)
 
 			this.tunerController.on("control-mode-changed", (sourceId, mode) => {
 				this.wsBroadcaster.broadcastTunerControlModeChanged(sourceId, mode)
@@ -434,6 +470,13 @@ export class ApiServer {
 		}
 
 		this.log.debug("Event broadcasting handlers registered")
+	}
+
+	/** Scanner channel (spec § 12.2): rate-limited `scanner`. */
+	private setupScannerBroadcasting(scanner: ScannerService): void {
+		const wiring = wireScannerBroadcasts(scanner, this.wsBroadcaster)
+		this.scannerLimiter = wiring.limiter
+		this.scannerWiring = wiring
 	}
 
 	/**

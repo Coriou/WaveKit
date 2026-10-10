@@ -31,6 +31,10 @@ import type {
 	SourceRemovedEventData,
 	DigitalVoiceCallEventData,
 	DigitalVoiceStatus,
+	ScanJob,
+	DecoderCreatedEventData,
+	DecoderRemovedEventData,
+	TunerCommandOrigin,
 } from "@wavekit/api-types"
 
 /**
@@ -44,6 +48,7 @@ import type {
  * - digital-voice: Digital voice stream status and per-call state
  * - resources: Container, SDR host, and source backpressure monitoring
  * - tuner: RTL-TCP tuner control events
+ * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, status (rate-limited)
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -56,6 +61,7 @@ export type WebSocketChannel =
 	| "resources"
 	| "tuner"
 	| "aircraft"
+	| "scanner"
 
 /**
  * Message sent from client to server.
@@ -103,6 +109,14 @@ export interface ServerMessage {
 		| "aircraft:update"
 		| "aircraft:lost"
 		| "aircraft:stats"
+		| "scanner:job"
+		| "scanner:progress"
+		| "scanner:discovery"
+		| "scanner:activity"
+		| "scanner:monitor"
+		| "scanner:status"
+		| "decoder:created"
+		| "decoder:removed"
 		| "subscribed"
 		| "unsubscribed"
 		| "error"
@@ -144,7 +158,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "digital-voice" ||
 		channel === "resources" ||
 		channel === "tuner" ||
-		channel === "aircraft"
+		channel === "aircraft" ||
+		channel === "scanner"
 	)
 }
 
@@ -782,17 +797,19 @@ export class WebSocketEventBroadcaster {
 	}
 
 	/**
-	 * Broadcasts tuner command events to subscribed clients.
+	 * Broadcasts tuner command events to subscribed clients. `origin` (Task 27) tells
+	 * clients who sent the command (`scanner`, `rest`, …); omitted when unknown.
 	 */
 	broadcastTunerCommandSent(
 		sourceId: string,
 		command: string,
 		value: number,
+		origin?: TunerCommandOrigin,
 	): void {
 		this.broadcast("tuner", {
 			type: "tuner:command-sent",
 			channel: "tuner",
-			data: { sourceId, command, value },
+			data: { sourceId, command, value, ...(origin ? { origin } : {}) },
 		})
 	}
 
@@ -872,6 +889,21 @@ export class WebSocketEventBroadcaster {
 			type: "aircraft:stats",
 			data: stats,
 		})
+	}
+
+	/** Full job DTO on the scanner channel (the server normally goes through the WS limiter). */
+	broadcastScannerJob(job: ScanJob): void {
+		this.broadcast("scanner", { type: "scanner:job", data: job })
+	}
+
+	/** A decoder appeared at runtime (scanner probes, spec § 6.5). */
+	broadcastDecoderCreated(data: DecoderCreatedEventData): void {
+		this.broadcast("decoders", { type: "decoder:created", data })
+	}
+
+	/** A runtime decoder is gone. */
+	broadcastDecoderRemoved(data: DecoderRemovedEventData): void {
+		this.broadcast("decoders", { type: "decoder:removed", data })
 	}
 
 	/**
