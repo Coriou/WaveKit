@@ -38,8 +38,9 @@ Condensed + Noto Sans, Tabler-based icons).
 | --- | --- | --- |
 | A · Instrument, B · Console | Earlier shell directions | Rejected, kept for reference |
 | C · Immersive | **Chosen shell.** Full-bleed spectrum, floating glass islands | Active |
-| Spectrum + waterfall | Live mock: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line | Active |
-| Tuned-signal panel | What is on the tuned frequency | Active |
+| Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line | Active |
+| Tuned-signal card | What is on the tuned frequency: one anatomy for every signal type | Active, reworked |
+| Tuned card, every signal type | Gallery of the card for all 18 mocked signals (voice, fleets, messages, sensors, audio only, unknown) | Active |
 | Tuner island | Digit tuning, typed entry with suggestions, mode, bandwidth, step, saved frequencies | Active |
 | Receiver island | Sample rate, gain table, AGC, bias-T, PPM, advanced (direct sampling, DC removal, IQ correction) | Active |
 | Listen island | Listen, squelch meter with auto/off, volume, analog vs decoded voice, AGC, filters, record | Active |
@@ -85,6 +86,31 @@ Condensed + Noto Sans, Tabler-based icons).
   pause with "N new" count; keyboard navigation.
 - **Search is allowed in Activity.** The early "no text filters" rule applies to the
   rest of the UI; Activity search is explicitly wanted.
+- **Mock spectrum covers every decoder.** Realistic EU/Brittany frequencies:
+  FM broadcast 88–105 MHz (audio only), airband AM voice 118.1 (carrier only while
+  keyed) and continuous ATIS, ACARS 131.525/.725/.825, VDL2 136.725–136.975, APRS
+  144.800, 2 m voice, marine ch 16/12, POCSAG 160.450, NFM, DMR 161.150, AIS A/B,
+  P25 163.0875 (encrypted), LPD 433.075, ISM 433.92, PMR446 ch 1/3/8, an undecoded
+  pager network at 466.025, LoRaWAN 868.1, ISM 868.3, wM-Bus 868.95, Meshtastic
+  869.525, ADS-B 1090 (dense 2 MHz pulses). The Tuner and palette know these
+  channels (`acars`, `vdl2`, `tower`, `guard`, `wmbus`, `p25`, `fm`). *Why:* test the
+  UI against every kind of emission, not just a few VHF signals.
+- **Tuned card reworked (one anatomy for every signal type).** The old card was tall,
+  repeated the Listen meter, buried the useful bit in a box inside the card, had no
+  frequency and no actions. Now:
+  header (type icon, protocol + mode, live state with call timer, frequency, 5-bar
+  signal glyph; level, SNR and decoder in its tooltip) → a "now" block whose content
+  depends on the kind → up to two earlier items (four in the panel variant), with
+  inline play for recordings → actions (Play last / Replay, Map for fleets and APRS,
+  Activity, Save, Pin; Identify for unknown signals).
+  Kinds: *call* (talkgroup, radio, live transcript, encrypted state with a lock and
+  no play), *tx* (analog voice: live timer and level, or the last transmission with
+  its transcript), *count* (AIS, ADS-B: number in range, latest or nearest, message
+  rate sparkline), *msg* (pager, ACARS, VDL2, APRS, Meshtastic, sensors: who/what in
+  bold, the message in full up to 3 lines, readings as chips), *audio* (broadcast FM,
+  no decoder), *unknown*. The card is a fixed 320 px wide and grows to fit its
+  content, never past three lines of message text, so it works for every type; anything wider (maps, tables) stays in
+  Map or Activity.
 - **Command palette (⌘K), first pass.** One field that understands intent, not just
   command names:
   - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits
@@ -134,6 +160,12 @@ Condensed + Noto Sans, Tabler-based icons).
   picker and jump-to-time, bulk actions (export, copy, audio clip).
 - Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
   commands so both stay in sync.
+- Tuned card placement. Proposal (not drawn yet): no free drag. The card snaps to a
+  few anchors (bottom-right default, top-right under Receiver, bottom-left above
+  Listen), remembered per client. **Pin** detaches a card that keeps showing *its*
+  frequency while you tune elsewhere; pinned cards stack in one column (max 3,
+  collapsible to the header line), so watching AIS or a talkgroup while scanning
+  works. Owner to confirm before it is designed.
 - Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a
   ghost VFO only? Owner to judge after trying it. Palette on mobile (bottom sheet?).
   Single-key shortcuts and `G` chords need a design pass with the full keymap.
