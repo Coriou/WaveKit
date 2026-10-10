@@ -176,7 +176,7 @@ existing broadcaster integration; no service emitter or subscriber registry is a
 Sink exceptions are delivery failures, isolated from storage: durable mutation still
 succeeds, store stays available, and result includes `delivery:'failed'` so integration
 can log/close affected streams. Successful callback (or absent unmounted sink) reports
-`delivery:'sent'|'unmounted'`; these are internal results, not persistence guarantees
+`delivery:'sent'|'unmounted'`; a no-op returns `delivery:'not-needed'`; these are internal results, not persistence guarantees
 or public UI flags. No sink promise/async callback is supported. Integrating owner
 must enforce the synchronous callback type and handle transport backpressure.
 Within existing broadcaster subscription lifecycle, register channel then capture
@@ -250,3 +250,20 @@ Sink failure cannot roll back or masquerade as persistence failure; internal
 delivery result is failed while committed mutation succeeds. Subscription uses
 existing broadcaster lifecycle with synchronous register/capture/enqueue.
 No second bus/subscriber registry or mounted integration in this checkpoint.
+
+## Foundation verification sample (before independent code review)
+
+Domain/storage/service are independent and unmounted. Four unit files pass97
+tests; Properties1–9 (excluding integration-only10) run100 cases each where
+applicable. Repository typecheck and lint pass (59 existing warnings,0errors).
+Test globals imports/UID mock typing initially failed root typecheck and were fixed
+in owned tests; no source or shared configuration changes were needed.
+Synthetic maximum state on Darwin24.6.0/x64 Intel i5-1038NG7 Node25.2.1:
+256presets +64ranking keys encode275522bytes (275540 after preferences). Ten serial
+actual-fsync mutations including snapshot capture:124.99/142.62/167.92ms
+minimum/median/maximum in the parent combined touched run. This is bounded local
+latency/size evidence, not sustained multi-client transport or power-loss acceptance.
+Admission is one active +32waiting; response loss does not cancel admitted work.
+Close rejects new work and drains accepted operations before releasing ownership.
+Operational admission/lease checks at mounting and slow-reader/network recovery
+remain Main/client integration gates; no client or mounted capability is claimed.

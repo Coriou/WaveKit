@@ -1,4 +1,5 @@
 import fc from "fast-check"
+import { describe, expect, it } from "vitest"
 import { createEmptySnapshot } from "../../../src/operator-data/domain.js"
 import {
 	OPERATOR_DATA_LIMITS,

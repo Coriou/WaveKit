@@ -402,7 +402,9 @@ describe("dedicated operator-data storage", () => {
 						phase === "after" &&
 						stage === (target === "directory" ? "directory-open" : "read-open")
 					) {
-						vi.spyOn(process, "getuid").mockReturnValue(uid + 1)
+						vi.spyOn(process as { getuid(): number }, "getuid").mockReturnValue(
+							uid + 1,
+						)
 						substituted = true
 					}
 				}),

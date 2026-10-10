@@ -17,7 +17,7 @@
   and restart/initialization failure tests; no generic store abstraction.
   Depends on4.
   _Requirements: 4.1–4.7_
-- [ ] 6. Implement bounded service transactions and lifecycle; verify concurrency,
+- [x] 6. Implement bounded service transactions and lifecycle; verify concurrency,
   no-op publication results, injected synchronous sink ordering/exception behavior,
   copies, overload, shutdown and injected failures.
   Depends on4–5.
