@@ -379,6 +379,15 @@ export class DiscoveryStore extends EventEmitter {
 		)
 			return this.coChannelEvidence(d, ev, opts.cap)
 		if (d.confidence === "decoded" && ev.protocol !== d.protocol) return null
+		// identity-less evidence it does not adopt from another family belongs to a co-channel emitter: its
+		// talkgroups or encrypted flag would land on, e.g., an analog discovery
+		if (
+			ev.identity === undefined &&
+			!moreSpecific(d.protocol, ev.protocol) &&
+			familyOf(ev.protocol) !== d.family &&
+			d.family !== "unknown"
+		)
+			return null
 		const before = JSON.stringify(d)
 		const beforeRank = rank(d.confidence)
 		this.capInto(d, opts.cap)

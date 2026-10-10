@@ -519,6 +519,62 @@ describe("DiscoveryStore ladder and sticky flags (§ 7.3)", () => {
 		expect(store.get(unk)?.protocol).toBe("dmr") // unknown → dmr is a refinement
 	})
 
+	it("applies nothing from identity-less evidence of another family: no metadata, no encrypted flag", () => {
+		const { store } = newStore()
+		const fm =
+			store.ingest(
+				makeObs({
+					id: "o1",
+					centreHz: CH,
+					startedAt: T0,
+					cls: "analog-fm",
+					hypotheses: [["analog-fm", 0.8]],
+				}),
+			).discoveryId ?? ""
+		const before = store.get(fm)
+		expect(
+			store.applyEvidence(
+				fm,
+				evidence("dmr", T0 + 2_000, { talkgroups: ["9"], encrypted: true }),
+			),
+		).toBeNull()
+		expect(store.get(fm)).toEqual(before)
+	})
+
+	it("still applies identity-less evidence it does not adopt within the same family, or onto an unknown family", () => {
+		const { store } = newStore()
+		const dmr = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
+		expect(
+			store.applyEvidence(
+				dmr,
+				evidence("nxdn48", T0 + 2_000, { talkgroups: ["9"], encrypted: true }),
+			),
+		).toBe("updated")
+		expect(store.get(dmr)?.protocol).toBe("dmr")
+		expect(store.get(dmr)?.metadata.talkgroups).toEqual(["9"])
+		expect(store.get(dmr)?.encrypted).toBe(true)
+
+		const unk =
+			store.ingest(
+				makeObs({
+					id: "o2",
+					centreHz: CH + 1_000_000,
+					startedAt: T0,
+					hypotheses: [["digital-unknown", 0.8]],
+				}),
+			).discoveryId ?? ""
+		expect(store.get(unk)?.protocol).toBe("digital-unknown")
+		expect(store.get(unk)?.family).toBe("unknown")
+		expect(
+			store.applyEvidence(
+				unk,
+				evidence("pocsag", T0 + 2_000, { talkgroups: ["7"] }),
+			),
+		).toBe("updated")
+		expect(store.get(unk)?.protocol).toBe("digital-unknown")
+		expect(store.get(unk)?.metadata.talkgroups).toEqual(["7"])
+	})
+
 	it("ignores evidence that is not CRC-clean", () => {
 		const { store } = newStore()
 		const id = store.ingest(dmrObs("o1", CH, T0)).discoveryId ?? ""
