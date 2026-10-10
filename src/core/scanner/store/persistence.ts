@@ -4,7 +4,8 @@
  * - `discoveries.json`: snapshot of discoveries + observations with `lastSeq` (atomic write);
  * - `journal/observations-YYYYMMDD.jsonl`: one line per store mutation, monotonic `seq`, UTC daily files;
  * - `jobs.json`: job specs, lifecycle state and the persisted lease (lifecycle changes only);
- * - `settings.json`: runtime settings overrides; `engine/<sourceId>.json`: learned engine state.
+ * - `settings.json`: runtime settings overrides; `engine/<sourceId>.json`: learned engine state;
+ * - `engine/occupancy/<sourceId>.json`: occupancy history (Task 17a).
  *
  * Atomic writes follow the BandOverrideStore pattern (tmp + fsync + rename). All disk work runs on
  * one promise chain in call order; `append` assigns its seq synchronously. Every file read is
@@ -41,6 +42,8 @@ import type {
 } from "../../spectrum/types.js"
 import { EngineStateSchema } from "../../spectrum/engine-state.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
+import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
+import type { OccupancyState } from "../../spectrum/occupancy.js"
 import {
 	DiscoverySchema,
 	ObservationSchema,
@@ -55,6 +58,8 @@ const JOBS_FILE = "jobs.json"
 const SETTINGS_FILE = "settings.json"
 const JOURNAL_DIR = "journal"
 const ENGINE_DIR = "engine"
+/** A subdirectory, so readEngines (direct `engine/*.json` only) never sees these files. */
+const OCCUPANCY_DIR = join(ENGINE_DIR, "occupancy")
 const JOURNAL_NAME = /^observations-(\d{8})\.jsonl$/
 const DAY_MS = 86_400_000
 
@@ -522,12 +527,38 @@ export class ScannerPersistence {
 
 	writeEngine(sourceId: string, s: EngineState): Promise<void> {
 		const text = JSON.stringify(s)
-		return this.enqueue(() =>
-			atomicWrite(
-				join(this.root, ENGINE_DIR, `${encodeURIComponent(sourceId)}.json`),
-				text,
-			),
-		)
+		return this.enqueue(() => atomicWrite(this.engineFile(sourceId), text))
+	}
+
+	writeOccupancy(sourceId: string, s: OccupancyState): Promise<void> {
+		const text = JSON.stringify(s)
+		return this.enqueue(() => atomicWrite(this.occupancyFile(sourceId), text))
+	}
+
+	/** One source's occupancy history; null when missing or invalid (logged). Does not need load(). */
+	async loadOccupancy(sourceId: string): Promise<OccupancyState | null> {
+		const file = this.occupancyFile(sourceId)
+		const read = await readJson(file)
+		if (read.kind === "missing") return null
+		const parsed =
+			read.kind === "ok" ? OccupancyStateSchema.safeParse(read.value) : null
+		if (parsed === null || !parsed.success) {
+			this.log.warn(
+				{
+					file,
+					issues: parsed?.success === false ? parsed.error.issues : undefined,
+					err: read.kind === "invalid" ? read.reason : undefined,
+				},
+				"Ignoring an invalid occupancy history file",
+			)
+			return null
+		}
+		return parsed.data
+	}
+
+	/** One source's engine state; null when missing or invalid (logged). Does not need load(). */
+	loadEngine(sourceId: string): Promise<EngineState | null> {
+		return this.readEngineFile(this.engineFile(sourceId))
 	}
 
 	pruneJournal(caps: {
@@ -566,6 +597,18 @@ export class ScannerPersistence {
 				)
 			return { deleted }
 		})
+	}
+
+	private engineFile(sourceId: string): string {
+		return join(this.root, ENGINE_DIR, `${encodeURIComponent(sourceId)}.json`)
+	}
+
+	private occupancyFile(sourceId: string): string {
+		return join(
+			this.root,
+			OCCUPANCY_DIR,
+			`${encodeURIComponent(sourceId)}.json`,
+		)
 	}
 
 	private enqueue<T>(fn: () => Promise<T>): Promise<T> {
