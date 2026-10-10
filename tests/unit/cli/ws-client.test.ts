@@ -1,5 +1,5 @@
 import { createServer, type AddressInfo, type Socket } from "node:net"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { WebSocketServer, type WebSocket } from "ws"
 import {
 	CHANNELS,
@@ -383,4 +383,86 @@ describe("liveness watchdog (A2 review M4, optional in A4)", () => {
 		h.close()
 		await new Promise<void>(resolve => wss.close(() => resolve()))
 	}, 20000)
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("recoverable access pause", () => {
+	it.each(["credential-unavailable", "unauthorized", "forbidden"] as const)(
+		"pauses %s, discards late events and permits an operator reconnect",
+		reason => {
+			const { client, sockets, emitted, timers } = harness()
+			client.start()
+			sockets[0]!.h.accessBlocked?.(reason)
+			expect(client.connected()).toBe(false)
+			expect(sockets[0]!.closed).toBe(true)
+			expect(timers.filter(t => !t.cleared)).toHaveLength(0)
+			expect(emitted.at(-1)).toMatchObject({
+				kind: "ws:close",
+				nextRetryAt: null,
+				reason: `access blocked: ${reason}; reconnect to retry`,
+			})
+			const length = emitted.length
+			sockets[0]!.h.error("private-input")
+			sockets[0]!.h.close(1006, "private-input")
+			sockets[0]!.h.open()
+			sockets[0]!.h.message('{"type":"subscribed","data":{"channels":[]}}')
+			expect(emitted).toHaveLength(length)
+			client.start()
+			expect(sockets).toHaveLength(1)
+			client.reconnectNow()
+			expect(sockets).toHaveLength(2)
+			sockets[1]!.h.close(1006, "network failed")
+			expect(timers.filter(t => !t.cleared)).toHaveLength(1)
+			client.stop()
+		},
+	)
+	it("handles a synchronous access callback before the factory returns its handle", () => {
+		const closed = vi.fn()
+		const timer = vi.fn()
+		const emitted: Inbound[] = []
+		const client = createWsClient({
+			url: () => "ws://localhost/ws",
+			factory: (_url, h) => {
+				h.accessBlocked?.("credential-unavailable")
+				h.close(1006, "private-input")
+				return { send: vi.fn(), close: closed }
+			},
+			emit: item => emitted.push(item),
+			now: () => 1000,
+			random: () => 0.5,
+			setTimeout: timer,
+			clearTimeout: vi.fn(),
+		})
+		client.start()
+		expect(closed).toHaveBeenCalledTimes(1)
+		expect(client.connected()).toBe(false)
+		expect(timer).not.toHaveBeenCalled()
+		expect(emitted.map(e => e.kind)).toEqual(["ws:connecting", "ws:close"])
+		client.stop()
+	})
+	it("handles synchronous open and close without retaining an obsolete handle", () => {
+		const sent = vi.fn()
+		const closed = vi.fn()
+		const timer = vi.fn()
+		let end: WsHandlers | undefined
+		const client = createWsClient({
+			url: () => "ws://localhost/ws",
+			factory: (_url, h) => {
+				end = h
+				h.open()
+				return { send: sent, close: closed }
+			},
+			emit: vi.fn(),
+			now: () => 1000,
+			random: () => 0.5,
+			setTimeout: timer,
+			clearTimeout: vi.fn(),
+		})
+		client.start()
+		expect(sent).toHaveBeenCalledTimes(1)
+		end?.close(1006, "network failed")
+		end?.close(1006, "late duplicate")
+		expect(timer).toHaveBeenCalledTimes(1)
+		client.stop()
+	})
 })

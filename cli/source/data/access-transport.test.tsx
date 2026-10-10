@@ -1,3 +1,6 @@
+import { mkdtemp, chmod, writeFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { randomBytes } from "node:crypto"
 import { createServer } from "node:http"
 import type { IncomingMessage, Server, ServerResponse } from "node:http"
@@ -5,14 +8,18 @@ import type { AddressInfo } from "node:net"
 import { once } from "node:events"
 import { WebSocketServer } from "ws"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { MachineCredential } from "./access-credentials.js"
+import {
+	createFileCredentialProvider,
+	MachineCredential,
+} from "./access-credentials.js"
 import { discover } from "./config.js"
 import {
 	createCliFetch,
 	createCliProbeFetch,
 	createCliWsFactory,
 } from "./access-transport.js"
-import { HANDSHAKE_TIMEOUT_MS } from "./ws-client.js"
+import { createWsClient, HANDSHAKE_TIMEOUT_MS } from "./ws-client.js"
+import type { Inbound } from "./types.js"
 import type { WsHandle, WsHandlers } from "./ws-client.js"
 
 const token = randomBytes(32).toString("base64url")
@@ -508,5 +515,163 @@ describe("CLI destination-bound transports", () => {
 		sockets.push(createCliWsFactory()(origin.replace("http:", "ws:"), handlers))
 		await handlers.closed
 		expect(handlers.close).toHaveBeenCalledWith(1008, "")
+	})
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("native WebSocket access pause", () => {
+	it.each([401, 403])(
+		"reports a safe access signal for HTTP %s before any open event",
+		async status => {
+			const origin = await listen(
+				createServer((_req, res) => {
+					res.writeHead(status, { "Content-Type": "text/plain" })
+					res.end(token)
+				}),
+			)
+			const h = events()
+			const accessBlocked = vi.fn()
+			sockets.push(
+				createCliWsFactory({ policy: { origin, credentials: credentials() } })(
+					origin.replace("http:", "ws:") + "/ws",
+					{ ...h, accessBlocked },
+				),
+			)
+			await h.closed
+			expect(accessBlocked).toHaveBeenCalledExactlyOnceWith(
+				status === 401 ? "unauthorized" : "forbidden",
+			)
+			expect(h.open).not.toHaveBeenCalled()
+			expect(h.error).not.toHaveBeenCalled()
+			expect(h.close).toHaveBeenCalledExactlyOnceWith(0, "")
+			expect(JSON.stringify(accessBlocked.mock.calls)).not.toContain(token)
+		},
+	)
+	it("provider rejection pauses without opening a socket or disclosing its exception", async () => {
+		const reached = vi.fn((_req: IncomingMessage, res: ServerResponse) =>
+			res.end("{}"),
+		)
+		const origin = await listen(createServer(reached))
+		const h = events()
+		const accessBlocked = vi.fn()
+		sockets.push(
+			createCliWsFactory({
+				policy: { origin, credentials: () => Promise.reject(new Error(token)) },
+			})(origin.replace("http:", "ws:") + "/ws", { ...h, accessBlocked }),
+		)
+		await h.closed
+		expect(accessBlocked).toHaveBeenCalledExactlyOnceWith(
+			"credential-unavailable",
+		)
+		expect(reached).not.toHaveBeenCalled()
+		expect(h.error).not.toHaveBeenCalled()
+		expect(h.close).toHaveBeenCalledExactlyOnceWith(0, "")
+	})
+	it.each([429, 503])(
+		"HTTP %s remains a transport retry rather than an access pause",
+		async status => {
+			const origin = await listen(
+				createServer((_req, res) => {
+					res.writeHead(status)
+					res.end(token)
+				}),
+			)
+			const emitted: Inbound[] = []
+			const retry = vi.fn((fn: () => void, ms: number) => {
+				const timer = setTimeout(fn, ms)
+				timer.unref()
+				return timer
+			})
+			const client = createWsClient({
+				url: () => origin.replace("http:", "ws:") + "/ws",
+				factory: createCliWsFactory({
+					policy: { origin, credentials: credentials() },
+				}),
+				emit: item => emitted.push(item),
+				now: () => Date.now(),
+				random: () => 0.5,
+				setTimeout: retry,
+				clearTimeout: handle => clearTimeout(handle as NodeJS.Timeout),
+			})
+			try {
+				client.start()
+				await vi.waitFor(() => expect(retry).toHaveBeenCalledTimes(1))
+				expect(emitted.at(-1)).toMatchObject({
+					kind: "ws:close",
+					reason: "CLI access transport failed",
+				})
+				expect(emitted.at(-1)).not.toMatchObject({ nextRetryAt: null })
+				expect(JSON.stringify(emitted)).not.toContain(token)
+			} finally {
+				client.stop()
+			}
+		},
+	)
+	it("operator retry rereads a rotated private token after a real 401 pause", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "wavekit-cli-wiring-"))
+		await chmod(directory, 0o700)
+		const path = join(directory, "credential")
+		const rotated = randomBytes(32).toString("base64url")
+		await writeFile(path, token, { mode: 0o600 })
+		const wss = new WebSocketServer({ noServer: true })
+		wsServers.push(wss)
+		let requests = 0
+		const server = createServer()
+		server.on("upgrade", (req, socket, head) => {
+			requests++
+			if (req.headers.authorization !== `Bearer ${rotated}`) {
+				socket.end(
+					`HTTP/1.1 401 Unauthorized\r\nContent-Length: ${token.length}\r\nConnection: close\r\n\r\n${token}`,
+				)
+				return
+			}
+			wss.handleUpgrade(req, socket, head, peer => {
+				peer.on("message", () =>
+					peer.send('{"type":"subscribed","data":{"channels":[]}}'),
+				)
+			})
+		})
+		const origin = await listen(server)
+		const emitted: Inbound[] = []
+		const retry = vi.fn((fn: () => void, ms: number) => {
+			const timer = setTimeout(fn, ms)
+			timer.unref()
+			return timer
+		})
+		const client = createWsClient({
+			url: () => origin.replace("http:", "ws:") + "/ws",
+			factory: createCliWsFactory({
+				policy: {
+					origin,
+					credentials: createFileCredentialProvider({ path, format: "token" }),
+				},
+			}),
+			emit: item => emitted.push(item),
+			now: () => Date.now(),
+			random: () => 0.5,
+			setTimeout: retry,
+			clearTimeout: handle => clearTimeout(handle as NodeJS.Timeout),
+		})
+		try {
+			client.start()
+			await vi.waitFor(() =>
+				expect(emitted.at(-1)).toMatchObject({
+					kind: "ws:close",
+					nextRetryAt: null,
+				}),
+			)
+			expect(requests).toBe(1)
+			expect(retry).not.toHaveBeenCalled()
+			await writeFile(path, rotated, { mode: 0o600 })
+			client.reconnectNow()
+			await vi.waitFor(() => expect(emitted.at(-1)?.kind).toBe("ws:open"))
+			expect(requests).toBe(2)
+			expect(retry).not.toHaveBeenCalled()
+			expect(JSON.stringify(emitted)).not.toContain(token)
+			expect(JSON.stringify(emitted)).not.toContain(rotated)
+		} finally {
+			client.stop()
+			await rm(directory, { recursive: true, force: true })
+		}
 	})
 })

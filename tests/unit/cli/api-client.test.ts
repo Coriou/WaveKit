@@ -1,3 +1,5 @@
+import { MachineCredential } from "../../../cli/source/data/access-credentials.js"
+import { createCliFetch } from "../../../cli/source/data/access-transport.js"
 import { describe, expect, it, vi } from "vitest"
 import { createApiClient } from "../../../cli/source/data/api-client.js"
 import type { FetchLike } from "../../../cli/source/data/config.js"
@@ -294,4 +296,40 @@ describe("A2 re-review: never report a landed write as failed", () => {
 			})
 		}
 	})
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("protected REST denial semantics", () => {
+	it.each([401, 403])(
+		"keeps %s as an HTTP answer and a failed write without echoing server secrets",
+		async status => {
+			const secret = Buffer.alloc(32, 7).toString("base64url")
+			const request = createCliFetch({
+				policy: {
+					origin: "http://127.0.0.1:9000",
+					credentials: async () => new MachineCredential(secret),
+				},
+				fetch: async () =>
+					new Response(
+						JSON.stringify({ code: "AUTH_REQUIRED", message: secret }),
+						{ status },
+					),
+			})
+			const api = client(request)
+			const get = await api.get("status")
+			expect(get).toMatchObject({
+				ok: false,
+				error: { kind: "http", status, message: `HTTP ${status}` },
+			})
+			const write = await api.decoder("readsb", "restart")
+			expect(write).toMatchObject({
+				ok: false,
+				outcome: "failed",
+				status,
+				code: "AUTH_REQUIRED",
+				message: `HTTP ${status}`,
+			})
+			expect(JSON.stringify({ get, write })).not.toContain(secret)
+		},
+	)
 })

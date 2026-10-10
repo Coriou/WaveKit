@@ -1,8 +1,15 @@
 /** The WaveKit CLI, loaded by cli.tsx once NODE_ENV is set. `wavekit --help` lists views, options and env vars. */
+import { resolve } from "node:path"
 import { render } from "ink"
 import { App } from "./app.js"
 import { helpText, parseArgs } from "./args.js"
-import { resolveExplicit, type ApiTarget } from "./data/config.js"
+import { createFileCredentialProvider } from "./data/access-credentials.js"
+import { createCliFetch, createCliWsFactory } from "./data/access-transport.js"
+import {
+	CliUsageError,
+	resolveExplicit,
+	type ApiTarget,
+} from "./data/config.js"
 import { createRuntime, nodeRuntimeDeps } from "./data/runtime.js"
 import {
 	createScreen,
@@ -27,11 +34,33 @@ if (parsed.kind === "error") {
 }
 
 let explicit: ApiTarget | null
+let transports: Parameters<typeof nodeRuntimeDeps>[2]
 try {
-	explicit = resolveExplicit(parsed.api, process.env)
+	if (parsed.credentialFile !== undefined) {
+		const origin = parsed.api ?? process.env["WAVEKIT_API_URL"]
+		if (!origin)
+			throw new CliUsageError(
+				"--credential-file requires --api or WAVEKIT_API_URL",
+			)
+		const policy = {
+			origin,
+			credentials: createFileCredentialProvider({
+				path: resolve(parsed.credentialFile),
+				format: parsed.credentialFormat ?? "access-state",
+			}),
+		}
+		// Validate the original target before conversion or any credential read.
+		transports = {
+			fetchFn: createCliFetch({ policy }),
+			wsFactory: createCliWsFactory({ policy }),
+		}
+		explicit = resolveExplicit(origin, {}, { preserveLocalhost: true })
+	} else {
+		explicit = resolveExplicit(parsed.api, process.env)
+	}
 } catch (err: unknown) {
 	process.stderr.write(
-		`wavekit: ${err instanceof Error ? err.message : String(err)}\n`,
+		`wavekit: ${err instanceof CliUsageError ? err.message : "CLI setup unavailable"}\n`,
 	)
 	process.exit(2)
 }
@@ -60,7 +89,9 @@ for (const m of [
 ] as const)
 	console[m] = drop
 
-const runtime = createRuntime(nodeRuntimeDeps(explicit, formatMessage))
+const runtime = createRuntime(
+	nodeRuntimeDeps(explicit, formatMessage, transports),
+)
 const screen = createScreen(process.stdout)
 let instance: ReturnType<typeof render> | null = null
 const shutdown = createShutdown({

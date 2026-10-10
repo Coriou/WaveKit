@@ -10,7 +10,7 @@ import {
 	MAX_PAYLOAD_BYTES,
 	SILENCE_MS,
 } from "./ws-client.js"
-import type { WsFactory } from "./ws-client.js"
+import type { AccessBlockedReason, WsFactory } from "./ws-client.js"
 
 export interface CliCredentialPolicy {
 	/** Explicit HTTP(S) origin, never a discovery candidate or WS URL. */
@@ -349,6 +349,12 @@ export function createCliWsFactory(options: TransportOptions = {}): WsFactory {
 			clearInterval(watchdog)
 			if (!cancelled) handlers.close(code, "")
 		}
+		const block = (reason: AccessBlockedReason): void => {
+			if (cancelled || closed) return
+			if (handlers.accessBlocked) handlers.accessBlocked(reason)
+			else handlers.error("CLI access transport failed")
+			finish(0)
+		}
 		void (async () => {
 			try {
 				const headers = policy
@@ -380,14 +386,14 @@ export function createCliWsFactory(options: TransportOptions = {}): WsFactory {
 				}, 5000)
 				watchdog.unref()
 				socket.on("open", () => {
-					if (!cancelled) {
+					if (!cancelled && !closed) {
 						touch()
 						handlers.open()
 					}
 				})
 				socket.on("message", (data: WebSocket.RawData) => {
 					touch()
-					if (!cancelled)
+					if (!cancelled && !closed)
 						handlers.message(
 							(Buffer.isBuffer(data)
 								? data
@@ -402,13 +408,36 @@ export function createCliWsFactory(options: TransportOptions = {}): WsFactory {
 					touch()
 				})
 				socket.on("pong", touch)
+				socket.on("unexpected-response", (_request, response) => {
+					const status = response.statusCode
+					// Never parse, forward or log a rejected handshake body.
+					response.on("error", () => undefined)
+					response.destroy()
+					if (status === 401 || status === 403)
+						block(status === 401 ? "unauthorized" : "forbidden")
+					else {
+						if (!cancelled && !closed)
+							handlers.error("CLI access transport failed")
+						finish(1006)
+					}
+					socket?.terminate()
+				})
 				socket.on("error", () => {
-					if (!cancelled) handlers.error("CLI access transport failed")
+					if (!cancelled && !closed)
+						handlers.error("CLI access transport failed")
 				})
 				socket.on("close", (code: number) => finish(code))
-			} catch {
-				if (!cancelled) handlers.error("CLI access transport failed")
-				finish(0)
+			} catch (error: unknown) {
+				if (
+					policy &&
+					error instanceof CliAccessError &&
+					error.code === "ACCESS_CREDENTIAL_UNAVAILABLE"
+				)
+					block("credential-unavailable")
+				else {
+					if (!cancelled) handlers.error("CLI access transport failed")
+					finish(0)
+				}
 			}
 		})()
 		return {

@@ -1,3 +1,4 @@
+import { createCliProbeFetch } from "./access-transport.js"
 import { createApiClient } from "./api-client.js"
 import {
 	discover as defaultDiscover,
@@ -59,6 +60,8 @@ export const NODE_TIMERS: Timers = {
 
 export interface RuntimeDeps {
 	fetchFn: FetchLike
+	/** Discovery never receives the authenticated REST transport. */
+	probeFetchFn: FetchLike
 	wsFactory: WsFactory
 	now(): number
 	random(): number
@@ -85,10 +88,12 @@ export type RuntimeHandle = Pick<Runtime, "store" | "reconnect" | "send">
 export function nodeRuntimeDeps(
 	explicit: ApiTarget | null,
 	summarize: ReduceDeps["summarize"],
+	transports?: Pick<RuntimeDeps, "fetchFn" | "wsFactory">,
 ): RuntimeDeps {
 	return {
-		fetchFn: (url, init) => fetch(url, init),
-		wsFactory: nodeWsFactory,
+		fetchFn: transports?.fetchFn ?? ((url, init) => fetch(url, init)),
+		probeFetchFn: createCliProbeFetch(),
+		wsFactory: transports?.wsFactory ?? nodeWsFactory,
 		now: () => Date.now(),
 		random: () => Math.random(),
 		timers: NODE_TIMERS,
@@ -342,7 +347,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			ws: target?.ws ?? null,
 			discovery: { mode: "probing", tried: [] },
 		})
-		const found = await discoverFn(deps.fetchFn)
+		const found = await discoverFn(deps.probeFetchFn)
 		if (run !== epoch) return
 		discovering = false
 		const at = deps.now()

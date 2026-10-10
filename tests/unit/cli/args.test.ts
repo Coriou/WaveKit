@@ -113,3 +113,49 @@ describe("parseArgs", () => {
 		}
 	})
 })
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("private credential options", () => {
+	it("defaults to private access-state and accepts explicit token files", () => {
+		expect(
+			parseArgs([
+				"--credential-file",
+				"/private/access-state.json",
+				"--api=http://localhost:9000",
+			]),
+		).toEqual({
+			kind: "run",
+			view: "overview",
+			api: "http://localhost:9000",
+			credentialFile: "/private/access-state.json",
+			credentialFormat: "access-state",
+		})
+		expect(
+			parseArgs([
+				"--credential-format=token",
+				"--credential-file=./credential",
+			]),
+		).toMatchObject({
+			kind: "run",
+			credentialFile: "./credential",
+			credentialFormat: "token",
+		})
+	})
+	it("rejects incomplete options and never echoes secret-looking arguments", () => {
+		const input = "secret-looking-user-input"
+		for (const argv of [
+			["--credential-file"],
+			["--credential-file="],
+			["--credential-format=token"],
+			["--credential-format", input],
+			["--view", input],
+			[`--token=${input}`],
+		]) {
+			const result = parseArgs(argv)
+			expect(result.kind).toBe("error")
+			expect(JSON.stringify(result)).not.toContain(input)
+		}
+		expect(HELP_TEXT).toContain("--credential-file")
+		expect(HELP_TEXT).toContain("--credential-format")
+	})
+})

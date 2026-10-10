@@ -58,14 +58,10 @@ describe("resolveExplicit", () => {
 })
 
 describe("A1 fix round 1: URL validation", () => {
-	it("refuses a URL without an http(s) or ws(s) scheme, with a hint", () => {
+	it("refuses a URL without an http(s) or ws(s) scheme, with safe guidance", () => {
 		expect(() => resolveExplicit("localhost:9000", {})).toThrow(CliUsageError)
-		expect(() => resolveExplicit("localhost:9000", {})).toThrow(
-			/did you mean http:\/\/localhost:9000\?/,
-		)
-		expect(() => resolveExplicit("127.0.0.1:9000", {})).toThrow(
-			/did you mean http:\/\/127\.0\.0\.1:9000\?/,
-		)
+		expect(() => resolveExplicit("localhost:9000", {})).toThrow(/use http/)
+		expect(() => resolveExplicit("127.0.0.1:9000", {})).toThrow(/use http/)
 		expect(() => resolveExplicit("file:///x", {})).toThrow(CliUsageError)
 		expect(() => resolveExplicit("ftp://h", {})).toThrow(CliUsageError)
 		expect(() =>
@@ -161,5 +157,39 @@ describe("discover", () => {
 	it("skips JSON that is not a WaveKit /health body", async () => {
 		const r = await discover(() => json(200, { hello: "world" }))
 		expect(r.target).toBeNull()
+	})
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("protected target resolution", () => {
+	it("preserves the hostname after the original protected target was validated", () => {
+		expect(
+			resolveExplicit("http://localhost:9000", {}, { preserveLocalhost: true }),
+		).toEqual({
+			base: "http://localhost:9000",
+			ws: "ws://localhost:9000/ws",
+			explicit: true,
+		})
+		expect(
+			resolveExplicit(
+				undefined,
+				{ WAVEKIT_API_URL: "https://localhost:8443" },
+				{ preserveLocalhost: true },
+			)?.base,
+		).toBe("https://localhost:8443")
+	})
+	it.each([
+		"http://user:private-input@localhost:9000",
+		"ws://private-input@localhost/ws",
+		"private-input",
+		"http://localhost:4713/#private-input",
+	])("rejects unsafe input without echoing it", input => {
+		try {
+			resolveExplicit(input, {})
+			expect.fail("accepted unsafe target")
+		} catch (error) {
+			expect(error).toBeInstanceOf(CliUsageError)
+			expect(String(error)).not.toContain("private-input")
+		}
 	})
 })

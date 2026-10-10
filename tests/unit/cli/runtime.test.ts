@@ -1,3 +1,4 @@
+import { createCliFetch } from "../../../cli/source/data/access-transport.js"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { FetchLike } from "../../../cli/source/data/config.js"
@@ -8,6 +9,7 @@ import {
 	POLL_MS,
 	BACKGROUND_EVENTS,
 	createRuntime,
+	nodeRuntimeDeps,
 	isUrgent,
 	type Timers,
 } from "../../../cli/source/data/runtime.js"
@@ -68,6 +70,7 @@ describe("runtime", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -116,6 +119,7 @@ describe("runtime", () => {
 					const ws = wsFake()
 					const rt = createRuntime({
 						fetchFn: never,
+						probeFetchFn: never,
 						wsFactory: ws.factory,
 						now: () => Date.now(),
 						random: () => 0.5,
@@ -153,6 +157,7 @@ describe("runtime", () => {
 		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -205,6 +210,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -245,6 +251,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -292,6 +299,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -318,6 +326,7 @@ describe("runtime", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -348,6 +357,7 @@ describe("runtime", () => {
 		)
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -406,6 +416,7 @@ describe("poll cycles (R47 M1, M2)", () => {
 		const held = heldFetch()
 		const rt = createRuntime({
 			fetchFn: held.fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -437,6 +448,7 @@ describe("poll cycles (R47 M1, M2)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: held.fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -530,6 +542,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore()
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -571,6 +584,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore(20_000)
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -604,6 +618,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		)
 		const rt = createRuntime({
 			fetchFn: () => Promise.reject(new DOMException("t", "TimeoutError")),
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -622,6 +637,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore()
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -654,6 +670,7 @@ describe("R55 runtime follow-ups", () => {
 	const make = (fetchFn: FetchLike, ws = wsFake()) =>
 		createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -744,6 +761,7 @@ describe("R55 follow-ups fix", () => {
 	const make = (fetchFn: FetchLike, ws = wsFake()) =>
 		createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -837,6 +855,7 @@ describe("R55 follow-ups fix", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -870,6 +889,7 @@ describe("R55 follow-ups fix", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -906,6 +926,7 @@ describe("background items wait for the whole second (D3)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1022,6 +1043,7 @@ describe("background items wait for the whole second (D3)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1079,6 +1101,7 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1106,6 +1129,7 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1147,6 +1171,7 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1187,6 +1212,7 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1204,4 +1230,98 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		expect(presets).toBeLessThanOrEqual(1 + 4)
 		rt.stop()
 	})
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("CLI access transport wiring", () => {
+	it("uses only the required probe transport for discovery and REST only after adoption", async () => {
+		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		const probeFetchFn = vi.fn<FetchLike>(() => okJson({ status: "ok" }))
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(probeFetchFn.mock.calls.map(c => c[0])).toEqual([
+			"http://127.0.0.1:9000/health",
+		])
+		expect(fetchFn.mock.calls.length).toBeGreaterThan(0)
+		expect(fetchFn.mock.calls.every(c => !c[0].endsWith("/health"))).toBe(true)
+		rt.stop()
+	})
+	it("node dependencies keep injected protected transports separate from credential-free probes", async () => {
+		const native = vi
+			.spyOn(globalThis, "fetch")
+			.mockResolvedValue(
+				new Response(JSON.stringify({ status: "ok", private: "discard" }), {
+					status: 503,
+				}),
+			)
+		const fetchFn = vi.fn<FetchLike>(() => okJson([]))
+		const wsFactory = wsFake().factory
+		try {
+			const deps = nodeRuntimeDeps(TARGET, PLAIN_SUMMARY.summarize, {
+				fetchFn,
+				wsFactory,
+			})
+			expect(deps.fetchFn).toBe(fetchFn)
+			expect(deps.wsFactory).toBe(wsFactory)
+			expect(
+				await (await deps.probeFetchFn(`${TARGET.base}/health`)).json(),
+			).toEqual({ status: "ok" })
+			expect(native.mock.calls[0]?.[1]).toMatchObject({
+				headers: {},
+				redirect: "error",
+				credentials: "omit",
+			})
+			expect(fetchFn).not.toHaveBeenCalled()
+		} finally {
+			native.mockRestore()
+		}
+	})
+	it.each([401, 403])(
+		"REST %s is an answered server and explicit access never migrates",
+		async status => {
+			const discover = vi.fn(async () => ({ target: null, tried: [] }))
+			const fetchFn = createCliFetch({
+				fetch: async () =>
+					new Response(JSON.stringify({ message: "untrusted message" }), {
+						status,
+					}),
+			})
+			const ws = wsFake()
+			const rt = createRuntime({
+				fetchFn,
+				probeFetchFn: never,
+				wsFactory: ws.factory,
+				now: () => Date.now(),
+				random: () => 0.5,
+				timers: fakeTimers,
+				summarize: PLAIN_SUMMARY.summarize,
+				explicit: TARGET,
+				discover,
+			})
+			rt.start()
+			ws.sockets[0]!.accessBlocked?.(
+				status === 401 ? "unauthorized" : "forbidden",
+			)
+			await vi.advanceTimersByTimeAsync(40_000)
+			expect(discover).not.toHaveBeenCalled()
+			expect(rt.store.get().conn.rest.failing).toContain("status")
+			expect(rt.store.get().status.error).toMatchObject({
+				kind: "http",
+				status,
+				message: `HTTP ${status}`,
+			})
+			expect(rt.store.get().conn.ws.nextRetryAt).toBeNull()
+			rt.stop()
+		},
+	)
 })
