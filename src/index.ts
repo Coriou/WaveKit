@@ -19,6 +19,7 @@ import {
 	loadConfig,
 	DigitalVoiceConfigSchema,
 	LiveDemodConfigSchema,
+	sourceScannerConfig,
 	type Config,
 } from "./config.js"
 import {
@@ -29,7 +30,10 @@ import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
-import { SourceFanoutRouter } from "./core/source-fanout-router.js"
+import {
+	SourceFanoutRouter,
+	defaultSourceIdFor,
+} from "./core/source-fanout-router.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
 import { TunerController } from "./core/tuner-controller.js"
@@ -268,7 +272,14 @@ async function main(): Promise<void> {
 		sourceManager,
 		fanoutManager,
 		logger,
-		config.sources[0]?.id,
+		defaultSourceIdFor(config.sources),
+		{
+			dedicated: new Set(
+				config.sources
+					.filter(s => sourceScannerConfig(s).role === "dedicated")
+					.map(s => s.id),
+			),
+		},
 	)
 	const audioOutput = new AudioOutput(logger, {
 		port: config.audio.tcpPort,

@@ -225,3 +225,92 @@ describe("WAVEKIT_SCANNER__ environment overrides", () => {
 		])
 	})
 })
+
+describe("config validation for dedicated sources (spec § 10.7)", () => {
+	const dedicated = { ...source, scanner: { role: "dedicated", passive: true } }
+	const decoder = (extra: Record<string, unknown>) => ({
+		id: "d",
+		type: "dsd-fme",
+		enabled: true,
+		options: {},
+		...extra,
+	})
+
+	it("fails when every source is dedicated and an enabled decoder has no sourceId", () => {
+		const result = ConfigSchema.safeParse({
+			sources: [dedicated],
+			decoders: [decoder({})],
+		})
+		expect(result.success).toBe(false)
+		expect(JSON.stringify(result.error?.issues)).toContain("dedicated")
+	})
+
+	it("passes with a shared source, an explicit sourceId, a deviceSerial or a disabled decoder", () => {
+		expect(
+			ConfigSchema.safeParse({
+				sources: [dedicated, source],
+				decoders: [decoder({})],
+			}).success,
+		).toBe(true)
+		expect(
+			ConfigSchema.safeParse({
+				sources: [dedicated],
+				decoders: [decoder({ sourceId: "rtl" })],
+			}).success,
+		).toBe(true)
+		expect(
+			ConfigSchema.safeParse({
+				sources: [dedicated],
+				decoders: [decoder({ type: "acarsdec", deviceSerial: "00000003" })],
+			}).success,
+		).toBe(true)
+		expect(
+			ConfigSchema.safeParse({
+				sources: [dedicated],
+				decoders: [decoder({ enabled: false })],
+			}).success,
+		).toBe(true)
+	})
+
+	it("passes for network producers that name their dongle in options, as config/default.yaml configures readsb and ais-catcher", () => {
+		const readsb = {
+			id: "adsb-decoder",
+			type: "readsb",
+			enabled: true,
+			outputHost: "127.0.0.1",
+			outputPort: 30003,
+			outputProtocol: "tcp",
+			options: {
+				deviceSerial: "00000002",
+				outputFormat: "sbs",
+				gain: 49.6,
+				lat: 37.7749,
+				lon: -122.4194,
+			},
+			minVersion: "3.14.1",
+		}
+		const ais = {
+			id: "ais-decoder",
+			type: "ais-catcher",
+			enabled: true,
+			outputHost: "127.0.0.1",
+			outputPort: 10110,
+			outputProtocol: "udp",
+			options: { deviceSerial: "00000004", outputFormat: "nmea", gain: 33.8 },
+		}
+		const result = ConfigSchema.safeParse({
+			sources: [dedicated],
+			decoders: [readsb, ais],
+		})
+		expect(result.error?.issues).toBeUndefined()
+		expect(result.success).toBe(true)
+		const withUnsourced = ConfigSchema.safeParse({
+			sources: [dedicated],
+			decoders: [readsb, decoder({})],
+		})
+		expect(withUnsourced.success).toBe(false)
+		expect(JSON.stringify(withUnsourced.error?.issues)).toContain(
+			"decoders d have no sourceId",
+		)
+	})
+})

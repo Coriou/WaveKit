@@ -528,33 +528,57 @@ export function sourceScannerConfig(
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
-export const ConfigSchema = z.object({
-	sources: z.array(SourceConfigSchema).default([]),
-	decoders: z.array(DecoderConfigSchema).default([]),
-	audio: AudioConfigSchema.default({}),
-	tunerRelay: TunerRelayConfigSchema.default({}),
-	tuner: TunerConfigSchema.default({}),
-	liveDemod: LiveDemodConfigSchema.optional(),
-	digitalVoice: DigitalVoiceConfigSchema.optional(),
-	api: ApiConfigSchema.default({}),
-	logging: LoggingConfigSchema.default({}),
-	health: HealthConfigSchema.optional(),
-	resources: ResourcesConfigSchema.default({}),
-	csdr: CsdrConfigSchema.default({}),
-	channelizer: ChannelizerConfigSchema.default({}),
-	/** Signal discovery scanner (spec § 12.3); on by default. */
-	scanner: ScannerConfigSchema.default({}),
-	/**
-	 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
-	 * case-insensitive). Absent: guessed from TZ / locale, else EU.
-	 */
-	region: RegionSchema.optional(),
-	/**
-	 * Directory for runtime state (API band overrides). Relative paths
-	 * resolve against the process working directory.
-	 */
-	stateDir: z.string().min(1).default("data"),
-})
+export const ConfigSchema = z
+	.object({
+		sources: z.array(SourceConfigSchema).default([]),
+		decoders: z.array(DecoderConfigSchema).default([]),
+		audio: AudioConfigSchema.default({}),
+		tunerRelay: TunerRelayConfigSchema.default({}),
+		tuner: TunerConfigSchema.default({}),
+		liveDemod: LiveDemodConfigSchema.optional(),
+		digitalVoice: DigitalVoiceConfigSchema.optional(),
+		api: ApiConfigSchema.default({}),
+		logging: LoggingConfigSchema.default({}),
+		health: HealthConfigSchema.optional(),
+		resources: ResourcesConfigSchema.default({}),
+		csdr: CsdrConfigSchema.default({}),
+		channelizer: ChannelizerConfigSchema.default({}),
+		/** Signal discovery scanner (spec § 12.3); on by default. */
+		scanner: ScannerConfigSchema.default({}),
+		/**
+		 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
+		 * case-insensitive). Absent: guessed from TZ / locale, else EU.
+		 */
+		region: RegionSchema.optional(),
+		/**
+		 * Directory for runtime state (API band overrides). Relative paths
+		 * resolve against the process working directory.
+		 */
+		stateDir: z.string().min(1).default("data"),
+	})
+	.superRefine((config, ctx) => {
+		// Spec § 10.7: decoders without sourceId use the default source, which
+		// is never a dedicated scanner source.
+		if (config.sources.length === 0) return
+		if (!config.sources.every(s => sourceScannerConfig(s).role === "dedicated"))
+			return
+		// A decoder that names its own dongle (top-level deviceSerial for
+		// external-SDR decoders, options.deviceSerial for readsb/ais-catcher)
+		// never uses the default source.
+		const unsourced = config.decoders.filter(
+			d =>
+				d.enabled &&
+				d.sourceId === undefined &&
+				d.deviceSerial === undefined &&
+				d.options["deviceSerial"] === undefined,
+		)
+		if (unsourced.length === 0) return
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			path: ["sources"],
+			message: `Every source is scanner.role "dedicated", but decoders ${unsourced.map(d => d.id).join(", ")} have no sourceId; give them a sourceId or make one source shared`,
+		})
+	})
 
 // ============================================================================
 // Type Exports
