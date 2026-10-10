@@ -139,3 +139,17 @@ The standalone core setup/pair utility is being implemented independently. Its
 package/build wiring waits for scanner Task 32's new worker build entry to settle.
 Core logging, audio-origin mapping, browser onboarding/renewal and actual
 container/TLS exposure acceptance remain incomplete portions of tasks 6–9.
+
+## Independent assembly checkpoint — 2026-10-10
+
+The reviewed foundation, private persistence/session flows, unmounted runtime
+adapters, decoder environment/container health hygiene and actual CLI credential
+wiring are assembled with current main. The complete repository test command
+passed: root 2,768 tests, CLI 295 and sdr-host 99. Eleven root integration tests
+were skipped by their existing fixture/binary prerequisites. Repository typecheck
+passed; lint has zero errors and 59 existing warnings.
+
+This batch is safe to land independently of scanner's active shared-file work.
+It does not mount core authentication or make the browser ready for release.
+Standalone setup/pairing follows as a separately reviewed change; the runtime
+and browser checkpoint remains open.

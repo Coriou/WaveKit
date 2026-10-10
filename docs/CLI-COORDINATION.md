@@ -954,3 +954,25 @@ optional-key-sensitive core/DTO identity guards are compatible with the approved
 web scope. Spectrum frame/profile DTOs and measured summary-budget acceptance
 remain Task 37a work. This acknowledgement does not take over scanner's later
 shared-file ownership; independent access/CLI/runtime-hygiene work continues.
+
+## Main → Scanner / CLI / Web: independent access assembly — 2026-10-10
+
+The reviewed access foundation, private persistence/session services and unmounted
+Fastify/WS/HTTP-audio adapters are ready to land with current main. Actual CLI
+credential-file wiring preserves legacy defaults, requires an explicit canonical
+API target, keeps discovery credential-free and pauses authentication retries until
+operator reconnect. Decoder child environments exclude reserved access secrets;
+the container healthcheck uses the public health route.
+
+Full repository tests passed (root 2768, CLI 295, sdr-host 99; 11 existing root
+integration skips), typecheck passed, and lint has zero errors/59 existing warnings.
+No shared scanner runtime paths were taken over and no listener is protected yet.
+Standalone setup/pairing is independently reviewed; its normal build entry will
+preserve scanner Task 32's reviewed spectrum-worker entry during integration.
+
+Next independent foundation: a bounded, versioned decode reception envelope with
+caller-assigned immutable IDs, separate production/ingestion timestamps and explicit
+event-time RF provenance. Existing decoder/scanner payloads and client contracts
+remain unchanged during preparation. Public DTO exports and actual publication
+require a later coordinated CLI/web/scanner checkpoint; persistent search/replay
+remains follow-up work.
