@@ -1031,11 +1031,14 @@ export class SpectrumPipeline {
 		}
 	}
 
-	/** Inside the usable span and not masked (DC, exclusions, baseband spurs). */
+	/**
+	 * Inside the usable span, not masked (DC, exclusions, baseband spurs) and not on this block's spur lines:
+	 * withoutLines drops provisional lines from the segments without masking them in the detector.
+	 */
 	private visibleRf(hz: number, ep: EpochState): boolean {
 		const bin = Math.round((hz - ep.centreHz) / this.binHz + this.n / 2)
 		if (bin < this.edgeBins || bin > this.n - this.edgeBins) return false
-		return this.detector.unmasked()[bin] === 1
+		return this.detector.unmasked()[bin] === 1 && this.lineMask[bin] !== 1
 	}
 
 	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */

@@ -17,8 +17,11 @@ function scene(seed: number, offsets: number[], seconds: number): Iq {
 	for (const o of offsets) addInto(iq, tone(n, FS, o, 0.1))
 	return iq
 }
-function play(parts: Iq[]): Harness {
-	const h = new Harness({ format: "FLOAT32LE" })
+function play(
+	parts: Iq[],
+	deps: { provisionalWindowMs?: number } = {},
+): Harness {
+	const h = new Harness({ format: "FLOAT32LE" }, deps)
 	h.start({ feed: false })
 	for (const p of parts) h.push(p, 16_384)
 	return h
@@ -88,6 +91,12 @@ describe("untracked-retune alarm in the pipeline", () => {
 				1,
 			),
 		])
+		expect(h.of("untracked-retune")).toEqual([])
+	}, 60_000)
+
+	it("does not count carriers dropped as provisional lines as vanished", () => {
+		// Steady tones become provisional lines after the line window and leave the segments; nothing moved.
+		const h = play([scene(9, OFFSETS, 14)], { provisionalWindowMs: 12_000 })
 		expect(h.of("untracked-retune")).toEqual([])
 	}, 60_000)
 })
