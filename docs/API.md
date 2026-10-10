@@ -1480,7 +1480,9 @@ Each returns the `ScanJob`. `resume` takes an optional body
 - from `paused(operator)`: resumes;
 - from `paused(resume-blocked)`: needs `takeover: true` (the impact grew
   beyond what was consented);
-- from `paused(preempted-*)`: arbitrates at once and ignores `takeover`; 409
+- from `paused(preempted-*)`: arbitrates at once; `takeover` is not required
+  (sending it records the current impact as consented for later
+  auto-resumes); 409
   `SCANNER_SOURCE_BUSY` while another job holds the lease
   (`details.holderJobId`) or a better-placed job waits for it
   (`details.waiter`).
@@ -1607,8 +1609,15 @@ audio if it was idle.
 }
 ```
 
-409 `OUT_OF_WINDOW` (outside the window, live audio on another source, or the
-centre unknown), 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
+409 `OUT_OF_WINDOW` with `details` saying why:
+
+- live audio runs on another source: `{ liveSourceId, sourceId }`;
+- the source centre is unknown: `{ sourceId }`;
+- the discovery is outside the current window: `{ offsetHz, usableHalfSpanHz }`;
+- live audio refused the offset (`CHANNEL_OFFSET_OUT_OF_RANGE`; the previous
+  offset is put back): `{ offsetHz }`.
+
+Also 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
 `SCANNER_DISCOVERY_LOCKED_OUT`, 404 `SCANNER_DISCOVERY_NOT_FOUND`.
 
 #### POST /api/scanner/identify
@@ -1842,8 +1851,10 @@ curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=44600000
 }
 ```
 
-400 `SPECTRUM_RANGE_INVALID` (bad range); 404 `SPECTRUM_SOURCE_NOT_FOUND`
-(no history for the source).
+400 `SPECTRUM_RANGE_INVALID` (`endHz` not above `startHz`, or the span above
+2 GHz); 404 `SPECTRUM_SOURCE_NOT_FOUND` (no history for the source). Query
+schema violations (a missing or unknown parameter, a negative Hz, `sinceMs`
+below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 
 ## WebSocket API
 
@@ -2633,15 +2644,24 @@ nc localhost 8080 | sox -t raw -r 48000 -e signed -b 16 -c 1 - output.wav
 
 ## Error Responses
 
-All error responses follow this format:
+All error responses use a flat body: `error` (an error name), `code`,
+`message` and, when there is more to say, `details`. The HTTP status carries
+the status code.
 
 ```json
 {
-	"error": {
-		"code": "DECODER_NOT_FOUND",
-		"message": "Decoder 'foo' not found",
-		"statusCode": 404
-	}
+	"error": "NotFound",
+	"code": "DECODER_NOT_FOUND",
+	"message": "Decoder with id 'foo' not found"
+}
+```
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "SCANNER_TAKEOVER_REQUIRED",
+	"message": "This sweep disturbs other consumers; resend with takeover",
+	"details": { "impact": { "liveAudioClients": 1 } }
 }
 ```
 
@@ -2666,7 +2686,7 @@ Scanner and spectrum routes answer with the flat body
 
 | Code                            | HTTP | When                                                                                                                                         |
 | ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VALIDATION_ERROR`              | 400  | Request schema, or a settings PATCH value out of bounds / unknown key                                                                        |
+| `VALIDATION_ERROR`              | 400  | Request schema (body, params or query, e.g. occupancy query bounds), or a settings PATCH value out of bounds / unknown key                  |
 | `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                 |
 | `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                        |
 | `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                       |
@@ -2683,7 +2703,7 @@ Scanner and spectrum routes answer with the flat body
 | `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                         |
 | `SCANNER_INVALID_TRANSITION`    | 409  | The lifecycle action does not apply to the current state                                                                                     |
 | `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                           |
-| `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`                                             |
+| `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`; listen adds `details` with `liveSourceId`/`sourceId`, `offsetHz`/`usableHalfSpanHz` or `offsetHz` (see listen) |
 | `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                  |
 | `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                        |
 | `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                   |

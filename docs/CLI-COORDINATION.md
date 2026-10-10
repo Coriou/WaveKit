@@ -1013,7 +1013,7 @@ The proposal "Core: proposed contract for the signal discovery scanner" landed w
 - Error bodies use the existing flat shape `{ error, code, message, details? }` (as every other route), not the nested `{ error: { … } }` shape written in the proposal.
 - `scanner:progress.probes` is a count; the probe list is in `GET /api/scanner/jobs/:id` (`progress.probes[]`).
 - Passive jobs (`passive-<sourceId>`) do not appear in `impact.scannerJobs`, so a sweep does not need `takeover` just because passive scanning runs.
-- `listen` before the channelizer returns `{ mode: "live-audio", sourceId, frequencyHz, offsetHz, httpUrl, wavUrl }` and answers 409 `OUT_OF_WINDOW`, `LIVE_AUDIO_UNAVAILABLE` or `SCANNER_DISCOVERY_LOCKED_OUT`.
+- `listen` before the channelizer returns `{ mode: "live-audio", sourceId, frequencyHz, offsetHz, httpUrl, wavUrl }` and answers 409 `OUT_OF_WINDOW`, `LIVE_AUDIO_UNAVAILABLE` or `SCANNER_DISCOVERY_LOCKED_OUT`. Listen's `OUT_OF_WINDOW` `details` are `{liveSourceId, sourceId}` (live audio on another source), `{sourceId}` (centre unknown), `{offsetHz, usableHalfSpanHz}` (outside the window) or `{offsetHz}` (live audio refused the offset).
 - New codes: `SCANNER_MONITOR_UNAVAILABLE` (400, listen-scan needs the channelizer), `SCANNER_JOB_NOT_TERMINAL` (409), `SCANNER_INVALID_TRANSITION` (409), `SCANNER_DISABLED` (503), `SCANNER_IDENTIFY_NOT_PAUSABLE` (409), `SCANNER_IDENTIFY_NOT_EDITABLE` (409), `SCANNER_IDENTIFY_VIA_JOBS` (400). Also `SCANNER_JOB_TERMINAL` (409), `SCANNER_SETTINGS_INVALID` (400), `SCANNER_SETTINGS_WRITE_FAILED` (500), `SCANNER_STATE_UNAVAILABLE` (503: persisted jobs/settings unreadable at boot; sweeps and settings changes refused this run), 404 `SCANNER_NOT_FOUND` (route level) and `SCANNER_JOB_NOT_FOUND` / `SCANNER_DISCOVERY_NOT_FOUND` (service level). Full table: `docs/API.md` "Scanner and spectrum codes".
 - `SCANNER_SOURCE_BUSY` (409): the detail is in `message` ("holder is starting", "releasing", "recovery pending", a relay client controls the tuner, or the lease holder); `details.holderJobId` when a job holds the source, `details.waiter` when a better-placed job waits for the lease (explicit resume from `paused(preempted-*)`).
 - Identify (`POST /api/scanner/identify`, `scanner:identify`, `ScanJob.identify`) is merged as in the identify amendments of 2026-10-09 and 2026-10-10, as corrected by the 2026-10-10 "artefact and spectrum shapes" entry. Addition: `ScannerIdentifyResult.ended?: "window-moved"` (the window moved off the target; open trials are `cancelled`).
@@ -1101,7 +1101,8 @@ Additions since the amendment text:
 - **`GET /api/spectrum/occupancy`**: query `sourceId`, `startHz`, `endHz` (required; `endHz` above `startHz` by at most
   2 GHz) and `sinceMs` (default 24 h, at most 168 h) → `{sourceId, bucketHz: 12500, sinceMs, buckets: [{startHz,
   dutyByHour: (number|null)[], observedMs, activeMs}], top: [{startHz, duty, observedMs, activeMs}]}`. 400
-  `SPECTRUM_RANGE_INVALID`, 404 `SPECTRUM_SOURCE_NOT_FOUND`.
+  `SPECTRUM_RANGE_INVALID`, 404 `SPECTRUM_SOURCE_NOT_FOUND`. Query schema violations (a missing or unknown parameter,
+  a negative Hz, `sinceMs` below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
 - **`ScannerIdentifyResult.ended?: "window-moved"`**: the tuned window moved off the identify target (retune, sweep
   takeover); open trials end `cancelled`.
 - **`SCANNER_SOURCE_BUSY`** carries `details.holderJobId` when a scanner job holds the source.

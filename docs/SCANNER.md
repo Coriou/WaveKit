@@ -89,7 +89,7 @@ pending ─► starting ─► running ⇄ holding
 - `core-restart`: the job was running when the core stopped; it resumes only with `resume.onBoot` (passive jobs always do).
 - `resume-blocked`: auto-resume found more to disturb than was consented.
 
-Auto-resume: once the preemptor leaves (relay control back to `user`, and no REST tuner write for `resume.autoAfterIdleMs`, 60 s by default) the job re-checks its impact. If it is not larger than what was consented, it re-takes the lease and resumes at the same hop; otherwise it goes to `paused(resume-blocked)` and needs `resume` with `takeover: true`. An explicit `resume` from `paused(preempted-*)` arbitrates at once and ignores `takeover`; it answers 409 `SCANNER_SOURCE_BUSY` while another job holds the lease or a better waiter exists.
+Auto-resume: once the preemptor leaves (relay control back to `user`, and no REST tuner write for `resume.autoAfterIdleMs`, 60 s by default) the job re-checks its impact. If it is not larger than what was consented, it re-takes the lease and resumes at the same hop; otherwise it goes to `paused(resume-blocked)` and needs `resume` with `takeover: true`. An explicit `resume` from `paused(preempted-*)` arbitrates at once; `takeover` is not required (sending it records the current impact as consented for later auto-resumes). It answers 409 `SCANNER_SOURCE_BUSY` while another job holds the lease or a better waiter exists.
 
 ### Takeover and impact
 
