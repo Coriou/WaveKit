@@ -104,6 +104,10 @@ export class TunerArbiter extends EventEmitter {
 	private readonly recovering = new Map<string, PersistedLease>()
 	/** Sources whose recovery is running; the record stays in `recovering` until it completes. */
 	private readonly recoveryRunning = new Set<string>()
+	/** Sources with a payload-started since their last disconnect. */
+	private readonly connected = new Set<string>()
+	/** Leases carrying a crashed sweep's record (adopted, or handed over from an adopted lease). */
+	private readonly adopted = new WeakSet<Lease>()
 	/** Sources whose released lease is still sending TEST_MODE 0 and the restore. */
 	private readonly releasing = new Set<string>()
 	private readonly lastOperatorAt = new Map<string, number>()
@@ -180,6 +184,7 @@ export class TunerArbiter extends EventEmitter {
 				snapshot: { ...current.snapshot },
 				changedFields: new Set(current.changedFields),
 			}
+			if (this.adopted.has(current)) this.adopted.add(lease)
 			this.lost.add(current)
 			this.leases.set(sourceId, lease)
 			this.priorities.set(sourceId, priority)
@@ -188,6 +193,14 @@ export class TunerArbiter extends EventEmitter {
 			return { ok: true, lease }
 		}
 		const pending = this.recovering.get(sourceId)
+		if (pending && !this.connected.has(sourceId)) {
+			// Writes fail until the source connects; adopting now could drop the record on rollback.
+			return {
+				ok: false,
+				code: "SCANNER_SOURCE_BUSY",
+				detail: "recovery pending",
+			}
+		}
 		if (pending)
 			return { ok: true, lease: this.adopt(pending, jobId, priority) }
 		const lease: Lease = {
@@ -373,6 +386,10 @@ export class TunerArbiter extends EventEmitter {
 			restored: [],
 			unrestorable: [],
 		}
+		// Changed fields with a known snapshot value that this release leaves unrestored.
+		let missed: string[] = [...lease.changedFields].filter(
+			f => lease.snapshot[f] !== undefined,
+		)
 		if (opts.restore) {
 			const r = await this.restoreFields(lease.sourceId, lease.snapshot, [
 				...lease.changedFields,
@@ -381,13 +398,34 @@ export class TunerArbiter extends EventEmitter {
 				restored: r.restored,
 				unrestorable: [...r.unknown, ...r.failed],
 			}
+			missed = r.failed
 		}
-		await this.deps.persistLease(lease.sourceId, null).catch((err: unknown) => {
+		if (this.adopted.has(lease) && missed.length > 0) {
+			// A crashed sweep's state is still on the tuner: recovery takes it back on the next connection.
+			const record = this.recordOf(lease)
+			this.recovering.set(lease.sourceId, record)
+			await this.deps
+				.persistLease(lease.sourceId, record)
+				.catch((err: unknown) => {
+					this.log.warn(
+						{ err, sourceId: lease.sourceId },
+						"Re-persisting the crash recovery record failed",
+					)
+				})
 			this.log.warn(
-				{ err, sourceId: lease.sourceId },
-				"Clearing the persisted lease failed",
+				{ sourceId: lease.sourceId, jobId: lease.jobId, missed },
+				"Released an adopted lease without a full restore; crash recovery re-queued",
 			)
-		})
+		} else {
+			await this.deps
+				.persistLease(lease.sourceId, null)
+				.catch((err: unknown) => {
+					this.log.warn(
+						{ err, sourceId: lease.sourceId },
+						"Clearing the persisted lease failed",
+					)
+				})
+		}
 		this.log.info(
 			{ sourceId: lease.sourceId, jobId: lease.jobId, ...result },
 			"Tuner lease released",
@@ -485,16 +523,20 @@ export class TunerArbiter extends EventEmitter {
 		if (lease.changedFields.size > before) await this.persist(lease)
 	}
 
-	private async persist(lease: Lease): Promise<void> {
-		const record: PersistedLease = {
+	private recordOf(lease: Lease): PersistedLease {
+		return {
 			sourceId: lease.sourceId,
 			jobId: lease.jobId,
 			acquiredAt: lease.acquiredAt,
 			snapshot: { ...lease.snapshot },
 			changedFields: [...lease.changedFields],
 		}
+	}
+
+	/** Never rejects: a failed persist is logged. */
+	private async persist(lease: Lease): Promise<void> {
 		await this.deps
-			.persistLease(lease.sourceId, record)
+			.persistLease(lease.sourceId, this.recordOf(lease))
 			.catch((err: unknown) => {
 				this.log.warn(
 					{ err, sourceId: lease.sourceId },
@@ -613,7 +655,12 @@ export class TunerArbiter extends EventEmitter {
 		this.lastOperatorAt.set(sourceId, this.now())
 		if (mode === "internal") {
 			// Control is back: retry a recovery the relay blocked and close a marker it kept open.
-			if (!this.deps.sources.isRtlTcpSource(sourceId)) return
+			if (
+				!this.deps.sources.isRtlTcpSource(sourceId) ||
+				!this.connected.has(sourceId)
+			) {
+				return
+			}
 			if (!this.startRecovery(sourceId) && this.markerOpen.has(sourceId)) {
 				void this.testModeOff(sourceId)
 			}
@@ -624,10 +671,12 @@ export class TunerArbiter extends EventEmitter {
 	}
 
 	private readonly onDisconnected = (sourceId: string): void => {
+		this.connected.delete(sourceId)
 		this.emit("source-down", sourceId)
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {
+		this.connected.add(sourceId)
 		// recover() sends TEST_MODE 0 as its first step.
 		if (
 			this.deps.sources.isRtlTcpSource(sourceId) &&
@@ -674,6 +723,7 @@ export class TunerArbiter extends EventEmitter {
 			// Frequency always, as in recover(): the stale last hop is the H4 hazard.
 			changedFields: new Set([...persisted.changedFields, "frequency"]),
 		}
+		this.adopted.add(lease)
 		this.leases.set(sourceId, lease)
 		this.priorities.set(sourceId, priority)
 		void this.persist(lease)
@@ -694,6 +744,8 @@ export class TunerArbiter extends EventEmitter {
 			} catch (err) {
 				this.log.error({ err, sourceId }, "A recovered listener failed")
 			}
+			// A "recovered" listener may drop its copy of the persisted lease; the holder's must stay.
+			if (this.leases.get(sourceId) === lease) void this.persist(lease)
 		})
 		return lease
 	}

@@ -437,29 +437,36 @@ describe("TunerArbiter lease discipline", () => {
 			changedFields: ["gain"],
 		}
 		h.arbiter.recoverPersistedLeases([crashed])
+		// Connected, but the recovery's writes fail: the record stays pending.
+		h.tuner.failAll = new Error("socket closed")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		h.tuner.failAll = null
+		expect(h.tuner.sent).toEqual([])
+		expect(recovered).toEqual([])
 		const b = h.arbiter.acquire("b", "rtl", 50)
 		if (!b.ok) throw new Error("acquire failed")
 		expect(b.lease.snapshot).toEqual(crashed.snapshot)
 		expect([...b.lease.changedFields].sort()).toEqual(["frequency", "gain"])
+		await new Promise(resolve => setImmediate(resolve))
 		h.sources.emit("payload-started", "rtl")
 		await new Promise(resolve => setImmediate(resolve))
 		// Only the reconnect marker close: no restore writes under the holder.
 		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
 			["set-test-mode", 0],
 		])
-		// The holder's record is the last one persisted, never cleared by recovery.
-		expect(h.persisted).toEqual([
-			{
+		// Only the holder's record is persisted (on adoption and after "recovered"), never cleared.
+		const holderRecord = {
+			sourceId: "rtl",
+			lease: {
 				sourceId: "rtl",
-				lease: {
-					sourceId: "rtl",
-					jobId: "b",
-					acquiredAt: b.lease.acquiredAt,
-					snapshot: crashed.snapshot,
-					changedFields: ["gain", "frequency"],
-				},
+				jobId: "b",
+				acquiredAt: b.lease.acquiredAt,
+				snapshot: crashed.snapshot,
+				changedFields: ["gain", "frequency"],
 			},
-		])
+		}
+		expect(h.persisted).toEqual([holderRecord, holderRecord])
 		expect(h.arbiter.holder("rtl")).toBe(b.lease)
 		expect(recovered).toEqual([
 			{ id: "rtl", r: { restored: [], unrestorable: [] } },
@@ -501,7 +508,169 @@ describe("TunerArbiter lease discipline", () => {
 		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
 			["set-test-mode", 0],
 		])
-		expect(h.persisted.map(p => p.lease?.jobId ?? null)).toEqual(["b"])
+		expect(h.persisted.map(p => p.lease?.jobId ?? null)).toEqual(["b", "b"])
+	})
+
+	it("refuses to adopt a pending recovery before the source connects", async () => {
+		const h = harness()
+		const recovered: string[] = []
+		h.arbiter.on("recovered", (id: string) => recovered.push(id))
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 100_000_000, gain: 296 },
+				changedFields: ["gain"],
+			},
+		])
+		expect(h.arbiter.acquire("b", "rtl", 50)).toEqual({
+			ok: false,
+			code: "SCANNER_SOURCE_BUSY",
+			detail: "recovery pending",
+		})
+		await new Promise(resolve => setImmediate(resolve))
+		expect(recovered).toEqual([])
+		expect(h.persisted).toEqual([])
+		expect(h.tuner.sent).toEqual([])
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+			["set-frequency", 100_000_000],
+			["set-gain", 296],
+		])
+		expect(recovered).toEqual(["rtl"])
+		expect(h.persisted).toEqual([{ sourceId: "rtl", lease: null }])
+		const b = h.arbiter.acquire("b", "rtl", 50)
+		if (!b.ok) throw new Error("acquire failed")
+		expect(b.lease.snapshot.frequency).toBe(100_000_000)
+	})
+
+	it("re-queues the crash record when an adopted lease's release cannot restore it", async () => {
+		const h = harness()
+		const results: { restored: string[]; unrestorable: string[] }[] = []
+		h.arbiter.on(
+			"recovered",
+			(_id: string, r: { restored: string[]; unrestorable: string[] }) =>
+				results.push(r),
+		)
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 100_000_000, gain: 296 },
+				changedFields: ["gain"],
+			},
+		])
+		h.tuner.failAll = new Error("socket closed")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		h.tuner.failAll = null
+		const b = h.arbiter.acquire("b", "rtl", 50)
+		if (!b.ok) throw new Error("acquire failed")
+		await new Promise(resolve => setImmediate(resolve))
+		// The rollback release runs while the source is unreachable: every write fails.
+		h.tuner.failAll = new Error("not connected")
+		const res = await h.arbiter.release(b.lease, { restore: true })
+		expect(res).toEqual({ restored: [], unrestorable: ["frequency", "gain"] })
+		expect(h.tuner.sent).toEqual([])
+		// The record is persisted again, not cleared.
+		expect(h.persisted.at(-1)).toMatchObject({
+			sourceId: "rtl",
+			lease: { snapshot: { frequency: 100_000_000, gain: 296 } },
+		})
+		h.tuner.failAll = null
+		h.sources.emit("disconnected", "rtl")
+		expect(h.arbiter.acquire("c", "rtl", 50)).toMatchObject({
+			ok: false,
+			detail: "recovery pending",
+		})
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+			["set-frequency", 100_000_000],
+			["set-gain", 296],
+		])
+		expect(results).toEqual([
+			{ restored: [], unrestorable: [] },
+			{ restored: ["frequency", "gain"], unrestorable: [] },
+		])
+		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
+	})
+
+	it("re-queues the crash record when an adopted lease is released without restore", async () => {
+		const h = harness()
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 100_000_000 },
+				changedFields: [],
+			},
+		])
+		h.tuner.failAll = new Error("socket closed")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		h.tuner.failAll = null
+		const a = h.arbiter.acquire("a", "rtl", 40)
+		if (!a.ok) throw new Error("acquire failed")
+		// A hand-over carries the crash record with it.
+		const b = h.arbiter.acquire("b", "rtl", 60)
+		if (!b.ok) throw new Error("hand-over failed")
+		await h.arbiter.release(b.lease, { restore: false })
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+		])
+		expect(h.persisted.at(-1)).toMatchObject({
+			lease: { jobId: "b", snapshot: { frequency: 100_000_000 } },
+		})
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+			["set-test-mode", 0],
+			["set-frequency", 100_000_000],
+		])
+		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
+	})
+
+	it("keeps the holder's persisted lease when a recovered listener drops its copy", async () => {
+		// Mirrors Task 35: onPersistLease keeps the record, onRecovered deletes it.
+		const store = new Map<string, PersistedLease>()
+		const h = harness([], {
+			persistLease: (sourceId, lease) => {
+				if (lease) store.set(sourceId, lease)
+				else store.delete(sourceId)
+				return Promise.resolve()
+			},
+		})
+		h.arbiter.on("recovered", (id: string) => store.delete(id))
+		const crashed: PersistedLease = {
+			sourceId: "rtl",
+			jobId: "crashed",
+			acquiredAt: 1,
+			snapshot: { frequency: 100_000_000, gain: 296 },
+			changedFields: ["gain"],
+		}
+		h.arbiter.recoverPersistedLeases([crashed])
+		h.tuner.failAll = new Error("socket closed")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		h.tuner.failAll = null
+		const b = h.arbiter.acquire("b", "rtl", 50)
+		if (!b.ok) throw new Error("acquire failed")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(store.get("rtl")).toEqual({
+			sourceId: "rtl",
+			jobId: "b",
+			acquiredAt: b.lease.acquiredAt,
+			snapshot: crashed.snapshot,
+			changedFields: ["gain", "frequency"],
+		})
 	})
 
 	it("refuses to lease a source while its previous lease is still releasing", async () => {
