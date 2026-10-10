@@ -57,10 +57,10 @@ try {
 const linkPath = join(root, ".agents", "memory")
 
 // A memory directory must never be publishable: refuse one inside a git work
-// tree unless that repository ignores it and tracks nothing beneath it. The
-// enclosing repository is found on the filesystem (any ancestor holding `.git`),
+// tree unless every enclosing repository ignores it and tracks nothing beneath
+// it. Repositories are found on the filesystem (every ancestor holding `.git`),
 // not through git's own discovery, which environment settings can narrow; any
-// git failure while checking it leaves the target unverified and is refused.
+// git failure while checking one leaves the target unverified and is refused.
 const discoveryEnv = [
 	"GIT_DIR",
 	"GIT_WORK_TREE",
@@ -76,27 +76,28 @@ function inspect(...args) {
 	return spawnSync("git", args, { encoding: "utf8", env })
 }
 
-function enclosingRepo(dir) {
+function enclosingRepos(dir) {
+	const repos = []
 	for (let current = dir; ; current = dirname(current)) {
-		if (existsSync(join(current, ".git"))) return current
-		if (dirname(current) === current) return null
+		if (existsSync(join(current, ".git"))) repos.push(current)
+		if (dirname(current) === current) return repos
 	}
 }
 
 function exposure(dir) {
-	const repo = enclosingRepo(dir)
-	if (!repo) return null
-	const path = relative(repo, dir) || "."
-	const ignored = inspect("-C", repo, "check-ignore", "-q", path)
-	if (ignored.status === 1)
-		return `it is trackable by the git repository at ${repo}`
-	if (ignored.status !== 0)
-		return `git could not verify it: ${ignored.stderr.trim().split("\n")[0]}`
-	const files = inspect("-C", repo, "ls-files", "--", path)
-	if (files.status !== 0) return "git could not verify it"
-	return files.stdout.trim() === ""
-		? null
-		: `it is trackable: the git repository at ${repo} tracks files beneath it`
+	for (const repo of enclosingRepos(dir)) {
+		const path = relative(repo, dir) || "."
+		const ignored = inspect("-C", repo, "check-ignore", "-q", path)
+		if (ignored.status === 1)
+			return `it is trackable by the git repository at ${repo}`
+		if (ignored.status !== 0)
+			return `git could not verify it: ${ignored.stderr.trim().split("\n")[0]}`
+		const files = inspect("-C", repo, "ls-files", "--", path)
+		if (files.status !== 0) return "git could not verify it"
+		if (files.stdout.trim() !== "")
+			return `it is trackable: the git repository at ${repo} tracks files beneath it`
+	}
+	return null
 }
 
 function requirePrivate(target) {

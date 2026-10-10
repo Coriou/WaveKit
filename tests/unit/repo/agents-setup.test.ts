@@ -233,6 +233,21 @@ describe("agents-setup", () => {
 		expect(existsSync(join(main, ".agents"))).toBe(false)
 	})
 
+	it("checks every enclosing repository, not only the nearest", () => {
+		// The outer repository tracks docs/specs; a nested one at docs/ ignores it.
+		const specs = join(main, "docs", "specs")
+		mkdirSync(specs, { recursive: true })
+		writeFileSync(join(specs, "README.md"), "spec\n")
+		git(main, "add", "docs/specs/README.md")
+		git(main, "commit", "-q", "-m", "specs")
+		git(join(main, "docs"), "init", "-q")
+		writeFileSync(join(main, "docs", ".git", "info", "exclude"), "specs/\n")
+
+		const result = setup(main, [], { WAVEKIT_AGENT_MEMORY_DIR: specs })
+		expect(result.status).toBe(1)
+		expect(existsSync(join(main, ".agents"))).toBe(false)
+	})
+
 	it("flags an existing link whose target is trackable", () => {
 		const docs = join(main, "docs")
 		mkdirSync(docs)
