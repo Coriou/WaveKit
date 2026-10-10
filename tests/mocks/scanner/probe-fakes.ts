@@ -1,4 +1,6 @@
 import { EventEmitter } from "node:events"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type { Readable } from "node:stream"
 import pino from "pino"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
@@ -63,14 +65,17 @@ export class FakeDecoderManager extends EventEmitter {
 		return Promise.resolve(decoder)
 	}
 
-	removeEphemeralDecoder(id: string): Promise<void> {
+	/** While set, removals wait for it (a decoder that takes time to stop). */
+	removeGate: Promise<void> | null = null
+
+	async removeEphemeralDecoder(id: string): Promise<void> {
+		if (this.removeGate) await this.removeGate
 		const decoder = this.created.get(id)
 		if (decoder && this.created.delete(id)) {
 			this.retired.set(id, decoder)
 			this.removed.push(id)
 			this.emit("decoder:removed", id)
 		}
-		return Promise.resolve()
 	}
 
 	getDecoder(id: string): FakeProbeDecoder | undefined {
@@ -93,7 +98,8 @@ export class FakeEngineView extends EventEmitter implements ProbeEngineView {
 	edge = 0
 	/** The engine's own stream counter; `epoch.stream` lags it after newStream() until setEpoch. */
 	stream = 0
-	private ring: number[] = []
+	private ring = new Uint8Array(0)
+	private ringBytes = 0
 	private readonly taps = new Set<
 		(startSample: number, bytes: Uint8Array) => void
 	>()
@@ -133,8 +139,11 @@ export class FakeEngineView extends EventEmitter implements ProbeEngineView {
 		if (start >= to) return null
 		return {
 			startSample: start,
-			bytes: Uint8Array.from(this.ring.slice(start * 2, to * 2)),
+			bytes: this.ring.slice(start * 2, Math.min(to * 2, this.ringBytes)),
 		}
+	}
+	get tapCount(): number {
+		return this.taps.size
 	}
 	tap(fn: (startSample: number, bytes: Uint8Array) => void): () => void {
 		this.taps.add(fn)
@@ -147,7 +156,15 @@ export class FakeEngineView extends EventEmitter implements ProbeEngineView {
 			bytes[2 * i] = (this.edge + i) & 255
 			bytes[2 * i + 1] = ((this.edge + i) >> 8) & 255
 		}
-		for (const b of bytes) this.ring.push(b)
+		if (this.ringBytes + bytes.length > this.ring.length) {
+			const grown = new Uint8Array(
+				Math.max(2 * this.ring.length, this.ringBytes + bytes.length),
+			)
+			grown.set(this.ring.subarray(0, this.ringBytes))
+			this.ring = grown
+		}
+		this.ring.set(bytes, this.ringBytes)
+		this.ringBytes += bytes.length
 		const start = this.edge
 		this.edge += samples
 		for (const t of this.taps) t(start, bytes)
@@ -162,11 +179,15 @@ export class FakeEngineView extends EventEmitter implements ProbeEngineView {
 	 */
 	newStream(): void {
 		this.stream += 1
-		this.ring = []
+		this.ring = new Uint8Array(0)
+		this.ringBytes = 0
 		this.edge = 0
 		this.emit("stream", this.stream, "restart")
 	}
 }
+
+/** Real recording dirs land here; probe tests remove it in afterAll. */
+export const PROBE_STORAGE_DIR = join(tmpdir(), `wk-probes-${process.pid}`)
 
 export function probeRequest(
 	overrides: Partial<ProbeRequest> = {},
@@ -213,7 +234,7 @@ export function poolHarness(
 		transports: opts.transports ?? [offsetTransport],
 		cpu,
 		engineCount: () => engines.length,
-		storageDir: `/tmp/wk-probes-${process.pid}`,
+		storageDir: PROBE_STORAGE_DIR,
 		allocatePort: () => Promise.resolve(port++),
 		logger: pino({ level: "silent" }),
 		now: () => clock.now,

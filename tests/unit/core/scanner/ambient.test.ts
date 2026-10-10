@@ -60,7 +60,7 @@ describe("AmbientEvidence", () => {
 		expect(got.filter(e => e.ev.identity?.kind === "dmr-cc")).toEqual([])
 	})
 
-	it("pairs ambient multimon capcodes only within 2 s and labels NXDN by the decoder's flavour", () => {
+	it("pairs ambient multimon capcodes per capcode within the hold ± 2 s and labels NXDN by the decoder's flavour", () => {
 		const decoders = new EventEmitter() as EventEmitter &
 			Record<string, unknown>
 		const nxdn = new EventEmitter()
@@ -91,23 +91,32 @@ describe("AmbientEvidence", () => {
 		const got: AmbientEvidenceEvent[] = []
 		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
 		ambient.start()
-		const page = () =>
+		const page = (address = 1234567) =>
 			decoders.emit("decoder:output", "pager-cfg", {
 				type: "message",
 				timestamp: new Date(clock.now),
 				data: {
 					protocol: "POCSAG1200",
-					address: 1234567,
+					address,
 					function: 0,
 					messageType: "alpha",
 					message: "",
 				},
 			})
+		// straddling hold end + 2 s: no pair
 		page()
-		clock.now += 3000
+		clock.now += 4000 + 2000 + 1
 		page()
 		expect(got).toEqual([])
-		clock.now += 1500
+		// a busy stream of other capcodes does not keep that window open
+		for (let i = 0; i < 10; i++) {
+			clock.now += 1000
+			page(2_000_000 + i)
+		}
+		page()
+		expect(got).toEqual([])
+		// 3 s apart inside the 4 s hold: pairs
+		clock.now += 3000
 		page()
 		expect(got).toHaveLength(1)
 		expect(got[0]).toMatchObject({

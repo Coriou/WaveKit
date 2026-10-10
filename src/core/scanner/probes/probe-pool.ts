@@ -22,6 +22,7 @@ import type {
 } from "../../digital-voice.js"
 import { probeId as buildProbeId, shortId } from "../ids.js"
 import { CPU_COST, probeCores } from "../plan/cost.js"
+import { bytesPerSample } from "../../spectrum/frame-source.js"
 import {
 	USABLE_FRACTION,
 	type EngineEpoch,
@@ -214,8 +215,8 @@ interface ProbeRecord {
 	teardownDone: Promise<void> | null
 	/** A mode step is tearing this record down; a stop clears it to cancel the step. */
 	stepping: boolean
-	/** Last multimon output (pairing window, § 6.4 "within the hold"). */
-	lastPairAt: number | null
+	/** multimon only: acceptance memory per capcode, bounded by the mode's hold (§ 6.4). */
+	capcodes: CapcodeWindows | null
 }
 
 /** Stream events of one engine, watched once a request names its source. */
@@ -229,9 +230,14 @@ interface StreamWatch {
 
 const PROBE_INPUT_HWM = 1024 * 1024
 const PROBE_INPUT_MAX_QUEUED = 8 * 1024 * 1024
+/** Pre-roll is clamped to this, so pre-roll plus the first live bytes stay under PROBE_INPUT_MAX_QUEUED. */
+const PRE_ROLL_MAX_BYTES = PROBE_INPUT_MAX_QUEUED - 2 * PROBE_INPUT_HWM
 const DEFAULT_START_LATENCY_MS = 400
-/** multimon capcodes pair only within this gap (§ 6.4 "two decodes … within the hold", ± 2 s). */
+/** Slack around a capcode's pairing window (§ 6.4 "within the hold", ± 2 s). */
 export const PAIRING_GAP_MS = 2000
+/** Hold of the multimon-ng POCSAG/FLEX mode (§ 6.4); also the ambient pairing window. */
+export const MULTIMON_HOLD_MS = 4000
+const MAX_CAPCODE_WINDOWS = 1024
 const LATENCY_ALPHA = 0.3
 const ADMISSION_RANK = {
 	"protocol-target": 0,
@@ -302,7 +308,7 @@ export function probeModesFor(
 					protocol: "pocsag",
 					covers: ["pocsag", "flex"],
 					options: { modes: ["POCSAG512", "POCSAG1200", "POCSAG2400", "FLEX"] },
-					holdMs: 4000,
+					holdMs: MULTIMON_HOLD_MS,
 				},
 			]
 			break
@@ -402,6 +408,63 @@ const CallEndSchema = z
 	})
 	.passthrough()
 
+/** Capcode of a multimon-ng pager output (light parse; interpretMultimon validates the rest). */
+function multimonCapcode(out: DecoderOutputLike): string | null {
+	if (
+		out.type !== "message" ||
+		typeof out.data !== "object" ||
+		out.data === null
+	)
+		return null
+	const d = out.data as { address?: unknown; capcode?: unknown }
+	if (typeof d.address === "number") return `pocsag:${d.address}`
+	if (typeof d.capcode === "string" && d.capcode.trim() !== "")
+		return `flex:${d.capcode.trim()}`
+	return null
+}
+
+/**
+ * multimon pairing windows, one per capcode (§ 6.4 "two decodes with the same
+ * capcode within the hold"): a capcode's first decode opens
+ * `[start − 2 s, start + holdMs + 2 s]`; a decode inside it shares that
+ * capcode's interpreter state, a decode outside it starts a fresh state and
+ * window. Other capcodes never touch a capcode's window.
+ */
+export class CapcodeWindows {
+	private readonly windows = new Map<
+		string,
+		{ interp: InterpreterState; windowStart: number }
+	>()
+
+	constructor(
+		private readonly holdMs: number,
+		private readonly create: () => InterpreterState,
+	) {}
+
+	/** Interpreter state for this output's capcode at `at`; null when the output names no capcode. */
+	stateFor(out: DecoderOutputLike, at: number): InterpreterState | null {
+		const key = multimonCapcode(out)
+		if (key === null) return null
+		let w = this.windows.get(key)
+		if (
+			w &&
+			at >= w.windowStart - PAIRING_GAP_MS &&
+			at <= w.windowStart + this.holdMs + PAIRING_GAP_MS
+		) {
+			return w.interp
+		}
+		// Re-inserted on renewal, so the map stays ordered by windowStart: the first entry is the oldest.
+		this.windows.delete(key)
+		w = { interp: this.create(), windowStart: at }
+		this.windows.set(key, w)
+		if (this.windows.size > MAX_CAPCODE_WINDOWS) {
+			const oldest = this.windows.keys().next()
+			if (oldest.done !== true) this.windows.delete(oldest.value)
+		}
+		return w.interp
+	}
+}
+
 function protocolShort(p: ScannerProtocol): string {
 	return p.replace(/[^a-z0-9]/g, "").slice(0, 8)
 }
@@ -428,6 +491,7 @@ export class ProbePool extends EventEmitter {
 		if (this.destroyed) return { deferred: "no-transport" }
 		const existing = [...this.records.values()].find(
 			r =>
+				(r.state !== "stopping" || r.stepping) &&
 				r.req.trackId === req.trackId &&
 				r.req.jobId === req.jobId &&
 				explicitModesKey(r.req) === explicitModesKey(req),
@@ -585,7 +649,11 @@ export class ProbePool extends EventEmitter {
 	private watch(sourceId: string, engine: ProbeEngineView): StreamWatch {
 		let watch = this.watches.get(sourceId)
 		if (watch?.engine === engine) return watch
-		watch?.off()
+		if (watch) {
+			watch.off()
+			// Its probes read the replaced engine's ring, and its "stop" may never reach us now.
+			this.endSourceProbes(sourceId)
+		}
 		const onStream = (stream: number, reason: EngineStreamReason): void =>
 			this.onStream(sourceId, stream, reason)
 		engine.on("stream", onStream)
@@ -627,6 +695,11 @@ export class ProbePool extends EventEmitter {
 			watch.latest = stream
 			watch.stopped = reason === "stop"
 		}
+		this.endSourceProbes(sourceId)
+	}
+
+	/** Ends every probe and queued request of a source whose ring they no longer address. */
+	private endSourceProbes(sourceId: string): void {
 		const at = this.now()
 		this.dropQueued(r => r.sourceId === sourceId)
 		for (const rec of this.records.values()) {
@@ -755,6 +828,7 @@ export class ProbePool extends EventEmitter {
 		transport: TransportStrategy,
 		ctx: TransportContext,
 		probeIdOverride: string | null,
+		carry: { calls: ProbeCall[]; recordDir: string | null } | null = null,
 	): string {
 		const mode = modes[modeIndex]!
 		this.seq += 1
@@ -789,15 +863,25 @@ export class ProbePool extends EventEmitter {
 			}),
 			input: null,
 			untap: null,
-			recordDir: null,
+			recordDir: carry?.recordDir ?? null,
 			dvChannel: false,
-			calls: [],
+			calls: carry?.calls ?? [],
 			detach: [],
 			modeTimer: null,
 			droppedBytes: 0,
 			teardownDone: null,
 			stepping: false,
-			lastPairAt: null,
+			capcodes: null,
+		}
+		if (mode.decoderType === "multimon-ng") {
+			rec.capcodes = new CapcodeWindows(mode.holdMs, () =>
+				createInterpreterState({
+					epoch: req.epoch,
+					origin: "probe",
+					probeId,
+					decoderId,
+				}),
+			)
 		}
 		this.records.set(probeId, rec)
 		this.byDecoder.set(decoderId, rec)
@@ -844,7 +928,8 @@ export class ProbePool extends EventEmitter {
 					}
 				: null
 		if (mode.decoderType === "dsd-fme" && req.record) {
-			rec.recordDir = join(
+			// A mode step keeps the probe id, so earlier modes' calls share the directory.
+			rec.recordDir ??= join(
 				this.deps.storageDir,
 				"recordings",
 				"dv",
@@ -852,6 +937,7 @@ export class ProbePool extends EventEmitter {
 			)
 			await mkdir(rec.recordDir, { recursive: true })
 		}
+		if (this.isStopping(rec)) return
 		let config = buildProbeConfig({
 			probeId: rec.decoderId,
 			req,
@@ -887,9 +973,12 @@ export class ProbePool extends EventEmitter {
 			)
 			// Pre-roll and tap in one synchronous block: no sample lost or repeated.
 			const edge = engine.liveEdge()
+			const maxPreRollSamples = Math.floor(
+				PRE_ROLL_MAX_BYTES / bytesPerSample(engine.format),
+			)
 			const from =
 				withPreRoll && req.preRollFromSample !== null
-					? req.preRollFromSample
+					? Math.max(req.preRollFromSample, edge - maxPreRollSamples)
 					: edge
 			const pre = engine.readRing(from, edge)
 			if (pre && pre.bytes.length > 0) input.write(Buffer.from(pre.bytes))
@@ -959,7 +1048,10 @@ export class ProbePool extends EventEmitter {
 		if (!rec.stepping) return
 		rec.stepping = false
 		this.records.delete(rec.probeId)
-		this.start(rec.req, rec.modes, next, rec.transport, ctx, rec.probeId)
+		this.start(rec.req, rec.modes, next, rec.transport, ctx, rec.probeId, {
+			calls: rec.calls,
+			recordDir: rec.recordDir,
+		})
 	}
 
 	private teardown(rec: ProbeRecord): Promise<void> {
@@ -1001,7 +1093,8 @@ export class ProbePool extends EventEmitter {
 
 	private async stopProbe(rec: ProbeRecord, reason: StopReason): Promise<void> {
 		if (rec.state === "stopping") {
-			if (!rec.stepping) return
+			// Another stop owns it: resolve once the decoder and channel are gone.
+			if (!rec.stepping) return rec.teardownDone ?? undefined
 			rec.stepping = false
 		}
 		await this.teardown(rec)
@@ -1042,17 +1135,8 @@ export class ProbePool extends EventEmitter {
 				return
 			}
 			case "multimon-ng": {
-				const at = this.now()
-				if (rec.lastPairAt !== null && at - rec.lastPairAt > PAIRING_GAP_MS) {
-					rec.interp = createInterpreterState({
-						epoch: rec.epoch,
-						origin: "probe",
-						probeId: rec.probeId,
-						decoderId: rec.decoderId,
-					})
-				}
-				rec.lastPairAt = at
-				this.deliver(rec, interpretMultimon(out, rec.interp))
+				const state = rec.capcodes?.stateFor(out, this.now())
+				if (state) this.deliver(rec, interpretMultimon(out, state))
 				return
 			}
 			case "direwolf":

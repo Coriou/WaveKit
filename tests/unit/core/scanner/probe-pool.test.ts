@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from "vitest"
+import { afterAll, describe, expect, it, vi } from "vitest"
+import { existsSync } from "node:fs"
+import { rm } from "node:fs/promises"
+import { join } from "node:path"
 import fc from "fast-check"
 import type { DecoderConfig } from "../../../../src/decoders/types.js"
 import { WaveKitError } from "../../../../src/utils/errors.js"
@@ -6,11 +9,30 @@ import { CPU_COST, probeCores } from "../../../../src/core/scanner/plan/cost.js"
 import { probeModesFor } from "../../../../src/core/scanner/probes/probe-pool.js"
 import {
 	FakeEngineView,
+	PROBE_STORAGE_DIR,
 	flushAsync,
 	linkLine,
 	poolHarness,
 	probeRequest,
 } from "../../../mocks/scanner/probe-fakes.js"
+import type { DecoderOutputLike } from "../../../../src/core/scanner/probes/confirm/double-match.js"
+
+afterAll(() => rm(PROBE_STORAGE_DIR, { recursive: true, force: true }))
+
+function pocsag(address: number, at: number): DecoderOutputLike {
+	// message "" is not a plausible payload: the capcode needs a second decode
+	return {
+		type: "message",
+		timestamp: new Date(at),
+		data: {
+			protocol: "POCSAG1200",
+			address,
+			function: 0,
+			messageType: "alpha",
+			message: "",
+		},
+	}
+}
 import { testSettings } from "../../../mocks/scanner/engine-fakes.js"
 
 describe("probeModesFor", () => {
@@ -76,7 +98,12 @@ describe("ProbePool", () => {
 		expect(decoder.config.options).toMatchObject({
 			enablePerCallRecording: true,
 			perCallRecordingPrune: false,
-			perCallRecordingDir: `/tmp/wk-probes-${process.pid}/recordings/dv/probe-${res.started}`,
+			perCallRecordingDir: join(
+				PROBE_STORAGE_DIR,
+				"recordings",
+				"dv",
+				`probe-${res.started}`,
+			),
 		})
 		const recordings: unknown[] = []
 		h.pool.on("recordings", (r: unknown) => recordings.push(r))
@@ -405,9 +432,18 @@ describe("ProbePool", () => {
 		if (!("started" in r2)) throw new Error("not started")
 		late.engine.newStream()
 		late.engine.push(300)
+		// let the launch get past its mkdir, so "nothing created" is not just "not created yet"
+		const dir = join(
+			PROBE_STORAGE_DIR,
+			"recordings",
+			"dv",
+			`probe-${r2.started}`,
+		)
+		await vi.waitFor(() => expect(existsSync(dir)).toBe(true))
 		await flushAsync()
 		await flushAsync()
-		expect(late.decoders.created.get(r2.started)?.bytesIn ?? 0).toBe(0)
+		expect(late.decoders.created.size).toBe(0)
+		expect(late.decoders.retired.size).toBe(0)
 		expect(late.pool.status()).toEqual([])
 	})
 
@@ -465,35 +501,161 @@ describe("ProbePool", () => {
 		expect(h.states.filter(s => s.state === "stopped")).toHaveLength(1)
 	})
 
-	it("pairs multimon capcodes only within 2 s of each other", async () => {
+	it("pairs two decodes of one capcode 3 s apart inside the 4 s hold", async () => {
 		const h = poolHarness()
-		const res = h.pool.request(
-			probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }),
-		)
-		if (!("started" in res)) throw new Error("not started")
+		h.pool.request(probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }))
 		await flushAsync()
 		const decoderId = h.pool.status()[0]!.decoderId
-		const page = () =>
-			h.decoders.emitOutput(decoderId, {
-				type: "message",
-				timestamp: new Date(h.clock.now),
-				data: {
-					protocol: "POCSAG1200",
-					address: 1234567,
-					function: 0,
-					messageType: "alpha",
-					message: "",
-				},
-			})
-		page()
-		h.clock.now += 3000
-		page()
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
 		expect(h.evidence).toEqual([])
-		h.clock.now += 1000
-		page()
+		h.clock.now += 3000
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
 		expect(h.evidence.map(e => e.ev.identity)).toEqual([
 			{ kind: "pocsag-capcode", value: "1234567" },
 		])
+	})
+
+	it("does not pair decodes of one capcode straddling hold end + 2 s", async () => {
+		const h = poolHarness()
+		h.pool.request(probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }))
+		await flushAsync()
+		const decoderId = h.pool.status()[0]!.decoderId
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		h.clock.now += 4000 + 2000 + 1
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		expect(h.evidence).toEqual([])
+		// that decode opened a fresh window: the next one 1 s later pairs
+		h.clock.now += 1000
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		expect(h.evidence).toHaveLength(1)
+	})
+
+	it("does not keep an old capcode pairable through a busy stream of other capcodes", async () => {
+		const h = poolHarness()
+		h.pool.request(probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }))
+		await flushAsync()
+		const decoderId = h.pool.status()[0]!.decoderId
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		for (let i = 0; i < 10; i++) {
+			h.clock.now += 1000
+			h.decoders.emitOutput(decoderId, pocsag(2_000_000 + i, h.clock.now))
+		}
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		expect(h.evidence).toEqual([])
+	})
+
+	it("ends a source's probes when another engine instance replaces its watch", async () => {
+		const h = poolHarness()
+		h.pool.watchEngine("rtl", h.engine)
+		h.engine.push(1000)
+		const res = h.pool.request(probeRequest({ preRollFromSample: 500 }))
+		if (!("started" in res)) throw new Error("not started")
+		await flushAsync()
+		expect(h.engine.tapCount).toBe(1)
+		h.pool.watchEngine("rtl", new FakeEngineView())
+		expect(h.engine.tapCount).toBe(0)
+		await flushAsync()
+		expect(h.pool.status()).toEqual([])
+		expect(h.states.at(-1)).toEqual({ probeId: res.started, state: "stopped" })
+		expect(h.decoders.removed).toContain(res.started)
+	})
+
+	it("resolves a second stop only once the first stop's teardown is done", async () => {
+		const h = poolHarness()
+		const res = h.pool.request(probeRequest())
+		if (!("started" in res)) throw new Error("not started")
+		await flushAsync()
+		let open = (): void => undefined
+		h.decoders.removeGate = new Promise<void>(resolve => {
+			open = resolve
+		})
+		const first = h.pool.release(res.started)
+		let secondDone = false
+		const second = h.pool.release(res.started).then(() => {
+			secondDone = true
+		})
+		await flushAsync()
+		expect(secondDone).toBe(false)
+		open()
+		await Promise.all([first, second])
+		expect(secondDone).toBe(true)
+		expect(h.decoders.removed).toContain(res.started)
+		expect(h.states.filter(s => s.state === "stopped")).toHaveLength(1)
+	})
+
+	it("keeps every mode's recorded calls across a mode step", async () => {
+		// fake setTimeout only: the mode hold is driven by the test, the real mkdir still completes
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		try {
+			const h = poolHarness()
+			const modes = [
+				{ ...probeModesFor("tdma-ms", [])[0]!, holdMs: 1000 },
+				{ ...probeModesFor("tdma-ms", [])[1]!, holdMs: 1000 },
+			]
+			const res = h.pool.request(
+				probeRequest({ record: true, holdMs: 2000, modes }),
+			)
+			if (!("started" in res)) throw new Error("not started")
+			const recordings: { calls: { callId: string }[] }[] = []
+			h.pool.on("recordings", (r: { calls: { callId: string }[] }) =>
+				recordings.push(r),
+			)
+			const confirming = async (notDecoder: string | null): Promise<string> => {
+				for (let i = 0; i < 10_000; i++) {
+					const p = h.pool.status()[0]
+					if (p?.state === "confirming" && p.decoderId !== notDecoder)
+						return p.decoderId
+					await flushAsync()
+				}
+				throw new Error("probe never reached confirming")
+			}
+			const callEnd = (decoderId: string, callId: string): void =>
+				h.decoders.emitOutput(decoderId, {
+					type: "call_end",
+					timestamp: new Date(h.clock.now),
+					data: {
+						callId,
+						protocol: "dmr",
+						startedAt: new Date(h.clock.now - 100).toISOString(),
+						encrypted: false,
+					},
+				})
+			const firstDecoder = await confirming(null)
+			callEnd(firstDecoder, "c1")
+			await vi.advanceTimersByTimeAsync(1001)
+			const secondDecoder = await confirming(firstDecoder)
+			expect(
+				h.decoders.created.get(secondDecoder)?.config.options["mode"],
+			).toBe("nxdn")
+			callEnd(secondDecoder, "c2")
+			await h.pool.release(res.started)
+			expect(recordings).toHaveLength(1)
+			expect(recordings[0]!.calls.map(c => c.callId)).toEqual(["c1", "c2"])
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it("clamps a long pre-roll so it and the live bytes fit the input cap, with no gap between them", async () => {
+		const h = poolHarness()
+		const total = 6_000_000 // 12 MB of CU8, more than the 8 MiB input cap
+		h.engine.push(total)
+		const res = h.pool.request(probeRequest({ preRollFromSample: 0 }))
+		if (!("started" in res)) throw new Error("not started")
+		h.engine.push(1000)
+		await flushAsync()
+		await flushAsync()
+		const got = h.decoders.created.get(res.started)!.received()
+		const preRollSamples = Math.floor((8 * 1024 * 1024 - 2 * 1024 * 1024) / 2)
+		expect(got.length).toBe((preRollSamples + 1000) * 2)
+		const first = total - preRollSamples
+		// every sample in order, from the clamped start through the live bytes
+		for (let i = 0; i < preRollSamples + 1000; i += 997) {
+			expect(got[2 * i]).toBe((first + i) & 255)
+			expect(got[2 * i + 1]).toBe(((first + i) >> 8) & 255)
+		}
+		const last = preRollSamples + 999
+		expect(got[2 * last]).toBe((first + last) & 255)
 	})
 
 	it("watches an engine's streams from its open, so a first request during a lag is stale", () => {

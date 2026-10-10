@@ -2,9 +2,9 @@
  * Evidence from configured, always-on decoders (spec § 6.4 "Ambient
  * evidence"): the same interpreters with origin "ambient", stamped with the
  * current engine epoch of the decoder's source. A decoder's acceptance memory
- * lasts one epoch; multimon capcodes pair only outputs at most 2 s apart
- * (§ 6.4 "two decodes … within the hold", ± 2 s), so a 30–60 s ISM sensor
- * still double-matches within its epoch. Matching to observations by
+ * lasts one epoch; multimon capcodes pair only within a per-capcode window of
+ * the multimon hold ± 2 s (§ 6.4 "two decodes … within the hold"), so a
+ * 30–60 s ISM sensor still double-matches within its epoch. Matching to observations by
  * frequency and time is done by ScannerService.
  */
 import { EventEmitter } from "node:events"
@@ -21,7 +21,7 @@ import { interpretDirewolf } from "./confirm/direwolf.js"
 import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
 import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
-import { PAIRING_GAP_MS } from "./probe-pool.js"
+import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
 export interface AmbientTarget {
 	sourceId: string
@@ -47,10 +47,11 @@ export interface AmbientDeps {
 	now?: () => number
 }
 
-/** Acceptance memory of one decoder: recreated on a new epoch, or after a multimon pairing gap. */
+/** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode window. */
 interface AmbientState {
+	epoch: number
 	interp: InterpreterState
-	lastAt: number
+	capcodes: CapcodeWindows | null
 }
 
 const AMBIENT_TYPES = new Set(["dsd-fme", "multimon-ng", "direwolf", "rtl433"])
@@ -125,27 +126,30 @@ export class AmbientEvidence extends EventEmitter {
 		if (!target) return
 		const epoch = this.deps.epochOf(target.sourceId)
 		if (epoch === null) return
-		const now = this.now()
 		const type = this.types.get(decoderId)
 		let entry = this.states.get(decoderId)
-		if (
-			!entry ||
-			entry.interp.epoch !== epoch ||
-			(type === "multimon-ng" && now - entry.lastAt > PAIRING_GAP_MS)
-		) {
-			entry = {
-				interp: createInterpreterState({
+		if (!entry || entry.epoch !== epoch) {
+			const create = (): InterpreterState =>
+				createInterpreterState({
 					epoch,
 					origin: "ambient",
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
-				}),
-				lastAt: now,
+				})
+			entry = {
+				epoch,
+				interp: create(),
+				capcodes:
+					type === "multimon-ng"
+						? new CapcodeWindows(MULTIMON_HOLD_MS, create)
+						: null,
 			}
 			this.states.set(decoderId, entry)
 		}
-		entry.lastAt = now
-		const state = entry.interp
+		const state = entry.capcodes
+			? entry.capcodes.stateFor(input as DecoderOutputLike, this.now())
+			: entry.interp
+		if (!state) return
 		let evs: DecodeEvidence[] = []
 		if (type === "dsd-fme")
 			evs = interpretDsdFme(
