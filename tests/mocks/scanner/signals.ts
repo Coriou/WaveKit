@@ -662,3 +662,82 @@ export function obwBelowPeakHz(psd: NarrowbandPsd, belowPeakDb = 20): number {
 	}
 	return (hi - lo + 1) * psd.binHz
 }
+
+export interface ImpulseTrainOptions {
+	periodMs: number
+	widthMs: number
+	/** Tones every toneSpacingHz across ±occupiedFraction·fs/2, each of amplitude toneAmp (power toneAmp²). */
+	toneSpacingHz: number
+	occupiedFraction: number
+	toneAmp: number
+	phaseMs?: number
+}
+
+/**
+ * Periodic broadband impulses (switching-supply RFI, spec § 4.9): one random-phase multitone burst
+ * of widthMs, rectangular-gated, repeated every periodMs from phaseMs. With toneSpacingHz equal to
+ * the scanner RBW, a frame inside a burst reads toneAmp² in every covered bin (tone-calibrated).
+ */
+export function impulseTrain(
+	rng: Rng,
+	n: number,
+	fs: number,
+	opts: ImpulseTrainOptions,
+): Iq {
+	const out = zerosIq(n)
+	const w = Math.max(1, Math.round((opts.widthMs * fs) / 1000))
+	const maxK = Math.floor(
+		(opts.occupiedFraction * fs) / (2 * opts.toneSpacingHz),
+	)
+	const shape = zerosIq(w)
+	for (let k = -maxK; k <= maxK; k++) {
+		const step = (TWO_PI * k * opts.toneSpacingHz) / fs
+		const phase = TWO_PI * rng()
+		for (let i = 0; i < w; i++) {
+			shape.re[i] =
+				(shape.re[i] ?? 0) + opts.toneAmp * Math.cos(step * i + phase)
+			shape.im[i] =
+				(shape.im[i] ?? 0) + opts.toneAmp * Math.sin(step * i + phase)
+		}
+	}
+	const period = (opts.periodMs * fs) / 1000
+	for (
+		let start = ((opts.phaseMs ?? 0) * fs) / 1000;
+		start < n;
+		start += period
+	)
+		addInto(out, shape, Math.round(start))
+	return out
+}
+
+/**
+ * Sum of complex tones at `teethHz` with amplitudes `amps` for absolute samples [at, at + n), so
+ * successive calls are phase-continuous (a spur comb streamed in chunks). Each tone runs as a
+ * recursive oscillator started from its exact phase at `at`.
+ */
+export function toneComb(
+	n: number,
+	fs: number,
+	teethHz: readonly number[],
+	amps: readonly number[],
+	at = 0,
+): Iq {
+	const out = zerosIq(n)
+	teethHz.forEach((hz, t) => {
+		const amp = amps[t] ?? 0
+		const w = (TWO_PI * hz) / fs
+		const start = (w * at) % TWO_PI
+		let re = amp * Math.cos(start)
+		let im = amp * Math.sin(start)
+		const cr = Math.cos(w)
+		const ci = Math.sin(w)
+		for (let i = 0; i < n; i++) {
+			out.re[i] = (out.re[i] ?? 0) + re
+			out.im[i] = (out.im[i] ?? 0) + im
+			const nextRe = re * cr - im * ci
+			im = re * ci + im * cr
+			re = nextRe
+		}
+	})
+	return out
+}
