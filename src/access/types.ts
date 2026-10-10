@@ -37,18 +37,25 @@ export type AccessDenialCode =
 
 export type AccessResponseHeaders = Readonly<Record<string, string>>
 
-interface AuthenticatedAdmission {
+export interface AuthenticatedAdmission {
 	kind: "authenticated"
 	principal: AccessPrincipal
 	headers: AccessResponseHeaders
+	/** Validated cookie for refresh only; non-enumerable, never public JSON. */
+	readonly sessionCookie?: string
 }
 
-interface DeniedAdmission {
+export interface DeniedAdmission {
 	kind: "deny"
 	status: 400 | 401 | 403 | 429 | 503
 	code: AccessDenialCode
 	headers: AccessResponseHeaders
 }
+
+/** Pairing authority is limited to the exchange, never general admission. */
+export type PairingAdmission =
+	| { kind: "pairing"; headers: AccessResponseHeaders }
+	| DeniedAdmission
 
 export type Admission =
 	| { kind: "public-health"; headers: AccessResponseHeaders }

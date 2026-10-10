@@ -8,6 +8,9 @@ import type {
 	AccessPolicyOptions,
 	AccessRequest,
 	Admission,
+	AuthenticatedAdmission,
+	DeniedAdmission,
+	PairingAdmission,
 } from "./types.js"
 
 export const CSRF_HEADER = "X-WaveKit-CSRF"
@@ -36,12 +39,20 @@ const sensitiveHeaders = new Set([
 	"sec-fetch-site",
 	"access-control-request-method",
 	"access-control-request-headers",
+	"upgrade",
 ])
 const headerName = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/
 
 interface ParsedHeaders {
 	values: Map<string, string>
 	cookie: string | undefined
+}
+
+interface CheckedBoundary extends ParsedHeaders {
+	kind: "checked"
+	input: AccessRequest
+	origin: string | undefined
+	headers: Record<string, string>
 }
 
 function parseHeaders(
@@ -150,7 +161,20 @@ export class AccessPolicy {
 		this.#sessions = options.sessions
 	}
 
-	evaluate(request: AccessRequest): Admission {
+	get sessionCookieName(): string {
+		return this.#cookieName
+	}
+
+	get listenerScheme(): "http" | "https" {
+		return this.#scheme
+	}
+
+	/** Flow composition must share this exact committed-state authority. */
+	usesSessionStore(sessions: SessionStore): boolean {
+		return this.#sessions === sessions
+	}
+
+	#validateBoundary(request: AccessRequest): CheckedBoundary | DeniedAdmission {
 		const headers: Record<string, string> = {
 			"Cache-Control": "no-store",
 			Vary: "Origin",
@@ -158,7 +182,7 @@ export class AccessPolicy {
 		const deny = (
 			status: 400 | 401 | 403 | 503,
 			code: AccessDenialCode,
-		): Admission => ({ kind: "deny", status, code, headers })
+		): DeniedAdmission => ({ kind: "deny", status, code, headers })
 		const parsed = accessRequestSchema.safeParse(request)
 		if (!parsed.success) return deny(400, "MALFORMED_REQUEST")
 		const input = parsed.data
@@ -202,6 +226,42 @@ export class AccessPolicy {
 		if (!authority) return deny(400, "MALFORMED_REQUEST")
 		if (!this.#authorities.has(authority)) return deny(403, "HOST_FORBIDDEN")
 		if (!validTarget(input.rawTarget)) return deny(400, "MALFORMED_REQUEST")
+		if (values.get("authorization")?.includes(","))
+			return deny(400, "MALFORMED_REQUEST")
+		const upgrade = values.get("upgrade")
+		if (
+			upgrade !== undefined &&
+			(upgrade.toLowerCase() !== "websocket" || input.transport !== "websocket")
+		)
+			return deny(400, "MALFORMED_REQUEST")
+		return { kind: "checked", input, values, cookie, origin, headers }
+	}
+
+	/** Exact pair-code exchange boundary; this never authenticates an API principal. */
+	validatePairingRequest(request: AccessRequest): PairingAdmission {
+		const boundary = this.#validateBoundary(request)
+		if (boundary.kind === "deny") return boundary
+		const { input, origin, headers } = boundary
+		if (
+			input.surface !== "api" ||
+			input.transport !== "http" ||
+			input.method !== "POST" ||
+			input.rawTarget !== "/api/access/pair"
+		)
+			return { kind: "deny", status: 400, code: "MALFORMED_REQUEST", headers }
+		if (!origin)
+			return { kind: "deny", status: 403, code: "ORIGIN_FORBIDDEN", headers }
+		return { kind: "pairing", headers }
+	}
+
+	evaluate(request: AccessRequest): Admission {
+		const boundary = this.#validateBoundary(request)
+		if (boundary.kind === "deny") return boundary
+		const { input, values, cookie, origin, headers } = boundary
+		const deny = (
+			status: 400 | 401 | 403 | 503,
+			code: AccessDenialCode,
+		): DeniedAdmission => ({ kind: "deny", status, code, headers })
 
 		if (
 			input.transport === "http" &&
@@ -271,7 +331,7 @@ export class AccessPolicy {
 		) {
 			return deny(403, "ORIGIN_FORBIDDEN")
 		}
-		return {
+		const admission: AuthenticatedAdmission = {
 			kind: "authenticated",
 			principal: {
 				kind: "session",
@@ -280,5 +340,7 @@ export class AccessPolicy {
 			},
 			headers,
 		}
+		Object.defineProperty(admission, "sessionCookie", { value: cookie })
+		return admission
 	}
 }

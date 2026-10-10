@@ -467,6 +467,81 @@ describe("one shared admission policy for API, WS and HTTP audio", () => {
 		})
 	})
 
+	it("keeps the exact pairing boundary separate from normal authenticated admission", async () => {
+		const { policy, request } = await setup()
+		const original = request(["Origin", allowedOrigin], {
+			method: "POST",
+			rawTarget: "/api/access/pair",
+		})
+		expect(policy.validatePairingRequest(original)).toMatchObject({
+			kind: "pairing",
+		})
+		expect(policy.evaluate(original)).toMatchObject({
+			kind: "deny",
+			status: 401,
+		})
+		for (const rawTarget of [
+			"/health",
+			"/api/access/pair?code=x",
+			"/api/access/pair/",
+			"/api/access/%70air",
+			"/api/access/session",
+		])
+			expect(
+				policy.validatePairingRequest({ ...original, rawTarget }),
+			).toMatchObject({ kind: "deny", status: 400 })
+		expect(
+			policy.validatePairingRequest(
+				request([], { method: "POST", rawTarget: "/api/access/pair" }),
+			),
+		).toMatchObject({ kind: "deny", status: 403 })
+	})
+
+	it("rejects duplicate or contradictory Upgrade facts before cookie admission", async () => {
+		const { policy, request } = await setup()
+		for (const headers of [
+			["Upgrade", "websocket", "upgrade", "websocket"],
+			["Upgrade", "websocket, h2c"],
+			["Upgrade", "h2c"],
+		])
+			expect(
+				policy.evaluate(
+					request([...bearer, ...headers], { transport: "websocket" }),
+				),
+			).toMatchObject({ kind: "deny", status: 400 })
+		expect(
+			policy.evaluate(request([...bearer, "Upgrade", "websocket"])),
+		).toMatchObject({ kind: "deny", status: 400 })
+		expect(
+			policy.evaluate(
+				request([...bearer, "Upgrade", "WebSocket"], {
+					transport: "websocket",
+				}),
+			),
+		).toMatchObject({ kind: "authenticated" })
+	})
+
+	it("exposes only the original validated cookie privately for renewal", async () => {
+		const { policy, sessions, request } = await setup()
+		const session = await sessions.create()
+		if (session.kind !== "created") throw new Error("Expected session")
+		const admission = policy.evaluate(
+			request([
+				"Cookie",
+				`wavekit_session=${session.cookieValue}`,
+				"Origin",
+				allowedOrigin,
+			]),
+		)
+		expect(admission.kind).toBe("authenticated")
+		if (admission.kind === "authenticated")
+			expect(admission.sessionCookie).toBe(session.cookieValue)
+		expect(JSON.stringify(admission)).not.toContain(session.cookieValue)
+		expect(policy.sessionCookieName).toBe("wavekit_session")
+		expect(policy.listenerScheme).toBe("http")
+		expect(policy.usesSessionStore(sessions)).toBe(true)
+	})
+
 	it("rejects wildcard/bind-all authority config, bad digest lengths and incompatible session binding safely", async () => {
 		const { options } = await setup()
 		for (const invalid of [
