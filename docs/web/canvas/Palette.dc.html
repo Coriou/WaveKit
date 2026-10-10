@@ -209,7 +209,8 @@ const VIEWS = [
 	{ id: 'activity', label: 'Activity', key: 'A', icon: P.activity },
 	{ id: 'map', label: 'Map', key: 'M', icon: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
 	{ id: 'scanner', label: 'Scanner', key: 'C', icon: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'] },
-	{ id: 'recordings', label: 'Recordings', key: 'R', icon: P.rec }
+	{ id: 'recordings', label: 'Recordings', key: 'R', icon: P.rec },
+	{ id: 'settings', label: 'Settings', kbd: ['⌘', ','], icon: ['M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z', 'M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'] }
 ];
 const DECODERS = [
 	{ id: 'adsb', title: 'ADS-B', sub: 'readsb · 1090 MHz · 34 aircraft', cat: 'aircraft' },
@@ -416,7 +417,7 @@ class Component extends DCLogic {
 		const extra = k === 'direct' && o[0] !== 'off' ? { noPreview: true, warn: 'Retunes to the HF range. VHF decoders stop until you turn it off.' } : {};
 		return Object.assign({ id: k + ':' + o[0], title: o[1], sub: o[2], icon: k === 'palette' ? P.palette : k === 'direct' ? P.chip : P.sound, patch: { [k]: o[0] }, cur: this.v()[k] === o[0] }, extra);
 	}
-	viewItem(x) { return { id: 'view:' + x.id, title: 'Go to ' + x.label, icon: x.icon, kbd: ['G', x.key], cur: this.v().nav === x.id, act: () => this.nav(x.id, x.label), does: 'Opens ' + x.label }; }
+	viewItem(x) { return { id: 'view:' + x.id, title: 'Go to ' + x.label, icon: x.icon, kbd: x.kbd || ['G', x.key], cur: this.v().nav === x.id, act: () => this.nav(x.id, x.label), does: 'Opens ' + x.label }; }
 	decItem(d) { return { id: 'dec:' + d.id, title: d.title, sub: d.sub, icon: CAT[d.cat], value: 'Running', valueC: '#7becc7', act: () => this.activity({ cats: [d.cat] }, 'Showing ' + d.title + ' in Activity'), does: 'Opens Activity showing only ' + d.title }; }
 	playTg(n) {
 		const info = TG_INFO[n];

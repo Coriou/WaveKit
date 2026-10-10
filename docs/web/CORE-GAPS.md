@@ -67,3 +67,23 @@ Format: `- [ ] item` — tick (`- [x]`) once it is in core on `main`.
 - [ ] Position extraction from ACARS / VDL2 (ADS-C, `POS` reports) and AIS aids to
   navigation (type 21) into the common envelope.
 
+**Settings**
+- [ ] Settings store in core: a persisted layer over the YAML (in `stateDir`), validated
+  writes over the API, live push of every change to all clients. Each value reports its
+  source (default, YAML, environment variable, UI) so the UI can lock what env or YAML pins.
+  Today only decoder band overrides persist; tuner, live-audio and source edits are lost on
+  restart.
+- [ ] One settings schema for core and every decoder: Zod plus UI hints (label, help,
+  group, essential or More, effect: live / restarts X / reconnects / hardware, aliases,
+  widget, unit), served to clients as JSON Schema so a new decoder needs no UI work.
+- [ ] Decoder options validated at the boundary (only lora-meshtastic does today) and
+  editable at runtime (`PATCH /api/decoders/:id` returns 501); batched apply that restarts
+  only what changed.
+- [ ] Station identity owned by core (name, location, altitude, region, callsign) and passed
+  to decoders, replacing readsb `lat`/`lon`, direwolf `callsign` (parsed, never used) and the
+  second `region` in lora-meshtastic.
+- [ ] New settings the design adds: units, time format, language, FFT size and averaging,
+  spectrum range, auto-squelch margin, global recording retention and size cap (today only
+  dsd-fme per-call limits), behaviour when space is low.
+- [ ] Configuration export and import (YAML), update check, decoder status for the decoder
+  pages (uptime, message rate, last message, last error), signed-in devices (with auth).

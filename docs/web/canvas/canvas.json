@@ -10,26 +10,8 @@
 	},
 	"pages": [],
 	"boards": {
-		"Main.dc.html": {
-			"x": 0,
-			"y": 0,
-			"w": 1440,
-			"h": 900,
-			"title": "A · Instrument — decodes on the spectrum, inspector on the right",
-			"expand": "fill",
-			"is_interactive": true
-		},
-		"Console.dc.html": {
-			"x": 1520,
-			"y": 0,
-			"w": 1440,
-			"h": 900,
-			"title": "B · Console — spectrum above decoded activity",
-			"expand": "fill",
-			"is_interactive": true
-		},
 		"Immersive.dc.html": {
-			"x": 3040,
+			"x": 0,
 			"y": 0,
 			"w": 1440,
 			"h": 900,
@@ -142,11 +124,25 @@
 			"h": 820,
 			"title": "Recordings — what you kept: calls, manual recordings, IQ captures",
 			"is_interactive": true
+		},
+		"Settings.dc.html": {
+			"x": 2660,
+			"y": 5700,
+			"w": 560,
+			"h": 820,
+			"title": "Settings — one registry: search, groups, decoder pages, Apply for disruptive changes",
+			"is_interactive": true
+		},
+		"SettingsPhone.dc.html": {
+			"x": 3300,
+			"y": 5700,
+			"w": 390,
+			"h": 844,
+			"title": "Settings on a phone — groups push in",
+			"is_interactive": true
 		}
 	},
 	"order": [
-		"Main.dc.html",
-		"Console.dc.html",
 		"Immersive.dc.html",
 		"Spectrum.dc.html",
 		"Tuned.dc.html",
@@ -160,15 +156,17 @@
 		"Activity.dc.html",
 		"Palette.dc.html",
 		"Map.dc.html",
-		"Recordings.dc.html"
+		"Recordings.dc.html",
+		"Settings.dc.html",
+		"SettingsPhone.dc.html"
 	],
 	"notes": {
 		"shells": {
 			"x": 0,
 			"y": -300,
-			"text": "App shell — three directions",
+			"text": "App shell — direction C",
 			"kind": "title1",
-			"maxW": 4480
+			"maxW": 1440
 		},
 		"parts": {
 			"x": 0,
@@ -180,9 +178,9 @@
 		"activity": {
 			"x": 0,
 			"y": 5420,
-			"text": "Activity, recordings and commands",
+			"text": "Activity, recordings, commands and settings",
 			"kind": "title1",
-			"maxW": 2580
+			"maxW": 3690
 		},
 		"messages": {
 			"x": 0,
@@ -204,7 +202,7 @@
 			"w": 360,
 			"maxH": 820,
 			"fill": "orange",
-			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up\n\nRecordings\n• Keep (star) a recording: exempt from retention, synced to every client\n• Manual recordings with name, note and non-destructive trim (in/out)\n• IQ capture of the viewed span + IQ playback as a source (spectrum, audio, decoders), SigMF export\n• Storage usage and retention endpoint (kept, auto, free)\n• Recording deep links and download (Opus / WAV transcode, trimmed)"
+			"text": "CORE GAPS — drawn here, not in core yet (keep updating)\n\nSpectrum\n• FFT stream (spectrum + waterfall), with zoom: higher-res FFT of the viewed slice\n• Low-latency tuner control over WebSocket (drag-to-pan retunes the centre)\n\nTuner\n• Gain table per tuner, sample-rate presets list\n• DC removal, IQ correction\n\nAudio\n• One WebSocket audio stream, analog + decoded voice auto-routed\n• Auto squelch, configurable AGC, real noise reduction, CW BFO\n• Analog audio recording\n\nData\n• Saved frequencies stored in core, shared by all clients\n• Signal history per frequency (auto band map)\n• Common decode envelope: category, title, fields, freq, raw JSON\n• DMR talker alias / error rate in call events (verify)\n\nActivity\n• Persistent, searchable event store (full-text incl. transcripts) with paging\n• Auto-record all audio (analog transmissions + digital calls), retention, playback by id with seek\n• Analog transmission events (start/end, duration) from squelch\n• Transcription pipeline (future): per-recording transcript + status\n• Operator settings in core, synced to every client incl. mobile: columns, pinned searches, recording prefs, saved frequencies, command history (palette ranking)\n• Live event push with replay-from-cursor so a paused or reconnecting client catches up\n\nRecordings\n• Keep (star) a recording: exempt from retention, synced to every client\n• Manual recordings with name, note and non-destructive trim (in/out)\n• IQ capture of the viewed span + IQ playback as a source (spectrum, audio, decoders), SigMF export\n• Storage usage and retention endpoint (kept, auto, free)\n• Recording deep links and download (Opus / WAV transcode, trimmed)\n\nMap\n• Station location in core (lat, lon, altitude), passed to readsb; estimate when unset; gpsd later\n• Position history (trails, last-hour replay) with a time cursor\n• Coverage: max range per bearing over 24 h (ADS-B, AIS)\n• Map tiles: regional PMTiles extract served by core, glyphs and style; OpenFreeMap fallback\n• Positions from ACARS / VDL2 (ADS-C, POS) and AIS aids to navigation\n\nSettings\n• Settings store in core: saved over the YAML, validated writes, live push to every client; each value says where it comes from (default, YAML, env, UI)\n• One settings schema for core and every decoder (Zod + UI hints: label, help, group, essential or More, effect, aliases, widget, unit), served to clients\n• Decoder options validated and editable at runtime (PATCH is 501 today); batched apply with restart orchestration\n• Station identity (name, location, altitude, region, callsign) owned by core and passed to decoders\n• New settings: units, time format, language, FFT size and averaging, auto-squelch margin, global retention and size cap\n• Config export / import (YAML), update check, signed-in devices"
 		}
 	},
 	"designSystems": []

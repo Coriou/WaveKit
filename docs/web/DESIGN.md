@@ -39,7 +39,6 @@ Condensed + Noto Sans, Tabler-based icons).
 
 | Board | What it is | State |
 | --- | --- | --- |
-| A · Instrument, B · Console | Earlier shell directions | Rejected, kept for reference |
 | C · Immersive | **Chosen shell.** Full-bleed spectrum, floating glass islands | Active |
 | Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line | Active |
 | Tuned-signal card | What is on the tuned frequency: one anatomy for every signal type | Active, reworked |
@@ -53,6 +52,8 @@ Condensed + Noto Sans, Tabler-based icons).
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
 | Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
+| Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
+| Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
 ## Decision log
@@ -351,8 +352,84 @@ Condensed + Noto Sans, Tabler-based icons).
   something: the "Add a column" drop target, the approximate station area and ACARS
   report diamonds on the map, the squelch threshold and the map's range rings; mesh
   links became solid. Dividers are a single hairline, never doubled.
-  Provisional until the owner compares before and after on the canvas; the previous
+  **Approved by the owner (2026-10-10)** after comparing on C · Immersive. The previous
   values are in the git history of `docs/web/canvas/`.
+
+- **Shell directions A and B removed (2026-10-10).** A · Instrument and B · Console were
+  deleted from the canvas; C · Immersive now sits alone at the top. Their last versions are
+  in the git history of `docs/web/canvas/` (`Main.dc.html`, `Console.dc.html`).
+
+- **Recordings polish accepted (2026-10-10).** Fine for now; a later repolish pass is
+  expected.
+
+- **Settings, first pass (2026-10-10).** Owner brief: lots of settings in a project like
+  WaveKit, more with every release; must never feel cluttered and must scale. Researched
+  beforehand: an inventory of every setting core has or the boards imply (about 110
+  station settings, ~15 personal preferences, ~8 per device, ~30 deploy-only) and how
+  VS Code, macOS, Home Assistant, Linear, Jellyfin, Grafana and SDR++ handle large
+  settings surfaces. Settled with the owner before drawing:
+  - *Who configures:* a one-owner station. Anyone else only listens and keeps their own
+    layout. No "station vs you" split in the UI for now.
+  - *Scope:* this is the web UI. Everything core needs went to [CORE-GAPS.md](CORE-GAPS.md).
+  - *One registry, three doors.* Every setting is declared once (core and each decoder,
+    with UI hints) and shown in three places: the Settings drawer, the islands ("All
+    receiver settings", "All audio settings" open the drawer at that section), and ⌘K
+    (Settings is a Go to destination, `⌘,`). Nothing exists only in one place.
+    *Why:* settings that live only in context can't be searched or audited; settings that
+    live only on a page pull you out of the receiver.
+  - *Configuration, not content.* Settings holds configuration. Things you curate stay
+    where they live (saved frequencies in the Tuner, Activity columns and pinned searches
+    in Activity, kept recordings in Recordings); Settings only links to them.
+  - *Eight groups:* Station (name, location, region, callsign; set once, used
+    everywhere), Receiver, Audio, Decoders, Recording & storage, Map, Display, System.
+    Display ends with a small "On this device" block (density, tuned card position,
+    motion), the only settings that do not sync, with a note saying so.
+  - *The drawer:* the Activity / Recordings slot, 560 px wide, spectrum visible behind so
+    live settings show their effect (the waterfall colours change behind the drawer).
+    Header (title, "N changed" chip that filters, close), search, then a 140 px rail of
+    group names that scroll-spies one long page; Decoders rows open a decoder page with
+    a back arrow. Full width below 1100 px.
+  - *Search first:* matches names, descriptions, aliases ("sql" finds squelch, "dongle"
+    finds the source), values and option names. Results are editable rows with a
+    breadcrumb (`Audio › More`). Typed filters become chips: Changed, Restarts something,
+    Touches hardware, Locked. Search always opens "More" folds.
+  - *The row:* label, one line of help, control on the right (wraps under the label when
+    narrow). A phosphor bar marks a changed value, and "Reset to …" appears on hover or
+    focus. A `⋯` menu holds Reset, Copy link (`/settings/<id>`), Copy as YAML. A circular
+    arrow next to the label means the change restarts something, a plug means it touches
+    the hardware; the tooltip says what exactly. Locked values (env or deploy) show a lock
+    and "Set by WAVEKIT_REGION · change it in the environment" instead of a control.
+  - *Disruptive changes wait for Apply.* A change that restarts a decoder, reconnects the
+    source or touches the hardware is not applied on its own: the row turns amber
+    ("Waiting for Apply · Restarts every decoder", with Undo) and an amber Apply bar at the
+    bottom batches them ("2 changes waiting · Restarts every decoder, turns on antenna
+    power · Discard / Apply"). Everything else applies at once. Amber stays the shell's
+    "not live" colour. Warnings sit inline ("Above 2.4 MS/s the Pi link may drop samples").
+  - *Progressive disclosure per section:* about five essentials per group, the rest
+    under "More · N". No global advanced mode. *Why:* Home Assistant is retiring exactly
+    that switch because it hid unrelated things.
+  - *Decoder pages, generated:* each decoder declares its settings; its page shows a
+    header (tool and version, Running / Idle / Stopped / Off), its essentials and More,
+    then Status (running for, messages, last message, the last error) with Restart and
+    Show log. Station identity is never copied: ADS-B shows "Station location · Roscoff ›",
+    APRS "Callsign · Not set ›", Meshtastic "Region · EU 868 ›". Widgets are a fixed set
+    (switch, segmented, select, stepper, slider, text, secret with Reveal, frequency list,
+    toggle chips, link, read-only, buttons); anything else is a design decision.
+  - *Errors and save state:* an invalid value shows a red message under the field and is
+    not saved (mock: the Meshtastic channel key, the callsign format). If the WaveKit is
+    unreachable, an amber banner says changes stay here, rows show "Not saved yet · Retry".
+  - *Phone:* the drawer becomes full screen; search and the eight groups (each with a
+    one-line summary of its current values) come first, and a group pushes in as its own
+    screen. Board: Settings on a phone.
+  - *Never in the UI:* `extraArgs`, internal buffers, injected sample rates, debug paths.
+    They stay in YAML.
+  - *Board tweaks:* `scenario` (normal / pending / offline), `storage` (ok / low),
+    `openAt` (deep link to a group, a decoder page or one row, which pulses), `layout`
+    (drawer / phone).
+  Checked on the rendered canvas inside C at 1440 px: the drawer, rail, Changed filter
+  and alias search work; text fields were narrowed afterwards so they sit beside their
+  label (not re-checked). The phone board and the Apply flow have not been looked at
+  rendered yet.
 
 ## Open questions and next topics
 
@@ -378,7 +455,13 @@ Condensed + Noto Sans, Tabler-based icons).
   purpose; revisit only if search plus day grouping stops being enough. `S` means *keep*
   in a focused Activity list but *save frequency* in the palette keymap: settle in the
   keymap pass. Recordings at phone width needs a look on a real phone layout.
-- Map view, Scanner, Settings.
+- Settings follow-ups: ⌘K should list individual settings ("Open in Settings" on a
+  palette row) and the palette's setting scopes should share the registry; first-run
+  setup (the Pi first-boot page asks for the location today); guest accounts and what
+  they may change; profiles or presets ("Night", "Portable"); editing the configuration
+  as text. The Listen island still says Auto squelch keeps "6 dB" while the margin is now
+  a setting. Signed-in devices needs the auth design.
+- Map view, Scanner.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
 
@@ -388,9 +471,9 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-The radius scale and the border system await the owner's before/after review on the canvas. Also pending:
-the visual check of the Recordings polish (desktop and phone). Then pick the next topic
-from the open questions (Scanner, Settings).
+Owner review of the Settings board (drawer in C, the Settings board's tweaks, the phone
+board), and a rendered check of the Apply flow and the phone layout. Then pick the next
+topic from the open questions (Scanner, or the Settings follow-ups).
 
 ## Handoff to the dev team (later)
 

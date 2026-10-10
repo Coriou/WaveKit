@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+.wk-s button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;margin:0;padding:0}
+.wk-s button:focus-visible,.wk-s select:focus-visible,.wk-s [tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+.wk-s .wk-ghost:hover{background:rgba(123,236,199,.08);color:#f4f7f5}
+.wk-s .wk-row:hover{background:rgba(123,236,199,.04)}
+.wk-s .wk-field{border:1px solid rgba(123,236,199,.18);transition:border-color .15s}
+.wk-s .wk-field:hover{border-color:rgba(123,236,199,.32)}
+.wk-s .wk-field:focus{border-color:rgba(123,236,199,.55);outline:none}
+.wk-s .wk-field::placeholder{color:#52645d}
+.wk-s .wk-bad,.wk-s .wk-bad:hover,.wk-s .wk-bad:focus{border-color:rgba(255,122,107,.55)}
+.wk-s select{appearance:none;-webkit-appearance:none}
+.wk-s select option{background:#111c19;color:#f4f7f5}
+.wk-s .wk-reset,.wk-s .wk-more{opacity:0;transition:opacity .15s}
+.wk-s .wk-row:hover .wk-reset,.wk-s .wk-row:focus-within .wk-reset,.wk-s .wk-row:hover .wk-more,.wk-s .wk-row:focus-within .wk-more,.wk-s .wk-more[aria-expanded="true"],.wk-s .wk-reset:focus-visible,.wk-s .wk-more:focus-visible{opacity:1}
+.wk-s .wk-rail:hover{background:rgba(123,236,199,.06);color:#f4f7f5}
+.wk-s .wk-scroll{scrollbar-width:thin;scrollbar-color:#2c443b transparent}
+.wk-s .wk-scroll:focus-visible{outline-offset:-2px}
+.wk-s input[type=range]{accent-color:#7becc7}
+.wk-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@media (hover:none){.wk-s .wk-reset,.wk-s .wk-more{opacity:1}}
+@media (prefers-reduced-motion:reduce){.wk-s *{transition:none !important}}
+</style>
+</helmet>
+<div class="wk-s" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{radius}}; overflow: hidden; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+
+	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px {{headPad}}">
+		<sc-if value="{{hasBack}}" hint-placeholder-val="{{false}}">
+			<button class="wk-ghost" onClick="{{back}}" aria-label="Back to {{backLabel}}" style="height: 36px; padding: 0 10px 0 4px; border-radius: 6px; display: flex; align-items: center; gap: 2px; color: #8ba598; font-size: 13px">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>{{backLabel}}
+			</button>
+		</sc-if>
+		<h2 style="margin: 0; min-width: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{title}}</h2>
+		<div style="flex: 1"></div>
+		<sc-if value="{{showChangedChip}}" hint-placeholder-val="{{true}}">
+			<button class="wk-ghost" onClick="{{toggleChanged}}" aria-pressed="{{changedOn}}" title="Show only the settings you changed" style="height: 30px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; color: {{chipFg}}; background: {{chipBg}}; border: 1px solid {{chipBorder}}">
+				<span aria-hidden="true" style="width: 3px; height: 12px; border-radius: 2px; background: #7becc7"></span>{{changedText}}
+			</button>
+		</sc-if>
+		<sc-if value="{{hasClose}}" hint-placeholder-val="{{true}}">
+			<button class="wk-ghost" onClick="{{close}}" aria-label="Close settings" style="width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: #8ba598">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
+			</button>
+		</sc-if>
+	</header>
+
+	<sc-if value="{{offline}}" hint-placeholder-val="{{false}}">
+		<div role="alert" style="flex: none; margin: 0 14px 10px; display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 12px; border-radius: 8px; background: rgba(242,184,75,.10); border: 1px solid rgba(242,184,75,.32); font-size: 13px; color: #f7dca4">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"></path><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"></path><path d="M12 16h.01"></path></svg>
+			<span style="flex: 1; min-width: 0">Can’t reach your WaveKit. Changes stay here until it’s back.</span>
+			<button onClick="{{retry}}" style="flex: none; height: 30px; padding: 0 12px; border-radius: 6px; background: rgba(242,184,75,.18); color: #f2b84b; font-weight: 700; font-size: 12.5px">Retry</button>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{showSearch}}" hint-placeholder-val="{{true}}">
+		<div style="flex: none; padding: 0 14px 10px">
+			<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 44px; box-sizing: border-box; padding: 5px 6px 5px 14px; border-radius: 8px; background: rgba(7,15,13,.55); border: 1px solid {{searchBorder}}; transition: border-color .15s">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>
+				<sc-for list="{{tokens}}" as="t" hint-placeholder-count="0">
+					<span style="display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 10px; border-radius: 4px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap">{{t.label}}
+						<button onClick="{{t.remove}}" aria-label="Remove filter {{t.label}}" style="width: 24px; height: 24px; border-radius: 4px; color: #7becc7; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+					</span>
+				</sc-for>
+				<input id="{{searchId}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onSearchKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search settings" placeholder="Search settings · squelch, ppm, retention…" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 140px; height: 32px; border: 0; outline: none; background: transparent; color: #f4f7f5; font: inherit; font-size: 14px">
+			</div>
+		</div>
+	</sc-if>
+
+	<div style="flex: 1; min-height: 0; display: flex">
+		<sc-if value="{{showRail}}" hint-placeholder-val="{{true}}">
+			<nav aria-label="Settings sections" style="flex: none; width: 140px; box-sizing: border-box; padding: 2px 4px 12px 10px; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; border-right: 1px solid rgba(123,236,199,.08)">
+				<sc-for list="{{rail}}" as="g" hint-placeholder-count="8">
+					<button class="wk-rail" onClick="{{g.pick}}" aria-current="{{g.current}}" style="height: 36px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 9px; text-align: left; font-size: 13px; font-weight: {{g.weight}}; color: {{g.fg}}; background: {{g.bg}}">
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{g.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+						<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.short}}</span>
+						<sc-if value="{{g.hasDot}}" hint-placeholder-val="{{false}}"><span aria-label="{{g.dotLabel}}" style="width: 6px; height: 6px; border-radius: 50%; background: {{g.dotC}}; flex: none"></span></sc-if>
+					</button>
+				</sc-for>
+			</nav>
+		</sc-if>
+
+		<div id="{{scrollId}}" class="wk-scroll" tabindex="-1" onScroll="{{onScroll}}" style="flex: 1; min-width: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 {{padX}} 24px">
+			<sc-for list="{{items}}" as="r" hint-placeholder-count="6">
+
+				<sc-if value="{{r.isH}}" hint-placeholder-val="{{false}}">
+					<div id="{{r.domId}}" style="padding: {{r.pad}} 6px 6px 10px">
+						<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .02em; color: #f4f7f5">{{r.label}}</h3>
+						<div style="margin-top: 2px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isDesc}}" hint-placeholder-val="{{false}}">
+					<div style="padding: 2px 10px 8px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+				</sc-if>
+
+				<sc-if value="{{r.isCount}}" hint-placeholder-val="{{false}}">
+					<div role="status" style="padding: 4px 10px 6px; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.text}}</div>
+				</sc-if>
+
+				<sc-if value="{{r.isFs}}" hint-placeholder-val="{{false}}">
+					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 10px; border-radius: 8px; text-align: left; font-size: 13.5px">
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z"></path></svg>
+						<span style="flex: 1">Show <b>{{r.label}}</b></span>
+						<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.count}}</span>
+					</button>
+				</sc-if>
+
+				<sc-if value="{{r.isEmpty}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 56px 24px 0">
+						<span style="font-weight: 700; color: #b9cac1">No setting matches “{{r.q}}”</span>
+						<span style="font-size: 13px; color: #8ba598; line-height: 1.5; max-width: 300px">Search looks in names, descriptions and values. Commands such as Tune or Record are in <kbd style="font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); color: #b9cac1">⌘K</kbd>.</span>
+						<button onClick="{{r.clear}}" style="margin-top: 4px; height: 34px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Clear search</button>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isSub}}" hint-placeholder-val="{{false}}">
+					<div style="margin: 18px 0 4px; padding: 12px 10px 0; border-top: 1px solid rgba(123,236,199,.08)">
+						<div style="display: flex; align-items: center; gap: 8px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-10z"></path><path d="M7 20h10"></path><path d="M9 16v4"></path><path d="M15 16v4"></path></svg>{{r.label}}
+						</div>
+						<div style="margin-top: 3px; font-size: 12.5px; color: #8ba598">{{r.desc}}</div>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isMeter}}" hint-placeholder-val="{{false}}">
+					<div style="margin: 4px 0 8px; padding: 14px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid {{r.edge}}">
+						<div style="display: flex; align-items: baseline; gap: 8px">
+							<span style="font-weight: 700">{{r.head}}</span>
+							<span style="flex: 1"></span>
+							<span style="font-size: 12.5px; color: {{r.freeC}}; font-variant-numeric: tabular-nums">{{r.free}}</span>
+						</div>
+						<div role="img" aria-label="{{r.aria}}" style="display: flex; gap: 2px; height: 8px; margin-top: 10px; border-radius: 3px; overflow: hidden; background: #22362f">
+							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="width: {{s.w}}%; background: {{s.c}}"></span></sc-for>
+						</div>
+						<div style="display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums">
+							<sc-for list="{{r.segs}}" as="s" hint-placeholder-count="3"><span style="display: flex; align-items: center; gap: 6px"><span style="width: 8px; height: 8px; border-radius: 2px; background: {{s.c}}"></span>{{s.label}}</span></sc-for>
+						</div>
+						<sc-if value="{{r.low}}" hint-placeholder-val="{{false}}">
+							<div style="margin-top: 10px; font-size: 12.5px; color: #f2b84b">{{r.lowText}}</div>
+						</sc-if>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isTiles}}" hint-placeholder-val="{{false}}">
+					<div style="margin: 4px 0 8px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 12px 12px 12px 14px; border-radius: 8px; background: rgba(7,15,13,.45); border: 1px solid rgba(123,236,199,.08)">
+						<span style="width: 36px; height: 36px; flex: none; border-radius: 6px; background: rgba(123,236,199,.10); display: grid; place-items: center">
+							<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13"></path><path d="M9 4v13"></path><path d="M15 7v13"></path></svg>
+						</span>
+						<span style="flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700">Offline map · Brittany and the Channel</span>
+							<span style="font-size: 12.5px; color: #8ba598; font-variant-numeric: tabular-nums">400 km around the station · 412 MB · updated 12 Sep</span>
+						</span>
+						<span style="display: flex; gap: 6px; margin-left: auto">
+							<button onClick="{{r.update}}" style="height: 32px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Update</button>
+							<button class="wk-ghost" onClick="{{r.remove}}" style="height: 32px; padding: 0 10px; border-radius: 6px; color: #b9cac1; font-size: 13px">Remove</button>
+						</span>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isGlink}}" hint-placeholder-val="{{false}}">
+					<button class="wk-row" onClick="{{r.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 8px 8px 8px 10px; border-radius: 8px; text-align: left; border-bottom: 1px solid rgba(123,236,199,.08)">
+						<span style="width: 32px; height: 32px; flex: none; border-radius: 6px; background: #192b24; display: grid; place-items: center; color: #7becc7">
+							<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+						</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+							<span style="font-weight: 700">{{r.label}}</span>
+							<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.summary}}</span>
+						</span>
+						<sc-if value="{{r.hasDot}}" hint-placeholder-val="{{false}}"><span aria-label="{{r.dotLabel}}" style="width: 7px; height: 7px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span></sc-if>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#52645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg>
+					</button>
+				</sc-if>
+
+				<sc-if value="{{r.isDec}}" hint-placeholder-val="{{false}}">
+					<div class="wk-row" style="display: flex; align-items: center; gap: 4px; margin-bottom: 2px; border-radius: 8px">
+						<button onClick="{{r.open}}" aria-label="{{r.name}} settings" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 9px 4px 9px 10px; border-radius: 8px; text-align: left">
+							<span style="width: 32px; height: 32px; flex: none; border-radius: 6px; background: {{r.tileBg}}; display: grid; place-items: center; color: {{r.tileFg}}">
+								<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+							</span>
+							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+								<span style="display: flex; align-items: baseline; gap: 8px; min-width: 0"><span style="font-weight: 700; white-space: nowrap">{{r.name}}</span><span style="font-size: 12px; color: #52645d; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.tool}}</span></span>
+								<span style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; font-variant-numeric: tabular-nums"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{r.dotC}}; flex: none"></span><span style="color: {{r.statC}}; overflow: hidden; text-overflow: ellipsis">{{r.line}}</span></span>
+							</span>
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#52645d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
+						</button>
+						<button role="switch" aria-checked="{{r.on}}" aria-label="{{r.name}} enabled" onClick="{{r.toggle}}" style="flex: none; width: 52px; height: 44px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span></span>
+						</button>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isDecHead}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; align-items: center; gap: 12px; padding: 4px 10px 14px">
+						<span style="width: 40px; height: 40px; flex: none; border-radius: 6px; background: {{r.tileBg}}; display: grid; place-items: center; color: {{r.tileFg}}">
+							<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+						</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+							<span style="font-size: 12.5px; color: #8ba598">{{r.tool}} · {{r.where}}</span>
+						</span>
+						<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 4px; background: {{r.pillBg}}; color: {{r.pillFg}}; font-size: 12px; font-weight: 700; white-space: nowrap"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{r.stateLabel}}</span>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isStatus}}" hint-placeholder-val="{{false}}">
+					<div style="margin-top: 18px; padding: 14px 10px 0; border-top: 1px solid rgba(123,236,199,.08); display: flex; flex-direction: column; gap: 12px">
+						<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Status</div>
+						<sc-if value="{{r.fault}}" hint-placeholder-val="{{false}}">
+							<div role="alert" style="padding: 10px 12px; border-radius: 8px; background: rgba(255,122,107,.08); border: 1px solid rgba(255,122,107,.32); font-size: 13px; line-height: 1.5; color: #ffc2bb">{{r.faultText}}</div>
+						</sc-if>
+						<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: rgba(123,236,199,.08)">
+							<sc-for list="{{r.stats}}" as="s" hint-placeholder-count="3">
+								<div style="background: #111c19; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px; min-width: 0">
+									<span style="font-size: 12px; color: #8ba598">{{s.k}}</span>
+									<span style="font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.v}}</span>
+								</div>
+							</sc-for>
+						</div>
+						<div style="display: flex; gap: 8px; flex-wrap: wrap">
+							<button onClick="{{r.restart}}" style="height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px">
+								<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4"></path><path d="M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4"></path></svg>Restart decoder
+							</button>
+							<button class="wk-ghost" onClick="{{r.logs}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #b9cac1; font-size: 13px">Show log</button>
+						</div>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isFold}}" hint-placeholder-val="{{false}}">
+					<button class="wk-ghost" onClick="{{r.toggle}}" aria-expanded="{{r.open}}" style="margin: 2px 0 0 4px; height: 32px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; color: #8ba598; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase">
+						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{r.chev}}deg); transition: transform .2s"><path d="M9 6l6 6l-6 6"></path></svg>{{r.label}}
+					</button>
+				</sc-if>
+
+				<sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
+					<div id="{{r.domId}}" class="wk-row" style="position: relative; margin-bottom: 2px; padding: 11px 6px 11px 16px; border-radius: 8px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .6s ease, box-shadow .6s ease">
+						<sc-if value="{{r.hasBar}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: 5px; top: 13px; bottom: 13px; width: 3px; border-radius: 2px; background: {{r.barC}}"></span></sc-if>
+						<sc-if value="{{r.hasCrumb}}" hint-placeholder-val="{{false}}"><div style="font-size: 11.5px; color: #8ba598; margin-bottom: 3px">{{r.crumb}}</div></sc-if>
+						<div style="display: flex; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px">
+							<div style="flex: 1 1 150px; min-width: 0">
+								<div style="display: flex; align-items: center; gap: 6px">
+									<span id="{{r.labelId}}" style="font-weight: 700; font-size: 14px">{{r.label}}</span>
+									<sc-if value="{{r.hasEff}}" hint-placeholder-val="{{false}}">
+										<span title="{{r.effText}}" style="display: inline-grid; place-items: center; color: {{r.effC}}">
+											<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.effIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+											<span class="wk-sr">{{r.effText}}</span>
+										</span>
+									</sc-if>
+									<sc-if value="{{r.locked}}" hint-placeholder-val="{{false}}">
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Locked"><path d="M5 13a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2v-6z"></path><path d="M11 16a1 1 0 1 0 2 0a1 1 0 0 0 -2 0"></path><path d="M8 11v-4a4 4 0 1 1 8 0v4"></path></svg>
+									</sc-if>
+								</div>
+								<sc-if value="{{r.hasSub}}" hint-placeholder-val="{{true}}"><div style="margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: #8ba598; text-wrap: pretty">{{r.sub}}</div></sc-if>
+								<sc-if value="{{r.hasNote}}" hint-placeholder-val="{{false}}">
+									<div role="{{r.noteRole}}" style="margin-top: 4px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 12.5px; line-height: 1.45; color: {{r.noteC}}">
+										<span>{{r.note}}</span>
+										<sc-if value="{{r.hasNoteBtn}}" hint-placeholder-val="{{false}}"><button onClick="{{r.noteAct}}" style="font-weight: 700; color: inherit; text-decoration: underline; text-underline-offset: 2px">{{r.noteBtn}}</button></sc-if>
+									</div>
+								</sc-if>
+								<sc-if value="{{r.canReset}}" hint-placeholder-val="{{false}}">
+									<button class="wk-reset" onClick="{{r.reset}}" style="margin-top: 3px; font-size: 12px; color: #7becc7; font-weight: 700; border-radius: 4px">Reset to {{r.defText}}</button>
+								</sc-if>
+							</div>
+
+							<div style="flex: 0 1 auto; max-width: 100%; margin-left: auto; display: flex; align-items: center; gap: 2px">
+
+								<sc-if value="{{r.isSw}}" hint-placeholder-val="{{false}}">
+									<button role="switch" aria-checked="{{r.on}}" aria-labelledby="{{r.labelId}}" onClick="{{r.toggle}}" style="width: 52px; height: 36px; display: grid; place-items: center; border-radius: 6px">
+										<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span></span>
+									</button>
+								</sc-if>
+
+								<sc-if value="{{r.isSeg}}" hint-placeholder-val="{{false}}">
+									<div role="radiogroup" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 2px; padding: 3px; border-radius: 6px; background: #0b1512; border: 1px solid rgba(123,236,199,.08)">
+										<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3">
+											<button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="height: 28px; padding: 0 10px; border-radius: 4px; font-size: 12.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums; background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button>
+										</sc-for>
+									</div>
+								</sc-if>
+
+								<sc-if value="{{r.isSel}}" hint-placeholder-val="{{false}}">
+									<span style="position: relative; display: inline-flex">
+										<select class="wk-field" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="height: 34px; max-width: 220px; padding: 0 30px 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 13px; cursor: pointer">
+											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}">{{o.label}}</option></sc-for>
+										</select>
+										<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="position: absolute; right: 10px; top: 10px; pointer-events: none"><path d="M6 9l6 6l6 -6"></path></svg>
+									</span>
+								</sc-if>
+
+								<sc-if value="{{r.isStep}}" hint-placeholder-val="{{false}}">
+									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; align-items: center; border: 1px solid rgba(123,236,199,.18); border-radius: 6px">
+										<button onClick="{{r.dec}}" aria-label="Decrease {{r.label}}" style="width: 34px; height: 32px; color: #b9cac1; font-size: 16px">−</button>
+										<span aria-live="polite" style="min-width: 64px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{r.valText}}</span>
+										<button onClick="{{r.inc}}" aria-label="Increase {{r.label}}" style="width: 34px; height: 32px; color: #b9cac1; font-size: 16px">+</button>
+									</div>
+								</sc-if>
+
+								<sc-if value="{{r.isSlider}}" hint-placeholder-val="{{false}}">
+									<span style="display: flex; align-items: center; gap: 10px">
+										<input type="range" min="{{r.min}}" max="{{r.max}}" step="{{r.step}}" value="{{r.val}}" onChange="{{r.onSlide}}" aria-labelledby="{{r.labelId}}" aria-valuetext="{{r.valText}}" style="width: 140px; margin: 0">
+										<span style="min-width: 62px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums">{{r.valText}}</span>
+									</span>
+								</sc-if>
+
+								<sc-if value="{{r.isText}}" hint-placeholder-val="{{false}}">
+									<input class="wk-field {{r.badClass}}" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" spellcheck="false" autocomplete="off" style="width: 168px; max-width: 100%; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font: inherit; font-size: 13.5px">
+								</sc-if>
+
+								<sc-if value="{{r.isSecret}}" hint-placeholder-val="{{false}}">
+									<span style="display: flex; align-items: center; gap: 4px">
+										<input class="wk-field {{r.badClass}}" type="{{r.inType}}" value="{{r.val}}" onChange="{{r.onText}}" placeholder="Paste the key" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" spellcheck="false" autocomplete="off" style="width: 150px; max-width: 100%; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: rgba(7,15,13,.55); color: #f4f7f5; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px">
+										<button class="wk-ghost" onClick="{{r.reveal}}" aria-pressed="{{r.shown}}" style="height: 34px; padding: 0 10px; border-radius: 6px; color: #b9cac1; font-size: 12.5px">{{r.revealLabel}}</button>
+									</span>
+								</sc-if>
+
+								<sc-if value="{{r.isLink}}" hint-placeholder-val="{{false}}">
+									<button class="wk-ghost" onClick="{{r.act}}" style="height: 34px; padding: 0 6px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 2px; color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{r.linkText}}<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
+								</sc-if>
+
+								<sc-if value="{{r.isRead}}" hint-placeholder-val="{{false}}">
+									<span style="padding: 0 6px; font-size: 13px; color: #b9cac1; font-variant-numeric: tabular-nums; white-space: nowrap">{{r.readText}}</span>
+								</sc-if>
+
+								<sc-if value="{{r.isBtns}}" hint-placeholder-val="{{false}}">
+									<span style="display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end">
+										<sc-for list="{{r.btns}}" as="b" hint-placeholder-count="1">
+											<button onClick="{{b.act}}" style="height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700; white-space: nowrap">{{b.label}}</button>
+										</sc-for>
+									</span>
+								</sc-if>
+
+								<sc-if value="{{r.isChips}}" hint-placeholder-val="{{false}}">
+									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 280px">
+										<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="3">
+											<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}">{{c.label}}</button>
+										</sc-for>
+									</div>
+								</sc-if>
+
+								<sc-if value="{{r.isFreqs}}" hint-placeholder-val="{{false}}">
+									<div role="group" aria-labelledby="{{r.labelId}}" style="display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; max-width: 300px">
+										<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="3">
+											<span style="display: flex; align-items: center; gap: 1px; height: 28px; padding: 0 2px 0 9px; border-radius: 4px; background: #192b24; font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{c.label}}
+												<button onClick="{{c.remove}}" aria-label="Remove {{c.label}} MHz" style="width: 24px; height: 24px; border-radius: 4px; color: #8ba598; display: grid; place-items: center"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+											</span>
+										</sc-for>
+										<input class="wk-field" onKeyDown="{{r.addKey}}" placeholder="+ Add" aria-label="Add a frequency in MHz" spellcheck="false" autocomplete="off" style="width: 76px; height: 28px; box-sizing: border-box; padding: 0 8px; border-radius: 4px; background: transparent; color: #f4f7f5; font: inherit; font-size: 12.5px">
+									</div>
+								</sc-if>
+
+								<button class="wk-more wk-ghost" onClick="{{r.toggleMenu}}" aria-haspopup="menu" aria-expanded="{{r.menuOpen}}" aria-label="More for {{r.label}}" style="width: 30px; height: 34px; border-radius: 6px; display: grid; place-items: center; color: #8ba598; flex: none">
+									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M17 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
+								</button>
+							</div>
+						</div>
+
+						<sc-if value="{{r.menuOpen}}" hint-placeholder-val="{{false}}">
+							<div role="menu" aria-label="{{r.label}}" style="position: absolute; right: 6px; top: 44px; z-index: 6; min-width: 196px; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
+								<sc-for list="{{r.menu}}" as="m" hint-placeholder-count="3">
+									<button role="menuitem" class="wk-ghost" onClick="{{m.act}}" aria-disabled="{{m.disabled}}" style="width: 100%; height: 36px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 10px; text-align: left; font-size: 13px; color: {{m.fg}}">
+										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>{{m.label}}
+									</button>
+								</sc-for>
+							</div>
+						</sc-if>
+					</div>
+				</sc-if>
+
+			</sc-for>
+		</div>
+	</div>
+
+	<sc-if value="{{hasPending}}" hint-placeholder-val="{{false}}">
+		<div role="region" aria-label="Changes waiting to be applied" style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 12px 12px 12px 18px; border-top: 1px solid rgba(242,184,75,.32); background: rgba(48,37,12,.55)">
+			<span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 50%; background: #f2b84b; flex: none"></span>
+			<span style="flex: 1 1 200px; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+				<span style="font-weight: 700; color: #f7dca4">{{pendingTitle}}</span>
+				<span style="font-size: 12.5px; color: #c9b27f">{{pendingSub}}</span>
+			</span>
+			<span style="display: flex; gap: 6px; margin-left: auto">
+				<button class="wk-ghost" onClick="{{discard}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: #f7dca4; font-size: 13px">Discard</button>
+				<button onClick="{{apply}}" style="height: 36px; padding: 0 16px; border-radius: 6px; background: #f2b84b; color: #1a1406; font-size: 13px; font-weight: 700">Apply</button>
+			</span>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{hasMenu}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" onClick="{{closeMenu}}" style="position: absolute; inset: 0; z-index: 5"></div>
+	</sc-if>
+
+	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}; transform: translateX(-50%); z-index: 8; max-width: calc(100% - 32px); height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-radius: 12px; background: rgba(25,43,36,.96); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13px">
+			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+			<span style="overflow: hidden; text-overflow: ellipsis">{{toastText}}</span>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"layout":{"editor":"enum","options":["drawer","phone"],"default":"drawer"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","display","dec:mesh","au.margin","rx.biasT"],"default":"none"},"values":{"editor":null},"onSet":{"editor":null},"onClose":{"editor":null},"onAction":{"editor":null},"target":{"editor":null},"$preview":{"width":560,"height":820}}'>
+const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
+const I = {
+	antenna: ['M20 4v8', 'M16 4.5v7', 'M12 5v16', 'M8 5.5v5', 'M4 6v4', 'M20 8h-16'],
+	radio: ['M14 3l-9.371 3.749a1 1 0 0 0 -.629 .928v11.323a1 1 0 0 0 1 1h14a1 1 0 0 0 1 -1v-11a1 1 0 0 0 -1 -1h-14.5', 'M4 12h16', 'M7 12v-2', 'M17 16v.01', 'M13 16v.01'],
+	volume: ['M15 8a5 5 0 0 1 0 8', 'M17.7 5a9 9 0 0 1 0 14', 'M6 15h-2a1 1 0 0 1 -1 -1v-4a1 1 0 0 1 1 -1h2l3.5 -4.5a.8 .8 0 0 1 1.5 .5v14a.8 .8 0 0 1 -1.5 .5l-3.5 -4.5'],
+	decoders: ['M4 4h6v6h-6z', 'M14 4h6v6h-6z', 'M4 14h6v6h-6z', 'M14 17a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'],
+	db: ['M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0', 'M4 6v6a8 3 0 0 0 16 0v-6', 'M4 12v6a8 3 0 0 0 16 0v-6'],
+	map: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'],
+	display: ['M3 5a1 1 0 0 1 1 -1h16a1 1 0 0 1 1 1v10a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-10z', 'M7 20h10', 'M9 16v4', 'M15 16v4'],
+	server: ['M3 7a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3z', 'M3 15a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v2a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3z', 'M7 8v.01', 'M7 16v.01'],
+	restart: ['M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4', 'M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4'],
+	plug: ['M9.785 6l8.215 8.215l-2.054 2.054a5.81 5.81 0 1 1 -8.215 -8.215l2.054 -2.054z', 'M4 20l3.5 -3.5', 'M15 4l-3.5 3.5', 'M20 9l-3.5 3.5'],
+	reset: ['M9 14l-4 -4l4 -4', 'M5 10h11a4 4 0 1 1 0 8h-1'],
+	link: ['M9 15l6 -6', 'M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464', 'M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463'],
+	code: ['M7 8l-4 4l4 4', 'M17 8l4 4l-4 4', 'M14 4l-4 16'],
+	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	marine: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	aviation: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2'],
+	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	mesh: ['M6 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M14 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M2 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M18 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M6 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M14 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M9 7l2 3M15 7l-2 3M6 12h4M14 12h4M11 14l-2 3M13 14l2 3']
+};
+const GROUPS = [
+	{ id: 'station', label: 'Station', icon: I.antenna, desc: 'Who and where this receiver is. Set once, used everywhere.' },
+	{ id: 'receiver', label: 'Receiver', icon: I.radio, desc: 'The dongle and how WaveKit talks to it.' },
+	{ id: 'audio', label: 'Audio', icon: I.volume, desc: 'How what you listen to sounds.' },
+	{ id: 'decoders', label: 'Decoders', icon: I.decoders, desc: 'What WaveKit decodes. Open one for its settings.' },
+	{ id: 'storage', label: 'Recording & storage', short: 'Storage', icon: I.db, desc: 'What is recorded, and for how long.' },
+	{ id: 'map', label: 'Map', icon: I.map, desc: 'Map tiles, trails and coverage.' },
+	{ id: 'display', label: 'Display', icon: I.display, desc: 'Spectrum, units, time and language.' },
+	{ id: 'system', label: 'System', icon: I.server, desc: 'Access, updates and the machine underneath.' }
+];
+const DECS = [
+	{ id: 'adsb', name: 'ADS-B', tool: 'readsb 3.14', where: '1090 MHz', state: 'run', stat: '312 msg/min', icon: I.aircraft, up: '3 h 12 min', last: 'now' },
+	{ id: 'ais', name: 'AIS', tool: 'AIS-catcher 0.61', where: 'Channels A and B', state: 'run', stat: '46 msg/min', icon: I.marine, up: '3 h 12 min', last: '2 s ago' },
+	{ id: 'acars', name: 'ACARS', tool: 'acarsdec 3.7', where: '3 channels at 131 MHz', state: 'run', stat: '9 msg/min', icon: I.aviation, up: '3 h 12 min', last: '14 s ago' },
+	{ id: 'vdl2', name: 'VDL2', tool: 'dumpvdl2 2.3', where: '4 channels at 136 MHz', state: 'idle', stat: 'Outside the capture', icon: I.aviation, up: 'Paused', last: '41 min ago' },
+	{ id: 'dmr', name: 'DMR and P25', tool: 'dsd-fme', where: 'The tuned channel', state: 'run', stat: '2 calls in the last hour', icon: I.voice, up: '3 h 12 min', last: '6 min ago' },
+	{ id: 'pocsag', name: 'POCSAG', tool: 'multimon-ng 1.3', where: '160.450 MHz', state: 'run', stat: '14 msg/min', icon: I.paging, up: '3 h 12 min', last: '9 s ago' },
+	{ id: 'aprs', name: 'APRS', tool: 'Dire Wolf 1.7', where: '144.800 MHz', state: 'run', stat: '5 msg/min', icon: I.aprs, up: '3 h 12 min', last: '31 s ago' },
+	{ id: 'ism', name: 'ISM sensors', tool: 'rtl_433 24.10', where: '433.92 and 868.3 MHz', state: 'run', stat: '38 msg/min', icon: I.sensors, up: '3 h 12 min', last: '1 s ago' },
+	{ id: 'mesh', name: 'Meshtastic', tool: 'LoRa decoder', where: '869.525 MHz', state: 'fault', stat: 'Stopped · channel key rejected', icon: I.mesh, up: '—', last: '2 h ago' }
+];
+const MHZ = v => (+v).toFixed(3);
+const callsignErr = v => !v || /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i.test(v) ? '' : 'Letters and digits, with an optional SSID: F4ABC-9';
+const keyErr = v => !v || (/^[A-Za-z0-9+/]+={0,2}$/.test(v) && (v.length === 4 || v.length === 24 || v.length === 44)) ? '' : 'Not a valid key. Expected 16 or 32 bytes in base64, as the Meshtastic app shares it.';
+const restarts = name => ({ eff: 'restart', effText: 'Restarts ' + name, effShort: 'restarts ' + name });
+const S = (id, g, label, o) => Object.assign({ id, g, label }, o);
+const ON = [['on', 'On'], ['off', 'Off']];
+const R = [
+	S('station.name', 'station', 'Station name', { kind: 'text', def: 'WaveKit', init: 'Roscoff station', ph: 'WaveKit', sub: 'Shown in the tab title and on your other devices', alias: 'title' }),
+	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never sent anywhere.', alias: 'position latitude longitude coordinates maidenhead locator gps qth' }),
+	S('station.region', 'station', 'Region', { kind: 'sel', opts: [['EU', 'Europe'], ['US', 'United States'], ['CA', 'Canada'], ['AU', 'Australia'], ['NZ', 'New Zealand'], ['JP', 'Japan']], def: 'EU', lock: 'WAVEKIT_REGION', sub: 'Band plans, channel names and legal limits', alias: 'country band plan' }),
+	S('station.callsign', 'station', 'Callsign', Object.assign({ kind: 'text', def: '', ph: 'Optional', sub: 'For APRS and the map', validate: callsignErr, alias: 'call sign ham amateur licence' }, restarts('APRS'))),
+	S('station.saved', 'station', 'Saved frequencies', { kind: 'link', text: '3 saved', act: 'tuner', sub: 'Managed in the Tuner, shared by every device', alias: 'bookmarks memories favourites channels' }),
+	S('station.altitude', 'station', 'Altitude', { kind: 'step', def: 12, min: 0, max: 4000, step: 1, unit: ' m', more: true, sub: 'Antenna height above sea level, for ADS-B range' }),
+	S('station.estimate', 'station', 'Estimate the location when unset', { kind: 'sw', def: true, more: true, sub: 'From the positions you receive, shown as approximate' }),
+
+	S('rx.source', 'receiver', 'Source', { kind: 'sel', opts: [['pi', 'Pi receiver · rtl_tcp'], ['sdrpp', 'SDR++ server'], ['file', 'IQ recording']], def: 'pi', sub: '192.168.1.40:1234 · streaming', eff: 'restart', effText: 'Reconnects the receiver. Decoders pause for a moment.', effShort: 'reconnects the receiver', alias: 'dongle rtl_tcp host device input sdr' }),
+	S('rx.rate', 'receiver', 'Sample rate', { kind: 'seg', key: 'rate', opts: [[1.024, '1.024'], [2.048, '2.048'], [2.4, '2.4'], [3.2, '3.2']], def: 2.4, unit: ' MS/s', sub: 'MS/s. Wider shows more spectrum and uses more CPU.', warn: v => v > 2.4 ? 'Above 2.4 MS/s the Pi link may drop samples' : '', eff: 'restart', effText: 'Restarts every decoder, about 2 s without signal', effShort: 'restarts every decoder', alias: 'span samplerate msps bandwidth' }),
+	S('rx.gain', 'receiver', 'Gain', { kind: 'slider', key: 'gainIdx', min: 0, max: 28, step: 1, def: 20, fmt: i => GAINS[i].toFixed(1) + ' dB', sub: 'Also on the Receiver island', alias: 'rf lna amplification' }),
+	S('rx.ppm', 'receiver', 'Frequency correction', { kind: 'step', key: 'ppm', def: 0, min: -100, max: 100, step: 1, unit: ' ppm', sub: 'Crystal error. Tune a known signal and adjust until it centres.', alias: 'ppm crystal offset calibration xtal' }),
+	S('rx.biasT', 'receiver', 'Bias‑T', { kind: 'sw', key: 'biasT', def: false, sub: 'Powers an LNA through the antenna port', eff: 'hw', effText: 'Sends 4.5 V up the antenna cable. Only with an LNA that needs it.', effShort: 'turns on antenna power', alias: 'bias tee lna power' }),
+	S('rx.direct', 'receiver', 'Direct sampling', { kind: 'seg', key: 'direct', opts: [['off', 'Off'], ['i', 'I'], ['q', 'Q']], def: 'off', more: true, sub: 'For HF below 24 MHz', eff: 'hw', effText: 'Switches the dongle input', effShort: 'switches the dongle input', alias: 'hf shortwave' }),
+	S('rx.offset', 'receiver', 'Offset tuning', { kind: 'sw', key: 'offsetTuning', def: false, more: true, sub: 'Moves the DC spike out of the band (E4000)', eff: 'hw', effText: 'Retunes the dongle', effShort: 'retunes the dongle' }),
+	S('rx.rtlAgc', 'receiver', 'RTL AGC', { kind: 'sw', key: 'rtlAgc', def: false, more: true, sub: 'Digital gain inside the RTL2832' }),
+	S('rx.dc', 'receiver', 'Remove DC spike', { kind: 'sw', key: 'dcBlock', def: true, more: true, sub: 'Hides the spike at the centre frequency' }),
+	S('rx.iq', 'receiver', 'IQ correction', { kind: 'sw', key: 'iqCorr', def: false, more: true, sub: 'Removes mirror images of strong signals' }),
+	S('rx.reconnect', 'receiver', 'After a reconnect', { kind: 'seg', opts: [['restore', 'Restore'], ['reset', 'Pi defaults']], def: 'restore', more: true, sub: 'Restore your frequency and gain, or start from the Pi’s defaults' }),
+	S('rx.stall', 'receiver', 'Report a stalled stream after', { kind: 'sel', opts: [[5, '5 s'], [15, '15 s'], [30, '30 s'], [60, '1 min'], [0, 'Never']], def: 15, more: true }),
+	S('rx.relay', 'receiver', 'Share with SDR++', { kind: 'sw', def: false, more: true, sub: 'An rtl_tcp relay on port 1234', eff: 'restart', effText: 'Starts the relay on port 1234', effShort: 'starts the SDR++ relay', alias: 'relay rtl_tcp sdr++ sdrpp share' }),
+	S('rx.relayCtl', 'receiver', 'Who may retune', { kind: 'seg', opts: [['exclusive', 'One at a time'], ['shared', 'Everyone']], def: 'exclusive', more: true, sub: 'While SDR++ is connected' }),
+	S('rx.pi', 'receiver', 'Pi host', { kind: 'link', text: 'Status', act: 'pi', more: true, sub: 'sdr-host 1.4.2 · starts at 2.048 MS/s, 49.6 dB' }),
+
+	S('au.src', 'audio', 'What you hear', { kind: 'seg', key: 'src', opts: [['auto', 'Auto'], ['analog', 'Analog'], ['digital', 'Decoded voice']], def: 'auto', sub: 'Auto plays decoded voice when there is some' }),
+	S('au.margin', 'audio', 'Auto squelch margin', { kind: 'step', def: 6, init: 8, min: 2, max: 20, step: 1, unit: ' dB', sub: 'How far above the noise floor Auto opens', alias: 'squelch sql threshold' }),
+	S('au.agc', 'audio', 'Level control', { kind: 'seg', key: 'agc', opts: [['off', 'Off'], ['slow', 'Slow'], ['fast', 'Fast']], def: 'slow', sub: 'Evens out loud and quiet stations', alias: 'agc automatic gain loudness' }),
+	S('au.deemph', 'audio', 'De-emphasis', { kind: 'seg', key: 'deemph', opts: [['off', 'Off'], ['50', '50 µs'], ['75', '75 µs']], def: 'off', sub: 'For FM broadcast: 50 µs in Europe, 75 µs in the Americas' }),
+	S('au.tone', 'audio', 'Tone squelch on saved frequencies', { kind: 'sw', def: false, sub: 'Open only on the CTCSS or DCS tone saved with a frequency', alias: 'ctcss dcs pl tone' }),
+	S('au.hp', 'audio', 'Cut low rumble', { kind: 'sw', key: 'hp', def: true, more: true, sub: 'High-pass at 300 Hz' }),
+	S('au.nr', 'audio', 'Noise reduction', { kind: 'sw', key: 'nr', def: false, more: true, sub: 'Softens hiss between words' }),
+	S('au.slot', 'audio', 'DMR timeslot', Object.assign({ kind: 'seg', opts: [['1', '1'], ['2', '2'], ['both', 'Both']], def: 'both', more: true, sub: 'Which slot to play when both carry a call' }, restarts('DMR and P25'))),
+	S('au.buffer', 'audio', 'Digital voice buffer', Object.assign({ kind: 'slider', min: 100, max: 1000, step: 50, def: 400, fmt: v => v + ' ms', more: true, sub: 'Longer is smoother, shorter is closer to live', alias: 'jitter latency delay' }, restarts('digital voice'))),
+	S('au.format', 'audio', 'Stream format', { kind: 'read', text: '48 kHz · 16-bit', more: true, sub: 'Sent to the browser and the app' }),
+
+	S('dec.autorestart', 'decoders', 'Restart a failed decoder', { kind: 'sw', def: true, more: true, sub: 'Up to 5 times, then it stays stopped' }),
+	S('dec.suspend', 'decoders', 'Pause decoders outside the capture', { kind: 'sw', def: true, more: true, sub: 'When you tune away from their band', alias: 'band suspension' }),
+
+	S('dec.adsb.enabled', 'dec:adsb', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.adsb.freq', 'dec:adsb', 'Frequency', { kind: 'read', text: '1090 MHz' }),
+	S('dec.adsb.loc', 'dec:adsb', 'Station location', { kind: 'link', text: 'Roscoff', act: 'station.location', sub: 'Used for distances and for aircraft on the ground' }),
+	S('dec.adsb.mlat', 'dec:adsb', 'Share timing for MLAT', Object.assign({ kind: 'sw', def: false, sub: 'Lets an MLAT network place aircraft that send no position', alias: 'multilateration' }, restarts('ADS-B'))),
+	S('dec.adsb.out', 'dec:adsb', 'Output for other programs', Object.assign({ kind: 'seg', opts: [['sbs', 'SBS'], ['beast', 'Beast'], ['json', 'JSON']], def: 'sbs', sub: 'On port 30003, for Virtual Radar and others' }, restarts('ADS-B'))),
+	S('dec.adsb.port', 'dec:adsb', 'Output port', Object.assign({ kind: 'step', def: 30003, min: 1024, max: 65535, step: 1, unit: '', more: true }, restarts('ADS-B'))),
+	S('dec.adsb.ver', 'dec:adsb', 'Version', { kind: 'read', text: 'readsb 3.14.1603', more: true, lock: 'compose.yaml', lockNote: 'Pinned at deploy in compose.yaml' }),
+
+	S('dec.ais.enabled', 'dec:ais', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.ais.ch', 'dec:ais', 'Channels', { kind: 'read', text: '161.975 · 162.025 MHz' }),
+	S('dec.ais.nmea', 'dec:ais', 'Share NMEA on port 10110', Object.assign({ kind: 'sw', def: true, sub: 'For OpenCPN and other chart plotters', alias: 'nmea opencpn chart plotter' }, restarts('AIS'))),
+	S('dec.ais.fmt', 'dec:ais', 'Output format', Object.assign({ kind: 'seg', opts: [['nmea', 'NMEA'], ['json', 'JSON']], def: 'nmea', more: true }, restarts('AIS'))),
+
+	S('dec.acars.enabled', 'dec:acars', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.acars.freqs', 'dec:acars', 'Frequencies', Object.assign({ kind: 'freqs', def: ['131.525', '131.725', '131.825'], sub: 'MHz, all inside one 2 MHz span' }, restarts('ACARS'))),
+
+	S('dec.vdl2.enabled', 'dec:vdl2', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.vdl2.freqs', 'dec:vdl2', 'Frequencies', Object.assign({ kind: 'freqs', def: ['136.725', '136.775', '136.875', '136.975'], sub: 'MHz, all inside one 2 MHz span' }, restarts('VDL2'))),
+	S('dec.vdl2.follow', 'dec:vdl2', 'Follow the capture', Object.assign({ kind: 'sw', def: true, sub: 'Decode any VDL2 channel the capture covers' }, restarts('VDL2'))),
+
+	S('dec.dmr.enabled', 'dec:dmr', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.dmr.mode', 'dec:dmr', 'Protocol', Object.assign({ kind: 'sel', opts: [['auto', 'Detect'], ['dmr', 'DMR'], ['p25', 'P25'], ['ysf', 'Yaesu Fusion'], ['dstar', 'D-STAR'], ['nxdn', 'NXDN']], def: 'auto', sub: 'Detect tries each protocol on the tuned channel' }, restarts('DMR and P25'))),
+	S('dec.dmr.slot', 'dec:dmr', 'Timeslot', { kind: 'link', text: 'In Audio', act: 'au.slot' }),
+	S('dec.dmr.rec', 'dec:dmr', 'Call recordings', { kind: 'link', text: 'In Recording & storage', act: 'storage' }),
+	S('dec.dmr.min', 'dec:dmr', 'Ignore calls shorter than', Object.assign({ kind: 'step', def: 250, min: 0, max: 2000, step: 50, unit: ' ms', more: true }, restarts('DMR and P25'))),
+	S('dec.dmr.hang', 'dec:dmr', 'End a call after silence of', Object.assign({ kind: 'step', def: 4000, min: 1000, max: 10000, step: 500, unit: ' ms', more: true }, restarts('DMR and P25'))),
+
+	S('dec.pocsag.enabled', 'dec:pocsag', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.pocsag.modes', 'dec:pocsag', 'Speeds', Object.assign({ kind: 'chips', opts: [['512', 'POCSAG 512'], ['1200', 'POCSAG 1200'], ['2400', 'POCSAG 2400'], ['flex', 'FLEX']], def: ['512', '1200', '2400'], alias: 'baud flex' }, restarts('POCSAG'))),
+	S('dec.pocsag.freqs', 'dec:pocsag', 'Frequencies', Object.assign({ kind: 'freqs', def: ['160.450'], sub: 'MHz' }, restarts('POCSAG'))),
+	S('dec.pocsag.charset', 'dec:pocsag', 'Character set', Object.assign({ kind: 'sel', opts: [['US', 'English (ASCII)'], ['FR', 'French'], ['DE', 'German'], ['SE', 'Swedish']], def: 'US', more: true }, restarts('POCSAG'))),
+
+	S('dec.aprs.enabled', 'dec:aprs', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.aprs.freq', 'dec:aprs', 'Frequency', { kind: 'read', text: '144.800 MHz' }),
+	S('dec.aprs.call', 'dec:aprs', 'Callsign', { kind: 'link', text: 'Not set', act: 'station.callsign', sub: 'Uses the station callsign' }),
+	S('dec.aprs.kiss', 'dec:aprs', 'KISS server on port 8001', Object.assign({ kind: 'sw', def: true, sub: 'For APRSIS32, Xastir and other clients' }, restarts('APRS'))),
+	S('dec.aprs.agw', 'dec:aprs', 'AGW server on port 8000', Object.assign({ kind: 'sw', def: false, more: true }, restarts('APRS'))),
+
+	S('dec.ism.enabled', 'dec:ism', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.ism.freqs', 'dec:ism', 'Frequencies', Object.assign({ kind: 'freqs', def: ['433.920', '868.300'], sub: 'MHz' }, restarts('ISM sensors'))),
+	S('dec.ism.protos', 'dec:ism', 'Devices to decode', Object.assign({ kind: 'sel', opts: [['all', 'All 237 kinds'], ['common', 'Common sensors (48)']], def: 'all', alias: 'protocols rtl_433 weather meters' }, restarts('ISM sensors'))),
+	S('dec.ism.unknown', 'dec:ism', 'Report unknown signals', Object.assign({ kind: 'sw', def: false, sub: 'Shows unrecognised transmissions in Activity' }, restarts('ISM sensors'))),
+
+	S('dec.mesh.enabled', 'dec:mesh', 'Enabled', { kind: 'sw', def: true }),
+	S('dec.mesh.preset', 'dec:mesh', 'Preset', Object.assign({ kind: 'sel', opts: [['LongFast', 'Long Fast'], ['MediumFast', 'Medium Fast'], ['ShortFast', 'Short Fast'], ['LongSlow', 'Long Slow']], def: 'LongFast', sub: 'Must match your mesh' }, restarts('Meshtastic'))),
+	S('dec.mesh.key', 'dec:mesh', 'Channel key', Object.assign({ kind: 'secret', def: '', init: 'mVb2qX1Lz9wTkd', sub: 'From the Meshtastic app: Channel › Share', validate: keyErr, alias: 'psk encryption secret' }, restarts('Meshtastic'))),
+	S('dec.mesh.region', 'dec:mesh', 'Region', { kind: 'link', text: 'EU 868', act: 'station.region', sub: 'From the station region' }),
+	S('dec.mesh.radio', 'dec:mesh', 'Radio', { kind: 'read', text: '869.525 MHz · 250 kHz · SF 11', more: true, sub: 'From the preset' }),
+
+	S('st.auto', 'storage', 'Record automatically', { kind: 'seg', opts: [['all', 'All audio'], ['digital', 'Digital calls'], ['off', 'Off']], def: 'all', sub: 'Every transmission, ready to replay in Activity', alias: 'auto record recording' }),
+	S('st.keep', 'storage', 'Keep recordings for', { kind: 'sel', opts: [[1, '1 day'], [3, '3 days'], [7, '7 days'], [14, '14 days'], [30, '30 days']], def: 7, sub: 'What you keep never expires', alias: 'retention expire days delete' }),
+	S('st.cap', 'storage', 'Use at most', { kind: 'sel', opts: [[25, '25 GB'], [50, '50 GB'], [100, '100 GB'], [200, '200 GB'], [0, 'No limit']], def: 50, sub: 'For automatic recordings', alias: 'quota size disk space limit' }),
+	S('st.low', 'storage', 'When space runs low', { kind: 'seg', opts: [['shorten', 'Expire sooner'], ['stop', 'Stop recording']], def: 'shorten' }),
+	S('st.dl', 'storage', 'Download audio as', { kind: 'seg', opts: [['opus', 'Opus'], ['wav', 'WAV']], def: 'opus', sub: 'Opus is about ten times smaller', alias: 'export format' }),
+	S('st.iqmax', 'storage', 'Longest IQ capture', { kind: 'sel', opts: [[30, '30 s'], [60, '1 min'], [120, '2 min'], [300, '5 min']], def: 60, more: true, sub: '1 min at 2.4 MS/s is about 290 MB', alias: 'iq capture length size' }),
+	S('st.iqfmt', 'storage', 'Download IQ as', { kind: 'seg', opts: [['sigmf', 'SigMF'], ['raw', 'Raw .cu8']], def: 'sigmf', more: true, sub: 'SigMF opens in SDR++ and GNU Radio' }),
+	S('st.where', 'storage', 'Stored in', { kind: 'read', text: 'data/recordings', more: true, lock: 'compose.yaml', lockNote: 'Set at deploy in compose.yaml' }),
+
+	S('map.online', 'map', 'Without the offline map', { kind: 'seg', opts: [['online', 'Online tiles'], ['none', 'No map']], def: 'online', sub: 'Online tiles come from OpenFreeMap and reveal the area you look at', alias: 'tiles openfreemap offline' }),
+	S('map.trails', 'map', 'Trail length', { kind: 'sel', opts: [[5, '5 min'], [15, '15 min'], [60, '1 hour']], def: 15, init: 60, alias: 'history track' }),
+	S('map.coverage', 'map', 'Record coverage', { kind: 'sw', def: true, sub: 'Furthest reception per bearing, for ADS-B and AIS', alias: 'range polar' }),
+	S('map.labels', 'map', 'Labels', { kind: 'seg', opts: [['few', 'Few'], ['normal', 'Normal'], ['many', 'Many']], def: 'normal', more: true }),
+	S('map.area', 'map', 'Offline map area', { kind: 'sel', opts: [[200, '200 km · 110 MB'], [400, '400 km · 412 MB'], [800, '800 km · 1.5 GB']], def: 400, more: true, sub: 'Around the station' }),
+
+	S('dp.palette', 'display', 'Waterfall colours', { kind: 'seg', key: 'palette', opts: [['phosphor', 'Phosphor'], ['amber', 'Amber'], ['mono', 'Mono']], def: 'phosphor', alias: 'palette colors theme' }),
+	S('dp.range', 'display', 'Spectrum range', { kind: 'seg', opts: [['auto', 'Auto'], ['fixed', 'Fixed']], def: 'auto', sub: 'Auto follows the noise floor', alias: 'db scale min max' }),
+	S('dp.units', 'display', 'Units', { kind: 'seg', opts: [['metric', 'Metric'], ['nautical', 'Nautical'], ['imperial', 'Imperial']], def: 'nautical', sub: 'Nautical: knots, nautical miles, feet for altitude', alias: 'km miles knots feet' }),
+	S('dp.time', 'display', 'Time', { kind: 'seg', opts: [['24', '24 h'], ['12', '12 h'], ['utc', 'UTC']], def: '24', alias: 'clock timezone zulu' }),
+	S('dp.lang', 'display', 'Language', { kind: 'sel', opts: [['en', 'English'], ['fr', 'Français']], def: 'en' }),
+	S('dp.fft', 'display', 'FFT size', { kind: 'sel', opts: [[2048, '2048'], [4096, '4096'], [8192, '8192'], [16384, '16384']], def: 8192, more: true, sub: 'Larger shows finer detail and reacts more slowly', alias: 'resolution bins' }),
+	S('dp.avg', 'display', 'Averaging', { kind: 'seg', opts: [['off', 'Off'], ['low', 'Low'], ['high', 'High']], def: 'low', more: true, sub: 'Smooths the spectrum line' }),
+	S('dp.tags', 'display', 'Saved-frequency tags', { kind: 'sw', def: true, more: true, sub: 'On the spectrum' }),
+	S('dp.keys', 'display', 'Keyboard shortcuts', { kind: 'link', text: 'Show all', act: 'shortcuts', more: true, alias: 'keymap hotkeys keys' }),
+	S('dev.density', 'display', 'Density', { kind: 'seg', opts: [['comfy', 'Comfortable'], ['compact', 'Compact']], def: 'comfy', dev: true }),
+	S('dev.card', 'display', 'Tuned card position', { kind: 'sel', opts: [['br', 'Bottom right'], ['tr', 'Top right'], ['bl', 'Bottom left']], def: 'br', dev: true }),
+	S('dev.motion', 'display', 'Motion', { kind: 'seg', opts: [['system', 'Follow system'], ['reduce', 'Reduce']], def: 'system', dev: true, alias: 'animation' }),
+
+	S('sys.devices', 'system', 'Signed-in devices', { kind: 'link', text: '3 devices', act: 'devices', sub: 'This Mac, an iPhone and an iPad', alias: 'access sign out login account' }),
+	S('sys.update', 'system', 'WaveKit 0.14.2', { kind: 'btns', btns: [['Check now', 'update']], sub: 'Up to date · checked today at 09:12', alias: 'update version upgrade' }),
+	S('sys.log', 'system', 'Log detail', { kind: 'seg', opts: [['info', 'Normal'], ['debug', 'Debug']], def: 'info', sub: 'Debug helps when reporting a problem', alias: 'logging level' }),
+	S('sys.config', 'system', 'Configuration', { kind: 'btns', btns: [['Export', 'export'], ['Import…', 'import']], sub: 'Every setting on this page as one YAML file', alias: 'backup restore yaml' }),
+	S('sys.health', 'system', 'Check decoders every', { kind: 'sel', opts: [[2, '2 s'], [5, '5 s'], [10, '10 s']], def: 5, more: true }),
+	S('sys.fault', 'system', 'Mark a decoder faulty after', { kind: 'step', def: 5, min: 1, max: 20, step: 1, unit: ' failures', more: true }),
+	S('sys.flat', 'system', 'Treat the signal as flat below', { kind: 'step', def: -40, min: -80, max: -10, step: 5, unit: ' dBFS', more: true, sub: 'Pauses decoders while the antenna hears nothing' }),
+	S('sys.ports', 'system', 'Ports', { kind: 'read', text: 'API 3000 · audio 8080', more: true, lock: 'compose.yaml', lockNote: 'Set at deploy in compose.yaml' }),
+	S('sys.data', 'system', 'Data folder', { kind: 'read', text: 'data/', more: true, lock: 'WAVEKIT_STATE_DIR' })
+];
+const BY = {};
+R.forEach(d => { BY[d.id] = d; });
+const GID = {};
+GROUPS.forEach(g => { GID[g.id] = g; });
+const FILTERS = [
+	{ id: 'changed', label: 'changed settings', words: ['changed', 'modified', 'custom'], test: (d, x) => x.changed },
+	{ id: 'restart', label: 'settings that restart something', words: ['restart', 'restarts', 'reconnect'], test: d => d.eff === 'restart' },
+	{ id: 'hw', label: 'settings that touch the hardware', words: ['hardware', 'dongle'], test: d => d.eff === 'hw' },
+	{ id: 'locked', label: 'locked settings', words: ['locked', 'environment', 'deploy'], test: d => !!d.lock }
+];
+const TOKEN = { changed: 'Changed', restart: 'Restarts something', hw: 'Touches hardware', locked: 'Locked' };
+const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const sw = on => ({ on, track: on ? '#7becc7' : '#2c443b', knob: on ? 18 : 2 });
+const segc = on => ({ on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598' });
+const decState = (d, on) => !on ? { label: 'Off', c: '#52645d', bg: 'rgba(139,165,152,.12)', fg: '#8ba598' } : d.state === 'fault' ? { label: 'Stopped', c: '#ff7a6b', bg: 'rgba(255,122,107,.14)', fg: '#ff9d92' } : d.state === 'idle' ? { label: 'Idle', c: '#8ba598', bg: 'rgba(139,165,152,.14)', fg: '#b9cac1' } : { label: 'Running', c: '#7becc7', bg: 'rgba(123,236,199,.14)', fg: '#7becc7' };
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		const vals = {};
+		R.forEach(d => { if (d.def !== undefined) vals[d.id] = d.init !== undefined ? d.init : d.def; });
+		const sc = props.scenario || 'normal';
+		const pending = sc === 'pending' ? { 'rx.rate': 3.2, 'rx.biasT': true } : {};
+		this.uid = 'wks' + Math.random().toString(36).slice(2, 7);
+		this.state = { vals, pending, draft: {}, failed: {}, offline: sc === 'offline', q: '', tokens: [], focus: false, dec: null, phoneGroup: null, more: {}, active: 'station', menu: null, pulse: null, toast: null, shown: {} };
+		this.scrollId = this.uid + '-scroll';
+		this.searchId = this.uid + '-q';
+	}
+	componentDidMount() {
+		const at = this.props.target && this.props.target.id ? this.props.target.id : this.props.openAt;
+		if (at && at !== 'none') this.navTo(at);
+	}
+	componentDidUpdate(prev) {
+		const t = this.props.target, pt = prev.target;
+		if (t && t.id && (!pt || pt.n !== t.n)) this.navTo(t.id);
+		if (prev.openAt !== this.props.openAt && this.props.openAt && this.props.openAt !== 'none') this.navTo(this.props.openAt);
+		if (prev.scenario !== this.props.scenario) {
+			const sc = this.props.scenario || 'normal';
+			this.setState({ pending: sc === 'pending' ? { 'rx.rate': 3.2, 'rx.biasT': true } : {}, offline: sc === 'offline', failed: {} });
+		}
+	}
+	componentWillUnmount() { clearTimeout(this.tt); clearTimeout(this.pt); }
+	phone() { return this.props.layout === 'phone'; }
+	linked(d) { const v = this.props.values; return d.key && v && v[d.key] !== undefined; }
+	committed(id) { const d = BY[id]; return this.linked(d) ? this.props.values[d.key] : this.state.vals[id]; }
+	val(id) {
+		const s = this.state;
+		if (id in s.draft) return s.draft[id];
+		if (id in s.pending) return s.pending[id];
+		return this.committed(id);
+	}
+	toast(text) {
+		clearTimeout(this.tt);
+		this.setState({ toast: text });
+		this.tt = setTimeout(() => this.setState({ toast: null }), 3200);
+	}
+	commitLive(d, v, st) {
+		st.vals = Object.assign({}, st.vals || this.state.vals, { [d.id]: v });
+		if (this.state.offline) st.failed = Object.assign({}, st.failed || this.state.failed, { [d.id]: true });
+		else if (d.key && this.props.onSet) this.props.onSet(d.key, v);
+	}
+	setVal(id, v) {
+		const d = BY[id], s = this.state;
+		const draft = Object.assign({}, s.draft);
+		if (d.validate && d.validate(v)) { draft[id] = v; return this.setState({ draft }); }
+		delete draft[id];
+		const st = { draft };
+		if (d.eff) {
+			const pending = Object.assign({}, s.pending);
+			if (eq(v, this.committed(id))) delete pending[id]; else pending[id] = v;
+			st.pending = pending;
+		} else this.commitLive(d, v, st);
+		this.setState(st);
+	}
+	reset(id) {
+		const d = BY[id], st = { menu: null };
+		const pending = Object.assign({}, this.state.pending); delete pending[id];
+		const draft = Object.assign({}, this.state.draft); delete draft[id];
+		st.pending = pending; st.draft = draft;
+		if (d.eff) { if (!eq(d.def, this.committed(id))) st.pending = Object.assign(pending, { [id]: d.def }); }
+		else this.commitLive(d, d.def, st);
+		this.setState(st);
+	}
+	apply() {
+		const s = this.state, st = { pending: {} }, n = Object.keys(s.pending).length;
+		const fx = this.pendingFx();
+		Object.keys(s.pending).forEach(id => this.commitLive(BY[id], s.pending[id], st));
+		this.setState(st);
+		this.toast(s.offline ? 'Not applied · your WaveKit is unreachable' : 'Applied ' + n + (n === 1 ? ' change' : ' changes') + (fx ? ' · ' + fx : ''));
+	}
+	pendingFx() {
+		const seen = [];
+		Object.keys(this.state.pending).forEach(id => { const t = BY[id].effShort; if (t && seen.indexOf(t) < 0) seen.push(t); });
+		const t = seen.join(', ');
+		return t ? t.charAt(0).toUpperCase() + t.slice(1) : '';
+	}
+	scrollTo(domId, pulse) {
+		const c = document.getElementById(this.scrollId), el = document.getElementById(domId);
+		if (!c || !el) return;
+		c.scrollTo({ top: Math.max(0, c.scrollTop + el.getBoundingClientRect().top - c.getBoundingClientRect().top - (pulse ? 60 : 4)), behavior: 'smooth' });
+		if (pulse) {
+			clearTimeout(this.pt);
+			this.setState({ pulse: pulse });
+			this.pt = setTimeout(() => this.setState({ pulse: null }), 1800);
+		}
+	}
+	rowDom(id) { return this.uid + '-' + id.replace(/[.:]/g, '-'); }
+	goGroup(id) {
+		const phone = this.phone();
+		this.setState({ q: '', tokens: [], dec: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
+			if (phone) { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }
+			else this.scrollTo(this.rowDom('g:' + id));
+		}, 30));
+	}
+	openDec(id) {
+		this.setState({ dec: id, q: '', tokens: [], phoneGroup: this.phone() ? 'decoders' : this.state.phoneGroup, menu: null, active: 'decoders' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+	}
+	navTo(id) {
+		if (GID[id]) return this.goGroup(id);
+		if (id.indexOf('dec:') === 0) return this.openDec(id.slice(4));
+		const d = BY[id];
+		if (!d) return;
+		const more = Object.assign({}, this.state.more);
+		if (d.more) more[d.g] = true;
+		const isDec = d.g.indexOf('dec:') === 0;
+		const phone = this.phone();
+		this.setState({ q: '', tokens: [], more, menu: null, dec: isDec ? d.g.slice(4) : null, phoneGroup: phone ? (isDec ? 'decoders' : d.g) : null, active: isDec ? 'decoders' : d.g }, () => setTimeout(() => this.scrollTo(this.rowDom(id), id), 60));
+	}
+	act(a) {
+		if (BY[a] || GID[a] || a.indexOf('dec:') === 0) return this.navTo(a);
+		if (this.props.onAction && this.props.onAction(a) === true) return;
+		const T = { map: 'Opens the Map to place the station', tuner: 'Opens the Tuner on saved frequencies', shortcuts: 'Opens ⌘K on Keyboard shortcuts', pi: 'Opens the Pi status page', devices: 'Devices: designed with accounts, later', update: 'WaveKit is up to date', export: 'Downloaded wavekit-settings.yaml', import: 'Choose a YAML file to restore' };
+		this.toast(T[a] || a);
+	}
+	label(d, v) {
+		if (d.opts) { const o = d.opts.find(x => eq(x[0], v)); if (o) return o[1]; }
+		if (d.fmt) return d.fmt(v);
+		if (d.kind === 'sw') return v ? 'On' : 'Off';
+		if (d.kind === 'step') return (v > 0 && d.min < 0 ? '+' : '') + v + (d.unit || '');
+		if (d.kind === 'freqs') return v.join(', ');
+		if (d.kind === 'chips') return v.length + ' selected';
+		if (d.kind === 'text' || d.kind === 'secret') return v ? (d.kind === 'secret' ? 'set' : '“' + v + '”') : 'empty';
+		return d.text || String(v);
+	}
+	info(d) {
+		const s = this.state, id = d.id;
+		const hasVal = d.def !== undefined;
+		const committed = hasVal ? this.committed(id) : undefined;
+		const changed = hasVal && !d.dev && !d.lock && !eq(committed, d.def);
+		return { changed, pending: id in s.pending, failed: !!s.failed[id] };
+	}
+	row(d, crumb) {
+		const s = this.state, id = d.id, x = this.info(d);
+		const v = d.def !== undefined ? this.val(id) : undefined;
+		const err = d.validate ? d.validate(v) : '';
+		const warn = d.warn ? d.warn(v) : '';
+		const locked = !!d.lock;
+		let note = '', noteC = '#8ba598', noteBtn = '', noteAct = null, noteRole = 'note';
+		if (err) { note = err; noteC = '#ff9d92'; noteRole = 'alert'; }
+		else if (x.failed) { note = 'Not saved yet'; noteC = '#f2b84b'; noteBtn = 'Retry'; noteAct = () => this.retry(); }
+		else if (x.pending) { note = 'Waiting for Apply · ' + d.effText; noteC = '#f2b84b'; noteBtn = 'Undo'; noteAct = () => { const p = Object.assign({}, s.pending); delete p[id]; this.setState({ pending: p }); }; }
+		else if (warn) { note = warn; noteC = '#f2b84b'; }
+		else if (locked) note = d.lockNote || 'Set by ' + d.lock + ' · change it in the environment';
+		const barC = err ? '#ff7a6b' : (x.pending || x.failed) ? '#f2b84b' : x.changed ? '#7becc7' : '';
+		const kind = locked ? 'read' : d.kind;
+		const pulse = s.pulse === id;
+		const opts = (d.opts || []).map(o => Object.assign({ v: String(o[0]), label: o[1], pick: () => this.setVal(id, o[0]) }, segc(eq(o[0], v))));
+		const r = {
+			isRow: true, domId: this.rowDom(id), labelId: this.rowDom(id) + '-l', label: d.label,
+			hasCrumb: !!crumb, crumb: crumb || '',
+			hasSub: !!d.sub, sub: d.sub || '',
+			hasNote: !!note, note, noteC, noteRole, hasNoteBtn: !!noteBtn, noteBtn, noteAct,
+			hasBar: !!barC, barC,
+			bg: pulse ? 'rgba(123,236,199,.10)' : 'transparent',
+			ring: pulse ? 'inset 0 0 0 1px rgba(123,236,199,.55)' : 'inset 0 0 0 1px transparent',
+			hasEff: !!d.eff, effText: d.effText || '', effIcon: d.eff === 'hw' ? I.plug : I.restart, effC: x.pending ? '#f2b84b' : '#8ba598',
+			locked,
+			canReset: x.changed && !x.pending && !locked, defText: d.def !== undefined ? this.label(d, d.def) : '', reset: () => this.reset(id),
+			isSw: kind === 'sw', isSeg: kind === 'seg', isSel: kind === 'sel', isStep: kind === 'step', isSlider: kind === 'slider', isText: kind === 'text', isSecret: kind === 'secret', isLink: kind === 'link', isRead: kind === 'read', isBtns: kind === 'btns', isChips: kind === 'chips', isFreqs: kind === 'freqs',
+			opts, selVal: String(v),
+			onSel: e => { const o = (d.opts || []).find(o => String(o[0]) === e.target.value); if (o) this.setVal(id, o[0]); },
+			toggle: () => this.setVal(id, !v),
+			val: v === undefined ? '' : v, valText: v !== undefined ? this.label(d, v) : '',
+			min: d.min, max: d.max, step: d.step,
+			dec: () => this.setVal(id, Math.max(d.min, v - d.step)), inc: () => this.setVal(id, Math.min(d.max, v + d.step)),
+			onSlide: e => this.setVal(id, Number(e.target.value)),
+			onText: e => this.setVal(id, e.target.value), ph: d.ph || '',
+			invalid: !!err, badClass: err ? 'wk-bad' : '',
+			shown: !!s.shown[id], inType: s.shown[id] ? 'text' : 'password', revealLabel: s.shown[id] ? 'Hide' : 'Reveal',
+			reveal: () => this.setState({ shown: Object.assign({}, s.shown, { [id]: !s.shown[id] }) }),
+			linkText: d.text || '', act: () => this.act(d.act),
+			readText: locked && d.def !== undefined ? this.label(d, v) : d.text || '',
+			btns: (d.btns || []).map(b => ({ label: b[0], act: () => this.act(b[1]) })),
+			menuOpen: s.menu === id, toggleMenu: () => this.setState({ menu: s.menu === id ? null : id })
+		};
+		if (kind === 'chips') r.chips = d.opts.map(o => { const on = v.indexOf(o[0]) >= 0; return { label: o[1], on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setVal(id, on ? v.filter(y => y !== o[0]) : d.opts.map(z => z[0]).filter(z => z === o[0] || v.indexOf(z) >= 0)) }; });
+		if (kind === 'freqs') {
+			r.chips = v.map(f => ({ label: f, remove: () => this.setVal(id, v.filter(y => y !== f)) }));
+			r.addKey = e => {
+				if (e.key !== 'Enter') return;
+				const n = parseFloat(String(e.target.value).replace(',', '.'));
+				if (!(n >= 24 && n <= 1766)) return this.toast('Type a frequency in MHz, 24 to 1766');
+				const f = MHZ(n);
+				e.target.value = '';
+				if (v.indexOf(f) < 0) this.setVal(id, v.concat([f]).sort((a, b) => a - b));
+			};
+		}
+		const yaml = id.replace(/^dec\.([a-z0-9]+)\./, 'decoders.$1.') + ': ' + (v === undefined ? '' : JSON.stringify(v));
+		r.menu = [
+			{ label: r.canReset ? 'Reset to ' + r.defText : 'Already the default', icon: I.reset, disabled: !r.canReset, fg: r.canReset ? '#f4f7f5' : '#52645d', act: () => r.canReset ? this.reset(id) : this.setState({ menu: null }) },
+			{ label: 'Copy link', icon: I.link, disabled: false, fg: '#f4f7f5', act: () => { this.copy('https://wavekit.local/settings/' + id); this.setState({ menu: null }); this.toast('Link copied · /settings/' + id); } },
+			{ label: 'Copy as YAML', icon: I.code, disabled: false, fg: '#f4f7f5', act: () => { this.copy(yaml); this.setState({ menu: null }); this.toast('Copied · ' + yaml); } }
+		];
+		return r;
+	}
+	copy(t) { try { if (navigator.clipboard) navigator.clipboard.writeText(t).catch(() => {}); } catch (e) { /* clipboard unavailable */ } }
+	retry() { this.setState({ offline: false, failed: {} }); this.toast('Saved · your WaveKit is back'); }
+	decOn(d) { return this.val('dec.' + d.id + '.enabled') !== false; }
+	decItem(d) {
+		const on = this.decOn(d), st = decState(d, on), open = () => this.openDec(d.id);
+		const tile = on && d.state !== 'fault' ? { tileBg: 'rgba(123,236,199,.10)', tileFg: '#7becc7' } : { tileBg: '#192b24', tileFg: '#8ba598' };
+		return Object.assign({ isDec: true, name: d.name, tool: d.tool, icon: d.icon, dotC: st.c, line: !on ? 'Off' : d.where + ' · ' + d.stat, statC: on && d.state === 'fault' ? '#ff9d92' : '#8ba598', open, toggle: () => this.setVal('dec.' + d.id + '.enabled', !on) }, sw(on), tile);
+	}
+	groupRows(gid) {
+		const rows = R.filter(d => d.g === gid);
+		return { ess: rows.filter(d => !d.more && !d.dev), more: rows.filter(d => d.more), dev: rows.filter(d => d.dev) };
+	}
+	groupItems(gid, withHead, first) {
+		const s = this.state, g = GID[gid], out = [], parts = this.groupRows(gid);
+		if (withHead) out.push({ isH: true, domId: this.rowDom('g:' + gid), label: g.label, desc: g.desc, pad: first ? '4px' : '26px' });
+		else out.push({ isDesc: true, desc: g.desc });
+		if (gid === 'storage') out.push(this.meter());
+		if (gid === 'map') out.push({ isTiles: true, update: () => this.toast('Updating the offline map · 412 MB'), remove: () => this.toast('The offline map would be removed (412 MB)') });
+		if (gid === 'decoders') DECS.forEach(d => out.push(this.decItem(d)));
+		parts.ess.forEach(d => out.push(this.row(d)));
+		if (parts.dev.length) {
+			out.push({ isSub: true, label: 'On this device', desc: 'Not synced. Each screen keeps its own.' });
+			parts.dev.forEach(d => out.push(this.row(d)));
+		}
+		if (parts.more.length) {
+			const open = !!s.more[gid];
+			out.push({ isFold: true, open, chev: open ? 90 : 0, label: open ? 'Fewer' : 'More · ' + parts.more.length, toggle: () => this.setState({ more: Object.assign({}, s.more, { [gid]: !open }) }) });
+			if (open) parts.more.forEach(d => out.push(this.row(d)));
+		}
+		return out;
+	}
+	meter() {
+		const low = this.props.storage === 'low';
+		const segs = low
+			? [{ w: 2, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 47, c: 'rgba(123,236,199,.45)', label: 'Automatic 27 GB' }, { w: 44, c: '#3d6356', label: 'Other files 26 GB' }, { w: 7, c: 'transparent', label: 'Free 4.1 GB' }]
+			: [{ w: 1, c: '#7becc7', label: 'Kept 1.1 GB' }, { w: 8, c: 'rgba(123,236,199,.45)', label: 'Automatic 18.4 GB' }, { w: 0.5, c: '#3d6356', label: 'Other 0.3 GB' }, { w: 90.5, c: 'transparent', label: 'Free 212 GB' }];
+		return { isMeter: true, head: 'USB drive on the Pi', free: low ? '4.1 GB free of 58 GB' : '212 GB free of 232 GB', freeC: low ? '#f2b84b' : '#8ba598', edge: low ? 'rgba(242,184,75,.32)' : 'rgba(123,236,199,.08)', segs, low, lowText: 'Space is low, so calls now expire after 2 days instead of 7.', aria: segs.map(x => x.label).join(', ') };
+	}
+	decPage(id) {
+		const d = DECS.find(x => x.id === id), s = this.state, out = [];
+		const on = this.decOn(d), st = decState(d, on);
+		const tile = on && d.state !== 'fault' ? { tileBg: 'rgba(123,236,199,.10)', tileFg: '#7becc7' } : { tileBg: '#192b24', tileFg: '#8ba598' };
+		out.push(Object.assign({ isDecHead: true, icon: d.icon, tool: d.tool, where: d.where, stateLabel: st.label, pillBg: st.bg, pillFg: st.fg }, tile));
+		const parts = this.groupRows('dec:' + id);
+		parts.ess.forEach(x => out.push(this.row(x)));
+		if (parts.more.length) {
+			const k = 'dec:' + id, open = !!s.more[k];
+			out.push({ isFold: true, open, chev: open ? 90 : 0, label: open ? 'Fewer' : 'More · ' + parts.more.length, toggle: () => this.setState({ more: Object.assign({}, s.more, { [k]: !open }) }) });
+			if (open) parts.more.forEach(x => out.push(this.row(x)));
+		}
+		const fault = on && d.state === 'fault';
+		out.push({ isStatus: true, fault, faultText: 'Stopped after 5 failed starts. The decoder rejected the channel key; fix it above and restart.', stats: [{ k: 'Running for', v: on ? d.up : '—' }, { k: 'Messages', v: on && d.state === 'run' ? d.stat : '—' }, { k: 'Last message', v: d.last }], restart: () => this.toast('Restarting ' + d.name + '…'), logs: () => this.toast('Opens the ' + d.name + ' log') });
+		return out;
+	}
+	searchItems() {
+		const s = this.state, q = s.q.trim().toLowerCase(), words = q.split(/\s+/).filter(Boolean), out = [];
+		const tests = s.tokens.map(t => FILTERS.find(f => f.id === t));
+		if (q.length >= 2) FILTERS.forEach(f => {
+			if (s.tokens.indexOf(f.id) >= 0 || !f.words.some(w => w.indexOf(q) === 0)) return;
+			const n = R.filter(d => f.test(d, this.info(d))).length;
+			out.push({ isFs: true, label: f.label, count: String(n), pick: () => this.setState({ tokens: s.tokens.concat([f.id]), q: '' }) });
+		});
+		const decHits = !tests.length && words.length ? DECS.filter(d => words.every(w => (d.name + ' ' + d.tool + ' ' + d.where).toLowerCase().indexOf(w) >= 0)) : [];
+		const hits = R.filter(d => {
+			const x = this.info(d);
+			if (!tests.every(f => f.test(d, x))) return false;
+			if (!words.length) return true;
+			const isDec = d.g.indexOf('dec:') === 0, dec = isDec ? DECS.find(z => 'dec:' + z.id === d.g) : null;
+			const v = d.def !== undefined ? this.label(d, this.val(d.id)) : (d.text || '');
+			const hay = [d.label, d.sub, d.alias, isDec ? 'decoders ' + dec.name + ' ' + dec.tool : GID[d.g].label, v, (d.opts || []).map(o => o[1]).join(' ')].join(' ').toLowerCase();
+			return words.every(w => hay.indexOf(w) >= 0);
+		});
+		const n = hits.length + decHits.length;
+		if (!n && !out.length) { out.push({ isEmpty: true, q: s.q.trim() || 'these filters', clear: () => this.setState({ q: '', tokens: [] }) }); return out; }
+		out.push({ isCount: true, text: n === 1 ? '1 setting' : n + ' settings' });
+		decHits.forEach(d => out.push(this.decItem(d)));
+		hits.forEach(d => {
+			const isDec = d.g.indexOf('dec:') === 0, dec = isDec ? DECS.find(z => 'dec:' + z.id === d.g) : null;
+			out.push(this.row(d, isDec ? 'Decoders › ' + dec.name : GID[d.g].label + (d.more ? ' › More' : d.dev ? ' › On this device' : '')));
+		});
+		return out;
+	}
+	summary(gid) {
+		const v = id => this.label(BY[id], this.val(id));
+		const run = DECS.filter(d => this.decOn(d) && d.state === 'run').length, stop = DECS.filter(d => this.decOn(d) && d.state === 'fault').length;
+		return {
+			station: this.val('station.name') + ' · Roscoff',
+			receiver: 'Pi receiver · ' + v('rx.rate') + ' MS/s · ' + v('rx.gain'),
+			audio: v('au.src') + ' · squelch +' + this.val('au.margin') + ' dB',
+			decoders: run + ' running' + (stop ? ' · ' + stop + ' stopped' : ''),
+			storage: v('st.keep') + ' · ' + (this.props.storage === 'low' ? '4.1 GB free' : '212 GB free'),
+			map: 'Offline · 412 MB · trails ' + v('map.trails'),
+			display: v('dp.palette') + ' · ' + v('dp.units') + ' · ' + v('dp.time'),
+			system: 'WaveKit 0.14.2 · up to date'
+		}[gid];
+	}
+	groupFlags(gid) {
+		const ids = R.filter(d => d.g === gid || (gid === 'decoders' && d.g.indexOf('dec:') === 0));
+		const s = this.state;
+		if (gid === 'decoders' && DECS.some(d => this.decOn(d) && d.state === 'fault')) return { hasDot: true, dotC: '#ff7a6b', dotLabel: 'A decoder has stopped' };
+		if (ids.some(d => d.id in s.pending || s.failed[d.id])) return { hasDot: true, dotC: '#f2b84b', dotLabel: 'Changes waiting' };
+		return { hasDot: false, dotC: 'transparent', dotLabel: '' };
+	}
+	renderVals() {
+		const s = this.state, phone = this.phone();
+		const searching = !!(s.q.trim() || s.tokens.length);
+		const dec = s.dec;
+		let items;
+		if (dec) items = this.decPage(dec);
+		else if (searching) items = this.searchItems();
+		else if (phone && !s.phoneGroup) items = GROUPS.map(g => Object.assign({ isGlink: true, label: g.label, icon: g.icon, summary: this.summary(g.id), pick: () => this.goGroup(g.id) }, this.groupFlags(g.id)));
+		else if (phone) items = this.groupItems(s.phoneGroup, false);
+		else { items = []; GROUPS.forEach((g, i) => { items = items.concat(this.groupItems(g.id, true, i === 0)); }); }
+		const changedN = R.filter(d => this.info(d).changed).length;
+		const pendN = Object.keys(s.pending).length;
+		const changedOn = s.tokens.indexOf('changed') >= 0;
+		const decObj = dec ? DECS.find(x => x.id === dec) : null;
+		const title = decObj ? decObj.name : phone && s.phoneGroup ? GID[s.phoneGroup].label : 'Settings';
+		const hasBack = !!dec || (phone && !!s.phoneGroup);
+		const backLabel = dec ? 'Decoders' : 'Settings';
+		return {
+			radius: phone ? '0' : '12px',
+			headPad: hasBack ? '8px' : '18px',
+			title, hasBack, backLabel,
+			back: () => {
+				if (dec) { if (phone) this.setState({ dec: null }); else this.goGroup('decoders'); }
+				else this.setState({ phoneGroup: null });
+			},
+			hasClose: !!this.props.onClose, close: () => this.props.onClose && this.props.onClose(),
+			showChangedChip: changedN > 0 && !dec, changedText: changedN + ' changed', changedOn,
+			chipFg: changedOn ? '#7becc7' : '#b9cac1', chipBg: changedOn ? 'rgba(123,236,199,.12)' : 'transparent', chipBorder: changedOn ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
+			toggleChanged: () => this.setState({ tokens: changedOn ? s.tokens.filter(t => t !== 'changed') : s.tokens.concat(['changed']), dec: null, phoneGroup: null }),
+			offline: s.offline, retry: () => this.retry(),
+			showSearch: !dec && !(phone && s.phoneGroup),
+			searchId: this.searchId, q: s.q,
+			searchBorder: s.focus ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
+			tokens: s.tokens.map(t => ({ label: TOKEN[t], remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
+			onQ: e => this.setState({ q: e.target.value }),
+			onFocus: () => this.setState({ focus: true }), onBlur: () => this.setState({ focus: false }),
+			onSearchKey: e => {
+				if (e.key === 'Escape') { if (s.q || s.tokens.length) { e.stopPropagation(); this.setState({ q: '', tokens: [] }); } }
+				else if (e.key === 'Backspace' && !s.q && s.tokens.length) this.setState({ tokens: s.tokens.slice(0, -1) });
+				else if (e.key === 'Enter') { const fs = items.find(x => x.isFs); if (fs) fs.pick(); }
+			},
+			showRail: !phone,
+			rail: GROUPS.map(g => {
+				const cur = !searching && s.active === g.id;
+				return Object.assign({ short: g.short || g.label, icon: g.icon, current: cur ? 'true' : 'false', weight: cur ? 700 : 400, fg: cur ? '#7becc7' : '#b9cac1', bg: cur ? '#192b24' : 'transparent', pick: () => this.goGroup(g.id) }, this.groupFlags(g.id));
+			}),
+			scrollId: this.scrollId, padX: phone ? '8px' : '8px',
+			onScroll: () => {
+				if (s.dec || searching || phone) return;
+				const c = document.getElementById(this.scrollId);
+				if (!c) return;
+				const top = c.getBoundingClientRect().top;
+				let active = GROUPS[0].id;
+				GROUPS.forEach(g => { const el = document.getElementById(this.rowDom('g:' + g.id)); if (el && el.getBoundingClientRect().top - top <= 80) active = g.id; });
+				if (c.scrollTop + c.clientHeight >= c.scrollHeight - 4) active = GROUPS[GROUPS.length - 1].id;
+				if (active !== s.active) this.setState({ active });
+			},
+			items,
+			hasPending: pendN > 0,
+			pendingTitle: pendN === 1 ? '1 change waiting' : pendN + ' changes waiting',
+			pendingSub: this.pendingFx(),
+			discard: () => { this.setState({ pending: {} }); this.toast('Discarded'); },
+			apply: () => this.apply(),
+			hasMenu: !!s.menu, closeMenu: () => this.setState({ menu: null }),
+			hasToast: !!s.toast, toastText: s.toast || '', toastBottom: pendN ? '84px' : '16px'
+		};
+	}
+}
+</script>
+</body>
+</html>

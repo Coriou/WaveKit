@@ -14,6 +14,7 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
+.wk-setlink:hover{background:rgba(123,236,199,.08)}
 button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
@@ -129,11 +130,12 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 				<div style="flex: 1"></div>
 				<span style="margin-top: 12px; font-size: 12.5px; color: #8ba598; font-variant-numeric: tabular-nums">Latency ≈ 180 ms</span>
 			</div>
+			<button class="wk-setlink" onClick="{{openSettings}}" style="font: inherit; cursor: pointer; align-self: flex-start; display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 6px 0 8px; margin: -6px 0 -6px -8px; border: 0; border-radius: 6px; background: transparent; color: #7becc7; font-size: 13px; font-weight: 700">All audio settings<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
 		</div>
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"$preview":{"width":440,"height":760}}'>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"direction":{"editor":"enum","options":["down","up"],"default":"down"},"$preview":{"width":440,"height":760}}'>
 const FLOOR = -108;
 const pc = db => Math.max(0, Math.min(100, (db + 120) / 100 * 100));
 const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
@@ -169,6 +171,7 @@ class Component extends DCLogic {
 		const rec = this.get('rec');
 		const flag = (k, label, sub) => ({ label, sub, ...sw(this.get(k)), pick: () => this.set(k, !this.get(k)) });
 		return {
+			openSettings: () => { if (this.props.onSettings) this.props.onSettings(); },
 			dir: this.props.direction === 'up' ? 'column-reverse' : 'column',
 			width: expanded ? '420px' : '340px',
 			expanded,
