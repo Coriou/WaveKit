@@ -71,6 +71,51 @@ describe("fixture manifest v2", () => {
 			),
 		).toThrow(/key_fields/)
 	})
+	it("accepts expected.marginal_keys on a channelizer golden in the harness key encoding (ruling QH-14)", () => {
+		const expected = {
+			min_count: 3,
+			payloads: [{ mmsi: "211234560" }],
+			key_fields: ["mmsi"],
+			marginal_keys: ['["993672078"]'],
+		}
+		const m = parseManifest(manifest([golden({ expected })]))
+		expect(m.fixtures[0]?.expected.marginal_keys).toEqual(['["993672078"]'])
+	})
+	it("rejects marginal_keys that are malformed, off a golden or a payload key (ruling QH-14)", () => {
+		const base = {
+			min_count: 3,
+			payloads: [{ mmsi: "211234560" }],
+			key_fields: ["mmsi"],
+		}
+		for (const key of ["993672078", '["993672078",21]', "{}"])
+			expect(() =>
+				parseManifest(
+					manifest([golden({ expected: { ...base, marginal_keys: [key] } })]),
+				),
+			).toThrow(/not a JSON array of the key_fields values/)
+		expect(() =>
+			parseManifest(
+				manifest([
+					golden({ expected: { ...base, marginal_keys: ['["211234560"]'] } }),
+				]),
+			),
+		).toThrow(/cannot be marginal/)
+		expect(() =>
+			parseManifest(
+				manifest([
+					golden({
+						role: "tail-golden",
+						expected: { ...base, marginal_keys: ['["1"]'] },
+					}),
+				]),
+			),
+		).toThrow(/for channelizer goldens/)
+		expect(() =>
+			parseManifest(
+				manifest([golden({ expected: { ...base, marginal_keys: [] } })]),
+			),
+		).toThrow()
+	})
 	it("ties the private license to private fetch", () => {
 		expect(() =>
 			parseManifest(manifest([golden({ license: "CC-BY-4.0" })])),

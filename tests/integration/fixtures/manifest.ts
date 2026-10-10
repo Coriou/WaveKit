@@ -43,6 +43,12 @@ const ExpectedSchema = z
 		key_fields: z.array(z.string().min(1)).min(1).optional(),
 		output_types: z.array(z.string().min(1)).min(1).optional(),
 		suspension: z.literal("channel-outside-capture").optional(),
+		/**
+		 * Keys that Property 15 may see on one path only (ruling QH-14): marginal real-capture frames
+		 * (QH-11) and known strays absent from the ground truth (QH-13). Each entry uses the harness key
+		 * encoding, the JSON array of the key_fields values, e.g. '["993672078",21]'.
+		 */
+		marginal_keys: z.array(z.string().min(1)).min(1).optional(),
 	})
 	.strict()
 
@@ -91,6 +97,32 @@ export const FixtureSchema = z
 			issue("negative fixtures expect min_count 0")
 		if (f.expected.suspension && f.role !== "negative")
 			issue("expected.suspension is for negative fixtures")
+		const marginal = f.expected.marginal_keys
+		if (marginal) {
+			const fields = f.expected.key_fields
+			if (f.role !== "channelizer-golden" || !fields)
+				issue(
+					"expected.marginal_keys is for channelizer goldens with key_fields",
+				)
+			for (const key of marginal) {
+				let tuple: unknown
+				try {
+					tuple = JSON.parse(key)
+				} catch {
+					tuple = undefined
+				}
+				if (!Array.isArray(tuple) || tuple.length !== (fields?.length ?? 0))
+					issue(
+						`marginal key ${key} is not a JSON array of the key_fields values`,
+					)
+			}
+			const payloadKeys = f.expected.payloads.map(p =>
+				JSON.stringify((fields ?? []).map(k => p[k] ?? null)),
+			)
+			for (const key of payloadKeys)
+				if (marginal.includes(key))
+					issue(`payload key ${key} cannot be marginal`)
+		}
 		if ((f.license === "private") !== (f.fetch.kind === "private"))
 			issue("license 'private' iff fetch.kind 'private'")
 	})

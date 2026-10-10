@@ -25,6 +25,7 @@ fixtures:
     sample_rate: 2048000
     center_hz: 162000000
     duration_s: 17
+    # marginal_keys (ruling QH-14): marginal real-capture frames one path decoded (QH-11, GOLDENS.md T28).
     expected:
       {
         min_count: 46,
@@ -35,6 +36,8 @@ fixtures:
             { mmsi: "368007230", messageType: 24 },
           ],
         key_fields: ["mmsi", "messageType"],
+        marginal_keys:
+          ['["003669761",4]', '["203245890",24]', '["993672078",21]'],
       }
 
   # Negatives (plan Task 7 step 4): the composed fixture with only channel.center_hz moved to
@@ -74,6 +77,7 @@ fixtures:
     sample_rate: 2400000
     center_hz: 162000000
     duration_s: 17
+    # marginal_keys (ruling QH-14): marginal real-capture frames one path decoded (QH-11, GOLDENS.md T28).
     expected:
       {
         min_count: 49,
@@ -84,6 +88,7 @@ fixtures:
             { mmsi: "368007230", messageType: 24 },
           ],
         key_fields: ["mmsi", "messageType"],
+        marginal_keys: ['["993672078",21]', '["203245890",18]'],
       }
 
   - id: composed_pocsag_466075k_2048k
@@ -102,6 +107,7 @@ fixtures:
     sample_rate: 2048000
     center_hz: 466300000
     duration_s: 12
+    # marginal_keys (ruling QH-14): the known multimon-ng bare-address stray, not in the sidecar (QH-13).
     expected:
       {
         min_count: 4,
@@ -112,6 +118,7 @@ fixtures:
             { address: 2000016, function: 3 },
           ],
         key_fields: ["address", "function"],
+        marginal_keys: ["[1690848,3]"],
       }
 
   - id: composed_aprs_144800k_2048k

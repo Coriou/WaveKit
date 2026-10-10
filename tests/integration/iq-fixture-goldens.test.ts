@@ -29,6 +29,7 @@ import {
 	keySet,
 	matchExpected,
 	padCommand,
+	property15Diff,
 	runSeconds,
 	selectFixtures,
 	stopCommand,
@@ -285,7 +286,17 @@ describe.skipIf(!container || !fixturesDir)("IQ fixture goldens", () => {
 			if (raw && chan && f.role === "channelizer-golden") {
 				// Feature: core-channelizer, Property 15: Golden equality
 				// Validates: addendum §8, §12.15
-				expect(keySet(f, chan.observed)).toEqual(keySet(f, raw.observed))
+				// Ruling QH-14: only expected.marginal_keys may differ (QH-11 marginal frames, QH-13 strays).
+				const diff = property15Diff(
+					f,
+					keySet(f, raw.observed),
+					keySet(f, chan.observed),
+				)
+				if (diff.tolerated.length > 0)
+					process.stderr.write(
+						`${f.id}: marginal keys on one path only (QH-14): ${diff.tolerated.join(" ")}\n`,
+					)
+				expect(diff.unexpected, "keys on one path only").toEqual([])
 			}
 		},
 		600000,

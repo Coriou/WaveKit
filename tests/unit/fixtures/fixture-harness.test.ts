@@ -10,6 +10,7 @@ import {
 	matchExpected,
 	fixturePaths,
 	padCommand,
+	property15Diff,
 	runSeconds,
 	selectFixtures,
 	stopCommand,
@@ -165,6 +166,34 @@ describe("fixture harness helpers", () => {
 })
 
 // Final review infra I1: the golden gate never passes vacuously.
+describe("Property 15 diff (ruling QH-14)", () => {
+	const raw = ['["1",1]', '["2",1]', '["3",4]']
+	it("is strict without marginal_keys", () => {
+		expect(property15Diff(fixture, raw, raw)).toEqual({
+			tolerated: [],
+			unexpected: [],
+		})
+		expect(
+			property15Diff(fixture, raw, ['["1",1]', '["2",1]', '["9",21]']),
+		).toEqual({ tolerated: [], unexpected: ['["3",4]', '["9",21]'] })
+	})
+	it("tolerates one-sided keys only when they are marginal, on either path", () => {
+		const marginal = FixtureSchema.parse({
+			...fixture,
+			expected: { ...fixture.expected, marginal_keys: ['["3",4]', '["9",21]'] },
+		})
+		// raw-only and chan-only marginal keys pass
+		expect(
+			property15Diff(marginal, raw, ['["1",1]', '["2",1]', '["9",21]']),
+		).toEqual({ tolerated: ['["3",4]', '["9",21]'], unexpected: [] })
+		// a lost non-marginal key still fails
+		expect(property15Diff(marginal, raw, ['["1",1]', '["3",4]'])).toEqual({
+			tolerated: [],
+			unexpected: ['["2",1]'],
+		})
+	})
+})
+
 describe("fixture selection", () => {
 	const negative = FixtureSchema.parse({
 		...fixture,

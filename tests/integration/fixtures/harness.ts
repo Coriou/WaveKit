@@ -250,3 +250,27 @@ export function keySet(f: Fixture, observed: ObservedOutput[]): string[] {
 	)
 	return [...keys].sort()
 }
+
+/**
+ * Property 15 under ruling QH-14: the keys only one path decoded, split into those
+ * expected.marginal_keys tolerates and the rest. The gate passes when `unexpected` is empty;
+ * without marginal_keys every one-sided key is unexpected (strict equality).
+ */
+export function property15Diff(
+	f: Fixture,
+	rawKeys: string[],
+	chanKeys: string[],
+): { tolerated: string[]; unexpected: string[] } {
+	const raw = new Set(rawKeys)
+	const chan = new Set(chanKeys)
+	const marginal = new Set(f.expected.marginal_keys ?? [])
+	const oneSided = [
+		...rawKeys.filter(k => !chan.has(k)),
+		...chanKeys.filter(k => !raw.has(k)),
+	]
+	const unique = [...new Set(oneSided)].sort()
+	return {
+		tolerated: unique.filter(k => marginal.has(k)),
+		unexpected: unique.filter(k => !marginal.has(k)),
+	}
+}
