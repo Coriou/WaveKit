@@ -89,6 +89,13 @@ Condensed + Noto Sans, Tabler-based icons).
   command names:
   - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits
     also offer the talkgroup, 7 digits a capcode, 9 digits an MMSI.
+  - *Tune is visible and paste-friendly:* "Tune to a frequency… (T)" is the first
+    suggestion and opens a Tune scope (recent tunes, saved). Pasted text is
+    understood: `161.150.000`, `161 150 000`, `446,00625 MHz`, `161150000` (Hz),
+    `Freq: 118.700 MHz AM` (mode applied), a trailing bandwidth (`12.5 kHz`). The
+    tune row shows the frequency large. Command words (`gain 30`, `step 6.25k`) are
+    never read as frequencies. *Why:* owner feedback — setting a frequency is the
+    most common thing to do, so it must be obvious, not just possible.
   - *Set with a value:* `gain 30` (snaps to the nearest step in the gain table),
     `sq 90` (read as −90 dB), `bw 25k` (checked against the mode's range), `vol 60`,
     `rate 2.048`, `step 6.25k`, `am`, `amber`.
