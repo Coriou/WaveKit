@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -125,18 +125,27 @@ describe.skipIf(process.env["WAVEKIT_SCANNER_INTEGRATION"] !== "1")(
 				const runningModes: (string | null)[] = []
 				// The terminal `job` event is emitted after the teardown (restore, decoder release, engine close);
 				// `getJob().state` already reads "completed" while those actions are still awaited.
-				let completed = false
+				// Any terminal state ends the wait, so a failed or cancelled sweep fails fast with its reason.
+				let ended: { state: string; reason?: string } | null = null
 				scanner.on(
 					"job",
 					(j: {
 						state: string
+						reason?: string
 						spec: { mode: string }
 						progress: { settleMode: string | null }
 					}) => {
-						if (j.spec.mode === "sweep" && j.state === "running")
-							runningModes.push(j.progress.settleMode)
-						if (j.spec.mode === "sweep" && j.state === "completed")
-							completed = true
+						if (j.spec.mode !== "sweep") return
+						if (j.state === "running") runningModes.push(j.progress.settleMode)
+						if (
+							j.state === "completed" ||
+							j.state === "failed" ||
+							j.state === "cancelled"
+						)
+							ended = {
+								state: j.state,
+								...(j.reason ? { reason: j.reason } : {}),
+							}
 					},
 				)
 				const job = await scanner.createJob({
@@ -150,16 +159,32 @@ describe.skipIf(process.env["WAVEKIT_SCANNER_INTEGRATION"] !== "1")(
 				const hops = job.plan.hops
 				const modes = runningModes
 				expect(hops.length).toBeGreaterThanOrEqual(3)
-				await waitFor(() => completed, 30_000)
+				await waitFor(() => ended !== null, 30_000)
+				expect(ended, `sweep ended ${JSON.stringify(ended)}`).toEqual({
+					state: "completed",
+				})
 
 				const sent = server.frames
 				const retunes = sent.filter(([cmd]) => cmd === 0x01).map(([, v]) => v)
 				for (const hop of hops) expect(retunes).toContain(hop.centreHz)
-				// every hop bracketed by TEST_MODE 1 … 0, never left on
-				const tm = sent.filter(([cmd]) => cmd === 0x07).map(([, v]) => v)
-				expect(tm.filter(v => v === 1).length).toBeGreaterThanOrEqual(
-					hops.length,
+				// every hop retune (revisits included) is bracketed back to back: TEST_MODE 1, SET_FREQ, TEST_MODE 0
+				const centres = new Set(hops.map(h => h.centreHz))
+				const hopRetunes = sent.flatMap(([cmd, v], i) =>
+					cmd === 0x01 && centres.has(v) ? [i] : [],
 				)
+				expect(hopRetunes.length).toBeGreaterThanOrEqual(hops.length)
+				for (const i of hopRetunes)
+					expect(
+						sent.slice(i - 1, i + 2),
+						`frames around retune #${i}`,
+					).toEqual([
+						[0x07, 1],
+						[0x01, sent[i]![1]],
+						[0x07, 0],
+					])
+				// never two TEST_MODE 1 without a 0 between (a release adds an extra 0), never left on
+				const tm = sent.filter(([cmd]) => cmd === 0x07).map(([, v]) => v)
+				expect(tm.join("")).not.toContain("11")
 				expect(tm.at(-1)).toBe(0)
 				// restore: the last frequency written is the pre-lease one
 				expect(retunes.at(-1)).toBe(INITIAL)
@@ -187,6 +212,7 @@ describe.skipIf(process.env["WAVEKIT_SCANNER_INTEGRATION"] !== "1")(
 				await scanner.stop()
 				await decoders.destroy()
 				await sourceManager.disconnectAll()
+				rmSync(dir, { recursive: true, force: true })
 			}
 		}, 60_000)
 	},

@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process"
 import { createHash } from "node:crypto"
-import { createReadStream, existsSync, mkdtempSync } from "node:fs"
+import { createReadStream, existsSync, mkdtempSync, rmSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { pipeline } from "node:stream/promises"
@@ -130,6 +130,7 @@ describe.skipIf(!run)(
 				await scanner.stop()
 				await decoders.destroy()
 				await sourceManager.disconnectAll()
+				rmSync(dir, { recursive: true, force: true })
 			}
 		}, 120_000)
 	},
