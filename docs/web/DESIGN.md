@@ -301,6 +301,21 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Keyboard (list focused):* ↑↓ move, Enter open/close, Space play, J / L ±5 s, K
     pause, I / O trim, Delete remove, Esc close.
 
+- **Recordings polish (2026-10-10, checked on the rendered canvas at 1440 and 390 px).**
+  An open row no longer repeats itself: the name and note become editable in place
+  (the name's placeholder is the automatic title; a chevron or the type tile closes it)
+  instead of a separate Name / Note form. Audio rows lose the second Play button (the
+  row's play circle is the one control; it shows the kept length when trimmed); IQ
+  rows keep one amber "Play as source" because the action needs words. Download and
+  Copy link carry icons, and Copy link confirms in place. Nothing opens by default in
+  the shell (the board's `openFirst` tweak shows the open anatomy), and an opened row
+  scrolls into view. The player is one 60 px line that never wraps; for a capture it
+  turns amber and its close button is "Back to live" (no second button). The shell
+  draws a thin amber frame around the stage while a capture plays, so live vs capture
+  is obvious beyond the chip; the chip truncates and moves below the islands on a
+  phone. IQ frequency labels sit on small plates at the right edge; capture contents
+  carry units ("41 messages").
+
 ## Open questions and next topics
 
 - Auto band map: remember what was decoded where and keep it labelled on the
@@ -335,11 +350,20 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Recordings first pass is drawn and waits for the owner's review on the canvas (board
-"Recordings", and the dock in C · Immersive: open Recordings, play the "Harbour band" IQ
-capture to see the shell's capture state, turn on Record in Listen to see the live row).
-Pick the next topic from the open questions; Scanner and Settings are the remaining
-screens behind the dock.
+**Topic: corner radius, across every board.** Owner (2026-10-10): the UI would look
+more professional with slightly less rounded corners everywhere. Today the boards use
+about 14 different radii (1–22 px, mostly 8–11 px on controls, 14 px on rows, 16–22 px
+on islands and drawers) with no scale behind them. Plan:
+1. Define a small radius scale as tokens (proposal to try: 4 / 6 / 8 / 12, islands and
+   drawers at 12, rows at 8, buttons and fields at 6, chips and tags at 4; circles stay
+   circles) and keep nested corners concentric (inner = outer − padding).
+2. Apply it to every board in one pass, Immersive first so the effect is judged on the
+   whole shell, then the islands, Activity, Recordings, Palette, Map, cards.
+3. Compare before and after on the canvas with the owner before freezing the values;
+   the scale then goes into the design-system pass (`packages/brand` tokens).
+
+Also pending from the Recordings polish: one final visual check of the polished board
+(desktop and phone) once the canvas is visible in the browser pane.
 
 ## Handoff to the dev team (later)
 

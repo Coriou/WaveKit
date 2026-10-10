@@ -19,7 +19,7 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 .wk-ghost:hover{background:#192b24;color:#f4f7f5}
 @media (max-width:1100px){.wk-float{display:none}.wk-act{left:16px;width:auto !important}}
 @media (max-width:1180px){.wk-dock{left:388px !important;transform:none !important}.wk-dock-label{display:none}}
-@media (max-width:760px){.wk-dock{display:none}}
+@media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
 </style>
 </helmet>
 <div style="position: relative; height: 100vh; min-height: 760px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
@@ -53,15 +53,16 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 
 	<sc-if value="{{showRecordings}}" hint-placeholder-val="{{false}}">
 		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 420px; z-index: 4">
-			<dc-import name="Recordings" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" hint-size="100%,100%"></dc-import>
+			<dc-import name="Recordings" open-first="{{false}}" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" hint-size="100%,100%"></dc-import>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 14px; background: rgba(48,37,12,.62); border: 1px solid rgba(242,184,75,.32); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13px; color: #f7dca4">
+		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 2px rgba(242,184,75,.55), inset 0 0 90px rgba(242,184,75,.10); transition: opacity .3s"></div>
+		<div class="wk-src" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 14px; background: rgba(48,37,12,.62); border: 1px solid rgba(242,184,75,.32); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13px; color: #f7dca4">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>
-			<span><b style="color: #f2b84b">Playing capture</b> · {{sourceText}}</span>
-			<button onClick="{{backToLive}}" style="height: 32px; padding: 0 12px; border-radius: 9px; background: rgba(242,184,75,.18); color: #f2b84b; font-weight: 700; font-size: 12.5px">Back to live</button>
+			<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis"><b style="color: #f2b84b">Playing capture</b> · {{sourceText}}</span>
+			<button onClick="{{backToLive}}" style="flex: none; height: 32px; padding: 0 12px; border-radius: 9px; background: rgba(242,184,75,.18); color: #f2b84b; font-weight: 700; font-size: 12.5px">Back to live</button>
 		</div>
 	</sc-if>
 
