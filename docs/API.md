@@ -1393,8 +1393,9 @@ Resend with `"takeover": true` to consent.
 
 Other answers: 409 `SCANNER_SOURCE_BUSY` (a relay client controls the tuner,
 another job holds the lease, or the lease is "releasing" or in "recovery
-pending"; the detail is in `message`, plus `details.holderJobId` when a job
-holds the source, or `details.issues` from the preview), 409
+pending"; the detail is in `message`; every one carries `details.reason`, see
+the error table, plus `details.holderJobId` when a job holds the source, or
+`details.issues` from the preview), 409
 `SCANNER_NO_TUNER_CONTROL` (the source has no rtl_tcp tuner control), 400
 `SCANNER_MONITOR_UNAVAILABLE` (`kind: "monitor"`, listen-scan needs the
 channelizer), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
@@ -1462,9 +1463,13 @@ carry `identify` (see `POST /api/scanner/identify`).
 
 Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
 `sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
-`capture`; other keys are ignored. The edit is previewed first; a preview with
-errors is rejected (400 `SCANNER_PLAN_INVALID`). Returns
-`{ job, plan, issues }`. 409 `SCANNER_JOB_TERMINAL` for an ended job, 409
+`capture`; other keys are ignored. The keys are merged into the spec the job
+was created with (only `sourceId` and `mode` are pinned), so derived fields
+follow the edit and keep their provenance: `{"sensitivity": "high"}` gives
+100 ms integration unless the job set `integrationMs` itself. While the job
+holds the lease, the engine takes the new tuning at once. The edit is
+previewed first; a preview with errors is rejected (400
+`SCANNER_PLAN_INVALID`). Returns `{ job, plan, issues }`. 409 `SCANNER_JOB_TERMINAL` for an ended job, 409
 `SCANNER_IDENTIFY_NOT_EDITABLE` for an identify job.
 
 ```bash
@@ -1477,7 +1482,18 @@ curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7Q
 Each returns the `ScanJob`. `resume` takes an optional body
 `{"takeover": true}`:
 
-- from `paused(operator)`: resumes;
+- from `paused(operator)` with the lease (no operator or relay write since
+  the pause): resumes at the same hop;
+- from `paused(operator)` after an operator or relay write took the lease:
+  re-acquires it. 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact` when
+  the impact grew beyond what was consented and `takeover` is not set (the
+  job stays `paused(operator)`); 409 `SCANNER_SOURCE_BUSY` moves it to
+  `paused(resume-blocked)` when another job holds the lease (a transient
+  refusal, `details.reason` `releasing`, `recovery-pending` or
+  `holder-starting`, leaves it `paused(operator)`);
+- from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
+  resumes at the persisted hop (boot resumes with `resume.onBoot` do the same
+  once the source's data starts);
 - from `paused(resume-blocked)`: needs `takeover: true` (the impact grew
   beyond what was consented);
 - from `paused(preempted-*)`: arbitrates at once; `takeover` is not required
@@ -1693,7 +1709,7 @@ given, or a bound is broken:
 ```
 
 409 `SCANNER_SOURCE_BUSY` while a sweep holds the source's tuner
-(`details.holderJobId`); 503 `SCANNER_DISABLED`. The job is listed,
+(`details.reason: "held"`, `details.holderJobId`); 503 `SCANNER_DISABLED`. The job is listed,
 cancellable and deletable once ended, but `pause`/`resume` answer 409
 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
 `SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core
@@ -2696,8 +2712,8 @@ Scanner and spectrum routes answer with the flat body
 | `SCANNER_JOB_NOT_FOUND`         | 404  | Service level: an action on a missing job                                                                                                    |
 | `SCANNER_DISCOVERY_NOT_FOUND`   | 404  | Service level: an action on a missing discovery (observations, PATCH, listen)                                                                |
 | `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                  |
-| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep disturbs other consumers; `details.impact`; resend with `takeover: true`                                                           |
-| `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
+| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep (or the resume of a `paused(operator)` sweep that lost its lease) disturbs other consumers; `details.impact`; resend with `takeover: true` |
+| `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.reason`: `"releasing"` (the previous lease is still restoring), `"recovery-pending"` (a crash or outage recovery waits for the source's data), `"holder-starting"` (the holder is still starting), `"relay"` (a relay client controls the tuner) or `"held"` (another scanner job holds the lease, or waits for it with a better claim). The first three clear by themselves within seconds; retry. `relay` and `held` last until the relay or the holder lets go. `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
 | `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                              |
 | `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                               |
 | `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                         |

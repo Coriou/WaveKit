@@ -81,15 +81,23 @@ pending ─► starting ─► running ⇄ holding
 
 `completed`, `cancelled` and `failed` (`source-removed`, `tuner-unavailable`, `invalid`) are terminal; only terminal jobs can be deleted. Pause reasons:
 
-- `operator`: paused by `POST …/pause`; probes stop, the lease and the decoder hold are kept.
+- `operator`: paused by `POST …/pause`; probes stop, the lease and the decoder hold are kept until an operator or relay write takes the tuner, which drops both (the job stays `paused(operator)`, it never auto-resumes).
 - `preempted-operator`: a REST tuner write (`origin: "rest"`) on the leased source; the lease is lost and never restored over.
 - `preempted-relay`: an SDR++ relay client took control (`control-mode-changed` → `external`).
-- `preempted-job`: a higher-priority scanner job took the lease (it keeps the original snapshot).
+- `preempted-job`: a higher-priority scanner job took the lease (it keeps the original snapshot). The waiting job keeps its decoder hold while that job holds the tuner; when an operator or relay write takes it, the waiter releases the decoders too, and holds them again when the lease comes back.
 - `source-down`: the source disconnected; the job resumes on the next payload with a new epoch.
 - `core-restart`: the job was running when the core stopped; it resumes only with `resume.onBoot` (passive jobs always do).
 - `resume-blocked`: auto-resume found more to disturb than was consented.
 
 Auto-resume: once the preemptor leaves (relay control back to `user`, and no REST tuner write for `resume.autoAfterIdleMs`, 60 s by default) the job re-checks its impact. If it is not larger than what was consented, it re-takes the lease and resumes at the same hop; otherwise it goes to `paused(resume-blocked)` and needs `resume` with `takeover: true`. An explicit `resume` from `paused(preempted-*)` arbitrates at once; `takeover` is not required (sending it records the current impact as consented for later auto-resumes). It answers 409 `SCANNER_SOURCE_BUSY` while another job holds the lease or a better waiter exists.
+
+Explicit `resume` in the other cases:
+
+- `paused(operator)` with the lease: resumes at the same hop.
+- `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while another job holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)`.
+- `paused(core-restart)`: re-acquires the lease, re-opens the engine and resumes at the persisted hop.
+
+Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery-pending` and `holder-starting` clear by themselves (retry); `relay` and `held` last until the relay or the holding job lets go.
 
 ### Takeover and impact
 
@@ -97,7 +105,7 @@ A sweep that would disturb something answers 409 `SCANNER_TAKEOVER_REQUIRED` wit
 
 ### Tuner restore
 
-At the end of a sweep the scanner writes back only the fields it changed, and only those whose previous value was known; others are listed as `unrestorable`. A lease lost to an operator or relay is never restored over. After a crash the previous tuning is restored on the source's first data. On shutdown the scanner hook runs before decoders, channelizer, fanout and sources stop, so the restore (bounded at 2 s) still reaches the rtl_tcp socket.
+At the end of a sweep the scanner writes back only the fields it changed, and only those whose previous value was known; others are listed as `unrestorable`. A restore that cannot be written (the source is disconnected, or the first retune failed half-way) is kept and runs on the source's first data after the reconnect, also when the job was deleted in between. A lease lost to an operator or relay is never restored over. After a crash the previous tuning is restored on the source's first data. The spectrum engine runs with the lease holder's FFT size, integration and threshold, and returns to the defaults when no sweep holds the source. On shutdown the scanner hook runs before decoders, channelizer, fanout and sources stop, so the restore (bounded at 2 s) still reaches the rtl_tcp socket.
 
 ## Presets and bandplans
 
