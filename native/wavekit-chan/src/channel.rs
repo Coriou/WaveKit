@@ -3,7 +3,7 @@
 
 use crate::{
     convert::f32_to_cu8,
-    plan::plan_chain,
+    plan::{plan_chain, ChainPlan},
     stages::{Nco, RationalFir},
 };
 
@@ -85,6 +85,11 @@ impl ChannelDsp {
             spec.bandwidth_hz,
             spec.transition_hz,
         )?;
+        Ok(Self::from_plan(spec, &plan))
+    }
+
+    /// Instantiates fresh DSP state using the prototypes already verified by the planner.
+    pub(crate) fn from_plan(spec: ChannelSpec, plan: &ChainPlan) -> Self {
         let mut stages = Vec::new();
         let (mut taps, mut delay_s) = (0usize, 0.0f64);
         // The planner already built every prototype (to check its tap budget); none is designed again.
@@ -95,7 +100,7 @@ impl ChannelDsp {
             stages.push(RationalFir::new(s.l, s.m, proto));
         }
         let g = gcd(spec.output_rate, spec.input_rate);
-        Ok(ChannelDsp {
+        ChannelDsp {
             nco: Nco::new(spec.offset_hz, spec.input_rate as f64),
             group_delay: delay_s * spec.output_rate as f64,
             filter_taps: taps,
@@ -107,7 +112,7 @@ impl ChannelDsp {
             held_i: Vec::new(),
             held_q: Vec::new(),
             spec,
-        })
+        }
     }
 
     /// Total prototype taps across the chain.
@@ -248,6 +253,46 @@ mod tests {
                 )
             })
             .unzip()
+    }
+
+    #[test]
+    fn prepared_plan_matches_synchronous_dsp_bytes_and_metadata() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (i, q) = ramp(8_193);
+        for (fs, out) in [2_048_000, 2_400_000].into_iter().flat_map(|fs| {
+            [24_000, 48_000, 250_000, 384_000, 1_000_000, 1_050_000, fs]
+                .into_iter()
+                .map(move |out| (fs, out))
+        }) {
+            for format in [Format::Cu8, Format::Cf32] {
+                let s = spec(fs, out, 31_250.0, format, 1.7);
+                let plan = crate::plan::plan_chain_bounded(
+                    fs,
+                    out,
+                    s.bandwidth_hz,
+                    s.transition_hz,
+                    &cancel,
+                )
+                .unwrap();
+                let mut prepared = ChannelDsp::from_plan(s.clone(), &plan);
+                let mut reference = ChannelDsp::new(s).unwrap();
+                assert_eq!(prepared.filter_taps(), reference.filter_taps());
+                assert_eq!(
+                    prepared.group_delay_samples().to_bits(),
+                    reference.group_delay_samples().to_bits()
+                );
+                assert_eq!(prepared.stage_count(), reference.stage_count());
+                for (ci, cq) in i.chunks(997).zip(q.chunks(997)) {
+                    let (mut a, mut b) = (Vec::new(), Vec::new());
+                    assert_eq!(
+                        prepared.process(ci, cq, &mut a),
+                        reference.process(ci, cq, &mut b)
+                    );
+                    assert_eq!(a, b);
+                    assert_eq!(prepared.held_samples(), reference.held_samples());
+                }
+            }
+        }
     }
 
     #[test]

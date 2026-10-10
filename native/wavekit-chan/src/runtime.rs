@@ -9,6 +9,7 @@ use crate::{
     args::Args,
     channel::{ChannelDsp, ChannelSpec},
     convert::InputAssembler,
+    preparation::{Planner, Prepared, SubmitError},
     protocol::{parse_request, OpenReq, Request},
     queue::ChannelQueue,
 };
@@ -19,6 +20,7 @@ use std::net::Shutdown;
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -70,12 +72,21 @@ struct Open {
     opened_at_byte: u64,
 }
 
+struct Pending {
+    serial: u64,
+    request: OpenReq,
+    cancel: Arc<AtomicBool>,
+}
+
 pub struct Runtime {
     args: Args,
     sink: Box<dyn FnMut(Value) + Send>,
     asm: InputAssembler,
     channels: BTreeMap<String, Open>,
     next_serial: u64,
+    planner: Planner,
+    pending: BTreeMap<String, Pending>,
+    terminated: bool,
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
     last_stats: Instant,
@@ -114,6 +125,9 @@ impl Runtime {
             asm: InputAssembler::default(),
             channels: BTreeMap::new(),
             next_serial: 0,
+            planner: Planner::new(),
+            pending: BTreeMap::new(),
+            terminated: false,
             pending_gaps: VecDeque::new(),
             last_stats: Instant::now(),
             gone_tx,
@@ -145,6 +159,9 @@ impl Runtime {
 
     /// Returns the exit code when the request ends the process.
     pub fn on_request(&mut self, req: Request) -> Option<i32> {
+        if self.terminated {
+            return Some(0);
+        }
         match req {
             Request::Open(o) => self.open(o),
             Request::Close { id } => self.close(&id, "requested"),
@@ -163,7 +180,7 @@ impl Runtime {
     }
 
     fn open(&mut self, o: OpenReq) {
-        if self.channels.contains_key(&o.id) {
+        if self.channels.contains_key(&o.id) || self.pending.contains_key(&o.id) {
             return self.reject(
                 &o.id,
                 "channel-request-invalid",
@@ -192,10 +209,6 @@ impl Runtime {
             format: o.format,
             gain: o.gain,
         };
-        let dsp = match ChannelDsp::new(spec) {
-            Ok(d) => d,
-            Err(e) => return self.reject(&o.id, "channel-request-invalid", e),
-        };
         let sample_bytes = o.format.sample_bytes();
         if o.queue_bytes < sample_bytes {
             return self.reject(
@@ -204,6 +217,57 @@ impl Runtime {
                 format!("queueBytes below one {} sample", o.format.as_str()),
             );
         }
+        let serial = self.next_serial;
+        let Some(next) = serial.checked_add(1) else {
+            return self.reject(
+                &o.id,
+                "channel-request-invalid",
+                "channel serial exhausted".into(),
+            );
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Err(SubmitError::PlannerBusy) =
+            self.planner
+                .submit(serial, spec, o.queue_bytes, cancel.clone())
+        {
+            return self.reject(&o.id, "channel-request-invalid", "planner busy".into());
+        }
+        self.next_serial = next;
+        self.pending.insert(
+            o.id.clone(),
+            Pending {
+                serial,
+                request: o,
+                cancel,
+            },
+        );
+    }
+
+    /// At most one prepared channel is installed per input/control turn. Socket/event/sample
+    /// authority stays here; input consumed during preparation belongs only to existing channels.
+    pub fn poll_prepared(&mut self) {
+        if self.terminated {
+            return;
+        }
+        let Some((serial, result)) = self.planner.take() else {
+            return;
+        };
+        let id = self
+            .pending
+            .iter()
+            .find(|(_, p)| p.serial == serial)
+            .map(|(id, _)| id.clone());
+        let Some(id) = id else {
+            return;
+        };
+        let pending = self.pending.remove(&id).unwrap();
+        match result {
+            Ok(prepared) => self.install(pending.request, serial, prepared),
+            Err(e) => self.reject(&id, "channel-request-invalid", e),
+        }
+    }
+
+    fn install(&mut self, o: OpenReq, serial: u64, Prepared { dsp, queue }: Prepared) {
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         // Listening before `opened` (§11): a client may connect as soon as it reads the event.
@@ -218,9 +282,6 @@ impl Runtime {
                 return self.reject(&o.id, "channel-request-invalid", detail);
             }
         };
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        let queue = Arc::new(ChannelQueue::new(o.queue_bytes, sample_bytes));
         let conn: ConnSlot = Arc::new(Mutex::new(Conn::default()));
         let writer = {
             let (q, p, c) = (queue.clone(), socket.clone(), conn.clone());
@@ -256,6 +317,11 @@ impl Runtime {
     }
 
     fn close(&mut self, id: &str, reason: &str) {
+        if let Some(p) = self.pending.remove(id) {
+            self.planner.cancel(&p.cancel);
+            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            return;
+        }
         let Some(mut ch) = self.channels.remove(id) else {
             return;
         };
@@ -394,6 +460,7 @@ impl Runtime {
     /// EOF (A7): drain every queue to its client, report open drop runs, emit `input-eof`, exit 0.
     /// Samples the A12 schedule still holds back are discarded; nothing is zero-padded.
     pub fn on_eof(&mut self) -> i32 {
+        self.cancel_preparations();
         self.drain_all(EOF_DRAIN_BUDGET);
         let (input, discarded) = (self.asm.consumed_bytes / 2, self.asm.discarded());
         self.emit(json!({"type": "input-eof", "inputSamples": input, "discardedBytes": discarded}));
@@ -422,12 +489,37 @@ impl Runtime {
         }
     }
 
+    fn cancel_preparations(&mut self) {
+        self.terminated = true;
+        for (_, p) in std::mem::take(&mut self.pending) {
+            self.planner.cancel(&p.cancel);
+        }
+        self.planner.stop();
+    }
+
     pub fn shutdown(&mut self) -> i32 {
+        let pending_ids: Vec<String> = self.pending.keys().cloned().collect();
+        for id in pending_ids {
+            self.close(&id, "requested");
+        }
+        self.cancel_preparations();
         let ids: Vec<String> = self.channels.keys().cloned().collect();
         for id in ids {
             self.close(&id, "requested");
         }
         0
+    }
+
+    #[cfg(test)]
+    fn request_and_wait(&mut self, req: Request) -> Option<i32> {
+        let code = self.on_request(req);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.pending.is_empty() {
+            self.poll_prepared();
+            assert!(Instant::now() < deadline, "preparation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+        code
     }
 
     #[cfg(test)]
@@ -437,6 +529,7 @@ impl Runtime {
 
     #[cfg(test)]
     fn on_eof_no_exit_for_test(&mut self) {
+        self.cancel_preparations();
         self.drain_all(EOF_DRAIN_BUDGET);
     }
 }
@@ -598,7 +691,12 @@ pub fn run(args: Args) -> i32 {
     let mut rt = Runtime::new(args, sink);
     rt.emit(json!({"type": "ready", "pid": std::process::id()}));
     loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        let wait = if rt.pending.is_empty() {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(5)
+        };
+        match rx.recv_timeout(wait) {
             Ok(Msg::Input(b)) => rt.on_input(&b),
             Ok(Msg::InputEof) => return rt.on_eof(),
             Ok(Msg::Control(Ok(r))) => {
@@ -613,6 +711,7 @@ pub fn run(args: Args) -> i32 {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
         rt.maybe_stats(Instant::now());
     }
@@ -696,13 +795,167 @@ mod tests {
             .collect()
     }
 
+    fn block_next_preparation(r: &mut Runtime) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        use std::sync::atomic::Ordering;
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let first = AtomicBool::new(true);
+        r.planner = Planner::with_hook(Box::new(move || {
+            if first.swap(false, Ordering::Relaxed) {
+                entered_tx.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        }));
+        (entered, release)
+    }
+    fn finish_preparations(r: &mut Runtime) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.pending.is_empty() {
+            r.poll_prepared();
+            assert!(Instant::now() < deadline, "worker did not complete");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[test]
+    fn pending_duplicate_cancel_reuse_and_install_byte_are_serial_owned() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("same", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_request(open("same", 162e6, 4096));
+        assert_eq!(last(&ev)["detail"], "duplicate channel id");
+        r.on_request(Request::Close { id: "same".into() });
+        r.on_request(open("same", 162e6 + 10_000.0, 4096));
+        r.on_input(&[128; 4096]);
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(2048),
+            dropped_input_bytes: Some(1024),
+        });
+        release.send(()).unwrap();
+        finish_preparations(&mut r);
+        let opened: Vec<Value> = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "opened")
+            .cloned()
+            .collect();
+        assert_eq!(opened.len(), 1, "old canceled serial never opens");
+        assert_eq!(r.channels["same"].serial, 1);
+        assert_eq!(r.channels["same"].opened_at_byte, 4096);
+        r.on_input(&[128; 4096]);
+        assert!(
+            of_cause(&ev, "input-gap").is_empty(),
+            "pending channel never saw old gap"
+        );
+        assert_eq!(r.channels["same"].out_samples, 48);
+        assert_eq!(r.on_request(Request::Shutdown), Some(0));
+        assert!(!dir.0.join("same.sock").exists());
+    }
+    #[test]
+    fn existing_channel_output_is_exact_while_cold_planner_is_blocked() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("live", 162e6 + 10_000.0, 1 << 20));
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("cold", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        let input: Vec<u8> = (0..80_003).map(|k| (k * 17 % 256) as u8).collect();
+        for b in input.chunks(333) {
+            r.on_input(b);
+            r.poll_prepared();
+        }
+        assert!(!r.channels.contains_key("cold"));
+        assert_eq!(r.channels["live"].out_samples, 40_001 * 48_000 / 2_048_000);
+        let mut got = Vec::new();
+        r.channels["live"].queue.try_pop_for_test(&mut got);
+        let (mut i, mut q) = (Vec::new(), Vec::new());
+        InputAssembler::default().push(&input, &mut i, &mut q);
+        let mut reference = ChannelDsp::new(ChannelSpec {
+            input_rate: 2_048_000,
+            offset_hz: 10_000.0,
+            bandwidth_hz: 45600.0,
+            transition_hz: 1200.0,
+            output_rate: 48_000,
+            format: crate::channel::Format::Cf32,
+            gain: 1.0,
+        })
+        .unwrap();
+        let mut want = Vec::new();
+        reference.process(&i, &q, &mut want);
+        assert_eq!(got, want, "planning changes no existing channel sample");
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        assert!(of_cause(&ev, "queue-overflow").is_empty());
+        r.on_request(Request::Close { id: "cold".into() });
+        release.send(()).unwrap();
+        r.shutdown();
+    }
+    #[test]
+    fn saturation_has_stable_busy_detail_and_shutdown_has_no_late_install() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("one", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        for id in ["two", "three", "four", "five"] {
+            r.on_request(open(id, 162e6, 4096));
+        }
+        assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
+        assert_eq!(last(&ev)["detail"], "planner busy");
+        r.shutdown();
+        let before = ev.lock().unwrap().len();
+        release.send(()).unwrap();
+        r.poll_prepared();
+        r.on_request(open("after", 162e6, 4096));
+        assert_eq!(ev.lock().unwrap().len(), before);
+        assert!(r.channels.is_empty());
+        assert!(r.pending.is_empty());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+    #[test]
+    fn eof_cancels_pending_without_open_or_socket_even_if_work_finishes_later() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("pending", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_input(&[128; 4097]);
+        assert_eq!(r.on_eof(), 0);
+        let eof = last(&ev);
+        assert_eq!(eof["type"], "input-eof");
+        assert_eq!(eof["inputSamples"], 2048);
+        assert_eq!(eof["discardedBytes"], 1);
+        release.send(()).unwrap();
+        r.poll_prepared();
+        assert_eq!(ev.lock().unwrap().len(), 1);
+        assert!(!dir.0.join("pending.sock").exists());
+    }
+
+    // Cold preparation must yield to input; no timing threshold determines this contract.
+    #[test]
+    fn cold_open_returns_before_installing_and_input_keeps_progressing() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("cold", 162e6, 96_000));
+        assert!(
+            ev.lock().unwrap().is_empty(),
+            "open only schedules preparation"
+        );
+        r.on_input(&[128; 4096]);
+        assert_eq!(r.received_bytes(), 4096);
+        r.on_request(Request::Close { id: "cold".into() });
+        assert_eq!(last(&ev)["type"], "closed");
+        assert!(!dir.0.join("cold.sock").exists());
+    }
+
     // Feature: core-channelizer, Property 9: Generation stamping (process side)
     // Validates: addendum §11, §12.9
     #[test]
     fn opened_carries_generation_and_listens_first() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        assert!(r.on_request(open("a", 162e6, 96_000)).is_none());
+        assert!(r.request_and_wait(open("a", 162e6, 96_000)).is_none());
         let e = last(&ev);
         assert_eq!(e["type"], "opened");
         assert_eq!(
@@ -724,7 +977,9 @@ mod tests {
     fn rejects_outside_and_duplicate_without_exiting() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        assert!(r.on_request(open("a", 162e6 + 900_000.0, 96_000)).is_none());
+        assert!(r
+            .request_and_wait(open("a", 162e6 + 900_000.0, 96_000))
+            .is_none());
         let e = last(&ev);
         assert_eq!(e["reasonCode"], "channel-outside-capture");
         assert_eq!(
@@ -732,8 +987,8 @@ mod tests {
             (Some("rejected"), Some("a"))
         );
         assert_eq!(e["generation"], 7);
-        r.on_request(open("b", 162e6, 96_000));
-        r.on_request(open("b", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
         r.on_eof_no_exit_for_test();
     }
@@ -761,9 +1016,11 @@ mod tests {
         let deep = dir.0.join("d".repeat(100)); // past sun_path
         std::fs::create_dir_all(&deep).unwrap();
         let (mut r, ev) = rt(&deep);
-        assert!(r.on_request(open("a", 162e6, 96_000)).is_none());
+        assert!(r.request_and_wait(open("a", 162e6, 96_000)).is_none());
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
-        assert!(r.on_request(Request::Close { id: "a".into() }).is_none());
+        assert!(r
+            .request_and_wait(Request::Close { id: "a".into() })
+            .is_none());
         assert_eq!(ev.lock().unwrap().len(), 1, "no channel was registered");
     }
 
@@ -771,7 +1028,7 @@ mod tests {
     fn queue_below_one_sample_is_rejected() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("a", 162e6, 7));
+        r.request_and_wait(open("a", 162e6, 7));
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
     }
 
@@ -781,7 +1038,7 @@ mod tests {
     fn pass_through_channel_has_no_taps_and_reproduces_the_input() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(parse_request(r#"{"v":1,"type":"open","id":"p","centerHz":162000000,"bandwidthHz":1500000,"transitionHz":50000,"outputRateHz":2048000,"format":"cu8","queueBytes":65536}"#).unwrap());
+        r.request_and_wait(parse_request(r#"{"v":1,"type":"open","id":"p","centerHz":162000000,"bandwidthHz":1500000,"transitionHz":50000,"outputRateHz":2048000,"format":"cu8","queueBytes":65536}"#).unwrap());
         let e = last(&ev);
         assert_eq!(
             (e["filterTaps"].as_u64(), e["groupDelaySamples"].as_f64()),
@@ -803,7 +1060,7 @@ mod tests {
     fn overflow_reports_discontinuity_with_gap_size() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("slow", 162e6, 800)); // 100 cf32 samples; the client never connects
+        r.request_and_wait(open("slow", 162e6, 800)); // 100 cf32 samples; the client never connects
         let block = vec![128u8; 2 * 2_048_000 / 10]; // 204 800 input samples → exactly 4 800 output samples (A12)
         r.on_input(&block); // accepts 0..100, drops 100..4800: the run is open, nothing emitted yet
         assert!(of_cause(&ev, "queue-overflow").is_empty());
@@ -859,7 +1116,7 @@ mod tests {
         ) {
             let dir = TempDir::new();
             let (mut r, ev) = rt(&dir.0);
-            r.on_request(open("q", 162e6, cap_samples * 8)); // nobody connects: only Drain empties it
+            r.request_and_wait(open("q", 162e6, cap_samples * 8)); // nobody connects: only Drain empties it
             // Model: the A12 schedule gives ⌊N·48000/2048000⌋ = ⌊3N/128⌋ samples after N inputs.
             let (mut n_in, mut out, mut level) = (0u64, 0u64, 0u64);
             let mut runs: Vec<(u64, u64)> = Vec::new();
@@ -909,14 +1166,14 @@ mod tests {
     fn open_drop_run_is_reported_before_gap_and_close() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("s", 162e6, 8)); // one sample
+        r.request_and_wait(open("s", 162e6, 8)); // one sample
         r.on_input(&vec![128u8; 2 * 2_048]); // 48 out: accepts 1, drops 47
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: None,
             dropped_input_bytes: Some(2 * 2_048_000),
         });
         r.on_input(&vec![128u8; 2 * 2_048]); // the reset lands before this input; queue still full
-        r.on_request(Request::Close { id: "s".into() });
+        r.request_and_wait(Request::Close { id: "s".into() });
         let kinds: Vec<(String, Option<u64>, Option<u64>)> = ev
             .lock()
             .unwrap()
@@ -966,9 +1223,9 @@ mod tests {
         // a: pre + post in one read, with the gap marked at the seam byte
         let dir_a = TempDir::new();
         let (mut a, ev_a) = rt(&dir_a.0);
-        a.on_request(open("g", 162e6 + 10_000.0, 1 << 22));
+        a.request_and_wait(open("g", 162e6 + 10_000.0, 1 << 22));
         let ca = reader(UnixStream::connect(sock(&ev_a)).unwrap());
-        a.on_request(Request::MarkGap {
+        a.request_and_wait(Request::MarkGap {
             at_input_byte: Some(pre.len() as u64),
             dropped_input_bytes: Some(512),
         });
@@ -976,7 +1233,7 @@ mod tests {
         // b: a fresh runtime fed only the post-gap input
         let dir_b = TempDir::new();
         let (mut b, ev_b) = rt(&dir_b.0);
-        b.on_request(open("g", 162e6 + 10_000.0, 1 << 22));
+        b.request_and_wait(open("g", 162e6 + 10_000.0, 1 << 22));
         let cb = reader(UnixStream::connect(sock(&ev_b)).unwrap());
         b.on_input(&post);
         a.on_eof_no_exit_for_test();
@@ -1011,12 +1268,12 @@ mod tests {
     fn queued_marks_apply_in_order_at_their_bytes() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("g", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("g", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(1_001),
             dropped_input_bytes: Some(0),
         });
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(3_000),
             dropped_input_bytes: Some(2 * 2_048_000),
         });
@@ -1040,10 +1297,10 @@ mod tests {
     fn late_mark_skips_channels_opened_after_its_byte() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("early", 162e6, 1 << 20));
+        r.request_and_wait(open("early", 162e6, 1 << 20));
         r.on_input(&[9u8; 4_096]);
-        r.on_request(open("late", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("late", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(1_000),
             dropped_input_bytes: Some(0),
         });
@@ -1081,8 +1338,8 @@ mod tests {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
         r.on_input(&[9u8; 4_096]);
-        r.on_request(open("c", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("c", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(4_096),
             dropped_input_bytes: Some(0),
         });
@@ -1097,7 +1354,7 @@ mod tests {
     fn output_after_a_failed_write_is_not_an_overflow() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         drop(UnixStream::connect(sock(&ev)).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !r.channels["x"].queue.is_closed() && Instant::now() < deadline {
@@ -1148,21 +1405,21 @@ mod tests {
     fn close_of_a_stalled_or_destroyed_client_returns_promptly_and_others_keep_flowing() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("stalled", 162e6, 1 << 24));
+        r.request_and_wait(open("stalled", 162e6, 1 << 24));
         let _stalled = UnixStream::connect(sock(&ev)).unwrap(); // connected, never reads
-        r.on_request(open("gone", 162e6, 1 << 24));
+        r.request_and_wait(open("gone", 162e6, 1 << 24));
         drop(UnixStream::connect(sock(&ev)).unwrap()); // destroyed client
-        r.on_request(open("live", 162e6, 1 << 24));
+        r.request_and_wait(open("live", 162e6, 1 << 24));
         let live = reader(UnixStream::connect(sock(&ev)).unwrap());
         // 1 s of input → exactly 48 000 cf32 samples (A12) = 384 000 B per channel, far past any socket buffer
         let block = vec![128u8; 2 * 2_048_000];
         r.on_input(&block);
         std::thread::sleep(Duration::from_millis(200)); // the stalled writer is now blocked in write_all
         let t = Instant::now();
-        r.on_request(Request::Close {
+        r.request_and_wait(Request::Close {
             id: "stalled".into(),
         });
-        r.on_request(Request::Close { id: "gone".into() });
+        r.request_and_wait(Request::Close { id: "gone".into() });
         // Below one join budget for both: neither writer was left to the 500 ms detach fallback.
         assert!(
             t.elapsed() < CLOSE_JOIN_BUDGET,
@@ -1193,7 +1450,7 @@ mod tests {
     fn client_gone_closes_only_the_channel_it_belongs_to() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         drop(UnixStream::connect(sock(&ev)).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         let gone = || {
@@ -1210,7 +1467,7 @@ mod tests {
         assert!(gone(), "client-gone was never reported");
         assert_eq!(last(&ev)["id"], "x");
         let n = ev.lock().unwrap().len();
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         let _c = UnixStream::connect(sock(&ev)).unwrap();
         r.gone_tx.send(("x".into(), 0)).unwrap(); // the first channel's serial
         r.poll_client_gone();
@@ -1222,7 +1479,7 @@ mod tests {
     fn stats_every_five_seconds() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("s", 162e6, 80));
+        r.request_and_wait(open("s", 162e6, 80));
         r.on_input(&vec![128u8; 2 * 20_480]); // 480 out, 10 fit
         let t0 = Instant::now();
         let n = ev.lock().unwrap().len();
@@ -1251,10 +1508,10 @@ mod tests {
     fn shutdown_closes_every_channel_and_exits_zero() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("a", 162e6, 96_000));
-        r.on_request(open("b", 162e6, 96_000));
+        r.request_and_wait(open("a", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
         let socket = sock(&ev);
-        assert_eq!(r.on_request(Request::Shutdown), Some(0));
+        assert_eq!(r.request_and_wait(Request::Shutdown), Some(0));
         let closed: Vec<Value> = ev
             .lock()
             .unwrap()

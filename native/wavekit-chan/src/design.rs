@@ -2,7 +2,10 @@
 //!
 //! Frequencies (`cutoff`, `transition`, `f`) are fractions of the sample rate, so 0.5 is Nyquist.
 
-use std::f64::consts::PI;
+use std::{
+    f64::consts::PI,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// Attenuation fed to Kaiser's β and length formulas, in dB. The formulas are approximate (short
 /// designs land near −58 dB, long ones near −63.5 dB), so `lowpass` does not rely on them alone:
@@ -50,6 +53,16 @@ fn bessel_i0(x: f64) -> f64 {
 
 /// Kaiser-windowed sinc with exactly `n` (odd) taps, normalised to DC gain `gain`.
 fn windowed_sinc(cutoff: f64, n: usize, gain: f64) -> Vec<f32> {
+    windowed_sinc_checked(cutoff, n, gain, None).expect("uncancelled design")
+}
+
+fn windowed_sinc_checked(
+    cutoff: f64,
+    n: usize,
+    gain: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<Vec<f32>, String> {
+    check_cancel(cancel)?;
     let beta = kaiser_beta(DESIGN_ATTENUATION_DB);
     let m = (n - 1) as f64 / 2.0;
     let i0b = bessel_i0(beta);
@@ -66,13 +79,22 @@ fn windowed_sinc(cutoff: f64, n: usize, gain: f64) -> Vec<f32> {
         })
         .collect();
     let sum: f64 = raw.iter().sum();
-    raw.iter().map(|t| (t * gain / sum) as f32).collect()
+    check_cancel(cancel)?;
+    Ok(raw.iter().map(|t| (t * gain / sum) as f32).collect())
 }
 
 /// Peak response over `[stop, 0.5]` in dB relative to DC, for symmetric odd-length `taps`.
 /// The peak sidelobe sits next to the stopband edge, so `[stop, stop + 20/n]` is sampled at
 /// 8 points per sidelobe (step 1/(8n)); the rest, out to Nyquist, at 512 points.
 fn stopband_peak_db(taps: &[f32], stop: f64) -> f64 {
+    stopband_peak_db_checked(taps, stop, None).expect("uncancelled response")
+}
+
+fn stopband_peak_db_checked(
+    taps: &[f32],
+    stop: f64,
+    cancel: Option<&AtomicBool>,
+) -> Result<f64, String> {
     let n = taps.len();
     let m = (n - 1) / 2;
     let dc: f64 = taps.iter().map(|&t| t as f64).sum();
@@ -89,11 +111,12 @@ fn stopband_peak_db(taps: &[f32], stop: f64) -> f64 {
     let edge_points = ((edge_end - stop) / step).ceil() as usize;
     let edge = (0..=edge_points).map(|i| (stop + i as f64 * step).min(0.5));
     let far = (0..=512).map(|i| edge_end + (0.5 - edge_end) * i as f64 / 512.0);
-    let peak = edge
-        .chain(far)
-        .map(|f| amplitude(f).abs())
-        .fold(0.0f64, f64::max);
-    20.0 * (peak / dc.abs()).log10()
+    let mut peak = 0.0f64;
+    for f in edge.chain(far) {
+        check_cancel(cancel)?;
+        peak = peak.max(amplitude(f).abs());
+    }
+    Ok(20.0 * (peak / dc.abs()).log10())
 }
 
 /// Linear-phase lowpass: `cutoff` is the −6 dB point (midway between passband and stopband
@@ -129,6 +152,70 @@ pub fn lowpass(cutoff: f64, transition: f64, gain: f64) -> Vec<f32> {
     best.map(|(_, taps)| taps).unwrap_or_default()
 }
 
+/// Checks before converting the floating estimate, including the subsequent +1 and odd rounding.
+pub(crate) fn kaiser_len_checked(transition: f64, max_taps: usize) -> Result<usize, String> {
+    if max_taps == 0 {
+        return Err("prototype tap limit 0 exceeded".into());
+    }
+    if !transition.is_finite() || transition <= 0.0 || transition >= 0.5 {
+        return Err(format!("invalid effective transition {transition}"));
+    }
+    let estimate = ((DESIGN_ATTENUATION_DB - 7.95) / (14.36 * transition)).ceil();
+    // Compare in floating point before a potentially saturating cast or overflowing addition.
+    if !estimate.is_finite() || estimate < 0.0 || estimate > (max_taps - 1) as f64 {
+        return Err(format!(
+            "prototype tap limit {max_taps} exceeded (estimate {estimate})"
+        ));
+    }
+    let n = (estimate as usize + 1) | 1;
+    if n > max_taps {
+        return Err(format!("prototype tap limit {max_taps} exceeded ({n})"));
+    }
+    Ok(n)
+}
+
+pub(crate) fn check_cancel(cancel: Option<&AtomicBool>) -> Result<(), String> {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        Err("channel preparation cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// Worker-only design: identical arithmetic and response samples, bounded allocations and
+/// cooperative cancellation. Unlike the synchronous reference, verification fails closed.
+pub(crate) fn lowpass_bounded(
+    cutoff: f64,
+    transition: f64,
+    gain: f64,
+    max_taps: usize,
+    cancel: &AtomicBool,
+) -> Result<Vec<f32>, String> {
+    check_cancel(Some(cancel))?;
+    if !cutoff.is_finite() || cutoff <= 0.0 || cutoff >= 0.5 || !gain.is_finite() || gain <= 0.0 {
+        return Err(format!("invalid effective cutoff {cutoff} or gain {gain}"));
+    }
+    let stop = cutoff + transition / 2.0;
+    let mut n = kaiser_len_checked(transition, max_taps)?;
+    for _ in 0..MAX_GROWTH_ROUNDS {
+        check_cancel(Some(cancel))?;
+        if n > max_taps {
+            return Err(format!("prototype tap limit {max_taps} exceeded ({n})"));
+        }
+        let taps = windowed_sinc_checked(cutoff, n, gain, Some(cancel))?;
+        let peak = stopband_peak_db_checked(&taps, stop, Some(cancel))?;
+        if peak <= VERIFIED_STOPBAND_DB {
+            return Ok(taps);
+        }
+        n = n
+            .checked_add(2 * (n / 64).max(1))
+            .ok_or_else(|| "prototype length growth overflow".to_string())?;
+    }
+    Err(format!(
+        "lowpass({cutoff}, {transition}) verification exhausted {MAX_GROWTH_ROUNDS} growth rounds"
+    ))
+}
+
 /// Magnitude response of `taps` at frequency `f` (fraction of the sample rate), in dB relative
 /// to the DC response (the tap sum), so a unity-shape passband reads 0 dB whatever the gain.
 pub fn response_db(taps: &[f32], f: f64) -> f64 {
@@ -145,6 +232,54 @@ pub fn response_db(taps: &[f32], f: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_lowpass_matches_reference_bits() {
+        let cancel = AtomicBool::new(false);
+        for (cutoff, transition, gain) in [(0.1, 0.05, 1.0), (0.2, 0.25, 3.0), (0.025, 0.01, 125.0)]
+        {
+            let a = lowpass(cutoff, transition, gain);
+            let b = lowpass_bounded(cutoff, transition, gain, 16_384, &cancel).unwrap();
+            assert_eq!(
+                a.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                b.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_design_checks_length_before_cast_and_growth_allocation() {
+        let cancel = AtomicBool::new(false);
+        for transition in [f64::from_bits(1), f64::MIN_POSITIVE, 1e-30] {
+            assert!(kaiser_len_checked(transition, 16_384)
+                .unwrap_err()
+                .contains("prototype tap limit"));
+        }
+        assert!(kaiser_len_checked(0.05, 0).is_err());
+        let n = kaiser_len(DESIGN_ATTENUATION_DB, 0.1);
+        // Underflowed coefficients cannot verify; the next growth must be rejected before allocation.
+        assert!(lowpass_bounded(0.1, 0.1, 1e-300, n, &cancel)
+            .unwrap_err()
+            .contains("prototype tap limit"));
+    }
+
+    #[test]
+    fn bounded_design_cancels_and_fails_closed_on_verification_exhaustion() {
+        let cancel = AtomicBool::new(true);
+        assert_eq!(
+            lowpass_bounded(0.1, 0.05, 1.0, 16_384, &cancel).unwrap_err(),
+            "channel preparation cancelled"
+        );
+        let taps = lowpass(0.1, 0.05, 1.0);
+        assert_eq!(
+            stopband_peak_db_checked(&taps, 0.125, Some(&cancel)).unwrap_err(),
+            "channel preparation cancelled"
+        );
+        cancel.store(false, Ordering::Relaxed);
+        assert!(lowpass_bounded(0.1, 0.1, 1e-300, 16_384, &cancel)
+            .unwrap_err()
+            .contains("verification exhausted"));
+    }
 
     /// Worst stopband response measured independently of `lowpass`'s own check: `response_db`
     /// at step 1/(8n) over `[stop, stop + 40/n]`, then 2 000 points out to Nyquist.

@@ -4,6 +4,7 @@ pub mod channel;
 pub mod convert;
 pub mod design;
 pub mod plan;
+mod preparation;
 pub mod protocol;
 pub mod queue;
 pub mod runtime;
