@@ -41,6 +41,10 @@
  *                equal the csdr front's, and its AMBE errors must not exceed
  *                max(1.25 x csdr, csdr + 20) (PF16). TGT/SRC lines that
  *                dsd-fme marks (CRC ERR) are reported, not compared (QH-12).
+ *                Gate inputs: the private own_dmr_446m_2048k / _2400k
+ *                captures only. composed_dmr_446m_2048k is no voice-gate input:
+ *                its 1.7 s source clip has no terminator, so both fronts miss
+ *                the absolute limits (QH-12); it stays a harness golden.
  * --unpaced     feed the chan front as fast as it reads (default: real time,
  *                2 bytes per sample, as the voice gate runs paced).
  * Exit code 0 on success, 1 on failure.
