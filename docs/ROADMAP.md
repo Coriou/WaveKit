@@ -277,6 +277,14 @@ use separate streaming servers; their per-client queues are now bounded. Priorit
 access/origin policy before exposing a browser UI.
 These findings describe the current code, not completed API acceptance.
 
+Access preparation is on local main (2026-10-10): reviewed private provisioning,
+pairing/session services, renewable 30-day sessions, unmounted REST/WS/audio
+adapters, destination-bound CLI credentials and child-environment/health-probe
+hygiene. The standalone setup/pair utility is reviewed; normal build integration
+will preserve the scanner worker entry. Runtime mounting, browser onboarding and
+automatic renewal, public audio origins, raw-listener and actual TLS/container
+acceptance remain open. See the [access implementation checklist](../.kiro/specs/core-access-policy/tasks.md).
+
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
       bounded replay and explicit gaps when history is unavailable.
@@ -297,6 +305,12 @@ These findings describe the current code, not completed API acceptance.
 This extends §4 for the web Activity panel and shared CLI/web/mobile state.
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
 journals, discovery search and settings are separate domain foundations.
+
+The [decode envelope spec](../.kiro/specs/decode-envelope/design.md) defines the
+next unmounted foundation: caller-owned reception IDs, separate producer/ingestion
+clocks, explicit unknown RF context and complete bounded decoded JSON. Public
+publication and Activity persistence remain separate checkpoints; parser fallback
+frequencies cannot establish event-time RF provenance.
 
 - [ ] Add a common decode envelope with stable identity, category, title, fields,
       actual channel frequency, source/decoder/job provenance and raw JSON.
