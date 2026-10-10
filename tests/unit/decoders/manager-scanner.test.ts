@@ -11,9 +11,18 @@ import { DecoderManager } from "../../../src/decoders/manager.js"
 import { DecoderRegistry } from "../../../src/decoders/registry.js"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
 import type { SourceManager } from "../../../src/core/source-manager.js"
-import type { DecoderCaps } from "../../../src/decoders/types.js"
+import type {
+	DecoderCaps,
+	DecoderChannelRequestResult,
+} from "../../../src/decoders/types.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
-import { FakeSources, RateDecoder, iqCaps } from "../../mocks/rate-fakes.js"
+import {
+	FakeSources,
+	RateDecoder,
+	deferred,
+	iqCaps,
+} from "../../mocks/rate-fakes.js"
+import { FakeChannelProvider } from "../../mocks/channel-fakes.js"
 
 const logger = pino({ level: "silent" })
 const DEBOUNCE = 350
@@ -23,6 +32,7 @@ const iqDecoderCaps: DecoderCaps = {
 	integrationPattern: "pure_consumer",
 }
 let sources: FakeSources
+let fanout: FanoutManager
 let manager: DecoderManager
 let decoders: Map<string, RateDecoder>
 let created: string[]
@@ -59,6 +69,23 @@ class StdinDecoder extends RateDecoder {
 		this.input?.off("data", this.track)
 		super.detachInput()
 	}
+}
+
+/** Requests a channelizer channel (no scanner input), so wiring can fail. */
+class ChannelProbe extends RateDecoder {
+	getChannelRequest(): DecoderChannelRequestResult {
+		return {
+			centerHz: 446_000_000,
+			bandwidthHz: 364_800,
+			transitionHz: 9_600,
+			outputRateHz: 384_000,
+			format: "cu8",
+		}
+	}
+}
+
+function managerRegistry(): DecoderRegistry {
+	return (manager as unknown as { registry: DecoderRegistry }).registry
 }
 
 const settle = () => vi.advanceTimersByTimeAsync(DEBOUNCE)
@@ -114,7 +141,8 @@ beforeEach(() => {
 		},
 		iqDecoderCaps,
 	)
-	manager = new DecoderManager(registry, new FanoutManager(logger), logger, {
+	fanout = new FanoutManager(logger)
+	manager = new DecoderManager(registry, fanout, logger, {
 		restartDelay: 10,
 		maxRestartDelay: 40,
 		validateVersions: false,
@@ -191,9 +219,7 @@ describe("ephemeral scanner probes", () => {
 	})
 
 	it("a failed start removes the probe and rethrows", async () => {
-		const registry = (manager as unknown as { registry: DecoderRegistry })
-			.registry
-		registry.register(
+		managerRegistry().register(
 			"failing",
 			config => {
 				const decoder = new RateDecoder(config.id, iqDecoderCaps)
@@ -211,6 +237,129 @@ describe("ephemeral scanner probes", () => {
 		expect(manager.getStatus("scan-x")).toBeUndefined()
 		expect(removed).toEqual(["scan-x"])
 		expect(sources.assignments.has("scan-x")).toBe(false)
+	})
+
+	it("a failed start whose stop also fails is still removed and rethrows the start error", async () => {
+		managerRegistry().register(
+			"failing-both",
+			config => {
+				const decoder = new RateDecoder(config.id, iqDecoderCaps)
+				decoder.failStart = true
+				decoder.failStop = true
+				return decoder
+			},
+			iqDecoderCaps,
+		)
+		await expect(
+			manager.createEphemeralDecoder(
+				{ ...probeConfig("scan-y"), type: "failing-both" },
+				{ owner: "scanner", jobId: "j1" },
+			),
+		).rejects.toThrow("spawn failed")
+		expect(manager.getStatus("scan-y")).toBeUndefined()
+		expect(removed).toEqual(["scan-y"])
+		expect(sources.assignments.has("scan-y")).toBe(false)
+	})
+
+	it("removeEphemeralDecoder removes the probe even when its stop fails", async () => {
+		await manager.createEphemeralDecoder(probeConfig(), {
+			owner: "scanner",
+			jobId: "j1",
+			input: new PassThrough(),
+		})
+		decoders.get("scan-j1-dmr-1")!.failStop = true
+		await expect(
+			manager.removeEphemeralDecoder("scan-j1-dmr-1"),
+		).rejects.toThrow("stop failed")
+		expect(manager.getStatus("scan-j1-dmr-1")).toBeUndefined()
+		expect(removed).toEqual(["scan-j1-dmr-1"])
+	})
+
+	it("a probe that cannot be wired is not started and leaves no channel or branch (PROBE_NOT_WIRED)", async () => {
+		const provider = new FakeChannelProvider()
+		provider.results.push({
+			ok: false,
+			reasonCode: "channelizer-unavailable",
+			detail: "ENOENT",
+		})
+		manager.setChannelizer(provider)
+		managerRegistry().register(
+			"chan-probe",
+			config => {
+				const decoder = new ChannelProbe(config.id, iqDecoderCaps)
+				decoders.set(config.id, decoder)
+				return decoder
+			},
+			iqDecoderCaps,
+		)
+		await expect(
+			manager.createEphemeralDecoder(
+				{ ...probeConfig("scan-nw"), type: "chan-probe", useChannelizer: true },
+				{ owner: "scanner", jobId: "j1" },
+			),
+		).rejects.toSatisfy(
+			(err: unknown) =>
+				err instanceof WaveKitError && err.code === "PROBE_NOT_WIRED",
+		)
+		const probe = decoders.get("scan-nw")!
+		expect(provider.calls).toHaveLength(1)
+		expect(probe.starts).toBe(0)
+		expect(probe.input).toBeNull()
+		expect(manager.getStatus("scan-nw")).toBeUndefined()
+		expect(removed).toEqual(["scan-nw"])
+		expect(sources.assignments.has("scan-nw")).toBe(false)
+		expect(provider.streams.size).toBe(0)
+		expect(provider.released).toEqual([])
+		expect(fanout.getBranchIds()).toEqual([])
+	})
+
+	it("a removal while the probe is wired never starts it", async () => {
+		const creating = manager.createEphemeralDecoder(probeConfig("scan-w"), {
+			owner: "scanner",
+			jobId: "j1",
+			input: new PassThrough(),
+		})
+		await manager.removeEphemeralDecoder("scan-w")
+		await expect(creating).rejects.toMatchObject({ code: "PROBE_REMOVED" })
+		expect(decoders.get("scan-w")!.starts).toBe(0)
+		expect(decoders.get("scan-w")!.input).toBeNull()
+		expect(manager.getStatus("scan-w")).toBeUndefined()
+		expect(removed).toEqual(["scan-w"])
+	})
+
+	it("a removal while the probe spawns stops it, attaches nothing and emits no status after removed", async () => {
+		const events: string[] = []
+		manager.on("decoder:status-changed", (id: string) =>
+			events.push(`status:${id}`),
+		)
+		manager.on("decoder:removed", (id: string) => events.push(`removed:${id}`))
+		const input = new PassThrough()
+		input.write(Buffer.alloc(4096, 1)) // pre-roll
+		const creating = manager.createEphemeralDecoder(
+			{ ...probeConfig("scan-race"), type: "stdin-test" },
+			{ owner: "scanner", jobId: "j1", input },
+		)
+		const outcome = creating.then(
+			() => null,
+			(err: unknown) => err,
+		)
+		const probe = decoders.get("scan-race") as StdinDecoder
+		const gate = deferred()
+		probe.startGate = gate
+		await ticks() // wired; start() now waits on the gate (the spawn)
+		expect(probe.starts).toBe(1)
+		await manager.removeEphemeralDecoder("scan-race")
+		gate.resolve()
+		expect(await outcome).toMatchObject({ code: "PROBE_REMOVED" })
+		await ticks()
+		expect(probe.running).toBe(false)
+		expect(probe.stops).toBe(2) // the removal's, then the one after the spawn
+		expect(probe.input).toBeNull()
+		expect(probe.trackedBytes).toBe(0)
+		expect(manager.getStatus("scan-race")).toBeUndefined()
+		expect(removed).toEqual(["scan-race"])
+		expect(events.at(-1)).toBe("removed:scan-race")
+		expect(sources.assignments.has("scan-race")).toBe(false)
 	})
 
 	it("is not suspended, resumed or restarted by caps changes", async () => {
@@ -245,6 +394,9 @@ describe("ephemeral scanner probes", () => {
 			health: "faulted",
 			desiredRunning: false,
 		})
+		await manager.startAll() // the probe pool owns probes, not startAll
+		expect(probe.starts).toBe(1)
+		expect(manager.getStatus("scan-j1-dmr-1")?.desiredRunning).toBe(false)
 	})
 
 	it("removeEphemeralDecoder stops, detaches, releases the source and emits removed", async () => {

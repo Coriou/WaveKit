@@ -524,6 +524,7 @@ export class DecoderManager extends EventEmitter {
 		state.rateGeneration++
 		try {
 			const outcome = await this.wireDecoderToFanout(state)
+			if (!this.probeLive(state)) throw this.probeRemovedError(config.id)
 			if (!outcome.wired) {
 				throw new WaveKitError(
 					`Scanner probe ${config.id} could not be wired: ${outcome.superseded ? "superseded" : `${outcome.reasonCode}: ${outcome.detail}`}`,
@@ -531,6 +532,20 @@ export class DecoderManager extends EventEmitter {
 				)
 			}
 			await decoder.start()
+			if (!this.probeLive(state)) {
+				// Removed or stopped while spawning: that stop ran before the
+				// process existed, so stop it again (this also clears timers the
+				// decoder armed after the spawn).
+				try {
+					await decoder.stop()
+				} catch (stopErr: unknown) {
+					this.log.warn(
+						{ err: stopErr, decoderId: config.id },
+						"Failed to stop a scanner probe removed during its start",
+					)
+				}
+				throw this.probeRemovedError(config.id)
+			}
 			// Attach only once the process exists: attachInput starts the stream
 			// flowing and pipes to stdin only when a process is running, so an
 			// earlier attach would drain the buffered pre-roll into the byte
@@ -540,12 +555,37 @@ export class DecoderManager extends EventEmitter {
 				state.inputAttached = true
 			}
 		} catch (err) {
-			state.lastError = createDecoderLastError(err, "error")
-			await this.removeDecoder(config.id)
+			// A concurrent stop or removal owns the cleanup of a probe it ended.
+			if (this.probeLive(state)) {
+				state.lastError = createDecoderLastError(err, "error")
+				try {
+					await this.removeDecoder(config.id)
+				} catch (removeErr: unknown) {
+					this.log.error(
+						{ err: removeErr, decoderId: config.id },
+						"Failed to remove a scanner probe whose start failed",
+					)
+				}
+			}
 			throw err
 		}
 		this.emitStatusChanged(state)
 		return decoder
+	}
+
+	/** False once the probe was removed or stopped (e.g. by the probe pool). */
+	private probeLive(state: DecoderState): boolean {
+		return (
+			this.decoders.get(state.config.id) === state &&
+			!state.intentionallyStopped
+		)
+	}
+
+	private probeRemovedError(id: string): WaveKitError {
+		return new WaveKitError(
+			`Scanner probe ${id} was removed during its start`,
+			"PROBE_REMOVED",
+		)
 	}
 
 	/** Stops and removes a probe; no-op for unknown ids. */
@@ -710,7 +750,7 @@ export class DecoderManager extends EventEmitter {
 				}
 				this.log.info(
 					{ decoderId: id, reasonCode: state.suspension.reasonCode },
-					"Start recorded; decoder suspended until the source rate and band are usable",
+					"Start recorded; decoder suspended (see reasonCode)",
 				)
 				this.emitStatusChanged(state)
 				return
@@ -820,6 +860,8 @@ export class DecoderManager extends EventEmitter {
 		const startPromises: Promise<void>[] = []
 
 		for (const [id, state] of this.decoders) {
+			// Probes are started and owned by the scanner's probe pool (spec § 6.5).
+			if (state.owner === "scanner") continue
 			if (state.config.enabled) {
 				startPromises.push(
 					this.startDecoder(id, { startMode: "auto" }).catch(err => {
@@ -959,7 +1001,17 @@ export class DecoderManager extends EventEmitter {
 		this.log.info({ decoderId: id }, "Removing decoder")
 
 		// Also cancel pending restarts when the process has already exited.
-		await this.stopDecoder(id)
+		// A probe is removed even when its stop fails: the probe pool cannot
+		// retry a removal that would fail the same way (spec § 6.5).
+		let stopFailed = false
+		let stopError: unknown
+		try {
+			await this.stopDecoder(id)
+		} catch (err) {
+			if (state.owner !== "scanner") throw err
+			stopFailed = true
+			stopError = err
+		}
 
 		// Remove event listeners
 		state.decoder.removeAllListeners()
@@ -967,6 +1019,7 @@ export class DecoderManager extends EventEmitter {
 		// Remove from map
 		this.decoders.delete(id)
 		this.emit("decoder:removed", id)
+		if (stopFailed) throw stopError
 	}
 
 	/**
@@ -2091,7 +2144,7 @@ export class DecoderManager extends EventEmitter {
 			this.updateDecoderHealth(state, "running")
 		this.log.info(
 			{ decoderId: id, reasonCode: state.suspension.reasonCode },
-			"Suspending decoder: source rate or band is unusable",
+			"Suspending decoder (see reasonCode)",
 		)
 		this.emitStatusChanged(state)
 
