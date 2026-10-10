@@ -34,28 +34,33 @@ Private `own_*` fixtures keep `payloads: []` (ruling QH-4: radio ids never enter
 
 Notes:
 
-- **Strays** (excluded from payloads): composed_pocsag `1690848/3` and sigid_pocsag `1860544/3`. Both are multimon-ng
-  address-only lines (`messageType: unknown`, empty message) that match no sidecar page. The composed one falls
-  between pages 1 and 2, so it is not a 0x7f pad decode. composed_ais_162m_2400k has 3 keys that 2048k lacks
+- **Strays** (excluded from payloads): composed_pocsag `1690848/3` (POCSAG1200) and sigid_pocsag `1860544/3`
+  (POCSAG512, ruling QH-7). Both are known multimon-ng bare-address strays: `messageType: unknown`, an empty
+  message, and no matching sidecar page. The composed one falls between pages 1 and 2, so it is not a 0x7f pad
+  decode. Its presence or absence on either path is not a channelizer regression. It is outside the payloads, and
+  the Property 15 key-set comparison may differ on it alone. composed_ais_162m_2400k has 3 keys that 2048k lacks
   (003669761/4, 993672078/21, 993672721/21). The real sources have no ground truth, so payloads use only keys
   that both rates decode.
-- **sigid_pocsag** decoded 0 until `decoder_options.offsetHz: -11000` was set. The 128 kHz file has nothing at DC.
+- **sigid_pocsag** (ruling QH-7) decoded 0 until `decoder_options.offsetHz: -11000` was set. The 128 kHz file has nothing at DC.
   Its paging carrier sits near -11 kHz, and an offline FM demod plus multimon-ng decodes the same pages there.
 - **rtl433_olympia_9571_2048k** decoded 0 on the raw path, and `rtl_433 -r cu8:<file> -s 2048000` alone also
-  decodes 0. Neither the image's rtl_433 nor 25.12 has an Olympia-9571 decoder. It was moved to `candidates`.
+  decodes 0. Neither the image's rtl_433 nor 25.12 has an Olympia-9571 decoder. It was moved to `candidates`
+  (ruling QH-8) and is excluded from the gate set.
 - No record run was suspended. The band verdicts are logged only, because the harness sets `bandSuspension: false`
   (E1). APRS and ACARS read `out-of-band`.
 
 ## Runs
 
-| date (CEST)      | host                                  | image                       | HEAD               | path                        | fixtures                       | result                                                                                                                                        | load (1-min, start → end) |
-| ---------------- | ------------------------------------- | --------------------------- | ------------------ | --------------------------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
-| 2026-10-10 09:57 | dev Mac (darwin, wavekit-app stopped) | local-core                  | b6fad0b            | raw, RECORD                 | the 14 above incl. olympia     | 12 recorded; sigid_pocsag float-timeout harness bug (fixed 83b4d8f); olympia 0                                                                | 4.71 → 2.87               |
-| 2026-10-10 11:01 | dev Mac                               | local-core                  | 83b4d8f + manifest | raw, RECORD                 | sigid_pocsag (offsetHz -11000) | count 6                                                                                                                                       | 3.85 → 3.08               |
-| 2026-10-10 11:03 | dev Mac                               | local-core                  | 83b4d8f + manifest | raw, gate (T8)              | 13 non-negative above          | 13/13 PASS; vitest exit 1 from an unhandled `[vitest-worker]: Timeout calling "onTaskUpdate"` (spawnSync blocks the worker), not an assertion | 3.23 → 2.83               |
-| 2026-10-10 (T27) | dev Mac                               | local-core and chan-46fbe76 | 46fbe76            | voice A/B default mode (E5) | `scripts/dsd-fme-voice-ab.mjs` | PASS on both, identical: muted 0.7 %, AMBE errors 6, link control 32, dmrSync 34, terminators 1                                               | 7.9 / 8.2                 |
-| 2026-10-10 11:13 | dev Mac                               | chan-46fbe76                | 452ea24            | raw, gate (T27)             | 13 non-negative above          | 13/13 PASS; same vitest RPC-timeout exit 1 as T8                                                                                              | 4.23 → 3.59               |
-| 2026-10-10 11:20 | dev Mac                               | chan-46fbe76                | 452ea24            | raw, RECORD (T27 identity)  | 13 non-negative above          | default-off identity: count and key set identical to the local-core record for all 13                                                         | 3.33 → 2.96               |
+| date (CEST)      | host                                  | image                       | HEAD               | path                                | fixtures                       | result                                                                                                                                                                                                       | load (1-min, start → end) |
+| ---------------- | ------------------------------------- | --------------------------- | ------------------ | ----------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------- |
+| 2026-10-10 09:57 | dev Mac (darwin, wavekit-app stopped) | local-core                  | b6fad0b            | raw, RECORD                         | the 14 above incl. olympia     | 12 recorded; sigid_pocsag float-timeout harness bug (fixed 83b4d8f); olympia 0                                                                                                                               | 4.71 → 2.87               |
+| 2026-10-10 11:01 | dev Mac                               | local-core                  | 83b4d8f + manifest | raw, RECORD                         | sigid_pocsag (offsetHz -11000) | count 6                                                                                                                                                                                                      | 3.85 → 3.08               |
+| 2026-10-10 11:03 | dev Mac                               | local-core                  | 83b4d8f + manifest | raw, gate (T8)                      | 13 non-negative above          | 13/13 PASS; vitest exit 1 from an unhandled `[vitest-worker]: Timeout calling "onTaskUpdate"` (spawnSync blocks the worker), not an assertion. The 09:57 record run's exit 1 also included this RPC timeout. | 3.23 → 2.83               |
+| 2026-10-10 (T27) | dev Mac                               | local-core and chan-46fbe76 | 46fbe76            | voice A/B default mode (E5)         | `scripts/dsd-fme-voice-ab.mjs` | PASS on both, identical: muted 0.7 %, AMBE errors 6, link control 32, dmrSync 34, terminators 1                                                                                                              | 7.9 / 8.2                 |
+| 2026-10-10 11:13 | dev Mac                               | chan-46fbe76                | 452ea24            | raw, gate (T27)                     | 13 non-negative above          | 13/13 PASS; same vitest RPC-timeout exit 1 as T8                                                                                                                                                             | 4.23 → 3.59               |
+| 2026-10-10 11:20 | dev Mac                               | chan-46fbe76                | 452ea24            | raw, RECORD (T27 identity)          | 13 non-negative above          | default-off identity: count and key set identical to the local-core record for all 13                                                                                                                        | 3.33 → 2.96               |
+| 2026-10-10 11:29 | dev Mac                               | local-core                  | 792a9da            | raw, gate (T8, async harness QH-9)  | 13 non-negative above          | 13/13 PASS, exit 0                                                                                                                                                                                           | 3.48 → 3.24               |
+| 2026-10-10 11:37 | dev Mac                               | chan-46fbe76                | 792a9da            | raw, gate (T27, async harness QH-9) | 13 non-negative above          | 13/13 PASS, exit 0; identical to the local-core row above                                                                                                                                                    | 3.27 → 3.13               |
 
 T8 step 3 (dev Mac): `vitest run tests/unit/fixtures` 157/157, `pnpm run typecheck` exit 0,
 `pnpm run lint` 0 errors (59 pre-existing warnings).
