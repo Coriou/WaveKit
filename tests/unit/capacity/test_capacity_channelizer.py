@@ -363,7 +363,8 @@ class DecodedSet(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             r = s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off"))
             missing = s.summarize(self.run_dir(d, "none", None, channelizer="off"))
-        self.assertEqual(r["decodedSet"], {"decoderId": "ais-catcher-ch2", "collectorExit": 0, "count": 4,
+        self.assertEqual(r["decodedSet"], {"decoderId": "ais-catcher-ch2", "collectorExit": 0, "minCount": None,
+                                           "marginalKeys": None, "count": 4,
                                            "keys": ['["211",1]', '["305",3]', '[null,5]']})
         self.assertIsNone(missing["decodedSet"])
 
@@ -376,11 +377,71 @@ class DecodedSet(unittest.TestCase):
                     s.summarize(self.run_dir(d, "on", fewer, channelizer="on")),
                     s.summarize(self.run_dir(d, "on-8", OUTPUTS, channelizer="on", channels=8))]
         cmp = s.decoded_set_comparisons(runs)
-        # on-8 has no off cell with 8 channels; the unbounded off cell is not the reference.
+        # The unbounded off cell is not the reference; on-8 has no off cell with 8 channels, so it gets an
+        # error row instead of being dropped (ruling FINAL-residual-1).
         self.assertEqual(cmp, [{"decodedSetComparison": {
             "fixture": "composed_ais_162m_2048k", "rate": 2048000, "channels": 4, "placement": "spread",
             "playback": "paced", "channelizerRun": "on", "boundedCsdrRun": "off-bounded",
-            "equal": False, "onlyBoundedCsdr": ["[null,5]"], "onlyChannelizer": []}}])
+            "equal": False, "onlyBoundedCsdr": ["[null,5]"], "onlyChannelizer": [], "outsideMarginal": ["[null,5]"],
+            "counts": {"channelizer": 3, "boundedCsdr": 4, "minCount": None}}}, {"decodedSetComparison": {
+            "fixture": "composed_ais_162m_2048k", "rate": 2048000, "channels": 8, "placement": "spread",
+            "playback": "paced", "channelizerRun": "on-8", "boundedCsdrRun": None, "equal": False,
+            "error": "no bounded-CSDR partner cell with a decodedSet"}}])
+
+    def test_equal_sets_compare_equal(self):
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off", minCount=4)),
+                    s.summarize(self.run_dir(d, "on", OUTPUTS, channelizer="on", minCount=4))]
+        (cmp,) = s.decoded_set_comparisons(runs)
+        self.assertTrue(cmp["decodedSetComparison"]["equal"])
+        self.assertNotIn("error", cmp["decodedSetComparison"])
+
+    def test_two_empty_sets_never_compare_equal(self):
+        # Ruling FINAL-residual-1: both cells decoding nothing is not a pass.
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off", "", channelizer="off")),
+                    s.summarize(self.run_dir(d, "on", "", channelizer="on"))]
+        (cmp,) = s.decoded_set_comparisons(runs)
+        row = cmp["decodedSetComparison"]
+        self.assertFalse(row["equal"])
+        self.assertIn("decoded nothing (off)", row["error"])
+        self.assertIn("decoded nothing (on)", row["error"])
+
+    def test_a_side_below_min_count_never_compares_equal(self):
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off", minCount=5)),
+                    s.summarize(self.run_dir(d, "on", OUTPUTS, channelizer="on", minCount=5))]
+        (cmp,) = s.decoded_set_comparisons(runs)
+        row = cmp["decodedSetComparison"]
+        self.assertFalse(row["equal"])
+        self.assertEqual(row["error"], "decoded 4 < minCount 5 (off); decoded 4 < minCount 5 (on)")
+        self.assertEqual(row["counts"], {"channelizer": 4, "boundedCsdr": 4, "minCount": 5})
+
+    def test_a_channelizer_cell_without_a_decoded_set_gets_an_error_row(self):
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            off = s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off"))
+            no_outputs = s.summarize(self.run_dir(d, "on", None, channelizer="on"))
+            broken = self.run_dir(d, "on-broken", OUTPUTS, channelizer="on", placement="clustered")
+            (broken / "samples.jsonl").write_text("")
+            runs = [off, no_outputs, s.summarize(broken)]
+        rows = [c["decodedSetComparison"] for c in s.decoded_set_comparisons(runs)]
+        self.assertEqual([(r["channelizerRun"], r["equal"]) for r in rows], [("on", False), ("on-broken", False)])
+        self.assertEqual(rows[0]["error"], "no decodedSet (on)")
+        self.assertEqual(rows[1]["error"], "no decodedSet (on-broken: fewer than two samples)")
+
+    def test_one_sided_keys_outside_the_marginal_keys_are_listed(self):
+        s = load("summarize")
+        fewer = "\n".join(OUTPUTS.splitlines()[:3])  # "[null,5]" lost
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off", marginalKeys=["[null,5]"])),
+                    s.summarize(self.run_dir(d, "on", fewer, channelizer="on", marginalKeys=["[null,5]"]))]
+        (cmp,) = s.decoded_set_comparisons(runs)
+        self.assertFalse(cmp["decodedSetComparison"]["equal"])  # strict stays strict
+        self.assertEqual(cmp["decodedSetComparison"]["outsideMarginal"], [])
 
     def test_a_failed_collector_never_compares_equal(self):
         s = load("summarize")

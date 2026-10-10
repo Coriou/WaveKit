@@ -25,7 +25,13 @@ stats/error/sync). After the per-run lines, one "decodedSetComparison" line per
 channelizer-on cell compares it with the channelizer-off, --buffers on cell of
 the same fixture, rate, channels, placement and playback (addendum §9: the
 same decoded set as the bounded-CSDR path). A collector that did not exit 0
-never compares equal.
+never compares equal, and neither does a side that decoded nothing or fewer
+outputs than the fixture's expected.min_count (meta "minCount"; ruling
+FINAL-residual-1: two empty sets are not a pass). A channelizer-on cell with no
+decodedSet or no bounded-CSDR partner still gets a comparison line, with
+"equal": false and an "error". "outsideMarginal" lists the one-sided keys that
+are not in the fixture's expected.marginal_keys (ruling QH-14); "equal" itself
+stays strict.
 
 Clock domains: pino's `time` in app.log and the sampler's `ts` both come from
 the container clock (sampler.py runs inside wkcap-app), so the window is the
@@ -140,30 +146,52 @@ def decoded_set(outputs_text, key_fields, output_types=None):
     return {"count": count, "keys": sorted(keys)}
 
 
+def decoded_set_problems(run):
+    """Why a run's decoded set cannot back an equality verdict (empty list if it can)."""
+    decoded = run["decodedSet"]
+    problems = []
+    if decoded["collectorExit"] != 0:
+        problems.append(f"collector exit {decoded['collectorExit']} ({run['run']})")
+    floor = decoded.get("minCount")
+    if decoded["count"] == 0:
+        problems.append(f"decoded nothing ({run['run']})")
+    elif isinstance(floor, int) and decoded["count"] < floor:
+        problems.append(f"decoded {decoded['count']} < minCount {floor} ({run['run']})")
+    return problems
+
+
 def decoded_set_comparisons(summaries):
-    """One comparison per channelizer-on run that has a bounded-CSDR (off, buffers on) run of the same cell."""
+    """One comparison per channelizer-on run, against the bounded-CSDR (off, buffers on) run of the same cell."""
     def cell(r):
         m = r.get("matrix") or {}
         return ((m.get("fixture") or {}).get("id"), r.get("rate"), m.get("channels"), m.get("placement"),
                 m.get("playback"))
-    runs = [r for r in summaries if r.get("decodedSet")]
-    reference = {cell(r): r for r in runs
-                 if (r.get("matrix") or {}).get("channelizer") == "off" and r.get("buffers") == "on"}
+    reference = {cell(r): r for r in summaries if r.get("decodedSet")
+                 and (r.get("matrix") or {}).get("channelizer") == "off" and r.get("buffers") == "on"}
     comparisons = []
-    for r in runs:
-        ref = reference.get(cell(r))
-        if (r.get("matrix") or {}).get("channelizer") != "on" or ref is None:
+    for r in summaries:
+        if (r.get("matrix") or {}).get("channelizer") != "on":
             continue
-        on, off = set(r["decodedSet"]["keys"]), set(ref["decodedSet"]["keys"])
         fixture, rate, channels, placement, playback = cell(r)
+        ref = reference.get(cell(r))
         row = {"fixture": fixture, "rate": rate, "channels": channels, "placement": placement,
-               "playback": playback, "channelizerRun": r["run"], "boundedCsdrRun": ref["run"],
-               "equal": on == off, "onlyBoundedCsdr": sorted(off - on), "onlyChannelizer": sorted(on - off)}
-        failed = [f"collector exit {x['decodedSet']['collectorExit']} ({x['run']})" for x in (ref, r)
-                  if x["decodedSet"]["collectorExit"] != 0]
-        if failed:
-            row["equal"] = False
-            row["error"] = "; ".join(failed)
+               "playback": playback, "channelizerRun": r["run"], "boundedCsdrRun": ref["run"] if ref else None,
+               "equal": False}
+        if not r.get("decodedSet"):
+            row["error"] = f"no decodedSet ({r['run']}{': ' + r['error'] if r.get('error') else ''})"
+        elif ref is None:
+            row["error"] = "no bounded-CSDR partner cell with a decodedSet"
+        else:
+            on, off = set(r["decodedSet"]["keys"]), set(ref["decodedSet"]["keys"])
+            marginal = set(r["decodedSet"].get("marginalKeys") or [])
+            row.update({"equal": on == off, "onlyBoundedCsdr": sorted(off - on), "onlyChannelizer": sorted(on - off),
+                        "outsideMarginal": sorted((on ^ off) - marginal),
+                        "counts": {"channelizer": r["decodedSet"]["count"], "boundedCsdr": ref["decodedSet"]["count"],
+                                   "minCount": r["decodedSet"].get("minCount")}})
+            failed = decoded_set_problems(ref) + decoded_set_problems(r)
+            if failed:
+                row["equal"] = False
+                row["error"] = "; ".join(failed)
         comparisons.append({"decodedSetComparison": row})
     return comparisons
 
@@ -184,9 +212,12 @@ def coverage_warnings(stats):
 
 def summarize(run):
     meta = json.loads((run / "meta.json").read_text())
+    matrix = {k: meta.get(k) for k in ("channelizer", "channels", "placement", "placements",
+                                        "fixture", "playback", "wavekitChanVersion")}
     samples = load(run / "samples.jsonl") if (run / "samples.jsonl").exists() else []
     if len(samples) < 2:
-        return {"run": run.name, "meta": meta, "error": "fewer than two samples"}
+        return {"run": run.name, "rate": meta.get("rate"), "buffers": meta.get("buffers"), "matrix": matrix,
+                "meta": meta, "error": "fewer than two samples"}
     first, last = samples[0], samples[-1]
     seconds = last["ts"] - first["ts"]
     sampler_cpu = 0.0
@@ -265,13 +296,13 @@ def summarize(run):
     decoded = None
     if meta.get("signalDecoder") and outputs.exists():
         decoded = {"decoderId": meta["signalDecoder"], "collectorExit": meta.get("collectorExit"),
+                   "minCount": meta.get("minCount"), "marginalKeys": meta.get("marginalKeys"),
                    **decoded_set(outputs.read_text(errors="replace"), meta.get("keyFields") or [],
                                  meta.get("outputTypes"))}
     return {
         "run": run.name,
         "rate": meta["rate"], "buffers": meta["buffers"], "decoders": meta["decoders"],
-        "matrix": {k: meta.get(k) for k in ("channelizer", "channels", "placement", "placements",
-                                            "fixture", "playback", "wavekitChanVersion")},
+        "matrix": matrix,
         "decoderStatus": meta.get("decoderStatus"),
         "windowSeconds": round(seconds, 1), "aborted": meta.get("aborted"),
         "cpuCores": {"total": round((cpu("usage_usec") - sampler_cpu) / seconds, 3),

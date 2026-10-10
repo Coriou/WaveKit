@@ -377,6 +377,9 @@ def main():
         "signalDecoder": signal_id,
         "keyFields": fixture["expected"].get("key_fields") if fixture else None,
         "outputTypes": fixture["expected"].get("output_types") if fixture else None,
+        # Ruling FINAL-residual-1: a decoded set below the fixture's floor never compares equal.
+        "minCount": fixture["expected"].get("min_count") if fixture else None,
+        "marginalKeys": fixture["expected"].get("marginal_keys") if fixture else None,
         # Delta E12 pins, written by write_config
         "pinned": {"bandSuspension": False, "digitalVoiceEnabled": False, "liveDemodEnabled": False},
     }
