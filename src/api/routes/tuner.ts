@@ -3,7 +3,10 @@
  */
 
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
-import type { TunerController } from "../../core/tuner-controller.js"
+import type {
+	TunerController,
+	TunerWriteOptions,
+} from "../../core/tuner-controller.js"
 import type {
 	TunerState,
 	SetFrequencyRequest,
@@ -20,6 +23,9 @@ import type {
 	SetXtalRequest,
 	TunerConfigUpdate,
 } from "@wavekit/api-types"
+
+/** Every REST tuner write is an operator command (signal discovery spec § 10.3). */
+const REST: TunerWriteOptions = { origin: "rest" }
 
 const tunerIfGainSchema = {
 	type: "object",
@@ -205,6 +211,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setFrequency(
 					request.params.sourceId,
 					request.body.hz,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -238,6 +245,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setGain(
 					request.params.sourceId,
 					request.body.tenthsDb,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -271,6 +279,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setGainMode(
 					request.params.sourceId,
 					request.body.mode,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -304,6 +313,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setSampleRate(
 					request.params.sourceId,
 					request.body.hz,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -334,7 +344,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
-				await tunerController.setPpm(request.params.sourceId, request.body.ppm)
+				await tunerController.setPpm(
+					request.params.sourceId,
+					request.body.ppm,
+					REST,
+				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
 				return handleTunerError(reply, err)
@@ -367,6 +381,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setIfGain(
 					request.params.sourceId,
 					request.body.gain,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -400,6 +415,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setTestMode(
 					request.params.sourceId,
 					request.body.enabled,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -433,6 +449,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setAgcMode(
 					request.params.sourceId,
 					request.body.enabled,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -466,6 +483,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setBiasTee(
 					request.params.sourceId,
 					request.body.enabled,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -499,6 +517,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setDirectSampling(
 					request.params.sourceId,
 					request.body.mode,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -532,6 +551,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setOffsetTuning(
 					request.params.sourceId,
 					request.body.enabled,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -565,6 +585,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setRtlXtal(
 					request.params.sourceId,
 					request.body.hz,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -598,6 +619,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setTunerXtal(
 					request.params.sourceId,
 					request.body.hz,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -631,6 +653,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				await tunerController.setTunerGainIndex(
 					request.params.sourceId,
 					request.body.index,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -668,6 +691,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 					request.params.sourceId,
 					request.body.stage,
 					request.body.gain,
+					REST,
 				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
@@ -731,7 +755,11 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 		},
 		async (request, reply) => {
 			try {
-				await tunerController.configure(request.params.sourceId, request.body)
+				await tunerController.configure(
+					request.params.sourceId,
+					request.body,
+					REST,
+				)
 				return tunerController.getState(request.params.sourceId)
 			} catch (err) {
 				return handleTunerError(reply, err)
