@@ -169,3 +169,36 @@ export function feedTones(
 
 export const tick = (ms = 0): Promise<void> =>
 	new Promise(resolve => setTimeout(resolve, ms))
+
+/**
+ * Waits until every job's queued dispatches and actions (teardown included) and every queued lease
+ * arbitration have run, instead of a fixed sleep (Task 37a re-review, finding 9). Repeats until a
+ * round queues nothing new: a dispatch can queue an arbitration, and an arbitration a dispatch.
+ */
+export async function settled(service: ScannerService): Promise<void> {
+	const internals = service as unknown as {
+		drivers: Map<string, { idle(): Promise<void> }>
+		arbitrations: Map<string, Promise<void>>
+	}
+	const snapshot = (): unknown[] => [
+		...internals.arbitrations.values(),
+		...[...internals.drivers.values()].map(
+			d => (d as unknown as { chain?: unknown }).chain,
+		),
+	]
+	for (let round = 0; round < 50; round++) {
+		const before = snapshot()
+		await Promise.all([
+			...[...internals.drivers.values()].map(d => d.idle()),
+			...internals.arbitrations.values(),
+		])
+		// job events queued with queueMicrotask, arbitrations queued from callbacks
+		await new Promise<void>(resolve => setImmediate(resolve))
+		const after = snapshot()
+		if (
+			after.length === before.length &&
+			after.every((x, i) => x === before[i])
+		)
+			return
+	}
+}

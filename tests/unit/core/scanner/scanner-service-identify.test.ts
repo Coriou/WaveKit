@@ -8,6 +8,7 @@ import {
 	CENTRE,
 	feedTone,
 	serviceHarness,
+	settled,
 	tick,
 } from "../../../mocks/scanner/service-fakes.js"
 
@@ -46,7 +47,7 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 			takeover: true,
 			resume: { autoAfterIdleMs: null },
 		})
-		await tick(20)
+		await settled(h.service)
 		await expect(
 			h.service.identify({ sourceId: "rtl", target: { frequencyHz: CENTRE } }),
 		).rejects.toMatchObject({

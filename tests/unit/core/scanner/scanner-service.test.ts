@@ -2,7 +2,7 @@ import type { EventEmitter } from "node:events"
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScanJob } from "@wavekit/api-types"
@@ -11,10 +11,13 @@ import {
 	feedTone,
 	feedTones,
 	serviceHarness,
+	settled,
 	tick,
 } from "../../../mocks/scanner/service-fakes.js"
 
 type Harness = ReturnType<typeof serviceHarness>
+/** Bound for state reached through I/O or the arbiter (vi.waitFor), never a fixed sleep. */
+const WAIT = { timeout: 5_000, interval: 5 }
 const holderOf = (h: Harness): string | undefined =>
 	(
 		h.service as unknown as {
@@ -38,10 +41,10 @@ const sweep = (priority: number) => ({
  */
 async function untilRunning(h: Harness, id: string, seed = 20): Promise<void> {
 	for (let i = 0; i < 50 && h.service.getJob(id)?.state === "starting"; i++) {
-		await tick(5)
+		await settled(h.service)
 		feedTone(h.fanout, 0.1, 0, 0, seed + i)
 	}
-	await tick()
+	await settled(h.service)
 }
 
 describe("ScannerService", () => {
@@ -117,7 +120,7 @@ describe("ScannerService", () => {
 							} catch (err) {
 								expect(err).toMatchObject({ statusCode: expect.any(Number) })
 							}
-							await tick()
+							await settled(h.service)
 							const jobs = h.service
 								.listJobs()
 								.filter(j => j.spec.mode === "sweep")
@@ -165,7 +168,7 @@ describe("ScannerService", () => {
 		})
 		await h.service.start()
 		const job = await h.service.createJob(sweep(50))
-		await tick(20)
+		await settled(h.service)
 		expect(h.tuner.states.get("rtl")!.frequency).not.toBe(CENTRE)
 		await h.service.stop()
 		const writes = h.tuner.sent
@@ -244,14 +247,14 @@ describe("ScannerService", () => {
 		const low = await h.service.createJob(sweep(30))
 		await untilRunning(h, low.id)
 		const high = await h.service.createJob(sweep(60))
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)).toMatchObject<Partial<ScanJob>>({
 			state: "paused",
 			reason: "preempted-job",
 		})
 		expect(holderOf(h)).toBe(high.id)
 		await h.service.cancelJob(high.id)
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("running")
 		expect(holderOf(h)).toBe(low.id)
 		await h.service.stop()
@@ -272,7 +275,7 @@ describe("ScannerService", () => {
 				? holdSource(sourceId, reason, holderId)
 				: Promise.reject(new Error("hold failed"))
 		await expect(h.service.createJob(sweep(60))).rejects.toThrow("hold failed")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("running")
 		expect(holderOf(h)).toBe(low.id)
 		await h.service.stop()
@@ -288,7 +291,7 @@ describe("ScannerService", () => {
 		await h.service.start()
 		// markers and no samples: the first own epoch waits for its marker run, so the sweep stays in "starting"
 		const low = await h.service.createJob(sweep(30))
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("starting")
 		await expect(h.service.createJob(sweep(60))).rejects.toMatchObject({
 			statusCode: 409,
@@ -299,7 +302,7 @@ describe("ScannerService", () => {
 		expect(h.service.getJob(low.id)?.state).toBe("starting")
 		// an operator write while it starts fails it (tuner-error), it is never left holding nothing
 		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)).toMatchObject<Partial<ScanJob>>({
 			state: "failed",
 			reason: "tuner-unavailable",
@@ -325,7 +328,7 @@ describe("ScannerService", () => {
 			reason: "preempted-job",
 		})
 		await h.service.cancelJob(second.id)
-		await tick(20)
+		await settled(h.service)
 		expect(holderOf(h)).toBe(first.id)
 		await h.service.stop()
 	})
@@ -558,7 +561,7 @@ describe("ScannerService", () => {
 			mode: "in-window",
 			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
 		})
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(job.id)?.state).toBe("running")
 		expect(h.service.getJob("passive-rtl")?.state).toBe("running")
 		await h.service.stop()
@@ -587,7 +590,14 @@ describe("ScannerService", () => {
 		const job = await a.service.createJob(sweep(50))
 		await untilRunning(a, job.id)
 		await a.service.patchSettings({ detection: { sensitivity: "high" } })
-		await tick(20)
+		await vi.waitFor(
+			() =>
+				expect(
+					JSON.parse(readFileSync(join(a.dir, "jobs.json"), "utf8")).jobs[0]
+						.lease?.jobId,
+				).toBe(job.id),
+			WAIT,
+		)
 		// the state a crash during the sweep leaves: the job with its lease
 		const crashedJobs = readFileSync(join(a.dir, "jobs.json"), "utf8")
 		expect(JSON.parse(crashedJobs).jobs[0].lease.jobId).toBe(job.id)
@@ -603,7 +613,15 @@ describe("ScannerService", () => {
 		// the persisted lease is recovered: the pre-crash centre is restored on connection
 		b.tuner.states.get("rtl")!.frequency = 450_100_000
 		b.sources.emit("payload-started", "rtl")
-		await tick(20)
+		await vi.waitFor(
+			() =>
+				expect(
+					b.tuner.sent.some(
+						c => c.origin === "scanner" && c.name === "set-frequency",
+					),
+				).toBe(true),
+			WAIT,
+		)
 		expect(
 			b.tuner.sent.filter(
 				c => c.origin === "scanner" && c.name === "set-frequency",
@@ -650,7 +668,7 @@ describe("ScannerService", () => {
 			mode: "in-window",
 			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
 		})
-		await tick(20)
+		await settled(b.service)
 		expect(b.service.getJob(inWindow.id)?.state).toBe("running")
 		await b.service.cancelJob(inWindow.id)
 		await b.service.stop()
@@ -678,7 +696,7 @@ describe("ScannerService", () => {
 		}
 		expect(centres().size).toBeGreaterThan(1)
 		await h.service.pauseJob(job.id)
-		await tick(20)
+		await settled(h.service)
 		const sent = h.tuner.sent.length
 		for (let i = 0; i < 15; i++) {
 			feedTone(h.fanout, 0.1, 0, 0, 90 + i)
@@ -704,7 +722,7 @@ describe("ScannerService", () => {
 			...sweep(60),
 			stop: { afterSweeps: 1 },
 		})
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
 		for (
 			let i = 0;
@@ -715,7 +733,7 @@ describe("ScannerService", () => {
 			await tick(5)
 		}
 		expect(h.service.getJob(high.id)?.state).toBe("completed")
-		await tick(50)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.state).toBe("running")
 		expect(holderOf(h)).toBe(low.id)
 		await h.service.stop()
@@ -728,7 +746,7 @@ describe("ScannerService", () => {
 		await untilRunning(h, job.id)
 		await h.service.pauseJob(job.id)
 		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
 			state: "paused",
 			reason: "operator",
@@ -749,7 +767,7 @@ describe("ScannerService", () => {
 		await untilRunning(h, job.id)
 		await h.service.pauseJob(job.id)
 		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await tick(20)
+		await settled(h.service)
 		const other = await h.service.createJob(sweep(60))
 		await untilRunning(h, other.id)
 		await expect(
@@ -771,7 +789,7 @@ describe("ScannerService", () => {
 		const job = await h.service.createJob(sweep(50))
 		await untilRunning(h, job.id)
 		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(job.id)?.reason).toBe("preempted-operator")
 		await h.service.resumeJob(job.id, { takeover: false })
 		expect(h.service.getJob(job.id)?.state).toBe("running")
@@ -785,7 +803,7 @@ describe("ScannerService", () => {
 		const job = await h.service.createJob(sweep(50))
 		await untilRunning(h, job.id)
 		h.tuner.setControl("rtl", "external")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(job.id)?.reason).toBe("preempted-relay")
 		await expect(
 			h.service.resumeJob(job.id, { takeover: false }),
@@ -813,7 +831,7 @@ describe("ScannerService", () => {
 		await untilRunning(h, high.id)
 		await h.service.pauseJob(high.id)
 		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
-		await tick(20)
+		await settled(h.service)
 		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
 		expect(h.service.getJob(mid.id)?.reason).toBe("preempted-job")
 		expect(h.service.getJob(high.id)?.reason).toBe("operator")
@@ -851,7 +869,7 @@ describe("ScannerService", () => {
 		}
 		internals.queueArbitration("rtl", () => false)
 		internals.queueArbitration("rtl")
-		await tick(20)
+		await settled(h.service)
 		// the widened run handed the best waiter its preemptor-idle; high (created after mid) grew
 		// mid's impact, so it is blocked rather than running. A filtered-only run leaves it waiting.
 		expect(h.service.getJob(mid.id)).toMatchObject<Partial<ScanJob>>({
@@ -998,9 +1016,10 @@ describe("ScannerService", () => {
 		expect(h.service.getJob("passive-rtl")).toBeUndefined()
 		h.sources.caps.set("rtl", h.configCaps)
 		h.sources.emit("connected", "rtl")
-		await tick(20)
-		feedTone(h.fanout, 0.5, 93_750)
-		await tick(100)
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")?.state).toBe("running"),
+			WAIT,
+		)
 		expect(h.service.getJob("passive-rtl")?.state).toBe("running")
 		await h.service.stop()
 	})
@@ -1016,7 +1035,7 @@ describe("ScannerService", () => {
 			...sweep(50),
 			resume: { autoAfterIdleMs: null, onBoot: true },
 		})
-		await tick(20)
+		await settled(h.service)
 		await h.service.stop()
 		const again = serviceHarness({
 			dir: h.dir,
