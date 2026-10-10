@@ -221,10 +221,7 @@ export class AisCatcherDecoder extends IqDecimateDecoder {
 		}
 	}
 
-	/** Migrated to the opt-in core channelizer (addendum §7 step 1). */
-	protected override channelizerSupported(): boolean {
-		return true
-	}
+	// channelizerSupported() stays false: the T28 Property 15 gate failed on 2026-10-10 (ruling PF9, fixtures/GOLDENS.md).
 
 	protected override getIqDecimationConfig(): IqDecimationConfig {
 		const inputRate = this.options.inputSampleRate ?? 2_400_000

@@ -64,3 +64,28 @@ Notes:
 
 T8 step 3 (dev Mac): `vitest run tests/unit/fixtures` 157/157, `pnpm run typecheck` exit 0,
 `pnpm run lint` 0 errors (59 pre-existing warnings).
+
+## Channelizer gates (T28–T31, Property 15)
+
+Runs use `WAVEKIT_FIXTURE_PATHS=raw,channelizer` and that decoder's `WAVEKIT_FIXTURE_IDS` on the dev Mac. wavekit-app is
+stopped and wk-fixtures runs on `chan-46fbe76`. Each decoder gets a RECORD run (counts and keys for both paths), then
+a gate run. A failed gate reverts that decoder's `channelizerSupported()` (ruling PF9). The flag reverts in source only,
+so the image under test is unchanged.
+
+| date (CEST)      | decoder     | HEAD    | fixture                             | raw count / keys | channelizer count / keys                | verdict                                                                                | load (1-min, start → end) |
+| ---------------- | ----------- | ------- | ----------------------------------- | ---------------- | --------------------------------------- | -------------------------------------------------------------------------------------- | ------------------------- |
+| 2026-10-10 11:46 | ais-catcher | 985b2f2 | composed_ais_162m_2048k             | 58 / 27          | 63 / 30 (3 of 3 runs)                   | FAIL Property 15: chan ⊋ raw, +003669761/4, +203245890/24, +993672078/21, nothing lost | 3.43 → 3.00               |
+|                  |             |         | composed_ais_162m_2400k             | 62 / 30          | 62 / 30 once, 60 / 29 twice             | FAIL Property 15: chan always lacks 993672078/21; one run also gained 203245890/18     |                           |
+|                  |             |         | composed_ais_162m_2048k_outside     | (not run)        | 0, suspended, `channel-outside-capture` | PASS                                                                                   |                           |
+| 2026-10-10 11:57 | dumpvdl2    | 985b2f2 | composed_vdl2_136800k_2048k         | 22 / 11          | 22 / 11, identical key set              | PASS (QH-10: composed fixture; live aircraft check moves to the post-merge A/B soak)   | 3.42 → 4.33               |
+|                  |             |         | composed_vdl2_136800k_2048k_outside | (not run)        | 0, suspended, `channel-outside-capture` | PASS                                                                                   |                           |
+
+Notes:
+
+- **ais-catcher (T28): flag reverted (PF9).** Every payload is present and every count is at least min_count on both
+  paths. The failure is strict key-set inequality on marginal real-capture frames. The channelizer is lossless here:
+  `droppedSamples` 0, `saturatedSamples` 0, and `outputSamples` exactly 9.6 M = 60 M × 384/2400. Both paths run the same
+  `AIS-catcher -r CU8 . -s 384000`; only the front differs (`sox rate -h` versus the channel). The 2400k channel-path
+  variance (60 or 62 messages) is AIS-catcher on a marginal frame, not a sample drop. 993672078/21 is also absent from
+  raw 2048k. Trying the cu8 `gain` request field needs a code change and a new image, so it was not tried. A
+  tolerance ruling for real-recording AIS is open with the orchestrator.
