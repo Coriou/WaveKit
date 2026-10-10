@@ -631,6 +631,9 @@ export class SpectrumService extends EventEmitter {
 			await engine.start()
 		} catch (err) {
 			this.errors.set(sourceId, errorMessage(err))
+			this.log.warn({ err, sourceId }, "Spectrum engine failed to start")
+			// Undo any partial setup (branch, listeners, host).
+			void engine.stop().catch(() => undefined)
 			throw err
 		}
 		engine.setSpectrumFeed(true)
@@ -836,14 +839,18 @@ export class SpectrumService extends EventEmitter {
 			} catch (err) {
 				if (this.superseded(state, seq)) return this.abort(clientId, state)
 				if (selection.sourceId === null) {
-					// Default selection: one failing source is logged once and skipped.
+					// Default selection: one failing source is logged once and skipped. A removal is no engine error.
+					const removed =
+						err instanceof WaveKitError &&
+						err.code === "SPECTRUM_SOURCE_REMOVED"
 					const message = errorMessage(err)
-					if (this.errors.get(sourceId) !== message)
+					if (!removed && this.errors.get(sourceId) !== message) {
 						this.log.warn(
 							{ err, sourceId },
 							"Spectrum engine for subscribers failed to start",
 						)
-					this.errors.set(sourceId, message)
+						this.errors.set(sourceId, message)
+					}
 					continue
 				}
 				const code: SpectrumSubscribeErrorCode =
@@ -921,6 +928,13 @@ export class SpectrumService extends EventEmitter {
 			(this.sourceGen.get(sourceId) ?? 0) !== gen ||
 			this.removedSources.has(sourceId)
 		) {
+			// The removal may have found no entry yet (still opening): drop its display data now.
+			const entry = this.entries.get(sourceId)
+			if (entry) {
+				entry.holds.clear()
+				entry.lastSummary = null
+				entry.lastEpoch = null
+			}
 			state.held.delete(sourceId)
 			await this.release(sourceId, wsConsumer(clientId))
 			throw this.removedError(sourceId)

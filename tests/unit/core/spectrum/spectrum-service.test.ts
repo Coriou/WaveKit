@@ -929,12 +929,22 @@ describe("SpectrumService", () => {
 		await j.service.start()
 		await j.service.acquire("rtl", "job:a")
 		await j.service.subscribe("c1", { sourceId: "rtl" })
+		j.host("rtl").epoch(1, true)
+		j.host("rtl").summaries(1)
+		const rtlStatus = () =>
+			j.service.status().sources.find(s => s.sourceId === "rtl")
+		expect(rtlStatus()?.summaryBinCount).toBe(819)
 		j.sources.emit("source-removed", "rtl", new Date())
 		await settle()
 		expect(j.service.sourceIds()).toEqual(["rtl"])
 		expect(j.service.allocation().consumers["rtl"]).toEqual({
 			jobs: ["job:a"],
 			displays: [],
+		})
+		// the job keeps the engine, but no display data of the removed source survives
+		expect(rtlStatus()).toMatchObject({
+			summaryBinCount: null,
+			latestFrame: null,
 		})
 		await j.service.release("rtl", "job:a")
 		expect(j.service.sourceIds()).toEqual([])
@@ -971,6 +981,28 @@ describe("SpectrumService", () => {
 		expect(h.service.sourceIds()).toEqual([])
 		expect(h.fanout.branches.size).toBe(0)
 		await h.service.stop()
+
+		// A default client: the removed source is skipped, and the removal is no engine error.
+		const d = make({ fake: true })
+		await d.service.start()
+		const dg = gate()
+		d.mem.engineGates.set("rtl", dg.promise)
+		const joining = d.service.subscribe("c2", undefined)
+		await settle()
+		d.sources.emit("source-removed", "rtl", new Date())
+		dg.open()
+		await joining
+		await settle()
+		expect(d.acks("c2").map(a => a.outcome)).toEqual(["default"])
+		expect(d.service.sourceIds()).toEqual(["air"])
+		const rtl = d.service.status().sources.find(s => s.sourceId === "rtl")
+		expect(rtl).toMatchObject({
+			engine: "idle",
+			eligible: false,
+			reason: "source-removed",
+		})
+		expect(rtl?.lastError).toBeUndefined()
+		await d.service.stop()
 	})
 
 	it("the profile cap stays bounded across default PATCH changes", async () => {

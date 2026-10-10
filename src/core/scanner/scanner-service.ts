@@ -1084,6 +1084,9 @@ export class ScannerService extends EventEmitter {
 		jobId: string,
 	): Promise<SpectrumEngine> {
 		const engine = await this.spectrum.acquire(sourceId, `job:${jobId}`)
+		// A display-opened engine emitted no stream event to the scanner (R2): the floor would still
+		// hold an earlier instance's stop. Never above the live stream, so this is safe unconditionally.
+		this.streamFloor.set(sourceId, engine.accounting().stream)
 		await this.spectrum.refreshTuning(sourceId)
 		this.updateMasks(sourceId)
 		return engine
@@ -2611,7 +2614,8 @@ export class ScannerService extends EventEmitter {
 			})),
 			floorDbfs: stats?.floorDbfs ?? null,
 			floorOccupied: spectrumStatus?.floorOccupied ?? false,
-			overload: (engine?.stats()?.overloadedBlocks ?? 0) > 0,
+			// The latest block, not the pipeline's cumulative count (Task 37a review finding 2).
+			overload: this.lastSummaries.get(cfg.id)?.overload ?? false,
 			settleMode: engine?.currentEpoch().settleMode ?? null,
 			settleMs: s.sweep.settleMs[link],
 			settleMeasured: this.measured.settleMs[link] !== null,

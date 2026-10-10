@@ -149,13 +149,18 @@ describe("engine summary budget", () => {
 							fftSize: 2048,
 							spectrumBins: budget,
 						})
-						const ev = r.summaries.at(-1)!
+						// Every block-summary of the run: the largest serialised size, mean timings.
+						const evs = r.summaries
+						const mean = (f: (ev: SummaryEvent) => number) =>
+							evs.reduce((sum, ev) => sum + f(ev), 0) / evs.length
 						samples.get(budget)!.push({
-							bytesPerSummary: serialize(ev).byteLength,
-							summaryBins: ev.summary.bins.length,
-							cloneUs: meanUs(50, () => structuredClone(ev)),
-							profile512Us: profileUs(ev.summary, 512),
-							profile2048Us: profileUs(ev.summary, 2048),
+							bytesPerSummary: Math.max(
+								...evs.map(ev => serialize(ev).byteLength),
+							),
+							summaryBins: Math.max(...evs.map(ev => ev.summary.bins.length)),
+							cloneUs: mean(ev => meanUs(50, () => structuredClone(ev))),
+							profile512Us: mean(ev => profileUs(ev.summary, 512)),
+							profile2048Us: mean(ev => profileUs(ev.summary, 2048)),
 							pipelineMs: r.pipelineMs,
 						})
 						await yieldToRpc()
@@ -166,9 +171,9 @@ describe("engine summary budget", () => {
 					const col = (k: keyof Sample) => s.map(x => x[k])
 					const row = {
 						budget,
-						summaryBins: s[0]!.summaryBins,
+						summaryBins: Math.max(...col("summaryBins")),
 						summariesPerS: 20,
-						bytesPerSummary: s[0]!.bytesPerSummary,
+						bytesPerSummary: Math.max(...col("bytesPerSummary")),
 						cloneUsMedian: median(col("cloneUs")),
 						cloneUsMin: Math.min(...col("cloneUs")),
 						profile512UsMedian: median(col("profile512Us")),
@@ -196,7 +201,7 @@ describe("engine summary budget", () => {
 					...rows.map(r => keys.map(k => cell(r[k])).join(" | ")),
 				].join("\n")
 				console.info(
-					`Spectrum summary budget (5 interleaved rounds, 1 s at 2.048 Msps, fftSize 2048, 50 ms blocks; criteria on minimums)\n${table}\nverdict: ${chosen ?? "none passes"}`,
+					`Spectrum summary budget (5 interleaved rounds, 1 s at 2.048 Msps, fftSize 2048, 50 ms blocks; every block-summary of each run sampled: max bytes, mean timings; criteria on the minimum over rounds)\n${table}\nverdict: ${chosen ?? "none passes"}`,
 				)
 				expect(rows).toHaveLength(3)
 			}, 120_000)

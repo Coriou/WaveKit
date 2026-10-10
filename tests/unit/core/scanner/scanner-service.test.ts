@@ -464,6 +464,49 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
+	it("a job that joins a display-opened engine keeps its tracks (stream floor, Task 37a review finding 1)", async () => {
+		const h = serviceHarness({
+			patch: s => {
+				s.passive.enabled = false
+			},
+		})
+		await h.service.start()
+		const inWindow = {
+			sourceId: "rtl",
+			mode: "in-window" as const,
+			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
+		}
+		const internals = h.service as unknown as {
+			live: Map<string, { observationId: string }>
+			streamFloor: Map<string, number>
+		}
+		// a job's engine stops: its "stop" moves the floor past that instance's stream
+		const first = await h.service.createJob(inWindow)
+		await untilRunning(h, first.id)
+		await h.service.cancelJob(first.id)
+		expect(h.service.spectrum.sourceIds()).toEqual([])
+		// a waterfall reopens the engine (display demand emits no stream event), then a job joins it
+		await h.service.spectrum.subscribe("c1", undefined)
+		const second = await h.service.createJob(inWindow)
+		await untilRunning(h, second.id)
+		const engine = h.service.spectrum.engine("rtl")!
+		expect(internals.streamFloor.get("rtl")).toBe(engine.accounting().stream)
+		feedTone(h.fanout, 2, 93_750)
+		await tick(50)
+		expect(internals.live.size).toBeGreaterThan(0)
+		const d = h.service
+			.listDiscoveries({})
+			.items.find(x => Math.abs(x.frequencyHz - (CENTRE + 93_750)) < 2_000)
+		const gaps = d
+			? h.service
+					.discoveryObservations(d.id, null, 50)
+					.items.filter(o => o.endReason === "gap")
+			: []
+		expect(gaps).toEqual([])
+		await h.service.spectrum.unsubscribe("c1")
+		await h.service.stop()
+	})
+
 	it("targets ambient dsd-fme decoders with their NXDN flavour (Task 34 carry)", () => {
 		const dsd = (id: string, mode: string) => ({
 			id,
