@@ -340,7 +340,7 @@ the pipeline is built). The worker transport itself (`{type: "events"}` structur
 | Resolution reporting | Frame `binCount` (actual) and `binHz` (effective), plus new `nativeBinHz` (= fs / fftSize). Status per source `summaryBinCount`, `summaryBinHz`, `summaryHz`; per profile `binCount`, `binHz`, `effectiveHz` | `reduceMaxHold` never upsamples (factor ≥ 1). A 2048-bin request on 1639 native bins reports `binCount` 1639 and `binHz` = `nativeBinHz`. |
 | Effective rate | Frames ≤ `min(hz, 1000 / integrationMs)` (20 Hz at the 50 ms default) | Frames come from block summaries; `effectiveHz` says so. |
 | Transport | Unchanged: `BlockSummary.bins` stays `number[]` in the structured-cloned `events` message; no transfer list | Keeps C1a, `measureTarget` (35a) and `bestPsd` (35) as written. The 37a measurement decides whether 2048 stays the default. |
-| R2 (`"stream"`, `"released"`) | `SpectrumService` re-emits `"stream"(sourceId, stream, reason)` and emits `"released"(sourceId, consumer)` **only for `job:` consumers**. A client subscribe, switch or profile change never emits either and never calls `reconfigure`/`refreshTuning`. An engine that stops because its last consumer (any kind) left emits `"stream"(…, "stop")` as for jobs | Display never restarts the engine or detector. |
+| R2 (`"stream"`, `"released"`), controller ruling | Task 32's engine emits `"stream"(stream, reason: "restart" \| "stop")` before a new stream's first event and from `stop()`. `SpectrumService` keeps scanner consumers (`job:`) and display demand (`ws:`) in **separate sets** per entry (`jobs`, `displays`); the engine runs while their union is non-empty. Scanner-facing events are **gated on scanner consumers**: (a) `"released"(sourceId, consumer)` only when a `job:` consumer releases and the engine stays up; (b) `"stream"(sourceId, stream, reason)` is re-emitted only while `jobs.size > 0`, or, for `"stop"`, when the release that stopped the engine was a `job:` consumer's. A client subscribe, switch, profile change, unsubscribe or disconnect never emits either (even when it starts or stops a display-only engine) and never calls `reconfigure`/`refreshTuning`. Task 35's `closeLiveOn(sourceId, endReason)` is re-hooked on both in 37a Step 6 | Display demand never triggers scanner-facing events or restarts the engine/detector. Suppressing events of a display-only engine loses nothing: live observations exist only for jobs, and every job (passive, sweep, identify) is a `job:` consumer. |
 | Default-profile PATCH | `ws.spectrumHz`/`ws.spectrumBins` (runtime) keep defining the default profile, read per summary. Default clients follow at the next frame; custom selections and existing `nearest` mappings are not re-evaluated | As planned. No eviction path exists. |
 
 ### Task 24 (config)
@@ -462,6 +462,12 @@ export interface SpectrumSubscribeResult { ack: SpectrumProfileEventData; snapsh
   consumers only).
 - `SpectrumServiceDeps` gains `createHost?: SpectrumEngineDeps["createHost"]`, passed through in `open()`. It is a test
   seam for deterministic event sequences; production omits it.
+- `Entry.consumers: Set<string>` is replaced by `jobs: Set<string>` (`job:` ids) and `displays: Set<string>` (`ws:`
+  ids). `acquire`/`release` route by prefix. The engine stops when both are empty. `status().sources[].consumers` is
+  `jobs.size + displays.size`. `open()` subscribes the engine's `"stream"` event and applies the R2 gate (Decisions).
+  `release()` decides before deleting: `wasJob = jobs.delete(consumer)`, `stopping = jobs.size + displays.size === 0`.
+  It emits `"released"` when `wasJob && !stopping`. A `"stop"` re-emit happens only if `wasJob`, and the gate is
+  checked before `stopEngine` so that the engine's own `"stop"` event is filtered by the same flag.
 - State: `clients: Map<string, { current: Selection | null; next: Selection | null; held: Set<string>; chain: Promise<unknown> }>`
   with `Selection = { sourceId: string | null; profile: SpectrumProfile | null }`, where `null`/`null` is the default
   selection.
@@ -626,8 +632,14 @@ Summary-budget test (`tests/unit/core/spectrum/spectrum-summary-budget.test.ts`)
     covered by test 2's `binCount ≤ bins`.
 23. Measurement, the gated test (above).
 
-R2 tests stay as the preflight ruling defines them (Task 35/37a). Test 12 is the amendment's guard that display demand
-triggers neither event.
+12a. "a display-only engine's start, restart and stop emit no scanner-facing event" (fake host). With no `job:`
+    consumer, `c1` subscribes to rtl, a rate change restarts the pipeline (engine `"stream"` with `"restart"`), and
+    `c1` leaves (engine `"stream"` with `"stop"`). The service emits no `"stream"` or `"released"`. Repeat with
+    `job:a` also holding rtl: the restart is re-emitted once, `release("rtl", "job:a")` while `c1` stays emits
+    `"released"("rtl", "job:a")`, and `c1` leaving afterwards emits nothing.
+
+The R2 tests stay as the preflight ruling defines them (Tasks 35 and 37a). Tests 12 and 12a guard that display demand
+triggers neither event. The service count is now 22 and the 37a total 31.
 
 ### S1-A files (edited by Task 24, the first task that needs them)
 
@@ -699,7 +711,7 @@ channel text.
 | 24 | +12 (schema, yaml comment, 4 S1-A type/doc lines) | +25, 2 literals edited | +2 |
 | 25 | +1 (DTO `ws`) | 0 | 0 |
 | 32 | +2 | +15 | +1 |
-| 37a | `spectrum-service.ts` +170 / −25; `spectrum.ts` +45; `events.ts` +55; `spectrum-broadcast.ts` ≈ 40 (rewrite) | +650 (service +14 and the two-source/fake-host harness, ws +4, budget 2) | +19 net (30 vs 11) |
+| 37a | `spectrum-service.ts` +170 / −25; `spectrum.ts` +45; `events.ts` +55; `spectrum-broadcast.ts` ≈ 40 (rewrite) | +650 (service +14 and the two-source/fake-host harness, ws +4, budget 2) | +20 net (31 vs 11) |
 
 About +330 source lines and +690 test lines in total. 37a grows by roughly half. One measurement run produces the
 numbers.
