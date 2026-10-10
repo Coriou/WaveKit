@@ -3,10 +3,10 @@
 - [x] 1. Audit config/band/scanner/live-audio/CLI/web authorities and agree peer
   boundaries; reserve independent paths with Main.
   _Requirements: 1.4, 2.1–2.5_
-- [ ] 2. Astra MEDIUM design advice, resolve findings and independent spec review.
+- [x] 2. Astra MEDIUM design advice, resolve findings and independent spec review.
   Record exact reviewed contracts privately; no implementation before checkpoint.
   _Requirements: 1–5_
-- [ ] 3. Design checkpoint: requirements/design/tasks consistent; public integration
+- [x] 3. Design checkpoint: requirements/design/tasks consistent; public integration
   explicitly deferred; ownership fences remain disjoint.
   _Requirements: 2.2, 5.5_
 - [ ] 4. Implement strict domain schemas, pure transitions/defaults/errors with

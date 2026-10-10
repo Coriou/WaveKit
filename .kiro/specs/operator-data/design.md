@@ -1,6 +1,7 @@
 # Shared operator data design
 
-Status: Astra review corrections pending re-review; independent implementation is not mounted.
+Status: Astra MEDIUM approved isolated foundation design checkpoint; implementation
+and end-to-end acceptance remain unverified, public integration is not mounted.
 
 ## Authority audit
 
