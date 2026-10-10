@@ -104,6 +104,9 @@ const invalid = (detail: string): ChannelRequestResult => ({
 	reasonCode: "channel-request-invalid",
 	detail,
 })
+/** CU8 IQ, live or replayed: recording sources carry IQ like the rate model assumes (`recording → iq`). */
+const isCu8Iq = (caps: SourceCaps): boolean =>
+	(caps.kind === "iq" || caps.kind === "recording") && caps.format === "U8_IQ"
 
 function defaultConnect(path: string): Promise<Readable> {
 	return new Promise((resolve, reject) => {
@@ -234,7 +237,7 @@ export class ChannelizerManager
 	): Promise<ChannelRequestResult> {
 		if (this.destroyed) return unavailable("channelizer manager destroyed")
 		const caps = this.deps.sourceManager.getCaps(sourceId)
-		if (!caps || caps.kind !== "iq" || caps.format !== "U8_IQ")
+		if (!caps || !isCu8Iq(caps))
 			return invalid(
 				`source ${sourceId} is not CU8 IQ (${caps?.kind ?? "none"}/${caps?.format ?? "none"})`,
 			)
@@ -389,9 +392,10 @@ export class ChannelizerManager
 				s.process.send({ v: 1, type: "close", id: channelId })
 				return unavailable(`connect ${event.socket}: ${message(err)}`)
 			}
-			socket.on("error", (err: Error) =>
-				this.log.debug({ err, channelId }, "Channel socket error"),
-			)
+			socket.on("error", (err: Error) => {
+				this.log.debug({ err, channelId }, "Channel socket error")
+				this.channelDied(s, channelId, socket, "socket-error")
+			})
 			if (s.invalidated) {
 				socket.destroy()
 				return await superseded()
@@ -589,7 +593,7 @@ export class ChannelizerManager
 				break
 			case "closed":
 				if (e.reason === "client-gone")
-					this.log.info({ channelId: e.id }, "Channel client gone")
+					this.channelDied(s, e.id, null, "client-gone")
 				break
 			case "input-eof":
 				s.sawInputEof = true
@@ -659,6 +663,41 @@ export class ChannelizerManager
 		this.retire(s, cause)
 	}
 
+	/**
+	 * A channel that died on its own (the process reports its client gone, or our socket errors) invalidates only
+	 * itself, so its decoder is detached and restarted instead of running on a dead stream. `socket` names the
+	 * socket that failed: a late error from an earlier socket of a reopened id leaves the new channel alone.
+	 */
+	private channelDied(
+		s: SourceChannelizer,
+		channelId: string,
+		socket: Readable | null,
+		cause: "client-gone" | "socket-error",
+	): void {
+		const ch = s.channels.get(channelId)
+		if (s.invalidated || !ch || (socket && ch.socket !== socket)) return
+		s.channels.delete(channelId)
+		this.channelOwner.delete(channelId)
+		this.log.warn(
+			{ sourceId: s.sourceId, generation: s.generation, channelId, cause },
+			"Channel died; invalidating it",
+		)
+		try {
+			this.emit("channel-invalidated", s.sourceId, s.generation, [channelId])
+		} catch (err: unknown) {
+			this.log.error(
+				{ err, sourceId: s.sourceId, generation: s.generation },
+				"channel-invalidated listener threw",
+			)
+		}
+		// The process already closed a client-gone channel; a socket error may have left it open there.
+		if (cause === "socket-error")
+			s.process.send({ v: 1, type: "close", id: channelId })
+		ch.socket.destroy()
+		ch.stream.destroy()
+		this.stopIfIdle(s, "last-channel-died")
+	}
+
 	private stopIfIdle(s: SourceChannelizer, cause: string): void {
 		if (!s.invalidated && s.channels.size === 0 && s.pending === 0) {
 			if (this.active.get(s.sourceId) === s) this.active.delete(s.sourceId)
@@ -698,8 +737,7 @@ export class ChannelizerManager
 
 	private capsDiffer(s: SourceChannelizer, caps: SourceCaps): boolean {
 		return (
-			caps.kind !== "iq" ||
-			caps.format !== "U8_IQ" ||
+			!isCu8Iq(caps) ||
 			s.caps.sampleRate !== caps.sampleRate ||
 			(caps.centerFreq !== undefined && s.caps.centerHz !== caps.centerFreq)
 		)

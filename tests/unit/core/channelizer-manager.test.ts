@@ -10,6 +10,7 @@ import {
 } from "vitest"
 import { EventEmitter } from "node:events"
 import { mkdirSync, rmSync } from "node:fs"
+import { createConnection, type Socket } from "node:net"
 import { PassThrough, Writable } from "node:stream"
 import pino from "pino"
 import { FanoutManager } from "../../../src/core/fanout-manager.js"
@@ -205,6 +206,30 @@ describe("ChannelizerManager", () => {
 	it("rejects non-CU8 sources as channel-request-invalid", async () => {
 		// Review Focus 5
 		sources.caps.set("rtl", { ...caps(), format: "FLOAT32LE" })
+		const m = manager()
+		expect(
+			await m.requestChannel("rtl", "ais", req(), undefined),
+		).toMatchObject({
+			ok: false,
+			reasonCode: "channel-request-invalid",
+		})
+		expect(m.currentGeneration("rtl")).toBe(0)
+	})
+	it("channelises a recording source carrying CU8 IQ, like the rate model's recording → iq", async () => {
+		// Final review core I1: the golden harness replays fixtures through recording sources.
+		const recording: SourceCaps = { ...caps(), kind: "recording" }
+		sources.caps.set("rtl", recording)
+		const m = manager()
+		const a = await m.requestChannel("rtl", "ais", req(), recording)
+		expect(a.ok).toBe(true)
+		const events: unknown[] = []
+		m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
+		sources.emit("caps-changed", "rtl", recording)
+		expect(events).toEqual([])
+		expect(fanout.getBranchIds()).toEqual(["channelizer-rtl"])
+	})
+	it("still rejects a recording source that is not CU8", async () => {
+		sources.caps.set("rtl", { ...caps(), kind: "recording", format: "S16_IQ" })
 		const m = manager()
 		expect(
 			await m.requestChannel("rtl", "ais", req(), undefined),
@@ -522,6 +547,79 @@ describe("ChannelizerManager", () => {
 			generation: 1,
 		})
 		expect(m.currentGeneration("rtl")).toBe(1)
+	})
+	// Final review core I2: a channel that dies on its own must not leave its decoder on a dead stream.
+	it("invalidates only a channel whose client the process reports gone, keeping the process for the others", async () => {
+		const sent: ChannelizerRequest[] = []
+		const procs: ChannelizerProcessLike[] = []
+		const m = manager({}, { createProcess: recordingProcess(sent, procs) })
+		const [a, b] = await Promise.all([
+			m.requestChannel("rtl", "ais", req(), caps()),
+			m.requestChannel("rtl", "vdl", req(162.1e6), caps()),
+		])
+		if (!a.ok || !b.ok) throw new Error("expected ok")
+		const events: unknown[] = []
+		m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
+		procs[0]!.emit("event", {
+			v: 1,
+			generation: 1,
+			type: "closed",
+			id: "ais-g1",
+			reason: "client-gone",
+		})
+		expect(events).toEqual([["rtl", 1, ["ais-g1"]]])
+		expect(a.stream.destroyed).toBe(true)
+		expect(b.stream.destroyed).toBe(false)
+		expect(fanout.getBranchIds()).toEqual(["channelizer-rtl"])
+		// The process already closed it; no close is sent back.
+		expect(sent.filter(r => r.type === "close")).toEqual([])
+		// A late duplicate is a no-op; the decoder's re-request opens the same id on the same generation.
+		procs[0]!.emit("event", {
+			v: 1,
+			generation: 1,
+			type: "closed",
+			id: "ais-g1",
+			reason: "client-gone",
+		})
+		expect(events).toHaveLength(1)
+		expect(await m.requestChannel("rtl", "ais", req(), caps())).toMatchObject({
+			ok: true,
+			channelId: "ais-g1",
+			generation: 1,
+		})
+	})
+	it("invalidates a channel whose socket errors, closes it and stops the process once idle", async () => {
+		const sent: ChannelizerRequest[] = []
+		const procs: ChannelizerProcessLike[] = []
+		const sockets: Socket[] = []
+		const m = manager(
+			{},
+			{
+				createProcess: recordingProcess(sent, procs),
+				connect: path =>
+					new Promise((resolve, reject) => {
+						const socket = createConnection(path)
+						socket.once("error", reject)
+						socket.once("connect", () => {
+							socket.off("error", reject)
+							sockets.push(socket)
+							resolve(socket)
+						})
+					}),
+			},
+		)
+		const a = await m.requestChannel("rtl", "ais", req(), caps())
+		if (!a.ok) throw new Error("expected ok")
+		const exited = new Promise(resolve => procs[0]!.once("exit", resolve))
+		const events: unknown[] = []
+		m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
+		sockets[0]!.destroy(new Error("read ECONNRESET"))
+		await vi.waitFor(() => expect(events).toEqual([["rtl", 1, ["ais-g1"]]]))
+		expect(a.stream.destroyed).toBe(true)
+		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
+		expect(fanout.getBranchIds()).toEqual([])
+		await exited
+		expect(m.unexpectedExitCount("rtl")).toBe(0)
 	})
 	it("rejects a second channel with the same id on one generation", async () => {
 		const m = manager()
