@@ -174,8 +174,7 @@ describe("channel requests (addendum §1, §2)", () => {
 	})
 
 	it("keeps every built-in non-channelisable until its migration task", () => {
-		// ais-catcher: flag reverted at its T28 gate (ruling PF9, fixtures/GOLDENS.md).
-		for (const type of ["lora-meshtastic", "readsb", "ais-catcher"]) {
+		for (const type of ["lora-meshtastic", "readsb"]) {
 			expect(
 				make(type).getChannelRequest?.({
 					sampleRateHz: 2_048_000,
@@ -475,8 +474,7 @@ describe("channel requests (addendum §1, §2)", () => {
 		).toMatchObject({ centerHz: 136.5e6 })
 	})
 
-	// Skipped while ais-catcher's flag is reverted (T28 gate, ruling PF9); unskip when it is restored.
-	it.skip("ais-catcher requests 384 kHz cu8 at its channelHz and, channelised, runs AIS-catcher directly without sox", () => {
+	it("ais-catcher requests 384 kHz cu8 at its channelHz and, channelised, runs AIS-catcher directly without sox", () => {
 		// The AIS channel centre is the A/B pair centre 162.000 MHz; AIS-catcher demodulates A and B at ±25 kHz from it.
 		const d = make("ais-catcher", {
 			channelHz: 162_000_000,
@@ -500,8 +498,7 @@ describe("channel requests (addendum §1, §2)", () => {
 		expect(pipelineOf(make("ais-catcher"))).toMatch(/^sox /)
 	})
 
-	// Skipped while ais-catcher's flag is reverted (T28 gate, ruling PF9); unskip when it is restored.
-	it.skip("channelised ais-catcher defaults its channel to the 162.000 MHz pair centre (ruling T28-AIS, plan A15)", () => {
+	it("channelised ais-catcher defaults its channel to the 162.000 MHz pair centre (ruling T28-AIS, plan A15)", () => {
 		const input = { sampleRateHz: 2_048_000, centerHz: 161.9e6 }
 		expect(make("ais-catcher").getChannelRequest?.(input)).toMatchObject({
 			centerHz: 162_000_000,
