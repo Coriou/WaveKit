@@ -2,7 +2,7 @@
 
 Canonical reference for WaveKit's containerized build and runtime workflow.
 For native (non-Docker) iteration see the "Native dev loop" section below
-and `CLAUDE.md`.
+and `AGENTS.md`.
 
 ## TL;DR
 
@@ -279,7 +279,7 @@ Common runtime env vars consumed by the wavekit-api container:
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
-(see `CLAUDE.md` "Config" section).
+(see `AGENTS.md` "Architecture essentials").
 
 ### State volume
 

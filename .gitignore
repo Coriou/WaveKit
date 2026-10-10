@@ -37,8 +37,8 @@ config/*.local.yaml
 # -----------------------------------------------------------------------------
 .idea/
 .vscode/*
-!.vscode/settings.json
 !.vscode/extensions.json
+!.vscode/mcp.json
 *.swp
 *.swo
 *~
@@ -73,6 +73,8 @@ snapshots/
 # Project-Specific: Development
 # -----------------------------------------------------------------------------
 wip/
+# Private agent workspace: shared-memory link, handoffs, lane status (AGENTS.md)
+/.agents/
 demod_comparison_*/
 
 # -----------------------------------------------------------------------------

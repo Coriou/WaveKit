@@ -27,7 +27,7 @@ literal artist. It means they share one construction system and one reviewed set
 This categorisation maps nine documented decoder integrations to eight readable
 signal categories. ACARS and VDL2 are grouped as Aviation data. Availability and
 runtime enablement depend on the product build, SDR source and configuration.
-The source is the project's `.kiro/steering/product.md`, blob
+The source is the retired `.kiro/steering/product.md` (pinned in `SOURCES.md`), blob
 `43bac806a9bb4bf423181b331b7ab6355646acfc`; this was not a live decoder test.
 
 APRS is represented by a position marker, not by a satellite. Marine means AIS here;

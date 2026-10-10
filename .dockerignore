@@ -45,6 +45,8 @@ README.md
 .env.*.local
 .env.development
 .kiro
+.agents
+.claude
 wip
 
 # Tests
