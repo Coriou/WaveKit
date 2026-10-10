@@ -161,6 +161,8 @@ export type PipelineEvent =
 	| { kind: "transient"; centreHz: number; epoch: number; sample: number }
 	| { kind: "block-summary"; summary: BlockSummary }
 	| { kind: "stats"; stats: PipelineStats }
+	/** Spec § 4.7: the scene moved without an observed command; a new unverified epoch starts at startSample. */
+	| { kind: "untracked-retune"; epoch: number; startSample: number; deltaHz: number | null }
 
 export interface PipelineConfig {
 	sourceId: string

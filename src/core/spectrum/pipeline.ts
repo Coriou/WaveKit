@@ -27,6 +27,8 @@ import type { ArtefactMasks, ArtefactSpurLine } from "./artefacts.js"
 import { ImpulseBlanker } from "./impulse-blanker.js"
 import { PROVISIONAL_WINDOW_MS, ProvisionalSpurs } from "./provisional-spurs.js"
 import type { BinRange } from "./provisional-spurs.js"
+import { untrackedRetuneAlarm } from "./retune-alarm.js"
+import type { PersistentFeature, SegmentRange } from "./retune-alarm.js"
 
 /**
  * The whole tier-1 pipeline for one source (decision D1): bytes → frames → blocks → floor →
@@ -57,6 +59,7 @@ const BURST_DILUTION_DB = 6 // long-path peak this far below the short max-hold 
 const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most this long
 const SPEC_PAD_BINS = 2
 const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
+const PERSISTENT_TRACK_S = 10
 
 interface EpochState {
 	epoch: number
@@ -144,6 +147,7 @@ export class SpectrumPipeline {
 	private readonly burstOn: Uint8Array
 	private readonly mergedDb: Float32Array
 	private floorReady = false
+	private prevPersistent: PersistentFeature[] = []
 	private exclusionEdges: number[] = []
 	private rasterEdges: number[] = []
 	private masks: MasksInput = {
@@ -595,6 +599,7 @@ export class SpectrumPipeline {
 		this.resetShort()
 		this.resetArtefacts()
 		this.floorReady = false
+		this.prevPersistent = []
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
 	}
@@ -675,6 +680,10 @@ export class SpectrumPipeline {
 		const blockEnd = s0 + (bi + 1) * this.blockSamples
 		if (bi !== this.blockIndex) {
 			if (this.blockFrames > 0) this.finishBlock()
+			if (this.ep !== ep) {
+				this.onFrame(f) // finishBlock raised an untracked-retune epoch that starts at or before f
+				return
+			}
 			this.blockIndex = bi
 		}
 		this.fft.transform(f.re, f.im)
@@ -839,6 +848,23 @@ export class SpectrumPipeline {
 			ep.staleRef = null
 		}
 
+		const segRanges = segs.map(s => this.segmentRf(s, ep))
+		if (
+			!gap &&
+			!overload &&
+			!blanking.excluded &&
+			this.prevPersistent.length > 0
+		) {
+			const alarm = untrackedRetuneAlarm(this.prevPersistent, segRanges, {
+				toleranceHz: this.binHz,
+				visible: hz => this.visibleRf(hz, ep),
+			})
+			if (alarm) {
+				this.startUntrackedEpoch(ep, blockEnd, alarm.deltaHz)
+				return
+			}
+		}
+
 		const learn = !gap && !overload
 		if (learn && !blanking.excluded) {
 			for (let i = 0; i < this.n; i++)
@@ -878,6 +904,8 @@ export class SpectrumPipeline {
 			}),
 		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
+		if (!gap && !overload && !blanking.excluded)
+			this.prevPersistent = this.persistentFeatures(segRanges, ep)
 		if (learn) {
 			this.tracker.trackBinsMask(this.joined, 2)
 			let usable = 0
@@ -987,6 +1015,87 @@ export class SpectrumPipeline {
 			if (!explained) return true
 		}
 		return false
+	}
+
+	private segmentRf(s: Segment, ep: EpochState): SegmentRange {
+		const rf = (bin: number): number =>
+			ep.centreHz + (bin - this.n / 2) * this.binHz
+		return {
+			startHz: rf(s.startBin - 0.5),
+			endHz: rf(s.endBin - 0.5),
+			centreHz: rf(s.centroidBin),
+		}
+	}
+
+	/** Inside the usable span and not masked (DC, exclusions, baseband spurs). */
+	private visibleRf(hz: number, ep: EpochState): boolean {
+		const bin = Math.round((hz - ep.centreHz) / this.binHz + this.n / 2)
+		if (bin < this.edgeBins || bin > this.n - this.edgeBins) return false
+		return this.detector.unmasked()[bin] === 1
+	}
+
+	/** Long-lived tracks and RF-fixed carriers present in this block (spec § 4.7). */
+	private persistentFeatures(
+		segRanges: SegmentRange[],
+		ep: EpochState,
+	): PersistentFeature[] {
+		const tol = this.binHz
+		const out: PersistentFeature[] = this.tracker.longLived(
+			PERSISTENT_TRACK_S * this.fs,
+		)
+		for (const c of this.spurs.rfCarriers()) {
+			if (!this.visibleRf(c.rfHz, ep)) continue
+			if (
+				!segRanges.some(
+					s => c.rfHz >= s.startHz - tol && c.rfHz <= s.endHz + tol,
+				)
+			)
+				continue
+			if (out.some(f => Math.abs(f.rfHz - c.rfHz) <= tol)) continue
+			out.push({ rfHz: c.rfHz, widthHz: c.widthBins * this.binHz })
+		}
+		return out
+	}
+
+	/**
+	 * Spec § 4.7: the scene moved without a command we saw. Close tracks ("retune"), start an
+	 * unverified epoch at the end of the alarm block with the caps centre unchanged (Δ is reported,
+	 * not applied), and announce it. Persistent features re-arm only after new 10 s tracks.
+	 */
+	private startUntrackedEpoch(
+		ep: EpochState,
+		startSample: number,
+		deltaHz: number | null,
+	): void {
+		const epoch = ++this.epochCounter
+		const info = {
+			stream: ep.stream,
+			epoch,
+			centreHz: ep.centreHz,
+			tuningTrust: "unverified" as const,
+		}
+		this.emit(this.tracker.beginEpoch(info))
+		this.emit(this.wideband.beginEpoch(info))
+		this.ep = {
+			...ep,
+			epoch,
+			tuningTrust: "unverified",
+			settledStart: startSample,
+			settleMode: "none",
+			staleLeft: 0,
+			staleRef: null,
+		}
+		this.blockIndex = -1
+		this.noiseEdgeBlock = -1
+		this.lastTrackBins.fill(0)
+		this.startEpochState()
+		this.out.push({ kind: "untracked-retune", epoch, startSample, deltaHz })
+		this.out.push({
+			kind: "epoch-started",
+			epoch,
+			startSample,
+			settleMode: "none",
+		})
 	}
 
 	/**

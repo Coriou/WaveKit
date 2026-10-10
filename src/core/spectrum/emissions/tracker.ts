@@ -12,6 +12,7 @@ import type {
 	TuningTrust,
 } from "../types.js"
 import type { Segment } from "./segmenter.js"
+import type { PersistentFeature } from "../retune-alarm.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -269,6 +270,24 @@ export class Tracker {
 		}
 	}
 
+	/** Open, non-burst tracks that were on in the last block and have been open ≥ minSamples (spec § 4.7). */
+	longLived(minSamples: number): PersistentFeature[] {
+		const out: PersistentFeature[] = []
+		for (const t of this.open) {
+			if (
+				t.misses > 0 ||
+				t.flags.burst ||
+				t.lastSample - t.startSample < minSamples
+			)
+				continue
+			out.push({
+				rfHz: this.rf(this.centroidBin(t), this.n, t.epoch.centreHz),
+				widthHz: (t.endBin - t.startBin) * this.opts.binHz,
+			})
+		}
+		return out
+	}
+
 	/**
 	 * Raises the sticky `spur` flag (spec § 4.9, Task 7a) on open tracks whose current bins all lie on
 	 * a spur line and returns their updates. Their segments are dropped from now on, so they close after the hang.
@@ -439,8 +458,15 @@ export class Tracker {
 		return f
 	}
 
-	private rf(bin: number, n: number): number {
-		return this.epoch.centreHz + (bin - n / 2) * this.opts.binHz
+	private rf(bin: number, n: number, centreHz = this.epoch.centreHz): number {
+		return centreHz + (bin - n / 2) * this.opts.binHz
+	}
+
+	/** Power-weighted mean bin over the track's blocks (the current span's middle before any weight). */
+	private centroidBin(t: OpenTrack): number {
+		return t.centroidDen > 0
+			? t.centroidNum / t.centroidDen
+			: (t.startBin + t.endBin - 1) / 2
 	}
 
 	private close(
@@ -458,10 +484,6 @@ export class Tracker {
 
 	private snapshot(t: OpenTrack, n: number): TrackSnapshot {
 		const binHz = this.opts.binHz
-		const centroid =
-			t.centroidDen > 0
-				? t.centroidNum / t.centroidDen
-				: (t.startBin + t.endBin - 1) / 2
 		const mean = t.spectrum.meanDb()
 		const a = Math.max(0, t.onMin - 1 - t.spectrum.lo)
 		const e = Math.min(mean.length, t.onMax + 1 - t.spectrum.lo)
@@ -477,7 +499,7 @@ export class Tracker {
 			epoch: t.epoch.epoch,
 			startSample: t.startSample,
 			lastSample: t.lastSample,
-			centreHz: t.epoch.centreHz + (centroid - n / 2) * binHz,
+			centreHz: this.rf(this.centroidBin(t), n, t.epoch.centreHz),
 			obwHz: useDb ? obwAtDb(mean, a, e, binHz, 20) : t.maxWidthBins * binHz,
 			obwMethod: useDb ? "-20dB" : "on-bins",
 			peakDbfs: t.peakDbfs,
