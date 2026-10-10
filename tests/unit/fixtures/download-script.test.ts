@@ -321,6 +321,24 @@ describe("download.sh v2", () => {
 			expect(existsSync(join(dir, "raw/unit_gen.cu8"))).toBe(false)
 		}
 	})
+	it("fails on a requested id that matches no fixture, after fetching the known ones (final review infra I1)", () => {
+		const src = mkdtempSync(join(tmpdir(), "wk-src-"))
+		const raw = join(src, "tone.cu8")
+		writeFileSync(raw, Buffer.from([127, 128]))
+		const digest = sha(raw)
+		const { path, dir } = tempManifest([
+			{
+				id: "tone",
+				fetch: { kind: "public", url: `file://${raw}`, archive_sha256: digest },
+				file: "raw/tone.cu8",
+				sha256: digest,
+			},
+		])
+		const r = runDownload(path, dir, {}, ["tone", "tnoe"])
+		expect(r.status).toBe(1)
+		expect(r.stderr).toMatch(/unknown fixture id: tnoe/)
+		expect(sha(join(dir, "raw/tone.cu8"))).toBe(digest)
+	})
 	it("skips large fixtures unless --all", () => {
 		const { path, dir } = tempManifest([
 			{

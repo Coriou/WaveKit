@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Download + verify fixtures from manifest v2 (addendum §8).
 # Usage: ./fixtures/download.sh [--all] [--rtl433] [fixture_id...]
-#   default: every non-large fixture; --all includes large ones.
+#   default: every non-large fixture; --all includes large ones. An id not in the manifest exits 1.
 #   --rtl433 (separate on purpose) also clones/pulls merbanan/rtl_433_tests; a failure exits 1.
 #   generated fixtures (fetch.kind generated, channelizer T7a) are rebuilt: the recipe's
 #   sources are fetched into <dir>/raw/.sources/ and sha256-checked, then compose.py
@@ -129,9 +129,10 @@ main() {
 	# Captured up front: a process substitution would swallow a bad-manifest exit.
 	local listing
 	listing="$(node "${SCRIPT_DIR}/manifest-query.mjs" list)" || { log_error "cannot read $WAVEKIT_FIXTURES_MANIFEST"; exit 1; }
-	local failed=0
+	local failed=0 known=" "
 	while IFS='|' read -r id kind url member transform file sha archive_sha large recipe; do
 		[[ -z "$id" ]] && continue
+		known+="$id "
 		if [[ ${#ids[@]} -gt 0 ]]; then
 			local wanted=false; for w in "${ids[@]}"; do [[ "$w" == "$id" ]] && wanted=true; done
 			$wanted || continue
@@ -141,6 +142,10 @@ main() {
 		set +e; fetch_fixture "$id" "$kind" "$url" "$member" "$transform" "$file" "$sha" "$archive_sha" "$recipe"; local rc=$?; set -e
 		[[ $rc -eq 1 ]] && failed=$((failed + 1))
 	done <<< "$listing"
+	# A typo'd id must never look like a successful download (final review infra I1).
+	for w in ${ids[@]+"${ids[@]}"}; do
+		[[ "$known" == *" $w "* ]] || { log_error "unknown fixture id: $w"; failed=$((failed + 1)); }
+	done
 	if [[ "$rtl433" == true ]]; then
 		set +e; clone_rtl433_tests; local clone_rc=$?; set -e
 		[[ $clone_rc -ne 0 ]] && failed=$((failed + 1))

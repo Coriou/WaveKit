@@ -8,8 +8,11 @@ import {
 	isSubset,
 	keySet,
 	matchExpected,
+	fixturePaths,
 	padCommand,
 	runSeconds,
+	selectFixtures,
+	stopCommand,
 } from "../../integration/fixtures/harness.js"
 
 const fixture = FixtureSchema.parse({
@@ -133,6 +136,16 @@ describe("fixture harness helpers", () => {
 		expect(cmd).toContain(`head -c ${3 * 2_048_000 * 2} /dev/zero`)
 		expect(runSeconds(fixture)).toBe(5 + 20 + 3 + 10)
 	})
+	it("stops the app by pid and KILLs its whole process group as the fallback (final review infra M3)", () => {
+		const cmd = stopCommand("/tmp/x.pid", "/tmp/x.cu8")
+		expect(cmd).toContain(`kill -TERM "$pid"`)
+		// GNU timeout leads its own process group; node is in it.
+		expect(cmd).toContain(`kill -KILL -"$pid"`)
+		expect(cmd).toMatch(/KILL fallback.*>&2/)
+		expect(cmd.indexOf(`kill -KILL -"$pid"`)).toBeLessThan(
+			cmd.indexOf("rm -f '/tmp/x.cu8' '/tmp/x.pid'"),
+		)
+	})
 	it("matches partial payloads and counts outputs", () => {
 		const observed = [
 			{ type: "ship", data: { mmsi: "211234560", messageType: 1, lat: 1 } },
@@ -147,5 +160,122 @@ describe("fixture harness helpers", () => {
 			missing: [],
 		})
 		expect(keySet(fixture, observed)).toEqual(['["211234560",1]', '["999",3]'])
+	})
+})
+
+// Final review infra I1: the golden gate never passes vacuously.
+describe("fixture selection", () => {
+	const negative = FixtureSchema.parse({
+		...fixture,
+		id: "own_ais_162m_2048k_outside",
+		role: "negative",
+		expected: {
+			min_count: 0,
+			payloads: [],
+			suspension: "channel-outside-capture",
+		},
+		channel: { center_hz: 163_003_520 },
+	})
+	const tail = FixtureSchema.parse({
+		...fixture,
+		id: "pocsag_tail",
+		role: "tail-golden",
+		decoder: "multimon-ng",
+		license: "CC0-1.0",
+		fetch: { kind: "generated", recipe: "recipes/pocsag_tail.json" },
+		file: "raw/pocsag_tail.cu8",
+		channel: undefined,
+	})
+	const wav = FixtureSchema.parse({
+		...tail,
+		id: "aprs_wav",
+		format: "wav",
+		file: "raw/aprs_wav.wav",
+	})
+	const all = [fixture, negative, tail, wav]
+	const present = () => true
+	const select = (
+		env: { paths?: string; ids?: string },
+		exists: (file: string) => boolean = present,
+	) =>
+		selectFixtures({
+			fixtures: all,
+			pathsEnv: env.paths,
+			idsEnv: env.ids,
+			exists,
+		})
+	const ids = (r: ReturnType<typeof selectFixtures>) =>
+		r.fixtures.map(f => f.id)
+
+	it("defaults to the raw path and skips negatives and non-cu8 fixtures there", () => {
+		const r = select({})
+		expect(r.paths).toEqual(["raw"])
+		expect(ids(r)).toEqual(["own_ais_162m_2048k", "pocsag_tail"])
+	})
+	it("trims path entries and runs negatives only with the channelizer path", () => {
+		const r = select({ paths: "raw, channelizer" })
+		expect(r.paths).toEqual(["raw", "channelizer"])
+		expect(ids(r)).toEqual([
+			"own_ais_162m_2048k",
+			"own_ais_162m_2048k_outside",
+			"pocsag_tail",
+		])
+		expect(fixturePaths(fixture, r.paths)).toEqual(["raw", "channelizer"])
+		expect(fixturePaths(negative, r.paths)).toEqual(["channelizer"])
+		expect(fixturePaths(tail, r.paths)).toEqual(["raw"])
+	})
+	it.each(["raw,chan", "raw,", "", "RAW", "raw,raw"])(
+		"rejects WAVEKIT_FIXTURE_PATHS=%j",
+		paths => {
+			expect(() => select({ paths })).toThrow(/WAVEKIT_FIXTURE_PATHS/)
+		},
+	)
+	it("rejects an unknown or typo'd fixture id", () => {
+		expect(() => select({ ids: "own_ais_162m_2048k,own_ais_162m" })).toThrow(
+			/unknown fixture id.*own_ais_162m\b/,
+		)
+		expect(() => select({ ids: "" })).toThrow(/WAVEKIT_FIXTURE_IDS/)
+	})
+	it("rejects a requested fixture whose file is absent", () => {
+		expect(() =>
+			select({ ids: "pocsag_tail" }, f => f !== "raw/pocsag_tail.cu8"),
+		).toThrow(/pocsag_tail.*raw\/pocsag_tail\.cu8.*download\.sh/)
+	})
+	it("rejects a requested fixture that no selected path would run", () => {
+		expect(() => select({ ids: "own_ais_162m_2048k_outside" })).toThrow(
+			/own_ais_162m_2048k_outside.*no selected path/,
+		)
+		expect(() => select({ ids: "pocsag_tail", paths: "channelizer" })).toThrow(
+			/pocsag_tail.*no selected path/,
+		)
+		expect(() => select({ ids: "aprs_wav" })).toThrow(/aprs_wav.*cu8/)
+	})
+	it("narrows to the requested ids", () => {
+		const r = select({
+			ids: "own_ais_162m_2048k_outside",
+			paths: "channelizer",
+		})
+		expect(ids(r)).toEqual(["own_ais_162m_2048k_outside"])
+	})
+	it("fails on an absent public or generated fixture, skips an absent private one", () => {
+		expect(() => select({}, f => f !== "raw/pocsag_tail.cu8")).toThrow(
+			/pocsag_tail.*absent/,
+		)
+		const r = select({}, f => f !== fixture.file)
+		expect(ids(r)).toEqual(["pocsag_tail"])
+		expect(r.skippedPrivate).toEqual(["own_ais_162m_2048k"])
+	})
+	it("fails on an empty selection", () => {
+		const empty = (fixtures: typeof all) => () =>
+			selectFixtures({
+				fixtures,
+				pathsEnv: undefined,
+				idsEnv: undefined,
+				exists: () => false,
+			})
+		expect(empty([])).toThrow(/no fixture to replay/)
+		expect(empty([fixture, wav])).toThrow(
+			/no fixture to replay.*own_ais_162m_2048k/,
+		)
 	})
 })

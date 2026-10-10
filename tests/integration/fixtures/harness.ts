@@ -80,6 +80,90 @@ export function buildFixtureConfig(input: {
 	})
 }
 
+const PATHS: readonly FixturePath[] = ["raw", "channelizer"]
+
+/**
+ * The paths a fixture runs on: negatives only on the channelizer path (the raw path ignores channelHz and would
+ * decode the real signal), the channelizer path only for channelizer goldens and negatives.
+ */
+export function fixturePaths(f: Fixture, paths: FixturePath[]): FixturePath[] {
+	return paths.filter(p =>
+		p === "raw"
+			? f.role !== "negative"
+			: f.role === "channelizer-golden" || f.role === "negative",
+	)
+}
+
+export interface FixtureSelection {
+	paths: FixturePath[]
+	fixtures: Fixture[]
+	/** Private fixtures absent here (no private access); listed, never silently dropped. */
+	skippedPrivate: string[]
+}
+
+/**
+ * The gate's selection (final review infra I1): a run that would compare nothing throws instead of passing.
+ * WAVEKIT_FIXTURE_PATHS must be distinct entries of raw/channelizer; every WAVEKIT_FIXTURE_IDS entry must name a cu8
+ * fixture that is present and that a selected path runs; without ids an absent public or generated fixture (a
+ * failed download or sha mismatch) throws, and an empty selection throws.
+ */
+export function selectFixtures(input: {
+	fixtures: Fixture[]
+	pathsEnv: string | undefined
+	idsEnv: string | undefined
+	exists: (file: string) => boolean
+}): FixtureSelection {
+	const rawPaths = (input.pathsEnv ?? "raw").split(",").map(p => p.trim())
+	if (
+		rawPaths.some(p => !(PATHS as readonly string[]).includes(p)) ||
+		new Set(rawPaths).size !== rawPaths.length
+	)
+		throw new Error(
+			`WAVEKIT_FIXTURE_PATHS=${JSON.stringify(input.pathsEnv)}: expected distinct entries of ${PATHS.join(", ")}`,
+		)
+	const paths = rawPaths as FixturePath[]
+	const byId = new Map(input.fixtures.map(f => [f.id, f]))
+	const runnable = (f: Fixture) =>
+		f.format === "cu8" && fixturePaths(f, paths).length > 0
+	const absent = (f: Fixture) =>
+		new Error(
+			`fixture ${f.id}: ${f.file} absent; run fixtures/download.sh (a sha mismatch deletes the output)`,
+		)
+	if (input.idsEnv !== undefined) {
+		const ids = input.idsEnv.split(",").map(id => id.trim())
+		if (ids.some(id => id === ""))
+			throw new Error(
+				`WAVEKIT_FIXTURE_IDS=${JSON.stringify(input.idsEnv)}: empty entry`,
+			)
+		const fixtures = ids.map(id => {
+			const f = byId.get(id)
+			if (!f) throw new Error(`unknown fixture id ${id} in WAVEKIT_FIXTURE_IDS`)
+			if (f.format !== "cu8")
+				throw new Error(`fixture ${id} is ${f.format}; the gate replays cu8`)
+			if (!runnable(f))
+				throw new Error(
+					`fixture ${id} (${f.role}) runs on no selected path (${paths.join(",")})`,
+				)
+			if (!input.exists(f.file)) throw absent(f)
+			return f
+		})
+		return { paths, fixtures, skippedPrivate: [] }
+	}
+	const fixtures: Fixture[] = []
+	const skippedPrivate: string[] = []
+	for (const f of input.fixtures) {
+		if (!runnable(f)) continue
+		if (input.exists(f.file)) fixtures.push(f)
+		else if (f.fetch.kind === "private") skippedPrivate.push(f.id)
+		else throw absent(f)
+	}
+	if (fixtures.length === 0)
+		throw new Error(
+			`no fixture to replay on ${paths.join(",")} (private fixtures absent: ${skippedPrivate.join(", ") || "none"})`,
+		)
+	return { paths, fixtures, skippedPrivate }
+}
+
 export function padCommand(
 	f: Fixture,
 	sourcePath: string,
@@ -89,6 +173,24 @@ export function padCommand(
 	const pad = (seconds: number) =>
 		`head -c ${seconds * bytesPerSecond} /dev/zero | tr '\\000' '\\177'`
 	return `{ ${pad(LEAD_SECONDS)}; cat '${sourcePath}'; ${pad(TAIL_SECONDS)}; } > '${paddedPath}'`
+}
+
+/** Printed by stopCommand when the KILL fallback fires; the harness surfaces it. */
+export const KILL_FALLBACK_MARK = "KILL fallback"
+
+/**
+ * Stops one app instance by pid and waits (bounded, 20 s) for it to exit, so two instances never overlap. The pid
+ * is GNU `timeout`, which leads its own process group: the KILL fallback signals the whole group so node cannot
+ * survive `timeout` and keep its decoders bound to fixed ports (final review infra M3).
+ */
+export function stopCommand(pidPath: string, paddedPath: string): string {
+	return [
+		`pid=$(cat '${pidPath}' 2>/dev/null)`,
+		`kill -TERM "$pid" 2>/dev/null`,
+		`i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done`,
+		`if kill -0 "$pid" 2>/dev/null; then echo "${KILL_FALLBACK_MARK}: app group $pid still running after 20 s" >&2; kill -KILL -"$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null; fi`,
+		`rm -f '${paddedPath}' '${pidPath}'`,
+	].join("; ")
 }
 
 export function runSeconds(f: Fixture): number {

@@ -21,13 +21,17 @@ import { beforeAll, describe, expect, it } from "vitest"
 import { loadManifest, type Fixture } from "./fixtures/manifest.js"
 import {
 	CONTAINER_FIXTURES_DIR,
+	KILL_FALLBACK_MARK,
 	buildFixtureConfig,
 	fixtureApiPort,
+	fixturePaths,
 	goldenDecoderId,
 	keySet,
 	matchExpected,
 	padCommand,
 	runSeconds,
+	selectFixtures,
+	stopCommand,
 	type FixturePath,
 	type ObservedOutput,
 } from "./fixtures/harness.js"
@@ -35,10 +39,6 @@ import {
 const container = process.env["WAVEKIT_FIXTURE_CONTAINER"]
 const fixturesDir = process.env["WAVEKIT_FIXTURES_DIR"]
 const record = process.env["WAVEKIT_FIXTURE_RECORD"] === "1"
-const paths = (process.env["WAVEKIT_FIXTURE_PATHS"] ?? "raw").split(
-	",",
-) as FixturePath[]
-const onlyIds = process.env["WAVEKIT_FIXTURE_IDS"]?.split(",")
 const COLLECTOR = "/tmp/wk-collect-outputs.mjs"
 
 function exec(
@@ -123,16 +123,13 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 	} finally {
 		// Runs even when setup or the collector throws, so the padded capture (hundreds of MB) never leaks.
 		// No match-by-command-line kill: bookworm-slim has no procps, and the config path is in the env, not on the command line.
-		// Stop this instance by pid and wait (bounded, 20 s) for it to exit before the next path starts, so two app
-		// instances never overlap (doubled decoders, port collisions, a corrupted Property 15 comparison).
-		exec(
-			[
-				"sh",
-				"-c",
-				`pid=$(cat '${pidPath}' 2>/dev/null); kill -TERM "$pid" 2>/dev/null; i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.2; i=$((i+1)); done; kill -KILL "$pid" 2>/dev/null; rm -f '${padded}' '${pidPath}'`,
-			],
-			{ timeoutMs: 30000 },
-		)
+		// Stop this instance before the next path starts, so two app instances never overlap (doubled decoders, port
+		// collisions, a corrupted Property 15 comparison).
+		const stopped = exec(["sh", "-c", stopCommand(pidPath, padded)], {
+			timeoutMs: 30000,
+		})
+		if (stopped.stderr.includes(KILL_FALLBACK_MARK))
+			process.stderr.write(`${tag}: ${stopped.stderr}`)
 	}
 	const observed: ObservedOutput[] = []
 	let status: Record<string, unknown> | undefined
@@ -157,22 +154,26 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 }
 
 describe.skipIf(!container || !fixturesDir)("IQ fixture goldens", () => {
-	const manifest = loadManifest()
-	// Negative fixtures are real captures with only channel.center_hz moved out of the capture. options.channelHz is
-	// read only by getChannelRequest (Task 23), so on the raw path they decode the real signal. They run on the
-	// channelizer path only, and are left out entirely when WAVEKIT_FIXTURE_PATHS has no channelizer (batch 3, Task 8).
-	const fixtures = manifest.fixtures.filter(
-		f =>
-			f.format === "cu8" &&
-			(f.role !== "negative" || paths.includes("channelizer")) &&
-			(!onlyIds || onlyIds.includes(f.id)) &&
-			existsSync(join(resolve(fixturesDir ?? "."), f.file)),
-	)
-	if (fixtures.length === 0) {
-		// An empty or not-yet-downloaded manifest is not a failure: nothing to replay.
-		it.skip("no verified cu8 fixture present in WAVEKIT_FIXTURES_DIR", () => {})
+	// vitest still runs a skipped suite's body to collect it; select only with the gate env set.
+	if (!container || !fixturesDir) {
+		it.skip("needs WAVEKIT_FIXTURE_CONTAINER and WAVEKIT_FIXTURES_DIR", () => {})
 		return
 	}
+	// Negative fixtures are real captures with only channel.center_hz moved out of the capture. options.channelHz is
+	// read only by getChannelRequest (Task 23), so on the raw path they decode the real signal. They run on the
+	// channelizer path only (fixturePaths), and are left out when WAVEKIT_FIXTURE_PATHS has no channelizer (batch 3,
+	// Task 8). With the gate env set, a selection that would compare nothing throws here and fails the run (final
+	// review infra I1): a bad path list, an unknown, absent or unrunnable requested id, an absent public fixture.
+	const { paths, fixtures, skippedPrivate } = selectFixtures({
+		fixtures: loadManifest().fixtures,
+		pathsEnv: process.env["WAVEKIT_FIXTURE_PATHS"],
+		idsEnv: process.env["WAVEKIT_FIXTURE_IDS"],
+		exists: file => existsSync(join(resolve(fixturesDir ?? "."), file)),
+	})
+	if (skippedPrivate.length > 0)
+		process.stderr.write(
+			`private fixtures absent, not replayed: ${skippedPrivate.join(", ")}\n`,
+		)
 	beforeAll(() => {
 		const r = spawnSync("docker", [
 			"cp",
@@ -185,16 +186,9 @@ describe.skipIf(!container || !fixturesDir)("IQ fixture goldens", () => {
 		"%s",
 		(_id, f, index) => {
 			const results = new Map<FixturePath, PathResult>()
-			for (const path of paths) {
-				if (
-					path === "channelizer" &&
-					f.role !== "channelizer-golden" &&
-					f.role !== "negative"
-				)
-					continue
-				if (path === "raw" && f.role === "negative") continue // see the filter above: raw ignores channelHz
-				results.set(path, runFixture(f, path, index))
-			}
+			const runs = fixturePaths(f, paths)
+			expect(runs.length, "fixture runs on no selected path").toBeGreaterThan(0)
+			for (const path of runs) results.set(path, runFixture(f, path, index))
 			for (const [path, r] of results) {
 				expect(
 					r.collectorExit,
@@ -254,6 +248,11 @@ describe.skipIf(!container || !fixturesDir)("IQ fixture goldens", () => {
 			}
 			const raw = results.get("raw")
 			const chan = results.get("channelizer")
+			if (paths.length === 2 && f.role === "channelizer-golden") {
+				// Property 15 needs both sides; a missing one must never pass on the other alone.
+				expect(raw, "raw path result").toBeDefined()
+				expect(chan, "channelizer path result").toBeDefined()
+			}
 			if (raw && chan && f.role === "channelizer-golden") {
 				// Feature: core-channelizer, Property 15: Golden equality
 				// Validates: addendum §8, §12.15
