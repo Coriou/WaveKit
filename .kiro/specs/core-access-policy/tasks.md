@@ -191,3 +191,26 @@ outside the owned paths). Actual listener mounting still requires the scanner
 37/37a/38 integration window. Health-probe authority, named analog/digital
 public origins, sanitized runtime logging and real transport/container exposure
 remain explicit integration gates, not additional product decisions.
+
+## Main integration verification — 2026-10-10
+
+The complete independent batch is landed on local main: access foundation,
+adapters, CLI wiring, setup/pair utility, runtime lifecycle composition and
+the internal decode-envelope foundation. Root tests passed with two workers:
+187 files, 2,905 tests, with 11 existing integration skips. The complete workspace
+run also passed CLI 295 and sdr-host 99. Repository typecheck and lint passed;
+main has 59 existing source warnings and three generated coverage warnings,
+with zero errors or warnings in the owned implementation paths.
+
+The final default-concurrency root run hit ten timing/shell failures and two
+worker RPC timeouts while Mac load reached 179. A two-worker diagnostic cleared
+the channelizer and healthcheck failures and exposed three generated fixture
+cases still using a five-second test deadline despite their thirty-second
+subprocess budget. `2df7ff4` aligns those three cases with the existing neighboring
+generated test. The subsequent complete two-worker root run passed; production
+behavior and assertions were unaffected by this test-budget correction.
+
+Next coordinated implementation is tasks 4/6–9 against scanner 37/37a/38. The
+reviewed browser recovery/onboarding brief is in design.md; genuine slice zoom
+planning is recorded in ROADMAP §8 and waits for Task 37a's measured baseline.
+No deployment, push or live receiver change is part of this checkpoint.

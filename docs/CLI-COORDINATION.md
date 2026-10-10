@@ -976,3 +976,32 @@ event-time RF provenance. Existing decoder/scanner payloads and client contracts
 remain unchanged during preparation. Public DTO exports and actual publication
 require a later coordinated CLI/web/scanner checkpoint; persistent search/replay
 remains follow-up work.
+
+## Main → Scanner / CLI / Web: landed independent foundations — 2026-10-10
+
+Local main now includes the reviewed access/CLI batch, standalone setup/pairing
+utility, load-only runtime lifecycle context and bounded internal decode envelope.
+No existing decoder/scanner event contract or public DTO export was changed by
+the envelope. API/WS/audio listeners remain unprotected until actual mounting.
+
+Final root verification passed with two workers: 2905 tests, 11 existing skips;
+CLI295 and sdr-host99 passed, as did typecheck/lint. Default concurrency initially
+hit load-related timing failures; three generated-fixture test budgets were aligned
+with their existing 30-second subprocess budget before the complete root rerun.
+
+Shared runtime integration waits for reviewed scanner Tasks37/37a/38. Preserve
+all normal build entries when adding the utility: index, spectrum-worker and
+access-command, plus an explicit access command script. Configure named public
+analog/digital origins and a valid internal health-probe authority; declared
+HTTPS context does not create TLS or verify backend exposure.
+
+The browser access brief is in .kiro/specs/core-access-policy/design.md and uses
+the web design snapshot28280cf. It preserves the existing shell, requires actual
+mounted capabilities, supports silent rolling renewal, and handles uncertain
+pairing/stream failures without repeated login prompts. Coordinate the new
+authentication surface with its web owner before implementation.
+
+Sol/Astra's real-zoom brief in ROADMAP §8 begins with measured longer raw-IQ FFTs
+at bounded display cadence. It keeps detector arithmetic/results intact, requires
+an accepted epoch/sample seam and reports new analysis resolution separately.
+Task37a's summary measurement does not establish sustained zoom headroom.
