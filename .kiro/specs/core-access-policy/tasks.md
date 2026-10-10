@@ -83,3 +83,17 @@ ownership of shared server/WS/audio/bootstrap paths. Mount against a settled
 scanner snapshot in a coordinated window. CLI credential/transport helpers are
 now being prepared independently on `feat/access-cli-transport`; live CLI wiring,
 first-use command/UI, container exposure and browser acceptance remain pending.
+
+## Independent runtime hygiene checkpoint — 2026-10-10
+
+`bb8f9a2` filters the reserved access environment namespace at the actual decoder
+and channelizer spawns, composing with existing CSDR filtering. `e743c39` removes
+the container healthcheck's protected status request while retaining public
+system health and existing service checks. These changes affect their call sites,
+but do not mount authentication. Scanner ownership was checked before editing.
+
+Independent Astra/root reviews approved both changes. Decoder/channelizer target
+set: 64 passing tests. Actual shell health probe: four passing tests covering
+its sole public request and exit statuses; real s6 service state was not tested.
+Repository typecheck and lint passed; lint retains 59 existing warnings and zero
+errors. Focused lint and shell syntax validation passed. Tasks 7–9 remain open.
