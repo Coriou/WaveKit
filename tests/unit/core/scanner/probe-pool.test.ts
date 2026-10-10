@@ -692,6 +692,23 @@ describe("ProbePool", () => {
 		expect(replacement.listenerCount("stream")).toBe(1)
 	})
 
+	it("drops a stopped engine's watch and never watches it again (S1-B final review, finding 9)", () => {
+		const h = poolHarness()
+		h.pool.watchEngine("rtl", h.engine)
+		expect(h.engine.listenerCount("stream")).toBe(1)
+		h.engine.emit("stream", 0, "stop")
+		expect(h.engine.listenerCount("stream")).toBe(0)
+		h.pool.watchEngine("rtl", h.engine)
+		expect(h.engine.listenerCount("stream")).toBe(0)
+		// A request still naming the stopped engine is stale; it never re-subscribes to it.
+		expect(h.pool.request(probeRequest())).toEqual({ deferred: "stale-epoch" })
+		expect(h.engine.listenerCount("stream")).toBe(0)
+		// The next engine instance of the source is watched as usual.
+		const next = new FakeEngineView()
+		h.pool.watchEngine("rtl", next)
+		expect(next.listenerCount("stream")).toBe(1)
+	})
+
 	it("keeps an accepted capcode's evidence flowing after its window ended, within the probe", async () => {
 		const h = poolHarness()
 		h.pool.request(probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }))

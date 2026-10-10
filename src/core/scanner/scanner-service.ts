@@ -75,7 +75,6 @@ import { CPU_COST } from "./plan/cost.js"
 import {
 	planForSpec,
 	previewPlan,
-	toJobSpec,
 	type PreviewContext,
 	type PreviewMeasured,
 } from "./plan/plan-preview.js"
@@ -311,6 +310,8 @@ export class ScannerService extends EventEmitter {
 	private readonly streamFloor = new Map<string, number>()
 	private readonly closedTracks = new Set<string>()
 	private passiveChain: Promise<void> = Promise.resolve()
+	/** Maintenance and passive-cost checks started by the tick (finding 5). */
+	private readonly background = new Set<Promise<void>>()
 	private overrides: RuntimeSettingsOverrides = {}
 	private effective: EffectiveScannerSettings
 	private measured: PreviewMeasured = {
@@ -371,8 +372,11 @@ export class ScannerService extends EventEmitter {
 				writeEngine: (sourceId, state) =>
 					this.writeEngineState(sourceId, state),
 				loadEngine: sourceId => this.persistence.loadEngine(sourceId),
+				// Occupancy keeps the same gate (S1-B final review, Info 2).
 				writeOccupancy: (sourceId, state) =>
-					this.persistence.writeOccupancy(sourceId, state),
+					this.configLoaded
+						? this.persistence.writeOccupancy(sourceId, state)
+						: Promise.resolve(),
 				loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
 			},
 			logger: deps.logger,
@@ -486,6 +490,20 @@ export class ScannerService extends EventEmitter {
 	async start(): Promise<void> {
 		if (this.started) return
 		this.started = true
+		try {
+			await this.startUp()
+		} catch (err) {
+			// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
+			// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
+			this.log.error(
+				{ err, pendingLeases: [...this.persistedLeases.keys()] },
+				"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
+			)
+			throw err
+		}
+	}
+
+	private async startUp(): Promise<void> {
 		let loaded: LoadedState
 		try {
 			loaded = await this.persistence.load()
@@ -547,8 +565,8 @@ export class ScannerService extends EventEmitter {
 		this.arbiter.on("recovered", this.onRecovered)
 		this.deps.sources.on("source-removed", this.onSourceRemoved)
 		// Boot-time caps are absent until SourceManager.connect(): passive jobs are (re)built when a source becomes usable.
-		this.deps.sources.on("connected", this.onSourceAvailable)
-		this.deps.sources.on("caps-changed", this.onSourceAvailable)
+		this.deps.sources.on("connected", this.onSourceConnected)
+		this.deps.sources.on("caps-changed", this.onCapsChanged)
 		this.probes.on("evidence", this.onProbeEvidence)
 		this.probes.on("recordings", this.onProbeRecordings)
 		this.probes.on("probe-state", this.onProbeState)
@@ -588,14 +606,23 @@ export class ScannerService extends EventEmitter {
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
 		this.timer = null
-		this.deps.sources.off("connected", this.onSourceAvailable)
-		this.deps.sources.off("caps-changed", this.onSourceAvailable)
+		// S1-B final review, finding 5: no late source or arbiter event starts work from here on (a boot
+		// resume after the drivers were disposed would leave a lease, a hold and a hop behind).
+		this.deps.sources.off("connected", this.onSourceConnected)
+		this.deps.sources.off("caps-changed", this.onCapsChanged)
+		this.deps.sources.off("source-removed", this.onSourceRemoved)
+		this.arbiter.off("source-down", this.onSourceDown)
+		this.arbiter.off("source-up", this.onSourceUp)
+		this.arbiter.off("recovered", this.onRecovered)
+		await Promise.all(this.background)
 		await this.passiveChain
 		await Promise.all([...this.drivers.values()].map(d => d.idle()))
 		await Promise.all(this.arbitrations.values())
-		for (const sourceId of this.spectrum.sourceIds()) {
-			const lease = this.arbiter.holder(sourceId)
-			if (lease) {
+		// Per source in parallel: each is bounded (release, then the caps), the hook as a whole is not.
+		await Promise.all(
+			this.spectrum.sourceIds().map(async sourceId => {
+				const lease = this.arbiter.holder(sourceId)
+				if (!lease) return
 				const res = await withTimeout(
 					this.arbiter.release(lease, { restore: true }),
 					RESTORE_TIMEOUT_MS,
@@ -604,8 +631,8 @@ export class ScannerService extends EventEmitter {
 				// Decoder holds are released below (dispose): let them resume on the restored tuning.
 				if (res.restored.length > 0)
 					await this.awaitRestoredCaps(sourceId, lease.snapshot, res.restored)
-			}
-		}
+			}),
+		)
 		await this.probes.destroy()
 		// One failing driver never stops the shutdown before the engines, the snapshot and jobs.json.
 		for (const d of this.drivers.values())
@@ -622,7 +649,6 @@ export class ScannerService extends EventEmitter {
 		this.spectrum.off("stream", this.onEngineStream)
 		this.spectrum.off("released", this.onEngineReleased)
 		this.arbiter.dispose()
-		this.deps.sources.off("source-removed", this.onSourceRemoved)
 		if (this.stateLoaded) {
 			await this.persistence
 				.writeSnapshot(this.store.snapshot())
@@ -851,16 +877,27 @@ export class ScannerService extends EventEmitter {
 			"protocols",
 			"capture",
 		]
-		const merged: ScanJobSpec = { ...toJobSpec(record.spec) }
+		// S1-B final review, finding 7: the operator's own input, not the normalised spec, so derived
+		// fields (integration, dwell, …) follow the patch and keep honest provenance. Only the source
+		// and the mode are pinned (`auto` never flips a running job's mode).
+		const merged: ScanJobSpec = {
+			...record.rawSpec,
+			sourceId: record.spec.sourceId,
+			mode: record.spec.mode,
+		}
 		for (const key of allowed)
 			if (patch[key] !== undefined) Object.assign(merged, { [key]: patch[key] })
 		const preview = this.preview(merged)
 		this.rejectErrors(preview.issues)
-		record.rawSpec = { ...record.rawSpec, ...merged }
+		record.rawSpec = merged
 		record.issues = preview.issues
 		record.updatedAt = this.now()
 		this.requireDriver(id).replan(preview.spec, preview.plan)
-		this.updateMasks(record.spec.sourceId)
+		const { sourceId } = record.spec
+		// The lease holder's tuning drives the engine (finding 2); its scheduler follows on the next own epoch.
+		if (this.arbiter.holder(sourceId)?.jobId === id)
+			await this.spectrum.refreshTuning(sourceId)
+		this.updateMasks(sourceId)
 		await this.persistJobs()
 		const job = this.toDto(record)
 		this.emit("job", job)
@@ -1052,6 +1089,7 @@ export class ScannerService extends EventEmitter {
 		requireDiscoveryIdFormat(id)
 		const discovery = this.store.get(id)
 		if (!discovery || !this.store.delete(id)) return false
+		this.lastConfirm.delete(id)
 		this.emit("discovery", {
 			change: "deleted",
 			discovery,
@@ -1958,6 +1996,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceDown = (sourceId: string): void => {
+		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (d.record.state === "running" || d.record.state === "holding")
 				d.dispatch({ type: "source-down" }).catch((err: unknown) =>
@@ -1967,6 +2006,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private readonly onSourceUp = (sourceId: string): void => {
+		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (d.record.state === "paused" && d.record.reason === "source-down")
 				d.dispatch({ type: "source-up" }).catch((err: unknown) =>
@@ -1974,18 +2014,33 @@ export class ScannerService extends EventEmitter {
 				)
 		}
 		if (!this.persistedLeases.has(sourceId)) this.runBootResumes(sourceId)
-		this.onSourceAvailable()
+		this.onSourceAvailable(sourceId)
 	}
 
-	private readonly onSourceAvailable = (): void => {
+	/** Boot-time caps are absent until SourceManager.connect(): the source's passive job is (re)built then. */
+	private readonly onSourceConnected = (sourceId: string): void => {
+		this.onSourceAvailable(sourceId)
+	}
+
+	/**
+	 * S1-B final review, finding 6: the scanner's own retunes change the caps on every sweep hop; the
+	 * source's passive job is not re-evaluated while the scanner holds its lease.
+	 */
+	private readonly onCapsChanged = (sourceId: string): void => {
+		if (this.arbiter.holder(sourceId)) return
+		this.onSourceAvailable(sourceId)
+	}
+
+	/** Re-evaluates one source's passive job (finding 6: only the source the event is about). */
+	private onSourceAvailable(sourceId: string): void {
 		if (!this.started || !this.settings().enabled) return
 		// refreshPassive logs a failure on the chain itself.
-		this.refreshPassive().catch(() => undefined)
+		this.refreshPassive(sourceId).catch(() => undefined)
 	}
 
-	/** ensurePassiveJobs, serialised on passiveChain (stop() awaits it). */
-	private refreshPassive(): Promise<void> {
-		const run = this.passiveChain.then(() => this.ensurePassiveJobs())
+	/** ensurePassiveJobs (of one source, or all), serialised on passiveChain (stop() awaits it). */
+	private refreshPassive(sourceId?: string): Promise<void> {
+		const run = this.passiveChain.then(() => this.ensurePassiveJobs(sourceId))
 		this.passiveChain = run.catch((err: unknown) =>
 			this.log.warn({ err }, "Refreshing passive jobs failed"),
 		)
@@ -1994,12 +2049,14 @@ export class ScannerService extends EventEmitter {
 
 	/** Recovery settled (restored, or adopted by a job's acquire with empty lists, Task 33). */
 	private readonly onRecovered = (sourceId: string): void => {
+		if (!this.started) return
 		// An adopting holder's lease stays persisted (its release restores the pre-crash state).
 		if (!this.arbiter.holder(sourceId)) this.persistedLeases.delete(sourceId)
 		this.runBootResumes(sourceId)
 	}
 
 	private readonly onSourceRemoved = (sourceId: string): void => {
+		if (!this.started) return
 		for (const d of this.driversOn(sourceId)) {
 			if (!isTerminal(d.record.state))
 				d.dispatch({ type: "source-removed" }).catch((err: unknown) =>
@@ -2009,7 +2066,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private runBootResumes(sourceId: string): void {
-		if (!this.settings().enabled) return
+		if (!this.started || !this.settings().enabled) return
 		const ids = this.bootResume.get(sourceId)
 		if (!ids) return
 		this.bootResume.delete(sourceId)
@@ -2448,9 +2505,12 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	private async ensurePassiveJobs(): Promise<void> {
+	private async ensurePassiveJobs(only?: string): Promise<void> {
 		const s = this.settings()
 		for (const cfg of this.deps.sourceConfigs) {
+			// Finding 5: never (re)start a passive job once stop() began.
+			if (!this.started) return
+			if (only !== undefined && cfg.id !== only) continue
 			const id = `passive-${cfg.id}`
 			const caps = this.deps.sources.getCaps(cfg.id) ?? cfg.caps
 			const eligible =
@@ -2458,6 +2518,8 @@ export class ScannerService extends EventEmitter {
 				s.passive.enabled &&
 				this.effective.passiveBySource[cfg.id] === true &&
 				isScannerIqFormat(caps) &&
+				// Finding 6: a permanently removed source (M1) until it connects again.
+				this.spectrum.eligibleSources().includes(cfg.id) &&
 				!this.passiveDisabled.has(cfg.id)
 			let existing = this.jobs.get(id)
 			if (existing && isTerminal(existing.state)) {
@@ -2876,9 +2938,7 @@ export class ScannerService extends EventEmitter {
 			this.lastStatusAt = now
 			this.emitStatus(false)
 			this.emitProgressFor(null)
-			this.checkPassiveCost(now).catch((err: unknown) =>
-				this.log.warn({ err }, "Passive cost check failed"),
-			)
+			this.track(this.checkPassiveCost(now), "Passive cost check failed")
 		}
 		if (
 			this.stateLoaded &&
@@ -2895,10 +2955,16 @@ export class ScannerService extends EventEmitter {
 		}
 		if (now - this.lastMaintenanceAt >= MAINTENANCE_EVERY_MS) {
 			this.lastMaintenanceAt = now
-			this.maintenance().catch((err: unknown) =>
-				this.log.warn({ err }, "Scanner maintenance failed"),
-			)
+			this.track(this.maintenance(), "Scanner maintenance failed")
 		}
+	}
+
+	/** Tick work stop() awaits (S1-B final review, finding 5). Never rejects. */
+	private track(work: Promise<void>, failure: string): void {
+		const run: Promise<void> = work
+			.catch((err: unknown) => this.log.warn({ err }, failure))
+			.finally(() => this.background.delete(run))
+		this.background.add(run)
 	}
 
 	private async maintenance(): Promise<void> {
@@ -2910,6 +2976,7 @@ export class ScannerService extends EventEmitter {
 		for (const id of pruned) {
 			const discovery = all.get(id)
 			all.delete(id)
+			this.lastConfirm.delete(id)
 			if (discovery)
 				this.emit("discovery", {
 					change: "deleted",

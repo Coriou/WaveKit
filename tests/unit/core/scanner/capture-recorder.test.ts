@@ -232,6 +232,39 @@ describe("CaptureRecorder", () => {
 		})
 	})
 
+	it("stop() awaits a capture that is sealing (S1-B final review, finding 5)", async () => {
+		const h = setup()
+		await h.store.init()
+		let sealing = false
+		let open = (): void => undefined
+		const gate = new Promise<void>(resolve => {
+			open = resolve
+		})
+		const seal = h.store.seal.bind(h.store)
+		h.store.seal = async (id: string, bytes: number) => {
+			sealing = true
+			await gate
+			return seal(id, bytes)
+		}
+		h.view.push(64_000)
+		expect(h.recorder.open(req())).toBe(true)
+		h.view.push(6_000)
+		h.recorder.decoded("o1")
+		h.close("o1", 70_000)
+		h.view.push(20_000)
+		await until(() => sealing)
+		expect(sealing).toBe(true)
+		let stopped = false
+		const stopping = h.recorder.stop().then(() => {
+			stopped = true
+		})
+		await new Promise(r => setTimeout(r, 20))
+		expect(stopped).toBe(false)
+		open()
+		await stopping
+		expect(h.captured).toHaveLength(1)
+	})
+
 	it("clips the pre-roll at the ring's tail and reports it", async () => {
 		const h = setup(0.5)
 		await h.store.init()

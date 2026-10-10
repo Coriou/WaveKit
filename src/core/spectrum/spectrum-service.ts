@@ -402,6 +402,9 @@ export class SpectrumService extends EventEmitter {
 	/** Adds a consumer (`job:<id>` or `ws:<clientId>`); opens the engine on first use. */
 	async acquire(sourceId: string, consumer: string): Promise<SpectrumEngine> {
 		for (;;) {
+			// S1-B final review, finding 5: no engine opens (fanout branch, worker) once stop() began.
+			if (this.stopping)
+				throw new WaveKitError("Spectrum service stopped", "SPECTRUM_STOPPED")
 			// Finding 3: a new engine never opens while the previous one of the source is closing.
 			const closing = this.closing.get(sourceId)
 			if (closing) {

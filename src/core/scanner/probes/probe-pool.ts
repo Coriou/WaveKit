@@ -498,6 +498,8 @@ export class ProbePool extends EventEmitter {
 	private readonly queue: ProbeRequest[] = []
 	private readonly latency = new Map<string, number>()
 	private readonly watches = new Map<string, StreamWatch>()
+	/** Engines whose "stop" the pool saw: never watched again (S1-B final review, finding 9). */
+	private readonly stoppedEngines = new WeakSet<ProbeEngineView>()
 	private seq = 0
 	private destroyed = false
 
@@ -666,7 +668,7 @@ export class ProbePool extends EventEmitter {
 	 * source replaces the old subscription. Without it the pool subscribes on first use.
 	 */
 	watchEngine(sourceId: string, engine: ProbeEngineView): void {
-		if (this.destroyed) return
+		if (this.destroyed || this.stoppedEngines.has(engine)) return
 		this.watch(sourceId, engine)
 	}
 
@@ -707,6 +709,7 @@ export class ProbePool extends EventEmitter {
 		engine: ProbeEngineView,
 		epoch: EngineEpoch,
 	): boolean {
+		if (this.stoppedEngines.has(engine)) return false
 		const { watch, replaced } = this.watch(sourceId, engine)
 		// A request in hand was built against the replaced engine: its epoch and sample indices are another engine's.
 		if (replaced) return false
@@ -725,6 +728,12 @@ export class ProbePool extends EventEmitter {
 		if (watch) {
 			watch.latest = stream
 			watch.stopped = reason === "stop"
+			if (watch.stopped) {
+				// Finding 9: the stopped engine (and its IQ ring) is not kept referenced until the next open.
+				watch.off()
+				this.watches.delete(sourceId)
+				this.stoppedEngines.add(watch.engine)
+			}
 		}
 		this.endSourceProbes(sourceId)
 	}

@@ -168,6 +168,8 @@ export class CaptureRecorder extends EventEmitter {
 	private readonly active = new Map<string, Recording>()
 	/** Kept captures between their keep decision and the seal of their file. */
 	private readonly sealing = new Set<Recording>()
+	/** Commits in flight (seal, manifest entry); stop() awaits them (S1-B final review, finding 5). */
+	private readonly committing = new Set<Promise<void>>()
 	private readonly decodeWaitMs: number
 
 	constructor(private readonly deps: CaptureRecorderDeps) {
@@ -294,7 +296,7 @@ export class CaptureRecorder extends EventEmitter {
 		const rec = this.active.get(observationId)
 		if (!rec) return
 		rec.decoded = true
-		if (rec.phase === "parked") void this.commit(rec)
+		if (rec.phase === "parked") this.startCommit(rec)
 	}
 
 	/** The track closed at `endSample`; `infoOf` is evaluated only if the capture is kept. */
@@ -346,6 +348,7 @@ export class CaptureRecorder extends EventEmitter {
 		await Promise.all(
 			[...this.active.values()].map(rec => this.discard(rec, "aborted")),
 		)
+		await Promise.all(this.committing)
 	}
 
 	// === internals ===
@@ -419,7 +422,7 @@ export class CaptureRecorder extends EventEmitter {
 		this.stopReading(rec)
 		void this.endFile(rec)
 		if (!rec.req.spec.onlyDecoded || rec.decoded) {
-			void this.commit(rec)
+			this.startCommit(rec)
 			return
 		}
 		rec.phase = "parked"
@@ -459,6 +462,15 @@ export class CaptureRecorder extends EventEmitter {
 			? Math.floor(inputs / rec.decimator.plan.decimation)
 			: inputs
 		return Math.min(rec.outBytes, 2 * Math.max(0, samples))
+	}
+
+	private startCommit(rec: Recording): void {
+		const run: Promise<void> = this.commit(rec)
+			.catch((err: unknown) =>
+				this.log.warn({ err, id: rec.id }, "Committing a capture failed"),
+			)
+			.finally(() => this.committing.delete(run))
+		this.committing.add(run)
 	}
 
 	private async commit(rec: Recording): Promise<void> {

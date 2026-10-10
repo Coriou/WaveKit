@@ -845,6 +845,21 @@ describe("SpectrumService", () => {
 		expect(h.service.sourceIds()).toEqual([])
 	})
 
+	it("refuses an acquire once stop() began (S1-B final review, finding 5)", async () => {
+		const h = make({ fake: true })
+		await h.service.start()
+		const stopping = h.service.stop()
+		await expect(h.service.acquire("rtl", "job:late")).rejects.toMatchObject({
+			code: "SPECTRUM_STOPPED",
+		})
+		await stopping
+		await expect(h.service.acquire("rtl", "job:late")).rejects.toMatchObject({
+			code: "SPECTRUM_STOPPED",
+		})
+		expect(h.service.sourceIds()).toEqual([])
+		expect(h.fanout.branches.size).toBe(0)
+	})
+
 	it("an acquire waits for a closing engine of the same source", async () => {
 		const h = make({ fake: true })
 		await h.service.start()

@@ -92,6 +92,28 @@ const blockSamplesOf = (cfg: {
 		Math.round((cfg.integrationMs * cfg.sampleRateHz) / (cfg.fftSize * 1000)),
 	) * cfg.fftSize
 
+const holderOf = (h: Harness): string | undefined =>
+	(
+		h.service as unknown as {
+			arbiter: { holder(id: string): { jobId: string } | undefined }
+		}
+	).arbiter.holder("rtl")?.jobId
+
+/** Runs `during` while stop() awaits the capture recorder (after the drivers were disposed). */
+function duringStop(h: Harness, during: () => Promise<void>): void {
+	const internals = h.service as unknown as {
+		recorder: { stop(): Promise<void> }
+	}
+	const stop = internals.recorder.stop.bind(internals.recorder)
+	internals.recorder.stop = async () => {
+		await during()
+		await stop()
+	}
+}
+
+const passiveSettled = (h: Harness): Promise<void> =>
+	(h.service as unknown as { passiveChain: Promise<void> }).passiveChain
+
 describe("ScannerService (S1-B final review)", () => {
 	it("restores the snapshot on reconnect after a cancel from paused(source-down) (finding 1, H4)", async () => {
 		const h = serviceHarness({ patch: noPassive })
@@ -322,6 +344,121 @@ describe("ScannerService (S1-B final review)", () => {
 		})
 		await h.service.resumeJob(job.id, { takeover: true })
 		expect(h.service.getJob(job.id)?.state).toBe("running")
+		await h.service.stop()
+	})
+
+	it("runs no boot resume when the source reconnects while stop() runs (finding 5)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: null, onBoot: true },
+		})
+		await untilRunning(h, job.id)
+		await h.service.stop()
+		const again = serviceHarness({ dir: h.dir, patch: noPassive })
+		await again.service.start()
+		expect(again.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "core-restart",
+		})
+		duringStop(again, async () => {
+			again.sources.emit("payload-started", "rtl")
+			await settled(again.service)
+		})
+		const before = again.tuner.sent.length
+		await again.service.stop()
+		await settled(again.service)
+		expect(holderOf(again)).toBeUndefined()
+		expect(again.decoders.isSourceHeld("rtl")).toBe(false)
+		expect(again.service.spectrum.engine("rtl")).toBeUndefined()
+		expect(scannerFrequencyWrites(again, before)).toEqual([])
+		expect(again.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "core-restart",
+		})
+	})
+
+	it("starts no passive job once stop() began (finding 5)", async () => {
+		const h = serviceHarness()
+		await h.service.start()
+		await h.service.patchSettings({ passive: { rtl: false } })
+		expect(h.service.getJob("passive-rtl")).toBeUndefined()
+		duringStop(h, async () => {
+			await h.service.patchSettings({ passive: { rtl: true } })
+			await passiveSettled(h)
+		})
+		await h.service.stop()
+		expect(h.service.getJob("passive-rtl")).toBeUndefined()
+		expect(h.service.spectrum.engine("rtl")).toBeUndefined()
+	})
+
+	it("never rebuilds a removed source's passive job on caps changes, and does once it connects again (finding 6)", async () => {
+		const h = serviceHarness()
+		await h.service.start()
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")?.state).toBe("running"),
+			WAIT,
+		)
+		h.sources.emit("source-removed", "rtl")
+		await settled(h.service)
+		expect(h.service.getJob("passive-rtl")?.state).toBe("failed")
+		h.sources.setCaps("rtl", { centerFreq: CENTRE + 25_000 })
+		await passiveSettled(h)
+		await settled(h.service)
+		expect(h.service.getJob("passive-rtl")?.state ?? "none").not.toMatch(
+			/^(pending|starting|running)$/,
+		)
+		expect(h.service.spectrum.engine("rtl")).toBeUndefined()
+		h.sources.emit("connected", "rtl")
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")?.state).toBe("running"),
+			WAIT,
+		)
+		await h.service.stop()
+	})
+
+	it("ignores the caps changes of its own sweep hops for passive jobs (finding 6)", async () => {
+		const h = serviceHarness()
+		await h.service.start()
+		await vi.waitFor(
+			() => expect(h.service.getJob("passive-rtl")?.state).toBe("running"),
+			WAIT,
+		)
+		const ensure = vi.spyOn(
+			h.service as unknown as { ensurePassiveJobs(): Promise<void> },
+			"ensurePassiveJobs",
+		)
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		expect(h.tuner.states.get("rtl")!.frequency).not.toBe(CENTRE)
+		expect(ensure).not.toHaveBeenCalled()
+		await h.service.stop()
+	})
+
+	it("merges a PATCH into the operator's spec: derived fields follow and keep honest provenance (finding 7)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		expect(job.spec.integrationMs).toBe(50)
+		const { job: patched } = await h.service.patchJob(job.id, {
+			sensitivity: "high",
+		})
+		expect(patched.spec).toMatchObject({
+			mode: "sweep",
+			sourceId: "rtl",
+			sensitivity: "high",
+			integrationMs: 100,
+		})
+		expect(patched.spec.provenance).toMatchObject({
+			sensitivity: "operator",
+			integrationMs: "default",
+			dwellMs: "default",
+			"hold.policy": "default",
+		})
+		// The lease holder's engine follows its new integration (finding 2).
+		expect(engineConfig(h)?.integrationMs).toBe(100)
 		await h.service.stop()
 	})
 })

@@ -106,6 +106,15 @@ describe("SpectrumEngine.setRingSeconds", () => {
 		await engine.stop()
 	})
 
+	it("drops the ring at stop (S1-B final review, finding 9)", async () => {
+		const { engine, feed, held } = await makeEngine()
+		await feed(100_000)
+		expect(held()).not.toBeNull()
+		await engine.stop()
+		expect(ringOf(engine)).toBeNull()
+		expect(held()).toBeNull()
+	})
+
 	it("is a no-op when the capacity does not change", async () => {
 		const { engine, feed } = await makeEngine()
 		await feed(10_000)

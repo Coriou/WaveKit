@@ -433,6 +433,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.branch = null
 		this.fanout = null
 		this.taps.clear()
+		// S1-B final review, finding 9: a stopped engine holds no IQ ring (MBs per source).
+		this.ring = null
 		const host = this.host
 		this.host = null
 		let state: EngineState | null = null
