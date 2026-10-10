@@ -16,7 +16,7 @@ scanner integration window. Scanner owns its current shared-file work.
 - [ ] 4. Prepare exact adapter/config/CLI contracts; agree the shared-file integration
   window with scanner and inspect settled route/WS/audio/bootstrap changes before wiring.
   _Requirements: 6.1, 6.5_
-- [ ] 5. Implement guided provisioning/pairing/refresh/revoke flows and private persistence,
+- [x] 5. Implement guided provisioning/pairing/refresh/revoke flows and private persistence,
   including fail-closed startup/storage behavior and bounded failed-attempt handling.
   _Requirements: 1.1, 1.2, 4.1–4.5_
 - [ ] 6. Integrate root Fastify/WS and shared HTTP audio admission/lease adapters, exact
@@ -44,3 +44,21 @@ callback cleanup regression. Targeted tests: four files, 88 tests, including two
 Integration remains pending. The next independent batch is guided provisioning,
 pairing and private durable persistence. Coordinate the shared adapters/config/CLI
 window with scanner before tasks 6–8; do not infer live protection from this checkpoint.
+
+## Independent provisioning/session checkpoint — 2026-10-10
+
+Private storage/setup: `3faf736`; pairing/session flows and exact boundary refactor:
+`2fadd1d`; request facts and transport lifetime helpers: `4246db0`.
+Independent Astra reviews approved all three components. Combined access tests:
+11 files, 193 passing tests. Repository typecheck and lint passed; lint retains
+59 existing warnings outside the access paths and no errors. Focused lint is clean.
+
+Task 5 completes the unmounted utility/service implementations. Actual first-use
+command/UI, routes in the running core and protected-mode acceptance remain tasks
+6–9. Same-scope dead-owner recovery is supported; foreign/unverifiable ownership
+requires explicit offline repair and deployment acceptance.
+
+The next batch is actively implementing unmounted Fastify/access-route and Node
+HTTP adapters on `feat/access-adapters`, based on `dbca1cc`. Shared existing core
+configuration/server/broadcaster/audio/bootstrap edits remain gated by task 4's
+scanner contract window. Do not claim that these commits protect running listeners.
