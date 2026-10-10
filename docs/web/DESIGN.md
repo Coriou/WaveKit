@@ -286,13 +286,43 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: owner review of the Map refinement**, then the open map questions:
-- Label density per zoom: is the default (aircraft from z7.5, vessels from z9.4,
-  aids to navigation from z11) right? Should labels be a per-layer setting?
-- Does the stepped altitude ramp read well on real traffic?
-- Map on a phone: the rail as a bottom sheet?
-- Then back to the queue: right-click menus on signals and markers (reuse the palette
-  command model), first reading the canvas comments on the Command palette board.
+**Topic: the Recordings screen (dock → Recordings).** Owner brief (2026-10-10): very
+important, and the UX must be super refined, super simple, clutter free. Fewer
+controls than feels necessary; every element has to earn its place.
+
+What already exists and must stay consistent:
+- Core auto-records all audio (analog transmissions from squelch, digital calls) with
+  retention; see CORE-GAPS "Auto-record all audio" and "Transcription pipeline".
+- Activity already replays recordings inline (player with speed and auto-next, live
+  audio pauses while replaying, transcript slot, "Play conversation").
+- Listen island has a manual Record toggle; the tuned card has Play last / Replay.
+- Decision: no text filters outside Activity. Recordings must justify any search it
+  has, or reuse Activity's search model and chips rather than inventing another.
+
+Settle first, with the owner, before drawing:
+1. How Recordings differs from Activity filtered to "With audio". Proposal to test:
+   Activity is *what happened*; Recordings is *what you kept*: manual recordings,
+   starred clips, and (later) IQ/baseband captures you can re-tune and re-decode.
+   Auto-recorded calls stay in Activity and are promoted by starring them.
+2. IQ/baseband recording (SDR++-style: record a slice of spectrum, play it back
+   through the whole app as if live). In scope now or later? It would be the strongest
+   reason for a separate screen. Likely a new core gap.
+3. Storage and retention: where the operator sees space used and what expires; one
+   quiet line, not a settings page.
+4. Export and share (clip a segment, download WAV/Opus, copy a link for other
+   clients).
+
+Design constraints to hold: one list, one player, no toolbars of icons; grouping by
+day; the row is the anatomy of the tuned card's earlier items (who/what, frequency,
+duration, transcript snippet) so nothing new to learn; playback reuses the Activity
+player. Keyboard: space play/pause, arrows move, J/K/L scrub. Works on the Immersive
+shell (spectrum stays visible behind, or Recordings takes the full stage like Map?)
+and on a phone width.
+
+Start by reading the Activity and Tuned boards (`canvas/Activity.dc.html`,
+`canvas/Tuned.dc.html`) and the Activity entries in the decision log above. Map
+follow-ups (label density per zoom, altitude ramp on real traffic, phone layout) wait
+for the owner's review.
 
 ## Handoff to the dev team (later)
 
