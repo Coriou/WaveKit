@@ -202,6 +202,24 @@ describe("agents-setup", () => {
 		expect(existsSync(join(main, ".agents"))).toBe(false)
 	})
 
+	it("refuses a memory directory git cannot verify", () => {
+		// Another user's repository: git refuses to inspect it ("dubious ownership").
+		const other = join(sandbox, "other")
+		mkdirSync(join(other, "notes"), { recursive: true })
+		git(other, "init", "-q")
+		const config = join(sandbox, "gitconfig")
+		writeFileSync(config, `[safe]\n\tdirectory = ${main}\n`)
+
+		const result = setup(main, [], {
+			WAVEKIT_AGENT_MEMORY_DIR: join(other, "notes"),
+			GIT_CONFIG_GLOBAL: config,
+			GIT_TEST_ASSUME_DIFFERENT_OWNER: "1",
+		})
+		expect(result.status).toBe(1)
+		expect(result.stderr).toContain("could not verify")
+		expect(existsSync(join(main, ".agents"))).toBe(false)
+	})
+
 	it("flags an existing link whose target is trackable", () => {
 		const docs = join(main, "docs")
 		mkdirSync(docs)

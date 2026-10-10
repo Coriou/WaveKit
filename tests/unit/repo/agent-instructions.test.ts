@@ -61,7 +61,7 @@ describe("agent instructions", () => {
 				/^\.(cursorrules|windsurfrules|clinerules)$/,
 				/^\.cursor\/rules\//,
 				/^\.claude\/(CLAUDE|AGENTS)\.md$/,
-				/^\.claude\/rules\//,
+				/(^|\/)\.claude\/rules\//,
 				// Claude reads a CLAUDE.md or CLAUDE.local.md *instead of* AGENTS.md.
 				/(^|\/)CLAUDE(\.local)?\.md$/,
 				/(^|\/)AGENTS\.override\.md$/,
@@ -229,10 +229,14 @@ describe("agent instructions", () => {
 				.split("\n")
 				.map(line => line.trim())
 			expect(ignored).toEqual(expect.arrayContaining([".agents", ".claude"]))
-			// A later negation would silently re-include them.
-			expect(
-				ignored.filter(line => /^!.*\.(agents|claude)/.test(line)),
-			).toEqual([])
+			// Later lines win, so any negation (even `!**`) must come before both.
+			const firstPrivate = Math.min(
+				ignored.indexOf(".agents"),
+				ignored.indexOf(".claude"),
+			)
+			expect(ignored.findLastIndex(line => line.startsWith("!"))).toBeLessThan(
+				firstPrivate,
+			)
 		})
 
 		it.each(instructionDocs)("%s names no machine-specific home paths", doc => {
