@@ -243,3 +243,36 @@ export const discoveryPatchSchema = {
 	additionalProperties: false,
 	minProperties: 1,
 } as const
+
+/** POST /api/scanner/identify (spec § 10.8): exactly one of `frequencyHz` or `all: true`. */
+export const identifyBodySchema = {
+	type: "object",
+	properties: {
+		sourceId: { type: "string", minLength: 1 },
+		target: {
+			type: "object",
+			properties: {
+				frequencyHz: { type: "number", exclusiveMinimum: 0 },
+				bandwidthHz: {
+					type: "number",
+					exclusiveMinimum: 0,
+					maximum: 1_000_000,
+				},
+				all: { type: "boolean", enum: [true] },
+			},
+			// branches carry no additionalProperties: Fastify's removeAdditional would strip inside oneOf
+			oneOf: [{ required: ["frequencyHz"] }, { required: ["all"] }],
+			additionalProperties: false,
+		},
+		timeoutMs: { type: "integer", minimum: 1000, maximum: 120_000 },
+		protocols: {
+			type: "array",
+			items: { type: "string", enum: protocolEnum },
+			uniqueItems: true,
+		},
+		exhaustive: { type: "boolean" },
+		record: { type: "boolean" },
+	},
+	required: ["target"],
+	additionalProperties: false,
+} as const

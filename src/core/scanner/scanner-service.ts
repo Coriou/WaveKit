@@ -3,7 +3,8 @@
  * arbiter, the probe pool, ambient evidence, the discovery/evidence stores
  * and persistence, job drivers, passive jobs, runtime settings, boot restore
  * and shutdown. Routes and WS (Tasks 36, 37) use only the public methods and
- * events listed in the plan.
+ * events listed in the plan. Events: "job", "progress", "activity",
+ * "discovery", "status" and "identify"(ScannerIdentifyEventData, Task 35a).
  */
 import { EventEmitter } from "node:events"
 import { readdir, rm } from "node:fs/promises"
@@ -16,6 +17,7 @@ import type {
 	ScannerActivityEventData,
 	ScannerDiscoveryEventData,
 	ScannerEngineStatus,
+	ScannerIdentifyRequest,
 	ScannerProgressEventData,
 	ScannerSettingsView,
 	ScannerStatus,
@@ -30,10 +32,22 @@ import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceConfig, SourceManager } from "../source-manager.js"
 import type { TunerController } from "../tuner-controller.js"
 import { sourceScannerConfig } from "../../config.js"
-import { bandplansFor, type BandRegionCode } from "./bandplan/index.js"
+import {
+	bandplansFor,
+	priorsFor,
+	type BandRegionCode,
+} from "./bandplan/index.js"
 import { classifySpectral, leakOrIntermod } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
 import { ulid } from "./ids.js"
+import {
+	IDENTIFY_KEEP_JOBS,
+	IdentifyRunner,
+	inWindow,
+	normaliseIdentify,
+	type NormalisedIdentify,
+} from "./identify.js"
+import { artefactOf, type ArtefactKind } from "../spectrum/artefacts.js"
 import { isTerminal } from "./job-state.js"
 import {
 	liveAudioListen,
@@ -283,6 +297,8 @@ export class ScannerService extends EventEmitter {
 		string,
 		{ hz: number; ppm: number; n: number }
 	>()
+	/** Latest block summary per source (identify measurements when no track resolved, § 10.8). */
+	private readonly lastSummaries = new Map<string, BlockSummary>()
 	/** Per source: track events of streams below this one are late (the stream ended, R2). */
 	private readonly streamFloor = new Map<string, number>()
 	private readonly closedTracks = new Set<string>()
@@ -663,6 +679,12 @@ export class ScannerService extends EventEmitter {
 				"SCANNER_DISABLED",
 				503,
 			)
+		if (spec.kind === "identify")
+			throw new ScannerApiError(
+				"Identify jobs are created with POST /api/scanner/identify",
+				"SCANNER_IDENTIFY_VIA_JOBS",
+				400,
+			)
 		if (spec.kind === "monitor") {
 			throw new ScannerApiError(
 				"Listen-scan jobs need the channelizer",
@@ -749,6 +771,12 @@ export class ScannerService extends EventEmitter {
 		const record = this.requireJob(id)
 		if (isTerminal(record.state))
 			throw new ScannerApiError("Job has ended", "SCANNER_JOB_TERMINAL", 409)
+		if (record.spec.kind === "identify")
+			throw new ScannerApiError(
+				"Identify jobs cannot be edited",
+				"SCANNER_IDENTIFY_NOT_EDITABLE",
+				409,
+			)
 		const allowed: (keyof ScanJobSpec)[] = [
 			"thresholdDb",
 			"sensitivity",
@@ -802,6 +830,108 @@ export class ScannerService extends EventEmitter {
 		this.jobs.delete(id)
 		this.drivers.delete(id)
 		void this.persistJobs()
+	}
+
+	// === identify (spec § 10.8) ===
+
+	async identify(req: ScannerIdentifyRequest): Promise<ScanJob> {
+		if (!this.settings().enabled)
+			throw new ScannerApiError(
+				"The scanner is disabled",
+				"SCANNER_DISABLED",
+				503,
+			)
+		const identify = normaliseIdentify(req)
+		const rawSpec: ScanJobSpec = {
+			...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+			mode: "in-window",
+			kind: "identify",
+			protocols: [],
+			priority: 100,
+			record: {
+				voice: identify.record,
+				analog: identify.record,
+				data: identify.record,
+			},
+			stop: { onFirstDecoded: false },
+			resume: { autoAfterIdleMs: null, onBoot: false },
+		}
+		const preview = this.preview(rawSpec)
+		this.rejectErrors(preview.issues)
+		const n = preview.spec
+		// Identify never acquires a lease (in-window), so the arbiter's refusal details do not apply; the holder does.
+		const holder = this.arbiter.holder(n.sourceId)
+		if (holder) {
+			throw new ScannerApiError(
+				`A sweep (scanner job ${holder.jobId}) holds this source's tuner; identify works in a still window`,
+				"SCANNER_SOURCE_BUSY",
+				409,
+				{ holderJobId: holder.jobId },
+			)
+		}
+		const target = identify.target
+		if (!("all" in target)) {
+			const window = this.identifyWindow(n.sourceId)
+			if (
+				!window ||
+				!inWindow(
+					target.frequencyHz,
+					target.bandwidthHz ?? 0,
+					window,
+					USABLE_FRACTION,
+				)
+			) {
+				const half = window ? (window.sampleRateHz * USABLE_FRACTION) / 2 : 0
+				throw new ScannerApiError(
+					"The target is outside the tuned window; tune first",
+					"OUT_OF_WINDOW",
+					409,
+					window
+						? {
+								window: {
+									startHz: window.centreHz - half,
+									endHz: window.centreHz + half,
+								},
+							}
+						: undefined,
+				)
+			}
+		}
+		const now = this.now()
+		const record: JobRecord = {
+			id: `j_${ulid(now)}`,
+			name:
+				"all" in target
+					? "Identify (window)"
+					: `Identify ${(target.frequencyHz / 1e6).toFixed(5)} MHz`,
+			passive: false,
+			rawSpec,
+			spec: n,
+			plan: preview.plan,
+			issues: preview.issues,
+			impact: null,
+			consentedImpact: null,
+			state: "pending",
+			createdAt: now,
+			updatedAt: now,
+			unrestorable: [],
+			counts: { observations: 0, transients: 0 },
+		}
+		const driver = this.createIdentifyDriver(record, identify)
+		this.jobs.set(record.id, record)
+		this.drivers.set(record.id, driver)
+		try {
+			await driver.start()
+		} catch (err) {
+			this.jobs.delete(record.id)
+			this.drivers.delete(record.id)
+			await driver.dispose()
+			throw err
+		}
+		this.pruneIdentifyJobs()
+		const dto = this.toDto(record)
+		this.emit("job", dto)
+		return dto
 	}
 
 	// === discoveries and evidence ===
@@ -1109,6 +1239,7 @@ export class ScannerService extends EventEmitter {
 					if (d.covers(sourceId, ev.centreHz)) d.record.counts.transients += 1
 				return
 			case "block-summary":
+				this.lastSummaries.set(sourceId, ev.summary)
 				this.onBlockSummary(sourceId, ev.summary)
 				for (const d of drivers)
 					d.onBlock(ev.summary.endSample, ev.summary.overload)
@@ -1319,6 +1450,14 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean {
+		// § 10.8: an active identify job owns the confirmation of the tracks it covers.
+		const identifying = live.jobIds.some(id => {
+			const r = this.jobs.get(id)
+			return (
+				r !== undefined && r.spec.kind === "identify" && !isTerminal(r.state)
+			)
+		})
+		if (identifying) return false
 		if (
 			track.flags.truncated ||
 			track.flags.edge ||
@@ -1839,6 +1978,101 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
+	private createIdentifyDriver(
+		record: JobRecord,
+		identify: NormalisedIdentify,
+	): IdentifyRunner {
+		const ranges = bandplansFor(this.deps.region).flatMap(b => b.ranges)
+		return new IdentifyRunner({
+			record,
+			identify,
+			inner: this.createDriver(record),
+			probes: this.probes,
+			engine: sourceId => this.identifyEngine(sourceId),
+			artefactAt: (sourceId, hz) => this.artefactAt(sourceId, hz),
+			liveTracks: sourceId =>
+				[...this.live.values()].flatMap(o =>
+					o.sourceId === sourceId && o.lastTrack
+						? [
+								{
+									observationId: o.observationId,
+									trackId: o.trackId,
+									epoch: o.epoch,
+									discoveryId: o.discoveryId,
+									track: o.lastTrack,
+								},
+							]
+						: [],
+				),
+			lastSummary: sourceId => this.lastSummaries.get(sourceId) ?? null,
+			discoveryOf: observationId => {
+				const id = this.store.discoveryIdOf(observationId)
+				return id ? this.store.get(id) : undefined
+			},
+			priorsAt: hz => priorsFor(ranges, hz),
+			format: sourceId =>
+				this.identifyEngine(sourceId)?.format ??
+				this.deps.sources.getCaps(sourceId)?.format ??
+				"",
+			// [S2] Task 40 replaces this with Boolean(this.deps.channels): parallel channel trials.
+			channelizer: () => false,
+			settings: () => this.settings(),
+			emit: data => this.emit("identify", data),
+			logger: this.deps.logger,
+			now: this.now,
+		})
+	}
+
+	/** The source's spectrum engine for identify (Task 37a points this at SpectrumService). */
+	private identifyEngine(sourceId: string): SpectrumEngine | undefined {
+		return this.engines.get(sourceId)?.engine
+	}
+
+	/**
+	 * § 4.9: `artefactOf` on the worker's current masks (Task 32's request/response message). Right after a retune
+	 * the main-thread epoch runs ahead of the worker's masks: "stale" makes the runner ask again on a later tick.
+	 */
+	private async artefactAt(
+		sourceId: string,
+		hz: number,
+	): Promise<ArtefactKind | null | "stale"> {
+		const engine = this.identifyEngine(sourceId)
+		if (!engine) return null
+		const masks = await engine.artefactMasks()
+		if (!masks) return null
+		const epoch = engine.currentEpoch().epoch
+		return masks.epoch === epoch ? artefactOf(hz, epoch, masks) : "stale"
+	}
+
+	/** The tuned window: the engine's epoch, or the source caps before any engine is open. */
+	private identifyWindow(
+		sourceId: string,
+	): { centreHz: number; sampleRateHz: number } | null {
+		const epoch = this.identifyEngine(sourceId)?.currentEpoch()
+		if (epoch)
+			return { centreHz: epoch.centreHz, sampleRateHz: epoch.sampleRateHz }
+		const caps = this.deps.sources.getCaps(sourceId)
+		const centreHz = caps?.centerFreq
+		const sampleRateHz = caps?.sampleRate
+		return typeof centreHz === "number" && typeof sampleRateHz === "number"
+			? { centreHz, sampleRateHz }
+			: null
+	}
+
+	/** Identify jobs are not persisted; only the newest IDENTIFY_KEEP_JOBS ended ones stay listed. */
+	private pruneIdentifyJobs(): void {
+		const ended = [...this.jobs.values()]
+			.filter(j => j.spec.kind === "identify" && isTerminal(j.state))
+			.sort((a, b) => a.createdAt - b.createdAt)
+		for (const j of ended.slice(
+			0,
+			Math.max(0, ended.length - IDENTIFY_KEEP_JOBS),
+		)) {
+			this.jobs.delete(j.id)
+			this.drivers.delete(j.id)
+		}
+	}
+
 	private async lifecycle(
 		id: string,
 		e: Parameters<JobDriver["dispatch"]>[0],
@@ -2333,6 +2567,7 @@ export class ScannerService extends EventEmitter {
 			...(record.endedAt !== undefined
 				? { endedAt: new Date(record.endedAt).toISOString() }
 				: {}),
+			...(driver instanceof IdentifyRunner ? { identify: driver.view() } : {}),
 		}
 	}
 
@@ -2455,8 +2690,9 @@ export class ScannerService extends EventEmitter {
 	/** Never rejects (a failed write is logged). */
 	private async persistJobs(): Promise<void> {
 		if (!this.configLoaded) return
+		// Identify jobs are never persisted: a 15 s question does not survive a restart (§ 10.8).
 		const jobs: PersistedJob[] = [...this.jobs.values()]
-			.filter(r => !r.passive)
+			.filter(r => !r.passive && r.spec.kind !== "identify")
 			.map(r => {
 				const lease = this.persistedLeases.get(r.spec.sourceId)
 				return {

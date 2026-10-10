@@ -7,6 +7,7 @@ import type {
 	ScanJob,
 	ScannerActivityEventData,
 	ScannerDiscoveryEventData,
+	ScannerIdentifyEventData,
 	ScannerProgressEventData,
 	ScannerStatus,
 } from "@wavekit/api-types"
@@ -31,6 +32,10 @@ export interface ScannerBroadcastSource extends Pick<EventEmitter, "off"> {
 		listener: (a: ScannerActivityEventData) => void,
 	): unknown
 	on(event: "status", listener: (s: ScannerStatus) => void): unknown
+	on(
+		event: "identify",
+		listener: (d: ScannerIdentifyEventData) => void,
+	): unknown
 	settings(): ScannerSettings
 }
 
@@ -76,11 +81,19 @@ export function wireScannerBroadcasts(
 		limiter.setMaxPerSecond(scanner.settings().ws.maxMessagesPerSecond)
 		limiter.offer("status", { type: "scanner:status", data: s }, "state")
 	}
+	// § 12.2 "on change": per target, coalesced to ≤ 1/s with the latest state delivered (P12).
+	const onIdentify = (d: ScannerIdentifyEventData) =>
+		limiter.offer(
+			`identify:${d.jobId}:${d.targetHz}`,
+			{ type: "scanner:identify", data: d },
+			"state",
+		)
 	scanner.on("job", onJob)
 	scanner.on("progress", onProgress)
 	scanner.on("discovery", onDiscovery)
 	scanner.on("activity", onActivity)
 	scanner.on("status", onStatus)
+	scanner.on("identify", onIdentify)
 	return {
 		limiter,
 		dispose: () => {
@@ -89,6 +102,7 @@ export function wireScannerBroadcasts(
 			scanner.off("discovery", onDiscovery)
 			scanner.off("activity", onActivity)
 			scanner.off("status", onStatus)
+			scanner.off("identify", onIdentify)
 			limiter.destroy()
 		},
 	}

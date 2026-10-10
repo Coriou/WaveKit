@@ -4,17 +4,18 @@
  *
  * Error codes (a ScannerApiError answers with its own status):
  * - 400 `VALIDATION_ERROR` (schema or settings PATCH), `SCANNER_PLAN_INVALID` `{issues}`,
- *   `SCANNER_MONITOR_UNAVAILABLE`, `SCANNER_SETTINGS_INVALID` `{issues}`
+ *   `SCANNER_MONITOR_UNAVAILABLE`, `SCANNER_SETTINGS_INVALID` `{issues}`, `SCANNER_IDENTIFY_VIA_JOBS`
  * - 404 `SCANNER_NOT_FOUND`, `SCANNER_JOB_NOT_FOUND`, `SCANNER_DISCOVERY_NOT_FOUND`
  * - 409 `SCANNER_TAKEOVER_REQUIRED` `{impact}`, `SCANNER_SOURCE_BUSY` (the message carries the
  *   arbiter's detail: "holder is starting", "releasing", "recovery pending", …),
  *   `SCANNER_NO_TUNER_CONTROL`, `SCANNER_JOB_TERMINAL`, `SCANNER_JOB_NOT_TERMINAL`,
- *   `SCANNER_INVALID_TRANSITION`, `SCANNER_DISCOVERY_LOCKED_OUT`, `OUT_OF_WINDOW`,
- *   `LIVE_AUDIO_UNAVAILABLE`
+ *   `SCANNER_INVALID_TRANSITION`, `SCANNER_DISCOVERY_LOCKED_OUT`, `OUT_OF_WINDOW` `{window}`,
+ *   `LIVE_AUDIO_UNAVAILABLE`, `SCANNER_IDENTIFY_NOT_PAUSABLE`, `SCANNER_IDENTIFY_NOT_EDITABLE`
  * - 500 `SCANNER_SETTINGS_WRITE_FAILED`
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
 import { createReadStream } from "node:fs"
+import type { ScannerIdentifyRequest } from "@wavekit/api-types"
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 import { ZodError } from "zod"
 import { ScannerApiError } from "../../core/scanner/errors.js"
@@ -36,6 +37,7 @@ import {
 	discoveryPatchSchema,
 	discoveryQuerySchema,
 	errorResponseSchema,
+	identifyBodySchema,
 	jobIdParamsSchema,
 	looseObjectSchema,
 	observationsQuerySchema,
@@ -66,6 +68,7 @@ export type ScannerRouteService = Pick<
 	| "recordingPath"
 	| "evidencePath"
 	| "listen"
+	| "identify"
 >
 
 export interface ScannerRoutesOptions {
@@ -168,6 +171,34 @@ function fromSpecBody({
 		...(exclusions !== undefined
 			? { exclusions: exclusions.map(toExclusion) }
 			: {}),
+	}
+}
+
+interface IdentifyBody {
+	sourceId?: string
+	target: { frequencyHz?: number; bandwidthHz?: number; all?: boolean }
+	timeoutMs?: number
+	protocols?: ScannerProtocol[]
+	exhaustive?: boolean
+	record?: boolean
+}
+
+/** The schema admits exactly one of `all: true` or `frequencyHz`; a bandwidth only means something with a frequency. */
+function toIdentifyRequest({
+	target,
+	...rest
+}: IdentifyBody): ScannerIdentifyRequest {
+	return {
+		...rest,
+		target:
+			target.all === true
+				? { all: true }
+				: {
+						frequencyHz: target.frequencyHz ?? 0,
+						...(target.bandwidthHz !== undefined
+							? { bandwidthHz: target.bandwidthHz }
+							: {}),
+					},
 	}
 }
 
@@ -560,6 +591,27 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 		async (request, reply) => {
 			try {
 				return await scanner.listen(request.params.id)
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
+	)
+
+	fastify.post<{ Body: IdentifyBody }>(
+		"/api/scanner/identify",
+		{
+			schema: {
+				tags,
+				summary:
+					"Identify a signal in the current window (every plausible decoder tries it)",
+				body: identifyBodySchema,
+				response: errors,
+			},
+		},
+		async (request, reply) => {
+			try {
+				const job = await scanner.identify(toIdentifyRequest(request.body))
+				return reply.code(201).send(job)
 			} catch (err) {
 				return sendError(reply, err)
 			}

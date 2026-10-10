@@ -48,7 +48,7 @@ import type {
  * - digital-voice: Digital voice stream status and per-call state
  * - resources: Container, SDR host, and source backpressure monitoring
  * - tuner: RTL-TCP tuner control events
- * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, status (rate-limited)
+ * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, identify, status (rate-limited)
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -114,6 +114,7 @@ export interface ServerMessage {
 		| "scanner:discovery"
 		| "scanner:activity"
 		| "scanner:monitor"
+		| "scanner:identify"
 		| "scanner:status"
 		| "decoder:created"
 		| "decoder:removed"
