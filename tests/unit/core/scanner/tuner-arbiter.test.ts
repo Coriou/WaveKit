@@ -359,9 +359,12 @@ describe("TunerArbiter lease discipline", () => {
 		const h = harness()
 		const a = h.arbiter.acquire("a", "rtl", 40)
 		if (!a.ok) throw new Error("acquire failed")
-		expect(h.arbiter.acquire("b", "rtl", 40)).toMatchObject({
+		// Task 38: the refusal names the holder, so the API can send details.holderJobId.
+		expect(h.arbiter.acquire("b", "rtl", 40)).toEqual({
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
+			detail: "Lease held by scanner job a",
+			holderJobId: "a",
 		})
 		const b = h.arbiter.acquire("b", "rtl", 60)
 		if (!b.ok) throw new Error("hand-over failed")
@@ -392,6 +395,7 @@ describe("TunerArbiter lease discipline", () => {
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
 			detail: "holder is starting",
+			holderJobId: "a",
 		})
 		expect(asked).toEqual(["a"])
 		expect(h.lost).toEqual([])

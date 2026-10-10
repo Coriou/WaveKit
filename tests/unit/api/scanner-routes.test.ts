@@ -428,6 +428,33 @@ describe("scanner routes", () => {
 		await build()
 	})
 
+	it("POST /api/scanner/jobs answers 409 with details.holderJobId when a job holds the lease (Task 38)", async () => {
+		await build({
+			createJob: vi.fn(() =>
+				Promise.reject(
+					new ScannerApiError(
+						"Lease held by scanner job j_high",
+						"SCANNER_SOURCE_BUSY",
+						409,
+						{ holderJobId: "j_high" },
+					),
+				),
+			),
+		})
+		const res = await app.inject({
+			method: "POST",
+			url: "/api/scanner/jobs",
+			payload: { mode: "sweep", takeover: true },
+		})
+		expect(res.statusCode).toBe(409)
+		expect(res.json()).toEqual({
+			error: "ScannerApiError",
+			code: "SCANNER_SOURCE_BUSY",
+			message: "Lease held by scanner job j_high",
+			details: { holderJobId: "j_high" },
+		})
+	})
+
 	it("validates the settings PATCH with ScannerSettingsPatchSchema and rejects config-only keys", async () => {
 		await build()
 		for (const ws of [

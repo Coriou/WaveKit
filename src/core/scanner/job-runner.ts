@@ -795,7 +795,14 @@ export class JobRunner implements JobDriver {
 					!TRANSIENT_REFUSALS.has(r.detail)
 				)
 					await this.blockResume()
-				throw new ScannerApiError(r.detail, r.code, 409)
+				throw new ScannerApiError(
+					r.detail,
+					r.code,
+					409,
+					r.holderJobId !== undefined
+						? { holderJobId: r.holderJobId }
+						: undefined,
+				)
 			}
 			this.lease = r.lease
 		}

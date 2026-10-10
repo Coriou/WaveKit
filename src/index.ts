@@ -446,7 +446,14 @@ async function main(): Promise<void> {
 		log.error({ err }, "Scanner failed to start; continuing without it")
 		// A partial start leaves listeners, spectrum fanout branches and timers behind and
 		// there is no shutdown hook for a null scanner: stop it before dropping it.
-		await scanner?.stop().catch(() => undefined)
+		await scanner
+			?.stop()
+			.catch((stopErr: unknown) =>
+				log.warn(
+					{ err: stopErr },
+					"Stopping the partially started scanner failed",
+				),
+			)
 		scanner = null
 	}
 

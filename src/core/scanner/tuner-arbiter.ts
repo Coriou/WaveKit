@@ -39,6 +39,8 @@ export interface AcquireRefusal {
 	ok: false
 	code: "SCANNER_SOURCE_BUSY" | "SCANNER_NO_TUNER_CONTROL"
 	detail: string
+	/** The job holding the lease, when one does (API `details.holderJobId`). */
+	holderJobId?: string
 }
 
 export type ArbiterTuner = Pick<
@@ -171,6 +173,7 @@ export class TunerArbiter extends EventEmitter {
 					ok: false,
 					code: "SCANNER_SOURCE_BUSY",
 					detail: `Lease held by scanner job ${current.jobId}`,
+					holderJobId: current.jobId,
 				}
 			}
 			if (!this.deps.canHandOver(current.jobId)) {
@@ -178,6 +181,7 @@ export class TunerArbiter extends EventEmitter {
 					ok: false,
 					code: "SCANNER_SOURCE_BUSY",
 					detail: "holder is starting",
+					holderJobId: current.jobId,
 				}
 			}
 			// Hand-over: the new job keeps the snapshot (§ 10.1 preempted-job row).

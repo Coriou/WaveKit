@@ -781,6 +781,21 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
+	it("refuses a lower-priority sweep with details.holderJobId while another job holds the lease (Task 38)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const high = await h.service.createJob(sweep(60))
+		await untilRunning(h, high.id)
+		await expect(h.service.createJob(sweep(30))).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_BUSY",
+			message: `Lease held by scanner job ${high.id}`,
+			details: { holderJobId: high.id },
+		})
+		expect(holderOf(h)).toBe(high.id)
+		await h.service.stop()
+	})
+
 	// ---- Task 35 fix round 2: explicit resume of a preempted sweep ----
 
 	it("resumes a sweep preempted by an operator write at once (fix round 2)", async () => {

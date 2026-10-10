@@ -122,6 +122,8 @@ class RunnerArbiter {
 	lease: Lease | null = null
 	/** The next acquire is refused with this detail. */
 	refuse: string | null = null
+	/** Sent with the refusal (the arbiter names the lease holder). */
+	refuseHolder: string | null = null
 	readonly retunes: {
 		target: { centreHz: number }
 		resolve: (p: PendingEpoch) => void
@@ -132,6 +134,9 @@ class RunnerArbiter {
 				ok: false as const,
 				code: "SCANNER_SOURCE_BUSY" as const,
 				detail: this.refuse,
+				...(this.refuseHolder !== null
+					? { holderJobId: this.refuseHolder }
+					: {}),
 			}
 		this.lease = {
 			sourceId,
@@ -417,9 +422,14 @@ describe("JobRunner resume of an operator pause without its lease (R4)", () => {
 	it("goes to paused(resume-blocked) when another job holds the lease", async () => {
 		const { runner, arbiter, record } = await pausedWithoutLease()
 		arbiter.refuse = "Lease held by scanner job j_other"
+		arbiter.refuseHolder = "j_other"
 		await expect(
 			runner.dispatch({ type: "resume", takeover: false }),
-		).rejects.toMatchObject({ statusCode: 409 })
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_BUSY",
+			details: { holderJobId: "j_other" },
+		})
 		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
 	})
 })
