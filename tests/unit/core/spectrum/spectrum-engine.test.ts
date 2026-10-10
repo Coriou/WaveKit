@@ -32,6 +32,7 @@ import {
 	settle,
 	testSettings,
 } from "../../../mocks/scanner/engine-fakes.js"
+import { WaveKitError } from "../../../../src/utils/errors.js"
 
 const logger = pino({ level: "silent" })
 const EMPTY_STATE: EngineState = {
@@ -467,6 +468,8 @@ describe("SpectrumEngine stream events (R2)", () => {
 		})
 		const log = record(engine)
 		await engine.start()
+		// The first stream is announced too, as "restart" (Tasks 35 and 37a rely on it).
+		expect(log[0]).toEqual(["stream", 0, "restart"])
 		await engine.reconfigure()
 		const at = log.findIndex(e => e[0] === "stream" && e[1] === 1)
 		expect(log[at]).toEqual(["stream", 1, "restart"])
@@ -490,5 +493,153 @@ describe("SpectrumEngine stream events (R2)", () => {
 		expect(log.filter(e => e[0] === "stream" && e[2] === "stop")).toHaveLength(
 			1,
 		)
+	})
+
+	it("announces a reconnect boundary and keeps late old-stream epochs on the old stream", async () => {
+		const { engine, sources, tuner, hosts } = makeEngine()
+		const log = record(engine)
+		await engine.start()
+		const host = hosts[0]!
+		host.handlers.events([
+			{ kind: "epoch-started", epoch: 1, startSample: 0, settleMode: "none" },
+		])
+		// An external retune posts a pending epoch on stream 0.
+		tuner.emit("command-sent", "rtl", "set-frequency", 446_300_000, "rest")
+		sources.setCaps("rtl", { centerFreq: 446_300_000 })
+		await settle()
+		const pending = host.inputs.find(i => i.kind === "pending-epoch")
+		const epoch = pending?.kind === "pending-epoch" ? pending.pending.epoch : -1
+		expect(epoch).toBeGreaterThan(1)
+		// No bytes are buffered, so the boundary applies at once: stream 1 is announced, then posted.
+		sources.emit("disconnected", "rtl")
+		expect(log.at(-1)).toEqual(["stream", 1, "restart"])
+		expect(host.inputs.at(-1)).toMatchObject({ kind: "new-stream", stream: 1 })
+		// A thread host still delivers stream 0's epoch and events, then stream 1's own start.
+		host.handlers.events([
+			{ kind: "epoch-started", epoch, startSample: 1000, settleMode: "timer" },
+			{ kind: "transient", centreHz: 446_310_000, epoch, sample: 1200 },
+		])
+		expect(engine.currentEpoch()).toMatchObject({
+			stream: 0,
+			epoch,
+			startSample: 1000,
+			centreHz: 446_300_000,
+			tuningTrust: "commanded",
+		})
+		expect(log.slice(-2)).toEqual([
+			["pipeline", "epoch-started", 0],
+			["pipeline", "transient", 0],
+		])
+		host.handlers.events([
+			{
+				kind: "epoch-started",
+				epoch: epoch + 1,
+				startSample: 0,
+				settleMode: "none",
+			},
+		])
+		expect(engine.currentEpoch()).toMatchObject({
+			stream: 1,
+			epoch: epoch + 1,
+			startSample: 0,
+			centreHz: 446_300_000,
+			tuningTrust: "unverified",
+			settleMode: "none",
+		})
+		await engine.stop()
+	})
+})
+
+describe("SpectrumEngine restart failures", () => {
+	it("reports a host that cannot be created on a rate change as an error, not an unhandled rejection", async () => {
+		const rejections: unknown[] = []
+		const onRejection = (reason: unknown): void => {
+			rejections.push(reason)
+		}
+		process.on("unhandledRejection", onRejection)
+		try {
+			let calls = 0
+			const { engine, sources } = makeEngine({
+				createHost: (_cfg, handlers) => {
+					calls += 1
+					if (calls > 1) {
+						throw new WaveKitError("worker missing", "SCANNER_WORKER_MISSING")
+					}
+					return new RecordingHost(handlers)
+				},
+			})
+			const errors: Error[] = []
+			engine.on("error", (err: Error) => errors.push(err))
+			await engine.start()
+			sources.setCaps("rtl", { sampleRate: 2_048_000 })
+			await settle()
+			await settle()
+			expect(calls).toBe(2)
+			expect(errors).toHaveLength(1)
+			expect(errors[0]).toMatchObject({ code: "SCANNER_WORKER_MISSING" })
+			expect(rejections).toEqual([])
+			await engine.stop()
+		} finally {
+			process.off("unhandledRejection", onRejection)
+		}
+	})
+
+	it("reports a restart onto a source that is no longer IQ", async () => {
+		const { engine, sources, hosts } = makeEngine()
+		const errors: Error[] = []
+		engine.on("error", (err: Error) => errors.push(err))
+		await engine.start()
+		sources.setCaps("rtl", {
+			kind: "audio_pcm",
+			format: "S16LE",
+			sampleRate: 48_000,
+		})
+		await settle()
+		await settle()
+		expect(hosts).toHaveLength(1)
+		expect(errors).toHaveLength(1)
+		expect(errors[0]).toMatchObject({ code: "SCANNER_SOURCE_NOT_IQ" })
+		await engine.stop()
+	})
+})
+
+describe("SpectrumEngine sub-sample gaps", () => {
+	it("realigns after a drop that ends mid-sample (S16, 6-byte chunks)", async () => {
+		const { engine, fanout, hosts } = makeEngine({
+			sources: new FakeSources("rtl", { format: "S16_IQ" }),
+		})
+		await engine.start()
+		await settle()
+		// Chunk k carries bytes 6k+1 … 6k+6; samples are 4 bytes.
+		const chunk = (k: number): Buffer =>
+			Buffer.from(Array.from({ length: 6 }, (_, j) => 6 * k + j + 1))
+		fanout.write(chunk(0))
+		await settle()
+		fanout.congest("scanner-rtl")
+		fanout.write(chunk(1))
+		fanout.write(chunk(2))
+		fanout.drain("scanner-rtl")
+		fanout.write(chunk(3))
+		await settle()
+		// Lost: bytes 4-17 (the half sample held back, then 12 dropped) = samples 1-4,
+		// plus the first 2 bytes of chunk 3, which finish sample 4.
+		expect(engine.liveEdge()).toBe(6)
+		expect([...(engine.readRing(5, 6)?.bytes ?? [])]).toEqual([21, 22, 23, 24])
+		await engine.stop()
+		const posted = hosts[0]!.inputs.filter(
+			i => i.kind === "bytes" || i.kind === "gap",
+		)
+		expect(
+			posted.map(i =>
+				i.kind === "bytes"
+					? { kind: i.kind, startSample: i.startSample, bytes: [...i.bytes] }
+					: i,
+			),
+		).toEqual([
+			{ kind: "bytes", startSample: 0, bytes: [1, 2, 3, 4] },
+			{ kind: "gap", startSample: 1, samples: 4 },
+			{ kind: "bytes", startSample: 5, bytes: [21, 22, 23, 24] },
+		])
+		expect(engine.accounting().gapSamples).toBe(4)
 	})
 })

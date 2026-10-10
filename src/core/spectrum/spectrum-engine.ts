@@ -284,7 +284,12 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		bufferedSamples: number
 	} | null = null
 	private readonly pendingMeta = new Map<number, EngineEpoch>()
-	private streamMeta: EngineEpoch | null = null
+	/**
+	 * Streams posted to the host whose own `epoch-started` (settleMode "none")
+	 * has not arrived yet, in post order. A thread host can still deliver the
+	 * old stream's events after a new-stream was posted.
+	 */
+	private readonly openingStreams: EngineEpoch[] = []
 	private current: EngineEpoch
 	private lastTunerKey: string | null = null
 	private marker: boolean | null = null
@@ -368,6 +373,8 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.bpMark = null
 		this.awaitingPayload = false
 		this.streamStartByte = 0
+		this.pendingMeta.clear()
+		this.openingStreams.length = 0
 		this.beginStream(this.initialTrust())
 		this.log.info(
 			{ format: this.fmt, sampleRateHz: caps.sampleRate },
@@ -446,7 +453,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				{ from: this.cfg?.sampleRateHz, to: pending.sampleRateHz },
 				"Sample rate change starts a new stream",
 			)
-			void this.restartPipeline(pending.tuningTrust)
+			this.restartInBackground(pending.tuningTrust)
 			return
 		}
 		this.flushBatch()
@@ -570,9 +577,22 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				(await old.exportState().catch(() => this.persisted)) ?? this.persisted
 			await old.close()
 			const caps = this.deps.sources.getCaps(this.sourceId)
-			if (!this.running || !isScannerIqFormat(caps)) return
+			if (!this.running) return
+			if (!isScannerIqFormat(caps)) {
+				// The old host is closed and no new one can start: report it rather than run dead.
+				const err = new WaveKitError(
+					`Source ${this.sourceId} is no longer an IQ source the scanner can read`,
+					"SCANNER_SOURCE_NOT_IQ",
+				)
+				this.log.error({ err }, "Pipeline restart failed")
+				this.emit("error", err)
+				return
+			}
 			this.inflightBytes = 0
 			this.pool.length = 0
+			// The old host's pending epochs and stream starts never arrive.
+			this.pendingMeta.clear()
+			this.openingStreams.length = 0
 			this.host = this.createHost(caps.sampleRate)
 			if (this.masks) this.send({ kind: "masks", ...this.masks })
 			if (this.spectrumFeed) this.send({ kind: "spectrum-feed", enabled: true })
@@ -582,6 +602,18 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		} finally {
 			this.restarting = false
 		}
+	}
+
+	/** Restart from an event handler: a failure (e.g. the host cannot be created) becomes "error". */
+	private restartInBackground(trust: TuningTrust): void {
+		this.restartPipeline(trust).catch((err: unknown) => {
+			const error =
+				err instanceof Error
+					? err
+					: new WaveKitError(String(err), "SCANNER_PIPELINE_ERROR")
+			this.log.error({ err: error }, "Pipeline restart failed")
+			this.emit("error", error)
+		})
 	}
 
 	private initialTrust(): TuningTrust {
@@ -599,7 +631,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.nextSample = 0
 		this.remainder = new Uint8Array(0)
 		this.skipBytes = 0
-		this.pendingMeta.clear()
+		// The old stream's pendingMeta stays until this stream's own epoch-started (onEvents).
 		this.externalPending = null
 		const ringSeconds = this.deps.settings().ringSeconds
 		this.ring = new IqRing({
@@ -608,7 +640,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 		const gainKey = gainKeyOf(this.deps.tuner?.getState(this.sourceId))
 		this.lastEpoch += 1
-		this.streamMeta = {
+		this.openingStreams.push({
 			stream: this.stream,
 			epoch: this.lastEpoch,
 			startSample: null,
@@ -617,7 +649,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			gainKey,
 			tuningTrust: trust,
 			settleMode: null,
-		}
+		})
 		// Before new-stream: an inline pipeline answers it synchronously (R2).
 		this.emit("stream", this.stream, "restart")
 		this.send({
@@ -891,13 +923,23 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			if (ev.kind === "epoch-started") {
 				this.lastEpoch = Math.max(this.lastEpoch, ev.epoch)
 				// An untracked retune (below) registers its meta under the epoch the pipeline started.
-				const meta =
-					this.pendingMeta.get(ev.epoch) ??
-					(ev.settleMode === "none" ? this.streamMeta : null)
+				let meta = this.pendingMeta.get(ev.epoch) ?? null
 				this.pendingMeta.delete(ev.epoch)
+				if (!meta && ev.settleMode === "none") {
+					// A stream's own start: each new-stream is answered by exactly one, in order.
+					meta = this.openingStreams.shift() ?? null
+					// Epochs the older stream still had pending can no longer start.
+					const stream = meta?.stream
+					if (stream !== undefined) {
+						for (const [epoch, m] of this.pendingMeta) {
+							if (m.stream < stream) this.pendingMeta.delete(epoch)
+						}
+					}
+				}
+				// Late old-stream events keep the old stream's labels (thread host).
 				this.current = {
 					...(meta ?? this.current),
-					stream: this.stream,
+					stream: meta?.stream ?? this.current.stream,
 					epoch: ev.epoch,
 					startSample: ev.startSample,
 					settleMode: ev.settleMode,
@@ -1029,7 +1071,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		this.emit("warning", code, deltaHz)
 	}
 
-	/** Captures the command position now; posts in a microtask (before any later bytes). */
+	/** Captures the command position now; posts at its microtask or at the next branch delivery, whichever comes first. */
 	private queueExternal(trust: TuningTrust): void {
 		if (!this.running) return
 		if (this.externalPending) {
@@ -1052,7 +1094,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (!caps) return
 		if (caps.sampleRate !== this.cfg?.sampleRateHz) {
-			void this.restartPipeline(pending.trust)
+			this.restartInBackground(pending.trust)
 			return
 		}
 		const fs = caps.sampleRate
