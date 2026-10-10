@@ -111,6 +111,22 @@ Condensed + Noto Sans, Tabler-based icons).
   no decoder), *unknown*. The card is a fixed 320 px wide and grows to fit its
   content, never past three lines of message text, so it works for every type; anything wider (maps, tables) stays in
   Map or Activity.
+- **Card and Activity refinements (owner review).** Card: no more "Talkgroup / TG
+  2081 / → TG 2081" triple; the talkgroup is the title, the radio the line below. The
+  call timer lives in the state line, not as a red number (red read as an error).
+  Earlier rows are shorter and no longer truncate. Actions sit on one row (primary +
+  Activity + icon-only Save and Pin). The inner box has no border; the level bars are
+  solid. Activity: the play button's focus ring sits on the circle, filter chips wrap
+  in the drawer instead of running off the edge, the player bar wraps its speed /
+  auto-next / close group so the time no longer overlaps, and "Recording all audio" is
+  a quiet pill with a red dot instead of a red outline.
+- **CTCSS and DCS tones are first-class for analog voice.** Shown as a chip on the tuned
+  card (`CTCSS 88.5 Hz`, `CTCSS 77.0 Hz · code 4` on PMR446, `DCS 023 normal`), in the
+  Activity row subtitle, in the spectrum labels, and in the raw event (`ctcssHz`, `dcs`).
+  Activity search understands `88.5`, `ctcss 88.5`, `dcs 023` as typed filters. Listen
+  shows "Tone squelch · CTCSS 88.5 Hz detected" with a switch to open only on that tone.
+  Mock: NFM 160.625 (88.5), PMR446 ch 1 (77.0), NFM 161.425 (DCS 023N), 2 m repeater
+  145.6375 (123.0). *Why:* owner request; tones identify users sharing a channel.
 - **Command palette (⌘K), first pass.** One field that understands intent, not just
   command names:
   - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits

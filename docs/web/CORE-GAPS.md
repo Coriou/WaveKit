@@ -24,6 +24,9 @@ Format: `- [ ] item` — tick (`- [x]`) once it is in core on `main`.
 - [ ] Configurable AGC (off/slow/fast, and any AGC on FM), real noise reduction, noise
   blanker, notch, CW BFO, real DSB.
 - [ ] Analog audio recording (digital per-call WAV exists).
+- [ ] CTCSS and DCS detection on analog channels (sub-audible tone below 300 Hz, DCS
+  code at 134.4 bit/s): report the tone on transmission events and live status, store it
+  with saved frequencies, and offer tone squelch (open only on the detected tone).
 
 **Data and Activity**
 - [ ] Saved frequencies stored in core, shared by all clients.
