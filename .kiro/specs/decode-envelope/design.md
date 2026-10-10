@@ -125,7 +125,8 @@ supply decoderType, provenance and refs. Omitted provenance creates
 and fields; omission uses the unknown defaults. It must be grounded by its caller,
 but this generic helper does not perform protocol confirmation or semantic RF
 classification. The validator returns a detached canonical envelope, accepts
-canonical wire JSON only, and does not accept Date instances in a wire envelope.
+canonical wire JSON only, and does not accept Date instances or undefined values
+in a wire envelope, even when nested.
 
 All inputs, including output/context/presentation metadata, pass descriptor safety
 checks before Zod or code can read potentially hostile properties. Functions do
@@ -165,7 +166,7 @@ length of the actual UTF-8 encoding, not JavaScript UTF-16 string length.
 | Complete compact JSON envelope                                       | 131072 UTF-8 bytes, inclusive                                            |
 | decodedData depth                                                    | 16; root has depth 0; every child adds 1                                 |
 | decodedData visited value positions                                  | 4096, inclusive; root counts 1                                           |
-| Each payload object / array                                          | 256 enumerable string-key members / array positions                      |
+| Each payload object / array                                          | 256 physical own keys / array positions; array length key excluded       |
 | Payload string values                                                | 32768 UTF-8 bytes each                                                   |
 | Payload property names                                               | 256 UTF-8 bytes each; may be empty                                       |
 | eventId, decoderId, decoderType, reference/provenance IDs, field key | 1–128 UTF-8 bytes                                                        |
@@ -187,14 +188,19 @@ metadata boundaries; decodedData preserves arbitrary safe JSON property names.
 
 Projection accepts primitives, ordinary/null-prototype records, arrays and valid
 plain Date instances only. Valid Dates use intrinsic getTime/toISOString and
-never the object's methods or toJSON. Reject custom Date subclasses/own custom
-serializer properties. Object undefined values are omitted; undefined array
+never the object's methods or toJSON. Reject custom Date subclasses and every
+extra Date own property rather than silently dropping attached data. Object
+undefined values are omitted; undefined array
 positions and holes become null. The raw root cannot be undefined. Primitive
 number -0 becomes 0, as in JSON. Repeated shared subobjects are cloned in each
 position; ancestor cycles are invalid. Count omitted undefined members and null
 array holes as visited positions so sparse/undefined input cannot evade limits.
 
-Inspect own descriptors rather than reading property values. Reject own accessor
+Inspect own descriptors rather than reading property values. Count physical own
+keys before inspecting descriptors: objects permit at most 256 own keys, arrays
+at most 256 positions plus the intrinsic length key. This includes nonenumerable
+keys and symbols; do not allocate a complete descriptor map before checking width.
+Reject own accessor
 properties without invoking getters, including nonenumerable accessors. Reject
 custom serializers without invoking them. Node's standard util.types.isProxy
 may reject direct/nested proxies before reflection; this is a Node implementation

@@ -77,7 +77,8 @@ recursive descent and contain reflective exceptions. This Node foundation may
 reject proxies through the standard Node intrinsic before reflection; it does
 not claim a portable general-JavaScript proxy defense.
 5.4 Enforce the design's depth, node, container, UTF-8 string and total encoded-byte
-limits. Reject the entire envelope when decoded data cannot fit; never silently
+limits, including physical own-key inspection before descriptor traversal. Reject
+the entire envelope when decoded data cannot fit; never silently
 truncate the payload and describe the result as complete.
 5.5 Clone the data and metadata without mutation, retention of input references or
 prototype pollution. Treat property names as data, including `__proto__` and
