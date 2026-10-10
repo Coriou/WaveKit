@@ -50,7 +50,7 @@ function harness(
 			decoders: { getAllStatus: () => [] },
 		},
 		scannerJobsOn: () => [],
-		// Ruling R1: every holder may hand over unless a test says otherwise (P5 assumes unconditional hand-over).
+		// Ruling R1: every holder may hand over unless a test says otherwise (P5 draws it per acquire).
 		canHandOver: () => true,
 		logger,
 		...extra,
@@ -72,7 +72,7 @@ interface RetuneOp {
 }
 
 type Op =
-	| { t: "acquire"; job: "a" | "b" | "c"; priority: number }
+	| { t: "acquire"; job: "a" | "b" | "c"; priority: number; handOver: boolean }
 	| RetuneOp
 	| { t: "rest" }
 	| { t: "relay"; external: boolean }
@@ -87,6 +87,8 @@ const opArb: fc.Arbitrary<Op> = fc.oneof(
 		t: fc.constant("acquire" as const),
 		job,
 		priority: fc.integer({ min: 0, max: 100 }),
+		// Ruling R1: whether the holder could hand over (false = it is starting).
+		handOver: fc.boolean(),
 	}),
 	fc.record({
 		t: fc.constant("retune" as const),
@@ -125,17 +127,37 @@ describe("TunerArbiter lease discipline", () => {
 				unknownArb,
 				fc.array(opArb, { minLength: 1, maxLength: 30 }),
 				async (unknown, ops) => {
-					const h = harness(unknown)
+					let handOver = true
+					const h = harness(unknown, { canHandOver: () => handOver })
 					const leases = new Map<string, Lease>()
 					for (const op of ops) {
 						const before = h.tuner.sent.length
 						const lostBefore = h.lost.length
 						switch (op.t) {
 							case "acquire": {
-								const hadHolder = h.arbiter.holder("rtl") !== undefined
+								handOver = op.handOver
+								const holderBefore = h.arbiter.holder("rtl")
+								const hadHolder = holderBefore !== undefined
+								const persistedBefore = h.persisted.length
 								const state = h.tuner.getState("rtl")!
 								const r = h.arbiter.acquire(op.job, "rtl", op.priority)
 								if (state.controlMode === "external") expect(r.ok).toBe(false)
+								// R1: a holder that cannot hand over keeps the lease, whatever the priority.
+								if (
+									holderBefore &&
+									holderBefore.jobId !== op.job &&
+									!op.handOver
+								) {
+									expect(r.ok).toBe(false)
+								}
+								if (!r.ok) {
+									if (r.detail === "holder is starting")
+										expect(op.handOver).toBe(false)
+									expect(h.tuner.sent.length).toBe(before)
+									expect(h.lost.length).toBe(lostBefore)
+									expect(h.persisted.length).toBe(persistedBefore)
+									expect(h.arbiter.holder("rtl")).toBe(holderBefore)
+								}
 								if (r.ok) {
 									leases.set(op.job, r.lease)
 									if (!hadHolder)
@@ -359,6 +381,13 @@ describe("TunerArbiter lease discipline", () => {
 		})
 		const a = h.arbiter.acquire("a", "rtl", 40)
 		if (!a.ok) throw new Error("acquire failed")
+		const persistedAfterAcquire = h.persisted.length
+		// The priority check refuses first: canHandOver is not even asked.
+		expect(h.arbiter.acquire("b", "rtl", 40)).toMatchObject({
+			ok: false,
+			code: "SCANNER_SOURCE_BUSY",
+		})
+		expect(asked).toEqual([])
 		expect(h.arbiter.acquire("b", "rtl", 60)).toEqual({
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
@@ -366,6 +395,7 @@ describe("TunerArbiter lease discipline", () => {
 		})
 		expect(asked).toEqual(["a"])
 		expect(h.lost).toEqual([])
+		expect(h.persisted).toHaveLength(persistedAfterAcquire)
 		expect(h.arbiter.holder("rtl")).toBe(a.lease)
 		starting = false
 		const b = h.arbiter.acquire("b", "rtl", 60)
@@ -386,6 +416,188 @@ describe("TunerArbiter lease discipline", () => {
 		h.tuner.setControl("rtl", "external")
 		expect(h.lost.at(-1)).toEqual({ jobId: "b", reason: "preempted-relay" })
 		expect(h.arbiter.holder("rtl")).toBe(undefined)
+	})
+
+	it("adopts a pending recovery on acquire and leaves the restore to the holder", async () => {
+		const h = harness()
+		const recovered: {
+			id: string
+			r: { restored: string[]; unrestorable: string[] }
+		}[] = []
+		h.arbiter.on(
+			"recovered",
+			(id: string, r: { restored: string[]; unrestorable: string[] }) =>
+				recovered.push({ id, r }),
+		)
+		const crashed: PersistedLease = {
+			sourceId: "rtl",
+			jobId: "crashed",
+			acquiredAt: 1,
+			snapshot: { frequency: 100_000_000, gain: 296 },
+			changedFields: ["gain"],
+		}
+		h.arbiter.recoverPersistedLeases([crashed])
+		const b = h.arbiter.acquire("b", "rtl", 50)
+		if (!b.ok) throw new Error("acquire failed")
+		expect(b.lease.snapshot).toEqual(crashed.snapshot)
+		expect([...b.lease.changedFields].sort()).toEqual(["frequency", "gain"])
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		// Only the reconnect marker close: no restore writes under the holder.
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+		])
+		// The holder's record is the last one persisted, never cleared by recovery.
+		expect(h.persisted).toEqual([
+			{
+				sourceId: "rtl",
+				lease: {
+					sourceId: "rtl",
+					jobId: "b",
+					acquiredAt: b.lease.acquiredAt,
+					snapshot: crashed.snapshot,
+					changedFields: ["gain", "frequency"],
+				},
+			},
+		])
+		expect(h.arbiter.holder("rtl")).toBe(b.lease)
+		expect(recovered).toEqual([
+			{ id: "rtl", r: { restored: [], unrestorable: [] } },
+		])
+		// The holder's release restores the pre-crash state.
+		h.tuner.sent.length = 0
+		const res = await h.arbiter.release(b.lease, { restore: true })
+		expect(res.restored).toEqual(["frequency", "gain"])
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+			["set-frequency", 100_000_000],
+			["set-gain", 296],
+		])
+		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
+	})
+
+	it("stops a running recovery when a job adopts its record", async () => {
+		const h = harness()
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 100_000_000 },
+				changedFields: ["frequency"],
+			},
+		])
+		let adopted: ReturnType<typeof h.arbiter.acquire> | null = null
+		h.tuner.on("command-sent", (_id: string, name: string) => {
+			if (name === "set-test-mode" && adopted === null)
+				adopted = h.arbiter.acquire("b", "rtl", 50)
+		})
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(adopted).toMatchObject({
+			ok: true,
+			lease: { jobId: "b", snapshot: { frequency: 100_000_000 } },
+		})
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+		])
+		expect(h.persisted.map(p => p.lease?.jobId ?? null)).toEqual(["b"])
+	})
+
+	it("refuses to lease a source while its previous lease is still releasing", async () => {
+		const h = harness()
+		const a = h.arbiter.acquire("a", "rtl", 50)
+		if (!a.ok) throw new Error("acquire failed")
+		await h.arbiter.retune(a.lease, {
+			centreHz: 450_012_500,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		const releasing = h.arbiter.release(a.lease, { restore: true })
+		expect(h.arbiter.acquire("b", "rtl", 90)).toEqual({
+			ok: false,
+			code: "SCANNER_SOURCE_BUSY",
+			detail: "releasing",
+		})
+		await releasing
+		const b = h.arbiter.acquire("b", "rtl", 50)
+		if (!b.ok) throw new Error("acquire failed")
+		// The snapshot is the restored centre, not the released job's last hop.
+		expect(b.lease.snapshot.frequency).toBe(446_100_000)
+	})
+
+	it("retries a relay-blocked recovery and closes an open marker when control returns", async () => {
+		const h = harness()
+		const recovered: string[] = []
+		h.arbiter.on("recovered", (id: string) => recovered.push(id))
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 446_100_000 },
+				changedFields: [],
+			},
+		])
+		h.tuner.setControl("rtl", "external")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent).toEqual([])
+		h.tuner.setControl("rtl", "internal")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 0],
+			["set-frequency", 446_100_000],
+		])
+		expect(recovered).toEqual(["rtl"])
+		expect(h.persisted).toEqual([{ sourceId: "rtl", lease: null }])
+		// A relay that takes control mid-bracket rejects TEST_MODE 0: the marker stays open.
+		h.tuner.sent.length = 0
+		const a = h.arbiter.acquire("a", "rtl", 50)
+		if (!a.ok) throw new Error("acquire failed")
+		h.tuner.afterTestModeOn = () => h.tuner.setControl("rtl", "external")
+		await expect(
+			h.arbiter.retune(a.lease, {
+				centreHz: 446_037_500,
+				gainTenthsDb: null,
+				sampleRateHz: null,
+			}),
+		).rejects.toMatchObject({ code: "SCANNER_LEASE_LOST" })
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-test-mode", 1],
+		])
+		h.tuner.setControl("rtl", "internal")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent.map(c => [c.name, c.value, c.accept])).toEqual([
+			["set-test-mode", 1, false],
+			["set-test-mode", 0, false],
+		])
+		// Closed: the next return of control sends nothing.
+		h.tuner.setControl("rtl", "external")
+		h.tuner.setControl("rtl", "internal")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(h.tuner.sent).toHaveLength(2)
+		expect(recovered).toEqual(["rtl"])
+	})
+
+	it("runs a hop that changes the sample rate without markers", async () => {
+		const h = harness()
+		const r = h.arbiter.acquire("a", "rtl", 50)
+		if (!r.ok) throw new Error("acquire failed")
+		const pending = await h.arbiter.retune(r.lease, {
+			centreHz: 446_037_500,
+			gainTenthsDb: null,
+			sampleRateHz: 2_400_000,
+		})
+		expect(h.tuner.sent.map(c => [c.name, c.value])).toEqual([
+			["set-sample-rate", 2_400_000],
+			["set-frequency", 446_037_500],
+		])
+		expect(pending).toMatchObject({
+			expectMarker: false,
+			sampleRateHz: 2_400_000,
+		})
+		expect(h.clock.suppressed).toBe(0)
 	})
 
 	it("reports unknown changed fields as unrestorable and never writes them", async () => {

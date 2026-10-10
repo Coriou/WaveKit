@@ -35,7 +35,7 @@ export interface Lease {
 	changedFields: Set<keyof TunerFieldValues>
 }
 
-interface AcquireRefusal {
+export interface AcquireRefusal {
 	ok: false
 	code: "SCANNER_SOURCE_BUSY" | "SCANNER_NO_TUNER_CONTROL"
 	detail: string
@@ -102,6 +102,10 @@ export class TunerArbiter extends EventEmitter {
 	private readonly priorities = new Map<string, number>()
 	private readonly lost = new WeakSet<Lease>()
 	private readonly recovering = new Map<string, PersistedLease>()
+	/** Sources whose recovery is running; the record stays in `recovering` until it completes. */
+	private readonly recoveryRunning = new Set<string>()
+	/** Sources whose released lease is still sending TEST_MODE 0 and the restore. */
+	private readonly releasing = new Set<string>()
 	private readonly lastOperatorAt = new Map<string, number>()
 	/** Sources with TEST_MODE 1 sent and no successful TEST_MODE 0 since. */
 	private readonly markerOpen = new Set<string>()
@@ -147,6 +151,10 @@ export class TunerArbiter extends EventEmitter {
 				detail: "A tuner relay client controls the tuner",
 			}
 		}
+		if (this.releasing.has(sourceId)) {
+			// The restore of the previous lease is still writing: a snapshot now would catch its last hop.
+			return { ok: false, code: "SCANNER_SOURCE_BUSY", detail: "releasing" }
+		}
 		const current = this.leases.get(sourceId)
 		if (current?.jobId === jobId) return { ok: true, lease: current }
 		if (current) {
@@ -179,6 +187,9 @@ export class TunerArbiter extends EventEmitter {
 			this.emit("lease-lost", current, "preempted-job")
 			return { ok: true, lease }
 		}
+		const pending = this.recovering.get(sourceId)
+		if (pending)
+			return { ok: true, lease: this.adopt(pending, jobId, priority) }
 		const lease: Lease = {
 			sourceId,
 			jobId,
@@ -215,6 +226,7 @@ export class TunerArbiter extends EventEmitter {
 		const s = this.deps.settings()
 		const opts: TunerWriteOptions = { origin: "scanner" }
 		let state = this.requireState(sourceId)
+		let rateChanged = false
 		if (
 			target.sampleRateHz !== null &&
 			(target.sampleRateHz !== state.sampleRate ||
@@ -236,6 +248,7 @@ export class TunerArbiter extends EventEmitter {
 			}
 			this.assertHeld(lease)
 			state = this.requireState(sourceId)
+			rateChanged = true
 		}
 		const fs = state.sampleRate
 		// unknownFields values are placeholders (controller: gainMode "agc", gain 0), never a reason to skip a write.
@@ -256,7 +269,10 @@ export class TunerArbiter extends EventEmitter {
 			)
 		await this.markChanged(lease, changing)
 		this.assertHeld(lease)
-		const markers = s.sweep.markers && clock.markerSupported !== false
+		// The engine restarts the stream on a rate change and drops this hop's epoch, so no
+		// marker would ever be expected for it: the hop runs unbracketed.
+		const markers =
+			s.sweep.markers && clock.markerSupported !== false && !rateChanged
 		const { commandSample, bufferedSamples } = clock.sampleClock()
 		const pending: PendingEpoch = {
 			epoch: clock.allocateEpoch(),
@@ -339,6 +355,18 @@ export class TunerArbiter extends EventEmitter {
 		if (!held) return { restored: [], unrestorable: [] }
 		this.leases.delete(lease.sourceId)
 		this.priorities.delete(lease.sourceId)
+		this.releasing.add(lease.sourceId)
+		try {
+			return await this.releaseHeld(lease, opts)
+		} finally {
+			this.releasing.delete(lease.sourceId)
+		}
+	}
+
+	private async releaseHeld(
+		lease: Lease,
+		opts: { restore: boolean },
+	): Promise<{ restored: string[]; unrestorable: string[] }> {
 		// § 4.6: TEST_MODE 0 on every release of a held lease, before any restore.
 		await this.testModeOff(lease.sourceId)
 		let result: { restored: string[]; unrestorable: string[] } = {
@@ -495,6 +523,7 @@ export class TunerArbiter extends EventEmitter {
 		sourceId: string,
 		snapshot: Partial<TunerFieldValues>,
 		changed: (keyof TunerFieldValues)[],
+		abort: () => boolean = () => false,
 	): Promise<{ restored: string[]; unknown: string[]; failed: string[] }> {
 		const restored: string[] = []
 		const unknown: string[] = []
@@ -508,6 +537,7 @@ export class TunerArbiter extends EventEmitter {
 				unknown.push(field)
 				continue
 			}
+			if (abort()) break
 			try {
 				switch (field) {
 					case "sampleRate":
@@ -581,7 +611,14 @@ export class TunerArbiter extends EventEmitter {
 		mode: TunerControlMode,
 	): void => {
 		this.lastOperatorAt.set(sourceId, this.now())
-		if (mode !== "external") return
+		if (mode === "internal") {
+			// Control is back: retry a recovery the relay blocked and close a marker it kept open.
+			if (!this.deps.sources.isRtlTcpSource(sourceId)) return
+			if (!this.startRecovery(sourceId) && this.markerOpen.has(sourceId)) {
+				void this.testModeOff(sourceId)
+			}
+			return
+		}
 		const lease = this.leases.get(sourceId)
 		if (lease) this.lose(lease, "preempted-relay")
 	}
@@ -591,13 +628,10 @@ export class TunerArbiter extends EventEmitter {
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {
-		const rtlTcp = this.deps.sources.isRtlTcpSource(sourceId)
-		const persisted = this.recovering.get(sourceId)
-		if (persisted && rtlTcp) {
-			this.recovering.delete(sourceId)
-			void this.recover(persisted)
-		} else if (
-			rtlTcp &&
+		// recover() sends TEST_MODE 0 as its first step.
+		if (
+			this.deps.sources.isRtlTcpSource(sourceId) &&
+			!this.startRecovery(sourceId) &&
 			(this.markerOpen.has(sourceId) || this.leases.has(sourceId))
 		) {
 			// A connection dropped mid-bracket can leave the dongle in test mode; replay never clears it.
@@ -606,23 +640,90 @@ export class TunerArbiter extends EventEmitter {
 		this.emit("source-up", sourceId)
 	}
 
+	/** Starts the pending recovery of a source; false when there is none or one is running. */
+	private startRecovery(sourceId: string): boolean {
+		const persisted = this.recovering.get(sourceId)
+		if (!persisted || this.recoveryRunning.has(sourceId)) return false
+		this.recoveryRunning.add(sourceId)
+		void this.recover(persisted)
+			.catch((err: unknown) => {
+				this.log.error({ err, sourceId }, "Lease recovery failed")
+			})
+			.finally(() => {
+				this.recoveryRunning.delete(sourceId)
+			})
+		return true
+	}
+
+	/**
+	 * A job acquiring a source whose crash recovery has not run takes the persisted lease over:
+	 * its release restores the pre-crash state, and recover() leaves the source alone.
+	 */
+	private adopt(
+		persisted: PersistedLease,
+		jobId: string,
+		priority: number,
+	): Lease {
+		const { sourceId } = persisted
+		this.recovering.delete(sourceId)
+		const lease: Lease = {
+			sourceId,
+			jobId,
+			acquiredAt: this.now(),
+			snapshot: { ...persisted.snapshot },
+			// Frequency always, as in recover(): the stale last hop is the H4 hazard.
+			changedFields: new Set([...persisted.changedFields, "frequency"]),
+		}
+		this.leases.set(sourceId, lease)
+		this.priorities.set(sourceId, priority)
+		void this.persist(lease)
+		this.log.info(
+			{
+				sourceId,
+				jobId,
+				crashedJobId: persisted.jobId,
+				snapshot: lease.snapshot,
+			},
+			"Tuner lease acquired; adopted the persisted lease of a crashed sweep",
+		)
+		// Recovery is settled (the holder restores on release); deferred so no listener runs inside acquire.
+		const result = { restored: [] as string[], unrestorable: [] as string[] }
+		queueMicrotask(() => {
+			try {
+				this.emit("recovered", sourceId, result)
+			} catch (err) {
+				this.log.error({ err, sourceId }, "A recovered listener failed")
+			}
+		})
+		return lease
+	}
+
 	private async recover(persisted: PersistedLease): Promise<void> {
 		const { sourceId } = persisted
+		// A lease that adopted the record owns its restore and its persistence from then on.
+		const superseded = () =>
+			this.recovering.get(sourceId) !== persisted || this.leases.has(sourceId)
+		if (superseded()) return
 		await this.testModeOff(sourceId)
 		// Frequency always: a stale last-hop centre is the H4 hazard, whatever changedFields says.
 		const fields = new Set<keyof TunerFieldValues>([
 			...persisted.changedFields,
 			"frequency",
 		])
-		const r = await this.restoreFields(sourceId, persisted.snapshot, [
-			...fields,
-		])
+		const r = await this.restoreFields(
+			sourceId,
+			persisted.snapshot,
+			[...fields],
+			superseded,
+		)
+		if (superseded()) return
 		if (r.failed.length > 0) {
-			// A write failed (for example relay control): retry on the next connection.
-			// Unknown snapshot values can never be written, so they alone never cause a retry.
-			this.recovering.set(sourceId, persisted)
+			// A write failed (for example relay control): the record stays in `recovering`, and the
+			// next connection or the return of control retries. Unknown snapshot values can never be
+			// written, so they alone never cause a retry.
 			return
 		}
+		this.recovering.delete(sourceId)
 		const result = { restored: r.restored, unrestorable: r.unknown }
 		await this.deps
 			.persistLease(persisted.sourceId, null)
