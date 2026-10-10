@@ -12,7 +12,7 @@
 - [x] 4. Implement strict domain schemas, pure transitions/defaults/errors with
   unit/property tests (validation, IDs, CAS/revisions, authority isolation, ranking).
   _Requirements: 1.1–1.5, 2.1–2.5, 3.1–3.5, 4.6_
-- [ ] 5. Implement dedicated persistence with bounded reads, lifetime ownership,
+- [x] 5. Implement dedicated persistence with bounded reads, lifetime ownership,
   atomic sync/rename (including newly-created-directory parent sync), failure latch
   and restart/initialization failure tests; no generic store abstraction.
   Depends on4.
