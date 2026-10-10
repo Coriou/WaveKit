@@ -51,19 +51,31 @@ warning; the Pi operator page redesign on a single port 80 and the brand kit.
    Mac, all nine decoders, 2.048 Msps): ~7.5 of 8 cores, every branch dropped
    8–36 %; four per-decoder `sox rate -h` resamplers cost ~1.5 cores. Band-aware
    suspension and pinning reduce load at a single tuned band in the meantime.
-   In progress since 2026-10-09 on branch `feat/core-channelizer`. Fixture
+   Code complete and reviewed on 2026-10-10 on branch `feat/core-channelizer`
+   (not merged). It covers the Rust `wavekit-chan`, the Node integration, seven
+   opt-in decoders, the fixture composer, the capacity tooling and the Docker
+   stage. Remaining: the quiet-host phase (image build, golden and voice gates,
+   capacity run) and the operator's DMR and voice capture. Every decoder stays
+   off until its golden gate passes, then the branch merges to main. Fixture
    sourcing (user, 2026-10-09): synthetic IQ for AIS, POCSAG, APRS and ACARS;
    real captures for DMR and analog voice (operator's radio), rtl_433 sensors and
-   aircraft; unlicensed public recordings may be used when fetched from their
-   source and never redistributed.
+   aircraft. Unlicensed public recordings may be used when they are fetched from
+   their source and never redistributed. Open limitation: opening a channel
+   stalls `wavekit-chan` input. Fix that before running the channelizer on a
+   Pi-class host.
 6. **Spectrum and waterfall service** (§8): important, get it right. It feeds
    the CLI and web waterfalls and the scanner's discovery. It is also the first
    step toward WaveKit's founding use case: an operator sees a signal on a
    waterfall, and every suitable decoder tries to identify and decode it.
-   Next session (user, 2026-10-09): identify the many signals visible in SDR++
-   that nothing decodes today. Start with a diagnostic pass that needs no new
-   code (artefact checks, short IQ snapshots, offline decoder attempts), then
-   build the spectrum service, the detector and the scanner's identify mode.
+   Next: identify the many signals visible in SDR++ that nothing decodes today.
+   Start with a diagnostic pass that needs no new code (artefact checks, short
+   IQ snapshots, offline decoder attempts), then build the spectrum service,
+   the detector and the scanner's identify mode.
+   Signal discovery scanner: spec and plan are done
+   ([plan](superpowers/plans/2026-10-09-signal-discovery-scanner.md)). Batch
+   S1-A (tasks 1–22, including the spectrum engine) runs in its own worktree and
+   does not depend on the channelizer. S1-B starts only after the channelizer is
+   merged on main.
 7. Later: API access/origin policy (prerequisite for host controls and a web
    UI); a stale `caps.centerFreq` after a retune that bypasses the relay can
    miss band suspensions. Also later: project license (§9) and agentic setup
