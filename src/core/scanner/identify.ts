@@ -482,6 +482,10 @@ interface TargetState {
 	state: ScannerIdentifyState
 	deadline: number
 	view: IdentifyTrackView | null
+	/** The track resolved before an in-window epoch change: the verdict's evidence if nothing re-resolves. */
+	fallback: IdentifyTrackView | null
+	/** Decoder outcomes of runs completed before an in-window epoch change; a re-plan keeps them and skips their runs. */
+	done: Map<ScannerProtocol, ScannerTrialOutcome>
 	/** The resolved track closed: trials run on its last snapshot (pre-roll from the ring). */
 	gone: boolean
 	/** The start-of-target artefact check met stale masks: repeat it while waiting (§ 10.8 (1) "ends at once"). */
@@ -498,6 +502,14 @@ const FINAL: ReadonlySet<ScannerIdentifyState> = new Set([
 	"identified",
 	"candidate",
 	"unidentified",
+])
+
+/** Trial outcomes a decoder actually produced (kept across an in-window epoch change). */
+const COMPLETED: ReadonlySet<ScannerTrialOutcome> = new Set([
+	"decoded",
+	"no-sync",
+	"crc-errors",
+	"timeout",
 ])
 
 function emptyMetadata(): DiscoveryMetadata {
@@ -711,11 +723,13 @@ export class IdentifyRunner implements JobDriver {
 			this.phase = "running"
 			// Each target's track is already resolved, so no wait deadline applies (a shared started + timeoutMs would
 			// have passed by the time later targets get their turn); restartTarget gives one after an epoch change.
+			// The window-move check looks at the centre only: detection keeps track centres in the usable span, but an
+			// edge track's OBW may reach past it without the window having moved.
 			for (const v of found)
 				this.newTarget(
 					v.track.centreHz,
 					toleranceHz(v.track.obwHz),
-					v.track.obwHz,
+					0,
 					Number.POSITIVE_INFINITY,
 					v,
 				)
@@ -743,6 +757,8 @@ export class IdentifyRunner implements JobDriver {
 			state: "waiting-for-signal",
 			deadline,
 			view,
+			fallback: null,
+			done: new Map(),
 			gone: false,
 			recheckArtefact: false,
 			plan: null,
@@ -789,6 +805,11 @@ export class IdentifyRunner implements JobDriver {
 		if (t.recheckArtefact) {
 			t.recheckArtefact = false
 			this.checkArtefact(t, false)
+			return
+		}
+		// Restarted by an in-window epoch change past the deadline: end with the evidence so far (like a window move).
+		if (t.fallback && now >= t.deadline) {
+			this.finishTarget(t, null)
 			return
 		}
 		const hit = resolveTarget(t.targetHz, t.toleranceHz, this.currentTracks())
@@ -844,7 +865,10 @@ export class IdentifyRunner implements JobDriver {
 				decoder: p.decoder,
 				mode: p.mode,
 				transport: p.transport,
-				outcome: p.run === null ? "unsupported" : "pending",
+				outcome:
+					p.run === null
+						? "unsupported"
+						: (t.done.get(p.protocol) ?? "pending"),
 				...(p.reason ? { reason: p.reason } : {}),
 			}),
 		)
@@ -897,6 +921,8 @@ export class IdentifyRunner implements JobDriver {
 		const run = t.plan?.runs[runIndex]
 		if (!view || !run) return false
 		t.nextRun += 1
+		// Completed before an in-window epoch change: not run again.
+		if (run.protocols.every(p => t.done.has(p))) return true
 		const fs = this.deps.engine(this.sourceId)?.currentEpoch().sampleRateHz ?? 0
 		const preRollSamples = Math.round(
 			(this.deps.settings().hold.preRollMs * fs) / 1000,
@@ -977,14 +1003,19 @@ export class IdentifyRunner implements JobDriver {
 			this.endMoved(t)
 			return
 		}
-		this.releaseRuns(t.active.splice(0))
+		const runs = t.active.splice(0)
+		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
+		this.releaseRuns(runs)
+		// Keep the evidence: decoder outcomes of completed runs, and the resolved track for the verdict.
+		for (const trial of t.trials)
+			if (COMPLETED.has(trial.outcome))
+				t.done.set(trial.protocol, trial.outcome)
+		t.fallback = t.view ?? t.fallback
 		t.state = "waiting-for-signal"
 		if (!Number.isFinite(t.deadline))
 			t.deadline = now + this.deps.identify.timeoutMs
 		t.view = null
 		t.gone = false
-		t.plan = null
-		t.trials = []
 		t.nextRun = 0
 		this.emitTarget(t)
 	}
@@ -1057,7 +1088,7 @@ export class IdentifyRunner implements JobDriver {
 		ended?: "window-moved",
 	): void {
 		if (FINAL.has(t.state)) return
-		const resolved = t.view
+		const resolved = t.view ?? t.fallback
 		const latest = resolved
 			? (this.deps
 					.liveTracks(this.sourceId)

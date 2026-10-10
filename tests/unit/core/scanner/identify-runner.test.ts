@@ -605,10 +605,81 @@ describe("IdentifyRunner window moves, cut-short runs and endings (Task 35a fix 
 		expect(h.record.state).toBe("completed")
 		// the deadline is the original start + 2 s (+ one tick to finish), not 2 s after the epoch change
 		expect(h.clock.now - startedAt).toBeLessThanOrEqual(2300)
-		expect(h.last()).toMatchObject({ state: "unidentified", trials: [] })
+		// the evidence survives the restart: the DMR track it resolved still gives candidate/dmr (fix round 2, R1)
+		expect(h.last()).toMatchObject({
+			state: "candidate",
+			result: {
+				protocol: "dmr",
+				observationId: "o_t1",
+				measurements: { source: "track", class: "tdma-ms" },
+			},
+		})
+		expect(h.last()!.result!.ended).toBeUndefined()
+		expect(outcomes(h)["dmr"]).toBe("cancelled")
+		expect(
+			h
+				.last()!
+				.trials.every(t => ["cancelled", "unsupported"].includes(t.outcome)),
+		).toBe(true)
 		expect(
 			h.events.some(e => e.trials.some(t => t.outcome === "no-sync")),
 		).toBe(false)
+	})
+
+	it("keeps completed trial outcomes across an in-window epoch change and does not run them again", async () => {
+		const h = identifyHarness()
+		const order = decoderOrder(h)
+		await dmrTrial(h)
+		// dsd-fme auto holds 2 s (+ start latency), then direwolf starts
+		while (order.length < 2) await h.advance(500)
+		expect(order).toEqual(["dsd-fme:auto", "direwolf:"])
+		expect(outcomes(h)).toMatchObject({ dmr: "no-sync", aprs: "running" })
+		h.engine.setEpoch(2, 446_100_000)
+		await h.pool.onEpoch("rtl", 2, 446_100_000)
+		await flushAsync()
+		await h.advance(100)
+		expect(h.last()).toMatchObject({ state: "waiting-for-signal" })
+		expect(outcomes(h)).toMatchObject({ dmr: "no-sync", aprs: "cancelled" })
+		// the handheld is seen again in the new epoch: the dsd-fme run is not repeated, direwolf is
+		h.tracks.push(
+			viewOf(trackOf({ trackId: "t2", epoch: 2, acf30: -0.94, acf60: 0.99 })),
+		)
+		await h.advance(100)
+		await flushAsync()
+		expect(order).toEqual(["dsd-fme:auto", "direwolf:", "direwolf:"])
+		expect(outcomes(h)).toMatchObject({
+			dmr: "no-sync",
+			dstar: "no-sync",
+			ysf: "no-sync",
+			p25p1: "no-sync",
+			aprs: "running",
+		})
+	})
+
+	it("never reports window-moved for a collected all: true track whose OBW reaches past the usable edge (R2)", async () => {
+		const h = identifyHarness({ request: { target: { all: true } } })
+		await h.runner.start()
+		// FakeEngineView: 446.1 MHz ± 819.2 kHz usable; a DMR handheld whose centre is inside but whose
+		// upper band edge (+4.5 kHz) is 1.3 kHz outside
+		h.tracks.push(
+			viewOf(
+				trackOf({
+					trackId: "e",
+					centreHz: 446_916_000,
+					acf30: -0.94,
+					acf60: 0.99,
+					flags: { ...FLAGS, edge: true },
+				}),
+				"d_e",
+			),
+		)
+		await h.advance(100) // collected, planned, first run started
+		await h.advance(100)
+		await h.advance(100)
+		const [target] = h.runner.view().targets
+		expect(target).toMatchObject({ targetHz: 446_916_000, state: "trying" })
+		expect(target!.result).toBeUndefined()
+		expect(h.decoders.created.size).toBe(1)
 	})
 
 	it("ends with the results so far on source-down", async () => {
