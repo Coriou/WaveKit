@@ -304,5 +304,92 @@ class ChannelizerSummary(unittest.TestCase):
         r = self.summary((2_000_000_000.0, 2_000_000_010.0), "", channelizer="off")
         self.assertEqual(r["warnings"], [])
 
+# Final review infra I2 / addendum §9: the signal channel decodes the same set as the bounded-CSDR path.
+OUTPUTS = "\n".join([
+    '{"kind":"output","output":{"type":"ship","data":{"mmsi":"211","messageType":1,"lat":1}}}',
+    '{"kind":"output","output":{"type":"ship","data":{"mmsi":"211","messageType":1,"lat":2}}}',
+    '{"kind":"output","output":{"type":"ship","data":{"mmsi":"305","messageType":3}}}',
+    '{"kind":"output","output":{"type":"stats","data":{"mmsi":"999"}}}',
+    '{"kind":"output","output":{"type":"ship","data":{"messageType":5}}}',
+    'not json',
+    '{"kind":"status","status":{"id":"ais-catcher-ch2","running":true}}',
+])
+
+class DecodedSet(unittest.TestCase):
+    def test_key_set_over_key_fields_like_the_golden_harness(self):
+        s = load("summarize")
+        r = s.decoded_set(OUTPUTS, ["mmsi", "messageType"])
+        # stats/error/sync outputs are not decodes (harness.ts counted()); a missing field is null.
+        self.assertEqual(r, {"count": 4, "keys": ['["211",1]', '["305",3]', '[null,5]']})
+
+    def test_output_types_restrict_the_counted_outputs(self):
+        s = load("summarize")
+        r = s.decoded_set(OUTPUTS, ["mmsi"], ["stats"])
+        self.assertEqual(r, {"count": 1, "keys": ['["999"]']})
+
+    def test_signal_decoder_is_the_instance_on_the_signal_channel(self):
+        run = load("run_capacity")
+        points = run.placements(162_100_000, 2_048_000, 0.8, 4, "spread", 162_000_000, 384_000)
+        decoders = [(f"ais-catcher-ch{k}", "ais-catcher", {"channelHz": hz}) for k, hz in enumerate(points)]
+        sid = run.signal_decoder_id(decoders, 162_000_000)
+        self.assertEqual(decoders[[d[0] for d in decoders].index(sid)][2]["channelHz"], 162_000_000)
+
+    def test_collector_command_writes_outputs_and_exit_code(self):
+        run = load("run_capacity")
+        cmd = run.collector_command(180, "ais-catcher-ch2")
+        self.assertIn("node /capacity-collect/collect-outputs.mjs 9000 180 ais-catcher-ch2", cmd)
+        self.assertIn("> /wkcap/outputs.jsonl", cmd)
+        self.assertIn("/wkcap/collector.exit", cmd)
+        self.assertTrue(run.COLLECTOR.is_file(), run.COLLECTOR)
+
+    def run_dir(self, d, name, outputs, **meta):
+        run = pathlib.Path(d) / name
+        run.mkdir()
+        sample = {"t": 0, "cpu": {"usage_usec": 0, "user_usec": 0, "system_usec": 0, "throttled_usec": 0},
+                  "mem": {"current": 1, "peak": 1, "anon": 0, "shmem": 0}, "memEvents": {},
+                  "decoders": [], "branches": []}
+        (run / "samples.jsonl").write_text("".join(json.dumps({**sample, "ts": ts}) + "\n" for ts in (0.0, 10.0)))
+        (run / "meta.json").write_text(json.dumps({
+            "rate": 2048000, "buffers": "on", "decoders": ["ais-catcher-ch2"], "channels": 4,
+            "placement": "spread", "playback": "paced", "fixture": {"id": "composed_ais_162m_2048k"},
+            "signalDecoder": "ais-catcher-ch2", "keyFields": ["mmsi", "messageType"], "collectorExit": 0,
+            **meta}))
+        if outputs is not None:
+            (run / "outputs.jsonl").write_text(outputs + "\n")
+        return run
+
+    def test_summarize_reports_the_signal_decoded_set(self):
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            r = s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off"))
+            missing = s.summarize(self.run_dir(d, "none", None, channelizer="off"))
+        self.assertEqual(r["decodedSet"], {"decoderId": "ais-catcher-ch2", "collectorExit": 0, "count": 4,
+                                           "keys": ['["211",1]', '["305",3]', '[null,5]']})
+        self.assertIsNone(missing["decodedSet"])
+
+    def test_compares_each_channelizer_cell_with_its_bounded_csdr_cell(self):
+        s = load("summarize")
+        fewer = "\n".join(OUTPUTS.splitlines()[:3])  # "305" decoded, "[null,5]" lost
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off-bounded", OUTPUTS, channelizer="off")),
+                    s.summarize(self.run_dir(d, "off-unbounded", fewer, channelizer="off", buffers="off")),
+                    s.summarize(self.run_dir(d, "on", fewer, channelizer="on")),
+                    s.summarize(self.run_dir(d, "on-8", OUTPUTS, channelizer="on", channels=8))]
+        cmp = s.decoded_set_comparisons(runs)
+        # on-8 has no off cell with 8 channels; the unbounded off cell is not the reference.
+        self.assertEqual(cmp, [{"decodedSetComparison": {
+            "fixture": "composed_ais_162m_2048k", "rate": 2048000, "channels": 4, "placement": "spread",
+            "playback": "paced", "channelizerRun": "on", "boundedCsdrRun": "off-bounded",
+            "equal": False, "onlyBoundedCsdr": ["[null,5]"], "onlyChannelizer": []}}])
+
+    def test_a_failed_collector_never_compares_equal(self):
+        s = load("summarize")
+        with tempfile.TemporaryDirectory() as d:
+            runs = [s.summarize(self.run_dir(d, "off", OUTPUTS, channelizer="off")),
+                    s.summarize(self.run_dir(d, "on", OUTPUTS, channelizer="on", collectorExit=3))]
+        (cmp,) = s.decoded_set_comparisons(runs)
+        self.assertFalse(cmp["decodedSetComparison"]["equal"])
+        self.assertIn("collector", cmp["decodedSetComparison"]["error"])
+
 if __name__ == "__main__":
     unittest.main()

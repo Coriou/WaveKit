@@ -18,6 +18,15 @@ mark is wavekit-chan's maximum since the channel opened, so it includes the
 warm-up; "queueHighWaterBytesAtWindowStart" is its value before the window.
 "cpuCores.wavekitChan" is the wavekit-chan processes' CPU over the window.
 
+"decodedSet" (fixture runs) is the signal instance's outputs.jsonl reduced like
+the golden harness's keySet: the sorted distinct key tuples over the fixture's
+expected.key_fields, counting only expected.output_types (else every type but
+stats/error/sync). After the per-run lines, one "decodedSetComparison" line per
+channelizer-on cell compares it with the channelizer-off, --buffers on cell of
+the same fixture, rate, channels, placement and playback (addendum §9: the
+same decoded set as the bounded-CSDR path). A collector that did not exit 0
+never compares equal.
+
 Clock domains: pino's `time` in app.log and the sampler's `ts` both come from
 the container clock (sampler.py runs inside wkcap-app), so the window is the
 first-to-last sampler span. meta "windowWall" is the driver's host clock; it is
@@ -45,6 +54,7 @@ def by_id(rows):
     return {row.get("id"): row for row in rows} if isinstance(rows, list) else {}
 
 
+UNCOUNTED_TYPES = {"stats", "error", "sync"}  # as tests/integration/fixtures/harness.ts
 STATS_INTERVAL_S = 5  # wavekit-chan emits "stats" every 5 s (addendum §11)
 COVERAGE_SLACK_S = STATS_INTERVAL_S + 2
 
@@ -108,6 +118,54 @@ def channelizer_stats(app_log, window=None):
     return {"queueHighWaterBytes": high_water, "queueHighWaterBytesAtWindowStart": high_water_before,
             "droppedSamples": dropped, "saturatedSamples": saturated, "queueOverflowEvents": overflows,
             "windowCoverage": coverage}
+
+
+def decoded_set(outputs_text, key_fields, output_types=None):
+    """The collector's output lines as {"count", "keys"}: keys are JSON arrays of key_fields, sorted, distinct."""
+    keys, count = set(), 0
+    for line in outputs_text.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        output = entry.get("output") if isinstance(entry, dict) and entry.get("kind") == "output" else None
+        if not isinstance(output, dict):
+            continue
+        kind = output.get("type")
+        if (kind not in output_types) if output_types else (kind in UNCOUNTED_TYPES):
+            continue
+        data = output.get("data") if isinstance(output.get("data"), dict) else {}
+        count += 1
+        keys.add(json.dumps([data.get(k) for k in key_fields], separators=(",", ":")))
+    return {"count": count, "keys": sorted(keys)}
+
+
+def decoded_set_comparisons(summaries):
+    """One comparison per channelizer-on run that has a bounded-CSDR (off, buffers on) run of the same cell."""
+    def cell(r):
+        m = r.get("matrix") or {}
+        return ((m.get("fixture") or {}).get("id"), r.get("rate"), m.get("channels"), m.get("placement"),
+                m.get("playback"))
+    runs = [r for r in summaries if r.get("decodedSet")]
+    reference = {cell(r): r for r in runs
+                 if (r.get("matrix") or {}).get("channelizer") == "off" and r.get("buffers") == "on"}
+    comparisons = []
+    for r in runs:
+        ref = reference.get(cell(r))
+        if (r.get("matrix") or {}).get("channelizer") != "on" or ref is None:
+            continue
+        on, off = set(r["decodedSet"]["keys"]), set(ref["decodedSet"]["keys"])
+        fixture, rate, channels, placement, playback = cell(r)
+        row = {"fixture": fixture, "rate": rate, "channels": channels, "placement": placement,
+               "playback": playback, "channelizerRun": r["run"], "boundedCsdrRun": ref["run"],
+               "equal": on == off, "onlyBoundedCsdr": sorted(off - on), "onlyChannelizer": sorted(on - off)}
+        failed = [f"collector exit {x['decodedSet']['collectorExit']} ({x['run']})" for x in (ref, r)
+                  if x["decodedSet"]["collectorExit"] != 0]
+        if failed:
+            row["equal"] = False
+            row["error"] = "; ".join(failed)
+        comparisons.append({"decodedSetComparison": row})
+    return comparisons
 
 
 def coverage_warnings(stats):
@@ -203,6 +261,12 @@ def summarize(run):
     chan_stats["windowCoverage"]["hostClockSkewS"] = (
         round(wall["start"] - first["ts"], 1) if has_wall and has_ts else None)
     warnings = coverage_warnings(chan_stats) if meta.get("channelizer") == "on" else []
+    outputs = run / "outputs.jsonl"
+    decoded = None
+    if meta.get("signalDecoder") and outputs.exists():
+        decoded = {"decoderId": meta["signalDecoder"], "collectorExit": meta.get("collectorExit"),
+                   **decoded_set(outputs.read_text(errors="replace"), meta.get("keyFields") or [],
+                                 meta.get("outputTypes"))}
     return {
         "run": run.name,
         "rate": meta["rate"], "buffers": meta["buffers"], "decoders": meta["decoders"],
@@ -238,6 +302,7 @@ def summarize(run):
         "channelizer": chan_stats,
         "warnings": warnings,
         "decoders": decoders,
+        "decodedSet": decoded,
         "source": fake[-1] if fake else None,
         "sourceConnections": sum(1 for e in fake if e.get("event") == "connected"),
         "sourceDisconnects": sum(1 for e in fake if e.get("event") == "disconnected"),
@@ -249,5 +314,8 @@ def summarize(run):
 
 
 if __name__ == "__main__":
-    for argument in sys.argv[1:]:
-        print(json.dumps(summarize(Path(argument))))
+    summaries = [summarize(Path(argument)) for argument in sys.argv[1:]]
+    for summary in summaries:
+        print(json.dumps(summary))
+    for comparison in decoded_set_comparisons(summaries):
+        print(json.dumps(comparison))

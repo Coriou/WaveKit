@@ -19,13 +19,20 @@ synthetic source logs a client disconnect inside the measurement window.
 
 All output goes to --out (e.g. output/capacity/<run-id>/, gitignored):
 config.yaml, meta.json, samples.jsonl (from sampler.py), app.log, fake.log
-and guard.jsonl. Use summarize.py to reduce them.
+and guard.jsonl (fixture runs add outputs.jsonl, collector.err and
+collector.exit). Use summarize.py to reduce them.
 
 With --fixture <id> the source replays that manifest fixture in a loop
 instead (--playback paced|unpaced), and the decoders are --channels instances
 of the fixture's decoder type at admissible --placement channel centres
 (addendum §9, plan A10). --channelizer on routes them through wavekit-chan.
 A cell counts only if every instance runs at window start and end.
+For the addendum §9 decoded-set criterion the instance on the signal channel
+(meta "signalDecoder") has its outputs collected over the window by the golden
+collector (tests/integration/fixtures/collect-outputs.mjs) into outputs.jsonl,
+with its exit code in meta "collectorExit"; summarize.py reduces them to the
+key set over the fixture's expected.key_fields and compares channelizer-on
+cells with their bounded-CSDR (off, --buffers on) cell.
 
 Exit codes: 0 ok, 2 preflight abort (including an inadmissible fixture
 signal), 3 app not healthy, 4 aborted inside the window, 5 a decoder
@@ -48,6 +55,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = Path(__file__).resolve().parents[2]
+# The golden harness's output collector, mounted read-only at /capacity-collect (final review infra I2)
+COLLECTOR = REPO / "tests" / "integration" / "fixtures" / "collect-outputs.mjs"
 ADMISSION_EPSILON_HZ = 1e-6  # same tolerance as admission.rs / admission.ts (Review Focus 1)
 USABLE_FRACTION = 0.8  # ChannelizerConfigSchema default (addendum §6)
 # Channel request output rate per channelisable decoder type (src/decoders/builtin/ais-catcher.ts)
@@ -157,6 +166,28 @@ def decoder_problems(statuses, expected_ids):
         elif not s.get("running"):
             problems.append(f"{decoder_id}: not running ({s.get('health')})")
     return problems
+
+
+def signal_decoder_id(decoders, signal_hz):
+    """The instance placements() pinned to the fixture's signal channel."""
+    return next(d[0] for d in decoders if d[2].get("channelHz") == signal_hz)
+
+
+def collector_command(window, decoder_id):
+    """Shell line for `docker exec -d`: the signal instance's outputs for `window` seconds, then its exit code."""
+    return (f"node /capacity-collect/{COLLECTOR.name} 9000 {window:g} {decoder_id} "
+            f"> /wkcap/outputs.jsonl 2> /wkcap/collector.err; echo $? > /wkcap/collector.exit")
+
+
+def wait_collector_exit(out, timeout):
+    """The collector's exit code once it has written it, else None."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            return int((out / "collector.exit").read_text().strip())
+        except (OSError, ValueError):
+            time.sleep(1)
+    return None
 
 
 def decoder_statuses():
@@ -296,6 +327,7 @@ def main():
     center = options.center
     fixture = None
     channel_hz = None
+    signal_id = None
     decoders = []
     placement_error = None
     if options.fixture:
@@ -318,6 +350,7 @@ def main():
                                     options.placement, signal_hz, CHANNEL_OUT_RATE[decoder_type])
             decoders = [(f"{decoder_type}-ch{k}", decoder_type, {**base, **extra, "channelHz": hz})
                         for k, hz in enumerate(channel_hz)]
+            signal_id = signal_decoder_id(decoders, signal_hz)
         except ValueError as error:
             placement_error = str(error)
     else:
@@ -341,6 +374,9 @@ def main():
         "placements": channel_hz,
         "fixture": {k: fixture[k] for k in ("id", "sha256", "sample_rate", "center_hz")} if fixture else None,
         "playback": options.playback,
+        "signalDecoder": signal_id,
+        "keyFields": fixture["expected"].get("key_fields") if fixture else None,
+        "outputTypes": fixture["expected"].get("output_types") if fixture else None,
         # Delta E12 pins, written by write_config
         "pinned": {"bandSuspension": False, "digitalVoiceEnabled": False, "liveDemodEnabled": False},
     }
@@ -392,7 +428,8 @@ def main():
                "-e", "WAVEKIT_CONFIG=/wkcap/config.yaml",
                "-e", f"WAVEKIT_CSDR__BOUNDED_BUFFERS={bounded}",
                "-e", "WAVEKIT_CSDR__BUFFER_ELEMENTS=65536",
-               "-v", f"{out}:/wkcap", "-v", f"{HERE}:/capacity:ro", options.image)
+               "-v", f"{out}:/wkcap", "-v", f"{HERE}:/capacity:ro",
+               "-v", f"{COLLECTOR.parent}:/capacity-collect:ro", options.image)
         if not wait_healthy(90):
             aborted = "app not healthy within 90s"
             return 3
@@ -403,6 +440,10 @@ def main():
         if problems:
             aborted = "decoders not all running at window start: " + "; ".join(problems)
             return 5
+        if signal_id:
+            for stale in ("outputs.jsonl", "collector.err", "collector.exit"):
+                (out / stale).unlink(missing_ok=True)
+            docker("exec", "-d", "wkcap-app", "sh", "-c", collector_command(options.window, signal_id))
         docker("exec", "-d", "wkcap-app", "python3", "/capacity/sampler.py",
                "--out", "/wkcap/samples.jsonl", "--duration", str(options.window),
                "--interval", str(options.interval))
@@ -428,6 +469,8 @@ def main():
                     aborted = f"VM MemAvailable {vm} MiB below {options.min_available_mib}"
                     break
         window_end_wall = time.time()
+        if signal_id:
+            meta["collectorExit"] = wait_collector_exit(out, 30)
         # Host clock. summarize.py windows app.log by the sampler span (container clock, like pino)
         # and reports this one's offset from it as hostClockSkewS.
         meta["windowWall"] = {"start": window_start_wall, "end": window_end_wall}
