@@ -423,7 +423,11 @@ export function normaliseSpec(
 	const fftSize =
 		spec.fftSize ??
 		(s.detection.fftSize === "auto" ? defaultFftSize(fs) : s.detection.fftSize)
-	pv("fftSize", spec.fftSize !== undefined)
+	pv(
+		"fftSize",
+		spec.fftSize !== undefined,
+		s.detection.fftSize === "auto" ? "default" : "config",
+	)
 	const integrationMs =
 		spec.integrationMs ??
 		(sensitivity === "high" ? 100 : s.detection.integrationMs)

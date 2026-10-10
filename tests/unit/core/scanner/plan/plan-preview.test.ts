@@ -238,6 +238,27 @@ describe("previewPlan derived defaults", () => {
 		expect(p.spec.dwellMs).toBe(35 + 3 * 100)
 	})
 
+	it("labels a configured fftSize config, and an operator one operator", () => {
+		const configured = ctx({
+			settings: settings(s => {
+				s.detection.fftSize = 4096
+			}),
+		})
+		const fromConfig = previewPlan(
+			{ bandplans: ["uhf-land-mobile"] },
+			configured,
+		)
+		expect(fromConfig.spec.fftSize).toBe(4096)
+		expect(fromConfig.spec.provenance["fftSize"]).toBe("config")
+		expect(fromConfig.spec.provenance["ranges.rasters"]).toBe("bandplan")
+		const given = previewPlan(
+			{ bandplans: ["uhf-land-mobile"], fftSize: 1024 },
+			configured,
+		)
+		expect(given.spec.fftSize).toBe(1024)
+		expect(given.spec.provenance["fftSize"]).toBe("operator")
+	})
+
 	it("applies an operator confirmHoldMs to every class", () => {
 		const p = previewPlan(
 			{

@@ -177,7 +177,9 @@ export const NormalisedJobSpecSchema = z.object({
 		onBoot: z.boolean(),
 	}),
 	txDurationHintMs: z.number().nonnegative(),
-	provenance: z.record(z.enum(["operator", "bandplan", "measured", "default"])),
+	provenance: z.record(
+		z.enum(["operator", "bandplan", "measured", "config", "default"]),
+	),
 })
 export type NormalisedJobSpecCheck = Assert<
 	SchemaMatches<NormalisedJobSpec, typeof NormalisedJobSpecSchema>

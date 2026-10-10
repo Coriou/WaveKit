@@ -401,7 +401,10 @@ export interface NormalisedJobSpec extends Required<
 	takeover: boolean
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
-	provenance: Record<string, "operator" | "bandplan" | "measured" | "default">
+	provenance: Record<
+		string,
+		"operator" | "bandplan" | "measured" | "config" | "default"
+	>
 }
 
 export interface Hop {

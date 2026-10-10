@@ -342,6 +342,12 @@ export interface DecoderStatus {
 	transition?: "suspending" | "resuming" | undefined
 	/** Who started the decoder; set by the manager while desiredRunning. */
 	startMode?: DecoderStartMode | undefined
+	/** "scanner" for probes created by the scanner; set by the manager. */
+	owner?: "config" | "scanner" | undefined
+	/** Owning scanner job of a probe. */
+	scannerJobId?: string | undefined
+	/** True only for scanner probes (runtime-only). */
+	ephemeral?: true | undefined
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */

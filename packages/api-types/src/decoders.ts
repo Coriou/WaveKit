@@ -176,10 +176,14 @@ export interface DecoderBandAssessment {
 	windowHalfWidthHz?: number
 }
 
-/** Rate reasons, or the tuned band no longer covering any target. */
+/**
+ * Rate reasons, the tuned band no longer covering any target, or the
+ * source held by a scanner sweep (signal discovery spec § 10.4).
+ */
 export type DecoderSuspensionReasonCode =
 	| NonNullable<DecoderRateAssessment["reasonCode"]>
 	| "frequency-out-of-band"
+	| "tuner-scanning"
 
 export interface DecoderCaps {
 	input: DecoderInputType
@@ -256,6 +260,12 @@ export interface DecoderStatus {
 	transition?: "suspending" | "resuming"
 	/** Who started the decoder; sent while `desiredRunning` is true. */
 	startMode?: DecoderStartMode
+	/** Who created the instance: configuration, or the scanner (a probe). Sent by current cores. */
+	owner?: "config" | "scanner"
+	/** Scanner job that owns this probe; present only for owner "scanner". */
+	scannerJobId?: string
+	/** Runtime-only instance (not in config, never persisted); present only for probes. */
+	ephemeral?: true
 }
 
 /** Why and since when a decoder is suspended for its source rate or band. */
