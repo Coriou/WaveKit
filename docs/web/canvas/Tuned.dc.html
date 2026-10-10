@@ -16,6 +16,7 @@
 body{margin:0;background:#0b1512}
 .wk-tc-act:hover{background:#192b24;color:#f4f7f5}
 .wk-tc-row:hover{background:rgba(123,236,199,.06)}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="box-sizing: border-box; width: 100%; padding: {{pad}}; background: {{bg}}; border: {{border}}; border-radius: {{radius}}; box-shadow: {{shadow}}; backdrop-filter: {{blur}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 14px">
@@ -114,7 +115,7 @@ body{margin:0;background:#0b1512}
 	</div>
 
 	<sc-if value="{{full}}" hint-placeholder-val="{{false}}">
-		<section aria-label="Also in view" style="display: flex; flex-direction: column; padding-top: 6px; border-top: 1px solid #1a2b25">
+		<section aria-label="Also in view" style="display: flex; flex-direction: column; padding-top: 6px; border-top: 1px solid rgba(123,236,199,.08)">
 			<h3 style="margin: 8px 0 2px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Also in view</h3>
 			<sc-for list="{{others}}" as="o" hint-placeholder-count="3">
 				<button class="wk-tc-row" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; height: 48px; padding: 0 8px; margin: 0 -8px; border: 0; border-radius: 6px; background: transparent">
@@ -251,7 +252,7 @@ class Component extends DCLogic {
 			return {
 				t: r[0], a: r[1], b: r[2], audio,
 				bg: on ? 'rgba(123,236,199,.08)' : 'transparent',
-				pBorder: on ? '#7becc7' : 'rgba(123,236,199,.4)', pBg: on ? '#7becc7' : 'transparent', pFg: on ? '#111c19' : '#7becc7', pIcon: on ? PAUSE : PLAY,
+				pBorder: on ? '#7becc7' : 'rgba(123,236,199,.18)', pBg: on ? '#7becc7' : 'transparent', pFg: on ? '#111c19' : '#7becc7', pIcon: on ? PAUSE : PLAY,
 				playLabel: on ? 'Playing' : 'Play recording',
 				pick: () => { if (audio) this.setState({ play: on ? null : id }); else this.act('open', freq); }
 			};
@@ -260,7 +261,7 @@ class Component extends DCLogic {
 			const o = opt || {};
 			return {
 				label, icon, hasLabel: !o.iconOnly, title: o.title || label, flex: o.iconOnly ? '0 0 36px' : '1 1 auto', pressed: o.pressed ? 'true' : 'false',
-				border: o.primary ? '#7becc7' : o.pressed ? 'rgba(123,236,199,.6)' : '#2c443b',
+				border: o.primary ? '#7becc7' : o.pressed ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
 				bg: o.primary ? '#7becc7' : o.pressed ? 'rgba(123,236,199,.12)' : 'transparent',
 				fg: o.primary ? '#111c19' : o.pressed ? '#7becc7' : '#b9cac1',
 				pick: o.pick || (() => this.act(id, freq))
@@ -308,7 +309,7 @@ class Component extends DCLogic {
 			bg: floating ? 'rgba(17,28,25,.55)' : '#111c19',
 			border: floating ? '1px solid rgba(123,236,199,.14)' : '0',
 			radius: floating ? '12px' : '0',
-			shadow: floating ? 'inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35)' : 'none',
+			shadow: floating ? 'inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35)' : 'none',
 			blur: floating ? 'blur(22px) saturate(170%)' : 'none'
 		};
 	}

@@ -14,6 +14,7 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="position: absolute; inset: 0; display: flex; flex-direction: column; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden; user-select: none; touch-action: none">
@@ -39,7 +40,7 @@ body{margin:0}
 					<span style="position: absolute; right: 0; top: -17px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; color: #f2b84b">SQUELCH</span>
 				</div>
 			</sc-if>
-			<div style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 4px; border-radius: 8px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(12px) saturate(160%)" onPointerDown="{{stop}}">
+			<div style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 4px; border-radius: 8px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); backdrop-filter: blur(12px) saturate(160%)" onPointerDown="{{stop}}">
 				<button onClick="{{zoomOut}}" aria-label="Zoom out" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 16px">−</button>
 				<div style="position: relative; width: 84px; height: 6px; border-radius: 3px; background: #22362f" aria-hidden="true">
 					<div style="position: absolute; top: 0; bottom: 0; left: {{ovLeft}}%; width: max(3px, {{ovWidth}}%); border-radius: 3px; background: #7becc7"></div>
@@ -48,7 +49,7 @@ body{margin:0}
 				<button onClick="{{zoomFit}}" aria-label="Show the whole capture" style="font: inherit; cursor: pointer; height: 28px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 44px">{{zoomText}}</button>
 			</div>
 		</div>
-		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid #1a2b25; background: #0b1512; overflow: hidden">
+		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid rgba(123,236,199,.08); background: #0b1512; overflow: hidden">
 			<sc-for list="{{ticks}}" as="t" hint-placeholder-count="12">
 				<span style="position: absolute; left: {{t.left}}%; top: 8px; transform: translateX(-50%); font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{t.text}}</span>
 			</sc-for>
@@ -56,7 +57,7 @@ body{margin:0}
 				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 4px; background: #7becc7; color: #111c19; font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
 			</sc-if>
 		</div>
-		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid #1a2b25; overflow: hidden">
+		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid rgba(123,236,199,.08); overflow: hidden">
 			<sc-for list="{{bands}}" as="b" hint-placeholder-count="3">
 				<div style="position: absolute; left: {{b.left}}%; width: {{b.width}}%; top: 4px; height: 16px; border-top: 2px solid rgba(123,236,199,.28); box-sizing: border-box">
 					<sc-if value="{{b.showLabel}}" hint-placeholder-val="{{true}}"><span style="position: absolute; left: 6px; top: 1px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: #8ba598; white-space: nowrap">{{b.label}}</span></sc-if>
@@ -84,7 +85,7 @@ body{margin:0}
 		</sc-if>
 		<sc-if value="{{hovering}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; top: {{topInset}}px; bottom: 0; left: {{hoverLeft}}%; width: 1px; background: rgba(244,247,245,.28); pointer-events: none">
-				<span style="position: absolute; top: {{hoverTagTop}}px; left: 0; transform: translateX(-50%); height: 20px; line-height: 20px; padding: 0 8px; border-radius: 4px; background: #192b24; border: 1px solid rgba(123,236,199,.3); font-size: 11.5px; z-index: 1; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
+				<span style="position: absolute; top: {{hoverTagTop}}px; left: 0; transform: translateX(-50%); height: 20px; line-height: 20px; padding: 0 8px; border-radius: 4px; background: #192b24; border: 1px solid rgba(123,236,199,.14); font-size: 11.5px; z-index: 1; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
 			</div>
 		</sc-if>
 	</div>
@@ -519,7 +520,7 @@ class Component extends DCLogic {
 					const r = [px - wd / 2 - 3, top - 2, px + wd / 2 + 3, top + 28];
 					if (clash(r)) continue;
 					taken.push(r);
-					return { left: pct(x.f), top, lead: 12 - dy, label: x.label, sub: x.sub, hasSub, freq: (x.f / 1e6).toFixed(3), icon: ICON[x.cat], border: x.f === vfo ? 'rgba(123,236,199,.7)' : 'rgba(123,236,199,.16)', pick: e => { e.stopPropagation(); this.tuneTo(x.f); } };
+					return { left: pct(x.f), top, lead: 12 - dy, label: x.label, sub: x.sub, hasSub, freq: (x.f / 1e6).toFixed(3), icon: ICON[x.cat], border: x.f === vfo ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.14)', pick: e => { e.stopPropagation(); this.tuneTo(x.f); } };
 				}
 			}
 			return null;

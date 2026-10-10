@@ -14,6 +14,7 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="box-sizing: border-box; width: 100%; height: {{rootH}}; display: flex; flex-direction: column; gap: 14px; padding: {{pad}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; background: {{rootBg}}; border-radius: {{rootRadius}}; border: {{rootBorder}}; box-shadow: {{rootShadow}}; backdrop-filter: {{rootBlur}}">
@@ -21,7 +22,7 @@ body{margin:0;background:#0b1512}
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
 		<span style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</span>
 		<div style="flex: 1"></div>
-		<button onClick="{{togglePause}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 1px solid #2c443b; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 12.5px">{{pauseLabel}}</button>
+		<button onClick="{{togglePause}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 1px solid rgba(123,236,199,.18); border-radius: 6px; background: transparent; color: #b9cac1; font-size: 12.5px">{{pauseLabel}}</button>
 		<sc-if value="{{feed}}" hint-placeholder-val="{{false}}">
 			<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
@@ -89,7 +90,7 @@ class Component extends DCLogic {
 		const count = id => MSGS.filter(m => id === 'all' || m.cat === id).length;
 		const chip = (id, label, icon) => {
 			const on = cat === id;
-			return { label, text: label, icon: icon || [], hasIcon: !!icon, showText: !feed || !icon, count: String(count(id)), on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ cat: id }) };
+			return { label, text: label, icon: icon || [], hasIcon: !!icon, showText: !feed || !icon, count: String(count(id)), on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ cat: id }) };
 		};
 		return {
 			feed,

@@ -14,6 +14,7 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <article style="box-sizing: border-box; width: 100%; padding: {{cardPad}}; border-radius: 8px; background: {{cardBg}}; border: {{cardBorder}}; box-shadow: {{cardShadow}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 12px">
@@ -145,8 +146,8 @@ class Component extends DCLogic {
 			icon: ICON[m.cat] || ICON.sensors,
 			cardPad: this.props.flat ? '4px 6px' : '16px',
 			cardBg: this.props.flat ? 'transparent' : 'rgba(17,28,25,.72)',
-			cardBorder: this.props.flat ? '0' : '1px solid ' + (m.live ? 'rgba(123,236,199,.45)' : 'rgba(123,236,199,.12)'),
-			cardShadow: this.props.flat ? 'none' : 'inset 0 1px 0 rgba(255,255,255,.06)',
+			cardBorder: this.props.flat ? '0' : '1px solid ' + (m.live ? 'rgba(123,236,199,.32)' : 'rgba(123,236,199,.14)'),
+			cardShadow: 'none',
 			badges,
 			titleFont: m.kind === 'call' || m.kind === 'aircraft' ? "'D-DIN Condensed', 'Noto Sans', sans-serif" : "'Noto Sans', sans-serif",
 			titleSize: m.kind === 'call' || m.kind === 'aircraft' ? '28px' : '17px',

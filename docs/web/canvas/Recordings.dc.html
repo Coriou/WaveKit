@@ -21,16 +21,17 @@ body{margin:0;background:#0b1512}
 .wk-r .wk-ghost:hover{background:rgba(123,236,199,.08);color:#f4f7f5}
 .wk-r .wk-row:hover{background:rgba(123,236,199,.04)}
 .wk-r .wk-field{border:1px solid transparent;transition:border-color .15s,background .15s}
-.wk-r .wk-field:hover{border-color:rgba(123,236,199,.12)}
-.wk-r .wk-field:focus{border-color:rgba(123,236,199,.5);background:rgba(7,15,13,.6);outline:none}
+.wk-r .wk-field:hover{border-color:rgba(123,236,199,.18)}
+.wk-r .wk-field:focus{border-color:rgba(123,236,199,.55);background:rgba(7,15,13,.6);outline:none}
 .wk-r .wk-field::placeholder{color:#52645d}
+.wk-r [role="region"]:focus-visible{outline-offset:-2px}
 .wk-r .wk-handle:focus-visible{outline:none}
-.wk-r .wk-handle:focus-visible>span{box-shadow:0 0 0 2px #0e1815,0 0 0 4px #f4f7f5}
+.wk-r .wk-handle:focus-visible>span{box-shadow:0 0 0 2px #0e1815,0 0 0 4px #7becc7}
 @keyframes wkpulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.wk-r *{animation:none !important;transition:none !important}}
 </style>
 </helmet>
-<div class="wk-r" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: rgba(17,28,25,.58); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-r" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: rgba(17,28,25,.58); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 10px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Recordings</h2>
@@ -56,7 +57,7 @@ body{margin:0;background:#0b1512}
 				</sc-if>
 			</div>
 			<sc-if value="{{showSugg}}" hint-placeholder-val="{{false}}">
-				<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 50px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.96); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
+				<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 50px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.96); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
 					<sc-for list="{{sugg}}" as="s" hint-placeholder-count="2">
 						<button role="option" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}" style="width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 12px; border-radius: 6px; background: {{s.bg}}">
 							<span style="font-size: 12px; color: #8ba598; width: 92px; flex: none">{{s.kind}}</span>
@@ -69,10 +70,10 @@ body{margin:0;background:#0b1512}
 		</div>
 	</sc-if>
 
-	<div tabindex="0" role="region" aria-label="Kept recordings. Arrows move, Enter opens, Space plays, J K L scrub, I and O trim." onKeyDown="{{listKey}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px; scrollbar-width: thin; scrollbar-color: #2c443b transparent; outline: none">
+	<div tabindex="0" role="region" aria-label="Kept recordings. Arrows move, Enter opens, Space plays, J K L scrub, I and O trim." onKeyDown="{{listKey}}" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
 
 		<sc-if value="{{liveRec}}" hint-placeholder-val="{{false}}">
-			<div style="display: flex; align-items: center; gap: 12px; margin: 2px 2px 8px; padding: 10px 8px 10px 12px; border-radius: 8px; background: rgba(255,122,107,.08); border: 1px solid rgba(255,122,107,.22)">
+			<div style="display: flex; align-items: center; gap: 12px; margin: 2px 2px 8px; padding: 10px 8px 10px 12px; border-radius: 8px; background: rgba(255,122,107,.08); border: 1px solid rgba(255,122,107,.14)">
 				<span style="width: 10px; height: 10px; border-radius: 50%; background: #ff7a6b; flex: none; animation: wkpulse 1.6s ease-in-out infinite"></span>
 				<span style="flex: 1; min-width: 0; display: flex; flex-direction: column">
 					<span style="font-weight: 700">Recording</span>
@@ -87,8 +88,8 @@ body{margin:0;background:#0b1512}
 			<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px; padding: 72px 28px 0">
 				<svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#3d6356" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>
 				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .02em; color: #d9e4de">Nothing kept yet</span>
-				<span style="font-size: 13.5px; line-height: 1.6; color: #8ba598; max-width: 280px; text-wrap: pretty">Every call is recorded for 7 days. Keep the ones that matter with <kbd style="font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid #2c443b; color: #b9cac1">S</kbd> in Activity, or press Record in Listen.</span>
-				<button onClick="{{openActivity}}" style="margin-top: 4px; height: 38px; padding: 0 16px; border-radius: 6px; border: 1px solid rgba(123,236,199,.4); color: #7becc7; font-size: 13px; font-weight: 700">Open Activity</button>
+				<span style="font-size: 13.5px; line-height: 1.6; color: #8ba598; max-width: 280px; text-wrap: pretty">Every call is recorded for 7 days. Keep the ones that matter with <kbd style="font: inherit; font-size: 12px; padding: 1px 6px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); color: #b9cac1">S</kbd> in Activity, or press Record in Listen.</span>
+				<button onClick="{{openActivity}}" style="margin-top: 4px; height: 38px; padding: 0 16px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Open Activity</button>
 			</div>
 		</sc-if>
 
@@ -96,7 +97,7 @@ body{margin:0;background:#0b1512}
 			<div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 10px; padding: 48px 24px 0">
 				<span style="font-weight: 700; color: #b9cac1">Nothing matches</span>
 				<span style="font-size: 13px; color: #8ba598; line-height: 1.5">Only kept recordings are searched here. Activity searches everything from the last 7 days.</span>
-				<button onClick="{{clearAll}}" style="margin-top: 4px; height: 34px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.4); color: #7becc7; font-size: 13px; font-weight: 700">Clear search</button>
+				<button onClick="{{clearAll}}" style="margin-top: 4px; height: 34px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); color: #7becc7; font-size: 13px; font-weight: 700">Clear search</button>
 			</div>
 		</sc-if>
 
@@ -163,7 +164,7 @@ body{margin:0;background:#0b1512}
 						<div style="padding: 8px 12px 12px 12px; display: flex; flex-direction: column; gap: 14px">
 
 							<div style="display: flex; flex-direction: column; gap: 4px">
-								<div onPointerDown="{{r.stripDown}}" title="{{r.stripTitle}}" style="position: relative; height: {{r.stripH}}; border-radius: 6px; background: #07100d; overflow: hidden; touch-action: none; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(123,236,199,.06)">
+								<div onPointerDown="{{r.stripDown}}" title="{{r.stripTitle}}" style="position: relative; height: {{r.stripH}}; border-radius: 6px; background: #07100d; overflow: hidden; touch-action: none; cursor: pointer; box-shadow: inset 0 0 0 1px rgba(123,236,199,.08)">
 									<svg width="100%" height="100%" viewBox="0 0 600 100" preserveAspectRatio="none" aria-hidden="true" style="display: block">
 										<sc-for list="{{r.marks}}" as="b" hint-placeholder-count="0"><rect x="{{b.x}}" y="{{b.y}}" width="{{b.w}}" height="{{b.h}}" fill="{{b.c}}" opacity="{{b.o}}"></rect></sc-for>
 									</svg>
@@ -226,7 +227,7 @@ body{margin:0;background:#0b1512}
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2M7 11l5 5l5 -5M12 4v12"></path></svg>Download
 									</button>
 									<sc-if value="{{r.dlOpen}}" hint-placeholder-val="{{false}}">
-										<div role="menu" aria-label="Download" style="position: absolute; left: 0; bottom: 42px; z-index: 5; width: 272px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.55); backdrop-filter: blur(24px)">
+										<div role="menu" aria-label="Download" style="position: absolute; left: 0; bottom: 42px; z-index: 5; width: 272px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.55); backdrop-filter: blur(24px)">
 											<sc-for list="{{r.formats}}" as="f" hint-placeholder-count="2">
 												<button role="menuitem" class="wk-ghost" onClick="{{f.pick}}" style="width: 100%; display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 6px 10px; border-radius: 6px; text-align: left">
 													<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px"><span style="font-weight: 700; font-size: 13.5px">{{f.name}}</span><span style="font-size: 12px; color: #8ba598; line-height: 1.35">{{f.hint}}</span></span>
@@ -243,13 +244,13 @@ body{margin:0;background:#0b1512}
 										<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
 									</button>
 									<sc-if value="{{r.moreOpen}}" hint-placeholder-val="{{false}}">
-										<div role="menu" aria-label="More actions" style="position: absolute; right: 0; bottom: 42px; z-index: 5; width: 264px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.55); backdrop-filter: blur(24px)">
+										<div role="menu" aria-label="More actions" style="position: absolute; right: 0; bottom: 42px; z-index: 5; width: 264px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.55); backdrop-filter: blur(24px)">
 											<button role="menuitem" class="wk-ghost" onClick="{{r.copyLink}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between">Copy link<span style="font-size: 12px; color: #8ba598">Opens in any WaveKit</span></button>
 											<button role="menuitem" class="wk-ghost" onClick="{{r.tune}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; font-variant-numeric: tabular-nums">Tune to {{r.freqText}}</button>
 											<sc-if value="{{r.inActivity}}" hint-placeholder-val="{{true}}">
 												<button role="menuitem" class="wk-ghost" onClick="{{r.showInActivity}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Show in Activity</button>
 											</sc-if>
-											<div style="height: 1px; margin: 6px 4px; background: rgba(123,236,199,.1)"></div>
+											<div style="height: 1px; margin: 6px 4px; background: rgba(123,236,199,.08)"></div>
 											<button role="menuitem" class="wk-ghost" onClick="{{r.remove}}" style="width: 100%; min-height: 44px; padding: 6px 10px; border-radius: 6px; text-align: left; display: flex; flex-direction: column; gap: 2px">
 												<span style="font-size: 13.5px; color: #ff9d92; font-weight: 700">{{r.removeText}}</span>
 												<span style="font-size: 12px; color: #8ba598; line-height: 1.4">{{r.removeHint}}</span>
@@ -266,7 +267,7 @@ body{margin:0;background:#0b1512}
 	</div>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="flex: none; margin: 0 10px 8px; height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(25,43,36,.92); border: 1px solid rgba(123,236,199,.16); font-size: 13px">
+		<div role="status" style="flex: none; margin: 0 10px 8px; height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(25,43,36,.92); border: 1px solid rgba(123,236,199,.14); font-size: 13px">
 			<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{toastText}}</span>
 			<sc-if value="{{canUndo}}" hint-placeholder-val="{{false}}"><button onClick="{{undo}}" style="height: 30px; padding: 0 12px; border-radius: 6px; background: rgba(123,236,199,.14); color: #7becc7; font-weight: 700; font-size: 13px">Undo</button></sc-if>
 		</div>
@@ -507,9 +508,9 @@ class Component extends DCLogic {
 				open, playing: isPlay, notPlaying: !isPlay, accent,
 				showBar: isCur && !open, pos: isCur ? s.pos * 100 : 0,
 				bg: s.fresh === x.id ? 'rgba(123,236,199,.13)' : open ? 'rgba(7,15,13,.42)' : 'transparent',
-				ring: open ? 'inset 0 0 0 1px rgba(123,236,199,.16)' : cursor ? 'inset 0 0 0 1px rgba(123,236,199,.3)' : 'none',
+				ring: open ? 'inset 0 0 0 1px rgba(123,236,199,.14)' : cursor ? 'inset 0 0 0 1px rgba(123,236,199,.32)' : 'none',
 				dur: fmtS(keep), durC: trimmed ? '#d9e4de' : '#8ba598',
-				pBorder: isCur ? accent : iq ? 'rgba(242,184,75,.45)' : 'rgba(123,236,199,.4)', pBg: isPlay ? accent : 'transparent', pFg: isPlay ? '#111c19' : accent,
+				pBorder: isCur ? accent : iq ? 'rgba(242,184,75,.18)' : 'rgba(123,236,199,.18)', pBg: isPlay ? accent : 'transparent', pFg: isPlay ? '#111c19' : accent,
 				playLabel: (isPlay ? 'Pause ' : iq ? 'Play as source: ' : 'Play ') + title(x),
 				playTitle: iq ? (isPlay ? 'Pause the capture' : 'Play as source: the spectrum and decoders run on the capture') : (isPlay ? 'Pause' : 'Play' + (trimmed ? ' the kept ' + fmtS(keep) : '')),
 				pick: () => { this.setState({ sel: x.id, open: open ? null : x.id, menu: null }); if (!open) this.reveal(x.id); },
@@ -587,7 +588,7 @@ class Component extends DCLogic {
 			openActivity: () => this.props.onActivity && this.props.onActivity(null),
 			q: s.q, hasQuery, resultCount: vis.length + (vis.length === 1 ? ' kept' : ' kept'),
 			placeholder: s.tokens.length ? 'Narrow further…' : 'Search names, notes, transcripts',
-			searchBorder: s.focus ? 'rgba(123,236,199,.5)' : 'rgba(123,236,199,.12)',
+			searchBorder: s.focus ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
 			onQ: e => this.setState({ q: e.target.value, sugg: 0 }),
 			onFocus: () => this.setState({ focus: true }), onBlur: () => this.setState({ focus: false }),
 			onKey: e => {
@@ -625,7 +626,7 @@ class Component extends DCLogic {
 			hasPlayer: !!playItem,
 			pAudio: !pIq, pIq,
 			pAccent: pIq ? '#f2b84b' : '#7becc7',
-			pBarBg: pIq ? 'rgba(40,32,14,.78)' : 'rgba(7,15,13,.72)', pBarBorder: pIq ? 'rgba(242,184,75,.28)' : 'rgba(123,236,199,.12)',
+			pBarBg: pIq ? 'rgba(40,32,14,.78)' : 'rgba(7,15,13,.72)', pBarBorder: pIq ? 'rgba(242,184,75,.14)' : 'rgba(123,236,199,.08)',
 			pPlaying: s.playing, pPaused: !s.playing, playerLabel: s.playing ? 'Pause' : 'Play',
 			togglePlay: () => playItem && this.setState({ playing: !s.playing, pos: s.pos >= playItem.tout - 0.001 ? playItem.tin : s.pos }),
 			prevC: this.neighbour(-1) ? '#b9cac1' : '#52645d', nextC: this.neighbour(1) ? '#b9cac1' : '#52645d',

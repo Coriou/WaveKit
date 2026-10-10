@@ -14,10 +14,11 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
-	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
+	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
 		<span style="width: 8px; height: 8px; border-radius: 50%; background: #7becc7; flex: none"></span>
 		<span style="font-weight: 700; white-space: nowrap">Pi receiver</span>
 		<span style="flex: 1; color: #8ba598; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap">{{summary}}</span>
@@ -75,7 +76,7 @@ body{margin:0;background:#0b1512}
 
 			<div style="display: flex; flex-direction: column">
 				<sc-for list="{{toggles}}" as="t" hint-placeholder-count="3">
-					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 6px 0; border: 0; border-bottom: 1px solid #1a2b25; background: transparent">
+					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 6px 0; border: 0; border-bottom: 1px solid rgba(123,236,199,.08); background: transparent">
 						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
 							<span style="font-weight: 700">{{t.label}}</span>
 							<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
@@ -90,7 +91,7 @@ body{margin:0;background:#0b1512}
 						<span style="font-weight: 700">Frequency correction</span>
 						<span style="font-size: 12.5px; color: #8ba598">Crystal error in parts per million</span>
 					</span>
-					<div style="display: flex; align-items: center; border: 1px solid #2c443b; border-radius: 6px">
+					<div style="display: flex; align-items: center; border: 1px solid rgba(123,236,199,.18); border-radius: 6px">
 						<button onClick="{{ppmDown}}" aria-label="Decrease correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">−</button>
 						<span style="min-width: 40px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums">{{ppm}}</span>
 						<button onClick="{{ppmUp}}" aria-label="Increase correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">+</button>
@@ -161,7 +162,7 @@ class Component extends DCLogic {
 			stats: [{ k: 'Throughput', v: (rate * 2).toFixed(1) + ' MB/s' }, { k: 'Dropped', v: '0' }, { k: 'Level', v: '−31 dBFS' }],
 			rates: RATES.map(r => {
 				const on = r === rate;
-				return { label: String(r), on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.set('rate', r) };
+				return { label: String(r), on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.set('rate', r) };
 			}),
 			rateWarn: rate > 2.4,
 			auto,
@@ -173,7 +174,7 @@ class Component extends DCLogic {
 			gainTicks: GAINS.map((g, i) => ({ h: i % 7 === 0 ? 6 : 3, c: i <= gi && !auto ? 'rgba(123,236,199,.6)' : '#2c443b' })),
 			onGain: e => { this.set('gainIdx', Number(e.target.value)); if (auto) this.set('gainAuto', false); },
 			toggleAuto: () => this.set('gainAuto', !auto),
-			autoBorder: auto ? 'rgba(123,236,199,.6)' : '#2c443b',
+			autoBorder: auto ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
 			autoBg: auto ? 'rgba(123,236,199,.12)' : 'transparent',
 			autoFg: auto ? '#7becc7' : '#b9cac1',
 			toggles: [

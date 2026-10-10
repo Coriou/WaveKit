@@ -14,15 +14,17 @@
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
+.wk-in:focus{border-color:rgba(123,236,199,.55) !important}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
-	<div style="height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+	<div style="height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 8px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
 		<svg width="26" height="26" viewBox="0 0 256 256" fill="none" role="img" aria-label="WaveKit" style="color: #7becc7; flex: none"><path d="M28 68C72 68 34 188 78 188C112 188 94 104 128 104C162 104 144 188 178 188C222 188 184 68 228 68" stroke="currentColor" stroke-width="26" stroke-linejoin="round"></path></svg>
-		<div style="width: 1px; height: 24px; background: rgba(123,236,199,.16); flex: none"></div>
+		<div style="width: 1px; height: 24px; background: rgba(123,236,199,.08); flex: none"></div>
 
 		<sc-if value="{{typing}}" hint-placeholder-val="{{false}}">
-			<input ref="{{focusRef}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onEntryKey}}" aria-label="Type a frequency, channel or saved name" placeholder="161.15 · ch 16 · +25k" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 40px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; border: 1px solid rgba(123,236,199,.5); background: rgba(11,21,18,.6); color: #f4f7f5; font: inherit; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; outline: none; caret-color: #7becc7">
+			<input ref="{{focusRef}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onEntryKey}}" aria-label="Type a frequency, channel or saved name" placeholder="161.15 · ch 16 · +25k" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 40px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; border: 1px solid rgba(123,236,199,.55); background: rgba(11,21,18,.6); color: #f4f7f5; font: inherit; font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; outline: none; caret-color: #7becc7">
 			<button onClick="{{cancelEntry}}" aria-label="Cancel typing" style="font: inherit; cursor: pointer; height: 38px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; font-size: 12.5px">Esc</button>
 		</sc-if>
 
@@ -45,14 +47,14 @@ body{margin:0;background:#0b1512}
 
 	<sc-if value="{{typing}}" hint-placeholder-val="{{false}}">
 		<div style="box-sizing: border-box; padding: 8px; border-radius: 12px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column">
-			<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid rgba(123,236,199,.1)">
+			<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid rgba(123,236,199,.08)">
 				<sc-if value="{{parsedOk}}" hint-placeholder-val="{{true}}">
 					<div style="display: flex; align-items: baseline; gap: 8px; font-variant-numeric: tabular-nums">
 						<span style="font-size: 24px; font-weight: 700">{{pMain}}</span>
 						<span style="font-size: 24px; color: #52645d">{{pSub}}</span>
 						<span style="font-size: 13px; color: #8ba598">MHz</span>
 						<div style="flex: 1"></div>
-						<span style="font-size: 12px; color: #8ba598; border: 1px solid #2c443b; border-radius: 4px; padding: 1px 7px">Enter</span>
+						<span style="font-size: 12px; color: #8ba598; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; padding: 1px 7px">Enter</span>
 					</div>
 					<span style="font-size: 13px; color: #b9cac1">{{pHint}}</span>
 				</sc-if>
@@ -132,7 +134,7 @@ body{margin:0;background:#0b1512}
 				<sc-if value="{{saving}}" hint-placeholder-val="{{false}}">
 					<div style="display: flex; flex-direction: column; gap: 10px; padding: 14px; margin: 4px 0 8px; border-radius: 8px; background: rgba(25,43,36,.8)">
 						<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: #8ba598">Name
-							<input value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{onSaveKey}}" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1px solid #2c443b; background: rgba(11,21,18,.7); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
+							<input class="wk-in" value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{onSaveKey}}" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); background: rgba(11,21,18,.7); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
 						</label>
 						<div style="display: flex; flex-wrap: wrap; gap: 6px" role="radiogroup" aria-label="Group">
 							<sc-for list="{{groups}}" as="g" hint-placeholder-count="4">
@@ -271,7 +273,7 @@ class Component extends DCLogic {
 				aria: 'Digit worth ' + kfmt(place) + ', currently ' + ch,
 				color: i < first ? '#2c443b' : i >= 7 ? '#8ba598' : '#f4f7f5',
 				bg: this.state.hover === i ? 'rgba(123,236,199,.1)' : 'transparent',
-				ring: this.state.hover === i ? 'inset 0 -2px 0 #7becc7' : 'none',
+				ring: 'none',
 				enter: () => this.setState({ hover: i }),
 				pick: e => { const r = e.currentTarget.getBoundingClientRect(); this.nudge(place, e.clientY < r.top + r.height / 2 ? 1 : -1); },
 				wheel: e => this.nudge(place, e.deltaY < 0 ? 1 : -1),
@@ -330,7 +332,7 @@ class Component extends DCLogic {
 			bwPct: r[1] > r[0] ? (bw - r[0]) / (r[1] - r[0]) * 100 : 0,
 			onBw: e => this.set('bw', Number(e.target.value)),
 			modes: MODES.map(id => ({ id, on: id === mode, bg: id === mode ? '#7becc7' : 'transparent', fg: id === mode ? '#111c19' : '#b9cac1', pick: () => { this.set('mode', id); this.set('bw', BW[id][3]); } })),
-			steps: STEPS.map(([v, label]) => ({ label, on: v === step, bg: v === step ? 'rgba(123,236,199,.12)' : 'transparent', border: v === step ? 'rgba(123,236,199,.6)' : '#2c443b', fg: v === step ? '#7becc7' : '#b9cac1', pick: () => this.set('step', v) })),
+			steps: STEPS.map(([v, label]) => ({ label, on: v === step, bg: v === step ? 'rgba(123,236,199,.12)' : 'transparent', border: v === step ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', fg: v === step ? '#7becc7' : '#b9cac1', pick: () => this.set('step', v) })),
 			canSave: !isSaved && !this.state.saving,
 			saving: this.state.saving,
 			openSave: () => this.setState({ saving: true, saveName: this.get('detected') || (curBand ? curBand.label : 'Saved ' + mfmt(freq)), saveGroup: curBand && /Marine|AIS/.test(curBand.label) ? 'Marine' : 'Local' }),
@@ -339,7 +341,7 @@ class Component extends DCLogic {
 			onSaveName: e => this.setState({ saveName: e.target.value }),
 			onSaveKey: e => { if (e.key === 'Enter') { e.preventDefault(); this.doSave(); } if (e.key === 'Escape') this.setState({ saving: false }); },
 			saveWhat: mfmt(freq) + ' MHz · ' + mode + ' · ' + kfmt(bw),
-			groups: GROUPS.map(g => { const on = g === this.state.saveGroup; return { label: g, on, border: on ? 'rgba(123,236,199,.6)' : '#2c443b', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ saveGroup: g }) }; }),
+			groups: GROUPS.map(g => { const on = g === this.state.saveGroup; return { label: g, on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.setState({ saveGroup: g }) }; }),
 			doSave: () => this.doSave(),
 			savedRows: saved.map(s => ({
 				label: s.label, meta: s.group + ' · ' + s.mode + ' · ' + kfmt(s.bw), freq: mfmt(s.f),

@@ -17,6 +17,7 @@ body{margin:0;background:#0b1512}
 .wk-cmd-list::-webkit-scrollbar{width:8px}
 .wk-cmd-list::-webkit-scrollbar-thumb{background:#22362f;border-radius:4px}
 input::placeholder{color:#6d857a}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
 </style>
 </helmet>
 <div style="position: {{rootPos}}; inset: {{rootInset}}; width: {{rootW}}; height: {{rootH}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; background: {{rootBg}}; overflow: hidden">
@@ -26,15 +27,15 @@ input::placeholder{color:#6d857a}
 	</sc-if>
 
 	<sc-if value="{{isOpen}}" hint-placeholder-val="{{true}}">
-		<div role="dialog" aria-modal="true" aria-label="Commands" style="position: absolute; top: {{top}}; left: 50%; transform: translateX(-50%); width: min(640px, calc(100% - 32px)); box-sizing: border-box; border-radius: 12px; background: rgba(17,28,25,.82); border: 1px solid rgba(123,236,199,.16); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 24px 64px rgba(0,0,0,.5); backdrop-filter: blur(28px) saturate(170%); display: flex; flex-direction: column; overflow: hidden">
+		<div role="dialog" aria-modal="true" aria-label="Commands" style="position: absolute; top: {{top}}; left: 50%; transform: translateX(-50%); width: min(640px, calc(100% - 32px)); box-sizing: border-box; border-radius: 12px; background: rgba(17,28,25,.82); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 24px 64px rgba(0,0,0,.5); backdrop-filter: blur(28px) saturate(170%); display: flex; flex-direction: column; overflow: hidden">
 
-			<div style="height: 60px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid rgba(123,236,199,.1)">
+			<div style="height: 60px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 14px 0 18px; border-bottom: 1px solid rgba(123,236,199,.08)">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"></path><path d="M21 21l-6 -6"></path></svg>
 				<sc-if value="{{hasScope}}" hint-placeholder-val="{{false}}">
-					<button onClick="{{popScope}}" aria-label="Back to all commands" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 8px 0 10px; border: 1px solid rgba(123,236,199,.4); border-radius: 6px; background: rgba(123,236,199,.12); color: #7becc7; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; white-space: nowrap">{{scopeTitle}}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg></button>
+					<button onClick="{{popScope}}" aria-label="Back to all commands" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 8px 0 10px; border: 1px solid transparent; border-radius: 6px; background: rgba(123,236,199,.12); color: #7becc7; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; white-space: nowrap">{{scopeTitle}}<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg></button>
 				</sc-if>
 				<input ref="{{focusRef}}" value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" placeholder="{{placeholder}}" aria-label="Command, frequency or search" role="combobox" aria-expanded="true" aria-controls="wk-cmd-list" aria-activedescendant="{{activeId}}" aria-autocomplete="list" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 40px; border: 0; padding: 0; background: transparent; color: #f4f7f5; font: inherit; font-size: 17px; outline: none; caret-color: #7becc7">
-				<button onClick="{{close}}" aria-label="Close" style="font: inherit; cursor: pointer; flex: none; height: 24px; padding: 0 7px; border: 1px solid #2c443b; border-radius: 4px; background: rgba(11,21,18,.6); color: #8ba598; font-size: 11.5px">esc</button>
+				<button onClick="{{close}}" aria-label="Close" style="font: inherit; cursor: pointer; flex: none; height: 24px; padding: 0 7px; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; background: rgba(11,21,18,.6); color: #8ba598; font-size: 11.5px">esc</button>
 			</div>
 
 			<div id="wk-cmd-list" class="wk-cmd-list" role="listbox" aria-label="Commands" style="max-height: {{listMax}}; overflow-y: auto; overscroll-behavior: contain; padding: 4px 8px 8px">
@@ -56,7 +57,7 @@ input::placeholder{color:#6d857a}
 									<span aria-hidden="true" style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{it.track}}"><span style="position: absolute; top: 2px; left: {{it.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: #f4f7f5"></span></span>
 								</sc-if>
 								<sc-if value="{{it.hasKbd}}" hint-placeholder-val="{{false}}">
-									<span style="flex: none; display: flex; gap: 3px" aria-hidden="true"><sc-for list="{{it.kbd}}" as="k" hint-placeholder-count="1"><span style="min-width: 20px; height: 20px; box-sizing: border-box; padding: 0 5px; border: 1px solid #2c443b; border-radius: 4px; background: rgba(11,21,18,.6); color: #b9cac1; font-size: 11.5px; line-height: 18px; text-align: center">{{k}}</span></sc-for></span>
+									<span style="flex: none; display: flex; gap: 3px" aria-hidden="true"><sc-for list="{{it.kbd}}" as="k" hint-placeholder-count="1"><span style="min-width: 20px; height: 20px; box-sizing: border-box; padding: 0 5px; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; background: rgba(11,21,18,.6); color: #b9cac1; font-size: 11.5px; line-height: 18px; text-align: center">{{k}}</span></sc-for></span>
 								</sc-if>
 								<sc-if value="{{it.scope}}" hint-placeholder-val="{{false}}">
 									<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
@@ -74,7 +75,7 @@ input::placeholder{color:#6d857a}
 			</div>
 
 			<sc-if value="{{hasEffect}}" hint-placeholder-val="{{true}}">
-				<div role="status" aria-live="polite" style="flex: none; display: flex; flex-direction: column; gap: 6px; padding: 11px 18px; border-top: 1px solid rgba(123,236,199,.1); background: rgba(11,21,18,.45)">
+				<div role="status" aria-live="polite" style="flex: none; display: flex; flex-direction: column; gap: 6px; padding: 11px 18px; border-top: 1px solid rgba(123,236,199,.08); background: rgba(11,21,18,.45)">
 					<div style="display: flex; align-items: center; gap: 10px; min-width: 0">
 						<span style="flex: none; height: 22px; padding: 0 8px; border-radius: 4px; font-size: 12px; font-weight: 700; line-height: 22px; display: flex; align-items: center; gap: 6px; background: {{effPillBg}}; color: {{effPillFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{effPill}}</span>
 						<span style="flex: 1; min-width: 0; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; font-variant-numeric: tabular-nums">
@@ -89,24 +90,24 @@ input::placeholder{color:#6d857a}
 				</div>
 			</sc-if>
 
-			<div style="flex: none; height: 38px; display: flex; align-items: center; gap: 14px; padding: 0 18px; border-top: 1px solid rgba(123,236,199,.1); font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden">
+			<div style="flex: none; height: 38px; display: flex; align-items: center; gap: 14px; padding: 0 18px; border-top: 1px solid rgba(123,236,199,.08); font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden">
 				<sc-for list="{{hints}}" as="h" hint-placeholder-count="4">
-					<span style="display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid #2c443b; border-radius: 4px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">{{h.k}}</span>{{h.t}}</span>
+					<span style="display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">{{h.k}}</span>{{h.t}}</span>
 				</sc-for>
 				<div style="flex: 1"></div>
-				<button onClick="{{openKeys}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #8ba598; font-size: 12px; display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid #2c443b; border-radius: 4px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">?</span>Shortcuts</button>
+				<button onClick="{{openKeys}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #8ba598; font-size: 12px; display: flex; align-items: center; gap: 5px"><span style="min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 4px; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; color: #b9cac1; font-size: 11px; line-height: 16px; text-align: center">?</span>Shortcuts</button>
 			</div>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{showReopen}}" hint-placeholder-val="{{false}}">
 		<div style="position: absolute; top: 40px; left: 50%; transform: translateX(-50%)">
-			<button onClick="{{reopen}}" style="font: inherit; color: #f4f7f5; cursor: pointer; height: 48px; padding: 0 12px 0 16px; border-radius: 12px; border: 1px solid rgba(123,236,199,.16); background: rgba(17,28,25,.6); display: flex; align-items: center; gap: 10px; font-weight: 700">Open commands<span style="height: 22px; padding: 0 7px; border: 1px solid #2c443b; border-radius: 4px; color: #b9cac1; font-size: 12px; font-weight: 400; line-height: 20px">⌘K</span></button>
+			<button onClick="{{reopen}}" style="font: inherit; color: #f4f7f5; cursor: pointer; height: 48px; padding: 0 12px 0 16px; border-radius: 12px; border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); background: rgba(17,28,25,.6); display: flex; align-items: center; gap: 10px; font-weight: 700">Open commands<span style="height: 22px; padding: 0 7px; border: 1px solid rgba(123,236,199,.18); border-radius: 4px; color: #b9cac1; font-size: 12px; font-weight: 400; line-height: 20px">⌘K</span></button>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 12px; background: rgba(25,43,36,.92); border: 1px solid rgba(123,236,199,.18); box-shadow: 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13.5px">
+		<div role="status" style="position: absolute; left: 50%; bottom: 84px; transform: translateX(-50%); height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 12px; background: rgba(25,43,36,.92); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); white-space: nowrap; font-size: 13.5px">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
 			<span>{{toastText}}</span>
 			<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
@@ -753,7 +754,7 @@ class Component extends DCLogic {
 			kbd: it.kbd || [], hasKbd: !!(it.kbd && it.kbd.length),
 			scope: !!it.scope,
 			bg: on ? 'rgba(123,236,199,.11)' : 'transparent',
-			ring: on ? 'inset 0 0 0 1px rgba(123,236,199,.22)' : 'none',
+			ring: on ? 'inset 0 0 0 1px rgba(123,236,199,.32)' : 'none',
 			enter: () => this.select(i),
 			pick: () => { this.select(i); this.run(it); }
 		};
@@ -770,7 +771,7 @@ class Component extends DCLogic {
 		const warn = cur && cur.warn ? cur.warn : '';
 		const shown = Object.assign({}, v, emb ? {} : s.preview || {});
 		const changed = emb ? [] : effects(s.preview, v).map(e => e.key);
-		const chip = (key, k2, val) => { const c = changed.indexOf(key) >= 0; return { k: k2, v: val, bg: c ? 'rgba(242,184,75,.12)' : 'rgba(17,28,25,.7)', border: c ? 'rgba(242,184,75,.55)' : '#22362f', fg: c ? '#f2b84b' : '#f4f7f5' }; };
+		const chip = (key, k2, val) => { const c = changed.indexOf(key) >= 0; return { k: k2, v: val, bg: c ? 'rgba(242,184,75,.12)' : 'rgba(17,28,25,.7)', border: c ? 'rgba(242,184,75,.55)' : 'rgba(123,236,199,.18)', fg: c ? '#f2b84b' : '#f4f7f5' }; };
 		const meta = s.scope ? SCOPES[s.scope] : null;
 		return {
 			embedded: emb, standalone: !emb,

@@ -316,7 +316,7 @@ Condensed + Noto Sans, Tabler-based icons).
   phone. IQ frequency labels sit on small plates at the right edge; capture contents
   carry units ("41 messages").
 
-- **Corner radius scale (2026-10-10).**
+- **Corner radius and border system (2026-10-10).**
   One small scale replaces the ~14 ad-hoc radii (1–22 px): **12 px** for floating
   islands, drawers, panels, popovers and menus, the palette dialog, toasts and the dock;
   **8 px** for list rows, cards and inner surfaces inside panels, the player bar and
@@ -330,6 +330,27 @@ Condensed + Noto Sans, Tabler-based icons).
   parent (segmented control 6 → segments 4; card 8 → inner blocks 6; Map rails 12 with
   4 px inset → buttons 8). Asymmetric radii scale with their parent (Recordings trim
   handles 6/2). The same values apply to radii built in JS (Tuned card, Messages feed).
+  **Borders.** Every border and divider is 1 px; 2 px is reserved for keyboard focus.
+  Colour comes from five phosphor-alpha tiers so edges sit right on glass: *hairline*
+  `rgba(123,236,199,.08)` for dividers, separators and inner-surface edges; *edge* `.14`
+  for the outer edge of islands, drawers, the dock, menus, popovers, toasts and cards;
+  *control* `.18` for the resting border of outlined controls (chips, outlined buttons,
+  fields, kbd), replacing the opaque `#2c443b` that made controls read as dark boxes;
+  *strong* `.32` for hover, selected and cursor rings; *accent* `.55` for active toggles,
+  pressed chips and focused fields. Amber (not live) and red (recording, destructive)
+  use the same alphas of their own colour. Rows and cards show state with an inset ring
+  (`inset 0 0 0 1px`, no layout shift); controls use a real border. A filled chip drops
+  its border (kept transparent so nothing moves). **Focus** is one style everywhere,
+  `outline: 2px solid #7becc7; outline-offset: 2px` on `:focus-visible` (inset −2 px only
+  where an outline cannot sit outside: the map canvas, Activity columns, the Recordings
+  list); play circles and trim handles keep the double-ring variant, now always accent;
+  text fields show focus with the accent border. **Glass edge:** every floating surface
+  (islands, dock, drawers, menus, popovers, the palette, toasts, chips over the spectrum
+  or map) carries the same top highlight `inset 0 1px 0 rgba(255,255,255,.08)` plus the
+  edge tier; non-floating cards and inner surfaces get none. **Dashed** lines only mean
+  something: the "Add a column" drop target, the approximate station area and ACARS
+  report diamonds on the map, the squelch threshold and the map's range rings; mesh
+  links became solid. Dividers are a single hairline, never doubled.
   Provisional until the owner compares before and after on the canvas; the previous
   values are in the git history of `docs/web/canvas/`.
 
@@ -367,7 +388,7 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-The radius scale awaits the owner's before/after review on the canvas. Also pending:
+The radius scale and the border system await the owner's before/after review on the canvas. Also pending:
 the visual check of the Recordings polish (desktop and phone). Then pick the next topic
 from the open questions (Scanner, Settings).
 
