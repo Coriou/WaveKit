@@ -339,23 +339,23 @@ analog recording; S3 adds monitor/listen; S4 supplies live acceptance. Preserve
 that dependency order. A scanner should characterize activity and confirm a
 protocol with decoding.
 
-- [ ] Scan an operator-selected frequency range or the receiver's supported tuning
-      range with explicit steps, bandwidth, dwell time and exclusions.
-- [ ] Offer protocol-specific searches, such as finding DMR activity, using suitable
-      demodulators/decoders and distinguishing a candidate from a confirmed decode.
-- [ ] Combine spectrum/activity detection with targeted decoding; report frequency,
+- [x] Scan an operator-selected frequency range or the receiver's supported tuning
+      range with explicit steps, bandwidth, dwell time and exclusions. (S1: docs/SCANNER.md)
+- [x] Offer protocol-specific searches, such as finding DMR activity, using suitable
+      demodulators/decoders and distinguishing a candidate from a confirmed decode. (S1: docs/SCANNER.md)
+- [x] Combine spectrum/activity detection with targeted decoding; report frequency,
       bandwidth, observed protocol, confidence, timestamps, signal measurements and
-      available decoded metadata. Retain evidence and avoid duplicate discoveries.
+      available decoded metadata. Retain evidence and avoid duplicate discoveries. (S1: docs/SCANNER.md)
 - [ ] Schedule efficient coarse searches and focused revisits, with bounded CPU,
       memory and retuning overhead. Test weak, intermittent and overlapping signals
-      using recorded fixtures and measured detection/false-positive rates.
-- [ ] Define background scanning ownership: a single tuner cannot scan other bands
+      using recorded fixtures and measured detection/false-positive rates. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
+- [x] Define background scanning ownership: a single tuner cannot scan other bands
       while maintaining an unrelated live stream. Expose pause/resume, priorities,
-      compatible in-window searches and additional-receiver options explicitly.
-- [ ] Expose scan jobs, progress, cancellation and discovery reports through the
-      shared API/events so CLI and future web clients have equivalent capabilities.
+      compatible in-window searches and additional-receiver options explicitly. (S1: docs/SCANNER.md)
+- [x] Expose scan jobs, progress, cancellation and discovery reports through the
+      shared API/events so CLI and future web clients have equivalent capabilities. (S1: docs/SCANNER.md)
 - [ ] Establish hardware/protocol limitations before promising whole-band coverage
-      or identifying every signal. Treat encrypted/undecodable activity honestly.
+      or identifying every signal. Treat encrypted/undecodable activity honestly. (measured rates and hardware limits: scanner plan S4, Tasks 47–50)
 
 ## 5b. Digital voice audio
 

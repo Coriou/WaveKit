@@ -716,6 +716,9 @@ start/stop/restart `decoder` bodies, `/api/status` decoder entries and the
 | `lastError`           | `{ kind, message, at }` for the most recent failure. `kind: "error"` = emitted error or failed (re)start; `kind: "exit"` = process exited without being asked to stop. `message` ≤ 512 chars (truncated with `…`), `at` is ISO-8601. An `"error"` recorded during a run is kept rather than replaced by the generic exit that ends that run. Retained across automatic restarts; cleared only by an explicit start/restart, the same moment `restartCount` resets to 0. |
 | `idleTimeoutMs`       | Milliseconds without output before `health` becomes `"idle"`: the configured `health.idleTimeout` (default 30000).                                                                                                                                                                                                                                       |
 | `nextRestartAt`       | ISO-8601 time of the scheduled automatic restart. Present only while one is pending (`health` is `"restarting"`, or `"faulted"` during a crash loop that is still retrying).                                                                                                                                                                       |
+| `owner`               | `"config"` or `"scanner"`: who created the instance. Scanner probes are `"scanner"`; their start/stop/restart and band routes answer 409 `DECODER_OWNED_BY_SCANNER`. Sent by current cores.                                                                                                                                                       |
+| `scannerJobId`        | The scanner job that owns a probe; present only with `owner: "scanner"`.                                                                                                                                                                                                                                                                          |
+| `ephemeral`           | `true` for runtime-only instances (scanner probes: not in config, never persisted, announced by `decoder:created` / `decoder:removed`). Hide or group them in decoder lists.                                                                                                                                                                       |
 
 `health` after an unexpected exit:
 
@@ -753,8 +756,8 @@ until fixture-verified requirements exist; external-input decoders report
 | Field            | Meaning                                                                                                                                                                         |
 | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `desiredRunning` | Operator intent: `true` after start/restart, `false` after stop.                                                                                                                |
-| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
-| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason or `"frequency-out-of-band"`.                                                  |
+| `suspended`      | Wanted but held back because the source rate makes this instance `unusable` or the tuned band covers none of its targets, or a scanner sweep holds its source. The decoder keeps its source reservation and `sourceId` and is never moved to another source. |
+| `suspension`     | `{ reasonCode, since }` (ISO-8601), present only while suspended. `reasonCode` is a rate reason, `"frequency-out-of-band"`, or `"tuner-scanning"` (a scanner sweep holds the source for its whole duration; a manual start answers 409 `SOURCE_HELD_BY_SCANNER`; the decoder resumes when the sweep ends). |
 | `transition`     | `"suspending"` or `"resuming"`, present only during a transition. A lasting `"suspending"` means the stop failed and the process may still run (`running` stays truthful).     |
 | `startMode`      | `"auto"` or `"operator"`, sent while `desiredRunning` is true. `"operator"` = started by hand via `POST /api/decoders/:id/start` (never band-suspended; a rate suspension still applies). Boot starts are `"auto"`. Stop clears it, restart keeps it, a core restart returns every decoder to `"auto"`. |
 
@@ -1136,6 +1139,712 @@ decoder sets its own `output`.
 Stops the stream server and disconnects its clients. dsd-fme keeps decoding
 call metadata.
 
+### Scanner
+
+Signal discovery scanner (operator guide: [SCANNER.md](SCANNER.md)). DTOs are in
+`packages/api-types/src/scanner.ts`. Errors use the flat body of every other
+route, `{ error, code, message, details? }`; the codes are listed under
+[Error Responses](#scanner-and-spectrum-codes). A route answers 404
+`SCANNER_NOT_FOUND` when the job, discovery, recording, evidence or capture in
+its path does not exist; the service answers 404 `SCANNER_JOB_NOT_FOUND` or
+`SCANNER_DISCOVERY_NOT_FOUND` for actions on a missing job or discovery.
+
+#### GET /api/scanner
+
+```bash
+curl http://localhost:9000/api/scanner
+```
+
+**Response** (`ScannerStatus`):
+
+```json
+{
+	"enabled": true,
+	"channelizerAvailable": false,
+	"engines": [
+		{
+			"sourceId": "rtl",
+			"state": "running",
+			"rbwHz": 1000,
+			"fftSize": 2048,
+			"kByRange": [
+				{ "startHz": 445200000, "endHz": 446800000, "k": 9.2, "faPerMhzMin": 0.8 }
+			],
+			"floorDbfs": -92.5,
+			"floorOccupied": false,
+			"overload": false,
+			"settleMode": "marker",
+			"settleMs": 41,
+			"settleMeasured": true,
+			"markerSupported": true,
+			"stuckTestMode": false,
+			"staleAfterSettle": 0,
+			"blankedFrames": 3,
+			"broadbandRfi": null,
+			"passive": { "enabled": true },
+			"frequencyError": { "hz": -310, "ppm": -0.7, "discoveries": 6 }
+		}
+	],
+	"budgets": {
+		"cpuBudgetCores": 1,
+		"cpuCoresInUse": 0.75,
+		"maxProbes": { "offset": 1, "channel": 4 },
+		"probesInUse": { "offset": 1, "channel": 0 }
+	},
+	"cpuGuard": { "percent": 41.5, "limitPercent": 90, "source": "os" },
+	"disk": "ok",
+	"jobs": { "active": 2, "total": 5 }
+}
+```
+
+`blankedFrames` counts frames blanked as broadband impulses;
+`broadbandRfi` is `{ periodMs }` while periodic broadband RFI is active.
+`passive.disabledReason` explains a passive job switched off by the cost rule.
+
+#### GET /api/scanner/settings
+
+```bash
+curl http://localhost:9000/api/scanner/settings
+```
+
+**Response** (`ScannerSettingsView`, abridged):
+
+```json
+{
+	"effective": {
+		"enabled": true,
+		"cpuBudgetCores": 0.5,
+		"maxProbes": { "offset": 1, "channel": 4 },
+		"detection": { "integrationMs": 50, "sensitivity": "normal" },
+		"ws": {
+			"maxMessagesPerSecond": 10,
+			"spectrumHz": 10,
+			"spectrumBins": 512,
+			"spectrumSummaryBins": 2048,
+			"spectrumMaxProfiles": 4
+		}
+	},
+	"passiveBySource": { "rtl": true, "rtl-dedicated": false },
+	"provenance": {
+		"cpuBudgetCores": "runtime",
+		"detection.integrationMs": "default",
+		"storage.dir": "config",
+		"passiveBySource.rtl": "default",
+		"passiveBySource.rtl-dedicated": "runtime"
+	},
+	"bounds": {
+		"cpuBudgetCores": { "type": "number", "min": 0.1, "max": 64 },
+		"detection.sensitivity": { "type": "string", "enum": ["low", "normal", "high"] },
+		"passive.<sourceId>": { "type": "boolean" }
+	}
+}
+```
+
+`provenance` is keyed by the dotted leaf path; its values are `config` (set in
+the config file or env), `runtime` (a PATCH, persisted in `settings.json`) and
+`default`. Per-source passive is keyed `passiveBySource.<sourceId>` in
+`provenance`, but `passive.<sourceId>` in `bounds` and in the PATCH body.
+
+#### PATCH /api/scanner/settings
+
+Runtime-safe keys only: `passive` per source, `cpuBudgetCores`, `maxProbes`,
+`detection.integrationMs` / `sensitivity` / `faTargetPerMhzMin` /
+`hysteresisDb` / `minSurfaceBlocks`, the `storage` caps (not `dir`) and
+`ws.maxMessagesPerSecond` / `spectrumHz` / `spectrumBins`. The config-only
+`ws.spectrumSummaryBins` and `ws.spectrumMaxProfiles` are rejected. The body
+is merged into the persisted overrides; the response is the new settings view.
+
+```bash
+curl -X PATCH http://localhost:9000/api/scanner/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"passive": {"rtl-dedicated": false}, "cpuBudgetCores": 0.5}'
+```
+
+**400** for an unknown key or a value out of bounds:
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "Configuration validation failed:\n  - cpuBudgetCores: Value is too small (minimum: 0.1)"
+}
+```
+
+`500 SCANNER_SETTINGS_WRITE_FAILED`: `settings.json` could not be written;
+nothing changed. `503 SCANNER_STATE_UNAVAILABLE`: the scanner could not read
+its persisted jobs and settings at boot, so it refuses settings changes (and
+sweeps) for this run rather than overwrite them.
+
+#### GET /api/scanner/bandplans
+
+Built-in bandplans for the effective region (see [SCANNER.md](SCANNER.md#presets-and-bandplans)).
+
+```bash
+curl http://localhost:9000/api/scanner/bandplans
+```
+
+```json
+[
+	{
+		"id": "pmr446",
+		"region": "EU",
+		"name": "PMR446",
+		"ranges": [
+			{
+				"startHz": 446000000,
+				"endHz": 446200000,
+				"rasters": [{ "spacingHz": 12500, "firstChannelHz": 446006250 }],
+				"obwHz": [9000, 11000],
+				"protocols": ["analog-fm", "dmr", "dpmr"],
+				"bandplanId": "pmr446"
+			}
+		]
+	}
+]
+```
+
+#### POST /api/scanner/plan
+
+Pure preview of a job spec (no side effects): the normalised spec with
+`provenance` per field (`operator`, `bandplan`, `measured`, `config`,
+`default`), the hop plan, `sweepPeriodMs`, probability of intercept per hop,
+CPU/disk estimates, the impact and `issues` (`severity` `error` or
+`warning`). Same body as `POST /api/scanner/jobs`.
+
+```bash
+curl -X POST http://localhost:9000/api/scanner/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"mode": "sweep", "bandplans": ["uhf-land-mobile"]}'
+```
+
+```json
+{
+	"spec": { "sourceId": "rtl", "mode": "sweep", "fftSize": 2048, "dwellMs": 185, "provenance": { "ranges": "bandplan", "fftSize": "default" } },
+	"plan": { "hops": [{ "index": 0, "centreHz": 400819200, "covered": { "startHz": 400000000, "endHz": 401638400 }, "channelCount": 131, "dcAdjacentChannelsHz": [], "excluded": [], "dcMinEdgeHz": 1500 }], "usableHalfSpanHz": 819200, "dcGuardHz": 1500, "ppmMarginHz": 940 },
+	"sweepPeriodMs": 8140,
+	"poi": [{ "hopIndex": 0, "detection": 0.61, "decode": 0.17 }],
+	"estimates": { "cpuCores": 0.75, "diskMbPerHour": 57.6, "probes": 1 },
+	"impact": { "liveAudioClients": 0, "digitalVoiceListeners": 0, "runningDecoders": ["dsd-fme"], "pinnedDecoders": [], "scannerJobs": [], "unrestorable": [] },
+	"issues": [
+		{
+			"code": "poi-low",
+			"severity": "warning",
+			"message": "detection POI below 50 % for a 5000 ms transmission",
+			"details": { "hops": [3, 4, 17], "txDurationHintMs": 5000 }
+		}
+	]
+}
+```
+
+#### POST /api/scanner/jobs
+
+Creates a job (`ScanJobSpec`, every field optional; defaults in
+[SCANNER.md](SCANNER.md#jobs)). Two shorthands are converted before planning:
+
+- a range `{startHz, endHz, spacingHz, firstChannelHz?}` becomes one raster
+  `{spacingHz, firstChannelHz}`, with `firstChannelHz` defaulting to
+  `startHz + spacingHz / 2`;
+- an exclusion `{frequencyHz, widthHz}` becomes
+  `{startHz: frequencyHz − widthHz / 2, endHz: frequencyHz + widthHz / 2}`.
+
+```bash
+curl -X POST http://localhost:9000/api/scanner/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{"ranges": [{"startHz": 446000000, "endHz": 446200000, "spacingHz": 12500}], "exclusions": [{"frequencyHz": 446006250, "widthHz": 12500}], "protocols": ["dmr"]}'
+```
+
+**201**: the `ScanJob` (see the job detail below).
+
+**400** `SCANNER_PLAN_INVALID` when the preview has errors:
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "SCANNER_PLAN_INVALID",
+	"message": "The job spec has errors",
+	"details": {
+		"issues": [
+			{ "code": "range-empty", "severity": "error", "message": "a sweep needs at least one range or bandplan" }
+		]
+	}
+}
+```
+
+**409** `SCANNER_TAKEOVER_REQUIRED`: the sweep would disturb other consumers.
+Resend with `"takeover": true` to consent.
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "SCANNER_TAKEOVER_REQUIRED",
+	"message": "This sweep disturbs other consumers; resend with takeover",
+	"details": {
+		"impact": {
+			"liveAudioClients": 1,
+			"digitalVoiceListeners": 0,
+			"runningDecoders": ["dsd-fme"],
+			"pinnedDecoders": [],
+			"scannerJobs": [],
+			"unrestorable": []
+		}
+	}
+}
+```
+
+Other answers: 409 `SCANNER_SOURCE_BUSY` (a relay client controls the tuner,
+another job holds the lease, or the lease is "releasing" or in "recovery
+pending"; the detail is in `message`, plus `details.holderJobId` when a job
+holds the source, or `details.issues` from the preview), 409
+`SCANNER_NO_TUNER_CONTROL` (the source has no rtl_tcp tuner control), 400
+`SCANNER_MONITOR_UNAVAILABLE` (`kind: "monitor"`, listen-scan needs the
+channelizer), 400 `SCANNER_IDENTIFY_VIA_JOBS` (`kind: "identify"`; use
+`/identify`), 503 `SCANNER_DISABLED`, 503 `SCANNER_STATE_UNAVAILABLE` (sweeps
+only).
+
+#### GET /api/scanner/jobs and GET /api/scanner/jobs/:id
+
+```bash
+curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
+```
+
+**Response** (`ScanJob`, abridged; the list returns an array of these):
+
+```json
+{
+	"id": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+	"name": null,
+	"state": "holding",
+	"passive": false,
+	"spec": { "sourceId": "rtl", "mode": "sweep", "kind": "discover", "priority": 50 },
+	"plan": { "hops": [], "usableHalfSpanHz": 819200, "dcGuardHz": 1500, "ppmMarginHz": 940 },
+	"issues": [],
+	"impact": { "liveAudioClients": 0, "digitalVoiceListeners": 0, "runningDecoders": [], "pinnedDecoders": [], "scannerJobs": [], "unrestorable": [] },
+	"unrestorable": [],
+	"progress": {
+		"sweepIndex": 3,
+		"hopIndex": 17,
+		"hopCount": 44,
+		"sweepPeriodMs": 8420,
+		"coverage": 0.94,
+		"holdingOn": "t-41",
+		"settleMode": "marker",
+		"probes": [
+			{
+				"probeId": "scan-t6q4m3x-dmr-1",
+				"decoderId": "scan-t6q4m3x-dmr-1",
+				"trackId": "t-41",
+				"targetHz": 446056250,
+				"protocol": "dmr",
+				"transport": "offset",
+				"state": "confirming",
+				"startedAt": "2026-10-10T14:02:11.120Z"
+			}
+		],
+		"counts": {
+			"observations": 120,
+			"transients": 4,
+			"discoveries": { "activity": 5, "candidate": 3, "classified": 0, "decoded": 2 }
+		}
+	},
+	"createdAt": "2026-10-10T13:55:00.000Z",
+	"updatedAt": "2026-10-10T14:02:11.120Z",
+	"startedAt": "2026-10-10T13:55:00.400Z"
+}
+```
+
+`reason` is set while `paused` (`operator`, `preempted-operator`,
+`preempted-relay`, `preempted-job`, `source-down`, `core-restart`,
+`resume-blocked`) or `failed` (`source-removed`, `tuner-unavailable`,
+`invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
+carry `identify` (see `POST /api/scanner/identify`).
+
+#### PATCH /api/scanner/jobs/:id
+
+Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
+`sensitivity`, `exclusions`, `hold`, `revisit`, `record`, `protocols`,
+`capture`; other keys are ignored. The edit is previewed first; a preview with
+errors is rejected (400 `SCANNER_PLAN_INVALID`). Returns
+`{ job, plan, issues }`. 409 `SCANNER_JOB_TERMINAL` for an ended job, 409
+`SCANNER_IDENTIFY_NOT_EDITABLE` for an identify job.
+
+```bash
+curl -X PATCH http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH \
+  -H 'Content-Type: application/json' -d '{"sensitivity": "high"}'
+```
+
+#### POST /api/scanner/jobs/:id/pause, /resume, /cancel
+
+Each returns the `ScanJob`. `resume` takes an optional body
+`{"takeover": true}`:
+
+- from `paused(operator)`: resumes;
+- from `paused(resume-blocked)`: needs `takeover: true` (the impact grew
+  beyond what was consented);
+- from `paused(preempted-*)`: arbitrates at once and ignores `takeover`; 409
+  `SCANNER_SOURCE_BUSY` while another job holds the lease
+  (`details.holderJobId`) or a better-placed job waits for it
+  (`details.waiter`).
+
+409 `SCANNER_INVALID_TRANSITION` when the action does not apply to the
+current state, 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` for pause/resume on an
+identify job.
+
+```bash
+curl -X POST http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH/resume \
+  -H 'Content-Type: application/json' -d '{"takeover": true}'
+```
+
+#### DELETE /api/scanner/jobs/:id
+
+Removes an ended job (`completed`, `cancelled`, `failed`); its discoveries
+stay. **204**; 409 `SCANNER_JOB_NOT_TERMINAL` while the job runs or is paused.
+
+#### GET /api/scanner/discoveries
+
+Query parameters: `jobId`, `sourceId`, `protocol`, `minConfidence`
+(`activity` | `candidate` | `classified` | `decoded`), `freqMinHz`,
+`freqMaxHz`, `since` (ISO 8601), `encrypted` (boolean), `q` (label search,
+≤ 100 chars), `sort` (`lastSeen` | `frequency` | `confidence`), `cursor`,
+`limit` (1–500).
+
+```bash
+curl 'http://localhost:9000/api/scanner/discoveries?protocol=dmr&minConfidence=decoded&limit=50'
+```
+
+```json
+{
+	"items": [
+		{
+			"id": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+			"frequencyHz": 446056250,
+			"frequencyKey": "r:446056250",
+			"measuredOffsetHz": -280,
+			"bandwidthHz": 9800,
+			"protocol": "dmr",
+			"family": "digital-voice",
+			"class": "tdma-ms",
+			"confidence": "decoded",
+			"identity": { "kind": "dmr-cc", "value": "1" },
+			"encrypted": false,
+			"coChannel": [],
+			"firstSeenAt": "2026-10-10T13:56:02.000Z",
+			"lastSeenAt": "2026-10-10T14:02:15.000Z",
+			"observationCount": 7,
+			"airtimeMs": 41200,
+			"signal": {
+				"best": { "peakDbfs": -38.5, "meanDbfs": -41.0, "snrDb": 51.5, "floorDbfs": -92.5 },
+				"last": { "peakDbfs": -40.0, "meanDbfs": -42.5, "snrDb": 50.0, "floorDbfs": -92.5 }
+			},
+			"metadata": { "talkgroups": ["9"], "sources": ["2060945"], "slots": [1], "callsigns": [], "capcodes": [], "ismModels": [] },
+			"sourceIds": ["rtl"],
+			"jobIds": ["j_01JA2T6Q4M3XZ8R6V5W2NKD7QH"],
+			"tuningTrust": "commanded",
+			"evidence": { "recordings": 3, "psd": true, "iq": false }
+		}
+	],
+	"nextCursor": "eyJ0IjoxNzI4NTY4OTM1MDAwfQ"
+}
+```
+
+Pass `nextCursor` as `cursor` for the next page; `null` ends the list.
+
+#### GET /api/scanner/discoveries/:id
+
+The `Discovery` (metadata, co-channel links, operator fields). 404
+`SCANNER_NOT_FOUND`.
+
+#### GET /api/scanner/discoveries/:id/observations
+
+`{ items: Observation[], nextCursor }`; `cursor` and `limit` (1–500, default
+100). Each observation has the sample range, centre, OBW, levels, duty,
+hypotheses, the decode evidence and flags. 404 `SCANNER_DISCOVERY_NOT_FOUND`.
+
+#### PATCH /api/scanner/discoveries/:id
+
+Operator fields: `label` (≤ 100 chars), `notes` (≤ 2000), `lockout`
+(boolean; stops its probes and blocks listen), `keep` (boolean; never pruned
+by age). At least one key. Returns the `Discovery`.
+
+```bash
+curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ8R6V5W2N \
+  -H 'Content-Type: application/json' -d '{"label": "Site A repeater", "keep": true}'
+```
+
+#### DELETE /api/scanner/discoveries/:id
+
+Deletes the discovery with its evidence and recordings (`scanner:discovery`
+`change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`.
+
+#### GET /api/scanner/recordings/:recordingId
+
+Downloads a recording as `audio/wav` (ids come from observations'
+`recordingIds`). 404 `SCANNER_NOT_FOUND`.
+
+```bash
+curl -o call.wav http://localhost:9000/api/scanner/recordings/<recordingId>
+```
+
+#### GET /api/scanner/discoveries/:id/evidence/psd and /evidence/iq
+
+`psd`: the best power spectrum snapshot (`application/json`). `iq`: the latest
+IQ snippet (`application/octet-stream`, cu8, ≤ 1 s at 48 kHz). 404
+`SCANNER_NOT_FOUND` when none is stored.
+
+#### POST /api/scanner/discoveries/:id/listen
+
+Before the channelizer, points live audio at the discovery when it is in the
+current window: sets `offsetHz` (restarting the live pipeline) and starts live
+audio if it was idle.
+
+```json
+{
+	"mode": "live-audio",
+	"sourceId": "rtl",
+	"frequencyHz": 446056250,
+	"offsetHz": 55970,
+	"httpUrl": "http://localhost:8081/stream",
+	"wavUrl": "http://localhost:8081/stream.wav"
+}
+```
+
+409 `OUT_OF_WINDOW` (outside the window, live audio on another source, or the
+centre unknown), 409 `LIVE_AUDIO_UNAVAILABLE` (live audio not configured), 409
+`SCANNER_DISCOVERY_LOCKED_OUT`, 404 `SCANNER_DISCOVERY_NOT_FOUND`.
+
+#### POST /api/scanner/identify
+
+Identify a signal in the current window: every plausible decoder tries it,
+without retuning. Body: `sourceId?`, `target` (exactly one of
+`{frequencyHz, bandwidthHz?}` or `{all: true}`), `timeoutMs` (1000–120000,
+default 15000; bounds only the wait for a signal), `protocols?`,
+`exhaustive?` (default false: stop at the first accepted decode), `record?`
+(default true). `bandwidthHz` (≤ 1 MHz) sets the match tolerance
+`max(1 kHz, bw/2)`; send the waterfall's click width.
+
+```bash
+curl -X POST http://localhost:9000/api/scanner/identify \
+  -H 'Content-Type: application/json' \
+  -d '{"target": {"frequencyHz": 446056250, "bandwidthHz": 12500}}'
+
+curl -X POST http://localhost:9000/api/scanner/identify \
+  -H 'Content-Type: application/json' -d '{"target": {"all": true}, "timeoutMs": 30000}'
+```
+
+**201**: a `ScanJob` with `spec.kind: "identify"` and `identify`:
+
+```json
+{
+	"id": "j_01JA2TB0Q7ZPM1V8C4X2N6R3TY",
+	"name": "Identify 446.05625 MHz",
+	"state": "running",
+	"spec": { "kind": "identify", "mode": "in-window", "sourceId": "rtl", "priority": 100 },
+	"identify": {
+		"target": { "frequencyHz": 446056250, "bandwidthHz": 12500 },
+		"timeoutMs": 15000,
+		"protocols": [],
+		"exhaustive": false,
+		"record": true,
+		"targets": [
+			{
+				"jobId": "j_01JA2TB0Q7ZPM1V8C4X2N6R3TY",
+				"targetHz": 446056250,
+				"state": "trying",
+				"trials": [
+					{ "protocol": "dmr", "decoder": "dsd-fme", "mode": "auto", "transport": "offset", "outcome": "running" },
+					{ "protocol": "pocsag", "decoder": "multimon-ng", "mode": "multimon-ng", "transport": "offset", "outcome": "pending" },
+					{ "protocol": "ism", "decoder": "rtl433", "mode": null, "transport": null, "outcome": "unsupported", "reason": "needs-channelizer" }
+				]
+			}
+		]
+	}
+}
+```
+
+400 (schema validation) when both or neither of `frequencyHz` / `all` are
+given, or a bound is broken:
+
+```json
+{
+	"error": "ValidationError",
+	"code": "VALIDATION_ERROR",
+	"message": "body/target must match exactly one schema in oneOf",
+	"details": [{ "instancePath": "/target", "keyword": "oneOf" }]
+}
+```
+
+409 `OUT_OF_WINDOW` with `details.window`:
+
+```json
+{
+	"error": "ScannerApiError",
+	"code": "OUT_OF_WINDOW",
+	"message": "The target is outside the tuned window; tune first",
+	"details": { "window": { "startHz": 445180800, "endHz": 446819200 } }
+}
+```
+
+409 `SCANNER_SOURCE_BUSY` while a sweep holds the source's tuner
+(`details.holderJobId`); 503 `SCANNER_DISABLED`. The job is listed,
+cancellable and deletable once ended, but `pause`/`resume` answer 409
+`SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
+`SCANNER_IDENTIFY_NOT_EDITABLE`. Identify jobs are not kept across a core
+restart; the last 50 ended ones stay listed.
+
+Each target ends `identified` (this job's own trials decoded an identity),
+`candidate` (a classification, a spectral score ≥ 0.5, or an identity decoded
+earlier) or `unidentified`, with `result`: `protocol?`, `confidence`,
+`identity?`, `metadata`, `discoveryId?`, `observationId?`, `measurements`
+(`source: "track" | "spectrum"`, `centreHz`, `obwHz`, `peakDbfs`, `snrDb`,
+`floorDbfs`, `dutyCycle`, `acf30?`, `acf60?`, `class`), `artefact?` (`dc`,
+`spur`, `image` at once with no trial; `rfi` only after the wait found no
+signal) and `ended?: "window-moved"` (the window moved off the target; open
+trials are `cancelled`).
+
+#### GET /api/scanner/captures
+
+Burst IQ captures (job option `capture`, [SCANNER.md](SCANNER.md#burst-iq-capture-fixtures)), newest first:
+
+```json
+[
+	{
+		"id": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv",
+		"createdAt": "2026-10-10T14:05:00.000Z",
+		"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+		"sourceId": "rtl",
+		"observationId": "o_01JA2TC3HZ5D7QW1N8R4T6Y0BK",
+		"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+		"mode": "wideband",
+		"role": "channelizer-golden",
+		"protocol": "dmr",
+		"identity": { "kind": "dmr-cc", "value": "1" },
+		"decoded": true,
+		"encrypted": false,
+		"tuningTrust": "commanded",
+		"sampleRateHz": 2048000,
+		"centreHz": 446000000,
+		"targetHz": 446056250,
+		"stream": 1,
+		"epoch": 12,
+		"startSample": 81920000,
+		"endSample": 92160000,
+		"preRollClippedMs": 0,
+		"postTruncated": false,
+		"durationS": 5,
+		"bytes": 20480000,
+		"files": { "iq": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.cu8", "manifest": "cap_01ja2tc4j8k2m5n7p9q1r3s6tv.json" }
+	}
+]
+```
+
+#### GET /api/scanner/captures/:file
+
+`<id>.cu8` (`application/octet-stream`) or `<id>.json`, the fixtures manifest
+v2 entry (`application/json`). 404 `SCANNER_NOT_FOUND` for any other name.
+
+```bash
+curl -O http://localhost:9000/api/scanner/captures/cap_01ja2tc4j8k2m5n7p9q1r3s6tv.cu8
+```
+
+#### DELETE /api/scanner/captures/:id
+
+**204**; 404 `SCANNER_NOT_FOUND`.
+
+### Spectrum
+
+Core spectrum service (waterfalls for the CLI, the web UI and the scanner).
+DTOs in `packages/api-types/src/spectrum.ts`. Served whenever the core runs,
+also with `scanner.enabled: false`.
+
+#### GET /api/spectrum
+
+```bash
+curl http://localhost:9000/api/spectrum
+```
+
+**Response** (`SpectrumStatus`: `{defaultProfile, profiles, limits, subscribers, sources}`, abridged):
+
+```json
+{
+	"defaultProfile": { "key": "10:512", "hz": 10, "bins": 512 },
+	"profiles": [
+		{
+			"sourceId": "rtl",
+			"key": "25:2048",
+			"hz": 25,
+			"bins": 2048,
+			"isDefault": false,
+			"clients": 1,
+			"binCount": 1639,
+			"binHz": 1000,
+			"summariesPerFrame": 1,
+			"effectiveHz": 20
+		}
+	],
+	"limits": {
+		"maxProfiles": 4,
+		"hz": { "min": 0.5, "max": 25, "step": 0.5 },
+		"bins": { "min": 128, "max": 2048 }
+	},
+	"subscribers": 2,
+	"sources": [
+		{
+			"sourceId": "rtl",
+			"eligible": true,
+			"engine": "running",
+			"consumers": 2,
+			"rbwHz": 1000,
+			"fftSize": 2048,
+			"floorDbfs": -92.5,
+			"floorOccupied": false,
+			"kByRange": [],
+			"settleMode": "marker",
+			"tuningTrust": "commanded",
+			"warnings": [],
+			"summaryBinCount": 1639,
+			"summaryBinHz": 1000,
+			"summaryHz": 20,
+			"latestFrame": null
+		}
+	]
+}
+```
+
+`SpectrumActiveProfile` (`profiles[]`): the profile `key`, `hz`, `bins`,
+`isDefault`, `clients`, and from the latest summary `binCount`, `binHz`,
+`summariesPerFrame` and `effectiveHz` (null before one). `SpectrumLimits`:
+`maxProfiles` (`scanner.ws.spectrumMaxProfiles`) and the `hz`/`bins` bounds.
+`SpectrumSourceStatus` (`sources[]`): `eligible` and `reason?`
+(`source-not-iq` | `source-removed`), the engine state and consumers, RBW,
+floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
+(`untracked-retune` | `host-centre-mismatch`, with `deltaHz`), the summary
+budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
+`latestFrame` (at the default profile) and `lastError?`.
+
+#### GET /api/spectrum/occupancy
+
+Hourly duty per 12.5 kHz bucket. Query: `sourceId`, `startHz`, `endHz`
+(required; `endHz` above `startHz` by at most 2 GHz) and `sinceMs` (default
+24 h, at most 168 h).
+
+```bash
+curl 'http://localhost:9000/api/spectrum/occupancy?sourceId=rtl&startHz=446000000&endHz=446200000&sinceMs=86400000'
+```
+
+```json
+{
+	"sourceId": "rtl",
+	"bucketHz": 12500,
+	"sinceMs": 86400000,
+	"buckets": [
+		{ "startHz": 446050000, "dutyByHour": [0.02, 0.11, null], "observedMs": 7200000, "activeMs": 468000 }
+	],
+	"top": [{ "startHz": 446050000, "duty": 0.065, "observedMs": 7200000, "activeMs": 468000 }]
+}
+```
+
+400 `SPECTRUM_RANGE_INVALID` (bad range); 404 `SPECTRUM_SOURCE_NOT_FOUND`
+(no history for the source).
+
 ## WebSocket API
 
 Each connection has a 1 MiB outbound payload budget across the application queue
@@ -1174,6 +1883,8 @@ ws.onopen = () => {
 				"digital-voice",
 				"resources",
 				"tuner",
+				"scanner",
+				"spectrum",
 			],
 		}),
 	)
@@ -1201,10 +1912,39 @@ ws.onmessage = event => {
 		"live-audio",
 		"digital-voice",
 		"resources",
-		"tuner"
+		"tuner",
+		"scanner",
+		"spectrum"
 	]
 }
 ```
+
+Channels: `decoders`, `sources`, `metrics`, `health`, `fanout`, `live-audio`,
+`digital-voice`, `resources`, `tuner`, `scanner` (signal discovery scanner,
+[SCANNER.md](SCANNER.md)) and `spectrum` (core waterfall frames, opt-in).
+
+`spectrum` takes optional per-client options on `subscribe`. Without options
+the client gets the default profile (`scanner.ws.spectrumHz` ×
+`scanner.ws.spectrumBins`, 10 Hz × 512) on every eligible source; with
+`options.spectrum` it selects one source and one profile:
+
+```json
+{
+	"type": "subscribe",
+	"channels": ["spectrum"],
+	"options": { "spectrum": { "sourceId": "rtl", "hz": 25, "bins": 2048 } }
+}
+```
+
+- `hz` is snapped to 0.5 and clamped to 0.5–25; `bins` is rounded and
+  clamped to 128–2048; omitted fields take the default's values.
+- One source and one profile per client. Subscribing again switches without a
+  gap; subscribing without options returns to the default selection.
+  `unsubscribe` or a disconnect releases the demand.
+- Rapid re-subscribes coalesce: only the latest request is answered; superseded
+  ones get no reply.
+- The answer is a `spectrum:profile` ack, then one `snapshot: true` frame per
+  source (current state, not a replay of missed messages), then live frames.
 
 #### Unsubscribe
 
@@ -1381,6 +2121,45 @@ more than one `decoder:status` per transition; always apply the latest.
 }
 ```
 
+#### decoder:created
+
+On the `decoders` channel when a decoder is added at runtime (scanner probes;
+`owner: "scanner"`, `ephemeral: true`). `decoder` is the
+`GET /api/decoders/:id` body. Add the row.
+
+```json
+{
+	"type": "decoder:created",
+	"channel": "decoders",
+	"data": {
+		"decoderId": "scan-t6q4m3x-dmr-1",
+		"decoder": {
+			"id": "scan-t6q4m3x-dmr-1",
+			"type": "dsd-fme",
+			"owner": "scanner",
+			"scannerJobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+			"ephemeral": true
+		}
+	}
+}
+```
+
+#### decoder:removed
+
+On the `decoders` channel when a runtime decoder is removed. Drop the row and
+any cached `decoder:status`.
+
+```json
+{
+	"type": "decoder:removed",
+	"channel": "decoders",
+	"data": {
+		"decoderId": "scan-t6q4m3x-dmr-1",
+		"removedAt": "2026-10-10T14:02:20.000Z"
+	}
+}
+```
+
 #### decoder:health
 
 ```json
@@ -1503,6 +2282,27 @@ further `source:status` or `source:disconnected` follows for that `sourceId`
 }
 ```
 
+#### tuner:command-sent
+
+On the `tuner` channel after a tuner command was written to an rtl_tcp source.
+`origin` (optional) says who issued it: `"rest"` (the REST API), `"scanner"`
+(a sweep through the scanner's lease) or `"replay"` (desired state re-sent on
+reconnect). It is absent for writes whose origin is not tagged. Relay (SDR++)
+commands do not pass through here.
+
+```json
+{
+	"type": "tuner:command-sent",
+	"channel": "tuner",
+	"data": {
+		"sourceId": "rtl",
+		"command": "set-frequency",
+		"value": 446000000,
+		"origin": "scanner"
+	}
+}
+```
+
 #### metrics
 
 Emitted every ~5 seconds.
@@ -1585,6 +2385,202 @@ On the `digital-voice` channel: the full `GET /api/digital-voice/status` body,
 sent on start/stop, on client connect/disconnect and after every
 `digital-voice:call`.
 
+#### Scanner channel
+
+All `scanner` messages pass one limiter: at most `scanner.ws.maxMessagesPerSecond`
+(10) in any second, at most one per key per second, latest state per key wins,
+and the latest state of every key is always delivered eventually. After a
+reconnect, refetch over REST (`GET /api/scanner/jobs`, `/discoveries`); missed
+messages are not replayed.
+
+#### scanner:job
+
+The full `ScanJob` (the `GET /api/scanner/jobs/:id` body) on create, on every
+state change and after every edit.
+
+```json
+{ "type": "scanner:job", "channel": "scanner", "data": { "id": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH", "state": "paused", "reason": "preempted-operator" } }
+```
+
+#### scanner:progress
+
+`{jobId, state, sweepIndex, hopIndex, hopCount, centerHz, holdingOn?, coverage, probes}`;
+`probes` is a count (the probe list is in the job detail, `progress.probes[]`).
+At most 1/s per job.
+
+```json
+{
+	"type": "scanner:progress",
+	"channel": "scanner",
+	"data": {
+		"jobId": "j_01JA2T6Q4M3XZ8R6V5W2NKD7QH",
+		"state": "running",
+		"sweepIndex": 3,
+		"hopIndex": 18,
+		"hopCount": 44,
+		"centerHz": 428400000,
+		"coverage": 0.94,
+		"probes": 0
+	}
+}
+```
+
+#### scanner:discovery
+
+`{change: "created" | "updated" | "upgraded" | "merged" | "deleted", discovery}`,
+coalesced to at most 1/s per discovery (the latest change wins).
+
+#### scanner:activity
+
+`{sourceId, observationId, discoveryId?, jobIds, frequencyHz, active, peakDbfs, hypothesis?: {protocol, score}}`
+when a transmission starts or ends. Activity is shed first under load (newest wins).
+
+#### scanner:identify
+
+One stream per identify target (`all: true` sends one per surfaced emission, with
+`targetHz` its centre): `{jobId, targetHz, state, trials, result?}`. Coalesced to at
+most 1/s per (job, target); the latest state is always delivered.
+
+- `state`: `waiting-for-signal` → `trying` → `identified` | `candidate` | `unidentified`.
+- `trials[]`: `{protocol, decoder, mode, transport, outcome, reason?}`. Outcomes:
+  `pending`, `running`, `decoded`, `no-sync`, `crc-errors`, `timeout`,
+  `skipped-budget`, `unsupported` (with `reason`: `no-decoder`,
+  `needs-channelizer`, `unsupported-format`; `mode` and `transport` null),
+  `not-needed` (an earlier trial decoded and `exhaustive` is false) and
+  `cancelled`.
+- `result`: see `POST /api/scanner/identify`, including `artefact?` and
+  `ended?: "window-moved"`.
+
+If `all: true` finds nothing within `timeoutMs`, no `scanner:identify` is sent;
+the job completes with `identify.targets: []` (`scanner:job`).
+
+```json
+{
+	"type": "scanner:identify",
+	"channel": "scanner",
+	"data": {
+		"jobId": "j_01JA2TB0Q7ZPM1V8C4X2N6R3TY",
+		"targetHz": 446056250,
+		"state": "identified",
+		"trials": [
+			{ "protocol": "dmr", "decoder": "dsd-fme", "mode": "auto", "transport": "offset", "outcome": "decoded" },
+			{ "protocol": "pocsag", "decoder": "multimon-ng", "mode": "multimon-ng", "transport": "offset", "outcome": "not-needed" }
+		],
+		"result": {
+			"protocol": "dmr",
+			"confidence": "decoded",
+			"identity": { "kind": "dmr-cc", "value": "1" },
+			"metadata": { "talkgroups": ["9"], "sources": ["2060945"], "slots": [1], "callsigns": [], "capcodes": [], "ismModels": [] },
+			"discoveryId": "d_01JA2T7B9S0KQ4M3XZ8R6V5W2N",
+			"measurements": { "source": "track", "centreHz": 446055970, "obwHz": 9800, "peakDbfs": -38.5, "snrDb": 51.5, "floorDbfs": -92.5, "dutyCycle": 0.5, "class": "tdma-ms" }
+		}
+	}
+}
+```
+
+#### scanner:status
+
+The `GET /api/scanner` body on change, at most 1/s (a settings
+PATCH always sends one).
+
+#### Spectrum channel
+
+The `spectrum` channel is opt-in per client (see [Subscribe](#subscribe)). Its
+messages go only to the clients whose selection they match, bypass the scanner
+limiter and do not count toward `ws.maxMessagesPerSecond`.
+
+#### spectrum:profile
+
+Sent to one client only: the ack to a `spectrum` subscribe, or a notice after a
+permanent source removal (`DELETE /api/sources/:id`) or a default-profile change
+that remapped the client.
+
+```json
+{
+	"type": "spectrum:profile",
+	"channel": "spectrum",
+	"data": {
+		"selection": "source",
+		"sourceId": "rtl",
+		"profile": { "key": "25:2048", "hz": 25, "bins": 2048 },
+		"effectiveHz": 20,
+		"outcome": "exact",
+		"adjusted": []
+	}
+}
+```
+
+- `selection`: `none` (no frames), `default` (the default profile on every
+  eligible source) or `source`.
+- `outcome`: `default` (no options), `exact`, `nearest` (see `adjusted`:
+  `hz`, `bins`, `profile-limit`), `rejected` (the previous selection is kept;
+  `code` and `message` say why) or `removed` (notice: `removedSourceId` was
+  removed; a source selection becomes `selection: "none"`).
+- `code`: `SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`,
+  `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`, `SPECTRUM_ENGINE_ERROR`.
+- Limits: the server serves the nearest admissible profile and never rejects a
+  request for its size. Above `scanner.ws.spectrumMaxProfiles` (4 distinct
+  non-default profiles over all sources; config-only, 1–16) a request maps to an
+  active profile on that source (preferring one not larger than the request) or
+  to the default.
+- Reset the client's waterfalls on every `spectrum:profile`, except that an
+  `outcome: "removed"` notice with `selection: "default"` drops only
+  `removedSourceId`'s waterfall. A reconnect changes nothing; a source re-added
+  with the same id is picked up by default subscribers on their next subscribe.
+
+#### spectrum:frame
+
+One frame per source and profile:
+
+```json
+{
+	"type": "spectrum:frame",
+	"channel": "spectrum",
+	"data": {
+		"sourceId": "rtl",
+		"profile": "10:512",
+		"epoch": 12,
+		"tuningTrust": "commanded",
+		"centerHz": 446000000,
+		"sampleRateHz": 2048000,
+		"binHz": 4000,
+		"nativeBinHz": 1000,
+		"startHz": 445180800,
+		"binCount": 410,
+		"bins": "AAECAwQF…",
+		"binEncoding": "u8-halfdb-127.5",
+		"floorDbfs": -92.5,
+		"thresholdDb": 9.2,
+		"tracks": [{ "startHz": 446051000, "endHz": 446061000, "flags": { "burst": false, "iqImage": false, "edge": false } }],
+		"masks": { "dcHz": 446000000, "dcGuardHz": 1500, "spurRanges": [{ "startHz": 446249500, "endHz": 446250500 }] },
+		"at": "2026-10-10T14:02:15.050Z"
+	}
+}
+```
+
+- `profile` is the key `<hz>:<bins>` (the default profile or the client's).
+- `bins`: base64 of a `Uint8Array`, `u8-halfdb-127.5` encoding: byte `v` is
+  `dBFS = v / 2 − 127.5` (0.5 dB steps), max-hold over the frame interval;
+  bin `i` is centred at `startHz + (i + 0.5) × binHz`.
+- `binCount ≤ bins`, never upsampled; `binHz` is the true width and
+  `nativeBinHz` is `fs / fftSize` (`binHz / nativeBinHz` is the max-hold
+  factor). The engine summary budget (`scanner.ws.spectrumSummaryBins`, 2048)
+  caps the detail.
+- Cadence: one frame per `ceil(blockHz / hz)` block summaries, with
+  `blockHz = 1000 / integrationMs` (20 at the default): 25 Hz gives 20 Hz, 10 or
+  15 Hz gives 10 Hz. `effectiveHz` is that cadence while blocks flow and an
+  upper bound across sweep settles and gaps.
+- The max-hold restarts when the epoch changes, so a frame never mixes two
+  centres. `tuningTrust: "unverified"` means the frequency axis may be wrong
+  (grey it out). `masks` are RF ranges: the DC spike (`dcHz ± dcGuardHz`) and
+  every masked spur line.
+- `snapshot: true` marks the current-state frame sent right after an ack (the
+  latest block of the current epoch at the client's profile; none while a
+  retune settles). It is not a replay.
+- Client rules: never merge or accumulate rows across a change of `sourceId`,
+  epoch, `profile`, `binHz` or `startHz`; each row carries its own axis. Compare
+  epochs for equality only (they restart with the engine).
+
 #### subscribed
 
 Confirmation of subscription.
@@ -1660,6 +2656,44 @@ All error responses follow this format:
 | `INVALID_CONFIG`          | 400         | Invalid configuration provided |
 | `SOURCE_CONNECTION_ERROR` | 503         | Cannot connect to source       |
 | `INTERNAL_ERROR`          | 500         | Internal server error          |
+| `DECODER_OWNED_BY_SCANNER` | 409        | start/stop/restart or band edit on a scanner probe (`owner: "scanner"`) |
+| `SOURCE_HELD_BY_SCANNER`  | 409         | start/restart of a decoder whose source a scanner sweep holds (`tuner-scanning`) |
+
+### Scanner and spectrum codes
+
+Scanner and spectrum routes answer with the flat body
+`{ "error": "<name>", "code": "<CODE>", "message": "…", "details"?: {…} }`.
+
+| Code                            | HTTP | When                                                                                                                                         |
+| ------------------------------- | ---- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VALIDATION_ERROR`              | 400  | Request schema, or a settings PATCH value out of bounds / unknown key                                                                        |
+| `SCANNER_PLAN_INVALID`          | 400  | The job preview has errors; `details.issues`                                                                                                 |
+| `SCANNER_MONITOR_UNAVAILABLE`   | 400  | `kind: "monitor"` (listen-scan needs the channelizer)                                                                                        |
+| `SCANNER_SETTINGS_INVALID`      | 400  | A settings patch that does not merge; `details.issues`                                                                                       |
+| `SCANNER_IDENTIFY_VIA_JOBS`     | 400  | `kind: "identify"` on `POST /api/scanner/jobs`; use `/api/scanner/identify`                                                                  |
+| `SPECTRUM_RANGE_INVALID`        | 400  | Occupancy query: `endHz` not above `startHz`, or the span above 2 GHz                                                                        |
+| `SCANNER_NOT_FOUND`             | 404  | Route level: the job, discovery, recording, evidence or capture in the path does not exist                                                   |
+| `SCANNER_JOB_NOT_FOUND`         | 404  | Service level: an action on a missing job                                                                                                    |
+| `SCANNER_DISCOVERY_NOT_FOUND`   | 404  | Service level: an action on a missing discovery (observations, PATCH, listen)                                                                |
+| `SPECTRUM_SOURCE_NOT_FOUND`     | 404  | Occupancy query: no history for the source                                                                                                  |
+| `SCANNER_TAKEOVER_REQUIRED`     | 409  | The sweep disturbs other consumers; `details.impact`; resend with `takeover: true`                                                           |
+| `SCANNER_SOURCE_BUSY`           | 409  | The tuner is not available; the detail is in `message` (a relay client controls the tuner, "holder is starting", "releasing", "recovery pending", lease held by another job). `details.holderJobId` when a job holds the source; `details.waiter` when a better-placed job waits; `details.issues` when the preview found it |
+| `SCANNER_NO_TUNER_CONTROL`      | 409  | The source has no rtl_tcp tuner control (sweep)                                                                                              |
+| `SCANNER_JOB_TERMINAL`          | 409  | Edit or action on an ended job                                                                                                               |
+| `SCANNER_JOB_NOT_TERMINAL`      | 409  | `DELETE` of a job that has not ended                                                                                                         |
+| `SCANNER_INVALID_TRANSITION`    | 409  | The lifecycle action does not apply to the current state                                                                                     |
+| `SCANNER_DISCOVERY_LOCKED_OUT`  | 409  | `listen` on a locked-out discovery                                                                                                           |
+| `OUT_OF_WINDOW`                 | 409  | `listen` or `identify` outside the tuned window; identify adds `details.window {startHz, endHz}`                                             |
+| `LIVE_AUDIO_UNAVAILABLE`        | 409  | `listen` without live audio                                                                                                                  |
+| `SCANNER_IDENTIFY_NOT_PAUSABLE` | 409  | `pause` / `resume` on an identify job                                                                                                        |
+| `SCANNER_IDENTIFY_NOT_EDITABLE` | 409  | `PATCH` on an identify job                                                                                                                   |
+| `SCANNER_SETTINGS_WRITE_FAILED` | 500  | `settings.json` could not be written; nothing changed                                                                                        |
+| `SCANNER_DISABLED`              | 503  | Job or identify creation with `scanner.enabled: false`                                                                                       |
+| `SCANNER_STATE_UNAVAILABLE`     | 503  | The persisted jobs and settings could not be read at boot; sweeps, sweep resumes and settings changes are refused for this run               |
+
+`spectrum:profile` codes (WS only): `SPECTRUM_OPTIONS_INVALID`,
+`SPECTRUM_SOURCE_NOT_FOUND`, `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`,
+`SPECTRUM_ENGINE_ERROR`.
 
 ## Rate Limiting
 
