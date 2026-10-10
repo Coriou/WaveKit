@@ -3,6 +3,7 @@ import { segment } from "./emissions/segmenter.js"
 import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
 import type { TrackerBlock } from "./emissions/tracker.js"
+import { flagIqImages } from "./emissions/iq-image.js"
 import type {
 	BlockSummary,
 	EngineState,
@@ -60,6 +61,9 @@ const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most th
 const SPEC_PAD_BINS = 2
 const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
 const PERSISTENT_TRACK_S = 10
+const IMAGE_TOLERANCE_HZ = 1000
+const IMAGE_MIN_REJECTION_DB = 20
+const IMAGE_MAX_REJECTION_DB = 65
 
 interface EpochState {
 	epoch: number
@@ -189,7 +193,7 @@ export class SpectrumPipeline {
 	private readonly lineScratch: Uint8Array
 	private readonly lastActive: Float64Array
 	private lastActivityEnd = 0
-	/** IQ-image tracks of the last block, for artefactMasks() (Task 11a fills it). */
+	/** IQ-image tracks of the last block, for artefactMasks() and the block summary's `iqImage` (emitWithImages). */
 	private imageTracks: { centreHz: number; obwHz: number }[] = []
 	private out: PipelineEvent[] = []
 
@@ -896,7 +900,7 @@ export class SpectrumPipeline {
 		}
 		this.emit(this.tracker.flagSpurs(this.lineMask))
 		this.noteActivity(trackSegs, blockEnd)
-		this.emit(this.tracker.block(trackSegs, block))
+		this.emitWithImages(this.tracker.block(trackSegs, block), ep)
 		this.emit(
 			this.wideband.block(floorOccupied ? [this.widebandSegment()] : [], {
 				...block,
@@ -1215,6 +1219,47 @@ export class SpectrumPipeline {
 		}
 	}
 
+	/**
+	 * Spec § 4.9: flag IQ images among the open tracks in the block where both are open, so every
+	 * snapshot of an image carries `iqImage` (events of this block are patched; tracks flagged now
+	 * that emitted nothing this block get an immediate track-update).
+	 */
+	private emitWithImages(events: PipelineEvent[], ep: EpochState): void {
+		const candidates = this.tracker.openCandidates()
+		const images = flagIqImages(candidates, ep.centreHz, {
+			rbwHz: this.binHz,
+			toleranceHz: IMAGE_TOLERANCE_HZ,
+			minRejectionDb: IMAGE_MIN_REJECTION_DB,
+			maxRejectionDb: IMAGE_MAX_REJECTION_DB,
+			dcGuardHz: this.dcGuardHz,
+		})
+		this.imageTracks = candidates
+			.filter(c => images.has(c.trackId))
+			.map(c => ({ centreHz: c.centreHz, obwHz: c.obwHz })) // § 4.9 artefact masks (Task 7a)
+		if (images.size === 0) {
+			this.emit(events)
+			return
+		}
+		const raised = this.tracker.raiseFlag(images, "iqImage")
+		const reported = new Set<string>()
+		for (const e of events) {
+			if (
+				e.kind !== "track-open" &&
+				e.kind !== "track-update" &&
+				e.kind !== "track-close"
+			)
+				continue
+			if (images.has(e.track.trackId)) e.track.flags.iqImage = true
+			reported.add(e.track.trackId)
+		}
+		this.emit(events)
+		for (const id of raised) {
+			if (reported.has(id)) continue
+			const track = this.tracker.snapshotOf(id)
+			if (track) this.emit([{ kind: "track-update", track }])
+		}
+	}
+
 	// ---- masks, summaries, stats ----
 
 	private applyMasks(): void {
@@ -1325,7 +1370,15 @@ export class SpectrumPipeline {
 			tracks: segs.map(s => ({
 				startHz: this.rfLow(ep, s.startBin),
 				endHz: this.rfLow(ep, s.endBin),
-				flags: { burst: burstSet.has(s), iqImage: false, edge: s.flags.edge },
+				flags: {
+					burst: burstSet.has(s),
+					iqImage: this.imageTracks.some(
+						t =>
+							t.centreHz >= this.rfLow(ep, s.startBin) &&
+							t.centreHz <= this.rfLow(ep, s.endBin),
+					),
+					edge: s.flags.edge,
+				},
 			})),
 			masks: { dcHz: ep.centreHz, dcGuardHz: this.dcGuardHz, spurRanges },
 			floorOccupied,

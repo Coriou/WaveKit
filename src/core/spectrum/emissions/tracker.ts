@@ -13,6 +13,7 @@ import type {
 } from "../types.js"
 import type { Segment } from "./segmenter.js"
 import type { PersistentFeature } from "../retune-alarm.js"
+import type { ImageCandidate } from "./iq-image.js"
 
 /**
  * Per-epoch emission tracks (spec §4.2, §6.2): matches each block's segments to open tracks by bin
@@ -277,6 +278,7 @@ export class Tracker {
 			if (
 				t.misses > 0 ||
 				t.flags.burst ||
+				t.flags.iqImage ||
 				t.lastSample - t.startSample < minSamples
 			)
 				continue
@@ -286,6 +288,39 @@ export class Tracker {
 			})
 		}
 		return out
+	}
+
+	/** Open, non-burst tracks on in the last block, with the −6 dB OBW of their mean spectrum (spec § 4.9). */
+	openCandidates(): ImageCandidate[] {
+		const out: ImageCandidate[] = []
+		for (const t of this.open) {
+			if (t.misses > 0 || t.flags.burst) continue
+			const mean = t.spectrum.meanDb()
+			const { a, e } = this.obwWindow(t, mean)
+			out.push({
+				trackId: t.id,
+				centreHz: this.rf(this.centroidBin(t), this.n, t.epoch.centreHz),
+				obwHz: obwAtDb(mean, a, e, this.opts.binHz, 6),
+				peakDbfs: t.peakDbfs,
+			})
+		}
+		return out
+	}
+
+	/** Sets a sticky flag on open tracks; returns the ids that were newly flagged. */
+	raiseFlag(ids: ReadonlySet<string>, flag: "iqImage"): string[] {
+		const raised: string[] = []
+		for (const t of this.open) {
+			if (!ids.has(t.id) || t.flags[flag]) continue
+			t.flags[flag] = true
+			raised.push(t.id)
+		}
+		return raised
+	}
+
+	snapshotOf(trackId: string): TrackSnapshot | undefined {
+		const t = this.open.find(o => o.id === trackId)
+		return t ? this.snapshot(t, this.n) : undefined
 	}
 
 	/**
@@ -371,6 +406,7 @@ export class Tracker {
 				obwBiased: false,
 				spur: false,
 				burst: false,
+				iqImage: false,
 			},
 			flagsChanged: false,
 			justOpened: true,
@@ -469,6 +505,17 @@ export class Tracker {
 			: (t.startBin + t.endBin - 1) / 2
 	}
 
+	/** The OBW/shape window over `mean` (index 0 = bin `spectrum.lo`): the on-bins ± 1. */
+	private obwWindow(
+		t: OpenTrack,
+		mean: Float32Array,
+	): { a: number; e: number } {
+		return {
+			a: Math.max(0, t.onMin - 1 - t.spectrum.lo),
+			e: Math.min(mean.length, t.onMax + 1 - t.spectrum.lo),
+		}
+	}
+
 	private close(
 		t: OpenTrack,
 		reason: ObservationEndReason,
@@ -485,8 +532,7 @@ export class Tracker {
 	private snapshot(t: OpenTrack, n: number): TrackSnapshot {
 		const binHz = this.opts.binHz
 		const mean = t.spectrum.meanDb()
-		const a = Math.max(0, t.onMin - 1 - t.spectrum.lo)
-		const e = Math.min(mean.length, t.onMax + 1 - t.spectrum.lo)
+		const { a, e } = this.obwWindow(t, mean)
 		const useDb = t.maxBlockSnrDb >= OBW_MIN_SNR_DB
 		const f = this.features(t)
 		const blocks = Math.max(1, t.blocks)

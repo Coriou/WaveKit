@@ -54,6 +54,8 @@ export interface TrackFlags {
 	obwBiased: boolean
 	/** Every block the track was on was a short-path burst block (spec § 4.10); surfaces at k_short + 3 dB or by repetition. */
 	burst: boolean
+	/** Mirror image of a stronger track at the opposite baseband offset (spec § 4.9): never surfaces, never probed. */
+	iqImage: boolean
 	/** Sticky: the track lies wholly on a spur line (baseband, provisional or comb; § 4.9, Task 7a). Never surfaced, never probed. */
 	spur: boolean
 }

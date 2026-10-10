@@ -46,6 +46,7 @@ function snap(over: Partial<TrackSnapshot> = {}): TrackSnapshot {
 			obwBiased: false,
 			spur: false,
 			burst: false,
+			iqImage: false,
 		},
 		tuningTrust: "commanded",
 		...over,

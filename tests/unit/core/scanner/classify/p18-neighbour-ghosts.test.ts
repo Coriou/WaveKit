@@ -50,6 +50,7 @@ function track(id: string, centreHz: number, peakDbfs: number): TrackSnapshot {
 			obwBiased: false,
 			spur: false,
 			burst: false,
+			iqImage: false,
 		},
 		tuningTrust: "commanded",
 	}
