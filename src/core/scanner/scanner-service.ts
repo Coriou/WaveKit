@@ -21,6 +21,7 @@ import type {
 	ScannerProgressEventData,
 	ScannerSettingsView,
 	ScannerStatus,
+	SpectrumSourceStatus,
 } from "@wavekit/api-types"
 import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
@@ -87,13 +88,15 @@ import {
 } from "./probes/probe-pool.js"
 import {
 	DEFAULT_TUNING,
-	SpectrumEngine,
 	USABLE_FRACTION,
 	isScannerIqFormat,
 	type EngineEpoch,
 	type EngineStreamReason,
 	type EngineTuning,
+	type HostCentreReader,
+	type SpectrumEngine,
 } from "../spectrum/spectrum-engine.js"
+import { SpectrumService } from "../spectrum/spectrum-service.js"
 import {
 	DiscoveryStore,
 	estimateFrequencyError,
@@ -134,6 +137,7 @@ import type {
 	Classification,
 	DecodeEvidence,
 	Discovery,
+	Hop,
 	HopPlan,
 	Identity,
 	Impact,
@@ -173,6 +177,7 @@ export interface ScannerServiceDeps {
 		readonly mode?: "os" | "cgroup"
 	}
 	tickMs?: number
+	hostCentre?: HostCentreReader
 }
 
 const SNAPSHOT_EVERY_MS = 10_000
@@ -216,15 +221,6 @@ function emptyLoadedState(): LoadedState {
 		engines: {},
 		droppedLines: 0,
 	}
-}
-
-interface EngineEntry {
-	engine: SpectrumEngine
-	refs: number
-	openedAt: number
-	lastSummary: BlockSummary | null
-	/** § 10.7: the passive cost rule ran for this engine instance (once, at openedAt + 60 s). */
-	costChecked: boolean
 }
 
 function intersectRanges(sets: FreqRange[][]): FreqRange[] {
@@ -278,9 +274,12 @@ export class ScannerService extends EventEmitter {
 	private readonly arbiter: TunerArbiter
 	private readonly probes: ProbePool
 	private readonly ambient: AmbientEvidence
+	/** Core spectrum service (engines, frames, occupancy); also served at /api/spectrum. */
+	readonly spectrum: SpectrumService
 	private readonly jobs = new Map<string, JobRecord>()
 	private readonly drivers = new Map<string, JobDriver>()
-	private readonly engines = new Map<string, EngineEntry>()
+	/** § 10.7: engine instances the passive cost rule already judged (once, at openedAt + 60 s). */
+	private readonly costChecked = new WeakSet<SpectrumEngine>()
 	private readonly live = new Map<string, LiveObservation>()
 	private recent: LiveObservation[] = []
 	private readonly bestPsd = new Map<
@@ -291,7 +290,6 @@ export class ScannerService extends EventEmitter {
 	private readonly persistedLeases = new Map<string, PersistedLease>()
 	private readonly bootResume = new Map<string, string[]>()
 	private readonly passiveDisabled = new Map<string, string>()
-	private readonly engineErrors = new Map<string, string>()
 	private readonly probeOutcomes = new Map<string, ProbeOutcome>()
 	private readonly frequencyErrors = new Map<
 		string,
@@ -303,7 +301,6 @@ export class ScannerService extends EventEmitter {
 	private readonly streamFloor = new Map<string, number>()
 	private readonly closedTracks = new Set<string>()
 	private passiveChain: Promise<void> = Promise.resolve()
-	private persistedEngines: Record<string, EngineState> = {}
 	private overrides: RuntimeSettingsOverrides = {}
 	private effective: EffectiveScannerSettings
 	private measured: PreviewMeasured = {
@@ -352,6 +349,30 @@ export class ScannerService extends EventEmitter {
 			logger: deps.logger,
 			now: this.now,
 		})
+		this.spectrum = new SpectrumService({
+			sources: deps.sources,
+			routing: deps.routing,
+			tuner: deps.tuner,
+			sourceConfigs: deps.sourceConfigs,
+			settings: () => this.settings(),
+			tuning: sourceId => this.engineTuning(sourceId),
+			// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
+			persistence: {
+				writeEngine: (sourceId, state) =>
+					this.writeEngineState(sourceId, state),
+				loadEngine: sourceId => this.persistence.loadEngine(sourceId),
+				writeOccupancy: (sourceId, state) =>
+					this.persistence.writeOccupancy(sourceId, state),
+				loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
+			},
+			logger: deps.logger,
+			now: this.now,
+			engineHost: deps.engineHost ?? "thread",
+			...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
+			// From the open, so the pool's lag guard sees every stream boundary (Task 34).
+			engineCreated: (sourceId, engine) =>
+				this.probes.watchEngine(sourceId, engine),
+		})
 		this.store = new DiscoveryStore({
 			maxDiscoveries: deps.settings.storage.maxDiscoveries,
 			now: this.now,
@@ -368,7 +389,7 @@ export class ScannerService extends EventEmitter {
 		this.arbiter = new TunerArbiter({
 			tuner: deps.tuner,
 			sources: deps.sources,
-			epochs: sourceId => this.engines.get(sourceId)?.engine,
+			epochs: sourceId => this.spectrum.engine(sourceId),
 			settings: () => this.settings(),
 			link: sourceId => {
 				const cfg = deps.sourceConfigs.find(c => c.id === sourceId)
@@ -398,7 +419,7 @@ export class ScannerService extends EventEmitter {
 		this.probes = new ProbePool({
 			decoders: deps.decoders,
 			digitalVoice: deps.digitalVoice,
-			engines: sourceId => this.engines.get(sourceId)?.engine,
+			engines: sourceId => this.spectrum.engine(sourceId),
 			settings: () => this.settings(),
 			transports: deps.transports ?? [offsetTransport],
 			cpu: {
@@ -406,7 +427,7 @@ export class ScannerService extends EventEmitter {
 					return deps.cpuMeter?.normalisedPercent ?? null
 				},
 			},
-			engineCount: () => this.engines.size,
+			engineCount: () => this.spectrum.sourceIds().length,
 			storageDir: this.storageDir,
 			allocatePort: () => this.allocatePort(),
 			logger: deps.logger,
@@ -416,7 +437,7 @@ export class ScannerService extends EventEmitter {
 			decoders: deps.decoders,
 			targetOf: id => this.ambientTarget(id),
 			epochOf: sourceId =>
-				this.engines.get(sourceId)?.engine.currentEpoch().epoch ?? null,
+				this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
 			logger: deps.logger,
 			now: this.now,
 		})
@@ -473,7 +494,6 @@ export class ScannerService extends EventEmitter {
 		// § 7.4: report the restored estimate; re-keying waits for the next decoded upgrade (rasters need the jobs).
 		for (const cfg of this.deps.sourceConfigs)
 			this.updateFrequencyError(cfg.id, { rekey: false })
-		this.persistedEngines = loaded.engines
 		// Probes are never persisted: recordings/dv/probe-* folders are crash leftovers (before any probe starts).
 		await this.evidence
 			.removeOrphanProbeDirs()
@@ -482,6 +502,10 @@ export class ScannerService extends EventEmitter {
 			)
 		this.store.on("mutation", this.onStoreMutation)
 		this.store.on("change", this.onStoreChange)
+		this.spectrum.on("pipeline", this.onSpectrumPipeline)
+		this.spectrum.on("stream", this.onEngineStream)
+		this.spectrum.on("released", this.onEngineReleased)
+		await this.spectrum.start()
 		this.arbiter.on("lease-lost", this.onLeaseLost)
 		this.arbiter.on("source-down", this.onSourceDown)
 		this.arbiter.on("source-up", this.onSourceUp)
@@ -530,7 +554,7 @@ export class ScannerService extends EventEmitter {
 		await this.passiveChain
 		await Promise.all([...this.drivers.values()].map(d => d.idle()))
 		await Promise.all(this.arbitrations.values())
-		for (const sourceId of this.engines.keys()) {
+		for (const sourceId of this.spectrum.sourceIds()) {
 			const lease = this.arbiter.holder(sourceId)
 			if (lease) {
 				const res = await withTimeout(
@@ -553,14 +577,10 @@ export class ScannerService extends EventEmitter {
 				)
 		this.ambient.stop()
 		this.deps.cpuMeter?.stop()
-		for (const [sourceId, entry] of this.engines) {
-			const state = await entry.engine.stop().catch((err: unknown) => {
-				this.log.warn({ err, sourceId }, "Stopping a spectrum engine failed")
-				return null
-			})
-			if (state) await this.writeEngineState(sourceId, state)
-		}
-		this.engines.clear()
+		await this.spectrum.stop()
+		this.spectrum.off("pipeline", this.onSpectrumPipeline)
+		this.spectrum.off("stream", this.onEngineStream)
+		this.spectrum.off("released", this.onEngineReleased)
 		this.arbiter.dispose()
 		this.deps.sources.off("source-removed", this.onSourceRemoved)
 		if (this.stateLoaded) {
@@ -579,8 +599,12 @@ export class ScannerService extends EventEmitter {
 	status(): ScannerStatus {
 		const s = this.settings()
 		const probes = this.probes.status()
+		const spectrum = this.spectrum.status().sources
 		const engines: ScannerEngineStatus[] = this.deps.sourceConfigs.map(cfg =>
-			this.engineStatus(cfg),
+			this.engineStatus(
+				cfg,
+				spectrum.find(x => x.sourceId === cfg.id),
+			),
 		)
 		return {
 			enabled: s.enabled,
@@ -589,7 +613,7 @@ export class ScannerService extends EventEmitter {
 			budgets: {
 				cpuBudgetCores: s.cpuBudgetCores,
 				cpuCoresInUse:
-					this.engines.size * CPU_COST.engine +
+					this.spectrum.sourceIds().length * CPU_COST.engine +
 					probes.reduce((sum, p) => sum + p.cores, 0),
 				maxProbes: { offset: s.maxProbes.offset, channel: s.maxProbes.channel },
 				probesInUse: {
@@ -1053,95 +1077,50 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
-	// === engines ===
+	// === engines (SpectrumService consumers) ===
 
-	private async openEngine(sourceId: string): Promise<SpectrumEngine> {
-		const existing = this.engines.get(sourceId)
-		if (existing) {
-			existing.refs += 1
-			await this.ensureEngineTuning(sourceId)
-			return existing.engine
-		}
-		const engine = new SpectrumEngine({
-			sourceId,
-			sources: this.deps.sources,
-			routing: this.deps.routing,
-			tuner: this.deps.tuner,
-			settings: () => this.settings(),
-			tuning: () => this.engineTuning(sourceId),
-			logger: this.deps.logger,
-			host: this.deps.engineHost ?? "thread",
-			...(this.persistedEngines[sourceId]
-				? { persistedEngine: this.persistedEngines[sourceId] }
-				: {}),
-		})
-		const entry: EngineEntry = {
-			engine,
-			refs: 1,
-			openedAt: this.now(),
-			lastSummary: null,
-			costChecked: false,
-		}
-		this.engines.set(sourceId, entry)
-		engine.on("pipeline", (ev: PipelineEvent, epoch: EngineEpoch) =>
-			this.onPipelineEvent(sourceId, ev, epoch),
-		)
-		engine.on("stream", (stream: number, reason: EngineStreamReason) =>
-			this.onEngineStream(sourceId, stream, reason),
-		)
-		engine.on("error", (err: Error) => {
-			this.engineErrors.set(sourceId, err.message)
-			this.log.warn({ err, sourceId }, "Spectrum engine error")
-		})
-		// From the open, so the pool's lag guard sees every stream boundary (Task 34).
-		this.probes.watchEngine(sourceId, engine)
-		try {
-			await engine.start()
-		} catch (err) {
-			this.engines.delete(sourceId)
-			this.engineErrors.set(
-				sourceId,
-				err instanceof Error ? err.message : String(err),
-			)
-			throw err
-		}
-		engine.setSpectrumFeed(true)
+	private async openEngine(
+		sourceId: string,
+		jobId: string,
+	): Promise<SpectrumEngine> {
+		const engine = await this.spectrum.acquire(sourceId, `job:${jobId}`)
+		await this.spectrum.refreshTuning(sourceId)
 		this.updateMasks(sourceId)
 		return engine
 	}
 
-	private async closeEngine(sourceId: string): Promise<void> {
-		const entry = this.engines.get(sourceId)
-		if (!entry) return
-		entry.refs -= 1
-		if (entry.refs > 0) return
-		this.engines.delete(sourceId)
-		this.lastSummaries.delete(sourceId)
-		let state: EngineState | null = null
-		try {
-			state = await entry.engine.stop()
-		} finally {
-			// The engine's "stop" stream event already closed them; this covers a stop that threw (R2).
-			this.closeLiveOn(sourceId, "job-end")
-		}
-		if (state) {
-			this.persistedEngines[sourceId] = state
-			await this.writeEngineState(sourceId, state)
-		}
+	/** The engine's re-emitted "stop" (last consumer) or "released" (it stays up) closes the job's observations (R2). */
+	private async closeEngine(sourceId: string, jobId: string): Promise<void> {
+		await this.spectrum.release(sourceId, `job:${jobId}`)
 	}
 
 	/**
 	 * R2 / I3: a new stream (restart, reconnect boundary, rate change, reconfigure) or the engine's
 	 * stop ends every open track of the old stream. A recreated pipeline never closes them itself.
 	 */
-	private onEngineStream(
+	private readonly onEngineStream = (
 		sourceId: string,
 		stream: number,
 		reason: EngineStreamReason,
-	): void {
+	): void => {
 		this.streamFloor.set(sourceId, reason === "stop" ? stream + 1 : stream)
+		// A summary of an ended stream never measures for identify.
+		this.lastSummaries.delete(sourceId)
 		this.closeLiveOn(sourceId, reason === "stop" ? "job-end" : "gap")
 	}
+
+	/** R2: a job released an engine that stays up (display or other jobs): observations end with the last job. */
+	private readonly onEngineReleased = (sourceId: string): void => {
+		const jobs =
+			this.spectrum.allocation().consumers[sourceId]?.jobs.length ?? 0
+		if (jobs === 0) this.closeLiveOn(sourceId, "job-end")
+	}
+
+	private readonly onSpectrumPipeline = (
+		sourceId: string,
+		ev: PipelineEvent,
+		epoch: EngineEpoch,
+	): void => this.onPipelineEvent(sourceId, ev, epoch)
 
 	/**
 	 * Synthesizes `track-close` from `live.lastTrack` for every live observation of the source.
@@ -1170,26 +1149,14 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	private async ensureEngineTuning(sourceId: string): Promise<void> {
-		const entry = this.engines.get(sourceId)
-		const cfg = entry?.engine.config()
-		if (!entry || !cfg) return
-		const t = this.engineTuning(sourceId)
-		const differs =
-			(t.fftSize !== null && t.fftSize !== cfg.fftSize) ||
-			(t.integrationMs !== null && t.integrationMs !== cfg.integrationMs) ||
-			t.thresholdDb !== cfg.thresholdDb
-		if (differs) await entry.engine.reconfigure()
-	}
-
 	private updateMasks(sourceId: string): void {
-		const entry = this.engines.get(sourceId)
-		if (!entry) return
+		const engine = this.spectrum.engine(sourceId)
+		if (!engine) return
 		const specs = [...this.jobs.values()]
 			.filter(j => j.spec.sourceId === sourceId && !isTerminal(j.state))
 			.map(j => j.spec)
 		const ranges = specs.flatMap(s => s.ranges)
-		entry.engine.setMasks({
+		engine.setMasks({
 			exclusions: intersectRanges(specs.map(s => s.exclusions)),
 			cfarRanges: ranges.map(r => ({ startHz: r.startHz, endHz: r.endHz })),
 			burstRanges: ranges
@@ -1435,10 +1402,12 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private classify(track: TrackSnapshot, sourceId: string): Classification {
-		return classifySpectral(
+		const c = classifySpectral(
 			track,
 			this.classifierContext(sourceId, track.centreHz),
 		)
+		// § 4.7: unverified RF: spectral evidence alone never lifts a discovery past `candidate`.
+		return track.tuningTrust === "unverified" ? { ...c, tier: "spectral" } : c
 	}
 
 	private protocolsFor(live: LiveObservation): ScannerProtocol[] {
@@ -1481,10 +1450,8 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
+	/** Best-SNR PSD slice per open observation (§ 8 evidence). */
 	private onBlockSummary(sourceId: string, summary: BlockSummary): void {
-		const entry = this.engines.get(sourceId)
-		if (!entry) return
-		entry.lastSummary = summary
 		for (const live of this.live.values()) {
 			const t = live.lastTrack
 			if (live.sourceId !== sourceId || !t) continue
@@ -1632,7 +1599,7 @@ export class ScannerService extends EventEmitter {
 					o.lastTrack,
 			)
 			.map(o => o.lastTrack!)
-		const cfg = this.engines.get(live.sourceId)?.engine.config()
+		const cfg = this.spectrum.engine(live.sourceId)?.config()
 		return leakOrIntermod(
 			track,
 			others,
@@ -1949,9 +1916,13 @@ export class ScannerService extends EventEmitter {
 			probes: this.probes,
 			decoders: this.deps.decoders,
 			settings: () => this.settings(),
-			openEngine: sourceId => this.openEngine(sourceId),
-			closeEngine: sourceId => this.closeEngine(sourceId),
-			engine: sourceId => this.engines.get(sourceId)?.engine,
+			openEngine: sourceId => this.openEngine(sourceId, record.id),
+			closeEngine: sourceId => this.closeEngine(sourceId, record.id),
+			engine: sourceId => this.spectrum.engine(sourceId),
+			activitySeed: (() => {
+				const seed = this.spectrum.activitySeed(record.spec.sourceId)
+				return (hop: Hop) => seed(hop.covered)
+			})(),
 			impact: () =>
 				this.arbiter.impact(record.spec.sourceId, record.spec, record.id),
 			undecoded: (live, reason) => this.markUndecoded(live, reason),
@@ -2029,9 +2000,9 @@ export class ScannerService extends EventEmitter {
 		})
 	}
 
-	/** The source's spectrum engine for identify (Task 37a points this at SpectrumService). */
+	/** The source's spectrum engine for identify. */
 	private identifyEngine(sourceId: string): SpectrumEngine | undefined {
-		return this.engines.get(sourceId)?.engine
+		return this.spectrum.engine(sourceId)
 	}
 
 	/**
@@ -2441,7 +2412,9 @@ export class ScannerService extends EventEmitter {
 			measured: {
 				...this.measured,
 				markerSupported: Object.fromEntries(
-					[...this.engines].map(([id, e]) => [id, e.engine.markerSupported]),
+					this.spectrum
+						.sourceIds()
+						.map(id => [id, this.spectrum.engine(id)?.markerSupported ?? null]),
 				),
 			},
 			impactFor: (sourceId, spec) => this.arbiter.impact(sourceId, spec),
@@ -2597,7 +2570,7 @@ export class ScannerService extends EventEmitter {
 				hopCount: p.hopCount,
 				centerHz:
 					hop?.centreHz ??
-					this.engines.get(r.spec.sourceId)?.engine.currentEpoch().centreHz ??
+					this.spectrum.engine(r.spec.sourceId)?.currentEpoch().centreHz ??
 					0,
 				...(p.holdingOn ? { holdingOn: p.holdingOn } : {}),
 				coverage: p.coverage,
@@ -2607,16 +2580,18 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
-	private engineStatus(cfg: SourceConfig): ScannerEngineStatus {
+	private engineStatus(
+		cfg: SourceConfig,
+		spectrumStatus: SpectrumSourceStatus | undefined,
+	): ScannerEngineStatus {
 		const s = this.settings()
-		const entry = this.engines.get(cfg.id)
-		const engine = entry?.engine
+		const engine = this.spectrum.engine(cfg.id)
 		const pc = engine?.config() ?? null
 		const stats = engine?.stats() ?? null
 		const link = linkOf(cfg)
 		const frequencyError = this.frequencyErrors.get(cfg.id)
 		const disabledReason = this.passiveDisabled.get(cfg.id)
-		const error = this.engineErrors.get(cfg.id)
+		const error = spectrumStatus?.lastError
 		return {
 			sourceId: cfg.id,
 			state: engine
@@ -2635,8 +2610,8 @@ export class ScannerService extends EventEmitter {
 				faPerMhzMin: k.faPerMhzMin,
 			})),
 			floorDbfs: stats?.floorDbfs ?? null,
-			floorOccupied: entry?.lastSummary?.floorOccupied ?? false,
-			overload: entry?.lastSummary?.overload ?? false,
+			floorOccupied: spectrumStatus?.floorOccupied ?? false,
+			overload: (engine?.stats()?.overloadedBlocks ?? 0) > 0,
 			settleMode: engine?.currentEpoch().settleMode ?? null,
 			settleMs: s.sweep.settleMs[link],
 			settleMeasured: this.measured.settleMs[link] !== null,
@@ -2757,13 +2732,7 @@ export class ScannerService extends EventEmitter {
 
 	private async maintenance(): Promise<void> {
 		const s = this.settings()
-		for (const [sourceId, entry] of this.engines) {
-			const state = await entry.engine.exportState().catch((err: unknown) => {
-				this.log.warn({ err, sourceId }, "Engine state export failed")
-				return null
-			})
-			if (state) await this.writeEngineState(sourceId, state)
-		}
+		await this.spectrum.persist()
 		// § 8 storage.discoveryMaxAgeDays (never operator `keep`)
 		const all = new Map(this.allDiscoveries({}).map(d => [d.id, d] as const))
 		const pruned = this.store.pruneInactive(s.storage.discoveryMaxAgeDays)
@@ -2816,13 +2785,20 @@ export class ScannerService extends EventEmitter {
 	 * Evaluated once per engine instance, at openedAt + 60 s (later load from sweeps never counts).
 	 */
 	private async checkPassiveCost(now: number): Promise<void> {
-		for (const [sourceId, entry] of this.engines) {
-			if (entry.costChecked || now - entry.openedAt < PASSIVE_COST_WINDOW_MS)
+		for (const sourceId of this.spectrum.sourceIds()) {
+			const openedAt = this.spectrum.openedAt(sourceId)
+			const engine = this.spectrum.engine(sourceId)
+			if (
+				!engine ||
+				openedAt === null ||
+				this.costChecked.has(engine) ||
+				now - openedAt < PASSIVE_COST_WINDOW_MS
+			)
 				continue
-			entry.costChecked = true
+			this.costChecked.add(engine)
 			if (this.passiveDisabled.has(sourceId)) continue
 			if (!this.jobs.has(`passive-${sourceId}`)) continue
-			const utilization = entry.engine.utilization()
+			const utilization = engine.utilization()
 			if (utilization === null || utilization <= PASSIVE_COST_LIMIT) continue
 			this.passiveDisabled.set(
 				sourceId,

@@ -27,6 +27,7 @@ import type {
 	Classification,
 	DecodeEvidence,
 	FailReason,
+	Hop,
 	HopPlan,
 	Impact,
 	JobState,
@@ -224,6 +225,8 @@ export interface JobRunnerDeps {
 	openEngine: (sourceId: string) => Promise<SpectrumEngine>
 	closeEngine: (sourceId: string) => Promise<void>
 	engine: (sourceId: string) => SpectrumEngine | undefined
+	/** Sweep revisit seed from the occupancy history (§ 10.2, Task 37a); none = no seeding. */
+	activitySeed?: (hop: Hop) => number
 	/** Impact of this job's source excluding the job itself (`arbiter.impact(sourceId, spec, record.id)`). */
 	impact: () => Impact
 	/** H3: a probe request for this observation was deferred. */
@@ -922,6 +925,9 @@ export class JobRunner implements JobDriver {
 			now: this.deps.now,
 			probeStartMs: this.deps.probes.startLatencyMs("dsd-fme", "offset"),
 			minSurfaceBlocks: this.deps.settings().detection.minSurfaceBlocks,
+			...(this.deps.activitySeed
+				? { activitySeed: this.deps.activitySeed }
+				: {}),
 		})
 		if (this.record.spec.tuner.agc !== null && this.lease) {
 			await this.deps.arbiter.setAgc(this.lease, this.record.spec.tuner.agc)

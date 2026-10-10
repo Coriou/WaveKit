@@ -535,10 +535,6 @@ describe("ScannerService", () => {
 		h.service as unknown as {
 			persistence: { loadConfig(): Promise<unknown> }
 			drivers: Map<string, { dispose(): Promise<void> }>
-			engines: Map<
-				string,
-				{ engine: { utilization(): number | null }; openedAt: number }
-			>
 			checkPassiveCost(now: number): Promise<void>
 		}
 
@@ -929,19 +925,22 @@ describe("ScannerService", () => {
 		const h = serviceHarness()
 		await h.service.start()
 		const internals = internalsOf(h)
-		const entry = internals.engines.get("rtl")!
-		entry.engine.utilization = () => 0.1
-		await internals.checkPassiveCost(entry.openedAt + 61_000)
+		const engine = h.service.spectrum.engine("rtl")!
+		const openedAt = h.service.spectrum.openedAt("rtl")!
+		engine.utilization = () => 0.1
+		await internals.checkPassiveCost(openedAt + 61_000)
 		// later sweep load on the shared engine never disables passive scanning
-		entry.engine.utilization = () => 0.9
-		await internals.checkPassiveCost(entry.openedAt + 3_600_000)
+		engine.utilization = () => 0.9
+		await internals.checkPassiveCost(openedAt + 3_600_000)
 		expect(h.service.getJob("passive-rtl")).toBeDefined()
 		await h.service.stop()
 		const costly = serviceHarness()
 		await costly.service.start()
-		const e2 = internalsOf(costly).engines.get("rtl")!
-		e2.engine.utilization = () => 0.9
-		await internalsOf(costly).checkPassiveCost(e2.openedAt + 61_000)
+		const e2 = costly.service.spectrum.engine("rtl")!
+		e2.utilization = () => 0.9
+		await internalsOf(costly).checkPassiveCost(
+			costly.service.spectrum.openedAt("rtl")! + 61_000,
+		)
 		expect(costly.service.getJob("passive-rtl")).toBeUndefined()
 		expect(costly.service.status().engines[0]?.passive.disabledReason).toMatch(
 			/engine-cpu 90 %/,
