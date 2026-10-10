@@ -50,7 +50,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
-| Map | Everything with a position around the station: layers, overlays, selection, location setup, last-hour replay, tile source. Wired into C (Map in the dock) | Active, first pass |
+| Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
@@ -174,6 +174,50 @@ Condensed + Noto Sans, Tabler-based icons).
     navigation, APRS stations, weather and balloons, Meshtastic nodes and links, ACARS
     and ADS-C position reports; range rings, real coverage, trails, replay of the last
     hour.
+- **Map refinement (second pass, 2026-10-10).**
+  - *Mocks stay in Brittany.* The station is really in Toulouse, but the owner keeps
+    the Roscoff mock on purpose: it exercises vessels and AIS, which Toulouse cannot.
+    The complaint about the first pass was the invented geometry, so the coastline is
+    now real: Natural Earth 10m (public domain) for the wide area and OSM coastline
+    (ODbL) simplified to ~50 m in a box around Roscoff (Île de Batz, Bay of Morlaix,
+    Bloscon). Place names sit at their real coordinates. Every vessel position and
+    every point of its past hour was checked against that coastline: ferries and the
+    Batz shuttle leave from a real berth and sit there before departing, and nothing
+    crosses land during replay. The other boards keep their Brittany data.
+  - *Controls respect the islands.* Layers moved from a top chip bar (which collided
+    with the Tuner) into a rail on the right, under Receiver: labelled rows with counts
+    and the altitude ramp, collapsing to icons under 1100 px. Overlays and a full
+    legend open beside the rail. Zoom and recentre sit below it. Selection and station
+    location panels open to the left of the rail.
+  - *Timeline is a chip until used.* Bottom right: "Live" with a small activity
+    sparkline. Opening it shows the hour histogram, scrubber and a play button (replay
+    at 120×). While replaying the chip turns amber with the time and "Back to live".
+  - *Labels never overlap.* Greedy placement by priority: selected and hovered, then
+    traffic (nearest aircraft first), ring distances, places by rank, sea names. Each
+    label tries six positions around its marker, avoids other markers, the shell's
+    islands and the map's own controls, stays inside the frame, or is dropped. Ring
+    distances move along their ring to a free spot.
+  - *Dense spots.* Hover says "+N nearby"; a click on a cluster opens a small chooser
+    instead of guessing. Touch uses a larger hit radius.
+  - *Keyboard and touch.* The map is focusable: arrows pan (Shift for more), +/−
+    zoom, 0 recentres, N / Shift-N walk through items nearest the centre, F follows,
+    Escape clears. Pinch zooms around the fingers. A scale bar sits above the chip.
+  - *Altitude ramp.* Five stepped colours that differ in lightness as well as hue
+    (ground, 10 000 ft, FL200, FL300, FL400+), labels show FL or feet.
+  - *Performance (mock).* Land, graticule, coverage and rings render into a cached
+    bitmap with a 256 px margin and are only redrawn when the view leaves the margin or
+    the zoom changes; the land is one path with per-ring culling; trails are three
+    fading segments instead of a gradient each; text widths are cached; ~30 fps when
+    idle, full rate while interacting, nothing while the tab is hidden. *Real build:*
+    MapLibre gives GPU layers, tile cache and symbol collision for map labels; we still
+    own interpolation between reports, the traffic label priority, hit testing for
+    clusters and the trail buffers (a GeoJSON or custom layer fed from them).
+- **Spectrum tags and narrow windows.** Signal tags no longer overlap: the tuned
+  signal and the strongest signals place first, others move up a row, drop their
+  detail, or hide (the signal stays clickable). Band names yield to saved-frequency
+  tags. The hover readout moved into the frequency axis, out of the tags' way. Below
+  1100 px Activity opens full width instead of disappearing (it was hidden with the
+  tuned card), and below 1180 px the dock goes icon-only and sits right of Listen.
 - **Command palette (⌘K), first pass.** One field that understands intent, not just
   command names:
   - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits
@@ -242,37 +286,13 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: refine the Map board.** Owner feedback on the first pass (2026-10-10): "looks
-great", but:
-
-1. **The mock is in the wrong place.** The station is in **Toulouse**, not Roscoff.
-   Re-base the map mock on Toulouse (≈ 43.60 N, 1.44 E): Garonne valley, Pyrenees to
-   the south, no coastline within AIS range, so the Vessels layer is honestly empty
-   (show the empty state). Realistic traffic: heavy ADS-B around Toulouse-Blagnac
-   (LFBO) including Airbus test and delivery flights, ATR flights from Francazal,
-   ACARS/VDL2, APRS around the city, Meshtastic in town. Coverage shaped by the
-   Pyrenees (short to the south) and the Massif Central. Use real-shaped geography,
-   not invented polygons; a mock is fine but it must be right where it is drawn.
-   The other boards' mock data (spectrum signals, Activity, tuned card: Roscoff, marine
-   ch 16, AIS) is Brittany-flavoured too; flag it and decide with the owner whether to
-   re-base everything on Toulouse.
-2. **Performance.** The mock redraws everything every frame (land polygons, gradients
-   per trail, text measuring). Cache the static layers (land, graticule, rings,
-   coverage) in an offscreen canvas, redraw them only on pan/zoom, cap the dynamic
-   layer to what moved, throttle to ~30 fps when idle. For the real build, note what
-   MapLibre gives (GPU layers, symbol collision, tile cache) and what we still own
-   (interpolation, hit testing, trail buffers).
-3. **Controls need a lot of refining.** Seen in the screenshot: the layer chips collide
-   with the Tuner island (the Aircraft chip hides under it); labels overlap each other
-   and place names (XK4521 over Lannion, ring labels under vessels); place labels get
-   clipped. Needed: label collision and priority, a layout that respects the islands
-   (layers move into a compact control or under the Tuner), clearer zoom/recentre
-   group, a calmer timeline (collapse to a chip until used?), keyboard and touch
-   (pinch) behaviour, and click targets for dense clusters.
-4. Then the open map questions: altitude ramp legibility, label density per zoom,
-   whether the timeline stays visible.
-
-Start by reading `canvas/Map.dc.html` and the "Map" entries in the decision log above.
+**Topic: owner review of the Map refinement**, then the open map questions:
+- Label density per zoom: is the default (aircraft from z7.5, vessels from z9.4,
+  aids to navigation from z11) right? Should labels be a per-layer setting?
+- Does the stepped altitude ramp read well on real traffic?
+- Map on a phone: the rail as a bottom sheet?
+- Then back to the queue: right-click menus on signals and markers (reuse the palette
+  command model), first reading the canvas comments on the Command palette board.
 
 ## Handoff to the dev team (later)
 

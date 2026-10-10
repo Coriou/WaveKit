@@ -17,7 +17,8 @@ body{margin:0;background:#0b1512}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer}
 button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-offset:2px}
 .wk-ghost:hover{background:#192b24;color:#f4f7f5}
-@media (max-width:1100px){.wk-float{display:none}}
+@media (max-width:1100px){.wk-float{display:none}.wk-act{left:16px;width:auto !important}}
+@media (max-width:1180px){.wk-dock{left:388px !important;transform:none !important}.wk-dock-label{display:none}}
 @media (max-width:760px){.wk-dock{display:none}}
 </style>
 </helmet>
@@ -45,7 +46,7 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 	</sc-if>
 
 	<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
-		<div class="wk-float" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: {{actW}}; z-index: 4; transition: width .25s ease">
+		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: {{actW}}; z-index: 4; transition: width .25s ease">
 			<dc-import name="Activity" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
 		</div>
 	</sc-if>
@@ -58,7 +59,7 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 		<sc-for list="{{nav}}" as="item" hint-placeholder-count="5">
 			<button class="wk-ghost" aria-label="{{item.label}}" onClick="{{item.pick}}" style="height: 44px; padding: 0 12px; border-radius: 12px; display: flex; align-items: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
 				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
-				<sc-if value="{{item.on}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
+				<sc-if value="{{item.on}}" hint-placeholder-val="{{false}}"><span class="wk-dock-label">{{item.label}}</span></sc-if>
 			</button>
 		</sc-for>
 		<div style="width: 1px; height: 26px; background: #2c443b; margin: 0 4px"></div>
