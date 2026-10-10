@@ -38,6 +38,8 @@ export const MAX_ACTIVE_PER_SOURCE = 2
 /** Bytes queued in a capture's WriteStream beyond which the disk is not keeping up: discard. */
 export const MAX_PENDING_WRITE_BYTES = 32 * 1024 * 1024
 const HOUR_MS = 3_600_000
+/** Ambient evidence stamped inside the pairing window can be delivered a little after it. */
+const PARK_MARGIN_MS = 500
 /** Accepted evidence kept per capture (the observation's own decodes, § 7.1). */
 const EVIDENCE_KEEP = 16
 
@@ -94,7 +96,7 @@ export interface CaptureRecorderDeps {
 	diskOk: () => boolean
 	logger: Logger
 	now: () => number
-	/** How long after the close an undecoded `onlyDecoded` capture waits for a decode; default AMBIENT_PAIR_MS. */
+	/** How long after the close an undecoded `onlyDecoded` capture waits for a decode; default AMBIENT_PAIR_MS + 500 ms. */
 	decodeWaitMs?: number
 }
 
@@ -123,6 +125,8 @@ interface Recording {
 	writtenEnd: number
 	/** End of the input samples the capture keeps (≤ writtenEnd; a retune cuts it to the track end). */
 	keepEnd: number
+	/** Input bytes of the pre-roll write, exempt from MAX_PENDING_WRITE_BYTES. */
+	preBytes: number
 	closeEnd: number | null
 	endTarget: number | null
 	closedAt: number | null
@@ -162,12 +166,14 @@ function metadataOf(evidence: DecodeEvidence[]): CaptureFacts["metadata"] {
 export class CaptureRecorder extends EventEmitter {
 	private readonly log: Logger
 	private readonly active = new Map<string, Recording>()
+	/** Kept captures between their keep decision and the seal of their file. */
+	private readonly sealing = new Set<Recording>()
 	private readonly decodeWaitMs: number
 
 	constructor(private readonly deps: CaptureRecorderDeps) {
 		super()
 		this.log = createComponentLogger(deps.logger, "CaptureRecorder")
-		this.decodeWaitMs = deps.decodeWaitMs ?? AMBIENT_PAIR_MS
+		this.decodeWaitMs = deps.decodeWaitMs ?? AMBIENT_PAIR_MS + PARK_MARGIN_MS
 	}
 
 	activeCount(): number {
@@ -187,16 +193,14 @@ export class CaptureRecorder extends EventEmitter {
 			return false
 		const now = this.deps.now()
 		const recordings = [...this.active.values()]
-		// A capped capture's window is complete: it frees its slot and budget until it is kept.
-		const inflight = recordings.filter(
-			r => r.req.jobId === req.jobId && r.phase !== "capped",
-		).length
+		// Every uncommitted capture of the job is in flight (recording, capped or parked).
+		const inflight = recordings.filter(r => r.req.jobId === req.jobId).length
 		if (
 			this.deps.store.countSince(req.jobId, now - HOUR_MS) + inflight >=
 			req.spec.maxPerHour
 		)
 			return false
-		// Only recording captures read the source.
+		// Only recording captures read the source: capped and parked ones free their slot.
 		if (
 			recordings.filter(
 				r => r.req.sourceId === req.sourceId && r.phase === "recording",
@@ -228,6 +232,7 @@ export class CaptureRecorder extends EventEmitter {
 			expectNext: 0,
 			writtenEnd: 0,
 			keepEnd: 0,
+			preBytes: 0,
 			closeEnd: null,
 			endTarget: null,
 			closedAt: null,
@@ -268,7 +273,11 @@ export class CaptureRecorder extends EventEmitter {
 		view.on("stream", onStream)
 		rec.unwatch = () => view.off("stream", onStream)
 		rec.untap = view.tap((start, bytes) => this.accept(rec, start, bytes))
-		if (pre) this.accept(rec, pre.startSample, pre.bytes)
+		if (pre) {
+			// The pre-roll is one write of up to preMs + 1 s of ring: allowed on top of the backlog cap.
+			rec.preBytes = pre.bytes.length
+			this.accept(rec, pre.startSample, pre.bytes)
+		}
 		return true
 	}
 
@@ -305,17 +314,32 @@ export class CaptureRecorder extends EventEmitter {
 			rec.phase === "capped" ||
 			rec.expectNext >= Math.min(rec.endTarget, rec.maxEnd)
 		) {
-			rec.keepEnd = Math.min(rec.writtenEnd, rec.endTarget)
+			// A capped window may already have been cut by a late retune.
+			const end = rec.phase === "capped" ? rec.keepEnd : rec.writtenEnd
+			rec.keepEnd = Math.min(end, rec.endTarget)
 			this.complete(rec)
 		}
 	}
 
-	/** A retune inside a capture: cut closed captures back to their track end, abort the rest. */
-	epochChanged(sourceId: string, epoch: number): void {
+	/**
+	 * A retune: cut recording captures that closed back to their track end, abort the rest.
+	 * `startSample` (the new epoch's settled start) also trims a complete window that the late
+	 * `epoch-started` reached after the fact (parked, capped, or committing before its seal).
+	 */
+	epochChanged(
+		sourceId: string,
+		epoch: number,
+		startSample: number | null = null,
+	): void {
+		const affected = (rec: Recording) =>
+			rec.req.sourceId === sourceId && rec.req.epoch !== epoch
 		for (const rec of [...this.active.values()]) {
-			if (rec.req.sourceId !== sourceId || rec.req.epoch === epoch) continue
-			this.ended(rec, "epoch")
+			if (!affected(rec)) continue
+			if (rec.phase === "recording") this.ended(rec, "epoch")
+			else this.trimLate(rec, startSample)
 		}
+		for (const rec of this.sealing)
+			if (affected(rec)) this.trimLate(rec, startSample)
 	}
 
 	async stop(): Promise<void> {
@@ -341,6 +365,16 @@ export class CaptureRecorder extends EventEmitter {
 		this.complete(rec)
 	}
 
+	/**
+	 * A retune at `at` inside a complete window's kept range: keep [start, track end), or up to
+	 * `at` for a capped capture whose track has not closed. The file is cut at the seal.
+	 */
+	private trimLate(rec: Recording, at: number | null): void {
+		if (at === null || at <= rec.startSample || at > rec.keepEnd) return
+		const cut = rec.closeEnd !== null && rec.closeEnd < at ? rec.closeEnd : at
+		rec.keepEnd = Math.max(rec.startSample, Math.min(rec.keepEnd, cut))
+	}
+
 	private accept(rec: Recording, start: number, bytes: Uint8Array): void {
 		if (rec.phase !== "recording") return
 		if (start !== rec.expectNext) {
@@ -357,7 +391,7 @@ export class CaptureRecorder extends EventEmitter {
 				rec.outBytes += out.length
 				// A copy: the engine reuses its chunk buffers after the tap returns.
 				rec.file.write(Buffer.from(out))
-				if (rec.file.writableLength > MAX_PENDING_WRITE_BYTES) {
+				if (rec.file.writableLength > MAX_PENDING_WRITE_BYTES + rec.preBytes) {
 					this.log.warn(
 						{ id: rec.id, pendingBytes: rec.file.writableLength },
 						"Capture writes are not keeping up",
@@ -431,12 +465,14 @@ export class CaptureRecorder extends EventEmitter {
 		if (rec.phase === "done") return
 		const infoOf = rec.infoOf
 		if (!infoOf) return this.discard(rec, "aborted")
-		const bytes = this.keptBytes(rec)
-		if (bytes === 0) return this.discard(rec, "empty")
+		if (this.keptBytes(rec) === 0) return this.discard(rec, "empty")
 		rec.phase = "done"
 		if (rec.parkTimer) clearTimeout(rec.parkTimer)
 		this.active.delete(rec.req.observationId)
+		// Until the seal, a late epoch-started can still trim the window (epochChanged).
+		this.sealing.add(rec)
 		await this.endFile(rec)
+		this.sealing.delete(rec)
 		const fail = async (reason: DiscardReason, err?: unknown) => {
 			if (err !== undefined)
 				this.log.warn({ err, id: rec.id }, `Capture ${reason}`)
@@ -444,6 +480,8 @@ export class CaptureRecorder extends EventEmitter {
 			this.emit("discarded", rec.req.observationId, reason)
 		}
 		if (rec.failed) return fail("write-error")
+		const bytes = this.keptBytes(rec)
+		if (bytes === 0) return fail("empty")
 		let sha256: string
 		try {
 			// Cut to the kept window, hash what is on disk, fsync before the rename.

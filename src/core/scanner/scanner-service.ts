@@ -1239,7 +1239,7 @@ export class ScannerService extends EventEmitter {
 		const drivers = this.driversOn(sourceId)
 		switch (ev.kind) {
 			case "epoch-started":
-				this.recorder.epochChanged(sourceId, ev.epoch)
+				this.recorder.epochChanged(sourceId, ev.epoch, ev.startSample)
 				this.probes
 					.onEpoch(sourceId, ev.epoch, epoch.centreHz)
 					.catch((err: unknown) =>

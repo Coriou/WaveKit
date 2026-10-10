@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdtempSync, readFileSync, statSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import fc from "fast-check"
@@ -10,6 +10,7 @@ import type { ScannerCapture } from "@wavekit/api-types"
 import {
 	CaptureRecorder,
 	MAX_CAPTURE_SECONDS,
+	MAX_PENDING_WRITE_BYTES,
 	type CaptureCloseInfo,
 	type CaptureEngineView,
 	type CaptureRequest,
@@ -44,11 +45,15 @@ class RingView extends EventEmitter implements CaptureEngineView {
 		tuningTrust: "commanded",
 		settleMode: "marker",
 	}
-	constructor(private readonly ringSeconds: number) {
+	constructor(
+		private readonly ringSeconds: number,
+		private readonly fs = FS,
+	) {
 		super()
+		this.epoch = { ...this.epoch, sampleRateHz: fs }
 		this.ring = new IqRing({
 			bytesPerSample: 2,
-			capacitySamples: ringSeconds * FS,
+			capacitySamples: ringSeconds * fs,
 		})
 	}
 	currentEpoch(): EngineEpoch {
@@ -101,7 +106,7 @@ class RingView extends EventEmitter implements CaptureEngineView {
 		this.edge = 0
 		this.ring = new IqRing({
 			bytesPerSample: 2,
-			capacitySamples: this.ringSeconds * FS,
+			capacitySamples: this.ringSeconds * this.fs,
 		})
 		if (!lagEpoch)
 			this.epoch = {
@@ -118,6 +123,7 @@ function setup(
 	ringSeconds = 2,
 	diskOk = true,
 	decodeWaitMs: number | null = 5,
+	fs = FS,
 ) {
 	const dir = mkdtempSync(join(tmpdir(), "wk-cap-"))
 	const clock = { now: 1_000_000 }
@@ -126,7 +132,7 @@ function setup(
 		logger: pino({ level: "silent" }),
 		now: () => clock.now,
 	})
-	const view = new RingView(ringSeconds)
+	const view = new RingView(ringSeconds, fs)
 	const recorder = new CaptureRecorder({
 		store,
 		engines: () => view,
@@ -325,7 +331,7 @@ describe("CaptureRecorder", () => {
 			min_count: 1,
 			payloads: [{ talkgroup: 9, source: 2060945 }],
 		})
-		await until(() => h.discarded.length === 2, 400)
+		await until(() => h.discarded.length === 2, 800)
 		expect(h.discarded.sort()).toEqual([
 			["b", "not-decoded"],
 			["c", "not-decoded"],
@@ -355,6 +361,71 @@ describe("CaptureRecorder", () => {
 		expect(sampleAt(iq, iq.length / 2 - 1)).toBe(65_999 & 0xffff)
 		expect(entry.sha256).toBe(createHash("sha256").update(iq).digest("hex"))
 	})
+
+	it("trims a parked capture when a late epoch-started puts the retune inside its post-roll", async () => {
+		const h = setup(2, true, 1000)
+		await h.store.init()
+		h.view.push(64_000)
+		expect(h.recorder.open(req({ observationId: "a" }))).toBe(true)
+		expect(
+			h.recorder.open(req({ observationId: "b", startSample: 30_000 })),
+		).toBe(true)
+		h.close("b", 40_000) // window [0, 56 000) already written: parked
+		h.view.push(4_000)
+		h.close("a", 66_000)
+		h.view.push(20_000) // a's window [28 000, 82 000) complete: parked
+		expect(h.discarded).toEqual([])
+		// The retune settled at 70 000: inside a's post-roll, after b's window.
+		h.recorder.epochChanged("rtl", 2, 70_000)
+		h.recorder.decoded("a")
+		h.recorder.decoded("b")
+		await until(() => h.captured.length === 2)
+		const a = h.captured.find(c => c.observationId === "a")!
+		const b = h.captured.find(c => c.observationId === "b")!
+		expect(a).toMatchObject({
+			startSample: 28_000,
+			endSample: 66_000,
+			postTruncated: true,
+		})
+		expect(b).toMatchObject({
+			startSample: 0,
+			endSample: 56_000,
+			postTruncated: false,
+		})
+		const { iq, entry } = readCapture(h.dir, a)
+		expect(iq.length).toBe((66_000 - 28_000) * 2)
+		expect(sampleAt(iq, iq.length / 2 - 1)).toBe(65_999 & 0xffff)
+		expect(entry.sha256).toBe(createHash("sha256").update(iq).digest("hex"))
+	})
+
+	it("lets a 5 s pre-roll at 3.2 Msps through the write backlog cap", async () => {
+		const fs = 3_200_000
+		const h = setup(6, true, 5, fs)
+		try {
+			await h.store.init()
+			for (let i = 0; i < 6; i++) h.view.push(fs)
+			const spec = {
+				...DEFAULT_CAPTURE,
+				enabled: true,
+				preMs: 5000,
+				postMs: 0,
+			}
+			// One pre-roll write of 5.5 s: 35.2 MB, above the 32 MiB backlog cap.
+			expect(5.5 * fs * 2).toBeGreaterThan(MAX_PENDING_WRITE_BYTES)
+			expect(h.recorder.open(req({ startSample: 5.5 * fs, spec }))).toBe(true)
+			h.recorder.decoded("o1")
+			h.close("o1", 6 * fs)
+			await until(() => h.captured.length + h.discarded.length === 1, 2000)
+			expect(h.discarded).toEqual([])
+			expect(h.captured[0]).toMatchObject({
+				startSample: 0.5 * fs,
+				endSample: 6 * fs,
+				bytes: 5.5 * fs * 2,
+			})
+		} finally {
+			rmSync(h.dir, { recursive: true, force: true })
+		}
+	}, 60_000)
 
 	it("ends on the engine's new stream: aborts an open capture, truncates a closed one, refuses a stale stream", async () => {
 		const h = setup()
@@ -390,7 +461,7 @@ describe("CaptureRecorder", () => {
 		expect(h.view.listenerCount("stream")).toBe(0)
 	})
 
-	it("stops writing at MAX_CAPTURE_SECONDS, frees its slot and budget, and keeps the capped capture at close", async () => {
+	it("stops writing at MAX_CAPTURE_SECONDS, frees its source slot but not its hour budget, and keeps the capped capture at close", async () => {
 		const h = setup()
 		await h.store.init()
 		h.view.push(64_000)
@@ -406,12 +477,32 @@ describe("CaptureRecorder", () => {
 		h.recorder.decoded("o1")
 		expect(h.recorder.activeCount()).toBe(1)
 		const edge = h.view.liveEdge()
-		// o1 is capped: it no longer counts against the job's hour budget (1) or the source's slots.
+		// o1 is capped: still in flight for its job's hour budget (1)…
 		expect(
 			h.recorder.open(req({ observationId: "o2", startSample: edge, spec })),
-		).toBe(true)
+		).toBe(false)
+		// …but it no longer reads the source: another job gets both source slots.
+		const other = { ...spec, maxPerHour: 6 }
+		for (const id of ["o3", "o4"])
+			expect(
+				h.recorder.open(
+					req({
+						observationId: id,
+						jobId: "j2",
+						startSample: edge,
+						spec: other,
+					}),
+				),
+			).toBe(true)
 		expect(
-			h.recorder.open(req({ observationId: "o3", startSample: edge, spec })),
+			h.recorder.open(
+				req({
+					observationId: "o5",
+					jobId: "j2",
+					startSample: edge,
+					spec: other,
+				}),
+			),
 		).toBe(false)
 		h.close("o1", h.view.liveEdge())
 		await until(() => h.captured.length === 1)
