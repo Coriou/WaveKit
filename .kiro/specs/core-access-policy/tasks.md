@@ -118,3 +118,24 @@ Next: actual CLI credential-file/target composition and authentication retry
 pausing on `feat/access-cli-wiring`. Task 7 remains incomplete: core logging,
 public audio origins and coordinated runtime acceptance still need integration.
 Tasks 24/25 scanner contracts are reviewed; later scanner task ownership remains.
+
+## Independent CLI wiring checkpoint — 2026-10-10
+
+`eb2cf61` mounts destination-bound transports when an operator supplies a private
+credential file and an explicit HTTP(S) API target. Protected target composition
+preserves its hostname; legacy localhost resolution keeps its existing rewrite.
+Discovery always uses its separate credential-free probe. WS authentication and
+credential failures pause retries; explicit reconnect rereads credentials.
+Existing REST liveness, confirmation and uncertain-write behavior is preserved.
+
+Independent Astra/root reviews approved the 12-path change. Touched logic/native
+transport set: 156 passing tests. Full CLI suite: 295 passing tests. Repository
+typecheck, CLI build, and compiled entry/help guards passed; malformed/userinfo/
+numeric-alias targets and missing explicit targets fail without echoing inputs.
+Repository lint passed with zero errors and 59 existing warnings; focused lint
+is clean. No actual protected core/browser listener is mounted yet.
+
+The standalone core setup/pair utility is being implemented independently. Its
+package/build wiring waits for scanner Task 32's new worker build entry to settle.
+Core logging, audio-origin mapping, browser onboarding/renewal and actual
+container/TLS exposure acceptance remain incomplete portions of tasks 6–9.
