@@ -97,4 +97,12 @@ describe("private host-only cookie transport directives", () => {
 			"; Secure",
 		)
 	})
+
+	it("rejects insecure __Secure- cookies before an operator enters a login loop", async () => {
+		await expect(cookies("http", "__Secure-wavekit")).rejects.toThrow(
+			"Invalid cookie configuration",
+		)
+		const { cookies: helper, token } = await cookies("https", "__Secure-wavekit")
+		expect(serializeSessionCookie(helper.issue(token, 60))).toContain("; Secure")
+	})
 })

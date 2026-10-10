@@ -41,6 +41,15 @@ async function fixture(ttlMs = 1000, maxListenersPerSession = 16) {
 }
 
 describe("ConnectionLeases", () => {
+	it("binds injected adapter managers to the actual session authority", async () => {
+		const first = await fixture()
+		const second = await fixture()
+		const leases = new ConnectionLeases(first.store)
+		expect(leases.usesSessionStore(first.store)).toBe(true)
+		expect(leases.usesSessionStore(second.store)).toBe(false)
+		leases.dispose()
+	})
+
 	it("rejects before admission without invoking transport cleanup", async () => {
 		vi.useFakeTimers()
 		const { store } = await fixture()

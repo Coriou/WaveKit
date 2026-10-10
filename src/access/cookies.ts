@@ -65,7 +65,10 @@ export class SessionCookies {
 	constructor(policy: AccessPolicy) {
 		this.#name = policy.sessionCookieName
 		this.#secure = policy.listenerScheme === "https"
-		if (this.#name.startsWith("__Host-") && !this.#secure)
+		if (
+			(this.#name.startsWith("__Host-") || this.#name.startsWith("__Secure-")) &&
+			!this.#secure
+		)
 			throw new WaveKitError(
 				"Invalid cookie configuration",
 				"ACCESS_CONFIG_INVALID",

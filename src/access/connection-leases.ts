@@ -88,6 +88,10 @@ export class ConnectionLeases {
 		this.#capacity = parsed.data.maxConnections
 	}
 
+	usesSessionStore(sessions: SessionStore): boolean {
+		return this.#sessions === sessions
+	}
+
 	attach(
 		principalId: string,
 		onInvalidated: () => void,
