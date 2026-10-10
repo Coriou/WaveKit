@@ -26,7 +26,7 @@ body{margin:0}
 			</sc-for>
 			<sc-for list="{{markers}}" as="m" hint-placeholder-count="4">
 				<div style="position: absolute; left: {{m.left}}%; top: {{m.top}}px; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center">
-					<button onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="font: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px; border-radius: 9px; background: rgba(17,28,25,.55); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08); color: #f4f7f5; font-size: 12px; white-space: nowrap; backdrop-filter: blur(10px) saturate(160%)">
+					<button onPointerDown="{{stop}}" onClick="{{m.pick}}" aria-label="Tune to {{m.label}} {{m.freq}} MHz" style="font: inherit; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 26px; padding: 0 10px 0 8px; border-radius: 6px; background: rgba(17,28,25,.55); border: 1px solid {{m.border}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08); color: #f4f7f5; font-size: 12px; white-space: nowrap; backdrop-filter: blur(10px) saturate(160%)">
 						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 						<span style="font-weight: 700">{{m.label}}</span>
 						<sc-if value="{{m.hasSub}}" hint-placeholder-val="{{true}}"><span style="color: #8ba598">{{m.sub}}</span></sc-if>
@@ -39,13 +39,13 @@ body{margin:0}
 					<span style="position: absolute; right: 0; top: -17px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; color: #f2b84b">SQUELCH</span>
 				</div>
 			</sc-if>
-			<div style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 4px; border-radius: 11px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(12px) saturate(160%)" onPointerDown="{{stop}}">
-				<button onClick="{{zoomOut}}" aria-label="Zoom out" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 16px">−</button>
+			<div style="position: absolute; right: 12px; bottom: 10px; display: flex; align-items: center; gap: 2px; height: 34px; padding: 0 4px; border-radius: 8px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.07); backdrop-filter: blur(12px) saturate(160%)" onPointerDown="{{stop}}">
+				<button onClick="{{zoomOut}}" aria-label="Zoom out" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 16px">−</button>
 				<div style="position: relative; width: 84px; height: 6px; border-radius: 3px; background: #22362f" aria-hidden="true">
 					<div style="position: absolute; top: 0; bottom: 0; left: {{ovLeft}}%; width: max(3px, {{ovWidth}}%); border-radius: 3px; background: #7becc7"></div>
 				</div>
-				<button onClick="{{zoomIn}}" aria-label="Zoom in" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 16px">+</button>
-				<button onClick="{{zoomFit}}" aria-label="Show the whole capture" style="font: inherit; cursor: pointer; height: 28px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 44px">{{zoomText}}</button>
+				<button onClick="{{zoomIn}}" aria-label="Zoom in" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 16px">+</button>
+				<button onClick="{{zoomFit}}" aria-label="Show the whole capture" style="font: inherit; cursor: pointer; height: 28px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; font-size: 12px; font-variant-numeric: tabular-nums; min-width: 44px">{{zoomText}}</button>
 			</div>
 		</div>
 		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid #1a2b25; background: #0b1512; overflow: hidden">
@@ -53,7 +53,7 @@ body{margin:0}
 				<span style="position: absolute; left: {{t.left}}%; top: 8px; transform: translateX(-50%); font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{t.text}}</span>
 			</sc-for>
 			<sc-if value="{{vfoVisible}}" hint-placeholder-val="{{true}}">
-				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 5px; background: #7becc7; color: #111c19; font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
+				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 4px; background: #7becc7; color: #111c19; font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
 			</sc-if>
 		</div>
 		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid #1a2b25; overflow: hidden">
@@ -63,7 +63,7 @@ body{margin:0}
 				</div>
 			</sc-for>
 			<sc-for list="{{saved}}" as="s" hint-placeholder-count="2">
-				<button onPointerDown="{{stop}}" onClick="{{s.pick}}" aria-label="Saved: {{s.label}}" style="font: inherit; cursor: pointer; position: absolute; left: {{s.left}}%; top: 3px; height: 18px; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 4px; border: 0; border-radius: 5px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 11px; font-weight: 700; white-space: nowrap">
+				<button onPointerDown="{{stop}}" onClick="{{s.pick}}" aria-label="Saved: {{s.label}}" style="font: inherit; cursor: pointer; position: absolute; left: {{s.left}}%; top: 3px; height: 18px; display: flex; align-items: center; gap: 4px; padding: 0 6px 0 4px; border: 0; border-radius: 4px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 11px; font-weight: 700; white-space: nowrap">
 					<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg>{{s.label}}
 				</button>
 			</sc-for>
@@ -84,7 +84,7 @@ body{margin:0}
 		</sc-if>
 		<sc-if value="{{hovering}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; top: {{topInset}}px; bottom: 0; left: {{hoverLeft}}%; width: 1px; background: rgba(244,247,245,.28); pointer-events: none">
-				<span style="position: absolute; top: {{hoverTagTop}}px; left: 0; transform: translateX(-50%); height: 20px; line-height: 20px; padding: 0 8px; border-radius: 5px; background: #192b24; border: 1px solid rgba(123,236,199,.3); font-size: 11.5px; z-index: 1; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
+				<span style="position: absolute; top: {{hoverTagTop}}px; left: 0; transform: translateX(-50%); height: 20px; line-height: 20px; padding: 0 8px; border-radius: 4px; background: #192b24; border: 1px solid rgba(123,236,199,.3); font-size: 11.5px; z-index: 1; white-space: nowrap; font-variant-numeric: tabular-nums">{{hoverText}}</span>
 			</div>
 		</sc-if>
 	</div>

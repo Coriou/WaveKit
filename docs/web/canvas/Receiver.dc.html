@@ -17,7 +17,7 @@ body{margin:0;background:#0b1512}
 </style>
 </helmet>
 <div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
-	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 18px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
+	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
 		<span style="width: 8px; height: 8px; border-radius: 50%; background: #7becc7; flex: none"></span>
 		<span style="font-weight: 700; white-space: nowrap">Pi receiver</span>
 		<span style="flex: 1; color: #8ba598; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap">{{summary}}</span>
@@ -25,16 +25,16 @@ body{margin:0;background:#0b1512}
 	</button>
 
 	<sc-if value="{{expanded}}" hint-placeholder-val="{{true}}">
-		<div style="box-sizing: border-box; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 18px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
+		<div style="box-sizing: border-box; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 12px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
 
 			<div style="display: flex; align-items: center; gap: 12px">
 				<div style="flex: 1; min-width: 0">
 					<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; line-height: 1.1">RTL-SDR · R820T</div>
 					<div style="color: #8ba598; font-size: 13px; margin-top: 2px">Raspberry Pi · rtl_tcp over Wi‑Fi</div>
 				</div>
-				<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 12px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12px; font-weight: 700"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>Streaming</span>
+				<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 6px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12px; font-weight: 700"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>Streaming</span>
 			</div>
-			<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 12px; overflow: hidden; background: #22362f">
+			<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: #22362f">
 				<sc-for list="{{stats}}" as="s" hint-placeholder-count="3">
 					<div style="background: #111c19; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px">
 						<span style="font-size: 12px; color: #8ba598">{{s.k}}</span>
@@ -47,7 +47,7 @@ body{margin:0;background:#0b1512}
 				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Sample rate</span>
 				<div role="radiogroup" aria-label="Sample rate" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px">
 					<sc-for list="{{rates}}" as="r" hint-placeholder-count="9">
-						<button role="radio" aria-checked="{{r.on}}" onClick="{{r.pick}}" style="font: inherit; cursor: pointer; height: 34px; border-radius: 8px; font-size: 13px; font-variant-numeric: tabular-nums; border: 1px solid {{r.border}}; background: {{r.bg}}; color: {{r.fg}}">{{r.label}}</button>
+						<button role="radio" aria-checked="{{r.on}}" onClick="{{r.pick}}" style="font: inherit; cursor: pointer; height: 34px; border-radius: 6px; font-size: 13px; font-variant-numeric: tabular-nums; border: 1px solid {{r.border}}; background: {{r.bg}}; color: {{r.fg}}">{{r.label}}</button>
 					</sc-for>
 				</div>
 				<sc-if value="{{rateWarn}}" hint-placeholder-val="{{false}}">
@@ -59,7 +59,7 @@ body{margin:0;background:#0b1512}
 				<div style="display: flex; align-items: center; gap: 10px">
 					<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Gain</span>
 					<span style="font-weight: 700; font-variant-numeric: tabular-nums; color: {{gainColor}}">{{gainText}}</span>
-					<button aria-pressed="{{auto}}" onClick="{{toggleAuto}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 7px; font-size: 12.5px; font-weight: 700; border: 1px solid {{autoBorder}}; background: {{autoBg}}; color: {{autoFg}}">Auto</button>
+					<button aria-pressed="{{auto}}" onClick="{{toggleAuto}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{autoBorder}}; background: {{autoBg}}; color: {{autoFg}}">Auto</button>
 				</div>
 				<div style="position: relative; height: 34px; opacity: {{gainOpacity}}">
 					<div style="position: absolute; left: 0; right: 0; top: 10px; height: 4px; border-radius: 2px; background: #22362f"></div>
@@ -90,7 +90,7 @@ body{margin:0;background:#0b1512}
 						<span style="font-weight: 700">Frequency correction</span>
 						<span style="font-size: 12.5px; color: #8ba598">Crystal error in parts per million</span>
 					</span>
-					<div style="display: flex; align-items: center; border: 1px solid #2c443b; border-radius: 9px">
+					<div style="display: flex; align-items: center; border: 1px solid #2c443b; border-radius: 6px">
 						<button onClick="{{ppmDown}}" aria-label="Decrease correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">−</button>
 						<span style="min-width: 40px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums">{{ppm}}</span>
 						<button onClick="{{ppmUp}}" aria-label="Increase correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">+</button>
@@ -106,9 +106,9 @@ body{margin:0;background:#0b1512}
 					<div style="display: flex; flex-direction: column; gap: 12px; padding-top: 6px">
 						<div style="display: flex; align-items: center; gap: 12px">
 							<span style="flex: 1; font-weight: 700">Direct sampling</span>
-							<div role="radiogroup" aria-label="Direct sampling" style="display: flex; gap: 2px; padding: 3px; border-radius: 10px; background: #0b1512">
+							<div role="radiogroup" aria-label="Direct sampling" style="display: flex; gap: 2px; padding: 3px; border-radius: 6px; background: #0b1512">
 								<sc-for list="{{ds}}" as="d" hint-placeholder-count="3">
-									<button role="radio" aria-checked="{{d.on}}" onClick="{{d.pick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 12px; border: 0; border-radius: 7px; font-size: 12.5px; font-weight: 700; background: {{d.bg}}; color: {{d.fg}}">{{d.label}}</button>
+									<button role="radio" aria-checked="{{d.on}}" onClick="{{d.pick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 12px; border: 0; border-radius: 4px; font-size: 12.5px; font-weight: 700; background: {{d.bg}}; color: {{d.fg}}">{{d.label}}</button>
 								</sc-for>
 							</div>
 						</div>
@@ -127,7 +127,7 @@ body{margin:0;background:#0b1512}
 				</sc-if>
 			</div>
 
-			<div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 12px; background: #192b24; font-size: 13px; color: #b9cac1">
+			<div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; background: #192b24; font-size: 13px; color: #b9cac1">
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 8v4l2 2"></path></svg>
 				<span style="flex: 1">WaveKit has control. SDR++ can take over through the relay on port 1234.</span>
 			</div>

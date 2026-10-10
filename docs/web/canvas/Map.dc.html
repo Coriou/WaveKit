@@ -27,16 +27,16 @@ body{margin:0;background:#08110e}
 	</div>
 
 	<sc-if value="{{hasHover}}" hint-placeholder-val="{{false}}">
-		<div style="position: absolute; left: {{hoverX}}px; top: {{hoverY}}px; transform: translate(-50%, calc(-100% - 14px)); pointer-events: none; z-index: 4; padding: 6px 10px; border-radius: 9px; background: rgba(17,28,25,.92); border: 1px solid rgba(123,236,199,.18); white-space: nowrap; font-size: 12.5px">
+		<div style="position: absolute; left: {{hoverX}}px; top: {{hoverY}}px; transform: translate(-50%, calc(-100% - 14px)); pointer-events: none; z-index: 4; padding: 6px 10px; border-radius: 8px; background: rgba(17,28,25,.92); border: 1px solid rgba(123,236,199,.18); white-space: nowrap; font-size: 12.5px">
 			<span style="font-weight: 700">{{hoverTitle}}</span> <span style="color: #8ba598">{{hoverSub}}</span><sc-if value="{{hoverMore}}" hint-placeholder-val="{{false}}"><span style="color: #7becc7"> · {{hoverMoreText}}</span></sc-if>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasChooser}}" hint-placeholder-val="{{false}}">
-		<div role="menu" aria-label="Several items here" style="position: absolute; left: {{chooserX}}px; top: {{chooserY}}px; z-index: 6; width: 250px; box-sizing: border-box; padding: 6px; border-radius: 14px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.18); box-shadow: 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(22px); display: flex; flex-direction: column">
+		<div role="menu" aria-label="Several items here" style="position: absolute; left: {{chooserX}}px; top: {{chooserY}}px; z-index: 6; width: 250px; box-sizing: border-box; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.18); box-shadow: 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(22px); display: flex; flex-direction: column">
 			<span style="padding: 6px 8px 4px; font-size: 12px; color: #8ba598">{{chooserTitle}}</span>
 			<sc-for list="{{chooser}}" as="c" hint-placeholder-count="3">
-				<button class="wk-m-row" role="menuitem" onClick="{{c.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 9px; background: transparent">
+				<button class="wk-m-row" role="menuitem" onClick="{{c.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent">
 					<span style="width: 8px; height: 8px; flex: none; border-radius: {{c.shape}}; background: {{c.color}}"></span>
 					<span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.title}}</span><span style="font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.sub}}</span></span>
 				</button>
@@ -46,23 +46,23 @@ body{margin:0;background:#08110e}
 
 	<div style="position: absolute; top: {{topBase}}px; left: 50%; transform: translateX(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: calc(100% - 32px); pointer-events: none">
 		<sc-if value="{{showApprox}}" hint-placeholder-val="{{false}}">
-			<button onClick="{{openLocation}}" style="pointer-events: auto; font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border-radius: 17px; border: 1px solid rgba(242,184,75,.45); background: rgba(40,32,14,.75); color: #f2b84b; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; backdrop-filter: blur(16px); white-space: nowrap">
+			<button onClick="{{openLocation}}" style="pointer-events: auto; font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(242,184,75,.45); background: rgba(40,32,14,.75); color: #f2b84b; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; backdrop-filter: blur(16px); white-space: nowrap">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
 				Station location is approximate · Set it
 			</button>
 		</sc-if>
 		<sc-if value="{{picking}}" hint-placeholder-val="{{false}}">
-			<div style="pointer-events: auto; height: 38px; padding: 0 6px 0 14px; border-radius: 19px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.4); display: flex; align-items: center; gap: 10px; font-size: 13px; white-space: nowrap">
+			<div style="pointer-events: auto; height: 38px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.4); display: flex; align-items: center; gap: 10px; font-size: 13px; white-space: nowrap">
 				Click the map where your antenna is
-				<button onClick="{{cancelPick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border: 0; border-radius: 14px; background: #192b24; color: #b9cac1; font-size: 12.5px">Cancel</button>
+				<button onClick="{{cancelPick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: #192b24; color: #b9cac1; font-size: 12.5px">Cancel</button>
 			</div>
 		</sc-if>
 	</div>
 
 	<div ref="{{refs.rail}}" class="wk-m-rail" style="position: absolute; right: 16px; top: {{topBase}}px; z-index: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: {{railW}}px">
-		<div role="group" aria-label="Map layers" style="display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 16px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<div role="group" aria-label="Map layers" style="display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
 			<sc-for list="{{layers}}" as="l" hint-placeholder-count="5">
-				<button class="wk-m-row" aria-pressed="{{l.on}}" onClick="{{l.pick}}" title="{{l.title}}" aria-label="{{l.aria}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border-radius: 11px; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px; font-weight: 700; border: 0; background: {{l.bg}}; color: {{l.fg}}">
+				<button class="wk-m-row" aria-pressed="{{l.on}}" onClick="{{l.pick}}" title="{{l.title}}" aria-label="{{l.aria}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border-radius: 8px; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px; font-weight: 700; border: 0; background: {{l.bg}}; color: {{l.fg}}">
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{l.dot}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{l.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 					<sc-if value="{{railWide}}" hint-placeholder-val="{{true}}"><span style="flex: 1; text-align: left">{{l.label}}</span><span style="font-weight: 400; color: {{l.countC}}; font-variant-numeric: tabular-nums">{{l.count}}</span></sc-if>
 				</button>
@@ -74,23 +74,23 @@ body{margin:0;background:#08110e}
 				</div>
 			</sc-if>
 			<div style="height: 1px; background: rgba(123,236,199,.12); margin: 3px 4px"></div>
-			<button class="wk-m-row" onClick="{{toggleOverlays}}" aria-expanded="{{overlaysOpen}}" aria-label="Overlays and legend" title="Overlays and legend" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border: 0; border-radius: 11px; background: {{ovBg}}; color: #b9cac1; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px">
+			<button class="wk-m-row" onClick="{{toggleOverlays}}" aria-expanded="{{overlaysOpen}}" aria-label="Overlays and legend" title="Overlays and legend" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border: 0; border-radius: 8px; background: {{ovBg}}; color: #b9cac1; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M12 4l-8 4l8 4l8 -4l-8 -4"></path><path d="M4 12l8 4l8 -4"></path><path d="M4 16l8 4l8 -4"></path></svg>
 				<sc-if value="{{railWide}}" hint-placeholder-val="{{true}}"><span style="flex: 1; text-align: left">Overlays</span><span style="color: #8ba598; font-variant-numeric: tabular-nums">{{ovCount}}</span></sc-if>
 			</button>
 		</div>
-		<div role="group" aria-label="Zoom" style="align-self: flex-end; display: flex; flex-direction: column; padding: 4px; gap: 2px; border-radius: 14px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); backdrop-filter: blur(22px) saturate(170%)">
-			<button class="wk-m-btn" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in (+)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: #b9cac1; font-size: 18px">+</button>
-			<button class="wk-m-btn" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out (−)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: #b9cac1; font-size: 18px">−</button>
+		<div role="group" aria-label="Zoom" style="align-self: flex-end; display: flex; flex-direction: column; padding: 4px; gap: 2px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); backdrop-filter: blur(22px) saturate(170%)">
+			<button class="wk-m-btn" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in (+)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 18px">+</button>
+			<button class="wk-m-btn" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out (−)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 18px">−</button>
 			<div style="height: 1px; background: rgba(123,236,199,.12); margin: 2px 4px"></div>
-			<button class="wk-m-btn" onClick="{{recenter}}" aria-label="Centre on the station" title="Centre on the station (0)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; background: transparent; color: {{recenterC}}; display: grid; place-items: center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0"></path><path d="M12 2v2M12 20v2M20 12h2M2 12h2"></path></svg></button>
+			<button class="wk-m-btn" onClick="{{recenter}}" aria-label="Centre on the station" title="Centre on the station (0)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: {{recenterC}}; display: grid; place-items: center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0"></path><path d="M12 2v2M12 20v2M20 12h2M2 12h2"></path></svg></button>
 		</div>
 	</div>
 
 	<sc-if value="{{overlaysOpen}}" hint-placeholder-val="{{false}}">
-		<div ref="{{refs.ov}}" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; z-index: 5; width: 280px; box-sizing: border-box; padding: 8px; border-radius: 16px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(22px); display: flex; flex-direction: column">
+		<div ref="{{refs.ov}}" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; z-index: 5; width: 280px; box-sizing: border-box; padding: 8px; border-radius: 12px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(22px); display: flex; flex-direction: column">
 			<sc-for list="{{overlays}}" as="o" hint-placeholder-count="5">
-				<button class="wk-m-row" aria-pressed="{{o.on}}" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 9px; background: transparent">
+				<button class="wk-m-row" aria-pressed="{{o.on}}" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent">
 					<span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13.5px">{{o.label}}</span><span style="font-size: 12px; color: #8ba598">{{o.sub}}</span></span>
 					<span style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{o.track}}"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: #f4f7f5"></span></span>
 				</button>
@@ -110,21 +110,21 @@ body{margin:0;background:#08110e}
 	</sc-if>
 
 	<sc-if value="{{hasSel}}" hint-placeholder-val="{{false}}">
-		<aside ref="{{refs.sel}}" aria-label="Selected" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{panelW}}; max-height: calc(100% - {{panelMaxOff}}px); overflow-y: auto; z-index: 3; box-sizing: border-box; padding: 16px; border-radius: 18px; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column; gap: 14px">
+		<aside ref="{{refs.sel}}" aria-label="Selected" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{panelW}}; max-height: calc(100% - {{panelMaxOff}}px); overflow-y: auto; z-index: 3; box-sizing: border-box; padding: 16px; border-radius: 12px; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column; gap: 14px">
 			<div style="display: flex; align-items: center; gap: 10px">
-				<span style="width: 34px; height: 34px; flex: none; border-radius: 10px; background: rgba(123,236,199,.12); display: grid; place-items: center; color: {{sel.color}}">
+				<span style="width: 34px; height: 34px; flex: none; border-radius: 6px; background: rgba(123,236,199,.12); display: grid; place-items: center; color: {{sel.color}}">
 					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{sel.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
 				</span>
 				<div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
 					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.title}}</span>
 					<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.sub}}</span>
 				</div>
-				<button onClick="{{closeSel}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<button onClick="{{closeSel}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
 			<sc-if value="{{sel.hasNote}}" hint-placeholder-val="{{false}}">
 				<p style="margin: 0; font-size: 13.5px; line-height: 1.45; color: #e3ece7; font-family: {{sel.noteFont}}; overflow-wrap: anywhere">{{sel.note}}</p>
 			</sc-if>
-			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border-radius: 12px; overflow: hidden; background: #22362f">
+			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: #22362f">
 				<sc-for list="{{sel.fields}}" as="f" hint-placeholder-count="6">
 					<div style="background: #111c19; padding: 9px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
 						<span style="font-size: 12px; color: #8ba598">{{f.k}}</span>
@@ -134,35 +134,35 @@ body{margin:0;background:#08110e}
 			</div>
 			<span style="font-size: 12px; color: #8ba598">{{sel.seen}}</span>
 			<div style="display: flex; gap: 6px">
-				<button onClick="{{toggleFollow}}" aria-pressed="{{following}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 10px; border: 1px solid {{followBorder}}; background: {{followBg}}; color: {{followFg}}; font-weight: 700; font-size: 13px">{{followText}}</button>
-				<button onClick="{{selActivity}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #b9cac1; font-weight: 700; font-size: 13px">Activity</button>
+				<button onClick="{{toggleFollow}}" aria-pressed="{{following}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 6px; border: 1px solid {{followBorder}}; background: {{followBg}}; color: {{followFg}}; font-weight: 700; font-size: 13px">{{followText}}</button>
+				<button onClick="{{selActivity}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 6px; border: 1px solid #2c443b; background: transparent; color: #b9cac1; font-weight: 700; font-size: 13px">Activity</button>
 			</div>
 		</aside>
 	</sc-if>
 
 	<sc-if value="{{locOpen}}" hint-placeholder-val="{{false}}">
-		<aside ref="{{refs.loc}}" aria-label="Station location" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{locW}}; z-index: 5; box-sizing: border-box; padding: 18px; border-radius: 18px; background: rgba(17,28,25,.88); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(24px); display: flex; flex-direction: column; gap: 14px">
+		<aside ref="{{refs.loc}}" aria-label="Station location" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{locW}}; z-index: 5; box-sizing: border-box; padding: 18px; border-radius: 12px; background: rgba(17,28,25,.88); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(24px); display: flex; flex-direction: column; gap: 14px">
 			<div style="display: flex; align-items: center">
 				<h2 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 20px">Station location</h2>
-				<button onClick="{{closeLocation}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<button onClick="{{closeLocation}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
-			<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #192b24; font-size: 13px">
+			<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; background: #192b24; font-size: 13px">
 				<span style="width: 8px; height: 8px; border-radius: 50%; background: {{locDot}}; flex: none"></span>
 				<span style="flex: 1; font-variant-numeric: tabular-nums">{{locNow}}</span>
 			</div>
-			<button onClick="{{startPick}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Pick on the map</button>
-			<button onClick="{{useBrowser}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Use this browser’s location</button>
+			<button onClick="{{startPick}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Pick on the map</button>
+			<button onClick="{{useBrowser}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Use this browser’s location</button>
 			<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: #8ba598">Coordinates or Maidenhead locator
-				<input value="{{locQ}}" onChange="{{onLocQ}}" placeholder="48.7051, −3.9750 · IN88aq" spellcheck="false" autocomplete="off" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 10px; border: 1px solid {{locQBorder}}; background: rgba(7,15,13,.6); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
+				<input value="{{locQ}}" onChange="{{onLocQ}}" placeholder="48.7051, −3.9750 · IN88aq" spellcheck="false" autocomplete="off" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1px solid {{locQBorder}}; background: rgba(7,15,13,.6); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
 			</label>
 			<sc-if value="{{hasLocParse}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; color: {{locParseC}}">{{locParse}}</span></sc-if>
-			<button onClick="{{saveLocation}}" disabled="{{saveDisabled}}" style="font: inherit; cursor: pointer; height: 42px; border-radius: 10px; border: 0; background: {{saveBg}}; color: {{saveFg}}; font-weight: 700; font-size: 14px">Save location</button>
+			<button onClick="{{saveLocation}}" disabled="{{saveDisabled}}" style="font: inherit; cursor: pointer; height: 42px; border-radius: 6px; border: 0; background: {{saveBg}}; color: {{saveFg}}; font-weight: 700; font-size: 14px">Save location</button>
 			<span style="font-size: 12px; color: #8ba598; line-height: 1.5">Stored on your WaveKit only, never sent anywhere. Used for the map centre, range rings and distances, and by the ADS-B decoder. Every device signed in sees it.</span>
 		</aside>
 	</sc-if>
 
 	<sc-if value="{{tlOpen}}" hint-placeholder-val="{{false}}">
-		<div ref="{{refs.tl}}" role="group" aria-label="Replay the last hour" style="position: absolute; right: 16px; bottom: {{tlPanelBottom}}px; z-index: 4; width: min(520px, calc(100% - 32px)); box-sizing: border-box; padding: 12px 14px 10px 10px; border-radius: 16px; background: rgba(17,28,25,.72); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; align-items: center; gap: 10px">
+		<div ref="{{refs.tl}}" role="group" aria-label="Replay the last hour" style="position: absolute; right: 16px; bottom: {{tlPanelBottom}}px; z-index: 4; width: min(520px, calc(100% - 32px)); box-sizing: border-box; padding: 12px 14px 10px 10px; border-radius: 12px; background: rgba(17,28,25,.72); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; align-items: center; gap: 10px">
 			<button onClick="{{togglePlay}}" aria-label="{{playLabel}}" title="{{playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 18px; background: rgba(123,236,199,.14); color: #7becc7; display: grid; place-items: center">
 				<sc-if value="{{playing}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg></sc-if>
 				<sc-if value="{{notPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg></sc-if>
@@ -178,17 +178,17 @@ body{margin:0;background:#08110e}
 				</div>
 				<div style="display: flex; justify-content: space-between; font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums"><span>13:03</span><span style="color: #f4f7f5">{{timeText}}</span><span>Now</span></div>
 			</div>
-			<button onClick="{{closeTl}}" aria-label="Close replay" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			<button onClick="{{closeTl}}" aria-label="Close replay" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 		</div>
 	</sc-if>
 
-	<div ref="{{refs.chip}}" style="position: absolute; right: 16px; bottom: {{chipBottom}}px; z-index: 4; display: flex; align-items: center; gap: 4px; height: 44px; box-sizing: border-box; padding: 4px; border-radius: 15px; background: rgba(17,28,25,.55); border: 1px solid {{chipBorder}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
-		<button class="wk-m-btn" onClick="{{toggleTl}}" aria-expanded="{{tlOpen}}" title="Replay the last hour" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 11px; background: transparent; color: {{chipFg}}; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
+	<div ref="{{refs.chip}}" style="position: absolute; right: 16px; bottom: {{chipBottom}}px; z-index: 4; display: flex; align-items: center; gap: 4px; height: 44px; box-sizing: border-box; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid {{chipBorder}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<button class="wk-m-btn" onClick="{{toggleTl}}" aria-expanded="{{tlOpen}}" title="Replay the last hour" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: {{chipFg}}; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
 			<span style="width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none"></span>{{chipText}}
 			<span aria-hidden="true" style="display: flex; align-items: flex-end; gap: 1px; height: 14px; width: 40px"><sc-for list="{{spark}}" as="h" hint-placeholder-count="12"><span style="flex: 1; height: {{h.h}}%; border-radius: 1px; background: {{h.c}}"></span></sc-for></span>
 		</button>
 		<sc-if value="{{notLive}}" hint-placeholder-val="{{false}}">
-			<button onClick="{{goLive}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 11px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap">Back to live</button>
+			<button onClick="{{goLive}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap">Back to live</button>
 		</sc-if>
 	</div>
 

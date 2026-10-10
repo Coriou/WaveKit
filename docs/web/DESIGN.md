@@ -316,6 +316,23 @@ Condensed + Noto Sans, Tabler-based icons).
   phone. IQ frequency labels sit on small plates at the right edge; capture contents
   carry units ("41 messages").
 
+- **Corner radius scale (2026-10-10).**
+  One small scale replaces the ~14 ad-hoc radii (1–22 px): **12 px** for floating
+  islands, drawers, panels, popovers and menus, the palette dialog, toasts and the dock;
+  **8 px** for list rows, cards and inner surfaces inside panels, the player bar and
+  search fields; **6 px** for buttons, inputs, segmented controls, type tiles and icon
+  squares, filter chips and menu or dropdown items; **4 px** for small tags and badges
+  (IQ, protocol, status badges up to 22 px tall), reading chips, kbd and inline tokens.
+  Full pills become 6 px; circles (width = height) stay round, and values of 3 px or
+  less (meter tracks, bars, progress lines, hairlines), slider thumbs and toggle-switch
+  tracks keep their shape. Nested corners are concentric: an inner surface inset by
+  padding p inside radius R uses max(R − p, the next smaller step) and never exceeds its
+  parent (segmented control 6 → segments 4; card 8 → inner blocks 6; Map rails 12 with
+  4 px inset → buttons 8). Asymmetric radii scale with their parent (Recordings trim
+  handles 6/2). The same values apply to radii built in JS (Tuned card, Messages feed).
+  Provisional until the owner compares before and after on the canvas; the previous
+  values are in the git history of `docs/web/canvas/`.
+
 ## Open questions and next topics
 
 - Auto band map: remember what was decoded where and keep it labelled on the
@@ -350,20 +367,9 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: corner radius, across every board.** Owner (2026-10-10): the UI would look
-more professional with slightly less rounded corners everywhere. Today the boards use
-about 14 different radii (1–22 px, mostly 8–11 px on controls, 14 px on rows, 16–22 px
-on islands and drawers) with no scale behind them. Plan:
-1. Define a small radius scale as tokens (proposal to try: 4 / 6 / 8 / 12, islands and
-   drawers at 12, rows at 8, buttons and fields at 6, chips and tags at 4; circles stay
-   circles) and keep nested corners concentric (inner = outer − padding).
-2. Apply it to every board in one pass, Immersive first so the effect is judged on the
-   whole shell, then the islands, Activity, Recordings, Palette, Map, cards.
-3. Compare before and after on the canvas with the owner before freezing the values;
-   the scale then goes into the design-system pass (`packages/brand` tokens).
-
-Also pending from the Recordings polish: one final visual check of the polished board
-(desktop and phone) once the canvas is visible in the browser pane.
+The radius scale awaits the owner's before/after review on the canvas. Also pending:
+the visual check of the Recordings polish (desktop and phone). Then pick the next topic
+from the open questions (Scanner, Settings).
 
 ## Handoff to the dev team (later)
 

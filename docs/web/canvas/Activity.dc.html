@@ -18,39 +18,39 @@ body{margin:0;background:#0b1512}
 .wk-play:focus-visible>span:first-child{box-shadow:0 0 0 2px #0e1815,0 0 0 4px #7becc7}
 </style>
 </helmet>
-<div style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 22px; overflow: hidden; background: rgba(17,28,25,.58); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: rgba(17,28,25,.58); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(26px) saturate(170%); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 8px; padding: 14px 10px 10px 18px">
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
-		<button onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 0; border-radius: 13px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
-		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 13px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; background: transparent; color: #b9cac1"><span style="width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span>{{recText}}</button>
+		<button onClick="{{togglePause}}" aria-pressed="{{paused}}" title="{{pauseTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 0; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; white-space: nowrap; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
+		<button onClick="{{toggleRec}}" aria-pressed="{{recording}}" title="{{recTitle}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 10px; border: 1px solid {{recBorder}}; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; background: transparent; color: #b9cac1"><span style="width: 7px; height: 7px; border-radius: 50%; background: {{recDot}}"></span>{{recText}}</button>
 		<div style="flex: 1"></div>
-		<button onClick="{{toggleMode}}" aria-label="{{modeLabel}}" title="{{modeLabel}}" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; display: grid; place-items: center; background: transparent; color: #8ba598">
+		<button onClick="{{toggleMode}}" aria-label="{{modeLabel}}" title="{{modeLabel}}" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 6px; display: grid; place-items: center; background: transparent; color: #8ba598">
 			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{modeIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 		</button>
-		<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 10px; display: grid; place-items: center; background: transparent; color: #8ba598">
+		<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 6px; display: grid; place-items: center; background: transparent; color: #8ba598">
 			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 		</button>
 	</header>
 
 	<div style="flex: none; padding: 0 14px; position: relative; z-index: 2">
-		<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 46px; box-sizing: border-box; padding: 6px 8px 6px 14px; border-radius: 14px; background: rgba(7,15,13,.55); border: 1px solid {{searchBorder}}; transition: border-color .15s">
+		<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-height: 46px; box-sizing: border-box; padding: 6px 8px 6px 14px; border-radius: 8px; background: rgba(7,15,13,.55); border: 1px solid {{searchBorder}}; transition: border-color .15s">
 			<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>
 			<sc-for list="{{tokens}}" as="t" hint-placeholder-count="0">
-				<span style="display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 10px; border-radius: 8px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap"><span style="font-weight: 400; color: #8ba598; margin-right: 4px">{{t.kind}}</span>{{t.value}}
-					<button onClick="{{t.remove}}" aria-label="Remove filter {{t.kind}} {{t.value}}" style="font: inherit; cursor: pointer; width: 24px; height: 24px; border: 0; border-radius: 6px; background: transparent; color: #7becc7; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<span style="display: flex; align-items: center; gap: 2px; height: 28px; padding: 0 2px 0 10px; border-radius: 4px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap"><span style="font-weight: 400; color: #8ba598; margin-right: 4px">{{t.kind}}</span>{{t.value}}
+					<button onClick="{{t.remove}}" aria-label="Remove filter {{t.kind}} {{t.value}}" style="font: inherit; cursor: pointer; width: 24px; height: 24px; border: 0; border-radius: 4px; background: transparent; color: #7becc7; display: grid; place-items: center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 				</span>
 			</sc-for>
 			<input value="{{q}}" onChange="{{onQ}}" onKeyDown="{{onKey}}" onFocus="{{onFocus}}" onBlur="{{onBlur}}" aria-label="Search activity" placeholder="{{placeholder}}" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 160px; height: 32px; border: 0; outline: none; background: transparent; color: #f4f7f5; font: inherit; font-size: 14.5px">
 			<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
 				<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{resultCount}}</span>
-				<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 12.5px">Clear all</button>
+				<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 12.5px">Clear all</button>
 			</sc-if>
 		</div>
 		<sc-if value="{{showSugg}}" hint-placeholder-val="{{false}}">
-			<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 52px; max-width: 560px; padding: 6px; border-radius: 14px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
+			<div role="listbox" aria-label="Search suggestions" style="position: absolute; left: 14px; right: 14px; top: 52px; max-width: 560px; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.5); backdrop-filter: blur(24px)">
 				<sc-for list="{{sugg}}" as="s" hint-placeholder-count="3">
-					<button role="option" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}" style="font: inherit; color: inherit; cursor: pointer; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 12px; border: 0; border-radius: 9px; background: {{s.bg}}">
+					<button role="option" aria-selected="{{s.on}}" onMouseDown="{{s.pick}}" onMouseEnter="{{s.enter}}" style="font: inherit; color: inherit; cursor: pointer; width: 100%; text-align: left; display: flex; align-items: center; gap: 12px; height: 42px; padding: 0 12px; border: 0; border-radius: 6px; background: {{s.bg}}">
 						<span style="font-size: 12px; color: #8ba598; width: 104px; flex: none">{{s.kind}}</span>
 						<span style="flex: 1; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{s.value}}</span>
 						<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{s.count}}</span>
@@ -63,17 +63,17 @@ body{margin:0;background:#0b1512}
 
 	<div role="group" aria-label="Quick filters" style="flex: none; display: flex; flex-wrap: {{chipWrap}}; align-items: center; gap: 6px; padding: 10px 14px 12px; overflow-x: auto; scrollbar-width: none">
 		<sc-for list="{{cats}}" as="c" hint-placeholder-count="8">
-			<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}">
+			<button aria-pressed="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.aria}}" title="{{c.label}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 				<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><span>{{c.label}}</span></sc-if>
 				<span style="font-weight: 400; font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums">{{c.count}}</span>
 			</button>
 		</sc-for>
 		<sc-if value="{{wide}}" hint-placeholder-val="{{true}}"><div style="width: 1px; height: 20px; background: rgba(123,236,199,.14); flex: none; margin: 0 2px"></div></sc-if>
-		<button aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{audioBorder}}; background: {{audioBg}}; color: {{audioFg}}">
+		<button aria-pressed="{{audioOnly}}" onClick="{{toggleAudio}}" style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{audioBorder}}; background: {{audioBg}}; color: {{audioFg}}">
 			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM15 15a2 2 0 0 1 2 -2h1a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2zM4 15v-3a8 8 0 0 1 16 0v3"></path></svg>With audio
 		</button>
-		<button style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; border: 1px solid #2c443b; background: transparent; color: #b9cac1">Today
+		<button style="font: inherit; cursor: pointer; flex: none; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; border: 1px solid #2c443b; background: transparent; color: #b9cac1">Today
 			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg>
 		</button>
 	</div>
@@ -82,13 +82,13 @@ body{margin:0;background:#0b1512}
 		<sc-if value="{{showLists}}" hint-placeholder-val="{{true}}">
 			<div style="flex: 1; min-width: 0; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
 				<sc-for list="{{columns}}" as="col" hint-placeholder-count="1">
-					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34); outline: none">
+					<section aria-label="{{col.title}}" tabindex="0" onKeyDown="{{col.key}}" title="↑ ↓ move · Space play · S keep · Enter open · Esc close" style="flex: 1 1 0; min-width: {{colMin}}; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: rgba(7,15,13,.34); outline: none">
 						<header style="flex: none; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px 0 14px">
 							<h3 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 15px; letter-spacing: .06em; text-transform: uppercase; color: #b9cac1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{col.title}}</h3>
 							<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{col.count}}</span>
 							<div style="flex: 1"></div>
 							<sc-if value="{{col.removable}}" hint-placeholder-val="{{false}}">
-								<button onClick="{{col.remove}}" aria-label="Remove column {{col.title}}" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 8px; background: transparent; color: #52645d; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+								<button onClick="{{col.remove}}" aria-label="Remove column {{col.title}}" style="font: inherit; cursor: pointer; width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: #52645d; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 							</sc-if>
 						</header>
 						<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 6px 8px; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
@@ -97,16 +97,16 @@ body{margin:0;background:#0b1512}
 									<span style="font-weight: 700; color: #b9cac1">{{col.emptyTitle}}</span>
 									<span style="font-size: 13px; color: #8ba598; line-height: 1.5">{{col.emptyText}}</span>
 									<sc-if value="{{hasQuery}}" hint-placeholder-val="{{false}}">
-										<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(123,236,199,.4); border-radius: 9px; background: transparent; color: #7becc7; font-size: 13px; font-weight: 700">Clear filters</button>
+										<button onClick="{{clearAll}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 14px; border: 1px solid rgba(123,236,199,.4); border-radius: 6px; background: transparent; color: #7becc7; font-size: 13px; font-weight: 700">Clear filters</button>
 									</sc-if>
 								</div>
 							</sc-if>
 							<sc-for list="{{col.groups}}" as="g" hint-placeholder-count="2">
 								<div style="position: sticky; top: 0; z-index: 1; padding: 8px 8px 4px; font-size: 11.5px; font-weight: 700; letter-spacing: .04em; color: #8ba598; font-variant-numeric: tabular-nums; background: linear-gradient(rgba(14,24,21,.96) 70%, rgba(14,24,21,0))">{{g.label}}</div>
 								<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="4">
-									<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 12px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
-										<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 12px">
-											<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 10px; background: #192b24; display: grid; place-items: center">
+									<div style="display: flex; align-items: stretch; margin-bottom: 2px; border-radius: 6px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .8s ease">
+										<button onClick="{{r.pick}}" aria-current="{{r.selected}}" style="font: inherit; color: inherit; cursor: pointer; flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: 12px; padding: 10px 6px 10px 10px; border: 0; background: transparent; text-align: left; border-radius: 6px">
+											<span style="position: relative; width: 32px; height: 32px; flex: none; border-radius: 6px; background: #192b24; display: grid; place-items: center">
 												<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 												<sc-if value="{{r.rec}}" hint-placeholder-val="{{false}}"><span title="Recording now" style="position: absolute; top: -2px; right: -2px; width: 10px; height: 10px; border-radius: 50%; background: #ff7a6b; box-shadow: 0 0 0 2px #0e1815"></span></sc-if>
 											</span>
@@ -128,7 +128,7 @@ body{margin:0;background:#0b1512}
 											</span>
 										</button>
 										<sc-if value="{{r.hasAudio}}" hint-placeholder-val="{{false}}">
-											<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 12px">
+											<button class="wk-play" onClick="{{r.play}}" aria-label="{{r.playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 54px; border: 0; background: transparent; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; border-radius: 6px">
 												<span style="width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center; border: 1px solid {{r.pBorder}}; background: {{r.pBg}}; color: {{r.pFg}}">
 													<sc-if value="{{r.playing}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 													<sc-if value="{{r.notPlaying}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
@@ -146,13 +146,13 @@ body{margin:0;background:#0b1512}
 					</section>
 				</sc-for>
 				<sc-if value="{{canAdd}}" hint-placeholder-val="{{false}}">
-					<div style="flex: none; width: 176px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 16px; border: 1px dashed rgba(123,236,199,.18)">
+					<div style="flex: none; width: 176px; display: flex; flex-direction: column; gap: 6px; padding: 10px; border-radius: 8px; border: 1px dashed rgba(123,236,199,.18)">
 						<span style="font-size: 12px; font-weight: 700; color: #b9cac1; padding: 4px 4px 2px">Add a column</span>
 						<sc-if value="{{canPin}}" hint-placeholder-val="{{false}}">
-							<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 9px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
+							<button onClick="{{pinSearch}}" style="font: inherit; cursor: pointer; min-height: 36px; padding: 6px 10px; border: 0; border-radius: 6px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 13px; font-weight: 700; text-align: left">Pin current search</button>
 						</sc-if>
 						<sc-for list="{{presets}}" as="p" hint-placeholder-count="2">
-							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 9px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 13px; text-align: left">+ {{p.title}}</button>
+							<button onClick="{{p.add}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 10px; border: 0; border-radius: 6px; background: rgba(123,236,199,.06); color: #b9cac1; font-size: 13px; text-align: left">+ {{p.title}}</button>
 						</sc-for>
 						<span style="font-size: 12px; color: #52645d; padding: 4px; line-height: 1.45">Columns sync to every device signed in to this WaveKit.</span>
 					</div>
@@ -161,17 +161,17 @@ body{margin:0;background:#0b1512}
 		</sc-if>
 
 		<sc-if value="{{showDetail}}" hint-placeholder-val="{{false}}">
-			<aside aria-label="Details" style="flex: {{detailFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 16px; background: rgba(7,15,13,.34)">
+			<aside aria-label="Details" style="flex: {{detailFlex}}; min-width: 0; display: flex; flex-direction: column; min-height: 0; border-radius: 8px; background: rgba(7,15,13,.34)">
 				<header style="flex: none; display: flex; align-items: center; gap: 4px; height: 44px; padding: 0 6px">
-					<button onClick="{{closeDetail}}" aria-label="{{backLabel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px 0 6px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; display: flex; align-items: center; gap: 4px; font-size: 13px">
+					<button onClick="{{closeDetail}}" aria-label="{{backLabel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px 0 6px; border: 0; border-radius: 6px; background: transparent; color: #b9cac1; display: flex; align-items: center; gap: 4px; font-size: 13px">
 						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{backIcon}}"></path></svg>{{backText}}
 					</button>
 					<div style="flex: 1"></div>
 					<sc-if value="{{selCanKeep}}" hint-placeholder-val="{{false}}">
-						<button onClick="{{toggleKeep}}" aria-pressed="{{selKept}}" title="{{keepTitle}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: {{keepFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="{{keepFill}}" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>{{keepText}}</button>
+						<button onClick="{{toggleKeep}}" aria-pressed="{{selKept}}" title="{{keepTitle}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: {{keepFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="{{keepFill}}" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 17.75l-6.172 3.245l1.179 -6.873l-5 -4.867l6.9 -1l3.086 -6.253l3.086 6.253l6.9 1l-5 4.867l1.179 6.873z"></path></svg>{{keepText}}</button>
 					</sc-if>
-					<button onClick="{{copySel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 13px">{{copyText}}</button>
-					<button onClick="{{tuneSel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 13px; font-weight: 700">Tune {{selFreq}}</button>
+					<button onClick="{{copySel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 13px">{{copyText}}</button>
+					<button onClick="{{tuneSel}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 12px; border: 0; border-radius: 6px; background: rgba(123,236,199,.12); color: #7becc7; font-size: 13px; font-weight: 700">Tune {{selFreq}}</button>
 				</header>
 				<div style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px 14px; display: flex; flex-direction: column; gap: 18px; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
 					<dc-import name="Decode" msg="{{sel}}" flat="{{true}}" on-tune="{{tune}}" on-play="{{playId}}" playing="{{selPlaying}}" play-pos="{{selPos}}" json-height="{{jsonH}}" hint-size="100%,360px"></dc-import>
@@ -180,11 +180,11 @@ body{margin:0;background:#0b1512}
 							<div style="display: flex; align-items: center; margin: 0 4px 6px">
 								<h4 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 400; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{relatedTitle}}</h4>
 								<sc-if value="{{canPlayAll}}" hint-placeholder-val="{{false}}">
-									<button onClick="{{playAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #7becc7; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg>Play conversation</button>
+									<button onClick="{{playAll}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 10px; border: 0; border-radius: 6px; background: transparent; color: #7becc7; font-size: 12.5px; font-weight: 700; display: flex; align-items: center; gap: 6px"><svg width="11" height="11" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg>Play conversation</button>
 								</sc-if>
 							</div>
 							<sc-for list="{{related}}" as="r" hint-placeholder-count="3">
-								<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 4px 8px; border: 0; border-radius: 9px; background: {{r.bg}}">
+								<button onClick="{{r.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 42px; padding: 4px 8px; border: 0; border-radius: 6px; background: {{r.bg}}">
 									<span style="width: 40px; flex: none; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.time}}</span>
 									<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; color: #d9e4de">{{r.preview}}</span>
 									<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{r.dur}}</span>
@@ -198,14 +198,14 @@ body{margin:0;background:#0b1512}
 	</div>
 
 	<sc-if value="{{hasPlayer}}" hint-placeholder-val="{{false}}">
-		<div style="flex: none; margin: 0 10px 10px; padding: 8px 10px 8px 8px; border-radius: 16px; background: rgba(7,15,13,.72); border: 1px solid rgba(123,236,199,.12); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
+		<div style="flex: none; margin: 0 10px 10px; padding: 8px 10px 8px 8px; border-radius: 8px; background: rgba(7,15,13,.72); border: 1px solid rgba(123,236,199,.12); display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px">
 			<div style="display: flex; align-items: center; gap: 2px; flex: none">
-				<button onClick="{{prev}}" aria-label="Previous recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: {{prevC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14h-2zM20 5v14l-10 -7z"></path></svg></button>
+				<button onClick="{{prev}}" aria-label="Previous recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 6px; background: transparent; color: {{prevC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h2v14h-2zM20 5v14l-10 -7z"></path></svg></button>
 				<button onClick="{{togglePlay}}" aria-label="{{playerLabel}}" style="font: inherit; cursor: pointer; width: 40px; height: 40px; border: 0; border-radius: 50%; background: #7becc7; color: #111c19; display: grid; place-items: center">
 					<sc-if value="{{pPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 					<sc-if value="{{pPaused}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
 				</button>
-				<button onClick="{{next}}" aria-label="Next recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: {{nextC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l10 -7z"></path></svg></button>
+				<button onClick="{{next}}" aria-label="Next recording" style="font: inherit; cursor: pointer; width: 34px; height: 34px; border: 0; border-radius: 6px; background: transparent; color: {{nextC}}; display: grid; place-items: center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M16 5h2v14h-2zM4 5v14l10 -7z"></path></svg></button>
 			</div>
 			<div style="flex: 1 1 180px; min-width: 0; display: flex; flex-direction: column; gap: 6px">
 				<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0">
@@ -222,9 +222,9 @@ body{margin:0;background:#0b1512}
 				</div>
 			</div>
 			<div style="flex: none; margin-left: auto; display: flex; align-items: center; gap: 8px">
-			<button onClick="{{cycleSpeed}}" aria-label="Playback speed {{speedText}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; min-width: 44px; padding: 0 8px; border: 1px solid #2c443b; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 12.5px; font-variant-numeric: tabular-nums">{{speedText}}</button>
-			<button aria-pressed="{{autoNext}}" onClick="{{toggleAutoNext}}" title="Play the next recording in this list when one ends" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border-radius: 8px; border: 1px solid {{anBorder}}; background: {{anBg}}; color: {{anFg}}; font-size: 12.5px">Auto-next</button>
-			<button onClick="{{stopPlay}}" aria-label="Close player and resume live audio" title="Close and resume live audio" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			<button onClick="{{cycleSpeed}}" aria-label="Playback speed {{speedText}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; min-width: 44px; padding: 0 8px; border: 1px solid #2c443b; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 12.5px; font-variant-numeric: tabular-nums">{{speedText}}</button>
+			<button aria-pressed="{{autoNext}}" onClick="{{toggleAutoNext}}" title="Play the next recording in this list when one ends" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border-radius: 6px; border: 1px solid {{anBorder}}; background: {{anBg}}; color: {{anFg}}; font-size: 12.5px">Auto-next</button>
+			<button onClick="{{stopPlay}}" aria-label="Close player and resume live audio" title="Close and resume live audio" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
 		</div>
 	</sc-if>

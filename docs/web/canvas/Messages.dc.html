@@ -21,16 +21,16 @@ body{margin:0;background:#0b1512}
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">Activity</h2>
 		<span style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</span>
 		<div style="flex: 1"></div>
-		<button onClick="{{togglePause}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 1px solid #2c443b; border-radius: 9px; background: transparent; color: #b9cac1; font-size: 12.5px">{{pauseLabel}}</button>
+		<button onClick="{{togglePause}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border: 1px solid #2c443b; border-radius: 6px; background: transparent; color: #b9cac1; font-size: 12.5px">{{pauseLabel}}</button>
 		<sc-if value="{{feed}}" hint-placeholder-val="{{false}}">
-			<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center">
+			<button onClick="{{close}}" aria-label="Close activity" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
 			</button>
 		</sc-if>
 	</header>
 	<div role="radiogroup" aria-label="Show" style="display: flex; flex-wrap: wrap; gap: 6px; flex: none">
 		<sc-for list="{{chips}}" as="c" hint-placeholder-count="9">
-			<button role="radio" aria-checked="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.label}}" title="{{c.label}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border-radius: 9px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}">
+			<button role="radio" aria-checked="{{c.on}}" onClick="{{c.pick}}" aria-label="{{c.label}}" title="{{c.label}}" style="font: inherit; cursor: pointer; height: 32px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{c.border}}; background: {{c.bg}}; color: {{c.fg}}">
 				<sc-if value="{{c.hasIcon}}" hint-placeholder-val="{{true}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{c.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg></sc-if>
 				<sc-if value="{{c.showText}}" hint-placeholder-val="{{true}}"><span>{{c.text}}</span></sc-if>
 				<span style="font-weight: 400; color: #8ba598; font-variant-numeric: tabular-nums">{{c.count}}</span>
@@ -96,7 +96,7 @@ class Component extends DCLogic {
 			rootH: feed ? '100%' : 'auto',
 			pad: feed ? '18px' : '40px',
 			rootBg: feed ? 'rgba(17,28,25,.62)' : '#0b1512',
-			rootRadius: feed ? '20px' : '0',
+			rootRadius: feed ? '12px' : '0',
 			rootBorder: feed ? '1px solid rgba(123,236,199,.14)' : '0',
 			rootShadow: feed ? 'inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4)' : 'none',
 			rootBlur: feed ? 'blur(24px) saturate(170%)' : 'none',

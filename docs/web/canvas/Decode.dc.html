@@ -16,14 +16,14 @@
 body{margin:0;background:#0b1512}
 </style>
 </helmet>
-<article style="box-sizing: border-box; width: 100%; padding: {{cardPad}}; border-radius: 16px; background: {{cardBg}}; border: {{cardBorder}}; box-shadow: {{cardShadow}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 12px">
+<article style="box-sizing: border-box; width: 100%; padding: {{cardPad}}; border-radius: 8px; background: {{cardBg}}; border: {{cardBorder}}; box-shadow: {{cardShadow}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 12px">
 	<header style="display: flex; align-items: center; gap: 10px">
-		<span style="width: 30px; height: 30px; flex: none; border-radius: 9px; background: #192b24; display: grid; place-items: center">
+		<span style="width: 30px; height: 30px; flex: none; border-radius: 6px; background: #192b24; display: grid; place-items: center">
 			<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 		</span>
 		<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; color: #b9cac1">{{m.proto}}</span>
 		<sc-for list="{{badges}}" as="b" hint-placeholder-count="1">
-			<span style="height: 20px; padding: 0 7px; border-radius: 10px; font-size: 11.5px; font-weight: 700; line-height: 20px; background: {{b.bg}}; color: {{b.fg}}">{{b.label}}</span>
+			<span style="height: 20px; padding: 0 7px; border-radius: 4px; font-size: 11.5px; font-weight: 700; line-height: 20px; background: {{b.bg}}; color: {{b.fg}}">{{b.label}}</span>
 		</sc-for>
 		<div style="flex: 1"></div>
 		<span style="font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{m.time}}</span>
@@ -35,14 +35,14 @@ body{margin:0;background:#0b1512}
 	</div>
 
 	<sc-if value="{{hasText}}" hint-placeholder-val="{{false}}">
-		<p style="margin: 0; padding: 10px 12px; border-radius: 10px; background: rgba(11,21,18,.7); font-family: {{textFont}}; font-size: 14px; line-height: 1.5; color: #f4f7f5; white-space: pre-wrap; overflow-wrap: anywhere">{{m.text}}</p>
+		<p style="margin: 0; padding: 10px 12px; border-radius: 6px; background: rgba(11,21,18,.7); font-family: {{textFont}}; font-size: 14px; line-height: 1.5; color: #f4f7f5; white-space: pre-wrap; overflow-wrap: anywhere">{{m.text}}</p>
 	</sc-if>
 	<sc-if value="{{toneOnly}}" hint-placeholder-val="{{false}}">
 		<span style="font-size: 13px; color: #8ba598; font-style: italic">Tone only. No message body.</span>
 	</sc-if>
 
 	<sc-if value="{{hasAudio}}" hint-placeholder-val="{{false}}">
-		<div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 8px; border-radius: 12px; background: rgba(11,21,18,.7)">
+		<div style="display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 8px; border-radius: 6px; background: rgba(11,21,18,.7)">
 			<button onClick="{{play}}" aria-label="{{playLabel}}" style="font: inherit; cursor: pointer; width: 34px; height: 34px; flex: none; border: 0; border-radius: 50%; display: grid; place-items: center; background: #7becc7; color: #111c19">
 				<sc-if value="{{isPlaying}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1" fill="currentColor"></rect><rect x="14" y="5" width="4" height="14" rx="1" fill="currentColor"></rect></svg></sc-if>
 				<sc-if value="{{notPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11 -7z" fill="currentColor"></path></svg></sc-if>
@@ -68,7 +68,7 @@ body{margin:0;background:#0b1512}
 	</sc-if>
 
 	<sc-if value="{{hasFields}}" hint-placeholder-val="{{true}}">
-		<dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 1px; border-radius: 10px; overflow: hidden; background: rgba(123,236,199,.08)">
+		<dl style="margin: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 1px; border-radius: 6px; overflow: hidden; background: rgba(123,236,199,.08)">
 			<sc-for list="{{fields}}" as="f" hint-placeholder-count="4">
 				<div style="background: rgba(17,28,25,.92); padding: 8px 10px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
 					<dt style="font-size: 11.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.k}}</dt>
@@ -79,7 +79,7 @@ body{margin:0;background:#0b1512}
 	</sc-if>
 
 	<sc-if value="{{hasPos}}" hint-placeholder-val="{{false}}">
-		<div style="position: relative; height: 96px; border-radius: 10px; overflow: hidden; background-color: #0b1512; background-image: linear-gradient(rgba(123,236,199,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(123,236,199,.07) 1px, transparent 1px); background-size: 24px 24px">
+		<div style="position: relative; height: 96px; border-radius: 6px; overflow: hidden; background-color: #0b1512; background-image: linear-gradient(rgba(123,236,199,.07) 1px, transparent 1px), linear-gradient(90deg, rgba(123,236,199,.07) 1px, transparent 1px); background-size: 24px 24px">
 			<span style="position: absolute; left: {{px}}%; top: {{py}}%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: #7becc7; box-shadow: 0 0 0 5px rgba(123,236,199,.18)"></span>
 			<span style="position: absolute; left: 10px; bottom: 8px; font-size: 12px; color: #b9cac1; font-variant-numeric: tabular-nums">{{posText}}</span>
 			<span style="position: absolute; right: 10px; bottom: 8px; font-size: 12px; font-weight: 700; color: #7becc7">Open on map</span>
@@ -87,11 +87,11 @@ body{margin:0;background:#0b1512}
 	</sc-if>
 
 	<footer style="display: flex; align-items: center; gap: 4px; margin: 0 -6px -6px">
-		<button onClick="{{tune}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: transparent; color: #8ba598; font-size: 12.5px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 6px">
+		<button onClick="{{tune}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; font-size: 12.5px; font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 6px">
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>{{m.freq}} MHz
 		</button>
 		<div style="flex: 1"></div>
-		<button onClick="{{toggleRaw}}" aria-expanded="{{showRaw}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 8px; background: {{rawBg}}; color: #8ba598; font-size: 12.5px">{{rawLabel}}</button>
+		<button onClick="{{toggleRaw}}" aria-expanded="{{showRaw}}" style="font: inherit; cursor: pointer; height: 30px; padding: 0 8px; border: 0; border-radius: 6px; background: {{rawBg}}; color: #8ba598; font-size: 12.5px">{{rawLabel}}</button>
 	</footer>
 	<sc-if value="{{showRaw}}" hint-placeholder-val="{{false}}">
 		<dc-import name="Json" data="{{rawData}}" max-height="{{jsonH}}" hint-size="100%,220px"></dc-import>

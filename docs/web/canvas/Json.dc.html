@@ -14,16 +14,16 @@
 body{margin:0;background:#0b1512}
 </style>
 </helmet>
-<div style="box-sizing: border-box; width: 100%; border-radius: 12px; background: rgba(7,15,13,.82); border: 1px solid rgba(123,236,199,.1); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+<div style="box-sizing: border-box; width: 100%; border-radius: 6px; background: rgba(7,15,13,.82); border: 1px solid rgba(123,236,199,.1); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
 	<div style="display: flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid rgba(123,236,199,.08)">
 		<span style="font-size: 12px; font-weight: 700; color: #b9cac1">JSON</span>
 		<span style="font-size: 12px; color: #52645d; margin-left: 6px; font-variant-numeric: tabular-nums">{{meta}}</span>
 		<div style="flex: 1"></div>
-		<button aria-pressed="{{wrap}}" onClick="{{toggleWrap}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 7px; font-size: 12px; background: {{wrapBg}}; color: {{wrapFg}}; display: flex; align-items: center; gap: 5px">
+		<button aria-pressed="{{wrap}}" onClick="{{toggleWrap}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 12px; background: {{wrapBg}}; color: {{wrapFg}}; display: flex; align-items: center; gap: 5px">
 			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4l2 -2m0 4l-2 -2M4 18h5"></path></svg>Wrap
 		</button>
-		<button onClick="{{copyLine}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 7px; font-size: 12px; background: transparent; color: #8ba598">Copy one line</button>
-		<button onClick="{{copy}}" aria-live="polite" style="font: inherit; cursor: pointer; height: 26px; padding: 0 9px; border: 0; border-radius: 7px; font-size: 12px; font-weight: 700; background: {{copyBg}}; color: {{copyFg}}; display: flex; align-items: center; gap: 5px">
+		<button onClick="{{copyLine}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 12px; background: transparent; color: #8ba598">Copy one line</button>
+		<button onClick="{{copy}}" aria-live="polite" style="font: inherit; cursor: pointer; height: 26px; padding: 0 9px; border: 0; border-radius: 6px; font-size: 12px; font-weight: 700; background: {{copyBg}}; color: {{copyFg}}; display: flex; align-items: center; gap: 5px">
 			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{copyIcon}}"></path></svg>{{copyLabel}}
 		</button>
 	</div>
