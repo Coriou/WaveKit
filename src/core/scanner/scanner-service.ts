@@ -302,7 +302,11 @@ export class ScannerService extends EventEmitter {
 	private configLoaded = true
 	/** Lease arbitration per source, serialised (P16). */
 	private readonly arbitrations = new Map<string, Promise<void>>()
-	private readonly arbitrationQueued = new Set<string>()
+	/** Queued arbitration per source and its candidate filter; null = all waiters (R3). */
+	private readonly arbitrationQueued = new Map<
+		string,
+		((r: JobRecord) => boolean) | null
+	>()
 	/** Jobs whose lease an operator or relay write took: their end is not handed over at once. */
 	private readonly operatorLost = new Set<string>()
 	private timer: NodeJS.Timeout | null = null
@@ -771,8 +775,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	async resumeJob(id: string, opts: { takeover: boolean }): Promise<ScanJob> {
-		if (this.requireJob(id).spec.mode === "sweep" && !this.configLoaded)
+		const record = this.requireJob(id)
+		if (record.spec.mode === "sweep" && !this.configLoaded)
 			throw this.stateUnavailable()
+		if (record.spec.mode === "sweep" && isPreempted(record))
+			return this.resumePreempted(record, opts.takeover)
 		return this.lifecycle(id, { type: "resume", takeover: opts.takeover })
 	}
 
@@ -1841,26 +1848,99 @@ export class ScannerService extends EventEmitter {
 		sourceId: string,
 		eligible?: (r: JobRecord) => boolean,
 	): Promise<void> {
-		const run = (this.arbitrations.get(sourceId) ?? Promise.resolve())
-			.then(() => {
-				this.arbitrationQueued.delete(sourceId)
-				return this.arbitrateLeases(sourceId, eligible)
-			})
-			.catch((err: unknown) =>
-				this.log.warn({ err, sourceId }, "Lease arbitration failed"),
-			)
-		this.arbitrations.set(sourceId, run)
+		return this.onArbitrationChain(sourceId, () =>
+			this.arbitrateLeases(sourceId, eligible),
+		).catch((err: unknown) =>
+			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
+		)
+	}
+
+	/** Runs `fn` on the source's serialised arbitration chain; its result or error goes to the caller only. */
+	private onArbitrationChain<T>(
+		sourceId: string,
+		fn: () => Promise<T>,
+	): Promise<T> {
+		const run = (this.arbitrations.get(sourceId) ?? Promise.resolve()).then(fn)
+		this.arbitrations.set(
+			sourceId,
+			run.then(
+				() => undefined,
+				() => undefined,
+			),
+		)
 		return run
 	}
 
-	/** Like arbitrate, from a callback; coalesced while one is queued for the source. */
+	/**
+	 * Like arbitrate, from a callback; coalesced while one is queued for the source. An unfiltered
+	 * request widens a queued filtered one (R3).
+	 */
 	private queueArbitration(
 		sourceId: string,
 		eligible?: (r: JobRecord) => boolean,
 	): void {
-		if (!this.started || this.arbitrationQueued.has(sourceId)) return
-		this.arbitrationQueued.add(sourceId)
-		void this.arbitrate(sourceId, eligible)
+		if (!this.started) return
+		if (this.arbitrationQueued.has(sourceId)) {
+			if (!eligible) this.arbitrationQueued.set(sourceId, null)
+			return
+		}
+		this.arbitrationQueued.set(sourceId, eligible ?? null)
+		void this.onArbitrationChain(sourceId, () => {
+			const filter = this.arbitrationQueued.get(sourceId) ?? null
+			this.arbitrationQueued.delete(sourceId)
+			return this.arbitrateLeases(sourceId, filter ?? undefined)
+		}).catch((err: unknown) =>
+			this.log.warn({ err, sourceId }, "Lease arbitration failed"),
+		)
+	}
+
+	/**
+	 * Explicit resume of a preempted sweep (fix round 2): on the arbitration chain, at once (no idle
+	 * wait; the resume is the consent). It gets the lease only when no job holds it and it is the
+	 * best waiter (`chooseLeaseHolder`, P16); otherwise 409 with its state unchanged.
+	 */
+	private async resumePreempted(
+		record: JobRecord,
+		takeover: boolean,
+	): Promise<ScanJob> {
+		const { sourceId } = record.spec
+		await this.onArbitrationChain(sourceId, async () => {
+			await Promise.all(this.driversOn(sourceId).map(d => d.idle()))
+			if (isPreempted(record)) {
+				const holder = this.arbiter.holder(sourceId)
+				if (holder)
+					throw new ScannerApiError(
+						`Lease held by scanner job ${holder.jobId}`,
+						"SCANNER_SOURCE_BUSY",
+						409,
+						{ holder: holder.jobId },
+					)
+				const best = chooseLeaseHolder(
+					[...this.jobs.values()]
+						.filter(
+							j =>
+								j.spec.sourceId === sourceId &&
+								j.spec.mode === "sweep" &&
+								isPreempted(j),
+						)
+						.map(j => ({
+							jobId: j.id,
+							priority: j.spec.priority,
+							createdAt: j.createdAt,
+						})),
+				)
+				if (best !== record.id)
+					throw new ScannerApiError(
+						`Scanner job ${best} waits for the lease with a better claim`,
+						"SCANNER_SOURCE_BUSY",
+						409,
+						{ waiter: best },
+					)
+			}
+			await this.requireDriver(record.id).dispatch({ type: "resume", takeover })
+		})
+		this.updateMasks(sourceId)
+		return this.toDto(record)
 	}
 
 	/**
@@ -2541,6 +2621,16 @@ export class ScannerService extends EventEmitter {
 			}, reject)
 		})
 	}
+}
+
+/** Paused by a lease loss (§ 10.1 preempted-*): waits for the lease. */
+function isPreempted(r: JobRecord): boolean {
+	return (
+		r.state === "paused" &&
+		(r.reason === "preempted-job" ||
+			r.reason === "preempted-operator" ||
+			r.reason === "preempted-relay")
+	)
 }
 
 /** Protocols a prior can be set on (every ScannerProtocol except the generic ones). */

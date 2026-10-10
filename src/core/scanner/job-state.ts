@@ -209,6 +209,10 @@ export function transition(
 					"open-engine",
 					"resend-hop",
 				])
+			// Explicit resume of a preempted job (Task 35 fix round 2): ScannerService lets it through
+			// only when the lease is free and the job is the best waiter; a refused acquire changes nothing.
+			if (preempted)
+				return to("running", ["acquire-lease", "hold-decoders", "resend-hop"])
 			return INVALID
 		case "cancel":
 			return to("cancelled", endActions(s))

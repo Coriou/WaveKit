@@ -245,6 +245,13 @@ export interface JobRunnerDeps {
 	now: () => number
 }
 
+/** Acquire refusals that clear by themselves: an operator-paused resume stays `paused(operator)` (R4). */
+const TRANSIENT_REFUSALS: ReadonlySet<string> = new Set([
+	"releasing",
+	"recovery pending",
+	"holder is starting",
+])
+
 const ACTIVE: ReadonlySet<JobState> = new Set([
 	"starting",
 	"running",
@@ -271,6 +278,12 @@ export class JobRunner implements JobDriver {
 	private epochOwn = false
 	/** Retunes awaiting the arbiter (their epoch may start before `retune()` resolves). */
 	private retunes = 0
+	/**
+	 * Stream whose opening epoch triggered the last hop re-send, until an own epoch starts (R1). A
+	 * further foreign stream before that means the re-sent hop's epoch was dropped again (e.g. the caps
+	 * never follow the tuner's rate): no re-send loop.
+	 */
+	private resendStream: number | null = null
 	private hopIndex: number | undefined
 	private hopCentre: number | null = null
 	private chain: Promise<void> = Promise.resolve()
@@ -431,12 +444,27 @@ export class JobRunner implements JobDriver {
 		}
 		this.epochOwn = own && epoch.tuningTrust === "commanded"
 		if (this.epochOwn && epoch.startSample !== null && this.scheduler) {
+			this.resendStream = null
 			this.exec(this.scheduler.onEpochStarted(epoch.startSample))
 			return
 		}
 		// A new stream the job did not start (a rate-change restart dropped the hop's pending epoch,
 		// a reconfigure, a reconnect): re-send the hop so it gets a normal pending epoch of its own.
-		if (!own && epoch.settleMode === "none") this.onUntrackedRetune()
+		if (!own && epoch.settleMode === "none") this.resendForStream(epoch.stream)
+	}
+
+	/** At most one re-send until an own epoch starts (R1). */
+	private resendForStream(stream: number): void {
+		if (!this.lease || this.hopCentre === null) return
+		if (this.resendStream !== null) {
+			this.log.warn(
+				{ stream, resentFor: this.resendStream, hopIndex: this.hopIndex },
+				"A new stream dropped the re-sent hop's epoch again; not re-sending (do the source caps follow the tuner's sample rate?)",
+			)
+			return
+		}
+		this.resendStream = stream
+		this.onUntrackedRetune()
 	}
 
 	onBlock(endSample: number, overload: boolean): void {
@@ -571,6 +599,8 @@ export class JobRunner implements JobDriver {
 		return (
 			this.retunes > 0 &&
 			this.lease !== null &&
+			// A new stream's opening epoch never settled: it takes the re-send path on every host (R2).
+			epoch.settleMode !== "none" &&
 			epoch.tuningTrust === "commanded" &&
 			epoch.centreHz === this.hopCentre &&
 			this.deps.arbiter.holder(this.sourceId) === this.lease
@@ -758,7 +788,8 @@ export class JobRunner implements JobDriver {
 					e.type === "resume" &&
 					record.state === "paused" &&
 					record.reason === "operator" &&
-					!leaseHeld
+					!leaseHeld &&
+					!TRANSIENT_REFUSALS.has(r.detail)
 				)
 					await this.blockResume()
 				throw new ScannerApiError(r.detail, r.code, 409)

@@ -120,11 +120,19 @@ describe("undecoded reasons (H3)", () => {
 
 class RunnerArbiter {
 	lease: Lease | null = null
+	/** The next acquire is refused with this detail. */
+	refuse: string | null = null
 	readonly retunes: {
 		target: { centreHz: number }
 		resolve: (p: PendingEpoch) => void
 	}[] = []
 	acquire(jobId: string, sourceId: string) {
+		if (this.refuse !== null)
+			return {
+				ok: false as const,
+				code: "SCANNER_SOURCE_BUSY" as const,
+				detail: this.refuse,
+			}
 		this.lease = {
 			sourceId,
 			jobId,
@@ -299,5 +307,119 @@ describe("JobRunner own epochs", () => {
 		await flush()
 		expect(record.state).toBe("running")
 		await runner.idle()
+	})
+
+	it("re-sends at most once until an own epoch starts (R1)", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		await runner.start()
+		await flush()
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		runner.onEpochStarted(
+			epochAt(1, HOP0, { stream: 1, startSample: 0, settleMode: "none" }),
+		)
+		await flush()
+		expect(arbiter.retunes).toHaveLength(2)
+		// the re-sent hop's epoch is dropped again (the caps never follow the rate): no loop
+		arbiter.retunes[1]!.resolve(pendingFor(12, HOP0))
+		await flush()
+		runner.onEpochStarted(
+			epochAt(1, HOP0, { stream: 2, startSample: 0, settleMode: "none" }),
+		)
+		runner.onEpochStarted(
+			epochAt(2, HOP0, { stream: 2, startSample: 0, settleMode: "none" }),
+		)
+		await flush()
+		expect(arbiter.retunes).toHaveLength(2)
+		expect(record.state).toBe("starting")
+	})
+
+	it("re-sends again after an own epoch started in between", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		await runner.start()
+		await flush()
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		runner.onEpochStarted(
+			epochAt(1, HOP0, { stream: 1, startSample: 0, settleMode: "none" }),
+		)
+		await flush()
+		arbiter.retunes[1]!.resolve(pendingFor(12, HOP0))
+		await flush()
+		runner.onEpochStarted(epochAt(12, HOP0, { stream: 1 }))
+		await flush()
+		expect(record.state).toBe("running")
+		// a later reconnect boundary: a new foreign stream re-sends the hop once more
+		runner.onEpochStarted(
+			epochAt(1, HOP0, { stream: 2, startSample: 0, settleMode: "none" }),
+		)
+		await flush()
+		expect(arbiter.retunes).toHaveLength(3)
+		arbiter.retunes[2]!.resolve(pendingFor(13, HOP0))
+		await runner.idle()
+	})
+
+	it("never claims a new stream's opening epoch during an in-flight retune: it re-sends (R2)", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		await runner.start()
+		await flush()
+		expect(arbiter.retunes).toHaveLength(1)
+		// inline host: the rate restart's opening epoch arrives while the retune is still in flight
+		runner.onEpochStarted(
+			epochAt(1, HOP0, { stream: 1, startSample: 0, settleMode: "none" }),
+		)
+		await flush()
+		expect(record.state).toBe("starting")
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		// the re-send waited for the in-flight retune, and its epoch is settled normally
+		expect(arbiter.retunes).toHaveLength(2)
+		arbiter.retunes[1]!.resolve(pendingFor(12, HOP0))
+		await flush()
+		runner.onEpochStarted(epochAt(12, HOP0, { stream: 1 }))
+		await flush()
+		expect(record.state).toBe("running")
+		await runner.idle()
+	})
+})
+
+describe("JobRunner resume of an operator pause without its lease (R4)", () => {
+	async function pausedWithoutLease() {
+		const h = runnerHarness()
+		await h.runner.start()
+		await flush()
+		h.runner.onEpochStarted(epochAt(11, HOP0))
+		h.arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		await h.runner.dispatch({ type: "pause" })
+		const lease = h.arbiter.lease!
+		h.arbiter.lease = null
+		await h.runner.leaseLost(lease, "preempted-operator")
+		expect(h.record).toMatchObject({ state: "paused", reason: "operator" })
+		return h
+	}
+
+	it("stays paused(operator) with a plain 409 on a transient refusal", async () => {
+		for (const detail of [
+			"releasing",
+			"recovery pending",
+			"holder is starting",
+		]) {
+			const { runner, arbiter, record } = await pausedWithoutLease()
+			arbiter.refuse = detail
+			await expect(
+				runner.dispatch({ type: "resume", takeover: false }),
+			).rejects.toMatchObject({ statusCode: 409, code: "SCANNER_SOURCE_BUSY" })
+			expect(record).toMatchObject({ state: "paused", reason: "operator" })
+		}
+	})
+
+	it("goes to paused(resume-blocked) when another job holds the lease", async () => {
+		const { runner, arbiter, record } = await pausedWithoutLease()
+		arbiter.refuse = "Lease held by scanner job j_other"
+		await expect(
+			runner.dispatch({ type: "resume", takeover: false }),
+		).rejects.toMatchObject({ statusCode: 409 })
+		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
 	})
 })

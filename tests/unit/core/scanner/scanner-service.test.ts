@@ -724,6 +724,104 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
+	// ---- Task 35 fix round 2: explicit resume of a preempted sweep ----
+
+	it("resumes a sweep preempted by an operator write at once (fix round 2)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await tick(20)
+		expect(h.service.getJob(job.id)?.reason).toBe("preempted-operator")
+		await h.service.resumeJob(job.id, { takeover: false })
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(job.id)
+		await h.service.stop()
+	})
+
+	it("refuses the resume of a relay-preempted sweep while the relay holds control (fix round 2)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		h.tuner.setControl("rtl", "external")
+		await tick(20)
+		expect(h.service.getJob(job.id)?.reason).toBe("preempted-relay")
+		await expect(
+			h.service.resumeJob(job.id, { takeover: false }),
+		).rejects.toMatchObject({ statusCode: 409, code: "SCANNER_SOURCE_BUSY" })
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "preempted-relay",
+		})
+		h.tuner.setControl("rtl", "internal")
+		await h.service.resumeJob(job.id, { takeover: false })
+		expect(h.service.getJob(job.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(job.id)
+		await h.service.stop()
+	})
+
+	/** low(30) and mid(40) wait as preempted-job; high(60), operator-paused, lost the lease to a REST write. */
+	async function twoWaiters() {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const low = await h.service.createJob(sweep(30))
+		await untilRunning(h, low.id)
+		const mid = await h.service.createJob(sweep(40))
+		await untilRunning(h, mid.id)
+		const high = await h.service.createJob(sweep(60))
+		await untilRunning(h, high.id)
+		await h.service.pauseJob(high.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await tick(20)
+		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
+		expect(h.service.getJob(mid.id)?.reason).toBe("preempted-job")
+		expect(h.service.getJob(high.id)?.reason).toBe("operator")
+		expect(holderOf(h)).toBeUndefined()
+		return { h, low, mid, high }
+	}
+
+	it("resumes only the best preempted-job waiter on a free lease (fix round 2, P16)", async () => {
+		const { h, low, mid } = await twoWaiters()
+		await expect(
+			h.service.resumeJob(low.id, { takeover: true }),
+		).rejects.toMatchObject({ statusCode: 409, code: "SCANNER_SOURCE_BUSY" })
+		expect(h.service.getJob(low.id)?.reason).toBe("preempted-job")
+		expect(holderOf(h)).toBeUndefined()
+		await h.service.resumeJob(mid.id, { takeover: false })
+		expect(h.service.getJob(mid.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(mid.id)
+		// a held lease refuses any other waiter
+		await expect(
+			h.service.resumeJob(low.id, { takeover: true }),
+		).rejects.toMatchObject({
+			statusCode: 409,
+			message: `Lease held by scanner job ${mid.id}`,
+		})
+		await h.service.stop()
+	})
+
+	it("widens a queued filtered arbitration with an unfiltered request (R3)", async () => {
+		const { h, mid } = await twoWaiters()
+		const internals = h.service as unknown as {
+			queueArbitration(
+				sourceId: string,
+				eligible?: (r: unknown) => boolean,
+			): void
+		}
+		internals.queueArbitration("rtl", () => false)
+		internals.queueArbitration("rtl")
+		await tick(20)
+		// the widened run handed the best waiter its preemptor-idle; high (created after mid) grew
+		// mid's impact, so it is blocked rather than running. A filtered-only run leaves it waiting.
+		expect(h.service.getJob(mid.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "resume-blocked",
+		})
+		await h.service.stop()
+	})
+
 	it("answers an invalid settings patch with 400 and rolls back a patch it could not save (finding 7)", async () => {
 		const h = serviceHarness({ patch: noPassive })
 		await h.service.start()

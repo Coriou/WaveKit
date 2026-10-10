@@ -163,6 +163,19 @@ const ROWS: [string[], string, string, string[]][] = [
 		"paused(resume-blocked)",
 		["report-impact", "release-decoders"],
 	],
+	// explicit resume of a preempted job (fix round 2; the service admits only the best waiter on a free lease)
+	[
+		PREEMPTED,
+		"resume:plain",
+		"running",
+		["acquire-lease", "hold-decoders", "resend-hop"],
+	],
+	[
+		PREEMPTED,
+		"resume:takeover",
+		"running",
+		["acquire-lease", "hold-decoders", "resend-hop"],
+	],
 	[["paused(operator)"], "resume:plain", "running", ["resend-hop"]],
 	[["paused(operator)"], "resume:takeover", "running", ["resend-hop"]],
 	[
