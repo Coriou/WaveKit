@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest"
 
 const bake = readFileSync("docker/bake.hcl", "utf8")
 const dockerfile = readFileSync("Dockerfile", "utf8")
+const dockerignore = readFileSync(".dockerignore", "utf8").split("\n")
 const target = (name: string) =>
 	bake.slice(
 		bake.indexOf(`target "${name}" {`),
@@ -43,5 +44,23 @@ describe("wavekit-chan image integration (addendum §10)", () => {
 		expect(stage("final-base")).toContain("COPY --from=chan-build")
 		expect(stage("final-sdrpp")).not.toContain("chan-build")
 		expect(stage("final-demod")).not.toContain("chan-build")
+	})
+	it("ships the third-party notices next to the binary (final review infra M8)", () => {
+		// Explicit re-include after `*.md`, so a later widening (e.g. `**/*.md`) cannot drop the notices.
+		const reinclude = dockerignore.indexOf("!native/wavekit-chan/LICENSES.md")
+		expect(reinclude).toBeGreaterThan(dockerignore.indexOf("*.md"))
+		expect(dockerfile).toContain(
+			"COPY native/wavekit-chan/LICENSES.md /usr/share/doc/wavekit-chan/LICENSES.md",
+		)
+		const notices = readFileSync("native/wavekit-chan/LICENSES.md", "utf8")
+		for (const crate of [
+			"serde",
+			"serde_core",
+			"serde_json",
+			"itoa",
+			"memchr",
+			"zmij",
+		])
+			expect(notices).toMatch(new RegExp(`^\\| ${crate} +\\|`, "m"))
 	})
 })

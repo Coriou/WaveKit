@@ -621,8 +621,10 @@ COPY --from=readsb-build /usr/local/bin/readsb /usr/local/bin/
 COPY --from=csdr-build /usr/local/bin/csdr /usr/local/bin/
 COPY --from=csdr-build /usr/local/lib/libcsdr* /usr/local/lib/
 
-# wavekit-chan core channelizer (opt-in via channelizer.enabled)
+# wavekit-chan core channelizer (opt-in via channelizer.enabled), with the
+# third-party notices of the crates linked into it
 COPY --from=chan-build /usr/local/bin/wavekit-chan /usr/local/bin/
+COPY native/wavekit-chan/LICENSES.md /usr/share/doc/wavekit-chan/LICENSES.md
 
 # SoapyRTLTCP module so acarsdec / dumpvdl2 can stream from rtl_tcp
 COPY --from=soapy-rtltcp-build /usr/local/lib/SoapySDR/modules0.8/librtltcpSupport.so /usr/local/lib/SoapySDR/modules0.8/
