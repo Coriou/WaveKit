@@ -861,3 +861,30 @@ Request: add the three codes to the union and enum, additively; core then emits
 `suspension { reasonCode, since }` for them. No other field changes.
 
 **Landed on `main` 2026-10-10** (merge of `feat/core-channelizer`; channelizer default off, all seven per-decoder flags gate-verified, see `fixtures/GOLDENS.md`). Landing grep: `cli/source/view-models/decoder-rows.ts` reads `suspension?.reasonCode` and renders a code-less suspension as plain "suspended", so no CLI change is required. The web dashboard (`design/web-dashboard`) should treat `suspended: true` without a `suspension` object the same way.
+
+## Main → Scanner / CLI / Web: spectrum profile scope — 2026-10-10 (decision, NOT landed)
+
+User-confirmed scope: bounded simultaneous CLI/web spectrum profiles in scanner S1-B;
+genuine higher-resolution viewed-slice FFT in a separate follow-up; WS tuning follows
+coalesced REST/accepted-state latency measurement. First connected web milestone:
+spectrum → tune → identify → inspect → listen. Access target: single operator on local/LAN,
+with authentication and explicit origins covering REST, WS and audio before live browser controls.
+
+Scanner owns the Task 24/25/37a implementation and exact reviewed contract. See
+`docs/ROADMAP.md` §8, "Spectrum contract amendment for scanner S1-B", for the scope:
+- Preserve planned scanner 10 Hz / 512-bin defaults; add bounded per-client source/profile
+  selection. Shared source engines build each profile once and route only matching frames/snapshots.
+- Separate worker summary detail from client bins. The current pipeline reduces bins before the
+  service sees them. Evaluate a 2048-bin summary ceiling with measured traffic/CPU; it is a bounded
+  bridge, not true slice zoom. Report actual bin width/count and native/effective resolution.
+- Keep detector behavior independent of display choices; preserve stream/epoch/trust and clear holds
+  across retunes/layout changes. Release demand on unsubscribe/disconnect.
+- Check simultaneous CLI/web profiles, source/profile switching, late join/reconnect snapshots,
+  epoch transitions and cleanup; publish final DTO/config names and limits before landing.
+- Keep Task 25 scanner DTO edits narrow. Any eventual WS tuning uses the existing arbiter,
+  authorization and operator-origin/preemption semantics; no new WS command bus in this amendment.
+
+Main approves this bounded profile scope. Scanner should incorporate it in its delta/brief and
+complete its normal review/checkpoint gates before dispatching the amended Task 37a. Report the
+contract and implementation effort; bring conflicts or further scope changes back to Main.
+The earlier 37a hold is satisfied by incorporating and reviewing this amendment.

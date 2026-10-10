@@ -1,12 +1,12 @@
 # Reliability and portable receiver roadmap
 
-Updated 2026-10-09. The immediate software sequence is below; numbered sections
+Updated 2026-10-10. The immediate software sequence is below; numbered sections
 track related work and acceptance rather than blocking all work on hardware.
 Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate priorities (re-ordered 2026-10-09)
+## Immediate priorities (re-ordered 2026-10-10)
 
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
@@ -18,74 +18,82 @@ Pi image); decoder band defaults with regions, persisted per-decoder band
 overrides and operator-start pinning; `source:removed`; the signal-flat source
 warning; the Pi operator page redesign on a single port 80 and the brand kit.
 
-1. **Live audio follow-ups**. The live analog fixes and dsd-fme call segmentation
-   were merged and verified over the air on 2026-10-09 (main 34f56e1). Evidence:
-   `output/acceptance/voice-decode-2026-10-09.json`. Results: squelch silent when
-   idle, clear NFM voice with `offsetHz`, and 2 PTT presses giving 2 DMR calls with
-   0 CRC errors. Still open:
-   - Latency: on 2026-10-09 most of the ~2-5 s lag was ffplay's own buffering.
-     `curl | play --buffer 512` sounded almost instant (user). Measure the remaining
-     stages (Pi queue, Wi-Fi, fanout, csdr rings, the 400 ms digital-voice jitter
-     buffer) only if a real client needs lower latency.
-   - A ~0.75 s noise tail when the squelch closes.
-   - One of the two DMR calls ended by the 4 s fallback timeout because its TLC
-     terminator was not decoded, so its duration stops at the last decoded line.
-     The calls did not split. Call events now carry `startedAt`/`endedAt`
-     ([DIGITAL-VOICE.md](DIGITAL-VOICE.md#call-duration-vs-event-timing-2026-10-09-anomaly)).
-   - Lazy pipeline start when no client is connected (deferred).
-   - `offsetHz` is set per decoder and is static; the channelizer replaces it.
-   - Digital voice audio (§5b): merged and verified over the air (main 9ff133d,
-     run10: 2 calls, CRC 0, FEC 0, 0.4 % muted, intelligible).
-2. **Next Pi image acceptance** (candidate `operator-20261009`, software-verified
-   only): clean-card flash on stable power, port 80 page, deliberate reboot with
-   the clean-shutdown journal marker and boot report, dongle hotplug, Ethernet,
-   Mac auto-reconnect and tuner replay. Waiting on the replacement power supply.
-3. **Streaming stability on stable power**: 30-minute continuous baseline, then an
-   overnight soak with decode counts and no external SDR++ client during it.
-4. **CLI overhaul merge** (CLI team): done 2026-10-09, fast-forwarded on local
-   `main` to `1baa845` (not pushed). Consumes the 2026-10-09 contracts up to
-   87f9f06; only CLI paths changed. Rebuild `cli/dist` to pick it up.
-5. **Core channelizer**: plan written 2026-10-09
-   ([plan](superpowers/plans/2026-10-09-core-channelizer.md)); implement in a
-   dedicated session after the CLI merge. Live evidence 2026-10-09 (loaded
-   Mac, all nine decoders, 2.048 Msps): ~7.5 of 8 cores, every branch dropped
-   8–36 %; four per-decoder `sox rate -h` resamplers cost ~1.5 cores. Band-aware
-   suspension and pinning reduce load at a single tuned band in the meantime.
-   Code complete and reviewed on 2026-10-10 on branch `feat/core-channelizer`
-   (not merged). It covers the Rust `wavekit-chan`, the Node integration, seven
-   opt-in decoders, the fixture composer, the capacity tooling and the Docker
-   stage. Remaining: the quiet-host phase (image build, golden and voice gates,
-   capacity run) and the operator's DMR and voice capture. Every decoder stays
-   off until its golden gate passes, then the branch merges to main. Fixture
-   sourcing (user, 2026-10-09): synthetic IQ for AIS, POCSAG, APRS and ACARS;
-   real captures for DMR and analog voice (operator's radio), rtl_433 sensors and
-   aircraft. Unlicensed public recordings may be used when they are fetched from
-   their source and never redistributed. Open limitation: opening a channel
-   stalls `wavekit-chan` input. Fix that before running the channelizer on a
-   Pi-class host.
-6. **Spectrum and waterfall service** (§8): important, get it right. It feeds
-   the CLI and web waterfalls and the scanner's discovery. It is also the first
-   step toward WaveKit's founding use case: an operator sees a signal on a
-   waterfall, and every suitable decoder tries to identify and decode it.
-   Next: identify the many signals visible in SDR++ that nothing decodes today.
-   Start with a diagnostic pass that needs no new code (artefact checks, short
-   IQ snapshots, offline decoder attempts), then build the spectrum service,
-   the detector and the scanner's identify mode.
-   Signal discovery scanner: spec and plan are done
-   ([plan](superpowers/plans/2026-10-09-signal-discovery-scanner.md)). Batch
-   S1-A (tasks 1–22, including the spectrum engine) runs in its own worktree and
-   does not depend on the channelizer. S1-B starts only after the channelizer is
-   merged on main.
-7. Later: API access/origin policy (prerequisite for host controls and a web
-   UI); a stale `caps.centerFreq` after a retune that bypasses the relay can
-   miss band suspensions. Also later: project license (§9) and agentic setup
-   modernisation (§10).
+The CLI overhaul and core channelizer are merged and included in the main push
+at `63c9c49` (2026-10-10). Channelizer golden/voice gates passed for seven
+adapters; `channelizer.enabled` remains false. The
+[capacity report](CAPACITY-2026-10-10-CHANNELIZER.md) records N=1/4 passes and an
+N=8 conditional pass: the shared input branch dropped 1.4–2 % under a four-CPU
+quota, versus zero with six CPUs. Combined scanner/audio capacity and live RF
+acceptance still need measurement.
+
+The next connected web milestone is **spectrum → tune → identify → inspect →
+listen**. The web dashboard is in design on `design/web-dashboard`; its
+`docs/web/CORE-GAPS.md` (audited at `fd42e45`, 2026-10-10) supplies the feature
+inventory mapped below. Canvas work can continue independently. Software,
+local-receiver acceptance and optional Pi acceptance have separate gates.
+
+1. **Finish scanner S1-B with shared spectrum contracts** (§5, §8). S1-A passed
+   its checkpoint and was rebased onto main; S1-B is running in the scanner's
+   own session. Add bounded simultaneous CLI/web spectrum profiles to Task 37a,
+   coordinating the Task 24/25 settings and DTOs first. Preserve planned scanner display
+   defaults and keep detector behavior independent of client display choices.
+   Identify and automated burst capture remain in this batch. Land after
+   CHECKPOINT S1 and shared-contract review; avoid a second spectrum service.
+2. **Prepare browser access policy and true zoom** (§4, §8). The initial access
+   target is one operator on a local/LAN deployment, with authentication and
+   explicit origins across REST, WS and audio. It must land before connecting
+   browser controls to the live receiver. Design genuine higher-resolution
+   viewed-slice FFT as a separate follow-up to S1-B; cropping existing display
+   bins is insufficient. Measure coalesced REST drag-to-tune latency before
+   choosing a WS tuning transport, preserving tuner arbitration either way.
+3. **Scanner S2, then S3; connect identification and listening** (§5, §5b).
+   Reuse channel probes, analog evidence recording and mixed-mode monitoring
+   already in the scanner plan. Size probe budgets from the combined workload,
+   using the conditional N=8 result conservatively. CLI waterfall and web
+   rendering can proceed against agreed DTOs. A first connected client need
+   not wait for every Pi acceptance test, but must report capabilities and
+   provisional RF evidence honestly.
+4. **Shared Activity, operator data and recordings** (§4a, §5c). Design event
+   identity/envelope, persistence, search and replay together; link scanner
+   discoveries and observations rather than replacing their recovery stores.
+   Establish recording catalog and deletion ownership before per-recording
+   Keep, trims and downloads. Saved frequencies and shared settings use the
+   same public contracts for CLI/web. Design may run alongside scanner; shared
+   storage/audio integration follows settled S2/S3 contracts.
+5. **Live identification and channelizer acceptance** (§3, §5). Close the loop
+   with scanner captures promoted to decoder fixtures, S4 detection/false-alarm
+   checks and live raw/channelizer A/B. Enable-by-default is a separate decision
+   after the live evidence. On a Pi-class host, fix open-time filter design
+   stalling input before enabling the channelizer there. The earlier no-code
+   signal diagnostic is complete; artefact rejection remains part of identify.
+   This acceptance proceeds independently of Activity/catalog implementation.
+6. **Richer listening, recordings and maps** (§5b, §5c, §8b). Follow the shared
+   foundations with tone squelch, audio DSP controls, manual recordings,
+   viewed-span IQ capture/playback, durable position trails and coverage.
+   Station location and basic existing-position display can ship earlier as
+   bounded tasks. Full map/offline assets and transcription are later scopes.
+7. **Parallel acceptance and release work**. The next Pi image candidate
+   (`operator-20261009b`) still needs stable-power clean-card acceptance:
+   deliberate reboot/boot report, hotplug, Ethernet, a 30-minute baseline and
+   soak without an external SDR++ client. Coordinate receiver and Docker build
+   windows. Diagnose the CI bake override and validate ARM64 without publishing
+   before enabling automatic multiarch GHCR publication (§11). Agent setup
+   consolidation (§10) remains a separate maintenance task.
+
+Live-audio evidence from 2026-10-09 remains valid: silent idle squelch, clear
+NFM at an offset, intelligible DMR and two PTT presses producing two calls.
+Open follow-ups include the ~0.75 s squelch noise tail, a DMR call ending by
+fallback timeout when its terminator was missed, and lazy live-demod start.
+Most measured playback lag was ffplay buffering; measure actual client stages
+before changing buffer defaults. See [DIGITAL-VOICE.md](DIGITAL-VOICE.md).
 
 The [channelizer research review](REVIEW-2026-10-08-CHANNELIZER.md) records the
 buffer finding, corrected rate arithmetic, limits of the Pi benchmark and missing
 fixture evidence. Exploratory research is not a final implementation spec.
 
-### Status at end of 2026-10-08 (committed code; NOT yet deployed to the Mac app)
+### Historical status at end of 2026-10-08
+
+This records the earlier checkpoint; the current landing status is above.
 
 - CLI requests 1–4 are merged: `source:status` and `decoder:status` WebSocket
   events and additive `DecoderStatus` fields (`sourceId`, `targetFrequenciesHz`,
@@ -142,8 +150,8 @@ and the earlier candidate's results remain separate claims.
       Wi-Fi path passed on the operator-page image (2026-10-08); Ethernet pending.
 - [ ] Recover the laptop's IQ stream automatically after a receiver reboot or
       hotplug. Observed failure: the core kept a half-open connection marked
-      connected/stale and never reconnected. Fix (stall watchdog) is merged but
-      not yet deployed.
+      connected/stale and never reconnected. Fix (stall watchdog) is merged and
+      deployed to the Mac; repeat acceptance against the new image on stable power.
 
 The 2026-10-08 Wi-Fi run passed unattended installation, direct key-based SSH,
 receiver startup and reboot recovery. USB reattachment exposed a stale receiver
@@ -156,11 +164,10 @@ was re-plugged), a weak Wi-Fi link and substantial delivery loss at times.
 
 Validate SD writing, unattended first boot and sustained streaming separately.
 Current development hardware has repeated undervoltage and substantial IQ loss
-over Wi-Fi; a replacement supply is expected on 2026-10-09. Proceed with the
-clean-card installer test on the current supply, recording any power events so
-they are not confused with installer failures. Streaming stability acceptance
-still requires stable power. Before erasing, verify the corrected payload and
-identify the actual target disk again.
+over Wi-Fi in earlier runs. Confirm stable power before the next baseline
+and soak; record power events separately from installer failures. The next
+image candidate still needs its own clean-card acceptance. Before erasing,
+verify the corrected payload and identify the actual target disk again.
 
 ## 2. Network performance and portability
 
@@ -191,22 +198,17 @@ pending. Coordinate any live receiver/network changes with the hardware session.
 - [ ] Make the SDR host re-apply its configured gain and sample rate when the last
       rtlmux client disconnects, so a departing client cannot leave the receiver
       under-driven (observed: gain left at index 11, samples spanning 124–131).
-- [ ] Sample-rate model, WaveKit-wide: every decoder (including future ones)
-      declares the input rate it works best at, the rates it accepts and the
-      minimum below which it cannot work; the manager resolves each decoder
-      against the source rate, suspends decoders with a machine-readable reason
-      (`insufficient-sample-rate`) and resumes them when the rate rises; the
-      per-decoder verdict (best / acceptable / unusable, with the reason) and the
-      source's valid rate presets travel through REST/WebSocket/`api-types` so
-      the CLI (and later web UI) can tell the user which rate suits which
-      decoder. Keep capture requirements separate from adapter output and decoder
-      stdin rates; unknown requirements remain explicit rather than disabling
-      third-party decoders. The core already sets the upstream rate via
-      `POST /api/tuner/:sourceId/sample-rate` and the SDR++ relay; keep both.
-      A channelizer (`docs/RESEARCH-2026-10-08-CHANNELIZER.md`) gives each
-      decoder an exact requested rate when supported, but cannot recover RF
-      bandwidth absent from the capture. Passband/transition margins and source
-      quality remain part of channel admission.
+- [x] Implement the decoder-instance sample-rate model: declared requirements,
+      rate assessment, reversible suspension/resume and shared API reporting.
+      Keep capture requirements separate from adapter output and stdin rates;
+      unknown third-party requirements remain explicit. A channelizer cannot
+      recover RF bandwidth absent from the capture. Hardware/live acceptance
+      and source capability presets remain separate work.
+- [ ] Expose per-tuner gain values and sample-rate presets through core capability
+      discovery. Core already supports gain in tenths dB and gain index, and
+      validates RTL sample-rate ranges; CLI presets are currently client-local.
+      Reuse that foundation, report table provenance/unknown values honestly,
+      and share presets with both clients.
 - [ ] Decided 2026-10-08: no lossy bit reduction, no lossless-only compression
       (measured 0.68–0.86 at real gains), no decoders on the Pi for now. Details
       and measurements: `docs/RESEARCH-2026-10-08-WIFI-IQ-TRANSPORT.md`.
@@ -238,7 +240,8 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       Accepted frequencies now update source/decoder metadata, and tuning-driven
       decoder restarts are serialized. Reconnect replay of the last accepted state
       (on first payload), caps reconciliation and an rtl_tcp stall watchdog are
-      merged; deploy and live re-test remain.
+      merged and deployed to the Mac; stable-power reboot/hotplug acceptance
+      against the next Pi image remains.
 - [x] Preserve arrays when applying indexed environment overrides.
 - [x] Fix recording EOF cleanup (file/timers released, downstream EOF after
       buffered final data; read errors stop looping playback).
@@ -251,12 +254,18 @@ Wi-Fi/Ethernet and direct links need separate acceptance tests.
       counter resets, 10 s deadline), independent of USB, processes and clients;
       not yet deployed to the Pi. Combined core + Pi drop reporting remains pending.
 - [ ] Exercise real decoder IQ fixtures, lifecycle failure cases, and memory limits.
+      Channelizer golden gates cover seven adapters. Extend RF evidence with
+      scanner captures and real voice/sensor/aircraft recordings; composed fixtures
+      remain useful where live signals are unavailable. Keep private capture
+      payloads out of the public repository.
 
 ## 4. API and event foundation for multiple clients
 
-The CLI is the first consumer; a future web interface must use the same public
-contracts. Audit existing REST, WebSocket, SSE and binary/server streaming paths
-before choosing extensions or promising compatibility.
+The CLI and the web dashboard under design are two consumers of the same public
+contracts. Audit existing REST, WebSocket and binary/server streaming paths
+before extending them. Announce shared contract changes in
+`docs/CLI-COORDINATION.md` and inspect both clients before landing; web canvas
+snapshots are design references, not production consumers yet.
 
 REST routes have Fastify schemas and Swagger; `/ws` supports channel subscriptions
 and caps incoming messages at 1 MiB. Outgoing payloads are now bounded per client
@@ -275,16 +284,46 @@ These findings describe the current code, not completed API acceptance.
 - [x] Bound WebSocket output queues, isolate slow clients and detect dead peers.
 - [ ] Bound per-client buffers and define overload behavior independently for
       telemetry, decoder events, audio and IQ.
-- [ ] Define authentication, origin policy, authorization and safe LAN exposure.
+- [ ] Implement single-operator local/LAN authentication and explicit origin
+      policy before live browser controls. Cover REST, WS upgrades/commands,
+      audio and recording downloads; preserve CLI access. Internet-facing
+      accounts and multi-user roles are later scopes. CORS alone is insufficient.
 - [ ] Test simultaneous CLI/web clients, slow readers, reconnects, server restart,
       event ordering, resource cleanup and documented throughput limits.
 - [ ] Publish examples and contract tests for REST, WebSocket, SSE and streaming.
 
+## 4a. Shared Activity and operator data
+
+This extends §4 for the web Activity panel and shared CLI/web/mobile state.
+Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
+journals, discovery search and settings are separate domain foundations.
+
+- [ ] Add a common decode envelope with stable identity, category, title, fields,
+      actual channel frequency, source/decoder/job provenance and raw JSON.
+      Preserve existing decoder payloads; source centre alone cannot locate an
+      offset probe's decode.
+- [ ] Provide persistent, searchable events with paging and full-text indexing,
+      including transcripts when available. Link discoveries, observations and
+      recordings without making scanner recovery journals a public event API.
+- [ ] Define live event replay from a cursor with snapshot ordering, duplicate
+      handling, restart/retention gaps and filtered subscriptions. Separate
+      durable Activity events from replaceable spectrum/status telemetry.
+- [ ] Store saved frequencies in core: name, frequency, mode, bandwidth and tone
+      settings, shared by all clients. Decoder band overrides and automatically
+      observed discoveries remain distinct objects.
+- [ ] Persist and synchronize operator settings, presentation preferences and
+      command-history inputs for palette ranking. Reuse operational tuner/audio
+      and scanner settings where they already exist; define update/conflict
+      semantics rather than creating a second scanner settings store.
+
 ## 5. Protocol-aware signal discovery and scanning
 
-Study and prototype this as a major product feature once tuning, source ownership
-and decoder lifecycle are reliable. A scanner should discover and characterize
-activity, not merely stop on a strong signal.
+Implementation follows the [scanner plan](superpowers/plans/2026-10-09-signal-discovery-scanner.md).
+S1-A spectrum/detector/store foundations passed their checkpoint on the scanner
+branch; S1-B is in flight and is not merged on main. S2 adds channel probes and
+analog recording; S3 adds monitor/listen; S4 supplies live acceptance. Preserve
+that dependency order. A scanner should characterize activity and confirm a
+protocol with decoding.
 
 - [ ] Scan an operator-selected frequency range or the receiver's supported tuning
       range with explicit steps, bandwidth, dwell time and exclusions.
@@ -306,15 +345,14 @@ activity, not merely stop on a strong signal.
 
 ## 5b. Digital voice audio
 
-Requested by the user on 2026-10-09. Today dsd-fme runs with `output: "null"`: it reports
-DMR call metadata (talkgroup, source, slot, color code, error counts), but nobody can
-hear the decoded voice. Make digital voice a first-class audio stream, like live analog
-audio.
+Digital voice landed and was verified over the air on 2026-10-09. Analog and
+digital PCM currently use separate HTTP servers; WS channels carry metadata
+and status. Shared browser audio and richer controls remain open.
 
 - [x] Output decoded voice from dsd-fme (AMBE+2/IMBE via mbelib) for DMR first, then
       P25 phase 1/2, NXDN, dPMR, D-STAR and YSF where dsd-fme supports them. Stream it
-      over the same HTTP/WS audio path as live demod, with per-call metadata
-      (protocol, talkgroup, source, slot) attached. Done 2026-10-09: dsd-fme
+      over HTTP with WS per-call metadata
+      (protocol, talkgroup, source, slot). Done 2026-10-09: dsd-fme
       `-o udp` into a paced 8 kHz mono stream on port 8082, `digital-voice` WS
       channel, `/api/digital-voice/*`, on by default
       ([DIGITAL-VOICE.md](DIGITAL-VOICE.md)). YSF datagrams verified on the
@@ -334,6 +372,56 @@ audio.
       is not split while PTT is held. Done 2026-10-09 (run10) after dropping `csdr dcblock`
       from the dsd-fme input chain (it muted the start of every TDMA burst; regression check
       `scripts/dsd-fme-voice-ab.mjs`). Evidence: `output/acceptance/voice-decode-2026-10-09.json`.
+
+- [ ] Provide one bounded WS audio stream at a stable 48 kHz, auto-routing analog
+      and decoded voice while retaining manual selection. Reuse scanner S3's
+      routing and arbitration; its planned 8 kHz HTTP monitor is a foundation,
+      not completion of this item. Avoid disconnecting clients on rate changes.
+- [ ] Add automatic floor-based and noise squelch, and update controls without
+      unnecessary pipeline restarts. Preserve current threshold/hang behavior
+      and fix the observed noise tail.
+- [ ] Expose AGC off/slow/fast where supported, including FM; implement real noise
+      reduction, audio noise blanker, notch, CW BFO and DSB demodulation.
+      Current filter presets and AM-based CW/DSB do not fulfill these controls.
+- [ ] Detect CTCSS and decode DCS code/polarity; expose tones on live status and
+      transmission events, saved frequencies and tone squelch. Reuse scanner
+      Task 41 channel features; its DCS presence boolean is not a decoded code.
+- [ ] Emit analog transmission start/end/duration events from squelch with stable
+      identity and recording links. Detector tracks and squelch transmissions
+      have different boundaries; reconcile them explicitly.
+- [ ] Expose DMR talker alias and a defined error-rate measure after verifying
+      pinned dsd-fme output. Existing CRC/FEC counts and internal bad-signal
+      ratio do not establish voice BER or an alias parser.
+
+## 5c. Recording catalog, capture and playback
+
+Reuse digital per-call WAVs, scanner evidence retention and the planned S2
+analog recorder. A shared catalog links each recording to its provenance;
+existing IDs need a compatibility strategy. Every deletion owner must honor
+retention and Keep. Discovery Keep protects an emitter's evidence collectively;
+recording Keep protects one recording independently.
+
+- [ ] Record analog transmissions and digital calls automatically across supported
+      live and scanner paths; expose bounded retention and playback by ID with
+      seek. Scanner WAV download alone does not provide seek or all-call coverage.
+- [ ] Keep/star individual recordings across clients; un-keeping restores normal
+      retention. Define disk reserve/low-space behavior and coordinate the
+      digital WAV pruner with scanner/catalog retention before enabling this.
+- [ ] Support manual recording with name/note and non-destructive in/out trim;
+      apply trim to playback and exported downloads.
+- [ ] Capture the viewed IQ span and export SigMF; play captures as a source for
+      spectrum, audio and compatible decoders, then restore live ownership.
+      Reuse paced IQ file sources and scanner Task 34a capture/decimation rather
+      than implementing another playback engine. Reconcile recording-source
+      capability metadata and spectrum/live-audio eligibility.
+- [ ] Expose storage totals: kept bytes, automatic-recording bytes, free space,
+      configured/effective retention and reasons for any shortened retention.
+      Existing evidence low-disk guards stop writes; do not claim automatic
+      retention shortening until it is implemented.
+- [ ] Provide stable recording links and trimmed WAV/Opus downloads. Deep-link
+      navigation belongs to clients; IDs, access policy and export belong to core.
+- [ ] Future: bounded transcription jobs with per-recording transcript/status,
+      searchable through §4a. Depends on finalized audio and stable catalog IDs.
 
 ## 6. Lightweight Pi operator page
 
@@ -372,8 +460,9 @@ operator-page image (2026-10-08) served the page from a fresh card: undervoltage
 state (`rpi_volt`), the `cpu-thermal` zone and `/proc/net/wireless` link data
 are visible to the receiver container; container memory accounting is not
 visible from inside it, and throttling stays unavailable by design. The page
-showed the USB hotplug transition. A later visual polish of the status and
-setup pages is committed but not yet in an image.
+showed the USB hotplug transition. Later status/setup polish is included in
+the next operator image candidate; that candidate still needs its own
+stable-power clean-card acceptance.
 
 Known limits: on current Raspberry Pi kernels the firmware's "since boot" power
 bits are cleared by the kernel's own polling and throttling flags need
@@ -386,19 +475,11 @@ and the full page responds, port 80 relays to it (8080 keeps serving it directly
 controls remain deliberately absent until authentication, authorization and
 origin/CSRF protection exist.
 
-**Pi UI: one address for the user** (implemented 2026-10-09; ships
-with the next image and its clean-card acceptance). Shape chosen: the port-80
-service stays the owner and relays to the receiver after setup, instead of
-handing the port over, so there is no gap and a stopped receiver falls back to
-the setup page. Original request: Two ports (80 for
-setup, 8080 for status) confuse operators. Goal: typing `http://<pi>/` always
-shows the right page — the setup page while installing, the status page once
-setup completes. Preferred shape: the status service takes over port 80 when
-setup finishes (the early setup server releases it), with 8080 kept as a
-compatibility alias or redirect; the early server's honest handoff check
-(status page responds before switching) must survive. Ship in an image after
-the 2026-10-08b candidate, with its own clean-card acceptance (setup → switch
-→ reboot keeps port 80 on the status page).
+**Pi UI: one address for the user** (implemented 2026-10-09, included in the
+next image candidate; clean-card acceptance pending). Port 80 owns the setup
+page and relays to the receiver once the status page answers, with a setup
+fallback if the receiver stops. Port 8080 remains a compatibility endpoint.
+Verify setup → status → reboot on the candidate itself.
 
 ## Delivery discipline
 
@@ -411,10 +492,11 @@ Record test results honestly, including skipped tests and hardware limitations.
 ## 7. CLI dashboard UI and UX overhaul
 
 Run this as a dedicated design/implementation team alongside core reliability and
-Pi operator-page work. Use Opus agents for implementation and review, with Fable
-as a consultant for difficult product/design decisions and critical review.
+Pi operator-page work. Use Sol for bounded implementation and audits, and Astra
+for architectural review; retain other model expertise where the task needs it.
 
-Done 2026-10-09 (`1baa845`): user guide and validation in `docs/CLI.md`; rulings in
+Merged 2026-10-09 (`1baa845`), included in the 2026-10-10 main push: user guide
+and validation in `docs/CLI.md`; rulings in
 `docs/superpowers/plans/2026-10-08-cli-dashboard-overhaul-decisions.md`. Open: CPU at
 50 msg/s is 8.6–8.7 % against an 8 % budget; band-override editing is not in the CLI;
 RF and hardware acceptance are outside what CLI tests can show.
@@ -446,11 +528,10 @@ RF and hardware acceptance are outside what CLI tests can show.
 
 Founding use case (user, 2026-10-09): WaveKit was created so the operator could
 find signals visually in SDR++ and have every decoder try to identify and decode
-them. Today decoders demodulate only the window centre, or a fixed per-decoder
-`offsetHz`, and WaveKit cannot see SDR++'s VFO through rtl_tcp. A signal
-elsewhere in the window therefore reaches no decoder. The fix is to detect
-emissions across the whole window, open a channelizer channel at each one, and
-try the plausible decoders there (identify mode, §5).
+them. The channelizer now supports offset channels, but automatic discovery and
+identify are not yet on main; legacy paths still use centre/static offsets and
+rtl_tcp does not expose SDR++'s VFO. Detect emissions across the window, open
+channels at their offsets and try plausible decoders there (identify mode, §5).
 
 Important; get it right. Operators find activity today by watching SDR++'s
 waterfall and waiting for an emitter to key up again. WaveKit should provide the
@@ -460,12 +541,17 @@ same view, and a program can do the watching more reliably than a person.
       averaged FFT of each source's IQ as a raw fanout consumer and publishes it
       on a general `spectrum` WebSocket channel. Rate and bins must suit a
       waterfall: 10 Hz or more and 1024 or more bins for the web; lower for the
-      CLI. Late-joining clients get a snapshot.
+      CLI. Late-joining clients get a matching snapshot. Scanner Task 37a owns
+      this service; support bounded simultaneous profiles and source selection
+      without client preferences changing detector behavior. Preserve the planned scanner
+      10 Hz / 512-bin default for subscriptions without options.
 - [ ] An activity detector on the full sample stream, not on display frames,
       so short TDMA or pager bursts are not missed. It keeps a per-bin noise
       floor and an N dB threshold, and merges adjacent bins into emissions with a
       centre, bandwidth, first and last seen times and a duty cycle. A persistent
       occupancy history keeps intermittent emitters known while they are idle.
+      Reuse scanner occupancy/discovery histories for the per-frequency band map;
+      Task 37a exposes occupancy rather than creating a second history store.
 - [ ] Receiver artefact masking: the DC spike at the tuned centre, IQ mirror
       images (a weaker copy at −f), and learned always-on spurs.
 - [ ] Hand-off to the scanner (§5): classification by bandwidth and band plan, a
@@ -478,6 +564,60 @@ same view, and a program can do the watching more reliably than a person.
       puts the frequency axis and every emission centre on the wrong RF. Fix it
       or show it as untrusted.
 
+### Spectrum contract amendment for scanner S1-B
+
+Decision 2026-10-10: profiles now, genuine slice zoom next; WS tuning follows
+latency measurement. Coordinate Tasks 24/25/37a in the scanner's owning session
+before changing shared contracts. This sets scope; the exact DTO/config names
+and measured limits belong to that session's delta/review.
+
+- Preserve the planned scanner default display settings for compatibility. Separate
+  the bounded worker summary-detail budget from a client's output bins; summary
+  reduction currently discards detail before Task 37a receives it. Evaluate
+  2048 summary bins as an initial bounded bridge, measuring worker traffic/CPU
+  and reporting actual detail when the native FFT provides fewer bins.
+- Add bounded per-client source/profile requests, share each source engine and
+  build each requested profile once. Route matching frames/snapshots and release
+  demand correctly on unsubscribe/disconnect. Limit distinct active profiles,
+  rates and bins; do not turn display preferences into detector restarts.
+- Preserve stream/epoch, capture axis, tuning trust, actual bin count/bin width
+  and discoverable native/effective spectral resolution. Clear accumulation on
+  epoch/layout changes; a snapshot must match its requested profile and epoch.
+- Verify simultaneous CLI/web profiles, source selection, profile switching,
+  late join/reconnect snapshots, retune boundaries and demand cleanup. Announce
+  final contracts in `docs/CLI-COORDINATION.md` before landing.
+- [ ] Follow-up: genuine higher-resolution FFT of the viewed slice, with bounded
+  DSP work and unchanged full-stream detection. Magnifying/cropping published
+  bins does not satisfy this item.
+- [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
+  WS tuning. Any transport reuses authorization, ordering, scanner preemption
+  and tuner origin semantics.
+- [ ] Implement source/channel DC removal, IQ correction and IQ swap as measured
+  sample-processing controls. Existing DC/image/spur masks only affect detection
+  and display; the ignored legacy IQ DC-block flag must not imply correction.
+
+## 8b. Positions, maps and coverage
+
+Extend existing ADS-B state and bounded in-memory trails. Durable cross-protocol
+position history belongs with §4a's event foundation; map reception coverage is
+separate from scanner RF sweep coverage.
+
+- [ ] Store station latitude/longitude/altitude with provenance, configurable by
+      clients, and pass location to readsb independently of the current
+      `enableMlat` option gate. When unset, derive a visibly approximate location
+      from received positions; do not use that estimate as authoritative station
+      coordinates for coverage. gpsd is a later extension.
+- [ ] Serve aircraft, vessel, APRS and mesh position trails with persistent
+      last-hour replay and a time cursor; reuse existing ADS-B tracking.
+- [ ] Aggregate 24-hour maximum received range per bearing for ADS-B and AIS,
+      based on explicit station location and valid timestamped positions.
+- [ ] Serve regional PMTiles, glyphs and style with bounded download/update and
+      storage accounting; support the design's online fallback. Offline asset
+      hosting follows the basic map and shared settings.
+- [ ] Extract positions from ACARS/VDL2 ADS-C/POS and AIS type 21 into the common
+      envelope, with fixtures, validity and entity provenance. Generic AIS JSON
+      lat/lon and current NMEA types 1/2/3 are only partial foundations.
+
 ## 9. Project license
 
 Done 2026-10-09 (`df7e7ee`): split license. WaveKit is AGPL-3.0-or-later (root
@@ -487,15 +627,31 @@ says that using WaveKit through its API does not put a program under the AGPL.
 The bundled GPL decoders run as separate processes, so they are aggregated, not
 linked. Open: `packages/brand` has no license field, because its fonts are OFL,
 its icons are MIT, and brand assets are not relicensed silently. The
-`wavekit-chan` crate is still marked ISC on `feat/core-channelizer` and will
-move to AGPL there.
+`wavekit-chan` crate is AGPL-3.0-or-later on main.
 
 ## 10. Agentic development setup modernisation
 
 The repo has `.kiro/` (specs, steering), `.vscode/`, `CLAUDE.md`, private
-memories and per-session handoffs, but no `AGENTS.md`. Replace this with one
-cross-harness setup that has no duplication. It should heal itself when it drifts
-from the code, and it should load only the context each task needs rather than
+memories and per-session handoffs. An `AGENTS.md` bridge is now on main and
+points all agents to canonical `CLAUDE.md` conventions. Consolidate this into
+one cross-harness setup with drift checks; the bridge is not the final
+consolidation. It should heal itself when it drifts from the code, and load
+only the context each task needs rather than
 injecting every skill, rule and constraint into every model. Decide what stays
 (`.kiro` specs or `docs/superpowers`), consolidate the conventions into one
 source, and add checks so the instructions cannot rot silently.
+
+## 11. CI images and release validation
+
+The main Docker workflow passes `CACHE_FROM_ONLY=false` through bake's target
+`set` overrides; it is a bake variable and belongs in the step environment.
+Fixing that wiring activates automatic image/cache publication on main pushes.
+
+- [ ] Validate the channelizer/core ARM64 build in a nonpublishing build or PR,
+      alongside AMD64, from a clean worktree and coordinated Docker window.
+- [ ] Correct the bake variable wiring and check GHCR visibility/permissions
+      before enabling multiarch publication. Publishing remains an explicit
+      release step after architecture validation.
+- [ ] Review Actions runtime/runner migrations separately from decoder correctness.
+
+No release check substitutes for live RF or Pi clean-card acceptance.
