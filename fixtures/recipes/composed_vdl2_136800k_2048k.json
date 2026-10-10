@@ -29,7 +29,7 @@
 			"sha256": "50a8dc2b270362d0f85f92c7dcf458fb3706e2ce0221ba2dfa86b6a5128a124b",
 			"format": "wav",
 			"sampleRate": 1050000,
-			"license": "GPL-3.0 (szpajder/dumpvdl2 repository license; synthetic test vector)",
+			"license": "GPL-3.0 (szpajder/dumpvdl2 repository license; synthetic test vector; no per-file grant; fetched from origin, not redistributed)",
 			"attribution": "szpajder/dumpvdl2 @ 686e87f test/vdl2_model_16b_1050kHz.wav: synthetic S16 I/Q, one burst at 0 Hz in 0.377 s. The WAV header says 44100 Hz; the samples are 1.05 Msps (dumpvdl2 README: oversample 10), so sampleRate overrides the header.",
 			"origin": "https://github.com/szpajder/dumpvdl2/tree/686e87f2294ef6275855ba7364bd4bb9a0f8f56a/test"
 		}
