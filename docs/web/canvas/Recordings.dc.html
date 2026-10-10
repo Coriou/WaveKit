@@ -101,7 +101,7 @@ body{margin:0;background:#0b1512}
 		</sc-if>
 
 		<sc-for list="{{groups}}" as="g" hint-placeholder-count="2">
-			<h3 style="position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 10px 6px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598; background: linear-gradient(rgba(16,27,23,.97) 72%, rgba(16,27,23,0))">{{g.label}}</h3>
+			<h3 style="position: sticky; top: 0; z-index: 2; margin: 0; padding: 12px 10px 6px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 13px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598; background: linear-gradient(#111d19 78%, rgba(17,29,25,0)); backdrop-filter: blur(12px)">{{g.label}}</h3>
 			<sc-for list="{{g.rows}}" as="r" hint-placeholder-count="3">
 				<article id="{{r.domId}}" aria-label="{{r.title}}" style="margin-bottom: 2px; border-radius: 14px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .6s ease, box-shadow .2s ease; scroll-margin: 40px 0 12px">
 					<div style="display: flex; align-items: stretch">
@@ -217,12 +217,12 @@ body{margin:0;background:#0b1512}
 
 							<div style="display: flex; align-items: center; gap: 4px; margin: 0 -4px -2px">
 								<sc-if value="{{r.isIq}}" hint-placeholder-val="{{false}}">
-									<button onClick="{{r.play}}" style="height: 36px; margin-right: 4px; padding: 0 14px 0 12px; border-radius: 10px; background: {{r.srcBg}}; color: {{r.srcFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; transition: background .15s">
+									<button onClick="{{r.play}}" style="flex: none; white-space: nowrap; height: 36px; margin-right: 4px; padding: 0 14px 0 12px; border-radius: 10px; background: {{r.srcBg}}; color: {{r.srcFg}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 8px; transition: background .15s">
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>{{r.srcText}}
 									</button>
 								</sc-if>
 								<span style="position: relative; display: flex">
-									<button class="wk-ghost" onClick="{{r.toggleDl}}" aria-haspopup="menu" aria-expanded="{{r.dlOpen}}" style="height: 36px; padding: 0 10px; border-radius: 10px; color: #b9cac1; font-size: 13px; display: flex; align-items: center; gap: 7px">
+									<button class="wk-ghost" onClick="{{r.toggleDl}}" aria-haspopup="menu" aria-expanded="{{r.dlOpen}}" style="flex: none; white-space: nowrap; height: 36px; padding: 0 10px; border-radius: 10px; color: #b9cac1; font-size: 13px; display: flex; align-items: center; gap: 7px">
 										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2M7 11l5 5l5 -5M12 4v12"></path></svg>Download
 									</button>
 									<sc-if value="{{r.dlOpen}}" hint-placeholder-val="{{false}}">
@@ -237,9 +237,6 @@ body{margin:0;background:#0b1512}
 										</div>
 									</sc-if>
 								</span>
-								<button class="wk-ghost" onClick="{{r.copyLink}}" style="height: 36px; padding: 0 10px; border-radius: 10px; color: {{r.copyC}}; font-size: 13px; display: flex; align-items: center; gap: 7px">
-									<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.copyIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>{{r.copyText}}
-								</button>
 								<div style="flex: 1"></div>
 								<span style="position: relative; display: flex">
 									<button class="wk-ghost" onClick="{{r.toggleMore}}" aria-haspopup="menu" aria-expanded="{{r.moreOpen}}" aria-label="More actions" style="width: 36px; height: 36px; border-radius: 10px; color: #8ba598; display: grid; place-items: center">
@@ -247,6 +244,7 @@ body{margin:0;background:#0b1512}
 									</button>
 									<sc-if value="{{r.moreOpen}}" hint-placeholder-val="{{false}}">
 										<div role="menu" aria-label="More actions" style="position: absolute; right: 0; bottom: 42px; z-index: 5; width: 264px; padding: 6px; border-radius: 14px; background: rgba(17,28,25,.97); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 16px 40px rgba(0,0,0,.55); backdrop-filter: blur(24px)">
+											<button role="menuitem" class="wk-ghost" onClick="{{r.copyLink}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 9px; text-align: left; font-size: 13.5px; display: flex; align-items: center; justify-content: space-between">Copy link<span style="font-size: 12px; color: #8ba598">Opens in any WaveKit</span></button>
 											<button role="menuitem" class="wk-ghost" onClick="{{r.tune}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 9px; text-align: left; font-size: 13.5px; font-variant-numeric: tabular-nums">Tune to {{r.freqText}}</button>
 											<sc-if value="{{r.inActivity}}" hint-placeholder-val="{{true}}">
 												<button role="menuitem" class="wk-ghost" onClick="{{r.showInActivity}}" style="width: 100%; height: 40px; padding: 0 10px; border-radius: 9px; text-align: left; font-size: 13.5px">Show in Activity</button>
@@ -569,7 +567,7 @@ class Component extends DCLogic {
 				formats: (iq ? fmtsIq : fmtsAudio).map(f => Object.assign(f, { pick: () => { this.setState({ menu: null }); this.toast('Downloading ' + title(x) + ' · ' + f.name.split(' ')[0] + ' · ' + f.size); } })),
 				copyText: s.copied === x.id ? 'Copied' : 'Copy link', copyC: s.copied === x.id ? '#7becc7' : '#b9cac1',
 				copyIcon: s.copied === x.id ? ['M5 12l5 5l10 -10'] : ['M9 15l6 -6', 'M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464', 'M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463'],
-				copyLink: () => { try { navigator.clipboard.writeText('http://wavekit.local/r/' + x.id); } catch (e) {} this.setState({ copied: x.id }); clearTimeout(this.ct); this.ct = setTimeout(() => this.setState({ copied: null }), 1600); },
+				copyLink: () => { try { navigator.clipboard.writeText('http://wavekit.local/r/' + x.id); } catch (e) {} this.setState({ menu: null }); this.toast('Link copied · opens “' + title(x) + '” in any WaveKit client'); },
 				freqText: fmtF(x.freq), tune: () => { this.setState({ menu: null }); this.props.onTune && this.props.onTune(x.freq); },
 				inActivity: x.origin === 'starred', showInActivity: () => { this.setState({ menu: null }); this.props.onActivity && this.props.onActivity(x); },
 				removeText: x.origin === 'starred' ? 'Remove from Recordings' : 'Delete recording',
