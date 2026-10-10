@@ -14,7 +14,7 @@
  * WAVEKIT_FIXTURE_RECORD=1 prints observed sets for review instead of asserting, and still fails a
  * suspended or zero-count run so it can never become a golden (delta E2).
  */
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
 import { beforeAll, describe, expect, it } from "vitest"
@@ -41,36 +41,60 @@ const fixturesDir = process.env["WAVEKIT_FIXTURES_DIR"]
 const record = process.env["WAVEKIT_FIXTURE_RECORD"] === "1"
 const COLLECTOR = "/tmp/wk-collect-outputs.mjs"
 
+interface ExecResult {
+	status: number | null
+	stdout: string
+	stderr: string
+}
+
+/**
+ * Async so the vitest worker's event loop stays live: a spawnSync blocked it for 30-53 s per fixture and its
+ * "onTaskUpdate" RPC timed out, failing a green run (ruling QH-9). Rejects on spawn error or timeout, as spawnSync threw.
+ */
 function exec(
 	args: string[],
 	options: { input?: string; timeoutMs?: number } = {},
-) {
-	const r = spawnSync(
-		"docker",
-		[
+): Promise<ExecResult> {
+	const timeoutMs = options.timeoutMs ?? 30000
+	return new Promise((resolvePromise, reject) => {
+		const child = spawn("docker", [
 			"exec",
 			...(options.input !== undefined ? ["-i"] : []),
 			container!,
 			...args,
-		],
-		{
-			encoding: "utf8",
-			timeout: options.timeoutMs ?? 30000,
-			maxBuffer: 64 * 1024 * 1024,
-			...(options.input !== undefined ? { input: options.input } : {}),
-		},
-	)
-	if (r.error) throw r.error
-	return r
+		])
+		let stdout = ""
+		let stderr = ""
+		child.stdout.setEncoding("utf8").on("data", (d: string) => (stdout += d))
+		child.stderr.setEncoding("utf8").on("data", (d: string) => (stderr += d))
+		const timer = setTimeout(() => {
+			child.kill("SIGTERM")
+			reject(
+				new Error(
+					`docker exec ${args[0] ?? ""} timed out after ${timeoutMs} ms`,
+				),
+			)
+		}, timeoutMs)
+		child.on("error", err => {
+			clearTimeout(timer)
+			reject(err)
+		})
+		child.on("close", status => {
+			clearTimeout(timer)
+			resolvePromise({ status, stdout, stderr })
+		})
+		child.stdin.on("error", () => {})
+		child.stdin.end(options.input)
+	})
 }
 
 /** A setup step that must succeed; its stderr explains the failure. */
-function execOk(
+async function execOk(
 	what: string,
 	args: string[],
 	options: { input?: string; timeoutMs?: number } = {},
 ) {
-	const r = exec(args, options)
+	const r = await exec(args, options)
 	expect(r.status, `${what} failed: ${r.stderr}`).toBe(0)
 	return r
 }
@@ -83,7 +107,11 @@ interface PathResult {
 	collectorStderr: string
 }
 
-function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
+async function runFixture(
+	f: Fixture,
+	path: FixturePath,
+	index: number,
+): Promise<PathResult> {
 	const tag = `${f.id}-${path}`
 	const apiPort = fixtureApiPort(index, path)
 	const padded = `/tmp/wk-${tag}.cu8`
@@ -91,7 +119,7 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 	const logPath = `/tmp/wk-${tag}.log`
 	const pidPath = `/tmp/wk-${tag}.pid`
 	const seconds = runSeconds(f)
-	execOk("config write", ["sh", "-c", `cat > '${configPath}'`], {
+	await execOk("config write", ["sh", "-c", `cat > '${configPath}'`], {
 		input: buildFixtureConfig({
 			fixture: f,
 			path,
@@ -99,9 +127,9 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 			paddedPath: padded,
 		}),
 	})
-	let collected: ReturnType<typeof exec>
+	let collected: ExecResult
 	try {
-		execOk(
+		await execOk(
 			"pad",
 			[
 				"sh",
@@ -111,12 +139,12 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 			{ timeoutMs: 120000 },
 		)
 		// $! is the `timeout` process (nohup execs it); `timeout` forwards SIGTERM to node, which stops its decoders.
-		execOk("app launch", [
+		await execOk("app launch", [
 			"sh",
 			"-c",
 			`WAVEKIT_CONFIG='${configPath}' nohup timeout -s TERM ${Math.ceil(seconds + 20)} node /app/dist/index.js > '${logPath}' 2>&1 & echo $! > '${pidPath}'`,
 		])
-		collected = exec(
+		collected = await exec(
 			["node", COLLECTOR, String(apiPort), String(seconds), goldenDecoderId(f)],
 			{ timeoutMs: (seconds + 30) * 1000 },
 		)
@@ -125,7 +153,7 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 		// No match-by-command-line kill: bookworm-slim has no procps, and the config path is in the env, not on the command line.
 		// Stop this instance before the next path starts, so two app instances never overlap (doubled decoders, port
 		// collisions, a corrupted Property 15 comparison).
-		const stopped = exec(["sh", "-c", stopCommand(pidPath, padded)], {
+		const stopped = await exec(["sh", "-c", stopCommand(pidPath, padded)], {
 			timeoutMs: 30000,
 		})
 		if (stopped.stderr.includes(KILL_FALLBACK_MARK))
@@ -147,7 +175,7 @@ function runFixture(f: Fixture, path: FixturePath, index: number): PathResult {
 	return {
 		observed,
 		status,
-		log: exec(["cat", logPath]).stdout,
+		log: (await exec(["cat", logPath])).stdout,
 		collectorExit: collected.status,
 		collectorStderr: collected.stderr,
 	}
@@ -184,11 +212,12 @@ describe.skipIf(!container || !fixturesDir)("IQ fixture goldens", () => {
 	})
 	it.each(fixtures.map((f, i) => [f.id, f, i] as const))(
 		"%s",
-		(_id, f, index) => {
+		async (_id, f, index) => {
 			const results = new Map<FixturePath, PathResult>()
 			const runs = fixturePaths(f, paths)
 			expect(runs.length, "fixture runs on no selected path").toBeGreaterThan(0)
-			for (const path of runs) results.set(path, runFixture(f, path, index))
+			for (const path of runs)
+				results.set(path, await runFixture(f, path, index))
 			for (const [path, r] of results) {
 				expect(
 					r.collectorExit,
