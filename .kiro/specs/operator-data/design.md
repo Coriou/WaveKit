@@ -93,6 +93,9 @@ explicit deployment pins, with no maps/coverage expansion here.
 
 ## Transactions and failure semantics
 
+UUID wire identities are canonical lowercase; uppercase spellings are rejected
+rather than creating case-dependent lookup aliases.
+
 Token `{storeId, revision}` is required for all writes, including ranking/reset.
 Service validates request synchronously, captures an immutable copy then admits it
 to a bounded queue. Inside queue: recheck availability/CAS, apply pure transition,

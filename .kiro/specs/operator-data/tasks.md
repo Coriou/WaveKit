@@ -9,7 +9,7 @@
 - [x] 3. Design checkpoint: requirements/design/tasks consistent; public integration
   explicitly deferred; ownership fences remain disjoint.
   _Requirements: 2.2, 5.5_
-- [ ] 4. Implement strict domain schemas, pure transitions/defaults/errors with
+- [x] 4. Implement strict domain schemas, pure transitions/defaults/errors with
   unit/property tests (validation, IDs, CAS/revisions, authority isolation, ranking).
   _Requirements: 1.1–1.5, 2.1–2.5, 3.1–3.5, 4.6_
 - [ ] 5. Implement dedicated persistence with bounded reads, lifetime ownership,
