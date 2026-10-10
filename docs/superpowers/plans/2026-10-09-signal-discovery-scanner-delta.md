@@ -21,9 +21,11 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 - **Task 23 (Step 5).** CLI acknowledgement of "Core: proposed contract for the signal discovery scanner"
   (`docs/CLI-COORDINATION.md` :716) → **none**. Below the proposal there are only core-authored amendments
   (2026-10-09 spectrum channel, 2026-10-09 identify, 2026-10-10 identify details, 2026-10-10 artefact and spectrum
-  shapes); no CLI reply on `main` or any other branch. Per the brief, Tasks 24, 26, 27 (except the WS field), 28, 30
-  and 31 may proceed; **Tasks 25, 29 (status fields and route codes) and 37 wait** for the user's decision to
-  proceed without an ack. The Core note on `ScannerSettingsView` was appended under the proposal.
+  shapes); no CLI reply on `main` or any other branch. The brief's no-reply rule would have held back Tasks 25, 29
+  (status fields and route codes), 37 and Task 27's WS field. **User decision (2026-10-10): the gate is lifted.**
+  Tasks 25, 27 (incl. the WS field), 29 and 37 proceed with the contract as proposed, without a CLI ack. Any later
+  CLI change request is recorded in this note under the affected task and handled as a follow-up task. The Core note
+  on `ScannerSettingsView` was appended under the proposal.
 - **S1-A shared-file baseline.** S1-A touched no shared file except the new
   `src/decoders/builtin/dsd-fme-link.ts`, so every shared file on the branch equals `main`.
 - **Unchanged since c4c1cda (no delta, line moves at most):** `src/core/tuner-controller.ts` (`SET_TEST_MODE` :65,
@@ -42,16 +44,18 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 - **Task 24 (carry).** Runtime-settings bounds must import `RuntimeSettingsOverridesSchema`
   (`src/core/scanner/store/persistence.ts` :253), never copy it.
 - **Task 24 (anchors).** `ConfigSchema` ends `csdr: CsdrConfigSchema.default({})` → on main it is followed by
-  `channelizer: ChannelizerConfigSchema.default({})`, and `ChannelizerConfigSchema` sits directly above
-  `ConfigSchema` (`src/config.ts` :383-420); the `ChannelizerConfig` type follows `CsdrConfig`. Insert as planned
+  `channelizer: ChannelizerConfigSchema.default({})` (the two fields are at `src/config.ts` :419-420), and
+  `ChannelizerConfigSchema` (`src/config.ts` :383-401) sits directly above `ConfigSchema` (:407); the
+  `ChannelizerConfig` type follows `CsdrConfig`. Insert as planned
   (the `csdr` anchors are still unique); `ScannerConfigSchema` goes between `ChannelizerConfigSchema` and
   `ConfigSchema`. `config/default.yaml`: the `csdr:` anchor (`bufferElements: 65536` :424, `# Health Monitoring`
   :427) is unchanged; the channelizer's commented block is at the end of the file (:667), so no conflict.
 
 ## Task 25
 
-- **Task 25 (Step 5 gate).** CLI ack of the scanner contract → none. Task 25 waits for the user's go-ahead. No
-  DTO changes were requested.
+- **Task 25 (Step 5).** CLI ack of the scanner contract → none. Per the user's decision of 2026-10-10 (Task 23),
+  Task 25 proceeds with the DTOs as proposed. No DTO changes were requested; any later CLI request goes into this
+  section and a follow-up task.
 - **Task 25 (A3 mapping, confirmed).** `CoreSuspensionReason = DecoderSuspensionReasonCode |
   ChannelAdmissionReason` (`src/decoders/types.ts` :65-67); `publicSuspension()` (`manager.ts` :196-203) drops the
   object only for `isChannelAdmissionReason(code)` (`channelizer/types.ts` :34-38: `channel-outside-capture`,
@@ -62,9 +66,12 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 - **Task 25 (carry, plan-preview provenance).** `ranges.rasters` and `fftSize` are labelled `"default"` even when
   config-derived; no correct label exists in the `operator | bandplan | measured | default` vocabulary. Task 25
   decides the label in the DTO (for example a `config` member) and the plan-preview code follows it.
-- **Task 25 / C3 (carry).** S1-A added the test-only export `trackIdPrefixes(sourceId, atMs)` in
-  `src/core/spectrum/pipeline.ts` :84 (wideband track ids use the `w-` prefix, distinct from narrowband). Add its
-  C3 contract entry.
+- **Task 25 / C3 (carry).** S1-A added the test-only export
+  `trackIdPrefixes(sourceId: string, atMs: number): { main: string; wideband: string }` in
+  `src/core/spectrum/pipeline.ts` :84-90. `main` is `` `${sourceId}-${atMs.toString(36)}-` `` and `wideband` is
+  `` `${main}w-` ``. Rationale: track ids are prefix + base-36 sequence, so the wideband prefix extends the main
+  one with a character outside base 36 (`-`). A bare `w` would make main track 1153 read `…-w1` and collide with
+  wideband track 1. Add this C3 contract entry.
 
 ## Task 26
 
@@ -74,15 +81,21 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 
 ## Task 27
 
-- No delta (`tuner-controller.ts` unchanged). Note for Tasks 33 and 35: every `setFrequency` caps update now also
+- No code delta (`tuner-controller.ts` unchanged).
+- **Task 27 (Step 5).** The brief made the WS field (`tuner:command-sent` `origin`) wait for a CLI ack. No ack
+  exists, but the user decided on 2026-10-10 (Task 23) to proceed as proposed, so the WS field is in scope with
+  the rest of Task 27. Any later CLI request goes into this section and a follow-up task.
+- Note for Tasks 33 and 35: every `setFrequency` caps update now also
   invalidates the source's channels when the channelizer is enabled (see Task 33).
 
 ## Task 28
 
 - **Task 28 (cf32 tail, corrected).** "The mode flag test asserts on the dsd-fme argument list only" → the test
   asserts on the whole `buildPipelineCommand()` string with whitespace-bounded tokens (`(^|\s)-fi(\s|$)`). The cf32
-  tail only made the csdr front stages conditional (`buildIqFrontStages` returns `convert/shift/decimate: null` when
-  `options.inputIqFormat === "cf32"`, `audio-demod-decoder.ts` :386-397; `dsd-fme.ts` :907-913). The default
+  tail only made the csdr front stages conditional: `buildIqFrontStages` (`audio-demod-decoder.ts` :386-397)
+  returns `convert/shift/decimate: null` when `inputIsChannelIq()` is true (the gate is defined at :322-324 and
+  reads `options.inputIqFormat === "cf32"`; it is called at :395). `dsd-fme.ts` :907-913 pushes only the non-null
+  stages. The default
   (cu8) path is unchanged and no csdr or sox stage emits a bare `-fi`/`-fm`/`-fn`, so the test stays as written.
 - **Task 28 (anchors).** Mode switch `case "nxdn":` is at `dsd-fme.ts` :1035 (`-fn` :1037); CRC-ERR in
   `updateErrorWindow` :1213; `DMR_TGT_SRC` use :1333, `DMR_ENCRYPTED` use :1370; `findWavFileAsync` :1947.
@@ -92,9 +105,9 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 
 ## Task 29
 
-- **Task 29 (Step 5 gate).** The status fields and route codes wait for the user's go-ahead (no CLI ack). The
-  manager-internal parts (probes, holds) depend on Task 25's `tuner-scanning` code, so in practice all of Task 29
-  waits for Task 25.
+- **Task 29 (Step 5).** No CLI ack, but per the user's decision of 2026-10-10 (Task 23) the status fields and
+  route codes proceed as proposed. Any later CLI request goes into this section and a follow-up task. Ordering is
+  unchanged: Task 29 depends on Task 25's `tuner-scanning` code, so it runs after Task 25.
 - **Task 29 (types, corrected).** "If `CoreSuspensionReason` exists, `Eligibility.blockedBy` and
   `DecoderSuspension.reasonCode` are typed with it" → on main `DecoderSuspension.reasonCode` is already
   `CoreSuspensionReason` (`manager.ts` :167-170), and `Eligibility.blockedBy` is `DecoderSuspensionReasonCode | null`
@@ -120,6 +133,12 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
     `state.channelStale = false`, `const request = this.channelRequestFor(state, caps)` (:1116-1119). Insert
     `if (state.input) return { wired: true }` directly before `const provider = this.channelizer`, so a probe with
     its own input never requests a channel, never gets `inputIqFormat: "cu8"` (:1123-1124) and never gets a branch.
+    Why this anchor and not the plan's: it is the first line after the source block on main. It is two lines above
+    the plan's anchor, so the return also skips the channelizer's `state.channelStale = false` reset. That reset
+    is harmless to skip: a probe never holds a channel, so `channelStale` stays false for it. The source block
+    (:1098-1115) still runs for probes, as Task 29 requires: `state.inputCaps`, `decoder.updateOptions`
+    (`inputSampleRate`, `inputCenterFreq`), `refreshRatePlan`, `sourceManager.assignDecoder` and
+    `state.assignedSourceId`. So `status.sourceId` is set and the caps are applied.
     `createEphemeralDecoder` checks `outcome.wired`; when it is false the probe is not started and the remove path
     runs (plan code, unchanged).
   - `handleCapsChange`: the anchor `if (this.selectedSourceId(state) !== sourceId) continue` occurs twice
@@ -192,12 +211,15 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
   awkward: add `SpectrumPipeline.closeAll()` (C3 addition, Task 32).
 - **Task 35 (carry).** The boot path catches journal I/O rejections from `DiscoveryStore` persistence `load()` (it
   throws on an unreadable journal). Leftover `*.tmp` files are not cleaned by S1-A.
-- **Task 35 (rollback order, new).** `rollback()` releases the decoder hold before the lease (plan :32819-32845),
-  whereas `teardown()` (plan :32796) and the S1-A transition table (`job-state.ts` :99, :125, :139) restore/release the lease
-  first. With the channelizer, releasing the hold first resumes channel-fed decoders at the scan frequency, and the
-  restore retune then invalidates their new channels (Task 33 note). In `rollback()`, release the lease (with
-  restore) before the decoder hold, matching `teardown()`. Test impact: none of the plan's assertions depend on that
-  order.
+- **Task 35 (rollback order). Controller ruling (2026-10-10).** The plan's `rollback()` (plan :32819-32845)
+  releases in the order engine, then decoder hold, then lease. `teardown()` (plan :32796) releases the lease
+  (with restore), then the decoder hold, then the engine, and the S1-A transition table (`job-state.ts` :99, :125,
+  :139) also puts the lease before `release-decoders`. The plan's own design line (plan :31878) lists "lease with
+  restore, decoder hold, engine reference". With the channelizer, releasing the hold first resumes channel-fed
+  decoders at the scan frequency, and the restore retune then invalidates their new channels (Task 33 note).
+  Ruling: `rollback()` releases in the order lease (with the restore retune), then decoder hold, then engine,
+  mirroring `teardown()`. Each step keeps its `before.*` guard and its `.catch` warning. If any plan assertion
+  depends on the old order, the Task 35 implementer flags it rather than silently changing the test.
 
 ## Task 35a
 
@@ -211,7 +233,8 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 
 ## Task 37
 
-- **Task 37 (Step 5 gate).** Waits for the user's go-ahead (no CLI ack).
+- **Task 37 (Step 5).** No CLI ack, but per the user's decision of 2026-10-10 (Task 23) Task 37 proceeds with
+  the WS contract as proposed. Any later CLI request goes into this section and a follow-up task.
 - **Task 37 (carry).** Pass a monotonic clock (`performance.now()`) to `WsLimiter`; the plan text passes
   `Date.now`.
 
@@ -248,9 +271,17 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 - **Plan and spec text fixes (docs wording only; write them into `docs/SCANNER.md` where they apply):**
   - "decoded" means the first ACCEPTED identity, not any identity-bearing evidence.
   - `block-summary` is emitted for every block except alarm blocks (see Task 37a).
-  - Spec § 4.9 (R6): impulse blanking reference is the plan's (kept), not the spec's current wording. A spec
-    amendment is needed (orchestrator to schedule; not in any S1-B file list).
-  - Spec § 4.9 (R7): OBW tolerance `max(30 %, 2 RBW)` kept. A spec amendment is needed (same).
+  - Spec § 4.9 (R6), impulse blanking. The plan's rule is kept: a frame is blanked when it is ≥ 6 dB over **the
+    previous block's integrated mean power per bin** on ≥ 50 % of the usable bins. The first block of an epoch is
+    judged against its own per-bin median ÷ ln 2. RFI is active after ≥ 3 impulse **events** (blanked frames within
+    2 N samples count as one event) whose last two intervals agree within ± 10 %; the period is their mean. The spec
+    currently says a frame "rises ≥ 6 dB over the **per-bin floor** on ≥ 50 % of usable bins" and RFI is "≥ 3
+    blanked **frames** at a stable interval (± 10 %)". Reason: the floor reference would blank steady wideband
+    occupants (§ 4.3); on noise-only bins the plan's reference equals the floor. A spec amendment is needed
+    (orchestrator to schedule; not in any S1-B file list).
+  - Spec § 4.9 (R7), IQ image OBW match. The plan's rule is kept: the −6 dB OBWs agree within
+    **`max(30 % of A, 2 RBW)`**. The spec currently says "similar OBW (± 30 %)". Reason: the 2 RBW term is needed
+    for 1-RBW tones. A spec amendment is needed (same).
   - C1 surfacing rule (c) requires `classification.tier === "channel"`; the spectral tier alone never surfaces.
 
 ## Task 40
