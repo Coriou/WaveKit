@@ -173,3 +173,21 @@ smoke passed. Normal package build-entry integration must preserve scanner
 Task 32's spectrum-worker entry. Actual protected listeners, browser pairing and
 rolling renewal remain pending integration; setup prints an unmounted public
 plan and creates no TLS listener.
+
+## Runtime lifecycle preparation checkpoint — 2026-10-10
+
+`2ad80f8` (landed as `8bb3845`) composes load-only private storage, durably
+restored sessions, API/audio policies and one shared connection lease authority.
+Explicit audio boundaries must agree with the public bootstrap; no advertised
+URL is used to guess listener roles. Partial construction releases ownership;
+idempotent shutdown closes leases before storage and preserves remembered
+browsers. Callers must stop admissions and drain flow/adapters before closing.
+Load mode now cannot create a missing private directory; provision mode retains
+its existing first-use behavior.
+
+Independent Astra/root review approved the four paths. The 58 focused tests,
+full repository typecheck/lint and focused lint passed (59 existing warnings
+outside the owned paths). Actual listener mounting still requires the scanner
+37/37a/38 integration window. Health-probe authority, named analog/digital
+public origins, sanitized runtime logging and real transport/container exposure
+remain explicit integration gates, not additional product decisions.
