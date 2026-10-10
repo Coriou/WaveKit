@@ -295,6 +295,275 @@ mod tests {
         }
     }
 
+    // Captured from the unmodified ccc319f release process on Intel macOS (rustc 1.98.1).
+    // Pin this host's encoded output so a common error in shared planner code cannot make
+    // both sides of the reference comparison pass. Transcendental bit patterns are host-specific;
+    // portable matrix equivalence/property tests above still run on other architectures.
+    #[cfg(all(target_arch = "x86_64", target_os = "macos"))]
+    #[test]
+    fn prepared_output_matches_prechange_process_hashes_on_intel_macos() {
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let input: Vec<u8> = (0..65_537).map(|k| (k * 31 % 256) as u8).collect();
+        let (mut i, mut q) = (Vec::new(), Vec::new());
+        crate::convert::InputAssembler::default().push(&input, &mut i, &mut q);
+        for (fs, out, format, hash, taps, delay_bits) in [
+            (
+                2048000,
+                24000,
+                Format::Cu8,
+                0x89c624a8cf99839bu64,
+                741,
+                0x40564c4000000000u64,
+            ),
+            (
+                2048000,
+                24000,
+                Format::Cf32,
+                0xe648ff45faffd31fu64,
+                741,
+                0x40564c4000000000u64,
+            ),
+            (
+                2048000,
+                48000,
+                Format::Cu8,
+                0x23f71bc668a7badfu64,
+                730,
+                0x4056488000000000u64,
+            ),
+            (
+                2048000,
+                48000,
+                Format::Cf32,
+                0x131186dd86e4d0deu64,
+                730,
+                0x4056488000000000u64,
+            ),
+            (
+                2048000,
+                250000,
+                Format::Cu8,
+                0x8dc60c646933e7b0u64,
+                5346,
+                0x405694b000000000u64,
+            ),
+            (
+                2048000,
+                250000,
+                Format::Cf32,
+                0x601b0625b82a3571u64,
+                5346,
+                0x405694b000000000u64,
+            ),
+            (
+                2048000,
+                384000,
+                Format::Cu8,
+                0x95e6675af599eb57u64,
+                697,
+                0x4056140000000000u64,
+            ),
+            (
+                2048000,
+                384000,
+                Format::Cf32,
+                0xe29bdcdebc68d0c0u64,
+                697,
+                0x4056140000000000u64,
+            ),
+            (
+                2048000,
+                1000000,
+                Format::Cu8,
+                0x3b9953fcdca9e64bu64,
+                5314,
+                0x4055e10000000000u64,
+            ),
+            (
+                2048000,
+                1000000,
+                Format::Cf32,
+                0x2c9e038b9cea45fdu64,
+                5314,
+                0x4055e10000000000u64,
+            ),
+            (
+                2048000,
+                1050000,
+                Format::Cu8,
+                0x67b12516ba2f407eu64,
+                4820,
+                0x40573ae000000001u64,
+            ),
+            (
+                2048000,
+                1050000,
+                Format::Cf32,
+                0x93d5adfc4761e90fu64,
+                4820,
+                0x40573ae000000001u64,
+            ),
+            (
+                2048000,
+                2048000,
+                Format::Cu8,
+                0x90b4ccc21a4fcc45u64,
+                0,
+                0x0000000000000000u64,
+            ),
+            (
+                2048000,
+                2048000,
+                Format::Cf32,
+                0xf4b8a6f724ae3185u64,
+                0,
+                0x0000000000000000u64,
+            ),
+            (
+                2400000,
+                24000,
+                Format::Cu8,
+                0xb273adda16c87b73u64,
+                4127,
+                0x40559147ae147ae1u64,
+            ),
+            (
+                2400000,
+                24000,
+                Format::Cf32,
+                0x15ce02c6250a1336u64,
+                4127,
+                0x40559147ae147ae1u64,
+            ),
+            (
+                2400000,
+                48000,
+                Format::Cu8,
+                0x2d6a0e77c74a3fdbu64,
+                4116,
+                0x40558e147ae147aeu64,
+            ),
+            (
+                2400000,
+                48000,
+                Format::Cf32,
+                0x27ab71be31962a87u64,
+                4116,
+                0x40558e147ae147aeu64,
+            ),
+            (
+                2400000,
+                250000,
+                Format::Cu8,
+                0x02f450a9098e8cafu64,
+                1046,
+                0x4057100000000000u64,
+            ),
+            (
+                2400000,
+                250000,
+                Format::Cf32,
+                0xffc4555e9ad6d9b5u64,
+                1046,
+                0x4057100000000000u64,
+            ),
+            (
+                2400000,
+                384000,
+                Format::Cu8,
+                0x14bb1aa23682cb8fu64,
+                4083,
+                0x40556147ae147ae1u64,
+            ),
+            (
+                2400000,
+                384000,
+                Format::Cf32,
+                0x2f3e79f188432110u64,
+                4083,
+                0x40556147ae147ae1u64,
+            ),
+            (
+                2400000,
+                1000000,
+                Format::Cu8,
+                0x3fc2c968c5393482u64,
+                1018,
+                0x40568aaaaaaaaaabu64,
+            ),
+            (
+                2400000,
+                1000000,
+                Format::Cf32,
+                0x37390279410e5e71u64,
+                1018,
+                0x40568aaaaaaaaaabu64,
+            ),
+            (
+                2400000,
+                1050000,
+                Format::Cu8,
+                0x1b0451493b96bb96u64,
+                1352,
+                0x4057480000000000u64,
+            ),
+            (
+                2400000,
+                1050000,
+                Format::Cf32,
+                0x7b1bb5406f9e3d66u64,
+                1352,
+                0x4057480000000000u64,
+            ),
+            (
+                2400000,
+                2400000,
+                Format::Cu8,
+                0xbe4df8d2662e09e6u64,
+                0,
+                0x0000000000000000u64,
+            ),
+            (
+                2400000,
+                2400000,
+                Format::Cf32,
+                0xeba01ff54cd8757du64,
+                0,
+                0x0000000000000000u64,
+            ),
+        ] {
+            let s = ChannelSpec {
+                input_rate: fs,
+                output_rate: out,
+                offset_hz: 31_250.0,
+                bandwidth_hz: if fs == out {
+                    1_400_000.0
+                } else {
+                    out as f64 * 0.95
+                },
+                transition_hz: if fs == out {
+                    50_000.0
+                } else {
+                    out as f64 * 0.025
+                },
+                format,
+                gain: 1.7,
+            };
+            let plan =
+                crate::plan::plan_chain_bounded(fs, out, s.bandwidth_hz, s.transition_hz, &cancel)
+                    .unwrap();
+            let mut dsp = ChannelDsp::from_plan(s, &plan);
+            assert_eq!(dsp.filter_taps(), taps);
+            assert_eq!(dsp.group_delay_samples().to_bits(), delay_bits);
+            let mut encoded = Vec::new();
+            dsp.process(&i, &q, &mut encoded);
+            let got = encoded.iter().fold(0xcbf29ce484222325u64, |h, byte| {
+                (h ^ *byte as u64).wrapping_mul(0x100000001b3)
+            });
+            assert_eq!(got, hash, "baseline encoded bytes {fs}->{out} {format:?}");
+        }
+    }
+
     #[test]
     fn format_names_and_sizes() {
         assert_eq!(Format::parse("cu8"), Some(Format::Cu8));

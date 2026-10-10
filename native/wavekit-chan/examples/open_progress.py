@@ -217,12 +217,15 @@ def observe(binary, rate, scenario):
                 raise TimeoutError("socket drain did not finish")
             arrivals = [stamp for stamp, _ in progress]
             pairs = list(zip(arrivals, arrivals[1:]))
-            intersecting = [b-a for a, b in pairs if a <= end and b >= begin]
+            # Clip silence to the open interval. An overlapping receive gap can extend into
+            # subsequent close()/writer-join work; report that full gap separately.
+            intersecting = [min(b, end)-max(a, begin) for a, b in pairs if a <= end and b >= begin]
+            overlapping = [b-a for a, b in pairs if a <= end and b >= begin]
             for timing in open_timings:
                 left, right = started+timing["sent_s"], started+timing["opened_s"]
                 timing["existing_bytes_during_open"] = sum(size for stamp, size in progress if left <= stamp <= right)
                 timing["max_progress_interruption_ms"] = max(
-                    (b-a for a, b in pairs if a <= right and b >= left), default=0)*1000
+                    (min(b, right)-max(a, left) for a, b in pairs if a <= right and b >= left), default=0)*1000
             inflight = [(stamp, size) for stamp, size in progress if begin <= stamp <= end]
             gaps = [event for _, event in events if event["type"] == "discontinuity"]
             total = sum(size for _, size in progress)
@@ -236,6 +239,7 @@ def observe(binary, rate, scenario):
                         existing_bytes_during_open=sum(size for _, size in inflight),
                         existing_recv_calls_during_open=len(inflight),
                         max_progress_interruption_ms=max(intersecting, default=0)*1000,
+                        max_overlapping_recv_gap_ms=max(overlapping, default=0)*1000,
                         baseline_max_recv_gap_ms=max(pre_gaps, default=0)*1000,
                         max_recv_gap_ms=max((b-a for a, b in pairs), default=0)*1000,
                         max_stdin_write_ms=max((b-a for a, b in write_times), default=0)*1000,

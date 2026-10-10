@@ -83,6 +83,13 @@ fn windowed_sinc_checked(
     Ok(raw.iter().map(|t| (t * gain / sum) as f32).collect())
 }
 
+// A deterministic test checkpoint inside an executing response sweep. It never exists in
+// production builds and does not alter the arithmetic path when disabled.
+#[cfg(test)]
+thread_local! {
+    static CANCEL_AFTER_RESPONSE_POINTS: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 /// Peak response over `[stop, 0.5]` in dB relative to DC, for symmetric odd-length `taps`.
 /// The peak sidelobe sits next to the stopband edge, so `[stop, stop + 20/n]` is sampled at
 /// 8 points per sidelobe (step 1/(8n)); the rest, out to Nyquist, at 512 points.
@@ -113,6 +120,19 @@ fn stopband_peak_db_checked(
     let far = (0..=512).map(|i| edge_end + (0.5 - edge_end) * i as f64 / 512.0);
     let mut peak = 0.0f64;
     for f in edge.chain(far) {
+        #[cfg(test)]
+        if let Some(token) = cancel {
+            CANCEL_AFTER_RESPONSE_POINTS.with(|remaining| {
+                if let Some(n) = remaining.get() {
+                    if n == 0 {
+                        token.store(true, std::sync::atomic::Ordering::Relaxed);
+                        remaining.set(None);
+                    } else {
+                        remaining.set(Some(n - 1));
+                    }
+                }
+            });
+        }
         check_cancel(cancel)?;
         peak = peak.max(amplitude(f).abs());
     }
@@ -232,6 +252,16 @@ pub fn response_db(taps: &[f32], f: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancellation_during_an_executing_response_sweep_is_observed() {
+        let cancel = AtomicBool::new(false);
+        CANCEL_AFTER_RESPONSE_POINTS.with(|remaining| remaining.set(Some(3)));
+        let result = lowpass_bounded(0.1, 0.05, 1.0, 16_384, &cancel);
+        assert_eq!(result.unwrap_err(), "channel preparation cancelled");
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        CANCEL_AFTER_RESPONSE_POINTS.with(|remaining| assert_eq!(remaining.get(), None));
+    }
 
     #[test]
     fn bounded_lowpass_matches_reference_bits() {
