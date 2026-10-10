@@ -53,6 +53,10 @@ export interface PrivateAccessStorageOptions {
 	random?: AccessRandomBytes
 }
 
+export interface ReadMachineCredentialOptions {
+	directory: string
+}
+
 function failure(code: string): WaveKitError {
 	return new WaveKitError("Private access storage unavailable", code)
 }
@@ -153,6 +157,72 @@ export class PrivateAccessStorage {
 		this.#directory = directory
 		this.#handle = handle
 		this.#directoryIdentity = identity
+	}
+
+	/**
+	 * Read-only machine-client boundary, including while the core writer is live.
+	 * Reuses the initialized-state/file validators; never acquires/reaps owners,
+	 * creates files/directories, chmods or persists. Parent paths must be trusted
+	 * and stable. No storage instance escapes; the callback alone receives the
+	 * sensitive token. Check a caller deadline inside that callback before I/O.
+	 */
+	static async readMachineCredential<T>(
+		options: ReadMachineCredentialOptions,
+		consumer: (token: string) => T | Promise<T>,
+	): Promise<T> {
+		const parsed = z
+			.object({
+				directory: z
+					.string()
+					.min(1)
+					.max(4096)
+					.refine(isAbsolute)
+					.refine(value => !value.includes("\0")),
+			})
+			.strict()
+			.safeParse(options)
+		if (!parsed.success || typeof consumer !== "function")
+			throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+		let handle: FileHandle | undefined
+		let token: string
+		try {
+			const uid = process.getuid?.()
+			if (uid === undefined) throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+			const stat = await fs.lstat(parsed.data.directory)
+			if (
+				!stat.isDirectory() ||
+				stat.isSymbolicLink() ||
+				stat.uid !== uid ||
+				(stat.mode & 0o7777) !== 0o700
+			)
+				throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+			handle = await fs.open(
+				parsed.data.directory,
+				constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+			)
+			const reader = new PrivateAccessStorage(
+				parsed.data.directory,
+				handle,
+				stat,
+			)
+			await reader.#assertDirectory()
+			await reader.#load("load", undefined)
+			await reader.#assertDirectory()
+			token = reader.#current().machineToken
+			reader.#state = undefined
+			reader.#closed = true
+		} catch {
+			throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+		} finally {
+			await handle?.close().catch(() => {
+				throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+			})
+		}
+		try {
+			return await consumer(token)
+		} catch {
+			throw failure("ACCESS_CREDENTIAL_UNAVAILABLE")
+		}
 	}
 
 	static async open(

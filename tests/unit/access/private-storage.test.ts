@@ -1,4 +1,5 @@
 import fs from "node:fs/promises"
+import { constants } from "node:fs"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -41,6 +42,179 @@ async function open(
 }
 
 describe("private single-operator persistence", () => {
+	it("reads the validated machine credential while a writer is live without writing or inspecting ownership", async () => {
+		const { directory } = await location()
+		const writer = await open(directory)
+		const digest = writer.machineSecretDigest()
+		const entries = await fs.readdir(directory)
+		const before = await Promise.all(
+			entries.map(async entry => ({
+				entry,
+				content: await fs.readFile(join(directory, entry), "utf8"),
+				stat: await fs.stat(join(directory, entry)),
+			})),
+		)
+		const mkdir = vi.spyOn(fs, "mkdir")
+		const write = vi.spyOn(fs, "writeFile")
+		const unlink = vi.spyOn(fs, "unlink")
+		const rename = vi.spyOn(fs, "rename")
+		const kill = vi.spyOn(process, "kill")
+		const fileOpen = vi.spyOn(fs, "open")
+		expect(
+			await PrivateAccessStorage.readMachineCredential({ directory }, token =>
+				verifyMachineToken(token, digest),
+			),
+		).toBe(true)
+		for (const spy of [mkdir, write, unlink, rename, kill])
+			expect(spy).not.toHaveBeenCalled()
+		for (const [, flags] of fileOpen.mock.calls) {
+			expect(typeof flags).toBe("number")
+			expect(
+				Number(flags) &
+					(constants.O_WRONLY |
+						constants.O_RDWR |
+						constants.O_CREAT |
+						constants.O_TRUNC),
+			).toBe(0)
+		}
+		expect(await fs.readdir(directory)).toEqual(entries)
+		for (const previous of before) {
+			expect(await fs.readFile(join(directory, previous.entry), "utf8")).toBe(
+				previous.content,
+			)
+			const current = await fs.stat(join(directory, previous.entry))
+			expect(current.ino).toBe(previous.stat.ino)
+			expect(current.mtimeMs).toBe(previous.stat.mtimeMs)
+			expect(current.mode).toBe(previous.stat.mode)
+		}
+	})
+
+	it("readonly reads never provision a missing directory and sanitize invalid options", async () => {
+		const { root, directory } = await location()
+		const mkdir = vi.spyOn(fs, "mkdir")
+		await expect(
+			PrivateAccessStorage.readMachineCredential({ directory }, () => "unused"),
+		).rejects.toMatchObject({
+			code: "ACCESS_CREDENTIAL_UNAVAILABLE",
+			cause: undefined,
+		})
+		await expect(
+			PrivateAccessStorage.readMachineCredential(
+				{ directory: "private-secret" },
+				() => "unused",
+			),
+		).rejects.toMatchObject({
+			code: "ACCESS_CREDENTIAL_UNAVAILABLE",
+			cause: undefined,
+		})
+		expect(mkdir).not.toHaveBeenCalled()
+		expect(await fs.readdir(root)).toEqual([])
+	})
+
+	it("closes the readonly directory before callback execution, and sanitizes callback failure", async () => {
+		const { directory } = await location()
+		const writer = await open(directory)
+		const originalOpen = fs.open
+		let closed = false
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			const handle = await originalOpen(path, flags, mode)
+			if (path === directory) {
+				const close = handle.close.bind(handle)
+				vi.spyOn(handle, "close").mockImplementation(async () => {
+					closed = true
+					await close()
+				})
+			}
+			return handle
+		})
+		const token = writer.useMachineCredential(value => value)
+		await expect(
+			PrivateAccessStorage.readMachineCredential({ directory }, () => {
+				expect(closed).toBe(true)
+				throw new Error(`${token} ${directory}`)
+			}),
+		).rejects.toMatchObject({
+			message: "Private access storage unavailable",
+			code: "ACCESS_CREDENTIAL_UNAVAILABLE",
+			cause: undefined,
+		})
+		expect(closed).toBe(true)
+	})
+
+	it("rechecks the directory after load before handing credentials to a consumer", async () => {
+		const { directory } = await location()
+		const writer = await open(directory)
+		await writer.close()
+		const originalOpen = fs.open
+		vi.spyOn(fs, "open").mockImplementation(async (path, flags, mode) => {
+			const handle = await originalOpen(path, flags, mode)
+			if (path === join(directory, "access-state.json")) {
+				await fs.rename(directory, `${directory}.old`)
+				await fs.mkdir(directory, { mode: 0o700 })
+			}
+			return handle
+		})
+		const consumer = vi.fn()
+		await expect(
+			PrivateAccessStorage.readMachineCredential({ directory }, consumer),
+		).rejects.toMatchObject({ code: "ACCESS_CREDENTIAL_UNAVAILABLE" })
+		expect(consumer).not.toHaveBeenCalled()
+	})
+
+	it.each([
+		"directory",
+		"state",
+		"marker",
+		"hardlink",
+		"mode",
+		"oversized",
+		"corrupt",
+	] as const)(
+		"readonly reads refuse unsafe %s without repair or owner-file changes",
+		async kind => {
+			const { root, directory } = await location()
+			const writer = await open(directory)
+			await writer.close()
+			const untouched = join(root, "untouched")
+			await fs.writeFile(untouched, "unchanged", { mode: 0o600 })
+			if (kind === "directory") {
+				await fs.rename(directory, `${directory}.real`)
+				await fs.symlink(`${directory}.real`, directory)
+			} else if (["state", "marker", "hardlink"].includes(kind)) {
+				const selected = join(
+					directory,
+					kind === "marker" ? "initialized" : "access-state.json",
+				)
+				await fs.unlink(selected)
+				if (kind === "hardlink") await fs.link(untouched, selected)
+				else await fs.symlink(untouched, selected)
+			} else if (kind === "mode")
+				await fs.chmod(join(directory, "access-state.json"), 0o644)
+			else
+				await fs.writeFile(
+					join(directory, "access-state.json"),
+					kind === "oversized" ? "s".repeat(65537) : "private-corrupt-secret",
+				)
+			const entries = await fs.readdir(directory)
+			const mkdir = vi.spyOn(fs, "mkdir")
+			const write = vi.spyOn(fs, "writeFile")
+			const unlink = vi.spyOn(fs, "unlink")
+			await expect(
+				PrivateAccessStorage.readMachineCredential(
+					{ directory },
+					() => "unused",
+				),
+			).rejects.toMatchObject({
+				code: "ACCESS_CREDENTIAL_UNAVAILABLE",
+				cause: undefined,
+			})
+			for (const spy of [mkdir, write, unlink])
+				expect(spy).not.toHaveBeenCalled()
+			expect(await fs.readdir(directory)).toEqual(entries)
+			expect(await fs.readFile(untouched, "utf8")).toBe("unchanged")
+		},
+	)
+
 	it("provisions once with private permissions and restores remembered browsers across process ownership lifetimes", async () => {
 		const { directory } = await location()
 		const storage = await open(directory)
@@ -96,7 +270,12 @@ describe("private single-operator persistence", () => {
 
 	it("refuses concurrent owners, including its own PID, and serializes concurrent session writes", async () => {
 		const { directory } = await location()
-		const results = await Promise.allSettled([open(directory), open(directory)])
+		// Initialization has its own tests; this fixture isolates writer ownership.
+		await (await open(directory)).close()
+		const results = await Promise.allSettled([
+			open(directory, "load"),
+			open(directory, "load"),
+		])
 		expect(
 			results.filter(result => result.status === "fulfilled").length,
 		).toBeLessThanOrEqual(1)
@@ -124,6 +303,51 @@ describe("private single-operator persistence", () => {
 		expect(
 			(await open(directory, "load")).startupSnapshot().sessions,
 		).toHaveLength(3)
+	})
+
+	it("concurrent first-use provisioning never acknowledges duplicate credentials or silently repairs both failed attempts", async () => {
+		const { directory } = await location()
+		const results = await Promise.allSettled([open(directory), open(directory)])
+		expect(
+			results.filter(result => result.status === "fulfilled"),
+		).toHaveLength(
+			results.some(result => result.status === "fulfilled") ? 1 : 0,
+		)
+		for (const result of results) {
+			if (result.status === "rejected")
+				expect(result.reason).toMatchObject({
+					code: expect.stringMatching(/^ACCESS_STORAGE_(BUSY|INCOMPLETE)$/),
+				})
+		}
+		const winner = results.find(result => result.status === "fulfilled")
+		if (!winner || winner.status !== "fulfilled") {
+			// Both refusals are reported as refusals: do not provision a fallback
+			// here or turn a partially initialized result into a success assertion.
+			expect(await fs.readdir(directory)).toEqual([])
+			await expect(
+				PrivateAccessStorage.readMachineCredential(
+					{ directory },
+					() => "unused",
+				),
+			).rejects.toMatchObject({ code: "ACCESS_CREDENTIAL_UNAVAILABLE" })
+			return
+		}
+		const digest = winner.value.machineSecretDigest()
+		const before = await fs.readFile(
+			join(directory, "access-state.json"),
+			"utf8",
+		)
+		await winner.value.close()
+		const restored = await open(directory, "load")
+		expect(restored.machineSecretDigest()).toEqual(digest)
+		expect(
+			await fs.readFile(join(directory, "access-state.json"), "utf8"),
+		).toBe(before)
+		expect(
+			(await fs.readdir(directory)).filter(
+				entry => entry === "access-state.json",
+			),
+		).toHaveLength(1)
 	})
 
 	it("recovers only validated dead unique owners in its own scope", async () => {
