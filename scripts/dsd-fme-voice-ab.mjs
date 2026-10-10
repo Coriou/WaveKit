@@ -39,7 +39,8 @@
  *                12 500 / 6 250) into fmdemod | BACK_CHAIN. Both fronts run
  *                the three-way check; the chan front's TGT/SRC lines must
  *                equal the csdr front's, and its AMBE errors must not exceed
- *                max(1.25 x csdr, csdr + 20) (PROVISIONAL, PF16).
+ *                max(1.25 x csdr, csdr + 20) (PF16). TGT/SRC lines that
+ *                dsd-fme marks (CRC ERR) are reported, not compared (QH-12).
  * --unpaced     feed the chan front as fast as it reads (default: real time,
  *                2 bytes per sample, as the voice gate runs paced).
  * Exit code 0 on success, 1 on failure.
@@ -55,6 +56,7 @@ import {
 	chanFeed,
 	chanFeedStages,
 	csdrFeedStages,
+	crcErrLinkLines,
 	linkLines,
 	openRequest,
 	parseIqArgs,
@@ -264,15 +266,23 @@ async function checkIq(iq) {
 	const got = linkLines(chan.decoded)
 	for (const line of want) if (!got.has(line)) fail(`chan lacks: ${line}`)
 	for (const line of got) if (!want.has(line)) fail(`chan adds: ${line}`)
-	process.stdout.write(`TGT/SRC lines: csdr ${want.size}, chan ${got.size}\n`)
+	process.stdout.write(
+		`TGT/SRC lines (CRC-valid, compared): csdr ${want.size}, chan ${got.size}\n`,
+	)
+	for (const [front, result] of [
+		["csdr", csdr],
+		["chan", chan],
+	])
+		for (const line of crcErrLinkLines(result.decoded))
+			process.stdout.write(`  ${front} CRC ERR, not compared: ${line}\n`)
 	const a = csdr.quality.audioErrors
 	const b = chan.quality.audioErrors
 	const limit = a === null ? null : ambeTolerance(a)
 	process.stdout.write(
-		`AMBE errors: csdr ${a}, chan ${b}; PROVISIONAL tolerance max(1.25 x csdr, csdr + 20) = ${limit} (delta §5, PF16: to be confirmed)\n`,
+		`AMBE errors: csdr ${a}, chan ${b}; tolerance max(1.25 x csdr, csdr + 20) = ${limit} (delta §5, PF16)\n`,
 	)
 	if (limit === null || b === null || b > limit)
-		fail("chan AMBE errors exceed the provisional tolerance")
+		fail("chan AMBE errors exceed the tolerance")
 	return chan
 }
 

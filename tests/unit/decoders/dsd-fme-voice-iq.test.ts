@@ -52,6 +52,7 @@ interface VoiceIq {
 		clock?: Clock,
 	): (source: AsyncIterable<Buffer>) => AsyncGenerator<Buffer>
 	linkLines(decoded: string): Set<string>
+	crcErrLinkLines(decoded: string): Set<string>
 }
 const scriptUrl = (name: string) =>
 	new URL(`../../../scripts/${name}`, import.meta.url)
@@ -191,6 +192,15 @@ describe("dsd-fme voice A/B IQ mode", () => {
 		expect([...iq.linkLines(decoded)]).toEqual([
 			" SLOT 1 TGT=9 SRC=2060945 FLCO=0x00 FID=0x10 SVC=0x00 Group Call",
 		])
+	})
+
+	it("leaves (CRC ERR) TGT/SRC lines out of the comparison and reports them (ruling QH-12)", () => {
+		const valid =
+			" SLOT 1 TGT=9 SRC=1234567 FLCO=0x00 FID=0x10 SVC=0x00 Group Call"
+		const corrupt = " SLOT 1 TGT=111111 SRC=2222222 Group Call   (CRC ERR)"
+		const decoded = [valid, corrupt].join("\n")
+		expect([...iq.linkLines(decoded)]).toEqual([valid])
+		expect([...iq.crcErrLinkLines(decoded)]).toEqual([corrupt])
 	})
 
 	it("streams the capture through one opened channel into the sink", async () => {

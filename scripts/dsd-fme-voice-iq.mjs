@@ -28,7 +28,7 @@ const DEMOD_RATE_HZ = 48_000
 export const NOMINAL_CENTER_HZ = 100_000_000
 /** First stage of the channelised dsd-fme pipeline (cf32 in, delta E8). */
 export const CHAN_FRONT = "csdr fmdemod"
-/** Delta §5 tolerance, PROVISIONAL until the user confirms it (PF16). */
+/** Delta §5 tolerance, accepted by the user (PF16). */
 export const ambeTolerance = csdr => Math.max(1.25 * csdr, csdr + 20)
 
 /** Parses the IQ-mode options; null when `--iq` is absent (default mode). */
@@ -231,9 +231,24 @@ export function chanFeed({ chanBin, iq, rate, offset, paced }, sink) {
 	)
 }
 
-/** Normalised decode lines carrying a link control (TGT=… SRC=…). */
+/**
+ * Normalised decode lines carrying a CRC-valid link control (TGT=… SRC=…). A
+ * "(CRC ERR)" line failed its integrity check, so it is no identity to compare
+ * (ruling QH-12); crcErrLinkLines lists those for the report.
+ */
 export function linkLines(decoded) {
 	return new Set(
-		decoded.split("\n").filter(line => /\bTGT=\d+ SRC=\d+/.test(line)),
+		decoded
+			.split("\n")
+			.filter(line => /\bTGT=\d+ SRC=\d+/.test(line) && !/CRC ERR/.test(line)),
+	)
+}
+
+/** The TGT=… SRC=… lines that failed their CRC: reported, never compared. */
+export function crcErrLinkLines(decoded) {
+	return new Set(
+		decoded
+			.split("\n")
+			.filter(line => /\bTGT=\d+ SRC=\d+/.test(line) && /CRC ERR/.test(line)),
 	)
 }
