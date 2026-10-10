@@ -6,6 +6,10 @@ and persistence. Task 6 requires both completed session flows and a coordinated
 scanner integration window. Scanner owns its current shared-file work. Independent
 CLI wiring and runtime hygiene portions of task 7 may proceed before task 6
 when they preserve legacy defaults and do not modify scanner-owned paths.
+Task 4 may also prepare a concrete, unmounted runtime lifecycle context in new
+files: compose provisioned storage, restored sessions, policies and shared leases
+with failure cleanup. Listener/config/bootstrap integration still requires the
+scanner Tasks 37, 37a and 38 checkpoint; no preparation grants live protection.
 
 - [x] 1. Implement exact authority/origin, raw-header and canonical credential policy.
   _Requirements: 2.1–2.3, 3.1–3.4_
@@ -153,3 +157,19 @@ This batch is safe to land independently of scanner's active shared-file work.
 It does not mount core authentication or make the browser ready for release.
 Standalone setup/pairing follows as a separately reviewed change; the runtime
 and browser checkpoint remains open.
+
+## Standalone setup/pairing checkpoint — 2026-10-10
+
+`8df836a` (landed independently as `de793ec`) adds a standalone utility and a
+validated read-only credential boundary usable while the core writer is live.
+Setup validates canonical browser/API/audio hostname and scheme before writing;
+LAN browser plans require HTTPS and literal loopback plans may use HTTP. Pairing
+uses one destination-bound machine-authenticated POST with a bounded deadline,
+no redirects and no automatic retry after an uncertain issuance.
+
+Independent Astra/root review approved all seven paths. The 101 focused tests,
+root TypeScript check, focused lint, standalone build/help and compiled timeout
+smoke passed. Normal package build-entry integration must preserve scanner
+Task 32's spectrum-worker entry. Actual protected listeners, browser pairing and
+rolling renewal remain pending integration; setup prints an unmounted public
+plan and creates no TLS listener.
