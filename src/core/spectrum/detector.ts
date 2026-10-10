@@ -51,6 +51,26 @@ export function defaultK(rbwHz: number, integrationMs: number): number {
 	return row.kDb[seg]! + frac * (row.kDb[seg + 1]! - row.kDb[seg]!)
 }
 
+/** k for the 5 ms short-burst path (feasibility § 3a, T = 5 ms column; 250 Hz measured "> 14", unvalidated). */
+export const SHORT_K_TABLE: readonly { rbwHz: number; kDb: number }[] = [
+	{ rbwHz: 1000, kDb: 8.5 },
+	{ rbwHz: 500, kDb: 11.5 },
+	{ rbwHz: 250, kDb: 15 },
+]
+
+/** Nearest-RBW row (in octaves) of SHORT_K_TABLE. */
+export function shortK(rbwHz: number): number {
+	let row = SHORT_K_TABLE[0]!
+	for (const r of SHORT_K_TABLE) {
+		if (
+			Math.abs(Math.log2(rbwHz / r.rbwHz)) <
+			Math.abs(Math.log2(rbwHz / row.rbwHz))
+		)
+			row = r
+	}
+	return row.kDb
+}
+
 /** Bins masked on each side of DC: ceil(max(dcGuardHz, 2·RBW) / binHz) (§ 4.5). */
 export function dcGuardBins(
 	dcGuardHz: number,

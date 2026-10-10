@@ -52,6 +52,8 @@ export interface TrackFlags {
 	edge: boolean
 	skirt: boolean
 	obwBiased: boolean
+	/** Every block the track was on was a short-path burst block (spec § 4.10); surfaces at k_short + 3 dB or by repetition. */
+	burst: boolean
 	/** Sticky: the track lies wholly on a spur line (baseband, provisional or comb; § 4.9, Task 7a). Never surfaced, never probed. */
 	spur: boolean
 }
@@ -182,6 +184,10 @@ export interface PipelineConfig {
 	maxTracks: number
 	/** 120000 → endReason max-duration */
 	maxTrackMs: number
+	/** Short-burst path integration (spec § 4.10); default 5, null disables the path. */
+	shortIntegrationMs?: number | null
+	/** FFT frame overlap; 0.5 doubles FFT cost (spec § 4.2). Default 0, the measured setting. */
+	overlap?: 0 | 0.5
 	persistedEngine?: EngineState
 }
 

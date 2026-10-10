@@ -36,6 +36,8 @@ export interface TrackerBlock {
 	thresholdDb: number
 	gap: boolean
 	overload: boolean
+	/** Segments of this block that are short-path bursts (spec § 4.10). */
+	burstSegments?: ReadonlySet<Segment>
 }
 
 interface EpochInfo {
@@ -349,6 +351,7 @@ export class Tracker {
 				skirt: false,
 				obwBiased: false,
 				spur: false,
+				burst: false,
 			},
 			flagsChanged: false,
 			justOpened: true,
@@ -399,6 +402,11 @@ export class Tracker {
 		this.raise(t, "truncated", s.flags.truncated)
 		this.raise(t, "edge", s.flags.edge)
 		this.raise(t, "skirt", s.flags.skirt)
+		// Burst is AND over the track's blocks: one continuous block makes it an ordinary track.
+		const isBurst = b.burstSegments?.has(s) ?? false
+		const wasBurst = t.flags.burst
+		t.flags.burst = t.blocks === 1 ? isBurst : wasBurst && isBurst
+		if (wasBurst && !t.flags.burst) t.flagsChanged = true
 	}
 
 	private raise(t: OpenTrack, flag: keyof TrackFlags, value: boolean): void {

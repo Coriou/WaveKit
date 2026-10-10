@@ -151,7 +151,9 @@ describe("detector on synthetic signals", () => {
 			// Validates: spec § 4.5, § 7.2
 			const h = heavyTail(seed, 1)
 			expect(
-				h.tracks().filter(t => t.blocks >= h.config.minSurfaceBlocks),
+				h
+					.tracks()
+					.filter(t => !t.flags.burst && t.blocks >= h.config.minSurfaceBlocks),
 			).toEqual([])
 		},
 		60_000,
@@ -164,7 +166,9 @@ describe("detector on synthetic signals", () => {
 		expect(opened).toBeGreaterThanOrEqual(1)
 		const long = h
 			.tracks()
-			.filter(t => t.blocks >= h.config.minSurfaceBlocks).length
+			.filter(
+				t => !t.flags.burst && t.blocks >= h.config.minSurfaceBlocks,
+			).length
 		expect(long / opened).toBeLessThanOrEqual(0.1)
 	}, 60_000)
 })

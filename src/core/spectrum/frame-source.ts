@@ -4,8 +4,8 @@
  *
  * - Formats: U8_IQ (u/127.5 − 1, the channelizer mapping), S16_IQ (s/32768),
  *   FLOAT32LE IQ, all little-endian interleaved I, Q.
- * - Frames never overlap: frame k of a contiguous stretch starts at
- *   stretchStart + k·N. A gap, or a push whose startSample is not the next
+ * - Frame k of a contiguous stretch starts at stretchStart + k·hop, where hop
+ *   is N, or N/2 with `overlap: 0.5` (§ 4.2). A gap, or a push whose startSample is not the next
  *   expected sample, is a seam: the partial frame before it is discarded and
  *   assembly restarts at the first sample after it.
  * - Counter runs (U8_IQ only; RTL2832 test mode, § 4.6): ≥ 256 consecutive
@@ -65,6 +65,9 @@ export class FrameSource {
 	private readonly bps: number
 	private readonly fftSize: number
 	private readonly frameBytes: number
+	/** Frame advance: fftSize, or fftSize/2 with 50 % overlap. */
+	private readonly hopSamples: number
+	private readonly hopBytes: number
 	private readonly window: Float32Array
 	private readonly re: Float32Array
 	private readonly im: Float32Array
@@ -84,7 +87,7 @@ export class FrameSource {
 	private streakLen = 0
 	private runStartSample: number | null = null
 
-	constructor(opts: { format: IqFormat; fftSize: number }) {
+	constructor(opts: { format: IqFormat; fftSize: number; overlap?: 0 | 0.5 }) {
 		const n = opts.fftSize
 		if (!Number.isInteger(n) || n < 2 || n > 1 << 20 || (n & (n - 1)) !== 0) {
 			throw new WaveKitError(
@@ -96,6 +99,8 @@ export class FrameSource {
 		this.bps = bytesPerSample(opts.format)
 		this.fftSize = n
 		this.frameBytes = n * this.bps
+		this.hopSamples = opts.overlap === 0.5 ? n / 2 : n
+		this.hopBytes = this.hopSamples * this.bps
 		this.window = hannWindow(n)
 		this.re = new Float32Array(n)
 		this.im = new Float32Array(n)
@@ -235,8 +240,8 @@ export class FrameSource {
 				im: this.im,
 				clipped,
 			})
-			this.head += this.frameBytes
-			this.bufStartSample += this.fftSize
+			this.head += this.hopBytes
+			this.bufStartSample += this.hopSamples
 		}
 	}
 

@@ -1,6 +1,6 @@
 import { WaveKitError } from "../../utils/errors.js"
 import { segment } from "./emissions/segmenter.js"
-import type { Segment } from "./emissions/segmenter.js"
+import type { Segment, SegmentOptions } from "./emissions/segmenter.js"
 import { Tracker } from "./emissions/tracker.js"
 import type { TrackerBlock } from "./emissions/tracker.js"
 import type {
@@ -15,7 +15,7 @@ import type {
 	SettleMode,
 	TuningTrust,
 } from "./types.js"
-import { dcGuardBins, Detector, usableEdgeBins } from "./detector.js"
+import { dcGuardBins, Detector, shortK, usableEdgeBins } from "./detector.js"
 import type { CfarRange } from "./detector.js"
 import { accumulateShiftedPower, Fft, powerToDb } from "./fft.js"
 import { bytesPerSample, FrameSource } from "./frame-source.js"
@@ -52,6 +52,11 @@ const CFAR_BUCKET_HZ = 2_000_000
 const KNOWN_RF_MAX = 1024
 const GAP_TOLERANCE_HZ = 2000
 const NO_FLOOR_DBFS = -200
+const DEFAULT_SHORT_INTEGRATION_MS = 5
+const BURST_DILUTION_DB = 6 // long-path peak this far below the short max-hold → energy in ≤ ¼ of the block
+const BURST_MAX_ON_MS = 15 // a burst block has the short path on for at most this long
+const SPEC_PAD_BINS = 2
+const OVERLAP_EDOF_GAIN = 1.89 // Welch equivalent independent frames, Hann at 50 % overlap
 
 interface EpochState {
 	epoch: number
@@ -91,6 +96,12 @@ export class SpectrumPipeline {
 	private readonly fs: number
 	private readonly binHz: number
 	private readonly framesPerBlock: number
+	private readonly hop: number
+	private readonly expectedFrames: number
+	private readonly framesPerShort: number
+	private readonly burstMaxOnFrames: number
+	private readonly shortK: number
+	private readonly shortDetector: Detector | null
 	private readonly blockSamples: number
 	private readonly blockMs: number
 	private readonly bytesPerSample: number
@@ -119,6 +130,20 @@ export class SpectrumPipeline {
 	private readonly joined: Uint8Array
 	private readonly lastTrackBins: Uint8Array
 	private readonly exclusionMask: Uint8Array
+	private readonly shortAcc: Float64Array
+	private readonly shortRing: Float64Array
+	private shortSlot = 0
+	private shortFill = 0
+	private shortNext = -1
+	private readonly shortDb: Float32Array
+	private readonly shortOn: Uint8Array
+	private readonly burstCount: Uint8Array
+	private readonly burstPeakDb: Float32Array
+	private readonly burstCountDone: Uint8Array
+	private readonly burstPeakDone: Float32Array
+	private readonly burstOn: Uint8Array
+	private readonly mergedDb: Float32Array
+	private floorReady = false
 	private exclusionEdges: number[] = []
 	private rasterEdges: number[] = []
 	private masks: MasksInput = {
@@ -173,11 +198,30 @@ export class SpectrumPipeline {
 		this.n = cfg.fftSize
 		this.fs = cfg.sampleRateHz
 		this.binHz = this.fs / this.n
+		const overlap = cfg.overlap ?? 0
+		this.hop = this.n * (1 - overlap)
 		this.framesPerBlock = Math.max(
 			1,
 			Math.round((cfg.integrationMs * this.fs) / (this.n * 1000)),
 		)
 		this.blockSamples = this.framesPerBlock * this.n
+		this.expectedFrames = this.blockSamples / this.hop
+		const shortMs =
+			cfg.shortIntegrationMs === undefined
+				? DEFAULT_SHORT_INTEGRATION_MS
+				: cfg.shortIntegrationMs
+		this.framesPerShort =
+			shortMs === null
+				? 0
+				: Math.max(1, Math.round((shortMs * this.fs) / (this.hop * 1000)))
+		// a burst of ≤ BURST_MAX_ON_MS keeps the sliding window on for at most its length + T_short − 1 frame
+		this.burstMaxOnFrames =
+			shortMs === null
+				? 0
+				: Math.round((BURST_MAX_ON_MS * this.fs) / (this.hop * 1000)) +
+					this.framesPerShort -
+					1
+		this.shortK = shortK(this.fs / this.n)
 		this.blockMs = (this.blockSamples / this.fs) * 1000
 		this.bytesPerSample = bytesPerSample(cfg.format)
 		this.gapBins = Math.max(1, Math.round(GAP_TOLERANCE_HZ / this.binHz))
@@ -188,10 +232,17 @@ export class SpectrumPipeline {
 		const hangBlocks = Math.max(1, Math.round(cfg.trackHangMs / this.blockMs))
 		this.hangSamples = hangBlocks * this.blockSamples
 		this.fft = new Fft(this.n)
-		this.frames = new FrameSource({ format: cfg.format, fftSize: this.n })
+		this.frames = new FrameSource({
+			format: cfg.format,
+			fftSize: this.n,
+			overlap,
+		})
 		this.floor = new NoiseFloor({
 			fftSize: this.n,
-			framesPerBlock: this.framesPerBlock,
+			framesPerBlock:
+				overlap > 0
+					? Math.round(OVERLAP_EDOF_GAIN * this.framesPerBlock)
+					: this.framesPerBlock,
 			tauBlocks: Math.max(1, Math.round((FLOOR_TAU_S * 1000) / this.blockMs)),
 		})
 		this.spurs = new SpurMap({
@@ -208,6 +259,17 @@ export class SpectrumPipeline {
 			rbwHz: this.binHz,
 			integrationMs: cfg.integrationMs,
 		})
+		this.shortDetector =
+			shortMs === null
+				? null
+				: new Detector({
+						fftSize: this.n,
+						hysteresisDb: cfg.hysteresisDb,
+						faTargetPerMhzMin: cfg.faTargetPerMhzMin,
+						pinnedK: this.shortK,
+						rbwHz: this.binHz,
+						integrationMs: shortMs,
+					})
 		const idPrefix = `${cfg.sourceId}-${now().toString(36)}-`
 		const maxTrackBlocks = Math.max(1, Math.ceil(cfg.maxTrackMs / this.blockMs))
 		this.tracker = new Tracker({
@@ -239,6 +301,16 @@ export class SpectrumPipeline {
 		this.joined = new Uint8Array(this.n)
 		this.lastTrackBins = new Uint8Array(this.n)
 		this.exclusionMask = new Uint8Array(this.n)
+		this.shortAcc = new Float64Array(this.n)
+		this.shortRing = new Float64Array(this.n * Math.max(1, this.framesPerShort))
+		this.shortDb = new Float32Array(this.n)
+		this.shortOn = new Uint8Array(this.n)
+		this.burstCount = new Uint8Array(this.n)
+		this.burstPeakDb = new Float32Array(this.n).fill(NO_FLOOR_DBFS)
+		this.burstCountDone = new Uint8Array(this.n)
+		this.burstPeakDone = new Float32Array(this.n).fill(NO_FLOOR_DBFS)
+		this.burstOn = new Uint8Array(this.n)
+		this.mergedDb = new Float32Array(this.n)
 		this.nextStatsAt = STATS_INTERVAL_S * this.fs
 		this.blanker = new ImpulseBlanker({
 			fftSize: this.n,
@@ -462,7 +534,11 @@ export class SpectrumPipeline {
 		this.discardBlock()
 		this.emit(this.tracker.closeAll("gap"))
 		this.emit(this.wideband.closeAll("gap"))
-		this.frames = new FrameSource({ format: this.cfg.format, fftSize: this.n })
+		this.frames = new FrameSource({
+			format: this.cfg.format,
+			fftSize: this.n,
+			overlap: this.cfg.overlap ?? 0,
+		})
 		this.gaps = []
 		this.resolving = null
 		this.stream = input.stream
@@ -515,7 +591,10 @@ export class SpectrumPipeline {
 		const ep = this.ep
 		if (!ep) return
 		this.detector.reset()
+		this.shortDetector?.reset()
+		this.resetShort()
 		this.resetArtefacts()
+		this.floorReady = false
 		this.floor.useKey(ep.absKey)
 		this.applyMasks()
 	}
@@ -589,9 +668,9 @@ export class SpectrumPipeline {
 		}
 		const s0 = ep.settledStart
 		if (s0 === null || f.startSample < s0) return
-		// A frame belongs to the block it starts in. After a seam the frame grid is no longer aligned to
-		// the block grid, so the last frame of a block may overhang into the next one (same epoch only:
-		// frames before s0 are dropped above, and nothing past a command is ever pushed before it).
+		// A frame belongs to the block it starts in. After a seam (or with overlap) the last frame of a block
+		// may overhang into the next one (same epoch only: frames before s0 are dropped above, and nothing
+		// past a command is ever pushed before it).
 		const bi = Math.floor((f.startSample - s0) / this.blockSamples)
 		const blockEnd = s0 + (bi + 1) * this.blockSamples
 		if (bi !== this.blockIndex) {
@@ -603,22 +682,78 @@ export class SpectrumPipeline {
 		accumulateShiftedPower(f.re, f.im, this.frameAcc)
 		this.blockClipped += f.clipped
 		this.blockFrames++
-		// § 4.9 (Task 7a): a blanked frame, or a pending one in an epoch's first block, is neither integrated nor enveloped
+		// § 4.9 (Task 7a): a blanked frame, or a pending one in an epoch's first block, is neither integrated,
+		// short-pathed nor enveloped; the frame after it is a seam for shortFrame, so the 5 ms window restarts
 		if (this.blanker.offer(this.frameAcc, f.startSample) === "keep") {
 			for (let i = 0; i < this.n; i++)
 				this.blockAcc[i] = (this.blockAcc[i] ?? 0) + (this.frameAcc[i] ?? 0)
+			this.shortFrame(f.startSample)
 			if (this.tracker.openCount > 0) {
 				powerToDb(this.frameAcc, 1, this.frameDb)
 				this.tracker.frame(this.frameDb, f.startSample)
 			}
 		}
-		if (f.startSample + this.n >= blockEnd) this.finishBlock()
+		if (f.startSample + this.hop >= blockEnd) this.finishBlock()
+	}
+
+	/**
+	 * Short path (spec § 4.10): the same frame powers (no extra FFT) summed over a sliding T_short window
+	 * that is evaluated on every frame, so a burst is integrated whole wherever it starts, across a block
+	 * edge too (fixed sub-blocks would split a straddling burst and dilute each half by up to 3 dB).
+	 * O(N) per frame: a ring of the last framesPerShort frame powers and a running sum. The window
+	 * restarts on a seam (a frame that does not follow its predecessor) and at each epoch.
+	 */
+	private shortFrame(startSample: number): void {
+		const d = this.shortDetector
+		if (!d) return
+		if (startSample !== this.shortNext) this.resetShort()
+		this.shortNext = startSample + this.hop
+		const w = this.framesPerShort
+		const base = this.shortSlot * this.n
+		for (let i = 0; i < this.n; i++) {
+			const p = this.frameAcc[i] ?? 0
+			this.shortAcc[i] =
+				(this.shortAcc[i] ?? 0) + p - (this.shortRing[base + i] ?? 0)
+			this.shortRing[base + i] = p
+		}
+		this.shortSlot = (this.shortSlot + 1) % w
+		if (this.shortSlot === 0) this.resumShort() // exact once per window: the running sum never drifts
+		if (this.shortFill < w) this.shortFill++
+		if (this.shortFill < w || !this.floorReady) return
+		powerToDb(this.shortAcc, w, this.shortDb)
+		d.detect(this.shortDb, this.floorDb, this.shortOn)
+		for (let i = 0; i < this.n; i++) {
+			const p = this.shortDb[i] ?? NO_FLOOR_DBFS
+			if (p > (this.burstPeakDb[i] ?? NO_FLOOR_DBFS)) this.burstPeakDb[i] = p
+			// on-window frames of this block (saturating; only the comparison with burstMaxOnFrames matters)
+			if (this.shortOn[i] === 1 && (this.burstCount[i] ?? 0) < 255)
+				this.burstCount[i] = (this.burstCount[i] ?? 0) + 1
+		}
+	}
+
+	private resetShort(): void {
+		this.shortRing.fill(0)
+		this.shortAcc.fill(0)
+		this.shortSlot = 0
+		this.shortFill = 0
+	}
+
+	private resumShort(): void {
+		this.shortAcc.fill(0)
+		for (let s = 0; s < this.framesPerShort; s++) {
+			const base = s * this.n
+			for (let i = 0; i < this.n; i++)
+				this.shortAcc[i] =
+					(this.shortAcc[i] ?? 0) + (this.shortRing[base + i] ?? 0)
+		}
 	}
 
 	private resetBlock(): void {
 		this.blockAcc.fill(0)
 		this.blockFrames = 0
 		this.blockClipped = 0
+		this.burstCount.fill(0) // the sliding window (shortAcc, shortRing) spans blocks and is not reset here
+		this.burstPeakDb.fill(NO_FLOOR_DBFS)
 		this.blanker.dropBlock()
 	}
 
@@ -639,47 +774,53 @@ export class SpectrumPipeline {
 		const blockStart = s0 + this.blockIndex * this.blockSamples
 		const blockEnd = blockStart + this.blockSamples
 		const gap =
-			frames < this.framesPerBlock ||
+			frames < this.expectedFrames ||
 			this.gaps.some(g => g.start < blockEnd && g.end > blockStart)
 		const overload =
 			this.blockClipped / (frames * this.n) > this.cfg.clipFraction
 		const blanking = this.blanker.endBlock(this.blockAcc) // § 4.9: blanked frames are not integrated
 		powerToDb(this.blockAcc, blanking.integrated, this.powerDb)
+		this.burstCountDone.set(this.burstCount)
+		this.burstPeakDone.set(this.burstPeakDb)
 		this.resetBlock()
 		this.gaps = this.gaps.filter(g => g.end > blockEnd)
 
 		this.extra.set(this.exclusionMask)
 		this.spurs.mask(ep.absKey, this.extra)
-		this.detector.setMasks({
+		const masks = {
 			dcGuardBins: this.dcBins,
 			edgeBins: this.edgeBins,
 			extra: this.extra,
-		})
+		}
+		this.detector.setMasks(masks)
+		this.shortDetector?.setMasks(masks)
 		const unmasked = this.detector.unmasked()
 		const blockFloor = this.floor.blockFloor(this.powerDb, unmasked)
 		const effective = this.floor.effectiveFloor(blockFloor, ep.absKey)
 		this.floor.perBinFloor(this.floorDb, effective)
+		this.floorReady = true
 		// recordNoiseEdges assumes adjacent blocks: after a skipped, stale, gap, overload or excluded block, start afresh
 		if (this.blockIndex !== this.noiseEdgeBlock + 1) this.detector.reset()
 		this.detector.detect(this.powerDb, this.floorDb, this.on)
 		const k = this.detector.kFor(this.n / 2)
 		const floorOccupied = this.floor.occupied(blockFloor, k, ep.absKey)
+		const segOpts: SegmentOptions = {
+			gapBins: this.gapBins,
+			usableStartBin: this.edgeBins,
+			usableEndBin: this.n - this.edgeBins + 1,
+			exclusionEdges: this.exclusionEdges,
+			rasterBinEdges: this.rasterEdges,
+			skirtDb: SKIRT_DB,
+			inWindow: this.masks.inWindow,
+			farSkirt: {
+				reachBins: Math.floor(FAR_SKIRT_REACH_HZ / this.binHz),
+				minDb: FAR_SKIRT_DB,
+				dcBin: this.n / 2,
+			},
+		}
 		const segs = this.withoutLines(
 			ep,
-			segment(this.on, this.powerDb, this.floorDb, {
-				gapBins: this.gapBins,
-				usableStartBin: this.edgeBins,
-				usableEndBin: this.n - this.edgeBins + 1,
-				exclusionEdges: this.exclusionEdges,
-				rasterBinEdges: this.rasterEdges,
-				skirtDb: SKIRT_DB,
-				inWindow: this.masks.inWindow,
-				farSkirt: {
-					reachBins: Math.floor(FAR_SKIRT_REACH_HZ / this.binHz),
-					minDb: FAR_SKIRT_DB,
-					dcBin: this.n / 2,
-				},
-			}),
+			segment(this.on, this.powerDb, this.floorDb, segOpts),
 		)
 
 		if (ep.staleLeft > 0) {
@@ -687,6 +828,10 @@ export class SpectrumPipeline {
 				ep.staleLeft--
 				this.staleAfterSettle++
 				this.detector.reset()
+				this.shortDetector?.reset()
+				// the sliding short window spans blocks and frames stay contiguous through a stale discard: restart it,
+				// or the first accepted block opens a burst ghost at the previous hop's emitters (spec § 4.6)
+				this.resetShort()
 				this.out.push({ kind: "stale-discard", epoch: ep.epoch, blocks: 1 })
 				return
 			}
@@ -712,20 +857,25 @@ export class SpectrumPipeline {
 			)
 			this.observeLines(ep)
 		}
+		const { trackSegs, burstSet } = this.mergeBursts(segs, segOpts)
 		const block: TrackerBlock = {
 			endSample: blockEnd,
-			powerDb: this.powerDb,
+			powerDb: burstSet.size > 0 ? this.mergedPower(burstSet) : this.powerDb,
 			floorDb: this.floorDb,
 			blockFloorDb: effective,
 			thresholdDb: k,
 			gap,
 			overload,
+			burstSegments: burstSet,
 		}
 		this.emit(this.tracker.flagSpurs(this.lineMask))
-		this.noteActivity(segs, blockEnd)
-		this.emit(this.tracker.block(segs, block))
+		this.noteActivity(trackSegs, blockEnd)
+		this.emit(this.tracker.block(trackSegs, block))
 		this.emit(
-			this.wideband.block(floorOccupied ? [this.widebandSegment()] : [], block),
+			this.wideband.block(floorOccupied ? [this.widebandSegment()] : [], {
+				...block,
+				powerDb: this.powerDb,
+			}),
 		)
 		this.tracker.trackBinsMask(this.lastTrackBins, 1)
 		if (learn) {
@@ -753,12 +903,72 @@ export class SpectrumPipeline {
 					blockEnd,
 					effective,
 					k,
-					segs,
+					trackSegs,
 					floorOccupied,
 					overload,
+					burstSet,
 				),
 			})
 		}
+	}
+
+	/**
+	 * Spec § 4.10: short-path segments that were on for ≤ BURST_MAX_ON_MS (≤ burstMaxOnFrames on-window
+	 * frames in the block) and are either unseen by the long path or ≥ BURST_DILUTION_DB stronger than its
+	 * peak replace the overlapping long segments and are marked as bursts; everything else stays with the long path.
+	 */
+	private mergeBursts(
+		segs: Segment[],
+		segOpts: SegmentOptions,
+	): { trackSegs: Segment[]; burstSet: Set<Segment> } {
+		const burstSet = new Set<Segment>()
+		if (!this.shortDetector) return { trackSegs: segs, burstSet }
+		for (let i = 0; i < this.n; i++)
+			this.burstOn[i] = (this.burstCountDone[i] ?? 0) > 0 ? 1 : 0
+		const candidates = segment(
+			this.burstOn,
+			this.burstPeakDone,
+			this.floorDb,
+			segOpts,
+		)
+		if (candidates.length === 0) return { trackSegs: segs, burstSet }
+		const replaced = new Set<Segment>()
+		for (const b of candidates) {
+			let onFrames = 0
+			for (let i = b.startBin; i < b.endBin; i++)
+				onFrames = Math.max(onFrames, this.burstCountDone[i] ?? 0)
+			if (onFrames > this.burstMaxOnFrames) continue
+			const overlapping = segs.filter(
+				s => s.startBin < b.endBin && s.endBin > b.startBin,
+			)
+			const longPeak = overlapping.reduce(
+				(m, s) => Math.max(m, s.peakDb),
+				-Infinity,
+			)
+			if (longPeak > b.peakDb - BURST_DILUTION_DB) continue
+			for (const s of overlapping) replaced.add(s)
+			burstSet.add(b)
+		}
+		if (burstSet.size === 0) return { trackSegs: segs, burstSet }
+		const trackSegs = [...segs.filter(s => !replaced.has(s)), ...burstSet].sort(
+			(a, b) => a.startBin - b.startBin,
+		)
+		return { trackSegs, burstSet }
+	}
+
+	/** Block PSD for the tracker: long-path power, with the short-path max-hold over burst segments. */
+	private mergedPower(burstSet: ReadonlySet<Segment>): Float32Array {
+		this.mergedDb.set(this.powerDb)
+		for (const b of burstSet) {
+			for (
+				let i = Math.max(0, b.startBin - SPEC_PAD_BINS);
+				i < Math.min(this.n, b.endBin + SPEC_PAD_BINS);
+				i++
+			) {
+				this.mergedDb[i] = this.burstPeakDone[i] ?? NO_FLOOR_DBFS
+			}
+		}
+		return this.mergedDb
 	}
 
 	/** Spec §4.6: a segment at the baseband bins of a pre-epoch track that no known emitter explains. */
@@ -882,9 +1092,9 @@ export class SpectrumPipeline {
 				const bin = Math.round(
 					(t.centreHz - ep.centreHz) / this.binHz + this.n / 2,
 				)
-				t.thresholdDb = this.detector.kFor(
-					Math.min(this.n - 1, Math.max(0, bin)),
-				)
+				t.thresholdDb = t.flags.burst
+					? this.shortK
+					: this.detector.kFor(Math.min(this.n - 1, Math.max(0, bin)))
 				if (Math.abs(t.centreHz - ep.centreHz) - t.obwHz / 2 < this.dcGuardHz)
 					t.flags.obwBiased = true
 				if (e.kind === "track-close" && t.blocks >= 2) {
@@ -932,6 +1142,11 @@ export class SpectrumPipeline {
 			edgeBins: this.edgeBins,
 			extra: this.exclusionMask,
 		})
+		this.shortDetector?.setMasks({
+			dcGuardBins: this.dcBins,
+			edgeBins: this.edgeBins,
+			extra: this.exclusionMask,
+		})
 		this.detector.setCfarRanges(this.cfarRanges(c))
 	}
 
@@ -969,6 +1184,7 @@ export class SpectrumPipeline {
 		segs: Segment[],
 		floorOccupied: boolean,
 		overload: boolean,
+		burstSet: ReadonlySet<Segment> = new Set(),
 	): BlockSummary {
 		const lo = this.edgeBins
 		const hi = this.n - this.edgeBins + 1
@@ -1000,7 +1216,7 @@ export class SpectrumPipeline {
 			tracks: segs.map(s => ({
 				startHz: this.rfLow(ep, s.startBin),
 				endHz: this.rfLow(ep, s.endBin),
-				flags: { burst: false, iqImage: false, edge: s.flags.edge },
+				flags: { burst: burstSet.has(s), iqImage: false, edge: s.flags.edge },
 			})),
 			masks: { dcHz: ep.centreHz, dcGuardHz: this.dcGuardHz, spurRanges },
 			floorOccupied,
