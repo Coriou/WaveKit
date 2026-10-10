@@ -171,4 +171,34 @@ describe("ImpulseBlanker", () => {
 		expect(b.rfi()).toEqual({ active: false, periodMs: null, events: 4 })
 		expect(b.blankedFrames).toBe(8)
 	})
+
+	it("keeps RFI timing across epoch starts on one stream", () => {
+		const rng = mulberry32(7)
+		const b = newBlanker()
+		const periodic = (k: number): Float64Array =>
+			frame(rng, k >= 30 && (k - 30) % 100 < 2 ? [ALL] : [])
+		for (let block = 0; block < 5; block++) runBlock(b, block, periodic) // events at frames 30, 130, 230
+		expect(b.rfi()).toEqual({ active: true, periodMs: 100, events: 3 })
+		b.reset() // a hop: new centre, same stream
+		expect(b.rfi()).toEqual({ active: true, periodMs: 100, events: 3 })
+		for (let block = 5; block < 7; block++) {
+			b.reset() // every block an epoch's first: the event at frame 330 is judged as pending
+			runBlock(b, block, periodic)
+		}
+		expect(b.rfi()).toEqual({ active: true, periodMs: 100, events: 4 })
+		expect(b.blankedFrames).toBe(8)
+	})
+
+	it("forgets RFI when a new stream restarts the sample index", () => {
+		const rng = mulberry32(8)
+		const b = newBlanker()
+		const periodic = (k: number): Float64Array =>
+			frame(rng, k >= 30 && (k - 30) % 100 < 2 ? [ALL] : [])
+		for (let block = 0; block < 5; block++) runBlock(b, block, periodic)
+		expect(b.rfi().active).toBe(true)
+		b.reset()
+		runBlock(b, 0, () => frame(rng)) // the new stream starts again at sample 0, quiet
+		expect(b.rfi()).toEqual({ active: false, periodMs: null, events: 0 })
+		expect(b.blankedFrames).toBe(6)
+	})
 })

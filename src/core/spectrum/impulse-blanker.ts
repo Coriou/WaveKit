@@ -101,6 +101,11 @@ export class ImpulseBlanker {
 	 */
 	offer(power: Float64Array, startSample: number): FrameVerdict {
 		this.latest = startSample
+		if (this.lastBlank !== null && startSample < this.lastBlank) {
+			// a new stream restarted the sample index: the old impulse timing says nothing about it
+			this.events = []
+			this.lastBlank = null
+		}
 		for (let i = 0; i < this.n; i++)
 			this.raw[i] = (this.raw[i] ?? 0) + (power[i] ?? 0)
 		this.frames++
