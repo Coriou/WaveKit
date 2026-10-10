@@ -28,6 +28,28 @@ fixtures:
     expected:
       { min_count: 1, payloads: [], key_fields: ["mmsi", "messageType"] }
 
+  # Negatives (plan Task 7 step 4): the composed fixture with only channel.center_hz moved to
+  # center_hz + 0.49 x sample_rate, outside the usable span. Channelizer path only (the raw path
+  # ignores channelHz); the decoder must suspend with channel-outside-capture and decode nothing.
+  - id: composed_ais_162m_2048k_outside
+    role: negative
+    decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta
+      notes: "Negative copy of composed_ais_162m_2048k (same file and sha256): channel at 162 MHz + 0.49 x 2.048 Msps = 163.00352 MHz."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2048k.json }
+    file: raw/composed_ais_162m_2048k.cu8
+    sha256: 9a2c4432135e49bc661f47ad6c99b270e44eb7c89322ee3a6720696df0c63166
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 162000000
+    duration_s: 17
+    expected:
+      { min_count: 0, payloads: [], suspension: channel-outside-capture }
+    channel: { center_hz: 163003520 }
+
   - id: composed_ais_162m_2400k
     role: channelizer-golden
     decoder: ais-catcher
@@ -133,6 +155,26 @@ fixtures:
     center_hz: 136650000
     duration_s: 10
     expected: { min_count: 1, payloads: [], key_fields: ["icao", "msgType"] }
+
+  # Negative copy (see composed_ais_162m_2048k_outside) until T7b delivers a VDL2 capture.
+  - id: composed_vdl2_136800k_2048k_outside
+    role: negative
+    decoder: dumpvdl2
+    decoder_options: { frequencies: [136725000, 136875000, 136975000] }
+    license: "composed: GPL-3.0 (junzis/pyVDL2 sample_iqdata_rtlsdr.dat and szpajder/dumpvdl2 vdl2_model_16b_1050kHz.wav; repository licenses, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/junzis/pyVDL2/tree/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data
+      notes: "Negative copy of composed_vdl2_136800k_2048k (same file and sha256): channel at 136.65 MHz + 0.49 x 2.048 Msps = 137.65352 MHz (channelHz overrides the span midpoint)."
+    fetch: { kind: generated, recipe: recipes/composed_vdl2_136800k_2048k.json }
+    file: raw/composed_vdl2_136800k_2048k.cu8
+    sha256: 98aab5aa3886fb5b53cf275e97371c0bb0db7f4213be6f7165a9c041d2931ed7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 136650000
+    duration_s: 10
+    expected:
+      { min_count: 0, payloads: [], suspension: channel-outside-capture }
+    channel: { center_hz: 137653520 }
 
   - id: composed_dmr_446m_2048k
     role: channelizer-golden

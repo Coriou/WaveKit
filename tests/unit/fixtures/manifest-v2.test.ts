@@ -181,4 +181,36 @@ describe("fixture manifest v2", () => {
 			key_fields: ["talkgroup", "source"],
 		})
 	})
+	it("pairs the AIS and VDL2 composed goldens with _outside negatives (plan Task 7 step 4)", () => {
+		const fixtures = loadManifest("fixtures/manifest.yaml").fixtures
+		const byId = new Map(fixtures.map(f => [f.id, f]))
+		for (const id of [
+			"composed_ais_162m_2048k",
+			"composed_vdl2_136800k_2048k",
+		]) {
+			const golden = byId.get(id)!
+			const negative = byId.get(`${id}_outside`)
+			expect(negative, id).toBeDefined()
+			expect(negative).toMatchObject({
+				role: "negative",
+				decoder: golden.decoder,
+				decoder_options: golden.decoder_options,
+				fetch: golden.fetch,
+				file: golden.file,
+				sha256: golden.sha256,
+				format: golden.format,
+				sample_rate: golden.sample_rate,
+				center_hz: golden.center_hz,
+				duration_s: golden.duration_s,
+				expected: {
+					min_count: 0,
+					payloads: [],
+					suspension: "channel-outside-capture",
+				},
+				channel: {
+					center_hz: golden.center_hz! + 0.49 * golden.sample_rate,
+				},
+			})
+		}
+	})
 })
