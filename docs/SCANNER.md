@@ -94,8 +94,8 @@ Auto-resume: once the preemptor leaves (relay control back to `user`, and no RES
 Explicit `resume` in the other cases:
 
 - `paused(operator)` with the lease: resumes at the same hop.
-- `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while another job holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)`.
-- `paused(core-restart)`: re-acquires the lease, re-opens the engine and resumes at the persisted hop.
+- `paused(operator)` after an operator or relay write took the lease: re-acquires it. With a grown impact and no `takeover` it answers 409 `SCANNER_TAKEOVER_REQUIRED` (the job stays paused); while a job of equal or higher priority holds the lease it answers 409 `SCANNER_SOURCE_BUSY` and moves to `paused(resume-blocked)` (taking the lease from a lower-priority job needs consent like a takeover).
+- `paused(core-restart)`: re-acquires the lease, re-opens the engine and restarts the sweep from its first hop.
 
 Every 409 `SCANNER_SOURCE_BUSY` carries `details.reason`: `releasing`, `recovery-pending` and `holder-starting` clear by themselves (retry); `relay` and `held` last until the relay or the holding job lets go.
 

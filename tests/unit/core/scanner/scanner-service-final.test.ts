@@ -461,4 +461,36 @@ describe("ScannerService (S1-B final review)", () => {
 		expect(engineConfig(h)?.integrationMs).toBe(100)
 		await h.service.stop()
 	})
+
+	it("needs takeover to resume a lease-less operator pause that would take the lease from a lower-priority sweep (re-review R1)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const p = await h.service.createJob(sweep(80))
+		await untilRunning(h, p.id)
+		await h.service.pauseJob(p.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(holderOf(h)).toBeUndefined()
+		const q = await h.service.createJob(sweep(50))
+		await untilRunning(h, q.id, 40)
+		expect(holderOf(h)).toBe(q.id)
+		await expect(
+			h.service.resumeJob(p.id, { takeover: false }),
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_TAKEOVER_REQUIRED",
+			details: { impact: { scannerJobs: [q.id] } },
+		})
+		expect(h.service.getJob(p.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "operator",
+		})
+		expect(holderOf(h)).toBe(q.id)
+		await h.service.resumeJob(p.id, { takeover: true })
+		await settled(h.service)
+		expect(h.service.getJob(p.id)?.state).toBe("running")
+		expect(holderOf(h)).toBe(p.id)
+		expect(h.service.getJob(q.id)?.reason).toBe("preempted-job")
+		await h.service.stop()
+	})
 })

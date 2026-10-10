@@ -1459,6 +1459,12 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`).
 
+`unrestorable` lists the tuner fields the job's end did not write back: fields
+whose previous value was unknown, and fields whose restore could not be written
+(for example while the source is disconnected). Those restores are re-queued
+and run on the source's first data after it reconnects, even if the job is
+deleted in between.
+
 #### PATCH /api/scanner/jobs/:id
 
 Live edit, applied at the next hop. Allowed keys: `thresholdDb`,
@@ -1487,13 +1493,15 @@ Each returns the `ScanJob`. `resume` takes an optional body
 - from `paused(operator)` after an operator or relay write took the lease:
   re-acquires it. 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact` when
   the impact grew beyond what was consented and `takeover` is not set (the
-  job stays `paused(operator)`); 409 `SCANNER_SOURCE_BUSY` moves it to
-  `paused(resume-blocked)` when another job holds the lease (a transient
+  job stays `paused(operator)`; taking the lease from a lower-priority job
+  counts as a grown impact); 409 `SCANNER_SOURCE_BUSY` moves it to
+  `paused(resume-blocked)` when a job of equal or higher priority holds the
+  lease (a transient
   refusal, `details.reason` `releasing`, `recovery-pending` or
   `holder-starting`, leaves it `paused(operator)`);
 - from `paused(core-restart)`: re-acquires the lease, re-opens the engine and
-  resumes at the persisted hop (boot resumes with `resume.onBoot` do the same
-  once the source's data starts);
+  restarts the sweep from its first hop (boot resumes with `resume.onBoot` do
+  the same once the source's data starts);
 - from `paused(resume-blocked)`: needs `takeover: true` (the impact grew
   beyond what was consented);
 - from `paused(preempted-*)`: arbitrates at once; `takeover` is not required

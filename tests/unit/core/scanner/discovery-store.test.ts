@@ -343,6 +343,23 @@ describe("DiscoveryStore association and keys (§ 5.2, § 7.2)", () => {
 		expect(d?.measuredOffsetHz).toBe(400)
 	})
 
+	it("stores a canonical zero offset when the median centre is 0.5 Hz below the raster (S1-B final re-review R3)", () => {
+		const { store } = newStore({ rasters: PMR })
+		const a = store.ingest(dmrObs("o1", CH - 1, T0))
+		const b = store.ingest(dmrObs("o2", CH, T0 + 5_000))
+		expect(b.discoveryId).toBe(a.discoveryId)
+		const d = store.get(a.discoveryId ?? "")!
+		expect(d.frequencyHz).toBe(CH)
+		// median(CH − 1, CH) = CH − 0.5; Math.round(−0.5) is −0
+		expect(Object.is(d.measuredOffsetHz, 0)).toBe(true)
+		// The persisted copy (JSON) equals the live store.
+		const replica = newStore({ rasters: PMR }).store
+		replica.restore(JSON.parse(JSON.stringify(store.snapshot())))
+		const r = replica.get(d.id)!
+		expect(Object.is(r.measuredOffsetHz, 0)).toBe(true)
+		expect(replica.snapshot()).toEqual(store.snapshot())
+	})
+
 	it("keeps analog FM and DMR on one channel as two cross-linked discoveries (rule 3)", () => {
 		const { store } = newStore({ rasters: PMR })
 		const fm = store.ingest(

@@ -154,6 +154,13 @@ export class TunerArbiter extends EventEmitter {
 		return this.leases.get(sourceId)
 	}
 
+	/** The holder's priority: an acquire above it hands the lease over, at or below it is refused. */
+	holderPriority(sourceId: string): number | undefined {
+		return this.leases.has(sourceId)
+			? (this.priorities.get(sourceId) ?? 0)
+			: undefined
+	}
+
 	acquire(
 		jobId: string,
 		sourceId: string,

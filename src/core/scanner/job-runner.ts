@@ -209,7 +209,13 @@ export interface JobRunnerDeps {
 	record: JobRecord
 	arbiter: Pick<
 		TunerArbiter,
-		"acquire" | "retune" | "release" | "setAgc" | "holder" | "operatorIdleSince"
+		| "acquire"
+		| "retune"
+		| "release"
+		| "setAgc"
+		| "holder"
+		| "holderPriority"
+		| "operatorIdleSince"
 	>
 	probes: Pick<
 		ProbePool,
@@ -796,9 +802,9 @@ export class JobRunner implements JobDriver {
 				409,
 			)
 		}
-		// S1-B final review, finding 8: a lease-less operator resume re-takes the tuner from the
-		// operator, so it needs the same consent as the auto-resume of a preempted job (which also runs
-		// only on a free lease; a job holding it refuses the acquire below: resume-blocked).
+		// S1-B final review, finding 8 (and re-review R1): a lease-less operator resume re-takes the tuner
+		// from the operator, or from a lower-priority holder by hand-over, so it needs consent as
+		// createJob does. A holder of equal or higher priority refuses the acquire below (resume-blocked).
 		if (
 			this.sweep &&
 			e.type === "resume" &&
@@ -806,7 +812,8 @@ export class JobRunner implements JobDriver {
 			record.state === "paused" &&
 			record.reason === "operator" &&
 			!leaseHeld &&
-			!this.deps.arbiter.holder(this.sourceId)
+			(this.deps.arbiter.holderPriority(this.sourceId) ?? -1) <
+				record.spec.priority
 		) {
 			const impact = this.deps.impact()
 			if (impactGrew(impact, record.consentedImpact))

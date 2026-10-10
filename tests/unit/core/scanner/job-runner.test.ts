@@ -161,6 +161,10 @@ class RunnerArbiter {
 	holder() {
 		return this.lease ?? undefined
 	}
+	/** The other job named by `refuseHolder` holds at an equal priority: the acquire is refused. */
+	holderPriority() {
+		return this.lease || this.refuseHolder !== null ? 50 : undefined
+	}
 	operatorIdleSince() {
 		return null
 	}

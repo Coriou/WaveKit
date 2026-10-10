@@ -1209,7 +1209,8 @@ export class DiscoveryStore extends EventEmitter {
 		const place = this.placement(d.sourceIds[0] ?? "", centre, obw)
 		d.frequencyHz = Math.round(place.frequencyHz)
 		d.frequencyKey = place.key
-		d.measuredOffsetHz = Math.round(centre - place.frequencyHz)
+		// `|| 0`: a median centre 0.5 Hz below the raster rounds to -0, which JSON persists as 0 (P13).
+		d.measuredOffsetHz = Math.round(centre - place.frequencyHz) || 0
 		d.bandwidthHz = Math.round(obw)
 	}
 
