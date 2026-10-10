@@ -248,8 +248,14 @@ describe("previewPlan derived defaults", () => {
 	})
 
 	it("labels hold.policy operator only when the operator gave a policy", () => {
+		// ScanJobSpec makes `policy` required inside `hold`; a raw, unvalidated spec can still omit it
 		const other = previewPlan(
-			{ bandplans: ["uhf-land-mobile"], hold: { maxHoldMs: 30_000 } },
+			{
+				bandplans: ["uhf-land-mobile"],
+				hold: { maxHoldMs: 30_000 } as unknown as NonNullable<
+					ScanJobSpec["hold"]
+				>,
+			},
 			ctx(),
 		)
 		expect(other.spec.hold.policy).toBe("hold")
