@@ -22,7 +22,7 @@
   copies, overload, shutdown and injected failures.
   Depends on4–5.
   _Requirements: 3.1–3.5, 4.2–4.3, 4.6–4.7_
-- [ ] 7. Foundation checkpoint: touched tests (bounded workers), repository
+- [x] 7. Foundation checkpoint: touched tests (bounded workers), repository
   typecheck/lint, independent Astra MEDIUM review; resolve and recheck findings.
   Record exact commits/results and remaining gates; no end-to-end delivery claim.
   _Requirements: 1–4_

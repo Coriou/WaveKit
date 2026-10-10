@@ -1,7 +1,8 @@
 # Shared operator data design
 
-Status: Astra MEDIUM approved isolated foundation design checkpoint; implementation
-and end-to-end acceptance remain unverified, public integration is not mounted.
+Status: isolated foundation implemented and independently approved by Astra MEDIUM
+at c9379f06197ecf7c7f483ddbc2bf0c8f8245dbe0. Public integration is not mounted;
+transport/client and end-to-end acceptance remain unverified.
 
 ## Authority audit
 
@@ -254,7 +255,7 @@ delivery result is failed while committed mutation succeeds. Subscription uses
 existing broadcaster lifecycle with synchronous register/capture/enqueue.
 No second bus/subscriber registry or mounted integration in this checkpoint.
 
-## Foundation verification sample (before independent code review)
+## Foundation verification sample
 
 Domain/storage/service are independent and unmounted. Four unit files pass99
 tests; Properties1–9 (excluding integration-only10) run100 cases each where
@@ -271,10 +272,12 @@ Close rejects new work and drains accepted operations before releasing ownership
 Operational admission/lease checks at mounting and slow-reader/network recovery
 remain Main/client integration gates; no client or mounted capability is claimed.
 
-## Foundation review round 4 resolution (pending re-review)
+## Foundation review round 4 resolution (confirmed by independent re-review)
 
 P1: previously reopening visible renamed state completed only stateDir parent
 sync. Existing-file recovery now also syncs operator-data before availability;
 failure rejects open while preserving the file. Storage ordering/recovery failure
 and service uncertain-rename/no-op regression coverage were added. No rollback
-or physical storage guarantee is claimed. Exact corrected code awaits re-review.
+or physical storage guarantee is claimed. Independent Astra MEDIUM re-review approved the exact corrected foundation at
+c9379f06197ecf7c7f483ddbc2bf0c8f8245dbe0 with no remaining blocking findings.
+Public DTOs, protected mounts and transport/client acceptance remain separate gates.
