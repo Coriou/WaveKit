@@ -343,7 +343,7 @@ Form: `**Task N.** <as planned> → <on main @ 63c9c49>; <what the task does ins
 | `scanner.ws.spectrumSummaryBins` | int, default **2048 (provisional)**, bounds 512–2048, config/env only (absent from `RuntimeSettingsOverridesSchema` and `NUMERIC_BOUNDS`) | **Role:** the engine's summary-detail budget, read only by `buildPipelineConfig` → `PipelineConfig.spectrumBins`. It is never per client and never PATCHable, so no display choice can rebuild a pipeline. **Why 2048:** it equals the largest client request, and at the default `fftSize` ≤ 2048 it is native (d = 1). **Provisional:** Step 9a's measurement fixes the final value; the fallback is 1024, then 512. |
 | `scanner.ws.spectrumMaxProfiles` | int, default **4**, bounds 1–16, config/env only | **Cap:** the size of U, the reserved set: distinct non-default `(sourceId, key)` pairs over every client's `current` and `next` selection. **Exempt:** only the *current* default key; pairs from a former default start counting, and the excess is remapped (M2). **Bounds:** built profiles ≤ engines + cap at all times; reserved ≤ cap + 1 while a switch is in flight (M3). |
 | Client profile bounds | `hz`: `clamp(round(hz × 2) / 2, 0.5, 25)`; `bins`: `clamp(round(bins), 128, 2048)` (`PROFILE_LIMITS`) | Same bounds as `ws.spectrumHz`/`ws.spectrumBins` and spec § 9. The 0.5 Hz step lets near-equal requests share a profile. |
-| Over-limit outcome | **nearest admissible profile, reported**; never rejected for size | **One rule.** Out-of-range values become the nearest bound. Past the cap, a request maps to a profile already active on its source or the current default; it prefers candidates ≤ the request on both axes, then the metric (finding 14). **Why:** frames are self-describing (`profile`, `binCount`, `binHz`), and `adjusted` makes the substitution testable. Clamping alone cannot enforce a count cap, and rejection blanks a waterfall over a soft limit. **Rejected with a code:** only requests that cannot be served at all. Main accepted this (32fc238). |
+| Over-limit outcome | **nearest admissible profile, reported**; never rejected for size | **One rule.** Out-of-range values become the nearest bound. Past the cap, a request maps to a profile already active on its source (and admissible, see step 4) or the current default; it prefers candidates ≤ the request on both axes, then the metric (finding 14). **Why:** frames are self-describing (`profile`, `binCount`, `binHz`), and `adjusted` makes the substitution testable. Clamping alone cannot enforce a count cap, and rejection blanks a waterfall over a soft limit. **Rejected with a code:** only requests that cannot be served at all. Main accepted this (32fc238). |
 | Nearest metric | `abs(log2(bins / b)) + abs(log2(hz / h))`; ties: fewer bins, then lower hz, then key order | Scale-invariant and deterministic; ties go to the cheaper profile. |
 | Selection model | One selection per client: **default** (no options: the default profile on every eligible source) or **one source** with one profile | The option-less contract is unchanged and the cost per client is bounded. |
 | Demand | Display consumer `ws:<clientId>` in the source entry's `displays` set; scanner consumers `job:<id>` in `jobs` (R2). The engine runs while either is non-empty | Engines stay shared, and display and scanner demand stay separate. |
@@ -442,7 +442,8 @@ export type SpectrumSubscribeErrorCode =
 	| "SPECTRUM_ENGINE_ERROR"
 /**
  * `spectrum:profile`, sent to one client only: its selection after a subscribe (ack), after a permanent source removal
- * (notice), or after a default PATCH remapped it (notice). Every one of them resets the client's waterfall.
+ * (notice), or after a default PATCH remapped it (notice). Each resets the client's waterfalls, except that an
+ * `outcome: "removed"` notice with `selection: "default"` drops only `removedSourceId`'s waterfall.
  */
 export interface SpectrumProfileEventData {
 	/** none: no frames; default: the default profile on every eligible source; source: one source. */
@@ -528,6 +529,24 @@ Public surface (C5 replaces `setSubscribers`, the `"frame"` signature and `"fram
   - `"stream"` and `"released"`, gated by R2.
 - `SpectrumServiceDeps` gains `createHost?: SpectrumEngineDeps["createHost"]`, passed through in `open()`. It is a test
   seam; production omits it.
+- Diagnostics accessor (R1). It is public, read-only, and returns a fresh copy; status/log only:
+```ts
+export interface SpectrumAllocation {
+	/** U: distinct non-default pairs `${sourceId}:${key}` over every client's current ∪ next, sorted. */
+	reserved: string[]
+	/** Non-default pairs over `current` only (what frames are built for), sorted. */
+	built: string[]
+	/** Per source with an entry: sorted consumer ids. */
+	consumers: Record<string, { jobs: string[]; displays: string[] }>
+	/** Client states alive (a running or pending op, or demand). */
+	clients: number
+}
+allocation(): SpectrumAllocation
+```
+  Tests read service internals **only** through `allocation()`, `status()`, `sourceIds()`, emitted events and the fake
+  fanout. Every "|U|" in the test list means `allocation().reserved.length` and every "built" means
+  `allocation().built.length`. Every "`displays`" means `allocation().consumers[id].displays`; an absent entry counts
+  as empty. Every "`clients.size`" means `allocation().clients`. No test casts to reach private fields.
 
 State:
 ```ts
@@ -884,18 +903,18 @@ S10. "releases demand on unsubscribe, disconnect and a subscribe still in flight
      - With `loadEngine` gated, `subscribe` then `unsubscribe` leaves `sourceIds()` empty and
        `fanout.branches.size` 0. The client gets no ack.
      - `subscribe(c1, {rtl})`, `unsubscribe(c1)` and `subscribe(c1, {rtl, 25, 2048})` in one tick: `c1` gets exactly
-       one ack, for `25:2048`. rtl's `displays` is `{ws:c1}`.
+       one ack, for `25:2048`. `allocation().consumers.rtl.displays` is `["ws:c1"]`.
      - A final `unsubscribe` leaves nothing.
      - Two default clients: the engine stops only when the second leaves.
 S11. "coalesces requests to one running and one pending; superseded requests send nothing and keep no demand".
      - With `loadEngine(air)` gated, `c1` requests A `{air}`, then B `{rtl, 20, 1024}`, then C `{rtl, 25, 2048}`
        synchronously.
      - B is never acquired and A's acquisition is released.
-     - Exactly one ack arrives, for C. The `displays` sets end as `rtl: {ws:c1}` and `air: {}`.
+     - Exactly one ack arrives, for C. `allocation().consumers` ends with rtl displays `["ws:c1"]` and no air entry, or empty air displays.
      - 10 subscribes in one tick lead to ≤ 2 acquisitions (the running one and the last) and one ack, for the last
        request.
 S12. "stop() cancels in-flight subscribes". `stop()` during a gated acquire with a pending request produces no ack,
-     `clients.size` 0, and no engine or branch remains. A `subscribe` after `stop()` sends nothing and acquires
+     `allocation().clients` 0, and no engine or branch remains. A `subscribe` after `stop()` sends nothing and acquires
      nothing.
 S13. "an acquire waits for a closing engine of the same source" (finding 3).
      - `c1` holds rtl alone; the fake host's `close()` is held.
@@ -907,7 +926,7 @@ S14. "permanent removal releases display demand and notifies affected clients; a
        - `c1 {rtl}` gets `outcome "removed"`, `selection "none"`, `removedSourceId "rtl"`;
        - default client `c2` gets `outcome "removed"`, `selection "default"`, and keeps its air frames.
      - With no job, the rtl engine and its branch are gone. No `"stream"` or `"released"` event fires.
-     - `status().profiles` has no rtl entry, and the cap count is 0.
+     - `status().profiles` has no rtl entry, and `allocation().reserved` is `[]`.
      - A later default subscribe (`c3`) acquires only air.
      - With `job:a` also holding rtl, the engine stays until `release("rtl", "job:a")`.
      - A new `{rtl}` subscribe is rejected with `SPECTRUM_SOURCE_REMOVED`.
@@ -915,7 +934,7 @@ S14. "permanent removal releases display demand and notifies affected clients; a
 S15. "a removal during an in-flight acquire sends one removal notice and keeps no demand".
      - With `loadEngine(rtl)` gated, `c1 {rtl}` is in flight; then `"source-removed"` fires and the gate opens.
      - `c1` receives only the `removed` notice: no ack and no snapshot.
-     - rtl's `displays` is empty, no engine runs and no branch remains.
+     - `allocation().consumers.rtl` is absent, no engine runs and no branch remains.
 S16. "the profile cap stays bounded across default PATCH changes" (M2). Cap 1, default A = `10:512`.
      - `c1 {rtl, 10, 512}` is exempt.
      - PATCH the default to B = `10:256`: `c1` now counts (|U| = 1).
@@ -932,7 +951,7 @@ S17. "make-before-break never builds more than the cap, and reserves at most cap
      - Sharing: `c1` and `c2` share P1 = `rtl 20:1024`. `c1 → {rtl, 25, 2048}` maps to the nearest, which is P1.
        `c2` leaves; `c1`'s switch to `{rtl, 25, 2048}` is then admitted.
      - Cross-source switch: `c1` on `rtl 20:1024` switches to `{air, 25, 2048}` with `loadEngine(air)` gated. It is
-       admitted, and reserved |U| = 2 = cap + 1.
+       admitted: `allocation().reserved.length` is 2 (= cap + 1) and `built.length` is 1.
      - During the hold:
        - `c2 {rtl, 15, 256}` and `c3 {rtl, 20, 1024}` are both mapped to `10:512` (`profile-limit`). For `c3`, no
          non-default candidate is admissible while the reserve is at cap + 1.
@@ -1078,7 +1097,8 @@ Replace these `task-38-brief.md` passages; Task 38 executes the replacements ver
 > **Client rules.**
 > - Never merge or accumulate rows across a change of `sourceId`, epoch, `profile`, `binHz` or `startHz`; each row
 >   carries its own axis.
-> - Reset on every `spectrum:profile`.
+> - Reset on every `spectrum:profile`, except that an `outcome: "removed"` notice with `selection: "default"`
+>   drops only `removedSourceId`'s waterfall; the client keeps its other sources.
 > - Compare epochs for equality only, because they restart when an engine restarts.
 >
 > **Permanent source removal** (`DELETE /api/sources/:id`, which emits `source:removed`):
@@ -1096,6 +1116,10 @@ Replace these `task-38-brief.md` passages; Task 38 executes the replacements ver
 >
 > **Settings.** `ScannerSettingsValues.ws` gains `spectrumSummaryBins` and `spectrumMaxProfiles`. They are read-only:
 > `PATCH /api/scanner/settings` rejects them.
+>
+> **Shared core typing (Task 37a owns it).** `SourceManagerEvents` in `src/core/source-manager.ts` gains
+> `"source-removed": (sourceId: string, removedAt: Date) => void`. This documents an event that `disconnect()` already
+> emits (permanent removal only; never on reconnect or shutdown). No behaviour changes.
 >
 > **Not in this change.** No WS tuning, no new command message, and no slice-zoom FFT (a separate follow-up).
 
