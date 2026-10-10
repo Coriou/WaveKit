@@ -57,6 +57,9 @@ class RecordingHost implements PipelineHost {
 	exportState(): Promise<EngineState> {
 		return Promise.resolve(EMPTY_STATE)
 	}
+	utilization(): number | null {
+		return null
+	}
 	close(): Promise<void> {
 		return Promise.resolve()
 	}

@@ -534,6 +534,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		return host.artefactMasks().catch(() => null)
 	}
 
+	/** Worker utilisation since the pipeline started (§ 10.7 passive cost rule). */
+	utilization(): number | null {
+		return this.host?.utilization() ?? null
+	}
+
 	/** Applies new tuning (fftSize, integration, k) by recreating the pipeline. */
 	async reconfigure(): Promise<void> {
 		await this.restartPipeline(this.current.tuningTrust)

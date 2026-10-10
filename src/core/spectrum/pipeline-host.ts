@@ -31,6 +31,8 @@ export interface PipelineHost {
 	exportState(): Promise<EngineState>
 	/** Current artefact masks (§ 4.9) after every input sent before the call (identify, Task 35a). Optional: test hosts need not implement it. */
 	artefactMasks?(): Promise<ArtefactMasks>
+	/** Worker event-loop utilisation (0–1) since start; null when not measurable (inline). */
+	utilization(): number | null
 	close(): Promise<void>
 }
 
@@ -93,6 +95,10 @@ export class InlinePipelineHost implements PipelineHost {
 		return Promise.resolve(this.pipeline.artefactMasks())
 	}
 
+	utilization(): number | null {
+		return null
+	}
+
 	close(): Promise<void> {
 		this.pipeline = null
 		return Promise.resolve()
@@ -101,6 +107,9 @@ export class InlinePipelineHost implements PipelineHost {
 
 export class ThreadPipelineHost implements PipelineHost {
 	private readonly worker: Worker
+	private readonly eluStart: ReturnType<
+		Worker["performance"]["eventLoopUtilization"]
+	>
 	private readonly log: Logger
 	private readonly exports = new Map<
 		number,
@@ -136,6 +145,7 @@ export class ThreadPipelineHost implements PipelineHost {
 			)
 		}
 		this.worker = new Worker(workerUrl, { name: `spectrum-${cfg.sourceId}` })
+		this.eluStart = this.worker.performance.eventLoopUtilization()
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
 		this.worker.on("error", err => this.handlers.error(asError(err))) // @types/node types the listener arg as unknown
 		this.worker.on("exit", code => {
@@ -216,6 +226,12 @@ export class ThreadPipelineHost implements PipelineHost {
 			this.maskRequests.set(requestId, { resolve, reject, timer })
 			this.post({ type: "artefact-masks", requestId })
 		})
+	}
+
+	utilization(): number | null {
+		if (this.exited) return null
+		return this.worker.performance.eventLoopUtilization(this.eluStart)
+			.utilization
 	}
 
 	async close(): Promise<void> {
