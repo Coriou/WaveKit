@@ -511,6 +511,15 @@ export interface ScannerSettings {
 		/** Burst IQ captures cap (Task 34a), default 256. */
 		maxCapturesMb: number
 	}
-	/** spectrumHz default 10 (0.5–25), spectrumBins default 512 (128–2048). */
-	ws: { maxMessagesPerSecond: number; spectrumHz: number; spectrumBins: number }
+	/**
+	 * spectrumHz default 10 (0.5–25), spectrumBins default 512 (128–2048).
+	 * spectrumSummaryBins 2048 (512–2048, provisional) and spectrumMaxProfiles 4 (1–16) are config-only.
+	 */
+	ws: {
+		maxMessagesPerSecond: number
+		spectrumHz: number
+		spectrumBins: number
+		spectrumSummaryBins: number
+		spectrumMaxProfiles: number
+	}
 }

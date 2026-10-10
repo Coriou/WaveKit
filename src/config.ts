@@ -26,6 +26,15 @@ export const SourceCapsSchema = z.object({
 })
 
 /**
+ * Per-source scanner role (signal discovery spec § 10.7). "dedicated"
+ * sources are never the default source for unsourced decoders.
+ */
+export const SourceScannerConfigSchema = z.object({
+	role: z.enum(["shared", "dedicated"]).default("shared"),
+	passive: z.boolean().default(true),
+})
+
+/**
  * Schema for SDR source configuration.
  * Supports rtl_tcp, SDR++ network sink, and recording sources.
  */
@@ -56,6 +65,8 @@ export const SourceConfigSchema = z.object({
 			rtlmuxStatsUrl: z.string().url().optional(),
 		})
 		.optional(),
+	/** Scanner role and passive discovery for this source (default shared, passive). */
+	scanner: SourceScannerConfigSchema.optional(),
 })
 
 /**
@@ -400,6 +411,119 @@ export const ChannelizerConfigSchema = z.object({
 		.default(16_384),
 })
 
+const POWER_OF_TWO_FFT = z
+	.number()
+	.int()
+	.min(512)
+	.max(16384)
+	.refine(n => (n & (n - 1)) === 0, "fftSize must be a power of two")
+
+/**
+ * Signal discovery scanner (spec § 12.3). Every key has a default, so an
+ * absent section enables the scanner with passive in-window discovery.
+ */
+export const ScannerConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		passive: z
+			.object({
+				enabled: z.boolean().default(true),
+				/** Pre-channelizer offset probes for passive jobs (each costs a full-rate chain). */
+				offsetProbes: z.boolean().default(false),
+			})
+			.default({}),
+		cpuBudgetCores: z.number().finite().min(0.1).max(64).default(1),
+		cpuGuardPercent: z.number().finite().min(1).max(100).default(90),
+		maxProbes: z
+			.object({
+				offset: z.number().int().min(0).max(16).default(1),
+				channel: z.number().int().min(0).max(64).default(4),
+			})
+			.default({}),
+		ringSeconds: z.number().finite().min(0.5).max(30).default(3),
+		detection: z
+			.object({
+				fftSize: z.union([z.literal("auto"), POWER_OF_TWO_FFT]).default("auto"),
+				integrationMs: z.number().finite().min(5).max(1000).default(50),
+				sensitivity: z.enum(["low", "normal", "high"]).default("normal"),
+				faTargetPerMhzMin: z.number().finite().min(0.01).max(1000).default(1),
+				dcGuardHz: z.number().finite().min(0).max(100_000).default(1500),
+				ppmMargin: z.number().finite().min(0).max(100).default(2),
+				clipFraction: z.number().finite().min(1e-6).max(1).default(0.001),
+				hysteresisDb: z.number().finite().min(0).max(20).default(3),
+				minSurfaceBlocks: z.number().int().min(1).max(20).default(2),
+				/** Short-burst path (§ 4.10); null disables it. */
+				shortIntegrationMs: z.number().positive().nullable().default(5),
+				/** FFT frame overlap (§ 4.2): 0 or 0.5. */
+				overlap: z.union([z.literal(0), z.literal(0.5)]).default(0),
+			})
+			.default({}),
+		sweep: z
+			.object({
+				markers: z.boolean().default(true),
+				markerTimeoutMs: z.number().int().min(100).max(10_000).default(2000),
+				pllSettleMs: z.number().finite().min(0).max(100).default(5),
+				settleMs: z
+					.object({
+						local: z.number().int().min(0).max(10_000).default(300),
+						network: z.number().int().min(0).max(10_000).default(1000),
+					})
+					.default({}),
+				revisitShare: z.number().finite().min(0).max(0.9).default(0.3),
+			})
+			.default({}),
+		hold: z
+			.object({
+				maxHoldMs: z.number().int().min(1000).max(600_000).default(60_000),
+				hangMs: z.number().int().min(0).max(60_000).default(2000),
+				preRollMs: z.number().int().min(0).max(10_000).default(300),
+			})
+			.default({}),
+		storage: z
+			.object({
+				/** null: `<stateDir>/scanner` (resolved by the scanner service). */
+				dir: z.string().min(1).nullable().default(null),
+				maxRecordingsMb: z.number().int().min(1).max(1_000_000).default(512),
+				maxEvidenceMb: z.number().int().min(1).max(100_000).default(64),
+				maxJournalMb: z.number().int().min(1).max(10_000).default(64),
+				maxAgeDays: z.number().int().min(1).max(3650).default(30),
+				discoveryMaxAgeDays: z.number().int().min(1).max(3650).default(180),
+				minFreeDiskMb: z.number().int().min(0).max(1_000_000).default(2048),
+				maxDiscoveries: z.number().int().min(1).max(1_000_000).default(10_000),
+				/** Burst IQ captures (Task 34a). */
+				maxCapturesMb: z.number().int().min(1).max(100_000).default(256),
+			})
+			.default({}),
+		ws: z
+			.object({
+				maxMessagesPerSecond: z.number().int().min(1).max(100).default(10),
+				/** `spectrum` WS feed (§ 12.2): frame rate and bins of the default profile. */
+				spectrumHz: z.number().finite().min(0.5).max(25).default(10),
+				spectrumBins: z.number().int().min(128).max(2048).default(512),
+				/** Engine summary-detail budget: block-summary bins per source (config only; never per client, never PATCHed). */
+				spectrumSummaryBins: z.number().int().min(512).max(2048).default(2048),
+				/** Distinct active non-default spectrum profiles over all sources (config only). */
+				spectrumMaxProfiles: z.number().int().min(1).max(16).default(4),
+			})
+			.default({}),
+	})
+	.superRefine((value, ctx) => {
+		if (value.hold.preRollMs > value.ringSeconds * 1000) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["hold", "preRollMs"],
+				message: `preRollMs ${value.hold.preRollMs} exceeds the IQ ring (ringSeconds ${value.ringSeconds})`,
+			})
+		}
+	})
+
+/** The source's scanner role with defaults applied. */
+export function sourceScannerConfig(
+	source: Pick<SourceConfig, "scanner">,
+): SourceScannerConfig {
+	return source.scanner ?? { role: "shared", passive: true }
+}
+
 /**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
@@ -418,6 +542,8 @@ export const ConfigSchema = z.object({
 	resources: ResourcesConfigSchema.default({}),
 	csdr: CsdrConfigSchema.default({}),
 	channelizer: ChannelizerConfigSchema.default({}),
+	/** Signal discovery scanner (spec § 12.3); on by default. */
+	scanner: ScannerConfigSchema.default({}),
 	/**
 	 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
 	 * case-insensitive). Absent: guessed from TZ / locale, else EU.
@@ -448,6 +574,8 @@ export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
 export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
 export type ChannelizerConfig = z.infer<typeof ChannelizerConfigSchema>
+export type SourceScannerConfig = z.infer<typeof SourceScannerConfigSchema>
+export type ScannerConfig = z.infer<typeof ScannerConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================
@@ -955,6 +1083,12 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SOURCES__<INDEX>__HOST",
 		"WAVEKIT_SOURCES__<INDEX>__PORT",
 		"WAVEKIT_DECODERS__<INDEX>__ENABLED",
+		"WAVEKIT_SCANNER__ENABLED",
+		"WAVEKIT_SCANNER__PASSIVE__ENABLED",
+		"WAVEKIT_SCANNER__CPU_BUDGET_CORES",
+		"WAVEKIT_SCANNER__MAX_PROBES__OFFSET",
+		"WAVEKIT_SCANNER__STORAGE__DIR",
+		"WAVEKIT_SOURCES__<INDEX>__SCANNER__ROLE",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
 }

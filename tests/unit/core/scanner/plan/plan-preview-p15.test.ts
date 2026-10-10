@@ -79,7 +79,13 @@ function context(): PreviewContext {
 				maxDiscoveries: 10_000,
 				maxCapturesMb: 256,
 			},
-			ws: { maxMessagesPerSecond: 10, spectrumHz: 2, spectrumBins: 512 },
+			ws: {
+				maxMessagesPerSecond: 10,
+				spectrumHz: 2,
+				spectrumBins: 512,
+				spectrumSummaryBins: 2048,
+				spectrumMaxProfiles: 4,
+			},
 		},
 		measured: {
 			settleMs: { local: null, network: null },

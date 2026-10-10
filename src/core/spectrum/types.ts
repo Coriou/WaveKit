@@ -98,7 +98,7 @@ export interface BlockSummary {
 	/** Of the decimated feed bins. */
 	binHz: number
 	startHz: number
-	/** ≤ spectrumBins, dBFS max-hold, rounded to 0.5. */
+	/** ≤ PipelineConfig.spectrumBins (the engine summary budget), dBFS max-hold, rounded to 0.5. */
 	bins: number[]
 	floorDbfs: number
 	thresholdDb: number
@@ -181,6 +181,7 @@ export interface PipelineConfig {
 	/** Pinned k, or null for table + CFAR. */
 	thresholdDb: number | null
 	faTargetPerMhzMin: number
+	/** Summary budget (ws.spectrumSummaryBins), never a client's bins. */
 	spectrumBins: number
 	/** 500 */
 	trackHangMs: number
@@ -245,7 +246,12 @@ export interface SpectrumSettings {
 	ringSeconds: number
 	detection: DetectionSettings
 	sweep: { settleMs: { local: number; network: number } }
-	ws: { spectrumHz: number; spectrumBins: number }
+	ws: {
+		spectrumHz: number
+		spectrumBins: number
+		spectrumSummaryBins: number
+		spectrumMaxProfiles: number
+	}
 }
 
 // ---------------------------------------------------------------- schema drift checks (persisted records)
