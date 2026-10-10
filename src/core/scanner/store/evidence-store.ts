@@ -38,7 +38,7 @@ export interface StorageCaps {
 
 /** `${discoveryId}~${fileName}`; the file lives in recordings/{dv,analog}/<discoveryId>/. */
 export const RECORDING_ID = /^(d_[0-9A-Za-z]+)~([A-Za-z0-9_.-]+\.wav)$/
-const DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
+export const DISCOVERY_ID = /^d_[0-9A-Za-z]+$/
 /** `recordings/dv/probe-<probeId>/`: a live probe's recording folder (probes are never persisted). */
 const PROBE_DIR = /^probe-[0-9A-Za-z._-]+$/
 const EVIDENCE_NAME = /^(?:psd\.json|iq-\d+\.(?:cu8|json))$/

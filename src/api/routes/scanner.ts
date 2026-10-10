@@ -29,8 +29,10 @@ import type {
 	ScannerConfidence,
 	ScannerProtocol,
 } from "../../core/scanner/types.js"
+import { RECORDING_ID } from "../../core/scanner/store/evidence-store.js"
 import { ConfigValidationError } from "../../utils/errors.js"
 import {
+	discoveryIdParamsSchema,
 	discoveryPatchSchema,
 	discoveryQuerySchema,
 	errorResponseSchema,
@@ -170,13 +172,11 @@ function fromSpecBody({
 }
 
 function notFound(reply: FastifyReply, what: string, id: string): FastifyReply {
-	return reply
-		.code(404)
-		.send({
-			error: "NotFound",
-			code: "SCANNER_NOT_FOUND",
-			message: `${what} ${id} not found`,
-		})
+	return reply.code(404).send({
+		error: "NotFound",
+		code: "SCANNER_NOT_FOUND",
+		message: `${what} ${id} not found`,
+	})
 }
 
 function toFilter(q: DiscoveryQuery): DiscoveryFilter {
@@ -481,7 +481,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			schema: {
 				tags,
 				summary: "Delete a discovery and its evidence",
-				params: jobIdParamsSchema,
+				params: discoveryIdParamsSchema,
 				response: errors,
 			},
 		},
@@ -501,8 +501,12 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			},
 		},
 		async (request, reply) => {
-			const path = scanner.recordingPath(request.params.recordingId)
-			if (!path) return notFound(reply, "Recording", request.params.recordingId)
+			const { recordingId } = request.params
+			// Malformed ids never reach the filesystem lookup.
+			const path = RECORDING_ID.test(recordingId)
+				? scanner.recordingPath(recordingId)
+				: null
+			if (!path) return notFound(reply, "Recording", recordingId)
 			const stream = createReadStream(path)
 			stream.on("error", (err: Error) =>
 				request.log.warn({ err }, "Recording stream error"),
@@ -518,7 +522,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				schema: {
 					tags,
 					summary: `Download ${kind} evidence`,
-					params: jobIdParamsSchema,
+					params: discoveryIdParamsSchema,
 					response: { 404: errorResponseSchema },
 				},
 			},

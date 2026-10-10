@@ -1,4 +1,5 @@
 /** JSON schemas for /api/scanner (spec § 12.1). Response bodies are DTOs from @wavekit/api-types. */
+import { DISCOVERY_ID } from "../../core/scanner/store/evidence-store.js"
 
 const protocolEnum = [
 	"analog-fm",
@@ -185,6 +186,15 @@ export const scanJobSpecSchema = {
 export const jobIdParamsSchema = {
 	type: "object",
 	properties: { id: { type: "string", minLength: 1, maxLength: 64 } },
+	required: ["id"],
+} as const
+
+/** A discovery id on routes whose id reaches the filesystem: no `..` or `/` slips into a path. */
+export const discoveryIdParamsSchema = {
+	type: "object",
+	properties: {
+		id: { type: "string", maxLength: 64, pattern: DISCOVERY_ID.source },
+	},
 	required: ["id"],
 } as const
 

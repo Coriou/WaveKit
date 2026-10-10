@@ -480,20 +480,67 @@ describe("scanner routes", () => {
 		).toMatchObject({ state: "paused" })
 	})
 
+	it("rejects ids that could leave the evidence and recording folders before the service sees them", async () => {
+		await build()
+		for (const url of [
+			"/api/scanner/discoveries/..%2F..%2Fetc/evidence/psd",
+			"/api/scanner/discoveries/..%2F..%2Fetc/evidence/iq",
+			"/api/scanner/discoveries/d_1%2F..%2F..%2Fetc/evidence/psd",
+		]) {
+			const res = await app.inject({ method: "GET", url })
+			expect(res.statusCode).toBe(400)
+			expect(res.json()).toMatchObject({ code: "FST_ERR_VALIDATION" })
+		}
+		expect(
+			(
+				await app.inject({
+					method: "DELETE",
+					url: "/api/scanner/discoveries/..%2F..%2Fetc",
+				})
+			).statusCode,
+		).toBe(400)
+		expect(
+			(
+				await app.inject({
+					method: "GET",
+					url: "/api/scanner/recordings/..%2F..%2Fetc%2Fpasswd.wav",
+				})
+			).statusCode,
+		).toBe(404)
+		expect(
+			(
+				await app.inject({
+					method: "GET",
+					url: "/api/scanner/recordings/d_1~..%2F..%2Fx.wav",
+				})
+			).statusCode,
+		).toBe(404)
+		expect(service.evidencePath).not.toHaveBeenCalled()
+		expect(service.deleteDiscovery).not.toHaveBeenCalled()
+		expect(service.recordingPath).not.toHaveBeenCalled()
+		expect(
+			(
+				await app.inject({
+					method: "GET",
+					url: "/api/scanner/discoveries/d_01ABC/evidence/psd",
+				})
+			).statusCode,
+		).toBe(404)
+		expect(service.evidencePath).toHaveBeenCalledWith("d_01ABC", "psd")
+	})
+
 	it("keeps the central handler's correlationId and array details in error bodies", async () => {
 		service = fakeService()
 		app = Fastify({ logger: false })
 		// Like ApiServer's handler for schema-validation errors.
 		app.setErrorHandler((error: FastifyError, _request, reply) =>
-			reply
-				.status(400)
-				.send({
-					error: "ValidationError",
-					code: "VALIDATION_ERROR",
-					message: error.message,
-					details: error.validation,
-					correlationId: "c-1",
-				}),
+			reply.status(400).send({
+				error: "ValidationError",
+				code: "VALIDATION_ERROR",
+				message: error.message,
+				details: error.validation,
+				correlationId: "c-1",
+			}),
 		)
 		await app.register(scannerRoutes, {
 			scanner: service as unknown as ScannerRouteService,
