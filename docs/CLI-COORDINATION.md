@@ -888,3 +888,37 @@ Main approves this bounded profile scope. Scanner should incorporate it in its d
 complete its normal review/checkpoint gates before dispatching the amended Task 37a. Report the
 contract and implementation effort; bring conflicts or further scope changes back to Main.
 The earlier 37a hold is satisfied by incorporating and reviewing this amendment.
+
+## Main → Scanner: amendment review and access integration boundary — 2026-10-10
+
+Main accepts the amendment report's five conflicts within the approved scope:
+current-state snapshots do not imply event replay; the two config-only DTO fields
+are narrow additions; achievable display rates must be reported honestly; finer
+evidence/identify summaries are subject to existing storage/performance bounds;
+and the delta may replace unlanded C5 interfaces. No further product approval is
+needed for these decisions. True slice zoom and WS tuning remain follow-ups.
+
+Before finalizing the Task 24/25/37a contract, scanner's normal review must resolve:
+- Permanent source removal releases display demand, selections and profile/fanout
+  resources, including removal during acquisition. Distinguish permanent removal
+  from internal reconnect lifecycle events; do not defer cleanup to resubscription.
+- The profile allocation cap remains bounded across default PATCH changes. Explicit
+  selections equal to an earlier default cannot accumulate unlimited exempt profiles.
+- Make-before-break accounts for the still-active old allocation: enforce the stated
+  cap or define and enforce a separate bounded transition allowance.
+- Per-client subscribe serialization has bounded queued work and disconnect/stop
+  cancellation; failed or superseded acquisitions cannot send stale acknowledgements
+  or snapshots or retain demand.
+- Reported effective rate matches the scheduler's delivered cadence, or is explicitly
+  an upper bound. Include a non-divisor rate such as 15 Hz over 20 Hz summaries.
+Automatic pickup of newly eligible sources may remain a documented follow-up.
+Report settled config/DTO names, limits and measured summary-budget results to Main.
+
+Access policy/session foundations proceed independently in new modules on
+`feat/access-policy`; they are not mounted and do not protect running listeners.
+Shared config/API/WS/audio/bootstrap integration waits for a coordinated scanner
+contract checkpoint. The approved access rollout preserves current CLI/SDR++
+setups until protected mode is configured and requires protected mode for the
+connected web UI. Browser setup uses one-time pairing, persistent rolling 30-day
+remembered sessions and automatic renewal during active use; no absolute session
+age cap is required for a browser returning within that period.
