@@ -36,6 +36,7 @@ import {
 	toApiDecoderInfo,
 	toApiDecoderStatus,
 } from "../serializers/decoder-status.js"
+import { WaveKitError } from "../../utils/errors.js"
 
 /**
  * Decoder capabilities schema for response (Requirement 17.1)
@@ -134,6 +135,26 @@ export interface ErrorResponse {
 	error: string
 	code: string
 	message: string
+}
+
+/** 409 body for mutating routes on a scanner probe (spec § 6.5); null otherwise. */
+export function scannerOwnedConflict(
+	manager: Pick<DecoderManager, "getStatus">,
+	id: string,
+): ErrorResponse | null {
+	if (manager.getStatus(id)?.owner !== "scanner") return null
+	return {
+		error: "Conflict",
+		code: "DECODER_OWNED_BY_SCANNER",
+		message: `Decoder '${id}' is a scanner probe; the scanner owns its lifecycle`,
+	}
+}
+
+/** 409 body when a start is refused because a scanner sweep holds the source. */
+function sourceHeldConflict(err: unknown): ErrorResponse | null {
+	if (!(err instanceof WaveKitError) || err.code !== "SOURCE_HELD_BY_SCANNER")
+		return null
+	return { error: "Conflict", code: err.code, message: err.message }
 }
 
 export interface DecoderConfigUpdate {
@@ -334,6 +355,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					message: `Decoder with id '${id}' not found`,
 				})
 			}
+			const owned = scannerOwnedConflict(decoderManager, id)
+			if (owned) return reply.status(409).send(owned)
 
 			const body = StartBodySchema.safeParse(request.body)
 			if (!body.success) {
@@ -375,7 +398,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 			}
 
 			try {
-				await decoderManager.startDecoder(id, { startMode })
+				await decoderManager.startDecoder(id, { startMode, refuseIfHeld: true })
 
 				const status = decoderManager.getStatus(id)
 				if (!status) {
@@ -393,6 +416,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
+				const held = sourceHeldConflict(err)
+				if (held) return reply.status(409).send(held)
 				const error = err as Error
 				return reply.status(500).send({
 					error: "InternalServerError",
@@ -444,6 +469,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					message: `Decoder with id '${id}' not found`,
 				})
 			}
+			const owned = scannerOwnedConflict(decoderManager, id)
+			if (owned) return reply.status(409).send(owned)
 
 			// Check if already stopped; a suspended decoder (or one waiting in
 			// restart backoff) is not running but can still be stopped.
@@ -510,6 +537,7 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 				response: {
 					200: decoderActionResponseSchema,
 					404: errorResponseSchema,
+					409: errorResponseSchema,
 					500: errorResponseSchema,
 				},
 			},
@@ -526,9 +554,11 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					message: `Decoder with id '${id}' not found`,
 				})
 			}
+			const owned = scannerOwnedConflict(decoderManager, id)
+			if (owned) return reply.status(409).send(owned)
 
 			try {
-				await decoderManager.restartDecoder(id)
+				await decoderManager.restartDecoder(id, { refuseIfHeld: true })
 
 				const status = decoderManager.getStatus(id)
 				if (!status) {
@@ -546,6 +576,8 @@ export const decoderRoutes: FastifyPluginAsync<DecoderRoutesOptions> = async (
 					decoder: toApiDecoderStatus(status),
 				}
 			} catch (err) {
+				const held = sourceHeldConflict(err)
+				if (held) return reply.status(409).send(held)
 				const error = err as Error
 				return reply.status(500).send({
 					error: "InternalServerError",
