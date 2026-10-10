@@ -121,6 +121,8 @@ export class TunerArbiter extends EventEmitter {
 		deps.tuner.on("command-sent", this.onCommandSent)
 		deps.tuner.on("control-mode-changed", this.onControlMode)
 		deps.sources.on("disconnected", this.onDisconnected)
+		deps.sources.on("removed", this.onRemoved)
+		deps.sources.on("source-removed", this.onRemoved)
 		deps.sources.on("payload-started", this.onPayloadStarted)
 	}
 
@@ -128,6 +130,8 @@ export class TunerArbiter extends EventEmitter {
 		this.deps.tuner.off("command-sent", this.onCommandSent)
 		this.deps.tuner.off("control-mode-changed", this.onControlMode)
 		this.deps.sources.off("disconnected", this.onDisconnected)
+		this.deps.sources.off("removed", this.onRemoved)
+		this.deps.sources.off("source-removed", this.onRemoved)
 		this.deps.sources.off("payload-started", this.onPayloadStarted)
 	}
 
@@ -673,6 +677,11 @@ export class TunerArbiter extends EventEmitter {
 	private readonly onDisconnected = (sourceId: string): void => {
 		this.connected.delete(sourceId)
 		this.emit("source-down", sourceId)
+	}
+
+	/** "removed" (teardown, also on reconnect) and "source-removed" (gone for good): no longer connected. */
+	private readonly onRemoved = (sourceId: string): void => {
+		this.connected.delete(sourceId)
 	}
 
 	private readonly onPayloadStarted = (sourceId: string): void => {

@@ -547,6 +547,38 @@ describe("TunerArbiter lease discipline", () => {
 		expect(b.lease.snapshot.frequency).toBe(100_000_000)
 	})
 
+	it("forgets the connection when the source is removed", async () => {
+		for (const event of ["removed", "source-removed"]) {
+			const h = harness()
+			h.arbiter.recoverPersistedLeases([
+				{
+					sourceId: "rtl",
+					jobId: "crashed",
+					acquiredAt: 1,
+					snapshot: { frequency: 100_000_000 },
+					changedFields: [],
+				},
+			])
+			// Connected while writes fail: the record stays pending and is adoptable.
+			h.tuner.failAll = new Error("socket closed")
+			h.sources.emit("payload-started", "rtl")
+			await new Promise(resolve => setImmediate(resolve))
+			h.tuner.failAll = null
+			h.sources.emit(event, "rtl")
+			expect(h.arbiter.acquire("b", "rtl", 50)).toEqual({
+				ok: false,
+				code: "SCANNER_SOURCE_BUSY",
+				detail: "recovery pending",
+			})
+			// Nor does a return of control retry the recovery on a removed source.
+			h.tuner.setControl("rtl", "external")
+			h.tuner.setControl("rtl", "internal")
+			await new Promise(resolve => setImmediate(resolve))
+			expect(h.tuner.sent).toEqual([])
+			h.arbiter.dispose()
+		}
+	})
+
 	it("re-queues the crash record when an adopted lease's release cannot restore it", async () => {
 		const h = harness()
 		const results: { restored: string[]; unrestorable: string[] }[] = []
