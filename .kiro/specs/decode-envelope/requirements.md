@@ -1,8 +1,9 @@
 # Decode envelope — requirements
 
-Status: draft for design review. The first batch is an unmounted foundation for
-Roadmap §4a and the spectrum → tune → identify → inspect milestone. It does not
-change existing decoder output, REST, WebSocket, CLI or scanner behavior.
+Status: reviewed and implemented as an unmounted foundation for Roadmap §4a
+and the spectrum → tune → identify → inspect milestone. Existing decoder output,
+REST, WebSocket, CLI and scanner behavior are unchanged. Runtime publishing,
+shared DTO promotion and persistent storage remain deferred.
 
 ## 1. Identity and compatibility
 

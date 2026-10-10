@@ -1,9 +1,10 @@
 # Decode envelope — design
 
-Status: draft, aligned with independent review; source implementation is not yet
-authorized. This is a decoder-event envelope useful for inspect. A decoder event
-may be sync, stats, an error, a call update or a parsed message; the name does not
-claim accepted scanner evidence.
+Status: reviewed; the authorized unmounted foundation is implemented and its
+validation checkpoint is complete. Runtime publishing, shared DTO promotion and
+persistent storage remain deferred. This decoder-event envelope is useful for
+inspect. A decoder event may be sync, stats, an error, a call update or a parsed
+message; the name does not claim accepted scanner evidence.
 
 ## Existing contracts
 
