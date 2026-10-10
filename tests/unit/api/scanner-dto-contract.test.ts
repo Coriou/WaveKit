@@ -12,11 +12,22 @@ import {
 	type DecoderRoutesOptions,
 } from "../../../src/api/routes/decoders.js"
 import { toApiDecoderInfo } from "../../../src/api/serializers/decoder-status.js"
+import type { Bandplan as CoreBandplan } from "../../../src/core/scanner/bandplan/index.js"
 import type * as CoreSettings from "../../../src/core/scanner/settings.js"
 import type * as Core from "../../../src/core/scanner/types.js"
+import type { SettleMode as CoreSettleMode } from "../../../src/core/spectrum/types.js"
 import type { DecoderCaps, DecoderStatus } from "../../../src/decoders/types.js"
 
-type Same<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false
+/**
+ * Identity, not mutual assignability: an optional key added or dropped on one
+ * side, at any depth, or a changed modifier makes it false.
+ */
+type Same<A, B> =
+	(<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2
+		? true
+		: false
+// The guard sees optional keys: mutual assignability would call these the same.
+const optionalCanary: Same<{ a?: number }, Record<never, never>> = false
 // Compile-time drift guard (checked by `pnpm run typecheck`): the DTOs are copies.
 const sameShapes: [
 	Same<Api.Discovery, Core.Discovery>,
@@ -31,7 +42,30 @@ const sameShapes: [
 	Same<Api.ScannerProtocol, Core.ScannerProtocol>,
 	Same<Api.ScannerSettingProvenance, CoreSettings.ScannerSettingProvenance>,
 	Same<Api.ScannerSettingBounds, CoreSettings.ScannerSettingBounds>,
-] = [true, true, true, true, true, true, true, true, true, true, true, true]
+	Same<Api.JobState, Core.JobState>,
+	Same<Api.PauseReason, Core.PauseReason>,
+	Same<Api.FailReason, Core.FailReason>,
+	Same<Api.Bandplan, CoreBandplan>,
+	Same<Api.SettleMode, CoreSettleMode>,
+] = [
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+	true,
+]
 
 const caps: DecoderCaps = {
 	input: "iq",
@@ -148,5 +182,6 @@ describe("scanner DecoderStatus fields over REST and WS", () => {
 
 	it("the DTO copies match the core types", () => {
 		expect(sameShapes.every(Boolean)).toBe(true)
+		expect(optionalCanary).toBe(false)
 	})
 })

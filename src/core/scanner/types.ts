@@ -401,6 +401,15 @@ export interface NormalisedJobSpec extends Required<
 	takeover: boolean
 	resume: { autoAfterIdleMs: number | null; onBoot: boolean }
 	txDurationHintMs: number
+	/**
+	 * Field key → where its value came from:
+	 * - `operator`: set in the job spec.
+	 * - `bandplan`: from the bandplan.
+	 * - `measured`: measured by the engine.
+	 * - `config`: an explicit value from the effective scanner settings (config file or
+	 *   runtime PATCH); today only `fftSize`.
+	 * - `default`: a built-in default, or a value derived from the effective settings.
+	 */
 	provenance: Record<
 		string,
 		"operator" | "bandplan" | "measured" | "config" | "default"
