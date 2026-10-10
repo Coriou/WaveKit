@@ -656,15 +656,16 @@ its icons are MIT, and brand assets are not relicensed silently. The
 
 ## 10. Agentic development setup modernisation
 
-The repo has `.kiro/` (specs, steering), `.vscode/`, `CLAUDE.md`, private
-memories and per-session handoffs. An `AGENTS.md` bridge is now on main and
-points all agents to canonical `CLAUDE.md` conventions. Consolidate this into
-one cross-harness setup with drift checks; the bridge is not the final
-consolidation. It should heal itself when it drifts from the code, and load
-only the context each task needs rather than
-injecting every skill, rule and constraint into every model. Decide what stays
-(`.kiro` specs or `docs/superpowers`), consolidate the conventions into one
-source, and add checks so the instructions cannot rot silently.
+Landed locally at `cc3fd74`: `AGENTS.md` is the single instruction file; `CLAUDE.md`, `.kiro/steering/`,
+`.github/instructions/` and the Kiro-only `.vscode/settings.json` are retired.
+[`docs/AGENT-SETUP.md`](AGENT-SETUP.md) records which harnesses were tested loading it
+natively (Codex, Claude Code, Grok CLI, omp) and the per-worktree shared-memory setup
+(`node scripts/agents-setup.mjs`). Specs follow [`docs/specs/README.md`](specs/README.md).
+`tests/unit/repo/` fails on drifted commands, paths, links, tool-enforced conventions,
+competing instruction files and private-workspace exposure. Remaining: move
+`.kiro/specs/<feature>/` directories to `docs/specs/` in one coordinated change once
+in-flight spec branches land, then drop the legacy root from the checker and docs; verify
+VS Code chat if it becomes a used harness.
 
 ## 11. CI images and release validation
 
