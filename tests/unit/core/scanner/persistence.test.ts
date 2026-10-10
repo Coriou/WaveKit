@@ -348,6 +348,30 @@ describe("ScannerPersistence lifecycle files", () => {
 		})
 	})
 
+	it.each([
+		["jobs.json", "{bad json"],
+		[
+			"settings.json",
+			JSON.stringify({ version: 1, settings: { futureKnob: true } }),
+		],
+	])(
+		"moves an invalid %s aside before the next write can replace it",
+		async (name, bad) => {
+			await withDir(async dir => {
+				await writeFile(join(dir, name), bad)
+				const p = new ScannerPersistence({ dir, logger, now: () => T0 })
+				await p.load()
+				await p.writeJobs([job])
+				await p.writeSettings({ cpuBudgetCores: 0.5 })
+				const aside = (await readdir(dir)).filter(n =>
+					n.startsWith(`${name}.invalid-`),
+				)
+				expect(aside).toEqual([`${name}.invalid-${T0}`])
+				expect(await readFile(join(dir, aside[0] ?? ""), "utf8")).toBe(bad)
+			})
+		},
+	)
+
 	it("skips invalid engine state files and keeps the valid ones", async () => {
 		await withDir(async dir => {
 			const p = new ScannerPersistence({ dir, logger, now: () => T0 })

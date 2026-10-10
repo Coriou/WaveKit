@@ -617,6 +617,13 @@ export class ScannerPersistence {
 		return next
 	}
 
+	/** Sets an unreadable file aside so the next write cannot destroy what an operator may still recover from it. */
+	private async moveAside(file: string): Promise<string> {
+		const aside = `${file}.invalid-${this.now()}`
+		await rename(file, aside).catch(() => undefined)
+		return aside
+	}
+
 	private async readSnapshot(): Promise<StoreSnapshot & { lastSeq: number }> {
 		const file = join(this.root, SNAPSHOT_FILE)
 		const empty = {
@@ -630,8 +637,7 @@ export class ScannerPersistence {
 		const parsed =
 			read.kind === "ok" ? SnapshotFileSchema.safeParse(read.value) : null
 		if (parsed === null || !parsed.success) {
-			const aside = `${file}.invalid-${this.now()}`
-			await rename(file, aside).catch(() => undefined)
+			const aside = await this.moveAside(file)
 			this.log.warn(
 				{
 					file,
@@ -713,10 +719,13 @@ export class ScannerPersistence {
 		const parsed =
 			read.kind === "ok" ? JobsFileSchema.safeParse(read.value) : null
 		if (parsed === null || !parsed.success) {
+			const aside = await this.moveAside(file)
 			this.log.warn(
 				{
 					file,
+					movedTo: aside,
 					issues: parsed?.success === false ? parsed.error.issues : undefined,
+					err: read.kind === "invalid" ? read.reason : undefined,
 				},
 				"Scanner jobs file is invalid; starting with no jobs",
 			)
@@ -732,10 +741,13 @@ export class ScannerPersistence {
 		const parsed =
 			read.kind === "ok" ? SettingsFileSchema.safeParse(read.value) : null
 		if (parsed === null || !parsed.success) {
+			const aside = await this.moveAside(file)
 			this.log.warn(
 				{
 					file,
+					movedTo: aside,
 					issues: parsed?.success === false ? parsed.error.issues : undefined,
+					err: read.kind === "invalid" ? read.reason : undefined,
 				},
 				"Scanner settings file is invalid; using config values",
 			)
