@@ -255,10 +255,14 @@ describe("private single-operator persistence", () => {
 	})
 
 	it("does not issue credentials in load mode or silently repair deleted prior setup state", async () => {
-		const { directory } = await location()
+		const { root, directory } = await location()
+		const mkdir = vi.spyOn(fs, "mkdir")
 		await expect(open(directory, "load")).rejects.toMatchObject({
 			code: "ACCESS_STORAGE_MISSING",
 		})
+		expect(mkdir).not.toHaveBeenCalled()
+		expect(await fs.readdir(root)).toEqual([])
+		mkdir.mockRestore()
 		const storage = await open(directory)
 		await storage.close()
 		await fs.unlink(join(directory, "access-state.json"))

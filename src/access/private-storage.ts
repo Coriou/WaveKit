@@ -239,13 +239,19 @@ export class PrivateAccessStorage {
 		try {
 			const scope = await processScope()
 			let createdDirectory = false
-			try {
-				await fs.mkdir(options.directory, { mode: 0o700 })
-				createdDirectory = true
-			} catch (error) {
-				if (!hasCode(error, "EEXIST")) throw error
+			if (options.mode === "provision") {
+				try {
+					await fs.mkdir(options.directory, { mode: 0o700 })
+					createdDirectory = true
+				} catch (error) {
+					if (!hasCode(error, "EEXIST")) throw error
+				}
 			}
-			const stat = await fs.lstat(options.directory)
+			const stat = await fs.lstat(options.directory).catch(error => {
+				if (options.mode === "load" && hasCode(error, "ENOENT"))
+					throw failure("ACCESS_STORAGE_MISSING")
+				throw error
+			})
 			if (
 				!stat.isDirectory() ||
 				stat.isSymbolicLink() ||
