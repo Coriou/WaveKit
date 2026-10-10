@@ -603,6 +603,17 @@ and measured limits belong to that session's delta/review.
 - [ ] Follow-up: genuine higher-resolution FFT of the viewed slice, with bounded
   DSP work and unchanged full-stream detection. Magnifying/cropping published
   bins does not satisfy this item.
+  Prepared Sol/Astra design: benchmark a separate longer raw-IQ FFT at bounded
+  display cadence, then select the viewed bins from that new transform. Require
+  real contiguous samples and report its own `Fs/N`, observation duration, window
+  and sample support separately from detector resolution and delivery cadence.
+  Preserve detector conversion arithmetic, deduplicate overlapping sample ranges
+  and reset at gap/marker/settle/stream boundaries. Borrowed raw arrays must remain
+  synchronous and display accumulation bounded. Translation/anti-alias decimation
+  is a measured optimization if the simpler transform exceeds available headroom.
+  Implementation waits for reviewed Task 37a contracts/summary measurements and
+  the 35a/38 shared-file window; sustained zoom workload measurements then choose
+  FFT, memory, rate and DSP-profile limits.
 - [ ] Measure coalesced REST drag-to-tune and accepted-state latency; then decide
   WS tuning. Any transport reuses authorization, ordering, scanner preemption
   and tuner origin semantics.

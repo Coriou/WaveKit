@@ -169,3 +169,46 @@ audio before WAV headers/client admission. Exact pairing-route handling delegate
 the services above; no `/api/access/*` exemption is permitted. Actual core wiring,
 current CORS-plugin replacement, CLI/probes/logging/raw-listener configuration and
 first-use UI/command acceptance remain coordinated integration work.
+
+## Browser integration brief — reviewed 2026-10-10
+
+The web design snapshot `28280cf` leaves authentication as an open surface.
+Preserve its existing shell and visual system; coordinate the pairing surface with
+its owner before UI implementation. The first successful flow ends at spectrum →
+tune → identify → inspect → listen. Device names and a device-list endpoint may
+follow; they must not delay first connection or expose private snapshots.
+
+Before enabling live controls, load trusted deployment facts containing canonical
+API/WS origins, named analog/digital audio origins and actual mounted access
+capabilities. Publish these through a reviewed narrow bootstrap boundary or trusted
+shell metadata. The existing capabilities helper has no wire endpoint. Public
+health stays a liveness surface; legacy/unmounted mode cannot unlock the browser.
+
+Check the credentialed session endpoint. A returning session obtains CSRF metadata
+in memory, performs one single-flight refresh, then connects streams and controls.
+A readable `401 AUTH_REQUIRED` presents one labeled, paste-friendly pairing-code
+field with keyboard submission and accessible inline status. Submit the one-time
+code once, then confirm cookie acceptance through session status. If the pairing
+response is uncertain, check session status before requesting another code.
+
+Renew at bootstrap, foreground, reconnect and roughly daily during visible use,
+coalescing simultaneous triggers. Active use can continue without an absolute age
+cap; passive frames do not renew. The opaque credential remains solely in the
+HttpOnly cookie, CSRF solely in memory. REST and audio need credentialed CORS;
+browser WS uses its eligible cookie. Browser WS cannot inspect the CLI's native
+handshake status: coalesce a REST session check after WS failure and, when the
+session is valid, recover the stream without another pairing/refresh loop.
+
+Offline, `503`, missing routes and opaque TLS/CORS failures preserve the remembered
+cookie and view while offering bounded connection recovery. Readable origin/Host
+denials need configuration recovery. A CSRF denial permits one metadata recovery,
+without automatic replay of hardware writes. Rate limiting and session capacity
+have different recovery; expose `Retry-After` through CORS when displaying a rate
+countdown. Capacity must not become a countdown retry loop.
+
+Logout and receiver changes invalidate pending client operations and stop owned
+transports. Generation guards discard late pair/status/refresh responses. Confirm
+durable logout before declaring success. Browser acceptance must cover restart,
+renewal near day 30, multiple tabs, uncertain pairing, logout races, cross-port
+audio, rejected origins and unavailable persistence. These remain integration
+gates; foundation tests do not establish browser readiness.
