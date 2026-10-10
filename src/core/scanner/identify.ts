@@ -22,7 +22,10 @@ import type {
 } from "@wavekit/api-types"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ArtefactKind } from "../spectrum/artefacts.js"
-import type { EngineEpoch } from "../spectrum/spectrum-engine.js"
+import {
+	USABLE_FRACTION,
+	type EngineEpoch,
+} from "../spectrum/spectrum-engine.js"
 import type { BlockSummary, TrackSnapshot } from "../spectrum/types.js"
 import {
 	CLASS_HYPOTHESES,
@@ -39,7 +42,6 @@ import {
 	type ProbePool,
 	type ProbeRequest,
 } from "./probes/probe-pool.js"
-import type { Lease, LeaseLostReason } from "./tuner-arbiter.js"
 import {
 	CONFIDENCE_RANK,
 	type DecodeEvidence,
@@ -475,6 +477,8 @@ interface RunState {
 interface TargetState {
 	targetHz: number
 	toleranceHz: number
+	/** The target band for the window check: the request's bandwidth, or the collected track's OBW (`all`). */
+	bandwidthHz: number
 	state: ScannerIdentifyState
 	deadline: number
 	view: IdentifyTrackView | null
@@ -554,13 +558,7 @@ export class IdentifyRunner implements JobDriver {
 				)
 			case "source-down":
 				// A 15 s identify does not wait for a reconnect: it ends with what it has (the stop-condition row).
-				await this.abort()
-				try {
-					await this.deps.inner.dispatch({ type: "stop-condition" })
-				} finally {
-					this.detach()
-				}
-				return
+				return this.endWithResults()
 			case "cancel":
 			case "source-removed":
 				await this.abort()
@@ -627,10 +625,23 @@ export class IdentifyRunner implements JobDriver {
 
 	/**
 	 * An identify job never holds a lease (the in-window rows strip the lease actions, P5), so the arbiter never
-	 * revokes one; the inner in-window runner keeps the semantics should that change.
+	 * revokes one. Should it, the job ends like on source-down: probes released, results so far reported.
 	 */
-	leaseLost(lease: Lease, reason: LeaseLostReason): Promise<void> {
-		return this.deps.inner.leaseLost(lease, reason)
+	leaseLost(): Promise<void> {
+		return this.endWithResults()
+	}
+
+	/**
+	 * § 10.8: whether identify owns the confirmation of a track at `hz` (other jobs then request no probe
+	 * for it). Before and during the `all` collection that is everything it covers; afterwards only the
+	 * tolerances of the targets still being identified.
+	 */
+	owns(sourceId: string, hz: number): boolean {
+		if (this.phase === "finished" || !this.covers(sourceId, hz)) return false
+		if (this.phase === "idle" || this.phase === "collecting") return true
+		return this.targets.some(
+			t => !FINAL.has(t.state) && Math.abs(hz - t.targetHz) <= t.toleranceHz,
+		)
 	}
 
 	replan(): void {
@@ -655,6 +666,14 @@ export class IdentifyRunner implements JobDriver {
 			this.record.state !== "running"
 		)
 			return
+		// The window moved off a target (operator retune, sweep takeover): end it now with what it has.
+		let moved = false
+		for (const x of this.targets) {
+			if (FINAL.has(x.state) || !this.windowMoved(x)) continue
+			this.endMoved(x)
+			moved = true
+		}
+		if (moved) return
 		const started = this.record.startedAt ?? now
 		const { target, timeoutMs } = this.deps.identify
 		if (this.phase === "idle") {
@@ -665,6 +684,7 @@ export class IdentifyRunner implements JobDriver {
 				const t = this.newTarget(
 					target.frequencyHz,
 					toleranceHz(target.bandwidthHz),
+					target.bandwidthHz ?? 0,
 					started + timeoutMs,
 					null,
 				)
@@ -674,8 +694,7 @@ export class IdentifyRunner implements JobDriver {
 			}
 		}
 		if (this.phase === "collecting") {
-			const found = this.deps
-				.liveTracks(this.sourceId)
+			const found = this.currentTracks()
 				.filter(
 					v =>
 						v.discoveryId !== null &&
@@ -691,11 +710,12 @@ export class IdentifyRunner implements JobDriver {
 			}
 			this.phase = "running"
 			// Each target's track is already resolved, so no wait deadline applies (a shared started + timeoutMs would
-			// have passed by the time later targets get their turn); restartTarget gives one if the window moves.
+			// have passed by the time later targets get their turn); restartTarget gives one after an epoch change.
 			for (const v of found)
 				this.newTarget(
 					v.track.centreHz,
 					toleranceHz(v.track.obwHz),
+					v.track.obwHz,
 					Number.POSITIVE_INFINITY,
 					v,
 				)
@@ -712,12 +732,14 @@ export class IdentifyRunner implements JobDriver {
 	private newTarget(
 		targetHz: number,
 		tolHz: number,
+		bandwidthHz: number,
 		deadline: number,
 		view: IdentifyTrackView | null,
 	): TargetState {
 		const t: TargetState = {
 			targetHz,
 			toleranceHz: tolHz,
+			bandwidthHz,
 			state: "waiting-for-signal",
 			deadline,
 			view,
@@ -769,11 +791,7 @@ export class IdentifyRunner implements JobDriver {
 			this.checkArtefact(t, false)
 			return
 		}
-		const hit = resolveTarget(
-			t.targetHz,
-			t.toleranceHz,
-			this.deps.liveTracks(this.sourceId),
-		)
+		const hit = resolveTarget(t.targetHz, t.toleranceHz, this.currentTracks())
 		if (hit) {
 			t.view = hit
 			t.gone = false
@@ -860,6 +878,8 @@ export class IdentifyRunner implements JobDriver {
 	private fillRuns(t: TargetState, now: number): boolean {
 		const plan = t.plan
 		if (!plan) return false
+		// Never a new run while the job ends (cancel, source-down, stop) or once it left `running`.
+		if (this.phase !== "running" || this.record.state !== "running") return true
 		// [S2] After the channelizer: parallel runs within maxProbes.channel (Task 40 sets `channelizer`).
 		const parallel = this.deps.channelizer()
 			? Math.max(1, this.deps.settings().maxProbes.channel)
@@ -947,11 +967,20 @@ export class IdentifyRunner implements JobDriver {
 		return true
 	}
 
-	/** The window moved under the track (untracked retune, reconnect): resolve the target again. */
+	/**
+	 * The epoch changed under the track with the target still in the window (gain change, reconnect at the
+	 * same centre): resolve the target again. The original deadline stays, so repeated epoch changes never
+	 * extend the job; an `all` target (no wait deadline) gets one now. A window move ends the target instead.
+	 */
 	private restartTarget(t: TargetState, now: number): void {
+		if (this.windowMoved(t)) {
+			this.endMoved(t)
+			return
+		}
 		this.releaseRuns(t.active.splice(0))
 		t.state = "waiting-for-signal"
-		t.deadline = now + this.deps.identify.timeoutMs
+		if (!Number.isFinite(t.deadline))
+			t.deadline = now + this.deps.identify.timeoutMs
 		t.view = null
 		t.gone = false
 		t.plan = null
@@ -991,7 +1020,15 @@ export class IdentifyRunner implements JobDriver {
 		t.active.splice(index, 1)
 		// § 10.8 (3): stop at the first accepted decode unless exhaustive.
 		const stop = why === "decoded" && !this.deps.identify.exhaustive
+		// The pool stopped the probe before its hold (epoch change, spawn failure, shutdown) and nothing was
+		// accepted: that is no decoder verdict.
+		const cutShort =
+			why === "stopped" &&
+			r.endsAt !== null &&
+			this.deps.now() < r.endsAt &&
+			![...r.seen.values()].some(seen => seen.identity !== null)
 		this.setTrials(t, r.runIndex, protocol => {
+			if (cutShort) return "cancelled"
 			const outcome = trialOutcome(r.seen.get(protocol))
 			return stop && outcome !== "decoded" ? "not-needed" : outcome
 		})
@@ -1004,16 +1041,21 @@ export class IdentifyRunner implements JobDriver {
 			for (const trial of t.trials)
 				if (trial.outcome === "pending") trial.outcome = "not-needed"
 			t.nextRun = t.plan?.runs.length ?? 0
-		} else if (t.state === "trying") {
+		} else if (t.state === "trying" && why !== "stopped") {
 			// Request the next run before this one's slot is released: the pool's priority queue then hands the slot to
 			// it, not to a queued passive probe that the next run would only preempt again (a spawn and a kill per run).
+			// A run the pool stopped is followed from the next tick (after an epoch change, or never at shutdown).
 			this.fillRuns(t, this.deps.now())
 		}
 		this.releaseRuns(ended)
 		this.emitTarget(t)
 	}
 
-	private finishTarget(t: TargetState, artefact: ArtefactKind | null): void {
+	private finishTarget(
+		t: TargetState,
+		artefact: ArtefactKind | null,
+		ended?: "window-moved",
+	): void {
 		if (FINAL.has(t.state)) return
 		const resolved = t.view
 		const latest = resolved
@@ -1064,13 +1106,15 @@ export class IdentifyRunner implements JobDriver {
 			metadata: discovery?.metadata ?? emptyMetadata(),
 			...(discovery ? { discoveryId: discovery.id } : {}),
 			...(latest ? { observationId: latest.observationId } : {}),
+			// After a window move the latest summary shows another window: measure from the track or not at all.
 			measurements: measureTarget(
 				track,
-				this.deps.lastSummary(this.sourceId),
+				ended ? null : this.deps.lastSummary(this.sourceId),
 				t.targetHz,
 				t.toleranceHz,
 			),
 			...(artefact ? { artefact } : {}),
+			...(ended ? { ended } : {}),
 		}
 		t.state = state
 		this.emitTarget(t)
@@ -1085,6 +1129,46 @@ export class IdentifyRunner implements JobDriver {
 				this.log.debug({ err }, "Identify stop ignored in this state"),
 			)
 			.finally(() => this.detach())
+	}
+
+	/** source-down (and a lease loss, never expected): end through the stop-condition row with the results so far. */
+	private async endWithResults(): Promise<void> {
+		await this.abort()
+		try {
+			await this.deps.inner.dispatch({ type: "stop-condition" })
+		} finally {
+			this.detach()
+		}
+	}
+
+	/** A sweep now holds the source, or the target band left the tuned window. */
+	private windowMoved(t: TargetState): boolean {
+		if (!this.deps.inner.covers(this.sourceId, t.targetHz)) return true
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch()
+		return (
+			epoch !== undefined &&
+			!inWindow(t.targetHz, t.bandwidthHz, epoch, USABLE_FRACTION)
+		)
+	}
+
+	/** Ends a target whose window moved: runs released, open trials `cancelled`, `ended: "window-moved"`. */
+	private endMoved(t: TargetState): void {
+		this.log.info(
+			{ targetHz: t.targetHz, state: t.state },
+			"Identify target ended: window moved",
+		)
+		const runs = t.active.splice(0)
+		for (const r of runs) this.setTrials(t, r.runIndex, () => "cancelled")
+		this.releaseRuns(runs)
+		this.finishTarget(t, null, "window-moved")
+	}
+
+	/** Live tracks of the current epoch only (old-epoch observations linger briefly behind a thread host). */
+	private currentTracks(): IdentifyTrackView[] {
+		const epoch = this.deps.engine(this.sourceId)?.currentEpoch().epoch
+		return this.deps
+			.liveTracks(this.sourceId)
+			.filter(v => epoch === undefined || v.epoch === epoch)
 	}
 
 	/** Cancel, source-down, source-removed: release every probe and report what each target has so far. */

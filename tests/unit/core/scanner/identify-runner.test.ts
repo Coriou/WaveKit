@@ -542,3 +542,139 @@ describe("IdentifyRunner (spec § 10.8)", () => {
 		)
 	}, 120_000)
 })
+
+/** Starts a DMR target and lets its first run (dsd-fme auto) start. */
+async function dmrTrial(h: Harness): Promise<void> {
+	await h.runner.start()
+	h.tracks.push(viewOf(dmrTrack()))
+	await h.advance(100)
+	await h.advance(100)
+	await flushAsync()
+	expect(h.decoders.created.size).toBe(1)
+	expect(outcomes(h)["dmr"]).toBe("running")
+}
+
+describe("IdentifyRunner window moves, cut-short runs and endings (Task 35a fix round 1)", () => {
+	it("ends the target within one tick when the window moves far mid-trial: trials cancelled, no further probe", async () => {
+		const h = identifyHarness()
+		const order = decoderOrder(h)
+		await dmrTrial(h)
+		// the operator retunes 1.4 MHz away: the service hands the pool the new epoch
+		h.engine.setEpoch(2, 447_500_000)
+		await h.pool.onEpoch("rtl", 2, 447_500_000)
+		await flushAsync()
+		await h.advance(100)
+		// it ends with what it has: the spectral class still speaks (the TDMA ACF), no decoder verdict
+		expect(h.last()).toMatchObject({
+			state: "candidate",
+			result: {
+				protocol: "dmr",
+				ended: "window-moved",
+				measurements: { source: "track", centreHz: TARGET_HZ },
+			},
+		})
+		expect(
+			h
+				.last()!
+				.trials.every(t => ["cancelled", "unsupported"].includes(t.outcome)),
+		).toBe(true)
+		expect(
+			h.events.some(e => e.trials.some(t => t.outcome === "no-sync")),
+		).toBe(false)
+		await settle(h, 1000, 10)
+		expect(h.record.state).toBe("completed")
+		expect(order).toEqual(["dsd-fme:auto"])
+		expect(h.decoders.created.size).toBe(0)
+	})
+
+	it("cancels a run cut short by an in-window epoch change, re-resolves, and keeps the original deadline", async () => {
+		const h = identifyHarness({ request: { timeoutMs: 2000 } })
+		const startedAt = h.clock.now
+		await dmrTrial(h)
+		// same centre (a gain change): the pool stops the probe and does not re-request it (identify re-plans)
+		h.engine.setEpoch(2, 446_100_000)
+		await h.pool.onEpoch("rtl", 2, 446_100_000)
+		await flushAsync()
+		expect(h.decoders.created.size).toBe(0)
+		expect(outcomes(h)["dmr"]).toBe("cancelled")
+		await h.advance(100)
+		expect(h.last()?.state).toBe("waiting-for-signal")
+		// the epoch-1 track no longer resolves; nothing transmits in epoch 2
+		while (!ENDED.includes(h.record.state) && h.clock.now - startedAt < 5000)
+			await h.advance(100)
+		expect(h.record.state).toBe("completed")
+		// the deadline is the original start + 2 s (+ one tick to finish), not 2 s after the epoch change
+		expect(h.clock.now - startedAt).toBeLessThanOrEqual(2300)
+		expect(h.last()).toMatchObject({ state: "unidentified", trials: [] })
+		expect(
+			h.events.some(e => e.trials.some(t => t.outcome === "no-sync")),
+		).toBe(false)
+	})
+
+	it("ends with the results so far on source-down", async () => {
+		const h = identifyHarness()
+		await dmrTrial(h)
+		await h.runner.dispatch({ type: "source-down" })
+		await flushAsync()
+		expect(h.record.state).toBe("completed")
+		expect(h.decoders.created.size).toBe(0)
+		expect(h.last()).toMatchObject({
+			state: "candidate",
+			result: { protocol: "dmr", measurements: { source: "track" } },
+		})
+		expect(outcomes(h)["dmr"]).toBe("cancelled")
+	})
+
+	it("ends like source-down on a lease loss (never expected: identify holds no lease)", async () => {
+		const h = identifyHarness()
+		await dmrTrial(h)
+		await h.runner.leaseLost()
+		await flushAsync()
+		expect(h.record.state).toBe("completed")
+		expect(h.decoders.created.size).toBe(0)
+	})
+
+	it("detaches its pool listeners when it completes, is cancelled, or fails to start", async () => {
+		const counts = (h: Harness) => [
+			h.pool.listenerCount("probe-state"),
+			h.pool.listenerCount("evidence"),
+		]
+		// the harness's own recorders are the baseline: one listener of each
+		const completed = identifyHarness({ artefact: "dc" })
+		expect(counts(completed)).toEqual([2, 2])
+		await completed.runner.start()
+		await settle(completed, 100, 5)
+		expect(completed.record.state).toBe("completed")
+		expect(counts(completed)).toEqual([1, 1])
+
+		const cancelled = identifyHarness()
+		await dmrTrial(cancelled)
+		await cancelled.runner.dispatch({ type: "cancel" })
+		expect(cancelled.record.state).toBe("cancelled")
+		expect(counts(cancelled)).toEqual([1, 1])
+
+		// ScannerService disposes a driver whose start failed
+		const failed = identifyHarness()
+		failed.record.state = "running"
+		await expect(failed.runner.start()).rejects.toMatchObject({
+			code: "SCANNER_INVALID_TRANSITION",
+		})
+		await failed.runner.dispose()
+		expect(counts(failed)).toEqual([1, 1])
+	})
+
+	it("owns confirmation of the whole window only until all: true has collected its targets", async () => {
+		const h = identifyHarness({ request: { target: { all: true } } })
+		await h.runner.start()
+		expect(h.runner.owns("rtl", 446_400_000)).toBe(true)
+		h.tracks.push(viewOf(dmrTrack(), "d_a"))
+		await h.advance(100) // collected: one target (tolerance 4.5 kHz), its first run started
+		expect(h.last()?.state).toBe("trying")
+		expect(h.runner.owns("rtl", TARGET_HZ + 4000)).toBe(true)
+		expect(h.runner.owns("rtl", 446_400_000)).toBe(false)
+		expect(h.runner.owns("other", TARGET_HZ)).toBe(false)
+		await settle(h, 1000, 30)
+		expect(h.record.state).toBe("completed")
+		expect(h.runner.owns("rtl", TARGET_HZ)).toBe(false)
+	})
+})

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
+import { IDENTIFY_KEEP_JOBS } from "../../../../src/core/scanner/identify.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
 	CENTRE,
@@ -48,9 +49,82 @@ describe("ScannerService.identify (spec § 10.8)", () => {
 		await tick(20)
 		await expect(
 			h.service.identify({ sourceId: "rtl", target: { frequencyHz: CENTRE } }),
-		).rejects.toMatchObject({ statusCode: 409, code: "SCANNER_SOURCE_BUSY" })
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_BUSY",
+			details: { holderJobId: expect.any(String) },
+		})
 		await h.service.stop()
 	})
+
+	it("refuses kind: identify on POST /jobs (identify has its own route)", async () => {
+		const h = serviceHarness(noPassive)
+		await h.service.start()
+		await expect(
+			h.service.createJob({
+				sourceId: "rtl",
+				mode: "in-window",
+				kind: "identify",
+			}),
+		).rejects.toMatchObject({
+			statusCode: 400,
+			code: "SCANNER_IDENTIFY_VIA_JOBS",
+		})
+		expect(h.service.listJobs()).toEqual([])
+		await h.service.stop()
+	})
+
+	it("ends a waiting target with ended: window-moved when a takeover sweep takes the tuner", async () => {
+		const h = serviceHarness(noPassive)
+		await h.service.start()
+		const job = await h.service.identify({
+			sourceId: "rtl",
+			target: { frequencyHz: CENTRE + 100_000 },
+			timeoutMs: 60_000,
+			record: false,
+		})
+		feedTone(h.fanout, 1, 0, 0, 12) // noise only: the target waits for a signal
+		await until(
+			() =>
+				h.service.getJob(job.id)?.identify?.targets[0]?.state ===
+				"waiting-for-signal",
+		)
+		await h.service.createJob({
+			sourceId: "rtl",
+			mode: "sweep",
+			ranges: [{ startHz: 450_000_000, endHz: 450_200_000 }],
+			takeover: true,
+			resume: { autoAfterIdleMs: null },
+		})
+		await until(() => h.service.getJob(job.id)?.state === "completed")
+		expect(h.service.getJob(job.id)!.identify!.targets[0]).toMatchObject({
+			state: "unidentified",
+			trials: [],
+			result: { ended: "window-moved" },
+		})
+		await h.service.stop()
+	})
+
+	it("keeps only the newest IDENTIFY_KEEP_JOBS ended identify jobs listed", async () => {
+		const h = serviceHarness(noPassive)
+		await h.service.start()
+		const ids: string[] = []
+		for (let i = 0; i <= IDENTIFY_KEEP_JOBS + 1; i++) {
+			const job = await h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: CENTRE + 100_000 },
+				record: false,
+			})
+			ids.push(job.id)
+			if (i <= IDENTIFY_KEEP_JOBS) await h.service.cancelJob(job.id)
+		}
+		// 51 ended when the 52nd was created: the oldest went, the newest 50 ended plus the running one stay
+		const listed = h.service.listJobs().map(j => j.id)
+		expect(listed).toHaveLength(IDENTIFY_KEEP_JOBS + 1)
+		expect(listed).not.toContain(ids[0])
+		expect(listed).toEqual(expect.arrayContaining(ids.slice(1)))
+		await h.service.stop()
+	}, 60_000)
 
 	it("identifies a carrier from the spectrum without a trial, and never persists the identify job", async () => {
 		const h = serviceHarness(noPassive)

@@ -604,6 +604,9 @@ export class ProbePool extends EventEmitter {
 		for (const rec of stale) rec.epochEndedAt = at
 		await Promise.all(stale.map(rec => this.stopProbe(rec, "epoch")))
 		for (const rec of stale) {
+			// Identify (priority above every job's 0–100, Task 35a) re-plans on its own: a re-request would only
+			// spawn a decoder it gives back, and preempt a lower-priority probe for nothing.
+			if (rec.req.priority > 100) continue
 			const engine = this.deps.engines(sourceId)
 			if (!engine) continue
 			const halfSpan =

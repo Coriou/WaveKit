@@ -665,6 +665,8 @@ export interface ScannerIdentifyResult {
 	observationId?: string
 	measurements: ScannerIdentifyMeasurements
 	artefact?: ScannerArtefactKind
+	/** The target ended early: the tuned window moved off it (retune, sweep takeover); open trials are `cancelled`. */
+	ended?: "window-moved"
 }
 /** `scanner:identify` (one stream per target; `all: true` gives one per surfaced emission). */
 export interface ScannerIdentifyEventData {

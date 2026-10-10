@@ -1116,6 +1116,7 @@ export class ScannerService extends EventEmitter {
 		entry.refs -= 1
 		if (entry.refs > 0) return
 		this.engines.delete(sourceId)
+		this.lastSummaries.delete(sourceId)
 		let state: EngineState | null = null
 		try {
 			state = await entry.engine.stop()
@@ -1450,11 +1451,11 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private needsConfirm(live: LiveObservation, track: TrackSnapshot): boolean {
-		// § 10.8: an active identify job owns the confirmation of the tracks it covers.
+		// § 10.8: an active identify job owns the confirmation of the tracks it is identifying.
 		const identifying = live.jobIds.some(id => {
-			const r = this.jobs.get(id)
+			const d = this.drivers.get(id)
 			return (
-				r !== undefined && r.spec.kind === "identify" && !isTerminal(r.state)
+				d instanceof IdentifyRunner && d.owns(live.sourceId, track.centreHz)
 			)
 		})
 		if (identifying) return false
@@ -2004,7 +2005,12 @@ export class ScannerService extends EventEmitter {
 							]
 						: [],
 				),
-			lastSummary: sourceId => this.lastSummaries.get(sourceId) ?? null,
+			// Only a summary of the current epoch measures the target's window (never a former one).
+			lastSummary: sourceId => {
+				const summary = this.lastSummaries.get(sourceId)
+				const epoch = this.identifyEngine(sourceId)?.currentEpoch().epoch
+				return summary && summary.epoch === epoch ? summary : null
+			},
 			discoveryOf: observationId => {
 				const id = this.store.discoveryIdOf(observationId)
 				return id ? this.store.get(id) : undefined
@@ -2154,7 +2160,7 @@ export class ScannerService extends EventEmitter {
 						`Lease held by scanner job ${holder.jobId}`,
 						"SCANNER_SOURCE_BUSY",
 						409,
-						{ holder: holder.jobId },
+						{ holderJobId: holder.jobId },
 					)
 				const best = chooseLeaseHolder(
 					[...this.jobs.values()]

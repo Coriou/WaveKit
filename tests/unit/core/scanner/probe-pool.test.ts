@@ -399,6 +399,19 @@ describe("ProbePool", () => {
 		).toBe(-75_000)
 	})
 
+	it("does not re-request an identify probe (priority > 100) on an epoch change: identify re-plans itself", async () => {
+		const h = poolHarness()
+		h.pool.request(probeRequest({ targetHz: 446_125_000, priority: 101 }))
+		await flushAsync()
+		expect(h.decoders.created.size).toBe(1)
+		h.engine.setEpoch(2, 446_200_000)
+		await h.pool.onEpoch("rtl", 2, 446_200_000)
+		await flushAsync()
+		expect(h.pool.status()).toEqual([])
+		expect(h.decoders.created.size).toBe(0)
+		expect(h.decoders.removed).toHaveLength(1)
+	})
+
 	it("ends a probe on a stream boundary of its source and never reads the new stream's ring", async () => {
 		const h = poolHarness()
 		h.engine.push(2000)
