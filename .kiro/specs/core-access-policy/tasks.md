@@ -1,7 +1,9 @@
 # Core access policy — tasks
 
-Do tasks in dependency order. Foundation and integration have separate checkpoints.
-Scanner owns its current shared-file work; coordinate before integration edits.
+Foundation and integration have separate checkpoints. Tasks 4 and 5 may proceed
+in parallel: prepare adapter contracts while implementing independent provisioning
+and persistence. Task 6 requires both completed session flows and a coordinated
+scanner integration window. Scanner owns its current shared-file work.
 
 - [x] 1. Implement exact authority/origin, raw-header and canonical credential policy.
   _Requirements: 2.1–2.3, 3.1–3.4_
@@ -11,8 +13,8 @@ Scanner owns its current shared-file work; coordinate before integration edits.
 - [x] 3. CHECKPOINT FOUNDATION: targeted meaningful tests, typecheck, lint and independent
   review; verify no existing runtime files/adapters changed and no live protection claimed.
   _Requirements: 1.3, 2.1–5.3_
-- [ ] 4. Agree integration window and exact adapter/config/CLI contract with scanner;
-  inspect settled scanner route/WS/audio/bootstrap changes before dispatch.
+- [ ] 4. Prepare exact adapter/config/CLI contracts; agree the shared-file integration
+  window with scanner and inspect settled route/WS/audio/bootstrap changes before wiring.
   _Requirements: 6.1, 6.5_
 - [ ] 5. Implement guided provisioning/pairing/refresh/revoke flows and private persistence,
   including fail-closed startup/storage behavior and bounded failed-attempt handling.

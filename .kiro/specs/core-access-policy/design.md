@@ -99,3 +99,73 @@ Validates: Requirements 3.3, 3.4, 6.1.
 
 Use deterministic scenario tests for races, persistence faults and adapter effects;
 property-based tests map to these properties with at least 100 runs.
+
+## Independent provisioning and session-flow batch
+
+Private storage owns a bounded, versioned 0600 state file inside a private 0700
+directory. Machine credentials remain outside ordinary config/status/log objects.
+Existing malformed, symlinked, unsafe or unexpectedly missing initialized state
+fails closed; it never silently provisions a replacement credential. Serialized
+writes use an exclusive same-directory temporary file, file sync, atomic rename
+and directory sync before success. Rotation atomically changes the credential
+binding and empties sessions; stale authority writes cannot restore the old binding.
+
+Ownership uses unique immutable process-owner files published before scanning other
+owners. Any other live owner, including another nonce for the same PID, makes the
+open busy. Only exact unique owner paths proven dead in the same supported process
+scope can be reclaimed. Foreign or unverifiable namespaces fail closed; automatic
+same-namespace crash recovery is tested, while container/host ownership transitions
+require explicit stopped-instance recovery and deployment acceptance. Never use
+host PID checks to reclaim a writer in another Docker PID namespace.
+
+Offline setup provisions private state. The running core owns pairing-code state;
+a future setup client obtains a code by making an authenticated request to that
+explicitly selected core. It must not mint an isolated in-memory code that the
+running server cannot redeem, or acquire writable storage behind a running owner.
+Actual command/UI and existing listener mounts remain a separate integration gate.
+
+## Pairing and remembered-session service contract
+
+The running authority issues pairing codes only for an original machine-authenticated
+POST `/api/access/pairing-codes`. Codes are ten Crockford-base32 characters displayed
+as `XXXXX-XXXXX`, expire after ten minutes and exist only as hashes in process memory.
+At most four outstanding/reserved codes are retained. Restart discards unused codes.
+
+POST `/api/access/pair` has a narrow boundary-only policy entrypoint requiring the
+actual API/HTTP method/path, exact Host, explicit allowed Origin and unambiguous raw
+headers. This check grants no principal; normal API policy still requires credentials
+there. Strict code input accepts ASCII case normalization and the single separator.
+Redemption limits are five attempts/minute per connection address, sixty/minute
+globally, and 128 active address buckets; forwarded addresses create no trust.
+A synchronous reservation precedes durable session creation. Concurrent redemption
+cannot issue two sessions; success consumes the reservation only after persistence.
+A reservation begun before expiry may finish afterward. Capacity failure permits an
+unexpired retry, while storage failure yields generic 503 without a cookie or success.
+
+Browser flows evaluate their original request and require a session principal:
+GET `/api/access/session`; POST `/api/access/session/refresh`,
+`/api/access/session/logout`, `/api/access/devices/revoke`, and
+`/api/access/devices/revoke-all`. Unsafe methods require Origin and CSRF. Mutations
+are serialized and reevaluate authentication at execution so logout cannot be undone
+by a queued refresh. Refresh reissues the same validated opaque cookie after durable
+renewal. Self/all revocation clears that cookie, with no hardware/job side effects.
+Public bodies contain device ID, expiry and CSRF metadata. Cookie directives are
+separate non-enumerable transport metadata and must never be serialized as JSON.
+
+## Unmounted adapter preparation
+
+Raw Node request conversion preserves original headers/target/socket address and
+uses the stricter upgrade path for raw Upgrade headers before framework metadata.
+A shared connection-lifetime manager checks the session authority every 250 ms by
+default (configurable maximum 1000 ms), with one bounded timer for at most 512 leases.
+Event-loop stalls can add delay; revocation/storage failure invokes immediate normal
+cleanup. The manager never schedules epoch expiry against Date.now() or a 30-day
+native timeout. Rejected lease attachment performs no transport cleanup before a
+protocol denial; release/disposal cancels listeners/timers idempotently.
+
+Next adapters install direct root Fastify hooks before plugins/routes and provide
+pre-upgrade reservation/adoption and download leases. The Node HTTP adapter gates
+audio before WAV headers/client admission. Exact pairing-route handling delegates to
+the services above; no `/api/access/*` exemption is permitted. Actual core wiring,
+current CORS-plugin replacement, CLI/probes/logging/raw-listener configuration and
+first-use UI/command acceptance remain coordinated integration work.
