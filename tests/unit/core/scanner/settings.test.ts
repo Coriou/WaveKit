@@ -56,15 +56,15 @@ describe("mergeScannerSettings (spec § 12.1 settings, D4)", () => {
 			overrides: { passive: { spare: true } },
 		})
 		expect(merged.passiveBySource).toEqual({ rtl: true, spare: true })
-		expect(merged.provenance["passive.rtl"]).toBe("default")
-		expect(merged.provenance["passive.spare"]).toBe("runtime")
+		expect(merged.provenance["passiveBySource.rtl"]).toBe("default")
+		expect(merged.provenance["passiveBySource.spare"]).toBe("runtime")
 		const configured = mergeScannerSettings({
 			config: defaults,
 			sources,
 			overrides: {},
 		})
 		expect(configured.passiveBySource).toEqual({ rtl: true, spare: false })
-		expect(configured.provenance["passive.spare"]).toBe("config")
+		expect(configured.provenance["passiveBySource.spare"]).toBe("config")
 		const off = ScannerConfigSchema.parse({ passive: { enabled: false } })
 		const gated = mergeScannerSettings({
 			config: off,
@@ -72,6 +72,18 @@ describe("mergeScannerSettings (spec § 12.1 settings, D4)", () => {
 			overrides: { passive: { spare: true } },
 		})
 		expect(gated.passiveBySource).toEqual({ rtl: false, spare: false })
+	})
+
+	it("keys per-source passive provenance apart from passive.enabled", () => {
+		const config = ScannerConfigSchema.parse({ passive: { enabled: false } })
+		const merged = mergeScannerSettings({
+			config,
+			sources: [{ id: "enabled" }],
+			overrides: { passive: { enabled: true } },
+		})
+		expect(merged.provenance["passive.enabled"]).toBe("config")
+		expect(merged.provenance["passiveBySource.enabled"]).toBe("runtime")
+		expect(merged.passiveBySource).toEqual({ enabled: false })
 	})
 
 	it("treats source ids containing dots as one key", () => {

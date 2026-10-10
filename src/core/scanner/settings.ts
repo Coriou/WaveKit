@@ -70,7 +70,10 @@ export const ScannerSettingsPatchSchema = RuntimeSettingsOverridesSchema
 export interface EffectiveScannerSettings {
 	settings: ScannerSettings
 	passiveBySource: Record<string, boolean>
-	/** Dotted leaf path ("detection.integrationMs", "passive.<sourceId>") → origin. */
+	/**
+	 * Dotted leaf path ("detection.integrationMs") → origin. Per-source passive is keyed
+	 * "passiveBySource.<sourceId>", so a source id never collides with "passive.enabled".
+	 */
 	provenance: Record<string, ScannerSettingProvenance>
 }
 
@@ -148,7 +151,7 @@ export function mergeScannerSettings(input: {
 		const configured = sourceScannerConfig(source).passive
 		passiveBySource[source.id] =
 			settings.passive.enabled && (override ?? configured)
-		provenance[`passive.${source.id}`] =
+		provenance[`passiveBySource.${source.id}`] =
 			override !== undefined
 				? "runtime"
 				: source.scanner !== undefined
