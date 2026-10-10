@@ -3,10 +3,7 @@ import { classifySpectral } from "../../../../src/core/scanner/classify/classifi
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import type { TrackSnapshot } from "../../../../src/core/spectrum/types.js"
 import { counterIds } from "../../../mocks/scanner/observations.js"
-import {
-	heavyTailedNoise,
-	mulberry32,
-} from "../../../mocks/scanner/signals.js"
+import { heavyTailedNoise, mulberry32 } from "../../../mocks/scanner/signals.js"
 import { FS, Harness, yieldToRpc } from "../spectrum/pipeline-harness.js"
 
 const SIGMA = 0.01
