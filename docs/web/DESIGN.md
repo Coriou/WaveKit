@@ -291,7 +291,7 @@ Condensed + Noto Sans, Tabler-based icons).
     normally); a manual recording or IQ capture is *deleted*. Both have Undo in a toast.
   - *Download:* audio as Opus (default) or WAV; IQ as SigMF (opens in SDR++ and GNU Radio)
     or the tuned channel's audio. Downloads are the trimmed part and say so.
-  - *Storage:* one quiet footer line, "Kept 1.6 GB · calls expire after 7 days · 212 GB
+  - *Storage:* one quiet footer line, "Kept 1.1 GB · calls expire after 7 days · 212 GB
     free"; when space is short it turns amber ("4.1 GB free · calls now expire after 2 days
     instead of 7"). It links to Settings › Storage. Tweak `storage` shows both.
   - *Live recording:* while Listen › Record is on, a red row at the top shows the
