@@ -49,6 +49,7 @@ import type {
  * - resources: Container, SDR host, and source backpressure monitoring
  * - tuner: RTL-TCP tuner control events
  * - scanner: Signal discovery scanner jobs, progress, discoveries, activity, identify, status (rate-limited)
+ * - spectrum: core waterfall frames, opt-in; `options.spectrum` on subscribe selects a source and profile
  */
 export type WebSocketChannel =
 	| "decoders"
@@ -62,13 +63,26 @@ export type WebSocketChannel =
 	| "tuner"
 	| "aircraft"
 	| "scanner"
+	| "spectrum"
 
 /**
- * Message sent from client to server.
+ * Message sent from client to server. `options` carries per-channel subscribe
+ * options (e.g. `options.spectrum`); the channel's observer validates them.
  */
 export interface ClientMessage {
 	type: "subscribe" | "unsubscribe"
 	channels: WebSocketChannel[]
+	options?: Partial<Record<WebSocketChannel, unknown>>
+}
+
+/**
+ * A channel's subscription lifecycle (one observer per channel): `subscribed` on
+ * every subscribe that names the channel (with its options), `unsubscribed` once
+ * when a client that had the channel unsubscribes, disconnects or is terminated.
+ */
+export interface ChannelObserver {
+	subscribed(clientId: string, options: unknown): void
+	unsubscribed(clientId: string): void
 }
 
 /**
@@ -116,6 +130,8 @@ export interface ServerMessage {
 		| "scanner:monitor"
 		| "scanner:identify"
 		| "scanner:status"
+		| "spectrum:frame"
+		| "spectrum:profile"
 		| "decoder:created"
 		| "decoder:removed"
 		| "subscribed"
@@ -160,7 +176,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "resources" ||
 		channel === "tuner" ||
 		channel === "aircraft" ||
-		channel === "scanner"
+		channel === "scanner" ||
+		channel === "spectrum"
 	)
 }
 
@@ -187,9 +204,15 @@ function parseClientMessage(data: unknown): ClientMessage | null {
 		return null
 	}
 
+	const options = msg["options"]
 	return {
 		type: msg["type"] as "subscribe" | "unsubscribe",
 		channels: validChannels,
+		...(typeof options === "object" &&
+		options !== null &&
+		!Array.isArray(options)
+			? { options: options as Partial<Record<WebSocketChannel, unknown>> }
+			: {}),
 	}
 }
 
@@ -208,6 +231,7 @@ export class WebSocketEventBroadcaster {
 	private clientIdCounter = 0
 	private readonly delivery = new WeakMap<ClientState, DeliveryState>()
 	private maintenanceTimer: ReturnType<typeof setInterval> | undefined
+	private readonly observers = new Map<WebSocketChannel, ChannelObserver>()
 
 	constructor(logger: Logger) {
 		this.log = createComponentLogger(logger, "WebSocketBroadcaster")
@@ -295,7 +319,7 @@ export class WebSocketEventBroadcaster {
 			}
 
 			if (message.type === "subscribe") {
-				this.handleSubscribe(client, message.channels)
+				this.handleSubscribe(client, message.channels, message.options)
 			} else {
 				this.handleUnsubscribe(client, message.channels)
 			}
@@ -317,6 +341,7 @@ export class WebSocketEventBroadcaster {
 	private handleSubscribe(
 		client: ClientState,
 		channels: WebSocketChannel[],
+		options?: Partial<Record<WebSocketChannel, unknown>>,
 	): void {
 		for (const channel of channels) {
 			client.subscriptions.add(channel)
@@ -335,6 +360,8 @@ export class WebSocketEventBroadcaster {
 			type: "subscribed",
 			data: { channels: Array.from(client.subscriptions) },
 		})
+		for (const channel of new Set(channels))
+			this.observers.get(channel)?.subscribed(client.id, options?.[channel])
 	}
 
 	/**
@@ -344,8 +371,9 @@ export class WebSocketEventBroadcaster {
 		client: ClientState,
 		channels: WebSocketChannel[],
 	): void {
+		const left = new Set<WebSocketChannel>()
 		for (const channel of channels) {
-			client.subscriptions.delete(channel)
+			if (client.subscriptions.delete(channel)) left.add(channel)
 		}
 
 		this.log.debug(
@@ -361,6 +389,8 @@ export class WebSocketEventBroadcaster {
 			type: "unsubscribed",
 			data: { channels: Array.from(client.subscriptions) },
 		})
+		for (const channel of left)
+			this.observers.get(channel)?.unsubscribed(client.id)
 	}
 
 	/**
@@ -371,9 +401,12 @@ export class WebSocketEventBroadcaster {
 		code?: number,
 		reason?: Buffer,
 	): void {
+		// A late close after terminateClient or closeAll is a no-op (finding 7).
+		if (!this.clients.has(client.id)) return
 		this.clients.delete(client.id)
 		this.delivery.delete(client)
 		this.stopMaintenanceIfIdle()
+		this.notifyUnsubscribed(client)
 		const reasonStr = reason ? reason.toString() : "unknown"
 		this.log.info(
 			{ clientId: client.id, code, reason: reasonStr },
@@ -515,6 +548,46 @@ export class WebSocketEventBroadcaster {
 			{ channel, type: message.type, sentCount },
 			"Broadcast message",
 		)
+	}
+
+	/**
+	 * Sends one message to the listed clients that are subscribed to `channel`
+	 * (same filter as broadcast), serialising it once. Returns the clients reached.
+	 */
+	sendToClients(
+		channel: WebSocketChannel,
+		clientIds: Iterable<string>,
+		message: ServerMessage,
+	): number {
+		const serialized = JSON.stringify({ ...message, channel })
+		let sent = 0
+		for (const id of clientIds) {
+			const client = this.clients.get(id)
+			if (
+				client?.subscriptions.has(channel) &&
+				client.socket.readyState === 1 &&
+				this.enqueue(client, serialized)
+			)
+				sent++
+		}
+		return sent
+	}
+
+	/** Observes one channel's subscriptions (one observer per channel); returns the unobserve function. */
+	observeChannel(
+		channel: WebSocketChannel,
+		observer: ChannelObserver,
+	): () => void {
+		this.observers.set(channel, observer)
+		return () => {
+			if (this.observers.get(channel) === observer)
+				this.observers.delete(channel)
+		}
+	}
+
+	private notifyUnsubscribed(client: ClientState): void {
+		for (const channel of client.subscriptions)
+			this.observers.get(channel)?.unsubscribed(client.id)
 	}
 
 	/**
@@ -931,6 +1004,7 @@ export class WebSocketEventBroadcaster {
 	 * Closes all client connections.
 	 */
 	closeAll(): void {
+		for (const client of this.clients.values()) this.notifyUnsubscribed(client)
 		for (const client of this.clients.values()) {
 			try {
 				client.socket.close(1000, "Server shutting down")

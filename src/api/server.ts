@@ -46,11 +46,14 @@ import { resourceRoutes } from "./routes/resources.js"
 import { aircraftRoutes } from "./routes/aircraft.js"
 import { scannerRoutes } from "./routes/scanner.js"
 import type { ScannerService } from "../core/scanner/scanner-service.js"
+import { spectrumRoutes } from "./routes/spectrum.js"
+import type { SpectrumService } from "../core/spectrum/spectrum-service.js"
 import {
 	WebSocketEventBroadcaster,
 	type ServerMessage,
 } from "./websocket/events.js"
 import { wireScannerBroadcasts } from "./websocket/scanner-broadcast.js"
+import { wireSpectrumBroadcasts } from "./websocket/spectrum-broadcast.js"
 import type { WsLimiter } from "../core/scanner/ws-limiter.js"
 import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
@@ -87,6 +90,7 @@ export interface ApiServerDependencies {
 	resourceAggregator?: ResourceAggregator | undefined
 	aircraftTracker?: AircraftTracker | undefined
 	scanner?: ScannerService | undefined
+	spectrum?: SpectrumService | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
 }
@@ -117,12 +121,14 @@ export class ApiServer {
 	private readonly resourceAggregator?: ResourceAggregator | undefined
 	private readonly aircraftTracker?: AircraftTracker | undefined
 	private readonly scanner?: ScannerService | undefined
+	private readonly spectrum?: SpectrumService | undefined
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private readonly sourceStatusPublisher: SourceStatusPublisher
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
 	private scannerWiring: { dispose(): void } | null = null
+	private spectrumWiring: { dispose(): void } | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.sourceManager = dependencies.sourceManager
@@ -139,6 +145,7 @@ export class ApiServer {
 		this.resourceAggregator = dependencies.resourceAggregator
 		this.aircraftTracker = dependencies.aircraftTracker
 		this.scanner = dependencies.scanner
+		this.spectrum = dependencies.spectrum
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
@@ -217,6 +224,8 @@ export class ApiServer {
 			this.scannerWiring?.dispose()
 			this.scannerWiring = null
 			this.scannerLimiter = null
+			this.spectrumWiring?.dispose()
+			this.spectrumWiring = null
 
 			// Close all WebSocket connections first
 			this.wsBroadcaster.closeAll()
@@ -369,6 +378,12 @@ export class ApiServer {
 		})
 
 		if (this.scanner) this.setupScannerBroadcasting(this.scanner)
+		// Spectrum frames, acks and snapshots bypass the scanner WsLimiter (Spectrum-profile amendment).
+		if (this.spectrum)
+			this.spectrumWiring = wireSpectrumBroadcasts(
+				this.spectrum,
+				this.wsBroadcaster,
+			)
 
 		// Source status with activity (same body as a GET /api/sources item)
 		this.sourceStatusPublisher.start()
@@ -803,6 +818,9 @@ export class ApiServer {
 		// Signal discovery scanner (spec § 12.1)
 		if (this.scanner) {
 			await this.app.register(scannerRoutes, { scanner: this.scanner })
+		}
+		if (this.spectrum) {
+			await this.app.register(spectrumRoutes, { spectrum: this.spectrum })
 		}
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
