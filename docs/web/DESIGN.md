@@ -242,13 +242,37 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-**Topic: right-click menus on signals and markers.** Scope to explore:
-- Right-click (and long-press) on a signal, a saved-frequency tag, the VFO, a band
-  edge and an Activity row.
-- Reuse the palette's command model so the menu and ⌘K offer the same actions
-  (Listen, Decode as…, Save, Show in Activity, Copy link, Set bandwidth to signal).
-- "Decode as…" for an unknown emission; what WaveKit can try on the fly.
-- First, read the canvas comments on the Command palette board.
+**Topic: refine the Map board.** Owner feedback on the first pass (2026-10-10): "looks
+great", but:
+
+1. **The mock is in the wrong place.** The station is in **Toulouse**, not Roscoff.
+   Re-base the map mock on Toulouse (≈ 43.60 N, 1.44 E): Garonne valley, Pyrenees to
+   the south, no coastline within AIS range, so the Vessels layer is honestly empty
+   (show the empty state). Realistic traffic: heavy ADS-B around Toulouse-Blagnac
+   (LFBO) including Airbus test and delivery flights, ATR flights from Francazal,
+   ACARS/VDL2, APRS around the city, Meshtastic in town. Coverage shaped by the
+   Pyrenees (short to the south) and the Massif Central. Use real-shaped geography,
+   not invented polygons; a mock is fine but it must be right where it is drawn.
+   The other boards' mock data (spectrum signals, Activity, tuned card: Roscoff, marine
+   ch 16, AIS) is Brittany-flavoured too; flag it and decide with the owner whether to
+   re-base everything on Toulouse.
+2. **Performance.** The mock redraws everything every frame (land polygons, gradients
+   per trail, text measuring). Cache the static layers (land, graticule, rings,
+   coverage) in an offscreen canvas, redraw them only on pan/zoom, cap the dynamic
+   layer to what moved, throttle to ~30 fps when idle. For the real build, note what
+   MapLibre gives (GPU layers, symbol collision, tile cache) and what we still own
+   (interpolation, hit testing, trail buffers).
+3. **Controls need a lot of refining.** Seen in the screenshot: the layer chips collide
+   with the Tuner island (the Aircraft chip hides under it); labels overlap each other
+   and place names (XK4521 over Lannion, ring labels under vessels); place labels get
+   clipped. Needed: label collision and priority, a layout that respects the islands
+   (layers move into a compact control or under the Tuner), clearer zoom/recentre
+   group, a calmer timeline (collapse to a chip until used?), keyboard and touch
+   (pinch) behaviour, and click targets for dense clusters.
+4. Then the open map questions: altitude ramp legibility, label density per zoom,
+   whether the timeline stays visible.
+
+Start by reading `canvas/Map.dc.html` and the "Map" entries in the decision log above.
 
 ## Handoff to the dev team (later)
 
