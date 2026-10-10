@@ -44,6 +44,7 @@ import type { PipelineHostMode } from "./pipeline-host.js"
 import {
 	SpectrumEngine,
 	USABLE_FRACTION,
+	buildPipelineConfig,
 	isScannerIqFormat,
 	type EngineEpoch,
 	type EngineStreamReason,
@@ -453,16 +454,27 @@ export class SpectrumService extends EventEmitter {
 		return this.request(clientId, { kind: "unsubscribe" })
 	}
 
-	/** Re-creates the pipeline when the lease holder's tuning differs from the running config (jobs only). */
+	/**
+	 * Re-creates the pipeline when the lease holder's tuning differs from the running config (jobs
+	 * only; never display demand, R2). Compared on the resolved config, so the defaults come back once
+	 * no holder remains (S1-B final review, finding 2).
+	 */
 	async refreshTuning(sourceId: string): Promise<void> {
 		const engine = this.engine(sourceId)
 		const cfg = engine?.config()
 		if (!engine || !cfg) return
-		const t = this.deps.tuning(sourceId)
+		const want = buildPipelineConfig(
+			sourceId,
+			engine.format,
+			cfg.sampleRateHz,
+			this.deps.settings(),
+			this.deps.tuning(sourceId),
+		)
 		const differs =
-			(t.fftSize !== null && t.fftSize !== cfg.fftSize) ||
-			(t.integrationMs !== null && t.integrationMs !== cfg.integrationMs) ||
-			t.thresholdDb !== cfg.thresholdDb
+			want.fftSize !== cfg.fftSize ||
+			want.integrationMs !== cfg.integrationMs ||
+			want.thresholdDb !== cfg.thresholdDb ||
+			want.faTargetPerMhzMin !== cfg.faTargetPerMhzMin
 		if (differs) await engine.reconfigure()
 	}
 

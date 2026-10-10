@@ -75,8 +75,8 @@ function nearestHop(plan: HopPlan, centreHz: number): number {
 export class SweepScheduler {
 	private plan: HopPlan
 	private spec: NormalisedJobSpec
-	private readonly blockSamples: number
-	private readonly sampleRateHz: number
+	private blockSamples: number
+	private sampleRateHz: number
 	private readonly now: () => number
 	private readonly probeStartMs: number
 	private readonly minSurfaceBlocks: number
@@ -283,6 +283,19 @@ export class SweepScheduler {
 		if (this.hold.mode === "hang")
 			return this.leaveHop([{ type: "stop-probes" }])
 		return []
+	}
+
+	/**
+	 * The engine was reconfigured (another lease holder's or the defaults' integration, FFT size or
+	 * rate; S1-B final review, finding 2). The next own epoch's `restartVisit` sizes the dwell with it.
+	 */
+	setBlockGeometry(blockSamples: number, sampleRateHz: number): void {
+		this.blockSamples = blockSamples
+		this.sampleRateHz = sampleRateHz
+	}
+
+	blockGeometry(): { blockSamples: number; sampleRateHz: number } {
+		return { blockSamples: this.blockSamples, sampleRateHz: this.sampleRateHz }
 	}
 
 	replan(plan: HopPlan, spec: NormalisedJobSpec): void {

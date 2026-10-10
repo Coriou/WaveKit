@@ -2061,6 +2061,7 @@ export class ScannerService extends EventEmitter {
 			openEngine: sourceId => this.openEngine(sourceId, record.id),
 			closeEngine: sourceId => this.closeEngine(sourceId, record.id),
 			engine: sourceId => this.spectrum.engine(sourceId),
+			refreshTuning: sourceId => this.spectrum.refreshTuning(sourceId),
 			activitySeed: (() => {
 				const seed = this.spectrum.activitySeed(record.spec.sourceId)
 				return (hop: Hop) => seed(hop.covered)

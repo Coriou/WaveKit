@@ -225,6 +225,11 @@ export interface JobRunnerDeps {
 	openEngine: (sourceId: string) => Promise<SpectrumEngine>
 	closeEngine: (sourceId: string) => Promise<void>
 	engine: (sourceId: string) => SpectrumEngine | undefined
+	/**
+	 * Re-applies the lease holder's engine tuning (the defaults with no holder) to an open engine
+	 * (`SpectrumService.refreshTuning`; S1-B final review, finding 2).
+	 */
+	refreshTuning: (sourceId: string) => Promise<void>
 	/** Sweep revisit seed from the occupancy history (§ 10.2, Task 37a); none = no seeding. */
 	activitySeed?: (hop: Hop) => number
 	/** Impact of this job's source excluding the job itself (`arbiter.impact(sourceId, spec, record.id)`). */
@@ -268,6 +273,19 @@ const LOST_EVENTS: ReadonlySet<JobEvent["type"]> = new Set([
 
 function inRange(hz: number, r: { startHz: number; endHz: number }): boolean {
 	return hz >= r.startHz && hz <= r.endHz
+}
+
+/** Samples per detection block of an engine config: whole FFT frames per integration. */
+function blockSamplesOf(cfg: {
+	integrationMs: number
+	sampleRateHz: number
+	fftSize: number
+}): number {
+	const frames = Math.max(
+		1,
+		Math.round((cfg.integrationMs * cfg.sampleRateHz) / (cfg.fftSize * 1000)),
+	)
+	return frames * cfg.fftSize
 }
 
 export class JobRunner implements JobDriver {
@@ -334,8 +352,9 @@ export class JobRunner implements JobDriver {
 	}
 
 	leaseLost(lease: Lease, reason: LeaseLostReason): Promise<void> {
-		const run = this.chain.then(() => {
-			if (this.lease === lease) this.lease = null
+		const run = this.chain.then(async () => {
+			const held = this.lease === lease
+			if (held) this.lease = null
 			const type =
 				this.record.state === "starting" && reason !== "preempted-job"
 					? "tuner-error"
@@ -344,7 +363,13 @@ export class JobRunner implements JobDriver {
 						: reason === "preempted-relay"
 							? "relay-external"
 							: "preempted-job"
-			return this.apply({ type })
+			try {
+				await this.apply({ type })
+			} finally {
+				// Finding 2: no holder after an operator or relay write: the engine returns to the defaults
+				// (a job that took the lease over has re-applied its own tuning).
+				if (held && reason !== "preempted-job") await this.refreshTuning()
+			}
 		})
 		this.chain = run.catch(() => undefined)
 		return run
@@ -448,6 +473,8 @@ export class JobRunner implements JobDriver {
 		this.epochOwn = own && epoch.tuningTrust === "commanded"
 		if (this.epochOwn && epoch.startSample !== null && this.scheduler) {
 			this.resendStream = null
+			// A reconfigured engine (holder change, PATCH, settings) blocks differently: dwell follows it.
+			this.syncGeometry()
 			this.exec(this.scheduler.onEpochStarted(epoch.startSample))
 			return
 		}
@@ -698,6 +725,7 @@ export class JobRunner implements JobDriver {
 		},
 	): Promise<void> {
 		const { record } = this
+		const released = !before.lease && this.lease !== null
 		if (!before.lease && this.lease) {
 			const lease = this.lease
 			this.lease = null
@@ -724,6 +752,7 @@ export class JobRunner implements JobDriver {
 					this.log.warn({ err }, "Closing the engine on rollback failed"),
 				)
 		}
+		if (released) await this.refreshTuning()
 		record.state = prev.state
 		if (prev.reason === undefined) delete record.reason
 		else record.reason = prev.reason
@@ -751,6 +780,7 @@ export class JobRunner implements JobDriver {
 
 	private async apply(e: JobEvent): Promise<void> {
 		const { record } = this
+		const heldBefore = this.lease !== null
 		// The arbiter has already revoked the lease, whatever this job's state: never keep a stale one.
 		if (LOST_EVENTS.has(e.type)) this.lease = null
 		const from =
@@ -805,6 +835,9 @@ export class JobRunner implements JobDriver {
 				)
 			}
 			this.lease = r.lease
+			// Finding 2: an open engine takes the new holder's tuning before the hop is re-sent (the
+			// reconfigure starts a new stream, which would drop a hop already in flight).
+			if (this.engineOpened) await this.refreshTuning()
 		}
 		const now = this.deps.now()
 		record.state = t.state
@@ -828,8 +861,27 @@ export class JobRunner implements JobDriver {
 			record.endedAt = now
 			await this.teardown()
 		}
+		// Finding 2: the remaining consumers return to the defaults (or the next holder's tuning).
+		if (heldBefore && this.lease === null) await this.refreshTuning()
 		this.deps.persist()
 		this.deps.changed("state")
+	}
+
+	/** Finding 2: engine tuning follows the lease holder, the scheduler's block geometry the engine. Never rejects. */
+	private async refreshTuning(): Promise<void> {
+		if (!this.sweep) return
+		await this.deps
+			.refreshTuning(this.sourceId)
+			.catch((err: unknown) =>
+				this.log.warn({ err }, "Re-applying the engine tuning failed"),
+			)
+		this.syncGeometry()
+	}
+
+	private syncGeometry(): void {
+		const cfg = this.deps.engine(this.sourceId)?.config()
+		if (this.scheduler && cfg)
+			this.scheduler.setBlockGeometry(blockSamplesOf(cfg), cfg.sampleRateHz)
 	}
 
 	/** Resume refused (another job holds the lease): `paused(resume-blocked)`, as a grown impact would. */
@@ -922,12 +974,8 @@ export class JobRunner implements JobDriver {
 				"Spectrum engine has no pipeline",
 				"SCANNER_ENGINE_MISSING",
 			)
-		const frames = Math.max(
-			1,
-			Math.round((cfg.integrationMs * cfg.sampleRateHz) / (cfg.fftSize * 1000)),
-		)
 		this.scheduler = new SweepScheduler(this.record.plan, this.record.spec, {
-			blockSamples: frames * cfg.fftSize,
+			blockSamples: blockSamplesOf(cfg),
 			sampleRateHz: cfg.sampleRateHz,
 			now: this.deps.now,
 			probeStartMs: this.deps.probes.startLatencyMs("dsd-fme", "offset"),

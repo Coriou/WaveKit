@@ -216,13 +216,14 @@ function runnerHarness() {
 		unrestorable: [],
 		counts: { observations: 0, transients: 0 },
 	}
+	const engineCfg = {
+		integrationMs: 50,
+		sampleRateHz: 1_024_000,
+		fftSize: 2048,
+	}
 	const engine = {
 		currentEpoch: () => epochAt(0, 446_100_000, { settleMode: "none" }),
-		config: () => ({
-			integrationMs: 50,
-			sampleRateHz: 1_024_000,
-			fftSize: 2048,
-		}),
+		config: () => ({ ...engineCfg }),
 		stats: () => null,
 	}
 	const runner = new JobRunner({
@@ -244,6 +245,7 @@ function runnerHarness() {
 		openEngine: () => Promise.resolve(engine as never),
 		closeEngine: () => Promise.resolve(),
 		engine: () => engine as never,
+		refreshTuning: () => Promise.resolve(),
 		impact: () => impact(),
 		undecoded: () => undefined,
 		discoveryCounts: () => ({
@@ -258,7 +260,7 @@ function runnerHarness() {
 		logger: pino({ level: "silent" }),
 		now: () => 0,
 	})
-	return { runner, arbiter, record }
+	return { runner, arbiter, record, engineCfg }
 }
 
 describe("JobRunner own epochs", () => {
@@ -385,6 +387,30 @@ describe("JobRunner own epochs", () => {
 		await flush()
 		expect(record.state).toBe("running")
 		await runner.idle()
+	})
+})
+
+describe("JobRunner block geometry (S1-B final review, finding 2)", () => {
+	it("sizes the dwell with the engine's current block on the next own epoch after a reconfigure", async () => {
+		const { runner, arbiter, engineCfg } = runnerHarness()
+		const blocks = (): number =>
+			(
+				runner as unknown as {
+					scheduler: { blockGeometry(): { blockSamples: number } }
+				}
+			).scheduler.blockGeometry().blockSamples
+		await runner.start()
+		await flush()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await flush()
+		expect(blocks()).toBe(25 * 2048)
+		// Another holder's (or the defaults') integration: the engine blocks 100 ms from now on.
+		engineCfg.integrationMs = 100
+		runner.onEpochStarted(epochAt(11, HOP0))
+		await flush()
+		expect(blocks()).toBe(50 * 2048)
+		await runner.dispose()
 	})
 })
 
