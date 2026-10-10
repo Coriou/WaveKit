@@ -189,4 +189,62 @@ describe("AmbientEvidence", () => {
 		})
 		ambient.stop()
 	})
+
+	it("keeps an accepted ambient capcode's evidence flowing for the whole epoch", () => {
+		const decoders = new EventEmitter() as EventEmitter &
+			Record<string, unknown>
+		decoders["getAllStatus"] = () => [
+			{
+				id: "pager-cfg",
+				type: "multimon-ng",
+				sourceId: "rtl",
+				owner: "config",
+			},
+		]
+		decoders["getDecoder"] = () => undefined
+		const clock = { now: 50_000 }
+		let epoch = 3
+		const ambient = new AmbientEvidence({
+			decoders: decoders as never,
+			targetOf: id =>
+				id === "pager-cfg" ? { sourceId: "rtl", hz: 153_350_000 } : null,
+			epochOf: () => epoch,
+			logger: pino({ level: "silent" }),
+			now: () => clock.now,
+		})
+		const got: AmbientEvidenceEvent[] = []
+		ambient.on("evidence", (e: AmbientEvidenceEvent) => got.push(e))
+		ambient.start()
+		const page = (address: number) =>
+			decoders.emit("decoder:output", "pager-cfg", {
+				type: "message",
+				timestamp: new Date(clock.now),
+				data: {
+					protocol: "POCSAG1200",
+					address,
+					function: 0,
+					messageType: "alpha",
+					message: "",
+				},
+			})
+		page(1234567)
+		clock.now += 1000
+		page(1234567)
+		expect(got).toHaveLength(1)
+		clock.now += 5 * 60_000
+		page(1234567)
+		expect(got).toHaveLength(2)
+		expect(got[1]?.ev).toMatchObject({
+			epoch: 3,
+			identity: { kind: "pocsag-capcode", value: "1234567" },
+		})
+		// a never-accepted capcode decoded once: nothing
+		page(7654321)
+		expect(got).toHaveLength(2)
+		// a new epoch clears the accepted set
+		epoch = 4
+		page(1234567)
+		expect(got).toHaveLength(2)
+		ambient.stop()
+	})
 })

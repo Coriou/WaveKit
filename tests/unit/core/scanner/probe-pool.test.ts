@@ -678,4 +678,65 @@ describe("ProbePool", () => {
 		expect(h.engine.listenerCount("stream")).toBe(0)
 		expect(replacement.listenerCount("stream")).toBe(1)
 	})
+
+	it("keeps an accepted capcode's evidence flowing after its window ended, within the probe", async () => {
+		const h = poolHarness()
+		h.pool.request(probeRequest({ cls: "fsk2-wide", holdMs: 60_000 }))
+		await flushAsync()
+		const decoderId = h.pool.status()[0]!.decoderId
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		h.clock.now += 1000
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		expect(h.evidence).toHaveLength(1)
+		h.clock.now += 5 * 60_000
+		h.decoders.emitOutput(decoderId, pocsag(1234567, h.clock.now))
+		expect(h.evidence).toHaveLength(2)
+		expect(h.evidence[1]!.ev.identity).toEqual({
+			kind: "pocsag-capcode",
+			value: "1234567",
+		})
+		// a never-accepted capcode decoded once: nothing
+		h.decoders.emitOutput(decoderId, pocsag(7654321, h.clock.now))
+		expect(h.evidence).toHaveLength(2)
+	})
+
+	it("never admits a request built against an engine instance that a lazy watch just replaced", async () => {
+		const a = new FakeEngineView()
+		const engines = [a]
+		// room for two probes, so only the replacement can keep the queued one from starting
+		const settings = testSettings(s => {
+			s.maxProbes.offset = 2
+			s.cpuBudgetCores = 4
+		})
+		const h = poolHarness({ engines, settings })
+		const first = h.pool.request(probeRequest({ trackId: "t1" }))
+		if (!("started" in first)) throw new Error("not started")
+		h.cpu.normalisedPercent = 95
+		expect(h.pool.request(probeRequest({ trackId: "t2" }))).toEqual({
+			deferred: "cpu",
+		})
+		h.cpu.normalisedPercent = null
+		await flushAsync()
+		// the source's engine is replaced without watchEngine; the new instance's epochs restart at 1
+		const b = new FakeEngineView()
+		engines[0] = b
+		h.pool.pump()
+		await flushAsync()
+		await flushAsync()
+		expect(h.pool.status()).toEqual([])
+		expect(h.decoders.created.size).toBe(0)
+		expect(a.tapCount).toBe(0)
+		expect(b.tapCount).toBe(0)
+		// request() path: the request that discovers the replacement is stale too
+		const c = new FakeEngineView()
+		engines[0] = c
+		expect(h.pool.request(probeRequest({ trackId: "t3" }))).toEqual({
+			deferred: "stale-epoch",
+		})
+		// once the new instance is watched, a fresh request starts on it
+		expect(h.pool.request(probeRequest({ trackId: "t3" }))).toHaveProperty(
+			"started",
+		)
+		expect(c.tapCount).toBe(1)
+	})
 })

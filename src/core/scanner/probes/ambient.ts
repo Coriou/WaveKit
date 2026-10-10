@@ -19,7 +19,6 @@ import {
 } from "./confirm/double-match.js"
 import { interpretDirewolf } from "./confirm/direwolf.js"
 import { interpretDsdFme, toDsdFmeScannerEvent } from "./confirm/dsd-fme.js"
-import { interpretMultimon } from "./confirm/multimon.js"
 import { interpretRtl433 } from "./confirm/rtl433.js"
 import { CapcodeWindows, MULTIMON_HOLD_MS } from "./probe-pool.js"
 
@@ -47,10 +46,10 @@ export interface AmbientDeps {
 	now?: () => number
 }
 
-/** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode window. */
+/** Acceptance memory of one decoder for one epoch; multimon keeps it per capcode (interp null). */
 interface AmbientState {
 	epoch: number
-	interp: InterpreterState
+	interp: InterpreterState | null
 	capcodes: CapcodeWindows | null
 }
 
@@ -136,28 +135,26 @@ export class AmbientEvidence extends EventEmitter {
 					decoderId,
 					...(target.nxdn !== undefined ? { nxdn: target.nxdn } : {}),
 				})
+			const multimon = type === "multimon-ng"
 			entry = {
 				epoch,
-				interp: create(),
-				capcodes:
-					type === "multimon-ng"
-						? new CapcodeWindows(MULTIMON_HOLD_MS, create)
-						: null,
+				interp: multimon ? null : create(),
+				capcodes: multimon
+					? new CapcodeWindows(MULTIMON_HOLD_MS, create)
+					: null,
 			}
 			this.states.set(decoderId, entry)
 		}
-		const state = entry.capcodes
-			? entry.capcodes.stateFor(input as DecoderOutputLike, this.now())
-			: entry.interp
-		if (!state) return
+		const state = entry.interp
 		let evs: DecodeEvidence[] = []
-		if (type === "dsd-fme")
+		if (entry.capcodes)
+			evs = entry.capcodes.interpret(input as DecoderOutputLike, this.now())
+		else if (state === null) return
+		else if (type === "dsd-fme")
 			evs = interpretDsdFme(
 				input as Parameters<typeof interpretDsdFme>[0],
 				state,
 			)
-		else if (type === "multimon-ng")
-			evs = interpretMultimon(input as DecoderOutputLike, state)
 		else if (type === "direwolf")
 			evs = interpretDirewolf(input as DecoderOutputLike, state)
 		else if (type === "rtl433")

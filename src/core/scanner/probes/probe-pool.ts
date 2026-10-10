@@ -428,23 +428,44 @@ function multimonCapcode(out: DecoderOutputLike): string | null {
  * capcode within the hold"): a capcode's first decode opens
  * `[start − 2 s, start + holdMs + 2 s]`; a decode inside it shares that
  * capcode's interpreter state, a decode outside it starts a fresh state and
- * window. Other capcodes never touch a capcode's window.
+ * window. Other capcodes never touch a capcode's window. Once a capcode is
+ * accepted its state is kept for the instance's life (one probe, or one
+ * ambient decoder epoch), so every later decode is evidence again
+ * (confirm/multimon.ts).
  */
 export class CapcodeWindows {
 	private readonly windows = new Map<
 		string,
 		{ interp: InterpreterState; windowStart: number }
 	>()
+	/** Accepted capcodes and their states, oldest first. */
+	private readonly accepted = new Map<string, InterpreterState>()
 
 	constructor(
 		private readonly holdMs: number,
 		private readonly create: () => InterpreterState,
 	) {}
 
-	/** Interpreter state for this output's capcode at `at`; null when the output names no capcode. */
-	stateFor(out: DecoderOutputLike, at: number): InterpreterState | null {
+	/** Evidence of one multimon output decoded at `at` (none when it names no capcode). */
+	interpret(out: DecoderOutputLike, at: number): DecodeEvidence[] {
 		const key = multimonCapcode(out)
-		if (key === null) return null
+		if (key === null) return []
+		const kept = this.accepted.get(key)
+		if (kept) return interpretMultimon(out, kept)
+		const state = this.windowState(key, at)
+		const evs = interpretMultimon(out, state)
+		if (evs.some(ev => ev.identity !== undefined)) {
+			this.windows.delete(key)
+			this.accepted.set(key, state)
+			if (this.accepted.size > MAX_CAPCODE_WINDOWS) {
+				const oldest = this.accepted.keys().next()
+				if (oldest.done !== true) this.accepted.delete(oldest.value)
+			}
+		}
+		return evs
+	}
+
+	private windowState(key: string, at: number): InterpreterState {
 		let w = this.windows.get(key)
 		if (
 			w &&
@@ -646,9 +667,14 @@ export class ProbePool extends EventEmitter {
 		this.watch(sourceId, engine)
 	}
 
-	private watch(sourceId: string, engine: ProbeEngineView): StreamWatch {
+	/** `replaced`: this call ended the watch of another engine instance for the source. */
+	private watch(
+		sourceId: string,
+		engine: ProbeEngineView,
+	): { watch: StreamWatch; replaced: boolean } {
 		let watch = this.watches.get(sourceId)
-		if (watch?.engine === engine) return watch
+		if (watch?.engine === engine) return { watch, replaced: false }
+		const replaced = watch !== undefined
 		if (watch) {
 			watch.off()
 			// Its probes read the replaced engine's ring, and its "stop" may never reach us now.
@@ -664,7 +690,7 @@ export class ProbePool extends EventEmitter {
 			off: () => engine.off("stream", onStream),
 		}
 		this.watches.set(sourceId, watch)
-		return watch
+		return { watch, replaced }
 	}
 
 	/**
@@ -678,7 +704,9 @@ export class ProbePool extends EventEmitter {
 		engine: ProbeEngineView,
 		epoch: EngineEpoch,
 	): boolean {
-		const watch = this.watch(sourceId, engine)
+		const { watch, replaced } = this.watch(sourceId, engine)
+		// A request in hand was built against the replaced engine: its epoch and sample indices are another engine's.
+		if (replaced) return false
 		return (
 			!watch.stopped && (watch.latest === null || watch.latest <= epoch.stream)
 		)
@@ -790,6 +818,8 @@ export class ProbePool extends EventEmitter {
 	pump(): void {
 		if (this.destroyed) return
 		for (const req of [...this.queue]) {
+			// Dropped by an earlier iteration (an engine replacement ends its source's queue).
+			if (!this.queue.includes(req)) continue
 			const engine = this.deps.engines(req.sourceId)
 			if (
 				!engine ||
@@ -1135,8 +1165,8 @@ export class ProbePool extends EventEmitter {
 				return
 			}
 			case "multimon-ng": {
-				const state = rec.capcodes?.stateFor(out, this.now())
-				if (state) this.deliver(rec, interpretMultimon(out, state))
+				if (rec.capcodes)
+					this.deliver(rec, rec.capcodes.interpret(out, this.now()))
 				return
 			}
 			case "direwolf":
