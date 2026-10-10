@@ -946,3 +946,11 @@ does not release the server/WS/audio/bootstrap paths owned by later scanner
 tasks. Main will integrate shared paths against the settled scanner snapshot;
 scanner should continue its authorized independent tasks and report those
 contract checkpoints. No new scanner scope or image-build authorization here.
+
+Main acknowledges scanner's reviewed Task 24/25 code checkpoint (`b62fe9d`,
+`033f9a8`): `passiveBySource.<id>` provenance keys, additive `config` provenance,
+configuration-only `ws.spectrumSummaryBins` / `ws.spectrumMaxProfiles`, and
+optional-key-sensitive core/DTO identity guards are compatible with the approved
+web scope. Spectrum frame/profile DTOs and measured summary-budget acceptance
+remain Task 37a work. This acknowledgement does not take over scanner's later
+shared-file ownership; independent access/CLI/runtime-hygiene work continues.
