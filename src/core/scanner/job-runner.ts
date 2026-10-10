@@ -796,6 +796,27 @@ export class JobRunner implements JobDriver {
 				409,
 			)
 		}
+		// S1-B final review, finding 8: a lease-less operator resume re-takes the tuner from the
+		// operator, so it needs the same consent as the auto-resume of a preempted job (which also runs
+		// only on a free lease; a job holding it refuses the acquire below: resume-blocked).
+		if (
+			this.sweep &&
+			e.type === "resume" &&
+			!e.takeover &&
+			record.state === "paused" &&
+			record.reason === "operator" &&
+			!leaseHeld &&
+			!this.deps.arbiter.holder(this.sourceId)
+		) {
+			const impact = this.deps.impact()
+			if (impactGrew(impact, record.consentedImpact))
+				throw new ScannerApiError(
+					"Resuming disturbs consumers started since the operator took the tuner; resend with takeover",
+					"SCANNER_TAKEOVER_REQUIRED",
+					409,
+					{ impact },
+				)
+		}
 		const actions = actionsForMode(record.spec.mode, t.actions)
 		const before = {
 			lease: this.lease !== null,
@@ -825,13 +846,17 @@ export class JobRunner implements JobDriver {
 					!TRANSIENT_REFUSALS.has(r.detail)
 				)
 					await this.blockResume()
+				const details = {
+					...(r.reason !== undefined ? { reason: r.reason } : {}),
+					...(r.holderJobId !== undefined
+						? { holderJobId: r.holderJobId }
+						: {}),
+				}
 				throw new ScannerApiError(
 					r.detail,
 					r.code,
 					409,
-					r.holderJobId !== undefined
-						? { holderJobId: r.holderJobId }
-						: undefined,
+					Object.keys(details).length > 0 ? details : undefined,
 				)
 			}
 			this.lease = r.lease

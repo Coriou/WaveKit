@@ -15,6 +15,7 @@ export type JobEvent =
 	| { type: "rest-write" }
 	| { type: "relay-external" }
 	| { type: "preempted-job" }
+	| { type: "preemptor-lost" }
 	| { type: "source-down" }
 	| { type: "source-up" }
 	| { type: "preemptor-idle"; impactGrew: boolean }
@@ -185,6 +186,12 @@ export function transition(
 			// the arbiter hands the lease over from a paused holder too; probes are already stopped
 			return pausedFor("operator") || pausedFor("source-down")
 				? to("paused", ["release-lease"], "preempted-job")
+				: INVALID
+		case "preemptor-lost":
+			// The job that took the lease lost it to an operator or relay write (S1-B final review,
+			// finding 3): a waiter keeps waiting but frees the configured decoders; preemptor-idle re-holds.
+			return pausedFor("preempted-job")
+				? to("paused", ["release-decoders"], "preempted-job")
 				: INVALID
 		case "source-down":
 			return active ? to("paused", ["stop-probes"], "source-down") : INVALID

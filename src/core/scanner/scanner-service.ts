@@ -931,7 +931,7 @@ export class ScannerService extends EventEmitter {
 				`A sweep (scanner job ${holder.jobId}) holds this source's tuner; identify works in a still window`,
 				"SCANNER_SOURCE_BUSY",
 				409,
-				{ holderJobId: holder.jobId },
+				{ reason: "held", holderJobId: holder.jobId },
 			)
 		}
 		const target = identify.target
@@ -1917,6 +1917,24 @@ export class ScannerService extends EventEmitter {
 		lease: Lease,
 		reason: LeaseLostReason,
 	): void => {
+		// S1-B final review, finding 3: the operator or a relay owns the tuner now; jobs waiting for the
+		// preemptor's lease free the configured decoders until the lease comes back.
+		if (reason !== "preempted-job") {
+			for (const d of this.driversOn(lease.sourceId)) {
+				if (
+					d.record.id === lease.jobId ||
+					d.record.state !== "paused" ||
+					d.record.reason !== "preempted-job"
+				)
+					continue
+				d.dispatch({ type: "preemptor-lost" }).catch((err: unknown) =>
+					this.log.debug(
+						{ err, jobId: d.record.id },
+						"preemptor-lost could not be applied",
+					),
+				)
+			}
+		}
 		const driver = this.drivers.get(lease.jobId)
 		if (!driver) return
 		// An operator or relay write is not handed to a waiting job at once (operator-idle tick).
@@ -2274,7 +2292,7 @@ export class ScannerService extends EventEmitter {
 						`Lease held by scanner job ${holder.jobId}`,
 						"SCANNER_SOURCE_BUSY",
 						409,
-						{ holderJobId: holder.jobId },
+						{ reason: "held", holderJobId: holder.jobId },
 					)
 				const best = chooseLeaseHolder(
 					[...this.jobs.values()]
@@ -2295,7 +2313,7 @@ export class ScannerService extends EventEmitter {
 						`Scanner job ${best} waits for the lease with a better claim`,
 						"SCANNER_SOURCE_BUSY",
 						409,
-						{ waiter: best },
+						{ reason: "held", waiter: best },
 					)
 			}
 			await this.requireDriver(record.id).dispatch({ type: "resume", takeover })
@@ -2572,6 +2590,7 @@ export class ScannerService extends EventEmitter {
 		const busy = errors.find(i => i.code === "source-busy")
 		if (busy)
 			throw new ScannerApiError(busy.message, "SCANNER_SOURCE_BUSY", 409, {
+				reason: "relay",
 				issues,
 			})
 		const control = errors.find(i => i.code === "no-tuner-control")
@@ -2693,7 +2712,9 @@ export class ScannerService extends EventEmitter {
 		}
 	}
 
+	/** A deleted (or replaced) job emits nothing more (S1-B final review, finding 4). */
 	private emitJob(record: JobRecord): void {
+		if (this.jobs.get(record.id) !== record) return
 		this.emit("job", this.toDto(record))
 	}
 

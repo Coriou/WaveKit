@@ -35,10 +35,23 @@ export interface Lease {
 	changedFields: Set<keyof TunerFieldValues>
 }
 
+/**
+ * API `details.reason` of every `SCANNER_SOURCE_BUSY` (S1-B final review, finding 4). The first three
+ * clear by themselves (worth a retry); `relay` and `held` last until the relay or the holder lets go.
+ */
+export type SourceBusyReason =
+	| "releasing"
+	| "recovery-pending"
+	| "holder-starting"
+	| "relay"
+	| "held"
+
 export interface AcquireRefusal {
 	ok: false
 	code: "SCANNER_SOURCE_BUSY" | "SCANNER_NO_TUNER_CONTROL"
 	detail: string
+	/** Set on every `SCANNER_SOURCE_BUSY` (API `details.reason`). */
+	reason?: SourceBusyReason
 	/** The job holding the lease, when one does (API `details.holderJobId`). */
 	holderJobId?: string
 }
@@ -159,11 +172,17 @@ export class TunerArbiter extends EventEmitter {
 				ok: false,
 				code: "SCANNER_SOURCE_BUSY",
 				detail: "A tuner relay client controls the tuner",
+				reason: "relay",
 			}
 		}
 		if (this.releasing.has(sourceId)) {
 			// The restore of the previous lease is still writing: a snapshot now would catch its last hop.
-			return { ok: false, code: "SCANNER_SOURCE_BUSY", detail: "releasing" }
+			return {
+				ok: false,
+				code: "SCANNER_SOURCE_BUSY",
+				detail: "releasing",
+				reason: "releasing",
+			}
 		}
 		const current = this.leases.get(sourceId)
 		if (current?.jobId === jobId) return { ok: true, lease: current }
@@ -173,6 +192,7 @@ export class TunerArbiter extends EventEmitter {
 					ok: false,
 					code: "SCANNER_SOURCE_BUSY",
 					detail: `Lease held by scanner job ${current.jobId}`,
+					reason: "held",
 					holderJobId: current.jobId,
 				}
 			}
@@ -181,6 +201,7 @@ export class TunerArbiter extends EventEmitter {
 					ok: false,
 					code: "SCANNER_SOURCE_BUSY",
 					detail: "holder is starting",
+					reason: "holder-starting",
 					holderJobId: current.jobId,
 				}
 			}
@@ -207,6 +228,7 @@ export class TunerArbiter extends EventEmitter {
 				ok: false,
 				code: "SCANNER_SOURCE_BUSY",
 				detail: "recovery pending",
+				reason: "recovery-pending",
 			}
 		}
 		if (pending)

@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import type { ScanJob } from "@wavekit/api-types"
+import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
 	CENTRE,
@@ -185,6 +186,142 @@ describe("ScannerService (S1-B final review)", () => {
 			fftSize: defaults.fftSize,
 			faTargetPerMhzMin: defaults.faTargetPerMhzMin,
 		})
+		await h.service.stop()
+	})
+
+	it("frees a preempted-job waiter's decoders when the preemptor loses the lease to the operator (finding 3)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const a = await h.service.createJob(sweep(30))
+		await untilRunning(h, a.id)
+		const b = await h.service.createJob(sweep(60))
+		await untilRunning(h, b.id, 40)
+		expect(h.service.getJob(a.id)?.reason).toBe("preempted-job")
+		expect([...(h.decoders.held.get("rtl") ?? [])].sort()).toEqual(
+			[a.id, b.id].sort(),
+		)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(h.service.getJob(b.id)?.reason).toBe("preempted-operator")
+		expect(h.service.getJob(a.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "preempted-job",
+		})
+		// No sweep holds the tuner and the operator owns it: configured decoders run again.
+		expect(h.decoders.isSourceHeld("rtl")).toBe(false)
+		// The preemptor ends: the lease goes back to A, which holds the decoders again.
+		await h.service.cancelJob(b.id)
+		await settled(h.service)
+		expect(h.service.getJob(a.id)?.state).toBe("running")
+		expect([...(h.decoders.held.get("rtl") ?? [])]).toEqual([a.id])
+		await h.service.stop()
+	})
+
+	it("answers every SCANNER_SOURCE_BUSY with details.reason (finding 4)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const high = await h.service.createJob(sweep(60))
+		await untilRunning(h, high.id)
+		await expect(h.service.createJob(sweep(30))).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_SOURCE_BUSY",
+			details: { reason: "held", holderJobId: high.id },
+		})
+		await expect(
+			h.service.identify({
+				sourceId: "rtl",
+				target: { frequencyHz: 450_100_000 },
+			}),
+		).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			details: { reason: "held", holderJobId: high.id },
+		})
+		// A relay client: the preview refuses.
+		h.tuner.setControl("rtl", "external")
+		await settled(h.service)
+		await expect(h.service.createJob(sweep(90))).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			details: { reason: "relay" },
+		})
+		h.tuner.setControl("rtl", "internal")
+		await h.service.stop()
+		// A higher-priority sweep while the holder is still starting (markers and no samples).
+		const m = serviceHarness({
+			patch: s => {
+				s.passive.enabled = false
+				s.sweep.markers = true
+			},
+		})
+		await m.service.start()
+		const starting = await m.service.createJob(sweep(40))
+		await settled(m.service)
+		expect(m.service.getJob(starting.id)?.state).toBe("starting")
+		await expect(m.service.createJob(sweep(90))).rejects.toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			details: { reason: "holder-starting", holderJobId: starting.id },
+		})
+		await m.service.stop()
+	})
+
+	it("emits nothing more for a job deleted before its teardown finished (finding 4)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		// The caps never show the restored tuning: the teardown waits for them (bounded, 1 s).
+		h.tuner.setFrequency = (sourceId, hz, opts) =>
+			ArbiterFakeTuner.prototype.setFrequency.call(h.tuner, sourceId, hz, opts)
+		const events: string[] = []
+		h.service.on("job", (j: ScanJob) => events.push(`${j.id}:${j.state}`))
+		const cancelled = h.service.cancelJob(job.id)
+		await vi.waitFor(
+			() => expect(h.service.getJob(job.id)?.state).toBe("cancelled"),
+			WAIT,
+		)
+		h.service.deleteJob(job.id)
+		const deletedAt = events.length
+		await cancelled
+		await settled(h.service)
+		expect(events.slice(deletedAt)).toEqual([])
+		await h.service.stop()
+	})
+
+	it("needs takeover to resume a lease-less operator pause when the impact grew (finding 8)", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob(sweep(50))
+		await untilRunning(h, job.id)
+		await h.service.pauseJob(job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "operator",
+		})
+		// The operator started a decoder on the source after taking the tuner.
+		h.decoders.getAllStatus = () =>
+			[
+				{
+					id: "dmr-1",
+					sourceId: "rtl",
+					running: true,
+					suspended: false,
+					startMode: "auto",
+				},
+			] as never
+		await expect(
+			h.service.resumeJob(job.id, { takeover: false }),
+		).rejects.toMatchObject({
+			statusCode: 409,
+			code: "SCANNER_TAKEOVER_REQUIRED",
+			details: { impact: { runningDecoders: ["dmr-1"] } },
+		})
+		expect(h.service.getJob(job.id)).toMatchObject<Partial<ScanJob>>({
+			state: "paused",
+			reason: "operator",
+		})
+		await h.service.resumeJob(job.id, { takeover: true })
+		expect(h.service.getJob(job.id)?.state).toBe("running")
 		await h.service.stop()
 	})
 })

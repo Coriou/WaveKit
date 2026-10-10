@@ -364,6 +364,7 @@ describe("TunerArbiter lease discipline", () => {
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
 			detail: "Lease held by scanner job a",
+			reason: "held",
 			holderJobId: "a",
 		})
 		const b = h.arbiter.acquire("b", "rtl", 60)
@@ -395,6 +396,7 @@ describe("TunerArbiter lease discipline", () => {
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
 			detail: "holder is starting",
+			reason: "holder-starting",
 			holderJobId: "a",
 		})
 		expect(asked).toEqual(["a"])
@@ -532,6 +534,7 @@ describe("TunerArbiter lease discipline", () => {
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
 			detail: "recovery pending",
+			reason: "recovery-pending",
 		})
 		await new Promise(resolve => setImmediate(resolve))
 		expect(recovered).toEqual([])
@@ -573,6 +576,7 @@ describe("TunerArbiter lease discipline", () => {
 				ok: false,
 				code: "SCANNER_SOURCE_BUSY",
 				detail: "recovery pending",
+				reason: "recovery-pending",
 			})
 			// Nor does a return of control retry the recovery on a removed source.
 			h.tuner.setControl("rtl", "external")
@@ -723,6 +727,45 @@ describe("TunerArbiter lease discipline", () => {
 		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
 	})
 
+	it("names a machine-readable reason on every SCANNER_SOURCE_BUSY refusal (S1-B final review, finding 4)", async () => {
+		let starting = false
+		const h = harness([], { canHandOver: () => !starting })
+		const a = h.arbiter.acquire("a", "rtl", 50)
+		if (!a.ok) throw new Error("acquire failed")
+		expect(h.arbiter.acquire("b", "rtl", 40)).toMatchObject({
+			code: "SCANNER_SOURCE_BUSY",
+			reason: "held",
+			holderJobId: "a",
+		})
+		starting = true
+		expect(h.arbiter.acquire("b", "rtl", 60)).toMatchObject({
+			reason: "holder-starting",
+			holderJobId: "a",
+		})
+		starting = false
+		const releasing = h.arbiter.release(a.lease, { restore: true })
+		expect(h.arbiter.acquire("b", "rtl", 60)).toMatchObject({
+			reason: "releasing",
+		})
+		await releasing
+		h.arbiter.recoverPersistedLeases([
+			{
+				sourceId: "rtl",
+				jobId: "crashed",
+				acquiredAt: 1,
+				snapshot: { frequency: 100_000_000 },
+				changedFields: [],
+			},
+		])
+		expect(h.arbiter.acquire("b", "rtl", 60)).toMatchObject({
+			reason: "recovery-pending",
+		})
+		h.tuner.setControl("rtl", "external")
+		expect(h.arbiter.acquire("b", "rtl", 60)).toMatchObject({
+			reason: "relay",
+		})
+	})
+
 	it("never re-queues a release without restore of a lease that was not adopted", async () => {
 		const h = harness()
 		const a = h.arbiter.acquire("a", "rtl", 50)
@@ -786,6 +829,7 @@ describe("TunerArbiter lease discipline", () => {
 			ok: false,
 			code: "SCANNER_SOURCE_BUSY",
 			detail: "releasing",
+			reason: "releasing",
 		})
 		await releasing
 		const b = h.arbiter.acquire("b", "rtl", 50)
