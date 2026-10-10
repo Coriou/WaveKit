@@ -220,6 +220,19 @@ describe("agents-setup", () => {
 		expect(existsSync(join(main, ".agents"))).toBe(false)
 	})
 
+	it("is not fooled by environment that narrows git discovery", () => {
+		const docs = join(main, "docs")
+		mkdirSync(docs)
+
+		const result = setup(main, [], {
+			WAVEKIT_AGENT_MEMORY_DIR: docs,
+			GIT_CEILING_DIRECTORIES: main,
+		})
+		expect(result.status).toBe(1)
+		expect(result.stderr).toContain("trackable")
+		expect(existsSync(join(main, ".agents"))).toBe(false)
+	})
+
 	it("flags an existing link whose target is trackable", () => {
 		const docs = join(main, "docs")
 		mkdirSync(docs)

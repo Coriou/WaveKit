@@ -23,7 +23,7 @@ import {
 	symlinkSync,
 } from "node:fs"
 import { homedir } from "node:os"
-import { join, relative } from "node:path"
+import { dirname, join, relative } from "node:path"
 
 const check = process.argv.includes("--check")
 
@@ -57,28 +57,41 @@ try {
 const linkPath = join(root, ".agents", "memory")
 
 // A memory directory must never be publishable: refuse one inside a git work
-// tree unless that repository ignores it and tracks nothing beneath it. Only a
-// confirmed "not a git repository" counts as private; any other git failure
-// (e.g. dubious ownership) leaves the target unverified and is refused.
+// tree unless that repository ignores it and tracks nothing beneath it. The
+// enclosing repository is found on the filesystem (any ancestor holding `.git`),
+// not through git's own discovery, which environment settings can narrow; any
+// git failure while checking it leaves the target unverified and is refused.
+const discoveryEnv = [
+	"GIT_DIR",
+	"GIT_WORK_TREE",
+	"GIT_COMMON_DIR",
+	"GIT_INDEX_FILE",
+	"GIT_CEILING_DIRECTORIES",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM",
+]
+
 function inspect(...args) {
-	return spawnSync("git", args, {
-		encoding: "utf8",
-		env: { ...process.env, LC_ALL: "C", LANGUAGE: "" },
-	})
+	const env = { ...process.env, LC_ALL: "C", LANGUAGE: "" }
+	for (const name of discoveryEnv) delete env[name]
+	return spawnSync("git", args, { encoding: "utf8", env })
+}
+
+function enclosingRepo(dir) {
+	for (let current = dir; ; current = dirname(current)) {
+		if (existsSync(join(current, ".git"))) return current
+		if (dirname(current) === current) return null
+	}
 }
 
 function exposure(dir) {
-	const top = inspect("-C", dir, "rev-parse", "--show-toplevel")
-	if (top.status !== 0) {
-		if (/not a git repository/.test(top.stderr)) return null
-		return `git could not verify it: ${top.stderr.trim().split("\n")[0]}`
-	}
-	const repo = top.stdout.trim()
+	const repo = enclosingRepo(dir)
+	if (!repo) return null
 	const path = relative(repo, dir) || "."
 	const ignored = inspect("-C", repo, "check-ignore", "-q", path)
 	if (ignored.status === 1)
 		return `it is trackable by the git repository at ${repo}`
-	if (ignored.status !== 0) return "git could not verify it"
+	if (ignored.status !== 0)
+		return `git could not verify it: ${ignored.stderr.trim().split("\n")[0]}`
 	const files = inspect("-C", repo, "ls-files", "--", path)
 	if (files.status !== 0) return "git could not verify it"
 	return files.stdout.trim() === ""
