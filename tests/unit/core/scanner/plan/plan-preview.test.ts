@@ -247,6 +247,21 @@ describe("previewPlan derived defaults", () => {
 		expect(p.spec.provenance["hold.confirmHoldMs"]).toBe("operator")
 	})
 
+	it("labels hold.policy operator only when the operator gave a policy", () => {
+		const other = previewPlan(
+			{ bandplans: ["uhf-land-mobile"], hold: { maxHoldMs: 30_000 } },
+			ctx(),
+		)
+		expect(other.spec.hold.policy).toBe("hold")
+		expect(other.spec.provenance["hold.policy"]).toBe("default")
+		expect(other.spec.provenance["hold.maxHoldMs"]).toBe("operator")
+		const given = previewPlan(
+			{ bandplans: ["uhf-land-mobile"], hold: { policy: "never" } },
+			ctx(),
+		)
+		expect(given.spec.provenance["hold.policy"]).toBe("operator")
+	})
+
 	it("picks the first non-dedicated source and rejects unknown ones", () => {
 		expect(previewPlan({}, ctx({ sources: [DEDI, PI] })).spec.sourceId).toBe(
 			"pi",

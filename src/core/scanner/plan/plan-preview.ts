@@ -531,7 +531,7 @@ export function normaliseSpec(
 				? "bandplan"
 				: "default"
 	const policy = spec.hold?.policy ?? "hold"
-	pv("hold.policy", spec.hold !== undefined)
+	pv("hold.policy", spec.hold?.policy !== undefined)
 	const confirmHoldMs: Partial<Record<ScannerClass, number>> = {}
 	for (const c of ALL_CLASSES)
 		confirmHoldMs[c] = spec.hold?.confirmHoldMs ?? DEFAULT_CONFIRM_HOLD_MS[c]
