@@ -24,6 +24,12 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 <div style="position: relative; height: 100vh; min-height: 760px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
 	<dc-import name="Spectrum" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" hint-size="100%,100%"></dc-import>
 
+	<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
+		<div style="position: absolute; inset: 0; z-index: 1">
+			<dc-import name="Map" embedded="{{true}}" on-action="{{mapAction}}" hint-size="100%,100%"></dc-import>
+		</div>
+	</sc-if>
+
 	<div style="position: absolute; top: 16px; left: 16px; z-index: 3">
 		<dc-import name="Tuner" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hint-size="440px,56px"></dc-import>
 	</div>
@@ -122,6 +128,7 @@ class Component extends DCLogic {
 			else if (id === 'scan') this.goNav('scanner');
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
 		};
+		this.mapAction = (id, tok) => { if (id === 'activity') this.goActivity({ tokens: [tok] }); };
 		this.used = id => {
 			const r = this.state.recent, old = r.find(x => x.id === id);
 			this.setState({ recent: [{ id, n: (old ? old.n : 0) + 1 }].concat(r.filter(x => x.id !== id)).slice(0, 12) });
@@ -169,7 +176,8 @@ class Component extends DCLogic {
 			},
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
-			showCard: s.open !== 'rx' && s.nav !== 'activity',
+			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'map',
+			showMap: s.nav === 'map', mapAction: this.mapAction,
 			nav: NAV.map(n => {
 				const on = n.id === s.nav;
 				return { ...n, on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598', pick: () => this.setState({ nav: n.id }) };

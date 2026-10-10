@@ -50,6 +50,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Decoded messages + Decode card | One card anatomy for every decoder; JSON fallback for unknown rtl_433 models | Active |
 | JSON viewer | Syntax colours, wrap, copy pretty / one line | Active |
 | Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
+| Map | Everything with a position around the station: layers, overlays, selection, location setup, last-hour replay, tile source. Wired into C (Map in the dock) | Active, first pass |
 | Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
@@ -130,6 +131,49 @@ Condensed + Noto Sans, Tabler-based icons).
   shows "Tone squelch · CTCSS 88.5 Hz detected" with a switch to open only on that tone.
   Mock: NFM 160.625 (88.5), PMR446 ch 1 (77.0), NFM 161.425 (DCS 023N), 2 m repeater
   145.6375 (123.0). *Why:* owner request; tones identify users sharing a channel.
+- **Map board, first pass.** The canvas cannot run MapLibre or fetch tiles, so the board
+  draws a live 2D mock in the intended style with a simplified Brittany / Channel
+  coastline (illustrative geometry, not survey data). Drawn:
+  - *Layers* chip island at the top (Aircraft, Vessels incl. aids to navigation, APRS,
+    Mesh, ACARS position reports) with counts; *Overlays* menu: range rings, coverage
+    (furthest reception per bearing, ADS-B and AIS), trails, labels, mesh links by SNR.
+  - *Glyphs:* aircraft as plane shapes rotated by track and coloured by altitude
+    (amber → phosphor → white, legend bottom right); vessels as hulls rotated by course,
+    a dot when moored; AtoN diamonds; APRS dots, weather stations as squares; mesh
+    hexagons with dashed links; ACARS/ADS-C reports as dashed amber diamonds labelled
+    with their age. Positions move by dead reckoning; trails fade.
+  - *Interaction:* drag to pan, scroll or double-click to zoom around the cursor,
+    hover tooltip, click to select. The selection panel (right) shows fields, distance and
+    bearing from the station, source decoder and freshness, Follow and Activity.
+  - *Station:* pulsing marker; approximate state (tweak `location`) shows a dashed
+    amber area and a "Station location is approximate · Set it" chip. The location
+    panel offers pick on the map, browser location, coordinates or a Maidenhead
+    locator, with a live parse and the privacy note.
+  - *Replay:* timeline island with a last-hour histogram; scrubbing moves everything
+    back in time; "Back to live".
+  - *Tiles:* footer says which source is in use (tweak `tiles`: offline extract,
+    online OpenFreeMap with "Download for offline", or downloading with progress) plus
+    © OpenStreetMap.
+  In C · Immersive, Map replaces the spectrum backdrop; Tuner, Receiver and Listen stay,
+  the tuned card hides.
+- **Map: decisions before design (owner, 2026-10-10).**
+  - *Station location:* core has none today (no lat/lon in config, readsb runs without
+    `--lat/--lon`, no GPS on the Pi). Order of sources: a location set once and stored
+    in core (pick on the map, type coordinates or a Maidenhead locator, or "use this
+    browser's location"; also asked on the Pi first-boot page) → an estimate from what
+    is received (centroid of decoded positions, shown as approximate) → USB GPS via
+    gpsd later for the portable receiver. Never sent anywhere; readsb gets it too.
+  - *Backend:* MapLibre GL JS with our own style (vector tiles, WebGL). Tiles both ways:
+    a regional Protomaps PMTiles extract served by core (works offline, no provider sees
+    the location) and OpenFreeMap online until the extract is downloaded, with the UI
+    saying which is in use. Glyphs generated from D-DIN and Noto Sans, served by core.
+    OSM attribution kept, discreet.
+  - *Look:* minimal, the spectrum's language: ink land, darker sea, thin phosphor
+    coastlines, faint graticule, few labels; the data dominates.
+  - *Content:* everything that has a position: ADS-B aircraft, AIS vessels and aids to
+    navigation, APRS stations, weather and balloons, Meshtastic nodes and links, ACARS
+    and ADS-C position reports; range rings, real coverage, trails, replay of the last
+    hour.
 - **Command palette (⌘K), first pass.** One field that understands intent, not just
   command names:
   - *Tune:* the Tuner's parser (MHz, kHz, `+25k`, channels, saved names); bare digits

@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Map</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#08110e}
+.wk-m-btn:hover{background:#192b24;color:#f4f7f5}
+.wk-m-chip:hover{border-color:rgba(123,236,199,.45)}
+</style>
+</helmet>
+<div style="position: {{rootPos}}; inset: 0; height: {{rootH}}; min-height: 640px; overflow: hidden; background: #08110e; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+
+	<div ref="{{refs.box}}" onPointerDown="{{onDown}}" onPointerMove="{{onMove}}" onPointerUp="{{onUp}}" onPointerCancel="{{onUp}}" onPointerLeave="{{onLeave}}" onDoubleClick="{{onDbl}}" style="position: absolute; inset: 0; cursor: {{cursor}}; touch-action: none">
+		<canvas ref="{{refs.cv}}" aria-label="Map of decoded positions around the station" role="img" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
+	</div>
+
+	<sc-if value="{{hasHover}}" hint-placeholder-val="{{false}}">
+		<div style="position: absolute; left: {{hoverX}}px; top: {{hoverY}}px; transform: translate(-50%, calc(-100% - 14px)); pointer-events: none; z-index: 4; padding: 6px 10px; border-radius: 9px; background: rgba(17,28,25,.92); border: 1px solid rgba(123,236,199,.18); white-space: nowrap; font-size: 12.5px">
+			<span style="font-weight: 700">{{hoverTitle}}</span> <span style="color: #8ba598">{{hoverSub}}</span>
+		</div>
+	</sc-if>
+
+	<div style="position: absolute; top: {{chipTop}}; left: 50%; transform: translateX(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: calc(100% - 32px)">
+		<div role="group" aria-label="Map layers" style="display: flex; align-items: center; gap: 4px; padding: 6px; border-radius: 16px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); flex-wrap: wrap; justify-content: center">
+			<sc-for list="{{layers}}" as="l" hint-placeholder-count="5">
+				<button class="wk-m-chip" aria-pressed="{{l.on}}" onClick="{{l.pick}}" title="{{l.title}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border-radius: 10px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700; border: 1px solid {{l.border}}; background: {{l.bg}}; color: {{l.fg}}">
+					<span style="width: 8px; height: 8px; border-radius: {{l.shape}}; background: {{l.dot}}; flex: none"></span>{{l.label}}<span style="font-weight: 400; color: #8ba598; font-variant-numeric: tabular-nums">{{l.count}}</span>
+				</button>
+			</sc-for>
+			<div style="width: 1px; height: 22px; background: rgba(123,236,199,.14); margin: 0 2px"></div>
+			<button class="wk-m-btn" onClick="{{toggleOverlays}}" aria-expanded="{{overlaysOpen}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 10px; background: {{ovBg}}; color: #b9cac1; display: flex; align-items: center; gap: 6px; font-size: 12.5px">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4l-8 4l8 4l8 -4l-8 -4"></path><path d="M4 12l8 4l8 -4"></path><path d="M4 16l8 4l8 -4"></path></svg>Overlays
+			</button>
+		</div>
+		<sc-if value="{{overlaysOpen}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; flex-direction: column; padding: 8px; border-radius: 14px; background: rgba(17,28,25,.85); border: 1px solid rgba(123,236,199,.14); backdrop-filter: blur(22px); min-width: 260px">
+				<sc-for list="{{overlays}}" as="o" hint-placeholder-count="5">
+					<button aria-pressed="{{o.on}}" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 9px; background: transparent">
+						<span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13.5px">{{o.label}}</span><span style="font-size: 12px; color: #8ba598">{{o.sub}}</span></span>
+						<span style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{o.track}}"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: #f4f7f5"></span></span>
+					</button>
+				</sc-for>
+			</div>
+		</sc-if>
+		<sc-if value="{{showApprox}}" hint-placeholder-val="{{false}}">
+			<button onClick="{{openLocation}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border-radius: 17px; border: 1px solid rgba(242,184,75,.45); background: rgba(40,32,14,.75); color: #f2b84b; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; backdrop-filter: blur(16px)">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
+				Station location is approximate · Set it
+			</button>
+		</sc-if>
+		<sc-if value="{{picking}}" hint-placeholder-val="{{false}}">
+			<div style="height: 38px; padding: 0 6px 0 14px; border-radius: 19px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.4); display: flex; align-items: center; gap: 10px; font-size: 13px">
+				Click the map where your antenna is
+				<button onClick="{{cancelPick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border: 0; border-radius: 14px; background: #192b24; color: #b9cac1; font-size: 12.5px">Cancel</button>
+			</div>
+		</sc-if>
+	</div>
+
+	<sc-if value="{{hasSel}}" hint-placeholder-val="{{false}}">
+		<aside aria-label="Selected" style="position: absolute; right: 16px; top: {{panelTop}}; width: 320px; max-height: calc(100% - 200px); overflow-y: auto; z-index: 3; box-sizing: border-box; padding: 16px; border-radius: 18px; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.09), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column; gap: 14px">
+			<div style="display: flex; align-items: center; gap: 10px">
+				<span style="width: 34px; height: 34px; flex: none; border-radius: 10px; background: rgba(123,236,199,.12); display: grid; place-items: center; color: {{sel.color}}">
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{sel.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+				</span>
+				<div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
+					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.title}}</span>
+					<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.sub}}</span>
+				</div>
+				<button onClick="{{closeSel}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			</div>
+			<sc-if value="{{sel.hasNote}}" hint-placeholder-val="{{false}}">
+				<p style="margin: 0; font-size: 13.5px; line-height: 1.45; color: #e3ece7; font-family: {{sel.noteFont}}; overflow-wrap: anywhere">{{sel.note}}</p>
+			</sc-if>
+			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border-radius: 12px; overflow: hidden; background: #22362f">
+				<sc-for list="{{sel.fields}}" as="f" hint-placeholder-count="6">
+					<div style="background: #111c19; padding: 9px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
+						<span style="font-size: 12px; color: #8ba598">{{f.k}}</span>
+						<span style="font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.v}}</span>
+					</div>
+				</sc-for>
+			</div>
+			<span style="font-size: 12px; color: #8ba598">{{sel.seen}}</span>
+			<div style="display: flex; gap: 6px">
+				<button onClick="{{toggleFollow}}" aria-pressed="{{following}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 10px; border: 1px solid {{followBorder}}; background: {{followBg}}; color: {{followFg}}; font-weight: 700; font-size: 13px">{{followText}}</button>
+				<button onClick="{{selActivity}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #b9cac1; font-weight: 700; font-size: 13px">Activity</button>
+			</div>
+		</aside>
+	</sc-if>
+
+	<sc-if value="{{locOpen}}" hint-placeholder-val="{{false}}">
+		<aside aria-label="Station location" style="position: absolute; right: 16px; top: {{panelTop}}; width: 340px; z-index: 5; box-sizing: border-box; padding: 18px; border-radius: 18px; background: rgba(17,28,25,.88); border: 1px solid rgba(123,236,199,.16); box-shadow: 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(24px); display: flex; flex-direction: column; gap: 14px">
+			<div style="display: flex; align-items: center">
+				<h2 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 20px">Station location</h2>
+				<button onClick="{{closeLocation}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 9px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			</div>
+			<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 10px; background: #192b24; font-size: 13px">
+				<span style="width: 8px; height: 8px; border-radius: 50%; background: {{locDot}}; flex: none"></span>
+				<span style="flex: 1; font-variant-numeric: tabular-nums">{{locNow}}</span>
+			</div>
+			<button onClick="{{startPick}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Pick on the map</button>
+			<button onClick="{{useBrowser}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 10px; border: 1px solid #2c443b; background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Use this browser’s location</button>
+			<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: #8ba598">Coordinates or Maidenhead locator
+				<input value="{{locQ}}" onChange="{{onLocQ}}" placeholder="48.7051, −3.9750 · IN88aq" spellcheck="false" autocomplete="off" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 10px; border: 1px solid {{locQBorder}}; background: rgba(7,15,13,.6); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
+			</label>
+			<sc-if value="{{hasLocParse}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; color: {{locParseC}}">{{locParse}}</span></sc-if>
+			<button onClick="{{saveLocation}}" disabled="{{saveDisabled}}" style="font: inherit; cursor: pointer; height: 42px; border-radius: 10px; border: 0; background: {{saveBg}}; color: {{saveFg}}; font-weight: 700; font-size: 14px">Save location</button>
+			<span style="font-size: 12px; color: #8ba598; line-height: 1.5">Stored on your WaveKit only, never sent anywhere. Used for the map centre, range rings and distances, and by the ADS-B decoder. Every device signed in sees it.</span>
+		</aside>
+	</sc-if>
+
+	<div style="position: absolute; left: 50%; bottom: {{timeBottom}}; transform: translateX(-50%); z-index: 3; width: min(560px, calc(100% - 32px)); box-sizing: border-box; padding: 10px 14px 10px 10px; border-radius: 16px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; align-items: center; gap: 12px">
+		<button onClick="{{goLive}}" aria-pressed="{{isLive}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 10px; border: 0; border-radius: 15px; display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; background: {{liveBg}}; color: {{liveFg}}"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>{{liveText}}</button>
+		<div style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px">
+			<div style="position: relative; height: 26px">
+				<div style="position: absolute; inset: 0 0 6px; display: flex; align-items: flex-end; gap: 1px" aria-hidden="true">
+					<sc-for list="{{hist}}" as="h" hint-placeholder-count="60"><span style="flex: 1; height: {{h.h}}%; border-radius: 1px; background: {{h.c}}"></span></sc-for>
+				</div>
+				<div style="position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 2px; background: #22362f"></div>
+				<div style="position: absolute; top: 0; bottom: 0; left: {{cursorPct}}%; width: 2px; margin-left: -1px; background: #f4f7f5"></div>
+				<input type="range" min="0" max="60" step="1" value="{{scrub}}" onChange="{{onScrub}}" aria-label="Replay the last hour" aria-valuetext="{{timeText}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
+			</div>
+			<div style="display: flex; justify-content: space-between; font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums"><span>13:02</span><span>{{timeText}}</span><span>Now</span></div>
+		</div>
+	</div>
+
+	<div style="position: absolute; right: 16px; bottom: {{legendBottom}}; z-index: 2; display: flex; flex-direction: column; align-items: flex-end; gap: 8px">
+		<div style="display: flex; flex-direction: column; gap: 4px; align-items: center">
+			<button class="wk-m-btn" onClick="{{zoomIn}}" aria-label="Zoom in" style="font: inherit; cursor: pointer; width: 38px; height: 38px; border: 1px solid rgba(123,236,199,.14); border-radius: 11px; background: rgba(17,28,25,.55); color: #b9cac1; font-size: 18px; backdrop-filter: blur(16px)">+</button>
+			<button class="wk-m-btn" onClick="{{zoomOut}}" aria-label="Zoom out" style="font: inherit; cursor: pointer; width: 38px; height: 38px; border: 1px solid rgba(123,236,199,.14); border-radius: 11px; background: rgba(17,28,25,.55); color: #b9cac1; font-size: 18px; backdrop-filter: blur(16px)">−</button>
+			<button class="wk-m-btn" onClick="{{recenter}}" aria-label="Centre on the station" title="Centre on the station" style="font: inherit; cursor: pointer; width: 38px; height: 38px; border: 1px solid rgba(123,236,199,.14); border-radius: 11px; background: rgba(17,28,25,.55); color: #b9cac1; display: grid; place-items: center; backdrop-filter: blur(16px)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0"></path><path d="M12 2v2M12 20v2M20 12h2M2 12h2"></path></svg></button>
+		</div>
+		<div style="display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 10px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.1); font-size: 11.5px; color: #8ba598; backdrop-filter: blur(16px)">
+			<span>Altitude</span>
+			<span style="width: 90px; height: 6px; border-radius: 3px; background: linear-gradient(90deg, #f2b84b, #7becc7, #f4f7f5)"></span>
+			<span style="font-variant-numeric: tabular-nums">0 → FL400</span>
+		</div>
+		<div style="display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: #8ba598">
+			<button onClick="{{openLocation}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #b9cac1; font-size: 11.5px; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{locDot}}"></span>{{stationText}}</button>
+			<span style="color: #2c443b">·</span>
+			<sc-if value="{{tilesOffline}}" hint-placeholder-val="{{true}}"><span>Offline map · 400 km around you · 412 MB</span></sc-if>
+			<sc-if value="{{tilesOnline}}" hint-placeholder-val="{{false}}"><span>Online map (OpenFreeMap) · <button onClick="{{downloadTiles}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #7becc7; font-size: 11.5px; font-weight: 700">Download for offline</button></span></sc-if>
+			<sc-if value="{{tilesDownloading}}" hint-placeholder-val="{{false}}"><span>Downloading map for your area · {{dlPct}} %</span></sc-if>
+			<span style="color: #2c443b">·</span>
+			<span>© OpenStreetMap</span>
+		</div>
+	</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"embedded":{"editor":null},"onAction":{"editor":null},"location":{"editor":"enum","options":["set","approximate"],"default":"set"},"tiles":{"editor":"enum","options":["offline","online","downloading"],"default":"offline"},"$preview":{"width":1440,"height":900}}'>
+// ---------- geography (simplified, illustrative) ----------
+const LAND = [
+	[[-1.51,48.64],[-1.85,48.70],[-2.02,48.65],[-2.17,48.60],[-2.32,48.68],[-2.53,48.60],[-2.73,48.52],[-2.82,48.60],[-3.05,48.80],[-3.20,48.84],[-3.45,48.83],[-3.57,48.77],[-3.64,48.69],[-3.76,48.70],[-3.85,48.63],[-3.92,48.68],[-3.96,48.70],[-3.985,48.712],[-4.02,48.705],[-4.06,48.68],[-4.17,48.67],[-4.33,48.68],[-4.45,48.64],[-4.57,48.61],[-4.70,48.56],[-4.77,48.50],[-4.79,48.36],[-4.62,48.34],[-4.50,48.38],[-4.40,48.33],[-4.55,48.30],[-4.62,48.25],[-4.50,48.18],[-4.33,48.10],[-4.45,48.08],[-4.73,48.04],[-4.53,48.00],[-4.37,47.80],[-4.15,47.85],[-3.92,47.86],[-3.60,47.77],[-3.37,47.70],[-3.15,47.60],[-3.12,47.48],[-3.00,47.57],[-2.85,47.52],[-2.52,47.29],[-2.20,47.25],[-2.05,47.10],[-1.90,46.80],[-1.40,46.40],[0.5,46.4],[2.5,46.4],[2.5,50.10],[1.60,50.20],[1.40,50.05],[1.00,49.92],[0.38,49.76],[0.10,49.50],[0.20,49.42],[-0.20,49.30],[-0.75,49.35],[-1.10,49.35],[-1.25,49.45],[-1.26,49.67],[-1.62,49.65],[-1.94,49.72],[-1.85,49.55],[-1.78,49.35],[-1.60,49.20],[-1.58,48.84]],
+	[[-5.71,50.07],[-5.48,50.21],[-5.08,50.42],[-4.94,50.55],[-4.75,50.75],[-4.53,51.02],[-4.25,51.05],[-4.10,51.20],[-3.60,51.22],[-3.00,51.25],[-3.0,51.8],[2.5,51.8],[2.5,51.3],[1.40,51.30],[1.33,51.12],[0.95,50.95],[0.24,50.73],[-0.14,50.82],[-0.79,50.73],[-1.10,50.80],[-1.45,50.75],[-1.95,50.68],[-2.45,50.58],[-2.90,50.72],[-3.40,50.62],[-3.52,50.45],[-3.64,50.22],[-3.95,50.30],[-4.14,50.36],[-4.50,50.33],[-4.75,50.25],[-5.07,50.15],[-5.20,49.96],[-5.40,50.08]],
+	[[-1.58,50.67],[-1.08,50.66],[-1.10,50.75],[-1.50,50.72]],
+	[[-2.25,49.18],[-2.0,49.17],[-2.02,49.25],[-2.24,49.26]],
+	[[-2.67,49.43],[-2.52,49.42],[-2.51,49.50],[-2.60,49.51]],
+	[[-2.24,49.71],[-2.15,49.70],[-2.16,49.73],[-2.23,49.73]],
+	[[-4.05,48.742],[-3.99,48.738],[-3.995,48.752],[-4.04,48.755]],
+	[[-5.13,48.45],[-5.05,48.44],[-5.03,48.47],[-5.11,48.48]],
+	[[-3.02,48.84],[-2.99,48.84],[-2.99,48.87],[-3.01,48.87]],
+	[[-3.25,47.29],[-3.07,47.33],[-3.10,47.37],[-3.22,47.36]],
+	[[-6.37,49.89],[-6.27,49.90],[-6.28,49.96],[-6.36,49.96]]
+];
+const PLACES = [
+	['Roscoff', -3.985, 48.700, 9], ['Morlaix', -3.83, 48.578, 8], ['Brest', -4.49, 48.39, 7], ['Lannion', -3.46, 48.73, 8], ['Saint-Malo', -2.02, 48.64, 7],
+	['Saint-Brieuc', -2.76, 48.51, 8], ['Quimper', -4.10, 48.00, 8], ['Cherbourg', -1.62, 49.63, 7], ['Plymouth', -4.14, 50.38, 7], ['Guernsey', -2.58, 49.46, 7],
+	['Jersey', -2.13, 49.21, 7], ['Île de Batz', -4.02, 48.758, 10], ['Lorient', -3.37, 47.75, 8], ['Exeter', -3.53, 50.72, 8]
+];
+const SEAS = [['LA MANCHE · ENGLISH CHANNEL', -3.4, 49.55], ["MER D'IROISE", -5.2, 48.15]];
+
+// ---------- helpers ----------
+const R = 6371;
+const rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
+function dest(lat, lon, brg, km) {
+	const d = km / R, b = rad(brg), p1 = rad(lat), l1 = rad(lon);
+	const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(b));
+	const l2 = l1 + Math.atan2(Math.sin(b) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+	return [deg(p2), deg(l2)];
+}
+function dist(a, b) {
+	const dp = rad(b[0] - a[0]), dl = rad(b[1] - a[1]);
+	const h = Math.sin(dp / 2) ** 2 + Math.cos(rad(a[0])) * Math.cos(rad(b[0])) * Math.sin(dl / 2) ** 2;
+	return 2 * R * Math.asin(Math.sqrt(h));
+}
+function bearing(a, b) {
+	const y = Math.sin(rad(b[1] - a[1])) * Math.cos(rad(b[0]));
+	const x = Math.cos(rad(a[0])) * Math.sin(rad(b[0])) - Math.sin(rad(a[0])) * Math.cos(rad(b[0])) * Math.cos(rad(b[1] - a[1]));
+	return (deg(Math.atan2(y, x)) + 360) % 360;
+}
+const wx = (lon, z) => (lon + 180) / 360 * 256 * Math.pow(2, z);
+const wy = (lat, z) => { const s = Math.sin(rad(lat)); return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * 256 * Math.pow(2, z); };
+const ilon = (x, z) => x / (256 * Math.pow(2, z)) * 360 - 180;
+const ilat = (y, z) => { const n = Math.PI - 2 * Math.PI * y / (256 * Math.pow(2, z)); return deg(Math.atan(Math.sinh(n))); };
+function rng(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+const fmtLat = v => Math.abs(v).toFixed(4) + '° ' + (v >= 0 ? 'N' : 'S');
+const fmtLon = v => Math.abs(v).toFixed(4) + '° ' + (v >= 0 ? 'E' : 'W');
+const cardinal = b => ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'][Math.round(b / 45) % 8];
+function maidenhead(q) {
+	const m = /^([a-r]{2})(\d{2})([a-x]{2})?$/i.exec(q.trim());
+	if (!m) return null;
+	const A = m[1].toUpperCase(), s = m[3] ? m[3].toLowerCase() : null;
+	let lon = (A.charCodeAt(0) - 65) * 20 - 180 + Number(m[2][0]) * 2;
+	let lat = (A.charCodeAt(1) - 65) * 10 - 90 + Number(m[2][1]);
+	if (s) { lon += (s.charCodeAt(0) - 97) * 5 / 60 + 2.5 / 60; lat += (s.charCodeAt(1) - 97) * 2.5 / 60 + 1.25 / 60; }
+	else { lon += 1; lat += 0.5; }
+	return [lat, lon];
+}
+function toLocator(lat, lon) {
+	const L = lon + 180, A = lat + 90;
+	const a = String.fromCharCode(65 + Math.floor(L / 20)) + String.fromCharCode(65 + Math.floor(A / 10));
+	const b = String(Math.floor((L % 20) / 2)) + String(Math.floor(A % 10));
+	const c = String.fromCharCode(97 + Math.floor((L % 2) * 12)) + String.fromCharCode(97 + Math.floor((A % 1) * 24));
+	return a + b + c;
+}
+function altColor(ft) {
+	const t = Math.max(0, Math.min(1, ft / 40000));
+	const a = [242, 184, 75], b = [123, 236, 199], c = [244, 247, 245];
+	const mix = (p, q, u) => p.map((v, i) => Math.round(v + (q[i] - v) * u));
+	const col = t < 0.5 ? mix(a, b, t / 0.5) : mix(b, c, (t - 0.5) / 0.5);
+	return 'rgb(' + col.join(',') + ')';
+}
+
+// ---------- mock traffic ----------
+const STATION = [48.7051, -3.9750];
+const APPROX = [48.76, -3.82];
+const COL = { vessel: '#8ec5ff', aton: '#8ec5ff', aprs: '#f4f7f5', mesh: '#c9a8ff', acars: '#f2b84b' };
+const ICONS = {
+	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
+	vessel: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
+	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
+	mesh: ['m10.82 7.2 -5.14 9.6M13.18 7.2l5.14 9.6M7 19h10', 'M9.5 5a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M2 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0', 'M17 19a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0'],
+	acars: ['M4 9.5h12a2 2 0 0 1 2 2v6a2 2 0 0 1 -2 2H9l-4 3v-3H4a2 2 0 0 1 -2 -2v-6a2 2 0 0 1 2 -2Z', 'M7 12.5h6M7 15.5h3', 'M17 3a5 5 0 0 1 5 5M17 6a2 2 0 0 1 2 2']
+};
+function makeTraffic() {
+	const r = rng(20261010), out = [];
+	const PFX = ['AFR', 'EZY', 'BAW', 'RYR', 'KLM', 'DLH', 'TOM', 'IBE', 'VLG', 'EXS', 'TAP', 'SWR', 'AEA', 'HOP'];
+	const TYPES = ['A320', 'A319', 'A321', 'B738', 'B38M', 'A20N', 'E190', 'A333', 'B789', 'AT76', 'CRJ9', 'A359'];
+	const AIRWAYS = [32, 212, 8, 188, 62, 242, 300, 120, 350, 170];
+	out.push({ id: 'a-afr1234', kind: 'aircraft', name: 'AFR1234', type: 'A320', icao: '3944EF', lat: 48.81, lon: -3.87, trk: 284, kn: 452, ft: 36000, vs: 0, sq: '4721', rssi: -12.4, msgs: 1834 });
+	out.push({ id: 'a-ezy48kt', kind: 'aircraft', name: 'EZY48KT', type: 'A319', icao: '406B8A', lat: 48.52, lon: -3.81, trk: 52, kn: 286, ft: 11250, vs: 1800, sq: '6215', rssi: -9.8, msgs: 612 });
+	out.push({ id: 'a-fny', kind: 'aircraft', name: 'FNY03', type: 'NH90', icao: '3B7FA2', lat: 48.66, lon: -4.31, trk: 75, kn: 120, ft: 1500, vs: 0, sq: '7000', rssi: -7.1, msgs: 220, note: 'Military helicopter · low level' });
+	for (let i = 0; i < 31; i++) {
+		const b = r() * 360, d = 25 + Math.pow(r(), 0.8) * 255;
+		const [lat, lon] = dest(STATION[0], STATION[1], b, d);
+		const trk = (AIRWAYS[Math.floor(r() * AIRWAYS.length)] + (r() - 0.5) * 16 + 360) % 360;
+		const low = r() < 0.18;
+		const ft = low ? Math.round((3000 + r() * 12000) / 250) * 250 : Math.round((28000 + r() * 12000) / 1000) * 1000;
+		const pfx = PFX[Math.floor(r() * PFX.length)];
+		out.push({ id: 'a' + i, kind: 'aircraft', name: pfx + Math.floor(100 + r() * 8900), type: TYPES[Math.floor(r() * TYPES.length)], icao: Math.floor(r() * 0xffffff).toString(16).toUpperCase().padStart(6, '0'), lat, lon, trk, kn: Math.round(low ? 230 + r() * 90 : 410 + r() * 80), ft, vs: low ? (r() < 0.5 ? 1400 : -1100) : 0, sq: String(Math.floor(r() * 7777)).padStart(4, '0').replace(/[89]/g, '7'), rssi: -(6 + r() * 22), msgs: Math.floor(80 + r() * 1800) });
+	}
+	const V = [
+		['Kerlouan', 227006760, 'Fishing', 48.735, -3.995, 284, 11.4, 'Under way', 'Roscoff'],
+		['Belle Étoile', 228237700, 'Passenger', 48.7183, -3.9661, 0, 0.1, 'Moored', 'Île de Batz'],
+		['Ker Avel', 227419000, 'Passenger ferry', 48.95, -4.02, 10, 21.0, 'Under way', 'Plymouth'],
+		['Morgane II', 227592820, 'Fishing', 48.80, -3.75, 60, 6.8, 'Engaged in fishing', '—'],
+		['Ar Vro', 227141500, 'Cargo', 48.90, -3.60, 102, 14.0, 'Under way', 'Saint-Malo'],
+		['Pilot 29', 227000290, 'Pilot vessel', 48.76, -4.10, 341, 18.2, 'Under way', '—'],
+		['Enez Vaz', 227300410, 'Passenger', 48.728, -4.005, 330, 8.0, 'Under way', 'Île de Batz'],
+		['Penn ar Bed', 227877100, 'Sailing', 48.82, -4.15, 250, 5.5, 'Under way, sailing', 'Aber Wrac’h'],
+		['Sant Erwan', 227663300, 'Fishing', 48.85, -3.90, 180, 3.1, 'Engaged in fishing', '—'],
+		['SNS 061', 227004610, 'Search and rescue', 48.722, -3.945, 0, 0.0, 'Moored', '—'],
+		['Nordic Star', 255806200, 'Cargo', 49.05, -3.70, 75, 13.0, 'Under way', 'Antwerp'],
+		['Atlantic Breeze', 538009100, 'Tanker', 49.10, -4.30, 250, 12.0, 'Under way', 'Lisbon'],
+		['Ty Gwenn', 227551900, 'Fishing', 48.78, -4.25, 200, 2.2, 'Engaged in fishing', '—']
+	];
+	V.forEach((v, i) => out.push({ id: 'v' + i, kind: 'vessel', name: v[0], mmsi: v[1], type: v[2], lat: v[3], lon: v[4], trk: v[5], kn: v[6], status: v[7], dest: v[8] }));
+	out.push({ id: 'aton1', kind: 'aton', name: 'Phare de l’île de Batz', mmsi: 992271001, type: 'Lighthouse (AIS AtoN)', lat: 48.747, lon: -4.025, trk: 0, kn: 0 });
+	out.push({ id: 'aton2', kind: 'aton', name: 'Men Guen Bras', mmsi: 992271014, type: 'Cardinal buoy (virtual AtoN)', lat: 48.765, lon: -3.958, trk: 0, kn: 0 });
+	const A = [
+		['F4ABC-9', 'Mobile', 48.3904, -4.4861, 112, 52 / 1.852, 'On the way home. QRV 145.500', 'WIDE1-1, WIDE2-1'],
+		['F6XYZ-13', 'Weather station', 48.58, -3.83, 0, 0, '14.2 °C · 78 % · wind 18 km/h W · 1012.4 hPa', 'direct'],
+		['F1ZZZ-1', 'Digipeater', 48.41, -3.93, 0, 0, 'Monts d’Arrée digi · 145.6375 rptr', 'direct'],
+		['F4KLM', 'Home station', 48.62, -4.35, 0, 0, 'Shack online, 2 m and 70 cm', 'F1ZZZ-1*'],
+		['F5XYZ-7', 'Handheld', 48.73, -3.46, 210, 3, 'Walking the coast path', 'WIDE1-1'],
+		['F4BLN-11', 'High-altitude balloon', 48.95, -3.20, 70, 24, 'Alt 18 240 m · climbing 4.8 m/s', 'WIDE2-1']
+	];
+	A.forEach((a, i) => out.push({ id: 'p' + i, kind: 'aprs', name: a[0], type: a[1], lat: a[2], lon: a[3], trk: a[4], kn: a[5], note: a[6], path: a[7] }));
+	const M = [
+		['Harbour relay', '!a3f2c1', 48.727, -3.987, 0, 0, 'Anyone on the coast tonight? Signal is great from the lighthouse.'],
+		['Lighthouse', '!9be011', 48.747, -4.025, 0, 0, 'Position beacon'],
+		['Morlaix node', '!77c0de', 48.585, -3.84, 0, 0, 'Router · 12 neighbours'],
+		['Kayak', '!0fe12a', 48.79, -3.95, 300, 2.5, 'Paddling to Batz, back by 18:00']
+	];
+	M.forEach((m, i) => out.push({ id: 'm' + i, kind: 'mesh', name: m[0], node: m[1], lat: m[2], lon: m[3], trk: m[4], kn: m[5], note: m[6] }));
+	out.push({ id: 'c1', kind: 'acars', name: 'XK4521', tail: 'F-HBXA', lat: 48.778, lon: -3.458, trk: 250, kn: 0, ft: 34000, note: 'POS N48467 W003275,FL340,ETA 1447,FOB 9.2', via: 'ACARS · label H1 · 131.725', age: 15 });
+	out.push({ id: 'c2', kind: 'acars', name: 'XK8801', tail: 'F-GZTB', lat: 48.60, lon: -2.90, trk: 230, kn: 0, ft: 36000, note: 'ADS-C periodic report · FL360 · cleared FL360', via: 'VDL2 · ADS-C · 136.975', age: 4 });
+	return out;
+}
+const TRAFFIC = makeTraffic();
+const LINKS = [['m0', 'm1', 9.0], ['m0', 'm2', 3.5], ['m0', 'm3', 6.5], ['m2', 'm1', -2.0]];
+const LAYERS = [
+	{ id: 'aircraft', label: 'Aircraft', dot: '#7becc7', shape: '2px', kinds: ['aircraft'], title: 'ADS-B · readsb' },
+	{ id: 'vessel', label: 'Vessels', dot: '#8ec5ff', shape: '2px', kinds: ['vessel', 'aton'], title: 'AIS · AIS-catcher, including aids to navigation' },
+	{ id: 'aprs', label: 'APRS', dot: '#f4f7f5', shape: '50%', kinds: ['aprs'], title: 'APRS · Direwolf, including weather and balloons' },
+	{ id: 'mesh', label: 'Mesh', dot: '#c9a8ff', shape: '50%', kinds: ['mesh'], title: 'Meshtastic nodes and links' },
+	{ id: 'acars', label: 'ACARS', dot: '#f2b84b', shape: '1px', kinds: ['acars'], title: 'Position reports from ACARS and VDL2 (ADS-C)' }
+];
+const HIST = (() => { const r = rng(77); return Array.from({ length: 60 }, (_, i) => 30 + r() * 55 + (i > 40 ? 10 : 0)); })();
+function covRadius(kind, b) {
+	if (kind === 'adsb') return 215 + 70 * Math.cos(rad(b - 25)) + 18 * Math.sin(rad(b * 3)) - (b > 150 && b < 230 ? 45 : 0);
+	const sea = b > 270 || b < 85;
+	return sea ? 48 + 10 * Math.sin(rad(b * 4)) : 6 + 3 * Math.sin(rad(b * 2));
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {
+			zoom: 8.6, c: null, sel: null, hover: null, follow: false, scrub: 0,
+			layers: { aircraft: true, vessel: true, aprs: true, mesh: true, acars: true },
+			ov: { rings: true, coverage: true, trails: true, labels: true, links: true }, overlaysOpen: false,
+			loc: null, locOpen: false, picking: false, pending: null, locQ: '', dl: 0, tiles: null, tick: 0
+		};
+		this.drag = null;
+		this.hits = [];
+		this.t0 = performance.now();
+		this.frame = this.frame.bind(this);
+		this.onWheel = this.onWheel.bind(this);
+		this.refsObj = {
+			box: el => { if (el && el !== this.boxEl) el.addEventListener('wheel', this.onWheel, { passive: false }); this.boxEl = el; },
+			cv: el => { this.cv = el; }
+		};
+		this.onDown = e => { if (e.button !== 0 || !this.boxEl) return; this.drag = { x: e.clientX, y: e.clientY, moved: false, c: this.center() }; this.boxEl.setPointerCapture(e.pointerId); };
+		this.onMove = e => {
+			const d = this.drag;
+			if (d) {
+				if (Math.abs(e.clientX - d.x) + Math.abs(e.clientY - d.y) > 4) d.moved = true;
+				if (d.moved) { this.setState({ c: [d.c[0] - (e.clientX - d.x), d.c[1] - (e.clientY - d.y)], follow: false }); }
+				return;
+			}
+			const r = this.boxEl.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+			const h = this.hitAt(x, y);
+			const id = h ? h.id : null;
+			if (id !== (this.state.hover && this.state.hover.id)) this.setState({ hover: h ? { id, x: h.x, y: h.y } : null });
+		};
+		this.onUp = e => {
+			const d = this.drag; this.drag = null;
+			if (this.boxEl && this.boxEl.hasPointerCapture && this.boxEl.hasPointerCapture(e.pointerId)) this.boxEl.releasePointerCapture(e.pointerId);
+			if (!d || d.moved || e.type !== 'pointerup') return;
+			const r = this.boxEl.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+			if (this.state.picking) { const ll = this.toLL(x, y); this.setState({ picking: false, pending: ll, locOpen: true, locQ: ll[0].toFixed(4) + ', ' + ll[1].toFixed(4) }); return; }
+			const h = this.hitAt(x, y);
+			this.setState({ sel: h ? h.id : null, follow: false, locOpen: false });
+		};
+		this.onLeave = () => { if (!this.drag && this.state.hover) this.setState({ hover: null }); };
+		this.onDbl = e => { const r = this.boxEl.getBoundingClientRect(); this.zoomAt(1, e.clientX - r.left, e.clientY - r.top); };
+	}
+	componentDidMount() { this.raf = requestAnimationFrame(this.frame); this.iv = setInterval(() => this.setState({ tick: this.state.tick + 1, dl: this.state.dl < 100 ? this.state.dl + 1 : 100 }), 1000); }
+	componentWillUnmount() { cancelAnimationFrame(this.raf); clearInterval(this.iv); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
+	station() { if (this.state.loc) return this.state.loc; return (this.props.location || 'set') === 'approximate' ? APPROX : STATION; }
+	approx() { return !this.state.loc && (this.props.location || 'set') === 'approximate'; }
+	center() {
+		if (this.state.c) return this.state.c;
+		const s = this.station(), z = this.state.zoom;
+		return [wx(s[1], z), wy(s[0] + 0.12, z)];
+	}
+	toXY(lat, lon) { const z = this.state.zoom, c = this.center(); return [wx(lon, z) - c[0] + this.W / 2, wy(lat, z) - c[1] + this.H / 2]; }
+	toLL(x, y) { const z = this.state.zoom, c = this.center(); return [ilat(y - this.H / 2 + c[1], z), ilon(x - this.W / 2 + c[0], z)]; }
+	zoomAt(dz, x, y) {
+		const z0 = this.state.zoom, z1 = Math.max(5.5, Math.min(13, z0 + dz));
+		if (z1 === z0) return;
+		const ll = this.toLL(x, y);
+		const px = wx(ll[1], z1), py = wy(ll[0], z1);
+		this.setState({ zoom: z1, c: [px - (x - this.W / 2), py - (y - this.H / 2)] });
+	}
+	onWheel(e) {
+		e.preventDefault();
+		const r = this.boxEl.getBoundingClientRect();
+		this.zoomAt(-e.deltaY * 0.0025, e.clientX - r.left, e.clientY - r.top);
+	}
+	pos(o, t) {
+		// dead reckoning: t seconds from the snapshot (negative = the past)
+		if (!o.kn) return [o.lat, o.lon];
+		return dest(o.lat, o.lon, o.trk, o.kn * 1.852 * t / 3600);
+	}
+	hitAt(x, y) {
+		let best = null, bd = 14;
+		for (const h of this.hits) { const d = Math.hypot(h.x - x, h.y - y); if (d < bd) { bd = d; best = h; } }
+		return best;
+	}
+	visible(o) { return LAYERS.some(l => this.state.layers[l.id] && l.kinds.includes(o.kind)); }
+	frame(ms) {
+		this.raf = requestAnimationFrame(this.frame);
+		const cv = this.cv;
+		if (!cv) return;
+		const dpr = Math.min(2, window.devicePixelRatio || 1), W = cv.clientWidth, H = cv.clientHeight;
+		if (!W || !H) return;
+		if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+		this.W = W; this.H = H;
+		const t = (ms - this.t0) / 1000 - this.state.scrub * 60;
+		const s = this.state, z = s.zoom;
+		if (s.follow && s.sel) {
+			const o = TRAFFIC.find(x => x.id === s.sel);
+			if (o) { const p = this.pos(o, t); const want = [wx(p[1], z), wy(p[0], z)]; const c = this.center(); if (Math.abs(want[0] - c[0]) + Math.abs(want[1] - c[1]) > 0.5) this.state.c = want; }
+		}
+		const g = cv.getContext('2d');
+		g.setTransform(dpr, 0, 0, dpr, 0, 0);
+		g.fillStyle = '#08110e';
+		g.fillRect(0, 0, W, H);
+		// graticule
+		const step = z < 7 ? 2 : z < 9 ? 1 : z < 11 ? 0.25 : 0.1;
+		const tl = this.toLL(0, 0), br = this.toLL(W, H);
+		g.strokeStyle = 'rgba(123,236,199,0.045)'; g.lineWidth = 1;
+		g.beginPath();
+		for (let lo = Math.ceil(tl[1] / step) * step; lo < br[1]; lo += step) { const x = Math.round(this.toXY(0, lo)[0]) + 0.5; g.moveTo(x, 0); g.lineTo(x, H); }
+		for (let la = Math.ceil(br[0] / step) * step; la < tl[0]; la += step) { const y = Math.round(this.toXY(la, 0)[1]) + 0.5; g.moveTo(0, y); g.lineTo(W, y); }
+		g.stroke();
+		// land
+		const poly = pts => { g.beginPath(); pts.forEach((p, i) => { const q = this.toXY(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.closePath(); };
+		g.fillStyle = '#0f1c18';
+		LAND.forEach(p => { poly(p); g.fill(); });
+		g.lineJoin = 'round';
+		LAND.forEach(p => { poly(p); g.strokeStyle = 'rgba(123,236,199,0.07)'; g.lineWidth = 5; g.stroke(); g.strokeStyle = 'rgba(123,236,199,0.42)'; g.lineWidth = 1; g.stroke(); });
+		// sea labels and places
+		if (s.ov.labels) {
+			g.textAlign = 'center'; g.textBaseline = 'middle';
+			g.font = "700 12px 'D-DIN Condensed', 'Noto Sans', sans-serif";
+			g.fillStyle = 'rgba(123,236,199,0.22)';
+			SEAS.forEach(([n, lo, la]) => { const q = this.toXY(la, lo); if ('letterSpacing' in g) g.letterSpacing = '4px'; g.fillText(n, q[0], q[1]); if ('letterSpacing' in g) g.letterSpacing = '0px'; });
+			g.font = "11.5px 'Noto Sans', sans-serif";
+			PLACES.forEach(([n, lo, la, minZ]) => {
+				if (z < minZ - 1.4) return;
+				const q = this.toXY(la, lo);
+				g.fillStyle = 'rgba(82,100,93,0.95)'; g.beginPath(); g.arc(q[0], q[1], 1.8, 0, 7); g.fill();
+				g.fillStyle = '#6d857a'; g.textAlign = 'left'; g.fillText(n, q[0] + 6, q[1]);
+			});
+		}
+		const st = this.station();
+		const sxy = this.toXY(st[0], st[1]);
+		const kmpx = 1 / (2 * Math.PI * R * Math.cos(rad(st[0])) / (256 * Math.pow(2, z)));
+		// coverage
+		if (s.ov.coverage) {
+			[['adsb', 'rgba(123,236,199,0.30)', 'rgba(123,236,199,0.03)'], ['ais', 'rgba(142,197,255,0.35)', 'rgba(142,197,255,0.04)']].forEach(([k, stroke, fill]) => {
+				g.beginPath();
+				for (let b = 0; b <= 360; b += 5) { const p = dest(st[0], st[1], b, covRadius(k, b)); const q = this.toXY(p[0], p[1]); if (b) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }
+				g.closePath(); g.fillStyle = fill; g.fill(); g.strokeStyle = stroke; g.lineWidth = 1; g.setLineDash([]); g.stroke();
+			});
+		}
+		// rings
+		if (s.ov.rings) {
+			g.setLineDash([3, 6]); g.strokeStyle = 'rgba(123,236,199,0.14)'; g.lineWidth = 1;
+			g.font = "11px 'Noto Sans', sans-serif"; g.fillStyle = 'rgba(123,236,199,0.4)'; g.textAlign = 'center';
+			[10, 25, 50, 100, 200, 300].forEach(km => {
+				const rr = km * kmpx;
+				if (rr < 40 || rr > Math.max(W, H) * 1.6) return;
+				g.beginPath(); g.arc(sxy[0], sxy[1], rr, 0, Math.PI * 2); g.stroke();
+				g.fillText(km + ' km', sxy[0], sxy[1] - rr - 7);
+			});
+			g.setLineDash([]);
+		}
+		// mesh links
+		const P = {};
+		TRAFFIC.forEach(o => { P[o.id] = this.pos(o, o.kind === 'acars' ? 0 : t); });
+		if (s.ov.links && s.layers.mesh) {
+			LINKS.forEach(([a, b, snr]) => {
+				const p = this.toXY(P[a][0], P[a][1]), q = this.toXY(P[b][0], P[b][1]);
+				g.setLineDash([2, 4]); g.strokeStyle = snr > 5 ? 'rgba(201,168,255,0.55)' : 'rgba(201,168,255,0.25)'; g.lineWidth = 1;
+				g.beginPath(); g.moveTo(p[0], p[1]); g.lineTo(q[0], q[1]); g.stroke();
+			});
+			g.setLineDash([]);
+		}
+		// trails
+		if (s.ov.trails) {
+			TRAFFIC.forEach(o => {
+				if (!o.kn || !this.visible(o) || o.kind === 'acars') return;
+				const span = o.kind === 'aircraft' ? 180 : 900;
+				const a = this.toXY(P[o.id][0], P[o.id][1]);
+				const pb = this.pos(o, t - span), b = this.toXY(pb[0], pb[1]);
+				const grad = g.createLinearGradient(a[0], a[1], b[0], b[1]);
+				const c0 = o.kind === 'aircraft' ? altColor(o.ft).replace('rgb(', 'rgba(').replace(')', ',0.55)') : { vessel: 'rgba(142,197,255,0.5)', aprs: 'rgba(244,247,245,0.4)', mesh: 'rgba(201,168,255,0.5)' }[o.kind];
+				grad.addColorStop(0, c0);
+				grad.addColorStop(1, 'rgba(0,0,0,0)');
+				g.strokeStyle = grad; g.lineWidth = 1.5; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+			});
+		}
+		// markers
+		const hits = [];
+		const label = (txt, x, y, col, bold) => { g.font = (bold ? '700 ' : '') + "11.5px 'Noto Sans', sans-serif"; g.textAlign = 'left'; g.fillStyle = 'rgba(8,17,14,0.75)'; const w = g.measureText(txt).width; g.fillRect(x - 3, y - 8, w + 6, 16); g.fillStyle = col; g.fillText(txt, x, y); };
+		const PLANE = [[0, -9], [1.5, -3], [8, 1], [8, 3], [1.5, 1.5], [1, 6], [3.5, 8], [3.5, 9], [0, 8.2], [-3.5, 9], [-3.5, 8], [-1, 6], [-1.5, 1.5], [-8, 3], [-8, 1], [-1.5, -3]];
+		const HULL = [[0, -8], [4, -2], [4, 7], [-4, 7], [-4, -2]];
+		const shape = (pts, x, y, ang, fill, stroke) => { g.save(); g.translate(x, y); g.rotate(rad(ang)); g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); if (fill) { g.fillStyle = fill; g.fill(); } if (stroke) { g.strokeStyle = stroke; g.lineWidth = 1.2; g.stroke(); } g.restore(); };
+		const order = ['mesh', 'aprs', 'aton', 'vessel', 'acars', 'aircraft'];
+		order.forEach(kind => TRAFFIC.forEach(o => {
+			if (o.kind !== kind || !this.visible(o)) return;
+			const p = P[o.id], q = this.toXY(p[0], p[1]);
+			if (q[0] < -30 || q[1] < -30 || q[0] > W + 30 || q[1] > H + 30) return;
+			if (dist(st, p) > 420 && o.kind === 'aircraft') return;
+			const isSel = s.sel === o.id, isHov = s.hover && s.hover.id === o.id;
+			if (isSel) { g.strokeStyle = 'rgba(244,247,245,0.9)'; g.lineWidth = 1.5; g.beginPath(); g.arc(q[0], q[1], 15, 0, 7); g.stroke(); }
+			let col;
+			if (kind === 'aircraft') { col = altColor(o.ft); shape(PLANE, q[0], q[1], o.trk, col, 'rgba(8,17,14,0.9)'); }
+			else if (kind === 'vessel') { col = COL.vessel; if (o.kn < 0.5) { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4, 0, 7); g.fill(); } else shape(HULL, q[0], q[1], o.trk, col, 'rgba(8,17,14,0.9)'); }
+			else if (kind === 'aton') { col = COL.aton; shape([[0, -5], [5, 0], [0, 5], [-5, 0]], q[0], q[1], 0, null, col); }
+			else if (kind === 'aprs') { col = COL.aprs; if (o.type === 'Weather station') { g.strokeStyle = col; g.lineWidth = 1.4; g.strokeRect(q[0] - 4.5, q[1] - 4.5, 9, 9); } else { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4.5, 0, 7); g.fill(); g.fillStyle = '#08110e'; g.beginPath(); g.arc(q[0], q[1], 1.6, 0, 7); g.fill(); } }
+			else if (kind === 'mesh') { col = COL.mesh; g.fillStyle = col; g.beginPath(); for (let k = 0; k < 6; k++) { const a = Math.PI / 3 * k; const xx = q[0] + 5 * Math.cos(a), yy = q[1] + 5 * Math.sin(a); if (k) g.lineTo(xx, yy); else g.moveTo(xx, yy); } g.closePath(); g.fill(); }
+			else if (kind === 'acars') { col = COL.acars; g.setLineDash([2, 2]); shape([[0, -6], [6, 0], [0, 6], [-6, 0]], q[0], q[1], 0, null, col); g.setLineDash([]); }
+			const showLabel = isSel || isHov || (s.ov.labels && (kind === 'aircraft' ? z >= 8 : kind === 'vessel' ? z >= 9.4 : kind === 'acars' || z >= 9));
+			if (showLabel) {
+				const txt = kind === 'aircraft' ? o.name + '  ' + (o.ft >= 10000 ? 'FL' + String(Math.round(o.ft / 100)).padStart(3, '0') : Math.round(o.ft / 100) * 100 + ' ft') : kind === 'acars' ? o.name + ' · ' + o.age + ' min ago' : o.name;
+				label(txt, q[0] + 11, q[1] - 1, kind === 'aircraft' ? '#e3ece7' : col, isSel);
+			}
+			hits.push({ id: o.id, x: q[0], y: q[1] });
+		}));
+		this.hits = hits;
+		// station
+		const pulse = (ms / 1000) % 2.4 / 2.4;
+		if (this.approx()) {
+			const rr = 18 * kmpx;
+			g.setLineDash([4, 4]); g.strokeStyle = 'rgba(242,184,75,0.7)'; g.lineWidth = 1.2; g.beginPath(); g.arc(sxy[0], sxy[1], rr, 0, 7); g.stroke(); g.setLineDash([]);
+			g.fillStyle = 'rgba(242,184,75,0.08)'; g.fill();
+			g.fillStyle = '#f2b84b'; g.beginPath(); g.arc(sxy[0], sxy[1], 3, 0, 7); g.fill();
+		} else {
+			g.strokeStyle = 'rgba(123,236,199,' + (0.6 * (1 - pulse)) + ')'; g.lineWidth = 1.5; g.beginPath(); g.arc(sxy[0], sxy[1], 6 + pulse * 22, 0, 7); g.stroke();
+			g.fillStyle = '#08110e'; g.beginPath(); g.arc(sxy[0], sxy[1], 7, 0, 7); g.fill();
+			g.strokeStyle = '#7becc7'; g.lineWidth = 2; g.stroke();
+			g.fillStyle = '#7becc7'; g.beginPath(); g.arc(sxy[0], sxy[1], 2.5, 0, 7); g.fill();
+		}
+		if (s.pending) { const pq = this.toXY(s.pending[0], s.pending[1]); g.strokeStyle = '#f4f7f5'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(pq[0] - 8, pq[1]); g.lineTo(pq[0] + 8, pq[1]); g.moveTo(pq[0], pq[1] - 8); g.lineTo(pq[0], pq[1] + 8); g.stroke(); }
+	}
+	selInfo(o) {
+		const st = this.station(), t = (performance.now() - this.t0) / 1000 - this.state.scrub * 60;
+		const p = o.kind === 'acars' ? [o.lat, o.lon] : this.pos(o, t);
+		const d = dist(st, p), b = bearing(st, p);
+		const rel = d.toFixed(d < 10 ? 1 : 0) + ' km ' + cardinal(b);
+		const ll = fmtLat(p[0]) + ' ' + fmtLon(p[1]);
+		if (o.kind === 'aircraft') return { icon: ICONS.aircraft, color: altColor(o.ft), title: o.name, sub: o.type + ' · ICAO ' + o.icao + (o.note ? ' · ' + o.note : ''), note: '', fields: [['Altitude', o.ft.toLocaleString('en-GB').replace(/,/g, ' ') + ' ft'], ['Vertical', o.vs > 0 ? '↑ ' + o.vs + ' ft/min' : o.vs < 0 ? '↓ ' + -o.vs + ' ft/min' : 'Level'], ['Speed', o.kn + ' kn'], ['Track', Math.round(o.trk) + '°'], ['Squawk', o.sq], ['From station', rel], ['Signal', o.rssi.toFixed(1) + ' dBFS'], ['Messages', String(o.msgs)]], seen: 'ADS-B · readsb · last message 0.4 s ago · ' + ll, token: o.name };
+		if (o.kind === 'vessel' || o.kind === 'aton') return { icon: ICONS.vessel, color: COL.vessel, title: o.name, sub: o.type + ' · MMSI ' + o.mmsi, note: '', fields: o.kind === 'aton' ? [['Type', 'Aid to navigation'], ['From station', rel], ['Status', 'On station'], ['Report', 'AIS type 21']] : [['Speed', o.kn.toFixed(1) + ' kn'], ['Course', Math.round(o.trk) + '°'], ['Status', o.status], ['Destination', o.dest], ['From station', rel], ['Channel', o.mmsi % 2 ? 'AIS A' : 'AIS B']], seen: 'AIS · AIS-catcher · last report 3 s ago · ' + ll, token: String(o.mmsi) };
+		if (o.kind === 'aprs') return { icon: ICONS.aprs, color: COL.aprs, title: o.name, sub: o.type + ' · via ' + o.path, note: o.note, fields: [['Speed', o.kn ? Math.round(o.kn * 1.852) + ' km/h' : 'Fixed'], ['Course', o.kn ? Math.round(o.trk) + '°' : '—'], ['From station', rel], ['Frequency', '144.800 MHz']], seen: 'APRS · Direwolf · last packet 1 min ago · ' + ll, token: o.name };
+		if (o.kind === 'mesh') return { icon: ICONS.mesh, color: COL.mesh, title: o.name, sub: 'Meshtastic node ' + o.node + ' · LongFast', note: o.note, fields: [['From station', rel], ['Links', String(LINKS.filter(l => l[0] === o.id || l[1] === o.id).length)], ['Best SNR', Math.max.apply(null, LINKS.filter(l => l[0] === o.id || l[1] === o.id).map(l => l[2])).toFixed(1) + ' dB'], ['Battery', '81 %']], seen: 'Meshtastic · 869.525 MHz · last heard 3 min ago · ' + ll, token: o.name };
+		return { icon: ICONS.acars, color: COL.acars, title: o.name + ' · ' + o.tail, sub: o.via, note: o.note, mono: true, fields: [['Reported', o.age + ' min ago'], ['Level', 'FL' + Math.round(o.ft / 100)], ['From station', rel], ['Accuracy', 'Position in message']], seen: 'Position parsed from the message text · ' + ll, token: o.name };
+	}
+	parseLoc(q) {
+		const s = q.trim().replace(/−/g, '-');
+		if (!s) return null;
+		const m = /^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/.exec(s);
+		if (m) { const a = parseFloat(m[1]), b = parseFloat(m[2]); if (Math.abs(a) <= 90 && Math.abs(b) <= 180) return [a, b]; return 'bad'; }
+		const mh = maidenhead(s);
+		return mh || 'bad';
+	}
+	renderVals() {
+		const s = this.state, emb = !!this.props.embedded;
+		const tiles = s.tiles || this.props.tiles || 'offline';
+		const st = this.station();
+		const counts = {};
+		TRAFFIC.forEach(o => { counts[o.kind] = (counts[o.kind] || 0) + 1; });
+		const selObj = s.sel ? TRAFFIC.find(o => o.id === s.sel) : null;
+		const sel = selObj ? this.selInfo(selObj) : null;
+		const hoverObj = s.hover ? TRAFFIC.find(o => o.id === s.hover.id) : null;
+		const pq = this.parseLoc(s.locQ);
+		const target = s.pending || (Array.isArray(pq) ? pq : null);
+		const minutes = s.scrub;
+		const tClock = (() => { const m = 14 * 60 + 3 - minutes; return String(Math.floor(m / 60)).padStart(2, '0') + ':' + String(m % 60).padStart(2, '0'); })();
+		return {
+			refs: this.refsObj,
+			rootPos: emb ? 'absolute' : 'relative', rootH: emb ? 'auto' : '100vh',
+			chipTop: emb ? '16px' : '16px',
+			panelTop: emb ? '88px' : '16px',
+			timeBottom: emb ? '96px' : '20px',
+			legendBottom: emb ? '96px' : '20px',
+			onDown: this.onDown, onMove: this.onMove, onUp: this.onUp, onLeave: this.onLeave, onDbl: this.onDbl,
+			cursor: s.picking ? 'crosshair' : this.drag ? 'grabbing' : s.hover ? 'pointer' : 'grab',
+			hasHover: !!hoverObj && !this.drag, hoverX: s.hover ? s.hover.x : 0, hoverY: s.hover ? s.hover.y : 0,
+			hoverTitle: hoverObj ? hoverObj.name : '',
+			hoverSub: hoverObj ? (hoverObj.kind === 'aircraft' ? (hoverObj.ft >= 10000 ? 'FL' + Math.round(hoverObj.ft / 100) : hoverObj.ft + ' ft') + ' · ' + hoverObj.kn + ' kn' : hoverObj.kind === 'vessel' ? hoverObj.type + ' · ' + hoverObj.kn.toFixed(1) + ' kn' : hoverObj.type || hoverObj.via || hoverObj.node || '') : '',
+			layers: LAYERS.map(l => {
+				const on = !!s.layers[l.id];
+				const n = l.kinds.reduce((a, k) => a + (counts[k] || 0), 0);
+				return { label: l.label, count: String(n), title: l.title, on: on ? 'true' : 'false', dot: on ? l.dot : '#52645d', shape: l.shape, border: on ? 'rgba(123,236,199,.28)' : 'transparent', bg: on ? 'rgba(123,236,199,.08)' : 'transparent', fg: on ? '#f4f7f5' : '#8ba598', pick: () => this.setState({ layers: Object.assign({}, s.layers, { [l.id]: !on }) }) };
+			}),
+			overlaysOpen: s.overlaysOpen, ovBg: s.overlaysOpen ? '#192b24' : 'transparent',
+			toggleOverlays: () => this.setState({ overlaysOpen: !s.overlaysOpen }),
+			overlays: [['rings', 'Range rings', 'Distance from your station'], ['coverage', 'Coverage', 'Furthest reception per bearing, last 24 h'], ['trails', 'Trails', 'Where things came from'], ['labels', 'Labels', 'Callsigns, names and places'], ['links', 'Mesh links', 'Who hears whom, by SNR']].map(([k, label, sub]) => ({ label, sub, on: s.ov[k] ? 'true' : 'false', track: s.ov[k] ? '#7becc7' : '#2c443b', knob: s.ov[k] ? 16 : 2, pick: () => this.setState({ ov: Object.assign({}, s.ov, { [k]: !s.ov[k] }) }) })),
+			showApprox: this.approx() && !s.picking && !s.locOpen,
+			picking: s.picking,
+			cancelPick: () => this.setState({ picking: false, locOpen: true }),
+			hasSel: !!sel && !s.locOpen,
+			sel: sel ? Object.assign({}, sel, { hasNote: !!sel.note, noteFont: sel.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit', fields: sel.fields.map(f => ({ k: f[0], v: f[1] })) }) : { icon: [], fields: [], title: '', sub: '', seen: '', color: '#7becc7', note: '', hasNote: false, noteFont: 'inherit' },
+			closeSel: () => this.setState({ sel: null, follow: false }),
+			following: s.follow ? 'true' : 'false',
+			followText: s.follow ? 'Following' : 'Follow',
+			followBorder: s.follow ? 'rgba(123,236,199,.6)' : '#2c443b', followBg: s.follow ? 'rgba(123,236,199,.12)' : 'transparent', followFg: s.follow ? '#7becc7' : '#b9cac1',
+			toggleFollow: () => this.setState({ follow: !s.follow }),
+			selActivity: () => { if (this.props.onAction && sel) this.props.onAction('activity', { type: 'call', v: sel.token, kind: 'Name', value: sel.token }); },
+			locOpen: s.locOpen,
+			openLocation: () => this.setState({ locOpen: true, sel: null, locQ: '', pending: null }),
+			closeLocation: () => this.setState({ locOpen: false, pending: null }),
+			startPick: () => this.setState({ picking: true, locOpen: false }),
+			useBrowser: () => this.setState({ pending: STATION, locQ: STATION[0].toFixed(4) + ', ' + STATION[1].toFixed(4) }),
+			locQ: s.locQ,
+			onLocQ: e => this.setState({ locQ: e.target.value, pending: null }),
+			locQBorder: pq === 'bad' ? 'rgba(242,184,75,.6)' : '#2c443b',
+			hasLocParse: !!target || pq === 'bad',
+			locParse: pq === 'bad' ? 'Not recognised. Try “48.7051, -3.9750” or a locator like IN88aq.' : target ? fmtLat(target[0]) + ' · ' + fmtLon(target[1]) + ' · ' + toLocator(target[0], target[1]) : '',
+			locParseC: pq === 'bad' ? '#f2b84b' : '#b9cac1',
+			saveDisabled: !target,
+			saveBg: target ? '#7becc7' : '#192b24', saveFg: target ? '#111c19' : '#52645d',
+			saveLocation: () => { if (target) this.setState({ loc: target, pending: null, locOpen: false, c: null }); },
+			locNow: this.approx() ? 'Approximate · from what you receive · ' + toLocator(st[0], st[1]) : fmtLat(st[0]) + ' · ' + fmtLon(st[1]) + ' · ' + toLocator(st[0], st[1]),
+			locDot: this.approx() ? '#f2b84b' : '#7becc7',
+			stationText: this.approx() ? 'Station approximate' : 'Station ' + toLocator(st[0], st[1]),
+			tilesOffline: tiles === 'offline' || (tiles === 'downloading' && s.dl >= 100),
+			tilesOnline: tiles === 'online',
+			tilesDownloading: tiles === 'downloading' && s.dl < 100,
+			dlPct: String(Math.min(100, 38 + s.dl)),
+			downloadTiles: () => this.setState({ tiles: 'downloading', dl: 0 }),
+			hist: HIST.map((h, i) => ({ h, c: i >= 60 - minutes ? 'rgba(123,236,199,.18)' : 'rgba(123,236,199,.45)' })),
+			scrub: 60 - minutes,
+			cursorPct: (60 - minutes) / 60 * 100,
+			onScrub: e => this.setState({ scrub: 60 - Number(e.target.value) }),
+			isLive: minutes === 0 ? 'true' : 'false',
+			liveText: minutes === 0 ? 'Live' : 'Back to live',
+			liveBg: minutes === 0 ? 'rgba(123,236,199,.14)' : '#192b24', liveFg: minutes === 0 ? '#7becc7' : '#b9cac1',
+			goLive: () => this.setState({ scrub: 0 }),
+			timeText: minutes === 0 ? 'Live · 14:03' : '−' + minutes + ' min · ' + tClock,
+			zoomIn: () => this.zoomAt(1, this.W / 2, this.H / 2),
+			zoomOut: () => this.zoomAt(-1, this.W / 2, this.H / 2),
+			recenter: () => this.setState({ c: null, follow: false })
+		};
+	}
+}
+</script>
+</body>
+</html>

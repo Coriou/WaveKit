@@ -125,6 +125,15 @@
 			"h": 2900,
 			"title": "Tuned card — every signal type WaveKit decodes",
 			"is_interactive": true
+		},
+		"Map.dc.html": {
+			"x": 0,
+			"y": 6640,
+			"w": 1440,
+			"h": 900,
+			"title": "Map — everything with a position, around your station",
+			"expand": "fill",
+			"is_interactive": true
 		}
 	},
 	"order": [
@@ -141,7 +150,8 @@
 		"Decode.dc.html",
 		"Json.dc.html",
 		"Activity.dc.html",
-		"Palette.dc.html"
+		"Palette.dc.html",
+		"Map.dc.html"
 	],
 	"notes": {
 		"shells": {

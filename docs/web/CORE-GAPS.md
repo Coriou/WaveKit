@@ -42,3 +42,15 @@ Format: `- [ ] item` — tick (`- [x]`) once it is in core on `main`.
 - [ ] DMR talker alias and error rate in call events (verify what dsd-fme exposes).
 - [ ] Authentication and origin policy before any browser UI ships (already on the roadmap).
 
+**Map**
+- [ ] Station location in core config (lat, lon, altitude; set from the UI), passed to
+  readsb as `--lat/--lon`; approximate location estimated from received positions when
+  unset; gpsd support later for the portable receiver.
+- [ ] Position history for aircraft, vessels, APRS and mesh nodes (trails, last-hour
+  replay), served with a time cursor.
+- [ ] Coverage: maximum range per bearing over 24 h for ADS-B and AIS.
+- [ ] Map tiles: serve a regional PMTiles extract (download and update from Settings)
+  plus map glyphs (fonts) and the style; online OpenFreeMap fallback.
+- [ ] Position extraction from ACARS / VDL2 (ADS-C, `POS` reports) and AIS aids to
+  navigation (type 21) into the common envelope.
+
