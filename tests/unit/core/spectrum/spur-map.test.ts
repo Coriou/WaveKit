@@ -60,6 +60,14 @@ function masked(map: SpurMap, key = KEY): number[] {
 	return bins
 }
 
+/** Size of the key's private RF table: the bound (P11) has no public surface. */
+function rfEntries(map: SpurMap, key = KEY): number {
+	const keys = (
+		map as unknown as { keys: Map<string, { rf: Map<number, unknown> }> }
+	).keys
+	return keys.get(key)?.rf.size ?? 0
+}
+
 describe("SpurMap", () => {
 	it("masks a spur that stays at one baseband offset across three centres", () => {
 		const map = newMap()
@@ -118,6 +126,42 @@ describe("SpurMap", () => {
 		expect(carriers).toHaveLength(1)
 		expect(Math.abs(carriers[0]!.rfHz - rf)).toBeLessThanOrEqual(BIN_HZ)
 		expect(carriers[0]!.widthBins).toBe(1)
+	})
+
+	it("reports the full width of a stable three-bin RF carrier", () => {
+		const map = newMap()
+		const rf = 447_000_000
+		feed(map, 1, 446_400_000, 6, { rfHz: [rf], widthBins: 3 })
+		feed(map, 2, 447_350_000, 6, { rfHz: [rf], widthBins: 3 })
+		const carriers = map.rfCarriers()
+		expect(carriers).toHaveLength(1)
+		expect(carriers[0]!.widthBins).toBe(3)
+		expect(Math.abs(carriers[0]!.rfHz - (rf + BIN_HZ))).toBeLessThanOrEqual(
+			BIN_HZ,
+		)
+	})
+
+	it("bounds the RF table and keeps the most-on entries when it overflows", () => {
+		const map = newMap()
+		const rf = 447_000_000
+		feed(map, 1, 446_400_000, 6, { rfHz: [rf] })
+		// Ten single-block epoch floods, each a full window of fresh, always-on
+		// entries a whole span apart: none falls below onFraction, so only the
+		// eviction step can hold the bound.
+		const all = new Uint8Array(N).fill(1)
+		for (let k = 0; k < 10; k++)
+			map.observe(
+				KEY,
+				{ epoch: 100 + k, centreHz: 500_000_000 + k * FS, binHz: BIN_HZ },
+				all,
+				BLOCK_MS,
+			)
+		expect(rfEntries(map)).toBeLessThanOrEqual(16_384)
+		expect(rfEntries(map)).toBeGreaterThan(16_384 - N)
+		feed(map, 2, 447_350_000, 6, { rfHz: [rf] })
+		const carriers = map.rfCarriers()
+		expect(carriers).toHaveLength(1)
+		expect(Math.abs(carriers[0]!.rfHz - rf)).toBeLessThanOrEqual(BIN_HZ)
 	})
 
 	it("does not call an RF carrier seen under a single centre anything", () => {

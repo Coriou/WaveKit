@@ -147,6 +147,11 @@ export class SpurMap {
 			for (const [rb, e] of s.rf)
 				if (e.onMs < this.onFraction * e.observedMs) s.rf.delete(rb)
 		}
+		if (s.rf.size > MAX_RF_ENTRIES) {
+			// Still over the bound (P11): evict the least-on entries, oldest first on ties.
+			const byOn = [...s.rf].sort((a, b) => a[1].onMs - b[1].onMs)
+			for (let k = 0; s.rf.size > MAX_RF_ENTRIES; k++) s.rf.delete(byOn[k]![0])
+		}
 		this.classify(s)
 	}
 
@@ -324,7 +329,10 @@ export class SpurMap {
 				qualifying.push(rb)
 		}
 		qualifying.sort((a, b) => a - b)
-		// The ±1-bin dilation widens every run by two bins.
+		// A carrier that straddles a bin edge under different centres can leave a
+		// qualifying entry one bin to either side of its own run, so a run up to
+		// two bins wider than maxWidthBins is still accepted; the width reported is
+		// the whole run.
 		for (let i = 0; i < qualifying.length; ) {
 			let j = i
 			while (
@@ -340,7 +348,7 @@ export class SpurMap {
 				if (![...s.rfConfirmed.keys()].some(k => Math.abs(k - mid) <= 1)) {
 					s.rfConfirmed.set(mid, {
 						rfHz: ((first + last) / 2) * s.binHz,
-						widthBins: Math.max(1, width - 2),
+						widthBins: width,
 						basebandBin: s.rf.get(mid)?.lastBasebandBin ?? 0,
 					})
 				}
