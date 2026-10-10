@@ -148,10 +148,12 @@ export function transition(
 		case "engine-ready":
 			return s.state === "starting" ? to("running", []) : INVALID
 		case "tuner-error":
+			// A first retune can fail mid-sequence (rate written, frequency refused): restore what was
+			// written; a failed restore is re-queued for the next connection (H4). No-op without a lease.
 			return s.state === "starting"
 				? to(
 						"failed",
-						["release-lease", "release-decoders"],
+						["restore", "release-lease", "release-decoders"],
 						"tuner-unavailable",
 					)
 				: INVALID

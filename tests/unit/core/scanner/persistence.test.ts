@@ -322,6 +322,27 @@ describe("ScannerPersistence lifecycle files", () => {
 		})
 	})
 
+	it("round-trips a lease whose job was deleted (S1-B final review, finding 1)", async () => {
+		await withDir(async dir => {
+			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
+			const orphan = { ...job.lease!, sourceId: "src-2", jobId: "j_gone" }
+			await p.writeJobs([job], [orphan])
+			const loaded = await new ScannerPersistence({
+				dir,
+				logger,
+				now: () => T0,
+			}).load()
+			expect(loaded.jobs).toEqual([job])
+			expect(loaded.leases).toEqual([orphan])
+			// No orphan: the file has no `leases` key, as before.
+			await p.writeJobs([job])
+			const raw = JSON.parse(
+				await readFile(join(dir, "jobs.json"), "utf8"),
+			) as Record<string, unknown>
+			expect(raw).not.toHaveProperty("leases")
+		})
+	})
+
 	it("loadConfig reads jobs, settings and engine state when the journal is unreadable, and stays unloaded", async () => {
 		await withDir(async dir => {
 			const p = new ScannerPersistence({ dir, logger, now: () => T0 })
@@ -336,6 +357,7 @@ describe("ScannerPersistence lifecycle files", () => {
 			await expect(q.load()).rejects.toThrow()
 			await expect(q.loadConfig()).resolves.toEqual({
 				jobs: [job],
+				leases: [],
 				settings: { cpuBudgetCores: 0.5 },
 				engines: { rtl: engine },
 			})

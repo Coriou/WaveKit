@@ -3,7 +3,8 @@
  *
  * - `discoveries.json`: snapshot of discoveries + observations with `lastSeq` (atomic write);
  * - `journal/observations-YYYYMMDD.jsonl`: one line per store mutation, monotonic `seq`, UTC daily files;
- * - `jobs.json`: job specs, lifecycle state and the persisted lease (lifecycle changes only);
+ * - `jobs.json`: job specs, lifecycle state and the persisted lease (lifecycle changes only), plus
+ *   `leases`: persisted leases whose job was deleted (their recovery still runs, H4);
  * - `settings.json`: runtime settings overrides; `engine/<sourceId>.json`: learned engine state;
  * - `engine/occupancy/<sourceId>.json`: occupancy history (Task 17a).
  *
@@ -104,6 +105,8 @@ export interface LoadedState {
 	lastSeq: number
 	entries: JournalEntry[]
 	jobs: PersistedJob[]
+	/** Persisted leases whose job was deleted (jobs.json `leases`): crash recovery still restores them (H4). */
+	leases: PersistedLease[]
 	settings: RuntimeSettingsOverrides
 	engines: Record<string, EngineState>
 	droppedLines: number
@@ -322,6 +325,7 @@ const SnapshotFileSchema = z.object({
 const JobsFileSchema = z.object({
 	version: z.literal(FILE_VERSION),
 	jobs: z.array(PersistedJobSchema),
+	leases: z.array(PersistedLeaseSchema).optional(),
 })
 const SettingsFileSchema = z.object({
 	version: z.literal(FILE_VERSION),
@@ -448,7 +452,7 @@ export class ScannerPersistence {
 		this.fileBytes.clear()
 		const snapshot = await this.readSnapshot()
 		const journal = await this.readJournal(snapshot.lastSeq)
-		const jobs = await this.readJobs()
+		const { jobs, leases } = await this.readJobs()
 		const settings = await this.readSettings()
 		const engines = await this.readEngines()
 		this.durableLastSeq = snapshot.lastSeq
@@ -471,6 +475,7 @@ export class ScannerPersistence {
 			lastSeq: snapshot.lastSeq,
 			entries: journal.entries,
 			jobs,
+			leases,
 			settings,
 			engines,
 			droppedLines: journal.dropped,
@@ -483,12 +488,12 @@ export class ScannerPersistence {
 	 * Never marks the state loaded, so journal and snapshot writes stay refused.
 	 */
 	async loadConfig(): Promise<
-		Pick<LoadedState, "jobs" | "settings" | "engines">
+		Pick<LoadedState, "jobs" | "leases" | "settings" | "engines">
 	> {
-		const jobs = await this.readJobs()
+		const { jobs, leases } = await this.readJobs()
 		const settings = await this.readSettings()
 		const engines = await this.readEngines()
-		return { jobs, settings, engines }
+		return { jobs, leases, settings, engines }
 	}
 
 	append(entry: Omit<JournalEntry, "seq">): Promise<number> {
@@ -539,8 +544,16 @@ export class ScannerPersistence {
 		})
 	}
 
-	writeJobs(jobs: PersistedJob[]): Promise<void> {
-		const text = JSON.stringify({ version: FILE_VERSION, jobs }, null, "\t")
+	/** `leases`: persisted leases whose job is gone (written only when there are some). */
+	writeJobs(
+		jobs: PersistedJob[],
+		leases: PersistedLease[] = [],
+	): Promise<void> {
+		const text = JSON.stringify(
+			{ version: FILE_VERSION, jobs, ...(leases.length > 0 ? { leases } : {}) },
+			null,
+			"\t",
+		)
 		return this.enqueue(() => atomicWrite(join(this.root, JOBS_FILE), text))
 	}
 
@@ -740,10 +753,13 @@ export class ScannerPersistence {
 		}
 	}
 
-	private async readJobs(): Promise<PersistedJob[]> {
+	private async readJobs(): Promise<{
+		jobs: PersistedJob[]
+		leases: PersistedLease[]
+	}> {
 		const file = join(this.root, JOBS_FILE)
 		const read = await readJson(file)
-		if (read.kind === "missing") return []
+		if (read.kind === "missing") return { jobs: [], leases: [] }
 		const parsed =
 			read.kind === "ok" ? JobsFileSchema.safeParse(read.value) : null
 		if (parsed === null || !parsed.success) {
@@ -757,9 +773,12 @@ export class ScannerPersistence {
 				},
 				"Scanner jobs file is invalid; starting with no jobs",
 			)
-			return []
+			return { jobs: [], leases: [] }
 		}
-		return parsed.data.jobs as PersistedJob[]
+		return {
+			jobs: parsed.data.jobs as PersistedJob[],
+			leases: (parsed.data.leases ?? []) as PersistedLease[],
+		}
 	}
 
 	private async readSettings(): Promise<RuntimeSettingsOverrides> {

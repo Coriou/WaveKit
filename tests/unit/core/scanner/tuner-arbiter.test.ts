@@ -674,6 +674,69 @@ describe("TunerArbiter lease discipline", () => {
 		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
 	})
 
+	it("re-queues a restoring release that cannot write (source down) and restores on the next payload (S1-B final review, finding 1)", async () => {
+		const h = harness()
+		const results: { restored: string[]; unrestorable: string[] }[] = []
+		h.arbiter.on(
+			"recovered",
+			(_id: string, r: { restored: string[]; unrestorable: string[] }) =>
+				results.push(r),
+		)
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		const a = h.arbiter.acquire("a", "rtl", 50)
+		if (!a.ok) throw new Error("acquire failed")
+		await h.arbiter.retune(a.lease, {
+			centreHz: 450_037_500,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		// The link drops: every write fails ("Source … is not connected").
+		h.sources.emit("disconnected", "rtl")
+		h.tuner.failAll = new Error("Source rtl is not connected")
+		const before = h.tuner.sent.length
+		const res = await h.arbiter.release(a.lease, { restore: true })
+		expect(res).toEqual({ restored: [], unrestorable: ["frequency"] })
+		expect(h.tuner.sent.length).toBe(before)
+		// The record is persisted again (not cleared) and blocks a new lease until the source is back.
+		expect(h.persisted.at(-1)).toMatchObject({
+			sourceId: "rtl",
+			lease: { jobId: "a", snapshot: { frequency: 446_100_000 } },
+		})
+		expect(h.arbiter.acquire("b", "rtl", 50)).toMatchObject({
+			ok: false,
+			detail: "recovery pending",
+		})
+		// The link is back: the controller replays the scanner's last hop, then the payload restores.
+		h.tuner.failAll = null
+		h.tuner.external("rtl", "set-frequency", 450_037_500, "replay")
+		h.sources.emit("payload-started", "rtl")
+		await new Promise(resolve => setImmediate(resolve))
+		expect(
+			h.tuner.sent.slice(before).map(c => [c.name, c.value, c.origin]),
+		).toEqual([
+			["set-test-mode", 0, "scanner"],
+			["set-frequency", 446_100_000, "scanner"],
+		])
+		expect(h.tuner.states.get("rtl")!.frequency).toBe(446_100_000)
+		expect(results).toEqual([{ restored: ["frequency"], unrestorable: [] }])
+		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
+	})
+
+	it("never re-queues a release without restore of a lease that was not adopted", async () => {
+		const h = harness()
+		const a = h.arbiter.acquire("a", "rtl", 50)
+		if (!a.ok) throw new Error("acquire failed")
+		await h.arbiter.retune(a.lease, {
+			centreHz: 450_037_500,
+			gainTenthsDb: null,
+			sampleRateHz: null,
+		})
+		await h.arbiter.release(a.lease, { restore: false })
+		expect(h.persisted.at(-1)).toEqual({ sourceId: "rtl", lease: null })
+		expect(h.arbiter.acquire("b", "rtl", 50)).toMatchObject({ ok: true })
+	})
+
 	it("keeps the holder's persisted lease when a recovered listener drops its copy", async () => {
 		// Mirrors Task 35: onPersistLease keeps the record, onRecovered deletes it.
 		const store = new Map<string, PersistedLease>()

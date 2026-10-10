@@ -408,8 +408,10 @@ export class TunerArbiter extends EventEmitter {
 			}
 			missed = r.failed
 		}
-		if (this.adopted.has(lease) && missed.length > 0) {
-			// A crashed sweep's state is still on the tuner: recovery takes it back on the next connection.
+		if (missed.length > 0 && (opts.restore || this.adopted.has(lease))) {
+			// The scan state is still on the tuner (a restore that failed, e.g. while the source is
+			// disconnected, or a crashed sweep's record): recovery takes it back on the next connection,
+			// after the controller's replay of the last hop (H4).
 			const record = this.recordOf(lease)
 			this.recovering.set(lease.sourceId, record)
 			await this.deps
@@ -422,7 +424,7 @@ export class TunerArbiter extends EventEmitter {
 				})
 			this.log.warn(
 				{ sourceId: lease.sourceId, jobId: lease.jobId, missed },
-				"Released an adopted lease without a full restore; crash recovery re-queued",
+				"Released a lease without a full restore; recovery re-queued for the next connection",
 			)
 		} else {
 			await this.deps

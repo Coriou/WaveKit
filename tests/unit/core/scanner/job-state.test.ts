@@ -94,7 +94,8 @@ const ROWS: [string[], string, string, string[]][] = [
 		["starting"],
 		"tuner-error",
 		"failed(tuner-unavailable)",
-		["release-lease", "release-decoders"],
+		// S1-B final review, finding 1: what the first retune wrote is restored (re-queued when it fails)
+		["restore", "release-lease", "release-decoders"],
 	],
 	[["running"], "hold", "holding", []],
 	[["holding"], "hold-done", "running", []],

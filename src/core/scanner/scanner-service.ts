@@ -224,6 +224,7 @@ function emptyLoadedState(): LoadedState {
 		lastSeq: 0,
 		entries: [],
 		jobs: [],
+		leases: [],
 		settings: {},
 		engines: {},
 		droppedLines: 0,
@@ -552,7 +553,11 @@ export class ScannerService extends EventEmitter {
 		this.probes.on("recordings", this.onProbeRecordings)
 		this.probes.on("probe-state", this.onProbeState)
 		this.ambient.on("evidence", this.onAmbientEvidence)
-		const leases = loaded.jobs.flatMap(j => (j.lease ? [j.lease] : []))
+		// A lease whose job was deleted is persisted unattached: its recovery still runs (H4).
+		const leases = [
+			...loaded.jobs.flatMap(j => (j.lease ? [j.lease] : [])),
+			...loaded.leases,
+		]
 		for (const lease of leases) this.persistedLeases.set(lease.sourceId, lease)
 		this.arbiter.recoverPersistedLeases(leases)
 		for (const pj of loaded.jobs) await this.restoreJob(pj)
@@ -2810,23 +2815,29 @@ export class ScannerService extends EventEmitter {
 	private async persistJobs(): Promise<void> {
 		if (!this.configLoaded) return
 		// Identify jobs are never persisted: a 15 s question does not survive a restart (§ 10.8).
-		const jobs: PersistedJob[] = [...this.jobs.values()]
-			.filter(r => !r.passive && r.spec.kind !== "identify")
-			.map(r => {
-				const lease = this.persistedLeases.get(r.spec.sourceId)
-				return {
-					id: r.id,
-					spec: r.spec,
-					rawSpec: r.rawSpec,
-					state: r.state,
-					...(r.reason ? { reason: r.reason } : {}),
-					createdAt: new Date(r.createdAt).toISOString(),
-					updatedAt: new Date(r.updatedAt).toISOString(),
-					...(lease && lease.jobId === r.id ? { lease } : {}),
-				}
-			})
+		const persisted = [...this.jobs.values()].filter(
+			r => !r.passive && r.spec.kind !== "identify",
+		)
+		const jobs: PersistedJob[] = persisted.map(r => {
+			const lease = this.persistedLeases.get(r.spec.sourceId)
+			return {
+				id: r.id,
+				spec: r.spec,
+				rawSpec: r.rawSpec,
+				state: r.state,
+				...(r.reason ? { reason: r.reason } : {}),
+				createdAt: new Date(r.createdAt).toISOString(),
+				updatedAt: new Date(r.updatedAt).toISOString(),
+				...(lease && lease.jobId === r.id ? { lease } : {}),
+			}
+		})
+		// H4 (S1-B final review, finding 1): the lease of a deleted job keeps its recovery record.
+		const ids = new Set(persisted.map(r => r.id))
+		const unattached = [...this.persistedLeases.values()].filter(
+			l => !ids.has(l.jobId),
+		)
 		await this.persistence
-			.writeJobs(jobs)
+			.writeJobs(jobs, unattached)
 			.catch((err: unknown) => this.log.warn({ err }, "jobs.json write failed"))
 	}
 
