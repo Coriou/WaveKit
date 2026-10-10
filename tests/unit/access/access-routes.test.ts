@@ -1,0 +1,294 @@
+import { once } from "node:events"
+import Fastify from "fastify"
+import websocket from "@fastify/websocket"
+import { WebSocket } from "ws"
+import { afterEach, describe, expect, it, vi } from "vitest"
+import { registerAccessRoutes } from "../../../src/access/access-routes.js"
+import {
+	digestMachineToken,
+	generateMachineToken,
+	sessionCredentialBinding,
+} from "../../../src/access/credentials.js"
+import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
+import { PairingService } from "../../../src/access/pairing.js"
+import { AccessPolicy } from "../../../src/access/policy.js"
+import { SessionFlows } from "../../../src/access/session-flows.js"
+import { SessionStore } from "../../../src/access/sessions.js"
+
+const origin = "http://receiver.lan:9000"
+const apps: ReturnType<typeof Fastify>[] = []
+afterEach(async () => {
+	await Promise.all(apps.splice(0).map(app => app.close()))
+})
+
+async function setup() {
+	let elapsed = 0
+	const persist = vi.fn(async () => {})
+	const token = generateMachineToken()
+	const digest = digestMachineToken(token)
+	const sessions = await SessionStore.open({
+		credentialBinding: sessionCredentialBinding(digest),
+		persist,
+		monotonicNow: () => elapsed,
+	})
+	const policy = new AccessPolicy({
+		listenerScheme: "http",
+		allowedAuthorities: ["receiver.lan:9000"],
+		allowedOrigins: [origin],
+		sessionCookieName: "wavekit_session",
+		machineSecretDigest: digest,
+		sessions,
+	})
+	const pairing = new PairingService({ policy, sessions })
+	const flows = new SessionFlows({ policy, sessions })
+	const app = Fastify({ logger: false })
+	apps.push(app)
+	const controller = installAccessHooks(app, { policy, sessions })
+	registerAccessRoutes(app, { pairing, flows })
+	const browser = { host: "receiver.lan:9000", origin }
+	const machine = {
+		host: "receiver.lan:9000",
+		authorization: `Bearer ${token}`,
+	}
+	const pair = async () => {
+		const issued = await app.inject({
+			method: "POST",
+			url: "/api/access/pairing-codes",
+			headers: machine,
+		})
+		expect(issued.statusCode).toBe(201)
+		const redeemed = await app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: browser,
+			payload: { code: issued.json<{ code: string }>().code },
+		})
+		expect(redeemed.statusCode).toBe(201)
+		const cookieHeader = redeemed.headers["set-cookie"]
+		if (typeof cookieHeader !== "string") throw new Error("Expected cookie")
+		const body = redeemed.json<{
+			deviceId: string
+			csrfToken: string
+			expiresAt: number
+		}>()
+		return {
+			body,
+			cookieHeader,
+			headers: {
+				...browser,
+				cookie: cookieHeader.split(";")[0] ?? "",
+				"x-wavekit-csrf": body.csrfToken,
+			},
+		}
+	}
+	return {
+		app,
+		controller,
+		sessions,
+		policy,
+		pairing,
+		flows,
+		browser,
+		machine,
+		persist,
+		pair,
+		advance: (ms: number) => {
+			elapsed += ms
+		},
+	}
+}
+
+describe("isolated access HTTP routes", () => {
+	it("pairs, reads status, refreshes remembered browser and logs out through real handlers", async () => {
+		const env = await setup()
+		const paired = await env.pair()
+		expect(paired.cookieHeader).toContain(
+			"HttpOnly; SameSite=Strict; Max-Age=2592000",
+		)
+		expect(paired.cookieHeader).not.toContain("Secure")
+		const status = await env.app.inject({
+			url: "/api/access/session",
+			headers: paired.headers,
+		})
+		expect(status.json()).toEqual(paired.body)
+		expect(status.headers["set-cookie"]).toBeUndefined()
+		expect(status.body).not.toContain(paired.headers.cookie.split("=")[1])
+		env.advance(29 * 86400000)
+		const refresh = await env.app.inject({
+			method: "POST",
+			url: "/api/access/session/refresh",
+			headers: paired.headers,
+		})
+		expect(refresh.statusCode).toBe(200)
+		expect(refresh.json<{ expiresAt: number }>().expiresAt).toBe(
+			paired.body.expiresAt + 29 * 86400000,
+		)
+		expect(refresh.headers["set-cookie"]).toBe(paired.cookieHeader)
+		const logout = await env.app.inject({
+			method: "POST",
+			url: "/api/access/session/logout",
+			headers: paired.headers,
+		})
+		expect(logout.statusCode).toBe(200)
+		expect(logout.headers["set-cookie"]).toContain(
+			"wavekit_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0",
+		)
+		expect(
+			(
+				await env.app.inject({
+					url: "/api/access/session",
+					headers: paired.headers,
+				})
+			).statusCode,
+		).toBe(401)
+	})
+
+	it("exempts only exact POST pairing and refuses originless pairing and unauthorized issue", async () => {
+		const env = await setup()
+		for (const url of [
+			"/api/access/pair?code=unused",
+			"/api/access/pair/",
+			"/api/access/anything",
+			"/api/access/pairing-codes",
+		])
+			expect(
+				(
+					await env.app.inject({
+						method: "POST",
+						url,
+						headers: env.browser,
+						payload: { code: "00000-00000" },
+					})
+				).statusCode,
+			).toBe(401)
+		expect(
+			(await env.app.inject({ url: "/api/access/pair", headers: env.browser }))
+				.statusCode,
+		).toBe(401)
+		expect(
+			(
+				await env.app.inject({
+					method: "POST",
+					url: "/api/access/pair",
+					headers: { host: "receiver.lan:9000" },
+					payload: { code: "00000-00000" },
+				})
+			).statusCode,
+		).toBe(403)
+		expect(env.persist).not.toHaveBeenCalled()
+	})
+
+	it("strictly validates pairing/revoke bodies and applies bounded payload parsing", async () => {
+		const env = await setup()
+		const issued = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pairing-codes",
+			headers: env.machine,
+		})
+		const code = issued.json<{ code: string }>().code
+		const malformed = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: env.browser,
+			payload: { code, extra: "secret" },
+		})
+		expect(malformed.statusCode).toBe(400)
+		expect(malformed.body).not.toContain("secret")
+		const oversized = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: env.browser,
+			payload: { code, junk: "s".repeat(2000) },
+		})
+		expect(oversized.statusCode).toBe(413)
+		expect(oversized.json()).toEqual({ code: "PAYLOAD_TOO_LARGE" })
+		expect(oversized.headers["access-control-allow-origin"]).toBe(origin)
+		const invalidJson = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pair",
+			headers: { ...env.browser, "content-type": "application/json" },
+			payload: '{"code":"private',
+		})
+		expect(invalidJson.statusCode).toBe(400)
+		expect(invalidJson.body).not.toContain("private")
+		expect(env.persist).not.toHaveBeenCalled()
+	})
+
+	it("does not parse or mutate on an unauthorized oversized session request", async () => {
+		const env = await setup()
+		const result = await env.app.inject({
+			method: "POST",
+			url: "/api/access/devices/revoke",
+			headers: env.browser,
+			payload: { deviceId: "s".repeat(2000) },
+		})
+		expect(result.statusCode).toBe(401)
+		expect(env.persist).not.toHaveBeenCalled()
+	})
+
+	it("requires original origin and CSRF for refresh and device revocation", async () => {
+		const env = await setup()
+		const paired = await env.pair()
+		const headers = { ...paired.headers, "x-wavekit-csrf": "wrong" }
+		for (const url of [
+			"/api/access/session/refresh",
+			"/api/access/session/logout",
+			"/api/access/devices/revoke-all",
+		])
+			expect(
+				(await env.app.inject({ method: "POST", url, headers })).statusCode,
+			).toBe(403)
+		const revoke = await env.app.inject({
+			method: "POST",
+			url: "/api/access/devices/revoke",
+			headers: paired.headers,
+			payload: { deviceId: paired.body.deviceId },
+		})
+		expect(revoke.json()).toEqual({ revoked: true })
+		expect(revoke.headers["set-cookie"]).toContain("Max-Age=0")
+		expect(env.sessions.lookupByPrincipal(paired.body.deviceId)).toBeUndefined()
+	})
+
+	it("durable failure returns503 with no successful cookie or credential exposure", async () => {
+		const env = await setup()
+		const paired = await env.pair()
+		env.persist.mockRejectedValueOnce(new Error("private storage detail"))
+		const result = await env.app.inject({
+			method: "POST",
+			url: "/api/access/session/logout",
+			headers: paired.headers,
+		})
+		expect(result.statusCode).toBe(503)
+		expect(result.headers["set-cookie"]).toBeUndefined()
+		expect(result.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+		expect(result.headers["access-control-allow-origin"]).toBe(origin)
+		expect(JSON.stringify(result.json())).not.toContain("private")
+	})
+	it("logout closes the browser's actual WebSocket and leaves the machine identity usable", async () => {
+		const env = await setup()
+		await env.app.register(websocket)
+		env.app.get("/ws", { websocket: true }, (socket, request) => {
+			env.controller.adoptWebSocket(request, socket)
+		})
+		const paired = await env.pair()
+		const url = await env.app.listen({ host: "127.0.0.1", port: 0 })
+		const client = new WebSocket(url.replace("http:", "ws:") + "/ws", {
+			headers: paired.headers,
+		})
+		await once(client, "open")
+		const closed = once(client, "close")
+		const logout = await env.app.inject({
+			method: "POST",
+			url: "/api/access/session/logout",
+			headers: paired.headers,
+		})
+		expect(logout.statusCode).toBe(200)
+		expect((await closed)[0]).toBe(1008)
+		const issued = await env.app.inject({
+			method: "POST",
+			url: "/api/access/pairing-codes",
+			headers: env.machine,
+		})
+		expect(issued.statusCode).toBe(201)
+	})
+})
