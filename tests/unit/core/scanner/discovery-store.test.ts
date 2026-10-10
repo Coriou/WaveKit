@@ -115,12 +115,34 @@ describe("DiscoveryStore surfacing filter (§ 7.2)", () => {
 		expect(store.ingest(inWindow).change).toBe("transient")
 	})
 
-	it("(c) surfaces a single block that carries a classification, as candidate", () => {
+	it("(c) surfaces a single block that carries a channel-tier classification", () => {
 		const { store } = newStore()
-		const r = store.ingest(dmrObs("o1", CH, T0, { blocks: 1 }))
+		const r = store.ingest(dmrObs("o1", CH, T0, { blocks: 1, tier: "channel" }))
 		expect(r.change).toBe("created")
-		expect(store.get(r.discoveryId ?? "")?.confidence).toBe("candidate")
+		expect(store.get(r.discoveryId ?? "")?.confidence).toBe("classified")
 		expect(store.get(r.discoveryId ?? "")?.protocol).toBe("dmr")
+	})
+
+	it("(c) never surfaces a single block on a spectral-tier classification alone", () => {
+		// the spectral class is derived from the same single block of energy, so it cannot vouch for it
+		const { store, entries } = newStore()
+		for (const [i, cls] of (
+			["fsk4-12k5", "ook-burst", "analog-fm"] as const
+		).entries()) {
+			const r = store.ingest(
+				makeObs({
+					id: `o${i}`,
+					centreHz: CH + i * 100_000,
+					startedAt: T0,
+					blocks: 1,
+					cls,
+					hypotheses: [["dmr", 0.8]],
+				}),
+			)
+			expect(r).toEqual({ discoveryId: null, change: "transient" })
+		}
+		expect(store.snapshot().discoveries).toHaveLength(0)
+		expect(entries).toHaveLength(0)
 	})
 
 	it("(d) merges three single-block hits on one key within 10 minutes, and not when spread wider", () => {

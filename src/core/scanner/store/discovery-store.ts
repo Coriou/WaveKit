@@ -768,7 +768,12 @@ export class DiscoveryStore extends EventEmitter {
 			t.maxBlockSnrDb >= t.thresholdDb + SINGLE_BLOCK_EXTRA_DB
 		)
 			return true
-		return !t.flags.edge && classificationAttached(obs.classification)
+		// (c) needs a channel-tier class: a spectral class is derived from the same single block of energy and cannot vouch for it
+		return (
+			!t.flags.edge &&
+			obs.classification.tier === "channel" &&
+			classificationAttached(obs.classification)
+		)
 	}
 
 	private singleBlockHit(
