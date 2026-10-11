@@ -440,6 +440,9 @@ csdr:
 #
 # scanner:
 #   enabled: true
+#   channelTier:                # config only; not exposed or changed by scanner settings PATCH
+#     enabled: false
+#     minMs: 500                 # integer 300..2000
 #   passive: { enabled: true, offsetProbes: false }
 #   cpuBudgetCores: 1.0
 #   cpuGuardPercent: 90

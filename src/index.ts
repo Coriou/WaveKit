@@ -20,6 +20,8 @@ import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
 import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
 import { WaveKitError } from "./utils/errors.js"
 import { PassThrough } from "node:stream"
+import { resolve } from "node:path"
+import { pathToFileURL } from "node:url"
 import {
 	loadConfig,
 	DigitalVoiceConfigSchema,
@@ -46,6 +48,13 @@ import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
+import { SettlementRegistry } from "./core/channelizer/settlement-observer.js"
+import type {
+	ChannelSettlementObserver,
+	CleanupOutcome,
+	ProviderLifetime,
+} from "./core/channelizer/settlement-observer.js"
+import { ScannerLifecycleOwner } from "./core/scanner/channel/consumer-lifecycle.js"
 import { ScannerService } from "./core/scanner/scanner-service.js"
 import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { DecoderRegistry } from "./decoders/registry.js"
@@ -200,6 +209,131 @@ function wireDecoderAudioToOutput(
 	}
 }
 
+interface ScannerRuntimePhaseDependencies {
+	sealAdmission(): void
+	drainBeforeProducer(): Promise<void>
+	beginStop(): Readonly<{
+		producerSettled: Promise<void>
+		completed: Promise<void>
+	}>
+	stopDecoders(): Promise<void>
+	stopChannelizer(): Promise<void>
+	attemptLocalCleanup(): Promise<readonly CleanupOutcome[]>
+	finalizeStopNative(producerOutcome: CleanupOutcome): Promise<void>
+}
+
+/** Actual phase promises remain authoritative even when a caller races a timeout. */
+export function createScannerRuntimePhases(
+	deps: ScannerRuntimePhaseDependencies,
+) {
+	let sealed = false
+	let firstFailure: WaveKitError | undefined
+	let producerOutcome: CleanupOutcome = { ok: true }
+	let producer: Promise<void> | undefined
+	let manager: Promise<void> | undefined
+	let core: Promise<void> | undefined
+	let final: Promise<void> | undefined
+	const fail = () => {
+		firstFailure ??= new WaveKitError(
+			"Scanner runtime shutdown incomplete",
+			"ACCESS_UNAVAILABLE",
+		)
+		return firstFailure
+	}
+	const attempt = <T>(run: () => T | Promise<T>): Promise<T> => {
+		try {
+			return Promise.resolve(run())
+		} catch (error) {
+			return Promise.reject(error)
+		}
+	}
+	const previous = async (phase: Promise<void>) => {
+		try {
+			await phase
+		} catch {
+			fail()
+		}
+	}
+	const sealAdmission = () => {
+		if (sealed) return
+		sealed = true
+		try {
+			deps.sealAdmission()
+		} catch {
+			fail()
+		}
+	}
+	const producerSettled = (): Promise<void> => {
+		sealAdmission()
+		producer ??= Promise.resolve()
+			.then(async () => {
+				await previous(attempt(deps.drainBeforeProducer))
+				const handle = deps.beginStop()
+				// Completion belongs to phase 66, not the producer boundary.
+				void handle.completed.catch(() => undefined)
+				return handle.producerSettled
+			})
+			.catch(() => {
+				producerOutcome = {
+					ok: false,
+					state: "unknown",
+					detail: "Scanner component cleanup incomplete",
+				}
+				throw fail()
+			})
+		return producer
+	}
+	const managerSettled = (): Promise<void> => {
+		manager ??= Promise.resolve().then(async () => {
+			await previous(producerSettled())
+			try {
+				await deps.stopDecoders()
+			} catch {
+				throw fail()
+			}
+		})
+		return manager
+	}
+	const coreSettled = (): Promise<void> => {
+		core ??= Promise.resolve().then(async () => {
+			await previous(managerSettled())
+			// Initiate every independent local attempt even when native close hangs.
+			const native = attempt(deps.stopChannelizer)
+			const local = attempt(deps.attemptLocalCleanup)
+			const outcomes = await Promise.allSettled([native, local] as const)
+			const localOutcome = outcomes[1]
+			if (
+				outcomes[0]?.status === "rejected" ||
+				localOutcome?.status === "rejected" ||
+				(localOutcome?.status === "fulfilled" &&
+					localOutcome.value.some(outcome => !outcome.ok))
+			)
+				throw fail()
+		})
+		return core
+	}
+	const completed = (): Promise<void> => {
+		sealAdmission()
+		final ??= Promise.resolve().then(async () => {
+			await previous(coreSettled())
+			try {
+				await deps.finalizeStopNative(producerOutcome)
+			} catch {
+				fail()
+			}
+			if (firstFailure) throw firstFailure
+		})
+		return final
+	}
+	return Object.freeze({
+		sealAdmission,
+		producerSettled,
+		managerSettled,
+		coreSettled,
+		completed,
+	})
+}
+
 /**
  * Main application bootstrap function.
  *
@@ -255,12 +389,78 @@ async function main(): Promise<void> {
 	const own = (priority: number, run: () => void | Promise<void>) => {
 		if (protectedMode) cleanup.push({ priority, run })
 	}
+	let runtimeApi: ApiServer | undefined
+	let runtimeDecoders: DecoderManager | undefined
+	let runtimeChannelizer: ChannelizerManager | null = null
+	let scanner: ScannerService | null = null
+	const scannerConstruction = new ScannerLifecycleOwner()
+	let scannerConstructionStarted = false
+	let scannerConstructionSettled = false
+	let settlementObserver: ChannelSettlementObserver | undefined
+	let providerLifetime: ProviderLifetime | undefined
+	const scannerPhases = createScannerRuntimePhases({
+		sealAdmission: () => {
+			// Attempt every independent gate even if one owner rejects sealing.
+			let failed = false
+			for (const seal of [
+				() => scannerConstruction.sealAdmission(),
+				() => scanner?.sealAdmission(),
+				() => providerLifetime?.sealAdmission(),
+				() => settlementObserver?.sealAdmission(),
+			]) {
+				try {
+					seal()
+				} catch {
+					failed = true
+				}
+			}
+			if (failed)
+				throw new WaveKitError(
+					"Scanner admission incomplete",
+					"ACCESS_UNAVAILABLE",
+				)
+		},
+		drainBeforeProducer: async () => {
+			await startupSettled
+			await runtimeApi?.stop()
+		},
+		beginStop: () => {
+			if (!scannerConstructionStarted && !scannerConstructionSettled) {
+				// Startup is now sealed/settled: no constructor capability escaped.
+				scannerConstructionSettled = true
+				scannerConstruction.completeConstruction({ ok: true })
+			}
+			return scannerConstruction.beginStop()
+		},
+		stopDecoders: async () => {
+			await runtimeDecoders?.destroy()
+		},
+		stopChannelizer: async () => {
+			await runtimeChannelizer?.destroy()
+		},
+		attemptLocalCleanup: () =>
+			providerLifetime?.attemptLocalCleanup() ?? Promise.resolve([]),
+		finalizeStopNative: async () => {
+			if (scanner) await scanner.finalizeStopNative()
+			else
+				await scannerConstruction.finalizeStopNative(
+					settlementObserver,
+					providerLifetime,
+				)
+		},
+	})
+	admissionGates.push(scannerPhases.sealAdmission)
+	own(40, scannerPhases.producerSettled)
+	own(60, scannerPhases.managerSettled)
+	own(65, scannerPhases.coreSettled)
+	own(66, scannerPhases.completed)
 	const checkpoint = () => {
 		if (stopping)
 			throw new WaveKitError("Startup stopped", "ACCESS_UNAVAILABLE")
 	}
 	let admissionFailed = false
 	let closing: Promise<void> | undefined
+	let closeLegacy: (() => Promise<void>) | undefined
 	const closeProtected = (): Promise<void> => {
 		stopping = true
 		for (const gate of admissionGates) {
@@ -362,8 +562,48 @@ async function main(): Promise<void> {
 			shutdownTimeout: 10000, // 10 seconds max shutdown time
 		})
 
-		// Install signal handlers for SIGTERM/SIGINT
-		if (!protectedMode) shutdown.installSignalHandlers()
+		if (!protectedMode) {
+			let legacyClosing: Promise<void> | undefined
+			closeLegacy = () => {
+				stopping = true
+				for (const gate of admissionGates) {
+					try {
+						gate()
+					} catch {
+						admissionFailed = true
+					}
+				}
+				legacyClosing ??= (async () => {
+					await startupSettled
+					// Utility timeouts may advance its hooks; actual phase dependencies cannot.
+					const outcomes = await Promise.allSettled([
+						shutdown.shutdown(),
+						scannerPhases.completed(),
+					])
+					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
+						throw new WaveKitError(
+							"Runtime shutdown incomplete",
+							"ACCESS_UNAVAILABLE",
+						)
+				})()
+				return legacyClosing
+			}
+			let signaled = false
+			const signal = () => {
+				if (signaled) return
+				signaled = true
+				const watchdog = setTimeout(() => process.exit(1), 10_000)
+				void closeLegacy!().then(
+					() => {
+						clearTimeout(watchdog)
+						process.exit(0)
+					},
+					() => process.exit(1),
+				)
+			}
+			process.on("SIGTERM", signal)
+			process.on("SIGINT", signal)
+		}
 
 		// Step 4: Initialize core components
 		const sourceManager = new SourceManager(logger, {
@@ -482,23 +722,58 @@ async function main(): Promise<void> {
 			bandOverrides,
 		)
 
-		own(60, () => decoderManager.destroy())
+		runtimeDecoders = decoderManager
 
 		// Wire DecoderManager to SourceManager for dynamic sample rate handling
 		decoderManager.setSourceManager(sourceManager, sourceRouting)
 
 		// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
 		// on the first channel request. Off by default, so no manager exists.
+		if (config.channelizer.enabled) {
+			const registry = new SettlementRegistry()
+			providerLifetime = registry.registerProviderLifetime()
+			if (!providerLifetime)
+				throw new WaveKitError(
+					"Scanner lifetime unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
+			const constructionCleanup = providerLifetime.ownCleanup(
+				"construction",
+				async () => {
+					try {
+						await scannerPhases.producerSettled()
+						return { ok: true }
+					} catch {
+						return {
+							ok: false,
+							state: "unknown",
+							detail: "Scanner construction cleanup incomplete",
+						}
+					}
+				},
+			)
+			if (!constructionCleanup)
+				throw new WaveKitError(
+					"Scanner owner unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
+			settlementObserver = registry.createObserver(providerLifetime)
+		}
 		const channelizer = config.channelizer.enabled
 			? new ChannelizerManager({
 					sourceManager,
 					routing: sourceRouting,
 					config: config.channelizer,
 					logger,
+					...(settlementObserver ? { settlementObserver } : {}),
 				})
 			: null
-		if (channelizer) own(65, () => channelizer.destroy())
-		decoderManager.setChannelizer(channelizer)
+		runtimeChannelizer = channelizer
+		const channels =
+			channelizer && settlementObserver
+				? settlementObserver.bindProvider(channelizer)
+				: channelizer
+		decoderManager.setChannelizer(channels)
 
 		// Step 6: Register built-in decoders with capabilities
 		decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
@@ -571,11 +846,25 @@ async function main(): Promise<void> {
 		// An unreadable state directory never reaches this catch: start() logs it and
 		// runs without the unread files (Task 35). Only an unexpected construction or
 		// start failure drops the scanner, and with it /api/spectrum.
-		let scanner: ScannerService | null = null
-		let stopScanner: (() => Promise<void>) | undefined
+		const { channelTier, ...scannerSettings } = config.scanner
 		try {
+			scannerConstructionStarted = true
 			scanner = new ScannerService({
-				settings: config.scanner,
+				settings: scannerSettings,
+				construction: scannerConstruction,
+				channels,
+				channelUsableFraction: config.channelizer.usableFraction,
+				channelTier: Object.freeze({ ...channelTier }),
+				channelProfile: null,
+				...(settlementObserver && providerLifetime
+					? {
+							channelOwnership: {
+								observer: settlementObserver,
+								lifetime: providerLifetime,
+								construction: scannerConstruction,
+							},
+						}
+					: {}),
 				sourceConfigs: config.sources,
 				decoderConfigs,
 				region: bandRegion.code,
@@ -589,16 +878,19 @@ async function main(): Promise<void> {
 				logger,
 				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
 			})
-			const ownedScanner = scanner
-			let scannerStopping: Promise<void> | undefined
-			// Retain the first real outcome: stop() may become a no-op after
-			// clearing its started flag even when asynchronous cleanup failed.
-			stopScanner = () =>
-				(scannerStopping ??= Promise.resolve().then(() => ownedScanner.stop()))
-			own(40, stopScanner)
+			scannerConstructionSettled = true
+			scannerConstruction.completeConstruction({ ok: true })
 			await scanner.start()
 			checkpoint()
 		} catch (err) {
+			if (!scannerConstructionSettled) {
+				scannerConstructionSettled = true
+				scannerConstruction.completeConstruction({
+					ok: false,
+					state: "unknown",
+					detail: "Scanner construction incomplete",
+				})
+			}
 			if (stopping) throw err
 			log.error(
 				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
@@ -611,11 +903,11 @@ async function main(): Promise<void> {
 			if (protectedMode) {
 				// Rejection aborts startup; shutdown observes this same rejection
 				// while still attempting the remaining owned cleanup.
-				await stopScanner?.()
+				await scannerConstruction.beginStop().producerSettled
 			} else {
-				await scanner
-					?.stop()
-					.catch((stopErr: unknown) =>
+				await scannerConstruction
+					.beginStop()
+					.producerSettled.catch((stopErr: unknown) =>
 						log.warn(
 							{ err: stopErr },
 							"Stopping the partially started scanner failed",
@@ -788,6 +1080,7 @@ async function main(): Promise<void> {
 			},
 		)
 
+		runtimeApi = apiServer
 		admissionGates.push(() => apiServer.stopAdmission())
 		own(10, () => apiServer.stop())
 
@@ -842,6 +1135,7 @@ async function main(): Promise<void> {
 		shutdown.register({
 			name: "source-manager",
 			handler: async () => {
+				await scannerPhases.completed().catch(() => undefined)
 				log.info("Shutting down source connections")
 				await sourceManager.disconnectAll()
 			},
@@ -852,6 +1146,7 @@ async function main(): Promise<void> {
 		shutdown.register({
 			name: "fanout-manager",
 			handler: async () => {
+				await scannerPhases.completed().catch(() => undefined)
 				log.info("Shutting down fanout manager")
 				sourceRouting.destroy()
 				fanoutManager.destroy()
@@ -863,6 +1158,7 @@ async function main(): Promise<void> {
 		shutdown.register({
 			name: "live-demodulator",
 			handler: async () => {
+				await scannerPhases.completed().catch(() => undefined)
 				log.info("Shutting down live demodulator")
 				await liveDemod.stop()
 			},
@@ -873,6 +1169,7 @@ async function main(): Promise<void> {
 		shutdown.register({
 			name: "digital-voice",
 			handler: async () => {
+				await scannerPhases.completed().catch(() => undefined)
 				log.info("Shutting down digital voice stream")
 				await digitalVoice.destroy()
 			},
@@ -883,32 +1180,29 @@ async function main(): Promise<void> {
 		shutdown.register({
 			name: "tuner-relay",
 			handler: async () => {
+				await scannerPhases.completed().catch(() => undefined)
 				log.info("Shutting down tuner relay")
 				await tunerRelay.stop()
 			},
 			timeout: 2000,
 		})
 
-		// Shutdown the channelizer after the decoders (LIFO: registered first, so
-		// it runs once decoderManager.destroy() has released every channel)
-		if (channelizer) {
-			shutdown.register({
-				name: "channelizer",
-				handler: async () => {
-					log.info("Shutting down channelizer")
-					await channelizer.destroy()
-				},
-				timeout: 5000,
-			})
-		}
+		// Actual dependencies remain ordered even if generic LIFO hooks time out.
+		shutdown.register({
+			name: "scanner-native-finalization",
+			handler: scannerPhases.completed,
+			timeout: 5000,
+		})
+		shutdown.register({
+			name: "channelizer",
+			handler: scannerPhases.coreSettled,
+			timeout: 5000,
+		})
 
 		// Shutdown decoders
 		shutdown.register({
 			name: "decoder-manager",
-			handler: async () => {
-				log.info("Shutting down decoders")
-				await decoderManager.destroy()
-			},
+			handler: scannerPhases.managerSettled,
 			timeout: 5000,
 		})
 
@@ -925,17 +1219,11 @@ async function main(): Promise<void> {
 		// Shutdown the scanner after the API server and before the decoders,
 		// channelizer, fanout and sources (LIFO): its tuner lease restore writes to
 		// a still-open rtl_tcp socket (spec § 10.3).
-		if (scanner) {
-			const scannerForShutdown = scanner
-			shutdown.register({
-				name: "scanner",
-				handler: async () => {
-					log.info("Shutting down scanner (restoring any tuner lease)")
-					await scannerForShutdown.stop()
-				},
-				timeout: 5000,
-			})
-		}
+		shutdown.register({
+			name: "scanner",
+			handler: scannerPhases.producerSettled,
+			timeout: 5000,
+		})
 
 		// First to shutdown: API server (stop accepting new connections)
 		shutdown.register({
@@ -1170,6 +1458,13 @@ async function main(): Promise<void> {
 			} finally {
 				clearTimeout(watchdog)
 			}
+		} else if (closeLegacy) {
+			const watchdog = setTimeout(() => process.exit(1), 10_000)
+			try {
+				await closeLegacy()
+			} finally {
+				clearTimeout(watchdog)
+			}
 		}
 		throw error
 	} finally {
@@ -1178,7 +1473,11 @@ async function main(): Promise<void> {
 }
 
 // Run the application
-main().catch(() => {
-	process.stderr.write("WaveKit startup failed\n")
-	process.exit(1)
-})
+if (
+	process.argv[1] &&
+	pathToFileURL(resolve(process.argv[1])).href === import.meta.url
+)
+	void main().catch(() => {
+		process.stderr.write("WaveKit startup failed\n")
+		process.exit(1)
+	})
