@@ -384,7 +384,7 @@ describe("channelizer acquisition ownership", () => {
 		expect(connect).not.toHaveBeenCalled()
 	})
 	it("cleans up a delayed canceled connect after same-ID replacement without stale close", async () => {
-		const { connect, processes, acquire } = harness()
+		const { h, connect, processes, acquire } = harness()
 		const alive = await acquire("alive")
 		if (!alive.ok) throw new Error("expected grant")
 		let resolve = (_s: PassThrough) => {}
@@ -610,7 +610,7 @@ describe("channelizer acquisition ownership", () => {
 		expect(connect).not.toHaveBeenCalled()
 	})
 	it("a terminal close during connect cancels that acquisition without collateral retirement", async () => {
-		const { h, connect, processes, acquire } = harness()
+		const { connect, processes, acquire } = harness()
 		const alive = await acquire("alive")
 		if (!alive.ok) throw new Error("expected grant")
 		let resolve = (_s: PassThrough) => {}
