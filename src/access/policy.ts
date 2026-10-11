@@ -11,6 +11,7 @@ import type {
 	AuthenticatedAdmission,
 	DeniedAdmission,
 	PairingAdmission,
+	PublicBootstrapAdmission,
 } from "./types.js"
 
 export const CSRF_HEADER = "X-WaveKit-CSRF"
@@ -235,6 +236,20 @@ export class AccessPolicy {
 		)
 			return deny(400, "MALFORMED_REQUEST")
 		return { kind: "checked", input, values, cookie, origin, headers }
+	}
+
+	/** Opt-in adapters only: exact public metadata, with no credential verification. */
+	validatePublicBootstrapRequest(request: AccessRequest): PublicBootstrapAdmission {
+		const boundary = this.#validateBoundary(request)
+		if (boundary.kind === "deny") return boundary
+		const { input, headers } = boundary
+		if (
+			input.surface !== "api" || input.transport !== "http" ||
+			(input.method !== "GET" && input.method !== "HEAD") ||
+			input.rawTarget !== "/api/access/bootstrap"
+		)
+			return { kind: "deny", status: 400, code: "MALFORMED_REQUEST", headers }
+		return { kind: "public-bootstrap", headers }
 	}
 
 	/** Exact pair-code exchange boundary; this never authenticates an API principal. */
