@@ -767,7 +767,7 @@ interface QuerySnapshot {
 }
 interface QueryDriver {
 	turn: (now: number) => number
-	dispatch: (now: number) => number | null
+	dispatch: (now: number, requests?: TinyCursor[]) => number | null
 	settle: (
 		id: number,
 		reason: string,
@@ -2169,12 +2169,21 @@ describe("item 2 closed fixture protocol and independent tiny SQLite oracles", (
 	it("fences reader wire ownership and late pages while retaining bytes through release", () => {
 		const driver = delivery.queryAccounting(1)
 		driver.turn(0)
-		driver.dispatch(0)
+		driver.dispatch(0, [cursor(0)])
 		const owner = driver.snapshot().readerOwner!
 		const result = {
 			...owner,
 			reason: "successful",
-			page: { sequences: [1], scannedThrough: 4 },
+			page: [
+				{
+					sequences: [1],
+					scannedThrough: 4,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: false,
+				},
+			],
 		}
 		expect(
 			wire.receiveReaderResult(
@@ -2187,12 +2196,25 @@ describe("item 2 closed fixture protocol and independent tiny SQLite oracles", (
 		expect(driver.snapshot().readerOwner).toEqual(owner)
 		expect(driver.join(owner.id, owner.owner, true)).toBe(true)
 		driver.turn(250000)
-		driver.dispatch(250000)
+		driver.dispatch(250000, [cursor(7)])
 		const next = driver.snapshot().readerOwner!
 		expect(
 			wire.receiveReaderResult(
 				driver,
-				{ ...next, reason: "successful", page: [] },
+				{
+					...next,
+					reason: "successful",
+					page: [
+						{
+							sequences: [],
+							scannedThrough: 4,
+							high: 24,
+							lower: 0,
+							generation: 1,
+							done: false,
+						},
+					],
+				},
 				250001,
 			),
 		).toBe(true)
@@ -2202,6 +2224,183 @@ describe("item 2 closed fixture protocol and independent tiny SQLite oracles", (
 		driver.stop()
 		expect(driver.snapshot().reconciled).toBe(true)
 	})
+	it("rejects malformed owned replies without settling or retaining bytes", () => {
+		const request = cursor(0)
+		const page = {
+			sequences: [1, 4],
+			scannedThrough: 4,
+			high: 24,
+			lower: 0,
+			generation: 1,
+			done: false,
+		}
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, [request])
+		const owner = driver.snapshot().readerOwner!
+		const reply = { ...owner, reason: "successful", page: [page] }
+		const badPages: unknown[] = [
+			null,
+			[],
+			"page",
+			1,
+			{ ...page, extra: 1 },
+			{ ...page, sequences: null },
+			{ ...page, sequences: "1" },
+			{ ...page, sequences: [1, 1] },
+			{ ...page, sequences: [4, 1] },
+			{ ...page, sequences: [0] },
+			{ ...page, sequences: [5] },
+			{ ...page, sequences: [1.5] },
+			{ ...page, sequences: [Number.MAX_SAFE_INTEGER + 1] },
+			{ ...page, sequences: Array(201).fill(1) },
+			{ ...page, high: 25 },
+			{ ...page, lower: 1 },
+			{ ...page, generation: 2 },
+			{ ...page, scannedThrough: 3 },
+			{ ...page, scannedThrough: 5 },
+			{ ...page, done: true },
+			{ ...page, done: 0 },
+			{ ...page, high: NaN },
+			{ ...page, after: 0 },
+			{ ...page, contract: "other" },
+			{ ...page, queryClass: 1 },
+			{ reset: "unknown" },
+			{ reset: null },
+			{ reset: "filter-contract" },
+			{ reset: "generation", sequences: [] },
+		]
+		const invalid: unknown[] = [
+			{ ...owner, reason: "successful" },
+			{ ...reply, page: null },
+			{ ...reply, page: {} },
+			{ ...reply, page: "page" },
+			{ ...reply, page: [] },
+			{ ...reply, page: [page, page] },
+			{ ...reply, page: Array(17).fill(page) },
+			{ ...reply, extra: 1 },
+			{ ...reply, requests: [request] },
+			{ ...reply, reason: "unknown" },
+			{ ...reply, reason: "query-failed" },
+			{ ...reply, page: ["x".repeat(1024 * 1024)] },
+			...badPages.map(bad => ({ ...reply, page: [bad] })),
+		]
+		const before = driver.snapshot()
+		for (const bad of invalid) {
+			expect(() => wire.receiveReaderResult(driver, bad, 1)).toThrow()
+			expect(driver.snapshot()).toEqual(before)
+		}
+		expect(wire.receiveReaderResult(driver, reply, 2)).toBe(true)
+		expect(driver.snapshot().totals["successful"]).toBe(1)
+	})
+	it("binds immutable request expectations once per owner and validates empty/reset pages", () => {
+		const requests = [
+			cursor(7, 20),
+			cursor(3),
+			cursor(3),
+			{ ...cursor(0), queryClass: 1 },
+		]
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, requests)
+		const owner = driver.snapshot().readerOwner!
+		requests[0]!.high = 25 // Caller changes cannot change dispatched expectations.
+		requests.push(cursor(0))
+		const reply = {
+			...owner,
+			reason: "successful",
+			page: [
+				{
+					sequences: [],
+					scannedThrough: 24,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: true,
+				},
+				{ reset: "generation" },
+				{ reset: "retention" },
+				{ reset: "filter-contract" },
+			],
+		}
+		expect(wire.receiveReaderResult(driver, reply, 1)).toBe(true)
+		expect(driver.snapshot().retainedReplyBytes).toBeGreaterThan(0)
+		driver.releaseReply(0)
+		driver.turn(125000)
+		driver.dispatch(125000, [cursor(0)])
+		const next = driver.snapshot().readerOwner!
+		expect(wire.receiveReaderResult(driver, reply, 125001)).toBe(false)
+		expect(driver.snapshot().readerOwner).toEqual(next)
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{ ...next, reason: "query-failed" },
+				125001,
+			),
+		).toBe(true)
+	})
+	it("rejects unbound or filter-rebound replies and preserves overdue ownership until join", () => {
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, [{ ...cursor(0), queryClass: 1 }])
+		const owner = driver.snapshot().readerOwner!
+		const reply = {
+			...owner,
+			reason: "successful",
+			page: [
+				{
+					sequences: [],
+					scannedThrough: 4,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: false,
+				},
+			],
+		}
+		expect(() => wire.receiveReaderResult(driver, reply, 1)).toThrow("cursor")
+		expect(driver.snapshot()).toMatchObject({
+			readerOwner: owner,
+			retainedReplyBytes: 0,
+			totals: { successful: 0 },
+		})
+		expect(() =>
+			wire.receiveReaderResult(
+				driver,
+				{ ...owner, reason: "successful" },
+				250000,
+			),
+		).toThrow()
+		expect(driver.snapshot()).toMatchObject({
+			readerOwner: owner,
+			retainedReplyBytes: 0,
+			totals: { successful: 0, "active-timeout": 1 },
+		})
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{
+					...owner,
+					reason: "successful",
+					page: [{ reset: "filter-contract" }],
+				},
+				250001,
+			),
+		).toBe(false)
+		expect(driver.join(owner.id, owner.owner, true)).toBe(true)
+		const unbound = delivery.queryAccounting(1)
+		unbound.turn(0)
+		unbound.dispatch(0)
+		expect(() =>
+			wire.receiveReaderResult(
+				unbound,
+				{ ...unbound.snapshot().readerOwner!, reason: "successful", page: [] },
+				1,
+			),
+		).toThrow("not bound")
+		expect(unbound.snapshot().totals["successful"]).toBe(0)
+	})
+
 	it("denies unproven sources without a caller-enforced flag and reserves padding", () => {
 		expect(tinyGuards.tinyGrowthSupported("25.2.1", "unknown")).toBe(false)
 		expect(tinyGuards.tinyGrowthSupported("22.13.0", "unknown")).toBe(false)
@@ -2247,7 +2446,7 @@ describe("item 2 closed fixture protocol and independent tiny SQLite oracles", (
 		expect(reader.initialPragmas["queryOnly"]).toBe(1)
 		const queryDriver = delivery.queryAccounting(1)
 		queryDriver.turn(0)
-		queryDriver.dispatch(0)
+		queryDriver.dispatch(0, requests)
 		expect(wire.receiveReaderResult(queryDriver, reader.readerReply, 1)).toBe(
 			true,
 		)
