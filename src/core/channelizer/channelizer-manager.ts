@@ -1210,28 +1210,45 @@ export class ChannelizerManager
 					}
 				}
 				break
-			case "discontinuity":
-				// Task 35 counts queue-overflow causes from this line.
-				this.log.warn(
-					{
-						sourceId: s.sourceId,
-						channelId: e.id,
-						generation: e.generation,
-						sampleIndex: e.sampleIndex,
-						droppedSamples: e.droppedSamples,
-						cause: e.cause,
-					},
-					"Channel discontinuity",
-				)
-				this.emit(
-					"channel-discontinuity",
-					e.id,
-					e.generation,
-					e.sampleIndex,
-					e.droppedSamples,
-					e.cause,
-				)
+			case "discontinuity": {
+				// Capture the exact process/send before log or public event reentry.
+				// Public ID/generation alone cannot identify an observed attempt.
+				const captured = s.settlement
+					? this.deps.settlementObserver?.captureDiscontinuity(
+							s.settlement,
+							e.id,
+							e.generation,
+						)
+					: undefined
+				try {
+					// Task 35 counts queue-overflow causes from this line.
+					this.log.warn(
+						{
+							sourceId: s.sourceId,
+							channelId: e.id,
+							generation: e.generation,
+							sampleIndex: e.sampleIndex,
+							droppedSamples: e.droppedSamples,
+							cause: e.cause,
+						},
+						"Channel discontinuity",
+					)
+					this.emit(
+						"channel-discontinuity",
+						e.id,
+						e.generation,
+						e.sampleIndex,
+						e.droppedSamples,
+						e.cause,
+					)
+				} finally {
+					// The SAME owned listener normally publishes this. A prior public
+					// listener may throw before it runs; only the captured send may finish.
+					if (captured)
+						this.deps.settlementObserver?.publishCapturedDiscontinuity(captured)
+				}
 				break
+			}
 			case "stats":
 				// Task 35 parses this line.
 				this.log.info(
@@ -1408,13 +1425,11 @@ export class ChannelizerManager
 		const directoryCleanup = async () => {
 			if (settlement) {
 				if (!proc.waitSettlementNativeRetirement) {
-					this.directoryClaims
-						.get(proc)
-						?.settle({
-							ok: false,
-							state: "unknown",
-							detail: "channel native retirement proof unavailable",
-						})
+					this.directoryClaims.get(proc)?.settle({
+						ok: false,
+						state: "unknown",
+						detail: "channel native retirement proof unavailable",
+					})
 					return
 				}
 				await proc.waitSettlementNativeRetirement()
@@ -1425,13 +1440,11 @@ export class ChannelizerManager
 				rmSync(dir, { recursive: true, force: true })
 				this.directoryClaims.get(proc)?.settle({ ok: true })
 			} catch (err: unknown) {
-				this.directoryClaims
-					.get(proc)
-					?.settle({
-						ok: false,
-						state: "failed",
-						detail: "channel directory cleanup failed",
-					})
+				this.directoryClaims.get(proc)?.settle({
+					ok: false,
+					state: "failed",
+					detail: "channel directory cleanup failed",
+				})
 				this.log.debug({ err, dir }, "Cannot remove channel socket dir")
 			}
 		}

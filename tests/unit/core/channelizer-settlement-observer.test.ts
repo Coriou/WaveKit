@@ -12,6 +12,7 @@ import type {
 	ObservedAcquisitionHandle,
 	ObservedTransaction,
 	ProcessClaim,
+	SendClaim,
 } from "../../../src/core/channelizer/settlement-observer.js"
 import type {
 	ChannelProvider,
@@ -139,6 +140,206 @@ function sealComponents(handle: ObservedAcquisitionHandle): void {
 	] as const)
 		handle.retainComponent(kind)?.sealNeverStarted()
 }
+
+function openedSend(
+	s: ReturnType<typeof setup>,
+	tx: ObservedTransaction,
+	id = "same",
+	process = processFor(s.observer, tx),
+): SendClaim {
+	const send = s.observer.claimSend(tx, process, id)!
+	s.observer.recordTerminal(
+		s.observer.captureTerminal(process, id, "opened")!,
+		"opened",
+	)
+	return send
+}
+function grantContinuity(
+	s: ReturnType<typeof setup>,
+	send: SendClaim,
+	decoderId: string,
+): void {
+	s.observer.recordGrant(send, {
+		sourceId: "s",
+		decoderId,
+		channelId: send.id,
+		generation: send.process.source.generation,
+		realised: {
+			outputRateHz: 48_000,
+			format: "cf32",
+			filterTaps: 10,
+			groupDelaySamples: 2,
+		},
+		process: send.process,
+		send,
+	})
+}
+
+describe("exact selected-grant continuity", () => {
+	it("transfers a pre-connect gap before the first grant callback, with no credit or public-event inference", () => {
+		const s = setup(),
+			{ handle, tx } = s.dequeue("d"),
+			send = openedSend(s, tx!)
+		const changed = vi.fn(() =>
+			expect(handle.snapshot().continuityLost).toBe(true),
+		)
+		handle.onChange(changed)
+		const grant = vi.fn(() =>
+			expect(handle.snapshot().continuityLost).toBe(true),
+		)
+		s.observer.subscribeGrants(grant)
+		const before = s.ledger.snapshot()
+		s.underlying.emit("channel-discontinuity", send.id, 1, 5, 10, "input-gap")
+		expect(handle.snapshot().continuityLost).toBe(false)
+		expect(s.observer.captureDiscontinuity(send.process, send.id, 1)).toBe(send)
+		s.underlying.emit("channel-discontinuity", send.id, 1, 5, 10, "input-gap")
+		expect(changed).not.toHaveBeenCalled()
+		expect(handle.snapshot().continuityLost).toBe(false) // No selected grant yet.
+		grantContinuity(s, send, "d")
+		expect(grant).toHaveBeenCalledOnce()
+		expect(changed).toHaveBeenCalledOnce()
+		expect(s.ledger.snapshot()).toEqual(before)
+	})
+
+	it("uses the same owned gap listener and eight V slots; duplicate live gaps notify once", () => {
+		const s = setup(),
+			{ handle, tx } = s.dequeue("d"),
+			send = openedSend(s, tx!)
+		for (let i = 0; i < 3; i++)
+			expect(s.provider.ownListener(() => {})).toBeDefined()
+		s.adapter.on("channel-invalidated", () => {})
+		s.observer.subscribeGrants(() => {})
+		s.observer.subscribeEnded(() => {})
+		expect(s.provider.ownListener(() => {})).toBeUndefined()
+		expect(s.underlying.listenerCount("channel-discontinuity")).toBe(1)
+		grantContinuity(s, send, "d")
+		s.observer.finishAcquisition(handle)
+		expect(handle.snapshot()).toMatchObject({
+			logical: "terminal",
+			ended: false,
+		})
+		const changed = vi.fn()
+		const off = handle.onChange(changed)
+		for (let i = 0; i < 100; i++) {
+			s.observer.captureDiscontinuity(send.process, send.id, 1)
+			s.underlying.emit("channel-discontinuity", send.id, 1, i, 1, "input-gap")
+			s.observer.publishCapturedDiscontinuity(send)
+		}
+		expect(changed).toHaveBeenCalledOnce()
+		expect(handle.snapshot().continuityLost).toBe(true)
+		for (let i = 0; i < 7; i++) handle.onChange(() => {})
+		expect(() => handle.onChange(() => {})).toThrow("notification capacity")
+		off()
+	})
+
+	it("refuses wrong identity and terminal attempts without contaminating same-ID processes", () => {
+		const s = setup(),
+			a = s.dequeue("a"),
+			b = s.dequeue("b")
+		const first = openedSend(s, a.tx!),
+			second = openedSend(s, b.tx!)
+		grantContinuity(s, first, "a")
+		grantContinuity(s, second, "b")
+		const foreign = setup(),
+			f = foreign.dequeue("foreign"),
+			foreignSend = openedSend(foreign, f.tx!)
+		expect(
+			s.observer.captureDiscontinuity(foreignSend.process, "same", 1),
+		).toBeUndefined()
+		expect(
+			s.observer.captureDiscontinuity(first.process, "wrong", 1),
+		).toBeUndefined()
+		expect(
+			s.observer.captureDiscontinuity(first.process, "same", 2),
+		).toBeUndefined()
+		const pending = s.observer.claimSend(a.tx!, first.process, "pending")!
+		expect(
+			s.observer.captureDiscontinuity(first.process, pending.id, 1),
+		).toBeUndefined()
+		s.observer.recordTerminal(
+			s.observer.captureTerminal(first.process, pending.id, "rejected")!,
+			"rejected",
+		)
+		expect(
+			s.observer.captureDiscontinuity(first.process, pending.id, 1),
+		).toBeUndefined()
+		s.observer.captureDiscontinuity(first.process, "same", 1)
+		s.underlying.emit("channel-discontinuity", "same", 1, 0, 1, "input-gap")
+		expect(a.handle.snapshot().continuityLost).toBe(true)
+		expect(b.handle.snapshot().continuityLost).toBe(false)
+		s.observer.endGrant(second, "original ended")
+		expect(
+			s.observer.captureDiscontinuity(second.process, "same", 1),
+		).toBeUndefined()
+		expect(b.handle.snapshot().continuityLost).toBe(false)
+		s.observer.recordTerminal(
+			s.observer.captureTerminal(first.process, "same", "closed")!,
+			"closed",
+		)
+		expect(
+			s.observer.captureDiscontinuity(first.process, "same", 1),
+		).toBeUndefined()
+	})
+
+	it("never transfers a superseded pre-grant bit or an old pending notification to a successor", () => {
+		const s = setup(),
+			{ handle, tx } = s.dequeue("d"),
+			old = openedSend(s, tx!)
+		s.observer.captureDiscontinuity(old.process, old.id, 1)
+		s.observer.recordTerminal(
+			s.observer.captureTerminal(old.process, old.id, "closed")!,
+			"closed",
+		)
+		const successor = openedSend(s, tx!, old.id, old.process)
+		grantContinuity(s, successor, "d")
+		expect(handle.snapshot().continuityLost).toBe(false)
+		const changed = vi.fn(() => {
+			s.observer.endGrant(successor, "reentrant-end")
+			s.observer.recordTerminal(
+				s.observer.captureTerminal(successor.process, successor.id, "closed")!,
+				"closed",
+			)
+		})
+		handle.onChange(() => {
+			if (!handle.snapshot().ended) changed()
+		})
+		s.observer.captureDiscontinuity(successor.process, successor.id, 1)
+		s.underlying.emit(
+			"channel-discontinuity",
+			successor.id,
+			1,
+			0,
+			1,
+			"input-gap",
+		)
+		s.observer.publishCapturedDiscontinuity(old)
+		s.observer.publishCapturedDiscontinuity(successor)
+		expect(changed).toHaveBeenCalledOnce()
+		expect(handle.snapshot()).toMatchObject({
+			continuityLost: true,
+			ended: true,
+		})
+	})
+
+	it("retains callback failure without resetting continuity or refunding credit", () => {
+		const s = setup(),
+			{ handle, tx } = s.dequeue("d"),
+			send = openedSend(s, tx!)
+		grantContinuity(s, send, "d")
+		const before = s.ledger.snapshot()
+		handle.onChange(() => {
+			throw new Error("synthetic gap callback")
+		})
+		s.observer.captureDiscontinuity(send.process, send.id, 1)
+		s.observer.publishCapturedDiscontinuity(send)
+		expect(handle.snapshot().continuityLost).toBe(true)
+		expect(s.provider.inspectFinal(ok)).toMatchObject({
+			ok: false,
+			state: "failed",
+		})
+		expect(s.ledger.snapshot()).toEqual(before)
+	})
+})
 
 describe("bounded channel settlement registry", () => {
 	it("holds only queue metadata before commit, with exactly 64 global slots", () => {
