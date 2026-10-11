@@ -507,3 +507,241 @@ it("commits visible identify consent before y, synchronously fences resize, and 
 	expect(confirm).toHaveBeenCalledTimes(1)
 	h.unmount()
 })
+
+// Exercise the real ingress fence and credential adapter across React's fallback.
+describe("identify consent subtree failures", () => {
+	beforeEach(() => {
+		vi.spyOn(console, "error").mockImplementation(() => undefined)
+	})
+	afterEach(() => vi.restoreAllMocks())
+
+	async function realConsentApp() {
+		const { App } = await import("./app.js")
+		const { createRuntime } = await import("./data/runtime.js")
+		const { createCliFetch } = await import("./data/access-transport.js")
+		const { MachineCredential } = await import("./data/access-credentials.js")
+		const { PLAIN_SUMMARY } = await import("./data/reducers.js")
+		const { scanView } = await import("./views/scan.js")
+		const { renderAt, settle } = await import("./test/harness.js")
+		const { SCAN_FRAME, SCAN_PROFILE, SCAN_STATUS, SCAN_DISCOVERY, SCAN_JOB } =
+			await import("./test/fixtures.js")
+		let now = Date.now()
+		let failure: "none" | "confirm" | "always" = "none"
+		let deferCredentials = false
+		const credentialWaiters: ((
+			value: InstanceType<typeof MachineCredential>,
+		) => void)[] = []
+		const handlers: WsHandlers[] = []
+		const posts: string[] = []
+		const source = {
+			...scenarioState("live").sources.value![0]!,
+			id: "rtl",
+			connected: true,
+			caps: {
+				...scenarioState("live").sources.value![0]!.caps,
+				kind: "iq" as const,
+				format: "U8_IQ" as const,
+				centerFreq: SCAN_FRAME.centerHz,
+				sampleRate: SCAN_FRAME.sampleRateHz,
+			},
+			activity: {
+				...scenarioState("live").sources.value![0]!.activity!,
+				state: "streaming" as const,
+			},
+		}
+		const accepted = {
+			...SCAN_JOB,
+			identify: {
+				...SCAN_JOB.identify,
+				target: {
+					frequencyHz: SCAN_DISCOVERY.frequencyHz,
+					bandwidthHz: SCAN_DISCOVERY.bandwidthHz,
+				},
+				timeoutMs: 15000,
+				protocols: [],
+				exhaustive: false,
+				record: false,
+			},
+		}
+		const native = vi.fn<typeof fetch>(async (input, init) => {
+			const url = String(input)
+			if (init?.method === "POST") {
+				posts.push(String(init.body))
+				return new Response(JSON.stringify(accepted), { status: 201 })
+			}
+			const body = url.endsWith("/api/sources")
+				? [source]
+				: url.endsWith("/api/scanner")
+					? SCAN_STATUS
+					: url.includes("/observations")
+						? { items: [], nextCursor: null }
+						: url.endsWith("/discoveries/disc1")
+							? SCAN_DISCOVERY
+							: url.includes("/discoveries?")
+								? { items: [SCAN_DISCOVERY], nextCursor: null }
+								: url.endsWith("/api/spectrum")
+									? { defaultProfile: SCAN_PROFILE.profile, sources: [] }
+									: []
+			return new Response(JSON.stringify(body))
+		})
+		const base = "http://localhost:9100"
+		const rt = createRuntime({
+			fetchFn: createCliFetch({
+				fetch: native,
+				policy: {
+					origin: base,
+					credentials: () =>
+						deferCredentials
+							? new Promise(resolve => credentialWaiters.push(resolve))
+							: Promise.resolve(new MachineCredential("A".repeat(43))),
+				},
+			}),
+			probeFetchFn: () => new Promise(() => undefined),
+			wsFactory: (_url, wire) => {
+				handlers.push(wire)
+				return { send: () => undefined, close: () => undefined }
+			},
+			now: () => now,
+			random: () => 0.5,
+			timers: {
+				setTimeout: () => 1,
+				clearTimeout: () => undefined,
+				setInterval: () => 1,
+				clearInterval: () => undefined,
+			},
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: {
+				base,
+				ws: `${base.replace("http", "ws")}/ws`,
+				explicit: true,
+			},
+		})
+		const testView: ViewModule = {
+			...scanView,
+			Component: props => {
+				if (
+					failure === "always" ||
+					(failure === "confirm" && props.ui.confirm?.kind === "identify")
+				)
+					throw new Error("consent subtree failed")
+				return <scanView.Component {...props} />
+			},
+		}
+		rt.start()
+		const h = await renderAt(
+			<App
+				runtime={rt}
+				views={{ scan: testView }}
+				initialView="scan"
+				color={false}
+				writeRaw={() => undefined}
+			/>,
+			{ cols: 80, rows: 24 },
+		)
+		const opened = new Set<WsHandlers>()
+		const refresh = async (_reconnect = false) => {
+			const wire = handlers.at(-1)!
+			if (!opened.has(wire)) {
+				opened.add(wire)
+				wire.open()
+				wire.message(
+					JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+				)
+			}
+			for (const [type, data] of [
+				["source:status", source],
+				["spectrum:profile", SCAN_PROFILE],
+				["spectrum:frame", SCAN_FRAME],
+			] as const)
+				wire.message(
+					JSON.stringify({
+						type,
+						channel: type.startsWith("source:") ? "sources" : "spectrum",
+						data,
+					}),
+				)
+			now += 5001
+			rt.tick()
+			for (let i = 0; i < 80; i++) await Promise.resolve()
+			rt.tick()
+			await settle()
+		}
+		await refresh()
+		await h.press("d")
+		await refresh()
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		await refresh()
+		expect(
+			rt.identifySnapshot().readiness,
+			JSON.stringify(rt.identifySnapshot()) + "\n" + h.text(),
+		).toMatchObject({ ready: true })
+		return {
+			h,
+			rt,
+			posts,
+			handlers,
+			refresh,
+			setFailure: (next: typeof failure) => {
+				failure = next
+			},
+			defer: () => {
+				deferCredentials = true
+			},
+			pending: () => credentialWaiters.length,
+			resolve: () => {
+				deferCredentials = false
+				for (const resolve of credentialWaiters.splice(0))
+					resolve(new MachineCredential("A".repeat(43)))
+			},
+			renderFailure: async () => {
+				rt.store.set({ ...rt.store.get(), now: ++now })
+				await settle()
+			},
+		}
+	}
+
+	it.each(["confirm", "latched", "credentials"] as const)(
+		"does not dispatch through a %s render failure and recovers only with fresh visible consent",
+		async mode => {
+			const a = await realConsentApp()
+			try {
+				if (mode === "latched") {
+					a.setFailure("always")
+					await a.renderFailure()
+				} else if (mode === "confirm") a.setFailure("confirm")
+				await a.h.press("i", QUIET)
+				if (mode === "credentials") {
+					expect(a.h.text()).toContain("Identify this frequency")
+					a.defer()
+					await a.h.press("y", QUIET)
+					expect(a.pending()).toBeGreaterThan(0)
+					a.setFailure("always")
+					await a.renderFailure()
+					a.resolve()
+				}
+				expect(a.h.text()).toContain("render error")
+				await a.h.press("y", QUIET)
+				expect(a.posts).toEqual([])
+				a.setFailure("none")
+				const previousSockets = a.handlers.length
+				await a.h.press("r", QUIET)
+				expect(a.handlers).toHaveLength(previousSockets + 1)
+				await a.refresh(true)
+				await a.h.press("y", QUIET)
+				expect(a.posts).toEqual([])
+				// Reconnect cannot revalidate the old consent token.
+				await a.refresh()
+				await a.h.press("i", QUIET)
+				expect(a.h.text()).toContain("Identify this frequency")
+				await a.h.press("y", QUIET)
+				expect(a.posts).toHaveLength(1)
+				await a.h.press("q", QUIET)
+				await a.h.waitFor(() => a.h.exited())
+			} finally {
+				a.h.unmount()
+				a.rt.stop()
+			}
+		},
+	)
+})

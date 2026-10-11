@@ -1788,6 +1788,7 @@ describe("identify runtime consent and receipt", () => {
 		options: {
 			deferredCredential?: boolean
 			post?: () => Promise<Response>
+			autoDiscovery?: boolean
 		} = {},
 	) {
 		const {
@@ -1824,6 +1825,7 @@ describe("identify runtime consent and receipt", () => {
 			| ((credential: InstanceType<typeof MachineCredential>) => void)
 			| null = null
 		let defer = false
+		let discoveryTarget = TARGET
 		let direct: unknown = {
 			...SCAN_JOB,
 			id: "off-list",
@@ -1895,6 +1897,7 @@ describe("identify runtime consent and receipt", () => {
 					defer
 						? new Promise(resolve => {
 								credentialResolve = resolve
+								defer = false
 							})
 						: Promise.resolve(new MachineCredential("A".repeat(43))),
 			},
@@ -1907,9 +1910,11 @@ describe("identify runtime consent and receipt", () => {
 			random: () => 0.5,
 			timers: fakeTimers,
 			summarize: PLAIN_SUMMARY.summarize,
-			explicit: TARGET,
+			explicit: options.autoDiscovery ? null : TARGET,
+			discover: async () => ({ target: discoveryTarget, tried: [] }),
 		})
 		rt.start()
+		for (let i = 0; i < 50; i++) await Promise.resolve()
 		ws.sockets[0]!.open()
 		ws.sockets[0]!.message(
 			JSON.stringify({ type: "subscribed", data: { channels: [] } }),
@@ -1963,6 +1968,11 @@ describe("identify runtime consent and receipt", () => {
 			posts,
 			reads,
 			native,
+			accepted,
+			ws,
+			setDiscoveryTarget: (next: typeof TARGET) => {
+				discoveryTarget = next
+			},
 			setReadOverride: (
 				override: (url: string) => Promise<Response> | null,
 			) => {
@@ -2002,6 +2012,10 @@ describe("identify runtime consent and receipt", () => {
 			exhaustive: false,
 			record: false,
 		})
+		expect(h.rt.identifySnapshot().receipt?.phase).toBe("known")
+		expect(h.reads).not.toContain(`${TARGET.base}/api/scanner/jobs/off-list`)
+		h.rt.setIdentifyInspection(true)
+		await drain()
 		expect(h.reads).toContain(`${TARGET.base}/api/scanner/jobs/off-list`)
 		expect(h.rt.identifySnapshot().receipt?.phase).toBe("terminal-confirmed")
 		h.rt.stop()
@@ -2122,6 +2136,227 @@ describe("identify runtime consent and receipt", () => {
 		expect(h.posts).toHaveLength(1)
 		h.rt.stop()
 	})
+	it.each(["failed", "oversized", "over-200"])(
+		"exact-ID inspection survives an actual %s job list",
+		async mode => {
+			const h = await readyRuntime()
+			const { SCAN_JOB } = await import("../../../cli/source/test/fixtures.js")
+			h.setReadOverride(url =>
+				url.endsWith("/api/scanner/jobs")
+					? Promise.resolve(
+							mode === "failed"
+								? new Response("{}", { status: 503 })
+								: mode === "oversized"
+									? new Response(" ".repeat(2 * 1024 * 1024 + 1))
+									: new Response(
+											JSON.stringify(
+												Array.from({ length: 201 }, (_, i) => ({
+													...SCAN_JOB,
+													id: `other-${i}`,
+												})),
+											),
+										),
+						)
+					: null,
+			)
+			vi.setSystemTime(Date.now() + 5001)
+			h.event("spectrum:frame", h.SCAN_FRAME)
+			h.rt.tick()
+			await drain()
+			h.rt.tick()
+			if (mode === "over-200") {
+				expect(h.rt.store.get().scan.lanes.jobs.value).toHaveLength(200)
+				expect(h.rt.store.get().scan.omittedJobs).toBe(1)
+			} else expect(h.rt.store.get().scan.lanes.jobs.error).not.toBeNull()
+			const p = h.prompt()
+			h.rt.confirmIdentify(p.token)
+			await drain()
+			expect(h.rt.identifySnapshot().receipt?.phase).toBe("known")
+			h.rt.setScanDemand(null)
+			h.rt.setIdentifyInspection(true)
+			await drain()
+			expect(h.reads).toContain(`${TARGET.base}/api/scanner/jobs/off-list`)
+			expect(h.rt.identifySnapshot().receipt?.phase).toBe("terminal-confirmed")
+			h.rt.stop()
+		},
+	)
+	it.each(["leave", "help", "source", "tab", "close-and-restore"])(
+		"late201 retains attribution without restoring %s focus or demand",
+		async mode => {
+			let release!: (response: Response) => void
+			const h = await readyRuntime({
+				post: () =>
+					new Promise(resolve => {
+						release = resolve
+					}),
+			})
+			const p = h.prompt()
+			h.rt.confirmIdentify(p.token)
+			await drain()
+			expect(h.posts).toHaveLength(1)
+			h.rt.setIdentifyInspection(false)
+			h.rt.setScanDemand(null)
+			h.rt.setIdentifyContext({
+				...h.context,
+				active: mode === "source" || mode === "tab",
+				sourceId: mode === "source" ? "other" : "rtl",
+				key: mode,
+			})
+			if (mode === "close-and-restore") h.rt.setIdentifyContext(h.context)
+			release(new Response(JSON.stringify(h.accepted), { status: 201 }))
+			await drain()
+			await vi.advanceTimersByTimeAsync(5001)
+			expect(h.rt.identifySnapshot()).toMatchObject({
+				receipt: { phase: "known", destination: TARGET.base },
+				inspection: false,
+				autoOpen: null,
+			})
+			expect(h.reads.filter(url => url.endsWith("/jobs/off-list"))).toEqual([])
+			h.rt.setIdentifyInspection(true)
+			await drain()
+			expect(h.rt.identifySnapshot().receipt?.phase).toBe("terminal-confirmed")
+			h.rt.stop()
+		},
+	)
+	it.each(["trust", "target", "lockout", "membership", "metadata"])(
+		"REST %s refresh permanently fences material consent but permits benign metadata",
+		async mode => {
+			const h = await readyRuntime()
+			const { SCAN_DISCOVERY } =
+				await import("../../../cli/source/test/fixtures.js")
+			const p = h.prompt()
+			const changed =
+				mode === "trust"
+					? { ...SCAN_DISCOVERY, tuningTrust: "relay" }
+					: mode === "target"
+						? { ...SCAN_DISCOVERY, frequencyHz: SCAN_DISCOVERY.frequencyHz + 1 }
+						: mode === "lockout"
+							? {
+									...SCAN_DISCOVERY,
+									operator: { lockout: true },
+								}
+							: mode === "membership"
+								? { ...SCAN_DISCOVERY, sourceIds: ["other"] }
+								: { ...SCAN_DISCOVERY, lastSeenAt: "2026-10-11T12:00:01Z" }
+			h.setReadOverride(url =>
+				url.endsWith("/discoveries/disc1")
+					? Promise.resolve(new Response(JSON.stringify(changed)))
+					: null,
+			)
+			vi.setSystemTime(Date.now() + 5001)
+			h.event("spectrum:frame", h.SCAN_FRAME)
+			h.rt.tick()
+			await drain()
+			h.setReadOverride(() => null)
+			vi.setSystemTime(Date.now() + 5001)
+			h.event("spectrum:frame", h.SCAN_FRAME)
+			h.rt.tick()
+			await drain()
+			h.rt.confirmIdentify(p.token)
+			await drain()
+			expect(h.posts).toHaveLength(mode === "metadata" ? 1 : 0)
+			h.rt.stop()
+		},
+	)
+
+	it("REST trust change during deferred credentials refuses native dispatch without a render tick", async () => {
+		const h = await readyRuntime({ deferredCredential: true })
+		const { SCAN_DISCOVERY } =
+			await import("../../../cli/source/test/fixtures.js")
+		const p = h.prompt()
+		h.rt.confirmIdentify(p.token)
+		await drain()
+		h.setReadOverride(url =>
+			url.endsWith("/discoveries/disc1")
+				? Promise.resolve(
+						new Response(
+							JSON.stringify({ ...SCAN_DISCOVERY, tuningTrust: "relay" }),
+						),
+					)
+				: null,
+		)
+		vi.setSystemTime(Date.now() + 5001)
+		h.event("spectrum:frame", h.SCAN_FRAME)
+		h.rt.tick()
+		await drain()
+		h.resolveCredential()
+		await drain()
+		expect(h.posts).toHaveLength(0)
+		expect(h.rt.identifySnapshot().receipt?.phase).toBe("unsent")
+		h.rt.stop()
+	})
+	it("late A201 cannot focus B or read its ID there; explicit inspection back at A uses a new generation", async () => {
+		let release!: (response: Response) => void
+		const h = await readyRuntime({
+			autoDiscovery: true,
+			post: () =>
+				new Promise(resolve => {
+					release = resolve
+				}),
+		})
+		const p = h.prompt()
+		h.rt.confirmIdentify(p.token)
+		await drain()
+		const B = {
+			base: "http://127.0.0.1:9200",
+			ws: "ws://127.0.0.1:9200/ws",
+			explicit: true,
+		}
+		h.setDiscoveryTarget(B)
+		h.setReadOverride(url =>
+			url.startsWith(TARGET.base)
+				? Promise.reject(new Error("A unavailable"))
+				: null,
+		)
+		await vi.advanceTimersByTimeAsync(5001)
+		vi.setSystemTime(Date.now() + 16000)
+		await vi.advanceTimersByTimeAsync(5001)
+		await drain()
+		h.rt.tick()
+		expect(
+			h.rt.store.get().conn.target.base,
+			JSON.stringify({ conn: h.rt.store.get().conn, reads: h.reads }),
+		).toBe(B.base)
+		h.rt.setIdentifyContext({ ...h.context, key: "B detail" })
+		release(new Response(JSON.stringify(h.accepted), { status: 201 }))
+		await drain()
+		expect(h.rt.identifySnapshot()).toMatchObject({
+			receipt: { phase: "known", destination: TARGET.base },
+			autoOpen: null,
+			inspection: false,
+		})
+		h.rt.setIdentifyInspection(true)
+		await drain()
+		expect(h.reads.filter(url => url.endsWith("/jobs/off-list"))).toEqual([])
+		const oldGeneration = h.rt.identifySnapshot().receipt!.readGeneration
+		h.rt.setIdentifyInspection(false)
+		h.setDiscoveryTarget(TARGET)
+		h.setReadOverride(url =>
+			url.startsWith(B.base)
+				? Promise.reject(new Error("B unavailable"))
+				: null,
+		)
+		await vi.advanceTimersByTimeAsync(5001)
+		vi.setSystemTime(Date.now() + 16000)
+		await vi.advanceTimersByTimeAsync(5001)
+		await drain()
+		h.rt.tick()
+		expect(h.rt.store.get().conn.target.base).toBe(TARGET.base)
+		h.rt.setIdentifyInspection(true)
+		await drain()
+		expect(h.reads.filter(url => url.endsWith("/jobs/off-list"))).toEqual([
+			`${TARGET.base}/api/scanner/jobs/off-list`,
+		])
+		expect(h.rt.identifySnapshot().receipt).toMatchObject({
+			phase: "terminal-confirmed",
+			destination: TARGET.base,
+		})
+		expect(h.rt.identifySnapshot().receipt!.readGeneration).toBeGreaterThan(
+			oldGeneration,
+		)
+		h.rt.stop()
+	})
+
 	it("a detail GET issued before discovery ingress cannot reauthorize, but a new successful inspection can", async () => {
 		const h = await readyRuntime()
 		const { SCAN_DISCOVERY } =

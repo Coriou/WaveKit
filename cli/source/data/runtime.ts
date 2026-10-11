@@ -11,6 +11,7 @@ import {
 	type IdentifyReceipt,
 	type IdentifySnapshot,
 	type IdentifyOutcome,
+	type IdentifyAutoOpen,
 } from "./identify-state.js"
 import { getScan, ScanReadError, submitIdentify } from "./api-client.js"
 import {
@@ -221,6 +222,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let identifyStatusDirty = true
 	let identifyFrame: IdentifyEvidence["frame"] = null
 	let identifyPrompt: IdentifyPrompt | null = null
+	let identifyAutoOpen: IdentifyAutoOpen | null = null
+	let identifyContextGeneration = 0
 	let identifyVisible: number | null = null
 	let identifyReceipt: IdentifyReceipt | null = null
 	let identifyInspection = false
@@ -243,6 +246,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		identifyDirty = true
 	}
 	function reconnectIdentify(): void {
+		identifyAutoOpen = null
+		identifyContextGeneration++
 		revokeIdentify(true)
 		identifySession++
 		identifyFrame = null
@@ -283,6 +288,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	function identifySnapshot(): IdentifySnapshot {
 		return {
 			prompt: identifyPrompt,
+			autoOpen: identifyAutoOpen,
 			receipt:
 				identifyReceipt && identifyReceipt.destination !== target?.base
 					? {
@@ -300,6 +306,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	): void {
 		if (live) liveIdentifyContext = live
 		if (JSON.stringify(context) !== JSON.stringify(identifyContext)) {
+			identifyContextGeneration++
+			identifyAutoOpen = null
 			const sourceChanged = context.sourceId !== identifyContext.sourceId
 			const detailChanged = context.discoveryId !== identifyContext.discoveryId
 			revokeIdentify(detailChanged || sourceChanged)
@@ -325,6 +333,20 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			revokeIdentify()
 			return false
 		}
+	}
+	function discoveryMaterial(detail: ScanDiscovery | null): string {
+		return JSON.stringify(
+			detail
+				? [
+						detail.id,
+						detail.frequencyHz,
+						detail.bandwidthHz,
+						detail.sourceIds.includes(identifyContext.sourceId ?? ""),
+						detail.tuningTrust,
+						detail.operator?.lockout === true,
+					]
+				: null,
+		)
 	}
 	function sourceMaterial(row: SourceRow | null): string {
 		return JSON.stringify(
@@ -686,7 +708,14 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 							authorizationSession === identifySession
 						) {
 							if (key === "discovery") {
-								identifyDetail = value as ScanDiscovery
+								const detail = value as ScanDiscovery
+								if (
+									identifyDetail &&
+									discoveryMaterial(identifyDetail) !==
+										discoveryMaterial(detail)
+								)
+									revokeIdentify()
+								identifyDetail = detail
 								identifyDetailAt = deps.now()
 								identifyDetailDirty = false
 							}
@@ -1103,6 +1132,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		identifyOwner = token
 		identifyBoundary = false
 		const attempt = ++identifyAttempt
+		const originContextGeneration = identifyContextGeneration
 		receiptReadReset()
 		identifyReceipt = {
 			phase: "preparing",
@@ -1142,10 +1172,21 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				].includes(outcome.code)
 			)
 				identifyAuthBlocked = true
-			if (outcome.kind === "accepted") {
-				identifyInspection = true
-				lastReceiptRead = -Infinity
-				void readReceiptCycle()
+			if (
+				outcome.kind === "accepted" &&
+				!stopped &&
+				originContextGeneration === identifyContextGeneration &&
+				prompt.contextKey === identifyContext.key &&
+				identifyContext.active &&
+				prompt.session === identifySession &&
+				prompt.destination === target?.base
+			) {
+				identifyAutoOpen = {
+					contextKey: prompt.contextKey,
+					destination: prompt.destination,
+					session: prompt.session,
+					jobId: outcome.job.id,
+				}
 			}
 		}
 		const deadline = deps.timers.setTimeout(() => {

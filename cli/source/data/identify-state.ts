@@ -117,7 +117,15 @@ export interface IdentifyReadiness {
 	request: IdentifyRequest | null
 	layout: IdentifyConsentLayout | null
 }
+export interface IdentifyAutoOpen {
+	contextKey: string
+	destination: string
+	session: number
+	jobId: string
+}
 export interface IdentifySnapshot {
+	/** One completion notice; UI owns whether inspection demand opens. */
+	autoOpen?: IdentifyAutoOpen | null
 	prompt: IdentifyPrompt | null
 	receipt: IdentifyReceipt | null
 	readiness: IdentifyReadiness

@@ -6,6 +6,7 @@ import {
 	useRef,
 	useState,
 	type ReactElement,
+	type ReactNode,
 } from "react"
 import { Banner } from "./components/banner.js"
 import { ChainStrip } from "./components/chain-strip.js"
@@ -50,6 +51,23 @@ function safe<T>(fn: () => T, fallback: T): T {
 	}
 }
 const NO_INFO: ViewKeyInfo = { rowIds: [], pageSize: 1, ctx: EMPTY_VIEW_CTX }
+
+/** Only a successfully committed frame can attest visible consent. */
+function CommittedFrame({
+	runtime,
+	token,
+	children,
+}: {
+	runtime: RuntimeHandle
+	token: number | null
+	children: ReactNode
+}): ReactElement {
+	useLayoutEffect(() => () => runtime.invalidateIdentify?.(), [runtime])
+	useLayoutEffect(() => {
+		if (token !== null) runtime.markIdentifyVisible?.(token)
+	}, [runtime, token])
+	return <>{children}</>
+}
 
 export function App({
 	runtime,
@@ -119,14 +137,6 @@ export function App({
 		renderedRef.current = { cols, rows, contentRows: chrome.content }
 		uiRef.current = ui
 		runtime.setIdentifyContext?.(identifyContextFor(ui), liveContext)
-		if (
-			ui.confirm?.kind === "identify" &&
-			!ui.help &&
-			!small &&
-			ui.confirm.layout.width === width &&
-			ui.confirm.layout.height === chrome.content
-		)
-			runtime.markIdentifyVisible?.(ui.confirm.token)
 	})
 	useEffect(() => {
 		const resize = (): void => {
@@ -336,6 +346,7 @@ export function App({
 			!small &&
 			!ui.help &&
 			!ui.quit &&
+			!ui.scan.receipt &&
 			ui.scan.sourceId !== null
 		const detail =
 			ui.detail.scan.open && ui.selected.scan && ui.scan.tab !== "spectrum"
@@ -365,25 +376,32 @@ export function App({
 		ui.scan.retry,
 		ui.scan.cursor,
 		ui.scan.tab,
+		ui.scan.receipt,
 		ui.detail.scan.open,
 		ui.selected.scan,
 		small,
 		ui.quit,
 	])
 	useEffect(() => {
-		const receipt = state.identify?.receipt
+		const open = state.identify?.autoOpen
+		const context = liveContext()
 		if (
-			state.identify?.inspection &&
-			ui.view === "scan" &&
-			receipt?.jobId &&
-			!ui.scan.receipt
-		)
+			open &&
+			runtime.identifySnapshot?.().autoOpen === open &&
+			context.active &&
+			context.key === open.contextKey &&
+			!uiRef.current.scan.receipt
+		) {
 			commitUi({
 				...uiRef.current,
 				scan: { ...uiRef.current.scan, receipt: true },
+				selected: { ...uiRef.current.selected, scan: null },
+				detail: { ...uiRef.current.detail, scan: { open: true, scroll: 0 } },
 				confirm: null,
 			})
-	}, [state.identify?.inspection, state.identify?.receipt?.jobId])
+		}
+	}, [state.identify?.autoOpen])
+
 	useEffect(() => {
 		runtime.setIdentifyInspection?.(
 			ui.view === "scan" &&
@@ -423,46 +441,63 @@ export function App({
 	return (
 		<ColorContext.Provider value={color}>
 			<ErrorBoundary key={ui.epoch}>
-				<Box
-					flexDirection="column"
-					width={cols}
-					height={rows - 1}
-					overflow="hidden"
+				<CommittedFrame
+					runtime={runtime}
+					token={
+						ui.confirm?.kind === "identify" &&
+						!ui.help &&
+						!small &&
+						ui.confirm.layout.width === width &&
+						ui.confirm.layout.height === chrome.content
+							? ui.confirm.token
+							: null
+					}
 				>
-					<ChainStrip state={state} width={width} />
-					{/* §5.1: the banner sits directly under the strip. */}
-					{banner ? <Banner line={banner} /> : null}
-					{chrome.switcher === 1 ? (
-						<Switcher view={ui.view} width={width} />
-					) : null}
-					{chrome.blank === 1 ? <Text> </Text> : null}
-					<Box flexDirection="column" height={chrome.content} overflow="hidden">
-						{ui.help ? (
-							<HelpOverlay ctx={ctx} width={width} height={chrome.content} />
-						) : view ? (
-							<view.Component
-								state={state}
-								ui={ui}
-								width={width}
-								height={chrome.content}
-								heightClass={hc}
-								widthClass={wc}
-							/>
+					<Box
+						flexDirection="column"
+						width={cols}
+						height={rows - 1}
+						overflow="hidden"
+					>
+						<ChainStrip state={state} width={width} />
+						{/* §5.1: the banner sits directly under the strip. */}
+						{banner ? <Banner line={banner} /> : null}
+						{chrome.switcher === 1 ? (
+							<Switcher view={ui.view} width={width} />
+						) : null}
+						{chrome.blank === 1 ? <Text> </Text> : null}
+						<Box
+							flexDirection="column"
+							height={chrome.content}
+							overflow="hidden"
+						>
+							{ui.help ? (
+								<HelpOverlay ctx={ctx} width={width} height={chrome.content} />
+							) : view ? (
+								<view.Component
+									state={state}
+									ui={ui}
+									width={width}
+									height={chrome.content}
+									heightClass={hc}
+									widthClass={wc}
+								/>
+							) : (
+								<Text> </Text>
+							)}
+						</Box>
+						{ui.confirm ? (
+							<ConfirmBar confirm={ui.confirm} width={width} />
 						) : (
-							<Text> </Text>
+							<Footer
+								ctx={ctx}
+								notice={footerNotice}
+								now={state.now}
+								width={width}
+							/>
 						)}
 					</Box>
-					{ui.confirm ? (
-						<ConfirmBar confirm={ui.confirm} width={width} />
-					) : (
-						<Footer
-							ctx={ctx}
-							notice={footerNotice}
-							now={state.now}
-							width={width}
-						/>
-					)}
-				</Box>
+				</CommittedFrame>
 			</ErrorBoundary>
 		</ColorContext.Provider>
 	)
