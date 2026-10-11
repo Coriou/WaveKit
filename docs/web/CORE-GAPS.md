@@ -107,6 +107,18 @@ mounted; anything marked *protected mode only* is unreachable in a default deplo
   Must land before browser controls touch the receiver (ROADMAP §4).
 - [ ] List signed-in devices (name, kind, last seen, this device); only revoke exists.
 
+**Scanner** (S1 is on main: discoveries, identify, sweeps with takeover, occupancy, listen)
+- [ ] Search discoveries by protocol, identity (colour code, NAC, capcode, talkgroup) and
+  frequency; `q` matches labels only today.
+- [ ] The auto-resume time on a job paused by an operator tune, for the "resumes in 58 s"
+  countdown.
+- [ ] Decoder names (not only counts) in a sweep's impact, for the consent line (verify).
+- [ ] `scanner:progress` at the 2 Hz the spec promised (the limiter allows 1/s per job).
+- [ ] Scanner WebSocket replay after a reconnect (today: refetch everything over REST).
+- [ ] A link between a saved frequency and the discovery it came from.
+- [ ] S2 enabled (parallel identify trials, "classified", CTCSS, analog recordings) and S3
+  listen-scan ("Scan a list") for the later Scanner mode.
+
 **Recordings**
 - [ ] Keep (star) a recording: exempt from retention, synced to every client; un-keeping
   returns it to normal retention. (Scanner discovery `keep` protects all of an emitter's

@@ -471,11 +471,65 @@ Condensed + Noto Sans, Tabler-based icons).
     instead. (4) "N changed" counts saved changes only; waiting ones show in the Apply bar
     and the rail dots.
 
+- **Scanner, decisions before design (owner, 2026-10-11).** Grounded in what scanner S1
+  provides on main (discoveries with a confidence ladder, identify in the tuned span,
+  sweeps that take the tuner with consent, occupancy history, listen in window) and the
+  plan (S2 channel tier: parallel trials, "classified", CTCSS, analog recordings; S3
+  listen-scan; S4 hardware acceptance). Settled with the owner before drawing:
+  - *Purpose:* the Scanner view is **discovery** (what is around me, found over time, by
+    watching the tuned span or sweeping bands). **Identify is an action, not a page**: on
+    any signal, from the tuned card, a right-click, ⌘K or `I`. Classic listen-scan (S3) will
+    be a later mode of the same view ("Scan a list"); not drawn, no placeholder.
+  - *Placement:* the right drawer (Activity's slot, 420 px, full width below 1100 px), plus a
+    **band strip** docked top centre over the spectrum while a scan covers more than the
+    visible span: whole range, hops with the current one lit, 24 h occupancy heat, excluded
+    ranges hatched, a bracket for the visible span, discovery ticks (solid decoded, hollow
+    maybe, pulsing active); click a tick to tune.
+  - *Sweep vs operator:* consent first (the composer states the cost in amber: "Takes the
+    receiver · pauses ADS-B, AIS and 3 others · live audio follows the scan"), a visible hold
+    while it runs (Tuner island: "Scanner has the receiver · Marine VHF · hop 7/44 · Pause ·
+    Stop"; Listen: "Following the scan"; paused decoders say why). Tuning anyway just works
+    and pauses the sweep: "Scan paused · you tuned · resumes in 58 s · Resume now · Stop".
+    Running sweep = phosphor with a scan glyph (it is live); paused = amber (not live).
+  - *Scan setup:* presets plus a live preview, not a job manager. Chips: This span, the
+    region's band plans, a custom range; preview line ("Sweeps in 8 s · catches a 5 s call
+    94 % of the time"); core's plan issues inline; More holds sensitivity, hold on activity,
+    protocols, record calls, exclusions, stop after. The button says what it does ("Start ·
+    takes the receiver"). A jobs list appears only when several jobs run (CLI / API).
+  - *Discoveries list:* typed-chip search like Activity, sort (Last heard, Frequency,
+    Confidence); rows with protocol tile, frequency, protocol + identity, confidence, last
+    heard or a live dot, lock when encrypted, star when kept. Confidence in words: "Heard",
+    "Maybe DMR", "Likely DMR" (S2), "DMR" with a check; caps and failure reasons on the second
+    line. A row opens in place (like Recordings): why that confidence, identity chips, a 24 h
+    activity strip with the last transmissions (playable when recorded), label and note in
+    place, actions Listen (tunes first if needed), Save frequency, Identify again, `⋯` Keep,
+    Ignore, Delete, Copy. Footer stays honest about coverage ("Nothing found in 12 min of
+    scanning (91 % covered)").
+  - *Auto band map = discoveries.* Discoveries tag the spectrum as a third, quieter tier
+    under saved-frequency tags (bright when active, dim when heard in the last hour, "DMR ·
+    CC 1"), with the existing yielding rules. Display › "Discoveries on the spectrum: All /
+    Decoded only / Off". Saving a discovery creates a linked saved frequency (name, mode,
+    bandwidth, tone prefilled); Ignore is core's lockout and hides the tag. This answers the
+    open "auto band map" question.
+  - *Identify in the tuned card:* waiting (countdown to the 15 s timeout) → one row per
+    decoder trial with outcome words (Trying, Decoded, No sync, CRC errors, Timed out,
+    Skipped (busy), Needs S2) → measured line ("12.5 kHz wide · SNR 18 dB · 30 ms bursts").
+    Outcomes: identified (the card becomes that type's card, Save / Open in Scanner), maybe
+    and unidentified ("Try for longer", 60 s), artefact answered at once ("This is the
+    receiver's own centre spike", "A mirror image of 162.400"), blocked by a sweep ("Pause the
+    scan and identify"), interrupted ("Stopped · you tuned away"). Every result becomes or
+    updates a discovery. Never moves the receiver.
+  - *Untrusted axis:* when core reports `tuningTrust: unverified`, the axis and discovery tags
+    dim with a "Frequencies unverified" chip.
+  - *Stages and access:* S1 drawn as default; a `stage` tweak shows S2 (Likely, CTCSS,
+    analog playback, parallel trials). Full controls are drawn; a web build shipping before
+    browser access lands would be read-only like the CLI Scan view (list, detail, band strip).
+  - *Boards:* Scanner (drawer, tweaks `state`, `openFirst`, `stage`), Identify (every
+    identify state of the tuned card), wired into C · Immersive. Mock stays in Brittany.
+
 ## Open questions and next topics
 
-- Auto band map: remember what was decoded where and keep it labelled on the
-  spectrum (active / seen recently / saved), user-configurable. Owner unsure;
-  leaning yes. Not drawn yet.
+- Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
 - Activity follow-ups: unread state and watched talkgroups/capcodes, real time-range
   picker and jump-to-time, bulk actions (export, copy, audio clip).
 - Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
@@ -501,7 +555,8 @@ Condensed + Noto Sans, Tabler-based icons).
   they may change; profiles or presets ("Night", "Portable"); editing the configuration
   as text. The Listen island still says Auto squelch keeps "6 dB" while the margin is now
   a setting. Signed-in devices needs the auth design.
-- Map view, Scanner.
+- Scanner listen-scan (S3, "Scan a list"), right-click signal menu with Identify first,
+  the `I` key in the keymap pass.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
 
