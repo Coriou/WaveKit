@@ -286,7 +286,7 @@ destination-bound CLI credentials and credential-free health probes. The setup
 utility, scanner worker and main entry retain separate build outputs. Browser
 onboarding/renewal, trusted bootstrap delivery, public audio origins and actual
 TLS/proxy/container exposure acceptance remain open. See the
-[access implementation checklist](../.kiro/specs/core-access-policy/tasks.md).
+[access implementation checklist](specs/core-access-policy/tasks.md).
 
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
@@ -313,13 +313,13 @@ checks at enqueue/send and accepted-write drain before shutdown. The assembled
 full root suite, typecheck, lint and build passed. Shipped client ordering,
 conflict/uncertain-outcome recovery, trusted bootstrap delivery and external
 browser/TLS acceptance remain open. Legacy mode does not mount operator data.
-The [Activity/catalog design](../.kiro/specs/activity-recording-catalog/design.md)
+The [Activity/catalog design](specs/activity-recording-catalog/design.md)
 landed at `c1e0293`; SQLite remains provisional until bounded runtime/storage
 qualification. Recording integration still follows S2/S3 and deletion-owner gates.
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
 journals, discovery search and settings are separate domain foundations.
 
-The [decode envelope spec](../.kiro/specs/decode-envelope/design.md) defines the
+The [decode envelope spec](specs/decode-envelope/design.md) defines the
 next unmounted foundation: caller-owned reception IDs, separate producer/ingestion
 clocks, explicit unknown RF context and complete bounded decoded JSON. Public
 publication and Activity persistence remain separate checkpoints; parser fallback
@@ -683,10 +683,9 @@ Landed locally at `cc3fd74`: `AGENTS.md` is the single instruction file; `CLAUDE
 natively (Codex, Claude Code, Grok CLI, omp) and the per-worktree shared-memory setup
 (`node scripts/agents-setup.mjs`). Specs follow [`docs/specs/README.md`](specs/README.md).
 `tests/unit/repo/` fails on drifted commands, paths, links, tool-enforced conventions,
-competing instruction files and private-workspace exposure. Remaining: move
-`.kiro/specs/<feature>/` directories to `docs/specs/` in one coordinated change once
-in-flight spec branches land, then drop the legacy root from the checker and docs; verify
-VS Code chat if it becomes a used harness.
+competing instruction files and private-workspace exposure. The six legacy spec directories now live under `docs/specs/`, with contents and
+numbering unchanged; the checker rejects tracked legacy specs. Historical coordination
+entries retain their original paths. Remaining: verify VS Code chat if it becomes a used harness.
 
 ## 11. CI images and release validation
 
