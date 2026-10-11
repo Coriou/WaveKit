@@ -19,6 +19,7 @@ mounted; anything marked *protected mode only* is unreachable in a default deplo
 - [ ] Zoom: a real higher-resolution FFT of the viewed slice (cropping the published bins
   is not zoom), plus FFT size up to 16384 and averaging per client (Display › FFT size,
   Averaging); profiles stop at 2048 bins today and the server allows 4 profiles in all.
+  Designed on main (`docs/specs/viewed-slice-spectrum/`, with feasibility gates), not built.
 - [ ] Waterfall backfill: the last few seconds of rows on subscribe, so the waterfall is
   not empty on open or reconnect (today a join gets one snapshot frame).
 - [ ] Low-latency tuner control over WebSocket (REST only today); drag-to-pan retunes the

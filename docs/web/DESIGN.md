@@ -587,7 +587,8 @@ Condensed + Noto Sans, Tabler-based icons).
   in a focused Activity list but *save frequency* in the palette keymap: settle in the
   keymap pass. Recordings at phone width needs a look on a real phone layout.
 - Settings follow-ups: ⌘K should list individual settings ("Open in Settings" on a
-  palette row) and the palette's setting scopes should share the registry; first-run
+  palette row) and the palette's setting scopes should share the registry (confirmed
+  2026-10-11: "theme" finds nothing because the palette keeps its own list); first-run
   setup (the Pi first-boot page asks for the location today); guest accounts and what
   they may change; profiles or presets ("Night", "Portable"); editing the configuration
   as text. The Listen island still says Auto squelch keeps "6 dB" while the margin is now
@@ -604,35 +605,59 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 ## Next session
 
 Handoff written 2026-10-11, at the end of the shell, Scanner composer and theming session.
+**Topic: the light theme, second pass.**
 
-**State.** On the canvas, not yet reviewed by the owner on screen (the agents checked their
-boards in a local headless render of the canvas runtime, not in the canvas editor):
-- Shell: one 16 px gutter; drawers overlay at full height and only Receiver and the tuned card
-  slide left; resizable drawer edge; dock regrouped (Map alone, Search icon); tuned card drags
-  by its type tile, snaps to anchors and minimises to one line.
-- Scanner composer: band ruler with lanes, several ranges, per-range protocols, Skip a part,
-  "Just find signals", "Looks for"; Shift-drag on the spectrum opens it prefilled.
-- Theming: every board on the tokens in [THEME-TOKENS.md](THEME-TOKENS.md), light mode and
-  five accents, set from Settings › Display or the Immersive tweaks. Light Map has its own
-  cartographic style.
+**State.** The owner reviewed the shell on the canvas and accepted it: one 16 px gutter,
+full-height overlay drawers (only Receiver and the tuned card slide left), dock regrouped,
+tuned card drag + snap + minimise, the Scanner composer (band ruler, ranges, per-range
+protocols). Every board runs on the tokens in [THEME-TOKENS.md](THEME-TOKENS.md) with dark
+(unchanged), light and five accents, set from Settings › Display or the Immersive tweaks.
+
+**Owner feedback on light (2026-10-11).** Light feels half done: a light shell floating over a
+dark spectrum and waterfall. Explore an **everything-light** theme, the plot and the Map
+included, with a more pleasant light: **paper-like** (warm off-white grounds, ink-like text,
+soft shadows), not a cold grey-white UI. This reopens the earlier decision "the plot stays a
+dark instrument screen" (record the outcome in the decision log either way).
 
 **Tasks, in order.**
-1. Sync: `git fetch origin && git merge origin/main`.
-2. Owner review on the canvas (Immersive in dark and light, every drawer, the card drag and
-   minimise, the Scanner composer). Collect feedback, fix, then polish with a reviewer agent.
-3. Open points from the agents: light "coral" is pushed toward rose to stay clear of the
-   danger red; neutral greys stay green-tinted whatever the accent; AIS vessel blue sits close
-   to the ice accent on the Map; JSON numbers use amber (reserved for state); `--wk-text-5`
-   hint text is under AA in dark (unchanged from before); the drawer resize grip is faint until
-   hovered; the waterfall palette "Phosphor" shares its name with the accent.
-4. Then the next topic from "Open questions" (keymap pass, or small screens and mobile).
+1. Sync: `git fetch origin && git merge origin/main`, then read this file, THEME-TOKENS.md and
+   the boards on the canvas (Immersive first).
+2. Brainstorm with the owner before drawing (one question at a time). Questions to settle:
+   - Paper direction: how warm, how much texture (none / subtle grain), which ink colours;
+     does each accent get a paper-friendly variant (deeper, less saturated)?
+   - Spectrum on paper: trace and fill colours, grid, squelch line, tags, the "now" glow; how
+     the waterfall ramp works on a light ground (paper → ink, or paper → accent → ink) while
+     weak signals stay visible. Prototype 2–3 ramps side by side on the Spectrum board and let
+     the owner pick by eye.
+   - Map on paper: a cartographic, chart-like style (the current light Map is a start).
+   - Do we keep "Dark plot" as an option in light mode (Settings › Display › Plot: Paper /
+     Dark), or does light mean everything light?
+   - Glass on paper: the islands' blur/translucency recipe over a light plot.
+3. Draw it: update the light tokens (keep dark and the token names unchanged), the Spectrum,
+   waterfall, BandStrip and Map light treatments, then check every board in light.
+4. **Palette bug:** typing "theme" in ⌘K finds nothing. Cause: Palette.dc.html keeps its own
+   hard-coded list of settings (`sc(...)` entries, e.g. "Waterfall palette" has the keyword
+   "theme") instead of the Settings registry, so Theme and Accent (added to Settings › Display
+   this session) are missing. Fix: add Theme and Accent as setting scopes with live preview,
+   wired to Immersive's `theme` / `accent` like Settings' `onSet`. Better, and already an open
+   question: make the palette list every setting from the one Settings registry ("Open in
+   Settings" on a row), so this cannot drift again.
+5. Smaller theme points from the agents: light "coral" is pushed toward rose to stay clear of
+   the danger red; neutral greys stay green-tinted whatever the accent; AIS vessel blue sits
+   close to the ice accent on the Map; JSON numbers use amber (reserved for state);
+   `--wk-text-5` hint text is under AA in dark; the drawer resize grip is faint until hovered;
+   the waterfall palette "Phosphor" shares its name with the accent.
+6. End of session: update this file (decision log, open questions, next session), CORE-GAPS
+   if anything needs core, snapshot the boards into `docs/web/canvas/`, commit and push.
 
 **How the canvas work went well (keep doing it).**
 - Research and inventories go to subagents. Board work goes to parallel agents that each own
-  distinct files and publish only those; a refused publish means re-read and reapply.
-- The canvas pane is often hidden, so agents verify in a local headless Chromium harness that
-  loads the canvas runtime with the current boards. Always render with ALL current boards in
-  the same folder; a stale embedded board gives false results.
+  distinct files and publish only those; a refused publish means re-read and reapply. A
+  shared spec file (like THEME-TOKENS.md) lets several agents convert boards consistently.
+- The canvas pane is often hidden, so agents verify in a local headless harness kept in the
+  git-ignored `.agents/web-canvas-harness/` (README there). Always render with ALL current
+  boards; a stale embedded board gives false results. Ask the owner to show the Browser pane
+  when a real canvas check matters.
 - To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work on
   copies in the session scratchpad, publish with `root` and `files`, then copy every board read
   fresh from the canvas into `docs/web/canvas/` and commit.
