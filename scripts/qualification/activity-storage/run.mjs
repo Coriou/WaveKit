@@ -75,6 +75,7 @@ export function parseArgs(args) {
 				"--reserve-gib",
 				"--deadline-ms",
 				"--resource-window",
+				"--capture-reservation",
 			].includes(key) ||
 			seen.has(key) ||
 			!value ||
@@ -85,7 +86,15 @@ export function parseArgs(args) {
 		if (key === "--scenario") config.scenario = value
 		else if (key === "--phase") config.phase = value
 		else if (key === "--output") config.output = value
-		else if (key === "--resource-window") {
+		else if (key === "--capture-reservation") {
+			if (
+				!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(:[0-9]{1,20}){4}$/.test(
+					value,
+				)
+			)
+				throw new Error("Invalid capture reservation")
+			config.captureReservation = value
+		} else if (key === "--resource-window") {
 			if (!/^[\x20-\x7e]{8,200}$/.test(value) || !value.trim())
 				throw new Error("Invalid operator attestation")
 			config.resourceWindow = value
@@ -122,6 +131,72 @@ export function parseArgs(args) {
 			"Long scenarios require --resource-window operator attestation",
 		)
 	return config
+}
+
+// Capture alone creates these directories. This is an identity handshake, never
+// caller-supplied write proof or permission to execute a long scenario.
+export function verifyCaptureReservation(config, root = ROOT) {
+	if (!config.captureReservation) return null
+	const [runId, captureInode, captureDevice, driverInode, driverDevice] =
+		config.captureReservation.split(":")
+	const base = join(resolve(root), "output", "qualification")
+	const path = join(base, `activity-capture-${runId}`)
+	const output = join(base, `activity-${runId}`)
+	if (resolve(root, config.output ?? "") !== output)
+		throw new Error("Capture output binding mismatch")
+	const capture = verifyOutputDirectory(path, root)
+	const driver = verifyOutputDirectory(output, root)
+	if (
+		String(capture.ino) !== captureInode ||
+		String(capture.dev) !== captureDevice ||
+		String(driver.ino) !== driverInode ||
+		String(driver.dev) !== driverDevice
+	)
+		throw new Error("Capture directory identity mismatch")
+	const empty = fs.opendirSync(output)
+	try {
+		if (empty.readSync()) throw new Error("Capture driver output not empty")
+	} finally {
+		empty.closeSync()
+	}
+	const entries = fs.opendirSync(path)
+	try {
+		const names = new Set()
+		let entry
+		while ((entry = entries.readSync())) {
+			if (
+				names.size === 3 ||
+				!["stdout.bin", "stderr.bin", "manifest.json"].includes(entry.name)
+			)
+				throw new Error("Unexpected capture reservation entry")
+			names.add(entry.name)
+		}
+		if (names.size !== 3) throw new Error("Missing capture reservation entry")
+	} finally {
+		entries.closeSync()
+	}
+	for (const name of ["stdout.bin", "stderr.bin", "manifest.json"]) {
+		const info = fs.lstatSync(join(path, name))
+		if (
+			!info.isFile() ||
+			info.isSymbolicLink() ||
+			info.nlink !== 1 ||
+			(info.mode & 0o777) !== 0o600 ||
+			info.size > 1024 ** 2 * (name === "stderr.bin" ? 2 : 1)
+		)
+			throw new Error("Unsafe capture reservation file")
+	}
+	return Object.freeze({
+		runId,
+		path,
+		output,
+		bytes: 4 * 1024 ** 2,
+		accounting: "external reservation; excluded from driver-local inventory",
+		captureInode: capture.ino,
+		captureDevice: capture.dev,
+		driverInode: driver.ino,
+		driverDevice: driver.dev,
+	})
 }
 
 export function supportedRuntime(version) {
@@ -437,12 +512,15 @@ export async function run(
 				deadlineMs: "--deadline-ms",
 				output: "--output",
 				resourceWindow: "--resource-window",
+				captureReservation: "--capture-reservation",
 			}[key]
 			if (!flag) throw new Error("Unknown configuration")
 			return [flag, String(key === "reserveBytes" ? value / GiB : value)]
 		}),
 	)
+	const externalCapture = verifyCaptureReservation(config, root)
 	const report = {
+		...(externalCapture ? { externalCapture } : {}),
 		harnessVersion: 2,
 		provisionalSQLite: true,
 		qualificationClaim: false,
@@ -473,7 +551,7 @@ export async function run(
 			...report,
 			status: "not-run",
 			reason:
-				"Deferred pending exact harness review and Main allocation; attestation is not authorization",
+				"Unsupported long mutation growth proof before persistent open/setup; exact review and execution allocation remain required",
 			resourceWindow: config.resourceWindow,
 			phase: config.phase,
 			remainingPrerequisites: LONG_PREREQUISITES,
@@ -499,7 +577,18 @@ export async function run(
 	)
 	report.workloadVersion = WORKLOAD_VERSION
 	report.commandArguments = config
-	const output = prepareOutput(config.output, config.reserveBytes, root, statfs)
+	const output = externalCapture
+		? {
+				path: externalCapture.output,
+				freeBytes: diskGuard(
+					statfs(externalCapture.output, { bigint: true }),
+					config.reserveBytes + externalCapture.bytes,
+				),
+				filesystemType: String(
+					statfs(externalCapture.output, { bigint: true }).type ?? "unknown",
+				),
+			}
+		: prepareOutput(config.output, config.reserveBytes, root, statfs)
 	const identity = verifyOutputDirectory(output.path, root)
 	const verify = () => {
 		const current = verifyOutputDirectory(output.path, root)
@@ -518,7 +607,7 @@ export async function run(
 							root: resolve(root),
 							identity: { inode: identity.ino, device: identity.dev },
 							limits: LIMITS,
-							reserveBytes: config.reserveBytes,
+							reserveBytes: config.reserveBytes + (externalCapture?.bytes ?? 0),
 						},
 						resourceLimits: {
 							maxOldGenerationSizeMb: 96,

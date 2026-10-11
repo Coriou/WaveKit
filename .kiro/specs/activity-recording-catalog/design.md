@@ -929,7 +929,7 @@ in-memory oracle across filtered empty pages, fixed high barriers, pruning,
 reopening and a simulated generation reset. At most25 rows,16 page requests and
 four examined sequence positions per page are used. A reader opens only after the
 writer exits. This does not exercise pinned readers or concurrent WAL pressure.
-The76 bounded tests retain all65 prior regressions. Exact review is pending.
+The79 bounded tests retain all65 prior regressions. The second item passed independent exact review; this does not qualify long workloads.
 
 Persistent fixture writes require Node25.2.1 and the exact SQLite3.50.4 source ID
 recorded in `worker.mjs`; a memory-only probe rejects other combinations before
@@ -964,6 +964,48 @@ ignored capture directory, a4 MiB aggregate reservation, stdout/stderr/manifest
 caps of1/2/1 MiB, pipe backpressure and capped draining, process-exit confirmation,
 then the separate60-second closure/size/hash/accounting reconciliation. No new
 consumer path or real execution window is authorized by this item.
+
+### Capped evidence consumer: implemented candidate
+
+`scripts/qualification/activity-storage/capture.mjs` and its separate
+`tests/unit/qualification/activity-storage-capture.test.ts` now provide the bounded
+consumer candidate. Independent exact code review remains pending. Its77 mock/virtual
+tests include100-case properties for byte conservation and single-assignment terminal
+outcomes; repository typecheck/lint and owned formatting passed. Corrected syntax,
+mock timing/binding and test typing failures preceded those passes. No real child,
+SQLite, runtime matrix or workload probe was run for this consumer; the earlier79
+qualification tests were preserved and not rerun during this mock-only batch.
+
+The consumer creates exclusive identity-bound capture/driver directories, reserves
+4 MiB once, and launches only the fixed sibling driver under the same executable with
+a closed environment and supervised POSIX group. Output caps are stdout1 MiB,
+stderr2 MiB and manifest1 MiB; reads/writes use bounded chunks and account partial
+writes. A signal request is not a join: root exit, pipe closure and write settlement
+are required. Unknown settlement preserves residue and returns incomplete evidence.
+The consumer does not recursively remove driver artifacts or claim that a pending
+manifest is a completed run. Its emitted summary separately confirms final manifest
+persistence and file closure; a missing/truncated summary is incomplete evidence.
+
+Before one JSON parse, a strict UTF-8 lexical pass limits depth16, values8192,
+properties4096 (256/object), array elements2048, string4096 code units, aggregate
+keys131072 and string values262144 code units, and number lexemes64 bytes. It rejects
+duplicate escaped keys and trailing documents. Closed report validation follows;
+raw byte caps alone do not bound parsed allocations. The8 MiB working-set figure is
+an estimate, never a native memory guarantee. Capture RSS96 MiB is an observed stop
+objective separate from the driver192 MiB objective. External driver/combined CPU
+and RSS remain unknown without a qualified platform sampler.
+
+Long scenarios still refuse before persistent SQLite open/setup. The whole2 GiB
+page-domain no-spill bound requires2,160,136,248 WAL bytes, exceeding64 MiB; a small
+input batch does not establish a smaller FTS/index mutation bound. The inspected
+[Node25.2.1 SQLite build](https://github.com/nodejs/node/blob/v25.2.1/deps/sqlite/sqlite.gyp)
+disables default memory statistics, so a hard-heap-limit readback cannot establish
+the needed dirty-page ceiling in the
+[allocator path](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/malloc.c).
+This is absence of an established proof, not proof that no solution exists. Capture
+cannot enable long writes or promote the tiny128-page proof. Exact implementation
+review, local assembly and an explicit bounded execution window precede actual
+capture/runtime evidence; long-growth proof and production integration are separate.
 
 ### Closed execution phases and containment
 
