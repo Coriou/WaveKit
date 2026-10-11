@@ -329,7 +329,7 @@ This metadata budget is not a WS aggregate/backpressure qualification.
 
 Reuse existing access capability and internal getter semantics. Pairing availability
 requires actual route installation, healthy session authority and configured origin
-requirements. Main's provider uses existing post-listen mounted state and stopping
+requirements. The API server's provider uses existing post-listen mounted state and stopping
 checks; do not add a competing cached readiness authority. Install route and opt-in
 together under the configured protected gate. Provider/route failures explicitly
 send safe status/body/serializer instead of falling through generic error mapping.
@@ -433,7 +433,8 @@ no read writes/pruning; unchanged restart-v1 compatibility; capacity and shutdow
 
 Exact implementation allocation, serial touched tests/typecheck/lint/build,
 independent exact-candidate review and merged client contract acceptance are pending.
-Main retains server/index/barrel/config/public documentation assembly. No web UI,
+Server composition, DTO exports and public API documentation remain pending
+implementation/acceptance. No web UI,
 regional registry or tuner changes belong to this slice. Local tests do not establish
 browser cookies/CORS/TLS/proxy exposure, private-volume/deployment behavior, physical
 native/RF settlement or measured capacity. Existing production binding remains off,
