@@ -1,5 +1,7 @@
 /** Current-grant bridge to accepted analog evidence; native lifetime proof stays external. */
 import { WaveKitError } from "../../../utils/errors.js"
+import type { CleanupOutcome } from "../../channelizer/settlement-observer.js"
+import { AnalogReceiptSchema } from "../store/analog-operations.js"
 import type {
 	AnalogCut,
 	AnalogGap,
@@ -50,6 +52,8 @@ export interface RecordingProducerDeps {
 export interface RecordingProducerSettlement {
 	readonly receipt: AnalogReceipt | null
 	readonly error: WaveKitError | null
+	readonly filesystem: CleanupOutcome
+	readonly operation: CleanupOutcome
 	readonly operationSettled: boolean
 	readonly logicalReleased: boolean
 	readonly componentClosed: boolean
@@ -66,6 +70,8 @@ export interface RecordingProducerHandle {
 }
 interface Entry {
 	readonly key: string
+	readonly discoveryId: string
+	readonly observationId: string
 	readonly identity: RecordingGrantIdentity
 	readonly sourceId: string
 	readonly created: Promise<void>
@@ -96,6 +102,51 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 		resolve = done
 	})
 	return { promise, resolve }
+}
+function unknownCleanup(detail: string): CleanupOutcome {
+	return Object.freeze({ ok: false, state: "unknown", detail })
+}
+function receiptOutcomes(
+	entry: Entry,
+	receipt: AnalogReceipt | null,
+	operationSettled: boolean,
+): { readonly filesystem: CleanupOutcome; readonly operation: CleanupOutcome } {
+	const parsed = AnalogReceiptSchema.safeParse(receipt)
+	if (
+		!operationSettled ||
+		!entry.operation ||
+		!parsed.success ||
+		parsed.data.operationId !== entry.operation.operationId ||
+		parsed.data.discoveryId !== entry.discoveryId ||
+		parsed.data.observationId !== entry.observationId ||
+		bindingKey(parsed.data.binding) !== entry.key
+	) {
+		return {
+			filesystem: unknownCleanup(
+				"No validated matching settled filesystem receipt",
+			),
+			operation: unknownCleanup("No validated matching operation settlement"),
+		}
+	}
+	const r = parsed.data
+	const cleanupComplete =
+		r.cleanup === "complete" && r.residueBytes === 0 && r.closure !== "unknown"
+	const filesystem: CleanupOutcome = cleanupComplete
+		? Object.freeze({ ok: true })
+		: unknownCleanup(
+				"Filesystem closure or disposable cleanup remains unconfirmed",
+			)
+	const operation: CleanupOutcome =
+		r.outcome === "finalized" || (r.outcome === "aborted" && cleanupComplete)
+			? Object.freeze({ ok: true })
+			: r.outcome === "failed" && cleanupComplete
+				? Object.freeze({
+						ok: false,
+						state: "failed",
+						detail: "Analog operation failed",
+					})
+				: unknownCleanup("Analog operation cleanup remains unsettled")
+	return { filesystem, operation }
 }
 function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify([
@@ -211,6 +262,8 @@ export class RecordingProducers {
 			settlement = deferred<RecordingProducerSettlement>()
 		const entry: Entry = {
 			key,
+			discoveryId: snapshot.discoveryId,
+			observationId: snapshot.observationId,
 			sourceId,
 			identity,
 			created: creation.promise,
@@ -386,6 +439,8 @@ export class RecordingProducers {
 				error ??= fail("Recording operation settlement failed", cause)
 			}
 		}
+		// These facts come only from the original operation's settled receipt, before logical release.
+		const outcomes = receiptOutcomes(entry, receipt, operationSettled)
 		// Natural finish keeps the grant live until actual operation settlement; release is only logical.
 		entry.live = false
 		try {
@@ -406,6 +461,8 @@ export class RecordingProducers {
 			Object.freeze({
 				receipt,
 				error,
+				filesystem: outcomes.filesystem,
+				operation: outcomes.operation,
 				operationSettled,
 				logicalReleased,
 				componentClosed: entry.producerClosed,

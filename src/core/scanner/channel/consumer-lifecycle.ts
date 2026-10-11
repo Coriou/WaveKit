@@ -55,6 +55,48 @@ const INSPECTION_FAILED: CleanupOutcome = Object.freeze({
 	detail: "Scanner final ownership inspection failed",
 })
 
+/** One exact constructor registration; retain externally before the fallible .on effect. */
+export class ConstructorListenerRegistration {
+	private installing = false
+	private sealed = false
+	private removed = false
+
+	constructor(
+		private readonly installExact: () => void,
+		private readonly removeExact: () => void,
+		private readonly absent: () => boolean,
+	) {}
+
+	register(own?: (removeExact: () => void) => boolean): void {
+		if (own && !own(() => this.remove()))
+			throw new WaveKitError("Scanner constructor ownership unavailable", "SCANNER_OWNER_UNAVAILABLE")
+		if (this.sealed)
+			throw new WaveKitError("Scanner constructor registration sealed", "SCANNER_OWNER_UNAVAILABLE")
+		this.installing = true
+		try {
+			this.installExact()
+		} finally {
+			// Even install-then-throw must leave the exact remover eligible for a real attempt.
+			this.installing = false
+		}
+		if (this.sealed) {
+			this.remove()
+			throw new WaveKitError("Scanner constructor registration sealed", "SCANNER_OWNER_UNAVAILABLE")
+		}
+	}
+
+	remove(): void {
+		this.sealed = true
+		if (this.removed) return
+		if (this.installing)
+			throw new WaveKitError("Scanner listener registration is unsettled", "SCANNER_COMPONENT_CLEANUP_UNKNOWN")
+		this.removeExact()
+		if (!this.absent())
+			throw new WaveKitError("Scanner listener removal is unverified", "SCANNER_COMPONENT_CLEANUP_UNKNOWN")
+		this.removed = true
+	}
+}
+
 function deferred(): Deferred {
 	let resolve!: () => void
 	let reject!: (reason: unknown) => void
@@ -180,6 +222,7 @@ export class ScannerLifecycleOwner {
 	finalizeStopNative(
 		observer: ChannelSettlementObserver | undefined,
 		lifetime?: ProviderLifetime,
+		releaseSettledReferences?: () => CleanupOutcome,
 	): Promise<void> {
 		const handle = this.beginStop()
 		if (this.finalizationStarted) return handle.completed
@@ -187,11 +230,18 @@ export class ScannerLifecycleOwner {
 		void handle.producerSettled
 			.catch(() => undefined)
 			.then(() => {
+				let references: CleanupOutcome = OK
+				try {
+					references = frozenOutcome(releaseSettledReferences?.() ?? OK)
+				} catch {
+					references = { ok: false, state: "unknown", detail: "Scanner final references remain unknown" }
+				}
+				if (!references.ok) this.rememberFailure(references)
 				// Helper ok already proves its actual component/subscription refs were removed. Only
 				// successful original closures can now be forgotten; failed/unknown owners stay retained.
 				for (const name of SLOT_NAMES) {
 					const slot = this.slots[name]
-					if (slot.outcome?.ok === true) slot.attempt = undefined
+					if (references.ok && slot.outcome?.ok === true) slot.attempt = undefined
 				}
 				let final: CleanupOutcome
 				try {

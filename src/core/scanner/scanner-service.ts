@@ -303,9 +303,20 @@ export class ScannerService extends EventEmitter {
 			offProof: (() => void) | undefined
 			nativeClosed: boolean
 			componentClosed: boolean
+			inspect: (() => void) | undefined
 		}
 	>()
 	private readonly channelSubscriptions: (() => void)[] = []
+	private probeComponentDrain: Promise<void> | undefined
+	private channelAdmissionRevision = 0
+	private readonly channelEngineStarts = new Map<string, SpectrumEngine>()
+	/** Six arbiter registrations plus the pool's sole constructor registration. */
+	private readonly constructorListeners: { remove: () => void; settled: boolean }[] = []
+	private readonly ownConstructorListener = (remove: () => void): boolean => {
+		if (this.consumerLifecycle.admissionSealed || this.constructorListeners.length >= 7) return false
+		this.constructorListeners.push({ remove, settled: false })
+		return true
+	}
 	private readonly channelTier: ScannerChannelTier
 	private readonly log: Logger
 	private readonly now: () => number
@@ -418,7 +429,7 @@ export class ScannerService extends EventEmitter {
 				this.cleanupServiceComponents(),
 			) ||
 			!this.consumerLifecycle.ownCleanup("probes", async () => {
-				if (this.probes) await this.probes.destroy()
+				await this.drainProbeComponents()
 				return { ok: true }
 			}) ||
 			!this.consumerLifecycle.ownCleanup(
@@ -436,10 +447,21 @@ export class ScannerService extends EventEmitter {
 					: { ok: true }
 			}) ||
 			!this.consumerLifecycle.ownCleanup("grants", async () => {
-				if (this.channelTaps) await this.channelTaps.stop()
-				for (const off of this.channelSubscriptions) off()
-				this.channelSubscriptions.length = 0
-				return { ok: true }
+				let outcome: CleanupOutcome = { ok: true }
+				try {
+					if (this.channelTaps) outcome = await this.channelTaps.stop()
+				} catch {
+					outcome = { ok: false, state: "unknown", detail: "Scanner channel component cleanup unknown" }
+				}
+				const retained: (() => void)[] = []
+				for (const off of this.channelSubscriptions) {
+					try { off() } catch {
+						retained.push(off)
+						if (outcome.ok) outcome = { ok: false, state: "unknown", detail: "Scanner channel subscription cleanup unknown" }
+					}
+				}
+				this.channelSubscriptions.splice(0, this.channelSubscriptions.length, ...retained)
+				return outcome
 			})
 		)
 			throw new WaveKitError(
@@ -485,8 +507,12 @@ export class ScannerService extends EventEmitter {
 				engineHost: deps.engineHost ?? "thread",
 				...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
 				// From the open, so the pool's lag guard sees every stream boundary (Task 34).
-				engineCreated: (sourceId, engine) =>
-					this.probes.watchEngine(sourceId, engine),
+				engineCreated: (sourceId, engine) => {
+					// This hook runs BEFORE engine.start; revoke queued capabilities before extra work.
+					this.channelEngineStarts.set(sourceId, engine)
+					this.invalidateChannelAdmission()
+					this.probes.watchEngine(sourceId, engine)
+				},
 			})
 			this.store = new DiscoveryStore({
 				maxDiscoveries: deps.settings.storage.maxDiscoveries,
@@ -545,6 +571,7 @@ export class ScannerService extends EventEmitter {
 					)
 			})
 			this.arbiter = new TunerArbiter({
+				ownConstructorListener: this.ownConstructorListener,
 				tuner: deps.tuner,
 				sources: deps.sources,
 				epochs: sourceId => this.spectrum.engine(sourceId),
@@ -575,6 +602,7 @@ export class ScannerService extends EventEmitter {
 				now: this.now,
 			})
 			this.probes = new ProbePool({
+				ownConstructorListener: this.ownConstructorListener,
 				decoders: deps.decoders,
 				digitalVoice: deps.digitalVoice,
 				engines: sourceId => this.spectrum.engine(sourceId),
@@ -873,6 +901,16 @@ export class ScannerService extends EventEmitter {
 		return this.consumerLifecycle.finalizeStopNative(
 			this.deps.channelOwnership?.observer,
 			this.deps.channelOwnership?.lifetime,
+			() => {
+				// The owner invokes this once AFTER phase40 and BEFORE its immutable core inspection.
+				// Each synchronous sweep is independent; unknown facts keep their exact reference.
+				let unknown = false
+				for (const owner of this.channelRecordingOwners.values()) {
+					try { owner.inspect?.() } catch { unknown = true }
+				}
+				try { this.channelTaps?.sweepSettledReferences() } catch { unknown = true }
+				return unknown ? { ok: false, state: "unknown", detail: "Scanner final references remain unknown" } : { ok: true }
+			},
 		)
 	}
 
@@ -899,6 +937,13 @@ export class ScannerService extends EventEmitter {
 			await this.startPromise
 		})
 		this.startPromise = null
+		for (const registration of this.constructorListeners) {
+			if (registration.settled) continue
+			await attempt(() => {
+				registration.remove()
+				registration.settled = true
+			})
+		}
 		await attempt(() =>
 			this.deps.sources.off("connected", this.onSourceConnected),
 		)
@@ -913,6 +958,9 @@ export class ScannerService extends EventEmitter {
 			await attempt(() => this.arbiter.off("source-up", this.onSourceUp))
 			await attempt(() => this.arbiter.off("recovered", this.onRecovered))
 		}
+		// Probe teardown may emit cleanup-only recording settlement. Wait that actual component
+		// before snapshotting its publication chains; this never depends on native phase66.
+		await attempt(() => this.drainProbeComponents())
 		for (const outcome of await Promise.allSettled([
 			...this.background,
 			this.passiveChain,
@@ -961,10 +1009,17 @@ export class ScannerService extends EventEmitter {
 		return failed
 			? {
 					ok: false,
-					state: "failed",
+					state: this.constructorListeners.some(registration => !registration.settled) ? "unknown" : "failed",
 					detail: "Scanner component cleanup failed",
 				}
 			: { ok: true }
+	}
+
+	private drainProbeComponents(): Promise<void> {
+		this.probeComponentDrain ??= Promise.resolve().then(async () => {
+			if (this.probes) await this.probes.destroy()
+		})
+		return this.probeComponentDrain
 	}
 
 	// === status and settings ===
@@ -1727,8 +1782,9 @@ export class ScannerService extends EventEmitter {
 			(endReason !== "quiet" && endReason !== "max-duration") ||
 			!this.finishChannelRecording(live.observationId)
 		)
-			this.cancelChannelSource(
+			this.cancelChannelObservation(
 				sourceId,
+				live.observationId,
 				endReason === "gap" ? "stream-changed" : "cancelled",
 			)
 		this.rememberClosed(track.trackId)
@@ -1898,8 +1954,10 @@ export class ScannerService extends EventEmitter {
 			.status()
 			.filter(probe => probe.transport === "offset").length
 		if (
+			!this.probes.channelBaselineKnown ||
 			profile.baselineEngineCount !== this.spectrum.sourceIds().length ||
-			profile.baselineOffsetCount !== offsetCount
+			profile.baselineOffsetCount !== offsetCount ||
+			![...this.channelEngineStarts].every(([id, started]) => this.spectrum.engine(id) === started)
 		)
 			return
 		const admission = ownership.ledger.admissionSnapshot()
@@ -1916,10 +1974,15 @@ export class ScannerService extends EventEmitter {
 		)
 			return
 		const identity = Object.freeze({})
+		const admissionRevision = this.channelAdmissionRevision
 		const captureCurrent = (): boolean => {
 			const now = engine.currentEpoch()
 			const currentCaps = this.deps.sources.getCaps(live.sourceId)
 			return (
+				this.channelAdmissionRevision === admissionRevision &&
+				this.probes.channelBaselineKnown &&
+				profile.baselineEngineCount === this.spectrum.sourceIds().length &&
+				profile.baselineOffsetCount === this.probes.status().filter(probe => probe.transport === "offset").length &&
 				currentCaps?.kind === "iq" &&
 				currentCaps.format === "U8_IQ" &&
 				currentCaps.sampleRate === epoch.sampleRateHz &&
@@ -1941,6 +2004,8 @@ export class ScannerService extends EventEmitter {
 			!live.evidenceDeleted
 		this.channelTaps.begin({
 			attempt: Object.freeze({
+				observationId: live.observationId,
+				trackId: live.trackId,
 				identity,
 				sourceId: live.sourceId,
 				decoderId: `scanner-tap-${ulid(this.now())}`,
@@ -2060,6 +2125,7 @@ export class ScannerService extends EventEmitter {
 			offProof: undefined as (() => void) | undefined,
 			nativeClosed: false,
 			componentClosed: false,
+			inspect: undefined as (() => void) | undefined,
 		}
 		// One source slot already owns this exact token, including its pending/closing liabilities.
 		if (this.channelRecordingOwners.has(token)) {
@@ -2091,6 +2157,7 @@ export class ScannerService extends EventEmitter {
 					this.channelRecordingOwners.delete(token)
 			}
 		}
+		owner.inspect = inspect
 		owner.offProof = tap.prepared.handle.onChange(inspect)
 		try {
 			if (!current() || !tap.current)
@@ -2130,6 +2197,8 @@ export class ScannerService extends EventEmitter {
 					},
 					cancel: () => producer.cancel("channel-invalidated"),
 					settled,
+					filesystemSettled: producer.settled.then(result => result.filesystem),
+					operationSettled: producer.settled.then(result => result.operation),
 				})
 			)
 				producer.cancel("channel-invalidated")
@@ -2156,6 +2225,31 @@ export class ScannerService extends EventEmitter {
 	): void {
 		this.channelProducers?.cancelSource(sourceId, cut)
 		this.channelTaps?.cancelSource(sourceId)
+	}
+
+	private cancelChannelObservation(sourceId: string, observationId: string, cut: AnalogCut): void {
+		for (const owner of this.channelRecordingOwners.values()) {
+			if (owner.observationId !== observationId || owner.identity.binding.sourceId !== sourceId) continue
+			owner.producer?.cancel(cut)
+			owner.tap.cancel()
+		}
+		this.channelTaps?.cancelObservation(sourceId, observationId)
+	}
+
+	/** Revoke before newly uncovered workload/limits can reach an atomic core dequeue. */
+	private invalidateChannelAdmission(): void {
+		this.channelAdmissionRevision++
+		this.channelTaps?.invalidateCoverage()
+		for (const owner of this.channelRecordingOwners.values()) owner.producer?.cancel("cancelled")
+		const ledger = this.deps.channelOwnership?.ledger
+		const profile = this.deps.channelProfile
+		if (!ledger || !profile || !this.effective) return
+		// No unknown coefficient or reduced baseline credit: retain the last conservative baseline.
+		const state = ledger.admissionSnapshot()
+		updateChannelAdmission(ledger, state.version, state.baseline, {
+			cpu: Math.min(profile.limits.cpu, this.settings().cpuBudgetCores),
+			bytes: profile.limits.bytes,
+		})
 	}
 
 	private protocolsFor(live: LiveObservation): ScannerProtocol[] {
@@ -2565,7 +2659,7 @@ export class ScannerService extends EventEmitter {
 			endedAt: o.endedAt ?? this.now(),
 			encrypted: o.encrypted,
 		}))
-		this.evidence
+		const publication = this.evidence
 			.linkProbeRecordings(r.probeDir, candidates)
 			.then(res => {
 				for (const l of res.linked)
@@ -2581,6 +2675,7 @@ export class ScannerService extends EventEmitter {
 					"Linking probe recordings failed",
 				),
 			)
+		this.track(publication, "Probe recording settlement failed")
 	}
 
 	private readonly onProbeState = (
@@ -2588,6 +2683,8 @@ export class ScannerService extends EventEmitter {
 		state: string,
 		req: ProbeRequest,
 	): void => {
+		// "starting" occurs synchronously before launch's first allocation/effect.
+		if (state === "starting" || state === "stopped") this.invalidateChannelAdmission()
 		// Mode stepping re-emits "starting" for the same probe: keep the first start (the hold covers all modes).
 		if (state === "starting" && !this.probeOutcomes.has(probeId)) {
 			this.probeOutcomes.set(probeId, {
@@ -3321,6 +3418,7 @@ export class ScannerService extends EventEmitter {
 			sources: this.deps.sourceConfigs,
 			overrides: this.overrides,
 		})
+		this.invalidateChannelAdmission()
 		// Runtime storage/detection settings reach the stores (§ 12.1 PATCH settings).
 		const s = this.effective.settings
 		this.store.setLimits({

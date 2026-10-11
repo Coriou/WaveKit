@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest"
+import { EventEmitter } from "node:events"
 import type {
 	ChannelSettlementObserver,
 	CleanupOutcome,
 	ProviderLifetime,
 } from "../../../../src/core/channelizer/settlement-observer.js"
-import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
+import {
+	ConstructorListenerRegistration,
+	ScannerLifecycleOwner,
+} from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import type { ScannerCleanupSlot } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 
 const OK: CleanupOutcome = { ok: true }
@@ -27,6 +31,62 @@ const SLOTS: readonly ScannerCleanupSlot[] = [
 	"producer",
 	"admission",
 ]
+
+describe("exact constructor listener ownership (C6)", () => {
+	it("captures before install-then-throw and removes only the actual owned callback", () => {
+		const emitter = new EventEmitter()
+		const unrelated = vi.fn()
+		const owned = vi.fn()
+		emitter.on("event", unrelated)
+		const original = new Error("install failed after effect")
+		let retained: (() => void) | undefined
+		const registration = new ConstructorListenerRegistration(
+			() => { emitter.on("event", owned); throw original },
+			() => { emitter.off("event", owned) },
+			() => !emitter.listeners("event").includes(owned),
+		)
+		expect(() => registration.register(remove => {
+			retained = remove
+			return true
+		})).toThrow(original)
+		expect(retained).toBeDefined()
+		retained!()
+		expect(emitter.listeners("event")).toEqual([unrelated])
+	})
+	it("never treats registration-time removal as settled while .on can still add the listener", () => {
+		const emitter = new EventEmitter()
+		const owned = vi.fn()
+		let retained!: () => void
+		const registration = new ConstructorListenerRegistration(
+			() => {
+				expect(retained).toThrow(expect.objectContaining({ code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN" }))
+				emitter.on("event", owned)
+			},
+			() => { emitter.off("event", owned) },
+			() => !emitter.listeners("event").includes(owned),
+		)
+		expect(() => registration.register(remove => {
+			retained = remove
+			return true
+		})).toThrow(expect.objectContaining({ code: "SCANNER_OWNER_UNAVAILABLE" }))
+		expect(emitter.listeners("event")).toEqual([])
+	})
+	it("keeps an unverified exact removal retryable without reporting success", () => {
+		const emitter = new EventEmitter()
+		const owned = vi.fn()
+		let canRemove = false
+		const registration = new ConstructorListenerRegistration(
+			() => { emitter.on("event", owned) },
+			() => { if (canRemove) emitter.off("event", owned) },
+			() => !emitter.listeners("event").includes(owned),
+		)
+		registration.register()
+		expect(() => registration.remove()).toThrow(expect.objectContaining({ code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN" }))
+		canRemove = true
+		registration.remove()
+		expect(emitter.listeners("event")).toEqual([])
+	})
+})
 function hold<T>() {
 	let resolve!: (value: T) => void
 	let reject!: (reason: unknown) => void
@@ -66,6 +126,31 @@ function nativeInspector(outcome: CleanupOutcome = OK) {
 }
 
 describe("ScannerLifecycleOwner fixed component boundary", () => {
+	it("sweeps settled references once at phase66 before the first nonwaiting inspection", async () => {
+		const owner = new ScannerLifecycleOwner()
+		const component = hold<CleanupOutcome>()
+		owner.ownCleanup("tap", () => component.promise)
+		owner.completeConstruction(OK)
+		const handle = owner.beginStop()
+		const order: string[] = []
+		const inspector = nativeInspector()
+		inspector.inspectFinal.mockImplementation(() => {
+			order.push("inspect")
+			return OK
+		})
+		const sweep = vi.fn(() => { order.push("sweep"); return OK })
+		const completed = owner.finalizeStopNative(inspector.observer, inspector.lifetime, sweep)
+		await flush()
+		expect(sweep).not.toHaveBeenCalled()
+		expect(inspector.inspectFinal).not.toHaveBeenCalled()
+		component.resolve(OK)
+		await handle.producerSettled
+		await completed
+		expect(order).toEqual(["sweep", "inspect"])
+		expect(owner.finalizeStopNative(inspector.observer, inspector.lifetime, sweep)).toBe(completed)
+		expect(sweep).toHaveBeenCalledOnce()
+	})
+
 	it("is inert and refuses duplicate/new sealed effect registration before effects", async () => {
 		const owner = new ScannerLifecycleOwner()
 		const cleanup = vi.fn(() => Promise.resolve(OK))

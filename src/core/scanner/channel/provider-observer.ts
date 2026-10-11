@@ -6,7 +6,10 @@ import type {
 	ConsumerComponent,
 	ObservedAcquisitionHandle,
 } from "../../channelizer/settlement-observer.js"
-import { prepareChannelAdmission } from "../plan/resource-admission.js"
+import {
+	eligibleChannelShape,
+	prepareChannelAdmission,
+} from "../plan/resource-admission.js"
 import type {
 	ScannerChannelAttempt,
 	ScannerChannelOwnership,
@@ -18,6 +21,8 @@ export interface PreparedScannerChannel {
 	readonly handle: ObservedAcquisitionHandle
 	readonly classifier: ConsumerComponent
 	readonly analog: ConsumerComponent
+	readonly filesystem: ConsumerComponent
+	readonly operation: ConsumerComponent
 	readonly lifecycle: GrantLifecycle
 	readonly request: Readonly<DecoderChannelRequest>
 }
@@ -31,6 +36,7 @@ export function prepareDirectChannel(input: {
 	readonly request: DecoderChannelRequest
 	readonly current: () => boolean
 	readonly ended: () => void
+	readonly continuityLost?: () => void
 }): PreparedScannerChannel | undefined {
 	const { ownership, channels, attempt } = input
 	// Default/missing profile denies BEFORE even bounded acquisition/arm metadata.
@@ -42,6 +48,12 @@ export function prepareDirectChannel(input: {
 		!input.current()
 	)
 		return undefined
+	if (!eligibleChannelShape({
+		profile: input.profile,
+		captureRateHz: attempt.captureRateHz,
+		request: input.request,
+		activation: "direct",
+	})) return undefined
 	const handle = ownership.observer.allocateAcquisition({
 		activation: "direct",
 		sourceId: attempt.sourceId,
@@ -67,11 +79,15 @@ export function prepareDirectChannel(input: {
 	const decoder = handle.retainComponent("decoder")
 	const classifier = handle.retainComponent("classifier")
 	const analog = handle.retainComponent("analog")
+	const filesystem = handle.retainComponent("filesystem")
+	const operation = handle.retainComponent("operation")
 	if (
 		!permit ||
 		!decoder ||
 		!classifier ||
 		!analog ||
+		!filesystem ||
+		!operation ||
 		!handle.attachPermit(permit) ||
 		!decoder.sealNeverStarted()
 	) {
@@ -79,6 +95,8 @@ export function prepareDirectChannel(input: {
 		decoder?.sealNeverStarted()
 		classifier?.sealNeverStarted()
 		analog?.sealNeverStarted()
+		filesystem?.sealNeverStarted()
+		operation?.sealNeverStarted()
 		handle.revokeUnclaimedArm()
 		return undefined
 	}
@@ -88,11 +106,14 @@ export function prepareDirectChannel(input: {
 		channels,
 		input.current,
 		input.ended,
+		input.continuityLost,
 	)
 	if (!input.current() || !handle.arm()) {
 		lifecycle.invalidate()
 		classifier.sealNeverStarted()
 		analog.sealNeverStarted()
+		filesystem.sealNeverStarted()
+		operation.sealNeverStarted()
 		handle.revokeUnclaimedArm()
 		return undefined
 	}
@@ -100,6 +121,8 @@ export function prepareDirectChannel(input: {
 		handle,
 		classifier,
 		analog,
+		filesystem,
+		operation,
 		lifecycle,
 		request: Object.freeze({ ...input.request }),
 	})

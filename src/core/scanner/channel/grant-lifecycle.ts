@@ -16,6 +16,7 @@ export class GrantLifecycle {
 	private sealed = false
 	private callbackFailed = false
 	private reclaimed = false
+	private gapNotified = false
 	private released: Promise<void> | undefined
 	private readonly unsubscribe: () => void
 	private readonly errorListener = (): void => this.invalidate()
@@ -26,11 +27,23 @@ export class GrantLifecycle {
 		private readonly provider: ChannelProvider,
 		private readonly current: () => boolean,
 		private readonly ended: () => void,
+		private readonly discontinuity: (() => void) | undefined = undefined,
 	) {
 		// Coverage exists before acquisition, including grant invalidation before await resumes.
 		this.unsubscribe = handle.onChange(() => {
-			if (handle.snapshot().ended || !this.attemptCurrent()) this.invalidate()
+			const snapshot = handle.snapshot()
+			if (snapshot.continuityLost && !this.gapNotified) {
+				this.gapNotified = true
+				try { this.discontinuity?.() } catch {
+					this.callbackFailed = true
+					this.invalidate()
+				}
+			}
+			if (snapshot.ended || !this.attemptCurrent()) this.invalidate()
 		})
+	}
+	get continuityLost(): boolean {
+		return this.handle.snapshot().continuityLost
 	}
 
 	get binding(): ObservedGrantBinding | undefined {

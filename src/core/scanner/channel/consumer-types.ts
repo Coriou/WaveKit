@@ -43,6 +43,8 @@ export interface ScannerChannelOwnership {
 }
 
 export interface ScannerChannelAttempt {
+	readonly observationId?: string
+	readonly trackId?: string
 	readonly identity: object
 	readonly sourceId: string
 	readonly decoderId: string

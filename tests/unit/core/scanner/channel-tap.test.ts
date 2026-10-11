@@ -86,7 +86,10 @@ function ownedTap() {
 		settle: vi.fn(),
 		sealNeverStarted: vi.fn(),
 	}
+	const filesystem = { begin: vi.fn(() => true), settle: vi.fn(), sealNeverStarted: vi.fn() }
+	const operation = { begin: vi.fn(() => true), settle: vi.fn(), sealNeverStarted: vi.fn() }
 	const lifecycle = {
+		continuityLost: false,
 		get live() {
 			return live
 		},
@@ -110,6 +113,8 @@ function ownedTap() {
 	const prepared = {
 		classifier,
 		analog,
+		filesystem,
+		operation,
 		lifecycle,
 		handle: {
 			snapshot: () => ({ components: { classifier: classifierState } }),
@@ -162,6 +167,29 @@ function ownedTap() {
 }
 
 describe("bounded current tap intake and component drains", () => {
+	it("an unrelated same-source observation cannot cancel the exact tap owner", async () => {
+		const f = ownedTap()
+		const tap = f.taps.begin({
+			attempt: { ...attempt, observationId: "owner-observation" },
+			current: () => true,
+			minMs: 500,
+			collected: vi.fn(),
+		})!
+		await f.ready()
+		f.taps.cancelObservation(attempt.sourceId, "unrelated-observation")
+		expect(f.lifecycle.invalidate).not.toHaveBeenCalled()
+		expect(tap.current).toBe(true)
+		f.taps.cancelObservation("old-source", "owner-observation")
+		expect(f.lifecycle.invalidate).not.toHaveBeenCalled()
+		f.taps.cancelObservation(attempt.sourceId, "owner-observation")
+		expect(f.lifecycle.invalidate).toHaveBeenCalledOnce()
+		expect(tap.current).toBe(false)
+		await tap.finish()
+		f.provePhysical()
+		f.taps.sweepSettledReferences()
+		expect(f.taps.ownerCount).toBe(0)
+	})
+
 	it("partial pairs stay bounded and classifier runs once before analog can begin", async () => {
 		const f = ownedTap(),
 			collected = vi.fn()
@@ -205,7 +233,7 @@ describe("bounded current tap intake and component drains", () => {
 		})
 		const push = vi.fn(),
 			cancel = vi.fn()
-		expect(tap.attachAnalog({ push, cancel, settled })).toBe(true)
+		expect(tap.attachAnalog({ push, cancel, settled, filesystemSettled: settled, operationSettled: settled })).toBe(true)
 		f.stream.write(Buffer.alloc(16))
 		expect(push.mock.calls[0]?.[0].length).toBe(4)
 		tap.sealIntake()

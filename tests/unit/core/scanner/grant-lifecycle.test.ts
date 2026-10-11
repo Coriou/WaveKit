@@ -44,6 +44,7 @@ function fixture() {
 		logical: "granted",
 		currentBinding: binding,
 		ended: false,
+		continuityLost: false,
 		native: "pending",
 		local: "pending",
 		components: {

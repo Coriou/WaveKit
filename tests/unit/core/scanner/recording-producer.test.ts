@@ -343,6 +343,8 @@ describe("current-grant recording producer", () => {
 		expect(await finish).toBe(marker)
 		expect(await h.settled).toMatchObject({
 			receipt: marker,
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: true },
 			operationSettled: true,
 			logicalReleased: true,
 			componentClosed: true,
@@ -505,8 +507,130 @@ describe("current-grant recording producer", () => {
 		expect(await h.finish()).toBe(pending)
 		expect(await h.settled).toMatchObject({
 			componentClosed: false,
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: false, state: "unknown" },
 			operationSettled: true,
 		})
 		expect(producers.ownerCount).toBe(1)
+	})
+	it("finalized closed media with retained disposable cleanup separates filesystem from operation proof", async () => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		const marker = f.complete()
+		expect(await h.finish()).toBe(marker)
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: true },
+			logicalReleased: true,
+		})
+		expect(marker.cleanup).toBe("pending")
+		expect(marker.residueBytes).toBeNull()
+		expect(Object.isFrozen(marker)).toBe(true)
+	})
+	it("validated complete final cleanup preserves both facts when subsequent logical release fails", async () => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		const receipt: AnalogReceipt = Object.freeze({
+			...f.receipt(), cleanup: "complete", residueBytes: 0,
+		})
+		f.release.mockRejectedValueOnce(new Error("logical release failed"))
+		f.complete(receipt)
+		expect(await h.finish()).toBe(receipt)
+		const result = await h.settled
+		expect(result).toMatchObject({
+			filesystem: { ok: true }, operation: { ok: true },
+			logicalReleased: false, componentClosed: false,
+		})
+		expect(result.error?.message).toContain("logical release failed")
+		expect(Object.isFrozen(result.filesystem)).toBe(true)
+		expect(Object.isFrozen(result.operation)).toBe(true)
+	})
+	it("failed decision with confirmed cleanup frees only filesystem, never operation", async () => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		const receipt: AnalogReceipt = Object.freeze({
+			...f.receipt("failed"), errorCode: "write-failed",
+		})
+		f.complete(receipt)
+		await h.finish()
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: true }, operation: { ok: false, state: "failed" },
+			logicalReleased: true,
+		})
+	})
+	it("aborted complete cleanup proves filesystem and operation without finalized media", async () => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		h.cancel()
+		f.complete(f.receipt("aborted"))
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: true }, operation: { ok: true },
+		})
+	})
+	it.each([null, 123])("closed finalized media with pending residue %s never credits filesystem", async residueBytes => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		f.complete(Object.freeze({ ...f.receipt(), residueBytes }))
+		await h.finish()
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: false, state: "unknown" }, operation: { ok: true },
+		})
+	})
+	it.each(["identity", "association", "binding", "header"] as const)("rejects %s receipt proof even when promises and release fulfill", async fault => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		const original = f.receipt(), id = randomUUID()
+		const receipt: AnalogReceipt = Object.freeze({
+			...original,
+			cleanup: "complete", residueBytes: 0,
+			...(fault === "identity" ? {
+				operationId: id, producerRecordingId: id,
+				alias: `d1~analog-${id}.wav`, artifact: `recordings/analog/d1/analog-${id}.wav`,
+			} : {}),
+			...(fault === "association" ? { observationId: "other" } : {}),
+			...(fault === "binding" ? { binding: { ...f.binding, epoch: 99 } } : {}),
+			...(fault === "header" ? { output: { ...original.output, fileBytes: 205 } } : {}),
+		})
+		f.complete(receipt)
+		expect(await h.finish()).toBe(receipt)
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: false, state: "unknown" },
+			operationSettled: true, logicalReleased: true,
+		})
+	})
+	it("custom begin throw grants neither component proof even after successful logical release", async () => {
+		const f = fixture()
+		f.begin.mockImplementation(() => { throw new Error("effect then throw") })
+		const h = new RecordingProducers(f.deps).begin(f.input)
+		await expect(h.ready).rejects.toThrow("creation failed")
+		expect(await h.settled).toMatchObject({
+			receipt: null, operationSettled: false, logicalReleased: true,
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: false, state: "unknown" },
+		})
+	})
+	it("a finish receipt cannot replace a rejected actual operation settlement", async () => {
+		const f = fixture(),
+			h = new RecordingProducers(f.deps).begin(f.input)
+		await h.ready
+		const receipt: AnalogReceipt = Object.freeze({
+			...f.receipt(), cleanup: "complete", residueBytes: 0,
+		})
+		const finish = h.finish()
+		f.finished.resolve(receipt)
+		f.settled.reject(new Error("settlement unknown"))
+		expect(await finish).toBe(receipt)
+		expect(await h.settled).toMatchObject({
+			filesystem: { ok: false, state: "unknown" },
+			operation: { ok: false, state: "unknown" },
+			operationSettled: false, componentClosed: false,
+		})
 	})
 })

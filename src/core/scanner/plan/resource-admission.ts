@@ -5,7 +5,10 @@ import type {
 	PreparedObservedPermit,
 	ResourceEnvelope,
 } from "../../channelizer/settlement-observer.js"
-import type { ScannerChannelProfile } from "../channel/consumer-types.js"
+import type {
+	ScannerChannelProfile,
+	ScannerChannelShapeProfile,
+} from "../channel/consumer-types.js"
 
 function validEnvelope(value: ResourceEnvelope): boolean {
 	return (
@@ -16,22 +19,24 @@ function validEnvelope(value: ResourceEnvelope): boolean {
 	)
 }
 
-/** Prepares immutable, UNCHARGED cells. The core atomically admits at dequeue. */
-export function prepareChannelAdmission(input: {
-	readonly handle: ObservedAcquisitionHandle
-	readonly ledger: ObservedPermitLedger | undefined
+/** Validates coverage without allocating a core request identity or reserving cells. */
+export function eligibleChannelShape(input: {
 	readonly profile: ScannerChannelProfile | null | undefined
 	readonly captureRateHz: number
 	readonly request: Readonly<DecoderChannelRequest>
 	readonly activation: "decoder" | "direct"
-}): PreparedObservedPermit | undefined {
-	const { ledger, profile, request } = input
+}): ScannerChannelShapeProfile | undefined {
+	const { profile, request } = input
 	if (
-		!ledger ||
 		!profile ||
 		!validEnvelope(profile.limits) ||
 		!validEnvelope(profile.baseline) ||
-		!Number.isFinite(input.captureRateHz)
+		!Number.isSafeInteger(profile.baselineEngineCount) ||
+		profile.baselineEngineCount < 0 ||
+		!Number.isSafeInteger(profile.baselineOffsetCount) ||
+		profile.baselineOffsetCount < 0 ||
+		!Number.isFinite(input.captureRateHz) ||
+		input.captureRateHz <= 0
 	)
 		return undefined
 	const coverage = profile.shapes.filter(
@@ -60,7 +65,21 @@ export function prepareChannelAdmission(input: {
 		(shape.downstream.decoder.cpu !== 0 || shape.downstream.decoder.bytes !== 0)
 	)
 		return undefined
-	return ledger.prepareObservedPermit(
+	return shape
+}
+
+/** Prepares immutable, UNCHARGED cells. The core atomically admits at dequeue. */
+export function prepareChannelAdmission(input: {
+	readonly handle: ObservedAcquisitionHandle
+	readonly ledger: ObservedPermitLedger | undefined
+	readonly profile: ScannerChannelProfile | null | undefined
+	readonly captureRateHz: number
+	readonly request: Readonly<DecoderChannelRequest>
+	readonly activation: "decoder" | "direct"
+}): PreparedObservedPermit | undefined {
+	const shape = eligibleChannelShape(input)
+	if (!input.ledger || !shape) return undefined
+	return input.ledger.prepareObservedPermit(
 		input.handle.requestToken,
 		Array.from({ length: 6 }, () => Object.freeze({ ...shape.nativeSend })),
 		Array.from({ length: 6 }, () => Object.freeze({ ...shape.process })),

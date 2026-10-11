@@ -47,6 +47,8 @@ export interface ChannelAnalogConsumer {
 	readonly push: (samples: Float32Array) => void
 	readonly cancel: () => void
 	readonly settled: Promise<CleanupOutcome>
+	readonly filesystemSettled: Promise<CleanupOutcome>
+	readonly operationSettled: Promise<CleanupOutcome>
 }
 interface Slot {
 	readonly input: ChannelTapRequest
@@ -65,6 +67,9 @@ interface Slot {
 	offData: (() => void) | undefined
 	analog: ChannelAnalogConsumer | undefined
 	analogBegun: boolean
+	filesystemBegun: boolean
+	operationBegun: boolean
+	componentsDrained: boolean
 	cleanupFailed: boolean
 }
 
@@ -121,24 +126,41 @@ export class ChannelTaps {
 			ended: () => {
 				if (slot) void this.close(slot).catch(() => undefined)
 			},
+			continuityLost: () => {
+				if (!slot) return
+				slot.gaps = true
+				// A gap has no trusted sample translation. Fence analog synchronously, drain later.
+				if (slot.phase === "analog" || slot.phase === "handoff" || slot.analogBegun)
+					slot.handle.cancel()
+			},
 		})
 		if (!prepared) return undefined
 		const handle: ChannelTapHandle = Object.freeze({
 			prepared,
 			get current() {
-				return prepared.lifecycle.live
+				return prepared.lifecycle.live && !prepared.lifecycle.continuityLost
 			},
 			beginAnalog: () => {
 				if (
 					!slot ||
 					slot.phase !== "handoff" ||
 					!prepared.lifecycle.live ||
+					prepared.lifecycle.continuityLost ||
 					prepared.handle.snapshot().components.classifier !== "settled" ||
 					slot.analogBegun
 				)
 					return false
 				slot.analogBegun = prepared.analog.begin()
-				return slot.analogBegun
+				slot.filesystemBegun = slot.analogBegun && prepared.filesystem.begin()
+				slot.operationBegun = slot.filesystemBegun && prepared.operation.begin()
+				if (!slot.operationBegun) {
+					// No producer effect has occurred yet. Settle the actually empty owned components.
+					prepared.analog.settle(OK)
+					prepared.filesystem.settle(OK)
+					prepared.operation.settle(OK)
+					slot.handle.cancel()
+				}
+				return slot.operationBegun
 			},
 			attachAnalog: (consumer: ChannelAnalogConsumer) =>
 				this.attachAnalog(slot!, consumer),
@@ -173,6 +195,9 @@ export class ChannelTaps {
 			offData: undefined,
 			analog: undefined,
 			analogBegun: false,
+			filesystemBegun: false,
+			operationBegun: false,
+			componentsDrained: false,
 			cleanupFailed: false,
 		}
 		this.slots.set(input.attempt.sourceId, slot)
@@ -212,6 +237,18 @@ export class ChannelTaps {
 	cancelSource(sourceId: string): void {
 		this.slots.get(sourceId)?.handle.cancel()
 	}
+	cancelObservation(sourceId: string, observationId: string): void {
+		const slot = this.slots.get(sourceId)
+		if (slot?.input.attempt.observationId === observationId) slot.handle.cancel()
+	}
+	/** Workload changes revoke original capabilities without sealing future covered admission. */
+	invalidateCoverage(): void {
+		for (const slot of this.slots.values()) slot.handle.cancel()
+	}
+	/** Phase66 may detach only references whose actual facts have settled; never waits. */
+	sweepSettledReferences(): void {
+		this.reap()
+	}
 	sealAdmission(): void {
 		this.sealed = true
 		for (const slot of this.slots.values()) slot.handle.cancel()
@@ -237,6 +274,7 @@ export class ChannelTaps {
 		const outcomes = await Promise.allSettled(
 			[...this.slots.values()].map(slot => this.close(slot)),
 		)
+		this.reap()
 		return outcomes.some(outcome => outcome.status === "rejected")
 			? {
 					ok: false,
@@ -263,6 +301,8 @@ export class ChannelTaps {
 		if (!result.ok) {
 			slot.prepared.classifier.sealNeverStarted()
 			slot.prepared.analog.sealNeverStarted()
+			slot.prepared.filesystem.sealNeverStarted()
+			slot.prepared.operation.sealNeverStarted()
 			slot.prepared.lifecycle.invalidate()
 			this.fence(slot)
 			return
@@ -275,13 +315,17 @@ export class ChannelTaps {
 		) {
 			slot.prepared.classifier.sealNeverStarted()
 			slot.prepared.analog.sealNeverStarted()
+			slot.prepared.filesystem.sealNeverStarted()
+			slot.prepared.operation.sealNeverStarted()
 			slot.prepared.lifecycle.invalidate()
 			return
 		}
 		slot.samples = new Float32Array(MAX_SAMPLES * 2)
+		slot.gaps ||= slot.prepared.lifecycle.continuityLost
 		slot.phase = "collecting"
 		slot.collectionStart = this.deps.now()
 		const onData = (bytes: unknown): void => {
+			slot.gaps ||= slot.prepared.lifecycle.continuityLost
 			if (
 				!Buffer.isBuffer(bytes) ||
 				!slot.prepared.lifecycle.live ||
@@ -330,6 +374,7 @@ export class ChannelTaps {
 			!slot.prepared.lifecycle.live
 		)
 			return
+		slot.gaps ||= slot.prepared.lifecycle.continuityLost
 		slot.collected = true
 		slot.phase = "handoff"
 		slot.offData?.()
@@ -383,13 +428,18 @@ export class ChannelTaps {
 		slot.analog = consumer
 		void consumer.settled.catch(() => undefined)
 		const stream = slot.prepared.lifecycle.readable
-		if (!stream || slot.phase !== "handoff" || this.sealed) {
+		if (!stream || slot.phase !== "handoff" || this.sealed || slot.prepared.lifecycle.continuityLost) {
 			consumer.cancel()
 			void this.close(slot).catch(() => undefined)
 			return false
 		}
 		slot.phase = "analog"
 		const onData = (bytes: unknown): void => {
+			if (slot.prepared.lifecycle.continuityLost) {
+				slot.gaps = true
+				slot.handle.cancel()
+				return
+			}
 			if (
 				!Buffer.isBuffer(bytes) ||
 				slot.phase !== "analog" ||
@@ -483,6 +533,21 @@ export class ChannelTaps {
 				"SCANNER_CHANNEL_CLEANUP_PENDING",
 			)
 		} else slot.prepared.analog.sealNeverStarted()
+		// Filesystem and operation are independent of the analog/logical-release outcome.
+		for (const [component, begun, settlement] of [
+			[slot.prepared.filesystem, slot.filesystemBegun, slot.analog?.filesystemSettled],
+			[slot.prepared.operation, slot.operationBegun, slot.analog?.operationSettled],
+		] as const) {
+			if (!begun) { component.sealNeverStarted(); continue }
+			let outcome: CleanupOutcome
+			try {
+				outcome = settlement ? await settlement : { ok: false, state: "unknown", detail: "Scanner recording component owner missing" }
+			} catch {
+				outcome = { ok: false, state: "unknown", detail: "Scanner recording component settlement unknown" }
+			}
+			component.settle(outcome)
+			if (!outcome.ok) failure ??= new WaveKitError("Scanner recording component cleanup pending", "SCANNER_CHANNEL_CLEANUP_PENDING")
+		}
 		try {
 			await slot.prepared.lifecycle.logicalDrain()
 		} catch {
@@ -497,11 +562,14 @@ export class ChannelTaps {
 				"SCANNER_CHANNEL_CLEANUP_FAILED",
 			)
 		if (failure) throw failure
+		slot.componentsDrained = true
+		this.reap()
 	}
 	private reap(): void {
 		for (const [source, slot] of this.slots) {
 			if (
 				slot.phase === "closing" &&
+				slot.componentsDrained &&
 				!slot.cleanupFailed &&
 				slot.prepared.lifecycle.reclaimIfSettled()
 			)
