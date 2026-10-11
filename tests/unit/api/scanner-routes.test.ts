@@ -1,3 +1,4 @@
+import type * as NodeFs from "node:fs"
 import { mkdtempSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -8,6 +9,15 @@ import {
 	type ScannerRouteService,
 } from "../../../src/api/routes/scanner.js"
 import { ScannerApiError } from "../../../src/core/scanner/errors.js"
+
+const { producer } = vi.hoisted(() => ({
+	producer: vi.fn<typeof NodeFs.createReadStream>(),
+}))
+vi.mock("node:fs", async importOriginal => {
+	const actual = await importOriginal<typeof NodeFs>()
+	producer.mockImplementation(actual.createReadStream)
+	return { ...actual, createReadStream: producer }
+})
 
 function fakeService(
 	overrides: Partial<Record<keyof ScannerRouteService, unknown>> = {},
@@ -79,6 +89,89 @@ describe("scanner routes", () => {
 
 	afterEach(async () => {
 		await app.close()
+	})
+
+	it("maps recording authority failure to the exact safe 503 before producer or WAV headers", async () => {
+		await build({
+			recordingPath: vi.fn(() => {
+				throw new ScannerApiError(
+					"Scanner recording evidence is unavailable",
+					"SCANNER_EVIDENCE_UNAVAILABLE",
+					503,
+				)
+			}),
+		})
+		producer.mockClear()
+		const result = await app.inject({
+			url: "/api/scanner/recordings/d_1~call.wav",
+		})
+		expect(result.statusCode).toBe(503)
+		expect(result.json()).toEqual({
+			error: "ScannerApiError",
+			code: "SCANNER_EVIDENCE_UNAVAILABLE",
+			message: "Scanner recording evidence is unavailable",
+		})
+		expect(result.headers["content-type"]).not.toContain("audio/wav")
+		expect(producer).not.toHaveBeenCalled()
+	})
+
+	it("maps repeated absent-metadata cleanup uncertainty, then settled and known absent deletion", async () => {
+		const pending = () =>
+			new ScannerApiError(
+				"Scanner evidence cleanup is pending",
+				"SCANNER_EVIDENCE_CLEANUP_PENDING",
+				503,
+			)
+		const remove = vi
+			.fn<ScannerRouteService["deleteDiscovery"]>()
+			.mockRejectedValueOnce(pending())
+			.mockRejectedValueOnce(pending())
+			.mockResolvedValueOnce(true)
+			.mockResolvedValueOnce(false)
+		await build({ deleteDiscovery: remove })
+		for (let attempt = 0; attempt < 2; attempt++) {
+			const result = await app.inject({
+				method: "DELETE",
+				url: "/api/scanner/discoveries/d_1",
+			})
+			expect(result.statusCode).toBe(503)
+			expect(result.json()).toEqual({
+				error: "ScannerApiError",
+				code: "SCANNER_EVIDENCE_CLEANUP_PENDING",
+				message: "Scanner evidence cleanup is pending",
+			})
+		}
+		expect(
+			(
+				await app.inject({
+					method: "DELETE",
+					url: "/api/scanner/discoveries/d_1",
+				})
+			).statusCode,
+		).toBe(204)
+		expect(
+			(
+				await app.inject({
+					method: "DELETE",
+					url: "/api/scanner/discoveries/d_1",
+				})
+			).statusCode,
+		).toBe(404)
+		expect(remove).toHaveBeenCalledTimes(4)
+		expect(service.getDiscovery).not.toHaveBeenCalled()
+	})
+
+	it("preserves legacy unexpected recording lookup failure as an ordinary framework error", async () => {
+		await build({
+			recordingPath: vi.fn(() => {
+				throw new Error("legacy lookup failed")
+			}),
+		})
+		const result = await app.inject({
+			url: "/api/scanner/recordings/d_1~call.wav",
+		})
+		expect(result.statusCode).toBe(500)
+		expect(result.json()).toMatchObject({ message: "legacy lookup failed" })
 	})
 
 	it("creates a job (201) and maps scanner errors to their status with details", async () => {

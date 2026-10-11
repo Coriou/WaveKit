@@ -3,6 +3,7 @@ import { once } from "node:events"
 import { request as httpRequest } from "node:http"
 import { PassThrough } from "node:stream"
 import Fastify from "fastify"
+import type { FastifyReply, FastifyRequest } from "fastify"
 import websocket from "@fastify/websocket"
 import { WebSocket } from "ws"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -17,6 +18,7 @@ import { AccessPolicy } from "../../../src/access/policy.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import { scannerRoutes } from "../../../src/api/routes/scanner.js"
 import type { ScannerRouteService } from "../../../src/api/routes/scanner.js"
+import { ScannerApiError } from "../../../src/core/scanner/errors.js"
 import { WebSocketEventBroadcaster } from "../../../src/api/websocket/events.js"
 import { createLogger } from "../../../src/utils/logger.js"
 
@@ -97,6 +99,133 @@ function beginDownload(
 }
 
 describe("protected mounted stream routes", () => {
+	it.each(["scanner", "generic", "unavailable", "disposed"] as const)(
+		"flushes %s recording 503 unchanged and frees capacity for the next download",
+		async failure => {
+			const env = await setup(1)
+			const lookup = vi.fn<ScannerRouteService["recordingPath"]>(
+				() => "/private/recording.wav",
+			)
+			if (failure === "scanner")
+				lookup.mockImplementationOnce(() => {
+					throw new ScannerApiError(
+						"Scanner recording evidence is unavailable",
+						"SCANNER_EVIDENCE_UNAVAILABLE",
+						503,
+					)
+				})
+			if (failure === "generic")
+				lookup.mockImplementationOnce(() => {
+					throw new Error("private credential or filesystem detail")
+				})
+			if (failure === "unavailable" || failure === "disposed") {
+				// One-shot handler seam: root authorization remains real and succeeds.
+				vi.spyOn(env.access, "leaseDownload").mockReturnValueOnce({
+					kind: "rejected",
+					reason: failure,
+				})
+			}
+			await env.app.register(scannerRoutes, {
+				scanner: scanner({ recordingPath: lookup }),
+				access: env.access,
+			})
+			const url = "/api/scanner/recordings/d_abc~sample.wav"
+			const denied = await env.app.inject({ url, headers: env.headers })
+			expect(denied.statusCode).toBe(503)
+			expect(denied.json()).toEqual(
+				failure === "scanner"
+					? {
+							error: "ScannerApiError",
+							code: "SCANNER_EVIDENCE_UNAVAILABLE",
+							message: "Scanner recording evidence is unavailable",
+						}
+					: { code: "ACCESS_UNAVAILABLE" },
+			)
+			expect(denied.headers["content-type"]).not.toContain("audio/wav")
+			expect(denied.headers["access-control-allow-origin"]).toBe(
+				"http://receiver.lan:9000",
+			)
+			expect(readStream).not.toHaveBeenCalled()
+			if (failure === "unavailable" || failure === "disposed")
+				expect(lookup).not.toHaveBeenCalled()
+			readStream.mockImplementationOnce(() => {
+				const stream = new PassThrough()
+				stream.end("recording bytes")
+				return stream
+			})
+			const success = await env.app.inject({ url, headers: env.headers })
+			expect(success.statusCode).toBe(200)
+			expect(success.headers["content-type"]).toContain("audio/wav")
+			expect(success.body).toBe("recording bytes")
+		},
+	)
+
+	it("suppresses a deferred recording rejection after revocation through actual handler completion", async () => {
+		const env = await setup(1)
+		let rejectLookup: (error: ScannerApiError) => void = () => {}
+		const pending = new Promise<string | null>((_resolve, reject) => {
+			rejectLookup = reject
+		})
+		let entered = () => {}
+		const started = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		let completed = () => {}
+		const handlerChecked = new Promise<void>(resolve => {
+			completed = resolve
+		})
+		env.app.addHook("onRoute", route => {
+			if (route.url !== "/api/scanner/recordings/:recordingId") return
+			const handler = route.handler
+			route.handler = async function (request, reply) {
+				try {
+					return await handler.call(this, request, reply)
+				} finally {
+					completed()
+				}
+			}
+		})
+		const output = vi.fn()
+		env.app.addHook(
+			"preHandler",
+			async (_request: FastifyRequest, reply: FastifyReply) => {
+				const send = reply.send.bind(reply)
+				vi.spyOn(reply, "send").mockImplementation(payload => {
+					output(payload)
+					return send(payload)
+				})
+			},
+		)
+		// Test adaptation exercises the helper's async catch; production recordingPath stays synchronous.
+		const deferred = (() => {
+			entered()
+			return pending
+		}) as unknown as ScannerRouteService["recordingPath"]
+		await env.app.register(scannerRoutes, {
+			scanner: scanner({ recordingPath: deferred }),
+			access: env.access,
+		})
+		const address = await env.app.listen({ host: "127.0.0.1", port: 0 })
+		const transportClosed = beginDownload(
+			address,
+			"/api/scanner/recordings/d_abc~sample.wav",
+			env.headers,
+		)
+		await started
+		await env.sessions.revoke(env.session.principalId)
+		rejectLookup(
+			new ScannerApiError(
+				"Scanner recording evidence is unavailable",
+				"SCANNER_EVIDENCE_UNAVAILABLE",
+				503,
+			),
+		)
+		await handlerChecked
+		await transportClosed
+		expect(output).not.toHaveBeenCalled()
+		expect(readStream).not.toHaveBeenCalled()
+	})
+
 	it("denies every download before lookup/producer creation", async () => {
 		const env = await setup()
 		const service = scanner()
