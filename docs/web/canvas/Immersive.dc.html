@@ -20,10 +20,11 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 @media (max-width:1100px){.wk-float{display:none}.wk-act{left:16px;width:auto !important}}
 @media (max-width:1180px){.wk-dock{left:388px !important;transform:none !important}.wk-dock-label{display:none}}
 @media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
+@media (max-width:1100px){.wk-band{top:132px !important;left:16px !important;right:16px !important}}
 </style>
 </helmet>
 <div style="position: relative; height: 100vh; min-height: 760px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
-	<dc-import name="Spectrum" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" hint-size="100%,100%"></dc-import>
+	<dc-import name="Spectrum" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-view="{{setView}}" hint-size="100%,100%"></dc-import>
 
 	<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 		<div style="position: absolute; inset: 0; z-index: 1">
@@ -31,8 +32,16 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 		</div>
 	</sc-if>
 
+	<sc-if value="{{showBand}}" hint-placeholder-val="{{false}}">
+		<div class="wk-band" style="position: absolute; top: 16px; left: 504px; right: 332px; z-index: 3; display: flex; justify-content: center; pointer-events: none">
+			<div style="width: 100%; max-width: 760px; pointer-events: auto">
+				<dc-import name="BandStrip" sweep="{{hold}}" discoveries="{{discs}}" view="{{view}}" on-tune="{{tune}}" hint-size="100%,56px"></dc-import>
+			</div>
+		</div>
+	</sc-if>
+
 	<div style="position: absolute; top: 16px; left: 16px; z-index: 3">
-		<dc-import name="Tuner" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hint-size="440px,56px"></dc-import>
+		<dc-import name="Tuner" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hold="{{hold}}" on-hold="{{scanAction}}" hint-size="440px,56px"></dc-import>
 	</div>
 
 	<div style="position: absolute; top: 16px; right: 16px; z-index: 3">
@@ -41,7 +50,7 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 
 	<sc-if value="{{showCard}}" hint-placeholder-val="{{true}}">
 		<div class="wk-float" style="position: absolute; right: 16px; bottom: 100px; width: 320px; z-index: 1">
-			<dc-import name="Tuned" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" hint-size="320px,300px"></dc-import>
+			<dc-import name="Tuned" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" scan-hold="{{scanHold}}" identify-run="{{idRun}}" hint-size="320px,300px"></dc-import>
 		</div>
 	</sc-if>
 
@@ -63,6 +72,12 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 		</div>
 	</sc-if>
 
+	<sc-if value="{{showScanner}}" hint-placeholder-val="{{false}}">
+		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 420px; z-index: 4">
+			<dc-import name="Scanner" sweep="{{scannerSweep}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-identify="{{identify}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
+		</div>
+	</sc-if>
+
 	<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
 		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(242,184,75,.55), inset 0 0 90px rgba(242,184,75,.10); transition: opacity .3s"></div>
 		<div class="wk-src" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(48,37,12,.62); border: 1px solid rgba(242,184,75,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13px; color: #f7dca4">
@@ -73,7 +88,7 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 	</sc-if>
 
 	<div style="position: absolute; left: 16px; bottom: 20px; z-index: 3">
-		<dc-import name="Listen" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" hint-size="340px,64px"></dc-import>
+		<dc-import name="Listen" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" hint-size="340px,64px"></dc-import>
 	</div>
 
 	<nav class="wk-dock" aria-label="Primary" style="position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); height: 60px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); z-index: 2">
@@ -105,14 +120,36 @@ button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-off
 
 	<sc-if value="{{palOpen}}" hint-placeholder-val="{{false}}">
 		<div style="position: absolute; inset: 0; z-index: 10">
-			<dc-import name="Palette" values="{{palVals}}" recent="{{recent}}" on-commit="{{commit}}" on-preview="{{preview}}" on-nav="{{goNav}}" on-activity="{{goActivity}}" on-used="{{used}}" on-close="{{closePal}}" hint-size="100%,100%"></dc-import>
+			<dc-import name="Palette" values="{{palVals}}" recent="{{recent}}" on-commit="{{commit}}" on-preview="{{preview}}" on-nav="{{goNav}}" on-activity="{{goActivity}}" on-used="{{used}}" on-close="{{closePal}}" on-scan="{{scanAction}}" on-identify="{{identify}}" hint-size="100%,100%"></dc-import>
 		</div>
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"sweep":{"editor":"enum","options":["off","sweeping","paused-you","paused-relay"],"default":"off"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"$preview":{"width":1440,"height":900}}'>
 const DETECTED = { 161150000: 'DMR · TG 2081', 163087500: 'P25 · TG 1201', 160450000: 'POCSAG pager', 160625000: 'NFM voice', 161975000: 'AIS channel A', 162025000: 'AIS channel B', 156800000: 'Marine ch 16', 144800000: 'APRS', 433920000: 'ISM sensors', 868300000: 'ISM 868 sensors', 868950000: 'wM-Bus meters', 869525000: 'Meshtastic', 446006250: 'PMR446 ch 1', 118100000: 'Airband tower', 131725000: 'ACARS', 136975000: 'VDL2', 93500000: 'FM broadcast', 1090000000: 'ADS-B' };
 const TONE = { 160625000: 'CTCSS 88.5 Hz', 446006250: 'CTCSS 77.0 Hz', 161425000: 'DCS 023N', 145637500: 'CTCSS 123.0 Hz' };
+// Scanner discoveries (shared mock). s2 = what changes with stage S2. 160.900 is ignored ("Birdie from the Pi"), so it is not tagged.
+const DISCOVERIES = [
+	{ hz: 161150000, bw: 12500, label: 'DMR · CC 1', sub: 'TG 2081, TG 9 · radios 2081034, 2081107 · slot 1', conf: 'decoded', recent: true },
+	{ hz: 163087500, bw: 12500, label: 'P25 · NAC 293', sub: 'TG 1201 · encrypted', conf: 'decoded', recent: true },
+	{ hz: 160450000, bw: 12500, label: 'POCSAG 1200', sub: 'Capcodes 1234567, 1234570', conf: 'decoded', recent: true },
+	{ hz: 160625000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', recent: true, s2: { label: 'Likely FM voice', sub: 'CTCSS 88.5 Hz', conf: 'likely' } },
+	{ hz: 161425000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', recent: true, s2: { label: 'Likely FM voice', sub: 'DCS present', conf: 'likely' } },
+	{ hz: 156800000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 16', conf: 'maybe', recent: true, s2: { label: 'Likely FM voice', conf: 'likely' } },
+	{ hz: 156600000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 12', conf: 'maybe', recent: true, s2: { label: 'Likely FM voice', conf: 'likely' } },
+	{ hz: 167512500, bw: 6250, label: 'Maybe NXDN', sub: 'No sync · 6.25 kHz 4FSK', conf: 'maybe', recent: true },
+	{ hz: 161162500, bw: 12500, label: 'Heard', sub: 'Maybe a neighbour’s leak', conf: 'heard', recent: true },
+	{ hz: 162400000, bw: 12500, label: 'Heard', sub: 'Steady carrier', conf: 'heard', recent: true },
+	{ hz: 446006250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 1', conf: 'maybe', recent: false, s2: { label: 'Likely FM voice', sub: 'PMR446 ch 1 · CTCSS 77.0 Hz, code 4', conf: 'likely' } },
+	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No decoder for this · Pager network, Morlaix?', conf: 'maybe', recent: false },
+	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', recent: false }
+];
+// The mock sweep: one hop a second; each pass holds a few seconds on the next active signal in this list
+const HOLDS = [{ hz: 161150000, label: 'DMR · CC 1' }, { hz: 160625000, label: 'FM voice' }, { hz: 163087500, label: 'P25 · NAC 293' }];
+const HOLD_S = 3, RESUME_S = 60, HOP_HZ = 1.5e6;
+const SWEEP_MOCK = { preset: 'VHF land mobile', startHz: 150000000, endHz: 174000000, hops: 16, sweepS: 6, coverage: 84 };
+const LIVE = st => st === 'sweeping' || st === 'holding';
+const hopCentre = w => Math.round(w.startHz + (w.hop - 0.5) * (w.endHz - w.startHz) / w.hops);
 const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
 
 class Component extends DCLogic {
@@ -127,16 +164,41 @@ class Component extends DCLogic {
 			recent: [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'palette:amber', n: 2 }],
 			saved: [{ f: 161150000, label: 'DMR repeater', group: 'Local', mode: 'NFM', bw: 12500 }, { f: 161975000, label: 'AIS channel A', group: 'Marine', mode: 'NFM', bw: 25000 }, { f: 156800000, label: 'Marine ch 16', group: 'Marine', mode: 'NFM', bw: 12500 }]
 		};
-		this.set = (k, v) => this.setState({ [k]: v });
+		this.set = (k, v) => { if (k === 'freq') this.manualTune(); this.setState({ [k]: v }); };
 		this.setBw = bw => this.setState({ bw });
 		this.closeActivity = () => this.setState({ nav: 'spectrum' });
 		this.setActMode = m => this.setState({ actMode: m });
-		this.tune = f => this.setState({ freq: f });
+		this.tune = f => { this.manualTune(); this.setState({ freq: f }); };
+		this.setView = view => this.setState({ view });
+		// scanner: Scanner drawer, palette and the Tuner's hold line all send these
+		this.scanAction = a => {
+			const sw = this.state.sw;
+			if (a.type === 'start') {
+				const span = a.endHz - a.startHz, watch = a.preset === 'This span' || span <= this.state.rate * 1e6;
+				const next = watch
+					? { preset: a.preset || 'This span', startHz: a.startHz, endHz: a.endHz, hops: 1, hop: 1, sweepS: 0, coverage: 100, state: 'watching' }
+					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, hops: Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
+				this.commit(null, watch ? 'Watching this span' : 'Scanning ' + next.preset + ' · the scanner has the receiver');
+				return this.setState({ sw: next });
+			}
+			if (!sw) return;
+			if (a.type === 'stop') { this.commit(null, 'Scan stopped · decoders start again'); return this.setState({ sw: null }); }
+			if (a.type === 'pause' && LIVE(sw.state)) { this.commit(null, 'Scan paused'); return this.setState({ sw: Object.assign({}, sw, { state: 'paused-you', resumeAt: null, holdHz: null, holdLabel: null }) }); }
+			if (a.type === 'resume' && sw.state === 'paused-you') { this.commit(null, 'Scan resumed'); return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', resumeAt: null }) }); }
+		};
+		// identify works on the tuned frequency; asked for another one (from the Scanner), tune there first
+		this.identify = hz => {
+			const sw = this.state.sw, cur = sw && LIVE(sw.state) ? (sw.state === 'holding' ? sw.holdHz : hopCentre(sw)) : this.state.freq;
+			if (hz && hz !== cur) this.tune(hz);
+			clearTimeout(this.tt);
+			this.setState({ idRun: Date.now(), pal: false, preview: null, toast: null, open: this.state.open === 'rx' ? null : this.state.open, nav: ['spectrum', 'scanner'].indexOf(this.state.nav) >= 0 ? 'spectrum' : this.state.nav });
+		};
 		const tog = id => () => this.setState({ open: this.state.open === id ? null : id });
 		this.openPal = () => this.setState({ pal: true, preview: null });
 		this.closePal = () => this.setState({ pal: false, preview: null });
 		this.preview = p => this.setState({ preview: p });
 		this.commit = (patch, text) => {
+			if (patch && patch.freq !== undefined) this.manualTune();
 			const prev = patch ? Object.keys(patch).reduce((o, k) => { o[k] = this.state[k]; return o; }, {}) : null;
 			clearTimeout(this.tt);
 			this.setState(Object.assign({}, patch || {}, { pal: false, preview: null, toast: text ? { text, prev } : null }));
@@ -150,7 +212,8 @@ class Component extends DCLogic {
 			if (id === 'activity' || id === 'open') this.goActivity({ tokens: tok });
 			else if (id === 'replay') this.goActivity({ tokens: tok, play: true });
 			else if (id === 'map') this.goNav('map');
-			else if (id === 'scan') this.goNav('scanner');
+			else if (id === 'scan' || id === 'open-scanner') this.goNav('scanner');
+			else if (id === 'pause-scan') this.scanAction({ type: 'pause' });
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
 		};
 		this.setSource = src => this.setState({ source: src });
@@ -176,10 +239,58 @@ class Component extends DCLogic {
 		this.toggleRx = tog('rx');
 		this.toggleListen = tog('listen');
 	}
-	componentWillUnmount() { clearTimeout(this.tt); }
+	componentDidMount() {
+		this.applySweepTweak();
+		this.clock = setInterval(() => this.tick(), 1000);
+	}
+	componentDidUpdate(prev) { if (prev.sweep !== this.props.sweep) this.applySweepTweak(); }
+	componentWillUnmount() { clearTimeout(this.tt); clearInterval(this.clock); }
+	// board tweak: jump straight to a sweep state so reviewers don't have to wait for one
+	applySweepTweak() {
+		const st = this.props.sweep || 'off';
+		if (st === 'off') { if (this.tweaked) this.setState({ sw: null }); this.tweaked = false; return; }
+		this.tweaked = true;
+		this.setState({ sw: Object.assign({}, SWEEP_MOCK, { hop: 7, pass: 0, state: st, resumeAt: st === 'paused-you' ? Date.now() + (RESUME_S - 2) * 1000 : null }) });
+	}
+	// a hand tune while the sweep has the receiver pauses it; it resumes on its own after 60 s
+	manualTune() {
+		const sw = this.state.sw;
+		if (sw && (LIVE(sw.state) || sw.state === 'paused-you')) this.setState({ sw: Object.assign({}, sw, { state: 'paused-you', resumeAt: Date.now() + RESUME_S * 1000, holdHz: null, holdLabel: null }) });
+	}
+	tick() {
+		const sw = this.state.sw;
+		if (!sw) return;
+		if (sw.state === 'paused-you') {
+			if (sw.resumeAt && Date.now() >= sw.resumeAt) this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', resumeAt: null }) });
+			else if (sw.resumeAt) this.forceUpdate();
+			return;
+		}
+		if (sw.state === 'holding') {
+			if (sw.holdLeft > 1) return this.setState({ sw: Object.assign({}, sw, { holdLeft: sw.holdLeft - 1 }) });
+			return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', holdHz: null, holdLabel: null, held: true }) });
+		}
+		if (sw.state !== 'sweeping') return;
+		const hop = sw.hop % sw.hops + 1, pass = (sw.pass || 0) + (hop === 1 ? 1 : 0);
+		const w = (sw.endHz - sw.startHz) / sw.hops, lo = sw.startHz + (hop - 1) * w;
+		const target = HOLDS[pass % HOLDS.length];
+		const hold = target.hz >= lo && target.hz < lo + w ? target : null;
+		this.setState({ sw: Object.assign({}, sw, { hop, pass, held: false }, hold ? { state: 'holding', holdHz: hold.hz, holdLabel: hold.label, holdLeft: HOLD_S } : null) });
+	}
 	renderVals() {
 		const base = this.state;
-		const s = Object.assign({}, base, base.preview || {});
+		const sw = base.sw || null;
+		const live = !!sw && LIVE(sw.state);
+		// while the sweep has the receiver, the tuning follows the hop (or the signal it holds on)
+		const swFreq = live ? (sw.state === 'holding' ? sw.holdHz : hopCentre(sw)) : null;
+		const s = Object.assign({}, base, swFreq ? { freq: swFreq } : {}, base.preview || {});
+		const stage = this.props.stage || 'S1';
+		const discs = DISCOVERIES.map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
+		const hold = sw && sw.state !== 'watching' ? {
+			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, hop: sw.hop, hops: sw.hops, sweepS: sw.sweepS, coverage: sw.coverage,
+			holdHz: sw.holdHz || undefined, holdLabel: sw.holdLabel || undefined,
+			resumeIn: sw.state === 'paused-you' && sw.resumeAt ? Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) : undefined
+		} : null;
+		const capHz = base.rate * 1e6;
 		const NAV = [
 			{ id: 'spectrum', label: 'Spectrum', d: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
 			{ id: 'activity', label: 'Activity', d: ['M3 12h4l3 8l4 -16l3 8h4'] },
@@ -188,10 +299,19 @@ class Component extends DCLogic {
 			{ id: 'recordings', label: 'Recordings', d: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'] }
 		];
 		return {
+			discs, hold, stage,
+			scannerSweep: hold || (sw ? sw : { state: 'watching', preset: 'This span', startHz: s.freq - capHz / 2, endHz: s.freq + capHz / 2, hop: 1, hops: 1, sweepS: 0, coverage: 100 }),
+			scanAction: this.scanAction, identify: this.identify,
+			idRun: base.idRun || 0,
+			scanHold: live,
+			following: live,
+			showBand: !!hold && s.nav !== 'map',
+			view: base.view || null, setView: this.setView,
+			showScanner: s.nav === 'scanner' && s.open !== 'rx',
 			freq: s.freq, bw: s.bw, step: s.step,
 			wfPalette: s.palette,
 			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,
-			palVals: base, recent: base.recent,
+			palVals: Object.assign({}, base, swFreq ? { freq: swFreq } : {}, { sweep: sw ? Object.assign({}, sw, hold || {}) : null }), recent: base.recent,
 			commit: this.commit, preview: this.preview, cardAction: this.cardAction, goNav: this.goNav, goActivity: this.goActivity, used: this.used,
 			actCmd: base.actCmd,
 			hasToast: !!base.toast, toastText: base.toast ? base.toast.text : '', canUndo: !!(base.toast && base.toast.prev), noUndo: !!(base.toast && !base.toast.prev), undo: this.undo,
@@ -224,7 +344,7 @@ class Component extends DCLogic {
 			},
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
-			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'recordings' && s.nav !== 'settings' && s.nav !== 'map',
+			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'recordings' && s.nav !== 'settings' && s.nav !== 'map' && s.nav !== 'scanner',
 			showMap: s.nav === 'map', mapAction: this.mapAction,
 			nav: NAV.map(n => {
 				const on = n.id === s.nav;

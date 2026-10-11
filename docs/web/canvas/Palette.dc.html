@@ -126,7 +126,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"recent":{"editor":null},"onCommit":{"editor":null},"onPreview":{"editor":null},"onNav":{"editor":null},"onActivity":{"editor":null},"onUsed":{"editor":null},"onClose":{"editor":null},"$preview":{"width":760,"height":700}}'>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"recent":{"editor":null},"onCommit":{"editor":null},"onPreview":{"editor":null},"onNav":{"editor":null},"onActivity":{"editor":null},"onUsed":{"editor":null},"onClose":{"editor":null},"onScan":{"editor":null},"onIdentify":{"editor":null},"scan":{"editor":"enum","options":["off","sweeping","paused-you"],"default":"off"},"$preview":{"width":760,"height":700}}'>
 const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
 const MODE_DESC = { NFM: 'Narrow FM · land mobile, marine, PMR', AM: 'Airband and broadcast AM', WFM: 'Broadcast FM', USB: 'Upper sideband · SSB voice', LSB: 'Lower sideband · SSB voice', CW: 'Morse', RAW: 'No audio · decoders only' };
 const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
@@ -193,6 +193,10 @@ const P = {
 	keys: ['M2 8a2 2 0 0 1 2 -2h16a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-16a2 2 0 0 1 -2 -2z', 'M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10'],
 	go: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
 	alert: ['M12 9v4', 'M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z', 'M12 16h.01'],
+	scan: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'],
+	identify: ['M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0', 'M21 21l-6 -6', 'M10 13v.01', 'M10 10a1.5 1.5 0 1 0 -1.14 -2.474'],
+	pause: ['M6 6a1 1 0 0 1 1 -1h2a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-2a1 1 0 0 1 -1 -1z', 'M14 6a1 1 0 0 1 1 -1h2a1 1 0 0 1 1 1v12a1 1 0 0 1 -1 1h-2a1 1 0 0 1 -1 -1z'],
+	stop: ['M5 7a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z'],
 	tag: ['M7.5 7.5m-1 0a1 1 0 1 0 2 0a1 1 0 1 0 -2 0', 'M3 6v5.172a2 2 0 0 0 .586 1.414l7.71 7.71a2.41 2.41 0 0 0 3.408 0l5.592 -5.592a2.41 2.41 0 0 0 0 -3.408l-7.71 -7.71a2 2 0 0 0 -1.414 -.586h-5.172a3 3 0 0 0 -3 3z']
 };
 const CAT = {
@@ -245,8 +249,25 @@ const SCOPES = {
 	save: { title: 'Save', ph: 'Name it, then pick a group', raw: true },
 	go: { title: 'Go to', ph: 'Choose a view' },
 	dec: { title: 'Decoders', ph: 'Find a decoder' },
-	keys: { title: 'Keyboard shortcuts', ph: 'Find a shortcut' }
+	keys: { title: 'Keyboard shortcuts', ph: 'Find a shortcut' },
+	scan: { title: 'Scan a band', ph: 'Choose a band to sweep' }
 };
+// Scanner presets (region EU). "This span" watches what the receiver already covers; the rest sweep.
+const SCAN_PRESETS = [
+	{ id: 'pmr446', label: 'PMR446', from: 446.0e6, to: 446.2e6, keys: ['pmr'] },
+	{ id: 'marine', label: 'Marine VHF', from: 156.0e6, to: 162.1e6, keys: ['boats', 'ships', 'ch 16'] },
+	{ id: '2m', label: '2 m', from: 144e6, to: 146e6, keys: ['amateur', 'ham', 'vhf ham'] },
+	{ id: '70cm', label: '70 cm', from: 430e6, to: 440e6, keys: ['amateur', 'ham', 'uhf ham'] },
+	{ id: 'vhf-lm', label: 'VHF land mobile', from: 150e6, to: 174e6, keys: ['business', 'dmr', 'pmr vhf'] },
+	{ id: 'uhf-pmr', label: 'UHF PMR', from: 440e6, to: 470e6, keys: ['business', 'uhf'] },
+	{ id: 'ism433', label: 'ISM 433', from: 433.05e6, to: 434.79e6, keys: ['sensors', 'lpd'] },
+	{ id: 'ism868', label: 'ISM 868', from: 863e6, to: 870e6, keys: ['sensors', 'lora', 'srd'] },
+	{ id: 'pagers', label: 'Pagers', from: 169.4e6, to: 169.8e6, also: '466 MHz', keys: ['pocsag', 'flex', 'paging'] }
+];
+const HOP_HZ = 1.5e6;
+const SCAN_COST = 'Takes the receiver · pauses ADS-B, AIS and 3 others · live audio follows the scan';
+const SCAN_MOCK = { preset: 'VHF land mobile', startHz: 150e6, endHz: 174e6, hop: 7, hops: 16, sweepS: 6, coverage: 84 };
+const mhzRange = (a, b) => { const f = x => { const m = x / 1e6; return Number.isInteger(m) ? String(m) : m.toFixed(3).replace(/0+$/, ''); }; return f(a) + '–' + f(b) + ' MHz'; };
 const DEEP = ['mode', 'bw', 'step', 'rate', 'src', 'agc', 'direct', 'palette', 'dec'];
 const LABEL = { freq: 'Frequency', mode: 'Mode', bw: 'Bandwidth', step: 'Step', rate: 'Sample rate', gain: 'Gain', sq: 'Squelch', vol: 'Volume', src: 'What you hear', agc: 'Level control', direct: 'Direct sampling', palette: 'Waterfall', listening: 'Listen', rec: 'Recording', nr: 'Noise reduction', hp: 'Cut low rumble', biasT: 'Bias-T', rtlAgc: 'RTL AGC', dcBlock: 'Remove DC spike', iqCorr: 'IQ correction', sqAuto: 'Auto squelch', saved: 'Saved' };
 const SEED_RECENT = [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'palette:amber', n: 2 }];
@@ -374,8 +395,16 @@ class Component extends DCLogic {
 		this.lastPrev = 'null';
 	}
 	componentWillUnmount() { clearTimeout(this.tt); }
+	componentDidUpdate(prev) { if (prev.scan !== this.props.scan && this.state.scanLocal) this.setState({ scanLocal: null, scanPreset: null }); }
 	embedded() { return !!this.props.onCommit; }
-	v() { return this.embedded() && this.props.values ? this.props.values : this.state.vals; }
+	v() { return this.embedded() && this.props.values ? this.props.values : Object.assign({}, this.state.vals, { sweep: this.demoSweep() }); }
+	demoSweep() {
+		const st = this.state.scanLocal || this.props.scan || 'off';
+		if (st === 'off') return null;
+		const pr = SCAN_PRESETS.find(x => x.label === this.state.scanPreset);
+		if (st === 'watching') return Object.assign({}, SCAN_MOCK, { preset: 'This span', state: st, hop: 1, hops: 1 });
+		return Object.assign({}, SCAN_MOCK, pr ? { preset: pr.label, startHz: pr.from, endHz: pr.to, hops: Math.max(1, Math.ceil((pr.to - pr.from) / HOP_HZ)), hop: 1 } : null, { state: st, resumeIn: st === 'paused-you' ? 58 : undefined });
+	}
 	recent() { return this.embedded() && this.props.recent ? this.props.recent : this.state.recent; }
 	boost(id) { const r = this.recent().find(x => x.id === id); return r ? Math.min(24, 9 * Math.log2(1 + r.n)) : 0; }
 
@@ -433,6 +462,44 @@ class Component extends DCLogic {
 		const v = this.v();
 		return { id: 'scope:save', title: 'Save ' + mfmt(v.freq) + ' MHz', sub: 'Name it and file it in a group', icon: P.bookmark, kbd: ['S'], scope: 'save' };
 	}
+	identifyItem() {
+		const v = this.v();
+		return { id: 'identify', title: 'Identify this signal', sub: 'Tries each decoder on ' + mfmt(v.freq) + ' MHz for up to 15 s · never moves the receiver', icon: P.identify, kbd: ['I'], keys: ['what is this', 'classify', 'unknown signal'], act: () => this.identify(), does: 'Runs Identify in the tuned card on ' + mfmt(v.freq) + ' MHz' };
+	}
+	scanScopeItem() {
+		const sw = this.v().sweep;
+		return { id: 'scope:scan', title: 'Scan a band…', sub: 'Sweeps a range and lists what it finds', icon: P.scan, value: sw && sw.state !== 'watching' ? sw.preset : '', scope: 'scan', keys: ['scanner', 'sweep', 'discover', 'find signals'] };
+	}
+	scanControlItems() {
+		const sw = this.v().sweep;
+		if (!sw) return [];
+		const where = sw.preset + (sw.state === 'watching' ? ' · watching this span' : ' · hop ' + sw.hop + '/' + sw.hops);
+		const paused = /^paused/.test(sw.state);
+		const out = [];
+		if (sw.state === 'sweeping' || sw.state === 'holding') out.push({ id: 'scan:pause', title: 'Pause scan', sub: where, icon: P.pause, keys: ['hold scan', 'give back the receiver'], act: () => this.scan({ type: 'pause' }, 'Scan paused'), does: 'Gives the receiver back · the scan waits until you resume' });
+		if (paused) out.push({ id: 'scan:resume', title: 'Resume scan', sub: sw.state === 'paused-relay' ? 'Waits until SDR++ disconnects' : where + (sw.resumeIn != null ? ' · resumes by itself in ' + sw.resumeIn + ' s' : ''), icon: P.play, keys: ['continue scan'], act: () => this.scan({ type: 'resume' }, 'Scan resumed'), does: 'Hands the receiver back to the scan', warn: SCAN_COST });
+		out.push({ id: 'scan:stop', title: 'Stop scan', sub: where, icon: P.stop, keys: ['end scan', 'cancel scan'], act: () => this.scan({ type: 'stop' }, 'Scan stopped'), does: 'Ends the scan · decoders start again · discoveries stay' });
+		return out;
+	}
+	discoveriesItem() {
+		return { id: 'scan:discoveries', title: 'Show discoveries', sub: 'Everything the scanner has found around you', icon: P.scan, keys: ['found', 'band map', 'what is around'], act: () => this.nav('scanner', 'Scanner'), does: 'Opens Scanner on its discoveries' };
+	}
+	scanPresetItem(pr) {
+		const v = this.v(), sw = v.sweep;
+		if (pr === 'span') {
+			const half = v.rate * 1e6 / 2, a = v.freq - half, b = v.freq + half;
+			return { id: 'scan:span', title: 'This span', sub: mhzRange(a, b) + ' · watches what the receiver already covers', icon: P.scan, cur: !!sw && sw.state === 'watching', act: () => this.scan({ type: 'start', preset: 'This span', startHz: a, endHz: b }, 'Watching this span'), does: 'Lists what appears in this span · keeps the receiver where it is' };
+		}
+		if (pr === 'custom') return { id: 'scan:custom', title: 'Custom range…', sub: 'Set the edges in the Scanner', icon: P.scan, act: () => this.nav('scanner', 'Scanner'), does: 'Opens the Scanner to set a range' };
+		const hops = Math.max(1, Math.ceil((pr.to - pr.from) / HOP_HZ));
+		return {
+			id: 'scan:' + pr.id, title: pr.label, keys: pr.keys,
+			sub: mhzRange(pr.from, pr.to) + (pr.also ? ' and ' + pr.also : '') + ' · ' + (hops === 1 ? 'one hop' : hops + ' hops'),
+			icon: P.scan, cur: !!sw && sw.preset === pr.label && sw.state !== 'watching',
+			act: () => this.scan({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to }, 'Scanning ' + pr.label),
+			does: 'Sweeps ' + pr.label + ' · ' + mhzRange(pr.from, pr.to), warn: SCAN_COST
+		};
+	}
 	defaultName() {
 		const v = this.v(), b = bandOf(v.freq);
 		if (v.freq === 161150000) return 'DMR · TG 2081';
@@ -471,8 +538,10 @@ class Component extends DCLogic {
 			tog('iqCorr', 'IQ correction', P.chip, { keys: ['mirror', 'image'] }),
 			sc('direct', 'Direct sampling', optLabel('direct', v.direct), P.chip, null, ['hf', 'shortwave']),
 			sc('palette', 'Waterfall palette', optLabel('palette', v.palette), P.palette, null, ['colours', 'colors', 'theme']),
-			{ id: 'activity', title: 'Search Activity', sub: 'Talkgroups, callsigns, messages, transcripts', icon: P.search, kbd: ['/'], act: () => this.activity({}, 'Opened Activity'), does: 'Opens Activity with the search field focused' }
-		].concat(VIEWS.map(x => this.viewItem(x)), [
+			{ id: 'activity', title: 'Search Activity', sub: 'Talkgroups, callsigns, messages, transcripts', icon: P.search, kbd: ['/'], act: () => this.activity({}, 'Opened Activity'), does: 'Opens Activity with the search field focused' },
+			this.identifyItem(),
+			this.scanScopeItem()
+		].concat(this.scanControlItems(), [this.discoveriesItem()], VIEWS.map(x => this.viewItem(x)), [
 			sc('dec', 'Decoders', DECODERS.length + ' running', P.chip, null, ['adsb ais acars vdl2 dmr pocsag aprs ism']),
 			{ id: 'copy:freq', title: 'Copy frequency', sub: mfmt(v.freq) + ' MHz', icon: P.copy, act: () => this.toast('Copied ' + mfmt(v.freq) + ' MHz'), does: 'Copies “' + mfmt(v.freq) + ' MHz” to the clipboard' },
 			{ id: 'copy:link', title: 'Copy link to this frequency', sub: 'Opens WaveKit tuned here, same mode and bandwidth', icon: P.link, act: () => this.toast('Link copied'), does: 'Copies a link for ' + mfmt(v.freq) + ' MHz · ' + v.mode + ' · ' + kfmt(v.bw), keys: ['share', 'url'] },
@@ -493,6 +562,7 @@ class Component extends DCLogic {
 		if (id === 'go') return VIEWS.map(x => this.viewItem(x));
 		if (id === 'dec') return DECODERS.map(d => this.decItem(d));
 		if (id === 'keys') return this.rootCommands().filter(c => c.kbd);
+		if (id === 'scan') return ['span'].concat(SCAN_PRESETS, ['custom']).map(pr => this.scanPresetItem(pr));
 		if (id === 'save') {
 			const here = v.saved.find(x => x.f === v.freq);
 			if (here) return [{ id: 'info:saved', info: true, title: 'Already saved as “' + here.label + '”', sub: here.group + ' · ' + mfmt(here.f) + ' MHz', icon: P.bookmark }];
@@ -525,7 +595,9 @@ class Component extends DCLogic {
 	}
 	suggested() {
 		const v = this.v(), out = [this.tuneScopeItem()];
+		out.push.apply(out, this.scanControlItems().filter(x => x.id !== 'scan:stop'));
 		if (!v.saved.some(x => x.f === v.freq)) out.push(this.saveScopeItem());
+		if (v.freq !== 161150000 && !CHANNELS.some(c => c.f === v.freq) && !v.saved.some(x => x.f === v.freq)) out.push(this.identifyItem());
 		if (v.freq === 161150000) out.push(this.playTg('2081'));
 		const fv = mfmt(v.freq);
 		out.push({ id: 'find:freq', title: 'Everything heard on ' + fv + ' MHz', sub: 'Calls, messages and decodes on this frequency', icon: P.activity, act: () => this.activity({ tokens: [{ type: 'freq', v: fv, kind: 'Frequency', value: fv + ' MHz' }] }, 'Showing ' + fv + ' MHz in Activity'), does: 'Opens Activity filtered to ' + fv + ' MHz' });
@@ -722,6 +794,18 @@ class Component extends DCLogic {
 		if (this.props.onNav) return this.props.onNav(id);
 		this.setState({ vals: Object.assign({}, this.state.vals, { nav: id }), q: '', scope: null, sel: 0 });
 		this.toast('Opened ' + label);
+	}
+	scan(a, label) {
+		if (this.props.onScan) return this.props.onScan(a);
+		const next = { start: a.preset === 'This span' ? 'watching' : 'sweeping', pause: 'paused-you', resume: 'sweeping', stop: 'off' }[a.type];
+		this.setState(Object.assign({ scanLocal: next, q: '', scope: null, sel: 0 }, a.type === 'start' ? { scanPreset: a.preset } : null));
+		this.toast(label);
+	}
+	identify() {
+		const v = this.v();
+		if (this.props.onIdentify) return this.props.onIdentify(v.freq);
+		this.setState({ q: '', scope: null, sel: 0 });
+		this.toast('Identifying ' + mfmt(v.freq) + ' MHz');
 	}
 	close() {
 		this.lastPrev = 'null';

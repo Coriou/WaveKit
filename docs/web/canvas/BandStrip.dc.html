@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Band strip</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+button:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+@keyframes wk-band-pulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.6);opacity:0}}
+.wk-band-pulse{animation:wk-band-pulse 1.4s ease-out infinite}
+@media (prefers-reduced-motion:reduce){.wk-band-pulse{animation:none;opacity:.35;transform:scale(1.8)}}
+@media (max-width:560px){.wk-band-label{display:none !important}}
+</style>
+</helmet>
+<div style="box-sizing: border-box; width: {{rootW}}; padding: {{rootPad}}; background: {{rootBg}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 13px">
+	<div role="group" aria-label="Scanned range, {{preset}}" onMouseLeave="{{leave}}" style="position: relative; height: 56px; box-sizing: border-box; display: flex; align-items: stretch; gap: 12px; padding: 0 14px 0 12px; border-radius: 12px; background: {{glassBg}}; border: 1px solid {{edge}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<div class="wk-band-label" style="flex: none; width: 118px; display: flex; align-items: center; gap: 8px; min-width: 0">
+			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{accent}}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
+			<span style="min-width: 0; display: flex; flex-direction: column; gap: 1px">
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: #b9cac1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{preset}}</span>
+				<span role="status" style="font-size: 12px; font-weight: 700; color: {{accent}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{stateText}}</span>
+			</span>
+		</div>
+
+		<div ref="{{trackRef}}" style="position: relative; flex: 1; min-width: 0">
+			<sc-for list="{{hops}}" as="h" hint-placeholder-count="16">
+				<div aria-hidden="true" style="position: absolute; top: 21px; left: {{h.left}}%; width: calc({{h.width}}% - 2px); height: 8px; border-radius: 2px; background: {{h.bg}}; box-shadow: {{h.glow}}"></div>
+			</sc-for>
+
+			<div aria-hidden="true" style="position: absolute; top: 31px; left: 0; right: 0; height: 4px; display: flex; border-radius: 2px; overflow: hidden">
+				<sc-for list="{{heat}}" as="c" hint-placeholder-count="96">
+					<span style="flex: 1; background: rgba(123,236,199,{{c}})"></span>
+				</sc-for>
+			</div>
+
+			<sc-for list="{{excluded}}" as="x" hint-placeholder-count="1">
+				<div title="{{x.title}}" style="position: absolute; top: 19px; left: {{x.left}}%; width: max(4px, {{x.width}}%); height: 18px; transform: translateX({{x.shift}}); border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(185,202,193,.55) 0 1.5px, rgba(11,21,18,.85) 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(185,202,193,.32)"></div>
+			</sc-for>
+
+			<sc-if value="{{hasBracket}}" hint-placeholder-val="{{true}}">
+				<div aria-hidden="true" style="position: absolute; top: 16px; height: 24px; left: {{bracketLeft}}%; width: max(6px, {{bracketWidth}}%); box-sizing: border-box; border-left: 1px solid rgba(244,247,245,.75); border-right: 1px solid rgba(244,247,245,.75)">
+					<span style="position: absolute; left: 0; right: 0; top: 0; height: 1px; background: rgba(244,247,245,.75)"></span>
+					<span style="position: absolute; left: 0; right: 0; bottom: 0; height: 1px; background: rgba(244,247,245,.75)"></span>
+				</div>
+			</sc-if>
+
+			<sc-for list="{{ticks}}" as="t" hint-placeholder-count="6">
+				<button onClick="{{t.pick}}" onMouseEnter="{{t.enter}}" onMouseLeave="{{leave}}" onFocus="{{t.enter}}" onBlur="{{leave}}" aria-label="{{t.aria}}" style="position: absolute; top: 1px; left: {{t.left}}%; width: 16px; height: 18px; margin-left: -8px; padding: 0; border: 0; border-radius: 4px; background: transparent; cursor: pointer; display: grid; place-items: center">
+					<span style="position: relative; width: 7px; height: 7px; display: block">
+						<sc-if value="{{t.active}}" hint-placeholder-val="{{false}}"><span class="wk-band-pulse" style="position: absolute; inset: 0; border-radius: 50%; background: {{t.color}}"></span></sc-if>
+						<span style="position: absolute; inset: 0; box-sizing: border-box; border-radius: 50%; border: 1.5px solid {{t.color}}; background: {{t.fill}}"></span>
+					</span>
+				</button>
+			</sc-for>
+
+			<sc-for list="{{labels}}" as="l" hint-placeholder-count="6">
+				<span style="position: absolute; top: 38px; left: {{l.left}}%; transform: translateX({{l.shift}}); font-size: 11px; line-height: 14px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{l.text}}</span>
+			</sc-for>
+
+			<sc-if value="{{hasTip}}" hint-placeholder-val="{{false}}">
+				<div role="tooltip" style="position: absolute; top: 62px; left: {{tipLeft}}%; transform: translateX(-50%); z-index: 2; box-sizing: border-box; min-width: 180px; max-width: 280px; padding: 8px 12px 9px; border-radius: 12px; background: rgba(17,28,25,.88); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column; gap: 2px; pointer-events: none">
+					<span style="font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{tipFreq}} <span style="font-size: 12px; font-weight: 400; color: #8ba598">MHz</span></span>
+					<span style="display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: {{tipColor}}">
+						<sc-if value="{{tipDecoded}}" hint-placeholder-val="{{true}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>{{tipLabel}}
+					</span>
+					<sc-if value="{{tipHasSub}}" hint-placeholder-val="{{true}}"><span style="font-size: 12.5px; color: #b9cac1; line-height: 1.4">{{tipSub}}</span></sc-if>
+					<span style="font-size: 12px; color: #8ba598">{{tipWhen}}</span>
+				</div>
+			</sc-if>
+		</div>
+	</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"sweep":{"editor":null},"discoveries":{"editor":null},"view":{"editor":null},"onTune":{"editor":null},"state":{"editor":"enum","options":["sweeping","holding","paused-you","paused-relay"],"default":"sweeping"},"$preview":{"width":800,"height":150}}'>
+// Shared mock (Brittany, region EU). Ignored discoveries (160.900 "Birdie from the Pi") are left out.
+const DISCOVERIES = [
+	{ hz: 161150000, bw: 12500, label: 'DMR · CC 1', sub: 'TG 2081, TG 9 · radios 2081034, 2081107 · slot 1', conf: 'decoded', active: false, recent: true },
+	{ hz: 163087500, bw: 12500, label: 'P25 · NAC 293', sub: 'TG 1201 · encrypted', conf: 'decoded', active: false, recent: true },
+	{ hz: 160450000, bw: 12500, label: 'POCSAG 1200', sub: 'Capcodes 1234567, 1234570', conf: 'decoded', active: false, recent: true },
+	{ hz: 160625000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', active: false, recent: true },
+	{ hz: 161425000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', active: false, recent: true },
+	{ hz: 156800000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 16', conf: 'maybe', active: false, recent: true },
+	{ hz: 156600000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 12', conf: 'maybe', active: false, recent: true },
+	{ hz: 167512500, bw: 6250, label: 'Maybe NXDN', sub: 'No sync · 6.25 kHz 4FSK', conf: 'maybe', active: false, recent: true },
+	{ hz: 161162500, bw: 12500, label: 'Heard', sub: 'Maybe a neighbour’s leak', conf: 'heard', active: false, recent: true },
+	{ hz: 162400000, bw: 12500, label: 'Heard', sub: 'Steady carrier', conf: 'heard', active: false, recent: true },
+	{ hz: 446006250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 1', conf: 'maybe', active: false, recent: false },
+	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No decoder for this · Pager network, Morlaix?', conf: 'maybe', active: false, recent: false },
+	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', active: false, recent: false }
+];
+// Ranges the scan never visits (core's exclusions). AIS is decoded elsewhere, so the sweep skips it.
+const EXCLUDED = [{ from: 161950000, to: 162050000, title: 'Not scanned · AIS A/B, decoded by AIS-catcher' }];
+const MOCK = { preset: 'VHF land mobile', startHz: 150000000, endHz: 174000000, hops: 16, sweepS: 6, coverage: 84 };
+const HOLD_HOP = 7, HOLD_S = 3;
+const RANK = { decoded: 3, likely: 2, maybe: 1, heard: 0 };
+const mfmt = hz => { const s = (hz / 1e6).toFixed(6); return s.slice(0, -3) + ' ' + s.slice(-3); };
+const short = hz => { const m = hz / 1e6; return Number.isInteger(m) ? String(m) : m.toFixed(3).replace(/0+$/, ''); };
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = { hop: 5, held: 0, tip: null };
+		this.leave = () => this.setState({ tip: null });
+		this.trackRef = el => {
+			if (!el || el === this.trackEl) return;
+			this.trackEl = el;
+			if (this.ro) this.ro.disconnect();
+			if (window.ResizeObserver) { this.ro = new ResizeObserver(() => this.measure()); this.ro.observe(el); }
+			this.measure();
+		};
+	}
+	measure() { const w = this.trackEl ? this.trackEl.clientWidth : 0; if (w && w !== this.state.trackW) this.setState({ trackW: w }); }
+	componentDidMount() {
+		// Standalone only: the hop advances once a second and holds on hop 7 (DMR is active there).
+		this.timer = setInterval(() => {
+			if (this.props.sweep || !/^(sweeping|holding)$/.test(this.props.state || 'sweeping')) return;
+			const s = this.state;
+			if (s.hop === HOLD_HOP && s.held < HOLD_S) return this.setState({ held: s.held + 1 });
+			this.setState({ hop: s.hop % MOCK.hops + 1, held: 0 });
+		}, 1000);
+	}
+	componentWillUnmount() { clearInterval(this.timer); if (this.ro) this.ro.disconnect(); }
+	sweep() {
+		if (this.props.sweep) return this.props.sweep;
+		const st = this.props.state || 'sweeping';
+		const holding = st === 'holding' || (st === 'sweeping' && this.state.hop === HOLD_HOP && this.state.held < HOLD_S);
+		return Object.assign({}, MOCK, {
+			state: holding ? 'holding' : st,
+			hop: st === 'holding' ? HOLD_HOP : this.state.hop,
+			holdHz: holding ? 161150000 : undefined, holdLabel: holding ? 'DMR · CC 1' : undefined,
+			resumeIn: st === 'paused-you' ? 58 : undefined
+		});
+	}
+	renderVals() {
+		const sw = this.sweep();
+		const embedded = !!this.props.sweep;
+		const L = sw.startHz, R = sw.endHz, span = R - L;
+		const pct = f => (f - L) / span * 100;
+		const paused = /^paused/.test(sw.state);
+		const accent = paused ? '#f2b84b' : '#7becc7';
+		const accentRgb = paused ? '242,184,75' : '123,236,199';
+		const hopW = span / sw.hops;
+		const cur = Math.max(1, Math.min(sw.hops, sw.hop || 1));
+
+		const discs = (this.props.discoveries || DISCOVERIES.map(d => Object.assign({}, d, { active: !embedded && d.hz === sw.holdHz }))).filter(d => d.hz >= L && d.hz <= R);
+
+		const hops = Array.from({ length: sw.hops }, (_, i) => {
+			const n = i + 1, on = n === cur;
+			return {
+				left: i / sw.hops * 100, width: 100 / sw.hops,
+				bg: on ? accent : n < cur ? 'rgba(' + accentRgb + ',.30)' : 'rgba(123,236,199,.12)',
+				glow: on ? '0 0 10px rgba(' + accentRgb + ',.55)' : 'none'
+			};
+		});
+
+		// 24 h occupancy: a soft bump around every discovery, weighted by how busy it is
+		const CELLS = 96;
+		const heat = Array.from({ length: CELLS }, (_, i) => {
+			const f = L + (i + 0.5) / CELLS * span;
+			let v = 0.04 + 0.03 * Math.abs(Math.sin(i * 12.9898));
+			discs.forEach(d => {
+				const w = d.conf === 'decoded' ? 0.75 : d.conf === 'heard' ? 0.25 : 0.4;
+				v += w * Math.exp(-Math.pow((f - d.hz) / (span / CELLS * 1.2), 2));
+			});
+			return Math.min(0.85, v).toFixed(2);
+		});
+
+		const excluded = EXCLUDED.filter(x => x.to > L && x.from < R).map(x => ({ left: pct(Math.max(L, x.from)), width: (Math.min(R, x.to) - Math.max(L, x.from)) / span * 100, shift: '0', title: x.title }));
+
+		// Ticks: active first, then by confidence; one within 9 px of a placed tick folds into it
+		const trackPx = this.state.trackW || 600;
+		const placed = [];
+		discs.slice().sort((a, b) => (b.active - a.active) || (RANK[b.conf] - RANK[a.conf]) || (b.recent - a.recent)).forEach(d => {
+			const x = pct(d.hz) / 100 * trackPx;
+			const near = placed.find(p => Math.abs(p.x - x) < 9);
+			if (near) near.more++;
+			else placed.push({ d, x, more: 0 });
+		});
+		const tip = this.state.tip;
+		const ticks = placed.sort((a, b) => a.d.hz - b.d.hz).map(p => {
+			const d = p.d, solid = d.conf === 'decoded';
+			const color = d.conf === 'heard' ? 'rgba(185,202,193,.75)' : solid || d.conf === 'likely' ? '#7becc7' : 'rgba(123,236,199,.85)';
+			return {
+				left: pct(d.hz), active: !!d.active, color, fill: solid ? color : 'rgba(11,21,18,.9)',
+				aria: 'Tune to ' + short(d.hz) + ' MHz, ' + d.label + (p.more ? ', ' + p.more + ' more nearby' : ''),
+				enter: () => this.setState({ tip: { hz: d.hz, more: p.more } }),
+				pick: () => { if (this.props.onTune) this.props.onTune(d.hz); }
+			};
+		});
+		const tipP = tip && placed.find(p => p.d.hz === tip.hz);
+		const td = tipP ? tipP.d : null;
+
+		// a few MHz labels: both ends plus round steps between them
+		const step = [1e6, 2e6, 5e6, 10e6, 20e6, 50e6, 100e6].find(s => span / s <= 5) || 100e6;
+		const labels = [{ left: 0, shift: '0', text: short(L) }];
+		for (let f = Math.ceil(L / step) * step; f < R; f += step) if (pct(f) > 9 && pct(f) < 88) labels.push({ left: pct(f), shift: '-50%', text: short(f) });
+		labels.push({ left: 100, shift: '-100%', text: short(R) + ' MHz' });
+
+		const view = this.props.view || { startHz: 160300000, endHz: 162700000 };
+		const vL = Math.max(L, view.startHz), vR = Math.min(R, view.endHz);
+
+		const stateText = sw.state === 'holding' ? 'Holding · ' + short(sw.holdHz || 0)
+			: sw.state === 'paused-you' ? (sw.resumeIn != null ? 'Paused · resumes in ' + sw.resumeIn + ' s' : 'Paused')
+			: sw.state === 'paused-relay' ? 'Waiting for SDR++'
+			: 'Hop ' + cur + '/' + sw.hops + ' · ' + sw.coverage + ' %';
+
+		return {
+			rootW: embedded ? '100%' : '800px',
+			rootPad: embedded ? '0' : '24px 20px 70px',
+			rootBg: embedded ? 'transparent' : '#0b1512',
+			glassBg: paused ? 'rgba(48,37,12,.55)' : 'rgba(17,28,25,.5)',
+			edge: paused ? 'rgba(242,184,75,.14)' : 'rgba(123,236,199,.14)',
+			accent, preset: sw.preset, stateText,
+			hops, heat, excluded, ticks, labels,
+			hasBracket: vR > vL,
+			bracketLeft: pct(vL), bracketWidth: (vR - vL) / span * 100,
+			leave: this.leave, trackRef: this.trackRef,
+			hasTip: !!td,
+			tipLeft: td ? Math.max(14, Math.min(86, pct(td.hz))) : 0,
+			tipFreq: td ? mfmt(td.hz) : '',
+			tipLabel: td ? td.label : '',
+			tipColor: td && td.conf === 'heard' ? '#b9cac1' : '#7becc7',
+			tipDecoded: !!td && td.conf === 'decoded',
+			tipSub: td ? td.sub : '', tipHasSub: !!(td && td.sub),
+			tipWhen: td ? (td.active ? 'Active now' : td.recent ? 'Heard in the last hour' : 'Heard earlier') + (tipP.more ? ' · +' + tipP.more + ' nearby' : '') + ' · click to tune' : ''
+		};
+	}
+}
+</script>
+</body>
+</html>

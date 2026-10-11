@@ -51,8 +51,11 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 		</div>
 		<div style="position: relative; height: 30px; flex: none; border-top: 1px solid rgba(123,236,199,.08); background: #0b1512; overflow: hidden">
 			<sc-for list="{{ticks}}" as="t" hint-placeholder-count="12">
-				<span style="position: absolute; left: {{t.left}}%; top: 8px; transform: translateX(-50%); font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums; white-space: nowrap">{{t.text}}</span>
+				<span style="position: absolute; left: {{t.left}}%; top: 8px; transform: translateX(-50%); font-size: 11.5px; color: #8ba598; opacity: {{trustDim}}; font-variant-numeric: tabular-nums; white-space: nowrap">{{t.text}}</span>
 			</sc-for>
+			<sc-if value="{{unverified}}" hint-placeholder-val="{{false}}">
+				<span role="status" title="The receiver has not confirmed its tuning, so frequencies may be off" style="position: absolute; right: 8px; top: 5px; height: 20px; display: flex; align-items: center; gap: 5px; padding: 0 7px 0 6px; border-radius: 4px; background: #2a2414; box-shadow: inset 0 0 0 1px rgba(242,184,75,.32); color: #f2b84b; font-size: 11.5px; font-weight: 700; white-space: nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 9v4"></path><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"></path><path d="M12 16h.01"></path></svg>Frequencies unverified</span>
+			</sc-if>
 			<sc-if value="{{vfoVisible}}" hint-placeholder-val="{{true}}">
 				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 4px; background: #7becc7; color: #111c19; font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
 			</sc-if>
@@ -69,6 +72,15 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 				</button>
 			</sc-for>
 		</div>
+		<sc-if value="{{hasDiscRow}}" hint-placeholder-val="{{false}}">
+			<div style="position: relative; height: 20px; flex: none; border-bottom: 1px solid rgba(123,236,199,.08); overflow: hidden; opacity: {{trustDim}}">
+				<sc-for list="{{discTags}}" as="d" hint-placeholder-count="3">
+					<button onPointerDown="{{stop}}" onClick="{{d.pick}}" aria-label="{{d.aria}}" title="{{d.aria}}" style="font: inherit; cursor: pointer; position: absolute; left: calc({{d.left}}% - 7px); top: 2px; height: 16px; display: flex; align-items: center; gap: 4px; padding: 0 5px 0 4px; border: 0; border-radius: 4px; background: {{d.bg}}; color: {{d.fg}}; font-size: 10.5px; font-weight: {{d.weight}}; white-space: nowrap">
+						<span style="width: 6px; height: 6px; flex: none; box-sizing: border-box; border-radius: 50%; border: 1.25px solid {{d.dot}}; background: {{d.dotFill}}"></span>{{d.label}}
+					</button>
+				</sc-for>
+			</div>
+		</sc-if>
 		<div style="position: relative; flex: 1; min-height: 0">
 			<canvas ref="{{refs.wf}}" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
 		</div>
@@ -91,7 +103,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["phosphor","amber","mono"],"default":"phosphor"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"$preview":{"width":1440,"height":640}}'>
+<script type="text/x-dc" data-dc-script data-props='{"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onBandwidth":{"editor":null},"showMarkers":{"editor":"boolean","default":true},"palette":{"editor":"enum","options":["phosphor","amber","mono"],"default":"phosphor"},"specHeight":{"editor":"range","min":160,"max":420,"step":10,"unit":"px","default":260},"topInset":{"editor":null,"tsType":"number"},"bandwidth":{"editor":null,"tsType":"number"},"squelch":{"editor":null,"tsType":"number"},"step":{"editor":null,"tsType":"number"},"sampleRate":{"editor":null,"tsType":"number"},"saved":{"editor":null},"discoveries":{"editor":null},"discoveryTags":{"editor":"enum","options":["all","decoded","off"],"default":"all"},"trust":{"editor":"enum","options":["ok","unverified"],"default":"ok"},"onView":{"editor":null},"$preview":{"width":1440,"height":640}}'>
 const BINS = 4096, HIST = 900, RATE = 24, MIN_SPAN = 100e3, LO = 24e6, HI = 1.9e9;
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
@@ -168,6 +180,23 @@ const BANDS = [
 	{ from: 863e6, to: 870e6, label: 'SRD 868' },
 	{ from: 1089e6, to: 1091e6, label: 'ADS-B' }
 ];
+// Scanner discoveries (shared mock, S1). Used when no `discoveries` prop is passed, so this board shows the tier on its own.
+const DISCOVERIES = [
+	{ hz: 161150000, bw: 12500, label: 'DMR · CC 1', sub: 'TG 2081, TG 9 · slot 1', conf: 'decoded', active: true, recent: true },
+	{ hz: 163087500, bw: 12500, label: 'P25 · NAC 293', sub: 'TG 1201 · encrypted', conf: 'decoded', active: false, recent: true },
+	{ hz: 160450000, bw: 12500, label: 'POCSAG 1200', sub: 'Capcodes 1234567, 1234570', conf: 'decoded', active: false, recent: true },
+	{ hz: 160625000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', active: false, recent: true },
+	{ hz: 161425000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', active: false, recent: true },
+	{ hz: 156800000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 16', conf: 'maybe', active: false, recent: true },
+	{ hz: 156600000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 12', conf: 'maybe', active: false, recent: true },
+	{ hz: 167512500, bw: 6250, label: 'Maybe NXDN', sub: 'No sync', conf: 'maybe', active: false, recent: true },
+	{ hz: 161162500, bw: 12500, label: 'Heard', sub: 'Maybe a neighbour’s leak', conf: 'heard', active: false, recent: true },
+	{ hz: 162400000, bw: 12500, label: 'Heard', sub: 'Steady carrier', conf: 'heard', active: false, recent: true },
+	{ hz: 446006250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 1', conf: 'maybe', active: false, recent: false },
+	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No decoder for this', conf: 'maybe', active: false, recent: false },
+	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', active: false, recent: false }
+];
+const CONF_RANK = { decoded: 3, likely: 2, maybe: 1, heard: 0 };
 const STEPS = [1e3, 2e3, 5e3, 10e3, 20e3, 25e3, 50e3, 100e3, 200e3, 250e3, 500e3, 1e6];
 const PAL = {
 	phosphor: [[0, [11, 21, 18]], [0.3, [13, 40, 34]], [0.5, [22, 115, 92]], [0.7, [62, 190, 150]], [0.86, [123, 236, 199]], [1, [244, 247, 245]]],
@@ -313,9 +342,18 @@ class Component extends DCLogic {
 			this.tuneTo(Math.round((this.vfo() + dir * step) / step) * step);
 		}
 	}
-	componentDidMount() { this.raf = requestAnimationFrame(this.frame); }
+	componentDidMount() { this.raf = requestAnimationFrame(this.frame); this.emitView(); }
 	componentWillUnmount() { cancelAnimationFrame(this.raf); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
+	// tells the shell which part of the band is on screen (the band strip draws it as a bracket)
+	emitView() {
+		if (!this.props.onView) return;
+		const s = this.state, key = s.viewL + '|' + s.viewSpan;
+		if (key === this.lastView) return;
+		this.lastView = key;
+		this.props.onView({ startHz: s.viewL, endHz: s.viewL + s.viewSpan });
+	}
 	componentDidUpdate(prev) {
+		this.emitView();
 		if ((prev.sampleRate ?? 2.4e6) !== this.cap()) {
 			this.count = 0; this.avg = null;
 			this.setView(this.state.center - this.cap() / 2, this.cap());
@@ -531,9 +569,41 @@ class Component extends DCLogic {
 			if (savedTaken.some(o => r[0] < o[1] + 4 && r[1] > o[0] - 4)) return false;
 			savedTaken.push(r); return true;
 		}).map(x => ({ left: pct(x.f), label: x.label, pick: e => { e.stopPropagation(); this.tuneTo(x.f); } }));
+		// discovery tags: a third, quieter tier under the saved tags. Active first, then by confidence;
+		// a discovery already saved is not tagged again (saved wins); one that still clashes is dropped
+		const tagMode = this.props.discoveryTags ?? 'all';
+		const discAll = (this.props.discoveries ?? DISCOVERIES).filter(d => !d.ignored && (tagMode === 'all' || (tagMode === 'decoded' && d.conf === 'decoded')));
+		const savedList = this.props.saved || [];
+		const discTaken = [];
+		const discTags = tagMode === 'off' ? [] : discAll.filter(d => inView(d.hz) && !savedList.some(x => Math.abs(x.f - d.hz) <= Math.max(1000, (d.bw || 12500) / 2)))
+			.sort((a, b) => (b.active - a.active) || (CONF_RANK[b.conf] - CONF_RANK[a.conf]) || (b.recent - a.recent))
+			.filter(d => {
+				const px = pct(d.hz) / 100 * w - 7, r = [px, px + 22 + d.label.length * 5.9];
+				if (discTaken.some(o => r[0] < o[1] + 4 && r[1] > o[0] - 4)) return false;
+				discTaken.push(r); return true;
+			})
+			.map(d => {
+				const solid = d.conf === 'decoded', heard = d.conf === 'heard';
+				const when = d.active ? 'active now' : d.recent ? 'heard in the last hour' : 'heard earlier';
+				const tone = d.active ? '#7becc7' : d.recent ? (heard ? 'rgba(185,202,193,.62)' : 'rgba(123,236,199,.62)') : 'rgba(139,165,152,.42)';
+				return {
+					left: pct(d.hz), label: d.label,
+					aria: d.label + (d.sub ? ' · ' + d.sub : '') + ' · ' + (d.hz / 1e6).toFixed(4) + ' MHz · ' + when,
+					fg: d.active ? '#7becc7' : tone,
+					bg: d.active ? 'rgba(123,236,199,.12)' : 'transparent',
+					weight: d.active ? 700 : 400,
+					dot: tone, dotFill: solid ? tone : 'transparent',
+					pick: e => { e.stopPropagation(); this.tuneTo(d.hz); }
+				};
+			});
+		const unverified = this.props.trust === 'unverified';
 		const zoom = cap / span;
 		const h = s.hover;
 		return {
+			hasDiscRow: tagMode !== 'off' && discAll.length > 0,
+			discTags,
+			unverified,
+			trustDim: unverified ? 0.45 : 1,
 			refs: this.refsObj,
 			onDown: this.onDown, onMove: this.onMove, onUp: this.onUp, onLeave: this.onLeave, stop: this.stop,
 			grabVfo: this.grabVfo, grabL: this.grabL, grabR: this.grabR,

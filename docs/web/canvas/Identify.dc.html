@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Identify, every state</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#0b1512}
+</style>
+</helmet>
+<div style="box-sizing: border-box; min-height: 100%; padding: 40px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; display: flex; flex-direction: column; gap: 36px">
+	<header style="display: flex; flex-direction: column; gap: 8px; max-width: 900px">
+		<h1 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 32px; line-height: 1.1">Identify, in the tuned card</h1>
+		<p style="margin: 0; font-size: 14px; line-height: 1.5; color: #b9cac1">Identify is an action, not a page. It runs in the card's "now" block on the tuned frequency and never moves the receiver. Unknown signals have it as their main action; every other card has it in the ⋯ menu. Every answer adds or updates a discovery. The cards are live: Try for longer, Identify again and Pause the scan and identify run the flow, and × goes back to the normal card.</p>
+	</header>
+	<sc-for list="{{groups}}" as="g" hint-placeholder-count="3">
+		<section style="display: flex; flex-direction: column; gap: 14px">
+			<div style="display: flex; align-items: baseline; gap: 12px">
+				<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 24px">{{g.title}}</h2>
+				<span style="font-size: 13px; color: #8ba598">{{g.sub}}</span>
+			</div>
+			<div style="display: grid; grid-template-columns: repeat(4, minmax(0, 320px)); gap: 24px; align-items: start">
+				<sc-for list="{{g.cards}}" as="c" hint-placeholder-count="4">
+					<figure style="margin: 0; display: flex; flex-direction: column; gap: 12px">
+						<figcaption style="display: flex; flex-direction: column; gap: 4px; min-height: 62px">
+							<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 18px; line-height: 1.2">{{c.name}}</span>
+							<span style="font-size: 13px; line-height: 1.4; color: #8ba598">{{c.when}}</span>
+						</figcaption>
+						<dc-import name="Tuned" freq="{{c.f}}" identify="{{c.id}}" scan-hold="{{c.hold}}" variant="floating" hint-size="320px,360px"></dc-import>
+					</figure>
+				</sc-for>
+			</div>
+		</section>
+	</sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":1880}}'>
+class Component extends DCLogic {
+	renderVals() {
+		const c = (f, id, name, when, hold) => ({ f, id, name, when, hold: !!hold });
+		return {
+			groups: [
+				{ title: 'While it runs', sub: 'Up to 15 s on the tuned frequency. S1 tries one decoder at a time; S2 runs them in parallel.', cards: [
+					c(466025000, 'waiting', 'Waiting', 'Nothing to measure until the signal transmits. The bar counts down to the 15 s timeout.'),
+					c(167512500, 'trying', 'Trying', 'One row per decoder, each with its outcome. The measured line appears with the first transmission.'),
+					c(466025000, 'interrupted', 'Interrupted', 'You tuned away mid-run. Nothing is kept; shown if you come back to the frequency.')
+				] },
+				{ title: 'Answers', sub: 'Every answer adds or updates a discovery in the Scanner.', cards: [
+					c(161150000, 'identified', 'Identified', 'A decoder synced. The card becomes that signal’s normal card, with Save and Open in Scanner.'),
+					c(167512500, 'maybe', 'Maybe', 'Looks like a known protocol but no decoder synced. The reason sits on the tag.'),
+					c(162400000, 'unidentified', 'Not identified', 'Nothing synced. What was measured stays, so the result is still useful.'),
+					c(160600000, 'artefact', 'Artefact', 'Answered at once from the receiver’s settings: centre spike, spur or mirror image.')
+				] },
+				{ title: 'While a scan has the receiver', sub: 'A sweep moves the receiver every few seconds, so identify waits for the user to pause it.', cards: [
+					c(466025000, 'blocked', 'Blocked', 'Identify needs the receiver to stay put. One button pauses the scan and starts.', true),
+					c(1090000000, '', 'Decoders paused', 'Decoder-backed cards say why they went quiet while a sweep runs.', true)
+				] }
+			]
+		};
+	}
+}
+</script>
+</body>
+</html>

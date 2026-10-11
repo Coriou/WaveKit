@@ -45,6 +45,17 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 		</sc-if>
 	</div>
 
+	<sc-if value="{{hasHold}}" hint-placeholder-val="{{false}}">
+		<div role="status" title="{{holdAll}}" style="height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 8px; padding: 0 4px 0 12px; border-radius: 12px; background: {{holdBg}}; border: 1px solid {{holdEdge}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); font-size: 12px; white-space: nowrap">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{holdC}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
+			<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #b9cac1; font-variant-numeric: tabular-nums"><b style="color: {{holdC}}">{{holdTitle}}</b>{{holdDetail}}</span>
+			<sc-if value="{{holdHasPrimary}}" hint-placeholder-val="{{true}}">
+				<button onClick="{{holdPrimary}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border: 0; border-radius: 6px; background: {{holdBtnBg}}; color: {{holdC}}; font-size: 12px; font-weight: 700">{{holdPrimaryLabel}}</button>
+			</sc-if>
+			<button onClick="{{holdStop}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: 0 9px; border: 1px solid rgba(123,236,199,.18); border-radius: 6px; background: transparent; color: #b9cac1; font-size: 12px; font-weight: 700">Stop</button>
+		</div>
+	</sc-if>
+
 	<sc-if value="{{typing}}" hint-placeholder-val="{{false}}">
 		<div style="box-sizing: border-box; padding: 8px; border-radius: 12px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column">
 			<div style="padding: 12px 12px 14px; display: flex; flex-direction: column; gap: 4px; border-bottom: 1px solid rgba(123,236,199,.08)">
@@ -167,7 +178,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"$preview":{"width":460,"height":600}}'>
+<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"hold":{"editor":null},"onHold":{"editor":null},"holdDemo":{"editor":"enum","options":["off","sweeping","holding","paused-you","paused-relay"],"default":"off"},"$preview":{"width":460,"height":600}}'>
 const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
 const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
 const STEPS = [[1000, '1k'], [5000, '5k'], [6250, '6.25k'], [8330, '8.33k'], [12500, '12.5k'], [25000, '25k'], [100000, '100k']];
@@ -202,6 +213,9 @@ const CHANNELS = [
 	{ f: 868.95e6, label: 'wM-Bus meters', keys: ['wmbus', 'wm-bus', 'meters'] },
 	{ f: 1090e6, label: 'ADS-B 1090', keys: ['adsb', 'ads-b', '1090'] }
 ].concat(Array.from({ length: 8 }, (_, i) => ({ f: 446.00625e6 + i * 12500, label: 'PMR446 ch ' + (i + 1), keys: ['pmr ' + (i + 1), 'pmr' + (i + 1), 'pmr'] })));
+// The shared mock sweep, for this board's holdDemo tweak (C · Immersive passes the live one as `hold`)
+const HOLD_MOCK = { preset: 'VHF land mobile', startHz: 150000000, endHz: 174000000, hop: 7, hops: 16, sweepS: 6, coverage: 84 };
+const hopCentre = h => h.state === 'holding' && h.holdHz ? h.holdHz : Math.round(h.startHz + (h.hop - 0.5) * (h.endHz - h.startHz) / h.hops);
 const kfmt = hz => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? (hz % 100 ? 2 : 1) : 0) + ' kHz' : hz + ' Hz';
 const mfmt = f => (f / 1e6).toFixed(f % 1000 ? 5 : 3);
 const bandOf = f => BANDS.find(b => f >= b.from && f <= b.to);
@@ -237,8 +251,28 @@ class Component extends DCLogic {
 		this.leave = () => this.setState({ hover: -1 });
 		this.focusRef = el => { if (el && el !== this.inputEl) { this.inputEl = el; el.focus(); } };
 	}
-	get(k) { const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k]; }
-	set(k, v) { if (this.props.onSet) this.props.onSet(k, v); else this.setState({ [k]: v }); }
+	get(k) {
+		if (k === 'freq') { const h = this.hold(); if (h && (h.state === 'sweeping' || h.state === 'holding')) return hopCentre(h); }
+		const v = this.props.values; return v && v[k] !== undefined ? v[k] : this.state[k];
+	}
+	// the scanner's hold on the receiver: the `hold` prop, else this board's holdDemo tweak
+	hold() {
+		if (this.props.hold !== undefined) return this.props.hold;
+		const st = this.state.holdLocal || this.props.holdDemo || 'off';
+		if (st === 'off') return null;
+		return Object.assign({}, HOLD_MOCK, { state: st }, st === 'holding' ? { holdHz: 161150000, holdLabel: 'DMR · CC 1' } : null, st === 'paused-you' ? { resumeIn: 58 } : null);
+	}
+	holdAct(a) {
+		if (this.props.onHold) return this.props.onHold(a);
+		this.setState({ holdLocal: a === 'stop' ? 'off' : a === 'pause' ? 'paused-you' : 'sweeping' });
+	}
+	componentDidUpdate(prev) { if (prev.holdDemo !== this.props.holdDemo && this.state.holdLocal) this.setState({ holdLocal: null }); }
+	set(k, v) {
+		if (this.props.onSet) return this.props.onSet(k, v);
+		// standalone: tuning by hand during the demo sweep pauses it, as the shell does
+		const h = k === 'freq' && this.props.hold === undefined ? this.hold() : null;
+		this.setState(Object.assign({ [k]: v }, h && (h.state === 'sweeping' || h.state === 'holding') ? { holdLocal: 'paused-you' } : null));
+	}
 	tune(f, mode) {
 		this.set('freq', f);
 		if (mode && mode !== this.get('mode')) { this.set('mode', mode); if (BW[mode]) this.set('bw', BW[mode][3]); }
@@ -297,8 +331,27 @@ class Component extends DCLogic {
 		const r = BW[mode];
 		const isSaved = saved.some(s => s.f === freq);
 		const curBand = bandOf(freq);
+		const hold = this.hold();
+		const hs = hold ? hold.state : '';
+		const live = hs === 'sweeping' || hs === 'holding';
+		const holdTitle = live ? 'Scanner has the receiver' : hs === 'paused-relay' ? 'SDR++ is connected' : hold && hold.resumeIn != null ? 'Scan paused · you tuned' : 'Scan paused';
+		const holdDetail = !hold ? ''
+			: live ? ' · ' + hold.preset + (hs === 'holding' ? ' · holding ' + mfmt(hold.holdHz || freq) : ' · hop ' + hold.hop + '/' + hold.hops)
+			: hs === 'paused-relay' ? ' · scanning waits for it'
+			: hold.resumeIn != null ? ' · resumes in ' + hold.resumeIn + ' s' : '';
 		return {
-			width: expanded || typing ? '440px' : 'max-content',
+			width: hold ? '472px' : expanded || typing ? '440px' : 'max-content',
+			hasHold: !!hold,
+			holdTitle, holdDetail,
+			holdAll: hold ? holdTitle + holdDetail : '',
+			holdC: live ? '#7becc7' : '#f2b84b',
+			holdBg: live ? 'rgba(17,28,25,.5)' : 'rgba(48,37,12,.62)',
+			holdEdge: live ? 'rgba(123,236,199,.14)' : 'rgba(242,184,75,.14)',
+			holdBtnBg: live ? 'rgba(123,236,199,.12)' : 'rgba(242,184,75,.18)',
+			holdHasPrimary: !!hold && hs !== 'paused-relay',
+			holdPrimaryLabel: live ? 'Pause' : 'Resume now',
+			holdPrimary: () => this.holdAct(live ? 'pause' : 'resume'),
+			holdStop: () => this.holdAct('stop'),
 			maxH: 'calc(100vh - 110px)',
 			digits, leave: this.leave,
 			typing, notTyping: !typing,

@@ -17,9 +17,19 @@ body{margin:0;background:#0b1512}
 .wk-tc-act:hover{background:#192b24;color:#f4f7f5}
 .wk-tc-row:hover{background:rgba(123,236,199,.06)}
 button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+.wk-tc-mi:hover,.wk-tc-mi:focus-visible{background:rgba(123,236,199,.08);color:#f4f7f5}
+.wk-tc-mi:focus-visible{outline-offset:-2px}
+.wk-tc-x:hover{background:rgba(123,236,199,.08);color:#f4f7f5}
+@keyframes wk-id-spin{to{transform:rotate(360deg)}}
+@keyframes wk-id-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}
+.wk-id-row{animation:wk-id-in .2s ease-out both}
+@media (prefers-reduced-motion: reduce){.wk-id-ic,.wk-id-row{animation:none !important}.wk-id-bar{transition:none !important}}
 </style>
 </helmet>
-<div style="box-sizing: border-box; width: 100%; padding: {{pad}}; background: {{bg}}; border: {{border}}; border-radius: {{radius}}; box-shadow: {{shadow}}; backdrop-filter: {{blur}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 14px">
+<div style="box-sizing: border-box; width: 100%; padding: {{pad}}; background: {{bg}}; border: {{border}}; border-radius: {{radius}}; box-shadow: {{shadow}}; backdrop-filter: {{blur}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px; display: flex; flex-direction: column; gap: 14px; position: relative">
+	<sc-if value="{{menuOpen}}" hint-placeholder-val="{{false}}">
+		<div onClick="{{closeMenu}}" aria-hidden="true" style="position: absolute; inset: 0; z-index: 4; border-radius: {{radius}}"></div>
+	</sc-if>
 
 	<div style="display: flex; align-items: center; gap: 10px; min-width: 0">
 		<div style="width: 34px; height: 34px; flex: none; border-radius: 6px; background: {{tileBg}}; color: {{tileFg}}; display: grid; place-items: center">
@@ -36,7 +46,12 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 			</div>
 		</div>
 		<div style="flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px" title="{{levelTitle}}">
-			<span style="font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700">{{freqText}}</span>
+			<span style="display: flex; align-items: center; gap: 5px">
+				<sc-if value="{{pinMark}}" hint-placeholder-val="{{false}}">
+					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pinned"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4"></path><path d="M9 15l-4.5 4.5"></path><path d="M14.5 4l5.5 5.5"></path></svg>
+				</sc-if>
+				<span style="font-variant-numeric: tabular-nums; font-size: 13px; font-weight: 700">{{freqText}}</span>
+			</span>
 			<span style="display: flex; align-items: flex-end; gap: 2px; height: 10px" role="img" aria-label="{{levelTitle}}">
 				<sc-for list="{{sigBars}}" as="b" hint-placeholder-count="5"><span style="width: 3px; height: {{b.h}}px; border-radius: 1px; background: {{b.c}}"></span></sc-for>
 			</span>
@@ -44,6 +59,59 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</div>
 
 	<div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 12px; border-radius: 8px; background: rgba(11,21,18,.5)">
+		<sc-if value="{{idBanner}}" hint-placeholder-val="{{false}}">
+			<div role="status" aria-live="polite" style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: #7becc7">
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M5 12l5 5l10 -10"></path></svg>
+				<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{idBannerText}}</span>
+				<button class="wk-tc-x" onClick="{{idClose}}" aria-label="Dismiss" title="Dismiss" style="font: inherit; cursor: pointer; width: 24px; height: 24px; margin: -4px -6px -4px 0; flex: none; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center">
+					<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg>
+				</button>
+			</div>
+		</sc-if>
+		<sc-if value="{{idOn}}" hint-placeholder-val="{{false}}">
+			<div style="display: flex; flex-direction: column; gap: 8px">
+				<div style="display: flex; align-items: center; gap: 8px; height: 16px">
+					<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{idEyebrow}}</span>
+					<button class="wk-tc-x" onClick="{{idClose}}" aria-label="{{idCloseLabel}}" title="{{idCloseLabel}}" style="font: inherit; cursor: pointer; width: 24px; height: 24px; margin: -4px -6px -4px 0; flex: none; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center">
+						<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6l-12 12M6 6l12 12"></path></svg>
+					</button>
+				</div>
+				<div style="display: flex; align-items: baseline; gap: 8px; min-width: 0; flex-wrap: wrap">
+					<p role="status" aria-live="polite" style="margin: 0; font-weight: 700; font-size: {{idTitleSize}}; line-height: 1.3; font-family: {{idTitleFont}}; color: {{idTitleC}}"><span>{{idTitle}}</span><span aria-hidden="true" style="font-weight: 400; color: #8ba598; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 13px; font-variant-numeric: tabular-nums">{{idSecs}}</span></p>
+					<sc-if value="{{idHasReason}}" hint-placeholder-val="{{false}}">
+						<span style="height: 20px; box-sizing: border-box; padding: 0 6px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); font-size: 12px; line-height: 18px; color: #b9cac1; white-space: nowrap">{{idReason}}</span>
+					</sc-if>
+				</div>
+				<sc-if value="{{idHasBar}}" hint-placeholder-val="{{false}}">
+					<div role="progressbar" aria-label="Time left to listen" aria-valuemin="0" aria-valuemax="{{idWindow}}" aria-valuenow="{{idLeft}}" aria-valuetext="{{idLeftText}}" style="height: 3px; border-radius: 1.5px; background: rgba(123,236,199,.08); overflow: hidden">
+						<div class="wk-id-bar" style="height: 100%; width: {{idBarW}}%; border-radius: 1.5px; background: {{idBarC}}; transition: width .14s linear"></div>
+					</div>
+				</sc-if>
+				<sc-if value="{{idHasLine}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 13px; color: #b9cac1; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden">{{idLine}}</span>
+				</sc-if>
+				<sc-if value="{{idHasTrials}}" hint-placeholder-val="{{false}}">
+					<ol aria-label="Decoders tried" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column">
+						<sc-for list="{{idTrials}}" as="r" hint-placeholder-count="4">
+							<li class="wk-id-row" title="{{r.title}}" style="display: flex; align-items: center; gap: 8px; height: 24px; font-size: 12.5px; color: {{r.rowC}}; white-space: nowrap">
+								<svg class="wk-id-ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="{{r.ic}}" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; animation: {{r.anim}}"><sc-for list="{{r.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+								<span style="font-weight: 700">{{r.p}}</span>
+								<span style="flex: 1; min-width: 0; color: #758b81; overflow: hidden; text-overflow: ellipsis">{{r.d}}</span>
+								<span style="flex: none; height: {{r.wh}}; box-sizing: border-box; padding: {{r.wp}}; border-radius: 4px; border: {{r.wb}}; line-height: {{r.wl}}; font-size: {{r.ws}}; color: {{r.wc}}; font-weight: {{r.ww}}">{{r.w}}</span>
+							</li>
+						</sc-for>
+					</ol>
+				</sc-if>
+				<sc-if value="{{idHasMeasured}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 12.5px; color: #b9cac1; font-variant-numeric: tabular-nums; line-height: 1.4"><span style="color: #8ba598">Measured</span> {{idMeasured}}</span>
+				</sc-if>
+				<sc-if value="{{idHasNote}}" hint-placeholder-val="{{false}}">
+					<span style="font-size: 12px; color: #8ba598">{{idNote}}</span>
+				</sc-if>
+			</div>
+		</sc-if>
+		<sc-if value="{{showNormal}}" hint-placeholder-val="{{true}}">
+		<div style="display: contents">
 		<sc-if value="{{hasEyebrow}}" hint-placeholder-val="{{true}}">
 			<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">{{eyebrow}}</span>
 		</sc-if>
@@ -85,6 +153,8 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 				<span style="flex: none; font-size: 12px; color: #8ba598; font-variant-numeric: tabular-nums">{{rate}}</span>
 			</div>
 		</sc-if>
+		</div>
+		</sc-if>
 	</div>
 
 	<sc-if value="{{hasRecent}}" hint-placeholder-val="{{true}}">
@@ -105,13 +175,29 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 		</section>
 	</sc-if>
 
-	<div style="display: flex; gap: 6px; flex-wrap: nowrap; min-width: 0">
+	<div style="display: flex; gap: 6px; flex-wrap: nowrap; min-width: 0; position: relative; z-index: 5">
+		<sc-if value="{{menuOpen}}" hint-placeholder-val="{{false}}">
+			<div role="menu" aria-label="More actions" onKeyDown="{{menuKey}}" style="position: absolute; right: 0; bottom: 42px; min-width: 200px; box-sizing: border-box; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.92); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.45); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column">
+				<sc-for list="{{menu}}" as="m" hint-placeholder-count="3">
+					<button class="wk-tc-mi" role="menuitem" onClick="{{m.pick}}" style="font: inherit; cursor: pointer; display: flex; align-items: center; gap: 10px; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: #e3ece7; font-size: 13px; text-align: left; white-space: nowrap">
+						<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; color: #8ba598"><sc-for list="{{m.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
+						<span style="flex: 1">{{m.label}}</span>
+						<sc-if value="{{m.hasKey}}" hint-placeholder-val="{{false}}"><kbd style="font: inherit; font-size: 11.5px; color: #8ba598; min-width: 18px; height: 18px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; border: 1px solid rgba(123,236,199,.18); display: grid; place-items: center">{{m.key}}</kbd></sc-if>
+					</button>
+				</sc-for>
+			</div>
+		</sc-if>
 		<sc-for list="{{actions}}" as="a" hint-placeholder-count="3">
 			<button class="wk-tc-act" onClick="{{a.pick}}" aria-pressed="{{a.pressed}}" title="{{a.title}}" style="font: inherit; cursor: pointer; flex: {{a.flex}}; min-width: 0; height: 36px; padding: 0 10px; border-radius: 6px; border: 1px solid {{a.border}}; background: {{a.bg}}; color: {{a.fg}}; display: flex; align-items: center; justify-content: center; gap: 7px; font-size: 13px; font-weight: 700; white-space: nowrap">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{a.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
 				<sc-if value="{{a.hasLabel}}" hint-placeholder-val="{{true}}"><span>{{a.label}}</span></sc-if>
 			</button>
 		</sc-for>
+		<sc-if value="{{hasMore}}" hint-placeholder-val="{{false}}">
+			<button class="wk-tc-act" onClick="{{toggleMenu}}" onKeyDown="{{menuKey}}" aria-haspopup="menu" aria-expanded="{{menuOpenStr}}" aria-label="More actions" title="More actions" style="font: inherit; cursor: pointer; flex: 0 0 36px; height: 36px; padding: 0; border-radius: 6px; border: 1px solid {{moreBorder}}; background: {{moreBg}}; color: {{moreFg}}; display: grid; place-items: center">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.6"></circle><circle cx="12" cy="12" r="1.6"></circle><circle cx="19" cy="12" r="1.6"></circle></svg>
+			</button>
+		</sc-if>
 	</div>
 
 	<sc-if value="{{full}}" hint-placeholder-val="{{false}}">
@@ -131,7 +217,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"$preview":{"width":344,"height":860}}'>
+<script type="text/x-dc" data-dc-script data-props='{"freq":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onAction":{"editor":null},"variant":{"editor":"enum","options":["panel","floating"],"default":"panel"},"identify":{"editor":"enum","options":["","waiting","trying","identified","maybe","unidentified","artefact","blocked","interrupted"],"default":""},"scanHold":{"editor":"boolean","default":false},"identifyRun":{"editor":null,"tsType":"number"},"$preview":{"width":344,"height":860}}'>
 const ICON = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
 	analog: ['M3 12c2 -6 4 -6 6 0s4 6 6 0s4 -6 6 0'],
@@ -218,35 +304,158 @@ const ORDER = [161150000, 161975000, 160450000, 160625000];
 const fmt = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
 const dbt = db => String(Math.round(db)).replace('-', '−') + ' dB';
 
+const MHZ = f => (f / 1e6).toFixed(f % 1000 ? 4 : 3);
+const UNKNOWN = freq => ({ kind: 'unknown', proto: 'Unidentified', protoSub: (freq / 1e6).toFixed(4) + ' MHz', icon: ICON.unknown, decoder: 'none', level: -96, snr: 9, live: false,
+	eyebrow: 'Signal', big: 'Not decoded', line: 'About 12 kHz wide · bursts roughly every 10 s', body: 'No decoder is running here. Try the scanner to identify it.', quiet: 'Nothing decoded on this frequency', recent: [] });
+const infoFor = freq => INFO[freq] || UNKNOWN(freq);
+
+// ——— Identify (runs inside the card's "now" block; never moves the receiver) ———
+const I = {
+	check: ['M5 12l5 5l10 -10'],
+	fail: ['M8 8l8 8M16 8l-8 8'],
+	skip: ['M6 12h12'],
+	queued: ['M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'],
+	spin: ['M12 3a9 9 0 1 0 9 9'],
+	stop: ['M7 7h10v10h-10z'],
+	radar: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'],
+	again: ['M20 11a8.1 8.1 0 0 0 -15.5 -2m-.5 -4v4h4', 'M4 13a8.1 8.1 0 0 0 15.5 2m.5 4v-4h-4'],
+	longer: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M12 7v5l3 3'],
+	pause: ['M6 5h4v14h-4z', 'M14 5h4v14h-4z'],
+	tune: ['M5 12h14', 'M13 18l6 -6', 'M13 6l6 6'],
+	ignore: ['M10.585 10.587a2 2 0 0 0 2.829 2.828', 'M16.681 16.673a8.717 8.717 0 0 1 -4.681 1.327c-3.6 0 -6.6 -2 -9 -6c1.272 -2.12 2.712 -3.678 4.32 -4.674m2.86 -1.146a9.055 9.055 0 0 1 1.82 -.18c3.6 0 6.6 2 9 6c-.666 1.11 -1.379 2.067 -2.138 2.87', 'M3 3l18 18'],
+	copy: ['M8 10a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z', 'M16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2']
+};
+const WORD = { decoded: 'Decoded', trying: 'Trying', nosync: 'No sync', crc: 'CRC errors', timeout: 'Timed out', busy: 'Skipped (busy)', s2: 'Needs S2', queued: 'Queued', stopped: 'Stopped' };
+const S2 = 'Telling speech from data comes with S2';
+const BUSY = 'multimon-ng is busy decoding 160.450';
+// Receiver artefacts are answered at once from the receiver's own settings (centre 161.500, 2.4 MS/s).
+const CENTRE = 161500000;
+const ART = {
+	161500000: { title: 'This is the receiver’s own centre spike', line: 'Every SDR shows a small peak where it is centred. Nothing is transmitting here.' },
+	160800000: { title: 'A spur from the receiver', line: 'A steady tone made inside the receiver, not on the air. It stays with the antenna unplugged.' },
+	160600000: { title: 'A mirror image of 162.400', line: 'A strong carrier 900 kHz the other side of centre shows up here, flipped.', to: 162400000 }
+};
+// An unknown signal that turns out to be DMR becomes a normal DMR call card.
+const DMR_FOUND = { kind: 'call', proto: 'DMR', protoSub: 'Tier II · slot 1 · CC 1', icon: ICON.voice, decoder: 'dsd-fme', level: -71, snr: 18, live: false,
+	big: 'TG 2081', line: 'From radio 2081107', quiet: 'Quiet · last call 8 s ago', recent: [['now', 'TG 2081 · radio 2081107', '0:06', 6]] };
+const PLANS = {
+	466025000: { measured: '25 kHz wide · SNR 16 dB · 1.9 s bursts',
+		trials: [['POCSAG', 'multimon-ng', 'nosync'], ['DMR', 'dsd-fme', 'nosync'], ['P25', 'dsd-fme', 'timeout', 'No frame arrived before the burst ended'], ['NXDN', 'dsd-fme', 'nosync']],
+		result: { kind: 'maybe', title: 'Maybe FLEX', line: 'Looks like pager bursts, FSK 25 kHz · no decoder for FLEX here', reason: 'No decoder for this' } },
+	167512500: { measured: '6.25 kHz wide · SNR 18 dB · 80 ms frames',
+		trials: [['DMR', 'dsd-fme', 'nosync'], ['P25', 'dsd-fme', 'nosync'], ['NXDN', 'dsd-fme', 'nosync'], ['POCSAG', 'multimon-ng', 'busy', BUSY], ['Voice', 'classifier', 's2', S2]],
+		result: { kind: 'maybe', title: 'Maybe NXDN', line: 'Looks like 4FSK 6.25 kHz · no decoder synced', reason: 'No sync' } },
+	162400000: { measured: 'under 1 kHz wide · SNR 24 dB · steady, no bursts',
+		trials: [['DMR', 'dsd-fme', 'nosync'], ['P25', 'dsd-fme', 'nosync'], ['NXDN', 'dsd-fme', 'nosync'], ['POCSAG', 'multimon-ng', 'busy', BUSY], ['Voice', 'classifier', 's2', S2]],
+		result: { kind: 'unidentified', line: 'A steady carrier, no modulation found.' } }
+};
+const planFor = (freq, x) => {
+	if (ART[freq]) return { art: ART[freq], trials: [] };
+	if (PLANS[freq]) return PLANS[freq];
+	if (x.kind === 'unknown') return { measured: '12.5 kHz wide · SNR 18 dB · 30 ms bursts',
+		trials: [['POCSAG', 'multimon-ng', 'nosync'], ['P25', 'dsd-fme', 'crc', 'Frames seen, checks failed'], ['DMR', 'dsd-fme', 'decoded']],
+		result: { kind: 'identified', as: DMR_FOUND } };
+	if (x.decoder !== 'Audio only' && x.decoder !== 'none') return { quick: true, measured: 'SNR ' + x.snr + ' dB · level ' + dbt(x.level),
+		trials: [[x.proto, x.decoder, 'decoded']], result: { kind: 'identified' } };
+	const wfm = x.kind === 'audio', am = /AM/.test(x.protoSub);
+	const tone = x.tone ? x.tone[0] + ' ' + x.tone[1] : '';
+	return { measured: (wfm ? '180 kHz wide' : am ? '8 kHz wide' : '12.5 kHz wide') + ' · SNR ' + x.snr + ' dB' + (tone ? ' · ' + tone : ''),
+		trials: wfm ? [['Voice', 'classifier', 's2', S2]] : [['DMR', 'dsd-fme', 'nosync'], ['P25', 'dsd-fme', 'nosync'], ['NXDN', 'dsd-fme', 'nosync'], ['Voice', 'classifier', 's2', S2]],
+		result: { kind: 'maybe', title: wfm ? 'Maybe broadcast FM' : am ? 'Maybe AM voice' : 'Maybe FM voice',
+			line: wfm ? 'Wide FM with a stereo pilot · nothing to decode' : 'Sounds like speech' + (tone ? ' with ' + tone : '') + ' · no digital decoder synced' } };
+};
+
 class Component extends DCLogic {
 	constructor(props) {
 		super(props);
-		this.state = { freq: 161150000, tick: 0, play: null, saved: false, pinned: false };
+		this.state = { freq: 161150000, tick: 0, play: null, saved: false, pinned: false,
+			run: null, stopped: null, idTouched: false, holdOk: false, menu: false, ignored: false };
+		this.closeMenu = () => this.setState({ menu: false });
+		this.toggleMenu = () => this.setState({ menu: !this.state.menu });
+		this.menuKey = e => { if (e.key === 'Escape') { e.stopPropagation(); this.setState({ menu: false }); } };
+		this.idClose = () => this.setState({ run: null, stopped: null, idTouched: true, menu: false });
 	}
 	componentDidMount() { this.timer = setInterval(() => this.setState({ tick: this.state.tick + 1 }), 140); }
 	componentWillUnmount() { clearInterval(this.timer); }
-	componentDidUpdate(prev) { if (prev.freq !== this.props.freq) this.setState({ play: null, saved: false, pinned: false }); }
+	componentDidUpdate(prev, prevState) {
+		if (prev.freq !== this.props.freq) this.setState({ play: null, saved: false, pinned: false });
+		const was = prev.freq ?? prevState.freq, now = this.freq();
+		if (was !== now) {
+			// Tuning away mid-run stops it; finished answers are not kept on the card.
+			const r = this.state.run;
+			if (r && r.hz === was) {
+				const v = this.idView(was, infoFor(was));
+				const mid = v && (v.phase === 'waiting' || v.phase === 'trying');
+				this.setState({ run: null, stopped: mid ? { hz: was, done: v.phase === 'trying' ? v.done : 0, to: now } : null, menu: false, ignored: false });
+			} else this.setState({ menu: false, ignored: false });
+		}
+		if (prev.identify !== this.props.identify) this.setState({ run: null, stopped: null, idTouched: false });
+		if (prev.scanHold !== this.props.scanHold) this.setState({ holdOk: false });
+		if (this.props.identifyRun && this.props.identifyRun !== prev.identifyRun) this.startId(false);
+	}
+	freq() { return this.props.freq ?? this.state.freq; }
 	tune(f) { if (this.props.onTune) this.props.onTune(f); else this.setState({ freq: f }); }
-	act(id, f) { if (this.props.onAction) this.props.onAction(id, f); }
+	act(id, f) { if (this.props.onAction) this.props.onAction(id, f, { type: id, hz: f }); }
+	startId(longer, holdOk) {
+		const hz = this.freq(), ok = holdOk || this.state.holdOk;
+		this.setState({ run: { hz, t0: Date.now(), longer: !!longer, blocked: !!this.props.scanHold && !ok }, stopped: null, idTouched: true, menu: false, holdOk: ok });
+		this.act('identify', hz);
+	}
+	// Which identify state to draw, if any: forced by the gallery prop, a live run, or a stopped one.
+	idView(freq, x) {
+		const s = this.state, forced = this.props.identify && !s.idTouched ? this.props.identify : null;
+		const plan = planFor(freq, x), n = plan.trials.length;
+		if (forced) {
+			if (forced === 'artefact') return { phase: 'artefact', plan: plan.art ? plan : { art: ART[CENTRE], trials: [] } };
+			if (forced === 'blocked') return { phase: 'blocked', plan };
+			if (forced === 'interrupted') return { phase: 'interrupted', plan, done: Math.min(2, n), to: 161150000 };
+			if (forced === 'waiting') return { phase: 'waiting', plan, left: 9, win: 15 };
+			if (forced === 'trying') return { phase: 'trying', plan, done: Math.min(2, n - 1), left: 7, win: 15 };
+			return { phase: forced, plan, done: n, win: 15 };
+		}
+		const r = s.run;
+		if (r && r.hz === freq) {
+			if (r.blocked) return { phase: 'blocked', plan };
+			if (plan.art) return { phase: 'artefact', plan };
+			const win = r.longer ? 60 : 15, e = (Date.now() - r.t0) / 1000;
+			const wait = r.longer ? 3 : plan.quick ? 1.2 : 2.6, step = r.longer ? 2.6 : 1.1;
+			if (e < wait) return { phase: 'waiting', plan, left: win - e, win };
+			const k = Math.floor((e - wait) / step);
+			// Hold the last row's answer for a beat before the card changes.
+			if (k < n || e < wait + n * step + 0.8) return { phase: 'trying', plan, done: Math.min(k, n), left: win - e, win };
+			return { phase: plan.result.kind, plan, done: n, win };
+		}
+		if (s.stopped && s.stopped.hz === freq) return { phase: 'interrupted', plan, done: s.stopped.done, to: s.stopped.to };
+		return null;
+	}
 	renderVals() {
-		const freq = this.props.freq ?? this.state.freq;
+		const freq = this.freq();
 		const floating = this.props.variant === 'floating';
 		const t = this.state.tick;
-		const x = INFO[freq] || { kind: 'unknown', proto: 'Unidentified', protoSub: (freq / 1e6).toFixed(4) + ' MHz', icon: ICON.unknown, decoder: 'none', level: -96, snr: 9, live: false,
-			eyebrow: 'Signal', big: 'Not decoded', line: 'About 12 kHz wide · bursts roughly every 10 s', body: 'No decoder is running here. Try the scanner to identify it.', quiet: 'Nothing decoded on this frequency', recent: [] };
+		const raw = infoFor(freq);
+		const v = this.idView(freq, raw);
+		const ph = v ? v.phase : null;
+		const running = ph === 'waiting' || ph === 'trying';
+		const found = ph === 'identified';
+		const x = found && v.plan.result && v.plan.result.as ? v.plan.result.as : raw;
+		const backed = x.decoder !== 'Audio only' && x.decoder !== 'none';
+		const held = !!this.props.scanHold && backed && !found;
 		const voice = x.kind === 'call' || x.kind === 'tx';
-		const live = !!x.live;
-		const lvl = live || x.kind === 'count' || x.kind === 'audio' ? x.level : -108;
-		const snr = live || x.kind === 'count' || x.kind === 'audio' ? x.snr : 3;
+		const live = !!x.live && !held;
+		const lvl = !held && (live || x.kind === 'count' || x.kind === 'audio') ? x.level : -108;
+		const snr = !held && (live || x.kind === 'count' || x.kind === 'audio') ? x.snr : 3;
 		const strength = Math.max(0, Math.min(5, Math.round(snr / 7)));
 		const secs = (x.start || 0) + Math.floor(t * 0.14);
-		const stateText = live ? (x.state || (voice ? (x.kind === 'call' ? 'Call in progress · ' : 'Transmitting · ') + fmt(secs) : 'Receiving')) : x.quiet || 'Quiet';
-		const stateFg = live ? '#7becc7' : x.locked ? '#f2b84b' : '#8ba598';
+		let stateText = live ? (x.state || (voice ? (x.kind === 'call' ? 'Call in progress · ' : 'Transmitting · ') + fmt(secs) : 'Receiving')) : x.quiet || 'Quiet';
+		let stateFg = live ? '#7becc7' : x.locked ? '#f2b84b' : '#8ba598';
+		if (held) { stateText = 'Paused · the scanner has the receiver'; stateFg = '#f2b84b'; }
+		if (running) { stateText = 'Identifying'; stateFg = '#7becc7'; }
+		const pulse = live || running;
 		const wave = Array.from({ length: 40 }, (_, i) => {
 			const h = live ? 15 + Math.abs(Math.sin(i * 1.7 + t * 0.9) * 55 + Math.sin(i * 0.43 + t * 0.37) * 25) : 6 + Math.abs(Math.sin(i * 1.7) * 30);
 			return { h: Math.min(100, h), c: live ? '#7becc7' : '#2c443b' };
 		});
-		const rateBars = Array.from({ length: 30 }, (_, i) => ({ h: 25 + Math.abs(Math.sin(i * 0.9 + (x.big || '').length) * 55 + Math.sin(i * 0.31) * 20), c: i === 29 ? '#7becc7' : 'rgba(123,236,199,.35)' }));
+		const rateBars = Array.from({ length: 30 }, (_, i) => ({ h: 25 + Math.abs(Math.sin(i * 0.9 + (x.big || '').length) * 55 + Math.sin(i * 0.31) * 20), c: held ? '#2c443b' : i === 29 ? '#7becc7' : 'rgba(123,236,199,.35)' }));
 		const recent = (x.recent || []).slice(0, floating ? 2 : 4).map((r, i) => {
 			const id = freq + ':' + i, audio = typeof r[3] === 'number', on = this.state.play === id;
 			return {
@@ -267,23 +476,114 @@ class Component extends DCLogic {
 				pick: o.pick || (() => this.act(id, freq))
 			};
 		};
+		const saved = this.state.saved, pinned = this.state.pinned;
+		const toggleSave = () => { this.setState({ saved: !saved }); this.act('save', freq); };
+		const togglePin = () => { this.setState({ pinned: !pinned, menu: false }); this.act('pin', freq); };
+		const mi = (label, icon, pick, key) => ({ label, icon, hasKey: !!key, key: key || '', pick: () => { this.setState({ menu: false }); pick(); } });
+		const miPin = mi(pinned ? 'Unpin card' : 'Pin this card', A.pin, togglePin);
+		const miCopy = mi('Copy frequency', I.copy, () => { try { if (navigator.clipboard) void navigator.clipboard.writeText(MHZ(freq)); } catch (e) { /* clipboard blocked */ } this.act('copy', freq); });
+		const miScanner = mi('Open in Scanner', I.radar, () => this.act('open-scanner', freq));
+		const startId = () => this.startId(false);
+
 		const actions = [];
-		if (x.kind === 'call' && !x.locked) actions.push(btn('replay', live ? 'From start' : 'Play last', A.play, { primary: !live, title: live ? 'Replay this call from the start' : 'Play the last call' }));
-		if (x.kind === 'tx' && !live) actions.push(btn('replay', 'Play last', A.play, { primary: true }));
-		if (x.map) actions.push(btn('map', 'Map', A.map));
-		if (x.kind === 'unknown') actions.push(btn('scan', 'Identify', A.scan, { primary: true }));
-		if (x.kind !== 'audio' && x.kind !== 'unknown') actions.push(btn('activity', 'Activity', A.activity));
-		actions.push(btn('save', this.state.saved ? 'Saved' : 'Save', A.save, { iconOnly: actions.length >= 1, title: this.state.saved ? 'Saved' : 'Save this frequency', pressed: this.state.saved, pick: () => { this.setState({ saved: !this.state.saved }); this.act('save', freq); } }));
-		actions.push(btn('pin', 'Pin', A.pin, { iconOnly: true, title: this.state.pinned ? 'Unpin card' : 'Pin this card. It keeps showing this frequency when you tune away.', pressed: this.state.pinned, pick: () => { this.setState({ pinned: !this.state.pinned }); this.act('pin', freq); } }));
+		let menu = [];
+		let pinInRow = false;
+		if (ph === 'identified') {
+			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { primary: !saved, pressed: saved, title: saved ? 'Saved' : 'Save this frequency', pick: toggleSave }));
+			actions.push(btn('open-scanner', 'Open in Scanner', I.radar));
+			if (x.kind === 'call' && !x.locked && !live) menu.push(mi('Play last', A.play, () => this.act('replay', freq)));
+			if (x.map) menu.push(mi('Map', A.map, () => this.act('map', freq)));
+			if (x.kind !== 'audio') menu.push(mi('Activity', A.activity, () => this.act('activity', freq)));
+			menu.push(mi('Identify again', I.again, startId, 'I'), miPin, miCopy);
+		} else if (ph === 'maybe' || ph === 'unidentified') {
+			actions.push(btn('identify', 'Try for longer · 60 s', I.longer, { primary: true, title: 'Listen for up to 60 s and try every decoder again', pick: () => this.startId(true) }));
+			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: true, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
+			menu.push(miScanner, miPin, miCopy);
+		} else if (ph === 'artefact') {
+			const art = v.plan.art, ign = this.state.ignored;
+			const ignoreBtn = btn('ignore', ign ? 'Ignored' : 'Ignore', I.ignore, { pressed: ign, title: ign ? 'Ignored. Its tag is hidden on the spectrum.' : 'Hide this from the spectrum and the Scanner', pick: () => { this.setState({ ignored: !ign }); this.act('ignore', freq); } });
+			if (art.to) actions.push(btn('tune', 'Tune to ' + MHZ(art.to), I.tune, { primary: true, pick: () => this.tune(art.to) }));
+			actions.push(ignoreBtn);
+			menu.push(miPin, miCopy);
+		} else if (ph === 'blocked') {
+			actions.push(btn('pause-scan', 'Pause the scan and identify', I.pause, { primary: true, pick: () => { this.act('pause-scan', freq); this.startId(false, true); } }));
+			menu.push(miPin, miCopy);
+		} else if (ph === 'interrupted') {
+			actions.push(btn('identify', 'Identify again', I.again, { primary: true, pick: startId }));
+			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: true, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
+			menu.push(miPin, miCopy);
+		} else {
+			// The card's own actions. Unknown signals keep Identify as the primary and Pin in the row;
+			// every other kind gets Identify (and Pin) in the ⋯ menu so the row still fits 320 px.
+			if (x.kind === 'call' && !x.locked) actions.push(btn('replay', live ? 'From start' : 'Play last', A.play, { primary: !live, title: live ? 'Replay this call from the start' : 'Play the last call' }));
+			if (x.kind === 'tx' && !live) actions.push(btn('replay', 'Play last', A.play, { primary: true }));
+			if (x.map) actions.push(btn('map', 'Map', A.map));
+			if (x.kind === 'unknown') actions.push(running
+				? btn('stop-identify', 'Stop', I.stop, { title: 'Stop identifying', pick: this.idClose })
+				: btn('identify', 'Identify', A.scan, { primary: true, title: 'Identify this signal  I', pick: startId }));
+			if (x.kind !== 'audio' && x.kind !== 'unknown') actions.push(btn('activity', 'Activity', A.activity));
+			actions.push(btn('save', saved ? 'Saved' : 'Save', A.save, { iconOnly: actions.length >= 1, title: saved ? 'Saved' : 'Save this frequency', pressed: saved, pick: toggleSave }));
+			if (x.kind === 'unknown') {
+				pinInRow = true;
+				actions.push(btn('pin', 'Pin', A.pin, { iconOnly: true, title: pinned ? 'Unpin card' : 'Pin this card. It keeps showing this frequency when you tune away.', pressed: pinned, pick: togglePin }));
+			} else {
+				menu.push(running ? mi('Stop identifying', I.stop, this.idClose) : mi('Identify', A.scan, startId, 'I'), miPin, miCopy);
+			}
+		}
+		const menuOpen = this.state.menu && menu.length > 0;
+
+		// Identify block
+		const idOn = !!v && !found;
+		const plan = v ? v.plan : { trials: [] };
+		const n = plan.trials.length;
+		const row = (tr, st) => {
+			const ok = st === 'decoded', busy = st === 'trying', fail = st === 'nosync' || st === 'crc' || st === 'timeout', tag = st === 's2', dim = st === 'queued';
+			return {
+				p: tr[0], d: '· ' + tr[1], w: WORD[st], title: tr[3] || tr[0] + ' with ' + tr[1] + ': ' + WORD[st],
+				icon: ok ? I.check : busy ? I.spin : fail ? I.fail : dim ? I.queued : st === 'stopped' ? I.stop : I.skip,
+				ic: ok || busy ? '#7becc7' : '#758b81', anim: busy ? 'wk-id-spin .9s linear infinite' : 'none',
+				rowC: dim ? '#758b81' : '#e3ece7',
+				wc: ok || busy ? '#7becc7' : dim ? '#758b81' : fail ? '#b9cac1' : '#8ba598', ww: ok ? 700 : 400,
+				wh: tag ? '18px' : 'auto', wp: tag ? '0 5px' : '0', wb: tag ? '1px solid rgba(123,236,199,.18)' : '0', wl: tag ? '16px' : 'normal', ws: tag ? '11.5px' : '12.5px'
+			};
+		};
+		let idTrials = [];
+		if (ph === 'trying') idTrials = plan.trials.map((tr, i) => row(tr, i < v.done ? tr[2] : i === v.done ? 'trying' : 'queued'));
+		else if (ph === 'interrupted') idTrials = plan.trials.slice(0, v.done + (v.done < n ? 1 : 0)).map((tr, i) => row(tr, i < v.done ? tr[2] : 'stopped'));
+		else if (ph === 'maybe' || ph === 'unidentified') idTrials = plan.trials.map(tr => row(tr, tr[2]));
+		const res = plan.result || {};
+		let idTitle = '', idSecs = '', idLine = '', idNote = '', idReason = '', big = false;
+		if (ph === 'waiting') { idTitle = 'Waiting for a transmission'; idSecs = ' · ' + Math.max(0, Math.ceil(v.left)) + ' s'; }
+		else if (ph === 'trying') { idTitle = 'Trying decoders'; idSecs = ' · ' + Math.min(v.done + 1, n) + ' of ' + n; }
+		else if (ph === 'maybe') { idTitle = res.title || 'Maybe'; idLine = res.line || ''; idReason = res.reason || ''; idNote = 'Added to discoveries'; big = true; }
+		else if (ph === 'unidentified') { idTitle = 'Not identified'; idLine = (res.line ? res.line + ' ' : '') + 'No decoder synced in ' + v.win + ' s.'; idNote = 'Added to discoveries'; big = true; }
+		else if (ph === 'artefact') { idTitle = plan.art.title; idLine = plan.art.line; idNote = 'Answered from the receiver’s settings, without listening'; }
+		else if (ph === 'blocked') { idTitle = 'The scanner has the receiver'; idLine = 'Identify listens here for up to 15 s. The scan keeps moving the receiver away.'; }
+		else if (ph === 'interrupted') { idTitle = 'Stopped · you tuned away'; idLine = v.done > 0 ? 'Tried ' + v.done + ' of ' + n + ' decoders before you tuned to ' + MHZ(v.to) + '. Nothing was kept.' : 'Stopped before a transmission came. Nothing was kept.'; }
+		const measured = (ph === 'trying' || ph === 'maybe' || ph === 'unidentified' || (ph === 'interrupted' && v.done > 0)) && !!plan.measured;
+		const left = running ? Math.max(0, v.left) : 0;
+
 		const body = x.transcript && live ? '“' + x.transcript + '”' : x.body || '';
 		const msg = x.kind === 'msg';
 		return {
 			icon: x.icon, proto: x.proto, protoSub: x.protoSub,
 			tileBg: live ? 'rgba(123,236,199,.14)' : '#192b24', tileFg: live ? '#7becc7' : x.kind === 'unknown' ? '#8ba598' : '#b9cac1',
-			stateText, stateFg, dotOpacity: live ? (t % 8 < 5 ? 1 : 0.35) : 1,
-			freqText: (freq / 1e6).toFixed(freq % 1000 ? 4 : 3),
-			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder,
+			stateText, stateFg, dotOpacity: pulse ? (t % 8 < 5 ? 1 : 0.35) : 1,
+			freqText: MHZ(freq),
+			pinMark: pinned && !pinInRow,
+			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder + (held ? ' (paused)' : ''),
 			sigBars: [2, 4, 6, 8, 10].map((h, i) => ({ h, c: i < strength ? '#7becc7' : '#2c443b' })),
+			showNormal: !idOn,
+			idBanner: found, idBannerText: 'Identified · added to discoveries',
+			idOn, idEyebrow: 'Identify', idCloseLabel: running ? 'Stop identifying' : 'Close', idClose: this.idClose,
+			idTitle, idSecs, idTitleSize: big ? '22px' : '14px', idTitleFont: big ? "'D-DIN Condensed', 'Noto Sans', sans-serif" : 'inherit', idTitleC: '#f4f7f5',
+			idHasReason: !!idReason, idReason,
+			idHasBar: running, idBarW: running ? Math.round((left / v.win) * 1000) / 10 : 0, idBarC: '#7becc7',
+			idWindow: running ? v.win : 15, idLeft: Math.ceil(left), idLeftText: Math.ceil(left) + ' seconds left',
+			idHasLine: !!idLine, idLine,
+			idHasTrials: idTrials.length > 0, idTrials,
+			idHasMeasured: measured, idMeasured: plan.measured || '',
+			idHasNote: !!idNote, idNote,
 			hasEyebrow: !!x.eyebrow && !msg, eyebrow: x.eyebrow || '',
 			hasTitle: msg, titleText: x.eyebrow || '',
 			hasBig: !msg && !!x.big,
@@ -299,10 +599,13 @@ class Component extends DCLogic {
 			bodyStyle: x.bodyPending ? 'italic' : 'normal',
 			hasChips: !!((x.chips && x.chips.length) || x.tone), chips: (x.tone ? [x.tone] : []).concat(x.chips || []).map(c => ({ k: c[0], v: c[1] })),
 			hasWave: voice && !x.locked, wave,
-			hasRate: x.kind === 'count', rateBars, rate: x.rate || '',
+			hasRate: x.kind === 'count', rateBars, rate: held ? 'paused' : x.rate || '',
 			hasRecent: recent.length > 0, recent,
 			recentTitle: voice ? 'Earlier on this frequency' : 'Earlier',
 			actions,
+			hasMore: menu.length > 0, menu, menuOpen, menuOpenStr: menuOpen ? 'true' : 'false',
+			moreBorder: menuOpen ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', moreBg: menuOpen ? 'rgba(123,236,199,.12)' : 'transparent', moreFg: menuOpen ? '#7becc7' : '#b9cac1',
+			toggleMenu: this.toggleMenu, closeMenu: this.closeMenu, menuKey: this.menuKey,
 			full: !floating,
 			others: ORDER.filter(f => f !== freq).map(f => ({ label: INFO[f].proto, sub: INFO[f].big || INFO[f].eyebrow, icon: INFO[f].icon, freq: (f / 1e6).toFixed(3), pick: () => this.tune(f) })),
 			pad: floating ? '16px' : '24px',
