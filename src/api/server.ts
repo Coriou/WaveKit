@@ -67,6 +67,10 @@ import { accessCapabilities } from "../access/bootstrap-policy.js"
 import type { ProtectedAccessBootstrap } from "../access/bootstrap-policy.js"
 import type { ProtectedRuntimeAccessConfig } from "../access/runtime-config.js"
 import type { NamedAccessRuntimeContext } from "../access/runtime-context.js"
+import type { OperatorDataService } from "../operator-data/service.js"
+import { operatorDataRoutes } from "../operator-data/routes.js"
+import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
+import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
 
 /**
  * HTTP header name for correlation ID.
@@ -141,6 +145,15 @@ export class ApiServer {
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private readonly sourceStatusPublisher: SourceStatusPublisher
 	private mounted = false
+	private starting = false
+	private startResult: Promise<void> | undefined
+	private stopping = false
+	private stopResult: Promise<void> | undefined
+	private operatorMountIntent = false
+	private operatorRestRegistered = false
+	private operatorData: OperatorDataService | undefined
+	private operatorObserver: (() => void) | undefined
+	private operatorCloseResult: Promise<void> | undefined
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
 	private scannerWiring: { dispose(): void } | null = null
@@ -207,7 +220,17 @@ export class ApiServer {
 	 * Starts the API server.
 	 * Registers all plugins and routes, then begins listening.
 	 */
-	async start(): Promise<void> {
+	start(): Promise<void> {
+		if (this.stopping || this.starting)
+			return Promise.reject(
+				new WaveKitError("API startup unavailable", "ACCESS_UNAVAILABLE"),
+			)
+		this.starting = true
+		this.startResult = this.finishStart()
+		return this.startResult
+	}
+
+	private async finishStart(): Promise<void> {
 		this.log.info(
 			{ host: this.config.host, port: this.config.port },
 			"Starting API server",
@@ -215,12 +238,16 @@ export class ApiServer {
 
 		// Register plugins
 		await this.registerPlugins()
+		if (this.stopping)
+			throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
 
 		// Register request logging hook
 		this.registerRequestLogging()
 
 		// Register routes (placeholder - routes will be implemented in later tasks)
 		await this.registerRoutes()
+		if (this.stopping)
+			throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
 
 		// Start listening
 		try {
@@ -229,7 +256,10 @@ export class ApiServer {
 				port: this.config.port,
 			})
 
+			if (this.stopping)
+				throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
 			this.mounted = true
+			this.operatorRestRegistered = this.operatorMountIntent
 			this.log.info(
 				{ host: this.config.host, port: this.config.port },
 				"API server started",
@@ -271,45 +301,169 @@ export class ApiServer {
 					mounted && Boolean(this.liveDemod?.getStatus().running),
 				digitalAudioAvailable:
 					mounted && Boolean(this.digitalVoice?.getStatus().running),
-				operatorDataAvailable: false as const,
+				operatorDataAvailable: mounted && this.operatorDataAvailable(),
 			},
 		}
 	}
 
-	stopAdmission(): void {
-		this.mounted = false
-		this.accessController?.dispose()
-		this.accessRoutes?.stopAdmission()
+	/** One initial port; synchronous bounded publication uses the existing transport. */
+	getOperatorDataBroadcastPort(): OperatorDataBroadcastPort {
+		return {
+			publishUpdated: data => {
+				try {
+					this.wsBroadcaster.broadcast("operator-data", {
+						type: "operator-data:updated",
+						channel: "operator-data",
+						data,
+					})
+				} catch {
+					this.invalidateOperatorDataPublication()
+				}
+			},
+			sendSnapshot: (clientId, data) =>
+				this.wsBroadcaster.sendToClients("operator-data", [clientId], {
+					type: "operator-data:snapshot",
+					channel: "operator-data",
+					data,
+				}) === 1,
+		}
 	}
 
-	async stop(): Promise<void> {
-		this.stopAdmission()
-		this.log.info("Stopping API server")
+	/** Mapping can fail before the port is called; the initial sink owns this fallback. */
+	invalidateOperatorDataPublication(): void {
+		this.log.warn("Operator data publication unavailable")
+		this.wsBroadcaster.invalidateChannelClients("operator-data")
+	}
 
+	/** Protected-only registration intent. Availability follows successful listen, not this call. */
+	mountOperatorData(service: OperatorDataService | undefined): void {
+		if (
+			!this.access ||
+			this.starting ||
+			this.stopping ||
+			this.operatorMountIntent
+		)
+			throw new WaveKitError("Operator mount unavailable", "ACCESS_UNAVAILABLE")
+		this.operatorMountIntent = true
+		this.operatorData = service
+		this.wsBroadcaster.enableOperatorDataChannel()
+		const port = this.getOperatorDataBroadcastPort()
+		this.operatorObserver = this.wsBroadcaster.observeChannel("operator-data", {
+			subscribed: clientId => {
+				try {
+					if (!sendOperatorDataSnapshot(this.operatorData, port, clientId))
+						this.wsBroadcaster.invalidateClient(clientId)
+				} catch {
+					this.log.warn("Operator data snapshot unavailable")
+					this.wsBroadcaster.invalidateClient(clientId)
+				}
+			},
+			unsubscribed: () => {},
+		})
+	}
+
+	private operatorDataAvailable(): boolean {
+		if (!this.operatorRestRegistered || !this.operatorObserver || this.stopping)
+			return false
 		try {
-			// Stop telemetry broadcasting interval
+			return this.operatorData?.snapshot() !== undefined
+		} catch {
+			return false
+		}
+	}
+
+	stopAdmission(): void {
+		this.stopping = true
+		this.mounted = false
+		this.operatorRestRegistered = false
+		let failed = false
+		for (const seal of [
+			() => this.accessController?.stopAdmission(),
+			() => this.accessRoutes?.stopAdmission(),
+			() => this.wsBroadcaster.stopSubscriptionAdmission(),
+		]) {
+			try {
+				seal()
+			} catch {
+				failed = true
+			}
+		}
+		if (failed)
+			throw new WaveKitError(
+				"API admission seal incomplete",
+				"ACCESS_UNAVAILABLE",
+			)
+	}
+
+	stop(): Promise<void> {
+		if (this.stopResult) return this.stopResult
+		let failed = false
+		try {
+			this.stopAdmission()
+		} catch {
+			failed = true
+		}
+		this.stopResult = this.finishStop(failed)
+		return this.stopResult
+	}
+
+	private async finishStop(sealFailed: boolean): Promise<void> {
+		this.log.info("Stopping API server")
+		let failed = sealFailed
+		const attempt = async (operation: () => void | Promise<void>) => {
+			try {
+				await operation()
+			} catch {
+				failed = true
+			}
+		}
+		// Startup cannot resume into registration/listen after teardown.
+		await this.startResult?.catch(() => undefined)
+		// Each actual drain is attempted. Output policy/sink/observer survive both.
+		await attempt(() => {
+			this.operatorCloseResult ??=
+				this.operatorData?.close() ?? Promise.resolve()
+			return this.operatorCloseResult
+		})
+		await attempt(async () => {
+			await this.accessRoutes?.drain()
+		})
+		await attempt(() => {
+			this.operatorObserver?.()
+			this.operatorObserver = undefined
+		})
+		await attempt(() => {
+			this.accessController?.dispose()
+		})
+		await attempt(() => {
+			this.wsBroadcaster.closeAll()
+		})
+		await attempt(() => {
 			if (this.telemetryInterval) {
 				clearInterval(this.telemetryInterval)
 				this.telemetryInterval = null
 			}
+		})
+		await attempt(() => {
 			this.sourceStatusPublisher.stop()
+		})
+		await attempt(() => {
 			this.scannerWiring?.dispose()
 			this.scannerWiring = null
 			this.scannerLimiter = null
+		})
+		await attempt(() => {
 			this.spectrumWiring?.dispose()
 			this.spectrumWiring = null
-
-			// Close all WebSocket connections first
-			this.wsBroadcaster.closeAll()
-
-			// Wait for service persistence completion independently of HTTP closure.
-			await this.accessRoutes?.drain()
+		})
+		await attempt(async () => {
 			await this.app.close()
-			this.log.info("API server stopped")
-		} catch (err) {
+		})
+		if (failed) {
 			this.log.error("Error stopping API server")
-			throw err
+			throw new WaveKitError("API shutdown incomplete", "ACCESS_UNAVAILABLE")
 		}
+		this.log.info("API server stopped")
 	}
 
 	/**
@@ -906,6 +1060,13 @@ export class ApiServer {
 		if (this.spectrum) {
 			await this.app.register(spectrumRoutes, { spectrum: this.spectrum })
 		}
+
+		if (this.operatorMountIntent && this.accessController)
+			await this.app.register(operatorDataRoutes, {
+				operatorData: this.operatorData,
+				authorizeMetadataMutation: request =>
+					this.accessController!.authorizeMetadataMutation(request),
+			})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app, this.accessController)

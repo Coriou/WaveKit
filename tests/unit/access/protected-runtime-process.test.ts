@@ -27,6 +27,9 @@ const repository = fileURLToPath(new URL("../../../", import.meta.url))
 let buildDirectory: string | undefined
 let entry: string
 let failedScannerEntry: string
+let failedOperatorEntry: string
+let pausedOperatorEntry: string
+let failedOperatorCloseEntry: string
 const roots: string[] = []
 const processes: RunningCore[] = []
 const reservations: Server[] = []
@@ -91,6 +94,61 @@ beforeAll(async () => {
 			},
 		],
 	})
+	for (const kind of ["failed", "paused", "close-failed"] as const) {
+		const directory = join(buildDirectory, kind + "-operator")
+		if (kind === "failed") failedOperatorEntry = join(directory, "index.js")
+		else if (kind === "paused")
+			pausedOperatorEntry = join(directory, "index.js")
+		else failedOperatorCloseEntry = join(directory, "index.js")
+		await build({
+			absWorkingDir: repository,
+			entryPoints: [{ in: "src/index.ts", out: "index" }],
+			bundle: true,
+			outdir: directory,
+			platform: "node",
+			format: "esm",
+			packages: "external",
+			plugins: [
+				{
+					name: kind + "-operator-acquisition",
+					setup(builder) {
+						builder.onLoad(
+							{ filter: /[/\\]operator-data[/\\]service\.ts$/ },
+							async args => {
+								const source = await readFile(args.path, "utf8")
+								const original =
+									"...(options.storageStage ? { stage: options.storageStage } : {}),"
+								if (!source.includes(original))
+									throw new Error("Operator fixture seam missing")
+								const stage =
+									kind === "failed"
+										? `stage: (stage, phase) => {
+								if (phase === "before" && (stage === "temp-write" || stage === "lock-release"))
+									throw new Error("Fixture operator acquisition or cleanup failed")
+							},`
+										: kind === "close-failed"
+											? `stage: (stage, phase) => {
+								if (stage === "lock-release" && phase === "before")
+									throw new Error("Fixture operator close failed")
+							},`
+											: `stage: async (stage, phase) => {
+								if (stage === "parent-open" && phase === "before") {
+									process.once("SIGTERM", () => process.stdout.write("operator-signal-seen\\n"))
+									process.stdout.write("operator-open-paused\\n")
+									await new Promise(resolve => process.once("SIGUSR2", resolve))
+								}
+							},`
+								return {
+									loader: "ts",
+									contents: source.replace(original, stage),
+								}
+							},
+						)
+					},
+				},
+			],
+		})
+	}
 }, 30_000)
 
 afterAll(async () => {
@@ -183,6 +241,7 @@ async function fixture() {
 			healthProbe: { target: origin, host: `127.0.0.1:${api}` },
 		},
 	}
+	await mkdir(config.stateDir, { mode: 0o700 })
 	await writeFile(configFile, JSON.stringify(config))
 	const releasePorts = async (keepApi = false) => {
 		for (const server of keepApi ? held.slice(1) : held)
@@ -251,6 +310,29 @@ async function started(core: RunningCore): Promise<void> {
 		await delay(20)
 	}
 	throw new Error("Built core startup deadline exceeded")
+}
+
+async function marker(core: RunningCore, value: string): Promise<void> {
+	if (core.stdout().includes(value)) return
+	await new Promise<void>((resolve, reject) => {
+		const check = () => {
+			if (core.stdout().includes(value)) {
+				cleanup()
+				resolve()
+			}
+		}
+		const ended = () => {
+			cleanup()
+			reject(new Error("Core exited before fixture marker"))
+		}
+		const cleanup = () => {
+			core.child.stdout?.off("data", check)
+			core.child.off("close", ended)
+		}
+		core.child.stdout?.on("data", check)
+		core.child.once("close", ended)
+		check()
+	})
 }
 
 async function http(
@@ -350,6 +432,11 @@ describe("built protected runtime process", () => {
 		expect((await http(env.api, "/api/status")).status).toBe(401)
 		const machine = { Authorization: `Bearer ${token}` }
 		expect((await http(env.api, "/api/status", machine)).status).toBe(200)
+		const operator = await http(env.api, "/api/operator-data", machine)
+		expect(operator.status).toBe(200)
+		expect(JSON.parse(operator.body)).toMatchObject({
+			snapshot: { revision: 0 },
+		})
 		for (const port of [env.raw, env.relay, env.analog, env.digital])
 			expect(await listening(port)).toBe(false)
 		const issued = await http(env.api, "/api/access/pairing-codes", machine, {})
@@ -405,6 +492,91 @@ describe("built protected runtime process", () => {
 		)
 		expect(snapshot).not.toContain(cookieHeader.split("=")[1]?.split(";")[0])
 	}, 30_000)
+
+	it("aborts rejected operator acquisition with hidden lock cleanup failure and retains private owner", async () => {
+		const env = await fixture()
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, failedOperatorEntry)
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+		expect(core.stdout()).not.toContain("WaveKit started successfully")
+		expect(core.stdout()).toContain("Destroying DecoderManager")
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(1)
+		await access(join(env.config.stateDir, "operator-data", ".writer-lock"))
+		for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+			expect(await listening(port)).toBe(false)
+	}, 15_000)
+
+	it("retains private ownership when an acquired operator store fails actual lock release during shutdown", async () => {
+		const env = await fixture()
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, failedOperatorCloseEntry)
+		await started(core)
+		core.child.kill("SIGTERM")
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+		expect(core.stdout()).toContain("Destroying DecoderManager")
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(1)
+		await access(join(env.config.stateDir, "operator-data", ".writer-lock"))
+		for (const port of [env.api, env.analog, env.digital, env.raw, env.relay])
+			expect(await listening(port)).toBe(false)
+	}, 15_000)
+
+	it("settles a real operator open stalled before I/O after SIGTERM without mounting, then releases settled ownership", async () => {
+		const env = await fixture()
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, pausedOperatorEntry)
+		await marker(core, "operator-open-paused")
+		core.child.kill("SIGTERM")
+		await marker(core, "operator-signal-seen")
+		expect(await listening(env.api)).toBe(false)
+		core.child.kill("SIGUSR2")
+		expect(await core.exited).toEqual({ code: 0, signal: null })
+		expect(core.stdout()).not.toContain("WaveKit started successfully")
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(0)
+		await expect(
+			access(join(env.config.stateDir, "operator-data", ".writer-lock")),
+		).rejects.toMatchObject({ code: "ENOENT" })
+	}, 15_000)
+
+	it("legacy startup opens no operator store or lock and exposes no metadata routes", async () => {
+		const env = await fixture()
+		await writeFile(
+			env.configFile,
+			JSON.stringify({ ...env.config, access: { mode: "legacy" } }),
+		)
+		await env.releasePorts()
+		const core = run(env.configFile)
+		await started(core)
+		expect((await http(env.api, "/api/operator-data")).status).toBe(404)
+		await expect(
+			access(join(env.config.stateDir, "operator-data")),
+		).rejects.toMatchObject({ code: "ENOENT" })
+		core.child.kill("SIGTERM")
+		expect(await core.exited).toEqual({ code: 0, signal: null })
+	}, 15_000)
 
 	it("releases private ownership after a later API bind failure and settles earlier resources", async () => {
 		const env = await fixture()
