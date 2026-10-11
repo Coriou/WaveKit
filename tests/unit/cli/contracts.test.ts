@@ -66,6 +66,7 @@ describe("ui/actions", () => {
 			"messages",
 			"receiver",
 			"system",
+			"scan",
 		])
 		for (const v of VIEW_ORDER) expect(VIEW_TITLES[v]).toBeTruthy()
 		expect(EMPTY_VIEW_CTX).toEqual({

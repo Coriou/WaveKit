@@ -134,10 +134,34 @@ export interface WsClient {
 	stop(): void
 	reconnectNow(): void
 	/** True while a socket exists, connecting or open. */
+	setScanSource(sourceId: string | null): void
 	connected(): boolean
 }
 
 export function createWsClient(deps: WsClientDeps): WsClient {
+	let scanSource: string | null = null
+	let scanSent = false
+	function sendScan(): void {
+		if (!open || !handle) return
+		if (scanSource) {
+			handle.send(
+				JSON.stringify({
+					type: "subscribe",
+					channels: ["scanner", "spectrum"],
+					options: { spectrum: { sourceId: scanSource, hz: 5, bins: 512 } },
+				}),
+			)
+			scanSent = true
+		} else if (scanSent) {
+			handle.send(
+				JSON.stringify({
+					type: "unsubscribe",
+					channels: ["scanner", "spectrum"],
+				}),
+			)
+			scanSent = false
+		}
+	}
 	let generation = 0
 	let handle: WsHandle | null = null
 	let timer: unknown = null
@@ -166,6 +190,8 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 	}
 
 	function connect(): void {
+		open = false
+		scanSent = false
 		if (stopped || accessPaused) return
 		const url = deps.url()
 		const gen = ++generation
@@ -200,13 +226,25 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 					}
 					const event = parseServerMessage(raw)
 					if (!event) {
-						deps.emit({ kind: "ws:invalid", at: deps.now() })
+						const scan =
+							typeof raw === "object" &&
+							raw !== null &&
+							"type" in raw &&
+							typeof raw.type === "string" &&
+							/^(scanner|spectrum):/.test(raw.type)
+						deps.emit({
+							kind: "ws:invalid",
+							at: deps.now(),
+							...(scan ? { scan: true } : {}),
+						})
 						return
 					}
 					if (event.type === "subscribed") {
+						if (open) return // additive acknowledgements do not reopen/resync the socket
 						attempt = 0
 						open = true
 						deps.emit({ kind: "ws:open", at: deps.now() })
+						sendScan()
 						return
 					}
 					deps.emit({ kind: "ws", event, at: deps.now() })
@@ -292,6 +330,10 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 			handle = null
 			attempt = 0
 			connect()
+		},
+		setScanSource: sourceId => {
+			scanSource = sourceId
+			sendScan()
 		},
 		connected: () => handle !== null,
 	}

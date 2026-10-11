@@ -7,6 +7,7 @@ export const VIEW_ALIASES: Readonly<Record<string, ViewId>> = {
 	messages: "messages",
 	receiver: "receiver",
 	system: "system",
+	scan: "scan",
 	dashboard: "overview",
 	output: "messages",
 	backpressure: "decoders",
@@ -149,12 +150,13 @@ Usage:
   wavekit [--view <view>] [--api <url>]
   wavekit --help
 
-Views (keys 1-5):
+Views (keys 1-6):
   overview   1  chain strip, receiver, decoders, latest messages
   decoders   2  process state, decodes and IQ drops per decoder
   messages   3  filterable, pausable decoded-message feed
   receiver   4  source, tuner, relay, fanout and upstream drops
   system     5  container, SDR host, live audio, core
+  scan       6  source spectrum, discoveries and existing scan jobs (read-only)
 
 Aliases:
   dashboard ${to} overview, output ${to} messages, backpressure ${to} decoders,

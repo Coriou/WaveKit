@@ -24,6 +24,14 @@ const ASKS = " (asks to confirm)"
 /** What a binding does, in help words; null = not listed (typing keys, notices). */
 function labelOf(a: Action, mode: ModeName): string | null {
 	switch (a.type) {
+		case "scan-source":
+			return "select source"
+		case "scan-tab":
+			return `show ${a.tab}`
+		case "scan-next-page":
+			return "next discoveries page"
+		case "scan-first-page":
+			return "first discoveries page"
 		case "move":
 			return "select"
 		case "page":
