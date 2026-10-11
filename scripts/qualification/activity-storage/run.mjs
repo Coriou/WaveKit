@@ -1256,16 +1256,20 @@ export function queryAccounting(seconds = 900) {
 		totals[reason]++
 		return true
 	}
+	const monotonic = nowUs => {
+		if (!Number.isSafeInteger(nowUs) || nowUs < 0 || nowUs < previous)
+			throw new Error("Invalid query clock")
+		previous = nowUs
+	}
+	const expire = nowUs => {
+		for (const [id, slot] of pending)
+			if (nowUs - slot.timeUs >= 250000)
+				terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
+	}
 	return {
 		turn(nowUs) {
-			if (
-				!Number.isSafeInteger(nowUs) ||
-				nowUs < 0 ||
-				nowUs < previous ||
-				stopped
-			)
-				throw new Error("Invalid query clock/state")
-			previous = nowUs
+			if (stopped) throw new Error("Invalid query clock/state")
+			monotonic(nowUs)
 			let processed = 0
 			// Query cadence is fixed at 125ms, so <= 8 current slots can be within
 			// 20ms. Stale whole slots are accounted arithmetically without a loop.
@@ -1293,12 +1297,8 @@ export function queryAccounting(seconds = 900) {
 			return processed
 		},
 		dispatch(nowUs) {
-			if (!Number.isSafeInteger(nowUs) || nowUs < 0 || nowUs < previous)
-				throw new Error("Invalid query clock")
-			previous = nowUs
-			for (const [id, slot] of pending)
-				if (nowUs - slot.timeUs >= 250000)
-					terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
+			monotonic(nowUs)
+			expire(nowUs)
 			if (stopped || readerOwner !== null || readerJoinFailed) return null
 			for (const [id, slot] of pending)
 				if (!slot.dispatched) {
@@ -1309,9 +1309,13 @@ export function queryAccounting(seconds = 900) {
 				}
 			return null
 		},
-		settle(id, reason, replyBytes = 0) {
+		// Every reply callback must supply its observed monotonic microseconds.
+		// Expiration wins at the deadline, regardless of timeout callback order.
+		settle(id, reason, nowUs, replyBytes = 0) {
 			if (!["successful", "query-failed"].includes(reason))
 				throw new Error("Invalid query terminal reply")
+			monotonic(nowUs)
+			expire(nowUs)
 			if (!pending.has(id)) return false
 			if (!pending.get(id).dispatched) throw new Error("Reply before dispatch")
 			if (

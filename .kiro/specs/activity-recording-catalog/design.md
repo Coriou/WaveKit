@@ -889,7 +889,7 @@ outcomes, shared stage deadlines, reservation transfer, metadata-only live inven
 streaming final hashes and residue reporting. The CLI still runs only the accepted
 micro/runtime/disabled cases; every long scenario and phase returns `not-run` with
 explicit prerequisites. No long scheduler is mounted and no performance result is
-claimed. The55 bounded tests include the original20 micro regressions and four
+claimed. The65 bounded tests include the original20 micro regressions and four
 properties with100 cases each; tests do not establish real runtime/platform support.
 
 Warmup/load transition callbacks may arrive from the scheduled boundary through
@@ -898,7 +898,10 @@ observed entry epoch, preserving the full900-second measured load. Lateness is
 reported and consumes the unchanged1,200-second total budget; it adds no worker
 budget. Warmup must already have drained by the scheduled30-second boundary;
 asynchronous receipt/control callbacks supply their observed monotonic clock.
-Query terminal accounting retains physical reader ownership on timeout. A valid
+Query settlement requires an observed monotonic microsecond timestamp; expiration
+at250,000 microseconds is established before accepting a reply, regardless of
+timeout callback order. Query terminal accounting retains physical reader ownership
+on timeout. A valid
 terminal reply confirms settlement; otherwise a matching request/owner-token join
 confirmation is required before reuse. Late replies and stale joins cannot change
 terminals or release a newer owner; failed join forbids reuse. Batch `bytes` counts

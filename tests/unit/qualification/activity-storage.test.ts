@@ -762,7 +762,12 @@ interface QuerySnapshot {
 interface QueryDriver {
 	turn: (now: number) => number
 	dispatch: (now: number) => number | null
-	settle: (id: number, reason: string, replyBytes?: number) => boolean
+	settle: (
+		id: number,
+		reason: string,
+		now: number,
+		replyBytes?: number,
+	) => boolean
 	join: (id: number, owner: number, confirmed: boolean) => boolean
 	releaseReply: (client: number) => boolean
 	stop: (deliberate?: boolean, joined?: boolean) => void
@@ -1205,8 +1210,8 @@ describe("allocated driver delivery, virtual evidence only", () => {
 			slots++
 			driver.turn(slot.timeUs)
 			const id = driver.dispatch(slot.timeUs)!
-			expect(driver.settle(id, "successful")).toBe(true)
-			expect(driver.settle(id, "successful")).toBe(false)
+			expect(driver.settle(id, "successful", slot.timeUs)).toBe(true)
+			expect(driver.settle(id, "successful", slot.timeUs)).toBe(false)
 		}
 		driver.stop()
 		expect(slots).toBe(7200)
@@ -1233,7 +1238,7 @@ describe("allocated driver delivery, virtual evidence only", () => {
 			expect(driver.dispatch(0)).toBe(0)
 			driver.turn(125000)
 			driver.stop(true, joined)
-			expect(driver.settle(0, "successful")).toBe(false)
+			expect(driver.settle(0, "successful", 125000)).toBe(false)
 			expect(driver.snapshot()).toMatchObject({
 				terminalCount: 16,
 				reconciled: true,
@@ -1249,7 +1254,7 @@ describe("allocated driver delivery, virtual evidence only", () => {
 		timeout.turn(0)
 		timeout.dispatch(0)
 		timeout.dispatch(250000)
-		expect(timeout.settle(0, "successful")).toBe(false)
+		expect(timeout.settle(0, "successful", 250000)).toBe(false)
 		timeout.stop(true, true)
 		expect(timeout.snapshot().totals).toMatchObject({
 			"active-timeout": 1,
@@ -1281,7 +1286,7 @@ describe("allocated driver delivery, virtual evidence only", () => {
 						else {
 							success++
 							expect(driver.dispatch(now)).toBe(id)
-							driver.settle(id, "successful")
+							driver.settle(id, "successful", now)
 						}
 					}
 					driver.stop()
@@ -1477,11 +1482,11 @@ describe("driver containment edge fixtures", () => {
 		const failed = delivery.queryAccounting(1)
 		failed.turn(0)
 		failed.dispatch(0)
-		expect(failed.settle(0, "query-failed")).toBe(true)
+		expect(failed.settle(0, "query-failed", 0)).toBe(true)
 		failed.stop()
 		failed.stop()
 		expect(failed.snapshot().totals["query-failed"]).toBe(1)
-		expect(() => failed.settle(0, "invented")).toThrow()
+		expect(() => failed.settle(0, "invented", 0)).toThrow()
 	})
 	it("caps replacements at 32, rejects overlapping roles and keeps fixed phase durations", async () => {
 		let clock = 0
@@ -1553,25 +1558,165 @@ describe("driver containment edge fixtures", () => {
 })
 
 describe("query reply retention accounting only", () => {
+	it.each([
+		[249999, false],
+		[250000, false],
+		[250001, false],
+		[249999, true],
+		[250000, true],
+		[250001, true],
+	] as const)(
+		"settles at observed %ius with preceding timeout dispatch: %s",
+		(now, dispatchFirst) => {
+			const driver = delivery.queryAccounting(2)
+			driver.turn(0)
+			driver.dispatch(0)
+			const owner = driver.snapshot().readerOwner!
+			driver.turn(125000)
+			const overdue = now >= 250000
+			// Without dispatchFirst, only the reply advances to its observation.
+			if (dispatchFirst) expect(driver.dispatch(now)).toBeNull()
+			expect(driver.settle(0, "successful", now, 1)).toBe(!overdue)
+			expect(driver.snapshot()).toMatchObject({
+				pending: 1,
+				readerOwner: overdue ? owner : null,
+				retainedReplyBytes: overdue ? 0 : 1,
+				totals: {
+					successful: overdue ? 0 : 1,
+					"active-timeout": overdue ? 1 : 0,
+				},
+			})
+			if (overdue) {
+				expect(driver.dispatch(now)).toBeNull()
+				expect(driver.settle(0, "query-failed", now)).toBe(false)
+				expect(driver.join(0, owner.owner + 1, true)).toBe(false)
+				expect(driver.join(0, owner.owner, true)).toBe(true)
+			}
+			expect(driver.dispatch(now)).toBe(1)
+			const nextOwner = driver.snapshot().readerOwner!
+			expect(driver.settle(0, "successful", now, 1)).toBe(false)
+			expect(driver.join(0, owner.owner, true)).toBe(false)
+			expect(driver.snapshot().readerOwner).toEqual(nextOwner)
+			expect(driver.settle(1, "successful", now)).toBe(true)
+			driver.stop(true, true)
+			expect(driver.snapshot()).toMatchObject({
+				terminalCount: 16,
+				reconciled: true,
+				totals: {
+					successful: overdue ? 1 : 2,
+					"active-timeout": overdue ? 1 : 0,
+					"cancelled-in-flight": 0,
+					"not-offered-after-stop": 14,
+				},
+			})
+		},
+	)
+	it.each(["successful", "query-failed"])(
+		"expires before an overdue %s reply even after a preceding turn",
+		reason => {
+			const driver = delivery.queryAccounting(2)
+			driver.turn(0)
+			driver.dispatch(0)
+			const owner = driver.snapshot().readerOwner!
+			driver.turn(125000)
+			driver.turn(250001)
+			expect(driver.settle(0, reason, 250001)).toBe(false)
+			expect(driver.dispatch(250001)).toBeNull()
+			expect(driver.snapshot()).toMatchObject({
+				pending: 2,
+				readerOwner: owner,
+				totals: { successful: 0, "query-failed": 0, "active-timeout": 1 },
+			})
+			driver.stop(true, true)
+			expect(driver.settle(0, "successful", 250001)).toBe(false)
+			expect(driver.snapshot()).toMatchObject({
+				terminalCount: 16,
+				reconciled: true,
+				totals: {
+					"active-timeout": 1,
+					"cancelled-in-flight": 0,
+					"cancelled-before-dispatch": 2,
+				},
+			})
+		},
+	)
+	it("expires other overdue queued slots on reply observation without releasing the reader", () => {
+		const driver = delivery.queryAccounting(2)
+		driver.turn(0)
+		driver.dispatch(0)
+		const owner = driver.snapshot().readerOwner!
+		driver.turn(125000)
+		driver.turn(250000)
+		expect(driver.settle(0, "successful", 375000)).toBe(false)
+		expect(driver.snapshot()).toMatchObject({
+			pending: 1,
+			readerOwner: owner,
+			totals: { "active-timeout": 1, "queue-expired": 1, successful: 0 },
+		})
+		expect(driver.settle(1, "successful", 375000)).toBe(false)
+		driver.stop()
+		expect(driver.snapshot()).toMatchObject({
+			terminalCount: 16,
+			reconciled: true,
+			totals: {
+				"active-timeout": 1,
+				"queue-expired": 1,
+				"interrupted-unknown": 0,
+				"cancelled-before-dispatch": 1,
+			},
+		})
+	})
+	it("requires a finite monotonic reply clock and rejects invalid observations without mutation", () => {
+		const driver = delivery.queryAccounting(2)
+		driver.turn(0)
+		driver.dispatch(0)
+		driver.turn(125000)
+		const before = driver.snapshot()
+		for (const now of [
+			NaN,
+			Infinity,
+			-Infinity,
+			-1,
+			0,
+			124999,
+			125000.5,
+			Number.MAX_SAFE_INTEGER + 1,
+		]) {
+			expect(() => driver.settle(0, "successful", now)).toThrow("clock")
+			expect(driver.snapshot()).toEqual(before)
+		}
+		// JS callbacks omitting the required argument must also fail at runtime.
+		expect(() =>
+			Reflect.apply(driver.settle, driver, [0, "successful"]),
+		).toThrow("clock")
+		expect(driver.snapshot()).toEqual(before)
+		expect(driver.settle(0, "successful", 125001)).toBe(true)
+		expect(() => driver.dispatch(125000)).toThrow("clock")
+		expect(() => driver.turn(125000)).toThrow("clock")
+		expect(() => driver.settle(0, "successful", 125000)).toThrow("clock")
+		expect(driver.settle(0, "successful", 125001)).toBe(false)
+		driver.stop()
+		expect(driver.snapshot().reconciled).toBe(true)
+	})
 	it("bounds retained replies and denies the same client's fixed slot without postponing it", () => {
 		const driver = delivery.queryAccounting(2)
 		driver.turn(0)
-		expect(() => driver.settle(0, "successful")).toThrow("before dispatch")
+		expect(() => driver.settle(0, "successful", 0)).toThrow("before dispatch")
 		driver.dispatch(0)
-		expect(driver.settle(0, "successful", 1024 * 1024)).toBe(true)
+		expect(driver.settle(0, "successful", 0, 1024 * 1024)).toBe(true)
 		driver.turn(125000)
 		driver.dispatch(125000)
-		driver.settle(1, "successful", 1024 * 1024)
+		driver.settle(1, "successful", 125000, 1024 * 1024)
 		driver.turn(250000)
 		driver.dispatch(250000)
-		expect(() => driver.settle(2, "successful", 1)).toThrow("quota")
+		expect(() => driver.settle(2, "successful", 250000, 1)).toThrow("quota")
 		expect(driver.releaseReply(0)).toBe(true)
 		expect(driver.releaseReply(0)).toBe(false)
-		driver.settle(2, "successful")
+		driver.settle(2, "successful", 250000)
 		for (let id = 3; id <= 9; id++) {
 			driver.turn(id * 125000)
 			const active = driver.dispatch(id * 125000)
-			if (active !== null) driver.settle(active, "successful")
+			if (active !== null) driver.settle(active, "successful", id * 125000)
 		}
 		expect(driver.snapshot().totals["client-busy"]).toBe(1)
 		driver.stop()
@@ -1684,7 +1829,7 @@ describe("review corrections: bounded transitions, reader ownership and wire env
 		driver.turn(125000)
 		expect(driver.dispatch(250000)).toBeNull()
 		expect(driver.snapshot().totals["active-timeout"]).toBe(1)
-		expect(driver.settle(0, "successful", 1)).toBe(false)
+		expect(driver.settle(0, "successful", 250000, 1)).toBe(false)
 		expect(driver.join(0, first.owner + 1, true)).toBe(false)
 		expect(driver.dispatch(250000)).toBeNull()
 		expect(driver.join(0, first.owner, true)).toBe(true)
@@ -1692,8 +1837,8 @@ describe("review corrections: bounded transitions, reader ownership and wire env
 		const second = driver.snapshot().readerOwner!
 		expect(driver.join(0, first.owner, true)).toBe(false)
 		expect(driver.snapshot().readerOwner).toEqual(second)
-		expect(driver.settle(0, "query-failed")).toBe(false)
-		expect(driver.settle(1, "successful")).toBe(true)
+		expect(driver.settle(0, "query-failed", 250000)).toBe(false)
+		expect(driver.settle(1, "successful", 250000)).toBe(true)
 		driver.stop(true, true)
 		expect(driver.snapshot()).toMatchObject({
 			reconciled: true,
@@ -1719,7 +1864,7 @@ describe("review corrections: bounded transitions, reader ownership and wire env
 		expect(driver.join(owner.id, owner.owner, true)).toBe(false)
 		expect(driver.dispatch(250000)).toBeNull()
 		driver.stop(true, true)
-		expect(driver.settle(0, "successful")).toBe(false)
+		expect(driver.settle(0, "successful", 250000)).toBe(false)
 		expect(driver.snapshot()).toMatchObject({
 			reconciled: true,
 			terminalCount: 8,
@@ -1736,7 +1881,7 @@ describe("review corrections: bounded transitions, reader ownership and wire env
 		cancelled.dispatch(0)
 		const cancelledOwner = cancelled.snapshot().readerOwner!
 		cancelled.stop(true, true)
-		expect(cancelled.settle(0, "successful")).toBe(false)
+		expect(cancelled.settle(0, "successful", 0)).toBe(false)
 		expect(cancelled.join(0, cancelledOwner.owner, true)).toBe(true)
 		expect(cancelled.dispatch(250000)).toBeNull()
 		expect(cancelled.snapshot().totals["cancelled-in-flight"]).toBe(1)
