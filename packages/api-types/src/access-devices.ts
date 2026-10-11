@@ -15,13 +15,17 @@ export const accessDeviceDtoSchema = z
 	})
 	.strict()
 	.refine(
-		value => value.createdAt <= value.renewedAt && value.renewedAt < value.expiresAt,
+		value =>
+			value.createdAt <= value.renewedAt && value.renewedAt < value.expiresAt,
 		"Invalid device clocks",
 	)
 
 export const accessDevicesDtoSchema = z
 	.object({
-		devices: z.array(accessDeviceDtoSchema).min(1).max(ACCESS_DEVICES_LIMITS.maxDevices),
+		devices: z
+			.array(accessDeviceDtoSchema)
+			.min(1)
+			.max(ACCESS_DEVICES_LIMITS.maxDevices),
 	})
 	.strict()
 	.superRefine(({ devices }, ctx) => {
@@ -34,15 +38,19 @@ export const accessDevicesDtoSchema = z
 			const previous = devices[i - 1]
 			if (
 				ids.has(device.deviceId) ||
-				(previous && (
-					previous.createdAt > device.createdAt ||
-					(previous.createdAt === device.createdAt && previous.deviceId >= device.deviceId)
-				))
+				(previous &&
+					(previous.createdAt > device.createdAt ||
+						(previous.createdAt === device.createdAt &&
+							previous.deviceId >= device.deviceId)))
 			)
-				ctx.addIssue({ code: "custom", message: "Invalid device ordering or identity" })
+				ctx.addIssue({
+					code: "custom",
+					message: "Invalid device ordering or identity",
+				})
 			ids.add(device.deviceId)
 		}
-		if (current !== 1) ctx.addIssue({ code: "custom", message: "Invalid current device" })
+		if (current !== 1)
+			ctx.addIssue({ code: "custom", message: "Invalid current device" })
 	})
 
 export type AccessDeviceDto = z.infer<typeof accessDeviceDtoSchema>

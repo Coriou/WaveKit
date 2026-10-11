@@ -126,7 +126,9 @@ export class SessionFlows {
 		if (admission.kind !== "authenticated") return admission
 		try {
 			// Original request authorization immediately precedes synchronous authority revalidation.
-			const snapshot = this.#sessions.snapshotActiveDevices(admission.principal.id)
+			const snapshot = this.#sessions.snapshotActiveDevices(
+				admission.principal.id,
+			)
 			return snapshot.kind === "active"
 				? flowSuccess(projectAccessDevices(snapshot.devices), admission.headers)
 				: this.#missing(admission)

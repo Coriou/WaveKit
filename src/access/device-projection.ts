@@ -1,4 +1,7 @@
-import { ACCESS_DEVICES_LIMITS, accessDevicesDtoSchema } from "@wavekit/api-types"
+import {
+	ACCESS_DEVICES_LIMITS,
+	accessDevicesDtoSchema,
+} from "@wavekit/api-types"
 import type { AccessDevicesDto } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 
@@ -10,10 +13,16 @@ export function projectAccessDevices(input: unknown): AccessDevicesDto {
 			input.length < 1 ||
 			input.length > ACCESS_DEVICES_LIMITS.maxDevices
 		)
-			throw new WaveKitError("Device inventory unavailable", "ACCESS_UNAVAILABLE")
+			throw new WaveKitError(
+				"Device inventory unavailable",
+				"ACCESS_UNAVAILABLE",
+			)
 		const devices = input.map((value: unknown) => {
 			if (!value || typeof value !== "object")
-				throw new WaveKitError("Device inventory unavailable", "ACCESS_UNAVAILABLE")
+				throw new WaveKitError(
+					"Device inventory unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
 			const row = value as Record<string, unknown>
 			return {
 				deviceId: row["deviceId"],
@@ -25,7 +34,10 @@ export function projectAccessDevices(input: unknown): AccessDevicesDto {
 		})
 		const parsed = accessDevicesDtoSchema.safeParse({ devices })
 		if (!parsed.success)
-			throw new WaveKitError("Device inventory unavailable", "ACCESS_UNAVAILABLE")
+			throw new WaveKitError(
+				"Device inventory unavailable",
+				"ACCESS_UNAVAILABLE",
+			)
 		return parsed.data
 	} catch {
 		throw new WaveKitError("Device inventory unavailable", "ACCESS_UNAVAILABLE")

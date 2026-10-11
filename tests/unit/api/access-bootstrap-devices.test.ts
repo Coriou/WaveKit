@@ -646,19 +646,39 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		const second = await env.pair()
 		const before = await fs.readFile(join(env.directory, "access-state.json"))
 		const privateBefore = env.context.api.sessions.exportSnapshot()
-		const headers = ["Host", browser.host, "Origin", origin, "Cookie", first.headers.cookie]
+		const headers = [
+			"Host",
+			browser.host,
+			"Origin",
+			origin,
+			"Cookie",
+			first.headers.cookie,
+		]
 		const get = await wire(env.server, "GET", "/api/access/devices", headers)
 		const head = await wire(env.server, "HEAD", "/api/access/devices", headers)
 		assertParity(get, head)
 		expect(get.status).toBe(200)
 		const dto = accessDevicesDtoSchema.parse(JSON.parse(get.body) as unknown)
 		expect(dto.devices).toHaveLength(2)
-		expect(dto.devices.filter(row => row.current).map(row => row.deviceId)).toEqual([first.body.deviceId])
-		expect(dto.devices.some(row => row.deviceId === second.body.deviceId)).toBe(true)
-		for (const row of dto.devices) expect(Object.keys(row).sort()).toEqual(["createdAt", "current", "deviceId", "expiresAt", "renewedAt"])
+		expect(
+			dto.devices.filter(row => row.current).map(row => row.deviceId),
+		).toEqual([first.body.deviceId])
+		expect(dto.devices.some(row => row.deviceId === second.body.deviceId)).toBe(
+			true,
+		)
+		for (const row of dto.devices)
+			expect(Object.keys(row).sort()).toEqual([
+				"createdAt",
+				"current",
+				"deviceId",
+				"expiresAt",
+				"renewedAt",
+			])
 		expect(get.headers["cache-control"]).toBe("no-store")
 		expect(get.headers["set-cookie"]).toBeUndefined()
-		expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(before)
+		expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(
+			before,
+		)
 		expect(env.context.api.sessions.exportSnapshot()).toEqual(privateBefore)
 	})
 
@@ -668,27 +688,77 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		const paired = await env.pair()
 		const cases: { headers: string[]; status: number }[] = [
 			{ headers: ["Host", browser.host, "Origin", origin], status: 401 },
-			{ headers: ["Host", browser.host, "Authorization", `Bearer ${env.token}`, "Cookie", paired.headers.cookie], status: 403 },
-			{ headers: ["Host", "foreign.invalid", "Cookie", paired.headers.cookie], status: 403 },
-			{ headers: ["Host", browser.host, "Origin", "http://foreign.invalid", "Cookie", paired.headers.cookie], status: 403 },
+			{
+				headers: [
+					"Host",
+					browser.host,
+					"Authorization",
+					`Bearer ${env.token}`,
+					"Cookie",
+					paired.headers.cookie,
+				],
+				status: 403,
+			},
+			{
+				headers: ["Host", "foreign.invalid", "Cookie", paired.headers.cookie],
+				status: 403,
+			},
+			{
+				headers: [
+					"Host",
+					browser.host,
+					"Origin",
+					"http://foreign.invalid",
+					"Cookie",
+					paired.headers.cookie,
+				],
+				status: 403,
+			},
 		]
 		for (const test of cases) {
-			const get = await wire(env.server, "GET", "/api/access/devices", test.headers)
-			const head = await wire(env.server, "HEAD", "/api/access/devices", test.headers)
+			const get = await wire(
+				env.server,
+				"GET",
+				"/api/access/devices",
+				test.headers,
+			)
+			const head = await wire(
+				env.server,
+				"HEAD",
+				"/api/access/devices",
+				test.headers,
+			)
 			assertParity(get, head)
 			expect(get.status).toBe(test.status)
 			expect(get.body).not.toContain("devices")
 		}
-		const headers = ["Host", browser.host, "Origin", origin, "Cookie", paired.headers.cookie]
-		const spy = vi.spyOn(env.context.api.sessions, "snapshotActiveDevices").mockImplementation(() => { throw new Error("private state path") })
+		const headers = [
+			"Host",
+			browser.host,
+			"Origin",
+			origin,
+			"Cookie",
+			paired.headers.cookie,
+		]
+		const spy = vi
+			.spyOn(env.context.api.sessions, "snapshotActiveDevices")
+			.mockImplementation(() => {
+				throw new Error("private state path")
+			})
 		const fault = await wire(env.server, "GET", "/api/access/devices", headers)
-		assertParity(fault, await wire(env.server, "HEAD", "/api/access/devices", headers))
+		assertParity(
+			fault,
+			await wire(env.server, "HEAD", "/api/access/devices", headers),
+		)
 		expect(fault.status).toBe(503)
 		expect(JSON.parse(fault.body)).toEqual({ code: "ACCESS_UNAVAILABLE" })
 		spy.mockRestore()
 		env.server.stopAdmission()
 		const sealed = await wire(env.server, "GET", "/api/access/devices", headers)
-		assertParity(sealed, await wire(env.server, "HEAD", "/api/access/devices", headers))
+		assertParity(
+			sealed,
+			await wire(env.server, "HEAD", "/api/access/devices", headers),
+		)
 		expect(sealed.status).toBe(503)
 	})
 
@@ -696,15 +766,41 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		const env = await setup()
 		await env.server.start()
 		const paired = await env.pair()
-		const headers = ["Host", browser.host, "Origin", origin, "Cookie", paired.headers.cookie]
-		for (const target of ["/api/access/devices?x=1", "/api/access/devices/", "/api/access/%64evices", "/api/access/../access/devices"]) {
+		const headers = [
+			"Host",
+			browser.host,
+			"Origin",
+			origin,
+			"Cookie",
+			paired.headers.cookie,
+		]
+		for (const target of [
+			"/api/access/devices?x=1",
+			"/api/access/devices/",
+			"/api/access/%64evices",
+			"/api/access/../access/devices",
+		]) {
 			const result = await wire(env.server, "GET", target, headers)
 			expect([400, 404]).toContain(result.status)
 			expect(result.body).not.toContain("createdAt")
 		}
-		const duplicate = await wire(env.server, "GET", "/api/access/devices", [...headers, "Cookie", paired.headers.cookie])
+		const duplicate = await wire(env.server, "GET", "/api/access/devices", [
+			...headers,
+			"Cookie",
+			paired.headers.cookie,
+		])
 		expect(duplicate.status).toBe(400)
-		const upgrade = await wire(env.server, "GET", "/api/access/devices", [...headers, "Connection", "Upgrade", "Upgrade", "websocket", "Sec-WebSocket-Version", "13", "Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ=="])
+		const upgrade = await wire(env.server, "GET", "/api/access/devices", [
+			...headers,
+			"Connection",
+			"Upgrade",
+			"Upgrade",
+			"websocket",
+			"Sec-WebSocket-Version",
+			"13",
+			"Sec-WebSocket-Key",
+			"dGhlIHNhbXBsZSBub25jZQ==",
+		])
 		expect(upgrade.status).toBe(400)
 		expect(upgrade.body).not.toContain("createdAt")
 	})
@@ -713,12 +809,20 @@ describe("assembled ApiServer session-only devices (A3 devices)", () => {
 		const env = await setup()
 		let target: string | undefined
 		env.app.addHook("preHandler", async request => {
-			if (target && request.url === "/api/access/devices") await env.context.api.sessions.revoke(target)
+			if (target && request.url === "/api/access/devices")
+				await env.context.api.sessions.revoke(target)
 		})
 		await env.server.start()
 		const paired = await env.pair()
 		target = paired.body.deviceId
-		const result = await wire(env.server, "GET", "/api/access/devices", ["Host", browser.host, "Origin", origin, "Cookie", paired.headers.cookie])
+		const result = await wire(env.server, "GET", "/api/access/devices", [
+			"Host",
+			browser.host,
+			"Origin",
+			origin,
+			"Cookie",
+			paired.headers.cookie,
+		])
 		expect(result.status).toBe(401)
 		expect(JSON.parse(result.body)).toEqual({ code: "AUTH_REQUIRED" })
 	})
@@ -728,19 +832,44 @@ describe("assembled device authority failure isolation", () => {
 	it("uses safe device serialization and reports actual uncertain storage as 503 on GET and HEAD", async () => {
 		const env = await setup()
 		env.app.addHook("preHandler", async (request, reply) => {
-			if (request.url === "/api/access/devices") reply.serializer(() => JSON.stringify({ private: "poison" }))
+			if (request.url === "/api/access/devices")
+				reply.serializer(() => JSON.stringify({ private: "poison" }))
 		})
 		await env.server.start()
 		const paired = await env.pair()
-		const headers = ["Host", browser.host, "Origin", origin, "Cookie", paired.headers.cookie]
-		const healthy = await wire(env.server, "GET", "/api/access/devices", headers)
-		expect(accessDevicesDtoSchema.safeParse(JSON.parse(healthy.body)).success).toBe(true)
+		const headers = [
+			"Host",
+			browser.host,
+			"Origin",
+			origin,
+			"Cookie",
+			paired.headers.cookie,
+		]
+		const healthy = await wire(
+			env.server,
+			"GET",
+			"/api/access/devices",
+			headers,
+		)
+		expect(
+			accessDevicesDtoSchema.safeParse(JSON.parse(healthy.body)).success,
+		).toBe(true)
 		expect(healthy.body).not.toContain("poison")
 		await env.context.close()
-		await expect(env.context.api.sessions.create()).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" })
-		const unavailable = await wire(env.server, "GET", "/api/access/devices", headers)
+		await expect(env.context.api.sessions.create()).rejects.toMatchObject({
+			code: "ACCESS_UNAVAILABLE",
+		})
+		const unavailable = await wire(
+			env.server,
+			"GET",
+			"/api/access/devices",
+			headers,
+		)
 		expect(unavailable.status).toBe(503)
 		expect(JSON.parse(unavailable.body)).toEqual({ code: "ACCESS_UNAVAILABLE" })
-		assertParity(unavailable, await wire(env.server, "HEAD", "/api/access/devices", headers))
+		assertParity(
+			unavailable,
+			await wire(env.server, "HEAD", "/api/access/devices", headers),
+		)
 	})
 })

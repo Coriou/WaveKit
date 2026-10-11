@@ -268,11 +268,17 @@ export class SessionStore {
 	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
 	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
 		if (this.#unavailable)
-			throw new WaveKitError("Session authority unavailable", "ACCESS_UNAVAILABLE")
+			throw new WaveKitError(
+				"Session authority unavailable",
+				"ACCESS_UNAVAILABLE",
+			)
 		const now = this.#now()
 		// The injected clock can reenter and invalidate authority. Capture only afterward.
 		if (this.#unavailable)
-			throw new WaveKitError("Session authority unavailable", "ACCESS_UNAVAILABLE")
+			throw new WaveKitError(
+				"Session authority unavailable",
+				"ACCESS_UNAVAILABLE",
+			)
 		const records = this.#records
 		const requester = records.get(requesterId)
 		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
@@ -287,9 +293,10 @@ export class SessionStore {
 				current: record.deviceId === requesterId,
 			})
 		}
-		devices.sort((a, b) =>
-			a.createdAt - b.createdAt ||
-			(a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0),
+		devices.sort(
+			(a, b) =>
+				a.createdAt - b.createdAt ||
+				(a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0),
 		)
 		return { kind: "active", devices }
 	}
