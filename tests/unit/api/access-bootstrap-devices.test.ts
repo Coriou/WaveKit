@@ -4,7 +4,7 @@ import fs from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import pino from "pino"
-import type { FastifyListenOptions } from "fastify"
+import type { FastifyListenOptions, FastifyRequest } from "fastify"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
 	ACCESS_BOOTSTRAP_LIMITS,
@@ -896,37 +896,40 @@ async function setupDeviceAuthority() {
 		held: boolean
 	}[] = []
 	let nextBarrier: (typeof barriers)[number] | undefined
-	const construction = vi.spyOn(SessionStore, "open").mockImplementationOnce(options =>
-		open({
-			...options,
-			epochNow: () => 1_000_000,
-			monotonicNow: () => {
-				clockReads.push(phase)
-				if (phase === "nested-failure") return NaN
-				if (phase === "snapshot" && fault === "expired") elapsed += 30 * 24 * 60 * 60 * 1000
-				if (phase === "snapshot" && fault === "invalid") return NaN
-				if (phase === "snapshot" && fault === "reentrant") {
-					phase = "nested-failure"
-					try {
-						store?.lookupByPrincipal(requester)
-					} finally {
-						phase = "snapshot"
+	const construction = vi
+		.spyOn(SessionStore, "open")
+		.mockImplementationOnce(options =>
+			open({
+				...options,
+				epochNow: () => 1_000_000,
+				monotonicNow: () => {
+					clockReads.push(phase)
+					if (phase === "nested-failure") return NaN
+					if (phase === "snapshot" && fault === "expired")
+						elapsed += 30 * 24 * 60 * 60 * 1000
+					if (phase === "snapshot" && fault === "invalid") return NaN
+					if (phase === "snapshot" && fault === "reentrant") {
+						phase = "nested-failure"
+						try {
+							store?.lookupByPrincipal(requester)
+						} finally {
+							phase = "snapshot"
+						}
+						returnedValidAfterReentry = true
 					}
-					returnedValidAfterReentry = true
-				}
-				return elapsed
-			},
-			persist: async snapshot => {
-				const barrier = nextBarrier
-				nextBarrier = undefined
-				if (barrier) {
-					barrier.signalEntered()
-					await barrier.gate
-				}
-				await options.persist(snapshot)
-			},
-		}),
-	)
+					return elapsed
+				},
+				persist: async snapshot => {
+					const barrier = nextBarrier
+					nextBarrier = undefined
+					if (barrier) {
+						barrier.signalEntered()
+						await barrier.gate
+					}
+					await options.persist(snapshot)
+				},
+			}),
+		)
 	let env: Awaited<ReturnType<typeof setup>>
 	try {
 		env = await setup()
@@ -937,25 +940,32 @@ async function setupDeviceAuthority() {
 	store = env.context.api.sessions
 	const snapshot = store.snapshotActiveDevices.bind(store)
 	// This wrapper labels clock scope only; it delegates all real snapshot logic/outcomes.
-	const snapshotScope = vi.spyOn(store, "snapshotActiveDevices").mockImplementation(id => {
-		requester = id
-		phase = "snapshot"
-		try {
-			return snapshot(id)
-		} finally {
-			phase = "ordinary"
-		}
-	})
+	const snapshotScope = vi
+		.spyOn(store, "snapshotActiveDevices")
+		.mockImplementation(id => {
+			requester = id
+			phase = "snapshot"
+			try {
+				return snapshot(id)
+			} finally {
+				phase = "ordinary"
+			}
+		})
 	deviceAuthorityCleanups.push(() => {
 		for (const barrier of barriers) barrier.release()
 		snapshotScope.mockRestore()
 	})
 	const holdNextPersist = () => {
-		if (nextBarrier) throw new Error("An unconsumed persistence barrier already exists")
+		if (nextBarrier)
+			throw new Error("An unconsumed persistence barrier already exists")
 		let signalEntered = () => {}
 		let releaseGate = () => {}
-		const entered = new Promise<void>(resolve => { signalEntered = resolve })
-		const gate = new Promise<void>(resolve => { releaseGate = resolve })
+		const entered = new Promise<void>(resolve => {
+			signalEntered = resolve
+		})
+		const gate = new Promise<void>(resolve => {
+			releaseGate = resolve
+		})
 		const barrier = {
 			entered,
 			signalEntered,
@@ -975,10 +985,16 @@ async function setupDeviceAuthority() {
 		clockReads,
 		snapshotScope,
 		holdNextPersist,
-		advance: (ms: number) => { elapsed += ms },
-		setFault: (value: "none" | "expired" | "invalid" | "reentrant") => { fault = value },
+		advance: (ms: number) => {
+			elapsed += ms
+		},
+		setFault: (value: "none" | "expired" | "invalid" | "reentrant") => {
+			fault = value
+		},
 		returnedValidAfterReentry: () => returnedValidAfterReentry,
-		releaseBarriers: () => { for (const barrier of barriers) barrier.release() },
+		releaseBarriers: () => {
+			for (const barrier of barriers) barrier.release()
+		},
 	}
 }
 
@@ -987,7 +1003,10 @@ function deviceHeaders(cookie: string): string[] {
 	return ["Host", browser.host, "Origin", origin, "Cookie", cookie]
 }
 
-async function deviceRead(env: Awaited<ReturnType<typeof setupDeviceAuthority>>, cookie: string) {
+async function deviceRead(
+	env: Awaited<ReturnType<typeof setupDeviceAuthority>>,
+	cookie: string,
+) {
 	const get = await wire(env.server, "GET", devicePath, deviceHeaders(cookie))
 	const head = await wire(env.server, "HEAD", devicePath, deviceHeaders(cookie))
 	assertParity(get, head)
@@ -1004,21 +1023,32 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		const barrier = env.holdNextPersist()
 		let completed = false
-		const pending = env.pair().then(result => { completed = true; return result })
+		const pending = env.pair().then(result => {
+			completed = true
+			return result
+		})
 		try {
 			await barrier.entered
 			const held = await deviceRead(env, first.headers.cookie)
 			expect(held).toEqual(before)
 			expect(barrier.held).toBe(true)
 			expect(completed).toBe(false)
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).toEqual(durable)
 			barrier.release()
 			const second = await pending
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).not.toEqual(durable)
 			const committed = await deviceRead(env, first.headers.cookie)
 			expect(committed.devices).toHaveLength(2)
-			expect(committed.devices.find(row => row.deviceId === second.body.deviceId)).toMatchObject({ current: false })
-			expect(committed.devices.find(row => row.current)?.deviceId).toBe(first.body.deviceId)
+			expect(
+				committed.devices.find(row => row.deviceId === second.body.deviceId),
+			).toMatchObject({ current: false })
+			expect(committed.devices.find(row => row.current)?.deviceId).toBe(
+				first.body.deviceId,
+			)
 		} finally {
 			env.releaseBarriers()
 			await pending
@@ -1035,16 +1065,29 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		env.advance(1000)
 		const barrier = env.holdNextPersist()
 		let completed = false
-		const pending = env.app.inject({ method: "POST", url: "/api/access/session/refresh", headers: paired.headers }).then(result => { completed = true; return result })
+		const pending = env.app
+			.inject({
+				method: "POST",
+				url: "/api/access/session/refresh",
+				headers: paired.headers,
+			})
+			.then(result => {
+				completed = true
+				return result
+			})
 		try {
 			await barrier.entered
 			expect(await deviceRead(env, paired.headers.cookie)).toEqual(before)
 			expect(barrier.held).toBe(true)
 			expect(completed).toBe(false)
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).toEqual(durable)
 			barrier.release()
 			expect((await pending).statusCode).toBe(200)
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).not.toEqual(durable)
 			const committed = await deviceRead(env, paired.headers.cookie)
 			expect(committed.devices[0]).toEqual({
 				...before.devices[0],
@@ -1067,20 +1110,36 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		const durable = await fs.readFile(join(env.directory, "access-state.json"))
 		const barrier = env.holdNextPersist()
 		let completed = false
-		const pending = env.app.inject({ method: "POST", url: "/api/access/devices/revoke", headers: requester.headers, payload: { deviceId: peer.body.deviceId } }).then(result => { completed = true; return result })
+		const pending = env.app
+			.inject({
+				method: "POST",
+				url: "/api/access/devices/revoke",
+				headers: requester.headers,
+				payload: { deviceId: peer.body.deviceId },
+			})
+			.then(result => {
+				completed = true
+				return result
+			})
 		try {
 			await barrier.entered
 			expect(await deviceRead(env, requester.headers.cookie)).toEqual(before)
 			expect(barrier.held).toBe(true)
 			expect(completed).toBe(false)
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).toEqual(durable)
 			barrier.release()
 			const result = await pending
 			expect(result.statusCode).toBe(200)
 			expect(result.json()).toEqual({ revoked: true })
-			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			expect(
+				await fs.readFile(join(env.directory, "access-state.json")),
+			).not.toEqual(durable)
 			const committed = await deviceRead(env, requester.headers.cookie)
-			expect(committed.devices).toEqual(before.devices.filter(row => row.deviceId !== peer.body.deviceId))
+			expect(committed.devices).toEqual(
+				before.devices.filter(row => row.deviceId !== peer.body.deviceId),
+			)
 		} finally {
 			env.releaseBarriers()
 			await pending
@@ -1093,7 +1152,7 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		for (const method of ["GET", "HEAD"]) {
 			const env = await setupDeviceAuthority()
 			let admitted = false
-			env.app.addHook("preHandler", async request => {
+			env.app.addHook("preHandler", async (request: FastifyRequest) => {
 				if (request.url === devicePath) {
 					admitted = true
 					env.setFault("expired")
@@ -1103,7 +1162,12 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 				await env.server.start()
 				const paired = await env.pair()
 				env.clockReads.length = 0
-				const result = await wire(env.server, method, devicePath, deviceHeaders(paired.headers.cookie))
+				const result = await wire(
+					env.server,
+					method,
+					devicePath,
+					deviceHeaders(paired.headers.cookie),
+				)
 				expect(admitted).toBe(true)
 				expect(result.status).toBe(401)
 				expect(result.headers["set-cookie"]).toBeUndefined()
@@ -1123,34 +1187,46 @@ describe("assembled device persistence and snapshot-clock schedules", () => {
 		assertParity(get, head)
 	})
 
-	it.each(["invalid", "reentrant"] as const)("fails closed only at the actual snapshot clock (%s), with wire GET/HEAD 503 parity", async fault => {
-		const responses: Awaited<ReturnType<typeof wire>>[] = []
-		for (const method of ["GET", "HEAD"]) {
-			const env = await setupDeviceAuthority()
-			try {
-				await env.server.start()
-				const paired = await env.pair()
-				env.clockReads.length = 0
-				env.setFault(fault)
-				const result = await wire(env.server, method, devicePath, deviceHeaders(paired.headers.cookie))
-				expect(env.snapshotScope).toHaveBeenCalledTimes(1)
-				expect(env.clockReads).toEqual(fault === "reentrant" ? ["ordinary", "ordinary", "snapshot", "nested-failure"] : ["ordinary", "ordinary", "snapshot"])
-				expect(env.context.api.sessions.unavailable).toBe(true)
-				expect(env.returnedValidAfterReentry()).toBe(fault === "reentrant")
-				expect(result.status).toBe(503)
-				expect(result.headers["set-cookie"]).toBeUndefined()
-				expect(result.body).not.toContain("devices")
-				expect(result.body).not.toContain("tokenHash")
-				expect(result.body).not.toContain("csrfToken")
-				responses.push(result)
-			} finally {
-				env.releaseBarriers()
-				env.snapshotScope.mockRestore()
+	it.each(["invalid", "reentrant"] as const)(
+		"fails closed only at the actual snapshot clock (%s), with wire GET/HEAD 503 parity",
+		async fault => {
+			const responses: Awaited<ReturnType<typeof wire>>[] = []
+			for (const method of ["GET", "HEAD"]) {
+				const env = await setupDeviceAuthority()
+				try {
+					await env.server.start()
+					const paired = await env.pair()
+					env.clockReads.length = 0
+					env.setFault(fault)
+					const result = await wire(
+						env.server,
+						method,
+						devicePath,
+						deviceHeaders(paired.headers.cookie),
+					)
+					expect(env.snapshotScope).toHaveBeenCalledTimes(1)
+					expect(env.clockReads).toEqual(
+						fault === "reentrant"
+							? ["ordinary", "ordinary", "snapshot", "nested-failure"]
+							: ["ordinary", "ordinary", "snapshot"],
+					)
+					expect(env.context.api.sessions.unavailable).toBe(true)
+					expect(env.returnedValidAfterReentry()).toBe(fault === "reentrant")
+					expect(result.status).toBe(503)
+					expect(result.headers["set-cookie"]).toBeUndefined()
+					expect(result.body).not.toContain("devices")
+					expect(result.body).not.toContain("tokenHash")
+					expect(result.body).not.toContain("csrfToken")
+					responses.push(result)
+				} finally {
+					env.releaseBarriers()
+					env.snapshotScope.mockRestore()
+				}
 			}
-		}
-		const [get, head] = responses
-		if (!get || !head) throw new Error("Missing wire responses")
-		expect(JSON.parse(get.body)).toEqual({ code: "ACCESS_UNAVAILABLE" })
-		assertParity(get, head)
-	})
+			const [get, head] = responses
+			if (!get || !head) throw new Error("Missing wire responses")
+			expect(JSON.parse(get.body)).toEqual({ code: "ACCESS_UNAVAILABLE" })
+			assertParity(get, head)
+		},
+	)
 })
