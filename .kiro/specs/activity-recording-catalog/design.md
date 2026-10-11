@@ -855,8 +855,10 @@ A pass permits Main to allocate implementation; it does not itself enable anythi
 
 ## Long-scenario extension plan (implementation and execution gated)
 
-The accepted microfixture remains the executable baseline. This section specifies
-an extension for independent design review, not permission to implement or run it.
+The accepted microfixture remains the executable baseline. This extension plan
+has passed independent design review. Only the first sequential driver/admission/
+report-containment item and bounded scaled tests are allocated; worker/query/
+receipt/fault implementation and real execution remain separately gated.
 Do not change the current `not-run` responses until the implementation phase is
 allocated and reviewed. Keep all changes within the seven paths listed above;
 no production modules, dependency changes, scanner imports or generalized store.
@@ -877,6 +879,47 @@ Each item retains small regression tests. These are dependency steps, not permis
 to launch parallel implementations. Do not add a generic scenario plugin interface.
 The independent design review precedes the first implementation item; exact code
 review and required checks precede an execution-window request.
+
+### First driver item: implemented boundary
+
+The first item adds callable driver routines exercised by bounded virtual clocks
+and fake acknowledgements: integer token admission, arithmetic stale-offer skipping,
+warmup/reset, queue charges retained through acknowledgement, single-assignment query
+outcomes, shared stage deadlines, reservation transfer, metadata-only live inventory,
+streaming final hashes and residue reporting. The CLI still runs only the accepted
+micro/runtime/disabled cases; every long scenario and phase returns `not-run` with
+explicit prerequisites. No long scheduler is mounted and no performance result is
+claimed. The65 bounded tests include the original20 micro regressions and four
+properties with100 cases each; tests do not establish real runtime/platform support.
+
+Warmup/load transition callbacks may arrive from the scheduled boundary through
+20ms late inclusive; earlier or later observations fail. The new phase uses the
+observed entry epoch, preserving the full900-second measured load. Lateness is
+reported and consumes the unchanged1,200-second total budget; it adds no worker
+budget. Warmup must already have drained by the scheduled30-second boundary;
+asynchronous receipt/control callbacks supply their observed monotonic clock.
+Query settlement requires an observed monotonic microsecond timestamp; expiration
+at250,000 microseconds is established before accepting a reply, regardless of
+timeout callback order. Query terminal accounting retains physical reader ownership
+on timeout. A valid
+terminal reply confirms settlement; otherwise a matching request/owner-token join
+confirmation is required before reuse. Late replies and stale joins cannot change
+terminals or release a newer owner; failed join forbids reuse. Batch `bytes` counts
+the complete serialized `{id,bytes,rows}` envelope, including array separators and
+the size field itself, within262,144 bytes. Data and the separate1 KiB control
+reservation remain charged through settlement and release once.
+
+Before the next worker item can execute storage, settle its narrow interface:
+one writer batch ID with bounded rows/serialized bytes, exactly one terminal batch
+acknowledgement (`committed`, `failed`, or `uncertain`) and a separately observed
+receipt clock; baseline acknowledgements must have equivalent queue ownership.
+Reader dispatch/cancel/join and bounded result bytes must agree with driver query
+accounting before any query worker is connected. Every mutation needs an enforced
+DB/WAL growth bound; an `enforced` flag in a virtual fixture is not evidence of an
+actual bound. The existing micro worker accepts only micro/runtime and is unchanged.
+A separately accepted capped capture consumer and post-exit verification remain
+required for real runs. These are prerequisites, not authorization to implement
+the worker/query/receipt/fault item in this delivery.
 
 ### Closed execution phases and containment
 
