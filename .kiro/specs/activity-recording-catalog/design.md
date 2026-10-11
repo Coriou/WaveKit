@@ -853,6 +853,235 @@ raw-log locations and explicit unsupported matrix cells. Independent review deci
 whether to accept SQLite, reduce stated defaults or reopen binding/storage choice.
 A pass permits Main to allocate implementation; it does not itself enable anything.
 
+## Long-scenario extension plan (implementation and execution gated)
+
+The accepted microfixture remains the executable baseline. This section specifies
+an extension for independent design review, not permission to implement or run it.
+Do not change the current `not-run` responses until the implementation phase is
+allocated and reviewed. Keep all changes within the seven paths listed above;
+no production modules, dependency changes, scanner imports or generalized store.
+
+### File changes and delivery order
+
+| Owned file                 | Planned extension                                                                                                                                                | Bounded verification before any long run                                                                                                                                          |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run.mjs`                  | Closed scenario/phase plan, preflight allocation, scheduled admission, bounded IPC, writer/reader supervision, aggregate metrics and preliminary/final reporting | Virtual clock schedules; queue saturation; cancel/deadline at setup/load/drain/hash/report/cleanup; worker death and unconfirmed termination; low-space and replaced-path refusal |
+| `worker.mjs`               | Explicit writer/reader roles; fixture schema/indexes/FTS, bounded transactions/queries, receipt epochs, crash barriers, WAL accounting and recovery              | Small actual SQLite fixtures with fixed failpoints; indexed query plans and result oracle; integrity/receipt checks after process-contained worker termination                    |
+| `workloads.mjs`            | Streaming timed offers, independent integer-time admission oracle, deterministic query mix, fixed receipt/fault schedules and seed42 manifest                    | At least100 bounded generated schedules; exact totals, equality boundaries and reason partition; no stored list of all events                                                     |
+| `activity-storage.test.ts` | Scaled fixtures, controllable clock/IPC and fault injection; retain all20 micro regressions                                                                      | One worker/test process at a time; short deadlines; no500k-row setup or15-minute run in the test suite                                                                            |
+| Three spec files           | Methodology, actual sanitized results, remaining matrix gaps and task state                                                                                      | Preserve requirement/property numbers; no result marked measured before its execution report exists                                                                               |
+
+Implement in one allocated work item at a time: driver/admission/report containment,
+then worker/query/receipt/fault scenarios, then exact whole-extension review.
+Each item retains small regression tests. These are dependency steps, not permission
+to launch parallel implementations. Do not add a generic scenario plugin interface.
+The independent design review precedes the first implementation item; exact code
+review and required checks precede an execution-window request.
+
+### Closed execution phases and containment
+
+Each invocation runs one scenario and one phase (`baseline` or `storage`), with
+fixed seed42, runtime executable selected by the operator outside the driver, and
+an exclusive fresh output directory. No arbitrary executable, SQL, path or module
+argument. A baseline and its storage pair are separate sequential invocations,
+never both15-minute phases inside a20-minute deadline. Both must have the same
+source/workload hashes, seed, scheduler, metrics settings and scenario duration.
+A baseline exercises payload generation, admission, queue accounting and ack-shaped
+messages with the database work disabled; label the omitted I/O explicitly.
+
+The main driver owns at most one writer and one reader worker, with one fixed
+control channel per worker. No descendants or detached processes. Bounded fixture
+crashes terminate an owned worker at an explicit transaction barrier; they do not
+claim whole-process/power-loss recovery. Reopen only after confirmed worker exit.
+A query deadline terminates its reader when no safe SQL interruption is available;
+join before replacement, cap replacements at32 per invocation and fail on excess.
+Do not require a newer SQLite interrupt API than the runtime being qualified.
+
+End-to-end budget is1,200 seconds from preflight through the cleanup attempt:
+setup at most180s, warmup30s, load900s, drain15s, remaining75s for close, hashing,
+report and cleanup. A stage consumes its budget or fails; it cannot borrow by
+silently shortening the measured900s. A seed setup that cannot finish in180s is
+an explicit setup-cap failure, not permission to keep running. Non-load fault
+and receipt cases use at most60s including cleanup. One deadline covers replacements
+and recovery too; per-stage timers do not reset it. Retain the100ms worker-join
+grace and fatal-containment behavior from the microfixture. If a worker cannot be
+joined, exit the owned CLI process without inspecting/deleting its files; preserve
+path/phase/failure information on stderr for controlled later recovery. No claim
+of absolute interruption while an OS/native call is stalled.
+
+Driver signals stop admission, cancel readers, drain/abort acknowledged work, then
+join all workers before file inspection. Failure of statfs must not suppress safe
+cleanup. Stream artifact hashing in64 KiB blocks after join instead of reading a
+multi-GiB database into memory; check the deadline between blocks. Save hashes in
+the preliminary report before deleting verified task files. The saved report stays
+`completion: pending`; the returned/CLI result includes final persistence/cleanup
+elapsed, cleanup failures and detected deadline overruns. The execution operator
+captures bounded stdout as final evidence; a preliminary report alone is incomplete.
+No repeated rewriting can make a report include the duration of its own final write.
+Preserve unsafe files and explicit residue inventory; never delete an arbitrary
+output tree. All output/capture files count toward the artifact limit.
+
+### Admission, offered load and queue measurements
+
+Use integer microsecond scheduled times with a rational/integer token oracle, not
+wall-clock floating-point drift. Full starting buckets: global100/s capacity1,000;
+each of10 producers50/s capacity200. Offers evenly spaced in each second, round-robin
+across producers. Reference admission uses scheduled time; actual scheduling records
+lateness independently. A stalled driver must not regenerate an unbounded backlog:
+process at most64 overdue offers per turn, aggregate skipped offers as scheduler
+misses and fail workload fidelity rather than quietly dropping or catching up forever.
+Any missed scheduled offer invalidates latency/load acceptance for that run.
+
+For900s, steady offers90,000; burst offers84,600 (58s at80/s plus2s at500/s per minute,
+94/s mean); overload offers450,000. With ideal scheduled timing the first two have
+zero token rejects; overload admits90,999 and rejects359,001 globally (last offer
+at899.998s, producers never exceed50/s). Test these totals without real-time waiting.
+Reference results remain independent from observed admission. Do not equate expected
+token rejection with storage loss or silently grant more tokens after stalls.
+
+Admission order: validate payload, test per-producer/global tokens, test queue slots
+and bytes, then consume tokens only for an admitted event. Record rate rejection
+separately from byte/queue/storage/disk denial. The reference token-only schedule
+is still reported if queue pressure changes actual token consumption. Normal load
+must match reference admission; overload must match expected rate rejects absent
+other pressure. Queue-pressure fault tests instead compare the full explicit
+admission-decision trace against a bounded reference including releases.
+
+At most1,024 data events/8 MiB of unacknowledged serialized bytes and128 control
+items/2 MiB, including data transferred into worker IPC queues. Account each
+message until ack/rejection, not just until `postMessage` returns. One in-flight
+writer batch at a time, at most64 rows/256 KiB and20ms batch dwell; control cannot
+bypass transaction serialization or become an unbounded ack backlog. Reject a
+144 KiB payload only when actual row/queue budget is exhausted; it fits the designed
+maximum and must not be unconditionally treated as oversized. Test oversize separately.
+
+Record offered, invalid, rate-rejected, queue-denied, storage-denied, admitted,
+committed, acknowledged, duplicate receipts, uncertain and scheduler-missed counts.
+Every admitted ID ends in committed, explicit failed, or uncertain-at-crash; a lost
+ack is not proof of lost commit. Receipt latency starts at admission and ends at
+ack reception, including queueing and commit. Report all failure/timeout counts
+beside percentiles so failures cannot improve apparent latency. Proposed acceptance
+remains p99 receipt≤250ms and p99 added main-loop delay≤5ms against matched baseline.
+
+### Fixture schema, search and receipts
+
+Use synthetic immutable rows containing integer commit sequence, event UUID,
+producer ID, ingress time, closed kind, frequency and bounded text/payload. Add
+unique event identity, `(kind, sequence)`, `(producer, sequence)` and
+`(frequency, sequence)` indexes plus external-content FTS5 with transactionally
+maintained insert/delete triggers. Explain actual indexed plans for each closed
+query; do not claim the production DTO/filter API is implemented. One SQLite writer,
+one read-only reader; actual journal mode, synchronous, page size, busy timeout,
+max page count and autocheckpoint settings captured at open and each reopen.
+
+The query scenario seeds100k or500k rows as separate invocations. Generate rows
+incrementally in64-row/256 KiB batches, checking physical/logical budgets between
+transactions. At2.5 KiB/row,500k payload alone is1.19 GiB; indexes/FTS may exceed the
+2 GiB database budget. Stop with capacity/setup-cap outcome and report attained row
+count instead of reducing payload or raising caps. No500k support claim if seed
+cannot fit. Measure100k before requesting500k. Exclude seeding from query latency
+but include it in total CPU/time/disk budgets and preserve its metrics separately.
+
+Eight simulated clients, at most one request each, one active reader query plus
+four queued requests; excess receives explicit admission denial, no hidden queue.
+Fixed mix rotates indexed frequency/kind/producer+keyset, FTS common/rare/empty,
+and empty filtered scan pages. Page≤200 rows and1 MiB serialized, tokenized search
+≤256 UTF-8 bytes/eight terms, no arbitrary SQL/FTS grammar. Use a deterministic
+bounded expected-result oracle computed from fixture generation, with high-water
+barrier and scanned-through handling checked across insert/prune/restart fixtures.
+Successful query p95≤250ms; deadline250ms plus≤100ms termination confirmation,
+including time queued. Report queued expiry, active timeout, cancellation and
+rejected requests separately. Slow-reader case withholds at most one reply/client;
+response bytes stay charged until released and cannot retain a SQLite transaction.
+
+Receipt fixture:20 virtual minute epochs, independent receipt/event tables,
+16-minute admission-ticket expiry, immutable event IDs and unique producer revisions.
+Schedules cover commit-before-ack failure, prune-before-retry, retry before/after
+expiry, unknown epoch, epoch close/cleanup ordering and restore generation change.
+Check original receipt or explicit expiry, never reappend. This is a narrow test
+fixture of the approved invariants, not a reusable ingestion framework. Report
+live event/index/FTS/receipt bytes separately where SQLite exposes them, otherwise
+mark attribution estimated/unavailable and retain aggregate file sizes. Derive
+retention horizon from measured overhead and receipt occupancy, not payload alone.
+
+### Fault, WAL and resource budgets
+
+Closed failpoints: before BEGIN, during inserts, after COMMIT before ack, receipt
+cleanup, retained reader/checkpoint, SQLITE_BUSY, statfs failure and synthetic
+ENOSPC before/during transaction. Capture commit/ack uncertainty, then inspect
+integrity, FTS equivalence and receipt uniqueness after confirmed worker death and
+reopen. No fault fills the filesystem. Restoration uses only a closed/checkpointed
+fixture copy, with both copies charged; no copying a live database without WAL.
+Actual power loss, directory durability and native recorder recovery remain outside
+this harness. Fixed failpoints must be reachable deterministically without delays.
+
+WAL profile16 MiB checkpoint warning,48 MiB stop ordinary admission/drain reader,
+64 MiB hard ceiling. A pinned reader forces measurable pressure in a bounded case.
+Before each transaction reserve worst-case growth, not just payload bytes: derive
+a conservative page-write ceiling for the closed schema and capped batch, including
+FTS/index changes, from page-count/allocation bounds. If no defensible growth bound
+can be enforced on an actual runtime, report WAL hard-cap qualification unsupported
+and leave pressure execution disabled; never claim a post-commit size check enforces
+64 MiB. Record reserved vs actual DB/WAL growth and checkpoint busy/overshoot.
+No full VACUUM; large cleanup is bounded incremental deletion with transaction caps.
+
+Preflight hard limits: DB2 GiB inclusive of256 MiB reserved receipt/catalog-headroom
+(no catalog rows implemented); WAL64 MiB; all artifacts including SHM, copies,
+reports, captures and residue≤4 GiB. A restore copy is admitted only if worst-case
+aggregate fits. Free disk≥8 GiB plus configured reserve (minimum1 GiB) and all
+unmaterialized reservations; after materialization transfer reservations to measured
+inventory once, without double counting. Unknown statfs/inventory denies admission.
+Check at every batch and at least once per second during idle/query phases. Abort
+on reserve breach; failed cleanup retains explicit bytes/path ownership in report.
+
+Sample main-loop delay at10ms resolution; fixed histograms with stated bin error,
+no unbounded latency sample arrays. CPU comes from process user/system deltas,
+reported per phase and as core equivalents; proposed safety stop is sustained
+
+> 1.5 cores for10 consecutive one-second samples, not a claimed throughput target.
+> Resource sampling1Hz, at most1,200 samples; aggregate progress≤1 KiB/s; report≤1 MiB
+> and bounded final stdout≤1 MiB. Sampling and logging run identically in baseline
+> and storage. Report measured instrumentation-only CPU/loop overhead separately;
+> no overhead subtraction disguises missed load or failures.
+
+The192 MiB worker-RSS objective cannot be isolated by summing worker_threads RSS,
+which is process-wide. Report whole-process peak RSS and separate worker heap/external
+metrics, never mislabeled worker RSS. For this extension enforce conservative
+whole-process RSS≤192 MiB, plus main retained heap/external growth≤32 MiB over
+matched baseline at warmup/drain. If startup alone exceeds this conservative cap,
+report unsupported measurement configuration; do not loosen it silently. Sampling
+can miss transient/native allocations, so record that limitation and worker heap
+limits rather than claiming a hard native-RSS ceiling. Per-worker V8 limits bound
+heaps only. CPU/RSS/loop limits abort execution with explicit incomplete accounting.
+
+### Resource-window proposal and known gaps
+
+No window is active. After exact extension review, request individual sequential
+slots: actual-runtime disabled/micro smoke first;100k query setup/cases (≤20min);
+steady baseline then storage (≤20min each); burst baseline then storage; overload
+baseline then storage; receipt/fault cases (≤60s each);500k query case only after
+capacity evidence; other approved native runtime/architecture cells separately.
+Clean or explicitly account for each slot's residue before the next. Do not queue
+an unattended matrix or overlap suites/other lanes. Each slot states exact executable,
+source hashes, scenario/phase, deadline, estimated CPU/RSS/disk and abort criteria.
+Paired comparison requires both slots on the same quiet host/settings; unmatched
+or interrupted halves remain incomplete, not performance acceptance.
+
+Known actual evidence is Node25.2.1 microtests only. Node20 disabled behavior tested
+with injected version strings is not an actual Node20 execution. Node22.13 minimum,
+Node22.23.3, native Linux AMD64/ARM64 and deployment filesystems remain unverified
+until their exact executables/runners are provided and measured. No runtime install,
+container/image build or emulation is inferred. FTS/API support is probed on each
+actual cell, not inferred from version parsing. Cross-runtime tests report skips
+and unsupported capabilities without converting them into success.
+
+`combined` stays `not-run` throughout this extension: a real accepted-scanner
+recorded-IQ baseline requires separately allocated integration/instrumentation and
+its own15-minute paired window. No scanner app import, live receiver or production
+mount is authorized by these seven paths. Completion of synthetic qualification
+can support a storage decision; it cannot accept SQLite packaging, full-system
+resource impact or catalog/recording lifecycle integration.
+
 ## Migrations, repair and acceptance
 
 Open state load-only during normal boot; explicit feature setup creates directories.
