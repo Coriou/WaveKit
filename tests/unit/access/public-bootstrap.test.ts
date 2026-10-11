@@ -99,15 +99,36 @@ async function bootstrapWire(
 		body: string
 		json: () => unknown
 	}>((resolve, reject) => {
-		const request = httpRequest({ host: "127.0.0.1", port: address.port, path: options.url, method: options.method ?? "GET", headers: options.headers, agent: false }, response => {
-			let body = ""
-			response.setEncoding("utf8")
-			response.on("data", (chunk: string) => { body += chunk })
-			response.on("error", reject)
-			response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, headers: response.headers, body, json: () => JSON.parse(body) as unknown }))
-		})
+		const request = httpRequest(
+			{
+				host: "127.0.0.1",
+				port: address.port,
+				path: options.url,
+				method: options.method ?? "GET",
+				headers: options.headers,
+				agent: false,
+			},
+			response => {
+				let body = ""
+				response.setEncoding("utf8")
+				response.on("data", (chunk: string) => {
+					body += chunk
+				})
+				response.on("error", reject)
+				response.on("end", () =>
+					resolve({
+						statusCode: response.statusCode ?? 0,
+						headers: response.headers,
+						body,
+						json: () => JSON.parse(body) as unknown,
+					}),
+				)
+			},
+		)
 		request.on("error", reject)
-		request.setTimeout(2000, () => request.destroy(new Error("Wire request timeout")))
+		request.setTimeout(2000, () =>
+			request.destroy(new Error("Wire request timeout")),
+		)
 		request.end()
 	})
 }

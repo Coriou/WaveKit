@@ -1,5 +1,10 @@
 import { EventEmitter, once } from "node:events"
-import { get, request as httpRequest, IncomingMessage as RawRequest, ServerResponse } from "node:http"
+import {
+	get,
+	request as httpRequest,
+	IncomingMessage as RawRequest,
+	ServerResponse,
+} from "node:http"
 import { Socket } from "node:net"
 import type { IncomingMessage } from "node:http"
 import Fastify from "fastify"
@@ -940,21 +945,51 @@ describe("unmounted root Fastify access hooks", () => {
 
 async function bootstrapWire(
 	app: ReturnType<typeof Fastify>,
-	options: { method: "GET" | "HEAD"; url: string; headers: Record<string, string> },
+	options: {
+		method: "GET" | "HEAD"
+		url: string
+		headers: Record<string, string>
+	},
 ) {
 	if (!app.server.listening) await listen(app)
 	const bound = app.addresses()[0]
 	if (!bound) throw new Error("Missing listener")
-	return await new Promise<{ statusCode: number; body: string; headers: import("node:http").IncomingHttpHeaders; json: () => unknown }>((resolve, reject) => {
-		const request = httpRequest({ host: "127.0.0.1", port: bound.port, path: options.url, method: options.method, headers: options.headers, agent: false }, response => {
-			let body = ""
-			response.setEncoding("utf8")
-			response.on("data", (chunk: string) => { body += chunk })
-			response.on("error", reject)
-			response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, headers: response.headers, body, json: () => JSON.parse(body) as unknown }))
-		})
+	return await new Promise<{
+		statusCode: number
+		body: string
+		headers: import("node:http").IncomingHttpHeaders
+		json: () => unknown
+	}>((resolve, reject) => {
+		const request = httpRequest(
+			{
+				host: "127.0.0.1",
+				port: bound.port,
+				path: options.url,
+				method: options.method,
+				headers: options.headers,
+				agent: false,
+			},
+			response => {
+				let body = ""
+				response.setEncoding("utf8")
+				response.on("data", (chunk: string) => {
+					body += chunk
+				})
+				response.on("error", reject)
+				response.on("end", () =>
+					resolve({
+						statusCode: response.statusCode ?? 0,
+						headers: response.headers,
+						body,
+						json: () => JSON.parse(body) as unknown,
+					}),
+				)
+			},
+		)
 		request.on("error", reject)
-		request.setTimeout(2000, () => request.destroy(new Error("Wire request timeout")))
+		request.setTimeout(2000, () =>
+			request.destroy(new Error("Wire request timeout")),
+		)
 		request.end()
 	})
 }
