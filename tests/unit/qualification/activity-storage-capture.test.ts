@@ -668,6 +668,74 @@ describe("POSIX root and pipe ownership under virtual deadlines", () => {
 			expect(vi.getTimerCount()).toBe(0)
 		},
 	)
+	it.each([
+		["cancel", 1200000],
+		["cancel", 1200001],
+		["cancel", 1201000],
+		["cancel", 1201001],
+		["write", 1200000],
+		["write", 1200001],
+		["write", 1201000],
+		["write", 1201001],
+	] as const)(
+		"anchors %s at observed %ims before the overdue driver callback",
+		async (kind, at) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			const timer = vi.spyOn(globalThis, "setTimeout")
+			let clock = 0
+			let settled = false
+			const child = new Child()
+			const controller = new AbortController()
+			const kill = vi.fn()
+			const sink = writers()
+			if (kind === "write") sink.stdout.mockImplementation(() => 0)
+			const pending = consumer
+				.superviseChild(() => child, sink, {
+					now: () => clock,
+					signal: controller.signal,
+					kill,
+					sample: normalSample,
+				})
+				.then(result => {
+					settled = true
+					return result
+				})
+			const driverTimer = timer.mock.calls.find(
+				call => call[1] === 1200000,
+			)?.[0]
+			expect(typeof driverTimer).toBe("function")
+			clock = at
+			if (kind === "cancel") controller.abort()
+			else {
+				child.stdout.write(Buffer.from("fail"))
+				await flush()
+			}
+			// Deliver the already overdue driver callback after the first failure,
+			// before dispatching the termination callbacks it scheduled.
+			if (typeof driverTimer === "function") driverTimer()
+			const remaining = Math.max(0, 1201000 - at)
+			if (remaining > 0) {
+				clock += remaining - 1
+				await vi.advanceTimersByTimeAsync(remaining - 1)
+				expect(settled).toBe(false)
+				clock++
+				await vi.advanceTimersByTimeAsync(1)
+			} else await vi.advanceTimersByTimeAsync(0)
+			expect(settled).toBe(true)
+			expect(await pending).toMatchObject({
+				reason:
+					kind === "cancel" ? "cancelled" : expect.stringContaining("write"),
+				joined: false,
+				writersSettled: true,
+				terminationMs: Math.max(1000, at - 1200000),
+			})
+			expect(kill.mock.calls).toEqual([
+				[4242, "SIGTERM"],
+				[4242, "SIGKILL"],
+			])
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
 	it("does not restart termination grace when the driver timer is delivered late", async () => {
 		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
 		let clock = 0

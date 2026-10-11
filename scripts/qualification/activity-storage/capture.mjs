@@ -1071,7 +1071,7 @@ export async function superviseChild(
 	const abort = (reason, deadline = now()) => {
 		latch.assign(reason)
 		if (abortAt !== null || stopped) return
-		abortAt = deadline
+		abortAt = Math.min(deadline, driverEnd)
 		send("SIGTERM")
 		timer(() => send("SIGKILL"), Math.max(0, abortAt + 100 - now()))
 		timer(
