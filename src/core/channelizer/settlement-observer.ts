@@ -86,6 +86,8 @@ export interface AcquisitionSnapshot {
 	readonly logical: "queued" | "acquiring" | "granted" | "terminal"
 	readonly currentBinding: ObservedGrantBinding | undefined
 	readonly ended: boolean
+	/** Sticky loss of continuity for the selected grant; never resource proof. */
+	readonly continuityLost: boolean
 	readonly native: ProofState
 	readonly local: ProofState
 	readonly components: Readonly<Record<ComponentKind, ProofState>>
@@ -421,6 +423,8 @@ interface HandleData {
 	terminal: boolean
 	ended: boolean
 	binding: ObservedGrantBinding | undefined
+	continuityLost: boolean
+	pendingContinuityNotification: SendClaim | undefined
 	readonly listeners: Set<() => void>
 	readonly components: Map<ComponentKind, ConsumerComponent>
 	abortListener: (() => void) | undefined
@@ -477,6 +481,7 @@ interface SendData {
 	disposed: boolean
 	connector: LocalCleanupClaim | undefined
 	released: boolean
+	continuityLost: boolean
 }
 const sends = new WeakMap<SendClaim, SendData>()
 
@@ -1050,6 +1055,7 @@ export class ObservedAcquisitionHandle {
 			logical: h.logical,
 			currentBinding: h.binding,
 			ended: h.ended,
+			continuityLost: h.continuityLost,
 			native,
 			local,
 			components: states,
@@ -1552,6 +1558,8 @@ export class ChannelSettlementObserver {
 			terminal: false,
 			ended: false,
 			binding: undefined,
+			continuityLost: false,
+			pendingContinuityNotification: undefined,
 			listeners: new Set(),
 			components: new Map(),
 			abortListener: undefined,
@@ -1599,7 +1607,8 @@ export class ChannelSettlementObserver {
 			sampleIndex: number,
 			dropped: number,
 			cause: "queue-overflow" | "input-gap",
-		) =>
+		) => {
+			this.publishPendingContinuity(id, generation)
 			adapter.emit(
 				"channel-discontinuity",
 				id,
@@ -1608,6 +1617,7 @@ export class ChannelSettlementObserver {
 				dropped,
 				cause,
 			)
+		}
 		const a = this.provider.ownListener(() => {
 			provider.off("channel-invalidated", invalidated)
 			if (
@@ -1841,11 +1851,88 @@ export class ChannelSettlementObserver {
 			disposed: false,
 			connector: undefined,
 			released: false,
+			continuityLost: false,
 		})
 		slot.send = send
 		p.sends.set(token, send)
 		p.current.set(id, send)
 		return send
+	}
+	/** Capture only manager-owned current native identity, before public reentry. */
+	captureDiscontinuity(
+		process: ProcessClaim,
+		id: string,
+		generation: number,
+	): SendClaim | undefined {
+		const p = processes.get(process)
+		if (
+			!p ||
+			process.provider !== this.provider ||
+			p.released ||
+			p.sealed ||
+			p.close ||
+			generation !== process.source.generation
+		)
+			return undefined
+		const send = p.current.get(id)
+		if (!send || send.process !== process || p.sends.get(send.token) !== send)
+			return undefined
+		const s = sends.get(send)!
+		const handle = transactions.get(s.tx)!.handle,
+			h = handles.get(handle)!
+		if (
+			s.phase !== "opened" ||
+			!s.recorded ||
+			s.released ||
+			s.disposed ||
+			h.observer !== this ||
+			h.released ||
+			h.canceled ||
+			h.ended ||
+			(h.terminal && !h.binding) ||
+			(h.binding && h.binding.send !== send)
+		)
+			return undefined
+		s.continuityLost = true
+		if (h.binding?.send === send && !h.continuityLost) {
+			h.continuityLost = true
+			h.pendingContinuityNotification = send
+		}
+		return send
+	}
+	/** Delivery only: the public ID/generation event cannot manufacture a gap. */
+	private publishPendingContinuity(id: string, generation: number): void {
+		const v = providerData(this.provider)
+		if (v.handles.size > 192) {
+			failure(this.provider, failed())
+			this.sealAdmission()
+			return
+		}
+		for (const handle of [...v.handles]) {
+			const send = handles.get(handle)!.pendingContinuityNotification
+			if (send?.id === id && send.process.source.generation === generation)
+				this.publishCapturedDiscontinuity(send)
+		}
+	}
+	/** Idempotent fallback when an earlier public listener throws or reenters. */
+	publishCapturedDiscontinuity(send: SendClaim): void {
+		const s = sends.get(send)
+		if (!s || send.process.provider !== this.provider) return
+		const handle = transactions.get(s.tx)!.handle,
+			h = handles.get(handle)!
+		if (h.observer !== this || h.pendingContinuityNotification !== send) return
+		h.pendingContinuityNotification = undefined
+		if (
+			h.released ||
+			h.canceled ||
+			h.ended ||
+			h.binding?.send !== send ||
+			h.binding.process !== send.process ||
+			h.binding.channelId !== send.id ||
+			h.binding.generation !== send.process.source.generation
+		)
+			return
+		notify(handle)
 	}
 	captureTerminal(
 		process: ProcessClaim,
@@ -1920,6 +2007,9 @@ export class ChannelSettlementObserver {
 			...binding,
 			realised: Object.freeze({ ...binding.realised }),
 		})
+		// A gap can arrive after opened while connector completion is still pending.
+		// Transfer only this selected send's bit before grant/result callbacks.
+		h.continuityLost ||= s.continuityLost
 		h.logical = "granted"
 		const handle = transactions.get(s.tx)!.handle,
 			record = this.grantSubscription

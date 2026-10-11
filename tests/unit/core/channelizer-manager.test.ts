@@ -9,6 +9,7 @@ import {
 	vi,
 } from "vitest"
 import { EventEmitter } from "node:events"
+import type { ChildProcess } from "node:child_process"
 import { mkdirSync, rmSync } from "node:fs"
 import { createConnection, type Socket } from "node:net"
 import { PassThrough, Writable } from "node:stream"
@@ -28,6 +29,10 @@ import {
 import {
 	ObservedPermitLedger,
 	SettlementRegistry,
+} from "../../../src/core/channelizer/settlement-observer.js"
+import type {
+	ProcessClaim,
+	SendClaim,
 } from "../../../src/core/channelizer/settlement-observer.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
 import type { Logger } from "../../../src/utils/logger.js"
@@ -171,6 +176,198 @@ afterEach(async () => {
 })
 
 describe("ChannelizerManager", () => {
+	it.each(["preconnect", "throw", "reentry"] as const)(
+		"captures exact gap ownership before %s callbacks with unchanged public arguments",
+		async mode => {
+			// Real registry/manager/forwarder, synthetic process events and connector.
+			// This is a provenance schedule, not a native/bootstrap/physical-close proof.
+			const registry = new SettlementRegistry(),
+				lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			const ledger = new ObservedPermitLedger(
+				{ cpu: 100, bytes: 100_000 },
+				{ cpu: 0, bytes: 0 },
+			)
+			let processClaim: ProcessClaim | undefined,
+				proc: ChannelizerProcess | undefined
+			let currentSend: SendClaim | undefined
+			const claimProcess = observer.claimProcess.bind(observer)
+			const claimSpy = vi
+				.spyOn(observer, "claimProcess")
+				.mockImplementation((...args) => {
+					processClaim = claimProcess(...args)
+					return processClaim
+				})
+			const input = new PassThrough()
+			const inputSpy = vi
+				.spyOn(ChannelizerProcess.prototype, "input", "get")
+				.mockReturnValue(input)
+			const startSpy = vi
+				.spyOn(ChannelizerProcess.prototype, "start")
+				.mockImplementation(async function (this: ChannelizerProcess) {
+					proc = this
+					const claim = processClaim!
+					claim.beginSpawn()
+					claim.recordReturnedChild(new EventEmitter() as ChildProcess)
+					claim.recordStartSettled()
+					this.emit("event", {
+						v: 1,
+						type: "ready",
+						generation: claim.source.generation,
+						pid: 1,
+					})
+				})
+			const openSpy = vi
+				.spyOn(ChannelizerProcess.prototype, "sendObserved")
+				.mockImplementation(function (this: ChannelizerProcess, open, send) {
+					currentSend = send
+					this.emit("event", {
+						v: 1,
+						type: "opened",
+						id: open.id,
+						generation: send.process.source.generation,
+						socket: "synthetic",
+						outputRateHz: 48_000,
+						format: "cf32",
+						filterTaps: 10,
+						groupDelaySamples: 2,
+					})
+				})
+			const controlSpy = vi
+				.spyOn(ChannelizerProcess.prototype, "send")
+				.mockImplementation(function (this: ChannelizerProcess, request) {
+					if (request.type === "close") {
+						this.emit("event", {
+							v: 1,
+							type: "closed",
+							id: request.id,
+							generation: processClaim!.source.generation,
+							reason: "requested",
+						})
+						if (currentSend)
+							observer.recordDisposed(
+								processClaim!,
+								currentSend.token,
+								currentSend.id,
+							)
+					}
+				})
+			let releaseConnect!: () => void,
+				connectorEntered = false
+			const gate = new Promise<void>(resolve => {
+				releaseConnect = resolve
+			})
+			const socket = new PassThrough()
+			const m = manager(
+				{},
+				{
+					settlementObserver: observer,
+					connect: async () => {
+						connectorEntered = true
+						await gate
+						return socket
+					},
+				},
+			)
+			const handle = observer.allocateAcquisition({
+				activation: "direct",
+				sourceId: "rtl",
+				decoderId: "gap",
+				scannerAttempt: {},
+				expectedRequest: req(),
+				expectedInputCaps: {
+					kind: "iq",
+					format: "U8_IQ",
+					sampleRate: 2_048_000,
+					centerFreq: 162e6,
+				},
+			})!
+			const unit = { cpu: 1, bytes: 100 }
+			handle.attachPermit(
+				ledger.prepareObservedPermit(
+					handle.requestToken,
+					Array.from({ length: 6 }, () => unit),
+					Array.from({ length: 6 }, () => unit),
+					{ decoder: { cpu: 0, bytes: 0 }, classifier: unit, analog: unit },
+				)!,
+			)
+			handle.arm()
+			const gap = (generation = 1) => ({
+				v: 1 as const,
+				type: "discontinuity" as const,
+				id: "gap-g1",
+				generation,
+				sampleIndex: 10,
+				droppedSamples: 4,
+				cause: "input-gap" as const,
+			})
+			const seen: boolean[] = []
+			const off = handle.onChange(() => {
+				seen.push(handle.snapshot().continuityLost)
+			})
+			let release: Promise<void> | undefined
+			try {
+				const acquiring = observer
+					.bindProvider(m)
+					.requestChannel("rtl", "gap", req(), caps())
+				await vi.waitFor(() => expect(connectorEntered).toBe(true))
+				proc!.emit("event", gap(99))
+				expect(handle.snapshot().continuityLost).toBe(false)
+				const grantSnapshot = vi.fn(() =>
+					expect(handle.snapshot().continuityLost).toBe(mode === "preconnect"),
+				)
+				const offGrant = observer.subscribeGrants(grantSnapshot)
+				if (mode === "preconnect") proc!.emit("event", gap())
+				releaseConnect()
+				const result = await acquiring
+				expect(result.ok).toBe(true)
+				expect(handle.snapshot()).toMatchObject({
+					logical: "terminal",
+					ended: false,
+				})
+				expect(grantSnapshot).toHaveBeenCalledOnce()
+				offGrant()
+				if (mode !== "preconnect") {
+					m.emit("channel-discontinuity", "gap-g1", 1, 10, 4, "input-gap")
+					expect(handle.snapshot().continuityLost).toBe(false)
+					m.prependOnceListener(
+						"channel-discontinuity",
+						(...args: unknown[]) => {
+							expect(args).toEqual(["gap-g1", 1, 10, 4, "input-gap"])
+							expect(handle.snapshot().continuityLost).toBe(true) // Before public callback.
+							if (mode === "throw")
+								throw new Error("synthetic earlier gap listener")
+							release = m.releaseChannel("gap-g1")
+						},
+					)
+					if (mode === "throw")
+						expect(() => proc!.emit("event", gap())).toThrow(
+							"earlier gap listener",
+						)
+					else proc!.emit("event", gap())
+					expect(seen).toContain(true)
+				}
+				expect(handle.snapshot().continuityLost).toBe(true)
+				const count = seen.length
+				observer.publishCapturedDiscontinuity(currentSend!)
+				expect(seen).toHaveLength(count)
+			} finally {
+				releaseConnect()
+				await release
+				processClaim?.recordActualClose()
+				processClaim?.recordStdioSettled()
+				off()
+				await m.destroy()
+				input.destroy()
+				inputSpy.mockRestore()
+				claimSpy.mockRestore()
+				startSpy.mockRestore()
+				openSpy.mockRestore()
+				controlSpy.mockRestore()
+			}
+		},
+	)
+
 	it.each(["deadline", "cancel"] as const)(
 		"reclaims repeated positively sealed no-start attempts after %s between claim and subscription",
 		async mode => {
@@ -817,6 +1014,8 @@ describe("ChannelizerManager", () => {
 			},
 		)
 		expect((await m.requestChannel("rtl", "ais", req(), caps())).ok).toBe(true)
+		const publicGap = vi.fn()
+		m.on("channel-discontinuity", publicGap)
 		// Task 35 (scripts/capacity/summarize.py) counts these lines by cause.
 		procs[0]!.emit("event", {
 			v: 1,
@@ -827,6 +1026,13 @@ describe("ChannelizerManager", () => {
 			droppedSamples: 512,
 			cause: "queue-overflow",
 		})
+		expect(publicGap).toHaveBeenCalledExactlyOnceWith(
+			"ais-g1",
+			1,
+			4096,
+			512,
+			"queue-overflow",
+		)
 		expect(lines.find(l => l["msg"] === "Channel discontinuity")).toMatchObject(
 			{
 				level: 40,
