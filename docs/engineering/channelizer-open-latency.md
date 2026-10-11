@@ -6,6 +6,12 @@ IQ on macOS; they establish neither Pi timing nor live RF acceptance. The
 channelizer remains opt-in. The existing golden, marginal-frame and digital
 voice acceptance rules remain in force.
 
+The native-only landing gate described below is historical. The later scoped Node
+candidate at `624625361abc44438adec952c496e9614461518a` implements busy recovery and
+terminal ownership; its combined exact review and remaining consumer adoption
+are recorded in the final section. Earlier timing evidence remains explicitly
+at its original production SHA, not relabeled as a new benchmark.
+
 ## Problem and decision criteria
 
 `Runtime::open` calls `ChannelDsp::new`, which calls `plan_chain`. Planning builds
@@ -331,3 +337,134 @@ Artifact SHA256 checksums (local files, to identify the exact retained evidence)
 | `wavekit-open-candidate-mixed.jsonl` | `1df3443c755bfc1fef7541accea55a9878135c77e7406562a8439bd1f45e40b7` |
 | `wavekit-open-candidate-saturation.jsonl` | `21847b72968b1e30f244d2c365ee3e0161d2b1dc5018d59803cdb684a6d27c64` |
 | `wavekit-open-final-equivalence.jsonl` | `d83ba20a85dd8d3ef7fbb1f3d965fdcd4bd7bd81bfc3bf018f986d48cc856efd` |
+
+## Node acquisition and terminal ownership candidate
+
+The lane rebased cleanly onto `d452b0a66eff76fa2864d2d2d5cdbbce9412d336`.
+The prior production/test/report patches are unchanged by rebase:
+`d4372cc → 99c353ca1db3919452292abfd0093c191ecf7079`,
+`fc35a97 → 4f74e3b11c47ac4e435f2506693f24e1222a742c`,
+`66053e9 → 0f9ae6a14cc5047db6f09bc2f21008d4aabf68e2`.
+Combined native/Node implementation is `e1a57400b490b0a7e2f511bce4ec297ae0c85ae2`;
+test-fixture binding cleanup is `624625361abc44438adec952c496e9614461518a`.
+The latter is the exact candidate submitted for independent combined review.
+
+`ChannelizerManager` alone retries `channel-request-invalid` with exact detail
+`planner busy`. Near matches, RF rejection and genuine design/resource failures
+remain nonretryable. Five sequential backoffs (25, 50, 100, 200, 400 ms) permit
+at most six **total** native open sends per logical acquisition, including the
+existing single generation-supersession retry. Exhausted busy returns
+`channelizer-unavailable`, not persistent invalid configuration.
+
+One monotonic five-second deadline starts when the serialized logical acquisition
+begins, excluding time queued behind another acquisition. It covers startup,
+close-barrier waiting, replies, backoff and socket connection, and never resets
+on busy or supersession. This is deliberately stricter than the old timeout,
+which began after startup and did not bound socket attachment. All acquisition
+timers use the remaining budget. Production uses `performance.now()`; the
+crash-loop clock remains separate. Actual OS scheduling can delay timer dispatch;
+the deadline prevents additional sends/adoption after expiry, not a universal
+wall-clock return-time guarantee.
+
+The core `ChannelProvider.requestChannel` accepts an optional fifth `AbortSignal`
+without changing wire fields or public protocol types. Pre-grant IDs are not an
+API: callers cancel pending acquisition with the signal. Queued cancellation
+settles promptly and leaves a no-op queue callback; running cancellation wakes
+acquisition waits, prevents resends/late grants, and performs bounded cleanup.
+Failure details are manager-authored (`channel request cancelled`,
+`channel request timed out after 5000 ms`, or unavailable); signal reasons are
+neither propagated nor logged. Acquisition abort ownership ends at grant.
+After grant, the caller synchronously stops accepting samples/evidence and calls
+`releaseChannel` with the opaque granted ID, awaiting its settlement promise.
+
+Stable IDs are retained. A closing record is installed before sending close or
+destroying sockets. Repeated releases share that promise. A replacement using
+the same ID waits for matching current-process/current-generation terminal
+ownership. A rejected event can settle cancellation only while that particular
+native open is still pending; after an opened event, rejection is not proof of
+closure. Ownership state changes synchronously during event dispatch, including
+multiple events before promise continuations. Late opened during closing never
+connects or installs. Acquisition retains its ownership record through connection:
+a terminal close during attachment refuses the grant rather than adopting a dead
+channel. Late custom connection completion destroys only the returned socket,
+without an ID-only close that could damage a replacement. The default connector
+also destroys a socket still connecting when cancellation/deadline interrupts it.
+
+Close settlement waits at most 250 ms, additionally bounded by the acquisition's
+remaining deadline. Unknown native close emits no reply; if ownership cannot be
+confirmed, the manager **retires the entire process generation**. At an expired
+acquisition deadline it sends close and retires immediately unless a terminal
+reply already settled ownership. Retirement synchronously invalidates remaining
+grants once and destroys delivery, then stops the process; it is disruptive,
+not a successful close or preservation of unrelated channels. It never starts a
+replacement itself. Only an eligible uncanceled acquisition can consume its
+existing one-time supersession allowance, still under the original deadline and
+send cap. `channel-invalidated` retains its first three core arguments and adds
+an optional fourth cause, so consumers can distinguish collateral retirement
+from ordinary source or channel loss. Decoder/scanner consumers were not edited.
+
+Independent Astra design advice identified a further native reuse prerequisite:
+the writer formerly unlinked its socket immediately after accept, before checking
+closing. A writer delayed beyond the bounded join could unlink a replacement's
+same-ID path. `install_writer_connection` now guards unlink and connection
+publication with the same mutex used to revoke the writer during close. Once
+closing is set, an old writer cannot touch the replacement path. A deterministic
+regression accepts the old connection, simulates close/rebind state, then resumes
+the installation helper and verifies the replacement remains connectable. It does
+not execute an actual timed-out runtime join. DSP arithmetic
+and planning are unaffected.
+
+Candidate validation:
+
+- 27 touched Rust runtime tests passed, including deterministic same-path reuse;
+  six native process tests passed; offline/locked one-job strict all-target Clippy,
+  format check and rebuilt release binary passed.
+- Rebuilt native binary SHA256:
+  `0f6f85a9d664047de046e0690222c6a64baefc85851873ca22ba9e5390040206`.
+  All 28 baseline output-hash/length/metadata comparisons passed again.
+- 141 targeted root tests across seven files passed: existing manager (35),
+  deterministic lifecycle (23), default connection cleanup (3), protocol (6),
+  transport/process (10), decoder channelizer integration (47), voice IQ (17).
+  Six real-binary integration tests also passed.
+- The deterministic cases cover exact busy versus near-match/invalid, six sends
+  including supersession, deadline across busy/rate change, queued/inflight/
+  backoff/postreply/connect cancellation, late startup/connect cleanup, release
+  repetition, same-ID barriers, late opened/rejected/closed ordering, close during
+  attachment, destroy/source loss/reconnect and collateral retirement. Tests
+  verify no acquisition timers remain after teardown, without timing thresholds.
+- Final required root typecheck passed; lint passed with zero errors and 59
+  existing warnings; the 23 affected lifecycle fixture tests passed again.
+  Initial expected invalidation-argument assertions
+  and a fixture typing/binding error were corrected; no skipped check is claimed.
+
+Independent Astra final review accepted exact source candidate
+`624625361abc44438adec952c496e9614461518a` against the stated base, with no blocking
+findings. Its two nonblocking report corrections are incorporated above: completed
+validation results and the precise simulated-state scope of the native regression.
+The reviewer inspected retained evidence and ran no builds or tests. This approval
+covers the scoped candidate, not consumer integration or Main's final assembly.
+FIFO terminal-event ordering remains an assumption.
+
+Optional signal support does
+not establish end-to-end cancellation for existing consumers that omit it.
+Scanner S2 owns post-grant intake fencing/evidence drain and direct-provider signal
+adoption; decoder consumers keep their existing ephemeral-removal contract.
+Those consumer acceptance gates, Main's exact assembly, Pi/live RF and combined
+scanner/audio acceptance remain separate. No defaults or aggregate CPU/channel
+admission budget changed, and no timing benchmark was repeated or relabeled.
+
+The core invalidation event identifies exact source, generation and opaque channel
+IDs, with an optional cause; it does not identify the decoder bound to each grant.
+A grant can be installed and invalidated before the acquisition caller resumes.
+The generation accessor records the last spawn and is not a liveness assertion:
+retirement alone does not advance it. Decoder consumers therefore need exact
+binding/invalidation coverage established before acquisition, and must refuse an
+already invalidated or destroyed grant before publishing decoder creation. Mapping
+opaque IDs by parsing, inferring capability or cutting the whole source is not a
+substitute. That separately allocated consumer change remains a landing gate.
+
+New local evidence files: `/tmp/wavekit-node-native-runtime-tests.log`,
+`/tmp/wavekit-node-native-process-tests.log`, `/tmp/wavekit-node-native-clippy.log`,
+`/tmp/wavekit-node-native-release-build.log`, `/tmp/wavekit-node-final-touched-tests.log`,
+`/tmp/wavekit-node-binary-integration.log`, `/tmp/wavekit-node-final-equivalence.jsonl`,
+`/tmp/wavekit-node-final-{typecheck,lint,fixture-tests}.log`.
