@@ -605,7 +605,7 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 ## Next session
 
 Handoff written 2026-10-11, at the end of the shell, Scanner composer and theming session.
-**Topic: the light theme, second pass.**
+**Topic: colour themes, second pass (paper light, grounds incl. true black, accents).**
 
 **State.** The owner reviewed the shell on the canvas and accepted it: one 16 px gutter,
 full-height overlay drawers (only Receiver and the tuned card slide left), dock regrouped,
@@ -642,12 +642,28 @@ dark instrument screen" (record the outcome in the decision log either way).
    wired to Immersive's `theme` / `accent` like Settings' `onSet`. Better, and already an open
    question: make the palette list every setting from the one Settings registry ("Open in
    Settings" on a row), so this cannot drift again.
-5. Smaller theme points from the agents: light "coral" is pushed toward rose to stay clear of
+5. **Accents feel odd; rethink colour as ground + accent (owner, 2026-10-11).** With a non-green
+   accent (coral in the owner's screenshot) only highlights change: the surfaces keep their
+   green-tinted ink, the waterfall stays on its own "Phosphor" palette, so a pink trace sits
+   over a green waterfall in a green shell. The owner wants to be able to change the
+   **background** too, and a **full black** preset. Questions to settle with the owner:
+   - Grounds as presets: Ink (today's green-black), Graphite (neutral grey), True black
+     (OLED, pure #000 plot and near-black islands), Paper (the light theme), maybe one more
+     (navy?). Free colour picking stays out (contrast cannot be guaranteed).
+   - Does each ground tint its neutrals (greys follow the ground, not the accent)?
+   - Accent per ground or free mix (some pairs clash: phosphor on paper, mono on black)?
+   - Waterfall palette: follow the accent by default ("Match accent"), keeping Amber / Mono /
+     classic ramps as explicit choices; the trace, fill and waterfall should never disagree.
+   - Settings › Display then reads: Theme (System / Dark / Light), Ground (per mode),
+     Accent, Waterfall colours; plus ⌘K entries for each.
+   Update THEME-TOKENS.md: grounds become a third axis (`data-wk-ground`), keeping the
+   existing token names so boards only gain the new attribute.
+6. Smaller theme points from the agents: light "coral" is pushed toward rose to stay clear of
    the danger red; neutral greys stay green-tinted whatever the accent; AIS vessel blue sits
    close to the ice accent on the Map; JSON numbers use amber (reserved for state);
    `--wk-text-5` hint text is under AA in dark; the drawer resize grip is faint until hovered;
    the waterfall palette "Phosphor" shares its name with the accent.
-6. End of session: update this file (decision log, open questions, next session), CORE-GAPS
+7. End of session: update this file (decision log, open questions, next session), CORE-GAPS
    if anything needs core, snapshot the boards into `docs/web/canvas/`, commit and push.
 
 **How the canvas work went well (keep doing it).**
