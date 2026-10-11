@@ -9,7 +9,10 @@ import {
 	updateChannelAdmission,
 } from "../../../../src/core/scanner/plan/resource-admission.js"
 import type { ScannerChannelProfile } from "../../../../src/core/scanner/channel/consumer-types.js"
-import type { DecoderChannelRequest } from "../../../../src/core/channelizer/types.js"
+import type {
+	ChannelProvider,
+	DecoderChannelRequest,
+} from "../../../../src/core/channelizer/types.js"
 
 const request = {
 	centerHz: 100_000_000,
@@ -61,37 +64,64 @@ function fixture() {
 	return { registry, observer, handle, ledger, profile }
 }
 describe("private channel admission", () => {
-	it.each(["workload", "budget"] as const)("uses the CURRENT %s ledger at dequeue, not the prepared snapshot (C4)", async change => {
-		const f = fixture()
-		const permit = prepareChannelAdmission({
-			handle: f.handle, ledger: f.ledger, profile: f.profile,
-			captureRateHz: 2_048_000, request, activation: "direct",
-		})!
-		expect(f.handle.attachPermit(permit)).toBe(true)
-		expect(f.handle.arm()).toBe(true)
-		const provider = Object.assign(new EventEmitter(), {
-			requestChannel: (_source: string, _decoder: string, actual: DecoderChannelRequest) => {
-				const handle = f.observer.takeAcquisition("s", "tap", actual)!
-				const state = f.ledger.admissionSnapshot()
-				expect(updateChannelAdmission(f.ledger, state.version,
-					change === "workload" ? { cpu: 4, bytes: 100 } : state.baseline,
-					change === "budget" ? { cpu: 1, bytes: 10_000 } : state.limits,
-				)).toBe(true)
-				expect(f.observer.tryReserveObservedTransaction(handle)).toBeUndefined()
-				f.observer.finishAcquisition(handle)
-				return Promise.resolve({ ok: false as const, reasonCode: "channelizer-unavailable" as const, detail: "fixture denial" })
-			},
-			releaseChannel: () => Promise.resolve(),
-			currentGeneration: () => 0,
-		})
-		const channels = f.observer.bindProvider(provider)
-		await channels.requestChannel("s", "tap", request, {
-			kind: "iq", format: "U8_IQ", sampleRate: 2_048_000, centerFreq: 100_000_000,
-		})
-		expect(f.ledger.snapshot().committed).toEqual({ cpu: 0, bytes: 0 })
-		expect(f.registry.snapshot().receipts).toBe(0)
-		expect(f.registry.snapshot().owners).toEqual({ V: 1, P: 0, L: 0 })
-	})
+	it.each(["workload", "budget"] as const)(
+		"uses the CURRENT %s ledger at dequeue, not the prepared snapshot (C4)",
+		async change => {
+			const f = fixture()
+			const permit = prepareChannelAdmission({
+				handle: f.handle,
+				ledger: f.ledger,
+				profile: f.profile,
+				captureRateHz: 2_048_000,
+				request,
+				activation: "direct",
+			})!
+			expect(f.handle.attachPermit(permit)).toBe(true)
+			expect(f.handle.arm()).toBe(true)
+			const provider = Object.assign(new EventEmitter(), {
+				requestChannel: (
+					_source: string,
+					_decoder: string,
+					actual: DecoderChannelRequest,
+				) => {
+					const handle = f.observer.takeAcquisition("s", "tap", actual)!
+					const state = f.ledger.admissionSnapshot()
+					expect(
+						updateChannelAdmission(
+							f.ledger,
+							state.version,
+							change === "workload" ? { cpu: 4, bytes: 100 } : state.baseline,
+							change === "budget" ? { cpu: 1, bytes: 10_000 } : state.limits,
+						),
+					).toBe(true)
+					expect(
+						f.observer.tryReserveObservedTransaction(handle),
+					).toBeUndefined()
+					f.observer.finishAcquisition(handle)
+					return Promise.resolve({
+						ok: false as const,
+						reasonCode: "channelizer-unavailable" as const,
+						detail: "fixture denial",
+					})
+				},
+				releaseChannel: () => Promise.resolve(),
+				currentGeneration: () => 0,
+			})
+			const channels = f.observer.bindProvider(
+				provider as unknown as ChannelProvider,
+			)
+			await channels.requestChannel("s", "tap", request, {
+				kind: "iq",
+				format: "U8_IQ",
+				sampleRate: 2_048_000,
+				centerFreq: 100_000_000,
+				exclusive: false,
+			})
+			expect(f.ledger.snapshot().committed).toEqual({ cpu: 0, bytes: 0 })
+			expect(f.registry.snapshot().receipts).toBe(0)
+			expect(f.registry.snapshot().owners).toEqual({ V: 1, P: 0, L: 0 })
+		},
+	)
 
 	it("missing ledger or coverage denies and preparation is uncharged", () => {
 		const f = fixture()

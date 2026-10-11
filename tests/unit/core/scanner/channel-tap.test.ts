@@ -86,8 +86,16 @@ function ownedTap() {
 		settle: vi.fn(),
 		sealNeverStarted: vi.fn(),
 	}
-	const filesystem = { begin: vi.fn(() => true), settle: vi.fn(), sealNeverStarted: vi.fn() }
-	const operation = { begin: vi.fn(() => true), settle: vi.fn(), sealNeverStarted: vi.fn() }
+	const filesystem = {
+		begin: vi.fn(() => true),
+		settle: vi.fn(),
+		sealNeverStarted: vi.fn(),
+	}
+	const operation = {
+		begin: vi.fn(() => true),
+		settle: vi.fn(),
+		sealNeverStarted: vi.fn(),
+	}
 	const lifecycle = {
 		continuityLost: false,
 		get live() {
@@ -233,7 +241,15 @@ describe("bounded current tap intake and component drains", () => {
 		})
 		const push = vi.fn(),
 			cancel = vi.fn()
-		expect(tap.attachAnalog({ push, cancel, settled, filesystemSettled: settled, operationSettled: settled })).toBe(true)
+		expect(
+			tap.attachAnalog({
+				push,
+				cancel,
+				settled,
+				filesystemSettled: settled,
+				operationSettled: settled,
+			}),
+		).toBe(true)
 		f.stream.write(Buffer.alloc(16))
 		expect(push.mock.calls[0]?.[0].length).toBe(4)
 		tap.sealIntake()

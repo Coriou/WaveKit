@@ -130,7 +130,11 @@ export class ChannelTaps {
 				if (!slot) return
 				slot.gaps = true
 				// A gap has no trusted sample translation. Fence analog synchronously, drain later.
-				if (slot.phase === "analog" || slot.phase === "handoff" || slot.analogBegun)
+				if (
+					slot.phase === "analog" ||
+					slot.phase === "handoff" ||
+					slot.analogBegun
+				)
 					slot.handle.cancel()
 			},
 		})
@@ -239,7 +243,8 @@ export class ChannelTaps {
 	}
 	cancelObservation(sourceId: string, observationId: string): void {
 		const slot = this.slots.get(sourceId)
-		if (slot?.input.attempt.observationId === observationId) slot.handle.cancel()
+		if (slot?.input.attempt.observationId === observationId)
+			slot.handle.cancel()
 	}
 	/** Workload changes revoke original capabilities without sealing future covered admission. */
 	invalidateCoverage(): void {
@@ -428,7 +433,12 @@ export class ChannelTaps {
 		slot.analog = consumer
 		void consumer.settled.catch(() => undefined)
 		const stream = slot.prepared.lifecycle.readable
-		if (!stream || slot.phase !== "handoff" || this.sealed || slot.prepared.lifecycle.continuityLost) {
+		if (
+			!stream ||
+			slot.phase !== "handoff" ||
+			this.sealed ||
+			slot.prepared.lifecycle.continuityLost
+		) {
 			consumer.cancel()
 			void this.close(slot).catch(() => undefined)
 			return false
@@ -535,18 +545,43 @@ export class ChannelTaps {
 		} else slot.prepared.analog.sealNeverStarted()
 		// Filesystem and operation are independent of the analog/logical-release outcome.
 		for (const [component, begun, settlement] of [
-			[slot.prepared.filesystem, slot.filesystemBegun, slot.analog?.filesystemSettled],
-			[slot.prepared.operation, slot.operationBegun, slot.analog?.operationSettled],
+			[
+				slot.prepared.filesystem,
+				slot.filesystemBegun,
+				slot.analog?.filesystemSettled,
+			],
+			[
+				slot.prepared.operation,
+				slot.operationBegun,
+				slot.analog?.operationSettled,
+			],
 		] as const) {
-			if (!begun) { component.sealNeverStarted(); continue }
+			if (!begun) {
+				component.sealNeverStarted()
+				continue
+			}
 			let outcome: CleanupOutcome
 			try {
-				outcome = settlement ? await settlement : { ok: false, state: "unknown", detail: "Scanner recording component owner missing" }
+				outcome = settlement
+					? await settlement
+					: {
+							ok: false,
+							state: "unknown",
+							detail: "Scanner recording component owner missing",
+						}
 			} catch {
-				outcome = { ok: false, state: "unknown", detail: "Scanner recording component settlement unknown" }
+				outcome = {
+					ok: false,
+					state: "unknown",
+					detail: "Scanner recording component settlement unknown",
+				}
 			}
 			component.settle(outcome)
-			if (!outcome.ok) failure ??= new WaveKitError("Scanner recording component cleanup pending", "SCANNER_CHANNEL_CLEANUP_PENDING")
+			if (!outcome.ok)
+				failure ??= new WaveKitError(
+					"Scanner recording component cleanup pending",
+					"SCANNER_CHANNEL_CLEANUP_PENDING",
+				)
 		}
 		try {
 			await slot.prepared.lifecycle.logicalDrain()

@@ -41,14 +41,21 @@ describe("exact constructor listener ownership (C6)", () => {
 		const original = new Error("install failed after effect")
 		let retained: (() => void) | undefined
 		const registration = new ConstructorListenerRegistration(
-			() => { emitter.on("event", owned); throw original },
-			() => { emitter.off("event", owned) },
+			() => {
+				emitter.on("event", owned)
+				throw original
+			},
+			() => {
+				emitter.off("event", owned)
+			},
 			() => !emitter.listeners("event").includes(owned),
 		)
-		expect(() => registration.register(remove => {
-			retained = remove
-			return true
-		})).toThrow(original)
+		expect(() =>
+			registration.register(remove => {
+				retained = remove
+				return true
+			}),
+		).toThrow(original)
 		expect(retained).toBeDefined()
 		retained!()
 		expect(emitter.listeners("event")).toEqual([unrelated])
@@ -59,16 +66,24 @@ describe("exact constructor listener ownership (C6)", () => {
 		let retained!: () => void
 		const registration = new ConstructorListenerRegistration(
 			() => {
-				expect(retained).toThrow(expect.objectContaining({ code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN" }))
+				expect(retained).toThrow(
+					expect.objectContaining({
+						code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN",
+					}),
+				)
 				emitter.on("event", owned)
 			},
-			() => { emitter.off("event", owned) },
+			() => {
+				emitter.off("event", owned)
+			},
 			() => !emitter.listeners("event").includes(owned),
 		)
-		expect(() => registration.register(remove => {
-			retained = remove
-			return true
-		})).toThrow(expect.objectContaining({ code: "SCANNER_OWNER_UNAVAILABLE" }))
+		expect(() =>
+			registration.register(remove => {
+				retained = remove
+				return true
+			}),
+		).toThrow(expect.objectContaining({ code: "SCANNER_OWNER_UNAVAILABLE" }))
 		expect(emitter.listeners("event")).toEqual([])
 	})
 	it("keeps an unverified exact removal retryable without reporting success", () => {
@@ -76,12 +91,18 @@ describe("exact constructor listener ownership (C6)", () => {
 		const owned = vi.fn()
 		let canRemove = false
 		const registration = new ConstructorListenerRegistration(
-			() => { emitter.on("event", owned) },
-			() => { if (canRemove) emitter.off("event", owned) },
+			() => {
+				emitter.on("event", owned)
+			},
+			() => {
+				if (canRemove) emitter.off("event", owned)
+			},
 			() => !emitter.listeners("event").includes(owned),
 		)
 		registration.register()
-		expect(() => registration.remove()).toThrow(expect.objectContaining({ code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN" }))
+		expect(() => registration.remove()).toThrow(
+			expect.objectContaining({ code: "SCANNER_COMPONENT_CLEANUP_UNKNOWN" }),
+		)
 		canRemove = true
 		registration.remove()
 		expect(emitter.listeners("event")).toEqual([])
@@ -138,8 +159,15 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 			order.push("inspect")
 			return OK
 		})
-		const sweep = vi.fn(() => { order.push("sweep"); return OK })
-		const completed = owner.finalizeStopNative(inspector.observer, inspector.lifetime, sweep)
+		const sweep = vi.fn(() => {
+			order.push("sweep")
+			return OK
+		})
+		const completed = owner.finalizeStopNative(
+			inspector.observer,
+			inspector.lifetime,
+			sweep,
+		)
 		await flush()
 		expect(sweep).not.toHaveBeenCalled()
 		expect(inspector.inspectFinal).not.toHaveBeenCalled()
@@ -147,7 +175,9 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		await handle.producerSettled
 		await completed
 		expect(order).toEqual(["sweep", "inspect"])
-		expect(owner.finalizeStopNative(inspector.observer, inspector.lifetime, sweep)).toBe(completed)
+		expect(
+			owner.finalizeStopNative(inspector.observer, inspector.lifetime, sweep),
+		).toBe(completed)
 		expect(sweep).toHaveBeenCalledOnce()
 	})
 

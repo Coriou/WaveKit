@@ -5,7 +5,10 @@ import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
-import { ScannerService, type ScannerServiceDeps } from "../../../../src/core/scanner/scanner-service.js"
+import {
+	ScannerService,
+	type ScannerServiceDeps,
+} from "../../../../src/core/scanner/scanner-service.js"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScanJob } from "@wavekit/api-types"
 import {
@@ -53,11 +56,26 @@ describe("ScannerService", () => {
 	it("phase40 preserves a channel component UNKNOWN and attempts every subscription remover", async () => {
 		const h = serviceHarness()
 		const original = new Error("first remover unavailable")
-		const failedOff = vi.fn(() => { throw original })
+		const failedOff = vi.fn(() => {
+			throw original
+		})
 		const siblingOff = vi.fn()
+		const actualDrain = vi.fn()
+		let started = false
+		const actualOutcome = Promise.resolve({
+			ok: false as const,
+			state: "unknown" as const,
+			detail: "Actual channel filesystem cleanup unknown",
+		})
 		const component = {
 			sealAdmission: vi.fn(),
-			stop: vi.fn(async () => ({ ok: false as const, state: "unknown" as const, detail: "Actual channel filesystem cleanup unknown" })),
+			stop: vi.fn(() => {
+				if (!started) {
+					started = true
+					actualDrain()
+				}
+				return actualOutcome
+			}),
 			sweepSettledReferences: vi.fn(),
 		}
 		// Component boundary fixture only; these outcomes do not manufacture native proof.
@@ -68,12 +86,18 @@ describe("ScannerService", () => {
 		boundary.channelTaps = component
 		boundary.channelSubscriptions.push(failedOff, siblingOff)
 		const handle = h.service.beginStop()
-		await expect(handle.producerSettled).rejects.toMatchObject({ message: "Actual channel filesystem cleanup unknown" })
-		expect(component.stop).toHaveBeenCalledOnce()
+		await expect(handle.producerSettled).rejects.toMatchObject({
+			message: "Actual channel filesystem cleanup unknown",
+		})
+		// Two independent phase slots request the same real component's cached first drain.
+		expect(component.stop).toHaveBeenCalledTimes(2)
+		expect(actualDrain).toHaveBeenCalledOnce()
 		expect(failedOff).toHaveBeenCalledOnce()
 		expect(siblingOff).toHaveBeenCalledOnce()
 		expect(boundary.channelSubscriptions).toEqual([failedOff])
-		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({ message: "Actual channel filesystem cleanup unknown" })
+		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({
+			message: "Actual channel filesystem cleanup unknown",
+		})
 	})
 
 	it("creates the passive job and credits one emission to every covering in-window job", async () => {
@@ -1178,14 +1202,24 @@ describe("R14 immutable scanner component phase", () => {
 			if (event === "removed") throw original
 		}
 		h.sources.on("newListener", failRegistration)
-		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(original)
-		owner.completeConstruction({ ok: false, state: "failed", detail: "Original construction failed" })
-		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(
+			original,
+		)
+		owner.completeConstruction({
+			ok: false,
+			state: "failed",
+			detail: "Original construction failed",
+		})
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 		expect(h.tuner.listeners("command-sent")).toEqual([])
 		expect(h.tuner.listeners("control-mode-changed")).toEqual([])
 		expect(h.sources.listeners("disconnected")).toEqual([unrelated])
 		expect(h.sources.listeners("removed")).toEqual([])
-		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({ message: "Original construction failed" })
+		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({
+			message: "Original construction failed",
+		})
 		h.sources.off("newListener", failRegistration)
 		h.sources.off("disconnected", unrelated)
 	})
@@ -1201,21 +1235,34 @@ describe("R14 immutable scanner component phase", () => {
 		}
 		h.sources.on("newListener", failRegistration)
 		const actualOff = h.tuner.off.bind(h.tuner)
-		const removal = vi.spyOn(h.tuner, "off").mockImplementation((event, listener) => {
-			if (event === "command-sent") throw new Error("owned removal failed")
-			return actualOff(event, listener)
+		const removal = vi
+			.spyOn(h.tuner, "off")
+			.mockImplementation((event, listener) => {
+				if (event === "command-sent") throw new Error("owned removal failed")
+				return actualOff(event, listener)
+			})
+		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(
+			original,
+		)
+		owner.completeConstruction({
+			ok: false,
+			state: "failed",
+			detail: "Immutable original construction failure",
 		})
-		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(original)
-		owner.completeConstruction({ ok: false, state: "failed", detail: "Immutable original construction failure" })
-		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({ message: "Immutable original construction failure" })
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			message: "Immutable original construction failure",
+		})
 		expect(h.tuner.listenerCount("command-sent")).toBe(1)
 		expect(h.tuner.listeners("control-mode-changed")).toEqual([])
 		expect(h.sources.listeners("disconnected")).toEqual([])
-		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({ message: "Immutable original construction failure" })
+		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({
+			message: "Immutable original construction failure",
+		})
 		removal.mockRestore()
 		h.sources.off("newListener", failRegistration)
 		// Explicit fixture cleanup; the owner did not claim this unresolved listener settled.
-		for (const listener of h.tuner.listeners("command-sent")) h.tuner.off("command-sent", listener)
+		for (const listener of h.tuner.listeners("command-sent"))
+			h.tuner.off("command-sent", listener)
 	})
 	it("an early own failure cannot complete40 while an independent component remains held", async () => {
 		const h = serviceHarness({

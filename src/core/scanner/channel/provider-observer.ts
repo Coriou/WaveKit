@@ -48,12 +48,15 @@ export function prepareDirectChannel(input: {
 		!input.current()
 	)
 		return undefined
-	if (!eligibleChannelShape({
-		profile: input.profile,
-		captureRateHz: attempt.captureRateHz,
-		request: input.request,
-		activation: "direct",
-	})) return undefined
+	if (
+		!eligibleChannelShape({
+			profile: input.profile,
+			captureRateHz: attempt.captureRateHz,
+			request: input.request,
+			activation: "direct",
+		})
+	)
+		return undefined
 	const handle = ownership.observer.allocateAcquisition({
 		activation: "direct",
 		sourceId: attempt.sourceId,

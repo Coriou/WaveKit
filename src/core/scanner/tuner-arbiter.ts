@@ -138,28 +138,80 @@ export class TunerArbiter extends EventEmitter {
 		this.log = createComponentLogger(deps.logger, "TunerArbiter")
 		this.now = deps.now ?? Date.now
 		try {
-			this.listen(deps.tuner, "command-sent", this.onCommandSent,
-				() => { deps.tuner.on("command-sent", this.onCommandSent) },
-				() => { deps.tuner.off("command-sent", this.onCommandSent) })
-			this.listen(deps.tuner, "control-mode-changed", this.onControlMode,
-				() => { deps.tuner.on("control-mode-changed", this.onControlMode) },
-				() => { deps.tuner.off("control-mode-changed", this.onControlMode) })
-			this.listen(deps.sources, "disconnected", this.onDisconnected,
-				() => { deps.sources.on("disconnected", this.onDisconnected) },
-				() => { deps.sources.off("disconnected", this.onDisconnected) })
-			this.listen(deps.sources, "removed", this.onRemoved,
-				() => { deps.sources.on("removed", this.onRemoved) },
-				() => { deps.sources.off("removed", this.onRemoved) })
-			this.listen(deps.sources, "source-removed", this.onRemoved,
-				() => { deps.sources.on("source-removed", this.onRemoved) },
-				() => { deps.sources.off("source-removed", this.onRemoved) })
-			this.listen(deps.sources, "payload-started", this.onPayloadStarted,
-				() => { deps.sources.on("payload-started", this.onPayloadStarted) },
-				() => { deps.sources.off("payload-started", this.onPayloadStarted) })
+			this.listen(
+				deps.tuner,
+				"command-sent",
+				this.onCommandSent,
+				() => {
+					deps.tuner.on("command-sent", this.onCommandSent)
+				},
+				() => {
+					deps.tuner.off("command-sent", this.onCommandSent)
+				},
+			)
+			this.listen(
+				deps.tuner,
+				"control-mode-changed",
+				this.onControlMode,
+				() => {
+					deps.tuner.on("control-mode-changed", this.onControlMode)
+				},
+				() => {
+					deps.tuner.off("control-mode-changed", this.onControlMode)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"disconnected",
+				this.onDisconnected,
+				() => {
+					deps.sources.on("disconnected", this.onDisconnected)
+				},
+				() => {
+					deps.sources.off("disconnected", this.onDisconnected)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"removed",
+				this.onRemoved,
+				() => {
+					deps.sources.on("removed", this.onRemoved)
+				},
+				() => {
+					deps.sources.off("removed", this.onRemoved)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"source-removed",
+				this.onRemoved,
+				() => {
+					deps.sources.on("source-removed", this.onRemoved)
+				},
+				() => {
+					deps.sources.off("source-removed", this.onRemoved)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"payload-started",
+				this.onPayloadStarted,
+				() => {
+					deps.sources.on("payload-started", this.onPayloadStarted)
+				},
+				() => {
+					deps.sources.off("payload-started", this.onPayloadStarted)
+				},
+			)
 		} catch (error: unknown) {
 			// Parent captured every remover before effects. Cleanup failure cannot replace the
 			// original exception; that parent's retained inventory can attempt the failed remover.
-			try { this.dispose() } catch { /* retained by the external construction owner */ }
+			try {
+				this.dispose()
+			} catch {
+				/* retained by the external construction owner */
+			}
 			throw error
 		}
 	}
@@ -171,8 +223,15 @@ export class TunerArbiter extends EventEmitter {
 		install: () => void,
 		remove: () => void,
 	): void {
-		const registration = new ConstructorListenerRegistration(install, remove,
-			() => emitter instanceof EventEmitter && !emitter.listeners(event).includes(listener))
+		const registration = new ConstructorListenerRegistration(
+			install,
+			remove,
+			() => {
+				if (!(emitter instanceof EventEmitter)) return false
+				const listeners: readonly unknown[] = emitter.listeners(event)
+				return !listeners.includes(listener)
+			},
+		)
 		this.constructorListeners.push(registration)
 		registration.register(this.deps.ownConstructorListener)
 	}
@@ -181,7 +240,9 @@ export class TunerArbiter extends EventEmitter {
 		let first: unknown
 		let failed = false
 		for (const registration of this.constructorListeners) {
-			try { registration.remove() } catch (error: unknown) {
+			try {
+				registration.remove()
+			} catch (error: unknown) {
 				if (!failed) first = error
 				failed = true
 			}

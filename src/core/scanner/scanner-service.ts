@@ -311,9 +311,16 @@ export class ScannerService extends EventEmitter {
 	private channelAdmissionRevision = 0
 	private readonly channelEngineStarts = new Map<string, SpectrumEngine>()
 	/** Six arbiter registrations plus the pool's sole constructor registration. */
-	private readonly constructorListeners: { remove: () => void; settled: boolean }[] = []
+	private readonly constructorListeners: {
+		remove: () => void
+		settled: boolean
+	}[] = []
 	private readonly ownConstructorListener = (remove: () => void): boolean => {
-		if (this.consumerLifecycle.admissionSealed || this.constructorListeners.length >= 7) return false
+		if (
+			this.consumerLifecycle.admissionSealed ||
+			this.constructorListeners.length >= 7
+		)
+			return false
 		this.constructorListeners.push({ remove, settled: false })
 		return true
 	}
@@ -451,16 +458,31 @@ export class ScannerService extends EventEmitter {
 				try {
 					if (this.channelTaps) outcome = await this.channelTaps.stop()
 				} catch {
-					outcome = { ok: false, state: "unknown", detail: "Scanner channel component cleanup unknown" }
+					outcome = {
+						ok: false,
+						state: "unknown",
+						detail: "Scanner channel component cleanup unknown",
+					}
 				}
 				const retained: (() => void)[] = []
 				for (const off of this.channelSubscriptions) {
-					try { off() } catch {
+					try {
+						off()
+					} catch {
 						retained.push(off)
-						if (outcome.ok) outcome = { ok: false, state: "unknown", detail: "Scanner channel subscription cleanup unknown" }
+						if (outcome.ok)
+							outcome = {
+								ok: false,
+								state: "unknown",
+								detail: "Scanner channel subscription cleanup unknown",
+							}
 					}
 				}
-				this.channelSubscriptions.splice(0, this.channelSubscriptions.length, ...retained)
+				this.channelSubscriptions.splice(
+					0,
+					this.channelSubscriptions.length,
+					...retained,
+				)
 				return outcome
 			})
 		)
@@ -906,10 +928,24 @@ export class ScannerService extends EventEmitter {
 				// Each synchronous sweep is independent; unknown facts keep their exact reference.
 				let unknown = false
 				for (const owner of this.channelRecordingOwners.values()) {
-					try { owner.inspect?.() } catch { unknown = true }
+					try {
+						owner.inspect?.()
+					} catch {
+						unknown = true
+					}
 				}
-				try { this.channelTaps?.sweepSettledReferences() } catch { unknown = true }
-				return unknown ? { ok: false, state: "unknown", detail: "Scanner final references remain unknown" } : { ok: true }
+				try {
+					this.channelTaps?.sweepSettledReferences()
+				} catch {
+					unknown = true
+				}
+				return unknown
+					? {
+							ok: false,
+							state: "unknown",
+							detail: "Scanner final references remain unknown",
+						}
+					: { ok: true }
 			},
 		)
 	}
@@ -1009,7 +1045,11 @@ export class ScannerService extends EventEmitter {
 		return failed
 			? {
 					ok: false,
-					state: this.constructorListeners.some(registration => !registration.settled) ? "unknown" : "failed",
+					state: this.constructorListeners.some(
+						registration => !registration.settled,
+					)
+						? "unknown"
+						: "failed",
 					detail: "Scanner component cleanup failed",
 				}
 			: { ok: true }
@@ -1957,7 +1997,9 @@ export class ScannerService extends EventEmitter {
 			!this.probes.channelBaselineKnown ||
 			profile.baselineEngineCount !== this.spectrum.sourceIds().length ||
 			profile.baselineOffsetCount !== offsetCount ||
-			![...this.channelEngineStarts].every(([id, started]) => this.spectrum.engine(id) === started)
+			![...this.channelEngineStarts].every(
+				([id, started]) => this.spectrum.engine(id) === started,
+			)
 		)
 			return
 		const admission = ownership.ledger.admissionSnapshot()
@@ -1982,7 +2024,9 @@ export class ScannerService extends EventEmitter {
 				this.channelAdmissionRevision === admissionRevision &&
 				this.probes.channelBaselineKnown &&
 				profile.baselineEngineCount === this.spectrum.sourceIds().length &&
-				profile.baselineOffsetCount === this.probes.status().filter(probe => probe.transport === "offset").length &&
+				profile.baselineOffsetCount ===
+					this.probes.status().filter(probe => probe.transport === "offset")
+						.length &&
 				currentCaps?.kind === "iq" &&
 				currentCaps.format === "U8_IQ" &&
 				currentCaps.sampleRate === epoch.sampleRateHz &&
@@ -2227,9 +2271,17 @@ export class ScannerService extends EventEmitter {
 		this.channelTaps?.cancelSource(sourceId)
 	}
 
-	private cancelChannelObservation(sourceId: string, observationId: string, cut: AnalogCut): void {
+	private cancelChannelObservation(
+		sourceId: string,
+		observationId: string,
+		cut: AnalogCut,
+	): void {
 		for (const owner of this.channelRecordingOwners.values()) {
-			if (owner.observationId !== observationId || owner.identity.binding.sourceId !== sourceId) continue
+			if (
+				owner.observationId !== observationId ||
+				owner.identity.binding.sourceId !== sourceId
+			)
+				continue
 			owner.producer?.cancel(cut)
 			owner.tap.cancel()
 		}
@@ -2240,7 +2292,8 @@ export class ScannerService extends EventEmitter {
 	private invalidateChannelAdmission(): void {
 		this.channelAdmissionRevision++
 		this.channelTaps?.invalidateCoverage()
-		for (const owner of this.channelRecordingOwners.values()) owner.producer?.cancel("cancelled")
+		for (const owner of this.channelRecordingOwners.values())
+			owner.producer?.cancel("cancelled")
 		const ledger = this.deps.channelOwnership?.ledger
 		const profile = this.deps.channelProfile
 		if (!ledger || !profile || !this.effective) return
@@ -2684,7 +2737,8 @@ export class ScannerService extends EventEmitter {
 		req: ProbeRequest,
 	): void => {
 		// "starting" occurs synchronously before launch's first allocation/effect.
-		if (state === "starting" || state === "stopped") this.invalidateChannelAdmission()
+		if (state === "starting" || state === "stopped")
+			this.invalidateChannelAdmission()
 		// Mode stepping re-emits "starting" for the same probe: keep the first start (the hold covers all modes).
 		if (state === "starting" && !this.probeOutcomes.has(probeId)) {
 			this.probeOutcomes.set(probeId, {

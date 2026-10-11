@@ -69,9 +69,15 @@ export class ConstructorListenerRegistration {
 
 	register(own?: (removeExact: () => void) => boolean): void {
 		if (own && !own(() => this.remove()))
-			throw new WaveKitError("Scanner constructor ownership unavailable", "SCANNER_OWNER_UNAVAILABLE")
+			throw new WaveKitError(
+				"Scanner constructor ownership unavailable",
+				"SCANNER_OWNER_UNAVAILABLE",
+			)
 		if (this.sealed)
-			throw new WaveKitError("Scanner constructor registration sealed", "SCANNER_OWNER_UNAVAILABLE")
+			throw new WaveKitError(
+				"Scanner constructor registration sealed",
+				"SCANNER_OWNER_UNAVAILABLE",
+			)
 		this.installing = true
 		try {
 			this.installExact()
@@ -81,7 +87,10 @@ export class ConstructorListenerRegistration {
 		}
 		if (this.sealed) {
 			this.remove()
-			throw new WaveKitError("Scanner constructor registration sealed", "SCANNER_OWNER_UNAVAILABLE")
+			throw new WaveKitError(
+				"Scanner constructor registration sealed",
+				"SCANNER_OWNER_UNAVAILABLE",
+			)
 		}
 	}
 
@@ -89,10 +98,16 @@ export class ConstructorListenerRegistration {
 		this.sealed = true
 		if (this.removed) return
 		if (this.installing)
-			throw new WaveKitError("Scanner listener registration is unsettled", "SCANNER_COMPONENT_CLEANUP_UNKNOWN")
+			throw new WaveKitError(
+				"Scanner listener registration is unsettled",
+				"SCANNER_COMPONENT_CLEANUP_UNKNOWN",
+			)
 		this.removeExact()
 		if (!this.absent())
-			throw new WaveKitError("Scanner listener removal is unverified", "SCANNER_COMPONENT_CLEANUP_UNKNOWN")
+			throw new WaveKitError(
+				"Scanner listener removal is unverified",
+				"SCANNER_COMPONENT_CLEANUP_UNKNOWN",
+			)
 		this.removed = true
 	}
 }
@@ -234,14 +249,19 @@ export class ScannerLifecycleOwner {
 				try {
 					references = frozenOutcome(releaseSettledReferences?.() ?? OK)
 				} catch {
-					references = { ok: false, state: "unknown", detail: "Scanner final references remain unknown" }
+					references = {
+						ok: false,
+						state: "unknown",
+						detail: "Scanner final references remain unknown",
+					}
 				}
 				if (!references.ok) this.rememberFailure(references)
 				// Helper ok already proves its actual component/subscription refs were removed. Only
 				// successful original closures can now be forgotten; failed/unknown owners stay retained.
 				for (const name of SLOT_NAMES) {
 					const slot = this.slots[name]
-					if (references.ok && slot.outcome?.ok === true) slot.attempt = undefined
+					if (references.ok && slot.outcome?.ok === true)
+						slot.attempt = undefined
 				}
 				let final: CleanupOutcome
 				try {

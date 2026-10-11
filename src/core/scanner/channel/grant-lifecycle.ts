@@ -34,7 +34,9 @@ export class GrantLifecycle {
 			const snapshot = handle.snapshot()
 			if (snapshot.continuityLost && !this.gapNotified) {
 				this.gapNotified = true
-				try { this.discontinuity?.() } catch {
+				try {
+					this.discontinuity?.()
+				} catch {
 					this.callbackFailed = true
 					this.invalidate()
 				}
