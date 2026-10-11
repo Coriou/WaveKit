@@ -77,7 +77,7 @@ describe("App shell", () => {
 		expect(f.at(-1)).toMatch(/\? help/)
 		expect(f[0]).toMatch(/^ api ● 2s {2}iq ● streaming/)
 		expect(f[1]).toBe(
-			" 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System",
+			" 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan",
 		)
 		for (const l of f) expect([...l].length).toBeLessThanOrEqual(120)
 		expect(h.text()).toContain("stub overview")
@@ -199,7 +199,7 @@ describe("App shell", () => {
 		const f = h.frame()
 		expect(f[1]).toMatch(/^ ! API unreachable/)
 		expect(f[2]).toBe(
-			" 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System",
+			" 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan",
 		)
 		h.unmount()
 	})

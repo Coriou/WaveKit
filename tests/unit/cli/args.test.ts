@@ -159,3 +159,9 @@ describe("private credential options", () => {
 		expect(HELP_TEXT).toContain("--credential-format")
 	})
 })
+
+it("opens additive Scan with --view and documents six views", () => {
+	expect(parseArgs(["--view", "scan"])).toEqual({ kind: "run", view: "scan" })
+	expect(helpText()).toContain("Views (keys 1-6)")
+	expect(helpText()).toContain("read-only")
+})

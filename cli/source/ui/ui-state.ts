@@ -80,6 +80,11 @@ export interface DetailUi {
 
 export interface UiState {
 	view: ViewId
+	scan: {
+		sourceId: string | null
+		tab: "spectrum" | "discoveries" | "jobs"
+		cursor: string | null
+	}
 	help: boolean
 	confirm: ConfirmRequest | null
 	/** Selected row id per view (decoder id, or message seq as a string). */
@@ -102,6 +107,7 @@ function perView<T>(make: () => T): Record<ViewId, T> {
 export function initialUi(view: ViewId): UiState {
 	return {
 		view,
+		scan: { sourceId: null, tab: "spectrum", cursor: null },
 		help: false,
 		confirm: null,
 		selected: perView(() => null),

@@ -163,6 +163,8 @@ const sepText = (): string => ` ${glyphs().sep} `
  */
 function startModeText(f: DecoderFacts): string {
 	const sep = sepText()
+	if (f.row.owner === "scanner" || f.row.ephemeral)
+		return `${sep}scanner probe (read-only)${f.row.scannerJobId ? `${sep}${quoted(f.row.scannerJobId)}` : ""}`
 	const mode = f.row.startMode
 	if (f.pinned)
 		return f.row.bandAssessment?.verdict === "out-of-band"
@@ -515,7 +517,7 @@ export function decoderConfirm(
 	op: DecoderOp,
 ): ConfirmRequest | null {
 	const f = decoderFacts(state).find(x => x.row.id === id)
-	if (!f) return null
+	if (!f || f.row.owner === "scanner" || f.row.ephemeral) return null
 	const now = state.now
 	const sep = ` ${glyphs().sep} `
 	// S4 (R59): the blast radius — whether it decodes the shared window, what it

@@ -106,8 +106,13 @@ export const RECEIVER_UNKNOWN_NOTICE = "tuner control unknown"
 const ANY = "*any"
 const PRINTABLE = "*printable"
 const DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"] as const
-const LIST_VIEWS: readonly ViewId[] = ["overview", "decoders", "messages"]
-const DETAIL_VIEWS: readonly ViewId[] = ["decoders", "messages"]
+const LIST_VIEWS: readonly ViewId[] = [
+	"overview",
+	"decoders",
+	"messages",
+	"scan",
+]
+const DETAIL_VIEWS: readonly ViewId[] = ["decoders", "messages", "scan"]
 
 const ud = (): string => `${glyphs().up}${glyphs().down}`
 const lr = (): string => (glyphs().up === "↑" ? "←→" : "<>")
@@ -352,6 +357,7 @@ export const BINDINGS: readonly Binding[] = [
 		keys: ["s"],
 		// R100: core ignores a start on a rate-suspended decoder, so it is not offered.
 		when: c =>
+			!c.v.decoderOwned &&
 			c.v.hasSelection &&
 			c.v.decoderRunning === false &&
 			c.v.decoderSuspension !== "rate",
@@ -365,7 +371,8 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: ["decoders"],
 		keys: ["x"],
-		when: c => c.v.hasSelection && c.v.decoderRunning === true,
+		when: c =>
+			!c.v.decoderOwned && c.v.hasSelection && c.v.decoderRunning === true,
 		action: () => ({ type: "decoder-op", op: "stop" }),
 		hint: hint("x", "stop"),
 	},
@@ -373,7 +380,7 @@ export const BINDINGS: readonly Binding[] = [
 		mode: "list",
 		views: ["decoders"],
 		keys: ["R"],
-		when: c => c.v.hasSelection,
+		when: c => !c.v.decoderOwned && c.v.hasSelection,
 		action: () => ({ type: "decoder-op", op: "restart" }),
 		hint: hint("R", "restart"),
 	},
@@ -382,7 +389,7 @@ export const BINDINGS: readonly Binding[] = [
 		views: ["decoders"],
 		keys: ["u"],
 		// R100: back to auto mode, POST …/start with { "pin": false }.
-		when: c => c.v.hasSelection && c.v.decoderPinned,
+		when: c => !c.v.decoderOwned && c.v.hasSelection && c.v.decoderPinned,
 		action: () => ({ type: "decoder-op", op: "unpin" }),
 		hint: hint("u", "return to auto"),
 	},
@@ -438,10 +445,64 @@ export const BINDINGS: readonly Binding[] = [
 		action: () => ({ type: "preset-open" }),
 		hint: hint("P", "preset"),
 	},
+	{
+		mode: "detail",
+		views: ["scan"],
+		keys: ["<pgup>"],
+		action: () => ({ type: "detail-scroll", delta: -1 }),
+	},
+	{
+		mode: "detail",
+		views: ["scan"],
+		keys: ["<pgdn>"],
+		action: () => ({ type: "detail-scroll", delta: 1 }),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["s"],
+		action: () => ({ type: "scan-source" }),
+		hint: hint("s", "source"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["w"],
+		action: () => ({ type: "scan-tab", tab: "spectrum" }),
+		hint: hint("w", "spectrum"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["d"],
+		action: () => ({ type: "scan-tab", tab: "discoveries" }),
+		hint: hint("d", "discoveries"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["b"],
+		action: () => ({ type: "scan-tab", tab: "jobs" }),
+		hint: hint("b", "jobs"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["n"],
+		action: () => ({ type: "scan-next-page" }),
+		hint: hint("n", "next page"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["f"],
+		action: () => ({ type: "scan-first-page" }),
+		hint: hint("f", "first page"),
+	},
 	// global
 	{
 		mode: "global",
-		keys: ["1", "2", "3", "4", "5"],
+		keys: ["1", "2", "3", "4", "5", "6"],
 		action: key => ({
 			type: "view",
 			view: VIEW_ORDER[Number(key) - 1] ?? "overview",
@@ -561,7 +622,7 @@ export function footerGroups(ctx: KeyContext, said?: string): Group[] {
 			variants: [
 				[
 					{
-						text: `${VIEW_TITLES[ctx.view]} ${glyphs().sep} 1-5 views`,
+						text: `${VIEW_TITLES[ctx.view]} ${glyphs().sep} 1-6 views`,
 						role: "label",
 					},
 				],

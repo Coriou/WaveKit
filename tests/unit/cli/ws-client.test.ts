@@ -466,3 +466,58 @@ describe("recoverable access pause", () => {
 		client.stop()
 	})
 })
+
+describe("visible Scan demand", () => {
+	it("restores source profile on reconnect, switches additively and unsubscribes without resync noise", () => {
+		const h = harness()
+		h.client.setScanSource("rtl")
+		h.client.start()
+		const socket = h.sockets[0]!
+		socket.h.open()
+		socket.h.message(
+			JSON.stringify({ type: "subscribed", data: { channels: [...CHANNELS] } }),
+		)
+		expect(JSON.parse(socket.sent.at(-1)!)).toEqual({
+			type: "subscribe",
+			channels: ["scanner", "spectrum"],
+			options: { spectrum: { sourceId: "rtl", hz: 5, bins: 512 } },
+		})
+		socket.h.message(
+			JSON.stringify({
+				type: "subscribed",
+				data: { channels: [...CHANNELS, "scanner", "spectrum"] },
+			}),
+		)
+		expect(h.emitted.filter(i => i.kind === "ws:open")).toHaveLength(1)
+		h.client.setScanSource("other")
+		expect(socket.sent.at(-1)).toContain('"sourceId":"other"')
+		socket.h.close(1006, "gone")
+		h.fire()
+		const next = h.sockets[1]!
+		next.h.open()
+		next.h.message(
+			JSON.stringify({ type: "subscribed", data: { channels: [...CHANNELS] } }),
+		)
+		expect(next.sent.at(-1)).toContain('"sourceId":"other"')
+		h.client.setScanSource(null)
+		expect(JSON.parse(next.sent.at(-1)!)).toEqual({
+			type: "unsubscribe",
+			channels: ["scanner", "spectrum"],
+		})
+		h.client.stop()
+	})
+})
+
+it("marks malformed Scan events for bounded presentation diagnostics", () => {
+	const { client, sockets, emitted } = harness()
+	client.start()
+	sockets[0]!.h.message(
+		JSON.stringify({
+			type: "spectrum:frame",
+			channel: "spectrum",
+			data: { bins: "invalid" },
+		}),
+	)
+	expect(emitted.at(-1)).toMatchObject({ kind: "ws:invalid", scan: true })
+	client.stop()
+})

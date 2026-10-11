@@ -1,3 +1,4 @@
+import { parseScanEvent } from "./scanner-guards.js"
 import type {
 	AircraftState,
 	AircraftTrackerStats,
@@ -282,7 +283,15 @@ export function guardDecoder(v: unknown): DecoderRow | undefined {
 		restartCount,
 		stats,
 		...pick(v, ["pid", "idleTimeoutMs"] as const, isNum),
-		...pick(v, ["version", "sourceId", "deviceSerial"] as const, isStr),
+		...pick(
+			v,
+			["version", "sourceId", "deviceSerial", "scannerJobId"] as const,
+			isStr,
+		),
+		...(v["owner"] === "scanner" || v["owner"] === "config"
+			? { owner: v["owner"] }
+			: {}),
+		...(v["ephemeral"] === true ? { ephemeral: true } : {}),
 		...(isStrOrNull(lastOutputAt) ? { lastOutputAt } : {}),
 		// All or nothing: this list overrides the nominal band table (R15), so a
 		// partial or empty one would give a confident wrong in-window answer.
@@ -1407,6 +1416,13 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 	const type = raw["type"]
 	const d = raw["data"]
 	if (!isStr(type)) return undefined
+	if (type.startsWith("spectrum:") || type.startsWith("scanner:")) {
+		if (
+			raw["channel"] !== (type.startsWith("spectrum:") ? "spectrum" : "scanner")
+		)
+			return undefined
+		return parseScanEvent(type, d)
+	}
 	const data: Obj = isObj(d) ? d : {}
 	const s = (k: string): string | undefined => {
 		const x = data[k]
@@ -1444,6 +1460,14 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 			return decoderId !== undefined && error !== undefined
 				? { type, decoderId, error }
 				: undefined
+		}
+		case "decoder:removed": {
+			const decoderId = s("decoderId")
+			return decoderId ? { type, decoderId } : undefined
+		}
+		case "decoder:created": {
+			const decoder = guardDecoder(data["decoder"])
+			return decoder ? { type, decoder } : undefined
 		}
 		case "decoder:status": {
 			const decoder = guardDecoder(d)
@@ -1557,7 +1581,17 @@ export function parseServerMessage(raw: unknown): WsEvent | undefined {
 			const sourceId = s("sourceId")
 			const command = s("command")
 			return sourceId !== undefined && command !== undefined
-				? { type, sourceId, command, value: data["value"] }
+				? {
+						type,
+						sourceId,
+						command,
+						value: data["value"],
+						...(data["origin"] === "rest" ||
+						data["origin"] === "scanner" ||
+						data["origin"] === "replay"
+							? { origin: data["origin"] }
+							: {}),
+					}
 				: undefined
 		}
 		case "tuner:control-mode-changed": {

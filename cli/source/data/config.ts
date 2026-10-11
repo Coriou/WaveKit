@@ -30,6 +30,8 @@ export type FetchLike = (
 	ok: boolean
 	status: number
 	statusText: string
+	headers?: { get(name: string): string | null }
+	body?: ReadableStream<Uint8Array> | null
 	json(): Promise<unknown>
 }>
 

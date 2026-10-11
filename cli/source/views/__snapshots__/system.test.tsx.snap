@@ -23,12 +23,12 @@ exports[`System view (spec §6.5) > golden: 80x24 1`] = `
 
 
 
- System · 1-5 views  a start audio  P preset  r reconnect  q quit  ? help"
+ System · 1-6 views  a start audio  P preset  r reconnect  q quit  ? help"
 `;
 
 exports[`System view (spec §6.5) > golden: 120x40 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
  CONTAINER cgroup v2 · as of 2s ago
  cpu       240%   throttled —   oom kills 0

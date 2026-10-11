@@ -23,7 +23,7 @@ exports[`Overview goldens (spec §6.1) > api-down cold (no cache) 80x24 1`] = `
 
 
 
- Overview · 1-5 views  ↑↓ select  r reconnect  q quit  ? help"
+ Overview · 1-6 views  ↑↓ select  r reconnect  q quit  ? help"
 `;
 
 exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
@@ -49,7 +49,7 @@ exports[`Overview goldens (spec §6.1) > api-down-cached 80x24 1`] = `
  18:03:14  multimon-ng   POCSAG  7654321  fn 0  numeric  0207 555 0101
  18:01:40  dsd-fme       DMR     TG 9  SRC 2341001  1.2s  quality 90%  2 err  …
  18:01:28  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
- Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+ Overview · 1-6 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
 `;
 
 exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
@@ -71,7 +71,7 @@ exports[`Overview goldens (spec §6.1) > live 60x20 1`] = `
  18:07  multimon-ng  1234567  fn 3  FIRE ALARM ACTIVATION -…
  18:07  dsd-fme      TG 2350  SRC 2340001  3.1s  …
  18:05  multimon-ng  7654321  fn 0  numeric  0207 555 0101
- Overview · 1-5 views  ↑↓ select  Enter open  q quit  ? help"
+ Overview · 1-6 views  ↑↓ select  Enter open  q quit  ? help"
 `;
 
 exports[`Overview goldens (spec §6.1) > live 80x24 1`] = `
@@ -97,12 +97,12 @@ exports[`Overview goldens (spec §6.1) > live 80x24 1`] = `
  18:03:58  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
  18:01:12  dsd-fme       DMR     TG 2350  SRC 2341234  12.0s  quality 75%  …
 
- Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+ Overview · 1-6 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
 `;
 
 exports[`Overview goldens (spec §6.1) > live 120x40 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4ms   4.1 MB/s · 2.048 MS/s   relay 1 client
  window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m ago
@@ -144,7 +144,7 @@ exports[`Overview goldens (spec §6.1) > live 120x40 1`] = `
 
 exports[`Overview goldens (spec §6.1) > live 200x50 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21%                                                           18:07
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
  RECEIVER  pi-iq · rtl_tcp 192.0.2.23:5555   ● streaming · sample age 4ms   4.1 MB/s · 2.048 MS/s                 MESSAGES  3 in 60s · 7 total
  window    444.947–446.995 MHz · centre 445.9707   external control · 192.0.2.1   last cmd 6m ago                 18:07:41  dsd-fme       DMR     TG 2350  SRC 2341234  8.4s  quality 65%  encrypted  …
@@ -217,5 +217,5 @@ exports[`Overview goldens (spec §6.1) > ws-only (REST down) 80x24 1`] = `
  18:04:11  dsd-fme       DMR     TG 9  SRC 2341001  1.2s  quality 90%  2 err  …
  18:03:59  multimon-ng   FLEX    1234567  ALN  TEST PAGE 03:58
  18:01:13  dsd-fme       DMR     TG 2350  SRC 2341234  12.0s  quality 75%  …
- Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
+ Overview · 1-6 views  ↑↓ select  Enter open  r reconnect  q quit  ? help"
 `;

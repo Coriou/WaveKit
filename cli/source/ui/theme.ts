@@ -128,3 +128,81 @@ export function roleProps(
 	if (base.bold === true || bold) out.bold = true
 	return out
 }
+
+/** Explicit 24-bit capability only; ordinary color support is not sufficient. */
+export function spectrumMode(
+	env: Env,
+	isTTY: boolean,
+	depth = 0,
+): "truecolor" | "ascii" | "mono" {
+	if (detectGlyphMode(env) === "ascii") return "ascii"
+	if (
+		detectColor(env, isTTY) &&
+		(depth >= 24 || /^(truecolor|24bit)$/i.test(env["COLORTERM"] ?? ""))
+	)
+		return "truecolor"
+	return "mono"
+}
+
+export const POWER_MIN_DBFS = -120
+export const POWER_MAX_DBFS = -20
+const PALETTE = [
+	"#102030",
+	"#204060",
+	"#306080",
+	"#4080a0",
+	"#60a0b0",
+	"#90bfc0",
+	"#c0ded8",
+	"#ffffff",
+] as const
+/** One pass, max-hold per display cell. Empty cells stay unknown; no invented resolution. */
+export function spectrumCells(bins: Uint8Array, width: number): number[] {
+	const cols = Math.min(512, Math.max(0, Math.floor(width)))
+	return Array.from({ length: cols }, (_, x) => {
+		const lo = Math.floor((x * bins.length) / cols)
+		const hi = Math.floor(((x + 1) * bins.length) / cols)
+		let peak = -1
+		for (let i = lo; i < hi; i++) peak = Math.max(peak, bins[i] ?? -1)
+		return peak
+	})
+}
+export function powerLevel(byte: number): number {
+	return Math.max(
+		0,
+		Math.min(
+			7,
+			Math.floor(
+				((byte / 2 - 127.5 - POWER_MIN_DBFS) /
+					(POWER_MAX_DBFS - POWER_MIN_DBFS)) *
+					8,
+			),
+		),
+	)
+}
+export function powerRamp(cells: readonly number[], ascii: boolean): string {
+	const ramp = ascii ? ASCII_GLYPHS.spark : glyphs().spark
+	return cells.map(v => (v < 0 ? " " : (ramp[powerLevel(v)] ?? " "))).join("")
+}
+export interface HalfBlockRun {
+	text: string
+	foreground: string
+	background: string
+}
+export function halfBlockRuns(
+	top: readonly number[],
+	bottom: readonly number[],
+): HalfBlockRun[] {
+	const runs: HalfBlockRun[] = []
+	for (let i = 0; i < top.length; i++) {
+		const t = top[i] ?? -1,
+			b = bottom[i] ?? -1
+		const foreground = t < 0 ? "#000000" : (PALETTE[powerLevel(t)] ?? "#000000")
+		const background = b < 0 ? "#000000" : (PALETTE[powerLevel(b)] ?? "#000000")
+		const prev = runs[runs.length - 1]
+		if (prev?.foreground === foreground && prev.background === background)
+			prev.text += "▀"
+		else runs.push({ text: "▀", foreground, background })
+	}
+	return runs
+}

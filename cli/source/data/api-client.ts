@@ -1,3 +1,4 @@
+import { guardScan, type ScanRead, type ScanValues } from "./scanner-guards.js"
 import type { LiveAudioConfig } from "@wavekit/api-types"
 import type { FetchLike } from "./config.js"
 import {
@@ -256,5 +257,149 @@ export function createApiClient(opts: ApiClientOptions): ApiClient {
 			),
 		audio: op => send("POST", `/api/live-audio/${op}`),
 		patchAudio: patch => send("PATCH", "/api/live-audio/config", patch),
+	}
+}
+
+/** New Scan reads never use response.json(): the byte cap applies before parsing. */
+export const SCAN_BODY_BYTES = 2 * 1024 * 1024
+export class ScanReadError extends Error {
+	override name = "ScanReadError"
+	constructor(
+		readonly kind:
+			| "unavailable"
+			| "too-large"
+			| "invalid"
+			| "http"
+			| "network"
+			| "timeout",
+		message: string,
+		readonly status?: number,
+		readonly code?: string,
+	) {
+		super(message)
+	}
+}
+
+export async function readBoundedJson(
+	response: Awaited<ReturnType<FetchLike>>,
+	signal: AbortSignal,
+): Promise<unknown> {
+	const body = response.body
+	if (!body)
+		throw new ScanReadError("unavailable", "bounded response body unavailable")
+	const reader = body.getReader()
+	let abort: (() => void) | undefined
+	const cancelled = new Promise<never>((_resolve, reject) => {
+		abort = () => {
+			reject(new ScanReadError("timeout", "Scan read cancelled or timed out"))
+			void reader.cancel().catch(() => undefined)
+		}
+		signal.addEventListener("abort", abort, { once: true })
+	})
+	try {
+		if (signal.aborted)
+			throw new ScanReadError("timeout", "Scan read cancelled or timed out")
+		const hint = response.headers?.get("content-length")
+		if (
+			hint !== null &&
+			hint !== undefined &&
+			/^\d+$/.test(hint) &&
+			Number(hint) > SCAN_BODY_BYTES
+		)
+			throw new ScanReadError("too-large", "Scan response exceeds 2 MiB")
+		const bytes = new Uint8Array(SCAN_BODY_BYTES)
+		let size = 0
+		while (true) {
+			const r = await Promise.race([reader.read(), cancelled])
+			if (r.done) break
+			if (!(r.value instanceof Uint8Array))
+				throw new ScanReadError("invalid", "invalid Scan response bytes")
+			const nextSize = size + r.value.byteLength
+			if (nextSize > SCAN_BODY_BYTES)
+				throw new ScanReadError("too-large", "Scan response exceeds 2 MiB")
+			bytes.set(r.value, size)
+			size = nextSize
+		}
+		try {
+			return JSON.parse(
+				Buffer.from(bytes.buffer, 0, size).toString("utf8"),
+			) as unknown
+		} catch {
+			throw new ScanReadError("invalid", "invalid Scan JSON")
+		}
+	} finally {
+		if (abort) signal.removeEventListener("abort", abort)
+		void reader.cancel().catch(() => undefined)
+		reader.releaseLock()
+	}
+}
+
+export async function getScan<K extends ScanRead>(
+	fetchFn: FetchLike,
+	base: string,
+	key: K,
+	path: string,
+	signal: AbortSignal,
+): Promise<ScanValues[K]> {
+	let abort: (() => void) | undefined
+	try {
+		if (signal.aborted)
+			throw new ScanReadError("timeout", "Scan read cancelled or timed out")
+		const cancelled = new Promise<never>((_resolve, reject) => {
+			abort = () =>
+				reject(new ScanReadError("timeout", "Scan read cancelled or timed out"))
+			signal.addEventListener("abort", abort, { once: true })
+		})
+		const response = await Promise.race([
+			fetchFn(`${base}${path}`, { signal }),
+			cancelled,
+		])
+		let body: unknown
+		try {
+			body = await readBoundedJson(response, signal)
+		} catch (error) {
+			if (!response.ok && error instanceof ScanReadError)
+				throw new ScanReadError(
+					error.kind,
+					`HTTP ${response.status}: ${error.message}`,
+					response.status,
+				)
+			throw error
+		}
+		if (!response.ok) {
+			// Never echo arbitrary error messages from an authenticated transport.
+			const code =
+				isObj(body) &&
+				isStr(body["code"]) &&
+				/^(?:SCANNER_|SPECTRUM_|AUTH_|ACCESS_|HOST_|ORIGIN_|MACHINE_|SESSION_|VALIDATION_)[A-Z_]{1,80}$/.test(
+					body["code"],
+				)
+					? body["code"]
+					: undefined
+			throw new ScanReadError(
+				"http",
+				`HTTP ${response.status}${code ? ` ${code}` : ""}`,
+				response.status,
+				code,
+			)
+		}
+		const value = guardScan(key, body)
+		if (value === undefined)
+			throw new ScanReadError("invalid", "unexpected Scan response shape")
+		return value
+	} catch (error) {
+		if (error instanceof ScanReadError) throw error
+		const timeout =
+			signal.aborted ||
+			(error instanceof Error &&
+				(error.name === "AbortError" || error.name === "TimeoutError"))
+		throw new ScanReadError(
+			timeout ? "timeout" : "network",
+			timeout
+				? "Scan read cancelled or timed out"
+				: "Scan transport unavailable",
+		)
+	} finally {
+		if (abort) signal.removeEventListener("abort", abort)
 	}
 }

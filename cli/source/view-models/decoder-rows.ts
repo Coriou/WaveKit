@@ -229,6 +229,7 @@ function countdown(f: DecoderFacts): string | null {
 
 /** R84: core's reason in one word; a code this CLI does not know adds nothing (the detail quotes it). */
 function suspendedWords(code: string | undefined, sep: string): string {
+	if (code === "tuner-scanning") return "suspended: tuner scanning"
 	if (code === "frequency-out-of-band") return `suspended${sep}out of band`
 	if (code !== undefined && isRateReason(code)) return `suspended${sep}rate`
 	return "suspended"

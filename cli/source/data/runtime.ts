@@ -1,3 +1,17 @@
+import { getScan, ScanReadError } from "./api-client.js"
+import {
+	initialScan,
+	resetScan,
+	selectScan,
+	scanProfile,
+	scanFrame,
+	scanRead,
+	sameDemand,
+	SCAN_PENDING_KEYS,
+	type ScanDemand,
+} from "./scan-state.js"
+import type { SpectrumFrameEventData } from "@wavekit/api-types"
+import type { ScanRead } from "./scanner-guards.js"
 import { createCliProbeFetch } from "./access-transport.js"
 import { createApiClient } from "./api-client.js"
 import {
@@ -78,12 +92,14 @@ export interface Runtime {
 	start(): void
 	stop(): void
 	reconnect(): void
+	setScanDemand(demand: ScanDemand | null): void
 	send(intent: WriteIntent): void
 	/** One flush: drain the inbound queue, reduce, commit once. Exposed for tests. */
 	tick(): void
 }
 
-export type RuntimeHandle = Pick<Runtime, "store" | "reconnect" | "send">
+export type RuntimeHandle = Pick<Runtime, "store" | "reconnect" | "send"> &
+	Partial<Pick<Runtime, "setScanDemand">>
 
 export function nodeRuntimeDeps(
 	explicit: ApiTarget | null,
@@ -131,7 +147,99 @@ export function isUrgent(item: Inbound): boolean {
 
 export function createRuntime(deps: RuntimeDeps): Runtime {
 	const queue: Inbound[] = []
+	let scan = initialScan()
+	let scanDirty = false
+	let scanDemand: ScanDemand | null = null
+	let scanGeneration = 0
+	let scanAbort: AbortController | null = null
+	let scanReading = false
+	let lastScanRead = -Infinity
+	const scanReadAt = new Map<string, number>()
+	let pendingFrame: { frame: SpectrumFrameEventData; at: number } | null = null
+	const pendingKeys = new Set<string>()
+	function resetScanSession(): void {
+		scanGeneration++
+		scanAbort?.abort()
+		scanReading = false
+		lastScanRead = -Infinity
+		scanReadAt.clear()
+		pendingFrame = null
+		pendingKeys.clear()
+		scan = resetScan(scan)
+		scanDirty = true
+	}
 	const push = (item: Inbound): void => {
+		if (item.kind === "ws:open" || item.kind === "ws:close") resetScanSession()
+		if (item.kind === "ws:invalid" && item.scan) {
+			if (scanDemand) {
+				scan = {
+					...scan,
+					invalidFrames: Math.min(
+						Number.MAX_SAFE_INTEGER,
+						scan.invalidFrames + 1,
+					),
+				}
+				scanDirty = true
+			}
+			return
+		}
+		if (item.kind === "ws") {
+			const ev = item.event
+			if (ev.type === "spectrum:frame") {
+				if (
+					scanDemand &&
+					ev.frame.sourceId === scanDemand.sourceId &&
+					scan.profile?.sourceId === scanDemand.sourceId &&
+					ev.frame.profile === scan.profile.profile?.key
+				)
+					pendingFrame = { frame: ev.frame, at: item.at }
+				return
+			}
+			if (ev.type === "spectrum:profile") {
+				pendingFrame = null
+				scan = scanProfile(scan, ev.profile)
+				scanDirty = true
+				return
+			}
+			if (ev.type === "scanner:status") {
+				scan = scanRead(scan, "status", ev.status, null, item.at)
+				scanDirty = true
+				if (scan.phase === "error") pendingFrame = null
+				return
+			}
+			if (ev.type === "scanner:invalidate") {
+				if (pendingKeys.size < SCAN_PENDING_KEYS) pendingKeys.add(ev.key)
+				return
+			}
+			if (
+				"sourceId" in ev &&
+				ev.sourceId === scanDemand?.sourceId &&
+				(ev.type === "source:disconnected" || ev.type === "source:removed")
+			) {
+				pendingFrame = null
+				scan = { ...scan, rows: [], phase: "waiting" }
+				scanDirty = true
+				if (ev.type === "source:removed") {
+					scan = {
+						...scan,
+						profile: null,
+						phase: "removed",
+						error: "source removed",
+					}
+					ws.setScanSource(null)
+				}
+			}
+			if (
+				ev.type === "source:status" &&
+				ev.source.id === scanDemand?.sourceId &&
+				ev.source.activity &&
+				ev.source.activity.state !== "streaming"
+			) {
+				pendingFrame = null
+				scan = { ...scan, rows: [] }
+				scanDirty = true
+			}
+		}
 		queue.push(item)
 	}
 	const store = createStore(initialState(deps.now()))
@@ -206,6 +314,89 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		setTimeout: deps.timers.setTimeout,
 		clearTimeout: deps.timers.clearTimeout,
 	})
+
+	async function readScanCycle(): Promise<void> {
+		if (
+			stopped ||
+			!scanDemand ||
+			!target ||
+			scanReading ||
+			deps.now() - lastScanRead < POLL_MS
+		)
+			return
+		if (
+			store.get().conn.ws.state === "closed" &&
+			store.get().conn.ws.reason?.includes("access")
+		)
+			return
+		const demand = scanDemand
+		const generation = scanGeneration
+		const base = target.base
+		const controller = new AbortController()
+		scanAbort = controller
+		scanReading = true
+		lastScanRead = deps.now()
+		pendingKeys.clear()
+		const signal = controller.signal
+		const timeout = deps.timers.setTimeout(() => controller.abort(), 2000)
+		const query = `sourceId=${encodeURIComponent(demand.sourceId)}&limit=50${demand.cursor ? `&cursor=${encodeURIComponent(demand.cursor)}` : ""}`
+		const reads: [ScanRead, string][] = [
+			["status", "/api/scanner"],
+			["spectrum", "/api/spectrum"],
+			["jobs", "/api/scanner/jobs"],
+			["discoveries", `/api/scanner/discoveries?${query}`],
+		]
+		if (demand.detail) {
+			const url = `/api/scanner/${demand.detail.kind === "job" ? "jobs" : "discoveries"}/${encodeURIComponent(demand.detail.id)}`
+			reads.push([demand.detail.kind, url])
+			if (demand.detail.kind === "discovery")
+				reads.push(["observations", `${url}/observations?limit=50`])
+		}
+		await Promise.allSettled(
+			reads
+				.filter(
+					([_key, path]) =>
+						deps.now() - (scanReadAt.get(path) ?? -Infinity) >= POLL_MS,
+				)
+				.map(async ([key, path]) => {
+					scanReadAt.set(path, deps.now())
+					if (scanReadAt.size > 64)
+						scanReadAt.delete(scanReadAt.keys().next().value ?? "")
+					try {
+						const value = await getScan(deps.fetchFn, base, key, path, signal)
+						if (generation !== scanGeneration || stopped) return
+						if (
+							(key === "job" || key === "discovery") &&
+							(!value || !("id" in value) || value.id !== demand.detail?.id)
+						)
+							throw new ScanReadError(
+								"invalid",
+								"Scan detail identity mismatch",
+							)
+						scan = scanRead(scan, key, value, null, deps.now())
+					} catch (error) {
+						if (generation !== scanGeneration || stopped) return
+						scan = scanRead(
+							scan,
+							key,
+							null,
+							error instanceof ScanReadError
+								? error.message
+								: "Scan read unavailable",
+							deps.now(),
+						)
+					}
+					scanDirty = true
+					if (scan.phase === "error" || scan.phase === "removed")
+						pendingFrame = null
+				}),
+		)
+		deps.timers.clearTimeout(timeout)
+		if (generation === scanGeneration) {
+			scanReading = false
+			scanAbort = null
+		}
+	}
 
 	function restInbound<E extends Endpoint>(
 		endpoint: E,
@@ -429,6 +620,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	}
 
 	function tick(): void {
+		void readScanCycle()
+		if (pendingFrame) {
+			scan = scanFrame(scan, pendingFrame.frame, pendingFrame.at)
+			pendingFrame = null
+			scanDirty = true
+		}
 		const current = store.get()
 		const now = deps.now()
 		// Background items (periodic snapshots, heartbeats, REST answers) wait for the
@@ -436,7 +633,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		// commits on the next 200 ms tick (D3, spec §15).
 		if (
 			Math.floor(now / 1000) === Math.floor(current.now / 1000) &&
-			!queue.some(isUrgent)
+			!queue.some(isUrgent) &&
+			!scanDirty
 		)
 			return
 		const batch = queue.splice(0, queue.length)
@@ -444,6 +642,10 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		// resync: each endpoint's next answer is a first answer again (final M2).
 		if (batch.some(i => i.kind === "ws:open")) answeredOnce.clear()
 		let next = reduce(current, batch, now, reduceDeps)
+		if (scanDirty) {
+			next = { ...next, scan }
+			scanDirty = false
+		}
 		const fx = next.effects
 		if (fx.polls.length > 0 || (fx.resync?.length ?? 0) > 0) {
 			next = { ...next, effects: { polls: [] } }
@@ -464,6 +666,24 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	async function execute(intent: WriteIntent): Promise<CommandOutcome[]> {
 		switch (intent.kind) {
 			case "decoder":
+				if (
+					store
+						.get()
+						.decoders.value?.some(
+							d =>
+								d.id === intent.decoderId &&
+								(d.owner === "scanner" || d.ephemeral),
+						)
+				)
+					return [
+						stamp(intent.op, {
+							ok: false,
+							outcome: "failed",
+							status: 409,
+							code: "DECODER_OWNED_BY_SCANNER",
+							message: "scanner probe is read-only",
+						}),
+					]
 				return [
 					stamp(intent.op, await api.decoder(intent.decoderId, intent.op)),
 				]
@@ -516,6 +736,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		stop: () => {
 			stopped = true
 			epoch++
+			resetScanSession()
+			scanDemand = null
+			scan = initialScan()
 			// Queued inbound belongs to the stopped session.
 			queue.length = 0
 			clearResync()
@@ -539,8 +762,46 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				void runDiscovery()
 				return
 			}
+			resetScanSession()
 			ws.reconnectNow()
 			requestResync()
+		},
+		setScanDemand: demand => {
+			if (sameDemand(scanDemand, demand)) return
+			const sourceChanged = scanDemand?.sourceId !== demand?.sourceId
+			const queryChanged = scanDemand?.cursor !== demand?.cursor
+			const detailChanged =
+				scanDemand?.detail?.id !== demand?.detail?.id ||
+				scanDemand?.detail?.kind !== demand?.detail?.kind
+			scanDemand = demand
+			scanGeneration++
+			scanAbort?.abort()
+			scanReading = false
+			lastScanRead = -Infinity
+			pendingKeys.clear()
+			if (sourceChanged) {
+				scanReadAt.clear()
+				pendingFrame = null
+				scan = selectScan(scan, demand?.sourceId ?? null)
+				ws.setScanSource(demand?.sourceId ?? null)
+			} else
+				scan = {
+					...scan,
+					lanes: {
+						...scan.lanes,
+						...(queryChanged
+							? { discoveries: { value: null, at: null, error: null } }
+							: {}),
+						...(detailChanged
+							? {
+									job: { value: null, at: null, error: null },
+									discovery: { value: null, at: null, error: null },
+									observations: { value: null, at: null, error: null },
+								}
+							: {}),
+					},
+				}
+			scanDirty = true
 		},
 		send: intent => {
 			const key = actionKey(intent)

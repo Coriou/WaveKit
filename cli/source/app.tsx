@@ -1,3 +1,4 @@
+import { scanSources } from "./view-models/scan.js"
 import { Box, Text, useApp } from "ink"
 import { useEffect, useState, type ReactElement } from "react"
 import { Banner } from "./components/banner.js"
@@ -76,7 +77,18 @@ export function App({
 		detail: ui.detail[ui.view].open,
 		heightClass: hc,
 		rows: info.rowIds.length,
-		v: info.ctx,
+		v: {
+			...info.ctx,
+			decoderOwned: safe(
+				() =>
+					state.decoders.value?.some(
+						d =>
+							d.id === ui.selected.decoders &&
+							(d.owner === "scanner" || d.ephemeral),
+					) === true,
+				true,
+			),
+		},
 	}
 	// R75: a fresh key notice (ui.notice) wins; otherwise the view's standing notice.
 	const footerNotice: UiState["notice"] =
@@ -105,6 +117,22 @@ export function App({
 			case "confirm-yes": {
 				const c = ui.confirm
 				if (!c) return
+				const confirmedIntent = c.intent
+				if (
+					confirmedIntent.kind === "decoder" &&
+					state.decoders.value?.some(
+						d =>
+							d.id === confirmedIntent.decoderId &&
+							(d.owner === "scanner" || d.ephemeral),
+					)
+				) {
+					setUi(u => ({
+						...u,
+						confirm: null,
+						notice: { text: "scanner probe is read-only", at: state.now },
+					}))
+					return
+				}
 				runtime.send(c.intent)
 				setUi(u => ({
 					...u,
@@ -164,6 +192,47 @@ export function App({
 			: ctx,
 		dispatch,
 	)
+	useEffect(() => {
+		if (ui.view === "scan" && ui.scan.sourceId === null) {
+			const first = scanSources(state)[0]
+			if (first) setUi(u => ({ ...u, scan: { ...u.scan, sourceId: first } }))
+		}
+	}, [ui.view, ui.scan.sourceId, state.sources.value])
+	useEffect(() => {
+		const active =
+			ui.view === "scan" &&
+			!small &&
+			!ui.help &&
+			!ui.quit &&
+			ui.scan.sourceId !== null
+		const detail =
+			ui.detail.scan.open && ui.selected.scan && ui.scan.tab !== "spectrum"
+				? {
+						kind:
+							ui.scan.tab === "jobs"
+								? ("job" as const)
+								: ("discovery" as const),
+						id: ui.selected.scan,
+					}
+				: null
+		runtime.setScanDemand?.(
+			active && ui.scan.sourceId
+				? { sourceId: ui.scan.sourceId, cursor: ui.scan.cursor, detail }
+				: null,
+		)
+	}, [
+		runtime,
+		ui.view,
+		ui.help,
+		ui.scan.sourceId,
+		ui.scan.cursor,
+		ui.scan.tab,
+		ui.detail.scan.open,
+		ui.selected.scan,
+		small,
+		ui.quit,
+	])
+	useEffect(() => () => runtime.setScanDemand?.(null), [runtime])
 	useEffect(() => {
 		if (ui.quit) exit()
 	}, [ui.quit, exit])

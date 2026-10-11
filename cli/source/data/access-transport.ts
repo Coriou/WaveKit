@@ -276,6 +276,8 @@ function createFetch(
 				ok: response.ok,
 				status: response.status,
 				statusText: "",
+				headers: response.headers,
+				body: response.body,
 				json: async (): Promise<unknown> => {
 					// Existing API clients render error-body messages verbatim. Do not
 					// let a server/redirect diagnostic echo the reusable bearer token.

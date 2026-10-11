@@ -1257,13 +1257,11 @@ describe("CLI access transport wiring", () => {
 		rt.stop()
 	})
 	it("node dependencies keep injected protected transports separate from credential-free probes", async () => {
-		const native = vi
-			.spyOn(globalThis, "fetch")
-			.mockResolvedValue(
-				new Response(JSON.stringify({ status: "ok", private: "discard" }), {
-					status: 503,
-				}),
-			)
+		const native = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ status: "ok", private: "discard" }), {
+				status: 503,
+			}),
+		)
 		const fetchFn = vi.fn<FetchLike>(() => okJson([]))
 		const wsFactory = wsFake().factory
 		try {
@@ -1324,4 +1322,145 @@ describe("CLI access transport wiring", () => {
 			rt.stop()
 		},
 	)
+})
+
+describe("Scan runtime bounded demand and generations", () => {
+	it("coalesces high-rate frames, refetches after reconnect and releases demand on stop", async () => {
+		const { SCAN_FRAME, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const sent: string[] = [],
+			handlers: WsHandlers[] = []
+		const rt = createRuntime({
+			fetchFn: never,
+			probeFetchFn: never,
+			wsFactory: (_url, h) => {
+				handlers.push(h)
+				return { send: s => sent.push(s), close: () => undefined }
+			},
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		const h = handlers[0]!
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		h.message(
+			JSON.stringify({
+				type: "spectrum:profile",
+				channel: "spectrum",
+				data: SCAN_PROFILE,
+			}),
+		)
+		for (let i = 0; i < 1000; i++)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: { ...SCAN_FRAME, epoch: i === 999 ? 2 : 4 },
+				}),
+			)
+		for (let i = 0; i < 1000; i++)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: {},
+				}),
+			)
+		rt.tick()
+		expect(rt.store.get().scan.invalidFrames).toBe(1000)
+		expect(rt.store.get().scan.rows).toHaveLength(1)
+		expect(rt.store.get().scan.rows[0]?.frame.epoch).toBe(2)
+		rt.setScanDemand({ sourceId: "other", cursor: null, detail: null })
+		h.message(
+			JSON.stringify({
+				type: "spectrum:frame",
+				channel: "spectrum",
+				data: SCAN_FRAME,
+			}),
+		)
+		rt.tick()
+		expect(rt.store.get().scan.rows).toHaveLength(0)
+		rt.reconnect()
+		const next = handlers[1]!
+		next.open()
+		next.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		expect(sent.at(-1)).toContain('"sourceId":"other"')
+		rt.setScanDemand(null)
+		expect(JSON.parse(sent.at(-1)!)).toEqual({
+			type: "unsubscribe",
+			channels: ["scanner", "spectrum"],
+		})
+		rt.stop()
+	})
+	it("drops delayed old-source/detail reads and caps same-path request cadence", async () => {
+		const { SCAN_DISCOVERY, SCAN_JOB, SCAN_STATUS, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake(),
+			urls: string[] = [],
+			signals: AbortSignal[] = []
+		let resolveOld: ((r: Response) => void) | undefined
+		const fetchFn: FetchLike = (url, init) => {
+			if (!url.includes("/scanner") && !url.includes("/spectrum"))
+				return never(url, init)
+			urls.push(url)
+			signals.push(init!.signal!)
+			if (url.includes("sourceId=rtl"))
+				return new Promise<Response>(r => {
+					resolveOld = r
+				})
+			const body = url.endsWith("/api/scanner")
+				? SCAN_STATUS
+				: url.endsWith("/api/spectrum")
+					? { defaultProfile: SCAN_PROFILE.profile, sources: [] }
+					: url.endsWith("/jobs")
+						? [SCAN_JOB]
+						: url.includes("/jobs/")
+							? SCAN_JOB
+							: { items: [], nextCursor: null }
+			return Promise.resolve(new Response(JSON.stringify(body)))
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		rt.tick()
+		await vi.advanceTimersByTimeAsync(200)
+		rt.setScanDemand({
+			sourceId: "other",
+			cursor: null,
+			detail: { kind: "job", id: "job1" },
+		})
+		rt.tick()
+		expect(signals[0]?.aborted).toBe(true)
+		resolveOld?.(
+			new Response(
+				JSON.stringify({ items: [SCAN_DISCOVERY], nextCursor: null }),
+			),
+		)
+		await vi.advanceTimersByTimeAsync(200)
+		expect(rt.store.get().scan.lanes.discoveries.value?.items).toEqual([])
+		rt.setScanDemand({
+			sourceId: "other",
+			cursor: null,
+			detail: { kind: "job", id: "job2" },
+		})
+		rt.tick()
+		await vi.advanceTimersByTimeAsync(200)
+		expect(urls.filter(u => u.endsWith("/api/scanner"))).toHaveLength(2) // one per source generation, not per detail
+		rt.setScanDemand(null)
+		rt.stop()
+	})
 })
