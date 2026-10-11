@@ -6,7 +6,7 @@ Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate priorities (re-ordered 2026-10-10)
+## Immediate priorities (re-ordered 2026-10-11)
 
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
@@ -28,8 +28,10 @@ acceptance still need measurement.
 
 The next connected web milestone is **spectrum → tune → identify → inspect →
 listen**. The web dashboard is in design on `design/web-dashboard`; its
-`docs/web/CORE-GAPS.md` (audited at `fd42e45`, 2026-10-10) supplies the feature
-inventory mapped below. Canvas work can continue independently. Software,
+`docs/web/CORE-GAPS.md` (audited at `df1346b`, 2026-10-11) supplies the feature
+inventory mapped below. That design remains separately owned and in progress;
+the current core scope is backend gap analysis and contracts. Web UI implementation
+requires a separate decision. Software,
 local-receiver acceptance and optional Pi acceptance have separate gates.
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
@@ -40,12 +42,19 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
    remains the next client action; web consumption and physical-terminal
    acceptance remain open. Preserve detector behavior independently of display
    preferences; genuine viewed-slice zoom remains a separate follow-up.
-2. **Prepare browser access policy and true zoom** (§4, §8). The initial access
+2. **Close browser access gaps and prepare spectrum foundations** (§4, §8). The initial access
    target is one operator on a local/LAN deployment, with authentication and
    explicit origins across REST, WS and audio. It must land before connecting
-   browser controls to the live receiver. Design genuine higher-resolution
-   viewed-slice FFT as a separate follow-up to S1-B; cropping existing display
-   bins is insufficient. Measure coalesced REST drag-to-tune latency before
+   browser controls to the live receiver. Protected pairing and session refresh
+   are implemented; public bootstrap/capabilities, authenticated device inventory,
+   browser onboarding/renewal consumption and TLS/proxy acceptance remain open.
+   Operator data is protected-only while the default deployment remains legacy;
+   changing that default is a separate decision. Regional display bands/channel
+   aliases and receiver-provenanced tuner capabilities are independent backend
+   foundations; preserve unknown hardware facts and existing scanner ranges.
+   The genuine higher-resolution viewed-slice FFT design is landed, with raw-seam,
+   budget and transport feasibility gates before implementation; cropping existing
+   display bins is insufficient. Measure coalesced REST drag-to-tune latency before
    choosing a WS tuning transport, preserving tuner arbitration either way.
 3. **Complete S2 acceptance, then S3 listening** (§5, §5b). Reviewed channel
    settlement, scanner consumer and shutdown composition are integrated locally.
