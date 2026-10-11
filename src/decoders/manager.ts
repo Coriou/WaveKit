@@ -171,6 +171,8 @@ interface DecoderState {
 	input: Readable | null
 	/** True while `input` is attached to the decoder. */
 	inputAttached: boolean
+	/** Scanner-only acquisition/startup identity; terminal tokens never become live again. */
+	scannerChannelAttempt: ScannerChannelAttempt | null
 }
 
 interface DecoderSuspension {
@@ -185,6 +187,26 @@ interface OpenChannelRef {
 	sourceId: string
 	generation: number
 	realised: RealisedChannel
+	stream: Readable
+	binding: ScannerDecoderChannelBinding | null
+}
+
+/** Internal lifecycle snapshot, not a capability or native-close/writer-drain receipt. */
+export interface ScannerDecoderChannelBinding {
+	readonly decoderId: string
+	readonly sourceId: string
+	readonly channelId: string
+	readonly generation: number
+	readonly realised: Readonly<RealisedChannel>
+}
+
+interface ScannerChannelAttempt {
+	state: DecoderState
+	rateGeneration: number
+	sourceId: string
+	provider: ChannelProvider
+	terminal: boolean
+	invalidated: Set<string>
 }
 
 /** A channel reason holding a wanted decoder back (addendum §5). */
@@ -197,7 +219,7 @@ interface ChannelHold {
 
 /** How wiring ended: wired, superseded by a newer transition, or held for a channel reason. */
 type WireOutcome =
-	| { wired: true }
+	| { wired: true; scannerChannel?: OpenChannelRef }
 	| { wired: false; superseded: true }
 	| ({ wired: false; superseded: false } & ChannelHold)
 
@@ -238,6 +260,13 @@ interface PendingSourceEvaluation {
  * Events emitted by the Decoder Manager.
  */
 export interface DecoderManagerEvents {
+	"decoder:scanner-channel-granted": (
+		binding: ScannerDecoderChannelBinding,
+	) => void
+	"decoder:scanner-channel-ended": (
+		binding: ScannerDecoderChannelBinding,
+		reason: "invalidated" | "released",
+	) => void
 	/** Emitted when a decoder produces output */
 	"decoder:output": (decoderId: string, output: DecoderOutput) => void
 	/** Emitted when a decoder encounters an error */
@@ -344,16 +373,54 @@ export class DecoderManager extends EventEmitter {
 		ReturnType<typeof setTimeout>
 	>()
 	private static readonly CHANNELIZER_RETRY_MS = 15_000
-	private readonly channelInvalidatedHandler = (
+	private readonly pendingScannerChannels = new Map<
+		DecoderState,
+		ScannerChannelAttempt
+	>()
+	private channelInvalidatedHandler:
+		| ((sourceId: string, generation: number, channelIds: string[]) => void)
+		| null = null
+
+	private onChannelsInvalidated(
+		provider: ChannelProvider,
 		sourceId: string,
-		_generation: number,
+		generation: number,
 		channelIds: string[],
-	): void => {
-		let affected = false
-		for (const state of this.decoders.values()) {
-			if (!state.channel || !channelIds.includes(state.channel.channelId))
+	): void {
+		// Capture pending identities first, before any adopted-channel listener can reenter.
+		for (const attempt of this.pendingScannerChannels.values()) {
+			if (
+				attempt.provider !== provider ||
+				attempt.sourceId !== sourceId ||
+				attempt.terminal
+			)
 				continue
-			affected = true
+			for (const id of channelIds) {
+				const key = JSON.stringify([generation, id])
+				if (attempt.invalidated.has(key)) continue
+				if (attempt.invalidated.size === 64) {
+					this.cancelScannerChannelAttempt(attempt.state, attempt)
+					break
+				}
+				attempt.invalidated.add(key)
+			}
+		}
+		let affected = false
+		const bindings = [...this.decoders.values()].map(state => ({
+			state,
+			ref: state.channel,
+		}))
+		for (const { state, ref } of bindings) {
+			if (
+				!ref ||
+				state.channel !== ref ||
+				ref.provider !== provider ||
+				ref.sourceId !== sourceId ||
+				ref.generation !== generation ||
+				!channelIds.includes(ref.channelId)
+			)
+				continue
+			if (state.owner === "config") affected = true
 			this.dropChannel(state, false)
 		}
 		// The serial worker restarts stale decoders (handleCapsChange); a
@@ -385,17 +452,39 @@ export class DecoderManager extends EventEmitter {
 	 * a raw fanout branch; null (the default) keeps today's behaviour.
 	 */
 	setChannelizer(provider: ChannelProvider | null): void {
-		this.channelizer?.off("channel-invalidated", this.channelInvalidatedHandler)
+		if (this.channelizer === provider) return
+		if (this.channelInvalidatedHandler)
+			this.channelizer?.off(
+				"channel-invalidated",
+				this.channelInvalidatedHandler,
+			)
+		for (const state of this.pendingScannerChannels.keys())
+			this.cancelScannerChannelAttempt(state)
 		this.channelizer = provider
 		this.channelizerUnavailableLogged = false
-		provider?.on("channel-invalidated", this.channelInvalidatedHandler)
+		this.channelInvalidatedHandler = null
+		if (provider) {
+			const handler = (sourceId: string, generation: number, ids: string[]) => {
+				if (this.channelInvalidatedHandler === handler)
+					this.onChannelsInvalidated(provider, sourceId, generation, ids)
+			}
+			this.channelInvalidatedHandler = handler
+		}
+		if (provider && this.channelInvalidatedHandler)
+			provider.on("channel-invalidated", this.channelInvalidatedHandler)
 		// Channels of a replaced provider would never be invalidated again:
 		// release them and let the worker re-wire their decoders.
 		const sources = new Set<string>()
-		for (const state of this.decoders.values()) {
-			if (!state.channel || state.channel.provider === provider) continue
-			sources.add(state.channel.sourceId)
+		const installation = this.channelInvalidatedHandler
+		const replaced = [...this.decoders.values()].map(state => ({
+			state,
+			ref: state.channel,
+		}))
+		for (const { state, ref } of replaced) {
+			if (!ref || state.channel !== ref || ref.provider === provider) continue
+			if (state.owner === "config") sources.add(ref.sourceId)
 			this.dropChannel(state, true)
+			if (this.channelInvalidatedHandler !== installation) return
 		}
 		for (const sourceId of sources) this.recheckStaleChannel(sourceId)
 		if (!provider) this.clearChannelRetries()
@@ -487,6 +576,7 @@ export class DecoderManager extends EventEmitter {
 			scannerJobId: probe?.jobId ?? null,
 			input: probe?.input ?? null,
 			inputAttached: false,
+			scannerChannelAttempt: null,
 		}
 
 		this.decoders.set(config.id, state)
@@ -508,6 +598,7 @@ export class DecoderManager extends EventEmitter {
 		config: DecoderConfig,
 		opts: { owner: "scanner"; jobId: string; input?: Readable },
 	): Promise<Decoder> {
+		if (this.destroying) throw this.probeRemovedError(config.id)
 		if (this.decoders.has(config.id)) {
 			throw new WaveKitError(
 				`Decoder already exists: ${config.id}`,
@@ -518,10 +609,18 @@ export class DecoderManager extends EventEmitter {
 			jobId: opts.jobId,
 			input: opts.input ?? null,
 		})
-		const state = this.decoders.get(config.id)!
+		const state = this.decoders.get(config.id)
+		if (
+			!state ||
+			state.decoder !== decoder ||
+			state.intentionallyStopped ||
+			this.destroying
+		)
+			throw this.probeRemovedError(config.id)
 		state.desiredRunning = true
 		state.intentionallyStopped = false
 		state.rateGeneration++
+		const generation = state.rateGeneration
 		try {
 			const outcome = await this.wireDecoderToFanout(state)
 			if (!this.probeLive(state)) throw this.probeRemovedError(config.id)
@@ -531,8 +630,11 @@ export class DecoderManager extends EventEmitter {
 					"PROBE_NOT_WIRED",
 				)
 			}
+			const channel = outcome.scannerChannel
+			if (!this.probeStartupLive(state, generation, channel))
+				throw this.probeRemovedError(config.id)
 			await decoder.start()
-			if (!this.probeLive(state)) {
+			if (!this.probeStartupLive(state, generation, channel)) {
 				// Removed or stopped while spawning: that stop ran before the
 				// process existed, so stop it again (this also clears timers the
 				// decoder armed after the spawn).
@@ -554,9 +656,16 @@ export class DecoderManager extends EventEmitter {
 				decoder.attachInput(state.input)
 				state.inputAttached = true
 			}
+			if (!this.probeStartupLive(state, generation, channel))
+				throw this.probeRemovedError(config.id)
+			this.emitStatusChanged(state)
+			if (!this.probeStartupLive(state, generation, channel)) {
+				await decoder.stop()
+				throw this.probeRemovedError(config.id)
+			}
 		} catch (err) {
 			// A concurrent stop or removal owns the cleanup of a probe it ended.
-			if (this.probeLive(state)) {
+			if (this.decoders.get(config.id) === state) {
 				state.lastError = createDecoderLastError(err, "error")
 				try {
 					await this.removeDecoder(config.id)
@@ -569,7 +678,6 @@ export class DecoderManager extends EventEmitter {
 			}
 			throw err
 		}
-		this.emitStatusChanged(state)
 		return decoder
 	}
 
@@ -579,6 +687,65 @@ export class DecoderManager extends EventEmitter {
 			this.decoders.get(state.config.id) === state &&
 			!state.intentionallyStopped
 		)
+	}
+
+	private probeStartupLive(
+		state: DecoderState,
+		generation: number,
+		channel: OpenChannelRef | undefined,
+	): boolean {
+		if (!this.probeLive(state) || !this.stillWanted(state, generation))
+			return false
+		if (!channel) return true
+		const currentGeneration = this.scannerProviderGeneration(
+			channel.provider,
+			channel.sourceId,
+		)
+		return (
+			state.channel === channel &&
+			this.scannerAttemptLive(state.scannerChannelAttempt) &&
+			!channel.stream.destroyed &&
+			!channel.stream.readableEnded &&
+			channel.generation === currentGeneration
+		)
+	}
+
+	private scannerProviderGeneration(
+		provider: ChannelProvider,
+		sourceId: string,
+	): number | null {
+		try {
+			return provider.currentGeneration(sourceId)
+		} catch (err: unknown) {
+			this.log.warn({ err, sourceId }, "Channel generation unavailable")
+			return null
+		}
+	}
+
+	private scannerAttemptLive(attempt: ScannerChannelAttempt | null): boolean {
+		return (
+			!!attempt &&
+			!attempt.terminal &&
+			attempt.state.scannerChannelAttempt === attempt &&
+			this.stillWanted(attempt.state, attempt.rateGeneration) &&
+			!attempt.state.intentionallyStopped &&
+			this.channelizer === attempt.provider &&
+			this.selectedSourceId(attempt.state) === attempt.sourceId &&
+			attempt.state.assignedSourceId === attempt.sourceId
+		)
+	}
+
+	private cancelScannerChannelAttempt(
+		state: DecoderState,
+		expected?: ScannerChannelAttempt,
+	): void {
+		const attempt = state.scannerChannelAttempt
+		if (!attempt || (expected && attempt !== expected)) return
+		attempt.terminal = true
+		attempt.invalidated.clear()
+		if (this.pendingScannerChannels.get(state) === attempt)
+			this.pendingScannerChannels.delete(state)
+		state.scannerChannelAttempt = null
 	}
 
 	private probeRemovedError(id: string): WaveKitError {
@@ -796,6 +963,7 @@ export class DecoderManager extends EventEmitter {
 		state.desiredRunning = false
 		state.startMode = "auto"
 		state.rateGeneration++
+		const stopGeneration = state.rateGeneration
 		state.suspension = null
 		state.transition = null
 		this.clearChannelRetry(this.selectedSourceId(state), true)
@@ -803,6 +971,10 @@ export class DecoderManager extends EventEmitter {
 		// Cancel any pending restart; "restarting" no longer holds once the
 		// operator stopped the decoder (a fault stays visible until a start).
 		this.cancelScheduledRestart(state)
+		this.cancelScannerChannelAttempt(state)
+		// Scanner intake fences must run before stop/detach/release can deliver buffered data.
+		if (state.owner === "scanner" && state.channel)
+			this.dropChannel(state, true)
 		if (state.lastHealth === "restarting")
 			this.updateDecoderHealth(state, "running")
 
@@ -810,8 +982,14 @@ export class DecoderManager extends EventEmitter {
 		try {
 			await state.decoder.stop()
 		} finally {
-			this.unwireDecoderFromFanout(state)
-			this.emitStatusChanged(state)
+			if (
+				state.owner !== "scanner" ||
+				(this.decoders.get(id) === state &&
+					state.rateGeneration === stopGeneration)
+			) {
+				this.unwireDecoderFromFanout(state)
+				this.emitStatusChanged(state)
+			}
 		}
 	}
 
@@ -1017,8 +1195,10 @@ export class DecoderManager extends EventEmitter {
 		state.decoder.removeAllListeners()
 
 		// Remove from map
-		this.decoders.delete(id)
-		this.emit("decoder:removed", id)
+		if (this.decoders.get(id) === state) {
+			this.decoders.delete(id)
+			this.emit("decoder:removed", id)
+		}
 		if (stopFailed) throw stopError
 	}
 
@@ -1027,6 +1207,8 @@ export class DecoderManager extends EventEmitter {
 	 */
 	async destroy(): Promise<void> {
 		this.destroying = true
+		for (const state of this.pendingScannerChannels.keys())
+			this.cancelScannerChannelAttempt(state)
 		this.log.info("Destroying DecoderManager")
 
 		// Stop health checks
@@ -1419,20 +1601,70 @@ export class DecoderManager extends EventEmitter {
 				detail: request.invalid,
 			}
 		const generation = state.rateGeneration
+		let attempt: ScannerChannelAttempt | null = null
+		if (state.owner === "scanner") {
+			if (
+				!this.stillWanted(state, generation) ||
+				state.intentionallyStopped ||
+				this.selectedSourceId(state) !== sourceId ||
+				state.assignedSourceId !== sourceId
+			)
+				return { wired: false, superseded: true }
+			this.cancelScannerChannelAttempt(state)
+			attempt = {
+				state,
+				provider,
+				sourceId,
+				rateGeneration: generation,
+				terminal: false,
+				invalidated: new Set(),
+			}
+			state.scannerChannelAttempt = attempt
+			this.pendingScannerChannels.set(state, attempt)
+		}
 		const result = await this.requestChannel(provider, sourceId, state, request)
+		if (attempt && this.pendingScannerChannels.get(state) === attempt)
+			this.pendingScannerChannels.delete(state)
 		if (!this.stillWanted(state, generation)) {
+			if (attempt) this.cancelScannerChannelAttempt(state, attempt)
 			if (result.ok)
 				await this.discardChannel(provider, result.stream, result.channelId)
 			return { wired: false, superseded: true }
 		}
-		if (!result.ok)
+		if (!result.ok) {
+			if (attempt) this.cancelScannerChannelAttempt(state, attempt)
 			return {
 				wired: false,
 				superseded: false,
 				reasonCode: result.reasonCode,
 				detail: result.detail,
 			}
-		if (result.generation !== provider.currentGeneration(sourceId)) {
+		}
+		if (
+			attempt &&
+			(!this.scannerAttemptLive(attempt) ||
+				attempt.invalidated.has(
+					JSON.stringify([result.generation, result.channelId]),
+				) ||
+				result.stream.destroyed ||
+				result.stream.readableEnded ||
+				result.generation !==
+					this.scannerProviderGeneration(provider, sourceId) ||
+				!this.scannerAttemptLive(attempt))
+		) {
+			this.cancelScannerChannelAttempt(state, attempt)
+			await this.discardChannel(provider, result.stream, result.channelId)
+			return {
+				wired: false,
+				superseded: false,
+				reasonCode: "channelizer-unavailable",
+				detail: "scanner channel grant is no longer live",
+			}
+		}
+		if (
+			!attempt &&
+			result.generation !== provider.currentGeneration(sourceId)
+		) {
 			// Invalidated while pending (Review Focus 3): retried with the
 			// current caps, never parked and never attached.
 			await this.discardChannel(provider, result.stream, result.channelId)
@@ -1468,29 +1700,63 @@ export class DecoderManager extends EventEmitter {
 		}
 		state.branchId = result.channelId
 		state.branchFanout = null
-		state.channel = {
+		const realised = Object.freeze({
+			outputRateHz: result.realised.outputRateHz,
+			format: result.realised.format,
+			groupDelaySamples: result.realised.groupDelaySamples,
+		})
+		const ref: OpenChannelRef = {
 			provider,
 			channelId: result.channelId,
 			sourceId,
 			generation: result.generation,
-			realised: result.realised,
+			realised,
+			stream: result.stream,
+			binding: attempt
+				? Object.freeze({
+						decoderId: state.config.id,
+						sourceId,
+						channelId: result.channelId,
+						generation: result.generation,
+						realised,
+					})
+				: null,
 		}
+		state.channel = ref
 		state.channelStale = false
+		attempt?.invalidated.clear()
+		if (ref.binding) {
+			const notified = this.notifyScannerChannel(
+				"decoder:scanner-channel-granted",
+				ref.binding,
+			)
+			if (!notified || !this.probeStartupLive(state, generation, ref)) {
+				if (state.channel === ref) this.dropChannel(state, true)
+				return { wired: false, superseded: true }
+			}
+		}
 		this.channelizerUnavailableLogged = false
 		// The channel is what stdin carries: its realised rate, its centre and
 		// its sample format (cf32 tails skip the raw convert/shift/decimate).
 		state.decoder.updateOptions({
-			inputSampleRate: result.realised.outputRateHz,
+			inputSampleRate: ref.realised.outputRateHz,
 			inputCenterFreq: request.centerHz,
-			inputIqFormat: result.realised.format,
+			inputIqFormat: ref.realised.format,
 		})
+		if (attempt && !this.probeStartupLive(state, generation, ref))
+			return { wired: false, superseded: true }
 		state.decoder.attachInput(result.stream)
+		if (attempt && !this.probeStartupLive(state, generation, ref)) {
+			if (state.channel === ref) this.dropChannel(state, true)
+			else if (!state.channel && !state.branchId) state.decoder.detachInput()
+			return { wired: false, superseded: true }
+		}
 		state.ratePlan = this.assessState(state)
 		this.log.debug(
 			{ decoderId: state.config.id, channelId: result.channelId },
 			"Decoder wired to channelizer channel",
 		)
-		return { wired: true }
+		return { wired: true, ...(attempt ? { scannerChannel: ref } : {}) }
 	}
 
 	/** A provider that throws is unavailable, never a decoder failure. */
@@ -1554,9 +1820,55 @@ export class DecoderManager extends EventEmitter {
 		const ref = state.channel
 		if (!ref) return
 		state.channel = null
-		ref.provider.releaseChannel(ref.channelId).catch((err: unknown) => {
+		this.cancelScannerChannelAttempt(state)
+		if (ref.binding)
+			this.notifyScannerChannel(
+				"decoder:scanner-channel-ended",
+				ref.binding,
+				"released",
+			)
+		this.releaseChannelRef(ref)
+	}
+
+	/** Notification failure is isolated per listener; cleanup and other bindings must proceed. */
+	private notifyScannerChannel(
+		event: "decoder:scanner-channel-granted" | "decoder:scanner-channel-ended",
+		binding: ScannerDecoderChannelBinding,
+		reason?: "invalidated" | "released",
+	): boolean {
+		let delivered = true
+		for (const listener of this.rawListeners(event)) {
+			try {
+				Reflect.apply(
+					listener,
+					this,
+					reason === undefined ? [binding] : [binding, reason],
+				)
+			} catch (err: unknown) {
+				delivered = false
+				this.log.error(
+					{ err, event, decoderId: binding.decoderId },
+					"Scanner channel listener threw",
+				)
+			}
+		}
+		return delivered
+	}
+
+	private releaseChannelRef(ref: OpenChannelRef): void {
+		// This is resource release initiation, never a native closure/drain acknowledgement.
+		try {
+			void ref.provider.releaseChannel(ref.channelId).catch((err: unknown) => {
+				this.log.warn(
+					{ err, channelId: ref.channelId },
+					"Channel release failed",
+				)
+			})
+		} catch (err: unknown) {
 			this.log.warn({ err, channelId: ref.channelId }, "Channel release failed")
-		})
+		} finally {
+			ref.stream.destroy()
+		}
 	}
 
 	/**
@@ -1566,18 +1878,31 @@ export class DecoderManager extends EventEmitter {
 	 * tearing the channel down.
 	 */
 	private dropChannel(state: DecoderState, release: boolean): void {
+		const ref = state.channel
+		if (!ref) return
+		// Claim termination before callbacks. Reentrant removal cannot end/release this ref twice.
+		state.channel = null
+		state.branchId = null
+		state.branchFanout = null
+		state.inputAttached = false
+		state.channelStale = true
+		this.cancelScannerChannelAttempt(state)
+		if (ref.binding)
+			this.notifyScannerChannel(
+				"decoder:scanner-channel-ended",
+				ref.binding,
+				release ? "released" : "invalidated",
+			)
 		try {
-			state.decoder.detachInput()
+			// An ended callback may have already installed a replacement on this instance.
+			if (!state.channel && !state.branchId) state.decoder.detachInput()
 		} catch (err: unknown) {
 			this.log.warn(
 				{ err, decoderId: state.config.id },
 				"detachInput failed while dropping a channel",
 			)
 		}
-		if (release) this.releaseChannelOf(state)
-		state.branchId = null
-		state.channel = null
-		state.channelStale = true
+		if (release) this.releaseChannelRef(ref)
 	}
 
 	/**
@@ -1689,6 +2014,9 @@ export class DecoderManager extends EventEmitter {
 	 * Unwires a decoder from its fanout branch.
 	 */
 	private unwireDecoderFromFanout(state: DecoderState): void {
+		this.cancelScannerChannelAttempt(state)
+		if (state.owner === "scanner" && state.channel)
+			this.dropChannel(state, true)
 		const { decoder, branchId, branchFanout, assignedSourceId, inputAttached } =
 			state
 		try {
@@ -1703,7 +2031,7 @@ export class DecoderManager extends EventEmitter {
 				state.branchFanout = null
 				state.inputAttached = false
 				state.assignedSourceId = null
-				if (assignedSourceId) {
+				if (assignedSourceId && this.decoders.get(state.config.id) === state) {
 					this.sourceManager?.unassignDecoder(state.config.id)
 					this.sourceRouting?.releaseUnused(assignedSourceId)
 				}

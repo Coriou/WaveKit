@@ -70,6 +70,7 @@ let configs: Map<string, DecoderConfig>
 let statusEvents: string[]
 let restarting: string[]
 let logLines: Array<Record<string, unknown>>
+let scannerBindingEvents: string[]
 
 function create(
 	id: string,
@@ -132,6 +133,13 @@ function setup(config: Partial<DecoderManagerConfig> = {}) {
 	manager.setSourceManager(sources as unknown as SourceManager)
 	provider = new FakeChannelProvider()
 	manager.setChannelizer(provider)
+	scannerBindingEvents = []
+	manager.on("decoder:scanner-channel-granted", () =>
+		scannerBindingEvents.push("granted"),
+	)
+	manager.on("decoder:scanner-channel-ended", () =>
+		scannerBindingEvents.push("ended"),
+	)
 	statusEvents = []
 	restarting = []
 	manager.on("decoder:status-changed", (id: string) => statusEvents.push(id))
@@ -141,6 +149,7 @@ function setup(config: Partial<DecoderManagerConfig> = {}) {
 beforeEach(() => setup())
 afterEach(async () => {
 	await manager.destroy()
+	expect(scannerBindingEvents).toEqual([])
 	vi.useRealTimers()
 })
 
@@ -392,6 +401,17 @@ describe("DecoderManager + channelizer (addendum §4, §5)", () => {
 		expect(decoder.detachedAt).toEqual([])
 		expect(provider.calls).toHaveLength(1)
 		expect(decoder.starts).toBe(1)
+	})
+
+	it("requires source and generation equality for a configured channel with the same opaque ID", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		provider.emit("channel-invalidated", "another-source", 1, ["dec-g1"])
+		provider.emit("channel-invalidated", "rtl", 2, ["dec-g1"])
+		await settle()
+		expect(decoder.detachedAt).toEqual([])
+		expect(provider.calls).toHaveLength(1)
+		expect(decoder.running).toBe(true)
 	})
 
 	it("retries a request whose generation was invalidated while pending", async () => {
