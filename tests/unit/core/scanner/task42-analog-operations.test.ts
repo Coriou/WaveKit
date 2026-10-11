@@ -13,6 +13,7 @@ import {
 	symlink,
 	unlink,
 	writeFile,
+	utimes,
 } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -147,12 +148,50 @@ function privateDir(root: string, operationId: string): string {
 	return join(root, ".analog-operations", operationId)
 }
 
+async function assertSameOwnerUncertainty(
+	h: Awaited<ReturnType<typeof harness>>,
+	operationId: string,
+	paths: readonly string[],
+): Promise<void> {
+	const before = await Promise.all(paths.map(path => readFile(path)))
+	const prepared = h.store.preparedRecordingOperations()
+	const inverse = vi.spyOn(h.adapter, "inverse")
+	await h.evidence.stopAnalog()
+	const reconciliation = await h.evidence.recoverAnalog()
+	expect(reconciliation).toContainEqual({
+		operationId,
+		discoveryId: h.discoveryId,
+		status: "quarantined",
+		errorCode: "cleanup-failed",
+		residueBytes: null,
+	})
+	expect(h.store.preparedRecordingOperations()).toEqual(prepared)
+	expect(inverse).not.toHaveBeenCalled()
+	h.evidence.setCaps({ ...caps, maxRecordingsMb: 0, maxAgeDays: 1 })
+	expect(await h.evidence.retention(new Set())).toEqual({ deleted: [] })
+	expect(await Promise.all(paths.map(path => readFile(path)))).toEqual(before)
+	expect(inverse).not.toHaveBeenCalled()
+	expect(
+		h.evidence.recordingPath(`${h.discoveryId}~analog-${operationId}.wav`),
+	).toBeNull()
+	await expect(h.evidence.removeDiscovery(h.discoveryId)).rejects.toMatchObject(
+		{ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" },
+	)
+	const denied = h.begin()
+	await expect(denied.ready).rejects.toThrow()
+	await denied.settled
+	expect(await Promise.all(paths.map(path => readFile(path)))).toEqual(before)
+	expect(inverse).not.toHaveBeenCalled()
+	inverse.mockRestore()
+}
+
 describe("Task42 owned prepared-link operations", () => {
 	it("failed recovery read close stays unknown through later inventory refresh and DELETE", async () => {
 		const h = await harness(),
 			receipt = await record(h)
 		const handles: Awaited<ReturnType<typeof open>>[] = []
 		let fail = true
+		let readOpens = 0
 		const evidence = new EvidenceStore({
 			dir: h.root,
 			caps,
@@ -163,6 +202,7 @@ describe("Task42 owned prepared-link operations", () => {
 				unlink,
 				checkpoint: async () => undefined,
 				readOpen: async (path, flags) => {
+					readOpens++
 					const handle = await open(path, flags)
 					if (fail) {
 						fail = false
@@ -185,6 +225,11 @@ describe("Task42 owned prepared-link operations", () => {
 			await expect(
 				evidence.removeDiscovery(h.discoveryId),
 			).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+			await evidence.stopAnalog()
+			await evidence.recoverAnalog()
+			evidence.setCaps({ ...caps, maxRecordingsMb: 0 })
+			expect(await evidence.retention(new Set())).toEqual({ deleted: [] })
+			expect(readOpens).toBe(1)
 			expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
 		} finally {
 			await Promise.all(handles.map(handle => handle.close()))
@@ -422,6 +467,10 @@ describe("Task42 owned prepared-link operations", () => {
 						join(privateDir(h.root, operation.operationId), "payload.wav.part"),
 					),
 				).toBe(true)
+				await assertSameOwnerUncertainty(h, operation.operationId, [
+					join(privateDir(h.root, operation.operationId), "intent.json"),
+					join(privateDir(h.root, operation.operationId), "payload.wav.part"),
+				])
 				await expect(
 					h.evidence.removeDiscovery(h.discoveryId),
 				).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
@@ -432,6 +481,10 @@ describe("Task42 owned prepared-link operations", () => {
 			} finally {
 				await Promise.all(handles.map(handle => handle.close()))
 			}
+			// A fresh owner after the descriptor lifetime ends may reconcile a genuine crash leftover.
+			const fresh = await harness({ root: h.root, store: h.store })
+			expect(fresh.evidence.analogAuthorityReady).toBe(true)
+			expect(existsSync(privateDir(h.root, operation!.operationId))).toBe(false)
 		},
 	)
 	it.each(["intent.tmp", "receipt.tmp"])(
@@ -477,11 +530,37 @@ describe("Task42 owned prepared-link operations", () => {
 					expect(
 						existsSync(join(privateDir(h.root, operation.operationId), name)),
 					).toBe(true)
+					if (name === "receipt.tmp") {
+						const final = join(
+							h.root,
+							`recordings/analog/${h.discoveryId}/analog-${operation.operationId}.wav`,
+						)
+						const old = new Date(NOW - 2 * 86400_000)
+						await utimes(final, old, old)
+						expect(receipt.output).toMatchObject({
+							fileBytes: 44,
+							outputFrames: 0,
+						})
+						expect(h.store.preparedRecordingOperations()).toHaveLength(1)
+						await assertSameOwnerUncertainty(h, operation.operationId, [
+							join(privateDir(h.root, operation.operationId), "intent.json"),
+							join(privateDir(h.root, operation.operationId), "receipt.tmp"),
+							final,
+						])
+					}
 					await expect(
 						h.evidence.removeDiscovery(h.discoveryId),
 					).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
 				} finally {
 					await Promise.all(handles.map(handle => handle.close()))
+				}
+				if (name === "receipt.tmp") {
+					const fresh = await harness({ root: h.root, store: h.store })
+					expect(fresh.evidence.analogAuthorityReady).toBe(true)
+					expect(h.store.preparedRecordingOperations()).toHaveLength(0)
+					expect(existsSync(privateDir(h.root, operation!.operationId))).toBe(
+						false,
+					)
 				}
 			}
 		},

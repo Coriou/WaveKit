@@ -1420,7 +1420,9 @@ export class AnalogOperations {
 					discoveryId: intent.discoveryId,
 					status: "quarantined" as const,
 					errorCode: "recovery-incomplete" as const,
-					residueBytes: this.inventory.opBytes.get(intent.operationId) ?? null,
+					residueBytes: this.closureUncertain(intent.operationId)
+						? null
+						: (this.inventory.opBytes.get(intent.operationId) ?? null),
 				}))
 			}
 			for (const intent of this.inventory.intents.values()) {
@@ -1433,6 +1435,18 @@ export class AnalogOperations {
 		})
 		return this.recovery
 	}
+	/** A same-owner stop/recover is not a process lifetime boundary for retained descriptors. */
+	private closureUncertain(operationId: string): boolean {
+		return (
+			this.unconfirmedReads.size > 0 ||
+			this.uncertainResidue.has(operationId) ||
+			(this.active.get(operationId)?.descriptors.size ?? 0) > 0
+		)
+	}
+	private requireCleanupClosure(operationId: string): void {
+		if (this.closureUncertain(operationId))
+			throw coded("cleanup-failed", "Descriptor closure remains unconfirmed")
+	}
 	private async reconcile(intent: Intent): Promise<AnalogReconciliation> {
 		const result = (
 			status: AnalogReconciliation["status"],
@@ -1442,8 +1456,12 @@ export class AnalogOperations {
 			discoveryId: intent.discoveryId,
 			status,
 			errorCode,
-			residueBytes: this.inventory.opBytes.get(intent.operationId) ?? null,
+			residueBytes: this.closureUncertain(intent.operationId)
+				? null
+				: (this.inventory.opBytes.get(intent.operationId) ?? null),
 		})
+		if (this.closureUncertain(intent.operationId))
+			return result("quarantined", "cleanup-failed")
 		if (!this.context.adapter.authorityHealthy())
 			return result("quarantined", "recovery-incomplete")
 		if (this.inventory.cleanup.has(intent.operationId)) {
@@ -1634,8 +1652,10 @@ export class AnalogOperations {
 		ownedIntent: boolean,
 		ownedMedia: boolean,
 	): Promise<void> {
+		this.requireCleanupClosure(intent.operationId)
 		if (ownedIntent) await this.validateCleanupMarker(intent)
 		const remove = async (path: string): Promise<void> => {
+			this.requireCleanupClosure(intent.operationId)
 			if (!this.context.adapter.authorityHealthy())
 				throw coded(
 					"cleanup-failed",
@@ -1643,6 +1663,7 @@ export class AnalogOperations {
 				)
 			try {
 				await this.safeTarget(path)
+				this.requireCleanupClosure(intent.operationId)
 				await this.io.unlink(path)
 			} catch (cause) {
 				if (nativeCode(cause) !== "ENOENT") throw cause
@@ -1666,6 +1687,7 @@ export class AnalogOperations {
 		if (ownedIntent) {
 			const transferred = this.cleanupPath(intent.operationId)
 			await this.safeTarget(transferred)
+			this.requireCleanupClosure(intent.operationId)
 			try {
 				await link(join(dir, "intent.json"), transferred)
 			} catch (cause) {
@@ -1677,6 +1699,7 @@ export class AnalogOperations {
 			}
 			await remove(join(dir, "intent.json"))
 		}
+		this.requireCleanupClosure(intent.operationId)
 		try {
 			await (this.io.rmdir?.(dir) ?? rmdir(dir))
 		} catch (cause) {
@@ -1727,6 +1750,7 @@ export class AnalogOperations {
 		for (const intent of [...this.inventory.intents.values()]) {
 			if (
 				keep.has(intent.discoveryId) ||
+				this.closureUncertain(intent.operationId) ||
 				this.protectedDiscovery(intent.discoveryId)
 			)
 				continue
@@ -1743,8 +1767,13 @@ export class AnalogOperations {
 			)
 				continue
 			await this.context.serialise(intent.discoveryId, async () => {
-				if (this.protectedDiscovery(intent.discoveryId)) return
+				if (
+					this.protectedDiscovery(intent.discoveryId) ||
+					this.closureUncertain(intent.operationId)
+				)
+					return
 				await this.exclusive(async () => {
+					if (this.closureUncertain(intent.operationId)) return
 					await this.validateCleanupMarker(intent)
 					await this.context.adapter.inverse(intent.operationId)
 					await this.cleanupOwned(intent, true, true)
