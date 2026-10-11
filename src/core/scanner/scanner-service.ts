@@ -227,6 +227,7 @@ function emptyLoadedState(): LoadedState {
 		settings: {},
 		engines: {},
 		droppedLines: 0,
+		recoveryHealth: "degraded",
 	}
 }
 
@@ -323,6 +324,12 @@ export class ScannerService extends EventEmitter {
 	private dirty = false
 	/** False when the persisted state could not be read: the journal and snapshot are not written this run. */
 	private stateLoaded = false
+	private recordingRecoveryHealthy = false
+	/** Exact prepared/inverse entries only; the normal mutation listener remains the sole writer. */
+	private readonly recordingAppends = new Map<
+		Parameters<ScannerPersistence["append"]>[0],
+		Promise<number> | null
+	>()
 	/**
 	 * False when even jobs, settings and engine state could not be read (`loadConfig` rejected): their
 	 * files are never written this run, and sweeps and settings changes are refused (503).
@@ -343,6 +350,7 @@ export class ScannerService extends EventEmitter {
 	private lastStatusAt = 0
 	private lastStatusJson = ""
 	private started = false
+	private startPromise: Promise<void> | null = null
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
@@ -400,6 +408,25 @@ export class ScannerService extends EventEmitter {
 			logger: deps.logger,
 			now: this.now,
 			isDiscoveryLive: id => this.store.get(id) !== undefined,
+		})
+		this.evidence.configureAnalog({
+			authorityHealthy: () => this.stateLoaded && this.recordingRecoveryHealthy,
+			// Effective channel consumer adoption is separately gated. No grant is inferred here.
+			bindingLive: () => false,
+			association: (discoveryId, observationId, binding) =>
+				this.store.recordingAssociation(discoveryId, observationId, binding),
+			prepare: metadata =>
+				this.acknowledgeRecordingMutation(beforeEmit => {
+					this.store.prepareRecording(metadata, beforeEmit)
+				}),
+			inverse: operationId =>
+				this.acknowledgeRecordingMutation(beforeEmit => {
+					this.store.removePreparedRecording(operationId, beforeEmit)
+				}),
+			buildCommitPlan: operationId =>
+				this.store.buildRecordingCommitPlan(operationId),
+			commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
+			publishCommit: plan => this.store.publishRecordingCommit(plan),
 		})
 		this.captures = new CaptureStore({
 			dir: join(this.storageDir, "captures"),
@@ -488,12 +515,11 @@ export class ScannerService extends EventEmitter {
 
 	// === lifecycle ===
 
-	async start(): Promise<void> {
-		if (this.started) return
+	start(): Promise<void> {
+		if (this.startPromise) return this.startPromise
+		if (this.started) return Promise.resolve()
 		this.started = true
-		try {
-			await this.startUp()
-		} catch (err) {
+		this.startPromise = this.startUp().catch((err: unknown) => {
 			// The caller stops a scanner whose start failed, which disposes the arbiter (S1-B final
 			// review, Info 3): say plainly that no persisted lease is restored this boot (H4).
 			this.log.error(
@@ -501,10 +527,13 @@ export class ScannerService extends EventEmitter {
 				"Scanner start failed: crash recovery of persisted tuner leases does not run this boot; a tuner may stay on a scan frequency until the next start",
 			)
 			throw err
-		}
+		})
+		return this.startPromise
 	}
 
 	private async startUp(): Promise<void> {
+		// A restarted service must not publish during its new recovery barrier.
+		this.store.off("change", this.onStoreChange)
 		let loaded: LoadedState
 		try {
 			loaded = await this.persistence.load()
@@ -527,12 +556,43 @@ export class ScannerService extends EventEmitter {
 				)
 			}
 		}
-		this.store.restore({
+		this.recordingRecoveryHealthy =
+			this.stateLoaded && loaded.recoveryHealth === "healthy"
+		const publicSnapshot = {
 			discoveries: loaded.discoveries,
 			observations: loaded.observations,
 			corrections: loaded.corrections,
-		})
-		for (const entry of loaded.entries) this.store.replay(entry)
+		}
+		try {
+			this.store.restore({
+				...publicSnapshot,
+				...(loaded.recordingOperations
+					? { recordingOperations: loaded.recordingOperations }
+					: {}),
+			})
+		} catch (err: unknown) {
+			this.recordingRecoveryHealthy = false
+			this.log.warn(
+				{ err },
+				"Scanner recording authority could not be restored",
+			)
+			// Preserve S1's public fallback; it is never evidence of Task42 authority.
+			this.store.restore(publicSnapshot)
+		}
+		for (const entry of loaded.entries) {
+			try {
+				this.store.replay(entry)
+			} catch (err: unknown) {
+				this.recordingRecoveryHealthy = false
+				this.log.warn(
+					{ err },
+					"Scanner recording journal authority is unavailable",
+				)
+			}
+		}
+		// Recovery inverses need the sole append writer before any public change listener.
+		this.store.off("mutation", this.onStoreMutation)
+		this.store.on("mutation", this.onStoreMutation)
 		if (loaded.droppedLines > 0)
 			this.log.warn(
 				{ droppedLines: loaded.droppedLines },
@@ -543,13 +603,32 @@ export class ScannerService extends EventEmitter {
 		// § 7.4: report the restored estimate; re-keying waits for the next decoded upgrade (rasters need the jobs).
 		for (const cfg of this.deps.sourceConfigs)
 			this.updateFrequencyError(cfg.id, { rekey: false })
+		await this.evidence
+			.recoverAnalog()
+			.then(results => {
+				const quarantined = results.filter(
+					result => result.status === "quarantined",
+				).length
+				if (quarantined > 0)
+					this.log.warn(
+						{ quarantined },
+						"Scanner recording recovery quarantined artifacts",
+					)
+				if (!this.evidence.analogAuthorityReady)
+					this.log.warn(
+						"Scanner recording inventory or authority is unavailable",
+					)
+			})
+			.catch((err: unknown) => {
+				this.recordingRecoveryHealthy = false
+				this.log.warn({ err }, "Scanner recording recovery is unavailable")
+			})
 		// Probes are never persisted: recordings/dv/probe-* folders are crash leftovers (before any probe starts).
 		await this.evidence
 			.removeOrphanProbeDirs()
 			.catch((err: unknown) =>
 				this.log.warn({ err }, "Orphaned probe folder cleanup failed"),
 			)
-		this.store.on("mutation", this.onStoreMutation)
 		this.store.on("change", this.onStoreChange)
 		this.spectrum.on("pipeline", this.onSpectrumPipeline)
 		this.spectrum.on("stream", this.onEngineStream)
@@ -605,7 +684,10 @@ export class ScannerService extends EventEmitter {
 
 	async stop(): Promise<void> {
 		if (!this.started) return
+		// Preserve the caller's startup/recovery barrier before tearing down its owners.
 		this.started = false
+		await this.startPromise?.catch(() => undefined)
+		this.startPromise = null
 		if (this.timer) clearInterval(this.timer)
 		this.timer = null
 		// S1-B final review, finding 5: no late source or arbiter event starts work from here on (a boot
@@ -635,6 +717,7 @@ export class ScannerService extends EventEmitter {
 					await this.awaitRestoredCaps(sourceId, lease.snapshot, res.restored)
 			}),
 		)
+		await this.evidence.stopAnalog()
 		await this.probes.destroy()
 		// One failing driver never stops the shutdown before the engines, the snapshot and jobs.json.
 		for (const d of this.drivers.values())
@@ -1091,7 +1174,16 @@ export class ScannerService extends EventEmitter {
 	async deleteDiscovery(id: string): Promise<boolean> {
 		requireDiscoveryIdFormat(id)
 		const discovery = this.store.get(id)
-		if (!discovery || !this.store.delete(id)) return false
+		if (!discovery) {
+			try {
+				if (!(await this.evidence.hasAnalogCleanup(id))) return false
+				await this.evidence.removeDiscovery(id)
+				return true
+			} catch {
+				throw this.recordingCleanupPending()
+			}
+		}
+		if (!this.store.delete(id)) return false
 		this.lastConfirm.delete(id)
 		this.emit("discovery", {
 			change: "deleted",
@@ -1102,11 +1194,26 @@ export class ScannerService extends EventEmitter {
 				o.discoveryId = null
 				o.evidenceDeleted = true
 			}
-		await this.evidence.removeDiscovery(id)
+		try {
+			await this.evidence.removeDiscovery(id)
+		} catch (err: unknown) {
+			if (
+				err instanceof Error &&
+				"code" in err &&
+				err.code === "SCANNER_EVIDENCE_CLEANUP_PENDING"
+			)
+				throw this.recordingCleanupPending()
+			throw err
+		}
 		return true
 	}
 
 	recordingPath(recordingId: string): string | null {
+		if (
+			/~analog-[0-9a-f-]{36}\.wav$/i.test(recordingId) &&
+			!this.evidence.analogAuthorityReady
+		)
+			throw this.recordingEvidenceUnavailable()
 		return this.evidence.recordingPath(recordingId)
 	}
 
@@ -2947,9 +3054,52 @@ export class ScannerService extends EventEmitter {
 	): void => {
 		this.dirty = true
 		if (!this.stateLoaded) return
-		this.persistence
-			.append(entry)
-			.catch((err: unknown) => this.log.warn({ err }, "Journal append failed"))
+		const appended = this.persistence.append(entry)
+		if (this.recordingAppends.has(entry))
+			this.recordingAppends.set(entry, appended)
+		void appended.catch((err: unknown) =>
+			this.log.warn({ err }, "Journal append failed"),
+		)
+	}
+
+	private async acknowledgeRecordingMutation(
+		mutate: (
+			beforeEmit: (entry: Parameters<ScannerPersistence["append"]>[0]) => void,
+		) => void,
+	): Promise<void> {
+		if (!this.stateLoaded || !this.recordingRecoveryHealthy)
+			throw this.recordingEvidenceUnavailable()
+		let registered: Parameters<ScannerPersistence["append"]>[0] | null = null
+		try {
+			mutate(entry => {
+				if (registered !== null || this.recordingAppends.size >= 16)
+					throw this.recordingEvidenceUnavailable()
+				registered = entry
+				this.recordingAppends.set(entry, null)
+			})
+			const appended =
+				registered === null ? null : this.recordingAppends.get(registered)
+			if (!appended) throw this.recordingEvidenceUnavailable()
+			await appended
+		} finally {
+			if (registered !== null) this.recordingAppends.delete(registered)
+		}
+	}
+
+	private recordingCleanupPending(): ScannerApiError {
+		return new ScannerApiError(
+			"Scanner evidence cleanup is pending",
+			"SCANNER_EVIDENCE_CLEANUP_PENDING",
+			503,
+		)
+	}
+
+	private recordingEvidenceUnavailable(): ScannerApiError {
+		return new ScannerApiError(
+			"Scanner recording evidence is unavailable",
+			"SCANNER_EVIDENCE_UNAVAILABLE",
+			503,
+		)
 	}
 
 	private readonly onStoreChange = (
