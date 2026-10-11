@@ -146,6 +146,7 @@ function realCaller(queued = false) {
 		currentGeneration: () => 1,
 	})
 	// EventEmitter's generic off signature is broader than the private never[] provider remover.
+	const requestChannel = vi.spyOn(underlying, "requestChannel")
 	const channels = observer.bindProvider(
 		underlying as unknown as ChannelProvider,
 	)
@@ -163,6 +164,11 @@ function realCaller(queued = false) {
 		registry,
 		observer,
 		lifetime,
+		ownership,
+		profile,
+		channels,
+		request,
+		requestChannel,
 		taps,
 		stream,
 		deny,
@@ -417,5 +423,189 @@ describe("observed direct preparation", () => {
 		expect(allocate).not.toHaveBeenCalled()
 		expect(registry.snapshot().queued).toBe(0)
 		expect(registry.snapshot().receipts).toBe(0)
+	})
+})
+
+describe("NC1 exact runtime registration continuations", () => {
+	it.each(["classifier", "analog"] as const)(
+		"cancellation inside %s data registration removes the late exact callback",
+		async phase => {
+			const f = realCaller()
+			const unrelated = vi.fn()
+			f.stream.on("data", unrelated)
+			let cancel!: () => void
+			const reenter = (event: string | symbol): void => {
+				if (event === "data") cancel()
+			}
+			if (phase === "classifier") f.stream.on("newListener", reenter)
+			const tap = f.taps.begin({
+				attempt,
+				current: () => true,
+				minMs: 500,
+				collected: vi.fn(),
+			})!
+			cancel = () => tap.cancel()
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+			if (phase === "analog") {
+				f.stream.write(Buffer.alloc(24_000 * 8))
+				expect(tap.beginAnalog()).toBe(true)
+				f.stream.on("newListener", reenter)
+				const push = vi.fn(),
+					canceled = vi.fn()
+				const settled = Promise.resolve({ ok: true as const })
+				expect(
+					tap.attachAnalog({
+						push,
+						cancel: canceled,
+						settled,
+						filesystemSettled: settled,
+						operationSettled: settled,
+					}),
+				).toBe(false)
+				f.stream.emit("data", Buffer.alloc(16))
+				expect(push).not.toHaveBeenCalled()
+				expect(canceled).toHaveBeenCalledOnce()
+			}
+			await tap.finish()
+			expect(f.stream.listeners("data")).toEqual([unrelated])
+			expect(f.taps.ownerCount).toBe(1)
+			f.physical()
+			f.taps.sweepSettledReferences()
+			expect(f.taps.ownerCount).toBe(0)
+			expect(f.registry.snapshot().acquisitions).toEqual([])
+		},
+	)
+	it.each(["classifier", "analog"] as const)(
+		"failed exact %s data remover remains owned even after native closure",
+		async phase => {
+			const f = realCaller()
+			const tap = f.taps.begin({
+				attempt,
+				current: () => true,
+				minMs: 500,
+				collected: vi.fn(),
+			})!
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+			if (phase === "analog") {
+				f.stream.write(Buffer.alloc(24_000 * 8))
+				expect(tap.beginAnalog()).toBe(true)
+				const settled = Promise.resolve({ ok: true as const })
+				expect(
+					tap.attachAnalog({
+						push: vi.fn(),
+						cancel: vi.fn(),
+						settled,
+						filesystemSettled: settled,
+						operationSettled: settled,
+					}),
+				).toBe(true)
+			}
+			const original = f.stream.off.bind(f.stream)
+			vi.spyOn(f.stream, "off").mockImplementation((event, callback) => {
+				if (event === "data") throw new TypeError("exact off unavailable")
+				return original(event, callback)
+			})
+			tap.cancel()
+			await expect(tap.finish()).rejects.toMatchObject({
+				code: "SCANNER_CHANNEL_CLEANUP_PENDING",
+			})
+			expect(f.stream.listenerCount("data")).toBe(1)
+			if (phase === "analog")
+				expect(tap.prepared.handle.snapshot().components.analog).toBe("unknown")
+			f.physical()
+			f.taps.sweepSettledReferences()
+			expect(f.taps.ownerCount).toBe(1)
+			expect(f.registry.snapshot().acquisitions).toHaveLength(1)
+		},
+	)
+})
+
+describe("NC3 denied preparation ownership", () => {
+	it("late currentness denial reclaims actual empty metadata repeatedly before returning", () => {
+		const f = realCaller()
+		for (let index = 0; index < 70; index++) {
+			let calls = 0
+			expect(
+				prepareDirectChannel({
+					channels: f.channels,
+					ownership: f.ownership,
+					profile: f.profile,
+					attempt: { ...attempt, identity: {}, decoderId: `denied-${index}` },
+					request: f.request,
+					current: () => ++calls === 1,
+					ended: vi.fn(),
+				}),
+			).toBeUndefined()
+			expect(f.registry.snapshot().acquisitions).toEqual([])
+			expect(f.registry.snapshot().queued).toBe(0)
+		}
+		expect(f.requestChannel).not.toHaveBeenCalled()
+		expect(f.ownership.ledger.snapshot().committed).toEqual({
+			cpu: 0,
+			bytes: 0,
+		})
+	})
+	it("arm collision cleans only the denied original, leaving the existing unclaimed arm", () => {
+		const f = realCaller()
+		const prepare = () =>
+			prepareDirectChannel({
+				channels: f.channels,
+				ownership: f.ownership,
+				profile: f.profile,
+				attempt: { ...attempt, identity: {} },
+				request: f.request,
+				current: () => true,
+				ended: vi.fn(),
+			})
+		const original = prepare()!
+		expect(original).toBeDefined()
+		expect(prepare()).toBeUndefined()
+		expect(f.registry.snapshot().acquisitions).toHaveLength(1)
+		expect(f.requestChannel).not.toHaveBeenCalled()
+		original.lifecycle.invalidate()
+		for (const component of [
+			original.classifier,
+			original.analog,
+			original.filesystem,
+			original.operation,
+		])
+			component.sealNeverStarted()
+		original.handle.revokeUnclaimedArm()
+		expect(original.lifecycle.reclaimIfSettled()).toBe(true)
+		expect(f.registry.snapshot().acquisitions).toEqual([])
+	})
+	it("unknown denial cleanup retains a closing source owner reachable by stop and final sweep", async () => {
+		const f = realCaller()
+		const allocate = f.observer.allocateAcquisition.bind(f.observer)
+		vi.spyOn(f.observer, "allocateAcquisition").mockImplementation(spec => {
+			const handle = allocate(spec)!
+			const onChange = handle.onChange.bind(handle)
+			vi.spyOn(handle, "onChange").mockImplementation(callback => {
+				onChange(callback)
+				return () => {
+					throw new TypeError("unsubscribe unknown")
+				}
+			})
+			return handle
+		})
+		let calls = 0
+		expect(
+			f.taps.begin({
+				attempt,
+				current: () => ++calls < 3,
+				minMs: 500,
+				collected: vi.fn(),
+			}),
+		).toBeUndefined()
+		expect(f.taps.ownerCount).toBe(1)
+		expect(f.requestChannel).not.toHaveBeenCalled()
+		expect(await f.taps.stop()).toMatchObject({ ok: false })
+		f.taps.sweepSettledReferences()
+		expect(f.taps.ownerCount).toBe(1)
+		expect(f.registry.snapshot().acquisitions).toHaveLength(1)
 	})
 })

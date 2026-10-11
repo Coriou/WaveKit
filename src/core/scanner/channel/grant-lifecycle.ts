@@ -8,6 +8,7 @@ import type {
 	ObservedGrantBinding,
 } from "../../channelizer/settlement-observer.js"
 import type { ScannerChannelAttempt } from "./consumer-types.js"
+import { RuntimeListenerRegistration } from "./consumer-lifecycle.js"
 
 /** Exact acquisition identity and synchronous intake fence; release is logical only. */
 export class GrantLifecycle {
@@ -20,6 +21,7 @@ export class GrantLifecycle {
 	private released: Promise<void> | undefined
 	private readonly unsubscribe: () => void
 	private readonly errorListener = (): void => this.invalidate()
+	private readonly registrations: RuntimeListenerRegistration[] = []
 
 	constructor(
 		readonly attempt: ScannerChannelAttempt,
@@ -73,6 +75,7 @@ export class GrantLifecycle {
 		const binding = this.handle.binding
 		if (
 			this.sealed ||
+			this.registrations.length !== 0 ||
 			!this.attemptCurrent() ||
 			this.handle.snapshot().ended ||
 			!binding ||
@@ -102,9 +105,30 @@ export class GrantLifecycle {
 		}
 		this.currentBinding = binding
 		this.stream = result.stream
-		result.stream.on("error", this.errorListener)
-		result.stream.once("end", this.errorListener)
-		result.stream.once("close", this.errorListener)
+		// Retain all exact owners BEFORE the first registration can cancel adoption.
+		for (const event of ["error", "end", "close"] as const) {
+			const stream = result.stream
+			this.registrations.push(
+				new RuntimeListenerRegistration(
+					() => {
+						if (event === "error") stream.on(event, this.errorListener)
+						else stream.once(event, this.errorListener)
+					},
+					() => {
+						stream.off(event, this.errorListener)
+					},
+					() => !stream.listeners(event).includes(this.errorListener),
+				),
+			)
+		}
+		try {
+			for (const registration of this.registrations) {
+				if (this.sealed || !registration.register()) break
+			}
+		} catch {
+			this.callbackFailed = true
+			this.invalidate()
+		}
 		if (!this.live) {
 			this.invalidate()
 			return false
@@ -114,7 +138,10 @@ export class GrantLifecycle {
 
 	/** Clear identity BEFORE callbacks, abort, stream close or release can reenter. */
 	invalidate(): void {
-		if (this.sealed) return
+		if (this.sealed) {
+			this.removeRegistrations()
+			return
+		}
 		this.sealed = true
 		const binding = this.currentBinding
 		const stream = this.stream
@@ -131,9 +158,7 @@ export class GrantLifecycle {
 				this.callbackFailed = true
 			}
 			if (stream) {
-				stream.off("error", this.errorListener)
-				stream.off("end", this.errorListener)
-				stream.off("close", this.errorListener)
+				this.removeRegistrations()
 				try {
 					stream.destroy()
 				} catch {
@@ -152,10 +177,14 @@ export class GrantLifecycle {
 	/** Keep native/local unknown tombstones; no elapsed time, ID or generation credit. */
 	reclaimIfSettled(): boolean {
 		if (this.reclaimed) return true
+		if (!this.sealed) return false
+		this.removeRegistrations()
 		const state = this.handle.snapshot()
 		if (
 			this.callbackFailed ||
-			!this.sealed ||
+			this.registrations.some(
+				registration => !registration.settled || registration.failed,
+			) ||
 			state.native !== "settled" ||
 			state.local !== "settled" ||
 			Object.values(state.components).some(value => value !== "settled")
@@ -169,6 +198,16 @@ export class GrantLifecycle {
 		}
 		this.reclaimed = true
 		return true
+	}
+
+	private removeRegistrations(): void {
+		for (const registration of this.registrations) {
+			try {
+				registration.remove()
+			} catch {
+				this.callbackFailed = true
+			}
+		}
 	}
 
 	private attemptCurrent(): boolean {

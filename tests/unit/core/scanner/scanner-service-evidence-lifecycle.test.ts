@@ -5,6 +5,11 @@ import { describe, expect, it, vi } from "vitest"
 import type { LiveObservation } from "../../../../src/core/scanner/job-runner.js"
 import type { DecodeEvidence } from "../../../../src/core/scanner/types.js"
 import type { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
+import type {
+	ProbePool,
+	ProbePoolDeps,
+} from "../../../../src/core/scanner/probes/probe-pool.js"
+import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
 import type { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
 import { classifySpectral } from "../../../../src/core/scanner/classify/classifier.js"
 import { trackOf } from "../../../mocks/scanner/identify-fakes.js"
@@ -275,4 +280,83 @@ describe("R14 disabled channel evidence boundary", () => {
 		expect(h.internals.store.get(live.discoveryId!)).toBeDefined()
 		await h.service.stop()
 	})
+})
+
+describe("NC2 original probe cleanup before service artifact publication", () => {
+	it.each(["decoder", "dv", "success"] as const)(
+		"%s cleanup controls the actual publication boundary",
+		async failure => {
+			const h = await harness()
+			const pool = (h.service as unknown as { probes: ProbePool }).probes
+			const deps = (pool as unknown as { deps: ProbePoolDeps }).deps
+			const removedDv = vi.fn(async () => {
+				if (failure === "dv") throw new TypeError("original DV cleanup unknown")
+			})
+			deps.digitalVoice = {
+				addChannel: async config => config,
+				ensureStarted: async () => undefined,
+				attachDecoder: () => undefined,
+				removeChannel: removedDv,
+			}
+			const live = h.observe()
+			const link = vi.spyOn(h.internals.evidence, "linkProbeRecordings")
+			const result = pool.request(
+				probeRequest({
+					jobId: live.jobIds[0]!,
+					trackId: live.trackId,
+					observationId: live.observationId,
+					discoveryId: live.discoveryId,
+					sourceId: live.sourceId,
+					epoch: h.epoch.epoch,
+					targetHz: live.lastTrack!.centreHz,
+					record: true,
+					holdMs: 60_000,
+				}),
+			)
+			expect(result).toHaveProperty("started")
+			if (!("started" in result))
+				throw new TypeError("fixture probe not admitted")
+			await vi.waitFor(() =>
+				expect(h.decoders.created.has(result.started)).toBe(true),
+			)
+			const dir = join(h.dir, "recordings", "dv", `probe-${result.started}`)
+			expect(existsSync(dir)).toBe(true)
+			await writeFile(join(dir, "owned.wav"), Buffer.alloc(4))
+			if (failure === "decoder") {
+				let original = true
+				vi.spyOn(h.decoders, "removeEphemeralDecoder").mockImplementation(
+					async id => {
+						// Model accepted manager map retirement despite failure of its ORIGINAL writer stop.
+						h.decoders.created.delete(id)
+						if (original) {
+							original = false
+							throw new TypeError("original decoder cleanup unknown")
+						}
+					},
+				)
+			}
+			if (failure === "success") {
+				await pool.release(result.started)
+				await vi.waitFor(() => expect(link).toHaveBeenCalledOnce())
+				await h.service.stop()
+			} else {
+				await expect(pool.release(result.started)).rejects.toMatchObject({
+					code: "SCANNER_PROBE_CLEANUP_FAILED",
+				})
+				await expect(pool.release(result.started)).rejects.toMatchObject({
+					code: "SCANNER_PROBE_CLEANUP_FAILED",
+				})
+				expect(removedDv).toHaveBeenCalled()
+				expect(link).not.toHaveBeenCalled()
+				expect(existsSync(join(dir, "owned.wav"))).toBe(true)
+				expect(pool.channelBaselineKnown).toBe(false)
+				expect(pool.status()[0]?.state).toBe("stopping")
+				await expect(h.service.stop()).rejects.toMatchObject({
+					code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+				})
+				expect(link).not.toHaveBeenCalled()
+				expect(existsSync(join(dir, "owned.wav"))).toBe(true)
+			}
+		},
+	)
 })

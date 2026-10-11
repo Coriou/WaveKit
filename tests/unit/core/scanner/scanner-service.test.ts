@@ -3,6 +3,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
+import type { ProbePool } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import {
@@ -1319,4 +1321,88 @@ describe("R14 immutable scanner component phase", () => {
 			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
 		})
 	})
+})
+
+describe("NC4 EACH nested component stop initiation", () => {
+	it.each([false, true])(
+		"starts unrelated stops while original probe cleanup is held (failure=%s)",
+		async failIndependent => {
+			const h = serviceHarness({
+				patch: s => {
+					s.passive.enabled = false
+				},
+			})
+			await h.service.start()
+			await h.service.createJob({ sourceId: "rtl", mode: "in-window" })
+			const internals = h.service as unknown as {
+				probes: ProbePool
+				ambient: { stop(): void }
+				recorder: { stop(): Promise<void> }
+				deps: ScannerServiceDeps
+			}
+			const ambientStop = vi.spyOn(internals.ambient, "stop")
+			const captureStop = vi.spyOn(internals.recorder, "stop")
+			const cpuStop = vi.fn(() => {
+				if (failIndependent) throw new TypeError("CPU stop failure")
+			})
+			internals.deps.cpuMeter = {
+				start: vi.fn(),
+				stop: cpuStop,
+				normalisedPercent: null,
+			}
+			const epoch = h.service.spectrum.engine("rtl")!.currentEpoch()
+			const result = internals.probes.request(
+				probeRequest({
+					epoch: epoch.epoch,
+					targetHz: CENTRE + 25_000,
+					holdMs: 60_000,
+				}),
+			)
+			expect(result).toHaveProperty("started")
+			if (!("started" in result))
+				throw new TypeError("fixture probe not admitted")
+			await vi.waitFor(() =>
+				expect(h.decoders.created.has(result.started)).toBe(true),
+			)
+			let release!: () => void
+			h.decoders.removeGate = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const remove = vi.spyOn(h.decoders, "removeEphemeralDecoder")
+			const handle = h.service.beginStop()
+			let complete = false
+			const outcome = handle.producerSettled.then(
+				() => {
+					complete = true
+					return undefined
+				},
+				error => {
+					complete = true
+					return error as unknown
+				},
+			)
+			await vi.waitFor(() => expect(remove).toHaveBeenCalled())
+			await vi.waitFor(() => expect(cpuStop).toHaveBeenCalledOnce())
+			expect(ambientStop).toHaveBeenCalledOnce()
+			expect(captureStop).toHaveBeenCalledOnce()
+			expect(complete).toBe(false)
+			release()
+			const settledOutcome = await outcome
+			expect(h.decoders.created.size).toBe(0)
+			expect(h.service.beginStop()).toBe(handle)
+			if (failIndependent) {
+				expect(settledOutcome).toMatchObject({
+					code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+				})
+				const final = h.service.finalizeStopNative()
+				await expect(final).rejects.toMatchObject({
+					code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+				})
+				expect(h.service.finalizeStopNative()).toBe(final)
+			} else {
+				expect(settledOutcome).toBeUndefined()
+				await h.service.finalizeStopNative()
+			}
+		},
+	)
 })

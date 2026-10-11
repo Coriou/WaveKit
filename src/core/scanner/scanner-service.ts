@@ -973,6 +973,13 @@ export class ScannerService extends EventEmitter {
 			await this.startPromise
 		})
 		this.startPromise = null
+		// These owned components do not depend on probe publication, lease restoration or native66.
+		// Initiate EACH before waiting for any of those independent original owners.
+		const independentStops = [
+			attempt(() => this.ambient?.stop()),
+			attempt(() => this.deps.cpuMeter?.stop()),
+			attempt(() => this.recorder?.stop()),
+		]
 		for (const registration of this.constructorListeners) {
 			if (registration.settled) continue
 			await attempt(() => {
@@ -1000,7 +1007,7 @@ export class ScannerService extends EventEmitter {
 		for (const outcome of await Promise.allSettled([
 			...this.background,
 			this.passiveChain,
-			...[...this.drivers.values()].map(driver => driver.idle()),
+			...[...this.drivers.values()].map(driver => attempt(() => driver.idle())),
 			...this.arbitrations.values(),
 		]))
 			if (outcome.status === "rejected") failed = true
@@ -1022,12 +1029,10 @@ export class ScannerService extends EventEmitter {
 			)
 		}
 		if (this.evidence) await attempt(() => this.evidence.stopAnalog())
+		await Promise.all(independentStops)
 		await Promise.all(
 			[...this.drivers.values()].map(driver => attempt(() => driver.dispose())),
 		)
-		if (this.ambient) await attempt(() => this.ambient.stop())
-		await attempt(() => this.deps.cpuMeter?.stop())
-		if (this.recorder) await attempt(() => this.recorder.stop())
 		if (this.spectrum) {
 			await attempt(() => this.spectrum.stop())
 			await attempt(() =>

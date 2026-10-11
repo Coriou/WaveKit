@@ -112,6 +112,78 @@ export class ConstructorListenerRegistration {
 	}
 }
 
+/** Exact live-stream registration, retained before installation can synchronously reenter. */
+export class RuntimeListenerRegistration {
+	private installationStarted = false
+	private installing = false
+	private removing = false
+	private sealed = false
+	private removed = false
+	private cleanupFailed = false
+	constructor(
+		private readonly installExact: () => void,
+		private readonly removeExact: () => void,
+		private readonly absent: () => boolean,
+	) {}
+	get settled(): boolean {
+		return !this.installing && !this.removing && this.removed
+	}
+	get failed(): boolean {
+		return this.cleanupFailed
+	}
+	register(): boolean {
+		if (this.sealed || this.installationStarted) return false
+		this.installationStarted = true
+		this.installing = true
+		let failure: unknown
+		let threw = false
+		try {
+			this.installExact()
+		} catch (error) {
+			threw = true
+			failure = error
+			this.cleanupFailed = true
+			this.sealed = true
+		} finally {
+			this.installing = false
+		}
+		if (this.sealed) {
+			try {
+				this.remove()
+			} catch (error) {
+				if (!threw) {
+					threw = true
+					failure = error
+				}
+			}
+		}
+		if (threw) throw failure
+		return !this.sealed
+	}
+	/** In-progress installation is fenced now; its original continuation owns final removal. */
+	remove(): boolean {
+		this.sealed = true
+		if (this.removed) return true
+		if (this.installing || this.removing) return false
+		this.removing = true
+		try {
+			this.removeExact()
+			if (!this.absent())
+				throw new WaveKitError(
+					"Scanner listener removal is unverified",
+					"SCANNER_COMPONENT_CLEANUP_UNKNOWN",
+				)
+			this.removed = true
+			return true
+		} catch (error) {
+			this.cleanupFailed = true
+			throw error
+		} finally {
+			this.removing = false
+		}
+	}
+}
+
 function deferred(): Deferred {
 	let resolve!: () => void
 	let reject!: (reason: unknown) => void

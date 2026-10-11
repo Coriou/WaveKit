@@ -216,6 +216,8 @@ interface ProbeRecord {
 	droppedBytes: number
 	/** Set by teardown; a stop that arrives during it awaits this. */
 	teardownDone: Promise<void> | null
+	/** Sticky outcome of this original resource owner, never replaced by a missing-map retry. */
+	cleanupState: "pending" | "settled" | "unknown"
 	/** A mode step is tearing this record down; a stop clears it to cancel the step. */
 	stepping: boolean
 	/** multimon only: acceptance memory per capcode, bounded by the mode's hold (§ 6.4). */
@@ -1069,6 +1071,7 @@ export class ProbePool extends EventEmitter {
 			modeTimer: null,
 			droppedBytes: 0,
 			teardownDone: null,
+			cleanupState: "pending",
 			stepping: false,
 			capcodes: null,
 			launchDone,
@@ -1299,7 +1302,12 @@ export class ProbePool extends EventEmitter {
 				: mode.holdMs
 		rec.modeTimer = setTimeout(() => {
 			rec.modeTimer = null
-			void this.onModeTimeout(rec)
+			void this.onModeTimeout(rec).catch((err: unknown) => {
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Probe mode cleanup failed",
+				)
+			})
 		}, holdMs)
 		rec.modeTimer.unref()
 	}
@@ -1360,6 +1368,7 @@ export class ProbePool extends EventEmitter {
 				await action()
 				return true
 			} catch (err) {
+				rec.cleanupState = "unknown"
 				this.cleanupFailed = true
 				this.retainedCleanup.add(rec)
 				this.sealAdmission()
@@ -1437,6 +1446,12 @@ export class ProbePool extends EventEmitter {
 		// allocatePort resolves after its allocator has closed the temporary server.
 		// Numbers are retained through that original settlement; there is no live port lease to release.
 		rec.allocatedPorts.length = 0
+		if (rec.cleanupState === "unknown")
+			throw new WaveKitError(
+				"Scanner original probe cleanup is unknown",
+				"SCANNER_PROBE_CLEANUP_FAILED",
+			)
+		rec.cleanupState = "settled"
 	}
 
 	private async stopProbe(rec: ProbeRecord, reason: StopReason): Promise<void> {
@@ -1465,7 +1480,7 @@ export class ProbePool extends EventEmitter {
 			this.emit("probe-state", rec.probeId, "stopped", rec.req)
 		})
 		// Settlement of pre-seal owned DV artifacts is cleanup, not reopened decoder intake.
-		if (rec.recordDir) {
+		if (rec.recordDir && rec.cleanupState === "settled") {
 			const result: ProbeRecordings = {
 				probeId: rec.probeId,
 				jobId: rec.req.jobId,

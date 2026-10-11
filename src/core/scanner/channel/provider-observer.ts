@@ -18,6 +18,8 @@ import type {
 import { GrantLifecycle } from "./grant-lifecycle.js"
 
 export interface PreparedScannerChannel {
+	/** Denied but retained only when exact empty-owner reclamation remains unknown. */
+	readonly denied?: boolean
 	readonly handle: ObservedAcquisitionHandle
 	readonly classifier: ConsumerComponent
 	readonly analog: ConsumerComponent
@@ -39,13 +41,20 @@ export function prepareDirectChannel(input: {
 	readonly continuityLost?: () => void
 }): PreparedScannerChannel | undefined {
 	const { ownership, channels, attempt } = input
+	const current = (): boolean => {
+		try {
+			return input.current()
+		} catch {
+			return false
+		}
+	}
 	// Default/missing profile denies BEFORE even bounded acquisition/arm metadata.
 	if (
 		!channels ||
 		!ownership?.ledger ||
 		!input.profile ||
 		ownership.construction.admissionSealed ||
-		!input.current()
+		!current()
 	)
 		return undefined
 	if (
@@ -111,14 +120,24 @@ export function prepareDirectChannel(input: {
 		input.ended,
 		input.continuityLost,
 	)
-	if (!input.current() || !handle.arm()) {
+	if (!current() || !handle.arm()) {
 		lifecycle.invalidate()
 		classifier.sealNeverStarted()
 		analog.sealNeverStarted()
 		filesystem.sealNeverStarted()
 		operation.sealNeverStarted()
 		handle.revokeUnclaimedArm()
-		return undefined
+		if (lifecycle.reclaimIfSettled()) return undefined
+		return Object.freeze({
+			denied: true,
+			handle,
+			classifier,
+			analog,
+			filesystem,
+			operation,
+			lifecycle,
+			request: Object.freeze({ ...input.request }),
+		})
 	}
 	return Object.freeze({
 		handle,

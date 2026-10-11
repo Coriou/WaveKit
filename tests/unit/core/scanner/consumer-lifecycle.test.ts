@@ -8,6 +8,7 @@ import type {
 import {
 	ConstructorListenerRegistration,
 	ScannerLifecycleOwner,
+	RuntimeListenerRegistration,
 } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import type { ScannerCleanupSlot } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 
@@ -461,5 +462,76 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		expect(owner.finalizeStopNative(undefined)).toBe(handle.completed)
 		await handle.completed
 		expect(cleanup).toHaveBeenCalledTimes(1)
+	})
+})
+
+describe("NC1 runtime installation and exact removal", () => {
+	it("a seal during installation waits for the original continuation and preserves unrelated callbacks", () => {
+		const emitter = new EventEmitter()
+		const owned = vi.fn(),
+			unrelated = vi.fn()
+		emitter.on("data", unrelated)
+		let registration!: RuntimeListenerRegistration
+		registration = new RuntimeListenerRegistration(
+			() => {
+				emitter.on("data", owned)
+			},
+			() => {
+				emitter.off("data", owned)
+			},
+			() => !emitter.listeners("data").includes(owned),
+		)
+		emitter.on("newListener", event => {
+			if (event !== "data") return
+			expect(registration.remove()).toBe(false)
+			expect(registration.settled).toBe(false)
+		})
+		expect(registration.register()).toBe(false)
+		expect(registration.settled).toBe(true)
+		expect(registration.failed).toBe(false)
+		expect(emitter.listeners("data")).toEqual([unrelated])
+	})
+	it("install-then-throw keeps the original failure and attempts its captured remover", () => {
+		const emitter = new EventEmitter()
+		const listener = vi.fn(),
+			original = new TypeError("registration threw after adding")
+		const registration = new RuntimeListenerRegistration(
+			() => {
+				emitter.on("data", listener)
+				throw original
+			},
+			() => {
+				emitter.off("data", listener)
+			},
+			() => !emitter.listeners("data").includes(listener),
+		)
+		expect(() => registration.register()).toThrow(original)
+		expect(emitter.listeners("data")).toEqual([])
+		expect(registration.settled).toBe(true)
+		expect(registration.failed).toBe(true)
+	})
+	it("removeListener reentry cannot duplicate the original removal or claim success in progress", () => {
+		const emitter = new EventEmitter(),
+			listener = vi.fn()
+		let registration!: RuntimeListenerRegistration
+		const remove = vi.fn(() => {
+			emitter.off("data", listener)
+		})
+		registration = new RuntimeListenerRegistration(
+			() => {
+				emitter.on("data", listener)
+			},
+			remove,
+			() => !emitter.listeners("data").includes(listener),
+		)
+		registration.register()
+		emitter.on("removeListener", event => {
+			if (event !== "data") return
+			expect(registration.remove()).toBe(false)
+			expect(registration.settled).toBe(false)
+		})
+		expect(registration.remove()).toBe(true)
+		expect(remove).toHaveBeenCalledOnce()
+		expect(registration.settled).toBe(true)
 	})
 })

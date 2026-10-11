@@ -168,3 +168,43 @@ describe("exact direct grant lifecycle", () => {
 		expect(f.unsubscribe).not.toHaveBeenCalled()
 	})
 })
+
+describe("NC1 grant runtime listener ownership", () => {
+	it.each(["error", "end", "close"] as const)(
+		"cancellation during %s registration removes every late exact listener",
+		async event => {
+			const f = fixture()
+			const unrelated = vi.fn()
+			f.result.stream.on("error", unrelated)
+			f.result.stream.on("newListener", registered => {
+				if (registered === event) f.lifecycle.invalidate()
+			})
+			expect(f.lifecycle.adopt(f.result)).toBe(false)
+			await f.lifecycle.logicalDrain()
+			expect(f.result.stream.listeners("error")).toEqual([unrelated])
+			expect(f.result.stream.listeners("end")).toEqual([])
+			expect(f.result.stream.listeners("close")).toEqual([])
+			f.change({ native: "settled", local: "settled" })
+			expect(f.lifecycle.reclaimIfSettled()).toBe(true)
+			expect(f.ended).toHaveBeenCalledOnce()
+			expect(f.release).toHaveBeenCalledOnce()
+		},
+	)
+	it("one exact removal failure cannot skip siblings or authorize successful reclamation", async () => {
+		const f = fixture()
+		expect(f.lifecycle.adopt(f.result)).toBe(true)
+		const original = f.result.stream.off.bind(f.result.stream)
+		vi.spyOn(f.result.stream, "off").mockImplementation((event, listener) => {
+			if (event === "error") throw new TypeError("error listener off failed")
+			return original(event, listener)
+		})
+		f.lifecycle.invalidate()
+		await f.lifecycle.logicalDrain()
+		expect(f.result.stream.listenerCount("error")).toBe(1)
+		expect(f.result.stream.listenerCount("end")).toBe(0)
+		expect(f.result.stream.listenerCount("close")).toBe(0)
+		f.change({ native: "settled", local: "settled" })
+		expect(f.lifecycle.reclaimIfSettled()).toBe(false)
+		expect(f.unsubscribe).not.toHaveBeenCalled()
+	})
+})

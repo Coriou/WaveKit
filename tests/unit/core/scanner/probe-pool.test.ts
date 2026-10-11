@@ -1249,3 +1249,100 @@ describe("ProbePool exact constructor subscription ownership", () => {
 		expect(h.decoders.listenerCount("decoder:output")).toBe(0)
 	})
 })
+
+describe("NC2 failed original drain cannot authorize a mode successor", () => {
+	it("retains the failed writer despite later missing-map removal and never starts the next mode", async () => {
+		const h = poolHarness()
+		const result = h.pool.request(probeRequest({ holdMs: 60_000 }))
+		if (!("started" in result))
+			throw new WaveKitError("Probe not admitted", "TEST")
+		await flushAsync()
+		const originalDecoder = h.decoders.created.get(result.started)!
+		expect(originalDecoder).toBeDefined()
+		let first = true
+		const remove = vi
+			.spyOn(h.decoders, "removeEphemeralDecoder")
+			.mockImplementation(async id => {
+				h.decoders.created.delete(id)
+				if (first) {
+					first = false
+					throw new WaveKitError("Original writer unknown", "TEST")
+				}
+			})
+		const create = vi.spyOn(h.decoders, "createEphemeralDecoder")
+		const boundary = h.pool as unknown as {
+			records: Map<string, { cleanupState: string; recordDir: string | null }>
+			onModeTimeout(record: unknown): Promise<void>
+		}
+		const record = boundary.records.get(result.started)!
+		record.recordDir = "original-owned-directory"
+		const publication = vi.fn()
+		h.pool.on("recordings", publication)
+		await expect(boundary.onModeTimeout(record)).rejects.toMatchObject({
+			code: "SCANNER_PROBE_CLEANUP_FAILED",
+		})
+		expect(record.cleanupState).toBe("unknown")
+		expect(create).not.toHaveBeenCalled()
+		await expect(h.pool.release(result.started)).rejects.toMatchObject({
+			code: "SCANNER_PROBE_CLEANUP_FAILED",
+		})
+		expect(remove).toHaveBeenCalledOnce()
+		expect(publication).not.toHaveBeenCalled()
+		expect(h.pool.status()[0]?.state).toBe("stopping")
+		await expect(h.pool.destroy()).rejects.toMatchObject({
+			code: "SCANNER_PROBE_CLEANUP_FAILED",
+		})
+	})
+})
+
+describe("NC2 original failure versus later missing-map completion", () => {
+	it("an early failed writer stop remains unknown after the pending create and late empty-map removal settle", async () => {
+		const h = poolHarness()
+		const gate = held<void>()
+		const create = h.decoders.createEphemeralDecoder.bind(h.decoders)
+		vi.spyOn(h.decoders, "createEphemeralDecoder").mockImplementation(
+			async (...args) => {
+				const decoder = await create(...args)
+				await gate.promise
+				return decoder
+			},
+		)
+		const result = h.pool.request(
+			probeRequest({ record: true, holdMs: 60_000 }),
+		)
+		if (!("started" in result))
+			throw new WaveKitError("Probe not admitted", "TEST")
+		await vi.waitFor(() =>
+			expect(h.decoders.created.has(result.started)).toBe(true),
+		)
+		const originalWriter = h.decoders.created.get(result.started)!
+		let first = true
+		const remove = vi
+			.spyOn(h.decoders, "removeEphemeralDecoder")
+			.mockImplementation(async id => {
+				h.decoders.created.delete(id)
+				if (first) {
+					first = false
+					throw new WaveKitError("Original writer stop failed", "TEST")
+				}
+			})
+		const publication = vi.fn()
+		h.pool.on("recordings", publication)
+		const stopping = h.pool
+			.release(result.started)
+			.catch((error: unknown) => error)
+		await vi.waitFor(() => expect(remove).toHaveBeenCalledOnce())
+		expect(h.engine.tapCount).toBe(0)
+		gate.resolve()
+		expect(await stopping).toMatchObject({
+			code: "SCANNER_PROBE_CLEANUP_FAILED",
+		})
+		expect(remove).toHaveBeenCalledTimes(2)
+		expect(originalWriter).toBeDefined()
+		expect(publication).not.toHaveBeenCalled()
+		expect(h.pool.channelBaselineKnown).toBe(false)
+		await expect(h.pool.destroy()).rejects.toMatchObject({
+			code: "SCANNER_PROBE_CLEANUP_FAILED",
+		})
+	})
+})
