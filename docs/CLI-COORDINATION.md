@@ -1141,3 +1141,9 @@ Observation inspection remains a page-count projection and job detail is reduced
 #### Spec relocation — 2026-10-11
 
 The six legacy spec directories now live under `docs/specs/`: activity-recording-catalog, build-devx-overhaul, core-access-policy, decode-envelope, lora-decoder and operator-data. Their contents and requirement/property/task numbering are unchanged. Earlier entries retain historical paths; the browser access brief cited above is now [core-access-policy/design.md](specs/core-access-policy/design.md). Historical readers may use commit `19d07ce58d92fc50f5862fa88e4f039f8be1019d` for the old paths. Frozen plan location history remains historical.
+
+#### CLI: confirmed discovery identification — 2026-10-11
+
+Scan discovery detail now offers `i` with explicit visible target/effect consent and y/n/Esc. It sends the existing frequency-target identify request once, with an explicit source, 15-second signal wait, exhaustive false and record false. Admission remains server-authoritative; there is no new backend contract. `o` opens retained exact-ID inspection independently of source availability or the displayed job list.
+
+Possibly-sent uncertain submissions remain inspection-only for the CLI session, without automatic retry or candidate attribution. Receipts are not durable; restart is not evidence of cancellation. Fresh terminal direct GET permits a new deliberate request but proves neither identification nor cleanup. Source/epoch/intent/credential-wait and rendered-consent fences are local checks; exactly-once and conditional stream/discovery binding are absent. Cursor tuning, listening, physical-terminal/RF and browser/TLS qualification remain separate.

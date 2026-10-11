@@ -34,10 +34,10 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
    landed locally, including identification, bounded burst capture and shared
-   spectrum profiles. The CLI now consumes them in read-only `6 Scan`: source
-   selection, spectrum/waterfall, discoveries, existing jobs and identify results,
-   with explicit recovery and bounded reads/history. Identify submission and
-   cursor tuning remain next client actions; web consumption and physical-terminal
+   spectrum profiles. The CLI now consumes them in `6 Scan`: source selection, spectrum/waterfall,
+   discoveries, confirmed frequency-target identify submission and retained job
+   inspection, with explicit recovery and bounded reads/history. Cursor tuning
+   remains the next client action; web consumption and physical-terminal
    acceptance remain open. Preserve detector behavior independently of display
    preferences; genuine viewed-slice zoom remains a separate follow-up.
 2. **Prepare browser access policy and true zoom** (§4, §8). The initial access

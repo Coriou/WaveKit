@@ -88,7 +88,7 @@ When core flags a source's signal as flat, IQ still reads `streaming` (bytes are
 | `3` | Messages | Filterable, pausable feed with per-protocol summaries and a JSON detail. ADS-B rows, their detail and the filter add registration, type and operator from the aircraft list.                                 |
 | `4` | Receiver | Source transport and activity, tuner (with edit mode), relay and its command history, fanout drops, upstream (Pi) drops                                                                                      |
 | `5` | System   | Container CPU and memory, alerts, SDR host processes (and Pi sampling when core reports it), live audio, core version                                                                                        |
-| `6` | Scan     | Selected-source spectrum and waterfall, scanner status, discoveries, existing jobs and identify results |
+| `6` | Scan     | Selected-source spectrum and waterfall, scanner status, discoveries, confirmed identify submission and job results |
 
 The detail pane sits to the right on wide terminals (160 columns or more) and below the list on tall ones (30 rows or more). Otherwise it covers the list. In the Decoders detail, rows that do not fit are marked `+N rows · PgDn` or `+N rows · PgUp`. The Messages detail shows `PgUp PgDn scroll` in the footer.
 
@@ -96,7 +96,11 @@ The detail pane sits to the right on wide terminals (160 columns or more) and be
 
 Open with `6` or `--view scan`. Press `s` to cycle eligible sources; `w`, `d` and `b` select spectrum, discoveries and jobs. `n` advances the discovery page and `f` returns to its first page. Enter opens detail; Esc closes it, and PgUp/PgDn scroll long details. The footer shows available keys.
 
-Scan is read-only: it does not tune, start or cancel jobs, submit identify requests, listen or download recordings. It can inspect existing identify results. Scanner-owned decoder probes are labelled in Decoders and their manual lifecycle controls are unavailable.
+In open discovery detail, press `i` to identify the selected source, frequency and width, then `y` to confirm or `n`/Esc to discard the unsent prompt. The pinned summary shows the complete target and effects; submission is unavailable when that summary cannot fit. Identify waits up to 15 seconds for signal; trials may take longer, may preempt scanner probes, and update discoveries/observations. This action requests no trial recordings; other scanner activity may still record. Fresh supported U8 IQ and an in-window target are local readiness checks, with final admission decided by core.
+
+Press `o` to inspect the retained identify receipt by exact job ID, including after source removal or when it is absent from the displayed jobs. Leaving Scan stops optional inspection reads without cancelling the job. A fresh terminal direct read permits another deliberate identification; terminal status does not establish successful decoding or resource cleanup.
+
+Submission is never retried automatically. A lost response or unusable creation response leaves an uncertain receipt blocked for this CLI session; inspect jobs without assuming a similar job is the same request. Receipts are not durable across process restart, and restarting does not establish that prior work stopped. The API does not provide exactly-once submission or conditional discovery/stream binding. Scan does not tune, cancel jobs, listen or download recordings. Scanner-owned decoder probes remain unavailable for manual lifecycle controls.
 
 The spectrum requests 5 Hz and 512 bins, then shows the profile actually served. Power is interval max-hold in dBFS, not calibrated dBm. Actual bin width, native resolution, tuning trust and DC/spur locations remain inspectable in spectrum detail. Unknown tuning remains visibly unverified, including signed frequency axes. Truecolor UTF-8 terminals use half-block waterfall cells; ASCII and no-color modes retain text and mask distinctions.
 
