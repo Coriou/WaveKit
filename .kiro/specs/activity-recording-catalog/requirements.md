@@ -1,7 +1,7 @@
 # Activity and recording catalog — requirements
 
 Status: reviewed design only. Accepted-S1 reconciliation and the bounded storage
-qualification plan passed independent delta review. Implementation is unallocated. No production implementation is
+qualification plan passed independent delta review. Only the disposable qualification harness and bounded guard/micro tests are allocated; production implementation remains unallocated. No production implementation is
 authorized by this document. Implementation tasks require the checkpoints in
 [tasks.md](tasks.md). [design.md](design.md) supplies bounds and failure semantics.
 The completed [decode envelope](../decode-envelope/design.md) remains the input

@@ -1,7 +1,8 @@
 # Activity and recording catalog — tasks
 
-Status: design-only lane. The draft design is independently reviewed. Implementation tasks are unallocated and
-unchecked. Completion of design does not authorize production edits or shared
+Status: independently reviewed design. A disposable qualification harness and bounded
+guard/micro tests are allocated; production implementation remains unallocated.
+Storage qualification is incomplete and its task remains unchecked. Completion of design does not authorize production edits or shared
 runtime mounts. Follow dependencies; Main assigns owners at each gate.
 
 - [x] **1. Draft design review checkpoint.** Audit actual core/envelope, scanner candidate and
@@ -13,8 +14,9 @@ runtime mounts. Follow dependencies; Main assigns owners at each gate.
       local landing and allocation of the implementation gates below.
       _Requirements: 1.1–1.6, 4.1–4.5, 6.6, 7.1–7.3._
 - [ ] **2. Runtime/storage qualification, independent first implementation batch.**
-      Follow the exact owned-path/runtime/scenario plan in design.md after explicit
-      allocation; no production modules or shared edits in this batch. Prove feature-specific Node22.13+ floor and exact
+      The disposable harness paths in design.md are allocated. Implement and independently
+      review the exact harness before broader experiments. Fifteen-minute sustained,
+      burst, matrix and combined-scanner experiments require a separate resource window; no production modules or shared edits in this batch. Prove feature-specific Node22.13+ floor and exact
       tested patch, harness disabled path on Node20, SQLite/FTS5 direct-worker availability
       and native AMD64/ARM64 runner behavior. Production worker build entries, state
       mounting, disabled-startup behavior and package/image integration belong to a
@@ -82,6 +84,6 @@ runtime mounts. Follow dependencies; Main assigns owners at each gate.
 
 For implementation, run touched test files, `pnpm run typecheck`, `pnpm run lint`
 and required checkpoint checks, reporting exact outcomes. Use bounded workers and
-coordinate full suites. For this design-only delivery, validate links, requirement
-traceability, owned diff and independent review and reconciliation against exact accepted S1; do not claim implementation tests
-prove the proposed contracts.
+coordinate full suites. For the disposable harness, validate guardrails and bounded microfixtures, links,
+requirement traceability and the owned diff. Independent harness review precedes
+broader experiments; harness tests do not prove production persistence contracts.

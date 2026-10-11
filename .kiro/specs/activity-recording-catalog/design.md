@@ -1,7 +1,7 @@
 # Activity and recording catalog — design
 
 Status: reviewed design only. Accepted-S1 reconciliation and the bounded storage
-qualification plan passed independent delta review. Implementation is unallocated. Requirements are in
+qualification plan passed independent delta review. Only the disposable qualification harness and bounded guard/micro tests are allocated; production implementation remains unallocated. Requirements are in
 [requirements.md](requirements.md); allocation and acceptance gates are in
 [tasks.md](tasks.md). One cohesive spec keeps ingestion, durable links and deletion
 invariants together; implementation batches have separate ownership. This is not
@@ -709,14 +709,16 @@ not a claim of file/DB atomicity. Keep stricter Task42 120-second limits. Later 
 these operations in preemption/source-failure/cancel drains, independently of REST
 terminal visibility and monitor audio selection.
 
-## Next allocation: storage qualification only
+## Storage qualification: disposable harness allocation
 
-This is an executable qualification **plan**, not authorization or implementation.
-SQLite and the feature runtime floor remain unaccepted until measured. The first
-allocation must not add production stores, listeners, DTO exports, catalog writes,
+The disposable harness and bounded guard/micro tests below are allocated. Independent
+review of the exact harness must precede broader experiments. Sustained, burst, runtime
+matrix and combined-scanner experiments require a separate resource window; no such
+results are claimed here. SQLite and the feature runtime floor remain unaccepted until
+measured. This allocation must not add production stores, listeners, DTO exports, catalog writes,
 recording/audio mounts, Keep behavior or a second recovery authority.
 
-Proposed exclusively owned new paths for a bounded disposable harness:
+Exclusively owned new paths for the bounded disposable harness:
 
 - `scripts/qualification/activity-storage/run.mjs`: explicit CLI experiment driver,
   bounds/preflight and machine-readable report; no import from application startup.
@@ -729,7 +731,7 @@ Proposed exclusively owned new paths for a bounded disposable harness:
 - These existing three spec files: record measured decision and revise estimates.
 
 No package/lockfile, Dockerfile, build script, config, API-types, scanner or runtime
-path is allocated by that proposed batch. Use direct Node .mjs workers so a harness
+path is allocated by this batch. Use direct Node .mjs workers so a harness
 can qualify behavior before requesting production worker build integration. Raw
 reports/temp DBs stay in a uniquely named ignored `output/qualification/` directory;
 only sanitized methodology/results may later enter this spec. The future production
@@ -753,14 +755,47 @@ Runtime matrix, each executable explicitly provided and version captured:
    is separate. No Docker image build/publish. Missing native architecture or exact
    runtime is an explicit outstanding gate, never covered by emulation or types.
 
-Proposed commands after allocation: `node scripts/qualification/activity-storage/run.mjs
+Commands for the allocated harness: `node scripts/qualification/activity-storage/run.mjs
 --scenario <name> --output <unique-dir> --seed 42` under each supplied Node binary;
 `pnpm exec vitest run tests/unit/qualification/activity-storage.test.ts
 --maxWorkers=1 --minWorkers=1`, then repository typecheck/lint. Driver validates a
 closed scenario enum and hard caps, so arguments cannot request unlimited work.
 One scenario at a time in a Main-coordinated quiet window, no background watchers
 or concurrent full suite. Native runner availability/execution requires Main's
-resource allocation; this design lane runs none of these experiments.
+resource allocation. Bounded guard/micro tests precede that gate; they cannot qualify
+sustained load, production mounts or unavailable runtime/architecture cells.
+
+Current harness boundary: `disabled`, `runtime` and `micro` are executable. All
+long scenario names require `--resource-window <attestation>` and still return
+`not-run`; that argument does not grant authorization. Sustained workload execution,
+paired baselines, query matrices and fault-pressure measurements need a reviewed
+harness extension before their resource window. The streaming workload generator
+and reference admission counter preserve the schedules below without running them
+against storage. Only seed42 is currently accepted.
+
+The microfixture uses ten synthetic2.5 KiB rows, transactional FTS/receipts,
+rollback (including injected ENOSPC), prune-before-receipt-cleanup, closed-epoch
+primitives and clean database reopen. It is not a production receipt protocol or
+crash-recovery proof. Smaller fixture caps apply:32 queued rows/128 KiB,16 MiB DB,
+4 MiB WAL and10-second deadline;1 MiB transaction headroom is checked before
+writes. The192 MiB guard measures shared-process RSS, not isolated worker RSS.
+Disabled/runtime-guard unit cases simulate version strings; they do not qualify an
+unavailable Node executable. Node25.2.1 guard/micro tests passed20 cases, including
+100 bounded admission-reference cases. SQLite emitted its experimental warning.
+Termination confirmation has a100ms grace; failure raises fatal containment and
+skips all artifact inspection/cleanup while a worker may still write. The CLI exits
+its owned process; library callers must do likewise. Native/OS stalls can delay
+timers and process exit, so the deadline is not a hard real-time guarantee.
+Observed elapsed time includes report persistence and cleanup attempts and detected
+overruns fail the result. `report.json` is explicitly preliminary (`completion: pending`),
+with hashes saved before verified DB cleanup; the returned/CLI result carries
+observed completion and finalization errors. Capture CLI stdout separately when
+retaining the final result; a preliminary report alone never proves completion.
+Disk-admission failure does not suppress safe identity-verified cleanup after join;
+unsafe artifacts or failed report persistence preserve files with explicit errors.
+Actual journal/synchronous pragmas are recorded before and after clean reopen.
+No sustained latency, row-overhead, architecture or production-mount acceptance
+is inferred from these tests. SQLite remains provisional.
 
 Scenario set and acceptance (all numbers provisional until measured):
 
