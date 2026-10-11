@@ -223,7 +223,9 @@ interface ScannerRuntimePhaseDependencies {
 }
 
 /** Actual phase promises remain authoritative even when a caller races a timeout. */
-export function createScannerRuntimePhases(deps: ScannerRuntimePhaseDependencies) {
+export function createScannerRuntimePhases(
+	deps: ScannerRuntimePhaseDependencies,
+) {
 	let sealed = false
 	let firstFailure: WaveKitError | undefined
 	let producerOutcome: CleanupOutcome = { ok: true }
@@ -263,20 +265,22 @@ export function createScannerRuntimePhases(deps: ScannerRuntimePhaseDependencies
 	}
 	const producerSettled = (): Promise<void> => {
 		sealAdmission()
-		producer ??= Promise.resolve().then(async () => {
-			await previous(attempt(deps.drainBeforeProducer))
-			const handle = deps.beginStop()
-			// Completion belongs to phase 66, not the producer boundary.
-			void handle.completed.catch(() => undefined)
-			return handle.producerSettled
-		}).catch(() => {
-			producerOutcome = {
-				ok: false,
-				state: "unknown",
-				detail: "Scanner component cleanup incomplete",
-			}
-			throw fail()
-		})
+		producer ??= Promise.resolve()
+			.then(async () => {
+				await previous(attempt(deps.drainBeforeProducer))
+				const handle = deps.beginStop()
+				// Completion belongs to phase 66, not the producer boundary.
+				void handle.completed.catch(() => undefined)
+				return handle.producerSettled
+			})
+			.catch(() => {
+				producerOutcome = {
+					ok: false,
+					state: "unknown",
+					detail: "Scanner component cleanup incomplete",
+				}
+				throw fail()
+			})
 		return producer
 	}
 	const managerSettled = (): Promise<void> => {
@@ -411,7 +415,10 @@ async function main(): Promise<void> {
 				}
 			}
 			if (failed)
-				throw new WaveKitError("Scanner admission incomplete", "ACCESS_UNAVAILABLE")
+				throw new WaveKitError(
+					"Scanner admission incomplete",
+					"ACCESS_UNAVAILABLE",
+				)
 		},
 		drainBeforeProducer: async () => {
 			await startupSettled
@@ -574,7 +581,10 @@ async function main(): Promise<void> {
 						scannerPhases.completed(),
 					])
 					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
-						throw new WaveKitError("Runtime shutdown incomplete", "ACCESS_UNAVAILABLE")
+						throw new WaveKitError(
+							"Runtime shutdown incomplete",
+							"ACCESS_UNAVAILABLE",
+						)
 				})()
 				return legacyClosing
 			}
@@ -723,7 +733,10 @@ async function main(): Promise<void> {
 			const registry = new SettlementRegistry()
 			providerLifetime = registry.registerProviderLifetime()
 			if (!providerLifetime)
-				throw new WaveKitError("Scanner lifetime unavailable", "ACCESS_UNAVAILABLE")
+				throw new WaveKitError(
+					"Scanner lifetime unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
 			const constructionCleanup = providerLifetime.ownCleanup(
 				"construction",
 				async () => {
@@ -740,7 +753,10 @@ async function main(): Promise<void> {
 				},
 			)
 			if (!constructionCleanup)
-				throw new WaveKitError("Scanner owner unavailable", "ACCESS_UNAVAILABLE")
+				throw new WaveKitError(
+					"Scanner owner unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
 			settlementObserver = registry.createObserver(providerLifetime)
 		}
 		const channelizer = config.channelizer.enabled
@@ -848,7 +864,7 @@ async function main(): Promise<void> {
 								construction: scannerConstruction,
 							},
 						}
-						: {}),
+					: {}),
 				sourceConfigs: config.sources,
 				decoderConfigs,
 				region: bandRegion.code,
@@ -889,8 +905,9 @@ async function main(): Promise<void> {
 				// while still attempting the remaining owned cleanup.
 				await scannerConstruction.beginStop().producerSettled
 			} else {
-				await scannerConstruction.beginStop().producerSettled
-					.catch((stopErr: unknown) =>
+				await scannerConstruction
+					.beginStop()
+					.producerSettled.catch((stopErr: unknown) =>
 						log.warn(
 							{ err: stopErr },
 							"Stopping the partially started scanner failed",

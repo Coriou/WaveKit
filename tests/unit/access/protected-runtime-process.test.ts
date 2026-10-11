@@ -37,7 +37,7 @@ const processes: RunningCore[] = []
 const reservations: Server[] = []
 const sockets: WebSocket[] = []
 
-// These future-module fixtures exercise entry-point composition, not the core
+// These explicit contract fixtures exercise entry-point composition, not the core
 // settlement implementation. The ordinary entry above always compiles real source.
 const scannerOwnerFixture = `
 export class ScannerLifecycleOwner {
@@ -58,7 +58,7 @@ export class ScannerLifecycleOwner {
 		this.sealAdmission()
 		void Promise.allSettled([...this.callbacks.values()].map(attempt => Promise.resolve().then(attempt)))
 			.then(outcomes => {
-				if (outcomes.some(outcome => outcome.status === "rejected" || !outcome.value.ok)) {
+				if (this.construction?.ok === false || outcomes.some(outcome => outcome.status === "rejected" || !outcome.value.ok)) {
 					this.componentFailed = true
 					reject(new Error("Fixture scanner component failed"))
 				} else resolve()
@@ -75,6 +75,9 @@ export class ScannerLifecycleOwner {
 }`
 
 const settlementFixture = `
+export function registerSettlementTransport() {
+	throw new Error("Native settlement transport is outside this composition fixture")
+}
 class Lifetime {
 	callbacks = new Map()
 	ownCleanup(kind, attempt) {
@@ -84,7 +87,10 @@ class Lifetime {
 	}
 	ownListener() { return { settle() {} } }
 	sealAdmission() { process.stdout.write("provider-admission-sealed\\n") }
-	async attemptLocalCleanup() {
+	attemptLocalCleanup() {
+		return this.localCleanup ??= Promise.resolve().then(() => this.runLocalCleanup())
+	}
+	async runLocalCleanup() {
 		process.stdout.write("provider-local-attempt\\n")
 		const outcomes = await Promise.allSettled([...this.callbacks.values()].map(attempt => Promise.resolve().then(attempt)))
 		const actual = outcomes.map(outcome => outcome.status === "fulfilled" ? outcome.value : { ok: false, state: "failed", detail: "Fixture local failed" })
@@ -102,6 +108,7 @@ export class SettlementRegistry {
 	registerProviderLifetime() { return new Lifetime() }
 	createObserver(lifetime) {
 		return {
+			provider: lifetime,
 			bindProvider(provider) { return provider },
 			sealAdmission() { lifetime.sealAdmission() },
 			attemptLocalCleanup() { return lifetime.attemptLocalCleanup() },
@@ -248,10 +255,14 @@ beforeAll(async () => {
 								throw new Error("Channelizer fixture seam missing")
 							return {
 								loader: "ts",
-								contents: source.replace(original, original + `
+								contents: source.replace(
+									original,
+									original +
+										`
 							process.stdout.write("core-native-attempt\\n")
 							if (process.env.R14_PROCESS_CASE === "native-failure") throw new Error("Fixture native failed")
-							`),
+							`,
+								),
 							}
 						},
 					)
@@ -265,14 +276,17 @@ beforeAll(async () => {
 								throw new Error("Operator fixture seam missing")
 							return {
 								loader: "ts",
-								contents: source.replace(original, `stage: async (stage, phase) => {
+								contents: source.replace(
+									original,
+									`stage: async (stage, phase) => {
 							if (process.env.R14_PROCESS_CASE === "operator-held" && stage === "lock-release" && phase === "before") {
 								process.stdout.write("operator-drain-paused\\n")
 								const hold = setInterval(() => {}, 1000)
 								try { await new Promise(resolve => process.once("SIGUSR2", resolve)) }
 								finally { clearInterval(hold) }
 							}
-							},`),
+							},`,
+								),
 							}
 						},
 					)
@@ -705,6 +719,33 @@ describe("built protected runtime process", () => {
 		expect(snapshot).not.toContain(cookieHeader.split("=")[1]?.split(";")[0])
 	}, 30_000)
 
+	it("drains the real optional channelizer composition with no profile or acquisition", async () => {
+		const env = await fixture()
+		await writeFile(
+			env.configFile,
+			JSON.stringify({
+				...env.config,
+				channelizer: { enabled: true },
+			}),
+		)
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		// Ordinary entry: real registry, manager, scanner owner and finalizer, no contract plugins.
+		const core = run(env.configFile, env.directory)
+		await started(core)
+		expect(await stop(core)).toEqual({ code: 0, signal: null })
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toEqual([])
+		for (const port of [env.api, env.raw, env.relay, env.analog, env.digital])
+			expect(await listening(port)).toBe(false)
+	}, 15_000)
+
 	it("aborts rejected operator acquisition with hidden lock cleanup failure and retains private owner", async () => {
 		const env = await fixture()
 		const provision = await PrivateAccessStorage.open({
@@ -878,25 +919,38 @@ describe("built protected runtime process", () => {
 		})
 		await provision.close()
 		await env.releasePorts()
-		const core = run(env.configFile, env.directory, scannerPhasesEntry, "operator-held")
+		const core = run(
+			env.configFile,
+			env.directory,
+			scannerPhasesEntry,
+			"operator-held",
+		)
 		await started(core)
 		core.child.kill("SIGTERM")
 		await marker(core, "operator-drain-paused")
 		const held = core.stdout()
 		expect(held.indexOf("provider-admission-sealed")).toBeGreaterThanOrEqual(0)
 		expect(held.indexOf("scanner-admission-sealed")).toBeGreaterThanOrEqual(0)
-		expect(held.indexOf("provider-admission-sealed")).toBeLessThan(held.indexOf("operator-drain-paused"))
-		expect(held.indexOf("scanner-admission-sealed")).toBeLessThan(held.indexOf("operator-drain-paused"))
+		expect(held.indexOf("provider-admission-sealed")).toBeLessThan(
+			held.indexOf("operator-drain-paused"),
+		)
+		expect(held.indexOf("scanner-admission-sealed")).toBeLessThan(
+			held.indexOf("operator-drain-paused"),
+		)
 		expect(held).not.toContain("scanner-stop-real")
 		expect(held).not.toContain("core-native-attempt")
 		expect(core.child.exitCode).toBeNull()
-		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(1)
 		core.child.kill("SIGUSR2")
 		expect(await core.exited).toEqual({ code: 0, signal: null })
 		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
 		expect(core.stdout()).toContain("scanner-probes-cleaned")
 		expect(core.stdout()).toContain("provider-final-inspected")
-		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toEqual([])
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toEqual([])
 	}, 15_000)
 
 	it("cleans externally owned scanner components when construction returns no service", async () => {
@@ -910,7 +964,12 @@ describe("built protected runtime process", () => {
 		})
 		await provision.close()
 		await env.releasePorts()
-		const core = run(env.configFile, env.directory, scannerPhasesEntry, "constructor-failure")
+		const core = run(
+			env.configFile,
+			env.directory,
+			scannerPhasesEntry,
+			"constructor-failure",
+		)
 		expect(await core.exited).toEqual({ code: 1, signal: null })
 		expect(core.stderr()).toBe("WaveKit startup failed\n")
 		expect(core.stdout()).not.toContain("WaveKit started successfully")
@@ -920,7 +979,9 @@ describe("built protected runtime process", () => {
 		expect(core.stdout()).toContain("core-native-attempt")
 		expect(core.stdout()).toContain("provider-local-attempt")
 		expect(core.stdout()).toContain("provider-final-inspected")
-		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(1)
 		expect(await listening(env.api)).toBe(false)
 	}, 15_000)
 
@@ -946,7 +1007,11 @@ describe("built protected runtime process", () => {
 			expect(core.stdout()).toContain("scanner-probes-cleaned")
 			expect(core.stdout()).toContain("Destroying DecoderManager")
 			expect(core.stdout()).toContain("provider-final-inspected")
-			expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+			expect(
+				(await readdir(env.directory)).filter(name =>
+					name.startsWith("owner-"),
+				),
+			).toHaveLength(1)
 			for (const port of [env.api, env.raw, env.relay, env.analog, env.digital])
 				expect(await listening(port)).toBe(false)
 		},
@@ -955,13 +1020,21 @@ describe("built protected runtime process", () => {
 
 	it("keeps the actual legacy signal pending after generic handler timeouts and exits on the retained failure", async () => {
 		const env = await fixture()
-		await writeFile(env.configFile, JSON.stringify({
-			...env.config,
-			channelizer: { enabled: true },
-			access: { mode: "legacy" },
-		}))
+		await writeFile(
+			env.configFile,
+			JSON.stringify({
+				...env.config,
+				channelizer: { enabled: true },
+				access: { mode: "legacy" },
+			}),
+		)
 		await env.releasePorts()
-		const core = run(env.configFile, undefined, scannerPhasesEntry, "legacy-held")
+		const core = run(
+			env.configFile,
+			undefined,
+			scannerPhasesEntry,
+			"legacy-held",
+		)
 		await started(core)
 		core.child.kill("SIGTERM")
 		await marker(core, "scanner-component-paused")

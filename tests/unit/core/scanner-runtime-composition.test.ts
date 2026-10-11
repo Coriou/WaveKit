@@ -100,10 +100,16 @@ describe("index scanner composition actual phase ownership", () => {
 		const f = fixture()
 		const sibling = deferred()
 		const componentFailure = Promise.reject(new Error("component failed"))
-		const allComponents = Promise.allSettled([componentFailure, sibling.promise]).then(() => {
+		const allComponents = Promise.allSettled([
+			componentFailure,
+			sibling.promise,
+		]).then(() => {
 			throw new Error("component aggregate failed")
 		})
-		f.deps.beginStop.mockReturnValue({ producerSettled: allComponents, completed: f.completion.promise })
+		f.deps.beginStop.mockReturnValue({
+			producerSettled: allComponents,
+			completed: f.completion.promise,
+		})
 		const result = f.phases.completed().catch(error => error as unknown)
 		f.front.resolve()
 		await continuations()
@@ -114,7 +120,9 @@ describe("index scanner composition actual phase ownership", () => {
 		f.native.resolve()
 		f.local.resolve()
 		expect(await result).toMatchObject({ code: "ACCESS_UNAVAILABLE" })
-		expect(f.deps.finalizeStopNative).toHaveBeenCalledWith(expect.objectContaining({ ok: false, state: "unknown" }))
+		expect(f.deps.finalizeStopNative).toHaveBeenCalledWith(
+			expect.objectContaining({ ok: false, state: "unknown" }),
+		)
 	})
 
 	it("manager failure still initiates both native and local cleanup and retains first failure", async () => {
@@ -168,7 +176,9 @@ describe("index scanner composition actual phase ownership", () => {
 
 	it("a synchronous partial-construction failure still attempts later cleanup", async () => {
 		const f = fixture()
-		f.deps.beginStop.mockImplementation(() => { throw new Error("construction cleanup failed") })
+		f.deps.beginStop.mockImplementation(() => {
+			throw new Error("construction cleanup failed")
+		})
 		const final = f.phases.completed().catch(error => error as unknown)
 		f.front.resolve()
 		f.native.resolve()
@@ -181,7 +191,9 @@ describe("index scanner composition actual phase ownership", () => {
 
 	it("an unknown final outcome stays failed after later receipts and repeated stop", async () => {
 		const f = fixture()
-		f.deps.finalizeStopNative.mockRejectedValueOnce(new Error("ownership unknown"))
+		f.deps.finalizeStopNative.mockRejectedValueOnce(
+			new Error("ownership unknown"),
+		)
 		f.front.resolve()
 		f.producer.resolve()
 		f.native.resolve()

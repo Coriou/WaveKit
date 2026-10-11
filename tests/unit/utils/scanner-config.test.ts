@@ -83,15 +83,15 @@ describe("scanner config section (spec § 12.3)", () => {
 		})
 	})
 
-	it.each([
-		{ scanner: {} },
-		{ scanner: { channelTier: {} } },
-	])("defaults an omitted or empty channel tier: %j", input => {
-		expect(ConfigSchema.parse(input).scanner.channelTier).toEqual({
-			enabled: false,
-			minMs: 500,
-		})
-	})
+	it.each([{ scanner: {} }, { scanner: { channelTier: {} } }])(
+		"defaults an omitted or empty channel tier: %j",
+		input => {
+			expect(ConfigSchema.parse(input).scanner.channelTier).toEqual({
+				enabled: false,
+				minMs: 500,
+			})
+		},
+	)
 
 	it.each([
 		[{ enabled: true }, { enabled: true, minMs: 500 }],
@@ -272,7 +272,10 @@ describe("WAVEKIT_SCANNER__ environment overrides", () => {
 
 	it("defaults the tier minimum when env introduces only the disabled flag", () => {
 		const configPath = path.join(tempDir, "tier.yaml")
-		fs.writeFileSync(configPath, "scanner:\n  channelTier:\n    enabled: true\n")
+		fs.writeFileSync(
+			configPath,
+			"scanner:\n  channelTier:\n    enabled: true\n",
+		)
 		process.env["WAVEKIT_SCANNER__CHANNEL_TIER__ENABLED"] = "false"
 		expect(loadConfig(configPath).scanner.channelTier).toEqual({
 			enabled: false,
