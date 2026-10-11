@@ -5,6 +5,8 @@
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
+import { JobRunner } from "../../../../src/core/scanner/job-runner.js"
+import { SpectrumEngine } from "../../../../src/core/spectrum/spectrum-engine.js"
 import type { ScanJob } from "@wavekit/api-types"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
@@ -66,6 +68,44 @@ async function cancelDuringOutage(h: Harness): Promise<string> {
 	h.tuner.failAll = null
 	return job.id
 }
+
+// Review F2: disconnect before an accepted epoch must release sweep ownership.
+describe("startup source failure", () => {
+	it.each(["sweep", "in-window"] as const)(
+		"ends a starting %s job on source-down",
+		async mode => {
+			const epoch = SpectrumEngine.prototype.currentEpoch
+			const readiness = vi
+				.spyOn(JobRunner.prototype, "onEpochStarted")
+				.mockImplementation(() => undefined)
+			const marker = vi
+				.spyOn(SpectrumEngine.prototype, "currentEpoch")
+				.mockImplementation(function (this: SpectrumEngine) {
+					return { ...epoch.call(this), startSample: null }
+				})
+			const h = serviceHarness({ patch: noPassive })
+			await h.service.start()
+			try {
+				const job = await h.service.createJob(
+					mode === "sweep" ? sweep(50) : { sourceId: "rtl", mode },
+				)
+				expect(h.service.getJob(job.id)?.state).toBe("starting")
+				h.sources.emit("disconnected", "rtl")
+				await settled(h.service)
+				expect(h.service.getJob(job.id)).toMatchObject({
+					state: "failed",
+					reason: "tuner-unavailable",
+				})
+				expect(holderOf(h)).toBeUndefined()
+				expect(h.decoders.held.size).toBe(0)
+			} finally {
+				await h.service.stop()
+				readiness.mockRestore()
+				marker.mockRestore()
+			}
+		},
+	)
+})
 
 const engineConfig = (h: Harness) => h.service.spectrum.engine("rtl")?.config()
 

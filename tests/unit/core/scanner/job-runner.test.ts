@@ -228,7 +228,7 @@ function runnerHarness() {
 	const engine = {
 		currentEpoch: () => epochAt(0, 446_100_000, { settleMode: "none" }),
 		config: () => ({ ...engineCfg }),
-		stats: () => null,
+		stats: () => ({ observedSamples: 1 }),
 	}
 	const runner = new JobRunner({
 		record,
@@ -461,5 +461,29 @@ describe("JobRunner resume of an operator pause without its lease (R4)", () => {
 			details: { holderJobId: "j_other" },
 		})
 		expect(record).toMatchObject({ state: "paused", reason: "resume-blocked" })
+	})
+})
+
+describe("JobRunner startup deadline (review F2)", () => {
+	it("fails at the cap, releases ownership, and ignores a late own epoch", async () => {
+		const { runner, arbiter, record } = runnerHarness()
+		await runner.start()
+		await flush()
+		arbiter.retunes[0]!.resolve(pendingFor(11, HOP0))
+		await runner.idle()
+		runner.tick(14_999)
+		await runner.idle()
+		expect(record.state).toBe("starting")
+		runner.tick(15_000)
+		await flush()
+		await runner.idle()
+		expect(record).toMatchObject({
+			state: "failed",
+			reason: "tuner-unavailable",
+		})
+		expect(arbiter.lease).toBeNull()
+		runner.onEpochStarted(epochAt(11, HOP0))
+		await flush()
+		expect(record.state).toBe("failed")
 	})
 })

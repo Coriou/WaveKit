@@ -3,6 +3,7 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import type { ScannerIdentifyEventData } from "@wavekit/api-types"
 import { IDENTIFY_KEEP_JOBS } from "../../../../src/core/scanner/identify.js"
+import type { JobDriver } from "../../../../src/core/scanner/job-runner.js"
 import type { ScannerSettings } from "../../../../src/core/scanner/types.js"
 import {
 	CENTRE,
@@ -24,6 +25,68 @@ async function until(pred: () => boolean, ms = 5000): Promise<void> {
 }
 
 describe("ScannerService.identify (spec § 10.8)", () => {
+	it.each([{ frequencyHz: CENTRE + 100_000 }, { all: true as const }])(
+		"bounds identify startup without IQ: %j",
+		async target => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			try {
+				const job = await h.service.identify({
+					sourceId: "rtl",
+					target,
+					timeoutMs: 1000,
+				})
+				const drivers = (
+					h.service as unknown as { drivers: Map<string, JobDriver> }
+				).drivers
+				const driver = drivers.get(job.id)!
+				driver.tick(Date.parse(job.createdAt) + 999)
+				await settled(h.service)
+				expect(h.service.getJob(job.id)?.state).toBe("starting")
+				driver.tick(Date.parse(job.createdAt) + 1000)
+				await settled(h.service)
+				expect(h.service.getJob(job.id)).toMatchObject({
+					state: "failed",
+					reason: "tuner-unavailable",
+				})
+				if ("frequencyHz" in target)
+					expect(h.service.getJob(job.id)?.identify?.targets[0]).toMatchObject({
+						state: "unidentified",
+						trials: [],
+						result: {
+							measurements: { peakDbfs: null, snrDb: null, floorDbfs: null },
+						},
+					})
+				expect(h.decoders.held.size).toBe(0)
+				feedTone(h.fanout, 0.1, 100_000)
+				await settled(h.service)
+				expect(h.service.getJob(job.id)?.state).toBe("failed")
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+
+	it.each([{ frequencyHz: CENTRE + 100_000 }, { all: true as const }])(
+		"handles source-down before identify's first epoch: %j",
+		async target => {
+			const h = serviceHarness(noPassive)
+			await h.service.start()
+			try {
+				const job = await h.service.identify({ sourceId: "rtl", target })
+				h.sources.emit("disconnected", "rtl")
+				await settled(h.service)
+				expect(h.service.getJob(job.id)).toMatchObject({
+					state: "failed",
+					reason: "tuner-unavailable",
+				})
+				expect(h.decoders.held.size).toBe(0)
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+
 	it("refuses a target outside the window and a source whose tuner a sweep holds", async () => {
 		const h = serviceHarness(noPassive)
 		await h.service.start()

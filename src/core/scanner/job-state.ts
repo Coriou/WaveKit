@@ -194,7 +194,11 @@ export function transition(
 				? to("paused", ["release-decoders"], "preempted-job")
 				: INVALID
 		case "source-down":
-			return active ? to("paused", ["stop-probes"], "source-down") : INVALID
+			return s.state === "starting"
+				? to("failed", endActions(s), "tuner-unavailable")
+				: active
+					? to("paused", ["stop-probes"], "source-down")
+					: INVALID
 		case "source-up":
 			return pausedFor("source-down") ? to("running", ["resend-hop"]) : INVALID
 		case "preemptor-idle":

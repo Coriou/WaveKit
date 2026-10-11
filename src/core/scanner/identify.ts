@@ -33,7 +33,11 @@ import {
 	classifySpectral,
 } from "./classify/classifier.js"
 import { ScannerApiError } from "./errors.js"
-import type { JobDriver, JobRecord } from "./job-runner.js"
+import {
+	JOB_STARTUP_CAP_MS,
+	type JobDriver,
+	type JobRecord,
+} from "./job-runner.js"
 import type { JobEvent } from "./job-state.js"
 import { PROTOCOL_DECODER, probeTransportFor } from "./plan/plan-preview.js"
 import {
@@ -570,7 +574,10 @@ export class IdentifyRunner implements JobDriver {
 				)
 			case "source-down":
 				// A 15 s identify does not wait for a reconnect: it ends with what it has (the stop-condition row).
+				if (this.record.state === "starting") return this.failStartup(e)
 				return this.endWithResults()
+			case "tuner-error":
+				return this.failStartup(e)
 			case "cancel":
 			case "source-removed":
 				await this.abort()
@@ -603,6 +610,17 @@ export class IdentifyRunner implements JobDriver {
 	}
 
 	tick(now: number): void {
+		if (
+			this.record.state === "starting" &&
+			this.phase !== "finished" &&
+			now - this.record.createdAt >=
+				Math.min(this.deps.identify.timeoutMs, JOB_STARTUP_CAP_MS)
+		) {
+			void this.failStartup({ type: "tuner-error" }).catch((err: unknown) =>
+				this.log.warn({ err }, "Identify startup failed"),
+			)
+			return
+		}
 		this.deps.inner.tick(now)
 		this.step(now)
 	}
@@ -686,6 +704,7 @@ export class IdentifyRunner implements JobDriver {
 			moved = true
 		}
 		if (moved) return
+		// First-IQ startup is separately capped; this budget bounds signal wait after readiness.
 		const started = this.record.startedAt ?? now
 		const { target, timeoutMs } = this.deps.identify
 		if (this.phase === "idle") {
@@ -1086,6 +1105,7 @@ export class IdentifyRunner implements JobDriver {
 		t: TargetState,
 		artefact: ArtefactKind | null,
 		ended?: "window-moved",
+		unavailable = false,
 	): void {
 		if (FINAL.has(t.state)) return
 		const resolved = t.view ?? t.fallback
@@ -1140,7 +1160,7 @@ export class IdentifyRunner implements JobDriver {
 			// After a window move the latest summary shows another window: measure from the track or not at all.
 			measurements: measureTarget(
 				track,
-				ended ? null : this.deps.lastSummary(this.sourceId),
+				ended || unavailable ? null : this.deps.lastSummary(this.sourceId),
 				t.targetHz,
 				t.toleranceHz,
 			),
@@ -1149,6 +1169,28 @@ export class IdentifyRunner implements JobDriver {
 		}
 		t.state = state
 		this.emitTarget(t)
+	}
+
+	/** No accepted IQ: never use a retained summary as an RF measurement. */
+	private async failStartup(event: JobEvent): Promise<void> {
+		if (this.phase === "finished") return
+		const target = this.deps.identify.target
+		if (this.targets.length === 0 && "frequencyHz" in target) {
+			const t = this.newTarget(
+				target.frequencyHz,
+				toleranceHz(target.bandwidthHz),
+				target.bandwidthHz ?? 0,
+				0,
+				null,
+			)
+			this.finishTarget(t, null, undefined, true)
+		}
+		await this.abort()
+		try {
+			await this.deps.inner.dispatch(event)
+		} finally {
+			this.detach()
+		}
 	}
 
 	private finishJob(): void {

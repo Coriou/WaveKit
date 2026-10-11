@@ -41,6 +41,9 @@ import type {
 } from "./types.js"
 import type { TrackSnapshot } from "../spectrum/types.js"
 
+/** Bounds first-IQ admission only; running jobs retain their existing stop contract. */
+export const JOB_STARTUP_CAP_MS = 15_000
+
 export interface JobRecord {
 	id: string
 	name: string | null
@@ -431,6 +434,11 @@ export class JobRunner implements JobDriver {
 
 	tick(now: number): void {
 		const { state, reason, spec } = this.record
+		if (
+			state === "starting" &&
+			now - this.record.createdAt >= JOB_STARTUP_CAP_MS
+		)
+			this.queueEvent({ type: "tuner-error" })
 		if ((state === "running" || state === "holding") && this.scheduler)
 			this.exec(this.scheduler.tick(now))
 		if (
@@ -469,7 +477,12 @@ export class JobRunner implements JobDriver {
 			own = true
 			this.addOwnEpoch(epoch.epoch)
 		}
-		if (this.record.state === "starting" && (!this.sweep || own))
+		if (
+			this.record.state === "starting" &&
+			(!this.sweep || own) &&
+			(this.record.spec.kind !== "identify" ||
+				(this.deps.engine(this.sourceId)?.stats()?.observedSamples ?? 0) > 0)
+		)
 			this.queueEvent({ type: "engine-ready" })
 		if (!this.sweep) return
 		if (!this.driving) {
@@ -504,6 +517,8 @@ export class JobRunner implements JobDriver {
 	}
 
 	onBlock(endSample: number, overload: boolean): void {
+		if (this.record.state === "starting" && (!this.sweep || this.epochOwn))
+			this.queueEvent({ type: "engine-ready" })
 		if (!this.sweep || !this.driving || !this.epochOwn || !this.scheduler)
 			return
 		if (overload && this.hopIndex !== undefined)
@@ -992,7 +1007,11 @@ export class JobRunner implements JobDriver {
 		const engine = await this.deps.openEngine(this.sourceId)
 		this.engineOpened = true
 		if (!this.sweep) {
-			if (engine.currentEpoch().startSample !== null)
+			if (
+				engine.currentEpoch().startSample !== null &&
+				(this.record.spec.kind !== "identify" ||
+					(engine.stats()?.observedSamples ?? 0) > 0)
+			)
 				this.queueEvent({ type: "engine-ready" })
 			return
 		}

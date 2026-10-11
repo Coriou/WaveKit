@@ -158,6 +158,12 @@ const ROWS: [string[], string, string, string[]][] = [
 		"paused(preempted-job)",
 		["release-decoders"],
 	],
+	[
+		["starting"],
+		"source-down",
+		"failed(tuner-unavailable)",
+		["stop-probes", "restore", "release-lease", "release-decoders"],
+	],
 	[ACTIVE, "source-down", "paused(source-down)", ["stop-probes"]],
 	[["paused(source-down)"], "source-up", "running", ["resend-hop"]],
 	[
