@@ -111,8 +111,19 @@ mounted; anything marked *protected mode only* is unreachable in a default deplo
 **Scanner** (S1 is on main: discoveries, identify, sweeps with takeover, occupancy, listen)
 - [ ] Search discoveries by protocol, identity (colour code, NAC, capcode, talkgroup) and
   frequency; `q` matches labels only today.
-- [ ] The auto-resume time on a job paused by an operator tune, for the "resumes in 58 s"
-  countdown.
+- [ ] **Auto-resume that never cuts off a call** (owner, 2026-10-11: "core also waits", wants
+  the best implementation; design: tuned card and Tuner island show "Scan resumes in 42 s ·
+  Stay here"). Today `paused(preempted-operator)` resumes `resume.autoAfterIdleMs` (60 s) after
+  the last REST tuner write, so a long call on the tuned frequency is cut off. Proposed:
+  1. The idle timer measures *operator activity*, not only tuner writes: it is held while the
+     operator's demodulator squelch is open (plus a short hang, e.g. 3 s after it closes), while
+     an identify trial runs on the leased source, and while a manual recording runs; it restarts
+     from full when the activity ends.
+  2. The job's status and `scanner:job` WS events carry `resumeAt` (ISO time, or `null` while
+     held) and `resumeHeldBy` (`audio` | `identify` | `recording` | `null`), so every client
+     can show the same countdown and "Scan waits while you listen".
+  3. "Stay here": `POST …/pause` on a job in `paused(preempted-*)` turns it into
+     `paused(operator)` (no auto-resume), without needing the lease back.
 - [ ] Decoder names (not only counts) in a sweep's impact, for the consent line (verify).
 - [ ] `scanner:progress` at the 2 Hz the spec promised (the limiter allows 1/s per job).
 - [ ] Scanner WebSocket replay after a reconnect (today: refetch everything over REST).
@@ -128,6 +139,26 @@ mounted; anything marked *protected mode only* is unreachable in a default deplo
   exclusions per range (today per job).
 - [ ] Which decoders are always on and which ranges they hold, so the ruler can mark
   "decoded elsewhere" and a sweep can skip them by default.
+- [ ] Ignore that also skips the frequency in sweeps (2026-10-11 design: Ignore = this
+  signal, always). Today a lockout stops probes, recordings and monitor audio but is not an
+  exclusion; a sweep still visits it. Skip (this scan only) is a per-job exclusion.
+- [ ] Scan presets in core, shared by every client (2026-10-11): built-in presets per region
+  (name, ranges, protocols, step, dwell, sensitivity) from the band plans, plus operator
+  presets saved from the composer ("Save as preset": name, ranges, skips, protocols,
+  settings), with create / rename / update / delete. Built-ins are read-only ("Save as new").
+- [ ] Step, dwell and sensitivity per range, each with its source (`band-plan` | `measured` |
+  `operator`) so the composer's "Tuning" line can say where a value came from; and the plan
+  endpoint's derived numbers (stop count, pass time) for the composer summary.
+- [ ] Switch a range on or off in a running job without stopping it.
+- [ ] Per-discovery hit stats for the live hit log: hit count this job, first and last heard,
+  last duration.
+- [ ] Overlapping ranges in one job swept once, trying the protocols of every range that
+  covers the stretch (the composer combines presets such as PMR / land mobile and Marine VHF).
+- [ ] A "new" flag on discoveries first heard in this job, for the one-shot pulse on the
+  spectrum and band strip.
+- [ ] Watch here (passive job) protocol choice set from the client.
+- [ ] The name of the higher-priority job in `paused(preempted-job)`.
+- [ ] A read-only access role (view the scanner and results, no receiver control).
 
 **Recordings**
 - [ ] Keep (star) a recording: exempt from retention, synced to every client; un-keeping

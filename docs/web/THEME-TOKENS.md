@@ -283,10 +283,10 @@ Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
 2. **Hairline or tint?** If it draws an edge (border, ring, 1 px divider), it is a line:
    `--wk-line-rgb`. If it fills or marks a state, it is the accent: `--wk-accent-rgb`. In dark
    both are identical, so a wrong call only shows in light mode (an accent-tinted edge).
-3. **Selected states** keep the existing recipe: border `rgba(var(--wk-accent-rgb),.55)`,
-   background `rgba(var(--wk-accent-rgb),.12)`, text `var(--wk-accent)`. Idle: border
-   `rgba(var(--wk-line-rgb),.18)`, text `var(--wk-text-2)`. Primary: background
-   `var(--wk-accent)`, text `var(--wk-on-accent)`.
+3. **Selected states** (v2.1, quiet): background `var(--wk-sel)`, text `var(--wk-accent)`, no
+   coloured border. Idle chips and toggles: background `var(--wk-chip)`, text `var(--wk-text-2)`,
+   border `transparent` (keep the 1 px so nothing shifts). Primary: background
+   `var(--wk-accent)`, text `var(--wk-on-accent)`. See §5.1.
 4. **Amber and red** are state colours: never use the accent for "paused / not live / caution"
    or for errors, and never use amber/red as decoration.
 5. **Glass recipe** for any floating surface:
@@ -334,6 +334,29 @@ Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
 9. **Contrast**: content text uses `--wk-text` to `--wk-text-4` only; `--wk-text-5` is for
    disabled or decorative glyphs.
 
+### 5.1 Focus, selection and highlight (v2.1, 2026-10-11)
+
+The owner found the shell "highlighting elements all the time". One rule per purpose; no
+accent ring or accent border anywhere except the primary button and a playing control.
+
+| Purpose | Recipe | Never |
+|---|---|---|
+| Keyboard focus | `outline:1.5px solid var(--wk-focus);outline-offset:2px` on `:focus-visible` only. `--wk-focus` = ink at .55 (≥3:1 on every ground, WCAG 2.4.7). A control with an inner shape (play button, handle) rings the shape: `box-shadow:0 0 0 2px var(--wk-surface),0 0 0 3.5px var(--wk-focus)` | on mouse click; accent colour; on `:focus` |
+| Focused pane or region | `outline:none;box-shadow:inset 0 2px 0 var(--wk-focus)` (a top edge, not a box) | a ring around a whole pane |
+| Text field focus | border `rgba(var(--wk-line-rgb),.3)` (JS `s.focus` too) | accent border |
+| Selected chip / toggle / step / segment | fill `var(--wk-sel)` + accent text | border of any colour |
+| Selected row | fill `rgba(var(--wk-accent-rgb),.11)` | inset ring |
+| Keyboard cursor in a list | `inset 0 0 0 1.5px var(--wk-focus)` only while `s.kb` (set by arrow keys, cleared by a click) | after a mouse click |
+| Chosen swatch / ground / waterfall | a small check mark (accent disc or inline tick) + accent label | ring around the option |
+| Hover | fill only (`var(--wk-chip)`, `var(--wk-fill)` or accent .04–.08); fields may darken their neutral line to .26 | accent border |
+| Jump-to highlight (Settings target) | fill `var(--wk-sel)` for 0.6 s, fading over 0.6 s | a box around the row |
+| Idle controls (knobs, live cards, storage bar) | neutral line or nothing | accent halo or edge |
+| Drag guides (snap ghost, range drag) | dashed accent, only while dragging | after the drag ends |
+
+Tokens (in the base rule of the token block): `--wk-focus:rgba(var(--wk-ink-rgb),.55)`,
+`--wk-sel:rgba(var(--wk-accent-rgb),.12)`, `--wk-chip:rgba(var(--wk-ink-rgb),.06)`. They resolve
+per scope, so grounds and accents need no extra rules.
+
 ## 6. Contrast results
 
 Islands are measured as their glass over the plot (dark .5, True black .72, Paper .96). Ratios
@@ -370,7 +393,7 @@ The source of truth. Every board's first helmet `<style>` is exactly this (17 li
 
 ```css
 /* wk-tokens v2 · copy verbatim, never edit per board */
-[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
 [data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a}
 [data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
 [data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}

@@ -612,6 +612,37 @@ Condensed + Noto Sans, Tabler-based icons).
     Recordings and Scanner sit on the sheet on Paper. Paper text-4 lightened to `#72675a` so it
     stays distinct from text-3.
 
+- **Polish pass: shell, quiet outlines, Scanner (owner, 2026-10-11 late session, approved in chat
+  one question at a time).**
+  - *Views and drawers:* Immersive keeps a `view` (Spectrum | Map) and a `drawer` (none |
+    Activity | Recordings | Scanner | Settings) apart. Drawers open over either view and stay
+    open when the view changes (owner: "we'll revisit later if needed"); closing one returns to
+    the view that was up. The dock shows both selections.
+  - *Tuned card:* default anchor "above Listen" (left-aligned with Listen, one gutter above,
+    follows Listen's height); it stays when the Receiver expands and shows on the Map too.
+  - *Settings:* "Tuned card position" learns "Above Listen"; a tidy pass over every group
+    (owner had no specific complaint: "just tidy it").
+  - *Quiet outlines* (THEME-TOKENS §5.1): selected = fill and accent text, no chip has an
+    outline (owner chose the most minimal option); keyboard focus = 1.5 px neutral ring
+    (`--wk-focus`, ink .55) on `:focus-visible` only; clicked fields get a neutral line, never
+    accent; no rings on rows, panes, swatches (a check mark instead) or idle controls; the
+    Settings jump-to highlight is a fill that fades in about 1.2 s.
+  - *Scanner words:* Pause = the scan keeps the receiver and the decoder hold until you tune
+    (core today); Stop = everything back. Tuning during a scan pauses it and shows "Scan
+    resumes in 42 s · Stay here"; core should hold that countdown while audio plays (CORE-GAPS,
+    owner wants the best implementation). Skip = this scan, Ignore = always (also out of
+    sweeps, core gap), Save = saved frequency; Keep folds into Save.
+  - *Scan a band:* sweeps only (Watch here moves to the tuned card and the Now block). Presets
+    first, nothing preselected; one preset list (yours first, then built-ins for the region),
+    "Save as preset", stored in core. Overlapping presets combine (shared stretch scanned once
+    for both protocol sets). Ruler with an Add | Skip switch, zoom buttons and an overview
+    strip, typed range rows, and a collapsed "Tuning" line per range (values chosen for you,
+    each labelled with its source).
+  - *While it runs:* compact status on the Tuner island (with Skip / Ignore / Save while
+    holding on a hit), discovery ticks on the spectrum, live hit log in the drawer ("New
+    only", ranges switchable mid-scan). Missing states drawn: first run, consent again, paused
+    by another scan, source down, no hardware, finished, disk low, read-only.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -653,120 +684,42 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-11, late, after the colour themes second pass. The owner reviewed the
-themes and liked them ("This is great"); the one fix asked for (Settings › Display shows only
-the ground the Theme pick uses; System shows both) is done and published.
-**Topic: polish pass, for an orchestrator with teammates.** Three workstreams, in this order of
-priority as the owner gave them, but the third is the big one: (A) shell and Settings polish,
-(B) a much quieter outline / focus system, (C) a full UX review of the Scanner, above all the
-custom "Scan a band" composer. The keymap pass moves after this.
-
-**Owner's words (2026-10-11).** "Need to polish everything basically." On outlines: "I don't
-like that it keeps highlighting elements all the time, we need to make it much more quiet." On
-the Scanner: "a very important feature, we're spending a lot of energy in the core to get it
-right, it should really come with a beautiful UI and extremely clean & intuitive UX. The custom
-'scan a band' in particular needs a lot of polishing."
+Handoff written 2026-10-11, late, after the polish pass (canvas version 72). All three
+workstreams of the previous handoff were brainstormed with the owner one question at a time,
+approved and drawn (decision log entry "Polish pass: shell, quiet outlines, Scanner"):
+A shell and Settings (Immersive view/drawer split, card "above Listen", Settings wording),
+B quiet outlines (THEME-TOKENS §5.1, applied to every board), C the Scanner redesign
+(presets-first "Scan a band", ruler tools, range rows with Tuning, running state, hit actions,
+pause/resume countdown, Watch here on the tuned card, missing states as Scanner `state` tweaks).
 
 **Start.**
-1. Sync: `git fetch origin && git merge origin/main`, then read this file, THEME-TOKENS.md and
-   the boards on the canvas (Immersive first). Read canvas comments. Ask the owner to show the
-   Browser pane when a real canvas check matters.
-2. Brainstorm each workstream with the owner before drawing, one question at a time
-   (superpowers:brainstorming; these are bounded design passes on existing boards, so a short
-   in-chat design and an explicit yes, no spec file). Workstreams can be brainstormed one after
-   another and then drawn in parallel by teammates with distinct files.
-
-### A. Shell and Settings polish (Immersive, Settings, SettingsPhone, Tuned)
-
-Facts checked in `Immersive.dc.html`:
-- **Opening Settings from the Map drops you on the Spectrum.** Cause: one `nav` state holds
-  both the base view (`spectrum` | `map`) and the drawers (`activity`, `recordings`, `scanner`,
-  `settings`); `openSettings()` sets `nav: 'settings'`, and `closeActivity` / `toggleSettings`
-  reset `nav: 'spectrum'`. The same happens for every drawer opened from the Map. Fix: split a
-  `view` (spectrum | map) from a `drawer` (none | activity | recordings | scanner | settings);
-  drawers overlay whichever view is up and closing one returns to that view. Check the Map's
-  free area and the dock's selected states with a drawer open over the Map; decide with the
-  owner whether ⌘K "Map" while a drawer is open keeps the drawer.
-- **Tuned card default position:** today `cardAt: 'br'` (bottom right). The owner wants it
-  snapped **right above the Listen (audio / squelch) island**, left-aligned with it, one 16 px
-  gutter between them (owner screenshot 2026-10-11: card bottom edge just above "Squelched ·
-  NFM audio"). Add that anchor (it moves with Listen's height when Listen expands) and make it
-  the default; keep drag, magnetic snap and minimise.
-- **Stop hiding the card when the Receiver panel opens:** `cardOn` is
-  `s.open !== 'rx' && s.nav !== 'map' && (!drawerOn || L.full)`; the card is movable now, so
-  drop the `open !== 'rx'` rule and resolve real collisions through the anchors instead (the
-  expanded Receiver is top right, the new default anchor is bottom left). Also ask whether the
-  card should show over the Map (it is hidden there today).
-- **Settings:** the owner wants Settings "again": walk every group for clarity, wording,
-  density and the "On this device" block (Theme, ground, Accent, Waterfall colours, Density,
-  Tuned card position, Motion); the "Tuned card position" select must learn the new anchor;
-  check phone layout. Keep the registry as the one source (Palette holds a copy; keep the copy
-  in sync and mark changes in both).
-- Then a general polish sweep of the shell: island spacing, motion, empty and error states,
-  wording, all grounds (Ink / Graphite / True black / Paper).
-
-### B. Quiet outline and focus system (every board)
-
-The shell shows too many rings: 2 px accent `outline` on `:focus-visible` in every board's
-helmet (57 rules), selected chips and segments drawn with an accent border at .55, the Settings
-target highlight (a 2 px accent ring around a whole row; in the owner's screenshot the Accent
-row stayed boxed), drag targets with dashed accent outlines, hover rings. Do first:
-1. An inventory (subagent, read-only): every outline, ring, accent border and highlight across
-   the boards, grouped by purpose (keyboard focus, selection, hover, transient highlight,
-   drop target), with where each appears and whether it persists after a mouse click.
-2. Brainstorm the rules with the owner. Starting proposal to discuss, not decided: keyboard
-   focus only on `:focus-visible`, thinner and quieter (1.5 px, ink or accent at reduced
-   alpha, offset), never after a mouse click; selection by fill and text colour rather than
-   a coloured border; hover by fill only; transient highlights (Settings target, palette
-   "Open in Settings") fade within ~1.2 s and never box a whole row; no accent edge on idle
-   controls. Accessibility stays: focus must remain visible for keyboard users (WCAG 2.4.7,
-   3:1 against the surface).
-3. Write the result as a new "Focus, selection and highlight" section in THEME-TOKENS.md
-   (with tokens such as `--wk-focus` if useful) and apply it to all boards with one script plus
-   per-board fixes. This touches every board: run it when no other teammate owns a board, or
-   have teammates apply it to the boards they own.
-
-### C. Scanner UX review (Scanner, BandStrip, Identify, Tuned, Tuner, Immersive)
-
-The core team is investing heavily in the scanner; the UI must match. Read first:
-`docs/SCANNER.md`, `docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md`, the
-scanner items in `docs/ROADMAP.md` (S1 band sweep, S3 listen-scan, S4 detection), CORE-GAPS.md,
-and this file's decision log entries "Scanner, decisions before design" and "Shell grid,
-Scanner composer and theming" (purpose = discovery over time; Scanner drawer with Discoveries;
-"Scan a band" composer with band ruler, ranges, per-range protocols, Just find signals;
-Identify flow on the tuned card; Tuner island hold state "Scanner has the receiver").
-1. Audit (subagent): walk every flow on the boards as a first-time operator (find what is
-   around me; scan a custom band; watch it run; pause / hand the receiver back; read and act on
-   discoveries; identify one signal; save it) and list friction, unclear words, dead ends,
-   visual noise, missing states (empty, first run, no hardware, sweep error, relay paused).
-   Compare with how SDR++ (frequency manager / scanner module), SDR Console, SDRTrunk and
-   Uniden scanners present ranges, steps, dwell, lockouts and hits; take ideas, not looks.
-2. Brainstorm with the owner, one question at a time, from the audit. Likely questions: what a
-   first-time scan should look like (presets first vs. ruler first); how ranges are added and
-   edited (drag on the ruler, typed, from the spectrum's "Scan this range"); how much of step,
-   dwell, sensitivity and exclusions stays visible; how protocols per range read; what the
-   running state shows in the shell and in the drawer; how discoveries land on the spectrum.
-3. Redesign "Scan a band" end to end on the Scanner board, then the running and results states,
-   checked on all four grounds. Any capability the design needs that core lacks goes into
-   CORE-GAPS.md and the canvas sticky.
-
-**End of session:** update this file (decision log, open questions, next session),
-CORE-GAPS.md if needed, snapshot every board into `docs/web/canvas/`, commit only your paths
-and push `design/web-dashboard`.
+1. Sync (`git fetch origin && git merge origin/main`), read this file, THEME-TOKENS.md §5.1 and
+   the canvas comments. Ask the owner for their review of the polish pass first; they had not
+   seen the drawn result when this was written.
+2. Known loose ends from the pass:
+   - With Listen expanded on a normal-height window the tuned card cannot fit above it; it
+     glides to the nearest free anchor (top centre). Ask whether that is right.
+   - In Immersive the per-range on/off chips of a running scan do not show (the shell passes
+     merged stretches only); they show on the Scanner board.
+   - "Scan waits while you listen" is a Scanner/Tuned tweak only; the shell does not model the
+     squelch hold.
+   - The band strip slightly overlaps the Tuner hold row in Immersive; dock tooltips can peek
+     out under a widened drawer (both older than the pass).
+   - Owner still to pick the Paper waterfall ramp (Spectrum `paperRamp` a/b/c).
+3. Next topic after the review: the keymap pass (postponed from before the polish pass).
 
 **How the canvas work went well (keep doing it).**
-- Settle the shared spec first (a token block, a rules section, a brief in the scratchpad),
-  apply mechanical changes to every board with one script, then give teammates distinct files
-  and the shared brief. Teammates edit local copies in the scratchpad and verify only; the
-  orchestrator publishes all changed boards in one Artifact call (`root` + `files`).
-- The canvas pane is often hidden, so teammates verify in the git-ignored
-  `.agents/web-canvas-harness/` (README there). `PORT=<n> node shot.js …` lets several render
-  at once, each with its own boards copy and its own port (ports clashed once; pick distinct
-  ones). Always render with ALL current boards; a stale embedded board gives false results.
-  Check Ink + phosphor against `docs/web/canvas/` so today's look never drifts.
-- To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work on
-  copies in the session scratchpad, publish, then copy every board into `docs/web/canvas/` and
-  commit.
+- Settle the shared spec first (a token section, a brief in the scratchpad), apply mechanical
+  changes to every board with one script, then give teammates distinct files and the shared
+  brief. Shared files: one owner; the other teammate keeps small local hunks and the
+  orchestrator merges with `git merge-file` against the common base (this pass: one trivial
+  conflict).
+- Check core semantics before writing UI copy: docs/SCANNER.md "Lifecycle" changed the Pause
+  wording mid-pass (Pause keeps the receiver and decoders only until you tune).
+- Teammates verify in the git-ignored `.agents/web-canvas-harness/` with their own boards copy
+  and port (`PORT=<n> node shot.js …`); always render with ALL current boards. The
+  orchestrator publishes all changed boards in one Artifact call (`root` + `files`), then copies
+  them into `docs/web/canvas/` and commits.
 
 ## Handoff to the dev team (later)
 
