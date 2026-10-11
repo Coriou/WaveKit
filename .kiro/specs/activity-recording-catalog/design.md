@@ -1013,11 +1013,27 @@ producer/keyset, FTS-common, FTS-rare, FTS-empty, combined-filter/keyset and fil
 empty-page. Each class receives900 offers. Use fixed seed-derived parameters and
 barrier; no next-page feedback changes the schedule. If the client's prior request
 is still active or its reply retained, count `client-busy` denial at its next slot,
-not a postponed offer. Driver misses use the same20ms rule; queue denial, expiry,
-timeout, successful response and client-busy partition scheduled requests. Warmup
+not a postponed offer. Driver misses use the same20ms rule. Every one of the7,200 planned request slots
+has exactly one terminal category: `successful`, `scheduler-missed`, `client-busy`,
+`queue-denied`, `queue-expired`, `active-timeout`, `query-failed`,
+`cancelled-before-dispatch`, `cancelled-in-flight`, `interrupted-unknown`, or
+`not-offered-after-stop`. The last category covers future scheduled slots after
+abort, including setup failure before measured time zero. An issued request whose
+completion cannot be confirmed on worker/process failure is `interrupted-unknown`,
+never silently cancelled or successful. For deliberate cancellation, queued requests
+become `cancelled-before-dispatch`; dispatched requests become `cancelled-in-flight`
+after confirmed worker settlement, otherwise `interrupted-unknown`. A synchronous
+single-assignment terminal transition makes later replies/cancel notifications
+no-ops; the first established timeout or terminal result is not counted again.
+Cancellation/timeout totals elsewhere are derived views of these categories, not
+additional buckets. Reconcile the sum to7,200 (or the scaled planned total), including
+not-offered slots, on every completed report. If fatal containment prevents a final
+report, label the missing accounting incomplete; a preliminary report is not proof
+of reconciliation. Warmup
 uses the same schedule for25s then5s drain; reset measured counters/barrier at zero.
-Small virtual schedules check totals, class balance and all denial outcomes against
-an independent oracle. A separate scaled fixture validates concurrent insertion/
+Small virtual schedules check totals, class balance, scheduler misses, cancellation,
+timeout/reply races and pre-load/mid-load interruption against an independent oracle;
+no slot is postponed or counted twice. A separate scaled fixture validates concurrent insertion/
 pruning and cursor correctness; it is not a concurrent-write throughput benchmark.
 Combined writer/query performance remains a subsequent explicitly specified gate.
 Successful query p95≤250ms; deadline250ms plus≤100ms termination confirmation,
