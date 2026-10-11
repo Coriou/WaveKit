@@ -172,7 +172,9 @@ GET/request/snapshot limits must use the same schema as domain and published DTO
 
 Channel `operator-data`; events `operator-data:snapshot` on subscription and
 `operator-data:updated` after changed durable transactions, data = complete
-GET body above. Existing envelope type/channel/data/timestamp remains unchanged.
+GET body above. The envelope is `{type, channel:'operator-data', data}` with no
+timestamp. Ordering uses snapshot `storeId` and `revision`; saved-record timestamps
+remain unchanged.
 Service accepts one injected synchronous `onCommit(snapshot)` sink, called with
 a detached committed snapshot after durable state swap and before queue release
 or mutation resolution. Current-token no-ops invoke nothing. The sink belongs to
