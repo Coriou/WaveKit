@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync } from "fastify"
 import { accessRequestFromHttp } from "../../access/http-request.js"
-import { encodeAccessBootstrap } from "../../access/public-bootstrap.js"
+import { projectAccessBootstrap } from "../../access/public-bootstrap.js"
 import type { AccessPolicy } from "../../access/policy.js"
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 
@@ -38,7 +38,7 @@ export const accessBootstrapRoutes: FastifyPluginAsync<
 			if (admission.kind === "deny")
 				return reply.code(admission.status).send({ code: admission.code })
 			try {
-				const body = encodeAccessBootstrap(options.provideBootstrap())
+				const body = projectAccessBootstrap(options.provideBootstrap())
 				// A provider/getter can synchronously seal admission; never publish after it.
 				if (options.controller.admissionStopped)
 					return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })

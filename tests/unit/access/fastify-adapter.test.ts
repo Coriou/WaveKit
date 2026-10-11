@@ -1,5 +1,5 @@
 import { EventEmitter, once } from "node:events"
-import { get, IncomingMessage as RawRequest, ServerResponse } from "node:http"
+import { get, request as httpRequest, IncomingMessage as RawRequest, ServerResponse } from "node:http"
 import { Socket } from "node:net"
 import type { IncomingMessage } from "node:http"
 import Fastify from "fastify"
@@ -938,6 +938,27 @@ describe("unmounted root Fastify access hooks", () => {
 	)
 })
 
+async function bootstrapWire(
+	app: ReturnType<typeof Fastify>,
+	options: { method: "GET" | "HEAD"; url: string; headers: Record<string, string> },
+) {
+	if (!app.server.listening) await listen(app)
+	const bound = app.addresses()[0]
+	if (!bound) throw new Error("Missing listener")
+	return await new Promise<{ statusCode: number; body: string; headers: import("node:http").IncomingHttpHeaders; json: () => unknown }>((resolve, reject) => {
+		const request = httpRequest({ host: "127.0.0.1", port: bound.port, path: options.url, method: options.method, headers: options.headers, agent: false }, response => {
+			let body = ""
+			response.setEncoding("utf8")
+			response.on("data", (chunk: string) => { body += chunk })
+			response.on("error", reject)
+			response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, headers: response.headers, body, json: () => JSON.parse(body) as unknown }))
+		})
+		request.on("error", reject)
+		request.setTimeout(2000, () => request.destroy(new Error("Wire request timeout")))
+		request.end()
+	})
+}
+
 describe("root bootstrap opt-in dispatch", () => {
 	it("leaves missing opt-in protected and admits no public principal when enabled", async () => {
 		for (const enabled of [false, true]) {
@@ -999,7 +1020,7 @@ describe("root bootstrap opt-in dispatch", () => {
 		env.app.addHook("onRequest", async (_request, reply) => {
 			reply.serializer(() => "secret serializer")
 		})
-		const denied = await env.app.inject({
+		const denied = await bootstrapWire(env.app, {
 			method: "HEAD",
 			url: "/api/access/bootstrap",
 			headers: { host: "evil.lan:9000" },
@@ -1008,7 +1029,7 @@ describe("root bootstrap opt-in dispatch", () => {
 		expect(denied.body).toBe("")
 		env.controller.stopAdmission()
 		for (const method of ["GET", "HEAD"] as const) {
-			const result = await env.app.inject({
+			const result = await bootstrapWire(env.app, {
 				method,
 				url: "/api/access/bootstrap",
 				headers: { host: "receiver.lan:9000", origin },

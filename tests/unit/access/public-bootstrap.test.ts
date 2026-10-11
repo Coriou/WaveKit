@@ -1,3 +1,4 @@
+import { request as httpRequest } from "node:http"
 import Fastify from "fastify"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -81,6 +82,34 @@ async function routes(provideBootstrap: () => unknown, optIn = true) {
 		provideBootstrap,
 	})
 	return { app, controller, policy, sessions, token }
+}
+
+// inject() exposes the pre-transport payload for explicit HEAD handlers. Verify
+// body suppression through Node HTTP on a real ephemeral loopback listener.
+async function bootstrapWire(
+	app: ReturnType<typeof Fastify>,
+	options: { method?: string; url: string; headers: Record<string, string> },
+) {
+	if (!app.server.listening) await app.listen({ host: "127.0.0.1", port: 0 })
+	const address = app.addresses()[0]
+	if (!address) throw new Error("Missing listener")
+	return await new Promise<{
+		statusCode: number
+		headers: import("node:http").IncomingHttpHeaders
+		body: string
+		json: () => unknown
+	}>((resolve, reject) => {
+		const request = httpRequest({ host: "127.0.0.1", port: address.port, path: options.url, method: options.method ?? "GET", headers: options.headers, agent: false }, response => {
+			let body = ""
+			response.setEncoding("utf8")
+			response.on("data", (chunk: string) => { body += chunk })
+			response.on("error", reject)
+			response.on("end", () => resolve({ statusCode: response.statusCode ?? 0, headers: response.headers, body, json: () => JSON.parse(body) as unknown }))
+		})
+		request.on("error", reject)
+		request.setTimeout(2000, () => request.destroy(new Error("Wire request timeout")))
+		request.end()
+	})
 }
 
 const headers = { host: "receiver.lan", origin: "https://receiver.lan" }
@@ -265,7 +294,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 			const env = await routes(provider)
 			const lookup = vi.spyOn(env.sessions, "lookup")
 			const admit = vi.spyOn(env.controller, "admit")
-			const result = await env.app.inject({
+			const result = await bootstrapWire(env.app, {
 				method,
 				url: "/api/access/bootstrap",
 				headers: {
@@ -298,7 +327,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 				() => ({ ...source(), apiOrigin: "https://foreign.lan" }),
 			]) {
 				const env = await routes(provider)
-				const result = await env.app.inject({
+				const result = await bootstrapWire(env.app, {
 					method,
 					url: "/api/access/bootstrap",
 					headers,
@@ -319,7 +348,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 	it("preserves normal admission without opt-in, and rejects authenticated query/upgrade delivery", async () => {
 		const provider = vi.fn(() => source())
 		const env = await routes(provider, false)
-		const denied = await env.app.inject({
+		const denied = await bootstrapWire(env.app, {
 			url: "/api/access/bootstrap",
 			headers,
 		})
@@ -330,7 +359,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 			["/api/access/bootstrap?x=1", {}],
 			["/api/access/bootstrap", { upgrade: "websocket" }],
 		] as const) {
-			const result = await env.app.inject({
+			const result = await bootstrapWire(env.app, {
 				url,
 				headers: { ...authorized, ...extra },
 			})
@@ -343,7 +372,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 	it("keeps validated preflight separate and bars forbidden origins before provider access", async () => {
 		const provider = vi.fn(() => source())
 		const env = await routes(provider)
-		const preflight = await env.app.inject({
+		const preflight = await bootstrapWire(env.app, {
 			method: "OPTIONS",
 			url: "/api/access/bootstrap",
 			headers: { ...headers, "access-control-request-method": "GET" },
@@ -351,7 +380,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 		expect(preflight.statusCode).toBe(204)
 		expect(preflight.body).toBe("")
 		for (const method of ["GET", "HEAD"] as const) {
-			const denied = await env.app.inject({
+			const denied = await bootstrapWire(env.app, {
 				method,
 				url: "/api/access/bootstrap",
 				headers: { ...headers, origin: "https://evil.lan" },
@@ -370,7 +399,7 @@ describe("bootstrap module routes (actual ApiServer assembly remains a separate 
 			return source()
 		})
 		stop = () => env.controller.stopAdmission()
-		const result = await env.app.inject({
+		const result = await bootstrapWire(env.app, {
 			url: "/api/access/bootstrap",
 			headers,
 		})
