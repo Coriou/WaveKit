@@ -928,9 +928,25 @@ wall-clock floating-point drift. Full starting buckets: global100/s capacity1,00
 each of10 producers50/s capacity200. Offers evenly spaced in each second, round-robin
 across producers. Reference admission uses scheduled time; actual scheduling records
 lateness independently. A stalled driver must not regenerate an unbounded backlog:
-process at most64 overdue offers per turn, aggregate skipped offers as scheduler
-misses and fail workload fidelity rather than quietly dropping or catching up forever.
+process at most64 due offers per turn. At each turn, any offer more than20ms
+late is skipped as a scheduler miss before admission; remaining due offers are
+processed in scheduled order up to64, then yield. Unprocessed offers face the same
+20ms rule next turn. This threshold is fixed and reported, not adjusted to make a
+run pass. Aggregate skipped offers and fail workload fidelity rather than quietly
+dropping or catching up forever.
 Any missed scheduled offer invalidates latency/load acceptance for that run.
+
+Warmup lasts30s: the first25s offer100/s across10 producers into a separate
+warmup identity namespace using the same storage/baseline path; the last5s stop
+input and drain. Failure to drain by30s fails setup. Retain warmup rows and report
+their count separately; no unbudgeted purge at transition. At measured time zero,
+reset both observed and reference buckets to full, all measured counters/histograms
+to zero, and establish a fresh monotonic epoch. Observed token decisions and the
+independent oracle both use the offer's scheduled microsecond offset; actual dispatch,
+queue and receipt latency use monotonic wall time. This qualifies a controlled
+scheduled-admission workload, not a production arrival-clock implementation.
+Virtual-clock tests cover partial warmup, failed drain, reset, exact refill boundaries,
+20ms/20ms-plus lateness and repeated64-item yields without unbounded catch-up.
 
 For900s, steady offers90,000; burst offers84,600 (58s at80/s plus2s at500/s per minute,
 94/s mean); overload offers450,000. With ideal scheduled timing the first two have
@@ -989,6 +1005,21 @@ and empty filtered scan pages. Page≤200 rows and1 MiB serialized, tokenized se
 ≤256 UTF-8 bytes/eight terms, no arbitrary SQL/FTS grammar. Use a deterministic
 bounded expected-result oracle computed from fixture generation, with high-water
 barrier and scanned-through handling checked across insert/prune/restart fixtures.
+The query measurement is explicitly read-only after seed/warmup: no concurrent
+writer traffic in this scenario. For900 measured seconds, each client offers one
+request per second at offsets clientIndex*125ms, producing7,200 scheduled requests.
+Cycle eight classes by `(second + clientIndex) mod8`: frequency/keyset, kind/keyset,
+producer/keyset, FTS-common, FTS-rare, FTS-empty, combined-filter/keyset and filtered
+empty-page. Each class receives900 offers. Use fixed seed-derived parameters and
+barrier; no next-page feedback changes the schedule. If the client's prior request
+is still active or its reply retained, count `client-busy` denial at its next slot,
+not a postponed offer. Driver misses use the same20ms rule; queue denial, expiry,
+timeout, successful response and client-busy partition scheduled requests. Warmup
+uses the same schedule for25s then5s drain; reset measured counters/barrier at zero.
+Small virtual schedules check totals, class balance and all denial outcomes against
+an independent oracle. A separate scaled fixture validates concurrent insertion/
+pruning and cursor correctness; it is not a concurrent-write throughput benchmark.
+Combined writer/query performance remains a subsequent explicitly specified gate.
 Successful query p95≤250ms; deadline250ms plus≤100ms termination confirmation,
 including time queued. Report queued expiry, active timeout, cancellation and
 rejected requests separately. Slow-reader case withholds at most one reply/client;
@@ -1021,9 +1052,14 @@ Before each transaction reserve worst-case growth, not just payload bytes: deriv
 a conservative page-write ceiling for the closed schema and capped batch, including
 FTS/index changes, from page-count/allocation bounds. If no defensible growth bound
 can be enforced on an actual runtime, report WAL hard-cap qualification unsupported
-and leave pressure execution disabled; never claim a post-commit size check enforces
+and deny that transaction before it starts; all affected scenarios remain unsupported/not-run, including seed setup, ordinary inserts, FTS maintenance, receipt updates and pruning; never claim a post-commit size check enforces
 64 MiB. Record reserved vs actual DB/WAL growth and checkpoint busy/overshoot.
 No full VACUUM; large cleanup is bounded incremental deletion with transaction caps.
+Split live metadata-only inventory from post-join artifact hashing. Per-batch live
+checks use bounded lstat/file identity/size information and conservative in-flight
+reservations; they must not call the current content-hashing `inspectArtifacts()`.
+Hashing is reserved for joined-worker finalization, avoiding live-file races and
+unbounded measurement I/O during admission.
 
 Preflight hard limits: DB2 GiB inclusive of256 MiB reserved receipt/catalog-headroom
 (no catalog rows implemented); WAL64 MiB; all artifacts including SHM, copies,
@@ -1064,6 +1100,27 @@ capacity evidence; other approved native runtime/architecture cells separately.
 Clean or explicitly account for each slot's residue before the next. Do not queue
 an unattended matrix or overlap suites/other lanes. Each slot states exact executable,
 source hashes, scenario/phase, deadline, estimated CPU/RSS/disk and abort criteria.
+External capture is an explicit operator obligation before each slot: exclusively
+create a separate `activity-capture-<UUID>` directory under the same ignored
+`output/qualification/` root, with no symlink/reused path, tied to the run UUID.
+Reserve4 MiB aggregate capture capacity before driver admission: stdout1 MiB,
+stderr2 MiB (including progress, warnings and fatal diagnostics), manifest1 MiB.
+Charge this reservation against the4 GiB artifact ceiling and free-space reserve;
+never count both its reserved and materialized bytes. No unbounded shell redirection
+is accepted. The execution-window proposal must identify an existing bounded pipe
+consumer or a separately reviewed capture mechanism; if unavailable, execution
+remains not-run rather than inventing a tool or expanding current path ownership.
+On cap breach the consumer stops the owned invocation, reports truncation and
+fails the run; it must drain/close pipes without deadlocking termination.
+After confirmed process exit the operator verifies exit status, EOF/completion,
+actual capture sizes/hashes and total driver+capture+residue bytes, then records
+these in the bounded manifest. Missing final stdout, truncated captures, unknown
+exit or unfinished pipe drain means incomplete evidence. Fatal containment can
+leave driver artifacts; the operator only inventories them after process exit and
+must not assume cleanup. Driver elapsed ends after its cleanup attempt; external
+capture close/verification time is a separate observed duration subject to a60s
+post-exit budget. It never changes the driver's20-minute measurement claim.
+
 Paired comparison requires both slots on the same quiet host/settings; unmatched
 or interrupted halves remain incomplete, not performance acceptance.
 
