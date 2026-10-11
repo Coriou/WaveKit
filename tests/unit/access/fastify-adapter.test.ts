@@ -132,6 +132,50 @@ async function addWs(env: Awaited<ReturnType<typeof setup>>) {
 }
 
 describe("unmounted root Fastify access hooks", () => {
+	it.each(["stop", "dispose"] as const)(
+		"%s gates health, ordinary, pair, preflight and real WebSocket admission",
+		async mode => {
+			const env = await setup()
+			const handler = vi.fn(async () => ({ ok: true }))
+			env.app.get("/health", handler)
+			env.app.get("/api/status", handler)
+			env.app.post("/api/access/pair", handler)
+			await env.app.register(websocket)
+			env.app.get("/ws", { websocket: true }, socket => {
+				void handler()
+				socket.terminate()
+			})
+			const address = await listen(env.app)
+			if (mode === "stop") env.controller.stopAdmission()
+			else env.controller.dispose()
+			for (const request of [
+				{ method: "GET" as const, url: "/health", headers: env.headers },
+				{ method: "GET" as const, url: "/api/status", headers: env.headers },
+				{
+					method: "POST" as const,
+					url: "/api/access/pair",
+					headers: env.headers,
+				},
+				{
+					method: "OPTIONS" as const,
+					url: "/api/status",
+					headers: {
+						host: "receiver.lan:9000",
+						origin,
+						"access-control-request-method": "GET",
+					},
+				},
+			]) {
+				const result = await env.app.inject(request)
+				expect(result.statusCode).toBe(503)
+				expect(result.headers["access-control-allow-origin"]).toBe(origin)
+			}
+			const upgrade = await rejected(address, env.headers)
+			expect(upgrade.status).toBe(503)
+			expect(handler).not.toHaveBeenCalled()
+		},
+	)
+
 	it("covers nested docs, unknown routes and exact public health before handlers", async () => {
 		const env = await setup()
 		const handler = vi.fn(() => ({ ok: true }))

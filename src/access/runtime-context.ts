@@ -26,6 +26,17 @@ export interface AccessRuntimeOptions {
 	readonly sessionCookieName?: string
 }
 
+/** Named listener boundaries are independent of the API authority allowlist. */
+export interface NamedAccessRuntimeOptions extends Omit<
+	AccessRuntimeOptions,
+	"audio"
+> {
+	readonly audio: {
+		readonly analog: AccessAudioBoundary
+		readonly digital: AccessAudioBoundary
+	}
+}
+
 /** Structurally usable as FastifyAccessOptions or NodeHttpAccessOptions. */
 export interface AccessRuntimeListener {
 	readonly policy: AccessPolicy
@@ -45,15 +56,30 @@ export interface AccessRuntimeContext {
 	close(): Promise<void>
 }
 
+export interface NamedAccessRuntimeContext extends Omit<
+	AccessRuntimeContext,
+	"audio"
+> {
+	readonly analogAudio: AccessRuntimeListener
+	readonly digitalAudio: AccessRuntimeListener
+}
+
+const audioBoundarySchema = z
+	.object({
+		listenerScheme: z.enum(["http", "https"]),
+		allowedAuthorities: z.array(z.string().min(1).max(300)).min(1).max(64),
+	})
+	.strict()
+
 const optionsSchema = z
 	.object({
 		bootstrap: z.unknown(),
-		audio: z
-			.object({
-				listenerScheme: z.enum(["http", "https"]),
-				allowedAuthorities: z.array(z.string().min(1).max(300)).min(1).max(64),
-			})
-			.strict(),
+		audio: z.union([
+			audioBoundarySchema,
+			z
+				.object({ analog: audioBoundarySchema, digital: audioBoundarySchema })
+				.strict(),
+		]),
 		directory: z
 			.string()
 			.min(1)
@@ -82,9 +108,15 @@ function unavailable(): WaveKitError {
  * this opens no server and advertises no live protection. Startup never provisions
  * or falls back to legacy. Storage is private to this lifecycle, not public config.
  */
-export async function openAccessRuntime(
+export function openAccessRuntime(
+	options: NamedAccessRuntimeOptions,
+): Promise<NamedAccessRuntimeContext>
+export function openAccessRuntime(
 	options: AccessRuntimeOptions,
-): Promise<AccessRuntimeContext> {
+): Promise<AccessRuntimeContext>
+export async function openAccessRuntime(
+	options: AccessRuntimeOptions | NamedAccessRuntimeOptions,
+): Promise<AccessRuntimeContext | NamedAccessRuntimeContext> {
 	let storage: PrivateAccessStorage | undefined
 	let leases: ConnectionLeases | undefined
 	try {
@@ -93,26 +125,52 @@ export async function openAccessRuntime(
 		const config = parsed.data
 		const bootstrap = resolveAccessBootstrap(config.bootstrap)
 		if (bootstrap.mode !== "protected") throw unavailable()
-		const audio = resolveAccessBootstrap({
-			mode: "protected",
-			...config.audio,
-			allowedOrigins: bootstrap.allowedOrigins,
-			externalAudioOrigins: [],
-		})
-		if (audio.mode !== "protected") throw unavailable()
+		const named = "analog" in config.audio
+		const resolveAudioBoundary = (boundary: AccessAudioBoundary) => {
+			const audio = resolveAccessBootstrap({
+				mode: "protected",
+				...boundary,
+				allowedOrigins: bootstrap.allowedOrigins,
+				externalAudioOrigins: [],
+			})
+			if (
+				audio.mode !== "protected" ||
+				audio.listenerScheme !== bootstrap.listenerScheme
+			)
+				throw unavailable()
+			// Retain the foundation's legacy single-audio contract.
+			if (
+				!named &&
+				audio.allowedAuthorities.some(
+					authority => !bootstrap.allowedAuthorities.includes(authority),
+				)
+			)
+				throw unavailable()
+			return audio
+		}
+		const audio:
+			| { analog: ProtectedAccessBootstrap; digital: ProtectedAccessBootstrap }
+			| { legacy: ProtectedAccessBootstrap } =
+			"analog" in config.audio
+				? {
+						analog: resolveAudioBoundary(config.audio.analog),
+						digital: resolveAudioBoundary(config.audio.digital),
+					}
+				: { legacy: resolveAudioBoundary(config.audio) }
+		const audioBoundaries =
+			"analog" in audio ? [audio.analog, audio.digital] : [audio.legacy]
 		if (
-			audio.listenerScheme !== bootstrap.listenerScheme ||
-			audio.allowedAuthorities.some(
-				authority => !bootstrap.allowedAuthorities.includes(authority),
-			) ||
 			bootstrap.externalAudioOrigins.some(origin => {
 				const url = new URL(origin)
 				const scheme = url.protocol === "https:" ? "https" : "http"
 				const authority = normalizeAuthority(url.host, scheme)
 				return (
-					scheme !== audio.listenerScheme ||
 					!authority ||
-					!audio.allowedAuthorities.includes(authority)
+					!audioBoundaries.some(
+						audio =>
+							scheme === audio.listenerScheme &&
+							audio.allowedAuthorities.includes(authority),
+					)
 				)
 			})
 		)
@@ -144,11 +202,12 @@ export async function openAccessRuntime(
 			listenerScheme: bootstrap.listenerScheme,
 			allowedAuthorities: bootstrap.allowedAuthorities,
 		})
-		const audioPolicy = new AccessPolicy({
-			...common,
-			listenerScheme: audio.listenerScheme,
-			allowedAuthorities: audio.allowedAuthorities,
-		})
+		const audioPolicy = (boundary: ProtectedAccessBootstrap) =>
+			new AccessPolicy({
+				...common,
+				listenerScheme: boundary.listenerScheme,
+				allowedAuthorities: boundary.allowedAuthorities,
+			})
 		leases = new ConnectionLeases(sessions)
 		const services = Object.freeze({
 			pairing: new PairingService({ policy: apiPolicy, sessions }),
@@ -159,7 +218,26 @@ export async function openAccessRuntime(
 		let closing: Promise<void> | undefined
 		return Object.freeze({
 			api: Object.freeze({ policy: apiPolicy, sessions, leases }),
-			audio: Object.freeze({ policy: audioPolicy, sessions, leases }),
+			...("analog" in audio
+				? {
+						analogAudio: Object.freeze({
+							policy: audioPolicy(audio.analog),
+							sessions,
+							leases,
+						}),
+						digitalAudio: Object.freeze({
+							policy: audioPolicy(audio.digital),
+							sessions,
+							leases,
+						}),
+					}
+				: {
+						audio: Object.freeze({
+							policy: audioPolicy(audio.legacy),
+							sessions,
+							leases,
+						}),
+					}),
 			services,
 			close(): Promise<void> {
 				closing ??= Promise.resolve().then(async () => {

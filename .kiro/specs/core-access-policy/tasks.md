@@ -214,3 +214,36 @@ Next coordinated implementation is tasks 4/6–9 against scanner 37/37a/38. The
 reviewed browser recovery/onboarding brief is in design.md; genuine slice zoom
 planning is recorded in ROADMAP §8 and waits for Task 37a's measured baseline.
 No deployment, push or live receiver change is part of this checkpoint.
+
+## Protected runtime integration candidate — 2026-10-11
+
+Runtime wiring now includes opt-in strict public mapping with named API, analog
+and digital boundaries, durable authority loading before listeners, root Fastify
+admission before plugins/routes, WS adoption before subscriber registration, and
+leased audio/scanner downloads. One session/lease authority backs all listeners.
+Protected raw TCP/relay startup is disabled; legacy defaults remain supported.
+Implicit relay configuration without a shared source fails validation before
+listeners, while explicit dedicated selection remains supported in legacy mode.
+
+Protected lifecycle composition seals admissions synchronously, fences late audio
+restarts, waits actual startup and flow/transport cleanup, and releases access
+storage only after successful completion. An incomplete drain retains ownership
+until process termination. The internal bootstrap uses actual mounted/healthy
+access services and running audio state; there is no public bootstrap endpoint or
+health metadata. Operator data is unmounted and unavailable.
+
+The candidate has 350 passing tests across 16 files with one worker, including a
+freshly compiled real process, paired-session restart, active WS SIGTERM cleanup,
+API bind-failure cleanup, failed partial scanner cleanup with retained ownership,
+legacy scanner fallback, no-listener fatal startup, actual Fastify persistence
+drain, stream revocation/late producer cleanup, mapping and probe validation
+(including canonical port-80 loopback origins for both address families).
+Independent exact-candidate review and final check results will be recorded in the
+subsequent checkpoint. These facts do not mark the integration tasks accepted yet.
+
+Task 8 container/network exposure and task 9 remain open. Outstanding acceptance
+includes deterministic signal during stalled startup, the coordinated broad-suite
+window, trusted shell bootstrap delivery and web authentication/playback recovery,
+real TLS/Host/private-volume/backend/container isolation, CLI/browser coexistence,
+and the connected spectrum → tune → identify → inspect → listen client milestone.
+No live receiver or browser/deployment acceptance follows from these tests.

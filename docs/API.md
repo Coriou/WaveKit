@@ -9,6 +9,96 @@ WaveKit exposes a REST API and WebSocket endpoint for control and real-time moni
 - **Audio Stream**: `tcp://localhost:8080`
 - **Live Audio Stream**: `http://localhost:8081/stream` (raw PCM) and `http://localhost:8081/stream.wav` (WAV-wrapped)
 
+## Protected runtime (opt-in)
+
+Legacy mode remains the default. Protected mode loads provisioned private access
+state before creating listeners. It mounts one shared session and connection-lease
+authority across the API, analog audio and digital audio boundaries. Missing,
+malformed or busy private state fails startup; it never falls back to legacy mode.
+
+A local HTTP configuration uses explicit loopback bindings and three distinct
+ports. For example (merge these fields with your normal configuration):
+
+```yaml
+api: { host: "127.0.0.1", port: 9000 }
+liveDemod: { httpPort: 8081 }
+digitalVoice: { httpPort: 8082 }
+access:
+  mode: protected
+  listenerScheme: http
+  exposure: local-http
+  allowedAuthorities: ["127.0.0.1:9000"]
+  allowedOrigins: ["http://127.0.0.1:9000"]
+  audio:
+    analog:
+      allowedAuthorities: ["127.0.0.1:8081"]
+      bindHost: "127.0.0.1"
+    digital:
+      allowedAuthorities: ["127.0.0.1:8082"]
+      bindHost: "127.0.0.1"
+  publicOrigins:
+    api: "http://127.0.0.1:9000"
+    analogAudio: "http://127.0.0.1:8081"
+    digitalAudio: "http://127.0.0.1:8082"
+  healthProbe:
+    target: "http://127.0.0.1:9000"
+    host: "127.0.0.1:9000"
+```
+
+Supply the absolute private directory separately through
+`WAVEKIT_ACCESS_PRIVATE_DIRECTORY`. It is not a public configuration field.
+Provision it while the core is stopped with `pnpm access --help` (or
+`node dist/access-command.js --help` for the complete command syntax). Setup
+prints a public access plan; enabling runtime protection requires the explicit
+configuration above. The normal build preserves `index.js`, `spectrum-worker.js`
+and `access-command.js`.
+
+Public/browser origins use one canonical hostname and scheme with canonical ports
+(default port 80 or 443 is omitted).
+Named audio authorities are independent of the API allowlist. Direct HTTP requires
+matching loopback address families and configured ports; `localhost` requires
+IPv4 backend bindings. LAN origins require `listenerScheme: https` and
+`exposure: tls-termination`, with independently configured loopback HTTP backends.
+The process does not implement TLS or infer proxy trust from forwarded headers.
+See [protected deployment constraints](DOCKER-SETUP.md#protected-runtime-deployment)
+for required proxy, private-volume and probe checks.
+
+The root policy runs before routes, documentation and CORS plugins. Only the exact
+credential-free `GET /health` and validated preflight are public; status, unknown
+routes and documentation require admission. Machine clients use the canonical
+Bearer credential. Browser pairing creates the shared host cookie, with allowed
+Origin and CSRF proof required for unsafe cookie-authenticated requests. WS
+adoption happens before subscriber registration. Passive WS/audio/download traffic
+does not renew the rolling session deadline; refresh does so only after durable
+persistence completes.
+
+Protected analog PCM/WAV, digital voice and scanner recording/evidence/capture
+streams admit before producers or streaming headers. Session expiry, revocation,
+storage failure and transport closure release their leases and producer resources.
+Async downloads recheck admission after lookup. Browser logout leaves machine
+streams and RF jobs independent. Protected mode suppresses raw audio TCP and the
+RTL-TCP relay; there is no raw-stream authentication exception. Independently,
+enabled implicit relay configuration requires a configured shared source; an
+explicit dedicated source remains supported in legacy mode.
+
+Denials retain safe stable codes: 401 requests pairing or credential recovery,
+403 requires correcting Origin/Host/CSRF context, 429 requires bounded retry using
+`Retry-After` when present, and 503 indicates unavailable access/storage/service.
+Malformed requests return 400. Protected root errors and request logs omit raw URLs,
+credentials and validation payloads. Clients must reconcile uncertain mutation
+outcomes rather than automatically replay RF operations.
+
+`ApiServer.getAccessBootstrap()` is an **internal composition projection**, not a
+public endpoint. Its version-1 result contains `apiOrigin`, `webSocketUrl`,
+`analogAudioOrigin`, `digitalAudioOrigin`, `access` (mode, sessionAvailable,
+pairingAvailable), and `capabilities` (actual running analog/digital availability,
+operatorDataAvailable). Unmounted legacy composition returns null; stopped or
+unavailable access has false session availability. Operator data remains unmounted
+and false. URLs describe configured destinations, not RF readiness or reachability.
+The external shell must arrange trusted pre-auth delivery; `/health` contains no
+bootstrap metadata. Browser UI integration and real TLS/exposure acceptance remain
+separate release gates.
+
 ## REST Endpoints
 
 ### Health & Status

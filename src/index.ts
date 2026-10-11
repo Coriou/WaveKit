@@ -14,6 +14,11 @@
 
 import "./bootstrap.js"
 
+import { openAccessRuntime } from "./access/runtime-context.js"
+import type { NamedAccessRuntimeContext } from "./access/runtime-context.js"
+import type { ProtectedAccessBootstrap } from "./access/bootstrap-policy.js"
+import { validateProtectedRuntimeMapping } from "./access/runtime-config.js"
+import { WaveKitError } from "./utils/errors.js"
 import { PassThrough } from "node:stream"
 import {
 	loadConfig,
@@ -227,7 +232,7 @@ async function main(): Promise<void> {
 	log.info(
 		{
 			config: {
-				...config,
+				accessMode: config.access.mode,
 				sources: config.sources.length,
 				decoders: config.decoders.length,
 			},
@@ -235,673 +240,899 @@ async function main(): Promise<void> {
 		"Starting WaveKit",
 	)
 
-	// CSDR ring sizing applies only to validated streaming stages; an inherited
-	// native setting is stripped from child shells so it cannot widen that set.
-	configureCsdrBuffers({
-		enabled: config.csdr.boundedBuffers,
-		elements: config.csdr.bufferElements,
+	const protectedMode = config.access.mode === "protected"
+	let access: NamedAccessRuntimeContext | undefined
+	let accessBootstrap: ProtectedAccessBootstrap | undefined
+	let stopping = false
+	let settled!: () => void
+	const startupSettled = new Promise<void>(resolve => {
+		settled = resolve
 	})
-	if (process.env[CSDR_BUFFER_ENV] !== undefined) {
-		log.warn(
-			{ env: CSDR_BUFFER_ENV },
-			"Ignoring inherited CSDR buffer setting; use csdr.boundedBuffers / WAVEKIT_CSDR__BOUNDED_BUFFERS",
-		)
+	const cleanup: { priority: number; run: () => void | Promise<void> }[] = []
+	const admissionGates: (() => void)[] = []
+	const own = (priority: number, run: () => void | Promise<void>) => {
+		if (protectedMode) cleanup.push({ priority, run })
 	}
-	log.info(
-		{
-			boundedBuffers: config.csdr.boundedBuffers,
-			bufferElements: config.csdr.bufferElements,
-		},
-		"CSDR ring policy",
-	)
-
-	// Step 3: Create graceful shutdown handler (Requirement 14.1)
-	const shutdown = new GracefulShutdown({
-		logger,
-		shutdownTimeout: 10000, // 10 seconds max shutdown time
-	})
-
-	// Install signal handlers for SIGTERM/SIGINT
-	shutdown.installSignalHandlers()
-
-	// Step 4: Initialize core components
-	const sourceManager = new SourceManager(logger, {
-		signalFlatThresholdDbfs: config.health?.signalFlatThresholdDbfs,
-		signalFlatHoldMs: config.health?.signalFlatHoldMs,
-	})
-	const fanoutManager = new FanoutManager(logger)
-	const sourceRouting = new SourceFanoutRouter(
-		sourceManager,
-		fanoutManager,
-		logger,
-		defaultSourceIdFor(config.sources),
-		{
-			dedicated: new Set(
-				config.sources
-					.filter(s => sourceScannerConfig(s).role === "dedicated")
-					.map(s => s.id),
-			),
-		},
-	)
-	const audioOutput = new AudioOutput(logger, {
-		port: config.audio.tcpPort,
-		format: config.audio.format,
-		sampleRate: config.audio.sampleRate,
-	})
-	const tunerRelay = new TunerRelay(logger, sourceManager, sourceRouting, {
-		enabled: config.tunerRelay.enabled,
-		host: config.tunerRelay.host,
-		port: config.tunerRelay.port,
-		sourceId: config.tunerRelay.sourceId,
-		controlPolicy: config.tunerRelay.controlPolicy,
-		maxClients: config.tunerRelay.maxClients,
-	})
-	const tunerController = new TunerController(logger, sourceManager, {
-		reconnectPolicy: config.tuner.reconnectPolicy,
-	})
-	const liveDemodConfig = LiveDemodConfigSchema.parse(config.liveDemod ?? {})
-	const liveDemod = new LiveDemodulator(
-		logger,
-		sourceManager,
-		sourceRouting,
-		liveDemodConfig,
-	)
-	const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
-		config.digitalVoice ?? {},
-	)
-	const digitalVoice = new DigitalVoiceService(logger, digitalVoiceConfig)
-
-	// Initialize tuner controller for configured RTL-TCP sources
-	for (const sourceConfig of config.sources) {
-		if (sourceConfig.type === "rtl_tcp") {
-			tunerController.initializeSource(
-				sourceConfig.id,
-				sourceConfig.caps,
-				sourceConfig.type,
-			)
+	const checkpoint = () => {
+		if (stopping)
+			throw new WaveKitError("Startup stopped", "ACCESS_UNAVAILABLE")
+	}
+	let admissionFailed = false
+	let closing: Promise<void> | undefined
+	const closeProtected = (): Promise<void> => {
+		stopping = true
+		for (const gate of admissionGates) {
+			try {
+				gate()
+			} catch {
+				admissionFailed = true
+			}
 		}
-	}
-
-	wireTunerControl({
-		log,
-		sourceManager,
-		tunerController,
-		tunerRelay,
-		relayEnabled: config.tunerRelay.enabled,
-	})
-
-	// Step 5: Initialize decoder system
-	// Band region (built-in band defaults) and persisted API band overrides;
-	// the store is loaded before startAll so the first check sees them.
-	const bandRegion = resolveProcessBandRegion(config.region)
-	log.info(
-		{ region: bandRegion.code, source: bandRegion.source },
-		"Band region",
-	)
-	const bandOverrides = new BandOverrideStore({
-		stateDir: config.stateDir,
-		logger,
-	})
-	await bandOverrides.load()
-	const decoderRegistry = new DecoderRegistry()
-	const decoderManager = new DecoderManager(
-		decoderRegistry,
-		fanoutManager,
-		logger,
-		createDecoderManagerOptions(config.health, bandRegion),
-		bandOverrides,
-	)
-
-	// Wire DecoderManager to SourceManager for dynamic sample rate handling
-	decoderManager.setSourceManager(sourceManager, sourceRouting)
-
-	// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
-	// on the first channel request. Off by default, so no manager exists.
-	const channelizer = config.channelizer.enabled
-		? new ChannelizerManager({
-				sourceManager,
-				routing: sourceRouting,
-				config: config.channelizer,
-				logger,
-			})
-		: null
-	decoderManager.setChannelizer(channelizer)
-
-	// Step 6: Register built-in decoders with capabilities
-	decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
-	decoderRegistry.register("multimon-ng", createMultimonDecoder, MULTIMON_CAPS)
-	decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
-	decoderRegistry.register("readsb", createReadsbDecoder, READSB_CAPS)
-	decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
-	decoderRegistry.register(
-		"ais-catcher",
-		createAisCatcherDecoder,
-		AIS_CATCHER_CAPS,
-	)
-	decoderRegistry.register("dumpvdl2", createDumpvdl2Decoder, DUMPVDL2_CAPS)
-	decoderRegistry.register("direwolf", createDirewolfDecoder, DIREWOLF_CAPS)
-	decoderRegistry.register(
-		"lora-meshtastic",
-		createLoraMeshtasticDecoder,
-		LORA_MESHTASTIC_CAPS,
-	)
-
-	log.info(
-		{ registeredDecoders: decoderRegistry.getRegisteredTypes() },
-		"Built-in decoders registered",
-	)
-
-	// Step 7: Create decoders from configuration. dsd-fme decoders are first
-	// pointed at the digital voice stream (-o udp to a local socket).
-	let decoderConfigs: DecoderConfig[] = config.decoders
-	try {
-		decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
-	} catch (err) {
-		log.error({ err }, "Digital voice setup failed; decoders keep their output")
-	}
-	for (const decoderConfig of decoderConfigs) {
-		try {
-			const decoder = decoderManager.createDecoder(decoderConfig)
-			digitalVoice.attachDecoder(decoderConfig.id, decoder)
-			log.info(
-				{ decoderId: decoderConfig.id, type: decoderConfig.type },
-				"Decoder created",
-			)
-		} catch (err) {
-			log.error(
-				{ err, decoderId: decoderConfig.id, type: decoderConfig.type },
-				"Failed to create decoder",
-			)
-		}
-	}
-
-	// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
-	// Built after the decoders and digital voice so probes and ambient evidence
-	// can attach, and started before any source connects, so a persisted tuner
-	// lease is restored on the source's first payload-started (spec § 10.3).
-	// Always constructed: with scanner.enabled false it runs no jobs, but its
-	// SpectrumService still serves `spectrum` subscribers and /api/spectrum.
-	// An unreadable state directory never reaches this catch: start() logs it and
-	// runs without the unread files (Task 35). Only an unexpected construction or
-	// start failure drops the scanner, and with it /api/spectrum.
-	let scanner: ScannerService | null = null
-	try {
-		scanner = new ScannerService({
-			settings: config.scanner,
-			sourceConfigs: config.sources,
-			decoderConfigs,
-			region: bandRegion.code,
-			stateDir: config.stateDir,
-			sources: sourceManager,
-			routing: sourceRouting,
-			tuner: tunerController,
-			decoders: decoderManager,
-			digitalVoice,
-			liveDemod,
-			logger,
-			cpuMeter: new CpuMeter({ sampleMs: 5000 }),
-		})
-		await scanner.start()
-	} catch (err) {
-		log.error({ err }, "Scanner failed to start; continuing without it")
-		// A partial start leaves listeners, spectrum fanout branches and timers behind and
-		// there is no shutdown hook for a null scanner: stop it before dropping it.
-		await scanner
-			?.stop()
-			.catch((stopErr: unknown) =>
-				log.warn(
-					{ err: stopErr },
-					"Stopping the partially started scanner failed",
-				),
-			)
-		scanner = null
-	}
-
-	// Step 8: Initialize resource monitoring (if enabled)
-	let resourceAggregator: ResourceAggregator | undefined
-	let containerMonitor: ContainerMonitor | undefined
-	let sdrHostPoller: SdrHostPoller | undefined
-	let backpressureTracker: SourceBackpressureTracker | undefined
-
-	if (config.resources.enabled) {
-		// Create container monitor
-		if (config.resources.containerMonitor.enabled) {
-			containerMonitor = new ContainerMonitor(logger, {
-				pollIntervalMs: config.resources.containerMonitor.pollIntervalMs,
-				emitSnapshots: false, // ResourceAggregator handles broadcasting
-			})
-		}
-
-		// Create SDR host poller with auto-detection
-		// For rtl_tcp sources, try to detect SDR host API at standard ports
-		// Explicit sdrHost config overrides auto-detection
-		const sdrHostConfigs: SdrHostConfig[] = config.sources
-			.filter(s => s.type === "rtl_tcp" && s.host) // Only rtl_tcp with host
-			.map(s => {
-				// Explicit config takes priority
-				if (s.sdrHost?.apiUrl) {
-					const cfg: SdrHostConfig = {
-						sourceId: s.id,
-						apiUrl: s.sdrHost.apiUrl,
-					}
-					if (s.sdrHost.rtlmuxStatsUrl) {
-						cfg.rtlmuxStatsUrl = s.sdrHost.rtlmuxStatsUrl
-					}
-					return cfg
+		closing ??= (async () => {
+			await startupSettled
+			// Real completion, never a timeout-race result, authorizes storage release.
+			let failed = admissionFailed
+			for (const entry of cleanup.sort((a, b) => a.priority - b.priority)) {
+				try {
+					await entry.run()
+				} catch {
+					failed = true
 				}
-
-				// Auto-detect: use source host with standard SDR host ports
-				const cfg: SdrHostConfig = {
-					sourceId: s.id,
-					apiUrl: `http://${s.host}:8080`, // Standard wavekit-sdr-host port
-				}
-				cfg.rtlmuxStatsUrl = `http://${s.host}:5556/stats.json` // Standard rtlmux stats
-				return cfg
-			})
-
-		if (config.resources.sdrHostPoller.enabled && sdrHostConfigs.length > 0) {
-			sdrHostPoller = new SdrHostPoller(logger, sdrHostConfigs, {
-				pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
-				timeoutMs: config.resources.sdrHostPoller.timeoutMs,
-			})
-			log.info(
-				{
-					count: sdrHostConfigs.length,
-					sources: sdrHostConfigs.map(c => c.sourceId),
+			}
+			if (failed)
+				throw new WaveKitError(
+					"Protected shutdown incomplete",
+					"ACCESS_UNAVAILABLE",
+				)
+			await access?.close()
+		})()
+		return closing
+	}
+	if (protectedMode) {
+		let signaled = false
+		const signal = () => {
+			if (signaled) return
+			signaled = true
+			const watchdog = setTimeout(() => process.exit(1), 10_000)
+			void closeProtected().then(
+				() => {
+					clearTimeout(watchdog)
+					process.exit(0)
 				},
-				"SDR host polling configured (auto-detected from source hosts)",
+				() => process.exit(1),
 			)
 		}
+		process.on("SIGTERM", signal)
+		process.on("SIGINT", signal)
+	}
+	try {
+		if (config.access.mode === "protected") {
+			accessBootstrap = validateProtectedRuntimeMapping(
+				config.access,
+				config.api,
+				{
+					analog: LiveDemodConfigSchema.parse(config.liveDemod ?? {}).httpPort,
+					digital: DigitalVoiceConfigSchema.parse(config.digitalVoice ?? {})
+						.httpPort,
+				},
+			)
+			access = await openAccessRuntime({
+				bootstrap: accessBootstrap,
+				audio: {
+					analog: {
+						listenerScheme: config.access.listenerScheme,
+						allowedAuthorities: config.access.audio.analog.allowedAuthorities,
+					},
+					digital: {
+						listenerScheme: config.access.listenerScheme,
+						allowedAuthorities: config.access.audio.digital.allowedAuthorities,
+					},
+				},
+				directory: process.env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] ?? "",
+				ownership: "single-host-pid-namespace",
+			})
+			checkpoint()
+		}
 
-		// Create backpressure tracker
-		backpressureTracker = new SourceBackpressureTracker(
+		// CSDR ring sizing applies only to validated streaming stages; an inherited
+		// native setting is stripped from child shells so it cannot widen that set.
+		configureCsdrBuffers({
+			enabled: config.csdr.boundedBuffers,
+			elements: config.csdr.bufferElements,
+		})
+		if (process.env[CSDR_BUFFER_ENV] !== undefined) {
+			log.warn(
+				{ env: CSDR_BUFFER_ENV },
+				"Ignoring inherited CSDR buffer setting; use csdr.boundedBuffers / WAVEKIT_CSDR__BOUNDED_BUFFERS",
+			)
+		}
+		log.info(
+			{
+				boundedBuffers: config.csdr.boundedBuffers,
+				bufferElements: config.csdr.bufferElements,
+			},
+			"CSDR ring policy",
+		)
+
+		// Step 3: Create graceful shutdown handler (Requirement 14.1)
+		const shutdown = new GracefulShutdown({
+			logger,
+			shutdownTimeout: 10000, // 10 seconds max shutdown time
+		})
+
+		// Install signal handlers for SIGTERM/SIGINT
+		if (!protectedMode) shutdown.installSignalHandlers()
+
+		// Step 4: Initialize core components
+		const sourceManager = new SourceManager(logger, {
+			signalFlatThresholdDbfs: config.health?.signalFlatThresholdDbfs,
+			signalFlatHoldMs: config.health?.signalFlatHoldMs,
+		})
+		own(100, () => sourceManager.disconnectAll())
+		const fanoutManager = new FanoutManager(logger)
+		const sourceRouting = new SourceFanoutRouter(
+			sourceManager,
+			fanoutManager,
+			logger,
+			defaultSourceIdFor(config.sources),
+			{
+				dedicated: new Set(
+					config.sources
+						.filter(s => sourceScannerConfig(s).role === "dedicated")
+						.map(s => s.id),
+				),
+			},
+		)
+		own(90, () => {
+			sourceRouting.destroy()
+			fanoutManager.destroy()
+		})
+		const audioOutput = new AudioOutput(logger, {
+			port: config.audio.tcpPort,
+			format: config.audio.format,
+			sampleRate: config.audio.sampleRate,
+		})
+		own(70, () => audioOutput.stop())
+		const tunerRelay = new TunerRelay(logger, sourceManager, sourceRouting, {
+			enabled: !protectedMode && config.tunerRelay.enabled,
+			host: config.tunerRelay.host,
+			port: config.tunerRelay.port,
+			sourceId: config.tunerRelay.sourceId,
+			controlPolicy: config.tunerRelay.controlPolicy,
+			maxClients: config.tunerRelay.maxClients,
+		})
+		own(80, () => tunerRelay.stop())
+		const tunerController = new TunerController(logger, sourceManager, {
+			reconnectPolicy: config.tuner.reconnectPolicy,
+		})
+		const liveDemodConfig = LiveDemodConfigSchema.parse(config.liveDemod ?? {})
+		const liveDemod = new LiveDemodulator(
 			logger,
 			sourceManager,
-			sdrHostPoller ?? null,
+			sourceRouting,
+			liveDemodConfig,
+			access && config.access.mode === "protected"
+				? {
+						httpAccess: access.analogAudio,
+						publicOrigin: config.access.publicOrigins.analogAudio,
+						httpHost: config.access.audio.analog.bindHost,
+					}
+				: {},
+		)
+		admissionGates.push(() => liveDemod.shutdownAdmission())
+		own(50, () => liveDemod.stop())
+		const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
+			config.digitalVoice ?? {},
+		)
+		const digitalVoice = new DigitalVoiceService(
+			logger,
+			digitalVoiceConfig,
+			access && config.access.mode === "protected"
+				? {
+						httpAccess: access.digitalAudio,
+						publicOrigin: config.access.publicOrigins.digitalAudio,
+						httpHost: config.access.audio.digital.bindHost,
+					}
+				: {},
+		)
+		admissionGates.push(() => digitalVoice.shutdownAdmission())
+		own(50, () => digitalVoice.destroy())
+
+		// Initialize tuner controller for configured RTL-TCP sources
+		for (const sourceConfig of config.sources) {
+			if (sourceConfig.type === "rtl_tcp") {
+				tunerController.initializeSource(
+					sourceConfig.id,
+					sourceConfig.caps,
+					sourceConfig.type,
+				)
+			}
+		}
+
+		wireTunerControl({
+			log,
+			sourceManager,
+			tunerController,
+			tunerRelay,
+			relayEnabled: !protectedMode && config.tunerRelay.enabled,
+		})
+
+		// Step 5: Initialize decoder system
+		// Band region (built-in band defaults) and persisted API band overrides;
+		// the store is loaded before startAll so the first check sees them.
+		const bandRegion = resolveProcessBandRegion(config.region)
+		log.info(
+			{ region: bandRegion.code, source: bandRegion.source },
+			"Band region",
+		)
+		const bandOverrides = new BandOverrideStore({
+			stateDir: config.stateDir,
+			logger,
+		})
+		await bandOverrides.load()
+		checkpoint()
+		const decoderRegistry = new DecoderRegistry()
+		const decoderManager = new DecoderManager(
+			decoderRegistry,
+			fanoutManager,
+			logger,
+			createDecoderManagerOptions(config.health, bandRegion),
+			bandOverrides,
 		)
 
-		// Create resource aggregator
-		resourceAggregator = new ResourceAggregator(
-			logger,
-			{
-				broadcastIntervalMs: config.resources.broadcastIntervalMs,
-				autoBroadcast: true,
-			},
-			{
-				containerMonitor: containerMonitor ?? null,
-				sdrHostPoller: sdrHostPoller ?? null,
-				backpressureTracker,
-			},
+		own(60, () => decoderManager.destroy())
+
+		// Wire DecoderManager to SourceManager for dynamic sample rate handling
+		decoderManager.setSourceManager(sourceManager, sourceRouting)
+
+		// Opt-in core channelizer (addendum §4): one wavekit-chan per source, spawned
+		// on the first channel request. Off by default, so no manager exists.
+		const channelizer = config.channelizer.enabled
+			? new ChannelizerManager({
+					sourceManager,
+					routing: sourceRouting,
+					config: config.channelizer,
+					logger,
+				})
+			: null
+		if (channelizer) own(65, () => channelizer.destroy())
+		decoderManager.setChannelizer(channelizer)
+
+		// Step 6: Register built-in decoders with capabilities
+		decoderRegistry.register("dsd-fme", createDsdFmeDecoder, DSD_FME_CAPS)
+		decoderRegistry.register(
+			"multimon-ng",
+			createMultimonDecoder,
+			MULTIMON_CAPS,
+		)
+		decoderRegistry.register("rtl433", createRtl433Decoder, RTL433_CAPS)
+		decoderRegistry.register("readsb", createReadsbDecoder, READSB_CAPS)
+		decoderRegistry.register("acarsdec", createAcarsdecDecoder, ACARSDEC_CAPS)
+		decoderRegistry.register(
+			"ais-catcher",
+			createAisCatcherDecoder,
+			AIS_CATCHER_CAPS,
+		)
+		decoderRegistry.register("dumpvdl2", createDumpvdl2Decoder, DUMPVDL2_CAPS)
+		decoderRegistry.register("direwolf", createDirewolfDecoder, DIREWOLF_CAPS)
+		decoderRegistry.register(
+			"lora-meshtastic",
+			createLoraMeshtasticDecoder,
+			LORA_MESHTASTIC_CAPS,
 		)
 
 		log.info(
-			{
-				containerMonitor: !!containerMonitor,
-				sdrHostPoller: !!sdrHostPoller,
-				sdrHostCount: sdrHostConfigs.length,
-			},
-			"Resource monitoring initialized",
+			{ registeredDecoders: decoderRegistry.getRegisteredTypes() },
+			"Built-in decoders registered",
 		)
-	}
 
-	// Step 8b: Initialize aircraft tracking (ADS-B specific)
-	const aircraftTrackingManager = new AircraftTrackingManager(
-		decoderManager,
-		{
-			maxAge: 60,
-			cleanupInterval: 5000,
-			maxTrackPoints: 100,
-			minTrackDistance: 50,
-		},
-		logger,
-	)
+		// Step 7: Create decoders from configuration. dsd-fme decoders are first
+		// pointed at the digital voice stream (-o udp to a local socket).
+		let decoderConfigs: DecoderConfig[] = config.decoders
+		try {
+			decoderConfigs = await digitalVoice.prepareDecoderConfigs(config.decoders)
+			checkpoint()
+		} catch (err) {
+			if (stopping) throw err
+			log.error(
+				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+				"Digital voice setup failed; decoders keep their output",
+			)
+		}
+		for (const decoderConfig of decoderConfigs) {
+			try {
+				const decoder = decoderManager.createDecoder(decoderConfig)
+				digitalVoice.attachDecoder(decoderConfig.id, decoder)
+				log.info(
+					{ decoderId: decoderConfig.id, type: decoderConfig.type },
+					"Decoder created",
+				)
+			} catch (err) {
+				if (stopping) throw err
+				log.error(
+					{
+						...(protectedMode ? { code: "RUNTIME_ERROR" } : { err }),
+						decoderId: decoderConfig.id,
+						type: decoderConfig.type,
+					},
+					"Failed to create decoder",
+				)
+			}
+		}
 
-	// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
-	const aircraftEnrichmentService = new AircraftEnrichmentService(
-		{
-			cacheTtlMs: 24 * 60 * 60 * 1000, // 24 hours
-			maxCacheSize: 10000,
-			rateLimitMs: 1000, // 1 request per second
-			enabled: true,
-		},
-		logger,
-	)
-	aircraftEnrichmentService.wireToTracker(aircraftTrackingManager.getTracker())
-	// Wire enrichment cache stats to tracker for accurate stats reporting
-	aircraftTrackingManager
-		.getTracker()
-		.setEnrichmentCacheProvider(aircraftEnrichmentService)
+		// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
+		// Built after the decoders and digital voice so probes and ambient evidence
+		// can attach, and started before any source connects, so a persisted tuner
+		// lease is restored on the source's first payload-started (spec § 10.3).
+		// Always constructed: with scanner.enabled false it runs no jobs, but its
+		// SpectrumService still serves `spectrum` subscribers and /api/spectrum.
+		// An unreadable state directory never reaches this catch: start() logs it and
+		// runs without the unread files (Task 35). Only an unexpected construction or
+		// start failure drops the scanner, and with it /api/spectrum.
+		let scanner: ScannerService | null = null
+		let stopScanner: (() => Promise<void>) | undefined
+		try {
+			scanner = new ScannerService({
+				settings: config.scanner,
+				sourceConfigs: config.sources,
+				decoderConfigs,
+				region: bandRegion.code,
+				stateDir: config.stateDir,
+				sources: sourceManager,
+				routing: sourceRouting,
+				tuner: tunerController,
+				decoders: decoderManager,
+				digitalVoice,
+				liveDemod,
+				logger,
+				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
+			})
+			const ownedScanner = scanner
+			let scannerStopping: Promise<void> | undefined
+			// Retain the first real outcome: stop() may become a no-op after
+			// clearing its started flag even when asynchronous cleanup failed.
+			stopScanner = () =>
+				(scannerStopping ??= Promise.resolve().then(() => ownedScanner.stop()))
+			own(40, stopScanner)
+			await scanner.start()
+			checkpoint()
+		} catch (err) {
+			if (stopping) throw err
+			log.error(
+				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+				protectedMode
+					? "Scanner startup failed; attempting cleanup"
+					: "Scanner failed to start; continuing without it",
+			)
+			// A partial start leaves listeners, spectrum fanout branches and timers behind and
+			// there is no shutdown hook for a null scanner: stop it before dropping it.
+			if (protectedMode) {
+				// Rejection aborts startup; shutdown observes this same rejection
+				// while still attempting the remaining owned cleanup.
+				await stopScanner?.()
+			} else {
+				await scanner
+					?.stop()
+					.catch((stopErr: unknown) =>
+						log.warn(
+							{ err: stopErr },
+							"Stopping the partially started scanner failed",
+						),
+					)
+			}
+			scanner = null
+		}
 
-	// Step 9: Initialize API server
-	const apiServer = new ApiServer(
-		{
-			sourceManager,
-			fanoutManager,
-			fanoutTelemetry: sourceRouting,
+		checkpoint()
+
+		// Step 8: Initialize resource monitoring (if enabled)
+		let resourceAggregator: ResourceAggregator | undefined
+		let containerMonitor: ContainerMonitor | undefined
+		let sdrHostPoller: SdrHostPoller | undefined
+		let backpressureTracker: SourceBackpressureTracker | undefined
+
+		if (config.resources.enabled) {
+			// Create container monitor
+			if (config.resources.containerMonitor.enabled) {
+				containerMonitor = new ContainerMonitor(logger, {
+					pollIntervalMs: config.resources.containerMonitor.pollIntervalMs,
+					emitSnapshots: false, // ResourceAggregator handles broadcasting
+				})
+			}
+
+			// Create SDR host poller with auto-detection
+			// For rtl_tcp sources, try to detect SDR host API at standard ports
+			// Explicit sdrHost config overrides auto-detection
+			const sdrHostConfigs: SdrHostConfig[] = config.sources
+				.filter(s => s.type === "rtl_tcp" && s.host) // Only rtl_tcp with host
+				.map(s => {
+					// Explicit config takes priority
+					if (s.sdrHost?.apiUrl) {
+						const cfg: SdrHostConfig = {
+							sourceId: s.id,
+							apiUrl: s.sdrHost.apiUrl,
+						}
+						if (s.sdrHost.rtlmuxStatsUrl) {
+							cfg.rtlmuxStatsUrl = s.sdrHost.rtlmuxStatsUrl
+						}
+						return cfg
+					}
+
+					// Auto-detect: use source host with standard SDR host ports
+					const cfg: SdrHostConfig = {
+						sourceId: s.id,
+						apiUrl: `http://${s.host}:8080`, // Standard wavekit-sdr-host port
+					}
+					cfg.rtlmuxStatsUrl = `http://${s.host}:5556/stats.json` // Standard rtlmux stats
+					return cfg
+				})
+
+			if (config.resources.sdrHostPoller.enabled && sdrHostConfigs.length > 0) {
+				sdrHostPoller = new SdrHostPoller(logger, sdrHostConfigs, {
+					pollIntervalMs: config.resources.sdrHostPoller.pollIntervalMs,
+					timeoutMs: config.resources.sdrHostPoller.timeoutMs,
+				})
+				log.info(
+					{
+						count: sdrHostConfigs.length,
+						sources: sdrHostConfigs.map(c => c.sourceId),
+					},
+					"SDR host polling configured (auto-detected from source hosts)",
+				)
+			}
+
+			// Create backpressure tracker
+			backpressureTracker = new SourceBackpressureTracker(
+				logger,
+				sourceManager,
+				sdrHostPoller ?? null,
+			)
+
+			// Create resource aggregator
+			resourceAggregator = new ResourceAggregator(
+				logger,
+				{
+					broadcastIntervalMs: config.resources.broadcastIntervalMs,
+					autoBroadcast: true,
+				},
+				{
+					containerMonitor: containerMonitor ?? null,
+					sdrHostPoller: sdrHostPoller ?? null,
+					backpressureTracker,
+				},
+			)
+
+			log.info(
+				{
+					containerMonitor: !!containerMonitor,
+					sdrHostPoller: !!sdrHostPoller,
+					sdrHostCount: sdrHostConfigs.length,
+				},
+				"Resource monitoring initialized",
+			)
+		}
+
+		own(20, () => {
+			resourceAggregator?.stop()
+			sdrHostPoller?.stop()
+			containerMonitor?.stop()
+		})
+		// Step 8b: Initialize aircraft tracking (ADS-B specific)
+		const aircraftTrackingManager = new AircraftTrackingManager(
 			decoderManager,
-			decoderRegistry,
-			audioOutput,
-			tunerRelay,
-			tunerController,
-			liveDemod,
-			digitalVoice,
-			resourceAggregator,
-			aircraftTracker: aircraftTrackingManager.getTracker(),
-			scanner: scanner ?? undefined,
-			spectrum: scanner?.spectrum,
+			{
+				maxAge: 60,
+				cleanupInterval: 5000,
+				maxTrackPoints: 100,
+				minTrackDistance: 50,
+			},
 			logger,
-			audioConfig: {
-				format: config.audio.format,
-				sampleRate: config.audio.sampleRate,
+		)
+
+		// Step 8c: Initialize aircraft enrichment service (ADS-B specific)
+		const aircraftEnrichmentService = new AircraftEnrichmentService(
+			{
+				cacheTtlMs: 24 * 60 * 60 * 1000, // 24 hours
+				maxCacheSize: 10000,
+				rateLimitMs: 1000, // 1 request per second
+				enabled: true,
 			},
-		},
-		{
-			host: config.api.host,
-			port: config.api.port,
-		},
-	)
+			logger,
+		)
+		aircraftEnrichmentService.wireToTracker(
+			aircraftTrackingManager.getTracker(),
+		)
+		// Wire enrichment cache stats to tracker for accurate stats reporting
+		aircraftTrackingManager
+			.getTracker()
+			.setEnrichmentCacheProvider(aircraftEnrichmentService)
 
-	// Step 9: Register shutdown handlers (in reverse order of startup)
-	// Handlers are called in LIFO order, so register in reverse dependency order
+		own(20, () => {
+			aircraftEnrichmentService.stop()
+			aircraftTrackingManager.stop()
+		})
 
-	// Last to shutdown: Source connections
-	shutdown.register({
-		name: "source-manager",
-		handler: async () => {
-			log.info("Shutting down source connections")
-			await sourceManager.disconnectAll()
-		},
-		timeout: 5000,
-	})
+		// Step 9: Initialize API server
+		const apiServer = new ApiServer(
+			{
+				...(access ? { access } : {}),
+				sourceManager,
+				fanoutManager,
+				fanoutTelemetry: sourceRouting,
+				decoderManager,
+				decoderRegistry,
+				audioOutput,
+				tunerRelay,
+				tunerController,
+				liveDemod,
+				digitalVoice,
+				resourceAggregator,
+				aircraftTracker: aircraftTrackingManager.getTracker(),
+				scanner: scanner ?? undefined,
+				spectrum: scanner?.spectrum,
+				logger,
+				audioConfig: {
+					format: config.audio.format,
+					sampleRate: config.audio.sampleRate,
+				},
+			},
+			{
+				host: config.api.host,
+				port: config.api.port,
+				...(accessBootstrap ? { accessBootstrap } : {}),
+				...(config.access.mode === "protected"
+					? { publicOrigins: config.access.publicOrigins }
+					: {}),
+			},
+		)
 
-	// Shutdown fanout manager (destroys all streams)
-	shutdown.register({
-		name: "fanout-manager",
-		handler: async () => {
-			log.info("Shutting down fanout manager")
-			sourceRouting.destroy()
-			fanoutManager.destroy()
-		},
-		timeout: 2000,
-	})
+		admissionGates.push(() => apiServer.stopAdmission())
+		own(10, () => apiServer.stop())
 
-	// Shutdown live demodulator
-	shutdown.register({
-		name: "live-demodulator",
-		handler: async () => {
-			log.info("Shutting down live demodulator")
-			await liveDemod.stop()
-		},
-		timeout: 2000,
-	})
+		// Step 9: Register shutdown handlers (in reverse order of startup)
+		// Handlers are called in LIFO order, so register in reverse dependency order
 
-	// Shutdown digital voice stream (releases its UDP sockets)
-	shutdown.register({
-		name: "digital-voice",
-		handler: async () => {
-			log.info("Shutting down digital voice stream")
-			await digitalVoice.destroy()
-		},
-		timeout: 2000,
-	})
-
-	// Shutdown tuner relay
-	shutdown.register({
-		name: "tuner-relay",
-		handler: async () => {
-			log.info("Shutting down tuner relay")
-			await tunerRelay.stop()
-		},
-		timeout: 2000,
-	})
-
-	// Shutdown the channelizer after the decoders (LIFO: registered first, so
-	// it runs once decoderManager.destroy() has released every channel)
-	if (channelizer) {
+		// Last to shutdown: Source connections
 		shutdown.register({
-			name: "channelizer",
+			name: "source-manager",
 			handler: async () => {
-				log.info("Shutting down channelizer")
-				await channelizer.destroy()
+				log.info("Shutting down source connections")
+				await sourceManager.disconnectAll()
 			},
 			timeout: 5000,
 		})
-	}
 
-	// Shutdown decoders
-	shutdown.register({
-		name: "decoder-manager",
-		handler: async () => {
-			log.info("Shutting down decoders")
-			await decoderManager.destroy()
-		},
-		timeout: 5000,
-	})
-
-	// Shutdown audio output
-	shutdown.register({
-		name: "audio-output",
-		handler: async () => {
-			log.info("Shutting down audio output")
-			await audioOutput.stop()
-		},
-		timeout: 2000,
-	})
-
-	// Shutdown the scanner after the API server and before the decoders,
-	// channelizer, fanout and sources (LIFO): its tuner lease restore writes to
-	// a still-open rtl_tcp socket (spec § 10.3).
-	if (scanner) {
-		const scannerForShutdown = scanner
+		// Shutdown fanout manager (destroys all streams)
 		shutdown.register({
-			name: "scanner",
+			name: "fanout-manager",
 			handler: async () => {
-				log.info("Shutting down scanner (restoring any tuner lease)")
-				await scannerForShutdown.stop()
+				log.info("Shutting down fanout manager")
+				sourceRouting.destroy()
+				fanoutManager.destroy()
+			},
+			timeout: 2000,
+		})
+
+		// Shutdown live demodulator
+		shutdown.register({
+			name: "live-demodulator",
+			handler: async () => {
+				log.info("Shutting down live demodulator")
+				await liveDemod.stop()
+			},
+			timeout: 2000,
+		})
+
+		// Shutdown digital voice stream (releases its UDP sockets)
+		shutdown.register({
+			name: "digital-voice",
+			handler: async () => {
+				log.info("Shutting down digital voice stream")
+				await digitalVoice.destroy()
+			},
+			timeout: 2000,
+		})
+
+		// Shutdown tuner relay
+		shutdown.register({
+			name: "tuner-relay",
+			handler: async () => {
+				log.info("Shutting down tuner relay")
+				await tunerRelay.stop()
+			},
+			timeout: 2000,
+		})
+
+		// Shutdown the channelizer after the decoders (LIFO: registered first, so
+		// it runs once decoderManager.destroy() has released every channel)
+		if (channelizer) {
+			shutdown.register({
+				name: "channelizer",
+				handler: async () => {
+					log.info("Shutting down channelizer")
+					await channelizer.destroy()
+				},
+				timeout: 5000,
+			})
+		}
+
+		// Shutdown decoders
+		shutdown.register({
+			name: "decoder-manager",
+			handler: async () => {
+				log.info("Shutting down decoders")
+				await decoderManager.destroy()
 			},
 			timeout: 5000,
 		})
-	}
 
-	// First to shutdown: API server (stop accepting new connections)
-	shutdown.register({
-		name: "api-server",
-		handler: async () => {
-			log.info("Shutting down API server")
-			await apiServer.stop()
-		},
-		timeout: 5000,
-	})
-
-	// Shutdown resource monitoring
-	if (resourceAggregator) {
+		// Shutdown audio output
 		shutdown.register({
-			name: "resource-aggregator",
+			name: "audio-output",
 			handler: async () => {
-				log.info("Shutting down resource monitoring")
-				resourceAggregator?.stop()
-				sdrHostPoller?.stop()
-				containerMonitor?.stop()
+				log.info("Shutting down audio output")
+				await audioOutput.stop()
+			},
+			timeout: 2000,
+		})
+
+		// Shutdown the scanner after the API server and before the decoders,
+		// channelizer, fanout and sources (LIFO): its tuner lease restore writes to
+		// a still-open rtl_tcp socket (spec § 10.3).
+		if (scanner) {
+			const scannerForShutdown = scanner
+			shutdown.register({
+				name: "scanner",
+				handler: async () => {
+					log.info("Shutting down scanner (restoring any tuner lease)")
+					await scannerForShutdown.stop()
+				},
+				timeout: 5000,
+			})
+		}
+
+		// First to shutdown: API server (stop accepting new connections)
+		shutdown.register({
+			name: "api-server",
+			handler: async () => {
+				log.info("Shutting down API server")
+				await apiServer.stop()
+			},
+			timeout: 5000,
+		})
+
+		// Shutdown resource monitoring
+		if (resourceAggregator) {
+			shutdown.register({
+				name: "resource-aggregator",
+				handler: async () => {
+					log.info("Shutting down resource monitoring")
+					resourceAggregator?.stop()
+					sdrHostPoller?.stop()
+					containerMonitor?.stop()
+				},
+				timeout: 1000,
+			})
+		}
+
+		// Shutdown aircraft tracking and enrichment
+		shutdown.register({
+			name: "aircraft-tracking",
+			handler: async () => {
+				log.info("Shutting down aircraft tracking and enrichment")
+				aircraftEnrichmentService.stop()
+				aircraftTrackingManager.stop()
 			},
 			timeout: 1000,
 		})
-	}
 
-	// Shutdown aircraft tracking and enrichment
-	shutdown.register({
-		name: "aircraft-tracking",
-		handler: async () => {
-			log.info("Shutting down aircraft tracking and enrichment")
-			aircraftEnrichmentService.stop()
-			aircraftTrackingManager.stop()
-		},
-		timeout: 1000,
-	})
+		// Step 10: Start API server
+		await apiServer.start()
+		checkpoint()
 
-	// Step 10: Start API server
-	await apiServer.start()
+		const wsBroadcaster = apiServer.getWebSocketBroadcaster()
 
-	const wsBroadcaster = apiServer.getWebSocketBroadcaster()
-
-	// Wire live demodulator events to WebSocket broadcaster
-	liveDemod.on("started", () => {
-		wsBroadcaster.broadcast("live-audio", {
-			type: "live-audio:started",
-			data: {},
+		// Wire live demodulator events to WebSocket broadcaster
+		liveDemod.on("started", () => {
+			wsBroadcaster.broadcast("live-audio", {
+				type: "live-audio:started",
+				data: {},
+			})
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
 		})
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-	liveDemod.on("stopped", () => {
-		wsBroadcaster.broadcast("live-audio", {
-			type: "live-audio:stopped",
-			data: {},
+		liveDemod.on("stopped", () => {
+			wsBroadcaster.broadcast("live-audio", {
+				type: "live-audio:stopped",
+				data: {},
+			})
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
 		})
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-	liveDemod.on("config-changed", liveConfig => {
-		wsBroadcaster.broadcastLiveAudioConfig(liveConfig)
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-	liveDemod.on("client-connected", () => {
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-	liveDemod.on("client-disconnected", () => {
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-	liveDemod.on("error", err => {
-		wsBroadcaster.broadcast("live-audio", {
-			type: "live-audio:error",
-			data: { message: err.message },
+		liveDemod.on("config-changed", liveConfig => {
+			wsBroadcaster.broadcastLiveAudioConfig(liveConfig)
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
 		})
-		wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
-	})
-
-	// Wire digital voice call state and status to WebSocket broadcaster
-	const broadcastDigitalVoiceStatus = () =>
-		wsBroadcaster.broadcastDigitalVoiceStatus(digitalVoice.getStatus())
-	digitalVoice.on("call", call => {
-		wsBroadcaster.broadcastDigitalVoiceCall(call)
-		broadcastDigitalVoiceStatus()
-	})
-	digitalVoice.on("started", broadcastDigitalVoiceStatus)
-	digitalVoice.on("stopped", broadcastDigitalVoiceStatus)
-	digitalVoice.on("clients-changed", broadcastDigitalVoiceStatus)
-	digitalVoice.on("error", err => {
-		log.warn({ err }, "Digital voice stream error")
-		broadcastDigitalVoiceStatus()
-	})
-
-	// Step 11: Start audio output server
-	await audioOutput.start()
-
-	// Step 11b: Start tuner relay server (if enabled)
-	await tunerRelay.start()
-
-	// Broadcast source caps changes to WebSocket clients
-	sourceManager.on("caps-changed", (sourceId, caps) => {
-		wsBroadcaster.broadcast("sources", {
-			type: "source:caps-changed",
-			data: { sourceId, caps },
+		liveDemod.on("client-connected", () => {
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
 		})
-	})
+		liveDemod.on("client-disconnected", () => {
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+		})
+		liveDemod.on("error", err => {
+			wsBroadcaster.broadcast("live-audio", {
+				type: "live-audio:error",
+				data: { message: err.message },
+			})
+			wsBroadcaster.broadcastLiveAudioStatus(liveDemod.getStatus())
+		})
 
-	// Step 12: Wire decoder audio outputs to AudioOutput (Requirement 11.1)
-	// This creates a combined stream that aggregates audio from all decoders
-	const cleanupAudioWiring = wireDecoderAudioToOutput(
-		decoderManager,
-		fanoutManager,
-		audioOutput,
-		config, // Pass config for monitoring check
-		log,
-	)
-
-	// Register cleanup for audio wiring
-	shutdown.register({
-		name: "audio-wiring",
-		handler: async () => {
-			log.info("Cleaning up audio wiring")
-			cleanupAudioWiring()
-		},
-		timeout: 1000,
-	})
-
-	// Start resource monitoring components
-	if (resourceAggregator) {
-		containerMonitor?.start()
-		sdrHostPoller?.start()
-		resourceAggregator.start()
-		log.info("Resource monitoring started")
-	}
-
-	// Start aircraft tracking manager and enrichment service
-	aircraftTrackingManager.start()
-	aircraftEnrichmentService.start()
-
-	// Step 13: Connect to configured sources and wire to fanout
-	for (const sourceConfig of config.sources) {
-		try {
-			await sourceManager.connect(sourceConfig)
-			log.info(
-				{
-					sourceId: sourceConfig.id,
-					host: sourceConfig.host,
-					port: sourceConfig.port,
-				},
-				"Connected to source",
+		// Wire digital voice call state and status to WebSocket broadcaster
+		const broadcastDigitalVoiceStatus = () =>
+			wsBroadcaster.broadcastDigitalVoiceStatus(digitalVoice.getStatus())
+		digitalVoice.on("call", call => {
+			wsBroadcaster.broadcastDigitalVoiceCall(call)
+			broadcastDigitalVoiceStatus()
+		})
+		digitalVoice.on("started", broadcastDigitalVoiceStatus)
+		digitalVoice.on("stopped", broadcastDigitalVoiceStatus)
+		digitalVoice.on("clients-changed", broadcastDigitalVoiceStatus)
+		digitalVoice.on("error", err => {
+			log.warn(
+				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+				"Digital voice stream error",
 			)
-		} catch (err) {
-			log.error(
-				{ err, sourceId: sourceConfig.id },
-				"Failed to connect to source (will retry)",
-			)
+			broadcastDigitalVoiceStatus()
+		})
+
+		// Step 11: Start audio output server
+		if (!protectedMode) await audioOutput.start()
+
+		// Step 11b: Start tuner relay server (if enabled)
+		await tunerRelay.start()
+		checkpoint()
+
+		// Broadcast source caps changes to WebSocket clients
+		sourceManager.on("caps-changed", (sourceId, caps) => {
+			wsBroadcaster.broadcast("sources", {
+				type: "source:caps-changed",
+				data: { sourceId, caps },
+			})
+		})
+
+		// Step 12: Wire decoder audio outputs to AudioOutput (Requirement 11.1)
+		// This creates a combined stream that aggregates audio from all decoders
+		const cleanupAudioWiring = protectedMode
+			? () => {}
+			: wireDecoderAudioToOutput(
+					decoderManager,
+					fanoutManager,
+					audioOutput,
+					config, // Pass config for monitoring check
+					log,
+				)
+
+		own(30, cleanupAudioWiring)
+
+		// Register cleanup for audio wiring
+		shutdown.register({
+			name: "audio-wiring",
+			handler: async () => {
+				log.info("Cleaning up audio wiring")
+				cleanupAudioWiring()
+			},
+			timeout: 1000,
+		})
+
+		// Start resource monitoring components
+		if (resourceAggregator) {
+			containerMonitor?.start()
+			sdrHostPoller?.start()
+			resourceAggregator.start()
+			log.info("Resource monitoring started")
 		}
-	}
 
-	// Step 14b: Start live demodulator (if enabled)
-	if (liveDemodConfig.enabled) {
-		try {
-			await liveDemod.start()
-		} catch (err) {
-			log.error({ err }, "Failed to start live demodulator")
+		// Start aircraft tracking manager and enrichment service
+		aircraftTrackingManager.start()
+		aircraftEnrichmentService.start()
+
+		// Step 13: Connect to configured sources and wire to fanout
+		for (const sourceConfig of config.sources) {
+			checkpoint()
+			try {
+				await sourceManager.connect(sourceConfig)
+				checkpoint()
+				log.info(
+					{
+						sourceId: sourceConfig.id,
+						host: sourceConfig.host,
+						port: sourceConfig.port,
+					},
+					"Connected to source",
+				)
+			} catch (err) {
+				if (stopping) throw err
+				log.error(
+					{
+						...(protectedMode ? { code: "RUNTIME_ERROR" } : { err }),
+						sourceId: sourceConfig.id,
+					},
+					"Failed to connect to source (will retry)",
+				)
+			}
 		}
-	}
 
-	// Step 14c: Start the digital voice stream (if any dsd-fme decoder feeds it)
-	if (digitalVoice.getStatus().decoders.length > 0) {
-		try {
-			await digitalVoice.start()
-		} catch (err) {
-			log.error({ err }, "Failed to start digital voice stream")
+		// Step 14b: Start live demodulator (if enabled)
+		checkpoint()
+		if (liveDemodConfig.enabled) {
+			try {
+				await liveDemod.start()
+				checkpoint()
+			} catch (err) {
+				if (stopping) throw err
+				log.error(
+					protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+					"Failed to start live demodulator",
+				)
+			}
 		}
-	} else if (digitalVoiceConfig.enabled) {
-		log.info("Digital voice enabled but no dsd-fme decoder streams voice")
+
+		// Step 14c: Start the digital voice stream (if any dsd-fme decoder feeds it)
+		checkpoint()
+		if (digitalVoice.getStatus().decoders.length > 0) {
+			try {
+				await digitalVoice.start()
+				checkpoint()
+			} catch (err) {
+				if (stopping) throw err
+				log.error(
+					protectedMode ? { code: "RUNTIME_ERROR" } : { err },
+					"Failed to start digital voice stream",
+				)
+			}
+		} else if (digitalVoiceConfig.enabled) {
+			log.info("Digital voice enabled but no dsd-fme decoder streams voice")
+		}
+
+		// Step 15: Start enabled decoders
+		// Log decoded messages for user visibility (Requirement: User Feedback)
+		decoderManager.on("decoder:output", (decoderId, output) => {
+			log.info({ decoderId, output }, "Decoded Message")
+		})
+
+		checkpoint()
+		await decoderManager.startAll()
+		checkpoint()
+
+		// Log startup complete
+		const uptimeMs = Date.now() - startTime
+		log.info(
+			{
+				uptimeMs,
+				apiHost: config.api.host,
+				apiPort: config.api.port,
+				audioPort: config.audio.tcpPort,
+				sources: config.sources.length,
+				decoders: config.decoders.length,
+			},
+			"WaveKit started successfully",
+		)
+	} catch (error) {
+		settled()
+		if (protectedMode) {
+			const watchdog = setTimeout(() => process.exit(1), 10_000)
+			try {
+				await closeProtected()
+			} finally {
+				clearTimeout(watchdog)
+			}
+		}
+		throw error
+	} finally {
+		settled()
 	}
-
-	// Step 15: Start enabled decoders
-	// Log decoded messages for user visibility (Requirement: User Feedback)
-	decoderManager.on("decoder:output", (decoderId, output) => {
-		log.info({ decoderId, output }, "Decoded Message")
-	})
-
-	await decoderManager.startAll()
-
-	// Log startup complete
-	const uptimeMs = Date.now() - startTime
-	log.info(
-		{
-			uptimeMs,
-			apiHost: config.api.host,
-			apiPort: config.api.port,
-			audioPort: config.audio.tcpPort,
-			sources: config.sources.length,
-			decoders: config.decoders.length,
-		},
-		"WaveKit started successfully",
-	)
 }
 
 // Run the application
-main().catch(err => {
-	console.error("Fatal error during startup:", err)
+main().catch(() => {
+	process.stderr.write("WaveKit startup failed\n")
 	process.exit(1)
 })

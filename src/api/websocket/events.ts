@@ -9,6 +9,7 @@
  * - 10.5: THE API_Server SHALL support channels: decoders, metrics, sources
  */
 
+import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import type { FastifyInstance } from "fastify"
 import type { WebSocket } from "ws"
 import type { Logger } from "../../utils/logger.js"
@@ -243,14 +244,14 @@ export class WebSocketEventBroadcaster {
 	 *
 	 * @param fastify - Fastify instance with websocket plugin registered
 	 */
-	registerRoute(fastify: FastifyInstance): void {
-		fastify.get(
-			"/ws",
-			{ websocket: true } as any,
-			((socket: WebSocket) => {
-				this.handleConnection(socket)
-			}) as any,
-		)
+	registerRoute(
+		fastify: FastifyInstance,
+		access?: FastifyAccessController,
+	): void {
+		fastify.get("/ws", { websocket: true }, (socket, request) => {
+			if (access && !access.adoptWebSocket(request, socket)) return
+			this.handleConnection(socket)
+		})
 
 		this.log.info("WebSocket route registered at /ws")
 	}
@@ -290,8 +291,8 @@ export class WebSocketEventBroadcaster {
 		})
 
 		// Handle errors
-		socket.on("error", (err: Error) => {
-			this.log.error({ clientId, err }, "WebSocket error")
+		socket.on("error", () => {
+			this.log.error({ clientId }, "WebSocket error")
 			this.terminateClient(clientState)
 		})
 	}
@@ -302,10 +303,6 @@ export class WebSocketEventBroadcaster {
 	private handleMessage(client: ClientState, data: Buffer | string): void {
 		try {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
-			this.log.info(
-				{ clientId: client.id, data: rawData },
-				"Received raw message",
-			)
 
 			const parsed = JSON.parse(rawData) as unknown
 			const message = parseClientMessage(parsed)
@@ -323,11 +320,8 @@ export class WebSocketEventBroadcaster {
 			} else {
 				this.handleUnsubscribe(client, message.channels)
 			}
-		} catch (err) {
-			this.log.warn(
-				{ clientId: client.id, err },
-				"Failed to parse client message",
-			)
+		} catch {
+			this.log.warn({ clientId: client.id }, "Failed to parse client message")
 			this.sendToClient(client, {
 				type: "error",
 				data: { message: "Invalid JSON" },
@@ -399,7 +393,7 @@ export class WebSocketEventBroadcaster {
 	private handleDisconnect(
 		client: ClientState,
 		code?: number,
-		reason?: Buffer,
+		_reason?: Buffer,
 	): void {
 		// A late close after terminateClient or closeAll is a no-op (finding 7).
 		if (!this.clients.has(client.id)) return
@@ -407,9 +401,8 @@ export class WebSocketEventBroadcaster {
 		this.delivery.delete(client)
 		this.stopMaintenanceIfIdle()
 		this.notifyUnsubscribed(client)
-		const reasonStr = reason ? reason.toString() : "unknown"
 		this.log.info(
-			{ clientId: client.id, code, reason: reasonStr },
+			{ clientId: client.id, code },
 			"WebSocket client disconnected",
 		)
 	}
@@ -462,15 +455,12 @@ export class WebSocketEventBroadcaster {
 			try {
 				client.socket.send(message.data, err => {
 					if (err) {
-						this.log.error(
-							{ clientId: client.id, err },
-							"WebSocket send failed",
-						)
+						this.log.error({ clientId: client.id }, "WebSocket send failed")
 						this.terminateClient(client)
 					}
 				})
-			} catch (err) {
-				this.log.error({ clientId: client.id, err }, "WebSocket send failed")
+			} catch {
+				this.log.error({ clientId: client.id }, "WebSocket send failed")
 				this.terminateClient(client)
 				return
 			}
@@ -511,11 +501,8 @@ export class WebSocketEventBroadcaster {
 		this.handleDisconnect(client)
 		try {
 			client.socket.terminate()
-		} catch (err) {
-			this.log.warn(
-				{ clientId: client.id, err },
-				"WebSocket termination failed",
-			)
+		} catch {
+			this.log.warn({ clientId: client.id }, "WebSocket termination failed")
 		}
 	}
 

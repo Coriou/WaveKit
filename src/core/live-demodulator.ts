@@ -19,6 +19,7 @@
  * second of queued audio; older audio is dropped (latency beats completeness).
  */
 
+import type { NodeHttpAccessOptions } from "../access/node-http-adapter.js"
 import { EventEmitter } from "node:events"
 import { spawn, type ChildProcess } from "node:child_process"
 import type * as http from "node:http"
@@ -91,6 +92,11 @@ export interface LiveDemodEvents {
 }
 
 export interface LiveDemodulatorOptions {
+	/** Borrowed shared protected policy/session/lease authority. */
+	httpAccess?: NodeHttpAccessOptions
+	/** Canonical configured public origin; never inferred from listener binding. */
+	publicOrigin?: string
+	httpHost?: string
 	/** First automatic restart delay; doubles per consecutive failure. */
 	restartBaseDelayMs?: number
 	restartMaxDelayMs?: number
@@ -125,7 +131,10 @@ const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"iqDcBlock",
 ])
 
-const DEFAULTS: Required<LiveDemodulatorOptions> = {
+const DEFAULTS: Required<
+	Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
+> &
+	Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost"> = {
 	restartBaseDelayMs: 1000,
 	restartMaxDelayMs: 30_000,
 	maxRestartAttempts: 10,
@@ -142,7 +151,10 @@ export class LiveDemodulator extends EventEmitter {
 	private readonly fanoutManager: FanoutManager | SourceFanoutRouter
 	private branchFanout: FanoutManager | null = null
 	private legacySourceId: string | null = null
-	private readonly options: Required<LiveDemodulatorOptions>
+	private readonly options: Required<
+		Omit<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
+	> &
+		Pick<LiveDemodulatorOptions, "httpAccess" | "publicOrigin" | "httpHost">
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
 	private readonly audio: AudioClientRegistry
@@ -191,6 +203,7 @@ export class LiveDemodulator extends EventEmitter {
 			"Live demodulator",
 			req => this.resolveRoute(req),
 			err => this.emitError(err),
+			options.httpAccess,
 		)
 	}
 
@@ -235,7 +248,17 @@ export class LiveDemodulator extends EventEmitter {
 		)
 	}
 
+	/** Stop HTTP admission immediately, before global route draining. */
+	shutdownAdmission(): void {
+		this.http.shutdownAdmission()
+	}
+
+	stopAdmission(): void {
+		this.http.stopAdmission()
+	}
+
 	async stop(): Promise<void> {
+		this.stopAdmission()
 		if (!this.http.listening && !this.run) {
 			this.log.warn("Live demodulator not running")
 			return
@@ -263,6 +286,11 @@ export class LiveDemodulator extends EventEmitter {
 		})
 		const previous = this.config
 		const portChanged = validated.httpPort !== previous.httpPort
+		if (portChanged && this.options.httpAccess)
+			throw new WaveKitError(
+				"Protected audio port changes require deployment reconfiguration",
+				"ACCESS_CONFIG_INVALID",
+			)
 		const sourceChanged = validated.sourceId !== previous.sourceId
 		const pipelineChanged = (
 			Object.keys(validated) as Array<keyof LiveDemodConfig>
@@ -324,8 +352,8 @@ export class LiveDemodulator extends EventEmitter {
 			config: this.config,
 			effectiveSampleRate: rateInfo.effectiveSampleRate,
 			decimationFactor: rateInfo.decimation,
-			httpUrl: `http://localhost:${this.config.httpPort}/stream`,
-			wavUrl: `http://localhost:${this.config.httpPort}/stream.wav`,
+			httpUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream`,
+			wavUrl: `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}/stream.wav`,
 			clientCount: this.audio.size,
 			bytesStreamed: this.audio.bytesStreamed,
 			pipelineHealth: this.pipelineHealth,
@@ -794,7 +822,7 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private async startHttpServer(): Promise<void> {
-		await this.http.start(this.config.httpPort)
+		await this.http.start(this.config.httpPort, this.options.httpHost)
 	}
 
 	/** Closes the server without waiting on streaming clients (they are destroyed). */

@@ -16,6 +16,9 @@
 import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import { createServer } from "node:http"
+import { WaveKitError } from "../utils/errors.js"
+import { NodeHttpAccessAdapter } from "../access/node-http-adapter.js"
+import type { NodeHttpAccessOptions } from "../access/node-http-adapter.js"
 import type { Logger } from "../utils/logger.js"
 import { liveAudioClientQueueLimit } from "./client-buffer.js"
 
@@ -60,7 +63,7 @@ export function streamHeaders(stream: StreamFormat): Record<string, string> {
 		"X-Channels": "1",
 		"Cache-Control": "no-cache, no-store",
 		"Access-Control-Expose-Headers":
-			"X-Audio-Format, X-Sample-Rate, X-Channels",
+			"X-Audio-Format, X-Sample-Rate, X-Channels, Retry-After",
 	}
 }
 
@@ -372,17 +375,24 @@ export class AudioHttpServer {
 	private readonly label: string
 	private readonly resolve: (req: http.IncomingMessage) => AudioRoute | null
 	private readonly onError: (err: Error) => void
+	private readonly accessOptions: NodeHttpAccessOptions | undefined
+	private access: NodeHttpAccessAdapter | undefined
+	private admissionStopped = false
+	private shuttingDown = false
 
 	constructor(
 		log: Logger,
 		label: string,
 		resolve: (req: http.IncomingMessage) => AudioRoute | null,
 		onError: (err: Error) => void,
+		access?: NodeHttpAccessOptions,
 	) {
 		this.log = log
 		this.label = label
 		this.resolve = resolve
 		this.onError = onError
+		this.accessOptions = access
+		if (access) this.access = new NodeHttpAccessAdapter(access)
 	}
 
 	get listening(): boolean {
@@ -390,7 +400,12 @@ export class AudioHttpServer {
 	}
 
 	async start(port: number, host = "0.0.0.0"): Promise<void> {
+		if (this.shuttingDown)
+			throw new WaveKitError("Audio listener stopping", "ACCESS_UNAVAILABLE")
 		if (this.server) return
+		if (this.admissionStopped && this.accessOptions)
+			this.access = new NodeHttpAccessAdapter(this.accessOptions)
+		this.admissionStopped = false
 		const server = createServer((req, res) => this.handle(req, res))
 		this.server = server
 		server.on("error", err => {
@@ -407,18 +422,40 @@ export class AudioHttpServer {
 			})
 		} catch (err) {
 			if (this.server === server) this.server = null
+			this.stopAdmission()
 			throw err
 		}
 	}
 
+	/** Terminal composition fence; ordinary stop/start remains restartable. */
+	shutdownAdmission(): void {
+		this.shuttingDown = true
+		this.stopAdmission()
+	}
+
+	/** Cut admission and close this listener's streams without disposing shared leases. */
+	stopAdmission(): void {
+		this.admissionStopped = true
+		this.access?.dispose()
+	}
+
 	/** Closes the server; callers close their registries' clients first. */
 	async close(): Promise<void> {
+		this.stopAdmission()
 		const server = this.server
 		if (!server) return
 		server.closeAllConnections()
-		await new Promise<void>(resolve => {
+		await new Promise<void>((resolve, reject) => {
 			server.close(err => {
-				if (err) this.log.warn({ err }, `Error closing ${this.label} server`)
+				if (err) {
+					reject(
+						new WaveKitError(
+							"Audio listener close failed",
+							"ACCESS_UNAVAILABLE",
+						),
+					)
+					return
+				}
 				resolve()
 			})
 		})
@@ -426,12 +463,38 @@ export class AudioHttpServer {
 	}
 
 	private handle(req: http.IncomingMessage, res: http.ServerResponse): void {
+		if (this.access)
+			res.setHeader("Access-Control-Expose-Headers", "Retry-After")
+		const context = this.access?.admit(req, res)
+		if (this.access && !context) return
+		if (this.admissionStopped) {
+			res.writeHead(503, { "Cache-Control": "no-store" })
+			res.end("Service Unavailable")
+			return
+		}
 		const route = req.method === "GET" ? this.resolve(req) : null
 		if (!route) {
 			res.statusCode = 404
 			res.end("Not Found")
 			return
 		}
-		acceptAudioStream(req, res, route.registry, route.stream, route.wav)
+		if (!this.access || !context) {
+			acceptAudioStream(req, res, route.registry, route.stream, route.wav)
+			return
+		}
+		let client: AudioClient | undefined
+		const lease = this.access.leaseStream(context, res, () => {
+			if (client) route.registry.close(client, "Access closed", true)
+		})
+		if (lease.kind === "rejected" || !lease.active()) return
+		client = acceptAudioStream(
+			req,
+			res,
+			route.registry,
+			route.stream,
+			route.wav,
+		)
+		// Registry events can invalidate the lease before register() returns.
+		if (!lease.active()) route.registry.close(client, "Access closed", true)
 	}
 }

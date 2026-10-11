@@ -49,6 +49,10 @@ export function installAccessHooks(
 			: policy.evaluate(original)
 		for (const [name, value] of Object.entries(admission.headers))
 			reply.header(name, value)
+		if (controller.admissionStopped || admission.kind === "deny")
+			reply.serializer(value => JSON.stringify(value))
+		if (controller.admissionStopped)
+			return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
 		if (admission.kind === "deny")
 			return reply.code(admission.status).send({ code: admission.code })
 		if (admission.kind === "preflight") return reply.code(204).send()
@@ -57,7 +61,10 @@ export function installAccessHooks(
 			if (original.transport === "websocket") {
 				const rejected = controller.reserveUpgrade(request)
 				if (rejected)
-					return reply.code(rejected.status).send({ code: rejected.code })
+					return reply
+						.serializer(value => JSON.stringify(value))
+						.code(rejected.status)
+						.send({ code: rejected.code })
 			}
 		}
 	})
@@ -79,6 +86,7 @@ export class FastifyAccessController {
 	#pending = new Set<UpgradeReservation>()
 	#downloads = new Set<() => void>()
 	#disposed = false
+	#stopped = false
 
 	constructor(options: FastifyAccessOptions) {
 		const grace = options.webSocketCloseGraceMs ?? 1000
@@ -99,8 +107,17 @@ export class FastifyAccessController {
 		this.#grace = grace
 	}
 
+	/** Synchronous gate; transport disposal is a separate shutdown step. */
+	stopAdmission(): void {
+		this.#stopped = true
+	}
+
+	get admissionStopped(): boolean {
+		return this.#stopped || this.#disposed
+	}
+
 	admit(request: FastifyRequest, principal: AccessPrincipal): void {
-		this.#principals.set(request, { ...principal })
+		if (!this.admissionStopped) this.#principals.set(request, { ...principal })
 	}
 
 	principalOf(request: FastifyRequest): AccessPrincipal | undefined {
@@ -112,7 +129,8 @@ export class FastifyAccessController {
 		request: FastifyRequest,
 	): { status: 401 | 429 | 503; code: string } | undefined {
 		const principal = this.#principals.get(request)
-		if (this.#disposed) return { status: 503, code: "ACCESS_UNAVAILABLE" }
+		if (this.admissionStopped)
+			return { status: 503, code: "ACCESS_UNAVAILABLE" }
 		if (!principal) return { status: 401, code: "AUTH_REQUIRED" }
 		// Bound machine reservations too, including close fallback timers.
 		if (this.#pending.size >= 512)
@@ -156,7 +174,7 @@ export class FastifyAccessController {
 	/** Call synchronously before registering the socket with any broadcaster. */
 	adoptWebSocket(request: FastifyRequest, socket: WebSocket): boolean {
 		const entry = this.#upgrades.get(request)
-		if (!entry || entry.closed || entry.socket || this.#disposed) {
+		if (!entry || entry.closed || entry.socket || this.admissionStopped) {
 			socket.terminate()
 			return false
 		}
@@ -242,7 +260,7 @@ export class FastifyAccessController {
 		)
 			return { kind: "rejected", reason: "invalidated" }
 		const principal = this.#principals.get(request)
-		if (this.#disposed) return { kind: "rejected", reason: "disposed" }
+		if (this.admissionStopped) return { kind: "rejected", reason: "disposed" }
 		if (!principal) return { kind: "rejected", reason: "invalidated" }
 		if (this.#downloads.size >= 512)
 			return { kind: "rejected", reason: "capacity" }
@@ -312,6 +330,7 @@ export class FastifyAccessController {
 	/** Does not dispose an injected shared lease manager; releases only this listener's leases. */
 	dispose(): void {
 		if (this.#disposed) return
+		this.stopAdmission()
 		this.#disposed = true
 		for (const entry of [...this.#pending]) {
 			if (entry.socket) {

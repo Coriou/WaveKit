@@ -1,5 +1,8 @@
+import { request as httpRequest } from "node:http"
+import type { ServerResponse } from "node:http"
 import { once } from "node:events"
 import Fastify from "fastify"
+import type { FastifyRequest, FastifyReply } from "fastify"
 import websocket from "@fastify/websocket"
 import { WebSocket } from "ws"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -21,7 +24,7 @@ afterEach(async () => {
 	await Promise.all(apps.splice(0).map(app => app.close()))
 })
 
-async function setup() {
+async function setup(beforeRoutes?: (app: ReturnType<typeof Fastify>) => void) {
 	let elapsed = 0
 	const persist = vi.fn(async () => {})
 	const token = generateMachineToken()
@@ -44,7 +47,8 @@ async function setup() {
 	const app = Fastify({ logger: false })
 	apps.push(app)
 	const controller = installAccessHooks(app, { policy, sessions })
-	registerAccessRoutes(app, { pairing, flows })
+	beforeRoutes?.(app)
+	const routes = registerAccessRoutes(app, { pairing, flows })
 	const browser = { host: "receiver.lan:9000", origin }
 	const machine = {
 		host: "receiver.lan:9000",
@@ -84,6 +88,7 @@ async function setup() {
 	return {
 		app,
 		controller,
+		routes,
 		sessions,
 		policy,
 		pairing,
@@ -99,6 +104,131 @@ async function setup() {
 }
 
 describe("isolated access HTTP routes", () => {
+	it.each(["pair", "refresh"] as const)(
+		"rejects %s admitted before shutdown but paused before its handler",
+		async flow => {
+			let pause = false
+			let arrived = () => {}
+			const atHandler = new Promise<void>(resolve => {
+				arrived = resolve
+			})
+			let resume = () => {}
+			const gate = new Promise<void>(resolve => {
+				resume = resolve
+			})
+			const env = await setup(app => {
+				app.addHook("preHandler", async () => {
+					if (pause) {
+						arrived()
+						await gate
+					}
+				})
+			})
+			const paired = await env.pair()
+			const issued = await env.app.inject({
+				method: "POST",
+				url: "/api/access/pairing-codes",
+				headers: env.machine,
+			})
+			const redeem = vi.spyOn(env.pairing, "redeem")
+			const refresh = vi.spyOn(env.flows, "refresh")
+			env.persist.mockClear()
+			pause = true
+			const pending = env.app.inject({
+				method: "POST",
+				url:
+					flow === "pair" ? "/api/access/pair" : "/api/access/session/refresh",
+				headers: flow === "pair" ? env.browser : paired.headers,
+				...(flow === "pair"
+					? { payload: { code: issued.json<{ code: string }>().code } }
+					: {}),
+			})
+			await atHandler
+			env.controller.stopAdmission()
+			env.routes.stopAdmission()
+			await env.routes.drain()
+			resume()
+			const denied = await pending
+			expect(denied.statusCode).toBe(503)
+			expect(denied.headers["access-control-allow-origin"]).toBe(origin)
+			expect(denied.headers["set-cookie"]).toBeUndefined()
+			expect(redeem).not.toHaveBeenCalled()
+			expect(refresh).not.toHaveBeenCalled()
+			expect(env.persist).not.toHaveBeenCalled()
+		},
+	)
+
+	it("drains actual refresh persistence even after its HTTP response closes", async () => {
+		let response: ServerResponse | undefined
+		const env = await setup(app => {
+			app.addHook(
+				"preHandler",
+				async (request: FastifyRequest, reply: FastifyReply) => {
+					if (request.url === "/api/access/session/refresh")
+						response = reply.raw
+				},
+			)
+		})
+		const paired = await env.pair()
+		env.advance(86400000)
+		let started = () => {}
+		const persisting = new Promise<void>(resolve => {
+			started = resolve
+		})
+		let release = () => {}
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		env.persist.mockImplementationOnce(async () => {
+			started()
+			await gate
+		})
+		const address = await env.app.listen({ host: "127.0.0.1", port: 0 })
+		const client = httpRequest(address + "/api/access/session/refresh", {
+			method: "POST",
+			headers: paired.headers,
+		})
+		const clientClosed = new Promise<void>(resolve => {
+			client.once("error", () => resolve())
+			client.once("response", incoming => {
+				incoming.resume()
+				incoming.once("end", () => resolve())
+			})
+		})
+		client.end()
+		await persisting
+		if (!response) throw new Error("Missing actual response")
+		const responseClosed = once(response, "close")
+		response.destroy()
+		await responseClosed
+		env.controller.stopAdmission()
+		env.routes.stopAdmission()
+		const draining = env.routes.drain()
+		expect(env.routes.drain()).toBe(draining)
+		let completed = false
+		void draining.then(() => {
+			completed = true
+		})
+		await Promise.resolve()
+		expect(completed).toBe(false)
+		try {
+			const denied = await env.app.inject({
+				method: "POST",
+				url: "/api/access/session/refresh",
+				headers: paired.headers,
+			})
+			expect(denied.statusCode).toBe(503)
+		} finally {
+			release()
+		}
+		await draining
+		await clientClosed
+		expect(completed).toBe(true)
+		expect(
+			env.sessions.lookupByPrincipal(paired.body.deviceId)?.expiresAt,
+		).toBe(paired.body.expiresAt + 86400000)
+	})
+
 	it("pairs, reads status, refreshes remembered browser and logs out through real handlers", async () => {
 		const env = await setup()
 		const paired = await env.pair()
