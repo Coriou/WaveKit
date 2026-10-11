@@ -511,9 +511,48 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Owner review of the polished Settings (drawer in C, the board's tweaks, the phone board)
-and the four "owner to decide" points in the Settings polish entry. Then pick the next
-topic from the open questions (Scanner, or the Settings follow-ups).
+Handoff written 2026-10-11, at the end of the Settings session.
+
+**State.** Settings is designed and polished: the Settings and Settings on a phone
+boards, wired into C. The owner liked the direction; the four "owner to decide"
+points in the Settings polish entry are still open and can wait. Shell directions A and B
+are gone. Corner radius and border system approved. Recordings accepted for now.
+
+**Tasks, in order.**
+1. Sync: `git fetch origin && git merge origin/main` on `design/web-dashboard`. At
+   handoff, main was ahead with scanner work: the runtime and channelizer merged, an
+   accepted-backend reconcile of `docs/ROADMAP.md`, and a read-only S1 Scan consumer in
+   the CLI (`cli/source/views/scan.tsx`, `cli/source/data/scan-state.ts`).
+2. Core progress: read `docs/ROADMAP.md` and the recent `git log origin/main`. Tick any
+   item in [CORE-GAPS.md](CORE-GAPS.md) that has landed on main.
+3. Gaps audit: make CORE-GAPS.md complete and current. Walk every board and every
+   decision in this file, and check each against what core has today. Add what is
+   missing, reword what core now partly covers, and keep the orange sticky on the canvas
+   in sync (it mirrors this file).
+4. Scanner design (the next design topic). Read first:
+   - `docs/SCANNER.md`
+   - the spec `docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md`
+   - the plans `docs/superpowers/plans/2026-10-09-signal-discovery-scanner*.md`
+   - the data contract `packages/api-types/src/scanner.ts`, plus the routes and WebSocket in
+     `src/api/routes/scanner*.ts` and `src/api/websocket/scanner-broadcast.ts`
+   - the CLI Scan view, as a reference for what S1 exposes today
+
+   Design the web Scanner on the canvas: the dock already has a Scanner entry, and ⌘K uses
+   `G C`. Design for what S1 really provides and for where the scanner plan is going, and
+   mark which parts wait on later stages. Brainstorm the key questions with the owner
+   before drawing. Record decisions here, and core needs in CORE-GAPS.md.
+
+**How the canvas work went well (keep doing it).**
+- Research and inventories go to subagents. Once a board exists, a dedicated Opus
+  teammate reviews and polishes it, with a written brief: the decisions to keep, the known
+  bugs, a checklist, and a requirement to check every change rendered.
+- To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work
+  on copies in the session scratchpad, publish with `root` and `files`, then copy every
+  board read fresh from the canvas into `docs/web/canvas/` and commit.
+- Visual check: use the built-in browser on the canvas URL with `resize_window`
+  1440×900. Select a board, then press Play (top right) and pick it from the list. Clicks
+  land best in the canvas's Fit view. Escape exits Play mode. Screenshots fail while the
+  pane is hidden.
 
 ## Handoff to the dev team (later)
 
