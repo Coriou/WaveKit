@@ -191,6 +191,11 @@ components:
 
 # Design System: WaveKit Receiver
 
+> **Planned (owner, 2026-10-11):** these pages move to the global WaveKit design system built
+> for the web dashboard (tokens in `docs/web/THEME-TOKENS.md` on `design/web-dashboard`, moving
+> into `packages/brand`): default True black ground, Mono accent, logo in its brand colour,
+> quiet focus and selection rules. Until then this file describes what ships.
+
 ## Overview
 
 **Creative North Star: "The Phosphor Scope on an Ink Field"**

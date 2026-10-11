@@ -8,6 +8,12 @@ Official baseline: **MAKE SENSE OF THE SPECTRUM**. In prose the name is **WaveKi
 logo artwork reads **wavekit**. Read [`AGENTS.md`](AGENTS.md) before changing anything;
 its rules are binding for people and agents alike.
 
+**Planned (owner, 2026-10-11):** the web dashboard's themed UI tokens (grounds, accents,
+focus and selection, `--wk-brand`; see `docs/web/THEME-TOKENS.md` on `design/web-dashboard`)
+become WaveKit's global design system and move into this package as `tokens/ui.css` and
+`tokens/ui.json`, validated like `brand.css`. Every surface (web app, Pi pages, later mobile)
+then consumes them from here.
+
 ![WaveKit brand overview](previews/01-brand-overview.svg)
 
 ## Which file do I need?

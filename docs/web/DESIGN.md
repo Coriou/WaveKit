@@ -643,6 +643,14 @@ Condensed + Noto Sans, Tabler-based icons).
     only", ranges switchable mid-scan). Missing states drawn: first run, consent again, paused
     by another scan, source down, no hardware, finished, disk low, read-only.
 
+- **Default look: True black + Mono (owner, 2026-10-11 late).** Dark theme defaults to the
+  True black ground with the Mono accent; the light theme (Paper) defaults to Mono too. The
+  waterfall stays on Match accent, so it is greyscale by default (owner chose it over Classic
+  heat). The signal-W logo keeps its brand colour (`--wk-brand`: phosphor on dark, forest on
+  Paper) whatever the accent. Ink + phosphor remains a choice and is exactly the v1 look.
+  The web token system is now the global WaveKit design system: it moves into
+  `packages/brand` and the Pi pages adopt it (see Next session).
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -684,42 +692,92 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-11, late, after the polish pass (canvas version 72). All three
-workstreams of the previous handoff were brainstormed with the owner one question at a time,
-approved and drawn (decision log entry "Polish pass: shell, quiet outlines, Scanner"):
-A shell and Settings (Immersive view/drawer split, card "above Listen", Settings wording),
-B quiet outlines (THEME-TOKENS §5.1, applied to every board), C the Scanner redesign
-(presets-first "Scan a band", ruler tools, range rows with Tuning, running state, hit actions,
-pause/resume countdown, Watch here on the tuned card, missing states as Scanner `state` tweaks).
+Handoff written 2026-10-12 after the polish pass (canvas v72), the new default look (v73,
+True black + Mono) and a full re-audit of [CORE-GAPS.md](CORE-GAPS.md) (v74 sticky). Two
+sessions are queued, in this order.
 
-**Start.**
-1. Sync (`git fetch origin && git merge origin/main`), read this file, THEME-TOKENS.md §5.1 and
-   the canvas comments. Ask the owner for their review of the polish pass first; they had not
-   seen the drawn result when this was written.
-2. Known loose ends from the pass:
-   - With Listen expanded on a normal-height window the tuned card cannot fit above it; it
-     glides to the nearest free anchor (top centre). Ask whether that is right.
-   - In Immersive the per-range on/off chips of a running scan do not show (the shell passes
-     merged stretches only); they show on the Scanner board.
-   - "Scan waits while you listen" is a Scanner/Tuned tweak only; the shell does not model the
-     squelch hold.
-   - The band strip slightly overlaps the Tuner hold row in Immersive; dock tooltips can peek
-     out under a widened drawer (both older than the pass).
-   - Owner still to pick the Paper waterfall ramp (Spectrum `paperRamp` a/b/c).
-3. Next topic after the review: the keymap pass (postponed from before the polish pass).
+### 1. Scanner UX review, end to end (next)
+
+The owner reviewed the redesigned Scanner on the canvas and wants a full UX pass before any
+optimisation work. Their notes (2026-10-12, with screenshots):
+- **The scanning bar under the Tuner island is ugly and unreadable** while a scan runs: the
+  band strip's range labels collide ("AirbAirbandPMR + Harbour + Pagers 169 …"), the dots and
+  hop marks are noise, and it repeats what the Tuner hold row and the drawer already say.
+- **Ruler ranges stack and their labels overlap** ("Your range 2 · Your range 4 …" drawn on top
+  of each other) when ranges are added and skipped; adding and removing ranges needs fixing.
+- **Too much text**, hard to read and understand: summary lines, catch-rate warnings, consent
+  lines and hints. Simplify hard.
+- **Where is the step?** A classic scanner lets you set the channel step. It exists only inside
+  each range's collapsed "Tuning" line, which nobody finds.
+- **"Scan a band" deserves more room**: it is rich and important; it could be wider (or a
+  larger surface than a drawer), with better controls, a more refined and intuitive UX,
+  visually simpler yet powerful.
+- Asked: can we realistically scan any band and try decoding anything, and is core ready?
+
+Facts for that session (from `docs/SCANNER.md` and `packages/api-types/src/scanner.ts` on
+main), to settle the design with the owner:
+- WaveKit is a **wideband** scanner, not a channel stepper: each hop covers about 80 % of the
+  sample rate (~1.6–1.9 MHz) and the FFT sees every channel in it at once. A range's
+  **raster** (channel spacing, e.g. 12.5 kHz) sets the channel grid discoveries are keyed to;
+  it barely changes sweep speed. Speed comes from the number of hops and the settle time
+  (≈ 185 ms per hop with test-mode markers, ≈ 1.15 s with a timer; 400–470 MHz is 44 hops,
+  ≈ 8 s or ≈ 51 s a pass). `POST /api/scanner/plan` reports real numbers. So "step" should
+  read as **channel spacing** (with presets per band) and the speed story should be about
+  hops and settle, not step.
+- Energy discovery works anywhere the tuner reaches (≈ 24–1766 MHz). Decoder **trials** only
+  cover `ScannerProtocol`: analog FM/AM, DMR, P25 I/II, NXDN, YSF, D-STAR, dPMR, POCSAG,
+  FLEX, APRS, ISM (rtl_433). AIS, ACARS, VDL2 and LoRa are dedicated decoders, not trials
+  (CORE-GAPS). S1 tries one decoder at a time; parallel trials need S2 (integrated,
+  disabled). Per-range dwell and sensitivity, range names, ranges on/off mid-scan and
+  presets are core gaps.
+- Start: brainstorm with the owner one question at a time (superpowers:brainstorming,
+  bounded), from a fresh first-time-operator audit of the current Scanner, BandStrip, Tuner
+  and composer; consider a wider composer surface (e.g. the drawer at full width, or a
+  dedicated Scanner view over the spectrum); then redraw.
+
+### 2. Design system v1 and web app foundation (after the Scanner review)
+
+The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
+make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
+- **The canvas boards are prototypes, not app code.** They do not ship (canvas component
+  format, inline styles, mock state, one class per board), so speeding them up is wasted
+  work. What carries over: the tokens (plain CSS custom properties), the focus / selection
+  rules, copy, mock data shapes, and every component's states and interactions as acceptance
+  criteria.
+- **Normalise the design system on the canvas** (cheap, and what the real app copies): one
+  recipe per component (chip, toggle, segmented control, island, drawer, row, field, toast,
+  tooltip), one shared helmet instead of rules copied in every board, a component inventory
+  board mapping each component to the boards that use it, duplicates removed.
+- **Make the tokens global**: move the token block into `packages/brand` as a themed
+  `tokens/ui.css` + `tokens/ui.json` beside `brand.css` (grounds, accents, focus, `--wk-brand`),
+  covered by `source/validate.py` contrast checks (read `packages/brand/AGENTS.md` first;
+  new colours are approved by the owner, 2026-10-11). Then
+  [THEME-TOKENS.md](THEME-TOKENS.md) points there.
+- **Apply it to the Pi pages**: `packages/sdr-host/ui` (install / first boot and monitor)
+  still uses the brand kit v1.0 Ink + phosphor theme (`packages/sdr-host/DESIGN.md`). Move
+  them to the global tokens with the new defaults (True black + Mono, brand-coloured logo).
+- **Plan the real web app's performance architecture** as a spec plus implementation plans:
+  WebGL2 spectrum and waterfall fed by binary WebSocket frames decoded in a worker;
+  virtualised Activity and Scanner lists; code-split drawers; the mock data server serving
+  the canvas's fake data so the front end can be built before the core gaps land.
+
+**End of each session:** update this file (decision log, next session), CORE-GAPS.md and the
+canvas sticky, snapshot every board into `docs/web/canvas/`, commit only your paths and push
+`design/web-dashboard`.
 
 **How the canvas work went well (keep doing it).**
 - Settle the shared spec first (a token section, a brief in the scratchpad), apply mechanical
   changes to every board with one script, then give teammates distinct files and the shared
   brief. Shared files: one owner; the other teammate keeps small local hunks and the
-  orchestrator merges with `git merge-file` against the common base (this pass: one trivial
-  conflict).
-- Check core semantics before writing UI copy: docs/SCANNER.md "Lifecycle" changed the Pause
-  wording mid-pass (Pause keeps the receiver and decoders only until you tune).
-- Teammates verify in the git-ignored `.agents/web-canvas-harness/` with their own boards copy
-  and port (`PORT=<n> node shot.js …`); always render with ALL current boards. The
-  orchestrator publishes all changed boards in one Artifact call (`root` + `files`), then copies
-  them into `docs/web/canvas/` and commits.
+  orchestrator merges with `git merge-file` against the common base.
+- Check core semantics before writing UI copy (docs/SCANNER.md "Lifecycle" changed the Pause
+  wording mid-pass).
+- Verify in the git-ignored `.agents/web-canvas-harness/` with a boards copy and port per
+  teammate (`PORT=<n> node shot.js …`); always render with ALL current boards. Publish all
+  changed boards in one Artifact call (`root` + `files`), then copy them into
+  `docs/web/canvas/` and commit.
+- Re-audit CORE-GAPS item by item against `origin/main` with a read-only subagent before a
+  handoff; it found nine stale items and eight duplicate groups this time.
 
 ## Handoff to the dev team (later)
 
