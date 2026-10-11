@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest"
 import * as fc from "fast-check"
 import * as net from "node:net"
+import { once } from "node:events"
 import { PassThrough } from "node:stream"
 import {
 	AudioOutput,
@@ -123,10 +124,14 @@ describe("Audio Output", () => {
 		it("should stop and close all connections", async () => {
 			await audioOutput.start()
 
-			const _client = await connectClient(config.port)
+			const accepted = once(audioOutput, "client-connected")
+			const client = await connectClient(config.port)
+			await accepted
 			expect(audioOutput.getConnectedClients()).toBe(1)
 
+			const closed = once(client.socket, "close")
 			await audioOutput.stop()
+			await closed
 			expect(audioOutput.getConnectedClients()).toBe(0)
 		})
 
