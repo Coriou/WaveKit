@@ -7,6 +7,7 @@ import {
 	scanRowIds,
 	scanSources,
 	scanDetail,
+	scanIdentifyReady,
 } from "../view-models/scan.js"
 import type { ViewModule, ViewProps } from "./types.js"
 
@@ -42,19 +43,43 @@ export const scanView: ViewModule = {
 			scanDetail(state, ui, width).length -
 				Math.max(
 					1,
-					height - (state.scan.lanes.status.value && height >= 18 ? 4 : 3),
+					height -
+						(ui.scan.receipt
+							? 1
+							: (state.scan.lanes.status.value && height >= 18 ? 4 : 3) +
+								(ui.scan.tab === "discoveries" ? 1 : 0)),
 				),
 		),
-		ctx: { ...EMPTY_VIEW_CTX, hasSelection: scanRowIds(state, ui).length > 0 },
+		ctx: {
+			...EMPTY_VIEW_CTX,
+			hasSelection: scanRowIds(state, ui).length > 0,
+			scanIdentifyReady: scanIdentifyReady(state, ui, width, height),
+			scanReceipt: state.identify?.receipt != null,
+		},
 	}),
 	onAction: (action, state, ui) => {
 		const clear = {
+			confirm: ui.confirm?.kind === "identify" ? null : ui.confirm,
 			selected: { ...ui.selected, scan: null },
 			detail: { ...ui.detail, scan: { open: false, scroll: 0 } },
 		}
+		if (action.type === "scan-receipt")
+			return {
+				ui: {
+					...ui,
+					...clear,
+					scan: { ...ui.scan, receipt: true },
+					detail: { ...ui.detail, scan: { open: true, scroll: 0 } },
+				},
+				effects: [],
+			}
 		if (action.type === "scan-tab")
 			return {
-				ui: { ...ui, ...clear, scan: { ...ui.scan, tab: action.tab } },
+				ui: {
+					...ui,
+					...clear,
+					scan: { ...ui.scan, tab: action.tab, receipt: false },
+				},
 				effects: [],
 			}
 		if (action.type === "scan-source") {
@@ -70,6 +95,7 @@ export const scanView: ViewModule = {
 					scan: {
 						...ui.scan,
 						sourceId,
+						receipt: false,
 						retry: ui.scan.retry + 1,
 						cursor: null,
 					},
@@ -89,7 +115,7 @@ export const scanView: ViewModule = {
 			)
 				return { ui, effects: [] }
 			return {
-				ui: { ...ui, ...clear, scan: { ...ui.scan, cursor } },
+				ui: { ...ui, ...clear, scan: { ...ui.scan, cursor, receipt: false } },
 				effects: [],
 			}
 		}

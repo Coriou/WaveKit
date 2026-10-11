@@ -675,3 +675,115 @@ describe("native WebSocket access pause", () => {
 		}
 	})
 })
+
+describe("identify synchronous dispatch fence", () => {
+	it.each([false, true])(
+		"honors the fence and strips private options (protected=%s)",
+		async protectedMode => {
+			const native = vi.fn<typeof fetch>(async (_url, init) => {
+				expect(init).not.toHaveProperty("beforeDispatch")
+				expect(init?.redirect).toBe("error")
+				expect(init?.credentials).toBe("omit")
+				return new Response("{}")
+			})
+			const beforeDispatch = vi.fn(() => true)
+			const request = createCliFetch({
+				fetch: native,
+				...(protectedMode
+					? {
+							policy: {
+								origin: "http://127.0.0.1:9100",
+								credentials: credentials(),
+							},
+						}
+					: {}),
+			})
+			await request("http://127.0.0.1:9100/api/scanner/identify", {
+				method: "POST",
+				beforeDispatch,
+			})
+			expect(beforeDispatch).toHaveBeenCalledTimes(1)
+			expect(native).toHaveBeenCalledTimes(1)
+		},
+	)
+	it.each(["false", "throw", "abort"])(
+		"refuses after deferred credential acquisition: %s",
+		async mode => {
+			let resolve!: (value: MachineCredential) => void
+			const provider = () =>
+				new Promise<MachineCredential>(r => {
+					resolve = r
+				})
+			const native = vi.fn<typeof fetch>(async () => new Response("{}"))
+			const controller = new AbortController()
+			const request = createCliFetch({
+				fetch: native,
+				policy: { origin: "http://127.0.0.1:9100", credentials: provider },
+			})
+			const pending = request("http://127.0.0.1:9100/api/scanner/identify", {
+				signal: controller.signal,
+				beforeDispatch: () => {
+					if (mode === "throw") throw new Error(token)
+					if (mode === "abort") {
+						controller.abort()
+						return true
+					}
+					return false
+				},
+			})
+			resolve(new MachineCredential(token))
+			await expect(pending).rejects.toMatchObject({
+				name: "DispatchNotSent",
+				message: "Identify request not sent",
+			})
+			expect(native).not.toHaveBeenCalled()
+		},
+	)
+	it.each(["destination", "headers", "credential", "aborted"])(
+		"types proven pre-native refusal %s",
+		async reason => {
+			const native = vi.fn<typeof fetch>(async () => new Response("{}"))
+			const controller = new AbortController()
+			if (reason === "aborted") controller.abort()
+			const request = createCliFetch({
+				fetch: native,
+				policy: {
+					origin: "http://127.0.0.1:9100",
+					credentials:
+						reason === "credential"
+							? async () => {
+									throw new Error(token)
+								}
+							: credentials(),
+				},
+			})
+			await expect(
+				request(
+					reason === "destination"
+						? "http://127.0.0.1:9101/api/scanner/identify"
+						: "http://127.0.0.1:9100/api/scanner/identify",
+					{
+						beforeDispatch: () => true,
+						signal: controller.signal,
+						...(reason === "headers"
+							? { headers: { Authorization: token } }
+							: {}),
+					},
+				),
+			).rejects.toMatchObject({ name: "DispatchNotSent", reason })
+			expect(native).not.toHaveBeenCalled()
+		},
+	)
+	it("native failure remains sanitized and possibly sent", async () => {
+		const native = vi.fn<typeof fetch>(async () => {
+			throw new Error(token)
+		})
+		await expect(
+			createCliFetch({ fetch: native })(
+				"http://127.0.0.1:9100/api/scanner/identify",
+				{ beforeDispatch: () => true },
+			),
+		).rejects.toMatchObject({ code: "ACCESS_TRANSPORT_FAILED" })
+		expect(native).toHaveBeenCalledTimes(1)
+	})
+})

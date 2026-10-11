@@ -4,7 +4,11 @@ import WebSocket from "ws"
 import { z } from "zod"
 import { CliAccessError, MachineCredential } from "./access-credentials.js"
 import type { CredentialProvider } from "./access-credentials.js"
-import type { FetchLike } from "./config.js"
+import {
+	DispatchNotSent,
+	type FetchLike,
+	type DispatchRefusalReason,
+} from "./config.js"
 import {
 	HANDSHAKE_TIMEOUT_MS,
 	MAX_PAYLOAD_BYTES,
@@ -256,18 +260,52 @@ function createFetch(
 	const policy = bindPolicy(options.policy)
 	const request = options.fetch ?? fetch
 	return async (input, init) => {
-		const target = destination(input, false)
-		if (policy && target.identity !== policy.identity)
-			throw new CliAccessError("ACCESS_DESTINATION_FORBIDDEN")
-		const headers = safeHeaders(init?.headers)
-		if (policy)
-			headers["Authorization"] = await authorization(
-				policy.credentials,
-				init?.signal,
-			)
+		const { beforeDispatch, ...nativeInit } = init ?? {}
+		const local = (reason: DispatchRefusalReason, error: unknown): never => {
+			if (beforeDispatch) throw new DispatchNotSent(reason)
+			throw error
+		}
+		let target: ReturnType<typeof destination>
+		try {
+			target = destination(input, false)
+			if (policy && target.identity !== policy.identity)
+				throw new CliAccessError("ACCESS_DESTINATION_FORBIDDEN")
+		} catch (error) {
+			return local("destination", error)
+		}
+		let headers: Record<string, string>
+		try {
+			headers = safeHeaders(nativeInit.headers)
+		} catch (error) {
+			return local("headers", error)
+		}
+		if (policy) {
+			try {
+				headers["Authorization"] = await authorization(
+					policy.credentials,
+					nativeInit.signal,
+				)
+			} catch (error) {
+				return local(
+					nativeInit.signal?.aborted ? "aborted" : "credential",
+					error,
+				)
+			}
+		}
+		if (beforeDispatch) {
+			if (nativeInit.signal?.aborted) throw new DispatchNotSent("aborted")
+			let allowed = false
+			try {
+				allowed = beforeDispatch() === true
+			} catch {
+				/* fixed refusal */
+			}
+			if (!allowed) throw new DispatchNotSent("eligibility")
+			if (nativeInit.signal?.aborted) throw new DispatchNotSent("aborted")
+		}
 		try {
 			const response = await request(target.url, {
-				...init,
+				...nativeInit,
 				headers,
 				redirect: "error",
 				credentials: "omit",

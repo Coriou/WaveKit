@@ -8,6 +8,39 @@ import { ErrorBoundary } from "./error-boundary.js"
 import { ColorContext } from "./lines.js"
 import { TooSmall } from "./too-small.js"
 
+it.each([59, 79, 199])(
+	"keeps identify y/n/Esc visible together at width %s",
+	async width => {
+		const confirm = {
+			kind: "identify" as const,
+			token: 1,
+			prompt: "Identify",
+			yes: "confirm",
+			no: "cancel",
+			request: {
+				sourceId: "rtl",
+				target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+				timeoutMs: 15000 as const,
+				exhaustive: false as const,
+				record: false as const,
+			},
+			layout: { width, height: 12, rows: [] },
+		}
+		const h = await renderAt(
+			<ColorContext.Provider value={false}>
+				<ConfirmBar confirm={confirm} width={width} />
+			</ColorContext.Provider>,
+			{ cols: width + 1, rows: 16 },
+		)
+		try {
+			expect(h.text()).toContain("y confirm  n cancel  Esc cancel")
+			expect(h.text()).not.toContain("...")
+		} finally {
+			h.unmount()
+		}
+	},
+)
+
 /** Set once Size's effects ran; useTerminalSize's resize listener is attached before it. */
 let sizeReady = false
 

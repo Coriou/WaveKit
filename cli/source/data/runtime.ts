@@ -1,4 +1,19 @@
-import { getScan, ScanReadError } from "./api-client.js"
+import {
+	identifyReadiness,
+	identifyFrameKey,
+	identifyPromptMatches,
+	identifyReceiptOutcome,
+	identifyReceiptRead,
+	identifyReceiptReconnect,
+	type IdentifyContext,
+	type IdentifyEvidence,
+	type IdentifyPrompt,
+	type IdentifyReceipt,
+	type IdentifySnapshot,
+	type IdentifyOutcome,
+	type IdentifyAutoOpen,
+} from "./identify-state.js"
+import { getScan, ScanReadError, submitIdentify } from "./api-client.js"
 import {
 	initialScan,
 	resetScan,
@@ -11,8 +26,8 @@ import {
 	type ScanDemand,
 } from "./scan-state.js"
 import type { SpectrumFrameEventData } from "@wavekit/api-types"
-import type { ScanRead } from "./scanner-guards.js"
-import { createCliProbeFetch } from "./access-transport.js"
+import type { ScanRead, ScanDiscovery, ScanValues } from "./scanner-guards.js"
+import { createCliFetch, createCliProbeFetch } from "./access-transport.js"
 import { createApiClient } from "./api-client.js"
 import {
 	discover as defaultDiscover,
@@ -35,6 +50,7 @@ import {
 	type RestInbound,
 	type RestValues,
 	type WriteIntent,
+	type SourceRow,
 	type WsEvent,
 } from "./types.js"
 import {
@@ -93,13 +109,35 @@ export interface Runtime {
 	stop(): void
 	reconnect(): void
 	setScanDemand(demand: ScanDemand | null): void
+	setIdentifyContext(
+		context: IdentifyContext,
+		live?: () => IdentifyContext,
+	): void
+	invalidateIdentify(): void
+	prepareIdentify(context: IdentifyContext): IdentifyPrompt | null
+	markIdentifyVisible(token: number): void
+	confirmIdentify(token: number): void
+	identifySnapshot(): IdentifySnapshot
+	setIdentifyInspection(active: boolean): void
 	send(intent: WriteIntent): void
 	/** One flush: drain the inbound queue, reduce, commit once. Exposed for tests. */
 	tick(): void
 }
 
 export type RuntimeHandle = Pick<Runtime, "store" | "reconnect" | "send"> &
-	Partial<Pick<Runtime, "setScanDemand">>
+	Partial<
+		Pick<
+			Runtime,
+			| "setScanDemand"
+			| "setIdentifyContext"
+			| "invalidateIdentify"
+			| "prepareIdentify"
+			| "markIdentifyVisible"
+			| "confirmIdentify"
+			| "identifySnapshot"
+			| "setIdentifyInspection"
+		>
+	>
 
 export function nodeRuntimeDeps(
 	explicit: ApiTarget | null,
@@ -107,7 +145,7 @@ export function nodeRuntimeDeps(
 	transports?: Pick<RuntimeDeps, "fetchFn" | "wsFactory">,
 ): RuntimeDeps {
 	return {
-		fetchFn: transports?.fetchFn ?? ((url, init) => fetch(url, init)),
+		fetchFn: transports?.fetchFn ?? createCliFetch(),
 		probeFetchFn: createCliProbeFetch(),
 		wsFactory: transports?.wsFactory ?? nodeWsFactory,
 		now: () => Date.now(),
@@ -158,6 +196,266 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	const scanReadAt = new Map<string, number>()
 	let pendingFrame: { frame: SpectrumFrameEventData; at: number } | null = null
 	const pendingKeys = new Set<string>()
+	// Authorization is synchronous ingress evidence, never the coalesced render store.
+	let identifyRevision = 0
+	let identifySession = 0
+	let identifyConnected = false
+	let identifyAuthBlocked = false
+	let identifyContext: IdentifyContext = {
+		sourceId: null,
+		discoveryId: null,
+		key: "",
+		active: false,
+		columns: 0,
+		rows: 0,
+		contentRows: 0,
+	}
+	let liveIdentifyContext: (() => IdentifyContext) | undefined
+	let identifySource: SourceRow | null = null
+	let identifySourceAt: number | null = null
+	let identifySourceDirty = true
+	let identifyDetail: ScanDiscovery | null = null
+	let identifyDetailAt: number | null = null
+	let identifyDetailDirty = true
+	let identifyStatus: ScanValues["status"] | null = null
+	let identifyStatusAt: number | null = null
+	let identifyStatusDirty = true
+	let identifyFrame: IdentifyEvidence["frame"] = null
+	let identifyPrompt: IdentifyPrompt | null = null
+	let identifyAutoOpen: IdentifyAutoOpen | null = null
+	let identifyContextGeneration = 0
+	let identifyVisible: number | null = null
+	let identifyReceipt: IdentifyReceipt | null = null
+	let identifyInspection = false
+	let identifyDirty = false
+	let identifyToken = 0
+	let identifyAttempt = 0
+	let identifyOwner: number | null = null
+	let identifyBoundary = false
+	let identifyAbort: AbortController | null = null
+	let receiptGeneration = 0
+	let receiptAbort: AbortController | null = null
+	let receiptReading = false
+	let lastReceiptRead = -Infinity
+	function revokeIdentify(detailDirty = false): void {
+		identifyRevision++
+		identifyPrompt = null
+		identifyVisible = null
+		if (identifyReceipt?.phase === "preparing") identifyAbort?.abort()
+		if (detailDirty) identifyDetailDirty = true
+		identifyDirty = true
+	}
+	function reconnectIdentify(): void {
+		identifyAutoOpen = null
+		identifyContextGeneration++
+		revokeIdentify(true)
+		identifySession++
+		identifyFrame = null
+		identifySourceDirty = true
+		identifyStatusDirty = true
+		receiptGeneration++
+		receiptAbort?.abort()
+		receiptReading = false
+		lastReceiptRead = -Infinity
+		if (identifyReceipt)
+			identifyReceipt = identifyReceiptReconnect(
+				identifyReceipt,
+				identifySession,
+			)
+	}
+	function evidence(): IdentifyEvidence {
+		return {
+			destination: target?.base ?? null,
+			session: identifySession,
+			revision: identifyRevision,
+			context: identifyContext,
+			connected: identifyConnected && !stopped,
+			authBlocked: identifyAuthBlocked,
+			source: identifySource,
+			sourceAt: identifySourceAt,
+			sourceDirty: identifySourceDirty,
+			scan,
+			frame: identifyFrame,
+			detail: identifyDetail,
+			detailAt: identifyDetailAt,
+			detailDirty: identifyDetailDirty,
+			status: identifyStatus,
+			statusAt: identifyStatusAt,
+			statusDirty: identifyStatusDirty,
+			profileGeneration: scanAdmission,
+		}
+	}
+	function identifySnapshot(): IdentifySnapshot {
+		return {
+			prompt: identifyPrompt,
+			autoOpen: identifyAutoOpen,
+			receipt:
+				identifyReceipt && identifyReceipt.destination !== target?.base
+					? {
+							...identifyReceipt,
+							error: "Reconnect to original API to inspect",
+						}
+					: identifyReceipt,
+			readiness: identifyReadiness(evidence(), identifyReceipt, deps.now()),
+			inspection: identifyInspection,
+		}
+	}
+	function updateIdentifyContext(
+		context: IdentifyContext,
+		live?: () => IdentifyContext,
+	): void {
+		if (live) liveIdentifyContext = live
+		if (JSON.stringify(context) !== JSON.stringify(identifyContext)) {
+			identifyContextGeneration++
+			identifyAutoOpen = null
+			const sourceChanged = context.sourceId !== identifyContext.sourceId
+			const detailChanged = context.discoveryId !== identifyContext.discoveryId
+			revokeIdentify(detailChanged || sourceChanged)
+			if (sourceChanged) {
+				identifySource = null
+				identifySourceAt = null
+				identifySourceDirty = true
+				identifyFrame = null
+			}
+			identifyContext = context
+		}
+	}
+	function liveContextMatches(): boolean {
+		if (!liveIdentifyContext) return true
+		try {
+			const current = liveIdentifyContext()
+			if (JSON.stringify(current) !== JSON.stringify(identifyContext)) {
+				updateIdentifyContext(current)
+				return false
+			}
+			return true
+		} catch {
+			revokeIdentify()
+			return false
+		}
+	}
+	function discoveryMaterial(detail: ScanDiscovery | null): string {
+		return JSON.stringify(
+			detail
+				? [
+						detail.id,
+						detail.frequencyHz,
+						detail.bandwidthHz,
+						detail.sourceIds.includes(identifyContext.sourceId ?? ""),
+						detail.tuningTrust,
+						detail.operator?.lockout === true,
+					]
+				: null,
+		)
+	}
+	function sourceMaterial(row: SourceRow | null): string {
+		return JSON.stringify(
+			row
+				? [
+						row.id,
+						row.connected,
+						row.caps,
+						row.activity?.state,
+						row.activityUnrecognised,
+					]
+				: null,
+		)
+	}
+	function identifyIngress(item: Inbound): void {
+		if (
+			item.kind === "ws:open" ||
+			item.kind === "ws:close" ||
+			item.kind === "target"
+		) {
+			reconnectIdentify()
+			if (item.kind === "ws:open") {
+				identifyConnected = true
+				identifyAuthBlocked = false
+			}
+			if (item.kind === "ws:close") {
+				identifyConnected = false
+				identifyAuthBlocked = item.reason.includes("access")
+			}
+			return
+		}
+		if (item.kind === "ws:invalid" && item.scan) {
+			revokeIdentify(true)
+			return
+		}
+		if (item.kind !== "ws") return
+		const ev = item.event
+		if (ev.type === "scanner:invalidate" && ev.key.startsWith("discovery:")) {
+			revokeIdentify(true)
+			return
+		}
+		if (ev.type === "spectrum:profile") {
+			revokeIdentify()
+			identifyFrame = null
+			return
+		}
+		if (ev.type === "spectrum:frame") {
+			const accepted = scanFrame(scan, ev.frame, item.at)
+			if (accepted === scan || ev.frame.sourceId !== identifyContext.sourceId)
+				return
+			if (
+				!identifyFrame ||
+				identifyFrameKey(identifyFrame.frame) !== identifyFrameKey(ev.frame)
+			)
+				revokeIdentify()
+			identifyFrame = { frame: { ...ev.frame, bins: "" }, receivedAt: item.at }
+			identifyDirty = true
+			return
+		}
+		if (ev.type === "scanner:status") {
+			const before = identifyStatus
+			const id = identifyContext.sourceId
+			if (
+				JSON.stringify([
+					before?.enabled,
+					before?.engines.find(x => x.sourceId === id)?.state,
+				]) !==
+				JSON.stringify([
+					ev.status.enabled,
+					ev.status.engines.find(x => x.sourceId === id)?.state,
+				])
+			)
+				revokeIdentify()
+			identifyStatus = ev.status
+			identifyStatusAt = item.at
+			identifyStatusDirty = false
+			identifyDirty = true
+			return
+		}
+		if (
+			ev.type === "source:status" &&
+			ev.source.id === identifyContext.sourceId
+		) {
+			if (sourceMaterial(identifySource) !== sourceMaterial(ev.source))
+				revokeIdentify()
+			identifySource = ev.source
+			identifySourceAt = item.at
+			identifySourceDirty = false
+			identifyDirty = true
+			return
+		}
+		if (
+			"sourceId" in ev &&
+			ev.sourceId === identifyContext.sourceId &&
+			[
+				"source:disconnected",
+				"source:removed",
+				"source:error",
+				"source:caps-changed",
+				"source:connected",
+			].includes(ev.type)
+		) {
+			revokeIdentify()
+			identifySourceDirty = true
+			identifyFrame = null
+			if (ev.type === "source:caps-changed" && identifySource)
+				identifySource = { ...identifySource, caps: ev.caps }
+		}
+	}
 	function resetScanSession(): void {
 		scanGeneration++
 		scanAbort?.abort()
@@ -172,6 +470,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		scanDirty = true
 	}
 	const push = (item: Inbound): void => {
+		identifyIngress(item)
 		if (item.kind === "ws:open" || item.kind === "ws:close") resetScanSession()
 		if (item.kind === "ws:invalid" && item.scan) {
 			if (scanDemand) {
@@ -354,6 +653,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		const demand = scanDemand
 		const generation = scanGeneration
 		const admission = scanAdmission
+		const authorizationRevision = identifyRevision
+		const authorizationSession = identifySession
 		const base = target.base
 		const controller = new AbortController()
 		scanAbort = controller
@@ -402,9 +703,58 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 								"invalid",
 								"Scan detail identity mismatch",
 							)
+						if (
+							authorizationRevision === identifyRevision &&
+							authorizationSession === identifySession
+						) {
+							if (key === "discovery") {
+								const detail = value as ScanDiscovery
+								if (
+									identifyDetail &&
+									discoveryMaterial(identifyDetail) !==
+										discoveryMaterial(detail)
+								)
+									revokeIdentify()
+								identifyDetail = detail
+								identifyDetailAt = deps.now()
+								identifyDetailDirty = false
+							}
+							if (key === "status") {
+								const status = value as ScanValues["status"]
+								const id = identifyContext.sourceId
+								if (
+									identifyStatus &&
+									JSON.stringify([
+										identifyStatus.enabled,
+										identifyStatus.engines.find(x => x.sourceId === id)?.state,
+									]) !==
+										JSON.stringify([
+											status.enabled,
+											status.engines.find(x => x.sourceId === id)?.state,
+										])
+								)
+									revokeIdentify()
+								identifyStatus = status
+								identifyStatusAt = deps.now()
+								identifyStatusDirty = false
+							}
+							identifyDirty = true
+						}
 						scan = scanRead(scan, key, value, null, deps.now())
 					} catch (error) {
 						if (generation !== scanGeneration || stopped) return
+						if (
+							authorizationRevision === identifyRevision &&
+							authorizationSession === identifySession
+						) {
+							if (key === "discovery") {
+								revokeIdentify(true)
+							}
+							if (key === "status") {
+								revokeIdentify()
+								identifyStatusDirty = true
+							}
+						}
 						scan = scanRead(
 							scan,
 							key,
@@ -452,6 +802,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		afterWrite = false,
 	): Promise<boolean> {
 		const run = epoch
+		const authorizationRevision = identifyRevision
+		const authorizationSession = identifySession
 		const seq = (issued.get(endpoint) ?? 0) + 1
 		issued.set(endpoint, seq)
 		const outcome = await api.get(endpoint)
@@ -475,6 +827,27 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			if (RESYNC_ENDPOINTS.includes(endpoint)) {
 				if (outcome.ok) resyncFailed.delete(endpoint)
 				else resyncFailed.add(endpoint)
+			}
+			if (
+				endpoint === "sources" &&
+				authorizationRevision === identifyRevision &&
+				authorizationSession === identifySession
+			) {
+				if (outcome.ok) {
+					const row =
+						(outcome.value as SourceRow[]).find(
+							x => x.id === identifyContext.sourceId,
+						) ?? null
+					if (sourceMaterial(row) !== sourceMaterial(identifySource))
+						revokeIdentify()
+					identifySource = row
+					identifySourceAt = deps.now()
+					identifySourceDirty = false
+				} else {
+					revokeIdentify()
+					identifySourceDirty = true
+				}
+				identifyDirty = true
 			}
 			push(restInbound(endpoint, outcome, deps.now(), urgent))
 		}
@@ -648,8 +1021,209 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		return [...out]
 	}
 
+	function receiptReadReset(): void {
+		receiptGeneration++
+		receiptAbort?.abort()
+		receiptReading = false
+		lastReceiptRead = -Infinity
+		if (identifyReceipt)
+			identifyReceipt = {
+				...identifyReceipt,
+				readGeneration: identifyReceipt.readGeneration + 1,
+			}
+	}
+	async function readReceiptCycle(): Promise<void> {
+		const receipt = identifyReceipt
+		if (
+			stopped ||
+			!identifyInspection ||
+			!receipt?.jobId ||
+			!target ||
+			receipt.destination !== target.base ||
+			receiptReading ||
+			deps.now() - lastReceiptRead < POLL_MS ||
+			identifyAuthBlocked
+		)
+			return
+		const generation = receiptGeneration
+		const session = identifySession
+		const base = target.base
+		const controller = new AbortController()
+		receiptAbort = controller
+		receiptReading = true
+		lastReceiptRead = deps.now()
+		const deadline = deps.timers.setTimeout(() => controller.abort(), 2000)
+		let job: ScanValues["job"] | null = null
+		let error: string | null = null
+		try {
+			job = await getScan(
+				deps.fetchFn,
+				base,
+				"job",
+				`/api/scanner/jobs/${encodeURIComponent(receipt.jobId)}`,
+				controller.signal,
+			)
+		} catch {
+			error = "Identify receipt unavailable"
+		} finally {
+			deps.timers.clearTimeout(deadline)
+		}
+		if (
+			stopped ||
+			generation !== receiptGeneration ||
+			session !== identifySession ||
+			identifyReceipt !== receipt
+		)
+			return
+		identifyReceipt = identifyReceiptRead(receipt, job, error, {
+			destination: target?.base ?? null,
+			session,
+			readGeneration: receipt.readGeneration,
+			now: deps.now(),
+		})
+		receiptReading = false
+		receiptAbort = null
+		identifyDirty = true
+	}
+	function prepareIdentify(context: IdentifyContext): IdentifyPrompt | null {
+		updateIdentifyContext(context)
+		if (!liveContextMatches()) return null
+		const e = evidence()
+		const ready = identifyReadiness(e, identifyReceipt, deps.now())
+		if (
+			!ready.ready ||
+			!ready.request ||
+			!ready.layout ||
+			!e.destination ||
+			!e.frame ||
+			!context.discoveryId
+		)
+			return null
+		identifyPrompt = {
+			token: ++identifyToken,
+			destination: e.destination,
+			session: e.session,
+			revision: e.revision,
+			profileGeneration: e.profileGeneration,
+			contextKey: context.key,
+			discoveryId: context.discoveryId,
+			request: ready.request,
+			frameKey: identifyFrameKey(e.frame.frame),
+			layout: ready.layout,
+		}
+		identifyVisible = null
+		identifyDirty = true
+		return identifyPrompt
+	}
+	function confirmIdentify(token: number): void {
+		const prompt = identifyPrompt
+		if (!prompt) return
+		if (
+			prompt.token !== token ||
+			identifyVisible !== token ||
+			!liveContextMatches() ||
+			!identifyPromptMatches(prompt, evidence(), identifyReceipt, deps.now())
+		) {
+			revokeIdentify()
+			return
+		}
+		identifyPrompt = null
+		identifyVisible = null
+		identifyOwner = token
+		identifyBoundary = false
+		const attempt = ++identifyAttempt
+		const originContextGeneration = identifyContextGeneration
+		receiptReadReset()
+		identifyReceipt = {
+			phase: "preparing",
+			destination: prompt.destination,
+			session: identifySession,
+			request: prompt.request,
+			status: null,
+			jobId: null,
+			job: null,
+			error: null,
+			terminalAt: null,
+			readGeneration: receiptGeneration,
+		}
+		identifyDirty = true
+		const controller = new AbortController()
+		identifyAbort = controller
+		let settled = false
+		const finish = (outcome: IdentifyOutcome): void => {
+			if (settled || attempt !== identifyAttempt) return
+			if (!identifyBoundary && controller.signal.aborted)
+				outcome = { kind: "unsent", status: null, reason: "aborted" }
+			settled = true
+			deps.timers.clearTimeout(deadline)
+			identifyOwner = null
+			identifyAbort = null
+			if (identifyReceipt)
+				identifyReceipt = identifyReceiptOutcome(identifyReceipt, outcome)
+			identifyDirty = true
+			if (
+				outcome.kind === "refused" &&
+				[
+					"AUTH_REQUIRED",
+					"HOST_FORBIDDEN",
+					"ORIGIN_FORBIDDEN",
+					"CSRF_REQUIRED",
+					"ACCESS_UNAVAILABLE",
+				].includes(outcome.code)
+			)
+				identifyAuthBlocked = true
+			if (
+				outcome.kind === "accepted" &&
+				!stopped &&
+				originContextGeneration === identifyContextGeneration &&
+				prompt.contextKey === identifyContext.key &&
+				identifyContext.active &&
+				prompt.session === identifySession &&
+				prompt.destination === target?.base
+			) {
+				identifyAutoOpen = {
+					contextKey: prompt.contextKey,
+					destination: prompt.destination,
+					session: prompt.session,
+					jobId: outcome.job.id,
+				}
+			}
+		}
+		const deadline = deps.timers.setTimeout(() => {
+			controller.abort()
+			identifyOwner = null
+			if (!identifyBoundary)
+				finish({ kind: "unsent", status: null, reason: "aborted" })
+		}, 15_000)
+		const beforeDispatch = (): boolean => {
+			if (
+				settled ||
+				controller.signal.aborted ||
+				identifyOwner !== token ||
+				!liveContextMatches() ||
+				!identifyPromptMatches(prompt, evidence(), identifyReceipt, deps.now())
+			)
+				return false
+			identifyBoundary = true
+			if (identifyReceipt)
+				identifyReceipt = { ...identifyReceipt, phase: "possibly-sent" }
+			identifyDirty = true
+			return true
+		}
+		void submitIdentify(
+			deps.fetchFn,
+			prompt.destination,
+			prompt.request,
+			controller.signal,
+			beforeDispatch,
+		).then(finish, () =>
+			finish({ kind: "unresolved", status: null, acceptedResponse: false }),
+		)
+	}
+
 	function tick(): void {
 		void readScanCycle()
+		void readReceiptCycle()
 		if (pendingFrame) {
 			scan = scanFrame(scan, pendingFrame.frame, pendingFrame.at)
 			pendingFrame = null
@@ -663,7 +1237,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		if (
 			Math.floor(now / 1000) === Math.floor(current.now / 1000) &&
 			!queue.some(isUrgent) &&
-			!scanDirty
+			!scanDirty &&
+			!identifyDirty
 		)
 			return
 		const batch = queue.splice(0, queue.length)
@@ -675,6 +1250,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			next = { ...next, scan }
 			scanDirty = false
 		}
+		next = { ...next, identify: identifySnapshot() }
+		identifyDirty = false
 		const fx = next.effects
 		if (fx.polls.length > 0 || (fx.resync?.length ?? 0) > 0) {
 			next = { ...next, effects: { polls: [] } }
@@ -744,6 +1321,21 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	return {
 		store,
 		tick,
+		identifySnapshot,
+		setIdentifyContext: updateIdentifyContext,
+		invalidateIdentify: () => revokeIdentify(),
+		prepareIdentify,
+		markIdentifyVisible: token => {
+			if (identifyPrompt?.token === token) identifyVisible = token
+		},
+		confirmIdentify,
+		setIdentifyInspection: active => {
+			if (active === identifyInspection) return
+			identifyInspection = active
+			receiptReadReset()
+			identifyDirty = true
+			if (active) void readReceiptCycle()
+		},
 		start: () => {
 			if (!stopped) return
 			stopped = false
@@ -764,6 +1356,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		},
 		stop: () => {
 			stopped = true
+			reconnectIdentify()
+			identifyAbort?.abort()
+			identifyConnected = false
 			epoch++
 			resetScanSession()
 			scanDemand = null
@@ -787,6 +1382,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		},
 		reconnect: () => {
 			if (stopped) return
+			reconnectIdentify()
+			identifyConnected = false
 			if (target === null) {
 				void runDiscovery()
 				return
@@ -805,6 +1402,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		},
 		setScanDemand: demand => {
 			if (sameDemand(scanDemand, demand)) return
+			revokeIdentify(true)
 			const sourceChanged = scanDemand?.sourceId !== demand?.sourceId
 			const retryChanged = (scanDemand?.retry ?? 0) !== (demand?.retry ?? 0)
 			const queryChanged = scanDemand?.cursor !== demand?.cursor
