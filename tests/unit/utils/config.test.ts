@@ -1144,3 +1144,54 @@ describe("band defaults config (region, stateDir, decoders[].band)", () => {
 		})
 	})
 })
+
+// Accepted source routing contract: implicit relay selection needs a shared source.
+describe("implicit tuner relay source validation", () => {
+	const dedicated = {
+		id: "scanner-only",
+		type: "rtl_tcp",
+		host: "127.0.0.1",
+		port: 1234,
+		caps: { kind: "iq", format: "U8_IQ", sampleRate: 2048000 },
+		scanner: { role: "dedicated" },
+	}
+
+	it.each([{ sources: [] }, { sources: [dedicated] }])(
+		"rejects enabled implicit relay without a shared source: %j",
+		({ sources }) => {
+			const result = ConfigSchema.safeParse({
+				sources,
+				tunerRelay: { enabled: true },
+			})
+			expect(result.success).toBe(false)
+			if (!result.success)
+				expect(result.error.issues).toContainEqual(
+					expect.objectContaining({ path: ["tunerRelay", "sourceId"] }),
+				)
+		},
+	)
+
+	it("preserves an empty source configuration when the relay is disabled", () => {
+		expect(
+			ConfigSchema.parse({ sources: [], tunerRelay: { enabled: false } })
+				.tunerRelay.enabled,
+		).toBe(false)
+	})
+
+	it("accepts an explicitly selected configured dedicated source", () => {
+		const config = ConfigSchema.parse({
+			sources: [dedicated],
+			tunerRelay: { enabled: true, sourceId: dedicated.id },
+		})
+		expect(config.tunerRelay.sourceId).toBe(dedicated.id)
+	})
+
+	it("accepts implicit selection when a configured shared source exists", () => {
+		expect(
+			ConfigSchema.safeParse({
+				sources: [{ ...dedicated, scanner: { role: "shared" } }],
+				tunerRelay: { enabled: true },
+			}).success,
+		).toBe(true)
+	})
+})

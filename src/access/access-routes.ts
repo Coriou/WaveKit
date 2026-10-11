@@ -10,6 +10,13 @@ export interface AccessRouteServices {
 	flows: SessionFlows
 }
 
+export interface AccessRouteController {
+	/** Rejects even requests admitted by the root hook before their handler starts. */
+	stopAdmission(): void
+	/** Stops admission and waits for flow completion, including durable persistence. */
+	drain(): Promise<void>
+}
+
 function sendFlow<T>(
 	reply: FastifyReply,
 	result: AccessFlowResult<T>,
@@ -25,7 +32,49 @@ function sendFlow<T>(
 export function registerAccessRoutes(
 	app: FastifyInstance,
 	services: AccessRouteServices,
-): void {
+): AccessRouteController {
+	let stopped = false
+	let active = 0
+	let draining: Promise<void> | undefined
+	let drained: (() => void) | undefined
+	const controller: AccessRouteController = Object.freeze({
+		stopAdmission(): void {
+			stopped = true
+		},
+		drain(): Promise<void> {
+			stopped = true
+			draining ??=
+				active === 0
+					? Promise.resolve()
+					: new Promise<void>(resolve => {
+							drained = resolve
+						})
+			return draining
+		},
+	})
+	const run = async (
+		reply: FastifyReply,
+		invoke: () =>
+			| AccessFlowResult<unknown>
+			| Promise<AccessFlowResult<unknown>>,
+	): Promise<FastifyReply> => {
+		// No asynchronous gap between this gate and the actual service invocation.
+		if (stopped || active >= 512)
+			return reply
+				.header("Cache-Control", "no-store")
+				.code(stopped ? 503 : 429)
+				.send({
+					code: stopped ? "ACCESS_UNAVAILABLE" : "ACCESS_CAPACITY",
+				})
+		active++
+		try {
+			return sendFlow(reply, await invoke())
+		} finally {
+			// Response close/onResponse cannot release this persistence ownership.
+			active--
+			if (active === 0) drained?.()
+		}
+	}
 	const options = {
 		bodyLimit: 1024,
 		errorHandler(
@@ -49,51 +98,45 @@ export function registerAccessRoutes(
 		},
 	}
 	app.post("/api/access/pairing-codes", options, async (request, reply) =>
-		sendFlow(
-			reply,
+		run(reply, () =>
 			services.pairing.issue(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
 	app.post("/api/access/pair", options, async (request, reply) =>
-		sendFlow(
-			reply,
-			await services.pairing.redeem(
+		run(reply, () =>
+			services.pairing.redeem(
 				accessRequestFromHttp(request.raw, "api"),
 				request.body,
 			),
 		),
 	)
 	app.get("/api/access/session", options, async (request, reply) =>
-		sendFlow(
-			reply,
+		run(reply, () =>
 			services.flows.status(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
 	app.post("/api/access/session/refresh", options, async (request, reply) =>
-		sendFlow(
-			reply,
-			await services.flows.refresh(accessRequestFromHttp(request.raw, "api")),
+		run(reply, () =>
+			services.flows.refresh(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
 	app.post("/api/access/session/logout", options, async (request, reply) =>
-		sendFlow(
-			reply,
-			await services.flows.logout(accessRequestFromHttp(request.raw, "api")),
+		run(reply, () =>
+			services.flows.logout(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
 	app.post("/api/access/devices/revoke", options, async (request, reply) =>
-		sendFlow(
-			reply,
-			await services.flows.revoke(
+		run(reply, () =>
+			services.flows.revoke(
 				accessRequestFromHttp(request.raw, "api"),
 				request.body,
 			),
 		),
 	)
 	app.post("/api/access/devices/revoke-all", options, async (request, reply) =>
-		sendFlow(
-			reply,
-			await services.flows.revokeAll(accessRequestFromHttp(request.raw, "api")),
+		run(reply, () =>
+			services.flows.revokeAll(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
+	return controller
 }

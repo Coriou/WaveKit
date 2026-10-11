@@ -22,6 +22,7 @@
  */
 
 import * as dgram from "node:dgram"
+import type { NodeHttpAccessOptions } from "../access/node-http-adapter.js"
 import { EventEmitter } from "node:events"
 import type * as http from "node:http"
 import { z } from "zod"
@@ -101,6 +102,11 @@ export interface DigitalVoiceStatus {
 }
 
 export interface DigitalVoiceServiceOptions {
+	/** Borrowed shared protected policy/session/lease authority. */
+	httpAccess?: NodeHttpAccessOptions
+	/** Canonical configured public origin; never inferred from listener binding. */
+	publicOrigin?: string
+	httpHost?: string
 	/** Pacing timer period (default 20 ms, one vocoder frame). */
 	tickMs?: number
 	/** A client that accepts nothing for this long is disconnected. */
@@ -170,7 +176,10 @@ function isDsdFmeMode(value: unknown): value is DsdFmeMode {
 export class DigitalVoiceService extends EventEmitter {
 	private readonly log: Logger
 	private readonly config: DigitalVoiceConfig
-	private readonly options: Required<DigitalVoiceServiceOptions>
+	private readonly options: Required<
+		Omit<DigitalVoiceServiceOptions, "httpAccess" | "publicOrigin" | "httpHost">
+	> &
+		Pick<DigitalVoiceServiceOptions, "httpAccess" | "publicOrigin" | "httpHost">
 	private readonly channels: Map<string, VoiceChannel> = new Map()
 	private readonly http: AudioHttpServer
 	private running = false
@@ -186,6 +195,7 @@ export class DigitalVoiceService extends EventEmitter {
 		this.log = createComponentLogger(logger, "DigitalVoice")
 		this.config = config
 		this.options = {
+			...options,
 			tickMs: options.tickMs ?? 20,
 			clientStallTimeoutMs: options.clientStallTimeoutMs ?? 30_000,
 			udpReceiveBufferBytes:
@@ -196,6 +206,7 @@ export class DigitalVoiceService extends EventEmitter {
 			"Digital voice",
 			req => this.resolveRoute(req),
 			err => this.emitError(err),
+			options.httpAccess,
 		)
 	}
 
@@ -347,7 +358,7 @@ export class DigitalVoiceService extends EventEmitter {
 			throw err
 		}
 		try {
-			await this.http.start(this.config.httpPort)
+			await this.http.start(this.config.httpPort, this.options.httpHost)
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err))
 			this.lastError = error.message
@@ -366,7 +377,17 @@ export class DigitalVoiceService extends EventEmitter {
 		)
 	}
 
+	/** Stop HTTP admission immediately, before global route draining. */
+	shutdownAdmission(): void {
+		this.http.shutdownAdmission()
+	}
+
+	stopAdmission(): void {
+		this.http.stopAdmission()
+	}
+
 	async stop(): Promise<void> {
+		this.stopAdmission()
 		if (!this.running) return
 		this.running = false
 		for (const channel of this.channels.values()) {
@@ -618,7 +639,7 @@ export class DigitalVoiceService extends EventEmitter {
 	}
 
 	private url(path: string): string {
-		return `http://localhost:${this.config.httpPort}${path}`
+		return `${this.options.publicOrigin ?? `http://localhost:${this.config.httpPort}`}${path}`
 	}
 
 	private emitError(err: Error): void {

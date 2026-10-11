@@ -59,6 +59,18 @@ import { SourceStatusPublisher } from "./websocket/source-status-publisher.js"
 import { toApiDecoderInfo } from "./serializers/decoder-status.js"
 import type { ResourceAggregator } from "../core/resource-aggregator.js"
 import type { AircraftTracker } from "../core/aircraft-tracker.js"
+import { installAccessHooks } from "../access/fastify-adapter.js"
+import type { FastifyAccessController } from "../access/fastify-adapter.js"
+import { registerAccessRoutes } from "../access/access-routes.js"
+import type { AccessRouteController } from "../access/access-routes.js"
+import { accessCapabilities } from "../access/bootstrap-policy.js"
+import type { ProtectedAccessBootstrap } from "../access/bootstrap-policy.js"
+import type { ProtectedRuntimeAccessConfig } from "../access/runtime-config.js"
+import type { NamedAccessRuntimeContext } from "../access/runtime-context.js"
+import type { OperatorDataService } from "../operator-data/service.js"
+import { operatorDataRoutes } from "../operator-data/routes.js"
+import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
+import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
 
 /**
  * HTTP header name for correlation ID.
@@ -67,6 +79,8 @@ import type { AircraftTracker } from "../core/aircraft-tracker.js"
 const CORRELATION_ID_HEADER = "x-correlation-id"
 
 export interface ApiServerConfig {
+	publicOrigins?: ProtectedRuntimeAccessConfig["publicOrigins"]
+	accessBootstrap?: ProtectedAccessBootstrap
 	host: string
 	port: number
 }
@@ -77,6 +91,8 @@ export interface AudioConfig {
 }
 
 export interface ApiServerDependencies {
+	access?: NamedAccessRuntimeContext
+
 	sourceManager: SourceManager
 	fanoutManager: FanoutManager
 	fanoutTelemetry?: FanoutTelemetryProvider
@@ -105,6 +121,9 @@ export interface ApiServerDependencies {
  * - CORS support for browser clients
  */
 export class ApiServer {
+	private readonly access: NamedAccessRuntimeContext | undefined
+	private readonly accessController: FastifyAccessController | undefined
+	private accessRoutes: AccessRouteController | undefined
 	private readonly app: FastifyInstance
 	private readonly log: Logger
 	private readonly config: ApiServerConfig
@@ -125,12 +144,23 @@ export class ApiServer {
 	private readonly audioConfig?: AudioConfig | undefined
 	private readonly wsBroadcaster: WebSocketEventBroadcaster
 	private readonly sourceStatusPublisher: SourceStatusPublisher
+	private mounted = false
+	private starting = false
+	private startResult: Promise<void> | undefined
+	private stopping = false
+	private stopResult: Promise<void> | undefined
+	private operatorMountIntent = false
+	private operatorRestRegistered = false
+	private operatorData: OperatorDataService | undefined
+	private operatorObserver: (() => void) | undefined
+	private operatorCloseResult: Promise<void> | undefined
 	private telemetryInterval: ReturnType<typeof setInterval> | null = null
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
 	private scannerWiring: { dispose(): void } | null = null
 	private spectrumWiring: { dispose(): void } | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
+		this.access = dependencies.access
 		this.sourceManager = dependencies.sourceManager
 		this.fanoutManager = dependencies.fanoutManager
 		this.fanoutTelemetry =
@@ -165,6 +195,20 @@ export class ApiServer {
 			disableRequestLogging: true, // We'll handle request logging ourselves
 		})
 
+		// Root policy precedes every plugin and route, including documentation.
+		this.accessController = this.access
+			? installAccessHooks(this.app, this.access.api)
+			: undefined
+		if (this.access)
+			this.app.addHook("onSend", async (_request, reply, payload) => {
+				if (
+					reply.hasHeader("Retry-After") &&
+					reply.hasHeader("Access-Control-Allow-Origin")
+				)
+					reply.header("Access-Control-Expose-Headers", "Retry-After")
+				return payload
+			})
+
 		// Register error handler immediately so it's available for any routes
 		this.registerErrorHandler()
 
@@ -176,7 +220,17 @@ export class ApiServer {
 	 * Starts the API server.
 	 * Registers all plugins and routes, then begins listening.
 	 */
-	async start(): Promise<void> {
+	start(): Promise<void> {
+		if (this.stopping || this.starting)
+			return Promise.reject(
+				new WaveKitError("API startup unavailable", "ACCESS_UNAVAILABLE"),
+			)
+		this.starting = true
+		this.startResult = this.finishStart()
+		return this.startResult
+	}
+
+	private async finishStart(): Promise<void> {
 		this.log.info(
 			{ host: this.config.host, port: this.config.port },
 			"Starting API server",
@@ -184,12 +238,16 @@ export class ApiServer {
 
 		// Register plugins
 		await this.registerPlugins()
+		if (this.stopping)
+			throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
 
 		// Register request logging hook
 		this.registerRequestLogging()
 
 		// Register routes (placeholder - routes will be implemented in later tasks)
 		await this.registerRoutes()
+		if (this.stopping)
+			throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
 
 		// Start listening
 		try {
@@ -198,12 +256,16 @@ export class ApiServer {
 				port: this.config.port,
 			})
 
+			if (this.stopping)
+				throw new WaveKitError("API startup stopped", "ACCESS_UNAVAILABLE")
+			this.mounted = true
+			this.operatorRestRegistered = this.operatorMountIntent
 			this.log.info(
 				{ host: this.config.host, port: this.config.port },
 				"API server started",
 			)
 		} catch (err) {
-			this.log.error({ err }, "Failed to start API server")
+			this.log.error("Failed to start API server")
 			throw err
 		}
 	}
@@ -211,31 +273,197 @@ export class ApiServer {
 	/**
 	 * Stops the API server gracefully.
 	 */
-	async stop(): Promise<void> {
-		this.log.info("Stopping API server")
+	/** Internal shell composition projection; no public endpoint or health metadata. */
+	getAccessBootstrap() {
+		if (
+			!this.access ||
+			!this.config.publicOrigins ||
+			!this.config.accessBootstrap
+		)
+			return null
+		const origins = this.config.publicOrigins
+		const mounted = this.mounted && !this.accessController?.admissionStopped
+		return {
+			version: 1 as const,
+			apiOrigin: origins.api,
+			webSocketUrl: `${origins.api.replace(/^http/, "ws")}/ws`,
+			analogAudioOrigin: origins.analogAudio,
+			digitalAudioOrigin: origins.digitalAudio,
+			access: accessCapabilities(this.config.accessBootstrap, {
+				sessions:
+					mounted &&
+					this.accessRoutes !== undefined &&
+					!this.access.api.sessions.unavailable,
+				pairing: mounted && this.accessRoutes !== undefined,
+			}),
+			capabilities: {
+				analogAudioAvailable:
+					mounted && Boolean(this.liveDemod?.getStatus().running),
+				digitalAudioAvailable:
+					mounted && Boolean(this.digitalVoice?.getStatus().running),
+				operatorDataAvailable: mounted && this.operatorDataAvailable(),
+			},
+		}
+	}
 
+	/** One initial port; synchronous bounded publication uses the existing transport. */
+	getOperatorDataBroadcastPort(): OperatorDataBroadcastPort {
+		return {
+			publishUpdated: data => {
+				try {
+					this.wsBroadcaster.broadcast("operator-data", {
+						type: "operator-data:updated",
+						channel: "operator-data",
+						data,
+					})
+				} catch {
+					this.invalidateOperatorDataPublication()
+				}
+			},
+			sendSnapshot: (clientId, data) =>
+				this.wsBroadcaster.sendToClients("operator-data", [clientId], {
+					type: "operator-data:snapshot",
+					channel: "operator-data",
+					data,
+				}) === 1,
+		}
+	}
+
+	/** Mapping can fail before the port is called; the initial sink owns this fallback. */
+	invalidateOperatorDataPublication(): void {
+		this.log.warn("Operator data publication unavailable")
+		this.wsBroadcaster.invalidateChannelClients("operator-data")
+	}
+
+	/** Protected-only registration intent. Availability follows successful listen, not this call. */
+	mountOperatorData(service: OperatorDataService | undefined): void {
+		if (
+			!this.access ||
+			this.starting ||
+			this.stopping ||
+			this.operatorMountIntent
+		)
+			throw new WaveKitError("Operator mount unavailable", "ACCESS_UNAVAILABLE")
+		this.operatorMountIntent = true
+		this.operatorData = service
+		this.wsBroadcaster.enableOperatorDataChannel()
+		const port = this.getOperatorDataBroadcastPort()
+		this.operatorObserver = this.wsBroadcaster.observeChannel("operator-data", {
+			subscribed: clientId => {
+				try {
+					if (!sendOperatorDataSnapshot(this.operatorData, port, clientId))
+						this.wsBroadcaster.invalidateClient(clientId)
+				} catch {
+					this.log.warn("Operator data snapshot unavailable")
+					this.wsBroadcaster.invalidateClient(clientId)
+				}
+			},
+			unsubscribed: () => {},
+		})
+	}
+
+	private operatorDataAvailable(): boolean {
+		if (!this.operatorRestRegistered || !this.operatorObserver || this.stopping)
+			return false
 		try {
-			// Stop telemetry broadcasting interval
+			return this.operatorData?.snapshot() !== undefined
+		} catch {
+			return false
+		}
+	}
+
+	stopAdmission(): void {
+		this.stopping = true
+		this.mounted = false
+		this.operatorRestRegistered = false
+		let failed = false
+		for (const seal of [
+			() => this.accessController?.stopAdmission(),
+			() => this.accessRoutes?.stopAdmission(),
+			() => this.wsBroadcaster.stopSubscriptionAdmission(),
+		]) {
+			try {
+				seal()
+			} catch {
+				failed = true
+			}
+		}
+		if (failed)
+			throw new WaveKitError(
+				"API admission seal incomplete",
+				"ACCESS_UNAVAILABLE",
+			)
+	}
+
+	stop(): Promise<void> {
+		if (this.stopResult) return this.stopResult
+		let failed = false
+		try {
+			this.stopAdmission()
+		} catch {
+			failed = true
+		}
+		this.stopResult = this.finishStop(failed)
+		return this.stopResult
+	}
+
+	private async finishStop(sealFailed: boolean): Promise<void> {
+		this.log.info("Stopping API server")
+		let failed = sealFailed
+		const attempt = async (operation: () => void | Promise<void>) => {
+			try {
+				await operation()
+			} catch {
+				failed = true
+			}
+		}
+		// Startup cannot resume into registration/listen after teardown.
+		await this.startResult?.catch(() => undefined)
+		// Each actual drain is attempted. Output policy/sink/observer survive both.
+		await attempt(() => {
+			this.operatorCloseResult ??=
+				this.operatorData?.close() ?? Promise.resolve()
+			return this.operatorCloseResult
+		})
+		await attempt(async () => {
+			await this.accessRoutes?.drain()
+		})
+		await attempt(() => {
+			this.operatorObserver?.()
+			this.operatorObserver = undefined
+		})
+		await attempt(() => {
+			this.accessController?.dispose()
+		})
+		await attempt(() => {
+			this.wsBroadcaster.closeAll()
+		})
+		await attempt(() => {
 			if (this.telemetryInterval) {
 				clearInterval(this.telemetryInterval)
 				this.telemetryInterval = null
 			}
+		})
+		await attempt(() => {
 			this.sourceStatusPublisher.stop()
+		})
+		await attempt(() => {
 			this.scannerWiring?.dispose()
 			this.scannerWiring = null
 			this.scannerLimiter = null
+		})
+		await attempt(() => {
 			this.spectrumWiring?.dispose()
 			this.spectrumWiring = null
-
-			// Close all WebSocket connections first
-			this.wsBroadcaster.closeAll()
-
+		})
+		await attempt(async () => {
 			await this.app.close()
-			this.log.info("API server stopped")
-		} catch (err) {
-			this.log.error({ err }, "Error stopping API server")
-			throw err
+		})
+		if (failed) {
+			this.log.error("Error stopping API server")
+			throw new WaveKitError("API shutdown incomplete", "ACCESS_UNAVAILABLE")
 		}
+		this.log.info("API server stopped")
 	}
 
 	/**
@@ -499,12 +727,13 @@ export class ApiServer {
 	 */
 	private async registerPlugins(): Promise<void> {
 		// CORS support for browser clients
-		await this.app.register(fastifyCors, {
-			origin: true, // Allow all origins (can be restricted in production)
-			methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-			allowedHeaders: ["Content-Type", "Authorization"],
-			credentials: true,
-		})
+		if (!this.access)
+			await this.app.register(fastifyCors, {
+				origin: true, // Allow all origins (can be restricted in production)
+				methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+				allowedHeaders: ["Content-Type", "Authorization"],
+				credentials: true,
+			})
 
 		this.log.debug("CORS plugin registered")
 
@@ -579,7 +808,7 @@ export class ApiServer {
 			this.log.debug(
 				{
 					method: request.method,
-					url: request.url,
+					route: request.routeOptions.url ?? "unmatched",
 					correlationId,
 				},
 				"Route not found",
@@ -588,7 +817,9 @@ export class ApiServer {
 			return reply.status(404).send({
 				error: "NotFound",
 				code: "NOT_FOUND",
-				message: `Route ${request.method} ${request.url} not found`,
+				message: this.access
+					? "Route not found"
+					: `Route ${request.method} ${request.url} not found`,
 				correlationId,
 			})
 		})
@@ -600,9 +831,9 @@ export class ApiServer {
 			// Log the error with correlation ID
 			this.log.error(
 				{
-					err: error,
+					code: error instanceof WaveKitError ? error.code : "REQUEST_ERROR",
 					method: request.method,
-					url: request.url,
+					route: request.routeOptions.url ?? "unmatched",
 					statusCode: error.statusCode ?? 500,
 					correlationId,
 				},
@@ -614,7 +845,7 @@ export class ApiServer {
 				return reply.status(400).send({
 					error: error.name,
 					code: error.code,
-					message: error.message,
+					message: this.access ? "Request failed" : error.message,
 					correlationId,
 				})
 			}
@@ -624,8 +855,8 @@ export class ApiServer {
 				return reply.status(400).send({
 					error: "ValidationError",
 					code: "VALIDATION_ERROR",
-					message: error.message,
-					details: error.validation,
+					message: this.access ? "Request failed" : error.message,
+					...(this.access ? {} : { details: error.validation }),
 					correlationId,
 				})
 			}
@@ -635,7 +866,7 @@ export class ApiServer {
 				return reply.status(404).send({
 					error: "NotFound",
 					code: "NOT_FOUND",
-					message: error.message || "Resource not found",
+					message: "Resource not found",
 					correlationId,
 				})
 			}
@@ -649,7 +880,7 @@ export class ApiServer {
 				return reply.status(error.statusCode).send({
 					error: error.name || "ClientError",
 					code: error.code || "CLIENT_ERROR",
-					message: error.message,
+					message: this.access ? "Request failed" : error.message,
 					correlationId,
 				})
 			}
@@ -659,7 +890,7 @@ export class ApiServer {
 				error: "InternalServerError",
 				code: "INTERNAL_ERROR",
 				message:
-					process.env["NODE_ENV"] === "production"
+					this.access || process.env["NODE_ENV"] === "production"
 						? "An internal error occurred"
 						: error.message,
 				correlationId,
@@ -683,7 +914,8 @@ export class ApiServer {
 			// Use client-provided correlation ID or generate a new one
 			const clientCorrelationId = request.headers[CORRELATION_ID_HEADER]
 			const correlationId =
-				typeof clientCorrelationId === "string"
+				typeof clientCorrelationId === "string" &&
+				/^[A-Za-z0-9_-]{1,64}$/.test(clientCorrelationId)
 					? clientCorrelationId
 					: generateCorrelationId()
 
@@ -710,7 +942,7 @@ export class ApiServer {
 			requestLogger.debug(
 				{
 					method: request.method,
-					url: request.url,
+					route: request.routeOptions.url ?? "unmatched",
 					remoteAddress: request.ip,
 				},
 				"Incoming request",
@@ -730,7 +962,7 @@ export class ApiServer {
 			this.log.info(
 				{
 					method: request.method,
-					url: request.url,
+					route: request.routeOptions.url ?? "unmatched",
 					statusCode: reply.statusCode,
 					responseTime: reply.elapsedTime,
 					correlationId,
@@ -747,6 +979,9 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		if (this.access)
+			this.accessRoutes = registerAccessRoutes(this.app, this.access.services)
+
 		// Register health and status routes (Requirement 9.1, 9.2)
 		await this.app.register(healthRoutes, {
 			sourceManager: this.sourceManager,
@@ -817,14 +1052,24 @@ export class ApiServer {
 
 		// Signal discovery scanner (spec § 12.1)
 		if (this.scanner) {
-			await this.app.register(scannerRoutes, { scanner: this.scanner })
+			await this.app.register(scannerRoutes, {
+				scanner: this.scanner,
+				...(this.accessController ? { access: this.accessController } : {}),
+			})
 		}
 		if (this.spectrum) {
 			await this.app.register(spectrumRoutes, { spectrum: this.spectrum })
 		}
 
+		if (this.operatorMountIntent && this.accessController)
+			await this.app.register(operatorDataRoutes, {
+				operatorData: this.operatorData,
+				authorizeMetadataMutation: request =>
+					this.accessController!.authorizeMetadataMutation(request),
+			})
+
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
-		this.wsBroadcaster.registerRoute(this.app)
+		this.wsBroadcaster.registerRoute(this.app, this.accessController)
 
 		this.log.debug("Routes registered")
 	}

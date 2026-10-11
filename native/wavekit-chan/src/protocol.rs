@@ -166,6 +166,110 @@ pub fn parse_request(line: &str) -> Result<Request, (String, String)> {
     }
 }
 
+/// Private opt-in envelope. The ordinary parser remains strict version 1.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ObservedRequest {
+    Ordinary(Request),
+    Open {
+        token: u64,
+        request: OpenReq,
+    },
+    InvalidOpen {
+        token: u64,
+        id: String,
+        detail: String,
+    },
+}
+
+// serde_json::Value normally replaces duplicate keys. Observed identity must never do so.
+struct UniqueObject(Map<String, Value>);
+impl<'de> serde::Deserialize<'de> for UniqueObject {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = UniqueObject;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an object without duplicate keys")
+            }
+            fn visit_map<M: serde::de::MapAccess<'de>>(
+                self,
+                mut map: M,
+            ) -> Result<Self::Value, M::Error> {
+                let mut result = Map::new();
+                while let Some((key, value)) = map.next_entry::<String, Value>()? {
+                    if result.insert(key, value).is_some() {
+                        return Err(serde::de::Error::custom("duplicate field"));
+                    }
+                }
+                Ok(UniqueObject(result))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
+}
+
+pub fn parse_observed_request(line: &str) -> Result<ObservedRequest, (String, String)> {
+    let value: Value =
+        serde_json::from_str(line).map_err(|e| (String::new(), format!("invalid JSON: {e}")))?;
+    if value.get("type").and_then(Value::as_str) != Some("open-observed") {
+        return parse_request(line).map(ObservedRequest::Ordinary);
+    }
+    let UniqueObject(mut obj) = serde_json::from_str::<UniqueObject>(line)
+        .map_err(|e| (String::new(), format!("invalid observed JSON: {e}")))?;
+    drop(value);
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let token = obj
+        .get("token")
+        .and_then(Value::as_str)
+        .filter(|t| !t.is_empty() && !t.starts_with('0') && t.bytes().all(|b| b.is_ascii_digit()))
+        .and_then(|t| t.parse::<u64>().ok())
+        .filter(|t| *t > 0)
+        .ok_or_else(|| {
+            (
+                id.clone(),
+                "token must be a canonical positive decimal u64 string".into(),
+            )
+        })?;
+    // Identity spelling is closed ASCII, so escaped keys/token/id cannot disguise identity.
+    if line.contains('\\') || !valid_id(&id) {
+        return Err((
+            id,
+            "observed identity must use unescaped ASCII spelling".into(),
+        ));
+    }
+    only(
+        &obj,
+        &[
+            "v",
+            "type",
+            "token",
+            "id",
+            "centerHz",
+            "bandwidthHz",
+            "transitionHz",
+            "outputRateHz",
+            "format",
+            "gain",
+            "queueBytes",
+        ],
+    )
+    .map_err(|detail| (id.clone(), detail))?;
+    if obj.get("v").and_then(Value::as_u64) != Some(1) {
+        return Err((id, "v must be 1".into()));
+    }
+    obj.remove("token");
+    obj.insert("type".into(), Value::String("open".into()));
+    match parse_request(&Value::Object(obj).to_string()) {
+        Ok(Request::Open(request)) => Ok(ObservedRequest::Open { token, request }),
+        Err((_, detail)) => Ok(ObservedRequest::InvalidOpen { token, id, detail }),
+        _ => unreachable!("type was replaced with open"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

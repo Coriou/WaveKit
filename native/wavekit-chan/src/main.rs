@@ -5,6 +5,13 @@ fn main() {
     match parse(&argv) {
         Ok(Command::Version) => println!("{VERSION_LINE}"),
         Ok(Command::Run(args)) => std::process::exit(wavekit_chan::runtime::run(args)),
+        Ok(Command::RunObserved {
+            args,
+            settlement_socket,
+        }) => std::process::exit(wavekit_chan::runtime::run_observed(
+            args,
+            &settlement_socket,
+        )),
         Err(e) => {
             eprintln!("wavekit-chan: {e}");
             std::process::exit(2);

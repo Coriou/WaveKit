@@ -10,12 +10,14 @@ import { openAccessRuntime } from "../../../src/access/runtime-context.js"
 import type {
 	AccessRuntimeContext,
 	AccessRuntimeOptions,
+	NamedAccessRuntimeContext,
+	NamedAccessRuntimeOptions,
 } from "../../../src/access/runtime-context.js"
 import { SessionStore } from "../../../src/access/sessions.js"
 import type { AccessRequest } from "../../../src/access/types.js"
 
 const roots: string[] = []
-const contexts: AccessRuntimeContext[] = []
+const contexts: (AccessRuntimeContext | NamedAccessRuntimeContext)[] = []
 const ownership = "single-host-pid-namespace" as const
 const origin = "https://receiver.lan:9000"
 const resolvedBootstrap = resolveAccessBootstrap({
@@ -53,6 +55,31 @@ function options(directory: string): AccessRuntimeOptions {
 		},
 		directory,
 		ownership,
+	}
+}
+
+function namedOptions(directory: string): NamedAccessRuntimeOptions {
+	return {
+		...options(directory),
+		bootstrap: {
+			...bootstrap,
+			allowedAuthorities: ["receiver.lan:9000"],
+			// Deliberately reverse advertised order; listener roles are explicit.
+			externalAudioOrigins: [
+				"https://receiver.lan:9002",
+				"https://receiver.lan:9001",
+			],
+		},
+		audio: {
+			analog: {
+				listenerScheme: "https",
+				allowedAuthorities: ["receiver.lan:9001"],
+			},
+			digital: {
+				listenerScheme: "https",
+				allowedAuthorities: ["receiver.lan:9002"],
+			},
+		},
 	}
 }
 
@@ -105,6 +132,141 @@ function audioRequest(cookie: string): AccessRequest {
 }
 
 describe("unmounted protected runtime lifecycle", () => {
+	it("keeps named listener Host boundaries distinct while sharing durable renewal and revocation", async () => {
+		const { directory, token } = await provision()
+		const storageOpen = vi.spyOn(PrivateAccessStorage, "open")
+		const context = await openAccessRuntime(namedOptions(directory))
+		contexts.push(context)
+		expect(storageOpen).toHaveBeenCalledTimes(1)
+		expect(storageOpen).toHaveBeenCalledWith(
+			expect.objectContaining({ mode: "load" }),
+		)
+		const listeners = [context.api, context.analogAudio, context.digitalAudio]
+		for (const listener of listeners) {
+			expect(listener.sessions).toBe(context.api.sessions)
+			expect(listener.leases).toBe(context.api.leases)
+		}
+		const authorities = [
+			"receiver.lan:9000",
+			"receiver.lan:9001",
+			"receiver.lan:9002",
+		]
+		for (const [index, listener] of listeners.entries()) {
+			for (const [hostIndex, host] of authorities.entries()) {
+				const result = listener.policy.evaluate(
+					request([], {
+						surface: index === 0 ? "api" : "audio",
+						rawHeaders: ["Host", host, "Authorization", `Bearer ${token}`],
+					}),
+				)
+				expect(result).toMatchObject(
+					index === hostIndex
+						? { kind: "authenticated" }
+						: { code: "HOST_FORBIDDEN" },
+				)
+			}
+		}
+		const session = await context.api.sessions.create()
+		if (session.kind !== "created") throw new Error("Missing session")
+		const cookies = [
+			"Cookie",
+			`wavekit_session=${session.cookieValue}`,
+			"X-WaveKit-CSRF",
+			session.csrfToken,
+		]
+		const closed = listeners.map(listener => {
+			const callback = vi.fn()
+			expect(listener.leases.attach(session.principalId, callback).kind).toBe(
+				"attached",
+			)
+			return callback
+		})
+		const browserRequests = authorities.map(host =>
+			request([], {
+				surface: "audio",
+				rawHeaders: [
+					"Host",
+					host,
+					"Origin",
+					origin,
+					"Cookie",
+					`wavekit_session=${session.cookieValue}`,
+				],
+			}),
+		)
+		for (const [index, listener] of listeners.entries()) {
+			const original = browserRequests[index]
+			if (!original) throw new Error("Missing test request")
+			expect(listener.policy.evaluate(original).kind).toBe("authenticated")
+		}
+		const refresh = await context.services.flows.refresh(
+			request(cookies, {
+				method: "POST",
+				rawTarget: "/api/access/session/refresh",
+			}),
+		)
+		expect(refresh).toMatchObject({
+			kind: "success",
+			cookie: { value: session.cookieValue },
+		})
+		for (const callback of closed) expect(callback).not.toHaveBeenCalled()
+		const logout = await context.services.flows.logout(
+			request(cookies, {
+				method: "POST",
+				rawTarget: "/api/access/session/logout",
+			}),
+		)
+		expect(logout.kind).toBe("success")
+		for (const callback of closed) expect(callback).toHaveBeenCalledOnce()
+		for (const [index, listener] of listeners.entries()) {
+			const original = browserRequests[index]
+			if (!original) throw new Error("Missing test request")
+			expect(listener.policy.evaluate(original)).toMatchObject({
+				code: "AUTH_REQUIRED",
+			})
+		}
+		await context.close()
+		const restarted = await openAccessRuntime(namedOptions(directory))
+		contexts.push(restarted)
+		expect(restarted.api.sessions.lookup(session.cookieValue)).toBeUndefined()
+	})
+
+	it.each([
+		{ externalAudioOrigins: ["https://receiver.lan:9003"] },
+		{ externalAudioOrigins: ["http://receiver.lan:9001"] },
+		{ externalAudioOrigins: ["https://receiver.lan:9000"] },
+	])(
+		"rejects advertised audio outside the named boundary union before storage I/O: %o",
+		async delta => {
+			const { directory } = await location()
+			const config = namedOptions(directory)
+			const storageOpen = vi.spyOn(PrivateAccessStorage, "open")
+			await expect(
+				openAccessRuntime({
+					...config,
+					bootstrap: { ...config.bootstrap, ...delta },
+				}),
+			).rejects.toMatchObject({ code: "ACCESS_RUNTIME_UNAVAILABLE" })
+			expect(storageOpen).not.toHaveBeenCalled()
+		},
+	)
+
+	it("rejects a named audio scheme inconsistent with API before storage I/O", async () => {
+		const { directory } = await location()
+		const config = namedOptions(directory)
+		const storageOpen = vi.spyOn(PrivateAccessStorage, "open")
+		await expect(
+			openAccessRuntime({
+				...config,
+				audio: {
+					...config.audio,
+					digital: { ...config.audio.digital, listenerScheme: "http" },
+				},
+			}),
+		).rejects.toMatchObject({ code: "ACCESS_RUNTIME_UNAVAILABLE" })
+		expect(storageOpen).not.toHaveBeenCalled()
+	})
+
 	// Feature: core-access-policy, Property 4: Durable renewable lifecycle
 	// Validates: Requirements 4.1, 4.4, 6.1
 	it("composes one committed authority and restores a paired browser without logout on restart", async () => {

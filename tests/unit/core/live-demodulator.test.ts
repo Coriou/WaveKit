@@ -15,6 +15,13 @@ import { EventEmitter } from "node:events"
 import { PassThrough, Writable } from "node:stream"
 import * as http from "node:http"
 import type { ChildProcess } from "node:child_process"
+import { AccessPolicy } from "../../../src/access/policy.js"
+import { SessionStore } from "../../../src/access/sessions.js"
+import {
+	digestMachineToken,
+	generateMachineToken,
+	sessionCredentialBinding,
+} from "../../../src/access/credentials.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { LiveDemodConfigSchema } from "../../../src/config.js"
 import type {
@@ -540,6 +547,43 @@ describe("LiveDemodulator", () => {
 		expect(Date.now() - started).toBeLessThan(1000)
 		expect(spawnMock).toHaveBeenCalledTimes(2)
 		expect(liveDemod.getStatus().httpUrl).toContain(String(newPort))
+	})
+
+	it("uses the configured analog origin and rejects protected port changes before altering RF config", async () => {
+		const digest = digestMachineToken(generateMachineToken())
+		const sessions = await SessionStore.open({
+			credentialBinding: sessionCredentialBinding(digest),
+			persist: () => Promise.resolve(),
+		})
+		const policy = new AccessPolicy({
+			listenerScheme: "http",
+			allowedAuthorities: ["receiver.local:8081"],
+			allowedOrigins: ["http://receiver.local:8080"],
+			sessionCookieName: "wavekit_session",
+			machineSecretDigest: digest,
+			sessions,
+		})
+		liveDemod = create(
+			{},
+			{
+				httpAccess: { policy, sessions },
+				publicOrigin: "http://receiver.local:8081",
+				httpHost: "127.0.0.1",
+			},
+		)
+		expect(liveDemod.getStatus().httpUrl).toBe(
+			"http://receiver.local:8081/stream",
+		)
+		expect(liveDemod.getStatus().wavUrl).toBe(
+			"http://receiver.local:8081/stream.wav",
+		)
+		await expect(
+			liveDemod.reconfigure({ httpPort: port + 1, gain: 5 }),
+		).rejects.toMatchObject({ code: "ACCESS_CONFIG_INVALID" })
+		expect(liveDemod.getStatus().config.httpPort).toBe(port)
+		expect(liveDemod.getStatus().config.gain).not.toBe(5)
+		await liveDemod.reconfigure({ squelch: -50 })
+		expect(liveDemod.getStatus().config.squelch).toBe(-50)
 	})
 
 	it("calculates effective sample rate from bandwidth", () => {

@@ -13,12 +13,36 @@ TIMEOUT=10
 API_HOST="${WAVEKIT_API_HOST:-localhost}"
 API_PORT="${WAVEKIT_API_PORT:-9000}"
 HEALTH_ENDPOINT="http://${API_HOST}:${API_PORT}/health"
+PROBE_TARGET="${WAVEKIT_ACCESS__HEALTH_PROBE__TARGET:-}"
+PROBE_HOST="${WAVEKIT_ACCESS__HEALTH_PROBE__HOST:-}"
+if [ -n "$PROBE_TARGET$PROBE_HOST" ] || [ "${WAVEKIT_ACCESS__MODE:-legacy}" = protected ]; then
+    case "$PROBE_TARGET" in
+        http://127.0.0.1|http://\[::1\]) probe_port=80 ;;
+        http://127.0.0.1:*) probe_port="${PROBE_TARGET#http://127.0.0.1:}" ;;
+        http://\[::1\]:*) probe_port="${PROBE_TARGET#http://\[::1\]:}" ;;
+        *) echo "API health probe configuration invalid"; exit 1 ;;
+    esac
+    case "$probe_port" in
+        ''|*[!0-9]*) echo "API health probe configuration invalid"; exit 1 ;;
+    esac
+    if [ "$probe_port" -lt 1 ] || [ "$probe_port" -gt 65535 ]; then
+        echo "API health probe configuration invalid"; exit 1
+    fi
+    case "$PROBE_HOST" in
+        ''|*[!A-Za-z0-9.:[\]-]*) echo "API health probe configuration invalid"; exit 1 ;;
+    esac
+    HEALTH_ENDPOINT="$PROBE_TARGET/health"
+fi
 
 # Check WaveKit API health endpoint
 # Returns 0 if healthy (200 OK), 1 if unhealthy (503 or connection error)
 check_wavekit_api() {
     # Use timeout to ensure we don't hang (Requirement 4.6)
-    response=$(timeout "${TIMEOUT}s" curl -sf -w "%{http_code}" -o /dev/null "${HEALTH_ENDPOINT}" 2>/dev/null)
+    if [ -n "$PROBE_HOST" ]; then
+        response=$(timeout "${TIMEOUT}s" curl -sf -w "%{http_code}" -o /dev/null -H "Host: $PROBE_HOST" "$HEALTH_ENDPOINT" 2>/dev/null)
+    else
+        response=$(timeout "${TIMEOUT}s" curl -sf -w "%{http_code}" -o /dev/null "$HEALTH_ENDPOINT" 2>/dev/null)
+    fi
     curl_exit=$?
 
     # Check if curl timed out or failed

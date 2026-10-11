@@ -14,9 +14,16 @@
  * - 500 `SCANNER_SETTINGS_WRITE_FAILED`
  * - 503 `SCANNER_DISABLED`, `SCANNER_STATE_UNAVAILABLE`
  */
+import type { ReadStream } from "node:fs"
+import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import { createReadStream } from "node:fs"
 import type { ScannerIdentifyRequest } from "@wavekit/api-types"
-import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
+import type {
+	FastifyInstance,
+	FastifyPluginAsync,
+	FastifyReply,
+	FastifyRequest,
+} from "fastify"
 import { ZodError } from "zod"
 import { ScannerApiError } from "../../core/scanner/errors.js"
 import type { ScannerService } from "../../core/scanner/scanner-service.js"
@@ -78,6 +85,7 @@ export type ScannerRouteService = Pick<
 
 export interface ScannerRoutesOptions {
 	scanner: ScannerRouteService
+	access?: FastifyAccessController
 }
 
 interface DiscoveryQuery {
@@ -231,6 +239,63 @@ function toFilter(q: DiscoveryQuery): DiscoveryFilter {
 		...(q.sort !== undefined ? { sort: q.sort } : {}),
 		...(q.cursor !== undefined ? { cursor: q.cursor } : {}),
 		...(q.limit !== undefined ? { limit: q.limit } : {}),
+	}
+}
+
+/** Reserve protected downloads before asynchronous lookup or producer creation. */
+async function sendDownload(
+	request: FastifyRequest,
+	reply: FastifyReply,
+	access: FastifyAccessController | undefined,
+	lookup: () => string | null | Promise<string | null>,
+	contentType: string,
+	missing: () => FastifyReply,
+	{ mapScannerErrors = false }: { mapScannerErrors?: boolean } = {},
+): Promise<FastifyReply> {
+	let stream: ReadStream | undefined
+	const lease = access?.leaseDownload(request, reply.raw, () =>
+		stream?.destroy(),
+	)
+	if (lease?.kind === "rejected") {
+		const status =
+			lease.reason === "capacity"
+				? 429
+				: lease.reason === "invalidated"
+					? 401
+					: 503
+		return reply.code(status).send({
+			code:
+				status === 429
+					? "ACCESS_CAPACITY"
+					: status === 401
+						? "AUTH_REQUIRED"
+						: "ACCESS_UNAVAILABLE",
+		})
+	}
+	try {
+		const path = await lookup()
+		if (lease && !lease.active()) return reply
+		if (!path) return missing()
+		stream = createReadStream(path)
+		stream.on("error", () => {
+			request.log.warn("Scanner download stream error")
+			lease?.release()
+		})
+		// A synchronous invalidation during producer construction owns late cleanup.
+		if (lease && !lease.active()) {
+			stream.destroy()
+			return reply
+		}
+		return reply.type(contentType).send(stream)
+	} catch (err) {
+		stream?.destroy()
+		if (lease && !lease.active()) return reply
+		if (mapScannerErrors && err instanceof ScannerApiError)
+			return sendError(reply, err)
+		if (!access) throw err
+		request.log.warn("Scanner download unavailable")
+		// The adapter's response-finish callback releases the lease after denial flush.
+		return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
 	}
 }
 
@@ -521,10 +586,15 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				response: errors,
 			},
 		},
-		async (request, reply) =>
-			(await scanner.deleteDiscovery(request.params.id))
-				? reply.code(204).send()
-				: notFound(reply, "Discovery", request.params.id),
+		async (request, reply) => {
+			try {
+				return (await scanner.deleteDiscovery(request.params.id))
+					? reply.code(204).send()
+					: notFound(reply, "Discovery", request.params.id)
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
 	)
 
 	fastify.get<{ Params: { recordingId: string } }>(
@@ -533,21 +603,37 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			schema: {
 				tags,
 				summary: "Download a recording (audio/wav)",
-				response: { 404: errorResponseSchema },
+				response: {
+					404: errorResponseSchema,
+					503: {
+						anyOf: [
+							errorResponseSchema,
+							{
+								type: "object",
+								properties: { code: { const: "ACCESS_UNAVAILABLE" } },
+								required: ["code"],
+								additionalProperties: false,
+							},
+						],
+					},
+				},
 			},
 		},
 		async (request, reply) => {
 			const { recordingId } = request.params
-			// Malformed ids never reach the filesystem lookup.
-			const path = RECORDING_ID.test(recordingId)
-				? scanner.recordingPath(recordingId)
-				: null
-			if (!path) return notFound(reply, "Recording", recordingId)
-			const stream = createReadStream(path)
-			stream.on("error", (err: Error) =>
-				request.log.warn({ err }, "Recording stream error"),
+			return sendDownload(
+				request,
+				reply,
+				options.access,
+				// Malformed ids never reach the filesystem lookup.
+				() =>
+					RECORDING_ID.test(recordingId)
+						? scanner.recordingPath(recordingId)
+						: null,
+				"audio/wav",
+				() => notFound(reply, "Recording", recordingId),
+				{ mapScannerErrors: true },
 			)
-			return reply.type("audio/wav").send(stream)
 		},
 	)
 
@@ -563,22 +649,15 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				},
 			},
 			async (request, reply) => {
-				const path = await scanner.evidencePath(request.params.id, kind)
-				if (!path)
-					return notFound(
-						reply,
-						`${kind} evidence of discovery`,
-						request.params.id,
-					)
-				const stream = createReadStream(path)
-				stream.on("error", (err: Error) =>
-					request.log.warn({ err }, "Evidence stream error"),
+				return sendDownload(
+					request,
+					reply,
+					options.access,
+					() => scanner.evidencePath(request.params.id, kind),
+					kind === "psd" ? "application/json" : "application/octet-stream",
+					() =>
+						notFound(reply, `${kind} evidence of discovery`, request.params.id),
 				)
-				return reply
-					.type(
-						kind === "psd" ? "application/json" : "application/octet-stream",
-					)
-					.send(stream)
 			},
 		)
 	}
@@ -603,19 +682,18 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			const dot = file.lastIndexOf(".")
 			const id = file.slice(0, dot)
 			const kind = file.slice(dot + 1)
-			// Malformed ids never reach the filesystem lookup.
-			const path =
-				dot > 0 && CAPTURE_ID.test(id) && (kind === "cu8" || kind === "json")
-					? scanner.capturePath(id, kind)
-					: null
-			if (!path) return notFound(reply, "Capture file", file)
-			const stream = createReadStream(path)
-			stream.on("error", (err: Error) =>
-				request.log.warn({ err }, "Capture stream error"),
+			return sendDownload(
+				request,
+				reply,
+				options.access,
+				// Malformed ids never reach the filesystem lookup.
+				() =>
+					dot > 0 && CAPTURE_ID.test(id) && (kind === "cu8" || kind === "json")
+						? scanner.capturePath(id, kind)
+						: null,
+				kind === "cu8" ? "application/octet-stream" : "application/json",
+				() => notFound(reply, "Capture file", file),
 			)
-			return reply
-				.type(kind === "cu8" ? "application/octet-stream" : "application/json")
-				.send(stream)
 		},
 	)
 

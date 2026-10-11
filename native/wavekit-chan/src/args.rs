@@ -17,6 +17,10 @@ pub struct Args {
 pub enum Command {
     Version,
     Run(Args),
+    RunObserved {
+        args: Args,
+        settlement_socket: PathBuf,
+    },
 }
 
 pub fn parse(argv: &[String]) -> Result<Command, String> {
@@ -47,6 +51,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         "block-samples",
         "socket-dir",
         "control-fd",
+        "settlement-socket",
     ];
     if let Some(bad) = map.keys().find(|k| !known.contains(&k.as_str())) {
         return Err(format!("unknown option --{bad}"));
@@ -80,7 +85,7 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
     if control_fd < 3 {
         return Err("--control-fd must be >= 3 (0-2 carry IQ, events and logs)".into());
     }
-    Ok(Command::Run(Args {
+    let args = Args {
         generation: get("generation")?
             .parse()
             .map_err(|_| "--generation must be an integer".to_string())?,
@@ -90,7 +95,25 @@ pub fn parse(argv: &[String]) -> Result<Command, String> {
         block_samples,
         socket_dir: PathBuf::from(get("socket-dir")?),
         control_fd,
-    }))
+    };
+    match map.get("settlement-socket") {
+        None => Ok(Command::Run(args)),
+        Some(path) => {
+            let path = PathBuf::from(path);
+            if !path.is_absolute()
+                || path.as_os_str().as_encoded_bytes().len() > 90
+                || path.to_str().is_none()
+                || path.as_os_str().as_encoded_bytes().contains(&0)
+                || control_fd == 4
+            {
+                return Err("--settlement-socket requires an absolute UTF-8 path <=90 bytes and private FD4".into());
+            }
+            Ok(Command::RunObserved {
+                args,
+                settlement_socket: path,
+            })
+        }
+    }
 }
 
 #[cfg(test)]

@@ -189,3 +189,54 @@ export function parseEventLine(
 		? { ok: true, event: parsed.data }
 		: { ok: false, error: parsed.error.message }
 }
+
+/** Private observed control path; ordinary v1 schemas and encodings stay unchanged. */
+export type OpenRequest = Extract<ChannelizerRequest, { type: "open" }>
+export const MAX_SETTLEMENT_TOKEN = 18_446_744_073_709_551_615n
+export function isSettlementToken(token: string): boolean {
+	return (
+		/^[1-9][0-9]{0,19}$/.test(token) && BigInt(token) <= MAX_SETTLEMENT_TOKEN
+	)
+}
+
+export function encodeObservedRequest(
+	open: OpenRequest,
+	token: string,
+): string {
+	// Reuse all native open constraints, including gain and the per-format queue floor.
+	const ordinary = encodeRequest(open)
+	if (open.type !== "open" || !isSettlementToken(token))
+		throw new WaveKitError(
+			"invalid observed channelizer request",
+			"CHANNELIZER_REQUEST_INVALID",
+		)
+	const parsed = ChannelizerRequestSchema.parse(JSON.parse(ordinary) as unknown)
+	return `${JSON.stringify({ ...parsed, type: "open-observed", token })}\n`
+}
+
+const ObservedReadySchema = z
+	.object({
+		v,
+		type: z.literal("ready"),
+		generation,
+		pid: z.number().int().positive(),
+		observerCapability: z.literal("attempt-disposal-v1"),
+	})
+	.strict()
+export type ObservedReadyEvent = z.infer<typeof ObservedReadySchema>
+export type ObservedEvent = ChannelizerEvent | ObservedReadyEvent
+
+export function parseObservedEventLine(
+	line: string,
+): { ok: true; event: ObservedEvent } | { ok: false; error: string } {
+	const ordinary = parseEventLine(line)
+	if (ordinary.ok) return ordinary
+	let raw: unknown
+	try {
+		raw = JSON.parse(line)
+	} catch {
+		return ordinary
+	}
+	const parsed = ObservedReadySchema.safeParse(raw)
+	return parsed.success ? { ok: true, event: parsed.data } : ordinary
+}

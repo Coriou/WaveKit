@@ -1,7 +1,11 @@
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
-import { ConfigValidationError } from "./utils/errors.js"
+import { ConfigValidationError, WaveKitError } from "./utils/errors.js"
+import {
+	AccessRuntimeConfigSchema,
+	validateProtectedRuntimeMapping,
+} from "./access/runtime-config.js"
 import {
 	CSDR_BUFFER_MAX_ELEMENTS,
 	CSDR_BUFFER_MIN_ELEMENTS,
@@ -538,6 +542,7 @@ export const ConfigSchema = z
 		liveDemod: LiveDemodConfigSchema.optional(),
 		digitalVoice: DigitalVoiceConfigSchema.optional(),
 		api: ApiConfigSchema.default({}),
+		access: AccessRuntimeConfigSchema,
 		logging: LoggingConfigSchema.default({}),
 		health: HealthConfigSchema.optional(),
 		resources: ResourcesConfigSchema.default({}),
@@ -557,6 +562,35 @@ export const ConfigSchema = z
 		stateDir: z.string().min(1).default("data"),
 	})
 	.superRefine((config, ctx) => {
+		if (config.access.mode === "protected") {
+			try {
+				validateProtectedRuntimeMapping(config.access, config.api, {
+					analog: LiveDemodConfigSchema.parse(config.liveDemod ?? {}).httpPort,
+					digital: DigitalVoiceConfigSchema.parse(config.digitalVoice ?? {})
+						.httpPort,
+				})
+			} catch {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["access"],
+					message: "Invalid access configuration",
+				})
+			}
+		}
+		if (
+			config.tunerRelay.enabled &&
+			config.tunerRelay.sourceId === undefined &&
+			!config.sources.some(
+				source => sourceScannerConfig(source).role === "shared",
+			)
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["tunerRelay", "sourceId"],
+				message:
+					"Select an explicit configured relay source or configure a shared source",
+			})
+		}
 		// The relay starts before sources connect, so validate its explicit
 		// selection against configured identities rather than runtime status.
 		if (
@@ -1048,6 +1082,11 @@ export function loadConfig(configPath?: string): Config {
 	const result = ConfigSchema.safeParse(configWithOverrides)
 
 	if (!result.success) {
+		if (result.error.issues.some(issue => issue.path[0] === "access"))
+			throw new WaveKitError(
+				"Invalid access configuration",
+				"ACCESS_CONFIG_INVALID",
+			)
 		throw new ConfigValidationError(result.error)
 	}
 
@@ -1061,6 +1100,11 @@ export function loadConfig(configPath?: string): Config {
 export function validateConfig(config: unknown): Config {
 	const result = ConfigSchema.safeParse(config)
 	if (!result.success) {
+		if (result.error.issues.some(issue => issue.path[0] === "access"))
+			throw new WaveKitError(
+				"Invalid access configuration",
+				"ACCESS_CONFIG_INVALID",
+			)
 		throw new ConfigValidationError(result.error)
 	}
 	return result.data
@@ -1087,6 +1131,8 @@ export function validateConfigSafe(config: unknown): {
 	}
 
 	const errors = result.error.issues.map(issue => {
+		if (issue.path[0] === "access")
+			return "access: Invalid access configuration"
 		const path = issue.path.length > 0 ? issue.path.join(".") : "root"
 		return `${path}: ${issue.message}`
 	})

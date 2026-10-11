@@ -9,6 +9,8 @@ import {
 } from "vitest"
 import { spawn } from "node:child_process"
 import type * as ChildProcessModule from "node:child_process"
+import { EventEmitter } from "node:events"
+import { PassThrough } from "node:stream"
 import { mkdirSync, rmSync } from "node:fs"
 import pino from "pino"
 import {
@@ -18,11 +20,26 @@ import {
 import type { ChannelizerEvent } from "../../../src/core/channelizer/protocol.js"
 import { writeExecutable } from "../../mocks/executables.js"
 import { FAKE_WAVEKIT_CHAN } from "../../mocks/fake-wavekit-chan.js"
+import {
+	ObservedPermitLedger,
+	SettlementRegistry,
+	type ProcessClaim,
+} from "../../../src/core/channelizer/settlement-observer.js"
+import type { ChannelProvider } from "../../../src/core/channelizer/types.js"
 
 vi.mock("node:child_process", async importOriginal => {
 	const actual = await importOriginal<typeof ChildProcessModule>()
 	return { ...actual, spawn: vi.fn(actual.spawn) }
 })
+
+class ProviderEmitter extends EventEmitter {
+	override off(
+		event: string | symbol,
+		listener: (...args: never[]) => void,
+	): this {
+		return super.off(event, listener as (...args: unknown[]) => void)
+	}
+}
 
 const logger = pino({ level: "silent" })
 // Short and under /tmp: macOS caps a Unix socket path at ~104 bytes.
@@ -65,6 +82,73 @@ const openA = {
 	queueBytes: 96_000,
 } as const
 
+/** Synthetic accounting only; these costs are not a measured capacity profile. */
+function ownedStartup() {
+	const registry = new SettlementRegistry()
+	const lifetime = registry.registerProviderLifetime()!
+	const observer = registry.createObserver(lifetime)
+	const expected = {
+		centerHz: 162e6,
+		bandwidthHz: 45_600,
+		transitionHz: 1_200,
+		outputRateHz: 48_000,
+		format: "cf32" as const,
+	}
+	const inputCaps = {
+		kind: "iq",
+		format: "U8_IQ",
+		sampleRate: 2_048_000,
+		centerFreq: 162e6,
+		exclusive: false,
+	} as const
+	const handle = observer.allocateAcquisition({
+		activation: "decoder",
+		sourceId: "s",
+		decoderId: "d",
+		scannerAttempt: {},
+		expectedRequest: expected,
+		expectedInputCaps: inputCaps,
+	})!
+	const cost = { cpu: 1, bytes: 100 }
+	const ledger = new ObservedPermitLedger(
+		{ cpu: 100, bytes: 10_000 },
+		{ cpu: 0, bytes: 0 },
+	)
+	handle.attachPermit(
+		ledger.prepareObservedPermit(
+			handle.requestToken,
+			Array.from({ length: 6 }, () => cost),
+			Array.from({ length: 6 }, () => cost),
+			{ decoder: cost, classifier: cost, analog: cost },
+		)!,
+	)
+	let claim: ProcessClaim | undefined
+	const underlying = Object.assign(new ProviderEmitter(), {
+		requestChannel: () => {
+			observer.takeAcquisition("s", "d", expected)
+			const tx = observer.tryReserveObservedTransaction(handle)!
+			claim = observer.claimProcess(tx, {
+				sourceId: "s",
+				generation: 4,
+				sampleRateHz: inputCaps.sampleRate,
+				centerHz: inputCaps.centerFreq,
+			})
+			return Promise.resolve({
+				ok: false,
+				reasonCode: "channelizer-unavailable",
+				detail: "startup fixture",
+			} as const)
+		},
+		releaseChannel: () => Promise.resolve(),
+		currentGeneration: () => 4,
+	}) satisfies ChannelProvider
+	const adapter = observer.bindProvider(underlying)
+	handle.arm()
+	void adapter.requestChannel("s", "d", expected, inputCaps)
+	if (!claim) throw new Error("missing startup fixture claim")
+	return { registry, lifetime, observer, handle, ledger, claim }
+}
+
 /** Records events and the exit in arrival order. */
 function record(p: ChannelizerProcess) {
 	const log: string[] = []
@@ -83,6 +167,126 @@ function record(p: ChannelizerProcess) {
 }
 
 describe("ChannelizerProcess", { timeout: 15_000 }, () => {
+	it("positively seals a never-invoked wrapper and refuses every late start without invoking spawn", async () => {
+		const owned = ownedStartup()
+		const p = new ChannelizerProcess(
+			opts({
+				settlement: {
+					process: owned.claim,
+					observer: owned.observer,
+					deadline: performance.now() + 1000,
+					now: () => performance.now(),
+				},
+			}),
+			logger,
+		)
+		const calls = vi.mocked(spawn).mock.calls.length
+		await p.stop()
+		await p.waitSettlementNativeRetirement()
+		// Native no-process is positive; all six committed envelopes still need
+		// logical terminal settlement (including the five unused reservations).
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(6)
+		owned.observer.finishAcquisition(owned.handle)
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(0)
+		await expect(p.start()).rejects.toThrow("startup cancelled")
+		expect(vi.mocked(spawn).mock.calls.length).toBe(calls)
+		await p.attemptSettlementCleanup()
+	})
+
+	it("keeps a returned no-PID child's physical charge until its exact CLOSE and stdio/start settlement", async () => {
+		const owned = ownedStartup()
+		const fake = Object.assign(new EventEmitter(), {
+			pid: undefined,
+			stdin: new PassThrough(),
+			stdout: new PassThrough(),
+			stderr: new PassThrough(),
+			stdio: [null, null, null, new PassThrough(), new PassThrough()],
+		}) as unknown as ChildProcessModule.ChildProcess
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			queueMicrotask(() =>
+				fake.emit("error", new Error("synthetic failed spawn")),
+			)
+			return fake
+		})
+		const p = new ChannelizerProcess(
+			opts({
+				settlement: {
+					process: owned.claim,
+					observer: owned.observer,
+					deadline: performance.now() + 1000,
+					now: () => performance.now(),
+				},
+			}),
+			logger,
+		)
+		try {
+			await expect(p.start()).rejects.toThrow("synthetic failed spawn")
+			owned.observer.finishAcquisition(owned.handle)
+			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(1)
+			let retired = false
+			const retirement = p.waitSettlementNativeRetirement().then(() => {
+				retired = true
+			})
+			await p.stop() // Existing no-PID stop fulfillment is explicitly not a CLOSE witness.
+			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(1)
+			expect(retired).toBe(false)
+			for (const stream of fake.stdio) stream?.destroy()
+			fake.emit("close", -2, null)
+			await retirement
+			expect(retired).toBe(true)
+			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(0)
+			await p.attemptSettlementCleanup()
+		} finally {
+			fake.stdout?.destroy()
+			fake.stderr?.destroy()
+			await p.attemptSettlementCleanup()
+		}
+	})
+
+	it("publishes positive no-process only for its own supported pre-spawn validation branch", async () => {
+		const owned = ownedStartup()
+		const before = vi.mocked(spawn).mock.calls.length
+		const p = new ChannelizerProcess(
+			opts({
+				binaryPath: "",
+				settlement: {
+					process: owned.claim,
+					observer: owned.observer,
+					deadline: performance.now() + 1000,
+					now: () => performance.now(),
+				},
+			}),
+			logger,
+		)
+		await expect(p.start()).rejects.toThrow("binary path unavailable")
+		owned.observer.finishAcquisition(owned.handle)
+		expect(vi.mocked(spawn).mock.calls.length).toBe(before)
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(0)
+		await p.attemptSettlementCleanup()
+	})
+
+	it("retains an uncertain synchronous spawn exception rather than treating caught failure as proof", async () => {
+		const owned = ownedStartup()
+		vi.mocked(spawn).mockImplementationOnce(() => {
+			throw new Error("uncertain fixture throw")
+		})
+		const p = new ChannelizerProcess(
+			opts({
+				settlement: {
+					process: owned.claim,
+					observer: owned.observer,
+					deadline: performance.now() + 1000,
+					now: () => performance.now(),
+				},
+			}),
+			logger,
+		)
+		await expect(p.start()).rejects.toThrow("uncertain fixture throw")
+		owned.observer.finishAcquisition(owned.handle)
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(1)
+		expect(owned.observer.snapshot().processes[0]?.native).toBe("unknown")
+		await p.attemptSettlementCleanup()
+	})
 	it("filters access credentials at the actual spawn without changing control pipes or native settings", async () => {
 		// Validates: core-access-policy Requirement 6.4.
 		vi.stubEnv("WAVEKIT_ACCESS_MACHINE_TOKEN", "private-machine-token")
