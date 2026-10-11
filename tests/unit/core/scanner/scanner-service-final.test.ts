@@ -534,3 +534,44 @@ describe("ScannerService (S1-B final review)", () => {
 		await h.service.stop()
 	})
 })
+
+describe("fatal engine job cleanup (review F5)", () => {
+	it.each(["worker-exit", "restart-not-iq"])(
+		"ends a sweep and releases holds after %s",
+		async cause => {
+			const h = serviceHarness({ patch: noPassive })
+			await h.service.start()
+			try {
+				const job = await h.service.createJob(sweep(50))
+				await untilRunning(h, job.id)
+				expect(holderOf(h)).toBe(job.id)
+				expect(h.decoders.held.size).toBe(1)
+				const engine = h.service.spectrum.engine("rtl")!
+				if (cause === "worker-exit")
+					engine.emit("fatal", new Error("worker exited"))
+				else
+					h.sources.setCaps("rtl", {
+						kind: "audio_pcm",
+						format: "S16LE",
+						sampleRate: 48_000,
+					})
+				await vi.waitFor(
+					() =>
+						expect(h.service.getJob(job.id)).toMatchObject({
+							state: "failed",
+							reason: "tuner-unavailable",
+						}),
+					WAIT,
+				)
+				await settled(h.service)
+				expect(holderOf(h)).toBeUndefined()
+				expect(h.decoders.held.size).toBe(0)
+				expect(
+					h.service.spectrum.status().sources.find(s => s.sourceId === "rtl"),
+				).toMatchObject({ engine: "error", latestFrame: null })
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+})

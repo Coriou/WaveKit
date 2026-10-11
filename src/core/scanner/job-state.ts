@@ -9,6 +9,7 @@ export type JobEvent =
 	| { type: "create-rejected" }
 	| { type: "engine-ready" }
 	| { type: "tuner-error" }
+	| { type: "engine-failed" }
 	| { type: "hold" }
 	| { type: "hold-done" }
 	| { type: "pause" }
@@ -158,6 +159,8 @@ export function transition(
 						"tuner-unavailable",
 					)
 				: INVALID
+		case "engine-failed":
+			return to("failed", endActions(s), "tuner-unavailable")
 		case "hold":
 			return s.state === "running" ? to("holding", []) : INVALID
 		case "hold-done":

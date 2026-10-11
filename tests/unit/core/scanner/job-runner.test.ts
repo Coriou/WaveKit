@@ -474,6 +474,8 @@ describe("JobRunner startup deadline (review F2)", () => {
 		runner.tick(14_999)
 		await runner.idle()
 		expect(record.state).toBe("starting")
+		// Readiness was queued just before the deadline: it must not defeat the expired admission.
+		runner.onEpochStarted(epochAt(11, HOP0))
 		runner.tick(15_000)
 		await flush()
 		await runner.idle()

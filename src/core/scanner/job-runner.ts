@@ -443,7 +443,7 @@ export class JobRunner implements JobDriver {
 			state === "starting" &&
 			now - this.record.createdAt >= JOB_STARTUP_CAP_MS
 		)
-			this.queueEvent({ type: "tuner-error" })
+			this.queueEvent({ type: "engine-failed" })
 		if ((state === "running" || state === "holding") && this.scheduler)
 			this.exec(this.scheduler.tick(now))
 		if (
@@ -486,7 +486,7 @@ export class JobRunner implements JobDriver {
 			this.record.state === "starting" &&
 			(!this.sweep || own) &&
 			(this.record.spec.kind !== "identify" ||
-				(this.deps.engine(this.sourceId)?.stats()?.observedSamples ?? 0) > 0)
+				this.hasCurrentIq(this.deps.engine(this.sourceId)))
 		)
 			this.queueEvent({ type: "engine-ready" })
 		if (!this.sweep) return
@@ -1008,14 +1008,24 @@ export class JobRunner implements JobDriver {
 		}
 	}
 
+	/** A new stream can retain old cumulative stats; only its ring proves current IQ admission. */
+	private hasCurrentIq(engine: SpectrumEngine | undefined): boolean {
+		if (!engine) return false
+		const { stream, liveEdge } = engine.accounting()
+		return (
+			stream === engine.currentEpoch().stream &&
+			liveEdge > 0 &&
+			engine.readRing(liveEdge - 1, liveEdge) !== null
+		)
+	}
+
 	private async openEngine(): Promise<void> {
 		const engine = await this.deps.openEngine(this.sourceId)
 		this.engineOpened = true
 		if (!this.sweep) {
 			if (
 				engine.currentEpoch().startSample !== null &&
-				(this.record.spec.kind !== "identify" ||
-					(engine.stats()?.observedSamples ?? 0) > 0)
+				(this.record.spec.kind !== "identify" || this.hasCurrentIq(engine))
 			)
 				this.queueEvent({ type: "engine-ready" })
 			return

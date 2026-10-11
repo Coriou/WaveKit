@@ -271,6 +271,9 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	private bps = 2
 	private fmt: IqFormat = "U8_IQ"
 	private running = false
+	private failed = false
+	private generation = 0
+	private stopping: Promise<EngineState | null> | null = null
 	private restarting = false
 	private persisted: EngineState | undefined
 	// Stream and sample accounting
@@ -349,7 +352,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	get isRunning(): boolean {
-		return this.running
+		return this.running && !this.failed
 	}
 
 	get markerSupported(): boolean | null {
@@ -363,6 +366,11 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 
 	async start(): Promise<void> {
 		if (this.running) return
+		if (this.failed)
+			throw new WaveKitError(
+				"Spectrum engine failed; acquire a new instance",
+				"SCANNER_ENGINE_FAILED",
+			)
 		const caps = this.deps.sources.getCaps(this.sourceId)
 		if (!isScannerIqFormat(caps)) {
 			throw new WaveKitError(
@@ -411,7 +419,19 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 	}
 
 	/** Stops the engine; returns the pipeline's engine state for persistence. */
-	async stop(): Promise<EngineState | null> {
+	stop(): Promise<EngineState | null> {
+		if (this.stopping) return this.stopping
+		const stopping = this.stopOnce()
+		this.stopping = stopping
+		void stopping
+			.finally(() => {
+				if (this.stopping === stopping) this.stopping = null
+			})
+			.catch(() => undefined)
+		return stopping
+	}
+
+	private async stopOnce(): Promise<EngineState | null> {
 		if (!this.running) return null
 		this.running = false
 		if (this.hostTimer) clearInterval(this.hostTimer)
@@ -618,10 +638,20 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 			this.persisted,
 		)
 		this.cfg = cfg
+		const generation = ++this.generation
 		const handlers: PipelineHostHandlers = {
-			events: events => this.onEvents(events),
-			buffer: buffer => this.onBuffer(buffer),
+			events: events => {
+				if (generation === this.generation && !this.failed)
+					this.onEvents(events)
+			},
+			buffer: buffer => {
+				if (generation === this.generation) this.onBuffer(buffer)
+			},
+			fatal: err => {
+				if (generation === this.generation) this.fail(err)
+			},
 			error: err => {
+				if (generation !== this.generation || this.failed) return
 				this.log.error({ err }, "Spectrum pipeline error")
 				this.emit("error", err)
 			},
@@ -633,8 +663,27 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 		})
 	}
 
+	private fail(err: Error): void {
+		if (this.failed || !this.running) return
+		this.failed = true
+		this.generation++
+		this.lastStats = null
+		this.current = {
+			...this.current,
+			startSample: null,
+			tuningTrust: "unverified",
+			settleMode: null,
+		}
+		this.log.error({ err }, "Spectrum pipeline unavailable")
+		if (this.listenerCount("error") > 0) this.emit("error", err)
+		this.emit("fatal", err)
+		void this.stop().catch((error: unknown) =>
+			this.log.warn({ err: error }, "Fatal pipeline cleanup failed"),
+		)
+	}
+
 	private async restartPipeline(trust: TuningTrust): Promise<void> {
-		if (this.restarting || !this.host) return
+		if (this.failed || this.restarting || !this.host) return
 		this.restarting = true
 		this.flushBatch()
 		const old = this.host
@@ -650,8 +699,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 					`Source ${this.sourceId} is no longer an IQ source the scanner can read`,
 					"SCANNER_SOURCE_NOT_IQ",
 				)
-				this.log.error({ err }, "Pipeline restart failed")
-				this.emit("error", err)
+				this.fail(err)
 				return
 			}
 			this.inflightBytes = 0
@@ -677,8 +725,7 @@ export class SpectrumEngine extends EventEmitter implements EpochClock {
 				err instanceof Error
 					? err
 					: new WaveKitError(String(err), "SCANNER_PIPELINE_ERROR")
-			this.log.error({ err: error }, "Pipeline restart failed")
-			this.emit("error", error)
+			this.fail(error)
 		})
 	}
 

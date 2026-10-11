@@ -1,3 +1,10 @@
+import { once } from "node:events"
+import { mkdtemp, writeFile, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { pathToFileURL } from "node:url"
+import type { Worker } from "node:worker_threads"
+import { ThreadPipelineHost } from "../../../../src/core/spectrum/pipeline-host.js"
 import { describe, expect, it } from "vitest"
 import fc from "fast-check"
 import pino from "pino"
@@ -693,5 +700,65 @@ describe("SpectrumEngine sub-sample gaps", () => {
 			{ kind: "bytes", startSample: 5, bytes: [21, 22, 23, 24] },
 		])
 		expect(engine.accounting().gapSamples).toBe(4)
+	})
+})
+
+describe("SpectrumEngine fatal host generations (review F5)", () => {
+	it("handles an actual unexpected worker exit once and closes its source listeners", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "wavekit-fatal-worker-"))
+		const path = join(dir, "exit.cjs")
+		await writeFile(path, "process.exit(17)\n")
+		let host!: ThreadPipelineHost
+		const { engine, sources } = makeEngine({
+			createHost: (cfg, handlers) => {
+				host = new ThreadPipelineHost(
+					cfg,
+					handlers,
+					pathToFileURL(path),
+					logger,
+				)
+				return host
+			},
+		})
+		const failures: Error[] = []
+		engine.on("fatal", (err: Error) => failures.push(err))
+		try {
+			await engine.start()
+			const worker = (host as unknown as { worker: Worker }).worker
+			await once(worker, "exit")
+			await engine.stop()
+			expect(failures).toHaveLength(1)
+			expect(failures[0]).toMatchObject({ code: "SCANNER_WORKER_EXIT" })
+			expect(engine.isRunning).toBe(false)
+			expect(engine.stats()).toBeNull()
+			expect(sources.listenerCount("caps-changed")).toBe(0)
+		} finally {
+			await engine.stop()
+			await rm(dir, { recursive: true, force: true })
+		}
+	})
+	it("keeps recoverable errors running, then discards old-host events after a fatal failure", async () => {
+		const { engine, hosts } = makeEngine()
+		const errors: Error[] = []
+		const events: PipelineEvent[] = []
+		engine.on("error", (err: Error) => errors.push(err))
+		engine.on("pipeline", (ev: PipelineEvent) => events.push(ev))
+		await engine.start()
+		const host = hosts[0]!
+		host.handlers.error(new WaveKitError("recoverable", "SCANNER_WORKER_ERROR"))
+		expect(engine.isRunning).toBe(true)
+		host.handlers.fatal!(new WaveKitError("dead", "SCANNER_WORKER_EXIT"))
+		const count = events.length
+		host.handlers.events([
+			{ kind: "epoch-started", epoch: 99, startSample: 0, settleMode: "none" },
+		])
+		host.handlers.fatal!(
+			new WaveKitError("duplicate exit", "SCANNER_WORKER_EXIT"),
+		)
+		await engine.stop()
+		expect(events).toHaveLength(count)
+		expect(engine.currentEpoch().epoch).not.toBe(99)
+		expect(engine.isRunning).toBe(false)
+		expect(errors).toHaveLength(2)
 	})
 })

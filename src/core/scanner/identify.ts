@@ -574,12 +574,16 @@ export class IdentifyRunner implements JobDriver {
 				)
 			case "source-down":
 				// A 15 s identify does not wait for a reconnect: it ends with what it has (the stop-condition row).
-				if (this.record.state === "starting") return this.failStartup(e)
+				if (this.record.state === "starting")
+					return this.failStartup({ type: "engine-failed" })
 				return this.endWithResults()
 			case "tuner-error":
 				return this.failStartup(e)
 			case "cancel":
 			case "source-removed":
+			case "engine-failed":
+				if (e.type === "engine-failed" && this.record.state === "starting")
+					return this.failStartup(e)
 				await this.abort()
 				try {
 					await this.deps.inner.dispatch(e)
@@ -616,7 +620,7 @@ export class IdentifyRunner implements JobDriver {
 			now - this.record.createdAt >=
 				Math.min(this.deps.identify.timeoutMs, JOB_STARTUP_CAP_MS)
 		) {
-			void this.failStartup({ type: "tuner-error" }).catch((err: unknown) =>
+			void this.failStartup({ type: "engine-failed" }).catch((err: unknown) =>
 				this.log.warn({ err }, "Identify startup failed"),
 			)
 			return

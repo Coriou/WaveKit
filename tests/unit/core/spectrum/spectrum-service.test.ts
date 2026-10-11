@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream"
 import pino from "pino"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import type {
 	SpectrumFrameEventData,
 	SpectrumProfileEventData,
@@ -46,6 +46,8 @@ import {
 	serviceHarness,
 	tick,
 } from "../../../mocks/scanner/service-fakes.js"
+
+import { WaveKitError } from "../../../../src/utils/errors.js"
 
 const AIR_CENTRE = 131_725_000
 
@@ -1385,5 +1387,74 @@ describe("ScannerService with the scanner disabled", () => {
 		await h.service.spectrum.unsubscribe("c1")
 		expect(h.fanout.branches.size).toBe(0)
 		await h.service.stop()
+	})
+})
+
+describe("fatal engine lifecycle (review F5)", () => {
+	it("invalidates status and snapshots, discards late messages, and reacquires for subscribers", async () => {
+		const h = make({ fake: true })
+		await h.service.start()
+		try {
+			await h.service.subscribe("existing", { sourceId: "rtl" })
+			const old = h.host()
+			old.epoch(1, true)
+			old.summaries(1, 2)
+			expect(
+				h.service.status().sources.find(s => s.sourceId === "rtl")?.latestFrame,
+			).not.toBeNull()
+			const handlers = old.handlers as PipelineHostHandlers & {
+				fatal?(err: Error): void
+			}
+			const error = new WaveKitError("worker exited", "SCANNER_WORKER_EXIT")
+			if (handlers.fatal) handlers.fatal(error)
+			else handlers.error(error)
+			expect(
+				h.service.status().sources.find(s => s.sourceId === "rtl"),
+			).toMatchObject({ engine: "error", latestFrame: null })
+			const from = h.log.length
+			old.summaries(1, 4)
+			expect(h.frames(from)).toEqual([])
+			await h.service.subscribe("new", { sourceId: "rtl" })
+			expect(h.hostsOf("rtl")).toHaveLength(2)
+			expect(h.seen("new").filter(e => e.type === "snapshot")).toEqual([])
+			await h.service.subscribe("existing", { sourceId: "rtl" })
+			const next = h.host()
+			next.epoch(1, true)
+			next.summaries(1, 10)
+			expect(
+				h
+					.frames(from)
+					.some(
+						f =>
+							f.clientIds.includes("existing") && f.clientIds.includes("new"),
+					),
+			).toBe(true)
+		} finally {
+			await h.service.stop()
+		}
+	})
+	it("reports restart-not-IQ as dead and rejects new demand instead of replaying stale data", async () => {
+		const h = make({ fake: true })
+		await h.service.start()
+		try {
+			await h.service.subscribe("existing", { sourceId: "rtl" })
+			h.host().epoch(1, true)
+			h.host().summaries(1)
+			h.sources.setCaps("rtl", {
+				kind: "audio_pcm",
+				format: "S16LE",
+				sampleRate: 48_000,
+			})
+			await vi.waitFor(() =>
+				expect(
+					h.service.status().sources.find(s => s.sourceId === "rtl"),
+				).toMatchObject({ engine: "error", latestFrame: null }),
+			)
+			await h.service.subscribe("new", { sourceId: "rtl" })
+			expect(h.acks("new").at(-1)?.code).toBe("SPECTRUM_SOURCE_NOT_IQ")
+			expect(h.seen("new").filter(e => e.type === "snapshot")).toEqual([])
+		} finally {
+			await h.service.stop()
+		}
 	})
 })

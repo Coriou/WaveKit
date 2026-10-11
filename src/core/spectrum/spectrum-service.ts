@@ -281,6 +281,7 @@ interface ClientState {
 }
 
 interface Entry {
+	failed?: boolean
 	engine: SpectrumEngine
 	jobs: Set<string>
 	displays: Set<string>
@@ -641,6 +642,29 @@ export class SpectrumService extends EventEmitter {
 			this.errors.set(sourceId, err.message)
 			this.log.warn({ err, sourceId }, "Spectrum engine error")
 		})
+		engine.on("fatal", (err: Error) => {
+			if (this.entries.get(sourceId) !== entry) return
+			this.errors.set(sourceId, err.message)
+			entry.failed = true
+			entry.lastSummary = null
+			entry.lastEpoch = null
+			entry.holds.clear()
+			for (const state of this.clients.values()) {
+				state.held.delete(sourceId)
+				state.current?.sources.delete(sourceId)
+				state.next?.sources.delete(sourceId)
+			}
+			// Remove before notifying jobs: releases cannot attach to this dead instance, and new
+			// demand waits for its bounded host close before opening a fresh generation.
+			void this.closeEntry(sourceId, entry, entry.jobs.size > 0).catch(
+				(error: unknown) =>
+					this.log.warn(
+						{ err: error, sourceId },
+						"Failed engine cleanup failed",
+					),
+			)
+			this.emit("fatal", sourceId, err)
+		})
 		this.deps.engineCreated?.(sourceId, engine)
 		try {
 			await engine.start()
@@ -937,7 +961,12 @@ export class SpectrumService extends EventEmitter {
 		if (this.stopping)
 			throw new WaveKitError("Spectrum service stopped", "SPECTRUM_STOPPED")
 		if (this.removedSources.has(sourceId)) throw this.removedError(sourceId)
-		await this.acquire(sourceId, wsConsumer(clientId))
+		const engine = await this.acquire(sourceId, wsConsumer(clientId))
+		if (this.entries.get(sourceId)?.engine !== engine || !engine.isRunning)
+			throw new WaveKitError(
+				"Spectrum engine became unavailable",
+				"SPECTRUM_ENGINE_ERROR",
+			)
 		state.held.add(sourceId)
 		if (
 			(this.sourceGen.get(sourceId) ?? 0) !== gen ||
@@ -1201,6 +1230,7 @@ export class SpectrumService extends EventEmitter {
 		ev: PipelineEvent,
 		epoch: EngineEpoch,
 	): void {
+		if (entry.failed) return
 		if (ev.kind === "block-summary") {
 			const summary = ev.summary
 			entry.lastSummary = summary

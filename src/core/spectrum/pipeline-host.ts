@@ -23,6 +23,8 @@ export interface PipelineHostHandlers {
 	events(events: PipelineEvent[]): void
 	buffer(buffer: ArrayBuffer): void
 	error(err: Error): void
+	/** Host cannot process further input; distinct from recoverable pipeline errors. */
+	fatal?(err: Error): void
 }
 
 export interface PipelineHost {
@@ -130,6 +132,7 @@ export class ThreadPipelineHost implements PipelineHost {
 	private nextRequestId = 0
 	private closing = false
 	private exited = false
+	private fatalReported = false
 
 	constructor(
 		cfg: PipelineConfig,
@@ -147,7 +150,7 @@ export class ThreadPipelineHost implements PipelineHost {
 		this.worker = new Worker(workerUrl, { name: `spectrum-${cfg.sourceId}` })
 		this.eluStart = this.worker.performance.eventLoopUtilization()
 		this.worker.on("message", (raw: unknown) => this.onMessage(raw))
-		this.worker.on("error", err => this.handlers.error(asError(err))) // @types/node types the listener arg as unknown
+		this.worker.on("error", err => this.reportFatal(asError(err))) // @types/node types the listener arg as unknown
 		this.worker.on("exit", code => {
 			this.exited = true
 			for (const [id, pending] of this.exports) {
@@ -165,7 +168,7 @@ export class ThreadPipelineHost implements PipelineHost {
 				this.maskRequests.delete(id)
 			}
 			if (!this.closing) {
-				this.handlers.error(
+				this.reportFatal(
 					new WaveKitError(
 						`Spectrum worker exited with code ${code}`,
 						"SCANNER_WORKER_EXIT",
@@ -174,6 +177,13 @@ export class ThreadPipelineHost implements PipelineHost {
 			}
 		})
 		this.post({ type: "init", config: cfg })
+	}
+
+	private reportFatal(err: Error): void {
+		if (this.closing || this.fatalReported) return
+		this.fatalReported = true
+		if (this.handlers.fatal) this.handlers.fatal(err)
+		else this.handlers.error(err)
 	}
 
 	send(input: PipelineInput, transfer?: ArrayBuffer): void {

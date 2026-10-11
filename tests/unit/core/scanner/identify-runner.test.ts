@@ -749,3 +749,28 @@ describe("IdentifyRunner window moves, cut-short runs and endings (Task 35a fix 
 		expect(h.runner.owns("rtl", TARGET_HZ)).toBe(false)
 	})
 })
+
+describe("IdentifyRunner fatal engine cleanup (review F5)", () => {
+	it("releases an active trial, reports cancellation, and ignores late probe evidence", async () => {
+		const h = identifyHarness()
+		h.engine.push(1_100_000)
+		await h.runner.start()
+		h.tracks.push(viewOf(dmrTrack()))
+		await h.advance(100)
+		await h.advance(100)
+		const probe = h.pool.status()[0]!
+		expect(probe).toBeDefined()
+		await h.runner.dispatch({ type: "engine-failed" })
+		expect(h.record).toMatchObject({
+			state: "failed",
+			reason: "tuner-unavailable",
+		})
+		expect(h.pool.status()).toEqual([])
+		expect(h.last()?.trials.some(t => t.outcome === "cancelled")).toBe(true)
+		const last = h.last()
+		emitDmrIdentity(h, probe.probeId)
+		await h.advance(100)
+		expect(h.last()).toBe(last)
+		expect(h.pool.listenerCount("probe-state")).toBe(0)
+	})
+})

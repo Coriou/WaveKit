@@ -554,6 +554,7 @@ export class ScannerService extends EventEmitter {
 		this.spectrum.on("pipeline", this.onSpectrumPipeline)
 		this.spectrum.on("stream", this.onEngineStream)
 		this.spectrum.on("released", this.onEngineReleased)
+		this.spectrum.on("fatal", this.onEngineFatal)
 		await this.spectrum.start()
 		await this.captures
 			.init()
@@ -649,6 +650,7 @@ export class ScannerService extends EventEmitter {
 		this.spectrum.off("pipeline", this.onSpectrumPipeline)
 		this.spectrum.off("stream", this.onEngineStream)
 		this.spectrum.off("released", this.onEngineReleased)
+		this.spectrum.off("fatal", this.onEngineFatal)
 		this.arbiter.dispose()
 		if (this.stateLoaded) {
 			await this.persistence
@@ -2037,6 +2039,22 @@ export class ScannerService extends EventEmitter {
 				this.operatorLost.delete(lease.jobId)
 				this.updateMasks(lease.sourceId)
 			})
+	}
+
+	private readonly onEngineFatal = (sourceId: string, err: Error): void => {
+		if (!this.started) return
+		this.lastSummaries.delete(sourceId)
+		this.closeLiveOn(sourceId, "gap")
+		for (const d of this.driversOn(sourceId))
+			if (!isTerminal(d.record.state))
+				void d
+					.dispatch({ type: "engine-failed" })
+					.catch((error: unknown) =>
+						this.log.warn(
+							{ err: error, cause: err, jobId: d.record.id },
+							"Failed engine job cleanup failed",
+						),
+					)
 	}
 
 	private readonly onSourceDown = (sourceId: string): void => {
