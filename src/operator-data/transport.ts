@@ -13,26 +13,16 @@ import type {
 } from "./schema.js"
 import type { OperatorDataMutationResult } from "./service.js"
 
-export interface OperatorDataReadDto {
-	snapshot: OperatorDataSnapshot
-	preferences: ReturnType<typeof effectivePreferences>
-	capabilities: {
-		toneSelection: true
-		toneDetection: false
-		toneSquelch: false
-	}
-	limits: typeof OPERATOR_DATA_LIMITS
-}
-export interface OperatorDataWriteDto {
-	snapshot: OperatorDataSnapshot
-	savedFrequencyId?: string
-}
-export interface OperatorDataErrorDto {
-	error: "OperatorDataError"
-	code: OperatorDataErrorCode
-	message: string
-	details?: { current: ExpectedToken }
-}
+import type {
+	OperatorDataReadDto,
+	OperatorDataWriteDto,
+	OperatorDataErrorDto,
+} from "@wavekit/api-types"
+export type {
+	OperatorDataReadDto,
+	OperatorDataWriteDto,
+	OperatorDataErrorDto,
+} from "@wavekit/api-types"
 
 /** Full replacement state, suitable for the existing single synchronous commit sink.
  * Tone selection describes stored intent only, not observed tones or RF support.
