@@ -303,10 +303,14 @@ acceptance remain open. See the [access implementation checklist](../.kiro/specs
 ## 4a. Shared Activity and operator data
 
 This extends §4 for the web Activity panel and shared CLI/web/mobile state.
-The reviewed operator-data foundation and pure transport mappings landed locally
-at `2e51a57`: durable presets/preferences/ranking with a canonical snapshot and
-CAS conflicts, currently unmounted. Public routes, synchronization and clients
-remain acceptance gates. The [Activity/catalog design](../.kiro/specs/activity-recording-catalog/design.md)
+The reviewed operator-data foundation provides durable presets/preferences/ranking
+with a canonical snapshot and CAS conflicts. Protected REST and bounded WS
+snapshot/update transport landed locally at `f0584a4`, including current-session
+checks at enqueue/send and accepted-write drain before shutdown. The assembled
+full root suite, typecheck, lint and build passed. Shipped client ordering,
+conflict/uncertain-outcome recovery, trusted bootstrap delivery and external
+browser/TLS acceptance remain open. Legacy mode does not mount operator data.
+The [Activity/catalog design](../.kiro/specs/activity-recording-catalog/design.md)
 landed at `c1e0293`; SQLite remains provisional until bounded runtime/storage
 qualification. Recording integration still follows S2/S3 and deletion-owner gates.
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
