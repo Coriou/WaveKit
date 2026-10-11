@@ -548,6 +548,147 @@ describe("partial byte writes and independent conservation", () => {
 })
 
 describe("POSIX root and pipe ownership under virtual deadlines", () => {
+	it.each([1199999, 1200000, 1200001])(
+		"checks driver deadline at observed %ims before overdue timers run",
+		async at => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			let clock = 0
+			const child = new Child()
+			const kill = vi.fn()
+			const pending = consumer.superviseChild(() => child, writers(), {
+				now: () => clock,
+				kill,
+				sample: normalSample,
+			})
+			clock = at
+			child.finish()
+			expect(await pending).toMatchObject({
+				reason: at < 1200000 ? null : "driver deadline exceeded",
+				joined: true,
+				writersSettled: true,
+				childElapsedMs: at,
+			})
+			expect(kill).not.toHaveBeenCalled()
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
+	it.each([1099, 1100, 1101])(
+		"checks absolute exit-to-closure deadline at observed %ims before timers run",
+		async at => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			let clock = 0
+			const child = new Child()
+			const kill = vi.fn()
+			const pending = consumer.superviseChild(() => child, writers(), {
+				now: () => clock,
+				kill,
+				sample: normalSample,
+			})
+			clock = 100
+			child.emit("exit", 0, null)
+			clock = at
+			child.finish()
+			expect(await pending).toMatchObject({
+				reason: at < 1100 ? null : "exit without pipe closure",
+				joined: true,
+				writersSettled: true,
+			})
+			expect(kill).not.toHaveBeenCalled()
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
+	it.each([
+		[1200000, "driver deadline exceeded"],
+		[1200001, "driver deadline exceeded"],
+		[1100, "exit without pipe closure"],
+		[1101, "exit without pipe closure"],
+	] as const)(
+		"checks late writer settlement at %ims after physical closure",
+		async (at, reason) => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			let clock = 0
+			let release: ((n: number) => void) | undefined
+			const child = new Child()
+			const kill = vi.fn()
+			const pending = consumer.superviseChild(
+				() => child,
+				{
+					stdout: () =>
+						new Promise<number>(resolveResult => {
+							release = resolveResult
+						}),
+					stderr: writers().stderr,
+				},
+				{ now: () => clock, kill, sample: normalSample },
+			)
+			child.stdout.write(Buffer.from("x"))
+			await flush()
+			// Model EOF/physical pipe closure while the disk write is unsettled.
+			for (const pipe of [child.stdout, child.stderr]) {
+				pipe.emit("end")
+			}
+			await flush()
+			clock = reason === "driver deadline exceeded" ? 1199999 : 100
+			child.emit("exit", 0, null)
+			child.emit("close", 0, null)
+			clock = at
+			release!(1)
+			expect(await pending).toMatchObject({
+				reason,
+				joined: true,
+				writersSettled: true,
+			})
+			expect(kill).not.toHaveBeenCalled()
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
+	it.each([1000, 1001, 1200001])(
+		"retains cancellation and physical late join at %ims without signalling a reap",
+		async at => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			let clock = 0
+			const child = new Child()
+			const controller = new AbortController()
+			const kill = vi.fn()
+			const pending = consumer.superviseChild(() => child, writers(), {
+				now: () => clock,
+				signal: controller.signal,
+				kill,
+				sample: normalSample,
+			})
+			controller.abort()
+			clock = at
+			child.finish()
+			expect(await pending).toMatchObject({
+				reason: "cancelled",
+				joined: true,
+				terminationMs: at,
+			})
+			expect(kill.mock.calls).toEqual([[4242, "SIGTERM"]])
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
+	it("does not restart termination grace when the driver timer is delivered late", async () => {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+		let clock = 0
+		const child = new Child()
+		const kill = vi.fn()
+		const pending = consumer.superviseChild(() => child, writers(), {
+			now: () => clock,
+			kill,
+			sample: normalSample,
+		})
+		clock = 1201001
+		await vi.advanceTimersByTimeAsync(1200000)
+		// Fake timers defer newly scheduled zero-delay callbacks to the next tick.
+		await vi.advanceTimersByTimeAsync(1)
+		expect(await pending).toMatchObject({
+			reason: "driver deadline exceeded",
+			joined: false,
+			terminationMs: 1001,
+		})
+		expect(vi.getTimerCount()).toBe(0)
+	})
 	it("keeps root-exit buffered output until EOF and completes only after pipes close", async () => {
 		const child = new Child()
 		const sink = writers()
@@ -969,6 +1110,36 @@ function mockLaunch(
 }
 const fakeHash = () => "a".repeat(64)
 describe("closed mock consumer finalization (no SQLite or subprocess probes)", () => {
+	it.each([1200000, 1200001])(
+		"never captures valid disabled output closed at driver deadline %ims before timers",
+		async at => {
+			vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+			const path = root()
+			let clock = 0
+			const summary = await consumer.capture(
+				{ scenario: "disabled", reserveBytes: GiB },
+				{
+					root: path,
+					statfs: free,
+					spawnChild: mockLaunch(path, report => {
+						clock = at
+						return JSON.stringify(report)
+					}),
+					hashSource: fakeHash,
+					sample: normalSample,
+					now: () => clock,
+					kill: vi.fn(),
+				},
+			)
+			expect(summary).toMatchObject({
+				outcome: "incomplete",
+				reason: expect.stringContaining("driver deadline exceeded"),
+				joined: true,
+				qualificationClaim: false,
+			})
+			expect(vi.getTimerCount()).toBe(0)
+		},
+	)
 	it("captures actual disabled report shape and closes accounting including final manifest", async () => {
 		const path = root()
 		const spawnChild = mockLaunch(path)

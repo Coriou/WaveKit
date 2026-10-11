@@ -975,6 +975,7 @@ export async function superviseChild(
 ) {
 	if (signal?.aborted) throw new Error("Cancelled before spawn")
 	const started = now()
+	const driverEnd = started + CAPS.driverMs
 	const child = factory()
 	const latch = terminalLatch()
 	const states = ["stdout", "stderr"].map(name => ({
@@ -1036,6 +1037,15 @@ export async function superviseChild(
 	})
 	const finish = () => {
 		if (stopped) return
+		// Timers may be delayed behind exit, EOF, close or writer callbacks.
+		// Observe the absolute budgets before clearing them, while retaining the
+		// actual physical join facts and the first terminal failure.
+		const at = now()
+		if (at >= driverEnd) latch.assign("driver deadline exceeded")
+		if (joinEnd !== null && at >= joinEnd)
+			latch.assign("exit without pipe closure")
+		if (abortAt !== null && at >= abortAt + CAPS.terminationMs)
+			latch.assign("termination deadline exceeded")
 		stopped = true
 		for (const id of timers) clearTimeout(id)
 		signal?.removeEventListener("abort", cancel)
@@ -1058,10 +1068,10 @@ export async function superviseChild(
 			latch.assign(`signal failed: ${String(error).slice(0, 256)}`)
 		}
 	}
-	const abort = reason => {
+	const abort = (reason, deadline = now()) => {
 		latch.assign(reason)
 		if (abortAt !== null || stopped) return
-		abortAt = now()
+		abortAt = deadline
 		send("SIGTERM")
 		timer(() => send("SIGKILL"), Math.max(0, abortAt + 100 - now()))
 		timer(
@@ -1129,9 +1139,9 @@ export async function superviseChild(
 		exitSignal = sig
 		if (code !== 0) abort("driver exit failed")
 		// A root exit with inherited/held pipes has only the fixed join grace.
-		if (!states.every(state => state.closed)) {
+		if (!childClosed || !states.every(state => state.closed && !state.busy)) {
 			if (abortAt === null) {
-				joinEnd = now() + CAPS.terminationMs
+				joinEnd = Math.min(now(), driverEnd) + CAPS.terminationMs
 				timer(
 					() => {
 						latch.assign("exit without pipe closure")
@@ -1170,7 +1180,10 @@ export async function superviseChild(
 	}
 	signal?.addEventListener("abort", cancel, { once: true })
 	if (signal?.aborted) cancel()
-	timer(() => abort("driver deadline exceeded"), CAPS.driverMs)
+	timer(
+		() => abort("driver deadline exceeded", driverEnd),
+		Math.max(0, driverEnd - now()),
+	)
 	const observe = () => {
 		if (stopped) return
 		try {
