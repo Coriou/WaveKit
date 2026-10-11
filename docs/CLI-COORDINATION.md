@@ -1129,3 +1129,11 @@ S1 is locally integrated after sequential whole-feature Sol LOW and Opus MEDIUM 
 - Successful discovery DELETE drains accepted evidence writes/moves and prevents late downloadable resurrection. Capture retention is separate.
 - Fatal spectrum failure invalidates cached live frames, fails affected jobs and releases resources. Existing spectrum-only subscriptions receive no automatic profile error notification: consult scanner:status or GET /api/spectrum when frames stop, then re-subscribe after cleanup. Passive configured/enabled state alone does not establish a running job; passive rebuild currently depends on source/settings events. These recovery gaps remain explicit follow-ups.
 - Terminal REST job state may precede teardown; admission can still return 409/releasing. Terminal job WS publication follows cleanup. Do not infer settled recording files from terminal state alone.
+
+#### CLI: read-only S1 Scan consumer — 2026-10-11
+
+The additive `6 Scan` / `--view scan` client consumes existing source-selected spectrum profiles and scanner read APIs. It shows spectrum/waterfall, discoveries, existing jobs and identify results; no scanner writes, tuning, listening or downloads were added. Existing API/DTO contracts are unchanged.
+
+Display demand is view-scoped, with explicit same-source recovery, source/profile/layout/epoch resets and no durable replay. Served profile, dBFS power, native bin width, tuning trust and supplied DC/spur RF locations are inspectable, including signed unverified axes. HTTP bodies, collection traversal, history and detail output are bounded. Scanner-owned probes cannot receive manual decoder lifecycle commands.
+
+Observation inspection remains a page-count projection and job detail is reduced; global job truncation is reported. Same-layout/repeated-epoch transparent replacement remains indistinguishable without a stream ID. Physical terminal, sustained load/RF, web bootstrap/TLS and S2 activation acceptance remain separate. Identify submission, cursor tuning and true FFT zoom are follow-ups.

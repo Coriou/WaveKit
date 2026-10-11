@@ -34,9 +34,12 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
    landed locally, including identification, bounded burst capture and shared
-   spectrum profiles. Verify actual CLI/web consumption, reconnects and source
-   selection. Preserve detector behavior independently of display preferences;
-   genuine viewed-slice zoom remains a separate follow-up.
+   spectrum profiles. The CLI now consumes them in read-only `6 Scan`: source
+   selection, spectrum/waterfall, discoveries, existing jobs and identify results,
+   with explicit recovery and bounded reads/history. Identify submission and
+   cursor tuning remain next client actions; web consumption and physical-terminal
+   acceptance remain open. Preserve detector behavior independently of display
+   preferences; genuine viewed-slice zoom remains a separate follow-up.
 2. **Prepare browser access policy and true zoom** (§4, §8). The initial access
    target is one operator on a local/LAN deployment, with authentication and
    explicit origins across REST, WS and audio. It must land before connecting
@@ -552,7 +555,9 @@ RF and hardware acceptance are outside what CLI tests can show.
 - [ ] Follow-up (user, 2026-10-09): the tuner controls are weak. Add a waterfall
       view on the §8 `spectrum` channel with cursor-based tuning: arrow keys move
       a cursor over the spectrum, Enter listens or decodes there, and a key zooms.
-      Use half-block characters in true colour for two pixels per cell.
+      Read-only `6 Scan` now provides the waterfall with truecolor half-blocks
+      and ASCII/no-color fallback. Cursor tuning, listen/identify actions and true
+      viewed-slice zoom remain open.
 
 ## 8. Spectrum and waterfall service, and activity detection
 
