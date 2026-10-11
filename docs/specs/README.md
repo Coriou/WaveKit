@@ -8,7 +8,6 @@ tool is required to read or write any of it.
 | Path                              | What                                                                                           | Status                                                                             |
 | --------------------------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | `docs/specs/<feature>/`           | Spec-driven features: `requirements.md`, `design.md`, `tasks.md`                               | Canonical for new specs                                                            |
-| `.kiro/specs/<feature>/`          | Same three-file format, created before this convention                                         | Valid until moved here as whole directories; contents and numbering unchanged      |
 | `docs/engineering/<topic>.md`     | Task-local engineering notes: measurements, investigations, design deltas too small for a spec | Canonical                                                                          |
 | `docs/superpowers/{specs,plans}/` | Earlier single-file designs and implementation plans                                           | Frozen archive: still referenced from code, tests and config; do not add new files |
 

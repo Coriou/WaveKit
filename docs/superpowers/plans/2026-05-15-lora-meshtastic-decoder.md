@@ -125,7 +125,7 @@ This task delivers the entire options parser + preset/region tables + the effect
  * protobuf-parses Meshtastic packets, emitting one JSON line per packet on
  * stdout. The TypeScript side validates the JSON shape and remaps to camelCase.
  *
- * Reference: docs in .kiro/specs/lora-decoder/{requirements,design}.md.
+ * Reference: docs in docs/specs/lora-decoder/{requirements,design}.md.
  */
 
 import { z } from "zod"
@@ -1260,7 +1260,7 @@ This task implements all eight property tests. Each test has the canonical refer
 /**
  * LoRa/Meshtastic Decoder Property-Based Tests.
  *
- * Eight properties from .kiro/specs/lora-decoder/design.md §7.
+ * Eight properties from docs/specs/lora-decoder/design.md §7.
  */
 
 import { describe, it, expect } from "vitest"
