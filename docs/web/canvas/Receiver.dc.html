@@ -9,106 +9,119 @@
 <x-dc>
 <helmet>
 <style>
+/* wk-tokens v1 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-bg:#e9eeeb;--wk-surface:#ffffff;--wk-fill:#e2e9e5;--wk-fill-glass:rgba(240,244,242,.96);--wk-well:rgba(22,50,42,.07);--wk-well-glass:rgba(22,50,42,.055);--wk-glass:rgba(248,250,249,.92);--wk-glass-panel:rgba(248,250,249,.95);--wk-glass-strong:rgba(250,252,251,.98);--wk-glass-fx:saturate(140%) brightness(1.08);--wk-glass-hi:rgba(255,255,255,.9);--wk-shadow:0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22);--wk-shadow-pop:0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24);--wk-shadow-tip:0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2);--wk-shadow-lg:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24);--wk-shadow-drawer:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28);--wk-shadow-xl:0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28);--wk-shadow-lift:0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34);--wk-text:#12201b;--wk-text-soft:#22332d;--wk-text-2:#33463e;--wk-text-3:#44574f;--wk-text-4:#4e6158;--wk-text-5:#8a9b93;--wk-ink-rgb:18,32,27;--wk-ink-2-rgb:51,70,62;--wk-ink-3-rgb:68,87,79;--wk-knob:#ffffff;--wk-line-solid:#d3dcd8;--wk-track:#77897f;--wk-accent:#086a50;--wk-accent-rgb:8,106,80;--wk-line-rgb:22,50,42;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(255,246,222,.94);--wk-amber-fill:#fbecc8;--wk-on-amber:#ffffff;--wk-danger:#b3301f;--wk-danger-rgb:214,64,48;--wk-danger-soft:#9e2a1b}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#0a5fa6;--wk-accent-rgb:10,95,166}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#6941c6;--wk-accent-rgb:105,65,198}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#ad2470;--wk-accent-rgb:173,36,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#1d2b26;--wk-accent-rgb:29,43,38}
+</style>
+<style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
 @font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
-.wk-setlink:hover{background:rgba(123,236,199,.08)}
-button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+.wk-setlink:hover{background:rgba(var(--wk-accent-rgb),.08)}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--wk-accent);outline-offset:2px}
 </style>
 </helmet>
-<div style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
-	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); text-align: left">
-		<span style="width: 8px; height: 8px; border-radius: 50%; background: #7becc7; flex: none"></span>
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="display: flex; flex-direction: column; gap: 8px; width: {{width}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+	<button onClick="{{toggle}}" aria-expanded="{{expanded}}" style="font: inherit; color: inherit; cursor: pointer; height: 56px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 12px 0 16px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); text-align: left">
+		<span style="width: 8px; height: 8px; border-radius: 50%; background: var(--wk-accent); flex: none"></span>
 		<span style="font-weight: 700; white-space: nowrap">Pi receiver</span>
-		<span style="flex: 1; color: #8ba598; font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap">{{summary}}</span>
-		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{chev}}deg); transition: transform .2s"><path d="M6 9l6 6l6 -6"></path></svg>
+		<span style="flex: 1; color: var(--wk-text-3); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap">{{summary}}</span>
+		<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{chev}}deg); transition: transform .2s"><path d="M6 9l6 6l6 -6"></path></svg>
 	</button>
 
 	<sc-if value="{{expanded}}" hint-placeholder-val="{{true}}">
-		<div style="box-sizing: border-box; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 12px; background: rgba(17,28,25,.66); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 16px 40px rgba(0,0,0,.4); backdrop-filter: blur(24px) saturate(170%); display: flex; flex-direction: column; gap: 22px">
+		<div style="box-sizing: border-box; max-height: calc(100vh - 110px); overflow-y: auto; overscroll-behavior: contain; padding: 20px; border-radius: 12px; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-lg); backdrop-filter: blur(24px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 22px">
 
 			<div style="display: flex; align-items: center; gap: 12px">
 				<div style="flex: 1; min-width: 0">
 					<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; line-height: 1.1">RTL-SDR · R820T</div>
-					<div style="color: #8ba598; font-size: 13px; margin-top: 2px">Raspberry Pi · rtl_tcp over Wi‑Fi</div>
+					<div style="color: var(--wk-text-3); font-size: 13px; margin-top: 2px">Raspberry Pi · rtl_tcp over Wi‑Fi</div>
 				</div>
-				<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 6px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12px; font-weight: 700"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>Streaming</span>
+				<span style="display: flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 12px; font-weight: 700"><span style="width: 6px; height: 6px; border-radius: 50%; background: currentColor"></span>Streaming</span>
 			</div>
-			<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: #22362f">
+			<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: var(--wk-line-solid)">
 				<sc-for list="{{stats}}" as="s" hint-placeholder-count="3">
-					<div style="background: #111c19; padding: 10px 12px; display: flex; flex-direction: column; gap: 2px">
-						<span style="font-size: 12px; color: #8ba598">{{s.k}}</span>
+					<div style="background: var(--wk-surface); padding: 10px 12px; display: flex; flex-direction: column; gap: 2px">
+						<span style="font-size: 12px; color: var(--wk-text-3)">{{s.k}}</span>
 						<span style="font-weight: 700; font-variant-numeric: tabular-nums">{{s.v}}</span>
 					</div>
 				</sc-for>
 			</div>
 
 			<div style="display: flex; flex-direction: column; gap: 10px">
-				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Sample rate</span>
+				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-3)">Sample rate</span>
 				<div role="radiogroup" aria-label="Sample rate" style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px">
 					<sc-for list="{{rates}}" as="r" hint-placeholder-count="9">
 						<button role="radio" aria-checked="{{r.on}}" onClick="{{r.pick}}" style="font: inherit; cursor: pointer; height: 34px; border-radius: 6px; font-size: 13px; font-variant-numeric: tabular-nums; border: 1px solid {{r.border}}; background: {{r.bg}}; color: {{r.fg}}">{{r.label}}</button>
 					</sc-for>
 				</div>
 				<sc-if value="{{rateWarn}}" hint-placeholder-val="{{false}}">
-					<span style="font-size: 12.5px; color: #f2b84b">Above 2.4 MS/s the Pi link may drop samples. Watch the Dropped counter.</span>
+					<span style="font-size: 12.5px; color: var(--wk-amber)">Above 2.4 MS/s the Pi link may drop samples. Watch the Dropped counter.</span>
 				</sc-if>
 			</div>
 
 			<div style="display: flex; flex-direction: column; gap: 8px">
 				<div style="display: flex; align-items: center; gap: 10px">
-					<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: #8ba598">Gain</span>
+					<span style="flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-3)">Gain</span>
 					<span style="font-weight: 700; font-variant-numeric: tabular-nums; color: {{gainColor}}">{{gainText}}</span>
 					<button aria-pressed="{{auto}}" onClick="{{toggleAuto}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border-radius: 6px; font-size: 12.5px; font-weight: 700; border: 1px solid {{autoBorder}}; background: {{autoBg}}; color: {{autoFg}}">Auto</button>
 				</div>
 				<div style="position: relative; height: 34px; opacity: {{gainOpacity}}">
-					<div style="position: absolute; left: 0; right: 0; top: 10px; height: 4px; border-radius: 2px; background: #22362f"></div>
-					<div style="position: absolute; left: 0; top: 10px; height: 4px; border-radius: 2px; background: #7becc7; width: {{gainPct}}%"></div>
+					<div style="position: absolute; left: 0; right: 0; top: 10px; height: 4px; border-radius: 2px; background: var(--wk-line-solid)"></div>
+					<div style="position: absolute; left: 0; top: 10px; height: 4px; border-radius: 2px; background: var(--wk-accent); width: {{gainPct}}%"></div>
 					<div style="position: absolute; left: 0; right: 0; top: 22px; display: flex; justify-content: space-between" aria-hidden="true">
 						<sc-for list="{{gainTicks}}" as="t" hint-placeholder-count="29"><span style="width: 1px; height: {{t.h}}px; background: {{t.c}}"></span></sc-for>
 					</div>
-					<div style="position: absolute; top: 4px; left: {{gainPct}}%; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: #f4f7f5; box-shadow: 0 0 0 4px rgba(123,236,199,.18)"></div>
+					<div style="position: absolute; top: 4px; left: {{gainPct}}%; width: 16px; height: 16px; margin-left: -8px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 0 0 4px rgba(var(--wk-accent-rgb),.18)"></div>
 					<input type="range" min="0" max="28" step="1" value="{{gainIdx}}" onChange="{{onGain}}" aria-label="Tuner gain" aria-valuetext="{{gainText}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
 				</div>
-				<span style="font-size: 12.5px; color: #8ba598">Steps follow the tuner's own gain table.</span>
+				<span style="font-size: 12.5px; color: var(--wk-text-3)">Steps follow the tuner's own gain table.</span>
 			</div>
 
 			<div style="display: flex; flex-direction: column">
 				<sc-for list="{{toggles}}" as="t" hint-placeholder-count="3">
-					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 6px 0; border: 0; border-bottom: 1px solid rgba(123,236,199,.08); background: transparent">
+					<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 52px; padding: 6px 0; border: 0; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08); background: transparent">
 						<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
 							<span style="font-weight: 700">{{t.label}}</span>
-							<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
+							<span style="font-size: 12.5px; color: var(--wk-text-3)">{{t.sub}}</span>
 						</span>
 						<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{t.track}}; transition: background .15s">
-							<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5; transition: left .15s"></span>
+							<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); transition: left .15s"></span>
 						</span>
 					</button>
 				</sc-for>
 				<div style="display: flex; align-items: center; gap: 14px; min-height: 52px">
 					<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
 						<span style="font-weight: 700">Frequency correction</span>
-						<span style="font-size: 12.5px; color: #8ba598">Crystal error in parts per million</span>
+						<span style="font-size: 12.5px; color: var(--wk-text-3)">Crystal error in parts per million</span>
 					</span>
-					<div style="display: flex; align-items: center; border: 1px solid rgba(123,236,199,.18); border-radius: 6px">
-						<button onClick="{{ppmDown}}" aria-label="Decrease correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">−</button>
+					<div style="display: flex; align-items: center; border: 1px solid rgba(var(--wk-line-rgb),.18); border-radius: 6px">
+						<button onClick="{{ppmDown}}" aria-label="Decrease correction" style="font: inherit; color: var(--wk-text-2); cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">−</button>
 						<span style="min-width: 40px; text-align: center; font-weight: 700; font-variant-numeric: tabular-nums">{{ppm}}</span>
-						<button onClick="{{ppmUp}}" aria-label="Increase correction" style="font: inherit; color: #b9cac1; cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">+</button>
+						<button onClick="{{ppmUp}}" aria-label="Increase correction" style="font: inherit; color: var(--wk-text-2); cursor: pointer; width: 34px; height: 32px; border: 0; background: transparent; font-size: 16px">+</button>
 					</div>
 				</div>
 			</div>
 
 			<div style="display: flex; flex-direction: column; gap: 4px">
-				<button onClick="{{toggleAdv}}" aria-expanded="{{adv}}" style="font: inherit; color: #8ba598; cursor: pointer; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0; border: 0; background: transparent; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase">
+				<button onClick="{{toggleAdv}}" aria-expanded="{{adv}}" style="font: inherit; color: var(--wk-text-3); cursor: pointer; display: flex; align-items: center; gap: 6px; height: 32px; padding: 0; border: 0; background: transparent; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase">
 					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="transform: rotate({{advChev}}deg); transition: transform .2s"><path d="M9 6l6 6l-6 6"></path></svg>Advanced
 				</button>
 				<sc-if value="{{adv}}" hint-placeholder-val="{{false}}">
 					<div style="display: flex; flex-direction: column; gap: 12px; padding-top: 6px">
 						<div style="display: flex; align-items: center; gap: 12px">
 							<span style="flex: 1; font-weight: 700">Direct sampling</span>
-							<div role="radiogroup" aria-label="Direct sampling" style="display: flex; gap: 2px; padding: 3px; border-radius: 6px; background: #0b1512">
+							<div role="radiogroup" aria-label="Direct sampling" style="display: flex; gap: 2px; padding: 3px; border-radius: 6px; background: var(--wk-well)">
 								<sc-for list="{{ds}}" as="d" hint-placeholder-count="3">
 									<button role="radio" aria-checked="{{d.on}}" onClick="{{d.pick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 12px; border: 0; border-radius: 4px; font-size: 12.5px; font-weight: 700; background: {{d.bg}}; color: {{d.fg}}">{{d.label}}</button>
 								</sc-for>
@@ -118,10 +131,10 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 							<button aria-pressed="{{t.on}}" onClick="{{t.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 14px; min-height: 44px; border: 0; background: transparent">
 								<span style="flex: 1; display: flex; flex-direction: column; gap: 2px">
 									<span style="font-weight: 700">{{t.label}}</span>
-									<span style="font-size: 12.5px; color: #8ba598">{{t.sub}}</span>
+									<span style="font-size: 12.5px; color: var(--wk-text-3)">{{t.sub}}</span>
 								</span>
 								<span style="position: relative; width: 36px; height: 20px; flex: none; border-radius: 10px; background: {{t.track}}">
-									<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: #f4f7f5"></span>
+									<span style="position: absolute; top: 2px; left: {{t.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob)"></span>
 								</span>
 							</button>
 						</sc-for>
@@ -129,19 +142,19 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 				</sc-if>
 			</div>
 
-			<div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; background: #192b24; font-size: 13px; color: #b9cac1">
-				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8ba598" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 8v4l2 2"></path></svg>
+			<div style="display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; background: var(--wk-fill); font-size: 13px; color: var(--wk-text-2)">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path><path d="M12 8v4l2 2"></path></svg>
 				<span style="flex: 1">WaveKit has control. SDR++ can take over through the relay on port 1234.</span>
 			</div>
-			<button class="wk-setlink" onClick="{{openSettings}}" style="font: inherit; cursor: pointer; align-self: flex-start; display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 6px 0 8px; margin: -6px 0 -6px -8px; border: 0; border-radius: 6px; background: transparent; color: #7becc7; font-size: 13px; font-weight: 700">All receiver settings<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
+			<button class="wk-setlink" onClick="{{openSettings}}" style="font: inherit; cursor: pointer; align-self: flex-start; display: flex; align-items: center; gap: 4px; height: 32px; padding: 0 6px 0 8px; margin: -6px 0 -6px -8px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-accent); font-size: 13px; font-weight: 700">All receiver settings<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6l-6 6"></path></svg></button>
 		</div>
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"$preview":{"width":440,"height":860}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"onSettings":{"editor":null},"expanded":{"editor":"boolean","default":true},"$preview":{"width":440,"height":860}}'>
 const RATES = [0.25, 1.024, 1.4, 1.8, 2.048, 2.4, 2.56, 2.88, 3.2];
 const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
-const sw = on => ({ on, track: on ? '#7becc7' : '#2c443b', knob: on ? 18 : 2 });
+const sw = on => ({ on, track: on ? 'var(--wk-accent)' : 'var(--wk-track)', knob: on ? 18 : 2 });
 
 class Component extends DCLogic {
 	constructor(props) {
@@ -156,6 +169,8 @@ class Component extends DCLogic {
 		const gainText = auto ? 'Auto' : GAINS[gi].toFixed(1) + ' dB';
 		const flag = (k, label, sub) => ({ label, sub, ...sw(this.get(k)), pick: () => this.set(k, !this.get(k)) });
 		return {
+			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
+			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'phosphor',
 			openSettings: () => { if (this.props.onSettings) this.props.onSettings(); },
 			width: expanded ? '420px' : 'max-content',
 			expanded,
@@ -165,21 +180,21 @@ class Component extends DCLogic {
 			stats: [{ k: 'Throughput', v: (rate * 2).toFixed(1) + ' MB/s' }, { k: 'Dropped', v: '0' }, { k: 'Level', v: '−31 dBFS' }],
 			rates: RATES.map(r => {
 				const on = r === rate;
-				return { label: String(r), on, border: on ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', bg: on ? 'rgba(123,236,199,.12)' : 'transparent', fg: on ? '#7becc7' : '#b9cac1', pick: () => this.set('rate', r) };
+				return { label: String(r), on, border: on ? 'rgba(var(--wk-accent-rgb),.55)' : 'rgba(var(--wk-line-rgb),.18)', bg: on ? 'rgba(var(--wk-accent-rgb),.12)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)', pick: () => this.set('rate', r) };
 			}),
 			rateWarn: rate > 2.4,
 			auto,
 			gainIdx: gi,
 			gainText,
-			gainColor: auto ? '#8ba598' : '#f4f7f5',
+			gainColor: auto ? 'var(--wk-text-3)' : 'var(--wk-text)',
 			gainPct: gi / 28 * 100,
 			gainOpacity: auto ? 0.35 : 1,
-			gainTicks: GAINS.map((g, i) => ({ h: i % 7 === 0 ? 6 : 3, c: i <= gi && !auto ? 'rgba(123,236,199,.6)' : '#2c443b' })),
+			gainTicks: GAINS.map((g, i) => ({ h: i % 7 === 0 ? 6 : 3, c: i <= gi && !auto ? 'rgba(var(--wk-accent-rgb),.6)' : 'var(--wk-track)' })),
 			onGain: e => { this.set('gainIdx', Number(e.target.value)); if (auto) this.set('gainAuto', false); },
 			toggleAuto: () => this.set('gainAuto', !auto),
-			autoBorder: auto ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)',
-			autoBg: auto ? 'rgba(123,236,199,.12)' : 'transparent',
-			autoFg: auto ? '#7becc7' : '#b9cac1',
+			autoBorder: auto ? 'rgba(var(--wk-accent-rgb),.55)' : 'rgba(var(--wk-line-rgb),.18)',
+			autoBg: auto ? 'rgba(var(--wk-accent-rgb),.12)' : 'transparent',
+			autoFg: auto ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			toggles: [
 				flag('rtlAgc', 'RTL AGC', 'Digital gain inside the RTL2832'),
 				flag('biasT', 'Bias‑T', 'Powers an LNA through the antenna port'),
@@ -193,7 +208,7 @@ class Component extends DCLogic {
 			toggleAdv: () => this.setState({ adv: !this.state.adv }),
 			ds: [['off', 'Off'], ['i', 'I'], ['q', 'Q']].map(([id, label]) => {
 				const on = this.get('direct') === id;
-				return { label, on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598', pick: () => this.set('direct', id) };
+				return { label, on, bg: on ? 'var(--wk-fill)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', pick: () => this.set('direct', id) };
 			}),
 			advToggles: [
 				flag('dcBlock', 'Remove DC spike', 'Filters the centre spike out of the IQ'),

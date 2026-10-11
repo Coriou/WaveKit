@@ -54,6 +54,8 @@ Condensed + Noto Sans, Tabler-based icons).
 | Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
+| Scanner | Discoveries drawer and the "Scan a band" composer: band ruler, ranges, per-range protocols, Just find signals. Wired into C | Active, second pass |
+| Identify, Band strip | Every identify state of the tuned card; the scanned range over the spectrum while a sweep runs (several ranges) | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
 ## Decision log
@@ -527,6 +529,45 @@ Condensed + Noto Sans, Tabler-based icons).
   - *Boards:* Scanner (drawer, tweaks `state`, `openFirst`, `stage`), Identify (every
     identify state of the tuned card), wired into C · Immersive. Mock stays in Brittany.
 
+- **Shell grid, Scanner composer and theming (owner, 2026-10-11, after the first Scanner
+  build).** The owner found the first Scanner pass thin (no visible way to choose the bands,
+  nothing to choose what to detect) and the shell loose (tuned card and drawers off the grid).
+  Settled before drawing:
+  - *One shell grid:* a single 16 px gutter. Tuner top-left, Receiver top-right, Listen
+    bottom-left, dock bottom-centre, tuned card home bottom-right; every bottom edge on one
+    baseline.
+  - *Drawers overlay, full height:* Activity, Scanner, Recordings and Settings float over
+    the plot's right side from the top gutter to the bottom gutter. The plot stays
+    full-bleed; only the Receiver island and the tuned card slide left to clear the drawer.
+    Width 420 px by default, resizable from the left edge (360–640 px), remembered. (A
+    "dock + reflow" version, where the plot shrank to the remaining width, was built and
+    dropped by the owner the same day: pushing the whole tuner felt worse.)
+  - *Dock:* Spectrum · Activity · Scanner · Recordings │ Map │ Search · Settings. Map is the
+    only entry that changes the main view, so it stands alone. "⌘ K" becomes a magnifier;
+    the shortcut shows in its tooltip only.
+  - *Tuned card moves:* drag by its type tile; on release it glides to the nearest anchor of
+    the free plot area (corners and edge mid-points that do not collide with islands), never
+    over an island or the drawer, remembered per client; arrow keys on the focused handle
+    move between anchors. This replaces the "anchors + Pin" proposal; Pin is not planned.
+    A chevron minimises the card to one line (tile, frequency, protocol and identity, live
+    dot); it still drags, and the state is remembered.
+  - *Scanner, where:* a band ruler in the composer shows the region's band plans in lanes
+    (Marine, Amateur, PMR / land mobile, Pagers, ISM, Air), zoomable, with the tuned span and
+    ranges held by always-on decoders marked. Click segments to add several bands, drag empty
+    ruler for a custom range. A range list below gives each range editable edges, hops,
+    protocols and "Skip a part" (exclusions, hatched on the ruler). Shift-drag on the spectrum
+    offers "Scan this range". Core's job contract already takes several ranges, per-range
+    protocols, band plans and exclusions.
+  - *Scanner, what:* protocol chips per range, prefilled from the band plan, toggled per
+    range; the preview adds "Looks for: …"; "Just find signals" turns decoding trials off for
+    the fastest sweep. Watching the tuned span gets the same "Looks for" row. More keeps only
+    sensitivity, hold, record calls and stop after.
+  - *Theming:* semantic colour tokens across every board. Light mode is a true light shell
+    (its own light-glass recipe) while the spectrum and waterfall stay a dark instrument
+    screen. Accents: phosphor (default) plus a small curated set (ice blue, violet, coral,
+    mono), each checked for contrast in both modes and kept clear of amber ("not live") and
+    red. Settings › Display: Theme (System / Dark / Light) and Accent.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -534,12 +575,8 @@ Condensed + Noto Sans, Tabler-based icons).
   picker and jump-to-time, bulk actions (export, copy, audio clip).
 - Right-click menus on signals (Listen, Decode as…, Save). Should reuse palette
   commands so both stay in sync.
-- Tuned card placement. Proposal (not drawn yet): no free drag. The card snaps to a
-  few anchors (bottom-right default, top-right under Receiver, bottom-left above
-  Listen), remembered per client. **Pin** detaches a card that keeps showing *its*
-  frequency while you tune elsewhere; pinned cards stack in one column (max 3,
-  collapsible to the header line), so watching AIS or a talkgroup while scanning
-  works. Owner to confirm before it is designed.
+- Tuned card placement: answered 2026-10-11 (drag by the type tile, magnetic snap to
+  anchors). Pinning a second card to watch another frequency is not planned.
 - Palette follow-ups: should tuning previews retune the hardware (as drawn) or show a
   ghost VFO only? Owner to judge after trying it. Palette on mobile (bottom sheet?).
   Single-key shortcuts and `G` chords need a design pass with the full keymap.
@@ -566,48 +603,39 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-11, at the end of the Settings session.
+Handoff written 2026-10-11, at the end of the shell, Scanner composer and theming session.
 
-**State.** Settings is designed and polished: the Settings and Settings on a phone
-boards, wired into C. The owner liked the direction; the four "owner to decide"
-points in the Settings polish entry are still open and can wait. Shell directions A and B
-are gone. Corner radius and border system approved. Recordings accepted for now.
+**State.** On the canvas, not yet reviewed by the owner on screen (the agents checked their
+boards in a local headless render of the canvas runtime, not in the canvas editor):
+- Shell: one 16 px gutter; drawers overlay at full height and only Receiver and the tuned card
+  slide left; resizable drawer edge; dock regrouped (Map alone, Search icon); tuned card drags
+  by its type tile, snaps to anchors and minimises to one line.
+- Scanner composer: band ruler with lanes, several ranges, per-range protocols, Skip a part,
+  "Just find signals", "Looks for"; Shift-drag on the spectrum opens it prefilled.
+- Theming: every board on the tokens in [THEME-TOKENS.md](THEME-TOKENS.md), light mode and
+  five accents, set from Settings › Display or the Immersive tweaks. Light Map has its own
+  cartographic style.
 
 **Tasks, in order.**
-1. Sync: `git fetch origin && git merge origin/main` on `design/web-dashboard`. At
-   handoff, main was ahead with scanner work: the runtime and channelizer merged, an
-   accepted-backend reconcile of `docs/ROADMAP.md`, and a read-only S1 Scan consumer in
-   the CLI (`cli/source/views/scan.tsx`, `cli/source/data/scan-state.ts`).
-2. Core progress: read `docs/ROADMAP.md` and the recent `git log origin/main`. Tick any
-   item in [CORE-GAPS.md](CORE-GAPS.md) that has landed on main.
-3. Gaps audit: make CORE-GAPS.md complete and current. Walk every board and every
-   decision in this file, and check each against what core has today. Add what is
-   missing, reword what core now partly covers, and keep the orange sticky on the canvas
-   in sync (it mirrors this file).
-4. Scanner design (the next design topic). Read first:
-   - `docs/SCANNER.md`
-   - the spec `docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md`
-   - the plans `docs/superpowers/plans/2026-10-09-signal-discovery-scanner*.md`
-   - the data contract `packages/api-types/src/scanner.ts`, plus the routes and WebSocket in
-     `src/api/routes/scanner*.ts` and `src/api/websocket/scanner-broadcast.ts`
-   - the CLI Scan view, as a reference for what S1 exposes today
-
-   Design the web Scanner on the canvas: the dock already has a Scanner entry, and ⌘K uses
-   `G C`. Design for what S1 really provides and for where the scanner plan is going, and
-   mark which parts wait on later stages. Brainstorm the key questions with the owner
-   before drawing. Record decisions here, and core needs in CORE-GAPS.md.
+1. Sync: `git fetch origin && git merge origin/main`.
+2. Owner review on the canvas (Immersive in dark and light, every drawer, the card drag and
+   minimise, the Scanner composer). Collect feedback, fix, then polish with a reviewer agent.
+3. Open points from the agents: light "coral" is pushed toward rose to stay clear of the
+   danger red; neutral greys stay green-tinted whatever the accent; AIS vessel blue sits close
+   to the ice accent on the Map; JSON numbers use amber (reserved for state); `--wk-text-5`
+   hint text is under AA in dark (unchanged from before); the drawer resize grip is faint until
+   hovered; the waterfall palette "Phosphor" shares its name with the accent.
+4. Then the next topic from "Open questions" (keymap pass, or small screens and mobile).
 
 **How the canvas work went well (keep doing it).**
-- Research and inventories go to subagents. Once a board exists, a dedicated Opus
-  teammate reviews and polishes it, with a written brief: the decisions to keep, the known
-  bugs, a checklist, and a requirement to check every change rendered.
-- To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work
-  on copies in the session scratchpad, publish with `root` and `files`, then copy every
-  board read fresh from the canvas into `docs/web/canvas/` and commit.
-- Visual check: use the built-in browser on the canvas URL with `resize_window`
-  1440×900. Select a board, then press Play (top right) and pick it from the list. Clicks
-  land best in the canvas's Fit view. Escape exits Play mode. Screenshots fail while the
-  pane is hidden.
+- Research and inventories go to subagents. Board work goes to parallel agents that each own
+  distinct files and publish only those; a refused publish means re-read and reapply.
+- The canvas pane is often hidden, so agents verify in a local headless Chromium harness that
+  loads the canvas runtime with the current boards. Always render with ALL current boards in
+  the same folder; a stale embedded board gives false results.
+- To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work on
+  copies in the session scratchpad, publish with `root` and `files`, then copy every board read
+  fresh from the canvas into `docs/web/canvas/` and commit.
 
 ## Handoff to the dev team (later)
 

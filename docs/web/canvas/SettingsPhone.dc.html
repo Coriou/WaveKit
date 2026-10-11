@@ -9,6 +9,19 @@
 <x-dc>
 <helmet>
 <style>
+/* wk-tokens v1 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-bg:#e9eeeb;--wk-surface:#ffffff;--wk-fill:#e2e9e5;--wk-fill-glass:rgba(240,244,242,.96);--wk-well:rgba(22,50,42,.07);--wk-well-glass:rgba(22,50,42,.055);--wk-glass:rgba(248,250,249,.92);--wk-glass-panel:rgba(248,250,249,.95);--wk-glass-strong:rgba(250,252,251,.98);--wk-glass-fx:saturate(140%) brightness(1.08);--wk-glass-hi:rgba(255,255,255,.9);--wk-shadow:0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22);--wk-shadow-pop:0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24);--wk-shadow-tip:0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2);--wk-shadow-lg:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24);--wk-shadow-drawer:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28);--wk-shadow-xl:0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28);--wk-shadow-lift:0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34);--wk-text:#12201b;--wk-text-soft:#22332d;--wk-text-2:#33463e;--wk-text-3:#44574f;--wk-text-4:#4e6158;--wk-text-5:#8a9b93;--wk-ink-rgb:18,32,27;--wk-ink-2-rgb:51,70,62;--wk-ink-3-rgb:68,87,79;--wk-knob:#ffffff;--wk-line-solid:#d3dcd8;--wk-track:#77897f;--wk-accent:#086a50;--wk-accent-rgb:8,106,80;--wk-line-rgb:22,50,42;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(255,246,222,.94);--wk-amber-fill:#fbecc8;--wk-on-amber:#ffffff;--wk-danger:#b3301f;--wk-danger-rgb:214,64,48;--wk-danger-soft:#9e2a1b}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#0a5fa6;--wk-accent-rgb:10,95,166}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#6941c6;--wk-accent-rgb:105,65,198}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#ad2470;--wk-accent-rgb:173,36,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#1d2b26;--wk-accent-rgb:29,43,38}
+</style>
+<style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
 @font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
@@ -16,14 +29,30 @@
 body{margin:0;background:#0b1512}
 </style>
 </helmet>
-<div style="position: relative; width: 390px; height: 844px; overflow: hidden; background: #0b1512; font-family: 'Noto Sans', system-ui, sans-serif">
-	<dc-import name="Settings" layout="phone" scenario="{{scenario}}" storage="{{storage}}" open-at="{{openAt}}" hint-size="390px,844px"></dc-import>
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="position: relative; width: 390px; height: 844px; overflow: hidden; background: var(--wk-bg); font-family: 'Noto Sans', system-ui, sans-serif">
+	<dc-import name="Settings" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{vals}}" on-set="{{set}}" layout="phone" scenario="{{scenario}}" storage="{{storage}}" open-at="{{openAt}}" hint-size="390px,844px"></dc-import>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","dec:mesh"],"default":"none"},"$preview":{"width":390,"height":844}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","dec:mesh"],"default":"none"},"$preview":{"width":390,"height":844}}'>
 class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = {};
+		// Settings › Display reports theme and accent here, like Immersive does; a tweak change wins again
+		this.set = (k, v) => { if (k === 'theme' || k === 'accent') this.setState({ [k]: v }); };
+	}
+	componentDidUpdate(prev) {
+		const tw = prev.theme !== this.props.theme && this.state.theme, aw = prev.accent !== this.props.accent && this.state.accent;
+		if (tw || aw) this.setState(Object.assign({}, tw ? { theme: undefined } : null, aw ? { accent: undefined } : null));
+	}
 	renderVals() {
-		return { scenario: this.props.scenario || 'normal', storage: this.props.storage || 'ok', openAt: this.props.openAt || 'none' };
+		const s = this.state, pick = s.theme || this.props.theme || 'dark';
+		const sys = pick === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+		return {
+			// theme scope: the board's own tweaks, or what Settings › Display picked
+			wkTheme: pick === 'light' || sys ? 'light' : 'dark', wkAccent: s.accent || this.props.accent || 'phosphor',
+			vals: Object.assign({}, s.theme ? { theme: s.theme } : null, s.accent ? { accent: s.accent } : null), set: this.set,
+			scenario: this.props.scenario || 'normal', storage: this.props.storage || 'ok', openAt: this.props.openAt || 'none' };
 	}
 }
 </script>

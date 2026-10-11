@@ -118,6 +118,15 @@ mounted; anything marked *protected mode only* is unreachable in a default deplo
 - [ ] A link between a saved frequency and the discovery it came from.
 - [ ] S2 enabled (parallel identify trials, "classified", CTCSS, analog recordings) and S3
   listen-scan ("Scan a list") for the later Scanner mode.
+- [ ] Band plans for the composer's ruler (2026-10-11): an Airband plan, the EU 169 MHz and
+  466 MHz pager plans (only `pager-vhf` 137–174 MHz exists), each plan with a display group
+  (Air, Marine, Amateur, PMR / land mobile, Pagers, ISM) and default protocols to try.
+- [ ] `ScannerProtocol` values for the protocols the composer offers: `ais`, `acars`,
+  `vdl2`, `lora` (Meshtastic), tones; DSC has no decoder at all.
+- [ ] A `name` on each scan range, a job-level "signals only" flag (no decoder trials), and
+  exclusions per range (today per job).
+- [ ] Which decoders are always on and which ranges they hold, so the ruler can mark
+  "decoded elsewhere" and a sweep can skip them by default.
 
 **Recordings**
 - [ ] Keep (star) a recording: exempt from retention, synced to every client; un-keeping

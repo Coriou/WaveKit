@@ -9,30 +9,44 @@
 <x-dc>
 <helmet>
 <style>
+/* wk-tokens v1 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-bg:#e9eeeb;--wk-surface:#ffffff;--wk-fill:#e2e9e5;--wk-fill-glass:rgba(240,244,242,.96);--wk-well:rgba(22,50,42,.07);--wk-well-glass:rgba(22,50,42,.055);--wk-glass:rgba(248,250,249,.92);--wk-glass-panel:rgba(248,250,249,.95);--wk-glass-strong:rgba(250,252,251,.98);--wk-glass-fx:saturate(140%) brightness(1.08);--wk-glass-hi:rgba(255,255,255,.9);--wk-shadow:0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22);--wk-shadow-pop:0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24);--wk-shadow-tip:0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2);--wk-shadow-lg:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24);--wk-shadow-drawer:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28);--wk-shadow-xl:0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28);--wk-shadow-lift:0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34);--wk-text:#12201b;--wk-text-soft:#22332d;--wk-text-2:#33463e;--wk-text-3:#44574f;--wk-text-4:#4e6158;--wk-text-5:#8a9b93;--wk-ink-rgb:18,32,27;--wk-ink-2-rgb:51,70,62;--wk-ink-3-rgb:68,87,79;--wk-knob:#ffffff;--wk-line-solid:#d3dcd8;--wk-track:#77897f;--wk-accent:#086a50;--wk-accent-rgb:8,106,80;--wk-line-rgb:22,50,42;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(255,246,222,.94);--wk-amber-fill:#fbecc8;--wk-on-amber:#ffffff;--wk-danger:#b3301f;--wk-danger-rgb:214,64,48;--wk-danger-soft:#9e2a1b}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#0a5fa6;--wk-accent-rgb:10,95,166}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#6941c6;--wk-accent-rgb:105,65,198}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#ad2470;--wk-accent-rgb:173,36,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#1d2b26;--wk-accent-rgb:29,43,38}
+</style>
+<style>
+[data-wk-theme]{--wka-hint:var(--wk-text-5);--wka-grip:var(--wk-well-glass);--wka-scrim:color-mix(in srgb,var(--wk-plot-bg) 28%,transparent);--wka-sticky:var(--wk-well);--wka-sticky-hi:var(--wk-surface);--wka-sticky-fx:blur(12px)}[data-wk-theme="light"]{--wka-hint:var(--wk-text-4);--wka-grip:var(--wk-glass-strong);--wka-scrim:color-mix(in srgb,var(--wk-plot-bg) 18%,transparent);--wka-sticky:color-mix(in srgb,var(--wk-fill) 96%,var(--wk-plot-bg));--wka-sticky-hi:var(--wk-fill);--wka-sticky-fx:none}
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
-button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+button:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--wk-accent);outline-offset:2px}
 </style>
 </helmet>
-<div style="box-sizing: border-box; width: 100%; border-radius: 6px; background: rgba(7,15,13,.82); border: 1px solid rgba(123,236,199,.08); color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
-	<div style="display: flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid rgba(123,236,199,.08)">
-		<span style="font-size: 12px; font-weight: 700; color: #b9cac1">JSON</span>
-		<span style="font-size: 12px; color: #52645d; margin-left: 6px; font-variant-numeric: tabular-nums">{{meta}}</span>
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="box-sizing: border-box; width: 100%; border-radius: 6px; background: var(--wk-well); border: 1px solid rgba(var(--wk-line-rgb),.08); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+	<div style="display: flex; align-items: center; gap: 4px; height: 36px; padding: 0 6px 0 12px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08)">
+		<span style="font-size: 12px; font-weight: 700; color: var(--wk-text-2)">JSON</span>
+		<span style="font-size: 12px; color: var(--wka-hint); margin-left: 6px; font-variant-numeric: tabular-nums">{{meta}}</span>
 		<div style="flex: 1"></div>
 		<button aria-pressed="{{wrap}}" onClick="{{toggleWrap}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 12px; background: {{wrapBg}}; color: {{wrapFg}}; display: flex; align-items: center; gap: 5px">
 			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4l2 -2m0 4l-2 -2M4 18h5"></path></svg>Wrap
 		</button>
-		<button onClick="{{copyLine}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 12px; background: transparent; color: #8ba598">Copy one line</button>
+		<button onClick="{{copyLine}}" style="font: inherit; cursor: pointer; height: 26px; padding: 0 8px; border: 0; border-radius: 6px; font-size: 12px; background: transparent; color: var(--wk-text-3)">Copy one line</button>
 		<button onClick="{{copy}}" aria-live="polite" style="font: inherit; cursor: pointer; height: 26px; padding: 0 9px; border: 0; border-radius: 6px; font-size: 12px; font-weight: 700; background: {{copyBg}}; color: {{copyFg}}; display: flex; align-items: center; gap: 5px">
 			<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{copyIcon}}"></path></svg>{{copyLabel}}
 		</button>
 	</div>
-	<div style="max-height: {{maxH}}px; overflow: auto; padding: 8px 0; scrollbar-width: thin; scrollbar-color: #2c443b transparent">
+	<div style="max-height: {{maxH}}px; overflow: auto; padding: 8px 0; scrollbar-width: thin; scrollbar-color: var(--wk-track) transparent">
 		<code style="display: block; min-width: {{minW}}; font-family: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, monospace; font-size: 12.5px; line-height: 1.6">
 			<sc-for list="{{lines}}" as="l" hint-placeholder-count="6">
 				<div style="display: flex; padding: 0 12px 0 0">
-					<span aria-hidden="true" style="width: 34px; flex: none; text-align: right; padding-right: 12px; color: #2c443b; user-select: none">{{l.n}}</span>
+					<span aria-hidden="true" style="width: 34px; flex: none; text-align: right; padding-right: 12px; color: var(--wk-track); user-select: none">{{l.n}}</span>
 					<span style="flex: 1; min-width: 0; white-space: {{ws}}; overflow-wrap: anywhere; padding-left: {{l.indent}}ch; text-indent: 0"><sc-for list="{{l.tokens}}" as="t"><span style="color: {{t.c}}; font-style: {{t.i}}">{{t.s}}</span></sc-for></span>
 				</div>
 			</sc-for>
@@ -40,8 +54,8 @@ button:focus-visible,[tabindex]:focus-visible{outline:2px solid #7becc7;outline-
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"data":{"editor":null},"maxHeight":{"editor":"int","default":260},"$preview":{"width":380,"height":300}}'>
-const C = { key: '#7becc7', str: '#f4f7f5', num: '#f2b84b', lit: '#b9cac1', punc: '#52645d' };
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},"data":{"editor":null},"maxHeight":{"editor":"int","default":260},"$preview":{"width":380,"height":300}}'>
+const C = { key: 'var(--wk-accent)', str: 'var(--wk-text)', num: 'var(--wk-amber)', lit: 'var(--wk-text-2)', punc: 'var(--wka-hint)' };
 const RE = /("(?:\\.|[^"\\])*")(\s*:)?|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b|([{}\[\],:])/g;
 const CHECK = 'M5 12l5 5l10 -10';
 const COPY = 'M8 8m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2zM16 8v-2a2 2 0 0 0 -2 -2h-8a2 2 0 0 0 -2 2v8a2 2 0 0 0 2 2h2';
@@ -86,21 +100,23 @@ class Component extends DCLogic {
 		const wrap = this.state.wrap;
 		const copied = this.state.copied === 'pretty';
 		return {
+			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
+			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'phosphor',
 			lines,
 			meta: raw.length + ' lines · ' + new Blob([text]).size + ' B',
 			ws: wrap ? 'pre-wrap' : 'pre',
 			minW: wrap ? '0' : 'max-content',
 			maxH: this.props.maxHeight ?? 260,
 			wrap,
-			wrapBg: wrap ? 'rgba(123,236,199,.12)' : 'transparent',
-			wrapFg: wrap ? '#7becc7' : '#8ba598',
+			wrapBg: wrap ? 'rgba(var(--wk-accent-rgb),.12)' : 'transparent',
+			wrapFg: wrap ? 'var(--wk-accent)' : 'var(--wk-text-3)',
 			toggleWrap: () => this.setState({ wrap: !wrap }),
 			copy: () => this.write(text, 'pretty'),
 			copyLine: () => this.write(JSON.stringify(data), 'line'),
 			copyLabel: copied ? 'Copied' : this.state.copied === 'line' ? 'Copied line' : 'Copy',
 			copyIcon: this.state.copied ? CHECK : COPY,
-			copyBg: this.state.copied ? 'rgba(123,236,199,.16)' : '#192b24',
-			copyFg: this.state.copied ? '#7becc7' : '#f4f7f5'
+			copyBg: this.state.copied ? 'rgba(var(--wk-accent-rgb),.16)' : 'var(--wk-fill)',
+			copyFg: this.state.copied ? 'var(--wk-accent)' : 'var(--wk-text)'
 		};
 	}
 }

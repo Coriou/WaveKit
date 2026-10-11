@@ -9,123 +9,177 @@
 <x-dc>
 <helmet>
 <style>
+/* wk-tokens v1 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-bg:#e9eeeb;--wk-surface:#ffffff;--wk-fill:#e2e9e5;--wk-fill-glass:rgba(240,244,242,.96);--wk-well:rgba(22,50,42,.07);--wk-well-glass:rgba(22,50,42,.055);--wk-glass:rgba(248,250,249,.92);--wk-glass-panel:rgba(248,250,249,.95);--wk-glass-strong:rgba(250,252,251,.98);--wk-glass-fx:saturate(140%) brightness(1.08);--wk-glass-hi:rgba(255,255,255,.9);--wk-shadow:0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22);--wk-shadow-pop:0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24);--wk-shadow-tip:0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2);--wk-shadow-lg:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24);--wk-shadow-drawer:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28);--wk-shadow-xl:0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28);--wk-shadow-lift:0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34);--wk-text:#12201b;--wk-text-soft:#22332d;--wk-text-2:#33463e;--wk-text-3:#44574f;--wk-text-4:#4e6158;--wk-text-5:#8a9b93;--wk-ink-rgb:18,32,27;--wk-ink-2-rgb:51,70,62;--wk-ink-3-rgb:68,87,79;--wk-knob:#ffffff;--wk-line-solid:#d3dcd8;--wk-track:#77897f;--wk-accent:#086a50;--wk-accent-rgb:8,106,80;--wk-line-rgb:22,50,42;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(255,246,222,.94);--wk-amber-fill:#fbecc8;--wk-on-amber:#ffffff;--wk-danger:#b3301f;--wk-danger-rgb:214,64,48;--wk-danger-soft:#9e2a1b}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#0a5fa6;--wk-accent-rgb:10,95,166}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#6941c6;--wk-accent-rgb:105,65,198}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#ad2470;--wk-accent-rgb:173,36,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#1d2b26;--wk-accent-rgb:29,43,38}
+</style>
+<style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
 @font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#0b1512}
 button{font:inherit;color:inherit;background:none;border:0;padding:0;margin:0;cursor:pointer}
-button:focus-visible,input:focus-visible+*{outline:2px solid #7becc7;outline-offset:2px}
-.wk-ghost:hover{background:#192b24;color:#f4f7f5}
-@media (max-width:1100px){.wk-float{display:none}.wk-act{left:16px;width:auto !important}}
-@media (max-width:1180px){.wk-dock{left:388px !important;transform:none !important}.wk-dock-label{display:none}}
+button:focus-visible,input:focus-visible+*,[tabindex]:focus-visible{outline:2px solid var(--wk-accent);outline-offset:2px}
+.wk-ghost:hover{background:var(--wk-fill);color:var(--wk-text)}
+.wk-tipw{position:relative}
+.wk-tip{position:absolute;left:50%;bottom:calc(100% + 12px);transform:translate(-50%,4px);white-space:nowrap;padding:6px 10px;border-radius:6px;background:var(--wk-glass-strong);border:1px solid rgba(var(--wk-line-rgb),.14);box-shadow:var(--wk-shadow-tip);color:var(--wk-text);font-size:12.5px;font-weight:400;pointer-events:none;opacity:0;transition:opacity .12s,transform .12s}
+.wk-tip kbd{font:inherit;color:var(--wk-text-3);margin-left:2px}
+.wk-tipw:hover .wk-tip,.wk-tipw:focus-visible .wk-tip{opacity:1;transform:translate(-50%,0);transition-delay:.35s}
+.wk-tipw:focus-visible .wk-tip{transition-delay:0s}
+.wk-rs .wk-rs-bar{opacity:.4;transition:opacity .15s,background .15s,height .15s}
+.wk-rs:hover .wk-rs-bar,.wk-rs:focus-visible .wk-rs-bar,.wk-rs[data-on="true"] .wk-rs-bar{opacity:1;background:var(--wk-accent);height:56px}
+.wk-rs:focus-visible{outline-offset:-2px}
+.wk-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@keyframes wk-tgt{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
+.wk-tgt{animation:wk-tgt .16s ease-out both}
+@media (max-width:1100px){.wk-float{display:none}}
 @media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
-@media (max-width:1100px){.wk-band{top:132px !important;left:16px !important;right:16px !important}}
+@media (prefers-reduced-motion:reduce){.wk-glide,.wk-shift,.wk-dock,.wk-drawer,.wk-tgt,.wk-tip{transition:none !important;animation:none !important}}
 </style>
 </helmet>
-<div style="position: relative; height: 100vh; min-height: 760px; background: #0b1512; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
-	<dc-import name="Spectrum" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-view="{{setView}}" hint-size="100%,100%"></dc-import>
+<div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
+	<div style="position: absolute; inset: 0">
+		<dc-import name="Spectrum" theme="{{wkTheme}}" accent="{{wkAccent}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{wfPalette}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-view="{{setView}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
 
-	<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
-		<div style="position: absolute; inset: 0; z-index: 1">
-			<dc-import name="Map" embedded="{{true}}" on-action="{{mapAction}}" hint-size="100%,100%"></dc-import>
-		</div>
-	</sc-if>
-
-	<sc-if value="{{showBand}}" hint-placeholder-val="{{false}}">
-		<div class="wk-band" style="position: absolute; top: 16px; left: 504px; right: 332px; z-index: 3; display: flex; justify-content: center; pointer-events: none">
-			<div style="width: 100%; max-width: 760px; pointer-events: auto">
-				<dc-import name="BandStrip" sweep="{{hold}}" discoveries="{{discs}}" view="{{view}}" on-tune="{{tune}}" hint-size="100%,56px"></dc-import>
+		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
+			<div style="position: absolute; inset: 0; z-index: 1">
+				<dc-import name="Map" theme="{{wkTheme}}" accent="{{wkAccent}}" embedded="{{true}}" on-action="{{mapAction}}" hint-size="100%,100%"></dc-import>
 			</div>
-		</div>
-	</sc-if>
+		</sc-if>
 
-	<div style="position: absolute; top: 16px; left: 16px; z-index: 3">
-		<dc-import name="Tuner" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hold="{{hold}}" on-hold="{{scanAction}}" hint-size="440px,56px"></dc-import>
+		<sc-if value="{{showBand}}" hint-placeholder-val="{{false}}">
+			<div class="wk-band wk-shift" style="position: absolute; top: {{bandTop}}px; left: {{bandLeft}}px; right: {{bandRight}}px; z-index: 3; display: flex; justify-content: center; pointer-events: none; transition: {{bandTr}}">
+				<div style="width: 100%; max-width: 760px; pointer-events: auto">
+					<dc-import name="BandStrip" theme="{{wkTheme}}" accent="{{wkAccent}}" sweep="{{hold}}" discoveries="{{discs}}" view="{{view}}" on-tune="{{tune}}" hint-size="100%,56px"></dc-import>
+				</div>
+			</div>
+		</sc-if>
+
+		<div ref="{{refs.tuner}}" style="position: absolute; top: 16px; left: 16px; z-index: 3">
+			<dc-import name="Tuner" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hold="{{hold}}" on-hold="{{scanAction}}" hint-size="440px,56px"></dc-import>
+		</div>
+
+		<div ref="{{refs.rx}}" class="wk-shift" style="position: absolute; top: 16px; right: {{rxRight}}px; z-index: 3; transition: {{rxTr}}">
+			<dc-import name="Receiver" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{rxVals}}" on-set="{{set}}" on-settings="{{openRxSettings}}" expanded="{{rxOpen}}" on-toggle="{{toggleRx}}" hint-size="300px,56px"></dc-import>
+		</div>
+
+		<sc-if value="{{dragging}}" hint-placeholder-val="{{false}}">
+			<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 1; pointer-events: none">
+				<sc-for list="{{targets}}" as="t" hint-placeholder-count="6">
+					<div class="wk-tgt" style="position: absolute; left: {{t.dotX}}px; top: {{t.dotY}}px; width: 12px; height: 12px; margin: -6px 0 0 -6px; box-sizing: border-box; border-radius: 50%; border: 1.5px solid rgba(var(--wk-accent-rgb),.5); background: rgba(var(--wk-accent-rgb),.12)"></div>
+				</sc-for>
+				<div style="position: absolute; left: 0; top: 0; width: 320px; height: {{cardH}}px; box-sizing: border-box; border-radius: 12px; border: 1.5px dashed rgba(var(--wk-accent-rgb),.55); background: rgba(var(--wk-accent-rgb),.05); transform: translate({{snapX}}px, {{snapY}}px); transition: transform .14s ease-out"></div>
+			</div>
+		</sc-if>
+
+		<sc-if value="{{showCard}}" hint-placeholder-val="{{true}}">
+			<div ref="{{refs.card}}" class="wk-float wk-glide" style="position: absolute; left: 0; top: 0; width: 320px; z-index: {{cardZ}}; transform: translate({{cardX}}px, {{cardY}}px) scale({{cardScale}}); transform-origin: 50% 50%; transition: {{cardTr}}">
+				<dc-import name="Tuned" theme="{{wkTheme}}" accent="{{wkAccent}}" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" scan-hold="{{scanHold}}" scan-text="{{scanText}}" identify-run="{{idRun}}" on-grab="{{grabCard}}" on-grab-key="{{cardKey}}" lifted="{{dragging}}" minimised="{{cardMin}}" on-minimise="{{setCardMin}}" hint-size="320px,300px"></dc-import>
+			</div>
+		</sc-if>
+
+		<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
+			<div class="wk-src" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-amber-glass); border: 1px solid rgba(var(--wk-amber-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); white-space: nowrap; font-size: 13px; color: var(--wk-amber-soft)">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>
+				<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis"><b style="color: var(--wk-amber)">Playing capture</b> · {{sourceText}}</span>
+				<button onClick="{{backToLive}}" style="flex: none; height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(var(--wk-amber-rgb),.18); color: var(--wk-amber); font-weight: 700; font-size: 12.5px">Back to live</button>
+			</div>
+		</sc-if>
+
+		<div ref="{{refs.listen}}" style="position: absolute; left: 16px; bottom: 16px; z-index: 3">
+			<dc-import name="Listen" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" hint-size="340px,64px"></dc-import>
+		</div>
+
+		<nav ref="{{refs.dock}}" class="wk-dock" aria-label="Primary" style="position: absolute; left: {{dockX}}px; bottom: 16px; height: 64px; box-sizing: border-box; display: flex; align-items: center; gap: 4px; padding: 0 9px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); z-index: 2; transition: {{dockTr}}">
+			<sc-for list="{{navViews}}" as="item" hint-placeholder-count="4">
+				<button class="wk-ghost wk-tipw" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}" style="height: 44px; min-width: 44px; padding: 0 12px; box-sizing: border-box; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+					<sc-if value="{{item.showLabel}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
+					<sc-if value="{{item.showTip}}" hint-placeholder-val="{{true}}"><span class="wk-tip" aria-hidden="true">{{item.label}}</span></sc-if>
+				</button>
+			</sc-for>
+			<div aria-hidden="true" style="width: 1px; height: 28px; background: rgba(var(--wk-line-rgb),.14); margin: 0 4px; flex: none"></div>
+			<sc-for list="{{navMap}}" as="item" hint-placeholder-count="1">
+				<button class="wk-ghost wk-tipw" aria-label="{{item.label}}" aria-pressed="{{item.on}}" onClick="{{item.pick}}" style="height: 44px; min-width: 44px; padding: 0 12px; box-sizing: border-box; border-radius: 6px; display: flex; align-items: center; justify-content: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
+					<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+					<sc-if value="{{item.showLabel}}" hint-placeholder-val="{{false}}"><span>{{item.label}}</span></sc-if>
+					<sc-if value="{{item.showTip}}" hint-placeholder-val="{{true}}"><span class="wk-tip" aria-hidden="true">{{item.label}}</span></sc-if>
+				</button>
+			</sc-for>
+			<div aria-hidden="true" style="width: 1px; height: 28px; background: rgba(var(--wk-line-rgb),.14); margin: 0 4px; flex: none"></div>
+			<button class="wk-ghost wk-tipw" onClick="{{openPal}}" aria-haspopup="dialog" aria-expanded="{{palOpen}}" aria-label="Search" aria-keyshortcuts="Meta+K" style="width: 44px; height: 44px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0"></path><path d="M21 21l-6 -6"></path></svg>
+				<span class="wk-tip" aria-hidden="true">Search <kbd>· ⌘K</kbd></span>
+			</button>
+			<button class="wk-ghost wk-tipw" onClick="{{toggleSettings}}" aria-pressed="{{settingsOn}}" aria-label="Settings" aria-keyshortcuts="Meta+Comma" style="width: 44px; height: 44px; border-radius: 6px; display: grid; place-items: center; background: {{gearBg}}; color: {{gearFg}}">
+				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
+				<span class="wk-tip" aria-hidden="true">Settings <kbd>· ⌘,</kbd></span>
+			</button>
+		</nav>
+
+		<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+			<div role="status" style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); white-space: nowrap; font-size: 13.5px">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
+				<span>{{toastText}}</span>
+				<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
+					<button onClick="{{undo}}" style="height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-weight: 700; font-size: 13px">Undo</button>
+				</sc-if>
+				<sc-if value="{{noUndo}}" hint-placeholder-val="{{false}}"><span style="width: 10px"></span></sc-if>
+			</div>
+		</sc-if>
 	</div>
-
-	<div style="position: absolute; top: 16px; right: 16px; z-index: 3">
-		<dc-import name="Receiver" values="{{rxVals}}" on-set="{{set}}" on-settings="{{openRxSettings}}" expanded="{{rxOpen}}" on-toggle="{{toggleRx}}" hint-size="300px,56px"></dc-import>
-	</div>
-
-	<sc-if value="{{showCard}}" hint-placeholder-val="{{true}}">
-		<div class="wk-float" style="position: absolute; right: 16px; bottom: 100px; width: 320px; z-index: 1">
-			<dc-import name="Tuned" freq="{{freq}}" on-tune="{{tune}}" on-action="{{cardAction}}" variant="floating" scan-hold="{{scanHold}}" identify-run="{{idRun}}" hint-size="320px,300px"></dc-import>
-		</div>
-	</sc-if>
-
-	<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
-		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: {{actW}}; z-index: 4; transition: width .25s ease">
-			<dc-import name="Activity" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
-		</div>
-	</sc-if>
-
-	<sc-if value="{{showRecordings}}" hint-placeholder-val="{{false}}">
-		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 420px; z-index: 4">
-			<dc-import name="Recordings" open-first="{{false}}" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" on-storage="{{openStorage}}" hint-size="100%,100%"></dc-import>
-		</div>
-	</sc-if>
-
-	<sc-if value="{{showSettings}}" hint-placeholder-val="{{false}}">
-		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 560px; z-index: 4">
-			<dc-import name="Settings" values="{{settingsVals}}" on-set="{{set}}" on-close="{{closeActivity}}" on-action="{{settingsAction}}" target="{{settingsAt}}" hint-size="100%,100%"></dc-import>
-		</div>
-	</sc-if>
-
-	<sc-if value="{{showScanner}}" hint-placeholder-val="{{false}}">
-		<div class="wk-act" style="position: absolute; top: 88px; right: 16px; bottom: 100px; width: 420px; z-index: 4">
-			<dc-import name="Scanner" sweep="{{scannerSweep}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-identify="{{identify}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
-		</div>
-	</sc-if>
 
 	<sc-if value="{{hasSource}}" hint-placeholder-val="{{false}}">
-		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(242,184,75,.55), inset 0 0 90px rgba(242,184,75,.10); transition: opacity .3s"></div>
-		<div class="wk-src" role="status" style="position: absolute; top: 22px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px); z-index: 5; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(48,37,12,.62); border: 1px solid rgba(242,184,75,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13px; color: #f7dca4">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f2b84b" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10"></path></svg>
-			<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis"><b style="color: #f2b84b">Playing capture</b> · {{sourceText}}</span>
-			<button onClick="{{backToLive}}" style="flex: none; height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(242,184,75,.18); color: #f2b84b; font-weight: 700; font-size: 12.5px">Back to live</button>
+		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 2; pointer-events: none; box-shadow: inset 0 0 0 1px rgba(var(--wk-amber-rgb),.55), inset 0 0 90px rgba(var(--wk-amber-rgb),.10); transition: opacity .3s"></div>
+	</sc-if>
+
+	<sc-if value="{{hasDrawer}}" hint-placeholder-val="{{false}}">
+		<div class="wk-drawer" style="position: absolute; z-index: 4; top: {{drTop}}px; bottom: {{drBottom}}px; right: 16px; left: {{drLeft}}; width: {{drWidth}}; transition: {{drTr}}">
+			<sc-if value="{{showActivity}}" hint-placeholder-val="{{false}}">
+				<dc-import name="Activity" theme="{{wkTheme}}" accent="{{wkAccent}}" command="{{actCmd}}" mode="{{actMode}}" on-mode="{{setActMode}}" on-tune="{{tune}}" on-close="{{closeActivity}}" hint-size="100%,100%"></dc-import>
+			</sc-if>
+			<sc-if value="{{showRecordings}}" hint-placeholder-val="{{false}}">
+				<dc-import name="Recordings" theme="{{wkTheme}}" accent="{{wkAccent}}" open-first="{{false}}" recording="{{recOn}}" recording-label="{{recLabel}}" stop-signal="{{srcStop}}" on-close="{{closeActivity}}" on-tune="{{tune}}" on-source="{{setSource}}" on-stop-recording="{{stopRec}}" on-activity="{{recActivity}}" on-storage="{{openStorage}}" hint-size="100%,100%"></dc-import>
+			</sc-if>
+			<sc-if value="{{showSettings}}" hint-placeholder-val="{{false}}">
+				<dc-import name="Settings" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{settingsVals}}" on-set="{{set}}" on-close="{{closeActivity}}" on-action="{{settingsAction}}" target="{{settingsAt}}" hint-size="100%,100%"></dc-import>
+			</sc-if>
+			<sc-if value="{{showScanner}}" hint-placeholder-val="{{false}}">
+				<dc-import name="Scanner" theme="{{wkTheme}}" accent="{{wkAccent}}" sweep="{{scannerSweep}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-identify="{{identify}}" on-close="{{closeActivity}}" prefill="{{scanPrefill}}" hint-size="100%,100%"></dc-import>
+			</sc-if>
+			<sc-if value="{{canResize}}" hint-placeholder-val="{{false}}">
+				<div class="wk-rs" role="separator" aria-orientation="vertical" aria-label="Resize {{drawerName}}" aria-valuemin="360" aria-valuemax="640" aria-valuenow="{{drW}}" aria-valuetext="{{drW}} pixels wide" tabindex="0" data-on="{{resizing}}" onPointerDown="{{rsDown}}" onKeyDown="{{rsKey}}" onDoubleClick="{{rsReset}}" title="Drag to resize · double-click resets" style="position: absolute; left: -14px; top: 16px; bottom: 16px; width: 20px; z-index: 5; cursor: col-resize; touch-action: none; display: flex; align-items: center; justify-content: center; border-radius: 6px">
+					<span class="wk-rs-bar" style="width: 4px; height: 40px; border-radius: 2px; background: rgba(var(--wk-accent-rgb),.45)"></span>
+				</div>
+			</sc-if>
 		</div>
 	</sc-if>
 
-	<div style="position: absolute; left: 16px; bottom: 20px; z-index: 3">
-		<dc-import name="Listen" values="{{listenVals}}" on-set="{{set}}" on-settings="{{openAudioSettings}}" expanded="{{listenOpen}}" on-toggle="{{toggleListen}}" direction="up" following="{{following}}" hint-size="340px,64px"></dc-import>
-	</div>
-
-	<nav class="wk-dock" aria-label="Primary" style="position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%); height: 60px; display: flex; align-items: center; gap: 4px; padding: 0 8px; border-radius: 12px; background: rgba(17,28,25,.5); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); z-index: 2">
-		<sc-for list="{{nav}}" as="item" hint-placeholder-count="5">
-			<button class="wk-ghost" aria-label="{{item.label}}" onClick="{{item.pick}}" style="height: 44px; padding: 0 12px; border-radius: 6px; display: flex; align-items: center; gap: 8px; background: {{item.bg}}; color: {{item.fg}}; font-size: 13px; font-weight: 700">
-				<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{item.d}}" as="p"><path d="{{p}}"></path></sc-for></svg>
-				<sc-if value="{{item.on}}" hint-placeholder-val="{{false}}"><span class="wk-dock-label">{{item.label}}</span></sc-if>
-			</button>
-		</sc-for>
-		<div style="width: 1px; height: 26px; background: rgba(123,236,199,.08); margin: 0 4px"></div>
-		<button class="wk-ghost" onClick="{{openPal}}" aria-haspopup="dialog" aria-expanded="{{palOpen}}" aria-label="Commands (⌘K)" style="height: 44px; padding: 0 12px; border-radius: 6px; display: flex; align-items: center; gap: 6px; color: #8ba598; font-size: 13px">
-			<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 9a2 2 0 1 1 2 -2v10a2 2 0 1 1 -2 -2h10a2 2 0 1 1 -2 2v-10a2 2 0 1 1 2 2h-10"></path></svg>K
-		</button>
-		<button class="wk-ghost" onClick="{{toggleSettings}}" aria-pressed="{{settingsOn}}" aria-label="Settings (⌘,)" title="Settings  ⌘," style="width: 44px; height: 44px; border-radius: 6px; display: grid; place-items: center; background: {{gearBg}}; color: {{gearFg}}">
-			<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
-		</button>
-	</nav>
-
-	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
-		<div role="status" style="position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; height: 44px; box-sizing: border-box; display: flex; align-items: center; gap: 12px; padding: 0 6px 0 16px; border-radius: 12px; background: rgba(25,43,36,.88); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.4); backdrop-filter: blur(22px) saturate(170%); white-space: nowrap; font-size: 13.5px">
-			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7becc7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>
-			<span>{{toastText}}</span>
-			<sc-if value="{{canUndo}}" hint-placeholder-val="{{true}}">
-				<button onClick="{{undo}}" style="height: 32px; padding: 0 12px; border-radius: 6px; background: rgba(123,236,199,.14); color: #7becc7; font-weight: 700; font-size: 13px">Undo</button>
-			</sc-if>
-			<sc-if value="{{noUndo}}" hint-placeholder-val="{{false}}"><span style="width: 10px"></span></sc-if>
-		</div>
+	<sc-if value="{{resizing}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 9; cursor: col-resize"></div>
+	</sc-if>
+	<sc-if value="{{dragging}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" style="position: absolute; inset: 0; z-index: 9; cursor: grabbing"></div>
 	</sc-if>
 
 	<sc-if value="{{palOpen}}" hint-placeholder-val="{{false}}">
 		<div style="position: absolute; inset: 0; z-index: 10">
-			<dc-import name="Palette" values="{{palVals}}" recent="{{recent}}" on-commit="{{commit}}" on-preview="{{preview}}" on-nav="{{goNav}}" on-activity="{{goActivity}}" on-used="{{used}}" on-close="{{closePal}}" on-scan="{{scanAction}}" on-identify="{{identify}}" hint-size="100%,100%"></dc-import>
+			<dc-import name="Palette" theme="{{wkTheme}}" accent="{{wkAccent}}" values="{{palVals}}" recent="{{recent}}" on-commit="{{commit}}" on-preview="{{preview}}" on-nav="{{goNav}}" on-activity="{{goActivity}}" on-used="{{used}}" on-close="{{closePal}}" on-scan="{{scanAction}}" on-identify="{{identify}}" hint-size="100%,100%"></dc-import>
 		</div>
 	</sc-if>
+	<div class="wk-sr" role="status" aria-live="polite">{{announce}}</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"sweep":{"editor":"enum","options":["off","sweeping","paused-you","paused-relay"],"default":"off"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light","system"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},"sweep":{"editor":"enum","options":["off","sweeping","paused-you","paused-relay"],"default":"off"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"$preview":{"width":1440,"height":900}}'>
 const DETECTED = { 161150000: 'DMR · TG 2081', 163087500: 'P25 · TG 1201', 160450000: 'POCSAG pager', 160625000: 'NFM voice', 161975000: 'AIS channel A', 162025000: 'AIS channel B', 156800000: 'Marine ch 16', 144800000: 'APRS', 433920000: 'ISM sensors', 868300000: 'ISM 868 sensors', 868950000: 'wM-Bus meters', 869525000: 'Meshtastic', 446006250: 'PMR446 ch 1', 118100000: 'Airband tower', 131725000: 'ACARS', 136975000: 'VDL2', 93500000: 'FM broadcast', 1090000000: 'ADS-B' };
 const TONE = { 160625000: 'CTCSS 88.5 Hz', 446006250: 'CTCSS 77.0 Hz', 161425000: 'DCS 023N', 145637500: 'CTCSS 123.0 Hz' };
 // Scanner discoveries (shared mock). s2 = what changes with stage S2. 160.900 is ignored ("Birdie from the Pi"), so it is not tagged.
@@ -149,8 +203,39 @@ const HOLDS = [{ hz: 161150000, label: 'DMR · CC 1' }, { hz: 160625000, label: 
 const HOLD_S = 3, RESUME_S = 60, HOP_HZ = 1.5e6;
 const SWEEP_MOCK = { preset: 'VHF land mobile', startHz: 150000000, endHz: 174000000, hops: 16, sweepS: 6, coverage: 84 };
 const LIVE = st => st === 'sweeping' || st === 'holding';
-const hopCentre = w => Math.round(w.startHz + (w.hop - 0.5) * (w.endHz - w.startHz) / w.hops);
+// Hops as [lo, hi]. A sweep over separate ranges (Pagers) gives each range its own hops and never visits the gap.
+const hopList = w => {
+	const rs = w.ranges && w.ranges.length ? w.ranges : [{ startHz: w.startHz, endHz: w.endHz }];
+	const tot = rs.reduce((a, r) => a + r.endHz - r.startHz, 0), out = [];
+	rs.forEach((r, i) => {
+		// each range brings its own hop count from the composer; otherwise hops split by width
+		const n = rs.length === 1 ? w.hops : r.hops > 0 ? r.hops : Math.max(1, Math.round(w.hops * (r.endHz - r.startHz) / tot)), step = (r.endHz - r.startHz) / n;
+		for (let k = 0; k < n; k++) out.push([r.startHz + k * step, r.startHz + (k + 1) * step]);
+	});
+	return out;
+};
+const hopCentre = w => { const h = hopList(w)[w.hop - 1] || hopList(w)[0]; return Math.round((h[0] + h[1]) / 2 / 12500) * 12500; };
 const LEVEL = { 161150000: -57, 161975000: -61, 162025000: -63, 160450000: -60, 160625000: -65, 160900000: -84, 161425000: -76, 162400000: -70, 163087500: -66, 156800000: -62, 144800000: -63, 118100000: -66, 131725000: -64, 136975000: -66, 93500000: -50, 433920000: -58, 446006250: -60, 868300000: -70, 868950000: -72, 869525000: -75, 1090000000: -62, 466025000: -62 };
+
+// Shell grid: one 16 px gutter. Top row (Tuner, Receiver) on the top gutter; bottom row (Listen, dock, tuned card home) on the bottom gutter.
+const G = 16, DOCK_H = 64, CARD_W = 320;
+// Right drawers share one slot, resizable 360–640 px by the left edge, width remembered per drawer
+const DRAWERS = ['activity', 'scanner', 'recordings', 'settings'];
+const DRAWER_NAME = { activity: 'Activity', scanner: 'Scanner', recordings: 'Recordings', settings: 'Settings' };
+const DRAWER_W = { activity: 420, scanner: 420, recordings: 420, settings: 560 };
+const DR_MIN = 360, DR_MAX = 640;
+// From 1100 px a drawer floats over the plot's right side at full height; the plot never moves, the Receiver and the card
+// slide left to clear it. The drawer gives up width before the Receiver would reach the Tuner; below 1100 px (or with no
+// room for 360 px) it overlays between the island rows instead. Dock width with the active label showing, for the collision check.
+const FULL_MIN_VW = 1100, DOCK_WIDE = 460, DOCK_COMPACT = 380;
+// Tuned card anchors in the free plot area: each is pushed off the islands along its own axis, or dropped if it still collides
+const ANCHORS = [
+	{ id: 'tl', name: 'top left', h: 'l', v: 't' }, { id: 'tc', name: 'top centre', h: 'c', v: 't' }, { id: 'tr', name: 'top right', h: 'r', v: 't' },
+	{ id: 'ml', name: 'left edge', h: 'l', v: 'm' }, { id: 'mr', name: 'right edge', h: 'r', v: 'm' },
+	{ id: 'bl', name: 'bottom left', h: 'l', v: 'b' }, { id: 'bc', name: 'bottom centre', h: 'c', v: 'b' }, { id: 'br', name: 'bottom right', h: 'r', v: 'b' }
+];
+const hits = (a, b) => a.x < b.x + b.w + G - 1 && b.x < a.x + a.w + G - 1 && a.y < b.y + b.h + G - 1 && b.y < a.y + a.h + G - 1;
+const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
 class Component extends DCLogic {
 	constructor(props) {
@@ -160,31 +245,39 @@ class Component extends DCLogic {
 			rate: 2.4, gainIdx: 20, gainAuto: false, rtlAgc: false, biasT: false, offsetTuning: false, ppm: 0, direct: 'off', dcBlock: true, iqCorr: false,
 			listening: true, toneSq: false, vol: 72, sq: -102, sqAuto: true, src: 'auto', agc: 'slow', deemph: 'off', hp: true, nr: false, rec: false,
 			open: null, nav: 'spectrum', palette: 'phosphor',
+			cardAt: 'br', cardMin: false, minAnim: false, drag: null, drawerW: Object.assign({}, DRAWER_W), resizing: false, geo: null, announce: '',
 			pal: false, preview: null, actCmd: null, toast: null,
 			recent: [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'palette:amber', n: 2 }],
 			saved: [{ f: 161150000, label: 'DMR repeater', group: 'Local', mode: 'NFM', bw: 12500 }, { f: 161975000, label: 'AIS channel A', group: 'Marine', mode: 'NFM', bw: 25000 }, { f: 156800000, label: 'Marine ch 16', group: 'Marine', mode: 'NFM', bw: 12500 }]
 		};
 		this.set = (k, v) => { if (k === 'freq') this.manualTune(); this.setState({ [k]: v }); };
 		this.setBw = bw => this.setState({ bw });
-		this.closeActivity = () => this.setState({ nav: 'spectrum' });
+		this.closeActivity = () => this.setState({ nav: 'spectrum', scanPrefill: null });
 		this.setActMode = m => this.setState({ actMode: m });
 		this.tune = f => { this.manualTune(); this.setState({ freq: f }); };
 		this.setView = view => this.setState({ view });
+		// "Scan this range" on the spectrum (shift-drag): open the Scanner's composer with that range.
+		// A fresh object each time, so the same range picked twice still reopens the composer.
+		this.scanRange = r => this.setState({ nav: 'scanner', scanPrefill: { startHz: r.startHz, endHz: r.endHz }, pal: false, preview: null, open: this.state.open === 'rx' ? null : this.state.open });
 		// scanner: Scanner drawer, palette and the Tuner's hold line all send these
 		this.scanAction = a => {
 			const sw = this.state.sw;
 			if (a.type === 'start') {
-				const span = a.endHz - a.startHz, watch = a.preset === 'This span' || span <= this.state.rate * 1e6;
+				// only "This span" watches; any other preset takes the receiver, even a one-hop band like PMR446
+				const span = a.endHz - a.startHz, watch = a.preset === 'This span';
 				const next = watch
 					? { preset: a.preset || 'This span', startHz: a.startHz, endHz: a.endHz, hops: 1, hop: 1, sweepS: 0, coverage: 100, state: 'watching' }
-					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, hops: Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
+					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
+				if (!watch) { next.hops = hopList(next).length; next.sweepS = Math.max(1, Math.round(next.hops * 0.375)); }
 				this.commit(null, watch ? 'Watching this span' : 'Scanning ' + next.preset + ' · the scanner has the receiver');
-				return this.setState({ sw: next });
+				return this.setState({ sw: next, scanPrefill: null });
 			}
 			if (!sw) return;
-			if (a.type === 'stop') { this.commit(null, 'Scan stopped · decoders start again'); return this.setState({ sw: null }); }
-			if (a.type === 'pause' && LIVE(sw.state)) { this.commit(null, 'Scan paused'); return this.setState({ sw: Object.assign({}, sw, { state: 'paused-you', resumeAt: null, holdHz: null, holdLabel: null }) }); }
-			if (a.type === 'resume' && sw.state === 'paused-you') { this.commit(null, 'Scan resumed'); return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', resumeAt: null }) }); }
+			// Pause and Stop leave the receiver where the sweep had it, so the card and Identify stay put.
+			const here = LIVE(sw.state) ? { freq: sw.state === 'holding' ? sw.holdHz : hopCentre(sw) } : {};
+			if (a.type === 'stop') { this.commit(null, 'Scan stopped · decoders start again'); return this.setState(Object.assign(here, { sw: null })); }
+			if (a.type === 'pause' && LIVE(sw.state)) { this.commit(null, 'Scan paused · decoders are back'); return this.setState(Object.assign(here, { sw: Object.assign({}, sw, { state: 'paused-you', resumeAt: null, holdHz: null, holdLabel: null }) })); }
+			if (a.type === 'resume' && sw.state === 'paused-you') { this.commit(null, 'Scan resumed · the scanner has the receiver'); return this.setState({ sw: Object.assign({}, sw, { state: 'sweeping', resumeAt: null }) }); }
 		};
 		// identify works on the tuned frequency; asked for another one (from the Scanner), tune there first
 		this.identify = hz => {
@@ -214,6 +307,9 @@ class Component extends DCLogic {
 			else if (id === 'map') this.goNav('map');
 			else if (id === 'scan' || id === 'open-scanner') this.goNav('scanner');
 			else if (id === 'pause-scan') this.scanAction({ type: 'pause' });
+			else if (id === 'ignore') this.setState({ ignored: Object.assign({}, this.state.ignored, { [f]: !(this.state.ignored || {})[f] }) });
+			else if (id === 'copy') this.commit(null, 'Copied ' + (f / 1e6).toFixed(f % 1000 ? 4 : 3));
+			// 'identify' and 'pin' are handled inside the card
 			else if (id === 'save' && !this.state.saved.some(x => x.f === f)) this.commit({ saved: this.state.saved.concat([{ f, label: DETECTED[f] || 'Saved ' + fv, group: 'Local', mode: this.state.mode, bw: this.state.bw }]) }, 'Saved ' + fv + ' MHz');
 		};
 		this.setSource = src => this.setState({ source: src });
@@ -235,6 +331,101 @@ class Component extends DCLogic {
 		this.openRxSettings = () => this.openSettings('receiver');
 		this.openAudioSettings = () => this.openSettings('audio');
 		this.settingsAction = a => { if (a === 'map') { this.goNav('map'); return true; } if (a === 'shortcuts') { this.setState({ nav: 'spectrum', pal: true, preview: null }); return true; } return false; };
+		// ---- shell geometry: measured, so the grid holds whatever the islands' content does
+		this.els = {};
+		this.ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(() => this.measure()) : null;
+		const refFor = k => el => { const old = this.els[k]; if (old === el) return; if (old && this.ro) this.ro.unobserve(old); this.els[k] = el; if (el && this.ro) this.ro.observe(el); };
+		this.refsObj = { root: refFor('root'), tuner: refFor('tuner'), rx: refFor('rx'), listen: refFor('listen'), dock: refFor('dock'), card: refFor('card') };
+		// ---- tuned card: minimised to one line by its chevron (remembered per client; the mock keeps it in state).
+		// While its height animates the card follows its anchor without the glide, so a bottom anchor keeps it on the baseline.
+		this.setCardMin = min => {
+			clearTimeout(this.minT);
+			this.minT = setTimeout(() => this.setState({ minAnim: false }), 320);
+			this.setState({ cardMin: !!min, minAnim: true, announce: min ? 'Card minimised' : 'Card expanded' });
+		};
+		// ---- tuned card: drag by its type tile, glide to the nearest anchor; arrows step between anchors
+		this.grabCard = e => {
+			if (e.button !== undefined && e.button !== 0) return;
+			const cur = this.cardPos;
+			if (!cur) return;
+			e.preventDefault();
+			const handle = e.currentTarget;
+			if (handle && handle.focus) handle.focus({ preventScroll: true });
+			this.dragFrom = { px: e.clientX, py: e.clientY, x: cur.x, y: cur.y, sc: this.scale() };
+			window.addEventListener('pointermove', this.onCardMove);
+			window.addEventListener('pointerup', this.onCardUp);
+			window.addEventListener('pointercancel', this.onCardCancel);
+			window.addEventListener('keydown', this.onDragEsc);
+			this.setState({ drag: { x: cur.x, y: cur.y } });
+		};
+		this.onCardMove = e => {
+			const d = this.dragFrom, g = this.layout;
+			if (!d || !g) return;
+			const x = clampN(d.x + (e.clientX - d.px) / d.sc, 0, g.freeW - CARD_W), y = clampN(d.y + (e.clientY - d.py) / d.sc, 0, Math.max(0, g.H - g.cardH));
+			this.setState({ drag: { x, y } });
+		};
+		this.endDrag = () => {
+			window.removeEventListener('pointermove', this.onCardMove);
+			window.removeEventListener('pointerup', this.onCardUp);
+			window.removeEventListener('pointercancel', this.onCardCancel);
+			window.removeEventListener('keydown', this.onDragEsc);
+			this.dragFrom = null;
+		};
+		this.onCardUp = () => {
+			const dr = this.state.drag, g = this.layout;
+			this.endDrag();
+			if (!dr || !g) return this.setState({ drag: null });
+			const a = this.nearest(g.anchors, dr.x, dr.y);
+			this.setState({ drag: null, cardAt: a ? a.id : this.state.cardAt, announce: a ? 'Card moved to ' + a.name : '' });
+		};
+		this.onCardCancel = () => { this.endDrag(); this.setState({ drag: null }); };
+		this.onDragEsc = e => { if (e.key === 'Escape') { e.preventDefault(); this.onCardCancel(); } };
+		this.cardKey = e => {
+			const dir = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] }[e.key];
+			const g = this.layout, cur = this.cardPos;
+			if (!dir || !g || !cur) return;
+			e.preventDefault();
+			let best = null, bestScore = Infinity;
+			g.anchors.forEach(a => {
+				const dx = a.x - cur.x, dy = a.y - cur.y;
+				const along = dx * dir[0] + dy * dir[1], across = Math.abs(dx * dir[1]) + Math.abs(dy * dir[0]);
+				if (along < 24) return;
+				const score = along + across * 2;
+				if (score < bestScore) { bestScore = score; best = a; }
+			});
+			if (best) this.setState({ cardAt: best.id, announce: 'Card moved to ' + best.name });
+		};
+		// ---- drawer resize by its left edge (pointer, arrows, Home/End, double-click resets)
+		this.rsDown = e => {
+			if (e.button !== undefined && e.button !== 0) return;
+			const id = this.drawerId();
+			if (!id) return;
+			e.preventDefault();
+			this.rsFrom = { px: e.clientX, w: this.drawerShown(id), sc: this.scale(), id };
+			window.addEventListener('pointermove', this.onRsMove);
+			window.addEventListener('pointerup', this.onRsUp);
+			window.addEventListener('pointercancel', this.onRsUp);
+			this.setState({ resizing: true });
+		};
+		this.onRsMove = e => { const r = this.rsFrom; if (r) this.setDrawerW(r.id, r.w - (e.clientX - r.px) / r.sc); };
+		this.onRsUp = () => {
+			window.removeEventListener('pointermove', this.onRsMove);
+			window.removeEventListener('pointerup', this.onRsUp);
+			window.removeEventListener('pointercancel', this.onRsUp);
+			if (!this.rsFrom) return;
+			this.rsFrom = null;
+			this.setState({ resizing: false });
+		};
+		this.rsKey = e => {
+			const id = this.drawerId();
+			if (!id) return;
+			const w = this.drawerShown(id), step = e.shiftKey ? 64 : 16;
+			const next = { ArrowLeft: w + step, ArrowRight: w - step, Home: DR_MAX, End: DR_MIN }[e.key];
+			if (next === undefined) return;
+			e.preventDefault();
+			this.setDrawerW(id, next);
+		};
+		this.rsReset = () => { const id = this.drawerId(); if (id) this.setDrawerW(id, DRAWER_W[id]); };
 		this.toggleTuner = tog('tuner');
 		this.toggleRx = tog('rx');
 		this.toggleListen = tog('listen');
@@ -242,9 +433,112 @@ class Component extends DCLogic {
 	componentDidMount() {
 		this.applySweepTweak();
 		this.clock = setInterval(() => this.tick(), 1000);
+		this.onWinResize = () => this.measure();
+		// Theme "system" follows the OS
+		this.mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null;
+		this.onScheme = () => this.forceUpdate();
+		if (this.mq && this.mq.addEventListener) this.mq.addEventListener('change', this.onScheme);
+		window.addEventListener('resize', this.onWinResize);
+		this.measure();
 	}
-	componentDidUpdate(prev) { if (prev.sweep !== this.props.sweep) this.applySweepTweak(); }
-	componentWillUnmount() { clearTimeout(this.tt); clearInterval(this.clock); }
+	componentDidUpdate(prev) {
+		if (prev.sweep !== this.props.sweep) this.applySweepTweak();
+		// a tweak change wins over a theme or accent picked in Settings
+		const tw = prev.theme !== this.props.theme && this.state.theme, aw = prev.accent !== this.props.accent && this.state.accent;
+		if (tw || aw) this.setState(Object.assign({}, tw ? { theme: undefined } : null, aw ? { accent: undefined } : null));
+		this.measure();
+	}
+	componentWillUnmount() {
+		clearTimeout(this.tt); clearTimeout(this.minT); clearInterval(this.clock);
+		if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme);
+		if (this.ro) this.ro.disconnect();
+		window.removeEventListener('resize', this.onWinResize);
+		this.endDrag(); this.onRsUp();
+	}
+	// CSS px per screen px (the canvas may scale the board)
+	scale() { const r = this.els.root; if (!r || !r.offsetWidth) return 1; return r.getBoundingClientRect().width / r.offsetWidth || 1; }
+	drawerId() { const s = this.state; return DRAWERS.indexOf(s.nav) >= 0 ? s.nav : null; }
+	drawerW(id) { return (this.state.drawerW || DRAWER_W)[id] || DRAWER_W[id]; }
+	// what the drawer really gets: its remembered width, less whatever the Receiver needs to stay clear of the Tuner
+	drawerShown(id) { const L = this.layout; return L && L.full ? L.dW : this.drawerW(id); }
+	setDrawerW(id, w) { const L = this.layout, max = L && L.full ? Math.min(DR_MAX, L.drMax) : DR_MAX; this.setState({ drawerW: Object.assign({}, this.state.drawerW, { [id]: Math.round(clampN(w, DR_MIN, Math.max(DR_MIN, max))) }) }); }
+	// island sizes in layout px; an open island keeps its collapsed size, so the card does not jump under its panel
+	measure() {
+		const e = this.els, s = this.state, prev = s.geo || {};
+		if (!e.root) return;
+		const sz = (el, keep, cap) => { if (!el || keep) return null; const w = el.offsetWidth, h = el.offsetHeight; return w && h && (!cap || h <= cap) ? { w, h } : null; };
+		const g = {
+			W: e.root.offsetWidth, H: e.root.offsetHeight,
+			tuner: sz(e.tuner, s.open === 'tuner', 140) || prev.tuner || { w: 440, h: 56 },
+			rx: sz(e.rx, s.open === 'rx', 120) || prev.rx || { w: 300, h: 56 },
+			listen: sz(e.listen, s.open === 'listen', 120) || prev.listen || { w: 340, h: 64 },
+			dockW: (e.dock && e.dock.offsetWidth) || prev.dockW || 0,
+			cardH: (e.card && e.card.offsetHeight) || prev.cardH || 300
+		};
+		if (JSON.stringify(g) !== JSON.stringify(s.geo)) this.setState({ geo: g });
+	}
+	nearest(anchors, x, y) {
+		let best = null, bd = Infinity;
+		anchors.forEach(a => { const d = Math.hypot(a.x - x, a.y - y); if (d < bd) { bd = d; best = a; } });
+		return best;
+	}
+	// the shell grid for this frame: drawer slot, the free area left of it, dock, band strip and the card anchors.
+	// The plot itself is always full-bleed.
+	shellLayout(s, flags) {
+		const g = s.geo || { W: 1440, H: 900, tuner: { w: 440, h: 56 }, rx: { w: 300, h: 56 }, listen: { w: 340, h: 64 }, dockW: 0, cardH: 300 };
+		const W = g.W, H = g.H, id = flags.drawer, wide = id === 'activity' && flags.actWide;
+		// widest drawer that still leaves the Tuner and the slid Receiver on the top row, and Listen and a compact dock on
+		// the bottom row, each one gutter apart
+		const minX = G + g.listen.w + G;
+		const drMax = W - G - Math.max(G + g.tuner.w + G + g.rx.w + G, minX + DOCK_COMPACT + G);
+		const dW = id ? Math.min(this.drawerW(id), drMax) : 0;
+		const full = !!id && !wide && W >= FULL_MIN_VW && dW >= DR_MIN;
+		const clearR = full ? dW + G : 0, freeW = W - clearR;
+		const topRow = G + Math.max(g.tuner.h, g.rx.h) + G;
+		// drawer slot: full height on the right, or an overlay between the island rows (narrow window, Activity wide)
+		const dr = !id ? null : full
+			? { top: G, bottom: G, left: 'auto', width: dW + 'px', resize: true }
+			: W < FULL_MIN_VW
+				? { top: topRow, bottom: G + DOCK_H + G, left: G + 'px', width: 'auto', resize: false }
+				: { top: G + g.rx.h + G, bottom: G + DOCK_H + G, left: 'auto', width: wide ? 'min(1240px, calc(100% - 32px))' : 'min(' + this.drawerW(id) + 'px, calc(100% - 32px))', resize: !wide };
+		// dock: centred on the window and never closer than one gutter to Listen; a full-height drawer only shifts it
+		// (and drops the active label) when the two would touch
+		const compact = W < 1180 || (full && freeW - G - minX < DOCK_WIDE);
+		const dockW = g.dockW || (compact ? 400 : 500);
+		let dockX = Math.max((W - dockW) / 2, minX);
+		if (full && dockX + dockW > freeW - G) dockX = Math.max(minX, freeW - G - dockW);
+		dockX = Math.round(dockX);
+		// band strip: between Tuner and Receiver when it fits, else a row under them; never under the drawer
+		const bandL = G + g.tuner.w + G, bandR = clearR + G + g.rx.w + G, bandAvail = W - bandL - bandR;
+		const band = bandAvail >= 420 ? { top: G, left: bandL, right: bandR, w: Math.min(760, bandAvail) } : { top: topRow, left: G, right: clearR + G, w: Math.min(760, freeW - 2 * G) };
+		const bandBox = { x: band.left + ((W - band.left - band.right) - band.w) / 2, y: band.top, w: band.w, h: 56 };
+		// islands the card keeps one gutter away from
+		const islands = [
+			{ x: G, y: G, w: g.tuner.w, h: g.tuner.h },
+			{ x: freeW - G - g.rx.w, y: G, w: g.rx.w, h: g.rx.h },
+			{ x: G, y: H - G - g.listen.h, w: g.listen.w, h: g.listen.h },
+			{ x: dockX, y: H - G - DOCK_H, w: dockW, h: DOCK_H }
+		];
+		if (flags.band) islands.push(bandBox);
+		// anchors use the card's current height (one line when minimised) and stay in the free area left of the drawer
+		const cardH = g.cardH, cw = CARD_W;
+		const xs = { l: G, c: Math.round((freeW - cw) / 2), r: freeW - G - cw };
+		const anchors = [];
+		ANCHORS.forEach(A => {
+			const r = { x: xs[A.h], y: A.v === 't' ? G : A.v === 'b' ? H - G - cardH : Math.round((H - cardH) / 2), w: cw, h: cardH };
+			for (let i = 0; i < 4; i++) {
+				const hit = islands.find(b => hits(r, b));
+				if (!hit) break;
+				if (A.v === 't') r.y = hit.y + hit.h + G;
+				else if (A.v === 'b') r.y = hit.y - G - cardH;
+				else { r.y = -1; break; }
+			}
+			if (r.y < G || r.y + cardH > H - G || r.x < G || islands.some(b => hits(r, b))) return;
+			if (anchors.some(o => Math.hypot(o.x - r.x, o.y - r.y) < 48)) return;
+			anchors.push({ id: A.id, name: A.name, x: r.x, y: r.y });
+		});
+		return { W, H, freeW, clearR, full, dW, drMax, dr, compact, dockX, band, anchors, cardH, wide };
+	}
 	// board tweak: jump straight to a sweep state so reviewers don't have to wait for one
 	applySweepTweak() {
 		const st = this.props.sweep || 'off';
@@ -271,43 +565,71 @@ class Component extends DCLogic {
 		}
 		if (sw.state !== 'sweeping') return;
 		const hop = sw.hop % sw.hops + 1, pass = (sw.pass || 0) + (hop === 1 ? 1 : 0);
-		const w = (sw.endHz - sw.startHz) / sw.hops, lo = sw.startHz + (hop - 1) * w;
+		const h = hopList(sw)[hop - 1] || [0, 0];
 		const target = HOLDS[pass % HOLDS.length];
-		const hold = target.hz >= lo && target.hz < lo + w ? target : null;
+		const hold = target.hz >= h[0] && target.hz < h[1] ? target : null;
 		this.setState({ sw: Object.assign({}, sw, { hop, pass, held: false }, hold ? { state: 'holding', holdHz: hold.hz, holdLabel: hold.label, holdLeft: HOLD_S } : null) });
 	}
 	renderVals() {
 		const base = this.state;
 		const sw = base.sw || null;
+		// theme: Settings › Display (state) or the board tweak; "system" resolves here, so children only get dark or light
+		const themePick = base.theme || this.props.theme || 'dark';
+		const wkTheme = themePick === 'system' ? (this.mq && this.mq.matches ? 'light' : 'dark') : themePick === 'light' ? 'light' : 'dark';
+		const wkAccent = base.accent || this.props.accent || 'phosphor';
 		const live = !!sw && LIVE(sw.state);
 		// while the sweep has the receiver, the tuning follows the hop (or the signal it holds on)
 		const swFreq = live ? (sw.state === 'holding' ? sw.holdHz : hopCentre(sw)) : null;
 		const s = Object.assign({}, base, swFreq ? { freq: swFreq } : {}, base.preview || {});
 		const stage = this.props.stage || 'S1';
-		const discs = DISCOVERIES.map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
+		const ign = base.ignored || {};
+		const discs = DISCOVERIES.filter(d => !ign[d.hz]).map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
 		const hold = sw && sw.state !== 'watching' ? {
-			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, hop: sw.hop, hops: sw.hops, sweepS: sw.sweepS, coverage: sw.coverage,
+			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, ranges: sw.ranges || undefined, exclusions: sw.exclusions || undefined, hop: sw.hop, hops: sw.hops, sweepS: sw.sweepS, coverage: sw.coverage,
 			holdHz: sw.holdHz || undefined, holdLabel: sw.holdLabel || undefined,
 			resumeIn: sw.state === 'paused-you' && sw.resumeAt ? Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) : undefined
 		} : null;
 		const capHz = base.rate * 1e6;
+		// dock: the spectrum and its drawers │ Map (the only entry that swaps the main view) │ Search, Settings
 		const NAV = [
 			{ id: 'spectrum', label: 'Spectrum', d: ['M3 7c3 0 1.5 10 4.5 10s1.5 -7 4.5 -7s1.5 7 4.5 7s1.5 -10 4.5 -10'] },
 			{ id: 'activity', label: 'Activity', d: ['M3 12h4l3 8l4 -16l3 8h4'] },
-			{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] },
 			{ id: 'scanner', label: 'Scanner', d: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'] },
 			{ id: 'recordings', label: 'Recordings', d: ['M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0', 'M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0'] }
 		];
+		const MAP_NAV = [{ id: 'map', label: 'Map', d: ['M3 7l6 -3l6 3l6 -3v13l-6 3l-6 -3l-6 3v-13', 'M9 4v13', 'M15 7v13'] }];
+		// ---- shell grid
+		const drawer = this.drawerId();
+		const showBand = !!hold && s.nav !== 'map';
+		const L = this.shellLayout(base, { drawer, actWide: (s.actMode || 'drawer') === 'wide', band: showBand });
+		this.layout = L;
+		// a between-rows drawer shares the right side with the Receiver panel, so the open panel wins; a full-height one
+		// has the Receiver and the card beside it
+		const drawerOn = !!drawer && (L.full || s.open !== 'rx');
+		const cardOn = s.open !== 'rx' && s.nav !== 'map' && (!drawerOn || L.full);
+		const home = L.anchors.find(a => a.id === base.cardAt) || this.nearest(L.anchors, L.freeW - G - CARD_W, L.H - G - L.cardH) || { x: L.freeW - G - CARD_W, y: L.H - G - L.cardH };
+		const drag = base.drag;
+		this.cardPos = home;
+		const snap = drag ? this.nearest(L.anchors, drag.x, drag.y) || home : home;
+		const moving = !!(base.resizing);
+		const navItem = n => {
+			const on = n.id === s.nav;
+			return { ...n, on, showLabel: on && !L.compact, showTip: !(on && !L.compact), bg: on ? 'var(--wk-fill)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', pick: () => this.setState({ nav: n.id, scanPrefill: null }) };
+		};
 		return {
+			wkTheme, wkAccent,
+			scanRange: this.scanRange, scanPrefill: base.scanPrefill || null,
 			discs, hold, stage,
 			scannerSweep: hold || (sw ? sw : { state: 'watching', preset: 'This span', startHz: s.freq - capHz / 2, endHz: s.freq + capHz / 2, hop: 1, hops: 1, sweepS: 0, coverage: 100 }),
 			scanAction: this.scanAction, identify: this.identify,
 			idRun: base.idRun || 0,
 			scanHold: live,
+			// while the sweep passes through (not holding), the card says so instead of "nothing decoded here"
+			scanText: live && sw.state === 'sweeping' ? 'Hop ' + sw.hop + ' of ' + sw.hops + ' · ' + sw.preset : '',
 			following: live,
-			showBand: !!hold && s.nav !== 'map',
+			showBand, bandTop: L.band.top, bandLeft: L.band.left, bandRight: L.band.right,
 			view: base.view || null, setView: this.setView,
-			showScanner: s.nav === 'scanner' && s.open !== 'rx',
+			showScanner: drawerOn && s.nav === 'scanner',
 			freq: s.freq, bw: s.bw, step: s.step,
 			wfPalette: s.palette,
 			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,
@@ -322,11 +644,11 @@ class Component extends DCLogic {
 			setBw: this.setBw,
 			rateHz: s.rate * 1e6,
 			savedMarks: s.saved.map(x => ({ f: x.f, label: x.label })),
-			showActivity: s.nav === 'activity' && s.open !== 'rx',
-			showRecordings: s.nav === 'recordings' && s.open !== 'rx',
-			showSettings: s.nav === 'settings' && s.open !== 'rx',
+			showActivity: drawerOn && s.nav === 'activity',
+			showRecordings: drawerOn && s.nav === 'recordings',
+			showSettings: drawerOn && s.nav === 'settings',
 			settingsVals: s, settingsAt: base.settingsAt || null, settingsAction: this.settingsAction,
-			toggleSettings: this.toggleSettings, settingsOn: s.nav === 'settings', gearBg: s.nav === 'settings' ? '#192b24' : 'transparent', gearFg: s.nav === 'settings' ? '#7becc7' : '#8ba598',
+			toggleSettings: this.toggleSettings, settingsOn: s.nav === 'settings', gearBg: s.nav === 'settings' ? 'var(--wk-fill)' : 'transparent', gearFg: s.nav === 'settings' ? 'var(--wk-accent)' : 'var(--wk-text-3)',
 			openStorage: this.openStorage, openRxSettings: this.openRxSettings, openAudioSettings: this.openAudioSettings,
 			recOn: !!s.rec, recLabel: (s.freq / 1e6).toFixed(3) + ' ' + s.mode,
 			srcStop: base.srcStop || 0, setSource: this.setSource, stopRec: this.stopRec, recActivity: this.recActivity,
@@ -335,7 +657,6 @@ class Component extends DCLogic {
 			closeActivity: this.closeActivity,
 			actMode: s.actMode || 'drawer',
 			setActMode: this.setActMode,
-			actW: (s.actMode || 'drawer') === 'wide' ? 'min(1240px, calc(100% - 32px))' : '420px',
 			rxVals: { rate: s.rate, gainIdx: s.gainIdx, gainAuto: s.gainAuto, rtlAgc: s.rtlAgc, biasT: s.biasT, offsetTuning: s.offsetTuning, ppm: s.ppm, direct: s.direct, dcBlock: s.dcBlock, iqCorr: s.iqCorr },
 			listenVals: {
 				listening: s.listening, vol: s.vol, sq: s.sq, sqAuto: s.sqAuto, src: s.src, agc: s.agc, deemph: s.deemph, hp: s.hp, nr: s.nr, rec: s.rec,
@@ -344,12 +665,28 @@ class Component extends DCLogic {
 			},
 			tunerOpen: s.open === 'tuner', rxOpen: s.open === 'rx', listenOpen: s.open === 'listen',
 			toggleTuner: this.toggleTuner, toggleRx: this.toggleRx, toggleListen: this.toggleListen,
-			showCard: s.open !== 'rx' && s.nav !== 'activity' && s.nav !== 'recordings' && s.nav !== 'settings' && s.nav !== 'map' && s.nav !== 'scanner',
 			showMap: s.nav === 'map', mapAction: this.mapAction,
-			nav: NAV.map(n => {
-				const on = n.id === s.nav;
-				return { ...n, on, bg: on ? '#192b24' : 'transparent', fg: on ? '#7becc7' : '#8ba598', pick: () => this.setState({ nav: n.id }) };
-			})
+			navViews: NAV.map(navItem), navMap: MAP_NAV.map(navItem),
+			refs: this.refsObj,
+			// drawer slot; the Receiver and the band strip slide to clear a full-height drawer
+			rxRight: G + L.clearR, rxTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
+			bandTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
+			hasDrawer: drawerOn, drawerName: drawer ? DRAWER_NAME[drawer] : '',
+			drTop: L.dr ? L.dr.top : 0, drBottom: L.dr ? L.dr.bottom : 0, drLeft: L.dr ? L.dr.left : 'auto', drWidth: L.dr ? L.dr.width : 'auto',
+			drTr: moving ? 'none' : 'width .26s cubic-bezier(.2,.8,.2,1)',
+			canResize: !!(L.dr && L.dr.resize), drW: drawer ? (L.full ? L.dW : this.drawerW(drawer)) : 0,
+			resizing: !!base.resizing, rsDown: this.rsDown, rsKey: this.rsKey, rsReset: this.rsReset,
+			// dock centred on the window
+			dockX: L.dockX, dockTr: moving ? 'none' : 'left .26s cubic-bezier(.2,.8,.2,1)',
+			// tuned card: anchored in the free plot area, dragged by its type tile
+			showCard: cardOn,
+			cardX: drag ? drag.x : home.x, cardY: drag ? drag.y : home.y, cardScale: drag ? 1.02 : 1,
+			cardTr: drag || moving || base.minAnim ? 'none' : 'transform .24s cubic-bezier(.34,1.32,.64,1)',
+			cardZ: drag ? 8 : 1, cardH: L.cardH, cardMin: !!base.cardMin, setCardMin: this.setCardMin,
+			dragging: !!drag, grabCard: this.grabCard, cardKey: this.cardKey,
+			snapX: snap.x, snapY: snap.y,
+			targets: L.anchors.map(a => ({ dotX: a.x + CARD_W / 2, dotY: a.y + L.cardH / 2 })),
+			announce: base.announce || ''
 		};
 	}
 }

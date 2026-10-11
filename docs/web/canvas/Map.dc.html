@@ -9,37 +9,50 @@
 <x-dc>
 <helmet>
 <style>
+/* wk-tokens v1 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-bg:#e9eeeb;--wk-surface:#ffffff;--wk-fill:#e2e9e5;--wk-fill-glass:rgba(240,244,242,.96);--wk-well:rgba(22,50,42,.07);--wk-well-glass:rgba(22,50,42,.055);--wk-glass:rgba(248,250,249,.92);--wk-glass-panel:rgba(248,250,249,.95);--wk-glass-strong:rgba(250,252,251,.98);--wk-glass-fx:saturate(140%) brightness(1.08);--wk-glass-hi:rgba(255,255,255,.9);--wk-shadow:0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22);--wk-shadow-pop:0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24);--wk-shadow-tip:0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2);--wk-shadow-lg:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24);--wk-shadow-drawer:0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28);--wk-shadow-xl:0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28);--wk-shadow-lift:0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34);--wk-text:#12201b;--wk-text-soft:#22332d;--wk-text-2:#33463e;--wk-text-3:#44574f;--wk-text-4:#4e6158;--wk-text-5:#8a9b93;--wk-ink-rgb:18,32,27;--wk-ink-2-rgb:51,70,62;--wk-ink-3-rgb:68,87,79;--wk-knob:#ffffff;--wk-line-solid:#d3dcd8;--wk-track:#77897f;--wk-accent:#086a50;--wk-accent-rgb:8,106,80;--wk-line-rgb:22,50,42;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(255,246,222,.94);--wk-amber-fill:#fbecc8;--wk-on-amber:#ffffff;--wk-danger:#b3301f;--wk-danger-rgb:214,64,48;--wk-danger-soft:#9e2a1b}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#0a5fa6;--wk-accent-rgb:10,95,166}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#6941c6;--wk-accent-rgb:105,65,198}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#ad2470;--wk-accent-rgb:173,36,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#1d2b26;--wk-accent-rgb:29,43,38}
+</style>
+<style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
 @font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
 @font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
 body{margin:0;background:#08110e}
-.wk-m-btn:hover{background:#192b24;color:#f4f7f5}
-.wk-m-row:hover{background:rgba(123,236,199,.08)}
-.wk-in:focus{border-color:rgba(123,236,199,.55) !important}
-.wk-m-box:focus-visible{outline:2px solid #7becc7;outline-offset:-2px}
-.wk-m-rail button:focus-visible,.wk-m-ui button:focus-visible{outline:2px solid #7becc7;outline-offset:2px}
+.wk-m-btn:hover{background:var(--wk-fill);color:var(--wk-text)}
+.wk-m-row:hover{background:rgba(var(--wk-accent-rgb),.08)}
+.wk-in:focus{border-color:rgba(var(--wk-accent-rgb),.55) !important}
+.wk-m-box:focus-visible{outline:2px solid var(--wk-accent);outline-offset:-2px}
+.wk-m-rail button:focus-visible,.wk-m-ui button:focus-visible{outline:2px solid var(--wk-accent);outline-offset:2px}
 </style>
 </helmet>
-<div class="wk-m-ui" style="position: {{rootPos}}; inset: 0; height: {{rootH}}; min-height: 640px; overflow: hidden; background: #08110e; color: #f4f7f5; font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+<div class="wk-m-ui" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="position: {{rootPos}}; inset: 0; height: {{rootH}}; min-height: 640px; overflow: hidden; background: {{mapSea}}; color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<div ref="{{refs.box}}" class="wk-m-box" tabindex="0" role="application" aria-roledescription="map" aria-label="Map of decoded positions around the station. Arrow keys pan, plus and minus zoom, N selects the next item, F follows it, 0 recentres, Escape clears." onKeyDown="{{onKey}}" onPointerDown="{{onDown}}" onPointerMove="{{onMove}}" onPointerUp="{{onUp}}" onPointerCancel="{{onUp}}" onPointerLeave="{{onLeave}}" onDoubleClick="{{onDbl}}" style="position: absolute; inset: 0; cursor: {{cursor}}; touch-action: none">
 		<canvas ref="{{refs.cv}}" aria-hidden="true" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block"></canvas>
 	</div>
 
 	<sc-if value="{{hasHover}}" hint-placeholder-val="{{false}}">
-		<div style="position: absolute; left: {{hoverX}}px; top: {{hoverY}}px; transform: translate(-50%, calc(-100% - 14px)); pointer-events: none; z-index: 4; padding: 6px 10px; border-radius: 8px; background: rgba(17,28,25,.92); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); white-space: nowrap; font-size: 12.5px">
-			<span style="font-weight: 700">{{hoverTitle}}</span> <span style="color: #8ba598">{{hoverSub}}</span><sc-if value="{{hoverMore}}" hint-placeholder-val="{{false}}"><span style="color: #7becc7"> · {{hoverMoreText}}</span></sc-if>
+		<div style="position: absolute; left: {{hoverX}}px; top: {{hoverY}}px; transform: translate(-50%, calc(-100% - 14px)); pointer-events: none; z-index: 4; padding: 6px 10px; border-radius: 8px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); white-space: nowrap; font-size: 12.5px">
+			<span style="font-weight: 700">{{hoverTitle}}</span> <span style="color: var(--wk-text-3)">{{hoverSub}}</span><sc-if value="{{hoverMore}}" hint-placeholder-val="{{false}}"><span style="color: var(--wk-accent)"> · {{hoverMoreText}}</span></sc-if>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasChooser}}" hint-placeholder-val="{{false}}">
-		<div role="menu" aria-label="Several items here" style="position: absolute; left: {{chooserX}}px; top: {{chooserY}}px; z-index: 6; width: 250px; box-sizing: border-box; padding: 6px; border-radius: 12px; background: rgba(17,28,25,.94); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(22px); display: flex; flex-direction: column">
-			<span style="padding: 6px 8px 4px; font-size: 12px; color: #8ba598">{{chooserTitle}}</span>
+		<div role="menu" aria-label="Several items here" style="position: absolute; left: {{chooserX}}px; top: {{chooserY}}px; z-index: 6; width: 250px; box-sizing: border-box; padding: 6px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(22px); display: flex; flex-direction: column">
+			<span style="padding: 6px 8px 4px; font-size: 12px; color: var(--wk-text-3)">{{chooserTitle}}</span>
 			<sc-for list="{{chooser}}" as="c" hint-placeholder-count="3">
 				<button class="wk-m-row" role="menuitem" onClick="{{c.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent">
 					<span style="width: 8px; height: 8px; flex: none; border-radius: {{c.shape}}; background: {{c.color}}"></span>
-					<span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.title}}</span><span style="font-size: 12px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.sub}}</span></span>
+					<span style="flex: 1; min-width: 0; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.title}}</span><span style="font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{c.sub}}</span></span>
 				</button>
 			</sc-for>
 		</div>
@@ -47,21 +60,21 @@ body{margin:0;background:#08110e}
 
 	<div style="position: absolute; top: {{topBase}}px; left: 50%; transform: translateX(-50%); z-index: 3; display: flex; flex-direction: column; align-items: center; gap: 8px; max-width: calc(100% - 32px); pointer-events: none">
 		<sc-if value="{{showApprox}}" hint-placeholder-val="{{false}}">
-			<button onClick="{{openLocation}}" style="pointer-events: auto; font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(242,184,75,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); background: rgba(40,32,14,.75); color: #f2b84b; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; backdrop-filter: blur(16px); white-space: nowrap">
+			<button onClick="{{openLocation}}" style="pointer-events: auto; font: inherit; cursor: pointer; height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(var(--wk-amber-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); background: var(--wk-amber-fill); color: var(--wk-amber); display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; backdrop-filter: blur(16px); white-space: nowrap">
 				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
 				Station location is approximate · Set it
 			</button>
 		</sc-if>
 		<sc-if value="{{picking}}" hint-placeholder-val="{{false}}">
-			<div style="pointer-events: auto; height: 38px; padding: 0 6px 0 14px; border-radius: 12px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); display: flex; align-items: center; gap: 10px; font-size: 13px; white-space: nowrap">
+			<div style="pointer-events: auto; height: 38px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); display: flex; align-items: center; gap: 10px; font-size: 13px; white-space: nowrap">
 				Click the map where your antenna is
-				<button onClick="{{cancelPick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: #192b24; color: #b9cac1; font-size: 12.5px">Cancel</button>
+				<button onClick="{{cancelPick}}" style="font: inherit; cursor: pointer; height: 28px; padding: 0 10px; border: 0; border-radius: 6px; background: var(--wk-fill); color: var(--wk-text-2); font-size: 12.5px">Cancel</button>
 			</div>
 		</sc-if>
 	</div>
 
 	<div ref="{{refs.rail}}" class="wk-m-rail" style="position: absolute; right: 16px; top: {{topBase}}px; z-index: 4; display: flex; flex-direction: column; align-items: stretch; gap: 8px; width: {{railW}}px">
-		<div role="group" aria-label="Map layers" style="display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+		<div role="group" aria-label="Map layers" style="display: flex; flex-direction: column; gap: 2px; padding: 5px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx)">
 			<sc-for list="{{layers}}" as="l" hint-placeholder-count="5">
 				<button class="wk-m-row" aria-pressed="{{l.on}}" onClick="{{l.pick}}" title="{{l.title}}" aria-label="{{l.aria}}" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border-radius: 8px; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px; font-weight: 700; border: 0; background: {{l.bg}}; color: {{l.fg}}">
 					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{l.dot}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{l.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
@@ -71,100 +84,100 @@ body{margin:0;background:#08110e}
 			<sc-if value="{{showAltRamp}}" hint-placeholder-val="{{true}}">
 				<div aria-hidden="true" style="padding: 6px 9px 4px; display: flex; flex-direction: column; gap: 4px">
 					<div style="display: flex; gap: 2px; height: 5px"><sc-for list="{{altSteps}}" as="a" hint-placeholder-count="5"><span style="flex: 1; border-radius: 2px; background: {{a.c}}"></span></sc-for></div>
-					<div style="display: flex; justify-content: space-between; font-size: 10.5px; color: #8ba598; font-variant-numeric: tabular-nums"><span>0</span><span>FL200</span><span>FL400</span></div>
+					<div style="display: flex; justify-content: space-between; font-size: 10.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums"><span>0</span><span>FL200</span><span>FL400</span></div>
 				</div>
 			</sc-if>
-			<div style="height: 1px; background: rgba(123,236,199,.08); margin: 3px 4px"></div>
-			<button class="wk-m-row" onClick="{{toggleOverlays}}" aria-expanded="{{overlaysOpen}}" aria-label="Overlays and legend" title="Overlays and legend" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border: 0; border-radius: 8px; background: {{ovBg}}; color: #b9cac1; display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px">
+			<div style="height: 1px; background: rgba(var(--wk-line-rgb),.08); margin: 3px 4px"></div>
+			<button class="wk-m-row" onClick="{{toggleOverlays}}" aria-expanded="{{overlaysOpen}}" aria-label="Overlays and legend" title="Overlays and legend" style="font: inherit; cursor: pointer; height: 36px; padding: 0 9px; border: 0; border-radius: 8px; background: {{ovBg}}; color: var(--wk-text-2); display: flex; align-items: center; justify-content: {{railJustify}}; gap: 9px; font-size: 12.5px">
 				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M12 4l-8 4l8 4l8 -4l-8 -4"></path><path d="M4 12l8 4l8 -4"></path><path d="M4 16l8 4l8 -4"></path></svg>
-				<sc-if value="{{railWide}}" hint-placeholder-val="{{true}}"><span style="flex: 1; text-align: left">Overlays</span><span style="color: #8ba598; font-variant-numeric: tabular-nums">{{ovCount}}</span></sc-if>
+				<sc-if value="{{railWide}}" hint-placeholder-val="{{true}}"><span style="flex: 1; text-align: left">Overlays</span><span style="color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{ovCount}}</span></sc-if>
 			</button>
 		</div>
-		<div role="group" aria-label="Zoom" style="align-self: flex-end; display: flex; flex-direction: column; padding: 4px; gap: 2px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08); backdrop-filter: blur(22px) saturate(170%)">
-			<button class="wk-m-btn" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in (+)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 18px">+</button>
-			<button class="wk-m-btn" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out (−)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: #b9cac1; font-size: 18px">−</button>
-			<div style="height: 1px; background: rgba(123,236,199,.08); margin: 2px 4px"></div>
+		<div role="group" aria-label="Zoom" style="align-self: flex-end; display: flex; flex-direction: column; padding: 4px; gap: 2px; border-radius: 12px; background: var(--wk-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); backdrop-filter: blur(22px) var(--wk-glass-fx)">
+			<button class="wk-m-btn" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in (+)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--wk-text-2); font-size: 18px">+</button>
+			<button class="wk-m-btn" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out (−)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: var(--wk-text-2); font-size: 18px">−</button>
+			<div style="height: 1px; background: rgba(var(--wk-line-rgb),.08); margin: 2px 4px"></div>
 			<button class="wk-m-btn" onClick="{{recenter}}" aria-label="Centre on the station" title="Centre on the station (0)" style="font: inherit; cursor: pointer; width: 36px; height: 36px; border: 0; border-radius: 8px; background: transparent; color: {{recenterC}}; display: grid; place-items: center"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0"></path><path d="M12 2v2M12 20v2M20 12h2M2 12h2"></path></svg></button>
 		</div>
 	</div>
 
 	<sc-if value="{{overlaysOpen}}" hint-placeholder-val="{{false}}">
-		<div ref="{{refs.ov}}" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; z-index: 5; width: 280px; box-sizing: border-box; padding: 8px; border-radius: 12px; background: rgba(17,28,25,.9); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.45); backdrop-filter: blur(22px); display: flex; flex-direction: column">
+		<div ref="{{refs.ov}}" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; z-index: 5; width: 280px; box-sizing: border-box; padding: 8px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(22px); display: flex; flex-direction: column">
 			<sc-for list="{{overlays}}" as="o" hint-placeholder-count="5">
 				<button class="wk-m-row" aria-pressed="{{o.on}}" onClick="{{o.pick}}" style="font: inherit; color: inherit; cursor: pointer; text-align: left; display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 4px 8px; border: 0; border-radius: 6px; background: transparent">
-					<span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13.5px">{{o.label}}</span><span style="font-size: 12px; color: #8ba598">{{o.sub}}</span></span>
-					<span style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{o.track}}"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: #f4f7f5"></span></span>
+					<span style="flex: 1; display: flex; flex-direction: column"><span style="font-weight: 700; font-size: 13.5px">{{o.label}}</span><span style="font-size: 12px; color: var(--wk-text-3)">{{o.sub}}</span></span>
+					<span style="position: relative; width: 32px; height: 18px; flex: none; border-radius: 9px; background: {{o.track}}"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 14px; height: 14px; border-radius: 50%; background: var(--wk-knob)"></span></span>
 				</button>
 			</sc-for>
-			<div style="height: 1px; background: rgba(123,236,199,.08); margin: 6px 8px"></div>
-			<span style="padding: 4px 8px; font-size: 12px; color: #8ba598">Legend</span>
-			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 4px 8px 8px; font-size: 12px; color: #b9cac1">
+			<div style="height: 1px; background: rgba(var(--wk-line-rgb),.08); margin: 6px 8px"></div>
+			<span style="padding: 4px 8px; font-size: 12px; color: var(--wk-text-3)">Legend</span>
+			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 10px; padding: 4px 8px 8px; font-size: 12px; color: var(--wk-text-2)">
 				<sc-for list="{{legend}}" as="g" hint-placeholder-count="8">
 					<span style="display: flex; align-items: center; gap: 8px; min-width: 0"><svg width="16" height="16" viewBox="-10 -10 20 20" aria-hidden="true" style="flex: none"><path d="{{g.d}}" fill="{{g.fill}}" stroke="{{g.stroke}}" stroke-width="1.4" stroke-dasharray="{{g.dash}}"></path></svg><span style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.label}}</span></span>
 				</sc-for>
 			</div>
 			<div style="padding: 0 8px 6px; display: flex; flex-direction: column; gap: 4px">
 				<div style="display: flex; gap: 2px; height: 6px"><sc-for list="{{altSteps}}" as="a" hint-placeholder-count="5"><span style="flex: 1; border-radius: 2px; background: {{a.c}}"></span></sc-for></div>
-				<div style="display: flex; justify-content: space-between; font-size: 11px; color: #8ba598; font-variant-numeric: tabular-nums"><span>Ground</span><span>10 000 ft</span><span>FL200</span><span>FL300</span><span>FL400+</span></div>
+				<div style="display: flex; justify-content: space-between; font-size: 11px; color: var(--wk-text-3); font-variant-numeric: tabular-nums"><span>Ground</span><span>10 000 ft</span><span>FL200</span><span>FL300</span><span>FL400+</span></div>
 			</div>
 		</div>
 	</sc-if>
 
 	<sc-if value="{{hasSel}}" hint-placeholder-val="{{false}}">
-		<aside ref="{{refs.sel}}" aria-label="Selected" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{panelW}}; max-height: calc(100% - {{panelMaxOff}}px); overflow-y: auto; z-index: 3; box-sizing: border-box; padding: 16px; border-radius: 12px; background: rgba(17,28,25,.62); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; flex-direction: column; gap: 14px">
+		<aside ref="{{refs.sel}}" aria-label="Selected" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{panelW}}; max-height: calc(100% - {{panelMaxOff}}px); overflow-y: auto; z-index: 3; box-sizing: border-box; padding: 16px; border-radius: 12px; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 14px">
 			<div style="display: flex; align-items: center; gap: 10px">
-				<span style="width: 34px; height: 34px; flex: none; border-radius: 6px; background: rgba(123,236,199,.12); display: grid; place-items: center; color: {{sel.color}}">
+				<span style="width: 34px; height: 34px; flex: none; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.12); display: grid; place-items: center; color: {{sel.color}}">
 					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{sel.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>
 				</span>
 				<div style="flex: 1; min-width: 0; display: flex; flex-direction: column">
 					<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; line-height: 1.1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.title}}</span>
-					<span style="font-size: 12.5px; color: #8ba598; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.sub}}</span>
+					<span style="font-size: 12.5px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sel.sub}}</span>
 				</div>
-				<button onClick="{{closeSel}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<button onClick="{{closeSel}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-3); display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
 			<sc-if value="{{sel.hasNote}}" hint-placeholder-val="{{false}}">
-				<p style="margin: 0; font-size: 13.5px; line-height: 1.45; color: #e3ece7; font-family: {{sel.noteFont}}; overflow-wrap: anywhere">{{sel.note}}</p>
+				<p style="margin: 0; font-size: 13.5px; line-height: 1.45; color: var(--wk-text-soft); font-family: {{sel.noteFont}}; overflow-wrap: anywhere">{{sel.note}}</p>
 			</sc-if>
-			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: #22362f">
+			<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; border-radius: 8px; overflow: hidden; background: var(--wk-line-solid)">
 				<sc-for list="{{sel.fields}}" as="f" hint-placeholder-count="6">
-					<div style="background: #111c19; padding: 9px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
-						<span style="font-size: 12px; color: #8ba598">{{f.k}}</span>
+					<div style="background: var(--wk-surface); padding: 9px 12px; display: flex; flex-direction: column; gap: 1px; min-width: 0">
+						<span style="font-size: 12px; color: var(--wk-text-3)">{{f.k}}</span>
 						<span style="font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{f.v}}</span>
 					</div>
 				</sc-for>
 			</div>
-			<span style="font-size: 12px; color: #8ba598">{{sel.seen}}</span>
+			<span style="font-size: 12px; color: var(--wk-text-3)">{{sel.seen}}</span>
 			<div style="display: flex; gap: 6px">
 				<button onClick="{{toggleFollow}}" aria-pressed="{{following}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 6px; border: 1px solid {{followBorder}}; background: {{followBg}}; color: {{followFg}}; font-weight: 700; font-size: 13px">{{followText}}</button>
-				<button onClick="{{selActivity}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); background: transparent; color: #b9cac1; font-weight: 700; font-size: 13px">Activity</button>
+				<button onClick="{{selActivity}}" style="font: inherit; cursor: pointer; flex: 1; height: 36px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); background: transparent; color: var(--wk-text-2); font-weight: 700; font-size: 13px">Activity</button>
 			</div>
 		</aside>
 	</sc-if>
 
 	<sc-if value="{{locOpen}}" hint-placeholder-val="{{false}}">
-		<aside ref="{{refs.loc}}" aria-label="Station location" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{locW}}; z-index: 5; box-sizing: border-box; padding: 18px; border-radius: 12px; background: rgba(17,28,25,.88); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 18px 48px rgba(0,0,0,.5); backdrop-filter: blur(24px); display: flex; flex-direction: column; gap: 14px">
+		<aside ref="{{refs.loc}}" aria-label="Station location" style="position: absolute; right: {{sideRight}}px; top: {{topBase}}px; width: {{locW}}; z-index: 5; box-sizing: border-box; padding: 18px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(24px); display: flex; flex-direction: column; gap: 14px">
 			<div style="display: flex; align-items: center">
 				<h2 style="margin: 0; flex: 1; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 20px">Station location</h2>
-				<button onClick="{{closeLocation}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+				<button onClick="{{closeLocation}}" aria-label="Close" style="font: inherit; cursor: pointer; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-3); display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 			</div>
-			<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; background: #192b24; font-size: 13px">
+			<div style="display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 8px; background: var(--wk-fill); font-size: 13px">
 				<span style="width: 8px; height: 8px; border-radius: 50%; background: {{locDot}}; flex: none"></span>
 				<span style="flex: 1; font-variant-numeric: tabular-nums">{{locNow}}</span>
 			</div>
-			<button onClick="{{startPick}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Pick on the map</button>
-			<button onClick="{{useBrowser}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid rgba(123,236,199,.18); background: transparent; color: #f4f7f5; font-weight: 700; font-size: 13.5px">Use this browser’s location</button>
-			<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: #8ba598">Coordinates or Maidenhead locator
-				<input class="wk-in" value="{{locQ}}" onChange="{{onLocQ}}" placeholder="48.7051, −3.9750 · IN88aq" spellcheck="false" autocomplete="off" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1px solid {{locQBorder}}; background: rgba(7,15,13,.6); color: #f4f7f5; font: inherit; font-size: 14px; outline: none">
+			<button onClick="{{startPick}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); background: transparent; color: var(--wk-text); font-weight: 700; font-size: 13.5px">Pick on the map</button>
+			<button onClick="{{useBrowser}}" style="font: inherit; cursor: pointer; height: 40px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); background: transparent; color: var(--wk-text); font-weight: 700; font-size: 13.5px">Use this browser’s location</button>
+			<label style="display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--wk-text-3)">Coordinates or Maidenhead locator
+				<input class="wk-in" value="{{locQ}}" onChange="{{onLocQ}}" placeholder="48.7051, −3.9750 · IN88aq" spellcheck="false" autocomplete="off" style="height: 40px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; border: 1px solid {{locQBorder}}; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; outline: none">
 			</label>
 			<sc-if value="{{hasLocParse}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; color: {{locParseC}}">{{locParse}}</span></sc-if>
 			<button onClick="{{saveLocation}}" disabled="{{saveDisabled}}" style="font: inherit; cursor: pointer; height: 42px; border-radius: 6px; border: 0; background: {{saveBg}}; color: {{saveFg}}; font-weight: 700; font-size: 14px">Save location</button>
-			<span style="font-size: 12px; color: #8ba598; line-height: 1.5">Stored on your WaveKit only, never sent anywhere. Used for the map centre, range rings and distances, and by the ADS-B decoder. Every device signed in sees it.</span>
+			<span style="font-size: 12px; color: var(--wk-text-3); line-height: 1.5">Stored on your WaveKit only, never sent anywhere. Used for the map centre, range rings and distances, and by the ADS-B decoder. Every device signed in sees it.</span>
 		</aside>
 	</sc-if>
 
 	<sc-if value="{{tlOpen}}" hint-placeholder-val="{{false}}">
-		<div ref="{{refs.tl}}" role="group" aria-label="Replay the last hour" style="position: absolute; right: 16px; bottom: {{tlPanelBottom}}px; z-index: 4; width: min(520px, calc(100% - 32px)); box-sizing: border-box; padding: 12px 14px 10px 10px; border-radius: 12px; background: rgba(17,28,25,.72); border: 1px solid rgba(123,236,199,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%); display: flex; align-items: center; gap: 10px">
-			<button onClick="{{togglePlay}}" aria-label="{{playLabel}}" title="{{playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 18px; background: rgba(123,236,199,.14); color: #7becc7; display: grid; place-items: center">
+		<div ref="{{refs.tl}}" role="group" aria-label="Replay the last hour" style="position: absolute; right: 16px; bottom: {{tlPanelBottom}}px; z-index: 4; width: min(520px, calc(100% - 32px)); box-sizing: border-box; padding: 12px 14px 10px 10px; border-radius: 12px; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; align-items: center; gap: 10px">
+			<button onClick="{{togglePlay}}" aria-label="{{playLabel}}" title="{{playLabel}}" style="font: inherit; cursor: pointer; flex: none; width: 36px; height: 36px; border: 0; border-radius: 18px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); display: grid; place-items: center">
 				<sc-if value="{{playing}}" hint-placeholder-val="{{false}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg></sc-if>
 				<sc-if value="{{notPlaying}}" hint-placeholder-val="{{true}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg></sc-if>
 			</button>
@@ -173,45 +186,45 @@ body{margin:0;background:#08110e}
 					<div style="position: absolute; inset: 0 0 6px; display: flex; align-items: flex-end; gap: 1px" aria-hidden="true">
 						<sc-for list="{{hist}}" as="h" hint-placeholder-count="60"><span style="flex: 1; height: {{h.h}}%; border-radius: 1px; background: {{h.c}}"></span></sc-for>
 					</div>
-					<div style="position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 2px; background: #22362f"></div>
-					<div style="position: absolute; top: 0; bottom: 0; left: {{cursorPct}}%; width: 2px; margin-left: -1px; background: #f4f7f5"></div>
+					<div style="position: absolute; left: 0; right: 0; bottom: 0; height: 3px; border-radius: 2px; background: var(--wk-line-solid)"></div>
+					<div style="position: absolute; top: 0; bottom: 0; left: {{cursorPct}}%; width: 2px; margin-left: -1px; background: var(--wk-text)"></div>
 					<input type="range" min="0" max="60" step="1" value="{{scrub}}" onChange="{{onScrub}}" aria-label="Replay position" aria-valuetext="{{timeText}}" style="position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: ew-resize">
 				</div>
-				<div style="display: flex; justify-content: space-between; font-size: 11.5px; color: #8ba598; font-variant-numeric: tabular-nums"><span>13:03</span><span style="color: #f4f7f5">{{timeText}}</span><span>Now</span></div>
+				<div style="display: flex; justify-content: space-between; font-size: 11.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums"><span>13:03</span><span style="color: var(--wk-text)">{{timeText}}</span><span>Now</span></div>
 			</div>
-			<button onClick="{{closeTl}}" aria-label="Close replay" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: #8ba598; display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			<button onClick="{{closeTl}}" aria-label="Close replay" style="font: inherit; cursor: pointer; flex: none; width: 32px; height: 32px; border: 0; border-radius: 6px; background: transparent; color: var(--wk-text-3); display: grid; place-items: center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
 		</div>
 	</sc-if>
 
-	<div ref="{{refs.chip}}" style="position: absolute; right: 16px; bottom: {{chipBottom}}px; z-index: 4; display: flex; align-items: center; gap: 4px; height: 44px; box-sizing: border-box; padding: 4px; border-radius: 12px; background: rgba(17,28,25,.55); border: 1px solid {{chipBorder}}; box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 12px 32px rgba(0,0,0,.35); backdrop-filter: blur(22px) saturate(170%)">
+	<div ref="{{refs.chip}}" style="position: absolute; right: 16px; bottom: {{chipBottom}}px; z-index: 4; display: flex; align-items: center; gap: 4px; height: 44px; box-sizing: border-box; padding: 4px; border-radius: 12px; background: var(--wk-glass); border: 1px solid {{chipBorder}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx)">
 		<button class="wk-m-btn" onClick="{{toggleTl}}" aria-expanded="{{tlOpen}}" title="Replay the last hour" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: {{chipFg}}; display: flex; align-items: center; gap: 8px; font-size: 12.5px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
 			<span style="width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex: none"></span>{{chipText}}
 			<span aria-hidden="true" style="display: flex; align-items: flex-end; gap: 1px; height: 14px; width: 40px"><sc-for list="{{spark}}" as="h" hint-placeholder-count="12"><span style="flex: 1; height: {{h.h}}%; border-radius: 1px; background: {{h.c}}"></span></sc-for></span>
 		</button>
 		<sc-if value="{{notLive}}" hint-placeholder-val="{{false}}">
-			<button onClick="{{goLive}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(123,236,199,.14); color: #7becc7; font-size: 12.5px; font-weight: 700; white-space: nowrap">Back to live</button>
+			<button onClick="{{goLive}}" style="font: inherit; cursor: pointer; height: 34px; padding: 0 10px; border: 0; border-radius: 8px; background: rgba(var(--wk-accent-rgb),.14); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap">Back to live</button>
 		</sc-if>
 	</div>
 
 	<sc-if value="{{showScale}}" hint-placeholder-val="{{true}}">
 		<div aria-hidden="true" style="position: absolute; right: 18px; bottom: {{scaleBottom}}px; z-index: 2; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; pointer-events: none">
-			<span style="font-size: 11px; color: #8ba598; font-variant-numeric: tabular-nums">{{scaleText}}</span>
-			<span style="width: {{scalePx}}px; height: 5px; box-sizing: border-box; border: 1px solid rgba(185,202,193,.55); border-top: 0"></span>
+			<span style="font-size: 11px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{scaleText}}</span>
+			<span style="width: {{scalePx}}px; height: 5px; box-sizing: border-box; border: 1px solid rgba(var(--wk-ink-2-rgb),.55); border-top: 0"></span>
 		</div>
 	</sc-if>
 
-	<div style="position: absolute; right: 16px; bottom: 6px; z-index: 2; display: flex; align-items: center; gap: 8px; font-size: 11px; color: #6d857a; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden">
-		<button onClick="{{openLocation}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #8ba598; font-size: 11px; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{locDot}}"></span>{{stationText}}</button>
+	<div style="position: absolute; right: 16px; bottom: 6px; z-index: 2; display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--wk-text-4); white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden">
+		<button onClick="{{openLocation}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: var(--wk-text-3); font-size: 11px; display: flex; align-items: center; gap: 5px"><span style="width: 6px; height: 6px; border-radius: 50%; background: {{locDot}}"></span>{{stationText}}</button>
 		<span>·</span>
 		<sc-if value="{{tilesOffline}}" hint-placeholder-val="{{true}}"><span>Offline map · 400 km around you · 412 MB</span></sc-if>
-		<sc-if value="{{tilesOnline}}" hint-placeholder-val="{{false}}"><span>Online map (OpenFreeMap) · <button onClick="{{downloadTiles}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: #7becc7; font-size: 11px; font-weight: 700">Download for offline</button></span></sc-if>
+		<sc-if value="{{tilesOnline}}" hint-placeholder-val="{{false}}"><span>Online map (OpenFreeMap) · <button onClick="{{downloadTiles}}" style="font: inherit; cursor: pointer; border: 0; padding: 0; background: transparent; color: var(--wk-accent); font-size: 11px; font-weight: 700">Download for offline</button></span></sc-if>
 		<sc-if value="{{tilesDownloading}}" hint-placeholder-val="{{false}}"><span>Downloading map for your area · {{dlPct}} %</span></sc-if>
 		<span>·</span>
 		<span>© OpenStreetMap · Natural Earth</span>
 	</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"embedded":{"editor":null},"onAction":{"editor":null},"location":{"editor":"enum","options":["set","approximate"],"default":"set"},"tiles":{"editor":"enum","options":["offline","online","downloading"],"default":"offline"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},"embedded":{"editor":null},"onAction":{"editor":null},"location":{"editor":"enum","options":["set","approximate"],"default":"set"},"tiles":{"editor":"enum","options":["offline","online","downloading"],"default":"offline"},"$preview":{"width":1440,"height":900}}'>
 // ---------- geography ----------
 // Land: Natural Earth 10m for the wide area, OSM coastline (ODbL) simplified to ~50 m
 // around Roscoff (box LOC). Rings are flat [lon, lat, lon, lat, …]. Edges lying on a
@@ -288,17 +301,43 @@ function toLocator(lat, lon) {
 	return a + b + c;
 }
 // Altitude: 5 steps, each distinct in lightness as well as hue (legible on dark land and sea).
+// Light map: same order, darkened so every step is >= 3:1 on light land and sea.
 const ALT = [[0, '#f2a14b'], [10000, '#e8d16a'], [20000, '#7becc7'], [30000, '#9fd8ff'], [40000, '#f4f7f5']];
+const ALT_L = ['#b4560c', '#7f6a00', '#0b7657', '#1d5fa8', '#1d2b26'];
+let LIGHT = false;
 function altColor(ft) {
-	for (let i = ALT.length - 1; i >= 0; i--) if (ft >= ALT[i][0]) return ALT[i][1];
-	return ALT[0][1];
+	for (let i = ALT.length - 1; i >= 0; i--) if (ft >= ALT[i][0]) return LIGHT ? ALT_L[i] : ALT[i][1];
+	return LIGHT ? ALT_L[0] : ALT[0][1];
 }
 
 // ---------- mock traffic (Roscoff, north Brittany) ----------
 const STATION = [48.7051, -3.9750];
 const APPROX = [48.76, -3.82];
 const BLOSCON = [48.7262, -3.9640], ROSCOFF_PIER = [48.7292, -3.9870], VIEUX_PORT = [48.7275, -3.9800];
-const COL = { vessel: '#8ec5ff', aton: '#8ec5ff', aprs: '#f4f7f5', mesh: '#c9a8ff', acars: '#f2b84b' };
+// Data colours. The map canvas is its own cartographic surface: dark map in the dark theme,
+// a light map (light land and sea, dark coastline) in the light theme. Neither reads var().
+const COL_D = { vessel: '#8ec5ff', aton: '#8ec5ff', aprs: '#f4f7f5', mesh: '#c9a8ff', acars: '#f2b84b' };
+const COL_L = { vessel: '#1f5fa6', aton: '#1f5fa6', aprs: '#1d2b26', mesh: '#6a3fc2', acars: '#7a4f00' };
+const COL = Object.assign({}, COL_D);
+// line = hairline tint (--wk-line-rgb), acc = --wk-accent-rgb; both resolved from the scope
+const MAP = {
+	dark: {
+		sea: '#08110e', land: '#0f1c18', grid: l => 'rgba(' + l + ',0.045)', coastHalo: l => 'rgba(' + l + ',0.07)', coast: l => 'rgba(' + l + ',0.42)', coastW: 1,
+		covA: [a => 'rgba(' + a + ',0.30)', a => 'rgba(' + a + ',0.03)'], covV: ['rgba(142,197,255,0.35)', 'rgba(142,197,255,0.04)'], ring: l => 'rgba(' + l + ',0.14)',
+		linkHi: 'rgba(201,168,255,0.55)', linkLo: 'rgba(201,168,255,0.25)', selRing: 'rgba(244,247,245,0.9)', outline: 'rgba(8,17,14,0.9)', hole: '#08110e',
+		apxRing: 'rgba(242,184,75,0.55)', apxFill: 'rgba(242,184,75,0.08)', apxDot: '#f2b84b', stFill: '#08110e', pending: '#f4f7f5',
+		sea_t: l => 'rgba(' + l + ',0.22)', placeDot: 'rgba(82,100,93,0.95)', place: '#6d857a', halo: null,
+		ringBox: 'rgba(8,17,14,0.8)', ringTxt: a => 'rgba(' + a + ',0.5)', labelBox: 'rgba(8,17,14,0.78)', airTxt: '#e3ece7'
+	},
+	light: {
+		sea: '#d5e3e3', land: '#f3f5f1', grid: () => 'rgba(22,50,42,0.06)', coastHalo: () => 'rgba(22,50,42,0.06)', coast: () => 'rgba(22,50,42,0.62)', coastW: 1.1,
+		covA: [a => 'rgba(' + a + ',0.55)', a => 'rgba(' + a + ',0.05)'], covV: ['rgba(31,95,166,0.45)', 'rgba(31,95,166,0.05)'], ring: () => 'rgba(22,50,42,0.3)',
+		linkHi: 'rgba(106,63,194,0.6)', linkLo: 'rgba(106,63,194,0.3)', selRing: 'rgba(18,32,27,0.85)', outline: 'rgba(255,255,255,0.95)', hole: '#ffffff',
+		apxRing: 'rgba(201,138,18,0.8)', apxFill: 'rgba(201,138,18,0.1)', apxDot: '#7a4f00', stFill: '#ffffff', pending: '#12201b',
+		sea_t: () => '#4a666b', placeDot: '#4e6158', place: '#3f524a', halo: 'rgba(243,245,241,0.92)',
+		ringBox: 'rgba(250,252,251,0.88)', ringTxt: a => 'rgb(' + a + ')', labelBox: 'rgba(250,252,251,0.88)', airTxt: '#22332d'
+	}
+};
 const ICONS = {
 	aircraft: ['M16 10h4a2 2 0 0 1 0 4h-4l-4 7h-3l2 -7h-4l-2 2h-3l2 -4l-2 -4h3l2 2h4l-2 -7h3l4 7'],
 	vessel: ['M4 18l-1 -5h18l-2 4M5 13v-6h8l4 6M7 7v-4h-1', 'M2 20a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1a2.4 2.4 0 0 1 2 -1a2.4 2.4 0 0 1 2 1a2.4 2.4 0 0 0 2 1a2.4 2.4 0 0 0 2 -1'],
@@ -373,11 +412,11 @@ const BY_ID = {};
 TRAFFIC.forEach(o => { BY_ID[o.id] = o; });
 const LINKS = [['m0', 'm1', 9.0], ['m0', 'm2', 3.5], ['m0', 'm3', 6.5], ['m2', 'm1', -2.0]];
 const LAYERS = [
-	{ id: 'aircraft', label: 'Aircraft', dot: '#7becc7', shape: '2px', kinds: ['aircraft'], title: 'ADS-B · readsb', icon: ICONS.aircraft },
+	{ id: 'aircraft', label: 'Aircraft', dot: 'var(--wk-accent)', shape: '2px', kinds: ['aircraft'], title: 'ADS-B · readsb', icon: ICONS.aircraft },
 	{ id: 'vessel', label: 'Vessels', dot: '#8ec5ff', shape: '2px', kinds: ['vessel', 'aton'], title: 'AIS · AIS-catcher, including aids to navigation', icon: ICONS.vessel },
-	{ id: 'aprs', label: 'APRS', dot: '#f4f7f5', shape: '50%', kinds: ['aprs'], title: 'APRS · Direwolf, including weather and balloons', icon: ICONS.aprs },
+	{ id: 'aprs', label: 'APRS', dot: 'var(--wk-text)', shape: '50%', kinds: ['aprs'], title: 'APRS · Direwolf, including weather and balloons', icon: ICONS.aprs },
 	{ id: 'mesh', label: 'Mesh', dot: '#c9a8ff', shape: '50%', kinds: ['mesh'], title: 'Meshtastic nodes and links', icon: ICONS.mesh },
-	{ id: 'acars', label: 'ACARS', dot: '#f2b84b', shape: '1px', kinds: ['acars'], title: 'Position reports from ACARS and VDL2 (ADS-C)', icon: ICONS.acars }
+	{ id: 'acars', label: 'ACARS', dot: 'var(--wk-amber)', shape: '1px', kinds: ['acars'], title: 'Position reports from ACARS and VDL2 (ADS-C)', icon: ICONS.acars }
 ];
 const LAYER_OF = {};
 LAYERS.forEach(l => l.kinds.forEach(k => { LAYER_OF[k] = l; }));
@@ -390,15 +429,15 @@ function covRadius(kind, b) {
 const PLANE = [[0, -9], [1.5, -3], [8, 1], [8, 3], [1.5, 1.5], [1, 6], [3.5, 8], [3.5, 9], [0, 8.2], [-3.5, 9], [-3.5, 8], [-1, 6], [-1.5, 1.5], [-8, 3], [-8, 1], [-1.5, -3]];
 const HULL = [[0, -8], [4, -2], [4, 7], [-4, 7], [-4, -2]];
 const svgPath = pts => 'M' + pts.map(p => p[0] + ' ' + p[1]).join('L') + 'Z';
-const LEGEND = [
-	{ label: 'Aircraft', d: svgPath(PLANE), fill: '#7becc7', stroke: 'none', dash: '' },
-	{ label: 'Vessel', d: svgPath(HULL), fill: '#8ec5ff', stroke: 'none', dash: '' },
-	{ label: 'Moored', d: 'M-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', fill: '#8ec5ff', stroke: 'none', dash: '' },
-	{ label: 'Aid to navigation', d: 'M0 -5L5 0L0 5L-5 0Z', fill: 'none', stroke: '#8ec5ff', dash: '' },
-	{ label: 'APRS station', d: 'M-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0', fill: '#f4f7f5', stroke: 'none', dash: '' },
-	{ label: 'Weather', d: 'M-4.5 -4.5h9v9h-9Z', fill: 'none', stroke: '#f4f7f5', dash: '' },
-	{ label: 'Mesh node', d: 'M5 0L2.5 4.33L-2.5 4.33L-5 0L-2.5 -4.33L2.5 -4.33Z', fill: '#c9a8ff', stroke: 'none', dash: '' },
-	{ label: 'ACARS report', d: 'M0 -6L6 0L0 6L-6 0Z', fill: 'none', stroke: '#f2b84b', dash: '2 2' }
+const legendFor = () => [
+	{ label: 'Aircraft', d: svgPath(PLANE), fill: 'var(--wk-accent)', stroke: 'none', dash: '' },
+	{ label: 'Vessel', d: svgPath(HULL), fill: COL.vessel, stroke: 'none', dash: '' },
+	{ label: 'Moored', d: 'M-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0', fill: COL.vessel, stroke: 'none', dash: '' },
+	{ label: 'Aid to navigation', d: 'M0 -5L5 0L0 5L-5 0Z', fill: 'none', stroke: COL.vessel, dash: '' },
+	{ label: 'APRS station', d: 'M-4.5 0a4.5 4.5 0 1 0 9 0a4.5 4.5 0 1 0 -9 0', fill: 'var(--wk-text)', stroke: 'none', dash: '' },
+	{ label: 'Weather', d: 'M-4.5 -4.5h9v9h-9Z', fill: 'none', stroke: 'var(--wk-text)', dash: '' },
+	{ label: 'Mesh node', d: 'M5 0L2.5 4.33L-2.5 4.33L-5 0L-2.5 -4.33L2.5 -4.33Z', fill: COL.mesh, stroke: 'none', dash: '' },
+	{ label: 'ACARS report', d: 'M0 -6L6 0L0 6L-6 0Z', fill: 'none', stroke: 'var(--wk-amber)', dash: '2 2' }
 ];
 
 class Component extends DCLogic {
@@ -565,6 +604,18 @@ class Component extends DCLogic {
 		const next = list[(i + dir + list.length) % list.length];
 		this.setState({ sel: next.id, follow: false, chooser: null });
 	}
+	// theme for the canvas: palette + accent/hairline rgb read once per theme/accent change
+	themeKey() {
+		const light = this.props.theme === 'light', k = (light ? 'light' : 'dark') + '|' + (this.props.accent || 'phosphor');
+		if (this.thKey !== k || !this.th) {
+			const cs = this.boxEl ? getComputedStyle(this.boxEl) : null;
+			const acc = cs ? cs.getPropertyValue('--wk-accent-rgb').trim() : '', line = cs ? cs.getPropertyValue('--wk-line-rgb').trim() : '';
+			this.th = { light, pal: MAP[light ? 'light' : 'dark'], acc: acc || '123,236,199', line: line || '123,236,199' };
+			this.thKey = acc ? k : null;
+		}
+		LIGHT = this.th.light; Object.assign(COL, LIGHT ? COL_L : COL_D);
+		return this.th;
+	}
 	visible(o) { return !!this.state.layers[LAYER_OF[o.kind].id]; }
 	textW(font, txt) {
 		const k = font + '|' + txt;
@@ -594,7 +645,8 @@ class Component extends DCLogic {
 		// land, graticule, coverage and ring circles: only redrawn when the view moves past the
 		// cached margin or the zoom/overlays change, otherwise the cached bitmap is blitted
 		const s = this.state, z = s.zoom, M = 256, c = this.center(), st = this.station();
-		const key = [z, W, H, dpr, s.ov.rings, s.ov.coverage, st[0], st[1]].join('|');
+		const th = this.themeKey(), pal = th.pal, A = th.acc, Ln = th.line;
+		const key = [z, W, H, dpr, s.ov.rings, s.ov.coverage, st[0], st[1], th.light, A, Ln].join('|');
 		const tl = [c[0] - W / 2, c[1] - H / 2];
 		if (this.stat && this.stat.key === key && tl[0] >= this.stat.x && tl[1] >= this.stat.y && tl[0] + W <= this.stat.x + W + 2 * M && tl[1] + H <= this.stat.y + H + 2 * M) return this.stat;
 		const cv = (this.stat && this.stat.cv) || document.createElement('canvas');
@@ -603,10 +655,10 @@ class Component extends DCLogic {
 		const g = cv.getContext('2d'), ox = tl[0] - M, oy = tl[1] - M;
 		const P = (lat, lon) => [wx(lon, z) - ox, wy(lat, z) - oy];
 		g.setTransform(dpr, 0, 0, dpr, 0, 0);
-		g.fillStyle = '#08110e'; g.fillRect(0, 0, CW, CH);
+		g.fillStyle = pal.sea; g.fillRect(0, 0, CW, CH);
 		const llTL = [ilat(oy, z), ilon(ox, z)], llBR = [ilat(oy + CH, z), ilon(ox + CW, z)];
 		const step = z < 7 ? 2 : z < 9 ? 1 : z < 11 ? 0.25 : 0.1;
-		g.strokeStyle = 'rgba(123,236,199,0.045)'; g.lineWidth = 1; g.beginPath();
+		g.strokeStyle = pal.grid(Ln); g.lineWidth = 1; g.beginPath();
 		for (let lo = Math.ceil(llTL[1] / step) * step; lo < llBR[1]; lo += step) { const x = Math.round(P(0, lo)[0]) + 0.5; g.moveTo(x, 0); g.lineTo(x, CH); }
 		for (let la = Math.ceil(llBR[0] / step) * step; la < llTL[0]; la += step) { const y = Math.round(P(la, 0)[1]) + 0.5; g.moveTo(0, y); g.lineTo(CW, y); }
 		g.stroke();
@@ -615,16 +667,16 @@ class Component extends DCLogic {
 		// one path for every ring: no hairline seams where clipped pieces meet
 		g.beginPath();
 		vis.forEach(r => { r.pts.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }); g.closePath(); });
-		g.fillStyle = '#0f1c18'; g.fill();
+		g.fillStyle = pal.land; g.fill();
 		g.beginPath();
 		vis.forEach(r => r.coast.forEach(line => line.forEach((p, i) => { const q = P(p[1], p[0]); if (i) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); })));
 		g.lineJoin = 'round';
-		g.strokeStyle = 'rgba(123,236,199,0.07)'; g.lineWidth = 5; g.stroke();
-		g.strokeStyle = 'rgba(123,236,199,0.42)'; g.lineWidth = 1; g.stroke();
+		g.strokeStyle = pal.coastHalo(Ln); g.lineWidth = 5; g.stroke();
+		g.strokeStyle = pal.coast(Ln); g.lineWidth = pal.coastW; g.stroke();
 		const sxy = P(st[0], st[1]);
 		const kmpx = 1 / (2 * Math.PI * R * Math.cos(rad(st[0])) / (256 * Math.pow(2, z)));
 		if (s.ov.coverage) {
-			[['adsb', 'rgba(123,236,199,0.30)', 'rgba(123,236,199,0.03)'], ['ais', 'rgba(142,197,255,0.35)', 'rgba(142,197,255,0.04)']].forEach(([k, stroke, fill]) => {
+			[['adsb', pal.covA[0](A), pal.covA[1](A)], ['ais', pal.covV[0], pal.covV[1]]].forEach(([k, stroke, fill]) => {
 				g.beginPath();
 				for (let b = 0; b <= 360; b += 5) { const p = dest(st[0], st[1], b, covRadius(k, b)); const q = P(p[0], p[1]); if (b) g.lineTo(q[0], q[1]); else g.moveTo(q[0], q[1]); }
 				g.closePath(); g.fillStyle = fill; g.fill(); g.strokeStyle = stroke; g.lineWidth = 1; g.stroke();
@@ -632,7 +684,7 @@ class Component extends DCLogic {
 		}
 		const rings = [];
 		if (s.ov.rings) {
-			g.setLineDash([3, 6]); g.strokeStyle = 'rgba(123,236,199,0.14)'; g.lineWidth = 1;
+			g.setLineDash([3, 6]); g.strokeStyle = pal.ring(Ln); g.lineWidth = 1;
 			[5, 10, 25, 50, 100, 200, 300].forEach(km => {
 				const rr = km * kmpx;
 				if (rr < 48 || rr > Math.max(W, H) * 1.6) return;
@@ -665,6 +717,7 @@ class Component extends DCLogic {
 		}
 		const g = cv.getContext('2d');
 		this.g = g;
+		const th = this.themeKey(), pal = th.pal, A = th.acc;
 		g.setTransform(dpr, 0, 0, dpr, 0, 0);
 		const stat = this.drawStatic(W, H, dpr), c = this.center();
 		g.drawImage(stat.cv, stat.x - (c[0] - W / 2), stat.y - (c[1] - H / 2), W + 512, H + 512);
@@ -676,7 +729,7 @@ class Component extends DCLogic {
 		if (s.ov.links && s.layers.mesh) {
 			g.lineWidth = 1;
 			LINKS.forEach(([a, b, snr]) => {
-				g.strokeStyle = snr > 5 ? 'rgba(201,168,255,0.55)' : 'rgba(201,168,255,0.25)';
+				g.strokeStyle = snr > 5 ? pal.linkHi : pal.linkLo;
 				g.beginPath(); g.moveTo(XY[a][0], XY[a][1]); g.lineTo(XY[b][0], XY[b][1]); g.stroke();
 			});
 			g.setLineDash([]);
@@ -707,12 +760,12 @@ class Component extends DCLogic {
 			if (q[0] < -30 || q[1] < -30 || q[0] > W + 30 || q[1] > H + 30) return;
 			if (kind === 'aircraft' && dist(st, P[o.id]) > 420) return;
 			const isSel = s.sel === o.id, isHov = s.hover && s.hover.id === o.id;
-			if (isSel) { g.strokeStyle = 'rgba(244,247,245,0.9)'; g.lineWidth = 1; g.beginPath(); g.arc(q[0], q[1], 15, 0, 7); g.stroke(); }
+			if (isSel) { g.strokeStyle = pal.selRing; g.lineWidth = 1; g.beginPath(); g.arc(q[0], q[1], 15, 0, 7); g.stroke(); }
 			let col;
-			if (kind === 'aircraft') { col = altColor(o.ft); shape(PLANE, q[0], q[1], o.trk, col, 'rgba(8,17,14,0.9)'); }
-			else if (kind === 'vessel') { col = COL.vessel; if (!this.moving(o, t)) { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4, 0, 7); g.fill(); } else shape(HULL, q[0], q[1], o.trk, col, 'rgba(8,17,14,0.9)'); }
+			if (kind === 'aircraft') { col = altColor(o.ft); shape(PLANE, q[0], q[1], o.trk, col, pal.outline); }
+			else if (kind === 'vessel') { col = COL.vessel; if (!this.moving(o, t)) { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4, 0, 7); g.fill(); } else shape(HULL, q[0], q[1], o.trk, col, pal.outline); }
 			else if (kind === 'aton') { col = COL.aton; shape([[0, -5], [5, 0], [0, 5], [-5, 0]], q[0], q[1], 0, null, col); }
-			else if (kind === 'aprs') { col = COL.aprs; if (o.type === 'Weather station') { g.strokeStyle = col; g.lineWidth = 1.4; g.strokeRect(q[0] - 4.5, q[1] - 4.5, 9, 9); } else { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4.5, 0, 7); g.fill(); g.fillStyle = '#08110e'; g.beginPath(); g.arc(q[0], q[1], 1.6, 0, 7); g.fill(); } }
+			else if (kind === 'aprs') { col = COL.aprs; if (o.type === 'Weather station') { g.strokeStyle = col; g.lineWidth = 1.4; g.strokeRect(q[0] - 4.5, q[1] - 4.5, 9, 9); } else { g.fillStyle = col; g.beginPath(); g.arc(q[0], q[1], 4.5, 0, 7); g.fill(); g.fillStyle = pal.hole; g.beginPath(); g.arc(q[0], q[1], 1.6, 0, 7); g.fill(); } }
 			else if (kind === 'mesh') { col = COL.mesh; g.fillStyle = col; g.beginPath(); for (let k = 0; k < 6; k++) { const a = Math.PI / 3 * k; const xx = q[0] + 5 * Math.cos(a), yy = q[1] + 5 * Math.sin(a); if (k) g.lineTo(xx, yy); else g.moveTo(xx, yy); } g.closePath(); g.fill(); }
 			else if (kind === 'acars') { col = COL.acars; g.setLineDash([2, 2]); shape([[0, -6], [6, 0], [0, 6], [-6, 0]], q[0], q[1], 0, null, col); g.setLineDash([]); }
 			obstacles.push([q[0] - 8, q[1] - 8, q[0] + 8, q[1] + 8]);
@@ -720,7 +773,7 @@ class Component extends DCLogic {
 			const wants = isSel || isHov || (s.ov.labels && (kind === 'aircraft' ? z >= 7.5 : kind === 'vessel' ? z >= 9.4 : kind === 'aton' ? z >= 11 : kind === 'acars' || z >= 9));
 			if (wants) {
 				const txt = kind === 'aircraft' ? o.name + '  ' + flText(o.ft) : kind === 'acars' ? o.name + ' · ' + o.age + ' min ago' : o.name;
-				labels.push({ txt, x: q[0], y: q[1], col: kind === 'aircraft' ? '#e3ece7' : col, bold: isSel, force: isSel || isHov, pri: isSel ? -2 : isHov ? -1 : PRI[kind] + (kind === 'aircraft' ? dist(st, P[o.id]) / 1000 : 0), box: true });
+				labels.push({ txt, x: q[0], y: q[1], col: kind === 'aircraft' ? pal.airTxt : col, bold: isSel, force: isSel || isHov, pri: isSel ? -2 : isHov ? -1 : PRI[kind] + (kind === 'aircraft' ? dist(st, P[o.id]) / 1000 : 0), box: true });
 			}
 		}));
 		this.hits = hits;
@@ -728,25 +781,27 @@ class Component extends DCLogic {
 		const kmpx = stat.kmpx;
 		if (this.approx()) {
 			const rr = 18 * kmpx;
-			g.setLineDash([4, 4]); g.strokeStyle = 'rgba(242,184,75,0.55)'; g.lineWidth = 1; g.beginPath(); g.arc(sxy[0], sxy[1], rr, 0, 7); g.stroke(); g.setLineDash([]);
-			g.fillStyle = 'rgba(242,184,75,0.08)'; g.fill();
-			g.fillStyle = '#f2b84b'; g.beginPath(); g.arc(sxy[0], sxy[1], 3, 0, 7); g.fill();
+			g.setLineDash([4, 4]); g.strokeStyle = pal.apxRing; g.lineWidth = 1; g.beginPath(); g.arc(sxy[0], sxy[1], rr, 0, 7); g.stroke(); g.setLineDash([]);
+			g.fillStyle = pal.apxFill; g.fill();
+			g.fillStyle = pal.apxDot; g.beginPath(); g.arc(sxy[0], sxy[1], 3, 0, 7); g.fill();
 		} else {
 			const pulse = (ms / 1000) % 2.4 / 2.4;
-			g.strokeStyle = 'rgba(123,236,199,' + (0.6 * (1 - pulse)) + ')'; g.lineWidth = 1.5; g.beginPath(); g.arc(sxy[0], sxy[1], 6 + pulse * 22, 0, 7); g.stroke();
-			g.fillStyle = '#08110e'; g.beginPath(); g.arc(sxy[0], sxy[1], 7, 0, 7); g.fill();
-			g.strokeStyle = '#7becc7'; g.lineWidth = 2; g.stroke();
-			g.fillStyle = '#7becc7'; g.beginPath(); g.arc(sxy[0], sxy[1], 2.5, 0, 7); g.fill();
+			g.strokeStyle = 'rgba(' + A + ',' + (0.6 * (1 - pulse)) + ')'; g.lineWidth = 1.5; g.beginPath(); g.arc(sxy[0], sxy[1], 6 + pulse * 22, 0, 7); g.stroke();
+			g.fillStyle = pal.stFill; g.beginPath(); g.arc(sxy[0], sxy[1], 7, 0, 7); g.fill();
+			g.strokeStyle = 'rgb(' + A + ')'; g.lineWidth = 2; g.stroke();
+			g.fillStyle = 'rgb(' + A + ')'; g.beginPath(); g.arc(sxy[0], sxy[1], 2.5, 0, 7); g.fill();
 		}
 		obstacles.push([sxy[0] - 10, sxy[1] - 10, sxy[0] + 10, sxy[1] + 10]);
-		if (s.pending) { const pq = this.toXY(s.pending[0], s.pending[1]); g.strokeStyle = '#f4f7f5'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(pq[0] - 8, pq[1]); g.lineTo(pq[0] + 8, pq[1]); g.moveTo(pq[0], pq[1] - 8); g.lineTo(pq[0], pq[1] + 8); g.stroke(); }
+		if (s.pending) { const pq = this.toXY(s.pending[0], s.pending[1]); g.strokeStyle = pal.pending; g.lineWidth = 1.5; g.beginPath(); g.moveTo(pq[0] - 8, pq[1]); g.lineTo(pq[0] + 8, pq[1]); g.moveTo(pq[0], pq[1] - 8); g.lineTo(pq[0], pq[1] + 8); g.stroke(); }
 		this.drawLabels(g, W, H, z, labels, obstacles, stat, sxy);
 	}
 	drawLabels(g, W, H, z, labels, obstacles, stat, sxy) {
 		// greedy placement by priority: selected and hovered first, then traffic, ring
 		// distances, places, sea names. A label that cannot find a free spot is dropped.
 		const s = this.state, placed = [];
-		const ui = this.uiRects;
+		const ui = this.uiRects, th = this.themeKey(), pal = th.pal, A = th.acc, Ln = th.line;
+		// light map: names get a land-coloured halo instead of a box
+		const halo = (txt, x, y) => { if (!pal.halo) return; g.save(); g.strokeStyle = pal.halo; g.lineWidth = 3; g.lineJoin = 'round'; g.strokeText(txt, x, y); g.restore(); };
 		const hit = (r, list) => list.some(o => r[0] < o[2] && r[2] > o[0] && r[1] < o[3] && r[3] > o[1]);
 		const free = (r, force) => r[0] >= 2 && r[1] >= 2 && r[2] <= W - 2 && r[3] <= H - 2 && (force || (!hit(r, ui) && !hit(r, placed)));
 		const FONT = "11.5px 'Noto Sans', sans-serif", BOLD = "700 11.5px 'Noto Sans', sans-serif";
@@ -796,16 +851,16 @@ class Component extends DCLogic {
 		// paint: sea names and places under traffic labels
 		g.textBaseline = 'middle';
 		placeDraws.forEach(([n, x, y, q]) => {
-			if (!q) { g.font = "700 12px 'D-DIN Condensed', 'Noto Sans', sans-serif"; g.fillStyle = 'rgba(123,236,199,0.22)'; g.textAlign = 'center'; if ('letterSpacing' in g) g.letterSpacing = '4px'; g.fillText(n, x, y); if ('letterSpacing' in g) g.letterSpacing = '0px'; return; }
-			g.fillStyle = 'rgba(82,100,93,0.95)'; g.beginPath(); g.arc(q[0], q[1], 1.8, 0, 7); g.fill();
-			g.font = "11.5px 'Noto Sans', sans-serif"; g.fillStyle = '#6d857a'; g.textAlign = 'left'; g.fillText(n, x + 1, y);
+			if (!q) { g.font = "700 12px 'D-DIN Condensed', 'Noto Sans', sans-serif"; g.fillStyle = pal.sea_t(Ln); g.textAlign = 'center'; if ('letterSpacing' in g) g.letterSpacing = '4px'; g.fillText(n, x, y); if ('letterSpacing' in g) g.letterSpacing = '0px'; return; }
+			g.fillStyle = pal.placeDot; g.beginPath(); g.arc(q[0], q[1], 1.8, 0, 7); g.fill();
+			g.font = "11.5px 'Noto Sans', sans-serif"; g.textAlign = 'left'; halo(n, x + 1, y); g.fillStyle = pal.place; g.fillText(n, x + 1, y);
 		});
-		g.font = "11px 'Noto Sans', sans-serif"; g.fillStyle = 'rgba(123,236,199,0.45)'; g.textAlign = 'center';
-		ringDraws.forEach(([txt, x, y]) => { g.fillStyle = 'rgba(8,17,14,0.8)'; g.fillRect(x - this.textW("11px 'Noto Sans', sans-serif", txt) / 2 - 2, y - 7, this.textW("11px 'Noto Sans', sans-serif", txt) + 4, 14); g.fillStyle = 'rgba(123,236,199,0.5)'; g.fillText(txt, x, y); });
+		g.font = "11px 'Noto Sans', sans-serif"; g.textAlign = 'center';
+		ringDraws.forEach(([txt, x, y]) => { g.fillStyle = pal.ringBox; g.fillRect(x - this.textW("11px 'Noto Sans', sans-serif", txt) / 2 - 2, y - 7, this.textW("11px 'Noto Sans', sans-serif", txt) + 4, 14); g.fillStyle = pal.ringTxt(A); g.fillText(txt, x, y); });
 		g.textAlign = 'left';
 		draws.forEach(({ l, font, r }) => {
 			g.font = font;
-			g.fillStyle = 'rgba(8,17,14,0.78)'; g.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
+			g.fillStyle = pal.labelBox; g.fillRect(r[0], r[1], r[2] - r[0], r[3] - r[1]);
 			g.fillStyle = l.col; g.fillText(l.txt, r[0] + 3, r[1] + 8.5);
 		});
 	}
@@ -850,6 +905,8 @@ class Component extends DCLogic {
 	}
 	renderVals() {
 		const s = this.state, emb = !!this.props.embedded;
+		const light = this.props.theme === 'light';
+		LIGHT = light; Object.assign(COL, light ? COL_L : COL_D);
 		const tiles = s.tiles || this.props.tiles || 'offline';
 		const st = this.station();
 		const counts = {};
@@ -870,6 +927,9 @@ class Component extends DCLogic {
 		const ovOn = Object.keys(s.ov).filter(k => s.ov[k]).length;
 		const chooserObjs = s.chooser ? s.chooser.ids.map(id => BY_ID[id]) : [];
 		return {
+			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
+			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'phosphor',
+			mapSea: MAP[light ? 'light' : 'dark'].sea,
 			refs: this.refsObj,
 			rootPos: emb ? 'absolute' : 'relative', rootH: emb ? 'auto' : '100vh',
 			topBase, railW, railWide: wide, railJustify: wide ? 'flex-start' : 'center',
@@ -886,27 +946,27 @@ class Component extends DCLogic {
 			chooserX: s.chooser ? Math.max(8, Math.min(s.chooser.x + 12, (this.W || 1440) - 266)) : 0,
 			chooserY: s.chooser ? Math.max(8, Math.min(s.chooser.y - 20, (this.H || 900) - 60 - chooserObjs.length * 44)) : 0,
 			chooserTitle: s.chooser ? s.chooser.n + ' here · pick one' : '',
-			chooser: chooserObjs.map(o => { const l = LAYER_OF[o.kind]; return { title: o.name, sub: this.describe(o), color: o.kind === 'aircraft' ? altColor(o.ft) : l.dot, shape: l.shape, pick: () => this.setState({ sel: o.id, chooser: null, follow: false, locOpen: false }) }; }),
+			chooser: chooserObjs.map(o => { const l = LAYER_OF[o.kind]; return { title: o.name, sub: this.describe(o), color: o.kind === 'aircraft' ? altColor(o.ft) : l.kinds[0] in COL ? COL[l.kinds[0]] : l.dot, shape: l.shape, pick: () => this.setState({ sel: o.id, chooser: null, follow: false, locOpen: false }) }; }),
 			layers: LAYERS.map(l => {
 				const on = !!s.layers[l.id];
 				const n = l.kinds.reduce((a, k) => a + (counts[k] || 0), 0);
-				return { label: l.label, count: String(n), countC: on ? '#8ba598' : '#52645d', title: l.title, icon: l.icon, aria: l.label + ', ' + n + (on ? ', shown' : ', hidden'), on: on ? 'true' : 'false', dot: on ? l.dot : '#52645d', bg: on ? 'rgba(123,236,199,.07)' : 'transparent', fg: on ? '#f4f7f5' : '#6d857a', pick: () => this.setState({ layers: Object.assign({}, s.layers, { [l.id]: !on }) }) };
+				return { label: l.label, count: String(n), countC: on ? 'var(--wk-text-3)' : 'var(--wk-text-5)', title: l.title, icon: l.icon, aria: l.label + ', ' + n + (on ? ', shown' : ', hidden'), on: on ? 'true' : 'false', dot: on ? (l.id === 'vessel' || l.id === 'mesh' ? COL[l.id] : l.dot) : 'var(--wk-text-5)', bg: on ? 'rgba(var(--wk-accent-rgb),.07)' : 'transparent', fg: on ? 'var(--wk-text)' : 'var(--wk-text-4)', pick: () => this.setState({ layers: Object.assign({}, s.layers, { [l.id]: !on }) }) };
 			}),
 			showAltRamp: wide && !!s.layers.aircraft,
-			altSteps: ALT.map(a => ({ c: a[1] })),
-			legend: LEGEND,
-			overlaysOpen: s.overlaysOpen, ovBg: s.overlaysOpen ? '#192b24' : 'transparent', ovCount: ovOn + '/5',
+			altSteps: ALT.map((a, i) => ({ c: light ? ALT_L[i] : a[1] })),
+			legend: legendFor(),
+			overlaysOpen: s.overlaysOpen, ovBg: s.overlaysOpen ? 'var(--wk-fill)' : 'transparent', ovCount: ovOn + '/5',
 			toggleOverlays: () => this.setState({ overlaysOpen: !s.overlaysOpen, chooser: null }),
-			overlays: [['rings', 'Range rings', 'Distance from your station'], ['coverage', 'Coverage', 'Furthest reception per bearing, last 24 h'], ['trails', 'Trails', 'Where things came from'], ['labels', 'Labels', 'Callsigns, names and places'], ['links', 'Mesh links', 'Who hears whom, by SNR']].map(([k, label, sub]) => ({ label, sub, on: s.ov[k] ? 'true' : 'false', track: s.ov[k] ? '#7becc7' : '#2c443b', knob: s.ov[k] ? 16 : 2, pick: () => this.setState({ ov: Object.assign({}, s.ov, { [k]: !s.ov[k] }) }) })),
+			overlays: [['rings', 'Range rings', 'Distance from your station'], ['coverage', 'Coverage', 'Furthest reception per bearing, last 24 h'], ['trails', 'Trails', 'Where things came from'], ['labels', 'Labels', 'Callsigns, names and places'], ['links', 'Mesh links', 'Who hears whom, by SNR']].map(([k, label, sub]) => ({ label, sub, on: s.ov[k] ? 'true' : 'false', track: s.ov[k] ? 'var(--wk-accent)' : 'var(--wk-track)', knob: s.ov[k] ? 16 : 2, pick: () => this.setState({ ov: Object.assign({}, s.ov, { [k]: !s.ov[k] }) }) })),
 			showApprox: this.approx() && !s.picking && !s.locOpen,
 			picking: s.picking,
 			cancelPick: () => this.setState({ picking: false, locOpen: true }),
 			hasSel: !!sel && !s.locOpen && !s.overlaysOpen,
-			sel: sel ? Object.assign({}, sel, { hasNote: !!sel.note, noteFont: sel.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit', fields: sel.fields.map(f => ({ k: f[0], v: f[1] })) }) : { icon: [], fields: [], title: '', sub: '', seen: '', color: '#7becc7', note: '', hasNote: false, noteFont: 'inherit' },
+			sel: sel ? Object.assign({}, sel, { hasNote: !!sel.note, noteFont: sel.mono ? "ui-monospace, 'SF Mono', Menlo, monospace" : 'inherit', fields: sel.fields.map(f => ({ k: f[0], v: f[1] })) }) : { icon: [], fields: [], title: '', sub: '', seen: '', color: 'var(--wk-accent)', note: '', hasNote: false, noteFont: 'inherit' },
 			closeSel: () => this.setState({ sel: null, follow: false }),
 			following: s.follow ? 'true' : 'false',
 			followText: s.follow ? 'Following' : 'Follow',
-			followBorder: s.follow ? 'rgba(123,236,199,.55)' : 'rgba(123,236,199,.18)', followBg: s.follow ? 'rgba(123,236,199,.12)' : 'transparent', followFg: s.follow ? '#7becc7' : '#b9cac1',
+			followBorder: s.follow ? 'rgba(var(--wk-accent-rgb),.55)' : 'rgba(var(--wk-line-rgb),.18)', followBg: s.follow ? 'rgba(var(--wk-accent-rgb),.12)' : 'transparent', followFg: s.follow ? 'var(--wk-accent)' : 'var(--wk-text-2)',
 			toggleFollow: () => this.setState({ follow: !s.follow }),
 			selActivity: () => { if (this.props.onAction && sel) this.props.onAction('activity', { type: 'call', v: sel.token, kind: 'Name', value: sel.token }); },
 			locOpen: s.locOpen,
@@ -916,15 +976,15 @@ class Component extends DCLogic {
 			useBrowser: () => this.setState({ pending: STATION, locQ: STATION[0].toFixed(4) + ', ' + STATION[1].toFixed(4) }),
 			locQ: s.locQ,
 			onLocQ: e => this.setState({ locQ: e.target.value, pending: null }),
-			locQBorder: pq === 'bad' ? 'rgba(242,184,75,.55)' : 'rgba(123,236,199,.18)',
+			locQBorder: pq === 'bad' ? 'rgba(var(--wk-amber-rgb),.55)' : 'rgba(var(--wk-line-rgb),.18)',
 			hasLocParse: !!target || pq === 'bad',
 			locParse: pq === 'bad' ? 'Not recognised. Try “48.7051, -3.9750” or a locator like IN88aq.' : target ? fmtLat(target[0]) + ' · ' + fmtLon(target[1]) + ' · ' + toLocator(target[0], target[1]) : '',
-			locParseC: pq === 'bad' ? '#f2b84b' : '#b9cac1',
+			locParseC: pq === 'bad' ? 'var(--wk-amber)' : 'var(--wk-text-2)',
 			saveDisabled: !target,
-			saveBg: target ? '#7becc7' : '#192b24', saveFg: target ? '#111c19' : '#52645d',
+			saveBg: target ? 'var(--wk-accent)' : 'var(--wk-fill)', saveFg: target ? 'var(--wk-on-accent)' : 'var(--wk-text-5)',
 			saveLocation: () => { if (target) this.setState({ loc: target, pending: null, locOpen: false, c: null }); },
 			locNow: this.approx() ? 'Approximate · from what you receive · ' + toLocator(st[0], st[1]) : fmtLat(st[0]) + ' · ' + fmtLon(st[1]) + ' · ' + toLocator(st[0], st[1]),
-			locDot: this.approx() ? '#f2b84b' : '#7becc7',
+			locDot: this.approx() ? 'var(--wk-amber)' : 'var(--wk-accent)',
 			stationText: this.approx() ? 'Station approximate' : 'Station ' + toLocator(st[0], st[1]),
 			tilesOffline: tiles === 'offline' || (tiles === 'downloading' && s.dl >= 100),
 			tilesOnline: tiles === 'online',
@@ -935,11 +995,11 @@ class Component extends DCLogic {
 			tlPanelBottom: chipBottom + 54,
 			chipBottom,
 			chipText: minutes === 0 ? 'Live' : 'Replay · ' + clock(minutes) + ' · −' + minutes + ' min',
-			chipFg: minutes === 0 ? '#7becc7' : '#f2b84b',
-			chipBorder: minutes === 0 ? 'rgba(123,236,199,.14)' : 'rgba(242,184,75,.14)',
+			chipFg: minutes === 0 ? 'var(--wk-accent)' : 'var(--wk-amber)',
+			chipBorder: minutes === 0 ? 'rgba(var(--wk-line-rgb),.14)' : 'rgba(var(--wk-amber-rgb),.14)',
 			notLive: minutes > 0,
-			spark: HIST.filter((_, i) => i % 5 === 4).map((h, i) => ({ h, c: i * 5 + 4 >= 60 - minutes ? 'rgba(123,236,199,.2)' : 'rgba(123,236,199,.55)' })),
-			hist: HIST.map((h, i) => ({ h, c: i >= 60 - minutes ? 'rgba(123,236,199,.18)' : 'rgba(123,236,199,.45)' })),
+			spark: HIST.filter((_, i) => i % 5 === 4).map((h, i) => ({ h, c: i * 5 + 4 >= 60 - minutes ? 'rgba(var(--wk-accent-rgb),.2)' : 'rgba(var(--wk-accent-rgb),.55)' })),
+			hist: HIST.map((h, i) => ({ h, c: i >= 60 - minutes ? 'rgba(var(--wk-accent-rgb),.18)' : 'rgba(var(--wk-accent-rgb),.45)' })),
 			scrub: 60 - minutes,
 			cursorPct: (60 - minutes) / 60 * 100,
 			onScrub: e => { clearInterval(this.playIv); this.setState({ scrub: 60 - Number(e.target.value), playing: false }); },
@@ -952,7 +1012,7 @@ class Component extends DCLogic {
 			scalePx: Math.round(scaleKm * kmpx), scaleText: scaleKm + ' km',
 			zoomIn: () => this.zoomAt(1, this.W / 2, this.H / 2),
 			zoomOut: () => this.zoomAt(-1, this.W / 2, this.H / 2),
-			recenterC: s.c ? '#b9cac1' : '#7becc7',
+			recenterC: s.c ? 'var(--wk-text-2)' : 'var(--wk-accent)',
 			recenter: () => this.setState({ c: null, follow: false })
 		};
 	}
