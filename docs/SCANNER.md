@@ -185,7 +185,7 @@ Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and jou
 
 ### Known limitations
 
-- `tunerRelay.sourceId` and the live demodulator default to `sources[0]`, which may be a dedicated source.
+- Relay and live audio default to the first non-dedicated source. Explicit source selection routes that source's IQ, capabilities and controls together. If every source is dedicated, implicit selection is rejected; select a source explicitly. Legacy live-demod callers supplying a fixed fanout cannot switch radios at runtime without supplying the source router.
 - A dedicated source added at runtime (`POST /api/sources`) is not excluded from the default-source choice until the core restarts. This matters only when no shared source existed at boot.
 - The CLI contract (`docs/CLI-COORDINATION.md`) was implemented without a CLI acknowledgement (user decision, 2026-10-10); later CLI requests become follow-up tasks.
 - Accepted deviation (Task 34a): the capture store has no separate `CaptureExtras` type; it uses `ScannerCapture` directly, so each name has one definition.
