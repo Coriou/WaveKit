@@ -217,7 +217,12 @@ export function App({
 				: null
 		runtime.setScanDemand?.(
 			active && ui.scan.sourceId
-				? { sourceId: ui.scan.sourceId, cursor: ui.scan.cursor, detail }
+				? {
+						sourceId: ui.scan.sourceId,
+						retry: ui.scan.retry,
+						cursor: ui.scan.cursor,
+						detail,
+					}
 				: null,
 		)
 	}, [
@@ -225,6 +230,7 @@ export function App({
 		ui.view,
 		ui.help,
 		ui.scan.sourceId,
+		ui.scan.retry,
 		ui.scan.cursor,
 		ui.scan.tab,
 		ui.detail.scan.open,

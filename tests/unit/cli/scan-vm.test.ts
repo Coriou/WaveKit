@@ -59,7 +59,7 @@ describe("read-only Scan presentation", () => {
 			null,
 			1000,
 		)
-		const text = scanDetail(state, ui).join("\n")
+		const text = scanDetail(state, ui, 199).join("\n")
 		expect(text).toContain("unsupported (needs-channelizer)")
 		expect(text).toContain("peak ? dBFS")
 		expect(text).toContain("unrestorable: gain")
@@ -105,3 +105,80 @@ describe("read-only Scan presentation", () => {
 		}
 	})
 })
+
+it.each([59, 79])(
+	"preserves narrow profile, result and RF semantics with bounded detail wrapping at%s",
+	width => {
+		const state = initialState(1000),
+			ui = initialUi("scan")
+		ui.scan.sourceId = "rtl"
+		state.scan = scanFrame(
+			scanProfile(selectScan(state.scan, "rtl"), {
+				...SCAN_PROFILE,
+				outcome: "nearest",
+				adjusted: ["profile-limit"],
+			}),
+			{
+				...SCAN_FRAME,
+				tuningTrust: "unverified",
+				masks: {
+					...SCAN_FRAME.masks,
+					spurRanges: [{ startHz: 445100000, endHz: 445110000 }],
+				},
+			},
+			1000,
+		)
+		const text = scanModel(state, ui, width, 11).lines.map(lineText).join("\n")
+		for (const essential of [
+			"nearest",
+			"profile-limit",
+			"effective",
+			"native 1000",
+			"DC",
+		])
+			expect(text).toContain(essential)
+		const rows = scanDetail(state, ui, width)
+		for (const essential of [
+			"effective: 5Hz",
+			"unverified",
+			"DC:",
+			"spur 1: 445100000..445110000 Hz",
+		])
+			expect(rows.join("")).toContain(essential)
+		expect(rows.every(r => cellWidth(r) <= width)).toBe(true)
+		const oldFrame = state.scan.rows.at(-1)!.frame
+		state.scan = scanFrame(
+			state.scan,
+			{
+				...SCAN_FRAME,
+				masks: {
+					...oldFrame.masks,
+					spurRanges: [{ startHz: 445300000, endHz: 445310000 }],
+				},
+			},
+			1000,
+		)
+		expect(scanDetail(state, ui, width).join("")).toContain(
+			"spur 1: 445300000..445310000 Hz",
+		)
+		expect(scanDetail(state, ui, width).join("")).not.toContain(
+			"445100000..445110000",
+		)
+		ui.scan.tab = "jobs"
+		const job = structuredClone(SCAN_JOB)
+		job.identify!.targets[0]!.trials[0]!.protocol = "long-protocol".repeat(6)
+		state.scan = scanRead(state.scan, "job", guardScan("job", job)!, null, 1000)
+		const jobRows = scanDetail(state, ui, width)
+		for (const essential of [
+			"unsupported (needs-channelizer)",
+			"peak ? dBFS",
+			"SNR ? dB",
+			"floor ? dBFS",
+			"OBW ? Hz",
+		])
+			expect(jobRows.join("")).toContain(essential)
+		expect(jobRows.every(r => cellWidth(r) <= width)).toBe(true)
+		ui.detail.scan.open = true
+		expect(scanModel(state, ui, width, 11).detailRows).toBe(jobRows.length)
+	},
+)

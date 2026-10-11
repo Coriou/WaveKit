@@ -1464,3 +1464,162 @@ describe("Scan runtime bounded demand and generations", () => {
 		rt.stop()
 	})
 })
+
+it.each(["status", "spectrum"] as const)(
+	"fences pre-admission %s fatal REST while applying post-admission failure",
+	async key => {
+		const { SCAN_STATUS, SCAN_PROFILE, SCAN_FRAME } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake()
+		const path = key === "status" ? "/api/scanner" : "/api/spectrum"
+		const fatal =
+			key === "status"
+				? {
+						...SCAN_STATUS,
+						engines: [
+							{
+								...SCAN_STATUS.engines[0]!,
+								sourceId: "rtl",
+								state: "error",
+								lastError: "fatal",
+							},
+						],
+					}
+				: {
+						defaultProfile: SCAN_PROFILE.profile,
+						sources: [
+							{
+								sourceId: "rtl",
+								eligible: true,
+								engine: "error",
+								tuningTrust: null,
+								lastError: "fatal",
+							},
+						],
+					}
+		let pending: ((r: Response) => void) | undefined,
+			first = true
+		const fetchFn: FetchLike = (url, init) => {
+			if (url.endsWith(path)) {
+				if (first) {
+					first = false
+					return new Promise<Response>(r => {
+						pending = r
+					})
+				}
+				return Promise.resolve(new Response(JSON.stringify(fatal)))
+			}
+			if (url.includes("/api/scanner") || url.includes("/api/spectrum"))
+				return Promise.resolve(
+					new Response(
+						JSON.stringify(
+							url.endsWith("/api/scanner")
+								? SCAN_STATUS
+								: url.endsWith("/api/spectrum")
+									? { defaultProfile: SCAN_PROFILE.profile, sources: [] }
+									: url.endsWith("/jobs")
+										? []
+										: { items: [], nextCursor: null },
+						),
+					),
+				)
+			return never(url, init)
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			rt.tick()
+			expect(pending).toBeDefined()
+			h.message(
+				JSON.stringify({
+					type: "spectrum:profile",
+					channel: "spectrum",
+					data: SCAN_PROFILE,
+				}),
+			)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: SCAN_FRAME,
+				}),
+			)
+			rt.tick()
+			pending!(new Response(JSON.stringify(fatal)))
+			await vi.advanceTimersByTimeAsync(200)
+			expect(rt.store.get().scan.profile?.sourceId).toBe("rtl")
+			expect(rt.store.get().scan.rows).toHaveLength(1)
+			await vi.advanceTimersByTimeAsync(5000)
+			expect(rt.store.get().scan.phase).toBe("error")
+			expect(rt.store.get().scan.profile).toBeNull()
+			expect(rt.store.get().scan.rows).toHaveLength(0)
+		} finally {
+			rt.stop()
+		}
+	},
+)
+
+it.each(["timeout", "source", "detail", "stop"] as const)(
+	"cancels exactly once a late Scan body after %s and never commits it",
+	async why => {
+		const ws = wsFake(),
+			cancel = vi.fn(() =>
+				why === "detail"
+					? Promise.reject(new Error("cancel rejected"))
+					: undefined,
+			),
+			json = vi.fn()
+		let late: ((r: Awaited<ReturnType<FetchLike>>) => void) | undefined
+		const fetchFn: FetchLike = (url, init) =>
+			url.includes("/discoveries?")
+				? new Promise(r => {
+						late = r
+					})
+				: never(url, init)
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		rt.tick()
+		expect(late).toBeDefined()
+		const resolve = late!
+		if (why === "timeout") await vi.advanceTimersByTimeAsync(2100)
+		else if (why === "source")
+			rt.setScanDemand({ sourceId: "other", cursor: null, detail: null })
+		else if (why === "detail")
+			rt.setScanDemand({
+				sourceId: "rtl",
+				cursor: null,
+				detail: { kind: "job", id: "j" },
+			})
+		else rt.stop()
+		const body = new ReadableStream<Uint8Array>({ cancel })
+		resolve({ ok: true, status: 200, statusText: "OK", body, json })
+		await vi.advanceTimersByTimeAsync(200)
+		expect(cancel).toHaveBeenCalledTimes(1)
+		expect(json).not.toHaveBeenCalled()
+		expect(rt.store.get().scan.lanes.discoveries.value).toBeNull()
+		rt.stop()
+	},
+)

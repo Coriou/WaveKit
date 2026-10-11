@@ -2,7 +2,7 @@ import type { AppState } from "../data/types.js"
 import type { ScanLane } from "../data/scan-state.js"
 import type { ScanJob, ScanDiscovery } from "../data/scanner-guards.js"
 import { sp, type Line } from "../ui/line.js"
-import { sanitize, truncate } from "../ui/text.js"
+import { sanitize, truncate, cellWidth } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
 
@@ -38,7 +38,7 @@ export function scanRowIds(state: AppState, ui: UiState): string[] {
 			.map(j => j.id)
 	if (ui.scan.tab === "discoveries")
 		return (state.scan.lanes.discoveries.value?.items ?? []).map(d => d.id)
-	return []
+	return state.scan.profile || state.scan.rows.length ? ["spectrum"] : []
 }
 const number = (n: number | null, unit: string) =>
 	n === null ? `? ${unit}` : `${n.toFixed(1)} ${unit}`
@@ -96,7 +96,61 @@ function discoveryLines(d: ScanDiscovery): string[] {
 		"Evidence flags do not establish finalized files or download availability.",
 	]
 }
-export function scanDetail(state: AppState, ui: UiState): string[] {
+export function wrapScanRows(rows: readonly string[], width: number): string[] {
+	const out: string[] = []
+	const limit = Math.max(1, Math.floor(width))
+	for (const text of rows) {
+		let row = "",
+			size = 0
+		for (const char of sanitize(text)) {
+			const n = cellWidth(char)
+			if (size + n > limit && row) {
+				out.push(row)
+				row = ""
+				size = 0
+			}
+			if (out.length >= 4095)
+				return [...out.slice(0, 4095), "Further detail rows omitted"]
+			row += char
+			size += n
+		}
+		out.push(row)
+		if (out.length >= 4096)
+			return [...out.slice(0, 4095), "Further detail rows omitted"]
+	}
+	return out
+}
+function spectrumDetail(state: AppState): string[] {
+	const p = state.scan.profile,
+		f = state.scan.rows.at(-1)?.frame
+	const rows = [
+		"profile requested 5Hz x 512",
+		`served source: ${p?.sourceId ?? "none"}`,
+		`outcome: ${p?.outcome ?? "pending"}`,
+		`adjusted: ${p?.adjusted.join(", ") || "none"}`,
+		`served: ${p?.profile?.hz ?? "?"}Hz x ${p?.profile?.bins ?? "?"}`,
+		`effective: ${p?.effectiveHz ?? "?"}Hz`,
+		`notice: ${state.scan.error ?? p?.code ?? "none"}`,
+	]
+	if (p?.message) rows.push(`profile message: ${p.message}`)
+	if (f)
+		rows.push(
+			`trust: ${f.tuningTrust}`,
+			`axis: ${f.startHz}..${f.startHz + f.binCount * f.binHz} Hz`,
+			`bins: ${f.binCount} | width ${f.binHz} Hz (native ${f.nativeBinHz})`,
+			`floor: ${f.floorDbfs} dBFS | threshold ${f.floorDbfs + f.thresholdDb} dBFS`,
+			`tracks: ${f.tracks.length}`,
+			`DC: ${f.masks.dcHz} +/-${f.masks.dcGuardHz} Hz`,
+			"Mask columns: D DC, S spur, X overlap; power unchanged",
+			...f.masks.spurRanges.map(
+				(r, i) => `spur ${i + 1}: ${r.startHz}..${r.endHz} Hz`,
+			),
+		)
+	else rows.push("axis/masks unavailable")
+	return rows
+}
+function rawScanDetail(state: AppState, ui: UiState): string[] {
+	if (ui.scan.tab === "spectrum") return spectrumDetail(state)
 	if (ui.scan.tab === "jobs") {
 		const l = state.scan.lanes.job
 		return l.value
@@ -124,6 +178,13 @@ export function scanDetail(state: AppState, ui: UiState): string[] {
 		...discoveryLines(l.value),
 		`observation page: ${observations.error ?? (observations.value ? `${observations.value.items.length} shown${observations.value.nextCursor ? ", more available" : ""}` : "API response pending")}`,
 	]
+}
+export function scanDetail(
+	state: AppState,
+	ui: UiState,
+	width = 199,
+): string[] {
+	return wrapScanRows(rawScanDetail(state, ui), width)
 }
 export function scanModel(
 	state: AppState,
@@ -169,13 +230,13 @@ export function scanModel(
 			),
 		)
 	if (ui.detail.scan.open) {
-		const rows = scanDetail(state, ui)
-		const detail = rows
-			.slice(
-				ui.detail.scan.scroll,
-				ui.detail.scan.scroll + Math.max(0, height - header.length - 1),
-			)
-			.map(t => line(t))
+		const rows = scanDetail(state, ui, width)
+		const room = Math.max(0, height - header.length - 1)
+		const start = Math.min(
+			ui.detail.scan.scroll,
+			Math.max(0, rows.length - room),
+		)
+		const detail = rows.slice(start, start + room).map(t => line(t))
 		return {
 			lines: [
 				...header,
@@ -190,12 +251,16 @@ export function scanModel(
 		const last = scan.rows[scan.rows.length - 1]
 		const fresh = !!last && state.now - last.receivedAt <= 5000
 		const p = scan.profile
-		const served = p?.profile
-			? `${p.sourceId ?? "all"} ${p.profile.hz}Hz x ${p.profile.bins} (${p.outcome}${p.adjusted.length ? `: ${p.adjusted.join(",")}` : ""})`
-			: "pending"
+		header.push(line("profile requested 5Hz x 512", "label"))
 		header.push(
 			line(
-				`profile requested 5Hz x 512${sep}served ${served}${sep}effective ${p?.effectiveHz ?? "?"}Hz`,
+				`served ${p?.profile?.hz ?? "?"}Hz x ${p?.profile?.bins ?? "?"} | ${p?.outcome ?? "pending"}`,
+				"label",
+			),
+		)
+		header.push(
+			line(
+				`adjusted ${p?.adjusted.join(",") || "none"} | effective ${p?.effectiveHz ?? "?"}Hz`,
 				"label",
 			),
 		)
@@ -221,21 +286,24 @@ export function scanModel(
 			const f = last.frame
 			header.push(
 				line(
-					`axis ${f.startHz}..${f.startHz + f.binCount * f.binHz} Hz${sep}${f.binCount} bins${sep}width ${f.binHz} Hz (native ${f.nativeBinHz})`,
+					`axis ${f.startHz}..${f.startHz + f.binCount * f.binHz} Hz`,
 					f.tuningTrust === "unverified" ? "old" : "value",
 				),
 			)
 			header.push(
 				line(
-					`floor ${f.floorDbfs.toFixed(1)} dBFS${sep}threshold ${(f.floorDbfs + f.thresholdDb).toFixed(1)} dBFS${sep}tracks ${f.tracks.length}${sep}DC ${f.masks.dcHz} +/-${f.masks.dcGuardHz} Hz${sep}spurs ${f.masks.spurRanges.length}`,
+					`width ${f.binHz} Hz (native ${f.nativeBinHz}) | ${f.tuningTrust}`,
+					f.tuningTrust === "unverified" ? "old" : "value",
+				),
+			)
+			header.push(
+				line(
+					`DC ${f.masks.dcHz} +/-${f.masks.dcGuardHz} Hz | ${f.masks.spurRanges.length} spurs`,
 				),
 			)
 		}
 		header.push(
-			line(
-				"power ramp: -120..-20 dBFS (clipped), max-hold; newest row below",
-				"label",
-			),
+			line("-120..-20 dBFS max-hold | Enter profile/RF masks", "label"),
 		)
 		return {
 			lines: header.slice(0, height),

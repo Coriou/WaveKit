@@ -342,18 +342,33 @@ export async function getScan<K extends ScanRead>(
 	signal: AbortSignal,
 ): Promise<ScanValues[K]> {
 	let abort: (() => void) | undefined
+	let abandoned = false
+	let claimed = false
+	let lateResponse: Awaited<ReturnType<FetchLike>> | null = null
+	let disposed = false
+	const disposeLate = () => {
+		if (!lateResponse || claimed || disposed) return
+		disposed = true
+		void lateResponse.body?.cancel().catch(() => undefined)
+	}
 	try {
 		if (signal.aborted)
 			throw new ScanReadError("timeout", "Scan read cancelled or timed out")
 		const cancelled = new Promise<never>((_resolve, reject) => {
-			abort = () =>
+			abort = () => {
+				abandoned = true
+				disposeLate()
 				reject(new ScanReadError("timeout", "Scan read cancelled or timed out"))
+			}
 			signal.addEventListener("abort", abort, { once: true })
 		})
-		const response = await Promise.race([
-			fetchFn(`${base}${path}`, { signal }),
-			cancelled,
-		])
+		const fetch = fetchFn(`${base}${path}`, { signal }).then(response => {
+			lateResponse = response
+			if (abandoned) disposeLate()
+			return response
+		})
+		const response = await Promise.race([fetch, cancelled])
+		claimed = true
 		let body: unknown
 		try {
 			body = await readBoundedJson(response, signal)

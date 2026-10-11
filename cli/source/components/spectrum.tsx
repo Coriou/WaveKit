@@ -5,6 +5,7 @@ import type { ScanState } from "../data/scan-state.js"
 import {
 	halfBlockRuns,
 	spectrumCells,
+	spectrumMaskCells,
 	powerRamp,
 	spectrumMode,
 } from "../ui/theme.js"
@@ -33,7 +34,7 @@ export function Spectrum({
 	const cells = spectrumCells(last.bins, width)
 	const count = Math.min(
 		64,
-		Math.max(0, (height - 1) * (mode === "truecolor" ? 2 : 1)),
+		Math.max(0, (height - 2) * (mode === "truecolor" ? 2 : 1)),
 	)
 	const rows = count ? scan.rows.slice(-count) : []
 	return (
@@ -41,6 +42,7 @@ export function Spectrum({
 			<Text color={color ? "cyan" : undefined} dimColor={unverified}>
 				{powerRamp(cells, mode === "ascii")}
 			</Text>
+			{height > 1 ? <Text>{spectrumMaskCells(last.frame, width)}</Text> : null}
 			{mode === "truecolor"
 				? Array.from({ length: Math.ceil(rows.length / 2) }, (_, i) => {
 						const top = spectrumCells(

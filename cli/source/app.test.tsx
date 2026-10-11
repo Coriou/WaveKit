@@ -1,5 +1,6 @@
 import { Text } from "ink"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import type { WsHandlers } from "./data/ws-client.js"
 import type { DecoderRow } from "./data/types.js"
 import { renderApp } from "./test/app-harness.js"
 import { scenarioState } from "./test/fixtures.js"
@@ -279,4 +280,133 @@ describe("App error boundary (spec §6.6)", () => {
 		await h.waitFor(() => h.exited())
 		h.unmount()
 	})
+})
+
+it("explicitly reselects and reconnects a re-added sole Scan source across App/runtime", async () => {
+	const { App } = await import("./app.js")
+	const { createRuntime, nodeRuntimeDeps } = await import("./data/runtime.js")
+	const { VIEWS } = await import("./views/registry.js")
+	const { renderAt, pollUntil } = await import("./test/harness.js")
+	const { SCAN_PROFILE, SCAN_FRAME } = await import("./test/fixtures.js")
+	const handlers: WsHandlers[] = [],
+		sent: string[] = []
+	const rt = createRuntime(
+		nodeRuntimeDeps(
+			{
+				base: "http://localhost:9100",
+				ws: "ws://localhost:9100/ws",
+				explicit: true,
+			},
+			(await import("./data/reducers.js")).PLAIN_SUMMARY.summarize,
+			{
+				fetchFn: () => new Promise(() => undefined),
+				wsFactory: (_url, h) => {
+					handlers.push(h)
+					return { send: s => sent.push(s), close: () => undefined }
+				},
+			},
+		),
+	)
+	const state = scenarioState(
+		"live",
+		(await import("./data/reducers.js")).PLAIN_SUMMARY,
+	)
+	const source = { ...state.sources.value![0]!, id: "rtl" }
+	state.sources.value = [source]
+	rt.start()
+	rt.store.set(state)
+	const h = await renderAt(
+		<App
+			runtime={rt}
+			views={VIEWS}
+			initialView="scan"
+			color={false}
+			writeRaw={() => undefined}
+		/>,
+		{ cols: 80, rows: 24 },
+	)
+	const admit = (wire: WsHandlers) => {
+		wire.message(
+			JSON.stringify({
+				type: "spectrum:profile",
+				channel: "spectrum",
+				data: SCAN_PROFILE,
+			}),
+		)
+		wire.message(
+			JSON.stringify({
+				type: "spectrum:frame",
+				channel: "spectrum",
+				data: SCAN_FRAME,
+			}),
+		)
+		rt.tick()
+	}
+	try {
+		let wire = handlers[0]!
+		wire.open()
+		wire.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		admit(wire)
+		expect(rt.store.get().scan.rows).toHaveLength(1)
+		for (const key of ["s", "r"]) {
+			wire.message(
+				JSON.stringify({
+					type: "source:removed",
+					channel: "sources",
+					data: { sourceId: "rtl" },
+				}),
+			)
+			rt.tick()
+			if (key === "s") {
+				const before = sent.length
+				await h.press("r", QUIET)
+				wire = handlers.at(-1)!
+				wire.open()
+				wire.message(
+					JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+				)
+				rt.tick()
+				expect(rt.store.get().scan.phase).toBe("removed")
+				expect(
+					sent.slice(before).every(s => !s.includes('"sourceId":"rtl"')),
+				).toBe(true)
+			}
+			const removed = sent.length
+			wire.message(
+				JSON.stringify({
+					type: "source:status",
+					channel: "sources",
+					data: source,
+				}),
+			)
+			rt.tick()
+			expect(
+				await pollUntil(
+					() =>
+						rt.store.get().sources.value?.some(s => s.id === "rtl") === true,
+				),
+			).toBe(true)
+			expect(rt.store.get().sources.value?.map(s => s.id)).toEqual(["rtl"])
+			await h.press("", QUIET)
+			expect(sent).toHaveLength(removed)
+			expect(rt.store.get().scan.phase).toBe("removed")
+			await h.press(key, QUIET)
+			if (key === "r") {
+				wire = handlers.at(-1)!
+				wire.open()
+				wire.message(
+					JSON.stringify({ type: "subscribed", data: { channels: [] } }),
+				)
+			}
+			expect(JSON.parse(sent.at(-1)!)).toMatchObject({
+				type: "subscribe",
+				options: { spectrum: { sourceId: "rtl" } },
+			})
+			admit(wire)
+			expect(rt.store.get().scan.rows).toHaveLength(1)
+		}
+	} finally {
+		h.unmount()
+		rt.stop()
+	}
 })

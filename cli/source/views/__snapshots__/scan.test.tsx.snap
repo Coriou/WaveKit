@@ -7,12 +7,16 @@ exports[`additive read-only Scan > golden spectrum with truthful units and profi
  SCAN · rtl · spectrum · read-only
  scanner enabled · engine running · passive enabled (not proof of a job) · 1 active jobs
  channelizer unavailable · CPU 0.5/1 cores · guard ?% · disk ok
- profile requested 5Hz x 512 · served rtl 5Hz x 512 (exact) · effective 5Hz
+ profile requested 5Hz x 512
+ served 5Hz x 512 | exact
+ adjusted none | effective 5Hz
  spectrum fresh · commanded · r reconnect to refresh/retry
- axis 445180800..446819200 Hz · 256 bins · width 6400 Hz (native 1000)
- floor -92.5 dBFS · threshold -83.3 dBFS · tracks 1 · DC 446000000 +/-1500 Hz · spurs 0
- power ramp: -120..-20 dBFS (clipped), max-hold; newest row below
+ axis 445180800..446819200 Hz
+ width 6400 Hz (native 1000) | commanded
+ DC 446000000 +/-1500 Hz | 0 spurs
+ -120..-20 dBFS max-hold | Enter profile/RF masks
  ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▇▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂
+                                                            D
  ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▇▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂
 
 
@@ -35,9 +39,5 @@ exports[`additive read-only Scan > golden spectrum with truthful units and profi
 
 
 
-
-
-
-
- ↑↓ select  s source  w spectrum  d discoveries  b jobs  n next page  f first page  r reconnect  q quit  ? help"
+ ↑↓ select  Enter open  s source  w spectrum  d discoveries  b jobs  n next page  f first page  q quit  ? help"
 `;

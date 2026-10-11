@@ -4,6 +4,18 @@ import type {
 	SpectrumProfileEventData,
 } from "@wavekit/api-types"
 
+/** Zod v3 array.max still traverses elements. Abort before entering the array parser. */
+function boundedArray<T extends z.ZodType<unknown>>(
+	element: T,
+	maximum: number,
+) {
+	return z
+		.custom<
+			unknown[]
+		>(value => Array.isArray(value) && value.length <= maximum, { message: "Scan collection cardinality exceeded", fatal: true })
+		.pipe(z.array(element))
+}
+
 const text = z.string().max(512)
 const id = z.string().min(1).max(128)
 const num = z.number().finite()
@@ -35,23 +47,22 @@ const frameSchema = z
 		binEncoding: z.literal("u8-halfdb-127.5"),
 		floorDbfs: num,
 		thresholdDb: num,
-		tracks: z
-			.array(
-				z.object({
-					startHz: hz,
-					endHz: hz,
-					flags: z.object({
-						burst: z.boolean(),
-						iqImage: z.boolean(),
-						edge: z.boolean(),
-					}),
+		tracks: boundedArray(
+			z.object({
+				startHz: hz,
+				endHz: hz,
+				flags: z.object({
+					burst: z.boolean(),
+					iqImage: z.boolean(),
+					edge: z.boolean(),
 				}),
-			)
-			.max(256),
+			}),
+			256,
+		),
 		masks: z.object({
 			dcHz: hz,
 			dcGuardHz: hz,
-			spurRanges: z.array(range).max(128),
+			spurRanges: boundedArray(range, 128),
 		}),
 		snapshot: z.literal(true).optional(),
 		at: text,
@@ -85,7 +96,7 @@ const profileSchema = z
 		profile: profile.nullable(),
 		effectiveHz: positive.nullable(),
 		outcome: z.enum(["default", "exact", "nearest", "rejected", "removed"]),
-		adjusted: z.array(z.enum(["hz", "bins", "profile-limit"])).max(3),
+		adjusted: boundedArray(z.enum(["hz", "bins", "profile-limit"]), 3),
 		removedSourceId: id.optional(),
 		code: z
 			.enum([
@@ -144,12 +155,12 @@ const levels = z.object({
 	floorDbfs: num,
 })
 const metadata = z.object({
-	talkgroups: z.array(text).max(64),
-	sources: z.array(text).max(64),
-	slots: z.array(count).max(64),
-	callsigns: z.array(text).max(64),
-	capcodes: z.array(text).max(64),
-	ismModels: z.array(text).max(64),
+	talkgroups: boundedArray(text, 64),
+	sources: boundedArray(text, 64),
+	slots: boundedArray(count, 64),
+	callsigns: boundedArray(text, 64),
+	capcodes: boundedArray(text, 64),
+	ismModels: boundedArray(text, 64),
 })
 const trial = z.object({
 	protocol: text,
@@ -200,7 +211,7 @@ const identifyTarget = z.object({
 		"candidate",
 		"unidentified",
 	]),
-	trials: z.array(trial).max(128),
+	trials: boundedArray(trial, 128),
 	result: result.optional(),
 })
 const job = z.object({
@@ -214,7 +225,7 @@ const job = z.object({
 		mode: z.enum(["in-window", "sweep"]),
 		kind: z.enum(["discover", "monitor", "identify"]),
 	}),
-	unrestorable: z.array(text).max(64),
+	unrestorable: boundedArray(text, 64),
 	createdAt: text,
 	updatedAt: text,
 	progress: z.object({
@@ -222,20 +233,19 @@ const job = z.object({
 		hopIndex: count,
 		hopCount: count,
 		coverage: num.min(0).max(1),
-		probes: z
-			.array(
-				z.object({
-					probeId: id,
-					decoderId: id,
-					targetHz: hz,
-					protocol: text,
-					transport: z.enum(["offset", "channel"]),
-					state: text,
-				}),
-			)
-			.max(128),
+		probes: boundedArray(
+			z.object({
+				probeId: id,
+				decoderId: id,
+				targetHz: hz,
+				protocol: text,
+				transport: z.enum(["offset", "channel"]),
+				state: text,
+			}),
+			128,
+		),
 	}),
-	identify: z.object({ targets: z.array(identifyTarget).max(256) }).optional(),
+	identify: z.object({ targets: boundedArray(identifyTarget, 256) }).optional(),
 })
 const discovery = z.object({
 	id,
@@ -251,13 +261,17 @@ const discovery = z.object({
 	lastSeenAt: text,
 	observationCount: count,
 	airtimeMs: hz,
-	sourceIds: z.array(id).max(64),
-	jobIds: z.array(id).max(256),
+	sourceIds: boundedArray(id, 64),
+	jobIds: boundedArray(id, 256),
 	signal: z.object({ best: levels, last: levels }),
 	metadata,
 	evidence: z.object({ recordings: count, psd: z.boolean(), iq: z.boolean() }),
 })
-const observation = z.object({ id, sourceId: id, jobIds: z.array(id).max(256) })
+const observation = z.object({
+	id,
+	sourceId: id,
+	jobIds: boundedArray(id, 256),
+})
 const scanner = z.object({
 	enabled: z.boolean(),
 	channelizerAvailable: z.boolean(),
@@ -274,49 +288,47 @@ const scanner = z.object({
 		limitPercent: hz,
 		source: z.enum(["os", "cgroup"]),
 	}),
-	engines: z
-		.array(
-			z.object({
-				sourceId: id,
-				state: z.enum(["idle", "running", "stopped", "error"]),
-				passive: z.object({
-					enabled: z.boolean(),
-					disabledReason: text.optional(),
-				}),
-				lastError: text.optional(),
-				blankedFrames: count,
-				broadbandRfi: z.object({ periodMs: hz }).nullable(),
+	engines: boundedArray(
+		z.object({
+			sourceId: id,
+			state: z.enum(["idle", "running", "stopped", "error"]),
+			passive: z.object({
+				enabled: z.boolean(),
+				disabledReason: text.optional(),
 			}),
-		)
-		.max(128),
+			lastError: text.optional(),
+			blankedFrames: count,
+			broadbandRfi: z.object({ periodMs: hz }).nullable(),
+		}),
+		128,
+	),
 })
 const spectrum = z.object({
 	defaultProfile: profile,
-	sources: z
-		.array(
-			z.object({
-				sourceId: id,
-				eligible: z.boolean(),
-				reason: z.enum(["source-not-iq", "source-removed"]).optional(),
-				engine: z.enum(["running", "idle", "error"]),
-				lastError: text.optional(),
-				tuningTrust: trust.nullable(),
-			}),
-		)
-		.max(128),
+	sources: boundedArray(
+		z.object({
+			sourceId: id,
+			eligible: z.boolean(),
+			reason: z.enum(["source-not-iq", "source-removed"]).optional(),
+			engine: z.enum(["running", "idle", "error"]),
+			lastError: text.optional(),
+			tuningTrust: trust.nullable(),
+		}),
+		128,
+	),
 })
 export const scanSchemas = {
 	status: scanner,
 	spectrum,
-	jobs: z.array(job).max(10000),
+	jobs: boundedArray(job, 10000),
 	discoveries: z.object({
-		items: z.array(discovery).max(50),
+		items: boundedArray(discovery, 50),
 		nextCursor: z.string().max(2048).nullable(),
 	}),
 	job,
 	discovery,
 	observations: z.object({
-		items: z.array(observation).max(50),
+		items: boundedArray(observation, 50),
 		nextCursor: z.string().max(2048).nullable(),
 	}),
 }

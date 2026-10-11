@@ -1,3 +1,4 @@
+import type { SpectrumFrameEventData } from "@wavekit/api-types"
 import type { Role } from "./line.js"
 
 export interface Glyphs {
@@ -205,4 +206,29 @@ export function halfBlockRuns(
 		else runs.push({ text: "▀", foreground, background })
 	}
 	return runs
+}
+
+/** Same bin intervals as max-hold rendering; RF annotations never alter power. */
+export function spectrumMaskCells(
+	frame: Pick<
+		SpectrumFrameEventData,
+		"startHz" | "binHz" | "binCount" | "masks"
+	>,
+	width: number,
+): string {
+	const cols = Math.min(512, Math.max(0, Math.floor(width)))
+	return Array.from({ length: cols }, (_, x) => {
+		const lo = Math.floor((x * frame.binCount) / cols),
+			hi = Math.floor(((x + 1) * frame.binCount) / cols)
+		if (hi <= lo) return " "
+		const start = frame.startHz + lo * frame.binHz,
+			end = frame.startHz + hi * frame.binHz
+		const dc =
+			frame.masks.dcHz + frame.masks.dcGuardHz >= start &&
+			frame.masks.dcHz - frame.masks.dcGuardHz < end
+		const spur = frame.masks.spurRanges.some(
+			r => r.endHz >= start && r.startHz < end,
+		)
+		return dc && spur ? "X" : dc ? "D" : spur ? "S" : " "
+	}).join("")
 }

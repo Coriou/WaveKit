@@ -151,6 +151,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 	let scanDirty = false
 	let scanDemand: ScanDemand | null = null
 	let scanGeneration = 0
+	let scanAdmission = 0
 	let scanAbort: AbortController | null = null
 	let scanReading = false
 	let lastScanRead = -Infinity
@@ -165,7 +166,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		scanReadAt.clear()
 		pendingFrame = null
 		pendingKeys.clear()
+		const removed = scan.phase === "removed"
 		scan = resetScan(scan)
+		if (removed) scan = { ...scan, phase: "removed", error: "source removed" }
 		scanDirty = true
 	}
 	const push = (item: Inbound): void => {
@@ -196,6 +199,8 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				return
 			}
 			if (ev.type === "spectrum:profile") {
+				if (scan.phase === "removed") return
+				scanAdmission++
 				pendingFrame = null
 				scan = scanProfile(scan, ev.profile)
 				scanDirty = true
@@ -226,6 +231,9 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 						phase: "removed",
 						error: "source removed",
 					}
+					scanGeneration++
+					scanAbort?.abort()
+					scanReading = false
 					ws.setScanSource(null)
 				}
 			}
@@ -315,10 +323,24 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 		clearTimeout: deps.timers.clearTimeout,
 	})
 
+	function eligibleScanSource(id: string): boolean {
+		return (
+			store
+				.get()
+				.sources.value?.some(
+					s =>
+						s.id === id &&
+						s.caps.kind !== "audio_pcm" &&
+						["U8_IQ", "S16_IQ", "FLOAT32LE"].includes(s.caps.format),
+				) === true
+		)
+	}
+
 	async function readScanCycle(): Promise<void> {
 		if (
 			stopped ||
 			!scanDemand ||
+			scan.phase === "removed" ||
 			!target ||
 			scanReading ||
 			deps.now() - lastScanRead < POLL_MS
@@ -331,6 +353,7 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			return
 		const demand = scanDemand
 		const generation = scanGeneration
+		const admission = scanAdmission
 		const base = target.base
 		const controller = new AbortController()
 		scanAbort = controller
@@ -365,6 +388,12 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 					try {
 						const value = await getScan(deps.fetchFn, base, key, path, signal)
 						if (generation !== scanGeneration || stopped) return
+						// A REST snapshot issued before this admission cannot revoke it.
+						if (
+							(key === "status" || key === "spectrum") &&
+							admission !== scanAdmission
+						)
+							return
 						if (
 							(key === "job" || key === "discovery") &&
 							(!value || !("id" in value) || value.id !== demand.detail?.id)
@@ -762,13 +791,22 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 				void runDiscovery()
 				return
 			}
+			if (
+				scan.phase === "removed" &&
+				scanDemand &&
+				eligibleScanSource(scanDemand.sourceId)
+			)
+				scan = selectScan(scan, scanDemand.sourceId)
 			resetScanSession()
+			if (scanDemand && eligibleScanSource(scanDemand.sourceId))
+				ws.setScanSource(scanDemand.sourceId)
 			ws.reconnectNow()
 			requestResync()
 		},
 		setScanDemand: demand => {
 			if (sameDemand(scanDemand, demand)) return
 			const sourceChanged = scanDemand?.sourceId !== demand?.sourceId
+			const retryChanged = (scanDemand?.retry ?? 0) !== (demand?.retry ?? 0)
 			const queryChanged = scanDemand?.cursor !== demand?.cursor
 			const detailChanged =
 				scanDemand?.detail?.id !== demand?.detail?.id ||
@@ -779,11 +817,15 @@ export function createRuntime(deps: RuntimeDeps): Runtime {
 			scanReading = false
 			lastScanRead = -Infinity
 			pendingKeys.clear()
-			if (sourceChanged) {
+			if (sourceChanged || retryChanged) {
 				scanReadAt.clear()
 				pendingFrame = null
 				scan = selectScan(scan, demand?.sourceId ?? null)
-				ws.setScanSource(demand?.sourceId ?? null)
+				ws.setScanSource(
+					demand && (!retryChanged || eligibleScanSource(demand.sourceId))
+						? demand.sourceId
+						: null,
+				)
 			} else
 				scan = {
 					...scan,

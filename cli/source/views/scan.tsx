@@ -34,12 +34,12 @@ export const scanView: ViewModule = {
 	id: "scan",
 	title: "Scan",
 	Component: ScanComponent,
-	keyInfo: (state, ui, _width, height) => ({
+	keyInfo: (state, ui, width, height) => ({
 		rowIds: scanRowIds(state, ui),
 		pageSize: Math.max(1, height - 3),
 		detailMaxScroll: Math.max(
 			0,
-			scanDetail(state, ui).length -
+			scanDetail(state, ui, width).length -
 				Math.max(
 					1,
 					height - (state.scan.lanes.status.value && height >= 18 ? 4 : 3),
@@ -64,7 +64,16 @@ export const scanView: ViewModule = {
 					(sources.indexOf(ui.scan.sourceId ?? "") + 1) % sources.length
 				] ?? null
 			return {
-				ui: { ...ui, ...clear, scan: { ...ui.scan, sourceId, cursor: null } },
+				ui: {
+					...ui,
+					...clear,
+					scan: {
+						...ui.scan,
+						sourceId,
+						retry: ui.scan.retry + 1,
+						cursor: null,
+					},
+				},
 				effects: [],
 			}
 		}

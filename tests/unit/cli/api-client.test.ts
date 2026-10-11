@@ -476,3 +476,25 @@ it("preserves authenticated body streams for bounded Scan reads", async () => {
 		vi.unstubAllGlobals()
 	}
 })
+
+it("handles a fetch rejection arriving after caller cancellation", async () => {
+	const { getScan } = await import("../../../cli/source/data/api-client.js")
+	const controller = new AbortController()
+	let rejectLate: ((reason: Error) => void) | undefined
+	const read = getScan(
+		() =>
+			new Promise((_resolve, reject) => {
+				rejectLate = reject
+			}),
+		"http://localhost",
+		"jobs",
+		"/api/scanner/jobs",
+		controller.signal,
+	)
+	const result = expect(read).rejects.toMatchObject({ kind: "timeout" })
+	controller.abort()
+	await result
+	rejectLate!(new Error("late fetch rejection"))
+	await Promise.resolve()
+	await Promise.resolve()
+})

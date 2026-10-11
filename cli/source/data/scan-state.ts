@@ -14,6 +14,7 @@ export interface ScanLane<T> {
 }
 export interface ScanDemand {
 	sourceId: string
+	retry?: number
 	cursor: string | null
 	detail: { kind: "job" | "discovery"; id: string } | null
 }
@@ -179,6 +180,7 @@ export function sameDemand(
 ): boolean {
 	return (
 		a?.sourceId === b?.sourceId &&
+		(a?.retry ?? 0) === (b?.retry ?? 0) &&
 		a?.cursor === b?.cursor &&
 		a?.detail?.kind === b?.detail?.kind &&
 		a?.detail?.id === b?.detail?.id

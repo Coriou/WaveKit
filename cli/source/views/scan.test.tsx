@@ -175,3 +175,63 @@ it("renders bounded truecolor half-block pairs on a simulated capable terminal",
 		}
 	}
 })
+
+it("exposes complete narrow details and RF masks through keyboard scroll and resize", async () => {
+	const s = state()
+	s.scan = scanProfile(s.scan, {
+		...SCAN_PROFILE,
+		outcome: "nearest",
+		adjusted: ["profile-limit"],
+	})
+	s.scan = scanFrame(
+		s.scan,
+		{
+			...SCAN_FRAME,
+			masks: {
+				...SCAN_FRAME.masks,
+				spurRanges: [{ startHz: 445100000, endHz: 445110000 }],
+			},
+		},
+		s.now,
+	)
+	s.scan = scanRead(s.scan, "job", guardScan("job", SCAN_JOB)!, null, s.now)
+	const h = await renderApp({
+		state: s,
+		views: VIEWS,
+		view: "scan",
+		cols: 60,
+		rows: 16,
+		strict: true,
+	})
+	try {
+		expect(h.text()).toContain("nearest")
+		expect(h.text()).toContain("profile-limit")
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		let inspected = h.text()
+		for (let i = 0; i < 22; i++) {
+			await h.press(KEYS.pgdn, { expectWrite: false })
+			inspected += "\n" + h.text()
+		}
+		expect(inspected).toContain("spur 1: 445100000..445110000 Hz")
+		expect(inspected).toContain("DC:")
+		await h.resize(80, 24)
+		await h.press(KEYS.pgup)
+		expect(h.text()).not.toContain("render error")
+		await h.press(KEYS.esc)
+		await h.press("b")
+		await h.press(KEYS.down)
+		await h.press(KEYS.enter)
+		inspected = h.text()
+		for (let i = 0; i < 22; i++) {
+			await h.press(KEYS.pgdn, { expectWrite: false })
+			inspected += "\n" + h.text()
+		}
+		expect(inspected).toContain("needs-channelizer")
+		expect(inspected).toContain("peak ? dBFS")
+		expect(inspected).toContain("SNR ? dB")
+		expect(h.runtime.sent).toEqual([])
+	} finally {
+		h.unmount()
+	}
+})
