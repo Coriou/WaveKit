@@ -780,8 +780,20 @@ crash-recovery proof. Smaller fixture caps apply:32 queued rows/128 KiB,16 MiB D
 4 MiB WAL and10-second deadline;1 MiB transaction headroom is checked before
 writes. The192 MiB guard measures shared-process RSS, not isolated worker RSS.
 Disabled/runtime-guard unit cases simulate version strings; they do not qualify an
-unavailable Node executable. Node25.2.1 guard/micro tests passed12 cases, including
+unavailable Node executable. Node25.2.1 guard/micro tests passed20 cases, including
 100 bounded admission-reference cases. SQLite emitted its experimental warning.
+Termination confirmation has a100ms grace; failure raises fatal containment and
+skips all artifact inspection/cleanup while a worker may still write. The CLI exits
+its owned process; library callers must do likewise. Native/OS stalls can delay
+timers and process exit, so the deadline is not a hard real-time guarantee.
+Observed elapsed time includes report persistence and cleanup attempts and detected
+overruns fail the result. `report.json` is explicitly preliminary (`completion: pending`),
+with hashes saved before verified DB cleanup; the returned/CLI result carries
+observed completion and finalization errors. Capture CLI stdout separately when
+retaining the final result; a preliminary report alone never proves completion.
+Disk-admission failure does not suppress safe identity-verified cleanup after join;
+unsafe artifacts or failed report persistence preserve files with explicit errors.
+Actual journal/synchronous pragmas are recorded before and after clean reopen.
 No sustained latency, row-overhead, architecture or production-mount acceptance
 is inferred from these tests. SQLite remains provisional.
 

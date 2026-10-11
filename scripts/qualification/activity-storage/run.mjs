@@ -12,6 +12,7 @@ export const LIMITS = Object.freeze({
 	reserveBytes: GiB,
 	deadlineMs: 20 * 60 * 1000,
 	microDeadlineMs: 10000,
+	terminationGraceMs: 100,
 	memoryBytes: 192 * 1024 ** 2,
 	queueRows: 32,
 	queueBytes: 128 * 1024,
@@ -211,6 +212,35 @@ export function verifyOutputDirectory(path, root) {
 	return fs.lstatSync(path)
 }
 
+// Native/OS stalls can prevent timely termination and even delay these timers.
+// Callers must end their owned process on this error; artifacts remain untouched.
+export class FatalContainmentError extends Error {
+	constructor(cause) {
+		super("Fatal containment: worker termination was not confirmed", { cause })
+		this.name = "FatalContainmentError"
+		this.fatalContainment = true
+	}
+}
+
+async function joinWorker(worker) {
+	let timer
+	try {
+		await Promise.race([
+			Promise.resolve().then(() => worker.terminate()),
+			new Promise((_, reject) => {
+				timer = setTimeout(
+					() => reject(new Error("Termination grace exceeded")),
+					LIMITS.terminationGraceMs,
+				)
+			}),
+		])
+	} catch (error) {
+		throw new FatalContainmentError(error)
+	} finally {
+		clearTimeout(timer)
+	}
+}
+
 export async function supervise(factory, deadlineMs, signal) {
 	if (
 		!Number.isInteger(deadlineMs) ||
@@ -255,7 +285,7 @@ export async function supervise(factory, deadlineMs, signal) {
 	} finally {
 		clearTimeout(timer)
 		if (abort) signal?.removeEventListener("abort", abort)
-		await worker.terminate() // Join on success, failure, timeout and cancellation; no subprocesses.
+		await joinWorker(worker) // Bounded confirmation on every outcome; no subprocesses.
 	}
 }
 
@@ -318,6 +348,9 @@ export async function run(
 		version = process.versions.node,
 		root = ROOT,
 		statfs = fs.statfsSync,
+		writeReport = fs.writeFileSync,
+		removeArtifact = fs.unlinkSync,
+		now = () => performance.now(),
 		signal,
 		workerFactory,
 	} = {},
@@ -363,7 +396,7 @@ export async function run(
 			resourceWindow: config.resourceWindow,
 		}
 	if (signal?.aborted) throw new Error("Cancelled before filesystem")
-	const started = performance.now()
+	const started = now()
 	report.sourceHashes = Object.fromEntries(
 		["run.mjs", "worker.mjs", "workloads.mjs"].map(name => {
 			const path = join(dirname(fileURLToPath(import.meta.url)), name)
@@ -402,7 +435,7 @@ export async function run(
 							stackSizeMb: 4,
 						},
 					})),
-			Math.floor(config.deadlineMs - (performance.now() - started)),
+			Math.floor(config.deadlineMs - (now() - started)),
 			signal,
 		)
 		outcome = {
@@ -414,6 +447,10 @@ export async function run(
 			filesystemType: output.filesystemType,
 		}
 	} catch (error) {
+		if (error instanceof FatalContainmentError) {
+			error.output = output.path
+			throw error // No inspection, hashing, persistence or deletion before a confirmed join.
+		}
 		outcome = {
 			...report,
 			status: "failed",
@@ -428,43 +465,81 @@ export async function run(
 	try {
 		verify()
 		diskGuard(statfs(output.path, { bigint: true }), config.reserveBytes)
+	} catch (error) {
+		outcome.status = "failed"
+		outcome.diskError = String(error)
+	}
+	// Disk admission and safe artifact identity inspection are independent after join.
+	try {
+		verify()
 		outcome.artifacts = inspectArtifacts(output.path)
 	} catch (error) {
 		outcome.status = "failed"
 		outcome.artifactError = String(error)
 	}
-	// Persist report before removing only verified task-created DB files. Reports remain.
-	verify()
-	outcome.elapsedMs = performance.now() - started
-	if (outcome.elapsedMs > config.deadlineMs) {
-		outcome.status = "failed"
-		outcome.deadlineExceeded = true
-	}
-	const serialized = JSON.stringify(outcome, null, 2)
-	if (Buffer.byteLength(serialized) > 128 * 1024)
-		throw new Error("Report quota exceeded")
-	fs.writeFileSync(join(output.path, "report.json"), serialized, {
-		flag: "wx",
-		mode: 0o600,
-	})
-	if (outcome.artifacts) {
-		for (const file of outcome.artifacts.files) {
-			if (file.name.startsWith("fixture.db")) {
-				const full = join(output.path, file.name)
-				const info = fs.lstatSync(full)
-				verify()
-				if (
-					!info.isFile() ||
-					info.isSymbolicLink() ||
-					info.nlink !== 1 ||
-					info.ino !== file.inode ||
-					info.dev !== file.device
-				)
-					throw new Error("Unsafe cleanup")
-				fs.unlinkSync(full)
-			}
+	const observeDeadline = () => {
+		outcome.elapsedMs = now() - started
+		if (outcome.elapsedMs > config.deadlineMs) {
+			outcome.status = "failed"
+			outcome.deadlineExceeded = true
 		}
 	}
+	observeDeadline()
+	// One preliminary write saves hashes before cleanup. It never asserts completed
+	// success: its own write and cleanup have not happened yet and cannot be measured
+	// in this snapshot. Only the returned result describes observed completion.
+	let persisted = false
+	try {
+		verify()
+		const serialized = JSON.stringify(
+			{
+				...outcome,
+				status: outcome.status === "failed" ? "failed" : "finalization-pending",
+				preliminaryOutcome: outcome.status,
+				completion: "pending",
+				elapsedScope: "before report persistence and cleanup",
+			},
+			null,
+			2,
+		)
+		if (Buffer.byteLength(serialized) > 128 * 1024)
+			throw new Error("Report quota exceeded")
+		writeReport(join(output.path, "report.json"), serialized, {
+			flag: "wx",
+			mode: 0o600,
+		})
+		persisted = true
+	} catch (error) {
+		outcome.status = "failed"
+		outcome.reportError = String(error)
+	}
+	if (persisted && outcome.artifacts) {
+		try {
+			for (const file of outcome.artifacts.files) {
+				if (file.name.startsWith("fixture.db")) {
+					verify()
+					const full = join(output.path, file.name)
+					const info = fs.lstatSync(full)
+					if (
+						!info.isFile() ||
+						info.isSymbolicLink() ||
+						info.nlink !== 1 ||
+						info.ino !== file.inode ||
+						info.dev !== file.device
+					)
+						throw new Error("Unsafe cleanup")
+					removeArtifact(full)
+				}
+			}
+		} catch (error) {
+			outcome.status = "failed"
+			outcome.cleanupError = String(error)
+		}
+	}
+	outcome.reportPersisted = persisted
+	outcome.completion = "observed"
+	outcome.elapsedScope = "through report persistence and cleanup attempt"
+	observeDeadline()
 	return { ...outcome, output: output.path }
 }
 
@@ -484,6 +559,7 @@ if (
 		if (report.status === "failed") process.exitCode = 1
 	} catch (error) {
 		process.stderr.write(String(error) + "\n")
+		if (error instanceof FatalContainmentError) process.exit(1)
 		process.exitCode = 1
 	} finally {
 		process.removeListener("SIGINT", cancel)

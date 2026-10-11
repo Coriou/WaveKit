@@ -107,6 +107,12 @@ async function fixture(data) {
 			.prepare("SELECT sqlite_version() AS version")
 			.get().version
 		const compileOptions = db.prepare("PRAGMA compile_options").all()
+		const pragmas = () => ({
+			journalMode: db.prepare("PRAGMA journal_mode").get().journal_mode,
+			synchronous: db.prepare("PRAGMA synchronous").get().synchronous,
+			pageSize: db.prepare("PRAGMA page_size").get().page_size,
+		})
+		const initialPragmas = pragmas()
 		db.exec(`CREATE TABLE activity(id INTEGER PRIMARY KEY, payload TEXT NOT NULL);
 			CREATE VIRTUAL TABLE search USING fts5(payload, content='activity', content_rowid='id');
 			CREATE TRIGGER activity_insert AFTER INSERT ON activity BEGIN INSERT INTO search(rowid,payload) VALUES(new.id,new.payload); END;
@@ -217,8 +223,8 @@ async function fixture(data) {
 			warnings,
 			sqlite,
 			compileOptions,
-			syncMode: "FULL",
-			pageSize: 4096,
+			initialPragmas,
+			finalPragmas: pragmas(),
 			primitives,
 			counts,
 			processRssBytes: process.memoryUsage().rss,
