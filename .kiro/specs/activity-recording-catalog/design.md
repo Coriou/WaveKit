@@ -889,8 +889,22 @@ outcomes, shared stage deadlines, reservation transfer, metadata-only live inven
 streaming final hashes and residue reporting. The CLI still runs only the accepted
 micro/runtime/disabled cases; every long scenario and phase returns `not-run` with
 explicit prerequisites. No long scheduler is mounted and no performance result is
-claimed. The41 bounded tests include the original20 micro regressions and four
+claimed. The55 bounded tests include the original20 micro regressions and four
 properties with100 cases each; tests do not establish real runtime/platform support.
+
+Warmup/load transition callbacks may arrive from the scheduled boundary through
+20ms late inclusive; earlier or later observations fail. The new phase uses the
+observed entry epoch, preserving the full900-second measured load. Lateness is
+reported and consumes the unchanged1,200-second total budget; it adds no worker
+budget. Warmup must already have drained by the scheduled30-second boundary;
+asynchronous receipt/control callbacks supply their observed monotonic clock.
+Query terminal accounting retains physical reader ownership on timeout. A valid
+terminal reply confirms settlement; otherwise a matching request/owner-token join
+confirmation is required before reuse. Late replies and stale joins cannot change
+terminals or release a newer owner; failed join forbids reuse. Batch `bytes` counts
+the complete serialized `{id,bytes,rows}` envelope, including array separators and
+the size field itself, within262,144 bytes. Data and the separate1 KiB control
+reservation remain charged through settlement and release once.
 
 Before the next worker item can execute storage, settle its narrow interface:
 one writer batch ID with bounded rows/serialized bytes, exactly one terminal batch

@@ -725,6 +725,9 @@ interface DriverSnapshot {
 	controlBytes: number
 	peakRows: number
 	maxLatenessUs: number
+	transitionLatenessUs: number | null
+	epochUs: number | null
+	loadEndsUs: number | null
 }
 interface Batch {
 	id: number
@@ -739,9 +742,9 @@ interface Driver {
 	) => { processed: number; missed: number; done: boolean }
 	admit: (event: DriverEvent, now: number, available?: boolean) => string
 	batch: (now: number, force?: boolean) => Batch | null
-	settle: (id: number, outcome: string) => boolean
+	settle: (id: number, outcome: string, now?: number) => boolean
 	control: (id: number, bytes: number) => boolean
-	releaseControl: (id: number) => boolean
+	releaseControl: (id: number, now?: number) => boolean
 	measure: (now: number) => void
 	stop: () => void
 	snapshot: () => DriverSnapshot
@@ -753,11 +756,14 @@ interface QuerySnapshot {
 	pending: number
 	terminalCount: number
 	reconciled: boolean
+	readerOwner: { id: number; owner: number } | null
+	readerJoinFailed: boolean
 }
 interface QueryDriver {
 	turn: (now: number) => number
 	dispatch: (now: number) => number | null
 	settle: (id: number, reason: string, replyBytes?: number) => boolean
+	join: (id: number, owner: number, confirmed: boolean) => boolean
 	releaseReply: (client: number) => boolean
 	stop: (deliberate?: boolean, joined?: boolean) => void
 	snapshot: () => QuerySnapshot
@@ -791,7 +797,12 @@ const delivery = (await import(
 	stageDeadline: (now: () => number) => {
 		enter: (stage: string) => void
 		check: () => number
-		snapshot: () => { stage: string; elapsedMs: number }
+		snapshot: () => {
+			stage: string
+			elapsedMs: number
+			enteredMs: number
+			transitions: { latenessMs: number }[]
+		}
 		supervise: (
 			factory: () => FakeWorker,
 			signal?: AbortSignal,
@@ -835,15 +846,15 @@ function acknowledge(driver: Driver, now: number) {
 	let batch
 	while ((batch = driver.batch(now, true))) driver.settle(batch.id, "committed")
 }
-function warmed(scenario: string, seconds = 1) {
+function warmed(scenario: string, seconds = 1, transitionUs = 30000000) {
 	const driver = delivery.admissionDriver(scenario, seconds)
 	driver.start(0)
 	for (let now = 0; now < 25000000; now += 10000) {
 		driver.turn(now)
 		acknowledge(driver, now)
 	}
-	driver.turn(30000000)
-	driver.measure(30000000)
+	driver.turn(transitionUs)
+	driver.measure(transitionUs)
 	return driver
 }
 
@@ -1059,7 +1070,7 @@ describe("allocated driver delivery, virtual evidence only", () => {
 		expect(driver.batch(19999)).toBeNull()
 		const batch = driver.batch(20000)!
 		expect(batch.rows).toHaveLength(1)
-		expect(batch.bytes).toBe(wireBytes(event(0, 0, 144 * 1024)))
+		expect(batch.bytes).toBe(Buffer.byteLength(JSON.stringify(batch)))
 		for (let i = 0; i < 127; i++) expect(driver.control(i, 16384)).toBe(true)
 		expect(driver.control(128, 1)).toBe(false)
 		expect(driver.snapshot()).toMatchObject({
@@ -1145,12 +1156,25 @@ describe("allocated driver delivery, virtual evidence only", () => {
 								while (
 									expectedRows < queued.length &&
 									expectedRows < 64 &&
-									expectedBytes + queued[expectedRows]! <= 256 * 1024
+									Buffer.byteLength(
+										JSON.stringify({
+											id: batch.id,
+											bytes: 262144,
+											rows: [],
+										}),
+									) +
+										expectedBytes +
+										queued[expectedRows]! +
+										expectedRows <=
+										256 * 1024
 								) {
 									expectedBytes += queued[expectedRows]!
 									expectedRows++
 								}
-								expect(batch.bytes).toBe(expectedBytes)
+								expect(batch.bytes).toBe(
+									Buffer.byteLength(JSON.stringify(batch)),
+								)
+								expect(batch.bytes).toBeLessThanOrEqual(262144)
 								expect(batch.rows).toHaveLength(expectedRows)
 								queued.splice(0, expectedRows)
 								rows -= expectedRows
@@ -1557,6 +1581,236 @@ describe("query reply retention accounting only", () => {
 			retainedReplyBytes: 0,
 			retainedReplies: 0,
 			totals: { "not-offered-after-stop": 6 },
+		})
+	})
+})
+
+describe("review corrections: bounded transitions, reader ownership and wire envelopes", () => {
+	it.each([0, 1, 20000])(
+		"uses the observed epoch at warmup +%ius without shortening load",
+		late => {
+			const epoch = 30000000 + late
+			const driver = warmed("steady", 900, epoch)
+			expect(driver.snapshot()).toMatchObject({
+				transitionLatenessUs: late,
+				epochUs: epoch,
+				loadEndsUs: epoch + 900000000,
+				counts: { offered: 0, admitted: 0 },
+			})
+			driver.turn(epoch)
+			expect(driver.snapshot().counts["offered"]).toBe(1)
+			// Seeking the fixed schedule ends it; grace never creates extra offers.
+			driver.turn(epoch + 900000000)
+			const offered = driver.snapshot().counts["offered"]
+			expect(driver.turn(epoch + 900020000)).toMatchObject({
+				processed: 0,
+				done: true,
+			})
+			expect(driver.snapshot().counts["offered"]).toBe(offered)
+		},
+	)
+	it.each([29999999, 30020001])(
+		"rejects a drained warmup transition at %ius",
+		time => {
+			expect(() => warmed("steady", 1, time)).toThrow("Warmup")
+		},
+	)
+	it("rejects a warmup that only finishes draining during transition grace", () => {
+		const driver = delivery.admissionDriver("steady", 1)
+		driver.start(0)
+		for (let now = 0; now < 24990000; now += 10000) {
+			driver.turn(now)
+			acknowledge(driver, now)
+		}
+		driver.turn(24990000)
+		const last = driver.batch(24990000, true)!
+		driver.settle(last.id, "committed", 30000001)
+		expect(driver.snapshot().counts["committed"]).toBe(2500)
+		expect(() => driver.measure(30000001)).toThrow("Warmup drain")
+	})
+	it.each([0, 0.001, 20])(
+		"accepts stage transition +%sms, reports it and preserves full load",
+		late => {
+			let clock = 0
+			const deadline = delivery.stageDeadline(() => clock)
+			clock = 180000
+			deadline.enter("warmup")
+			clock = 210000 - 0.001
+			expect(() => deadline.enter("load")).toThrow("Fixed phase")
+			clock = 210000 + late
+			expect(deadline.check()).toBe(0)
+			deadline.enter("load")
+			expect(deadline.check()).toBe(900000)
+			expect(deadline.snapshot()).toMatchObject({ enteredMs: clock })
+			expect(deadline.snapshot().transitions[1]?.latenessMs).toBeCloseTo(late)
+			const loadEpoch = clock
+			clock = loadEpoch + 900000 - 0.001
+			expect(() => deadline.enter("drain")).toThrow("Fixed phase")
+			clock = loadEpoch + 900000 + late
+			deadline.enter("drain")
+			clock += 15000
+			deadline.enter("finalization")
+			expect(deadline.check()).toBeCloseTo(75000 - 2 * late)
+			clock = 1200000
+			expect(deadline.check()).toBe(0)
+			clock += 0.001
+			expect(() => deadline.check()).toThrow("finalization")
+		},
+	)
+	it("rejects beyond-grace transitions and never borrows past the total deadline", () => {
+		let clock = 0
+		const warmup = delivery.stageDeadline(() => clock)
+		warmup.enter("warmup")
+		clock = 30020.001
+		expect(() => warmup.enter("load")).toThrow("warmup")
+		clock = 0
+		const load = delivery.stageDeadline(() => clock)
+		load.enter("warmup")
+		clock = 30000
+		load.enter("load")
+		clock = 930020.001
+		expect(() => load.enter("drain")).toThrow("load")
+		clock = 1200000.001
+		expect(() => load.enter("drain")).toThrow("load")
+	})
+	it("holds the timed-out reader until matching join, fencing late replies and old joins", () => {
+		const driver = delivery.queryAccounting(2)
+		driver.turn(0)
+		expect(driver.dispatch(0)).toBe(0)
+		const first = driver.snapshot().readerOwner!
+		expect(() => driver.join(first.id, first.owner, true)).toThrow(
+			"before terminal",
+		)
+		driver.turn(125000)
+		expect(driver.dispatch(250000)).toBeNull()
+		expect(driver.snapshot().totals["active-timeout"]).toBe(1)
+		expect(driver.settle(0, "successful", 1)).toBe(false)
+		expect(driver.join(0, first.owner + 1, true)).toBe(false)
+		expect(driver.dispatch(250000)).toBeNull()
+		expect(driver.join(0, first.owner, true)).toBe(true)
+		expect(driver.dispatch(250000)).toBe(1)
+		const second = driver.snapshot().readerOwner!
+		expect(driver.join(0, first.owner, true)).toBe(false)
+		expect(driver.snapshot().readerOwner).toEqual(second)
+		expect(driver.settle(0, "query-failed")).toBe(false)
+		expect(driver.settle(1, "successful")).toBe(true)
+		driver.stop(true, true)
+		expect(driver.snapshot()).toMatchObject({
+			reconciled: true,
+			terminalCount: 16,
+			readerOwner: null,
+			totals: {
+				"active-timeout": 1,
+				successful: 1,
+				"not-offered-after-stop": 14,
+			},
+		})
+	})
+	it("keeps failed joins unusable and cancellation cannot change an established timeout", () => {
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0)
+		const owner = driver.snapshot().readerOwner!
+		driver.turn(125000)
+		driver.dispatch(250000)
+		expect(() => driver.join(owner.id, owner.owner, false)).toThrow(
+			"reuse forbidden",
+		)
+		expect(driver.join(owner.id, owner.owner, true)).toBe(false)
+		expect(driver.dispatch(250000)).toBeNull()
+		driver.stop(true, true)
+		expect(driver.settle(0, "successful")).toBe(false)
+		expect(driver.snapshot()).toMatchObject({
+			reconciled: true,
+			terminalCount: 8,
+			readerJoinFailed: true,
+			readerOwner: owner,
+			totals: {
+				"active-timeout": 1,
+				"cancelled-in-flight": 0,
+				"cancelled-before-dispatch": 1,
+			},
+		})
+		const cancelled = delivery.queryAccounting(1)
+		cancelled.turn(0)
+		cancelled.dispatch(0)
+		const cancelledOwner = cancelled.snapshot().readerOwner!
+		cancelled.stop(true, true)
+		expect(cancelled.settle(0, "successful")).toBe(false)
+		expect(cancelled.join(0, cancelledOwner.owner, true)).toBe(true)
+		expect(cancelled.dispatch(250000)).toBeNull()
+		expect(cancelled.snapshot().totals["cancelled-in-flight"]).toBe(1)
+	})
+	it("packs the complete wire envelope at the exact cap for differing batch-ID digits", () => {
+		const driver = delivery.admissionDriver("steady", 1)
+		for (let id = 1; id <= 101; id++) {
+			const now = id * 1000000
+			if (![1, 9, 10, 99, 100, 101].includes(id)) {
+				driver.admit(event(id, now, 1), now)
+				const batch = driver.batch(now, true)!
+				driver.settle(batch.id, "committed")
+				continue
+			}
+			// Independent serialized template, with six-digit bytes at the cap.
+			const inputs = [event(2 * id, now, 1), event(2 * id + 1, now, 1)]
+			const template = {
+				id,
+				bytes: 262144,
+				rows: inputs.map(row => ({ ...row, id: `warmup:${row.id}` })),
+			}
+			const extra = 262144 - Buffer.byteLength(JSON.stringify(template))
+			inputs[0]!.payload = "x".repeat(131000)
+			inputs[1]!.payload = "x".repeat(extra - 131000 + 2)
+			for (const input of inputs)
+				expect(driver.admit(input, now)).toBe("admitted")
+			const dataBytes = inputs.reduce((sum, input) => sum + wireBytes(input), 0)
+			const batch = driver.batch(now, true)!
+			expect(batch.id).toBe(id)
+			expect(batch.rows).toHaveLength(2)
+			expect(Buffer.byteLength(JSON.stringify(batch))).toBe(262144)
+			expect(batch.bytes).toBe(262144)
+			expect(driver.snapshot()).toMatchObject({
+				retainedBytes: dataBytes,
+				controlBytes: 1024,
+			})
+			driver.settle(batch.id, "committed")
+			expect(driver.snapshot()).toMatchObject({
+				retainedBytes: 0,
+				controlBytes: 0,
+			})
+		}
+	})
+	it("splits a cap-plus-one envelope and progresses with escaped payloads", () => {
+		const driver = delivery.admissionDriver("steady", 1)
+		const inputs = [event(0, 0, 131000), event(1, 0, 1)]
+		const template = {
+			id: 1,
+			bytes: 262144,
+			rows: inputs.map(row => ({ ...row, id: `warmup:${row.id}` })),
+		}
+		inputs[1]!.payload = "x".repeat(
+			262145 - Buffer.byteLength(JSON.stringify(template)) + 1,
+		)
+		for (const input of inputs) expect(driver.admit(input, 0)).toBe("admitted")
+		const first = driver.batch(0, true)!
+		expect(first.rows).toHaveLength(1)
+		expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThanOrEqual(262144)
+		driver.settle(first.id, "committed")
+		const second = driver.batch(0, true)!
+		expect(second.rows).toHaveLength(1)
+		driver.settle(second.id, "committed")
+		const escaped = { ...event(2), payload: '\"\\\n'.repeat(20000) }
+		expect(driver.admit(escaped, 0)).toBe("admitted")
+		const batch = driver.batch(0, true)!
+		expect(batch.bytes).toBe(Buffer.byteLength(JSON.stringify(batch)))
+		expect(batch.bytes).toBeLessThanOrEqual(262144)
+		expect(batch.rows).toHaveLength(1)
+		driver.settle(batch.id, "committed")
+		expect(driver.batch(0, true)).toBeNull()
+		expect(driver.snapshot()).toMatchObject({
+			retainedRows: 0,
+			retainedBytes: 0,
+			controlBytes: 0,
 		})
 	})
 })

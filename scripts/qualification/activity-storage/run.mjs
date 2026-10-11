@@ -706,6 +706,7 @@ export const DRIVER_LIMITS = Object.freeze({
 	batchBytes: 256 * 1024,
 	dwellUs: 20000,
 	latenessUs: 20000,
+	transitionLatenessUs: 20000,
 	turnRows: 64,
 	dbBytes: 2 * GiB,
 	dbHeadroomBytes: 256 * 1024 ** 2,
@@ -728,42 +729,58 @@ export function stageDeadline(now = () => performance.now()) {
 	const roles = new Map()
 	let replacements = 0
 	let fatal = false
-	const check = () => {
-		const current = now()
+	const transitions = []
+	const check = (current = now()) => {
+		const grace = ["warmup", "load"].includes(stage)
+			? DRIVER_LIMITS.transitionLatenessUs / 1000
+			: 0
 		if (
 			current < entered ||
 			current - started > LIMITS.deadlineMs ||
-			current - entered > STAGE_MS[stage]
+			current > entered + STAGE_MS[stage] + grace
 		)
 			throw new Error(`Deadline exceeded: ${stage}`)
 		return Math.max(
 			0,
 			Math.min(
 				LIMITS.deadlineMs - (current - started),
-				STAGE_MS[stage] - (current - entered),
+				entered + STAGE_MS[stage] - current,
 			),
 		)
 	}
 	return {
 		check,
 		enter(next) {
-			check()
+			const current = now()
+			check(current)
 			if (
 				["warmup", "load"].includes(stage) &&
-				now() - entered < STAGE_MS[stage]
+				current < entered + STAGE_MS[stage]
 			)
 				throw new Error("Fixed phase duration not complete")
 			if (stages[index + 1] !== next)
 				throw new Error("Invalid stage transition")
+			transitions.push({
+				from: stage,
+				to: next,
+				scheduledMs: entered + STAGE_MS[stage],
+				observedMs: current,
+				latenessMs: Math.max(0, current - (entered + STAGE_MS[stage])),
+			})
 			stage = next
 			index++
-			entered = now()
+			// Observed entry is the new epoch: load always gets its full 900s.
+			// Transition delay consumes the unchanged total/finalization budget.
+			entered = current
 		},
 		snapshot() {
 			return {
 				stage,
 				elapsedMs: now() - started,
 				stageElapsedMs: now() - entered,
+				enteredMs: entered,
+				transitions: transitions.map(value => ({ ...value })),
+				transitionLatenessLimitMs: DRIVER_LIMITS.transitionLatenessUs / 1000,
 			}
 		},
 		// A replacement receives this same remaining budget; it never resets it.
@@ -903,6 +920,19 @@ function writerCounts() {
 		schedulerMissed: 0,
 	}
 }
+// JSON envelope size includes array brackets/separators and its own bytes field.
+// The decimal self-size reaches a fixed point in at most a few digit changes.
+function batchWireBytes(id, dataBytes, rows) {
+	const base =
+		Buffer.byteLength(JSON.stringify({ id, bytes: 0, rows: [] })) +
+		dataBytes +
+		Math.max(0, rows - 1) -
+		1
+	let bytes = base + 1
+	while (base + String(bytes).length !== bytes)
+		bytes = base + String(bytes).length
+	return bytes
+}
 export function admissionDriver(scenario, seconds = 900) {
 	if (
 		!["steady", "burst", "overload"].includes(scenario) ||
@@ -928,6 +958,12 @@ export function admissionDriver(scenario, seconds = 900) {
 	let peakRows = 0
 	let peakBytes = 0
 	let maxLatenessUs = 0
+	let transitionLatenessUs = null
+	let warmupDrainedUs = null
+	const recordDrain = () => {
+		if (mode === "warmup" && !retainedRows && !controls.size)
+			warmupDrainedUs = previousWall
+	}
 	const monotonic = nowUs => {
 		if (!Number.isSafeInteger(nowUs) || nowUs < 0 || nowUs < previousWall)
 			throw new Error("Invalid monotonic clock")
@@ -959,7 +995,10 @@ export function admissionDriver(scenario, seconds = 900) {
 		}
 		const bytes = Buffer.byteLength(JSON.stringify(row))
 		// Escaping can make a raw payload too large for one bounded IPC batch.
-		if (bytes > DRIVER_LIMITS.batchBytes) {
+		if (
+			batchWireBytes(Number.MAX_SAFE_INTEGER, bytes, 1) >
+			DRIVER_LIMITS.batchBytes
+		) {
 			counts.invalid++
 			return "invalid"
 		}
@@ -1030,30 +1069,34 @@ export function admissionDriver(scenario, seconds = 900) {
 				nowUs - queue[0].admittedUs < DRIVER_LIMITS.dwellUs
 			)
 				return null
-			let bytes = 0
+			const id = batchId + 1
+			if (!Number.isSafeInteger(id)) throw new Error("Batch ID exhausted")
+			let dataBytes = 0
 			let rows = 0
 			while (
 				rows < queue.length &&
 				rows < DRIVER_LIMITS.batchRows &&
-				bytes + queue[rows].bytes <= DRIVER_LIMITS.batchBytes
+				batchWireBytes(id, dataBytes + queue[rows].bytes, rows + 1) <=
+					DRIVER_LIMITS.batchBytes
 			) {
-				bytes += queue[rows].bytes
+				dataBytes += queue[rows].bytes
 				rows++
 			}
-			// Reserve fixed envelope/control headroom before posting, independently
-			// of the serialized rows. Both stay charged until batch settlement.
+			if (!rows) throw new Error("Queued row cannot fit batch envelope")
+			// Disjoint charges: serialized rows remain data; 1KiB reserves control
+			// state/envelope overhead. The actual wire cap includes both categories.
 			if (
 				controls.size >= DRIVER_LIMITS.controlRows ||
 				controlBytes + 1024 > DRIVER_LIMITS.controlBytes
 			)
 				return null
-			const id = ++batchId
+			batchId = id
 			controls.set(`batch:${id}`, 1024)
 			controlBytes += 1024
-			inflight = { id, rows: queue.splice(0, rows), bytes }
+			inflight = { id, rows: queue.splice(0, rows), dataBytes }
 			return {
 				id,
-				bytes,
+				bytes: batchWireBytes(id, dataBytes, rows),
 				rows: inflight.rows.map(row => ({
 					id: row.id,
 					producer: row.producer,
@@ -1062,20 +1105,24 @@ export function admissionDriver(scenario, seconds = 900) {
 				})),
 			}
 		},
-		settle(id, outcome) {
+		// Async receipt handlers supply their observed clock; fixtures may use the
+		// latest driver clock. Warmup drain must finish before transition grace.
+		settle(id, outcome, nowUs = previousWall) {
 			if (!["committed", "failed", "uncertain"].includes(outcome))
 				throw new Error("Invalid batch settlement")
 			if (!inflight || inflight.id !== id) {
 				counts.duplicateReceipts++
 				return false
 			}
+			monotonic(nowUs)
 			counts[outcome] += inflight.rows.length
 			if (outcome !== "uncertain") counts.acknowledged += inflight.rows.length
 			controlBytes -= controls.get(`batch:${id}`)
 			controls.delete(`batch:${id}`)
 			retainedRows -= inflight.rows.length
-			retainedBytes -= inflight.bytes
+			retainedBytes -= inflight.dataBytes
 			inflight = null
+			recordDrain()
 			return true
 		},
 		control(id, bytes) {
@@ -1093,10 +1140,12 @@ export function admissionDriver(scenario, seconds = 900) {
 			controlBytes += bytes
 			return true
 		},
-		releaseControl(id) {
+		releaseControl(id, nowUs = Math.max(0, previousWall)) {
 			if (!controls.has(id)) return false
+			monotonic(nowUs)
 			controlBytes -= controls.get(id)
 			controls.delete(id)
+			recordDrain()
 			return true
 		},
 		measure(nowUs) {
@@ -1104,7 +1153,10 @@ export function admissionDriver(scenario, seconds = 900) {
 			if (
 				mode !== "warmup" ||
 				epoch === null ||
-				nowUs - epoch !== 30000000 ||
+				nowUs - epoch < 30000000 ||
+				nowUs - epoch > 30000000 + DRIVER_LIMITS.transitionLatenessUs ||
+				warmupDrainedUs === null ||
+				warmupDrainedUs > epoch + 30000000 ||
 				!schedule.done ||
 				counts.admitted !== 2500 ||
 				counts.committed !== 2500 ||
@@ -1113,6 +1165,7 @@ export function admissionDriver(scenario, seconds = 900) {
 				controls.size
 			)
 				throw new Error("Warmup drain/reset failed")
+			transitionLatenessUs = nowUs - epoch - 30000000
 			warmup = { ...counts }
 			counts = writerCounts()
 			buckets = tokenBuckets()
@@ -1134,7 +1187,7 @@ export function admissionDriver(scenario, seconds = 900) {
 				controlBytes -= controls.get(`batch:${inflight.id}`)
 				controls.delete(`batch:${inflight.id}`)
 				retainedRows -= inflight.rows.length
-				retainedBytes -= inflight.bytes
+				retainedBytes -= inflight.dataBytes
 				inflight = null
 			}
 		},
@@ -1150,6 +1203,10 @@ export function admissionDriver(scenario, seconds = 900) {
 				peakRows,
 				peakBytes,
 				maxLatenessUs,
+				transitionLatenessUs,
+				transitionLatenessLimitUs: DRIVER_LIMITS.transitionLatenessUs,
+				epochUs: epoch,
+				loadEndsUs: mode === "load" ? epoch + seconds * 1000000 : null,
 				fidelity: counts.schedulerMissed ? "failed" : "no scheduler misses",
 				receiptLatency: null,
 				latencyMeasurement:
@@ -1185,6 +1242,9 @@ export function queryAccounting(seconds = 900) {
 	let retainedReplyBytes = 0
 	let next = 0
 	let active = null
+	let readerOwner = null
+	let ownerSequence = 0
+	let readerJoinFailed = false
 	let stopped = false
 	let previous = -1
 	const terminal = (id, reason) => {
@@ -1221,6 +1281,7 @@ export function queryAccounting(seconds = 900) {
 				classes[(Math.floor(id / 8) + client) % 8]++
 				if (
 					retainedReplies.has(client) ||
+					readerOwner?.id % 8 === client ||
 					[...pending.keys()].some(key => key % 8 === client)
 				)
 					totals["client-busy"]++
@@ -1238,11 +1299,12 @@ export function queryAccounting(seconds = 900) {
 			for (const [id, slot] of pending)
 				if (nowUs - slot.timeUs >= 250000)
 					terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
-			if (active !== null) return null
+			if (stopped || readerOwner !== null || readerJoinFailed) return null
 			for (const [id, slot] of pending)
 				if (!slot.dispatched) {
 					slot.dispatched = true
 					active = id
+					readerOwner = { id, owner: ++ownerSequence }
 					return id
 				}
 			return null
@@ -1261,10 +1323,24 @@ export function queryAccounting(seconds = 900) {
 			)
 				throw new Error("Retained reply quota exceeded")
 			terminal(id, reason)
+			readerOwner = null // A valid terminal reply confirms query settlement.
 			if (replyBytes) {
 				retainedReplies.set(id % 8, replyBytes)
 				retainedReplyBytes += replyBytes
 			}
+			return true
+		},
+		// Called only after external termination/settlement confirmation. Matching
+		// both keys fences delayed joins from prior owners; failure poisons reuse.
+		join(id, owner, confirmed) {
+			if (readerOwner?.id !== id || readerOwner.owner !== owner) return false
+			if (pending.has(id)) throw new Error("Reader join before terminal")
+			if (confirmed !== true) {
+				readerJoinFailed = true
+				throw new Error("Reader join failed; reuse forbidden")
+			}
+			if (readerJoinFailed) return false
+			readerOwner = null
 			return true
 		},
 		releaseReply(client) {
@@ -1305,6 +1381,8 @@ export function queryAccounting(seconds = 900) {
 				classes: [...classes],
 				plannedClasses: Array(8).fill(seconds),
 				pending: pending.size,
+				readerOwner: readerOwner ? { ...readerOwner } : null,
+				readerJoinFailed,
 				retainedReplies: retainedReplies.size,
 				retainedReplyBytes,
 				terminalCount,
