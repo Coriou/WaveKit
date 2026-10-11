@@ -129,6 +129,11 @@ export class Rtl433Decoder extends IqDecimateDecoder {
 		}
 	}
 
+	/** Migrated to the opt-in core channelizer (addendum §7 step 3). */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
 	/**
 	 * Returns the IQ decimation configuration.
 	 * rtl_433 works best at 250 kHz - 1 MHz sample rates.

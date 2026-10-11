@@ -1,3 +1,4 @@
+import { scanView } from "./scan.js"
 import type { ViewId } from "../ui/actions.js"
 import { decodersView } from "./decoders.js"
 import { messagesView } from "./messages.js"
@@ -13,4 +14,5 @@ export const VIEWS: Record<ViewId, ViewModule> = {
 	messages: messagesView,
 	receiver: receiverView,
 	system: systemView,
+	scan: scanView,
 }

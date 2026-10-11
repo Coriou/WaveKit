@@ -2,7 +2,7 @@
 
 exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bottom pane 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
    DECODERS          process     restarts  errors  decodes          events      iq in  drop now  lifetime  window
  ● dsd-fme           up 52s             0       0  2/min · 11s ago       3   831.5 MB       12%       36%  in
@@ -44,7 +44,7 @@ exports[`Decoders view (spec §6.2) > golden: 120x40 with readsb detail as a bot
 
 exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right pane 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024 · external control  decoders 8/9 up · 1 restarting · 2 in window  drops !21%                                                           18:07
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
    DECODERS          process     restarts  errors  decodes          drop now  lifetime  band MHz          window  readsb    ADS-B · network producer · iq → jsonl · pid 1531
  ● dsd-fme           up 52s             0       0  2/min · 11s ago       12%       36%  tuned             in      process   up 51s · 0 restarts · 6 errors · health "idle"
@@ -96,7 +96,7 @@ exports[`Decoders view (spec §6.2) > golden: 200x50 with the detail as a right 
 
 exports[`Decoders view (spec §6.2) > golden: crash-loop 120x40 1`] = `
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 failing · 2 in window  drops !21%
- 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
    DECODERS          process     restarts  errors  decodes          events      iq in  drop now  lifetime  window
  ● dsd-fme           up 52s             0       0  2/min · 11s ago       3   831.5 MB       12%       36%  in

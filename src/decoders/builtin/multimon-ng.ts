@@ -217,6 +217,15 @@ export class MultimonDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 48 kHz; sox still resamples to 22 050 Hz. The IQ
+	 * AGC stays and now runs on channel IQ (addendum §3 risk).
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
 	 * Returns the decoder command.
 	 */
 	protected getDecoderCommand(): string {

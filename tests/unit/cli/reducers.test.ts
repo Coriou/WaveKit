@@ -1394,3 +1394,41 @@ describe("A8 fix M-e: decoder:health with a value the CLI does not know", () => 
 		expect(s.decoders.value).toHaveLength(1)
 	})
 })
+
+it("adopts and removes ephemeral scanner probes without manual ownership", async () => {
+	const { parseServerMessage } =
+		await import("../../../cli/source/data/guards.js")
+	const { initialState, reduce, PLAIN_SUMMARY } =
+		await import("../../../cli/source/data/reducers.js")
+	const d = {
+		id: "scan-probe",
+		type: "dsd-fme",
+		running: true,
+		health: "idle",
+		uptime: 0,
+		restartCount: 0,
+		stats: { bytesIn: 0, eventsOut: 0, errors: 0 },
+		owner: "scanner",
+		scannerJobId: "job1",
+		ephemeral: true,
+	}
+	const created = parseServerMessage({
+		type: "decoder:created",
+		data: { decoderId: d.id, decoder: d },
+	})!
+	let s = initialState(0)
+	s.decoders.value = []
+	s = reduce(s, [{ kind: "ws", event: created, at: 1 }], 1, PLAIN_SUMMARY)
+	expect(s.decoders.value?.[0]).toMatchObject({
+		owner: "scanner",
+		scannerJobId: "job1",
+		ephemeral: true,
+	})
+	const removed = parseServerMessage({
+		type: "decoder:removed",
+		data: { decoderId: d.id, removedAt: "2026-10-11" },
+	})!
+	s = reduce(s, [{ kind: "ws", event: removed, at: 2 }], 2, PLAIN_SUMMARY)
+	expect(s.decoders.value).toEqual([])
+	expect(Object.hasOwn(s.session, d.id)).toBe(false)
+})

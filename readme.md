@@ -557,4 +557,8 @@ rtlmux -a 0.0.0.0 -p 5555 -s 5556 127.0.0.1 1234
 
 ## License
 
-ISC
+WaveKit is licensed under AGPL-3.0-or-later (see [LICENSE](LICENSE)). You may use, modify and run it. If you distribute a modified version, or offer it to users over a network, you must publish your changes under the same license.
+
+Using WaveKit through its REST or WebSocket API from a separate program does not place that program under the AGPL. `@wavekit/api-types` (`packages/api-types`) is MIT-licensed so client projects can import the API types freely.
+
+The bundled third-party decoders run as separate processes and keep their own licenses.

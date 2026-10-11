@@ -1,3 +1,4 @@
+import { initialScan } from "./scan-state.js"
 import type { DecoderOutput, TunerState } from "@wavekit/api-types"
 import { emptyLane, laneFail, laneOk } from "./freshness.js"
 import {
@@ -72,6 +73,7 @@ export const PLAIN_SUMMARY: ReduceDeps = {
 
 export function initialState(now: number): AppState {
 	return {
+		scan: initialScan(),
 		conn: {
 			target: { base: null, ws: null },
 			discovery: { mode: "probing", tried: [] },
@@ -421,6 +423,25 @@ function reduceWs(
 	deps: ReduceDeps,
 ): AppState {
 	switch (ev.type) {
+		case "spectrum:frame":
+		case "spectrum:profile":
+		case "scanner:invalidate":
+		case "scanner:status":
+			return s // Scan is bounded separately by the runtime.
+		case "decoder:removed":
+			return withPolls(
+				{
+					...s,
+					decoders: {
+						...s.decoders,
+						value: s.decoders.value?.filter(d => d.id !== ev.decoderId),
+					},
+					session: Object.fromEntries(
+						Object.entries(s.session).filter(([id]) => id !== ev.decoderId),
+					),
+				},
+				["decoders"],
+			)
 		case "decoder:output": {
 			const lookup: AircraftLookup = icao =>
 				s.aircraft.map.get(aircraftKey(icao))?.state
@@ -457,6 +478,7 @@ function reduceWs(
 				["decoders"],
 			)
 		}
+		case "decoder:created":
 		case "decoder:status": {
 			// One GET /api/decoders/:id body, latest wins. Lifecycle-driven, so the
 			// lane's receivedAt (the last full list) is kept.

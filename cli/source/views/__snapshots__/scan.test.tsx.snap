@@ -1,0 +1,43 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`additive read-only Scan > golden spectrum with truthful units and profiles 1`] = `
+" api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
+ 1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
+
+ SCAN · rtl · spectrum · read-only
+ scanner enabled · engine running · passive enabled (not proof of a job) · 1 active jobs
+ channelizer unavailable · CPU 0.5/1 cores · guard ?% · disk ok
+ profile requested 5Hz x 512
+ served 5Hz x 512 | exact
+ adjusted none | effective 5Hz
+ spectrum fresh · commanded · r reconnect to refresh/retry
+ axis 445180800..446819200 Hz
+ width 6400 Hz (native 1000) | commanded
+ DC 446000000 +/-1500 Hz | 0 spurs
+ -120..-20 dBFS max-hold | Enter profile/RF masks
+ ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▇▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂
+                                                            D
+ ▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▇▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂▂
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ select  Enter open  s source  w spectrum  d discoveries  b jobs  n next page  f first page  q quit  ? help"
+`;

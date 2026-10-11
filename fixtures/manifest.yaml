@@ -1,220 +1,516 @@
-# WaveKit Test Fixtures Manifest
-# Defines IQ/audio recordings for decoder validation testing
-#
-# Each fixture specifies:
-# - Source URL and download details
-# - IQ format and sample rate
-# - Target decoder and expected output
-
-version: 1
+# WaveKit test fixtures, manifest v2 (addendum §8).
+# Schema: tests/integration/fixtures/manifest.ts. Accessor: fixtures/manifest-query.mjs.
+# `fixtures` are verified (sha256, rate, centre, license, expected decodes).
+# `candidates` are known sources that are not verified yet; nothing reads them automatically.
+# Private own captures: license "private", fetch.kind "private", never committed.
+version: 2
 
 fixtures:
-  # =============================================================================
-  # SMALL FIXTURES (< 10 MB) - Priority for fast testing
-  # =============================================================================
+  # Composed wideband goldens (channelizer T7a): fixtures/compose.py builds each from
+  # fixtures/recipes/<id>.json; download.sh fetches the recipe's sources and regenerates it.
+  # sha256 is from compose.py with numpy 2.5.3 on macOS (see README: regenerate if it differs).
+  # expected: quiet-host raw record 2026-10-10 on wavekit:local-core, min_count = max(1, floor(0.8 x count)); see GOLDENS.md.
+  - id: composed_ais_162m_2048k
+    role: channelizer-golden
+    decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta
+      notes: "Real AIS A (161.975 MHz) and B (162.025 MHz), IQEngine Fort Smallwood (RTL-SDR V3, 2024-09-08), first 17.476 s of each, at -/+25 kHz around the pair centre (plan A15), each low-passed to its own 20 kHz channel (bandwidthHz) so the other channel in each 240 kS/s recording is not added twice. channelHz pins the pair centre on both paths. Local check 2026-10-10 (T7c): 15 (A) + 41 (B) CRC-valid frames with a throwaway demod (sources alone: 16 + 43 with the same demod). ais-catcher: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2048k.json }
+    file: raw/composed_ais_162m_2048k.cu8
+    sha256: 9a2c4432135e49bc661f47ad6c99b270e44eb7c89322ee3a6720696df0c63166
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 162000000
+    duration_s: 17
+    # marginal_keys (ruling QH-14): marginal real-capture frames one path decoded (QH-11, GOLDENS.md T28).
+    expected:
+      {
+        min_count: 46,
+        payloads:
+          [
+            { mmsi: "338155151", messageType: 18 },
+            { mmsi: "367165450", messageType: 1 },
+            { mmsi: "368007230", messageType: 24 },
+          ],
+        key_fields: ["mmsi", "messageType"],
+        marginal_keys:
+          ['["003669761",4]', '["203245890",24]', '["993672078",21]'],
+      }
 
-  # POCSAG Pager - 1.18 MB (SigIDwiki)
-  # Needs FM demod before multimon-ng
-  - id: sigid_pocsag
+  # Negatives (plan Task 7 step 4): the composed fixture with only channel.center_hz moved to
+  # center_hz + 0.49 x sample_rate, outside the usable span. Channelizer path only (the raw path
+  # ignores channelHz); the decoder must suspend with channel-outside-capture and decode nothing.
+  - id: composed_ais_162m_2048k_outside
+    role: negative
+    decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-162M025CF-240K0FS-20260730/meta
+      notes: "Negative copy of composed_ais_162m_2048k (same file and sha256): channel at 162 MHz + 0.49 x 2.048 Msps = 163.00352 MHz."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2048k.json }
+    file: raw/composed_ais_162m_2048k.cu8
+    sha256: 9a2c4432135e49bc661f47ad6c99b270e44eb7c89322ee3a6720696df0c63166
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 162000000
+    duration_s: 17
+    expected:
+      { min_count: 0, payloads: [], suspension: channel-outside-capture }
+    channel: { center_hz: 163003520 }
+
+  - id: composed_ais_162m_2400k
+    role: channelizer-golden
+    decoder: ais-catcher
+    decoder_options: { channelHz: 162000000 }
+    license: "composed: CC-BY-4.0 (IQEngine AIS recordings, Gary Schafer) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://iqengine.org/api/datasources/local/local/AIS-Collection-Fort-Smallwood-Pt1-161M975CF-240K0FS-20260730/meta
+      notes: "As composed_ais_162m_2048k at 2.4 Msps. Local check 2026-10-10 (T7c): 15 (A) + 41 (B) CRC-valid frames. ais-catcher: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_ais_162m_2400k.json }
+    file: raw/composed_ais_162m_2400k.cu8
+    sha256: 1e137e2d08ef14fa276367a94ca92269fc681b3e39c29f960cd256e18a1d3470
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 162000000
+    duration_s: 17
+    # marginal_keys (ruling QH-14): marginal real-capture frames one path decoded (QH-11, GOLDENS.md T28).
+    expected:
+      {
+        min_count: 49,
+        payloads:
+          [
+            { mmsi: "338155151", messageType: 18 },
+            { mmsi: "367165450", messageType: 1 },
+            { mmsi: "368007230", messageType: 24 },
+          ],
+        key_fields: ["mmsi", "messageType"],
+        marginal_keys: ['["993672078",21]', '["203245890",18]'],
+      }
+
+  - id: composed_pocsag_466075k_2048k
+    role: channelizer-golden
     decoder: multimon-ng
-    protocol: POCSAG
-    source_url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
-    format: zip
-    size_mb: 1.18
-    # IQ format typically detected from file, common: cu8 (unsigned 8-bit complex)
-    iq_format: cu8
-    sample_rate: null # Needs detection from file
-    needs_fm_demod: true
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      Small POCSAG pager capture from SigIDwiki.
-      Requires FM demodulation to audio before feeding to multimon-ng.
+    decoder_options:
+      { offsetHz: -225000, modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
+    license: "composed: synthetic (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      notes: "Synthetic POCSAG: 466.075 MHz carries 4 pages (512 and 1200 bps, alpha and numeric), 465.970 MHz carries 3 adjacent-channel pages with other addresses; both keyed throughout. offsetHz selects 466.075 MHz on both paths (delta E7). Local check 2026-10-10 (FM demod + multimon-ng 1.2.0): 4/4 pages on 466.075 MHz, 3/3 on 465.970 MHz, no false decodes."
+    fetch:
+      { kind: generated, recipe: recipes/composed_pocsag_466075k_2048k.json }
+    file: raw/composed_pocsag_466075k_2048k.cu8
+    sha256: 2747fa821c929ac7755747756b8efd41d21509dce7877792d6c33e8eeb1a32fc
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 466300000
+    duration_s: 12
+    # marginal_keys (ruling QH-14): the known multimon-ng bare-address stray, not in the sidecar (QH-13).
+    expected:
+      {
+        min_count: 4,
+        payloads:
+          [
+            { address: 1234567, function: 3 },
+            { address: 1122334, function: 0 },
+            { address: 2000016, function: 3 },
+          ],
+        key_fields: ["address", "function"],
+        marginal_keys: ["[1690848,3]"],
+      }
 
-  # FLEX Pager - 2.36 MB (SigIDwiki)
+  - id: composed_aprs_144800k_2048k
+    role: channelizer-golden
+    decoder: direwolf
+    decoder_options: { offsetHz: -400000 }
+    license: "composed: CC0-1.0 (sdr-flex aprs-afsk1200) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/livethisdream/sdr-flex/tree/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/aprs-afsk1200
+      notes: "sdr-flex APRS render (N0CALL>APRS, KC1ABC>APRS; FM 3 kHz deviation) at 144.800 MHz, 4 repeats. Local check 2026-10-10 (FM demod + multimon-ng AFSK1200): 8/8 frames. direwolf: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_aprs_144800k_2048k.json }
+    file: raw/composed_aprs_144800k_2048k.cu8
+    sha256: 55e76d0dd37231287afaa50843a77c335419ddc826e6a229897af00c3ce57862
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 145200000
+    duration_s: 12
+    expected:
+      {
+        min_count: 6,
+        payloads:
+          [
+            { source: "N0CALL", destination: "APRS" },
+            { source: "KC1ABC", destination: "APRS" },
+          ],
+        key_fields: ["source", "destination"],
+      }
+
+  - id: composed_acars_131725k_2048k
+    role: channelizer-golden
+    decoder: acarsdec
+    decoder_options: { offsetHz: 325000, frequencies: [131725000] }
+    license: "composed: synthetic (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      notes: "Synthetic plain-old ACARS: 4 downlinks on 131.725 MHz, 2 adjacent on 131.525 MHz. offsetHz and frequencies agree on 131.725 MHz for both paths. Local check 2026-10-10 (AM demod + a Python port of acarsdec msk.c/acars.c, which decodes acarsdec's own test.wav): 4/4 and 2/2 frames, CRC and parity valid. acarsdec: verify in image."
+    fetch:
+      { kind: generated, recipe: recipes/composed_acars_131725k_2048k.json }
+    file: raw/composed_acars_131725k_2048k.cu8
+    sha256: 48c31b7b7f41c6e767e2bb896e83aebfa1bd076828490e11789c21c53a5fe6a1
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 131400000
+    duration_s: 12
+    expected:
+      {
+        min_count: 3,
+        payloads:
+          [
+            { tail: "D-AWKT", label: "H1" },
+            { tail: "G-WKIT", label: "5Z" },
+            { tail: "EI-WKT", label: "Q0" },
+          ],
+        key_fields: ["tail", "label"],
+      }
+
+  - id: composed_ism_433920k_2048k
+    role: channelizer-golden
+    decoder: rtl433
+    license: "composed: unstated (rtl_433_tests Acurite sample; fetched from origin; not redistributed; local test use only) + CC0-1.0 (sdr-flex rtl433-ook-pwm) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02
+      notes: "rtl_433_tests Acurite 3-in-1 capture (signal near 433.93 MHz, 4 repeats) and the sdr-flex OOK PWM render at 433.95 MHz (3 repeats; rtl_433 decodes it only with its flex spec, which the rtl433 decoder cannot pass). Local check 2026-10-10 (rtl_433 25.12): Acurite-3n1 id 7992 8/8 on the 433.92 MHz channel and on a 1.024 Msps decimation of the whole capture; OOK codes with -X."
+    fetch: { kind: generated, recipe: recipes/composed_ism_433920k_2048k.json }
+    file: raw/composed_ism_433920k_2048k.cu8
+    sha256: d9937b2523a95a6c491314f4c780603d4b2c256891e8cab216679c6da72bd05f
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 433720000
+    duration_s: 10
+    channel: { center_hz: 433920000 }
+    expected:
+      {
+        min_count: 6,
+        payloads: [{ model: "Acurite-3n1", id: 7992 }],
+        key_fields: ["model", "id"],
+      }
+
+  - id: composed_vdl2_136800k_2048k
+    role: channelizer-golden
+    decoder: dumpvdl2
+    decoder_options: { frequencies: [136725000, 136875000, 136975000] }
+    license: "composed: GPL-3.0 (junzis/pyVDL2 sample_iqdata_rtlsdr.dat and szpajder/dumpvdl2 vdl2_model_16b_1050kHz.wav; repository licenses, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/junzis/pyVDL2/tree/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data
+      notes: "Real pyVDL2 RTL-SDR recording (1.05 Msps cu8): its two VDL2 channels (bursts at -10.45 and +39.74 kHz in the file) each shifted to 0 Hz, low-passed to 25 kHz and placed at 136.975 and 136.875 MHz; the synthetic dumpvdl2 test burst (S16 WAV, header rate 44.1 kHz overridden to 1.05 Msps) at 136.725 MHz, 5 repeats. The span midpoint 136.850 MHz is +200 kHz from the 136.650 MHz centre, so the channelizer shifts and every frequency is also inside the raw path's 1.05 Msps window. Local check 2026-10-10 (T7c): FFT placement, every burst carrier within 31 Hz of its frequency and nothing at +-50 kHz. dumpvdl2: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_vdl2_136800k_2048k.json }
+    file: raw/composed_vdl2_136800k_2048k.cu8
+    sha256: 98aab5aa3886fb5b53cf275e97371c0bb0db7f4213be6f7165a9c041d2931ed7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 136650000
+    duration_s: 10
+    expected:
+      {
+        min_count: 17,
+        payloads:
+          [
+            { icao: "345678", msgType: "I" },
+            { icao: "3944EE", msgType: "S" },
+            { icao: "400D91", msgType: "I" },
+          ],
+        key_fields: ["icao", "msgType"],
+      }
+
+  # Negative copy (see composed_ais_162m_2048k_outside) until T7b delivers a VDL2 capture.
+  - id: composed_vdl2_136800k_2048k_outside
+    role: negative
+    decoder: dumpvdl2
+    decoder_options: { frequencies: [136725000, 136875000, 136975000] }
+    license: "composed: GPL-3.0 (junzis/pyVDL2 sample_iqdata_rtlsdr.dat and szpajder/dumpvdl2 vdl2_model_16b_1050kHz.wav; repository licenses, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/junzis/pyVDL2/tree/d57de3b80163f9729e6f1c8f3af89df86f674962/tests/data
+      notes: "Negative copy of composed_vdl2_136800k_2048k (same file and sha256): channel at 136.65 MHz + 0.49 x 2.048 Msps = 137.65352 MHz (channelHz overrides the span midpoint)."
+    fetch: { kind: generated, recipe: recipes/composed_vdl2_136800k_2048k.json }
+    file: raw/composed_vdl2_136800k_2048k.cu8
+    sha256: 98aab5aa3886fb5b53cf275e97371c0bb0db7f4213be6f7165a9c041d2931ed7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 136650000
+    duration_s: 10
+    expected:
+      { min_count: 0, payloads: [], suspension: channel-outside-capture }
+    channel: { center_hz: 137653520 }
+
+  - id: composed_dmr_446m_2048k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: "composed: AGPL-3.0 (Newspicel/sdrmm dmr_call_48k; repository license, no per-file grant; fetched from origin, not redistributed) + synthetic noise (WaveKit, AGPL-3.0-or-later)"
+    provenance:
+      url: https://github.com/Newspicel/sdrmm/tree/4869fb8304138328dd7c8c82223c0d23fbd1fba6/fixtures
+      notes: "Real DMR direct-mode call (sdrmm dmr_call_48k, PMR446 channel 1, 48 kS/s cf32, 1.7 s; colour code 1, radio 12345678 to talkgroup 12345678) at 446.19375 MHz, +6 kHz from the 446.18775 MHz centre as in run 8, 4 repeats. Polyphase upsampling and one fixed gain only. Extra coverage next to the mandatory own DMR capture. Local check 2026-10-10 (T7c; csdr is not on this host, so its chain was emulated in numpy: shift, 12.5 kHz-matched FIR /43, fmdemod, gain 2, limit, then sox and dsd-fme AW 2025-217-g83d7460 -fs): 24 TGT=12345678 SRC=12345678 lines, 28 audio errors (the source repeated alone at 48 kS/s: 24 lines, 38 errors). dsd-fme with csdr: verify in image."
+    fetch: { kind: generated, recipe: recipes/composed_dmr_446m_2048k.json }
+    file: raw/composed_dmr_446m_2048k.cu8
+    sha256: 207493345b3237c9eb2ee34709d8012ed495329b52ea5772344c0d5e4de637ba
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 446187750
+    duration_s: 10
+    expected:
+      {
+        min_count: 1,
+        payloads: [{ talkgroup: 12345678, source: 12345678 }],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
+
+  # Own DMR captures (channelizer T7b, mandatory before dsd-fme migrates: delta D2/E4).
+  # Private: real radio identifiers; copied from WAVEKIT_PRIVATE_FIXTURES_DIR, never committed.
+  - id: own_dmr_446m_2048k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: private
+    provenance:
+      notes: "Own capture 2026-10-10 09:35 CEST: lab handheld, DMR direct mode, PMR446 channel 16 (446.19375 MHz), +6 kHz from the 446.18775 MHz centre as in run 8; RTL-SDR Blog V4 on the Pi via rtlmux, gain 0, core stopped. 3 PTTs, trimmed to 18..47 s of the 60 s take. Offline csdr front in wavekit:local-core (main 9ff133d): 3 calls ending on TLC, CRC 0, FEC 8, AMBE errors 19, 1.1 % muted."
+    fetch: { kind: private }
+    file: raw/own_dmr_446m_2048k.cu8
+    sha256: 52986b809787b6b9227ebd945de3ee034ef8131bc38ac9ce122857ae7b9b6cc7
+    format: cu8
+    sample_rate: 2048000
+    center_hz: 446187750
+    duration_s: 29
+    expected:
+      {
+        min_count: 2,
+        payloads: [],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
+
+  - id: own_dmr_446m_2400k
+    role: channelizer-golden
+    decoder: dsd-fme
+    decoder_options: { offsetHz: 6000 }
+    license: private
+    provenance:
+      notes: "Own capture 2026-10-10 09:37 CEST, as own_dmr_446m_2048k but at 2.4 Msps; 3 PTTs, trimmed to 14..45 s of the 60 s take. Offline csdr front: 3 calls ending on TLC, CRC 2, FEC 4, AMBE errors 18, 0.9 % muted."
+    fetch: { kind: private }
+    file: raw/own_dmr_446m_2400k.cu8
+    sha256: 8551d0f4d6804ab341ea61a9de2d6cac9f4a94f861a2212fd512ebd5c427ed9d
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 446187750
+    duration_s: 31
+    expected:
+      {
+        min_count: 2,
+        payloads: [],
+        output_types: ["call_start"],
+        key_fields: ["talkgroup", "source"],
+      }
+
+  # Public recordings without a stated license (Ruling T6-LIC): fetched from origin at test
+  # time, never committed or redistributed. Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
+  - id: sdrangel_adsb
+    role: tail-golden
+    decoder: readsb
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://www.sdrangel.org/iq-files/
+      notes: "SDRangel ADS-B example, 2021-11-26, London area; auxi centre 1090000000 Hz. readsb raw baseline (readsb does not migrate)."
+    fetch:
+      kind: public
+      url: https://www.sdrangel.org/iq/adsb.zip
+      archive_sha256: 67b99c06fe7ca6b3c21d493f36760bad4b9fb46db4e7a4dade699e7ccdd5a2fb
+      member: adsb.2021-11-26T15_03_30_573.wav
+      transform: wav-to-cu8
+    file: raw/sdrangel_adsb.cu8
+    sha256: bded99b1a3d6fe4aa31e2092b631a5b5e3cbbc2d534f4089bd54e89c59ae4b8a
+    format: cu8
+    sample_rate: 2400000
+    center_hz: 1090000000
+    duration_s: 102.088
+    large: true
+    expected: { min_count: 1, payloads: [], key_fields: ["icao"] }
+
+  - id: sigid_pocsag
+    role: tail-golden
+    decoder: multimon-ng
+    decoder_options:
+      { offsetHz: -11000, modes: ["POCSAG512", "POCSAG1200", "POCSAG2400"] }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://www.sigidwiki.com/wiki/File:POCSAG_IQ.zip
+      notes: "SigIDWiki POCSAG IQ sample (Admin, 2015-02-10). 128 kHz u8 IQ WAV; centre not recorded. Nothing at DC: FSK carriers near -11 kHz (decodes) and +13 kHz (nothing decodes), so offsetHz -11000 selects the paging channel (quiet-host record 2026-10-10)."
+    fetch:
+      kind: public
+      url: https://www.sigidwiki.com/images/6/65/POCSAG_IQ.zip
+      archive_sha256: 45bcba81cd4a0a50d1a0519bf4c484fc7513da18021eb2faed79cb03378c6353
+      member: POCSAG_IQ.wav
+      transform: wav-to-cu8
+    file: raw/sigid_pocsag.cu8
+    sha256: 2218e1ce0a3e1e82d3b402a90f2a277eb8d87380e15c14eb0080b97776dc60c1
+    format: cu8
+    sample_rate: 128000
+    duration_s: 16.364
+    expected:
+      {
+        min_count: 4,
+        payloads:
+          [
+            { address: 1234567, function: 3 },
+            { address: 1126640, function: 3 },
+            { address: 1121802, function: 3 },
+          ],
+        key_fields: ["address", "function"],
+      }
+
+  - id: rtl433_acurite_3n1_g001
+    role: tail-golden
+    decoder: rtl433
+    decoder_options: { inputSampleRate: 250000, targetSampleRate: 250000 }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02
+      notes: "rtl_433_tests sample; upstream .json: Acurite-3n1 id 7992 (x2). decoder_options unverified (T6a)."
+    fetch:
+      kind: public
+      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/acurite/Acurite_3-in-1/02/g001_433.92M_250k.cu8
+      archive_sha256: d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641
+    file: raw/rtl433_acurite_3n1_g001.cu8
+    sha256: d3d964b90b3861ddeeed7edb4e982714bcbedba29f177fa31faaeec9cea6c641
+    format: cu8
+    sample_rate: 250000
+    center_hz: 433920000
+    duration_s: 0.262
+    expected:
+      {
+        min_count: 1,
+        payloads: [{ model: "Acurite-3n1", id: 7992 }],
+        key_fields: ["model", "id"],
+      }
+
+  - id: rtl433_fineoffset_wh32_g001
+    role: tail-golden
+    decoder: rtl433
+    decoder_options: { inputSampleRate: 1000000, targetSampleRate: 1000000 }
+    license: "unstated (fetched from origin; not redistributed; local test use only)"
+    provenance:
+      url: https://github.com/merbanan/rtl_433_tests/tree/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/fineoffset/fineoffset_wh32
+      notes: "rtl_433_tests sample; upstream .json: Fineoffset-WH32 id 248. decoder_options unverified (T6a)."
+    fetch:
+      kind: public
+      url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/fineoffset/fineoffset_wh32/g001_868.3M_1000k.cu8
+      archive_sha256: 7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e
+    file: raw/rtl433_fineoffset_wh32_g001.cu8
+    sha256: 7139db4e8428da34280b87b6460e256bae494a2bc4c80f6fe563a09a2cb5ac9e
+    format: cu8
+    sample_rate: 1000000
+    center_hz: 868300000
+    duration_s: 0.131
+    expected:
+      {
+        min_count: 1,
+        payloads: [{ model: "Fineoffset-WH32", id: 248 }],
+        key_fields: ["model", "id"],
+      }
+
+candidates:
+  # Probed 2026-10-09 (channelizer T6a). Facts: .superpowers/sdd/2026-10-09-core-channelizer/t6-acquisition.md
+  # "cu8 sha256" is the file after download.sh `transform: wav-to-cu8` (sox 14.4.2).
   - id: sigid_flex
     decoder: multimon-ng
-    protocol: FLEX
-    source_url: https://www.sigidwiki.com/images/e/ec/FLEX_Pager_IQ_20150816_929613kHz_IQ.zip
-    format: zip
-    size_mb: 2.36
-    iq_format: cu8
-    sample_rate: null
-    needs_fm_demod: true
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      FLEX pager capture from SigIDwiki.
-      Contains center frequency in filename: 929.613 MHz.
-
-  # VDL2 - 6.85 MB (SigIDwiki)
-  # dumpvdl2 supports direct IQ input via --iq-file
-  - id: sigid_vdlm2
+    url: https://www.sigidwiki.com/images/e/ec/FLEX_Pager_IQ_20150816_929613kHz_IQ.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sigidwiki.com/wiki/File:FLEX_Pager_IQ_20150816_929613kHz_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "39062 Hz is below multimon-ng's 48000 Hz capture minimum (insufficient-sample-rate)",
+        "peak level 0.011 FS: wav-to-cu8 without gain leaves about 1.5 LSB of signal",
+      ]
+    notes: "archive sha256 68e84a9b0d435cd0d692200f55de1e25d0ec131c0fd133f93fa3666029be9333 (2470938 B); member 'FLEX Pager IQ 20150816_929613kHz_IQ.wav': s16 IQ WAV, 39062 Hz, 28.099 s, centre 929613000 from the file name only (no metadata chunk); cu8 sha256 3152690901c9bfc472ecc1536cc91d0ecd8005409a115dc9fd7421a74159b355."
+  - id: sigid_vdlm2_iq
     decoder: dumpvdl2
-    protocol: VDL2
-    source_url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
-    format: zip
-    size_mb: 6.85
-    iq_format: cu8
-    sample_rate: null # May be 2.048 MHz, verify from file
-    needs_fm_demod: false
-    dumpvdl2_args:
-      - "--iq-file"
-      - "-"
-      - "--sample-format"
-      - "U8"
-    frequencies:
-      - 136650000
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      VDL Mode 2 aviation data link capture.
-      dumpvdl2 can read IQ directly with --iq-file mode.
-
-  # =============================================================================
-  # MEDIUM FIXTURES (10-50 MB)
-  # =============================================================================
-
-  # SDRangel DSD (YSF) - ~5 MB
-  - id: sdrangel_dsd
-    decoder: dsd-fme
-    protocol: YSF
-    source_url: https://www.sdrangel.org/iq/dsd.zip
-    format: zip
-    size_mb: 5
-    iq_format: s16le # SDRangel typically uses 16-bit
-    sample_rate: 75000 # Listed as "75k" on SDRangel page
-    needs_fm_demod: true
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      Yaesu System Fusion digital voice sample from SDRangel.
-      Listed as 16-bit WAV (IQ wrapper).
-
-  # SDRplay AIS - 16 MB
-  - id: sdrplay_ais
-    decoder: ais-catcher
-    protocol: AIS
-    source_url: https://sdrplay.com/resources/IQ/AIS.zip
-    format: zip
-    size_mb: 16
-    iq_format: wav # SDRuno-style WAV wrapper
-    sample_rate: null
-    needs_fm_demod: false # AIS-catcher handles demod internally
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      AIS ship tracking capture from SDRplay.
-      AIS-catcher can process WAV files directly.
-
-  # =============================================================================
-  # TIER A: WIDEBAND IQ (> 1 Msps) - Recommended for Pipeline Testing
-  # =============================================================================
-
-  # SDRangel ADS-B - 460 MB
-  # 2.4 Msps, 16-bit IQ in WAV wrapper
-  - id: sdrangel_adsb
-    decoder: readsb
-    protocol: ADSB
-    source_url: https://www.sdrangel.org/iq/adsb.zip
-    format: zip
-    size_mb: 460
-    iq_format: wav
-    sample_rate: 2400000
-    needs_conversion: false # readsb might handle --ifile-format
-    expected_output:
-      type: count
-      min_messages: 10
-    notes: |
-      Tier A wideband capture (2.4 Msps).
-      Best known-good public ADS-B IQ recording.
-
-  # SDRplay ACARS - 539 MB
-  # Wideband IQ, likely requires AM demodulation
-  - id: sdrplay_acars
-    decoder: acarsdec
-    protocol: ACARS
-    source_url: https://sdrplay.com/resources/IQ/acars.zip
-    format: zip
-    size_mb: 539
-    iq_format: wav
-    sample_rate: 2000000 # Estimated, verify with soxi
-    needs_am_demod: true
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      Tier A wideband ACARS capture.
-      Requires AM demodulation to audio for acarsdec.
-
-  # =============================================================================
-  # TIER B: NARROWBAND/AUDIO FIXTURES
-  # =============================================================================
-
-  # SigIDwiki ACARS - 3.3 MB (Tier B)
-  # 135k samples/sec, 32-bit float, Stereo IQ
+    url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sigidwiki.com/wiki/File:VDL-M2_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "48000 Hz is not a multiple of 105000 Hz, which dumpvdl2 requires",
+        "centre frequency unknown: no metadata chunk",
+      ]
+    notes: "archive sha256 c81f78a3b59101eaab0e33739c5b8ea58b9c1b30de688b91b527f85c7399c022 (7187114 B); one member 'VDL2 IQ.wav': s16 2-channel WAV, 48000 Hz, 46.9 s, I/Q uncorrelated (complex IQ, not stereo audio); cu8 sha256 3d629c32ea36432535e51b1a6217ae67a56fd4d6cd2f2c3ed1bb18c83df90c16."
   - id: sigid_acars
     decoder: acarsdec
-    protocol: ACARS
-    source_url: https://www.sigidwiki.com/images/0/00/ACARS_IQ.zip
-    format: zip
-    size_mb: 3.3
-    iq_format: f32le
-    sample_rate: 135498
-    needs_am_demod: true
-    expected_output:
-      type: count
-      min_messages: 1
-    notes: |
-      Tier B narrowband ACARS capture.
-      Requires AM demodulation.
-
-  # SigIDwiki VDL2 - 6.85 MB (Audio-rate only)
-  # 48kHz, 16-bit PCM - INVALID for dumpvdl2 direct IQ
-  - id: sigid_vdlm2
-    decoder: dumpvdl2
-    protocol: VDL2
-    source_url: https://www.sigidwiki.com/images/d/df/VDL-M2_IQ.zip
-    format: zip
-    size_mb: 6.85
-    iq_format: wav
-    sample_rate: 48000
-    expected_output:
-      type: none
-    notes: |
-      Audio-rate recording (48kHz). 
-      Too low for dumpvdl2 IQ input (needs >1Msps or integer multiple of 105k).
-      Marked as reference only.
-
-  # =============================================================================
-  # SPECIAL: rtl_433 uses external test repository
-  # =============================================================================
-
-  - id: rtl433_tests_repo
-    decoder: rtl433
-    protocol: various
-    source_url: https://github.com/merbanan/rtl_433_tests.git
-    format: git_repo
-    size_mb: null # Variable, contains many small samples
-    notes: |
-      rtl_433 community test repository with extensive sample coverage.
-      Clone and use specific samples for regression testing.
-
-  # =============================================================================
-  # SPECIAL: direwolf uses gen_packets for deterministic generation
-  # =============================================================================
-
+    url: https://www.sigidwiki.com/images/0/00/ACARS_IQ.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sigidwiki.com/wiki/File:ACARS_IQ.zip states none; the site disclaimer says contributors keep their rights",
+        "f32 WAV at full scale (RMS 0.87): wav-to-cu8 clips 611828 of 938770 samples",
+      ]
+    notes: "archive sha256 de9ace984b89d119fe7434ad9bf8bee19846d20514f95d17447580df2ed39d61 (3496378 B); member acars_IQ.wav: f32 IQ WAV, 135498 Hz, 3.464 s, FREQ chunk centre 131726151 Hz (SignalHound BB60C). Role if licensed: tail-golden."
+  - id: sdrangel_dsd
+    decoder: dsd-fme
+    url: https://www.sdrangel.org/iq/dsd.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sdrangel.org/iq-files/ states none",
+        "content is YSF digital speech (page), not DMR: needs a dsd-fme YSF mode",
+      ]
+    notes: "archive sha256 fdeb3d0831882a4cf6614c6c43567df01a0c94ba4f876bdc9879cf17ebd99797 (3827980 B); member dsd.2021-12-02T16_44_54_046.wav: s16 IQ WAV, 74999 Hz, 15.943 s, auxi centre 145687500 Hz; cu8 sha256 8d7994696efe0adec16f31e1b41bdf669e683289634c1ddbd60792a65f531343. Role if licensed: tail-golden."
+  - id: sdrplay_ais
+    decoder: ais-catcher
+    url: https://sdrplay.com/resources/IQ/ais.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sdrplay.com/iq-demo-files/ (Wayback 20260712032104) states none, only 'for technical evaluation purposes ... as is without support'",
+        "hosting URL returns 404 on 2026-10-09 (AIS.zip and ais.zip); only a Wayback copy (20220402123107) exists",
+        "62500 Hz capture centred on 161985000 covers AIS channel A only",
+      ]
+    notes: "Wayback archive sha256 8acecdb2c5d37255a84182ec7e819f940d0f8c0e002890eb1801f68293fe1807 (16518385 B); member ais/SDRuno_20200907_184926Z_161985kHz.wav: s16 IQ WAV, 62500 Hz, 75.784 s, auxi centre 161985000 Hz, peak 0.084 FS; cu8 sha256 2adfb46443a9e4966acd5444382dc81da098606d19f533aa645f2b106e044906."
+  - id: sdrplay_acars
+    decoder: acarsdec
+    url: https://sdrplay.com/resources/IQ/acars.zip
+    license: null
+    blockers:
+      [
+        "license unverified: https://www.sdrplay.com/iq-demo-files/ (Wayback 20260712032104) states none",
+        "hosting URL returns 404 on 2026-10-09; not downloaded (539 MB Wayback copy only)",
+        "WAV rate and centre unverified",
+      ]
+  - id: lora_meshtastic_placeholder
+    decoder: lora-meshtastic
+    url: null
+    license: null
+    blockers:
+      [
+        "fixtures/lora/meshtastic-sample.cu8 is a 12-byte placeholder",
+        "LoRa is excluded from channelizer migration",
+      ]
   - id: direwolf_generated
     decoder: direwolf
-    protocol: APRS
-    source_url: null # Generated locally
-    format: generated
-    generator: gen_packets
-    notes: |
-      APRS packets generated with gen_packets tool.
-      No download needed - generate deterministic test WAV files.
+    url: null
+    license: null
+    blockers:
+      [
+        "generated locally with direwolf's gen_packets as audio WAV, not IQ: parser-transcript or tail-golden at most",
+        "generator command line and packet list not recorded yet",
+      ]
+    notes: "Kept from v1 (format: generated, generator: gen_packets). The only deterministic APRS source; no download needed."
+  # Demoted from fixtures at the 2026-10-10 quiet-host record: decodes 0 on the raw path.
+  - id: rtl433_olympia_9571_2048k
+    decoder: rtl433
+    url: https://raw.githubusercontent.com/merbanan/rtl_433_tests/1aa8c29d6b9383739d1aeed495dbc5069b704392/tests/olympia/9571/door_open_4ddf3b_868.4M_2048k.cu8
+    license: null
+    blockers:
+      [
+        "no Olympia-9571 decoder in rtl_433: absent from `-R help` in the image build (202605052147, 283/320 registered) and in rtl_433 25.12; `rtl_433 -r cu8:<file> -s 2048000` alone yields 0 events (2026-10-10)",
+        "license unstated (fetched from origin; not redistributed; local test use only)",
+      ]
+    notes: "rtl_433_tests sample; upstream .json: Olympia-9571 id 5103419 state open (x2). cu8, 2048000 Hz, centre 868400000, 0.128 s; sha256 2465b4a547cef2926547de13d6f72fb127791af0e01b434223d9b59bfb35e62d. Promote back (tail-golden) once rtl_433 ships the decoder."

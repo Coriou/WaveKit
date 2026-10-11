@@ -282,6 +282,29 @@ docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
   wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs
 ```
 
+**IQ mode (core channelizer).** With `--iq` the same check is fed from a cu8
+capture instead of the discriminator output (`scripts/dsd-fme-voice-iq.mjs`):
+
+```bash
+docker run --rm --network none --entrypoint node -v "$PWD:/w:ro" \
+  wavekit:local-core /w/scripts/dsd-fme-voice-ab.mjs \
+  --iq <capture.cu8> --rate <fs> --offset <hz> --front csdr|chan \
+  [--chan-bin wavekit-chan] [--unpaced]
+```
+
+`--offset` is the signal's offset from the capture centre (run 8: 6000).
+`--front csdr` runs the decoder's raw front (convert, shift, matched
+firdecimate, fmdemod, then the back chain). `--front chan` runs the csdr front
+first as the reference, then `wavekit-chan` (one 48 kHz cf32 channel at
+capture centre + offset, 12 500 / 6 250 Hz, as the channelised decoder
+requests it) into fmdemod and the back chain. Both fronts run the three-way
+check above. The chan front must also decode the same TGT/SRC lines as the
+csdr front, and its AMBE errors must not exceed max(1.25 x csdr, csdr + 20).
+That tolerance is provisional until the user confirms it. The chan front feeds
+the capture at real time (2 bytes per sample, `--unpaced` to disable) and fails
+on any discontinuity, on a channel closed before `input-eof`, or on an
+`input-eof` that does not count every fed byte.
+
 The `-o udp` A/B regression suspected on 2026-10-09 (runs 6 and 7) was ruled
 out: offline, every input path decoded identically with voice on and off, and
 the run 9 live A/B on a clean channel matched exactly. Run 7 had co-channel

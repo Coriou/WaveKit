@@ -26,11 +26,13 @@ import { shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
 import {
 	channelDecimationStage,
+	channelFilterPlan,
 	deemphasisStage,
 	shiftStage,
 	validateChannelOffset,
 } from "./csdr-stages.js"
 import { BaseDecoder } from "./base-decoder.js"
+import { readChannelHz } from "./iq-decimate-decoder.js"
 import { configuredBandRequirements } from "./status-fields.js"
 import type {
 	DecoderBandDeclaration,
@@ -41,6 +43,10 @@ import type {
 	DecoderRateRequirements,
 	DemodulationConfig,
 } from "./types.js"
+import type {
+	DecoderChannelRequest,
+	DecoderChannelRequestResult,
+} from "../core/channelizer/types.js"
 import type { Logger } from "../utils/logger.js"
 
 /** Debug recording options for capturing audio at pipeline stages */
@@ -101,6 +107,37 @@ export function audioDemodRateAdapter(
 		decoderInputKind: "audio_pcm",
 		decoderInputRateHz: stdin.rateHz,
 		decoderInputFormat: stdin.format,
+	}
+}
+
+/**
+ * Addendum §2 request for the cf32 audio tail at the exact demod rate. Pure.
+ * An explicit filterTransition keeps the plan formula relative to the output
+ * rate (plan A11); otherwise the passband is the one the raw path's matched
+ * firdecimate realises (channelFilterPlan), so the two cannot disagree.
+ */
+export function audioChannelRequest(
+	config: DemodulationConfig,
+	input: { sampleRateHz: number; centerHz?: number },
+): DecoderChannelRequest {
+	const outputRateHz = config.demodSampleRate ?? config.sampleRate
+	let bandwidthHz: number
+	let transitionHz: number
+	if (config.filterTransition !== undefined) {
+		const t = config.filterTransition
+		bandwidthHz = outputRateHz * (1 - t)
+		transitionHz = (outputRateHz * t) / 2
+	} else {
+		const p = channelFilterPlan(outputRateHz, 1, config.bandwidth)
+		bandwidthHz = 2 * p.passbandHz
+		transitionHz = p.stopbandHz - p.passbandHz
+	}
+	return {
+		centerHz: config.channelHz ?? input.centerHz ?? 0,
+		bandwidthHz,
+		transitionHz,
+		outputRateHz,
+		format: "cf32",
 	}
 }
 
@@ -182,6 +219,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 	/** Debug recording options if enabled */
 	protected debugRecording?: DebugRecordingOptions
 	private invalidOffsetLogged = false
+	private channelOverridesOffsetLogged = false
+	private unknownCentreLogged = false
 
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
@@ -275,17 +314,87 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		return 0
 	}
 
+	/** Migration flag (addendum §7): flipped per decoder by Task 31. */
+	protected channelizerSupported(): boolean {
+		return false
+	}
+
+	/** The manager injects `inputIqFormat: "cf32"` when it feeds channel IQ. */
+	protected inputIsChannelIq(): boolean {
+		return this.config.options["inputIqFormat"] === "cf32"
+	}
+
+	getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		if (!this.channelizerSupported()) return undefined
+		const config = this.getDemodConfig()
+		const channelHz = this.resolveChannelHz(
+			config.channelHz ?? readChannelHz(this.config.options),
+			input,
+		)
+		return audioChannelRequest({ ...config, channelHz }, input)
+	}
+
+	/**
+	 * Channel centre (delta E7): an explicit channelHz wins; otherwise
+	 * offsetHz is absorbed as capture centre + offsetHz, which follows
+	 * retunes because every caps change recomputes the request. Undefined
+	 * (offset 0) when the capture centre is unknown. `source` names where an
+	 * explicit centre came from, for the override warning.
+	 */
+	protected resolveChannelHz(
+		channelHz: number | undefined,
+		input: { centerHz?: number },
+		source = "channelHz",
+	): number | undefined {
+		const offsetHz = this.getOffsetHz()
+		if (channelHz !== undefined) {
+			if (offsetHz !== 0 && !this.channelOverridesOffsetLogged) {
+				this.channelOverridesOffsetLogged = true
+				this.logger.warn(
+					{ channelHz, offsetHz, source },
+					"The channel centre overrides offsetHz",
+				)
+			}
+			return channelHz
+		}
+		if (input.centerHz === undefined) {
+			if (!this.unknownCentreLogged) {
+				this.unknownCentreLogged = true
+				this.logger.info(
+					{ offsetHz },
+					"No channelHz and no capture centre; requesting offset 0",
+				)
+			}
+			return undefined
+		}
+		return input.centerHz + offsetHz
+	}
+
 	/**
 	 * Front of every IQ-to-audio chain: U8 IQ → float, optional shift of
 	 * offsetHz to DC, then the decimating channel filter. An explicit
 	 * filterTransition keeps the legacy firdecimate; otherwise the filter is
 	 * matched to the channel bandwidth (see csdr-stages.ts).
+	 *
+	 * Channel IQ (cf32) arrives float, centred and at the demod rate, so all
+	 * three stages are null: no offset check either, as a shift would move
+	 * the centred channel twice (delta E8).
 	 */
 	protected buildIqFrontStages(
 		config: DemodulationConfig,
 		inputSampleRate: number,
 		decimation: number,
-	): { convert: string; shift: string | null; decimate: string } {
+	): {
+		convert: string | null
+		shift: string | null
+		decimate: string | null
+	} {
+		if (this.inputIsChannelIq()) {
+			return { convert: null, shift: null, decimate: null }
+		}
 		const offsetHz = this.getOffsetHz()
 		if (offsetHz !== 0) {
 			validateChannelOffset(offsetHz, inputSampleRate, config.bandwidth)
@@ -388,7 +497,8 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 		// 9. Limit amplitude to prevent clipping (real)
 
 		const front = this.buildIqFrontStages(config, inputSampleRate, decimation)
-		const csdrStages: string[] = [front.convert] // U8 IQ -> complex float
+		const csdrStages: string[] = []
+		if (front.convert) csdrStages.push(front.convert) // U8 IQ -> complex float
 		if (front.shift) csdrStages.push(front.shift) // offsetHz -> DC
 
 		// Optional IQ-level AGC - applied BEFORE decimation and FM demod
@@ -399,7 +509,7 @@ export abstract class AudioDemodDecoder extends BaseDecoder {
 			csdrStages.push("csdr agc -f complex -p slow -r 0.7")
 		}
 
-		csdrStages.push(front.decimate) // Decimate + filter (complex)
+		if (front.decimate) csdrStages.push(front.decimate) // Decimate + filter (complex)
 
 		if (config.modulation === "am") {
 			csdrStages.push(

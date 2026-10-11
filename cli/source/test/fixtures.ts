@@ -141,3 +141,147 @@ export function scenarioState(
 	const { items, now } = scenarioInbound(loadScenario(name))
 	return reduce(initialState(now - WINDOW_MS - 1000), items, now, deps)
 }
+
+/** Accepted S1 wire examples used by guards, state and render regressions. */
+export const SCAN_FRAME = {
+	sourceId: "rtl",
+	profile: "5:512",
+	epoch: 4,
+	tuningTrust: "commanded" as const,
+	centerHz: 446000000,
+	sampleRateHz: 2048000,
+	startHz: 445180800,
+	binHz: 6400,
+	nativeBinHz: 1000,
+	binCount: 256,
+	bins: Buffer.from(
+		Array.from({ length: 256 }, (_, i) => (i === 128 ? 180 : 60)),
+	).toString("base64"),
+	binEncoding: "u8-halfdb-127.5" as const,
+	floorDbfs: -92.5,
+	thresholdDb: 9.2,
+	tracks: [
+		{
+			startHz: 446000000,
+			endHz: 446012500,
+			flags: { burst: false, iqImage: false, edge: false },
+		},
+	],
+	masks: { dcHz: 446000000, dcGuardHz: 1500, spurRanges: [] },
+	at: "2026-10-11T12:00:00Z",
+}
+export const SCAN_PROFILE = {
+	selection: "source" as const,
+	sourceId: "rtl",
+	profile: { key: "5:512", hz: 5, bins: 512 },
+	effectiveHz: 5,
+	outcome: "exact" as const,
+	adjusted: [],
+}
+export const SCAN_STATUS = {
+	enabled: true,
+	channelizerAvailable: false,
+	disk: "ok",
+	jobs: { active: 1, total: 1 },
+	budgets: {
+		cpuBudgetCores: 1,
+		cpuCoresInUse: 0.5,
+		maxProbes: { offset: 1, channel: 4 },
+		probesInUse: { offset: 0, channel: 0 },
+	},
+	cpuGuard: { percent: null, limitPercent: 90, source: "os" },
+	engines: [
+		{
+			sourceId: "rtl",
+			state: "running",
+			passive: { enabled: true },
+			blankedFrames: 0,
+			broadbandRfi: null,
+		},
+	],
+}
+export const SCAN_JOB = {
+	id: "job1",
+	name: "Existing identify",
+	state: "completed",
+	passive: false,
+	spec: { sourceId: "rtl", kind: "identify", mode: "in-window" },
+	unrestorable: ["gain"],
+	createdAt: "2026-10-11T12:00:00Z",
+	updatedAt: "2026-10-11T12:00:01Z",
+	progress: {
+		sweepIndex: 0,
+		hopIndex: 0,
+		hopCount: 0,
+		coverage: 0,
+		probes: [],
+	},
+	identify: {
+		targets: [
+			{
+				jobId: "job1",
+				targetHz: 446000000,
+				state: "unidentified",
+				trials: [
+					{
+						protocol: "ism",
+						decoder: "rtl433",
+						mode: null,
+						transport: null,
+						outcome: "unsupported",
+						reason: "needs-channelizer",
+					},
+				],
+				result: {
+					confidence: "activity",
+					metadata: {
+						talkgroups: [],
+						sources: [],
+						slots: [],
+						callsigns: [],
+						capcodes: [],
+						ismModels: [],
+					},
+					measurements: {
+						source: "spectrum",
+						centreHz: 446000000,
+						obwHz: null,
+						peakDbfs: null,
+						snrDb: null,
+						floorDbfs: null,
+						dutyCycle: null,
+						class: "unknown",
+					},
+				},
+			},
+		],
+	},
+}
+export const SCAN_DISCOVERY = {
+	id: "disc1",
+	frequencyHz: 446056250,
+	bandwidthHz: 12500,
+	protocol: "dmr",
+	confidence: "decoded",
+	encrypted: false,
+	identity: { kind: "dmr-cc", value: "1" },
+	tuningTrust: "commanded",
+	lastSeenAt: "2026-10-11T12:00:00Z",
+	observationCount: 2,
+	airtimeMs: 300,
+	sourceIds: ["rtl"],
+	jobIds: ["job1"],
+	signal: {
+		best: { peakDbfs: -40, meanDbfs: -45, snrDb: 30, floorDbfs: -90 },
+		last: { peakDbfs: -41, meanDbfs: -46, snrDb: 29, floorDbfs: -90 },
+	},
+	metadata: {
+		talkgroups: ["9"],
+		sources: ["2060945"],
+		slots: [1],
+		callsigns: [],
+		capcodes: [],
+		ismModels: [],
+	},
+	evidence: { recordings: 0, psd: true, iq: false },
+}

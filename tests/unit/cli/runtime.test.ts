@@ -1,3 +1,4 @@
+import { createCliFetch } from "../../../cli/source/data/access-transport.js"
 import fc from "fast-check"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { FetchLike } from "../../../cli/source/data/config.js"
@@ -8,6 +9,7 @@ import {
 	POLL_MS,
 	BACKGROUND_EVENTS,
 	createRuntime,
+	nodeRuntimeDeps,
 	isUrgent,
 	type Timers,
 } from "../../../cli/source/data/runtime.js"
@@ -68,6 +70,7 @@ describe("runtime", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -116,6 +119,7 @@ describe("runtime", () => {
 					const ws = wsFake()
 					const rt = createRuntime({
 						fetchFn: never,
+						probeFetchFn: never,
 						wsFactory: ws.factory,
 						now: () => Date.now(),
 						random: () => 0.5,
@@ -153,6 +157,7 @@ describe("runtime", () => {
 		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -205,6 +210,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -245,6 +251,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -292,6 +299,7 @@ describe("runtime", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -318,6 +326,7 @@ describe("runtime", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -348,6 +357,7 @@ describe("runtime", () => {
 		)
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -406,6 +416,7 @@ describe("poll cycles (R47 M1, M2)", () => {
 		const held = heldFetch()
 		const rt = createRuntime({
 			fetchFn: held.fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -437,6 +448,7 @@ describe("poll cycles (R47 M1, M2)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: held.fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -530,6 +542,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore()
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -571,6 +584,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore(20_000)
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -604,6 +618,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		)
 		const rt = createRuntime({
 			fetchFn: () => Promise.reject(new DOMException("t", "TimeoutError")),
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -622,6 +637,7 @@ describe("rediscovery (fix round 1, Critical)", () => {
 		const core = flakyCore()
 		const rt = createRuntime({
 			fetchFn: core.fetchFn,
+			probeFetchFn: never,
 			wsFactory: core.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -654,6 +670,7 @@ describe("R55 runtime follow-ups", () => {
 	const make = (fetchFn: FetchLike, ws = wsFake()) =>
 		createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -744,6 +761,7 @@ describe("R55 follow-ups fix", () => {
 	const make = (fetchFn: FetchLike, ws = wsFake()) =>
 		createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -837,6 +855,7 @@ describe("R55 follow-ups fix", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -870,6 +889,7 @@ describe("R55 follow-ups fix", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -906,6 +926,7 @@ describe("background items wait for the whole second (D3)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1022,6 +1043,7 @@ describe("background items wait for the whole second (D3)", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn: never,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1079,6 +1101,7 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1106,6 +1129,7 @@ describe("final M2: REST answers a user waits on are urgent", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1147,6 +1171,7 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		const ws = wsFake()
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: ws.factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1187,6 +1212,7 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		}
 		const rt = createRuntime({
 			fetchFn,
+			probeFetchFn: never,
 			wsFactory: wsFake().factory,
 			now: () => Date.now(),
 			random: () => 0.5,
@@ -1205,3 +1231,553 @@ describe("R98: failed resync endpoints retry once REST recovers", () => {
 		rt.stop()
 	})
 })
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("CLI access transport wiring", () => {
+	it("uses only the required probe transport for discovery and REST only after adoption", async () => {
+		const fetchFn = vi.fn<FetchLike>(url => okJson(bodies(url)))
+		const probeFetchFn = vi.fn<FetchLike>(() => okJson({ status: "ok" }))
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn,
+			wsFactory: wsFake().factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: null,
+		})
+		rt.start()
+		await vi.advanceTimersByTimeAsync(FLUSH_MS)
+		expect(probeFetchFn.mock.calls.map(c => c[0])).toEqual([
+			"http://127.0.0.1:9000/health",
+		])
+		expect(fetchFn.mock.calls.length).toBeGreaterThan(0)
+		expect(fetchFn.mock.calls.every(c => !c[0].endsWith("/health"))).toBe(true)
+		rt.stop()
+	})
+	it("node dependencies keep injected protected transports separate from credential-free probes", async () => {
+		const native = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			new Response(JSON.stringify({ status: "ok", private: "discard" }), {
+				status: 503,
+			}),
+		)
+		const fetchFn = vi.fn<FetchLike>(() => okJson([]))
+		const wsFactory = wsFake().factory
+		try {
+			const deps = nodeRuntimeDeps(TARGET, PLAIN_SUMMARY.summarize, {
+				fetchFn,
+				wsFactory,
+			})
+			expect(deps.fetchFn).toBe(fetchFn)
+			expect(deps.wsFactory).toBe(wsFactory)
+			expect(
+				await (await deps.probeFetchFn(`${TARGET.base}/health`)).json(),
+			).toEqual({ status: "ok" })
+			expect(native.mock.calls[0]?.[1]).toMatchObject({
+				headers: {},
+				redirect: "error",
+				credentials: "omit",
+			})
+			expect(fetchFn).not.toHaveBeenCalled()
+		} finally {
+			native.mockRestore()
+		}
+	})
+	it.each([401, 403])(
+		"REST %s is an answered server and explicit access never migrates",
+		async status => {
+			const discover = vi.fn(async () => ({ target: null, tried: [] }))
+			const fetchFn = createCliFetch({
+				fetch: async () =>
+					new Response(JSON.stringify({ message: "untrusted message" }), {
+						status,
+					}),
+			})
+			const ws = wsFake()
+			const rt = createRuntime({
+				fetchFn,
+				probeFetchFn: never,
+				wsFactory: ws.factory,
+				now: () => Date.now(),
+				random: () => 0.5,
+				timers: fakeTimers,
+				summarize: PLAIN_SUMMARY.summarize,
+				explicit: TARGET,
+				discover,
+			})
+			rt.start()
+			ws.sockets[0]!.accessBlocked?.(
+				status === 401 ? "unauthorized" : "forbidden",
+			)
+			await vi.advanceTimersByTimeAsync(40_000)
+			expect(discover).not.toHaveBeenCalled()
+			expect(rt.store.get().conn.rest.failing).toContain("status")
+			expect(rt.store.get().status.error).toMatchObject({
+				kind: "http",
+				status,
+				message: `HTTP ${status}`,
+			})
+			expect(rt.store.get().conn.ws.nextRetryAt).toBeNull()
+			rt.stop()
+		},
+	)
+})
+
+describe("Scan runtime bounded demand and generations", () => {
+	it("coalesces high-rate frames, refetches after reconnect and releases demand on stop", async () => {
+		const { SCAN_FRAME, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const sent: string[] = [],
+			handlers: WsHandlers[] = []
+		const rt = createRuntime({
+			fetchFn: never,
+			probeFetchFn: never,
+			wsFactory: (_url, h) => {
+				handlers.push(h)
+				return { send: s => sent.push(s), close: () => undefined }
+			},
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		const h = handlers[0]!
+		h.open()
+		h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		h.message(
+			JSON.stringify({
+				type: "spectrum:profile",
+				channel: "spectrum",
+				data: SCAN_PROFILE,
+			}),
+		)
+		for (let i = 0; i < 1000; i++)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: { ...SCAN_FRAME, epoch: i === 999 ? 2 : 4 },
+				}),
+			)
+		for (let i = 0; i < 1000; i++)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: {},
+				}),
+			)
+		rt.tick()
+		expect(rt.store.get().scan.invalidFrames).toBe(1000)
+		expect(rt.store.get().scan.rows).toHaveLength(1)
+		expect(rt.store.get().scan.rows[0]?.frame.epoch).toBe(2)
+		rt.setScanDemand({ sourceId: "other", cursor: null, detail: null })
+		h.message(
+			JSON.stringify({
+				type: "spectrum:frame",
+				channel: "spectrum",
+				data: SCAN_FRAME,
+			}),
+		)
+		rt.tick()
+		expect(rt.store.get().scan.rows).toHaveLength(0)
+		rt.reconnect()
+		const next = handlers[1]!
+		next.open()
+		next.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+		expect(sent.at(-1)).toContain('"sourceId":"other"')
+		rt.setScanDemand(null)
+		expect(JSON.parse(sent.at(-1)!)).toEqual({
+			type: "unsubscribe",
+			channels: ["scanner", "spectrum"],
+		})
+		rt.stop()
+	})
+	it("drops delayed old-source/detail reads and caps same-path request cadence", async () => {
+		const { SCAN_DISCOVERY, SCAN_JOB, SCAN_STATUS, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake(),
+			urls: string[] = [],
+			signals: AbortSignal[] = []
+		let resolveOld: ((r: Response) => void) | undefined
+		const fetchFn: FetchLike = (url, init) => {
+			if (!url.includes("/scanner") && !url.includes("/spectrum"))
+				return never(url, init)
+			urls.push(url)
+			signals.push(init!.signal!)
+			if (url.includes("sourceId=rtl"))
+				return new Promise<Response>(r => {
+					resolveOld = r
+				})
+			const body = url.endsWith("/api/scanner")
+				? SCAN_STATUS
+				: url.endsWith("/api/spectrum")
+					? { defaultProfile: SCAN_PROFILE.profile, sources: [] }
+					: url.endsWith("/jobs")
+						? [SCAN_JOB]
+						: url.includes("/jobs/")
+							? SCAN_JOB
+							: { items: [], nextCursor: null }
+			return Promise.resolve(new Response(JSON.stringify(body)))
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		rt.tick()
+		await vi.advanceTimersByTimeAsync(200)
+		rt.setScanDemand({
+			sourceId: "other",
+			cursor: null,
+			detail: { kind: "job", id: "job1" },
+		})
+		rt.tick()
+		expect(signals[0]?.aborted).toBe(true)
+		resolveOld?.(
+			new Response(
+				JSON.stringify({ items: [SCAN_DISCOVERY], nextCursor: null }),
+			),
+		)
+		await vi.advanceTimersByTimeAsync(200)
+		expect(rt.store.get().scan.lanes.discoveries.value?.items).toEqual([])
+		rt.setScanDemand({
+			sourceId: "other",
+			cursor: null,
+			detail: { kind: "job", id: "job2" },
+		})
+		rt.tick()
+		await vi.advanceTimersByTimeAsync(200)
+		expect(urls.filter(u => u.endsWith("/api/scanner"))).toHaveLength(2) // one per source generation, not per detail
+		rt.setScanDemand(null)
+		rt.stop()
+	})
+})
+
+it.each(["status", "spectrum"] as const)(
+	"fences pre-admission %s fatal REST while applying post-admission failure",
+	async key => {
+		const { SCAN_STATUS, SCAN_PROFILE, SCAN_FRAME } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake()
+		const path = key === "status" ? "/api/scanner" : "/api/spectrum"
+		const fatal =
+			key === "status"
+				? {
+						...SCAN_STATUS,
+						engines: [
+							{
+								...SCAN_STATUS.engines[0]!,
+								sourceId: "rtl",
+								state: "error",
+								lastError: "fatal",
+							},
+						],
+					}
+				: {
+						defaultProfile: SCAN_PROFILE.profile,
+						sources: [
+							{
+								sourceId: "rtl",
+								eligible: true,
+								engine: "error",
+								tuningTrust: null,
+								lastError: "fatal",
+							},
+						],
+					}
+		let pending: ((r: Response) => void) | undefined,
+			first = true
+		const fetchFn: FetchLike = (url, init) => {
+			if (url.endsWith(path)) {
+				if (first) {
+					first = false
+					return new Promise<Response>(r => {
+						pending = r
+					})
+				}
+				return Promise.resolve(new Response(JSON.stringify(fatal)))
+			}
+			if (url.includes("/api/scanner") || url.includes("/api/spectrum"))
+				return Promise.resolve(
+					new Response(
+						JSON.stringify(
+							url.endsWith("/api/scanner")
+								? SCAN_STATUS
+								: url.endsWith("/api/spectrum")
+									? { defaultProfile: SCAN_PROFILE.profile, sources: [] }
+									: url.endsWith("/jobs")
+										? []
+										: { items: [], nextCursor: null },
+						),
+					),
+				)
+			return never(url, init)
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			rt.tick()
+			expect(pending).toBeDefined()
+			h.message(
+				JSON.stringify({
+					type: "spectrum:profile",
+					channel: "spectrum",
+					data: SCAN_PROFILE,
+				}),
+			)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: SCAN_FRAME,
+				}),
+			)
+			rt.tick()
+			pending!(new Response(JSON.stringify(fatal)))
+			await vi.advanceTimersByTimeAsync(200)
+			expect(rt.store.get().scan.profile?.sourceId).toBe("rtl")
+			expect(rt.store.get().scan.rows).toHaveLength(1)
+			await vi.advanceTimersByTimeAsync(5000)
+			expect(rt.store.get().scan.phase).toBe("error")
+			expect(rt.store.get().scan.profile).toBeNull()
+			expect(rt.store.get().scan.rows).toHaveLength(0)
+		} finally {
+			rt.stop()
+		}
+	},
+)
+
+it.each(["timeout", "source", "detail", "stop"] as const)(
+	"cancels exactly once a late Scan body after %s and never commits it",
+	async why => {
+		const ws = wsFake(),
+			cancel = vi.fn(() =>
+				why === "detail"
+					? Promise.reject(new Error("cancel rejected"))
+					: undefined,
+			),
+			json = vi.fn()
+		let late: ((r: Awaited<ReturnType<FetchLike>>) => void) | undefined
+		const fetchFn: FetchLike = (url, init) =>
+			url.includes("/discoveries?")
+				? new Promise(r => {
+						late = r
+					})
+				: never(url, init)
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		rt.start()
+		rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+		rt.tick()
+		expect(late).toBeDefined()
+		const resolve = late!
+		if (why === "timeout") await vi.advanceTimersByTimeAsync(2100)
+		else if (why === "source")
+			rt.setScanDemand({ sourceId: "other", cursor: null, detail: null })
+		else if (why === "detail")
+			rt.setScanDemand({
+				sourceId: "rtl",
+				cursor: null,
+				detail: { kind: "job", id: "j" },
+			})
+		else rt.stop()
+		const body = new ReadableStream<Uint8Array>({ cancel })
+		resolve({ ok: true, status: 200, statusText: "OK", body, json })
+		await vi.advanceTimersByTimeAsync(200)
+		expect(cancel).toHaveBeenCalledTimes(1)
+		expect(json).not.toHaveBeenCalled()
+		expect(rt.store.get().scan.lanes.discoveries.value).toBeNull()
+		rt.stop()
+	},
+)
+
+it.each(["profile-first", "source-first"] as const)(
+	"admits requestedB after old servedA removal (%s) and continues REST reads",
+	async order => {
+		const { SCAN_PROFILE, SCAN_FRAME } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake(),
+			reads: string[] = []
+		const fetchFn: FetchLike = (url, init) => {
+			if (url.includes("/api/scanner") || url.includes("/api/spectrum")) {
+				reads.push(url)
+				return Promise.resolve(
+					new Response(
+						JSON.stringify(
+							url.endsWith("/jobs") ? [] : { items: [], nextCursor: null },
+						),
+					),
+				)
+			}
+			return never(url, init)
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "A", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			const event = (type: string, data: unknown) =>
+				h.message(
+					JSON.stringify({
+						type,
+						channel: type.startsWith("source:") ? "sources" : "spectrum",
+						data,
+					}),
+				)
+			event("spectrum:profile", { ...SCAN_PROFILE, sourceId: "A" })
+			event("spectrum:frame", { ...SCAN_FRAME, sourceId: "A" })
+			rt.tick()
+			expect(rt.store.get().scan.rows).toHaveLength(1)
+			rt.setScanDemand({ sourceId: "B", cursor: null, detail: null })
+			const removal = () =>
+				event("spectrum:profile", {
+					selection: "none",
+					sourceId: null,
+					profile: null,
+					effectiveHz: null,
+					outcome: "removed",
+					adjusted: [],
+					removedSourceId: "A",
+					code: "SPECTRUM_SOURCE_REMOVED",
+				})
+			const source = () => event("source:removed", { sourceId: "A" })
+			if (order === "profile-first") {
+				removal()
+				source()
+			} else {
+				source()
+				removal()
+			}
+			rt.tick()
+			expect(rt.store.get().scan.sourceId).toBe("B")
+			expect(rt.store.get().scan.phase).toBe("negotiating")
+			expect(rt.store.get().scan.rows).toHaveLength(0)
+			event("spectrum:profile", { ...SCAN_PROFILE, sourceId: "B" })
+			event("spectrum:frame", { ...SCAN_FRAME, sourceId: "B" })
+			rt.tick()
+			expect(rt.store.get().scan.profile?.sourceId).toBe("B")
+			expect(rt.store.get().scan.rows[0]?.frame.sourceId).toBe("B")
+			await vi.advanceTimersByTimeAsync(200)
+			const before = reads.length
+			await vi.advanceTimersByTimeAsync(5200)
+			expect(reads.length).toBeGreaterThan(before)
+			expect(rt.store.get().scan.phase).toBe("waiting")
+		} finally {
+			rt.stop()
+		}
+	},
+)
+
+it.each([0, 10000])(
+	"admits signed unverified Spectrum history at centre%s",
+	async centerHz => {
+		const { SCAN_FRAME, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn: never,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			h.message(
+				JSON.stringify({
+					type: "spectrum:profile",
+					channel: "spectrum",
+					data: SCAN_PROFILE,
+				}),
+			)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: {
+						...SCAN_FRAME,
+						centerHz,
+						startHz: centerHz - 819500,
+						binHz: 4000,
+						binCount: 410,
+						bins: Buffer.from(new Uint8Array(410).fill(70)).toString("base64"),
+						tuningTrust: "unverified",
+						tracks: [
+							{
+								startHz: -50500,
+								endHz: -40500,
+								flags: { burst: false, iqImage: false, edge: false },
+							},
+						],
+						masks: {
+							dcHz: centerHz,
+							dcGuardHz: 1500,
+							spurRanges: [{ startHz: -30500, endHz: -20500 }],
+						},
+					},
+				}),
+			)
+			rt.tick()
+			const row = rt.store.get().scan.rows[0]!
+			expect(row.frame.startHz).toBe(centerHz - 819500)
+			expect(row.frame.tuningTrust).toBe("unverified")
+			expect(row.frame.tracks[0]?.startHz).toBe(-50500)
+			expect(row.frame.masks.spurRanges[0]?.startHz).toBe(-30500)
+			expect(row.bins).toHaveLength(410)
+			expect(rt.store.get().scan.invalidFrames).toBe(0)
+		} finally {
+			rt.stop()
+		}
+	},
+)

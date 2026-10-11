@@ -1,3 +1,5 @@
+import type { ScanEvent } from "./scanner-guards.js"
+import type { ScanState } from "./scan-state.js"
 import type {
 	AircraftState,
 	AircraftTrackerStats,
@@ -237,6 +239,7 @@ export interface WsCommandSentEvent {
 	sourceId: string
 	command: string
 	value: unknown
+	origin?: "rest" | "scanner" | "replay"
 }
 export interface WsControlModeEvent {
 	type: "tuner:control-mode-changed"
@@ -245,6 +248,9 @@ export interface WsControlModeEvent {
 }
 
 export type WsEvent =
+	| ScanEvent
+	| { type: "decoder:created"; decoder: DecoderRow }
+	| { type: "decoder:removed"; decoderId: string }
 	| { type: "subscribed"; channels: string[] }
 	| { type: "unsubscribed"; channels: string[] }
 	| { type: "server-error"; message: string }
@@ -527,6 +533,7 @@ export interface Effects {
 }
 
 export interface AppState {
+	scan: ScanState
 	conn: ConnState
 	sources: Lane<SourceRow[]>
 	metrics: Record<string, MetricBeat>
@@ -606,7 +613,7 @@ export type Inbound =
 	| { kind: "ws:connecting"; at: number; attempt: number }
 	| { kind: "ws:open"; at: number }
 	| WsCloseInbound
-	| { kind: "ws:invalid"; at: number }
+	| { kind: "ws:invalid"; at: number; scan?: true }
 	| TargetInbound
 	| ActionSentInbound
 	| ActionResultInbound

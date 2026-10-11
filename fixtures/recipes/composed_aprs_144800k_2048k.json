@@ -1,0 +1,48 @@
+{
+	"id": "composed_aprs_144800k_2048k",
+	"description": "The CC0 sdr-flex APRS render (two AX.25 UI frames, FM 3 kHz deviation) moved to 144.800 MHz (APRS, IARU Region 1) and repeated every 3 s.",
+	"sampleRate": 2048000,
+	"centerHz": 145200000,
+	"durationS": 12,
+	"seed": 14481,
+	"noiseDbfs": -32,
+	"dcSpikeDbfs": -38,
+	"iqImage": {
+		"rejectionDb": 35,
+		"phaseDeg": 8
+	},
+	"sources": [
+		{
+			"id": "sdrflex_aprs_afsk1200",
+			"url": "https://raw.githubusercontent.com/livethisdream/sdr-flex/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/aprs-afsk1200/capture.sigmf-data",
+			"sha256": "5daaefffdc1eae810d3928979b8d19a0da28cf25760fd4cfb1131b9e11d3dc21",
+			"format": "cu8",
+			"sampleRate": 96000,
+			"centerHz": 144390000,
+			"license": "CC0-1.0",
+			"attribution": "livethisdream/sdr-flex fixtures/aprs-afsk1200 @ ded403a (synthetic, SigMF core:license CC0-1.0).",
+			"origin": "https://github.com/livethisdream/sdr-flex/tree/ded403a043d10ca4c4dd629219853638db6f9450/fixtures/aprs-afsk1200"
+		}
+	],
+	"components": [
+		{
+			"name": "aprs_144800k",
+			"source": "sdrflex_aprs_afsk1200",
+			"offsetHz": -400000,
+			"levelDb": -15,
+			"startS": 0.5,
+			"repeatEveryS": 3.0,
+			"rampS": 0.005,
+			"expected": [
+				{
+					"source": "N0CALL",
+					"destination": "APRS"
+				},
+				{
+					"source": "KC1ABC",
+					"destination": "APRS"
+				}
+			]
+		}
+	]
+}

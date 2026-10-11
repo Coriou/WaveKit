@@ -172,7 +172,7 @@ describe("footer", () => {
 			"↑↓ select decoder  Enter open  r reconnect  q quit  ? help",
 		)
 		expect(lineText(footerLine({ ...base, heightClass: "compact" }, 79))).toBe(
-			"Overview · 1-5 views  ↑↓ select  Enter open  r reconnect  q quit  ? help",
+			"Overview · 1-6 views  ↑↓ select  Enter open  r reconnect  q quit  ? help",
 		)
 		const d = {
 			...base,
@@ -384,5 +384,34 @@ describe("design polish: S5 external-control notice", () => {
 	it("final review: quoted server text never hides a hint", () => {
 		const out = footer('restart failed · 502 · "c take control"', 119)
 		expect(out).toContain('"c take control"  c take control')
+	})
+})
+
+it("sixth view is read-only and scanner-owned decoder keys are suppressed", () => {
+	expect(resolveKey(base, "6")).toEqual({ type: "view", view: "scan" })
+	const scan = { ...base, view: "scan" as const }
+	for (const key of ["a", "x", "i", "c", "R"])
+		expect(resolveKey(scan, key)).toBeUndefined()
+	const probe = {
+		...base,
+		view: "decoders" as const,
+		v: {
+			...base.v,
+			hasSelection: true,
+			decoderOwned: true,
+			decoderPinned: true,
+		},
+	}
+	for (const running of [false, true])
+		for (const key of ["s", "x", "R", "u"])
+			expect(
+				resolveKey(
+					{ ...probe, v: { ...probe.v, decoderRunning: running } },
+					key,
+				),
+			).toBeUndefined()
+	expect(resolveKey({ ...scan, confirm: "tuner" }, "6")).toBeUndefined()
+	expect(resolveKey({ ...scan, help: true }, "d")).toEqual({
+		type: "help-close",
 	})
 })

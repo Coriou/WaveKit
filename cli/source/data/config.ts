@@ -30,36 +30,37 @@ export type FetchLike = (
 	ok: boolean
 	status: number
 	statusText: string
+	headers?: { get(name: string): string | null }
+	body?: ReadableStream<Uint8Array> | null
 	json(): Promise<unknown>
 }>
 
 const SCHEMES = new Set(["http:", "https:", "ws:", "wss:"])
 
-export function checkTarget(url: string): URL {
-	// "localhost:9000" parses as scheme "localhost:" with an empty host.
-	const hint = /^[a-z][a-z0-9+.-]*:\/\//i.test(url)
-		? ""
-		: ` (did you mean http://${url}?)`
+export interface TargetOptions {
+	/** Protected transports bind the original authority before any URL conversion. */
+	preserveLocalhost?: boolean
+}
+
+export function checkTarget(url: string, options: TargetOptions = {}): URL {
 	let u: URL
 	try {
 		u = new URL(url)
 	} catch {
-		throw new CliUsageError(`invalid API URL: ${url}${hint}`)
+		throw new CliUsageError("invalid API URL; use http(s):// or ws(s)://")
 	}
-	if (url.includes("#")) {
-		throw new CliUsageError(`invalid API URL: ${url}; remove the #fragment`)
-	}
-	if (!SCHEMES.has(u.protocol) || u.hostname === "") {
+	if (url.includes("#"))
+		throw new CliUsageError("invalid API URL; remove the fragment")
+	if (!SCHEMES.has(u.protocol) || u.hostname === "" || u.username || u.password)
 		throw new CliUsageError(
-			`invalid API URL: ${url}; use http(s):// or ws(s)://${hint}`,
+			"invalid API URL; use http(s):// or ws(s):// without userinfo",
 		)
-	}
-	if (u.hostname === "localhost") u.hostname = "127.0.0.1"
-	if (u.port === RELAY_PORT) {
+	if (u.hostname === "localhost" && !options.preserveLocalhost)
+		u.hostname = "127.0.0.1"
+	if (u.port === RELAY_PORT)
 		throw new CliUsageError(
-			`port 4713 is the RTL-TCP relay, not the WaveKit API (${url})`,
+			"port 4713 is the RTL-TCP relay, not the WaveKit API",
 		)
-	}
 	return u
 }
 
@@ -89,10 +90,11 @@ type Env = Readonly<Record<string, string | undefined>>
 export function resolveExplicit(
 	apiFlag: string | undefined,
 	env: Env,
+	options: TargetOptions = {},
 ): ApiTarget | null {
 	const api = apiFlag ?? env["WAVEKIT_API_URL"]
 	if (api !== undefined && api !== "") {
-		const u = checkTarget(api)
+		const u = checkTarget(api, options)
 		if (u.protocol === "ws:") u.protocol = "http:"
 		else if (u.protocol === "wss:") u.protocol = "https:"
 		const base = u.origin
@@ -101,7 +103,7 @@ export function resolveExplicit(
 	const ws =
 		env["WAVEKIT_WS_URL"] ?? env["WAVEKIT_WS_URLS"]?.split(",")[0]?.trim()
 	if (ws !== undefined && ws !== "") {
-		const u = checkTarget(ws)
+		const u = checkTarget(ws, options)
 		if (u.protocol === "http:") u.protocol = "ws:"
 		else if (u.protocol === "https:") u.protocol = "wss:"
 		const url = u.toString()

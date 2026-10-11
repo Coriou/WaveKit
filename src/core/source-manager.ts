@@ -133,6 +133,10 @@ export interface SourceManagerEvents {
 		metrics: { bytesReceived: number; dataRate: number },
 	) => void
 	ended: (sourceId: string) => void // For recording sources
+	/** Internal teardown signal: permanent removal, reconnect and shutdown (see teardown()). */
+	removed: (sourceId: string) => void
+	/** Permanent removal only (disconnect()); never on reconnect or shutdown. */
+	"source-removed": (sourceId: string, removedAt: Date) => void
 	"caps-changed": (sourceId: string, caps: SourceCaps) => void // For dynamic sample rate
 	/** The rate-truth mismatch flag was raised or cleared (see getStatus().rateMismatch). */
 	"rate-truth-changed": (sourceId: string) => void
@@ -273,6 +277,40 @@ export class ExclusiveSourceError extends Error {
 	}
 }
 
+/**
+ * Bytes per complex sample for IQ formats (CU8 pair 2, CS16 pair 4, CF32
+ * pair 8); null for audio and undeclared formats, which are not aligned.
+ */
+export function iqFrameBytes(
+	caps: Pick<SourceCaps, "kind" | "format">,
+): number | null {
+	if (caps.kind !== "iq") return null
+	switch (caps.format) {
+		case "U8_IQ":
+			return 2
+		case "S16_IQ":
+			return 4
+		case "FLOAT32LE":
+			return 8
+		default:
+			return null
+	}
+}
+
+/** Prepends the carried remainder and cuts `chunk` to whole frames. */
+export function alignIqChunk(
+	remainder: Buffer,
+	chunk: Buffer,
+	frameBytes: number,
+): { aligned: Buffer; remainder: Buffer } {
+	const input = remainder.length ? Buffer.concat([remainder, chunk]) : chunk
+	const length = input.length - (input.length % frameBytes)
+	return {
+		aligned: input.subarray(0, length),
+		remainder: Buffer.from(input.subarray(length)),
+	}
+}
+
 export class SourceManager extends EventEmitter {
 	private sources: Map<string, SourceState> = new Map()
 	private decoderAssignments: Map<string, DecoderAssignment> = new Map()
@@ -391,17 +429,16 @@ export class SourceManager extends EventEmitter {
 
 	private forwardData(id: string, state: SourceState, chunk: Buffer): boolean {
 		// TCP boundaries are arbitrary. Fanout may shed complete chunks, so each
-		// CU8 chunk must contain whole I/Q pairs before reaching its branches.
-		if (
-			state.config.caps.kind === "iq" &&
-			state.config.caps.format === "U8_IQ"
-		) {
-			const input = state.iqRemainder.length
-				? Buffer.concat([state.iqRemainder, chunk])
-				: chunk
-			const length = input.length - (input.length % 2)
-			state.iqRemainder = Buffer.from(input.subarray(length))
-			chunk = input.subarray(0, length)
+		// IQ chunk must contain whole complex samples before reaching its branches.
+		const frameBytes = iqFrameBytes(state.config.caps)
+		if (frameBytes !== null) {
+			const { aligned, remainder } = alignIqChunk(
+				state.iqRemainder,
+				chunk,
+				frameBytes,
+			)
+			state.iqRemainder = remainder
+			chunk = aligned
 			if (!chunk.length) return true
 		}
 

@@ -6,12 +6,14 @@ export type ViewId =
 	| "messages"
 	| "receiver"
 	| "system"
+	| "scan"
 export const VIEW_ORDER: readonly ViewId[] = [
 	"overview",
 	"decoders",
 	"messages",
 	"receiver",
 	"system",
+	"scan",
 ]
 export const VIEW_TITLES: Readonly<Record<ViewId, string>> = {
 	overview: "Overview",
@@ -19,6 +21,7 @@ export const VIEW_TITLES: Readonly<Record<ViewId, string>> = {
 	messages: "Messages",
 	receiver: "Receiver",
 	system: "System",
+	scan: "Scan",
 }
 
 export type EditKey =
@@ -73,6 +76,10 @@ export type Action =
 	| { type: "preset-next" }
 	| { type: "confirm-yes" }
 	| { type: "confirm-no" }
+	| { type: "scan-tab"; tab: "spectrum" | "discoveries" | "jobs" }
+	| { type: "scan-source" }
+	| { type: "scan-next-page" }
+	| { type: "scan-first-page" }
 	| { type: "notice"; text: string }
 
 /** The only actions that cause network writes (spec T9, P20). */
@@ -82,6 +89,7 @@ export function isWrite(action: Action): boolean {
 
 /** Per-view facts the keymap's `when` predicates read (filled by each view's keyInfo). */
 export interface ViewKeyCtx {
+	decoderOwned?: boolean
 	hasSelection: boolean
 	decoderRunning: boolean | null
 	/** R100: the selected decoder runs pinned (operator start mode). */

@@ -47,9 +47,10 @@ export async function renderApp(opts: {
 			writeRaw={opts.writeRaw ?? (() => undefined)}
 		/>
 	)
+	const strictSize = { cols: opts.cols }
 	const h = await renderAt(
 		opts.strict === true ? (
-			<StrictFitContext.Provider value={{ cols: opts.cols }}>
+			<StrictFitContext.Provider value={strictSize}>
 				{app}
 			</StrictFitContext.Provider>
 		) : (
@@ -57,5 +58,10 @@ export async function renderApp(opts: {
 		),
 		{ cols: opts.cols, rows: opts.rows },
 	)
+	const resize = h.resize
+	h.resize = async (cols, rows, options) => {
+		strictSize.cols = cols
+		await resize(cols, rows, options)
+	}
 	return Object.assign(h, { runtime })
 }

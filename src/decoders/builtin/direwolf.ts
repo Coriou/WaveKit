@@ -187,6 +187,14 @@ export class DirewolfDecoder extends AudioDemodDecoder {
 	}
 
 	/**
+	 * Migrated to the opt-in core channelizer (addendum §7 step 4): channel
+	 * IQ arrives at exactly 48 kHz, so the sox resample disappears.
+	 */
+	protected override channelizerSupported(): boolean {
+		return true
+	}
+
+	/**
 	 * Returns the decoder command.
 	 */
 	protected getDecoderCommand(): string {

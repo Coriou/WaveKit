@@ -16,6 +16,7 @@ import {
 	decoderBandRangeSchema,
 	decoderBandRegionSchema,
 } from "./decoder-rate-schemas.js"
+import { scannerOwnedConflict } from "./decoders.js"
 
 export interface DecoderBandRoutesOptions {
 	decoderManager: DecoderManager
@@ -172,6 +173,8 @@ export const decoderBandRoutes: FastifyPluginAsync<
 			const { id } = request.params
 			const found = lookup(decoderManager, id)
 			if (!found.ok) return reply.status(found.status).send(found.body)
+			const owned = scannerOwnedConflict(decoderManager, id)
+			if (owned) return reply.status(409).send(owned)
 			const parsed = DecoderBandOverrideSchema.safeParse(request.body)
 			if (!parsed.success)
 				return reply.status(400).send({
@@ -209,6 +212,8 @@ export const decoderBandRoutes: FastifyPluginAsync<
 			const { id } = request.params
 			const found = lookup(decoderManager, id)
 			if (!found.ok) return reply.status(found.status).send(found.body)
+			const owned = scannerOwnedConflict(decoderManager, id)
+			if (owned) return reply.status(409).send(owned)
 			const settings = await decoderManager.deleteBandOverride(id)
 			if (!settings) return reply.status(404).send(notFoundAfterWrite(id))
 			return settings

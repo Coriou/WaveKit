@@ -1,7 +1,11 @@
 import { readFileSync, existsSync } from "node:fs"
 import { parse as parseYaml } from "yaml"
 import { z } from "zod"
-import { ConfigValidationError } from "./utils/errors.js"
+import { ConfigValidationError, WaveKitError } from "./utils/errors.js"
+import {
+	AccessRuntimeConfigSchema,
+	validateProtectedRuntimeMapping,
+} from "./access/runtime-config.js"
 import {
 	CSDR_BUFFER_MAX_ELEMENTS,
 	CSDR_BUFFER_MIN_ELEMENTS,
@@ -23,6 +27,15 @@ export const SourceCapsSchema = z.object({
 	channels: z.number().int().positive().optional(),
 	centerFreq: z.number().positive().optional(),
 	exclusive: z.boolean().default(false),
+})
+
+/**
+ * Per-source scanner role (signal discovery spec § 10.7). "dedicated"
+ * sources are never the default source for unsourced decoders.
+ */
+export const SourceScannerConfigSchema = z.object({
+	role: z.enum(["shared", "dedicated"]).default("shared"),
+	passive: z.boolean().default(true),
 })
 
 /**
@@ -56,6 +69,8 @@ export const SourceConfigSchema = z.object({
 			rtlmuxStatsUrl: z.string().url().optional(),
 		})
 		.optional(),
+	/** Scanner role and passive discovery for this source (default shared, passive). */
+	scanner: SourceScannerConfigSchema.optional(),
 })
 
 /**
@@ -143,6 +158,8 @@ export const DecoderConfigSchema = z.object({
 	minVersion: z.string().optional(),
 	/** Maximum allowed version for this decoder */
 	maxVersion: z.string().optional(),
+	/** Route this instance through the core channelizer (addendum §7) */
+	useChannelizer: z.boolean().default(false),
 	/**
 	 * Band admission override (band defaults spec §3): where this decoder is
 	 * useful. Never changes the process arguments.
@@ -374,33 +391,248 @@ export const CsdrConfigSchema = z.object({
 })
 
 /**
+ * Opt-in core channelizer (addendum §6). Off by default: every pipeline stays
+ * byte-identical. One supervised wavekit-chan process per source.
+ * usableFraction and blockSamples mirror the wavekit-chan argument validation.
+ */
+export const ChannelizerConfigSchema = z.object({
+	enabled: z.boolean().default(false),
+	binaryPath: z.string().min(1).default("wavekit-chan"),
+	socketDir: z.string().min(1).default("/var/run/wavekit/chan"),
+	usableFraction: z.number().min(0.5).max(0.95).default(0.8),
+	channelQueueMs: z.number().int().min(50).max(2000).default(250),
+	inputHighWaterMark: z
+		.number()
+		.int()
+		.min(65_536)
+		.max(16 * 1024 * 1024)
+		.default(262_144),
+	blockSamples: z
+		.number()
+		.int()
+		.min(256)
+		.max(1 << 20)
+		.default(16_384),
+})
+
+const POWER_OF_TWO_FFT = z
+	.number()
+	.int()
+	.min(512)
+	.max(16384)
+	.refine(n => (n & (n - 1)) === 0, "fftSize must be a power of two")
+
+/**
+ * Signal discovery scanner (spec § 12.3). Every key has a default, so an
+ * absent section enables the scanner with passive in-window discovery.
+ */
+export const ScannerConfigSchema = z
+	.object({
+		enabled: z.boolean().default(true),
+		/** Config-only channel-tier admission; excluded from mutable scanner settings. */
+		channelTier: z
+			.object({
+				enabled: z.boolean().default(false),
+				minMs: z.number().int().min(300).max(2000).default(500),
+			})
+			.default({}),
+		passive: z
+			.object({
+				enabled: z.boolean().default(true),
+				/** Pre-channelizer offset probes for passive jobs (each costs a full-rate chain). */
+				offsetProbes: z.boolean().default(false),
+			})
+			.default({}),
+		cpuBudgetCores: z.number().finite().min(0.1).max(64).default(1),
+		cpuGuardPercent: z.number().finite().min(1).max(100).default(90),
+		maxProbes: z
+			.object({
+				offset: z.number().int().min(0).max(16).default(1),
+				channel: z.number().int().min(0).max(64).default(4),
+			})
+			.default({}),
+		ringSeconds: z.number().finite().min(0.5).max(30).default(3),
+		detection: z
+			.object({
+				fftSize: z.union([z.literal("auto"), POWER_OF_TWO_FFT]).default("auto"),
+				integrationMs: z.number().finite().min(5).max(1000).default(50),
+				sensitivity: z.enum(["low", "normal", "high"]).default("normal"),
+				faTargetPerMhzMin: z.number().finite().min(0.01).max(1000).default(1),
+				dcGuardHz: z.number().finite().min(0).max(100_000).default(1500),
+				ppmMargin: z.number().finite().min(0).max(100).default(2),
+				clipFraction: z.number().finite().min(1e-6).max(1).default(0.001),
+				hysteresisDb: z.number().finite().min(0).max(20).default(3),
+				minSurfaceBlocks: z.number().int().min(1).max(20).default(2),
+				/** Short-burst path (§ 4.10); null disables it. */
+				shortIntegrationMs: z.number().positive().nullable().default(5),
+				/** FFT frame overlap (§ 4.2): 0 or 0.5. */
+				overlap: z.union([z.literal(0), z.literal(0.5)]).default(0),
+			})
+			.default({}),
+		sweep: z
+			.object({
+				markers: z.boolean().default(true),
+				markerTimeoutMs: z.number().int().min(100).max(10_000).default(2000),
+				pllSettleMs: z.number().finite().min(0).max(100).default(5),
+				settleMs: z
+					.object({
+						local: z.number().int().min(0).max(10_000).default(300),
+						network: z.number().int().min(0).max(10_000).default(1000),
+					})
+					.default({}),
+				revisitShare: z.number().finite().min(0).max(0.9).default(0.3),
+			})
+			.default({}),
+		hold: z
+			.object({
+				maxHoldMs: z.number().int().min(1000).max(600_000).default(60_000),
+				hangMs: z.number().int().min(0).max(60_000).default(2000),
+				preRollMs: z.number().int().min(0).max(10_000).default(300),
+			})
+			.default({}),
+		storage: z
+			.object({
+				/** null: `<stateDir>/scanner` (resolved by the scanner service). */
+				dir: z.string().min(1).nullable().default(null),
+				maxRecordingsMb: z.number().int().min(1).max(1_000_000).default(512),
+				maxEvidenceMb: z.number().int().min(1).max(100_000).default(64),
+				maxJournalMb: z.number().int().min(1).max(10_000).default(64),
+				maxAgeDays: z.number().int().min(1).max(3650).default(30),
+				discoveryMaxAgeDays: z.number().int().min(1).max(3650).default(180),
+				minFreeDiskMb: z.number().int().min(0).max(1_000_000).default(2048),
+				maxDiscoveries: z.number().int().min(1).max(1_000_000).default(10_000),
+				/** Burst IQ captures (Task 34a). */
+				maxCapturesMb: z.number().int().min(1).max(100_000).default(256),
+			})
+			.default({}),
+		ws: z
+			.object({
+				maxMessagesPerSecond: z.number().int().min(1).max(100).default(10),
+				/** `spectrum` WS feed (§ 12.2): frame rate and bins of the default profile. */
+				spectrumHz: z.number().finite().min(0.5).max(25).default(10),
+				spectrumBins: z.number().int().min(128).max(2048).default(512),
+				/** Engine summary-detail budget: block-summary bins per source (config only; never per client, never PATCHed). */
+				spectrumSummaryBins: z.number().int().min(512).max(2048).default(2048),
+				/** Distinct active non-default spectrum profiles over all sources (config only). */
+				spectrumMaxProfiles: z.number().int().min(1).max(16).default(4),
+			})
+			.default({}),
+	})
+	.superRefine((value, ctx) => {
+		if (value.hold.preRollMs > value.ringSeconds * 1000) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["hold", "preRollMs"],
+				message: `preRollMs ${value.hold.preRollMs} exceeds the IQ ring (ringSeconds ${value.ringSeconds})`,
+			})
+		}
+	})
+
+/** The source's scanner role with defaults applied. */
+export function sourceScannerConfig(
+	source: Pick<SourceConfig, "scanner">,
+): SourceScannerConfig {
+	return source.scanner ?? { role: "shared", passive: true }
+}
+
+/**
  * Main configuration schema for WaveKit.
  * Requirements: 12.5, 15.4, 17.1, 17.2, 17.3, 17.4
  */
-export const ConfigSchema = z.object({
-	sources: z.array(SourceConfigSchema).default([]),
-	decoders: z.array(DecoderConfigSchema).default([]),
-	audio: AudioConfigSchema.default({}),
-	tunerRelay: TunerRelayConfigSchema.default({}),
-	tuner: TunerConfigSchema.default({}),
-	liveDemod: LiveDemodConfigSchema.optional(),
-	digitalVoice: DigitalVoiceConfigSchema.optional(),
-	api: ApiConfigSchema.default({}),
-	logging: LoggingConfigSchema.default({}),
-	health: HealthConfigSchema.optional(),
-	resources: ResourcesConfigSchema.default({}),
-	csdr: CsdrConfigSchema.default({}),
-	/**
-	 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
-	 * case-insensitive). Absent: guessed from TZ / locale, else EU.
-	 */
-	region: RegionSchema.optional(),
-	/**
-	 * Directory for runtime state (API band overrides). Relative paths
-	 * resolve against the process working directory.
-	 */
-	stateDir: z.string().min(1).default("data"),
-})
+export const ConfigSchema = z
+	.object({
+		sources: z.array(SourceConfigSchema).default([]),
+		decoders: z.array(DecoderConfigSchema).default([]),
+		audio: AudioConfigSchema.default({}),
+		tunerRelay: TunerRelayConfigSchema.default({}),
+		tuner: TunerConfigSchema.default({}),
+		liveDemod: LiveDemodConfigSchema.optional(),
+		digitalVoice: DigitalVoiceConfigSchema.optional(),
+		api: ApiConfigSchema.default({}),
+		access: AccessRuntimeConfigSchema,
+		logging: LoggingConfigSchema.default({}),
+		health: HealthConfigSchema.optional(),
+		resources: ResourcesConfigSchema.default({}),
+		csdr: CsdrConfigSchema.default({}),
+		channelizer: ChannelizerConfigSchema.default({}),
+		/** Signal discovery scanner (spec § 12.3); on by default. */
+		scanner: ScannerConfigSchema.default({}),
+		/**
+		 * Band plan region for built-in band defaults (EU, US, CA, AU, NZ, JP, CN;
+		 * case-insensitive). Absent: guessed from TZ / locale, else EU.
+		 */
+		region: RegionSchema.optional(),
+		/**
+		 * Directory for runtime state (API band overrides). Relative paths
+		 * resolve against the process working directory.
+		 */
+		stateDir: z.string().min(1).default("data"),
+	})
+	.superRefine((config, ctx) => {
+		if (config.access.mode === "protected") {
+			try {
+				validateProtectedRuntimeMapping(config.access, config.api, {
+					analog: LiveDemodConfigSchema.parse(config.liveDemod ?? {}).httpPort,
+					digital: DigitalVoiceConfigSchema.parse(config.digitalVoice ?? {})
+						.httpPort,
+				})
+			} catch {
+				ctx.addIssue({
+					code: z.ZodIssueCode.custom,
+					path: ["access"],
+					message: "Invalid access configuration",
+				})
+			}
+		}
+		if (
+			config.tunerRelay.enabled &&
+			config.tunerRelay.sourceId === undefined &&
+			!config.sources.some(
+				source => sourceScannerConfig(source).role === "shared",
+			)
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["tunerRelay", "sourceId"],
+				message:
+					"Select an explicit configured relay source or configure a shared source",
+			})
+		}
+		// The relay starts before sources connect, so validate its explicit
+		// selection against configured identities rather than runtime status.
+		if (
+			config.tunerRelay.enabled &&
+			config.tunerRelay.sourceId &&
+			!config.sources.some(s => s.id === config.tunerRelay.sourceId)
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["tunerRelay", "sourceId"],
+				message: `Tuner relay source '${config.tunerRelay.sourceId}' is not configured`,
+			})
+		}
+		// Spec § 10.7: decoders without sourceId use the default source, which
+		// is never a dedicated scanner source.
+		if (config.sources.length === 0) return
+		if (!config.sources.every(s => sourceScannerConfig(s).role === "dedicated"))
+			return
+		// A decoder that names its own dongle (top-level deviceSerial for
+		// external-SDR decoders, options.deviceSerial for readsb/ais-catcher)
+		// never uses the default source.
+		const unsourced = config.decoders.filter(
+			d =>
+				d.enabled &&
+				d.sourceId === undefined &&
+				d.deviceSerial === undefined &&
+				d.options["deviceSerial"] === undefined,
+		)
+		if (unsourced.length === 0) return
+		ctx.addIssue({
+			code: z.ZodIssueCode.custom,
+			path: ["sources"],
+			message: `Every source is scanner.role "dedicated", but decoders ${unsourced.map(d => d.id).join(", ")} have no sourceId; give them a sourceId or make one source shared`,
+		})
+	})
 
 // ============================================================================
 // Type Exports
@@ -419,6 +651,9 @@ export type LoggingConfig = z.infer<typeof LoggingConfigSchema>
 export type HealthConfig = z.infer<typeof HealthConfigSchema>
 export type ResourcesConfig = z.infer<typeof ResourcesConfigSchema>
 export type CsdrConfig = z.infer<typeof CsdrConfigSchema>
+export type ChannelizerConfig = z.infer<typeof ChannelizerConfigSchema>
+export type SourceScannerConfig = z.infer<typeof SourceScannerConfigSchema>
+export type ScannerConfig = z.infer<typeof ScannerConfigSchema>
 export type Config = z.infer<typeof ConfigSchema>
 
 // ============================================================================
@@ -854,6 +1089,11 @@ export function loadConfig(configPath?: string): Config {
 	const result = ConfigSchema.safeParse(configWithOverrides)
 
 	if (!result.success) {
+		if (result.error.issues.some(issue => issue.path[0] === "access"))
+			throw new WaveKitError(
+				"Invalid access configuration",
+				"ACCESS_CONFIG_INVALID",
+			)
 		throw new ConfigValidationError(result.error)
 	}
 
@@ -867,6 +1107,11 @@ export function loadConfig(configPath?: string): Config {
 export function validateConfig(config: unknown): Config {
 	const result = ConfigSchema.safeParse(config)
 	if (!result.success) {
+		if (result.error.issues.some(issue => issue.path[0] === "access"))
+			throw new WaveKitError(
+				"Invalid access configuration",
+				"ACCESS_CONFIG_INVALID",
+			)
 		throw new ConfigValidationError(result.error)
 	}
 	return result.data
@@ -893,6 +1138,8 @@ export function validateConfigSafe(config: unknown): {
 	}
 
 	const errors = result.error.issues.map(issue => {
+		if (issue.path[0] === "access")
+			return "access: Invalid access configuration"
 		const path = issue.path.length > 0 ? issue.path.join(".") : "root"
 		return `${path}: ${issue.message}`
 	})
@@ -926,6 +1173,12 @@ export function getSupportedEnvVars(): string[] {
 		"WAVEKIT_SOURCES__<INDEX>__HOST",
 		"WAVEKIT_SOURCES__<INDEX>__PORT",
 		"WAVEKIT_DECODERS__<INDEX>__ENABLED",
+		"WAVEKIT_SCANNER__ENABLED",
+		"WAVEKIT_SCANNER__PASSIVE__ENABLED",
+		"WAVEKIT_SCANNER__CPU_BUDGET_CORES",
+		"WAVEKIT_SCANNER__MAX_PROBES__OFFSET",
+		"WAVEKIT_SCANNER__STORAGE__DIR",
+		"WAVEKIT_SOURCES__<INDEX>__SCANNER__ROLE",
 	]
 	return ["WAVEKIT_CONFIG", ...legacyVars, ...nestedExamples]
 }

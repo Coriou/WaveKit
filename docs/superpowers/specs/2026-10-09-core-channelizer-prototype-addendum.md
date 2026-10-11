@@ -18,7 +18,7 @@ bands they cannot decode.
 | Decision | Taken | Alternative if flipped |
 |---|---|---|
 | D1 Language | Rust: `rustfft` + own FIR/polyphase resampler; binary `wavekit-chan`; new Dockerfile stage on a Rust bookworm image; amd64/arm64 via `docker/bake.hcl`; no runtime deps. | C++ + libcsdr (GPL-3, integer-only decimation) or C + liquid-dsp (MIT, new dep to build and pin). Only § 10 and the crate list change. |
-| D2 Fixture sourcing | Hybrid: public corpora with license recorded per fixture; short own RTL-SDR captures at 2.048/2.4 Msps for POCSAG, DMR, LoRa (`fixtures/lora/README.md` procedure, `scripts/auto-capture.mjs`/`.py`), kept out of git under `fixtures/raw/` (already gitignored, `.gitignore:79`) and fetched by `download.sh` with sha256; synthetic only for DSP property tests. | Public-only (gaps stay uncovered) or own-only (no provenance diversity). Only § 8's acquisition list changes. |
+| D2 Fixture sourcing | Hybrid: public corpora with license recorded per fixture; short own RTL-SDR captures at 2.048/2.4 Msps for POCSAG, DMR, LoRa (`fixtures/lora/README.md` procedure, `scripts/auto-capture.mjs`/`.py`), kept out of git under `fixtures/raw/` (already gitignored, `.gitignore:79`) and fetched by `download.sh` with sha256; synthetic only for DSP property tests. **Amended 2026-10-09 (user decision):** synthetic IQ is also allowed for AIS, POCSAG, APRS and ACARS goldens, composed to 2.048/2.4 Msps by `fixtures/compose.py` (§ 8); DMR, analog voice, rtl_433 sensors and aircraft stay real captures; unlicensed public recordings may be used only when fetched from their origin at test time and never redistributed. | Public-only (gaps stay uncovered) or own-only (no provenance diversity). Only § 8's acquisition list changes. |
 | D3 Transport | One raw Unix socket per channel under `channelizer.socketDir` plus a JSON-lines control protocol (requests on stdin, events on stdout). Node connects per channel and passes the socket `Readable` to `decoder.attachInput()` (`base-decoder.ts:307-321`), so `DecoderManager` contracts do not change. | In-band framed blocks de-framed in Node (extra copy, Node CPU) or fixed extra pipe fds at spawn (cannot add a channel without a restart). Only § 4 and § 11 change. |
 
 Everything under RESOLVED in the parent and rate-model specs stays as decided:
@@ -73,9 +73,11 @@ Derivation is pure and lives beside the existing adapter helpers
 (`audioDemodRateAdapter`, `iqDecimateRateAdapter`, rate-model § 2.2) so the
 pipeline string and the request cannot disagree. Default passband when the
 decoder declares nothing narrower: `t = filterTransition ?? 0.05`,
-`transitionHz = outputRateHz × t / 2`, `bandwidthHz = outputRateHz × (1 − t)`,
-which reproduces today's `firdecimate` cut at the output Nyquist
-(`iq-decimate-decoder.ts:175`, `audio-demod-decoder.ts:217, 235`).
+`transitionHz = outputRateHz × t / 2`, `bandwidthHz = outputRateHz × (1 − t)`.
+That reproduces today's `firdecimate` cut at the output Nyquist only when the
+decoder sets `filterTransition` (multimon-ng, direwolf, the IQ family). A
+decoder without it (dsd-fme, acarsdec) uses the channel-matched raw filter, and
+its request derives the passband from the same `channelFilterPlan` (§ 14 A16).
 `DemodulationConfig.bandwidth` stays informational, as it is today.
 
 | Instance | outputRateHz | format | Change versus today |
@@ -83,7 +85,7 @@ which reproduces today's `firdecimate` cut at the output Nyquist
 | ais-catcher | 384 000 | cu8 | replaces `sox rate -h` (`iqResampleCommand`, `process-tools.ts:32-70`) |
 | dumpvdl2 | `targetSampleRate` (1 050 000) | cu8 (`U8` in dumpvdl2 terms) | replaces sox; `bandwidthHz = max(default, span + 50 000)` |
 | rtl_433 | `targetSampleRate` exactly (250 000 default) | cu8 | integer `fs/k` becomes exact; adapter reports `resample` |
-| multimon-ng, direwolf, dsd-fme | `demodSampleRate ?? sampleRate` (48 000) | cf32 | k=43 → 47 627.9 Hz at 2.048 Msps becomes exactly 48 000; sox after demod disappears for direwolf and dsd-fme |
+| multimon-ng, direwolf, dsd-fme | `demodSampleRate ?? sampleRate` (48 000) | cf32 | k=43 → 47 627.9 Hz at 2.048 Msps becomes exactly 48 000; sox after demod disappears for direwolf; dsd-fme keeps its WAV wrapper |
 | acarsdec | 24 000 | cf32 | as above, exact |
 
 `frontendIq` in each `DecoderRateRequirements` (rate-model § 2.3) is unchanged:
@@ -292,6 +294,18 @@ decodes; pager, ACARS and AIS captures contain real identifiers and stay
 private. `rtl_433_tests` samples are `tail-golden` (narrow rates, no capture).
 A fixture is a channelizer golden only at ≥ 2.048 Msps CU8 with a known centre.
 
+Amendment (2026-10-09, D2 as amended, channelizer T7a): no licensed public recording
+at 2.048/2.4 Msps carries confirmed traffic, so the AIS, POCSAG, APRS, ACARS and
+rtl_433 channelizer goldens are composed: `fixtures/compose.py` resamples narrowband
+sources (IQEngine AIS, CC BY 4.0; sdr-flex APRS and OOK, CC0; an rtl_433_tests capture,
+unstated license, fetched from origin) and WaveKit POCSAG/ACARS generators to the
+capture rate, places them at offsets, adds seeded noise, an IQ image and a DC spike,
+and quantises to CU8. The manifest marks them `fetch: { kind: generated, recipe }`;
+`download.sh` fetches the sources and regenerates the file (sha256-checked).
+Property 15 is an equality gate, so it needs a known centre and known offsets, not
+real-world impairments. Own captures remain for DMR, analog voice, rtl_433 sensors and
+aircraft.
+
 ## 9. Capacity tooling (batch 5)
 
 `scripts/capacity/fake_rtl_tcp.py` gains `--file <cu8> [--loop]` with the same
@@ -338,13 +352,19 @@ Spawn: `wavekit-chan --generation G --input-format cu8 --input-rate FS
 --input-center C --usable-fraction F --block-samples B --socket-dir DIR`.
 Requests on stdin, events on stdout, one JSON object per line, every line with
 `v: 1`. Zod schemas in `src/core/channelizer/protocol.ts`; unknown request
-`type` yields `rejected` with `channel-request-invalid`, never an exit.
+`type` yields `rejected` with `channel-request-invalid`, never an exit. As
+implemented (`native/wavekit-chan/src/protocol.rs`): requests arrive on fd 3
+(§ 14 A1); `queueBytes` is within 1..=64 MiB and at least one sample;
+`gain` (cu8 only) is within 1e-6..=1e6; `mark-gap` without `atInputByte`
+marks the gap at the bytes received so far; `shutdown` has no event of its
+own: it emits `closed` (`requested`) for every open channel, then the process
+exits 0.
 
 ```ts
 // requests
 { v: 1, type: "open", id, centerHz, bandwidthHz, transitionHz, outputRateHz, format: "cu8" | "cf32", gain?, queueBytes }
 { v: 1, type: "close", id }
-{ v: 1, type: "mark-gap" }                 // Node saw an input-branch drop
+{ v: 1, type: "mark-gap", atInputByte?, droppedInputBytes? }  // Node saw an input-branch drop (plan A2)
 { v: 1, type: "shutdown" }
 // events
 { v: 1, type: "ready", generation, pid }
@@ -417,7 +437,7 @@ channel status.
 
 ## 14. Deviations adopted by the implementation plan (2026-10-09)
 
-The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this addendum except for the five points below. Each is bounded to the plan tasks named in its assumption.
+The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this addendum except for the points below; A16–A18 come from the plan's delta (`2026-10-09-core-channelizer-delta.md`, E7, E9, E10c). Each is bounded to the plan tasks named in its assumption.
 
 | Deviation | Addendum section | What the plan does instead | Why |
 |---|---|---|---|
@@ -426,3 +446,6 @@ The plan `docs/superpowers/plans/2026-10-09-core-channelizer.md` follows this ad
 | A5: no `rustfft` | § 10 (crate list) | Crates are `serde` and `serde_json`, with `proptest` as a dev-dependency only. | The direct FIR path (halfband cascade plus rational polyphase) needs no FFT; tone tests use correlation and filter design uses a hand-written Kaiser window. |
 | A10: spread over the admissible range | § 9 (spread at `center + usable × ((k + 0.5)/N − 0.5)`) | The formula is applied to the admissible centre range `±L`, `L = ⌊fs·F/2 − (bw/2 + tr)⌋`; clustered placements are shifted inside `±L`. | Applied literally, wide channels (AIS at N = 8) land outside § 6's own admission rule, get `channel-outside-capture`, and the gate silently runs fewer channels. |
 | AIS channel centre | § 8 fixture example (`channel: { center_hz: 161975000 }`) | AIS goldens, harness tests and capacity placements use the A/B pair centre 162 000 000 Hz as the channel centre. | AIS-catcher expects its input centred between channels A and B (±25 kHz); centring on channel A shifts baseband by 25 kHz and mis-tunes both channels. |
+| A16: matched passband | § 2 (default `t = filterTransition ?? 0.05`) | Without `filterTransition`, the request takes its passband from `channelFilterPlan(outputRateHz, 1, bandwidth)`: `bandwidthHz = 2·passbandHz`, `transitionHz = stopbandHz − passbandHz` (dsd-fme 12 500 / 6 250, acarsdec 12 000 / 6 000). With it, the § 2 formula holds. | The raw path now uses a channel-matched `firdecimate` for these decoders; the § 2 default would be about 3.6 times wider than raw. |
+| A17: `offsetHz` absorbed | § 1 (centre per instance) | The request centre is `channelHz ?? (capture centre + offsetHz)`; `channelHz` wins when both are set (warned once). The cf32 tail has no `csdr shift`, and `offsetHz` is not validated against the output rate. | The channel is already centred; a shift would move it twice, and the raw-path offset bound would cause a start-failure loop. |
+| A18: band at the channel centre | § 1, § 5 | A decoder with a valid channel request is band-assessed at `request.centerHz` with `frontendRateHz = request.outputRateHz`, not at the capture centre. | Otherwise a channel away from the capture centre is band-suspended although the channelizer could serve it. |

@@ -20,6 +20,7 @@
  * The output is still IQ data (U8 complex), just at a lower sample rate.
  */
 
+import { z } from "zod"
 import { iqResampleCommand, shellCommand } from "./process-tools.js"
 import { boundCsdrPipeline } from "./csdr-buffers.js"
 import { BaseDecoder } from "./base-decoder.js"
@@ -31,6 +32,10 @@ import type {
 	DecoderOutput,
 	DecoderRateAdapter,
 } from "./types.js"
+import type {
+	DecoderChannelRequest,
+	DecoderChannelRequestResult,
+} from "../core/channelizer/types.js"
 import type { Logger } from "../utils/logger.js"
 
 /**
@@ -47,6 +52,11 @@ export interface IqDecimationConfig {
 	filterTransition?: number
 	/** Optional custom cutoff for FIR filter (default: 0.5) */
 	filterCutoff?: number
+	/**
+	 * Absolute RF centre the decoder wants from the core channelizer
+	 * (addendum §1). Absent: the capture centre.
+	 */
+	channelHz?: number | undefined
 }
 
 /**
@@ -79,6 +89,36 @@ export function iqDecimationRates(config: IqDecimationConfig): {
 		inputSampleRate,
 		decimation,
 		outputRate: inputSampleRate / decimation,
+	}
+}
+
+/** Decoder option `channelHz`: absolute RF centre of the wanted channel. */
+const ChannelHzSchema = z.number().finite().positive().optional()
+
+/** `options.channelHz` when it is a positive finite number of Hz. */
+export function readChannelHz(
+	options: Record<string, unknown>,
+): number | undefined {
+	const parsed = ChannelHzSchema.safeParse(options["channelHz"])
+	return parsed.success ? parsed.data : undefined
+}
+
+/**
+ * Addendum §2 default passband: t = filterTransition ?? 0.05 relative to the
+ * OUTPUT rate (plan A11). Pure.
+ */
+export function iqChannelRequest(
+	config: IqDecimationConfig,
+	input: { sampleRateHz: number; centerHz?: number },
+): DecoderChannelRequest {
+	const t = config.filterTransition ?? 0.05
+	const outputRateHz = config.targetSampleRate
+	return {
+		centerHz: config.channelHz ?? input.centerHz ?? 0,
+		bandwidthHz: outputRateHz * (1 - t),
+		transitionHz: (outputRateHz * t) / 2,
+		outputRateHz,
+		format: "cu8",
 	}
 }
 
@@ -126,6 +166,9 @@ export function iqDecimateRateAdapter(
  * - Piping decimated IQ to decoder stdin
  */
 export abstract class IqDecimateDecoder extends BaseDecoder {
+	private unknownCentreLogged = false
+	private filterCutoffLogged = false
+
 	constructor(config: DecoderConfig, logger: Logger) {
 		super(config, logger)
 	}
@@ -174,6 +217,38 @@ export abstract class IqDecimateDecoder extends BaseDecoder {
 			input.sampleRateHz,
 			this.getDecoderInputFormat(),
 		)
+	}
+
+	/** Migration flag (addendum §7): flipped per decoder by Tasks 28–30. */
+	protected channelizerSupported(): boolean {
+		return false
+	}
+
+	getChannelRequest(input: {
+		sampleRateHz: number
+		centerHz?: number
+	}): DecoderChannelRequestResult | undefined {
+		if (!this.channelizerSupported()) return undefined
+		const config = { ...this.getIqDecimationConfig() }
+		config.channelHz ??= readChannelHz(this.config.options)
+		if (
+			config.channelHz === undefined &&
+			input.centerHz === undefined &&
+			!this.unknownCentreLogged
+		) {
+			this.unknownCentreLogged = true
+			this.logger.info(
+				"No channelHz and no capture centre; requesting offset 0",
+			)
+		}
+		if (config.filterCutoff !== undefined && !this.filterCutoffLogged) {
+			this.filterCutoffLogged = true
+			this.logger.warn(
+				{ filterCutoff: config.filterCutoff },
+				"filterCutoff is not translated to a channel passband",
+			)
+		}
+		return iqChannelRequest(config, input)
 	}
 
 	/**

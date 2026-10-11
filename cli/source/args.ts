@@ -7,6 +7,7 @@ export const VIEW_ALIASES: Readonly<Record<string, ViewId>> = {
 	messages: "messages",
 	receiver: "receiver",
 	system: "system",
+	scan: "scan",
 	dashboard: "overview",
 	output: "messages",
 	backpressure: "decoders",
@@ -16,8 +17,16 @@ export const VIEW_ALIASES: Readonly<Record<string, ViewId>> = {
 	resources: "system",
 }
 
+interface RunArgs {
+	kind: "run"
+	view: ViewId
+	api?: string
+	credentialFile?: string
+	credentialFormat?: "token" | "access-state"
+}
+
 export type ParsedArgs =
-	| { kind: "run"; view: ViewId; api?: string }
+	| RunArgs
 	| { kind: "help" }
 	| { kind: "error"; message: string }
 
@@ -30,10 +39,10 @@ function lookupView(v: string): ViewId | undefined {
 	return Object.hasOwn(VIEW_ALIASES, v) ? VIEW_ALIASES[v] : undefined
 }
 
-function viewError(v: string): ParsedArgs {
+function viewError(): ParsedArgs {
 	return {
 		kind: "error",
-		message: `wavekit: invalid view "${v}" ${glyphs().sep} valid views: ${VALID} (aliases: ${ALIASES})`,
+		message: `wavekit: invalid view ${glyphs().sep} valid views: ${VALID} (aliases: ${ALIASES})`,
 	}
 }
 
@@ -53,13 +62,15 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 	if (argv.includes("--help") || argv.includes("-h")) return { kind: "help" }
 	let view: ViewId = "overview"
 	let api: string | undefined
+	let credentialFile: string | undefined
+	let credentialFormat: "token" | "access-state" | undefined
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i] ?? ""
 		if (a === "--view" || a === "-v" || a.startsWith("--view=")) {
 			const { value, next } = flagValue(argv, i, "--view")
 			i = next
 			const id = value === undefined ? undefined : lookupView(value)
-			if (id === undefined) return viewError(value ?? "")
+			if (id === undefined) return viewError()
 			view = id
 			continue
 		}
@@ -76,12 +87,49 @@ export function parseArgs(argv: readonly string[]): ParsedArgs {
 			api = value
 			continue
 		}
+		if (a === "--credential-file" || a.startsWith("--credential-file=")) {
+			const { value, next } = flagValue(argv, i, "--credential-file")
+			i = next
+			if (value === undefined || value === "" || value.startsWith("-"))
+				return {
+					kind: "error",
+					message: "wavekit: --credential-file needs a path",
+				}
+			credentialFile = value
+			continue
+		}
+		if (a === "--credential-format" || a.startsWith("--credential-format=")) {
+			const { value, next } = flagValue(argv, i, "--credential-format")
+			i = next
+			if (value !== "token" && value !== "access-state")
+				return {
+					kind: "error",
+					message: "wavekit: --credential-format must be token or access-state",
+				}
+			credentialFormat = value
+			continue
+		}
 		return {
 			kind: "error",
-			message: `wavekit: unknown argument "${a}" ${glyphs().sep} see wavekit --help`,
+			message: `wavekit: unknown argument ${glyphs().sep} see wavekit --help`,
 		}
 	}
-	return api === undefined ? { kind: "run", view } : { kind: "run", view, api }
+	if (credentialFormat !== undefined && credentialFile === undefined)
+		return {
+			kind: "error",
+			message: "wavekit: --credential-format needs --credential-file",
+		}
+	return {
+		kind: "run",
+		view,
+		...(api === undefined ? {} : { api }),
+		...(credentialFile === undefined
+			? {}
+			: {
+					credentialFile,
+					credentialFormat: credentialFormat ?? "access-state",
+				}),
+	}
 }
 
 /** Help in the given glyph set; cli.tsx prints it after the glyph mode is set (WAVEKIT_ASCII, locale). */
@@ -102,12 +150,13 @@ Usage:
   wavekit [--view <view>] [--api <url>]
   wavekit --help
 
-Views (keys 1-5):
+Views (keys 1-6):
   overview   1  chain strip, receiver, decoders, latest messages
   decoders   2  process state, decodes and IQ drops per decoder
   messages   3  filterable, pausable decoded-message feed
   receiver   4  source, tuner, relay, fanout and upstream drops
   system     5  container, SDR host, live audio, core
+  scan       6  source spectrum, discoveries and existing scan jobs (read-only)
 
 Aliases:
   dashboard ${to} overview, output ${to} messages, backpressure ${to} decoders,
@@ -117,6 +166,8 @@ Aliases:
 Options:
   --view, -v <view>   open this view first
   --api <url>         WaveKit API base URL, e.g. http://127.0.0.1:9000
+  --credential-file <path>  private credential file; requires explicit HTTP API
+  --credential-format <format>  access-state (default) or token
   --help, -h          show this help
 
 Environment:
@@ -129,7 +180,9 @@ Environment:
 
 Precedence: --api, then WAVEKIT_API_URL, then WAVEKIT_WS_URL / WAVEKIT_WS_URLS.
 With none set, wavekit tries http://127.0.0.1:9000, then http://127.0.0.1:3000.
-localhost is read as 127.0.0.1. Port 4713 is the RTL-TCP relay, not the API.
+Without a credential file, localhost is read as 127.0.0.1.
+With a credential file, use --api or WAVEKIT_API_URL; hostname stays exact.
+Port 4713 is the RTL-TCP relay, not the API.
 `
 }
 

@@ -84,10 +84,11 @@ export const decoderRateReasonCodes = [
 	"external-input",
 ] as const
 
-/** Rate reasons plus the band reason; the suspension reasonCode enum. */
+/** Rate reasons plus the band and scanner-hold reasons; the suspension reasonCode enum. */
 export const decoderSuspensionReasonCodes = [
 	...decoderRateReasonCodes,
 	"frequency-out-of-band",
+	"tuner-scanning",
 ] as const
 
 const frequency = { type: "number", exclusiveMinimum: 0 } as const

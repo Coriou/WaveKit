@@ -15,6 +15,7 @@
 
 import { signalDecoder } from "./process-tools.js"
 import { EventEmitter } from "node:events"
+import { childAccessEnvironment } from "../access/runtime-hygiene.js"
 import { spawn, type ChildProcess } from "node:child_process"
 import { createConnection, type Socket } from "node:net"
 import { createSocket, type Socket as UdpSocket } from "node:dgram"
@@ -179,6 +180,7 @@ export abstract class NetworkProducerDecoder
 
 		try {
 			this.process = spawn(command, args, {
+				env: childAccessEnvironment(process.env),
 				stdio: ["pipe", "pipe", "pipe"],
 				detached: process.platform !== "win32",
 			})

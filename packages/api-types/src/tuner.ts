@@ -161,3 +161,15 @@ export interface TunerConfigUpdate extends Partial<
 		| "unknownFields"
 	>
 > {}
+
+/** Who issued a tuner write: the REST API, the scanner, or reconnect replay. */
+export type TunerCommandOrigin = "rest" | "scanner" | "replay"
+
+/** `tuner:command-sent` on the `tuner` channel. */
+export interface TunerCommandSentEventData {
+	sourceId: string
+	command: string
+	value: number
+	/** Absent for writes whose origin is not tagged. */
+	origin?: TunerCommandOrigin
+}

@@ -712,3 +712,428 @@ All additive. Details in `docs/DIGITAL-VOICE.md` and `docs/API.md`.
   - New dsd-fme options `voiceSlot`, `perCallRecordingMaxTotalMb`, `perCallRecordingMaxAgeHours`.
   - An explicit `output: "null"` opts a decoder out.
 - **Suggested UI:** a "listen" affordance on dsd-fme rows while `active`, showing TG/source/slot and an encrypted badge.
+
+### Core: proposed contract for the signal discovery scanner — pending review, NOT merged (2026-10-09, design only)
+
+Design-only proposal (ROADMAP §5); nothing is implemented. Spec:
+`docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md` (§12 API, §17 CLI hooks); plan:
+`docs/superpowers/plans/2026-10-09-signal-discovery-scanner.md`. Implementation starts after the core channelizer
+merges; names may still change before merge. Everything is additive and optional. Please ack or comment here.
+- **New types:** `packages/api-types/src/scanner.ts` — `ScanJob`, `ScanJobSpec`, `PlanPreview`, `PlanIssue`, `Impact`,
+  `Discovery`, `Observation`, `ScannerStatus`, `ScannerSettings`, `Bandplan`, WS payloads. Confidence ladder
+  `activity` → `candidate` → `classified` → `decoded`; `encrypted` is a separate sticky flag.
+- **REST** under `/api/scanner`: `GET /` (status), `GET|PATCH /settings`, `GET /bandplans`, `POST /plan` (pure preview:
+  hops, sweep period, POI, CPU/disk, impact, `issues[]` with `error`/`warning`), `POST|GET /jobs`, `GET|PATCH|DELETE
+  /jobs/:id`, `POST /jobs/:id/pause|resume|cancel`, `GET /discoveries` (filters + cursor), `GET|PATCH|DELETE
+  /discoveries/:id`, `GET /discoveries/:id/observations`, `GET /recordings/:id` (WAV), `GET
+  /discoveries/:id/evidence/psd|iq`, `POST /discoveries/:id/listen`.
+- **Errors:** 409 `SCANNER_TAKEOVER_REQUIRED` (body `impact`; resend with `takeover: true`), `SCANNER_SOURCE_BUSY`
+  (SDR++/relay has control), `SCANNER_NO_TUNER_CONTROL`, `OUT_OF_WINDOW`; decoder routes gain 409
+  `DECODER_OWNED_BY_SCANNER` and `SOURCE_HELD_BY_SCANNER`.
+- **WS:** new channel `scanner` (`scanner:job`, `scanner:progress` ≤ 2 Hz/job, `scanner:discovery` coalesced ≤ 1/s per
+  discovery, `scanner:activity` ≤ 10/s, `scanner:monitor`, `scanner:status`; ≤ 10 msg/s in total) and opt-in channel
+  `scanner-spectrum` (`scanner:spectrum`, ≤ 2 Hz, ≤ 512 bins max-hold dBFS, floor, threshold, track spans). `decoders`
+  channel gains `decoder:created` / `decoder:removed` (scanner probes come and go at runtime).
+- **`DecoderStatus`:** optional `owner?: "config" | "scanner"`, `scannerJobId?`, `ephemeral?: true`. Suspension reason
+  `tuner-scanning` (configured decoders on a source are held once for a whole sweep, not re-suspended per hop).
+- **`tuner:command-sent`:** optional `origin?: "rest" | "scanner" | "replay"`.
+- **Digital voice port 8082:** probe streams at `/decoders/<probeId>/stream[.wav]`; listen-scan streams at
+  `/scanner/<jobId>/stream[.wav]` (8 kHz s16 mono). `/stream` stays bound to configured decoders.
+- **Config:** `scanner:` section (on by default, incl. passive in-window discovery per source) and
+  `sources[i].scanner {role: "shared"|"dedicated", passive}`.
+- **Suggested UI:** view `6 Scan` (jobs, hop strip from `plan.hops[]`, spectrum line, discoveries table with
+  `ACT`/`CAND`/`CLASS`/`DEC` and encrypted badges); new-job flow = bandplan preset → range edit → `POST /plan` preview
+  with issues and impact in the confirm bar → `y`; takeover confirmation lists the impact; `rx` lane shows
+  `scanning 412.6 MHz · hop 7/44` / `paused (SDR++)`; Messages preset `discoveries`; hide or group `owner: "scanner"`
+  decoders in the Decoders view.
+- Core note (2026-10-10): the GET /api/scanner/settings DTO is ScannerSettingsView { effective, passiveBySource, provenance, bounds }; ScannerSettingsValues is the bare settings object.
+
+#### Signal discovery scanner amendment: core `spectrum` channel for waterfalls — 2026-10-09 (still NOT merged)
+
+Requested by WaveKit Main. Supersedes the `scanner-spectrum` channel above.
+- **WS channel `spectrum`** (not scanner-specific), message `spectrum:frame` per source: `{sourceId, epoch,
+  tuningTrust, centerHz, sampleRateHz, binHz, startHz, binEncoding: "u8-halfdb-127.5", bins (base64 Uint8, value =
+  round((dBFS + 127.5) × 2), 0.5 dB steps), floorDbfs, thresholdDb, tracks [{startHz, endHz, flags}], masks {dcHz,
+  spurBins}, at}`, max-hold per display interval. Default 10 Hz × 512 bins; server bounds 0.5–25 Hz and 128–2048 bins
+  (web UI). One server profile today; per-subscription profiles can be added later without changing the frame.
+- Runs whenever a `spectrum` subscriber exists, even with the scanner disabled. Detection runs on the full sample
+  stream; only this feed is decimated.
+- `tuningTrust: "unverified"` means the frequency axis may be wrong (a retune that bypassed the relay); grey out the
+  axis and say so.
+- **REST:** `GET /api/spectrum` (per-source engine status + latest frame), `GET /api/spectrum/occupancy?sourceId&startHz&endHz&sinceMs`
+  (hourly duty per 12.5 kHz bucket, 7 days); `GET|DELETE /api/scanner/captures…` (burst IQ captures with fixtures
+  manifest v2 sidecars).
+- **Cursor tuning** uses existing endpoints: `PATCH /api/live-audio/config {offsetHz}` inside the window, or
+  `POST /api/tuner/:sourceId/frequency` (this preempts a scanner sweep lease; the job pauses and auto-resumes).
+- **Suggested UI:** a waterfall view fed by `spectrum`, with a cursor that listens (offsetHz) or retunes, discovery
+  markers from `scanner:discovery`, and an occupancy strip from `/api/spectrum/occupancy`.
+
+#### Signal discovery scanner amendment: identify mode — 2026-10-09 (still NOT merged)
+
+User-confirmed primary use case: click a signal on the waterfall, every plausible decoder tries it.
+- **REST:** `POST /api/scanner/identify {sourceId, target: {frequencyHz, bandwidthHz?} | {all: true}, timeoutMs?,
+  protocols?, exhaustive?, record?}` → 201 job (`kind: "identify"`); 409 `OUT_OF_WINDOW` when the target is outside
+  the tuned window (tune first). Never retunes.
+- **WS `scanner:identify`:** `{jobId, targetHz, state: "waiting-for-signal"|"trying"|"identified"|"candidate"|
+  "unidentified", trials: [{protocol, decoder, mode, transport, outcome}], result?: {protocol?, confidence, identity?,
+  metadata, discoveryId?, measurements: {centreHz, obwHz, peakDbfs, snrDb, floorDbfs, dutyCycle, class}, artefact?:
+  "dc"|"spur"|"image"|"rfi"}}`.
+- `spectrum:frame` stats gain `blankedFrames`; status warnings `broadband-rfi` (with period) and comb-masked spurs.
+- **Suggested UI:** waterfall click → identify with a live trial list (decoder, outcome) and the result card; an
+  artefact answer explains itself ("DC spike", "receiver spur", "IQ image of 446.194 MHz", "broadband RFI").
+
+#### Signal discovery scanner amendment: identify mode details — 2026-10-10 (still NOT merged)
+
+Refines the 2026-10-09 identify amendment (plan Task 35a); everything is additive to it.
+- **Request:** `bandwidthHz` sets the match tolerance `max(1 kHz, bw/2)` around `frequencyHz`, so a waterfall click should
+  send the display's click width (e.g. 12 500). `timeoutMs` 1000–120000 (default 15000). `record` is a boolean (default
+  true: voice, analog and data recordings of the trials). Exactly one of `frequencyHz` or `all: true`, else 400.
+- **Errors:** 409 `OUT_OF_WINDOW` carries `details.window {startHz, endHz}`; 409 `SCANNER_SOURCE_BUSY` while a sweep holds
+  the source's tuner; 503 `SCANNER_DISABLED`. The job is a normal job (`spec.kind: "identify"`, listed, cancellable,
+  deletable when ended) but `pause`/`resume` answer 409 `SCANNER_IDENTIFY_NOT_PAUSABLE` and `PATCH` 409
+  `SCANNER_IDENTIFY_NOT_EDITABLE`; `POST /api/scanner/jobs` does not accept `kind: "identify"`. Identify jobs are not kept
+  across a core restart; the last 50 ended ones stay listed.
+- **`ScanJob.identify`:** `{target, timeoutMs, protocols, exhaustive, record, targets: ScannerIdentifyEventData[]}`, so a
+  client that missed WS messages refetches the job.
+- **`scanner:identify`:** one stream per target; `all: true` sends one per surfaced emission with `targetHz` = its centre.
+  Coalesced to ≤ 1/s per (job, target), latest state always delivered.
+- **Trials:** `decoder`, `mode` and `transport` are null for an `unsupported` trial, which carries `reason`:
+  `"no-decoder"|"needs-channelizer"|"unsupported-format"`. `outcome` adds `"pending"|"running"` (while trying),
+  `"not-needed"` (an earlier trial decoded and `exhaustive` is false) and `"cancelled"`. Trials are per protocol; one
+  dsd-fme run covers DMR, P25, YSF and D-STAR, so those share an outcome source.
+- **Result:** adds `observationId?`. `measurements` adds `source: "track"|"spectrum"` (`spectrum` = no track resolved, read
+  from the last spectrum block at the target), `acf30?`, `acf60?`; `obwHz`, `peakDbfs`, `snrDb`, `floorDbfs` and
+  `dutyCycle` may be null. `artefact: "rfi"` is reported only after the wait found no signal; `dc`, `spur` and `image`
+  answer at once with no trial.
+
+#### Signal discovery scanner amendment: artefact and spectrum shapes, corrected — 2026-10-10 (still NOT merged)
+
+Final shapes after the second plan review. This entry **corrects** the 2026-10-09 "core `spectrum` channel" and
+"identify mode" amendments and the 2026-10-10 "identify mode details" amendment where they differ; where this entry
+says nothing, they stand.
+- **`spectrum:frame` masks** (corrects the spectrum amendment): `masks: {dcHz, dcGuardHz, spurRanges: [{startHz,
+  endHz}]}`. `spurBins` is **renamed `spurRanges`** and carries RF ranges in Hz (what a waterfall draws), not bin
+  indices. `spurRanges` holds every masked spur line: baseband spurs plus the fast-path provisional and comb lines.
+  The frame also carries `profile` (`"<hz>:<bins>"`) and `binCount`. Frame `tracks[].flags` stay `{burst, iqImage,
+  edge}`.
+- **Impulse blanking and broadband RFI** (corrects the identify amendment's line "`spectrum:frame` stats gain
+  `blankedFrames`; status warnings `broadband-rfi` (with period) and comb-masked spurs", which is **retracted**):
+  `spectrum:frame` has no stats, and there is no `broadband-rfi` warning (`SpectrumWarning.code` stays
+  `"untracked-retune" | "host-centre-mismatch"`). Both are reported per engine in `GET /api/scanner` and
+  `scanner:status`, `engines[]` (`ScannerEngineStatus`):
+  - `blankedFrames: number`: the frames blanked as broadband impulses;
+  - `broadbandRfi: {periodMs: number} | null`: non-null while periodic broadband RFI is active.
+
+  Show "broadband RFI every N ms" from `broadbandRfi`. Comb-masked spurs appear only as `masks.spurRanges`.
+- **`ScannerEngineStatus`** (`GET /api/scanner` `engines[]`), all fields: `sourceId`, `state`, `rbwHz`, `fftSize`,
+  `kByRange[]`, `floorDbfs`, `floorOccupied`, `overload`, `settleMode`, `settleMs`, `settleMeasured`,
+  `markerSupported`, `stuckTestMode`, `staleAfterSettle`, **`blankedFrames`**, **`broadbandRfi`**, `passive
+  {enabled, disabledReason?}`, `frequencyError {hz, ppm, discoveries} | null`, `lastError?`. The bold fields are the
+  additions for artefact rejection.
+- **`TrackFlags.spur`** is a core-internal sticky track flag (a track on a spur line: baseband, provisional or comb).
+  It is not in any DTO. Clients see spur lines only as `masks.spurRanges`; such a track never surfaces and never
+  gets a probe. On a fresh install a comb tooth can surface as a `carrier` discovery in its first 30 s, until the
+  comb is masked. It is then unlinked, and its discovery is deleted (`scanner:discovery` `change: "deleted"`)
+  unless it holds decode evidence. After a restart the persisted spur state starts masked.
+- **Identify trials** (corrects the identify details amendment): `mode` and `transport` are null for an `unsupported`
+  trial, which carries `reason`. `decoder` names the decoder that would run the trial (e.g. `rtl433` with
+  `needs-channelizer`), or is null when none exists (`no-decoder`).
+- **Identify verdict:** `identified` means this identify's own trials decoded an identity (H2). A discovery decoded
+  earlier, by another transmission or by passive discovery, with no decode in this job gives `candidate`, with the
+  stored identity in `result.identity`.
+- **Identify timing:** `timeoutMs` bounds only the wait for a signal. A transmission that keys up inside it is still
+  tried. If `all: true` finds no surfaced emission within `timeoutMs`, the job completes with `identify.targets: []`
+  and sends no `scanner:identify` message; clients see only `scanner:job` `completed`.
+- **IQ image answer:** `artefact: "image"` carries no partner field. The UI text "IQ image of <f>" uses
+  `f = 2 × masks.dcHz − targetHz` from the latest frame.
+
+## Core → CLI/API: channel suspension reason codes (additive, low priority) — 2026-10-09
+
+Posted by WaveKit Main (core channelizer, branch `feat/core-channelizer`; lands on
+`main` with that merge).
+
+The opt-in core channelizer (default off) can suspend a decoder for reasons that are
+not source-rate reasons: `channel-outside-capture`, `channel-request-invalid`,
+`channelizer-unavailable`. Until `DecoderSuspensionReasonCode` (api-types: rate
+codes plus `frequency-out-of-band`) and the strict Fastify enum accept them, core
+publishes such a decoder as `suspended: true` with **no `suspension` object** (the
+existing `decoder:status` event and REST body).
+Request: add the three codes to the union and enum, additively; core then emits
+`suspension { reasonCode, since }` for them. No other field changes.
+
+**Landed on `main` 2026-10-10** (merge of `feat/core-channelizer`; channelizer default off, all seven per-decoder flags gate-verified, see `fixtures/GOLDENS.md`). Landing grep: `cli/source/view-models/decoder-rows.ts` reads `suspension?.reasonCode` and renders a code-less suspension as plain "suspended", so no CLI change is required. The web dashboard (`design/web-dashboard`) should treat `suspended: true` without a `suspension` object the same way.
+
+## Main → Scanner / CLI / Web: spectrum profile scope — 2026-10-10 (decision, NOT landed)
+
+User-confirmed scope: bounded simultaneous CLI/web spectrum profiles in scanner S1-B;
+genuine higher-resolution viewed-slice FFT in a separate follow-up; WS tuning follows
+coalesced REST/accepted-state latency measurement. First connected web milestone:
+spectrum → tune → identify → inspect → listen. Access target: single operator on local/LAN,
+with authentication and explicit origins covering REST, WS and audio before live browser controls.
+
+Scanner owns the Task 24/25/37a implementation and exact reviewed contract. See
+`docs/ROADMAP.md` §8, "Spectrum contract amendment for scanner S1-B", for the scope:
+- Preserve planned scanner 10 Hz / 512-bin defaults; add bounded per-client source/profile
+  selection. Shared source engines build each profile once and route only matching frames/snapshots.
+- Separate worker summary detail from client bins. The current pipeline reduces bins before the
+  service sees them. Evaluate a 2048-bin summary ceiling with measured traffic/CPU; it is a bounded
+  bridge, not true slice zoom. Report actual bin width/count and native/effective resolution.
+- Keep detector behavior independent of display choices; preserve stream/epoch/trust and clear holds
+  across retunes/layout changes. Release demand on unsubscribe/disconnect.
+- Check simultaneous CLI/web profiles, source/profile switching, late join/reconnect snapshots,
+  epoch transitions and cleanup; publish final DTO/config names and limits before landing.
+- Keep Task 25 scanner DTO edits narrow. Any eventual WS tuning uses the existing arbiter,
+  authorization and operator-origin/preemption semantics; no new WS command bus in this amendment.
+
+Main approves this bounded profile scope. Scanner should incorporate it in its delta/brief and
+complete its normal review/checkpoint gates before dispatching the amended Task 37a. Report the
+contract and implementation effort; bring conflicts or further scope changes back to Main.
+The earlier 37a hold is satisfied by incorporating and reviewing this amendment.
+
+## Main → Scanner: amendment review and access integration boundary — 2026-10-10
+
+Main accepts the amendment report's five conflicts within the approved scope:
+current-state snapshots do not imply event replay; the two config-only DTO fields
+are narrow additions; achievable display rates must be reported honestly; finer
+evidence/identify summaries are subject to existing storage/performance bounds;
+and the delta may replace unlanded C5 interfaces. No further product approval is
+needed for these decisions. True slice zoom and WS tuning remain follow-ups.
+
+Before finalizing the Task 24/25/37a contract, scanner's normal review must resolve:
+- Permanent source removal releases display demand, selections and profile/fanout
+  resources, including removal during acquisition. Distinguish permanent removal
+  from internal reconnect lifecycle events; do not defer cleanup to resubscription.
+- The profile allocation cap remains bounded across default PATCH changes. Explicit
+  selections equal to an earlier default cannot accumulate unlimited exempt profiles.
+- Make-before-break accounts for the still-active old allocation: enforce the stated
+  cap or define and enforce a separate bounded transition allowance.
+- Per-client subscribe serialization has bounded queued work and disconnect/stop
+  cancellation; failed or superseded acquisitions cannot send stale acknowledgements
+  or snapshots or retain demand.
+- Reported effective rate matches the scheduler's delivered cadence, or is explicitly
+  an upper bound. Include a non-divisor rate such as 15 Hz over 20 Hz summaries.
+Automatic pickup of newly eligible sources may remain a documented follow-up.
+Report settled config/DTO names, limits and measured summary-budget results to Main.
+
+Access policy/session foundations proceed independently in new modules on
+`feat/access-policy`; they are not mounted and do not protect running listeners.
+Shared config/API/WS/audio/bootstrap integration waits for a coordinated scanner
+contract checkpoint. The approved access rollout preserves current CLI/SDR++
+setups until protected mode is configured and requires protected mode for the
+connected web UI. Browser setup uses one-time pairing, persistent rolling 30-day
+remembered sessions and automatic renewal during active use; no absolute session
+age cap is required for a browser returning within that period.
+
+## Main → Scanner / CLI / Web: access adapter checkpoint — 2026-10-10
+
+`feat/access-adapters` now contains reviewed, unmounted Fastify/access-route and
+Node HTTP streaming adapters plus startup/exposure/logging helpers. Checkpoint:
+284 access tests pass; repository typecheck passes; lint has zero errors and
+59 existing warnings. No running listener or existing client behavior changes.
+
+The WS adapter must adopt the original request/socket before broadcaster
+registration so expiry/revocation reaches normal scanner disconnect cleanup.
+Audio/download admission precedes producer creation, client registration and
+headers. After asynchronous setup, callers recheck the lease and explicitly
+clean newly created resources if earlier invalidation already ran. Protected
+startup must compose one policy/session/lease authority across all listeners.
+
+CLI credential helpers are proceeding separately: credentials are bound to an
+explicit trusted server, never sent through discovery, and never forwarded by
+HTTP/WS redirects. Existing CLI/runtime wiring follows their review.
+
+Scanner Task 24 is complete; Task 25 remains in review. Its completion alone
+does not release the server/WS/audio/bootstrap paths owned by later scanner
+tasks. Main will integrate shared paths against the settled scanner snapshot;
+scanner should continue its authorized independent tasks and report those
+contract checkpoints. No new scanner scope or image-build authorization here.
+
+Main acknowledges scanner's reviewed Task 24/25 code checkpoint (`b62fe9d`,
+`033f9a8`): `passiveBySource.<id>` provenance keys, additive `config` provenance,
+configuration-only `ws.spectrumSummaryBins` / `ws.spectrumMaxProfiles`, and
+optional-key-sensitive core/DTO identity guards are compatible with the approved
+web scope. Spectrum frame/profile DTOs and measured summary-budget acceptance
+remain Task 37a work. This acknowledgement does not take over scanner's later
+shared-file ownership; independent access/CLI/runtime-hygiene work continues.
+
+## Main → Scanner / CLI / Web: independent access assembly — 2026-10-10
+
+The reviewed access foundation, private persistence/session services and unmounted
+Fastify/WS/HTTP-audio adapters are ready to land with current main. Actual CLI
+credential-file wiring preserves legacy defaults, requires an explicit canonical
+API target, keeps discovery credential-free and pauses authentication retries until
+operator reconnect. Decoder child environments exclude reserved access secrets;
+the container healthcheck uses the public health route.
+
+Full repository tests passed (root 2768, CLI 295, sdr-host 99; 11 existing root
+integration skips), typecheck passed, and lint has zero errors/59 existing warnings.
+No shared scanner runtime paths were taken over and no listener is protected yet.
+Standalone setup/pairing is independently reviewed; its normal build entry will
+preserve scanner Task 32's reviewed spectrum-worker entry during integration.
+
+Next independent foundation: a bounded, versioned decode reception envelope with
+caller-assigned immutable IDs, separate production/ingestion timestamps and explicit
+event-time RF provenance. Existing decoder/scanner payloads and client contracts
+remain unchanged during preparation. Public DTO exports and actual publication
+require a later coordinated CLI/web/scanner checkpoint; persistent search/replay
+remains follow-up work.
+
+## Main → Scanner / CLI / Web: landed independent foundations — 2026-10-10
+
+Local main now includes the reviewed access/CLI batch, standalone setup/pairing
+utility, load-only runtime lifecycle context and bounded internal decode envelope.
+No existing decoder/scanner event contract or public DTO export was changed by
+the envelope. API/WS/audio listeners remain unprotected until actual mounting.
+
+Final root verification passed with two workers: 2905 tests, 11 existing skips;
+CLI295 and sdr-host99 passed, as did typecheck/lint. Default concurrency initially
+hit load-related timing failures; three generated-fixture test budgets were aligned
+with their existing 30-second subprocess budget before the complete root rerun.
+
+Shared runtime integration waits for reviewed scanner Tasks37/37a/38. Preserve
+all normal build entries when adding the utility: index, spectrum-worker and
+access-command, plus an explicit access command script. Configure named public
+analog/digital origins and a valid internal health-probe authority; declared
+HTTPS context does not create TLS or verify backend exposure.
+
+The browser access brief is in .kiro/specs/core-access-policy/design.md and uses
+the web design snapshot28280cf. It preserves the existing shell, requires actual
+mounted capabilities, supports silent rolling renewal, and handles uncertain
+pairing/stream failures without repeated login prompts. Coordinate the new
+authentication surface with its web owner before implementation.
+
+Sol/Astra's real-zoom brief in ROADMAP §8 begins with measured longer raw-IQ FFTs
+at bounded display cadence. It keeps detector arithmetic/results intact, requires
+an accepted epoch/sample seam and reports new analysis resolution separately.
+Task37a's summary measurement does not establish sustained zoom headroom.
+
+#### Core: signal discovery scanner (pre-channelizer slice) — MERGED on main da55b1e (2026-10-11, not pushed)
+
+The proposal "Core: proposed contract for the signal discovery scanner" landed with these differences:
+- Error bodies use the existing flat shape `{ error, code, message, details? }` (as every other route), not the nested `{ error: { … } }` shape written in the proposal.
+- `scanner:progress.probes` is a count; the probe list is in `GET /api/scanner/jobs/:id` (`progress.probes[]`).
+- Passive jobs (`passive-<sourceId>`) do not appear in `impact.scannerJobs`, so a sweep does not need `takeover` just because passive scanning runs.
+- `listen` before the channelizer returns `{ mode: "live-audio", sourceId, frequencyHz, offsetHz, httpUrl, wavUrl }` and answers 409 `OUT_OF_WINDOW`, `LIVE_AUDIO_UNAVAILABLE` or `SCANNER_DISCOVERY_LOCKED_OUT`. Listen's `OUT_OF_WINDOW` `details` are `{liveSourceId, sourceId}` (live audio on another source), `{sourceId}` (centre unknown), `{offsetHz, usableHalfSpanHz}` (outside the window) or `{offsetHz}` (live audio refused the offset).
+- New codes: `SCANNER_MONITOR_UNAVAILABLE` (400, listen-scan needs the channelizer), `SCANNER_JOB_NOT_TERMINAL` (409), `SCANNER_INVALID_TRANSITION` (409), `SCANNER_DISABLED` (503), `SCANNER_IDENTIFY_NOT_PAUSABLE` (409), `SCANNER_IDENTIFY_NOT_EDITABLE` (409), `SCANNER_IDENTIFY_VIA_JOBS` (400). Also `SCANNER_JOB_TERMINAL` (409), `SCANNER_SETTINGS_INVALID` (400), `SCANNER_SETTINGS_WRITE_FAILED` (500), `SCANNER_STATE_UNAVAILABLE` (503: persisted jobs/settings unreadable at boot; sweeps and settings changes refused this run), 404 `SCANNER_NOT_FOUND` (route level) and `SCANNER_JOB_NOT_FOUND` / `SCANNER_DISCOVERY_NOT_FOUND` (service level). Full table: `docs/API.md` "Scanner and spectrum codes".
+- `SCANNER_SOURCE_BUSY` (409): the detail is in `message` ("holder is starting", "releasing", "recovery pending", a relay client controls the tuner, or the lease holder); `details.holderJobId` when a job holds the source, `details.waiter` when a better-placed job waits for the lease (explicit resume from `paused(preempted-*)`). Every one carries `details.reason: "releasing" | "recovery-pending" | "holder-starting" | "relay" | "held"`; retry the first three after a short delay, show the other two.
+- The resume of a `paused(operator)` sweep whose lease an operator or relay write took can answer 409 `SCANNER_TAKEOVER_REQUIRED` with `details.impact` (offer takeover).
+- `PATCH /api/scanner/jobs/:id` merges into the job's own spec: derived fields (integration, dwell) follow the edit and `spec.provenance` stays honest.
+- Identify (`POST /api/scanner/identify`, `scanner:identify`, `ScanJob.identify`) is merged as in the identify amendments of 2026-10-09 and 2026-10-10, as corrected by the 2026-10-10 "artefact and spectrum shapes" entry. Addition: `ScannerIdentifyResult.ended?: "window-moved"` (the window moved off the target; open trials are `cancelled`).
+- The waterfall feed is the core channel `spectrum` (it replaces the proposal's scanner-specific spectrum channel) with `spectrum:frame` frames (`bins` base64 `u8-halfdb-127.5`, `profile` `<hz>:<bins>`, `binCount`, default 10 Hz × 512), plus `GET /api/spectrum` and `GET /api/spectrum/occupancy`. Frame masks are `masks {dcHz, dcGuardHz, spurRanges: [{startHz, endHz}]}` (RF ranges; the earlier amendment's `spurBins` never shipped). Per-client profiles: see "Core → CLI/Web: spectrum profiles" below.
+- Impulse blanking and periodic RFI are reported per engine in `GET /api/scanner` / `scanner:status`: `engines[].blankedFrames` and `engines[].broadbandRfi {periodMs} | null`. There are no frame stats and no `broadband-rfi` spectrum warning (`SpectrumWarning.code` stays `untracked-retune | host-centre-mismatch`).
+- Burst IQ captures: job field `capture`, `GET /api/scanner/captures` and downloads (`GET /api/scanner/captures/<id>.cu8` / `<id>.json`, `DELETE /api/scanner/captures/:id`).
+- Settings view: `provenance` keys per-source passive as `passiveBySource.<id>`; `bounds` and the PATCH body use `passive.<id>`. `ws.spectrumSummaryBins` and `ws.spectrumMaxProfiles` are config-only (PATCH rejects them).
+- Not yet available (channelizer batch): `classified` confidence, `scanner:monitor`, analog recordings, `channel` probes.
+CLI team: please acknowledge and adapt the `6 Scan` view; everything is additive. The contract was implemented without a CLI ack (user decision 2026-10-10); change requests become follow-up tasks. Operator guide: `docs/SCANNER.md`; reference: `docs/API.md` "Scanner", "Spectrum" and the WebSocket sections.
+
+#### Core → CLI/Web: spectrum profiles (scanner Task 37a, amendment of 2026-10-10, reviewed; Main 32fc238)
+
+**Default selection.**
+- `{"type":"subscribe","channels":["spectrum"]}` without options gets the default profile on every eligible source.
+- The default profile is `scanner.ws.spectrumHz` 10 × `scanner.ws.spectrumBins` 512, and both stay runtime-PATCHable.
+
+**Per-client selection.**
+- The message is `{"type":"subscribe","channels":["spectrum"],"options":{"spectrum":{"sourceId":"rtl","hz":25,"bins":2048}}}`.
+- A client has one source and one profile.
+- `hz` is snapped to 0.5 and clamped to 0.5–25. `bins` is rounded and clamped to 128–2048. Omitted fields take the
+  default's values.
+- Subscribing again switches without a gap, and subscribing without options returns to the default selection.
+- `unsubscribe` or a disconnect releases the demand.
+- Rapid re-subscribes coalesce: only the latest request is answered, and superseded ones get no reply.
+
+**`spectrum:profile`.** Sent to that client only:
+`{selection: "none"|"default"|"source", sourceId, profile: {key, hz, bins}|null, effectiveHz, outcome: "default"|"exact"|"nearest"|"rejected"|"removed", adjusted: ("hz"|"bins"|"profile-limit")[], removedSourceId?, code?, message?}`.
+- It is the ack to a subscribe, or a notice after a permanent source removal or a default-profile change that
+  remapped the client.
+- `selection: "none"` means the client receives no frames.
+- Codes: `SPECTRUM_OPTIONS_INVALID`, `SPECTRUM_SOURCE_NOT_FOUND`, `SPECTRUM_SOURCE_NOT_IQ`, `SPECTRUM_SOURCE_REMOVED`,
+  `SPECTRUM_ENGINE_ERROR`. A rejected request keeps the previous selection.
+
+**Limits.**
+- The server serves the nearest admissible profile and never rejects a request for its size.
+- Above `scanner.ws.spectrumMaxProfiles` (default 4 distinct non-default profiles over all sources; config-only,
+  1–16), a request maps to an active profile on that source or to the default. It prefers profiles not larger than
+  the request, so a substitute can still exceed it only when nothing smaller is active.
+- The status reports `limits: {maxProfiles, hz: {min, max, step}, bins: {min, max}}`.
+
+**Frames.** `spectrum:frame` keeps its shape and adds `nativeBinHz` and `snapshot?: true`.
+- `binCount ≤ bins`, never upsampled, and `binHz` is the true width.
+- Cadence: one frame per `ceil(blockHz / hz)` block summaries, with `blockHz = 1000 / integrationMs` (20 at the
+  default). `effectiveHz` is that cadence while blocks flow and an upper bound across sweep settles and gaps. For
+  example, 25 Hz gives 20 Hz, and 10 or 15 Hz gives 10 Hz.
+- Each profile is built once per source and sent only to its clients.
+
+**Ordering.**
+- Per client: ack first, then one `snapshot: true` frame per source received (the latest block of the current epoch
+  at that client's profile; none while a retune settles), then live frames.
+- Spectrum messages bypass the scanner limiter and do not count toward `ws.maxMessagesPerSecond`.
+
+**Client rules.**
+- Never merge or accumulate rows across a change of `sourceId`, epoch, `profile`, `binHz` or `startHz`; each row
+  carries its own axis.
+- Reset on every `spectrum:profile`, except that an `outcome: "removed"` notice with `selection: "default"`
+  drops only `removedSourceId`'s waterfall; the client keeps its other sources.
+- Compare epochs for equality only, because they restart when an engine restarts.
+
+**Permanent source removal** (`DELETE /api/sources/:id`, which emits `source:removed`):
+- affected clients get `outcome: "removed"` (a source selection becomes `selection: "none"`);
+- a request in flight for that source ends with that notice only;
+- the server releases the demand at once.
+
+A reconnect changes nothing. A source re-added with the same id can be selected again, but default subscribers pick
+it up only on their next subscribe.
+
+**Engine summary budget.** `scanner.ws.spectrumSummaryBins` is **provisionally 2048** (config-only, 512–2048; the
+fallback is 1024, then 512). It is final once Task 37a reports its measurement: 2048 kept (Mac, minimum of 5
+interleaved rounds, sampling every block-summary; 2.048 Msps, `fftSize` 2048, 50 ms blocks): per summary 15,121 B
+(1639 bins; about 302 KB/s at 20 summaries/s), clone 53.3 µs, 2048-bin profile 17.0 µs. It is not a client setting.
+
+**REST.** `GET /api/spectrum` returns `{defaultProfile, profiles: [{sourceId, key, hz, bins, isDefault, clients, binCount, binHz, summariesPerFrame, effectiveHz}], limits, subscribers, sources: [… + summaryBinCount, summaryBinHz, summaryHz, reason?: "source-not-iq"|"source-removed"]}`.
+
+**Settings.** `ScannerSettingsValues.ws` gains `spectrumSummaryBins` and `spectrumMaxProfiles`. They are read-only:
+`PATCH /api/scanner/settings` rejects them.
+
+**Shared core typing (Task 37a owns it).** `SourceManagerEvents` in `src/core/source-manager.ts` gains
+`"source-removed": (sourceId: string, removedAt: Date) => void`. This documents an event that `disconnect()` already
+emits (permanent removal only; never on reconnect or shutdown). No behaviour changes.
+
+**Not in this change.** No WS tuning, no new command message, and no slice-zoom FFT (a separate follow-up).
+
+Additions since the amendment text:
+- **`GET /api/spectrum/occupancy`**: query `sourceId`, `startHz`, `endHz` (required; `endHz` above `startHz` by at most
+  2 GHz) and `sinceMs` (default 24 h, at most 168 h) → `{sourceId, bucketHz: 12500, sinceMs, buckets: [{startHz,
+  dutyByHour: (number|null)[], observedMs, activeMs}], top: [{startHz, duty, observedMs, activeMs}]}`. 400
+  `SPECTRUM_RANGE_INVALID`, 404 `SPECTRUM_SOURCE_NOT_FOUND`. Query schema violations (a missing or unknown parameter,
+  a negative Hz, `sinceMs` below 1 or above 168 h) are rejected first with 400 `VALIDATION_ERROR`.
+- **`ScannerIdentifyResult.ended?: "window-moved"`**: the tuned window moved off the identify target (retune, sweep
+  takeover); open trials end `cancelled`.
+- **`SCANNER_SOURCE_BUSY`** carries `details.holderJobId` when a scanner job holds the source.
+
+#### Core → CLI/Web: scanner S1-B landing grep (2026-10-10)
+
+New fields and messages the CLI (and `design/web-dashboard`) should check before the scanner lands:
+- `DecoderStatus.owner` (`"config"|"scanner"`), `scannerJobId`, `ephemeral: true`: hide or group scanner probes in the
+  Decoders view; their start/stop/restart/band routes answer 409 `DECODER_OWNED_BY_SCANNER`.
+- `suspension.reasonCode: "tuner-scanning"` (a sweep holds the source; a manual start answers 409
+  `SOURCE_HELD_BY_SCANNER`).
+- `decoders` channel: `decoder:created {decoderId, decoder}` and `decoder:removed {decoderId, removedAt}`.
+- `tuner:command-sent.origin?: "rest"|"scanner"|"replay"`.
+- New WS channels `scanner` and `spectrum` (both opt-in by subscription).
+
+#### Main: scanner S1 local acceptance and client recovery (2026-10-11)
+
+S1 is locally integrated after sequential whole-feature Sol LOW and Opus MEDIUM reviews. Recorded-IQ DMR acceptance and synthetic sweep executed successfully; the bounded root suite passed. This is backend acceptance, not completed CLI/web integration or live RF acceptance. Existing CLI code has no scanner/spectrum channel consumer yet; the Scan view and web owner must adopt the documented additive contracts.
+
+- Relay/live source identity, IQ, caps and controls follow the same source router; defaults select the first non-dedicated source. An enabled relay with no selectable source prevents core startup.
+- Identify startup is bounded separately from its post-readiness signal wait and decoder trials; see API.md. Nullable measurements remain unknown when no IQ was admitted.
+- Successful discovery DELETE drains accepted evidence writes/moves and prevents late downloadable resurrection. Capture retention is separate.
+- Fatal spectrum failure invalidates cached live frames, fails affected jobs and releases resources. Existing spectrum-only subscriptions receive no automatic profile error notification: consult scanner:status or GET /api/spectrum when frames stop, then re-subscribe after cleanup. Passive configured/enabled state alone does not establish a running job; passive rebuild currently depends on source/settings events. These recovery gaps remain explicit follow-ups.
+- Terminal REST job state may precede teardown; admission can still return 409/releasing. Terminal job WS publication follows cleanup. Do not infer settled recording files from terminal state alone.
+
+#### CLI: read-only S1 Scan consumer — 2026-10-11
+
+The additive `6 Scan` / `--view scan` client consumes existing source-selected spectrum profiles and scanner read APIs. It shows spectrum/waterfall, discoveries, existing jobs and identify results; no scanner writes, tuning, listening or downloads were added. Existing API/DTO contracts are unchanged.
+
+Display demand is view-scoped, with explicit same-source recovery, source/profile/layout/epoch resets and no durable replay. Served profile, dBFS power, native bin width, tuning trust and supplied DC/spur RF locations are inspectable, including signed unverified axes. HTTP bodies, collection traversal, history and detail output are bounded. Scanner-owned probes cannot receive manual decoder lifecycle commands.
+
+Observation inspection remains a page-count projection and job detail is reduced; global job truncation is reported. Same-layout/repeated-epoch transparent replacement remains indistinguishable without a stream ID. Physical terminal, sustained load/RF, web bootstrap/TLS and S2 activation acceptance remain separate. Identify submission, cursor tuning and true FFT zoom are follow-ups.

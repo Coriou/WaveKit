@@ -424,6 +424,62 @@ csdr:
   bufferElements: 65536
 
 # -----------------------------------------------------------------------------
+# Signal discovery scanner
+# -----------------------------------------------------------------------------
+# Finds and characterises activity on a source, confirms it with a probe
+# decoder where one exists, and reports each emitter once
+# (docs/SCANNER.md). On by default, including passive in-window discovery on
+# every shared source. Values below are the defaults; uncomment to change.
+# Most keys can also be changed at runtime with PATCH /api/scanner/settings.
+#
+# Env: WAVEKIT_SCANNER__ENABLED=false, WAVEKIT_SCANNER__CPU_BUDGET_CORES=0.5,
+#      WAVEKIT_SCANNER__MAX_PROBES__OFFSET=1, WAVEKIT_SCANNER__STORAGE__DIR=...
+# Per source: sources[i].scanner { role: shared | dedicated, passive: true }.
+# A dedicated source is never the default source for decoders without a
+# sourceId.
+#
+# scanner:
+#   enabled: true
+#   channelTier:                # config only; not exposed or changed by scanner settings PATCH
+#     enabled: false
+#     minMs: 500                 # integer 300..2000
+#   passive: { enabled: true, offsetProbes: false }
+#   cpuBudgetCores: 1.0
+#   cpuGuardPercent: 90
+#   maxProbes: { offset: 1, channel: 4 }
+#   ringSeconds: 3
+#   detection:
+#     fftSize: auto              # or a power of two 512..16384
+#     integrationMs: 50
+#     sensitivity: normal        # low | normal | high
+#     faTargetPerMhzMin: 1.0
+#     dcGuardHz: 1500
+#     ppmMargin: 2
+#     clipFraction: 0.001
+#     hysteresisDb: 3
+#     minSurfaceBlocks: 2
+#     shortIntegrationMs: 5      # short-burst path (null = off)
+#     overlap: 0                 # FFT frame overlap: 0 or 0.5 (doubles the FFT cost)
+#   sweep:
+#     markers: true
+#     markerTimeoutMs: 2000
+#     pllSettleMs: 5
+#     settleMs: { local: 300, network: 1000 }
+#     revisitShare: 0.3
+#   hold: { maxHoldMs: 60000, hangMs: 2000, preRollMs: 300 }
+#   storage:
+#     dir: null                  # null = <stateDir>/scanner
+#     maxRecordingsMb: 512
+#     maxEvidenceMb: 64
+#     maxJournalMb: 64
+#     maxAgeDays: 30
+#     discoveryMaxAgeDays: 180
+#     minFreeDiskMb: 2048
+#     maxDiscoveries: 10000
+#     maxCapturesMb: 256         # burst IQ captures (job.capture)
+#   ws: { maxMessagesPerSecond: 10, spectrumHz: 10, spectrumBins: 512, spectrumSummaryBins: 2048, spectrumMaxProfiles: 4 }   # spectrum feed: default profile 0.5-25 Hz, 128-2048 bins; summary budget 512-2048 (provisional 2048) and profile cap 1-16 are config-only
+
+# -----------------------------------------------------------------------------
 # Health Monitoring
 # -----------------------------------------------------------------------------
 # Configure decoder health monitoring. Decoders transition through health states:
@@ -663,3 +719,20 @@ csdr:
 #   checkInterval: 5000
 #   idleTimeout: 30000
 # ---
+
+# Core channelizer (opt-in prototype; docs/superpowers/specs/2026-10-09-core-channelizer-prototype-addendum.md).
+# Off by default. When on, decoders with `useChannelizer: true` get exact-rate IQ
+# from one wavekit-chan process per source; raw fanout is unchanged.
+# channelizer:
+#   enabled: false
+#   binaryPath: wavekit-chan
+#   socketDir: /var/run/wavekit/chan
+#   usableFraction: 0.8
+#   channelQueueMs: 250
+#   inputHighWaterMark: 262144
+#   blockSamples: 16384
+
+# Protected runtime is opt-in; provision private state with the access command.
+# Public listener mappings are validated separately from private state.
+access:
+  mode: legacy

@@ -1,3 +1,5 @@
+import { MachineCredential } from "../../../cli/source/data/access-credentials.js"
+import { createCliFetch } from "../../../cli/source/data/access-transport.js"
 import { describe, expect, it, vi } from "vitest"
 import { createApiClient } from "../../../cli/source/data/api-client.js"
 import type { FetchLike } from "../../../cli/source/data/config.js"
@@ -294,4 +296,205 @@ describe("A2 re-review: never report a landed write as failed", () => {
 			})
 		}
 	})
+})
+
+// Validates: core-access-policy requirements 6.3, 6.4.
+describe("protected REST denial semantics", () => {
+	it.each([401, 403])(
+		"keeps %s as an HTTP answer and a failed write without echoing server secrets",
+		async status => {
+			const secret = Buffer.alloc(32, 7).toString("base64url")
+			const request = createCliFetch({
+				policy: {
+					origin: "http://127.0.0.1:9000",
+					credentials: async () => new MachineCredential(secret),
+				},
+				fetch: async () =>
+					new Response(
+						JSON.stringify({ code: "AUTH_REQUIRED", message: secret }),
+						{ status },
+					),
+			})
+			const api = client(request)
+			const get = await api.get("status")
+			expect(get).toMatchObject({
+				ok: false,
+				error: { kind: "http", status, message: `HTTP ${status}` },
+			})
+			const write = await api.decoder("readsb", "restart")
+			expect(write).toMatchObject({
+				ok: false,
+				outcome: "failed",
+				status,
+				code: "AUTH_REQUIRED",
+				message: `HTTP ${status}`,
+			})
+			expect(JSON.stringify({ get, write })).not.toContain(secret)
+		},
+	)
+})
+
+describe("bounded Scan HTTP bodies", () => {
+	it("caps actual streamed bytes before parsing despite a false small Content-Length", async () => {
+		const { readBoundedJson, SCAN_BODY_BYTES } =
+			await import("../../../cli/source/data/api-client.js")
+		let cancelled = false
+		const body = new ReadableStream<Uint8Array>({
+			start(c) {
+				c.enqueue(new Uint8Array(SCAN_BODY_BYTES))
+				c.enqueue(new Uint8Array(1))
+			},
+			cancel() {
+				cancelled = true
+			},
+		})
+		await expect(
+			readBoundedJson(
+				{
+					ok: true,
+					status: 200,
+					statusText: "",
+					headers: { get: () => "1" },
+					body,
+					json: async () => {
+						throw new Error("uncapped parser")
+					},
+				},
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({ kind: "too-large" })
+		expect(cancelled).toBe(true)
+	})
+	it("never falls back to unbounded json and aborts a stalled reader", async () => {
+		const { readBoundedJson } =
+			await import("../../../cli/source/data/api-client.js")
+		const json = vi.fn(async () => ({}))
+		await expect(
+			readBoundedJson(
+				{ ok: true, status: 200, statusText: "", json },
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({ kind: "unavailable" })
+		expect(json).not.toHaveBeenCalled()
+		const controller = new AbortController()
+		const read = readBoundedJson(
+			{
+				ok: true,
+				status: 200,
+				statusText: "",
+				json,
+				body: new ReadableStream<Uint8Array>(),
+			},
+			controller.signal,
+		)
+		controller.abort()
+		await expect(read).rejects.toMatchObject({ kind: "timeout" })
+	})
+	it("keeps safe HTTP code/status, rejects malformed JSON, and guards successful DTOs", async () => {
+		const { getScan } = await import("../../../cli/source/data/api-client.js")
+		const response =
+			(body: string, status = 200) =>
+			async () =>
+				new Response(body, { status })
+		await expect(
+			getScan(
+				response(
+					'{"code":"SCANNER_STATE_UNAVAILABLE","message":"secret"}',
+					503,
+				),
+				"http://core",
+				"jobs",
+				"/api/scanner/jobs",
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({
+			status: 503,
+			code: "SCANNER_STATE_UNAVAILABLE",
+			message: "HTTP 503 SCANNER_STATE_UNAVAILABLE",
+		})
+		await expect(
+			getScan(
+				response("{"),
+				"http://core",
+				"jobs",
+				"/api/scanner/jobs",
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({ kind: "invalid" })
+		await expect(
+			getScan(
+				response("[]"),
+				"http://core",
+				"jobs",
+				"/api/scanner/jobs",
+				new AbortController().signal,
+			),
+		).resolves.toEqual([])
+	})
+})
+
+it("bounds Scan waiting even when an injected fetch ignores abort", async () => {
+	const { getScan } = await import("../../../cli/source/data/api-client.js")
+	const controller = new AbortController()
+	const read = getScan(
+		() => new Promise(() => undefined),
+		"http://localhost",
+		"status",
+		"/api/scanner",
+		controller.signal,
+	)
+	const result = expect(read).rejects.toMatchObject({ kind: "timeout" })
+	controller.abort()
+	await result
+})
+
+it("preserves authenticated body streams for bounded Scan reads", async () => {
+	const { getScan } = await import("../../../cli/source/data/api-client.js")
+	const { SCAN_STATUS } = await import("../../../cli/source/test/fixtures.js")
+	const nativeFetch = vi.fn(
+		async () => new Response(JSON.stringify(SCAN_STATUS)),
+	)
+	vi.stubGlobal("fetch", nativeFetch)
+	try {
+		const fetchFn = createCliFetch({
+			policy: {
+				origin: "http://localhost:9000",
+				credentials: async () =>
+					new MachineCredential(Buffer.alloc(32, 7).toString("base64url")),
+			},
+		})
+		const value = await getScan(
+			fetchFn,
+			"http://localhost:9000",
+			"status",
+			"/api/scanner",
+			new AbortController().signal,
+		)
+		expect(value.enabled).toBe(SCAN_STATUS.enabled)
+		expect(nativeFetch).toHaveBeenCalledTimes(1)
+	} finally {
+		vi.unstubAllGlobals()
+	}
+})
+
+it("handles a fetch rejection arriving after caller cancellation", async () => {
+	const { getScan } = await import("../../../cli/source/data/api-client.js")
+	const controller = new AbortController()
+	let rejectLate: ((reason: Error) => void) | undefined
+	const read = getScan(
+		() =>
+			new Promise((_resolve, reject) => {
+				rejectLate = reject
+			}),
+		"http://localhost",
+		"jobs",
+		"/api/scanner/jobs",
+		controller.signal,
+	)
+	const result = expect(read).rejects.toMatchObject({ kind: "timeout" })
+	controller.abort()
+	await result
+	rejectLate!(new Error("late fetch rejection"))
+	await Promise.resolve()
+	await Promise.resolve()
 })

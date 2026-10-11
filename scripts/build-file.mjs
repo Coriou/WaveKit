@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { build, context } from "esbuild"
+import { basename, extname } from "node:path"
 import process from "node:process"
 
 const args = process.argv.slice(2)
@@ -12,7 +13,9 @@ for (const arg of args) {
 		continue
 	}
 	if (arg.startsWith("-")) continue
-	entryPoints.push(arg)
+	// Flat output: dist/<name>.js for every entry, so dist/index.js can load
+	// dist/spectrum-worker.js with new URL("./spectrum-worker.js", import.meta.url).
+	entryPoints.push({ in: arg, out: basename(arg, extname(arg)) })
 }
 
 if (entryPoints.length === 0) {

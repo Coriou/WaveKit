@@ -2,11 +2,18 @@ import WebSocket from "ws"
 import { parseServerMessage } from "./guards.js"
 import type { Inbound } from "./types.js"
 
+export type AccessBlockedReason =
+	| "credential-unavailable"
+	| "unauthorized"
+	| "forbidden"
+
 export interface WsHandlers {
 	open(): void
 	message(text: string): void
 	close(code: number, reason: string): void
 	error(message: string): void
+	/** Pause until an operator retries; no server diagnostic or credential is passed. */
+	accessBlocked?(reason: AccessBlockedReason): void
 }
 export interface WsHandle {
 	send(text: string): void
@@ -127,15 +134,40 @@ export interface WsClient {
 	stop(): void
 	reconnectNow(): void
 	/** True while a socket exists, connecting or open. */
+	setScanSource(sourceId: string | null): void
 	connected(): boolean
 }
 
 export function createWsClient(deps: WsClientDeps): WsClient {
+	let scanSource: string | null = null
+	let scanSent = false
+	function sendScan(): void {
+		if (!open || !handle) return
+		if (scanSource) {
+			handle.send(
+				JSON.stringify({
+					type: "subscribe",
+					channels: ["scanner", "spectrum"],
+					options: { spectrum: { sourceId: scanSource, hz: 5, bins: 512 } },
+				}),
+			)
+			scanSent = true
+		} else if (scanSent) {
+			handle.send(
+				JSON.stringify({
+					type: "unsubscribe",
+					channels: ["scanner", "spectrum"],
+				}),
+			)
+			scanSent = false
+		}
+	}
 	let generation = 0
 	let handle: WsHandle | null = null
 	let timer: unknown = null
 	let attempt = 0
 	let stopped = true
+	let accessPaused = false
 	let lastError = ""
 	/** True between the subscribe ack (ws:open) and the socket's close. */
 	let open = false
@@ -158,7 +190,9 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 	}
 
 	function connect(): void {
-		if (stopped) return
+		open = false
+		scanSent = false
+		if (stopped || accessPaused) return
 		const url = deps.url()
 		const gen = ++generation
 		if (url === null) {
@@ -168,11 +202,16 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		lastError = ""
 		deps.emit({ kind: "ws:connecting", at: deps.now(), attempt })
 		let local: WsHandle | null = null
+		let pendingSubscribe = false
 		try {
 			local = deps.factory(url, {
 				open: () => {
 					if (gen !== generation) return
-					local?.send(
+					if (local === null) {
+						pendingSubscribe = true
+						return
+					}
+					local.send(
 						JSON.stringify({ type: "subscribe", channels: [...CHANNELS] }),
 					)
 				},
@@ -187,13 +226,25 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 					}
 					const event = parseServerMessage(raw)
 					if (!event) {
-						deps.emit({ kind: "ws:invalid", at: deps.now() })
+						const scan =
+							typeof raw === "object" &&
+							raw !== null &&
+							"type" in raw &&
+							typeof raw.type === "string" &&
+							/^(scanner|spectrum):/.test(raw.type)
+						deps.emit({
+							kind: "ws:invalid",
+							at: deps.now(),
+							...(scan ? { scan: true } : {}),
+						})
 						return
 					}
 					if (event.type === "subscribed") {
+						if (open) return // additive acknowledgements do not reopen/resync the socket
 						attempt = 0
 						open = true
 						deps.emit({ kind: "ws:open", at: deps.now() })
+						sendScan()
 						return
 					}
 					deps.emit({ kind: "ws", event, at: deps.now() })
@@ -202,8 +253,25 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 					if (gen !== generation) return
 					lastError = message
 				},
+				accessBlocked: reason => {
+					if (gen !== generation) return
+					accessPaused = true
+					generation++
+					clearTimer()
+					open = false
+					handle = null
+					local?.close()
+					deps.emit({
+						kind: "ws:close",
+						at: deps.now(),
+						code: 0,
+						reason: `access blocked: ${reason}; reconnect to retry`,
+						nextRetryAt: null,
+					})
+				},
 				close: (code, reason) => {
 					if (gen !== generation) return
+					generation++
 					handle = null
 					open = false
 					scheduleRetry(code, reason !== "" ? reason : lastError)
@@ -212,11 +280,18 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		} catch (err: unknown) {
 			// A synchronous throw (e.g. a URL with a fragment) must not escape:
 			// from the retry timer it would be an uncaught exception.
+			if (gen !== generation) return
 			handle = null
 			scheduleRetry(0, err instanceof Error ? err.message : String(err))
 			return
 		}
+		if (gen !== generation || stopped || accessPaused) {
+			local.close()
+			return
+		}
 		handle = local
+		if (pendingSubscribe)
+			local.send(JSON.stringify({ type: "subscribe", channels: [...CHANNELS] }))
 	}
 
 	return {
@@ -227,6 +302,7 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		},
 		stop: () => {
 			stopped = true
+			accessPaused = false
 			open = false
 			generation++
 			clearTimer()
@@ -235,6 +311,7 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 		},
 		reconnectNow: () => {
 			stopped = false
+			accessPaused = false
 			generation++
 			clearTimer()
 			if (open) {
@@ -253,6 +330,10 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 			handle = null
 			attempt = 0
 			connect()
+		},
+		setScanSource: sourceId => {
+			scanSource = sourceId
+			sendScan()
 		},
 		connected: () => handle !== null,
 	}

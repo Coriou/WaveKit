@@ -19,7 +19,20 @@ import type {
 	TunerGainMode,
 	TunerDirectSampling,
 	TunerControlMode,
+	TunerCommandOrigin,
 } from "@wavekit/api-types"
+
+/**
+ * Optional last argument of every write. `origin` is reported on
+ * "command-sent" (signal discovery spec § 10.3). `accept: false` writes the
+ * command and updates state and caps, marks the field known (inferred) and
+ * records no desired field; a field accepted earlier is still replayed with
+ * its current value. Test mode is never a desired field, so it is never replayed.
+ */
+export interface TunerWriteOptions {
+	origin?: TunerCommandOrigin
+	accept?: boolean
+}
 
 /**
  * Sample rates the RTL2832U accepts. librtlsdr's rtlsdr_set_sample_rate()
@@ -100,7 +113,6 @@ type DesiredField =
 	| "gain"
 	| "ppm"
 	| "ifGain"
-	| "testMode"
 	| "agcMode"
 	| "directSampling"
 	| "offsetTuning"
@@ -117,7 +129,6 @@ const COMMAND_FIELDS: Record<number, DesiredField> = {
 	[RTL_TCP_COMMANDS.SET_GAIN]: "gain",
 	[RTL_TCP_COMMANDS.SET_FREQ_CORRECTION]: "ppm",
 	[RTL_TCP_COMMANDS.SET_IF_GAIN]: "ifGain",
-	[RTL_TCP_COMMANDS.SET_TEST_MODE]: "testMode",
 	[RTL_TCP_COMMANDS.SET_AGC_MODE]: "agcMode",
 	[RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING]: "directSampling",
 	[RTL_TCP_COMMANDS.SET_OFFSET_TUNING]: "offsetTuning",
@@ -155,7 +166,7 @@ const STATE_FIELDS: readonly TunerStateField[] = [
 /**
  * Reconnect replay order (librtlsdr semantics): sampling path, xtals and PPM
  * first, rate before center, then front-end toggles, then the gain group in
- * acceptance order, then test mode.
+ * acceptance order.
  */
 const REPLAY_PHASES: ReadonlyArray<{
 	fields: readonly DesiredField[]
@@ -171,7 +182,6 @@ const REPLAY_PHASES: ReadonlyArray<{
 		fields: ["gainMode", "gain", "tunerGainIndex", "ifGain", "tunerIfGain"],
 		byAcceptance: true,
 	},
-	{ fields: ["testMode"], byAcceptance: false },
 ]
 
 /**
@@ -194,7 +204,12 @@ export interface TunerConnectSyncResult {
 
 export interface TunerControllerEvents {
 	"state-changed": (sourceId: string, state: TunerState) => void
-	"command-sent": (sourceId: string, command: string, value: number) => void
+	"command-sent": (
+		sourceId: string,
+		command: string,
+		value: number,
+		origin?: TunerCommandOrigin,
+	) => void
 	"control-mode-changed": (sourceId: string, mode: TunerControlMode) => void
 	error: (sourceId: string, error: Error) => void
 }
@@ -246,6 +261,13 @@ export class TunerValidationError extends TunerControllerError {
 		super(message, "TUNER_VALIDATION_ERROR", 400)
 		this.name = "TunerValidationError"
 	}
+}
+
+/** The reported TunerState field a command writes, if it has one (rtlXtal, tunerXtal and tunerGainIndex do not). */
+function stateFieldOf(cmd: number): TunerStateField | undefined {
+	if (cmd === RTL_TCP_COMMANDS.SET_TEST_MODE) return "testMode"
+	const field = COMMAND_FIELDS[cmd]
+	return STATE_FIELDS.find(known => known === field)
 }
 
 export class TunerController extends EventEmitter {
@@ -572,7 +594,11 @@ export class TunerController extends EventEmitter {
 		state.lastCommandAt = now
 
 		if (updated) {
-			this.markAccepted(sourceId, command)
+			if (command === RTL_TCP_COMMANDS.SET_TEST_MODE) {
+				this.markWrittenNotAccepted(sourceId, command)
+			} else {
+				this.markAccepted(sourceId, command)
+			}
 			// Gain commands imply manual mode on the relay path (state above).
 			if (
 				command !== RTL_TCP_COMMANDS.SET_GAIN_MODE &&
@@ -592,16 +618,24 @@ export class TunerController extends EventEmitter {
 
 	// === Tuning Commands (only when controlMode === "internal") ===
 
-	async setFrequency(sourceId: string, hz: number): Promise<void> {
+	async setFrequency(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("frequency", hz, VALIDATION.frequency)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_FREQUENCY, hz, opts)
 		state.frequency = hz
 		this.sourceManager.updateSourceCaps(sourceId, { centerFreq: hz })
 		this.emitStateChanged(sourceId)
 	}
 
-	async setSampleRate(sourceId: string, hz: number): Promise<void> {
+	async setSampleRate(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("sampleRate", hz, VALIDATION.sampleRate)
 		if (!isValidRtlSampleRate(hz)) {
@@ -609,7 +643,7 @@ export class TunerController extends EventEmitter {
 				`sampleRate ${hz} is not supported by RTL-SDR (expected 225001-300000 or 900001-3200000)`,
 			)
 		}
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_SAMPLE_RATE, hz, opts)
 		state.sampleRate = hz
 		try {
 			this.sourceManager.updateSourceCaps(sourceId, { sampleRate: hz })
@@ -619,23 +653,40 @@ export class TunerController extends EventEmitter {
 		this.emitStateChanged(sourceId)
 	}
 
-	async setGainMode(sourceId: string, mode: TunerGainMode): Promise<void> {
+	async setGainMode(
+		sourceId: string,
+		mode: TunerGainMode,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "manual" ? 1 : 0
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN_MODE, value)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_GAIN_MODE,
+			value,
+			opts,
+		)
 		state.gainMode = mode
 		this.emitStateChanged(sourceId)
 	}
 
-	async setGain(sourceId: string, tenthsDb: number): Promise<void> {
+	async setGain(
+		sourceId: string,
+		tenthsDb: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("gain", tenthsDb, VALIDATION.gain)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_GAIN, tenthsDb, opts)
 		state.gain = tenthsDb
 		this.emitStateChanged(sourceId)
 	}
 
-	async setPpm(sourceId: string, ppm: number): Promise<void> {
+	async setPpm(
+		sourceId: string,
+		ppm: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateRange("ppm", ppm, VALIDATION.ppm)
 		const value = this.encodeSignedInt32(ppm)
@@ -643,36 +694,56 @@ export class TunerController extends EventEmitter {
 			sourceId,
 			RTL_TCP_COMMANDS.SET_FREQ_CORRECTION,
 			value,
+			opts,
 		)
 		state.ppm = ppm
 		this.emitStateChanged(sourceId)
 	}
 
-	async setIfGain(sourceId: string, gain: number): Promise<void> {
+	async setIfGain(
+		sourceId: string,
+		gain: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("ifGain", gain)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_IF_GAIN, gain)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_IF_GAIN, gain, opts)
 		state.ifGain = gain
 		this.emitStateChanged(sourceId)
 	}
 
-	async setTestMode(sourceId: string, enabled: boolean): Promise<void> {
+	/**
+	 * RTL2832 test mode (counter samples). Used by the scanner as a retune
+	 * marker; never accepted state, so reconnect replay cannot re-send it
+	 * (signal discovery spec § 4.6). The reported state still follows it.
+	 */
+	async setTestMode(
+		sourceId: string,
+		enabled: boolean,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_TEST_MODE,
 			enabled ? 1 : 0,
+			{ ...opts, accept: false },
 		)
 		state.testMode = enabled
 		this.emitStateChanged(sourceId)
 	}
 
-	async setAgcMode(sourceId: string, enabled: boolean): Promise<void> {
+	async setAgcMode(
+		sourceId: string,
+		enabled: boolean,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_AGC_MODE,
 			enabled ? 1 : 0,
+			opts,
 		)
 		state.agcMode = enabled
 		this.emitStateChanged(sourceId)
@@ -681,6 +752,7 @@ export class TunerController extends EventEmitter {
 	async setDirectSampling(
 		sourceId: string,
 		mode: TunerDirectSampling,
+		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		const value = mode === "off" ? 0 : mode === "i" ? 1 : 2
@@ -688,56 +760,80 @@ export class TunerController extends EventEmitter {
 			sourceId,
 			RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING,
 			value,
+			opts,
 		)
 		state.directSampling = mode
 		this.emitStateChanged(sourceId)
 	}
 
-	async setOffsetTuning(sourceId: string, enabled: boolean): Promise<void> {
+	async setOffsetTuning(
+		sourceId: string,
+		enabled: boolean,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_OFFSET_TUNING,
 			enabled ? 1 : 0,
+			opts,
 		)
 		state.offsetTuning = enabled
 		this.emitStateChanged(sourceId)
 	}
 
-	async setRtlXtal(sourceId: string, hz: number): Promise<void> {
+	async setRtlXtal(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("rtlXtal", hz)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_RTL_XTAL, hz)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_RTL_XTAL, hz, opts)
 		state.rtlXtal = hz
 		this.emitStateChanged(sourceId)
 	}
 
-	async setTunerXtal(sourceId: string, hz: number): Promise<void> {
+	async setTunerXtal(
+		sourceId: string,
+		hz: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerXtal", hz)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_TUNER_XTAL, hz)
+		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_TUNER_XTAL, hz, opts)
 		state.tunerXtal = hz
 		this.emitStateChanged(sourceId)
 	}
 
-	async setTunerGainIndex(sourceId: string, index: number): Promise<void> {
+	async setTunerGainIndex(
+		sourceId: string,
+		index: number,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint32("tunerGainIndex", index)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
 			index,
+			opts,
 		)
 		state.tunerGainIndex = index
 		this.emitStateChanged(sourceId)
 	}
 
-	async setBiasTee(sourceId: string, enabled: boolean): Promise<void> {
+	async setBiasTee(
+		sourceId: string,
+		enabled: boolean,
+		opts: TunerWriteOptions = {},
+	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		await this.sendCommand(
 			sourceId,
 			RTL_TCP_COMMANDS.SET_BIAS_TEE,
 			enabled ? 1 : 0,
+			opts,
 		)
 		state.biasTee = enabled
 		this.emitStateChanged(sourceId)
@@ -747,12 +843,18 @@ export class TunerController extends EventEmitter {
 		sourceId: string,
 		stage: number,
 		gain: number,
+		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSourceForControl(sourceId)
 		this.validateUint16("tunerIfGain.stage", stage)
 		this.validateUint16("tunerIfGain.gain", gain)
 		const value = (stage << 16) | (gain & 0xffff)
-		await this.sendCommand(sourceId, RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN, value)
+		await this.sendCommand(
+			sourceId,
+			RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
+			value,
+			opts,
+		)
 		state.tunerIfGain = { stage, gain }
 		this.emitStateChanged(sourceId)
 	}
@@ -762,6 +864,7 @@ export class TunerController extends EventEmitter {
 	async configure(
 		sourceId: string,
 		updates: Partial<TunerState>,
+		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		const state = this.validateSource(sourceId)
 		const hasCommandUpdates = this.hasCommandUpdates(updates)
@@ -780,61 +883,61 @@ export class TunerController extends EventEmitter {
 			updates.frequency !== undefined &&
 			updates.frequency !== state.frequency
 		) {
-			await this.setFrequency(sourceId, updates.frequency)
+			await this.setFrequency(sourceId, updates.frequency, opts)
 		}
 		if (
 			updates.sampleRate !== undefined &&
 			updates.sampleRate !== state.sampleRate
 		) {
-			await this.setSampleRate(sourceId, updates.sampleRate)
+			await this.setSampleRate(sourceId, updates.sampleRate, opts)
 		}
 		if (updates.gainMode !== undefined && updates.gainMode !== state.gainMode) {
-			await this.setGainMode(sourceId, updates.gainMode)
+			await this.setGainMode(sourceId, updates.gainMode, opts)
 		}
 		if (updates.gain !== undefined && updates.gain !== state.gain) {
-			await this.setGain(sourceId, updates.gain)
+			await this.setGain(sourceId, updates.gain, opts)
 		}
 		if (updates.ppm !== undefined && updates.ppm !== state.ppm) {
-			await this.setPpm(sourceId, updates.ppm)
+			await this.setPpm(sourceId, updates.ppm, opts)
 		}
 		if (updates.ifGain !== undefined && updates.ifGain !== state.ifGain) {
-			await this.setIfGain(sourceId, updates.ifGain)
+			await this.setIfGain(sourceId, updates.ifGain, opts)
 		}
 		if (updates.testMode !== undefined && updates.testMode !== state.testMode) {
-			await this.setTestMode(sourceId, updates.testMode)
+			await this.setTestMode(sourceId, updates.testMode, opts)
 		}
 		if (updates.agcMode !== undefined && updates.agcMode !== state.agcMode) {
-			await this.setAgcMode(sourceId, updates.agcMode)
+			await this.setAgcMode(sourceId, updates.agcMode, opts)
 		}
 		if (updates.biasTee !== undefined && updates.biasTee !== state.biasTee) {
-			await this.setBiasTee(sourceId, updates.biasTee)
+			await this.setBiasTee(sourceId, updates.biasTee, opts)
 		}
 		if (
 			updates.directSampling !== undefined &&
 			updates.directSampling !== state.directSampling
 		) {
-			await this.setDirectSampling(sourceId, updates.directSampling)
+			await this.setDirectSampling(sourceId, updates.directSampling, opts)
 		}
 		if (
 			updates.offsetTuning !== undefined &&
 			updates.offsetTuning !== state.offsetTuning
 		) {
-			await this.setOffsetTuning(sourceId, updates.offsetTuning)
+			await this.setOffsetTuning(sourceId, updates.offsetTuning, opts)
 		}
 		if (updates.rtlXtal !== undefined && updates.rtlXtal !== state.rtlXtal) {
-			await this.setRtlXtal(sourceId, updates.rtlXtal)
+			await this.setRtlXtal(sourceId, updates.rtlXtal, opts)
 		}
 		if (
 			updates.tunerXtal !== undefined &&
 			updates.tunerXtal !== state.tunerXtal
 		) {
-			await this.setTunerXtal(sourceId, updates.tunerXtal)
+			await this.setTunerXtal(sourceId, updates.tunerXtal, opts)
 		}
 		if (
 			updates.tunerGainIndex !== undefined &&
 			updates.tunerGainIndex !== state.tunerGainIndex
 		) {
-			await this.setTunerGainIndex(sourceId, updates.tunerGainIndex)
+			await this.setTunerGainIndex(sourceId, updates.tunerGainIndex, opts)
 		}
 		if (
 			updates.tunerIfGain !== undefined &&
@@ -849,6 +952,7 @@ export class TunerController extends EventEmitter {
 					sourceId,
 					updates.tunerIfGain.stage,
 					updates.tunerIfGain.gain,
+					opts,
 				)
 			}
 		}
@@ -937,7 +1041,7 @@ export class TunerController extends EventEmitter {
 		}
 
 		for (const { name, value } of written) {
-			this.emit("command-sent", sourceId, name, value)
+			this.emit("command-sent", sourceId, name, value, "replay")
 		}
 		if (failure) this.emit("error", sourceId, failure)
 		if (plan.length > 0 || capsChanged) this.emitStateChanged(sourceId)
@@ -1139,6 +1243,15 @@ export class TunerController extends EventEmitter {
 		desired.set(field, ++this.acceptanceSeq)
 	}
 
+	/**
+	 * A written but not accepted value (`accept: false`, every test-mode write, a
+	 * relay TEST_MODE) is known: the state shows it. It is not a desired field.
+	 */
+	private markWrittenNotAccepted(sourceId: string, cmd: number): void {
+		const field = stateFieldOf(cmd)
+		if (field !== undefined) this.markInferred(sourceId, field)
+	}
+
 	private buildReplayPlan(
 		state: TunerState,
 		desired: ReadonlyMap<DesiredField, number>,
@@ -1181,8 +1294,6 @@ export class TunerController extends EventEmitter {
 				]
 			case "ifGain":
 				return [RTL_TCP_COMMANDS.SET_IF_GAIN, state.ifGain]
-			case "testMode":
-				return [RTL_TCP_COMMANDS.SET_TEST_MODE, flag(state.testMode)]
 			case "agcMode":
 				return [RTL_TCP_COMMANDS.SET_AGC_MODE, flag(state.agcMode)]
 			case "directSampling":
@@ -1232,10 +1343,12 @@ export class TunerController extends EventEmitter {
 		sourceId: string,
 		cmd: number,
 		value: number,
+		opts: TunerWriteOptions = {},
 	): Promise<void> {
 		try {
 			this.sourceManager.writeToSource(sourceId, this.encodeFrame(cmd, value))
-			this.markAccepted(sourceId, cmd)
+			if (opts.accept === false) this.markWrittenNotAccepted(sourceId, cmd)
+			else this.markAccepted(sourceId, cmd)
 			const state = this.tunerStates.get(sourceId)
 			if (state) {
 				state.commandCount++
@@ -1243,8 +1356,11 @@ export class TunerController extends EventEmitter {
 				delete state.lastError
 			}
 			const cmdName = COMMAND_NAMES[cmd] ?? `cmd-0x${cmd.toString(16)}`
-			this.emit("command-sent", sourceId, cmdName, value)
-			this.log.debug({ sourceId, command: cmdName, value }, "Command sent")
+			this.emit("command-sent", sourceId, cmdName, value, opts.origin)
+			this.log.debug(
+				{ sourceId, command: cmdName, value, origin: opts.origin },
+				"Command sent",
+			)
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err)
 			const state = this.tunerStates.get(sourceId)
@@ -1286,7 +1402,8 @@ export class TunerController extends EventEmitter {
 	 * for frequency/sampleRate not declared by config or the source caps.
 	 */
 	private unknownFields(sourceId: string): TunerStateField[] {
-		const accepted = this.desiredFields.get(sourceId)
+		const accepted: ReadonlyMap<string, number> | undefined =
+			this.desiredFields.get(sourceId)
 		const inferred = this.inferredFields.get(sourceId)
 		const baseline = this.baselineCaps.get(sourceId)
 		const declared = new Set<TunerStateField>()

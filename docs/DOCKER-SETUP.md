@@ -2,7 +2,7 @@
 
 Canonical reference for WaveKit's containerized build and runtime workflow.
 For native (non-Docker) iteration see the "Native dev loop" section below
-and `CLAUDE.md`.
+and `AGENTS.md`.
 
 ## TL;DR
 
@@ -279,7 +279,7 @@ Common runtime env vars consumed by the wavekit-api container:
 
 YAML config under `config/` is the canonical source of truth; env vars
 override per-key via the `WAVEKIT_` prefix with `__` as nested separator
-(see `CLAUDE.md` "Config" section).
+(see `AGENTS.md` "Architecture essentials").
 
 ### State volume
 
@@ -307,3 +307,63 @@ curl http://localhost:9000/health
 
 `sdrpp-server` does not expose HTTP. Its healthcheck probes TCP 5259
 directly via `bash -c '</dev/tcp/localhost/5259'`.
+
+## Protected runtime deployment
+
+Protected runtime mounting is opt-in; [the API reference](API.md#protected-runtime-opt-in)
+shows the exact public configuration. The runtime opens HTTP API/analog/digital
+listeners only on explicitly configured loopback addresses. It provides no TLS
+listener. `exposure: tls-termination` asserts that a trusted TLS terminator shares
+the backend network namespace; the terminator must preserve the configured public
+Host authority. Forwarded headers do not select trusted scheme or listener role.
+Do not widen backend bindings to make a separate proxy container reach them.
+External browser/API/audio origins must share one hostname and HTTPS scheme,
+with distinct origins for the three listeners.
+
+Private state uses `WAVEKIT_ACCESS_PRIVATE_DIRECTORY`, an absolute path in a private
+volume, separately from public YAML. Provision before starting the core. Runtime
+loads existing state and requires its single-host/PID-namespace writer ownership
+contract; deployment must ensure no unrelated namespace or process can write that
+volume. A missing, corrupt or busy authority fails before listeners open. Protect
+the directory and credential files with the existing provisioning permissions;
+never put credentials or private paths in browser bootstrap/config payloads.
+
+The credential-free shell probe supports the same explicit nested overrides as
+runtime configuration:
+
+```text
+WAVEKIT_ACCESS__MODE=protected
+WAVEKIT_ACCESS__HEALTH_PROBE__TARGET=http://127.0.0.1:9000
+WAVEKIT_ACCESS__HEALTH_PROBE__HOST=receiver.example:9443
+```
+
+The target is the actual loopback HTTP backend origin (IPv4 or bracketed IPv6),
+with no path, query, userinfo or fragment. For backend port 80, use the bare
+canonical origin
+(`http://127.0.0.1` or `http://[::1]`); runtime rejects an explicit `:80`.
+The script appends `/health`, and sends the configured Host header. Runtime validates this Host in its API authority list
+alongside the public API authority. Supply these overrides explicitly to the
+probe environment even when the rest of the protected configuration comes from
+YAML; the shell probe does not read YAML. Missing protected probe overrides and
+malformed targets fail without calling curl. Legacy probe arguments remain
+unchanged. Each deployment/compose healthcheck must be checked against its actual
+backend binding and approved Host rather than assuming a localhost default.
+
+Protected mode disables raw audio TCP and RTL-TCP relay startup. This does not
+establish container/network exposure acceptance: inspect published ports, proxy
+Host preservation, direct backend reachability and private-volume writer scope
+in the real deployment. No protected compose profile or new port publication is
+provided by this runtime change.
+
+Shutdown seals admissions, closes owned streams, waits for actual startup and
+accepted persistence/transport cleanup, then releases private access ownership.
+An incomplete protected shutdown retains ownership until process termination;
+a referenced ten-second watchdog exits with failure. A timeout is not proof that
+filesystem I/O completed. Remembered browser sessions survive successful restart.
+
+Local process and transport tests do not certify TLS, cookie behavior in real
+browsers, container isolation, receiver RF operation or CLI/web coexistence.
+Trusted shell delivery of the internal bootstrap, credentialed analog/digital
+playback, revocation/recovery and the connected spectrum → tune → identify →
+inspect → listen milestone require external acceptance before protected mode is
+advertised as client-ready.

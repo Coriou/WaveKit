@@ -7,7 +7,7 @@ upstream changes. No live decoder execution or trademark search was performed.
 ## Product
 
 - Repository: https://github.com/Coriou/WaveKit
-- Product context: https://github.com/Coriou/WaveKit/blob/main/.kiro/steering/product.md
+- Product context: https://github.com/Coriou/WaveKit/blob/6c931fc095a3ba00471b87d8c67a85307f000bc4/.kiro/steering/product.md
 - Product file Git blob: `43bac806a9bb4bf423181b331b7ab6355646acfc`
 - This is the source of the eight category groupings and nine documented integrations.
 - The original signal path and Inter Display lineage came from the owner-supplied

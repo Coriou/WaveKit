@@ -87,7 +87,7 @@ describe("applyUiAction", () => {
 				ctx,
 				0,
 			).view,
-		).toBe("system")
+		).toBe("scan")
 		expect(
 			applyUiAction(initialUi("messages"), { type: "preset-cycle" }, ctx, 0)
 				.messages.preset,

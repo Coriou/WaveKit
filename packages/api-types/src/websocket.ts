@@ -21,3 +21,16 @@ export interface SourceRemovedEventData {
 	/** ISO 8601 timestamp of the removal. */
 	removedAt: string
 }
+
+/** `decoder:created` on the `decoders` channel: a decoder added at runtime (scanner probes). */
+export interface DecoderCreatedEventData {
+	decoderId: string
+	decoder: DecoderInfo
+}
+
+/** `decoder:removed` on the `decoders` channel; clients drop the row. */
+export interface DecoderRemovedEventData {
+	decoderId: string
+	/** ISO 8601 timestamp of the removal. */
+	removedAt: string
+}
