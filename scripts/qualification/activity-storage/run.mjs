@@ -5,6 +5,7 @@ import { arch, platform, release } from "node:os"
 import { dirname, join, resolve, sep } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { Worker } from "node:worker_threads"
+import { offerSchedule, tokenBuckets, WORKLOAD_VERSION } from "./workloads.mjs"
 
 export const GiB = 1024 ** 3
 export const LIMITS = Object.freeze({
@@ -32,6 +33,14 @@ export const SCENARIOS = [
 	"combined",
 ]
 const LONG = SCENARIOS.slice(3)
+export const PHASES = Object.freeze(["baseline", "storage"])
+export const LONG_PREREQUISITES = Object.freeze([
+	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only)",
+	"Enforced conservative DB/WAL transaction growth bounds for every mutation, including setup and receipts",
+	"Accepted read-only query worker, receipt/fault contracts and exact extension qualification",
+	"Owned 4MiB capture reservation and separately accepted capped pipe consumer with post-exit verification",
+	"Exact independent implementation review and individually allocated execution window",
+])
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 export const UNVERIFIED = [
 	"Node20 disabled executable",
@@ -60,6 +69,7 @@ export function parseArgs(args) {
 		if (
 			![
 				"--scenario",
+				"--phase",
 				"--output",
 				"--seed",
 				"--reserve-gib",
@@ -73,6 +83,7 @@ export function parseArgs(args) {
 			throw new Error("Malformed or unknown argument")
 		seen.add(key)
 		if (key === "--scenario") config.scenario = value
+		else if (key === "--phase") config.phase = value
 		else if (key === "--output") config.output = value
 		else if (key === "--resource-window") {
 			if (!/^[\x20-\x7e]{8,200}$/.test(value) || !value.trim())
@@ -100,6 +111,12 @@ export function parseArgs(args) {
 		config.deadlineMs > LIMITS.microDeadlineMs
 	)
 		throw new Error("Micro deadline cap")
+	if (
+		config.phase !== undefined &&
+		(!PHASES.includes(config.phase) || !LONG.includes(config.scenario))
+	)
+		throw new Error("Invalid phase for scenario")
+	if (LONG.includes(config.scenario)) config.phase ??= "storage"
 	if (LONG.includes(config.scenario) && !config.resourceWindow)
 		throw new Error(
 			"Long scenarios require --resource-window operator attestation",
@@ -266,7 +283,13 @@ export async function supervise(factory, deadlineMs, signal) {
 					reject(new Error("Duplicate worker result"))
 					return
 				}
-				result = message
+				try {
+					if (Buffer.byteLength(JSON.stringify(message)) > 128 * 1024)
+						throw new Error("Worker result quota exceeded")
+					result = message
+				} catch (error) {
+					reject(error)
+				}
 			})
 			worker.once("error", reject)
 			worker.once("exit", code => {
@@ -289,57 +312,105 @@ export async function supervise(factory, deadlineMs, signal) {
 	}
 }
 
-function hashArtifact(path, expected) {
+function hashArtifact(path, expected, checkDeadline = () => {}) {
 	const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
 	try {
-		const actual = fs.fstatSync(fd)
-		if (
-			actual.ino !== expected.ino ||
-			actual.dev !== expected.dev ||
-			actual.size !== expected.size
-		)
-			throw new Error("Artifact changed during inspection")
-		return createHash("sha256").update(fs.readFileSync(fd)).digest("hex")
+		const verify = () => {
+			const actual = fs.fstatSync(fd)
+			if (
+				actual.ino !== expected.ino ||
+				actual.dev !== expected.dev ||
+				actual.size !== expected.size ||
+				actual.mtimeMs !== expected.mtimeMs
+			)
+				throw new Error("Artifact changed during inspection")
+		}
+		verify()
+		const hash = createHash("sha256")
+		const block = Buffer.alloc(64 * 1024)
+		let count
+		do {
+			checkDeadline()
+			count = fs.readSync(fd, block, 0, block.length, null)
+			if (count) hash.update(block.subarray(0, count))
+		} while (count)
+		verify()
+		return hash.digest("hex")
 	} finally {
 		fs.closeSync(fd)
 	}
 }
 
-export function inspectArtifacts(path) {
+export function inventoryArtifacts(path, long = false) {
 	let bytes = 0
 	const files = []
-	for (const name of fs.readdirSync(path)) {
-		if (
-			![
-				"fixture.db",
-				"fixture.db-wal",
-				"fixture.db-shm",
-				"report.json",
-			].includes(name)
-		)
-			throw new Error("Unexpected artifact")
-		const full = join(path, name)
-		const info = fs.lstatSync(full)
-		if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
-			throw new Error("Unsafe artifact")
-		const cap = name.endsWith("-wal")
-			? LIMITS.walBytes
-			: name === "fixture.db"
-				? LIMITS.dbBytes
-				: 128 * 1024
-		if (info.size > cap) throw new Error("Artifact quota exceeded")
-		bytes += info.size
-		files.push({
-			name,
-			bytes: info.size,
-			inode: info.ino,
-			device: info.dev,
-			sha256: hashArtifact(full, info),
-		})
+	const dir = fs.opendirSync(path)
+	try {
+		let entry
+		let entries = 0
+		while ((entry = dir.readSync())) {
+			if (++entries > 4) throw new Error("Artifact entry cap exceeded")
+			const name = entry.name
+			if (
+				![
+					"fixture.db",
+					"fixture.db-wal",
+					"fixture.db-shm",
+					"report.json",
+				].includes(name)
+			)
+				throw new Error("Unexpected artifact")
+			const full = join(path, name)
+			const info = fs.lstatSync(full)
+			if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1)
+				throw new Error("Unsafe artifact")
+			const cap = name.endsWith("-wal")
+				? long
+					? DRIVER_LIMITS.walBytes
+					: LIMITS.walBytes
+				: name === "fixture.db"
+					? long
+						? DRIVER_LIMITS.dbBytes
+						: LIMITS.dbBytes
+					: 128 * 1024
+			if (info.size > cap) throw new Error("Artifact quota exceeded")
+			bytes += info.size
+			files.push({
+				name,
+				bytes: info.size,
+				inode: info.ino,
+				device: info.dev,
+				mtimeMs: info.mtimeMs,
+			})
+		}
+	} finally {
+		dir.closeSync()
 	}
 	if (bytes + 128 * 1024 > LIMITS.artifactBytes)
 		throw new Error("Artifact budget exceeded")
 	return { bytes, files }
+}
+
+// Live admission uses metadata only. Content hashing is a separate joined-worker
+// operation. The legacy micro worker still calls inspectArtifacts unchanged.
+export function inspectArtifacts(path, checkDeadline = () => {}) {
+	const inventory = inventoryArtifacts(path)
+	return {
+		bytes: inventory.bytes,
+		files: inventory.files.map(file => ({
+			...file,
+			sha256: hashArtifact(
+				join(path, file.name),
+				{
+					ino: file.inode,
+					dev: file.device,
+					size: file.bytes,
+					mtimeMs: file.mtimeMs,
+				},
+				checkDeadline,
+			),
+		})),
+	}
 }
 
 export async function run(
@@ -360,6 +431,7 @@ export async function run(
 		Object.entries(config).flatMap(([key, value]) => {
 			const flag = {
 				scenario: "--scenario",
+				phase: "--phase",
 				seed: "--seed",
 				reserveBytes: "--reserve-gib",
 				deadlineMs: "--deadline-ms",
@@ -371,13 +443,22 @@ export async function run(
 		}),
 	)
 	const report = {
-		harnessVersion: 1,
+		harnessVersion: 2,
 		provisionalSQLite: true,
 		qualificationClaim: false,
 		scenario: config.scenario,
 		seed: 42,
 		node: version,
 		versions: { ...process.versions },
+		runtimeProvenance: {
+			executable: process.execPath,
+			actualNode: process.versions.node,
+			requestedNode: version,
+		},
+		pragmaProvenance:
+			"Worker-reported actual open/reopen PRAGMAs; never inferred from runtime version",
+		osStallLimit:
+			"Synchronous OS/native calls can delay timers and deadline checks; no absolute interruption guarantee",
 		os: platform(),
 		osRelease: release(),
 		arch: arch(),
@@ -394,6 +475,16 @@ export async function run(
 			reason:
 				"Deferred pending exact harness review and Main allocation; attestation is not authorization",
 			resourceWindow: config.resourceWindow,
+			phase: config.phase,
+			remainingPrerequisites: LONG_PREREQUISITES,
+			metrics: {
+				receiptLatency: null,
+				loopDelay: null,
+				cpu: null,
+				memory: null,
+				diskGrowth: null,
+			},
+			measurement: "not-run; virtual fixtures are correctness evidence only",
 		}
 	if (signal?.aborted) throw new Error("Cancelled before filesystem")
 	const started = now()
@@ -406,7 +497,7 @@ export async function run(
 			return [name, hashArtifact(path, info)]
 		}),
 	)
-	report.workloadVersion = 1
+	report.workloadVersion = WORKLOAD_VERSION
 	report.commandArguments = config
 	const output = prepareOutput(config.output, config.reserveBytes, root, statfs)
 	const identity = verifyOutputDirectory(output.path, root)
@@ -449,6 +540,9 @@ export async function run(
 	} catch (error) {
 		if (error instanceof FatalContainmentError) {
 			error.output = output.path
+			error.scenario = config.scenario
+			error.phase = config.phase ?? "micro"
+			error.stage = "worker"
 			throw error // No inspection, hashing, persistence or deletion before a confirmed join.
 		}
 		outcome = {
@@ -472,10 +566,18 @@ export async function run(
 	// Disk admission and safe artifact identity inspection are independent after join.
 	try {
 		verify()
-		outcome.artifacts = inspectArtifacts(output.path)
+		outcome.artifacts = inspectArtifacts(output.path, () => {
+			if (now() - started > config.deadlineMs)
+				throw new Error("Hash deadline exceeded")
+		})
 	} catch (error) {
 		outcome.status = "failed"
 		outcome.artifactError = String(error)
+		try {
+			outcome.residue = inventoryArtifacts(output.path)
+		} catch (inventoryError) {
+			outcome.residue = { status: "unknown", error: String(inventoryError) }
+		}
 	}
 	const observeDeadline = () => {
 		outcome.elapsedMs = now() - started
@@ -536,6 +638,21 @@ export async function run(
 			outcome.cleanupError = String(error)
 		}
 	}
+	try {
+		verify()
+		outcome.residue = {
+			...inventoryArtifacts(output.path),
+			path: output.path,
+			ownership: "Driver-owned; capture inventory is separate",
+		}
+	} catch (error) {
+		outcome.status = "failed"
+		outcome.residue = {
+			path: output.path,
+			status: "unknown",
+			error: String(error),
+		}
+	}
 	outcome.reportPersisted = persisted
 	outcome.completion = "observed"
 	outcome.elapsedScope = "through report persistence and cleanup attempt"
@@ -555,14 +672,645 @@ if (
 		const report = await run(parseArgs(process.argv.slice(2)), {
 			signal: controller.signal,
 		})
-		process.stdout.write(JSON.stringify(report, null, 2) + "\n")
+		const finalText = JSON.stringify(report, null, 2) + "\n"
+		if (Buffer.byteLength(finalText) > 1024 * 1024)
+			throw new Error("Final stdout quota exceeded")
+		process.stdout.write(finalText)
 		if (report.status === "failed") process.exitCode = 1
 	} catch (error) {
-		process.stderr.write(String(error) + "\n")
+		process.stderr.write(
+			JSON.stringify({
+				error: String(error).slice(0, 1024),
+				output: error.output ?? null,
+				scenario: error.scenario ?? null,
+				phase: error.phase ?? null,
+				stage: error.stage ?? null,
+			}) + "\n",
+		)
 		if (error instanceof FatalContainmentError) process.exit(1)
 		process.exitCode = 1
 	} finally {
 		process.removeListener("SIGINT", cancel)
 		process.removeListener("SIGTERM", cancel)
+	}
+}
+
+// Allocated driver routines only: these are not wired to long CLI execution.
+export const DRIVER_LIMITS = Object.freeze({
+	dataRows: 1024,
+	dataBytes: 8 * 1024 ** 2,
+	controlRows: 128,
+	controlBytes: 2 * 1024 ** 2,
+	rowBytes: 144 * 1024,
+	batchRows: 64,
+	batchBytes: 256 * 1024,
+	dwellUs: 20000,
+	latenessUs: 20000,
+	turnRows: 64,
+	dbBytes: 2 * GiB,
+	dbHeadroomBytes: 256 * 1024 ** 2,
+	walBytes: 64 * 1024 ** 2,
+	captureBytes: 4 * 1024 ** 2,
+})
+const STAGE_MS = Object.freeze({
+	setup: 180000,
+	warmup: 30000,
+	load: 900000,
+	drain: 15000,
+	finalization: 75000,
+})
+export function stageDeadline(now = () => performance.now()) {
+	const started = now()
+	let stage = "setup"
+	let entered = started
+	let index = 0
+	const stages = Object.keys(STAGE_MS)
+	const roles = new Map()
+	let replacements = 0
+	let fatal = false
+	const check = () => {
+		const current = now()
+		if (
+			current < entered ||
+			current - started > LIMITS.deadlineMs ||
+			current - entered > STAGE_MS[stage]
+		)
+			throw new Error(`Deadline exceeded: ${stage}`)
+		return Math.max(
+			0,
+			Math.min(
+				LIMITS.deadlineMs - (current - started),
+				STAGE_MS[stage] - (current - entered),
+			),
+		)
+	}
+	return {
+		check,
+		enter(next) {
+			check()
+			if (
+				["warmup", "load"].includes(stage) &&
+				now() - entered < STAGE_MS[stage]
+			)
+				throw new Error("Fixed phase duration not complete")
+			if (stages[index + 1] !== next)
+				throw new Error("Invalid stage transition")
+			stage = next
+			index++
+			entered = now()
+		},
+		snapshot() {
+			return {
+				stage,
+				elapsedMs: now() - started,
+				stageElapsedMs: now() - entered,
+			}
+		},
+		// A replacement receives this same remaining budget; it never resets it.
+		async supervise(factory, signal, role = "writer") {
+			if (
+				fatal ||
+				!["writer", "reader"].includes(role) ||
+				roles.get(role) === "active"
+			)
+				throw new Error("Worker role not admitted")
+			const remaining = Math.floor(check())
+			if (remaining < 1) throw new Error(`Deadline exceeded: ${stage}`)
+			if (roles.has(role) && ++replacements > 32)
+				throw new Error("Worker replacement cap exceeded")
+			roles.set(role, "active")
+			try {
+				return await supervise(factory, remaining, signal)
+			} catch (error) {
+				if (error instanceof FatalContainmentError) {
+					fatal = true
+					error.stage = stage
+				}
+				throw error
+			} finally {
+				roles.set(role, fatal ? "unjoined" : "joined")
+			}
+		},
+	}
+}
+
+// Physical inventory and unmaterialized reservations are disjoint. A transfer
+// replaces reservation bytes with measured bytes exactly once.
+export function artifactBudget(reserveBytes = GiB) {
+	const owned = new Map()
+	function usage() {
+		let measured = 0
+		let reserved = 0
+		for (const entry of owned.values()) {
+			measured += entry.measured
+			reserved += entry.reserved
+		}
+		return { measured, reserved, total: measured + reserved }
+	}
+	return {
+		reserve(id, bytes) {
+			if (
+				typeof id !== "string" ||
+				!id ||
+				owned.has(id) ||
+				owned.size >= 256 ||
+				!Number.isSafeInteger(bytes) ||
+				bytes < 0
+			)
+				throw new Error("Invalid owned reservation")
+			if (usage().total + bytes > LIMITS.artifactBytes)
+				throw new Error("Artifact budget exceeded")
+			owned.set(id, { measured: 0, reserved: bytes })
+		},
+		materialize(id, measured, remaining = 0) {
+			if (
+				!owned.has(id) ||
+				![measured, remaining].every(
+					value => Number.isSafeInteger(value) && value >= 0,
+				)
+			)
+				throw new Error("Unknown inventory")
+			const before = owned.get(id)
+			if (measured + remaining > before.measured + before.reserved)
+				throw new Error("Unreserved growth")
+			owned.set(id, { measured, reserved: remaining })
+		},
+		check(free) {
+			const result = usage()
+			const available = BigInt(diskGuard(free, reserveBytes))
+			if (available < BigInt(8 * GiB + reserveBytes + result.reserved))
+				throw new Error("Reservation free-space breached")
+			return result
+		},
+		transaction(inventory, growth) {
+			// No fabricated bound: future worker must supply and enforce page/schema
+			// growth bounds BEFORE every transaction, not a post-commit size check.
+			if (
+				!growth ||
+				growth.enforced !== true ||
+				![
+					growth.dbBytes,
+					growth.walBytes,
+					inventory?.dbBytes,
+					inventory?.walBytes,
+				].every(value => Number.isSafeInteger(value) && value >= 0)
+			)
+				throw new Error("Transaction growth bound unavailable")
+			if (
+				inventory.dbBytes + growth.dbBytes >
+					DRIVER_LIMITS.dbBytes - DRIVER_LIMITS.dbHeadroomBytes ||
+				inventory.walBytes + growth.walBytes > DRIVER_LIMITS.walBytes
+			)
+				throw new Error("DB/WAL growth gate")
+			if (
+				usage().total + growth.dbBytes + growth.walBytes >
+				LIMITS.artifactBytes
+			)
+				throw new Error("Aggregate growth gate")
+		},
+		reserveCapture(runId) {
+			if (
+				!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+					runId,
+				)
+			)
+				throw new Error("Invalid capture owner")
+			this.reserve(`capture:${runId}`, DRIVER_LIMITS.captureBytes)
+			return {
+				id: `capture:${runId}`,
+				bytes: DRIVER_LIMITS.captureBytes,
+				consumer: "not-run: separately accepted capped pipe consumer required",
+			}
+		},
+		usage,
+	}
+}
+
+function writerCounts() {
+	return {
+		offered: 0,
+		invalid: 0,
+		producerRejected: 0,
+		globalRejected: 0,
+		queueDenied: 0,
+		storageDenied: 0,
+		admitted: 0,
+		committed: 0,
+		acknowledged: 0,
+		failed: 0,
+		uncertain: 0,
+		duplicateReceipts: 0,
+		schedulerMissed: 0,
+	}
+}
+export function admissionDriver(scenario, seconds = 900) {
+	if (
+		!["steady", "burst", "overload"].includes(scenario) ||
+		!Number.isInteger(seconds) ||
+		seconds < 1 ||
+		seconds > 900
+	)
+		throw new Error("Invalid driver scenario")
+	let schedule = offerSchedule("steady", 25)
+	let buckets = tokenBuckets()
+	let counts = writerCounts()
+	let epoch = null
+	let mode = "warmup"
+	let warmup = null
+	let previousWall = -1
+	let queue = []
+	let inflight = null
+	let retainedBytes = 0
+	let retainedRows = 0
+	let batchId = 0
+	const controls = new Map()
+	let controlBytes = 0
+	let peakRows = 0
+	let peakBytes = 0
+	let maxLatenessUs = 0
+	const monotonic = nowUs => {
+		if (!Number.isSafeInteger(nowUs) || nowUs < 0 || nowUs < previousWall)
+			throw new Error("Invalid monotonic clock")
+		previousWall = nowUs
+	}
+	function admit(event, nowUs, storageAvailable = true) {
+		counts.offered++
+		const payloadBytes =
+			typeof event.payload === "string" ? Buffer.byteLength(event.payload) : 0
+		if (
+			!Number.isSafeInteger(event.id) ||
+			event.id < 0 ||
+			!Number.isInteger(event.producer) ||
+			event.producer < 0 ||
+			event.producer > 9 ||
+			!Number.isSafeInteger(event.timeUs) ||
+			event.timeUs < 0 ||
+			!payloadBytes ||
+			payloadBytes > DRIVER_LIMITS.rowBytes
+		) {
+			counts.invalid++
+			return "invalid"
+		}
+		const row = {
+			id: `${mode}:${event.id}`,
+			producer: event.producer,
+			timeUs: event.timeUs,
+			payload: event.payload,
+		}
+		const bytes = Buffer.byteLength(JSON.stringify(row))
+		// Escaping can make a raw payload too large for one bounded IPC batch.
+		if (bytes > DRIVER_LIMITS.batchBytes) {
+			counts.invalid++
+			return "invalid"
+		}
+		const rate = buckets.decide(event.producer, event.timeUs, false)
+		if (rate) {
+			counts[rate]++
+			return rate
+		}
+		if (
+			retainedRows === DRIVER_LIMITS.dataRows ||
+			retainedBytes + bytes > DRIVER_LIMITS.dataBytes
+		) {
+			counts.queueDenied++
+			return "queueDenied"
+		}
+		if (!storageAvailable) {
+			counts.storageDenied++
+			return "storageDenied"
+		}
+		buckets.decide(event.producer, event.timeUs)
+		queue.push({
+			...row,
+			bytes,
+			admittedUs: nowUs,
+		})
+		retainedRows++
+		retainedBytes += bytes
+		counts.admitted++
+		peakRows = Math.max(peakRows, retainedRows)
+		peakBytes = Math.max(peakBytes, retainedBytes)
+		return "admitted"
+	}
+	return {
+		start(nowUs) {
+			if (epoch !== null) throw new Error("Already started")
+			monotonic(nowUs)
+			epoch = nowUs
+		},
+		turn(nowUs, storageAvailable = true) {
+			monotonic(nowUs)
+			if (epoch === null || mode === "stopped")
+				throw new Error("Driver not active")
+			const offset = nowUs - epoch
+			const missed = schedule.skipBefore(offset - DRIVER_LIMITS.latenessUs)
+			counts.schedulerMissed += missed
+			counts.offered += missed
+			let processed = 0
+			while (processed < DRIVER_LIMITS.turnRows) {
+				const event = schedule.nextDue(offset)
+				if (!event) break
+				maxLatenessUs = Math.max(maxLatenessUs, offset - event.timeUs)
+				admit(event, nowUs, storageAvailable)
+				processed++
+			}
+			return { processed, missed, done: schedule.done }
+		},
+		// Test fixture entry exercises the same actual queue and token path.
+		admit(event, nowUs, storageAvailable = true) {
+			monotonic(nowUs)
+			return admit(event, nowUs, storageAvailable)
+		},
+		batch(nowUs, force = false) {
+			monotonic(nowUs)
+			if (inflight || !queue.length) return null
+			if (
+				!force &&
+				queue.length < DRIVER_LIMITS.batchRows &&
+				nowUs - queue[0].admittedUs < DRIVER_LIMITS.dwellUs
+			)
+				return null
+			let bytes = 0
+			let rows = 0
+			while (
+				rows < queue.length &&
+				rows < DRIVER_LIMITS.batchRows &&
+				bytes + queue[rows].bytes <= DRIVER_LIMITS.batchBytes
+			) {
+				bytes += queue[rows].bytes
+				rows++
+			}
+			// Reserve fixed envelope/control headroom before posting, independently
+			// of the serialized rows. Both stay charged until batch settlement.
+			if (
+				controls.size >= DRIVER_LIMITS.controlRows ||
+				controlBytes + 1024 > DRIVER_LIMITS.controlBytes
+			)
+				return null
+			const id = ++batchId
+			controls.set(`batch:${id}`, 1024)
+			controlBytes += 1024
+			inflight = { id, rows: queue.splice(0, rows), bytes }
+			return {
+				id,
+				bytes,
+				rows: inflight.rows.map(row => ({
+					id: row.id,
+					producer: row.producer,
+					timeUs: row.timeUs,
+					payload: row.payload,
+				})),
+			}
+		},
+		settle(id, outcome) {
+			if (!["committed", "failed", "uncertain"].includes(outcome))
+				throw new Error("Invalid batch settlement")
+			if (!inflight || inflight.id !== id) {
+				counts.duplicateReceipts++
+				return false
+			}
+			counts[outcome] += inflight.rows.length
+			if (outcome !== "uncertain") counts.acknowledged += inflight.rows.length
+			controlBytes -= controls.get(`batch:${id}`)
+			controls.delete(`batch:${id}`)
+			retainedRows -= inflight.rows.length
+			retainedBytes -= inflight.bytes
+			inflight = null
+			return true
+		},
+		control(id, bytes) {
+			if (
+				!Number.isSafeInteger(id) ||
+				id < 0 ||
+				!Number.isSafeInteger(bytes) ||
+				bytes < 1 ||
+				controls.has(id) ||
+				controls.size >= DRIVER_LIMITS.controlRows ||
+				controlBytes + bytes > DRIVER_LIMITS.controlBytes
+			)
+				return false
+			controls.set(id, bytes)
+			controlBytes += bytes
+			return true
+		},
+		releaseControl(id) {
+			if (!controls.has(id)) return false
+			controlBytes -= controls.get(id)
+			controls.delete(id)
+			return true
+		},
+		measure(nowUs) {
+			monotonic(nowUs)
+			if (
+				mode !== "warmup" ||
+				epoch === null ||
+				nowUs - epoch !== 30000000 ||
+				!schedule.done ||
+				counts.admitted !== 2500 ||
+				counts.committed !== 2500 ||
+				counts.schedulerMissed ||
+				retainedRows ||
+				controls.size
+			)
+				throw new Error("Warmup drain/reset failed")
+			warmup = { ...counts }
+			counts = writerCounts()
+			buckets = tokenBuckets()
+			schedule = offerSchedule(scenario, seconds)
+			epoch = nowUs
+			mode = "load"
+			peakRows = 0
+			peakBytes = 0
+			maxLatenessUs = 0
+		},
+		stop() {
+			mode = "stopped"
+			counts.failed += queue.length
+			retainedRows -= queue.length
+			retainedBytes -= queue.reduce((sum, row) => sum + row.bytes, 0)
+			queue = []
+			if (inflight) {
+				counts.uncertain += inflight.rows.length
+				controlBytes -= controls.get(`batch:${inflight.id}`)
+				controls.delete(`batch:${inflight.id}`)
+				retainedRows -= inflight.rows.length
+				retainedBytes -= inflight.bytes
+				inflight = null
+			}
+		},
+		snapshot() {
+			return {
+				mode,
+				counts: { ...counts },
+				warmup,
+				retainedRows,
+				retainedBytes,
+				controlRows: controls.size,
+				controlBytes,
+				peakRows,
+				peakBytes,
+				maxLatenessUs,
+				fidelity: counts.schedulerMissed ? "failed" : "no scheduler misses",
+				receiptLatency: null,
+				latencyMeasurement:
+					"unmeasured; no worker receipt clock in this delivery item",
+			}
+		},
+	}
+}
+
+export const QUERY_TERMINALS = Object.freeze([
+	"successful",
+	"scheduler-missed",
+	"client-busy",
+	"queue-denied",
+	"queue-expired",
+	"active-timeout",
+	"query-failed",
+	"cancelled-before-dispatch",
+	"cancelled-in-flight",
+	"interrupted-unknown",
+	"not-offered-after-stop",
+])
+// Driver-only query partition. No SQL, actual query worker or result oracle is
+// implemented here. Retained state is at most one slot per client (eight total).
+export function queryAccounting(seconds = 900) {
+	if (!Number.isInteger(seconds) || seconds < 1 || seconds > 900)
+		throw new Error("Invalid query duration")
+	const planned = seconds * 8
+	const totals = Object.fromEntries(QUERY_TERMINALS.map(key => [key, 0]))
+	const classes = Array(8).fill(0)
+	const pending = new Map()
+	const retainedReplies = new Map()
+	let retainedReplyBytes = 0
+	let next = 0
+	let active = null
+	let stopped = false
+	let previous = -1
+	const terminal = (id, reason) => {
+		if (!QUERY_TERMINALS.includes(reason))
+			throw new Error("Invalid query terminal")
+		if (!pending.has(id)) return false
+		pending.delete(id)
+		if (active === id) active = null
+		totals[reason]++
+		return true
+	}
+	return {
+		turn(nowUs) {
+			if (
+				!Number.isSafeInteger(nowUs) ||
+				nowUs < 0 ||
+				nowUs < previous ||
+				stopped
+			)
+				throw new Error("Invalid query clock/state")
+			previous = nowUs
+			let processed = 0
+			// Query cadence is fixed at 125ms, so <= 8 current slots can be within
+			// 20ms. Stale whole slots are accounted arithmetically without a loop.
+			const staleEnd = Math.min(
+				planned,
+				Math.max(next, Math.ceil((nowUs - 20000) / 125000)),
+			)
+			totals["scheduler-missed"] += staleEnd - next
+			next = staleEnd
+			while (next < planned && next * 125000 <= nowUs && processed < 64) {
+				const id = next++
+				const client = id % 8
+				classes[(Math.floor(id / 8) + client) % 8]++
+				if (
+					retainedReplies.has(client) ||
+					[...pending.keys()].some(key => key % 8 === client)
+				)
+					totals["client-busy"]++
+				else if (pending.size >= (active === null ? 4 : 5))
+					totals["queue-denied"]++
+				else pending.set(id, { dispatched: false, timeUs: id * 125000 })
+				processed++
+			}
+			return processed
+		},
+		dispatch(nowUs) {
+			if (!Number.isSafeInteger(nowUs) || nowUs < 0 || nowUs < previous)
+				throw new Error("Invalid query clock")
+			previous = nowUs
+			for (const [id, slot] of pending)
+				if (nowUs - slot.timeUs >= 250000)
+					terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
+			if (active !== null) return null
+			for (const [id, slot] of pending)
+				if (!slot.dispatched) {
+					slot.dispatched = true
+					active = id
+					return id
+				}
+			return null
+		},
+		settle(id, reason, replyBytes = 0) {
+			if (!["successful", "query-failed"].includes(reason))
+				throw new Error("Invalid query terminal reply")
+			if (!pending.has(id)) return false
+			if (!pending.get(id).dispatched) throw new Error("Reply before dispatch")
+			if (
+				!Number.isSafeInteger(replyBytes) ||
+				replyBytes < 0 ||
+				replyBytes > 1024 * 1024 ||
+				retainedReplyBytes + replyBytes > DRIVER_LIMITS.controlBytes ||
+				(replyBytes && reason !== "successful")
+			)
+				throw new Error("Retained reply quota exceeded")
+			terminal(id, reason)
+			if (replyBytes) {
+				retainedReplies.set(id % 8, replyBytes)
+				retainedReplyBytes += replyBytes
+			}
+			return true
+		},
+		releaseReply(client) {
+			if (!retainedReplies.has(client)) return false
+			retainedReplyBytes -= retainedReplies.get(client)
+			retainedReplies.delete(client)
+			return true
+		},
+		stop(deliberate = false, joined = false) {
+			if (stopped) return
+			stopped = true
+			retainedReplies.clear()
+			retainedReplyBytes = 0
+			for (const [id, slot] of pending)
+				terminal(
+					id,
+					deliberate
+						? slot.dispatched
+							? joined
+								? "cancelled-in-flight"
+								: "interrupted-unknown"
+							: "cancelled-before-dispatch"
+						: slot.dispatched
+							? "interrupted-unknown"
+							: "cancelled-before-dispatch",
+				)
+			totals["not-offered-after-stop"] += planned - next
+			next = planned
+		},
+		snapshot() {
+			const terminalCount = Object.values(totals).reduce(
+				(sum, count) => sum + count,
+				0,
+			)
+			return {
+				planned,
+				totals: { ...totals },
+				classes: [...classes],
+				plannedClasses: Array(8).fill(seconds),
+				pending: pending.size,
+				retainedReplies: retainedReplies.size,
+				retainedReplyBytes,
+				terminalCount,
+				reconciled: terminalCount === planned,
+				actualQueries: "not-run",
+			}
+		},
 	}
 }

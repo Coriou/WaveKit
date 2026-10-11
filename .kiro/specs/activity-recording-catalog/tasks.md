@@ -15,9 +15,11 @@ runtime mounts. Follow dependencies; Main assigns owners at each gate.
       _Requirements: 1.1–1.6, 4.1–4.5, 6.6, 7.1–7.3._
 - [ ] **2. Runtime/storage qualification, independent first implementation batch.**
       The bounded micro harness is implemented and independently approved. The next
-      allocated phase is the concrete long-scenario extension plan in design.md and
-      its independent design review. Extension implementation requires that checkpoint;
-      exact implementation review then precedes an execution-window allocation. Fifteen-minute sustained,
+      phase is the independently approved long-scenario extension plan in design.md.
+      Only its first sequential driver/admission/report-containment implementation
+      item is allocated, with bounded scaled tests. Worker/query/receipt/fault work
+      requires a later allocation; exact implementation review precedes that next
+      item and any execution-window allocation. Fifteen-minute sustained,
       burst, matrix and combined-scanner experiments require a separate resource window; no production modules or shared edits in this batch. Prove feature-specific Node22.13+ floor and exact
       tested patch, harness disabled path on Node20, SQLite/FTS5 direct-worker availability
       and native AMD64/ARM64 runner behavior. Production worker build entries, state
