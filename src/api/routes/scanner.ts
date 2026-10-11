@@ -250,6 +250,7 @@ async function sendDownload(
 	lookup: () => string | null | Promise<string | null>,
 	contentType: string,
 	missing: () => FastifyReply,
+	{ mapScannerErrors = false }: { mapScannerErrors?: boolean } = {},
 ): Promise<FastifyReply> {
 	let stream: ReadStream | undefined
 	const lease = access?.leaseDownload(request, reply.raw, () =>
@@ -262,16 +263,14 @@ async function sendDownload(
 				: lease.reason === "invalidated"
 					? 401
 					: 503
-		return reply
-			.code(status)
-			.send({
-				code:
-					status === 429
-						? "ACCESS_CAPACITY"
-						: status === 401
-							? "AUTH_REQUIRED"
-							: "ACCESS_UNAVAILABLE",
-			})
+		return reply.code(status).send({
+			code:
+				status === 429
+					? "ACCESS_CAPACITY"
+					: status === 401
+						? "AUTH_REQUIRED"
+						: "ACCESS_UNAVAILABLE",
+		})
 	}
 	try {
 		const path = await lookup()
@@ -290,8 +289,10 @@ async function sendDownload(
 		return reply.type(contentType).send(stream)
 	} catch (err) {
 		stream?.destroy()
-		if (!access) throw err
 		if (lease && !lease.active()) return reply
+		if (mapScannerErrors && err instanceof ScannerApiError)
+			return sendError(reply, err)
+		if (!access) throw err
 		request.log.warn("Scanner download unavailable")
 		// The adapter's response-finish callback releases the lease after denial flush.
 		return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
@@ -585,10 +586,15 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 				response: errors,
 			},
 		},
-		async (request, reply) =>
-			(await scanner.deleteDiscovery(request.params.id))
-				? reply.code(204).send()
-				: notFound(reply, "Discovery", request.params.id),
+		async (request, reply) => {
+			try {
+				return (await scanner.deleteDiscovery(request.params.id))
+					? reply.code(204).send()
+					: notFound(reply, "Discovery", request.params.id)
+			} catch (err) {
+				return sendError(reply, err)
+			}
+		},
 	)
 
 	fastify.get<{ Params: { recordingId: string } }>(
@@ -597,7 +603,20 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 			schema: {
 				tags,
 				summary: "Download a recording (audio/wav)",
-				response: { 404: errorResponseSchema },
+				response: {
+					404: errorResponseSchema,
+					503: {
+						anyOf: [
+							errorResponseSchema,
+							{
+								type: "object",
+								properties: { code: { const: "ACCESS_UNAVAILABLE" } },
+								required: ["code"],
+								additionalProperties: false,
+							},
+						],
+					},
+				},
 			},
 		},
 		async (request, reply) => {
@@ -613,6 +632,7 @@ export const scannerRoutes: FastifyPluginAsync<ScannerRoutesOptions> = async (
 						: null,
 				"audio/wav",
 				() => notFound(reply, "Recording", recordingId),
+				{ mapScannerErrors: true },
 			)
 		},
 	)
