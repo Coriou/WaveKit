@@ -556,6 +556,9 @@ export class EvidenceStore {
 				)
 			})
 		this.removals.set(discoveryId, removal)
+		// Fence existing handles before caller can enqueue another PCM chunk.
+		const drain = this.analog?.cancelDiscovery(discoveryId)
+		if (drain) void drain.catch(() => undefined)
 		try {
 			await removal
 		} finally {

@@ -4,6 +4,9 @@ import {
 	link,
 	mkdir,
 	mkdtemp,
+	open,
+	rmdir,
+	lstat,
 	readFile,
 	realpath,
 	rm,
@@ -17,11 +20,13 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 import { WavFileWriter } from "../../../../src/core/scanner/channel/wav-writer.js"
 import {
 	AnalogReceiptSchema,
+	AnalogOperations,
 	type AnalogMetadataAdapter,
 	type AnalogOperationIo,
 	type AnalogReceipt,
 } from "../../../../src/core/scanner/store/analog-operations.js"
 import { DiscoveryStore } from "../../../../src/core/scanner/store/discovery-store.js"
+import { ScannerPersistence } from "../../../../src/core/scanner/store/persistence.js"
 import { EvidenceStore } from "../../../../src/core/scanner/store/evidence-store.js"
 import type { RecordingBinding } from "../../../../src/core/scanner/store/recording-operation.js"
 import { createLogger } from "../../../../src/utils/logger.js"
@@ -143,6 +148,470 @@ function privateDir(root: string, operationId: string): string {
 }
 
 describe("Task42 owned prepared-link operations", () => {
+	it("failed recovery read close stays unknown through later inventory refresh and DELETE", async () => {
+		const h = await harness(),
+			receipt = await record(h)
+		const handles: Awaited<ReturnType<typeof open>>[] = []
+		let fail = true
+		const evidence = new EvidenceStore({
+			dir: h.root,
+			caps,
+			logger,
+			now: () => NOW,
+			statfs: async () => ({ freeBytes: 1e9 }),
+			analogIo: {
+				unlink,
+				checkpoint: async () => undefined,
+				readOpen: async (path, flags) => {
+					const handle = await open(path, flags)
+					if (fail) {
+						fail = false
+						handles.push(handle)
+						vi.spyOn(handle, "close").mockRejectedValueOnce(
+							new Error("read close failed"),
+						)
+					}
+					return handle
+				},
+			},
+		})
+		try {
+			evidence.configureAnalog(h.adapter)
+			await evidence.recoverAnalog()
+			expect(evidence.analogAuthorityReady).toBe(false)
+			await expect(
+				evidence.removeDiscovery(h.discoveryId),
+			).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+			await expect(
+				evidence.removeDiscovery(h.discoveryId),
+			).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+			expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
+		} finally {
+			await Promise.all(handles.map(handle => handle.close()))
+		}
+	})
+
+	it("exact inventory charges one inode across both media links and credits only its final unlink", async () => {
+		const h = await harness()
+		const operations = new AnalogOperations({
+			root: h.root,
+			adapter: h.adapter,
+			admits: () => true,
+			serialise: async (_id, job) => job(),
+			legacyBytes: async () => 0,
+			limits: () => ({ maxBytes: 20 * 1024 * 1024, minFreeBytes: 0 }),
+			freeBytes: async () => 1e9,
+		})
+		try {
+			await operations.recover()
+			const op = operations.begin({
+				discoveryId: h.discoveryId,
+				observationId: "o1",
+				binding: h.binding,
+			})
+			await op.ready
+			await op.push(new Int16Array(24000))
+			const stage = join(privateDir(h.root, op.operationId), "payload.wav.part")
+			const final = join(
+				h.root,
+				"recordings",
+				"analog",
+				h.discoveryId,
+				`analog-${op.operationId}.wav`,
+			)
+			await link(stage, final)
+			const second = operations.begin({
+				discoveryId: h.discoveryId,
+				observationId: "o1",
+				binding: h.binding,
+			})
+			await second.ready
+			await operations.hasCleanup(h.discoveryId)
+			const intentBytes = (
+				await lstat(join(privateDir(h.root, op.operationId), "intent.json"))
+			).size
+			const secondIntentBytes = (
+				await lstat(join(privateDir(h.root, second.operationId), "intent.json"))
+			).size
+			const exact = 48044 + 44 + intentBytes + secondIntentBytes
+			expect(operations.managedBytes).toBe(exact)
+			await unlink(final)
+			second.cancel()
+			await second.settled
+			expect(operations.managedBytes).toBe(48044 + intentBytes)
+			op.cancel()
+			await op.settled
+			expect(operations.managedBytes).toBe(0)
+		} finally {
+			await operations.stop()
+		}
+	})
+	it("own-link assignment failure retains finalized decision and never invokes compensation", async () => {
+		const h = await harness(),
+			original = h.adapter.buildCommitPlan
+		const inverse = vi.spyOn(h.adapter, "inverse")
+		h.adapter.buildCommitPlan = id => {
+			const plan = original(id)
+			if (plan)
+				Object.defineProperty(plan.observation, "recordingIds", {
+					configurable: true,
+					get: () => plan.priorIds,
+					set: () => {
+						throw new Error("post-link assignment fault")
+					},
+				})
+			return plan
+		}
+		const receipt = await record(h)
+		expect(receipt.outcome).toBe("finalized")
+		expect(inverse).not.toHaveBeenCalled()
+		expect(
+			existsSync(join(privateDir(h.root, receipt.operationId), "receipt.json")),
+		).toBe(true)
+		expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
+	})
+	it("actual silent commit snapshot reload preserves later state/count before optional projection append", async () => {
+		const h = await harness()
+		const stateDir = join(h.root, "state")
+		const persistence = new ScannerPersistence({
+			dir: stateDir,
+			logger,
+			now: () => NOW,
+		})
+		await persistence.load()
+		let snapshot = h.store.snapshot()
+		const publish = h.adapter.publishCommit
+		h.adapter.publishCommit = plan => {
+			// This callback is first reached after own marker link and all silent plain assignments.
+			expect(
+				existsSync(
+					join(privateDir(h.root, plan.metadata.operationId), "receipt.json"),
+				),
+			).toBe(true)
+			h.store.attachRecordings("o1", ["later-unrelated"], "cut")
+			snapshot = h.store.snapshot()
+			throw new Error("optional projection never appended")
+		}
+		const receipt = await record(h)
+		expect(receipt.outcome).toBe("finalized")
+		const restored = new DiscoveryStore({
+			maxDiscoveries: 100,
+			now: () => NOW,
+			newId: counterIds(),
+		})
+		await persistence.writeSnapshot(snapshot)
+		const loaded = await new ScannerPersistence({
+			dir: stateDir,
+			logger,
+			now: () => NOW,
+		}).load()
+		expect(loaded.recoveryHealth).toBe("healthy")
+		expect(loaded.recordingOperations).toHaveLength(1)
+		restored.restore(loaded)
+		for (const entry of loaded.entries) restored.replay(entry)
+		const before = restored.snapshot()
+		const restarted = await harness({ root: h.root, store: restored })
+		expect(restored.snapshot()).toEqual(before)
+		expect(
+			restored.observations(h.discoveryId, null, 100).items[0],
+		).toMatchObject({
+			recording: "cut",
+			recordingIds: [receipt.alias, "later-unrelated"],
+		})
+		expect(restored.get(h.discoveryId)?.evidence.recordings).toBe(2)
+		expect(restarted.evidence.recordingPath(receipt.alias!)).not.toBeNull()
+		h.adapter.publishCommit = publish
+	})
+	it("cleanup sibling unlink failure retries after restart even if a stale alias remains", async () => {
+		let fail = true
+		const h = await harness({
+			io: {
+				checkpoint: async () => undefined,
+				unlink: async path => {
+					if (path.endsWith(".cleanup") && fail) {
+						fail = false
+						throw new Error("transient sibling unlink")
+					}
+					await unlink(path)
+				},
+			},
+		})
+		const receipt = await record(h)
+		await expect(
+			h.evidence.removeDiscovery(h.discoveryId),
+		).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+		expect(existsSync(privateDir(h.root, receipt.operationId))).toBe(false)
+		expect(
+			existsSync(
+				join(h.root, ".analog-operations", `${receipt.operationId}.cleanup`),
+			),
+		).toBe(true)
+		const restarted = await harness({ root: h.root, store: h.store })
+		expect(restarted.evidence.analogAuthorityReady).toBe(true)
+		expect(restarted.evidence.recordingPath(receipt.alias!)).toBeNull()
+		expect(
+			existsSync(
+				join(h.root, ".analog-operations", `${receipt.operationId}.cleanup`),
+			),
+		).toBe(false)
+		expect(
+			h.store.observations(h.discoveryId, null, 100).items[0]?.recordingIds,
+		).toContain(receipt.alias)
+	})
+
+	it.each([false, true])(
+		"real writer initialization retains failed-close ownership (cancel=%s)",
+		async cancelled => {
+			const handles: Awaited<ReturnType<typeof open>>[] = []
+			let operation:
+				| ReturnType<Awaited<ReturnType<typeof harness>>["begin"]>
+				| undefined
+			const h = await harness({
+				io: {
+					unlink,
+					checkpoint: async () => undefined,
+					wavIo: {
+						open: async (path, flags) => {
+							const handle = await open(path, flags)
+							handles.push(handle)
+							let wrote = false
+							return {
+								sync: () => handle.sync(),
+								close: async () => {
+									throw new Error("failed physical close")
+								},
+								write: async (buffer, offset, length, position) => {
+									if (wrote) {
+										if (cancelled) operation?.cancel()
+										throw new Error("header write failed")
+									}
+									wrote = true
+									return handle.write(
+										buffer,
+										offset,
+										Math.min(2, length),
+										position,
+									)
+								},
+							}
+						},
+						inspect: async () => {
+							throw new Error("must not inspect")
+						},
+						unlink,
+					},
+				},
+			})
+			try {
+				operation = h.begin()
+				await expect(operation.ready).rejects.toThrow()
+				const receipt = await operation.settled
+				expect(receipt).toMatchObject({
+					outcome: "failed",
+					cleanup: "pending",
+					closure: "unknown",
+					residueBytes: null,
+				})
+				expect(
+					existsSync(
+						join(privateDir(h.root, operation.operationId), "intent.json"),
+					),
+				).toBe(true)
+				expect(
+					existsSync(
+						join(privateDir(h.root, operation.operationId), "payload.wav.part"),
+					),
+				).toBe(true)
+				await expect(
+					h.evidence.removeDiscovery(h.discoveryId),
+				).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+				h.evidence.setCaps({ ...caps, maxRecordingsMb: 1 })
+				const next = h.begin()
+				await expect(next.ready).rejects.toThrow()
+				await next.settled
+			} finally {
+				await Promise.all(handles.map(handle => handle.close()))
+			}
+		},
+	)
+	it.each(["intent.tmp", "receipt.tmp"])(
+		"metadata %s failed close retains typed ownership",
+		async name => {
+			for (const cancelled of [false, true]) {
+				const handles: Awaited<ReturnType<typeof open>>[] = []
+				let operation:
+					| ReturnType<Awaited<ReturnType<typeof harness>>["begin"]>
+					| undefined
+				const h = await harness({
+					io: {
+						unlink,
+						checkpoint: async () => undefined,
+						metadataOpen: async path => {
+							const handle = await open(path, "wx")
+							if (!path.endsWith(name)) return handle
+							handles.push(handle)
+							return {
+								write: (buffer, offset, length, position) =>
+									handle.write(buffer, offset, length, position),
+								sync: () => handle.sync(),
+								close: async () => {
+									if (cancelled) operation?.cancel()
+									throw new Error("metadata close failed")
+								},
+							}
+						},
+					},
+				})
+				try {
+					operation = h.begin()
+					if (name === "intent.tmp")
+						await operation.ready.catch(() => undefined)
+					else await operation.ready
+					const receipt = await operation.finish()
+					expect(receipt).toMatchObject({
+						outcome: "failed",
+						cleanup: "pending",
+						closure: "unknown",
+						residueBytes: null,
+					})
+					expect(
+						existsSync(join(privateDir(h.root, operation.operationId), name)),
+					).toBe(true)
+					await expect(
+						h.evidence.removeDiscovery(h.discoveryId),
+					).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+				} finally {
+					await Promise.all(handles.map(handle => handle.close()))
+				}
+			}
+		},
+	)
+	it.each([false, true])(
+		"persistent cleanup ownership retries failed rmdir (restart=%s)",
+		async restart => {
+			let fail = true
+			const h = await harness({
+				io: {
+					unlink,
+					checkpoint: async () => undefined,
+					rmdir: async path => {
+						if (fail) {
+							fail = false
+							throw new Error("transient directory removal")
+						}
+						await rmdir(path)
+					},
+				},
+			})
+			const receipt = await record(h)
+			h.store.delete(h.discoveryId)
+			await expect(
+				h.evidence.removeDiscovery(h.discoveryId),
+			).rejects.toMatchObject({ code: "SCANNER_EVIDENCE_CLEANUP_PENDING" })
+			expect(
+				existsSync(
+					join(h.root, ".analog-operations", `${receipt.operationId}.cleanup`),
+				),
+			).toBe(true)
+			expect(
+				existsSync(
+					join(privateDir(h.root, receipt.operationId), "intent.json"),
+				),
+			).toBe(false)
+			if (restart) {
+				const recovered = new EvidenceStore({
+					dir: h.root,
+					caps,
+					logger,
+					now: () => NOW,
+					statfs: async () => ({ freeBytes: 1e9 }),
+				})
+				recovered.configureAnalog(h.adapter)
+				expect(await recovered.recoverAnalog()).toContainEqual(
+					expect.objectContaining({
+						status: "cleaned",
+						operationId: receipt.operationId,
+					}),
+				)
+				expect(recovered.analogAuthorityReady).toBe(true)
+			} else await h.evidence.removeDiscovery(h.discoveryId)
+			expect(existsSync(privateDir(h.root, receipt.operationId))).toBe(false)
+			expect(
+				existsSync(
+					join(h.root, ".analog-operations", `${receipt.operationId}.cleanup`),
+				),
+			).toBe(false)
+		},
+	)
+	it("DELETE cancels a ready unfinished handle before returning control", async () => {
+		const entered = deferred(),
+			release = deferred()
+		const h = await harness({
+			io: {
+				unlink,
+				checkpoint: async () => undefined,
+				wavIo: {
+					open: async (path, flags) => {
+						const handle = await open(path, flags)
+						return {
+							sync: () => handle.sync(),
+							close: () => handle.close(),
+							write: async (buffer, offset, length, position) => {
+								if (position >= 44) {
+									entered.resolve()
+									await release.promise
+								}
+								return handle.write(buffer, offset, length, position)
+							},
+						}
+					},
+					inspect: async () => {
+						throw new Error("cancelled writer must not inspect")
+					},
+					unlink,
+				},
+			},
+		})
+		const op = h.begin()
+		await op.ready
+		const write = op.push(new Int16Array(160)).catch(() => undefined)
+		await entered.promise
+		const removal = h.evidence.removeDiscovery(h.discoveryId)
+		await expect(op.push(new Int16Array(80))).rejects.toThrow()
+		release.resolve()
+		await write
+		await removal
+		expect((await op.settled).outcome).toBe("aborted")
+	})
+	it.each([true, false])(
+		"null finalized output facts quarantine with prepared ledger=%s",
+		async ledger => {
+			const h = await harness()
+			const receipt = await record(h)
+			if (!ledger) h.store.removePreparedRecording(receipt.operationId)
+			const marker = join(
+				privateDir(h.root, receipt.operationId),
+				"receipt.json",
+			)
+			await writeFile(
+				marker,
+				JSON.stringify({
+					...receipt,
+					output: { ...receipt.output, sampleRateHz: null, channelCount: null },
+				}),
+			)
+			const restarted = await harness({ root: h.root, store: h.store })
+			expect(restarted.evidence.recordingPath(receipt.alias!)).toBeNull()
+			expect(existsSync(join(h.root, receipt.artifact!))).toBe(true)
+			expect(
+				AnalogReceiptSchema.safeParse({
+					...receipt,
+					output: { ...receipt.output, sampleRateHz: null },
+				}).success,
+			).toBe(false)
+		},
+	)
+
 	it("commits verified media, frozen provenance and input/output units, then preserves its immutable decision", async () => {
 		const h = await harness()
 		const op = h.begin()

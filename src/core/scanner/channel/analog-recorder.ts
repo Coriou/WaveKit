@@ -25,7 +25,8 @@ export class AnalogRecorder {
 	private tail: Promise<void> = Promise.resolve()
 	private terminal: Promise<AnalogReceipt> | null = null
 	private failure: unknown = null
-	private inputSamples = 0
+	private admissionSampleIndex: number | null = 0
+	private blockInputIndex: number | null = null
 	constructor(
 		private readonly opts: {
 			operation: AnalogHandle
@@ -70,14 +71,25 @@ export class AnalogRecorder {
 					"SCANNER_ANALOG_WRITE_FAILED",
 				),
 			)
+		for (const value of cf32)
+			if (!Number.isFinite(value))
+				return Promise.reject(
+					new WaveKitError(
+						"Nonfinite analog cf32",
+						"SCANNER_ANALOG_INVALID_BINDING",
+					),
+				)
+		const inputStart = cf32.length % 2 ? null : this.admissionSampleIndex
+		this.admissionSampleIndex =
+			inputStart === null ? null : inputStart + cf32.length / 2
 		if (
 			cf32.byteLength > MAX_QUEUE_BYTES - this.queuedBytes ||
 			this.queuedChunks === MAX_QUEUE_CHUNKS
 		) {
-			this.gap({
+			this.reportGap({
 				cause: "queue-overflow",
-				inputSampleIndex: this.inputSamples,
-				droppedInputSamples: Math.floor(cf32.length / 2),
+				inputSampleIndex: inputStart,
+				droppedInputSamples: cf32.length % 2 ? null : cf32.length / 2,
 				outputFrameIndex: null,
 			})
 			return Promise.reject(
@@ -87,14 +99,6 @@ export class AnalogRecorder {
 				),
 			)
 		}
-		for (const value of cf32)
-			if (!Number.isFinite(value))
-				return Promise.reject(
-					new WaveKitError(
-						"Nonfinite analog cf32",
-						"SCANNER_ANALOG_INVALID_BINDING",
-					),
-				)
 		if (!cf32.length) return Promise.resolve()
 		const input = new Float32Array(cf32)
 		this.queuedBytes += input.byteLength
@@ -108,6 +112,11 @@ export class AnalogRecorder {
 							"Analog recorder cancelled",
 							"SCANNER_ANALOG_WRITE_FAILED",
 						)
+					if (!this.filled)
+						this.blockInputIndex =
+							inputStart === null || this.admissionSampleIndex === null
+								? null
+								: inputStart + offset / 2
 					const take = Math.min(
 						BLOCK_FLOATS - this.filled,
 						input.length - offset,
@@ -117,7 +126,6 @@ export class AnalogRecorder {
 					offset += take
 					if (this.filled !== BLOCK_FLOATS) continue
 					this.filled = 0
-					this.inputSamples += BLOCK_FLOATS / 2
 					const blocks = this.squelch.process(Buffer.from(this.block.buffer))
 					const gated = blocks[0]
 					if (!gated) continue
@@ -132,9 +140,9 @@ export class AnalogRecorder {
 						try {
 							await this.opts.operation.push(pcm)
 						} catch (cause) {
-							this.gap({
+							this.reportGap({
 								cause: "writer-backpressure",
-								inputSampleIndex: this.inputSamples - BLOCK_FLOATS / 2,
+								inputSampleIndex: this.blockInputIndex,
 								droppedInputSamples: BLOCK_FLOATS / 2,
 								outputFrameIndex: null,
 							})
@@ -156,21 +164,27 @@ export class AnalogRecorder {
 		this.tail = run.catch(() => undefined)
 		return run
 	}
+	/** Provider gaps are not a cursor reset: absent an authoritative new origin, positions become unknown. */
 	gap(gap: AnalogGap): void {
+		this.admissionSampleIndex = null
+		this.blockInputIndex = null
+		this.reportGap(gap)
+	}
+	private reportGap(gap: AnalogGap): void {
 		this.opts.operation.addGap(gap)
 	}
 	finish(cut: AnalogCut = "completed"): Promise<AnalogReceipt> {
 		this.accepting = false
 		this.terminal ??= this.tail.then(() => {
 			if (this.filled >= 2)
-				this.gap({
+				this.reportGap({
 					cause: "unknown",
-					inputSampleIndex: this.inputSamples,
+					inputSampleIndex: this.blockInputIndex,
 					droppedInputSamples: Math.floor(this.filled / 2),
 					outputFrameIndex: null,
 				})
 			if (this.filled % 2)
-				this.gap({
+				this.reportGap({
 					cause: "unknown",
 					inputSampleIndex: null,
 					droppedInputSamples: null,

@@ -93,6 +93,78 @@ function fake() {
 	return { handle, pcm, receipt, push, cancel, finish, gap }
 }
 describe("Task42 bounded internal analog producer", () => {
+	it("qualifies overflow at admission across backlog, rejected input and later accepted input", async () => {
+		const f = fake(),
+			entered = deferred(),
+			release = deferred()
+		f.push.mockImplementationOnce(async () => {
+			entered.resolve()
+			await release.promise
+		})
+		const recorder = new AnalogRecorder({
+			operation: f.handle,
+			thresholdDbfs: null,
+		})
+		const first = recorder.push(tone(4800))
+		await entered.promise
+		await expect(recorder.push(tone(8192))).rejects.toThrow("queue")
+		expect(f.gap).toHaveBeenLastCalledWith({
+			cause: "queue-overflow",
+			inputSampleIndex: 4800,
+			droppedInputSamples: 8192,
+			outputFrameIndex: null,
+		})
+		release.resolve()
+		await first
+		await recorder.push(tone(480))
+		await expect(recorder.push(tone(9000))).rejects.toThrow("queue")
+		expect(f.gap).toHaveBeenLastCalledWith({
+			cause: "queue-overflow",
+			inputSampleIndex: 13472,
+			droppedInputSamples: 9000,
+			outputFrameIndex: null,
+		})
+		await recorder.push(new Float32Array([1]))
+		await expect(recorder.push(new Float32Array(18001))).rejects.toThrow(
+			"queue",
+		)
+		expect(f.gap).toHaveBeenLastCalledWith({
+			cause: "queue-overflow",
+			inputSampleIndex: null,
+			droppedInputSamples: null,
+			outputFrameIndex: null,
+		})
+		await recorder.finish()
+	})
+	it("provider gaps retain supplied facts and invalidate an inferred future origin", async () => {
+		const f = fake(),
+			recorder = new AnalogRecorder({
+				operation: f.handle,
+				thresholdDbfs: null,
+			})
+		await recorder.push(tone(480))
+		recorder.gap({
+			cause: "source-gap",
+			inputSampleIndex: 10000,
+			droppedInputSamples: 100,
+			outputFrameIndex: null,
+		})
+		await expect(recorder.push(tone(9000))).rejects.toThrow("queue")
+		expect(f.gap).toHaveBeenLastCalledWith({
+			cause: "queue-overflow",
+			inputSampleIndex: null,
+			droppedInputSamples: 9000,
+			outputFrameIndex: null,
+		})
+		expect(f.gap).toHaveBeenNthCalledWith(1, {
+			cause: "source-gap",
+			inputSampleIndex: 10000,
+			droppedInputSamples: 100,
+			outputFrameIndex: null,
+		})
+		await recorder.finish()
+	})
+
 	it("produces exactly the independent FM output in 10 ms PCM pushes across odd chunks", async () => {
 		const f = fake()
 		const recorder = new AnalogRecorder({
@@ -141,6 +213,8 @@ describe("Task42 bounded internal analog producer", () => {
 		expect(f.gap).toHaveBeenCalledWith(
 			expect.objectContaining({
 				cause: "queue-overflow",
+				inputSampleIndex: 4800,
+				droppedInputSamples: 8192,
 				outputFrameIndex: null,
 			}),
 		)
@@ -177,7 +251,7 @@ describe("Task42 bounded internal analog producer", () => {
 		await recorder.finish()
 		expect(f.gap).toHaveBeenNthCalledWith(1, {
 			cause: "unknown",
-			inputSampleIndex: 0,
+			inputSampleIndex: null,
 			droppedInputSamples: 2,
 			outputFrameIndex: null,
 		})

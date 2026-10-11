@@ -10,6 +10,7 @@ import {
 	realpath,
 	rmdir,
 	unlink,
+	type FileHandle,
 } from "node:fs/promises"
 import { dirname, join, resolve, sep } from "node:path"
 import { z } from "zod"
@@ -18,6 +19,8 @@ import {
 	WavFileWriter,
 	wavHeader,
 	type WavWriteReceipt,
+	type WavHandle,
+	type WavIo,
 } from "../channel/wav-writer.js"
 import type { RecordingCommitPlan } from "./discovery-store.js"
 import {
@@ -135,8 +138,14 @@ export const AnalogReceiptSchema = z
 					r.alias !== recordingAlias(r.discoveryId, r.operationId) ||
 					r.artifact !== recordingArtifact(r.discoveryId, r.operationId) ||
 					r.output.format !== "s16le-wav" ||
+					r.output.sampleRateHz !== 8000 ||
+					r.output.channelCount !== 1 ||
+					r.output.outputFrames === null ||
+					r.output.fileBytes === null ||
 					r.output.fileBytes !== 44 + 2 * (r.output.outputFrames ?? -1) ||
 					r.closure !== "closed" ||
+					r.cutReason === null ||
+					r.errorCode !== null ||
 					r.durability.mediaFileSync !== "synced" ||
 					r.durability.metadata !== "journal-append-prepared-link" ||
 					r.durability.finalMarkerFileSync !== "synced"))
@@ -221,6 +230,10 @@ export interface AnalogReconciliation {
 	residueBytes: number | null
 }
 export interface AnalogOperationIo {
+	wavIo?: WavIo
+	readOpen?: (path: string, flags: number) => Promise<FileHandle>
+	metadataOpen?: (path: string) => Promise<WavHandle>
+	rmdir?: (path: string) => Promise<void>
 	unlink(path: string): Promise<void>
 	checkpoint(name: string, operationId: string): Promise<void>
 }
@@ -238,11 +251,13 @@ interface Inventory {
 	bytes: number
 	metadataBytes: number
 	unknown: boolean
+	cleanup: Set<string>
 	intents: Map<string, Intent>
 	opBytes: Map<string, number>
 }
 interface Operation {
 	intent: Intent
+	descriptors: Set<WavHandle>
 	writer: WavFileWriter | null
 	cancelled: AnalogCut | null
 	accepting: boolean
@@ -307,18 +322,20 @@ export class AnalogOperations {
 		string,
 		{ intent: Intent; receipt: AnalogReceipt; available: boolean }
 	>()
+	private readonly unconfirmedReads = new Set<FileHandle>()
 	private readonly io: AnalogOperationIo
 	private lock: Promise<void> = Promise.resolve()
 	private inventory: Inventory = {
 		bytes: 0,
 		metadataBytes: 0,
 		unknown: true,
+		cleanup: new Set(),
 		intents: new Map(),
 		opBytes: new Map(),
 	}
 	private readonly uncertainResidue = new Map<
 		string,
-		{ discoveryId: string; bytes: number }
+		{ discoveryId: string; bytes: number; descriptors: ReadonlySet<WavHandle> }
 	>()
 	private stopped = false
 	private initialized = false
@@ -406,6 +423,7 @@ export class AnalogOperations {
 			prepared: false,
 			metadataAck: false,
 			ownedIntent: false,
+			descriptors: new Set(),
 			ownedDirectory: false,
 			ownedMedia: false,
 			foreignMarker: false,
@@ -541,7 +559,9 @@ export class AnalogOperations {
 			this.valid(op)
 			await this.checkpoint("intent", op.intent.operationId)
 			this.valid(op)
-			op.writer = await WavFileWriter.open(this.stagePath(op.intent))
+			op.writer = await WavFileWriter.open(this.stagePath(op.intent), 8000, {
+				io: this.writerIo(op),
+			})
 			this.valid(op)
 			await this.checkpoint("stage", op.intent.operationId)
 			this.valid(op)
@@ -568,6 +588,59 @@ export class AnalogOperations {
 				)
 		return bytes
 	}
+	private trackedHandle(op: Operation, handle: WavHandle): WavHandle {
+		op.descriptors.add(handle)
+		return {
+			write: (buffer, offset, length, position) =>
+				handle.write(buffer, offset, length, position),
+			sync: () => handle.sync(),
+			close: async () => {
+				await handle.close()
+				op.descriptors.delete(handle)
+			},
+		}
+	}
+	private writerIo(op: Operation): WavIo {
+		const injected = this.io.wavIo
+		return {
+			open: async (path, flags) =>
+				this.trackedHandle(
+					op,
+					await (injected?.open(path, flags) ?? open(path, flags)),
+				),
+			unlink: async path => {
+				if (op.descriptors.size)
+					throw coded("cleanup-failed", "Descriptor closure unconfirmed")
+				await (injected?.unlink(path) ?? this.io.unlink(path))
+			},
+			inspect: injected
+				? path => injected.inspect(path)
+				: async path => {
+						const handle = await open(
+							path,
+							constants.O_RDONLY | constants.O_NOFOLLOW,
+						)
+						const tracked = this.trackedHandle(op, handle)
+						try {
+							const header = Buffer.alloc(44)
+							let offset = 0
+							while (offset < header.length) {
+								const { bytesRead } = await handle.read(
+									header,
+									offset,
+									header.length - offset,
+									offset,
+								)
+								if (!bytesRead) throw coded("close-failed", "Short WAV header")
+								offset += bytesRead
+							}
+							return { header, fileBytes: (await handle.stat()).size }
+						} finally {
+							await tracked.close()
+						}
+					},
+		}
+	}
 	private async publishIntent(op: Operation): Promise<void> {
 		const dir = this.opDir(op.intent.operationId)
 		const temp = join(dir, "intent.tmp")
@@ -588,7 +661,8 @@ export class AnalogOperations {
 	): Promise<void> {
 		await this.safeTarget(path, op)
 		if (op) this.valid(op)
-		const handle = await open(path, "wx")
+		const opened = await (this.io.metadataOpen?.(path) ?? open(path, "wx"))
+		const handle = op ? this.trackedHandle(op, opened) : opened
 		try {
 			if (op) this.valid(op)
 			let offset = 0
@@ -797,6 +871,7 @@ export class AnalogOperations {
 								this.uncertainResidue.set(op.intent.operationId, {
 									discoveryId: op.intent.discoveryId,
 									bytes: RESERVATION,
+									descriptors: op.descriptors,
 								})
 								throw coded(
 									"cleanup-failed",
@@ -805,6 +880,17 @@ export class AnalogOperations {
 								)
 							}
 						}
+					}
+					if (op.descriptors.size) {
+						this.uncertainResidue.set(op.intent.operationId, {
+							discoveryId: op.intent.discoveryId,
+							bytes: RESERVATION,
+							descriptors: op.descriptors,
+						})
+						throw coded(
+							"cleanup-failed",
+							"Descriptor closure remains unconfirmed",
+						)
 					}
 					if (op.foreignMarker)
 						throw coded(
@@ -834,7 +920,8 @@ export class AnalogOperations {
 					op.cancelled && cleanup === "complete" ? "aborted" : "failed",
 					op.cancelled ?? cut,
 					cleanup,
-					this.inventory.unknown
+					this.inventory.unknown ||
+						this.uncertainResidue.has(op.intent.operationId)
 						? null
 						: (this.inventory.opBytes.get(op.intent.operationId) ?? 0),
 					error,
@@ -907,7 +994,11 @@ export class AnalogOperations {
 				gaps: op.gaps,
 				omittedGapCount: op.omitted,
 				cutReason,
-				closure: op.output ? "closed" : "incomplete",
+				closure: op.descriptors.size
+					? "unknown"
+					: op.output
+						? "closed"
+						: "incomplete",
 				outcome,
 				artifact: outcome === "finalized" ? op.intent.artifact : null,
 				cleanup,
@@ -1031,9 +1122,23 @@ export class AnalogOperations {
 			if (nativeCode(cause) !== "ENOENT") throw cause
 		}
 	}
+	private async closeRead(handle: FileHandle): Promise<void> {
+		try {
+			await handle.close()
+		} catch (cause) {
+			this.unconfirmedReads.add(handle)
+			this.inventory.unknown = true
+			throw cause
+		}
+	}
 	private async readJson(path: string): Promise<unknown> {
+		if (this.unconfirmedReads.size)
+			throw coded("cleanup-failed", "Read descriptor closure unconfirmed")
 		await this.safeTarget(path)
-		const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+		const handle = await (this.io.readOpen?.(
+			path,
+			constants.O_RDONLY | constants.O_NOFOLLOW,
+		) ?? open(path, constants.O_RDONLY | constants.O_NOFOLLOW))
 		try {
 			const info = await handle.stat()
 			if (!info.isFile() || info.size > MAX_OPERATION_METADATA_BYTES)
@@ -1053,18 +1158,19 @@ export class AnalogOperations {
 			}
 			return JSON.parse(bytes.toString("utf8")) as unknown
 		} finally {
-			await handle.close()
+			await this.closeRead(handle)
 		}
 	}
 	private async mediaValid(
 		intent: Intent,
 		receipt: AnalogReceipt,
 	): Promise<boolean> {
+		if (this.unconfirmedReads.size)
+			throw coded("cleanup-failed", "Read descriptor closure unconfirmed")
 		await this.safeTarget(this.finalPath(intent))
-		const handle = await open(
-			this.finalPath(intent),
-			constants.O_RDONLY | constants.O_NOFOLLOW,
-		)
+		const path = this.finalPath(intent)
+		const flags = constants.O_RDONLY | constants.O_NOFOLLOW
+		const handle = await (this.io.readOpen?.(path, flags) ?? open(path, flags))
 		try {
 			const info = await handle.stat()
 			const header = Buffer.alloc(44)
@@ -1088,7 +1194,7 @@ export class AnalogOperations {
 				header.equals(wavHeader(8000, info.size - 44))
 			)
 		} finally {
-			await handle.close()
+			await this.closeRead(handle)
 		}
 	}
 	private matches(intent: Intent, receipt: AnalogReceipt): boolean {
@@ -1129,11 +1235,19 @@ export class AnalogOperations {
 		}
 		return names
 	}
+	private cleanupPath(id: string): string {
+		return join(this.root, ".analog-operations", `${id}.cleanup`)
+	}
 	private async scanInventory(): Promise<void> {
+		if (this.unconfirmedReads.size) {
+			this.inventory.unknown = true
+			return
+		}
 		const next: Inventory = {
 			bytes: 0,
 			metadataBytes: 0,
-			unknown: false,
+			unknown: this.unconfirmedReads.size > 0,
+			cleanup: new Set(),
 			intents: new Map(),
 			opBytes: new Map(),
 		}
@@ -1169,7 +1283,34 @@ export class AnalogOperations {
 			await this.safeDirectory(this.root, true)
 			const base = join(this.root, ".analog-operations")
 			await this.safeDirectory(base, true)
-			for (const id of await this.children(base, MAX_RECOVERY_OPERATIONS)) {
+			const names = await this.children(base, MAX_RECOVERY_OPERATIONS * 2)
+			const operationIds = new Set(
+				names.map(name =>
+					name.endsWith(".cleanup") ? name.slice(0, -8) : name,
+				),
+			)
+			if (operationIds.size > MAX_RECOVERY_OPERATIONS)
+				throw coded("recovery-incomplete", "Operation inventory overflow")
+			const cleanup = new Map<string, Intent>()
+			for (const name of names.filter(name => name.endsWith(".cleanup"))) {
+				const id = name.slice(0, -8)
+				try {
+					if (!UUIDSchema.safeParse(id).success)
+						throw coded("recovery-incomplete", "Invalid cleanup owner")
+					const intent = IntentSchema.parse(
+						await this.readJson(this.cleanupPath(id)),
+					)
+					if (intent.operationId !== id)
+						throw coded("recovery-incomplete", "Cleanup ownership mismatch")
+					cleanup.set(id, intent)
+					next.cleanup.add(id)
+					next.intents.set(id, intent)
+					await account(this.cleanupPath(id), id, true)
+				} catch {
+					next.unknown = true
+				}
+			}
+			for (const id of names.filter(name => !name.endsWith(".cleanup"))) {
 				if (!UUIDSchema.safeParse(id).success) {
 					next.unknown = true
 					continue
@@ -1182,7 +1323,13 @@ export class AnalogOperations {
 					continue
 				}
 				let metadataBytes = 0
-				for (const name of await this.children(dir, 8)) {
+				const directoryNames = await this.children(dir, 8)
+				if (
+					cleanup.has(id) &&
+					directoryNames.some(name => name !== "intent.json")
+				)
+					next.unknown = true
+				for (const name of directoryNames) {
 					const metadata = name !== "payload.wav.part"
 					if (
 						![
@@ -1207,18 +1354,41 @@ export class AnalogOperations {
 						next.unknown = true
 						continue
 					}
+					if (
+						cleanup.has(id) &&
+						JSON.stringify(cleanup.get(id)) !== JSON.stringify(intent)
+					)
+						next.unknown = true
 					next.intents.set(id, intent)
 					await this.safeDirectory(dirname(this.finalPath(intent)))
 					await account(this.finalPath(intent), id, false)
 				} catch (cause) {
+					if (nativeCode(cause) === "ENOENT" && cleanup.has(id)) {
+						// Transferred authority only permits a known empty leftover directory.
+						if ((await this.children(dir, 1)).length) next.unknown = true
+						continue
+					}
 					if (nativeCode(cause) === "ENOENT" && next.intents.has(id)) continue
 					// Pre-intent crash residue is quarantined and counted; its media ownership is unknown.
 					if (!this.active.has(id)) next.unknown = true
 				}
 			}
+			if (next.intents.size > MAX_RECOVERY_OPERATIONS) next.unknown = true
+			for (const [id, intent] of cleanup) {
+				await account(this.finalPath(intent), id, false)
+				try {
+					await lstat(this.finalPath(intent))
+					next.unknown = true // A cleanup disposition never authorizes unexpected replacement media.
+				} catch (cause) {
+					if (nativeCode(cause) !== "ENOENT") next.unknown = true
+				}
+				if ((next.opBytes.get(id) ?? 0) > MAX_OPERATION_METADATA_BYTES)
+					next.unknown = true
+			}
 		} catch {
 			next.unknown = true
 		}
+		if (this.unconfirmedReads.size) next.unknown = true
 		this.inventory = next
 	}
 
@@ -1276,6 +1446,15 @@ export class AnalogOperations {
 		})
 		if (!this.context.adapter.authorityHealthy())
 			return result("quarantined", "recovery-incomplete")
+		if (this.inventory.cleanup.has(intent.operationId)) {
+			try {
+				await this.context.adapter.inverse(intent.operationId)
+				await this.cleanupOwned(intent, true, false)
+				return { ...result("cleaned", null), residueBytes: 0 }
+			} catch {
+				return result("quarantined", "cleanup-failed")
+			}
+		}
 		let marker: AnalogReceipt
 		try {
 			marker = freeze(
@@ -1469,7 +1648,7 @@ export class AnalogOperations {
 				if (nativeCode(cause) !== "ENOENT") throw cause
 			}
 		}
-		// Persistent cleanup authority is removed last. Any failure retains the original intent.
+		// Transfer strict cleanup authority before removing the directory's last file.
 		if (ownedMedia) await remove(this.finalPath(intent))
 		const dir = this.opDir(intent.operationId)
 		for (const name of [
@@ -1484,12 +1663,26 @@ export class AnalogOperations {
 				if (nativeCode(cause) !== "ENOENT") throw cause
 			}
 		}
-		if (ownedIntent) await remove(join(dir, "intent.json"))
+		if (ownedIntent) {
+			const transferred = this.cleanupPath(intent.operationId)
+			await this.safeTarget(transferred)
+			try {
+				await link(join(dir, "intent.json"), transferred)
+			} catch (cause) {
+				if (nativeCode(cause) !== "EEXIST" && nativeCode(cause) !== "ENOENT")
+					throw cause
+				const prior = IntentSchema.parse(await this.readJson(transferred))
+				if (JSON.stringify(prior) !== JSON.stringify(intent))
+					throw coded("cleanup-failed", "Foreign cleanup ownership")
+			}
+			await remove(join(dir, "intent.json"))
+		}
 		try {
-			await rmdir(dir)
+			await (this.io.rmdir?.(dir) ?? rmdir(dir))
 		} catch (cause) {
 			if (nativeCode(cause) !== "ENOENT") throw cause
 		}
+		if (ownedIntent) await remove(this.cleanupPath(intent.operationId))
 	}
 	path(alias: string): string | null {
 		if (!this.ready) return null
