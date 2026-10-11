@@ -1,4 +1,15 @@
-import { guardScan, type ScanRead, type ScanValues } from "./scanner-guards.js"
+import {
+	guardScan,
+	guardIdentifyJob,
+	type ScanRead,
+	type ScanValues,
+} from "./scanner-guards.js"
+import { DispatchNotSent } from "./config.js"
+import type {
+	IdentifyOutcome,
+	IdentifyRequest,
+	IdentifySafeDetails,
+} from "./identify-state.js"
 import type { LiveAudioConfig } from "@wavekit/api-types"
 import type { FetchLike } from "./config.js"
 import {
@@ -414,6 +425,183 @@ export async function getScan<K extends ScanRead>(
 				? "Scan read cancelled or timed out"
 				: "Scan transport unavailable",
 		)
+	} finally {
+		if (abort) signal.removeEventListener("abort", abort)
+	}
+}
+
+/** Reviewed precreation refusals. A status family alone never proves no creation. */
+const IDENTIFY_REFUSALS: ReadonlySet<string> = new Set([
+	"503:SCANNER_DISABLED",
+	"400:SCANNER_PLAN_INVALID",
+	"409:SCANNER_SOURCE_BUSY",
+	"409:SCANNER_NO_TUNER_CONTROL",
+	"409:OUT_OF_WINDOW",
+	"400:VALIDATION_ERROR",
+	"401:AUTH_REQUIRED",
+	"403:HOST_FORBIDDEN",
+	"403:ORIGIN_FORBIDDEN",
+	"403:CSRF_REQUIRED",
+	"503:ACCESS_UNAVAILABLE",
+])
+const IDENTIFY_ISSUES: ReadonlySet<string> = new Set([
+	"range-empty",
+	"range-outside-tuner",
+	"all-excluded",
+	"plan-empty",
+	"not-in-window",
+	"no-tuner-control",
+	"source-busy",
+	"dwell-too-short",
+	"hold-inconsistent",
+	"channel-too-wide",
+	"source-not-iq",
+	"no-probe-transport",
+	"poi-low",
+	"rbw-coarse",
+	"rbw-fine",
+	"settle-timer",
+	"settle-unmeasured",
+	"budget-cpu",
+	"budget-disk",
+	"dc-adjacent-channels",
+	"dedicated-available",
+	"unrestorable",
+	"probe-unavailable",
+])
+function identifyDetails(body: unknown): IdentifySafeDetails | undefined {
+	if (!isObj(body) || !isObj(body["details"])) return undefined
+	const d = body["details"]
+	const safe: IdentifySafeDetails = {}
+	const reason = d["reason"]
+	if (
+		reason === "held" ||
+		reason === "relay" ||
+		reason === "holder-starting" ||
+		reason === "releasing" ||
+		reason === "recovery-pending"
+	)
+		safe.reason = reason
+	if (
+		isStr(d["holderJobId"]) &&
+		d["holderJobId"].length > 0 &&
+		d["holderJobId"].length <= 128
+	)
+		safe.holderJobId = d["holderJobId"]
+	const window = d["window"]
+	if (
+		isObj(window) &&
+		typeof window["startHz"] === "number" &&
+		Number.isFinite(window["startHz"]) &&
+		typeof window["endHz"] === "number" &&
+		Number.isFinite(window["endHz"]) &&
+		window["endHz"] >= window["startHz"]
+	)
+		safe.window = { startHz: window["startHz"], endHz: window["endHz"] }
+	const issues = d["issues"]
+	if (Array.isArray(issues) && issues.length <= 64) {
+		const projected: NonNullable<IdentifySafeDetails["issues"]> = []
+		for (const issue of issues) {
+			if (
+				!isObj(issue) ||
+				!isStr(issue["code"]) ||
+				!IDENTIFY_ISSUES.has(issue["code"]) ||
+				(issue["severity"] !== "error" && issue["severity"] !== "warning")
+			)
+				continue
+			projected.push({ code: issue["code"], severity: issue["severity"] })
+		}
+		safe.issues = projected
+	}
+	return Object.keys(safe).length ? safe : undefined
+}
+export function classifyIdentifyResponse(
+	status: number,
+	body: unknown,
+	request: IdentifyRequest,
+): IdentifyOutcome {
+	if (status === 201) {
+		const job = guardIdentifyJob(body, request)
+		return job
+			? { kind: "accepted", status: 201, job }
+			: { kind: "unresolved", status, acceptedResponse: true }
+	}
+	const code =
+		isObj(body) &&
+		isStr(body["code"]) &&
+		/^(?:SCANNER_|AUTH_|ACCESS_|HOST_|ORIGIN_|VALIDATION_)[A-Z_]{1,80}$|^(?:OUT_OF_WINDOW|CSRF_REQUIRED)$/.test(
+			body["code"],
+		)
+			? body["code"]
+			: undefined
+	const details = identifyDetails(body)
+	if (code && IDENTIFY_REFUSALS.has(`${status}:${code}`))
+		return { kind: "refused", status, code, ...(details ? { details } : {}) }
+	return {
+		kind: "unresolved",
+		status,
+		acceptedResponse: false,
+		...(code ? { code } : {}),
+		...(details ? { details } : {}),
+	}
+}
+
+/** One POST; deadline and boundary ownership belong to runtime, independent of display demand. */
+export async function submitIdentify(
+	fetchFn: FetchLike,
+	base: string,
+	request: IdentifyRequest,
+	signal: AbortSignal,
+	beforeDispatch: () => boolean,
+): Promise<IdentifyOutcome> {
+	if (signal.aborted) return { kind: "unsent", status: null, reason: "aborted" }
+	let abort: (() => void) | undefined
+	let abandoned = false
+	let claimed = false
+	let lateResponse: Awaited<ReturnType<FetchLike>> | null = null
+	let disposed = false
+	let status: number | null = null
+	const disposeLate = () => {
+		if (!lateResponse || claimed || disposed) return
+		disposed = true
+		void lateResponse.body?.cancel().catch(() => undefined)
+	}
+	try {
+		const cancelled = new Promise<never>((_resolve, reject) => {
+			abort = () => {
+				abandoned = true
+				disposeLate()
+				reject(new ScanReadError("timeout", "Identify request timed out"))
+			}
+			signal.addEventListener("abort", abort, { once: true })
+		})
+		const fetch = fetchFn(`${base}/api/scanner/identify`, {
+			method: "POST",
+			signal,
+			beforeDispatch,
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(request),
+		}).then(response => {
+			lateResponse = response
+			// Retain the status even if abort wins before the await continuation.
+			if (!abandoned) status = response.status
+			if (abandoned) disposeLate()
+			return response
+		})
+		const response = await Promise.race([fetch, cancelled])
+		claimed = true
+		status = response.status
+		let body: unknown
+		try {
+			body = await readBoundedJson(response, signal)
+		} catch {
+			body = undefined
+		}
+		return classifyIdentifyResponse(status, body, request)
+	} catch (error) {
+		if (error instanceof DispatchNotSent)
+			return { kind: "unsent", status: null, reason: error.reason }
+		return { kind: "unresolved", status, acceptedResponse: status === 201 }
 	} finally {
 		if (abort) signal.removeEventListener("abort", abort)
 	}

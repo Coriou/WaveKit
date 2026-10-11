@@ -4,7 +4,19 @@ import {
 	PLAIN_SUMMARY,
 } from "../../../cli/source/data/reducers.js"
 import { initialUi } from "../../../cli/source/ui/ui-state.js"
-import { scanModel, scanDetail } from "../../../cli/source/view-models/scan.js"
+import {
+	scanModel,
+	scanDetail,
+	identifyDisclosure,
+	scanIdentifyReady,
+	scanRowIds,
+} from "../../../cli/source/view-models/scan.js"
+import {
+	identifySourceIdentity,
+	type IdentifyRequest,
+	type IdentifyReceipt,
+} from "../../../cli/source/data/identify-state.js"
+import { chromeRows } from "../../../cli/source/ui/frame.js"
 import {
 	selectScan,
 	scanProfile,
@@ -20,6 +32,152 @@ import {
 } from "../../../cli/source/test/fixtures.js"
 import { cellWidth, lineText } from "../../../cli/source/ui/text.js"
 import { decoderConfirm } from "../../../cli/source/view-models/decoders.js"
+
+const identifyRequest: IdentifyRequest = {
+	sourceId: "rtl",
+	target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+	timeoutMs: 15000,
+	exhaustive: false,
+	record: false,
+}
+
+describe("identify disclosure and independent receipt", () => {
+	it.each([
+		[60, 16],
+		[80, 24],
+		[200, 50],
+	])(
+		"pins every disclosure at %sx%s with banner and scrolled detail",
+		(cols, rows) => {
+			for (const banner of [false, true]) {
+				const state = initialState(1000),
+					ui = initialUi("scan")
+				const height = chromeRows(rows, banner).content
+				const request = { ...identifyRequest, sourceId: "R".repeat(128) }
+				const layout = identifyDisclosure(request, cols - 1, height)
+				expect(layout.fits).toBe(true)
+				ui.detail.scan = { open: true, scroll: 4000 }
+				ui.confirm = {
+					kind: "identify",
+					token: 1,
+					request,
+					prompt: "Identify",
+					yes: "confirm",
+					no: "cancel",
+					layout: { width: cols - 1, height, rows: layout.lines },
+				}
+				const model = scanModel(state, ui, cols - 1, height)
+				expect(model.lines.slice(0, layout.lines.length).map(lineText)).toEqual(
+					layout.lines,
+				)
+				expect(model.lines.length).toBeLessThanOrEqual(height)
+				expect(model.lines.every(l => cellWidth(lineText(l)) <= cols - 3)).toBe(
+					true,
+				)
+				const text = layout.lines.join("")
+				for (const value of [
+					"Identify this frequency",
+					`Source: ${request.sourceId}`,
+					"Frequency: 446056250 Hz",
+					"Width: 12500 Hz",
+					"Wait up to 15s for signal; trials may take longer.",
+					"May preempt scanner probes.",
+					"Updates scanner discoveries and observations.",
+					"No trial recordings; other scanner activity may record.",
+				])
+					expect(text).toContain(value)
+			}
+		},
+	)
+	it("preserves identity whitespace, controls, Unicode and exact exponent numbers without rounding", () => {
+		const sourceId = " leading  spaces\\literal\n\t\u001b\u202e📡 trailing "
+		const request = {
+			...identifyRequest,
+			sourceId,
+			target: { frequencyHz: 1e100, bandwidthHz: 1e-100 },
+		}
+		const layout = identifyDisclosure(request, 59, 12)
+		expect(layout.fits).toBe(true)
+		expect(layout.lines.join("")).toContain(
+			`Source: ${identifySourceIdentity(sourceId)}`,
+		)
+		expect(layout.lines.join("")).toContain("Frequency: 1e+100 Hz")
+		expect(layout.lines.join("")).toContain("Width: 1e-100 Hz")
+		expect(layout.lines.join("")).not.toMatch(/[^\x20-\x7e]/)
+		expect(identifySourceIdentity("\\u000a")).not.toBe(
+			identifySourceIdentity("\n"),
+		)
+	})
+	it("denies oversized consent, changed layout and hidden help while keeping inspection", () => {
+		const state = initialState(1000),
+			ui = initialUi("scan")
+		const request = { ...identifyRequest, sourceId: "📡".repeat(100) }
+		expect(identifyDisclosure(request, 59, 12).fits).toBe(false)
+		expect(identifyDisclosure(identifyRequest, 58, 12).fits).toBe(false)
+		expect(identifyDisclosure(identifyRequest, 59, 7).fits).toBe(false)
+		const layout = identifyDisclosure(identifyRequest, 79, 20)
+		ui.confirm = {
+			kind: "identify",
+			token: 1,
+			request: identifyRequest,
+			prompt: "Identify",
+			yes: "confirm",
+			no: "cancel",
+			layout: { width: 79, height: 20, rows: layout.lines },
+		}
+		expect(
+			scanModel(state, ui, 59, 12).lines.map(lineText).join("\n"),
+		).toContain("Confirmation cannot fit")
+		ui.help = true
+		expect(
+			scanModel(state, ui, 79, 20).lines.map(lineText).join("\n"),
+		).toContain("Confirmation cannot fit")
+		expect(scanIdentifyReady(state, ui, 79, 20)).toBe(false)
+	})
+	it("shows retained off-list result without source admission and keeps unresolved inspection-only", () => {
+		const state = initialState(1000),
+			ui = initialUi("scan")
+		const receipt: IdentifyReceipt = {
+			phase: "known",
+			destination: "http://localhost:3000",
+			session: 1,
+			request: identifyRequest,
+			status: 201,
+			jobId: SCAN_JOB.id,
+			job: guardScan("job", SCAN_JOB)!,
+			error: null,
+			terminalAt: null,
+			readGeneration: 1,
+		}
+		state.identify = {
+			prompt: null,
+			receipt,
+			readiness: {
+				ready: false,
+				reason: "Inspect the previous identify receipt",
+				request: null,
+				layout: null,
+			},
+			inspection: true,
+		}
+		ui.scan.receipt = true
+		ui.detail.scan.open = true
+		for (const tab of ["spectrum", "discoveries", "jobs"] as const) {
+			ui.scan.tab = tab
+			expect(scanRowIds(state, ui)).toEqual([])
+			const text = scanDetail(state, ui, 199).join("\n")
+			expect(text).toContain(`job ID: ${SCAN_JOB.id}`)
+			expect(text).toContain("unsupported (needs-channelizer)")
+			expect(text).toContain("peak ? dBFS")
+		}
+		receipt.phase = "unresolved"
+		receipt.job = null
+		receipt.jobId = null
+		expect(scanDetail(state, ui, 199).join("\n")).toContain(
+			"Inspection only for this session; no retry.",
+		)
+	})
+})
 
 describe("read-only Scan presentation", () => {
 	it("shows requested/served widths, cadence, units, trust and stale state", () => {

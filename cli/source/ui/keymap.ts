@@ -448,6 +448,22 @@ export const BINDINGS: readonly Binding[] = [
 	{
 		mode: "detail",
 		views: ["scan"],
+		keys: ["i"],
+		when: c => c.v.scanIdentifyReady === true,
+		action: () => ({ type: "scan-identify" }),
+		hint: hint("i", "identify (asks to confirm)"),
+	},
+	{
+		mode: "list",
+		views: ["scan"],
+		keys: ["o"],
+		when: c => c.v.scanReceipt === true,
+		action: () => ({ type: "scan-receipt" }),
+		hint: hint("o", "identify receipt"),
+	},
+	{
+		mode: "detail",
+		views: ["scan"],
 		keys: ["<pgup>"],
 		action: () => ({ type: "detail-scroll", delta: -1 }),
 	},
@@ -539,6 +555,7 @@ export const BINDINGS: readonly Binding[] = [
 ]
 
 export function modeChain(ctx: KeyContext): ModeName[] {
+	if (ctx.help && ctx.confirm === "identify") return ["help"]
 	if (ctx.confirm !== null) return ["confirm"]
 	if (ctx.help) return ["help"]
 	if (ctx.input) return ["input"]

@@ -410,3 +410,100 @@ it("explicitly reselects and reconnects a re-added sole Scan source across App/r
 		rt.stop()
 	}
 })
+
+it("commits visible identify consent before y, synchronously fences resize, and never uses generic writes", async () => {
+	const { scanView } = await import("./views/scan.js")
+	const { SCAN_DISCOVERY, SCAN_PROFILE, SCAN_FRAME, SCAN_STATUS } =
+		await import("./test/fixtures.js")
+	const { initialScan, selectScan, scanRead, scanProfile, scanFrame } =
+		await import("./data/scan-state.js")
+	const { guardScan } = await import("./data/scanner-guards.js")
+	const { identifyConsentLayout } = await import("./data/identify-state.js")
+	const state = scenarioState("live")
+	state.sources.value = [{ ...state.sources.value![0]!, id: "rtl" }]
+	state.scan = scanFrame(
+		scanProfile(selectScan(initialScan(), "rtl"), SCAN_PROFILE),
+		SCAN_FRAME,
+		state.now,
+	)
+	state.scan = scanRead(
+		state.scan,
+		"status",
+		guardScan("status", SCAN_STATUS)!,
+		null,
+		state.now,
+	)
+	state.scan = scanRead(
+		state.scan,
+		"discoveries",
+		guardScan("discoveries", { items: [SCAN_DISCOVERY], nextCursor: null })!,
+		null,
+		state.now,
+	)
+	state.scan = scanRead(
+		state.scan,
+		"discovery",
+		guardScan("discovery", SCAN_DISCOVERY)!,
+		null,
+		state.now,
+	)
+	const request = {
+		sourceId: "rtl",
+		target: {
+			frequencyHz: SCAN_DISCOVERY.frequencyHz,
+			bandwidthHz: SCAN_DISCOVERY.bandwidthHz,
+		},
+		timeoutMs: 15000 as const,
+		exhaustive: false as const,
+		record: false as const,
+	}
+	state.identify = {
+		prompt: null,
+		receipt: null,
+		inspection: false,
+		readiness: { ready: true, reason: null, request, layout: null },
+	}
+	const h = await renderApp({
+		state,
+		views: { scan: scanView },
+		view: "scan",
+		cols: 80,
+		rows: 24,
+	})
+	const visible = vi.fn(),
+		confirm = vi.fn(),
+		invalidate = vi.fn()
+	h.runtime.markIdentifyVisible = visible
+	h.runtime.confirmIdentify = confirm
+	h.runtime.invalidateIdentify = invalidate
+	h.runtime.prepareIdentify = context => ({
+		token: 1,
+		destination: "http://core",
+		session: 1,
+		revision: 1,
+		profileGeneration: 1,
+		contextKey: context.key,
+		discoveryId: "disc1",
+		request,
+		frameKey: "frame",
+		layout: identifyConsentLayout(request, context),
+	})
+	await h.press("d")
+	await h.press(KEYS.enter)
+	await h.press("i")
+	expect(h.text()).toContain("Identify this frequency")
+	expect(h.text()).toContain("y confirm  n cancel  Esc cancel")
+	expect(visible).toHaveBeenCalledWith(1)
+	await h.press("y")
+	expect(confirm).toHaveBeenCalledTimes(1)
+	await h.press("y", QUIET)
+	expect(confirm).toHaveBeenCalledTimes(1)
+	expect(h.runtime.sent).toEqual([])
+	await h.press("i")
+	const before = invalidate.mock.calls.length
+	await h.resize(59, 15)
+	expect(invalidate.mock.calls.length).toBeGreaterThan(before)
+	await h.press("y", QUIET)
+	expect(confirm).toHaveBeenCalledTimes(1)
+	h.unmount()
+})

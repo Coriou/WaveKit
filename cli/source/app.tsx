@@ -1,6 +1,12 @@
 import { scanSources } from "./view-models/scan.js"
-import { Box, Text, useApp } from "ink"
-import { useEffect, useState, type ReactElement } from "react"
+import { Box, Text, useApp, useStdout } from "ink"
+import {
+	useEffect,
+	useLayoutEffect,
+	useRef,
+	useState,
+	type ReactElement,
+} from "react"
 import { Banner } from "./components/banner.js"
 import { ChainStrip } from "./components/chain-strip.js"
 import { ConfirmBar } from "./components/confirm-bar.js"
@@ -10,6 +16,7 @@ import { HelpOverlay } from "./components/help-overlay.js"
 import { ColorContext } from "./components/lines.js"
 import { Switcher } from "./components/switcher.js"
 import { TooSmall } from "./components/too-small.js"
+import type { IdentifyContext } from "./data/identify-state.js"
 import type { RuntimeHandle } from "./data/runtime.js"
 import type { AppState } from "./data/types.js"
 import { useKeys } from "./hooks/use-keys.js"
@@ -52,9 +59,12 @@ export function App({
 	writeRaw,
 }: AppProps): ReactElement {
 	const { exit } = useApp()
+	const { stdout } = useStdout()
 	const { columns: cols, rows } = useTerminalSize()
 	const state = useStore(runtime.store, selectAll)
 	const [ui, setUi] = useState<UiState>(() => initialUi(initialView))
+	const uiRef = useRef(ui)
+	const renderedRef = useRef({ cols, rows, contentRows: 0 })
 	const small = tooSmall(cols, rows)
 	const hc = heightClass(rows)
 	const wc = widthClass(cols)
@@ -63,6 +73,70 @@ export function App({
 		? null
 		: safe(() => bannerLine(bannerConditions(state), state.now, width), null)
 	const chrome = chromeRows(rows, banner !== null)
+	const identifyContextFor = (u: UiState, live = false): IdentifyContext => {
+		const dimensions = renderedRef.current
+		const columns = live ? (stdout.columns ?? 0) : dimensions.cols
+		const height = live ? (stdout.rows ?? 0) : dimensions.rows
+		return {
+			sourceId: u.scan.sourceId,
+			discoveryId:
+				u.detail.scan.open && u.scan.tab === "discoveries"
+					? u.selected.scan
+					: null,
+			key: JSON.stringify([
+				u.view,
+				u.help,
+				u.quit,
+				u.scan.sourceId,
+				u.scan.tab,
+				u.scan.cursor,
+				u.scan.retry,
+				u.selected.scan,
+				u.detail.scan.open,
+				u.scan.receipt === true,
+			]),
+			active:
+				u.view === "scan" &&
+				!u.help &&
+				!u.quit &&
+				!u.scan.receipt &&
+				u.detail.scan.open &&
+				u.scan.tab === "discoveries" &&
+				!tooSmall(columns, height),
+			columns,
+			rows: height,
+			contentRows: dimensions.contentRows,
+		}
+	}
+	const liveContext = (): IdentifyContext =>
+		identifyContextFor(uiRef.current, true)
+	const commitUi = (next: UiState): void => {
+		uiRef.current = next
+		runtime.setIdentifyContext?.(identifyContextFor(next), liveContext)
+		setUi(next)
+	}
+	useLayoutEffect(() => {
+		renderedRef.current = { cols, rows, contentRows: chrome.content }
+		uiRef.current = ui
+		runtime.setIdentifyContext?.(identifyContextFor(ui), liveContext)
+		if (
+			ui.confirm?.kind === "identify" &&
+			!ui.help &&
+			!small &&
+			ui.confirm.layout.width === width &&
+			ui.confirm.layout.height === chrome.content
+		)
+			runtime.markIdentifyVisible?.(ui.confirm.token)
+	})
+	useEffect(() => {
+		const resize = (): void => {
+			runtime.invalidateIdentify?.()
+		}
+		stdout.on("resize", resize)
+		return () => {
+			stdout.off("resize", resize)
+		}
+	}, [stdout, runtime])
 	const view = views[ui.view]
 	// Computed outside the boundary, so a throw here must not take the app down.
 	const info = view
@@ -105,18 +179,71 @@ export function App({
 	const dispatch = (a: Action): void => {
 		// While too small nothing is visible: only quit (q, Ctrl-C) is honoured, so a
 		// hidden confirm, audio toggle, draft or edit cannot change blind.
-		if (small && a.type !== "quit") return
+		if (
+			(small || tooSmall(stdout.columns ?? 0, stdout.rows ?? 0)) &&
+			a.type !== "quit"
+		) {
+			runtime.invalidateIdentify?.()
+			return
+		}
+		if (a.type === "scan-identify") {
+			const prompt = runtime.prepareIdentify?.(
+				identifyContextFor(uiRef.current, true),
+			)
+			if (!prompt) {
+				commitUi({
+					...uiRef.current,
+					notice: {
+						text:
+							runtime.identifySnapshot?.().readiness.reason ??
+							"Identify unavailable; reinspect detail",
+						at: state.now,
+					},
+				})
+				return
+			}
+			commitUi({
+				...uiRef.current,
+				confirm: {
+					kind: "identify",
+					token: prompt.token,
+					request: prompt.request,
+					layout: { width, height: chrome.content, rows: prompt.layout.lines },
+					prompt: "Identify",
+					yes: "confirm",
+					no: "cancel",
+				},
+			})
+			return
+		}
+		if (a.type !== "confirm-yes" && a.type !== "confirm-no")
+			runtime.invalidateIdentify?.()
 		switch (a.type) {
 			case "quit":
-				setUi(u => ({ ...u, quit: true }))
+				commitUi({ ...uiRef.current, quit: true })
 				return
 			case "reconnect":
 				runtime.reconnect()
-				setUi(u => ({ ...u, epoch: u.epoch + 1 }))
+				commitUi({ ...uiRef.current, epoch: uiRef.current.epoch + 1 })
 				return
 			case "confirm-yes": {
-				const c = ui.confirm
+				const c = uiRef.current.confirm
 				if (!c) return
+				if (c.kind === "identify") {
+					runtime.confirmIdentify?.(c.token)
+					const receipt = runtime.identifySnapshot?.().receipt
+					commitUi({
+						...uiRef.current,
+						confirm: null,
+						scan: {
+							...uiRef.current.scan,
+							receipt:
+								receipt?.phase === "known" ||
+								receipt?.phase === "terminal-confirmed",
+						},
+					})
+					return
+				}
 				const confirmedIntent = c.intent
 				if (
 					confirmedIntent.kind === "decoder" &&
@@ -151,15 +278,16 @@ export function App({
 			default:
 				break
 		}
-		const out = view?.onAction?.(a, state, ui)
+		if (a.type === "confirm-no") runtime.invalidateIdentify?.()
+		const out = view?.onAction?.(a, state, uiRef.current)
 		if (out) {
-			setUi(out.ui)
+			commitUi(out.ui)
 			for (const e of out.effects) applyEffect(e)
 			return
 		}
-		setUi(u =>
+		commitUi(
 			applyUiAction(
-				u,
+				uiRef.current,
 				a,
 				{
 					rowIds: info.rowIds,
@@ -195,7 +323,11 @@ export function App({
 	useEffect(() => {
 		if (ui.view === "scan" && ui.scan.sourceId === null) {
 			const first = scanSources(state)[0]
-			if (first) setUi(u => ({ ...u, scan: { ...u.scan, sourceId: first } }))
+			if (first)
+				commitUi({
+					...uiRef.current,
+					scan: { ...uiRef.current.scan, sourceId: first },
+				})
 		}
 	}, [ui.view, ui.scan.sourceId, state.sources.value])
 	useEffect(() => {
@@ -238,7 +370,44 @@ export function App({
 		small,
 		ui.quit,
 	])
-	useEffect(() => () => runtime.setScanDemand?.(null), [runtime])
+	useEffect(() => {
+		const receipt = state.identify?.receipt
+		if (
+			state.identify?.inspection &&
+			ui.view === "scan" &&
+			receipt?.jobId &&
+			!ui.scan.receipt
+		)
+			commitUi({
+				...uiRef.current,
+				scan: { ...uiRef.current.scan, receipt: true },
+				confirm: null,
+			})
+	}, [state.identify?.inspection, state.identify?.receipt?.jobId])
+	useEffect(() => {
+		runtime.setIdentifyInspection?.(
+			ui.view === "scan" &&
+				ui.scan.receipt === true &&
+				!small &&
+				!ui.help &&
+				!ui.quit,
+		)
+	}, [runtime, ui.view, ui.scan.receipt, small, ui.help, ui.quit])
+	useEffect(() => {
+		if (
+			ui.confirm?.kind === "identify" &&
+			state.identify?.prompt?.token !== ui.confirm.token
+		)
+			commitUi({ ...uiRef.current, confirm: null })
+	}, [state.identify?.prompt?.token])
+	useEffect(
+		() => () => {
+			runtime.setScanDemand?.(null)
+			runtime.setIdentifyInspection?.(false)
+			runtime.invalidateIdentify?.()
+		},
+		[runtime],
+	)
 	useEffect(() => {
 		if (ui.quit) exit()
 	}, [ui.quit, exit])

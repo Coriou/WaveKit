@@ -1,4 +1,5 @@
 import { z } from "zod"
+import type { IdentifyRequest } from "./identify-state.js"
 import type {
 	SpectrumFrameEventData,
 	SpectrumProfileEventData,
@@ -248,7 +249,24 @@ const job = z.object({
 			128,
 		),
 	}),
-	identify: z.object({ targets: boundedArray(identifyTarget, 256) }).optional(),
+	identify: z
+		.object({
+			target: z
+				.union([
+					z.object({
+						frequencyHz: positive,
+						bandwidthHz: positive.max(1_000_000).optional(),
+					}),
+					z.object({ all: z.literal(true) }),
+				])
+				.optional(),
+			timeoutMs: positive.int().optional(),
+			protocols: boundedArray(text, 128).optional(),
+			exhaustive: z.boolean().optional(),
+			record: z.boolean().optional(),
+			targets: boundedArray(identifyTarget, 256),
+		})
+		.optional(),
 })
 const discovery = z.object({
 	id,
@@ -269,6 +287,7 @@ const discovery = z.object({
 	signal: z.object({ best: levels, last: levels }),
 	metadata,
 	evidence: z.object({ recordings: count, psd: z.boolean(), iq: z.boolean() }),
+	operator: z.object({ lockout: z.boolean().optional() }).optional(),
 })
 const observation = z.object({
 	id,
@@ -339,6 +358,34 @@ export type ScanRead = keyof typeof scanSchemas
 export type ScanValues = { [K in ScanRead]: z.infer<(typeof scanSchemas)[K]> }
 export type ScanJob = ScanValues["job"]
 export type ScanDiscovery = ScanValues["discovery"]
+/** Older reduced jobs remain inspectable; only this complete projection attributes a POST. */
+export function guardIdentifyJob(
+	v: unknown,
+	request: IdentifyRequest,
+): ScanJob | undefined {
+	const p = job.safeParse(v)
+	if (!p.success) return undefined
+	const j = p.data
+	const i = j.identify
+	if (
+		j.spec.sourceId !== request.sourceId ||
+		j.spec.kind !== "identify" ||
+		j.spec.mode !== "in-window" ||
+		!i ||
+		!i.target ||
+		!("frequencyHz" in i.target) ||
+		i.target.frequencyHz !== request.target.frequencyHz ||
+		i.target.bandwidthHz !== request.target.bandwidthHz ||
+		i.timeoutMs !== request.timeoutMs ||
+		i.exhaustive !== request.exhaustive ||
+		i.record !== request.record ||
+		!i.protocols ||
+		i.protocols.length !== 0 ||
+		i.targets.some(t => t.jobId !== j.id)
+	)
+		return undefined
+	return j
+}
 export function guardScan<K extends ScanRead>(
 	key: K,
 	v: unknown,

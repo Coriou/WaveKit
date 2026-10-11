@@ -498,3 +498,325 @@ it("handles a fetch rejection arriving after caller cancellation", async () => {
 	await Promise.resolve()
 	await Promise.resolve()
 })
+
+describe("identify bounded POST outcome attribution", () => {
+	const request = {
+		sourceId: "rtl",
+		target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+		timeoutMs: 15000,
+		exhaustive: false,
+		record: false,
+	} as const
+	async function wire() {
+		const { SCAN_JOB } = await import("../../../cli/source/test/fixtures.js")
+		return {
+			...SCAN_JOB,
+			identify: {
+				...SCAN_JOB.identify!,
+				target: request.target,
+				timeoutMs: 15000,
+				protocols: [],
+				exhaustive: false,
+				record: false,
+			},
+		}
+	}
+	it("sends the exact explicit request once and adopts only strict201", async () => {
+		const { submitIdentify } =
+			await import("../../../cli/source/data/api-client.js")
+		const job = await wire()
+		const beforeDispatch = vi.fn(() => true)
+		const fetchFn = vi.fn<FetchLike>(async (_url, init) => {
+			expect(init?.beforeDispatch?.()).toBe(true)
+			return new Response(JSON.stringify(job), { status: 201 })
+		})
+		const result = await submitIdentify(
+			fetchFn,
+			"http://core",
+			request,
+			new AbortController().signal,
+			beforeDispatch,
+		)
+		expect(result).toMatchObject({
+			kind: "accepted",
+			status: 201,
+			job: { id: job.id },
+		})
+		expect(fetchFn).toHaveBeenCalledTimes(1)
+		expect(fetchFn.mock.calls[0]?.[0]).toBe("http://core/api/scanner/identify")
+		expect(fetchFn.mock.calls[0]?.[1]?.body).toBe(JSON.stringify(request))
+		expect(
+			JSON.parse(fetchFn.mock.calls[0]?.[1]?.body ?? "{}") as unknown,
+		).not.toHaveProperty("protocols")
+	})
+	it.each([
+		[503, "SCANNER_DISABLED"],
+		[400, "SCANNER_PLAN_INVALID"],
+		[409, "SCANNER_SOURCE_BUSY"],
+		[409, "SCANNER_NO_TUNER_CONTROL"],
+		[409, "OUT_OF_WINDOW"],
+		[400, "VALIDATION_ERROR"],
+		[401, "AUTH_REQUIRED"],
+		[403, "HOST_FORBIDDEN"],
+		[403, "ORIGIN_FORBIDDEN"],
+		[403, "CSRF_REQUIRED"],
+		[503, "ACCESS_UNAVAILABLE"],
+	])(
+		"only reviewed exact pair %s %s is definitely refused",
+		async (status, code) => {
+			const { classifyIdentifyResponse } =
+				await import("../../../cli/source/data/api-client.js")
+			expect(
+				classifyIdentifyResponse(status, { code, message: "secret" }, request),
+			).toEqual({ kind: "refused", status, code })
+			expect(classifyIdentifyResponse(500, { code }, request).kind).toBe(
+				"unresolved",
+			)
+		},
+	)
+	it.each([200, 202, 204, 400, 404, 409, 500, 503])(
+		"status%s without reviewed provenance stays unresolved",
+		async status => {
+			const { classifyIdentifyResponse } =
+				await import("../../../cli/source/data/api-client.js")
+			expect(classifyIdentifyResponse(status, {}, request)).toEqual({
+				kind: "unresolved",
+				status,
+				acceptedResponse: false,
+			})
+		},
+	)
+	it("whitelists safe bounded details and never copies arbitrary server text", async () => {
+		const { classifyIdentifyResponse } =
+			await import("../../../cli/source/data/api-client.js")
+		const result = classifyIdentifyResponse(
+			409,
+			{
+				code: "SCANNER_SOURCE_BUSY",
+				message: "secret",
+				details: {
+					reason: "held",
+					holderJobId: "job2",
+					window: { startHz: 1, endHz: 2 },
+					issues: [
+						{ code: "source-busy", severity: "error", message: "secret" },
+						{ code: "secret", severity: "warning" },
+					],
+					secret: "secret",
+				},
+			},
+			request,
+		)
+		expect(result).toMatchObject({
+			details: {
+				reason: "held",
+				holderJobId: "job2",
+				window: { startHz: 1, endHz: 2 },
+				issues: [{ code: "source-busy", severity: "error" }],
+			},
+		})
+		expect(JSON.stringify(result)).not.toContain("secret")
+		expect(
+			classifyIdentifyResponse(
+				409,
+				{
+					code: "OUT_OF_WINDOW",
+					details: { window: { startHz: 2, endHz: 1 } },
+				},
+				request,
+			),
+		).not.toHaveProperty("details")
+	})
+	it("preserves201 status and accepted-response truth for partial, mismatched, malformed and oversized bodies", async () => {
+		const { submitIdentify, SCAN_BODY_BYTES } =
+			await import("../../../cli/source/data/api-client.js")
+		const job = await wire()
+		for (const body of [
+			"{",
+			"{}",
+			JSON.stringify({ ...job, spec: { ...job.spec, sourceId: "other" } }),
+			" ".repeat(SCAN_BODY_BYTES + 1),
+		]) {
+			const result = await submitIdentify(
+				async () => new Response(body, { status: 201 }),
+				"http://core",
+				request,
+				new AbortController().signal,
+				() => true,
+			)
+			expect(result).toEqual({
+				kind: "unresolved",
+				status: 201,
+				acceptedResponse: true,
+			})
+		}
+	})
+	it("a stalled201 body preserves creation response status on cancellation", async () => {
+		const { submitIdentify } =
+			await import("../../../cli/source/data/api-client.js")
+		const controller = new AbortController()
+		let started: (() => void) | undefined
+		const reading = new Promise<void>(resolve => {
+			started = resolve
+		})
+		const body = new ReadableStream<Uint8Array>(
+			{
+				pull() {
+					started!()
+				},
+			},
+			{ highWaterMark: 0 },
+		)
+		const pending = submitIdentify(
+			async () => new Response(body, { status: 201 }),
+			"http://core",
+			request,
+			controller.signal,
+			() => true,
+		)
+		await reading
+		controller.abort()
+		expect(await pending).toMatchObject({
+			kind: "unresolved",
+			status: 201,
+			acceptedResponse: true,
+		})
+	})
+	it("typed adapter refusal is unsent; generic transport or abort exception is uncertain", async () => {
+		const { submitIdentify } =
+			await import("../../../cli/source/data/api-client.js")
+		const { DispatchNotSent } =
+			await import("../../../cli/source/data/config.js")
+		const refused = await submitIdentify(
+			() => Promise.reject(new DispatchNotSent("eligibility")),
+			"http://core",
+			request,
+			new AbortController().signal,
+			() => false,
+		)
+		expect(refused).toMatchObject({ kind: "unsent", status: null })
+		for (const error of [
+			new Error("secret"),
+			new DOMException("secret", "AbortError"),
+		])
+			expect(
+				await submitIdentify(
+					() => Promise.reject(error),
+					"http://core",
+					request,
+					new AbortController().signal,
+					() => true,
+				),
+			).toEqual({ kind: "unresolved", status: null, acceptedResponse: false })
+	})
+	it("bounds ignored abort and cancels a late unclaimed response without adopting it", async () => {
+		const { submitIdentify } =
+			await import("../../../cli/source/data/api-client.js")
+		const controller = new AbortController()
+		let resolve:
+			| ((response: Awaited<ReturnType<FetchLike>>) => void)
+			| undefined
+		const pending = submitIdentify(
+			() =>
+				new Promise(r => {
+					resolve = r
+				}),
+			"http://core",
+			request,
+			controller.signal,
+			() => true,
+		)
+		controller.abort()
+		expect(await pending).toMatchObject({ kind: "unresolved", status: null })
+		const cancel = vi.fn()
+		resolve!(new Response(new ReadableStream({ cancel }), { status: 201 }))
+		await Promise.resolve()
+		await Promise.resolve()
+		expect(cancel).toHaveBeenCalledTimes(1)
+	})
+	it("already aborted input is definitely unsent without calling transport", async () => {
+		const { submitIdentify } =
+			await import("../../../cli/source/data/api-client.js")
+		const controller = new AbortController()
+		controller.abort()
+		const fetchFn = vi.fn<FetchLike>()
+		expect(
+			await submitIdentify(
+				fetchFn,
+				"http://core",
+				request,
+				controller.signal,
+				() => true,
+			),
+		).toMatchObject({ kind: "unsent" })
+		expect(fetchFn).not.toHaveBeenCalled()
+	})
+})
+
+it("identify uses the real post-credential fence and never invokes native dispatch after eligibility changes", async () => {
+	const { submitIdentify } =
+		await import("../../../cli/source/data/api-client.js")
+	const request = {
+		sourceId: "rtl",
+		target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+		timeoutMs: 15000,
+		exhaustive: false,
+		record: false,
+	} as const
+	let resolveCredential: ((credential: MachineCredential) => void) | undefined
+	const credentials = new Promise<MachineCredential>(resolve => {
+		resolveCredential = resolve
+	})
+	const native = vi.fn(async () => new Response("{}", { status: 201 }))
+	const fetchFn = createCliFetch({
+		policy: { origin: "http://core:9000", credentials: () => credentials },
+		fetch: native,
+	})
+	let eligible = true
+	const pending = submitIdentify(
+		fetchFn,
+		"http://core:9000",
+		request,
+		new AbortController().signal,
+		() => eligible,
+	)
+	eligible = false
+	resolveCredential!(
+		new MachineCredential(Buffer.alloc(32, 7).toString("base64url")),
+	)
+	expect(await pending).toMatchObject({ kind: "unsent", reason: "eligibility" })
+	expect(native).not.toHaveBeenCalled()
+})
+
+it("identify handles rejection after caller cancellation without changing its finalized outcome", async () => {
+	const { submitIdentify } =
+		await import("../../../cli/source/data/api-client.js")
+	const request = {
+		sourceId: "rtl",
+		target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+		timeoutMs: 15000,
+		exhaustive: false,
+		record: false,
+	} as const
+	const controller = new AbortController()
+	let rejectLate: ((error: Error) => void) | undefined
+	const pending = submitIdentify(
+		() =>
+			new Promise((_resolve, reject) => {
+				rejectLate = reject
+			}),
+		"http://core",
+		request,
+		controller.signal,
+		() => true,
+	)
+	controller.abort()
+	expect(await pending).toEqual({
+		kind: "unresolved",
+		status: null,
+		acceptedResponse: false,
+	})
+	rejectLate!(new Error("late secret"))
+	await Promise.resolve()
+	await Promise.resolve()
+})

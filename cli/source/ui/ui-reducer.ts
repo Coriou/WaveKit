@@ -99,6 +99,30 @@ export function applyUiAction(
 	ctx: UiCtx,
 	now: number,
 ): UiState {
+	// Runtime receives the same invalidation synchronously from App. This also
+	// prevents a stale prompt surviving local navigation in the rendered state.
+	if (
+		ui.confirm?.kind === "identify" &&
+		[
+			"view",
+			"view-step",
+			"help-open",
+			"quit",
+			"reconnect",
+			"move",
+			"page",
+			"top",
+			"newest",
+			"open",
+			"escape",
+			"scan-tab",
+			"scan-source",
+			"scan-next-page",
+			"scan-first-page",
+			"scan-receipt",
+		].includes(action.type)
+	)
+		ui = { ...ui, confirm: null }
 	const v = ui.view
 	switch (action.type) {
 		case "view":
@@ -145,6 +169,12 @@ export function applyUiAction(
 			}
 		}
 		case "escape": {
+			if (v === "scan" && ui.scan.receipt)
+				return {
+					...ui,
+					scan: { ...ui.scan, receipt: false },
+					detail: { ...ui.detail, scan: { open: false, scroll: 0 } },
+				}
 			if (ui.detail[v].open)
 				return {
 					...ui,

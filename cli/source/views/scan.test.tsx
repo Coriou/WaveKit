@@ -23,6 +23,166 @@ import { scanView } from "./scan.js"
 import { KEYS, renderAt } from "../test/harness.js"
 import { Spectrum } from "../components/spectrum.js"
 import { ColorContext } from "../components/lines.js"
+import { Lines, StrictFitContext } from "../components/lines.js"
+import { ConfirmBar } from "../components/confirm-bar.js"
+import { Box } from "ink"
+import { identifyDisclosure } from "../view-models/scan.js"
+import {
+	identifySourceIdentity,
+	type IdentifyRequest,
+} from "../data/identify-state.js"
+import { chromeRows, heightClass, widthClass } from "../ui/frame.js"
+
+describe("native identify disclosure", () => {
+	it.each([
+		[60, 16],
+		[80, 24],
+		[200, 50],
+	])(
+		"shows pinned exact consent and all three keys at %sx%s in ASCII/no-color",
+		async (cols, rows) => {
+			setGlyphMode("ascii")
+			for (const banner of [false, true]) {
+				for (const { sourceId, target } of [
+					{
+						sourceId: "receiver\\named\n\u202e📡",
+						target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+					},
+					{
+						sourceId: "R".repeat(128),
+						target: { frequencyHz: 1e100, bandwidthHz: 1e-100 },
+					},
+				]) {
+					const width = cols - 1,
+						height = chromeRows(rows, banner).content
+					const request: IdentifyRequest = {
+						sourceId,
+						target,
+						timeoutMs: 15000,
+						exhaustive: false,
+						record: false,
+					}
+					const layout = identifyDisclosure(request, width, height)
+					expect(layout.fits).toBe(true)
+					const ui = initialUi("scan")
+					ui.detail.scan = { open: true, scroll: 4095 }
+					const confirm = {
+						kind: "identify" as const,
+						token: 1,
+						request,
+						prompt: "Identify",
+						yes: "confirm",
+						no: "cancel",
+						layout: { width, height, rows: layout.lines },
+					}
+					ui.confirm = confirm
+					const Component = scanView.Component
+					const chromeHeight = rows - 2 - height
+					const h = await renderAt(
+						<StrictFitContext.Provider value={{ cols }}>
+							<ColorContext.Provider value={false}>
+								<Box flexDirection="column" height={rows - 1} width={cols}>
+									<Lines
+										lines={Array.from({ length: chromeHeight }, () => [])}
+										width={cols}
+										height={chromeHeight}
+									/>
+									<Component
+										state={state()}
+										ui={ui}
+										width={width}
+										height={height}
+										heightClass={heightClass(rows)}
+										widthClass={widthClass(cols)}
+									/>
+									<ConfirmBar confirm={confirm} width={width} />
+								</Box>
+							</ColorContext.Provider>
+						</StrictFitContext.Provider>,
+						{ cols, rows },
+					)
+					try {
+						const joined = h
+							.frame()
+							.map(row => row.slice(1))
+							.join("")
+						for (const required of [
+							"Identify this frequency",
+							`Source: ${identifySourceIdentity(sourceId)}`,
+							`Frequency: ${String(target.frequencyHz)} Hz`,
+							`Width: ${String(target.bandwidthHz)} Hz`,
+							"Wait up to 15s for signal; trials may take longer.",
+							"May preempt scanner probes.",
+							"Updates scanner discoveries and observations.",
+							"No trial recordings; other scanner activity may record.",
+							"y confirm  n cancel  Esc cancel",
+						])
+							expect(joined).toContain(required)
+						expect(h.text()).not.toMatch(/[^\x00-\x7f]/)
+						expect(h.text()).not.toContain("render error")
+					} finally {
+						h.unmount()
+					}
+				}
+			}
+		},
+	)
+	it("keeps receipt inspection reachable when the selected source is gone", () => {
+		const s = state(),
+			ui = initialUi("scan")
+		s.sources.value = []
+		for (const tab of ["spectrum", "discoveries", "jobs"] as const) {
+			ui.scan.tab = tab
+			const next = scanView.onAction?.({ type: "scan-receipt" }, s, ui)
+			expect(next?.ui.scan.receipt).toBe(true)
+			expect(next?.ui.detail.scan).toEqual({ open: true, scroll: 0 })
+			expect(next?.effects).toEqual([])
+		}
+	})
+	it("renders a fit denial instead of partial consent after a layout change", async () => {
+		const request: IdentifyRequest = {
+			sourceId: "rtl",
+			target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+			timeoutMs: 15000,
+			exhaustive: false,
+			record: false,
+		}
+		const ui = initialUi("scan")
+		ui.confirm = {
+			kind: "identify",
+			token: 1,
+			request,
+			prompt: "Identify",
+			yes: "confirm",
+			no: "cancel",
+			layout: {
+				width: 79,
+				height: 20,
+				rows: identifyDisclosure(request, 79, 20).lines,
+			},
+		}
+		const Component = scanView.Component
+		const h = await renderAt(
+			<ColorContext.Provider value={false}>
+				<Component
+					state={state()}
+					ui={ui}
+					width={59}
+					height={12}
+					heightClass="compact"
+					widthClass="narrow"
+				/>
+			</ColorContext.Provider>,
+			{ cols: 60, rows: 16 },
+		)
+		try {
+			expect(h.text()).toContain("Confirmation cannot fit; widen terminal")
+			expect(h.text()).not.toContain("Identify this frequency")
+		} finally {
+			h.unmount()
+		}
+	})
+})
 
 function state() {
 	const s = scenarioState("live", { summarize: formatMessage })

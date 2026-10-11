@@ -237,3 +237,141 @@ it.each([0, 10000])(
 		expect(guardScan("job", job)).toBeUndefined()
 	},
 )
+
+describe("strict identify attribution projection", () => {
+	const request = {
+		sourceId: "rtl",
+		target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+		timeoutMs: 15000,
+		exhaustive: false,
+		record: false,
+	} as const
+	const wire = () => ({
+		...SCAN_JOB,
+		identify: {
+			...SCAN_JOB.identify!,
+			target: { ...request.target },
+			timeoutMs: 15000,
+			protocols: [],
+			exhaustive: false,
+			record: false,
+		},
+	})
+	it("keeps old jobs inspectable without fabricating normalized request fields", async () => {
+		const { guardIdentifyJob } =
+			await import("../../../cli/source/data/scanner-guards.js")
+		expect(guardScan("job", SCAN_JOB)).toBeDefined()
+		expect(guardIdentifyJob(SCAN_JOB, request)).toBeUndefined()
+		expect(guardIdentifyJob(wire(), request)?.identify).toMatchObject({
+			target: request.target,
+			protocols: [],
+			record: false,
+		})
+	})
+	it("requires all normalized settings and exact source/request, while allowing nearby resolved target", async () => {
+		const { guardIdentifyJob } =
+			await import("../../../cli/source/data/scanner-guards.js")
+		for (const key of [
+			"target",
+			"timeoutMs",
+			"protocols",
+			"exhaustive",
+			"record",
+		] as const) {
+			const identify: Record<string, unknown> = { ...wire().identify }
+			delete identify[key]
+			expect(guardIdentifyJob({ ...wire(), identify }, request)).toBeUndefined()
+		}
+		for (const patch of [
+			{ protocols: ["dmr"] },
+			{ record: true },
+			{ exhaustive: true },
+			{ timeoutMs: 15001 },
+			{ target: { ...request.target, bandwidthHz: 12501 } },
+			{ target: { ...request.target, frequencyHz: 1 } },
+			{ targets: [{ ...SCAN_JOB.identify!.targets[0]!, jobId: "other" }] },
+		])
+			expect(
+				guardIdentifyJob(
+					{ ...wire(), identify: { ...wire().identify, ...patch } },
+					request,
+				),
+			).toBeUndefined()
+		expect(
+			guardIdentifyJob(
+				{ ...wire(), spec: { ...SCAN_JOB.spec, sourceId: "other" } },
+				request,
+			),
+		).toBeUndefined()
+		expect(
+			guardIdentifyJob(wire(), request)?.identify?.targets[0]?.targetHz,
+		).toBe(446000000)
+	})
+	it("preserves lockout without inventing one for old discoveries", () => {
+		expect(guardScan("discovery", SCAN_DISCOVERY)?.operator).toBeUndefined()
+		expect(
+			guardScan("discovery", {
+				...SCAN_DISCOVERY,
+				operator: { lockout: true, notes: "private" },
+			})?.operator,
+		).toEqual({ lockout: true })
+	})
+	it("preserves candidate/identified and nullable RF plus all authoritative trial outcomes", () => {
+		for (const outcome of [
+			"unsupported",
+			"skipped-budget",
+			"not-needed",
+			"cancelled",
+		])
+			for (const state of ["candidate", "identified", "unidentified"]) {
+				const target = SCAN_JOB.identify!.targets[0]!
+				const parsed = guardScan("job", {
+					...wire(),
+					identify: {
+						...wire().identify,
+						targets: [
+							{
+								...target,
+								state,
+								trials: [{ ...target.trials[0]!, outcome }],
+								result: { ...target.result!, ended: "window-moved" },
+							},
+						],
+					},
+				})
+				expect(parsed?.identify?.targets[0]?.state).toBe(state)
+				expect(parsed?.identify?.targets[0]?.trials[0]?.outcome).toBe(outcome)
+				expect(
+					parsed?.identify?.targets[0]?.result?.measurements.obwHz,
+				).toBeNull()
+				expect(parsed?.identify?.targets[0]?.result?.ended).toBe("window-moved")
+			}
+	})
+})
+
+it("keeps whole-window and optional-width identify requests inspectable, but cannot attribute them to exact-width submission", async () => {
+	const { guardIdentifyJob } =
+		await import("../../../cli/source/data/scanner-guards.js")
+	const request = {
+		sourceId: "rtl",
+		target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+		timeoutMs: 15000,
+		exhaustive: false,
+		record: false,
+	} as const
+	for (const target of [{ all: true }, { frequencyHz: 446056250 }]) {
+		const job = {
+			...SCAN_JOB,
+			identify: {
+				...SCAN_JOB.identify!,
+				target,
+				timeoutMs: 15000,
+				protocols: [],
+				exhaustive: false,
+				record: false,
+			},
+		}
+		expect(guardScan("job", job)).toBeDefined()
+		expect(guardIdentifyJob(job, request)).toBeUndefined()
+	}
+})

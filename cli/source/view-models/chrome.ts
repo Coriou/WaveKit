@@ -312,6 +312,14 @@ export function footerWithNotice(
 
 /** ▶ prompt, cut so the y/n hints always fit (spec §6.2, §6.4, §6.5). */
 export function confirmLine(c: ConfirmRequest, width: number): Line {
+	if (c.kind === "identify") {
+		// These three keys stay together; the full consent lives in pinned Scan rows.
+		const keys = "y confirm  n cancel  Esc cancel"
+		return truncateLine(
+			[sp(width >= 43 ? `Identify   ${keys}` : keys, "value", true)],
+			width,
+		)
+	}
 	const hints: Line = [
 		sp("y", "value", true),
 		sp(` ${c.yes}`, "label"),
