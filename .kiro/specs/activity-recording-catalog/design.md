@@ -1007,7 +1007,7 @@ bounded expected-result oracle computed from fixture generation, with high-water
 barrier and scanned-through handling checked across insert/prune/restart fixtures.
 The query measurement is explicitly read-only after seed/warmup: no concurrent
 writer traffic in this scenario. For900 measured seconds, each client offers one
-request per second at offsets clientIndex*125ms, producing7,200 scheduled requests.
+request per second at offsets clientIndex\*125ms, producing7,200 scheduled requests.
 Cycle eight classes by `(second + clientIndex) mod8`: frequency/keyset, kind/keyset,
 producer/keyset, FTS-common, FTS-rare, FTS-empty, combined-filter/keyset and filtered
 empty-page. Each class receives900 offers. Use fixed seed-derived parameters and
