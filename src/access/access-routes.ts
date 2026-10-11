@@ -122,7 +122,7 @@ export function registerAccessRoutes(
 		exposeHeadRoute: false,
 		errorHandler(error, request, reply) {
 			reply.serializer(JSON.stringify)
-			return options.errorHandler(error, request, reply)
+			void options.errorHandler(error, request, reply)
 		},
 		preHandler(
 			request: FastifyRequest,
