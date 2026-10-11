@@ -1,8 +1,9 @@
-import { once } from "node:events"
+import { EventEmitter, once } from "node:events"
 import { get, IncomingMessage as RawRequest, ServerResponse } from "node:http"
 import { Socket } from "node:net"
 import type { IncomingMessage } from "node:http"
 import Fastify from "fastify"
+import type { FastifyRequest } from "fastify"
 import websocket from "@fastify/websocket"
 import { WebSocket } from "ws"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -12,6 +13,7 @@ import {
 	generateMachineToken,
 	sessionCredentialBinding,
 } from "../../../src/access/credentials.js"
+import { accessRequestFromHttp } from "../../../src/access/http-request.js"
 import { installAccessHooks } from "../../../src/access/fastify-adapter.js"
 import { AccessPolicy } from "../../../src/access/policy.js"
 import { SessionStore } from "../../../src/access/sessions.js"
@@ -131,7 +133,314 @@ async function addWs(env: Awaited<ReturnType<typeof setup>>) {
 	})
 }
 
+function fakeSocket(): WebSocket {
+	return Object.assign(new EventEmitter(), {
+		readyState: 1,
+		close: vi.fn(),
+		terminate: vi.fn(),
+	}) as unknown as WebSocket
+}
+
+function reservedSocket(
+	env: Awaited<ReturnType<typeof setup>>,
+	machine = false,
+) {
+	const raw = new RawRequest(new Socket())
+	raw.method = "GET"
+	raw.url = "/ws"
+	raw.rawHeaders = Object.entries(machine ? env.machine : env.headers).flatMap(
+		([name, value]) => [name, value],
+	)
+	const request = { raw } as FastifyRequest
+	const admission = env.policy.evaluate(accessRequestFromHttp(raw, "api"))
+	if (admission.kind !== "authenticated")
+		throw new Error("Missing test admission")
+	env.controller.admit(request, admission.principal)
+	expect(env.controller.reserveUpgrade(request)).toBeUndefined()
+	return { request, socket: fakeSocket() }
+}
+
 describe("unmounted root Fastify access hooks", () => {
+	it.each(["revoke", "expiry", "stop"] as const)(
+		"reevaluates root-admitted metadata immediately after %s with trusted denial headers",
+		async reason => {
+			const env = await setup()
+			const mutate = vi.fn()
+			env.app.addHook("preHandler", async () => {
+				if (reason === "revoke")
+					await env.sessions.revoke(env.created.principalId)
+				if (reason === "expiry") env.advance(31 * 86400000)
+				if (reason === "stop") env.controller.stopAdmission()
+			})
+			env.app.post(
+				"/metadata",
+				{
+					schema: {
+						response: {
+							"4xx": {
+								type: "object",
+								required: ["saved"],
+								properties: { saved: { type: "boolean" } },
+							},
+						},
+					},
+				},
+				(request, reply) => {
+					const denied = env.controller.authorizeMetadataMutation(request)
+					if (denied) {
+						for (const [name, value] of Object.entries(denied.headers))
+							reply.header(name, value)
+						return reply
+							.serializer(value => JSON.stringify(value))
+							.code(denied.status)
+							.send({ code: denied.code })
+					}
+					mutate()
+					return reply.send({ saved: true })
+				},
+			)
+			const result = await env.app.inject({
+				method: "POST",
+				url: "/metadata",
+				headers: { ...env.headers, "x-wavekit-csrf": env.created.csrfToken },
+			})
+			expect(result.statusCode).toBe(reason === "stop" ? 503 : 401)
+			expect(result.json()).toEqual({
+				code: reason === "stop" ? "ACCESS_UNAVAILABLE" : "AUTH_REQUIRED",
+			})
+			expect(result.headers["access-control-allow-origin"]).toBe(origin)
+			expect(result.headers["cache-control"]).toBe("no-store")
+			expect(mutate).not.toHaveBeenCalled()
+		},
+	)
+
+	it("allows only current authenticated mutation requests, rejecting public and preflight outcomes", async () => {
+		const env = await setup()
+		const mutate = vi.fn()
+		env.app.post("/metadata", (request, reply) => {
+			const denied = env.controller.authorizeMetadataMutation(request)
+			if (denied) return reply.code(denied.status).send({ code: denied.code })
+			mutate()
+			return reply.send({ saved: true })
+		})
+		for (const headers of [
+			env.machine,
+			{ ...env.headers, "x-wavekit-csrf": env.created.csrfToken },
+		])
+			expect(
+				(await env.app.inject({ method: "POST", url: "/metadata", headers }))
+					.statusCode,
+			).toBe(200)
+		expect(mutate).toHaveBeenCalledTimes(2)
+		for (const [method, url, headers] of [
+			["GET", "/health", { host: "receiver.lan:9000", origin }],
+			[
+				"OPTIONS",
+				"/metadata",
+				{
+					host: "receiver.lan:9000",
+					origin,
+					"access-control-request-method": "POST",
+				},
+			],
+		] as const) {
+			const raw = new RawRequest(new Socket())
+			raw.method = method
+			raw.url = url
+			raw.rawHeaders = Object.entries(headers).flatMap(([name, value]) => [
+				name,
+				value,
+			])
+			const request = { raw } as FastifyRequest
+			expect(env.controller.authorizeMetadataMutation(request)).toMatchObject({
+				kind: "deny",
+				status: 503,
+				code: "ACCESS_UNAVAILABLE",
+			})
+		}
+	})
+
+	it("retains allowed-Origin headers on stopped denial without reflecting hostile Origins", async () => {
+		const env = await setup()
+		env.controller.stopAdmission()
+		for (const candidate of [origin, "http://evil.invalid"]) {
+			const raw = new RawRequest(new Socket())
+			raw.method = "POST"
+			raw.url = "/metadata"
+			raw.rawHeaders = ["Host", "receiver.lan:9000", "Origin", candidate]
+			const denied = env.controller.authorizeMetadataMutation({
+				raw,
+			} as FastifyRequest)
+			expect(denied).toMatchObject({ status: 503, code: "ACCESS_UNAVAILABLE" })
+			expect(denied?.headers["Access-Control-Allow-Origin"]).toBe(
+				candidate === origin ? origin : undefined,
+			)
+		}
+	})
+
+	it.each([
+		{
+			headers: ["Origin", origin, "Origin", origin],
+			status: 400,
+			code: "MALFORMED_REQUEST",
+		},
+		{
+			headers: ["Origin", "http://evil.invalid"],
+			status: 403,
+			code: "ORIGIN_FORBIDDEN",
+		},
+		{
+			headers: ["Origin", origin, "X-WaveKit-CSRF", "wrong"],
+			status: 403,
+			code: "CSRF_REQUIRED",
+		},
+	])(
+		"preserves current raw policy denial $status/$code rather than cached admission",
+		async ({ headers, status, code }) => {
+			const env = await setup()
+			const raw = new RawRequest(new Socket())
+			raw.method = "POST"
+			raw.url = "/metadata"
+			raw.rawHeaders = [
+				"Host",
+				"receiver.lan:9000",
+				"Cookie",
+				`wavekit_session=${env.created.cookieValue}`,
+				...headers,
+			]
+			const request = { raw } as FastifyRequest
+			env.controller.admit(request, {
+				kind: "session",
+				id: env.created.principalId,
+				expiresAt: null,
+			})
+			const denied = env.controller.authorizeMetadataMutation(request)
+			expect(denied).toMatchObject({ kind: "deny", status, code })
+			expect(denied?.headers["Cache-Control"]).toBe("no-store")
+		},
+	)
+
+	it("requires an exactly adopted owned socket and retains current output across admission seal", async () => {
+		const env = await setup()
+		const fixture = reservedSocket(env)
+		expect(
+			env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+		).toBe(false)
+		expect(env.controller.adoptWebSocket(fixture.request, fixture.socket)).toBe(
+			true,
+		)
+		expect(
+			env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+		).toBe(true)
+		expect(
+			env.controller.isWebSocketCurrent(
+				{ raw: fixture.request.raw } as FastifyRequest,
+				fixture.socket,
+			),
+		).toBe(false)
+		expect(
+			env.controller.isWebSocketCurrent(fixture.request, fakeSocket()),
+		).toBe(false)
+		env.controller.stopAdmission()
+		expect(
+			env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+		).toBe(true)
+		env.controller.dispose()
+		expect(
+			env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+		).toBe(false)
+	})
+
+	it.each(["revoke", "expiry"] as const)(
+		"rejects %s while the adopted socket's close handshake is delayed",
+		async reason => {
+			const env = await setup()
+			const fixture = reservedSocket(env)
+			expect(
+				env.controller.adoptWebSocket(fixture.request, fixture.socket),
+			).toBe(true)
+			if (reason === "revoke")
+				await env.sessions.revoke(env.created.principalId)
+			else env.advance(31 * 86400000)
+			expect(fixture.socket.readyState).toBe(1)
+			expect(
+				env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+			).toBe(false)
+			expect(fixture.socket.close).toHaveBeenCalledWith(1008, "Access expired")
+		},
+	)
+
+	it("preserves machine output when session storage fails but never treats a missing lease as machine proof", async () => {
+		const env = await setup()
+		const machine = reservedSocket(env, true)
+		expect(env.controller.adoptWebSocket(machine.request, machine.socket)).toBe(
+			true,
+		)
+		const browser = reservedSocket(env)
+		expect(env.controller.adoptWebSocket(browser.request, browser.socket)).toBe(
+			true,
+		)
+		env.persist.mockRejectedValueOnce(new Error("private storage reason"))
+		await expect(env.sessions.renew(env.created.principalId)).rejects.toThrow()
+		expect(
+			env.controller.isWebSocketCurrent(browser.request, browser.socket),
+		).toBe(false)
+		expect(
+			env.controller.isWebSocketCurrent(machine.request, machine.socket),
+		).toBe(true)
+		env.controller.admit(machine.request, {
+			kind: "session",
+			id: env.created.principalId,
+			expiresAt: 1,
+		})
+		expect(
+			env.controller.isWebSocketCurrent(machine.request, machine.socket),
+		).toBe(false)
+	})
+
+	it.each(["throw", "release", "dispose", "closing"] as const)(
+		"fails closed after current() synchronously causes %s",
+		async effect => {
+			const env = await setup()
+			let triggered = false
+			let fixture: ReturnType<typeof reservedSocket> | undefined
+			const attach = env.leases.attach.bind(env.leases)
+			vi.spyOn(env.leases, "attach").mockImplementation((id, invalidated) => {
+				const result = attach(id, invalidated)
+				if (result.kind !== "attached") return result
+				return {
+					kind: "attached",
+					lease: {
+						release: result.lease.release,
+						current: () => {
+							const current = result.lease.current()
+							if (triggered && fixture) {
+								if (effect === "throw")
+									throw new Error("private current detail")
+								if (effect === "release")
+									fixture.request.raw.socket.emit("close")
+								if (effect === "dispose") env.controller.dispose()
+								if (effect === "closing")
+									Object.defineProperty(fixture.socket, "readyState", {
+										value: 2,
+									})
+							}
+							return current
+						},
+					},
+				}
+			})
+			fixture = reservedSocket(env)
+			expect(
+				env.controller.adoptWebSocket(fixture.request, fixture.socket),
+			).toBe(true)
+			triggered = true
+			expect(
+				env.controller.isWebSocketCurrent(fixture.request, fixture.socket),
+			).toBe(false)
+		},
+	)
+
 	it.each(["stop", "dispose"] as const)(
 		"%s gates health, ordinary, pair, preflight and real WebSocket admission",
 		async mode => {

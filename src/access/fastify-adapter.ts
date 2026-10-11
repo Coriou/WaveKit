@@ -10,7 +10,7 @@ import type {
 import { accessRequestFromHttp } from "./http-request.js"
 import type { AccessPolicy } from "./policy.js"
 import type { SessionStore } from "./sessions.js"
-import type { AccessPrincipal } from "./types.js"
+import type { AccessPrincipal, DeniedAdmission } from "./types.js"
 
 export interface FastifyAccessOptions {
 	policy: AccessPolicy
@@ -21,6 +21,7 @@ export interface FastifyAccessOptions {
 
 interface UpgradeReservation {
 	request: FastifyRequest
+	principal: AccessPrincipal
 	lease?: ConnectionLease
 	socket?: WebSocket
 	timer?: ReturnType<typeof setTimeout>
@@ -77,6 +78,7 @@ export function installAccessHooks(
 
 /** Context contains admitted identities only; credentials stay in the raw request. */
 export class FastifyAccessController {
+	#policy: AccessPolicy
 	#sessions: SessionStore
 	#leases: ConnectionLeases
 	#ownsLeases: boolean
@@ -101,6 +103,7 @@ export class FastifyAccessController {
 				"Invalid access adapter configuration",
 				"ACCESS_CONFIG_INVALID",
 			)
+		this.#policy = options.policy
 		this.#sessions = options.sessions
 		this.#ownsLeases = options.leases === undefined
 		this.#leases = options.leases ?? new ConnectionLeases(options.sessions)
@@ -114,6 +117,64 @@ export class FastifyAccessController {
 
 	get admissionStopped(): boolean {
 		return this.#stopped || this.#disposed
+	}
+
+	/** Reevaluate the original boundary immediately before synchronous metadata mutation. */
+	authorizeMetadataMutation(
+		request: FastifyRequest,
+	): DeniedAdmission | undefined {
+		const admission = this.#policy.evaluate(
+			accessRequestFromHttp(request.raw, "api"),
+		)
+		if (this.admissionStopped)
+			return {
+				kind: "deny",
+				status: 503,
+				code: "ACCESS_UNAVAILABLE",
+				headers: admission.headers,
+			}
+		if (admission.kind === "deny") return admission
+		if (admission.kind === "authenticated") return undefined
+		return {
+			kind: "deny",
+			status: 503,
+			code: "ACCESS_UNAVAILABLE",
+			headers: admission.headers,
+		}
+	}
+
+	/** Existing output remains authorized through admission sealing, until disposal or revocation. */
+	isWebSocketCurrent(request: FastifyRequest, socket: WebSocket): boolean {
+		const entry = this.#upgrades.get(request)
+		if (!entry) return false
+		const owned = () => {
+			const principal = this.#principals.get(request)
+			return (
+				!this.#disposed &&
+				!entry.closed &&
+				!entry.closing &&
+				entry.request === request &&
+				entry.socket === socket &&
+				this.#upgrades.get(request) === entry &&
+				this.#pending.has(entry) &&
+				principal !== undefined &&
+				principal.kind === entry.principal.kind &&
+				principal.id === entry.principal.id &&
+				socket.readyState === 1 &&
+				!request.raw.socket.destroyed
+			)
+		}
+		if (!owned()) return false
+		if (entry.principal.kind === "session") {
+			if (!entry.lease) return false
+			try {
+				if (!entry.lease.current()) return false
+			} catch {
+				return false
+			}
+		} else if (entry.principal.kind !== "machine" || entry.lease) return false
+		// current() may synchronously invalidate/release or close this reservation.
+		return owned()
 	}
 
 	admit(request: FastifyRequest, principal: AccessPrincipal): void {
@@ -137,6 +198,7 @@ export class FastifyAccessController {
 			return { status: 429, code: "ACCESS_CAPACITY" }
 		const reservation: UpgradeReservation = {
 			request,
+			principal: { ...principal },
 			closed: false,
 			closing: false,
 			cleanup: () => {},

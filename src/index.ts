@@ -54,6 +54,8 @@ import { createDecoderManagerOptions } from "./decoders/manager-options.js"
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
+import { OperatorDataService } from "./operator-data/service.js"
+import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import {
 	createDsdFmeDecoder,
 	DSD_FME_CAPS,
@@ -788,6 +790,50 @@ async function main(): Promise<void> {
 
 		admissionGates.push(() => apiServer.stopAdmission())
 		own(10, () => apiServer.stop())
+
+		if (protectedMode) {
+			let acquisition: "pending" | "acquired" | "rejected" = "pending"
+			let operatorData: OperatorDataService | undefined
+			let mounted = false
+			let earlyClose: Promise<void> | undefined
+			// Register BEFORE invoking open: a rejection hides the lock-cleanup outcome.
+			own(5, () => {
+				if (acquisition !== "acquired" || !operatorData)
+					throw new WaveKitError(
+						"Operator acquisition cleanup unknown",
+						"ACCESS_UNAVAILABLE",
+					)
+				// After transfer, the server's retained stop outcome owns drain-before-close.
+				if (mounted) return apiServer.stop()
+				return (earlyClose ??= operatorData.close())
+			})
+			const sink = createOperatorDataCommitSink(
+				apiServer.getOperatorDataBroadcastPort(),
+			)
+			try {
+				operatorData = await OperatorDataService.open({
+					stateDir: config.stateDir,
+					onCommit: snapshot => {
+						try {
+							sink(snapshot)
+						} catch {
+							apiServer.invalidateOperatorDataPublication()
+						}
+						return undefined
+					},
+				})
+				acquisition = "acquired"
+			} catch {
+				acquisition = "rejected"
+				throw new WaveKitError(
+					"Operator startup unavailable",
+					"ACCESS_UNAVAILABLE",
+				)
+			}
+			checkpoint()
+			apiServer.mountOperatorData(operatorData)
+			mounted = true
+		}
 
 		// Step 9: Register shutdown handlers (in reverse order of startup)
 		// Handlers are called in LIFO order, so register in reverse dependency order

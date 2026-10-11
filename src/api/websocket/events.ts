@@ -36,6 +36,7 @@ import type {
 	DecoderCreatedEventData,
 	DecoderRemovedEventData,
 	TunerCommandOrigin,
+	OperatorDataReadDto,
 } from "@wavekit/api-types"
 
 /**
@@ -65,6 +66,7 @@ export type WebSocketChannel =
 	| "aircraft"
 	| "scanner"
 	| "spectrum"
+	| "operator-data"
 
 /**
  * Message sent from client to server. `options` carries per-channel subscribe
@@ -89,7 +91,7 @@ export interface ChannelObserver {
 /**
  * Message sent from server to client.
  */
-export interface ServerMessage {
+interface ExistingServerMessage {
 	type:
 		| "decoder:output"
 		| "decoder:started"
@@ -142,6 +144,15 @@ export interface ServerMessage {
 	data: unknown
 }
 
+/** Operator metadata preserves the canonical DTO and three-field wire envelope. */
+interface OperatorDataServerMessage {
+	type: "operator-data:snapshot" | "operator-data:updated"
+	channel: "operator-data"
+	data: OperatorDataReadDto
+}
+
+export type ServerMessage = ExistingServerMessage | OperatorDataServerMessage
+
 /**
  * Internal client state tracking subscriptions.
  */
@@ -149,6 +160,7 @@ interface ClientState {
 	socket: WebSocket
 	subscriptions: Set<WebSocketChannel>
 	id: string
+	current?: () => boolean
 }
 
 interface DeliveryState {
@@ -178,7 +190,8 @@ function isValidChannel(channel: unknown): channel is WebSocketChannel {
 		channel === "tuner" ||
 		channel === "aircraft" ||
 		channel === "scanner" ||
-		channel === "spectrum"
+		channel === "spectrum" ||
+		channel === "operator-data"
 	)
 }
 
@@ -233,6 +246,8 @@ export class WebSocketEventBroadcaster {
 	private readonly delivery = new WeakMap<ClientState, DeliveryState>()
 	private maintenanceTimer: ReturnType<typeof setInterval> | undefined
 	private readonly observers = new Map<WebSocketChannel, ChannelObserver>()
+	private operatorDataEnabled = false
+	private subscriptionAdmissionStopped = false
 
 	constructor(logger: Logger) {
 		this.log = createComponentLogger(logger, "WebSocketBroadcaster")
@@ -250,7 +265,10 @@ export class WebSocketEventBroadcaster {
 	): void {
 		fastify.get("/ws", { websocket: true }, (socket, request) => {
 			if (access && !access.adoptWebSocket(request, socket)) return
-			this.handleConnection(socket)
+			this.handleConnection(
+				socket,
+				access ? () => access.isWebSocketCurrent(request, socket) : undefined,
+			)
 		})
 
 		this.log.info("WebSocket route registered at /ws")
@@ -259,23 +277,20 @@ export class WebSocketEventBroadcaster {
 	/**
 	 * Handles a new WebSocket connection (Requirement 10.1).
 	 */
-	private handleConnection(socket: WebSocket): void {
+	private handleConnection(socket: WebSocket, current?: () => boolean): void {
 		const clientId = `client-${++this.clientIdCounter}`
 
 		const clientState: ClientState = {
 			socket,
 			subscriptions: new Set(),
 			id: clientId,
+			...(current ? { current } : {}),
 		}
 
 		this.clients.set(clientId, clientState)
-		this.getDelivery(clientState)
-		if (!this.maintenanceTimer) {
-			this.maintenanceTimer = setInterval(() => this.maintainClients(), 100)
-			this.maintenanceTimer.unref()
-		}
 		socket.on("pong", () => {
-			this.getDelivery(clientState).alive = true
+			if (this.clients.get(clientId) === clientState)
+				this.getDelivery(clientState).alive = true
 		})
 
 		this.log.info({ clientId }, "WebSocket client connected")
@@ -295,12 +310,19 @@ export class WebSocketEventBroadcaster {
 			this.log.error({ clientId }, "WebSocket error")
 			this.terminateClient(clientState)
 		})
+		if (!this.currentClient(clientState)) return
+		this.getDelivery(clientState)
+		if (!this.maintenanceTimer) {
+			this.maintenanceTimer = setInterval(() => this.maintainClients(), 100)
+			this.maintenanceTimer.unref()
+		}
 	}
 
 	/**
 	 * Handles incoming messages from a client.
 	 */
 	private handleMessage(client: ClientState, data: Buffer | string): void {
+		if (!this.currentClient(client)) return
 		try {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
 
@@ -337,7 +359,11 @@ export class WebSocketEventBroadcaster {
 		channels: WebSocketChannel[],
 		options?: Partial<Record<WebSocketChannel, unknown>>,
 	): void {
-		for (const channel of channels) {
+		if (!this.currentClient(client) || this.subscriptionAdmissionStopped) return
+		const activeChannels = channels.filter(
+			channel => channel !== "operator-data" || this.operatorDataEnabled,
+		)
+		for (const channel of activeChannels) {
 			client.subscriptions.add(channel)
 		}
 
@@ -354,8 +380,11 @@ export class WebSocketEventBroadcaster {
 			type: "subscribed",
 			data: { channels: Array.from(client.subscriptions) },
 		})
-		for (const channel of new Set(channels))
+		for (const channel of new Set(activeChannels)) {
+			// Ack or an earlier observer may synchronously invalidate this client.
+			if (!this.currentClient(client)) return
 			this.observers.get(channel)?.subscribed(client.id, options?.[channel])
+		}
 	}
 
 	/**
@@ -398,6 +427,11 @@ export class WebSocketEventBroadcaster {
 		// A late close after terminateClient or closeAll is a no-op (finding 7).
 		if (!this.clients.has(client.id)) return
 		this.clients.delete(client.id)
+		const state = this.delivery.get(client)
+		if (state) {
+			state.queue = []
+			state.queuedBytes = 0
+		}
 		this.delivery.delete(client)
 		this.stopMaintenanceIfIdle()
 		this.notifyUnsubscribed(client)
@@ -423,8 +457,23 @@ export class WebSocketEventBroadcaster {
 		return state
 	}
 
+	private currentClient(client: ClientState): boolean {
+		if (this.clients.get(client.id) !== client) return false
+		try {
+			if (client.current && !client.current()) {
+				this.terminateClient(client)
+				return false
+			}
+		} catch {
+			this.terminateClient(client)
+			return false
+		}
+		// current() may synchronously invoke reservation/socket cleanup.
+		return this.clients.get(client.id) === client
+	}
+
 	private enqueue(client: ClientState, data: string): boolean {
-		if (!this.clients.has(client.id) || client.socket.readyState !== 1)
+		if (!this.currentClient(client) || client.socket.readyState !== 1)
 			return false
 		const state = this.getDelivery(client)
 		const bytes = Buffer.byteLength(data)
@@ -447,9 +496,12 @@ export class WebSocketEventBroadcaster {
 	}
 
 	private flushClient(client: ClientState, state: DeliveryState): void {
-		// Wait for ws to drain before handing it another application message.
-		while (state.queue.length && (client.socket.bufferedAmount ?? 0) === 0) {
-			if (!this.clients.has(client.id) || client.socket.readyState !== 1) return
+		// Check authority even while blocked: invalidation discards queued output.
+		if (!this.currentClient(client)) return
+		while (state.queue.length) {
+			if (!this.currentClient(client) || client.socket.readyState !== 1) return
+			// Wait for ws to drain before handing it another application message.
+			if ((client.socket.bufferedAmount ?? 0) !== 0) return
 			const message = state.queue.shift()!
 			state.queuedBytes -= message.bytes
 			try {
@@ -469,6 +521,7 @@ export class WebSocketEventBroadcaster {
 
 	private maintainClients(): void {
 		for (const client of this.clients.values()) {
+			if (!this.currentClient(client)) continue
 			if (client.socket.readyState !== 1) {
 				this.terminateClient(client)
 				continue
@@ -526,7 +579,7 @@ export class WebSocketEventBroadcaster {
 		let sentCount = 0
 
 		for (const client of this.clients.values()) {
-			if (client.subscriptions.has(channel) && client.socket.readyState === 1) {
+			if (client.subscriptions.has(channel)) {
 				if (this.enqueue(client, serialized)) sentCount++
 			}
 		}
@@ -552,7 +605,6 @@ export class WebSocketEventBroadcaster {
 			const client = this.clients.get(id)
 			if (
 				client?.subscriptions.has(channel) &&
-				client.socket.readyState === 1 &&
 				this.enqueue(client, serialized)
 			)
 				sent++
@@ -573,8 +625,39 @@ export class WebSocketEventBroadcaster {
 	}
 
 	private notifyUnsubscribed(client: ClientState): void {
-		for (const channel of client.subscriptions)
-			this.observers.get(channel)?.unsubscribed(client.id)
+		const channels = [...client.subscriptions]
+		client.subscriptions.clear()
+		for (const channel of channels) {
+			try {
+				this.observers.get(channel)?.unsubscribed(client.id)
+			} catch {
+				this.log.warn(
+					{ clientId: client.id },
+					"WebSocket observer cleanup failed",
+				)
+			}
+		}
+	}
+
+	/** Called only by the protected operator mount before listener startup. */
+	enableOperatorDataChannel(): void {
+		this.operatorDataEnabled = true
+	}
+
+	/** Seal new subscriptions while current output remains live during drain. */
+	stopSubscriptionAdmission(): void {
+		this.subscriptionAdmissionStopped = true
+	}
+
+	invalidateClient(clientId: string): void {
+		const client = this.clients.get(clientId)
+		if (client) this.terminateClient(client)
+	}
+
+	invalidateChannelClients(channel: WebSocketChannel): void {
+		for (const client of [...this.clients.values()]) {
+			if (client.subscriptions.has(channel)) this.terminateClient(client)
+		}
 	}
 
 	/**
@@ -991,17 +1074,15 @@ export class WebSocketEventBroadcaster {
 	 * Closes all client connections.
 	 */
 	closeAll(): void {
-		for (const client of this.clients.values()) this.notifyUnsubscribed(client)
-		for (const client of this.clients.values()) {
+		const clients = [...this.clients.values()]
+		for (const client of clients) this.handleDisconnect(client)
+		for (const client of clients) {
 			try {
 				client.socket.close(1000, "Server shutting down")
 			} catch {
 				// Ignore errors during shutdown
 			}
 		}
-		for (const client of this.clients.values()) this.delivery.delete(client)
-		this.clients.clear()
-		this.stopMaintenanceIfIdle()
 		this.log.info("All WebSocket connections closed")
 	}
 }
