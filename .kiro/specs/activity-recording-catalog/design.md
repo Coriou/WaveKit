@@ -1,7 +1,7 @@
 # Activity and recording catalog — design
 
-Status: design only, independently reviewed; final approval and landing await
-reconciliation against the exact accepted scanner S1 commit. Requirements are in
+Status: reviewed design only. Accepted-S1 reconciliation and the bounded storage
+qualification plan passed independent delta review. Implementation is unallocated. Requirements are in
 [requirements.md](requirements.md); allocation and acceptance gates are in
 [tasks.md](tasks.md). One cohesive spec keeps ingestion, durable links and deletion
 invariants together; implementation batches have separate ownership. This is not
@@ -9,11 +9,13 @@ a general event bus or a replacement for scanner recovery stores.
 
 ## Grounded baseline
 
-Audit baseline: core `ccc319fe828a991cdd3a060486a81959e071168d`; scanner candidate
-`0fc3fdb5a4186741200730f0491b87c34ac5187d`, inspected read-only, not accepted main.
-Scanner owner has continuing edits; references here mean committed candidate code,
-not an assertion that its working tree is frozen. Cached web reference is
-`28280cf8f322ff381eada2c4c388063d4d47cf35`; remote freshness was not checked.
+Original audit: core `ccc319fe828a991cdd3a060486a81959e071168d`, scanner
+`0fc3fdb5a4186741200730f0491b87c34ac5187d`. Reconciled against accepted S1
+`90bfa03177135786b7cae28ddf43ffc087d9b1eb` (runtime `6519de733577e4592b80e3d77d4ea8c3040e59d5`)
+on released base `d452b0a66eff76fa2864d2d2d5cdbbce9412d336`. Current assertions below
+refer to that accepted code; historical defects are not carried as current gaps.
+Cached web reference remains `28280cf8f322ff381eada2c4c388063d4d47cf35`;
+remote freshness was not checked.
 
 - `src/decoders/manager.ts`, `setupDecoderEventHandlers`, forwards each decoder's
   output to `decoder:output`; `src/api/websocket/events.ts` sends `{decoderId,
@@ -43,6 +45,35 @@ output}`. There is no durable ingress identity or event-time RF binding there.
   pins 25.2.1, Docker's node-build uses Node22, and esbuild externalizes packages.
   Compose mounts state at `/app/data` in relevant profiles; `/recordings` is not
   a universal state mount. Do not store a DB in an ephemeral image layer.
+
+### Accepted S1 failure and settlement contracts
+
+F3's EvidenceStore `admits` combines the authoritative DiscoveryStore existence
+predicate with a bounded in-flight removal map. The map is not permanent deletion
+history: standalone stores can explicitly re-admit an ID, while production IDs
+remain unique and absent discoveries stay unavailable. Merged-away IDs lose
+admission/download authority too. Preserve this distinction when importing aliases;
+old scanner routes cannot bypass existence checks merely because catalog has bytes.
+A kept future catalog object may have an independent catalog link, never revive the
+removed scanner discovery. Probe finally cleanup/startup orphan cleanup and separate
+CaptureStore retention remain unchanged; F3 is not power-loss atomicity or Keep.
+
+F5's fatal worker exit/error or failed pipeline replacement invalidates engine
+generation/readiness/stats, closes host/branch/ring/listeners, clears service cached
+summaries/profile reservations and fails affected nonterminal scanner jobs using
+`tuner-unavailable`. Active identify trials are cancelled; late old-generation
+output cannot refresh evidence. Fresh demand waits for failed-host cleanup before
+opening a new supported-IQ engine; there is no automatic unbounded restart loop or
+no-data watchdog. Activity adapters must use these owner failure/generation signals
+and record interrupted coverage, never present stale summary metadata as live RF.
+Do not add a second cleanup authority or deduce absence of receptions from failure.
+
+Terminal REST state/endedAt still becomes visible before awaited teardown; terminal
+job WS publication follows teardown. Even WS terminal is not a blanket catalog file
+settlement receipt: asynchronous recording linking needs its own operation outcome.
+Resource admission can still return409/releasing until cleanup settles. S2/S3 must
+extend owner drains to new producer operations and preserve the existing F3/F5
+regressions; UI recovery reads actual availability, not elapsed time since terminal.
 
 ## Identity and the ingress seam
 
@@ -440,12 +471,17 @@ unless specified):
   these are producer-owned uncommitted bytes; once catalog-reserved, cleanup must
   close/fail the corresponding intent and cannot remove leased/protected media.
 - `EvidenceStore.removeOrphanProbeDirs`, `retention`, `removeDiscovery`: startup
-  cleanup, category/age eviction and directory deletion. Fence live writers and
-  queued per-discovery writes before deleting; a later callback cannot recreate
-  an already-deleted discovery's files.
+  cleanup, category/age eviction and directory deletion. Accepted S1 already fences
+  per-ID removal and drains accepted serialized PSD/IQ writes and recording moves.
+  Preserve this implementation and extend the same accepted-operation boundary to
+  new analog commit/abort work; do not recreate a separate discovery tombstone store.
 - `scanner-service.ts:deleteDiscovery` and automatic prune dispatch: current
-  explicit route removes metadata then directories, bypassing discovery Keep.
-  It must use coordinated protection/delete admission before managed Keep ships.
+  explicit route synchronously removes DiscoveryStore authority and invalidates
+  live/recent producer references, then awaits EvidenceStore.removeDiscovery.
+  Downloads and late linking require existing discovery authority; accepted work
+  drains before DELETE success, and filesystem failure rejects it. F3 therefore
+  resolves the old resurrection/drain gap. Explicit deletion still needs the future
+  coordinated Keep/file-lease admission before managed catalog protection ships.
 - `store/discovery-store.ts`: explicit removal, inactive-age/capacity eviction,
   merge removal and observation trimming. These are domain metadata operations,
   not permission to cascade media deletion. Merges preserve original aliases and
@@ -631,6 +667,157 @@ No planned120-second analog cap or8 kHz live UDP rate proves native WAV duration
 or format. Header inspection, actual close evidence and all native cleanup paths
 are required before playback/Keep is enabled for that producer.
 
+### Task42 producer receipts and alias handoff
+
+The scanner owns producer identity and recovery. Allocate a unique producer
+recording ID and operation ID before reservation/staged write; qualify them by
+producer run UUID. A producerStoreId is nullable when no scanner-owned stable
+lineage exists; do not create a separate persistent identity store solely for the
+catalog. Preserve operation/run identity in scanner-owned recovery metadata when
+available; never derive lineage from a filesystem path. Frozen binding includes
+an engine-instance UUID because numeric stream/epoch can restart. Do not require
+mounting the catalog to record in S2.
+When catalog integration is allocated, map this producer identity once to a catalog
+UUID and retain the scanner `discoveryId~filename` identifier as a namespaced alias.
+The catalog receipt/ticket epoch is for a later Activity handoff, not a replacement
+for scanner journaling or a new scanner public API.
+
+Required immutable producer receipt, finalized, aborted or failed: operation/producer IDs,
+legacy alias when published, discovery/observation references, frozen source/stream/
+epoch/channel binding generation, tuning trust and qualified channel frequency,
+realised media format/rate/channels, bytes/sample count, gaps, cut/end reason and
+closure outcome. Gap/cut/error values use closed typed enums; retain at most64 gap
+entries and an omittedCount. sampleCount is verified written frames (safe integer),
+bytes is verified entire file including its actual header;44 bytes is valid only
+for the fixed writer layout, never assumed for imported WAVs. Unknown facts are nullable. Internal root-relative artifact
+references are never public paths. A completion promise settles all close, publish,
+metadata or abort cleanup and reservation release exactly once; repeating operation
+completion is idempotent. F3 admission is checked inside its serialized publication
+boundary; deletion drains accepted commit/abort before acknowledging. If publication
+fails after rename, retain an explicit recovery intent rather than returning ready
+or silently losing ownership. Finalized requires verified close/header/count,
+rename and metadata acknowledgement. Distinguish journal append acknowledgement
+from fsync durability; existing scanner journals do not establish the latter.
+Metadata failure conditionally rolls back only this operation's link/alias and
+cleans its artifact; failed cleanup retains a scanner-owned intent and accounts
+residual bytes until settlement. Releasing an active reservation cannot erase
+physical residue from totals. Track accepted operations separately from serialized
+publication so delete can cancel/drain without awaiting itself or blocking abort
+behind a queue it holds. These constraints are agreed for design; exact receipt
+types and transitions still require Task42 owner review. This is a producer contract,
+not a claim of file/DB atomicity. Keep stricter Task42 120-second limits. Later Tasks44–46 must include
+these operations in preemption/source-failure/cancel drains, independently of REST
+terminal visibility and monitor audio selection.
+
+## Next allocation: storage qualification only
+
+This is an executable qualification **plan**, not authorization or implementation.
+SQLite and the feature runtime floor remain unaccepted until measured. The first
+allocation must not add production stores, listeners, DTO exports, catalog writes,
+recording/audio mounts, Keep behavior or a second recovery authority.
+
+Proposed exclusively owned new paths for a bounded disposable harness:
+
+- `scripts/qualification/activity-storage/run.mjs`: explicit CLI experiment driver,
+  bounds/preflight and machine-readable report; no import from application startup.
+- `scripts/qualification/activity-storage/worker.mjs`: isolated SQLite experiment,
+  synthetic tables/FTS/receipts and bounded writer/reader load; disposable only.
+- `scripts/qualification/activity-storage/workloads.mjs`: seeded sanitized synthetic
+  envelopes, queries and fault schedules; no private RF payloads or copied journals.
+- `tests/unit/qualification/activity-storage.test.ts`: harness guardrails, deadlines,
+  cleanup and report accounting; not production persistence acceptance tests.
+- These existing three spec files: record measured decision and revise estimates.
+
+No package/lockfile, Dockerfile, build script, config, API-types, scanner or runtime
+path is allocated by that proposed batch. Use direct Node .mjs workers so a harness
+can qualify behavior before requesting production worker build integration. Raw
+reports/temp DBs stay in a uniquely named ignored `output/qualification/` directory;
+only sanitized methodology/results may later enter this spec. The future production
+implementation path proposal remains `src/core/activity/storage/` and targeted
+`tests/unit/core/activity/storage/`; those are **not** part of qualification.
+
+Runtime matrix, each executable explicitly provided and version captured:
+
+1. Node20 (exact installed patch recorded): with feature disabled, harness startup
+   must never load node:sqlite, spawn a worker or create state; enabling returns
+   unsupported before state write. This proves the qualification guard only;
+   production disabled-path verification is repeated when mounting is allocated.
+2. Node22.13.0 minimum candidate: module/FTS5/API/worker/crash tests. If unavailable
+   or failing, do not claim support; raise proposed floor to the earliest actually
+   tested patch or leave qualification incomplete. No network runtime installation
+   or global configuration change is implied by this plan.
+3. Exact deployed Node22 patch (accepted S1 runner used22.23.3) and local dev25.2.1:
+   repeat the same matrix, with sqlite_version/compile_options, architecture, OS,
+   filesystem/mount and sync mode recorded. Experimental module warnings are recorded.
+4. Linux AMD64 and ARM64 with existing authorized native runners; native macOS host
+   is separate. No Docker image build/publish. Missing native architecture or exact
+   runtime is an explicit outstanding gate, never covered by emulation or types.
+
+Proposed commands after allocation: `node scripts/qualification/activity-storage/run.mjs
+--scenario <name> --output <unique-dir> --seed 42` under each supplied Node binary;
+`pnpm exec vitest run tests/unit/qualification/activity-storage.test.ts
+--maxWorkers=1 --minWorkers=1`, then repository typecheck/lint. Driver validates a
+closed scenario enum and hard caps, so arguments cannot request unlimited work.
+One scenario at a time in a Main-coordinated quiet window, no background watchers
+or concurrent full suite. Native runner availability/execution requires Main's
+resource allocation; this design lane runs none of these experiments.
+
+Scenario set and acceptance (all numbers provisional until measured):
+
+- **Runtime/disabled**: prove module guard and no filesystem side effects above;
+  worker startup/exit/error/cancellation and FTS5 capability must be explicit.
+- **Steady and burst**: separate15-minute scenarios,2.5 KiB average payload.
+  Steady offers100/s distributed evenly across10 producer instances (10/s each).
+  Burst scenario repeats58 seconds at80/s then2 seconds at500/s, evenly across
+  the same10 instances (8/s then50/s each). Start buckets full; use deterministic
+  evenly spaced offers. The burst spends800 global tokens, the58-second interval
+  replenishes1,160, so the1,000-token bucket recovers and no rate rejection is
+  expected. Mean burst-scenario load is94/s. A separate overload schedule offers
+  sustained500/s and compares exact expected global/per-instance rate rejections
+  against a reference bucket model; those rejects are not storage loss. Paired baseline uses
+  identical scheduled input without storage; p99 added main-loop delay≤5ms,
+  queue≤1,024/8 MiB plus reserved128/2 MiB, no unexpected admitted loss, durable
+  receipt p99≤250ms. Record offered/admitted/rejected/committed counts separately.
+  A maximum144 KiB payload case must hit byte/rate admission rather than grow RSS.
+- **Concurrent queries**: eight simulated clients within four queued/one reader
+  execution cap, one active request/client; indexed filter/FTS/empty-match/cursor
+  cases on seeded100k and up-to500k rows. Include adversarial low-selectivity tokens.
+  Successful page p95≤250ms, every deadline cancels within an additional100ms;
+  failed queries are explicit, never reported as an empty successful page.
+- **Retention and receipts**: advance controlled time through at least20 epoch
+  transitions, prune Activity before retries, close epochs before receipt cleanup,
+  inject failed owner ack and restore. Original receipt or explicit expiry only;
+  no reappend. Explain actual table/index/FTS/receipt bytes per row and attained
+  horizon under shared2 GiB cap/256 MiB metadata reservation, not seven-day marketing.
+- **Crash and pressure**: child-process termination at transaction/receipt boundaries,
+  worker death, blocked reader/checkpoint, busy DB, failed statfs and injected ENOSPC;
+  no host disk filling. WAL thresholds16/48/64 MiB, recovery integrity, zero success
+  before commit, no reopened expired epochs; SQLite failure never blocks input.
+  Keep measured cancellation/WAL overshoot visible; hard64 MiB enforcement requires
+  preflight transaction growth allowance, not merely checking size after commit.
+- **Memory/disk**: total qualification worker RSS≤192 MiB and retained main-thread
+  queue overhead≤32 MiB over paired baseline, measured after warmup and after drain.
+  Peak report/artifact allocation≤4 GiB; preflight requires≥8 GiB free plus existing
+  configured reserve. Stop on any reserve breach; do not run full VACUUM. Use task-
+  owned disposable directories, never stateDir/scanner/access/media roots; remove
+  only task DBs after summaries/hashes are saved. Each scenario has a20-minute hard
+  wall deadline and process-tree cleanup; cancellation verifies no remaining worker.
+
+First run is synthetic qualification, not sustained combined-scanner acceptance.
+After runtime/storage microqualification passes, request a separate Main-coordinated
+15-minute paired accepted-scanner recorded-IQ workload (no live receiver) with the
+same offered events/queries and preserved native acceptance fixtures. Compare
+scanner throughput/drops and event-loop/worker latency against its storage-off
+baseline; require no new scanner drops attributable to storage and budgets above.
+If that cannot run, storage qualification is provisional. Production power-loss,
+media fsync semantics and native recording closure remain later integration tests.
+
+Deliver exact runtime/source/workload versions, commands, seed, offered/admitted
+counts, latency distributions, RSS/queue/DB/WAL/FTS/receipt bytes, fault outcomes,
+raw-log locations and explicit unsupported matrix cells. Independent review decides
+whether to accept SQLite, reduce stated defaults or reopen binding/storage choice.
+A pass permits Main to allocate implementation; it does not itself enable anything.
+
 ## Migrations, repair and acceptance
 
 Open state load-only during normal boot; explicit feature setup creates directories.
@@ -700,9 +887,9 @@ storage scheduling, not a performance claim from empty synthetic inserts.
 
 ## Design review status
 
-Two independent read-only source audits were incorporated. Adversarial review R1
-requested bounded deduplication receipt lifetime and a generation-fenced two-store
-Keep handshake. Both contracts are now explicit above; independent R2 review
-approved the amended design with no remaining design blockers. Final design approval/landing also requires reconciliation against the
-exact accepted S1 commit. The audited candidate remains0fc3fdb; later external
-fixes are not assumed. SQLite remains provisional pending the qualification gate.
+Two independent source audits and an amended-design review resolved bounded receipt
+lifetime and generation-fenced Keep. Accepted-S1 F3/F5 reconciliation now preserves
+implemented deletion authority/drains and fatal-generation cleanup while retaining
+terminal/file-settlement distinctions. The reconciliation and exact qualification
+plan passed independent delta review with no remaining design blockers. SQLite remains provisional; S2/S3, protected
+mounts and every deletion-owner/Keep gate still require their allocated checkpoints.

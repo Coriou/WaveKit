@@ -8,13 +8,17 @@ runtime mounts. Follow dependencies; Main assigns owners at each gate.
       planned S2/S3, native recordings/pruners, CLI and external web references. Resolve
       independent Sol research and adversarial review objections. Publish these three
       spec files and retain private ownership/review ledger separately. Two source audits
-      and amended-design review passed; exact accepted-S1 reconciliation remains required
-      for final design approval/landing, before checkpoint A.
+      and amended-design review passed; accepted-S1 reconciliation is prepared against90bfa031 on released d452b0a;
+      its independent delta review passed with no remaining design blockers. Main owns
+      local landing and allocation of the implementation gates below.
       _Requirements: 1.1–1.6, 4.1–4.5, 6.6, 7.1–7.3._
 - [ ] **2. Runtime/storage qualification, independent first implementation batch.**
-      After explicit allocation, prove feature-specific Node22.13+ floor and exact
-      tested patch, dynamic disabled path on Node20, SQLite/FTS5 worker availability,
-      worker build entries, local state mount and AMD64/ARM64 packaging. Use bounded
+      Follow the exact owned-path/runtime/scenario plan in design.md after explicit
+      allocation; no production modules or shared edits in this batch. Prove feature-specific Node22.13+ floor and exact
+      tested patch, harness disabled path on Node20, SQLite/FTS5 direct-worker availability
+      and native AMD64/ARM64 runner behavior. Production worker build entries, state
+      mounting, disabled-startup behavior and package/image integration belong to a
+      separately allocated integration gate after qualification. Use bounded
       disposable fixtures to measure4KiB/row assumption, index plans, worker cancellation,
       WAL cap, fsync behavior and combined100/s workload. No runtime mount or Docker
       image build without a separate authorized window. Stop if runtime floor rejected.
