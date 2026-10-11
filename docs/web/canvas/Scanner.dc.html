@@ -74,11 +74,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 <div class="wk-sc" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: 12px; overflow: hidden; background: var(--wk-glass-panel); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
 
 	<header style="flex: none; display: flex; align-items: center; gap: 6px; padding: 14px 10px 10px 18px">
-		<sc-if value="{{composing}}" hint-placeholder-val="{{false}}">
-			<button class="wk-ghost" onClick="{{cancelCompose}}" aria-label="Back to discoveries" title="Back to discoveries" style="width: 36px; height: 36px; margin-left: -10px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)">
-				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg>
-			</button>
-		</sc-if>
 		<h2 style="margin: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 22px; letter-spacing: .02em">{{headTitle}}</h2>
 		<span style="margin-left: 4px; font-size: 12px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{headCount}}</span>
 		<div style="flex: 1"></div>
@@ -87,8 +82,31 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</button>
 	</header>
 
-	<sc-if value="{{notComposing}}" hint-placeholder-val="{{true}}">
 		<div style="flex: none; padding: 0 14px 12px">
+			<sc-if value="{{nowCompact}}" hint-placeholder-val="{{false}}">
+			<section aria-label="Scan status" style="display: flex; flex-direction: column; gap: 8px; padding: 10px 6px 10px 12px; border-radius: 8px; background: {{nowBg}}; box-shadow: inset 0 0 0 1px {{nowRing}}">
+				<div style="display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13px; white-space: nowrap; font-variant-numeric: tabular-nums">
+					<sc-if value="{{nowLive}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 7px; height: 7px; flex: none; margin: 0 4px; border-radius: 50%; background: var(--wk-accent); animation: wkpulse 1.6s ease-in-out infinite"></span></sc-if>
+					<sc-if value="{{nowNotLive}}" hint-placeholder-val="{{true}}"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{{nowTileFg}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; animation: {{nowIconAnim}}"><sc-for list="{{nowIcon}}" as="p" hint-placeholder-count="3"><path d="{{p}}"></path></sc-for></svg></sc-if>
+					<span aria-live="{{nowLiveRegion}}" title="{{nowTitle}}" style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--wk-text-2)"><b style="color: {{nowHeadC}}">{{nowHead}}</b><sc-if value="{{nowHasDetail}}" hint-placeholder-val="{{true}}"> · {{nowDetail}}</sc-if></span>
+					<sc-if value="{{canPlan}}" hint-placeholder-val="{{true}}"><button class="wk-ghost" onClick="{{openPlan}}" style="flex: none; height: 30px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700">Open plan</button></sc-if>
+				</div>
+				<sc-if value="{{nowHasSub}}" hint-placeholder-val="{{false}}"><span style="margin-top: -6px; padding-right: 6px; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{nowSub}}</span></sc-if>
+				<div role="progressbar" aria-label="This pass" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{passPct}}" style="position: relative; height: 3px; margin-right: 6px; border-radius: 1.5px; background: {{passTrack}}; overflow: hidden">
+					<span style="position: absolute; left: 0; top: 0; bottom: 0; width: {{passPct}}%; border-radius: 1.5px; background: {{passFill}}; transition: width .4s ease"></span>
+				</div>
+				<sc-if value="{{nowHasActs}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; flex-wrap: wrap; gap: 6px">
+						<sc-for list="{{nowActs}}" as="a" hint-placeholder-count="1">
+							<button class="{{a.cls}}" onClick="{{a.act}}" disabled="{{a.disabled}}" title="{{a.title}}" aria-label="{{a.aria}}" style="height: 36px; padding: {{a.pad}}; border-radius: 6px; border: 1px solid {{a.border}}; background: {{a.bg}}; color: {{a.fg}}; opacity: {{a.op}}; font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px; white-space: nowrap">
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{a.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg>{{a.label}}
+							</button>
+						</sc-for>
+					</div>
+				</sc-if>
+			</section>
+			</sc-if>
+			<sc-if value="{{nowFull}}" hint-placeholder-val="{{true}}">
 			<section aria-label="Scan status" style="display: flex; flex-direction: column; gap: 10px; padding: 12px; border-radius: 8px; background: {{nowBg}}; box-shadow: inset 0 0 0 1px {{nowRing}}; transition: background .2s, box-shadow .2s">
 				<div style="display: flex; align-items: center; gap: 12px; min-height: 36px">
 					<span style="width: 32px; height: 32px; flex: none; border-radius: 6px; background: {{nowTileBg}}; display: grid; place-items: center; color: {{nowTileFg}}">
@@ -97,9 +115,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
 						<span style="display: flex; align-items: center; gap: 7px; min-width: 0">
 							<sc-if value="{{nowLive}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 7px; height: 7px; flex: none; border-radius: 50%; background: var(--wk-accent); animation: wkpulse 1.6s ease-in-out infinite"></span></sc-if>
-							<span id="sc-now-head" style="font-weight: 700; font-size: 14.5px; color: {{nowHeadC}}; font-variant-numeric: tabular-nums">{{nowHead}}</span>
+							<span id="sc-now-head" title="{{nowTitle}}" style="font-weight: 700; font-size: 14.5px; color: {{nowHeadC}}; font-variant-numeric: tabular-nums">{{nowHead}}</span>
 						</span>
-						<span aria-live="{{nowLiveRegion}}" style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{nowSub}}</span>
+						<sc-if value="{{nowHasSub}}" hint-placeholder-val="{{true}}"><span aria-live="{{nowLiveRegion}}" style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{nowSub}}</span></sc-if>
 					</span>
 					<sc-if value="{{nowHasSwitch}}" hint-placeholder-val="{{false}}">
 						<button role="switch" aria-checked="{{watchOn}}" aria-labelledby="sc-now-head" title="Find signals where you are tuned. Never moves the receiver." onClick="{{toggleWatch}}" style="flex: none; width: 52px; height: 44px; margin-right: -8px; display: grid; place-items: center; border-radius: 6px">
@@ -108,8 +126,8 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</sc-if>
 				</div>
 				<sc-if value="{{nowHasSegs}}" hint-placeholder-val="{{false}}">
-					<div role="img" aria-label="{{segAria}}" style="position: relative; display: flex; gap: 2px; height: 6px">
-						<sc-for list="{{segs}}" as="g" hint-placeholder-count="16"><span style="flex: 1; min-width: 0; border-radius: 2px; background: {{g.c}}; box-shadow: {{g.glow}}; transition: background .25s"></span></sc-for>
+					<div role="progressbar" aria-label="This pass" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{passPct}}" style="position: relative; height: 3px; border-radius: 1.5px; background: {{passTrack}}; overflow: hidden">
+						<span style="position: absolute; left: 0; top: 0; bottom: 0; width: {{passPct}}%; border-radius: 1.5px; background: {{passFill}}; transition: width .4s ease"></span>
 					</div>
 				</sc-if>
 				<sc-if value="{{nowHasLine}}" hint-placeholder-val="{{true}}">
@@ -127,15 +145,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 							</sc-for>
 						</div>
 					</sc-if>
-				</sc-if>
-				<sc-if value="{{nowHasRuns}}" hint-placeholder-val="{{false}}">
-					<div role="group" aria-label="Ranges in this scan" style="display: flex; flex-wrap: wrap; gap: 6px">
-						<sc-for list="{{runRanges}}" as="g" hint-placeholder-count="2">
-							<button class="wk-chipb" aria-pressed="{{g.on}}" onClick="{{g.pick}}" disabled="{{g.disabled}}" title="{{g.title}}" style="height: 30px; padding: 0 8px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12px; white-space: nowrap; background: {{g.bg}}; color: {{g.fg}}; font-variant-numeric: tabular-nums">
-								<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{g.tick}}"><path d="M5 12l5 5l10 -10"></path></svg><b style="font-weight: 700">{{g.name}}</b><span style="color: var(--wk-text-3)">{{g.range}}</span>
-							</button>
-						</sc-for>
-					</div>
 				</sc-if>
 				<sc-if value="{{nowHasBanner}}" hint-placeholder-val="{{false}}">
 					<div role="status" style="display: flex; align-items: center; gap: 10px; padding: 8px 6px 8px 10px; border-radius: 6px; background: {{bannerBg}}; font-size: 12.5px; line-height: 1.45; color: {{bannerFg}}">
@@ -158,19 +167,20 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</sc-for>
 				</div>
 			</section>
+			</sc-if>
 		</div>
 
 		<sc-if value="{{hasTabs}}" hint-placeholder-val="{{false}}">
 			<div style="flex: none; padding: 0 14px 10px">
 				<div role="tablist" aria-label="Show" class="wk-seg" style="display: flex">
-					<sc-for list="{{tabs}}" as="t" hint-placeholder-count="2"><button role="tab" aria-selected="{{t.on}}" onClick="{{t.pick}}" style="flex: 1; background: {{t.bg}}; color: {{t.fg}}">{{t.label}}<span style="margin-left: 6px; font-weight: 400; color: var(--wk-text-3)">{{t.count}}</span></button></sc-for>
+					<sc-for list="{{tabs}}" as="t" hint-placeholder-count="2"><button role="tab" aria-selected="{{t.on}}" onClick="{{t.pick}}" style="flex: 1; background: {{t.bg}}; color: {{t.fg}}">{{t.label}}</button></sc-for>
 				</div>
 			</div>
 		</sc-if>
 
 		<sc-if value="{{showHits}}" hint-placeholder-val="{{false}}">
 			<div style="flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px 8px 16px">
-				<span style="flex: 1; min-width: 0; font-size: 12.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{hitsHead}}</span>
+				<span style="flex: 1"></span>
 				<button class="wk-chipb" aria-pressed="{{newOnly}}" onClick="{{toggleNewOnly}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{newOnlyBg}}; color: {{newOnlyFg}}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{newOnlyTick}}"><path d="M5 12l5 5l10 -10"></path></svg>New only</button>
 			</div>
 			<div tabindex="0" role="region" aria-label="Hits in this scan" class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 8px 10px">
@@ -219,8 +229,8 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 						<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
 					</span>
 					<span style="font-weight: 700; font-size: 15px">Nothing found yet</span>
-					<span style="font-size: 13px; line-height: 1.55; color: var(--wk-text-3); text-wrap: pretty">Every signal the scanner finds lands here, with what it is, when it was heard and whether it decoded. Watch here looks where you are tuned. Scan a band sweeps a whole band.</span>
-					<button onClick="{{openCompose}}" style="margin-top: 6px; height: 40px; padding: 0 16px 0 13px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px">
+					<span style="font-size: 13px; line-height: 1.55; color: var(--wk-text-3); text-wrap: pretty">Signals the scanner finds land here.</span>
+					<button onClick="{{openPlan}}" style="margin-top: 6px; height: 40px; padding: 0 16px 0 13px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13.5px; font-weight: 700; display: flex; align-items: center; gap: 8px">
 						<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>Scan a band
 					</button>
 				</div>
@@ -443,247 +453,6 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</div>
 			</sc-if>
 		</sc-if>
-	</sc-if>
-
-	<sc-if value="{{composing}}" hint-placeholder-val="{{false}}">
-		<div class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 2px 14px 18px">
-			<sc-if value="{{compNote}}" hint-placeholder-val="{{false}}">
-				<div role="status" style="display: flex; align-items: flex-start; gap: 10px; margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; background: var(--wk-amber-fill); color: var(--wk-amber-soft); font-size: 13px; line-height: 1.5">
-					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 2px"><path d="M9.785 6l8.215 8.215l-2.054 2.054a5.81 5.81 0 1 1 -8.215 -8.215l2.054 -2.054z"></path><path d="M4 20l3.5 -3.5"></path><path d="M15 4l-3.5 3.5"></path><path d="M20 9l-3.5 3.5"></path></svg>
-					<span>{{compNoteText}}</span>
-				</div>
-			</sc-if>
-
-			<section aria-labelledby="sc-p-h">
-				<div style="display: flex; align-items: baseline; gap: 8px; margin: 0 2px 8px">
-					<h3 id="sc-p-h" class="wk-eyebrow">Bands</h3>
-					<span style="flex: 1; min-width: 0; font-size: 12px; color: var(--wk-text-4)">{{presetHint}}</span>
-				</div>
-				<div role="group" aria-labelledby="sc-p-h" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(172px, 1fr)); gap: 6px">
-					<sc-for list="{{presets}}" as="p" hint-placeholder-count="6">
-						<button class="wk-card" aria-pressed="{{p.on}}" onClick="{{p.pick}}" aria-label="{{p.aria}}" title="{{p.title}}" style="min-height: 68px; box-sizing: border-box; padding: 9px 10px 9px 11px; border-radius: 8px; background: {{p.bg}}; text-align: left; display: flex; flex-direction: column; gap: 2px; min-width: 0">
-							<span style="display: flex; align-items: center; gap: 6px; min-width: 0">
-								<span style="flex: 1; min-width: 0; font-weight: 700; font-size: 13.5px; color: {{p.nameC}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{p.name}}</span>
-								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; opacity: {{p.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>
-							</span>
-							<span style="font-size: 12px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{p.range}}</span>
-							<span style="font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis"><sc-if value="{{p.user}}" hint-placeholder-val="{{false}}"><b style="font-weight: 700; color: var(--wk-text-2)">Yours · </b></sc-if>{{p.decodes}}</span>
-						</button>
-					</sc-for>
-				</div>
-				<sc-if value="{{hasMorePresets}}" hint-placeholder-val="{{true}}">
-					<button class="wk-ghost" onClick="{{toggleAllPresets}}" aria-expanded="{{allPresets}}" style="margin: 6px 0 0 -4px; height: 32px; padding: 0 10px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">
-						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{morePresetsChev}}"></path></svg>{{morePresetsText}}
-					</button>
-				</sc-if>
-			</section>
-
-			<section aria-labelledby="sc-ruler-h" style="margin-top: 18px">
-				<div style="display: flex; align-items: center; gap: 8px; margin: 0 0 8px 2px; flex-wrap: wrap">
-					<h3 id="sc-ruler-h" class="wk-eyebrow" style="margin-right: 4px">Ruler</h3>
-					<span id="sc-tool-l" style="font-size: 12px; color: var(--wk-text-3)">Drag to</span>
-					<div role="radiogroup" aria-labelledby="sc-tool-l" class="wk-seg">
-						<sc-for list="{{tools}}" as="t" hint-placeholder-count="2"><button role="radio" aria-checked="{{t.on}}" onClick="{{t.pick}}" title="{{t.title}}" style="height: 28px; padding: 0 10px; background: {{t.bg}}; color: {{t.fg}}">{{t.label}}</button></sc-for>
-					</div>
-					<div style="flex: 1"></div>
-					<div style="display: flex; gap: 2px">
-						<button class="wk-ghost" onClick="{{zoomOut}}" aria-label="Zoom the ruler out" title="Zoom out" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
-						<button class="wk-ghost" onClick="{{zoomIn}}" aria-label="Zoom the ruler in" title="Zoom in" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
-						<button class="wk-ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="Show every range" style="height: 32px; padding: 0 9px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; opacity: {{fitOp}}">Fit</button>
-					</div>
-				</div>
-
-				<div ref="{{rulerRef}}" tabindex="0" role="group" aria-label="{{rulerAria}}" onKeyDown="{{rulerKey}}" style="position: relative; border-radius: 8px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.12); overflow: hidden; user-select: none">
-					<div ref="{{trackRef}}" onPointerDown="{{rDown}}" onPointerMove="{{rMove}}" onPointerUp="{{rUp}}" onPointerCancel="{{rCancel}}" style="position: relative; display: flex; flex-direction: column; cursor: {{rCursor}}; touch-action: pan-y">
-						<div aria-hidden="true" style="position: relative; height: 22px; flex: none">
-							<sc-for list="{{runLabels}}" as="l" hint-placeholder-count="2">
-								<span style="position: absolute; top: 5px; left: {{l.left}}px; width: {{l.width}}px; box-sizing: border-box; padding: 0 4px 0 3px; font-size: 11px; font-weight: 700; color: {{l.fg}}; text-align: {{l.align}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{l.text}}</span>
-							</sc-for>
-						</div>
-						<div style="position: relative; height: 40px; flex: none">
-							<sc-for list="{{runBars}}" as="b" hint-placeholder-count="2">
-								<div title="{{b.title}}" style="position: absolute; top: 4px; bottom: 12px; left: {{b.left}}px; width: {{b.width}}px; border-radius: 3px; background: {{b.bg}}; pointer-events: none"></div>
-							</sc-for>
-							<sc-for list="{{skipBars}}" as="x" hint-placeholder-count="1">
-								<div title="{{x.title}}" style="position: absolute; top: 2px; bottom: 10px; left: {{x.left}}px; width: {{x.width}}px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.7) 0 1.5px, var(--wk-well) 1.5px 3.5px); pointer-events: none"></div>
-							</sc-for>
-							<sc-for list="{{elseMarks}}" as="m" hint-placeholder-count="1">
-								<span role="img" aria-label="{{m.aria}}" title="{{m.aria}}" style="position: absolute; bottom: 2px; height: 6px; left: {{m.left}}px; width: {{m.width}}px; border-radius: 1px; background: rgba(var(--wk-ink-3-rgb),.7)"></span>
-							</sc-for>
-							<sc-if value="{{rulerEmpty}}" hint-placeholder-val="{{true}}">
-								<span aria-hidden="true" style="position: absolute; inset: 0 0 8px; display: grid; place-items: center; font-size: 12px; color: var(--wk-text-4); pointer-events: none">{{rulerEmptyText}}</span>
-							</sc-if>
-						</div>
-						<div title="Drag here to move along the band" style="position: relative; height: 22px; flex: none; border-top: 1px solid rgba(var(--wk-line-rgb),.08); cursor: {{axisCursor}}">
-							<sc-for list="{{rTicks}}" as="t" hint-placeholder-count="5">
-								<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 0; width: 1px; height: 4px; background: rgba(var(--wk-ink-3-rgb),.5)"></span>
-								<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 4px; transform: translateX({{t.shift}}); font-size: 11px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{t.text}}</span>
-							</sc-for>
-						</div>
-						<sc-if value="{{hasDrag}}" hint-placeholder-val="{{false}}">
-							<div aria-hidden="true" style="position: absolute; top: 22px; height: 40px; left: {{dragL}}px; width: {{dragW}}px; box-sizing: border-box; border: 1px dashed {{dragEdge}}; border-radius: 3px; background: {{dragBg}}; pointer-events: none; z-index: 3">
-								<span style="position: absolute; top: -20px; left: 50%; transform: translateX(-50%); padding: 1px 6px; border-radius: 4px; background: var(--wk-glass-strong); font-size: 11px; font-weight: 700; color: {{dragEdge}}; white-space: nowrap; font-variant-numeric: tabular-nums">{{dragText}}</span>
-							</div>
-						</sc-if>
-					</div>
-				</div>
-				<div ref="{{ovRef}}" onPointerDown="{{ovDown}}" onPointerMove="{{ovMove}}" onPointerUp="{{ovUp}}" onPointerCancel="{{ovUp}}" role="slider" tabindex="0" aria-label="Overview, 100 to 900 MHz. Drag to move the ruler." aria-valuemin="100" aria-valuemax="900" aria-valuenow="{{ovNow}}" aria-valuetext="{{ovText}}" onKeyDown="{{rulerKey}}" style="position: relative; height: 18px; margin-top: 6px; border-radius: 4px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.1); cursor: grab; touch-action: none">
-					<sc-for list="{{ovMarks}}" as="m" hint-placeholder-count="2">
-						<span aria-hidden="true" style="position: absolute; top: 5px; height: 8px; left: {{m.left}}%; width: max(2px, {{m.width}}%); border-radius: 1px; background: rgba(var(--wk-accent-rgb),.7)"></span>
-					</sc-for>
-					<span aria-hidden="true" style="position: absolute; top: 1px; bottom: 1px; left: {{ovL}}%; width: max(6px, {{ovW}}%); border-radius: 3px; background: rgba(var(--wk-ink-rgb),.12); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-rgb),.28)"></span>
-				</div>
-				<p style="margin: 7px 2px 0; font-size: 12px; line-height: 1.45; color: var(--wk-text-3)">{{rulerHint}}</p>
-			</section>
-
-			<section aria-labelledby="sc-ranges" style="margin-top: 18px">
-				<div style="display: flex; align-items: baseline; gap: 8px; margin: 0 2px 8px">
-					<h3 id="sc-ranges" class="wk-eyebrow">{{rangesHead}}</h3>
-					<span style="flex: 1; min-width: 0; font-size: 12px; color: var(--wk-text-4)">{{rangesHint}}</span>
-				</div>
-				<sc-if value="{{noRanges}}" hint-placeholder-val="{{false}}">
-					<p style="margin: 0; padding: 14px; border-radius: 8px; background: var(--wk-well-glass); font-size: 13px; line-height: 1.5; color: var(--wk-text-3)">Each band you pick, or range you draw, gets a row here with its edges, what it looks for and how it is tuned.</p>
-				</sc-if>
-				<div role="list" aria-labelledby="sc-ranges" style="display: flex; flex-direction: column; gap: 8px">
-					<sc-for list="{{ranges}}" as="r" hint-placeholder-count="1">
-						<div role="listitem" id="{{r.domId}}" aria-label="{{r.aria}}" style="display: flex; flex-direction: column; gap: 10px; padding: 10px 6px 6px 12px; border-radius: 8px; background: {{r.bg}}; transition: background .6s ease; scroll-margin: 12px">
-							<div style="display: flex; align-items: flex-start; gap: 8px">
-								<span aria-hidden="true" style="width: 10px; height: 10px; flex: none; margin-top: 5px; border-radius: 3px; background: {{r.swatch}}"></span>
-								<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
-									<span style="font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
-									<span style="font-size: 12px; line-height: 1.4; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{r.meta}}</span>
-								</span>
-								<button class="wk-ghost" onClick="{{r.remove}}" aria-label="Remove {{r.name}}" title="Remove from the scan" style="flex: none; width: 32px; height: 32px; margin-top: -4px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
-								</button>
-							</div>
-							<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-left: 18px">
-								<input class="wk-box" value="{{r.fa}}" onChange="{{r.onA}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, from, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 34px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.aEdge}}">
-								<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
-								<input class="wk-box" value="{{r.fb}}" onChange="{{r.onB}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, to, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 34px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.bEdge}}">
-								<span style="font-size: 12px; color: var(--wk-text-3)">MHz</span>
-							</div>
-							<sc-if value="{{r.hasErr}}" hint-placeholder-val="{{false}}">
-								<span role="alert" style="padding-left: 18px; font-size: 12.5px; color: var(--wk-amber)">{{r.err}}</span>
-							</sc-if>
-							<div role="group" aria-label="What to look for in {{r.name}}" style="display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 0 6px 0 18px">
-								<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="4">
-									<sc-if value="{{c.isToggle}}" hint-placeholder-val="{{true}}"><button class="wk-chipb" aria-pressed="{{c.on}}" onClick="{{c.pick}}" disabled="{{c.disabled}}" title="{{c.title}}" style="height: 30px; padding: 0 9px 0 7px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{c.bg}}; color: {{c.fg}}; opacity: {{c.op}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{c.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{c.label}}</button></sc-if>
-									<sc-if value="{{c.isNote}}" hint-placeholder-val="{{false}}"><span title="{{c.title}}" style="height: 30px; box-sizing: border-box; padding: 0 9px; border-radius: 6px; display: flex; align-items: center; font-size: 12px; white-space: nowrap; color: var(--wk-text-3); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.12); opacity: {{c.op}}">{{c.label}}</span></sc-if>
-								</sc-for>
-								<button class="wk-ghost" onClick="{{r.toggleAdd}}" aria-expanded="{{r.addOpen}}" disabled="{{findOnly}}" style="height: 30px; padding: 0 9px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-3); opacity: {{chipOp}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Add</button>
-							</div>
-							<sc-if value="{{r.addOpen}}" hint-placeholder-val="{{false}}">
-								<div role="group" aria-label="Add a protocol to {{r.name}}" style="display: flex; flex-wrap: wrap; gap: 6px; margin: 0 6px 0 18px; padding: 8px; border-radius: 6px; background: var(--wk-well-glass)">
-									<sc-for list="{{r.addList}}" as="o" hint-placeholder-count="6">
-										<button class="wk-out" onClick="{{o.pick}}" disabled="{{o.disabled}}" title="{{o.title}}" style="height: 30px; padding: 0 10px; border-radius: 6px; background: var(--wk-chip); color: {{o.fg}}; font-size: 12.5px; font-weight: 700; white-space: nowrap">{{o.label}}</button>
-									</sc-for>
-								</div>
-							</sc-if>
-							<sc-if value="{{r.hasAuto}}" hint-placeholder-val="{{false}}">
-								<div style="display: flex; align-items: center; gap: 8px; padding-left: 18px">
-									<span aria-hidden="true" style="width: 14px; height: 14px; flex: none; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.7) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span>
-									<span title="{{r.autoTitle}}" style="flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; color: var(--wk-text-3); text-wrap: pretty">{{r.autoText}}</span>
-									<button class="wk-ghost" onClick="{{r.includeAuto}}" aria-label="{{r.autoAria}}" title="{{r.autoAria}}" style="flex: none; height: 28px; padding: 0 8px; border-radius: 6px; color: var(--wk-text-2); font-size: 12px">Include</button>
-								</div>
-							</sc-if>
-							<sc-for list="{{r.excl}}" as="x" hint-placeholder-count="1">
-								<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-left: 18px">
-									<span aria-hidden="true" style="width: 14px; height: 14px; flex: none; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.7) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span>
-									<span style="font-size: 12.5px; color: var(--wk-text-2)">Skips</span>
-									<input class="wk-box" value="{{x.fa}}" onChange="{{x.onA}}" onKeyDown="{{fieldKey}}" aria-label="Skip in {{r.name}}, from, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 78px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
-									<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
-									<input class="wk-box" value="{{x.fb}}" onChange="{{x.onB}}" onKeyDown="{{fieldKey}}" aria-label="Skip in {{r.name}}, to, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 78px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
-									<span style="flex: 1; min-width: 0; font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis" title="{{x.why}}">{{x.why}}</span>
-									<button class="wk-ghost" onClick="{{x.remove}}" aria-label="Stop skipping {{x.fa}}–{{x.fb}}" style="flex: none; width: 32px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
-								</div>
-							</sc-for>
-							<button class="wk-ghost" onClick="{{r.addSkip}}" style="align-self: flex-start; height: 28px; margin: -4px 0 -2px 12px; padding: 0 8px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--wk-text-2)">
-								<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M14 17a3 3 0 1 0 6 0a3 3 0 1 0 -6 0"></path><path d="M9.15 14.85l8.85 -10.85"></path><path d="M6 4l8.85 10.85"></path></svg>Skip a part
-							</button>
-							<div style="display: flex; flex-direction: column; margin: 0 0 0 12px; border-top: 1px solid rgba(var(--wk-line-rgb),.08)">
-								<button class="wk-row" onClick="{{r.toggleTune}}" aria-expanded="{{r.tuneOpen}}" aria-label="Tuning for {{r.name}}: {{r.tuneSum}}" style="min-height: 36px; margin-top: 2px; padding: 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 8px; text-align: left; font-size: 12.5px">
-									<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; transform: rotate({{r.tuneRot}}deg); transition: transform .15s"><path d="M9 6l6 6l-6 6"></path></svg>
-									<span style="flex: none; font-weight: 700; color: var(--wk-text-2)">Tuning</span>
-									<span style="flex: 1; min-width: 0; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.tuneSum}}</span>
-									<span class="wk-src" style="color: {{r.tuneSrcC}}">{{r.tuneSrc}}</span>
-								</button>
-								<sc-if value="{{r.tuneOpen}}" hint-placeholder-val="{{false}}">
-									<div style="display: flex; flex-direction: column; gap: 10px; padding: 6px 6px 8px 28px">
-										<sc-for list="{{r.tuneRows}}" as="t" hint-placeholder-count="3">
-											<div style="display: flex; flex-direction: column; gap: 6px">
-												<span style="display: flex; align-items: baseline; gap: 8px">
-													<span id="{{t.id}}" style="font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">{{t.label}}</span>
-													<span title="{{t.note}}" style="flex: 1; min-width: 0; font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{t.note}}</span>
-													<span class="wk-src" style="color: {{t.srcC}}">{{t.src}}</span>
-												</span>
-												<div role="radiogroup" aria-labelledby="{{t.id}}" class="wk-seg" style="align-self: flex-start">
-													<sc-for list="{{t.opts}}" as="o" hint-placeholder-count="3"><button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="height: 28px; padding: 0 9px; background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button></sc-for>
-												</div>
-											</div>
-										</sc-for>
-									</div>
-								</sc-if>
-							</div>
-						</div>
-					</sc-for>
-				</div>
-			</section>
-
-			<section aria-labelledby="sc-opt-h" style="margin-top: 18px">
-				<h3 id="sc-opt-h" class="wk-eyebrow" style="margin: 0 2px 2px">Options</h3>
-				<sc-for list="{{opts}}" as="o" hint-placeholder-count="3">
-					<div style="display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08)">
-						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><span id="{{o.id}}" style="font-weight: 700; font-size: 13.5px">{{o.label}}</span><span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3)">{{o.sub}}</span></span>
-						<button role="switch" aria-checked="{{o.on}}" aria-labelledby="{{o.id}}" onClick="{{o.toggle}}" style="flex: none; width: 52px; height: 44px; margin-right: -8px; display: grid; place-items: center; border-radius: 6px">
-							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{o.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
-						</button>
-					</div>
-				</sc-for>
-				<div style="display: flex; align-items: center; gap: 12px; padding: 10px 2px">
-					<span id="sc-stop" style="flex: 1; font-weight: 700; font-size: 13.5px">Stop after</span>
-					<div role="radiogroup" aria-labelledby="sc-stop" class="wk-seg">
-						<sc-for list="{{stopOpts}}" as="o" hint-placeholder-count="4"><button role="radio" aria-checked="{{o.on}}" onClick="{{o.pick}}" style="height: 28px; padding: 0 9px; background: {{o.bg}}; color: {{o.fg}}">{{o.label}}</button></sc-for>
-					</div>
-				</div>
-			</section>
-		</div>
-
-		<div style="flex: none; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 12px; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
-			<sc-if value="{{saving}}" hint-placeholder-val="{{false}}">
-				<div role="group" aria-label="Save as preset" style="display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: 8px; background: var(--wk-well-glass)">
-					<label for="sc-save-name" style="font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">Preset name</label>
-					<input id="sc-save-name" ref="{{saveRef}}" class="wk-box" value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{saveKey}}" spellcheck="false" autocomplete="off" style="height: 36px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px">
-					<span style="font-size: 12px; line-height: 1.45; color: var(--wk-text-3); text-wrap: pretty">{{saveWhat}}</span>
-					<div style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap">
-						<button class="wk-ghost" onClick="{{cancelSave}}" style="height: 34px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px">Cancel</button>
-						<div style="flex: 1"></div>
-						<sc-if value="{{canUpdate}}" hint-placeholder-val="{{false}}"><button class="wk-out" onClick="{{updatePreset}}" style="height: 34px; padding: 0 12px; border-radius: 6px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap">{{updateText}}</button></sc-if>
-						<button onClick="{{savePreset}}" disabled="{{saveDisabled}}" style="height: 34px; padding: 0 14px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; white-space: nowrap; opacity: {{saveOp}}">{{saveText}}</button>
-					</div>
-				</div>
-			</sc-if>
-			<div role="status" style="display: flex; flex-direction: column; gap: 3px; min-width: 0">
-				<span style="font-weight: 700; font-size: 14.5px; line-height: 1.4; color: {{pvLineC}}; font-variant-numeric: tabular-nums">{{pvLine}}</span>
-				<sc-if value="{{pvHasSub}}" hint-placeholder-val="{{true}}"><span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-2); font-variant-numeric: tabular-nums; text-wrap: pretty">{{pvSub}}</span></sc-if>
-				<sc-if value="{{pvHasLooks}}" hint-placeholder-val="{{true}}"><span title="{{pvLooks}}" style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Looks for <span style="color: var(--wk-text-soft)">{{pvLooks}}</span></span></sc-if>
-				<sc-if value="{{pvWarn}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-amber); font-variant-numeric: tabular-nums">{{pvWarnText}}</span></sc-if>
-				<sc-if value="{{pvConsent}}" hint-placeholder-val="{{true}}">
-					<span style="display: flex; align-items: flex-start; gap: 7px; margin-top: 3px; font-size: 12.5px; line-height: 1.45; color: var(--wk-amber)">
-						<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 2px"><path d="M12 9v4"></path><path d="M10.363 3.591l-8.106 13.534a1.914 1.914 0 0 0 1.636 2.871h16.214a1.914 1.914 0 0 0 1.636 -2.87l-8.106 -13.536a1.914 1.914 0 0 0 -3.274 0z"></path><path d="M12 16h.01"></path></svg>
-						<span style="text-wrap: pretty">{{pvConsentText}}</span>
-					</span>
-				</sc-if>
-			</div>
-			<div style="display: flex; align-items: center; gap: 6px">
-				<button class="wk-ghost" onClick="{{openSave}}" disabled="{{saveBtnDisabled}}" aria-expanded="{{saving}}" style="height: 44px; padding: 0 10px 0 8px; margin-left: -6px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px; display: flex; align-items: center; gap: 6px; white-space: nowrap; opacity: {{saveBtnOp}}">
-					<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"></path><path d="M10 14a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"></path><path d="M14 4v4h-6v-4"></path></svg>Save as preset
-				</button>
-				<div style="flex: 1"></div>
-				<button onClick="{{start}}" disabled="{{startDisabled}}" style="height: 44px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap; transition: background .15s">{{startText}}</button>
-			</div>
-		</div>
-	</sc-if>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
 		<div role="status" style="flex: none; margin: 0 10px 8px; min-height: 42px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi); font-size: 13px">
@@ -692,15 +461,13 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		</div>
 	</sc-if>
 
-	<sc-if value="{{notComposing}}" hint-placeholder-val="{{true}}">
 		<footer style="flex: none; display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 20px 10px; font-size: 12px; color: {{footC}}; font-variant-numeric: tabular-nums">
 			<span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis" title="{{footText}}">{{footText}}</span>
 		</footer>
-	</sc-if>
 </div>
 </x-dc>
 
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["first-run", "watching", "composer", "composer-combined", "composer-tuning", "starting", "sweeping", "holding", "paused", "paused-released", "paused-you", "paused-waiting", "consent", "paused-job", "paused-relay", "source-down", "source-removed", "no-tuner", "no-receiver", "finished", "nothing-found", "disk-low", "read-only"],"default":"sweeping"},"openFirst":{"editor":"boolean","default":true},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onIdentify":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"onSettings":{"editor":null},"onClose":{"editor":null},"$preview":{"width":420,"height":820}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["first-run", "watching", "starting", "sweeping", "holding", "paused", "paused-released", "paused-you", "paused-waiting", "consent", "paused-job", "paused-relay", "source-down", "source-removed", "no-tuner", "no-receiver", "finished", "nothing-found", "disk-low", "read-only"],"default":"sweeping"},"openFirst":{"editor":"boolean","default":true},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"onScan":{"editor":null},"onPlan":{"editor":null},"vfo":{"editor":null,"tsType":"number"},"onTune":{"editor":null},"onIdentify":{"editor":null},"watch":{"editor":null,"tsType":"boolean"},"onWatch":{"editor":null},"onSettings":{"editor":null},"onClose":{"editor":null},"$preview":{"width":420,"height":820}}'>
 // ---------- Icons (tabler-style stroke paths) ----------
 const I = {
 	voice: ['M9 5a3 3 0 0 1 3 -3a3 3 0 0 1 3 3v5a3 3 0 0 1 -3 3a3 3 0 0 1 -3 -3V5M8 21h8M12 17v4', 'M5 10a7 7 0 0 0 14 0'],
@@ -738,42 +505,10 @@ const PROTO = {
 };
 const PORDER = ['dmr', 'p25', 'nxdn', 'dpmr', 'ysf', 'dstar', 'fm', 'am', 'tones', 'pocsag', 'flex', 'aprs', 'ais', 'acars', 'vdl2', 'ism', 'lora'];
 
-// ---------- Presets (region EU; the station is in Toulouse, the mock stays in Brittany) ----------
-// Built-ins mirror core's band plans (core id in `core`); the rest are drawn ahead of core (CORE GAPS).
-// step: the band plan's channel raster in Hz (0 = no raster, wideband devices).
-const PRESETS = [
-	{ id: 'marine', core: 'marine-vhf', name: 'Marine VHF', short: 'Marine', ranges: [[156, 162.025]], protos: ['fm', 'ais'], step: 25000 },
-	{ id: 'pmr', core: 'vhf-land-mobile', name: 'PMR / land mobile', short: 'PMR', ranges: [[136, 174]], protos: ['dmr', 'p25', 'nxdn', 'fm', 'pocsag'], step: 12500 },
-	{ id: 'pagers', name: 'Pagers', ranges: [[169.4, 169.8, 'Pagers 169'], [466, 466.25, 'Pagers 466']], protos: ['pocsag', 'flex'], step: 12500 },
-	{ id: 'air', name: 'Airband', ranges: [[118, 137]], protos: ['am', 'acars', 'vdl2'], step: 8330 },
-	{ id: 'pmr446', core: 'pmr446', name: 'PMR446', ranges: [[446, 446.2]], protos: ['fm', 'dpmr', 'dmr'], step: 6250, labels: { dmr: 'DMR Tier I' } },
-	{ id: 'ism', core: 'ism-433, ism-868', name: 'ISM 433 / 868', short: 'ISM', ranges: [[433.05, 434.79, 'ISM 433'], [863, 870, 'ISM 868']], protos: ['ism', 'lora'], step: 0 },
-	{ id: 'uhf', core: 'uhf-land-mobile', name: 'UHF land mobile', short: 'UHF', ranges: [[400, 470]], protos: ['dmr', 'p25', 'nxdn', 'fm'], step: 12500 },
-	{ id: '2m', core: 'amateur-2m', name: '2 m amateur', short: '2 m', ranges: [[144, 146]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], step: 12500 },
-	{ id: '70cm', core: 'amateur-70cm', name: '70 cm amateur', short: '70 cm', ranges: [[430, 440]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'p25'], step: 12500 }
-];
-const SHOWN = 6;
-// Presets you saved (core keeps and syncs them: CORE GAPS). Shown first, marked "Yours".
-const USER0 = [
-	{ id: 'u-harbour', user: true, name: 'Harbour channels', short: 'Harbour', ranges: [[156.5, 157.45, 'Harbour channels']], protos: ['fm'], step: 25000, opts: { hold: true } }
-];
-// Channels the always-on decoders already cover. A scan skips them (core's marine plan does the same for AIS).
-const ELSEWHERE = [
-	{ a: 161.95, b: 162.05, name: 'AIS', by: 'AIS-catcher', what: 'AIS 161.975 and 162.025' },
-	{ a: 131.5125, b: 131.7375, name: 'ACARS', by: 'acarsdec', what: 'ACARS 131.525 and 131.725' },
-	{ a: 136.9625, b: 136.9875, name: 'VDL2', by: 'dumpvdl2', what: 'VDL2 136.975' },
-	{ a: 144.7875, b: 144.8125, name: 'APRS', by: 'Direwolf', what: 'APRS 144.800' }
-];
 // What a sweep pauses on this receiver (the Pi receiver at 161.150). ADS-B runs on its own receiver and is not touched.
 const PAUSES = 'AIS-catcher, POCSAG and DMR decoding';
-const LIM = [24, 1766], OV = [100, 900], HOP_MHZ = 1.5;
 const SPAN = { a: 160.4, b: 162.0 };
-const DWELLS = { short: 0.15, normal: 0.25, long: 0.6 }, DWELL_PER = 0.025;
 const WATCH_PROTOS = ['dmr', 'p25', 'nxdn', 'dpmr', 'fm', 'tones', 'pocsag', 'flex', 'ais'];
-const STEP_OPTS = [[0, 'None'], [6250, '6.25'], [8330, '8.33'], [12500, '12.5'], [25000, '25']];
-const DWELL_OPTS = [['short', 'Short'], ['normal', 'Normal'], ['long', 'Long']];
-const SENS = [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']];
-const STOPS = [['never', 'Never'], ['pass', '1 pass'], ['10m', '10 min'], ['1h', '1 h']];
 const SORTS = [['heard', 'Last heard'], ['freq', 'Frequency'], ['conf', 'Confidence']];
 const CONF_ORDER = { decoded: 0, likely: 1, maybe: 2, heard: 3 };
 // The board's own run (the shell passes its live one as `sweep`): two presets combined, Marine inside PMR / land mobile.
@@ -858,7 +593,6 @@ const HITS = {
 	d9: { n: 11, first: '13:52', last: 'now', by: 'Energy only' },
 	d11: { n: 6, first: '13:50', last: 'now', by: 'Energy only' }
 };
-const FIRST_RUN_STATES = ['first-run'];
 
 // ---------- Helpers ----------
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -876,33 +610,6 @@ const chipc = on => ({ bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: on ? 'va
 const confWord = x => x.conf === 'decoded' ? x.proto : x.conf === 'likely' ? 'Likely ' + x.proto : x.conf === 'maybe' ? 'Maybe ' + x.proto : 'Heard';
 const protoOf = x => x.proto || 'Heard';
 const listText = xs => xs.slice(0, 6).join(', ') + (xs.length > 6 ? ' and ' + (xs.length - 6) + ' more' : '');
-const andText = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1];
-const stepText = hz => hz === 0 ? 'no channel grid' : (hz / 1000) + ' kHz steps';
-const pf = t => { const v = parseFloat(String(t).replace(',', '.')); return isFinite(v) ? v : NaN; };
-const snap = v => Math.round(v / 0.025) * 0.025;
-const withTones = ps => ps.includes('fm') && !ps.includes('tones') ? ps.concat(['tones']) : ps;
-const coveredElsewhere = (p, r) => !!PROTO[p].only && PROTO[p].only.every(f => r.excl.some(x => pf(x.fa) <= f && pf(x.fb) >= f));
-const catchPct = (hops, T) => hops <= 1 ? 100 : Math.min(99, Math.round(100 * (1 - Math.exp(-3.377 * 5 / T))));
-// a preset in words: what it decodes, and the fixed channels it leaves to an always-on decoder
-const decodesText = p => {
-	const own = p.protos.filter(q => !PROTO[q].only && !PROTO[q].s2).map(q => (p.labels && p.labels[q]) || PROTO[q].label);
-	const left = p.protos.filter(q => PROTO[q].only).map(q => PROTO[q].label);
-	return listText(own) + (left.length ? ' · skips ' + andText(left) : '');
-};
-const presetRange = p => p.ranges.length > 1 ? p.ranges.map(r => mt(r[0]) + '–' + mt(r[1])).join(' and ') + ' MHz' : mr(p.ranges[0][0], p.ranges[0][1]);
-
-let RID = 0;
-const autoSkips = (a, b) => ELSEWHERE.filter(m => m.b > a && m.a < b).map(m => ({ id: 'x' + (++RID), fa: f3(Math.max(a, m.a)), fb: f3(Math.min(b, m.b)), why: m.name + ' · already decoded by ' + m.by, auto: true }));
-// a range you draw borrows the protocols and channel step of the band plans it overlaps
-const overlapping = (a, b) => PRESETS.filter(p => p.ranges.some(r => r[1] > a && r[0] < b));
-const guessProtos = (a, b) => { const hit = overlapping(a, b), ps = hit.length ? [].concat.apply([], hit.map(x => x.protos)) : ['fm', 'dmr', 'p25']; return PORDER.filter(p => ps.includes(p) && (!PROTO[p].only || PROTO[p].only.some(f => f >= a && f <= b))); };
-const guessStep = (a, b) => { const hit = overlapping(a, b).sort((x, y) => (x.ranges[0][1] - x.ranges[0][0]) - (y.ranges[0][1] - y.ranges[0][0])); return hit.length ? { hz: hit[0].step, from: hit[0].name } : { hz: 12500, from: '' }; };
-function mkRange(o) {
-	const chips = withTones(o.protos);
-	const g = o.step == null ? guessStep(o.a, o.b) : { hz: o.step, from: o.srcName || '' };
-	return { id: 'r' + (++RID), src: o.src || null, srcName: o.srcName || '', origin: o.origin || (o.src ? 'preset' : 'drawn'), name: o.name, short: o.short || o.name, fa: f3(o.a), fb: f3(o.b), chips, on: chips.slice(), labels: o.labels || null, excl: autoSkips(o.a, o.b), stepDef: g.hz, stepFrom: g.from, step: null, dwell: null, sens: null, tuneOpen: !!o.tuneOpen };
-}
-const fromPreset = p => p.ranges.map(r => mkRange({ src: p.id, srcName: p.name, name: r[2] || p.name, short: r[2] || p.short || p.name, a: r[0], b: r[1], protos: p.protos, labels: p.labels, step: p.step }));
 
 // Hourly activity, oldest first: index 0 = 15:00 yesterday, 23 = this hour.
 function hourBars(x) {
@@ -921,7 +628,6 @@ function hourBars(x) {
 	return out;
 }
 function staged(x, stage) { return stage === 'S2' && x.s2 ? Object.assign({}, x, x.s2, { chips: (x.chips || []).concat(x.s2.chips || []) }) : x; }
-const presetById = (id, users) => (users || []).concat(PRESETS).find(p => p.id === id);
 
 class Component extends DCLogic {
 	constructor(props) {
@@ -932,13 +638,9 @@ class Component extends DCLogic {
 			q: '', tokens: [], focus: false, sugg: 0,
 			toast: null, idUntil: {}, playTx: null, txPos: 0,
 			watchOn: true, watchProtos: ['dmr', 'p25', 'nxdn', 'fm', 'pocsag'], watchEdit: false,
-			userPresets: USER0.slice(), tool: 'add', allPresets: false, findOnly: false, hold: true, rec: true, stopAfter: 'never', sensDefault: 'normal',
-			tw: 0, cw: 0, drag: null, addFor: null, saving: false, saveName: '', dirty: false, flash: null,
 			newOnly: false, hitOpen: null, skipped: {}, lastStart: null
 		}, this.fromTweak(props.state));
-		if (props.prefill) Object.assign(this.state, this.prefillState(props.prefill));
 		this.acc = 0; this.secAcc = 0;
-		this.initRuler();
 	}
 	// ---------- Board tweak: each scanner state, so reviewers can see it without waiting ----------
 	fromTweak(st) {
@@ -946,9 +648,6 @@ class Component extends DCLogic {
 		const M = {
 			'first-run': { mode: 'watching', firstRun: true },
 			watching: { mode: 'watching' },
-			composer: { mode: 'watching', composing: true, comp: 'empty' },
-			'composer-combined': { mode: 'watching', composing: true, comp: 'combined' },
-			'composer-tuning': { mode: 'watching', composing: true, comp: 'tuning' },
 			starting: { mode: 'starting', hop: 0, cov: 0, elapsed: 0 },
 			sweeping: { mode: 'sweeping' },
 			holding: { mode: 'holding', hop: 9 },
@@ -968,141 +667,19 @@ class Component extends DCLogic {
 			'disk-low': { mode: 'sweeping', diskLow: true },
 			'read-only': { mode: 'sweeping', ro: true }
 		};
-		const o = Object.assign({ composing: false, comp: 'empty', hw: 'ok', ro: false, diskLow: false, firstRun: false, released: false, waiting: false, autoStart: 0,
+		const o = Object.assign({ hw: 'ok', ro: false, diskLow: false, firstRun: false, released: false, waiting: false, autoStart: 0,
 			run: RUN0, hop: 7, cov: 84, elapsed: 720, resumeIn: 42, runOff: {}, tab: 'scan', hitOpen: null, watchOn: true }, M[st] || M.sweeping);
 		o.items = o.firstRun ? [] : SEED.map(x => Object.assign({ label: '', note: '', saved: false, ignored: false }, x));
 		if (o.firstRun) o.watchOn = true;
-		return Object.assign(o, this.compSeed(o.comp));
+		return o;
 	}
-	compSeed(kind) {
-		RID = 0;
-		let ranges = [];
-		if (kind === 'combined') ranges = fromPreset(PRESETS[1]).concat(fromPreset(PRESETS[0]));
-		if (kind === 'tuning') { const r = mkRange({ name: 'Your range', origin: 'drawn', a: 166.0, b: 168.0, protos: guessProtos(166, 168), tuneOpen: true }); r.sens = 'high'; ranges = [r]; }
-		const v = ranges.length ? this.fitRanges(ranges) : { vL: 116, vR: 176 };
-		return Object.assign({ ranges, addFor: null, saving: false, dirty: false, tool: 'add' }, v);
-	}
-	// ---------- Ruler: zoom, pan, drag ----------
-	initRuler() {
-		this.onRWheel = e => {
-			const s = this.state;
-			if (e.ctrlKey || e.metaKey) { e.preventDefault(); this.zoomAt(Math.exp(e.deltaY * 0.01), this.fAtClient(e.clientX)); }
-			else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) { e.preventDefault(); const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY; this.panBy(d / (s.tw || 300) * (s.vR - s.vL)); }
-		};
-		this.rulerRef = el => { if (el === this.rulerEl) return; if (this.rulerEl) this.rulerEl.removeEventListener('wheel', this.onRWheel); this.rulerEl = el; if (el) el.addEventListener('wheel', this.onRWheel, { passive: false }); this.observe(); };
-		this.trackRef = el => { if (el === this.trackEl) return; this.trackEl = el; this.observe(); };
-		this.ovRef = el => { this.ovEl = el; };
-		this.saveRef = el => { if (el && el !== this.saveEl) { this.saveEl = el; el.focus(); el.select(); } if (!el) this.saveEl = null; };
-		this.rDown = e => {
-			if (e.button !== 0 || !this.trackEl) return;
-			const r = this.trackEl.getBoundingClientRect(), y = e.clientY - r.top;
-			const skip = (this.state.tool === 'skip') !== !!e.altKey;
-			this.rd = { mode: y > r.height - 22 ? 'pan' : skip ? 'skip' : 'add', x0: e.clientX - r.left, sx: e.clientX, pid: e.pointerId, moved: false, L: this.state.vL, R: this.state.vR };
-		};
-		this.rMove = e => {
-			const d = this.rd;
-			if (!d || !this.trackEl) return;
-			if (!d.moved) { if (Math.abs(e.clientX - d.sx) < 5) return; d.moved = true; try { this.trackEl.setPointerCapture(d.pid); } catch (er) {} }
-			const r = this.trackEl.getBoundingClientRect();
-			if (d.mode === 'pan') { const df = (e.clientX - d.sx) / r.width * (d.R - d.L); this.setView(d.L - df, d.R - df); return; }
-			this.setState({ drag: { x0: d.x0, x1: clamp(e.clientX - r.left, 0, r.width), alt: d.mode === 'skip' } });
-		};
-		this.rUp = e => {
-			const d = this.rd;
-			this.rd = null;
-			if (!d) return;
-			try { if (this.trackEl && this.trackEl.hasPointerCapture(d.pid)) this.trackEl.releasePointerCapture(d.pid); } catch (er) {}
-			if (!d.moved) { if (d.mode !== 'pan' && e) this.flashAt(this.fAtClient(e.clientX)); return; }
-			const g = this.state.drag;
-			this.setState({ drag: null });
-			if (d.mode === 'pan' || !g) return;
-			const s = this.state, k = (s.vR - s.vL) / (s.tw || 1);
-			const a = snap(s.vL + Math.min(g.x0, g.x1) * k), b = snap(s.vL + Math.max(g.x0, g.x1) * k);
-			if (b - a < 0.025) return;
-			if (g.alt) this.addSkipAt(a, b); else this.addCustom(a, b, 'drawn');
-		};
-		this.rCancel = () => { this.rd = null; this.setState({ drag: null }); };
-		// overview strip: press or drag to move the ruler there
-		const ovF = x => { if (!this.ovEl) return 0; const r = this.ovEl.getBoundingClientRect(); return OV[0] + clamp((x - r.left) / r.width, 0, 1) * (OV[1] - OV[0]); };
-		this.ovDown = e => { if (e.button !== 0) return; this.ovd = e.pointerId; try { this.ovEl.setPointerCapture(e.pointerId); } catch (er) {} this.centerAt(ovF(e.clientX)); };
-		this.ovMove = e => { if (this.ovd != null) this.centerAt(ovF(e.clientX)); };
-		this.ovUp = e => { if (this.ovd == null) return; try { this.ovEl.releasePointerCapture(this.ovd); } catch (er) {} this.ovd = null; };
-	}
-	observe() {
-		if (!window.ResizeObserver) return this.measure();
-		if (!this.ro) this.ro = new ResizeObserver(() => this.measure());
-		this.ro.disconnect();
-		if (this.rulerEl) this.ro.observe(this.rulerEl);
-		if (this.trackEl) this.ro.observe(this.trackEl);
-		this.measure();
-	}
-	measure() {
-		const tw = this.trackEl ? this.trackEl.clientWidth : 0, cw = this.rulerEl ? this.rulerEl.clientWidth : 0;
-		if ((tw && tw !== this.state.tw) || (cw && cw !== this.state.cw)) this.setState({ tw: tw || this.state.tw, cw: cw || this.state.cw });
-	}
-	fAtClient(x) { const s = this.state; if (!this.trackEl) return (s.vL + s.vR) / 2; const r = this.trackEl.getBoundingClientRect(); return s.vL + clamp((x - r.left) / r.width, 0, 1) * (s.vR - s.vL); }
-	setView(L, R) {
-		const span = clamp(R - L, 0.2, LIM[1] - LIM[0]), c = (L + R) / 2;
-		L = c - span / 2; R = c + span / 2;
-		if (L < LIM[0]) { L = LIM[0]; R = L + span; }
-		if (R > LIM[1]) { R = LIM[1]; L = R - span; }
-		this.setState({ vL: L, vR: R });
-	}
-	zoomAt(k, f) { const s = this.state, w = s.vR - s.vL; if (f == null) f = (s.vL + s.vR) / 2; const span = clamp(w * k, 0.2, LIM[1] - LIM[0]), fr = (f - s.vL) / w; this.setView(f - fr * span, f - fr * span + span); }
-	panBy(df) { this.setView(this.state.vL + df, this.state.vR + df); }
-	centerAt(f) { const w = this.state.vR - this.state.vL; this.setView(f - w / 2, f + w / 2); }
-	fitRanges(rs) {
-		const as = rs.map(r => pf(r.fa)).filter(isFinite), bs = rs.map(r => pf(r.fb)).filter(isFinite);
-		if (!as.length) return {};
-		const a = Math.min.apply(null, as), b = Math.max.apply(null, bs), pad = Math.max(0.1, (b - a) * 0.08);
-		return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) };
-	}
-	flashAt(f) {
-		const r = this.state.ranges.filter(x => pf(x.fa) <= f && pf(x.fb) >= f).sort((x, y) => (pf(x.fb) - pf(x.fa)) - (pf(y.fb) - pf(y.fa)))[0];
-		if (!r) return;
-		this.setState({ flash: r.id });
-		clearTimeout(this.ft); this.ft = setTimeout(() => this.setState({ flash: null }), 1200);
-		setTimeout(() => { const el = document.getElementById('rng-' + r.id); if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 30);
-	}
-	prefillState(p) {
-		const a = snap(Math.min(p.startHz, p.endHz) / 1e6), b = snap(Math.max(p.startHz, p.endHz) / 1e6);
-		const ranges = [mkRange({ name: 'From the spectrum', origin: 'spectrum', a, b, protos: guessProtos(a, b) })];
-		return Object.assign({ composing: true, addFor: null, saving: false, ranges }, this.fitRanges(ranges));
-	}
-	setRanges(ranges, extra) { this.setState(Object.assign({ ranges, dirty: true }, extra || {})); }
-	patchRange(id, p) { this.setRanges(this.state.ranges.map(r => r.id === id ? Object.assign({}, r, p) : r)); }
-	patchExcl(rid, xid, p) { const r = this.state.ranges.find(y => y.id === rid); if (r) this.patchRange(rid, { excl: r.excl.map(x => x.id === xid ? Object.assign({}, x, p) : x) }); }
-	togglePreset(p) {
-		const s = this.state;
-		if (s.ranges.some(r => r.src === p.id)) return this.setState({ ranges: s.ranges.filter(r => r.src !== p.id), addFor: null, saving: false });
-		const ranges = s.ranges.concat(fromPreset(p));
-		this.setState(Object.assign({ ranges, saving: false, dirty: false }, this.fitRanges(ranges), p.opts && p.opts.hold != null ? { hold: p.opts.hold } : null));
-	}
-	addCustom(a, b, origin) {
-		const s = this.state, n = s.ranges.filter(r => !r.src).length;
-		const r = mkRange({ name: n ? 'Your range ' + (n + 1) : 'Your range', origin, a, b, protos: guessProtos(a, b) });
-		this.setRanges(s.ranges.concat([r]), { flash: r.id });
-		clearTimeout(this.ft); this.ft = setTimeout(() => this.setState({ flash: null }), 1200);
-	}
-	addSkipAt(a, b) {
-		const s = this.state, m = (a + b) / 2;
-		const r = s.ranges.filter(x => pf(x.fa) <= m && pf(x.fb) >= m).sort((x, y) => (pf(x.fb) - pf(x.fa)) - (pf(y.fb) - pf(y.fa)))[0];
-		if (!r) return this.toast('A skip goes inside a range · drag across one of yours');
-		this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(Math.max(a, pf(r.fa))), fb: f3(Math.min(b, pf(r.fb))), why: 'Skipped by you' }]) });
-	}
-	removeRange(r) {
-		const s = this.state, idx = s.ranges.indexOf(r);
-		this.setRanges(s.ranges.filter(x => x !== r), { addFor: null });
-		this.toast('Removed ' + r.name + ' from the scan', () => { const rs = this.state.ranges.slice(); rs.splice(idx, 0, r); this.setState({ ranges: rs, toast: null }); });
-	}
-	openCompose() { if (this.state.hw === 'no-receiver' || this.state.ro) return; this.setState({ composing: true, saving: false }); }
+	// "Scan a band" opens the shell's planner sheet
+	openPlan() { if (this.state.hw === 'no-receiver' || this.state.ro) return; if (this.props.onPlan) this.props.onPlan(); else this.toast('Opens Scan a band'); }
 
 	componentDidMount() { this.timer = setInterval(() => this.step(), 125); }
-	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.tt); clearTimeout(this.st); clearTimeout(this.ft); if (this.ro) this.ro.disconnect(); if (this.rulerEl) this.rulerEl.removeEventListener('wheel', this.onRWheel); }
+	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.tt); clearTimeout(this.st); }
 	componentDidUpdate(prev) {
 		if (prev.state !== this.props.state) this.setState(this.fromTweak(this.props.state));
-		// the spectrum's "Scan this range" opens the composer with that range filled in
-		if (this.props.prefill && this.props.prefill !== prev.prefill) this.setState(this.prefillState(this.props.prefill));
 		if (prev.openFirst !== this.props.openFirst) { const o = this.props.openFirst === false ? null : 'd1'; this.setState({ open: o, sel: o }); }
 	}
 
@@ -1163,7 +740,7 @@ class Component extends DCLogic {
 		const a = Object.assign({ type }, extra || {});
 		if (this.props.onScan) this.props.onScan(a);
 		const sw0 = this.sweep(), held = this.state.items.find(x => x.hz === sw0.holdHz);
-		if (type === 'start') this.setState({ lastStart: a, composing: false, saving: false, tab: 'scan', newOnly: false });
+		if (type === 'start') this.setState({ lastStart: a, tab: 'scan', newOnly: false });
 		if (type === 'save' && held) { const on = !held.saved; this.patch(held.id, { saved: on }); this.toast(on ? 'Saved ' + f3(held.hz / 1e6) + ' · the scan carries on' : 'Removed from saved frequencies'); }
 		if (type === 'ignore' && held) { this.patch(held.id, { ignored: true }); this.toast('Ignored ' + f3(held.hz / 1e6) + ' · never probed, recorded or scanned again', () => { this.patch(held.id, { ignored: false }); this.setState({ toast: null }); }); }
 		if (type === 'skip') this.toast('Skipped ' + f3(sw0.holdHz / 1e6) + ' for this scan · moving on');
@@ -1321,69 +898,8 @@ class Component extends DCLogic {
 	}
 
 
-	// ---------- Composer plan (mirrors core's preview) ----------
+	// a protocol shows from its stage on
 	vis(p) { return !!PROTO[p] && (!PROTO[p].s2 || this.stage() === 'S2'); }
-	// One range as core would plan it: edges, skips, stops, and the time per stop its decoding trials cost
-	info(r) {
-		const s = this.state, st = this.stage(), a = pf(r.fa), b = pf(r.fb);
-		let err = '';
-		if (!(isFinite(a) && isFinite(b))) err = 'Type both edges in MHz';
-		else if (b <= a) err = 'The low edge must be under the high edge';
-		else if (a < LIM[0] || b > LIM[1]) err = 'The receiver tunes 24 to 1766 MHz';
-		const chips = r.chips.filter(p => this.vis(p));
-		const on = r.on.filter(p => this.vis(p) && !PROTO[p].none && !coveredElsewhere(p, r));
-		const ex = err ? [] : r.excl.map(x => { const xa = pf(x.fa), xb = pf(x.fb), ok = isFinite(xa) && isFinite(xb) && xb > xa && xb > a && xa < b; return { x, ok, ca: ok ? Math.max(a, xa) : 0, cb: ok ? Math.min(b, xb) : 0 }; });
-		const eff = err ? 0 : Math.max(0, b - a - ex.filter(e => e.ok).reduce((t, e) => t + e.cb - e.ca, 0));
-		if (!err && eff <= 0) err = 'Everything in it is skipped';
-		const hops = err ? 0 : Math.max(1, Math.ceil(eff / HOP_MHZ - 1e-9));
-		const n = s.findOnly ? 0 : st === 'S2' ? Math.min(on.length, 2) : on.length;
-		const dwell = DWELLS[r.dwell || 'normal'] + DWELL_PER * n;
-		return { r, a, b, err, chips, on, ex, hops, dwell, T: hops * dwell };
-	}
-	shortOf(i) { const p = i.r.src && presetById(i.r.src, this.state.userPresets); return p && p.ranges.length === 1 ? (p.short || p.name) : i.r.short; }
-	plan() {
-		const s = this.state, users = s.userPresets, rs = s.ranges.map(r => this.info(r)).sort((x, y) => (x.a || 0) - (y.a || 0));
-		const looksIds = s.findOnly ? [] : PORDER.filter(p => rs.some(i => i.on.includes(p)));
-		const looks = s.findOnly ? 'any signal · no decoding' : looksIds.length ? listText(looksIds.map(p => PROTO[p].label)) : 'any signal';
-		if (!rs.length) return { valid: false, empty: true, rs, merged: [], looks: '', looksIds, line: 'Nothing to scan yet', sub: 'Pick a band above, or drag on the ruler' };
-		const bad = rs.find(i => i.err);
-		if (bad) return { valid: false, rs, merged: [], looks, looksIds, line: bad.r.name + ' · ' + bad.err, sub: 'Fix it in the range below' };
-		// overlapping ranges are swept once, trying the protocols of every range there
-		const uniq = [];
-		[].concat.apply([], rs.map(i => i.ex.filter(e => e.ok))).sort((x, y) => x.ca - y.ca || y.cb - x.cb).forEach(e => { const last = uniq[uniq.length - 1]; if (!last || e.cb > last.cb) uniq.push(e); });
-		const merged = [];
-		rs.forEach(i => { const m = merged[merged.length - 1]; if (m && i.a <= m.b) { m.b = Math.max(m.b, i.b); m.items.push(i); } else merged.push({ a: i.a, b: i.b, items: [i] }); });
-		merged.forEach(m => {
-			m.skip = uniq.filter(e => e.ca >= m.a && e.cb <= m.b).reduce((t, e) => t + e.cb - e.ca, 0);
-			m.hops = Math.max(1, Math.ceil(Math.max(0.01, m.b - m.a - m.skip) / HOP_MHZ - 1e-9));
-			m.dwell = Math.max.apply(null, m.items.map(i => i.dwell));
-		});
-		const hops = merged.reduce((t, m) => t + m.hops, 0), T = merged.reduce((t, m) => t + m.hops * m.dwell, 0), pct = catchPct(hops, T);
-		const srcs = Array.from(new Set(rs.filter(i => i.r.src).map(i => i.r.src))), nC = rs.filter(i => !i.r.src).length;
-		const who = [srcs.length === 1 ? presetById(srcs[0], users).name : srcs.length > 1 ? srcs.length + ' presets' : '', nC === 1 ? 'your range' : nC > 1 ? nC + ' of your ranges' : ''].filter(Boolean).join(' + ');
-		const where = merged.length <= 2 ? merged.map(m => mt(m.a) + '–' + mt(m.b)).join(' and ') + ' MHz' : merged.length + ' separate stretches';
-		const inside = rs.filter((i, x) => rs.some((j, y) => j !== i && j.a <= i.a && j.b >= i.b && (j.a < i.a || j.b > i.b || y < x))).map(i => this.shortOf(i));
-		const partial = merged.some(m => m.items.length > 1) && !inside.length;
-		const sub0 = [who, where, inside.length ? andText(inside) + ' inside' : partial ? 'the overlap is scanned once' : ''].filter(Boolean).join(' · '), sub = sub0.charAt(0).toUpperCase() + sub0.slice(1);
-		const line = hops === 1 ? 'One stop · it stays there and catches every call' : hops + ' stops · ' + (T < 1 ? 'a full pass in under a second' : 'a full pass every ' + secsText(T));
-		// the run's name: preset short names in band-plan order, then your ranges
-		const order = users.concat(PRESETS).map(p => p.id);
-		const names = srcs.slice().sort((x, y) => order.indexOf(x) - order.indexOf(y)).map(id => { const p = presetById(id, users); return p.short || p.name; }).concat(nC ? ['your range'] : []);
-		const name = names.length <= 2 ? names.join(' + ').replace(/^your/, 'Your') : names[0] + ' + ' + (names.length - 1) + ' more';
-		return { valid: true, rs, merged, uniq, looks, looksIds, hops, T, pct, line, sub, name, srcs, warn: pct < 80,
-			warnText: 'A 5 s call is caught only ' + pct + ' % of the time · fewer bands, or Find signals only, is faster',
-			consent: 'Takes the Pi receiver · pauses ' + PAUSES + ' until the scan ends · live audio follows the scan' };
-	}
-	// What on-scan start carries: the shell's view (merged stretches) and core's ScanJobSpec ranges
-	startPayload(plan) {
-		const s = this.state, hz = x => Math.round(x * 1e6);
-		const ranges = plan.merged.map(m => Object.assign({ startHz: hz(m.a), endHz: hz(m.b), name: m.items.map(i => this.shortOf(i)).join(' + '), hops: m.hops },
-			m.items.length > 1 ? { inner: m.items.filter(i => i.a > m.a || i.b < m.b).map(i => ({ startHz: hz(i.a), endHz: hz(i.b), name: this.shortOf(i) })) } : null));
-		const jobRanges = plan.rs.map(i => Object.assign({ startHz: hz(i.a), endHz: hz(i.b), name: i.r.name, label: this.shortOf(i), protocols: s.findOnly ? [] : i.on.slice(), rasters: [i.r.step != null ? i.r.step : i.r.stepDef], dwell: i.r.dwell || 'measured', sensitivity: i.r.sens || 'default' }, i.r.src ? { preset: i.r.src } : null));
-		const exclusions = plan.uniq.map(e => ({ startHz: hz(e.ca), endHz: hz(e.cb), reason: e.x.why || 'Skipped by you' }));
-		return { preset: plan.name, startHz: hz(plan.merged[0].a), endHz: hz(plan.merged[plan.merged.length - 1].b), hops: plan.hops, sweepS: Math.max(1, Math.round(plan.T)), ranges, jobRanges, exclusions, protocols: plan.looksIds, findOnly: s.findOnly,
-			hold: { policy: s.hold ? 'hold' : 'never', maxHoldMs: 60000, hangMs: 2000 }, record: s.rec, stopAfter: s.stopAfter };
-	}
 
 	// ---------- Hit log (this scan) ----------
 	hitList() {
@@ -1394,14 +910,13 @@ class Component extends DCLogic {
 	}
 	hitStats() { const hs = this.hitList().filter(x => !x.ignored); return { n: hs.length, fresh: hs.filter(x => x.h.fresh).length }; }
 	hitVals(sw0) {
-		const s = this.state, all = this.hitList(), stats = this.hitStats();
+		const s = this.state, all = this.hitList();
 		const list = s.newOnly ? all.filter(x => x.h.fresh) : all;
 		const live = sw0.state === 'sweeping' || sw0.state === 'holding';
 		return {
-			hitsHead: stats.n + ' found by this scan · ' + stats.fresh + ' new',
 			newOnly: s.newOnly, newOnlyBg: chipc(s.newOnly).bg, newOnlyFg: chipc(s.newOnly).fg, newOnlyTick: chipc(s.newOnly).tick,
 			toggleNewOnly: () => this.setState({ newOnly: !s.newOnly }),
-			hitsEmpty: list.length === 0, hitsEmptyText: s.newOnly ? 'Nothing new yet. Everything this scan heard was already known.' : 'Nothing heard yet. Hits land here as the scan finds them.',
+			hitsEmpty: list.length === 0, hitsEmptyText: s.newOnly ? 'Nothing new yet' : 'Nothing heard yet',
 			hits: list.map(x => {
 				const open = s.hitOpen === x.id, skipped = !!s.skipped[x.id], f = f6(x.hz);
 				const tone = x.conf === 'decoded' ? { bg: 'var(--wk-fill)', fg: 'var(--wk-accent)', c: 'var(--wk-accent)', w: 700 } : x.conf === 'heard' ? { bg: 'var(--wk-surface)', fg: 'var(--wk-text-3)', c: 'var(--wk-text-3)', w: 400 } : { bg: 'var(--wk-fill)', fg: 'var(--wk-text-2)', c: 'var(--wk-text-2)', w: 400 };
@@ -1428,6 +943,12 @@ class Component extends DCLogic {
 	}
 
 	// ---------- Now block ----------
+	// the frequency the sweep is on: the shell's when it drives the sweep, else the middle of this board's hop
+	hopFreq(sw0) {
+		const v = this.props.vfo;
+		const hz = typeof v === 'number' && v > 0 ? v : Math.round(((sw0.a + (sw0.hop - 0.5) * (sw0.b - sw0.a) / Math.max(1, sw0.hops)) * 1e6) / 12500) * 12500;
+		return (hz / 1e6).toFixed(5).replace(/0{1,2}$/, '');
+	}
 	now(sw0) {
 		const s = this.state;
 		const live = { bg: 'var(--wk-well-glass)', ring: 'rgba(var(--wk-line-rgb),.14)', tileBg: 'var(--wk-fill)', tileFg: 'var(--wk-accent)', headC: 'var(--wk-text)' };
@@ -1435,66 +956,50 @@ class Component extends DCLogic {
 		const quiet = { bg: 'var(--wk-well-glass)', ring: 'rgba(var(--wk-line-rgb),.08)', tileBg: 'var(--wk-fill)', tileFg: 'var(--wk-text-3)', headC: 'var(--wk-text)' };
 		const bad = { bg: 'rgba(var(--wk-danger-rgb),.06)', ring: 'rgba(var(--wk-danger-rgb),.2)', tileBg: 'rgba(var(--wk-danger-rgb),.12)', tileFg: 'var(--wk-danger)', headC: 'var(--wk-danger-soft)' };
 		const A = (label, icon, kind, fn, title, o) => Object.assign({ label, icon, kind, act: fn || (() => {}), title: title || '', aria: o && o.iconOnly ? title : label }, o || {});
-		const pause = A('Pause', I.pause, 'out', () => this.scan('pause'), 'Pause the scan. It keeps the receiver until you tune.');
-		const stop = A('Stop', I.stop, 'ghost', () => this.scan('stop'), 'End the scan. The receiver and decoders are yours again.');
-		const resume = A('Resume', I.play, 'amber', () => this.scan('resume'), 'Take the receiver again and carry on at the same stop');
-		const compose = A('Scan a band', I.scan, 'out', () => this.openCompose());
-		const again = A('Scan again', I.again, 'out', () => s.lastStart ? this.scan('start', s.lastStart) : this.openCompose());
-		const stopTxt = 'stop ' + sw0.hop + ' of ' + sw0.hops, st = this.hitStats(), found = st.n + ' found, ' + st.fresh + ' new';
-		const runs = (sw0.ranges || []).length > 1;
-		const held = s.items.find(x => x.hz === sw0.holdHz);
+		const compose = A('Scan a band', I.scan, 'out', () => this.openPlan());
+		const again = A('Scan again', I.again, 'out', () => s.lastStart ? this.scan('start', s.lastStart) : this.openPlan());
+		// where the sweep is: the frequency, never "stop N of M"
+		const at = this.hopFreq(sw0);
+		const cl = { compact: true, acts: [] };
 		switch (sw0.state) {
-			case 'starting': return Object.assign({}, live, { icon: I.scan, iconAnim: 'wkpulse 1.2s ease-in-out infinite', head: 'Starting · ' + sw0.name, sub: 'Taking the receiver and pausing ' + PAUSES, segs: 'idle', line: 'The first full pass takes about ' + secsText(sw0.sweepS), runs, acts: [stop] });
-			case 'sweeping': return Object.assign({}, live, { icon: I.scan, head: 'Scanning · ' + sw0.name, sub: 'Stop ' + sw0.hop + ' of ' + sw0.hops + ' · a full pass every ' + secsText(sw0.sweepS), segs: 'live', line: sw0.cov + ' % covered · ' + found, runs, acts: [pause, stop] });
-			case 'holding': return Object.assign({}, live, { icon: I.scan, live: true, head: 'Holding on ' + f3(sw0.holdHz / 1e6) + ' · ' + sw0.holdLabel, sub: 'Moves on 2 s after the call ends, at most 60 s', segs: 'hold', runs,
-				hitActs: [
-					{ label: 'Skip', icon: I.skip, fill: 'none', pressed: false, fg: 'var(--wk-text)', title: 'Move on and leave it out for the rest of this scan', act: () => this.scan('skip', { hz: sw0.holdHz }) },
-					{ label: 'Ignore', icon: I.eyeOff, fill: 'none', pressed: false, fg: 'var(--wk-text)', title: 'Always: never probed, recorded or scanned again', act: () => this.scan('ignore', { hz: sw0.holdHz }) },
-					{ label: held && held.saved ? 'Saved' : 'Save', icon: I.star, fill: held && held.saved ? 'currentColor' : 'none', pressed: !!(held && held.saved), fg: held && held.saved ? 'var(--wk-accent)' : 'var(--wk-text)', title: 'Add to saved frequencies  S', act: () => this.scan('save', { hz: sw0.holdHz }) }
-				],
-				acts: [Object.assign({}, pause, { label: '', iconOnly: true, aria: 'Pause the scan' }), Object.assign({}, stop, { label: '', iconOnly: true, aria: 'Stop the scan' })] });
-			case 'paused': return sw0.released
-				? Object.assign({}, amb, { icon: I.pause, head: 'Scan paused', sub: 'The receiver is yours and decoders are back. Resume asks first if more decoders would pause.', segs: 'amber', line: 'Paused at ' + stopTxt + ' · ' + sw0.cov + ' % covered', runs, acts: [resume, stop] })
-				: Object.assign({}, amb, { icon: I.pause, head: 'Scan paused · holding the receiver', sub: 'Decoders stay paused. Tune anywhere and the receiver is yours.', segs: 'amber', line: 'Paused at ' + stopTxt + ' · ' + sw0.cov + ' % covered', runs, acts: [resume, stop] });
-			case 'paused-you': return Object.assign({}, amb, sw0.waiting
+			// while a scan holds the receiver the Tuner's scan row is the status and the control: the drawer only says where
+			// it is (one line and the pass line) and opens the plan. Consent keeps its button: the Tuner row only says "Review".
+			case 'starting': return Object.assign({}, live, cl, { icon: I.scan, head: sw0.name, detail: 'starting', segs: 'idle' });
+			case 'sweeping': return Object.assign({}, live, cl, { icon: I.scan, head: sw0.name, detail: at, title: 'A full pass takes about ' + secsText(sw0.sweepS), segs: 'live' });
+			case 'holding': return Object.assign({}, live, cl, { icon: I.scan, live: true, head: f3(sw0.holdHz / 1e6), detail: sw0.holdLabel, title: 'Moves on 2 s after the call ends, at most 60 s', segs: 'hold' });
+			case 'paused': return Object.assign({}, amb, cl, sw0.released
+				? { icon: I.pause, head: 'Scan paused', detail: 'the receiver is yours', sub: 'Paused at ' + at, title: 'Resume asks first if more decoders would pause' }
+				: { icon: I.pause, head: 'Scan paused', detail: 'holding the receiver', sub: 'Paused at ' + at, title: 'Decoders stay paused. Tune anywhere and the receiver is yours.' }, { segs: 'amber' });
+			case 'paused-you': return Object.assign({}, amb, cl, sw0.waiting
 				? { icon: I.pause, head: 'Scan waits while you listen', sub: 'The countdown holds at ' + sw0.resumeIn + ' s while the squelch is open' }
-				: { icon: I.pause, head: 'Scan resumes in ' + sw0.resumeIn + ' s', sub: 'You tuned, so the receiver is yours until then' }, { liveRegion: 'off', segs: 'amber', line: 'Paused at ' + stopTxt + ' · ' + sw0.cov + ' % covered', runs,
-				acts: [A('Stay here', I.stay, 'amber', () => this.scan('stay'), 'Keep the scan paused. It will not resume on its own.'), A('Resume now', I.play, 'ghost', () => this.scan('resume')), stop] });
-			case 'consent': return Object.assign({}, amb, { icon: I.warn, head: 'Resume needs your OK', sub: 'APRS started on this receiver while the scan was paused. Resuming pauses it too.', segs: 'amber', line: 'Paused at ' + stopTxt + ' · ' + sw0.cov + ' % covered',
-				acts: [A('Resume and pause APRS', I.play, 'amber', () => this.scan('resume', { takeover: true })), stop] });
-			case 'paused-job': return Object.assign({}, amb, { icon: I.scan, head: 'Waiting for another scan', sub: '“Harbour channels” has a higher priority and holds the receiver. This scan carries on when it ends.', segs: 'amber', line: 'Waiting at ' + stopTxt + ' · ' + sw0.cov + ' % covered',
-				acts: [A('Resume', I.play, 'amber', null, 'Waits until the other scan lets go', { disabled: true }), stop] });
-			case 'paused-relay': return Object.assign({}, amb, { icon: I.plug, head: 'SDR++ has the receiver', sub: 'The scan carries on at ' + stopTxt + ' when SDR++ lets go', segs: 'amber', line: sw0.cov + ' % covered before it connected', acts: [stop] });
-			case 'source-down': return Object.assign({}, amb, { icon: I.plug, iconAnim: 'wkpulse 1.6s ease-in-out infinite', head: 'Pi receiver is offline', sub: 'Reconnecting · the scan carries on at ' + stopTxt + ' once it is back', segs: 'amber', line: 'Offline for 2 min · ' + sw0.cov + ' % covered', acts: [stop] });
-			case 'source-removed': return Object.assign({}, bad, { icon: I.plug, head: 'Scan ended · receiver removed', sub: 'The Pi receiver was removed in Settings. The ' + st.n + ' signals it found are kept.', line: sw0.cov + ' % covered before it ended', acts: [compose] });
-			case 'finished': return Object.assign({}, quiet, { tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished · ' + found, sub: sw0.name + ' · 3 full passes in 30 min · ' + sw0.cov + ' % covered', acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
-			case 'nothing-found': return Object.assign({}, quiet, { icon: I.scan, head: 'Scan finished · nothing new', sub: sw0.name + ' · ' + mr(sw0.a, sw0.b), line: 'A 5 s call was caught 94 % of the time', acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
+				: { icon: I.pause, head: 'Scan resumes in ' + sw0.resumeIn + ' s', sub: 'You tuned, so the receiver is yours until then' }, { liveRegion: 'off', segs: 'amber' });
+			case 'consent': return Object.assign({}, amb, cl, { icon: I.warn, head: 'Resume needs your OK', sub: 'APRS started while the scan was paused · resuming pauses it too', segs: 'amber',
+				acts: [A('Resume and pause APRS', I.play, 'amber', () => this.scan('resume', { takeover: true }))] });
+			case 'paused-job': return Object.assign({}, amb, cl, { icon: I.scan, head: 'Waiting for another scan', sub: '“Harbour channels” has the receiver · this scan carries on after it', segs: 'amber' });
+			case 'paused-relay': return Object.assign({}, amb, cl, { icon: I.plug, head: 'SDR++ has the receiver', sub: 'The scan carries on when SDR++ lets go', segs: 'amber' });
+			case 'source-down': return Object.assign({}, amb, cl, { icon: I.plug, iconAnim: 'wkpulse 1.6s ease-in-out infinite', head: 'Pi receiver is offline', sub: 'Reconnecting · the scan carries on once it is back', segs: 'amber' });
+			case 'source-removed': return Object.assign({}, bad, { icon: I.plug, head: 'Scan ended · receiver removed', sub: 'Removed in Settings · what it found is kept', acts: [compose] });
+			case 'finished': return Object.assign({}, quiet, { tileFg: 'var(--wk-accent)', icon: I.check, head: 'Scan finished', sub: sw0.name + ' · 3 full passes in 30 min', acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
+			case 'nothing-found': return Object.assign({}, quiet, { icon: I.scan, head: 'Scan finished · nothing new', sub: sw0.name + ' · ' + mr(sw0.a, sw0.b), acts: [again, Object.assign({}, compose, { kind: 'ghost' })] });
 			default:
 				if (s.hw === 'no-receiver') return Object.assign({}, quiet, { icon: I.plug, head: 'No receiver', sub: 'Connect a receiver to find the signals around you', acts: [A('Open Settings', I.gear, 'out', () => this.props.onSettings ? this.props.onSettings('receivers') : this.toast('Opens Settings › Receivers'))] });
 				return Object.assign({}, this.watchOn() ? live : quiet, {
 					icon: this.watchOn() ? I.eye : I.eyeOff, head: 'Watch here',
-					sub: this.watchOn() ? r1(SPAN.a) + '–' + r1(SPAN.b) + ' MHz · finds signals where you are tuned, never moves the receiver' : 'Off · nothing new is found until you watch or scan',
+					sub: this.watchOn() ? r1(SPAN.a) + '–' + r1(SPAN.b) + ' MHz' : 'Off',
 					sw: true, looks: this.watchOn(),
 					banner: s.hw === 'no-tuner' ? { tone: 'quiet', icon: I.plug, text: 'This receiver is tuned from SDR++, so it cannot sweep bands. Watch here still works.' } : null,
 					acts: s.hw === 'ok' && !s.firstRun ? [compose] : []
 				});
 		}
 	}
-	segments(sw0, mode) {
-		const n = Math.min(sw0.hops, 32), cur = Math.ceil(sw0.hop / sw0.hops * n), light = this.props.theme === 'light';
-		const out = [];
-		for (let i = 1; i <= n; i++) {
-			let c, glow = 'none';
-			if (mode === 'idle') c = 'rgba(var(--wk-accent-rgb),.12)';
-			else if (mode === 'amber') c = i === cur ? 'rgba(var(--wk-amber-rgb),.7)' : 'rgba(var(--wk-amber-rgb),.16)';
-			else if (i === cur) { c = 'var(--wk-accent)'; glow = light ? 'none' : '0 0 8px rgba(var(--wk-accent-rgb),.55)'; }
-			else c = i < cur ? 'rgba(var(--wk-accent-rgb),.3)' : 'rgba(var(--wk-accent-rgb),.12)';
-			out.push({ c, glow });
-		}
-		return out;
+	// one thin line for the pass: how far this pass has got, never a hop count
+	passLine(sw0, mode) {
+		const pct = mode === 'idle' || !sw0.hops ? 0 : Math.round(sw0.hop / sw0.hops * 100);
+		const amber = mode === 'amber';
+		return { passPct: pct, passTrack: amber ? 'rgba(var(--wk-amber-rgb),.16)' : 'rgba(var(--wk-accent-rgb),.14)', passFill: amber ? 'var(--wk-amber)' : 'var(--wk-accent)' };
 	}
 	footer(sw0) {
-		const s = this.state, el = durText(sw0.elapsed), st = this.hitStats();
+		const s = this.state, el = durText(sw0.elapsed);
 		const t = (() => { switch (sw0.state) {
 			case 'starting': return 'Starting · the receiver moves in a moment';
 			case 'sweeping': case 'holding': return 'Scanning for ' + el + ' · started 13:50';
@@ -1504,7 +1009,7 @@ class Component extends DCLogic {
 			case 'paused-job': return 'Waiting since 14:02 · scanned for ' + el;
 			case 'paused-relay': return 'Waiting for SDR++ since 14:04';
 			case 'source-down': return 'Offline since 14:06 · retrying every 8 s';
-			case 'source-removed': return 'Ended at 14:06 · ' + st.n + ' found are kept';
+			case 'source-removed': return 'Ended at 14:06';
 			case 'finished': return 'Finished at 14:20 · it stopped after 30 min as asked';
 			case 'nothing-found': return 'Nothing found in 12 min of scanning (91 % covered)';
 			default: return s.hw === 'no-receiver' ? 'No receiver connected' : s.firstRun ? 'Watching since 14:02 · nothing found yet' : this.watchOn() ? 'Watching since 11:02 · 4 found today in this span' : 'Not watching · discoveries so far are kept';
@@ -1512,197 +1017,10 @@ class Component extends DCLogic {
 		return (s.ro ? 'View only · ' : '') + t;
 	}
 
-	// ---------- Composer: presets ----------
-	presetVals() {
-		const s = this.state, picked = id => s.ranges.some(r => r.src === id);
-		const builtins = s.allPresets ? PRESETS : PRESETS.filter((p, i) => i < SHOWN || picked(p.id));
-		const more = PRESETS.length - SHOWN;
-		return {
-			presets: s.userPresets.concat(builtins).map(p => {
-				const on = picked(p.id), range = presetRange(p);
-				return {
-					name: p.name, user: !!p.user, on, tick: on ? 1 : 0, bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', nameC: on ? 'var(--wk-accent)' : 'var(--wk-text)',
-					range, decodes: decodesText(p),
-					aria: p.name + (p.user ? ', your preset' : '') + ', ' + range + ', ' + decodesText(p),
-					title: on ? 'Take ' + p.name + ' out of the scan' : 'Add ' + p.name + ' to the scan',
-					pick: () => this.togglePreset(p)
-				};
-			}),
-			presetHint: s.ranges.length ? 'Pick more to scan them together' : 'Pick one or more · EU band plans',
-			hasMorePresets: more > 0, allPresets: s.allPresets,
-			morePresetsText: s.allPresets ? 'Fewer bands' : more + ' more bands', morePresetsChev: s.allPresets ? 'M6 15l6 -6l6 6' : 'M6 9l6 6l6 -6',
-			toggleAllPresets: () => this.setState({ allPresets: !s.allPresets })
-		};
-	}
-
-	// ---------- Composer: ruler ----------
-	rulerVals(plan) {
-		const s = this.state, L = s.vL, R = s.vR, tw = s.tw || 360, k = tw / (R - L), X = f => (f - L) * k;
-		const ok = plan.rs.filter(i => !i.err);
-		// elementary stretches: where two ranges overlap the fill doubles and both names show
-		const pts = Array.from(new Set([].concat.apply([], ok.map(i => [i.a, i.b])))).sort((a, b) => a - b), runs = [];
-		for (let j = 0; j < pts.length - 1; j++) {
-			const p = pts[j], q = pts[j + 1], cov = ok.filter(i => i.a <= p && i.b >= q);
-			if (!cov.length) continue;
-			const key = cov.map(i => i.r.id).join(','), last = runs[runs.length - 1];
-			if (last && last.key === key && Math.abs(last.b - p) < 1e-9) last.b = q; else runs.push({ a: p, b: q, key, cov });
-		}
-		const vis = runs.filter(r => r.b > L && r.a < R);
-		const px = r => { const x0 = Math.max(0, X(r.a)), x1 = Math.min(tw, X(r.b)); return { x0, w: Math.max(3, x1 - x0) }; };
-		const runBars = vis.map(r => { const p = px(r), fl = r.cov.some(i => i.r.id === s.flash); return { left: p.x0, width: p.w, title: r.cov.map(i => i.r.name).join(' + ') + ' · ' + mr(r.a, r.b), bg: fl ? 'rgba(var(--wk-accent-rgb),.6)' : r.cov.length > 1 ? 'rgba(var(--wk-accent-rgb),.46)' : 'rgba(var(--wk-accent-rgb),.24)' }; });
-		// a shared stretch shows both names even when it is narrow (centred over it); single names give way around it
-		const est = t => t.length * 6.7 + 10, placed = [];
-		vis.filter(r => r.cov.length > 1).forEach(r => { const p = px(r), text = r.cov.map(i => this.shortOf(i)).join(' + '), w = Math.max(p.w, est(text)); placed.push({ left: clamp(p.x0 + p.w / 2 - w / 2, 0, Math.max(0, tw - w)), width: w, text, fg: 'var(--wk-accent)', align: 'center' }); });
-		vis.filter(r => r.cov.length === 1).forEach(r => {
-			const p = px(r);
-			let a = p.x0, b = p.x0 + p.w;
-			placed.filter(o => o.fg === 'var(--wk-accent)').forEach(o => { if (o.left < b && o.left + o.width > a) { if (o.left > a) b = Math.min(b, o.left - 4); else a = Math.max(a, o.left + o.width + 4); } });
-			if (b - a >= 30) placed.push({ left: a, width: b - a, text: this.shortOf(r.cov[0]), fg: 'var(--wk-text-2)', align: 'left' });
-		});
-		const runLabels = placed;
-		const skipBars = [].concat.apply([], ok.map(i => i.ex.filter(e => e.ok && e.cb > L && e.ca < R).map(e => { const x0 = Math.max(0, X(e.ca)); return { left: x0, width: Math.max(3, Math.min(tw, X(e.cb)) - x0), title: 'Skipped · ' + f3(e.ca) + '–' + f3(e.cb) + ' · ' + e.x.why }; })));
-		const elseMarks = ELSEWHERE.filter(m => m.b > L && m.a < R).map(m => { const x0 = Math.max(0, X(m.a)); return { left: x0, width: Math.max(3, Math.min(tw, X(m.b)) - x0), aria: m.what + ' · already decoded by ' + m.by }; });
-		const step = [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 200, 500].find(st => st * k >= 60) || 500;
-		const dec = step < 0.1 ? 3 : step === 0.25 ? 2 : step < 1 ? 1 : 0;
-		const rTicks = [];
-		for (let n = Math.ceil(L / step); n * step <= R; n++) {
-			const f = n * step, x = X(f);
-			if (x < 3 || x > tw - 3) continue;
-			rTicks.push({ left: x, text: f.toFixed(dec), shift: x < 22 ? '0' : x > tw - 30 ? '-100%' : '-50%' });
-		}
-		if (rTicks.length) { const t = rTicks[rTicks.length - 1]; if (t.left < tw - 64) rTicks.push({ left: tw - 2, text: 'MHz', shift: '-100%' }); }
-		const g = s.drag, gA = g ? L + Math.min(g.x0, g.x1) / k : 0, gB = g ? L + Math.max(g.x0, g.x1) / k : 0;
-		const fmt = f => +f.toFixed(R - L < 5 ? 3 : 1), ovS = OV[1] - OV[0], ovP = f => clamp((f - OV[0]) / ovS * 100, 0, 100);
-		const skipTool = s.tool === 'skip';
-		return {
-			runBars, runLabels, skipBars, elseMarks, rTicks,
-			rulerEmpty: vis.length === 0,
-			rulerEmptyText: skipTool ? 'Skips go inside a range' : ok.length ? 'Your ranges are outside this view · Fit shows them' : 'Drag here to draw your own range',
-			rulerHint: skipTool ? 'Drag across a range to skip that part. Alt-drag adds a range instead.' : 'Drag across the ruler to add your own range. Alt-drag skips a part, Ctrl + scroll zooms, click a range to find its row.',
-			tools: [['add', 'Add', 'Dragging adds a range'], ['skip', 'Skip', 'Dragging skips a part of a range']].map(t => Object.assign(segc(s.tool === t[0]), { label: t[1], title: t[2], pick: () => this.setState({ tool: t[0] }) })),
-			rulerAria: 'Band ruler, ' + fmt(L) + ' to ' + fmt(R) + ' MHz. Arrow keys move along the band, plus and minus zoom.',
-			rulerKey: e => {
-				if (e.target.tagName === 'INPUT') return;
-				const sp = s.vR - s.vL;
-				if (e.key === 'ArrowLeft') { e.preventDefault(); this.panBy(-sp * 0.1); }
-				else if (e.key === 'ArrowRight') { e.preventDefault(); this.panBy(sp * 0.1); }
-				else if (e.key === '+' || e.key === '=') { e.preventDefault(); this.zoomAt(0.5); }
-				else if (e.key === '-' || e.key === '_') { e.preventDefault(); this.zoomAt(2); }
-			},
-			rDown: this.rDown, rMove: this.rMove, rUp: this.rUp, rCancel: this.rCancel, rulerRef: this.rulerRef, trackRef: this.trackRef,
-			ovRef: this.ovRef, ovDown: this.ovDown, ovMove: this.ovMove, ovUp: this.ovUp,
-			rCursor: g ? (g.alt ? 'cell' : 'col-resize') : skipTool ? 'cell' : 'crosshair', axisCursor: this.rd && this.rd.mode === 'pan' && this.rd.moved ? 'grabbing' : 'grab',
-			zoomIn: () => this.zoomAt(0.5), zoomOut: () => this.zoomAt(2),
-			zoomFit: () => { const v = this.fitRanges(s.ranges.filter(r => isFinite(pf(r.fa)) && isFinite(pf(r.fb)))); if (v.vL != null) this.setState(v); },
-			noFit: !ok.length, fitOp: ok.length ? 1 : 0.45,
-			hasDrag: !!g && Math.abs(g.x1 - g.x0) > 1, dragL: g ? Math.min(g.x0, g.x1) : 0, dragW: g ? Math.abs(g.x1 - g.x0) : 0,
-			dragText: g ? (g.alt ? 'Skip ' : 'Add ') + f3(snap(gA)) + '–' + f3(snap(gB)) : '',
-			dragEdge: g && g.alt ? 'var(--wk-text-2)' : 'var(--wk-accent)',
-			dragBg: g && g.alt ? 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.35) 0 1.5px, transparent 1.5px 4px)' : 'rgba(var(--wk-accent-rgb),.1)',
-			ovMarks: ok.filter(i => i.b > OV[0] && i.a < OV[1]).map(i => ({ left: ovP(i.a), width: Math.max(0.3, ovP(i.b) - ovP(i.a)) })),
-			ovL: ovP(L), ovW: Math.max(0.8, ovP(R) - ovP(L)), ovNow: Math.round((L + R) / 2), ovText: fmt(L) + ' to ' + fmt(R) + ' MHz'
-		};
-	}
-
-	// ---------- Composer: range rows ----------
-	rangeVals(plan) {
-		const s = this.state, st = this.stage(), n = s.ranges.length, users = s.userPresets;
-		const byId = {};
-		plan.rs.forEach(i => { byId[i.r.id] = i; });
-		const infos = s.ranges.map(r => byId[r.id] || this.info(r)).sort((x, y) => (x.a || 0) - (y.a || 0));
-		const amber = 'rgba(var(--wk-amber-rgb),.6)';
-		const you = 'var(--wk-accent)', quiet = 'var(--wk-text-4)';
-		return {
-			noRanges: n === 0, skipOp: n ? 1 : 0.45,
-			rangesHead: n ? (n === 1 ? '1 range' : n + ' ranges') : 'Ranges',
-			rangesHint: n > 1 ? 'Overlaps are scanned once, for both' : '',
-			addSkipAny: () => { const r = s.ranges[s.ranges.length - 1]; if (!r) return; const a = pf(r.fa), b = pf(r.fb); if (!(b > a)) return; const c = (a + b) / 2, h = Math.max(0.025, snap((b - a) * 0.05)); this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Type the part to skip' }]) }); },
-			ranges: infos.map(i => {
-				const r = i.r, open = s.addFor === r.id;
-				const lab = p => (r.labels && r.labels[p]) || PROTO[p].label;
-				const pre = r.src && presetById(r.src, users);
-				const origin = pre ? (pre.user ? 'From your preset ' + pre.name : 'From ' + pre.name) : r.origin === 'spectrum' ? 'From the spectrum' : 'Drawn by you';
-				const other = i.err ? null : infos.find(j => j !== i && !j.err && j.a < i.b && j.b > i.a);
-				const share = !other ? '' : other.a <= i.a && other.b >= i.b ? 'inside ' + other.r.name + ', scanned once for both' : i.a <= other.a && i.b >= other.b ? other.r.name + ' inside it' : 'overlaps ' + other.r.name + ', scanned once';
-				const meta = [origin, i.err ? '' : i.hops === 1 ? 'one stop' : i.hops + ' stops', share].filter(Boolean).join(' · ');
-				const chips = i.chips.filter(p => !coveredElsewhere(p, r)).map(p => {
-					const on = r.on.includes(p), c = chipc(on);
-					return { isNote: false, isToggle: true, label: lab(p), on, disabled: s.findOnly, tick: c.tick, op: s.findOnly ? 0.45 : 1, bg: c.bg, fg: c.fg, title: PROTO[p].title || '', pick: () => this.patchRange(r.id, { on: on ? r.on.filter(x => x !== p) : r.on.concat([p]) }) };
-				});
-				const addList = PORDER.filter(p => !r.chips.includes(p) && (!PROTO[p].s2 || st === 'S2')).map(p => ({ label: PROTO[p].label, disabled: false, fg: 'var(--wk-accent)', title: PROTO[p].title || '', pick: () => { this.patchRange(r.id, { chips: r.chips.concat([p]), on: r.on.concat([p]) }); this.setState({ addFor: null }); } }));
-				// Tuning: channel step, time per stop and sensitivity, each with where it comes from
-				const step = r.step != null ? r.step : r.stepDef, sens = r.sens || s.sensDefault, dwellS = Math.round(i.dwell * 10) / 10 || 0.1;
-				const stepSrc = r.step != null ? 'you' : r.stepFrom ? 'band plan' : 'auto';
-				const changed = r.step != null || !!r.dwell || !!r.sens, autos = r.excl.filter(x => x.auto);
-				return {
-					domId: 'rng-' + r.id, name: r.name, aria: r.name + ', ' + (i.err ? i.err : f3(i.a) + ' to ' + f3(i.b) + ' MHz'),
-					bg: s.flash === r.id ? 'var(--wk-sel)' : 'var(--wk-well-glass)',
-					swatch: i.err ? 'var(--wk-amber)' : 'var(--wk-accent)', meta,
-					fa: r.fa, fb: r.fb, aEdge: i.err ? amber : '', bEdge: i.err ? amber : '',
-					onA: e => this.patchRange(r.id, { fa: e.target.value }), onB: e => this.patchRange(r.id, { fb: e.target.value }),
-					hasErr: !!i.err, err: i.err, chips, addOpen: open, addList,
-					toggleAdd: () => this.setState({ addFor: open ? null : r.id }),
-					remove: () => this.removeRange(r),
-					hasAuto: autos.length > 0,
-					autoText: 'Leaves out ' + andText(autos.map(x => x.why.split(' · ')[0])) + ' · their own decoders cover them',
-					autoTitle: autos.map(x => x.fa + '–' + x.fb + ' MHz · ' + x.why).join('\n'),
-					autoAria: 'Scan the ' + andText(autos.map(x => x.why.split(' · ')[0])) + ' channels too',
-					includeAuto: () => { this.patchRange(r.id, { excl: r.excl.filter(x => !x.auto) }); this.toast(andText(autos.map(x => x.why.split(' · ')[0])) + ' channels are scanned too · their decoders pause anyway'); },
-					addSkip: () => { const a = pf(r.fa), b = pf(r.fb); if (!(b > a)) return; const c = (a + b) / 2, h = Math.max(0.025, snap((b - a) * 0.05)); this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Type the part to skip' }]) }); },
-					excl: r.excl.filter(x => !x.auto).map(x => {
-						const e = i.ex.find(q => q.x === x);
-						return { fa: x.fa, fb: x.fb, why: x.why || '', edge: e && !e.ok ? amber : '', onA: ev => this.patchExcl(r.id, x.id, { fa: ev.target.value }), onB: ev => this.patchExcl(r.id, x.id, { fb: ev.target.value }), remove: () => this.patchRange(r.id, { excl: r.excl.filter(y => y !== x) }) };
-					}),
-					tuneOpen: r.tuneOpen, tuneRot: r.tuneOpen ? 90 : 0, toggleTune: () => this.setState({ ranges: s.ranges.map(y => y.id === r.id ? Object.assign({}, y, { tuneOpen: !y.tuneOpen }) : y) }),
-					tuneSum: (step ? (step / 1000) + ' kHz' : 'no grid') + ' · ' + dwellS + ' s a stop · ' + sens,
-					tuneSrc: changed ? 'you' : stepSrc === 'band plan' ? 'band plan' : 'auto', tuneSrcC: changed ? you : quiet,
-					tuneRows: [
-						{ id: 'tst-' + r.id, label: 'Channel steps', note: step === 0 ? 'no grid, for wideband devices' : 'in kHz', src: stepSrc === 'band plan' ? 'band plan' : stepSrc, srcC: stepSrc === 'you' ? you : quiet,
-							opts: STEP_OPTS.map(o => Object.assign(segc(step === o[0]), { label: o[1], pick: () => this.patchRange(r.id, { step: o[0] === r.stepDef ? null : o[0] }) })) },
-						{ id: 'tdw-' + r.id, label: 'Time per stop', note: dwellS + ' s on each stop', src: r.dwell ? 'you' : 'measured', srcC: r.dwell ? you : quiet,
-							opts: DWELL_OPTS.map(o => Object.assign(segc((r.dwell || 'normal') === o[0]), { label: o[1], pick: () => this.patchRange(r.id, { dwell: o[0] === 'normal' ? null : o[0] }) })) },
-						{ id: 'tse-' + r.id, label: 'Sensitivity', note: 'higher finds weaker signals, and more false ones', src: r.sens ? 'you' : 'Settings', srcC: r.sens ? you : quiet,
-							opts: SENS.map(o => Object.assign(segc(sens === o[0]), { label: o[1], pick: () => this.patchRange(r.id, { sens: o[0] === s.sensDefault ? null : o[0] }) })) }
-					]
-				};
-			})
-		};
-	}
-
-	// ---------- Composer: save as preset ----------
-	saveVals(plan) {
-		const s = this.state, users = s.userPresets, srcs = plan.srcs || [];
-		const one = srcs.length === 1 && plan.rs.every(i => i.r.src === srcs[0]) ? presetById(srcs[0], users) : null;
-		const builtin = !!one && !one.user && s.dirty, mine = !!one && one.user && s.dirty;
-		const nSkip = (plan.uniq || []).filter(e => !e.x.auto).length, nR = plan.rs.length;
-		const what = [nR + (nR === 1 ? ' range' : ' ranges'), nSkip ? nSkip + (nSkip === 1 ? ' skip' : ' skips') : '', s.findOnly ? 'no decoding' : plan.looksIds.length + ' protocols', 'tuning and options'].filter(Boolean).join(', ');
-		const save = asNew => {
-			const name = s.saveName.trim();
-			if (!name) return;
-			const id = asNew || !mine ? 'u' + Date.now() : one.id;
-			const p = { id, user: true, name, short: name.length > 18 ? name.split(' ')[0] : name, ranges: plan.rs.map(i => [i.a, i.b, i.r.name]), protos: plan.looksIds.length ? plan.looksIds : ['fm'], step: plan.rs[0].r.step != null ? plan.rs[0].r.step : plan.rs[0].r.stepDef, opts: { hold: s.hold } };
-			const list = asNew || !mine ? [p].concat(users) : users.map(u => u.id === id ? p : u);
-			this.setState({ userPresets: list, saving: false, dirty: false, ranges: s.ranges.map(r => Object.assign({}, r, { src: id, srcName: name })) });
-			this.toast((asNew || !mine ? 'Saved “' : 'Updated “') + name + '” · first in Bands, on every client');
-		};
-		return {
-			saving: s.saving, saveName: s.saveName, saveRef: this.saveRef,
-			onSaveName: e => this.setState({ saveName: e.target.value }),
-			saveKey: e => { e.stopPropagation(); if (e.key === 'Enter') save(!mine); if (e.key === 'Escape') this.setState({ saving: false }); },
-			saveWhat: 'Keeps ' + what + '. Presets live in WaveKit and show on every client.' + (builtin ? ' Built-in presets stay as they are, so this makes a new one.' : ''),
-			canUpdate: mine, updateText: mine ? 'Update “' + one.name + '”' : '', updatePreset: () => save(false),
-			saveText: builtin || mine ? 'Save as new' : 'Save preset', savePreset: () => save(true),
-			saveDisabled: !s.saveName.trim(), saveOp: s.saveName.trim() ? 1 : 0.45,
-			cancelSave: () => this.setState({ saving: false }),
-			saveBtnDisabled: !plan.valid, saveBtnOp: plan.valid ? 1 : 0.45,
-			openSave: () => { if (!plan.valid) return; this.setState({ saving: !s.saving, saveName: s.saving ? s.saveName : one && one.user ? one.name : plan.name + (one ? ' (mine)' : '') }); }
-		};
-	}
-
 	renderVals() {
 		const s = this.state, sw0 = this.sweep(), nw = this.now(sw0);
 		const gs = this.groups(), flat = [].concat.apply([], gs.map(g => g.xs));
-		const sugg = this.suggestions(), plan = this.plan();
+		const sugg = this.suggestions();
 		const hasQuery = !!(s.q.trim() || s.tokens.length);
 		const count = s.items.filter(x => !x.ignored).length;
 		const actStyle = a => {
@@ -1719,39 +1037,25 @@ class Component extends DCLogic {
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
-			headTitle: s.composing ? 'Scan a band' : 'Scanner', headCount: s.composing ? '' : String(count),
+			// the drawer's one count: this scan's finds while a scan is on, else every discovery
+			headTitle: 'Scanner', headCount: hasRun ? hits.n + ' found · ' + hits.fresh + ' new' : String(count),
 			close: () => this.props.onClose && this.props.onClose(),
-			composing: s.composing, notComposing: !s.composing, openCompose: () => this.openCompose(),
+			openPlan: () => this.openPlan(),
 
 			// Now block
 			nowBg: nw.bg, nowRing: nw.ring, nowTileBg: nw.tileBg, nowTileFg: nw.tileFg, nowIcon: nw.icon, nowIconAnim: nw.iconAnim || 'none',
-			nowLive: !!nw.live, nowHead: nw.head, nowHeadC: nw.headC, nowSub: nw.sub, nowLiveRegion: nw.liveRegion || 'polite',
+			nowCompact: !!nw.compact, nowFull: !nw.compact, nowNotLive: !nw.live, nowHasDetail: !!nw.detail, nowDetail: nw.detail || '',
+			canPlan: !!nw.compact && !ro, nowHasActs: !ro && (nw.acts || []).length > 0,
+			nowLive: !!nw.live, nowHead: nw.head, nowHeadC: nw.headC, nowHasSub: !!nw.sub, nowSub: nw.sub || '', nowTitle: nw.title || '', nowLiveRegion: nw.liveRegion || 'polite',
 			nowHasSwitch: !!nw.sw && !ro, watchOn: this.watchOn(), watchTrack: wt.track, watchKnob: wt.knob,
 			toggleWatch: () => { const on = !this.watchOn(); this.setState({ watchOn: on }); if (this.props.onWatch) this.props.onWatch(on); this.toast(on ? 'Watching where you are tuned' : 'Stopped watching · discoveries so far are kept'); },
-			nowHasSegs: isSweep, segs: isSweep ? this.segments(sw0, nw.segs) : [],
-			segAria: 'Stop ' + sw0.hop + ' of ' + sw0.hops,
+			nowHasSegs: isSweep, ...this.passLine(sw0, nw.segs),
 			nowHasLine: !!nw.line, nowLine: nw.line || '',
 			nowHasLooks: !!nw.looks && !ro,
 			watchLooks: (() => { const ids = PORDER.filter(p => s.watchProtos.includes(p) && this.vis(p)); return ids.length ? listText(ids.map(p => PROTO[p].label)) : 'any signal'; })(),
 			watchEditOpen: s.watchEdit, watchEditText: s.watchEdit ? 'Done' : 'Change',
 			toggleWatchEdit: () => this.setState({ watchEdit: !s.watchEdit }),
 			watchChips: WATCH_PROTOS.filter(p => this.vis(p)).map(p => { const on = s.watchProtos.includes(p), c = chipc(on); return { label: PROTO[p].label, on, tick: c.tick, bg: c.bg, fg: c.fg, pick: () => this.setState({ watchProtos: on ? s.watchProtos.filter(y => y !== p) : s.watchProtos.concat([p]) }) }; }),
-			nowHasRuns: !!nw.runs,
-			runRanges: (sw0.ranges || []).map(g => {
-				const on = !s.runOff[g.id], c = chipc(on);
-				return {
-					name: g.name, range: mt(g.a) + '–' + mt(g.b), on, tick: c.tick, bg: c.bg, fg: on ? 'var(--wk-text)' : 'var(--wk-text-3)', disabled: ro,
-					title: on ? 'Turn ' + g.name + ' off for the rest of this scan' : 'Turn ' + g.name + ' back on',
-					pick: () => {
-						const others = sw0.ranges.filter(x => x.id !== g.id && !s.runOff[x.id]);
-						if (on && !others.length) return this.toast('A scan needs one range on · Stop ends it');
-						const outer = others.find(x => x.a <= g.a && x.b >= g.b);
-						this.setState({ runOff: Object.assign({}, s.runOff, { [g.id]: on }) });
-						if (this.props.onScan) this.props.onScan({ type: 'range', name: g.name, on: !on });
-						this.toast(on ? (outer ? g.name + ' off · its stretch is still scanned for ' + outer.name : g.name + ' off from the next pass') : g.name + ' back on from the next pass');
-					}
-				};
-			}),
 			nowHasBanner: !!banner, bannerText: banner ? banner.text : '', bannerIcon: banner ? banner.icon : [],
 			bannerBg: banner && banner.tone === 'amber' ? 'var(--wk-amber-fill)' : 'rgba(var(--wk-ink-rgb),.05)', bannerFg: banner && banner.tone === 'amber' ? 'var(--wk-amber-soft)' : 'var(--wk-text-2)',
 			bannerHasAct: !!(banner && banner.act), bannerActText: banner && banner.act ? banner.act : '', bannerAct: () => banner && banner.fn && banner.fn(),
@@ -1760,7 +1064,7 @@ class Component extends DCLogic {
 
 			// Tabs and hit log
 			hasTabs: hasRun,
-			tabs: [['scan', 'This scan', String(hits.n)], ['all', 'All discoveries', String(count)]].map(t => Object.assign(segc(tab === t[0]), { label: t[1], count: t[2], pick: () => this.setState({ tab: t[0] }) })),
+			tabs: [['scan', 'This scan'], ['all', 'All discoveries']].map(t => Object.assign(segc(tab === t[0]), { label: t[1], pick: () => this.setState({ tab: t[0] }) })),
 			showHits: tab === 'scan', showAll: tab === 'all',
 			firstRun: s.firstRun, notFirstRun: !s.firstRun,
 			...this.hitVals(sw0),
@@ -1801,30 +1105,6 @@ class Component extends DCLogic {
 				else if (k === 's' && cur && !ro) this.patch(cur.id, { saved: !cur.saved });
 				else if (k === 'l' && cur) this.tuneTo(cur.hz);
 			},
-
-			// Composer
-			compNote: hw !== 'ok', compNoteText: hw === 'no-tuner' ? 'This receiver is tuned from SDR++, so WaveKit cannot sweep it. Watch here still finds signals where it is tuned.' : 'No receiver is connected. Add one in Settings › Receivers, then come back.',
-			...this.presetVals(),
-			...this.rulerVals(plan),
-			...this.rangeVals(plan),
-			...this.saveVals(plan),
-			findOnly: s.findOnly, chipOp: s.findOnly ? 0.45 : 1,
-			opts: [
-				['sc-o-hold', 'Stop on activity', 'Stays on a call until 2 s after it ends, up to 60 s', 'hold'],
-				['sc-o-find', 'Find signals, don’t decode (fastest)', 'Lists what transmits without trying any decoder', 'findOnly'],
-				['sc-o-rec', 'Record calls', 'Decoded calls go to Activity like any other', 'rec']
-			].map(o => { const v = sw(!!s[o[3]]); return { id: o[0], label: o[1], sub: o[2], on: v.on, track: v.track, knob: v.knob, toggle: () => this.setState({ [o[3]]: !s[o[3]], addFor: null }) }; }),
-			stopOpts: STOPS.map(o => Object.assign(segc(s.stopAfter === o[0]), { label: o[1], pick: () => this.setState({ stopAfter: o[0] }) })),
-			fieldKey: e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); },
-			pvLine: plan.line, pvLineC: plan.valid ? 'var(--wk-text)' : plan.empty ? 'var(--wk-text-2)' : 'var(--wk-amber)', pvHasSub: !!plan.sub, pvSub: plan.sub,
-			pvHasLooks: !!plan.looks && plan.valid, pvLooks: plan.looks,
-			pvWarn: !!plan.warn, pvWarnText: plan.warnText || '',
-			pvConsent: plan.valid && hw === 'ok', pvConsentText: plan.consent || '',
-			cancelCompose: () => this.setState({ composing: false, addFor: null, saving: false }),
-			startDisabled: !plan.valid || hw !== 'ok',
-			startText: hw === 'no-tuner' ? 'Cannot sweep this receiver' : hw === 'no-receiver' ? 'No receiver' : plan.empty ? 'Pick a band or drag on the ruler' : plan.valid ? 'Start scan' : 'Fix the range to start',
-			startBg: plan.valid && hw === 'ok' ? 'var(--wk-accent)' : 'var(--wk-chip)', startFg: plan.valid && hw === 'ok' ? 'var(--wk-on-accent)' : 'var(--wk-text-3)',
-			start: () => { if (plan.valid && hw === 'ok') this.scan('start', this.startPayload(plan)); },
 
 			// Toast and footer
 			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(),

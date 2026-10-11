@@ -46,16 +46,18 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 .wk-rs:hover .wk-rs-bar,.wk-rs:focus-visible .wk-rs-bar,.wk-rs[data-on="true"] .wk-rs-bar{opacity:1;background:var(--wk-accent);height:56px}
 .wk-rs:focus-visible{outline-offset:-2px}
 .wk-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+@keyframes wk-sheet{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:none}}
+.wk-sheet{animation:wk-sheet .2s cubic-bezier(.2,.8,.2,1) both}
 @keyframes wk-tgt{from{opacity:0;transform:scale(.6)}to{opacity:1;transform:none}}
 .wk-tgt{animation:wk-tgt .16s ease-out both}
 @media (max-width:1100px){.wk-float{display:none}}
 @media (max-width:760px){.wk-dock{display:none}.wk-src{top:84px !important}}
-@media (prefers-reduced-motion:reduce){.wk-glide,.wk-shift,.wk-dock,.wk-drawer,.wk-tgt,.wk-tip{transition:none !important;animation:none !important}}
+@media (prefers-reduced-motion:reduce){.wk-glide,.wk-shift,.wk-dock,.wk-drawer,.wk-tgt,.wk-tip,.wk-sheet{transition:none !important;animation:none !important}}
 </style>
 </helmet>
 <div ref="{{refs.root}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: relative; height: 100vh; min-height: 760px; background: var(--wk-plot-bg); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; overflow: hidden">
 	<div style="position: absolute; inset: 0">
-		<dc-import name="Spectrum" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-view="{{setView}}" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
+		<dc-import name="Spectrum" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" vfo="{{freq}}" on-tune="{{tune}}" show-markers="{{true}}" spec-height="{{specH}}" top-inset="{{inset}}" bandwidth="{{bw}}" squelch="{{sqLine}}" palette="{{waterfall}}" step="{{step}}" on-bandwidth="{{setBw}}" sample-rate="{{rateHz}}" saved="{{savedMarks}}" discoveries="{{discs}}" discovery-tags="all" trust="ok" on-scan-range="{{scanRange}}" hint-size="100%,100%"></dc-import>
 
 		<sc-if value="{{showMap}}" hint-placeholder-val="{{false}}">
 			<div style="position: absolute; inset: 0; z-index: 1">
@@ -63,16 +65,8 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 			</div>
 		</sc-if>
 
-		<sc-if value="{{showBand}}" hint-placeholder-val="{{false}}">
-			<div class="wk-band wk-shift" style="position: absolute; top: {{bandTop}}px; left: {{bandLeft}}px; right: {{bandRight}}px; z-index: 3; display: flex; justify-content: center; pointer-events: none; transition: {{bandTr}}">
-				<div style="width: 100%; max-width: 760px; pointer-events: auto">
-					<dc-import name="BandStrip" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" sweep="{{hold}}" discoveries="{{discs}}" view="{{specView}}" on-tune="{{tune}}" hint-size="100%,56px"></dc-import>
-				</div>
-			</div>
-		</sc-if>
-
 		<div ref="{{refs.tuner}}" style="position: absolute; top: 16px; left: 16px; z-index: 3">
-			<dc-import name="Tuner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hold="{{hold}}" on-hold="{{scanAction}}" hint-size="440px,56px"></dc-import>
+			<dc-import name="Tuner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{tunerVals}}" on-set="{{set}}" expanded="{{tunerOpen}}" on-toggle="{{toggleTuner}}" hold="{{hold}}" on-hold="{{scanAction}}" on-plan="{{planScan}}" hint-size="440px,56px"></dc-import>
 		</div>
 
 		<div ref="{{refs.rx}}" class="wk-shift" style="position: absolute; top: 16px; right: {{rxRight}}px; z-index: 3; transition: {{rxTr}}">
@@ -161,13 +155,19 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				<dc-import name="Settings" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" values="{{settingsVals}}" on-set="{{set}}" on-close="{{closeActivity}}" on-action="{{settingsAction}}" target="{{settingsAt}}" hint-size="100%,100%"></dc-import>
 			</sc-if>
 			<sc-if value="{{showScanner}}" hint-placeholder-val="{{false}}">
-				<dc-import name="Scanner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" sweep="{{scannerSweep}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-identify="{{identify}}" on-close="{{closeActivity}}" prefill="{{scanPrefill}}" watch="{{watchOn}}" on-watch="{{setWatch}}" hint-size="100%,100%"></dc-import>
+				<dc-import name="Scanner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" sweep="{{scannerSweep}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-identify="{{identify}}" on-close="{{closeActivity}}" on-plan="{{planScan}}" vfo="{{freq}}" watch="{{watchOn}}" on-watch="{{setWatch}}" hint-size="100%,100%"></dc-import>
 			</sc-if>
 			<sc-if value="{{canResize}}" hint-placeholder-val="{{false}}">
 				<div class="wk-rs" role="separator" aria-orientation="vertical" aria-label="Resize {{drawerName}}" aria-valuemin="360" aria-valuemax="640" aria-valuenow="{{drW}}" aria-valuetext="{{drW}} pixels wide" tabindex="0" data-on="{{resizing}}" onPointerDown="{{rsDown}}" onKeyDown="{{rsKey}}" onDoubleClick="{{rsReset}}" title="Drag to resize · double-click resets" style="position: absolute; left: -14px; top: 16px; bottom: 16px; width: 20px; z-index: 5; cursor: col-resize; touch-action: none; display: flex; align-items: center; justify-content: center; border-radius: 6px">
 					<span class="wk-rs-bar" style="width: 4px; height: 40px; border-radius: 2px; background: rgba(var(--wk-accent-rgb),.45)"></span>
 				</div>
 			</sc-if>
+		</div>
+	</sc-if>
+
+	<sc-if value="{{plannerOn}}" hint-placeholder-val="{{false}}">
+		<div role="dialog" aria-label="Scan a band" class="wk-sheet" style="position: absolute; z-index: 5; display: grid; top: {{shTop}}px; left: {{shSide}}px; right: {{shSide}}px; height: {{shH}}; border-radius: {{shRadius}}px; box-shadow: var(--wk-shadow-drawer)">
+			<dc-import name="ScanPlanner" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" state="{{plannerState}}" sweep="{{plannerSweep}}" prefill="{{scanPrefill}}" discoveries="{{discs}}" stage="{{stage}}" on-scan="{{scanAction}}" on-tune="{{tune}}" on-close="{{closePlanner}}" hint-size="100%,100%"></dc-import>
 		</div>
 	</sc-if>
 
@@ -208,14 +208,26 @@ const DISCOVERIES = [
 // The mock sweep: one hop a second; each pass holds a few seconds on the next active signal in this list
 const HOLDS = [{ hz: 161150000, label: 'DMR · CC 1' }, { hz: 160625000, label: 'FM voice' }, { hz: 163087500, label: 'P25 · NAC 293' }];
 const HOLD_S = 3, RESUME_S = 60, HOP_HZ = 1.5e6;
-const SWEEP_MOCK = { preset: 'Marine + PMR', startHz: 136000000, endHz: 174000000, hops: 26, sweepS: 10, coverage: 84 };
+const SWEEP_MOCK = { preset: 'Marine + PMR', startHz: 136000000, endHz: 174000000, hops: 26, sweepS: 10, coverage: 84,
+	// the two presets it was started from (the planner's rows); Marine sits inside PMR, so one stretch carries all the hops
+	ranges: [
+		{ name: 'PMR / land mobile', startHz: 136000000, endHz: 174000000, hops: 26, spacingHz: [12500, 6250], protocols: ['dmr', 'p25', 'nxdn', 'analog-fm', 'pocsag'] },
+		{ name: 'Marine VHF', startHz: 156000000, endHz: 162025000, hops: 4, spacingHz: [25000], protocols: ['analog-fm'] }
+	],
+	stretches: [{ name: 'Marine + PMR', startHz: 136000000, endHz: 174000000, hops: 26 }],
+	exclusions: [
+		{ startHz: 136725000, endHz: 136975000, reason: 'VDL2' },
+		{ startHz: 144787500, endHz: 144812500, reason: 'APRS' },
+		{ startHz: 161962500, endHz: 162037500, reason: 'AIS' }
+	] };
 const LIVE = st => st === 'sweeping' || st === 'holding';
 // Hops as [lo, hi]. A sweep over separate ranges (Pagers) gives each range its own hops and never visits the gap.
 const hopList = w => {
-	const rs = w.ranges && w.ranges.length ? w.ranges : [{ startHz: w.startHz, endHz: w.endHz }];
+	// the planner's stretches are merged and never overlap (its table rows can nest: Marine inside PMR), so they lead
+	const rs = w.stretches && w.stretches.length ? w.stretches : w.ranges && w.ranges.length ? w.ranges : [{ startHz: w.startHz, endHz: w.endHz }];
 	const tot = rs.reduce((a, r) => a + r.endHz - r.startHz, 0), out = [];
 	rs.forEach((r, i) => {
-		// each range brings its own hop count from the composer; otherwise hops split by width
+		// each range brings its own hop count from the planner; otherwise hops split by width
 		const n = rs.length === 1 ? w.hops : r.hops > 0 ? r.hops : Math.max(1, Math.round(w.hops * (r.endHz - r.startHz) / tot)), step = (r.endHz - r.startHz) / n;
 		for (let k = 0; k < n; k++) out.push([r.startHz + k * step, r.startHz + (k + 1) * step]);
 	});
@@ -268,14 +280,20 @@ class Component extends DCLogic {
 		const wfKey = o => { if (!o || !('palette' in o)) return o; const n = Object.assign({}, o); n.waterfall = n.palette === 'phosphor' ? 'match' : n.palette; delete n.palette; return n; };
 		this.set = (k, v) => { if (k === 'freq') this.manualTune(); this.setState(wfKey({ [k]: v })); };
 		this.setBw = bw => this.setState({ bw });
-		this.closeActivity = () => this.setState({ drawer: null, scanPrefill: null });
+		this.closeActivity = () => this.setState({ drawer: null });
 		this.setActMode = m => this.setState({ actMode: m });
 		this.tune = f => { this.manualTune(); this.setState({ freq: f }); };
-		// the spectrum's visible range (BandStrip draws it); not the main view
-		this.setView = v => this.setState({ specView: v });
-		// "Scan this range" on the spectrum (shift-drag): open the Scanner's composer with that range.
-		// A fresh object each time, so the same range picked twice still reopens the composer.
-		this.scanRange = r => this.setState({ drawer: 'scanner', scanPrefill: { startHz: r.startHz, endHz: r.endHz }, pal: false, preview: null, open: this.state.open === 'rx' ? null : this.state.open });
+		// Scan a band: a sheet that drops over the plot. 'compose' plans a scan (Scanner's "Scan a band", ⌘K, Shift-drag);
+		// 'running' is the same sheet on the live sweep (a click on the Tuner's scan row). Esc or close returns.
+		// the planner sheet replaces the drawer while it is open; the drawer comes back when it closes or the scan starts
+		this.openPlanner = (mode, prefill) => this.setState({ planner: mode, scanPrefill: prefill || null, pal: false, preview: null, open: this.state.open === 'rx' ? null : this.state.open, drawer: null, plannerDrawer: this.state.planner ? this.state.plannerDrawer : this.state.drawer });
+		// the Tuner's scan row and the Scanner drawer: the running sheet while a sweep exists, else a new plan
+		this.planScan = () => { const sw = this.state.sw; this.openPlanner(sw && sw.state !== 'watching' ? 'running' : 'compose'); };
+		this.closePlanner = () => this.setState({ planner: null, scanPrefill: null, drawer: this.state.plannerDrawer || null, plannerDrawer: null });
+		this.onKey = e => { if (e.key === 'Escape' && this.state.planner && !this.state.pal && !e.defaultPrevented) { e.preventDefault(); this.closePlanner(); } };
+		// "Scan this range" on the spectrum (shift-drag): the planner opens with that range filled in.
+		// A fresh object each time, so the same range picked twice still refills it.
+		this.scanRange = r => this.openPlanner('compose', { startHz: r.startHz, endHz: r.endHz });
 		// scanner: Scanner drawer, palette and the Tuner's hold line all send these
 		this.scanAction = a => {
 			const sw = this.state.sw;
@@ -284,10 +302,11 @@ class Component extends DCLogic {
 				const span = a.endHz - a.startHz, watch = a.preset === 'This span';
 				const next = watch
 					? { preset: a.preset || 'This span', startHz: a.startHz, endHz: a.endHz, hops: 1, hop: 1, sweepS: 0, coverage: 100, state: 'watching' }
-					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
+					: Object.assign({}, SWEEP_MOCK, { preset: a.preset || 'Custom range', startHz: a.startHz, endHz: a.endHz, ranges: a.ranges || null, stretches: a.stretches && a.stretches.length ? a.stretches : null, exclusions: a.exclusions && a.exclusions.length ? a.exclusions : null, hops: a.hops || Math.max(2, Math.ceil(span / HOP_HZ)), hop: 1, state: 'sweeping', pass: 0 });
 				if (!watch) { next.hops = hopList(next).length; next.sweepS = Math.max(1, Math.round(next.hops * 0.375)); }
 				this.commit(null, watch ? 'Watching this span' : 'Scanning ' + next.preset + ' · the scanner has the receiver');
-				return this.setState({ sw: next, scanPrefill: null });
+				// starting a scan closes the planner
+				return this.setState({ sw: next, scanPrefill: null, planner: null, drawer: this.state.planner ? (this.state.plannerDrawer || null) : this.state.drawer, plannerDrawer: null });
 			}
 			if (!sw) return;
 			// Pause and Stop leave the receiver where the sweep had it, so the card and Identify stay put.
@@ -327,7 +346,7 @@ class Component extends DCLogic {
 		};
 		this.undo = () => { const t = this.state.toast; if (t && t.prev) this.setState(Object.assign({}, t.prev, { toast: null })); };
 		// ⌘K and the dock: Spectrum and Map change only the view (an open drawer stays); the rest open their drawer
-		this.goNav = id => this.setState(VIEWS.indexOf(id) >= 0 ? { view: id, pal: false, preview: null } : { drawer: id, pal: false, preview: null, open: null });
+		this.goNav = id => id === 'planner' ? this.openPlanner('compose') : this.setState(VIEWS.indexOf(id) >= 0 ? { view: id, pal: false, preview: null } : { drawer: id, pal: false, preview: null, open: null });
 		this.goActivity = cmd => this.setState({ drawer: 'activity', actCmd: Object.assign({ n: Date.now() }, cmd), pal: false, preview: null, open: this.state.open === 'rx' ? null : this.state.open });
 		this.cardAction = (id, f) => {
 			const fv = (f / 1e6).toFixed(3), tok = [{ type: 'freq', v: fv, kind: 'Frequency', value: fv + ' MHz' }];
@@ -471,6 +490,7 @@ class Component extends DCLogic {
 		this.onScheme = () => this.forceUpdate();
 		if (this.mq && this.mq.addEventListener) this.mq.addEventListener('change', this.onScheme);
 		window.addEventListener('resize', this.onWinResize);
+		window.addEventListener('keydown', this.onKey);
 		this.measure();
 	}
 	componentDidUpdate(prev) {
@@ -485,6 +505,7 @@ class Component extends DCLogic {
 		if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme);
 		if (this.ro) this.ro.disconnect();
 		window.removeEventListener('resize', this.onWinResize);
+		window.removeEventListener('keydown', this.onKey);
 		this.endDrag(); this.onRsUp();
 	}
 	// CSS px per screen px (the canvas may scale the board)
@@ -494,7 +515,7 @@ class Component extends DCLogic {
 	// what the drawer really gets: its remembered width, less whatever the Receiver needs to stay clear of the Tuner
 	drawerShown(id) { const L = this.layout; return L && L.full ? L.dW : this.drawerW(id); }
 	setDrawerW(id, w) { const L = this.layout, max = L && L.full ? Math.min(DR_MAX, L.drMax) : DR_MAX; this.setState({ drawerW: Object.assign({}, this.state.drawerW, { [id]: Math.round(clampN(w, DR_MIN, Math.max(DR_MIN, max))) }) }); }
-	// island sizes in layout px. The grid (drawer width, dock, band strip) uses each island's collapsed size; the card
+	// island sizes in layout px. The grid (drawer width, dock) uses each island's collapsed size; the card
 	// uses the live size (open panel included), so it rides up with Listen and steps aside for an open Receiver or Tuner.
 	measure() {
 		const e = this.els, s = this.state, prev = s.geo || {};
@@ -520,7 +541,7 @@ class Component extends DCLogic {
 		anchors.forEach(a => { const d = Math.hypot(a.x - x, a.y - y); if (d < bd) { bd = d; best = a; } });
 		return best;
 	}
-	// the shell grid for this frame: drawer slot, the free area left of it, dock, band strip and the card anchors.
+	// the shell grid for this frame: drawer slot, the free area left of it, dock and the card anchors.
 	// The plot itself is always full-bleed.
 	shellLayout(s, flags) {
 		const g0 = { W: 1440, H: 900, tuner: { w: 440, h: 56 }, rx: { w: 300, h: 56 }, listen: { w: 340, h: 64 }, dockW: 0, cardH: 300 };
@@ -547,10 +568,6 @@ class Component extends DCLogic {
 		let dockX = Math.max((W - dockW) / 2, minX);
 		if (full && dockX + dockW > freeW - G) dockX = Math.max(minX, freeW - G - dockW);
 		dockX = Math.round(dockX);
-		// band strip: between Tuner and Receiver when it fits, else a row under them; never under the drawer
-		const bandL = G + g.tuner.w + G, bandR = clearR + G + g.rx.w + G, bandAvail = W - bandL - bandR;
-		const band = bandAvail >= 420 ? { top: G, left: bandL, right: bandR, w: Math.min(760, bandAvail) } : { top: topRow, left: G, right: clearR + G, w: Math.min(760, freeW - 2 * G) };
-		const bandBox = { x: band.left + ((W - band.left - band.right) - band.w) / 2, y: band.top, w: band.w, h: 56 };
 		// islands the card keeps one gutter away from, at their live size (an open panel counts)
 		const islands = [
 			{ x: G, y: G, w: live.tuner.w, h: live.tuner.h },
@@ -558,7 +575,6 @@ class Component extends DCLogic {
 			{ x: G, y: H - G - live.listen.h, w: live.listen.w, h: live.listen.h },
 			{ x: dockX, y: H - G - DOCK_H, w: dockW, h: DOCK_H }
 		];
-		if (flags.band) islands.push(bandBox);
 		// a drawer between the island rows covers the plot: the card keeps clear of it too (or hides if nothing is left).
 		// It only shows when the Receiver panel is shut, so an open Receiver lifts it.
 		if (dr && !full && !flags.rxOpen) {
@@ -586,7 +602,7 @@ class Component extends DCLogic {
 			if (anchors.some(o => Math.hypot(o.x - r.x, o.y - r.y) < 48)) return;
 			anchors.push({ id: A.id, name: A.name, x: r.x, y: r.y });
 		});
-		return { W, H, freeW, clearR, full, dW, drMax, dr, compact, dockX, band, anchors, spots, cardH, wide };
+		return { W, H, freeW, clearR, full, dW, drMax, dr, compact, dockX, anchors, spots, cardH, wide };
 	}
 	// board tweak: jump straight to a sweep state so reviewers don't have to wait for one
 	applySweepTweak() {
@@ -646,7 +662,7 @@ class Component extends DCLogic {
 		const ign = base.ignored || {};
 		const discs = DISCOVERIES.filter(d => !ign[d.hz]).map(d => Object.assign({}, d, stage === 'S2' ? d.s2 : null, { active: live ? sw.state === 'holding' && sw.holdHz === d.hz : d.hz === 161150000 }));
 		const hold = sw && sw.state !== 'watching' ? {
-			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, ranges: sw.ranges || undefined, exclusions: sw.exclusions || undefined, hop: sw.hop, hops: sw.hops, sweepS: sw.sweepS, coverage: sw.coverage,
+			state: sw.state, preset: sw.preset, startHz: sw.startHz, endHz: sw.endHz, ranges: sw.ranges || undefined, stretches: sw.stretches || undefined, exclusions: sw.exclusions || undefined, hop: sw.hop, hops: sw.hops, sweepS: sw.sweepS, coverage: sw.coverage,
 			holdHz: sw.holdHz || undefined, holdLabel: sw.holdLabel || undefined, released: !!sw.released,
 			resumeIn: sw.state === 'paused-you' && sw.resumeAt ? Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) : undefined
 		} : null;
@@ -665,8 +681,7 @@ class Component extends DCLogic {
 		// ---- shell grid
 		const drawer = this.drawerId();
 		const view = base.view === 'map' ? 'map' : 'spectrum';
-		const showBand = !!hold && view !== 'map';
-		const L = this.shellLayout(base, { drawer, actWide: (s.actMode || 'drawer') === 'wide', band: showBand, rxOpen: s.open === 'rx' });
+		const L = this.shellLayout(base, { drawer, actWide: (s.actMode || 'drawer') === 'wide', rxOpen: s.open === 'rx' });
 		this.layout = L;
 		// a between-rows drawer shares the right side with the Receiver panel, so the open panel wins; a full-height one
 		// has the Receiver and the card beside it
@@ -681,29 +696,35 @@ class Component extends DCLogic {
 		this.cardPos = home;
 		const snap = drag ? this.nearest(L.anchors, drag.x, drag.y) || home || drag : home || { x: 0, y: 0 };
 		const moving = !!(base.resizing);
+		// the planner in running mode needs a sweep; if the scan ends while it is open, it closes
+		const plannerOn = !!base.planner && (base.planner === 'compose' || !!hold);
+		const phone = L.W < 760;
 		const navItem = (n, isView) => {
 			const on = isView ? n.id === view : n.id === drawer;
 			const label = isView && on && !L.compact;
 			// a view button shows its view; a drawer button opens its drawer, or closes it when it is the one open
-			const pick = isView ? () => this.setState({ view: n.id }) : () => on ? this.closeActivity() : this.setState({ drawer: n.id, scanPrefill: null });
+			const pick = isView ? () => this.setState({ view: n.id }) : () => on ? this.closeActivity() : this.setState({ drawer: n.id });
 			return { ...n, on, showLabel: label, showTip: !label, bg: on ? 'var(--wk-fill)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', pick };
 		};
 		return {
 			wkTheme, wkAccent, wkGround, waterfall,
 			scanRange: this.scanRange, scanPrefill: base.scanPrefill || null,
+			// the planner sheet: full width less the gutters, ~55 % of the height; a phone gets the whole screen
+			plannerOn, plannerSweep: plannerOn && base.planner === 'running' ? hold : null,
+			plannerState: base.planner === 'running' ? 'running' : base.scanPrefill ? 'prefilled' : 'empty',
+			closePlanner: this.closePlanner, planScan: this.planScan,
+			shTop: phone ? 0 : G, shSide: phone ? 0 : G, shH: phone ? '100%' : 'max(420px, 55%)', shRadius: phone ? 0 : 12,
 			discs, hold, stage,
 			scannerSweep: hold || (sw ? sw : { state: 'watching', preset: 'This span', startHz: s.freq - capHz / 2, endHz: s.freq + capHz / 2, hop: 1, hops: 1, sweepS: 0, coverage: 100 }),
 			scanAction: this.scanAction, identify: this.identify,
 			idRun: base.idRun || 0,
 			scanHold: live,
-			// while the sweep passes through (not holding), the card says so instead of "nothing decoded here"
-			scanText: live && sw.state === 'sweeping' ? 'Stop ' + sw.hop + ' of ' + sw.hops + ' · ' + sw.preset : '',
+			// while the sweep passes through (not holding), the card is one line: "Scanning · 146.9625" (no hop count)
+			scanText: live && sw.state === 'sweeping' ? (swFreq / 1e6).toFixed(5).replace(/0{1,2}$/, '') : '',
 			// the countdown after you tuned during a scan, on the tuned card (Stay here keeps it paused)
 			scanResume: sw && sw.state === 'paused-you' && sw.resumeAt ? { resumeIn: Math.max(0, Math.ceil((sw.resumeAt - Date.now()) / 1000)) } : null,
 			watchOn: base.watchOn !== false, setWatch: this.setWatch,
 			following: live,
-			showBand, bandTop: L.band.top, bandLeft: L.band.left, bandRight: L.band.right,
-			specView: base.specView || null, setView: this.setView,
 			showScanner: drawerOn && drawer === 'scanner',
 			freq: s.freq, bw: s.bw, step: s.step,
 			palOpen: base.pal, openPal: this.openPal, closePal: this.closePal,
@@ -712,7 +733,9 @@ class Component extends DCLogic {
 			actCmd: base.actCmd,
 			hasToast: !!base.toast, toastText: base.toast ? base.toast.text : '', canUndo: !!(base.toast && base.toast.prev), noUndo: !!(base.toast && !base.toast.prev), undo: this.undo,
 			tune: this.tune, set: this.set,
-			specH: 300, inset: 84,
+			specH: 300,
+			// the plot starts under the Tuner, whose scan row adds a line while a scan is on
+			inset: hold ? 132 : 84,
 			sqLine: s.listening ? (s.sqAuto ? -102 : s.sq) : -200,
 			tunerVals: { freq: s.freq, mode: s.mode, bw: s.bw, step: s.step, saved: s.saved, detected: DETECTED[s.freq] },
 			setBw: this.setBw,
@@ -742,9 +765,8 @@ class Component extends DCLogic {
 			showMap: view === 'map', mapAction: this.mapAction,
 			navViews: NAV.map(n => navItem(n, true)), navDrawers: DRAWER_NAV.map(n => navItem(n, false)),
 			refs: this.refsObj,
-			// drawer slot; the Receiver and the band strip slide to clear a full-height drawer
+			// drawer slot; the Receiver slides to clear a full-height drawer
 			rxRight: G + L.clearR, rxTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
-			bandTr: moving ? 'none' : 'right .26s cubic-bezier(.2,.8,.2,1)',
 			hasDrawer: drawerOn, drawerName: drawer ? DRAWER_NAME[drawer] : '',
 			drTop: L.dr ? L.dr.top : 0, drBottom: L.dr ? L.dr.bottom : 0, drLeft: L.dr ? L.dr.left : 'auto', drWidth: L.dr ? L.dr.width : 'auto',
 			drTr: moving ? 'none' : 'width .26s cubic-bezier(.2,.8,.2,1)',

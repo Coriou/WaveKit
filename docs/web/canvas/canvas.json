@@ -139,7 +139,7 @@
       "w": 420,
       "h": 820,
       "is_interactive": true,
-      "title": "Scanner — discoveries, scan a band, sweeps that hold the receiver"
+      "title": "Scanner — discoveries and the live hit log while a scan holds the receiver"
     },
     "Identify.dc.html": {
       "x": 500,
@@ -149,13 +149,13 @@
       "is_interactive": true,
       "title": "Identify — every state of the tuned card while it identifies a signal"
     },
-    "BandStrip.dc.html": {
+    "ScanPlanner.dc.html": {
       "x": 2020,
       "y": 8100,
-      "w": 800,
-      "h": 150,
+      "w": 1440,
+      "h": 500,
       "is_interactive": true,
-      "title": "Band strip — the scanned range over the spectrum while a scan runs"
+      "title": "Scan a band — the planner sheet, and the same sheet on a running scan"
     }
   },
   "createdOnFiles": {
@@ -217,7 +217,7 @@
     },
     "scanner": {
       "kind": "title1",
-      "maxW": 2820,
+      "maxW": 3460,
       "text": "Scanner and identify",
       "w": 240,
       "x": 0,
@@ -243,7 +243,7 @@
     "SettingsPhone.dc.html",
     "Scanner.dc.html",
     "Identify.dc.html",
-    "BandStrip.dc.html"
+    "ScanPlanner.dc.html"
   ],
   "pages": [],
   "title": "WaveKit Web — App Shell"

@@ -96,12 +96,12 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				<span style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 19px; line-height: 1.1; white-space: nowrap">{{proto}}</span>
 				<span style="font-size: 12.5px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{protoSub}}</span>
 			</div>
-			<div style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: {{stateFg}}; white-space: nowrap; overflow: hidden">
+			<div style="display: {{stateDisp}}; align-items: center; gap: 6px; font-size: 12.5px; color: {{stateFg}}; white-space: nowrap; overflow: hidden">
 				<span style="width: 6px; height: 6px; flex: none; border-radius: 50%; background: currentColor; opacity: {{dotOpacity}}"></span>
 				<span style="overflow: hidden; text-overflow: ellipsis">{{stateText}}</span>
 			</div>
 		</div>
-		<div style="flex: none; display: flex; flex-direction: column; align-items: flex-end; gap: 3px" title="{{levelTitle}}">
+		<div style="flex: none; display: {{freqColDisp}}; flex-direction: column; align-items: flex-end; gap: 3px" title="{{levelTitle}}">
 			<span style="display: flex; align-items: center; gap: 5px">
 				<sc-if value="{{pinMark}}" hint-placeholder-val="{{false}}">
 					<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" role="img" aria-label="Pinned"><path d="M15 4.5l-4 4l-4 1.5l-1.5 1.5l7 7l1.5 -1.5l1.5 -4l4 -4"></path><path d="M9 15l-4.5 4.5"></path><path d="M14.5 4l5.5 5.5"></path></svg>
@@ -124,7 +124,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	<div class="wk-tc-body" style="display: grid; grid-template-rows: {{bodyRows}}; margin-top: {{bodyGap}}; opacity: {{bodyOp}}; visibility: {{bodyVis}}; transition: grid-template-rows .24s cubic-bezier(.2,.8,.2,1), margin-top .24s cubic-bezier(.2,.8,.2,1), opacity .18s ease-out, visibility .24s">
 	<div style="min-height: 0; overflow: {{bodyOverflow}}; display: flex; flex-direction: column; gap: 14px">
 
-	<div style="display: flex; flex-direction: column; gap: 8px; padding: 14px 14px 12px; border-radius: 8px; background: var(--wk-well-glass)">
+	<div style="display: {{wellDisp}}; flex-direction: column; gap: 8px; padding: 14px 14px 12px; border-radius: 8px; background: var(--wk-well-glass)">
 		<sc-if value="{{idBanner}}" hint-placeholder-val="{{false}}">
 			<div role="status" aria-live="polite" style="display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--wk-accent)">
 				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M5 12l5 5l10 -10"></path></svg>
@@ -404,10 +404,10 @@ const MHZ = f => (f / 1e6).toFixed(f % 1000 ? 4 : 3);
 const UNKNOWN = freq => ({ kind: 'unknown', proto: 'Unidentified', protoSub: (freq / 1e6).toFixed(4) + ' MHz', icon: ICON.unknown, decoder: 'none', level: -96, snr: 9, live: false,
 	eyebrow: 'Signal', big: 'Not decoded', line: 'About 12 kHz wide · bursts roughly every 10 s', body: 'No decoder is running here. Try the scanner to identify it.', quiet: 'Nothing decoded on this frequency', recent: [] });
 const infoFor = freq => INFO[freq] || UNKNOWN(freq);
-// While a sweep passes through a frequency with nothing on it, the card says what the receiver is doing
-// instead of "Not decoded". scanText is the shell's "Hop 7 of 16 · VHF land mobile".
-const SCANNING = text => ({ kind: 'scan', proto: 'Scanning', protoSub: text.split(' · ').slice(1).join(' · '), icon: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'], decoder: 'none', level: -100, snr: 6, live: false,
-	eyebrow: 'Passing through', line: 'The scan listens here for a moment, then moves on. It stops on anything that transmits.', quiet: text.split(' · ')[0], recent: [] });
+// While a sweep passes through a frequency with nothing on it, the card is one compact line, "Scanning · 146.9625",
+// instead of "Not decoded". scanText is the frequency the shell's sweep is on.
+const SCANNING = text => ({ kind: 'scan', proto: 'Scanning · ' + text, protoSub: '', icon: ['M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9', 'M16 9a5 5 0 1 0 -7 7', 'M20.486 9a9 9 0 1 0 -11.482 11.495'], decoder: 'none', level: -100, snr: 6, live: false,
+	quiet: 'Scanning', recent: [] });
 
 // ——— Identify (runs inside the card's "now" block; never moves the receiver) ———
 const I = {
@@ -715,7 +715,7 @@ class Component extends DCLogic {
 
 		const body = x.transcript && live ? '“' + x.transcript + '”' : x.body || '';
 		// the minimised line: frequency, protocol and identity in short form, and a live dot (with the call timer) when active
-		const shortId = x.kind === 'scan' ? 'Scanning' + (x.protoSub ? ' · ' + x.protoSub : '') : x.kind === 'unknown' ? 'Unidentified' : (() => {
+		const shortId = x.kind === 'scan' ? 'Scanning' : x.kind === 'unknown' ? 'Unidentified' : (() => {
 			const b = x.big || '';
 			let id = b && !/^[\d.]+$/.test(b) ? (x.kind === 'count' ? b + ' ' + (x.bigUnit || '') : b) : x.bigUnit && x.bigUnit !== 'MHz' ? x.bigUnit : x.eyebrow ? x.eyebrow.split(' · ')[0] : '';
 			if (id && x.proto.toLowerCase().indexOf(id.toLowerCase()) >= 0) id = '';
@@ -734,6 +734,8 @@ class Component extends DCLogic {
 			levelTitle: 'Signal ' + dbt(lvl) + ' · SNR ' + snr + ' dB · decoder ' + x.decoder + (held ? ' (paused)' : ''),
 			sigBars: [2, 4, 6, 8, 10].map((h, i) => ({ h, c: i < strength ? 'var(--wk-accent)' : 'var(--wk-track)' })),
 			showNormal: !idOn,
+			// a sweep passing through: the header alone, one line
+			stateDisp: scanning ? 'none' : 'flex', freqColDisp: scanning ? 'none' : 'flex', wellDisp: scanning ? 'none' : 'flex',
 			idBanner: found, idBannerText: 'Identified · added to discoveries',
 			idOn, idEyebrow: 'Identify', idCloseLabel: running ? 'Stop identifying' : 'Close', idClose: this.idClose,
 			idTitle, idSecs, idTitleSize: big ? '22px' : '14px', idTitleFont: big ? "'D-DIN Condensed', 'Noto Sans', sans-serif" : 'inherit', idTitleC: 'var(--wk-text)',
@@ -773,7 +775,8 @@ class Component extends DCLogic {
 			pad: floating ? (min ? '8px 10px' : '16px') : '24px',
 			isMin: min, notMin: !min, canMin: floating, toggleMin: this.toggleMin, lineRef: this.lineRef, chevRef: this.chevRef,
 			shortId, lineState, lineDot: pulse || held, lineTitle: MHZ(freq) + ' MHz · ' + shortId + ' · ' + stateText + ' · click to expand',
-			bodyRows: min ? '0fr' : '1fr', bodyGap: min ? '0px' : '14px', bodyOp: min ? 0 : 1, bodyVis: min ? 'hidden' : 'visible', bodyOverflow: clip ? 'hidden' : 'visible',
+			// a sweep passing through: the header line alone (the Tuner's scan row has Pause and Stop)
+			bodyRows: min || scanning ? '0fr' : '1fr', bodyGap: min || scanning ? '0px' : '14px', bodyOp: min || scanning ? 0 : 1, bodyVis: min || scanning ? 'hidden' : 'visible', bodyOverflow: clip || scanning ? 'hidden' : 'visible',
 			bg: floating ? 'var(--wk-glass)' : 'var(--wk-surface)',
 			border: floating ? '1px solid rgba(var(--wk-line-rgb),.14)' : '0',
 			radius: floating ? '12px' : '0',

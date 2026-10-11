@@ -1,0 +1,1209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scan planner</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+/* wk-tokens v2 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92;--wk-brand:#7becc7;--wk-focus:rgba(var(--wk-ink-rgb),.55);--wk-sel:rgba(var(--wk-accent-rgb),.12);--wk-chip:rgba(var(--wk-ink-rgb),.06)}
+[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a;--wk-brand:#16735c}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
+[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
+[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+</style>
+<style>
+@font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
+@font-face{font-family:"D-DIN Condensed";font-weight:700;font-display:swap;src:url("/_blob/2abc64ad8670fc5303395b91efc22319") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:400;font-display:swap;src:url("/_blob/fc93658bc9e76c8f71fbef44633be7ab") format("woff2")}
+@font-face{font-family:"Noto Sans";font-weight:700;font-display:swap;src:url("/_blob/d96658b3edaf151ed186f81e701c06c7") format("woff2")}
+body{margin:0;background:#000000}
+body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
+.wk-pl{outline:none}
+.wk-pl button{font:inherit;color:inherit;cursor:pointer;border:0;background:transparent;margin:0;padding:0}
+.wk-pl button:disabled{cursor:default}
+.wk-pl button:focus-visible,.wk-pl [tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
+.wk-pl [role="group"][tabindex]:focus-visible{outline:none;box-shadow:inset 0 2px 0 var(--wk-focus)}
+.wk-pl .wk-ghost:hover:not(:disabled){background:rgba(var(--wk-accent-rgb),.08);color:var(--wk-text)}
+.wk-pl .wk-chipb{border:1px solid transparent;transition:background .15s,color .15s}
+.wk-pl .wk-chipb[aria-pressed="false"]:hover,.wk-pl .wk-chipb[aria-checked="false"]:hover{background:rgba(var(--wk-ink-rgb),.1) !important}
+.wk-pl .wk-cell:hover{background:var(--wk-chip)}
+.wk-pl .wk-row{transition:background .6s ease}
+.wk-pl .wk-row:hover{background:rgba(var(--wk-accent-rgb),.04)}
+.wk-pl .wk-box{border:1px solid rgba(var(--wk-line-rgb),.14);transition:border-color .15s}
+.wk-pl .wk-box:hover{border-color:rgba(var(--wk-line-rgb),.26)}
+.wk-pl .wk-box:focus{border-color:rgba(var(--wk-line-rgb),.3);outline:none}
+.wk-pl .wk-box::placeholder{color:var(--wk-text-4)}
+.wk-pl input{caret-color:var(--wk-accent)}
+.wk-pl ::selection{background:rgba(var(--wk-accent-rgb),.28);color:var(--wk-text)}
+.wk-pl .wk-scroll{scrollbar-width:thin;scrollbar-color:rgba(var(--wk-accent-rgb),.18) transparent}
+.wk-pl .wk-hscroll{scrollbar-width:none}
+.wk-pl .wk-hscroll::-webkit-scrollbar{display:none}
+.wk-pl .wk-th{font-family:'D-DIN Condensed','Noto Sans',sans-serif;font-weight:700;font-size:12.5px;letter-spacing:.09em;text-transform:uppercase;color:var(--wk-text-4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wk-pl .wk-seg{display:inline-flex;gap:2px;padding:3px;border-radius:6px;background:var(--wk-well);border:1px solid rgba(var(--wk-line-rgb),.08)}
+.wk-pl .wk-seg>button{height:28px;padding:0 10px;border-radius:4px;font-size:12.5px;font-weight:700;white-space:nowrap;font-variant-numeric:tabular-nums;transition:background .15s,color .15s}
+.wk-pl .wk-seg>button[aria-checked="false"]:hover{color:var(--wk-text)}
+.wk-pl .wk-primary{transition:filter .15s}
+.wk-pl .wk-primary:hover:not(:disabled){filter:brightness(1.08)}
+@keyframes wk-pl-pulse{0%{transform:scale(1);opacity:.7}100%{transform:scale(2.6);opacity:0}}
+.wk-pl .wk-pulse{animation:wk-pl-pulse 1.4s ease-out infinite}
+.wk-pl .wk-new{opacity:0;animation:wk-pl-pulse 1.4s ease-out 2}
+@media (prefers-reduced-motion:reduce){.wk-pl *{transition:none !important}.wk-pl .wk-pulse{animation:none;opacity:.35;transform:scale(1.8)}.wk-pl .wk-new{animation:none}}
+</style>
+</helmet>
+<div class="wk-pl" ref="{{rootRef}}" tabindex="-1" onKeyDown="{{rootKey}}" role="dialog" aria-label="{{dialogLabel}}" data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="position: absolute; inset: 0; box-sizing: border-box; display: flex; flex-direction: column; border-radius: {{rootR}}; overflow: hidden; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-xl); backdrop-filter: blur(26px) var(--wk-glass-fx); color: var(--wk-text); font-family: 'Noto Sans', system-ui, sans-serif; font-size: 14px">
+
+	<header style="flex: none; display: grid; grid-template-columns: {{hdCols}}; grid-template-areas: {{hdAreas}}; align-items: center; column-gap: 12px; row-gap: 8px; padding: {{hdPad}}">
+		<div style="grid-area: title; display: flex; align-items: center; gap: 9px; min-width: 0">
+			<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="{{runC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M21 12h-8a1 1 0 1 0 -1 1v8a9 9 0 0 0 9 -9"></path><path d="M16 9a5 5 0 1 0 -7 7"></path><path d="M20.486 9a9 9 0 1 0 -11.482 11.495"></path></svg>
+			</sc-if>
+			<h2 title="{{title}}" style="margin: 0; font-size: 16px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{title}}</h2>
+		</div>
+
+		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
+			<div role="group" aria-label="Presets" class="wk-hscroll" style="grid-area: presets; min-width: 0; display: flex; align-items: center; gap: 6px; overflow-x: auto; -webkit-mask-image: {{chipMask}}; mask-image: {{chipMask}}">
+				<sc-for list="{{presets}}" as="p" hint-placeholder-count="8">
+					<sc-if value="{{p.divider}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="flex: none; width: 1px; height: 18px; margin: 0 4px; background: rgba(var(--wk-line-rgb),.16)"></span></sc-if>
+					<button class="wk-chipb" aria-pressed="{{p.on}}" onClick="{{p.pick}}" title="{{p.title}}" aria-label="{{p.aria}}" style="flex: none; height: 32px; padding: 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; white-space: nowrap; background: {{p.bg}}; color: {{p.fg}}">
+						<sc-if value="{{p.on}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left: -2px"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>
+						<sc-if value="{{p.user}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-left: -2px; opacity: .8"><path d="M18 7v14l-6 -4l-6 4v-14a4 4 0 0 1 4 -4h4a4 4 0 0 1 4 4z"></path></svg></sc-if>
+						{{p.label}}
+					</button>
+				</sc-for>
+			</div>
+			<button class="wk-ghost" onClick="{{openSave}}" disabled="{{saveDisabled}}" aria-expanded="{{saveOpen}}" title="{{saveTitle}}" style="grid-area: save; height: 36px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--wk-text-2); white-space: nowrap; opacity: {{saveOp}}">
+				<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"></path><path d="M10 14a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"></path><path d="M14 4v4h-6v-4"></path></svg>{{saveLabel}}
+			</button>
+		</sc-if>
+
+		<button class="wk-ghost" onClick="{{close}}" aria-label="Close" title="Close · Esc" style="grid-area: close; width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)">
+			<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg>
+		</button>
+	</header>
+
+	<section aria-label="Ruler" style="flex: none; padding: {{secPad}}">
+		<div ref="{{rulerRef}}" tabindex="0" role="group" aria-label="{{rulerAria}}" onKeyDown="{{rulerKey}}" style="position: relative; display: flex; height: {{rulerH}}px; border-radius: 8px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.12); user-select: none">
+
+			<sc-if value="{{showGutter}}" hint-placeholder-val="{{true}}">
+				<div aria-hidden="true" style="position: relative; flex: none; width: {{gutW}}px; border-right: 1px solid rgba(var(--wk-line-rgb),.08)">
+					<sc-for list="{{gutLabels}}" as="g" hint-placeholder-count="7">
+						<span style="position: absolute; left: 12px; right: 8px; top: {{g.top}}px; height: {{g.h}}px; display: flex; align-items: center; font-size: {{g.size}}px; font-weight: {{g.weight}}; color: {{g.fg}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.text}}</span>
+					</sc-for>
+				</div>
+			</sc-if>
+
+			<div ref="{{trackRef}}" onPointerDown="{{rDown}}" onPointerMove="{{rMove}}" onPointerUp="{{rUp}}" onPointerCancel="{{rCancel}}" style="position: relative; flex: 1; min-width: 0; margin: 0 {{trackPad}}px; overflow: {{trackOverflow}}; cursor: {{rCursor}}; touch-action: pan-y">
+
+				<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
+					<sc-for list="{{laneBars}}" as="b" hint-placeholder-count="8">
+						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; overflow: hidden; display: flex; align-items: center; padding: 0 5px; font-size: 10.5px; font-weight: 700; line-height: 1; color: {{b.fg}}; white-space: nowrap">{{b.text}}</div>
+					</sc-for>
+					<div aria-hidden="true" style="position: absolute; left: 0; right: 0; top: {{laneLine}}px; height: 1px; background: rgba(var(--wk-line-rgb),.08)"></div>
+					<sc-for list="{{runBars}}" as="b" hint-placeholder-count="2">
+						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; border-radius: 3px; background: {{b.bg}}"></div>
+					</sc-for>
+					<sc-for list="{{chanTicks}}" as="t" hint-placeholder-count="0">
+						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: {{t.top}}px; width: 1px; height: {{t.h}}px; background: rgba(var(--wk-ink-rgb),{{t.op}})"></span>
+					</sc-for>
+					<sc-for list="{{skipBars}}" as="x" hint-placeholder-count="1">
+						<div title="{{x.title}}" style="position: absolute; top: {{x.top}}px; height: {{x.h}}px; left: {{x.left}}px; width: {{x.width}}px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, var(--wk-well) 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.3)"></div>
+					</sc-for>
+					<sc-if value="{{rulerEmpty}}" hint-placeholder-val="{{true}}">
+						<span aria-hidden="true" style="position: absolute; left: 0; right: 0; top: {{emptyTop}}px; height: {{emptyH}}px; display: grid; place-items: center; font-size: 12.5px; color: var(--wk-text-3); pointer-events: none">{{rulerEmptyText}}</span>
+					</sc-if>
+					<sc-if value="{{hasDrag}}" hint-placeholder-val="{{false}}">
+						<div aria-hidden="true" style="position: absolute; top: 2px; height: {{dragH}}px; left: {{dragL}}px; width: {{dragW}}px; box-sizing: border-box; border: 1px dashed {{dragEdge}}; border-radius: 3px; background: {{dragBg}}; z-index: 3">
+							<span style="position: absolute; bottom: 4px; left: 50%; transform: translateX(-50%); padding: 2px 7px; border-radius: 4px; background: var(--wk-glass-strong); font-size: 11.5px; font-weight: 700; color: {{dragEdge}}; white-space: nowrap; font-variant-numeric: tabular-nums">{{dragText}}</span>
+						</div>
+					</sc-if>
+				</sc-if>
+
+				<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
+					<sc-for list="{{hopCells}}" as="h" hint-placeholder-count="12">
+						<span aria-hidden="true" style="position: absolute; top: {{h.top}}px; height: {{h.h}}px; left: {{h.left}}px; width: {{h.width}}px; border-radius: 2px; background: {{h.bg}}; box-shadow: {{h.glow}}; opacity: {{h.op}}"></span>
+					</sc-for>
+					<sc-for list="{{runSkips}}" as="x" hint-placeholder-count="1">
+						<div title="{{x.title}}" style="position: absolute; top: {{x.top}}px; height: {{x.h}}px; left: {{x.left}}px; width: {{x.width}}px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, var(--wk-well) 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.3)"></div>
+					</sc-for>
+					<sc-for list="{{segGaps}}" as="g" hint-placeholder-count="0">
+						<span title="{{g.title}}" style="position: absolute; top: {{g.top}}px; height: {{g.h}}px; left: {{g.left}}px; width: {{g.width}}px; display: grid; place-items: center; font-size: 13px; color: var(--wk-text-4)">≈</span>
+					</sc-for>
+					<sc-for list="{{rowBars}}" as="b" hint-placeholder-count="2">
+						<span aria-hidden="true" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; border-radius: 2px; background: {{b.bg}}"></span>
+					</sc-for>
+					<sc-for list="{{ticks}}" as="t" hint-placeholder-count="6">
+						<button onClick="{{t.pick}}" onMouseEnter="{{t.enter}}" onMouseLeave="{{tipLeave}}" onFocus="{{t.enter}}" onBlur="{{tipLeave}}" aria-label="{{t.aria}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; width: 18px; height: 22px; margin-left: -9px; border-radius: 4px; display: grid; place-items: center; z-index: 2">
+							<span style="position: relative; width: 8px; height: 8px; display: block">
+								<sc-if value="{{t.active}}" hint-placeholder-val="{{false}}"><span class="wk-pulse" style="position: absolute; inset: 0; border-radius: 50%; background: {{t.color}}"></span></sc-if>
+								<sc-if value="{{t.fresh}}" hint-placeholder-val="{{false}}"><span class="wk-new" style="position: absolute; inset: 0; border-radius: 50%; background: {{t.color}}"></span></sc-if>
+								<span style="position: absolute; inset: 0; box-sizing: border-box; border-radius: 50%; border: 1.5px solid {{t.color}}; background: {{t.fill}}"></span>
+							</span>
+						</button>
+					</sc-for>
+					<sc-if value="{{hasTip}}" hint-placeholder-val="{{false}}">
+						<div role="tooltip" style="position: absolute; top: {{tipTop}}px; left: {{tipLeft}}px; transform: translateX({{tipShift}}); z-index: 6; box-sizing: border-box; min-width: 180px; max-width: 300px; padding: 8px 12px 9px; border-radius: 10px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 2px; pointer-events: none">
+							<span style="font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{tipFreq}} <span style="font-size: 12px; font-weight: 400; color: var(--wk-text-3)">MHz</span></span>
+							<span style="display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: {{tipColor}}">
+								<sc-if value="{{tipDecoded}}" hint-placeholder-val="{{true}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>{{tipLabel}}
+							</span>
+							<sc-if value="{{tipHasSub}}" hint-placeholder-val="{{true}}"><span style="font-size: 12.5px; color: var(--wk-text-2); line-height: 1.4">{{tipSub}}</span></sc-if>
+							<span style="font-size: 12px; color: var(--wk-text-3)">{{tipWhen}}</span>
+						</div>
+					</sc-if>
+				</sc-if>
+
+				<sc-for list="{{tags}}" as="t" hint-placeholder-count="2">
+					<span aria-hidden="true" title="{{t.title}}" style="position: absolute; top: {{t.top}}px; left: {{t.left}}px; height: 18px; min-width: 18px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{t.bg}}; color: {{t.fg}}; font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums; opacity: {{t.op}}; z-index: 1">{{t.num}}</span>
+					<sc-if value="{{t.showName}}" hint-placeholder-val="{{true}}">
+						<span aria-hidden="true" style="position: absolute; top: {{t.top}}px; left: {{t.nameLeft}}px; max-width: {{t.nameW}}px; height: 18px; font-size: 12px; font-weight: 700; color: var(--wk-text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; line-height: 18px; opacity: {{t.op}}; pointer-events: none; z-index: 1">{{t.name}}</span>
+					</sc-if>
+				</sc-for>
+
+				<div style="position: absolute; left: 0; right: 0; top: {{axisTop}}px; height: {{axisH}}px; border-top: 1px solid rgba(var(--wk-line-rgb),.08); cursor: {{axisCursor}}" title="{{axisTitle}}">
+					<sc-for list="{{rTicks}}" as="t" hint-placeholder-count="6">
+						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 0; width: 1px; height: 4px; background: rgba(var(--wk-ink-3-rgb),.5)"></span>
+						<span aria-hidden="true" style="position: absolute; left: {{t.left}}px; top: 4px; transform: translateX({{t.shift}}); font-size: 11.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none">{{t.text}}</span>
+					</sc-for>
+				</div>
+			</div>
+		</div>
+
+		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
+			<div style="display: flex; align-items: center; gap: 10px; margin-top: 6px">
+				<div role="radiogroup" aria-label="Dragging on the ruler" class="wk-seg" style="flex: none">
+					<sc-for list="{{tools}}" as="t" hint-placeholder-count="2"><button role="radio" aria-checked="{{t.on}}" onClick="{{t.pick}}" title="{{t.title}}" style="background: {{t.bg}}; color: {{t.fg}}">{{t.label}}</button></sc-for>
+				</div>
+				<div ref="{{ovRef}}" onPointerDown="{{ovDown}}" onPointerMove="{{ovMove}}" onPointerUp="{{ovUp}}" onPointerCancel="{{ovUp}}" role="slider" tabindex="0" aria-label="Overview, 100 to 900 MHz" title="Overview, 100 to 900 MHz · drag to move the ruler" aria-valuemin="100" aria-valuemax="900" aria-valuenow="{{ovNow}}" aria-valuetext="{{ovText}}" onKeyDown="{{rulerKey}}" style="position: relative; flex: 1; min-width: 60px; height: 18px; border-radius: 4px; background: var(--wk-well-glass); box-shadow: inset 0 0 0 1px rgba(var(--wk-line-rgb),.1); cursor: grab; touch-action: none">
+					<sc-for list="{{ovMarks}}" as="m" hint-placeholder-count="2">
+						<span aria-hidden="true" style="position: absolute; top: 5px; height: 8px; left: {{m.left}}%; width: max(2px, {{m.width}}%); border-radius: 1px; background: rgba(var(--wk-accent-rgb),.7)"></span>
+					</sc-for>
+					<span aria-hidden="true" style="position: absolute; top: 1px; bottom: 1px; left: {{ovL}}%; width: max(6px, {{ovW}}%); border-radius: 3px; background: rgba(var(--wk-ink-rgb),.12); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-rgb),.28)"></span>
+				</div>
+				<div style="flex: none; display: flex; gap: 2px">
+					<button class="wk-ghost" onClick="{{zoomOut}}" aria-label="Zoom out" title="Zoom out · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"></path></svg></button>
+					<button class="wk-ghost" onClick="{{zoomIn}}" aria-label="Zoom in" title="Zoom in · Ctrl + scroll" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
+					<button class="wk-ghost" onClick="{{zoomFit}}" disabled="{{noFit}}" title="Show every range" style="height: 32px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; opacity: {{fitOp}}">Fit</button>
+				</div>
+			</div>
+		</sc-if>
+	</section>
+
+	<div class="wk-scroll" role="table" aria-label="Ranges" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: {{tablePad}}">
+		<sc-if value="{{showHead}}" hint-placeholder-val="{{true}}">
+			<div role="row" style="display: grid; grid-template-columns: {{gridCols}}; grid-template-areas: {{gridAreas}}; column-gap: 12px; align-items: center; height: 28px; padding: 0 8px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.1)">
+				<span role="columnheader" class="wk-th" style="grid-area: n">#</span>
+				<span role="columnheader" class="wk-th" style="grid-area: name">Name</span>
+				<span role="columnheader" class="wk-th" style="grid-area: edges">Edges <span style="text-transform: none; letter-spacing: .02em">MHz</span></span>
+				<span role="columnheader" class="wk-th" style="grid-area: sp">Channel spacing</span>
+				<span role="columnheader" class="wk-th" style="grid-area: protos">Protocols</span>
+				<span role="columnheader" class="wk-th" style="grid-area: skips">Skips</span>
+				<span role="columnheader" class="wk-th" style="grid-area: act; text-align: right">{{actHead}}</span>
+			</div>
+		</sc-if>
+		<sc-if value="{{noRows}}" hint-placeholder-val="{{false}}">
+			<p style="margin: 0; padding: 16px 8px; font-size: 13px; color: var(--wk-text-3)">No ranges yet</p>
+		</sc-if>
+		<sc-for list="{{rows}}" as="r" hint-placeholder-count="2">
+			<div role="row" id="{{r.domId}}" class="wk-row" aria-label="{{r.aria}}" style="display: grid; grid-template-columns: {{gridCols}}; grid-template-areas: {{gridAreas}}; column-gap: 12px; row-gap: 6px; align-items: center; min-height: 44px; padding: {{rowPad}}; border-bottom: 1px solid rgba(var(--wk-line-rgb),.07); background: {{r.bg}}; opacity: {{r.op}}; scroll-margin: 8px">
+				<span role="cell" style="grid-area: n; display: flex">
+					<span style="height: 20px; min-width: 20px; box-sizing: border-box; padding: 0 5px; border-radius: 4px; display: grid; place-items: center; background: {{r.tagBg}}; color: {{r.tagFg}}; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.num}}</span>
+				</span>
+				<span role="cell" style="grid-area: name; min-width: 0; display: flex; align-items: center">
+					<sc-if value="{{r.renaming}}" hint-placeholder-val="{{false}}">
+						<input class="wk-box" ref="{{renameRef}}" value="{{renameText}}" onChange="{{onRename}}" onKeyDown="{{renameKey}}" onBlur="{{commitRename}}" aria-label="Range name" spellcheck="false" autocomplete="off" style="width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-weight: 700">
+					</sc-if>
+					<sc-if value="{{r.notRenaming}}" hint-placeholder-val="{{true}}">
+						<span title="{{r.name}}" onDoubleClick="{{r.rename}}" style="min-width: 0; font-size: 13.5px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+					</sc-if>
+				</span>
+				<span role="cell" style="grid-area: edges; display: flex; align-items: center; gap: 6px; min-width: 0">
+					<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}">
+						<input class="wk-box" value="{{r.fa}}" onChange="{{r.onA}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, low edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.aEdge}}">
+						<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
+						<input class="wk-box" value="{{r.fb}}" onChange="{{r.onB}}" onKeyDown="{{fieldKey}}" aria-label="{{r.name}}, high edge, MHz" title="{{r.err}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 88px; height: 32px; box-sizing: border-box; padding: 0 8px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px; font-variant-numeric: tabular-nums; border-color: {{r.bEdge}}">
+					</sc-if>
+					<sc-if value="{{r.readOnly}}" hint-placeholder-val="{{false}}">
+						<span style="font-size: 13.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums; white-space: nowrap">{{r.edgesText}}</span>
+					</sc-if>
+				</span>
+				<span role="cell" style="grid-area: sp; display: flex; min-width: 0">
+					<button class="wk-cell" onClick="{{r.openSp}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Channel spacing for {{r.name}}: {{r.spText}}" title="{{r.spTitle}}" style="height: 30px; max-width: 100%; padding: 0 8px 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 6px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap; font-variant-numeric: tabular-nums">
+						<span style="overflow: hidden; text-overflow: ellipsis">{{r.spText}}</span>
+						<sc-if value="{{r.spMine}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" title="Changed from the band plan" style="width: 5px; height: 5px; border-radius: 50%; background: var(--wk-accent)"></span></sc-if>
+						<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6l6 -6"></path></svg></sc-if>
+					</button>
+				</span>
+				<span role="cell" style="grid-area: protos; min-width: 0; display: flex">
+					<button class="wk-cell" onClick="{{r.openProtos}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Protocols for {{r.name}}: {{r.protoAll}}" title="{{r.protoAll}}" style="min-width: 0; max-width: 100%; min-height: 30px; padding: 3px; border-radius: 7px; display: flex; flex-wrap: {{protoWrap}}; align-items: center; gap: 4px; overflow: hidden">
+						<sc-for list="{{r.protos}}" as="c" hint-placeholder-count="3">
+							<span style="flex: none; height: 24px; padding: 0 8px; border-radius: 5px; display: flex; align-items: center; background: var(--wk-sel); color: var(--wk-accent); font-size: 12.5px; font-weight: 700; white-space: nowrap">{{c.label}}</span>
+						</sc-for>
+						<sc-if value="{{r.protoMore}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 7px; border-radius: 5px; display: flex; align-items: center; color: var(--wk-text-2); font-size: 12.5px; font-weight: 700; font-variant-numeric: tabular-nums">{{r.protoMoreText}}</span></sc-if>
+						<sc-if value="{{r.protoNone}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 24px; padding: 0 6px; display: flex; align-items: center; color: var(--wk-text-3); font-size: 12.5px; white-space: nowrap">{{r.protoNoneText}}</span></sc-if>
+						<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 24px; height: 24px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></span></sc-if>
+					</button>
+				</span>
+				<span role="cell" style="grid-area: skips; min-width: 0; display: flex">
+					<button class="wk-cell" onClick="{{r.openSkips}}" disabled="{{r.readOnly}}" aria-haspopup="dialog" aria-label="Skips in {{r.name}}: {{r.skipText}}" title="{{r.skipTitle}}" style="min-width: 0; max-width: 100%; height: 30px; padding: 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: {{r.skipFg}}; white-space: nowrap">
+						<sc-if value="{{r.hasSkips}}" hint-placeholder-val="{{true}}"><span aria-hidden="true" style="flex: none; width: 12px; height: 12px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span></sc-if>
+						<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.skipText}}</span>
+					</button>
+				</span>
+				<span role="cell" style="grid-area: act; display: flex; justify-content: flex-end">
+					<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}">
+						<button class="wk-ghost" onClick="{{r.openMore}}" aria-haspopup="menu" aria-label="More for {{r.name}}" title="Rename or remove" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
+						</button>
+					</sc-if>
+					<sc-if value="{{r.readOnly}}" hint-placeholder-val="{{false}}">
+						<button role="switch" aria-checked="{{r.on}}" onClick="{{r.toggle}}" aria-label="Scan {{r.name}}" title="{{r.swTitle}}" style="width: 48px; height: 36px; margin-right: -6px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
+						</button>
+					</sc-if>
+				</span>
+			</div>
+		</sc-for>
+	</div>
+
+	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
+		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}px; transform: translateX(-50%); z-index: 15; max-width: calc(100% - 32px); box-sizing: border-box; min-height: 40px; display: flex; align-items: center; gap: 10px; padding: 0 6px 0 14px; border-radius: 10px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); font-size: 13px">
+			<span style="flex: 1; min-width: 0; padding: 8px 0; line-height: 1.4">{{toastText}}</span>
+			<sc-if value="{{canUndo}}" hint-placeholder-val="{{false}}"><button onClick="{{undo}}" style="flex: none; height: 30px; padding: 0 12px; border-radius: 6px; background: var(--wk-sel); color: var(--wk-accent); font-weight: 700; font-size: 13px">Undo</button></sc-if>
+		</div>
+	</sc-if>
+
+	<footer style="flex: none; display: flex; flex-wrap: wrap; align-items: center; column-gap: 14px; row-gap: 8px; padding: {{footPad}}; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
+		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
+			<button class="wk-ghost" onClick="{{openOptions}}" aria-haspopup="dialog" aria-expanded="{{optOpen}}" style="flex: none; height: 40px; padding: 0 10px 0 8px; margin-left: -8px; border-radius: 6px; display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; color: var(--wk-text-2)">
+				<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h4m4 0h8M4 16h10m4 0h2"></path><path d="M8 6v4M14 14v4"></path></svg>Options
+				<sc-if value="{{optChanged}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" title="Changed from the defaults" style="width: 5px; height: 5px; border-radius: 50%; background: var(--wk-accent)"></span></sc-if>
+			</button>
+			<span role="status" title="{{sumTitle}}" style="order: {{sumOrder}}; flex: {{sumFlex}}; min-width: 0; font-size: 13.5px; font-weight: {{sumWeight}}; color: {{sumC}}; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sumText}}</span>
+			<sc-if value="{{showConsent}}" hint-placeholder-val="{{true}}">
+				<span title="Takes the Pi receiver until the scan ends · live audio follows the scan" style="flex: none; display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--wk-amber); white-space: nowrap">
+					<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg>{{consentText}}
+				</span>
+			</sc-if>
+			<span style="flex: 1 1 0; min-width: 0"></span>
+			<button class="wk-primary" onClick="{{start}}" disabled="{{startDisabled}}" title="{{startTitle}}" style="flex: {{startFlex}}; height: 40px; padding: 0 18px; border-radius: 6px; background: {{startBg}}; color: {{startFg}}; font-size: 13.5px; font-weight: 700; white-space: nowrap">Start · takes the receiver</button>
+		</sc-if>
+
+		<sc-if value="{{running}}" hint-placeholder-val="{{false}}">
+			<div role="status" style="flex: 1 1 320px; min-width: 0; display: flex; align-items: center; gap: 14px">
+				<span style="flex: none; font-size: 13px; font-weight: 700; color: {{runC}}; white-space: nowrap">{{runWord}}</span>
+				<span style="flex: none; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap">{{runFreq}}</span>
+				<sc-if value="{{runHasLabel}}" hint-placeholder-val="{{false}}"><span style="flex: none; font-size: 13px; font-weight: 700; color: var(--wk-accent); white-space: nowrap">{{runLabel}}</span></sc-if>
+				<span aria-hidden="true" title="This pass" style="position: relative; flex: 1; min-width: 40px; height: 3px; border-radius: 2px; background: rgba(var(--wk-ink-rgb),.12); overflow: hidden">
+					<span style="position: absolute; left: 0; top: 0; bottom: 0; width: {{passPct}}%; border-radius: 2px; background: {{runC}}; transition: width .3s linear"></span>
+				</span>
+			</div>
+			<div style="flex: none; display: flex; align-items: center; gap: 6px; margin-left: auto">
+				<sc-if value="{{canStay}}" hint-placeholder-val="{{false}}">
+					<button class="wk-ghost" onClick="{{stay}}" style="height: 40px; padding: 0 12px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px; font-weight: 700; white-space: nowrap">Stay here</button>
+				</sc-if>
+				<sc-if value="{{canPause}}" hint-placeholder-val="{{true}}">
+					<button onClick="{{pause}}" title="The scan keeps the receiver until you tune" style="height: 40px; padding: 0 14px 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: var(--wk-chip); color: var(--wk-text); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14h-4zM14 5h4v14h-4z"></path></svg>Pause</button>
+				</sc-if>
+				<sc-if value="{{canResume}}" hint-placeholder-val="{{false}}">
+					<button class="wk-primary" onClick="{{resume}}" style="height: 40px; padding: 0 16px 0 12px; border-radius: 6px; display: flex; align-items: center; gap: 7px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg>Resume</button>
+				</sc-if>
+				<button class="wk-ghost" onClick="{{stopScan}}" title="Ends the scan · the receiver and decoders are yours again" style="height: 40px; padding: 0 14px 0 11px; border-radius: 6px; display: flex; align-items: center; gap: 7px; color: var(--wk-text-2); font-size: 13px; font-weight: 700; white-space: nowrap"><svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M6 6h12v12h-12z"></path></svg>Stop</button>
+			</div>
+		</sc-if>
+	</footer>
+
+	<sc-if value="{{hasPop}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" onPointerDown="{{closePop}}" style="position: absolute; inset: 0; z-index: 20"></div>
+		<div role="dialog" aria-label="{{popLabel}}" class="wk-scroll" style="position: absolute; z-index: 21; left: {{popLeft}}px; top: {{popTop}}; bottom: {{popBottom}}; width: {{popW}}px; max-height: {{popMaxH}}px; overflow-y: auto; box-sizing: border-box; padding: 12px; border-radius: 10px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); backdrop-filter: blur(22px) var(--wk-glass-fx); display: flex; flex-direction: column; gap: 10px">
+
+			<sc-if value="{{popSp}}" hint-placeholder-val="{{false}}">
+				<span class="wk-th" style="color: var(--wk-text-3)">Channel spacing, kHz</span>
+				<div role="group" aria-label="Channel spacing" style="display: flex; flex-wrap: wrap; gap: 6px">
+					<sc-for list="{{spOpts}}" as="o" hint-placeholder-count="5">
+						<button class="wk-chipb" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}" style="height: 32px; padding: 0 10px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; background: {{o.bg}}; color: {{o.fg}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{o.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{o.label}}</button>
+					</sc-for>
+				</div>
+				<div style="display: flex; align-items: center; gap: 6px">
+					<input class="wk-box" value="{{spCustom}}" onChange="{{onSpCustom}}" onKeyDown="{{spCustomKey}}" placeholder="Other, e.g. 5" aria-label="Other channel spacing, kHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 32px; box-sizing: border-box; padding: 0 9px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13px; font-variant-numeric: tabular-nums">
+					<button class="wk-ghost" onClick="{{addSpCustom}}" disabled="{{spCustomBad}}" style="height: 32px; padding: 0 12px; border-radius: 6px; font-size: 13px; font-weight: 700; color: var(--wk-text-2); opacity: {{spCustomOp}}">Add</button>
+				</div>
+				<sc-if value="{{spCanReset}}" hint-placeholder-val="{{false}}">
+					<button class="wk-ghost" onClick="{{spReset}}" style="align-self: flex-start; height: 30px; margin: -2px 0 -4px -6px; padding: 0 8px; border-radius: 6px; font-size: 12.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums">{{spResetText}}</button>
+				</sc-if>
+			</sc-if>
+
+			<sc-if value="{{popProtos}}" hint-placeholder-val="{{false}}">
+				<span class="wk-th" style="color: var(--wk-text-3)">Protocols to try</span>
+				<div role="group" aria-label="Protocols" style="display: flex; flex-wrap: wrap; gap: 6px">
+					<sc-for list="{{protoOpts}}" as="o" hint-placeholder-count="8">
+						<button class="wk-chipb" aria-pressed="{{o.on}}" onClick="{{o.pick}}" title="{{o.title}}" style="height: 30px; padding: 0 10px 0 7px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{o.bg}}; color: {{o.fg}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity: {{o.tick}}"><path d="M5 12l5 5l10 -10"></path></svg>{{o.label}}</button>
+					</sc-for>
+				</div>
+				<sc-if value="{{protoFindOnly}}" hint-placeholder-val="{{false}}"><span style="font-size: 12.5px; color: var(--wk-text-3)">Off while Find signals only is on</span></sc-if>
+			</sc-if>
+
+			<sc-if value="{{popSkips}}" hint-placeholder-val="{{false}}">
+				<span class="wk-th" style="color: var(--wk-text-3)">Skips in {{popName}}</span>
+				<sc-if value="{{skipsNone}}" hint-placeholder-val="{{false}}"><span style="font-size: 13px; color: var(--wk-text-3)">None</span></sc-if>
+				<sc-for list="{{skipRows}}" as="x" hint-placeholder-count="1">
+					<div style="display: flex; align-items: center; gap: 6px">
+						<span aria-hidden="true" style="flex: none; width: 12px; height: 12px; border-radius: 2px; background: repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.75) 0 1.5px, transparent 1.5px 3.5px); box-shadow: inset 0 0 0 1px rgba(var(--wk-ink-2-rgb),.4)"></span>
+						<input class="wk-box" value="{{x.fa}}" onChange="{{x.onA}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, low edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
+						<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
+						<input class="wk-box" value="{{x.fb}}" onChange="{{x.onB}}" onKeyDown="{{fieldKey}}" disabled="{{x.auto}}" aria-label="Skip, high edge, MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="width: 84px; height: 30px; box-sizing: border-box; padding: 0 7px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 12.5px; font-variant-numeric: tabular-nums; border-color: {{x.edge}}">
+						<span title="{{x.title}}" style="flex: 1; min-width: 0; font-size: 12.5px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{x.why}}</span>
+						<button class="wk-ghost" onClick="{{x.remove}}" aria-label="{{x.removeLabel}}" title="{{x.removeLabel}}" style="flex: none; width: 30px; height: 30px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+					</div>
+				</sc-for>
+				<button class="wk-ghost" onClick="{{addSkip}}" title="Or Alt-drag across the ruler" style="align-self: flex-start; height: 30px; margin: 0 0 -4px -6px; padding: 0 9px 0 6px; border-radius: 6px; display: flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Skip a part</button>
+			</sc-if>
+
+			<sc-if value="{{popMore}}" hint-placeholder-val="{{false}}">
+				<div role="menu" aria-label="{{popName}}" style="display: flex; flex-direction: column; margin: -6px">
+					<button role="menuitem" class="wk-ghost" onClick="{{menuRename}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Rename</button>
+					<button role="menuitem" class="wk-ghost" onClick="{{menuRemove}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; color: var(--wk-danger-soft)">Remove</button>
+				</div>
+			</sc-if>
+
+			<sc-if value="{{popOpts}}" hint-placeholder-val="{{false}}">
+				<sc-for list="{{optSwitches}}" as="o" hint-placeholder-count="3">
+					<div title="{{o.hint}}" style="display: flex; align-items: center; gap: 12px; min-height: 36px">
+						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700">{{o.label}}</span>
+						<button role="switch" aria-checked="{{o.on}}" aria-labelledby="{{o.id}}" onClick="{{o.toggle}}" style="flex: none; width: 48px; height: 36px; margin-right: -6px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{o.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{o.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
+						</button>
+					</div>
+				</sc-for>
+				<div aria-hidden="true" style="height: 1px; background: rgba(var(--wk-line-rgb),.1)"></div>
+				<sc-for list="{{optSegs}}" as="o" hint-placeholder-count="3">
+					<div title="{{o.hint}}" style="display: flex; align-items: center; gap: 12px; min-height: 36px">
+						<span id="{{o.id}}" style="flex: 1; min-width: 0; font-size: 13.5px; font-weight: 700">{{o.label}}</span>
+						<div role="radiogroup" aria-labelledby="{{o.id}}" class="wk-seg" style="flex: none">
+							<sc-for list="{{o.opts}}" as="v" hint-placeholder-count="3"><button role="radio" aria-checked="{{v.on}}" onClick="{{v.pick}}" style="background: {{v.bg}}; color: {{v.fg}}">{{v.label}}</button></sc-for>
+						</div>
+					</div>
+				</sc-for>
+			</sc-if>
+
+			<sc-if value="{{popSave}}" hint-placeholder-val="{{false}}">
+				<label for="pl-save-name" class="wk-th" style="color: var(--wk-text-3)">Preset name</label>
+				<input id="pl-save-name" ref="{{saveRef}}" class="wk-box" value="{{saveName}}" onChange="{{onSaveName}}" onKeyDown="{{saveKey}}" spellcheck="false" autocomplete="off" style="height: 36px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px">
+				<div style="display: flex; justify-content: flex-end; gap: 6px">
+					<button class="wk-ghost" onClick="{{closePop}}" style="height: 34px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px">Cancel</button>
+					<button class="wk-primary" onClick="{{savePreset}}" disabled="{{saveNameBad}}" style="height: 34px; padding: 0 14px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700; opacity: {{saveNameOp}}">Save</button>
+				</div>
+			</sc-if>
+		</div>
+	</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","holding","paused"],"default":"combined"},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"$preview":{"width":1440,"height":500}}'>
+// ---------- Protocols (S1 trials; AIS, ACARS, VDL2, LoRa are dedicated decoders) ----------
+// s2: arrives with stage S2 · only + by: lives on fixed channels an always-on decoder covers
+const PROTO = {
+	dmr: { label: 'DMR' }, p25: { label: 'P25' }, nxdn: { label: 'NXDN' }, dpmr: { label: 'dPMR' }, ysf: { label: 'YSF' }, dstar: { label: 'D-STAR' },
+	fm: { label: 'FM voice' }, am: { label: 'AM voice' }, tones: { label: 'Tones', s2: true, title: 'CTCSS and DCS on FM voice' },
+	pocsag: { label: 'POCSAG' }, flex: { label: 'FLEX' }, aprs: { label: 'APRS', only: [144.8], by: 'Direwolf' }, ais: { label: 'AIS', only: [161.975, 162.025], by: 'AIS-catcher' },
+	acars: { label: 'ACARS', only: [131.525, 131.725], by: 'acarsdec' }, vdl2: { label: 'VDL2', only: [136.975], by: 'dumpvdl2' }, ism: { label: 'rtl_433' }, lora: { label: 'LoRa' }
+};
+const PORDER = ['dmr', 'p25', 'nxdn', 'dpmr', 'ysf', 'dstar', 'fm', 'am', 'tones', 'pocsag', 'flex', 'aprs', 'ais', 'acars', 'vdl2', 'ism', 'lora'];
+
+// ---------- Presets (region EU; the station is in Toulouse, the mock stays in Brittany) ----------
+// sp: the band plan's channel spacing in Hz (0 = Any, no grid: wideband devices). lane: the ruler's band-plan lane.
+const PRESETS = [
+	{ id: 'marine', name: 'Marine VHF', short: 'Marine', lane: 'marine', ranges: [[156, 162.025]], protos: ['fm', 'ais'], sp: [25000] },
+	{ id: 'pmr', name: 'PMR / land mobile', short: 'PMR', lane: 'pmr', ranges: [[136, 174]], protos: ['dmr', 'p25', 'nxdn', 'fm', 'pocsag'], sp: [12500, 6250] },
+	{ id: 'pagers', name: 'Pagers', lane: 'pagers', ranges: [[169.4, 169.8, 'Pagers 169'], [466, 466.25, 'Pagers 466']], protos: ['pocsag', 'flex'], sp: [12500] },
+	{ id: 'air', name: 'Airband', lane: 'air', ranges: [[118, 137]], protos: ['am', 'acars', 'vdl2'], sp: [8330] },
+	{ id: 'pmr446', name: 'PMR446', lane: 'pmr', ranges: [[446, 446.2]], protos: ['fm', 'dpmr', 'dmr'], sp: [6250], labels: { dmr: 'DMR Tier I' } },
+	{ id: 'ism', name: 'ISM 433 / 868', short: 'ISM', lane: 'ism', ranges: [[433.05, 434.79, 'ISM 433'], [863, 870, 'ISM 868']], protos: ['ism', 'lora'], sp: [0] },
+	{ id: 'uhf', name: 'UHF land mobile', short: 'UHF', lane: 'pmr', ranges: [[400, 470]], protos: ['dmr', 'p25', 'nxdn', 'fm'], sp: [12500, 6250] },
+	{ id: '2m', name: '2 m amateur', chip: '2 m', short: '2 m', lane: 'ham', ranges: [[144, 146]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], sp: [12500] },
+	{ id: '70cm', name: '70 cm amateur', chip: '70 cm', short: '70 cm', lane: 'ham', ranges: [[430, 440]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'p25'], sp: [12500] }
+];
+// Presets you saved (core keeps and syncs them: CORE GAPS). Shown first.
+const USER0 = [
+	{ id: 'u-harbour', user: true, name: 'Harbour channels', short: 'Harbour', ranges: [[156.5, 157.45, 'Harbour channels']], protos: ['fm'], sp: [25000], opts: { hold: true } }
+];
+const LANES = [{ id: 'marine', name: 'Marine' }, { id: 'ham', name: 'Amateur' }, { id: 'pmr', name: 'PMR / land mobile' }, { id: 'pagers', name: 'Pagers' }, { id: 'ism', name: 'ISM' }, { id: 'air', name: 'Air' }];
+// Channels the always-on decoders already cover. A scan skips them (core's marine plan does the same for AIS).
+const ELSEWHERE = [
+	{ a: 161.95, b: 162.05, name: 'AIS', by: 'AIS-catcher' },
+	{ a: 131.5125, b: 131.7375, name: 'ACARS', by: 'acarsdec' },
+	{ a: 136.9625, b: 136.9875, name: 'VDL2', by: 'dumpvdl2' },
+	{ a: 144.7875, b: 144.8125, name: 'APRS', by: 'Direwolf' }
+];
+// What a sweep pauses on this receiver (the Pi receiver at 161.150). ADS-B has its own receiver.
+const PAUSES = ['AIS', 'POCSAG', 'DMR'];
+const LIM = [24, 1766], OV = [100, 900], HOP_MHZ = 1.5;
+const SPAN = { startHz: 160400000, endHz: 162000000 };
+const DWELLS = { short: 0.15, normal: 0.25, long: 0.6 }, DWELL_PER = 0.025;
+const SP_OPTS = [6250, 8330, 12500, 25000];
+const STOPS = [['never', 'Never'], ['pass', '1 pass'], ['10m', '10 min'], ['1h', '1 h']];
+const DWELL_OPTS = [['short', 'Short'], ['normal', 'Normal'], ['long', 'Long']];
+const SENS = [['low', 'Low'], ['normal', 'Normal'], ['high', 'High']];
+// Discoveries the shell passes today (same shape as BandStrip's); the board's own when standalone
+const DISCS = [
+	{ hz: 161150000, bw: 12500, label: 'DMR · CC 1', sub: 'TG 2081, TG 9 · radios 2081034, 2081107 · slot 1', conf: 'decoded', recent: true },
+	{ hz: 163087500, bw: 12500, label: 'P25 · NAC 293', sub: 'TG 1201 · encrypted', conf: 'decoded', recent: true, fresh: true },
+	{ hz: 160450000, bw: 12500, label: 'POCSAG 1200', sub: 'Capcodes 1234567, 1234570', conf: 'decoded', recent: true },
+	{ hz: 160625000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', recent: true },
+	{ hz: 161425000, bw: 12500, label: 'Maybe FM voice', sub: '', conf: 'maybe', recent: true },
+	{ hz: 156800000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 16', conf: 'maybe', recent: true },
+	{ hz: 156600000, bw: 12500, label: 'Maybe FM voice', sub: 'Marine ch 12', conf: 'maybe', recent: true },
+	{ hz: 167512500, bw: 6250, label: 'Maybe NXDN', sub: 'No sync · 6.25 kHz 4FSK', conf: 'maybe', recent: true, fresh: true },
+	{ hz: 161162500, bw: 12500, label: 'Heard', sub: 'Maybe a neighbour’s leak', conf: 'heard', recent: true },
+	{ hz: 162400000, bw: 12500, label: 'Heard', sub: 'Steady carrier', conf: 'heard', recent: true },
+	{ hz: 446006250, bw: 12500, label: 'Maybe FM voice', sub: 'PMR446 ch 1', conf: 'maybe', recent: false },
+	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No sync yet · Pager network, Morlaix?', conf: 'maybe', recent: false },
+	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', recent: false }
+];
+const RANK = { decoded: 3, likely: 2, maybe: 1, heard: 0 };
+const LIVE = st => st === 'sweeping' || st === 'holding' || st === 'starting';
+const RUNNING = st => !!st && /^(starting|sweeping|holding|paused|consent|source-down)/.test(st);
+
+// ---------- Helpers ----------
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const f3 = mhz => mhz.toFixed(3);
+const mt = x => String(+(+x).toFixed(3));
+const pf = t => { const v = parseFloat(String(t).replace(',', '.')); return isFinite(v) ? v : NaN; };
+const snap = v => Math.round(v / 0.025) * 0.025;
+const secsText = t => t < 1 ? '< 1 s' : t < 60 ? Math.round(t) + ' s' : (Math.round(t / 6) / 10) + ' min';
+const kHz = hz => String(+(hz / 1000).toFixed(3));
+const spText = arr => !arr || !arr.length || arr.includes(0) ? 'Any' : arr.length === 1 ? kHz(arr[0]) + ' kHz' : arr.slice().sort((a, b) => b - a).map(kHz).join(' + ');
+const spSame = (x, y) => x.length === y.length && x.every(v => y.includes(v));
+const fq = hz => { const s = (hz / 1e6).toFixed(4); return s.endsWith('0') ? s.slice(0, -1) : s; };
+const short = hz => { const m = hz / 1e6; return Number.isInteger(m) ? String(m) : m.toFixed(3).replace(/0+$/, ''); };
+const andText = xs => xs.length < 2 ? xs.join('') : xs.slice(0, -1).join(', ') + ' and ' + xs[xs.length - 1];
+const sw = on => ({ on, track: on ? 'var(--wk-accent)' : 'var(--wk-track)', knob: on ? 18 : 2 });
+const segc = on => ({ on, bg: on ? 'var(--wk-sel)' : 'transparent', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)' });
+const chipc = on => ({ on, bg: on ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-2)', tick: on ? 1 : 0.3 });
+const withTones = ps => ps.includes('fm') && !ps.includes('tones') ? ps.concat(['tones']) : ps;
+const coveredElsewhere = (p, r) => { const o = PROTO[p].only; if (!o) return false; const a = pf(r.fa), b = pf(r.fb), inR = o.filter(f => f >= a - 0.0125 && f <= b + 0.0125); return inR.length > 0 && inR.every(f => r.excl.some(x => x.auto && pf(x.fa) <= f + 0.0125 && pf(x.fb) >= f - 0.0125)); };
+const textW = (t, px) => t.length * px * 0.56 + 2;
+
+let RID = 0;
+const autoSkips = (a, b) => ELSEWHERE.filter(m => m.b > a && m.a < b).map(m => ({ id: 'x' + (++RID), fa: f3(Math.max(a, m.a)), fb: f3(Math.min(b, m.b)), why: m.name, by: m.by, auto: true }));
+// a range you draw borrows the protocols and channel spacing of the band plan it falls in (the narrowest one), else 12.5 kHz
+const overlapping = (a, b) => PRESETS.filter(p => p.ranges.some(r => r[1] > a && r[0] < b));
+const guessProtos = (a, b) => { const hit = overlapping(a, b), ps = hit.length ? [].concat.apply([], hit.map(x => x.protos)) : ['fm', 'dmr', 'p25']; return PORDER.filter(p => ps.includes(p) && (!PROTO[p].only || PROTO[p].only.some(f => f >= a && f <= b))); };
+const guessSp = (a, b) => { const hit = overlapping(a, b).sort((x, y) => (x.ranges[0][1] - x.ranges[0][0]) - (y.ranges[0][1] - y.ranges[0][0])); return hit.length ? hit[0].sp.slice() : [12500]; };
+function mkRange(o) {
+	return { id: 'r' + (++RID), src: o.src || null, name: o.name, short: o.short || o.name, fa: f3(o.a), fb: f3(o.b), protos: withTones(o.protos), labels: o.labels || null, excl: autoSkips(o.a, o.b), spDef: o.sp ? o.sp.slice() : guessSp(o.a, o.b), sp: null };
+}
+const fromPreset = p => p.ranges.map(r => mkRange({ src: p.id, name: r[2] || p.name, short: r[2] || p.short || p.name, a: r[0], b: r[1], protos: p.protos, labels: p.labels, sp: p.sp }));
+const presetById = (id, users) => (users || []).concat(PRESETS).find(p => p.id === id);
+
+// Tags: one numbered tag per range at its low edge; tags never overlap (a later one moves right), and a name is drawn
+// only in the free room between its tag and the next tag (or its own high edge). Nothing stacks.
+function placeTags(items, tw, top, stops) {
+	const out = [];
+	let edge = -Infinity;
+	items.forEach(it => {
+		const w = String(it.num).length > 1 ? 24 : 18;
+		let x = Math.max(it.x0 + 2, edge + 3);
+		x = Math.min(x, tw - w - 1);
+		out.push(Object.assign({ left: x, w, top }, it));
+		edge = x + w;
+	});
+	out.forEach((t, i) => {
+		const next = out.slice(i + 1).reduce((m, o) => Math.min(m, o.left), Infinity);
+		const nl = t.left + t.w + 5, stop = (stops || []).filter(x => x > nl - 2).reduce((m, x) => Math.min(m, x), Infinity);
+		const room = Math.min(next - 8, t.x1 - 6, tw - 4, stop - 6) - nl;
+		t.nameLeft = t.left + t.w + 5; t.nameW = Math.max(0, room);
+		t.showName = room >= Math.min(textW(t.name, 12), 52);
+	});
+	return out;
+}
+
+class Component extends DCLogic {
+	constructor(props) {
+		super(props);
+		this.state = Object.assign({
+			userPresets: USER0.slice(), tool: 'add', findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal',
+			tw: 0, cw: 0, drag: null, flash: null, pop: null, renaming: null, renameText: '', saveName: '', spCustom: '', toast: null, tip: null,
+			runOff: {}, acc: 0
+		}, this.fromTweak(props.state));
+		if (props.prefill) Object.assign(this.state, this.prefillState(props.prefill));
+		this.initRefs();
+	}
+
+	// ---------- Board tweak: each state renders without clicking ----------
+	fromTweak(st) {
+		RID = 0;
+		st = st || 'empty';
+		let ranges = [];
+		if (st === 'preset') ranges = fromPreset(PRESETS[0]);
+		if (st === 'combined' || st === 'running' || st === 'holding' || st === 'paused') ranges = fromPreset(PRESETS[1]).concat(fromPreset(PRESETS[0]));
+		if (st === 'custom') {
+			// ranges drawn, overlapped and skipped by hand: the case whose labels used to stack
+			const mk = (n, a, b) => mkRange({ name: n, a, b, protos: guessProtos(a, b) });
+			ranges = [mk('Your range', 150, 158), mk('Your range 2', 155, 157.5), mk('Your range 3', 166, 168), mk('Your range 4', 166.5, 167.5)];
+			ranges[2].excl.push({ id: 'x' + (++RID), fa: '167.000', fb: '167.200', why: 'Skipped by you' });
+			ranges[0].sp = [12500, 25000];
+		}
+		const o = Object.assign({ ranges, own: null, hop: 1, runOff: {}, pop: null, renaming: null, drag: null, toast: null }, ranges.length ? this.fitRanges(ranges) : { vL: 116, vR: 176 });
+		if (st === 'prefilled') Object.assign(o, this.prefillState((this.props && this.props.prefill) || SPAN));
+		if (st === 'running' || st === 'holding' || st === 'paused') {
+			const plan = this.planOf(ranges, { findOnly: false, dwell: 'normal', users: USER0, stage: this.props.stage });
+			const p = this.payload(plan, { findOnly: false, hold: true, rec: true, stopAfter: 'never', dwell: 'normal', sens: 'normal' });
+			o.own = this.runOf(p, st === 'running' ? 'sweeping' : st);
+			o.hop = st === 'running' ? 6 : this.hopAt(o.own, 161150000);
+			if (st === 'holding') Object.assign(o.own, { holdHz: 161150000, holdLabel: 'DMR · CC 1' });
+		}
+		return o;
+	}
+	prefillState(p) {
+		const a = snap(Math.min(p.startHz, p.endHz) / 1e6), b = snap(Math.max(p.startHz, p.endHz) / 1e6);
+		const ranges = [mkRange({ name: 'Your range', a, b, protos: guessProtos(a, b) })];
+		return Object.assign({ ranges, own: null, pop: null }, this.fitRanges(ranges));
+	}
+	componentDidMount() {
+		this.timer = setInterval(() => this.step(), 125);
+		if (this.rootEl) { try { this.rootEl.focus({ preventScroll: true }); } catch (e) {} }
+	}
+	componentWillUnmount() { clearInterval(this.timer); clearTimeout(this.tt); clearTimeout(this.ft); if (this.ro) this.ro.disconnect(); if (this.rulerEl) this.rulerEl.removeEventListener('wheel', this.onRWheel); }
+	componentDidUpdate(prev) {
+		if (this.rootEl && (document.activeElement === document.body || !document.activeElement)) { try { this.rootEl.focus({ preventScroll: true }); } catch (e) {} }
+		if (prev.state !== this.props.state) this.setState(this.fromTweak(this.props.state));
+		if (this.props.prefill && this.props.prefill !== prev.prefill) { const v = this.prefillState(this.props.prefill); this.setState(v); this.flash(v.ranges[0].id); }
+	}
+	// board-only sweep: one hop every sweepS / hops seconds (the shell drives its own)
+	step() {
+		const s = this.state, o = s.own;
+		if (this.props.sweep || !o || o.state !== 'sweeping') return;
+		const acc = s.acc + 0.125, per = Math.max(0.2, o.sweepS / o.hops);
+		if (acc < per) return this.setState({ acc });
+		const lay = this.runLayout(Object.assign({}, o, { hop: s.hop }), s.tw || 1200), on = c => lay.rows.some(r => !s.runOff[r.name] && (c.a + c.b) / 2 >= r.startHz && (c.a + c.b) / 2 <= r.endHz);
+		let h = s.hop;
+		for (let k = 0; k < lay.cells.length; k++) { h = h % lay.cells.length + 1; if (on(lay.cells[h - 1])) break; }
+		this.setState({ acc: 0, hop: h });
+	}
+
+	// ---------- Refs, ruler pointer and wheel ----------
+	initRefs() {
+		this.rootRef = el => { if (el === this.rootEl) return; this.rootEl = el; this.observe(); };
+		this.trackRef = el => { if (el === this.trackEl) return; this.trackEl = el; this.observe(); };
+		this.ovRef = el => { this.ovEl = el; };
+		this.saveRef = el => { if (el && el !== this.saveEl) { this.saveEl = el; el.focus(); el.select(); } if (!el) this.saveEl = null; };
+		this.renameRef = el => { if (el && el !== this.renEl) { this.renEl = el; el.focus(); el.select(); } if (!el) this.renEl = null; };
+		this.onRWheel = e => {
+			if (this.running()) return;
+			const s = this.state;
+			if (e.ctrlKey || e.metaKey) { e.preventDefault(); this.zoomAt(Math.exp(e.deltaY * 0.01), this.fAtClient(e.clientX)); }
+			else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) { e.preventDefault(); const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY; this.panBy(d / (s.tw || 300) * (s.vR - s.vL)); }
+		};
+		this.rulerRef = el => { if (el === this.rulerEl) return; if (this.rulerEl) this.rulerEl.removeEventListener('wheel', this.onRWheel); this.rulerEl = el; if (el) el.addEventListener('wheel', this.onRWheel, { passive: false }); };
+		this.rDown = e => {
+			if (e.button !== 0 || !this.trackEl || this.running()) return;
+			const r = this.trackEl.getBoundingClientRect(), y = e.clientY - r.top, G = this.geo();
+			const skip = (this.state.tool === 'skip') !== !!e.altKey;
+			this.rd = { mode: y >= G.axisTop ? 'pan' : skip ? 'skip' : 'add', x0: e.clientX - r.left, y0: y, sx: e.clientX, pid: e.pointerId, moved: false, L: this.state.vL, R: this.state.vR };
+		};
+		this.rMove = e => {
+			const d = this.rd;
+			if (!d || !this.trackEl) return;
+			if (!d.moved) { if (Math.abs(e.clientX - d.sx) < 5) return; d.moved = true; try { this.trackEl.setPointerCapture(d.pid); } catch (er) {} }
+			const r = this.trackEl.getBoundingClientRect();
+			if (d.mode === 'pan') { const df = (e.clientX - d.sx) / r.width * (d.R - d.L); this.setView(d.L - df, d.R - df); return; }
+			this.setState({ drag: { x0: d.x0, x1: clamp(e.clientX - r.left, 0, r.width), alt: d.mode === 'skip' } });
+		};
+		this.rUp = e => {
+			const d = this.rd;
+			this.rd = null;
+			if (!d) return;
+			try { if (this.trackEl && this.trackEl.hasPointerCapture(d.pid)) this.trackEl.releasePointerCapture(d.pid); } catch (er) {}
+			if (!d.moved) { if (d.mode !== 'pan') this.clickAt(d.x0, d.y0); return; }
+			const g = this.state.drag;
+			this.setState({ drag: null });
+			if (d.mode === 'pan' || !g) return;
+			const s = this.state, k = (s.vR - s.vL) / (s.tw || 1);
+			const a = snap(s.vL + Math.min(g.x0, g.x1) * k), b = snap(s.vL + Math.max(g.x0, g.x1) * k);
+			if (b - a < 0.025) return;
+			if (g.alt) this.addSkipAt(a, b); else this.addCustom(a, b);
+		};
+		this.rCancel = () => { this.rd = null; this.setState({ drag: null }); };
+		const ovF = x => { if (!this.ovEl) return 0; const r = this.ovEl.getBoundingClientRect(); return OV[0] + clamp((x - r.left) / r.width, 0, 1) * (OV[1] - OV[0]); };
+		this.ovDown = e => { if (e.button !== 0) return; this.ovd = e.pointerId; try { this.ovEl.setPointerCapture(e.pointerId); } catch (er) {} this.centerAt(ovF(e.clientX)); };
+		this.ovMove = e => { if (this.ovd != null) this.centerAt(ovF(e.clientX)); };
+		this.ovUp = () => { if (this.ovd == null) return; try { this.ovEl.releasePointerCapture(this.ovd); } catch (er) {} this.ovd = null; };
+		this.tipLeave = () => this.setState({ tip: null });
+	}
+	observe() {
+		if (!window.ResizeObserver) return this.measure();
+		if (!this.ro) this.ro = new ResizeObserver(() => this.measure());
+		this.ro.disconnect();
+		if (this.rootEl) this.ro.observe(this.rootEl);
+		if (this.trackEl) this.ro.observe(this.trackEl);
+		this.measure();
+	}
+	measure() {
+		const tw = this.trackEl ? this.trackEl.clientWidth : 0, cw = this.rootEl ? this.rootEl.clientWidth : 0;
+		if ((tw && tw !== this.state.tw) || (cw && cw !== this.state.cw)) this.setState({ tw: tw || this.state.tw, cw: cw || this.state.cw });
+	}
+	fAtClient(x) { const s = this.state; if (!this.trackEl) return (s.vL + s.vR) / 2; const r = this.trackEl.getBoundingClientRect(); return s.vL + clamp((x - r.left) / r.width, 0, 1) * (s.vR - s.vL); }
+	setView(L, R) {
+		const span = clamp(R - L, 0.2, LIM[1] - LIM[0]), c = (L + R) / 2;
+		L = c - span / 2; R = c + span / 2;
+		if (L < LIM[0]) { L = LIM[0]; R = L + span; }
+		if (R > LIM[1]) { R = LIM[1]; L = R - span; }
+		this.setState({ vL: L, vR: R });
+	}
+	zoomAt(k, f) { const s = this.state, w = s.vR - s.vL; if (f == null) f = (s.vL + s.vR) / 2; const span = clamp(w * k, 0.2, LIM[1] - LIM[0]), fr = (f - s.vL) / w; this.setView(f - fr * span, f - fr * span + span); }
+	panBy(df) { this.setView(this.state.vL + df, this.state.vR + df); }
+	centerAt(f) { const w = this.state.vR - this.state.vL; this.setView(f - w / 2, f + w / 2); }
+	fitRanges(rs) {
+		const as = rs.map(r => pf(r.fa)).filter(isFinite), bs = rs.map(r => pf(r.fb)).filter(isFinite);
+		if (!as.length) return {};
+		const a = Math.min.apply(null, as), b = Math.max.apply(null, bs), pad = Math.max(0.1, (b - a) * 0.06);
+		return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) };
+	}
+	// ruler geometry (px inside the track)
+	geo() {
+		const narrow = this.narrow();
+		if (this.running()) return { rulerH: narrow ? 132 : 140, tickTop: 6, hopTop: 30, hopH: narrow ? 30 : 38, rangeTop: narrow ? 66 : 76, axisTop: narrow ? 104 : 112, axisH: 22 };
+		const LH = narrow ? 11 : 13, LG = 2, top = 6, lanesEnd = top + LANES.length * (LH + LG) - LG;
+		return { rulerH: lanesEnd + 54, LH, LG, laneTop: top, lanesEnd, rangeTop: lanesEnd + 5, rangeH: 24, axisTop: lanesEnd + 32, axisH: 22 };
+	}
+	clickAt(x, y) {
+		const s = this.state, G = this.geo(), k = (s.tw || 1) / (s.vR - s.vL), X = f => (f - s.vL) * k;
+		if (y < G.lanesEnd + 2) {
+			// a band-plan lane: click a band to add (or take out) that preset
+			const li = Math.floor((y - G.laneTop) / (G.LH + G.LG)), lane = LANES[li];
+			if (!lane) return;
+			const hit = [].concat.apply([], PRESETS.filter(p => p.lane === lane.id).map(p => p.ranges.map(r => ({ p, a: r[0], b: r[1] })))).filter(h => X(h.a) - 3 <= x && X(h.b) + 3 >= x).sort((u, v) => (u.b - u.a) - (v.b - v.a))[0];
+			if (hit) this.togglePreset(hit.p);
+			return;
+		}
+		const f = s.vL + x / k;
+		const r = s.ranges.filter(q => pf(q.fa) <= f && pf(q.fb) >= f).sort((q, w) => (pf(q.fb) - pf(q.fa)) - (pf(w.fb) - pf(w.fa)))[0];
+		if (r) this.flash(r.id);
+	}
+	flash(id) {
+		this.setState({ flash: id });
+		clearTimeout(this.ft); this.ft = setTimeout(() => this.setState({ flash: null }), 1200);
+		setTimeout(() => { const el = document.getElementById('pl-row-' + id); if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, 30);
+	}
+
+	// ---------- Editing ----------
+	setRanges(ranges, extra) { this.setState(Object.assign({ ranges }, extra || {})); }
+	patchRange(id, p) { this.setRanges(this.state.ranges.map(r => r.id === id ? Object.assign({}, r, p) : r)); }
+	patchExcl(rid, xid, p) { const r = this.state.ranges.find(y => y.id === rid); if (r) this.patchRange(rid, { excl: r.excl.map(x => x.id === xid ? Object.assign({}, x, p) : x) }); }
+	togglePreset(p) {
+		const s = this.state;
+		if (s.ranges.some(r => r.src === p.id)) return this.setState({ ranges: s.ranges.filter(r => r.src !== p.id), pop: null });
+		const ranges = s.ranges.concat(fromPreset(p));
+		this.setState(Object.assign({ ranges, pop: null }, this.fitRanges(ranges), p.opts && p.opts.hold != null ? { hold: p.opts.hold } : null));
+	}
+	addCustom(a, b) {
+		const s = this.state, n = s.ranges.filter(r => !r.src).length;
+		const r = mkRange({ name: n ? 'Your range ' + (n + 1) : 'Your range', a, b, protos: guessProtos(a, b) });
+		this.setRanges(s.ranges.concat([r]));
+		this.flash(r.id);
+	}
+	addSkipAt(a, b) {
+		const s = this.state, m = (a + b) / 2;
+		const r = s.ranges.filter(x => pf(x.fa) <= m && pf(x.fb) >= m).sort((x, y) => (pf(x.fb) - pf(x.fa)) - (pf(y.fb) - pf(y.fa)))[0];
+		if (!r) return this.toast('A skip goes inside a range');
+		this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(Math.max(a, pf(r.fa))), fb: f3(Math.min(b, pf(r.fb))), why: 'Skipped by you' }]) });
+		this.flash(r.id);
+	}
+	removeRange(r) {
+		const s = this.state, idx = s.ranges.indexOf(r);
+		this.setRanges(s.ranges.filter(x => x !== r), { pop: null });
+		this.toast('Removed ' + r.name, () => { const rs = this.state.ranges.slice(); rs.splice(idx, 0, r); this.setState({ ranges: rs, toast: null }); });
+	}
+	toast(text, undo) { clearTimeout(this.tt); this.setState({ toast: { text, undo } }); this.tt = setTimeout(() => this.setState({ toast: null }), undo ? 6000 : 3200); }
+	openPop(kind, rid, e, w0) {
+		const s = this.state;
+		if (s.pop && s.pop.kind === kind && s.pop.rid === rid) return this.setState({ pop: null });
+		if (!this.rootEl || !e || !e.currentTarget) return;
+		const rr = this.rootEl.getBoundingClientRect(), br = e.currentTarget.getBoundingClientRect();
+		const w = Math.min(w0, rr.width - 16);
+		const below = rr.bottom - br.bottom, above = br.top - rr.top;
+		const up = below < 230 && above > below;
+		const left = clamp(kind === 'more' ? br.right - rr.left - w : br.left - rr.left, 8, rr.width - w - 8);
+		this.setState({ pop: { kind, rid, w, left, top: up ? null : br.bottom - rr.top + 6, bottom: up ? rr.bottom - br.top + 6 : null, maxH: Math.max(140, (up ? above : below) - 14) }, spCustom: '', saveName: kind === 'save' ? this.planNow().name : s.saveName });
+	}
+
+	// ---------- Plan (mirrors core's preview) ----------
+	stage() { return this.props.stage === 'S2' ? 'S2' : 'S1'; }
+	vis(p, st) { return !PROTO[p].s2 || st === 'S2'; }
+	info(r, o) {
+		const a = pf(r.fa), b = pf(r.fb), st = o.stage === 'S2' ? 'S2' : 'S1';
+		let err = '';
+		if (!(isFinite(a) && isFinite(b))) err = 'Type both edges in MHz';
+		else if (b <= a) err = 'The low edge is above the high edge';
+		else if (a < LIM[0] || b > LIM[1]) err = 'The receiver tunes 24 to 1766 MHz';
+		const on = r.protos.filter(p => this.vis(p, st) && !coveredElsewhere(p, r));
+		const ex = err ? [] : r.excl.map(x => { const xa = pf(x.fa), xb = pf(x.fb), ok = isFinite(xa) && isFinite(xb) && xb > xa && xb > a && xa < b; return { x, ok, ca: ok ? Math.max(a, xa) : 0, cb: ok ? Math.min(b, xb) : 0 }; });
+		const eff = err ? 0 : Math.max(0, b - a - ex.filter(e => e.ok).reduce((t, e) => t + e.cb - e.ca, 0));
+		if (!err && eff <= 0) err = 'Everything in it is skipped';
+		const hops = err ? 0 : Math.max(1, Math.ceil(eff / HOP_MHZ - 1e-9));
+		const n = o.findOnly ? 0 : st === 'S2' ? Math.min(on.length, 2) : on.length;
+		const dwell = DWELLS[o.dwell || 'normal'] + DWELL_PER * n;
+		const sp = r.sp || r.spDef;
+		return { r, a, b, err, on, ex, hops, dwell, sp };
+	}
+	planOf(ranges, o) {
+		const rs = ranges.map(r => this.info(r, o)).sort((x, y) => ((x.a || 0) - (y.a || 0)) || ((y.b || 0) - (x.b || 0)));
+		rs.forEach((i, k) => { i.num = k + 1; });
+		if (!rs.length) return { valid: false, empty: true, rs, merged: [] };
+		const bad = rs.find(i => i.err);
+		if (bad) return { valid: false, rs, merged: [], bad };
+		// overlapping ranges are swept once, trying the protocols of every range there
+		const uniq = [];
+		[].concat.apply([], rs.map(i => i.ex.filter(e => e.ok))).sort((x, y) => x.ca - y.ca || y.cb - x.cb).forEach(e => { const last = uniq[uniq.length - 1]; if (!last || e.cb > last.cb) uniq.push(e); });
+		const merged = [];
+		rs.forEach(i => { const m = merged[merged.length - 1]; if (m && i.a <= m.b) { m.b = Math.max(m.b, i.b); m.items.push(i); } else merged.push({ a: i.a, b: i.b, items: [i] }); });
+		merged.forEach(m => {
+			m.skip = uniq.filter(e => e.ca >= m.a && e.cb <= m.b).reduce((t, e) => t + e.cb - e.ca, 0);
+			m.hops = Math.max(1, Math.ceil(Math.max(0.01, m.b - m.a - m.skip) / HOP_MHZ - 1e-9));
+			m.dwell = Math.max.apply(null, m.items.map(i => i.dwell));
+		});
+		const hops = merged.reduce((t, m) => t + m.hops, 0), T = merged.reduce((t, m) => t + m.hops * m.dwell, 0);
+		const users = o.users || [], srcs = Array.from(new Set(rs.filter(i => i.r.src).map(i => i.r.src))), nC = rs.filter(i => !i.r.src).length;
+		const order = users.concat(PRESETS).map(p => p.id);
+		const names = srcs.slice().sort((x, y) => order.indexOf(x) - order.indexOf(y)).map(id => { const p = presetById(id, users); return p ? p.short || p.name : id; }).concat(nC ? [nC > 1 ? 'your ranges' : 'your range'] : []);
+		const name0 = names.length <= 2 ? names.join(' + ') : names[0] + ' + ' + (names.length - 1) + ' more';
+		return { valid: true, rs, merged, uniq, hops, T, srcs, name: name0.charAt(0).toUpperCase() + name0.slice(1) };
+	}
+	planNow() { const s = this.state; return this.planOf(s.ranges, { findOnly: s.findOnly, dwell: s.dwell, users: s.userPresets, stage: this.props.stage }); }
+	// on-scan start: one entry per range (the table's rows), plus the merged stretches the sweep visits
+	payload(plan, o) {
+		const hz = x => Math.round(x * 1e6);
+		const ranges = plan.rs.map(i => ({ name: i.r.name, startHz: hz(i.a), endHz: hz(i.b), hops: i.hops, spacingHz: i.sp.slice(), protocols: o.findOnly ? [] : i.on.slice() }));
+		const exclusions = plan.uniq.map(e => ({ startHz: hz(e.ca), endHz: hz(e.cb), reason: e.x.auto ? e.x.why + ' · already decoded by ' + e.x.by : 'Skipped by you' }));
+		const stretches = plan.merged.map(m => ({ startHz: hz(m.a), endHz: hz(m.b), hops: m.hops, name: m.items.map(i => i.r.short).join(' + ') }));
+		return { preset: plan.name, startHz: hz(plan.merged[0].a), endHz: hz(plan.merged[plan.merged.length - 1].b), ranges, exclusions, hops: plan.hops, sweepS: Math.max(1, Math.round(plan.T)), stretches,
+			options: { holdOnActivity: o.hold, findOnly: o.findOnly, record: o.rec, stopAfter: o.stopAfter, timePerHop: o.dwell, sensitivity: o.sens } };
+	}
+
+	// ---------- Running mode ----------
+	runOf(p, state) {
+		return { state, preset: p.preset, startHz: p.startHz, endHz: p.endHz, ranges: p.ranges, exclusions: p.exclusions, stretches: p.stretches, hops: p.hops, sweepS: p.sweepS };
+	}
+	// the sweep to show: the shell's when it passes a running one, else the board's own
+	run() {
+		const w = this.props.sweep;
+		if (w && RUNNING(w.state)) return Object.assign({ ext: true }, w);
+		const o = this.state.own;
+		return o ? Object.assign({}, o, { hop: this.state.hop }) : null;
+	}
+	running() { return !!this.run(); }
+	narrow() { const cw = this.state.cw || 1440; return cw < 760; }
+	// the stretches the sweep visits, in order, with their hops (BandStrip's layout, kept readable)
+	stretchesOf(w) {
+		const rows = (w.ranges && w.ranges.length ? w.ranges : [{ startHz: w.startHz, endHz: w.endHz, name: w.preset }]).slice().sort((x, y) => x.startHz - y.startHz);
+		let st = w.stretches && w.stretches.length ? w.stretches.map(x => ({ a: x.startHz, b: x.endHz, hops: x.hops })) : null;
+		if (!st) {
+			st = [];
+			rows.forEach(r => { const m = st[st.length - 1]; if (m && r.startHz <= m.b) { m.b = Math.max(m.b, r.endHz); m.n++; } else st.push({ a: r.startHz, b: r.endHz, hops: r.hops, n: 1 }); });
+			const tot = st.reduce((t, m) => t + m.b - m.a, 0);
+			const own = st.every(m => m.n === 1 && m.hops > 0) && st.reduce((t, m) => t + m.hops, 0) === w.hops;
+			st.forEach(m => { m.hops = st.length === 1 ? w.hops : own ? m.hops : Math.max(1, Math.round(w.hops * (m.b - m.a) / tot)); });
+		}
+		return { rows, st };
+	}
+	hopAt(w, hz) {
+		const { st } = this.stretchesOf(w);
+		let n = 0;
+		for (const m of st) { if (hz >= m.a && hz <= m.b) return n + Math.min(m.hops, Math.floor((hz - m.a) / ((m.b - m.a) / m.hops)) + 1); n += m.hops; }
+		return 1;
+	}
+	runLayout(w, tw) {
+		const { rows, st } = this.stretchesOf(w);
+		// separate stretches share the ruler with a small break; each gets its width's share, never less than a readable minimum
+		const GAP = st.length > 1 ? 22 : 0, room = tw - GAP * (st.length - 1);
+		const tot = st.reduce((t, m) => t + m.b - m.a, 0), MIN = st.length > 1 ? Math.min(150, room / st.length) : 0;
+		const raw = st.map(m => Math.max(MIN, room * (m.b - m.a) / tot)), rawTot = raw.reduce((t, v) => t + v, 0);
+		let at = 0;
+		const segs = st.map((m, i) => { const sg = { a: m.a, b: m.b, x: at, w: raw[i] * room / rawTot, hops: m.hops }; at += sg.w + GAP; return sg; });
+		const segOf = f => segs.find(g => f >= g.a && f <= g.b);
+		const P = f => { const g = segOf(f); return g ? g.x + (f - g.a) / (g.b - g.a) * g.w : null; };
+		const cells = [];
+		segs.forEach(g => { for (let k = 0; k < g.hops; k++) cells.push({ x: g.x + k * g.w / g.hops, w: g.w / g.hops, a: g.a + k * (g.b - g.a) / g.hops, b: g.a + (k + 1) * (g.b - g.a) / g.hops }); });
+		return { rows, segs, segOf, P, cells, GAP };
+	}
+
+	// ---------- Values ----------
+	presetVals(plan) {
+		const s = this.state, picked = id => s.ranges.some(r => r.src === id), users = s.userPresets;
+		return users.concat(PRESETS).map((p, i) => {
+			const on = picked(p.id), c = chipc(on);
+			const range = p.ranges.map(r => mt(r[0]) + '–' + mt(r[1])).join(', ') + ' MHz';
+			return { label: p.user ? p.name : p.chip || p.name, user: !!p.user, on, bg: c.bg, fg: c.fg, divider: i === users.length && i > 0,
+				title: (p.user ? 'Your preset · ' : '') + p.name + ' · ' + range, aria: p.name + (p.user ? ', your preset' : '') + ', ' + range, pick: () => this.togglePreset(p) };
+		});
+	}
+	composeRuler(plan, G) {
+		const s = this.state, L = s.vL, R = s.vR, tw = s.tw || 1200, k = tw / (R - L), X = f => (f - L) * k;
+		const ok = plan.rs.filter(i => !i.err);
+		const picked = id => s.ranges.some(r => r.src === id);
+		// band-plan lanes; a band's name shows only where it fits, after the bands before it in its lane
+		const laneBars = [];
+		LANES.forEach((ln, li) => {
+			const bands = [].concat.apply([], PRESETS.filter(p => p.lane === ln.id).map(p => p.ranges.map(r => ({ p, a: r[0], b: r[1], label: r[2] || p.name, alt: p.short || p.chip || '' })))).sort((u, v) => u.a - v.a || v.b - u.b);
+			let edge = -Infinity;
+			bands.filter(h => h.b > L && h.a < R).forEach(h => {
+				const x0 = Math.max(0, X(h.a)), x1 = Math.min(tw, X(h.b)), w = Math.max(2, x1 - x0), on = picked(h.p.id);
+				const lbl = w >= textW(h.label, 10.5) + 10 ? h.label : h.alt && w >= textW(h.alt, 10.5) + 10 ? h.alt : '';
+				const fits = !!lbl && x0 >= edge;
+				if (fits) edge = x0 + textW(lbl, 10.5) + 12;
+				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: on ? 'rgba(var(--wk-accent-rgb),.26)' : 'rgba(var(--wk-ink-rgb),.09)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', text: fits ? lbl : '',
+					title: h.label + ' · ' + mt(h.a) + '–' + mt(h.b) + ' MHz · click to ' + (on ? 'take it out' : 'add it') });
+			});
+		});
+		// your ranges: elementary stretches, where two ranges overlap the fill doubles
+		const pts = Array.from(new Set([].concat.apply([], ok.map(i => [i.a, i.b])))).sort((a, b) => a - b), runs = [];
+		for (let j = 0; j < pts.length - 1; j++) {
+			const p = pts[j], q = pts[j + 1], cov = ok.filter(i => i.a <= p && i.b >= q);
+			if (cov.length) runs.push({ a: p, b: q, cov });
+		}
+		const RT = G.rangeTop;
+		const runBars = runs.filter(r => r.b > L && r.a < R).map(r => {
+			const x0 = Math.max(0, X(r.a)), x1 = Math.min(tw, X(r.b)), fl = r.cov.some(i => i.r.id === s.flash);
+			return { top: RT, h: G.rangeH, left: x0, width: Math.max(2, x1 - x0), title: r.cov.map(i => i.num + ' ' + i.r.name).join(' + ') + ' · ' + mt(r.a) + '–' + mt(r.b) + ' MHz', bg: fl ? 'rgba(var(--wk-accent-rgb),.55)' : r.cov.length > 1 ? 'rgba(var(--wk-accent-rgb),.36)' : 'rgba(var(--wk-accent-rgb),.18)' };
+		});
+		const skipBars = [].concat.apply([], ok.map(i => i.ex.filter(e => e.ok && e.cb > L && e.ca < R).map(e => { const x0 = Math.max(0, X(e.ca)); return { top: RT - 1, h: G.rangeH + 2, left: x0, width: Math.max(3, Math.min(tw, X(e.cb)) - x0), title: 'Skipped · ' + f3(e.ca) + '–' + f3(e.cb) + ' · ' + (e.x.auto ? e.x.why + ', already decoded by ' + e.x.by : e.x.why) }; })));
+		// zoomed in (under 2 MHz across), faint channel ticks show each range's spacing
+		const chanTicks = [];
+		if (R - L < 2) {
+			ok.forEach(i => {
+				const sps = i.sp.filter(v => v > 0).sort((a, b) => b - a);
+				sps.forEach((v, si) => {
+					const st = v / 1e6;
+					if ((R - L) / st > 700) return;
+					for (let n = Math.ceil(Math.max(L, i.a) / st); n * st <= Math.min(R, i.b); n++) chanTicks.push({ left: X(n * st), top: RT + G.rangeH - (si ? 4 : 7), h: si ? 4 : 7, op: si ? 0.18 : 0.3 });
+				});
+			});
+		}
+		// tags 1, 2, 3… at each range's low edge, names only where they fit
+		const tags = placeTags(ok.filter(i => i.b > L && i.a < R).map(i => ({ x0: Math.max(0, X(i.a)), x1: Math.min(tw, X(i.b)), num: i.num, name: i.r.name })), tw, RT + 3, skipBars.filter(x => x.width >= 8).map(x => x.left))
+			.map(t => Object.assign(t, { bg: 'var(--wk-accent)', fg: 'var(--wk-on-accent)', op: 1, title: t.num + ' · ' + t.name }));
+		const step = [0.025, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 25, 50, 100, 200, 500].find(st => st * k >= 70) || 500;
+		const dec = step < 0.1 ? 3 : step === 0.25 ? 2 : step < 1 ? 1 : 0;
+		const rTicks = [];
+		for (let n = Math.ceil(L / step); n * step <= R; n++) {
+			const x = X(n * step);
+			if (x < 3 || x > tw - 56) continue;
+			rTicks.push({ left: x, text: (n * step).toFixed(dec), shift: x < 22 ? '0' : '-50%' });
+		}
+		rTicks.push({ left: tw - 2, text: 'MHz', shift: '-100%' });
+		const g = s.drag, gA = g ? L + Math.min(g.x0, g.x1) / k : 0, gB = g ? L + Math.max(g.x0, g.x1) / k : 0;
+		const fmt = f => +f.toFixed(R - L < 5 ? 3 : 1), ovS = OV[1] - OV[0], ovP = f => clamp((f - OV[0]) / ovS * 100, 0, 100);
+		const skipTool = s.tool === 'skip', vis = runs.some(r => r.b > L && r.a < R);
+		return {
+			laneBars, runBars, skipBars, chanTicks, tags, rTicks,
+			laneLine: G.lanesEnd + 2,
+			rulerEmpty: !vis, emptyTop: RT, emptyH: G.rangeH,
+			rulerEmptyText: skipTool ? 'Skips go inside a range' : ok.length ? 'Your ranges are outside this view · Fit' : 'Drag here to draw a range, or click a band above',
+			tools: [['add', 'Add', 'Drag on the ruler adds a range · Alt-drag skips'], ['skip', 'Skip', 'Drag across a range skips that part · Alt-drag adds']].map(t => Object.assign(segc(s.tool === t[0]), { label: t[1], title: t[2], pick: () => this.setState({ tool: t[0] }) })),
+			rulerAria: 'Band ruler, ' + fmt(L) + ' to ' + fmt(R) + ' MHz. Drag to add a range, Alt-drag to skip, arrow keys move, plus and minus zoom.',
+			rCursor: g ? (g.alt ? 'cell' : 'col-resize') : skipTool ? 'cell' : 'crosshair',
+			axisCursor: this.rd && this.rd.mode === 'pan' && this.rd.moved ? 'grabbing' : 'grab', axisTitle: 'Drag to move along the band',
+			hasDrag: !!g && Math.abs(g.x1 - g.x0) > 1, dragL: g ? Math.min(g.x0, g.x1) : 0, dragW: g ? Math.abs(g.x1 - g.x0) : 0, dragH: G.rangeTop + G.rangeH,
+			dragText: g ? (g.alt ? 'Skip ' : 'Add ') + f3(snap(gA)) + '–' + f3(snap(gB)) : '',
+			dragEdge: g && g.alt ? 'var(--wk-text-2)' : 'var(--wk-accent)',
+			dragBg: g && g.alt ? 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.35) 0 1.5px, transparent 1.5px 4px)' : 'rgba(var(--wk-accent-rgb),.1)',
+			zoomIn: () => this.zoomAt(0.5), zoomOut: () => this.zoomAt(2),
+			zoomFit: () => { const v = this.fitRanges(s.ranges.filter(r => isFinite(pf(r.fa)) && isFinite(pf(r.fb)))); if (v.vL != null) this.setState(v); },
+			noFit: !ok.length, fitOp: ok.length ? 1 : 0.45,
+			ovMarks: ok.filter(i => i.b > OV[0] && i.a < OV[1]).map(i => ({ left: ovP(i.a), width: Math.max(0.3, ovP(i.b) - ovP(i.a)) })),
+			ovL: ovP(L), ovW: Math.max(0.8, ovP(R) - ovP(L)), ovNow: Math.round((L + R) / 2), ovText: fmt(L) + ' to ' + fmt(R) + ' MHz',
+			hopCells: [], runSkips: [], segGaps: [], rowBars: [], ticks: [], hasTip: false
+		};
+	}
+	runRuler(w, G) {
+		const s = this.state, tw = s.tw || 1200, lay = this.runLayout(w, tw), off = s.runOff;
+		const paused = !LIVE(w.state), acc = paused ? 'var(--wk-amber)' : 'var(--wk-accent)', accRgb = paused ? 'var(--wk-amber-rgb)' : 'var(--wk-accent-rgb)';
+		const cur = clamp(w.hop || 1, 1, lay.cells.length);
+		const rowOn = r => !off[r.name];
+		const onAt = f => lay.rows.some(r => rowOn(r) && f >= r.startHz && f <= r.endHz);
+		const hopCells = lay.cells.map((c, i) => {
+			const n = i + 1, on = n === cur;
+			return { top: G.hopTop, h: G.hopH, left: c.x + 0.5, width: Math.max(1, c.w - 1.5), bg: on ? acc : n < cur ? 'rgba(' + accRgb + ',.30)' : 'rgba(var(--wk-accent-rgb),.12)',
+				glow: on && this.props.theme !== 'light' ? '0 0 12px rgba(' + accRgb + ',.5)' : 'none', op: onAt((c.a + c.b) / 2) ? 1 : 0.3 };
+		});
+		const exl = w.exclusions || [];
+		const runSkips = exl.map(x => { const g = lay.segs.find(q => x.endHz > q.a && x.startHz < q.b); if (!g) return null; const x0 = lay.P(Math.max(g.a, x.startHz)), x1 = lay.P(Math.min(g.b, x.endHz)); return { top: G.hopTop - 1, h: G.hopH + 2, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + (x.reason || 'skipped') }; }).filter(Boolean);
+		const segGaps = lay.segs.slice(1).map((g, i) => ({ top: G.hopTop, h: G.hopH, left: lay.segs[i].x + lay.segs[i].w, width: lay.GAP, title: 'Not scanned · ' + short(lay.segs[i].b) + '–' + short(g.a) + ' MHz' }));
+		// each range: a thin line under the hops and its numbered tag (same numbers as the table)
+		const rows = lay.rows.map((r, i) => ({ r, num: i + 1, x0: lay.P(r.startHz), x1: lay.P(r.endHz), on: rowOn(r) }));
+		const rowBars = rows.map(o => ({ top: G.rangeTop + 20, h: 3, left: o.x0, width: Math.max(2, o.x1 - o.x0), bg: o.on ? 'rgba(var(--wk-accent-rgb),.5)' : 'rgba(var(--wk-ink-rgb),.15)' }));
+		const tags = placeTags(rows.map(o => ({ x0: o.x0, x1: o.x1, num: o.num, name: o.r.name, on: o.on })), tw, G.rangeTop)
+			.map(t => Object.assign(t, { bg: t.on ? 'var(--wk-accent)' : 'var(--wk-chip)', fg: t.on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', op: t.on ? 1 : 0.7, title: t.num + ' · ' + t.name + (t.on ? '' : ' · off') }));
+		// discovery ticks: active first, then by confidence; one within 10 px of a placed tick folds into it
+		const own = !w.ext;
+		const discs = (this.props.discoveries || DISCS.map(d => Object.assign({}, d, { active: own && w.state === 'holding' && d.hz === w.holdHz }))).filter(d => !!lay.segOf(d.hz) && !d.ignored);
+		const placed = [];
+		discs.slice().sort((a, b) => (!!b.active - !!a.active) || ((RANK[b.conf] || 0) - (RANK[a.conf] || 0)) || (!!b.recent - !!a.recent)).forEach(d => {
+			const x = lay.P(d.hz), near = placed.find(p => Math.abs(p.x - x) < 10);
+			if (near) near.more++; else placed.push({ d, x, more: 0 });
+		});
+		const ticks = placed.sort((a, b) => a.d.hz - b.d.hz).map(p => {
+			const d = p.d, solid = d.conf === 'decoded';
+			const color = d.conf === 'heard' ? 'rgba(var(--wk-ink-2-rgb),.8)' : solid || d.conf === 'likely' ? 'var(--wk-accent)' : 'rgba(var(--wk-accent-rgb),.85)';
+			return { top: G.tickTop, left: p.x, active: !!d.active, fresh: !!d.fresh && !d.active, color, fill: solid ? color : 'var(--wk-well)',
+				aria: 'Tune to ' + short(d.hz) + ' MHz, ' + d.label + (p.more ? ', ' + p.more + ' more nearby' : ''),
+				enter: () => this.setState({ tip: { hz: d.hz } }),
+				pick: () => { if (this.props.onTune) this.props.onTune(d.hz); else this.toast('Tunes to ' + short(d.hz) + ' MHz'); } };
+		});
+		const tp = s.tip && placed.find(p => p.d.hz === s.tip.hz), td = tp ? tp.d : null;
+		// axis: each stretch's ends, plus round steps inside a wide one
+		const rTicks = [];
+		lay.segs.forEach((g, gi) => {
+			const span = g.b - g.a, pxPer = g.w / span;
+			rTicks.push({ left: g.x, text: short(g.a), shift: '0' });
+			const endText = short(g.b) + (gi === lay.segs.length - 1 ? ' MHz' : '');
+			const endW = textW(endText, 11.5);
+			if (g.w > endW + 46) rTicks.push({ left: g.x + g.w, text: endText, shift: '-100%' });
+			const step = [1e5, 2e5, 5e5, 1e6, 2e6, 5e6, 10e6, 20e6, 50e6].find(v => v * pxPer >= 90);
+			if (!step) return;
+			for (let f = Math.ceil(g.a / step) * step; f < g.b; f += step) { const x = lay.P(f); if (x - g.x > 44 && g.x + g.w - x > endW + 30) rTicks.push({ left: x, text: short(f), shift: '-50%' }); }
+		});
+		return { hopCells, runSkips, segGaps, rowBars, tags, ticks, rTicks, laneBars: [], runBars: [], skipBars: [], chanTicks: [], rulerEmpty: false, hasDrag: false,
+			rCursor: 'default', axisCursor: 'default', axisTitle: '', rulerAria: 'Scan ruler, ' + short(w.startHz) + ' to ' + short(w.endHz) + ' MHz',
+			hasTip: !!td, tipTop: G.tickTop + 26, tipLeft: td ? clamp(tp.x, 10, tw - 10) : 0, tipShift: td ? (tp.x < 150 ? '0' : tp.x > tw - 150 ? '-100%' : '-50%') : '0',
+			tipFreq: td ? fq(td.hz) : '', tipLabel: td ? td.label : '', tipColor: td && td.conf === 'heard' ? 'var(--wk-text-2)' : 'var(--wk-accent)', tipDecoded: !!td && td.conf === 'decoded',
+			tipSub: td ? td.sub : '', tipHasSub: !!(td && td.sub), tipWhen: td ? (td.active ? 'Active now' : td.recent ? 'Heard in the last hour' : 'Heard earlier') + (tp.more ? ' · +' + tp.more + ' nearby' : '') + ' · click to tune' : '',
+			lay, cur };
+	}
+	protoChips(labels, cw) { const max = cw >= 1320 ? 6 : cw >= 1100 ? 4 : cw >= 760 ? 3 : 99; return { shown: labels.slice(0, max).map(l => ({ label: l })), more: labels.length > max ? '+' + (labels.length - max) : '' }; }
+	composeRows(plan) {
+		const s = this.state, cw = s.cw || 1440, st = this.stage();
+		return plan.rs.map(i => {
+			const r = i.r, lab = p => (r.labels && r.labels[p]) || PROTO[p].label;
+			const labels = i.on.map(lab), pc = this.protoChips(labels, cw);
+			const user = r.excl.filter(x => !x.auto), auto = r.excl.filter(x => x.auto);
+			const names = auto.map(x => x.why).concat(user.length ? [user.length === 1 ? f3(pf(user[0].fa)) + '–' + f3(pf(user[0].fb)) : user.length + ' yours'] : []);
+			const amber = 'rgba(var(--wk-amber-rgb),.7)', badA = i.err && !(isFinite(i.a) && (!isFinite(i.b) || i.a < i.b)), mine = !!r.sp && !spSame(r.sp, r.spDef);
+			return {
+				domId: 'pl-row-' + r.id, num: i.num, name: r.name, aria: i.num + ', ' + r.name + ', ' + (i.err || f3(i.a) + ' to ' + f3(i.b) + ' MHz'),
+				bg: s.flash === r.id ? 'var(--wk-sel)' : 'transparent', op: 1,
+				tagBg: i.err ? 'var(--wk-amber)' : 'var(--wk-accent)', tagFg: i.err ? 'var(--wk-on-amber)' : 'var(--wk-on-accent)',
+				renaming: s.renaming === r.id, notRenaming: s.renaming !== r.id, rename: () => this.setState({ renaming: r.id, renameText: r.name, pop: null }),
+				editable: true, readOnly: false, err: i.err || '',
+				fa: r.fa, fb: r.fb, aEdge: i.err && (badA || !isFinite(i.a) || i.a < LIM[0]) ? amber : '', bEdge: i.err && !badA ? amber : '',
+				onA: e => this.patchRange(r.id, { fa: e.target.value }), onB: e => this.patchRange(r.id, { fb: e.target.value }),
+				spText: spText(i.sp), spMine: mine, spTitle: mine ? 'Band plan: ' + spText(r.spDef) : 'Channel spacing',
+				openSp: e => this.openPop('sp', r.id, e, 300),
+				protos: s.findOnly ? [] : pc.shown, protoMore: !s.findOnly && !!pc.more, protoMoreText: pc.more,
+				protoNone: s.findOnly || !labels.length, protoNoneText: s.findOnly ? 'Find only' : 'Any signal',
+				protoAll: s.findOnly ? 'Find signals only · no decoding' : labels.length ? labels.join(', ') : 'Finds any signal, decodes nothing',
+				openProtos: e => this.openPop('protos', r.id, e, 360),
+				hasSkips: names.length > 0, skipText: names.length ? names.join(', ') : 'None', skipFg: names.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)',
+				skipTitle: r.excl.length ? r.excl.map(x => x.fa + '–' + x.fb + ' MHz · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why)).join('\n') : 'Skip a part · or Alt-drag on the ruler',
+				openSkips: e => this.openPop('skips', r.id, e, 400),
+				openMore: e => this.openPop('more', r.id, e, 160)
+			};
+		});
+	}
+	runRows(rr) {
+		const s = this.state, cw = s.cw || 1440, w = rr.w, exl = w.exclusions || [];
+		return rr.lay.rows.map((r, k) => {
+			const on = !s.runOff[r.name], v = sw(on);
+			const labels = (r.protocols || []).map(p => PROTO[p] ? PROTO[p].label : p), pc = this.protoChips(labels, cw);
+			const sk = exl.filter(x => x.endHz > r.startHz && x.startHz < r.endHz).map(x => !x.reason || /^Skipped/.test(x.reason) ? short(x.startHz) + '–' + short(x.endHz) : x.reason.split(' · ')[0]);
+			return {
+				domId: 'pl-run-' + k, num: k + 1, name: r.name, aria: (k + 1) + ', ' + r.name + (on ? '' : ', off'),
+				bg: 'transparent', op: on ? 1 : 0.55, tagBg: on ? 'var(--wk-accent)' : 'var(--wk-chip)', tagFg: on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)',
+				renaming: false, notRenaming: true, rename: null, editable: false, readOnly: true, err: '',
+				edgesText: short(r.startHz) + '–' + short(r.endHz),
+				spText: spText(r.spacingHz), spMine: false, spTitle: 'Channel spacing',
+				protos: pc.shown, protoMore: !!pc.more, protoMoreText: pc.more, protoNone: !labels.length, protoNoneText: 'Any signal', protoAll: labels.join(', ') || 'Any signal',
+				hasSkips: sk.length > 0, skipText: sk.length ? Array.from(new Set(sk)).join(', ') : 'None', skipFg: sk.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)', skipTitle: '',
+				on, track: v.track, knob: v.knob, swTitle: on ? 'Take it out of the scan for now' : 'Scan it again',
+				toggle: () => { this.setState({ runOff: Object.assign({}, s.runOff, { [r.name]: on }) }); if (this.props.onScan) this.props.onScan({ type: 'range', name: r.name, on: !on }); }
+			};
+		});
+	}
+	popVals(plan) {
+		const s = this.state, p = s.pop, st = this.stage();
+		const none = { hasPop: false, popSp: false, popProtos: false, popSkips: false, popMore: false, popOpts: false, popSave: false };
+		if (!p) return none;
+		const r = s.ranges.find(x => x.id === p.rid), i = r && plan.rs.find(x => x.r === r);
+		const base = Object.assign({}, none, { hasPop: true, popLeft: p.left, popW: p.w, popTop: p.top == null ? 'auto' : p.top + 'px', popBottom: p.bottom == null ? 'auto' : p.bottom + 'px', popMaxH: p.maxH, popName: r ? r.name : '' });
+		if (p.kind === 'options') {
+			return Object.assign(base, { popOpts: true, popLabel: 'Options',
+				optSwitches: [
+					['pl-o-hold', 'Stop on activity', 'Stays on a call until 2 s after it ends, up to 60 s', 'hold'],
+					['pl-o-find', 'Find signals only', 'Lists what transmits without trying a decoder · fastest', 'findOnly'],
+					['pl-o-rec', 'Record calls', 'Decoded calls go to Activity like any other', 'rec']
+				].map(o => { const v = sw(!!s[o[3]]); return { id: o[0], label: o[1], hint: o[2], on: v.on, track: v.track, knob: v.knob, toggle: () => this.setState({ [o[3]]: !s[o[3]] }) }; }),
+				optSegs: [
+					['pl-o-stop', 'Stop after', 'Ends the scan on its own', 'stopAfter', STOPS],
+					['pl-o-dwell', 'Time per hop', 'How long each hop listens · for every range', 'dwell', DWELL_OPTS],
+					['pl-o-sens', 'Sensitivity', 'Higher finds weaker signals, and more false ones · for every range', 'sens', SENS]
+				].map(o => ({ id: o[0], label: o[1], hint: o[2], opts: o[4].map(v => Object.assign(segc(s[o[3]] === v[0]), { label: v[1], pick: () => this.setState({ [o[3]]: v[0] }) })) }))
+			});
+		}
+		if (p.kind === 'save') {
+			const name = s.saveName.trim();
+			const save = () => {
+				if (!name || !plan.valid) return;
+				const id = 'u' + Date.now();
+				const np = { id, user: true, name, short: name.length > 16 ? name.split(' ')[0] : name, ranges: plan.rs.map(x => [x.a, x.b, x.r.name]), protos: plan.rs[0].on.length ? plan.rs[0].on : ['fm'], sp: plan.rs[0].sp, opts: { hold: s.hold } };
+				this.setState({ userPresets: [np].concat(s.userPresets), pop: null, ranges: s.ranges.map(x => Object.assign({}, x, { src: id })) });
+				this.toast('Saved “' + name + '” · first in the presets');
+			};
+			return Object.assign(base, { popSave: true, popLabel: 'Save as preset', saveName: s.saveName, saveRef: this.saveRef, onSaveName: e => this.setState({ saveName: e.target.value }),
+				saveKey: e => { e.stopPropagation(); if (e.key === 'Enter') save(); if (e.key === 'Escape') this.setState({ pop: null }); }, savePreset: save, saveNameBad: !name, saveNameOp: name ? 1 : 0.45 });
+		}
+		if (!r || !i) return none;
+		if (p.kind === 'sp') {
+			const cur = i.sp, customs = cur.filter(v => v > 0 && !SP_OPTS.includes(v));
+			const set = arr => this.patchRange(r.id, { sp: spSame(arr, r.spDef) ? null : arr });
+			const tog = v => { if (v === 0) return set([0]); const base0 = cur.filter(x => x > 0); const nx = base0.includes(v) ? base0.filter(x => x !== v) : base0.concat([v]); set(nx.length ? nx : [0]); };
+			const cv = pf(s.spCustom), bad = !(cv >= 0.5 && cv <= 500);
+			const add = () => { if (bad) return; const hz = Math.round(cv * 1000); tog(cur.includes(hz) ? -1 : hz); this.setState({ spCustom: '' }); };
+			return Object.assign(base, { popSp: true, popLabel: 'Channel spacing for ' + r.name,
+				spOpts: SP_OPTS.concat(customs).map(v => Object.assign(chipc(cur.includes(v)), { label: kHz(v), title: kHz(v) + ' kHz channels', pick: () => tog(v) }))
+					.concat([Object.assign(chipc(cur.includes(0)), { label: 'Any', title: 'No channel grid · for wideband devices', pick: () => tog(0) })]),
+				spCustom: s.spCustom, onSpCustom: e => this.setState({ spCustom: e.target.value }), spCustomKey: e => { e.stopPropagation(); if (e.key === 'Enter') add(); if (e.key === 'Escape') this.setState({ pop: null }); },
+				addSpCustom: add, spCustomBad: bad, spCustomOp: bad ? 0.45 : 1,
+				spCanReset: !!r.sp && !spSame(r.sp, r.spDef), spResetText: 'Use the band plan · ' + spText(r.spDef), spReset: () => this.patchRange(r.id, { sp: null })
+			});
+		}
+		if (p.kind === 'protos') {
+			const lab = q => (r.labels && r.labels[q]) || PROTO[q].label;
+			const a = i.a, b = i.b;
+			const list = PORDER.filter(q => this.vis(q, st) && !coveredElsewhere(q, r) && (!PROTO[q].only || PROTO[q].only.some(f => f >= a && f <= b)));
+			return Object.assign(base, { popProtos: true, popLabel: 'Protocols for ' + r.name, protoFindOnly: s.findOnly,
+				protoOpts: list.map(q => { const on = r.protos.includes(q); return Object.assign(chipc(on), { label: lab(q), title: PROTO[q].title || '', pick: () => this.patchRange(r.id, { protos: on ? r.protos.filter(x => x !== q) : r.protos.concat([q]) }) }); })
+			});
+		}
+		if (p.kind === 'skips') {
+			const amber = 'rgba(var(--wk-amber-rgb),.7)';
+			return Object.assign(base, { popSkips: true, popLabel: 'Skips in ' + r.name, skipsNone: !r.excl.length,
+				skipRows: r.excl.map(x => { const e = i.ex.find(q => q.x === x); return { fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + x.by : x.why, title: x.auto ? x.why + ' is already decoded by ' + x.by : x.why, edge: e && !e.ok ? amber : '',
+					onA: ev => this.patchExcl(r.id, x.id, { fa: ev.target.value }), onB: ev => this.patchExcl(r.id, x.id, { fb: ev.target.value }),
+					removeLabel: x.auto ? 'Scan the ' + x.why + ' channels too' : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.patchRange(r.id, { excl: r.excl.filter(y => y !== x) }) }; }),
+				addSkip: () => { if (!(i.b > i.a)) return; const c = (i.a + i.b) / 2, h = Math.max(0.025, snap((i.b - i.a) * 0.05)); this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Skipped by you' }]) }); }
+			});
+		}
+		if (p.kind === 'more') {
+			return Object.assign(base, { popMore: true, popLabel: r.name, menuRename: () => this.setState({ renaming: r.id, renameText: r.name, pop: null }), menuRemove: () => this.removeRange(r) });
+		}
+		return none;
+	}
+
+	renderVals() {
+		const s = this.state, w = this.run(), runningM = !!w, composing = !runningM, G = this.geo();
+		const cw = s.cw || 1440, narrow = cw < 760, mid = cw < 1240;
+		const plan = this.planNow();
+		const close = () => { if (this.props.onClose) this.props.onClose(); else this.toast('Closes the sheet'); };
+		const rr = runningM ? Object.assign(this.runRuler(w, G), { w }) : null;
+		const ruler = runningM ? rr : this.composeRuler(plan, G);
+		const sendScan = (type, extra) => {
+			const a = Object.assign({ type }, extra || {});
+			if (this.props.onScan) this.props.onScan(a);
+			if (this.props.sweep && RUNNING(this.props.sweep.state)) return;
+			// standalone: the board runs its own sweep so every control answers
+			const o = s.own;
+			if (type === 'start') this.setState({ own: this.runOf(a, 'sweeping'), hop: 1, acc: 0, runOff: {}, pop: null, tip: null });
+			else if (!o) return;
+			else if (type === 'pause') this.setState({ own: Object.assign({}, o, { state: 'paused', holdHz: null, holdLabel: null }) });
+			else if (type === 'resume' || type === 'stay') this.setState({ own: Object.assign({}, o, { state: type === 'stay' ? 'paused' : 'sweeping' }) });
+			else if (type === 'stop') { this.setState({ own: null, tip: null }); this.toast('Scan stopped · the receiver and decoders are yours again'); }
+		};
+		// footer: compose summary
+		const valid = plan.valid;
+		const sumText = plan.empty ? 'Pick a preset or drag on the ruler' : !valid ? plan.bad.num + ' · ' + plan.bad.r.name + ' · ' + plan.bad.err : 'Full pass ' + (plan.T < 1 ? 'under 1 s' : '≈ ' + secsText(plan.T)) + ' · ' + plan.hops + (plan.hops === 1 ? ' hop' : ' hops');
+		const optChanged = s.findOnly || !s.hold || !s.rec || s.stopAfter !== 'never' || s.dwell !== 'normal' || s.sens !== 'normal';
+		// footer: running
+		let runWord = '', runFreq = '', runLabel = '', runC = 'var(--wk-accent)', passPct = 0, canPause = false, canResume = false, canStay = false;
+		if (runningM) {
+			const lay = rr.lay, c = lay.cells[rr.cur - 1] || lay.cells[0], here = Math.round((c.a + c.b) / 2 / 12500) * 12500;
+			const st = w.state, live = LIVE(st);
+			runC = live ? 'var(--wk-accent)' : 'var(--wk-amber)';
+			passPct = lay.cells.length > 1 ? Math.round(100 * (rr.cur - (live ? 0.5 : 0.5)) / lay.cells.length) : 100;
+			runWord = st === 'holding' ? 'Holding' : st === 'starting' ? 'Starting' : st === 'sweeping' ? 'Scanning'
+				: st === 'paused-you' ? (w.waiting ? 'Waits while you listen' : w.resumeIn != null ? 'Scan resumes in ' + w.resumeIn + ' s' : 'Paused')
+				: st === 'paused-relay' ? 'Waiting for SDR++' : st === 'paused-job' ? 'Another scan first' : st === 'source-down' ? 'Receiver offline' : st === 'consent' ? 'Waiting for you' : 'Paused';
+			runFreq = fq(st === 'holding' && w.holdHz ? w.holdHz : here);
+			runLabel = st === 'holding' && w.holdLabel ? w.holdLabel : '';
+			canPause = live; canResume = !live && st !== 'source-down' && st !== 'paused-job' && st !== 'paused-relay'; canStay = st === 'paused-you';
+		}
+		const hdAreas = narrow ? (composing ? "'title save close' 'presets presets presets'" : "'title close'") : composing ? "'title presets save close'" : "'title close'";
+		const hdCols = narrow ? (composing ? 'minmax(0,1fr) auto auto' : 'minmax(0,1fr) auto') : composing ? 'auto minmax(0,1fr) auto auto' : 'minmax(0,1fr) auto';
+		const gutW = narrow ? 0 : mid ? 118 : 124;
+		const gutLabels = runningM ? [
+			{ top: G.tickTop, h: 22, text: 'Found', size: 11.5, weight: 400, fg: 'var(--wk-text-3)' },
+			{ top: G.hopTop, h: G.hopH, text: 'Hops', size: 11.5, weight: 400, fg: 'var(--wk-text-3)' },
+			{ top: G.rangeTop, h: 18, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)' }
+		] : LANES.map((ln, li) => ({ top: G.laneTop + li * (G.LH + G.LG) - 1, h: G.LH + 2, text: ln.name, size: 11, weight: 400, fg: 'var(--wk-text-3)' }))
+			.concat([{ top: G.rangeTop, h: G.rangeH, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)' }]);
+		const gridAreas = narrow ? "'n name sp act' '. edges edges edges' '. protos protos protos' '. skips skips skips'" : "'n name edges sp protos skips act'";
+		const gridCols = narrow ? '24px minmax(0,1fr) auto 40px' : mid ? '24px minmax(100px,1fr) ' + (runningM ? '130px' : '206px') + ' 140px minmax(150px,1.8fr) minmax(90px,.9fr) 48px' : '28px minmax(150px,1.2fr) ' + (runningM ? '170px' : '214px') + ' 150px minmax(220px,2.3fr) minmax(120px,1fr) 52px';
+		const rows = runningM ? this.runRows(rr) : this.composeRows(plan);
+		const pad = narrow ? 12 : 20;
+		return Object.assign({
+			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
+			rootRef: this.rootRef, trackRef: this.trackRef, rulerRef: this.rulerRef, ovRef: this.ovRef, saveRef: this.saveRef, renameRef: this.renameRef,
+			rDown: this.rDown, rMove: this.rMove, rUp: this.rUp, rCancel: this.rCancel, ovDown: this.ovDown, ovMove: this.ovMove, ovUp: this.ovUp, tipLeave: this.tipLeave,
+			rootR: narrow ? '0' : '12px', dialogLabel: composing ? 'Scan a band' : 'Scan · ' + w.preset,
+			rootKey: e => {
+				if (e.key !== 'Escape') return;
+				e.stopPropagation();
+				if (s.pop) return this.setState({ pop: null });
+				if (s.renaming) return this.setState({ renaming: null });
+				if (s.drag) return this.rCancel();
+				close();
+			},
+			running: runningM, composing, title: composing ? 'Scan a band' : w.preset, runC,
+			hdAreas, hdCols, hdPad: narrow ? '10px 8px 8px 14px' : '12px 12px 10px 20px',
+			presets: this.presetVals(plan), chipMask: mid ? 'linear-gradient(90deg, #000 calc(100% - 28px), transparent)' : 'none',
+			saveDisabled: !valid, saveOp: valid ? 1 : 0.45, saveOpen: !!(s.pop && s.pop.kind === 'save'), saveLabel: narrow ? 'Save' : 'Save as preset', saveTitle: 'Save these ranges, spacing, protocols and options as a preset',
+			openSave: e => { if (valid) this.openPop('save', null, e, 300); },
+			close,
+			secPad: '0 ' + pad + 'px', rulerH: G.rulerH, showGutter: gutW > 0, gutW, gutLabels, trackPad: narrow ? 6 : 10, trackOverflow: runningM ? 'visible' : 'hidden',
+			axisTop: G.axisTop, axisH: G.axisH,
+			rulerKey: e => {
+				if (e.target.tagName === 'INPUT' || runningM) return;
+				const sp = s.vR - s.vL;
+				if (e.key === 'ArrowLeft') { e.preventDefault(); this.panBy(-sp * 0.1); }
+				else if (e.key === 'ArrowRight') { e.preventDefault(); this.panBy(sp * 0.1); }
+				else if (e.key === '+' || e.key === '=') { e.preventDefault(); this.zoomAt(0.5); }
+				else if (e.key === '-' || e.key === '_') { e.preventDefault(); this.zoomAt(2); }
+			},
+			tablePad: '2px ' + (narrow ? 4 : 12) + 'px 6px', rowPad: narrow ? '8px 8px' : '0 8px', showHead: !narrow && rows.length > 0, noRows: rows.length === 0,
+			gridAreas, gridCols, protoWrap: narrow ? 'wrap' : 'nowrap', actHead: runningM ? 'Scan' : '', rows,
+			renameText: s.renameText, onRename: e => this.setState({ renameText: e.target.value }),
+			commitRename: () => { const id = s.renaming, t = s.renameText.trim(); if (!id) return; this.setState({ renaming: null }); if (t) this.patchRange(id, { name: t, short: t }); },
+			renameKey: e => { e.stopPropagation(); if (e.key === 'Enter') e.target.blur(); if (e.key === 'Escape') this.setState({ renaming: null }); },
+			fieldKey: e => { e.stopPropagation(); if (e.key === 'Enter' || e.key === 'Escape') e.target.blur(); },
+			hasToast: !!s.toast, toastText: s.toast ? s.toast.text : '', canUndo: !!(s.toast && s.toast.undo), undo: () => s.toast && s.toast.undo && s.toast.undo(), toastBottom: narrow ? 120 : 74,
+			footPad: narrow ? '10px 12px 12px 16px' : '10px 14px 12px 20px',
+			openOptions: e => this.openPop('options', null, e, 380), optOpen: !!(s.pop && s.pop.kind === 'options'), optChanged,
+			sumText, sumTitle: valid ? plan.merged.map(m => mt(m.a) + '–' + mt(m.b)).join(', ') + ' MHz · hops and settle time set the speed' : '',
+			sumC: plan.empty ? 'var(--wk-text-3)' : valid ? 'var(--wk-text)' : 'var(--wk-amber)', sumWeight: valid ? 700 : 400, sumFlex: narrow ? '1 0 100%' : '0 1 auto', sumOrder: narrow ? -1 : 0,
+			showConsent: valid, consentText: 'Pauses ' + PAUSES.join(', '),
+			startDisabled: !valid, startTitle: valid ? '' : plan.empty ? 'Pick a preset or drag on the ruler' : 'Fix range ' + plan.bad.num,
+			startBg: valid ? 'var(--wk-accent)' : 'var(--wk-chip)', startFg: valid ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', startFlex: narrow ? '1 0 100%' : 'none',
+			start: () => { if (valid) sendScan('start', this.payload(plan, s)); },
+			runWord, runFreq, runLabel, runHasLabel: !!runLabel, passPct, canPause, canResume, canStay,
+			pause: () => sendScan('pause'), resume: () => sendScan('resume'), stay: () => sendScan('stay'), stopScan: () => sendScan('stop'),
+			closePop: () => this.setState({ pop: null })
+		}, ruler, this.popVals(plan));
+	}
+}
+</script>
+</body>
+</html>

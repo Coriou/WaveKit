@@ -365,7 +365,7 @@ class Component extends DCLogic {
 		};
 		this.onLeave = () => { if (!this.drag) this.setState({ hover: null }); };
 		this.clearSel = () => this.setState({ rsel: null });
-		// "Scan this range": the shell opens the Scanner's composer with it filled in
+		// "Scan this range": the shell opens the Scan a band planner sheet with it filled in
 		this.scanSel = () => {
 			const r = this.state.rsel;
 			if (!r) return;
@@ -455,7 +455,7 @@ class Component extends DCLogic {
 	componentDidMount() { this.raf = requestAnimationFrame(this.frame); this.emitView(); }
 	componentWillUnmount() { clearTimeout(this.sentT); cancelAnimationFrame(this.raf); if (this.ro) this.ro.disconnect(); if (this.boxEl) this.boxEl.removeEventListener('wheel', this.onWheel); }
 	measureBox() { const w = this.boxEl ? this.boxEl.clientWidth : 0; if (w && w !== this.state.boxW) { this.dirty = true; this.setState({ boxW: w }); } }
-	// tells the shell which part of the band is on screen (the band strip draws it as a bracket)
+	// tells the shell which part of the band is on screen (optional; the shell no longer uses it since the band strip went)
 	emitView() {
 		if (!this.props.onView) return;
 		const s = this.state, key = s.viewL + '|' + s.viewSpan;

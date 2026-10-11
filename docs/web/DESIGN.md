@@ -54,8 +54,9 @@ Condensed + Noto Sans, Tabler-based icons).
 | Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
-| Scanner | Discoveries drawer and the "Scan a band" composer: band ruler, ranges, per-range protocols, Just find signals. Wired into C | Active, second pass |
-| Identify, Band strip | Every identify state of the tuned card; the scanned range over the spectrum while a sweep runs (several ranges) | Active, first pass |
+| Scanner | Discoveries drawer and live hit log; "Scan a band" opens the planner sheet. Wired into C | Active, third pass |
+| Scan planner | "Scan a band" as a full-width sheet over the plot: presets, full-width ruler, range table with channel spacing, one-line footer; running mode (current hop, ticks, ranges on/off). Wired into C | Active, first pass |
+| Identify | Every identify state of the tuned card | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
 ## Decision log
@@ -651,6 +652,44 @@ Condensed + Noto Sans, Tabler-based icons).
   The web token system is now the global WaveKit design system: it moves into
   `packages/brand` and the Pi pages adopt it (see Next session).
 
+- **Scanner UX review (owner, 2026-10-12, approved in chat; owner took every recommendation
+  "to try it, revisit later if need be").** From a first-time-operator audit of the canvas v74
+  Scanner: one fact said in five places while a scan ran, an unreadable band strip, "stop" meaning
+  a hop, a button and two options, a 420 px composer that truncated its own band cards, and the
+  channel step two levels deep.
+  - *Scan a band is a planner sheet:* it drops from the top across the full window width (about
+    55 % of the height; the waterfall stays visible below), opened from the drawer, ⌘K or
+    Shift-drag on the spectrum; Esc closes; full screen on a phone. Presets in one chip row,
+    a full-width ruler (band-plan lanes, one "your ranges" lane with numbered tags matching the
+    table, names only where they fit), a range table (# · name · edges · channel spacing ·
+    protocols · skips · ⋯) and a one-line footer (Options · "Full pass ≈ 10 s · 26 hops" · one
+    amber consent line · "Start · takes the receiver"). Rejected: a wider drawer (the ruler still
+    fights for height) and a dock view like Map (you lose sight of the air while planning).
+  - *Channel spacing* is a column of the range table: a chip ("12.5 kHz", "12.5 + 6.25", "Any")
+    with a multi-select popover and a custom value, prefilled from the band plan; faint channel
+    ticks on the zoomed ruler. No speed hint: in WaveKit spacing sets the channel grid, hops and
+    settle set the speed. Rejected: one job-wide step (wrong for Marine 25 + PMR 12.5) and hiding
+    it. The Tuner keeps "Tuning step" (manual tuning); the planner says "Channel spacing".
+  - *One running surface:* the band strip island is removed (board deleted). The Tuner hold row
+    is the only status and control (glyph, name, pass-progress line, current frequency, Pause,
+    Stop; Skip / Ignore / Save while holding); clicking it opens the planner in running mode,
+    which is the readable "where is it" (big ruler, current hop lit, discovery ticks, ranges
+    switchable). The tuned card says only "Scanning · 146.9625"; Listen keeps "Following the
+    scan"; the drawer keeps one count.
+  - *Words:* no help paragraphs (tooltips and empty states instead); never "stop" for a hop; no
+    hop count while running, only "26 hops" in the planner summary.
+  - *Drawn details (agents' choices, owner to judge on the canvas):* clicking a band in a lane
+    adds or removes that preset; rows sort by frequency so tags read 1, 2, 3 on the ruler; nested
+    ranges shade their shared stretch; a dot marks spacing changed from the band plan, with a
+    "Use the band plan" reset; Remove has Undo; the Options button carries a dot when anything
+    differs from the defaults. Running mode: lanes Found · Hops · Your ranges, the current hop lit
+    (amber when paused), switched-off ranges dimmed. The drawer's running block is one line with
+    "Open plan"; the tuned card is one line while the scan passes through.
+  - *Answer to "can we scan any band and decode anything?":* finding signals works anywhere the
+    tuner reaches (about 24–1766 MHz); decoding only the trial protocols (FM/AM voice, DMR, P25,
+    NXDN, YSF, D-STAR, dPMR, POCSAG, FLEX, APRS, ISM); AIS, ACARS, VDL2 and LoRa are dedicated
+    decoders, not trials (core gap); one trial at a time until S2 is enabled.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -692,50 +731,21 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after the polish pass (canvas v72), the new default look (v73,
-True black + Mono) and a full re-audit of [CORE-GAPS.md](CORE-GAPS.md) (v74 sticky). Two
-sessions are queued, in this order.
+Handoff written 2026-10-12 after the Scanner UX review (canvas v75). The review is done (decision
+log, "Scanner UX review"); the owner took every recommendation to try it and may revisit after using
+the canvas. One session is queued.
 
-### 1. Scanner UX review, end to end (next)
+**Scanner follow-ups to check with the owner first (short):**
+- How the planner sheet feels in use: its height (about 55 %), the glass-strong surface, and the
+  drawer closing while it is open and coming back after.
+- Consent to resume after a scan grew (`paused(resume-blocked)`): the Tuner row offers only
+  "Review", so the drawer still holds "Resume and pause APRS". Either the Tuner row gets that one
+  button or the drawer keeps it.
+- The holding tuned card still says "Paused · the scanner has the receiver" (unchanged this pass).
+- The mock shell ignores the planner's Options and its pass time; ⌘K presets start a sweep without
+  per-range rows, so running mode falls back to one row.
 
-The owner reviewed the redesigned Scanner on the canvas and wants a full UX pass before any
-optimisation work. Their notes (2026-10-12, with screenshots):
-- **The scanning bar under the Tuner island is ugly and unreadable** while a scan runs: the
-  band strip's range labels collide ("AirbAirbandPMR + Harbour + Pagers 169 …"), the dots and
-  hop marks are noise, and it repeats what the Tuner hold row and the drawer already say.
-- **Ruler ranges stack and their labels overlap** ("Your range 2 · Your range 4 …" drawn on top
-  of each other) when ranges are added and skipped; adding and removing ranges needs fixing.
-- **Too much text**, hard to read and understand: summary lines, catch-rate warnings, consent
-  lines and hints. Simplify hard.
-- **Where is the step?** A classic scanner lets you set the channel step. It exists only inside
-  each range's collapsed "Tuning" line, which nobody finds.
-- **"Scan a band" deserves more room**: it is rich and important; it could be wider (or a
-  larger surface than a drawer), with better controls, a more refined and intuitive UX,
-  visually simpler yet powerful.
-- Asked: can we realistically scan any band and try decoding anything, and is core ready?
-
-Facts for that session (from `docs/SCANNER.md` and `packages/api-types/src/scanner.ts` on
-main), to settle the design with the owner:
-- WaveKit is a **wideband** scanner, not a channel stepper: each hop covers about 80 % of the
-  sample rate (~1.6–1.9 MHz) and the FFT sees every channel in it at once. A range's
-  **raster** (channel spacing, e.g. 12.5 kHz) sets the channel grid discoveries are keyed to;
-  it barely changes sweep speed. Speed comes from the number of hops and the settle time
-  (≈ 185 ms per hop with test-mode markers, ≈ 1.15 s with a timer; 400–470 MHz is 44 hops,
-  ≈ 8 s or ≈ 51 s a pass). `POST /api/scanner/plan` reports real numbers. So "step" should
-  read as **channel spacing** (with presets per band) and the speed story should be about
-  hops and settle, not step.
-- Energy discovery works anywhere the tuner reaches (≈ 24–1766 MHz). Decoder **trials** only
-  cover `ScannerProtocol`: analog FM/AM, DMR, P25 I/II, NXDN, YSF, D-STAR, dPMR, POCSAG,
-  FLEX, APRS, ISM (rtl_433). AIS, ACARS, VDL2 and LoRa are dedicated decoders, not trials
-  (CORE-GAPS). S1 tries one decoder at a time; parallel trials need S2 (integrated,
-  disabled). Per-range dwell and sensitivity, range names, ranges on/off mid-scan and
-  presets are core gaps.
-- Start: brainstorm with the owner one question at a time (superpowers:brainstorming,
-  bounded), from a fresh first-time-operator audit of the current Scanner, BandStrip, Tuner
-  and composer; consider a wider composer surface (e.g. the drawer at full width, or a
-  dedicated Scanner view over the spectrum); then redraw.
-
-### 2. Design system v1 and web app foundation (after the Scanner review)
+### 2. Design system v1 and web app foundation (next)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):

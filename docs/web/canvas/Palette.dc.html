@@ -322,7 +322,7 @@ const HOP_HZ = 1.5e6;
 const SCAN_COST = 'Takes the Pi receiver · pauses AIS-catcher, POCSAG and DMR decoding until the scan ends · live audio follows the scan';
 const SCAN_MOCK = { preset: 'Marine + PMR', startHz: 136e6, endHz: 174e6, hop: 7, hops: 26, sweepS: 10, coverage: 84 };
 const mhzRange = (a, b) => { const f = x => { const m = x / 1e6; return Number.isInteger(m) ? String(m) : m.toFixed(3).replace(/0+$/, ''); }; return f(a) + '–' + f(b) + ' MHz'; };
-const DEEP = ['mode', 'bw', 'step', 'rate', 'src', 'agc', 'direct', 'theme', 'ground', 'accent', 'waterfall', 'dec'];
+const DEEP = ['mode', 'bw', 'step', 'rate', 'src', 'agc', 'direct', 'theme', 'ground', 'accent', 'waterfall', 'dec', 'scan'];
 const LABEL = { freq: 'Frequency', mode: 'Mode', bw: 'Bandwidth', step: 'Step', rate: 'Sample rate', gain: 'Gain', sq: 'Squelch', vol: 'Volume', src: 'What you hear', agc: 'Level control', direct: 'Direct sampling', theme: 'Theme', ground: 'Dark ground', accent: 'Accent', waterfall: 'Waterfall', listening: 'Listen', rec: 'Recording', nr: 'Noise reduction', hp: 'Cut low rumble', biasT: 'Bias-T', rtlAgc: 'RTL AGC', dcBlock: 'Remove DC spike', iqCorr: 'IQ correction', sqAuto: 'Auto squelch', saved: 'Saved' };
 const SEED_RECENT = [{ id: 'tune:156800000', n: 6 }, { id: 'view:activity', n: 4 }, { id: 'gain:17', n: 3 }, { id: 'waterfall:amber', n: 2 }];
 // Copy of the Settings registry (Settings.dc.html, R + GROUPS): id, group label, label, keywords.
@@ -682,17 +682,18 @@ class Component extends DCLogic {
 	}
 	scanScopeItem() {
 		const sw = this.v().sweep;
-		return { id: 'scope:scan', title: 'Scan a band…', sub: 'Sweeps a range and lists what it finds', icon: P.scan, value: sw && sw.state !== 'watching' ? sw.preset : '', scope: 'scan', keys: ['scanner', 'sweep', 'discover', 'find signals'] };
+		// opens the planner sheet; the band plans stay one search away (deep items "Scan a band › Marine VHF")
+		return { id: 'scope:scan', title: 'Scan a band…', sub: 'Pick bands or draw your own ranges', icon: P.scan, value: sw && sw.state !== 'watching' ? sw.preset : '', keys: ['scanner', 'sweep', 'discover', 'find signals', 'planner'], act: () => this.nav('planner', 'Scan a band'), does: 'Opens Scan a band' };
 	}
 	scanControlItems() {
 		const sw = this.v().sweep;
 		if (!sw) return [];
-		const where = sw.preset + (sw.state === 'watching' ? ' · watching here' : ' · stop ' + sw.hop + '/' + sw.hops);
+		const where = sw.preset + (sw.state === 'watching' ? ' · watching here' : ' · ' + (this.v().freq / 1e6).toFixed(5).replace(/0{1,2}$/, ''));
 		const paused = /^paused/.test(sw.state);
 		const out = [];
 		if (sw.state === 'sweeping' || sw.state === 'holding') out.push({ id: 'scan:pause', title: 'Pause scan', sub: where, icon: P.pause, keys: ['hold scan'], act: () => this.scan({ type: 'pause' }, 'Scan paused · it keeps the receiver until you tune'), does: 'Keeps the receiver and the paused decoders until you tune · never resumes on its own' });
 		if (sw.state === 'paused-you') out.push({ id: 'scan:stay', title: 'Stay here', sub: where + (sw.resumeIn != null ? ' · resumes by itself in ' + sw.resumeIn + ' s' : ''), icon: P.pause, keys: ['keep paused', 'do not resume'], act: () => this.scan({ type: 'stay' }, 'Staying here · the scan waits until you resume it'), does: 'Keeps the scan paused · it will not resume on its own' });
-		if (paused) out.push({ id: 'scan:resume', title: 'Resume scan', sub: sw.state === 'paused-relay' ? 'Waits until SDR++ lets go' : where + (sw.resumeIn != null ? ' · resumes by itself in ' + sw.resumeIn + ' s' : ''), icon: P.play, keys: ['continue scan'], act: () => this.scan({ type: 'resume' }, 'Scan resumed · the scanner has the receiver'), does: 'Gives the receiver back to the scan, at the same stop', warn: SCAN_COST });
+		if (paused) out.push({ id: 'scan:resume', title: 'Resume scan', sub: sw.state === 'paused-relay' ? 'Waits until SDR++ lets go' : where + (sw.resumeIn != null ? ' · resumes by itself in ' + sw.resumeIn + ' s' : ''), icon: P.play, keys: ['continue scan'], act: () => this.scan({ type: 'resume' }, 'Scan resumed · the scanner has the receiver'), does: 'Gives the receiver back to the scan, where it left off', warn: SCAN_COST });
 		out.push({ id: 'scan:stop', title: 'Stop scan', sub: where, icon: P.stop, keys: ['end scan', 'cancel scan', 'give back the receiver'], act: () => this.scan({ type: 'stop' }, 'Scan stopped · the receiver and decoders are yours again'), does: 'Ends the scan · the receiver and decoders are yours again · discoveries stay' });
 		return out;
 	}
@@ -705,13 +706,13 @@ class Component extends DCLogic {
 			const half = v.rate * 1e6 / 2, a = v.freq - half, b = v.freq + half;
 			return { id: 'scan:span', title: 'Watch here', sub: mhzRange(a, b) + ' · finds signals where you are tuned, never moves the receiver', icon: P.scan, cur: !!sw && sw.state === 'watching', act: () => this.scan({ type: 'start', preset: 'This span', startHz: a, endHz: b }, 'Watching this span'), does: 'Lists what appears in this span · keeps the receiver where it is' };
 		}
-		if (pr === 'custom') return { id: 'scan:custom', title: 'Your own range…', sub: 'Opens Scan a band, to drag or type the edges', icon: P.scan, act: () => this.nav('scanner', 'Scanner'), does: 'Opens the Scanner to set a range' };
+		if (pr === 'custom') return { id: 'scan:custom', title: 'Your own range…', sub: 'Drag or type the edges', icon: P.scan, act: () => this.nav('planner', 'Scan a band'), does: 'Opens Scan a band' };
 		// separate ranges (Pagers, ISM) take their own stops and skip what lies between
 		const hops = pr.ranges ? pr.ranges.reduce((t, r) => t + Math.max(1, Math.ceil((r.endHz - r.startHz) / HOP_HZ)), 0) : Math.max(1, Math.ceil((pr.to - pr.from) / HOP_HZ));
 		const range = pr.ranges ? pr.ranges.map(r => mhzRange(r.startHz, r.endHz).replace(' MHz', '')).join(' and ') + ' MHz' : mhzRange(pr.from, pr.to);
 		return {
 			id: 'scan:' + pr.id, title: pr.label, keys: pr.keys,
-			sub: range + ' · ' + (hops === 1 ? 'one stop' : hops + ' stops') + ' · ' + pr.decodes,
+			sub: range + ' · ' + pr.decodes,
 			icon: P.scan, cur: !!sw && sw.preset === pr.label && sw.state !== 'watching',
 			act: () => this.scan(Object.assign({ type: 'start', preset: pr.label, startHz: pr.from, endHz: pr.to, hops }, pr.ranges ? { ranges: pr.ranges } : null), 'Scanning ' + pr.label),
 			does: 'Sweeps ' + pr.label + ' · ' + range, warn: SCAN_COST

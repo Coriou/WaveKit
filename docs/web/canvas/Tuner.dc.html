@@ -36,6 +36,7 @@ body{margin:0;background:#000000}
 body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-in:focus{border-color:rgba(var(--wk-line-rgb),.3) !important}
 button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus);outline-offset:2px}
+.wk-hold-open:focus-visible{outline-offset:0}
 @keyframes wk-hold-pulse{0%,100%{opacity:1}50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){[data-wk-theme] *{animation:none !important}}
 </style>
@@ -68,10 +69,10 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	</div>
 
 	<sc-if value="{{hasHold}}" hint-placeholder-val="{{false}}">
-		<div role="status" title="{{holdAll}}" style="position: relative; overflow: hidden; height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 5px 0 12px; border-radius: 12px; background: {{holdBg}}; border: 1px solid {{holdEdge}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); font-size: 12.5px; white-space: nowrap">
+		<div role="status" onClick="{{openPlan}}" style="position: relative; overflow: hidden; cursor: {{holdCur}}; height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 6px; padding: 0 5px 0 12px; border-radius: 12px; background: {{holdBg}}; border: 1px solid {{holdEdge}}; box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow); backdrop-filter: blur(22px) var(--wk-glass-fx); font-size: 12.5px; white-space: nowrap">
 			<sc-if value="{{holdPulse}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="width: 7px; height: 7px; flex: none; margin-right: 2px; border-radius: 50%; background: var(--wk-accent); animation: wk-hold-pulse 1.6s ease-in-out infinite"></span></sc-if>
 			<sc-if value="{{holdNoPulse}}" hint-placeholder-val="{{true}}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{holdC}}" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{holdIcon}}" as="p" hint-placeholder-count="3"><path d="{{p}}"></path></sc-for></svg></sc-if>
-			<span style="flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--wk-text-2); font-variant-numeric: tabular-nums"><b style="color: {{holdC}}">{{holdTitle}}</b>{{holdDetail}}</span>
+			<button class="wk-hold-open" title="{{holdAll}}" aria-label="{{holdAria}}" style="font: inherit; cursor: inherit; margin: 0; padding: 0; border: 0; background: transparent; flex: 1; min-width: 0; height: 30px; display: flex; align-items: center; gap: 8px; text-align: left; border-radius: 6px; overflow: hidden; color: var(--wk-text-2); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap"><span style="flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis"><b style="color: {{holdC}}">{{holdTitle}}</b>{{holdDetail}}</span><sc-if value="{{holdHasFreq}}" hint-placeholder-val="{{false}}"><span style="flex: none; color: var(--wk-text); font-weight: 700">{{holdFreq}}</span></sc-if></button>
 			<sc-for list="{{holdBtns}}" as="h" hint-placeholder-count="2">
 				<button onClick="{{h.act}}" aria-label="{{h.aria}}" title="{{h.title}}" style="font: inherit; cursor: pointer; flex: none; height: 30px; padding: {{h.pad}}; border: 0; border-radius: 6px; background: {{h.bg}}; color: {{h.fg}}; font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 5px">
 					<sc-if value="{{h.hasIcon}}" hint-placeholder-val="{{false}}"><svg width="13" height="13" viewBox="0 0 24 24" fill="{{h.fill}}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{h.icon}}" as="p" hint-placeholder-count="1"><path d="{{p}}"></path></sc-for></svg></sc-if>{{h.label}}
@@ -205,7 +206,7 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"hold":{"editor":null},"onHold":{"editor":null},"holdDemo":{"editor":"enum","options":["off","starting","sweeping","holding","paused","paused-released","paused-you","paused-waiting","consent","paused-job","paused-relay","source-down"],"default":"off"},"$preview":{"width":460,"height":600}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"values":{"editor":null},"onSet":{"editor":null},"onToggle":{"editor":null},"expanded":{"editor":"boolean","default":true},"hold":{"editor":null},"onHold":{"editor":null},"onPlan":{"editor":null},"holdDemo":{"editor":"enum","options":["off","starting","sweeping","holding","paused","paused-released","paused-you","paused-waiting","consent","paused-job","paused-relay","source-down"],"default":"off"},"$preview":{"width":460,"height":600}}'>
 const MODES = ['NFM', 'AM', 'WFM', 'USB', 'LSB', 'CW', 'RAW'];
 const BW = { NFM: [5000, 25000, 500, 12500], AM: [3000, 20000, 500, 10000], WFM: [50000, 250000, 5000, 150000], USB: [1500, 4000, 100, 2400], LSB: [1500, 4000, 100, 2400], CW: [100, 1000, 50, 500], RAW: [0, 0, 1, 0] };
 const STEPS = [[1000, '1k'], [5000, '5k'], [6250, '6.25k'], [8330, '8.33k'], [12500, '12.5k'], [25000, '25k'], [100000, '100k']];
@@ -247,6 +248,8 @@ const HI = { pause: ['M6 5h4v14h-4zM14 5h4v14h-4z'], play: ['M7 4v16l13 -8z'], s
 const hopCentre = h => h.state === 'holding' && h.holdHz ? h.holdHz : Math.round(h.startHz + (h.hop - 0.5) * (h.endHz - h.startHz) / h.hops);
 const kfmt = hz => hz >= 1000 ? (hz / 1000).toFixed(hz % 1000 ? (hz % 100 ? 2 : 1) : 0) + ' kHz' : hz + ' Hz';
 const mfmt = f => (f / 1e6).toFixed(f % 1000 ? 5 : 3);
+// the frequency a scan is on, short: 146.9625, 161.150
+const sfmt = f => (f / 1e6).toFixed(5).replace(/0{1,2}$/, '');
 const bandOf = f => BANDS.find(b => f >= b.from && f <= b.to);
 
 function parse(q, cur) {
@@ -368,30 +371,34 @@ class Component extends DCLogic {
 		const hs = hold ? hold.state : '';
 		const live = hs === 'sweeping' || hs === 'holding';
 		// the scan's hold, in words: running, holding on a hit (with its actions), paused, waiting
-		const B = (label, icon, act, kind, o) => Object.assign({ label, icon: icon || [], hasIcon: !!icon, act: () => this.holdAct(act), aria: label || (o && o.aria) || act, title: '', fill: 'none',
+		const B = (label, icon, act, kind, o) => Object.assign({ label, icon: icon || [], hasIcon: !!icon, act: e => { if (e && e.stopPropagation) e.stopPropagation(); this.holdAct(act); }, aria: label || (o && o.aria) || act, title: '', fill: 'none',
 			pad: label ? (icon ? '0 9px 0 7px' : '0 9px') : '0 8px', bg: kind === 'primary' ? (live ? 'rgba(var(--wk-accent-rgb),.12)' : 'rgba(var(--wk-amber-rgb),.18)') : kind === 'chip' ? 'var(--wk-chip)' : 'transparent', fg: kind === 'primary' ? (live ? 'var(--wk-accent)' : 'var(--wk-amber)') : 'var(--wk-text-2)' }, o || {});
 		const stopB = B('', HI.stop, 'stop', 'ghost', { aria: 'Stop the scan', title: 'End the scan. The receiver and decoders are yours again.' });
 		const hSaved = !!this.state.holdSaved;
-		let holdTitle = '', holdDetail = '', holdIcon = SCAN_ICON, holdBtns = [];
+		let holdTitle = '', holdDetail = '', holdIcon = SCAN_ICON, holdBtns = [], holdFreq = '';
+		// one status line for the scan: preset and the frequency it is on, no hop counts (the progress line shows the pass)
 		if (hold) {
-			const stopTxt = ' · stop ' + hold.hop + '/' + hold.hops;
-			if (hs === 'starting') { holdTitle = 'Starting'; holdDetail = ' · ' + hold.preset; holdBtns = [stopB]; }
-			else if (hs === 'sweeping') { holdTitle = 'Scanning'; holdDetail = ' · ' + hold.preset + stopTxt; holdBtns = [B('Pause', null, 'pause', 'primary', { title: 'Pause the scan. It keeps the receiver until you tune.' }), stopB]; }
-			else if (hs === 'holding') { holdTitle = 'Holding ' + mfmt(hold.holdHz || freq); holdDetail = ' · ' + (hold.holdLabel || 'Activity'); holdBtns = [B('Skip', HI.skip, 'skip', 'chip', { title: 'Move on and leave it out for the rest of this scan' }), B('Ignore', HI.ignore, 'ignore', 'chip', { title: 'Always: never probed, recorded or scanned again' }), B('', HI.star, 'save', 'chip', { aria: hSaved ? 'Saved' : 'Save frequency', title: 'Save frequency', fill: hSaved ? 'currentColor' : 'none', fg: hSaved ? 'var(--wk-accent)' : 'var(--wk-text-2)' }), stopB]; }
+			if (hs === 'starting') { holdTitle = hold.preset; holdDetail = ' · starting'; holdBtns = [stopB]; }
+			else if (hs === 'sweeping') { holdTitle = hold.preset; holdFreq = sfmt(freq); holdBtns = [B('Pause', null, 'pause', 'primary', { title: 'Pause the scan. It keeps the receiver until you tune.' }), stopB]; }
+			else if (hs === 'holding') { holdTitle = sfmt(hold.holdHz || freq); holdDetail = ' · ' + (hold.holdLabel || 'Activity'); holdBtns = [B('Skip', HI.skip, 'skip', 'chip', { title: 'Move on and leave it out for the rest of this scan' }), B('Ignore', HI.ignore, 'ignore', 'chip', { title: 'Always: never probed, recorded or scanned again' }), B('', HI.star, 'save', 'chip', { aria: hSaved ? 'Saved' : 'Save frequency', title: 'Save frequency', fill: hSaved ? 'currentColor' : 'none', fg: hSaved ? 'var(--wk-accent)' : 'var(--wk-text-2)' }), stopB]; }
 			else if (hs === 'paused-you') { holdIcon = HI.pause; holdTitle = hold.waiting ? 'Scan waits while you listen' : 'Scan resumes in ' + hold.resumeIn + ' s'; holdDetail = ''; holdBtns = [B('Stay here', null, 'stay', 'primary', { title: 'Keep the scan paused. It will not resume on its own.' }), B('Resume now', null, 'resume', 'ghost'), stopB]; }
-			else if (hs === 'paused') { holdIcon = HI.pause; holdTitle = 'Scan paused'; holdDetail = hold.released ? ' · the receiver is yours' : ' · holding the receiver'; holdBtns = [B('Resume', HI.play, 'resume', 'primary', { title: hold.released ? 'Takes the receiver again. Asks first if more decoders would pause.' : 'Carry on at the same stop' }), stopB]; }
+			else if (hs === 'paused') { holdIcon = HI.pause; holdTitle = 'Scan paused'; holdDetail = hold.released ? ' · the receiver is yours' : ' · holding the receiver'; holdBtns = [B('Resume', HI.play, 'resume', 'primary', { title: hold.released ? 'Takes the receiver again. Asks first if more decoders would pause.' : 'Carry on where it left off' }), stopB]; }
 			else if (hs === 'consent') { holdIcon = HI.warn; holdTitle = 'Resume needs your OK'; holdDetail = ' · APRS would pause too'; holdBtns = [B('Review', null, 'review', 'primary', { title: 'Open the Scanner to decide' }), stopB]; }
 			else if (hs === 'paused-job') { holdTitle = 'Waiting for another scan'; holdDetail = ' · ' + hold.preset; holdBtns = [stopB]; }
 			else if (hs === 'paused-relay') { holdIcon = HI.plug; holdTitle = 'SDR++ has the receiver'; holdDetail = ' · the scan waits'; holdBtns = [stopB]; }
 			else if (hs === 'source-down') { holdIcon = HI.plug; holdTitle = 'Receiver offline'; holdDetail = ' · the scan waits'; holdBtns = [stopB]; }
 		}
+		const canPlan = !!hold && !!this.props.onPlan;
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
 			wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'mono', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'black'),
 			width: hold ? '472px' : expanded || typing ? '440px' : 'max-content',
 			hasHold: !!hold,
 			holdTitle, holdDetail,
-			holdAll: hold ? holdTitle + holdDetail : '',
+			holdAll: hold ? holdTitle + holdDetail + (holdFreq ? ' · ' + holdFreq : '') + (canPlan ? ' · open the scan plan' : '') : '',
+			holdAria: hold ? holdTitle + holdDetail + (holdFreq ? ' · ' + holdFreq : '') + (canPlan ? '. Open the scan plan' : '') : '',
+			holdHasFreq: !!holdFreq, holdFreq,
+			openPlan: () => { if (canPlan) this.props.onPlan(); }, holdCur: canPlan ? 'pointer' : 'default',
 			holdC: live || hs === 'starting' ? 'var(--wk-accent)' : 'var(--wk-amber)', holdIcon, holdBtns,
 			holdPulse: hs === 'holding', holdNoPulse: hs !== 'holding',
 			holdHasBar: live || hs === 'starting' || /^paused/.test(hs), holdBarW: hold ? (hs === 'starting' ? 3 : Math.round(hold.hop / hold.hops * 100)) : 0,

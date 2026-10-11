@@ -14,6 +14,9 @@ accepted (S2 integrated, disabled), channelizer merged but off, operator data, a
 bootstrap and device list mounted. One fact behind several lines: `config/default.yaml`
 runs `access.mode: legacy`, where operator data is not mounted; anything marked
 *protected mode only* is unreachable in a default deployment.
+Re-checked 2026-10-12 (Scanner UX review): `origin/main` still at `b2b4473`, nothing to tick; the
+new planner sheet needs no new core item (plan preview, impact and `scanner:progress` cover it;
+ranges on/off mid-scan is already listed).
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
 - Activity categories: the decode-envelope spec on main (`docs/specs/decode-envelope/`,
