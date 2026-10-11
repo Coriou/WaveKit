@@ -247,3 +247,97 @@ fn a_non_utf8_control_line_is_rejected_not_fatal() {
     assert_eq!(p.next(4)["type"], "closed");
     assert_eq!(p.wait_exit(), Some(0));
 }
+
+// Async cold open/close/reuse keeps native serial authority without adding v1 fields.
+#[test]
+fn rapid_cold_close_reopen_never_installs_the_canceled_spec_after_close() {
+    let mut p = Proc::spawn(29);
+    assert_eq!(p.next(29)["type"], "ready");
+    let cold = r#"{"v":1,"type":"open","id":"ch1","centerHz":162000000,"bandwidthHz":997500,"transitionHz":26250,"outputRateHz":1050000,"format":"cu8","queueBytes":65536}"#;
+    p.send(cold);
+    p.send(r#"{"v":1,"type":"close","id":"ch1"}"#);
+    p.send(OPEN);
+    let mut saw_close = false;
+    loop {
+        let e = p.next(29);
+        match e["type"].as_str() {
+            Some("closed") => {
+                assert!(!saw_close);
+                saw_close = true;
+            }
+            Some("opened") if !saw_close => assert_eq!(e["outputRateHz"], 1_050_000),
+            Some("opened") => {
+                assert_eq!(e["outputRateHz"], 48_000, "canceled serial cannot install");
+                let socket = e["socket"].as_str().unwrap();
+                let mut c = UnixStream::connect(socket).unwrap();
+                c.set_read_timeout(Some(WAIT)).unwrap();
+                let reader = thread::spawn(move || {
+                    let mut b = Vec::new();
+                    c.read_to_end(&mut b).unwrap();
+                    b
+                });
+                p.stdin
+                    .as_mut()
+                    .unwrap()
+                    .write_all(&vec![128; 4096])
+                    .unwrap();
+                p.stdin.take();
+                assert_eq!(p.next(29)["type"], "input-eof");
+                assert_eq!(p.wait_exit(), Some(0));
+                assert_eq!(reader.join().unwrap().len(), 48 * 8);
+                assert!(!std::path::Path::new(socket).exists());
+                break;
+            }
+            _ => panic!("unexpected event {e}"),
+        }
+    }
+}
+
+#[test]
+fn shutdown_during_cold_work_exits_without_late_open_or_socket() {
+    let mut p = Proc::spawn(31);
+    assert_eq!(p.next(31)["type"], "ready");
+    for id in ["cold-a", "cold-b", "cold-c", "cold-d", "cold-e"] {
+        p.send(&format!(r#"{{"v":1,"type":"open","id":"{id}","centerHz":162000000,"bandwidthHz":997500,"transitionHz":26250,"outputRateHz":1050000,"format":"cu8","queueBytes":65536}}"#));
+    }
+    p.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(p.wait_exit(), Some(0));
+    let mut closed = std::collections::BTreeSet::new();
+    let mut terminal = std::collections::BTreeSet::new();
+    loop {
+        let e = match p.events.recv_timeout(WAIT) {
+            Ok(e) => e,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(e) => panic!("event reader did not reach EOF: {e}"),
+        };
+        assert_eq!(e["generation"], 31);
+        if e["type"] == "closed" {
+            closed.insert(e["id"].as_str().unwrap().to_string());
+            assert!(terminal.insert(e["id"].as_str().unwrap().to_string()));
+        }
+        if e["type"] == "opened" {
+            assert!(
+                !closed.contains(e["id"].as_str().unwrap()),
+                "no open after close"
+            );
+        }
+        if e["type"] == "rejected" && e["detail"] == "planner busy" {
+            assert_eq!(e["reasonCode"], "channel-request-invalid");
+            assert!(terminal.insert(e["id"].as_str().unwrap().to_string()));
+        }
+    }
+    assert_eq!(terminal.len(), 5, "every open is closed or rejected busy");
+    assert!(std::fs::read_dir(&p._dir.0).unwrap().all(|e| e
+        .unwrap()
+        .path()
+        .extension()
+        .is_none_or(|x| x != "sock")));
+    // A new source generation can reuse the same ID and carries only fresh process authority.
+    let mut fresh = Proc::spawn(32);
+    assert_eq!(fresh.next(32)["type"], "ready");
+    fresh.send(OPEN);
+    assert_eq!(fresh.next(32)["type"], "opened");
+    fresh.send(r#"{"v":1,"type":"shutdown"}"#);
+    assert_eq!(fresh.next(32)["type"], "closed");
+    assert_eq!(fresh.wait_exit(), Some(0));
+}

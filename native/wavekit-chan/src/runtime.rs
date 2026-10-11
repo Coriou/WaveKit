@@ -9,7 +9,12 @@ use crate::{
     args::Args,
     channel::{ChannelDsp, ChannelSpec},
     convert::InputAssembler,
-    protocol::{parse_request, OpenReq, Request},
+    disposal::{
+        self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
+        WriterPublisher, SLOTS,
+    },
+    preparation::{Planner, Prepared, SubmitError},
+    protocol::{parse_observed_request, parse_request, ObservedRequest, OpenReq, Request},
     queue::ChannelQueue,
 };
 use serde_json::{json, Value};
@@ -19,6 +24,7 @@ use std::net::Shutdown;
 use std::os::fd::FromRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -36,7 +42,7 @@ const ACCEPT_POLL: (Duration, Duration) = (Duration::from_millis(5), Duration::f
 enum Msg {
     Input(Vec<u8>),
     InputEof,
-    Control(Result<Request, (String, String)>),
+    Control(Result<ObservedRequest, (String, String)>),
     ControlEof,
 }
 
@@ -48,6 +54,7 @@ enum Msg {
 struct Conn {
     closing: bool,
     draining: bool,
+    cleanup_uncertain: bool,
     stream: Option<UnixStream>,
 }
 type ConnSlot = Arc<Mutex<Conn>>;
@@ -68,6 +75,21 @@ struct Open {
     run: Option<(u64, u64)>,
     /// Input bytes received when the channel opened; a gap marked at or before this never reached it.
     opened_at_byte: u64,
+    payload: Option<PayloadPublisher>,
+    observed: Option<RuntimePermits>,
+}
+
+struct Pending {
+    serial: u64,
+    request: OpenReq,
+    cancel: Arc<AtomicBool>,
+    observed: Option<RuntimePermits>,
+}
+
+struct Retired {
+    channel: Open,
+    payload: PayloadPublisher,
+    writer: WriterPublisher,
 }
 
 pub struct Runtime {
@@ -76,12 +98,18 @@ pub struct Runtime {
     asm: InputAssembler,
     channels: BTreeMap<String, Open>,
     next_serial: u64,
+    planner: Planner,
+    pending: BTreeMap<String, Pending>,
+    terminated: bool,
     /// Marked gaps not yet reached by the input, in arrival order: (atInputByte, droppedInputBytes).
     pending_gaps: VecDeque<(u64, u64)>,
     last_stats: Instant,
     /// Writers → main, unbounded: a writer never blocks reporting its client gone.
     gone_tx: mpsc::Sender<(String, u64)>,
     gone_rx: mpsc::Receiver<(String, u64)>,
+    disposal: Option<Disposal>,
+    retired: [Option<Retired>; SLOTS],
+    reap_cursor: usize,
 }
 
 /// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
@@ -114,11 +142,29 @@ impl Runtime {
             asm: InputAssembler::default(),
             channels: BTreeMap::new(),
             next_serial: 0,
+            planner: Planner::new(),
+            pending: BTreeMap::new(),
+            terminated: false,
             pending_gaps: VecDeque::new(),
             last_stats: Instant::now(),
             gone_tx,
             gone_rx,
+            disposal: None,
+            retired: std::array::from_fn(|_| None),
+            reap_cursor: 0,
         }
+    }
+
+    /// Internal native integration seam; production uses the authenticated blocking bootstrap.
+    pub fn with_settlement(
+        args: Args,
+        sink: Box<dyn FnMut(Value) + Send>,
+        stream: UnixStream,
+    ) -> std::io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        let mut runtime = Self::new(args, sink);
+        runtime.disposal = Some(Disposal::new(stream));
+        Ok(runtime)
     }
 
     /// Every event carries `v: 1` and this process's generation (Property 9).
@@ -145,8 +191,11 @@ impl Runtime {
 
     /// Returns the exit code when the request ends the process.
     pub fn on_request(&mut self, req: Request) -> Option<i32> {
+        if self.terminated {
+            return Some(0);
+        }
         match req {
-            Request::Open(o) => self.open(o),
+            Request::Open(o) => self.open(o, None),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
                 at_input_byte,
@@ -162,12 +211,75 @@ impl Runtime {
         None
     }
 
-    fn open(&mut self, o: OpenReq) {
-        if self.channels.contains_key(&o.id) {
-            return self.reject(
-                &o.id,
+    fn reject_attempt(
+        &mut self,
+        o: OpenReq,
+        code: &str,
+        detail: String,
+        attempt: Option<AttemptPermits>,
+    ) {
+        let id = o.id.clone();
+        drop(o);
+        if let Some(p) = attempt {
+            p.preparation.reservation.publish();
+            p.runtime.writer.publish(); // No work/writer was created, permanently sealed.
+            self.reject(&id, code, detail); // All request/error payloads consumed before publication.
+            p.preparation.payload.publish();
+            p.runtime.logical.publish();
+        } else {
+            self.reject(&id, code, detail);
+        }
+    }
+
+    pub fn on_observed_request(&mut self, req: ObservedRequest) -> Option<i32> {
+        match req {
+            ObservedRequest::Ordinary(r) => self.on_request(r),
+            ObservedRequest::InvalidOpen { token, id, detail } => {
+                if self.terminated {
+                    return Some(0);
+                }
+                match self.disposal.as_mut().map(|d| d.admit(token, &id)) {
+                    Some(Admission::Accepted(p)) => {
+                        p.preparation.reservation.publish();
+                        p.runtime.writer.publish();
+                        self.reject(&id, "channel-request-invalid", detail);
+                        p.preparation.payload.publish();
+                        p.runtime.logical.publish();
+                    }
+                    _ => self.reject(&id, "channel-request-invalid", detail),
+                }
+                None
+            }
+            ObservedRequest::Open { token, request } => {
+                if self.terminated {
+                    return Some(0);
+                }
+                let admission = self.disposal.as_mut().map(|d| d.admit(token, &request.id));
+                match admission {
+                    Some(Admission::Accepted(p)) => self.open(request, Some(p)),
+                    Some(Admission::Refused) => self.reject(
+                        &request.id,
+                        "channel-request-invalid",
+                        "settlement capacity unavailable".into(),
+                    ),
+                    _ => self.reject(
+                        &request.id,
+                        "channel-request-invalid",
+                        "invalid settlement token or unavailable transport".into(),
+                    ),
+                }
+                None
+            }
+        }
+    }
+
+    fn open(&mut self, o: OpenReq, attempt: Option<AttemptPermits>) {
+        if self.channels.contains_key(&o.id) || self.pending.contains_key(&o.id) {
+            return self.reject_attempt(
+                o,
                 "channel-request-invalid",
                 "duplicate channel id".into(),
+                attempt,
             );
         }
         let a = &self.args;
@@ -181,7 +293,21 @@ impl Runtime {
             a.usable_fraction,
         ) {
             Ok(off) => off,
-            Err(r) => return self.reject(&o.id, r.code, r.detail),
+            Err(r) => return self.reject_attempt(o, r.code, r.detail, attempt),
+        };
+        let sample_bytes = o.format.sample_bytes();
+        if o.queue_bytes < sample_bytes {
+            let detail = format!("queueBytes below one {} sample", o.format.as_str());
+            return self.reject_attempt(o, "channel-request-invalid", detail, attempt);
+        }
+        let serial = self.next_serial;
+        let Some(next) = serial.checked_add(1) else {
+            return self.reject_attempt(
+                o,
+                "channel-request-invalid",
+                "channel serial exhausted".into(),
+                attempt,
+            );
         };
         let spec = ChannelSpec {
             input_rate: a.input_rate,
@@ -192,18 +318,92 @@ impl Runtime {
             format: o.format,
             gain: o.gain,
         };
-        let dsp = match ChannelDsp::new(spec) {
-            Ok(d) => d,
-            Err(e) => return self.reject(&o.id, "channel-request-invalid", e),
+        let (preparation, observed) = match attempt {
+            Some(p) => (Some(p.preparation), Some(p.runtime)),
+            None => (None, None),
         };
-        let sample_bytes = o.format.sample_bytes();
-        if o.queue_bytes < sample_bytes {
-            return self.reject(
-                &o.id,
+        let cancel = Arc::new(AtomicBool::new(false));
+        if let Err((SubmitError::PlannerBusy, preparation)) =
+            self.planner
+                .submit_observed(serial, spec, o.queue_bytes, cancel.clone(), preparation)
+        {
+            drop(cancel);
+            let attempt = preparation
+                .zip(observed)
+                .map(|(preparation, runtime)| AttemptPermits {
+                    preparation,
+                    runtime,
+                });
+            return self.reject_attempt(
+                o,
                 "channel-request-invalid",
-                format!("queueBytes below one {} sample", o.format.as_str()),
+                "planner busy".into(),
+                attempt,
             );
         }
+        self.next_serial = next;
+        self.pending.insert(
+            o.id.clone(),
+            Pending {
+                serial,
+                request: o,
+                cancel,
+                observed,
+            },
+        );
+    }
+
+    /// At most one prepared channel is installed per input/control turn. Socket/event/sample
+    /// authority stays here; input consumed during preparation belongs only to existing channels.
+    pub fn poll_prepared(&mut self) {
+        if self.terminated {
+            return;
+        }
+        let Some((serial, result, failed_payload)) = self.planner.take_observed() else {
+            return;
+        };
+        let id = self
+            .pending
+            .iter()
+            .find(|(_, p)| p.serial == serial)
+            .map(|(id, _)| id.clone());
+        let Some(id) = id else {
+            // Uncertain/unmatched result: drop without optimistic publication.
+            drop(result);
+            drop(failed_payload);
+            return;
+        };
+        let pending = self.pending.remove(&id).unwrap();
+        match result {
+            Ok(prepared) => self.install(pending.request, serial, prepared, pending.observed),
+            Err(e) => {
+                drop(pending.request);
+                drop(pending.cancel);
+                if let Some(p) = pending.observed {
+                    p.writer.publish();
+                    self.reject(&id, "channel-request-invalid", e); // Error payload consumed/dropped.
+                    if let Some(payload) = failed_payload {
+                        payload.publish();
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, "channel-request-invalid", e);
+                }
+            }
+        }
+    }
+
+    fn install(
+        &mut self,
+        o: OpenReq,
+        serial: u64,
+        Prepared {
+            dsp,
+            queue,
+            payload,
+        }: Prepared,
+        observed: Option<RuntimePermits>,
+    ) {
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         // Listening before `opened` (§11): a client may connect as soon as it reads the event.
@@ -213,14 +413,30 @@ impl Runtime {
         }) {
             Ok(l) => l,
             Err(e) => {
-                let _ = std::fs::remove_file(&socket);
+                let cleanup_known = std::fs::remove_file(&socket)
+                    .map(|_| true)
+                    .unwrap_or_else(|e| e.kind() == ErrorKind::NotFound);
                 let detail = format!("bind {}: {e}", socket.display());
-                return self.reject(&o.id, "channel-request-invalid", detail);
+                let id = o.id.clone();
+                drop(e);
+                drop(o);
+                drop(dsp);
+                drop(queue);
+                if let Some(p) = observed {
+                    p.writer.publish();
+                    self.reject(&id, "channel-request-invalid", detail);
+                    if let Some(payload) = payload {
+                        if cleanup_known {
+                            payload.publish();
+                        }
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, "channel-request-invalid", detail);
+                }
+                return;
             }
         };
-        let serial = self.next_serial;
-        self.next_serial += 1;
-        let queue = Arc::new(ChannelQueue::new(o.queue_bytes, sample_bytes));
         let conn: ConnSlot = Arc::new(Mutex::new(Conn::default()));
         let writer = {
             let (q, p, c) = (queue.clone(), socket.clone(), conn.clone());
@@ -242,6 +458,8 @@ impl Runtime {
                 saturated: 0,
                 run: None,
                 opened_at_byte: self.received_bytes(),
+                payload,
+                observed,
             },
         );
         self.emit(json!({
@@ -256,6 +474,20 @@ impl Runtime {
     }
 
     fn close(&mut self, id: &str, reason: &str) {
+        if let Some(p) = self.pending.remove(id) {
+            self.planner.cancel(&p.cancel);
+            let observed = p.observed;
+            drop(p.request);
+            drop(p.cancel);
+            if let Some(p) = observed {
+                p.writer.publish();
+                self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+                p.logical.publish();
+            } else {
+                self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            }
+            return;
+        }
         let Some(mut ch) = self.channels.remove(id) else {
             return;
         };
@@ -263,7 +495,13 @@ impl Runtime {
             self.emit(e); // A13: an open run is reported before `closed`
         }
         {
-            let mut c = ch.conn.lock().unwrap();
+            // A poisoned observed connection retains unknown completion; default behavior is unchanged.
+            let locked = ch.conn.lock();
+            let mut c = match locked {
+                Ok(c) => c,
+                Err(e) if ch.observed.is_some() => e.into_inner(),
+                Err(_) => panic!("channel connection poisoned"),
+            };
             c.closing = true;
             // Unblocks a writer stuck in write_all to a client that stopped reading (or vanished).
             if let Some(s) = c.stream.take() {
@@ -271,11 +509,71 @@ impl Runtime {
             }
         }
         ch.queue.close();
-        let _ = std::fs::remove_file(&ch.socket);
-        if let Some(w) = ch.writer.take() {
-            join_bounded(w, CLOSE_JOIN_BUDGET);
+        if let Err(e) = std::fs::remove_file(&ch.socket) {
+            if ch.observed.is_some() && e.kind() != ErrorKind::NotFound {
+                if let Ok(mut conn) = ch.conn.lock() {
+                    conn.cleanup_uncertain = true;
+                }
+            }
         }
-        self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        if let Some(p) = ch.observed.take() {
+            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            p.logical.publish();
+            if let Some(payload) = ch.payload.take() {
+                self.retired[p.slot] = Some(Retired {
+                    channel: ch,
+                    payload,
+                    writer: p.writer,
+                });
+            }
+        } else {
+            if let Some(w) = ch.writer.take() {
+                join_bounded(w, CLOSE_JOIN_BUDGET);
+            }
+            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        }
+    }
+
+    /// Every continuing turn, including the existing idle timeout, reaps at most one writer.
+    pub fn poll_disposal(&mut self) {
+        if self.disposal.is_none() {
+            return;
+        }
+        for n in 0..SLOTS {
+            let i = (self.reap_cursor + n) % SLOTS;
+            let finished = self.retired[i].as_ref().is_some_and(|r| {
+                !r.channel.conn.is_poisoned()
+                    && r.channel.writer.as_ref().is_some_and(|w| w.is_finished())
+            });
+            if finished {
+                let Retired {
+                    mut channel,
+                    payload,
+                    writer,
+                } = self.retired[i].take().unwrap();
+                let joined = channel.writer.take().unwrap().join();
+                let uncertain = channel
+                    .conn
+                    .lock()
+                    .map(|c| c.cleanup_uncertain)
+                    .unwrap_or(true);
+                drop(channel); // DSP, queue, connection, path, and all main-owned clones.
+                if joined.is_err() {
+                    eprintln!("wavekit-chan: retired writer unwound");
+                }
+                drop(joined);
+                if !uncertain {
+                    payload.publish();
+                    writer.publish();
+                }
+                self.reap_cursor = (i + 1) % SLOTS;
+                break;
+            }
+        }
+        self.reap_cursor = (self.reap_cursor + 1) % SLOTS;
+        if let Some(d) = &mut self.disposal {
+            d.poll();
+        }
     }
 
     pub fn on_client_gone(&mut self, id: &str) {
@@ -394,6 +692,7 @@ impl Runtime {
     /// EOF (A7): drain every queue to its client, report open drop runs, emit `input-eof`, exit 0.
     /// Samples the A12 schedule still holds back are discarded; nothing is zero-padded.
     pub fn on_eof(&mut self) -> i32 {
+        self.cancel_preparations();
         self.drain_all(EOF_DRAIN_BUDGET);
         let (input, discarded) = (self.asm.consumed_bytes / 2, self.asm.discarded());
         self.emit(json!({"type": "input-eof", "inputSamples": input, "discardedBytes": discarded}));
@@ -412,22 +711,68 @@ impl Runtime {
             ch.conn.lock().unwrap().draining = true;
             ch.queue.close();
             let _ = std::fs::remove_file(&ch.socket);
-            writers.extend(ch.writer.take());
+            if let Some(p) = ch.observed.take() {
+                // EOF is not a matching closed event. Drop logical permit unpublished.
+                drop(p.logical);
+                if let Some(payload) = ch.payload.take() {
+                    self.retired[p.slot] = Some(Retired {
+                        channel: ch,
+                        payload,
+                        writer: p.writer,
+                    });
+                }
+            } else {
+                writers.extend(ch.writer.take());
+            }
         }
         for e in events {
             self.emit(e);
         }
-        while writers.iter().any(|w| !w.is_finished()) && Instant::now() < deadline {
+        // Observed ownership does not remove the ordinary EOF drain opportunity.
+        // Waiting retains the bundle without publishing logical/disposal proof.
+        while (writers.iter().any(|w| !w.is_finished())
+            || self
+                .retired
+                .iter()
+                .flatten()
+                .any(|r| r.channel.writer.as_ref().is_some_and(|w| !w.is_finished())))
+            && Instant::now() < deadline
+        {
             thread::sleep(Duration::from_millis(10));
         }
     }
 
+    fn cancel_preparations(&mut self) {
+        self.terminated = true;
+        for (_, p) in std::mem::take(&mut self.pending) {
+            self.planner.cancel(&p.cancel);
+        }
+        self.planner.stop();
+    }
+
     pub fn shutdown(&mut self) -> i32 {
+        let pending_ids: Vec<String> = self.pending.keys().cloned().collect();
+        for id in pending_ids {
+            self.close(&id, "requested");
+        }
+        self.cancel_preparations();
         let ids: Vec<String> = self.channels.keys().cloned().collect();
         for id in ids {
             self.close(&id, "requested");
         }
         0
+    }
+
+    #[cfg(test)]
+    fn request_and_wait(&mut self, req: Request) -> Option<i32> {
+        let code = self.on_request(req);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !self.pending.is_empty() {
+            self.poll_prepared();
+            assert!(Instant::now() < deadline, "preparation did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+        code
     }
 
     #[cfg(test)]
@@ -437,6 +782,7 @@ impl Runtime {
 
     #[cfg(test)]
     fn on_eof_no_exit_for_test(&mut self) {
+        self.cancel_preparations();
         self.drain_all(EOF_DRAIN_BUDGET);
     }
 }
@@ -464,6 +810,23 @@ fn abandon(q: &ChannelQueue, conn: &ConnSlot, (gone, id, serial): Gone) {
 }
 
 type Gone = (mpsc::Sender<(String, u64)>, String, u64);
+
+/// Unlink and publish the accepted connection under the same lock that close() uses
+/// to revoke this writer. After close has set `closing`, an old writer must never
+/// unlink a replacement channel's same-ID socket, even if its bounded join expired.
+fn install_writer_connection(path: &std::path::Path, conn: &ConnSlot, stream: &UnixStream) -> bool {
+    let mut c = conn.lock().unwrap();
+    if c.closing {
+        return false;
+    }
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != ErrorKind::NotFound {
+            c.cleanup_uncertain = true;
+        }
+    } // exactly one client per socket
+    c.stream = stream.try_clone().ok();
+    true
+}
 
 fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: ConnSlot, gone: Gone) {
     // The listener is non-blocking: accept() is polled so close() and EOF never need a wake-up
@@ -494,19 +857,13 @@ fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: Con
         }
     };
     drop(listener);
-    // Exactly one client per socket.
-    let _ = std::fs::remove_file(&path);
     // BSD/macOS accept() inherits O_NONBLOCK from the listener; the writes below must block.
     if let Err(e) = stream.set_nonblocking(false) {
         eprintln!("wavekit-chan: channel {}: set_nonblocking: {e}", gone.1);
         return abandon(&q, &conn, gone);
     }
-    {
-        let mut c = conn.lock().unwrap();
-        if c.closing {
-            return; // close() got here first
-        }
-        c.stream = stream.try_clone().ok(); // close() shuts this clone down to unblock write_all
+    if !install_writer_connection(&path, &conn, &stream) {
+        return; // close() got here first; the path may already belong to a replacement
     }
     let mut stream = stream;
     let mut buf = Vec::with_capacity(WRITE_CHUNK);
@@ -521,9 +878,22 @@ fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: Con
 
 /// Parses control lines until EOF, an I/O error, or `send` returning false. A line that is not
 /// UTF-8 is a malformed request like any other (Property 14), so it never ends control.
+#[cfg(test)]
 fn read_control<R: BufRead>(
-    mut r: R,
+    r: R,
     mut send: impl FnMut(Result<Request, (String, String)>) -> bool,
+) -> std::io::Result<()> {
+    read_control_mode(r, false, |req| {
+        send(req.map(|r| match r {
+            ObservedRequest::Ordinary(r) => r,
+            _ => unreachable!("default parser refuses observed envelope"),
+        }))
+    })
+}
+fn read_control_mode<R: BufRead>(
+    mut r: R,
+    observed: bool,
+    mut send: impl FnMut(Result<ObservedRequest, (String, String)>) -> bool,
 ) -> std::io::Result<()> {
     let mut raw = Vec::new();
     loop {
@@ -536,7 +906,8 @@ fn read_control<R: BufRead>(
         }
         let req = match std::str::from_utf8(&raw) {
             Ok(l) if l.trim().is_empty() => continue,
-            Ok(l) => parse_request(l),
+            Ok(l) if observed => parse_observed_request(l),
+            Ok(l) => parse_request(l).map(ObservedRequest::Ordinary),
             Err(e) => Err((String::new(), format!("invalid UTF-8: {e}"))),
         };
         if !send(req) {
@@ -547,6 +918,35 @@ fn read_control<R: BufRead>(
 
 /// The process main loop. Returns the exit code.
 pub fn run(args: Args) -> i32 {
+    run_inner(args, None)
+}
+
+pub fn run_observed(args: Args, path: &std::path::Path) -> i32 {
+    if args.control_fd == 4 {
+        return 2;
+    }
+    match disposal::bootstrap_fd4().and_then(|fd| disposal::bootstrap(path, fd)) {
+        Ok(disposal) => run_inner(args, Some(disposal)),
+        Err(e) => {
+            eprintln!("wavekit-chan: settlement startup: {e}");
+            2
+        }
+    }
+}
+
+fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
+    let observed = disposal.is_some();
+    if observed {
+        let mut stdout = std::io::stdout().lock();
+        let ready = json!({"v": 1, "type": "ready", "generation": args.generation,
+            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY});
+        if serde_json::to_writer(&mut stdout, &ready).is_err()
+            || stdout.write_all(b"\n").is_err()
+            || stdout.flush().is_err()
+        {
+            return 2;
+        }
+    }
     let (tx, rx) = mpsc::sync_channel::<Msg>(1); // ≤ 2 input blocks in flight (addendum §6)
     {
         let tx = tx.clone();
@@ -581,8 +981,9 @@ pub fn run(args: Args) -> i32 {
         thread::spawn(move || {
             // SAFETY: the parent passes an open pipe at this fd (A1); this thread owns it from here on.
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
-            if let Err(e) = read_control(BufReader::new(file), |r| tx.send(Msg::Control(r)).is_ok())
-            {
+            if let Err(e) = read_control_mode(BufReader::new(file), observed, |r| {
+                tx.send(Msg::Control(r)).is_ok()
+            }) {
                 eprintln!("wavekit-chan: control fd {fd}: {e}");
             }
             let _ = tx.send(Msg::ControlEof);
@@ -596,13 +997,21 @@ pub fn run(args: Args) -> i32 {
         let _ = l.flush();
     });
     let mut rt = Runtime::new(args, sink);
-    rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+    rt.disposal = disposal;
+    if !observed {
+        rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+    }
     loop {
-        match rx.recv_timeout(Duration::from_millis(250)) {
+        let wait = if rt.pending.is_empty() {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_millis(5)
+        };
+        match rx.recv_timeout(wait) {
             Ok(Msg::Input(b)) => rt.on_input(&b),
             Ok(Msg::InputEof) => return rt.on_eof(),
             Ok(Msg::Control(Ok(r))) => {
-                if let Some(code) = rt.on_request(r) {
+                if let Some(code) = rt.on_observed_request(r) {
                     return code;
                 }
             }
@@ -613,8 +1022,10 @@ pub fn run(args: Args) -> i32 {
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
         rt.maybe_stats(Instant::now());
+        rt.poll_disposal();
     }
 }
 
@@ -649,6 +1060,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn accepted_old_writer_cannot_unlink_replacement_after_close() {
+        let dir = TempDir::new();
+        let path = dir.0.join("same.sock");
+        let old = UnixListener::bind(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        let (accepted, _) = old.accept().unwrap();
+        let conn = ConnSlot::default();
+        // Pause the old writer immediately after accept, then complete close and
+        // bind a replacement before the old writer resumes (no timing assertion).
+        conn.lock().unwrap().closing = true;
+        std::fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        assert!(!install_writer_connection(&path, &conn, &accepted));
+        assert!(conn.lock().unwrap().stream.is_none());
+        let _replacement_client = UnixStream::connect(&path).unwrap();
+        replacement.accept().unwrap();
+        assert!(path.exists());
     }
 
     fn rt(dir: &Path) -> (Runtime, Events) {
@@ -696,13 +1127,339 @@ mod tests {
             .collect()
     }
 
+    fn block_next_preparation(r: &mut Runtime) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        use std::sync::atomic::Ordering;
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, released) = mpsc::channel();
+        let first = AtomicBool::new(true);
+        r.planner = Planner::with_hook(Box::new(move || {
+            if first.swap(false, Ordering::Relaxed) {
+                entered_tx.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+            }
+        }));
+        (entered, release)
+    }
+    fn finish_preparations(r: &mut Runtime) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.pending.is_empty() {
+            r.poll_prepared();
+            assert!(Instant::now() < deadline, "worker did not complete");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    #[test]
+    fn pending_duplicate_cancel_reuse_and_install_byte_are_serial_owned() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("same", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_request(open("same", 162e6, 4096));
+        assert_eq!(last(&ev)["detail"], "duplicate channel id");
+        r.on_request(Request::Close { id: "same".into() });
+        r.on_request(open("same", 162e6 + 10_000.0, 4096));
+        r.on_input(&[128; 4096]);
+        r.on_request(Request::MarkGap {
+            at_input_byte: Some(2048),
+            dropped_input_bytes: Some(1024),
+        });
+        release.send(()).unwrap();
+        finish_preparations(&mut r);
+        let opened: Vec<Value> = ev
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "opened")
+            .cloned()
+            .collect();
+        assert_eq!(opened.len(), 1, "old canceled serial never opens");
+        assert_eq!(r.channels["same"].serial, 1);
+        assert_eq!(r.channels["same"].opened_at_byte, 4096);
+        r.on_input(&[128; 4096]);
+        assert!(
+            of_cause(&ev, "input-gap").is_empty(),
+            "pending channel never saw old gap"
+        );
+        assert_eq!(r.channels["same"].out_samples, 48);
+        assert_eq!(r.on_request(Request::Shutdown), Some(0));
+        assert!(!dir.0.join("same.sock").exists());
+    }
+    #[test]
+    fn existing_channel_output_is_exact_while_cold_planner_is_blocked() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.request_and_wait(open("live", 162e6 + 10_000.0, 1 << 20));
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("cold", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        let input: Vec<u8> = (0..80_003).map(|k| (k * 17 % 256) as u8).collect();
+        for b in input.chunks(333) {
+            r.on_input(b);
+            r.poll_prepared();
+        }
+        assert!(!r.channels.contains_key("cold"));
+        assert_eq!(r.channels["live"].out_samples, 40_001 * 48_000 / 2_048_000);
+        let mut got = Vec::new();
+        r.channels["live"].queue.try_pop_for_test(&mut got);
+        let (mut i, mut q) = (Vec::new(), Vec::new());
+        InputAssembler::default().push(&input, &mut i, &mut q);
+        let mut reference = ChannelDsp::new(ChannelSpec {
+            input_rate: 2_048_000,
+            offset_hz: 10_000.0,
+            bandwidth_hz: 45600.0,
+            transition_hz: 1200.0,
+            output_rate: 48_000,
+            format: crate::channel::Format::Cf32,
+            gain: 1.0,
+        })
+        .unwrap();
+        let mut want = Vec::new();
+        reference.process(&i, &q, &mut want);
+        assert_eq!(got, want, "planning changes no existing channel sample");
+        assert!(of_cause(&ev, "input-gap").is_empty());
+        assert!(of_cause(&ev, "queue-overflow").is_empty());
+        r.on_request(Request::Close { id: "cold".into() });
+        release.send(()).unwrap();
+        r.shutdown();
+    }
+    #[test]
+    fn saturation_has_stable_busy_detail_and_shutdown_has_no_late_install() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("one", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        for id in ["two", "three", "four", "five"] {
+            r.on_request(open(id, 162e6, 4096));
+        }
+        assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
+        assert_eq!(last(&ev)["detail"], "planner busy");
+        r.shutdown();
+        let before = ev.lock().unwrap().len();
+        release.send(()).unwrap();
+        r.poll_prepared();
+        r.on_request(open("after", 162e6, 4096));
+        assert_eq!(ev.lock().unwrap().len(), before);
+        assert!(r.channels.is_empty());
+        assert!(r.pending.is_empty());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+    #[test]
+    fn eof_cancels_pending_without_open_or_socket_even_if_work_finishes_later() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_request(open("pending", 162e6, 4096));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_input(&[128; 4097]);
+        assert_eq!(r.on_eof(), 0);
+        let eof = last(&ev);
+        assert_eq!(eof["type"], "input-eof");
+        assert_eq!(eof["inputSamples"], 2048);
+        assert_eq!(eof["discardedBytes"], 1);
+        release.send(()).unwrap();
+        r.poll_prepared();
+        assert_eq!(ev.lock().unwrap().len(), 1);
+        assert!(!dir.0.join("pending.sock").exists());
+    }
+
+    fn observed_open(id: &str, token: u64) -> ObservedRequest {
+        let Request::Open(request) = open(id, 162e6, 4096) else {
+            unreachable!()
+        };
+        ObservedRequest::Open { token, request }
+    }
+    fn attach_proof(r: &mut Runtime) -> UnixStream {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        r.disposal = Some(Disposal::new(stream));
+        peer
+    }
+    fn no_proof(peer: &mut UnixStream) {
+        let mut b = [0; 256];
+        assert_eq!(peer.read(&mut b).unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+    fn read_proof(r: &mut Runtime, peer: &mut UnixStream) -> Value {
+        let mut proofs = read_proofs(r, peer, 1);
+        proofs.remove(0)
+    }
+    fn read_proofs(r: &mut Runtime, peer: &mut UnixStream, count: usize) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frame = Vec::new();
+        loop {
+            r.poll_disposal();
+            let mut bytes = [0; 256];
+            match peer.read(&mut bytes) {
+                Ok(n) => {
+                    frame.extend_from_slice(&bytes[..n]);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => panic!("proof read: {e}"),
+            }
+            if frame.ends_with(b"\n") && frame.iter().filter(|&&b| b == b'\n').count() == count {
+                return serde_json::Deserializer::from_slice(&frame)
+                    .into_iter::<Value>()
+                    .map(Result::unwrap)
+                    .collect();
+            }
+            assert!(Instant::now() < deadline, "proof did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn observed_running_and_queued_cancel_stay_unknown_until_worker_drop_and_retire() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_observed_request(observed_open("running", 1));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_observed_request(observed_open("queued", 2));
+        r.on_request(Request::Close {
+            id: "running".into(),
+        });
+        r.on_request(Request::Close {
+            id: "queued".into(),
+        });
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert_eq!(r.planner.outstanding_for_test(), 2);
+        release.send(()).unwrap();
+        let proofs = read_proofs(&mut r, &mut peer, 2);
+        let mut tokens: Vec<_> = proofs
+            .iter()
+            .map(|p| p["token"].as_str().unwrap())
+            .collect();
+        tokens.sort();
+        assert_eq!(tokens, vec!["1", "2"]);
+        assert_eq!(r.planner.outstanding_for_test(), 0);
+        assert!(r.pending.is_empty());
+    }
+
+    #[test]
+    fn observed_held_writer_beyond_old_join_budget_requires_return_join_and_bundle_drop() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        r.request_and_wait(open("configured", 162e6, 4096));
+        r.on_observed_request(observed_open("held", 1));
+        finish_preparations(&mut r);
+        let (release, gate) = mpsc::channel();
+        let (entered_tx, entered) = mpsc::channel();
+        let (returned_tx, returned) = mpsc::channel();
+        {
+            let ch = r.channels.get_mut("held").unwrap();
+            // Retire the real accept writer first; replace it with a precisely held return gate.
+            ch.conn.lock().unwrap().closing = true;
+            ch.writer.take().unwrap().join().unwrap();
+            ch.conn.lock().unwrap().closing = false;
+            ch.writer = Some(thread::spawn(move || {
+                entered_tx.send(()).unwrap(); // An early guard/notice is not thread return.
+                gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                returned_tx.send(()).unwrap();
+            }));
+        }
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_request(Request::Close { id: "held".into() });
+        assert_eq!(last(&ev)["type"], "closed");
+        thread::sleep(CLOSE_JOIN_BUDGET + Duration::from_millis(10));
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert!(r.retired.iter().any(Option::is_some));
+        assert!(r.channels.contains_key("configured"));
+        // Same-ID successor gets its own cell before the old writer returns.
+        r.on_observed_request(observed_open("held", 2));
+        finish_preparations(&mut r);
+        release.send(()).unwrap();
+        returned.recv_timeout(Duration::from_secs(10)).unwrap();
+        let proof = read_proof(&mut r, &mut peer);
+        assert_eq!(proof["token"], "1");
+        assert!(r.channels.contains_key("held"));
+        no_proof(&mut peer);
+        r.on_request(Request::Close { id: "held".into() });
+        assert_eq!(read_proof(&mut r, &mut peer)["token"], "2");
+        r.shutdown();
+    }
+
+    #[test]
+    fn observed_poisoned_writer_connection_retains_unknown_after_actual_thread_return() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        r.on_observed_request(observed_open("poisoned", 1));
+        finish_preparations(&mut r);
+        let conn = r.channels["poisoned"].conn.clone();
+        {
+            conn.lock().unwrap().closing = true;
+            r.channels
+                .get_mut("poisoned")
+                .unwrap()
+                .writer
+                .take()
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+        let worker_conn = conn.clone();
+        r.channels.get_mut("poisoned").unwrap().writer = Some(thread::spawn(move || {
+            let _held = worker_conn.lock().unwrap();
+            panic!("injected writer connection poison");
+        }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.channels["poisoned"]
+            .writer
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(conn);
+        r.on_request(Request::Close {
+            id: "poisoned".into(),
+        });
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert!(
+            r.retired.iter().any(Option::is_some),
+            "unknown bundle remains owned"
+        );
+    }
+
+    // Cold preparation must yield to input; no timing threshold determines this contract.
+    #[test]
+    fn cold_open_returns_before_installing_and_input_keeps_progressing() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        r.on_request(open("cold", 162e6, 96_000));
+        assert!(
+            ev.lock().unwrap().is_empty(),
+            "open only schedules preparation"
+        );
+        r.on_input(&[128; 4096]);
+        assert_eq!(r.received_bytes(), 4096);
+        r.on_request(Request::Close { id: "cold".into() });
+        assert_eq!(last(&ev)["type"], "closed");
+        assert!(!dir.0.join("cold.sock").exists());
+    }
+
     // Feature: core-channelizer, Property 9: Generation stamping (process side)
     // Validates: addendum §11, §12.9
     #[test]
     fn opened_carries_generation_and_listens_first() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        assert!(r.on_request(open("a", 162e6, 96_000)).is_none());
+        assert!(r.request_and_wait(open("a", 162e6, 96_000)).is_none());
         let e = last(&ev);
         assert_eq!(e["type"], "opened");
         assert_eq!(
@@ -724,7 +1481,9 @@ mod tests {
     fn rejects_outside_and_duplicate_without_exiting() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        assert!(r.on_request(open("a", 162e6 + 900_000.0, 96_000)).is_none());
+        assert!(r
+            .request_and_wait(open("a", 162e6 + 900_000.0, 96_000))
+            .is_none());
         let e = last(&ev);
         assert_eq!(e["reasonCode"], "channel-outside-capture");
         assert_eq!(
@@ -732,8 +1491,8 @@ mod tests {
             (Some("rejected"), Some("a"))
         );
         assert_eq!(e["generation"], 7);
-        r.on_request(open("b", 162e6, 96_000));
-        r.on_request(open("b", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
         r.on_eof_no_exit_for_test();
     }
@@ -761,9 +1520,11 @@ mod tests {
         let deep = dir.0.join("d".repeat(100)); // past sun_path
         std::fs::create_dir_all(&deep).unwrap();
         let (mut r, ev) = rt(&deep);
-        assert!(r.on_request(open("a", 162e6, 96_000)).is_none());
+        assert!(r.request_and_wait(open("a", 162e6, 96_000)).is_none());
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
-        assert!(r.on_request(Request::Close { id: "a".into() }).is_none());
+        assert!(r
+            .request_and_wait(Request::Close { id: "a".into() })
+            .is_none());
         assert_eq!(ev.lock().unwrap().len(), 1, "no channel was registered");
     }
 
@@ -771,7 +1532,7 @@ mod tests {
     fn queue_below_one_sample_is_rejected() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("a", 162e6, 7));
+        r.request_and_wait(open("a", 162e6, 7));
         assert_eq!(last(&ev)["reasonCode"], "channel-request-invalid");
     }
 
@@ -781,7 +1542,7 @@ mod tests {
     fn pass_through_channel_has_no_taps_and_reproduces_the_input() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(parse_request(r#"{"v":1,"type":"open","id":"p","centerHz":162000000,"bandwidthHz":1500000,"transitionHz":50000,"outputRateHz":2048000,"format":"cu8","queueBytes":65536}"#).unwrap());
+        r.request_and_wait(parse_request(r#"{"v":1,"type":"open","id":"p","centerHz":162000000,"bandwidthHz":1500000,"transitionHz":50000,"outputRateHz":2048000,"format":"cu8","queueBytes":65536}"#).unwrap());
         let e = last(&ev);
         assert_eq!(
             (e["filterTaps"].as_u64(), e["groupDelaySamples"].as_f64()),
@@ -803,7 +1564,7 @@ mod tests {
     fn overflow_reports_discontinuity_with_gap_size() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("slow", 162e6, 800)); // 100 cf32 samples; the client never connects
+        r.request_and_wait(open("slow", 162e6, 800)); // 100 cf32 samples; the client never connects
         let block = vec![128u8; 2 * 2_048_000 / 10]; // 204 800 input samples → exactly 4 800 output samples (A12)
         r.on_input(&block); // accepts 0..100, drops 100..4800: the run is open, nothing emitted yet
         assert!(of_cause(&ev, "queue-overflow").is_empty());
@@ -859,7 +1620,7 @@ mod tests {
         ) {
             let dir = TempDir::new();
             let (mut r, ev) = rt(&dir.0);
-            r.on_request(open("q", 162e6, cap_samples * 8)); // nobody connects: only Drain empties it
+            r.request_and_wait(open("q", 162e6, cap_samples * 8)); // nobody connects: only Drain empties it
             // Model: the A12 schedule gives ⌊N·48000/2048000⌋ = ⌊3N/128⌋ samples after N inputs.
             let (mut n_in, mut out, mut level) = (0u64, 0u64, 0u64);
             let mut runs: Vec<(u64, u64)> = Vec::new();
@@ -909,14 +1670,14 @@ mod tests {
     fn open_drop_run_is_reported_before_gap_and_close() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("s", 162e6, 8)); // one sample
+        r.request_and_wait(open("s", 162e6, 8)); // one sample
         r.on_input(&vec![128u8; 2 * 2_048]); // 48 out: accepts 1, drops 47
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: None,
             dropped_input_bytes: Some(2 * 2_048_000),
         });
         r.on_input(&vec![128u8; 2 * 2_048]); // the reset lands before this input; queue still full
-        r.on_request(Request::Close { id: "s".into() });
+        r.request_and_wait(Request::Close { id: "s".into() });
         let kinds: Vec<(String, Option<u64>, Option<u64>)> = ev
             .lock()
             .unwrap()
@@ -966,9 +1727,9 @@ mod tests {
         // a: pre + post in one read, with the gap marked at the seam byte
         let dir_a = TempDir::new();
         let (mut a, ev_a) = rt(&dir_a.0);
-        a.on_request(open("g", 162e6 + 10_000.0, 1 << 22));
+        a.request_and_wait(open("g", 162e6 + 10_000.0, 1 << 22));
         let ca = reader(UnixStream::connect(sock(&ev_a)).unwrap());
-        a.on_request(Request::MarkGap {
+        a.request_and_wait(Request::MarkGap {
             at_input_byte: Some(pre.len() as u64),
             dropped_input_bytes: Some(512),
         });
@@ -976,7 +1737,7 @@ mod tests {
         // b: a fresh runtime fed only the post-gap input
         let dir_b = TempDir::new();
         let (mut b, ev_b) = rt(&dir_b.0);
-        b.on_request(open("g", 162e6 + 10_000.0, 1 << 22));
+        b.request_and_wait(open("g", 162e6 + 10_000.0, 1 << 22));
         let cb = reader(UnixStream::connect(sock(&ev_b)).unwrap());
         b.on_input(&post);
         a.on_eof_no_exit_for_test();
@@ -1011,12 +1772,12 @@ mod tests {
     fn queued_marks_apply_in_order_at_their_bytes() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("g", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("g", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(1_001),
             dropped_input_bytes: Some(0),
         });
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(3_000),
             dropped_input_bytes: Some(2 * 2_048_000),
         });
@@ -1040,10 +1801,10 @@ mod tests {
     fn late_mark_skips_channels_opened_after_its_byte() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("early", 162e6, 1 << 20));
+        r.request_and_wait(open("early", 162e6, 1 << 20));
         r.on_input(&[9u8; 4_096]);
-        r.on_request(open("late", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("late", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(1_000),
             dropped_input_bytes: Some(0),
         });
@@ -1081,8 +1842,8 @@ mod tests {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
         r.on_input(&[9u8; 4_096]);
-        r.on_request(open("c", 162e6, 1 << 20));
-        r.on_request(Request::MarkGap {
+        r.request_and_wait(open("c", 162e6, 1 << 20));
+        r.request_and_wait(Request::MarkGap {
             at_input_byte: Some(4_096),
             dropped_input_bytes: Some(0),
         });
@@ -1097,7 +1858,7 @@ mod tests {
     fn output_after_a_failed_write_is_not_an_overflow() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         drop(UnixStream::connect(sock(&ev)).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         while !r.channels["x"].queue.is_closed() && Instant::now() < deadline {
@@ -1148,21 +1909,21 @@ mod tests {
     fn close_of_a_stalled_or_destroyed_client_returns_promptly_and_others_keep_flowing() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("stalled", 162e6, 1 << 24));
+        r.request_and_wait(open("stalled", 162e6, 1 << 24));
         let _stalled = UnixStream::connect(sock(&ev)).unwrap(); // connected, never reads
-        r.on_request(open("gone", 162e6, 1 << 24));
+        r.request_and_wait(open("gone", 162e6, 1 << 24));
         drop(UnixStream::connect(sock(&ev)).unwrap()); // destroyed client
-        r.on_request(open("live", 162e6, 1 << 24));
+        r.request_and_wait(open("live", 162e6, 1 << 24));
         let live = reader(UnixStream::connect(sock(&ev)).unwrap());
         // 1 s of input → exactly 48 000 cf32 samples (A12) = 384 000 B per channel, far past any socket buffer
         let block = vec![128u8; 2 * 2_048_000];
         r.on_input(&block);
         std::thread::sleep(Duration::from_millis(200)); // the stalled writer is now blocked in write_all
         let t = Instant::now();
-        r.on_request(Request::Close {
+        r.request_and_wait(Request::Close {
             id: "stalled".into(),
         });
-        r.on_request(Request::Close { id: "gone".into() });
+        r.request_and_wait(Request::Close { id: "gone".into() });
         // Below one join budget for both: neither writer was left to the 500 ms detach fallback.
         assert!(
             t.elapsed() < CLOSE_JOIN_BUDGET,
@@ -1193,7 +1954,7 @@ mod tests {
     fn client_gone_closes_only_the_channel_it_belongs_to() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         drop(UnixStream::connect(sock(&ev)).unwrap());
         let deadline = Instant::now() + Duration::from_secs(5);
         let gone = || {
@@ -1210,7 +1971,7 @@ mod tests {
         assert!(gone(), "client-gone was never reported");
         assert_eq!(last(&ev)["id"], "x");
         let n = ev.lock().unwrap().len();
-        r.on_request(open("x", 162e6, 1 << 20));
+        r.request_and_wait(open("x", 162e6, 1 << 20));
         let _c = UnixStream::connect(sock(&ev)).unwrap();
         r.gone_tx.send(("x".into(), 0)).unwrap(); // the first channel's serial
         r.poll_client_gone();
@@ -1222,7 +1983,7 @@ mod tests {
     fn stats_every_five_seconds() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("s", 162e6, 80));
+        r.request_and_wait(open("s", 162e6, 80));
         r.on_input(&vec![128u8; 2 * 20_480]); // 480 out, 10 fit
         let t0 = Instant::now();
         let n = ev.lock().unwrap().len();
@@ -1251,10 +2012,10 @@ mod tests {
     fn shutdown_closes_every_channel_and_exits_zero() {
         let dir = TempDir::new();
         let (mut r, ev) = rt(&dir.0);
-        r.on_request(open("a", 162e6, 96_000));
-        r.on_request(open("b", 162e6, 96_000));
+        r.request_and_wait(open("a", 162e6, 96_000));
+        r.request_and_wait(open("b", 162e6, 96_000));
         let socket = sock(&ev);
-        assert_eq!(r.on_request(Request::Shutdown), Some(0));
+        assert_eq!(r.request_and_wait(Request::Shutdown), Some(0));
         let closed: Vec<Value> = ev
             .lock()
             .unwrap()

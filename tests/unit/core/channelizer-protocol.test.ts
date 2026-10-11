@@ -7,6 +7,8 @@ import {
 	MIN_GAIN,
 	PROTOCOL_VERSION,
 	encodeRequest,
+	encodeObservedRequest,
+	parseObservedEventLine,
 	parseEventLine,
 } from "../../../src/core/channelizer/protocol.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
@@ -237,5 +239,72 @@ describe("channelizer protocol v1", () => {
 			'{"v":1,"type":"input-eof","generation":1,"inputSamples":1.5,"discardedBytes":0}',
 		]
 		for (const line of bad) expect(parseEventLine(line).ok, line).toBe(false)
+	})
+})
+
+describe("private observed protocol compatibility", () => {
+	it("keeps ordinary bytes while extending only observed opens", () => {
+		const ordinary = encodeRequest(open)
+		const observed = JSON.parse(
+			encodeObservedRequest(open, "18446744073709551615"),
+		) as Record<string, unknown>
+		expect(observed).toEqual({
+			...open,
+			type: "open-observed",
+			token: "18446744073709551615",
+		})
+		expect(encodeRequest(open)).toBe(ordinary)
+		for (const token of ["0", "01", "-1", "1.0", "18446744073709551616"])
+			expect(() => encodeObservedRequest(open, token)).toThrow(WaveKitError)
+	})
+
+	it("uses the same open validation for ordinary and observed requests", () => {
+		for (const patch of [
+			{ gain: MIN_GAIN },
+			{ gain: MAX_GAIN },
+			{ queueBytes: 2 },
+			{ format: "cf32", queueBytes: 8 },
+			{ id: "x".repeat(64) },
+		]) {
+			const request = { ...open, ...patch } as ChannelizerRequest
+			expect(() => encodeRequest(request)).not.toThrow()
+			expect(() =>
+				encodeObservedRequest(request as typeof open, "1"),
+			).not.toThrow()
+		}
+		for (const patch of [
+			{ format: "cf32", gain: 1 },
+			{ queueBytes: 1 },
+			{ gain: 0 },
+			{ centerHz: Infinity },
+			{ extra: true },
+			{ outputRateHz: 1.5 },
+		]) {
+			const request = { ...open, ...patch }
+			expect(() => encodeRequest(request as never)).toThrow(WaveKitError)
+			expect(() => encodeObservedRequest(request as never, "1")).toThrow(
+				WaveKitError,
+			)
+		}
+	})
+
+	it("accepts capability only in the private parser and retains ordinary event parity", () => {
+		const ordinary = '{"v":1,"type":"ready","generation":1,"pid":42}'
+		const observed =
+			'{"v":1,"type":"ready","generation":1,"pid":42,"observerCapability":"attempt-disposal-v1"}'
+		expect(parseObservedEventLine(ordinary)).toEqual(parseEventLine(ordinary))
+		expect(parseEventLine(observed).ok).toBe(false)
+		expect(parseObservedEventLine(observed)).toMatchObject({
+			ok: true,
+			event: { observerCapability: "attempt-disposal-v1" },
+		})
+		for (const line of [
+			observed.replace("attempt-disposal-v1", "unknown"),
+			observed.replace('"v":1', '"v":1,"extra":true'),
+		])
+			expect(parseObservedEventLine(line).ok).toBe(false)
+		const rejected =
+			'{"v":1,"type":"rejected","generation":1,"id":"a","reasonCode":"channel-request-invalid","detail":"busy"}'
+		expect(parseObservedEventLine(rejected)).toEqual(parseEventLine(rejected))
 	})
 })

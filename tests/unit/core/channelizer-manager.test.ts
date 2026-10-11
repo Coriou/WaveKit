@@ -25,6 +25,10 @@ import {
 	type ChannelizerProcessLike,
 	type ChannelizerProcessOptions,
 } from "../../../src/core/channelizer/channelizer-process.js"
+import {
+	ObservedPermitLedger,
+	SettlementRegistry,
+} from "../../../src/core/channelizer/settlement-observer.js"
 import type { ChannelizerRequest } from "../../../src/core/channelizer/protocol.js"
 import type { Logger } from "../../../src/utils/logger.js"
 import {
@@ -69,7 +73,13 @@ function manager(
 	extra: Partial<
 		Pick<
 			ChannelizerManagerDeps,
-			"createProcess" | "connect" | "now" | "logger" | "openTimeoutMs"
+			| "createProcess"
+			| "connect"
+			| "now"
+			| "logger"
+			| "openTimeoutMs"
+			| "settlementObserver"
+			| "openNow"
 		>
 	> = {},
 ) {
@@ -161,6 +171,336 @@ afterEach(async () => {
 })
 
 describe("ChannelizerManager", () => {
+	it.each(["deadline", "cancel"] as const)(
+		"reclaims repeated positively sealed no-start attempts after %s between claim and subscription",
+		async mode => {
+			const registry = new SettlementRegistry()
+			const lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			const ledger = new ObservedPermitLedger(
+				{ cpu: 100, bytes: 100_000 },
+				{ cpu: 0, bytes: 0 },
+			)
+			let controller = new AbortController()
+			const start = vi.spyOn(ChannelizerProcess.prototype, "start")
+			const m = manager(
+				{},
+				{
+					settlementObserver: observer,
+					openNow: () => {
+						if (registry.snapshot().processes.length > 0) {
+							if (mode === "cancel") controller.abort()
+							return mode === "deadline" ? 10_000 : 0
+						}
+						return 0
+					},
+				},
+			)
+			const adapter = observer.bindProvider(m)
+			try {
+				for (let attempt = 0; attempt < 4; attempt++) {
+					controller = new AbortController()
+					const handle = observer.allocateAcquisition({
+						activation: "direct",
+						sourceId: "rtl",
+						decoderId: `no-start-${attempt}`,
+						scannerAttempt: {},
+						signal: controller.signal,
+						expectedRequest: req(),
+						expectedInputCaps: {
+							kind: "iq",
+							format: "U8_IQ",
+							sampleRate: 2_048_000,
+							centerFreq: 162e6,
+						},
+					})!
+					const cost = { cpu: 1, bytes: 100 }
+					handle.attachPermit(
+						ledger.prepareObservedPermit(
+							handle.requestToken,
+							Array.from({ length: 6 }, () => cost),
+							Array.from({ length: 6 }, () => cost),
+							{ decoder: { cpu: 0, bytes: 0 }, classifier: cost, analog: cost },
+						)!,
+					)
+					expect(handle.arm()).toBe(true)
+					expect(
+						await adapter.requestChannel(
+							"rtl",
+							`no-start-${attempt}`,
+							req(),
+							caps(),
+						),
+					).toMatchObject({ ok: false, reasonCode: "channelizer-unavailable" })
+					await vi.waitFor(() =>
+						expect(registry.snapshot().owners).toEqual({ V: 1, P: 0, L: 0 }),
+					)
+					expect(registry.snapshot().receipts).toBe(0)
+					expect(ledger.snapshot().committed).toEqual({ cpu: 0, bytes: 0 })
+					expect(fanout.getBranchIds()).toEqual([])
+				}
+				expect(start).not.toHaveBeenCalled()
+				await m.destroy()
+				expect(lifetime.inspectFinal({ ok: true })).toEqual({ ok: true })
+			} finally {
+				start.mockRestore()
+			}
+		},
+	)
+
+	it.each(["native", "local"] as const)(
+		"starts every independent cleanup before waiting for held %s retirement",
+		async held => {
+			const registry = new SettlementRegistry()
+			const lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			let resolveNative!: () => void, resolveLocal!: () => void
+			const nativeGate = new Promise<void>(resolve => {
+				resolveNative = resolve
+			})
+			const localGate = new Promise<void>(resolve => {
+				resolveLocal = resolve
+			})
+			let nativeStarted = false,
+				localStarted = false,
+				providerStarted = false,
+				childClosed = false
+			lifetime.ownCleanup("construction", async () => {
+				providerStarted = true
+				return {
+					ok: false,
+					state: "failed",
+					detail: "synthetic provider cleanup failed",
+				}
+			})
+			// Hold actual child CLOSE despite fanout/input shutdown until the native gate opens.
+			process.env["FAKE_CHAN_MODE"] = "ignore-shutdown"
+			const m = manager(
+				{},
+				{
+					settlementObserver: observer,
+					createProcess: (options, parent) => {
+						const p = new ChannelizerProcess(
+							{ ...options, stopTimeoutMs: 10 },
+							parent,
+						)
+						const stop = p.stop.bind(p)
+						p.once("exit", () => {
+							childClosed = true
+						})
+						p.stop = () => {
+							nativeStarted = true
+							return nativeGate.then(stop)
+						}
+						p.attemptSettlementCleanup = () => {
+							localStarted = true
+							return localGate.then(() => [])
+						}
+						return p
+					},
+				},
+			)
+			const result = await observer
+				.bindProvider(m)
+				.requestChannel("rtl", "held-cleanup", req(), caps())
+			expect(result.ok).toBe(true)
+			let finished = false
+			const destroy = m.destroy().then(() => {
+				finished = true
+			})
+			try {
+				await vi.waitFor(() => {
+					expect(nativeStarted).toBe(true)
+					expect(localStarted).toBe(true)
+					expect(providerStarted).toBe(true)
+				})
+				expect(childClosed).toBe(false)
+				if (held === "native") resolveLocal()
+				else {
+					resolveNative()
+					await vi.waitFor(() => expect(childClosed).toBe(true))
+				}
+				await Promise.resolve()
+				expect(finished).toBe(false)
+			} finally {
+				resolveNative()
+				resolveLocal()
+				await destroy
+			}
+			// A failed independent sibling cannot be lost or rewritten by later positive cleanup.
+			expect(lifetime.inspectFinal({ ok: true })).toMatchObject({
+				ok: false,
+				state: "failed",
+				detail: "synthetic provider cleanup failed",
+			})
+			expect(registry.snapshot().owners.V).toBe(1)
+		},
+	)
+
+	it.skipIf(!process.env["WAVEKIT_CHAN_WITNESS_BINARY"])(
+		"reclaims exact native attempts while a configured channel keeps the witnessed process alive",
+		async () => {
+			const registry = new SettlementRegistry()
+			const lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			const m = manager(
+				{ binaryPath: process.env["WAVEKIT_CHAN_WITNESS_BINARY"]! },
+				{ settlementObserver: observer },
+			)
+			const adapter = observer.bindProvider(m)
+			// Synthetic accounting fixtures exercise lifetimes, not calibrated capacity.
+			const unit = { cpu: 1, bytes: 100 }
+			const ledger = new ObservedPermitLedger(
+				{ cpu: 100, bytes: 100_000 },
+				{ cpu: 0, bytes: 0 },
+			)
+			const acquire = async (id: string) => {
+				const handle = observer.allocateAcquisition({
+					activation: "direct",
+					sourceId: "rtl",
+					decoderId: id,
+					scannerAttempt: {},
+					expectedRequest: req(),
+					expectedInputCaps: {
+						kind: "iq",
+						format: "U8_IQ",
+						sampleRate: 2_048_000,
+						centerFreq: 162e6,
+					},
+				})!
+				const owned = [
+					"decoder",
+					"classifier",
+					"analog",
+					"filesystem",
+					"operation",
+				].map(
+					kind =>
+						handle.retainComponent(
+							kind as
+								| "decoder"
+								| "classifier"
+								| "analog"
+								| "filesystem"
+								| "operation",
+						)!,
+				)
+				expect(
+					handle.attachPermit(
+						ledger.prepareObservedPermit(
+							handle.requestToken,
+							Array.from({ length: 6 }, () => unit),
+							Array.from({ length: 6 }, () => unit),
+							{ decoder: { cpu: 0, bytes: 0 }, classifier: unit, analog: unit },
+						)!,
+					),
+				).toBe(true)
+				expect(handle.arm()).toBe(true)
+				const result = await adapter.requestChannel("rtl", id, req(), caps())
+				expect(result.ok).toBe(true)
+				for (const component of owned)
+					expect(component.sealNeverStarted()).toBe(true)
+				if (!result.ok) throw new Error("native acquisition fixture denied")
+				return result
+			}
+			const first = await acquire("observed-first")
+			const configured = await adapter.requestChannel(
+				"rtl",
+				"configured-held",
+				req(),
+				caps(),
+			)
+			expect(configured.ok).toBe(true)
+			if (!configured.ok)
+				throw new Error("configured acquisition fixture denied")
+			expect(configured.generation).toBe(first.generation)
+			await adapter.releaseChannel(first.channelId)
+			await vi.waitFor(() => {
+				expect(registry.snapshot().receipts).toBe(0)
+				expect(ledger.snapshot().nativeAttempts).toEqual({ cpu: 0, bytes: 0 })
+			})
+			// Exact per-attempt disposal cannot refund the live process residual/cache charge.
+			expect(ledger.snapshot().processResiduals).toEqual(unit)
+			expect(registry.snapshot().owners.P).toBe(1)
+			const second = await acquire("observed-second")
+			expect(second.generation).toBe(configured.generation)
+			await adapter.releaseChannel(second.channelId)
+			await vi.waitFor(() => expect(registry.snapshot().receipts).toBe(0))
+			expect(ledger.snapshot().processResiduals).toEqual(unit)
+			await adapter.releaseChannel(configured.channelId)
+			await m.destroy()
+			expect(lifetime.inspectFinal({ ok: true })).toEqual({ ok: true })
+			expect(registry.snapshot().owners).toEqual({ V: 0, P: 0, L: 0 })
+			expect(ledger.snapshot().committed).toEqual({ cpu: 0, bytes: 0 })
+		},
+	)
+
+	it("keeps configured four-argument acquisition usable with identity ownership but no profile ledger", async () => {
+		const registry = new SettlementRegistry()
+		const lifetime = registry.registerProviderLifetime()!
+		const observer = registry.createObserver(lifetime)
+		const m = manager({}, { settlementObserver: observer })
+		const forwarding = observer.bindProvider(m)
+		expect(observer.bindProvider(m)).toBe(forwarding)
+		const result = await forwarding.requestChannel(
+			"rtl",
+			"configured",
+			req(),
+			caps(),
+		)
+		expect(result.ok).toBe(true)
+		// No observed acquisition or budget was invented for this configured caller.
+		expect(registry.snapshot()).toMatchObject({
+			receipts: 0,
+			owners: { V: 1, P: 0, L: 0 },
+			queued: 0,
+		})
+		expect(registry.snapshot().processes).toEqual([])
+		if (result.ok) await forwarding.releaseChannel(result.channelId)
+		await m.destroy()
+		expect(lifetime.inspectFinal({ ok: true })).toEqual({ ok: true })
+		expect(registry.snapshot().owners).toEqual({ V: 0, P: 0, L: 0 })
+	})
+
+	it("retains provider ownership when a source remover returns without removing its listener", async () => {
+		const registry = new SettlementRegistry()
+		const lifetime = registry.registerProviderLifetime()!
+		const observer = registry.createObserver(lifetime)
+		const m = manager({}, { settlementObserver: observer })
+		const off = vi.spyOn(sources, "off").mockImplementation(() => sources)
+		try {
+			await m.destroy()
+			expect(sources.listenerCount("caps-changed")).toBe(1)
+			expect(lifetime.inspectFinal({ ok: true })).toMatchObject({
+				ok: false,
+				state: "failed",
+			})
+			expect(registry.snapshot().owners.V).toBe(1)
+		} finally {
+			off.mockRestore()
+			sources.removeAllListeners()
+		}
+	})
+
+	it("removes its exact source subscriptions before final listener inspection without requiring source disconnect", async () => {
+		const unrelated = vi.fn()
+		sources.on("caps-changed", unrelated)
+		const registry = new SettlementRegistry()
+		const lifetime = registry.registerProviderLifetime()!
+		const observer = registry.createObserver(lifetime)
+		const m = manager({}, { settlementObserver: observer })
+		expect(sources.listenerCount("caps-changed")).toBe(2)
+		expect(sources.listenerCount("disconnected")).toBe(1)
+		expect(sources.listenerCount("removed")).toBe(1)
+		await m.destroy()
+		expect(sources.listeners("caps-changed")).toEqual([unrelated])
+		expect(sources.listenerCount("disconnected")).toBe(0)
+		expect(sources.listenerCount("removed")).toBe(0)
+		expect(lifetime.inspectFinal({ ok: true })).toEqual({ ok: true })
+		// The source remains connected; exact subscription cleanup is its own proof.
+		expect(sources.getCaps("rtl")).toEqual(caps())
+	})
+
 	it("spawns one process for concurrent requests and names channels per generation", async () => {
 		const m = manager()
 		const [a, b] = await Promise.all([
@@ -323,7 +663,7 @@ describe("ChannelizerManager", () => {
 		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
 		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
 		await vi.waitFor(() => expect(order).toContain("socket-closed"))
-		expect(events).toEqual([["rtl", 1, ["ais-g1"]]])
+		expect(events).toEqual([["rtl", 1, ["ais-g1"], "caps-changed"]])
 		expect(order[0]).toBe("invalidated")
 		expect(fanout.getBranchIds()).toEqual([])
 		expect(released).toContain("rtl")
@@ -360,7 +700,7 @@ describe("ChannelizerManager", () => {
 			const events: unknown[] = []
 			m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
 			sources.emit(event, "rtl")
-			expect(events).toEqual([["rtl", 1, ["ais-g1", "vdl-g1"]]])
+			expect(events).toEqual([["rtl", 1, ["ais-g1", "vdl-g1"], "source-lost"]])
 			expect(fanout.getBranchIds()).toEqual([])
 			expect(released).toEqual(["rtl"])
 		},
@@ -567,7 +907,7 @@ describe("ChannelizerManager", () => {
 			id: "ais-g1",
 			reason: "client-gone",
 		})
-		expect(events).toEqual([["rtl", 1, ["ais-g1"]]])
+		expect(events).toEqual([["rtl", 1, ["ais-g1"], "client-gone"]])
 		expect(a.stream.destroyed).toBe(true)
 		expect(b.stream.destroyed).toBe(false)
 		expect(fanout.getBranchIds()).toEqual(["channelizer-rtl"])
@@ -614,7 +954,9 @@ describe("ChannelizerManager", () => {
 		const events: unknown[] = []
 		m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
 		sockets[0]!.destroy(new Error("read ECONNRESET"))
-		await vi.waitFor(() => expect(events).toEqual([["rtl", 1, ["ais-g1"]]]))
+		await vi.waitFor(() =>
+			expect(events).toEqual([["rtl", 1, ["ais-g1"], "socket-error"]]),
+		)
 		expect(a.stream.destroyed).toBe(true)
 		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
 		expect(fanout.getBranchIds()).toEqual([])
@@ -897,7 +1239,7 @@ describe("ChannelizerManager", () => {
 		expect(await m.requestChannel("rtl", "ais", req(), caps())).toMatchObject({
 			ok: false,
 			reasonCode: "channelizer-unavailable",
-			detail: "no opened/rejected within 300 ms",
+			detail: "channel request timed out after 300 ms",
 		})
 		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
 		expect(fanout.getBranchIds()).toEqual([])

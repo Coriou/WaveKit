@@ -63,7 +63,10 @@ export interface ChannelProvider {
 		decoderId: string,
 		req: DecoderChannelRequest,
 		inputCaps: SourceCaps | undefined,
+		/** Acquisition only: abort prevents a late grant; after grant, release its opaque ID. */
+		signal?: AbortSignal,
 	): Promise<ChannelRequestResult>
+	/** Stops delivery synchronously; resolves after terminal closure or disruptive generation retirement. */
 	releaseChannel(channelId: string): Promise<void>
 	currentGeneration(sourceId: string): number
 	on(
@@ -72,6 +75,8 @@ export interface ChannelProvider {
 			sourceId: string,
 			generation: number,
 			channelIds: string[],
+			/** Present for manager-owned invalidation; retirement can affect all grants. */
+			cause?: string,
 		) => void,
 	): this
 	on(
