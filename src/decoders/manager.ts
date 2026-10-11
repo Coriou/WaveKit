@@ -151,6 +151,8 @@ interface DecoderState {
 	rateGeneration: number
 	/** The channelizer channel feeding stdin (addendum §4); null on the raw path */
 	channel: OpenChannelRef | null
+	/** A terminal ref awaiting its batch notification/cleanup, never an adopted live identity. */
+	endingChannel: OpenChannelRef | null
 	/** The channel was invalidated under a wanted decoder; the worker restarts it */
 	channelStale: boolean
 	/**
@@ -189,6 +191,7 @@ interface OpenChannelRef {
 	realised: RealisedChannel
 	stream: Readable
 	binding: ScannerDecoderChannelBinding | null
+	ending: { release: boolean; cleanupStarted: boolean } | null
 }
 
 /** Internal lifecycle snapshot, not a capability or native-close/writer-drain receipt. */
@@ -406,6 +409,7 @@ export class DecoderManager extends EventEmitter {
 			}
 		}
 		let affected = false
+		const claimed: Array<{ state: DecoderState; ref: OpenChannelRef }> = []
 		const bindings = [...this.decoders.values()].map(state => ({
 			state,
 			ref: state.channel,
@@ -421,8 +425,10 @@ export class DecoderManager extends EventEmitter {
 			)
 				continue
 			if (state.owner === "config") affected = true
-			this.dropChannel(state, false)
+			this.claimChannel(state, ref, false)
+			claimed.push({ state, ref })
 		}
+		for (const { state, ref } of claimed) this.finishChannelDrop(state, ref)
 		// The serial worker restarts stale decoders (handleCapsChange); a
 		// rejection there becomes a suspension, a later usable centre resumes.
 		if (affected) this.recheckStaleChannel(sourceId)
@@ -453,6 +459,17 @@ export class DecoderManager extends EventEmitter {
 	 */
 	setChannelizer(provider: ChannelProvider | null): void {
 		if (this.channelizer === provider) return
+		// Claim the complete old installation before callbacks can reinstall its provider.
+		// Cleanup owns these exact refs even if an ended callback performs another swap.
+		const replaced: Array<{ state: DecoderState; ref: OpenChannelRef }> = []
+		const sources = new Set<string>()
+		for (const state of this.decoders.values()) {
+			const ref = state.channel
+			if (!ref || ref.provider === provider) continue
+			this.claimChannel(state, ref, true)
+			replaced.push({ state, ref })
+			if (state.owner === "config") sources.add(ref.sourceId)
+		}
 		if (this.channelInvalidatedHandler)
 			this.channelizer?.off(
 				"channel-invalidated",
@@ -474,20 +491,9 @@ export class DecoderManager extends EventEmitter {
 			provider.on("channel-invalidated", this.channelInvalidatedHandler)
 		// Channels of a replaced provider would never be invalidated again:
 		// release them and let the worker re-wire their decoders.
-		const sources = new Set<string>()
-		const installation = this.channelInvalidatedHandler
-		const replaced = [...this.decoders.values()].map(state => ({
-			state,
-			ref: state.channel,
-		}))
-		for (const { state, ref } of replaced) {
-			if (!ref || state.channel !== ref || ref.provider === provider) continue
-			if (state.owner === "config") sources.add(ref.sourceId)
-			this.dropChannel(state, true)
-			if (this.channelInvalidatedHandler !== installation) return
-		}
+		for (const { state, ref } of replaced) this.finishChannelDrop(state, ref)
 		for (const sourceId of sources) this.recheckStaleChannel(sourceId)
-		if (!provider) this.clearChannelRetries()
+		if (!this.channelizer) this.clearChannelRetries()
 	}
 
 	/**
@@ -569,6 +575,7 @@ export class DecoderManager extends EventEmitter {
 			transition: null,
 			rateGeneration: 0,
 			channel: null,
+			endingChannel: null,
 			channelStale: false,
 			keepFailureAccounting: false,
 			startMode: "auto",
@@ -610,18 +617,18 @@ export class DecoderManager extends EventEmitter {
 			input: opts.input ?? null,
 		})
 		const state = this.decoders.get(config.id)
-		if (
-			!state ||
-			state.decoder !== decoder ||
-			state.intentionallyStopped ||
-			this.destroying
-		)
-			throw this.probeRemovedError(config.id)
-		state.desiredRunning = true
-		state.intentionallyStopped = false
-		state.rateGeneration++
-		const generation = state.rateGeneration
 		try {
+			if (
+				!state ||
+				state.decoder !== decoder ||
+				state.intentionallyStopped ||
+				this.destroying
+			)
+				throw this.probeRemovedError(config.id)
+			state.desiredRunning = true
+			state.intentionallyStopped = false
+			state.rateGeneration++
+			const generation = state.rateGeneration
 			const outcome = await this.wireDecoderToFanout(state)
 			if (!this.probeLive(state)) throw this.probeRemovedError(config.id)
 			if (!outcome.wired) {
@@ -664,8 +671,12 @@ export class DecoderManager extends EventEmitter {
 				throw this.probeRemovedError(config.id)
 			}
 		} catch (err) {
-			// A concurrent stop or removal owns the cleanup of a probe it ended.
-			if (this.decoders.get(config.id) === state) {
+			// Remove only this creation's original state, including a registration-time stop.
+			if (
+				state &&
+				state.decoder === decoder &&
+				this.decoders.get(config.id) === state
+			) {
 				state.lastError = createDecoderLastError(err, "error")
 				try {
 					await this.removeDecoder(config.id)
@@ -973,7 +984,7 @@ export class DecoderManager extends EventEmitter {
 		this.cancelScheduledRestart(state)
 		this.cancelScannerChannelAttempt(state)
 		// Scanner intake fences must run before stop/detach/release can deliver buffered data.
-		if (state.owner === "scanner" && state.channel)
+		if ((state.owner === "scanner" && state.channel) || state.endingChannel)
 			this.dropChannel(state, true)
 		if (state.lastHealth === "restarting")
 			this.updateDecoderHealth(state, "running")
@@ -1721,6 +1732,7 @@ export class DecoderManager extends EventEmitter {
 						realised,
 					})
 				: null,
+			ending: null,
 		}
 		state.channel = ref
 		state.channelStale = false
@@ -1878,8 +1890,21 @@ export class DecoderManager extends EventEmitter {
 	 * tearing the channel down.
 	 */
 	private dropChannel(state: DecoderState, release: boolean): void {
-		const ref = state.channel
+		const ref = state.channel ?? state.endingChannel
 		if (!ref) return
+		if (state.channel === ref) this.claimChannel(state, ref, release)
+		this.finishChannelDrop(state, ref)
+	}
+
+	/** No callbacks: batch termination claims every old identity before notifying any. */
+	private claimChannel(
+		state: DecoderState,
+		ref: OpenChannelRef,
+		release: boolean,
+	): void {
+		if (state.channel !== ref) return
+		ref.ending = { release, cleanupStarted: false }
+		state.endingChannel = ref
 		// Claim termination before callbacks. Reentrant removal cannot end/release this ref twice.
 		state.channel = null
 		state.branchId = null
@@ -1887,11 +1912,19 @@ export class DecoderManager extends EventEmitter {
 		state.inputAttached = false
 		state.channelStale = true
 		this.cancelScannerChannelAttempt(state)
+	}
+
+	/** Completes only a previously claimed ref; never clears a successor's ownership. */
+	private finishChannelDrop(state: DecoderState, ref: OpenChannelRef): void {
+		const ending = ref.ending
+		if (!ending || ending.cleanupStarted) return
+		ending.cleanupStarted = true
+		if (state.endingChannel === ref) state.endingChannel = null
 		if (ref.binding)
 			this.notifyScannerChannel(
 				"decoder:scanner-channel-ended",
 				ref.binding,
-				release ? "released" : "invalidated",
+				ending.release ? "released" : "invalidated",
 			)
 		try {
 			// An ended callback may have already installed a replacement on this instance.
@@ -1902,7 +1935,7 @@ export class DecoderManager extends EventEmitter {
 				"detachInput failed while dropping a channel",
 			)
 		}
-		if (release) this.releaseChannelRef(ref)
+		if (ending.release) this.releaseChannelRef(ref)
 	}
 
 	/**
@@ -2015,7 +2048,7 @@ export class DecoderManager extends EventEmitter {
 	 */
 	private unwireDecoderFromFanout(state: DecoderState): void {
 		this.cancelScannerChannelAttempt(state)
-		if (state.owner === "scanner" && state.channel)
+		if ((state.owner === "scanner" && state.channel) || state.endingChannel)
 			this.dropChannel(state, true)
 		const { decoder, branchId, branchFanout, assignedSourceId, inputAttached } =
 			state

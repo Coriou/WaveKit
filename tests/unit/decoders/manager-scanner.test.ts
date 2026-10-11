@@ -539,6 +539,105 @@ describe("scanner opaque channel binding lifecycle", () => {
 		expect(provider.listenerCount("channel-invalidated")).toBe(0)
 	})
 
+	it("claims both adopted A refs before a reentrant A→B→A swap and preserves a new A grant", async () => {
+		const x = provider.grant("old-X")
+		provider.scripts.push(() => Promise.resolve(x))
+		await startBinding("scan-X")
+		const y = provider.grant("old-Y")
+		provider.scripts.push(() => Promise.resolve(y))
+		const creatingY = observed(startBinding("scan-Y"))
+		const decoderY = decoders.get("scan-Y") as BindingProbe
+		const startGate = deferred()
+		decoderY.startGate = startGate
+		await ticks()
+		expect(decoderY.starts).toBe(1)
+		expect(grants.map(binding => binding.decoderId)).toEqual([
+			"scan-X",
+			"scan-Y",
+		])
+		const next = new BindingProvider()
+		const fresh = provider.grant("new-A")
+		let successor: Promise<unknown> | undefined
+		manager.once("decoder:scanner-channel-ended", binding => {
+			expect(binding.decoderId).toBe("scan-X")
+			const states = (
+				manager as unknown as {
+					decoders: Map<
+						string,
+						{ channel: unknown; scannerChannelAttempt: unknown }
+					>
+				}
+			).decoders
+			expect(states.get("scan-X")!.channel).toBeNull()
+			expect(states.get("scan-Y")!.channel).toBeNull()
+			expect(states.get("scan-Y")!.scannerChannelAttempt).toBeNull()
+			manager.setChannelizer(provider)
+			provider.scripts.push(() => Promise.resolve(fresh))
+			successor = startBinding("scan-new-A")
+		})
+		manager.setChannelizer(next)
+		expect(
+			ends.map(({ binding, reason }) => [binding.decoderId, reason]),
+		).toEqual([
+			["scan-X", "released"],
+			["scan-Y", "released"],
+		])
+		expect(provider.released).toEqual(["old-X", "old-Y"])
+		expect(next.released).toEqual([])
+		expect(decoders.get("scan-X")!.input).toBeNull()
+		expect(decoderY.input).toBeNull()
+		expect(x.stream.destroyed).toBe(true)
+		expect(y.stream.destroyed).toBe(true)
+		await successor
+		startGate.resolve()
+		expect(await creatingY).toMatchObject({ code: "PROBE_REMOVED" })
+		expect(decoderY.running).toBe(false)
+		expect(decoderY.stops).toBeGreaterThanOrEqual(1)
+		expect(manager.getDecoder("scan-Y")).toBeUndefined()
+		expect(manager.getStatus("scan-new-A")!.running).toBe(true)
+		expect(decoders.get("scan-new-A")!.input).toBe(fresh.stream)
+		expect(fresh.stream.destroyed).toBe(false)
+		provider.emit("channel-invalidated", "rtl", 1, ["old-X", "old-Y"])
+		expect(ends).toHaveLength(2)
+		expect(provider.released).toEqual(["old-X", "old-Y"])
+		expect(provider.listenerCount("channel-invalidated")).toBe(1)
+		expect(next.listenerCount("channel-invalidated")).toBe(0)
+	})
+
+	it("reentrant removal of another claimed ref ends it before stop and cleans it once", async () => {
+		provider.scripts.push(() => Promise.resolve(provider.grant("claimed-X")))
+		await startBinding("scan-X")
+		provider.scripts.push(() => Promise.resolve(provider.grant("claimed-Y")))
+		await startBinding("scan-Y")
+		const decoderY = decoders.get("scan-Y")!
+		const order: string[] = []
+		const stop = decoderY.stop.bind(decoderY)
+		decoderY.stop = async () => {
+			order.push("stop-Y")
+			await stop()
+		}
+		manager.on("decoder:scanner-channel-ended", binding => {
+			order.push(`ended-${binding.decoderId}`)
+		})
+		let removingY: Promise<void> | undefined
+		manager.once("decoder:scanner-channel-ended", () => {
+			removingY = manager.removeEphemeralDecoder("scan-Y")
+		})
+		manager.setChannelizer(new BindingProvider())
+		await removingY
+		expect(order.indexOf("ended-scan-Y")).toBeGreaterThanOrEqual(0)
+		expect(order.indexOf("ended-scan-Y")).toBeLessThan(order.indexOf("stop-Y"))
+		expect(ends.map(({ binding }) => binding.decoderId)).toEqual([
+			"scan-X",
+			"scan-Y",
+		])
+		expect(ends.every(({ reason }) => reason === "released")).toBe(true)
+		expect(provider.released).toHaveLength(2)
+		expect(new Set(provider.released).size).toBe(2)
+		expect(decoderY.input).toBeNull()
+		expect(manager.getDecoder("scan-Y")).toBeUndefined()
+	})
+
 	it("ended callback removal installs a same-ID successor without stale outer cleanup", async () => {
 		await startBinding()
 		const oldDecoder = decoders.get("scan-binding")!
@@ -661,6 +760,31 @@ describe("scanner opaque channel binding lifecycle", () => {
 		expect(manager.getDecoder("scan-binding")).toBeUndefined()
 	})
 
+	it("stop-only registration cancellation removes the original probe and permits the same ID again", async () => {
+		let stopping: Promise<void> | undefined
+		manager.once("decoder:created", id => {
+			stopping = manager.stopDecoder(id)
+		})
+		const creating = observed(startBinding())
+		const original = decoders.get("scan-binding")!
+		expect(await creating).toMatchObject({ code: "PROBE_REMOVED" })
+		await stopping
+		expect(manager.getDecoder("scan-binding")).toBeUndefined()
+		expect(original.eventNames()).toEqual([])
+		expect(original.starts).toBe(0)
+		expect(original.input).toBeNull()
+		expect(sources.assignments.has("scan-binding")).toBe(false)
+		expect(provider.calls).toEqual([])
+		expect(provider.released).toEqual([])
+		expect(grants).toEqual([])
+		expect(ends).toEqual([])
+		expect(pendingBindings().size).toBe(0)
+		expect(removed.filter(id => id === "scan-binding")).toHaveLength(1)
+		await startBinding()
+		expect(manager.getDecoder("scan-binding")).not.toBe(original)
+		expect(manager.getStatus("scan-binding")!.running).toBe(true)
+	})
+
 	it("removal and ended events initiate cleanup without claiming the provider close barrier settled", async () => {
 		await startBinding()
 		const gate = deferred()
@@ -677,6 +801,22 @@ describe("scanner opaque channel binding lifecycle", () => {
 		expect(provider.released).toHaveLength(1)
 		gate.resolve()
 		await gate.promise
+	})
+
+	it("handles a rejected release promise once and still destroys the owned stream", async () => {
+		const result = provider.grant()
+		provider.scripts.push(() => Promise.resolve(result))
+		await startBinding()
+		provider.releaseChannel = id => {
+			provider.released.push(id)
+			return Promise.reject(new WaveKitError("release rejection", "TEST"))
+		}
+		await manager.removeEphemeralDecoder("scan-binding")
+		await ticks()
+		await manager.removeEphemeralDecoder("scan-binding")
+		expect(provider.released).toEqual([result.channelId])
+		expect(result.stream.destroyed).toBe(true)
+		expect(ends).toEqual([{ binding: grants[0], reason: "released" }])
 	})
 
 	it("offset and configured channel paths emit no scanner binding notifications", async () => {
@@ -801,6 +941,50 @@ describe("scanner opaque channel binding lifecycle", () => {
 			expect(token.invalidated.size).toBe(0)
 		},
 	)
+
+	it("overflow on one source leaves a concurrently pending unrelated source usable", async () => {
+		sources.caps.set("other", { ...iqCaps(2_400_000), centerFreq: 446_000_000 })
+		const rtlGate = deferred()
+		const otherGate = deferred()
+		const rtl = provider.grant("rtl-late")
+		const other = provider.grant("other-live")
+		provider.scripts.push(async () => {
+			await rtlGate.promise
+			return rtl
+		})
+		provider.scripts.push(async () => {
+			await otherGate.promise
+			return other
+		})
+		const rtlCreating = observed(startBinding("scan-rtl"))
+		const otherCreating = observed(
+			manager.createEphemeralDecoder(
+				{ ...bindingConfig("scan-other"), sourceId: "other" },
+				{ owner: "scanner", jobId: "j1" },
+			),
+		)
+		const tokens = [...pendingBindings().values()]
+		expect(tokens).toHaveLength(2)
+		provider.emit(
+			"channel-invalidated",
+			"rtl",
+			1,
+			Array.from({ length: 65 }, (_, i) => `rtl-${i}`),
+		)
+		expect(tokens[0]!.terminal).toBe(true)
+		expect(tokens[1]!.terminal).toBe(false)
+		expect(tokens[1]!.invalidated.size).toBe(0)
+		expect(pendingBindings().size).toBe(1)
+		otherGate.resolve()
+		expect(await otherCreating).toBeNull()
+		rtlGate.resolve()
+		expect(await rtlCreating).toMatchObject({ code: "PROBE_NOT_WIRED" })
+		expect(grants.map(binding => binding.sourceId)).toEqual(["other"])
+		expect(manager.getStatus("scan-other")!.running).toBe(true)
+		expect(other.stream.destroyed).toBe(false)
+		expect(provider.released).toEqual(["rtl-late"])
+		expect(pendingBindings().size).toBe(0)
+	})
 
 	it.each(["release-first", "invalidate-first", "swap-first"])(
 		"%s emits one terminal event and fences evidence before cleanup callbacks",
