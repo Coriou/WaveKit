@@ -27,17 +27,22 @@ export const accessBootstrapRoutes: FastifyPluginAsync<
 		url: "/api/access/bootstrap",
 		exposeHeadRoute: false,
 		// WebSocket's route wrapper runs before the HTTP handler; reject upgrades here.
-		preHandler: async (request, reply) => {
+		preHandler: (request, reply, done) => {
 			reply.serializer(value => JSON.stringify(value))
 			const admission = options.policy.validatePublicBootstrapRequest(
 				accessRequestFromHttp(request.raw, "api"),
 			)
 			for (const [name, value] of Object.entries(admission.headers))
 				reply.header(name, value)
-			if (options.controller.admissionStopped)
-				return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
-			if (admission.kind === "deny")
-				return reply.code(admission.status).send({ code: admission.code })
+			if (options.controller.admissionStopped) {
+				void reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
+				return
+			}
+			if (admission.kind === "deny") {
+				void reply.code(admission.status).send({ code: admission.code })
+				return
+			}
+			done()
 		},
 		handler: (_request, reply) => {
 			reply.serializer(value => JSON.stringify(value))

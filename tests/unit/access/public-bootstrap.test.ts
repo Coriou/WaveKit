@@ -1,4 +1,5 @@
 import { request as httpRequest } from "node:http"
+import type { IncomingHttpHeaders } from "node:http"
 import Fastify from "fastify"
 import fc from "fast-check"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -95,7 +96,7 @@ async function bootstrapWire(
 	if (!address) throw new Error("Missing listener")
 	return await new Promise<{
 		statusCode: number
-		headers: import("node:http").IncomingHttpHeaders
+		headers: IncomingHttpHeaders
 		body: string
 		json: () => unknown
 	}>((resolve, reject) => {

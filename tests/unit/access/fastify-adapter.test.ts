@@ -6,7 +6,7 @@ import {
 	ServerResponse,
 } from "node:http"
 import { Socket } from "node:net"
-import type { IncomingMessage } from "node:http"
+import type { IncomingMessage, IncomingHttpHeaders } from "node:http"
 import Fastify from "fastify"
 import type { FastifyRequest } from "fastify"
 import websocket from "@fastify/websocket"
@@ -957,7 +957,7 @@ async function bootstrapWire(
 	return await new Promise<{
 		statusCode: number
 		body: string
-		headers: import("node:http").IncomingHttpHeaders
+		headers: IncomingHttpHeaders
 		json: () => unknown
 	}>((resolve, reject) => {
 		const request = httpRequest(

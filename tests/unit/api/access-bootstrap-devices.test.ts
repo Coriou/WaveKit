@@ -335,6 +335,13 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 		expect(get.body).not.toContain(paired.body.deviceId)
 		expect(get.body).not.toContain(paired.headers.cookie)
 		assertParity(get, head)
+		const noOrigin = await wire(env.server, "GET", undefined, [
+			"Host",
+			browser.host,
+		])
+		expect(noOrigin.status).toBe(200)
+		expect(JSON.parse(noOrigin.body)).toEqual(dto)
+		expect(noOrigin.headers["access-control-allow-origin"]).toBeUndefined()
 		expect(lookup).not.toHaveBeenCalled()
 		expect(ordinary).not.toHaveBeenCalled()
 		expect(env.context.api.sessions.exportSnapshot()).toEqual(snapshot)
@@ -365,6 +372,25 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 			expect(noCredential.status).toBe(options.legacy ? 404 : 401)
 			expect(invalid.status).toBe(options.legacy ? 404 : 401)
 			expect(valid.status).toBe(404)
+			assertParity(noCredential, await wire(env.server, "HEAD"))
+			assertParity(
+				invalid,
+				await wire(env.server, "HEAD", undefined, [
+					"Host",
+					browser.host,
+					"Authorization",
+					"Basic wrong",
+				]),
+			)
+			assertParity(
+				valid,
+				await wire(env.server, "HEAD", undefined, [
+					"Host",
+					browser.host,
+					"Authorization",
+					`Bearer ${env.token}`,
+				]),
+			)
 			if (!options.legacy) {
 				const foreign = await wire(env.server, "GET", undefined, [
 					"Host",
@@ -417,7 +443,7 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 				await barrier
 				return address
 			})) as typeof env.app.listen
-		const spy = vi.spyOn(env.app, "listen").mockImplementation(delayed)
+		env.app.listen = delayed
 		const startup = env.server.start()
 		try {
 			await listening
@@ -429,7 +455,7 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 		} finally {
 			release()
 			await startup
-			spy.mockRestore()
+			env.app.listen = original
 		}
 		expect((await wire(env.server)).status).toBe(200)
 	})
@@ -570,6 +596,7 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 		await env.server.start()
 		const provider = vi.spyOn(env.server, "getAccessBootstrap")
 		for (const headers of [
+			["Host", browser.host, "host", browser.host],
 			["Host", browser.host, "Authorization", "one", "authorization", "two"],
 			["Host", browser.host, "Origin", origin, "origin", origin],
 			["Host", browser.host, "Cookie", "wavekit_session=a; wavekit_session=b"],
