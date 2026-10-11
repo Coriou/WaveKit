@@ -1,6 +1,6 @@
 # Reliability and portable receiver roadmap
 
-Updated 2026-10-10. The immediate software sequence is below; numbered sections
+Updated 2026-10-11. The immediate software sequence is below; numbered sections
 track related work and acceptance rather than blocking all work on hardware.
 Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
@@ -32,13 +32,11 @@ listen**. The web dashboard is in design on `design/web-dashboard`; its
 inventory mapped below. Canvas work can continue independently. Software,
 local-receiver acceptance and optional Pi acceptance have separate gates.
 
-1. **Finish scanner S1-B with shared spectrum contracts** (§5, §8). S1-A passed
-   its checkpoint and was rebased onto main; S1-B is running in the scanner's
-   own session. Add bounded simultaneous CLI/web spectrum profiles to Task 37a,
-   coordinating the Task 24/25 settings and DTOs first. Preserve planned scanner display
-   defaults and keep detector behavior independent of client display choices.
-   Identify and automated burst capture remain in this batch. Land after
-   CHECKPOINT S1 and shared-contract review; avoid a second spectrum service.
+1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
+   landed locally, including identification, bounded burst capture and shared
+   spectrum profiles. Verify actual CLI/web consumption, reconnects and source
+   selection. Preserve detector behavior independently of display preferences;
+   genuine viewed-slice zoom remains a separate follow-up.
 2. **Prepare browser access policy and true zoom** (§4, §8). The initial access
    target is one operator on a local/LAN deployment, with authentication and
    explicit origins across REST, WS and audio. It must land before connecting
@@ -46,13 +44,15 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
    viewed-slice FFT as a separate follow-up to S1-B; cropping existing display
    bins is insufficient. Measure coalesced REST drag-to-tune latency before
    choosing a WS tuning transport, preserving tuner arbitration either way.
-3. **Scanner S2, then S3; connect identification and listening** (§5, §5b).
-   Reuse channel probes, analog evidence recording and mixed-mode monitoring
-   already in the scanner plan. Size probe budgets from the combined workload,
-   using the conditional N=8 result conservatively. CLI waterfall and web
-   rendering can proceed against agreed DTOs. A first connected client need
-   not wait for every Pi acceptance test, but must report capabilities and
-   provisional RF evidence honestly.
+3. **Complete S2 acceptance, then S3 listening** (§5, §5b). Reviewed channel
+   settlement, scanner consumer and shutdown composition are integrated locally.
+   The channel tier defaults off, the measured private profile is absent and
+   production producer binding remains disabled. Guarded IQ capture is still
+   required and incomplete; finalized analog cleanup without proof remains
+   unknown, so successful physical reuse is deferred. Establish calibration,
+   combined capacity and recording cleanup evidence before activation. CLI/web
+   work can proceed against truthful capabilities without waiting for every Pi
+   acceptance test. S3 monitoring and mixed-mode listening remain follow-ups.
 4. **Shared Activity, operator data and recordings** (§4a, §5c). Design event
    identity/envelope, persistence, search and replay together; link scanner
    discoveries and observations rather than replacing their recovery stores.
@@ -270,20 +270,20 @@ snapshots are design references, not production consumers yet.
 REST routes have Fastify schemas and Swagger; `/ws` supports channel subscriptions
 and caps incoming messages at 1 MiB. Outgoing payloads are now bounded per client
 at 1 MiB/256 queued messages, with heartbeat and slow/dead-client cleanup. There
-is still no sequence/replay or reconnect snapshot contract, and no SSE endpoint.
-Authentication is absent from the
-API layer and CORS reflects all origins with credentials enabled. Audio and IQ
-use separate streaming servers; their per-client queues are now bounded. Prioritize
-access/origin policy before exposing a browser UI.
-These findings describe the current code, not completed API acceptance.
+is no general durable event replay contract or SSE endpoint. Operator data has
+its own store-ID/revision snapshot contract; spectrum snapshots do not provide
+durable Activity replay. Audio and IQ use separate bounded streaming servers.
+Protected mode enforces authentication and explicit origins; legacy mode remains
+a separate compatibility policy. External browser exposure still requires its
+own acceptance.
 
-Access preparation is on local main (2026-10-10): reviewed private provisioning,
-pairing/session services, renewable 30-day sessions, unmounted REST/WS/audio
-adapters, destination-bound CLI credentials and child-environment/health-probe
-hygiene. The standalone setup/pair utility is reviewed; normal build integration
-will preserve the scanner worker entry. Runtime mounting, browser onboarding and
-automatic renewal, public audio origins, raw-listener and actual TLS/container
-acceptance remain open. See the [access implementation checklist](../.kiro/specs/core-access-policy/tasks.md).
+Protected access runtime is on local main: private provisioning, pairing/session
+services, renewable 30-day sessions, mounted REST/WS/audio adapters,
+destination-bound CLI credentials and credential-free health probes. The setup
+utility, scanner worker and main entry retain separate build outputs. Browser
+onboarding/renewal, trusted bootstrap delivery, public audio origins and actual
+TLS/proxy/container exposure acceptance remain open. See the
+[access implementation checklist](../.kiro/specs/core-access-policy/tasks.md).
 
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
@@ -348,6 +348,12 @@ and the recorded-IQ/full-suite checkpoint (not pushed). S2 adds channel probes a
 analog recording; S3 adds monitor/listen; S4 supplies live acceptance. Preserve
 that dependency order. A scanner should characterize activity and confirm a
 protocol with decoding.
+
+The reviewed S2 internal recording protocol, exact grant/settlement ownership,
+consumer and protected composition are now integrated locally. This is a
+disabled implementation checkpoint, not S2 completion: profile/calibration,
+useful combined turnover, physical analog cleanup/reuse and guarded IQ remain
+open. Missing proof retains ownership rather than admitting a successor.
 
 - [x] Scan an operator-selected frequency range or the receiver's supported tuning
       range with explicit steps, bandwidth, dwell time and exclusions. (S1: docs/SCANNER.md)
@@ -552,16 +558,16 @@ RF and hardware acceptance are outside what CLI tests can show.
 
 Founding use case (user, 2026-10-09): WaveKit was created so the operator could
 find signals visually in SDR++ and have every decoder try to identify and decode
-them. The channelizer now supports offset channels, but automatic discovery and
-identify are not yet on main; legacy paths still use centre/static offsets and
-rtl_tcp does not expose SDR++'s VFO. Detect emissions across the window, open
-channels at their offsets and try plausible decoders there (identify mode, §5).
+them. S1 discovery, identify and shared spectrum contracts are now on local main.
+The new S2 observed-channel producer remains disabled; existing offset probes
+retain their own behavior. rtl_tcp does not expose SDR++'s VFO. Detect emissions
+across the window and confirm them through suitable decoders (identify mode, §5).
 
 Important; get it right. Operators find activity today by watching SDR++'s
 waterfall and waiting for an emitter to key up again. WaveKit should provide the
 same view, and a program can do the watching more reliably than a person.
 
-- [ ] A core spectrum service, independent of scanner jobs. It computes an
+- [x] A core spectrum service, independent of scanner jobs. It computes an
       averaged FFT of each source's IQ as a raw fanout consumer and publishes it
       on a general `spectrum` WebSocket channel. Rate and bins must suit a
       waterfall: 10 Hz or more and 1024 or more bins for the web; lower for the
@@ -569,7 +575,7 @@ same view, and a program can do the watching more reliably than a person.
       this service; support bounded simultaneous profiles and source selection
       without client preferences changing detector behavior. Preserve the planned scanner
       10 Hz / 512-bin default for subscriptions without options.
-- [ ] An activity detector on the full sample stream, not on display frames,
+- [x] An activity detector on the full sample stream, not on display frames,
       so short TDMA or pager bursts are not missed. It keeps a per-bin noise
       floor and an N dB threshold, and merges adjacent bins into emissions with a
       centre, bandwidth, first and last seen times and a duty cycle. A persistent
