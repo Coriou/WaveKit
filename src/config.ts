@@ -557,6 +557,19 @@ export const ConfigSchema = z
 		stateDir: z.string().min(1).default("data"),
 	})
 	.superRefine((config, ctx) => {
+		// The relay starts before sources connect, so validate its explicit
+		// selection against configured identities rather than runtime status.
+		if (
+			config.tunerRelay.enabled &&
+			config.tunerRelay.sourceId &&
+			!config.sources.some(s => s.id === config.tunerRelay.sourceId)
+		) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["tunerRelay", "sourceId"],
+				message: `Tuner relay source '${config.tunerRelay.sourceId}' is not configured`,
+			})
+		}
 		// Spec § 10.7: decoders without sourceId use the default source, which
 		// is never a dedicated scanner source.
 		if (config.sources.length === 0) return

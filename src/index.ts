@@ -288,11 +288,11 @@ async function main(): Promise<void> {
 		format: config.audio.format,
 		sampleRate: config.audio.sampleRate,
 	})
-	const tunerRelay = new TunerRelay(logger, sourceManager, fanoutManager, {
+	const tunerRelay = new TunerRelay(logger, sourceManager, sourceRouting, {
 		enabled: config.tunerRelay.enabled,
 		host: config.tunerRelay.host,
 		port: config.tunerRelay.port,
-		sourceId: config.tunerRelay.sourceId ?? config.sources[0]?.id,
+		sourceId: config.tunerRelay.sourceId,
 		controlPolicy: config.tunerRelay.controlPolicy,
 		maxClients: config.tunerRelay.maxClients,
 	})
@@ -303,7 +303,7 @@ async function main(): Promise<void> {
 	const liveDemod = new LiveDemodulator(
 		logger,
 		sourceManager,
-		fanoutManager,
+		sourceRouting,
 		liveDemodConfig,
 	)
 	const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
