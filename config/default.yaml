@@ -728,3 +728,8 @@ csdr:
 #   channelQueueMs: 250
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
+
+# Protected runtime is opt-in; provision private state with the access command.
+# Public listener mappings are validated separately from private state.
+access:
+  mode: legacy

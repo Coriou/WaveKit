@@ -13,6 +13,7 @@ import { DigitalVoiceConfigSchema } from "../../../src/config.js"
 import type { DecoderConfig } from "../../../src/decoders/types.js"
 import type {
 	DigitalVoiceCall,
+	DigitalVoiceServiceOptions,
 	DigitalVoiceService as DigitalVoiceServiceType,
 } from "../../../src/core/digital-voice.js"
 
@@ -120,6 +121,7 @@ describe("DigitalVoiceService", () => {
 
 	async function create(
 		overrides: Record<string, unknown> = {},
+		options: DigitalVoiceServiceOptions = {},
 	): Promise<DigitalVoiceServiceType> {
 		const config = DigitalVoiceConfigSchema.parse({
 			httpPort: port,
@@ -127,7 +129,7 @@ describe("DigitalVoiceService", () => {
 			maxBufferMs: 500,
 			...overrides,
 		})
-		return new DigitalVoiceService(logger, config)
+		return new DigitalVoiceService(logger, config, options)
 	}
 
 	function socket(index = 0): FakeSocket {
@@ -159,6 +161,30 @@ describe("DigitalVoiceService", () => {
 	afterEach(async () => {
 		vi.useRealTimers()
 		await service.destroy()
+	})
+
+	it("advertises the named digital origin for top-level and decoder streams", async () => {
+		service = await create(
+			{},
+			{ publicOrigin: "https://receiver.local:8445", httpHost: "127.0.0.1" },
+		)
+		const empty = service.getStatus()
+		expect(empty.httpUrl).toBe("https://receiver.local:8445/stream")
+		expect(empty.wavUrl).toBe("https://receiver.local:8445/stream.wav")
+		await service.prepareDecoderConfigs([dsd("dsd-fme")])
+		const status = service.getStatus()
+		expect(status.httpUrl).toBe(
+			"https://receiver.local:8445/decoders/dsd-fme/stream",
+		)
+		expect(status.wavUrl).toBe(
+			"https://receiver.local:8445/decoders/dsd-fme/stream.wav",
+		)
+		expect(status.decoders[0]?.httpUrl).toBe(
+			"https://receiver.local:8445/decoders/dsd-fme/stream",
+		)
+		expect(status.decoders[0]?.wavUrl).toBe(
+			"https://receiver.local:8445/decoders/dsd-fme/stream.wav",
+		)
 	})
 
 	describe("decoder routing", () => {
