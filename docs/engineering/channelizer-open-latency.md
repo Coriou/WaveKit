@@ -523,3 +523,30 @@ numeric CPU/memory calibration, an OS shutdown-time bound or consumer integratio
 acceptance. Process residual/cache charges remain until exact child closure;
 unknown cleanup still retains ownership. The implementation review and Main's
 assembly/adoption remain pending.
+
+Independent review of the optional-witness candidate `8a15a99f5859a7c4860b182b20c43a24da71c464`
+requested three corrections despite the passing local checks. Observed writers
+must retain the ordinary bounded EOF drain opportunity at the actual child-process
+boundary. Independent local cleanup must begin before waiting for a held native
+stop. A positively fenced wrapper whose start was never invoked must complete its
+startup decision, with process resource credit separate from local cleanup.
+The corrected implementation preserves the same two-second EOF opportunity for
+retained observed writers, initiates independent native and local cleanup before
+aggregate waits, and records a sealed never-invoked wrapper's positive startup
+decision. Native channel-directory cleanup waits on an internal exact retirement
+latch: any returned child requires actual CLOSE and start settlement; a supported
+never-spawned wrapper requires irreversible startup fencing. This latch does not
+itself return accounting credit.
+
+Affected validation passed 30 runtime tests and 14 native process/compatibility/
+disposal tests, including actual-child full output parity with the reader held
+through EOF. The five Node files initially passed 96 tests with one new assertion
+failure: it expected one envelope before logical settlement, where all six
+committed envelopes are correctly retained. The assertion was corrected, and only
+the process file was rerun (14 passed), giving 97 distinct passing Node cases.
+The original failure log remains in `/tmp/wavekit-r14-corrections-validation/`.
+Root typecheck, strict Clippy and formatting passed. Root lint passed with zero
+errors and 59 existing warnings. Exact-candidate independent review remains
+pending. The earlier broad check results apply to the rejected earlier candidate.
+No additional timing, capacity calibration, Pi, live RF or consumer integration
+claim follows from these regressions.

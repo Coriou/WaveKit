@@ -728,7 +728,16 @@ impl Runtime {
         for e in events {
             self.emit(e);
         }
-        while writers.iter().any(|w| !w.is_finished()) && Instant::now() < deadline {
+        // Observed ownership does not remove the ordinary EOF drain opportunity.
+        // Waiting retains the bundle without publishing logical/disposal proof.
+        while (writers.iter().any(|w| !w.is_finished())
+            || self
+                .retired
+                .iter()
+                .flatten()
+                .any(|r| r.channel.writer.as_ref().is_some_and(|w| !w.is_finished())))
+            && Instant::now() < deadline
+        {
             thread::sleep(Duration::from_millis(10));
         }
     }

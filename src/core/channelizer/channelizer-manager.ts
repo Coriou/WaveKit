@@ -402,10 +402,16 @@ export class ChannelizerManager
 		}
 		for (const sourceId of [...this.active.keys()])
 			this.invalidate(sourceId, "destroy")
-		// In-flight requests settle (a pending one is superseded, then refused); a spawn that was mid-start retires itself.
-		await Promise.all(this.queues.values())
-		while (this.stops.size > 0) await Promise.all(this.stops)
-		await this.deps.settlementObserver?.attemptLocalCleanup()
+		// Initiate provider and transport cleanup before waiting for any native
+		// close. In-flight startup/queue ownership settles independently.
+		const localCleanup = this.deps.settlementObserver?.attemptLocalCleanup()
+		if (localCleanup) {
+			await Promise.allSettled([...this.queues.values(), localCleanup])
+			while (this.stops.size > 0) await Promise.allSettled(this.stops)
+		} else {
+			await Promise.all(this.queues.values())
+			while (this.stops.size > 0) await Promise.all(this.stops)
+		}
 	}
 
 	private async request(
@@ -1387,30 +1393,55 @@ export class ChannelizerManager
 	private stopProcess(proc: ChannelizerProcessLike, dir: string): void {
 		const settlement = this.processClaims.get(proc)
 		settlement?.sealStartup()
-		const stop = proc
+		const nativeStop = proc
 			.stop()
 			.catch((err: unknown) =>
 				this.log.warn({ err, dir }, "Channelizer stop failed"),
 			)
-			.finally(async () => {
-				try {
-					await proc.attemptSettlementCleanup?.()
-				} catch (err: unknown) {
-					this.log.warn({ err }, "Channelizer local cleanup failed")
+		// These attempts have independent owners. A held child/server close
+		// must not prevent the sibling transport/pathname attempt from starting.
+		const localCleanup = proc
+			.attemptSettlementCleanup?.()
+			.catch((err: unknown) =>
+				this.log.warn({ err }, "Channelizer local cleanup failed"),
+			)
+		const directoryCleanup = async () => {
+			if (settlement) {
+				if (!proc.waitSettlementNativeRetirement) {
+					this.directoryClaims
+						.get(proc)
+						?.settle({
+							ok: false,
+							state: "unknown",
+							detail: "channel native retirement proof unavailable",
+						})
+					return
 				}
-				try {
-					rmSync(dir, { recursive: true, force: true })
-					this.directoryClaims.get(proc)?.settle({ ok: true })
-				} catch (err: unknown) {
-					this.directoryClaims.get(proc)?.settle({
+				await proc.waitSettlementNativeRetirement()
+			} else await nativeStop
+			// Unlike the proof endpoint, native code may still create files here.
+			// Reclaim this directory only after its exact native dependency settles.
+			try {
+				rmSync(dir, { recursive: true, force: true })
+				this.directoryClaims.get(proc)?.settle({ ok: true })
+			} catch (err: unknown) {
+				this.directoryClaims
+					.get(proc)
+					?.settle({
 						ok: false,
 						state: "failed",
 						detail: "channel directory cleanup failed",
 					})
-					this.log.debug({ err, dir }, "Cannot remove channel socket dir")
-				}
-				this.stops.delete(stop)
-			})
+				this.log.debug({ err, dir }, "Cannot remove channel socket dir")
+			}
+		}
+		const stop = Promise.allSettled([
+			nativeStop,
+			localCleanup,
+			directoryCleanup(),
+		]).then(() => {
+			this.stops.delete(stop)
+		})
 		this.stops.add(stop)
 	}
 

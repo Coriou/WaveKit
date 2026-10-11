@@ -167,6 +167,32 @@ function record(p: ChannelizerProcess) {
 }
 
 describe("ChannelizerProcess", { timeout: 15_000 }, () => {
+	it("positively seals a never-invoked wrapper and refuses every late start without invoking spawn", async () => {
+		const owned = ownedStartup()
+		const p = new ChannelizerProcess(
+			opts({
+				settlement: {
+					process: owned.claim,
+					observer: owned.observer,
+					deadline: performance.now() + 1000,
+					now: () => performance.now(),
+				},
+			}),
+			logger,
+		)
+		const calls = vi.mocked(spawn).mock.calls.length
+		await p.stop()
+		await p.waitSettlementNativeRetirement()
+		// Native no-process is positive; all six committed envelopes still need
+		// logical terminal settlement (including the five unused reservations).
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(6)
+		owned.observer.finishAcquisition(owned.handle)
+		expect(owned.ledger.snapshot().processResiduals.cpu).toBe(0)
+		await expect(p.start()).rejects.toThrow("startup cancelled")
+		expect(vi.mocked(spawn).mock.calls.length).toBe(calls)
+		await p.attemptSettlementCleanup()
+	})
+
 	it("keeps a returned no-PID child's physical charge until its exact CLOSE and stdio/start settlement", async () => {
 		const owned = ownedStartup()
 		const fake = Object.assign(new EventEmitter(), {
@@ -197,10 +223,17 @@ describe("ChannelizerProcess", { timeout: 15_000 }, () => {
 			await expect(p.start()).rejects.toThrow("synthetic failed spawn")
 			owned.observer.finishAcquisition(owned.handle)
 			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(1)
+			let retired = false
+			const retirement = p.waitSettlementNativeRetirement().then(() => {
+				retired = true
+			})
 			await p.stop() // Existing no-PID stop fulfillment is explicitly not a CLOSE witness.
 			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(1)
+			expect(retired).toBe(false)
 			for (const stream of fake.stdio) stream?.destroy()
 			fake.emit("close", -2, null)
+			await retirement
+			expect(retired).toBe(true)
 			expect(owned.ledger.snapshot().processResiduals.cpu).toBe(0)
 			await p.attemptSettlementCleanup()
 		} finally {

@@ -124,7 +124,7 @@ impl Drop for OwnedChild {
 struct Process {
     child: Child,
     // Keep IQ open: disposal must progress on the existing timeout with no input.
-    _iq: ChildStdin,
+    _iq: Option<ChildStdin>,
     control: UnixStream,
     proof: BufReader<UnixStream>,
     events: mpsc::Receiver<Value>,
@@ -248,7 +248,7 @@ impl Process {
         assert_eq!(ready["observerCapability"], "attempt-disposal-v1");
         Self {
             child: owned.0.take().unwrap(),
-            _iq: iq,
+            _iq: Some(iq),
             control,
             proof,
             events,
@@ -262,7 +262,7 @@ impl Process {
     fn event(&self, kind: &str, id: &str) -> Value {
         loop {
             let value = self.events.recv_timeout(Duration::from_secs(10)).unwrap();
-            if value["type"] == kind && value["id"] == id {
+            if value["type"] == kind && (id.is_empty() || value["id"] == id) {
                 return value;
             }
         }
@@ -334,4 +334,70 @@ fn duplicate_and_dsp_invalid_attempts_prove_only_their_token_not_incumbent() {
     process.proof(3, "format");
     process.send(json!({"v":1,"type":"close","id":"incumbent"}));
     process.event("closed", "incumbent");
+}
+
+// Actual child boundary: the reader intentionally starts after input EOF while
+// accepted output remains queued. The byte assertions, not elapsed timing, are
+// the oracle; the hold is far inside the unchanged two-second drain opportunity.
+fn actual_child_eof_output(observed: bool) -> (Vec<u8>, u64, Value) {
+    let mut process = Process::start();
+    let mut request = open("eof", observed.then_some(1));
+    request["queueBytes"] = json!(2 << 20);
+    process.send(request);
+    let installed = process.event("opened", "eof");
+    let mut client = UnixStream::connect(installed["socket"].as_str().unwrap()).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let input: Vec<u8> = (0..(8 << 20))
+        .map(|i| ((i * 17 + i / 3) & 255) as u8)
+        .collect();
+    // Control is FIFO: the rejected sentinel proves the preceding marker is
+    // registered before IQ begins, independent of the input/control thread race.
+    process.send(json!({"v":1,"type":"mark-gap","atInputByte":input.len(),"droppedInputBytes":0}));
+    let mut sentinel = open("barrier", None);
+    sentinel["centerHz"] = json!(500000000);
+    process.send(sentinel);
+    process.event("rejected", "barrier");
+    process._iq.as_mut().unwrap().write_all(&input).unwrap();
+    // Exact input-position barrier counts accepted output before EOF; no
+    // reader has consumed any sample bytes yet.
+    let boundary = process.event("discontinuity", "eof");
+    let samples = boundary["sampleIndex"].as_u64().unwrap();
+    assert!(
+        samples * 8 > 512 * 1024,
+        "fixture must exercise socket backpressure"
+    );
+    process._iq.as_mut().unwrap().write_all(&[127]).unwrap();
+    drop(process._iq.take()); // Control remains open: only actual InputEof terminates the child.
+    let reader = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(100));
+        let mut bytes = Vec::new();
+        client.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let eof = process.event("input-eof", "");
+    assert_eq!(eof["inputSamples"], input.len() / 2);
+    assert_eq!(eof["discardedBytes"], 1);
+    let bytes = reader.join().unwrap();
+    assert_eq!(
+        bytes.len() as u64,
+        samples * 8,
+        "actual child must retain the queued suffix through EOF drain"
+    );
+    assert!(process.child.wait().unwrap().success());
+    let mut extra_proof = String::new();
+    process.proof.read_to_string(&mut extra_proof).unwrap();
+    assert!(
+        extra_proof.is_empty(),
+        "EOF/budget is not a matching terminal disposal proof"
+    );
+    (bytes, samples, eof)
+}
+
+#[test]
+fn actual_child_observed_eof_preserves_full_held_reader_output_and_odd_accounting() {
+    let ordinary = actual_child_eof_output(false);
+    let observed = actual_child_eof_output(true);
+    assert_eq!(observed, ordinary);
 }

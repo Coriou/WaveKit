@@ -68,6 +68,8 @@ export interface ChannelizerProcessLike extends EventEmitter {
 		send: SendClaim,
 	): void
 	attemptSettlementCleanup?(): Promise<readonly CleanupOutcome[]>
+	/** Internal dependency only: exact child CLOSE or sealed, positively settled no-spawn decision. */
+	waitSettlementNativeRetirement?(): Promise<void>
 }
 
 /** Longest event line accepted; a child that writes more without a newline is stopped, so it cannot grow memory. */
@@ -162,6 +164,13 @@ export class ChannelizerProcess
 	private startupSealed = false
 	private startSettled = false
 	private starting = false
+	private startInvoked = false
+	private spawnInvoked = false
+	private actualChildClosed = false
+	private resolveNativeRetirement!: () => void
+	private readonly nativeRetirement = new Promise<void>(resolve => {
+		this.resolveNativeRetirement = resolve
+	})
 
 	constructor(
 		private readonly options: ChannelizerProcessOptions,
@@ -195,6 +204,7 @@ export class ChannelizerProcess
 				"channelizer already started",
 				"CHANNELIZER_UNAVAILABLE",
 			)
+		this.startInvoked = true
 		this.starting = true
 		try {
 			const transport = new SettlementTransport(
@@ -217,6 +227,7 @@ export class ChannelizerProcess
 		} finally {
 			this.startSettled = true
 			settlement.process.recordStartSettled()
+			this.resolveNativeRetirementIfProved()
 		}
 	}
 
@@ -269,6 +280,7 @@ export class ChannelizerProcess
 					unavailable("channelizer binary path unavailable")
 					return
 				}
+				this.spawnInvoked = true
 				child = spawn(
 					this.options.binaryPath,
 					this.transport
@@ -301,8 +313,10 @@ export class ChannelizerProcess
 			settlement?.process.recordReturnedChild(child)
 			// Own the actual returned child CLOSE even when spawn returned no PID.
 			child.once("close", () => {
+				this.actualChildClosed = true
 				settlement?.process.recordStdioSettled()
 				settlement?.process.recordActualClose()
+				this.resolveNativeRetirementIfProved()
 			})
 			this.control = child.stdio[CONTROL_FD] as Writable | null
 			if (this.transport) {
@@ -461,9 +475,32 @@ export class ChannelizerProcess
 		this.control.write(encodeObservedRequest(open, send.token))
 	}
 
-	async attemptSettlementCleanup(): Promise<readonly CleanupOutcome[]> {
+	private sealStartupOwner(): void {
 		this.startupSealed = true
-		this.options.settlement?.process.sealStartup()
+		const settlement = this.options.settlement
+		settlement?.process.sealStartup()
+		// The wrapper's invocation capability is now irreversibly fenced. This
+		// decision is independent of child/PID snapshots or stop fulfillment.
+		if (settlement && !this.startInvoked) {
+			this.startSettled = true
+			settlement.process.recordStartSettled()
+		}
+		this.resolveNativeRetirementIfProved()
+	}
+
+	private resolveNativeRetirementIfProved(): void {
+		if (!this.options.settlement || !this.startupSealed || !this.startSettled)
+			return
+		if (this.actualChildClosed || (!this.spawnInvoked && !this.child))
+			this.resolveNativeRetirement()
+	}
+
+	waitSettlementNativeRetirement(): Promise<void> {
+		return this.nativeRetirement
+	}
+
+	async attemptSettlementCleanup(): Promise<readonly CleanupOutcome[]> {
+		this.sealStartupOwner()
 		this.transport?.seal()
 		const bootstrap = this.child?.stdio[4] as Writable | null | undefined
 		bootstrap?.destroy()
@@ -472,8 +509,7 @@ export class ChannelizerProcess
 
 	stop(): Promise<void> {
 		if (this.options.settlement) {
-			this.startupSealed = true
-			this.options.settlement.process.sealStartup()
+			this.sealStartupOwner()
 			this.transport?.seal()
 			const bootstrap = this.child?.stdio[4] as Writable | null | undefined
 			bootstrap?.destroy()

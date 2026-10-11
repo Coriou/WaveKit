@@ -79,6 +79,7 @@ function manager(
 			| "logger"
 			| "openTimeoutMs"
 			| "settlementObserver"
+			| "openNow"
 		>
 	> = {},
 ) {
@@ -170,6 +171,172 @@ afterEach(async () => {
 })
 
 describe("ChannelizerManager", () => {
+	it.each(["deadline", "cancel"] as const)(
+		"reclaims repeated positively sealed no-start attempts after %s between claim and subscription",
+		async mode => {
+			const registry = new SettlementRegistry()
+			const lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			const ledger = new ObservedPermitLedger(
+				{ cpu: 100, bytes: 100_000 },
+				{ cpu: 0, bytes: 0 },
+			)
+			let controller = new AbortController()
+			const start = vi.spyOn(ChannelizerProcess.prototype, "start")
+			const m = manager(
+				{},
+				{
+					settlementObserver: observer,
+					openNow: () => {
+						if (registry.snapshot().processes.length > 0) {
+							if (mode === "cancel") controller.abort()
+							return mode === "deadline" ? 10_000 : 0
+						}
+						return 0
+					},
+				},
+			)
+			const adapter = observer.bindProvider(m)
+			try {
+				for (let attempt = 0; attempt < 4; attempt++) {
+					controller = new AbortController()
+					const handle = observer.allocateAcquisition({
+						activation: "direct",
+						sourceId: "rtl",
+						decoderId: `no-start-${attempt}`,
+						scannerAttempt: {},
+						signal: controller.signal,
+						expectedRequest: req(),
+						expectedInputCaps: {
+							kind: "iq",
+							format: "U8_IQ",
+							sampleRate: 2_048_000,
+							centerFreq: 162e6,
+						},
+					})!
+					const cost = { cpu: 1, bytes: 100 }
+					handle.attachPermit(
+						ledger.prepareObservedPermit(
+							handle.requestToken,
+							Array.from({ length: 6 }, () => cost),
+							Array.from({ length: 6 }, () => cost),
+							{ decoder: { cpu: 0, bytes: 0 }, classifier: cost, analog: cost },
+						)!,
+					)
+					expect(handle.arm()).toBe(true)
+					expect(
+						await adapter.requestChannel(
+							"rtl",
+							`no-start-${attempt}`,
+							req(),
+							caps(),
+						),
+					).toMatchObject({ ok: false, reasonCode: "channelizer-unavailable" })
+					await vi.waitFor(() =>
+						expect(registry.snapshot().owners).toEqual({ V: 1, P: 0, L: 0 }),
+					)
+					expect(registry.snapshot().receipts).toBe(0)
+					expect(ledger.snapshot().committed).toEqual({ cpu: 0, bytes: 0 })
+					expect(fanout.getBranchIds()).toEqual([])
+				}
+				expect(start).not.toHaveBeenCalled()
+				await m.destroy()
+				expect(lifetime.inspectFinal({ ok: true })).toEqual({ ok: true })
+			} finally {
+				start.mockRestore()
+			}
+		},
+	)
+
+	it.each(["native", "local"] as const)(
+		"starts every independent cleanup before waiting for held %s retirement",
+		async held => {
+			const registry = new SettlementRegistry()
+			const lifetime = registry.registerProviderLifetime()!
+			const observer = registry.createObserver(lifetime)
+			let resolveNative!: () => void, resolveLocal!: () => void
+			const nativeGate = new Promise<void>(resolve => {
+				resolveNative = resolve
+			})
+			const localGate = new Promise<void>(resolve => {
+				resolveLocal = resolve
+			})
+			let nativeStarted = false,
+				localStarted = false,
+				providerStarted = false,
+				childClosed = false
+			lifetime.ownCleanup("construction", async () => {
+				providerStarted = true
+				return {
+					ok: false,
+					state: "failed",
+					detail: "synthetic provider cleanup failed",
+				}
+			})
+			// Hold actual child CLOSE despite fanout/input shutdown until the native gate opens.
+			process.env["FAKE_CHAN_MODE"] = "ignore-shutdown"
+			const m = manager(
+				{},
+				{
+					settlementObserver: observer,
+					createProcess: (options, parent) => {
+						const p = new ChannelizerProcess(
+							{ ...options, stopTimeoutMs: 10 },
+							parent,
+						)
+						const stop = p.stop.bind(p)
+						p.once("exit", () => {
+							childClosed = true
+						})
+						p.stop = () => {
+							nativeStarted = true
+							return nativeGate.then(stop)
+						}
+						p.attemptSettlementCleanup = () => {
+							localStarted = true
+							return localGate.then(() => [])
+						}
+						return p
+					},
+				},
+			)
+			const result = await observer
+				.bindProvider(m)
+				.requestChannel("rtl", "held-cleanup", req(), caps())
+			expect(result.ok).toBe(true)
+			let finished = false
+			const destroy = m.destroy().then(() => {
+				finished = true
+			})
+			try {
+				await vi.waitFor(() => {
+					expect(nativeStarted).toBe(true)
+					expect(localStarted).toBe(true)
+					expect(providerStarted).toBe(true)
+				})
+				expect(childClosed).toBe(false)
+				if (held === "native") resolveLocal()
+				else {
+					resolveNative()
+					await vi.waitFor(() => expect(childClosed).toBe(true))
+				}
+				await Promise.resolve()
+				expect(finished).toBe(false)
+			} finally {
+				resolveNative()
+				resolveLocal()
+				await destroy
+			}
+			// A failed independent sibling cannot be lost or rewritten by later positive cleanup.
+			expect(lifetime.inspectFinal({ ok: true })).toMatchObject({
+				ok: false,
+				state: "failed",
+				detail: "synthetic provider cleanup failed",
+			})
+			expect(registry.snapshot().owners.V).toBe(1)
+		},
+	)
+
 	it.skipIf(!process.env["WAVEKIT_CHAN_WITNESS_BINARY"])(
 		"reclaims exact native attempts while a configured channel keeps the witnessed process alive",
 		async () => {
