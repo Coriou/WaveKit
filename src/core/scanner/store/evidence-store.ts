@@ -28,6 +28,14 @@ import { WaveKitError } from "../../../utils/errors.js"
 import { createComponentLogger } from "../../../utils/logger.js"
 import type { Logger } from "../../../utils/logger.js"
 import { atomicWrite } from "./persistence.js"
+import {
+	AnalogOperations,
+	type AnalogHandle,
+	type AnalogInput,
+	type AnalogMetadataAdapter,
+	type AnalogOperationIo,
+	type AnalogReconciliation,
+} from "./analog-operations.js"
 
 export interface StorageCaps {
 	maxRecordingsMb: number
@@ -177,6 +185,8 @@ export class EvidenceStore {
 	/** Only in-flight removals are retained; the discovery store supplies lasting authority. */
 	private readonly removals = new Map<string, Promise<void>>()
 	private readonly isDiscoveryLive: (id: string) => boolean
+	private analog: AnalogOperations | null = null
+	private readonly analogIo: AnalogOperationIo | undefined
 
 	constructor(opts: {
 		dir: string
@@ -186,6 +196,7 @@ export class EvidenceStore {
 		statfs?: (p: string) => Promise<{ freeBytes: number }>
 		/** Required by production producers; standalone stores may own admission themselves. */
 		isDiscoveryLive?: (id: string) => boolean
+		analogIo?: AnalogOperationIo
 	}) {
 		this.root = resolve(opts.dir)
 		this.caps = { ...opts.caps }
@@ -193,6 +204,52 @@ export class EvidenceStore {
 		this.now = opts.now
 		this.statfs = opts.statfs ?? defaultStatfs
 		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
+		this.analogIo = opts.analogIo
+	}
+
+	configureAnalog(adapter: AnalogMetadataAdapter): void {
+		if (this.analog)
+			throw new WaveKitError(
+				"Analog adapter already configured",
+				"SCANNER_ANALOG_ADMISSION_DENIED",
+			)
+		this.analog = new AnalogOperations({
+			root: this.root,
+			adapter,
+			admits: id => this.admits(id),
+			serialise: (id, job) => this.serialise(id, job),
+			legacyBytes: async () =>
+				(await this.collect())
+					.filter(file => file.category === "recordings")
+					.reduce((sum, file) => sum + file.bytes, 0),
+			limits: () => ({
+				maxBytes: this.caps.maxRecordingsMb * MIB,
+				minFreeBytes: this.caps.minFreeDiskMb * MIB,
+			}),
+			freeBytes: async () => (await this.statfs(this.root)).freeBytes,
+			...(this.analogIo ? { io: this.analogIo } : {}),
+		})
+	}
+	get analogAuthorityReady(): boolean {
+		return this.analog?.ready ?? false
+	}
+	beginAnalog(input: AnalogInput): AnalogHandle {
+		if (!this.analog)
+			throw new WaveKitError(
+				"Analog metadata authority not configured",
+				"SCANNER_ANALOG_ADMISSION_DENIED",
+			)
+		return this.analog.begin(input)
+	}
+	recoverAnalog(): Promise<AnalogReconciliation[]> {
+		return this.analog?.recover() ?? Promise.resolve([])
+	}
+	hasAnalogCleanup(id: string): Promise<boolean> {
+		assertDiscoveryId(id)
+		return this.analog?.hasCleanup(id) ?? Promise.resolve(false)
+	}
+	stopAnalog(): Promise<void> {
+		return this.analog?.stop() ?? Promise.resolve()
 	}
 
 	private admits(id: string): boolean {
@@ -396,13 +453,25 @@ export class EvidenceStore {
 		meta: { sampleRateHz: number; centreHz: number },
 	): Promise<string | null> {
 		assertDiscoveryId(discoveryId)
+		if (
+			!Number.isFinite(meta.sampleRateHz) ||
+			meta.sampleRateHz <= 0 ||
+			!Number.isFinite(meta.centreHz) ||
+			meta.centreHz < 0
+		)
+			throw new WaveKitError(
+				"Invalid realized IQ metadata",
+				"SCANNER_INVALID_IQ_METADATA",
+			)
 		if (!this.admits(discoveryId)) return null
 		return this.serialise(discoveryId, async () => {
 			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
 				return null
 			const savedAt = this.now()
-			const limit = Math.max(2, Math.floor(meta.sampleRateHz) * 2)
-			const body = bytes.length > limit ? bytes.subarray(0, limit) : bytes
+			const limit = Math.floor(meta.sampleRateHz) * 2
+			const length = Math.floor(Math.min(bytes.length, limit) / 2) * 2
+			if (length === 0) return null
+			const body = bytes.subarray(0, length)
 			const dir = join(this.root, "evidence", discoveryId)
 			// the name keeps the `iq-<ms>` contract: a snippet saved in an already-used millisecond takes the next free one
 			let at = savedAt
@@ -438,6 +507,8 @@ export class EvidenceStore {
 			!this.admits(discoveryId)
 		)
 			return null
+		if (/^analog-[0-9a-f-]{36}\.wav$/i.test(file))
+			return this.analog?.path(recordingId) ?? null
 		for (const kind of RECORDING_KINDS) {
 			const path = join(this.root, "recordings", kind, discoveryId, file)
 			if (existsSync(path)) return path
@@ -461,18 +532,33 @@ export class EvidenceStore {
 		const pending = this.removals.get(discoveryId)
 		if (pending) return pending
 		// Fence admission synchronously and drain accepted writes/moves before removal.
-		const removal = this.serialise(discoveryId, async () => {
-			await rm(join(this.root, "evidence", discoveryId), {
-				recursive: true,
-				force: true,
-			})
-			for (const kind of RECORDING_KINDS)
-				await rm(join(this.root, "recordings", kind, discoveryId), {
-					recursive: true,
-					force: true,
+		const removal = Promise.resolve()
+			.then(async () => {
+				// Long analog settlement drains outside the publication queue it may itself need.
+				if (this.analog) await this.analog.deleteDiscovery(discoveryId)
+				await this.serialise(discoveryId, async () => {
+					await rm(join(this.root, "evidence", discoveryId), {
+						recursive: true,
+						force: true,
+					})
+					for (const kind of RECORDING_KINDS)
+						await rm(join(this.root, "recordings", kind, discoveryId), {
+							recursive: true,
+							force: true,
+						})
 				})
-		})
+			})
+			.catch((cause: unknown) => {
+				throw new WaveKitError(
+					"Scanner evidence cleanup remains pending",
+					"SCANNER_EVIDENCE_CLEANUP_PENDING",
+					cause instanceof Error ? cause : undefined,
+				)
+			})
 		this.removals.set(discoveryId, removal)
+		// Fence existing handles before caller can enqueue another PCM chunk.
+		const drain = this.analog?.cancelDiscovery(discoveryId)
+		if (drain) void drain.catch(() => undefined)
 		try {
 			await removal
 		} finally {
@@ -489,7 +575,9 @@ export class EvidenceStore {
 		const isProtected = (f: StoredFile): boolean =>
 			f.probe ||
 			now - f.mtimeMs < RECORDING_IN_PROGRESS_MS ||
-			keepDiscoveryIds.has(f.discoveryId)
+			keepDiscoveryIds.has(f.discoveryId) ||
+			(this.analog?.protectedDiscovery(f.discoveryId) ?? false) ||
+			/^analog-[0-9a-f-]{36}\.wav$/i.test(f.path.split("/").at(-1) ?? "")
 		const byAge = [...files].sort(
 			(a, b) =>
 				a.mtimeMs - b.mtimeMs || (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0),
@@ -520,6 +608,14 @@ export class EvidenceStore {
 				total -= f.bytes
 			}
 		}
+		if (this.analog)
+			deleted.push(
+				...(await this.analog.retained(
+					keepDiscoveryIds,
+					this.caps.maxAgeDays * DAY_MS,
+					now,
+				)),
+			)
 		await this.removeEmptyDirs()
 		if (deleted.length > 0)
 			this.log.info(
@@ -559,7 +655,10 @@ export class EvidenceStore {
 						const path = join(dir, name)
 						try {
 							const s = await stat(path)
-							if (s.isFile())
+							if (
+								s.isFile() &&
+								!(this.analog?.ownsArtifact(relative(this.root, path)) ?? false)
+							)
 								out.push({
 									path,
 									rel: relative(this.root, path),

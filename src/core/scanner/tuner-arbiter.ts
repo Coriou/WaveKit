@@ -20,6 +20,7 @@ import { gainKeyOf, type EpochClock } from "../spectrum/spectrum-engine.js"
 import type { LeaseTunerFields, PersistedLease } from "./store/persistence.js"
 import type { Impact, NormalisedJobSpec, ScannerSettings } from "./types.js"
 import type { PendingEpoch } from "../spectrum/types.js"
+import { ConstructorListenerRegistration } from "./channel/consumer-lifecycle.js"
 
 export type TunerFieldValues = LeaseTunerFields
 export type LeaseLostReason =
@@ -94,6 +95,8 @@ export interface ArbiterDeps {
 	canHandOver: (jobId: string) => boolean
 	logger: Logger
 	now?: () => number
+	/** Captures each of the six exact removers before constructor registration can throw. */
+	ownConstructorListener?: (removeExact: () => void) => boolean
 }
 
 const FIELDS: readonly (keyof TunerFieldValues)[] = [
@@ -111,6 +114,7 @@ function toError(err: unknown): Error {
 }
 
 export class TunerArbiter extends EventEmitter {
+	private readonly constructorListeners: ConstructorListenerRegistration[] = []
 	private readonly log: Logger
 	private readonly now: () => number
 	private readonly leases = new Map<string, Lease>()
@@ -133,21 +137,117 @@ export class TunerArbiter extends EventEmitter {
 		super()
 		this.log = createComponentLogger(deps.logger, "TunerArbiter")
 		this.now = deps.now ?? Date.now
-		deps.tuner.on("command-sent", this.onCommandSent)
-		deps.tuner.on("control-mode-changed", this.onControlMode)
-		deps.sources.on("disconnected", this.onDisconnected)
-		deps.sources.on("removed", this.onRemoved)
-		deps.sources.on("source-removed", this.onRemoved)
-		deps.sources.on("payload-started", this.onPayloadStarted)
+		try {
+			this.listen(
+				deps.tuner,
+				"command-sent",
+				this.onCommandSent,
+				() => {
+					deps.tuner.on("command-sent", this.onCommandSent)
+				},
+				() => {
+					deps.tuner.off("command-sent", this.onCommandSent)
+				},
+			)
+			this.listen(
+				deps.tuner,
+				"control-mode-changed",
+				this.onControlMode,
+				() => {
+					deps.tuner.on("control-mode-changed", this.onControlMode)
+				},
+				() => {
+					deps.tuner.off("control-mode-changed", this.onControlMode)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"disconnected",
+				this.onDisconnected,
+				() => {
+					deps.sources.on("disconnected", this.onDisconnected)
+				},
+				() => {
+					deps.sources.off("disconnected", this.onDisconnected)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"removed",
+				this.onRemoved,
+				() => {
+					deps.sources.on("removed", this.onRemoved)
+				},
+				() => {
+					deps.sources.off("removed", this.onRemoved)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"source-removed",
+				this.onRemoved,
+				() => {
+					deps.sources.on("source-removed", this.onRemoved)
+				},
+				() => {
+					deps.sources.off("source-removed", this.onRemoved)
+				},
+			)
+			this.listen(
+				deps.sources,
+				"payload-started",
+				this.onPayloadStarted,
+				() => {
+					deps.sources.on("payload-started", this.onPayloadStarted)
+				},
+				() => {
+					deps.sources.off("payload-started", this.onPayloadStarted)
+				},
+			)
+		} catch (error: unknown) {
+			// Parent captured every remover before effects. Cleanup failure cannot replace the
+			// original exception; that parent's retained inventory can attempt the failed remover.
+			try {
+				this.dispose()
+			} catch {
+				/* retained by the external construction owner */
+			}
+			throw error
+		}
+	}
+
+	private listen(
+		emitter: object,
+		event: string,
+		listener: (...args: never[]) => void,
+		install: () => void,
+		remove: () => void,
+	): void {
+		const registration = new ConstructorListenerRegistration(
+			install,
+			remove,
+			() => {
+				if (!(emitter instanceof EventEmitter)) return false
+				const listeners: readonly unknown[] = emitter.listeners(event)
+				return !listeners.includes(listener)
+			},
+		)
+		this.constructorListeners.push(registration)
+		registration.register(this.deps.ownConstructorListener)
 	}
 
 	dispose(): void {
-		this.deps.tuner.off("command-sent", this.onCommandSent)
-		this.deps.tuner.off("control-mode-changed", this.onControlMode)
-		this.deps.sources.off("disconnected", this.onDisconnected)
-		this.deps.sources.off("removed", this.onRemoved)
-		this.deps.sources.off("source-removed", this.onRemoved)
-		this.deps.sources.off("payload-started", this.onPayloadStarted)
+		let first: unknown
+		let failed = false
+		for (const registration of this.constructorListeners) {
+			try {
+				registration.remove()
+			} catch (error: unknown) {
+				if (!failed) first = error
+				failed = true
+			}
+		}
+		if (failed) throw first
 	}
 
 	holder(sourceId: string): Lease | undefined {
