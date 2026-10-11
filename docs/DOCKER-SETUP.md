@@ -338,8 +338,10 @@ WAVEKIT_ACCESS__HEALTH_PROBE__HOST=receiver.example:9443
 ```
 
 The target is the actual loopback HTTP backend origin (IPv4 or bracketed IPv6),
-with no path, query, userinfo or fragment. The script appends `/health`, and sends
-the configured Host header. Runtime validates this Host in its API authority list
+with no path, query, userinfo or fragment. For backend port 80, use the bare
+canonical origin
+(`http://127.0.0.1` or `http://[::1]`); runtime rejects an explicit `:80`.
+The script appends `/health`, and sends the configured Host header. Runtime validates this Host in its API authority list
 alongside the public API authority. Supply these overrides explicitly to the
 probe environment even when the rest of the protected configuration comes from
 YAML; the shell probe does not read YAML. Missing protected probe overrides and

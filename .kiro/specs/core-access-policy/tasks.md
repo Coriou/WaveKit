@@ -232,10 +232,12 @@ until process termination. The internal bootstrap uses actual mounted/healthy
 access services and running audio state; there is no public bootstrap endpoint or
 health metadata. Operator data is unmounted and unavailable.
 
-The candidate has 340 passing tests across 16 files with one worker, including a
+The candidate has 350 passing tests across 16 files with one worker, including a
 freshly compiled real process, paired-session restart, active WS SIGTERM cleanup,
-API bind-failure cleanup, no-listener fatal startup, actual Fastify persistence
-drain, stream revocation/late producer cleanup, mapping and probe validation.
+API bind-failure cleanup, failed partial scanner cleanup with retained ownership,
+legacy scanner fallback, no-listener fatal startup, actual Fastify persistence
+drain, stream revocation/late producer cleanup, mapping and probe validation
+(including canonical port-80 loopback origins for both address families).
 Independent exact-candidate review and final check results will be recorded in the
 subsequent checkpoint. These facts do not mark the integration tasks accepted yet.
 

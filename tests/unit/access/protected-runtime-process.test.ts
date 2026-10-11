@@ -26,6 +26,7 @@ import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
 const repository = fileURLToPath(new URL("../../../", import.meta.url))
 let buildDirectory: string | undefined
 let entry: string
+let failedScannerEntry: string
 const roots: string[] = []
 const processes: RunningCore[] = []
 const reservations: Server[] = []
@@ -51,6 +52,44 @@ beforeAll(async () => {
 		platform: "node",
 		format: "esm",
 		packages: "external",
+	})
+	const failureDirectory = join(buildDirectory, "failed-scanner")
+	failedScannerEntry = join(failureDirectory, "index.js")
+	await build({
+		absWorkingDir: repository,
+		entryPoints: [{ in: "src/index.ts", out: "index" }],
+		bundle: true,
+		outdir: failureDirectory,
+		platform: "node",
+		format: "esm",
+		packages: "external",
+		plugins: [
+			{
+				name: "failed-partial-scanner-cleanup",
+				setup(builder) {
+					builder.onLoad({ filter: /[/\\]scanner-service\.ts$/ }, () => ({
+						loader: "js",
+						contents: `export class ScannerService {
+						started = false
+						async start() {
+							this.started = true
+							throw new Error("Scanner fixture startup failed")
+						}
+						async stop() {
+							if (!this.started) {
+								process.stdout.write("scanner-stop-noop\\n")
+								return
+							}
+							this.started = false
+							process.stdout.write("scanner-stop-real\\n")
+							await Promise.resolve()
+							throw new Error("Scanner fixture cleanup failed")
+						}
+					}`,
+					}))
+				},
+			},
+		],
 	})
 }, 30_000)
 
@@ -165,7 +204,11 @@ async function fixture() {
 	}
 }
 
-function run(configFile: string, directory?: string): RunningCore {
+function run(
+	configFile: string,
+	directory?: string,
+	executable = entry,
+): RunningCore {
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			([name]) => !name.startsWith("WAVEKIT_"),
@@ -174,7 +217,7 @@ function run(configFile: string, directory?: string): RunningCore {
 	env["WAVEKIT_CONFIG"] = configFile
 	if (directory !== undefined)
 		env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = directory
-	const child = spawn(process.execPath, [entry], {
+	const child = spawn(process.execPath, [executable], {
 		cwd: repository,
 		env,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -394,6 +437,50 @@ describe("built protected runtime process", () => {
 		for (const port of [env.raw, env.relay, env.analog, env.digital])
 			expect(await listening(port)).toBe(false)
 		// API remains held by this test, and is deliberately excluded above.
+	}, 15_000)
+
+	it("retains failed partial scanner cleanup even when a repeated stop would resolve", async () => {
+		const env = await fixture()
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, failedScannerEntry)
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+		expect(core.stderr()).toBe("WaveKit startup failed\n")
+		expect(core.stdout()).not.toContain("WaveKit started successfully")
+		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
+		expect(core.stdout()).not.toContain("scanner-stop-noop")
+		// Shutdown still attempts other constructed resources after that rejection.
+		expect(core.stdout()).toContain("Destroying DecoderManager")
+		// Retaining this file proves close() never released access ownership.
+		expect(
+			(await readdir(env.directory)).filter(name => name.startsWith("owner-")),
+		).toHaveLength(1)
+		for (const port of [env.api, env.raw, env.relay, env.analog, env.digital])
+			expect(await listening(port)).toBe(false)
+	}, 15_000)
+
+	it("preserves legacy startup fallback after the same partial scanner cleanup failure", async () => {
+		const env = await fixture()
+		await writeFile(
+			env.configFile,
+			JSON.stringify({ ...env.config, access: { mode: "legacy" } }),
+		)
+		await env.releasePorts()
+		const core = run(env.configFile, undefined, failedScannerEntry)
+		await started(core)
+		expect(core.stdout()).toContain(
+			"Stopping the partially started scanner failed",
+		)
+		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
+		expect(await listening(env.api)).toBe(true)
+		expect(await listening(env.raw)).toBe(true)
+		core.child.kill("SIGTERM")
+		expect(await core.exited).toEqual({ code: 0, signal: null })
 	}, 15_000)
 
 	it.each([

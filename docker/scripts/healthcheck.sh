@@ -17,6 +17,7 @@ PROBE_TARGET="${WAVEKIT_ACCESS__HEALTH_PROBE__TARGET:-}"
 PROBE_HOST="${WAVEKIT_ACCESS__HEALTH_PROBE__HOST:-}"
 if [ -n "$PROBE_TARGET$PROBE_HOST" ] || [ "${WAVEKIT_ACCESS__MODE:-legacy}" = protected ]; then
     case "$PROBE_TARGET" in
+        http://127.0.0.1|http://\[::1\]) probe_port=80 ;;
         http://127.0.0.1:*) probe_port="${PROBE_TARGET#http://127.0.0.1:}" ;;
         http://\[::1\]:*) probe_port="${PROBE_TARGET#http://\[::1\]:}" ;;
         *) echo "API health probe configuration invalid"; exit 1 ;;

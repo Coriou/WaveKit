@@ -570,6 +570,7 @@ async function main(): Promise<void> {
 		// runs without the unread files (Task 35). Only an unexpected construction or
 		// start failure drops the scanner, and with it /api/spectrum.
 		let scanner: ScannerService | null = null
+		let stopScanner: (() => Promise<void>) | undefined
 		try {
 			scanner = new ScannerService({
 				settings: config.scanner,
@@ -587,25 +588,38 @@ async function main(): Promise<void> {
 				cpuMeter: new CpuMeter({ sampleMs: 5000 }),
 			})
 			const ownedScanner = scanner
-			own(40, () => ownedScanner.stop())
+			let scannerStopping: Promise<void> | undefined
+			// Retain the first real outcome: stop() may become a no-op after
+			// clearing its started flag even when asynchronous cleanup failed.
+			stopScanner = () =>
+				(scannerStopping ??= Promise.resolve().then(() => ownedScanner.stop()))
+			own(40, stopScanner)
 			await scanner.start()
 			checkpoint()
 		} catch (err) {
 			if (stopping) throw err
 			log.error(
 				protectedMode ? { code: "RUNTIME_ERROR" } : { err },
-				"Scanner failed to start; continuing without it",
+				protectedMode
+					? "Scanner startup failed; attempting cleanup"
+					: "Scanner failed to start; continuing without it",
 			)
 			// A partial start leaves listeners, spectrum fanout branches and timers behind and
 			// there is no shutdown hook for a null scanner: stop it before dropping it.
-			await scanner
-				?.stop()
-				.catch((stopErr: unknown) =>
-					log.warn(
-						protectedMode ? { code: "RUNTIME_ERROR" } : { err: stopErr },
-						"Stopping the partially started scanner failed",
-					),
-				)
+			if (protectedMode) {
+				// Rejection aborts startup; shutdown observes this same rejection
+				// while still attempting the remaining owned cleanup.
+				await stopScanner?.()
+			} else {
+				await scanner
+					?.stop()
+					.catch((stopErr: unknown) =>
+						log.warn(
+							{ err: stopErr },
+							"Stopping the partially started scanner failed",
+						),
+					)
+			}
 			scanner = null
 		}
 

@@ -53,7 +53,8 @@ prints a public access plan; enabling runtime protection requires the explicit
 configuration above. The normal build preserves `index.js`, `spectrum-worker.js`
 and `access-command.js`.
 
-Public/browser origins use one canonical hostname and scheme with explicit ports.
+Public/browser origins use one canonical hostname and scheme with canonical ports
+(default port 80 or 443 is omitted).
 Named audio authorities are independent of the API allowlist. Direct HTTP requires
 matching loopback address families and configured ports; `localhost` requires
 IPv4 backend bindings. LAN origins require `listenerScheme: https` and

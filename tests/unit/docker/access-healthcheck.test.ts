@@ -102,6 +102,8 @@ describe("credential-free container health probe", () => {
 
 	it.each([
 		["http://127.0.0.1:9000", "receiver.local:8443"],
+		["http://127.0.0.1", "127.0.0.1"],
+		["http://[::1]", "[::1]"],
 		["http://[::1]:9000", "[::1]:9000"],
 	])(
 		"uses explicit protected target %s and Host %s for only public health",
@@ -133,6 +135,22 @@ describe("credential-free container health probe", () => {
 
 	it.each([
 		["both missing", "", ""],
+		[
+			"path on default-port IPv4 target",
+			"http://127.0.0.1/health",
+			"127.0.0.1",
+		],
+		["path on default-port IPv6 target", "http://[::1]/health", "[::1]"],
+		[
+			"query on default-port target",
+			"http://127.0.0.1?SECRET-query",
+			"127.0.0.1",
+		],
+		[
+			"userinfo on default-port target",
+			"http://127.0.0.1@remote.local",
+			"127.0.0.1",
+		],
 		["target missing", "", "receiver.local:8443"],
 		["Host missing", "http://127.0.0.1:9000", ""],
 		["remote target", "http://receiver.local:9000", "receiver.local:8443"],

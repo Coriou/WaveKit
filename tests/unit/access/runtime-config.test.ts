@@ -82,6 +82,52 @@ describe("protected runtime deployment mapping", () => {
 		})
 	})
 
+	it.each([
+		["127.0.0.1", "127.0.0.1"],
+		["[::1]", "::1"],
+	] as const)(
+		"accepts canonical port-80 API/probe origin for %s and rejects explicit default-port spelling",
+		(host, bindHost) => {
+			const access = localAccess()
+			access.publicOrigins = {
+				api: `http://${host}`,
+				analogAudio: `http://${host}:8081`,
+				digitalAudio: `http://${host}:8082`,
+			}
+			access.allowedOrigins = [access.publicOrigins.api]
+			access.allowedAuthorities = [host]
+			access.audio.analog = { allowedAuthorities: [`${host}:8081`], bindHost }
+			access.audio.digital = { allowedAuthorities: [`${host}:8082`], bindHost }
+			access.healthProbe = { target: `http://${host}`, host }
+			const input = {
+				...runtimeConfig(access),
+				api: { host: bindHost, port: 80 },
+			}
+			expect(validateConfig(input).access).toEqual(access)
+			expect(
+				ConfigSchema.safeParse({
+					...input,
+					access: {
+						...access,
+						healthProbe: { ...access.healthProbe, target: `http://${host}:80` },
+					},
+				}).success,
+			).toBe(false)
+			expect(
+				ConfigSchema.safeParse({
+					...input,
+					access: {
+						...access,
+						publicOrigins: {
+							...access.publicOrigins,
+							api: `http://${host}:80`,
+						},
+					},
+				}).success,
+			).toBe(false)
+		},
+	)
+
 	it.each(["local", "proxy"] as const)(
 		"accepts explicit %s bindings and named public destinations",
 		kind => {
