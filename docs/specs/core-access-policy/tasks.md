@@ -270,7 +270,7 @@ retain their original scope. Backend verification is recorded below.
       post-clock availability recheck and no read writes/renewal/pruning/migration.
       Reuse existing pairing/refresh/logout/revoke and bounded flow/drain ownership.
       _Requirements: 3.2, 4.6–4.8, 5.1–5.3_
-- [ ] 13. CHECKPOINT BACKEND CONTRACT: focused actual-server and property tests
+- [x] 13. CHECKPOINT BACKEND CONTRACT: focused actual-server and property tests
       covering exact raw tuple, HEAD/denial/CORS, absent-route/provider states,
       serializer faults, current mounted flags, permission, committed persistence
       races, requester expiry/revocation and reentrant clock failure. Run released
@@ -283,3 +283,26 @@ retain their original scope. Backend verification is recorded below.
       deployment, RF/native, capacity or physical evidence acceptance. Task 9 remains
       a separate connected-client release gate.
       _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_
+
+### Backend implementation checkpoint — 2026-10-11
+
+Explicit protected bootstrap and session-only remembered-device GET/HEAD routes,
+closed shared DTO exports and public API/client documentation are implemented.
+Independent exact-candidate code reviews approved both stages. Actual-server tests
+cover raw-wire HEAD, exact tuple/upgrade rejection, provider/serializer faults,
+committed inventory during held real create/refresh/revoke persistence, requester
+expiry after admission and snapshot-only/reentrant clock failure. Property 5 and
+Property 6 retain traced coverage with at least 100 runs.
+
+At `14a0e235e95cf6b5b1b4beace70cd683bc25b7cc`, the fresh full root suite passed:
+319 files and 5106 tests passed, 6 files/15 tests skipped, exit 0. Workspace tests
+passed all 8 tasks (2 cached build prerequisites); fresh CLI tests passed all 341.
+Typecheck exited 0 with the root compiler executed and 7 cached workspace tasks.
+Lint exited 0 with 0 errors and 62 existing warnings. Shared/API-type compilation,
+the three root entry builds and CLI build exited 0. The final checkpoint/status
+correction changes documentation only; runtime and test blobs retain that scope.
+Historical task formatting and earlier checkpoints are preserved.
+
+Task 14, task 9 and real browser cookie/CORS/TLS/proxy/deployment acceptance remain
+open. No receiver, native/RF, endurance/load, connected-client or production-binding
+acceptance follows from this backend checkpoint.

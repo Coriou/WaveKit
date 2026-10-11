@@ -15,7 +15,8 @@ Per-listener authority allowlists include scheme/effective-port context; origins
 are exact HTTP(S) origins. Forwarded headers and attacker-supplied Host do not
 create trust. Existing public health exceptions are API GET/HEAD `/health` and
 `/health/live`, after authority/origin validation. The accepted bootstrap extension
-below is separately opt-in and implementation-pending. Actual framework and audio
+below is implemented with a separate opt-in; client/exposure acceptance remains
+pending. Actual framework and audio
 admission adapters will check before executing handlers or sending WAV headers.
 
 Machine authentication uses a random 32-byte canonical base64url token, loaded
