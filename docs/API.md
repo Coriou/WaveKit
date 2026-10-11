@@ -1459,6 +1459,14 @@ curl http://localhost:9000/api/scanner/jobs/j_01JA2T6Q4M3XZ8R6V5W2NKD7QH
 `invalid`). Passive jobs have ids `passive-<sourceId>`. Identify jobs also
 carry `identify` (see `POST /api/scanner/identify`).
 
+Startup is bounded to 15 seconds; identify uses the smaller of that cap and
+`timeoutMs`. A source disconnect during startup fails the job with
+`tuner-unavailable` and releases its resources. Deadlines are evaluated on the
+service tick. A terminal REST state does not prove teardown has finished:
+new admission may still return 409 with `details.reason: "releasing"` while
+restore, decoder and probe cleanup completes. Terminal job WS publication
+follows teardown.
+
 `unrestorable` lists the tuner fields the job's end did not write back: fields
 whose previous value was unknown, and fields whose restore could not be written
 (for example while the source is disconnected). Those restores are re-queued
@@ -1601,6 +1609,14 @@ curl -X PATCH http://localhost:9000/api/scanner/discoveries/d_01JA2T7B9S0KQ4M3XZ
 Deletes the discovery with its evidence and recordings (`scanner:discovery`
 `change: "deleted"`). **204**; 404 `SCANNER_NOT_FOUND`.
 
+Success waits for accepted evidence writes and recording moves to drain and
+for the discovery's evidence/recording folders to be removed. Live and recent
+producer references are invalidated; later completions cannot recreate
+downloadable evidence for the deleted ID. Downloads require an existing
+discovery even if orphan files remain. Filesystem deletion failures reject the
+request. This does not promise transactional power-loss durability or change
+the separate capture-retention policy.
+
 #### GET /api/scanner/recordings/:recordingId
 
 Downloads a recording as `audio/wav` (ids come from observations'
@@ -1653,6 +1669,17 @@ default 15000; bounds only the wait for a signal), `protocols?`,
 `exhaustive?` (default false: stop at the first accepted decode), `record?`
 (default true). `bandwidthHz` (≤ 1 MHz) sets the match tolerance
 `max(1 kHz, bw/2)`; send the waterfall's click width.
+
+The signal-wait budget starts after usable IQ is admitted for the current
+stream. Initial IQ admission has a separate `min(timeoutMs, 15000)` ms budget
+from job creation. With no usable IQ, the job fails with `tuner-unavailable`;
+a single target reports `unidentified`, empty trials and null nullable RF
+statistics, while `all` reports no measured targets. A transmission found
+within the signal-wait budget may finish its bounded decoder trials afterward;
+`timeoutMs` is not an overall job-duration limit. An epoch change preserves an
+established single-target deadline; collected `all` targets may receive a
+bounded re-resolution wait. Disconnect during active identify ends it with
+the results collected so far.
 
 ```bash
 curl -X POST http://localhost:9000/api/scanner/identify \
@@ -1852,6 +1879,15 @@ floor, `k` per range, `settleMode`, `tuningTrust`, `warnings`
 (`untracked-retune` | `host-centre-mismatch`, with `deltaHz`), the summary
 budget actually delivered (`summaryBinCount`, `summaryBinHz`, `summaryHz`),
 `latestFrame` (at the default profile) and `lastError?`.
+
+An unexpected worker exit, fatal worker error or failed pipeline replacement
+invalidates the engine and its cached live spectrum. Status reports
+`engine: "error"` with `lastError`; stale summaries are not served as live.
+Affected scanner jobs fail with `tuner-unavailable` and release resources
+through normal teardown/recovery. Fresh demand waits for cleanup and can
+acquire a new engine if the source still supports IQ; a now non-IQ source is
+rejected. Existing clients may re-subscribe. There is no unlimited automatic
+restart loop or general no-data watchdog.
 
 #### GET /api/spectrum/occupancy
 
