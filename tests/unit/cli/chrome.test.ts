@@ -155,7 +155,7 @@ describe("footer, confirm, switcher, help", () => {
 	it("highlights the active view", () => {
 		const l = switcherLine("decoders", 119)
 		expect(lineText(l)).toBe(
-			"1 Overview  2 Decoders  3 Messages  4 Receiver  5 System",
+			"1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan",
 		)
 		expect(l.find(s => s.text === "Decoders")?.role).toBe("selected")
 	})
@@ -250,7 +250,7 @@ describe("M11: help lists every binding of the view, from the keymap", () => {
 			"reconnect + refetch",
 			"this help",
 			"quit",
-			"1-5",
+			"1-6",
 			"next view",
 		]) {
 			expect(t).toContain(s)
