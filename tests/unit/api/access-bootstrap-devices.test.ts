@@ -372,25 +372,35 @@ describe("assembled ApiServer protected bootstrap (A3 bootstrap only)", () => {
 			expect(noCredential.status).toBe(options.legacy ? 404 : 401)
 			expect(invalid.status).toBe(options.legacy ? 404 : 401)
 			expect(valid.status).toBe(404)
-			assertParity(noCredential, await wire(env.server, "HEAD"))
-			assertParity(
-				invalid,
+			const absentHeads = [
+				await wire(env.server, "HEAD"),
 				await wire(env.server, "HEAD", undefined, [
 					"Host",
 					browser.host,
 					"Authorization",
 					"Basic wrong",
 				]),
-			)
-			assertParity(
-				valid,
 				await wire(env.server, "HEAD", undefined, [
 					"Host",
 					browser.host,
 					"Authorization",
 					`Bearer ${env.token}`,
 				]),
-			)
+			]
+			for (const [index, get] of [noCredential, invalid, valid].entries()) {
+				const head = absentHeads[index]
+				if (!head) throw new Error("Missing HEAD response")
+				if (options.legacy) {
+					// Ordinary legacy 404 includes the method in its message; HEAD is
+					// one byte longer than GET, with no protected-header parity promise.
+					expect(head.status).toBe(404)
+					expect(head.body).toBe("")
+					expect(head.headers["content-type"]).toBe(get.headers["content-type"])
+					expect(Number(head.headers["content-length"])).toBe(
+						Number(get.headers["content-length"]) + 1,
+					)
+				} else assertParity(get, head)
+			}
 			if (!options.legacy) {
 				const foreign = await wire(env.server, "GET", undefined, [
 					"Host",
