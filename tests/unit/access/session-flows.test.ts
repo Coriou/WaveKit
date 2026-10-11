@@ -398,3 +398,128 @@ describe("original-request remembered-browser session flows", () => {
 		).toThrow("Invalid session flow configuration")
 	})
 })
+
+describe("session-only device read flows", () => {
+	it.each(["GET", "HEAD"])(
+		"reauthorizes %s and returns detached committed inventory without renewal",
+		async method => {
+			const env = await setup()
+			const before = env.sessions.exportSnapshot()
+			const result = env.flows.devices(
+				env.request("/api/access/devices", { method }),
+			)
+			expect(result).toMatchObject({
+				kind: "success",
+				status: 200,
+				body: {
+					devices: [{ deviceId: env.created.principalId, current: true }],
+				},
+			})
+			expect(env.sessions.exportSnapshot()).toEqual(before)
+			expect(env.persist).not.toHaveBeenCalled()
+			expect(JSON.stringify(result)).not.toContain(env.created.csrfToken)
+			expect(JSON.stringify(result)).not.toContain(env.created.cookieValue)
+		},
+	)
+
+	it("gives machine identity precedence over a valid session cookie", async () => {
+		const env = await setup()
+		const request = env.request("/api/access/devices", { method: "GET" })
+		expect(
+			env.flows.devices({
+				...request,
+				rawHeaders: [
+					...request.rawHeaders,
+					"Authorization",
+					`Bearer ${env.token}`,
+				],
+			}),
+		).toMatchObject({
+			kind: "deny",
+			status: 403,
+			body: { code: "SESSION_REQUIRED" },
+		})
+	})
+
+	it("revalidates requester at the snapshot boundary and returns no inventory after revoke or expiry", async () => {
+		const env = await setup()
+		const original = env.sessions.snapshotActiveDevices.bind(env.sessions)
+		vi.spyOn(env.sessions, "snapshotActiveDevices").mockImplementationOnce(
+			id => {
+				env.advance(30 * DAY)
+				return original(id)
+			},
+		)
+		expect(
+			env.flows.devices(env.request("/api/access/devices", { method: "GET" })),
+		).toMatchObject({ status: 401, body: { code: "AUTH_REQUIRED" } })
+		await env.sessions.revoke(env.created.principalId)
+		expect(
+			env.flows.devices(env.request("/api/access/devices", { method: "GET" })),
+		).toMatchObject({ status: 401 })
+	})
+
+	it("sanitizes a snapshot fault as 503 rather than a successful empty inventory", async () => {
+		const env = await setup()
+		vi.spyOn(env.sessions, "snapshotActiveDevices").mockImplementation(() => {
+			throw new Error("private path and token")
+		})
+		const result = env.flows.devices(
+			env.request("/api/access/devices", { method: "GET" }),
+		)
+		expect(result).toMatchObject({
+			status: 503,
+			body: { code: "ACCESS_UNAVAILABLE" },
+		})
+		expect(JSON.stringify(result)).not.toContain("private path")
+	})
+
+	it.each([
+		{ method: "POST" },
+		{ method: "GET", rawTarget: "/api/access/devices?x=1" },
+		{ method: "GET", transport: "websocket" as const },
+	])("does not authorize a normalized or nonread tuple (%#)", async changes => {
+		const env = await setup()
+		const result = env.flows.devices(
+			env.request("/api/access/devices", changes),
+		)
+		expect(result.kind).toBe("deny")
+	})
+})
+
+describe("device safe-read context", () => {
+	it.each(["same-origin", "none"])(
+		"accepts existing Origin-less %s fetch metadata without CSRF",
+		async site => {
+			const env = await setup()
+			const rawHeaders = [
+				"Host",
+				"receiver.lan:9000",
+				"Cookie",
+				`wavekit_session=${env.created.cookieValue}`,
+				"Sec-Fetch-Site",
+				site,
+			]
+			expect(
+				env.flows.devices(
+					env.request("/api/access/devices", { method: "GET", rawHeaders }),
+				),
+			).toMatchObject({ status: 200 })
+		},
+	)
+
+	it("retains safe-read rejection without Origin or qualifying fetch metadata", async () => {
+		const env = await setup()
+		const rawHeaders = [
+			"Host",
+			"receiver.lan:9000",
+			"Cookie",
+			`wavekit_session=${env.created.cookieValue}`,
+		]
+		expect(
+			env.flows.devices(
+				env.request("/api/access/devices", { method: "HEAD", rawHeaders }),
+			),
+		).toMatchObject({ status: 403 })
+	})
+})

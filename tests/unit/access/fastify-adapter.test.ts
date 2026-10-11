@@ -1,7 +1,12 @@
 import { EventEmitter, once } from "node:events"
-import { get, IncomingMessage as RawRequest, ServerResponse } from "node:http"
+import {
+	get,
+	request as httpRequest,
+	IncomingMessage as RawRequest,
+	ServerResponse,
+} from "node:http"
 import { Socket } from "node:net"
-import type { IncomingMessage } from "node:http"
+import type { IncomingMessage, IncomingHttpHeaders } from "node:http"
 import Fastify from "fastify"
 import type { FastifyRequest } from "fastify"
 import websocket from "@fastify/websocket"
@@ -24,7 +29,7 @@ afterEach(async () => {
 	await Promise.all(apps.splice(0).map(app => app.close()))
 })
 
-async function setup(capacity = 32) {
+async function setup(capacity = 32, publicBootstrap = false) {
 	let elapsed = 0
 	const token = generateMachineToken()
 	const digest = digestMachineToken(token)
@@ -53,6 +58,7 @@ async function setup(capacity = 32) {
 		sessions,
 		leases,
 		webSocketCloseGraceMs: 30,
+		publicBootstrap,
 	})
 	app.addHook("onClose", async () => leases.dispose())
 	const created = await sessions.create()
@@ -935,4 +941,141 @@ describe("unmounted root Fastify access hooks", () => {
 			expect(startWriting).not.toHaveBeenCalled()
 		},
 	)
+})
+
+async function bootstrapWire(
+	app: ReturnType<typeof Fastify>,
+	options: {
+		method: "GET" | "HEAD"
+		url: string
+		headers: Record<string, string>
+	},
+) {
+	if (!app.server.listening) await listen(app)
+	const bound = app.addresses()[0]
+	if (!bound) throw new Error("Missing listener")
+	return await new Promise<{
+		statusCode: number
+		body: string
+		headers: IncomingHttpHeaders
+		json: () => unknown
+	}>((resolve, reject) => {
+		const request = httpRequest(
+			{
+				host: "127.0.0.1",
+				port: bound.port,
+				path: options.url,
+				method: options.method,
+				headers: options.headers,
+				agent: false,
+			},
+			response => {
+				let body = ""
+				response.setEncoding("utf8")
+				response.on("data", (chunk: string) => {
+					body += chunk
+				})
+				response.on("error", reject)
+				response.on("end", () =>
+					resolve({
+						statusCode: response.statusCode ?? 0,
+						headers: response.headers,
+						body,
+						json: () => JSON.parse(body) as unknown,
+					}),
+				)
+			},
+		)
+		request.on("error", reject)
+		request.setTimeout(2000, () =>
+			request.destroy(new Error("Wire request timeout")),
+		)
+		request.end()
+	})
+}
+
+describe("root bootstrap opt-in dispatch", () => {
+	it("leaves missing opt-in protected and admits no public principal when enabled", async () => {
+		for (const enabled of [false, true]) {
+			const env = await setup(32, enabled)
+			const reserve = vi.spyOn(env.controller, "reserveUpgrade")
+			const handler = vi.fn((request: FastifyRequest) => ({
+				principal: env.controller.principalOf(request) ?? null,
+			}))
+			env.app.get("/api/access/bootstrap", { exposeHeadRoute: false }, handler)
+			const result = await env.app.inject({
+				url: "/api/access/bootstrap",
+				headers: {
+					host: "receiver.lan:9000",
+					origin,
+					authorization: "Basic stale",
+				},
+			})
+			expect(result.statusCode).toBe(enabled ? 200 : 401)
+			if (enabled) expect(result.json()).toEqual({ principal: null })
+			else expect(handler).not.toHaveBeenCalled()
+			expect(reserve).not.toHaveBeenCalled()
+		}
+	})
+
+	it("keeps query, encoded, trailing, POST and raw Upgrade requests on ordinary policy", async () => {
+		const env = await setup(32, true)
+		const handler = vi.fn(() => ({ unexpected: true }))
+		env.app.route({
+			method: ["GET", "POST"],
+			url: "/api/access/bootstrap",
+			handler,
+		})
+		for (const [url, method, extra] of [
+			["/api/access/bootstrap?x=1", "GET", {}],
+			["/api/access/%62ootstrap", "GET", {}],
+			["/api/access/bootstrap/", "GET", {}],
+			["/api/access/bootstrap", "POST", {}],
+			["/api/access/bootstrap", "GET", { upgrade: "websocket" }],
+		] as const) {
+			const result = await env.app.inject({
+				url,
+				method,
+				headers: { host: "receiver.lan:9000", ...extra },
+			})
+			expect(result.statusCode).toBe(401)
+		}
+		expect(handler).not.toHaveBeenCalled()
+	})
+
+	it("retains HEAD boundary denial and sealed503 with safe serializer and no handler", async () => {
+		const env = await setup(32, true)
+		const handler = vi.fn(() => ({ unexpected: true }))
+		env.app.route({
+			method: ["GET", "HEAD"],
+			exposeHeadRoute: false,
+			url: "/api/access/bootstrap",
+			handler,
+		})
+		env.app.addHook("onRequest", async (_request, reply) => {
+			reply.serializer(() => "secret serializer")
+		})
+		const denied = await bootstrapWire(env.app, {
+			method: "HEAD",
+			url: "/api/access/bootstrap",
+			headers: { host: "evil.lan:9000" },
+		})
+		expect(denied.statusCode).toBe(403)
+		expect(denied.body).toBe("")
+		env.controller.stopAdmission()
+		for (const method of ["GET", "HEAD"] as const) {
+			const result = await bootstrapWire(env.app, {
+				method,
+				url: "/api/access/bootstrap",
+				headers: { host: "receiver.lan:9000", origin },
+			})
+			expect(result.statusCode).toBe(503)
+			expect(result.headers["cache-control"]).toBe("no-store")
+			expect(result.headers["access-control-allow-origin"]).toBe(origin)
+			if (method === "GET")
+				expect(result.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+			else expect(result.body).toBe("")
+		}
+		expect(handler).not.toHaveBeenCalled()
+	})
 })

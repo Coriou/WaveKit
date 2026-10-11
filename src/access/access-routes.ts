@@ -1,4 +1,4 @@
-import type { FastifyInstance, FastifyReply } from "fastify"
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify"
 import { serializeSessionCookie } from "./cookies.js"
 import type { AccessFlowResult } from "./cookies.js"
 import { accessRequestFromHttp } from "./http-request.js"
@@ -115,6 +115,42 @@ export function registerAccessRoutes(
 			services.flows.status(accessRequestFromHttp(request.raw, "api")),
 		),
 	)
+	app.route({
+		method: ["GET", "HEAD"],
+		url: "/api/access/devices",
+		...options,
+		exposeHeadRoute: false,
+		errorHandler(error, request, reply) {
+			reply.serializer(JSON.stringify)
+			void options.errorHandler(error, request, reply)
+		},
+		preHandler(
+			request: FastifyRequest,
+			reply: FastifyReply,
+			done: (error?: Error) => void,
+		) {
+			reply.serializer(JSON.stringify)
+			const original = accessRequestFromHttp(request.raw, "api")
+			if (
+				original.transport !== "http" ||
+				original.rawTarget !== "/api/access/devices" ||
+				(original.method !== "GET" && original.method !== "HEAD")
+			) {
+				void reply
+					.header("Cache-Control", "no-store")
+					.code(400)
+					.send({ code: "MALFORMED_REQUEST" })
+				return
+			}
+			done()
+		},
+		handler(request, reply) {
+			reply.serializer(JSON.stringify)
+			return run(reply, () =>
+				services.flows.devices(accessRequestFromHttp(request.raw, "api")),
+			)
+		},
+	})
 	app.post("/api/access/session/refresh", options, async (request, reply) =>
 		run(reply, () =>
 			services.flows.refresh(accessRequestFromHttp(request.raw, "api")),

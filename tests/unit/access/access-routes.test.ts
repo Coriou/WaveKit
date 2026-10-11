@@ -422,3 +422,128 @@ describe("isolated access HTTP routes", () => {
 		expect(issued.statusCode).toBe(201)
 	})
 })
+
+describe("device inventory route admission", () => {
+	it("uses an explicit safe serializer for session inventory and sanitized service faults", async () => {
+		const env = await setup(app => {
+			app.setReplySerializer(() => '"private inherited serializer"')
+		})
+		// Provision directly: inherited serializers intentionally poison unrelated existing routes.
+		const session = await env.sessions.create()
+		if (session.kind !== "created") throw new Error("Missing session")
+		const headers = {
+			...env.browser,
+			cookie: `wavekit_session=${session.cookieValue}`,
+		}
+		const success = await env.app.inject({
+			method: "GET",
+			url: "/api/access/devices",
+			headers,
+		})
+		expect(success.statusCode).toBe(200)
+		expect(success.json()).toMatchObject({
+			devices: [{ deviceId: session.principalId, current: true }],
+		})
+		vi.spyOn(env.sessions, "snapshotActiveDevices").mockImplementation(() => {
+			throw new Error("private fault")
+		})
+		const failed = await env.app.inject({
+			method: "GET",
+			url: "/api/access/devices",
+			headers,
+		})
+		expect(failed.statusCode).toBe(503)
+		expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+	})
+
+	it("rechecks session authority after an earlier root admission", async () => {
+		let revoke = false
+		let id = ""
+		let sessions: SessionStore | undefined
+		const env = await setup(app => {
+			app.addHook("preHandler", async (request: FastifyRequest) => {
+				if (revoke && request.url === "/api/access/devices")
+					await sessions?.revoke(id)
+			})
+		})
+		sessions = env.sessions
+		const paired = await env.pair()
+		id = paired.body.deviceId
+		revoke = true
+		const response = await env.app.inject({
+			method: "GET",
+			url: "/api/access/devices",
+			headers: paired.headers,
+		})
+		expect(response.statusCode).toBe(401)
+		expect(response.json()).toEqual({ code: "AUTH_REQUIRED" })
+	})
+
+	it("shares the existing 512 active-flow bound and drains accepted persistence after sealing reads", async () => {
+		const env = await setup()
+		const paired = await env.pair()
+		let release = () => {}
+		let entered = () => {}
+		const atPersist = new Promise<void>(resolve => {
+			entered = resolve
+		})
+		const gate = new Promise<void>(resolve => {
+			release = resolve
+		})
+		env.persist.mockImplementationOnce(async () => {
+			entered()
+			await gate
+		})
+		const original = env.flows.refresh.bind(env.flows)
+		let calls = 0
+		let full = () => {}
+		const atCapacity = new Promise<void>(resolve => {
+			full = resolve
+		})
+		vi.spyOn(env.flows, "refresh").mockImplementation(request => {
+			if (++calls === 512) full()
+			return original(request)
+		})
+		const pending = Array.from({ length: 512 }, () =>
+			env.app
+				.inject({
+					method: "POST",
+					url: "/api/access/session/refresh",
+					headers: paired.headers,
+				})
+				.then(response => response.statusCode),
+		)
+		await atPersist
+		await atCapacity
+		try {
+			const overloaded = await env.app.inject({
+				method: "GET",
+				url: "/api/access/devices",
+				headers: paired.headers,
+			})
+			expect(overloaded.statusCode).toBe(429)
+			expect(overloaded.json()).toEqual({ code: "ACCESS_CAPACITY" })
+			const draining = env.routes.drain()
+			let settled = false
+			void draining.then(() => {
+				settled = true
+			})
+			const sealed = await env.app.inject({
+				method: "HEAD",
+				url: "/api/access/devices",
+				headers: paired.headers,
+			})
+			expect(sealed.statusCode).toBe(503)
+			expect(settled).toBe(false)
+			release()
+			expect(await Promise.all(pending)).toEqual(
+				Array.from({ length: 512 }, () => 200),
+			)
+			await draining
+			expect(settled).toBe(true)
+		} finally {
+			release()
+			await Promise.all(pending)
+		}
+	})
+})

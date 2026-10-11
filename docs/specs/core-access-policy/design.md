@@ -15,7 +15,8 @@ Per-listener authority allowlists include scheme/effective-port context; origins
 are exact HTTP(S) origins. Forwarded headers and attacker-supplied Host do not
 create trust. Existing public health exceptions are API GET/HEAD `/health` and
 `/health/live`, after authority/origin validation. The accepted bootstrap extension
-below is separately opt-in and implementation-pending. Actual framework and audio
+below is implemented with a separate opt-in; client/exposure acceptance remains
+pending. Actual framework and audio
 admission adapters will check before executing handlers or sending WAV headers.
 
 Machine authentication uses a random 32-byte canonical base64url token, loaded
@@ -185,13 +186,13 @@ first-use UI/command acceptance remain coordinated integration work.
 The web design snapshot `28280cf` leaves authentication as an open surface.
 Preserve its existing shell and visual system; coordinate the pairing surface with
 its owner before UI implementation. The first successful flow ends at spectrum →
-tune → identify → inspect → listen. Device names and a device-list endpoint may
-follow; they must not delay first connection or expose private snapshots.
+tune → identify → inspect → listen. Device names remain a follow-up; the implemented device-list endpoint exposes
+only remembered-session ID/clocks/current metadata, never private snapshots.
 
 Before enabling live controls, load trusted deployment facts containing canonical
 API/WS origins, named analog/digital audio origins and actual mounted access
 capabilities. Publish these through a reviewed narrow bootstrap boundary or trusted
-shell metadata. The existing capabilities helper has no wire endpoint. Public
+shell metadata. The exact protected bootstrap endpoint supplies these facts. Public
 health stays a liveness surface; legacy/unmounted mode cannot unlock the browser.
 
 Check the credentialed session endpoint. A returning session obtains CSRF metadata
@@ -225,9 +226,10 @@ gates; foundation tests do not establish browser readiness.
 
 ## Public bootstrap and remembered-device projection
 
-**DESIGN ACCEPTED, IMPLEMENTATION PENDING.** This section defines an additive
-protected-only contract. It does not assert that either route is mounted, that a
-client is shipped, or that browser/TLS/exposure acceptance is complete. Historical
+**BACKEND IMPLEMENTED; CLIENT/EXPOSURE ACCEPTANCE PENDING.** This section defines
+the additive protected-only contract implemented by explicit GET/HEAD routes and
+closed shared DTOs. It does not assert a shipped browser client or completed
+browser/TLS/exposure acceptance. Historical
 checkpoint descriptions above retain their original scope. Existing configuration,
 authentication, session persistence and stream authorities remain authoritative.
 
@@ -416,9 +418,9 @@ failure latch and lease revocation remain authoritative.
 | Requester expiry/revocation between root hook and snapshot | 401; clock/authority failure instead yields 503             |
 | Clock callback reenters and latches unavailable            | Post-callback recheck yields 503 before successful assembly |
 
-### Pending implementation and acceptance
+### Backend verification and remaining acceptance
 
-Use real ApiServer/root hooks/routes and SessionStore persistence/clock fixtures in
+Backend verification uses real ApiServer/root hooks/routes and SessionStore persistence/clock fixtures in
 `tests/unit/api/access-bootstrap-devices.test.ts`, alongside focused policy, adapter,
 store, flow, route and projector tests. Required schedules include the full raw
 request tuple at dispatch and delivery; valid authenticated normalized variants and
@@ -431,10 +433,9 @@ caps as well as 32, detached rows and deterministic current marker; deferred
 create/refresh/revoke, requester expiry/revocation, failed persist and reentrant clock;
 no read writes/pruning; unchanged restart-v1 compatibility; capacity and shutdown drain.
 
-Exact implementation allocation, serial touched tests/typecheck/lint/build,
-independent exact-candidate review and merged client contract acceptance are pending.
-Server composition, DTO exports and public API documentation remain pending
-implementation/acceptance. No web UI,
+Server composition, shared DTO exports and public API documentation implement this
+contract. Focused actual-server/property tests and independent exact-candidate
+reviews cover the backend; the task checkpoint records cohesive check results. No web UI,
 regional registry or tuner changes belong to this slice. Local tests do not establish
 browser cookies/CORS/TLS/proxy exposure, private-volume/deployment behavior, physical
 native/RF settlement or measured capacity. Existing production binding remains off,

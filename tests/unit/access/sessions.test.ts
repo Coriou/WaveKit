@@ -1,3 +1,4 @@
+import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import {
 	digestMachineToken,
@@ -372,4 +373,228 @@ describe("durable remembered-browser authority", () => {
 		mono = 10
 		expect(env.store.lookup(session.cookieValue)).toBeUndefined()
 	})
+})
+
+describe("committed active device inventory", () => {
+	// Feature: core-access-policy, Property 6: Committed active inventory
+	// Validates: Requirements 4.6, 4.7, 4.8
+	it("returns bounded detached identities, ordered clocks and exactly the requesting device", async () => {
+		await fc.assert(
+			fc.asyncProperty(fc.integer({ min: 1, max: 32 }), async count => {
+				const env = await setup({ maxSessions: count })
+				const identities: string[] = []
+				for (let i = 0; i < count; i++) {
+					identities.push(created(await env.store.create()).principalId)
+					if (i % 2 === 0) env.advance(1)
+				}
+				const requester = identities[0]
+				if (!requester) throw new Error("Missing requester")
+				env.persist.mockClear()
+				const snapshot = env.store.snapshotActiveDevices(requester)
+				expect(snapshot.kind).toBe("active")
+				if (snapshot.kind !== "active") throw new Error("Missing snapshot")
+				expect(snapshot.devices).toHaveLength(count)
+				expect(
+					snapshot.devices
+						.filter(device => device.current)
+						.map(device => device.deviceId),
+				).toEqual([requester])
+				expect(snapshot.devices.map(device => device.deviceId)).toEqual(
+					identities.toSorted((a, b) => {
+						const groupA = Math.floor((identities.indexOf(a) + 1) / 2)
+						const groupB = Math.floor((identities.indexOf(b) + 1) / 2)
+						return groupA - groupB || (a < b ? -1 : a > b ? 1 : 0)
+					}),
+				)
+				expect(Object.keys(snapshot.devices[0] ?? {}).sort()).toEqual([
+					"createdAt",
+					"current",
+					"deviceId",
+					"expiresAt",
+					"renewedAt",
+				])
+				const first = snapshot.devices[0]
+				if (first) first.expiresAt = 0
+				expect(env.store.snapshotActiveDevices(requester)).not.toEqual(snapshot)
+				expect(env.persist).not.toHaveBeenCalled()
+			}),
+			{ numRuns: 100 },
+		)
+	})
+
+	it.each([1, 2, 32])(
+		"respects configured capacity %i without changing read admission",
+		async capacity => {
+			const env = await setup({ maxSessions: capacity })
+			const first = created(await env.store.create())
+			for (let i = 1; i < capacity; i++) created(await env.store.create())
+			expect(await env.store.create()).toMatchObject({
+				kind: "capacity",
+				status: 429,
+			})
+			expect(env.store.snapshotActiveDevices(first.principalId)).toMatchObject({
+				kind: "active",
+				devices: expect.arrayContaining([
+					{
+						deviceId: first.principalId,
+						createdAt: 1_000_000,
+						renewedAt: 1_000_000,
+						expiresAt: first.expiresAt,
+						current: true,
+					},
+				]),
+			})
+		},
+	)
+
+	it("reads the clock once and filters expired peers without pruning, lease notification or writes", async () => {
+		let now = 0
+		const clock = vi.fn(() => now)
+		const env = await setup({ ttlMs: 100, monotonicNow: clock })
+		const old = created(await env.store.create())
+		const cleanup = vi.fn()
+		env.store.onInvalidated(old.principalId, cleanup)
+		now = 50
+		const current = created(await env.store.create())
+		now = 100
+		clock.mockClear()
+		env.persist.mockClear()
+		const result = env.store.snapshotActiveDevices(current.principalId)
+		expect(result).toMatchObject({
+			kind: "active",
+			devices: [{ deviceId: current.principalId, current: true }],
+		})
+		expect(clock).toHaveBeenCalledTimes(1)
+		expect(env.store.exportSnapshot().sessions).toHaveLength(2)
+		expect(env.persist).not.toHaveBeenCalled()
+		expect(cleanup).not.toHaveBeenCalled()
+		expect(env.store.snapshotActiveDevices(old.principalId)).toEqual({
+			kind: "missing",
+		})
+	})
+
+	it.each(["create", "renew", "revoke"] as const)(
+		"does not expose an uncommitted %s",
+		async operation => {
+			const env = await setup()
+			const session = created(await env.store.create())
+			const before = env.store.snapshotActiveDevices(session.principalId)
+			let release = () => {}
+			let entered = () => {}
+			const atPersist = new Promise<void>(resolve => {
+				entered = resolve
+			})
+			const barrier = new Promise<void>(resolve => {
+				release = resolve
+			})
+			env.persist.mockImplementationOnce(async () => {
+				entered()
+				await barrier
+			})
+			env.advance(10)
+			const pending =
+				operation === "create"
+					? env.store.create()
+					: operation === "renew"
+						? env.store.renew(session.principalId)
+						: env.store.revoke(session.principalId)
+			await atPersist
+			expect(env.store.snapshotActiveDevices(session.principalId)).toEqual(
+				before,
+			)
+			release()
+			await pending
+			expect(env.store.snapshotActiveDevices(session.principalId)).not.toEqual(
+				before,
+			)
+		},
+	)
+
+	it("fails closed after persistence uncertainty and after a reentrant clock callback invalidates authority", async () => {
+		const env = await setup()
+		const session = created(await env.store.create())
+		env.persist.mockRejectedValueOnce(new Error("private storage path"))
+		await expect(env.store.renew(session.principalId)).rejects.toThrow()
+		expect(() => env.store.snapshotActiveDevices(session.principalId)).toThrow(
+			"Session authority unavailable",
+		)
+
+		let mode: "normal" | "reenter" | "fail" = "normal"
+		let store: SessionStore | undefined
+		const other = await setup({
+			monotonicNow: () => {
+				if (mode === "fail") return NaN
+				if (mode === "reenter") {
+					mode = "fail"
+					try {
+						store?.snapshotActiveDevices(session.principalId)
+					} catch {
+						/* Expected authority failure. */
+					}
+					mode = "normal"
+				}
+				return 0
+			},
+		})
+		store = other.store
+		const requester = created(await store.create())
+		mode = "reenter"
+		expect(() =>
+			other.store.snapshotActiveDevices(requester.principalId),
+		).toThrow("Session authority unavailable")
+	})
+
+	it("keeps v1 persistence and restart clocks unchanged by reads", async () => {
+		const env = await setup()
+		const session = created(await env.store.create())
+		const durable = env.durable()
+		const restarted = await SessionStore.open({
+			...env.options,
+			snapshot: durable,
+		})
+		env.persist.mockClear()
+		expect(restarted.snapshotActiveDevices(session.principalId)).toEqual(
+			env.store.snapshotActiveDevices(session.principalId),
+		)
+		expect(restarted.exportSnapshot()).toEqual(durable)
+		expect(env.persist).not.toHaveBeenCalled()
+	})
+})
+
+describe("device snapshot ordering and clock failures", () => {
+	it("sorts equal creation times by ASCII identity, independent of private insertion order", async () => {
+		const env = await setup()
+		created(await env.store.create())
+		created(await env.store.create())
+		const privateState = env.store.exportSnapshot()
+		const a = privateState.sessions[0]
+		const b = privateState.sessions[1]
+		if (!a || !b) throw new Error("Missing records")
+		a.deviceId = `device_${"a".repeat(42)}A`
+		b.deviceId = `device_${"Z".repeat(42)}A`
+		const restarted = await SessionStore.open({
+			...env.options,
+			snapshot: privateState,
+		})
+		const result = restarted.snapshotActiveDevices(a.deviceId)
+		if (result.kind !== "active") throw new Error("Missing requester")
+		expect(result.devices.map(row => row.deviceId)).toEqual([
+			b.deviceId,
+			a.deviceId,
+		])
+	})
+
+	it.each([NaN, Infinity, Number.MAX_SAFE_INTEGER])(
+		"fails closed for an unusable clock value (%#)",
+		async invalid => {
+			let now = 0
+			const env = await setup({ monotonicNow: () => now })
+			const session = created(await env.store.create())
+			now = invalid
+			expect(() =>
+				env.store.snapshotActiveDevices(session.principalId),
+			).toThrow("Session authority unavailable")
+			expect(env.store.unavailable).toBe(true)
+		},
+	)
 })

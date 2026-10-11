@@ -14,6 +14,8 @@ import type { AccessPrincipal, DeniedAdmission } from "./types.js"
 
 export interface FastifyAccessOptions {
 	policy: AccessPolicy
+	/** Only true when protected composition installs the exact configured bootstrap route. */
+	publicBootstrap?: boolean
 	sessions: SessionStore
 	leases?: ConnectionLeases
 	webSocketCloseGraceMs?: number
@@ -45,9 +47,17 @@ export function installAccessHooks(
 		const original = accessRequestFromHttp(request.raw, "api")
 		const pair =
 			original.method === "POST" && original.rawTarget === "/api/access/pair"
-		const admission = pair
-			? policy.validatePairingRequest(original)
-			: policy.evaluate(original)
+		const bootstrap =
+			options.publicBootstrap === true &&
+			original.surface === "api" &&
+			original.transport === "http" &&
+			(original.method === "GET" || original.method === "HEAD") &&
+			original.rawTarget === "/api/access/bootstrap"
+		const admission = bootstrap
+			? policy.validatePublicBootstrapRequest(original)
+			: pair
+				? policy.validatePairingRequest(original)
+				: policy.evaluate(original)
 		for (const [name, value] of Object.entries(admission.headers))
 			reply.header(name, value)
 		if (controller.admissionStopped || admission.kind === "deny")

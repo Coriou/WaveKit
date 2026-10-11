@@ -62,3 +62,8 @@ export type Admission =
 	| { kind: "preflight"; status: 204; headers: AccessResponseHeaders }
 	| AuthenticatedAdmission
 	| DeniedAdmission
+
+/** Public deployment metadata only; this carries no principal or transport authority. */
+export type PublicBootstrapAdmission =
+	| { kind: "public-bootstrap"; headers: AccessResponseHeaders }
+	| DeniedAdmission

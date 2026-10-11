@@ -64,7 +64,8 @@ See [protected deployment constraints](DOCKER-SETUP.md#protected-runtime-deploym
 for required proxy, private-volume and probe checks.
 
 The root policy runs before routes, documentation and CORS plugins. Only the exact
-credential-free `GET /health` and validated preflight are public; status, unknown
+credential-free `GET /health`, validated preflight and explicitly mounted exact
+`GET`/`HEAD /api/access/bootstrap` are public; status, unknown
 routes and documentation require admission. Machine clients use the canonical
 Bearer credential. Browser pairing creates the shared host cookie, with allowed
 Origin and CSRF proof required for unsafe cookie-authenticated requests. WS
@@ -88,16 +89,47 @@ Malformed requests return 400. Protected root errors and request logs omit raw U
 credentials and validation payloads. Clients must reconcile uncertain mutation
 outcomes rather than automatically replay RF operations.
 
-`ApiServer.getAccessBootstrap()` is an **internal composition projection**, not a
-public endpoint. Its version-1 result contains `apiOrigin`, `webSocketUrl`,
-`analogAudioOrigin`, `digitalAudioOrigin`, `access` (mode, sessionAvailable,
-pairingAvailable), and `capabilities` (actual running analog/digital availability,
-operatorDataAvailable). Unmounted legacy composition returns null; stopped or
-unavailable access has false session availability. Operator data remains unmounted
-and false. URLs describe configured destinations, not RF readiness or reachability.
-The external shell must arrange trusted pre-auth delivery; `/health` contains no
-bootstrap metadata. Browser UI integration and real TLS/exposure acceptance remain
-separate release gates.
+Protected composition with configured canonical public mapping mounts explicit
+`GET` and `HEAD /api/access/bootstrap`. The closed version-1 `AccessBootstrapDto`
+contains `apiOrigin`, API-derived `webSocketUrl`, named `analogAudioOrigin` and
+`digitalAudioOrigin`, `access` (protected mode, sessionAvailable, pairingAvailable),
+and `capabilities` (analogAudioAvailable, digitalAudioAvailable,
+operatorDataAvailable). These flags reflect current mounted/healthy services and
+running audio independently; URLs describe configured destinations, not RF readiness
+or reachability. Projection is an explicit allowlist with a 4096-byte JSON budget.
+The internal `ApiServer.getAccessBootstrap()` remains its composition source.
+
+This public read validates the original exact method/path, Host, Origin and raw
+headers. Queries, normalized path variants, upgrades and ambiguous credentials are
+rejected; an unambiguous invalid credential does not authenticate this read or
+prevent discovery. It creates no principal, lease, cookie or renewal. Responses use
+`Cache-Control: no-store` and the existing explicit-origin CORS boundary; preflight
+remains separate. HEAD has the GET status/representation headers and no wire body.
+Legacy mode leaves the route absent. Protected composition without public mapping
+uses ordinary admission before an absent-route response; an installed unavailable,
+stopping or faulty provider returns fixed `503 ACCESS_UNAVAILABLE`. A bootstrap
+401 therefore cannot establish mounted pairing/session services or unlock controls.
+`/health` contains no bootstrap metadata. Clients must trust the configured canonical
+target before accepting these facts; real browser cookie/CORS/TLS/proxy recovery and
+exposure acceptance remain separate gates.
+
+`GET` and `HEAD /api/access/devices` require a current browser session. Machine
+credentials are rejected with 403, including when accompanied by a session cookie;
+missing/expired/revoked sessions return 401 and unavailable storage/clock authority
+returns safe 503. The closed `AccessDevicesDto` is `{ devices: AccessDeviceDto[] }`:
+each row contains only `deviceId`, `createdAt`, `renewedAt`, `expiresAt` (integer
+milliseconds) and `current`. It lists unexpired remembered sessions, not online
+presence, with exactly one current requester and at most the configured cap (maximum
+32). Rows sort by creation time, then ASCII device ID. No names, credentials or private
+session records are exposed.
+
+The inventory reauthorizes the original request immediately before a synchronous,
+one-clock committed-map snapshot and rechecks availability after the clock callback.
+Pending create/refresh/revoke persistence remains invisible until commit. Reads do
+not wait for the mutation queue, renew, prune, persist or migrate. Existing pairing,
+refresh/logout/revoke permissions and bounded flow/drain ownership remain unchanged;
+capacity denial returns 429. GET/HEAD use safe serializers, no-store and the existing
+origin policy, with no HEAD wire body. Informational success grants no RF operation.
 
 ## REST Endpoints
 
