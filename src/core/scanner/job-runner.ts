@@ -30,6 +30,7 @@ import type {
 	Hop,
 	HopPlan,
 	Impact,
+	Identity,
 	JobState,
 	NormalisedJobSpec,
 	PauseReason,
@@ -87,6 +88,8 @@ export interface LiveObservation {
 	undecodedReason?: UndecodedReason
 	/** Explicit deletion invalidates late evidence from this bounded observation lifetime. */
 	evidenceDeleted?: boolean
+	/** Accepted identity of this observation, never borrowed from a retained discovery. */
+	acceptedIdentity?: { identity: Identity; stream: number; epoch: number }
 }
 
 export interface JobDriver {

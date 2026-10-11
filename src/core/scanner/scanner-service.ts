@@ -1742,7 +1742,11 @@ export class ScannerService extends EventEmitter {
 		const discoveryId = live.discoveryId
 		if (!discoveryId) return
 		// § 7.1: the observation keeps its own accepted evidence (Observation.decode; A1/A3 metrics).
-		if (this.store.appendObservationEvidence(live.observationId, ev)) {
+		const accepted = this.store.appendObservationEvidence(
+			live.observationId,
+			ev,
+		)
+		if (accepted) {
 			this.dirty = true
 			this.recorder.evidence(live.observationId, ev)
 		}
@@ -1757,6 +1761,12 @@ export class ScannerService extends EventEmitter {
 		if (!ev.identity || this.store.get(survivor)?.confidence !== "decoded")
 			return
 		live.decoded = true
+		if (accepted && live.lastTrack)
+			live.acceptedIdentity = {
+				identity: ev.identity,
+				stream: live.lastTrack.stream,
+				epoch: ev.epoch,
+			}
 		this.recorder.decoded(live.observationId)
 		this.lastConfirm.set(survivor, this.now())
 		if (!wasDecoded) this.updateFrequencyError(live.sourceId, { rekey: true })
@@ -1778,15 +1788,10 @@ export class ScannerService extends EventEmitter {
 			)
 			.map(o => o.lastTrack!)
 		const cfg = this.spectrum.engine(live.sourceId)?.config()
-		return leakOrIntermod(
-			track,
-			others,
-			id => this.decodedAt(id, live.sourceId),
-			{
-				identity,
-				...(cfg ? { rbwHz: cfg.sampleRateHz / cfg.fftSize } : {}),
-			},
-		)
+		return leakOrIntermod(track, others, id => this.decodedAt(id, live), {
+			identity,
+			...(cfg ? { rbwHz: cfg.sampleRateHz / cfg.fftSize } : {}),
+		})
 	}
 
 	/**
@@ -1844,16 +1849,54 @@ export class ScannerService extends EventEmitter {
 
 	private decodedAt(
 		identity: Identity,
-		sourceId: string,
+		live: LiveObservation,
 	): { centreHz: number; peakDbfs: number }[] {
-		return this.store
-			.list({ sourceId, minConfidence: "decoded", limit: 500 })
-			.items.filter(
-				d =>
-					d.identity?.kind === identity.kind &&
-					d.identity.value === identity.value,
+		const target = live.lastTrack
+		const engine = this.spectrum.engine(live.sourceId)
+		const epoch = engine?.currentEpoch()
+		const cfg = engine?.config()
+		if (
+			!target ||
+			!epoch ||
+			!cfg ||
+			target.stream !== epoch.stream ||
+			target.epoch !== epoch.epoch
+		)
+			return []
+		// Track updates within one integration block can arrive together in a worker batch. No
+		// retained best-power/identity, closed track or older sample window proves simultaneous RF.
+		const blockSamples = Math.max(
+			cfg.fftSize,
+			Math.round((cfg.sampleRateHz * cfg.integrationMs) / 1000),
+		)
+		const half = (cfg.sampleRateHz * USABLE_FRACTION) / 2
+		return [...this.live.values()].flatMap(o => {
+			const t = o.lastTrack
+			const accepted = o.acceptedIdentity
+			if (
+				o === live ||
+				o.evidenceDeleted ||
+				o.endedAt !== undefined ||
+				o.sourceId !== live.sourceId ||
+				o.epoch !== live.epoch ||
+				!t ||
+				!accepted ||
+				accepted.identity.kind !== identity.kind ||
+				accepted.identity.value !== identity.value ||
+				accepted.stream !== epoch.stream ||
+				accepted.epoch !== epoch.epoch ||
+				t.stream !== epoch.stream ||
+				t.epoch !== epoch.epoch ||
+				t.flags.gap ||
+				Math.abs(t.lastSample - target.lastSample) > blockSamples ||
+				t.lastSample < target.startSample ||
+				target.lastSample < t.startSample ||
+				Math.abs(t.centreHz - epoch.centreHz) > half ||
+				!Number.isFinite(t.peakDbfs)
 			)
-			.map(d => ({ centreHz: d.frequencyHz, peakDbfs: d.signal.best.peakDbfs }))
+				return []
+			return [{ centreHz: t.centreHz, peakDbfs: t.peakDbfs }]
+		})
 	}
 
 	private readonly onProbeRecordings = (r: ProbeRecordings): void => {
@@ -1998,6 +2041,8 @@ export class ScannerService extends EventEmitter {
 
 	private readonly onSourceDown = (sourceId: string): void => {
 		if (!this.started) return
+		for (const o of this.live.values())
+			if (o.sourceId === sourceId) delete o.acceptedIdentity
 		for (const d of this.driversOn(sourceId)) {
 			if (
 				d.record.state === "starting" ||

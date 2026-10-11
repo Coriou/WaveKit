@@ -174,3 +174,91 @@ describe("discovery deletion producer boundary (review F3)", () => {
 		}
 	})
 })
+
+const decode = (o: LiveObservation): DecodeEvidence => ({
+	protocol: "dmr",
+	identity: { kind: "dmr-cc", value: "1" },
+	metadata: {},
+	crcClean: true,
+	at: Date.now(),
+	epoch: o.epoch,
+	origin: "probe",
+})
+
+describe("simultaneous adjacent-leak evidence (review F4)", () => {
+	it.each([
+		"historical",
+		"outside-window",
+		"other-stream",
+		"other-epoch",
+		"sample-gap",
+		"disconnected",
+	])(
+		"does not cap a valid decode using a strong %s observation",
+		async mode => {
+			const h = await harness()
+			try {
+				const strong = h.observe(CENTRE + 100_000, -10)
+				h.internals.applyEvidence(strong, decode(strong))
+				expect(h.internals.store.get(strong.discoveryId!)?.confidence).toBe(
+					"decoded",
+				)
+				if (mode === "historical") h.internals.live.delete(strong.trackId)
+				else if (mode === "outside-window")
+					strong.lastTrack = {
+						...strong.lastTrack!,
+						centreHz: CENTRE + 2_000_000,
+					}
+				else if (mode === "other-stream")
+					strong.lastTrack = {
+						...strong.lastTrack!,
+						stream: strong.lastTrack!.stream + 1,
+					}
+				else if (mode === "other-epoch") strong.epoch += 1
+				else if (mode === "sample-gap")
+					strong.lastTrack = { ...strong.lastTrack!, lastSample: 0 }
+				else h.sources.emit("disconnected", "rtl")
+				const weak = h.observe(CENTRE + 200_000, -40)
+				h.internals.applyEvidence(weak, decode(weak))
+				expect(h.internals.store.get(weak.discoveryId!)).toMatchObject({
+					confidence: "decoded",
+				})
+				expect(
+					h.internals.store.get(weak.discoveryId!)?.confidenceCap,
+				).not.toBe("adjacent-leak")
+			} finally {
+				await h.service.stop()
+			}
+		},
+	)
+	it("still caps a simultaneous same-window identity at the measured 20 dB boundary", async () => {
+		const h = await harness()
+		try {
+			const strong = h.observe(CENTRE + 100_000, -20)
+			h.internals.applyEvidence(strong, decode(strong))
+			const weak = h.observe(CENTRE + 200_000, -40)
+			h.internals.applyEvidence(weak, decode(weak))
+			expect(h.internals.store.get(weak.discoveryId!)).toMatchObject({
+				confidence: "candidate",
+				confidenceCap: "adjacent-leak",
+			})
+		} finally {
+			await h.service.stop()
+		}
+	})
+	it("uses current power rather than a discovery's historical best", async () => {
+		const h = await harness()
+		try {
+			const strong = h.observe(CENTRE + 100_000, -10)
+			h.internals.applyEvidence(strong, decode(strong))
+			strong.lastTrack = { ...strong.lastTrack!, peakDbfs: -30 }
+			const weak = h.observe(CENTRE + 200_000, -40)
+			h.internals.applyEvidence(weak, decode(weak))
+			expect(h.internals.store.get(weak.discoveryId!)?.confidence).toBe(
+				"decoded",
+			)
+		} finally {
+			await h.service.stop()
+		}
+	})
+})
