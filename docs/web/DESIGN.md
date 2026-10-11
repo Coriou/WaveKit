@@ -598,7 +598,9 @@ Condensed + Noto Sans, Tabler-based icons).
     teal so they no longer sit next to the ice accent.
   - *Settings › Display* (On this device): Theme, Dark ground (three preview tiles: plot,
     island, accent trace), Light ground (Paper tile), Accent (swatches previewed on the current
-    ground), Waterfall colours (four ramp strips). The old "Waterfall palette" row is gone.
+    ground), Waterfall colours (four ramp strips). The old "Waterfall palette" row is gone. Only
+    the ground the Theme pick uses is shown; System uses both, so it shows both (owner, same
+    evening).
   - *⌘K fix:* "theme" found nothing because the palette kept its own hard-coded settings list.
     Now Theme, Dark ground, Accent and Waterfall colours are palette scopes with live preview,
     Esc revert and undo, and **every setting** in the Settings registry is a palette row
@@ -638,7 +640,7 @@ Condensed + Noto Sans, Tabler-based icons).
   the `I` key in the keymap pass.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
-- Theme follow-ups: confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
+- Theme follow-ups: the owner liked the themes (2026-10-11); confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
   delete the other two; more light grounds later (a cool "Mist"?) only if asked; whether the
   Ink tint should also follow the accent on the Pi image UI; the Map legend's "Aircraft"
   swatch uses the accent while aircraft are coloured by altitude; the drawer resize grip is
@@ -651,35 +653,120 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-11, at the end of the colour themes second pass.
-**Topic: keyboard map pass** (single-key shortcuts, `G` chords, the `S` keep/save clash, the
-`I` identify key, palette on mobile), unless the owner picks another from the open questions.
+Handoff written 2026-10-11, late, after the colour themes second pass. The owner reviewed the
+themes and liked them ("This is great"); the one fix asked for (Settings › Display shows only
+the ground the Theme pick uses; System shows both) is done and published.
+**Topic: polish pass, for an orchestrator with teammates.** Three workstreams, in this order of
+priority as the owner gave them, but the third is the big one: (A) shell and Settings polish,
+(B) a much quieter outline / focus system, (C) a full UX review of the Scanner, above all the
+custom "Scan a band" composer. The keymap pass moves after this.
 
-**State.** Every board runs on tokens v2 ([THEME-TOKENS.md](THEME-TOKENS.md)): Theme × ground
-× accent, Paper light with everything light, Match-accent waterfall, ⌘K colour scopes and every
-setting reachable from ⌘K. Ink + phosphor dark is unchanged.
+**Owner's words (2026-10-11).** "Need to polish everything basically." On outlines: "I don't
+like that it keeps highlighting elements all the time, we need to make it much more quiet." On
+the Scanner: "a very important feature, we're spending a lot of energy in the core to get it
+right, it should really come with a beautiful UI and extremely clean & intuitive UX. The custom
+'scan a band' in particular needs a lot of polishing."
 
-**Tasks, in order.**
-1. Sync: `git fetch origin && git merge origin/main`, then read this file and the boards on the
-   canvas (Immersive first).
-2. Owner review of the themes on the real canvas (show the Browser pane): try each ground and
-   accent from Settings › Display and ⌘K; pick the Paper waterfall ramp on the Spectrum board
-   (`paperRamp` a / b / c), then remove the losing ramps and the tweak. Read canvas comments.
-3. The keymap pass, brainstormed with the owner before drawing (one question at a time).
-4. End of session: update this file (decision log, open questions, next session), CORE-GAPS
-   if anything needs core, snapshot the boards into `docs/web/canvas/`, commit and push.
+**Start.**
+1. Sync: `git fetch origin && git merge origin/main`, then read this file, THEME-TOKENS.md and
+   the boards on the canvas (Immersive first). Read canvas comments. Ask the owner to show the
+   Browser pane when a real canvas check matters.
+2. Brainstorm each workstream with the owner before drawing, one question at a time
+   (superpowers:brainstorming; these are bounded design passes on existing boards, so a short
+   in-chat design and an explicit yes, no spec file). Workstreams can be brainstormed one after
+   another and then drawn in parallel by teammates with distinct files.
+
+### A. Shell and Settings polish (Immersive, Settings, SettingsPhone, Tuned)
+
+Facts checked in `Immersive.dc.html`:
+- **Opening Settings from the Map drops you on the Spectrum.** Cause: one `nav` state holds
+  both the base view (`spectrum` | `map`) and the drawers (`activity`, `recordings`, `scanner`,
+  `settings`); `openSettings()` sets `nav: 'settings'`, and `closeActivity` / `toggleSettings`
+  reset `nav: 'spectrum'`. The same happens for every drawer opened from the Map. Fix: split a
+  `view` (spectrum | map) from a `drawer` (none | activity | recordings | scanner | settings);
+  drawers overlay whichever view is up and closing one returns to that view. Check the Map's
+  free area and the dock's selected states with a drawer open over the Map; decide with the
+  owner whether ⌘K "Map" while a drawer is open keeps the drawer.
+- **Tuned card default position:** today `cardAt: 'br'` (bottom right). The owner wants it
+  snapped **right above the Listen (audio / squelch) island**, left-aligned with it, one 16 px
+  gutter between them (owner screenshot 2026-10-11: card bottom edge just above "Squelched ·
+  NFM audio"). Add that anchor (it moves with Listen's height when Listen expands) and make it
+  the default; keep drag, magnetic snap and minimise.
+- **Stop hiding the card when the Receiver panel opens:** `cardOn` is
+  `s.open !== 'rx' && s.nav !== 'map' && (!drawerOn || L.full)`; the card is movable now, so
+  drop the `open !== 'rx'` rule and resolve real collisions through the anchors instead (the
+  expanded Receiver is top right, the new default anchor is bottom left). Also ask whether the
+  card should show over the Map (it is hidden there today).
+- **Settings:** the owner wants Settings "again": walk every group for clarity, wording,
+  density and the "On this device" block (Theme, ground, Accent, Waterfall colours, Density,
+  Tuned card position, Motion); the "Tuned card position" select must learn the new anchor;
+  check phone layout. Keep the registry as the one source (Palette holds a copy; keep the copy
+  in sync and mark changes in both).
+- Then a general polish sweep of the shell: island spacing, motion, empty and error states,
+  wording, all grounds (Ink / Graphite / True black / Paper).
+
+### B. Quiet outline and focus system (every board)
+
+The shell shows too many rings: 2 px accent `outline` on `:focus-visible` in every board's
+helmet (57 rules), selected chips and segments drawn with an accent border at .55, the Settings
+target highlight (a 2 px accent ring around a whole row; in the owner's screenshot the Accent
+row stayed boxed), drag targets with dashed accent outlines, hover rings. Do first:
+1. An inventory (subagent, read-only): every outline, ring, accent border and highlight across
+   the boards, grouped by purpose (keyboard focus, selection, hover, transient highlight,
+   drop target), with where each appears and whether it persists after a mouse click.
+2. Brainstorm the rules with the owner. Starting proposal to discuss, not decided: keyboard
+   focus only on `:focus-visible`, thinner and quieter (1.5 px, ink or accent at reduced
+   alpha, offset), never after a mouse click; selection by fill and text colour rather than
+   a coloured border; hover by fill only; transient highlights (Settings target, palette
+   "Open in Settings") fade within ~1.2 s and never box a whole row; no accent edge on idle
+   controls. Accessibility stays: focus must remain visible for keyboard users (WCAG 2.4.7,
+   3:1 against the surface).
+3. Write the result as a new "Focus, selection and highlight" section in THEME-TOKENS.md
+   (with tokens such as `--wk-focus` if useful) and apply it to all boards with one script plus
+   per-board fixes. This touches every board: run it when no other teammate owns a board, or
+   have teammates apply it to the boards they own.
+
+### C. Scanner UX review (Scanner, BandStrip, Identify, Tuned, Tuner, Immersive)
+
+The core team is investing heavily in the scanner; the UI must match. Read first:
+`docs/SCANNER.md`, `docs/superpowers/specs/2026-10-09-signal-discovery-scanner-design.md`, the
+scanner items in `docs/ROADMAP.md` (S1 band sweep, S3 listen-scan, S4 detection), CORE-GAPS.md,
+and this file's decision log entries "Scanner, decisions before design" and "Shell grid,
+Scanner composer and theming" (purpose = discovery over time; Scanner drawer with Discoveries;
+"Scan a band" composer with band ruler, ranges, per-range protocols, Just find signals;
+Identify flow on the tuned card; Tuner island hold state "Scanner has the receiver").
+1. Audit (subagent): walk every flow on the boards as a first-time operator (find what is
+   around me; scan a custom band; watch it run; pause / hand the receiver back; read and act on
+   discoveries; identify one signal; save it) and list friction, unclear words, dead ends,
+   visual noise, missing states (empty, first run, no hardware, sweep error, relay paused).
+   Compare with how SDR++ (frequency manager / scanner module), SDR Console, SDRTrunk and
+   Uniden scanners present ranges, steps, dwell, lockouts and hits; take ideas, not looks.
+2. Brainstorm with the owner, one question at a time, from the audit. Likely questions: what a
+   first-time scan should look like (presets first vs. ruler first); how ranges are added and
+   edited (drag on the ruler, typed, from the spectrum's "Scan this range"); how much of step,
+   dwell, sensitivity and exclusions stays visible; how protocols per range read; what the
+   running state shows in the shell and in the drawer; how discoveries land on the spectrum.
+3. Redesign "Scan a band" end to end on the Scanner board, then the running and results states,
+   checked on all four grounds. Any capability the design needs that core lacks goes into
+   CORE-GAPS.md and the canvas sticky.
+
+**End of session:** update this file (decision log, open questions, next session),
+CORE-GAPS.md if needed, snapshot every board into `docs/web/canvas/`, commit only your paths
+and push `design/web-dashboard`.
 
 **How the canvas work went well (keep doing it).**
-- Settle the shared spec first (here: the v2 token block, written and contrast-checked before
-  any board work), apply mechanical changes to every board with one script, then give
-  parallel agents distinct files and a shared brief in the scratchpad. Agents edit local
-  copies and verify only; the orchestrator publishes all boards in one call.
-- The canvas pane is often hidden, so agents verify in the git-ignored
-  `.agents/web-canvas-harness/` (README there; `PORT=<n> node shot.js …` lets several agents
-  render at once, each with its own boards copy). Always render with ALL current boards.
+- Settle the shared spec first (a token block, a rules section, a brief in the scratchpad),
+  apply mechanical changes to every board with one script, then give teammates distinct files
+  and the shared brief. Teammates edit local copies in the scratchpad and verify only; the
+  orchestrator publishes all changed boards in one Artifact call (`root` + `files`).
+- The canvas pane is often hidden, so teammates verify in the git-ignored
+  `.agents/web-canvas-harness/` (README there). `PORT=<n> node shot.js …` lets several render
+  at once, each with its own boards copy and its own port (ports clashed once; pick distinct
+  ones). Always render with ALL current boards; a stale embedded board gives false results.
+  Check Ink + phosphor against `docs/web/canvas/` so today's look never drifts.
 - To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work on
-  copies in the session scratchpad, publish with `root` and `files`, then copy every board into
-  `docs/web/canvas/` and commit.
+  copies in the session scratchpad, publish, then copy every board into `docs/web/canvas/` and
+  commit.
 
 ## Handoff to the dev team (later)
 

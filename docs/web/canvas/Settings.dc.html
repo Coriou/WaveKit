@@ -1010,7 +1010,9 @@ class Component extends DCLogic {
 	}
 	groupRows(gid) {
 		const rows = R.filter(d => d.g === gid);
-		return { ess: rows.filter(d => !d.more && !d.dev), more: rows.filter(d => d.more), dev: rows.filter(d => d.dev) };
+		// only the ground the Theme pick uses; System uses both, so it shows both
+		const pick = this.val('dev.theme'), offGround = pick === 'dark' ? 'dev.lightGround' : pick === 'light' ? 'dev.ground' : null;
+		return { ess: rows.filter(d => !d.more && !d.dev), more: rows.filter(d => d.more), dev: rows.filter(d => d.dev && d.id !== offGround) };
 	}
 	groupItems(gid, withHead, first) {
 		const s = this.state, g = GID[gid], out = [], parts = this.groupRows(gid);
