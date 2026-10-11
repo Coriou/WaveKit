@@ -12,10 +12,15 @@ export interface AccessBootstrapRoutesOptions {
 }
 
 /** Composition must mount this together with the root hook's explicit opt-in. */
-export const accessBootstrapRoutes: FastifyPluginAsync<AccessBootstrapRoutesOptions> = async (app, options) => {
+export const accessBootstrapRoutes: FastifyPluginAsync<
+	AccessBootstrapRoutesOptions
+> = async (app, options) => {
 	// Override inherited/global mappings; error causes and serializer internals stay private.
 	app.setErrorHandler((_error, _request, reply) =>
-		reply.serializer(value => JSON.stringify(value)).code(503).send({ code: "ACCESS_UNAVAILABLE" }),
+		reply
+			.serializer(value => JSON.stringify(value))
+			.code(503)
+			.send({ code: "ACCESS_UNAVAILABLE" }),
 	)
 	app.route({
 		method: ["GET", "HEAD"],
@@ -23,8 +28,11 @@ export const accessBootstrapRoutes: FastifyPluginAsync<AccessBootstrapRoutesOpti
 		exposeHeadRoute: false,
 		handler: (request, reply) => {
 			reply.serializer(value => JSON.stringify(value))
-			const admission = options.policy.validatePublicBootstrapRequest(accessRequestFromHttp(request.raw, "api"))
-			for (const [name, value] of Object.entries(admission.headers)) reply.header(name, value)
+			const admission = options.policy.validatePublicBootstrapRequest(
+				accessRequestFromHttp(request.raw, "api"),
+			)
+			for (const [name, value] of Object.entries(admission.headers))
+				reply.header(name, value)
 			if (options.controller.admissionStopped)
 				return reply.code(503).send({ code: "ACCESS_UNAVAILABLE" })
 			if (admission.kind === "deny")

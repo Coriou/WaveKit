@@ -34,6 +34,7 @@ import type { LiveDemodulator } from "../core/live-demodulator.js"
 import type { DigitalVoiceService } from "../core/digital-voice.js"
 import { WaveKitError } from "../utils/errors.js"
 import { healthRoutes } from "./routes/health.js"
+import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
 import { decoderRoutes } from "./routes/decoders.js"
 import { decoderBandRoutes } from "./routes/decoder-band.js"
@@ -123,6 +124,7 @@ export interface ApiServerDependencies {
 export class ApiServer {
 	private readonly access: NamedAccessRuntimeContext | undefined
 	private readonly accessController: FastifyAccessController | undefined
+	private readonly publicBootstrapConfigured: boolean
 	private accessRoutes: AccessRouteController | undefined
 	private readonly app: FastifyInstance
 	private readonly log: Logger
@@ -179,6 +181,11 @@ export class ApiServer {
 		this.audioConfig = dependencies.audioConfig
 		this.log = createComponentLogger(dependencies.logger, "ApiServer")
 		this.config = config
+		this.publicBootstrapConfigured = Boolean(
+			this.access &&
+			config.publicOrigins &&
+			config.accessBootstrap?.mode === "protected",
+		)
 
 		// Create WebSocket broadcaster
 		this.wsBroadcaster = new WebSocketEventBroadcaster(dependencies.logger)
@@ -197,7 +204,10 @@ export class ApiServer {
 
 		// Root policy precedes every plugin and route, including documentation.
 		this.accessController = this.access
-			? installAccessHooks(this.app, this.access.api)
+			? installAccessHooks(this.app, {
+					...this.access.api,
+					publicBootstrap: this.publicBootstrapConfigured,
+				})
 			: undefined
 		if (this.access)
 			this.app.addHook("onSend", async (_request, reply, payload) => {
@@ -273,7 +283,7 @@ export class ApiServer {
 	/**
 	 * Stops the API server gracefully.
 	 */
-	/** Internal shell composition projection; no public endpoint or health metadata. */
+	/** Current configured projection; the public route publishes an explicit allowlist. */
 	getAccessBootstrap() {
 		if (
 			!this.access ||
@@ -981,6 +991,18 @@ export class ApiServer {
 	private async registerRoutes(): Promise<void> {
 		if (this.access)
 			this.accessRoutes = registerAccessRoutes(this.app, this.access.services)
+
+		if (this.publicBootstrapConfigured && this.access && this.accessController)
+			await this.app.register(accessBootstrapRoutes, {
+				policy: this.access.api.policy,
+				controller: this.accessController,
+				provideBootstrap: () =>
+					this.mounted &&
+					!this.stopping &&
+					!this.accessController?.admissionStopped
+						? this.getAccessBootstrap()
+						: null,
+			})
 
 		// Register health and status routes (Requirement 9.1, 9.2)
 		await this.app.register(healthRoutes, {

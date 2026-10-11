@@ -239,12 +239,15 @@ export class AccessPolicy {
 	}
 
 	/** Opt-in adapters only: exact public metadata, with no credential verification. */
-	validatePublicBootstrapRequest(request: AccessRequest): PublicBootstrapAdmission {
+	validatePublicBootstrapRequest(
+		request: AccessRequest,
+	): PublicBootstrapAdmission {
 		const boundary = this.#validateBoundary(request)
 		if (boundary.kind === "deny") return boundary
 		const { input, headers } = boundary
 		if (
-			input.surface !== "api" || input.transport !== "http" ||
+			input.surface !== "api" ||
+			input.transport !== "http" ||
 			(input.method !== "GET" && input.method !== "HEAD") ||
 			input.rawTarget !== "/api/access/bootstrap"
 		)

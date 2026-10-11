@@ -938,15 +938,23 @@ describe("unmounted root Fastify access hooks", () => {
 	)
 })
 
-
 describe("root bootstrap opt-in dispatch", () => {
 	it("leaves missing opt-in protected and admits no public principal when enabled", async () => {
 		for (const enabled of [false, true]) {
 			const env = await setup(32, enabled)
 			const reserve = vi.spyOn(env.controller, "reserveUpgrade")
-			const handler = vi.fn((request: FastifyRequest) => ({ principal: env.controller.principalOf(request) ?? null }))
+			const handler = vi.fn((request: FastifyRequest) => ({
+				principal: env.controller.principalOf(request) ?? null,
+			}))
 			env.app.get("/api/access/bootstrap", { exposeHeadRoute: false }, handler)
-			const result = await env.app.inject({ url: "/api/access/bootstrap", headers: { host: "receiver.lan:9000", origin, authorization: "Basic stale" } })
+			const result = await env.app.inject({
+				url: "/api/access/bootstrap",
+				headers: {
+					host: "receiver.lan:9000",
+					origin,
+					authorization: "Basic stale",
+				},
+			})
 			expect(result.statusCode).toBe(enabled ? 200 : 401)
 			if (enabled) expect(result.json()).toEqual({ principal: null })
 			else expect(handler).not.toHaveBeenCalled()
@@ -957,7 +965,11 @@ describe("root bootstrap opt-in dispatch", () => {
 	it("keeps query, encoded, trailing, POST and raw Upgrade requests on ordinary policy", async () => {
 		const env = await setup(32, true)
 		const handler = vi.fn(() => ({ unexpected: true }))
-		env.app.route({ method: ["GET", "POST"], url: "/api/access/bootstrap", handler })
+		env.app.route({
+			method: ["GET", "POST"],
+			url: "/api/access/bootstrap",
+			handler,
+		})
 		for (const [url, method, extra] of [
 			["/api/access/bootstrap?x=1", "GET", {}],
 			["/api/access/%62ootstrap", "GET", {}],
@@ -965,7 +977,11 @@ describe("root bootstrap opt-in dispatch", () => {
 			["/api/access/bootstrap", "POST", {}],
 			["/api/access/bootstrap", "GET", { upgrade: "websocket" }],
 		] as const) {
-			const result = await env.app.inject({ url, method, headers: { host: "receiver.lan:9000", ...extra } })
+			const result = await env.app.inject({
+				url,
+				method,
+				headers: { host: "receiver.lan:9000", ...extra },
+			})
 			expect(result.statusCode).toBe(401)
 		}
 		expect(handler).not.toHaveBeenCalled()
@@ -974,18 +990,34 @@ describe("root bootstrap opt-in dispatch", () => {
 	it("retains HEAD boundary denial and sealed503 with safe serializer and no handler", async () => {
 		const env = await setup(32, true)
 		const handler = vi.fn(() => ({ unexpected: true }))
-		env.app.route({ method: ["GET", "HEAD"], exposeHeadRoute: false, url: "/api/access/bootstrap", handler })
-		env.app.addHook("onRequest", async (_request, reply) => { reply.serializer(() => "secret serializer") })
-		const denied = await env.app.inject({ method: "HEAD", url: "/api/access/bootstrap", headers: { host: "evil.lan:9000" } })
+		env.app.route({
+			method: ["GET", "HEAD"],
+			exposeHeadRoute: false,
+			url: "/api/access/bootstrap",
+			handler,
+		})
+		env.app.addHook("onRequest", async (_request, reply) => {
+			reply.serializer(() => "secret serializer")
+		})
+		const denied = await env.app.inject({
+			method: "HEAD",
+			url: "/api/access/bootstrap",
+			headers: { host: "evil.lan:9000" },
+		})
 		expect(denied.statusCode).toBe(403)
 		expect(denied.body).toBe("")
 		env.controller.stopAdmission()
 		for (const method of ["GET", "HEAD"] as const) {
-			const result = await env.app.inject({ method, url: "/api/access/bootstrap", headers: { host: "receiver.lan:9000", origin } })
+			const result = await env.app.inject({
+				method,
+				url: "/api/access/bootstrap",
+				headers: { host: "receiver.lan:9000", origin },
+			})
 			expect(result.statusCode).toBe(503)
 			expect(result.headers["cache-control"]).toBe("no-store")
 			expect(result.headers["access-control-allow-origin"]).toBe(origin)
-			if (method === "GET") expect(result.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
+			if (method === "GET")
+				expect(result.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
 			else expect(result.body).toBe("")
 		}
 		expect(handler).not.toHaveBeenCalled()

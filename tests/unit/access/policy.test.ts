@@ -559,18 +559,30 @@ describe("one shared admission policy for API, WS and HTTP audio", () => {
 	})
 })
 
-
 describe("separate non-authenticating bootstrap admission", () => {
 	it("ignores unambiguous credentials without session lookup, persistence or principal", async () => {
 		const { policy, sessions, request, persist } = await setup()
 		const lookup = vi.spyOn(sessions, "lookup")
 		for (const method of ["GET", "HEAD"])
-			for (const credentials of [[], bearer, ["Authorization", "Basic invalid"], ["Authorization", "Bearer wrong"], ["Cookie", "wavekit_session=expired"]]) {
-				const input = request(credentials, { method, rawTarget: "/api/access/bootstrap" })
+			for (const credentials of [
+				[],
+				bearer,
+				["Authorization", "Basic invalid"],
+				["Authorization", "Bearer wrong"],
+				["Cookie", "wavekit_session=expired"],
+			]) {
+				const input = request(credentials, {
+					method,
+					rawTarget: "/api/access/bootstrap",
+				})
 				const before = lookup.mock.calls.length
-				expect(policy.validatePublicBootstrapRequest(input)).toEqual({ kind: "public-bootstrap", headers: { "Cache-Control": "no-store", Vary: "Origin" } })
+				expect(policy.validatePublicBootstrapRequest(input)).toEqual({
+					kind: "public-bootstrap",
+					headers: { "Cache-Control": "no-store", Vary: "Origin" },
+				})
 				expect(lookup.mock.calls.length).toBe(before)
-				if (credentials !== bearer) expect(policy.evaluate(input).kind).toBe("deny")
+				if (credentials !== bearer)
+					expect(policy.evaluate(input).kind).toBe("deny")
 			}
 		expect(lookup).toHaveBeenCalledTimes(2) // Default evaluate still performs ordinary cookie lookup for GET/HEAD.
 		expect(persist).not.toHaveBeenCalled()
@@ -581,28 +593,86 @@ describe("separate non-authenticating bootstrap admission", () => {
 		const bootstrap = request([], { rawTarget: "/api/access/bootstrap" })
 		// Feature: core-access-policy, Property 5: No implicit privilege
 		// Validates: Requirements 3.3, 3.4, 3.5, 3.6, 6.1
-		fc.assert(fc.property(fc.string({ minLength: 1, maxLength: 30 }), suffix => {
-			expect(policy.validatePublicBootstrapRequest({ ...bootstrap, rawTarget: bootstrap.rawTarget + "?" + encodeURIComponent(suffix) }).kind).toBe("deny")
-		}), { numRuns: 100 })
+		fc.assert(
+			fc.property(fc.string({ minLength: 1, maxLength: 30 }), suffix => {
+				expect(
+					policy.validatePublicBootstrapRequest({
+						...bootstrap,
+						rawTarget: bootstrap.rawTarget + "?" + encodeURIComponent(suffix),
+					}).kind,
+				).toBe("deny")
+			}),
+			{ numRuns: 100 },
+		)
 		for (const override of [
-			{ rawTarget: "/api/access/bootstrap/" }, { rawTarget: "/api/access/%62ootstrap" },
-			{ rawTarget: "/prefix/api/access/bootstrap" }, { method: "POST" },
-			{ method: "OPTIONS" }, { surface: "audio" }, { transport: "websocket" },
-		] as const) expect(policy.validatePublicBootstrapRequest({ ...bootstrap, ...override })).toMatchObject({ kind: "deny", status: 400 })
-		expect(policy.evaluate(bootstrap)).toMatchObject({ kind: "deny", status: 401 })
-		expect(policy.evaluate({ ...bootstrap, rawHeaders: [...bootstrap.rawHeaders, ...bearer] }).kind).toBe("authenticated")
+			{ rawTarget: "/api/access/bootstrap/" },
+			{ rawTarget: "/api/access/%62ootstrap" },
+			{ rawTarget: "/prefix/api/access/bootstrap" },
+			{ method: "POST" },
+			{ method: "OPTIONS" },
+			{ surface: "audio" },
+			{ transport: "websocket" },
+		] as const)
+			expect(
+				policy.validatePublicBootstrapRequest({ ...bootstrap, ...override }),
+			).toMatchObject({ kind: "deny", status: 400 })
+		expect(policy.evaluate(bootstrap)).toMatchObject({
+			kind: "deny",
+			status: 401,
+		})
+		expect(
+			policy.evaluate({
+				...bootstrap,
+				rawHeaders: [...bootstrap.rawHeaders, ...bearer],
+			}).kind,
+		).toBe("authenticated")
 	})
 
 	it("retains raw Host/Origin/header validation before public admission", async () => {
 		const { policy, request } = await setup()
 		for (const headers of [
-			["Authorization", "Bearer one,two"], ["Authorization", "one", "authorization", "two"],
-			["Cookie", "wavekit_session=a; wavekit_session=b"], ["Cookie", "missing-equals"],
+			["Authorization", "Bearer one,two"],
+			["Authorization", "one", "authorization", "two"],
+			["Cookie", "wavekit_session=a; wavekit_session=b"],
+			["Cookie", "missing-equals"],
 			["Upgrade", "websocket"],
-		]) expect(policy.validatePublicBootstrapRequest(request(headers, { rawTarget: "/api/access/bootstrap" }))).toMatchObject({ kind: "deny", status: 400 })
-		expect(policy.validatePublicBootstrapRequest(request(["Origin", allowedOrigin], { rawTarget: "/api/access/bootstrap" }))).toMatchObject({ kind: "public-bootstrap", headers: { "Access-Control-Allow-Origin": allowedOrigin, "Access-Control-Allow-Credentials": "true" } })
-		expect(policy.validatePublicBootstrapRequest(request(["Origin", "null"], { rawTarget: "/api/access/bootstrap" }))).toMatchObject({ status: 403 })
-		expect(policy.validatePublicBootstrapRequest(request([], { rawTarget: "/api/access/bootstrap", rawHeaders: ["Host", "evil.lan", "X-Forwarded-Host", "receiver.lan:9000"] }))).toMatchObject({ status: 403, code: "HOST_FORBIDDEN" })
+		])
+			expect(
+				policy.validatePublicBootstrapRequest(
+					request(headers, { rawTarget: "/api/access/bootstrap" }),
+				),
+			).toMatchObject({ kind: "deny", status: 400 })
+		expect(
+			policy.validatePublicBootstrapRequest(
+				request(["Origin", allowedOrigin], {
+					rawTarget: "/api/access/bootstrap",
+				}),
+			),
+		).toMatchObject({
+			kind: "public-bootstrap",
+			headers: {
+				"Access-Control-Allow-Origin": allowedOrigin,
+				"Access-Control-Allow-Credentials": "true",
+			},
+		})
+		expect(
+			policy.validatePublicBootstrapRequest(
+				request(["Origin", "null"], { rawTarget: "/api/access/bootstrap" }),
+			),
+		).toMatchObject({ status: 403 })
+		expect(
+			policy.validatePublicBootstrapRequest(
+				request([], {
+					rawTarget: "/api/access/bootstrap",
+					rawHeaders: [
+						"Host",
+						"evil.lan",
+						"X-Forwarded-Host",
+						"receiver.lan:9000",
+					],
+				}),
+			),
+		).toMatchObject({ status: 403, code: "HOST_FORBIDDEN" })
 	})
 
 	it("allows public metadata when session storage fails without conferring session authority", async () => {
@@ -610,9 +680,16 @@ describe("separate non-authenticating bootstrap admission", () => {
 		const created = await sessions.create()
 		if (created.kind !== "created") throw new Error("Expected session")
 		persist.mockRejectedValueOnce(new Error("private storage fault"))
-		await expect(sessions.renew(created.principalId)).rejects.toMatchObject({ code: "ACCESS_UNAVAILABLE" })
-		const input = request(["Cookie", `wavekit_session=${created.cookieValue}`], { rawTarget: "/api/access/bootstrap" })
-		expect(policy.validatePublicBootstrapRequest(input).kind).toBe("public-bootstrap")
+		await expect(sessions.renew(created.principalId)).rejects.toMatchObject({
+			code: "ACCESS_UNAVAILABLE",
+		})
+		const input = request(
+			["Cookie", `wavekit_session=${created.cookieValue}`],
+			{ rawTarget: "/api/access/bootstrap" },
+		)
+		expect(policy.validatePublicBootstrapRequest(input).kind).toBe(
+			"public-bootstrap",
+		)
 		expect(policy.evaluate(input)).toMatchObject({ status: 503 })
 	})
 })

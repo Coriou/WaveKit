@@ -3,11 +3,15 @@ import type { AccessBootstrapDto } from "@wavekit/api-types"
 import { WaveKitError } from "../utils/errors.js"
 
 function unavailable(): never {
-	throw new WaveKitError("Access bootstrap is unavailable", "ACCESS_UNAVAILABLE")
+	throw new WaveKitError(
+		"Access bootstrap is unavailable",
+		"ACCESS_UNAVAILABLE",
+	)
 }
 
 function record(value: unknown): Record<string, unknown> {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) return unavailable()
+	if (typeof value !== "object" || value === null || Array.isArray(value))
+		return unavailable()
 	return value as Record<string, unknown>
 }
 

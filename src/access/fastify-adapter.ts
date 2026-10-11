@@ -47,8 +47,10 @@ export function installAccessHooks(
 		const original = accessRequestFromHttp(request.raw, "api")
 		const pair =
 			original.method === "POST" && original.rawTarget === "/api/access/pair"
-		const bootstrap = options.publicBootstrap === true &&
-			original.surface === "api" && original.transport === "http" &&
+		const bootstrap =
+			options.publicBootstrap === true &&
+			original.surface === "api" &&
+			original.transport === "http" &&
 			(original.method === "GET" || original.method === "HEAD") &&
 			original.rawTarget === "/api/access/bootstrap"
 		const admission = bootstrap
