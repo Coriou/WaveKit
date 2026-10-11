@@ -240,17 +240,17 @@ describe("Task42 startup completion barrier", () => {
 	})
 })
 
-async function realHarness() {
-	const dir = await realpath(
-		await mkdtemp(join(tmpdir(), "wk-task42-startup-")),
-	)
+async function realHarness(existingDir?: string) {
+	const dir =
+		existingDir ??
+		(await realpath(await mkdtemp(join(tmpdir(), "wk-task42-startup-"))))
 	const h = serviceHarness({
 		dir,
 		patch: settings => {
 			settings.enabled = false
 		},
 	})
-	dirs.push(dir)
+	if (!existingDir) dirs.push(dir)
 	runningServices.push(h.service)
 	return { ...h, internals: h.service as unknown as Internals }
 }
@@ -464,34 +464,42 @@ describe("Task42 real startup recovery", () => {
 		},
 	)
 
-	it("a real stop/start cycle cannot expose previous availability while a new load is pending", async () => {
+	it("a stopped instance stays sealed while a fresh owner waits for recovery", async () => {
 		const h = await realHarness()
 		await h.service.start()
 		expect(h.internals.evidence.analogAuthorityReady).toBe(true)
 		await h.service.stop()
+		await expect(h.service.start()).rejects.toMatchObject({
+			code: "SCANNER_STOPPED",
+		})
+		const fresh = await realHarness(h.dir)
 		const release = signal()
-		const load = h.internals.persistence.load.bind(h.internals.persistence)
-		vi.spyOn(h.internals.persistence, "load").mockImplementationOnce(
+		const load = fresh.internals.persistence.load.bind(
+			fresh.internals.persistence,
+		)
+		vi.spyOn(fresh.internals.persistence, "load").mockImplementationOnce(
 			async () => {
 				await release.promise
 				return load()
 			},
 		)
 		let completed = false
-		const restart = h.service.start().then(() => {
+		const restart = fresh.service.start().then(() => {
 			completed = true
 		})
 		try {
 			expect(h.internals.evidence.analogAuthorityReady).toBe(false)
+			expect(fresh.internals.evidence.analogAuthorityReady).toBe(false)
 			expect(() =>
-				h.service.recordingPath(`d_demo~analog-${randomUUID()}.wav`),
+				fresh.service.recordingPath(`d_demo~analog-${randomUUID()}.wav`),
 			).toThrow("Scanner recording evidence is unavailable")
-			expect(h.service.listCaptures()).toEqual([])
+			expect(fresh.service.listCaptures()).toEqual([])
 			expect(completed).toBe(false)
 		} finally {
 			release.resolve()
 		}
 		await restart
-		expect(h.internals.evidence.analogAuthorityReady).toBe(true)
+		expect(fresh.internals.evidence.analogAuthorityReady).toBe(true)
+		expect(h.internals.evidence.analogAuthorityReady).toBe(false)
 	})
 })
