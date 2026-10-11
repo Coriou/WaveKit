@@ -240,3 +240,79 @@ export function* queryOffers(seconds = 900) {
 				queryClass: (second + client) % 8,
 			}
 }
+
+// Closed tiny fixture. These values are not production DTOs or long seed support.
+export function tinyRows(count = 24) {
+	if (![20, 24, 25].includes(count))
+		throw new Error("Invalid tiny fixture size")
+	return Array.from({ length: count }, (_, index) => {
+		const sequence = index + 1
+		return {
+			sequence,
+			eventId: `00000000-0000-4000-8000-${String(sequence).padStart(12, "0")}`,
+			producer: sequence % 3,
+			ingressUs: sequence * 1000,
+			kind: sequence % 2 ? "message" : "call",
+			frequency: 100 + (sequence % 3),
+			text: `synthetic common ${sequence % 7 === 0 ? "rare" : "ordinary"}`,
+			payload: `fixture:${sequence}`,
+		}
+	})
+}
+export function tinyQuery(queryClass) {
+	if (!Number.isInteger(queryClass) || queryClass < 0 || queryClass > 7)
+		throw new Error("Invalid tiny query class")
+	return [
+		["frequency=101", []],
+		["kind='call'", []],
+		["producer=1", []],
+		[
+			"sequence IN (SELECT rowid FROM search WHERE search MATCH ?)",
+			['"common"'],
+		],
+		["sequence IN (SELECT rowid FROM search WHERE search MATCH ?)", ['"rare"']],
+		[
+			"sequence IN (SELECT rowid FROM search WHERE search MATCH ?)",
+			['"absent"'],
+		],
+		["kind='message' AND producer=1", []],
+		["frequency=999", []],
+	][queryClass]
+}
+// Independent expected membership: no SQL predicates, FTS or query implementation.
+// Four examined sequence positions/page, including filtered misses and holes.
+export function tinyExpectedPage(
+	rows,
+	cursor,
+	current = { generation: 1, lower: 0 },
+) {
+	if (cursor.contract !== `tiny-v1:ascending:${cursor.queryClass}`)
+		return { reset: "filter-contract" }
+	if (cursor.generation !== current.generation) return { reset: "generation" }
+	if (cursor.lower !== current.lower) return { reset: "retention" }
+	const end = Math.min(cursor.high, cursor.after + 4)
+	const matches = row =>
+		[
+			row.frequency === 101,
+			row.kind === "call",
+			row.producer === 1,
+			row.text.split(" ").includes("common"),
+			row.text.split(" ").includes("rare"),
+			false,
+			row.kind === "message" && row.producer === 1,
+			false,
+		][cursor.queryClass]
+	return {
+		sequences: rows
+			.filter(
+				row =>
+					row.sequence > cursor.after && row.sequence <= end && matches(row),
+			)
+			.map(row => row.sequence),
+		scannedThrough: end,
+		high: cursor.high,
+		lower: cursor.lower,
+		generation: cursor.generation,
+		done: end === cursor.high,
+	}
+}

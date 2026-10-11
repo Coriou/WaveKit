@@ -35,7 +35,7 @@ export const SCENARIOS = [
 const LONG = SCENARIOS.slice(3)
 export const PHASES = Object.freeze(["baseline", "storage"])
 export const LONG_PREREQUISITES = Object.freeze([
-	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only)",
+	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only through CLI; tiny is fixture-only)",
 	"Enforced conservative DB/WAL transaction growth bounds for every mutation, including setup and receipts",
 	"Accepted read-only query worker, receipt/fault contracts and exact extension qualification",
 	"Owned 4MiB capture reservation and separately accepted capped pipe consumer with post-exit verification",
@@ -295,7 +295,7 @@ export async function supervise(factory, deadlineMs, signal) {
 			worker.once("exit", code => {
 				if (code !== 0 || !result)
 					reject(new Error(`Worker interrupted: exit ${code}`))
-				else if (result.status !== "ok")
+				else if (!["ok", "unsupported"].includes(result.status))
 					reject(
 						Object.assign(new Error(result.error || "Worker failure"), {
 							workerResult: result,
@@ -392,7 +392,7 @@ export function inventoryArtifacts(path, long = false) {
 }
 
 // Live admission uses metadata only. Content hashing is a separate joined-worker
-// operation. The legacy micro worker still calls inspectArtifacts unchanged.
+// operation; workers never hash live database contents.
 export function inspectArtifacts(path, checkDeadline = () => {}) {
 	const inventory = inventoryArtifacts(path)
 	return {
@@ -531,7 +531,7 @@ export async function run(
 		)
 		outcome = {
 			...report,
-			status: "micro-only",
+			status: result.status === "unsupported" ? "unsupported" : "micro-only",
 			result,
 			counts: result.counts,
 			preflightFreeBytes: output.freeBytes,
@@ -1395,4 +1395,72 @@ export function queryAccounting(seconds = 900) {
 			}
 		},
 	}
+}
+
+// Narrow fixture wire glue. Callbacks observe the parent's clock at reception;
+// worker clocks cannot be compared with admission clocks. State changes are sync.
+export function validateBatchEnvelope(batch) {
+	if (
+		!batch ||
+		Object.keys(batch).sort().join() !== "bytes,id,rows" ||
+		!Number.isSafeInteger(batch.id) ||
+		batch.id < 1 ||
+		!Array.isArray(batch.rows) ||
+		batch.rows.length < 1 ||
+		batch.rows.length > 64 ||
+		batch.bytes !== Buffer.byteLength(JSON.stringify(batch)) ||
+		batch.bytes > 262144
+	)
+		throw new Error("Invalid bounded batch envelope")
+	return batch
+}
+export function batchAcknowledgement(id, outcome, rows) {
+	if (
+		!Number.isSafeInteger(id) ||
+		id < 1 ||
+		!["committed", "failed", "uncertain"].includes(outcome) ||
+		!Number.isInteger(rows) ||
+		rows < 1 ||
+		rows > 64
+	)
+		throw new Error("Invalid batch acknowledgement")
+	return Object.freeze({ id, outcome, rows })
+}
+// Baseline performs identical envelope/ack ownership, with database I/O omitted.
+export function baselineBatchAcknowledgement(batch) {
+	validateBatchEnvelope(batch)
+	return batchAcknowledgement(batch.id, "committed", batch.rows.length)
+}
+export function receiveBatchAcknowledgement(driver, batch, ack, nowUs) {
+	validateBatchEnvelope(batch)
+	if (!Number.isSafeInteger(nowUs) || nowUs < 0)
+		throw new Error("Invalid receipt clock")
+	if (
+		!ack ||
+		Object.keys(ack).sort().join() !== "id,outcome,rows" ||
+		ack.id !== batch.id ||
+		ack.rows !== batch.rows.length ||
+		Buffer.byteLength(JSON.stringify(ack)) > 1024
+	)
+		throw new Error("Invalid batch acknowledgement ownership")
+	batchAcknowledgement(ack.id, ack.outcome, ack.rows)
+	return Object.freeze({
+		accepted: driver.settle(ack.id, ack.outcome, nowUs),
+		receiptUs: nowUs,
+	})
+}
+export function receiveReaderResult(driver, result, nowUs) {
+	const owner = driver.snapshot().readerOwner
+	if (!owner || result?.id !== owner.id || result.owner !== owner.owner)
+		return false
+	if (!["successful", "query-failed"].includes(result.reason))
+		throw new Error("Invalid reader result")
+	const bytes = Buffer.byteLength(JSON.stringify(result))
+	if (bytes > 1024 * 1024) throw new Error("Reader page quota exceeded")
+	return driver.settle(
+		result.id,
+		result.reason,
+		nowUs,
+		result.reason === "successful" ? bytes : 0,
+	)
 }
