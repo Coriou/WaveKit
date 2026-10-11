@@ -856,9 +856,9 @@ A pass permits Main to allocate implementation; it does not itself enable anythi
 ## Long-scenario extension plan (implementation and execution gated)
 
 The accepted microfixture remains the executable baseline. This extension plan
-has passed independent design review. Only the first sequential driver/admission/
-report-containment item and bounded scaled tests are allocated; worker/query/
-receipt/fault implementation and real execution remain separately gated.
+has passed independent design review. The first driver/admission/report-containment item is accepted. The second
+worker/query/receipt/fault item is allocated for bounded fixtures; independent
+exact review and real execution remain separately gated.
 Do not change the current `not-run` responses until the implementation phase is
 allocated and reviewed. Keep all changes within the seven paths listed above;
 no production modules, dependency changes, scanner imports or generalized store.
@@ -916,10 +916,54 @@ receipt clock; baseline acknowledgements must have equivalent queue ownership.
 Reader dispatch/cancel/join and bounded result bytes must agree with driver query
 accounting before any query worker is connected. Every mutation needs an enforced
 DB/WAL growth bound; an `enforced` flag in a virtual fixture is not evidence of an
-actual bound. The existing micro worker accepts only micro/runtime and is unchanged.
+actual bound. The second item implements this narrow interface for closed tiny fixtures only.
 A separately accepted capped capture consumer and post-exit verification remain
-required for real runs. These are prerequisites, not authorization to implement
-the worker/query/receipt/fault item in this delivery.
+required for real runs; the long CLI stays `not-run`.
+
+### Second worker item: bounded fixture boundary
+
+The candidate adds closed writer/reader actions, transactional seed receipts,
+20 virtual one-minute epochs with sixteen-minute receipt expiry, prune/retry and
+fixed termination barriers. Queries compare indexed/FTS membership with a separate
+in-memory oracle across filtered empty pages, fixed high barriers, pruning,
+reopening and a simulated generation reset. At most25 rows,16 page requests and
+four examined sequence positions per page are used. A reader opens only after the
+writer exits. This does not exercise pinned readers or concurrent WAL pressure.
+The76 bounded tests retain all65 prior regressions. Exact review is pending.
+
+Persistent fixture writes require Node25.2.1 and the exact SQLite3.50.4 source ID
+recorded in `worker.mjs`; a memory-only probe rejects other combinations before
+persistent DB creation. Node20 remains disabled before SQLite import/worker/state.
+The required deployment floor Node22.13+, Linux AMD64/ARM64, and other exact runtime
+patches remain unverified. Source matching is not platform acceptance.
+
+Before opening, configuring or mutating the DB, admission reserves524,288 DB bytes,
+597,048 WAL bytes and bootstrap journal/SHM space:1,223,744 bytes in total. Actual
+PRAGMAs enforce4096-byte pages,128-page maximum, spilling disabled and FULL sync;
+all schema/index/FTS/receipt/prune transactions use the same pre-BEGIN check.
+Reopen validates the joined DB/WAL page domain before SQLite can recover it.
+The bound follows the unique dirty-page commit path in SQLite's
+[pager](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/pager.c) and the
+32-byte header,24-byte frame header and sector padding in its
+[WAL implementation](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/wal.c).
+No custom VFS, extension, backup, VACUUM or arbitrary SQL is admitted. The bound
+covers file lengths; filesystem allocation overhead and synchronous OS stalls are
+not bounded by this proof. Free-space reserve and process containment remain necessary.
+Post-commit inventory is evidence, never the enforcement mechanism.
+
+This small128-page proof cannot support the planned2 GiB database/64 MiB WAL
+scenario. Long scenarios remain denied before writes. SQLITE_BUSY, pinned-reader
+checkpoint pressure, actual backup restoration, power loss, sustained throughput,
+per-index byte attribution and runtime matrix qualification remain unqualified.
+ENOSPC is injected before commit without filling disk; generation reset changes
+fixture metadata rather than restoring backup bytes. Every receipt/fault test
+joins the worker (with an outer process deadline) before reading or removing files.
+
+External capture still needs a separately allocated capped consumer: one exclusive
+ignored capture directory, a4 MiB aggregate reservation, stdout/stderr/manifest
+caps of1/2/1 MiB, pipe backpressure and capped draining, process-exit confirmation,
+then the separate60-second closure/size/hash/accounting reconciliation. No new
+consumer path or real execution window is authorized by this item.
 
 ### Closed execution phases and containment
 

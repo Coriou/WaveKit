@@ -35,7 +35,7 @@ export const SCENARIOS = [
 const LONG = SCENARIOS.slice(3)
 export const PHASES = Object.freeze(["baseline", "storage"])
 export const LONG_PREREQUISITES = Object.freeze([
-	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only)",
+	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only through CLI; tiny is fixture-only)",
 	"Enforced conservative DB/WAL transaction growth bounds for every mutation, including setup and receipts",
 	"Accepted read-only query worker, receipt/fault contracts and exact extension qualification",
 	"Owned 4MiB capture reservation and separately accepted capped pipe consumer with post-exit verification",
@@ -295,7 +295,7 @@ export async function supervise(factory, deadlineMs, signal) {
 			worker.once("exit", code => {
 				if (code !== 0 || !result)
 					reject(new Error(`Worker interrupted: exit ${code}`))
-				else if (result.status !== "ok")
+				else if (!["ok", "unsupported"].includes(result.status))
 					reject(
 						Object.assign(new Error(result.error || "Worker failure"), {
 							workerResult: result,
@@ -392,7 +392,7 @@ export function inventoryArtifacts(path, long = false) {
 }
 
 // Live admission uses metadata only. Content hashing is a separate joined-worker
-// operation. The legacy micro worker still calls inspectArtifacts unchanged.
+// operation; workers never hash live database contents.
 export function inspectArtifacts(path, checkDeadline = () => {}) {
 	const inventory = inventoryArtifacts(path)
 	return {
@@ -531,7 +531,7 @@ export async function run(
 		)
 		outcome = {
 			...report,
-			status: "micro-only",
+			status: result.status === "unsupported" ? "unsupported" : "micro-only",
 			result,
 			counts: result.counts,
 			preflightFreeBytes: output.freeBytes,
@@ -1231,6 +1231,49 @@ export const QUERY_TERMINALS = Object.freeze([
 ])
 // Driver-only query partition. No SQL, actual query worker or result oracle is
 // implemented here. Retained state is at most one slot per client (eight total).
+// One bounded immutable request set per physical reader owner. Reply-supplied
+// context never supplies validation expectations.
+const readerExpectations = new WeakMap()
+function readerRequests(requests) {
+	if (!Array.isArray(requests) || !requests.length || requests.length > 16)
+		throw new Error("Invalid reader requests")
+	return Object.freeze(
+		requests.map(request => {
+			if (
+				!readerShape(
+					request,
+					"after,contract,generation,high,lower,queryClass",
+				) ||
+				![
+					request.after,
+					request.generation,
+					request.high,
+					request.lower,
+					request.queryClass,
+				].every(Number.isSafeInteger) ||
+				request.lower < 0 ||
+				request.after < request.lower ||
+				request.high < request.after ||
+				request.high > 64 ||
+				request.generation < 1 ||
+				request.queryClass < 0 ||
+				request.queryClass > 7 ||
+				typeof request.contract !== "string" ||
+				request.contract.length > 64
+			)
+				throw new Error("Invalid reader request cursor")
+			return Object.freeze({ ...request })
+		}),
+	)
+}
+function readerShape(value, fields) {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		Object.keys(value).sort().join() === fields
+	)
+}
 export function queryAccounting(seconds = 900) {
 	if (!Number.isInteger(seconds) || seconds < 1 || seconds > 900)
 		throw new Error("Invalid query duration")
@@ -1266,7 +1309,7 @@ export function queryAccounting(seconds = 900) {
 			if (nowUs - slot.timeUs >= 250000)
 				terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
 	}
-	return {
+	const driver = {
 		turn(nowUs) {
 			if (stopped) throw new Error("Invalid query clock/state")
 			monotonic(nowUs)
@@ -1296,15 +1339,23 @@ export function queryAccounting(seconds = 900) {
 			}
 			return processed
 		},
-		dispatch(nowUs) {
+		dispatch(nowUs, requests) {
 			monotonic(nowUs)
 			expire(nowUs)
 			if (stopped || readerOwner !== null || readerJoinFailed) return null
 			for (const [id, slot] of pending)
 				if (!slot.dispatched) {
+					const expected =
+						requests === undefined ? null : readerRequests(requests)
 					slot.dispatched = true
 					active = id
 					readerOwner = { id, owner: ++ownerSequence }
+					if (expected)
+						readerExpectations.set(driver, {
+							...readerOwner,
+							requests: expected,
+						})
+					else readerExpectations.delete(driver)
 					return id
 				}
 			return null
@@ -1328,6 +1379,7 @@ export function queryAccounting(seconds = 900) {
 				throw new Error("Retained reply quota exceeded")
 			terminal(id, reason)
 			readerOwner = null // A valid terminal reply confirms query settlement.
+			readerExpectations.delete(driver)
 			if (replyBytes) {
 				retainedReplies.set(id % 8, replyBytes)
 				retainedReplyBytes += replyBytes
@@ -1345,6 +1397,7 @@ export function queryAccounting(seconds = 900) {
 			}
 			if (readerJoinFailed) return false
 			readerOwner = null
+			readerExpectations.delete(driver)
 			return true
 		},
 		releaseReply(client) {
@@ -1395,4 +1448,139 @@ export function queryAccounting(seconds = 900) {
 			}
 		},
 	}
+	return driver
+}
+
+// Narrow fixture wire glue. Callbacks observe the parent's clock at reception;
+// worker clocks cannot be compared with admission clocks. State changes are sync.
+export function validateBatchEnvelope(batch) {
+	if (
+		!batch ||
+		Object.keys(batch).sort().join() !== "bytes,id,rows" ||
+		!Number.isSafeInteger(batch.id) ||
+		batch.id < 1 ||
+		!Array.isArray(batch.rows) ||
+		batch.rows.length < 1 ||
+		batch.rows.length > 64 ||
+		batch.bytes !== Buffer.byteLength(JSON.stringify(batch)) ||
+		batch.bytes > 262144
+	)
+		throw new Error("Invalid bounded batch envelope")
+	return batch
+}
+export function batchAcknowledgement(id, outcome, rows) {
+	if (
+		!Number.isSafeInteger(id) ||
+		id < 1 ||
+		!["committed", "failed", "uncertain"].includes(outcome) ||
+		!Number.isInteger(rows) ||
+		rows < 1 ||
+		rows > 64
+	)
+		throw new Error("Invalid batch acknowledgement")
+	return Object.freeze({ id, outcome, rows })
+}
+// Baseline performs identical envelope/ack ownership, with database I/O omitted.
+export function baselineBatchAcknowledgement(batch) {
+	validateBatchEnvelope(batch)
+	return batchAcknowledgement(batch.id, "committed", batch.rows.length)
+}
+export function receiveBatchAcknowledgement(driver, batch, ack, nowUs) {
+	validateBatchEnvelope(batch)
+	if (!Number.isSafeInteger(nowUs) || nowUs < 0)
+		throw new Error("Invalid receipt clock")
+	if (
+		!ack ||
+		Object.keys(ack).sort().join() !== "id,outcome,rows" ||
+		ack.id !== batch.id ||
+		ack.rows !== batch.rows.length ||
+		Buffer.byteLength(JSON.stringify(ack)) > 1024
+	)
+		throw new Error("Invalid batch acknowledgement ownership")
+	batchAcknowledgement(ack.id, ack.outcome, ack.rows)
+	return Object.freeze({
+		accepted: driver.settle(ack.id, ack.outcome, nowUs),
+		receiptUs: nowUs,
+	})
+}
+export function receiveReaderResult(driver, result, nowUs) {
+	const owner = driver.snapshot().readerOwner
+	if (!owner || result?.id !== owner.id || result.owner !== owner.owner)
+		return false
+	// With a physical owner still held, dispatch only observes time/expiration;
+	// it cannot dispatch or release a reader. Invalid overdue replies also time out.
+	driver.dispatch(nowUs)
+	const expected = readerExpectations.get(driver)
+	if (!expected || expected.id !== owner.id || expected.owner !== owner.owner)
+		throw new Error("Reader requests not bound at dispatch")
+	if (
+		!readerShape(
+			result,
+			result.reason === "successful"
+				? "id,owner,page,reason"
+				: "id,owner,reason",
+		) ||
+		!["successful", "query-failed"].includes(result.reason)
+	)
+		throw new Error("Invalid reader result envelope")
+	const bytes = Buffer.byteLength(JSON.stringify(result))
+	if (bytes > 1024 * 1024) throw new Error("Reader page quota exceeded")
+	if (result.reason === "successful") {
+		if (
+			!Array.isArray(result.page) ||
+			result.page.length !== expected.requests.length ||
+			result.page.length > 16
+		)
+			throw new Error("Invalid reader page array")
+		for (let index = 0; index < result.page.length; index++) {
+			const page = result.page[index]
+			const request = expected.requests[index]
+			const filterReset =
+				request.contract !== `tiny-v1:ascending:${request.queryClass}`
+			if (readerShape(page, "reset")) {
+				if (
+					filterReset
+						? page.reset !== "filter-contract"
+						: !["generation", "retention"].includes(page.reset)
+				)
+					throw new Error("Invalid reader reset")
+				continue
+			}
+			const end = Math.min(request.high, request.after + 4)
+			if (
+				filterReset ||
+				!readerShape(
+					page,
+					"done,generation,high,lower,scannedThrough,sequences",
+				) ||
+				![page.generation, page.high, page.lower, page.scannedThrough].every(
+					Number.isSafeInteger,
+				) ||
+				page.generation !== request.generation ||
+				page.high !== request.high ||
+				page.lower !== request.lower ||
+				page.scannedThrough !== end ||
+				page.done !== (end === request.high) ||
+				!Array.isArray(page.sequences) ||
+				page.sequences.length > 200
+			)
+				throw new Error("Invalid reader page cursor")
+			let previous = request.after
+			for (const sequence of page.sequences) {
+				if (
+					!Number.isSafeInteger(sequence) ||
+					sequence <= previous ||
+					sequence > end
+				)
+					throw new Error("Invalid reader page sequences")
+				previous = sequence
+			}
+		}
+	}
+	return driver.settle(
+		result.id,
+		result.reason,
+		nowUs,
+		result.reason === "successful" ? bytes : 0,
+	)
 }
