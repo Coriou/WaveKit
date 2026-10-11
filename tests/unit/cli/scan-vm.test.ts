@@ -182,3 +182,40 @@ it.each([59, 79])(
 		expect(scanModel(state, ui, width, 11).detailRows).toBe(jobRows.length)
 	},
 )
+
+it.each([0, 10000])(
+	"shows truthful signed unverified axis and masks at centre%s",
+	centerHz => {
+		const state = initialState(1000),
+			ui = initialUi("scan")
+		ui.scan.sourceId = "rtl"
+		state.scan = scanFrame(
+			scanProfile(selectScan(state.scan, "rtl"), SCAN_PROFILE),
+			{
+				...SCAN_FRAME,
+				centerHz,
+				startHz: centerHz - 819500,
+				binHz: 4000,
+				binCount: 410,
+				bins: Buffer.from(new Uint8Array(410).fill(70)).toString("base64"),
+				tuningTrust: "unverified",
+				masks: {
+					dcHz: centerHz,
+					dcGuardHz: 1500,
+					spurRanges: [{ startHz: -30500, endHz: -20500 }],
+				},
+			},
+			1000,
+		)
+		const text = scanModel(state, ui, 79, 20).lines.map(lineText).join("\n")
+		expect(text).toContain(`axis ${centerHz - 819500}..${centerHz + 820500} Hz`)
+		expect(text).toContain("unverified")
+		const detail = scanDetail(state, ui, 59).join("")
+		expect(detail).toContain(
+			`axis: ${centerHz - 819500}..${centerHz + 820500} Hz`,
+		)
+		expect(detail).toContain(`DC: ${centerHz} +/-1500 Hz`)
+		expect(detail).toContain("spur 1: -30500..-20500 Hz")
+		expect(detail).toContain("trust: unverified")
+	},
+)

@@ -98,3 +98,35 @@ describe("bounded source-selected spectrum history", () => {
 		expect(s.omittedJobs).toBe(20)
 	})
 })
+
+it("resets history for old served-source removal without removing the pending requested source", () => {
+	const pending = {
+		...selectScan(scanFrame(ready(), SCAN_FRAME, 1), "B"),
+		rows: scanFrame(ready(), SCAN_FRAME, 1).rows,
+	}
+	const notice = scanProfile(pending, {
+		selection: "none",
+		sourceId: null,
+		profile: null,
+		effectiveHz: null,
+		outcome: "removed",
+		adjusted: [],
+		removedSourceId: "rtl",
+		code: "SPECTRUM_SOURCE_REMOVED",
+	})
+	expect(notice.rows).toHaveLength(0)
+	expect(notice.sourceId).toBe("B")
+	expect(notice.phase).toBe("negotiating")
+	expect(notice.error).toBeNull()
+	const actualRemoval = scanProfile(pending, {
+		selection: "none",
+		sourceId: null,
+		profile: null,
+		effectiveHz: null,
+		outcome: "removed",
+		adjusted: [],
+		removedSourceId: "B",
+		code: "SPECTRUM_SOURCE_REMOVED",
+	})
+	expect(actualRemoval.phase).toBe("removed")
+})

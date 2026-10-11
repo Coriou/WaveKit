@@ -1623,3 +1623,161 @@ it.each(["timeout", "source", "detail", "stop"] as const)(
 		rt.stop()
 	},
 )
+
+it.each(["profile-first", "source-first"] as const)(
+	"admits requestedB after old servedA removal (%s) and continues REST reads",
+	async order => {
+		const { SCAN_PROFILE, SCAN_FRAME } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake(),
+			reads: string[] = []
+		const fetchFn: FetchLike = (url, init) => {
+			if (url.includes("/api/scanner") || url.includes("/api/spectrum")) {
+				reads.push(url)
+				return Promise.resolve(
+					new Response(
+						JSON.stringify(
+							url.endsWith("/jobs") ? [] : { items: [], nextCursor: null },
+						),
+					),
+				)
+			}
+			return never(url, init)
+		}
+		const rt = createRuntime({
+			fetchFn,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "A", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			const event = (type: string, data: unknown) =>
+				h.message(
+					JSON.stringify({
+						type,
+						channel: type.startsWith("source:") ? "sources" : "spectrum",
+						data,
+					}),
+				)
+			event("spectrum:profile", { ...SCAN_PROFILE, sourceId: "A" })
+			event("spectrum:frame", { ...SCAN_FRAME, sourceId: "A" })
+			rt.tick()
+			expect(rt.store.get().scan.rows).toHaveLength(1)
+			rt.setScanDemand({ sourceId: "B", cursor: null, detail: null })
+			const removal = () =>
+				event("spectrum:profile", {
+					selection: "none",
+					sourceId: null,
+					profile: null,
+					effectiveHz: null,
+					outcome: "removed",
+					adjusted: [],
+					removedSourceId: "A",
+					code: "SPECTRUM_SOURCE_REMOVED",
+				})
+			const source = () => event("source:removed", { sourceId: "A" })
+			if (order === "profile-first") {
+				removal()
+				source()
+			} else {
+				source()
+				removal()
+			}
+			rt.tick()
+			expect(rt.store.get().scan.sourceId).toBe("B")
+			expect(rt.store.get().scan.phase).toBe("negotiating")
+			expect(rt.store.get().scan.rows).toHaveLength(0)
+			event("spectrum:profile", { ...SCAN_PROFILE, sourceId: "B" })
+			event("spectrum:frame", { ...SCAN_FRAME, sourceId: "B" })
+			rt.tick()
+			expect(rt.store.get().scan.profile?.sourceId).toBe("B")
+			expect(rt.store.get().scan.rows[0]?.frame.sourceId).toBe("B")
+			await vi.advanceTimersByTimeAsync(200)
+			const before = reads.length
+			await vi.advanceTimersByTimeAsync(5200)
+			expect(reads.length).toBeGreaterThan(before)
+			expect(rt.store.get().scan.phase).toBe("waiting")
+		} finally {
+			rt.stop()
+		}
+	},
+)
+
+it.each([0, 10000])(
+	"admits signed unverified Spectrum history at centre%s",
+	async centerHz => {
+		const { SCAN_FRAME, SCAN_PROFILE } =
+			await import("../../../cli/source/test/fixtures.js")
+		const ws = wsFake()
+		const rt = createRuntime({
+			fetchFn: never,
+			probeFetchFn: never,
+			wsFactory: ws.factory,
+			now: () => Date.now(),
+			random: () => 0.5,
+			timers: fakeTimers,
+			summarize: PLAIN_SUMMARY.summarize,
+			explicit: TARGET,
+		})
+		try {
+			rt.start()
+			rt.setScanDemand({ sourceId: "rtl", cursor: null, detail: null })
+			const h = ws.sockets[0]!
+			h.open()
+			h.message(JSON.stringify({ type: "subscribed", data: { channels: [] } }))
+			h.message(
+				JSON.stringify({
+					type: "spectrum:profile",
+					channel: "spectrum",
+					data: SCAN_PROFILE,
+				}),
+			)
+			h.message(
+				JSON.stringify({
+					type: "spectrum:frame",
+					channel: "spectrum",
+					data: {
+						...SCAN_FRAME,
+						centerHz,
+						startHz: centerHz - 819500,
+						binHz: 4000,
+						binCount: 410,
+						bins: Buffer.from(new Uint8Array(410).fill(70)).toString("base64"),
+						tuningTrust: "unverified",
+						tracks: [
+							{
+								startHz: -50500,
+								endHz: -40500,
+								flags: { burst: false, iqImage: false, edge: false },
+							},
+						],
+						masks: {
+							dcHz: centerHz,
+							dcGuardHz: 1500,
+							spurRanges: [{ startHz: -30500, endHz: -20500 }],
+						},
+					},
+				}),
+			)
+			rt.tick()
+			const row = rt.store.get().scan.rows[0]!
+			expect(row.frame.startHz).toBe(centerHz - 819500)
+			expect(row.frame.tuningTrust).toBe("unverified")
+			expect(row.frame.tracks[0]?.startHz).toBe(-50500)
+			expect(row.frame.masks.spurRanges[0]?.startHz).toBe(-30500)
+			expect(row.bins).toHaveLength(410)
+			expect(rt.store.get().scan.invalidFrames).toBe(0)
+		} finally {
+			rt.stop()
+		}
+	},
+)

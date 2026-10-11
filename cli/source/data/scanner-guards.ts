@@ -23,8 +23,9 @@ const hz = num.nonnegative()
 const positive = num.positive()
 const count = num.int().nonnegative()
 const trust = z.enum(["commanded", "relay", "unverified"])
-const range = z
-	.object({ startHz: hz, endHz: hz })
+// Spectrum coordinates can cross zero; physical scanner/request frequencies stay nonnegative.
+const spectrumRange = z
+	.object({ startHz: num, endHz: num })
 	.refine(v => v.endHz >= v.startHz)
 const profile = z.object({
 	key: id,
@@ -37,32 +38,34 @@ const frameSchema = z
 		profile: id,
 		epoch: count,
 		tuningTrust: trust,
-		centerHz: hz,
+		centerHz: num,
 		sampleRateHz: positive,
 		binHz: positive,
 		nativeBinHz: positive,
-		startHz: hz,
+		startHz: num,
 		binCount: count.min(1).max(2048),
 		bins: z.string().max(2732),
 		binEncoding: z.literal("u8-halfdb-127.5"),
 		floorDbfs: num,
 		thresholdDb: num,
 		tracks: boundedArray(
-			z.object({
-				startHz: hz,
-				endHz: hz,
-				flags: z.object({
-					burst: z.boolean(),
-					iqImage: z.boolean(),
-					edge: z.boolean(),
-				}),
-			}),
+			z
+				.object({
+					startHz: num,
+					endHz: num,
+					flags: z.object({
+						burst: z.boolean(),
+						iqImage: z.boolean(),
+						edge: z.boolean(),
+					}),
+				})
+				.refine(v => v.endHz >= v.startHz),
 			256,
 		),
 		masks: z.object({
-			dcHz: hz,
+			dcHz: num,
 			dcGuardHz: hz,
-			spurRanges: boundedArray(range, 128),
+			spurRanges: boundedArray(spectrumRange, 128),
 		}),
 		snapshot: z.literal(true).optional(),
 		at: text,

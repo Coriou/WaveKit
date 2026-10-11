@@ -81,11 +81,16 @@ export function scanProfile(
 		profile: p,
 		phase:
 			p.outcome === "removed"
-				? "removed"
+				? p.removedSourceId === s.sourceId
+					? "removed"
+					: "negotiating"
 				: p.outcome === "rejected"
 					? "error"
 					: "waiting",
-		error: p.code ?? p.message ?? null,
+		error:
+			p.outcome === "removed" && p.removedSourceId !== s.sourceId
+				? null
+				: (p.code ?? p.message ?? null),
 	}
 }
 export function scanFrame(

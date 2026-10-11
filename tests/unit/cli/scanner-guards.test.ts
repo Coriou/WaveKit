@@ -31,7 +31,23 @@ describe("S1 boundary guards", () => {
 		{ nativeBinHz: Infinity },
 		{ binHz: 0 },
 		{ binCount: 2049 },
-		{ startHz: -1 },
+		{ startHz: -Infinity },
+		{ centerHz: NaN },
+		{ sampleRateHz: 0 },
+		{ nativeBinHz: 0 },
+		{ masks: { ...SCAN_FRAME.masks, dcGuardHz: -1 } },
+		{
+			masks: { ...SCAN_FRAME.masks, spurRanges: [{ startHz: -1, endHz: -2 }] },
+		},
+		{
+			tracks: [
+				{
+					startHz: -1,
+					endHz: -2,
+					flags: { burst: false, iqImage: false, edge: false },
+				},
+			],
+		},
 		{ epoch: -1 },
 		{ at: "never" },
 		{ profile: "5:128" },
@@ -179,3 +195,45 @@ describe("Scan collection preflight", () => {
 		}
 	})
 })
+
+it.each([0, 10000])(
+	"accepts producer-shaped signed Spectrum coordinates at centre%s without loosening scanner RF constraints",
+	centerHz => {
+		const frame = {
+			...SCAN_FRAME,
+			centerHz,
+			tuningTrust: "unverified",
+			sampleRateHz: 2048000,
+			startHz: centerHz - 819500,
+			binHz: 4000,
+			binCount: 410,
+			bins: Buffer.from(new Uint8Array(410).fill(70)).toString("base64"),
+			tracks: [
+				{
+					startHz: -50500,
+					endHz: -40500,
+					flags: { burst: false, iqImage: false, edge: false },
+				},
+			],
+			masks: {
+				dcHz: centerHz,
+				dcGuardHz: 1500,
+				spurRanges: [{ startHz: -30500, endHz: -20500 }],
+			},
+		}
+		expect(guardSpectrumFrame(frame)).toEqual(frame)
+		expect(
+			guardSpectrumFrame({
+				...frame,
+				centerHz: -10000,
+				masks: { ...frame.masks, dcHz: -10000 },
+			}),
+		).toBeDefined()
+		expect(
+			guardScan("discovery", { ...SCAN_DISCOVERY, frequencyHz: -1 }),
+		).toBeUndefined()
+		const job = structuredClone(SCAN_JOB)
+		job.identify!.targets[0]!.targetHz = -1
+		expect(guardScan("job", job)).toBeUndefined()
+	},
+)
