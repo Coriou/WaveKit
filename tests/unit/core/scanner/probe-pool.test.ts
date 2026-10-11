@@ -215,6 +215,105 @@ describe("ProbePool", () => {
 		expect(h.pool.status().map(p => p.jobId)).toEqual(["high"])
 	})
 
+	it.each(["decoder", "dv"] as const)(
+		"contains failed %s preemption while retaining the original and draining its sibling",
+		async failed => {
+			const gate = held<void>()
+			const removeDv = vi.fn(async () => {
+				if (failed === "dv")
+					throw new WaveKitError("Original DV stop failed", "TEST")
+				await gate.promise
+			})
+			const h = poolHarness({
+				digitalVoice: {
+					addChannel: async config => ({
+						...config,
+						options: { ...config.options, output: "udp" },
+					}),
+					ensureStarted: async () => undefined,
+					attachDecoder: () => undefined,
+					removeChannel: removeDv,
+				},
+			})
+			const admitted = h.pool.request(
+				probeRequest({
+					jobId: "low",
+					priority: 10,
+					record: true,
+					holdMs: 60_000,
+				}),
+			)
+			if (!("started" in admitted))
+				throw new WaveKitError("Probe not admitted", "TEST")
+			const boundary = h.pool as unknown as {
+				records: Map<string, { launchSettled: boolean; cleanupState: string }>
+				log: { warn: (...args: unknown[]) => void }
+			}
+			const original = boundary.records.get(admitted.started)!
+			await vi.waitFor(() => expect(original.launchSettled).toBe(true))
+			const create = vi.spyOn(h.decoders, "createEphemeralDecoder")
+			const removeDecoder = vi
+				.spyOn(h.decoders, "removeEphemeralDecoder")
+				.mockImplementation(async id => {
+					if (failed === "decoder") {
+						h.decoders.created.delete(id)
+						throw new WaveKitError("Original decoder stop failed", "TEST")
+					}
+					await gate.promise
+					h.decoders.created.delete(id)
+				})
+			const warning = vi.spyOn(boundary.log, "warn")
+			const publication = vi.fn()
+			h.pool.on("recordings", publication)
+			expect(
+				h.pool.request(
+					probeRequest({ jobId: "high", priority: 90, trackId: "t2" }),
+				),
+			).toEqual({ deferred: "max-probes" })
+			await flushAsync()
+			expect(removeDecoder).toHaveBeenCalledOnce()
+			expect(removeDv).toHaveBeenCalledOnce()
+			expect(original.cleanupState).toBe("unknown")
+			let explicitSettled = false
+			const explicit = h.pool
+				.release(admitted.started)
+				.catch((err: unknown) => {
+					explicitSettled = true
+					return err
+				})
+			await flushAsync()
+			expect(explicitSettled).toBe(false)
+			expect(publication).not.toHaveBeenCalled()
+			expect(create).not.toHaveBeenCalled()
+			gate.resolve()
+			expect(await explicit).toMatchObject({
+				code: "SCANNER_PROBE_CLEANUP_FAILED",
+			})
+			await flushAsync()
+			expect(warning).toHaveBeenCalledWith(
+				expect.objectContaining({
+					probeId: admitted.started,
+					err: expect.objectContaining({
+						code: "SCANNER_PROBE_CLEANUP_FAILED",
+					}),
+				}),
+				"Preempted probe cleanup failed",
+			)
+			expect(boundary.records.get(admitted.started)).toBe(original)
+			expect(original.cleanupState).toBe("unknown")
+			expect(h.pool.channelBaselineKnown).toBe(false)
+			expect(h.states.filter(state => state.state === "stopped")).toEqual([])
+			expect(publication).not.toHaveBeenCalled()
+			expect(create).not.toHaveBeenCalled()
+			await expect(h.pool.release(admitted.started)).rejects.toMatchObject({
+				code: "SCANNER_PROBE_CLEANUP_FAILED",
+			})
+			await expect(h.pool.destroy()).rejects.toMatchObject({
+				code: "SCANNER_PROBE_CLEANUP_FAILED",
+			})
+		},
+	)
+
 	it("steps to the next mode when the hold ends without accepted evidence", async () => {
 		vi.useFakeTimers()
 		try {

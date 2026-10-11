@@ -973,7 +973,18 @@ export class ProbePool extends EventEmitter {
 			if (r.state === "stopping" || r.req.priority >= req.priority) continue
 			if (!victim || r.req.priority < victim.req.priority) victim = r
 		}
-		if (victim) void this.stopProbe(victim, "preempted")
+		if (victim) {
+			const original = victim
+			void this.stopProbe(original, "preempted").catch((err: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(original)
+				this.sealAdmission()
+				this.log.warn(
+					{ err, probeId: original.probeId },
+					"Preempted probe cleanup failed",
+				)
+			})
+		}
 	}
 
 	/**
