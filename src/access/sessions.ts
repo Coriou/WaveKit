@@ -1,3 +1,4 @@
+import type { AccessDeviceDto } from "@wavekit/api-types"
 import { randomBytes } from "node:crypto"
 import { performance } from "node:perf_hooks"
 import { WaveKitError } from "../utils/errors.js"
@@ -24,6 +25,10 @@ export interface SessionSnapshot {
 	credentialBinding: string
 	sessions: SessionRecord[]
 }
+
+export type ActiveDevicesSnapshot =
+	| { kind: "active"; devices: AccessDeviceDto[] }
+	| { kind: "missing" }
 
 export interface SessionMetadata {
 	principalId: string
@@ -258,6 +263,35 @@ export class SessionStore {
 	lookupByPrincipal(principalId: string): SessionMetadata | undefined {
 		const record = this.#active(principalId)
 		return record ? this.#metadata(record) : undefined
+	}
+
+	/** Detached active committed inventory. Reads never queue, prune, persist or renew. */
+	snapshotActiveDevices(requesterId: string): ActiveDevicesSnapshot {
+		if (this.#unavailable)
+			throw new WaveKitError("Session authority unavailable", "ACCESS_UNAVAILABLE")
+		const now = this.#now()
+		// The injected clock can reenter and invalidate authority. Capture only afterward.
+		if (this.#unavailable)
+			throw new WaveKitError("Session authority unavailable", "ACCESS_UNAVAILABLE")
+		const records = this.#records
+		const requester = records.get(requesterId)
+		if (!requester || requester.expiresAt <= now) return { kind: "missing" }
+		const devices: AccessDeviceDto[] = []
+		for (const record of records.values()) {
+			if (record.expiresAt <= now) continue
+			devices.push({
+				deviceId: record.deviceId,
+				createdAt: record.createdAt,
+				renewedAt: record.renewedAt,
+				expiresAt: record.expiresAt,
+				current: record.deviceId === requesterId,
+			})
+		}
+		devices.sort((a, b) =>
+			a.createdAt - b.createdAt ||
+			(a.deviceId < b.deviceId ? -1 : a.deviceId > b.deviceId ? 1 : 0),
+		)
+		return { kind: "active", devices }
 	}
 
 	/** Explicit export is intentionally sensitive; instance JSON contains no state. */

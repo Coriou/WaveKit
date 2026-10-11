@@ -1,5 +1,7 @@
+import type { AccessDevicesDto } from "@wavekit/api-types"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
+import { projectAccessDevices } from "./device-projection.js"
 import {
 	admissionDenial,
 	flowDenial,
@@ -113,6 +115,24 @@ export class SessionFlows {
 		return metadata
 			? flowSuccess(metadata, admission.headers)
 			: this.#missing(admission)
+	}
+
+	devices(request: AccessRequest): AccessFlowResult<AccessDevicesDto> {
+		const admission = this.#admit(
+			request,
+			request.method === "HEAD" ? "HEAD" : "GET",
+			"/api/access/devices",
+		)
+		if (admission.kind !== "authenticated") return admission
+		try {
+			// Original request authorization immediately precedes synchronous authority revalidation.
+			const snapshot = this.#sessions.snapshotActiveDevices(admission.principal.id)
+			return snapshot.kind === "active"
+				? flowSuccess(projectAccessDevices(snapshot.devices), admission.headers)
+				: this.#missing(admission)
+		} catch {
+			return flowDenial(503, "ACCESS_UNAVAILABLE", admission.headers)
+		}
 	}
 
 	refresh(request: AccessRequest): Promise<AccessFlowResult<PairedSession>> {
