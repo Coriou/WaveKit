@@ -1,8 +1,15 @@
 import type { ChannelProvider } from "../../channelizer/types.js"
 import type { CleanupOutcome } from "../../channelizer/settlement-observer.js"
 import { WaveKitError } from "../../../utils/errors.js"
-import type { ScannerChannelAttempt, ScannerChannelOwnership, ScannerChannelProfile } from "./consumer-types.js"
-import { prepareDirectChannel, type PreparedScannerChannel } from "./provider-observer.js"
+import type {
+	ScannerChannelAttempt,
+	ScannerChannelOwnership,
+	ScannerChannelProfile,
+} from "./consumer-types.js"
+import {
+	prepareDirectChannel,
+	type PreparedScannerChannel,
+} from "./provider-observer.js"
 
 const RATE = 48_000
 const MAX_SAMPLES = 96_000
@@ -66,59 +73,117 @@ export class ChannelTaps {
 	private readonly slots = new Map<string, Slot>()
 	private sealed = false
 	private stopPromise: Promise<CleanupOutcome> | undefined
-	constructor(private readonly deps: {
-		readonly channels: ChannelProvider | null | undefined
-		readonly ownership: ScannerChannelOwnership | undefined
-		readonly profile: ScannerChannelProfile | null | undefined
-		readonly maxSources: number
-		readonly now: () => number
-	}) {
+	constructor(
+		private readonly deps: {
+			readonly channels: ChannelProvider | null | undefined
+			readonly ownership: ScannerChannelOwnership | undefined
+			readonly profile: ScannerChannelProfile | null | undefined
+			readonly maxSources: number
+			readonly now: () => number
+		},
+	) {
 		if (!Number.isSafeInteger(deps.maxSources) || deps.maxSources < 1)
-			throw new WaveKitError("Bounded channel sources required", "SCANNER_CHANNEL_BOUND")
+			throw new WaveKitError(
+				"Bounded channel sources required",
+				"SCANNER_CHANNEL_BOUND",
+			)
 	}
-	get ownerCount(): number { return this.slots.size }
+	get ownerCount(): number {
+		return this.slots.size
+	}
 
 	begin(input: ChannelTapRequest): ChannelTapHandle | undefined {
 		this.reap()
-		if (this.sealed || this.slots.has(input.attempt.sourceId) ||
-			this.slots.size >= this.deps.maxSources || !Number.isFinite(input.minMs) ||
-			input.minMs < 300 || input.minMs > 2000 || !input.current()) return undefined
+		if (
+			this.sealed ||
+			this.slots.has(input.attempt.sourceId) ||
+			this.slots.size >= this.deps.maxSources ||
+			!Number.isFinite(input.minMs) ||
+			input.minMs < 300 ||
+			input.minMs > 2000 ||
+			!input.current()
+		)
+			return undefined
 		let slot: Slot | undefined
 		const prepared = prepareDirectChannel({
-			channels: this.deps.channels, ownership: this.deps.ownership, profile: this.deps.profile,
+			channels: this.deps.channels,
+			ownership: this.deps.ownership,
+			profile: this.deps.profile,
 			attempt: input.attempt,
-			request: { centerHz: input.attempt.targetHz, bandwidthHz: 16_000,
-				transitionHz: 4_000, outputRateHz: RATE, format: "cf32" },
+			request: {
+				centerHz: input.attempt.targetHz,
+				bandwidthHz: 16_000,
+				transitionHz: 4_000,
+				outputRateHz: RATE,
+				format: "cf32",
+			},
 			current: () => !this.sealed && input.current(),
-			ended: () => { if (slot) void this.close(slot).catch(() => undefined) },
+			ended: () => {
+				if (slot) void this.close(slot).catch(() => undefined)
+			},
 		})
 		if (!prepared) return undefined
 		const handle: ChannelTapHandle = Object.freeze({
 			prepared,
-			get current() { return prepared.lifecycle.live },
+			get current() {
+				return prepared.lifecycle.live
+			},
 			beginAnalog: () => {
-				if (!slot || slot.phase !== "handoff" || !prepared.lifecycle.live ||
-					prepared.handle.snapshot().components.classifier !== "settled" || slot.analogBegun) return false
+				if (
+					!slot ||
+					slot.phase !== "handoff" ||
+					!prepared.lifecycle.live ||
+					prepared.handle.snapshot().components.classifier !== "settled" ||
+					slot.analogBegun
+				)
+					return false
 				slot.analogBegun = prepared.analog.begin()
 				return slot.analogBegun
 			},
-			attachAnalog: (consumer: ChannelAnalogConsumer) => this.attachAnalog(slot!, consumer),
-			sealIntake: () => { slot!.offData?.(); slot!.offData = undefined; slot!.tail = Buffer.alloc(0) },
-			releaseLogical: () => { prepared.lifecycle.invalidate(); return prepared.lifecycle.logicalDrain() },
+			attachAnalog: (consumer: ChannelAnalogConsumer) =>
+				this.attachAnalog(slot!, consumer),
+			sealIntake: () => {
+				slot!.offData?.()
+				slot!.offData = undefined
+				slot!.tail = Buffer.alloc(0)
+			},
+			releaseLogical: () => {
+				prepared.lifecycle.invalidate()
+				return prepared.lifecycle.logicalDrain()
+			},
 			finish: () => this.close(slot!),
-			cancel: () => { void this.close(slot!).catch(() => undefined) },
+			cancel: () => {
+				void this.close(slot!).catch(() => undefined)
+			},
 		})
-		slot = { input, prepared, handle, samples: undefined,
-			start: this.deps.now(), phase: "pending", count: 0, tail: Buffer.alloc(0),
-			gaps: false, collected: false, collectionStart: 0,
-			acquisition: undefined, drain: undefined, offData: undefined, analog: undefined, analogBegun: false,
-			cleanupFailed: false }
+		slot = {
+			input,
+			prepared,
+			handle,
+			samples: undefined,
+			start: this.deps.now(),
+			phase: "pending",
+			count: 0,
+			tail: Buffer.alloc(0),
+			gaps: false,
+			collected: false,
+			collectionStart: 0,
+			acquisition: undefined,
+			drain: undefined,
+			offData: undefined,
+			analog: undefined,
+			analogBegun: false,
+			cleanupFailed: false,
+		}
 		this.slots.set(input.attempt.sourceId, slot)
 		const original = slot
 		// Own acquisition before any continuation; no pregrant ID derivation/release.
 		let acquired!: () => void
 		let failed!: (cause: unknown) => void
-		original.acquisition = new Promise<void>((yes, no) => { acquired = yes; failed = no })
+		original.acquisition = new Promise<void>((yes, no) => {
+			acquired = yes
+			failed = no
+		})
 		void original.acquisition.catch(() => {
 			original.handle.cancel()
 		})
@@ -129,14 +194,24 @@ export class ChannelTaps {
 	/** Uses the existing service tick; no extra timer or expiry-based native credit. */
 	tick(): void {
 		for (const slot of this.slots.values()) {
-			if (!slot.input.current()) { slot.handle.cancel(); continue }
-			if (slot.phase === "pending" && this.deps.now() - slot.start >= 5000) slot.handle.cancel()
-			else if (slot.phase === "collecting" && this.deps.now() - slot.collectionStart >= 2000) this.deliver(slot)
+			if (!slot.input.current()) {
+				slot.handle.cancel()
+				continue
+			}
+			if (slot.phase === "pending" && this.deps.now() - slot.start >= 5000)
+				slot.handle.cancel()
+			else if (
+				slot.phase === "collecting" &&
+				this.deps.now() - slot.collectionStart >= 2000
+			)
+				this.deliver(slot)
 		}
 		this.reap()
 	}
 
-	cancelSource(sourceId: string): void { this.slots.get(sourceId)?.handle.cancel() }
+	cancelSource(sourceId: string): void {
+		this.slots.get(sourceId)?.handle.cancel()
+	}
 	sealAdmission(): void {
 		this.sealed = true
 		for (const slot of this.slots.values()) slot.handle.cancel()
@@ -147,7 +222,10 @@ export class ChannelTaps {
 		if (this.stopPromise) return this.stopPromise
 		let resolve!: (outcome: CleanupOutcome) => void
 		let reject!: (cause: unknown) => void
-		this.stopPromise = new Promise<CleanupOutcome>((yes, no) => { resolve = yes; reject = no })
+		this.stopPromise = new Promise<CleanupOutcome>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
 		void this.stopPromise.catch(() => undefined)
 		// Own the first handle before sealing can synchronously reenter stop.
 		void this.stopComponents().then(resolve, reject)
@@ -156,18 +234,32 @@ export class ChannelTaps {
 
 	private async stopComponents(): Promise<CleanupOutcome> {
 		this.sealAdmission()
-		const outcomes = await Promise.allSettled([...this.slots.values()].map(slot => this.close(slot)))
+		const outcomes = await Promise.allSettled(
+			[...this.slots.values()].map(slot => this.close(slot)),
+		)
 		return outcomes.some(outcome => outcome.status === "rejected")
-			? { ok: false, state: "failed", detail: "Scanner channel component cleanup failed" } : OK
+			? {
+					ok: false,
+					state: "failed",
+					detail: "Scanner channel component cleanup failed",
+				}
+			: OK
 	}
 
 	private async acquire(slot: Slot): Promise<void> {
 		const channels = this.deps.channels!
-		const result = await channels.requestChannel(slot.input.attempt.sourceId,
-			slot.input.attempt.decoderId, slot.prepared.request, {
-				kind: "iq", format: "U8_IQ", sampleRate: slot.input.attempt.captureRateHz,
-				centerFreq: slot.input.attempt.captureCentreHz, exclusive: false,
-			})
+		const result = await channels.requestChannel(
+			slot.input.attempt.sourceId,
+			slot.input.attempt.decoderId,
+			slot.prepared.request,
+			{
+				kind: "iq",
+				format: "U8_IQ",
+				sampleRate: slot.input.attempt.captureRateHz,
+				centerFreq: slot.input.attempt.captureCentreHz,
+				exclusive: false,
+			},
+		)
 		if (!result.ok) {
 			slot.prepared.classifier.sealNeverStarted()
 			slot.prepared.analog.sealNeverStarted()
@@ -175,8 +267,12 @@ export class ChannelTaps {
 			this.fence(slot)
 			return
 		}
-		if (!slot.prepared.lifecycle.adopt(result) || this.sealed || slot.phase === "closing" ||
-			!slot.prepared.classifier.begin()) {
+		if (
+			!slot.prepared.lifecycle.adopt(result) ||
+			this.sealed ||
+			slot.phase === "closing" ||
+			!slot.prepared.classifier.begin()
+		) {
 			slot.prepared.classifier.sealNeverStarted()
 			slot.prepared.analog.sealNeverStarted()
 			slot.prepared.lifecycle.invalidate()
@@ -186,7 +282,12 @@ export class ChannelTaps {
 		slot.phase = "collecting"
 		slot.collectionStart = this.deps.now()
 		const onData = (bytes: unknown): void => {
-			if (!Buffer.isBuffer(bytes) || !slot.prepared.lifecycle.live || slot.phase !== "collecting") return
+			if (
+				!Buffer.isBuffer(bytes) ||
+				!slot.prepared.lifecycle.live ||
+				slot.phase !== "collecting"
+			)
+				return
 			this.push(slot, bytes)
 		}
 		result.stream.on("data", onData)
@@ -202,31 +303,53 @@ export class ChannelTaps {
 			return
 		}
 		const data = slot.tail.length ? Buffer.concat([slot.tail, bytes]) : bytes
-		const complete = data.length - data.length % 8
+		const complete = data.length - (data.length % 8)
 		for (let index = 0; index < complete; index += 8) {
-			const real = data.readFloatLE(index), imaginary = data.readFloatLE(index + 4)
-			if (!Number.isFinite(real) || !Number.isFinite(imaginary)) { slot.gaps = true; slot.handle.cancel(); return }
+			const real = data.readFloatLE(index),
+				imaginary = data.readFloatLE(index + 4)
+			if (!Number.isFinite(real) || !Number.isFinite(imaginary)) {
+				slot.gaps = true
+				slot.handle.cancel()
+				return
+			}
 			slot.samples![slot.count * 2] = real
 			slot.samples![slot.count * 2 + 1] = imaginary
 			slot.count++
 		}
 		slot.tail = Buffer.from(data.subarray(complete))
-		if (slot.count >= Math.ceil(RATE * Math.max(500, slot.input.minMs) / 1000)) this.deliver(slot)
+		if (
+			slot.count >= Math.ceil((RATE * Math.max(500, slot.input.minMs)) / 1000)
+		)
+			this.deliver(slot)
 	}
 
 	private deliver(slot: Slot): void {
-		if (slot.collected || slot.phase !== "collecting" || !slot.prepared.lifecycle.live) return
+		if (
+			slot.collected ||
+			slot.phase !== "collecting" ||
+			!slot.prepared.lifecycle.live
+		)
+			return
 		slot.collected = true
 		slot.phase = "handoff"
 		slot.offData?.()
 		slot.offData = undefined
-		const result = Object.freeze({ attempt: slot.input.attempt,
-			samples: slot.samples!.subarray(0, slot.count * 2), outputRateHz: RATE as 48000,
-			format: "cf32" as const, gaps: slot.gaps || slot.tail.length !== 0 })
+		const result = Object.freeze({
+			attempt: slot.input.attempt,
+			samples: slot.samples!.subarray(0, slot.count * 2),
+			outputRateHz: RATE as 48000,
+			format: "cf32" as const,
+			gaps: slot.gaps || slot.tail.length !== 0,
+		})
 		let outcome: CleanupOutcome = OK
-		try { slot.input.collected(result, slot.handle) }
-		catch {
-			outcome = { ok: false, state: "failed", detail: "Scanner classifier component failed" }
+		try {
+			slot.input.collected(result, slot.handle)
+		} catch {
+			outcome = {
+				ok: false,
+				state: "failed",
+				detail: "Scanner classifier component failed",
+			}
 			slot.handle.cancel()
 		} finally {
 			// The synchronous consumer has finished; do not refund F with its buffer retained.
@@ -239,10 +362,18 @@ export class ChannelTaps {
 	private fence(slot: Slot): void {
 		const alreadyClosing = slot.phase === "closing"
 		slot.phase = "closing"
-		try { slot.offData?.() } catch { slot.cleanupFailed = true }
+		try {
+			slot.offData?.()
+		} catch {
+			slot.cleanupFailed = true
+		}
 		slot.offData = undefined
 		if (!alreadyClosing) {
-			try { slot.analog?.cancel() } catch { slot.cleanupFailed = true }
+			try {
+				slot.analog?.cancel()
+			} catch {
+				slot.cleanupFailed = true
+			}
 		}
 	}
 
@@ -259,23 +390,40 @@ export class ChannelTaps {
 		}
 		slot.phase = "analog"
 		const onData = (bytes: unknown): void => {
-			if (!Buffer.isBuffer(bytes) || slot.phase !== "analog" || !slot.prepared.lifecycle.live) return
-			if (bytes.length > MAX_BYTES - slot.tail.length) { slot.handle.cancel(); return }
+			if (
+				!Buffer.isBuffer(bytes) ||
+				slot.phase !== "analog" ||
+				!slot.prepared.lifecycle.live
+			)
+				return
+			if (bytes.length > MAX_BYTES - slot.tail.length) {
+				slot.handle.cancel()
+				return
+			}
 			const data = slot.tail.length ? Buffer.concat([slot.tail, bytes]) : bytes
-			const complete = data.length - data.length % 8
+			const complete = data.length - (data.length % 8)
 			const samples = new Float32Array(complete / 4)
 			for (let index = 0; index < complete; index += 4) {
 				const value = data.readFloatLE(index)
-				if (!Number.isFinite(value)) { slot.handle.cancel(); return }
+				if (!Number.isFinite(value)) {
+					slot.handle.cancel()
+					return
+				}
 				samples[index / 4] = value
 			}
 			slot.tail = Buffer.from(data.subarray(complete))
-			try { if (samples.length > 0) consumer.push(samples) }
-			catch { slot.handle.cancel() }
+			try {
+				if (samples.length > 0) consumer.push(samples)
+			} catch {
+				slot.handle.cancel()
+			}
 		}
 		stream.on("data", onData)
 		slot.offData = () => stream.off("data", onData)
-		if (!slot.prepared.lifecycle.live) { slot.handle.cancel(); return false }
+		if (!slot.prepared.lifecycle.live) {
+			slot.handle.cancel()
+			return false
+		}
 		return true
 	}
 
@@ -283,7 +431,10 @@ export class ChannelTaps {
 		if (slot.drain) return slot.drain
 		let resolve!: () => void
 		let reject!: (cause: unknown) => void
-		slot.drain = new Promise<void>((yes, no) => { resolve = yes; reject = no })
+		slot.drain = new Promise<void>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
 		void slot.drain.catch(() => undefined)
 		// Claim before ended/release callbacks can reenter this same owner.
 		this.fence(slot)
@@ -293,29 +444,68 @@ export class ChannelTaps {
 	}
 	private async drain(slot: Slot): Promise<void> {
 		let failure: WaveKitError | undefined
-		try { await slot.acquisition }
-		catch { failure = new WaveKitError("Scanner channel acquisition cleanup failed", "SCANNER_CHANNEL_CLEANUP_FAILED") }
+		try {
+			await slot.acquisition
+		} catch {
+			failure = new WaveKitError(
+				"Scanner channel acquisition cleanup failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
+		}
 		slot.samples = undefined
 		slot.tail = Buffer.alloc(0)
 		slot.prepared.classifier.settle(OK)
 		if (slot.analog) {
 			let outcome: CleanupOutcome
-			try { outcome = await slot.analog.settled }
-			catch { outcome = { ok: false, state: "failed", detail: "Scanner analog component cleanup failed" } }
+			try {
+				outcome = await slot.analog.settled
+			} catch {
+				outcome = {
+					ok: false,
+					state: "failed",
+					detail: "Scanner analog component cleanup failed",
+				}
+			}
 			slot.prepared.analog.settle(outcome)
-			if (!outcome.ok) failure ??= new WaveKitError("Scanner analog component cleanup failed", "SCANNER_CHANNEL_CLEANUP_FAILED")
+			if (!outcome.ok)
+				failure ??= new WaveKitError(
+					"Scanner analog component cleanup failed",
+					"SCANNER_CHANNEL_CLEANUP_FAILED",
+				)
 		} else if (slot.analogBegun) {
-			slot.prepared.analog.settle({ ok: false, state: "unknown", detail: "Scanner analog owner missing" })
-			failure ??= new WaveKitError("Scanner analog owner missing", "SCANNER_CHANNEL_CLEANUP_PENDING")
+			slot.prepared.analog.settle({
+				ok: false,
+				state: "unknown",
+				detail: "Scanner analog owner missing",
+			})
+			failure ??= new WaveKitError(
+				"Scanner analog owner missing",
+				"SCANNER_CHANNEL_CLEANUP_PENDING",
+			)
 		} else slot.prepared.analog.sealNeverStarted()
-		try { await slot.prepared.lifecycle.logicalDrain() }
-		catch { failure ??= new WaveKitError("Scanner logical channel release failed", "SCANNER_CHANNEL_CLEANUP_FAILED") }
-		if (slot.cleanupFailed) failure ??= new WaveKitError("Scanner channel intake cleanup failed", "SCANNER_CHANNEL_CLEANUP_FAILED")
+		try {
+			await slot.prepared.lifecycle.logicalDrain()
+		} catch {
+			failure ??= new WaveKitError(
+				"Scanner logical channel release failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
+		}
+		if (slot.cleanupFailed)
+			failure ??= new WaveKitError(
+				"Scanner channel intake cleanup failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
 		if (failure) throw failure
 	}
 	private reap(): void {
 		for (const [source, slot] of this.slots) {
-			if (slot.phase === "closing" && !slot.cleanupFailed && slot.prepared.lifecycle.reclaimIfSettled()) this.slots.delete(source)
+			if (
+				slot.phase === "closing" &&
+				!slot.cleanupFailed &&
+				slot.prepared.lifecycle.reclaimIfSettled()
+			)
+				this.slots.delete(source)
 		}
 	}
 }

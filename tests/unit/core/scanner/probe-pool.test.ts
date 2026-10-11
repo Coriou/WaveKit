@@ -771,13 +771,27 @@ describe("ProbePool", () => {
 	})
 })
 
-
 describe("R14 direct-only observed decoder gate", () => {
 	it("denies selected channel transport before decoder, DV and recording effects without offset fallback", async () => {
-		const dv = { addChannel: vi.fn(), removeChannel: vi.fn(), ensureStarted: vi.fn(), attachDecoder: vi.fn() }
-		const h = poolHarness({ digitalVoice: dv,
-			transports: [{ kind: "channel", preRoll: false, maxProbes: () => 4,
-				cores: () => 0, supports: () => true, configure: config => config }] })
+		const dv = {
+			addChannel: vi.fn(),
+			removeChannel: vi.fn(),
+			ensureStarted: vi.fn(),
+			attachDecoder: vi.fn(),
+		}
+		const h = poolHarness({
+			digitalVoice: dv,
+			transports: [
+				{
+					kind: "channel",
+					preRoll: false,
+					maxProbes: () => 4,
+					cores: () => 0,
+					supports: () => true,
+					configure: config => config,
+				},
+			],
+		})
 		const create = vi.spyOn(h.decoders, "createEphemeralDecoder")
 		h.pool.request(probeRequest({ preRollFromSample: null }))
 		await flushAsync()

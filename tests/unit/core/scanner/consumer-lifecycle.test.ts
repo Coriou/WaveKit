@@ -1,28 +1,68 @@
 import { describe, expect, it, vi } from "vitest"
-import type { ChannelSettlementObserver, CleanupOutcome, ProviderLifetime } from "../../../../src/core/channelizer/settlement-observer.js"
+import type {
+	ChannelSettlementObserver,
+	CleanupOutcome,
+	ProviderLifetime,
+} from "../../../../src/core/channelizer/settlement-observer.js"
 import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import type { ScannerCleanupSlot } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 
 const OK: CleanupOutcome = { ok: true }
-const UNKNOWN: CleanupOutcome = { ok: false, state: "unknown", detail: "Owned component remains unknown" }
-const FAILED: CleanupOutcome = { ok: false, state: "failed", detail: "Owned component cleanup failed" }
-const SLOTS: readonly ScannerCleanupSlot[] = ["service", "probes", "grants", "tap", "classifier", "producer", "admission"]
+const UNKNOWN: CleanupOutcome = {
+	ok: false,
+	state: "unknown",
+	detail: "Owned component remains unknown",
+}
+const FAILED: CleanupOutcome = {
+	ok: false,
+	state: "failed",
+	detail: "Owned component cleanup failed",
+}
+const SLOTS: readonly ScannerCleanupSlot[] = [
+	"service",
+	"probes",
+	"grants",
+	"tap",
+	"classifier",
+	"producer",
+	"admission",
+]
 function hold<T>() {
 	let resolve!: (value: T) => void
 	let reject!: (reason: unknown) => void
-	const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+	const promise = new Promise<T>((yes, no) => {
+		resolve = yes
+		reject = no
+	})
 	return { promise, resolve, reject }
 }
-async function flush() { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+async function flush() {
+	await Promise.resolve()
+	await Promise.resolve()
+	await Promise.resolve()
+}
 function nativeInspector(outcome: CleanupOutcome = OK) {
 	const inspectFinal = vi.fn((_producer: CleanupOutcome) => outcome)
 	const attemptLocalCleanup = vi.fn(() => Promise.resolve([OK]))
 	const disposeListenersIfSettled = vi.fn(() => OK)
 	// The owner unit test exercises typed synchronous inspection, never claims core proof.
 	// Full native/local proof is tested by the independently owned core implementation.
-	const observer = { inspectFinal, attemptLocalCleanup } as unknown as ChannelSettlementObserver
-	const lifetime = { inspectFinal, attemptLocalCleanup, disposeListenersIfSettled } as unknown as ProviderLifetime
-	return { observer, lifetime, inspectFinal, attemptLocalCleanup, disposeListenersIfSettled }
+	const observer = {
+		inspectFinal,
+		attemptLocalCleanup,
+	} as unknown as ChannelSettlementObserver
+	const lifetime = {
+		inspectFinal,
+		attemptLocalCleanup,
+		disposeListenersIfSettled,
+	} as unknown as ProviderLifetime
+	return {
+		observer,
+		lifetime,
+		inspectFinal,
+		attemptLocalCleanup,
+		disposeListenersIfSettled,
+	}
 }
 
 describe("ScannerLifecycleOwner fixed component boundary", () => {
@@ -71,7 +111,9 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		owner.ownCleanup("tap", cleanup)
 		const handle = owner.beginStop()
 		let settled = false
-		void handle.producerSettled.then(() => { settled = true })
+		void handle.producerSettled.then(() => {
+			settled = true
+		})
 		await flush()
 		expect(cleanup).not.toHaveBeenCalled()
 		expect(settled).toBe(false)
@@ -86,19 +128,25 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		const sibling = hold<CleanupOutcome>()
 		const heldCleanup = vi.fn(() => sibling.promise)
 		const independent = vi.fn(() => Promise.resolve(OK))
-		owner.ownCleanup("service", async () => { throw new Error("Original exception is not outcome authority") })
+		owner.ownCleanup("service", async () => {
+			throw new Error("Original exception is not outcome authority")
+		})
 		owner.ownCleanup("producer", heldCleanup)
 		owner.ownCleanup("tap", independent)
 		owner.completeConstruction(OK)
 		const handle = owner.beginStop()
 		let rejected = false
-		void handle.producerSettled.catch(() => { rejected = true })
+		void handle.producerSettled.catch(() => {
+			rejected = true
+		})
 		await flush()
 		expect(heldCleanup).toHaveBeenCalledTimes(1)
 		expect(independent).toHaveBeenCalledTimes(1)
 		expect(rejected).toBe(false)
 		sibling.resolve(OK)
-		await expect(handle.producerSettled).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		await expect(handle.producerSettled).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 	})
 
 	it("retains the first actual component failure regardless of later sibling outcome", async () => {
@@ -113,9 +161,13 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		first.resolve(UNKNOWN)
 		await flush()
 		later.resolve(FAILED)
-		await expect(handle.producerSettled).rejects.toMatchObject({ message: UNKNOWN.detail })
+		await expect(handle.producerSettled).rejects.toMatchObject({
+			message: UNKNOWN.detail,
+		})
 		const inspector = nativeInspector(OK)
-		await expect(owner.finalizeStopNative(inspector.observer, inspector.lifetime)).rejects.toMatchObject({ message: UNKNOWN.detail })
+		await expect(
+			owner.finalizeStopNative(inspector.observer, inspector.lifetime),
+		).rejects.toMatchObject({ message: UNKNOWN.detail })
 		expect(inspector.inspectFinal).toHaveBeenCalledWith(UNKNOWN)
 	})
 
@@ -123,20 +175,29 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		const owner = new ScannerLifecycleOwner()
 		const held = hold<CleanupOutcome>()
 		const actual = { removed: false }
-		owner.ownCleanup("service", async () => { actual.removed = true; return OK })
+		owner.ownCleanup("service", async () => {
+			actual.removed = true
+			return OK
+		})
 		owner.ownCleanup("producer", () => held.promise)
 		owner.completeConstruction(FAILED)
 		expect(owner.admissionSealed).toBe(true)
 		const handle = owner.beginStop()
 		let done = false
-		void handle.producerSettled.catch(() => { done = true })
+		void handle.producerSettled.catch(() => {
+			done = true
+		})
 		await flush()
 		expect(actual.removed).toBe(true)
 		expect(done).toBe(false)
 		held.resolve(OK)
-		await expect(handle.producerSettled).rejects.toMatchObject({ message: FAILED.detail })
+		await expect(handle.producerSettled).rejects.toMatchObject({
+			message: FAILED.detail,
+		})
 		const inspector = nativeInspector()
-		await expect(owner.finalizeStopNative(undefined, inspector.lifetime)).rejects.toMatchObject({ message: FAILED.detail })
+		await expect(
+			owner.finalizeStopNative(undefined, inspector.lifetime),
+		).rejects.toMatchObject({ message: FAILED.detail })
 		expect(inspector.inspectFinal).toHaveBeenCalledWith(FAILED)
 	})
 
@@ -144,7 +205,9 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 		const owner = new ScannerLifecycleOwner()
 		owner.completeConstruction(FAILED)
 		owner.completeConstruction(OK)
-		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({ message: FAILED.detail })
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			message: FAILED.detail,
+		})
 		const success = new ScannerLifecycleOwner()
 		success.completeConstruction(OK)
 		success.completeConstruction(FAILED)
@@ -153,11 +216,15 @@ describe("ScannerLifecycleOwner fixed component boundary", () => {
 
 	it("freezes first construction failure facts against caller mutation", async () => {
 		const owner = new ScannerLifecycleOwner()
-		const failure: { ok: false; state: "failed" | "unknown"; detail: string } = { ok: false, state: "failed", detail: "First construction failure" }
+		const failure: { ok: false; state: "failed" | "unknown"; detail: string } =
+			{ ok: false, state: "failed", detail: "First construction failure" }
 		owner.completeConstruction(failure)
 		failure.state = "unknown"
 		failure.detail = "Later caller rewrite"
-		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({ message: "First construction failure", code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			message: "First construction failure",
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 	})
 })
 
@@ -168,12 +235,21 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		owner.completeConstruction(OK)
 		const handle = owner.beginStop()
 		let completed = false
-		void handle.completed.then(() => { completed = true }, () => { completed = true })
+		void handle.completed.then(
+			() => {
+				completed = true
+			},
+			() => {
+				completed = true
+			},
+		)
 		await handle.producerSettled
 		expect(completed).toBe(false)
 		expect(inspector.inspectFinal).not.toHaveBeenCalled()
 		expect(inspector.attemptLocalCleanup).not.toHaveBeenCalled()
-		await expect(owner.finalizeStopNative(inspector.observer, inspector.lifetime)).rejects.toMatchObject({ message: UNKNOWN.detail })
+		await expect(
+			owner.finalizeStopNative(inspector.observer, inspector.lifetime),
+		).rejects.toMatchObject({ message: UNKNOWN.detail })
 		expect(inspector.attemptLocalCleanup).not.toHaveBeenCalled()
 		expect(inspector.disposeListenersIfSettled).not.toHaveBeenCalled()
 	})
@@ -203,7 +279,10 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		owner.completeConstruction(OK)
 		const inspector = nativeInspector(UNKNOWN)
 		const handle = owner.beginStop()
-		const result = owner.finalizeStopNative(inspector.observer, inspector.lifetime)
+		const result = owner.finalizeStopNative(
+			inspector.observer,
+			inspector.lifetime,
+		)
 		expect(result).toBe(handle.completed)
 		await expect(result).rejects.toMatchObject({ message: UNKNOWN.detail })
 		const late = nativeInspector(OK)
@@ -218,7 +297,9 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		const inspector = nativeInspector()
 		const handle = owner.beginStop()
 		inspector.inspectFinal.mockImplementation(() => {
-			expect(owner.finalizeStopNative(inspector.observer, inspector.lifetime)).toBe(handle.completed)
+			expect(
+				owner.finalizeStopNative(inspector.observer, inspector.lifetime),
+			).toBe(handle.completed)
 			return OK
 		})
 		await owner.finalizeStopNative(inspector.observer, inspector.lifetime)
@@ -231,7 +312,9 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		owner.ownCleanup("service", cleanup)
 		owner.completeConstruction(FAILED)
 		const inspector = nativeInspector(UNKNOWN)
-		await expect(owner.finalizeStopNative(undefined, inspector.lifetime)).rejects.toMatchObject({ message: FAILED.detail })
+		await expect(
+			owner.finalizeStopNative(undefined, inspector.lifetime),
+		).rejects.toMatchObject({ message: FAILED.detail })
 		expect(cleanup).toHaveBeenCalledTimes(1)
 		expect(inspector.inspectFinal).toHaveBeenCalledWith(FAILED)
 	})
@@ -240,9 +323,17 @@ describe("ScannerLifecycleOwner nonwaiting final native inspection", () => {
 		const owner = new ScannerLifecycleOwner()
 		owner.completeConstruction(OK)
 		const inspector = nativeInspector()
-		inspector.inspectFinal.mockImplementation(() => { throw new Error("External inspection fault") })
-		const result = owner.finalizeStopNative(inspector.observer, inspector.lifetime)
-		await expect(result).rejects.toMatchObject({ message: "Scanner final ownership inspection failed", code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		inspector.inspectFinal.mockImplementation(() => {
+			throw new Error("External inspection fault")
+		})
+		const result = owner.finalizeStopNative(
+			inspector.observer,
+			inspector.lifetime,
+		)
+		await expect(result).rejects.toMatchObject({
+			message: "Scanner final ownership inspection failed",
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 		expect(owner.finalizeStopNative(undefined)).toBe(result)
 	})
 

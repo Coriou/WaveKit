@@ -662,10 +662,18 @@ export class ProbePool extends EventEmitter {
 		for (const watch of this.watches.values()) watch.off()
 		this.watches.clear()
 		const outcomes = await Promise.allSettled(
-			[...this.records.values()].map(record => this.stopProbe(record, "shutdown")),
+			[...this.records.values()].map(record =>
+				this.stopProbe(record, "shutdown"),
+			),
 		)
-		if (outcomes.some(outcome => outcome.status === "rejected") || this.cleanupFailed)
-			throw new WaveKitError("Scanner probe cleanup failed", "SCANNER_PROBE_CLEANUP_FAILED")
+		if (
+			outcomes.some(outcome => outcome.status === "rejected") ||
+			this.cleanupFailed
+		)
+			throw new WaveKitError(
+				"Scanner probe cleanup failed",
+				"SCANNER_PROBE_CLEANUP_FAILED",
+			)
 	}
 
 	// === streams ===
@@ -975,7 +983,10 @@ export class ProbePool extends EventEmitter {
 		// Initial composition is DIRECT-TAP ONLY. Deny the selected observed decoder
 		// route before ports/DV/directory/tap/constructor effects, without offset retry.
 		if (transport.kind === "channel")
-			throw new WaveKitError("Observed scanner decoder route is unavailable", "SCANNER_CHANNEL_DECODER_UNAVAILABLE")
+			throw new WaveKitError(
+				"Observed scanner decoder route is unavailable",
+				"SCANNER_CHANNEL_DECODER_UNAVAILABLE",
+			)
 		const ports =
 			mode.decoderType === "direwolf"
 				? {
@@ -1114,7 +1125,10 @@ export class ProbePool extends EventEmitter {
 		if (rec.teardownDone) return rec.teardownDone
 		let resolve!: () => void
 		let reject!: (cause: unknown) => void
-		rec.teardownDone = new Promise<void>((yes, no) => { resolve = yes; reject = no })
+		rec.teardownDone = new Promise<void>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
 		void rec.teardownDone.catch(() => undefined)
 		// Untap/removal callbacks may synchronously request this same teardown again.
 		void this.runTeardown(rec).then(resolve, reject)
@@ -1126,13 +1140,20 @@ export class ProbePool extends EventEmitter {
 		if (rec.modeTimer) clearTimeout(rec.modeTimer)
 		rec.modeTimer = null
 		this.byDecoder.delete(rec.decoderId)
-		const attempt = async (action: () => unknown | Promise<unknown>): Promise<boolean> => {
-			try { await action(); return true }
-			catch (err) {
+		const attempt = async (
+			action: () => unknown | Promise<unknown>,
+		): Promise<boolean> => {
+			try {
+				await action()
+				return true
+			} catch (err) {
 				this.cleanupFailed = true
 				this.retainedCleanup.add(rec)
 				this.sealAdmission()
-				this.log.warn({ err, probeId: rec.probeId }, "Probe component cleanup failed")
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Probe component cleanup failed",
+				)
 				return false
 			}
 		}
@@ -1141,7 +1162,9 @@ export class ProbePool extends EventEmitter {
 		for (const off of rec.detach) if (!(await attempt(off))) remaining.push(off)
 		rec.detach = remaining
 		await attempt(() => rec.input?.end())
-		await attempt(() => this.deps.decoders.removeEphemeralDecoder(rec.decoderId))
+		await attempt(() =>
+			this.deps.decoders.removeEphemeralDecoder(rec.decoderId),
+		)
 		if (rec.dvChannel && this.deps.digitalVoice) {
 			await attempt(() => this.deps.digitalVoice!.removeChannel(rec.decoderId))
 		}

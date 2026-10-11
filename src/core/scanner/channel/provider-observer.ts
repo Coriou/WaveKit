@@ -1,7 +1,17 @@
-import type { ChannelProvider, DecoderChannelRequest } from "../../channelizer/types.js"
-import type { ConsumerComponent, ObservedAcquisitionHandle } from "../../channelizer/settlement-observer.js"
+import type {
+	ChannelProvider,
+	DecoderChannelRequest,
+} from "../../channelizer/types.js"
+import type {
+	ConsumerComponent,
+	ObservedAcquisitionHandle,
+} from "../../channelizer/settlement-observer.js"
 import { prepareChannelAdmission } from "../plan/resource-admission.js"
-import type { ScannerChannelAttempt, ScannerChannelOwnership, ScannerChannelProfile } from "./consumer-types.js"
+import type {
+	ScannerChannelAttempt,
+	ScannerChannelOwnership,
+	ScannerChannelProfile,
+} from "./consumer-types.js"
 import { GrantLifecycle } from "./grant-lifecycle.js"
 
 export interface PreparedScannerChannel {
@@ -24,8 +34,14 @@ export function prepareDirectChannel(input: {
 }): PreparedScannerChannel | undefined {
 	const { ownership, channels, attempt } = input
 	// Default/missing profile denies BEFORE even bounded acquisition/arm metadata.
-	if (!channels || !ownership?.ledger || !input.profile ||
-		ownership.construction.admissionSealed || !input.current()) return undefined
+	if (
+		!channels ||
+		!ownership?.ledger ||
+		!input.profile ||
+		ownership.construction.admissionSealed ||
+		!input.current()
+	)
+		return undefined
 	const handle = ownership.observer.allocateAcquisition({
 		activation: "direct",
 		sourceId: attempt.sourceId,
@@ -33,20 +49,32 @@ export function prepareDirectChannel(input: {
 		expectedRequest: Object.freeze({ ...input.request }),
 		scannerAttempt: attempt.identity,
 		expectedInputCaps: Object.freeze({
-			kind: "iq", format: "U8_IQ", sampleRate: attempt.captureRateHz,
+			kind: "iq",
+			format: "U8_IQ",
+			sampleRate: attempt.captureRateHz,
 			centerFreq: attempt.captureCentreHz,
 		}),
 	})
 	if (!handle) return undefined
 	const permit = prepareChannelAdmission({
-		handle, ledger: ownership.ledger, profile: input.profile,
-		captureRateHz: attempt.captureRateHz, request: input.request, activation: "direct",
+		handle,
+		ledger: ownership.ledger,
+		profile: input.profile,
+		captureRateHz: attempt.captureRateHz,
+		request: input.request,
+		activation: "direct",
 	})
 	const decoder = handle.retainComponent("decoder")
 	const classifier = handle.retainComponent("classifier")
 	const analog = handle.retainComponent("analog")
-	if (!permit || !decoder || !classifier || !analog || !handle.attachPermit(permit) ||
-		!decoder.sealNeverStarted()) {
+	if (
+		!permit ||
+		!decoder ||
+		!classifier ||
+		!analog ||
+		!handle.attachPermit(permit) ||
+		!decoder.sealNeverStarted()
+	) {
 		handle.cancel()
 		decoder?.sealNeverStarted()
 		classifier?.sealNeverStarted()
@@ -54,7 +82,13 @@ export function prepareDirectChannel(input: {
 		handle.revokeUnclaimedArm()
 		return undefined
 	}
-	const lifecycle = new GrantLifecycle(attempt, handle, channels, input.current, input.ended)
+	const lifecycle = new GrantLifecycle(
+		attempt,
+		handle,
+		channels,
+		input.current,
+		input.ended,
+	)
 	if (!input.current() || !handle.arm()) {
 		lifecycle.invalidate()
 		classifier.sealNeverStarted()
@@ -62,5 +96,11 @@ export function prepareDirectChannel(input: {
 		handle.revokeUnclaimedArm()
 		return undefined
 	}
-	return Object.freeze({ handle, classifier, analog, lifecycle, request: Object.freeze({ ...input.request }) })
+	return Object.freeze({
+		handle,
+		classifier,
+		analog,
+		lifecycle,
+		request: Object.freeze({ ...input.request }),
+	})
 }

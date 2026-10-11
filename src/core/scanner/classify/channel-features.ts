@@ -45,10 +45,15 @@ export type ChannelToneEvidence =
 	| { readonly kind: "ambiguous" }
 	| { readonly kind: "tone"; readonly hz: number; readonly fraction: number }
 
+interface SupportedChannelSymbol {
+	readonly kind: "supported"
+	readonly baud: 2400 | 4800 | 9600
+	readonly fraction: number
+}
 export type ChannelSymbolEvidence =
 	| { readonly kind: "absent" }
 	| { readonly kind: "ambiguous" }
-	| { readonly kind: "supported"; readonly baud: 2400 | 4800 | 9600; readonly fraction: number }
+	| SupportedChannelSymbol
 
 export interface ChannelFeatureEvidence {
 	readonly kind: "evidence"
@@ -76,20 +81,27 @@ const HISTOGRAM_HALF_HZ = 12_000
 const BIN_HZ = (2 * HISTOGRAM_HALF_HZ) / HISTOGRAM_BINS
 const AUDIO_RATE = 8000
 const CTCSS_HZ = [
-	67, 69.3, 71.9, 74.4, 77, 79.7, 82.5, 85.4, 88.5, 91.5,
-	94.8, 97.4, 100, 103.5, 107.2, 110.9, 114.8, 118.8, 123, 127.3,
-	131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9,
-	171.3, 173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5,
-	203.5, 206.5, 210.7, 218.1, 225.7, 229.1, 233.6, 241.8, 250.3, 254.1,
+	67, 69.3, 71.9, 74.4, 77, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100,
+	103.5, 107.2, 110.9, 114.8, 118.8, 123, 127.3, 131.8, 136.5, 141.3, 146.2,
+	151.4, 156.7, 159.8, 162.2, 165.5, 167.9, 171.3, 173.8, 177.3, 179.9, 183.5,
+	186.2, 189.9, 192.8, 196.6, 199.5, 203.5, 206.5, 210.7, 218.1, 225.7, 229.1,
+	233.6, 241.8, 250.3, 254.1,
 ] as const
 
-const unknown = (reason: ChannelFeatureUnknownReason): ChannelFeatureResult => ({
+const unknown = (
+	reason: ChannelFeatureUnknownReason,
+): ChannelFeatureResult => ({
 	kind: "unknown",
 	reason,
 })
 
 /** Normalised coherent line energy. Fixed banks avoid an FFT or an unbounded frequency search. */
-function lineFraction(values: Float64Array, hz: number, rate: number, energy: number): number {
+function lineFraction(
+	values: Float64Array,
+	hz: number,
+	rate: number,
+	energy: number,
+): number {
 	if (energy <= 0 || values.length === 0) return 0
 	const coefficient = 2 * Math.cos((2 * Math.PI * hz) / rate)
 	let previous = 0
@@ -99,13 +111,19 @@ function lineFraction(values: Float64Array, hz: number, rate: number, energy: nu
 		before = previous
 		previous = current
 	}
-	const power = previous * previous + before * before - coefficient * previous * before
+	const power =
+		previous * previous + before * before - coefficient * previous * before
 	return Math.max(0, Math.min(1, (2 * power) / (values.length * energy)))
 }
 
-function ctcssEvidence(audio: Float64Array, energy: number): ChannelToneEvidence {
-	const lines = CTCSS_HZ.map(hz => ({ hz, fraction: lineFraction(audio, hz, AUDIO_RATE, energy) }))
-		.sort((a, b) => b.fraction - a.fraction)
+function ctcssEvidence(
+	audio: Float64Array,
+	energy: number,
+): ChannelToneEvidence {
+	const lines = CTCSS_HZ.map(hz => ({
+		hz,
+		fraction: lineFraction(audio, hz, AUDIO_RATE, energy),
+	})).sort((a, b) => b.fraction - a.fraction)
 	const best = lines[0]!
 	if (best.fraction < 0.12) return { kind: "absent" }
 	if (lines[1]!.fraction > best.fraction * 0.65) return { kind: "ambiguous" }
@@ -126,7 +144,10 @@ function symbolEvidence(discriminator: Float64Array): ChannelSymbolEvidence {
 		energy += changes[i]! ** 2
 	}
 	const lines = ([2400, 4800, 9600] as const)
-		.map(baud => ({ baud, fraction: lineFraction(changes, baud, CHANNEL_FEATURE_RATE_HZ, energy) }))
+		.map(baud => ({
+			baud,
+			fraction: lineFraction(changes, baud, CHANNEL_FEATURE_RATE_HZ, energy),
+		}))
 		.sort((a, b) => b.fraction - a.fraction)
 	const best = lines[0]!
 	if (best.fraction < 0.06) return { kind: "absent" }
@@ -165,7 +186,10 @@ export function extractChannelFeatures(
 	const minMs = input.minMs ?? MIN_CHANNEL_FEATURE_MS
 	if (!Number.isInteger(minMs) || minMs < 300 || minMs > 2000)
 		return unknown("invalid-window")
-	if (samples.length > 2 * MAX_CHANNEL_FEATURE_SAMPLES || samples.byteLength > MAX_CHANNEL_FEATURE_BYTES)
+	if (
+		samples.length > 2 * MAX_CHANNEL_FEATURE_SAMPLES ||
+		samples.byteLength > MAX_CHANNEL_FEATURE_BYTES
+	)
 		return unknown("sample-bound")
 	if (samples.length % 2 !== 0) return unknown("incomplete-sample")
 	if (input.gaps) return unknown("gaps")
@@ -177,7 +201,9 @@ export function extractChannelFeatures(
 	for (const value of samples)
 		if (!Number.isFinite(value)) return unknown("nonfinite")
 	const count = samples.length / 2
-	const required = Math.ceil((Math.max(MIN_CHANNEL_FEATURE_MS, minMs) * CHANNEL_FEATURE_RATE_HZ) / 1000)
+	const required = Math.ceil(
+		(Math.max(MIN_CHANNEL_FEATURE_MS, minMs) * CHANNEL_FEATURE_RATE_HZ) / 1000,
+	)
 	if (count < required) return unknown("insufficient-on-samples")
 	const frequencies = new Float64Array(count - 1)
 	const on = new Uint8Array(count)
@@ -198,8 +224,13 @@ export function extractChannelFeatures(
 		const im = samples[2 * n + 1]!
 		const previousRe = samples[2 * n - 2]!
 		const previousIm = samples[2 * n - 1]!
-		const hz = Math.atan2(im * previousRe - re * previousIm, re * previousRe + im * previousIm)
-			* CHANNEL_FEATURE_RATE_HZ / (2 * Math.PI)
+		const hz =
+			(Math.atan2(
+				im * previousRe - re * previousIm,
+				re * previousRe + im * previousIm,
+			) *
+				CHANNEL_FEATURE_RATE_HZ) /
+			(2 * Math.PI)
 		frequencies[n - 1] = hz
 		mean += hz
 	}
@@ -209,15 +240,17 @@ export function extractChannelFeatures(
 	let deviation = 0
 	for (let n = 0; n < frequencies.length; n++) {
 		const hz = frequencies[n]! - mean
-		if (Math.abs(hz) >= HISTOGRAM_HALF_HZ) return unknown("unsupported-deviation")
+		if (Math.abs(hz) >= HISTOGRAM_HALF_HZ)
+			return unknown("unsupported-deviation")
 		frequencies[n] = hz
 		energy += hz * hz
 		deviation = Math.max(deviation, Math.abs(hz))
 		const bin = Math.floor((hz + HISTOGRAM_HALF_HZ) / BIN_HZ)
 		histogram[bin] = histogram[bin]! + 1
 	}
-	const smoothed = histogram.map((_, i) =>
-		((histogram[i - 1] ?? 0) + histogram[i]! + (histogram[i + 1] ?? 0)) / 3,
+	const smoothed = histogram.map(
+		(_, i) =>
+			((histogram[i - 1] ?? 0) + histogram[i]! + (histogram[i + 1] ?? 0)) / 3,
 	)
 	const peakFloor = Math.max(...smoothed) * 0.1
 	const peaksHz: number[] = []
@@ -243,8 +276,8 @@ export function extractChannelFeatures(
 	let bandEnergy = 0
 	let low = 0
 	let band = 0
-	const lowAlpha = 1 - Math.exp(-2 * Math.PI * 300 / AUDIO_RATE)
-	const bandAlpha = 1 - Math.exp(-2 * Math.PI * 3000 / AUDIO_RATE)
+	const lowAlpha = 1 - Math.exp((-2 * Math.PI * 300) / AUDIO_RATE)
+	const bandAlpha = 1 - Math.exp((-2 * Math.PI * 3000) / AUDIO_RATE)
 	for (let n = 0; n < audio.length; n++) {
 		let value = 0
 		for (let k = 0; k < 6; k++) value += frequencies[n * 6 + k]! / 6
@@ -256,14 +289,22 @@ export function extractChannelFeatures(
 	}
 	const markFraction = lineFraction(audio, 1200, AUDIO_RATE, audioEnergy)
 	const spaceFraction = lineFraction(audio, 2200, AUDIO_RATE, audioEnergy)
-	const pair = markFraction >= 0.08 && spaceFraction >= 0.08 && markFraction + spaceFraction >= 0.4 && alternatingAfsk(audio)
-	const afskKind = pair ? "pair" : Math.max(markFraction, spaceFraction) >= 0.08 ? "ambiguous" : "absent"
+	const pair =
+		markFraction >= 0.08 &&
+		spaceFraction >= 0.08 &&
+		markFraction + spaceFraction >= 0.4 &&
+		alternatingAfsk(audio)
+	const afskKind = pair
+		? "pair"
+		: Math.max(markFraction, spaceFraction) >= 0.08
+			? "ambiguous"
+			: "absent"
 	return {
 		kind: "evidence",
 		sampleCount: count,
 		onSamples,
-		durationMs: count * 1000 / CHANNEL_FEATURE_RATE_HZ,
-		onDurationMs: onSamples * 1000 / CHANNEL_FEATURE_RATE_HZ,
+		durationMs: (count * 1000) / CHANNEL_FEATURE_RATE_HZ,
+		onDurationMs: (onSamples * 1000) / CHANNEL_FEATURE_RATE_HZ,
 		discriminator: {
 			histogram,
 			binWidthHz: BIN_HZ,
@@ -273,7 +314,8 @@ export function extractChannelFeatures(
 			peakSpacingHz: peaksHz.slice(1).map((hz, i) => hz - peaksHz[i]!),
 			deviationHz: deviation,
 			stdHz: Math.sqrt(energy / frequencies.length),
-			voiceBandFraction: audioEnergy > 0 ? Math.min(1, bandEnergy / audioEnergy) : 0,
+			voiceBandFraction:
+				audioEnergy > 0 ? Math.min(1, bandEnergy / audioEnergy) : 0,
 		},
 		afsk: { kind: afskKind, markFraction, spaceFraction },
 		ctcss: ctcssEvidence(audio, audioEnergy),

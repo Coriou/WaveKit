@@ -1,7 +1,17 @@
 /** Current-grant bridge to accepted analog evidence; native lifetime proof stays external. */
 import { WaveKitError } from "../../../utils/errors.js"
-import type { AnalogCut, AnalogGap, AnalogHandle, AnalogInput, AnalogReceipt } from "../store/analog-operations.js"
-import { RecordingBindingSchema, RecordingIdentitySchema, type RecordingBinding } from "../store/recording-operation.js"
+import type {
+	AnalogCut,
+	AnalogGap,
+	AnalogHandle,
+	AnalogInput,
+	AnalogReceipt,
+} from "../store/analog-operations.js"
+import {
+	RecordingBindingSchema,
+	RecordingIdentitySchema,
+	type RecordingBinding,
+} from "../store/recording-operation.js"
 import { AnalogRecorder } from "./analog-recorder.js"
 
 export interface RecordingGrantIdentity {
@@ -74,30 +84,53 @@ interface Entry {
 	nativeClosed: boolean
 }
 function fail(message: string, cause?: unknown): WaveKitError {
-	return new WaveKitError(message, "SCANNER_RECORDING_PRODUCER", cause instanceof Error ? cause : undefined)
+	return new WaveKitError(
+		message,
+		"SCANNER_RECORDING_PRODUCER",
+		cause instanceof Error ? cause : undefined,
+	)
 }
 function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
 	let resolve!: (value: T) => void
-	const promise = new Promise<T>(done => { resolve = done })
+	const promise = new Promise<T>(done => {
+		resolve = done
+	})
 	return { promise, resolve }
 }
 function bindingKey(binding: RecordingBinding): string {
 	return JSON.stringify([
-		binding.sourceId, binding.engineInstanceId, binding.stream, binding.epoch,
-		binding.channelId, binding.channelGeneration, binding.inputFormat,
-		binding.inputSampleRateHz, binding.groupDelayInputSamples, binding.targetHz,
-		binding.captureCentreHz, binding.tuningTrust,
+		binding.sourceId,
+		binding.engineInstanceId,
+		binding.stream,
+		binding.epoch,
+		binding.channelId,
+		binding.channelGeneration,
+		binding.inputFormat,
+		binding.inputSampleRateHz,
+		binding.groupDelayInputSamples,
+		binding.targetHz,
+		binding.captureCentreHz,
+		binding.tuningTrust,
 	])
 }
 function realizedBinding(binding: RecordingBinding): RecordingBinding {
 	const parsed = RecordingBindingSchema.safeParse(binding)
 	if (!parsed.success) throw fail("Invalid recording grant binding")
 	const b = parsed.data
-	if (b.sourceId === null || b.engineInstanceId === null || b.stream === null ||
-		b.epoch === null || b.channelId === null || b.channelGeneration === null ||
-		b.inputFormat !== "cf32" || b.inputSampleRateHz !== 48000 ||
-		b.groupDelayInputSamples === null || b.targetHz === null ||
-		b.captureCentreHz === null || b.tuningTrust === null)
+	if (
+		b.sourceId === null ||
+		b.engineInstanceId === null ||
+		b.stream === null ||
+		b.epoch === null ||
+		b.channelId === null ||
+		b.channelGeneration === null ||
+		b.inputFormat !== "cf32" ||
+		b.inputSampleRateHz !== 48000 ||
+		b.groupDelayInputSamples === null ||
+		b.targetHz === null ||
+		b.captureCentreHz === null ||
+		b.tuningTrust === null
+	)
 		throw fail("Realized 48 kHz cf32 grant and delay required")
 	return Object.freeze(b)
 }
@@ -113,7 +146,9 @@ export class RecordingProducers {
 		if (!Number.isSafeInteger(deps.maxOwners) || deps.maxOwners <= 0)
 			throw fail("Bounded recording ownership required")
 	}
-	get ownerCount(): number { return this.sources.size }
+	get ownerCount(): number {
+		return this.sources.size
+	}
 	bindingLive(binding: RecordingBinding): boolean {
 		const parsed = RecordingBindingSchema.safeParse(binding)
 		if (!parsed.success) return false
@@ -121,80 +156,166 @@ export class RecordingProducers {
 		if (!entry?.live || entry.nativeClosed) return false
 		try {
 			const current = this.deps.isCurrentCommitted(entry.identity)
-			return current && entry.live && !entry.nativeClosed && this.tuples.get(entry.key) === entry
-		} catch { return false }
+			return (
+				current &&
+				entry.live &&
+				!entry.nativeClosed &&
+				this.tuples.get(entry.key) === entry
+			)
+		} catch {
+			return false
+		}
 	}
 	begin(input: RecordingProducerInput): RecordingProducerHandle {
-		if (this.sealed || this.deps.enabled !== true || this.deps.profileReady !== true || this.deps.adoptionReady !== true ||
-			input.recordAudio !== true || input.analogFm !== true || input.encrypted !== false)
+		if (
+			this.sealed ||
+			this.deps.enabled !== true ||
+			this.deps.profileReady !== true ||
+			this.deps.adoptionReady !== true ||
+			input.recordAudio !== true ||
+			input.analogFm !== true ||
+			input.encrypted !== false
+		)
 			throw fail("Recording producer admission denied")
-		if (input.provider === null || typeof input.provider !== "object" || input.token === null || typeof input.token !== "object" ||
+		if (
+			input.provider === null ||
+			typeof input.provider !== "object" ||
+			input.token === null ||
+			typeof input.token !== "object" ||
 			!RecordingIdentitySchema.safeParse(input.discoveryId).success ||
 			!RecordingIdentitySchema.safeParse(input.observationId).success ||
 			(input.thresholdDbfs !== null && !Number.isFinite(input.thresholdDbfs)) ||
-			(input.hangMs !== undefined && (!Number.isFinite(input.hangMs) || input.hangMs < 0)) ||
-			(input.deemphasisUs !== undefined && input.deemphasisUs !== null && input.deemphasisUs !== 750))
+			(input.hangMs !== undefined &&
+				(!Number.isFinite(input.hangMs) || input.hangMs < 0)) ||
+			(input.deemphasisUs !== undefined &&
+				input.deemphasisUs !== null &&
+				input.deemphasisUs !== 750)
+		)
 			throw fail("Invalid recording association or audio options")
 		const binding = realizedBinding(input.binding)
 		const snapshot = Object.freeze({ ...input, binding })
 		const sourceId = binding.sourceId!
 		const key = bindingKey(binding)
-		if (this.tuples.has(key) || this.sources.has(sourceId) || this.sources.size >= this.deps.maxOwners)
+		if (
+			this.tuples.has(key) ||
+			this.sources.has(sourceId) ||
+			this.sources.size >= this.deps.maxOwners
+		)
 			throw fail("Recording ownership collision or retained source")
-		const identity = Object.freeze({ binding, provider: snapshot.provider, token: snapshot.token })
-		const creation = deferred<void>(), settlement = deferred<RecordingProducerSettlement>()
+		const identity = Object.freeze({
+			binding,
+			provider: snapshot.provider,
+			token: snapshot.token,
+		})
+		const creation = deferred<void>(),
+			settlement = deferred<RecordingProducerSettlement>()
 		const entry: Entry = {
-			key, sourceId, identity, created: creation.promise, creationDone: () => creation.resolve(),
-			settled: settlement.promise, settle: settlement.resolve, operation: null, recorder: null,
-			ready: Promise.resolve(), terminal: null, accepting: true, live: true, cancelled: null,
-			creationError: null, producerClosed: false, nativeClosed: false,
+			key,
+			sourceId,
+			identity,
+			created: creation.promise,
+			creationDone: () => creation.resolve(),
+			settled: settlement.promise,
+			settle: settlement.resolve,
+			operation: null,
+			recorder: null,
+			ready: Promise.resolve(),
+			terminal: null,
+			accepting: true,
+			live: true,
+			cancelled: null,
+			creationError: null,
+			producerClosed: false,
+			nativeClosed: false,
 		}
 		// Own the original tuple before any injected callback, component or operation creation.
 		this.tuples.set(key, entry)
 		this.sources.set(sourceId, entry)
 		try {
-			void snapshot.nativeOwnershipSettled.then(outcome => {
-				this.observeNativeOwnership(identity, outcome)
-			}, () => { /* Unknown native proof retains the bounded original owner. */ }).catch(() => { /* Malformed proof never retires an owner. */ })
+			void snapshot.nativeOwnershipSettled
+				.then(
+					outcome => {
+						this.observeNativeOwnership(identity, outcome)
+					},
+					() => {
+						/* Unknown native proof retains the bounded original owner. */
+					},
+				)
+				.catch(() => {
+					/* Malformed proof never retires an owner. */
+				})
 			this.requireCurrent(entry)
-			if (!this.deps.beginAnalogComponent(identity)) throw fail("Analog component refused")
+			if (!this.deps.beginAnalogComponent(identity))
+				throw fail("Analog component refused")
 			this.requireCurrent(entry)
-			entry.operation = this.deps.beginAnalog({ discoveryId: snapshot.discoveryId, observationId: snapshot.observationId, binding })
+			entry.operation = this.deps.beginAnalog({
+				discoveryId: snapshot.discoveryId,
+				observationId: snapshot.observationId,
+				binding,
+			})
 			// Record the returned original operation before any further reentrant predicate.
 			this.requireCurrent(entry)
-			entry.recorder = new AnalogRecorder({ operation: entry.operation, thresholdDbfs: snapshot.thresholdDbfs,
+			entry.recorder = new AnalogRecorder({
+				operation: entry.operation,
+				thresholdDbfs: snapshot.thresholdDbfs,
 				...(snapshot.hangMs !== undefined ? { hangMs: snapshot.hangMs } : {}),
-				...(snapshot.deemphasisUs !== undefined ? { deemphasisUs: snapshot.deemphasisUs } : {}),
+				...(snapshot.deemphasisUs !== undefined
+					? { deemphasisUs: snapshot.deemphasisUs }
+					: {}),
 			})
-		} catch (cause) { entry.creationError = fail("Recording producer creation failed", cause) }
-		finally { entry.creationDone() }
+		} catch (cause) {
+			entry.creationError = fail("Recording producer creation failed", cause)
+		} finally {
+			entry.creationDone()
+		}
 		entry.ready = entry.created.then(async () => {
 			if (entry.creationError) throw entry.creationError
 			if (!entry.operation) throw fail("Missing recording operation")
 			await entry.operation.ready
 			this.requireCurrent(entry)
 		})
-		void entry.ready.catch(() => { this.cancelEntry(entry, "channel-invalidated") })
-		return Object.freeze({ identity, ready: entry.ready, settled: entry.settled,
+		void entry.ready.catch(() => {
+			this.cancelEntry(entry, "channel-invalidated")
+		})
+		return Object.freeze({
+			identity,
+			ready: entry.ready,
+			settled: entry.settled,
 			push: (cf32: Float32Array) => {
-				if (!entry.accepting || !entry.recorder) return Promise.reject(fail("Recording intake fenced"))
-				try { this.requireCurrent(entry) }
-				catch (cause) { this.cancelEntry(entry, "channel-invalidated"); return Promise.reject(cause) }
+				if (!entry.accepting || !entry.recorder)
+					return Promise.reject(fail("Recording intake fenced"))
+				try {
+					this.requireCurrent(entry)
+				} catch (cause) {
+					this.cancelEntry(entry, "channel-invalidated")
+					return Promise.reject(cause)
+				}
 				return entry.recorder.push(cf32)
 			},
-			gap: (gap: AnalogGap) => { if (entry.accepting) entry.recorder?.gap(gap) },
+			gap: (gap: AnalogGap) => {
+				if (entry.accepting) entry.recorder?.gap(gap)
+			},
 			finish: (cut: AnalogCut = "completed") => this.finishEntry(entry, cut),
 			cancel: (cut: AnalogCut = "cancelled") => this.cancelEntry(entry, cut),
 		})
 	}
 	/** Later exact proof may retire a clean producer tombstone; unknown never changes its owner. */
-	observeNativeOwnership(identity: RecordingGrantIdentity, outcome: RecordingNativeOutcome): boolean {
+	observeNativeOwnership(
+		identity: RecordingGrantIdentity,
+		outcome: RecordingNativeOutcome,
+	): boolean {
 		const parsed = RecordingBindingSchema.safeParse(identity.binding)
 		if (!parsed.success) return false
 		const entry = this.tuples.get(bindingKey(parsed.data))
-		if (!entry || outcome.status !== "released" ||
-			identity.provider !== entry.identity.provider || identity.token !== entry.identity.token ||
-			outcome.provider !== entry.identity.provider || outcome.token !== entry.identity.token) return false
+		if (
+			!entry ||
+			outcome.status !== "released" ||
+			identity.provider !== entry.identity.provider ||
+			identity.token !== entry.identity.token ||
+			outcome.provider !== entry.identity.provider ||
+			outcome.token !== entry.identity.token
+		)
+			return false
 		entry.nativeClosed = true
 		if (entry.live) this.cancelEntry(entry, "channel-invalidated")
 		this.retire(entry)
@@ -211,10 +332,23 @@ export class RecordingProducers {
 		return Promise.all(entries.map(entry => entry.settled))
 	}
 	private requireCurrent(entry: Entry): void {
-		if (!entry.live || entry.nativeClosed || entry.cancelled || this.sealed || this.tuples.get(entry.key) !== entry)
+		if (
+			!entry.live ||
+			entry.nativeClosed ||
+			entry.cancelled ||
+			this.sealed ||
+			this.tuples.get(entry.key) !== entry
+		)
 			throw fail("Recording grant invalidated")
 		const current = this.deps.isCurrentCommitted(entry.identity)
-		if (!current || !entry.live || entry.nativeClosed || entry.cancelled || this.sealed || this.tuples.get(entry.key) !== entry)
+		if (
+			!current ||
+			!entry.live ||
+			entry.nativeClosed ||
+			entry.cancelled ||
+			this.sealed ||
+			this.tuples.get(entry.key) !== entry
+		)
 			throw fail("Recording grant is not current and committed")
 	}
 	private cancelEntry(entry: Entry, cut: AnalogCut): void {
@@ -234,23 +368,49 @@ export class RecordingProducers {
 		await entry.created
 		let error = entry.creationError
 		let receipt: AnalogReceipt | null = null
-		let operationSettled = false, logicalReleased = false
+		let operationSettled = false,
+			logicalReleased = false
 		try {
-			if (entry.recorder) receipt = await entry.recorder.finish(entry.cancelled ?? cut)
-			else if (entry.operation) receipt = await entry.operation.finish(entry.cancelled ?? cut)
-		} catch (cause) { error ??= fail("Recording producer drain failed", cause) }
+			if (entry.recorder)
+				receipt = await entry.recorder.finish(entry.cancelled ?? cut)
+			else if (entry.operation)
+				receipt = await entry.operation.finish(entry.cancelled ?? cut)
+		} catch (cause) {
+			error ??= fail("Recording producer drain failed", cause)
+		}
 		if (entry.operation) {
-			try { receipt = await entry.operation.settled; operationSettled = true }
-			catch (cause) { error ??= fail("Recording operation settlement failed", cause) }
+			try {
+				receipt = await entry.operation.settled
+				operationSettled = true
+			} catch (cause) {
+				error ??= fail("Recording operation settlement failed", cause)
+			}
 		}
 		// Natural finish keeps the grant live until actual operation settlement; release is only logical.
 		entry.live = false
-		try { await this.deps.releaseLogical(entry.identity); logicalReleased = true }
-		catch (cause) { error ??= fail("Recording logical release failed", cause) }
-		const closed = receipt !== null && (receipt.outcome === "finalized" && receipt.closure === "closed" || receipt.cleanup === "complete" && receipt.closure !== "unknown")
-		if (operationSettled && !closed) error ??= fail("Recording cleanup remains unsettled")
-		entry.producerClosed = operationSettled && logicalReleased && error === null && closed
-		entry.settle(Object.freeze({ receipt, error, operationSettled, logicalReleased, componentClosed: entry.producerClosed }))
+		try {
+			await this.deps.releaseLogical(entry.identity)
+			logicalReleased = true
+		} catch (cause) {
+			error ??= fail("Recording logical release failed", cause)
+		}
+		const closed =
+			receipt !== null &&
+			((receipt.outcome === "finalized" && receipt.closure === "closed") ||
+				(receipt.cleanup === "complete" && receipt.closure !== "unknown"))
+		if (operationSettled && !closed)
+			error ??= fail("Recording cleanup remains unsettled")
+		entry.producerClosed =
+			operationSettled && logicalReleased && error === null && closed
+		entry.settle(
+			Object.freeze({
+				receipt,
+				error,
+				operationSettled,
+				logicalReleased,
+				componentClosed: entry.producerClosed,
+			}),
+		)
 		this.retire(entry)
 		if (receipt) return receipt // Immutable marker decision is never reversed by a later release failure.
 		throw error ?? fail("Recording operation produced no receipt")
@@ -258,6 +418,7 @@ export class RecordingProducers {
 	private retire(entry: Entry): void {
 		if (!entry.producerClosed || !entry.nativeClosed) return
 		if (this.tuples.get(entry.key) === entry) this.tuples.delete(entry.key)
-		if (this.sources.get(entry.sourceId) === entry) this.sources.delete(entry.sourceId)
+		if (this.sources.get(entry.sourceId) === entry)
+			this.sources.delete(entry.sourceId)
 	}
 }

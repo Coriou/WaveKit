@@ -1,7 +1,10 @@
 import type { Classification, ScannerClass, ScannerProtocol } from "../types.js"
 import { applyPriors, CLASS_HYPOTHESES } from "./classifier.js"
 import type { ChannelFeatureResult } from "./channel-features.js"
-import { MAX_CHANNEL_FEATURE_SAMPLES, MIN_CHANNEL_FEATURE_MS } from "./channel-features.js"
+import {
+	MAX_CHANNEL_FEATURE_SAMPLES,
+	MIN_CHANNEL_FEATURE_MS,
+} from "./channel-features.js"
 
 export interface ChannelTierContext {
 	readonly priors: Partial<Record<ScannerProtocol, number>>
@@ -20,9 +23,17 @@ export type ChannelTierFallbackReason =
 	| "unsupported-waveform"
 	| "protocol-filtered"
 
-export type ChannelTierResult =
-	| { readonly kind: "fallback"; readonly reason: ChannelTierFallbackReason; readonly classification: Classification }
-	| { readonly kind: "refined"; readonly classification: Classification; readonly ctcssHz?: number }
+interface ChannelTierFallback {
+	readonly kind: "fallback"
+	readonly reason: ChannelTierFallbackReason
+	readonly classification: Classification
+}
+interface ChannelTierRefinement {
+	readonly kind: "refined"
+	readonly classification: Classification
+	readonly ctcssHz?: number
+}
+export type ChannelTierResult = ChannelTierFallback | ChannelTierRefinement
 
 /** Conservative waveform refinement; hypotheses remain hypotheses, never decoded identity. */
 export function refineChannelClassification(
@@ -36,7 +47,11 @@ export function refineChannelClassification(
 		classification: spectral,
 	})
 	if (!context.rfTrusted) return fallback("rf-untrusted")
-	if (!Number.isFinite(context.obwHz) || context.obwHz <= 0 || context.obwHz > 16_000)
+	if (
+		!Number.isFinite(context.obwHz) ||
+		context.obwHz <= 0 ||
+		context.obwHz > 16_000
+	)
 		return fallback("unsupported-bandwidth")
 	if (features.kind === "unknown") return fallback("feature-unknown")
 	const d = features.discriminator
@@ -52,20 +67,49 @@ export function refineChannelClassification(
 		d.peaksHz.length > 128 ||
 		d.peaksHz.length !== d.peakStdHz.length ||
 		d.peakSpacingHz.length !== Math.max(0, d.peaksHz.length - 1) ||
-		![d.binWidthHz, d.centerOffsetHz, d.deviationHz, d.stdHz, d.voiceBandFraction,
-			...d.histogram, ...d.peaksHz, ...d.peakStdHz, ...d.peakSpacingHz,
-			features.afsk.markFraction, features.afsk.spaceFraction,
-			...Object.values(context.priors)].every(Number.isFinite)
-		|| d.stdHz < 0 || d.deviationHz < 0 || d.voiceBandFraction < 0 || d.voiceBandFraction > 1
-		|| d.histogram.some(count => count < 0)
-		|| d.peakStdHz.some(std => std < 0)
-		|| d.peakSpacingHz.some(spacing => spacing <= 0)
-		|| (features.ctcss.kind === "tone" && (!Number.isFinite(features.ctcss.hz) || features.ctcss.hz < 67 || features.ctcss.hz > 254.1 || !Number.isFinite(features.ctcss.fraction)))
-		|| (features.symbolRate.kind === "supported" && (!Number.isFinite(features.symbolRate.fraction) || ![2400, 4800, 9600].includes(features.symbolRate.baud)))
-	) return fallback("invalid-evidence")
-	if (features.afsk.kind === "pair" && (features.afsk.markFraction < 0.08 || features.afsk.spaceFraction < 0.08 || features.afsk.markFraction + features.afsk.spaceFraction < 0.4))
+		![
+			d.binWidthHz,
+			d.centerOffsetHz,
+			d.deviationHz,
+			d.stdHz,
+			d.voiceBandFraction,
+			...d.histogram,
+			...d.peaksHz,
+			...d.peakStdHz,
+			...d.peakSpacingHz,
+			features.afsk.markFraction,
+			features.afsk.spaceFraction,
+			...Object.values(context.priors),
+		].every(Number.isFinite) ||
+		d.stdHz < 0 ||
+		d.deviationHz < 0 ||
+		d.voiceBandFraction < 0 ||
+		d.voiceBandFraction > 1 ||
+		d.histogram.some(count => count < 0) ||
+		d.peakStdHz.some(std => std < 0) ||
+		d.peakSpacingHz.some(spacing => spacing <= 0) ||
+		(features.ctcss.kind === "tone" &&
+			(!Number.isFinite(features.ctcss.hz) ||
+				features.ctcss.hz < 67 ||
+				features.ctcss.hz > 254.1 ||
+				!Number.isFinite(features.ctcss.fraction))) ||
+		(features.symbolRate.kind === "supported" &&
+			(!Number.isFinite(features.symbolRate.fraction) ||
+				![2400, 4800, 9600].includes(features.symbolRate.baud)))
+	)
 		return fallback("invalid-evidence")
-	if (features.afsk.kind === "ambiguous" || features.ctcss.kind === "ambiguous" || features.symbolRate.kind === "ambiguous")
+	if (
+		features.afsk.kind === "pair" &&
+		(features.afsk.markFraction < 0.08 ||
+			features.afsk.spaceFraction < 0.08 ||
+			features.afsk.markFraction + features.afsk.spaceFraction < 0.4)
+	)
+		return fallback("invalid-evidence")
+	if (
+		features.afsk.kind === "ambiguous" ||
+		features.ctcss.kind === "ambiguous" ||
+		features.symbolRate.kind === "ambiguous"
+	)
 		return fallback("ambiguous")
 	let cls: ScannerClass | undefined
 	if (features.afsk.kind === "pair") {
@@ -80,14 +124,17 @@ export function refineChannelClassification(
 		cls = context.obwHz <= 5500 ? "fsk4-6k25" : "fsk4-12k5"
 	} else if (
 		d.peaksHz.length === 2 &&
-		d.peaksHz[0]! >= -5000 && d.peaksHz[0]! <= -4000 &&
-		d.peaksHz[1]! >= 4000 && d.peaksHz[1]! <= 5000 &&
+		d.peaksHz[0]! >= -5000 &&
+		d.peaksHz[0]! <= -4000 &&
+		d.peaksHz[1]! >= 4000 &&
+		d.peaksHz[1]! <= 5000 &&
 		d.peakStdHz.every(std => std < 500)
 	) {
 		cls = "fsk2-wide"
 	} else if (
 		d.peaksHz.length === 1 &&
-		d.stdHz >= 1000 && d.stdHz <= 5000 &&
+		d.stdHz >= 1000 &&
+		d.stdHz <= 5000 &&
 		d.deviationHz <= 7500 &&
 		d.voiceBandFraction >= 0.3
 	) {
@@ -100,6 +147,7 @@ export function refineChannelClassification(
 		kind: "refined",
 		classification: { ...spectral, class: cls, hypotheses, tier: "channel" },
 		...(cls === "analog-fm" && features.ctcss.kind === "tone"
-			? { ctcssHz: features.ctcss.hz } : {}),
+			? { ctcssHz: features.ctcss.hz }
+			: {}),
 	}
 }

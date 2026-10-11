@@ -8,8 +8,12 @@ import type {
 import type { ScannerChannelProfile } from "../channel/consumer-types.js"
 
 function validEnvelope(value: ResourceEnvelope): boolean {
-	return Number.isFinite(value.cpu) && value.cpu >= 0 &&
-		Number.isSafeInteger(value.bytes) && value.bytes >= 0
+	return (
+		Number.isFinite(value.cpu) &&
+		value.cpu >= 0 &&
+		Number.isSafeInteger(value.bytes) &&
+		value.bytes >= 0
+	)
 }
 
 /** Prepares immutable, UNCHARGED cells. The core atomically admits at dequeue. */
@@ -22,21 +26,40 @@ export function prepareChannelAdmission(input: {
 	readonly activation: "decoder" | "direct"
 }): PreparedObservedPermit | undefined {
 	const { ledger, profile, request } = input
-	if (!ledger || !profile || !validEnvelope(profile.limits) ||
-		!validEnvelope(profile.baseline) || !Number.isFinite(input.captureRateHz)) return undefined
-	const coverage = profile.shapes.filter(shape =>
-		shape.captureRateHz === input.captureRateHz &&
-		shape.bandwidthHz === request.bandwidthHz &&
-		shape.transitionHz === request.transitionHz &&
-		shape.outputRateHz === request.outputRateHz && shape.format === request.format,
+	if (
+		!ledger ||
+		!profile ||
+		!validEnvelope(profile.limits) ||
+		!validEnvelope(profile.baseline) ||
+		!Number.isFinite(input.captureRateHz)
+	)
+		return undefined
+	const coverage = profile.shapes.filter(
+		shape =>
+			shape.captureRateHz === input.captureRateHz &&
+			shape.bandwidthHz === request.bandwidthHz &&
+			shape.transitionHz === request.transitionHz &&
+			shape.outputRateHz === request.outputRateHz &&
+			shape.format === request.format,
 	)
 	if (coverage.length !== 1) return undefined
 	const shape = coverage[0]!
-	if (![shape.nativeSend, shape.process, shape.downstream.decoder,
-		shape.downstream.classifier, shape.downstream.analog].every(validEnvelope)) return undefined
+	if (
+		![
+			shape.nativeSend,
+			shape.process,
+			shape.downstream.decoder,
+			shape.downstream.classifier,
+			shape.downstream.analog,
+		].every(validEnvelope)
+	)
+		return undefined
 	// Direct D=0 is accepted only when this exact reviewed shape explicitly covers it.
-	if (input.activation === "direct" &&
-		(shape.downstream.decoder.cpu !== 0 || shape.downstream.decoder.bytes !== 0)) return undefined
+	if (
+		input.activation === "direct" &&
+		(shape.downstream.decoder.cpu !== 0 || shape.downstream.decoder.bytes !== 0)
+	)
+		return undefined
 	return ledger.prepareObservedPermit(
 		input.handle.requestToken,
 		Array.from({ length: 6 }, () => Object.freeze({ ...shape.nativeSend })),

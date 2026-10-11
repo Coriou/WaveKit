@@ -4,6 +4,7 @@ import { join } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
+import type { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScanJob } from "@wavekit/api-types"
 import {
@@ -948,7 +949,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	it("finishes the shutdown when a job fails to dispose, and a failed start keeps its own error (finding 8)", async () => {
+	it("reports disposal failure after sibling shutdown, and a failed start keeps its own error (finding 8)", async () => {
 		const h = serviceHarness({ liveCaps: false, patch: noPassive })
 		const svc = h.service as unknown as {
 			createDriver(r: unknown): { dispose(): Promise<void> }
@@ -969,11 +970,16 @@ describe("ScannerService", () => {
 			mode: "in-window",
 			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
 		})
-		await h.service.stop()
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 		const jobs = JSON.parse(readFileSync(join(h.dir, "jobs.json"), "utf8"))
 			.jobs as { id: string }[]
 		expect(jobs.map(j => j.id)).toEqual([job.id])
 		expect(existsSync(join(h.dir, "discoveries.json"))).toBe(true)
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 	})
 
 	it("marks a persisted job that no longer plans as failed (finding 9)", async () => {
@@ -1132,25 +1138,60 @@ describe("ScannerService", () => {
 	})
 })
 
-
 describe("R14 immutable scanner component phase", () => {
 	it("an early own failure cannot complete40 while an independent component remains held", async () => {
-		const h = serviceHarness({ patch: settings => { settings.passive.enabled = false } })
-		const owner = (h.service as unknown as { consumerLifecycle: import("../../../../src/core/scanner/channel/consumer-lifecycle.js").ScannerLifecycleOwner }).consumerLifecycle
+		const h = serviceHarness({
+			patch: settings => {
+				settings.passive.enabled = false
+			},
+		})
+		const owner = (
+			h.service as unknown as {
+				consumerLifecycle: ScannerLifecycleOwner
+			}
+		).consumerLifecycle
 		let release!: () => void
-		const held = new Promise<void>(resolve => { release = resolve })
-		expect(owner.ownCleanup("classifier", () => Promise.resolve({ ok: false, state: "failed", detail: "fixture own failure" }))).toBe(true)
-		expect(owner.ownCleanup("admission", async () => { await held; return { ok: true } })).toBe(true)
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		expect(
+			owner.ownCleanup("classifier", () =>
+				Promise.resolve({
+					ok: false,
+					state: "failed",
+					detail: "fixture own failure",
+				}),
+			),
+		).toBe(true)
+		expect(
+			owner.ownCleanup("admission", async () => {
+				await held
+				return { ok: true }
+			}),
+		).toBe(true)
 		const first = h.service.beginStop()
 		expect(h.service.beginStop()).toBe(first)
 		let settledPhase = false
-		void first.producerSettled.then(() => { settledPhase = true }, () => { settledPhase = true })
+		void first.producerSettled.then(
+			() => {
+				settledPhase = true
+			},
+			() => {
+				settledPhase = true
+			},
+		)
 		await Promise.resolve()
 		await Promise.resolve()
 		expect(settledPhase).toBe(false)
 		release()
-		await expect(first.producerSettled).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
-		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
-		await expect(h.service.stop()).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		await expect(first.producerSettled).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 	})
 })

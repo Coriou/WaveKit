@@ -28,6 +28,7 @@ import type { SourceCaps } from "../../config.js"
 import type { DecoderConfig } from "../../decoders/types.js"
 import type { DecoderManager } from "../../decoders/manager.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import { WaveKitError } from "../../utils/errors.js"
 import type { DigitalVoiceService } from "../digital-voice.js"
 import type { LiveDemodulator } from "../live-demodulator.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
@@ -160,10 +161,23 @@ import { AMBIENT_PAIR_MS } from "./types.js"
 
 import type { ChannelProvider } from "../channelizer/types.js"
 import type { CleanupOutcome } from "../channelizer/settlement-observer.js"
-import { ScannerLifecycleOwner, type ScannerStopHandle } from "./channel/consumer-lifecycle.js"
+import {
+	ScannerLifecycleOwner,
+	type ScannerStopHandle,
+} from "./channel/consumer-lifecycle.js"
 import { ChannelTaps, type ChannelTapHandle } from "./channel/channel-tap.js"
-import { RecordingProducers, type RecordingGrantIdentity, type RecordingNativeOutcome, type RecordingProducerHandle } from "./channel/recording-producer.js"
-import type { ObservedDecoderEligibility, ScannerChannelOwnership, ScannerChannelProfile, ScannerChannelTier } from "./channel/consumer-types.js"
+import {
+	RecordingProducers,
+	type RecordingGrantIdentity,
+	type RecordingNativeOutcome,
+	type RecordingProducerHandle,
+} from "./channel/recording-producer.js"
+import type {
+	ObservedDecoderEligibility,
+	ScannerChannelOwnership,
+	ScannerChannelProfile,
+	ScannerChannelTier,
+} from "./channel/consumer-types.js"
 import { recordingEngineInstanceId } from "./store/recording-operation.js"
 import { extractChannelFeatures } from "./classify/channel-features.js"
 import { refineChannelClassification } from "./classify/channel-tier.js"
@@ -210,7 +224,6 @@ const MAINTENANCE_EVERY_MS = 5 * 60_000
 const STATUS_EVERY_MS = 1_000
 const RECENT_KEEP_MS = 10_000
 const RECONFIRM_AFTER_MS = 15 * 60_000
-const RESTORE_TIMEOUT_MS = 2_000
 /** Task 29 review, finding 6: bound on waiting for the source caps to show a restored tuning. */
 const RESTORE_CAPS_TIMEOUT_MS = 1_000
 const PASSIVE_COST_WINDOW_MS = 60_000
@@ -274,38 +287,24 @@ function linkOf(cfg: SourceConfig): "local" | "network" {
 		: "network"
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
-	return new Promise(resolve => {
-		const timer = setTimeout(() => resolve(fallback), ms)
-		timer.unref()
-		p.then(
-			v => {
-				clearTimeout(timer)
-				resolve(v)
-			},
-			() => {
-				clearTimeout(timer)
-				resolve(fallback)
-			},
-		)
-	})
-}
-
 export class ScannerService extends EventEmitter {
 	private readonly consumerLifecycle: ScannerLifecycleOwner
 	private readonly channelTaps: ChannelTaps | undefined
 	private readonly channelProducers: RecordingProducers
 	// Effective producer adoption requires Main's exact assembled runtime acceptance.
 	private readonly channelProducerAdopted: boolean = false
-	private readonly channelRecordingOwners = new Map<object, {
-		readonly identity: RecordingGrantIdentity
-		readonly tap: ChannelTapHandle
-		readonly observationId: string
-		producer: RecordingProducerHandle | undefined
-		offProof: (() => void) | undefined
-		nativeClosed: boolean
-		componentClosed: boolean
-	}>()
+	private readonly channelRecordingOwners = new Map<
+		object,
+		{
+			readonly identity: RecordingGrantIdentity
+			readonly tap: ChannelTapHandle
+			readonly observationId: string
+			producer: RecordingProducerHandle | undefined
+			offProof: (() => void) | undefined
+			nativeClosed: boolean
+			componentClosed: boolean
+		}
+	>()
 	private readonly channelSubscriptions: (() => void)[] = []
 	private readonly channelTier: ScannerChannelTier
 	private readonly log: Logger
@@ -390,212 +389,282 @@ export class ScannerService extends EventEmitter {
 
 	constructor(private readonly deps: ScannerServiceDeps) {
 		super()
-		if (deps.construction && deps.channelOwnership &&
-			deps.construction !== deps.channelOwnership.construction)
-			throw new WaveKitError("Scanner construction owner mismatch", "SCANNER_OWNER_MISMATCH")
+		if (
+			deps.construction &&
+			deps.channelOwnership &&
+			deps.construction !== deps.channelOwnership.construction
+		)
+			throw new WaveKitError(
+				"Scanner construction owner mismatch",
+				"SCANNER_OWNER_MISMATCH",
+			)
 		const external = deps.construction ?? deps.channelOwnership?.construction
 		this.consumerLifecycle = external ?? new ScannerLifecycleOwner()
-		this.channelTier = Object.freeze({ enabled: deps.channelTier?.enabled ?? false,
-			minMs: deps.channelTier?.minMs ?? 500 })
-		if (!Number.isInteger(this.channelTier.minMs) || this.channelTier.minMs < 300 || this.channelTier.minMs > 2000)
-			throw new WaveKitError("Invalid scanner channel tier", "SCANNER_CHANNEL_TIER_INVALID")
-		if (!this.consumerLifecycle.ownCleanup("service", () => this.cleanupServiceComponents()) ||
+		this.channelTier = Object.freeze({
+			enabled: deps.channelTier?.enabled ?? false,
+			minMs: deps.channelTier?.minMs ?? 500,
+		})
+		if (
+			!Number.isInteger(this.channelTier.minMs) ||
+			this.channelTier.minMs < 300 ||
+			this.channelTier.minMs > 2000
+		)
+			throw new WaveKitError(
+				"Invalid scanner channel tier",
+				"SCANNER_CHANNEL_TIER_INVALID",
+			)
+		if (
+			!this.consumerLifecycle.ownCleanup("service", () =>
+				this.cleanupServiceComponents(),
+			) ||
 			!this.consumerLifecycle.ownCleanup("probes", async () => {
 				if (this.probes) await this.probes.destroy()
 				return { ok: true }
-			}) || !this.consumerLifecycle.ownCleanup("tap", async () => this.channelTaps?.stop() ?? { ok: true }) ||
+			}) ||
+			!this.consumerLifecycle.ownCleanup(
+				"tap",
+				async () => this.channelTaps?.stop() ?? { ok: true },
+			) ||
 			!this.consumerLifecycle.ownCleanup("producer", async () => {
-				const results = await this.channelProducers?.stop() ?? []
+				const results = (await this.channelProducers?.stop()) ?? []
 				return results.some(result => !result.componentClosed)
-					? { ok: false, state: "failed", detail: "Scanner analog producer cleanup failed" } : { ok: true }
+					? {
+							ok: false,
+							state: "failed",
+							detail: "Scanner analog producer cleanup failed",
+						}
+					: { ok: true }
 			}) ||
 			!this.consumerLifecycle.ownCleanup("grants", async () => {
 				if (this.channelTaps) await this.channelTaps.stop()
 				for (const off of this.channelSubscriptions) off()
 				this.channelSubscriptions.length = 0
 				return { ok: true }
-			})) throw new WaveKitError("Scanner cleanup ownership unavailable", "SCANNER_OWNER_UNAVAILABLE")
+			})
+		)
+			throw new WaveKitError(
+				"Scanner cleanup ownership unavailable",
+				"SCANNER_OWNER_UNAVAILABLE",
+			)
 		try {
-		this.log = createComponentLogger(deps.logger, "ScannerService")
-		this.now = deps.now ?? Date.now
-		this.storageDir =
-			deps.settings.storage.dir || join(deps.stateDir, "scanner")
-		this.effective = mergeScannerSettings({
-			config: deps.settings,
-			sources: deps.sourceConfigs,
-			overrides: {},
-		})
-		this.persistence = new ScannerPersistence({
-			dir: this.storageDir,
-			logger: deps.logger,
-			now: this.now,
-		})
-		this.spectrum = new SpectrumService({
-			sources: deps.sources,
-			routing: deps.routing,
-			tuner: deps.tuner,
-			sourceConfigs: deps.sourceConfigs,
-			settings: () => this.settings(),
-			tuning: sourceId => this.engineTuning(sourceId),
-			// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
-			persistence: {
-				writeEngine: (sourceId, state) =>
-					this.writeEngineState(sourceId, state),
-				loadEngine: sourceId => this.persistence.loadEngine(sourceId),
-				// Occupancy keeps the same gate (S1-B final review, Info 2).
-				writeOccupancy: (sourceId, state) =>
-					this.configLoaded
-						? this.persistence.writeOccupancy(sourceId, state)
-						: Promise.resolve(),
-				loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
-			},
-			logger: deps.logger,
-			now: this.now,
-			engineHost: deps.engineHost ?? "thread",
-			...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
-			// From the open, so the pool's lag guard sees every stream boundary (Task 34).
-			engineCreated: (sourceId, engine) =>
-				this.probes.watchEngine(sourceId, engine),
-		})
-		this.store = new DiscoveryStore({
-			maxDiscoveries: deps.settings.storage.maxDiscoveries,
-			now: this.now,
-			newId: () => ulid(this.now()),
-			minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
-			rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
-		})
-		this.evidence = new EvidenceStore({
-			dir: this.storageDir,
-			caps: storageCaps(deps.settings),
-			logger: deps.logger,
-			now: this.now,
-			isDiscoveryLive: id => this.store.get(id) !== undefined,
-		})
-		this.evidence.configureAnalog({
-			authorityHealthy: () => this.stateLoaded && this.recordingRecoveryHealthy,
-			// Effective channel consumer adoption is separately gated. No grant is inferred here.
-			bindingLive: binding => this.channelProducerAdopted && this.channelProducers?.bindingLive(binding) === true,
-			association: (discoveryId, observationId, binding) =>
-				this.store.recordingAssociation(discoveryId, observationId, binding),
-			prepare: metadata =>
-				this.acknowledgeRecordingMutation(beforeEmit => {
-					this.store.prepareRecording(metadata, beforeEmit)
-				}),
-			inverse: operationId =>
-				this.acknowledgeRecordingMutation(beforeEmit => {
-					this.store.removePreparedRecording(operationId, beforeEmit)
-				}),
-			buildCommitPlan: operationId =>
-				this.store.buildRecordingCommitPlan(operationId),
-			commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
-			publishCommit: plan => this.store.publishRecordingCommit(plan),
-		})
-		this.captures = new CaptureStore({
-			dir: join(this.storageDir, "captures"),
-			logger: deps.logger,
-			now: this.now,
-		})
-		this.recorder = new CaptureRecorder({
-			store: this.captures,
-			engines: sourceId => this.spectrum.engine(sourceId),
-			diskOk: () => this.disk === "ok",
-			logger: deps.logger,
-			now: this.now,
-		})
-		// Each capture can be ~100 MB: enforce the cap at once, not only at the 5 min maintenance.
-		this.recorder.on("captured", () => {
-			this.captures
-				.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
-				.catch((err: unknown) =>
-					this.log.warn({ err }, "Capture retention failed"),
-				)
-		})
-		this.arbiter = new TunerArbiter({
-			tuner: deps.tuner,
-			sources: deps.sources,
-			epochs: sourceId => this.spectrum.engine(sourceId),
-			settings: () => this.settings(),
-			link: sourceId => {
-				const cfg = deps.sourceConfigs.find(c => c.id === sourceId)
-				return cfg ? linkOf(cfg) : "network"
-			},
-			persistLease: (sourceId, lease) => this.onPersistLease(sourceId, lease),
-			impactSources: {
-				liveDemod: deps.liveDemod,
-				digitalVoice: deps.digitalVoice,
-				decoders: deps.decoders,
-			},
-			scannerJobsOn: (sourceId, except) =>
-				[...this.jobs.values()]
-					.filter(
-						j =>
-							j.spec.sourceId === sourceId &&
-							!j.passive &&
-							j.id !== except &&
-							!isTerminal(j.state),
-					)
-					.map(j => j.id),
-			// Ruling R1: `preempted-job` is invalid from `starting`; the new job gets 409 and retries.
-			canHandOver: jobId => this.jobs.get(jobId)?.state !== "starting",
-			logger: deps.logger,
-			now: this.now,
-		})
-		this.probes = new ProbePool({
-			decoders: deps.decoders,
-			digitalVoice: deps.digitalVoice,
-			engines: sourceId => this.spectrum.engine(sourceId),
-			settings: () => this.settings(),
-			transports: deps.transports ?? [offsetTransport],
-			cpu: {
-				get normalisedPercent() {
-					return deps.cpuMeter?.normalisedPercent ?? null
+			this.log = createComponentLogger(deps.logger, "ScannerService")
+			this.now = deps.now ?? Date.now
+			this.storageDir =
+				deps.settings.storage.dir || join(deps.stateDir, "scanner")
+			this.effective = mergeScannerSettings({
+				config: deps.settings,
+				sources: deps.sourceConfigs,
+				overrides: {},
+			})
+			this.persistence = new ScannerPersistence({
+				dir: this.storageDir,
+				logger: deps.logger,
+				now: this.now,
+			})
+			this.spectrum = new SpectrumService({
+				sources: deps.sources,
+				routing: deps.routing,
+				tuner: deps.tuner,
+				sourceConfigs: deps.sourceConfigs,
+				settings: () => this.settings(),
+				tuning: sourceId => this.engineTuning(sourceId),
+				// Engine state keeps the config-load gate (Task 35): never written when jobs and settings could not be read.
+				persistence: {
+					writeEngine: (sourceId, state) =>
+						this.writeEngineState(sourceId, state),
+					loadEngine: sourceId => this.persistence.loadEngine(sourceId),
+					// Occupancy keeps the same gate (S1-B final review, Info 2).
+					writeOccupancy: (sourceId, state) =>
+						this.configLoaded
+							? this.persistence.writeOccupancy(sourceId, state)
+							: Promise.resolve(),
+					loadOccupancy: sourceId => this.persistence.loadOccupancy(sourceId),
 				},
-			},
-			engineCount: () => this.spectrum.sourceIds().length,
-			storageDir: this.storageDir,
-			allocatePort: () => this.allocatePort(),
-			logger: deps.logger,
-			now: this.now,
-		})
-		this.ambient = new AmbientEvidence({
-			decoders: deps.decoders,
-			targetOf: id => this.ambientTarget(id),
-			epochOf: sourceId =>
-				this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
-			logger: deps.logger,
-			now: this.now,
-		})
-		this.channelTaps = deps.channelOwnership ? new ChannelTaps({
-			channels: deps.channels, ownership: deps.channelOwnership, profile: deps.channelProfile,
-			maxSources: Math.max(1, deps.sourceConfigs.length), now: () => performance.now(),
-		}) : undefined
-		this.channelProducers = new RecordingProducers({
-			enabled: this.channelTier.enabled, profileReady: Boolean(deps.channelProfile && deps.channelOwnership?.ledger),
-			adoptionReady: this.channelProducerAdopted, maxOwners: Math.max(1, deps.sourceConfigs.length),
-			isCurrentCommitted: identity => {
-				const owner = this.channelRecordingOwners.get(identity.token)
-				return owner !== undefined && owner.identity.provider === identity.provider &&
-					identity.provider === deps.channels && owner.tap.current &&
-					Object.entries(owner.identity.binding).every(([key, value]) => Reflect.get(identity.binding, key) === value)
-			},
-			beginAnalogComponent: identity => this.channelRecordingOwners.get(identity.token)?.tap.beginAnalog() === true,
-			beginAnalog: input => this.evidence.beginAnalog(input),
-			releaseLogical: identity => this.channelRecordingOwners.get(identity.token)?.tap.releaseLogical() ??
-				Promise.reject(new WaveKitError("Scanner recording owner missing", "SCANNER_CHANNEL_CLEANUP_PENDING")),
-		})
-		if (deps.channelOwnership) {
-			this.channelSubscriptions.push(deps.channelOwnership.observer.subscribeGrants((handle) => {
-				if (this.consumerLifecycle.admissionSealed) handle.cancel()
-			}))
-			this.channelSubscriptions.push(deps.channelOwnership.observer.subscribeEnded(() => {
-				this.channelTaps?.tick()
-			}))
-		}
-		if (!external) this.consumerLifecycle.completeConstruction({ ok: true })
+				logger: deps.logger,
+				now: this.now,
+				engineHost: deps.engineHost ?? "thread",
+				...(deps.hostCentre ? { hostCentre: deps.hostCentre } : {}),
+				// From the open, so the pool's lag guard sees every stream boundary (Task 34).
+				engineCreated: (sourceId, engine) =>
+					this.probes.watchEngine(sourceId, engine),
+			})
+			this.store = new DiscoveryStore({
+				maxDiscoveries: deps.settings.storage.maxDiscoveries,
+				now: this.now,
+				newId: () => ulid(this.now()),
+				minSurfaceBlocks: deps.settings.detection.minSurfaceBlocks,
+				rasters: (sourceId, hz) => this.rastersAt(sourceId, hz),
+			})
+			this.evidence = new EvidenceStore({
+				dir: this.storageDir,
+				caps: storageCaps(deps.settings),
+				logger: deps.logger,
+				now: this.now,
+				isDiscoveryLive: id => this.store.get(id) !== undefined,
+			})
+			this.evidence.configureAnalog({
+				authorityHealthy: () =>
+					this.stateLoaded && this.recordingRecoveryHealthy,
+				// Effective channel consumer adoption is separately gated. No grant is inferred here.
+				bindingLive: binding =>
+					this.channelProducerAdopted &&
+					this.channelProducers?.bindingLive(binding) === true,
+				association: (discoveryId, observationId, binding) =>
+					this.store.recordingAssociation(discoveryId, observationId, binding),
+				prepare: metadata =>
+					this.acknowledgeRecordingMutation(beforeEmit => {
+						this.store.prepareRecording(metadata, beforeEmit)
+					}),
+				inverse: operationId =>
+					this.acknowledgeRecordingMutation(beforeEmit => {
+						this.store.removePreparedRecording(operationId, beforeEmit)
+					}),
+				buildCommitPlan: operationId =>
+					this.store.buildRecordingCommitPlan(operationId),
+				commitPlanCurrent: plan => this.store.recordingCommitPlanCurrent(plan),
+				publishCommit: plan => this.store.publishRecordingCommit(plan),
+			})
+			this.captures = new CaptureStore({
+				dir: join(this.storageDir, "captures"),
+				logger: deps.logger,
+				now: this.now,
+			})
+			this.recorder = new CaptureRecorder({
+				store: this.captures,
+				engines: sourceId => this.spectrum.engine(sourceId),
+				diskOk: () => this.disk === "ok",
+				logger: deps.logger,
+				now: this.now,
+			})
+			// Each capture can be ~100 MB: enforce the cap at once, not only at the 5 min maintenance.
+			this.recorder.on("captured", () => {
+				this.captures
+					.retention(this.settings().storage.maxCapturesMb * 1024 * 1024)
+					.catch((err: unknown) =>
+						this.log.warn({ err }, "Capture retention failed"),
+					)
+			})
+			this.arbiter = new TunerArbiter({
+				tuner: deps.tuner,
+				sources: deps.sources,
+				epochs: sourceId => this.spectrum.engine(sourceId),
+				settings: () => this.settings(),
+				link: sourceId => {
+					const cfg = deps.sourceConfigs.find(c => c.id === sourceId)
+					return cfg ? linkOf(cfg) : "network"
+				},
+				persistLease: (sourceId, lease) => this.onPersistLease(sourceId, lease),
+				impactSources: {
+					liveDemod: deps.liveDemod,
+					digitalVoice: deps.digitalVoice,
+					decoders: deps.decoders,
+				},
+				scannerJobsOn: (sourceId, except) =>
+					[...this.jobs.values()]
+						.filter(
+							j =>
+								j.spec.sourceId === sourceId &&
+								!j.passive &&
+								j.id !== except &&
+								!isTerminal(j.state),
+						)
+						.map(j => j.id),
+				// Ruling R1: `preempted-job` is invalid from `starting`; the new job gets 409 and retries.
+				canHandOver: jobId => this.jobs.get(jobId)?.state !== "starting",
+				logger: deps.logger,
+				now: this.now,
+			})
+			this.probes = new ProbePool({
+				decoders: deps.decoders,
+				digitalVoice: deps.digitalVoice,
+				engines: sourceId => this.spectrum.engine(sourceId),
+				settings: () => this.settings(),
+				transports: deps.transports ?? [offsetTransport],
+				cpu: {
+					get normalisedPercent() {
+						return deps.cpuMeter?.normalisedPercent ?? null
+					},
+				},
+				engineCount: () => this.spectrum.sourceIds().length,
+				storageDir: this.storageDir,
+				allocatePort: () => this.allocatePort(),
+				logger: deps.logger,
+				now: this.now,
+			})
+			this.ambient = new AmbientEvidence({
+				decoders: deps.decoders,
+				targetOf: id => this.ambientTarget(id),
+				epochOf: sourceId =>
+					this.spectrum.engine(sourceId)?.currentEpoch().epoch ?? null,
+				logger: deps.logger,
+				now: this.now,
+			})
+			this.channelTaps = deps.channelOwnership
+				? new ChannelTaps({
+						channels: deps.channels,
+						ownership: deps.channelOwnership,
+						profile: deps.channelProfile,
+						maxSources: Math.max(1, deps.sourceConfigs.length),
+						now: () => performance.now(),
+					})
+				: undefined
+			this.channelProducers = new RecordingProducers({
+				enabled: this.channelTier.enabled,
+				profileReady: Boolean(
+					deps.channelProfile && deps.channelOwnership?.ledger,
+				),
+				adoptionReady: this.channelProducerAdopted,
+				maxOwners: Math.max(1, deps.sourceConfigs.length),
+				isCurrentCommitted: identity => {
+					const owner = this.channelRecordingOwners.get(identity.token)
+					return (
+						owner !== undefined &&
+						owner.identity.provider === identity.provider &&
+						identity.provider === deps.channels &&
+						owner.tap.current &&
+						Object.entries(owner.identity.binding).every(
+							([key, value]) => Reflect.get(identity.binding, key) === value,
+						)
+					)
+				},
+				beginAnalogComponent: identity =>
+					this.channelRecordingOwners.get(identity.token)?.tap.beginAnalog() ===
+					true,
+				beginAnalog: input => this.evidence.beginAnalog(input),
+				releaseLogical: identity =>
+					this.channelRecordingOwners
+						.get(identity.token)
+						?.tap.releaseLogical() ??
+					Promise.reject(
+						new WaveKitError(
+							"Scanner recording owner missing",
+							"SCANNER_CHANNEL_CLEANUP_PENDING",
+						),
+					),
+			})
+			if (deps.channelOwnership) {
+				this.channelSubscriptions.push(
+					deps.channelOwnership.observer.subscribeGrants(handle => {
+						if (this.consumerLifecycle.admissionSealed) handle.cancel()
+					}),
+				)
+				this.channelSubscriptions.push(
+					deps.channelOwnership.observer.subscribeEnded(() => {
+						this.channelTaps?.tick()
+					}),
+				)
+			}
+			if (!external) this.consumerLifecycle.completeConstruction({ ok: true })
 		} catch (error) {
 			if (!external) {
-				this.consumerLifecycle.completeConstruction({ ok: false, state: "failed", detail: "Scanner construction failed" })
-				void this.consumerLifecycle.beginStop().producerSettled.catch(() => undefined)
+				this.consumerLifecycle.completeConstruction({
+					ok: false,
+					state: "failed",
+					detail: "Scanner construction failed",
+				})
+				void this.consumerLifecycle
+					.beginStop()
+					.producerSettled.catch(() => undefined)
 			}
 			throw error
 		}
@@ -612,7 +681,10 @@ export class ScannerService extends EventEmitter {
 	// === lifecycle ===
 
 	start(): Promise<void> {
-		if (this.consumerLifecycle.admissionSealed) return Promise.reject(new WaveKitError("Scanner admission is sealed", "SCANNER_STOPPED"))
+		if (this.consumerLifecycle.admissionSealed)
+			return Promise.reject(
+				new WaveKitError("Scanner admission is sealed", "SCANNER_STOPPED"),
+			)
 		if (this.startPromise) return this.startPromise
 		if (this.started) return Promise.resolve()
 		this.startupAttempted = true
@@ -781,7 +853,9 @@ export class ScannerService extends EventEmitter {
 		)
 	}
 
-	sealAdmission(_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown"): void {
+	sealAdmission(
+		_reason: "shutdown" | "source-loss" | "provider-change" = "shutdown",
+	): void {
 		this.consumerLifecycle.sealAdmission()
 		this.started = false
 		if (this.timer) clearInterval(this.timer)
@@ -796,8 +870,10 @@ export class ScannerService extends EventEmitter {
 	}
 
 	finalizeStopNative(): Promise<void> {
-		return this.consumerLifecycle.finalizeStopNative(this.deps.channelOwnership?.observer,
-			this.deps.channelOwnership?.lifetime)
+		return this.consumerLifecycle.finalizeStopNative(
+			this.deps.channelOwnership?.observer,
+			this.deps.channelOwnership?.lifetime,
+		)
 	}
 
 	async stop(): Promise<void> {
@@ -810,47 +886,85 @@ export class ScannerService extends EventEmitter {
 	/** EACH independent actual component settles before an aggregate failure; no native66 wait. */
 	private async cleanupServiceComponents(): Promise<CleanupOutcome> {
 		let failed = false
-		const attempt = async (cleanup: () => unknown | Promise<unknown>): Promise<void> => {
-			try { await cleanup() } catch { failed = true }
+		const attempt = async (
+			cleanup: () => unknown | Promise<unknown>,
+		): Promise<void> => {
+			try {
+				await cleanup()
+			} catch {
+				failed = true
+			}
 		}
-		await attempt(async () => { await this.startPromise })
+		await attempt(async () => {
+			await this.startPromise
+		})
 		this.startPromise = null
-		await attempt(() => this.deps.sources.off("connected", this.onSourceConnected))
-		await attempt(() => this.deps.sources.off("caps-changed", this.onCapsChanged))
-		await attempt(() => this.deps.sources.off("source-removed", this.onSourceRemoved))
+		await attempt(() =>
+			this.deps.sources.off("connected", this.onSourceConnected),
+		)
+		await attempt(() =>
+			this.deps.sources.off("caps-changed", this.onCapsChanged),
+		)
+		await attempt(() =>
+			this.deps.sources.off("source-removed", this.onSourceRemoved),
+		)
 		if (this.arbiter) {
 			await attempt(() => this.arbiter.off("source-down", this.onSourceDown))
 			await attempt(() => this.arbiter.off("source-up", this.onSourceUp))
 			await attempt(() => this.arbiter.off("recovered", this.onRecovered))
 		}
-		for (const outcome of await Promise.allSettled([...this.background, this.passiveChain,
-			...[...this.drivers.values()].map(driver => driver.idle()), ...this.arbitrations.values()]))
+		for (const outcome of await Promise.allSettled([
+			...this.background,
+			this.passiveChain,
+			...[...this.drivers.values()].map(driver => driver.idle()),
+			...this.arbitrations.values(),
+		]))
 			if (outcome.status === "rejected") failed = true
 		if (this.spectrum && this.arbiter) {
-			await Promise.all(this.spectrum.sourceIds().map(sourceId => attempt(async () => {
-				const lease = this.arbiter.holder(sourceId)
-				if (!lease) return
-				const result = await this.arbiter.release(lease, { restore: true })
-				if (result.restored.length > 0)
-					await this.awaitRestoredCaps(sourceId, lease.snapshot, result.restored)
-			})))
+			await Promise.all(
+				this.spectrum.sourceIds().map(sourceId =>
+					attempt(async () => {
+						const lease = this.arbiter.holder(sourceId)
+						if (!lease) return
+						const result = await this.arbiter.release(lease, { restore: true })
+						if (result.restored.length > 0)
+							await this.awaitRestoredCaps(
+								sourceId,
+								lease.snapshot,
+								result.restored,
+							)
+					}),
+				),
+			)
 		}
 		if (this.evidence) await attempt(() => this.evidence.stopAnalog())
-		await Promise.all([...this.drivers.values()].map(driver => attempt(() => driver.dispose())))
+		await Promise.all(
+			[...this.drivers.values()].map(driver => attempt(() => driver.dispose())),
+		)
 		if (this.ambient) await attempt(() => this.ambient.stop())
 		await attempt(() => this.deps.cpuMeter?.stop())
 		if (this.recorder) await attempt(() => this.recorder.stop())
 		if (this.spectrum) {
 			await attempt(() => this.spectrum.stop())
-			await attempt(() => this.spectrum.off("pipeline", this.onSpectrumPipeline))
+			await attempt(() =>
+				this.spectrum.off("pipeline", this.onSpectrumPipeline),
+			)
 			await attempt(() => this.spectrum.off("stream", this.onEngineStream))
 			await attempt(() => this.spectrum.off("released", this.onEngineReleased))
 			await attempt(() => this.spectrum.off("fatal", this.onEngineFatal))
 		}
 		if (this.arbiter) await attempt(() => this.arbiter.dispose())
-		if (this.stateLoaded) await attempt(() => this.persistence.writeSnapshot(this.store.snapshot()))
-		if (this.startupAttempted && this.persistence) await attempt(() => this.persistJobs())
-		return failed ? { ok: false, state: "failed", detail: "Scanner component cleanup failed" } : { ok: true }
+		if (this.stateLoaded)
+			await attempt(() => this.persistence.writeSnapshot(this.store.snapshot()))
+		if (this.startupAttempted && this.persistence)
+			await attempt(() => this.persistJobs())
+		return failed
+			? {
+					ok: false,
+					state: "failed",
+					detail: "Scanner component cleanup failed",
+				}
+			: { ok: true }
 	}
 
 	// === status and settings ===
@@ -1605,9 +1719,18 @@ export class ScannerService extends EventEmitter {
 		}
 		const needs = !synthetic && !late && this.needsConfirm(live, track)
 		for (const d of covering) d.onTrack(live, track, needs)
-		if (!closing) { this.refineLiveChannel(live, track); return }
-		if (endReason !== "quiet" && endReason !== "max-duration" || !this.finishChannelRecording(live.observationId))
-			this.cancelChannelSource(sourceId, endReason === "gap" ? "stream-changed" : "cancelled")
+		if (!closing) {
+			this.refineLiveChannel(live, track)
+			return
+		}
+		if (
+			(endReason !== "quiet" && endReason !== "max-duration") ||
+			!this.finishChannelRecording(live.observationId)
+		)
+			this.cancelChannelSource(
+				sourceId,
+				endReason === "gap" ? "stream-changed" : "cancelled",
+			)
 		this.rememberClosed(track.trackId)
 		for (const jobId of live.jobIds)
 			this.drivers.get(jobId)?.onTrackClosed(track.trackId)
@@ -1737,125 +1860,279 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private refineLiveChannel(live: LiveObservation, track: TrackSnapshot): void {
-		const ownership = this.deps.channelOwnership, profile = this.deps.channelProfile
-		if (!this.channelTier.enabled || !this.channelTaps || !ownership?.ledger || !profile ||
-			this.consumerLifecycle.admissionSealed || live.encrypted || track.tuningTrust === "unverified" ||
-			!Number.isFinite(track.obwHz) || track.obwHz > 16_000 || track.flags.truncated ||
-			track.flags.edge || track.flags.iqImage || track.flags.spur) return
-		const source = this.deps.sourceConfigs.find(config => config.id === live.sourceId)
+		const ownership = this.deps.channelOwnership,
+			profile = this.deps.channelProfile
+		if (
+			!this.channelTier.enabled ||
+			!this.channelTaps ||
+			!ownership?.ledger ||
+			!profile ||
+			this.consumerLifecycle.admissionSealed ||
+			live.encrypted ||
+			track.tuningTrust === "unverified" ||
+			!Number.isFinite(track.obwHz) ||
+			track.obwHz > 16_000 ||
+			track.flags.truncated ||
+			track.flags.edge ||
+			track.flags.iqImage ||
+			track.flags.spur
+		)
+			return
+		const source = this.deps.sourceConfigs.find(
+			config => config.id === live.sourceId,
+		)
 		if (!source || source.type === "recording") return
 		const engine = this.spectrum.engine(live.sourceId)
 		if (!engine || engine.format !== "U8_IQ") return
 		const epoch = engine.currentEpoch()
 		const caps = this.deps.sources.getCaps(live.sourceId)
-		if (!caps || caps.kind !== "iq" || caps.format !== "U8_IQ" ||
-			caps.sampleRate !== epoch.sampleRateHz || caps.centerFreq !== epoch.centreHz) return
-		const offsetCount = this.probes.status().filter(probe => probe.transport === "offset").length
-		if (profile.baselineEngineCount !== this.spectrum.sourceIds().length ||
-			profile.baselineOffsetCount !== offsetCount) return
+		if (
+			!caps ||
+			caps.kind !== "iq" ||
+			caps.format !== "U8_IQ" ||
+			caps.sampleRate !== epoch.sampleRateHz ||
+			caps.centerFreq !== epoch.centreHz
+		)
+			return
+		const offsetCount = this.probes
+			.status()
+			.filter(probe => probe.transport === "offset").length
+		if (
+			profile.baselineEngineCount !== this.spectrum.sourceIds().length ||
+			profile.baselineOffsetCount !== offsetCount
+		)
+			return
 		const admission = ownership.ledger.admissionSnapshot()
-		if (!updateChannelAdmission(ownership.ledger, admission.version, profile.baseline, {
-			cpu: Math.min(profile.limits.cpu, this.settings().cpuBudgetCores), bytes: profile.limits.bytes,
-		})) return
+		if (
+			!updateChannelAdmission(
+				ownership.ledger,
+				admission.version,
+				profile.baseline,
+				{
+					cpu: Math.min(profile.limits.cpu, this.settings().cpuBudgetCores),
+					bytes: profile.limits.bytes,
+				},
+			)
+		)
+			return
 		const identity = Object.freeze({})
 		const captureCurrent = (): boolean => {
 			const now = engine.currentEpoch()
 			const currentCaps = this.deps.sources.getCaps(live.sourceId)
-			return currentCaps?.kind === "iq" && currentCaps.format === "U8_IQ" &&
-				currentCaps.sampleRate === epoch.sampleRateHz && currentCaps.centerFreq === epoch.centreHz &&
+			return (
+				currentCaps?.kind === "iq" &&
+				currentCaps.format === "U8_IQ" &&
+				currentCaps.sampleRate === epoch.sampleRateHz &&
+				currentCaps.centerFreq === epoch.centreHz &&
 				!this.consumerLifecycle.admissionSealed &&
-				this.spectrum.engine(live.sourceId) === engine && now.stream === epoch.stream &&
-				now.epoch === epoch.epoch && now.sampleRateHz === epoch.sampleRateHz &&
-				now.centreHz === epoch.centreHz && now.gainKey === epoch.gainKey &&
-				now.tuningTrust === epoch.tuningTrust && !live.encrypted
+				this.spectrum.engine(live.sourceId) === engine &&
+				now.stream === epoch.stream &&
+				now.epoch === epoch.epoch &&
+				now.sampleRateHz === epoch.sampleRateHz &&
+				now.centreHz === epoch.centreHz &&
+				now.gainKey === epoch.gainKey &&
+				now.tuningTrust === epoch.tuningTrust &&
+				!live.encrypted
+			)
 		}
-		const current = (): boolean => captureCurrent() && this.live.get(live.trackId) === live && !live.evidenceDeleted
+		const current = (): boolean =>
+			captureCurrent() &&
+			this.live.get(live.trackId) === live &&
+			!live.evidenceDeleted
 		this.channelTaps.begin({
-			attempt: Object.freeze({ identity, sourceId: live.sourceId,
-				decoderId: `scanner-tap-${ulid(this.now())}`, engine,
-				engineInstanceId: recordingEngineInstanceId(engine), stream: epoch.stream, epoch: epoch.epoch,
-				captureRateHz: epoch.sampleRateHz, captureCentreHz: epoch.centreHz, targetHz: track.centreHz,
-				tuningTrust: epoch.tuningTrust, gainKey: epoch.gainKey }),
-			current: captureCurrent, minMs: this.channelTier.minMs,
+			attempt: Object.freeze({
+				identity,
+				sourceId: live.sourceId,
+				decoderId: `scanner-tap-${ulid(this.now())}`,
+				engine,
+				engineInstanceId: recordingEngineInstanceId(engine),
+				stream: epoch.stream,
+				epoch: epoch.epoch,
+				captureRateHz: epoch.sampleRateHz,
+				captureCentreHz: epoch.centreHz,
+				targetHz: track.centreHz,
+				tuningTrust: epoch.tuningTrust,
+				gainKey: epoch.gainKey,
+			}),
+			current: captureCurrent,
+			minMs: this.channelTier.minMs,
 			collected: (result, tap) => {
 				try {
 					if (!current() || !tap.current) return
-					const features = extractChannelFeatures(result.samples, { outputRateHz: result.outputRateHz,
-						format: result.format, snrDb: track.snrDb, minMs: this.channelTier.minMs, gaps: result.gaps })
-					const refined = refineChannelClassification(live.classification, features, {
-						...this.classifierContext(live.sourceId, track.centreHz),
-						rfTrusted: epoch.tuningTrust !== "unverified", obwHz: track.obwHz,
+					const features = extractChannelFeatures(result.samples, {
+						outputRateHz: result.outputRateHz,
+						format: result.format,
+						snrDb: track.snrDb,
+						minMs: this.channelTier.minMs,
+						gaps: result.gaps,
 					})
+					const refined = refineChannelClassification(
+						live.classification,
+						features,
+						{
+							...this.classifierContext(live.sourceId, track.centreHz),
+							rfTrusted: epoch.tuningTrust !== "unverified",
+							obwHz: track.obwHz,
+						},
+					)
 					const discoveryId = this.store.discoveryIdOf(live.observationId)
-					if (refined.kind !== "refined" || !discoveryId || !current() || !tap.current) return
+					if (
+						refined.kind !== "refined" ||
+						!discoveryId ||
+						!current() ||
+						!tap.current
+					)
+						return
 					this.store.applyClassification(discoveryId, refined.classification)
-					if (current() && tap.current && this.store.discoveryIdOf(live.observationId) === discoveryId)
+					if (
+						current() &&
+						tap.current &&
+						this.store.discoveryIdOf(live.observationId) === discoveryId
+					)
 						live.classification = refined.classification
 				} finally {
 					// Classifier F is settled by ChannelTaps after this callback returns.
-					void Promise.resolve().then(() => this.startChannelRecording(live, tap, current)).catch(() => {
-						tap.cancel()
-					})
+					void Promise.resolve()
+						.then(() => this.startChannelRecording(live, tap, current))
+						.catch(() => {
+							tap.cancel()
+						})
 				}
 			},
 		})
 	}
 
-	private async startChannelRecording(live: LiveObservation, tap: ChannelTapHandle, current: () => boolean): Promise<void> {
+	private async startChannelRecording(
+		live: LiveObservation,
+		tap: ChannelTapHandle,
+		current: () => boolean,
+	): Promise<void> {
 		const binding = tap.prepared.lifecycle.binding
 		const channels = this.deps.channels
-		const job = live.jobIds.map(id => this.jobs.get(id)?.spec).find(spec => spec?.record.analog)
+		const job = live.jobIds
+			.map(id => this.jobs.get(id)?.spec)
+			.find(spec => spec?.record.analog)
 		const discoveryId = this.store.discoveryIdOf(live.observationId)
-		if (!this.channelProducerAdopted || !current() || !binding || !channels || !job ||
-			!discoveryId || live.classification.class !== "analog-fm" || live.encrypted) {
+		if (
+			!this.channelProducerAdopted ||
+			!current() ||
+			!binding ||
+			!channels ||
+			!job ||
+			!discoveryId ||
+			live.classification.class !== "analog-fm" ||
+			live.encrypted
+		) {
 			await tap.finish()
 			return
 		}
 		const attempt = tap.prepared.lifecycle.attempt
 		const token = tap.prepared.handle.requestToken
-		const identity: RecordingGrantIdentity = Object.freeze({ provider: channels, token,
-			binding: Object.freeze({ sourceId: attempt.sourceId, engineInstanceId: attempt.engineInstanceId,
-				stream: attempt.stream, epoch: attempt.epoch, channelId: binding.channelId,
-				channelGeneration: binding.generation, inputFormat: "cf32" as const, inputSampleRateHz: 48000,
-				groupDelayInputSamples: binding.realised.groupDelaySamples, targetHz: attempt.targetHz,
-				captureCentreHz: attempt.captureCentreHz, tuningTrust: attempt.tuningTrust }) })
+		const identity: RecordingGrantIdentity = Object.freeze({
+			provider: channels,
+			token,
+			binding: Object.freeze({
+				sourceId: attempt.sourceId,
+				engineInstanceId: attempt.engineInstanceId,
+				stream: attempt.stream,
+				epoch: attempt.epoch,
+				channelId: binding.channelId,
+				channelGeneration: binding.generation,
+				inputFormat: "cf32" as const,
+				inputSampleRateHz: 48000,
+				groupDelayInputSamples: binding.realised.groupDelaySamples,
+				targetHz: attempt.targetHz,
+				captureCentreHz: attempt.captureCentreHz,
+				tuningTrust: attempt.tuningTrust,
+			}),
+		})
 		let resolveNative!: (outcome: RecordingNativeOutcome) => void
-		const nativeOwnershipSettled = new Promise<RecordingNativeOutcome>(resolve => { resolveNative = resolve })
-		const owner = { identity, tap, observationId: live.observationId,
+		const nativeOwnershipSettled = new Promise<RecordingNativeOutcome>(
+			resolve => {
+				resolveNative = resolve
+			},
+		)
+		const owner = {
+			identity,
+			tap,
+			observationId: live.observationId,
 			producer: undefined as RecordingProducerHandle | undefined,
-			offProof: undefined as (() => void) | undefined, nativeClosed: false, componentClosed: false }
+			offProof: undefined as (() => void) | undefined,
+			nativeClosed: false,
+			componentClosed: false,
+		}
 		// One source slot already owns this exact token, including its pending/closing liabilities.
-		if (this.channelRecordingOwners.has(token)) { tap.cancel(); return }
+		if (this.channelRecordingOwners.has(token)) {
+			tap.cancel()
+			return
+		}
 		this.channelRecordingOwners.set(token, owner)
 		const inspect = (): void => {
 			const state = tap.prepared.handle.snapshot()
-			if (!owner.nativeClosed && state.logical === "terminal" && state.native === "settled") {
+			if (
+				!owner.nativeClosed &&
+				state.logical === "terminal" &&
+				state.native === "settled"
+			) {
 				owner.nativeClosed = true
-				resolveNative(Object.freeze({ status: "released", provider: channels, token }))
+				resolveNative(
+					Object.freeze({ status: "released", provider: channels, token }),
+				)
 			}
-			if (owner.nativeClosed && owner.componentClosed && state.local === "settled" &&
-				Object.values(state.components).every(value => value === "settled")) {
+			if (
+				owner.nativeClosed &&
+				owner.componentClosed &&
+				state.local === "settled" &&
+				Object.values(state.components).every(value => value === "settled")
+			) {
 				owner.offProof?.()
 				owner.offProof = undefined
-				if (this.channelRecordingOwners.get(token) === owner) this.channelRecordingOwners.delete(token)
+				if (this.channelRecordingOwners.get(token) === owner)
+					this.channelRecordingOwners.delete(token)
 			}
 		}
 		owner.offProof = tap.prepared.handle.onChange(inspect)
 		try {
-			if (!current() || !tap.current) throw new WaveKitError("Scanner recording grant ended", "SCANNER_CHANNEL_UNAVAILABLE")
-			const producer = this.channelProducers.begin({ ...identity, discoveryId, observationId: live.observationId,
-				recordAudio: true, analogFm: true, encrypted: false, thresholdDbfs: job.thresholdDb,
-				nativeOwnershipSettled })
+			if (!current() || !tap.current)
+				throw new WaveKitError(
+					"Scanner recording grant ended",
+					"SCANNER_CHANNEL_UNAVAILABLE",
+				)
+			const producer = this.channelProducers.begin({
+				...identity,
+				discoveryId,
+				observationId: live.observationId,
+				recordAudio: true,
+				analogFm: true,
+				encrypted: false,
+				thresholdDbfs: job.thresholdDb,
+				nativeOwnershipSettled,
+			})
 			owner.producer = producer
 			const settled = producer.settled.then(result => {
 				owner.componentClosed = result.componentClosed
 				inspect()
-				return result.componentClosed ? { ok: true as const } :
-					{ ok: false as const, state: "failed" as const, detail: "Scanner analog producer cleanup failed" }
+				return result.componentClosed
+					? { ok: true as const }
+					: {
+							ok: false as const,
+							state: "failed" as const,
+							detail: "Scanner analog producer cleanup failed",
+						}
 			})
-			if (!tap.attachAnalog({ push: samples => {
-				void producer.push(samples).catch(() => { producer.cancel("channel-invalidated"); tap.cancel() })
-			}, cancel: () => producer.cancel("channel-invalidated"), settled })) producer.cancel("channel-invalidated")
+			if (
+				!tap.attachAnalog({
+					push: samples => {
+						void producer.push(samples).catch(() => {
+							producer.cancel("channel-invalidated")
+							tap.cancel()
+						})
+					},
+					cancel: () => producer.cancel("channel-invalidated"),
+					settled,
+				})
+			)
+				producer.cancel("channel-invalidated")
 			inspect()
 		} catch {
 			tap.cancel()
@@ -1873,7 +2150,10 @@ export class ScannerService extends EventEmitter {
 		return false
 	}
 
-	private cancelChannelSource(sourceId: string, cut: AnalogCut = "source-lost"): void {
+	private cancelChannelSource(
+		sourceId: string,
+		cut: AnalogCut = "source-lost",
+	): void {
 		this.channelProducers?.cancelSource(sourceId, cut)
 		this.channelTaps?.cancelSource(sourceId)
 	}
