@@ -247,3 +247,39 @@ window, trusted shell bootstrap delivery and web authentication/playback recover
 real TLS/Host/private-volume/backend/container isolation, CLI/browser coexistence,
 and the connected spectrum → tune → identify → inspect → listen client milestone.
 No live receiver or browser/deployment acceptance follows from these tests.
+
+## Bootstrap/device design extension — 2026-10-11
+
+**DESIGN ACCEPTED, IMPLEMENTATION PENDING.** The additive contract is specified in
+[design.md](design.md#public-bootstrap-and-remembered-device-projection). It does
+not assert mounted routes, shipped clients or browser/TLS/exposure acceptance.
+Historical task states and checkpoints above are unchanged. The following stable
+new tasks require separate exact implementation allocation and verification.
+
+- [ ] 10. Implement closed canonical bootstrap/device DTO schemas and explicit
+      bounded allowlist projectors; configured origins/API-derived WS URL only,
+      4096-byte bootstrap budget, detached device ID/clocks/current metadata only.
+      _Requirements: 3.6, 4.7, 4.8_
+- [ ] 11. Mount exact opt-in protected GET/HEAD bootstrap with shared raw boundary,
+      separate preflight, no public principal/lease and invalid-credential semantics.
+      Preserve legacy ordinary absence, protected absent-route normal admission and
+      installed-provider safe 503; gate flags on actual readiness/current health.
+      _Requirements: 2.1–2.3, 3.3–3.6, 6.1_
+- [ ] 12. Implement session-only explicit GET/HEAD device inventory using the
+      authority-clock/committed-map snapshot, immediate request reauthorization,
+      post-clock availability recheck and no read writes/renewal/pruning/migration.
+      Reuse existing pairing/refresh/logout/revoke and bounded flow/drain ownership.
+      _Requirements: 3.2, 4.6–4.8, 5.1–5.3_
+- [ ] 13. CHECKPOINT BACKEND CONTRACT: focused actual-server and property tests
+      covering exact raw tuple, HEAD/denial/CORS, absent-route/provider states,
+      serializer faults, current mounted flags, permission, committed persistence
+      races, requester expiry/revocation and reentrant clock failure. Run released
+      serial checks and independent exact-candidate review before merged client
+      contract acceptance; extend Property 5 and verify new Property 6.
+      _Requirements: 2.1–3.6, 4.6–4.8, 6.1_
+- [ ] 14. CHECKPOINT CLIENT/EXPOSURE: verify real browser cookie/CORS/TLS/proxy
+      recovery and trusted canonical bootstrap delivery; bootstrap-path 401 cannot
+      infer mounted pairing/session or unlock. No local backend check substitutes for
+      deployment, RF/native, capacity or physical evidence acceptance. Task 9 remains
+      a separate connected-client release gate.
+      _Requirements: 1.1–1.3, 3.6, 4.8, 6.2–6.5_

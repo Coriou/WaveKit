@@ -13,8 +13,9 @@ can be rejected. Exact names live with the implementation; no shared DTO edits.
 
 Per-listener authority allowlists include scheme/effective-port context; origins
 are exact HTTP(S) origins. Forwarded headers and attacker-supplied Host do not
-create trust. Public health exceptions are API GET/HEAD `/health` and
-`/health/live` only, after authority/origin validation. Actual framework and audio
+create trust. Existing public health exceptions are API GET/HEAD `/health` and
+`/health/live`, after authority/origin validation. The accepted bootstrap extension
+below is separately opt-in and implementation-pending. Actual framework and audio
 admission adapters will check before executing handlers or sending WAV headers.
 
 Machine authentication uses a random 32-byte canonical base64url token, loaded
@@ -93,9 +94,18 @@ usable; renewal updates the deadline, restart restores unexpired compatible
 records, and expired/revoked/unavailable sessions cannot acquire a valid lease.
 Validates: Requirements 4.1–4.5, 5.1, 5.2.
 
-Property 5: **No implicit privilege** — public health and preflight exceptions
-cannot admit protected API/audio/WS resources or execute their side effects.
-Validates: Requirements 3.3, 3.4, 6.1.
+Property 5: **No implicit privilege** — public health, exact opt-in bootstrap and
+preflight exceptions cannot admit protected API/audio/WS resources or execute
+their side effects. Bootstrap grants no principal or lease, and absent opt-in,
+normalized targets, upgrades and audio cannot acquire its public exception.
+Validates: Requirements 3.3, 3.4, 3.5, 3.6, 6.1.
+
+Property 6: **Committed active inventory** — a session-only read returns detached,
+bounded, deterministically ordered allowlist rows from one committed authority
+snapshot, with exactly one active requester. Pending mutations and read activity
+cannot create renewal or expose uncommitted state; requester expiry/revocation,
+storage failure and reentrant clock failure fail closed.
+Validates: Requirements 4.6, 4.7, 4.8.
 
 Use deterministic scenario tests for races, persistence faults and adapter effects;
 property-based tests map to these properties with at least 100 runs.
@@ -212,3 +222,221 @@ durable logout before declaring success. Browser acceptance must cover restart,
 renewal near day 30, multiple tabs, uncertain pairing, logout races, cross-port
 audio, rejected origins and unavailable persistence. These remain integration
 gates; foundation tests do not establish browser readiness.
+
+## Public bootstrap and remembered-device projection
+
+**DESIGN ACCEPTED, IMPLEMENTATION PENDING.** This section defines an additive
+protected-only contract. It does not assert that either route is mounted, that a
+client is shipped, or that browser/TLS/exposure acceptance is complete. Historical
+checkpoint descriptions above retain their original scope. Existing configuration,
+authentication, session persistence and stream authorities remain authoritative.
+
+### Exact bootstrap boundary
+
+Mount explicit GET and HEAD `/api/access/bootstrap` only with protected composition,
+configured canonical public mapping and the matching root-hook opt-in. Default
+policy evaluation remains unchanged. A separate public-bootstrap decision carries
+validated response headers but no principal; it never authenticates another route.
+The root dispatcher and route delivery both check the complete exact tuple:
+HTTP transport, API surface, GET/HEAD method and raw target equality. Never match
+by decoded path, query stripping, prefix or framework normalization. An admitted
+normalized variant or upgrade must not receive the DTO merely because normal
+authentication succeeded. HEAD is explicitly registered with implicit auto-HEAD
+disabled and shares GET boundary/provider checks, status and headers, without a
+wire body. OPTIONS uses existing validated preflight, not the metadata handler.
+
+Shared raw-header parsing, Host and any present Origin validation precede this
+exception. Missing Origin is allowed for this public safe request after valid
+Host; opaque/disallowed Origin and malformed/ambiguous input retain existing
+failures. Forwarded headers cannot supply authority or advertised origins.
+Preserve `Cache-Control: no-store`, `Vary: Origin` and credentialed CORS only for
+an unambiguous allowed Origin, including readable denials where currently safe.
+
+For this exact public request, ignore structurally unambiguous invalid credentials:
+wrong/expired/revoked tokens, unsupported schemes and unknown cookies do not
+cause 401 or create authority. Valid credentials are equally irrelevant. Do not
+verify credentials or look up sessions to admit it. Duplicate sensitive headers,
+comma-joined Authorization, malformed header/cookie syntax and duplicate configured
+cookie keys still fail boundary validation. Public reads issue no cookie, refresh,
+lease, pairing exchange or store mutation. WS and audio have no bootstrap exception.
+
+| Request/composition                                                         | Result                                                                                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Installed protected route/opt-in, exact GET, valid boundary, ready provider | 200 bounded DTO; credentials irrelevant                                                           |
+| Exact HEAD                                                                  | Same GET status/headers, no body on success or failure                                            |
+| Malformed boundary or unallowed Host/Origin                                 | Existing 400/403 safe denial and header rules                                                     |
+| Allowed validated OPTIONS                                                   | Existing 204 preflight; no DTO, principal or actual-request authority                             |
+| Query, trailing slash, encoding, prefix, POST, upgrade or audio             | Normal policy; subsequent ordinary routing or exact-target denial, never public DTO               |
+| Legacy without access hooks, absent route                                   | Ordinary framework 404; no protected boundary/CORS claim                                          |
+| Protected route/opt-in absent, including absent mapping                     | Normal admission first: 400/403/401/503 as applicable; admitted authenticated request reaches 404 |
+| Installed route/opt-in but absent, not-ready, throwing or invalid provider  | Fixed 503 `ACCESS_UNAVAILABLE`; no fake successful document                                       |
+| Sealed/stopping controller                                                  | Existing 503 admission denial; no cached successful response                                      |
+
+Normal credential precedence governs protected absent-route denials; unavailable
+session authority does not erase distinct machine authority. No unconditional 404
+bypass is introduced. Bootstrap-path 401 establishes neither mounted pairing/session
+services nor control permission. Clients retain unavailable state until a valid
+bounded DTO is obtained from their configured canonical endpoint. Only subsequent
+credentialed session operations establish authorization. Independently established
+session operations can use existing refresh/pair recovery after 401. Preserve
+cookies/view on offline or 503 recovery; never infer an authoritative empty list,
+unlock, pairing availability or automatically replay a hardware write.
+
+### Closed bootstrap DTO and provider
+
+Canonical shared Zod schemas infer closed public DTOs; explicit projection copies
+only the allowlist below, never spreads the internal getter or config. Input extras
+cannot become output fields. No new dependency or configuration is needed.
+
+```ts
+interface AccessBootstrapDto {
+	version: 1
+	apiOrigin: string
+	webSocketUrl: string
+	analogAudioOrigin: string
+	digitalAudioOrigin: string
+	access: {
+		mode: "protected"
+		sessionAvailable: boolean
+		pairingAvailable: boolean
+	}
+	capabilities: {
+		analogAudioAvailable: boolean
+		digitalAudioAvailable: boolean
+		operatorDataAvailable: boolean
+	}
+}
+```
+
+HTTP(S) origins are canonical configured values, each bounded at 320 characters;
+WS URL is exactly the API origin's ws/wss counterpart plus `/ws`, bounded at 323
+characters. Validate this relationship rather than accept arbitrary WS locations.
+Fully encoded UTF-8 body is at most 4096 bytes. Invalid projection or overflow is
+fixed safe 503, without internal causes. No secrets, digests, cookies, device IDs,
+allowlists, source inventories, paths or private cleanup state are advertised.
+This metadata budget is not a WS aggregate/backpressure qualification.
+
+| Provider state                                                               | Projection                                                                      |
+| ---------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| Actual protected listener/routes ready, canonical mapping present            | 200 with current mounted flags                                                  |
+| Registration intent only, before successful ready/listen or failed startup   | Provider unavailable; no successful readiness document                          |
+| Session authority unavailable on otherwise running composition               | 200 with session/pairing false; independent audio/operator flags remain current |
+| Audio listener not actually mounted/running                                  | Corresponding audio capability false                                            |
+| Operator routes/snapshot/update not wired, stopping or snapshot health fails | Operator capability false via existing on-demand authority                      |
+| Route/opt-in absent due to missing mapping                                   | Normal protected admission then authenticated 404, not a provider response      |
+| Installed route/opt-in with malformed/missing/throwing provider              | Fixed safe 503                                                                  |
+| Stopping                                                                     | Admission/provider unavailable                                                  |
+
+Reuse existing access capability and internal getter semantics. Pairing availability
+requires actual route installation, healthy session authority and configured origin
+requirements. Main's provider uses existing post-listen mounted state and stopping
+checks; do not add a competing cached readiness authority. Install route and opt-in
+together under the configured protected gate. Provider/route failures explicitly
+send safe status/body/serializer instead of falling through generic error mapping.
+Flags are point-in-time advisory mounted-backend facts, not endpoint identity,
+permission, RF/native readiness, TLS reachability or a future availability promise.
+Health remains minimal liveness metadata. Legacy is not expanded.
+
+### Session-only device methods and DTO
+
+Explicit GET and HEAD `/api/access/devices` reuse the existing session-only flow
+and bounded route admission/drain. HEAD executes the same checks with no body.
+Safe-read Origin/fetch-metadata rules remain unchanged; safe reads do not add CSRF.
+Machine authority cannot enumerate devices, even with a session cookie alongside
+a preferred machine Authorization credential. Existing pair, refresh, logout,
+individual revoke and revoke-all permissions and operations are reused.
+
+```ts
+interface AccessDeviceDto {
+	deviceId: string
+	createdAt: number
+	renewedAt: number
+	expiresAt: number
+	current: boolean
+}
+interface AccessDevicesDto {
+	devices: AccessDeviceDto[]
+}
+```
+
+All objects are closed. IDs use existing live-record constraints. Clocks are existing
+nonnegative safe-integer epoch milliseconds with their existing ordering invariants.
+Sort by creation time ascending, then ASCII device ID ascending, never locale order.
+Rows are detached and bounded by configured session capacity (maximum 32), with
+exactly one current requester. Active means remembered and unexpired, not online.
+Renewal time records explicit refresh, not read activity. No labels, kind, lastSeen,
+user agent/IP, extra timestamp/revision, metadata-write API or storage migration.
+
+| Request/state                                            | Result                                                     |
+| -------------------------------------------------------- | ---------------------------------------------------------- |
+| Current session and allowed safe-read context            | 200 snapshot; HEAD same status/headers without body        |
+| Missing, expired or revoked requester                    | 401 `AUTH_REQUIRED`                                        |
+| Valid machine principal                                  | 403 `SESSION_REQUIRED` using existing flow error shape     |
+| Malformed boundary or cross-origin/fetch-metadata denial | Existing safe 400/403                                      |
+| Store unavailable or authority clock failure             | 503 `ACCESS_UNAVAILABLE`, never successful empty inventory |
+| Sealed controller or stopped flow admission              | Existing 503                                               |
+| Existing active-flow capacity exhausted                  | Existing 429                                               |
+| Unsupported method                                       | Normal policy/routing, no new bypass                       |
+
+Snapshot is informational, not renewable authority or a guarantee that a later
+revocation succeeds. Existing revoke results and explicit refetch reconcile races;
+no device WS bus, online tracking, background clock, queue or second lifecycle.
+
+### Snapshot linearization and fail-closed reads
+
+Add a narrow synchronous SessionStore active-device snapshot operation returning
+an active snapshot or missing-requester discriminator. Unavailable/clock failure
+uses the existing safe authority error. Do not project `exportSnapshot()`, which
+contains persistence-internal credential metadata, or use an external wall clock.
+
+Inside the authority: check availability, call its clock exactly once for this
+snapshot, recheck availability after the injected callback, then capture the current
+committed map and revalidate requester presence/expiry against that same time.
+A callback that latches failure but returns valid time still yields 503. Construct
+allowlist rows without external callbacks, omit expired rows, mark requester,
+sort/bound and return detached objects. Existing authentication may independently
+read the clock; the one-clock rule applies to snapshot assembly. Do not prune,
+renew, enqueue or persist a read. Existing expired records may remain privately
+stored until normal mutation pruning.
+
+The flow reauthorizes the original request immediately before this synchronous
+operation, requiring a session principal with no await gap. Store revalidation
+closes requester expiry/revocation after initial root-hook admission. The view
+linearizes at its clock/committed-map observation; later changes do not retroactively
+invalidate an informational response. Existing mutation serialization, storage
+failure latch and lease revocation remain authoritative.
+
+| Persistence/race state                                     | Visible read                                                |
+| ---------------------------------------------------------- | ----------------------------------------------------------- |
+| Create accepted, persistence pending                       | New row omitted; previous committed map                     |
+| Refresh pending                                            | Previous committed clocks/expiry; no premature renewal      |
+| Revoke pending                                             | Previous committed record until successful commit           |
+| Mutation committed before snapshot                         | Updated committed map                                       |
+| Failed uncertain persistence/latched unavailable           | 503, no old successful or empty fallback                    |
+| Requester expiry/revocation between root hook and snapshot | 401; clock/authority failure instead yields 503             |
+| Clock callback reenters and latches unavailable            | Post-callback recheck yields 503 before successful assembly |
+
+### Pending implementation and acceptance
+
+Use real ApiServer/root hooks/routes and SessionStore persistence/clock fixtures in
+`tests/unit/api/access-bootstrap-devices.test.ts`, alongside focused policy, adapter,
+store, flow, route and projector tests. Required schedules include the full raw
+request tuple at dispatch and delivery; valid authenticated normalized variants and
+upgrades; malformed/duplicate headers; invalid credentials confined to public reads;
+GET/HEAD denial/body parity; separate preflight; no public principal/lease/renewal;
+legacy absence versus protected absent-route valid/invalid credentials; provider
+readiness/faults, byte limits and poisoned inherited serializers; IPv4/IPv6/default
+port canonical URLs; truthful independent session/audio/operator flags; low configured
+caps as well as 32, detached rows and deterministic current marker; deferred
+create/refresh/revoke, requester expiry/revocation, failed persist and reentrant clock;
+no read writes/pruning; unchanged restart-v1 compatibility; capacity and shutdown drain.
+
+Exact implementation allocation, serial touched tests/typecheck/lint/build,
+independent exact-candidate review and merged client contract acceptance are pending.
+Main retains server/index/barrel/config/public documentation assembly. No web UI,
+regional registry or tuner changes belong to this slice. Local tests do not establish
+browser cookies/CORS/TLS/proxy exposure, private-volume/deployment behavior, physical
+native/RF settlement or measured capacity. Existing production binding remains off,
+scanner tier disabled with 500 ms default and 300–2000 ms bounds, private profile
+absent/direct-only; analog filesystem uncertainty, deferred reuse and required
+incomplete guarded IQ remain separate acceptance gaps.
