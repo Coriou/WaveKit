@@ -770,3 +770,29 @@ describe("ProbePool", () => {
 		expect(c.tapCount).toBe(1)
 	})
 })
+
+
+describe("R14 direct-only observed decoder gate", () => {
+	it("denies selected channel transport before decoder, DV and recording effects without offset fallback", async () => {
+		const dv = { addChannel: vi.fn(), removeChannel: vi.fn(), ensureStarted: vi.fn(), attachDecoder: vi.fn() }
+		const h = poolHarness({ digitalVoice: dv,
+			transports: [{ kind: "channel", preRoll: false, maxProbes: () => 4,
+				cores: () => 0, supports: () => true, configure: config => config }] })
+		const create = vi.spyOn(h.decoders, "createEphemeralDecoder")
+		h.pool.request(probeRequest({ preRollFromSample: null }))
+		await flushAsync()
+		expect(create).not.toHaveBeenCalled()
+		expect(dv.addChannel).not.toHaveBeenCalled()
+		expect(dv.ensureStarted).not.toHaveBeenCalled()
+		expect(h.decoders.created.size).toBe(0)
+		await h.pool.destroy()
+	})
+	it("early seal makes queued and later requests unable to start", async () => {
+		const h = poolHarness()
+		h.pool.sealAdmission()
+		expect(h.pool.request(probeRequest())).toEqual({ deferred: "no-transport" })
+		h.pool.pump()
+		expect(h.decoders.created.size).toBe(0)
+		await h.pool.destroy()
+	})
+})

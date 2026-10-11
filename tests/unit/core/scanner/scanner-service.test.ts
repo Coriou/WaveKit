@@ -1131,3 +1131,26 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 })
+
+
+describe("R14 immutable scanner component phase", () => {
+	it("an early own failure cannot complete40 while an independent component remains held", async () => {
+		const h = serviceHarness({ patch: settings => { settings.passive.enabled = false } })
+		const owner = (h.service as unknown as { consumerLifecycle: import("../../../../src/core/scanner/channel/consumer-lifecycle.js").ScannerLifecycleOwner }).consumerLifecycle
+		let release!: () => void
+		const held = new Promise<void>(resolve => { release = resolve })
+		expect(owner.ownCleanup("classifier", () => Promise.resolve({ ok: false, state: "failed", detail: "fixture own failure" }))).toBe(true)
+		expect(owner.ownCleanup("admission", async () => { await held; return { ok: true } })).toBe(true)
+		const first = h.service.beginStop()
+		expect(h.service.beginStop()).toBe(first)
+		let settledPhase = false
+		void first.producerSettled.then(() => { settledPhase = true }, () => { settledPhase = true })
+		await Promise.resolve()
+		await Promise.resolve()
+		expect(settledPhase).toBe(false)
+		release()
+		await expect(first.producerSettled).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+		await expect(h.service.stop()).rejects.toMatchObject({ code: "SCANNER_COMPONENT_CLEANUP_FAILED" })
+	})
+})

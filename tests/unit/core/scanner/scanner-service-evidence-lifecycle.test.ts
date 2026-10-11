@@ -262,3 +262,18 @@ describe("simultaneous adjacent-leak evidence (review F4)", () => {
 		}
 	})
 })
+
+
+describe("R14 disabled channel evidence boundary", () => {
+	it("default service stop uses the same component handle and preserves accepted discovery evidence", async () => {
+		const h = await harness()
+		const live = h.observe()
+		const first = h.service.beginStop()
+		expect(h.service.beginStop()).toBe(first)
+		await first.producerSettled
+		await h.service.finalizeStopNative()
+		await first.completed
+		expect(h.internals.store.get(live.discoveryId!)).toBeDefined()
+		await h.service.stop()
+	})
+})

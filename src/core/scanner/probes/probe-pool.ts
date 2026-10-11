@@ -501,6 +501,8 @@ export class ProbePool extends EventEmitter {
 	/** Engines whose "stop" the pool saw: never watched again (S1-B final review, finding 9). */
 	private readonly stoppedEngines = new WeakSet<ProbeEngineView>()
 	private seq = 0
+	private readonly retainedCleanup = new Set<ProbeRecord>()
+	private cleanupFailed = false
 	private destroyed = false
 
 	constructor(private readonly deps: ProbePoolDeps) {
@@ -648,15 +650,22 @@ export class ProbePool extends EventEmitter {
 		)
 	}
 
-	async destroy(): Promise<void> {
+	/** Synchronous gate used before API/operator drain; no new tick/queue/create may escape. */
+	sealAdmission(): void {
 		this.destroyed = true
 		this.queue.length = 0
+	}
+
+	async destroy(): Promise<void> {
+		this.sealAdmission()
 		this.deps.decoders.off("decoder:output", this.onOutput)
 		for (const watch of this.watches.values()) watch.off()
 		this.watches.clear()
-		await Promise.all(
-			[...this.records.values()].map(r => this.stopProbe(r, "shutdown")),
+		const outcomes = await Promise.allSettled(
+			[...this.records.values()].map(record => this.stopProbe(record, "shutdown")),
 		)
+		if (outcomes.some(outcome => outcome.status === "rejected") || this.cleanupFailed)
+			throw new WaveKitError("Scanner probe cleanup failed", "SCANNER_PROBE_CLEANUP_FAILED")
 	}
 
 	// === streams ===
@@ -962,6 +971,11 @@ export class ProbePool extends EventEmitter {
 		withPreRoll: boolean,
 	): Promise<void> {
 		const { req, mode, transport } = rec
+		if (this.destroyed) return
+		// Initial composition is DIRECT-TAP ONLY. Deny the selected observed decoder
+		// route before ports/DV/directory/tap/constructor effects, without offset retry.
+		if (transport.kind === "channel")
+			throw new WaveKitError("Observed scanner decoder route is unavailable", "SCANNER_CHANNEL_DECODER_UNAVAILABLE")
 		const ports =
 			mode.decoderType === "direwolf"
 				? {
@@ -1097,7 +1111,13 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private teardown(rec: ProbeRecord): Promise<void> {
-		rec.teardownDone ??= this.runTeardown(rec)
+		if (rec.teardownDone) return rec.teardownDone
+		let resolve!: () => void
+		let reject!: (cause: unknown) => void
+		rec.teardownDone = new Promise<void>((yes, no) => { resolve = yes; reject = no })
+		void rec.teardownDone.catch(() => undefined)
+		// Untap/removal callbacks may synchronously request this same teardown again.
+		void this.runTeardown(rec).then(resolve, reject)
 		return rec.teardownDone
 	}
 
@@ -1105,32 +1125,27 @@ export class ProbePool extends EventEmitter {
 		rec.state = "stopping"
 		if (rec.modeTimer) clearTimeout(rec.modeTimer)
 		rec.modeTimer = null
-		rec.untap?.()
-		rec.untap = null
-		for (const off of rec.detach) off()
-		rec.detach = []
 		this.byDecoder.delete(rec.decoderId)
-		rec.input?.end()
-		try {
-			await this.deps.decoders.removeEphemeralDecoder(rec.decoderId)
-		} catch (err) {
-			this.log.warn(
-				{ err, probeId: rec.probeId },
-				"Removing a probe decoder failed",
-			)
+		const attempt = async (action: () => unknown | Promise<unknown>): Promise<boolean> => {
+			try { await action(); return true }
+			catch (err) {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.sealAdmission()
+				this.log.warn({ err, probeId: rec.probeId }, "Probe component cleanup failed")
+				return false
+			}
 		}
+		if (await attempt(() => rec.untap?.())) rec.untap = null
+		const remaining: (() => void)[] = []
+		for (const off of rec.detach) if (!(await attempt(off))) remaining.push(off)
+		rec.detach = remaining
+		await attempt(() => rec.input?.end())
+		await attempt(() => this.deps.decoders.removeEphemeralDecoder(rec.decoderId))
 		if (rec.dvChannel && this.deps.digitalVoice) {
-			await this.deps.digitalVoice
-				.removeChannel(rec.decoderId)
-				.catch((err: unknown) => {
-					this.log.warn(
-						{ err, probeId: rec.probeId },
-						"Removing a probe voice channel failed",
-					)
-				})
+			await attempt(() => this.deps.digitalVoice!.removeChannel(rec.decoderId))
 		}
-		rec.input?.destroy()
-		rec.input = null
+		if (await attempt(() => rec.input?.destroy())) rec.input = null
 	}
 
 	private async stopProbe(rec: ProbeRecord, reason: StopReason): Promise<void> {
