@@ -759,6 +759,7 @@ describe("IdentifyRunner fatal engine cleanup (review F5)", () => {
 		await h.advance(100)
 		await h.advance(100)
 		const probe = h.pool.status()[0]!
+		const listeners = h.pool.listenerCount("probe-state")
 		expect(probe).toBeDefined()
 		await h.runner.dispatch({ type: "engine-failed" })
 		expect(h.record).toMatchObject({
@@ -771,6 +772,7 @@ describe("IdentifyRunner fatal engine cleanup (review F5)", () => {
 		emitDmrIdentity(h, probe.probeId)
 		await h.advance(100)
 		expect(h.last()).toBe(last)
-		expect(h.pool.listenerCount("probe-state")).toBe(0)
+		// The harness owns one recorder listener; only the runner subscription must disappear.
+		expect(h.pool.listenerCount("probe-state")).toBe(listeners - 1)
 	})
 })
