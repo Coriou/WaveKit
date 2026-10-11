@@ -62,7 +62,7 @@ import {
 	type PendingChange,
 } from "../ui/tuner-edit.js"
 import type {
-	ConfirmRequest,
+	WriteConfirm,
 	EditField,
 	TunerEditState,
 	UiState,
@@ -492,7 +492,7 @@ export function confirmItem(c: PendingChange, fromKnown = true): string {
 export function tunerConfirm(
 	edit: TunerEditState,
 	state?: AppState,
-): ConfirmRequest | null {
+): WriteConfirm | null {
 	const commands = pendingCommands(edit)
 	if (commands.length === 0 || outOfRange(edit).length > 0) return null
 	const changes = pendingChanges(edit)
@@ -565,7 +565,7 @@ export function reviewHeldNotice(edit: TunerEditState): string {
 	return "nothing changed"
 }
 
-export function controlConfirm(state: AppState): ConfirmRequest | null {
+export function controlConfirm(state: AppState): WriteConfirm | null {
 	const t = receiverTuner(state)
 	if (!t) return null
 	const toInternal = t.controlMode === "external"

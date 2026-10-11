@@ -33,11 +33,30 @@ use fixed-size digest comparison and never accept URL/subprotocol credentials.
 Unsafe cookie requests require allowed Origin and CSRF proof; cookie WebSocket
 upgrades require allowed Origin. Safe no-Origin cookie reads need positive
 same-origin/browser-navigation metadata.
-3.3 Allow only exact minimal API GET/HEAD health exceptions. Protect status,
-documentation, recordings, scanner controls, audio and unknown paths by default.
+3.3 Allow exact minimal API GET/HEAD health exceptions and, only in configured
+protected composition with its route and explicit opt-in installed, exact API/HTTP
+GET/HEAD `/api/access/bootstrap` as non-authenticating public metadata. Protect
+status, documentation, recordings, scanner controls, audio and unknown paths by
+default. The bootstrap exception does not change the existing health boundary.
 3.4 Validate credential-free preflight without granting actual request access.
 Return stable generic denial codes, no-store responses and readable CORS failures
 only for allowed origins. Authenticate before side effects or streaming headers.
+
+3.5 Match the bootstrap exception against the exact raw target, method, transport
+and surface after shared raw-header, Host and present-Origin validation. Queries,
+trailing slashes, encodings, prefixes, upgrades and audio have no public exception.
+Ignore structurally unambiguous invalid credentials only on this public request;
+reject malformed/ambiguous security input. Grant no principal, lease, cookie,
+renewal or side effect. Preserve no-store, Vary and allowed-Origin-only CORS;
+explicit HEAD has GET status/headers without a body. Preflight remains separate.
+3.6 Publish only a closed, bounded configured-origin/current-mounted capability
+projection. Legacy without access hooks and an absent route has ordinary 404;
+protected composition without the route/opt-in, including absent mapping, applies
+normal admission before authenticated 404. An installed route/opt-in with an
+unavailable, not-ready, throwing or invalid provider returns fixed safe 503.
+Never bypass admission to force 404, spread an internal getter or fabricate a
+successful empty projection. Bootstrap-path 401 proves neither mounted
+pairing/session surfaces nor authorization; no response establishes browser unlock.
 
 ## 4. Remembered browsers
 
@@ -55,6 +74,23 @@ validated bounded snapshot. Serialize mutations and persist before acknowledging
 issuance, renewal or revocation. Do not fall back silently to memory-only sessions.
 4.5 Fail session access with a service-unavailable response on persistence failure;
 close browser leases and avoid misleading login prompts or durable-success claims.
+
+4.6 Provide explicit session-only GET/HEAD `/api/access/devices` under existing
+safe-read rules. Machine authority cannot enumerate devices. Reuse existing
+pairing, refresh, logout and revocation operations without expanding permissions.
+4.7 Project a bounded deterministic snapshot of active committed sessions using
+one SessionStore authority-clock observation per snapshot. Include only existing
+device ID, creation/renewal/expiry epoch-ms clocks and current-requester marker.
+Active means remembered and unexpired, not online. Reads must not renew, prune,
+queue or persist; pending mutations cannot leak before commit. No labels, kind,
+lastSeen, new clock, revision or persistence migration is introduced.
+4.8 Reauthorize the original request immediately before the synchronous snapshot
+without an await gap and revalidate requester expiry/presence in the store.
+Recheck authority availability after the injected clock callback, capture committed
+state afterward and invoke no external callback during assembly. Unavailable
+storage or clock failure returns 503, never successful empty inventory; an invalid
+requester returns 401. Return detached allowlist rows bounded by the configured
+session cap, at most 32, with exactly one current requester.
 
 ## 5. Connection lifecycle
 

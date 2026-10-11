@@ -6,7 +6,7 @@ Software checks and hardware
 acceptance are separate: a healthy process or passing unit suite does not prove
 continuous IQ reception, correct RF decoding, or unattended installation.
 
-## Immediate priorities (re-ordered 2026-10-10)
+## Immediate priorities (re-ordered 2026-10-11)
 
 Done since 2026-10-08 (merged on main): Mac core deploy with tuner reconnect sync
 and stall watchdog; trustworthy full suite; rate model B1–B4 (per-instance rates,
@@ -28,24 +28,33 @@ acceptance still need measurement.
 
 The next connected web milestone is **spectrum → tune → identify → inspect →
 listen**. The web dashboard is in design on `design/web-dashboard`; its
-`docs/web/CORE-GAPS.md` (audited at `fd42e45`, 2026-10-10) supplies the feature
-inventory mapped below. Canvas work can continue independently. Software,
+`docs/web/CORE-GAPS.md` (audited at `df1346b`, 2026-10-11) supplies the feature
+inventory mapped below. That design remains separately owned and in progress;
+the current core scope is backend gap analysis and contracts. Web UI implementation
+requires a separate decision. Software,
 local-receiver acceptance and optional Pi acceptance have separate gates.
 
 1. **Connect clients to the accepted S1 contracts** (§5, §8). S1-A and S1-B
    landed locally, including identification, bounded burst capture and shared
-   spectrum profiles. The CLI now consumes them in read-only `6 Scan`: source
-   selection, spectrum/waterfall, discoveries, existing jobs and identify results,
-   with explicit recovery and bounded reads/history. Identify submission and
-   cursor tuning remain next client actions; web consumption and physical-terminal
+   spectrum profiles. The CLI now consumes them in `6 Scan`: source selection, spectrum/waterfall,
+   discoveries, confirmed frequency-target identify submission and retained job
+   inspection, with explicit recovery and bounded reads/history. Cursor tuning
+   remains the next client action; web consumption and physical-terminal
    acceptance remain open. Preserve detector behavior independently of display
    preferences; genuine viewed-slice zoom remains a separate follow-up.
-2. **Prepare browser access policy and true zoom** (§4, §8). The initial access
+2. **Close browser access gaps and prepare spectrum foundations** (§4, §8). The initial access
    target is one operator on a local/LAN deployment, with authentication and
    explicit origins across REST, WS and audio. It must land before connecting
-   browser controls to the live receiver. Design genuine higher-resolution
-   viewed-slice FFT as a separate follow-up to S1-B; cropping existing display
-   bins is insufficient. Measure coalesced REST drag-to-tune latency before
+   browser controls to the live receiver. Protected pairing and session refresh
+   are implemented; public bootstrap/capabilities, authenticated device inventory,
+   browser onboarding/renewal consumption and TLS/proxy acceptance remain open.
+   Operator data is protected-only while the default deployment remains legacy;
+   changing that default is a separate decision. Regional display bands/channel
+   aliases and receiver-provenanced tuner capabilities are independent backend
+   foundations; preserve unknown hardware facts and existing scanner ranges.
+   The genuine higher-resolution viewed-slice FFT design is landed, with raw-seam,
+   budget and transport feasibility gates before implementation; cropping existing
+   display bins is insufficient. Measure coalesced REST drag-to-tune latency before
    choosing a WS tuning transport, preserving tuner arbitration either way.
 3. **Complete S2 acceptance, then S3 listening** (§5, §5b). Reviewed channel
    settlement, scanner consumer and shutdown composition are integrated locally.
@@ -286,7 +295,7 @@ destination-bound CLI credentials and credential-free health probes. The setup
 utility, scanner worker and main entry retain separate build outputs. Browser
 onboarding/renewal, trusted bootstrap delivery, public audio origins and actual
 TLS/proxy/container exposure acceptance remain open. See the
-[access implementation checklist](../.kiro/specs/core-access-policy/tasks.md).
+[access implementation checklist](specs/core-access-policy/tasks.md).
 
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
 - [ ] Specify snapshot/event ordering, sequence IDs, reconnect/resume behavior,
@@ -313,13 +322,13 @@ checks at enqueue/send and accepted-write drain before shutdown. The assembled
 full root suite, typecheck, lint and build passed. Shipped client ordering,
 conflict/uncertain-outcome recovery, trusted bootstrap delivery and external
 browser/TLS acceptance remain open. Legacy mode does not mount operator data.
-The [Activity/catalog design](../.kiro/specs/activity-recording-catalog/design.md)
+The [Activity/catalog design](specs/activity-recording-catalog/design.md)
 landed at `c1e0293`; SQLite remains provisional until bounded runtime/storage
 qualification. Recording integration still follows S2/S3 and deletion-owner gates.
 Existing `DecoderOutput` has decoder/type/time/raw data; scanner recovery
 journals, discovery search and settings are separate domain foundations.
 
-The [decode envelope spec](../.kiro/specs/decode-envelope/design.md) defines the
+The [decode envelope spec](specs/decode-envelope/design.md) defines the
 next unmounted foundation: caller-owned reception IDs, separate producer/ingestion
 clocks, explicit unknown RF context and complete bounded decoded JSON. Public
 publication and Activity persistence remain separate checkpoints; parser fallback
@@ -683,10 +692,9 @@ Landed locally at `cc3fd74`: `AGENTS.md` is the single instruction file; `CLAUDE
 natively (Codex, Claude Code, Grok CLI, omp) and the per-worktree shared-memory setup
 (`node scripts/agents-setup.mjs`). Specs follow [`docs/specs/README.md`](specs/README.md).
 `tests/unit/repo/` fails on drifted commands, paths, links, tool-enforced conventions,
-competing instruction files and private-workspace exposure. Remaining: move
-`.kiro/specs/<feature>/` directories to `docs/specs/` in one coordinated change once
-in-flight spec branches land, then drop the legacy root from the checker and docs; verify
-VS Code chat if it becomes a used harness.
+competing instruction files and private-workspace exposure. The six legacy spec directories now live under `docs/specs/`, with contents and
+numbering unchanged; the checker rejects tracked legacy specs. Historical coordination
+entries retain their original paths. Remaining: verify VS Code chat if it becomes a used harness.
 
 ## 11. CI images and release validation
 

@@ -4,7 +4,7 @@ exports[`additive read-only Scan > golden spectrum with truthful units and profi
 " api ● 2s  iq ● streaming · 4.1 MB/s  rx 445.971 MHz ±1.024  decoders 8/9 up · 1 restarting · 2 in window  drops !21%
  1 Overview  2 Decoders  3 Messages  4 Receiver  5 System  6 Scan
 
- SCAN · rtl · spectrum · read-only
+ SCAN · rtl · spectrum · inspection; identify asks to confirm
  scanner enabled · engine running · passive enabled (not proof of a job) · 1 active jobs
  channelizer unavailable · CPU 0.5/1 cores · guard ?% · disk ok
  profile requested 5Hz x 512

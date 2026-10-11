@@ -198,8 +198,12 @@ describe("agent instructions", () => {
 			expect(prettier["singleQuote"]).not.toBe(true)
 		})
 
+		it("no tracked legacy specs remain", () => {
+			expect(tracked.filter(file => file.startsWith(".kiro/specs/"))).toEqual([])
+		})
+
 		it("spec directories hold the three spec files", () => {
-			const specRoots = ["docs/specs", ".kiro/specs"].filter(dir =>
+			const specRoots = ["docs/specs"].filter(dir =>
 				existsSync(join(root, dir)),
 			)
 			const incomplete = specRoots.flatMap(dir =>

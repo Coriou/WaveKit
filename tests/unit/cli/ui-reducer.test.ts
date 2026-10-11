@@ -4,6 +4,48 @@ import { initialUi } from "../../../cli/source/ui/ui-state.js"
 
 const ctx = { rowIds: ["a", "b", "c"], pageSize: 2 }
 
+describe("identify local intent", () => {
+	function pending() {
+		const ui = initialUi("scan")
+		ui.confirm = {
+			kind: "identify",
+			token: 1,
+			prompt: "Identify",
+			yes: "confirm",
+			no: "cancel",
+			request: {
+				sourceId: "rtl",
+				target: { frequencyHz: 446056250, bandwidthHz: 12500 },
+				timeoutMs: 15000,
+				exhaustive: false,
+				record: false,
+			},
+			layout: { width: 59, height: 12, rows: [] },
+		}
+		return ui
+	}
+	it("discards unsent consent on help, selection, reconnect and view changes", () => {
+		for (const action of [
+			{ type: "help-open" },
+			{ type: "move", delta: 1 },
+			{ type: "reconnect" },
+			{ type: "view", view: "receiver" },
+		] as const)
+			expect(applyUiAction(pending(), action, ctx, 0).confirm).toBeNull()
+	})
+	it("n only dismisses the prompt; Esc exits receipt inspection locally", () => {
+		expect(
+			applyUiAction(pending(), { type: "confirm-no" }, ctx, 0).confirm,
+		).toBeNull()
+		const ui = initialUi("scan")
+		ui.scan.receipt = true
+		ui.detail.scan = { open: true, scroll: 15 }
+		const next = applyUiAction(ui, { type: "escape" }, ctx, 0)
+		expect(next.scan.receipt).toBe(false)
+		expect(next.detail.scan).toEqual({ open: false, scroll: 0 })
+	})
+})
+
 describe("applyUiAction", () => {
 	it("moves and clamps the selection", () => {
 		let ui = applyUiAction(

@@ -18,6 +18,21 @@ export const DISCOVERY_CANDIDATES: readonly string[] = [
 
 const RELAY_PORT = "4713"
 
+export type DispatchRefusalReason =
+	| "aborted"
+	| "eligibility"
+	| "destination"
+	| "headers"
+	| "credential"
+
+/** Proof from the adapter that native dispatch did not occur. No raw diagnostics. */
+export class DispatchNotSent extends Error {
+	override name = "DispatchNotSent"
+	constructor(readonly reason: DispatchRefusalReason) {
+		super("Identify request not sent")
+	}
+}
+
 export type FetchLike = (
 	url: string,
 	init?: {
@@ -25,6 +40,8 @@ export type FetchLike = (
 		method?: string
 		headers?: Record<string, string>
 		body?: string
+		/** Private synchronous fence; adapters remove it before native dispatch. */
+		beforeDispatch?: () => boolean
 	},
 ) => Promise<{
 	ok: boolean

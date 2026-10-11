@@ -1,10 +1,88 @@
 import type { AppState } from "../data/types.js"
+import {
+	identifyConsentLayout,
+	identifySourceIdentity,
+	type IdentifyConsentLayout,
+	type IdentifyRequest,
+} from "../data/identify-state.js"
 import type { ScanLane } from "../data/scan-state.js"
 import type { ScanJob, ScanDiscovery } from "../data/scanner-guards.js"
 import { sp, type Line } from "../ui/line.js"
 import { sanitize, truncate, cellWidth } from "../ui/text.js"
 import { glyphs } from "../ui/theme.js"
 import type { UiState } from "../ui/ui-state.js"
+
+/** Shared with the dispatch fence; width excludes the incumbent left gutter. */
+export function identifyDisclosure(
+	request: IdentifyRequest,
+	width: number,
+	height: number,
+): IdentifyConsentLayout {
+	return identifyConsentLayout(request, {
+		sourceId: request.sourceId,
+		discoveryId: null,
+		key: "disclosure",
+		active: true,
+		columns: width + 1,
+		// This view only knows its content budget. App/runtime check live terminal
+		// dimensions independently, including the minimum and committed layout.
+		rows: 16,
+		contentRows: height,
+	})
+}
+
+export function scanIdentifyReady(
+	state: AppState,
+	ui: UiState,
+	width: number,
+	height: number,
+): boolean {
+	const readiness = state.identify?.readiness
+	return (
+		ui.scan.tab === "discoveries" &&
+		ui.detail.scan.open &&
+		!ui.scan.receipt &&
+		!ui.help &&
+		readiness?.ready === true &&
+		readiness.request !== null &&
+		identifyDisclosure(readiness.request, width, height).fits
+	)
+}
+
+function receiptLines(state: AppState): string[] {
+	const r = state.identify?.receipt
+	if (!r) return ["No identify receipt in this session."]
+	const labels = {
+		preparing: "Submitting identify; dispatch pending.",
+		"possibly-sent": "Submitting identify; outcome pending.",
+		unsent: "Identify was not sent; reinspect before a new confirmation.",
+		refused: "Identify refused; reinspect before a new confirmation.",
+		unresolved: r.acceptedResponse
+			? "Accepted response; job details unavailable."
+			: "Submission outcome unknown; inspect jobs.",
+		known: "Accepted identify; inspect the exact job below.",
+		"terminal-confirmed": "Exact job terminal state confirmed by direct GET.",
+	}
+	return [
+		"IDENTIFY RECEIPT",
+		labels[r.phase],
+		...(r.phase === "unresolved"
+			? ["Inspection only for this session; no retry."]
+			: []),
+		...(r.status !== null
+			? [`HTTP ${r.status}${r.code ? ` ${r.code}` : ""}`]
+			: []),
+		...(r.error ? [r.error] : []),
+		...(r.terminalAt !== null && state.now - r.terminalAt > 15000
+			? ["Terminal proof stale; fresh exact-ID GET required."]
+			: []),
+		`source: ${identifySourceIdentity(r.request.sourceId)}`,
+		`request: ${r.request.target.frequencyHz} Hz | width ${r.request.target.bandwidthHz} Hz`,
+		`job ID: ${r.jobId ?? "unavailable"}`,
+		"Navigation does not cancel server work.",
+		...(r.job ? jobLines(r.job) : []),
+	]
+}
 
 export function scanSources(state: AppState): string[] {
 	return (state.sources.value ?? [])
@@ -32,6 +110,7 @@ export function scanLaneText(
 	return null
 }
 export function scanRowIds(state: AppState, ui: UiState): string[] {
+	if (ui.scan.receipt) return []
 	if (ui.scan.tab === "jobs")
 		return (state.scan.lanes.jobs.value ?? [])
 			.filter(j => j.spec.sourceId === ui.scan.sourceId)
@@ -150,6 +229,7 @@ function spectrumDetail(state: AppState): string[] {
 	return rows
 }
 function rawScanDetail(state: AppState, ui: UiState): string[] {
+	if (ui.scan.receipt) return receiptLines(state)
 	if (ui.scan.tab === "spectrum") return spectrumDetail(state)
 	if (ui.scan.tab === "jobs") {
 		const l = state.scan.lanes.job
@@ -202,10 +282,59 @@ export function scanModel(
 	const selected = state.sources.value?.find(s => s.id === source)
 	const header: Line[] = [
 		line(
-			`SCAN${sep}${source ?? "no eligible IQ source"}${sep}${ui.scan.tab}${sep}read-only`,
+			`SCAN${sep}${source ?? "no eligible IQ source"}${sep}${ui.scan.tab}${sep}inspection; identify asks to confirm`,
 			"label",
 		),
 	]
+	if (ui.confirm?.kind === "identify") {
+		const c = ui.confirm
+		const disclosure = identifyDisclosure(c.request, width, height)
+		const fits =
+			disclosure.fits &&
+			c.layout.width === width &&
+			c.layout.height === height &&
+			c.layout.rows.length === disclosure.lines.length &&
+			c.layout.rows.every((r, i) => r === disclosure.lines[i]) &&
+			!ui.help
+		if (!fits)
+			return {
+				lines: [
+					line("Confirmation cannot fit; widen terminal", "attention"),
+				].slice(0, height),
+				plotHeight: 0,
+				detailRows: 0,
+			}
+		const rows = scanDetail(state, ui, width)
+		const room = Math.max(0, height - disclosure.lines.length)
+		const start = Math.min(
+			ui.detail.scan.scroll,
+			Math.max(0, rows.length - room),
+		)
+		return {
+			lines: [
+				...disclosure.lines.map(t => line(t)),
+				...rows.slice(start, start + room).map(t => line(t, "old")),
+			],
+			plotHeight: 0,
+			detailRows: rows.length,
+		}
+	}
+	if (ui.scan.receipt) {
+		const rows = scanDetail(state, ui, width)
+		const room = Math.max(0, height - 1)
+		const start = Math.min(
+			ui.detail.scan.scroll,
+			Math.max(0, rows.length - room),
+		)
+		return {
+			lines: [
+				line("IDENTIFY RECEIPT | PgUp/PgDn scroll | Esc back", "label"),
+				...rows.slice(start, start + room).map(t => line(t)),
+			].slice(0, height),
+			plotHeight: 0,
+			detailRows: rows.length,
+		}
+	}
 	const status = scan.lanes.status
 	const statusText = scanLaneText(
 		status,
@@ -231,18 +360,31 @@ export function scanModel(
 		)
 	if (ui.detail.scan.open) {
 		const rows = scanDetail(state, ui, width)
-		const room = Math.max(0, height - header.length - 1)
+		const detailHeader = [
+			line(`DETAIL${sep}PgUp/PgDn scroll${sep}Esc back`, "label"),
+		]
+		if (ui.scan.tab === "discoveries") {
+			const ready = scanIdentifyReady(state, ui, width, height)
+			const readiness = state.identify?.readiness
+			const reason =
+				readiness?.ready && readiness.request
+					? identifyDisclosure(readiness.request, width, height).reason
+					: readiness?.reason
+			detailHeader.push(
+				line(
+					`Identify: ${ready ? "i identify (asks to confirm)" : (reason ?? "fresh reinspection required")}`,
+					ready ? "label" : "attention",
+				),
+			)
+		}
+		const room = Math.max(0, height - header.length - detailHeader.length)
 		const start = Math.min(
 			ui.detail.scan.scroll,
 			Math.max(0, rows.length - room),
 		)
 		const detail = rows.slice(start, start + room).map(t => line(t))
 		return {
-			lines: [
-				...header,
-				line(`DETAIL${sep}PgUp/PgDn scroll${sep}Esc back`, "label"),
-				...detail,
-			].slice(0, height),
+			lines: [...header, ...detailHeader, ...detail].slice(0, height),
 			plotHeight: 0,
 			detailRows: rows.length,
 		}

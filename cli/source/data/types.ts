@@ -1,5 +1,6 @@
 import type { ScanEvent } from "./scanner-guards.js"
 import type { ScanState } from "./scan-state.js"
+import type { IdentifySnapshot } from "./identify-state.js"
 import type {
 	AircraftState,
 	AircraftTrackerStats,
@@ -533,6 +534,7 @@ export interface Effects {
 }
 
 export interface AppState {
+	identify?: IdentifySnapshot
 	scan: ScanState
 	conn: ConnState
 	sources: Lane<SourceRow[]>

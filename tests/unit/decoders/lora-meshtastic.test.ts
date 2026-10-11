@@ -1,7 +1,7 @@
 /**
  * LoRa/Meshtastic Decoder Property-Based Tests.
  *
- * Eight properties from .kiro/specs/lora-decoder/design.md section 7.
+ * Eight properties from docs/specs/lora-decoder/design.md section 7.
  */
 
 import { describe, it, expect } from "vitest"

@@ -1,6 +1,6 @@
 # Build & DX Overhaul Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan phase-by-phase. Each phase below dispatches one fresh subagent that executes the Kiro task list in `.kiro/specs/build-devx-overhaul/tasks.md` for that phase, then returns for review at the verification gate. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan phase-by-phase. Each phase below dispatches one fresh subagent that executes the Kiro task list in `docs/specs/build-devx-overhaul/tasks.md` for that phase, then returns for review at the verification gate. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the 737-line single Dockerfile, four parallel compose files, divergent Makefile dev flows, and Docker-free CI with: one narrow-staged Dockerfile, one profile-driven compose file, GHCR-backed BuildKit registry cache, a native `pnpm dev` headline loop, and CI that builds at least `final-core` on every PR.
 
@@ -12,7 +12,7 @@
 
 ## Authoritative spec
 
-The Kiro spec at `/Users/ben/Projects/wavekit/.kiro/specs/build-devx-overhaul/` is the canonical source of truth:
+The spec at `docs/specs/build-devx-overhaul/` is the canonical source of truth:
 
 - `requirements.md` — 11 user stories, 51 acceptance criteria, Out-of-Scope list
 - `design.md` — current-state diagnosis (14 anti-patterns), 20-stage Dockerfile structure, compose topology, cache strategy, s6 contract change, 12 correctness properties, risk register
@@ -202,7 +202,7 @@ Property 5 demands a `docker system prune -af && make docker-build` test that pu
 
 Task B.2.10 apt-installs `python3-matplotlib`, `python3-scipy`. These pull in ~400MB of Debian deps. This is intentional (the demod test environment is interactive and benefits from these), but it WILL make `final-demod` the largest stage. If image size becomes a complaint, requirement 10's "modest, opportunistic" framing covers trimming this in a follow-up — DO NOT trim during this refactor (out-of-scope per requirement 10.5).
 
-## Tasks: defer to `.kiro/specs/build-devx-overhaul/tasks.md`
+## Tasks: defer to `docs/specs/build-devx-overhaul/tasks.md`
 
 The 60-task implementation checklist lives in the Kiro spec. The subagent dispatched for each phase below MUST open `tasks.md`, execute that phase's tasks in order, check off each with `- [x]`, and report the verification gate's pass/fail to the dispatching session.
 

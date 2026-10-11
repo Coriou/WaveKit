@@ -38,6 +38,56 @@ const base: KeyContext = {
 	},
 }
 
+describe("identify keys", () => {
+	it("offers identify only in eligible open detail; preparation is not a write", () => {
+		const scan = {
+			...base,
+			view: "scan" as const,
+			detail: true,
+			v: { ...base.v, scanIdentifyReady: true },
+		}
+		expect(resolveKey(scan, "i")).toEqual({ type: "scan-identify" })
+		expect(isWrite({ type: "scan-identify" })).toBe(false)
+		expect(resolveKey({ ...scan, detail: false }, "i")).toBeUndefined()
+		expect(
+			resolveKey({ ...scan, v: { ...scan.v, scanIdentifyReady: false } }, "i"),
+		).toBeUndefined()
+		expect(
+			footerHints(scan).some(
+				h => h.hint.label === "identify (asks to confirm)",
+			),
+		).toBe(true)
+	})
+	it("opens a retained receipt without a source or selectable rows on every Scan tab", () => {
+		for (const detail of [false, true]) {
+			const scan = {
+				...base,
+				view: "scan" as const,
+				detail,
+				rows: 0,
+				v: { ...base.v, scanReceipt: true },
+			}
+			expect(resolveKey(scan, "o")).toEqual({ type: "scan-receipt" })
+			expect(isWrite({ type: "scan-receipt" })).toBe(false)
+		}
+	})
+	it("keeps modal consent explicit and help cannot approve hidden identify", () => {
+		const scan = {
+			...base,
+			view: "scan" as const,
+			confirm: "identify" as const,
+		}
+		expect(resolveKey(scan, "y")).toEqual({ type: "confirm-yes" })
+		for (const key of ["n", "<esc>"])
+			expect(resolveKey(scan, key)).toEqual({ type: "confirm-no" })
+		for (const key of ["i", "o", "<enter>"])
+			expect(resolveKey(scan, key)).toBeUndefined()
+		expect(resolveKey({ ...scan, help: true }, "y")).toEqual({
+			type: "help-close",
+		})
+	})
+})
+
 describe("keyName", () => {
 	it("normalises Ink keys; Backspace and Delete are the same key", () => {
 		expect(keyName("", { backspace: false, delete: true })).toBe("<backspace>")

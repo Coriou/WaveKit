@@ -80,6 +80,8 @@ export type Action =
 	| { type: "scan-source" }
 	| { type: "scan-next-page" }
 	| { type: "scan-first-page" }
+	| { type: "scan-identify" }
+	| { type: "scan-receipt" }
 	| { type: "notice"; text: string }
 
 /** The only actions that cause network writes (spec T9, P20). */
@@ -89,6 +91,9 @@ export function isWrite(action: Action): boolean {
 
 /** Per-view facts the keymap's `when` predicates read (filled by each view's keyInfo). */
 export interface ViewKeyCtx {
+	/** Advisory only; App/runtime revalidate the committed consent at dispatch. */
+	scanIdentifyReady?: boolean
+	scanReceipt?: boolean
 	decoderOwned?: boolean
 	hasSelection: boolean
 	decoderRunning: boolean | null

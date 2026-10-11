@@ -1,4 +1,5 @@
 import type { WriteIntent } from "../data/types.js"
+import type { IdentifyPrompt } from "../data/identify-state.js"
 import type { Group } from "./line.js"
 import { VIEW_ORDER, type ViewId } from "./actions.js"
 
@@ -43,9 +44,14 @@ export interface TunerEditState {
 	digit: number
 }
 
-export type ConfirmKind = "decoder" | "tuner" | "control" | "preset"
-export interface ConfirmRequest {
-	kind: ConfirmKind
+export type ConfirmKind =
+	| "decoder"
+	| "tuner"
+	| "control"
+	| "preset"
+	| "identify"
+export interface WriteConfirm {
+	kind: Exclude<ConfirmKind, "identify">
 	/** Text after the ▶ glyph, e.g. "restart readsb · up 51s · pid 1531". */
 	prompt: string
 	yes: string
@@ -60,6 +66,23 @@ export interface ConfirmRequest {
 	 */
 	groups?: Group[]
 }
+
+/** Separate from WriteIntent: identify has its own runtime fence and receipt. */
+export interface IdentifyConfirm {
+	kind: "identify"
+	/** Absent; these preserve inspection of incumbent confirmation projections. */
+	intent?: never
+	extra?: never
+	groups?: never
+	presetIndex?: never
+	prompt: string
+	yes: string
+	no: string
+	token: IdentifyPrompt["token"]
+	request: IdentifyPrompt["request"]
+	layout: { width: number; height: number; rows: readonly string[] }
+}
+export type ConfirmRequest = WriteConfirm | IdentifyConfirm
 
 export interface MessagesUi {
 	following: boolean
@@ -85,6 +108,7 @@ export interface UiState {
 		retry: number
 		tab: "spectrum" | "discoveries" | "jobs"
 		cursor: string | null
+		receipt?: boolean
 	}
 	help: boolean
 	confirm: ConfirmRequest | null
