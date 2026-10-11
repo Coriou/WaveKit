@@ -558,6 +558,19 @@ fn abandon(q: &ChannelQueue, conn: &ConnSlot, (gone, id, serial): Gone) {
 
 type Gone = (mpsc::Sender<(String, u64)>, String, u64);
 
+/// Unlink and publish the accepted connection under the same lock that close() uses
+/// to revoke this writer. After close has set `closing`, an old writer must never
+/// unlink a replacement channel's same-ID socket, even if its bounded join expired.
+fn install_writer_connection(path: &std::path::Path, conn: &ConnSlot, stream: &UnixStream) -> bool {
+    let mut c = conn.lock().unwrap();
+    if c.closing {
+        return false;
+    }
+    let _ = std::fs::remove_file(path); // exactly one client per socket
+    c.stream = stream.try_clone().ok();
+    true
+}
+
 fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: ConnSlot, gone: Gone) {
     // The listener is non-blocking: accept() is polled so close() and EOF never need a wake-up
     // connection, which EOF could not tell apart from a real client. The flags are read before
@@ -587,19 +600,13 @@ fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: Con
         }
     };
     drop(listener);
-    // Exactly one client per socket.
-    let _ = std::fs::remove_file(&path);
     // BSD/macOS accept() inherits O_NONBLOCK from the listener; the writes below must block.
     if let Err(e) = stream.set_nonblocking(false) {
         eprintln!("wavekit-chan: channel {}: set_nonblocking: {e}", gone.1);
         return abandon(&q, &conn, gone);
     }
-    {
-        let mut c = conn.lock().unwrap();
-        if c.closing {
-            return; // close() got here first
-        }
-        c.stream = stream.try_clone().ok(); // close() shuts this clone down to unblock write_all
+    if !install_writer_connection(&path, &conn, &stream) {
+        return; // close() got here first; the path may already belong to a replacement
     }
     let mut stream = stream;
     let mut buf = Vec::with_capacity(WRITE_CHUNK);
@@ -748,6 +755,26 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn accepted_old_writer_cannot_unlink_replacement_after_close() {
+        let dir = TempDir::new();
+        let path = dir.0.join("same.sock");
+        let old = UnixListener::bind(&path).unwrap();
+        let _client = UnixStream::connect(&path).unwrap();
+        let (accepted, _) = old.accept().unwrap();
+        let conn = ConnSlot::default();
+        // Pause the old writer immediately after accept, then complete close and
+        // bind a replacement before the old writer resumes (no timing assertion).
+        conn.lock().unwrap().closing = true;
+        std::fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        assert!(!install_writer_connection(&path, &conn, &accepted));
+        assert!(conn.lock().unwrap().stream.is_none());
+        let _replacement_client = UnixStream::connect(&path).unwrap();
+        replacement.accept().unwrap();
+        assert!(path.exists());
     }
 
     fn rt(dir: &Path) -> (Runtime, Events) {

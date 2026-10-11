@@ -323,7 +323,7 @@ describe("ChannelizerManager", () => {
 		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
 		sources.emit("caps-changed", "rtl", caps(2_048_000, 163e6))
 		await vi.waitFor(() => expect(order).toContain("socket-closed"))
-		expect(events).toEqual([["rtl", 1, ["ais-g1"]]])
+		expect(events).toEqual([["rtl", 1, ["ais-g1"], "caps-changed"]])
 		expect(order[0]).toBe("invalidated")
 		expect(fanout.getBranchIds()).toEqual([])
 		expect(released).toContain("rtl")
@@ -360,7 +360,7 @@ describe("ChannelizerManager", () => {
 			const events: unknown[] = []
 			m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
 			sources.emit(event, "rtl")
-			expect(events).toEqual([["rtl", 1, ["ais-g1", "vdl-g1"]]])
+			expect(events).toEqual([["rtl", 1, ["ais-g1", "vdl-g1"], "source-lost"]])
 			expect(fanout.getBranchIds()).toEqual([])
 			expect(released).toEqual(["rtl"])
 		},
@@ -567,7 +567,7 @@ describe("ChannelizerManager", () => {
 			id: "ais-g1",
 			reason: "client-gone",
 		})
-		expect(events).toEqual([["rtl", 1, ["ais-g1"]]])
+		expect(events).toEqual([["rtl", 1, ["ais-g1"], "client-gone"]])
 		expect(a.stream.destroyed).toBe(true)
 		expect(b.stream.destroyed).toBe(false)
 		expect(fanout.getBranchIds()).toEqual(["channelizer-rtl"])
@@ -614,7 +614,9 @@ describe("ChannelizerManager", () => {
 		const events: unknown[] = []
 		m.on("channel-invalidated", (...args: unknown[]) => events.push(args))
 		sockets[0]!.destroy(new Error("read ECONNRESET"))
-		await vi.waitFor(() => expect(events).toEqual([["rtl", 1, ["ais-g1"]]]))
+		await vi.waitFor(() =>
+			expect(events).toEqual([["rtl", 1, ["ais-g1"], "socket-error"]]),
+		)
 		expect(a.stream.destroyed).toBe(true)
 		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
 		expect(fanout.getBranchIds()).toEqual([])
@@ -897,7 +899,7 @@ describe("ChannelizerManager", () => {
 		expect(await m.requestChannel("rtl", "ais", req(), caps())).toMatchObject({
 			ok: false,
 			reasonCode: "channelizer-unavailable",
-			detail: "no opened/rejected within 300 ms",
+			detail: "channel request timed out after 300 ms",
 		})
 		expect(sent).toContainEqual({ v: 1, type: "close", id: "ais-g1" })
 		expect(fanout.getBranchIds()).toEqual([])

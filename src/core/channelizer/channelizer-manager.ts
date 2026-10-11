@@ -9,6 +9,7 @@ import type { ChannelizerConfig, SourceCaps } from "../../config.js"
 import type { FanoutManager } from "../fanout-manager.js"
 import type { SourceFanoutRouter } from "../source-fanout-router.js"
 import type { SourceManager } from "../source-manager.js"
+import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import { admitChannel } from "./admission.js"
 import {
@@ -36,6 +37,9 @@ export const MAX_SOCKET_PATH = 100
 export const CRASH_LIMIT = 5
 export const CRASH_WINDOW_MS = 60_000
 const OPEN_TIMEOUT_MS = 5000
+const CLOSE_TIMEOUT_MS = 250
+const BUSY_BACKOFF_MS = [25, 50, 100, 200, 400] as const
+const MAX_OPEN_SENDS = BUSY_BACKOFF_MS.length + 1
 const SAMPLE_BYTES = { cu8: 2, cf32: 8 } as const
 const MAX_NAME = 48
 /**
@@ -58,11 +62,13 @@ export interface ChannelizerManagerDeps {
 		o: ChannelizerProcessOptions,
 		logger: Logger,
 	) => ChannelizerProcessLike
-	connect?: (socketPath: string) => Promise<Readable>
+	connect?: (socketPath: string, signal?: AbortSignal) => Promise<Readable>
 	/** Injectable clock for the crash-loop window (tests). */
 	now?: () => number
 	/** How long a request waits for `opened`/`rejected` (default 5 s; tests). */
 	openTimeoutMs?: number
+	/** Monotonic acquisition clock; separate from the crash-window wall clock. */
+	openNow?: () => number
 }
 
 /** `socket` is the process's Unix socket; `stream` is what the decoder gets (fed with end: false). */
@@ -72,7 +78,25 @@ interface OpenChannel {
 	stream: PassThrough
 }
 type OpenRequest = Extract<ChannelizerRequest, { type: "open" }>
-type OpenReply = OpenedEvent | RejectedEvent | "superseded" | null
+type OpenReply = OpenedEvent | RejectedEvent
+interface RequestContext {
+	signal: AbortSignal | undefined
+	deadline: number
+	sends: number
+}
+interface OpenAttempt {
+	/** Updated synchronously on wire events, before any promise continuation. */
+	pending: boolean
+	opened: boolean
+	closed: boolean
+	interrupt: (() => void) | undefined
+	reply: (e: OpenReply) => boolean
+}
+interface Closing {
+	pendingOpen: boolean
+	promise: Promise<void>
+	finish: () => void
+}
 interface SourceChannelizer {
 	sourceId: string
 	generation: number
@@ -82,7 +106,9 @@ interface SourceChannelizer {
 	fanout: FanoutManager
 	branchId: string
 	channels: Map<string, OpenChannel>
-	waiters: Map<string, (e: OpenReply) => void>
+	waiters: Map<string, OpenAttempt>
+	closing: Map<string, Closing>
+	interruptions: Set<() => void>
 	/** Requests between `open` and attaching (or failing); the process is not idle while any is in flight. */
 	pending: number
 	gapAtByte: number | null
@@ -108,14 +134,39 @@ const invalid = (detail: string): ChannelRequestResult => ({
 const isCu8Iq = (caps: SourceCaps): boolean =>
 	(caps.kind === "iq" || caps.kind === "recording") && caps.format === "U8_IQ"
 
-function defaultConnect(path: string): Promise<Readable> {
+function defaultConnect(path: string, signal?: AbortSignal): Promise<Readable> {
 	return new Promise((resolve, reject) => {
 		const socket = createConnection(path)
-		socket.once("error", reject)
-		socket.once("connect", () => {
-			socket.off("error", reject)
+		// A late transport error can arrive between acquisition settlement and the manager attaching its handler.
+		socket.on("error", () => {})
+		const cancelled = () => {
+			cleanup()
+			socket.destroy()
+			reject(
+				new WaveKitError(
+					"channel socket connection cancelled",
+					"CHANNELIZER_UNAVAILABLE",
+				),
+			)
+		}
+		const failed = (err: Error) => {
+			cleanup()
+			socket.destroy()
+			reject(err)
+		}
+		const connected = () => {
+			cleanup()
 			resolve(socket)
-		})
+		}
+		const cleanup = () => {
+			signal?.removeEventListener("abort", cancelled)
+			socket.off("error", failed)
+			socket.off("connect", connected)
+		}
+		socket.once("error", failed)
+		socket.once("connect", connected)
+		signal?.addEventListener("abort", cancelled, { once: true })
+		if (signal?.aborted) cancelled()
 	})
 }
 
@@ -139,12 +190,15 @@ export class ChannelizerManager
 	private readonly losses = new Map<string, number>()
 	/** Process stops in flight; `destroy()` awaits them all (PF14). */
 	private readonly stops = new Set<Promise<void>>()
+	private readonly releases = new Map<string, Promise<void>>()
+	private readonly destroyWaiters = new Set<() => void>()
 	private readonly createProcess: NonNullable<
 		ChannelizerManagerDeps["createProcess"]
 	>
 	private readonly connect: NonNullable<ChannelizerManagerDeps["connect"]>
 	private readonly now: () => number
 	private readonly openTimeoutMs: number
+	private readonly openNow: () => number
 	private destroyed = false
 	private readonly onCaps = (sourceId: string, caps: SourceCaps) => {
 		const s = this.active.get(sourceId)
@@ -163,6 +217,7 @@ export class ChannelizerManager
 		this.connect = deps.connect ?? defaultConnect
 		this.now = deps.now ?? Date.now
 		this.openTimeoutMs = deps.openTimeoutMs ?? OPEN_TIMEOUT_MS
+		this.openNow = deps.openNow ?? (() => performance.now())
 		deps.sourceManager.on("caps-changed", this.onCaps)
 		deps.sourceManager.on("disconnected", this.onGone)
 		deps.sourceManager.on("removed", this.onGone)
@@ -190,34 +245,61 @@ export class ChannelizerManager
 		decoderId: string,
 		req: DecoderChannelRequest,
 		inputCaps: SourceCaps | undefined,
+		signal?: AbortSignal,
 	): Promise<ChannelRequestResult> {
-		// Serialised per source: one spawn for concurrent requests, and generations never interleave.
-		const run = () => this.request(sourceId, decoderId, req, inputCaps)
-		const next = (this.queues.get(sourceId) ?? Promise.resolve()).then(run, run)
-		this.queues.set(
-			sourceId,
-			next.catch(() => undefined),
-		)
-		return next
+		// A queued cancellation settles the caller now; its eventual queue callback
+		// remains a no-op. Running work settles through bounded ownership cleanup.
+		return new Promise((resolve, reject) => {
+			const cancelled = () => resolve(unavailable(this.cancellationDetail()))
+			signal?.addEventListener("abort", cancelled, { once: true })
+			if (signal?.aborted) cancelled()
+			const run = () => {
+				signal?.removeEventListener("abort", cancelled)
+				if (signal?.aborted) return unavailable(this.cancellationDetail())
+				const ctx: RequestContext = {
+					signal,
+					deadline: this.openNow() + this.openTimeoutMs,
+					sends: 0,
+				}
+				return this.request(sourceId, decoderId, req, inputCaps, ctx)
+			}
+			const next = (this.queues.get(sourceId) ?? Promise.resolve()).then(
+				run,
+				run,
+			)
+			this.queues.set(
+				sourceId,
+				next.catch(() => undefined),
+			)
+			void next.then(resolve, reject)
+		})
 	}
 
 	releaseChannel(channelId: string): Promise<void> {
+		const held = this.releases.get(channelId)
+		if (held) return held
 		const sourceId = this.channelOwner.get(channelId)
 		if (sourceId === undefined) return Promise.resolve()
-		this.channelOwner.delete(channelId)
 		const s = this.active.get(sourceId)
 		const ch = s?.channels.get(channelId)
 		if (!s || !ch) return Promise.resolve()
+		this.channelOwner.delete(channelId)
 		s.channels.delete(channelId)
-		s.process.send({ v: 1, type: "close", id: channelId })
+		const settlement = this.closeOwned(s, channelId, false)
 		ch.socket.destroy()
 		ch.stream.destroy()
+		this.releases.set(channelId, settlement)
+		void settlement.then(() => {
+			if (this.releases.get(channelId) === settlement)
+				this.releases.delete(channelId)
+		})
 		this.stopIfIdle(s, "last-channel-released")
-		return Promise.resolve()
+		return settlement
 	}
 
 	async destroy(): Promise<void> {
 		this.destroyed = true
+		for (const wake of [...this.destroyWaiters]) wake()
 		this.deps.sourceManager.off("caps-changed", this.onCaps)
 		this.deps.sourceManager.off("disconnected", this.onGone)
 		this.deps.sourceManager.off("removed", this.onGone)
@@ -233,9 +315,12 @@ export class ChannelizerManager
 		decoderId: string,
 		req: DecoderChannelRequest,
 		inputCaps: SourceCaps | undefined,
+		ctx: RequestContext,
 		retried = false,
 	): Promise<ChannelRequestResult> {
 		if (this.destroyed) return unavailable("channelizer manager destroyed")
+		if (ctx.signal?.aborted) return unavailable(this.cancellationDetail())
+		if (this.remaining(ctx) <= 0) return this.timeout()
 		const caps = this.deps.sourceManager.getCaps(sourceId)
 		if (!caps || !isCu8Iq(caps))
 			return invalid(
@@ -285,6 +370,16 @@ export class ChannelizerManager
 		}
 		const generation = s?.generation ?? this.currentGeneration(sourceId) + 1
 		const channelId = `${sanitize(decoderId)}-g${generation}`
+		const closing = s?.closing.get(channelId)
+		if (s && closing) {
+			const settled = await this.wait(s, ctx, done => {
+				void closing.promise.then(() => done("closed"))
+				return () => {}
+			})
+			if (settled === "cancelled") return unavailable(this.cancellationDetail())
+			if (settled === null) return this.timeout()
+			return this.request(sourceId, decoderId, req, inputCaps, ctx, retried)
+		}
 		// The process rejects a duplicate id; refusing it here keeps the open channel's socket untouched.
 		if (s?.channels.has(channelId))
 			return invalid(`duplicate channel id ${channelId}`)
@@ -318,10 +413,18 @@ export class ChannelizerManager
 				`socket path too long (${length} > ${MAX_SOCKET_PATH}): ${socketPath}`,
 			)
 		}
-		const superseded = (): Promise<ChannelRequestResult> =>
-			retried
+		const superseded = (): Promise<ChannelRequestResult> => {
+			if (ctx.signal?.aborted)
+				return Promise.resolve(unavailable(this.cancellationDetail()))
+			if (this.destroyed)
+				return Promise.resolve(unavailable("channelizer manager destroyed"))
+			if (this.remaining(ctx) <= 0) return Promise.resolve(this.timeout())
+			if (ctx.sends >= MAX_OPEN_SENDS)
+				return Promise.resolve(unavailable("channel open send limit reached"))
+			return retried
 				? Promise.resolve(unavailable("generation superseded twice"))
-				: this.request(sourceId, decoderId, req, inputCaps, true)
+				: this.request(sourceId, decoderId, req, inputCaps, ctx, true)
+		}
 		if (!s) {
 			const held = this.crashLoopHold(sourceId)
 			if (held) return unavailable(held)
@@ -331,6 +434,7 @@ export class ChannelizerManager
 				{ sampleRate: caps.sampleRate, centerHz },
 				generation,
 				dir,
+				ctx,
 			)
 			if ("error" in spawned) return unavailable(spawned.error)
 			s = spawned
@@ -349,59 +453,216 @@ export class ChannelizerManager
 				return superseded()
 			}
 		}
-		return this.open(s, open, superseded)
+		return this.open(s, open, ctx, superseded)
 	}
 
 	private async open(
 		s: SourceChannelizer,
 		open: OpenRequest,
+		ctx: RequestContext,
 		superseded: () => Promise<ChannelRequestResult>,
 	): Promise<ChannelRequestResult> {
 		const channelId = open.id
 		s.pending++
+		let ownedAttempt: OpenAttempt | undefined
 		try {
-			const reply = new Promise<OpenReply>(resolve => {
-				const timer = setTimeout(() => resolve(null), this.openTimeoutMs)
-				s.waiters.set(channelId, e => {
-					clearTimeout(timer)
-					resolve(e)
+			let event: OpenedEvent
+			for (;;) {
+				if (ctx.signal?.aborted) return unavailable(this.cancellationDetail())
+				if (this.destroyed) return unavailable("channelizer manager destroyed")
+				const caps = this.deps.sourceManager.getCaps(s.sourceId)
+				if (!s.invalidated && (!caps || this.capsDiffer(s, caps)))
+					this.invalidate(s.sourceId, "caps-changed")
+				if (s.invalidated || this.active.get(s.sourceId) !== s)
+					return await superseded()
+				if (this.remaining(ctx) <= 0) return this.timeout()
+				if (ctx.sends >= MAX_OPEN_SENDS)
+					return unavailable("channel open send limit reached")
+				const attempt: OpenAttempt = {
+					pending: true,
+					opened: false,
+					closed: false,
+					interrupt: undefined,
+					reply: () => false,
+				}
+				ownedAttempt = attempt
+				const reply = await this.wait<OpenReply>(s, ctx, done => {
+					attempt.reply = done
+					s.waiters.set(channelId, attempt)
+					ctx.sends++
+					s.process.send(open)
+					return () => {
+						if (!attempt.opened && s.waiters.get(channelId) === attempt)
+							s.waiters.delete(channelId)
+					}
 				})
-			})
-			s.process.send(open)
-			const event = await reply
-			s.waiters.delete(channelId)
-			// Source invalidated while this request was pending: retry once against the new state, like a superseded generation.
-			if (event === "superseded") return await superseded()
-			if (event === null) {
-				s.process.send({ v: 1, type: "close", id: channelId })
-				return unavailable(`no opened/rejected within ${this.openTimeoutMs} ms`)
+				if (reply === "superseded") return await superseded()
+				if (reply === "cancelled" || reply === null) {
+					await this.closeOwned(
+						s,
+						channelId,
+						attempt.pending,
+						this.remaining(ctx),
+						reply === null ? "open-timeout" : "cancel-close-unconfirmed",
+					)
+					return reply === null
+						? this.timeout()
+						: unavailable(this.cancellationDetail())
+				}
+				if (s.invalidated) return await superseded()
+				if (ctx.signal?.aborted || this.remaining(ctx) <= 0) {
+					if (reply.type === "opened" && !attempt.closed)
+						await this.closeOwned(
+							s,
+							channelId,
+							false,
+							this.remaining(ctx),
+							ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+						)
+					return ctx.signal?.aborted
+						? unavailable(this.cancellationDetail())
+						: this.timeout()
+				}
+				if (reply.type === "rejected") {
+					if (
+						reply.reasonCode !== "channel-request-invalid" ||
+						reply.detail !== "planner busy"
+					)
+						return {
+							ok: false,
+							reasonCode: reply.reasonCode,
+							detail: reply.detail,
+						}
+					if (ctx.sends >= MAX_OPEN_SENDS)
+						return unavailable("planner busy retry limit reached")
+					const backoff = BUSY_BACKOFF_MS[ctx.sends - 1] ?? 400
+					const waited = await this.wait(
+						s,
+						ctx,
+						() => () => {},
+						backoff,
+						"elapsed",
+					)
+					if (waited === "cancelled")
+						return unavailable(this.cancellationDetail())
+					if (waited === "superseded") return await superseded()
+					if (waited === null) return this.timeout()
+					continue
+				}
+				event = reply
+				break
 			}
-			if (event.type === "rejected")
-				return { ok: false, reasonCode: event.reasonCode, detail: event.detail }
-			// Property 9: never attach a stream from a generation other than the current one.
+			if (ownedAttempt?.closed)
+				return unavailable("channel closed during acquisition")
+			if (ctx.signal?.aborted || this.remaining(ctx) <= 0) {
+				await this.closeOwned(
+					s,
+					channelId,
+					false,
+					this.remaining(ctx),
+					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+				)
+				return ctx.signal?.aborted
+					? unavailable(this.cancellationDetail())
+					: this.timeout()
+			}
 			if (
 				s.invalidated ||
 				event.generation !== this.currentGeneration(s.sourceId)
 			)
 				return await superseded()
-			let socket: Readable
-			try {
-				socket = await this.connect(event.socket)
-			} catch (err: unknown) {
-				if (s.invalidated) return await superseded()
-				s.process.send({ v: 1, type: "close", id: channelId })
-				return unavailable(`connect ${event.socket}: ${message(err)}`)
+			const connected = await this.wait<
+				{ socket: Readable } | { failed: true }
+			>(s, ctx, done => {
+				const connectCancel = new AbortController()
+				if (ownedAttempt)
+					ownedAttempt.interrupt = () => {
+						done({ failed: true })
+					}
+				let accepted = false
+				void Promise.resolve()
+					.then(() => {
+						if (
+							ctx.signal?.aborted ||
+							s.invalidated ||
+							this.destroyed ||
+							this.remaining(ctx) <= 0
+						)
+							return undefined
+						return this.connect(event.socket, connectCancel.signal)
+					})
+					.then(
+						socket => {
+							if (socket) {
+								accepted = true
+								if (!done({ socket })) socket.destroy()
+							}
+						},
+						() => {
+							done({ failed: true })
+						},
+					)
+				return () => {
+					if (ownedAttempt) ownedAttempt.interrupt = undefined
+					if (!accepted) connectCancel.abort()
+				}
+			})
+			if (connected === "superseded") return await superseded()
+			if (
+				connected === "cancelled" ||
+				connected === null ||
+				"failed" in connected
+			) {
+				if (!ownedAttempt?.closed)
+					await this.closeOwned(
+						s,
+						channelId,
+						false,
+						this.remaining(ctx),
+						connected === null
+							? "open-timeout"
+							: connected === "cancelled"
+								? "cancel-close-unconfirmed"
+								: "connect-close-unconfirmed",
+					)
+				if (
+					ownedAttempt?.closed &&
+					connected !== "cancelled" &&
+					connected !== null
+				)
+					return unavailable("channel closed during acquisition")
+				return connected === "cancelled"
+					? unavailable(this.cancellationDetail())
+					: connected === null
+						? this.timeout()
+						: unavailable("channel socket connection failed")
 			}
+			const socket = connected.socket
 			socket.on("error", (err: Error) => {
 				this.log.debug({ err, channelId }, "Channel socket error")
 				this.channelDied(s, channelId, socket, "socket-error")
 			})
-			if (s.invalidated) {
+			if (
+				ctx.signal?.aborted ||
+				this.remaining(ctx) <= 0 ||
+				s.invalidated ||
+				ownedAttempt?.closed
+			) {
 				socket.destroy()
-				return await superseded()
+				if (ownedAttempt?.closed)
+					return unavailable("channel closed during acquisition")
+				if (s.invalidated) return await superseded()
+				await this.closeOwned(
+					s,
+					channelId,
+					false,
+					this.remaining(ctx),
+					ctx.signal?.aborted ? "cancel-close-unconfirmed" : "open-timeout",
+				)
+				return ctx.signal?.aborted
+					? unavailable(this.cancellationDetail())
+					: this.timeout()
 			}
-			// end: false: the socket's EOF (process death) must never end the decoder's stdin; only detach/destroy does.
-			// pipeline() cannot express that, so both streams carry their own error handler.
 			const stream = new PassThrough()
 			stream.on("error", (err: Error) =>
 				this.log.debug({ err, channelId }, "Channel stream error"),
@@ -421,9 +682,126 @@ export class ChannelizerManager
 				},
 			}
 		} finally {
+			if (s.waiters.get(channelId) === ownedAttempt) s.waiters.delete(channelId)
 			s.pending--
 			this.stopIfIdle(s, "no-channels")
 		}
+	}
+
+	private remaining(ctx: RequestContext): number {
+		return Math.max(0, ctx.deadline - this.openNow())
+	}
+
+	private cancellationDetail(): string {
+		return this.destroyed
+			? "channelizer manager destroyed"
+			: "channel request cancelled"
+	}
+
+	private timeout(): ChannelRequestResult {
+		return unavailable(this.timeoutDetail())
+	}
+
+	private timeoutDetail(): string {
+		return `channel request timed out after ${this.openTimeoutMs} ms`
+	}
+
+	/** All acquisition waits share one monotonic deadline and wake immediately on cancellation/retirement. */
+	private wait<T>(
+		s: SourceChannelizer | undefined,
+		ctx: RequestContext,
+		subscribe: (done: (value: T) => boolean) => () => void,
+		delay = this.remaining(ctx),
+		timeoutReply: T | null = null,
+	): Promise<T | "cancelled" | "superseded" | null> {
+		return new Promise(resolve => {
+			let settled = false
+			let cleanup = () => {}
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const finish = (
+				value: T | "cancelled" | "superseded" | null,
+			): boolean => {
+				if (settled) return false
+				settled = true
+				if (timer !== undefined) clearTimeout(timer)
+				ctx.signal?.removeEventListener("abort", cancelled)
+				this.destroyWaiters.delete(cancelled)
+				s?.interruptions.delete(superseded)
+				cleanup()
+				resolve(value)
+				return true
+			}
+			const cancelled = () => {
+				finish("cancelled")
+			}
+			const superseded = () => {
+				finish("superseded")
+			}
+			ctx.signal?.addEventListener("abort", cancelled, { once: true })
+			this.destroyWaiters.add(cancelled)
+			s?.interruptions.add(superseded)
+			const remaining = this.remaining(ctx)
+			if (ctx.signal?.aborted || this.destroyed) {
+				finish("cancelled")
+				return
+			}
+			if (s?.invalidated) {
+				finish("superseded")
+				return
+			}
+			if (remaining <= 0) {
+				finish(null)
+				return
+			}
+			timer = setTimeout(
+				() => {
+					finish(delay < remaining ? timeoutReply : null)
+				},
+				Math.min(delay, remaining),
+			)
+			cleanup = subscribe(finish)
+			if (settled) cleanup() // synchronous fake/event delivery can settle inside subscribe
+		})
+	}
+
+	/** A closed line is a FIFO terminal barrier. Unknown native close has no reply: bounded retirement is the fallback. */
+	private closeOwned(
+		s: SourceChannelizer,
+		id: string,
+		pendingOpen: boolean,
+		budget = CLOSE_TIMEOUT_MS,
+		cause = "close-unconfirmed",
+	): Promise<void> {
+		if (s.invalidated) return Promise.resolve()
+		const held = s.closing.get(id)
+		if (held) return held.promise
+		let resolve = () => {}
+		const promise = new Promise<void>(done => {
+			resolve = done
+		})
+		let timer: ReturnType<typeof setTimeout> | undefined
+		const closing: Closing = {
+			pendingOpen,
+			promise,
+			finish: () => {
+				if (s.closing.get(id) !== closing) return
+				s.closing.delete(id)
+				if (timer !== undefined) clearTimeout(timer)
+				resolve()
+			},
+		}
+		s.closing.set(id, closing) // before send or socket destruction
+		s.process.send({ v: 1, type: "close", id })
+		if (s.closing.get(id) === closing) {
+			const retire = () => {
+				if (this.active.get(s.sourceId) === s)
+					this.invalidate(s.sourceId, cause)
+				closing.finish()
+			}
+			if (budget <= 0) retire()
+			else timer = setTimeout(retire, Math.min(CLOSE_TIMEOUT_MS, budget))
+		}
+		return promise
 	}
 
 	private async spawn(
@@ -431,6 +809,7 @@ export class ChannelizerManager
 		caps: { sampleRate: number; centerHz: number },
 		generation: number,
 		dir: string,
+		ctx: RequestContext,
 	): Promise<SourceChannelizer | { error: string }> {
 		try {
 			// A fresh, private directory per generation: stale sockets from an earlier run never linger.
@@ -451,6 +830,7 @@ export class ChannelizerManager
 				usableFraction: this.deps.config.usableFraction,
 				blockSamples: this.deps.config.blockSamples,
 				socketDir: dir,
+				readyTimeoutMs: this.remaining(ctx),
 			},
 			this.deps.logger,
 		)
@@ -460,7 +840,28 @@ export class ChannelizerManager
 		}
 		proc.on("event", onReady)
 		try {
-			await proc.start()
+			const started = await this.wait<"ready" | { error: string }>(
+				undefined,
+				ctx,
+				done => {
+					void proc.start().then(
+						() => done("ready"),
+						(err: unknown) => done({ error: message(err) }),
+					)
+					return () => {}
+				},
+			)
+			if (started !== "ready") {
+				this.stopProcess(proc, dir)
+				return {
+					error:
+						started === "cancelled"
+							? this.cancellationDetail()
+							: started === null || started === "superseded"
+								? this.timeoutDetail()
+								: started.error,
+				}
+			}
 		} catch (err: unknown) {
 			// Logged at warn: DecoderManager reports channelizer-unavailable at error once (Review Focus 4).
 			this.log.warn({ err, sourceId, generation }, "wavekit-chan did not start")
@@ -512,6 +913,8 @@ export class ChannelizerManager
 			branchId,
 			channels: new Map(),
 			waiters: new Map(),
+			closing: new Map(),
+			interruptions: new Set(),
 			pending: 0,
 			gapAtByte: null,
 			droppedAtGap: 0,
@@ -545,6 +948,7 @@ export class ChannelizerManager
 	}
 
 	private onEvent(s: SourceChannelizer, e: ChannelizerEvent): void {
+		if (s.invalidated || this.active.get(s.sourceId) !== s) return
 		if (e.generation !== s.generation) {
 			this.log.warn(
 				{ sourceId: s.sourceId, got: e.generation, want: s.generation },
@@ -555,7 +959,20 @@ export class ChannelizerManager
 		switch (e.type) {
 			case "opened":
 			case "rejected":
-				s.waiters.get(e.id)?.(e)
+				{
+					const closing = s.closing.get(e.id)
+					if (closing) {
+						if (e.type === "rejected" && closing.pendingOpen) closing.finish()
+						else if (e.type === "opened") closing.pendingOpen = false
+						break // never connect/install a closing attempt
+					}
+					const attempt = s.waiters.get(e.id)
+					if (attempt?.pending) {
+						attempt.pending = false
+						attempt.opened = e.type === "opened"
+						attempt.reply(e)
+					}
+				}
 				break
 			case "discontinuity":
 				// Task 35 counts queue-overflow causes from this line.
@@ -591,10 +1008,17 @@ export class ChannelizerManager
 					"channelizer stats",
 				)
 				break
-			case "closed":
+			case "closed": {
+				s.closing.get(e.id)?.finish()
+				const attempt = s.waiters.get(e.id)
+				if (attempt?.opened) {
+					attempt.closed = true
+					attempt.interrupt?.()
+				}
 				if (e.reason === "client-gone")
 					this.channelDied(s, e.id, null, "client-gone")
 				break
+			}
 			case "input-eof":
 				s.sawInputEof = true
 				this.log.info(
@@ -646,7 +1070,7 @@ export class ChannelizerManager
 		const ids = [...s.channels.keys()]
 		try {
 			if (ids.length > 0)
-				this.emit("channel-invalidated", sourceId, s.generation, ids)
+				this.emit("channel-invalidated", sourceId, s.generation, ids, cause)
 		} catch (err: unknown) {
 			this.log.error(
 				{ err, sourceId, generation: s.generation },
@@ -659,7 +1083,7 @@ export class ChannelizerManager
 			this.channelOwner.delete(ch.id)
 		}
 		s.channels.clear()
-		for (const w of s.waiters.values()) w("superseded")
+		for (const wake of [...s.interruptions]) wake()
 		this.retire(s, cause)
 	}
 
@@ -683,7 +1107,13 @@ export class ChannelizerManager
 			"Channel died; invalidating it",
 		)
 		try {
-			this.emit("channel-invalidated", s.sourceId, s.generation, [channelId])
+			this.emit(
+				"channel-invalidated",
+				s.sourceId,
+				s.generation,
+				[channelId],
+				cause,
+			)
 		} catch (err: unknown) {
 			this.log.error(
 				{ err, sourceId: s.sourceId, generation: s.generation },
@@ -691,8 +1121,7 @@ export class ChannelizerManager
 			)
 		}
 		// The process already closed a client-gone channel; a socket error may have left it open there.
-		if (cause === "socket-error")
-			s.process.send({ v: 1, type: "close", id: channelId })
+		if (cause === "socket-error") void this.closeOwned(s, channelId, false)
 		ch.socket.destroy()
 		ch.stream.destroy()
 		this.stopIfIdle(s, "last-channel-died")
@@ -708,6 +1137,8 @@ export class ChannelizerManager
 	/** Synchronous on purpose (called from event listeners); `destroy()` awaits the tracked stop. */
 	private retire(s: SourceChannelizer, cause: string): void {
 		s.invalidated = true
+		for (const wake of [...s.interruptions]) wake()
+		for (const closing of [...s.closing.values()]) closing.finish()
 		s.detachFanout()
 		s.fanout.removeBranch(s.branchId)
 		this.deps.routing.releaseUnused(s.sourceId)
