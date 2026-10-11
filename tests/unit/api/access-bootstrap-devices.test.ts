@@ -11,6 +11,7 @@ import {
 	accessBootstrapDtoSchema,
 	accessDevicesDtoSchema,
 } from "@wavekit/api-types"
+import { SessionStore } from "../../../src/access/sessions.js"
 import { PrivateAccessStorage } from "../../../src/access/private-storage.js"
 import { openAccessRuntime } from "../../../src/access/runtime-context.js"
 import type {
@@ -28,7 +29,10 @@ const servers: ApiServer[] = []
 const contexts: NamedAccessRuntimeContext[] = []
 const roots: string[] = []
 const services: OperatorDataService[] = []
+const deviceAuthorityCleanups: (() => void)[] = []
 afterEach(async () => {
+	// Release test-only persistence ownership before real server/flow shutdown drains.
+	for (const cleanup of deviceAuthorityCleanups.splice(0)) cleanup()
 	vi.restoreAllMocks()
 	for (const server of servers.splice(0)) await server.stop()
 	for (const service of services.splice(0)) await service.close()
@@ -871,5 +875,282 @@ describe("assembled device authority failure isolation", () => {
 			unavailable,
 			await wire(env.server, "HEAD", "/api/access/devices", headers),
 		)
+	})
+})
+
+/** Test-only delegation; the runtime still owns the actual private persist callback. */
+async function setupDeviceAuthority() {
+	const open = SessionStore.open.bind(SessionStore)
+	let elapsed = 0
+	let store: SessionStore | undefined
+	let requester = ""
+	let phase: "ordinary" | "snapshot" | "nested-failure" = "ordinary"
+	let fault: "none" | "expired" | "invalid" | "reentrant" = "none"
+	let returnedValidAfterReentry = false
+	const clockReads: string[] = []
+	const barriers: {
+		entered: Promise<void>
+		signalEntered: () => void
+		gate: Promise<void>
+		release: () => void
+		held: boolean
+	}[] = []
+	let nextBarrier: (typeof barriers)[number] | undefined
+	const construction = vi.spyOn(SessionStore, "open").mockImplementationOnce(options =>
+		open({
+			...options,
+			epochNow: () => 1_000_000,
+			monotonicNow: () => {
+				clockReads.push(phase)
+				if (phase === "nested-failure") return NaN
+				if (phase === "snapshot" && fault === "expired") elapsed += 30 * 24 * 60 * 60 * 1000
+				if (phase === "snapshot" && fault === "invalid") return NaN
+				if (phase === "snapshot" && fault === "reentrant") {
+					phase = "nested-failure"
+					try {
+						store?.lookupByPrincipal(requester)
+					} finally {
+						phase = "snapshot"
+					}
+					returnedValidAfterReentry = true
+				}
+				return elapsed
+			},
+			persist: async snapshot => {
+				const barrier = nextBarrier
+				nextBarrier = undefined
+				if (barrier) {
+					barrier.signalEntered()
+					await barrier.gate
+				}
+				await options.persist(snapshot)
+			},
+		}),
+	)
+	let env: Awaited<ReturnType<typeof setup>>
+	try {
+		env = await setup()
+		expect(construction).toHaveBeenCalledTimes(1)
+	} finally {
+		construction.mockRestore()
+	}
+	store = env.context.api.sessions
+	const snapshot = store.snapshotActiveDevices.bind(store)
+	// This wrapper labels clock scope only; it delegates all real snapshot logic/outcomes.
+	const snapshotScope = vi.spyOn(store, "snapshotActiveDevices").mockImplementation(id => {
+		requester = id
+		phase = "snapshot"
+		try {
+			return snapshot(id)
+		} finally {
+			phase = "ordinary"
+		}
+	})
+	deviceAuthorityCleanups.push(() => {
+		for (const barrier of barriers) barrier.release()
+		snapshotScope.mockRestore()
+	})
+	const holdNextPersist = () => {
+		if (nextBarrier) throw new Error("An unconsumed persistence barrier already exists")
+		let signalEntered = () => {}
+		let releaseGate = () => {}
+		const entered = new Promise<void>(resolve => { signalEntered = resolve })
+		const gate = new Promise<void>(resolve => { releaseGate = resolve })
+		const barrier = {
+			entered,
+			signalEntered,
+			gate,
+			held: true,
+			release: () => {
+				barrier.held = false
+				releaseGate()
+			},
+		}
+		barriers.push(barrier)
+		nextBarrier = barrier
+		return barrier
+	}
+	return {
+		...env,
+		clockReads,
+		snapshotScope,
+		holdNextPersist,
+		advance: (ms: number) => { elapsed += ms },
+		setFault: (value: "none" | "expired" | "invalid" | "reentrant") => { fault = value },
+		returnedValidAfterReentry: () => returnedValidAfterReentry,
+		releaseBarriers: () => { for (const barrier of barriers) barrier.release() },
+	}
+}
+
+const devicePath = "/api/access/devices"
+function deviceHeaders(cookie: string): string[] {
+	return ["Host", browser.host, "Origin", origin, "Cookie", cookie]
+}
+
+async function deviceRead(env: Awaited<ReturnType<typeof setupDeviceAuthority>>, cookie: string) {
+	const get = await wire(env.server, "GET", devicePath, deviceHeaders(cookie))
+	const head = await wire(env.server, "HEAD", devicePath, deviceHeaders(cookie))
+	assertParity(get, head)
+	expect(get.status).toBe(200)
+	return accessDevicesDtoSchema.parse(JSON.parse(get.body) as unknown)
+}
+
+describe("assembled device persistence and snapshot-clock schedules", () => {
+	it("completes GET/HEAD against old committed rows while an actual create persist is held", async () => {
+		const env = await setupDeviceAuthority()
+		await env.server.start()
+		const first = await env.pair()
+		const before = await deviceRead(env, first.headers.cookie)
+		const durable = await fs.readFile(join(env.directory, "access-state.json"))
+		const barrier = env.holdNextPersist()
+		let completed = false
+		const pending = env.pair().then(result => { completed = true; return result })
+		try {
+			await barrier.entered
+			const held = await deviceRead(env, first.headers.cookie)
+			expect(held).toEqual(before)
+			expect(barrier.held).toBe(true)
+			expect(completed).toBe(false)
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			barrier.release()
+			const second = await pending
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			const committed = await deviceRead(env, first.headers.cookie)
+			expect(committed.devices).toHaveLength(2)
+			expect(committed.devices.find(row => row.deviceId === second.body.deviceId)).toMatchObject({ current: false })
+			expect(committed.devices.find(row => row.current)?.deviceId).toBe(first.body.deviceId)
+		} finally {
+			env.releaseBarriers()
+			await pending
+			env.snapshotScope.mockRestore()
+		}
+	})
+
+	it("completes GET/HEAD with previous clocks while actual refresh persistence is held", async () => {
+		const env = await setupDeviceAuthority()
+		await env.server.start()
+		const paired = await env.pair()
+		const before = await deviceRead(env, paired.headers.cookie)
+		const durable = await fs.readFile(join(env.directory, "access-state.json"))
+		env.advance(1000)
+		const barrier = env.holdNextPersist()
+		let completed = false
+		const pending = env.app.inject({ method: "POST", url: "/api/access/session/refresh", headers: paired.headers }).then(result => { completed = true; return result })
+		try {
+			await barrier.entered
+			expect(await deviceRead(env, paired.headers.cookie)).toEqual(before)
+			expect(barrier.held).toBe(true)
+			expect(completed).toBe(false)
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			barrier.release()
+			expect((await pending).statusCode).toBe(200)
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			const committed = await deviceRead(env, paired.headers.cookie)
+			expect(committed.devices[0]).toEqual({
+				...before.devices[0],
+				renewedAt: 1_001_000,
+				expiresAt: paired.body.expiresAt + 1000,
+			})
+		} finally {
+			env.releaseBarriers()
+			await pending
+			env.snapshotScope.mockRestore()
+		}
+	})
+
+	it("completes GET/HEAD with the old peer row while actual revoke persistence is held", async () => {
+		const env = await setupDeviceAuthority()
+		await env.server.start()
+		const requester = await env.pair()
+		const peer = await env.pair()
+		const before = await deviceRead(env, requester.headers.cookie)
+		const durable = await fs.readFile(join(env.directory, "access-state.json"))
+		const barrier = env.holdNextPersist()
+		let completed = false
+		const pending = env.app.inject({ method: "POST", url: "/api/access/devices/revoke", headers: requester.headers, payload: { deviceId: peer.body.deviceId } }).then(result => { completed = true; return result })
+		try {
+			await barrier.entered
+			expect(await deviceRead(env, requester.headers.cookie)).toEqual(before)
+			expect(barrier.held).toBe(true)
+			expect(completed).toBe(false)
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).toEqual(durable)
+			barrier.release()
+			const result = await pending
+			expect(result.statusCode).toBe(200)
+			expect(result.json()).toEqual({ revoked: true })
+			expect(await fs.readFile(join(env.directory, "access-state.json"))).not.toEqual(durable)
+			const committed = await deviceRead(env, requester.headers.cookie)
+			expect(committed.devices).toEqual(before.devices.filter(row => row.deviceId !== peer.body.deviceId))
+		} finally {
+			env.releaseBarriers()
+			await pending
+			env.snapshotScope.mockRestore()
+		}
+	})
+
+	it("expires the requester after actual root admission and returns wire GET/HEAD 401 parity", async () => {
+		const responses: Awaited<ReturnType<typeof wire>>[] = []
+		for (const method of ["GET", "HEAD"]) {
+			const env = await setupDeviceAuthority()
+			let admitted = false
+			env.app.addHook("preHandler", async request => {
+				if (request.url === devicePath) {
+					admitted = true
+					env.setFault("expired")
+				}
+			})
+			try {
+				await env.server.start()
+				const paired = await env.pair()
+				env.clockReads.length = 0
+				const result = await wire(env.server, method, devicePath, deviceHeaders(paired.headers.cookie))
+				expect(admitted).toBe(true)
+				expect(result.status).toBe(401)
+				expect(result.headers["set-cookie"]).toBeUndefined()
+				expect(result.body).not.toContain("devices")
+				expect(env.clockReads).toEqual(["ordinary", "ordinary", "snapshot"])
+				expect(env.snapshotScope).toHaveBeenCalledTimes(1)
+				expect(env.context.api.sessions.unavailable).toBe(false)
+				responses.push(result)
+			} finally {
+				env.releaseBarriers()
+				env.snapshotScope.mockRestore()
+			}
+		}
+		const [get, head] = responses
+		if (!get || !head) throw new Error("Missing wire responses")
+		expect(JSON.parse(get.body)).toEqual({ code: "AUTH_REQUIRED" })
+		assertParity(get, head)
+	})
+
+	it.each(["invalid", "reentrant"] as const)("fails closed only at the actual snapshot clock (%s), with wire GET/HEAD 503 parity", async fault => {
+		const responses: Awaited<ReturnType<typeof wire>>[] = []
+		for (const method of ["GET", "HEAD"]) {
+			const env = await setupDeviceAuthority()
+			try {
+				await env.server.start()
+				const paired = await env.pair()
+				env.clockReads.length = 0
+				env.setFault(fault)
+				const result = await wire(env.server, method, devicePath, deviceHeaders(paired.headers.cookie))
+				expect(env.snapshotScope).toHaveBeenCalledTimes(1)
+				expect(env.clockReads).toEqual(fault === "reentrant" ? ["ordinary", "ordinary", "snapshot", "nested-failure"] : ["ordinary", "ordinary", "snapshot"])
+				expect(env.context.api.sessions.unavailable).toBe(true)
+				expect(env.returnedValidAfterReentry()).toBe(fault === "reentrant")
+				expect(result.status).toBe(503)
+				expect(result.headers["set-cookie"]).toBeUndefined()
+				expect(result.body).not.toContain("devices")
+				expect(result.body).not.toContain("tokenHash")
+				expect(result.body).not.toContain("csrfToken")
+				responses.push(result)
+			} finally {
+				env.releaseBarriers()
+				env.snapshotScope.mockRestore()
+			}
+		}
+		const [get, head] = responses
+		if (!get || !head) throw new Error("Missing wire responses")
+		expect(JSON.parse(get.body)).toEqual({ code: "ACCESS_UNAVAILABLE" })
+		assertParity(get, head)
 	})
 })
