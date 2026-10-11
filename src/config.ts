@@ -429,6 +429,13 @@ const POWER_OF_TWO_FFT = z
 export const ScannerConfigSchema = z
 	.object({
 		enabled: z.boolean().default(true),
+		/** Config-only channel-tier admission; excluded from mutable scanner settings. */
+		channelTier: z
+			.object({
+				enabled: z.boolean().default(false),
+				minMs: z.number().int().min(300).max(2000).default(500),
+			})
+			.default({}),
 		passive: z
 			.object({
 				enabled: z.boolean().default(true),

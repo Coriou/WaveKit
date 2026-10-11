@@ -18,6 +18,7 @@ import { join } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 import { fileURLToPath } from "node:url"
 import { build } from "esbuild"
+import type { Plugin } from "esbuild"
 import { WebSocket } from "ws"
 import { z } from "zod"
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest"
@@ -30,10 +31,147 @@ let failedScannerEntry: string
 let failedOperatorEntry: string
 let pausedOperatorEntry: string
 let failedOperatorCloseEntry: string
+let scannerPhasesEntry: string
 const roots: string[] = []
 const processes: RunningCore[] = []
 const reservations: Server[] = []
 const sockets: WebSocket[] = []
+
+// These future-module fixtures exercise entry-point composition, not the core
+// settlement implementation. The ordinary entry above always compiles real source.
+const scannerOwnerFixture = `
+export class ScannerLifecycleOwner {
+	callbacks = new Map()
+	sealAdmission() { process.stdout.write("scanner-admission-sealed\\n") }
+	ownCleanup(slot, attempt) {
+		if (this.callbacks.has(slot) || this.handle) return false
+		this.callbacks.set(slot, attempt)
+		return true
+	}
+	completeConstruction(outcome) { this.construction ??= outcome }
+	beginStop() {
+		if (this.handle) return this.handle
+		let resolve, reject
+		const producerSettled = new Promise((yes, no) => { resolve = yes; reject = no })
+		this.handle = Object.freeze({ producerSettled, completed: producerSettled })
+		void producerSettled.catch(() => {})
+		this.sealAdmission()
+		void Promise.allSettled([...this.callbacks.values()].map(attempt => Promise.resolve().then(attempt)))
+			.then(outcomes => {
+				if (outcomes.some(outcome => outcome.status === "rejected" || !outcome.value.ok)) {
+					this.componentFailed = true
+					reject(new Error("Fixture scanner component failed"))
+				} else resolve()
+			})
+		return this.handle
+	}
+	finalizeStopNative(observer, lifetime) {
+		process.stdout.write("scanner-final-inspected\\n")
+		let outcome = this.construction ?? { ok: true }
+		if (this.componentFailed) outcome = { ok: false, state: "failed", detail: "Component failed" }
+		const final = observer ? observer.inspectFinal(outcome) : lifetime ? lifetime.inspectFinal(outcome) : outcome
+		return final.ok ? Promise.resolve() : Promise.reject(new Error("Fixture scanner final failed"))
+	}
+}`
+
+const settlementFixture = `
+class Lifetime {
+	callbacks = new Map()
+	ownCleanup(kind, attempt) {
+		if (this.callbacks.has(kind)) return undefined
+		this.callbacks.set(kind, attempt)
+		return { settle() {} }
+	}
+	ownListener() { return { settle() {} } }
+	sealAdmission() { process.stdout.write("provider-admission-sealed\\n") }
+	async attemptLocalCleanup() {
+		process.stdout.write("provider-local-attempt\\n")
+		const outcomes = await Promise.allSettled([...this.callbacks.values()].map(attempt => Promise.resolve().then(attempt)))
+		const actual = outcomes.map(outcome => outcome.status === "fulfilled" ? outcome.value : { ok: false, state: "failed", detail: "Fixture local failed" })
+		if (process.env.R14_PROCESS_CASE === "local-failure") actual.push({ ok: false, state: "failed", detail: "Fixture local failed" })
+		this.localFailed = actual.some(outcome => !outcome.ok)
+		return actual
+	}
+	disposeListenersIfSettled() { return { ok: true } }
+	inspectFinal(outcome) {
+		process.stdout.write("provider-final-inspected\\n")
+		return this.final ??= this.localFailed ? { ok: false, state: "failed", detail: "Fixture local failed" } : outcome
+	}
+}
+export class SettlementRegistry {
+	registerProviderLifetime() { return new Lifetime() }
+	createObserver(lifetime) {
+		return {
+			bindProvider(provider) { return provider },
+			sealAdmission() { lifetime.sealAdmission() },
+			attemptLocalCleanup() { return lifetime.attemptLocalCleanup() },
+			inspectFinal(outcome) { return lifetime.inspectFinal(outcome) }
+		}
+	}
+}`
+
+function lifecycleContracts(): Plugin {
+	return {
+		name: "explicit-r14-composition-contract-fixtures",
+		setup(builder) {
+			builder.onResolve(
+				{ filter: /(?:settlement-observer|consumer-lifecycle)\.js$/ },
+				args => ({ path: args.path, namespace: "r14-contract" }),
+			)
+			builder.onLoad({ filter: /.*/, namespace: "r14-contract" }, args => ({
+				loader: "js",
+				contents: args.path.endsWith("consumer-lifecycle.js")
+					? scannerOwnerFixture
+					: settlementFixture,
+			}))
+		},
+	}
+}
+
+const scannerServiceFixture = `
+import { EventEmitter } from "node:events"
+import { ScannerLifecycleOwner } from "./channel/consumer-lifecycle.js"
+export class ScannerService extends EventEmitter {
+	constructor(options) {
+		super()
+		this.options = options
+		this.owner = options.construction ?? options.channelOwnership?.construction ?? new ScannerLifecycleOwner()
+		this.owner.ownCleanup("service", async () => {
+			process.stdout.write("scanner-stop-real\\n")
+			if (process.env.R14_PROCESS_CASE === "legacy-held") {
+				process.stdout.write("scanner-component-paused\\n")
+				const hold = setInterval(() => {}, 1000)
+				try { await new Promise(resolve => process.once("SIGUSR2", resolve)) }
+				finally { clearInterval(hold) }
+			}
+			if (["partial-failure", "legacy-held"].includes(process.env.R14_PROCESS_CASE))
+				return { ok: false, state: "failed", detail: "Fixture component failed" }
+			return { ok: true }
+		})
+		this.owner.ownCleanup("probes", async () => {
+			process.stdout.write("scanner-probes-cleaned\\n")
+			return { ok: true }
+		})
+		if (process.env.R14_PROCESS_CASE === "constructor-failure")
+			throw new Error("Fixture scanner constructor failed")
+	}
+	settings() { return this.options.settings }
+	async start() {
+		if (process.env.R14_PROCESS_CASE === "partial-failure")
+			throw new Error("Scanner fixture startup failed")
+	}
+	sealAdmission() { this.owner.sealAdmission() }
+	beginStop() { return this.owner.beginStop() }
+	finalizeStopNative() { return this.owner.finalizeStopNative(this.options.channelOwnership?.observer, this.options.channelOwnership?.lifetime) }
+	stop() {
+		if (this.compatibilityStopped) {
+			process.stdout.write("scanner-stop-noop\\n")
+			return Promise.resolve()
+		}
+		this.compatibilityStopped = true
+		return this.beginStop().producerSettled
+	}
+}`
 
 // Build these exact current sources in a repository-local ignored directory so
 // Node resolves the same external dependencies without accepting stale dist/.
@@ -67,29 +205,100 @@ beforeAll(async () => {
 		format: "esm",
 		packages: "external",
 		plugins: [
+			lifecycleContracts(),
 			{
 				name: "failed-partial-scanner-cleanup",
 				setup(builder) {
 					builder.onLoad({ filter: /[/\\]scanner-service\.ts$/ }, () => ({
 						loader: "js",
-						contents: `export class ScannerService {
-						started = false
-						async start() {
-							this.started = true
-							throw new Error("Scanner fixture startup failed")
-						}
-						async stop() {
-							if (!this.started) {
-								process.stdout.write("scanner-stop-noop\\n")
-								return
-							}
-							this.started = false
-							process.stdout.write("scanner-stop-real\\n")
-							await Promise.resolve()
-							throw new Error("Scanner fixture cleanup failed")
-						}
-					}`,
+						contents: scannerServiceFixture.replaceAll(
+							"process.env.R14_PROCESS_CASE",
+							'"partial-failure"',
+						),
 					}))
+				},
+			},
+		],
+	})
+	const phasesDirectory = join(buildDirectory, "scanner-phases-contract")
+	scannerPhasesEntry = join(phasesDirectory, "index.js")
+	await build({
+		absWorkingDir: repository,
+		entryPoints: [{ in: "src/index.ts", out: "index" }],
+		bundle: true,
+		outdir: phasesDirectory,
+		platform: "node",
+		format: "esm",
+		packages: "external",
+		plugins: [
+			lifecycleContracts(),
+			{
+				name: "actual-index-scanner-phase-contract",
+				setup(builder) {
+					builder.onLoad({ filter: /[/\\]scanner-service\.ts$/ }, () => ({
+						loader: "js",
+						contents: scannerServiceFixture,
+					}))
+					builder.onLoad(
+						{ filter: /[/\\]channelizer-manager\.ts$/ },
+						async args => {
+							const source = await readFile(args.path, "utf8")
+							const original = "async destroy(): Promise<void> {"
+							if (!source.includes(original))
+								throw new Error("Channelizer fixture seam missing")
+							return {
+								loader: "ts",
+								contents: source.replace(original, original + `
+							process.stdout.write("core-native-attempt\\n")
+							if (process.env.R14_PROCESS_CASE === "native-failure") throw new Error("Fixture native failed")
+							`),
+							}
+						},
+					)
+					builder.onLoad(
+						{ filter: /[/\\]operator-data[/\\]service\.ts$/ },
+						async args => {
+							const source = await readFile(args.path, "utf8")
+							const original =
+								"...(options.storageStage ? { stage: options.storageStage } : {}),"
+							if (!source.includes(original))
+								throw new Error("Operator fixture seam missing")
+							return {
+								loader: "ts",
+								contents: source.replace(original, `stage: async (stage, phase) => {
+							if (process.env.R14_PROCESS_CASE === "operator-held" && stage === "lock-release" && phase === "before") {
+								process.stdout.write("operator-drain-paused\\n")
+								const hold = setInterval(() => {}, 1000)
+								try { await new Promise(resolve => process.once("SIGUSR2", resolve)) }
+								finally { clearInterval(hold) }
+							}
+							},`),
+							}
+						},
+					)
+					builder.onLoad(
+						{ filter: /[/\\]graceful-shutdown\.ts$/ },
+						async args => {
+							const source = await readFile(args.path, "utf8")
+							if (
+								!source.includes("}, handler.timeout)") ||
+								!source.includes("clearTimeout(forceExitTimer)")
+							)
+								throw new Error("Generic shutdown fixture seam missing")
+							return {
+								loader: "ts",
+								contents: source
+									.replace(
+										"}, handler.timeout)",
+										'}, process.env["R14_PROCESS_CASE"] === "legacy-held" ? 20 : handler.timeout)',
+									)
+									.replace(
+										"clearTimeout(forceExitTimer)",
+										'clearTimeout(forceExitTimer)\nprocess.stdout.write("generic-utility-fulfilled\\n")',
+									),
+							}
+						},
+					)
 				},
 			},
 		],
@@ -267,12 +476,15 @@ function run(
 	configFile: string,
 	directory?: string,
 	executable = entry,
+	fixtureCase?: string,
 ): RunningCore {
 	const env = Object.fromEntries(
 		Object.entries(process.env).filter(
 			([name]) => !name.startsWith("WAVEKIT_"),
 		),
 	)
+	delete env["R14_PROCESS_CASE"]
+	if (fixtureCase !== undefined) env["R14_PROCESS_CASE"] = fixtureCase
 	env["WAVEKIT_CONFIG"] = configFile
 	if (directory !== undefined)
 		env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = directory
@@ -652,7 +864,121 @@ describe("built protected runtime process", () => {
 		expect(await listening(env.api)).toBe(true)
 		expect(await listening(env.raw)).toBe(true)
 		core.child.kill("SIGTERM")
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+	}, 15_000)
+
+	it("seals scanner and provider admission before a held operator drain", async () => {
+		const env = await fixture()
+		env.config.channelizer.enabled = true
+		await writeFile(env.configFile, JSON.stringify(env.config))
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, scannerPhasesEntry, "operator-held")
+		await started(core)
+		core.child.kill("SIGTERM")
+		await marker(core, "operator-drain-paused")
+		const held = core.stdout()
+		expect(held.indexOf("provider-admission-sealed")).toBeGreaterThanOrEqual(0)
+		expect(held.indexOf("scanner-admission-sealed")).toBeGreaterThanOrEqual(0)
+		expect(held.indexOf("provider-admission-sealed")).toBeLessThan(held.indexOf("operator-drain-paused"))
+		expect(held.indexOf("scanner-admission-sealed")).toBeLessThan(held.indexOf("operator-drain-paused"))
+		expect(held).not.toContain("scanner-stop-real")
+		expect(held).not.toContain("core-native-attempt")
+		expect(core.child.exitCode).toBeNull()
+		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+		core.child.kill("SIGUSR2")
 		expect(await core.exited).toEqual({ code: 0, signal: null })
+		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
+		expect(core.stdout()).toContain("scanner-probes-cleaned")
+		expect(core.stdout()).toContain("provider-final-inspected")
+		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toEqual([])
+	}, 15_000)
+
+	it("cleans externally owned scanner components when construction returns no service", async () => {
+		const env = await fixture()
+		env.config.channelizer.enabled = true
+		await writeFile(env.configFile, JSON.stringify(env.config))
+		const provision = await PrivateAccessStorage.open({
+			directory: env.directory,
+			mode: "provision",
+			ownership: "single-host-pid-namespace",
+		})
+		await provision.close()
+		await env.releasePorts()
+		const core = run(env.configFile, env.directory, scannerPhasesEntry, "constructor-failure")
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+		expect(core.stderr()).toBe("WaveKit startup failed\n")
+		expect(core.stdout()).not.toContain("WaveKit started successfully")
+		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
+		expect(core.stdout()).toContain("scanner-probes-cleaned")
+		expect(core.stdout()).toContain("Destroying DecoderManager")
+		expect(core.stdout()).toContain("core-native-attempt")
+		expect(core.stdout()).toContain("provider-local-attempt")
+		expect(core.stdout()).toContain("provider-final-inspected")
+		expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+		expect(await listening(env.api)).toBe(false)
+	}, 15_000)
+
+	it.each(["native-failure", "local-failure"] as const)(
+		"attempts both independent core cleanups and retains private ownership after %s",
+		async kind => {
+			const env = await fixture()
+			env.config.channelizer.enabled = true
+			await writeFile(env.configFile, JSON.stringify(env.config))
+			const provision = await PrivateAccessStorage.open({
+				directory: env.directory,
+				mode: "provision",
+				ownership: "single-host-pid-namespace",
+			})
+			await provision.close()
+			await env.releasePorts()
+			const core = run(env.configFile, env.directory, scannerPhasesEntry, kind)
+			await started(core)
+			core.child.kill("SIGTERM")
+			expect(await core.exited).toEqual({ code: 1, signal: null })
+			expect(core.stdout().match(/core-native-attempt/g)).toHaveLength(1)
+			expect(core.stdout().match(/provider-local-attempt/g)).toHaveLength(1)
+			expect(core.stdout()).toContain("scanner-probes-cleaned")
+			expect(core.stdout()).toContain("Destroying DecoderManager")
+			expect(core.stdout()).toContain("provider-final-inspected")
+			expect((await readdir(env.directory)).filter(name => name.startsWith("owner-"))).toHaveLength(1)
+			for (const port of [env.api, env.raw, env.relay, env.analog, env.digital])
+				expect(await listening(port)).toBe(false)
+		},
+		15_000,
+	)
+
+	it("keeps the actual legacy signal pending after generic handler timeouts and exits on the retained failure", async () => {
+		const env = await fixture()
+		await writeFile(env.configFile, JSON.stringify({
+			...env.config,
+			channelizer: { enabled: true },
+			access: { mode: "legacy" },
+		}))
+		await env.releasePorts()
+		const core = run(env.configFile, undefined, scannerPhasesEntry, "legacy-held")
+		await started(core)
+		core.child.kill("SIGTERM")
+		await marker(core, "scanner-component-paused")
+		await marker(core, "generic-utility-fulfilled")
+		expect(core.stdout()).toContain("Shutdown handler failed or timed out")
+		expect(core.child.exitCode).toBeNull()
+		expect(core.child.signalCode).toBeNull()
+		expect(core.stdout()).not.toContain("provider-final-inspected")
+		core.child.kill("SIGUSR2")
+		expect(await core.exited).toEqual({ code: 1, signal: null })
+		expect(core.stdout().match(/scanner-stop-real/g)).toHaveLength(1)
+		expect(core.stdout()).toContain("scanner-probes-cleaned")
+		expect(core.stdout()).toContain("core-native-attempt")
+		expect(core.stdout()).toContain("provider-local-attempt")
+		expect(core.stdout()).toContain("provider-final-inspected")
+		expect(await listening(env.api)).toBe(false)
+		expect(await listening(env.raw)).toBe(false)
 	}, 15_000)
 
 	it.each([

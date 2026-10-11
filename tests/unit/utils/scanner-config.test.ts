@@ -10,6 +10,7 @@ import {
 	sourceScannerConfig,
 } from "../../../src/config.js"
 import type { ScannerSettings } from "../../../src/core/scanner/types.js"
+import { ConfigValidationError } from "../../../src/utils/errors.js"
 
 const SPEC_DEFAULTS: ScannerSettings = {
 	enabled: true,
@@ -68,13 +69,64 @@ const source = {
 }
 
 describe("scanner config section (spec § 12.3)", () => {
-	it("an empty section yields exactly the spec defaults, typed as ScannerSettings", () => {
-		const parsed: ScannerSettings = ScannerConfigSchema.parse({})
+	it("an empty section preserves ScannerSettings defaults alongside config-only tier defaults", () => {
+		const { channelTier, ...settings } = ScannerConfigSchema.parse({})
+		const parsed: ScannerSettings = settings
 		expect(parsed).toEqual(SPEC_DEFAULTS)
+		expect(channelTier).toEqual({ enabled: false, minMs: 500 })
 	})
 
 	it("a config without a scanner key gets the defaults", () => {
-		expect(ConfigSchema.parse({}).scanner).toEqual(SPEC_DEFAULTS)
+		expect(ConfigSchema.parse({}).scanner).toEqual({
+			...SPEC_DEFAULTS,
+			channelTier: { enabled: false, minMs: 500 },
+		})
+	})
+
+	it.each([
+		{ scanner: {} },
+		{ scanner: { channelTier: {} } },
+	])("defaults an omitted or empty channel tier: %j", input => {
+		expect(ConfigSchema.parse(input).scanner.channelTier).toEqual({
+			enabled: false,
+			minMs: 500,
+		})
+	})
+
+	it.each([
+		[{ enabled: true }, { enabled: true, minMs: 500 }],
+		[{ minMs: 800 }, { enabled: false, minMs: 800 }],
+	])("defaults only the omitted channel-tier key: %j", (input, expected) => {
+		const { channelTier, ...settings } = ScannerConfigSchema.parse({
+			channelTier: input,
+		})
+		expect(channelTier).toEqual(expected)
+		expect(settings).toEqual(SPEC_DEFAULTS)
+	})
+
+	it.each([300, 2000])("accepts the channel-tier boundary %i ms", minMs => {
+		expect(
+			ScannerConfigSchema.parse({ channelTier: { enabled: true, minMs } })
+				.channelTier,
+		).toEqual({ enabled: true, minMs })
+	})
+
+	it.each([299, 2001, 500.5, NaN, Infinity, "500"])(
+		"rejects an invalid channel-tier minimum %s",
+		minMs => {
+			const result = ScannerConfigSchema.safeParse({ channelTier: { minMs } })
+			expect(result.success).toBe(false)
+			expect(result.error?.issues.map(issue => issue.path)).toContainEqual([
+				"channelTier",
+				"minMs",
+			])
+		},
+	)
+
+	it.each(["true", 1, null])("rejects a non-boolean tier flag %s", enabled => {
+		expect(
+			ScannerConfigSchema.safeParse({ channelTier: { enabled } }).success,
+		).toBe(false)
 	})
 
 	it("keeps sibling defaults when one nested key is set", () => {
@@ -180,11 +232,73 @@ describe("WAVEKIT_SCANNER__ environment overrides", () => {
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "wavekit-scanner-config-"))
 		originalEnv = { ...process.env }
+		for (const key of Object.keys(process.env))
+			if (key.startsWith("WAVEKIT_")) delete process.env[key]
 	})
 	afterEach(() => {
 		fs.rmSync(tempDir, { recursive: true, force: true })
 		process.env = originalEnv
 	})
+
+	it.each([
+		{},
+		{ scanner: {} },
+		{ scanner: { channelTier: {} } },
+		{ scanner: { channelTier: { enabled: true } } },
+		{ scanner: { channelTier: { minMs: 2000 } } },
+	])(
+		"loads channel-tier defaults and partial config identically to parsing: %j",
+		input => {
+			const configPath = path.join(tempDir, "tier.yaml")
+			fs.writeFileSync(configPath, JSON.stringify(input))
+			expect(loadConfig(configPath).scanner).toEqual(
+				ConfigSchema.parse(input).scanner,
+			)
+		},
+	)
+
+	it("applies typed tier env overrides over YAML while preserving scanner settings", () => {
+		const configPath = path.join(tempDir, "tier.yaml")
+		fs.writeFileSync(
+			configPath,
+			"scanner:\n  cpuBudgetCores: 2\n  channelTier:\n    enabled: false\n    minMs: 300\n",
+		)
+		process.env["WAVEKIT_SCANNER__CHANNEL_TIER__ENABLED"] = "true"
+		process.env["WAVEKIT_SCANNER__CHANNEL_TIER__MIN_MS"] = "800"
+		const { channelTier, ...settings } = loadConfig(configPath).scanner
+		expect(channelTier).toEqual({ enabled: true, minMs: 800 })
+		expect(settings).toEqual({ ...SPEC_DEFAULTS, cpuBudgetCores: 2 })
+	})
+
+	it("defaults the tier minimum when env introduces only the disabled flag", () => {
+		const configPath = path.join(tempDir, "tier.yaml")
+		fs.writeFileSync(configPath, "scanner:\n  channelTier:\n    enabled: true\n")
+		process.env["WAVEKIT_SCANNER__CHANNEL_TIER__ENABLED"] = "false"
+		expect(loadConfig(configPath).scanner.channelTier).toEqual({
+			enabled: false,
+			minMs: 500,
+		})
+	})
+
+	it("defaults the disabled flag when env introduces only the tier minimum", () => {
+		const configPath = path.join(tempDir, "tier.yaml")
+		fs.writeFileSync(configPath, "{}")
+		process.env["WAVEKIT_SCANNER__CHANNEL_TIER__MIN_MS"] = "300"
+		expect(loadConfig(configPath).scanner.channelTier).toEqual({
+			enabled: false,
+			minMs: 300,
+		})
+	})
+
+	it.each(["299", "2001", "500.5", "not-a-number"])(
+		"rejects invalid channel-tier env minimum %s during loading",
+		minMs => {
+			const configPath = path.join(tempDir, "tier.yaml")
+			fs.writeFileSync(configPath, "{}")
+			process.env["WAVEKIT_SCANNER__CHANNEL_TIER__MIN_MS"] = minMs
+			expect(() => loadConfig(configPath)).toThrow(ConfigValidationError)
+		},
+	)
 
 	it("override nested scanner keys and an indexed source's scanner role", () => {
 		const configPath = path.join(tempDir, "scanner.yaml")
