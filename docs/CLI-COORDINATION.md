@@ -1007,7 +1007,7 @@ at bounded display cadence. It keeps detector arithmetic/results intact, require
 an accepted epoch/sample seam and reports new analysis resolution separately.
 Task37a's summary measurement does not establish sustained zoom headroom.
 
-#### Core: signal discovery scanner (pre-channelizer slice) — READY on feat/scanner-s1a (2026-10-10, NOT merged yet; the controller replaces this line with "MERGED on main <sha> (<date>, not pushed)" at landing)
+#### Core: signal discovery scanner (pre-channelizer slice) — MERGED on main da55b1e (2026-10-11, not pushed)
 
 The proposal "Core: proposed contract for the signal discovery scanner" landed with these differences:
 - Error bodies use the existing flat shape `{ error, code, message, details? }` (as every other route), not the nested `{ error: { … } }` shape written in the proposal.
@@ -1119,3 +1119,13 @@ New fields and messages the CLI (and `design/web-dashboard`) should check before
 - `decoders` channel: `decoder:created {decoderId, decoder}` and `decoder:removed {decoderId, removedAt}`.
 - `tuner:command-sent.origin?: "rest"|"scanner"|"replay"`.
 - New WS channels `scanner` and `spectrum` (both opt-in by subscription).
+
+#### Main: scanner S1 local acceptance and client recovery (2026-10-11)
+
+S1 is locally integrated after sequential whole-feature Sol LOW and Opus MEDIUM reviews. Recorded-IQ DMR acceptance and synthetic sweep executed successfully; the bounded root suite passed. This is backend acceptance, not completed CLI/web integration or live RF acceptance. Existing CLI code has no scanner/spectrum channel consumer yet; the Scan view and web owner must adopt the documented additive contracts.
+
+- Relay/live source identity, IQ, caps and controls follow the same source router; defaults select the first non-dedicated source. An enabled relay with no selectable source prevents core startup.
+- Identify startup is bounded separately from its post-readiness signal wait and decoder trials; see API.md. Nullable measurements remain unknown when no IQ was admitted.
+- Successful discovery DELETE drains accepted evidence writes/moves and prevents late downloadable resurrection. Capture retention is separate.
+- Fatal spectrum failure invalidates cached live frames, fails affected jobs and releases resources. Existing spectrum-only subscriptions receive no automatic profile error notification: consult scanner:status or GET /api/spectrum when frames stop, then re-subscribe after cleanup. Passive configured/enabled state alone does not establish a running job; passive rebuild currently depends on source/settings events. These recovery gaps remain explicit follow-ups.
+- Terminal REST job state may precede teardown; admission can still return 409/releasing. Terminal job WS publication follows cleanup. Do not infer settled recording files from terminal state alone.

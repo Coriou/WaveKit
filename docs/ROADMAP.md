@@ -333,8 +333,8 @@ frequencies cannot establish event-time RF provenance.
 ## 5. Protocol-aware signal discovery and scanning
 
 Implementation follows the [scanner plan](superpowers/plans/2026-10-09-signal-discovery-scanner.md).
-S1-A spectrum/detector/store foundations passed their checkpoint on the scanner
-branch; S1-B is in flight and is not merged on main. S2 adds channel probes and
+S1-A and S1-B landed locally at `da55b1e` after independent sequential reviews
+and the recorded-IQ/full-suite checkpoint (not pushed). S2 adds channel probes and
 analog recording; S3 adds monitor/listen; S4 supplies live acceptance. Preserve
 that dependency order. A scanner should characterize activity and confirm a
 protocol with decoding.

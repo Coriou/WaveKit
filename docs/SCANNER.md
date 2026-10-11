@@ -187,6 +187,9 @@ Retention: the `storage.max*Mb` caps, `maxAgeDays` (recordings, evidence and jou
 
 - Relay and live audio default to the first non-dedicated source. Explicit source selection routes that source's IQ, capabilities and controls together. If every source is dedicated, implicit selection is rejected; select a source explicitly. Legacy live-demod callers supplying a fixed fanout cannot switch radios at runtime without supplying the source router.
 - A dedicated source added at runtime (`POST /api/sources`) is not excluded from the default-source choice until the core restarts. This matters only when no shared source existed at boot.
+- An enabled relay without an explicit source cannot start when there are no configured shared sources (including an empty source list). The core exits during startup; configure a shared source, select a source explicitly, or disable the relay.
+- After a fatal spectrum worker failure, passive discovery can remain failed until a source reconnect, capability change or settings update rebuilds it. `passive.enabled` describes the configured job's presence, not successful scanning. Inspect its job state and the spectrum engine error.
+- Spectrum-only clients receive no automatic profile notification for that fatal failure. Consult `scanner:status` or `GET /api/spectrum` when frames stop; re-subscribe after cleanup to request a fresh engine. Automatic bounded passive recovery and direct display failure notification remain follow-up work.
 - The CLI contract (`docs/CLI-COORDINATION.md`) was implemented without a CLI acknowledgement (user decision, 2026-10-10); later CLI requests become follow-up tasks.
 - Accepted deviation (Task 34a): the capture store has no separate `CaptureExtras` type; it uses `ScannerCapture` directly, so each name has one definition.
 
