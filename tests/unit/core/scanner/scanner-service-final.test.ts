@@ -90,7 +90,20 @@ describe("startup source failure", () => {
 					mode === "sweep" ? sweep(50) : { sourceId: "rtl", mode },
 				)
 				expect(h.service.getJob(job.id)?.state).toBe("starting")
+				// Accepted readiness can already be queued when disconnect arrives; it must not
+				// turn a startup failure into a lease-holding running-source pause.
+				const ready = (
+					h.service as unknown as {
+						drivers: Map<
+							string,
+							{ dispatch(e: { type: "engine-ready" }): Promise<void> }
+						>
+					}
+				).drivers
+					.get(job.id)!
+					.dispatch({ type: "engine-ready" })
 				h.sources.emit("disconnected", "rtl")
+				await ready
 				await settled(h.service)
 				expect(h.service.getJob(job.id)).toMatchObject({
 					state: "failed",

@@ -2067,7 +2067,9 @@ export class ScannerService extends EventEmitter {
 				d.record.state === "running" ||
 				d.record.state === "holding"
 			)
-				d.dispatch({ type: "source-down" }).catch((err: unknown) =>
+				d.dispatch({
+					type: d.record.state === "starting" ? "engine-failed" : "source-down",
+				}).catch((err: unknown) =>
 					this.log.warn({ err, jobId: d.record.id }, "source-down failed"),
 				)
 		}
