@@ -250,22 +250,22 @@ No live receiver or browser/deployment acceptance follows from these tests.
 
 ## Bootstrap/device design extension — 2026-10-11
 
-**DESIGN ACCEPTED, IMPLEMENTATION PENDING.** The additive contract is specified in
-[design.md](design.md#public-bootstrap-and-remembered-device-projection). It does
-not assert mounted routes, shipped clients or browser/TLS/exposure acceptance.
-Historical task states and checkpoints above are unchanged. The following stable
-new tasks require separate exact implementation allocation and verification.
+**BACKEND IMPLEMENTED; CLIENT/EXPOSURE ACCEPTANCE PENDING.** The additive contract
+is specified in [design.md](design.md#public-bootstrap-and-remembered-device-projection).
+Explicit protected routes and closed DTOs are implemented; browser clients and
+TLS/exposure acceptance remain gated. Historical task states/checkpoints above
+retain their original scope. Backend verification is recorded below.
 
-- [ ] 10. Implement closed canonical bootstrap/device DTO schemas and explicit
+- [x] 10. Implement closed canonical bootstrap/device DTO schemas and explicit
       bounded allowlist projectors; configured origins/API-derived WS URL only,
       4096-byte bootstrap budget, detached device ID/clocks/current metadata only.
       _Requirements: 3.6, 4.7, 4.8_
-- [ ] 11. Mount exact opt-in protected GET/HEAD bootstrap with shared raw boundary,
+- [x] 11. Mount exact opt-in protected GET/HEAD bootstrap with shared raw boundary,
       separate preflight, no public principal/lease and invalid-credential semantics.
       Preserve legacy ordinary absence, protected absent-route normal admission and
       installed-provider safe 503; gate flags on actual readiness/current health.
       _Requirements: 2.1–2.3, 3.3–3.6, 6.1_
-- [ ] 12. Implement session-only explicit GET/HEAD device inventory using the
+- [x] 12. Implement session-only explicit GET/HEAD device inventory using the
       authority-clock/committed-map snapshot, immediate request reauthorization,
       post-clock availability recheck and no read writes/renewal/pruning/migration.
       Reuse existing pairing/refresh/logout/revoke and bounded flow/drain ownership.

@@ -46,8 +46,9 @@ local-receiver acceptance and optional Pi acceptance have separate gates.
    target is one operator on a local/LAN deployment, with authentication and
    explicit origins across REST, WS and audio. It must land before connecting
    browser controls to the live receiver. Protected pairing and session refresh
-   are implemented; public bootstrap/capabilities, authenticated device inventory,
-   browser onboarding/renewal consumption and TLS/proxy acceptance remain open.
+   and exact public bootstrap/capabilities plus session-only device inventory are
+   implemented. Browser onboarding/renewal consumption, trusted canonical delivery
+   and TLS/proxy acceptance remain open.
    Operator data is protected-only while the default deployment remains legacy;
    changing that default is a separate decision. Regional display bands/channel
    aliases and receiver-provenanced tuner capabilities are independent backend
@@ -293,8 +294,11 @@ Protected access runtime is on local main: private provisioning, pairing/session
 services, renewable 30-day sessions, mounted REST/WS/audio adapters,
 destination-bound CLI credentials and credential-free health probes. The setup
 utility, scanner worker and main entry retain separate build outputs. Browser
-onboarding/renewal, trusted bootstrap delivery, public audio origins and actual
-TLS/proxy/container exposure acceptance remain open. See the
+onboarding/renewal consumption, trusted canonical bootstrap delivery and actual
+TLS/proxy/container exposure acceptance remain open. Exact protected GET/HEAD
+bootstrap now publishes configured origins and current mounted capability flags;
+session-only GET/HEAD device inventory publishes committed ID/clocks/current metadata
+without renewal or online-presence claims. See the
 [access implementation checklist](specs/core-access-policy/tasks.md).
 
 - [ ] Define typed, versioned schemas, capability discovery and consistent errors.
