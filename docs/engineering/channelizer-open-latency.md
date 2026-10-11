@@ -468,3 +468,58 @@ New local evidence files: `/tmp/wavekit-node-native-runtime-tests.log`,
 `/tmp/wavekit-node-native-release-build.log`, `/tmp/wavekit-node-final-touched-tests.log`,
 `/tmp/wavekit-node-binary-integration.log`, `/tmp/wavekit-node-final-equivalence.jsonl`,
 `/tmp/wavekit-node-final-{typecheck,lint,fixture-tests}.log`.
+
+
+A further optional disposal-witness implementation is being authored on top of
+`f81b759fdb1fb50b045fcf9cbc2e59abc537ad97`. Its bounded local validation is complete; independent implementation
+review is pending. The earlier measurements and approvals above
+remain evidence for their exact earlier candidates only.
+
+Logical release alone does not prove that a canceled planner reservation, prepared
+payload, writer or connector has been physically disposed. The optional witness
+uses a separate bounded local socket with process authentication during startup,
+exact per-send tokens, and completion only after the corresponding native owners
+have dropped their resources. Process cache and residual resources remain charged
+until exact child closure. Default protocol parsing, configured four-argument
+callers and DSP arithmetic remain compatibility requirements.
+
+The Node observer separates a 128-credit receipt pool from one 128-unit ownership
+pool shared by provider, process and send/local owners, plus 64 queued metadata
+slots. Six receipts and twelve ownership units are reserved atomically at dequeue
+with the applicable resource envelopes. Unknown cleanup retains ownership. An
+absent eligible profile denies observed acquisition before effects; identity and
+cleanup ownership do not require a fabricated resource budget.
+
+Authored validation includes bounded transport/authentication and candidate cleanup
+schedules, cancellation/startup ownership, exact non-FIFO proof reconciliation,
+default compatibility, and native disposal progress with silent input/control.
+A manager-to-native lifecycle test will also check repeated observed-channel
+turnover while a configured channel keeps the same process alive. Its accounting
+values are synthetic test fixtures, not a calibrated capacity profile. The lifecycle tests pass locally. Combined consumer acceptance, calibration,
+Pi timing and live RF remain separate acceptance gates.
+
+
+The released local validation ran serially, with one compiler job and one test
+worker. Native coverage passed 106 library tests, seven DSP properties, six process
+tests, three opt-in/default compatibility tests and four disposal tests. The seven
+Node files passed 117 tests, including actual manager-to-native repeated turnover
+while a configured channel kept the same process alive. The actual binary used was
+this worktree's debug build; the test accounting envelopes were synthetic.
+
+The first Rust check exposed a missing test type annotation. The first new disposal
+run exposed macOS inheritance of nonblocking mode on the accepted test-reader
+socket; the fixture now explicitly uses a blocking read with its bounded timeout.
+Only that four-test disposal file was rerun. Root typecheck exposed narrow emitter
+signatures and incomplete fixture caps; the owned types were corrected and the four
+affected Node files passed 82 tests on rerun. Lint exposed five multiline union
+indentation errors after formatting; named interfaces resolved them without a
+runtime change. All first failure logs were retained. Final root typecheck, strict
+Clippy, formatting and diff checks passed. Root lint passed with zero errors and
+59 existing warnings. No timing benchmark or broad root suite was repeated.
+
+Validation logs are retained under `/tmp/wavekit-r14-validation/`. Per-attempt
+physical disposal and idle progress in these synthetic local tests do not establish
+numeric CPU/memory calibration, an OS shutdown-time bound or consumer integration
+acceptance. Process residual/cache charges remain until exact child closure;
+unknown cleanup still retains ownership. The implementation review and Main's
+assembly/adoption remain pending.

@@ -9,8 +9,12 @@ use crate::{
     args::Args,
     channel::{ChannelDsp, ChannelSpec},
     convert::InputAssembler,
+    disposal::{
+        self, Admission, AttemptPermits, Disposal, PayloadPublisher, RuntimePermits,
+        WriterPublisher, SLOTS,
+    },
     preparation::{Planner, Prepared, SubmitError},
-    protocol::{parse_request, OpenReq, Request},
+    protocol::{parse_observed_request, parse_request, ObservedRequest, OpenReq, Request},
     queue::ChannelQueue,
 };
 use serde_json::{json, Value};
@@ -38,7 +42,7 @@ const ACCEPT_POLL: (Duration, Duration) = (Duration::from_millis(5), Duration::f
 enum Msg {
     Input(Vec<u8>),
     InputEof,
-    Control(Result<Request, (String, String)>),
+    Control(Result<ObservedRequest, (String, String)>),
     ControlEof,
 }
 
@@ -50,6 +54,7 @@ enum Msg {
 struct Conn {
     closing: bool,
     draining: bool,
+    cleanup_uncertain: bool,
     stream: Option<UnixStream>,
 }
 type ConnSlot = Arc<Mutex<Conn>>;
@@ -70,12 +75,21 @@ struct Open {
     run: Option<(u64, u64)>,
     /// Input bytes received when the channel opened; a gap marked at or before this never reached it.
     opened_at_byte: u64,
+    payload: Option<PayloadPublisher>,
+    observed: Option<RuntimePermits>,
 }
 
 struct Pending {
     serial: u64,
     request: OpenReq,
     cancel: Arc<AtomicBool>,
+    observed: Option<RuntimePermits>,
+}
+
+struct Retired {
+    channel: Open,
+    payload: PayloadPublisher,
+    writer: WriterPublisher,
 }
 
 pub struct Runtime {
@@ -93,6 +107,9 @@ pub struct Runtime {
     /// Writers → main, unbounded: a writer never blocks reporting its client gone.
     gone_tx: mpsc::Sender<(String, u64)>,
     gone_rx: mpsc::Receiver<(String, u64)>,
+    disposal: Option<Disposal>,
+    retired: [Option<Retired>; SLOTS],
+    reap_cursor: usize,
 }
 
 /// Joins a writer for at most `budget`, then detaches it. A stuck writer must never block the main loop.
@@ -132,7 +149,22 @@ impl Runtime {
             last_stats: Instant::now(),
             gone_tx,
             gone_rx,
+            disposal: None,
+            retired: std::array::from_fn(|_| None),
+            reap_cursor: 0,
         }
+    }
+
+    /// Internal native integration seam; production uses the authenticated blocking bootstrap.
+    pub fn with_settlement(
+        args: Args,
+        sink: Box<dyn FnMut(Value) + Send>,
+        stream: UnixStream,
+    ) -> std::io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        let mut runtime = Self::new(args, sink);
+        runtime.disposal = Some(Disposal::new(stream));
+        Ok(runtime)
     }
 
     /// Every event carries `v: 1` and this process's generation (Property 9).
@@ -163,7 +195,7 @@ impl Runtime {
             return Some(0);
         }
         match req {
-            Request::Open(o) => self.open(o),
+            Request::Open(o) => self.open(o, None),
             Request::Close { id } => self.close(&id, "requested"),
             Request::MarkGap {
                 at_input_byte,
@@ -179,12 +211,75 @@ impl Runtime {
         None
     }
 
-    fn open(&mut self, o: OpenReq) {
+    fn reject_attempt(
+        &mut self,
+        o: OpenReq,
+        code: &str,
+        detail: String,
+        attempt: Option<AttemptPermits>,
+    ) {
+        let id = o.id.clone();
+        drop(o);
+        if let Some(p) = attempt {
+            p.preparation.reservation.publish();
+            p.runtime.writer.publish(); // No work/writer was created, permanently sealed.
+            self.reject(&id, code, detail); // All request/error payloads consumed before publication.
+            p.preparation.payload.publish();
+            p.runtime.logical.publish();
+        } else {
+            self.reject(&id, code, detail);
+        }
+    }
+
+    pub fn on_observed_request(&mut self, req: ObservedRequest) -> Option<i32> {
+        match req {
+            ObservedRequest::Ordinary(r) => self.on_request(r),
+            ObservedRequest::InvalidOpen { token, id, detail } => {
+                if self.terminated {
+                    return Some(0);
+                }
+                match self.disposal.as_mut().map(|d| d.admit(token, &id)) {
+                    Some(Admission::Accepted(p)) => {
+                        p.preparation.reservation.publish();
+                        p.runtime.writer.publish();
+                        self.reject(&id, "channel-request-invalid", detail);
+                        p.preparation.payload.publish();
+                        p.runtime.logical.publish();
+                    }
+                    _ => self.reject(&id, "channel-request-invalid", detail),
+                }
+                None
+            }
+            ObservedRequest::Open { token, request } => {
+                if self.terminated {
+                    return Some(0);
+                }
+                let admission = self.disposal.as_mut().map(|d| d.admit(token, &request.id));
+                match admission {
+                    Some(Admission::Accepted(p)) => self.open(request, Some(p)),
+                    Some(Admission::Refused) => self.reject(
+                        &request.id,
+                        "channel-request-invalid",
+                        "settlement capacity unavailable".into(),
+                    ),
+                    _ => self.reject(
+                        &request.id,
+                        "channel-request-invalid",
+                        "invalid settlement token or unavailable transport".into(),
+                    ),
+                }
+                None
+            }
+        }
+    }
+
+    fn open(&mut self, o: OpenReq, attempt: Option<AttemptPermits>) {
         if self.channels.contains_key(&o.id) || self.pending.contains_key(&o.id) {
-            return self.reject(
-                &o.id,
+            return self.reject_attempt(
+                o,
                 "channel-request-invalid",
                 "duplicate channel id".into(),
+                attempt,
             );
         }
         let a = &self.args;
@@ -198,7 +293,21 @@ impl Runtime {
             a.usable_fraction,
         ) {
             Ok(off) => off,
-            Err(r) => return self.reject(&o.id, r.code, r.detail),
+            Err(r) => return self.reject_attempt(o, r.code, r.detail, attempt),
+        };
+        let sample_bytes = o.format.sample_bytes();
+        if o.queue_bytes < sample_bytes {
+            let detail = format!("queueBytes below one {} sample", o.format.as_str());
+            return self.reject_attempt(o, "channel-request-invalid", detail, attempt);
+        }
+        let serial = self.next_serial;
+        let Some(next) = serial.checked_add(1) else {
+            return self.reject_attempt(
+                o,
+                "channel-request-invalid",
+                "channel serial exhausted".into(),
+                attempt,
+            );
         };
         let spec = ChannelSpec {
             input_rate: a.input_rate,
@@ -209,28 +318,28 @@ impl Runtime {
             format: o.format,
             gain: o.gain,
         };
-        let sample_bytes = o.format.sample_bytes();
-        if o.queue_bytes < sample_bytes {
-            return self.reject(
-                &o.id,
-                "channel-request-invalid",
-                format!("queueBytes below one {} sample", o.format.as_str()),
-            );
-        }
-        let serial = self.next_serial;
-        let Some(next) = serial.checked_add(1) else {
-            return self.reject(
-                &o.id,
-                "channel-request-invalid",
-                "channel serial exhausted".into(),
-            );
+        let (preparation, observed) = match attempt {
+            Some(p) => (Some(p.preparation), Some(p.runtime)),
+            None => (None, None),
         };
         let cancel = Arc::new(AtomicBool::new(false));
-        if let Err(SubmitError::PlannerBusy) =
+        if let Err((SubmitError::PlannerBusy, preparation)) =
             self.planner
-                .submit(serial, spec, o.queue_bytes, cancel.clone())
+                .submit_observed(serial, spec, o.queue_bytes, cancel.clone(), preparation)
         {
-            return self.reject(&o.id, "channel-request-invalid", "planner busy".into());
+            drop(cancel);
+            let attempt = preparation
+                .zip(observed)
+                .map(|(preparation, runtime)| AttemptPermits {
+                    preparation,
+                    runtime,
+                });
+            return self.reject_attempt(
+                o,
+                "channel-request-invalid",
+                "planner busy".into(),
+                attempt,
+            );
         }
         self.next_serial = next;
         self.pending.insert(
@@ -239,6 +348,7 @@ impl Runtime {
                 serial,
                 request: o,
                 cancel,
+                observed,
             },
         );
     }
@@ -249,7 +359,7 @@ impl Runtime {
         if self.terminated {
             return;
         }
-        let Some((serial, result)) = self.planner.take() else {
+        let Some((serial, result, failed_payload)) = self.planner.take_observed() else {
             return;
         };
         let id = self
@@ -258,16 +368,42 @@ impl Runtime {
             .find(|(_, p)| p.serial == serial)
             .map(|(id, _)| id.clone());
         let Some(id) = id else {
+            // Uncertain/unmatched result: drop without optimistic publication.
+            drop(result);
+            drop(failed_payload);
             return;
         };
         let pending = self.pending.remove(&id).unwrap();
         match result {
-            Ok(prepared) => self.install(pending.request, serial, prepared),
-            Err(e) => self.reject(&id, "channel-request-invalid", e),
+            Ok(prepared) => self.install(pending.request, serial, prepared, pending.observed),
+            Err(e) => {
+                drop(pending.request);
+                drop(pending.cancel);
+                if let Some(p) = pending.observed {
+                    p.writer.publish();
+                    self.reject(&id, "channel-request-invalid", e); // Error payload consumed/dropped.
+                    if let Some(payload) = failed_payload {
+                        payload.publish();
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, "channel-request-invalid", e);
+                }
+            }
         }
     }
 
-    fn install(&mut self, o: OpenReq, serial: u64, Prepared { dsp, queue }: Prepared) {
+    fn install(
+        &mut self,
+        o: OpenReq,
+        serial: u64,
+        Prepared {
+            dsp,
+            queue,
+            payload,
+        }: Prepared,
+        observed: Option<RuntimePermits>,
+    ) {
         let socket = self.args.socket_dir.join(format!("{}.sock", o.id));
         let _ = std::fs::remove_file(&socket);
         // Listening before `opened` (§11): a client may connect as soon as it reads the event.
@@ -277,9 +413,28 @@ impl Runtime {
         }) {
             Ok(l) => l,
             Err(e) => {
-                let _ = std::fs::remove_file(&socket);
+                let cleanup_known = std::fs::remove_file(&socket)
+                    .map(|_| true)
+                    .unwrap_or_else(|e| e.kind() == ErrorKind::NotFound);
                 let detail = format!("bind {}: {e}", socket.display());
-                return self.reject(&o.id, "channel-request-invalid", detail);
+                let id = o.id.clone();
+                drop(e);
+                drop(o);
+                drop(dsp);
+                drop(queue);
+                if let Some(p) = observed {
+                    p.writer.publish();
+                    self.reject(&id, "channel-request-invalid", detail);
+                    if let Some(payload) = payload {
+                        if cleanup_known {
+                            payload.publish();
+                        }
+                    }
+                    p.logical.publish();
+                } else {
+                    self.reject(&id, "channel-request-invalid", detail);
+                }
+                return;
             }
         };
         let conn: ConnSlot = Arc::new(Mutex::new(Conn::default()));
@@ -303,6 +458,8 @@ impl Runtime {
                 saturated: 0,
                 run: None,
                 opened_at_byte: self.received_bytes(),
+                payload,
+                observed,
             },
         );
         self.emit(json!({
@@ -319,7 +476,16 @@ impl Runtime {
     fn close(&mut self, id: &str, reason: &str) {
         if let Some(p) = self.pending.remove(id) {
             self.planner.cancel(&p.cancel);
-            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            let observed = p.observed;
+            drop(p.request);
+            drop(p.cancel);
+            if let Some(p) = observed {
+                p.writer.publish();
+                self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+                p.logical.publish();
+            } else {
+                self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            }
             return;
         }
         let Some(mut ch) = self.channels.remove(id) else {
@@ -329,7 +495,13 @@ impl Runtime {
             self.emit(e); // A13: an open run is reported before `closed`
         }
         {
-            let mut c = ch.conn.lock().unwrap();
+            // A poisoned observed connection retains unknown completion; default behavior is unchanged.
+            let locked = ch.conn.lock();
+            let mut c = match locked {
+                Ok(c) => c,
+                Err(e) if ch.observed.is_some() => e.into_inner(),
+                Err(_) => panic!("channel connection poisoned"),
+            };
             c.closing = true;
             // Unblocks a writer stuck in write_all to a client that stopped reading (or vanished).
             if let Some(s) = c.stream.take() {
@@ -337,11 +509,71 @@ impl Runtime {
             }
         }
         ch.queue.close();
-        let _ = std::fs::remove_file(&ch.socket);
-        if let Some(w) = ch.writer.take() {
-            join_bounded(w, CLOSE_JOIN_BUDGET);
+        if let Err(e) = std::fs::remove_file(&ch.socket) {
+            if ch.observed.is_some() && e.kind() != ErrorKind::NotFound {
+                if let Ok(mut conn) = ch.conn.lock() {
+                    conn.cleanup_uncertain = true;
+                }
+            }
         }
-        self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        if let Some(p) = ch.observed.take() {
+            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+            p.logical.publish();
+            if let Some(payload) = ch.payload.take() {
+                self.retired[p.slot] = Some(Retired {
+                    channel: ch,
+                    payload,
+                    writer: p.writer,
+                });
+            }
+        } else {
+            if let Some(w) = ch.writer.take() {
+                join_bounded(w, CLOSE_JOIN_BUDGET);
+            }
+            self.emit(json!({"type": "closed", "id": id, "reason": reason}));
+        }
+    }
+
+    /// Every continuing turn, including the existing idle timeout, reaps at most one writer.
+    pub fn poll_disposal(&mut self) {
+        if self.disposal.is_none() {
+            return;
+        }
+        for n in 0..SLOTS {
+            let i = (self.reap_cursor + n) % SLOTS;
+            let finished = self.retired[i].as_ref().is_some_and(|r| {
+                !r.channel.conn.is_poisoned()
+                    && r.channel.writer.as_ref().is_some_and(|w| w.is_finished())
+            });
+            if finished {
+                let Retired {
+                    mut channel,
+                    payload,
+                    writer,
+                } = self.retired[i].take().unwrap();
+                let joined = channel.writer.take().unwrap().join();
+                let uncertain = channel
+                    .conn
+                    .lock()
+                    .map(|c| c.cleanup_uncertain)
+                    .unwrap_or(true);
+                drop(channel); // DSP, queue, connection, path, and all main-owned clones.
+                if joined.is_err() {
+                    eprintln!("wavekit-chan: retired writer unwound");
+                }
+                drop(joined);
+                if !uncertain {
+                    payload.publish();
+                    writer.publish();
+                }
+                self.reap_cursor = (i + 1) % SLOTS;
+                break;
+            }
+        }
+        self.reap_cursor = (self.reap_cursor + 1) % SLOTS;
+        if let Some(d) = &mut self.disposal {
+            d.poll();
+        }
     }
 
     pub fn on_client_gone(&mut self, id: &str) {
@@ -479,7 +711,19 @@ impl Runtime {
             ch.conn.lock().unwrap().draining = true;
             ch.queue.close();
             let _ = std::fs::remove_file(&ch.socket);
-            writers.extend(ch.writer.take());
+            if let Some(p) = ch.observed.take() {
+                // EOF is not a matching closed event. Drop logical permit unpublished.
+                drop(p.logical);
+                if let Some(payload) = ch.payload.take() {
+                    self.retired[p.slot] = Some(Retired {
+                        channel: ch,
+                        payload,
+                        writer: p.writer,
+                    });
+                }
+            } else {
+                writers.extend(ch.writer.take());
+            }
         }
         for e in events {
             self.emit(e);
@@ -566,7 +810,11 @@ fn install_writer_connection(path: &std::path::Path, conn: &ConnSlot, stream: &U
     if c.closing {
         return false;
     }
-    let _ = std::fs::remove_file(path); // exactly one client per socket
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != ErrorKind::NotFound {
+            c.cleanup_uncertain = true;
+        }
+    } // exactly one client per socket
     c.stream = stream.try_clone().ok();
     true
 }
@@ -621,9 +869,22 @@ fn writer(listener: UnixListener, path: PathBuf, q: Arc<ChannelQueue>, conn: Con
 
 /// Parses control lines until EOF, an I/O error, or `send` returning false. A line that is not
 /// UTF-8 is a malformed request like any other (Property 14), so it never ends control.
+#[cfg(test)]
 fn read_control<R: BufRead>(
-    mut r: R,
+    r: R,
     mut send: impl FnMut(Result<Request, (String, String)>) -> bool,
+) -> std::io::Result<()> {
+    read_control_mode(r, false, |req| {
+        send(req.map(|r| match r {
+            ObservedRequest::Ordinary(r) => r,
+            _ => unreachable!("default parser refuses observed envelope"),
+        }))
+    })
+}
+fn read_control_mode<R: BufRead>(
+    mut r: R,
+    observed: bool,
+    mut send: impl FnMut(Result<ObservedRequest, (String, String)>) -> bool,
 ) -> std::io::Result<()> {
     let mut raw = Vec::new();
     loop {
@@ -636,7 +897,8 @@ fn read_control<R: BufRead>(
         }
         let req = match std::str::from_utf8(&raw) {
             Ok(l) if l.trim().is_empty() => continue,
-            Ok(l) => parse_request(l),
+            Ok(l) if observed => parse_observed_request(l),
+            Ok(l) => parse_request(l).map(ObservedRequest::Ordinary),
             Err(e) => Err((String::new(), format!("invalid UTF-8: {e}"))),
         };
         if !send(req) {
@@ -647,6 +909,35 @@ fn read_control<R: BufRead>(
 
 /// The process main loop. Returns the exit code.
 pub fn run(args: Args) -> i32 {
+    run_inner(args, None)
+}
+
+pub fn run_observed(args: Args, path: &std::path::Path) -> i32 {
+    if args.control_fd == 4 {
+        return 2;
+    }
+    match disposal::bootstrap_fd4().and_then(|fd| disposal::bootstrap(path, fd)) {
+        Ok(disposal) => run_inner(args, Some(disposal)),
+        Err(e) => {
+            eprintln!("wavekit-chan: settlement startup: {e}");
+            2
+        }
+    }
+}
+
+fn run_inner(args: Args, disposal: Option<Disposal>) -> i32 {
+    let observed = disposal.is_some();
+    if observed {
+        let mut stdout = std::io::stdout().lock();
+        let ready = json!({"v": 1, "type": "ready", "generation": args.generation,
+            "pid": std::process::id(), "observerCapability": disposal::CAPABILITY});
+        if serde_json::to_writer(&mut stdout, &ready).is_err()
+            || stdout.write_all(b"\n").is_err()
+            || stdout.flush().is_err()
+        {
+            return 2;
+        }
+    }
     let (tx, rx) = mpsc::sync_channel::<Msg>(1); // ≤ 2 input blocks in flight (addendum §6)
     {
         let tx = tx.clone();
@@ -681,8 +972,9 @@ pub fn run(args: Args) -> i32 {
         thread::spawn(move || {
             // SAFETY: the parent passes an open pipe at this fd (A1); this thread owns it from here on.
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
-            if let Err(e) = read_control(BufReader::new(file), |r| tx.send(Msg::Control(r)).is_ok())
-            {
+            if let Err(e) = read_control_mode(BufReader::new(file), observed, |r| {
+                tx.send(Msg::Control(r)).is_ok()
+            }) {
                 eprintln!("wavekit-chan: control fd {fd}: {e}");
             }
             let _ = tx.send(Msg::ControlEof);
@@ -696,7 +988,10 @@ pub fn run(args: Args) -> i32 {
         let _ = l.flush();
     });
     let mut rt = Runtime::new(args, sink);
-    rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+    rt.disposal = disposal;
+    if !observed {
+        rt.emit(json!({"type": "ready", "pid": std::process::id()}));
+    }
     loop {
         let wait = if rt.pending.is_empty() {
             Duration::from_millis(250)
@@ -707,7 +1002,7 @@ pub fn run(args: Args) -> i32 {
             Ok(Msg::Input(b)) => rt.on_input(&b),
             Ok(Msg::InputEof) => return rt.on_eof(),
             Ok(Msg::Control(Ok(r))) => {
-                if let Some(code) = rt.on_request(r) {
+                if let Some(code) = rt.on_observed_request(r) {
                     return code;
                 }
             }
@@ -721,6 +1016,7 @@ pub fn run(args: Args) -> i32 {
         rt.poll_prepared();
         rt.poll_client_gone(); // ≤ 250 ms after the failed write
         rt.maybe_stats(Instant::now());
+        rt.poll_disposal();
     }
 }
 
@@ -957,6 +1253,178 @@ mod tests {
         r.poll_prepared();
         assert_eq!(ev.lock().unwrap().len(), 1);
         assert!(!dir.0.join("pending.sock").exists());
+    }
+
+    fn observed_open(id: &str, token: u64) -> ObservedRequest {
+        let Request::Open(request) = open(id, 162e6, 4096) else {
+            unreachable!()
+        };
+        ObservedRequest::Open { token, request }
+    }
+    fn attach_proof(r: &mut Runtime) -> UnixStream {
+        let (stream, peer) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        peer.set_nonblocking(true).unwrap();
+        r.disposal = Some(Disposal::new(stream));
+        peer
+    }
+    fn no_proof(peer: &mut UnixStream) {
+        let mut b = [0; 256];
+        assert_eq!(peer.read(&mut b).unwrap_err().kind(), ErrorKind::WouldBlock);
+    }
+    fn read_proof(r: &mut Runtime, peer: &mut UnixStream) -> Value {
+        let mut proofs = read_proofs(r, peer, 1);
+        proofs.remove(0)
+    }
+    fn read_proofs(r: &mut Runtime, peer: &mut UnixStream, count: usize) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut frame = Vec::new();
+        loop {
+            r.poll_disposal();
+            let mut bytes = [0; 256];
+            match peer.read(&mut bytes) {
+                Ok(n) => {
+                    frame.extend_from_slice(&bytes[..n]);
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(e) => panic!("proof read: {e}"),
+            }
+            if frame.ends_with(b"\n") && frame.iter().filter(|&&b| b == b'\n').count() == count {
+                return serde_json::Deserializer::from_slice(&frame)
+                    .into_iter::<Value>()
+                    .map(Result::unwrap)
+                    .collect();
+            }
+            assert!(Instant::now() < deadline, "proof did not finish");
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn observed_running_and_queued_cancel_stay_unknown_until_worker_drop_and_retire() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        let (entered, release) = block_next_preparation(&mut r);
+        r.on_observed_request(observed_open("running", 1));
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_observed_request(observed_open("queued", 2));
+        r.on_request(Request::Close {
+            id: "running".into(),
+        });
+        r.on_request(Request::Close {
+            id: "queued".into(),
+        });
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert_eq!(r.planner.outstanding_for_test(), 2);
+        release.send(()).unwrap();
+        let proofs = read_proofs(&mut r, &mut peer, 2);
+        let mut tokens: Vec<_> = proofs
+            .iter()
+            .map(|p| p["token"].as_str().unwrap())
+            .collect();
+        tokens.sort();
+        assert_eq!(tokens, vec!["1", "2"]);
+        assert_eq!(r.planner.outstanding_for_test(), 0);
+        assert!(r.pending.is_empty());
+    }
+
+    #[test]
+    fn observed_held_writer_beyond_old_join_budget_requires_return_join_and_bundle_drop() {
+        let dir = TempDir::new();
+        let (mut r, ev) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        r.request_and_wait(open("configured", 162e6, 4096));
+        r.on_observed_request(observed_open("held", 1));
+        finish_preparations(&mut r);
+        let (release, gate) = mpsc::channel();
+        let (entered_tx, entered) = mpsc::channel();
+        let (returned_tx, returned) = mpsc::channel();
+        {
+            let ch = r.channels.get_mut("held").unwrap();
+            // Retire the real accept writer first; replace it with a precisely held return gate.
+            ch.conn.lock().unwrap().closing = true;
+            ch.writer.take().unwrap().join().unwrap();
+            ch.conn.lock().unwrap().closing = false;
+            ch.writer = Some(thread::spawn(move || {
+                entered_tx.send(()).unwrap(); // An early guard/notice is not thread return.
+                gate.recv_timeout(Duration::from_secs(10)).unwrap();
+                returned_tx.send(()).unwrap();
+            }));
+        }
+        entered.recv_timeout(Duration::from_secs(10)).unwrap();
+        r.on_request(Request::Close { id: "held".into() });
+        assert_eq!(last(&ev)["type"], "closed");
+        thread::sleep(CLOSE_JOIN_BUDGET + Duration::from_millis(10));
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert!(r.retired.iter().any(Option::is_some));
+        assert!(r.channels.contains_key("configured"));
+        // Same-ID successor gets its own cell before the old writer returns.
+        r.on_observed_request(observed_open("held", 2));
+        finish_preparations(&mut r);
+        release.send(()).unwrap();
+        returned.recv_timeout(Duration::from_secs(10)).unwrap();
+        let proof = read_proof(&mut r, &mut peer);
+        assert_eq!(proof["token"], "1");
+        assert!(r.channels.contains_key("held"));
+        no_proof(&mut peer);
+        r.on_request(Request::Close { id: "held".into() });
+        assert_eq!(read_proof(&mut r, &mut peer)["token"], "2");
+        r.shutdown();
+    }
+
+    #[test]
+    fn observed_poisoned_writer_connection_retains_unknown_after_actual_thread_return() {
+        let dir = TempDir::new();
+        let (mut r, _) = rt(&dir.0);
+        let mut peer = attach_proof(&mut r);
+        r.on_observed_request(observed_open("poisoned", 1));
+        finish_preparations(&mut r);
+        let conn = r.channels["poisoned"].conn.clone();
+        {
+            conn.lock().unwrap().closing = true;
+            r.channels
+                .get_mut("poisoned")
+                .unwrap()
+                .writer
+                .take()
+                .unwrap()
+                .join()
+                .unwrap();
+        }
+        let worker_conn = conn.clone();
+        r.channels.get_mut("poisoned").unwrap().writer = Some(thread::spawn(move || {
+            let _held = worker_conn.lock().unwrap();
+            panic!("injected writer connection poison");
+        }));
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !r.channels["poisoned"]
+            .writer
+            .as_ref()
+            .unwrap()
+            .is_finished()
+        {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        drop(conn);
+        r.on_request(Request::Close {
+            id: "poisoned".into(),
+        });
+        for _ in 0..8 {
+            r.poll_disposal();
+        }
+        no_proof(&mut peer);
+        assert!(
+            r.retired.iter().any(Option::is_some),
+            "unknown bundle remains owned"
+        );
     }
 
     // Cold preparation must yield to input; no timing threshold determines this contract.

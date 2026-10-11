@@ -2,6 +2,7 @@
 //! Canceled jobs/results retain their reservation until the worker has destroyed their payload.
 use crate::{
     channel::{ChannelDsp, ChannelSpec},
+    disposal::{PayloadPublisher, PreparationPermits},
     plan::{plan_chain_bounded, ChainPlan},
     queue::ChannelQueue,
 };
@@ -25,12 +26,14 @@ pub(crate) enum SubmitError {
 pub(crate) struct Prepared {
     pub dsp: ChannelDsp,
     pub queue: Arc<ChannelQueue>,
+    pub payload: Option<PayloadPublisher>,
 }
 struct Job {
     serial: u64,
     spec: ChannelSpec,
     queue_bytes: usize,
     cancel: Arc<AtomicBool>,
+    permits: Option<PreparationPermits>,
 }
 struct Reply {
     job: Job,
@@ -131,7 +134,11 @@ impl Cache {
             job.queue_bytes,
             job.spec.format.sample_bytes(),
         ));
-        Ok(Prepared { dsp, queue })
+        Ok(Prepared {
+            dsp,
+            queue,
+            payload: None,
+        })
     }
 }
 
@@ -155,6 +162,7 @@ impl Planner {
             worker: Some(worker),
         }
     }
+    #[cfg(test)]
     pub fn submit(
         &self,
         serial: u64,
@@ -162,12 +170,23 @@ impl Planner {
         queue_bytes: usize,
         cancel: Arc<AtomicBool>,
     ) -> Result<(), SubmitError> {
+        self.submit_observed(serial, spec, queue_bytes, cancel, None)
+            .map_err(|(error, _)| error)
+    }
+    pub fn submit_observed(
+        &self,
+        serial: u64,
+        spec: ChannelSpec,
+        queue_bytes: usize,
+        cancel: Arc<AtomicBool>,
+        permits: Option<PreparationPermits>,
+    ) -> Result<(), (SubmitError, Option<PreparationPermits>)> {
         let mut s = self.shared.state.lock().unwrap();
         if s.stopping
             || s.outstanding >= MAX_PREPARATIONS
             || queue_bytes > MAX_PENDING_QUEUE_BYTES.saturating_sub(s.queue_bytes)
         {
-            return Err(SubmitError::PlannerBusy);
+            return Err((SubmitError::PlannerBusy, permits));
         }
         s.outstanding += 1;
         s.queue_bytes += queue_bytes;
@@ -176,22 +195,51 @@ impl Planner {
             spec,
             queue_bytes,
             cancel,
+            permits,
         });
         self.shared.wake.notify_one();
         Ok(())
     }
+    #[cfg(test)]
     pub fn take(&self) -> Option<(u64, Result<Prepared, String>)> {
+        let (serial, result, payload) = self.take_observed()?;
+        assert!(payload.is_none(), "unobserved test helper");
+        Some((serial, result))
+    }
+    pub fn take_observed(
+        &self,
+    ) -> Option<(u64, Result<Prepared, String>, Option<PayloadPublisher>)> {
         let mut s = self.shared.state.lock().unwrap();
         // Leave canceled payload disposal to the worker; never deallocate large stale buffers on IQ.
         let i = s
             .replies
             .iter()
             .position(|r| !r.job.cancel.load(Ordering::Relaxed))?;
-        let r = s.replies.remove(i).unwrap();
+        let mut r = s.replies.remove(i).unwrap();
+        let permits = r.job.permits.take();
+        let serial = r.job.serial;
+        let bytes = r.job.queue_bytes;
+        let mut result = r.result;
+        drop(r.job);
         s.outstanding -= 1;
-        s.queue_bytes -= r.job.queue_bytes;
-        Some((r.job.serial, r.result))
+        s.queue_bytes -= bytes;
+        let payload = permits.map(|p| {
+            p.reservation.publish(); // Job dropped and mutex-protected counters retired.
+            p.payload
+        });
+        match &mut result {
+            Ok(prepared) => {
+                prepared.payload = payload;
+                Some((serial, result, None))
+            }
+            Err(_) => Some((serial, result, payload)),
+        }
     }
+    #[cfg(test)]
+    pub fn outstanding_for_test(&self) -> usize {
+        self.shared.state.lock().unwrap().outstanding
+    }
+
     pub fn cancel(&self, token: &AtomicBool) {
         // Synchronize the notification with wait() to avoid a cancellation lost wakeup.
         let _state = self.shared.state.lock().unwrap();
@@ -226,6 +274,16 @@ fn retire(shared: &Shared, bytes: usize) {
     s.outstanding -= 1;
     s.queue_bytes -= bytes;
 }
+fn finish_discard(shared: &Shared, bytes: usize, permits: Option<PreparationPermits>) {
+    // All job/result/transient payloads are gone before either physical publication.
+    if let Some(p) = permits {
+        p.payload.publish();
+        retire(shared, bytes);
+        p.reservation.publish();
+    } else {
+        retire(shared, bytes);
+    }
+}
 fn work(shared: Arc<Shared>, hook: Option<Box<dyn Fn() + Send>>) {
     let mut cache = Cache::default();
     loop {
@@ -235,25 +293,27 @@ fn work(shared: Arc<Shared>, hook: Option<Box<dyn Fn() + Send>>) {
             .iter()
             .position(|r| r.job.cancel.load(Ordering::Relaxed))
         {
-            let r = s.replies.remove(i).unwrap();
+            let mut r = s.replies.remove(i).unwrap();
             let bytes = r.job.queue_bytes;
+            let permits = r.job.permits.take();
             drop(s);
             drop(r);
-            retire(&shared, bytes);
+            finish_discard(&shared, bytes, permits);
             continue;
         }
         if let Some(i) = s.jobs.iter().position(|j| j.cancel.load(Ordering::Relaxed)) {
-            let job = s.jobs.remove(i).unwrap();
+            let mut job = s.jobs.remove(i).unwrap();
             let bytes = job.queue_bytes;
+            let permits = job.permits.take();
             drop(s);
             drop(job);
-            retire(&shared, bytes);
+            finish_discard(&shared, bytes, permits);
             continue;
         }
         if s.stopping {
             return;
         }
-        let Some(job) = s.jobs.pop_front() else {
+        let Some(mut job) = s.jobs.pop_front() else {
             drop(shared.wake.wait(s).unwrap());
             continue;
         };
@@ -262,16 +322,25 @@ fn work(shared: Arc<Shared>, hook: Option<Box<dyn Fn() + Send>>) {
         if let Some(hook) = &hook {
             hook();
         }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cache.prepare(&job)))
-            .unwrap_or_else(|_| Err("channel preparation failed".into()));
+        let planned =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| cache.prepare(&job)));
+        // An unwind must not create optimistic proof, even when the ordinary error is returned.
+        let result = match planned {
+            Ok(result) => result,
+            Err(_) => {
+                drop(job.permits.take());
+                Err("channel preparation failed".into())
+            }
+        };
         let mut s = shared.state.lock().unwrap();
         s.active = None;
         if job.cancel.load(Ordering::Relaxed) || s.stopping {
             let bytes = job.queue_bytes;
+            let permits = job.permits.take();
             drop(s);
             drop(result);
             drop(job);
-            retire(&shared, bytes);
+            finish_discard(&shared, bytes, permits);
         } else {
             s.replies.push_back(Reply { job, result });
         }
@@ -302,6 +371,7 @@ mod tests {
             spec,
             queue_bytes: 1024,
             cancel: Arc::new(AtomicBool::new(false)),
+            permits: None,
         }
     }
     fn wait_until(mut pred: impl FnMut() -> bool) {
@@ -399,6 +469,106 @@ mod tests {
         assert!(planner.take().is_none());
         wait_until(|| planner.shared.state.lock().unwrap().outstanding == 0);
     }
+    fn witnessed() -> (crate::disposal::Disposal, crate::disposal::AttemptPermits) {
+        use crate::disposal::{Admission, Disposal};
+        let (stream, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut disposal = Disposal::new(stream);
+        let Admission::Accepted(permits) = disposal.admit(1, "payload") else {
+            panic!("admit")
+        };
+        (disposal, permits)
+    }
+    #[test]
+    fn successful_take_transfers_payload_permit_and_cannot_publish_it_at_counter_retirement() {
+        let (disposal, permits) = witnessed();
+        let slot = permits.runtime.slot;
+        permits.runtime.writer.publish();
+        permits.runtime.logical.publish();
+        let planner = Planner::new();
+        assert!(planner
+            .submit_observed(
+                0,
+                spec(48_000),
+                4096,
+                Arc::new(AtomicBool::new(false)),
+                Some(permits.preparation)
+            )
+            .is_ok());
+        wait_until(|| !planner.shared.state.lock().unwrap().replies.is_empty());
+        let (_, result, failed_payload) = planner.take_observed().unwrap();
+        assert!(failed_payload.is_none());
+        assert_eq!(planner.shared.state.lock().unwrap().outstanding, 0);
+        assert_eq!(
+            disposal.bits_for_test(slot),
+            0x0d,
+            "payload remains owned after take"
+        );
+        let Prepared {
+            dsp,
+            queue,
+            payload,
+        } = result.unwrap();
+        drop(dsp);
+        drop(queue);
+        payload.unwrap().publish();
+        assert_eq!(disposal.bits_for_test(slot), 0x0f);
+    }
+    #[test]
+    fn actual_payload_drop_and_mutex_counter_retirement_are_separate_obligations() {
+        let (disposal, permits) = witnessed();
+        let slot = permits.runtime.slot;
+        permits.runtime.writer.publish();
+        permits.runtime.logical.publish();
+        let shared = Arc::new(Shared {
+            state: Mutex::new(State {
+                outstanding: 1,
+                queue_bytes: 4096,
+                ..State::default()
+            }),
+            wake: Condvar::new(),
+        });
+        let held_counter = shared.state.lock().unwrap();
+        let worker_shared = shared.clone();
+        let worker =
+            thread::spawn(move || finish_discard(&worker_shared, 4096, Some(permits.preparation)));
+        wait_until(|| disposal.bits_for_test(slot) == 0x0e);
+        assert_eq!(held_counter.outstanding, 1);
+        assert_eq!(held_counter.queue_bytes, 4096);
+        drop(held_counter);
+        worker.join().unwrap();
+        assert_eq!(disposal.bits_for_test(slot), 0x0f);
+        assert_eq!(shared.state.lock().unwrap().outstanding, 0);
+    }
+    #[test]
+    fn completed_result_cancellation_drops_payload_before_publishing_both_worker_bits() {
+        let (disposal, permits) = witnessed();
+        let slot = permits.runtime.slot;
+        permits.runtime.writer.publish();
+        permits.runtime.logical.publish();
+        let planner = Planner::new();
+        let cancel = Arc::new(AtomicBool::new(false));
+        assert!(planner
+            .submit_observed(
+                0,
+                spec(48_000),
+                4096,
+                cancel.clone(),
+                Some(permits.preparation)
+            )
+            .is_ok());
+        wait_until(|| !planner.shared.state.lock().unwrap().replies.is_empty());
+        assert_eq!(
+            disposal.bits_for_test(slot),
+            0x0c,
+            "completed result is still physical payload"
+        );
+        planner.cancel(&cancel);
+        assert!(planner.take_observed().is_none());
+        wait_until(|| disposal.bits_for_test(slot) == 0x0f);
+        assert_eq!(planner.shared.state.lock().unwrap().outstanding, 0);
+    }
+
     #[test]
     fn cache_keys_include_every_plan_input_but_never_mutable_channel_state() {
         let mut a = spec(48_000);

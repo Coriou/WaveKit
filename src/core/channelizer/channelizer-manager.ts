@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { EventEmitter } from "node:events"
-import { mkdirSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { createConnection } from "node:net"
 import { join } from "node:path"
 import { PassThrough, type Readable } from "node:stream"
@@ -30,6 +30,14 @@ import type {
 	ChannelRequestResult,
 	DecoderChannelRequest,
 } from "./types.js"
+import type {
+	ChannelSettlementObserver,
+	LocalCleanupClaim,
+	ObservedAcquisitionHandle,
+	ObservedTransaction,
+	ProcessClaim,
+	SendClaim,
+} from "./settlement-observer.js"
 
 /** Longest socket path we hand the process; macOS caps `sun_path` at ~104 bytes (Review Focus 2). */
 export const MAX_SOCKET_PATH = 100
@@ -69,6 +77,8 @@ export interface ChannelizerManagerDeps {
 	openTimeoutMs?: number
 	/** Monotonic acquisition clock; separate from the crash-window wall clock. */
 	openNow?: () => number
+	/** Internal composition opt-in; public configured providers remain unchanged. */
+	settlementObserver?: ChannelSettlementObserver
 }
 
 /** `socket` is the process's Unix socket; `stream` is what the decoder gets (fed with end: false). */
@@ -76,13 +86,17 @@ interface OpenChannel {
 	id: string
 	socket: Readable
 	stream: PassThrough
+	settlement?: SendClaim
 }
 type OpenRequest = Extract<ChannelizerRequest, { type: "open" }>
 type OpenReply = OpenedEvent | RejectedEvent
 interface RequestContext {
+	decoderId: string
 	signal: AbortSignal | undefined
 	deadline: number
 	sends: number
+	observed?: ObservedAcquisitionHandle
+	transaction?: ObservedTransaction
 }
 interface OpenAttempt {
 	/** Updated synchronously on wire events, before any promise continuation. */
@@ -91,6 +105,7 @@ interface OpenAttempt {
 	closed: boolean
 	interrupt: (() => void) | undefined
 	reply: (e: OpenReply) => boolean
+	settlement?: SendClaim
 }
 interface Closing {
 	pendingOpen: boolean
@@ -116,6 +131,7 @@ interface SourceChannelizer {
 	invalidated: boolean
 	sawInputEof: boolean
 	detachFanout: () => void
+	settlement?: ProcessClaim
 }
 
 const message = (err: unknown) =>
@@ -199,6 +215,18 @@ export class ChannelizerManager
 	private readonly now: () => number
 	private readonly openTimeoutMs: number
 	private readonly openNow: () => number
+	private readonly processClaims = new WeakMap<
+		ChannelizerProcessLike,
+		ProcessClaim
+	>()
+	private readonly directoryClaims = new WeakMap<
+		ChannelizerProcessLike,
+		LocalCleanupClaim
+	>()
+	private readonly listenerClaims: {
+		readonly claim: LocalCleanupClaim
+		readonly remove: () => void
+	}[] = []
 	private destroyed = false
 	private readonly onCaps = (sourceId: string, caps: SourceCaps) => {
 		const s = this.active.get(sourceId)
@@ -218,6 +246,31 @@ export class ChannelizerManager
 		this.now = deps.now ?? Date.now
 		this.openTimeoutMs = deps.openTimeoutMs ?? OPEN_TIMEOUT_MS
 		this.openNow = deps.openNow ?? (() => performance.now())
+		deps.settlementObserver?.bindProvider(this)
+		for (const [event, listener] of [
+			["caps-changed", this.onCaps],
+			["disconnected", this.onGone],
+			["removed", this.onGone],
+		] as const) {
+			const remove = () => {
+				deps.sourceManager.off(event, listener)
+				if (
+					!(deps.sourceManager instanceof EventEmitter) ||
+					deps.sourceManager.listeners(event).includes(listener)
+				)
+					throw new WaveKitError(
+						"channel settlement listener cleanup incomplete",
+						"CHANNELIZER_UNAVAILABLE",
+					)
+			}
+			const claim = deps.settlementObserver?.provider.ownListener(remove)
+			if (deps.settlementObserver && !claim)
+				throw new WaveKitError(
+					"channel settlement capacity unavailable",
+					"CHANNELIZER_UNAVAILABLE",
+				)
+			if (claim) this.listenerClaims.push({ claim, remove })
+		}
 		deps.sourceManager.on("caps-changed", this.onCaps)
 		deps.sourceManager.on("disconnected", this.onGone)
 		deps.sourceManager.on("removed", this.onGone)
@@ -247,6 +300,11 @@ export class ChannelizerManager
 		inputCaps: SourceCaps | undefined,
 		signal?: AbortSignal,
 	): Promise<ChannelRequestResult> {
+		const observed = this.deps.settlementObserver?.takeAcquisition(
+			sourceId,
+			decoderId,
+			req,
+		)
 		// A queued cancellation settles the caller now; its eventual queue callback
 		// remains a no-op. Running work settles through bounded ownership cleanup.
 		return new Promise((resolve, reject) => {
@@ -256,10 +314,20 @@ export class ChannelizerManager
 			const run = () => {
 				signal?.removeEventListener("abort", cancelled)
 				if (signal?.aborted) return unavailable(this.cancellationDetail())
+				const transaction = observed
+					? this.deps.settlementObserver?.tryReserveObservedTransaction(
+							observed,
+						)
+					: undefined
+				if (observed && (!transaction || this.deps.createProcess))
+					return unavailable("channel settlement capacity unavailable")
 				const ctx: RequestContext = {
+					decoderId,
 					signal,
 					deadline: this.openNow() + this.openTimeoutMs,
 					sends: 0,
+					...(observed ? { observed } : {}),
+					...(transaction ? { transaction } : {}),
 				}
 				return this.request(sourceId, decoderId, req, inputCaps, ctx)
 			}
@@ -271,7 +339,18 @@ export class ChannelizerManager
 				sourceId,
 				next.catch(() => undefined),
 			)
-			void next.then(resolve, reject)
+			void next.then(
+				result => {
+					if (observed)
+						this.deps.settlementObserver?.finishAcquisition(observed)
+					resolve(result)
+				},
+				err => {
+					if (observed)
+						this.deps.settlementObserver?.finishAcquisition(observed)
+					reject(err)
+				},
+			)
 		})
 	}
 
@@ -283,6 +362,8 @@ export class ChannelizerManager
 		const s = this.active.get(sourceId)
 		const ch = s?.channels.get(channelId)
 		if (!s || !ch) return Promise.resolve()
+		if (ch.settlement)
+			this.deps.settlementObserver?.endGrant(ch.settlement, "released")
 		this.channelOwner.delete(channelId)
 		s.channels.delete(channelId)
 		const settlement = this.closeOwned(s, channelId, false)
@@ -299,15 +380,32 @@ export class ChannelizerManager
 
 	async destroy(): Promise<void> {
 		this.destroyed = true
+		this.deps.settlementObserver?.sealAdmission()
 		for (const wake of [...this.destroyWaiters]) wake()
-		this.deps.sourceManager.off("caps-changed", this.onCaps)
-		this.deps.sourceManager.off("disconnected", this.onGone)
-		this.deps.sourceManager.off("removed", this.onGone)
+		if (this.deps.settlementObserver) {
+			for (const { claim, remove } of this.listenerClaims) {
+				try {
+					remove()
+					claim.settle({ ok: true })
+				} catch {
+					claim.settle({
+						ok: false,
+						state: "failed",
+						detail: "channel settlement listener cleanup failed",
+					})
+				}
+			}
+		} else {
+			this.deps.sourceManager.off("caps-changed", this.onCaps)
+			this.deps.sourceManager.off("disconnected", this.onGone)
+			this.deps.sourceManager.off("removed", this.onGone)
+		}
 		for (const sourceId of [...this.active.keys()])
 			this.invalidate(sourceId, "destroy")
 		// In-flight requests settle (a pending one is superseded, then refused); a spawn that was mid-start retires itself.
 		await Promise.all(this.queues.values())
 		while (this.stops.size > 0) await Promise.all(this.stops)
+		await this.deps.settlementObserver?.attemptLocalCleanup()
 	}
 
 	private async request(
@@ -453,6 +551,22 @@ export class ChannelizerManager
 				return superseded()
 			}
 		}
+		if (
+			ctx.transaction &&
+			(!s.settlement ||
+				!this.deps.settlementObserver?.shareProcess(
+					ctx.transaction,
+					s.settlement,
+				))
+		)
+			return unavailable("channelizer settlement unavailable")
+		if (
+			ctx.transaction &&
+			Buffer.byteLength(join(s.dir, `${channelId}.sock`)) > MAX_SOCKET_PATH
+		) {
+			this.stopIfIdle(s, "socket-path-unavailable")
+			return unavailable("channel socket path unavailable")
+		}
 		return this.open(s, open, ctx, superseded)
 	}
 
@@ -486,11 +600,25 @@ export class ChannelizerManager
 					reply: () => false,
 				}
 				ownedAttempt = attempt
+				if (ctx.transaction) {
+					const send =
+						s.settlement &&
+						this.deps.settlementObserver?.claimSend(
+							ctx.transaction,
+							s.settlement,
+							channelId,
+						)
+					if (!send || !s.process.sendObserved)
+						return unavailable("channel settlement capacity unavailable")
+					attempt.settlement = send
+				}
 				const reply = await this.wait<OpenReply>(s, ctx, done => {
 					attempt.reply = done
 					s.waiters.set(channelId, attempt)
 					ctx.sends++
-					s.process.send(open)
+					if (attempt.settlement)
+						s.process.sendObserved?.(open, attempt.settlement)
+					else s.process.send(open)
 					return () => {
 						if (!attempt.opened && s.waiters.get(channelId) === attempt)
 							s.waiters.delete(channelId)
@@ -574,6 +702,7 @@ export class ChannelizerManager
 			const connected = await this.wait<
 				{ socket: Readable } | { failed: true }
 			>(s, ctx, done => {
+				const connectorOwner = ownedAttempt?.settlement?.retainConnector()
 				const connectCancel = new AbortController()
 				if (ownedAttempt)
 					ownedAttempt.interrupt = () => {
@@ -587,18 +716,27 @@ export class ChannelizerManager
 							s.invalidated ||
 							this.destroyed ||
 							this.remaining(ctx) <= 0
-						)
+						) {
+							connectorOwner?.settle({ ok: true })
 							return undefined
+						}
 						return this.connect(event.socket, connectCancel.signal)
 					})
 					.then(
 						socket => {
 							if (socket) {
+								socket.once("close", () => connectorOwner?.settle({ ok: true }))
 								accepted = true
 								if (!done({ socket })) socket.destroy()
 							}
 						},
 						() => {
+							// A foreign connector may reject after creating a resource we cannot own.
+							connectorOwner?.settle({
+								ok: false,
+								state: "unknown",
+								detail: "channel connector cleanup unknown",
+							})
 							done({ failed: true })
 						},
 					)
@@ -668,8 +806,30 @@ export class ChannelizerManager
 				this.log.debug({ err, channelId }, "Channel stream error"),
 			)
 			socket.pipe(stream, { end: false })
-			s.channels.set(channelId, { id: channelId, socket, stream })
+			s.channels.set(channelId, {
+				id: channelId,
+				socket,
+				stream,
+				...(ownedAttempt?.settlement
+					? { settlement: ownedAttempt.settlement }
+					: {}),
+			})
 			this.channelOwner.set(channelId, s.sourceId)
+			if (ownedAttempt?.settlement && s.settlement)
+				this.deps.settlementObserver?.recordGrant(ownedAttempt.settlement, {
+					sourceId: s.sourceId,
+					decoderId: ctx.decoderId,
+					channelId,
+					generation: event.generation,
+					realised: {
+						outputRateHz: event.outputRateHz,
+						format: event.format,
+						filterTaps: event.filterTaps,
+						groupDelaySamples: event.groupDelaySamples,
+					},
+					process: s.settlement,
+					send: ownedAttempt.settlement,
+				})
 			return {
 				ok: true,
 				stream,
@@ -811,29 +971,81 @@ export class ChannelizerManager
 		dir: string,
 		ctx: RequestContext,
 	): Promise<SourceChannelizer | { error: string }> {
+		const settlement =
+			ctx.transaction &&
+			this.deps.settlementObserver?.claimProcess(ctx.transaction, {
+				sourceId,
+				generation,
+				sampleRateHz: caps.sampleRate,
+				centerHz: caps.centerHz,
+			})
+		if (ctx.transaction && !settlement)
+			return { error: "channel settlement capacity unavailable" }
+		const directoryOwner = settlement?.retainLocal("directory")
 		try {
 			// A fresh, private directory per generation: stale sockets from an earlier run never linger.
-			rmSync(dir, { recursive: true, force: true })
-			mkdirSync(dir, { recursive: true, mode: 0o700 })
+			if (settlement) {
+				mkdirSync(this.deps.config.socketDir, { recursive: true, mode: 0o700 })
+				dir = mkdtempSync(`${dir}-`)
+			} else {
+				rmSync(dir, { recursive: true, force: true })
+				mkdirSync(dir, { recursive: true, mode: 0o700 })
+			}
 		} catch (err: unknown) {
+			settlement?.sealStartup()
+			settlement?.recordStartSettled()
+			directoryOwner?.settle({
+				ok: false,
+				state: "unknown",
+				detail: "channel directory cleanup unknown",
+			})
 			// e.g. EACCES on the default /var/run/wavekit/chan outside the image: a suspension, never a crash.
 			this.log.warn({ err, sourceId, dir }, "Cannot create channel socket dir")
 			return { error: `socket dir ${dir}: ${message(err)}` }
 		}
 		this.generations.set(sourceId, generation)
-		const proc = this.createProcess(
-			{
-				binaryPath: this.deps.config.binaryPath,
-				generation,
-				inputRateHz: caps.sampleRate,
-				inputCenterHz: caps.centerHz,
-				usableFraction: this.deps.config.usableFraction,
-				blockSamples: this.deps.config.blockSamples,
-				socketDir: dir,
-				readyTimeoutMs: this.remaining(ctx),
-			},
-			this.deps.logger,
-		)
+		let proc: ChannelizerProcessLike
+		try {
+			proc = this.createProcess(
+				{
+					binaryPath: this.deps.config.binaryPath,
+					generation,
+					inputRateHz: caps.sampleRate,
+					inputCenterHz: caps.centerHz,
+					usableFraction: this.deps.config.usableFraction,
+					blockSamples: this.deps.config.blockSamples,
+					socketDir: dir,
+					readyTimeoutMs: this.remaining(ctx),
+					...(settlement && this.deps.settlementObserver
+						? {
+								settlement: {
+									process: settlement,
+									observer: this.deps.settlementObserver,
+									deadline: ctx.deadline,
+									now: this.openNow,
+								},
+							}
+						: {}),
+				},
+				this.deps.logger,
+			)
+		} catch (err: unknown) {
+			settlement?.sealStartup()
+			settlement?.recordStartSettled()
+			try {
+				rmSync(dir, { recursive: true, force: true })
+				directoryOwner?.settle({ ok: true })
+			} catch {
+				directoryOwner?.settle({
+					ok: false,
+					state: "failed",
+					detail: "channel directory cleanup failed",
+				})
+			}
+			return { error: message(err) }
+		}
+		if (settlement) this.processClaims.set(proc, settlement)
+		if (directoryOwner) this.directoryClaims.set(proc, directoryOwner)
 		let readyGeneration: number | undefined
 		const onReady = (e: ChannelizerEvent) => {
 			if (e.type === "ready") readyGeneration = e.generation
@@ -924,6 +1136,7 @@ export class ChannelizerManager
 				fanout.off("backpressure", onBackpressure)
 				fanout.off("drain", onDrain)
 			},
+			...(settlement ? { settlement } : {}),
 		}
 		const branch = fanout.addBranch({
 			id: branchId,
@@ -948,6 +1161,23 @@ export class ChannelizerManager
 	}
 
 	private onEvent(s: SourceChannelizer, e: ChannelizerEvent): void {
+		// Capture exact native attempt BEFORE any close finish, resolver or consumer
+		// callback can synchronously send another request with the same opaque id.
+		const terminal =
+			s.settlement &&
+			e.generation === s.generation &&
+			(e.type === "opened" || e.type === "rejected" || e.type === "closed")
+				? this.deps.settlementObserver?.captureTerminal(
+						s.settlement,
+						e.id,
+						e.type,
+					)
+				: undefined
+		if (
+			terminal &&
+			(e.type === "opened" || e.type === "rejected" || e.type === "closed")
+		)
+			this.deps.settlementObserver?.recordTerminal(terminal, e.type)
 		if (s.invalidated || this.active.get(s.sourceId) !== s) return
 		if (e.generation !== s.generation) {
 			this.log.warn(
@@ -1068,6 +1298,9 @@ export class ChannelizerManager
 		s.invalidated = true
 		this.active.delete(sourceId)
 		const ids = [...s.channels.keys()]
+		for (const ch of s.channels.values())
+			if (ch.settlement)
+				this.deps.settlementObserver?.endGrant(ch.settlement, cause)
 		try {
 			if (ids.length > 0)
 				this.emit("channel-invalidated", sourceId, s.generation, ids, cause)
@@ -1100,6 +1333,8 @@ export class ChannelizerManager
 	): void {
 		const ch = s.channels.get(channelId)
 		if (s.invalidated || !ch || (socket && ch.socket !== socket)) return
+		if (ch.settlement)
+			this.deps.settlementObserver?.endGrant(ch.settlement, cause)
 		s.channels.delete(channelId)
 		this.channelOwner.delete(channelId)
 		this.log.warn(
@@ -1150,15 +1385,28 @@ export class ChannelizerManager
 	}
 
 	private stopProcess(proc: ChannelizerProcessLike, dir: string): void {
+		const settlement = this.processClaims.get(proc)
+		settlement?.sealStartup()
 		const stop = proc
 			.stop()
 			.catch((err: unknown) =>
 				this.log.warn({ err, dir }, "Channelizer stop failed"),
 			)
-			.finally(() => {
+			.finally(async () => {
+				try {
+					await proc.attemptSettlementCleanup?.()
+				} catch (err: unknown) {
+					this.log.warn({ err }, "Channelizer local cleanup failed")
+				}
 				try {
 					rmSync(dir, { recursive: true, force: true })
+					this.directoryClaims.get(proc)?.settle({ ok: true })
 				} catch (err: unknown) {
+					this.directoryClaims.get(proc)?.settle({
+						ok: false,
+						state: "failed",
+						detail: "channel directory cleanup failed",
+					})
 					this.log.debug({ err, dir }, "Cannot remove channel socket dir")
 				}
 				this.stops.delete(stop)
