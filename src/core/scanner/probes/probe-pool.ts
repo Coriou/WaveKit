@@ -23,6 +23,7 @@ import type {
 import { probeId as buildProbeId, shortId } from "../ids.js"
 import { CPU_COST, probeCores } from "../plan/cost.js"
 import { bytesPerSample } from "../../spectrum/frame-source.js"
+import { ConstructorListenerRegistration } from "../channel/consumer-lifecycle.js"
 import {
 	USABLE_FRACTION,
 	type EngineEpoch,
@@ -132,6 +133,8 @@ export interface ProbePoolDeps {
 	allocatePort: () => Promise<number>
 	logger: Logger
 	now?: () => number
+	/** Own the exact remover before the sole external constructor listener effect. */
+	ownConstructorListener?: (removeExact: () => void) => boolean
 }
 
 export interface ProbeStatus {
@@ -213,10 +216,19 @@ interface ProbeRecord {
 	droppedBytes: number
 	/** Set by teardown; a stop that arrives during it awaits this. */
 	teardownDone: Promise<void> | null
+	/** Sticky outcome of this original resource owner, never replaced by a missing-map retry. */
+	cleanupState: "pending" | "settled" | "unknown"
 	/** A mode step is tearing this record down; a stop clears it to cancel the step. */
 	stepping: boolean
 	/** multimon only: acceptance memory per capcode, bounded by the mode's hold (§ 6.4). */
 	capcodes: CapcodeWindows | null
+	/** The original launch remains owned until every awaiting allocation/create returns. */
+	launchDone: Promise<void>
+	launchSettled: boolean
+	accepting: boolean
+	decoderAttempted: boolean
+	dvAttempted: boolean
+	allocatedPorts: number[]
 }
 
 /** Stream events of one engine, watched once a request names its source. */
@@ -501,13 +513,41 @@ export class ProbePool extends EventEmitter {
 	/** Engines whose "stop" the pool saw: never watched again (S1-B final review, finding 9). */
 	private readonly stoppedEngines = new WeakSet<ProbeEngineView>()
 	private seq = 0
+	private readonly retainedCleanup = new Set<ProbeRecord>()
+	private cleanupFailed = false
 	private destroyed = false
+	private readonly outputRegistration: ConstructorListenerRegistration
 
 	constructor(private readonly deps: ProbePoolDeps) {
 		super()
 		this.log = createComponentLogger(deps.logger, "ProbePool")
 		this.now = deps.now ?? Date.now
-		deps.decoders.on("decoder:output", this.onOutput)
+		const emitter = deps.decoders
+		const listener = this.onOutput
+		this.outputRegistration = new ConstructorListenerRegistration(
+			() => {
+				emitter.on("decoder:output", listener)
+			},
+			() => {
+				emitter.off("decoder:output", listener)
+			},
+			() =>
+				emitter instanceof EventEmitter &&
+				!emitter.listeners("decoder:output").includes(listener),
+		)
+		try {
+			this.outputRegistration.register(deps.ownConstructorListener)
+		} catch (err: unknown) {
+			try {
+				this.outputRegistration.remove()
+			} catch (cleanupError: unknown) {
+				this.log.warn(
+					{ err: cleanupError },
+					"Partial probe constructor subscription retained",
+				)
+			}
+			throw err
+		}
 	}
 
 	request(req: ProbeRequest): { started: string } | { deferred: Deferral } {
@@ -558,12 +598,13 @@ export class ProbePool extends EventEmitter {
 			}
 			return pick
 		}
+		if (this.destroyed) return { deferred: "no-transport" }
 		return { started: this.start(req, modes, 0, pick.transport, ctx, null) }
 	}
 
 	follow(probeId: string, follow: boolean): void {
 		const rec = this.records.get(probeId)
-		if (!rec || rec.state === "stopping" || rec.state === "starting") return
+		if (!rec || this.isStopping(rec) || rec.state === "starting") return
 		rec.state = follow ? "following" : "confirming"
 		this.emit("probe-state", probeId, rec.state, rec.req)
 	}
@@ -603,7 +644,10 @@ export class ProbePool extends EventEmitter {
 		const stale = [...this.records.values()].filter(
 			r => r.req.sourceId === sourceId && r.epoch !== epoch,
 		)
-		for (const rec of stale) rec.epochEndedAt = at
+		for (const rec of stale) {
+			rec.epochEndedAt = at
+			this.fence(rec)
+		}
 		await Promise.all(stale.map(rec => this.stopProbe(rec, "epoch")))
 		for (const rec of stale) {
 			// Identify (priority above every job's 0–100, Task 35a) re-plans on its own: a re-request would only
@@ -648,15 +692,65 @@ export class ProbePool extends EventEmitter {
 		)
 	}
 
-	async destroy(): Promise<void> {
+	/** Internal direct-admission gate: terminal status rows do not erase unknown offset residue. */
+	get channelBaselineKnown(): boolean {
+		return (
+			!this.destroyed && !this.cleanupFailed && this.retainedCleanup.size === 0
+		)
+	}
+
+	/** Synchronous gate used before API/operator drain; no new tick/queue/create may escape. */
+	sealAdmission(): void {
 		this.destroyed = true
 		this.queue.length = 0
-		this.deps.decoders.off("decoder:output", this.onOutput)
-		for (const watch of this.watches.values()) watch.off()
-		this.watches.clear()
-		await Promise.all(
-			[...this.records.values()].map(r => this.stopProbe(r, "shutdown")),
+		// Fence every original capability before any cleanup callback can reenter.
+		const records = [...this.records.values()]
+		for (const rec of records) this.fence(rec)
+		for (const rec of records) {
+			void this.stopProbe(rec, "shutdown").catch((err: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Sealed probe cleanup failed",
+				)
+			})
+		}
+	}
+
+	async destroy(): Promise<void> {
+		this.sealAdmission()
+		try {
+			this.outputRegistration.remove()
+		} catch (err: unknown) {
+			this.cleanupFailed = true
+			this.log.warn({ err }, "Probe output subscription cleanup failed")
+		}
+		for (const [sourceId, watch] of this.watches) {
+			try {
+				watch.off()
+				this.watches.delete(sourceId)
+			} catch (err: unknown) {
+				this.cleanupFailed = true
+				this.log.warn(
+					{ err, sourceId },
+					"Probe stream subscription cleanup failed",
+				)
+			}
+		}
+		const outcomes = await Promise.allSettled(
+			[...this.records.values()].map(record =>
+				this.stopProbe(record, "shutdown"),
+			),
 		)
+		if (
+			outcomes.some(outcome => outcome.status === "rejected") ||
+			this.cleanupFailed
+		)
+			throw new WaveKitError(
+				"Scanner probe cleanup failed",
+				"SCANNER_PROBE_CLEANUP_FAILED",
+			)
 	}
 
 	// === streams ===
@@ -681,20 +775,56 @@ export class ProbePool extends EventEmitter {
 		if (watch?.engine === engine) return { watch, replaced: false }
 		const replaced = watch !== undefined
 		if (watch) {
-			watch.off()
 			// Its probes read the replaced engine's ring, and its "stop" may never reach us now.
 			this.endSourceProbes(sourceId)
+			try {
+				watch.off()
+			} catch (err: unknown) {
+				this.cleanupFailed = true
+				this.sealAdmission()
+				throw err
+			}
 		}
 		const onStream = (stream: number, reason: EngineStreamReason): void =>
 			this.onStream(sourceId, stream, reason)
-		engine.on("stream", onStream)
+		const registration = new ConstructorListenerRegistration(
+			() => {
+				engine.on("stream", onStream)
+			},
+			() => {
+				engine.off("stream", onStream)
+			},
+			() =>
+				engine instanceof EventEmitter &&
+				!engine.listeners("stream").includes(onStream),
+		)
 		watch = {
 			engine,
 			latest: null,
 			stopped: false,
-			off: () => engine.off("stream", onStream),
+			off: () => registration.remove(),
 		}
 		this.watches.set(sourceId, watch)
+		try {
+			registration.register()
+			if (this.destroyed) {
+				registration.remove()
+				this.watches.delete(sourceId)
+			}
+		} catch (err: unknown) {
+			this.sealAdmission()
+			try {
+				registration.remove()
+				this.watches.delete(sourceId)
+			} catch (cleanupError: unknown) {
+				this.cleanupFailed = true
+				this.log.warn(
+					{ err: cleanupError, sourceId },
+					"Partial probe stream subscription retained",
+				)
+			}
+			throw err
+		}
 		return { watch, replaced }
 	}
 
@@ -724,15 +854,27 @@ export class ProbePool extends EventEmitter {
 		stream: number,
 		reason: EngineStreamReason,
 	): void {
+		if (this.destroyed) return
 		const watch = this.watches.get(sourceId)
 		if (watch) {
 			watch.latest = stream
 			watch.stopped = reason === "stop"
 			if (watch.stopped) {
 				// Finding 9: the stopped engine (and its IQ ring) is not kept referenced until the next open.
-				watch.off()
-				this.watches.delete(sourceId)
 				this.stoppedEngines.add(watch.engine)
+				this.endSourceProbes(sourceId)
+				try {
+					watch.off()
+					this.watches.delete(sourceId)
+				} catch (err: unknown) {
+					this.cleanupFailed = true
+					this.sealAdmission()
+					this.log.warn(
+						{ err, sourceId },
+						"Stopped engine subscription cleanup failed",
+					)
+				}
+				return
 			}
 		}
 		this.endSourceProbes(sourceId)
@@ -742,13 +884,24 @@ export class ProbePool extends EventEmitter {
 	private endSourceProbes(sourceId: string): void {
 		const at = this.now()
 		this.dropQueued(r => r.sourceId === sourceId)
-		for (const rec of this.records.values()) {
-			if (rec.req.sourceId !== sourceId) continue
+		const records = [...this.records.values()].filter(
+			rec => rec.req.sourceId === sourceId,
+		)
+		for (const rec of records) {
 			rec.epochEndedAt ??= at
-			// Synchronously, before the engine delivers the new stream's first bytes.
-			rec.untap?.()
-			rec.untap = null
-			void this.stopProbe(rec, "stream")
+			this.fence(rec)
+		}
+		for (const rec of records) {
+			// Teardown invokes each currently owned untap synchronously before its first await.
+			void this.stopProbe(rec, "stream").catch((err: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.sealAdmission()
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Stream-ended probe cleanup failed",
+				)
+			})
 		}
 	}
 
@@ -820,7 +973,18 @@ export class ProbePool extends EventEmitter {
 			if (r.state === "stopping" || r.req.priority >= req.priority) continue
 			if (!victim || r.req.priority < victim.req.priority) victim = r
 		}
-		if (victim) void this.stopProbe(victim, "preempted")
+		if (victim) {
+			const original = victim
+			void this.stopProbe(original, "preempted").catch((err: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(original)
+				this.sealAdmission()
+				this.log.warn(
+					{ err, probeId: original.probeId },
+					"Preempted probe cleanup failed",
+				)
+			})
+		}
 	}
 
 	/**
@@ -830,6 +994,7 @@ export class ProbePool extends EventEmitter {
 	pump(): void {
 		if (this.destroyed) return
 		for (const req of [...this.queue]) {
+			if (this.destroyed) return
 			// Dropped by an earlier iteration (an engine replacement ends its source's queue).
 			if (!this.queue.includes(req)) continue
 			const engine = this.deps.engines(req.sourceId)
@@ -856,6 +1021,7 @@ export class ProbePool extends EventEmitter {
 			}
 			const pick = this.pickTransport(first, ctx)
 			if ("deferred" in pick) continue
+			if (this.destroyed) return
 			this.dropQueued(r => r === req)
 			this.start(req, modes, 0, pick.transport, ctx, null)
 		}
@@ -880,6 +1046,10 @@ export class ProbePool extends EventEmitter {
 			this.seq,
 		)
 		const probeId = probeIdOverride ?? decoderId
+		let finishLaunch!: () => void
+		const launchDone = new Promise<void>(resolve => {
+			finishLaunch = resolve
+		})
 		const rec: ProbeRecord = {
 			probeId,
 			decoderId,
@@ -912,8 +1082,15 @@ export class ProbePool extends EventEmitter {
 			modeTimer: null,
 			droppedBytes: 0,
 			teardownDone: null,
+			cleanupState: "pending",
 			stepping: false,
 			capcodes: null,
+			launchDone,
+			launchSettled: false,
+			accepting: true,
+			decoderAttempted: false,
+			dvAttempted: false,
+			allocatedPorts: [],
 		}
 		if (mode.decoderType === "multimon-ng") {
 			rec.capcodes = new CapcodeWindows(mode.holdMs, () =>
@@ -927,24 +1104,53 @@ export class ProbePool extends EventEmitter {
 		}
 		this.records.set(probeId, rec)
 		this.byDecoder.set(decoderId, rec)
-		this.emit("probe-state", probeId, "starting", req)
-		void this.launch(rec, ctx, modeIndex === 0).catch((err: unknown) => {
-			// The pool stopped it while it started (createEphemeralDecoder rejects with PROBE_REMOVED): not a failure.
-			if (this.isStopping(rec)) {
-				this.log.debug(
-					{ probeId, decoderType: mode.decoderType },
-					"Probe stopped during its start",
+		try {
+			this.emit("probe-state", probeId, "starting", req)
+		} catch (err: unknown) {
+			rec.launchSettled = true
+			finishLaunch()
+			void this.stopProbe(rec, "error").catch((cleanupError: unknown) => {
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.log.warn(
+					{ err: cleanupError, probeId },
+					"Probe registration cleanup failed",
 				)
-				return
-			}
-			const removed =
-				err instanceof WaveKitError && err.code === "PROBE_REMOVED"
-			this.log[removed ? "debug" : "warn"](
-				{ err, probeId, decoderType: mode.decoderType },
-				removed ? "Probe removed during its start" : "Probe failed to start",
-			)
-			void this.stopProbe(rec, "error")
-		})
+			})
+			throw err
+		}
+		void this.launch(rec, ctx, modeIndex === 0).then(
+			() => {
+				rec.launchSettled = true
+				finishLaunch()
+			},
+			(err: unknown) => {
+				rec.launchSettled = true
+				finishLaunch()
+				// The pool stopped it while it started (createEphemeralDecoder rejects with PROBE_REMOVED): not a failure.
+				if (this.isStopping(rec)) {
+					this.log.debug(
+						{ probeId, decoderType: mode.decoderType },
+						"Probe stopped during its start",
+					)
+					return
+				}
+				const removed =
+					err instanceof WaveKitError && err.code === "PROBE_REMOVED"
+				this.log[removed ? "debug" : "warn"](
+					{ err, probeId, decoderType: mode.decoderType },
+					removed ? "Probe removed during its start" : "Probe failed to start",
+				)
+				void this.stopProbe(rec, "error").catch((cleanupError: unknown) => {
+					this.cleanupFailed = true
+					this.retainedCleanup.add(rec)
+					this.log.warn(
+						{ err: cleanupError, probeId },
+						"Failed probe cleanup failed",
+					)
+				})
+			},
+		)
 		return probeId
 	}
 
@@ -953,7 +1159,22 @@ export class ProbePool extends EventEmitter {
 	 * the first inline check's narrowing across the awaits and rejects the second one (TS2367).
 	 */
 	private isStopping(rec: ProbeRecord): boolean {
-		return rec.state === "stopping"
+		return (
+			this.destroyed ||
+			!rec.accepting ||
+			rec.state === "stopping" ||
+			this.records.get(rec.probeId) !== rec
+		)
+	}
+
+	private fence(rec: ProbeRecord): void {
+		rec.accepting = false
+		rec.state = "stopping"
+		rec.stepping = false
+		if (rec.modeTimer) clearTimeout(rec.modeTimer)
+		rec.modeTimer = null
+		if (this.byDecoder.get(rec.decoderId) === rec)
+			this.byDecoder.delete(rec.decoderId)
 	}
 
 	private async launch(
@@ -962,13 +1183,25 @@ export class ProbePool extends EventEmitter {
 		withPreRoll: boolean,
 	): Promise<void> {
 		const { req, mode, transport } = rec
-		const ports =
-			mode.decoderType === "direwolf"
-				? {
-						kiss: await this.deps.allocatePort(),
-						agw: await this.deps.allocatePort(),
-					}
-				: null
+		if (this.isStopping(rec)) return
+		// Initial composition is DIRECT-TAP ONLY. Deny the selected observed decoder
+		// route before ports/DV/directory/tap/constructor effects, without offset retry.
+		if (transport.kind === "channel")
+			throw new WaveKitError(
+				"Observed scanner decoder route is unavailable",
+				"SCANNER_CHANNEL_DECODER_UNAVAILABLE",
+			)
+		let ports: { kiss: number; agw: number } | null = null
+		if (mode.decoderType === "direwolf") {
+			const kiss = await this.deps.allocatePort()
+			rec.allocatedPorts.push(kiss)
+			if (this.isStopping(rec)) return
+			const agw = await this.deps.allocatePort()
+			rec.allocatedPorts.push(agw)
+			if (this.isStopping(rec)) return
+			ports = { kiss, agw }
+		}
+		if (this.isStopping(rec)) return
 		if (mode.decoderType === "dsd-fme" && req.record) {
 			// A mode step keeps the probe id, so earlier modes' calls share the directory.
 			rec.recordDir ??= join(
@@ -989,14 +1222,15 @@ export class ProbePool extends EventEmitter {
 			recordDir: rec.recordDir,
 			ports,
 		})
+		if (this.isStopping(rec)) return
 		const dv = this.deps.digitalVoice
 		if (mode.decoderType === "dsd-fme" && dv) {
+			rec.dvAttempted = true
 			config = await dv.addChannel(config)
 			rec.dvChannel = config.options["output"] === "udp"
-			// A stop during addChannel tore down before the channel existed; removeChannel is idempotent.
-			if (rec.dvChannel && this.isStopping(rec))
-				await dv.removeChannel(rec.decoderId)
-			if (rec.dvChannel && !this.isStopping(rec)) await dv.ensureStarted()
+			// Late returned channels remain in the original record for teardown after launch settles.
+			if (this.isStopping(rec)) return
+			if (rec.dvChannel) await dv.ensureStarted()
 		}
 		if (this.isStopping(rec)) return
 		if (transport.preRoll) {
@@ -1010,11 +1244,13 @@ export class ProbePool extends EventEmitter {
 				)
 			}
 			const input = new PassThrough({ highWaterMark: PROBE_INPUT_HWM })
+			rec.input = input
 			input.on("error", (err: Error) =>
 				this.log.debug({ err, probeId: rec.probeId }, "Probe input error"),
 			)
 			// Pre-roll and tap in one synchronous block: no sample lost or repeated.
 			const edge = engine.liveEdge()
+			if (this.isStopping(rec)) return
 			const maxPreRollSamples = Math.floor(
 				PRE_ROLL_MAX_BYTES / bytesPerSample(engine.format),
 			)
@@ -1023,38 +1259,52 @@ export class ProbePool extends EventEmitter {
 					? Math.max(req.preRollFromSample, edge - maxPreRollSamples)
 					: edge
 			const pre = engine.readRing(from, edge)
+			if (this.isStopping(rec)) return
 			if (pre && pre.bytes.length > 0) input.write(Buffer.from(pre.bytes))
+			if (this.isStopping(rec)) return
 			rec.untap = engine.tap((_start, bytes) => {
+				if (this.isStopping(rec)) return
 				if (input.writableLength > PROBE_INPUT_MAX_QUEUED) {
 					rec.droppedBytes += bytes.length
 					return
 				}
 				input.write(Buffer.from(bytes))
 			})
-			rec.input = input
+			if (this.isStopping(rec)) return
 		}
+		if (this.isStopping(rec)) return
+		rec.decoderAttempted = true
 		const decoder = await this.deps.decoders.createEphemeralDecoder(config, {
 			owner: "scanner",
 			jobId: req.jobId,
 			...(rec.input ? { input: rec.input } : {}),
 		})
-		if (this.isStopping(rec)) {
-			await this.deps.decoders.removeEphemeralDecoder(rec.decoderId)
-			return
-		}
+		if (this.isStopping(rec)) return
 		const emitter = decoder as unknown as EventEmitter
 		if (rec.dvChannel && dv)
 			dv.attachDecoder(rec.decoderId, emitter as unknown as VoiceCallSource)
+		if (this.isStopping(rec)) return
 		if (mode.decoderType === "dsd-fme") {
 			const onLink = (line: DsdFmeLinkLine): void => {
+				if (this.isStopping(rec)) return
 				this.markOutput(rec)
+				if (this.isStopping(rec)) return
 				this.deliver(rec, interpretDsdFme({ kind: "link", line }, rec.interp))
 			}
+			rec.detach.push(() => {
+				emitter.off("link", onLink)
+				if (emitter.listeners("link").includes(onLink))
+					throw new WaveKitError(
+						"Probe link listener removal is unverified",
+						"SCANNER_PROBE_CLEANUP_UNKNOWN",
+					)
+			})
 			emitter.on("link", onLink)
-			rec.detach.push(() => emitter.off("link", onLink))
+			if (this.isStopping(rec)) return
 		}
 		rec.state = "confirming"
 		this.emit("probe-state", rec.probeId, "confirming", req)
+		if (this.isStopping(rec)) return
 		// req.holdMs is the class total: leave the later modes their own holds inside it (§ 6.4).
 		const laterHoldMs = rec.modes.slice(1).reduce((sum, m) => sum + m.holdMs, 0)
 		const holdMs =
@@ -1063,13 +1313,19 @@ export class ProbePool extends EventEmitter {
 				: mode.holdMs
 		rec.modeTimer = setTimeout(() => {
 			rec.modeTimer = null
-			void this.onModeTimeout(rec)
+			void this.onModeTimeout(rec).catch((err: unknown) => {
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Probe mode cleanup failed",
+				)
+			})
 		}, holdMs)
 		rec.modeTimer.unref()
 	}
 
 	private async onModeTimeout(rec: ProbeRecord): Promise<void> {
-		if (rec.confirmed || rec.state !== "confirming") return
+		if (this.isStopping(rec) || rec.confirmed || rec.state !== "confirming")
+			return
 		const next = rec.modeIndex + 1
 		if (next >= rec.modes.length) return
 		const engine = this.deps.engines(rec.req.sourceId)
@@ -1087,7 +1343,7 @@ export class ProbePool extends EventEmitter {
 		rec.stepping = true
 		await this.teardown(rec)
 		// A stop during the teardown cancelled the step and finishes the probe itself.
-		if (!rec.stepping) return
+		if (this.destroyed || !rec.stepping) return
 		rec.stepping = false
 		this.records.delete(rec.probeId)
 		this.start(rec.req, rec.modes, next, rec.transport, ctx, rec.probeId, {
@@ -1097,46 +1353,122 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private teardown(rec: ProbeRecord): Promise<void> {
-		rec.teardownDone ??= this.runTeardown(rec)
+		if (rec.teardownDone) return rec.teardownDone
+		let resolve!: () => void
+		let reject!: (cause: unknown) => void
+		rec.teardownDone = new Promise<void>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
+		void rec.teardownDone.catch(() => undefined)
+		// Untap/removal callbacks may synchronously request this same teardown again.
+		void this.runTeardown(rec).then(resolve, reject)
 		return rec.teardownDone
 	}
 
 	private async runTeardown(rec: ProbeRecord): Promise<void> {
+		rec.accepting = false
 		rec.state = "stopping"
 		if (rec.modeTimer) clearTimeout(rec.modeTimer)
 		rec.modeTimer = null
-		rec.untap?.()
-		rec.untap = null
-		for (const off of rec.detach) off()
-		rec.detach = []
 		this.byDecoder.delete(rec.decoderId)
-		rec.input?.end()
-		try {
-			await this.deps.decoders.removeEphemeralDecoder(rec.decoderId)
-		} catch (err) {
-			this.log.warn(
-				{ err, probeId: rec.probeId },
-				"Removing a probe decoder failed",
-			)
+		const attempt = async (
+			action: () => unknown | Promise<unknown>,
+		): Promise<boolean> => {
+			try {
+				await action()
+				return true
+			} catch (err) {
+				rec.cleanupState = "unknown"
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.sealAdmission()
+				this.log.warn(
+					{ err, probeId: rec.probeId },
+					"Probe component cleanup failed",
+				)
+				return false
+			}
 		}
-		if (rec.dvChannel && this.deps.digitalVoice) {
-			await this.deps.digitalVoice
-				.removeChannel(rec.decoderId)
-				.catch((err: unknown) => {
-					this.log.warn(
-						{ err, probeId: rec.probeId },
-						"Removing a probe voice channel failed",
+		const untap = rec.untap
+		const detach = rec.detach.splice(0)
+		const initialUntap = attempt(() => {
+			untap?.()
+		}).then(ok => {
+			if (ok && rec.untap === untap) rec.untap = null
+		})
+		const initialDetach = detach.map(off =>
+			attempt(() => {
+				off()
+			}).then(ok => {
+				if (!ok) rec.detach.push(off)
+			}),
+		)
+		const initialInput = attempt(() => rec.input?.end())
+		// Cancel an already-invoked manager create now; it may return a late resource only afterward.
+		// Launch never awaits teardown, so waiting for original launch settlement cannot self-await.
+		const earlyDecoderRemoval =
+			rec.decoderAttempted && !rec.launchSettled
+				? attempt(() =>
+						this.deps.decoders.removeEphemeralDecoder(rec.decoderId),
 					)
-				})
-		}
-		rec.input?.destroy()
-		rec.input = null
+				: Promise.resolve(true)
+		const earlyDvRemoval =
+			rec.dvChannel && !rec.launchSettled && this.deps.digitalVoice
+				? attempt(() => this.deps.digitalVoice!.removeChannel(rec.decoderId))
+				: Promise.resolve(true)
+		await Promise.all([
+			rec.launchDone,
+			earlyDecoderRemoval,
+			earlyDvRemoval,
+			initialUntap,
+			initialInput,
+			...initialDetach,
+		])
+		// A callback may have sealed during tap/link installation, before its return was captured.
+		const lateUntap = rec.untap
+		const lateDetach = rec.detach.splice(0)
+		await Promise.all([
+			attempt(() => {
+				lateUntap?.()
+			}).then(ok => {
+				if (ok && rec.untap === lateUntap) rec.untap = null
+			}),
+			...lateDetach.map(off =>
+				attempt(() => {
+					off()
+				}).then(ok => {
+					if (!ok) rec.detach.push(off)
+				}),
+			),
+			attempt(() => rec.input?.end()),
+			rec.decoderAttempted
+				? attempt(() =>
+						this.deps.decoders.removeEphemeralDecoder(rec.decoderId),
+					)
+				: Promise.resolve(true),
+			rec.dvAttempted && this.deps.digitalVoice
+				? attempt(() => this.deps.digitalVoice!.removeChannel(rec.decoderId))
+				: Promise.resolve(true),
+			attempt(() => rec.input?.destroy()).then(ok => {
+				if (ok) rec.input = null
+			}),
+		])
+		// allocatePort resolves after its allocator has closed the temporary server.
+		// Numbers are retained through that original settlement; there is no live port lease to release.
+		rec.allocatedPorts.length = 0
+		if (rec.cleanupState === "unknown")
+			throw new WaveKitError(
+				"Scanner original probe cleanup is unknown",
+				"SCANNER_PROBE_CLEANUP_FAILED",
+			)
+		rec.cleanupState = "settled"
 	}
 
 	private async stopProbe(rec: ProbeRecord, reason: StopReason): Promise<void> {
 		if (rec.state === "stopping") {
 			// Another stop owns it: resolve once the decoder and channel are gone.
-			if (!rec.stepping) return rec.teardownDone ?? undefined
+			if (!rec.stepping && rec.teardownDone) return rec.teardownDone
 			rec.stepping = false
 		}
 		await this.teardown(rec)
@@ -1144,8 +1476,22 @@ export class ProbePool extends EventEmitter {
 		if (this.records.get(rec.probeId) !== rec) return
 		this.records.delete(rec.probeId)
 		this.log.debug({ probeId: rec.probeId, reason }, "Probe stopped")
-		this.emit("probe-state", rec.probeId, "stopped", rec.req)
-		if (rec.recordDir) {
+		const notificationFailures: unknown[] = []
+		const notify = (action: () => void): void => {
+			try {
+				action()
+			} catch (err: unknown) {
+				notificationFailures.push(err)
+				this.cleanupFailed = true
+				this.retainedCleanup.add(rec)
+				this.sealAdmission()
+			}
+		}
+		notify(() => {
+			this.emit("probe-state", rec.probeId, "stopped", rec.req)
+		})
+		// Settlement of pre-seal owned DV artifacts is cleanup, not reopened decoder intake.
+		if (rec.recordDir && rec.cleanupState === "settled") {
 			const result: ProbeRecordings = {
 				probeId: rec.probeId,
 				jobId: rec.req.jobId,
@@ -1154,8 +1500,11 @@ export class ProbePool extends EventEmitter {
 				calls: rec.calls,
 				epochEndedAt: rec.epochEndedAt,
 			}
-			this.emit("recordings", result)
+			notify(() => {
+				this.emit("recordings", result)
+			})
 		}
+		if (notificationFailures.length > 0) throw notificationFailures[0]
 		this.pump()
 	}
 
@@ -1166,8 +1515,9 @@ export class ProbePool extends EventEmitter {
 		out: DecoderOutputLike,
 	): void => {
 		const rec = this.byDecoder.get(decoderId)
-		if (!rec || rec.state === "stopping") return
+		if (!rec || this.isStopping(rec)) return
 		this.markOutput(rec)
+		if (this.isStopping(rec)) return
 		switch (rec.mode.decoderType) {
 			case "dsd-fme": {
 				const ev = toDsdFmeScannerEvent(out)
@@ -1191,8 +1541,11 @@ export class ProbePool extends EventEmitter {
 	}
 
 	private markOutput(rec: ProbeRecord): void {
+		if (this.isStopping(rec)) return
 		if (rec.firstOutputAt !== null) return
-		rec.firstOutputAt = this.now()
+		const at = this.now()
+		if (this.isStopping(rec)) return
+		rec.firstOutputAt = at
 		const key = `${rec.mode.decoderType}:${rec.transport.kind}`
 		const sample = rec.firstOutputAt - rec.startedAt
 		const prev = this.latency.get(key)
@@ -1207,23 +1560,27 @@ export class ProbePool extends EventEmitter {
 		ev: DsdFmeScannerEvent,
 		out: DecoderOutputLike,
 	): void {
+		if (this.isStopping(rec)) return
 		if (ev.kind !== "call_end") return
 		const parsed = CallEndSchema.safeParse(out.data)
 		if (!parsed.success || parsed.data.flags?.wavFileUpdate) return
 		const d = parsed.data
-		rec.calls.push({
+		const call: ProbeCall = {
 			callId: d.callId,
 			startedAt: Date.parse(d.startedAt),
 			endedAt: d.endedAt ? Date.parse(d.endedAt) : out.timestamp.getTime(),
 			...(d.talkgroup != null ? { talkgroup: String(d.talkgroup) } : {}),
 			...(d.source != null ? { source: String(d.source) } : {}),
 			encrypted: d.encrypted === true || d.flags?.encrypted === true,
-		})
+		}
+		if (this.isStopping(rec)) return
+		rec.calls.push(call)
 	}
 
 	/** P17: only evidence of the probe's epoch, stamped before that epoch ended. */
 	private deliver(rec: ProbeRecord, evs: DecodeEvidence[]): void {
 		for (const ev of evs) {
+			if (this.isStopping(rec)) return
 			if (ev.epoch !== rec.epoch) continue
 			if (rec.epochEndedAt !== null && ev.at >= rec.epochEndedAt) continue
 			if (ev.identity || ev.encrypted !== undefined) rec.confirmed = true

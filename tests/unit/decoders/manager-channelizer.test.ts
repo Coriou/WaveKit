@@ -70,6 +70,7 @@ let configs: Map<string, DecoderConfig>
 let statusEvents: string[]
 let restarting: string[]
 let logLines: Array<Record<string, unknown>>
+let scannerBindingEvents: string[]
 
 function create(
 	id: string,
@@ -132,6 +133,13 @@ function setup(config: Partial<DecoderManagerConfig> = {}) {
 	manager.setSourceManager(sources as unknown as SourceManager)
 	provider = new FakeChannelProvider()
 	manager.setChannelizer(provider)
+	scannerBindingEvents = []
+	manager.on("decoder:scanner-channel-granted", () =>
+		scannerBindingEvents.push("granted"),
+	)
+	manager.on("decoder:scanner-channel-ended", () =>
+		scannerBindingEvents.push("ended"),
+	)
 	statusEvents = []
 	restarting = []
 	manager.on("decoder:status-changed", (id: string) => statusEvents.push(id))
@@ -141,6 +149,7 @@ function setup(config: Partial<DecoderManagerConfig> = {}) {
 beforeEach(() => setup())
 afterEach(async () => {
 	await manager.destroy()
+	expect(scannerBindingEvents).toEqual([])
 	vi.useRealTimers()
 })
 
@@ -392,6 +401,17 @@ describe("DecoderManager + channelizer (addendum §4, §5)", () => {
 		expect(decoder.detachedAt).toEqual([])
 		expect(provider.calls).toHaveLength(1)
 		expect(decoder.starts).toBe(1)
+	})
+
+	it("requires source and generation equality for a configured channel with the same opaque ID", async () => {
+		const decoder = create("dec", { useChannelizer: true })
+		await manager.startDecoder("dec")
+		provider.emit("channel-invalidated", "another-source", 1, ["dec-g1"])
+		provider.emit("channel-invalidated", "rtl", 2, ["dec-g1"])
+		await settle()
+		expect(decoder.detachedAt).toEqual([])
+		expect(provider.calls).toHaveLength(1)
+		expect(decoder.running).toBe(true)
 	})
 
 	it("retries a request whose generation was invalidated while pending", async () => {
@@ -813,6 +833,42 @@ describe("channelizer-unavailable retry (A14, PF6)", () => {
 })
 
 describe("provider swap", () => {
+	it("finishes both old refs through A after a detach callback reinstalls A and recovers configured decoders", async () => {
+		const a = create("a", { useChannelizer: true })
+		const b = create("b", { useChannelizer: true })
+		await manager.startDecoder("a")
+		await manager.startDecoder("b")
+		const oldA = provider
+		const oldAStream = a.input
+		const oldBStream = b.input
+		const next = new FakeChannelProvider()
+		const detach = a.detachInput.bind(a)
+		let reentered = false
+		a.detachInput = () => {
+			detach()
+			if (!reentered) {
+				reentered = true
+				manager.setChannelizer(oldA)
+			}
+		}
+		manager.setChannelizer(next)
+		expect(oldA.released).toEqual(["a-g1", "b-g1"])
+		expect(next.released).toEqual([])
+		expect(a.detachedAt).toEqual(["before-destroy"])
+		expect(b.detachedAt).toEqual(["before-destroy"])
+		expect(oldA.listenerCount("channel-invalidated")).toBe(1)
+		expect(next.listenerCount("channel-invalidated")).toBe(0)
+		await settle()
+		expect(oldA.calls).toHaveLength(4)
+		expect(next.calls).toHaveLength(0)
+		expect(a.input).not.toBe(oldAStream)
+		expect(b.input).not.toBe(oldBStream)
+		expect(a.input).toBe(oldA.streams.get("a-g1"))
+		expect(b.input).toBe(oldA.streams.get("b-g1"))
+		expect(status("a").running).toBe(true)
+		expect(status("b").running).toBe(true)
+	})
+
 	it("releases channels to the provider that opened them and re-wires through the new one", async () => {
 		const decoder = create("dec", { useChannelizer: true })
 		await manager.startDecoder("dec")

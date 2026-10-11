@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process"
 import { EventEmitter } from "node:events"
 import * as fs from "node:fs"
 import nodeFs from "node:fs"
@@ -627,6 +628,10 @@ describe("disposable activity qualification guards", () => {
 		// Availability probe happens only in an explicitly started worker, never here.
 		const root = sandbox()
 		const runtime = await harness.run({ scenario: "runtime" }, { root })
+		if (runtime.status === "unsupported") {
+			context.skip()
+			return
+		}
 		if (
 			runtime.status === "failed" &&
 			/No such built-in module|Cannot find|no such module: fts5/.test(
@@ -750,6 +755,7 @@ interface Driver {
 	snapshot: () => DriverSnapshot
 }
 interface QuerySnapshot {
+	retainedReplyBytes: number
 	planned: number
 	totals: Record<string, number>
 	classes: number[]
@@ -761,7 +767,7 @@ interface QuerySnapshot {
 }
 interface QueryDriver {
 	turn: (now: number) => number
-	dispatch: (now: number) => number | null
+	dispatch: (now: number, requests?: TinyCursor[]) => number | null
 	settle: (
 		id: number,
 		reason: string,
@@ -1958,4 +1964,613 @@ describe("review corrections: bounded transitions, reader ownership and wire env
 			controlBytes: 0,
 		})
 	})
+})
+
+interface TinyRow {
+	sequence: number
+	eventId: string
+	producer: number
+	ingressUs: number
+	kind: string
+	frequency: number
+	text: string
+	payload: string
+}
+interface TinyCursor {
+	contract: string
+	after: number
+	high: number
+	lower: number
+	generation: number
+	queryClass: number
+}
+interface TinyResult {
+	status: string
+	error?: string
+	barrier?: string
+	ack: { id: number; outcome: string; rows: number } | null
+	pages: unknown[]
+	readerReply: unknown
+	plans: { detail: string }[][]
+	sequences: number[]
+	ftsSequences: number[]
+	integrity: string
+	receiptOutcomes: unknown[]
+	receiptFacts: {
+		epochs: { id: number; expires: number; closed: number }[]
+		receipts: { epoch: number; sequence: number }[]
+	}
+	initialPragmas: Record<string, unknown>
+	finalPragmas: Record<string, unknown>
+	provenance: { version: string; sourceId: string }
+	reservations: {
+		label: string
+		reserved: { dbBytes: number; walBytes: number }
+		beforeBytes: number
+		afterBytes: number
+	}[]
+}
+const tinyWorkload = (await import(
+	pathToFileURL(join(source, "workloads.mjs")).href
+)) as {
+	tinyRows: (count?: number) => TinyRow[]
+	tinyExpectedPage: (
+		rows: TinyRow[],
+		cursor: TinyCursor,
+		current?: { generation: number; lower: number },
+	) => unknown
+}
+const wire = (await import(pathToFileURL(join(source, "run.mjs")).href)) as {
+	validateBatchEnvelope: (batch: unknown) => unknown
+	baselineBatchAcknowledgement: (batch: Batch) => {
+		id: number
+		outcome: string
+		rows: number
+	}
+	batchAcknowledgement: (
+		id: number,
+		outcome: string,
+		rows: number,
+	) => { id: number; outcome: string; rows: number }
+	receiveBatchAcknowledgement: (
+		driver: Driver,
+		batch: Batch,
+		ack: unknown,
+		nowUs: number,
+	) => { accepted: boolean; receiptUs: number }
+	receiveReaderResult: (
+		driver: ReturnType<typeof delivery.queryAccounting>,
+		result: unknown,
+		nowUs: number,
+	) => boolean
+}
+const tinyGuards = (await import(
+	pathToFileURL(join(source, "worker.mjs")).href
+)) as {
+	TINY_GROWTH: { dbBytes: number; walBytes: number; totalBytes: number }
+	tinyGrowthSupported: (node: string, sourceId: string) => boolean
+}
+function tinyBatch() {
+	const batch = { id: 1, bytes: 0, rows: tinyWorkload.tinyRows() }
+	for (let i = 0; i < 4; i++)
+		batch.bytes = Buffer.byteLength(JSON.stringify(batch))
+	return batch
+}
+function tinyDirectory() {
+	const root = sandbox()
+	const directory = harness.prepareOutput(
+		undefined,
+		harness.GiB,
+		root,
+		free,
+	).path
+	return { root, directory }
+}
+// One actual worker at a time; every helper confirms exit before returning.
+async function tinyWorker(
+	location: { root: string; directory: string },
+	action: string,
+	options: { fault?: string; requests?: TinyCursor[] } = {},
+) {
+	const info = fs.lstatSync(location.directory)
+	const data = {
+		...location,
+		scenario: "tiny",
+		action,
+		role: action === "query" ? "reader" : "writer",
+		identity: { inode: info.ino, device: info.dev },
+		limits: { queueRows: 32 },
+		reserveBytes: harness.GiB,
+		readerOwner: { id: 0, owner: 1 },
+		batch: tinyBatch(),
+		...options,
+	}
+	// A fresh test host keeps Vitest's earlier virtual-schedule allocations out
+	// of the actual 192MiB guard. The cap is unchanged, and this host owns exactly
+	// one worker. stdout is emitted only after confirmed worker termination.
+	const script = `
+import { Worker } from "node:worker_threads";
+const worker = new Worker(new URL(${JSON.stringify(pathToFileURL(join(source, "worker.mjs")).href)}), { workerData: ${JSON.stringify(data)}, execArgv: [], resourceLimits: { maxOldGenerationSizeMb: 96, maxYoungGenerationSizeMb: 16, stackSizeMb: 4 } });
+let result; let failure;
+const timer = setTimeout(() => { failure = "Tiny worker deadline"; void worker.terminate(); }, 2000);
+worker.on("error", error => { failure = String(error); });
+worker.on("message", message => { if(result) failure = "Duplicate terminal"; result = message; if(message.barrier) void worker.terminate(); });
+worker.on("exit", code => { clearTimeout(timer); if(failure || !result || (!result.barrier && code !== 0)) { process.stderr.write(failure || "Tiny interrupted"); process.exitCode = 1; } else process.stdout.write(JSON.stringify(result)); });`
+	return await new Promise<TinyResult>((resolveResult, reject) => {
+		execFile(
+			process.execPath,
+			["--input-type=module", "-e", script],
+			{ timeout: 3000, maxBuffer: 128 * 1024, killSignal: "SIGKILL" },
+			(error, stdout, stderr) => {
+				if (error)
+					reject(new Error(`${String(error)} ${stderr.slice(0, 1024)}`))
+				else {
+					try {
+						resolveResult(JSON.parse(stdout) as TinyResult)
+					} catch (parseError) {
+						reject(parseError)
+					}
+				}
+			},
+		)
+	})
+}
+function cursor(queryClass: number, after = 0, high = 24): TinyCursor {
+	return {
+		contract: `tiny-v1:ascending:${queryClass}`,
+		queryClass,
+		after,
+		high,
+		lower: 0,
+		generation: 1,
+	}
+}
+
+describe("item 2 closed fixture protocol and independent tiny SQLite oracles", () => {
+	it("validates complete envelopes and observes one immutable terminal receipt clock", () => {
+		const driver = delivery.admissionDriver("steady", 1)
+		driver.admit(event(1), 0)
+		const batch = driver.batch(20000)!
+		expect(wire.validateBatchEnvelope(batch)).toBe(batch)
+		for (const invalid of [
+			{ ...batch, bytes: batch.bytes - 1 },
+			{ ...batch, extra: 1 },
+			{ ...batch, rows: [] },
+		])
+			expect(() => wire.validateBatchEnvelope(invalid)).toThrow()
+		const ack = wire.batchAcknowledgement(batch.id, "committed", 1)
+		expect(wire.baselineBatchAcknowledgement(batch)).toEqual(ack)
+		expect(Object.isFrozen(ack)).toBe(true)
+		expect(() =>
+			wire.receiveBatchAcknowledgement(driver, batch, ack, NaN),
+		).toThrow("clock")
+		expect(() =>
+			wire.receiveBatchAcknowledgement(
+				driver,
+				batch,
+				{ ...ack, rows: 2 },
+				25000,
+			),
+		).toThrow("ownership")
+		expect(driver.snapshot().retainedRows).toBe(1)
+		expect(wire.receiveBatchAcknowledgement(driver, batch, ack, 25000)).toEqual(
+			{ accepted: true, receiptUs: 25000 },
+		)
+		expect(
+			wire.receiveBatchAcknowledgement(driver, batch, ack, 26000).accepted,
+		).toBe(false)
+		expect(driver.snapshot()).toMatchObject({
+			retainedRows: 0,
+			retainedBytes: 0,
+			controlRows: 0,
+			counts: { committed: 1, duplicateReceipts: 1 },
+		})
+	})
+	it("fences reader wire ownership and late pages while retaining bytes through release", () => {
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, [cursor(0)])
+		const owner = driver.snapshot().readerOwner!
+		const result = {
+			...owner,
+			reason: "successful",
+			page: [
+				{
+					sequences: [1],
+					scannedThrough: 4,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: false,
+				},
+			],
+		}
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{ ...result, owner: owner.owner + 1 },
+				1,
+			),
+		).toBe(false)
+		expect(wire.receiveReaderResult(driver, result, 250000)).toBe(false)
+		expect(driver.snapshot().readerOwner).toEqual(owner)
+		expect(driver.join(owner.id, owner.owner, true)).toBe(true)
+		driver.turn(250000)
+		driver.dispatch(250000, [cursor(7)])
+		const next = driver.snapshot().readerOwner!
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{
+					...next,
+					reason: "successful",
+					page: [
+						{
+							sequences: [],
+							scannedThrough: 4,
+							high: 24,
+							lower: 0,
+							generation: 1,
+							done: false,
+						},
+					],
+				},
+				250001,
+			),
+		).toBe(true)
+		expect(driver.snapshot().retainedReplyBytes).toBeGreaterThan(0)
+		expect(driver.releaseReply(next.id % 8)).toBe(true)
+		expect(driver.snapshot().retainedReplyBytes).toBe(0)
+		driver.stop()
+		expect(driver.snapshot().reconciled).toBe(true)
+	})
+	it("rejects malformed owned replies without settling or retaining bytes", () => {
+		const request = cursor(0)
+		const page = {
+			sequences: [1, 4],
+			scannedThrough: 4,
+			high: 24,
+			lower: 0,
+			generation: 1,
+			done: false,
+		}
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, [request])
+		const owner = driver.snapshot().readerOwner!
+		const reply = { ...owner, reason: "successful", page: [page] }
+		const badPages: unknown[] = [
+			null,
+			[],
+			"page",
+			1,
+			{ ...page, extra: 1 },
+			{ ...page, sequences: null },
+			{ ...page, sequences: "1" },
+			{ ...page, sequences: [1, 1] },
+			{ ...page, sequences: [4, 1] },
+			{ ...page, sequences: [0] },
+			{ ...page, sequences: [5] },
+			{ ...page, sequences: [1.5] },
+			{ ...page, sequences: [Number.MAX_SAFE_INTEGER + 1] },
+			{ ...page, sequences: Array(201).fill(1) },
+			{ ...page, high: 25 },
+			{ ...page, lower: 1 },
+			{ ...page, generation: 2 },
+			{ ...page, scannedThrough: 3 },
+			{ ...page, scannedThrough: 5 },
+			{ ...page, done: true },
+			{ ...page, done: 0 },
+			{ ...page, high: NaN },
+			{ ...page, after: 0 },
+			{ ...page, contract: "other" },
+			{ ...page, queryClass: 1 },
+			{ reset: "unknown" },
+			{ reset: null },
+			{ reset: "filter-contract" },
+			{ reset: "generation", sequences: [] },
+		]
+		const invalid: unknown[] = [
+			{ ...owner, reason: "successful" },
+			{ ...reply, page: null },
+			{ ...reply, page: {} },
+			{ ...reply, page: "page" },
+			{ ...reply, page: [] },
+			{ ...reply, page: [page, page] },
+			{ ...reply, page: Array(17).fill(page) },
+			{ ...reply, extra: 1 },
+			{ ...reply, requests: [request] },
+			{ ...reply, reason: "unknown" },
+			{ ...reply, reason: "query-failed" },
+			{ ...reply, page: ["x".repeat(1024 * 1024)] },
+			...badPages.map(bad => ({ ...reply, page: [bad] })),
+		]
+		const before = driver.snapshot()
+		for (const bad of invalid) {
+			expect(() => wire.receiveReaderResult(driver, bad, 1)).toThrow()
+			expect(driver.snapshot()).toEqual(before)
+		}
+		expect(wire.receiveReaderResult(driver, reply, 2)).toBe(true)
+		expect(driver.snapshot().totals["successful"]).toBe(1)
+	})
+	it("binds immutable request expectations once per owner and validates empty/reset pages", () => {
+		const requests = [
+			cursor(7, 20),
+			cursor(3),
+			cursor(3),
+			{ ...cursor(0), queryClass: 1 },
+		]
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, requests)
+		const owner = driver.snapshot().readerOwner!
+		requests[0]!.high = 25 // Caller changes cannot change dispatched expectations.
+		requests.push(cursor(0))
+		const reply = {
+			...owner,
+			reason: "successful",
+			page: [
+				{
+					sequences: [],
+					scannedThrough: 24,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: true,
+				},
+				{ reset: "generation" },
+				{ reset: "retention" },
+				{ reset: "filter-contract" },
+			],
+		}
+		expect(wire.receiveReaderResult(driver, reply, 1)).toBe(true)
+		expect(driver.snapshot().retainedReplyBytes).toBeGreaterThan(0)
+		driver.releaseReply(0)
+		driver.turn(125000)
+		driver.dispatch(125000, [cursor(0)])
+		const next = driver.snapshot().readerOwner!
+		expect(wire.receiveReaderResult(driver, reply, 125001)).toBe(false)
+		expect(driver.snapshot().readerOwner).toEqual(next)
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{ ...next, reason: "query-failed" },
+				125001,
+			),
+		).toBe(true)
+	})
+	it("rejects unbound or filter-rebound replies and preserves overdue ownership until join", () => {
+		const driver = delivery.queryAccounting(1)
+		driver.turn(0)
+		driver.dispatch(0, [{ ...cursor(0), queryClass: 1 }])
+		const owner = driver.snapshot().readerOwner!
+		const reply = {
+			...owner,
+			reason: "successful",
+			page: [
+				{
+					sequences: [],
+					scannedThrough: 4,
+					high: 24,
+					lower: 0,
+					generation: 1,
+					done: false,
+				},
+			],
+		}
+		expect(() => wire.receiveReaderResult(driver, reply, 1)).toThrow("cursor")
+		expect(driver.snapshot()).toMatchObject({
+			readerOwner: owner,
+			retainedReplyBytes: 0,
+			totals: { successful: 0 },
+		})
+		expect(() =>
+			wire.receiveReaderResult(
+				driver,
+				{ ...owner, reason: "successful" },
+				250000,
+			),
+		).toThrow()
+		expect(driver.snapshot()).toMatchObject({
+			readerOwner: owner,
+			retainedReplyBytes: 0,
+			totals: { successful: 0, "active-timeout": 1 },
+		})
+		expect(
+			wire.receiveReaderResult(
+				driver,
+				{
+					...owner,
+					reason: "successful",
+					page: [{ reset: "filter-contract" }],
+				},
+				250001,
+			),
+		).toBe(false)
+		expect(driver.join(owner.id, owner.owner, true)).toBe(true)
+		const unbound = delivery.queryAccounting(1)
+		unbound.turn(0)
+		unbound.dispatch(0)
+		expect(() =>
+			wire.receiveReaderResult(
+				unbound,
+				{ ...unbound.snapshot().readerOwner!, reason: "successful", page: [] },
+				1,
+			),
+		).toThrow("not bound")
+		expect(unbound.snapshot().totals["successful"]).toBe(0)
+	})
+
+	it("denies unproven sources without a caller-enforced flag and reserves padding", () => {
+		expect(tinyGuards.tinyGrowthSupported("25.2.1", "unknown")).toBe(false)
+		expect(tinyGuards.tinyGrowthSupported("22.13.0", "unknown")).toBe(false)
+		expect(tinyGuards.TINY_GROWTH.walBytes).toBe(32 + 128 * 4120 + 65536 + 4120)
+		expect(tinyGuards.TINY_GROWTH.dbBytes).toBe(524288)
+	})
+	it("executes indexed/FTS/keyset pages against independent membership across insert/prune/reopen/restore", async context => {
+		if (process.versions.node !== "25.2.1") {
+			context.skip()
+			return
+		}
+		const location = tinyDirectory()
+		const seed = await tinyWorker(location, "seed")
+		if (seed.status === "unsupported") {
+			context.skip()
+			return
+		}
+		expect(seed.status, seed.error).toBe("ok")
+		expect(seed.ack).toEqual({ id: 1, outcome: "committed", rows: 24 })
+		expect(seed.initialPragmas).toMatchObject({
+			journalMode: "wal",
+			synchronous: 2,
+			pageSize: 4096,
+			maxPageCount: 128,
+			cacheSpill: 0,
+			busyTimeout: 50,
+			walAutocheckpoint: 32,
+		})
+		expect(seed.provenance.version).toBe("3.50.4")
+		expect(seed.reservations.map(item => item.label)).toEqual([
+			"schema",
+			"seed",
+		])
+		for (const item of seed.reservations)
+			expect(item.afterBytes - item.beforeBytes).toBeLessThanOrEqual(
+				tinyGuards.TINY_GROWTH.totalBytes,
+			)
+		const requests = Array.from({ length: 16 }, (_, i) =>
+			cursor(i % 8, i < 8 ? 0 : 20),
+		)
+		const reader = await tinyWorker(location, "query", { requests })
+		expect(reader.status, reader.error).toBe("ok")
+		expect(reader.initialPragmas["queryOnly"]).toBe(1)
+		const queryDriver = delivery.queryAccounting(1)
+		queryDriver.turn(0)
+		queryDriver.dispatch(0, requests)
+		expect(wire.receiveReaderResult(queryDriver, reader.readerReply, 1)).toBe(
+			true,
+		)
+		expect(queryDriver.snapshot().retainedReplyBytes).toBeGreaterThan(0)
+		queryDriver.releaseReply(0)
+		queryDriver.stop()
+		expect(reader.pages).toEqual(
+			requests.map(request =>
+				tinyWorkload.tinyExpectedPage(tinyWorkload.tinyRows(), request),
+			),
+		)
+		for (const index of [0, 1, 2, 6, 7])
+			expect(reader.plans[index]!.map(plan => plan.detail).join()).toMatch(
+				/USING (COVERING )?INDEX activity_/,
+			)
+		expect(reader.plans[3]!.map(plan => plan.detail).join()).toContain(
+			"VIRTUAL TABLE INDEX",
+		)
+		const rebound = await tinyWorker(location, "query", {
+			requests: [{ ...cursor(0), queryClass: 1 }],
+		})
+		expect(rebound.pages).toEqual([{ reset: "filter-contract" }])
+		expect((await tinyWorker(location, "append")).status).toBe("ok")
+		const fixed = await tinyWorker(location, "query", {
+			requests: [cursor(3, 20)],
+		})
+		expect(fixed.pages).toEqual([
+			tinyWorkload.tinyExpectedPage(tinyWorkload.tinyRows(25), cursor(3, 20)),
+		])
+		expect((await tinyWorker(location, "prune")).status).toBe("ok")
+		const pruned = await tinyWorker(location, "query", {
+			requests: [cursor(3), { ...cursor(7, 8, 25), lower: 8 }],
+		})
+		expect(pruned.pages).toEqual([
+			{ reset: "retention" },
+			tinyWorkload.tinyExpectedPage(
+				tinyWorkload.tinyRows(25).slice(8),
+				{ ...cursor(7, 8, 25), lower: 8 },
+				{ generation: 1, lower: 8 },
+			),
+		])
+		expect((await tinyWorker(location, "restore")).status).toBe("ok")
+		expect(
+			(
+				await tinyWorker(location, "query", {
+					requests: [{ ...cursor(3, 8), lower: 8 }],
+				})
+			).pages,
+		).toEqual([{ reset: "generation" }])
+	}, 10000)
+	it("keeps original pruned receipts through failed owner acknowledgement, 20 epochs and exact expiry", async context => {
+		if (process.versions.node !== "25.2.1") {
+			context.skip()
+			return
+		}
+		const location = tinyDirectory()
+		const receipts = await tinyWorker(location, "receipts")
+		expect(receipts.status, receipts.error).toBe("ok")
+		expect(receipts.receiptOutcomes).toEqual([
+			{ sequence: 1, epoch: 1 },
+			"CONFLICT",
+			"ADMISSION_EXPIRED",
+			"GENERATION_RESET",
+			"ADMISSION_EXPIRED",
+			"ADMISSION_EXPIRED",
+		])
+		expect(receipts.receiptFacts.epochs).toEqual(
+			Array.from({ length: 20 }, (_, i) => ({
+				id: i + 1,
+				expires: (i + 16) * 60000000,
+				closed: i < 4 ? 1 : 0,
+			})),
+		)
+		expect(receipts.receiptFacts.receipts.map(row => row.sequence)).toEqual(
+			Array.from({ length: 16 }, (_, i) => i + 5),
+		)
+		const reopened = await tinyWorker(location, "recover")
+		expect(reopened.status, reopened.error).toBe("ok")
+		expect(reopened.sequences).toEqual(
+			Array.from({ length: 19 }, (_, i) => i + 2),
+		)
+		expect(reopened.receiptFacts).toEqual(receipts.receiptFacts)
+	}, 10000)
+	it
+		.skipIf(process.versions.node !== "25.2.1")
+		.each(["before-begin", "insert", "after-commit", "enospc", "reopen"])(
+		"confirms worker death/rollback before recovering the fixed %s failpoint",
+		async fault => {
+			const location = tinyDirectory()
+			const interrupted = await tinyWorker(location, "seed", { fault })
+			if (fault === "enospc") {
+				expect(interrupted.status).toBe("failed")
+				expect(interrupted.error).toContain("Injected ENOSPC")
+				expect(interrupted.ack).toEqual({ id: 1, outcome: "failed", rows: 24 })
+			} else expect(interrupted.barrier).toBe(fault)
+			const reopened = await tinyWorker(location, "recover")
+			expect(reopened.status, reopened.error).toBe("ok")
+			const committed = ["after-commit", "reopen"].includes(fault)
+			expect(reopened.sequences).toEqual(
+				committed ? Array.from({ length: 24 }, (_, i) => i + 1) : [],
+			)
+			expect(reopened.ftsSequences).toEqual(reopened.sequences)
+			expect(reopened.receiptFacts.receipts.map(row => row.sequence)).toEqual(
+				reopened.sequences,
+			)
+			expect(reopened.integrity).toBe("ok")
+		},
+		10000,
+	)
+	it("closes epochs durably before a terminated cleanup can reclaim receipts", async context => {
+		if (process.versions.node !== "25.2.1") {
+			context.skip()
+			return
+		}
+		const location = tinyDirectory()
+		expect(
+			(await tinyWorker(location, "receipts", { fault: "receipt-cleanup" }))
+				.barrier,
+		).toBe("receipt-cleanup")
+		const reopened = await tinyWorker(location, "recover")
+		expect(reopened.status, reopened.error).toBe("ok")
+		expect(reopened.receiptFacts.epochs.filter(row => row.closed)).toHaveLength(
+			4,
+		)
+		expect(reopened.receiptFacts.receipts).toHaveLength(20)
+	}, 10000)
 })

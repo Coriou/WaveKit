@@ -8,9 +8,18 @@ import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import {
 	encodeRequest,
+	encodeObservedRequest,
 	parseEventLine,
+	parseObservedEventLine,
 	type ChannelizerRequest,
 } from "./protocol.js"
+import type {
+	ChannelSettlementObserver,
+	CleanupOutcome,
+	ProcessClaim,
+	SendClaim,
+} from "./settlement-observer.js"
+import { SettlementTransport } from "./settlement-transport.js"
 
 /**
  * One supervised `wavekit-chan` process (addendum §4, §11; A1): IQ on stdin, JSON-lines control on
@@ -27,6 +36,13 @@ export interface ChannelizerProcessOptions {
 	socketDir: string
 	readyTimeoutMs?: number
 	stopTimeoutMs?: number
+	/** Explicit internal opt-in; never populated by public configuration. */
+	settlement?: {
+		process: ProcessClaim
+		observer: ChannelSettlementObserver
+		deadline: number
+		now: () => number
+	}
 }
 
 /**
@@ -47,6 +63,13 @@ export interface ChannelizerProcessLike extends EventEmitter {
 	 * shutdown and input EOF arrives first, so a stop ends with either `closed` lines or `input-eof`.
 	 */
 	stop(): Promise<void>
+	sendObserved?(
+		open: Extract<ChannelizerRequest, { type: "open" }>,
+		send: SendClaim,
+	): void
+	attemptSettlementCleanup?(): Promise<readonly CleanupOutcome[]>
+	/** Internal dependency only: exact child CLOSE or sealed, positively settled no-spawn decision. */
+	waitSettlementNativeRetirement?(): Promise<void>
 }
 
 /** Longest event line accepted; a child that writes more without a newline is stopped, so it cannot grow memory. */
@@ -137,6 +160,17 @@ export class ChannelizerProcess
 	private control: Writable | null = null
 	private exited = false
 	private stopping: Promise<void> | null = null
+	private transport: SettlementTransport | undefined
+	private startupSealed = false
+	private startSettled = false
+	private starting = false
+	private startInvoked = false
+	private spawnInvoked = false
+	private actualChildClosed = false
+	private resolveNativeRetirement!: () => void
+	private readonly nativeRetirement = new Promise<void>(resolve => {
+		this.resolveNativeRetirement = resolve
+	})
 
 	constructor(
 		private readonly options: ChannelizerProcessOptions,
@@ -157,7 +191,47 @@ export class ChannelizerProcess
 		return stdin
 	}
 
-	start(): Promise<void> {
+	async start(): Promise<void> {
+		const settlement = this.options.settlement
+		if (!settlement) return this.startChild()
+		if (this.startupSealed)
+			throw new WaveKitError(
+				"channelizer startup cancelled",
+				"CHANNELIZER_UNAVAILABLE",
+			)
+		if (this.starting || this.child)
+			throw new WaveKitError(
+				"channelizer already started",
+				"CHANNELIZER_UNAVAILABLE",
+			)
+		this.startInvoked = true
+		this.starting = true
+		try {
+			const transport = new SettlementTransport(
+				settlement.process,
+				settlement.observer,
+			)
+			this.transport = transport
+			await transport.listen()
+			if (this.startupSealed || settlement.now() >= settlement.deadline)
+				throw new WaveKitError(
+					"channelizer startup cancelled",
+					"CHANNELIZER_UNAVAILABLE",
+				)
+			await this.startChild()
+		} catch (err: unknown) {
+			this.startupSealed = true
+			settlement.process.sealStartup()
+			this.transport?.seal()
+			throw err
+		} finally {
+			this.startSettled = true
+			settlement.process.recordStartSettled()
+			this.resolveNativeRetirementIfProved()
+		}
+	}
+
+	private startChild(): Promise<void> {
 		if (this.child)
 			return Promise.reject(
 				new WaveKitError(
@@ -165,8 +239,10 @@ export class ChannelizerProcess
 					"CHANNELIZER_UNAVAILABLE",
 				),
 			)
-		const readyTimeoutMs =
-			this.options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS
+		const settlement = this.options.settlement
+		const readyTimeoutMs = settlement
+			? Math.max(0, settlement.deadline - settlement.now())
+			: (this.options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS)
 		return new Promise((resolve, reject) => {
 			let settled = false
 			let lastStderr = ""
@@ -188,16 +264,44 @@ export class ChannelizerProcess
 
 			let child: ChildProcess
 			try {
+				if (
+					settlement &&
+					(!this.transport ||
+						this.startupSealed ||
+						!settlement.process.beginSpawn())
+				) {
+					unavailable("channelizer startup cancelled")
+					return
+				}
+				if (settlement && this.options.binaryPath.length === 0) {
+					// Supported validation occurs in our own synchronous owner before
+					// Node spawn is invoked, so no returned or escaped child is possible.
+					settlement.process.recordSupportedNoReturn()
+					unavailable("channelizer binary path unavailable")
+					return
+				}
+				this.spawnInvoked = true
 				child = spawn(
 					this.options.binaryPath,
-					buildChannelizerArgs(this.options),
+					this.transport
+						? [
+								...buildChannelizerArgs(this.options),
+								"--settlement-socket",
+								this.transport.socketPath,
+							]
+						: buildChannelizerArgs(this.options),
 					{
 						env: childAccessEnvironment(process.env),
 						detached: process.platform !== "win32",
-						stdio: ["pipe", "pipe", "pipe", "pipe"],
+						stdio: this.transport
+							? ["pipe", "pipe", "pipe", "pipe", "pipe"]
+							: ["pipe", "pipe", "pipe", "pipe"],
 					},
 				)
 			} catch (err: unknown) {
+				// A caught exception is not a physical no-process proof. Retain unknown
+				// unless a supported pre-spawn validation branch was separately proved.
+				settlement?.process.recordUncertainSpawn()
 				const cause = err instanceof Error ? err : undefined
 				unavailable(
 					`spawn ${this.options.binaryPath} failed: ${String(err)}`,
@@ -206,7 +310,32 @@ export class ChannelizerProcess
 				return
 			}
 			this.child = child
+			settlement?.process.recordReturnedChild(child)
+			// Own the actual returned child CLOSE even when spawn returned no PID.
+			child.once("close", () => {
+				this.actualChildClosed = true
+				settlement?.process.recordStdioSettled()
+				settlement?.process.recordActualClose()
+				this.resolveNativeRetirementIfProved()
+			})
 			this.control = child.stdio[CONTROL_FD] as Writable | null
+			if (this.transport) {
+				this.transport.assignChild(child)
+				const bootstrap = child.stdio[4] as Writable | null
+				const bootstrapOwner = settlement?.process.retainLocal("bootstrap")
+				if (!bootstrap) {
+					bootstrapOwner?.settle({ ok: true })
+					unavailable("channelizer bootstrap unavailable")
+					this.transport.seal()
+					return
+				}
+				bootstrap.once("close", () => bootstrapOwner?.settle({ ok: true }))
+				bootstrap.on("error", () => {
+					unavailable("channelizer bootstrap failed")
+					this.transport?.seal()
+				})
+				bootstrap.end(this.transport.nonce)
+			}
 
 			// After the child dies, writes fail with EPIPE: expected, and reported through "exit".
 			child.stdin?.on("error", (err: Error) =>
@@ -257,7 +386,9 @@ export class ChannelizerProcess
 				splitEventLines(
 					child.stdout,
 					line => {
-						const parsed = parseEventLine(line)
+						const parsed = settlement
+							? parseObservedEventLine(line)
+							: parseEventLine(line)
 						if (!parsed.ok) {
 							this.log.warn(
 								{ line, error: parsed.error },
@@ -266,7 +397,36 @@ export class ChannelizerProcess
 							this.emit("protocol-error", line, parsed.error)
 							return
 						}
-						if (parsed.event.type === "ready") settle()
+						if (parsed.event.type === "ready") {
+							if (!this.transport) settle()
+							else {
+								if (
+									!("observerCapability" in parsed.event) ||
+									parsed.event.observerCapability !== "attempt-disposal-v1"
+								) {
+									unavailable("channelizer settlement capability unavailable")
+									this.transport.seal()
+									return
+								}
+								const ready = parsed.event
+								this.transport.markReady("attempt-disposal-v1")
+								void this.transport.authenticated.then(
+									() => {
+										if (this.startupSealed) return
+										settle()
+										this.emit("event", {
+											v: 1,
+											type: "ready",
+											generation: ready.generation,
+											pid: ready.pid,
+										})
+									},
+									() =>
+										unavailable("channelizer settlement authentication failed"),
+								)
+								return
+							}
+						}
 						this.emit("event", parsed.event)
 					},
 					prefix => {
@@ -295,7 +455,67 @@ export class ChannelizerProcess
 		control.write(line)
 	}
 
+	sendObserved(
+		open: Extract<ChannelizerRequest, { type: "open" }>,
+		send: SendClaim,
+	): void {
+		if (
+			!this.options.settlement ||
+			!this.transport ||
+			this.startupSealed ||
+			!this.control ||
+			this.exited ||
+			this.control.destroyed ||
+			this.control.writableEnded
+		)
+			throw new WaveKitError(
+				"channelizer settlement unavailable",
+				"CHANNELIZER_UNAVAILABLE",
+			)
+		this.control.write(encodeObservedRequest(open, send.token))
+	}
+
+	private sealStartupOwner(): void {
+		this.startupSealed = true
+		const settlement = this.options.settlement
+		settlement?.process.sealStartup()
+		// The wrapper's invocation capability is now irreversibly fenced. This
+		// decision is independent of child/PID snapshots or stop fulfillment.
+		if (settlement && !this.startInvoked) {
+			this.startSettled = true
+			settlement.process.recordStartSettled()
+		}
+		this.resolveNativeRetirementIfProved()
+	}
+
+	private resolveNativeRetirementIfProved(): void {
+		if (!this.options.settlement || !this.startupSealed || !this.startSettled)
+			return
+		if (this.actualChildClosed || (!this.spawnInvoked && !this.child))
+			this.resolveNativeRetirement()
+	}
+
+	waitSettlementNativeRetirement(): Promise<void> {
+		return this.nativeRetirement
+	}
+
+	async attemptSettlementCleanup(): Promise<readonly CleanupOutcome[]> {
+		this.sealStartupOwner()
+		this.transport?.seal()
+		const bootstrap = this.child?.stdio[4] as Writable | null | undefined
+		bootstrap?.destroy()
+		return this.transport ? this.transport.cleanup() : []
+	}
+
 	stop(): Promise<void> {
+		if (this.options.settlement) {
+			this.sealStartupOwner()
+			this.transport?.seal()
+			const bootstrap = this.child?.stdio[4] as Writable | null | undefined
+			bootstrap?.destroy()
+			if (!this.child && this.startSettled)
+				this.options.settlement.process.recordNoProcess()
+		}
 		if (!this.child || this.exited) return Promise.resolve()
 		this.stopping ??= this.terminate(this.child)
 		return this.stopping

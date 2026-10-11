@@ -1,0 +1,688 @@
+import type { ChannelProvider } from "../../channelizer/types.js"
+import type { CleanupOutcome } from "../../channelizer/settlement-observer.js"
+import { RuntimeListenerRegistration } from "./consumer-lifecycle.js"
+import type { Readable } from "node:stream"
+import { WaveKitError } from "../../../utils/errors.js"
+import type {
+	ScannerChannelAttempt,
+	ScannerChannelOwnership,
+	ScannerChannelProfile,
+} from "./consumer-types.js"
+import {
+	prepareDirectChannel,
+	type PreparedScannerChannel,
+} from "./provider-observer.js"
+
+const RATE = 48_000
+const MAX_SAMPLES = 96_000
+const MAX_BYTES = MAX_SAMPLES * 8
+const OK: CleanupOutcome = Object.freeze({ ok: true })
+
+export interface ChannelTapResult {
+	readonly attempt: ScannerChannelAttempt
+	readonly samples: Float32Array
+	readonly outputRateHz: 48000
+	readonly format: "cf32"
+	readonly gaps: boolean
+}
+export interface ChannelTapRequest {
+	readonly attempt: ScannerChannelAttempt
+	readonly current: () => boolean
+	readonly minMs: number
+	/** Private callback may hand the SAME live native tap to analog after classifier drain. */
+	readonly collected: (result: ChannelTapResult, tap: ChannelTapHandle) => void
+}
+export interface ChannelTapHandle {
+	readonly prepared: PreparedScannerChannel
+	readonly current: boolean
+	/** Called after synchronous classifier drain, BEFORE analog construction/effects. */
+	beginAnalog(): boolean
+	attachAnalog(consumer: ChannelAnalogConsumer): boolean
+	sealIntake(): void
+	/** Producer settlement may release logically without awaiting its own component drain. */
+	releaseLogical(): Promise<void>
+	finish(): Promise<void>
+	cancel(): void
+}
+export interface ChannelAnalogConsumer {
+	/** Bounded downstream intake; the consumer owns asynchronous writes until settled. */
+	readonly push: (samples: Float32Array) => void
+	readonly cancel: () => void
+	readonly settled: Promise<CleanupOutcome>
+	readonly filesystemSettled: Promise<CleanupOutcome>
+	readonly operationSettled: Promise<CleanupOutcome>
+}
+interface Slot {
+	readonly input: ChannelTapRequest
+	readonly prepared: PreparedScannerChannel
+	readonly handle: ChannelTapHandle
+	samples: Float32Array | undefined
+	readonly start: number
+	phase: "pending" | "collecting" | "handoff" | "analog" | "closing"
+	count: number
+	tail: Buffer
+	gaps: boolean
+	collected: boolean
+	collectionStart: number
+	acquisition: Promise<void> | undefined
+	drain: Promise<void> | undefined
+	registrations: RuntimeListenerRegistration[]
+	analog: ChannelAnalogConsumer | undefined
+	analogBegun: boolean
+	filesystemBegun: boolean
+	operationBegun: boolean
+	componentsDrained: boolean
+	cleanupFailed: boolean
+}
+
+/** ONE source owner includes pending, collecting, handoff, closing and unknown tombstones. */
+export class ChannelTaps {
+	private readonly slots = new Map<string, Slot>()
+	private sealed = false
+	private stopPromise: Promise<CleanupOutcome> | undefined
+	constructor(
+		private readonly deps: {
+			readonly channels: ChannelProvider | null | undefined
+			readonly ownership: ScannerChannelOwnership | undefined
+			readonly profile: ScannerChannelProfile | null | undefined
+			readonly maxSources: number
+			readonly now: () => number
+		},
+	) {
+		if (!Number.isSafeInteger(deps.maxSources) || deps.maxSources < 1)
+			throw new WaveKitError(
+				"Bounded channel sources required",
+				"SCANNER_CHANNEL_BOUND",
+			)
+	}
+	get ownerCount(): number {
+		return this.slots.size
+	}
+
+	begin(input: ChannelTapRequest): ChannelTapHandle | undefined {
+		this.reap()
+		if (
+			this.sealed ||
+			this.slots.has(input.attempt.sourceId) ||
+			this.slots.size >= this.deps.maxSources ||
+			!Number.isFinite(input.minMs) ||
+			input.minMs < 300 ||
+			input.minMs > 2000 ||
+			!input.current()
+		)
+			return undefined
+		let slot: Slot | undefined
+		const prepared = prepareDirectChannel({
+			channels: this.deps.channels,
+			ownership: this.deps.ownership,
+			profile: this.deps.profile,
+			attempt: input.attempt,
+			request: {
+				centerHz: input.attempt.targetHz,
+				bandwidthHz: 16_000,
+				transitionHz: 4_000,
+				outputRateHz: RATE,
+				format: "cf32",
+			},
+			current: () => !this.sealed && input.current(),
+			ended: () => {
+				if (slot) void this.close(slot).catch(() => undefined)
+			},
+			continuityLost: () => {
+				if (!slot) return
+				slot.gaps = true
+				// A gap has no trusted sample translation. Fence analog synchronously, drain later.
+				if (
+					slot.phase === "analog" ||
+					slot.phase === "handoff" ||
+					slot.analogBegun
+				)
+					slot.handle.cancel()
+			},
+		})
+		if (!prepared) return undefined
+		const handle: ChannelTapHandle = Object.freeze({
+			prepared,
+			get current() {
+				return prepared.lifecycle.live && !prepared.lifecycle.continuityLost
+			},
+			beginAnalog: () => {
+				if (
+					!slot ||
+					slot.phase !== "handoff" ||
+					!prepared.lifecycle.live ||
+					prepared.lifecycle.continuityLost ||
+					prepared.handle.snapshot().components.classifier !== "settled" ||
+					slot.analogBegun
+				)
+					return false
+				slot.analogBegun = prepared.analog.begin()
+				slot.filesystemBegun = slot.analogBegun && prepared.filesystem.begin()
+				slot.operationBegun = slot.filesystemBegun && prepared.operation.begin()
+				if (!slot.operationBegun) {
+					// No producer effect has occurred yet. Settle the actually empty owned components.
+					prepared.analog.settle(OK)
+					prepared.filesystem.settle(OK)
+					prepared.operation.settle(OK)
+					slot.handle.cancel()
+				}
+				return slot.operationBegun
+			},
+			attachAnalog: (consumer: ChannelAnalogConsumer) =>
+				this.attachAnalog(slot!, consumer),
+			sealIntake: () => {
+				if (!this.removeIntake(slot!)) {
+					slot!.handle.cancel()
+					throw new WaveKitError(
+						"Scanner intake cleanup pending",
+						"SCANNER_CHANNEL_CLEANUP_PENDING",
+					)
+				}
+				slot!.tail = Buffer.alloc(0)
+			},
+			releaseLogical: () => {
+				prepared.lifecycle.invalidate()
+				return prepared.lifecycle.logicalDrain()
+			},
+			finish: () => this.close(slot!),
+			cancel: () => {
+				void this.close(slot!).catch(() => undefined)
+			},
+		})
+		slot = {
+			input,
+			prepared,
+			handle,
+			samples: undefined,
+			start: this.deps.now(),
+			phase: "pending",
+			count: 0,
+			tail: Buffer.alloc(0),
+			gaps: false,
+			collected: false,
+			collectionStart: 0,
+			acquisition: undefined,
+			drain: undefined,
+			registrations: [],
+			analog: undefined,
+			analogBegun: false,
+			filesystemBegun: false,
+			operationBegun: false,
+			componentsDrained: false,
+			cleanupFailed: false,
+		}
+		this.slots.set(input.attempt.sourceId, slot)
+		if (prepared.denied) {
+			// Publish the bounded original owner BEFORE cleanup can reenter. Never acquire this arm.
+			slot.cleanupFailed = true
+			void this.close(slot).catch(() => undefined)
+			return undefined
+		}
+		const original = slot
+		// Own acquisition before any continuation; no pregrant ID derivation/release.
+		let acquired!: () => void
+		let failed!: (cause: unknown) => void
+		original.acquisition = new Promise<void>((yes, no) => {
+			acquired = yes
+			failed = no
+		})
+		void original.acquisition.catch(() => {
+			original.handle.cancel()
+		})
+		void this.acquire(original).then(acquired, failed)
+		return handle
+	}
+
+	/** Uses the existing service tick; no extra timer or expiry-based native credit. */
+	tick(): void {
+		for (const slot of this.slots.values()) {
+			if (!slot.input.current()) {
+				slot.handle.cancel()
+				continue
+			}
+			if (slot.phase === "pending" && this.deps.now() - slot.start >= 5000)
+				slot.handle.cancel()
+			else if (
+				slot.phase === "collecting" &&
+				this.deps.now() - slot.collectionStart >= 2000
+			)
+				this.deliver(slot)
+		}
+		this.reap()
+	}
+
+	cancelSource(sourceId: string): void {
+		this.slots.get(sourceId)?.handle.cancel()
+	}
+	cancelObservation(sourceId: string, observationId: string): void {
+		const slot = this.slots.get(sourceId)
+		if (slot?.input.attempt.observationId === observationId)
+			slot.handle.cancel()
+	}
+	/** Workload changes revoke original capabilities without sealing future covered admission. */
+	invalidateCoverage(): void {
+		for (const slot of this.slots.values()) slot.handle.cancel()
+	}
+	/** Phase66 may detach only references whose actual facts have settled; never waits. */
+	sweepSettledReferences(): void {
+		this.reap()
+	}
+	sealAdmission(): void {
+		this.sealed = true
+		for (const slot of this.slots.values()) slot.handle.cancel()
+	}
+
+	/** Phase40 drains own classifier/intake/logical attempts, NEVER native accounting. */
+	stop(): Promise<CleanupOutcome> {
+		if (this.stopPromise) return this.stopPromise
+		let resolve!: (outcome: CleanupOutcome) => void
+		let reject!: (cause: unknown) => void
+		this.stopPromise = new Promise<CleanupOutcome>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
+		void this.stopPromise.catch(() => undefined)
+		// Own the first handle before sealing can synchronously reenter stop.
+		void this.stopComponents().then(resolve, reject)
+		return this.stopPromise
+	}
+
+	private async stopComponents(): Promise<CleanupOutcome> {
+		this.sealAdmission()
+		const outcomes = await Promise.allSettled(
+			[...this.slots.values()].map(slot => this.close(slot)),
+		)
+		this.reap()
+		return outcomes.some(outcome => outcome.status === "rejected")
+			? {
+					ok: false,
+					state: "failed",
+					detail: "Scanner channel component cleanup failed",
+				}
+			: OK
+	}
+
+	private async acquire(slot: Slot): Promise<void> {
+		const channels = this.deps.channels!
+		const result = await channels.requestChannel(
+			slot.input.attempt.sourceId,
+			slot.input.attempt.decoderId,
+			slot.prepared.request,
+			{
+				kind: "iq",
+				format: "U8_IQ",
+				sampleRate: slot.input.attempt.captureRateHz,
+				centerFreq: slot.input.attempt.captureCentreHz,
+				exclusive: false,
+			},
+		)
+		if (!result.ok) {
+			slot.prepared.classifier.sealNeverStarted()
+			slot.prepared.analog.sealNeverStarted()
+			slot.prepared.filesystem.sealNeverStarted()
+			slot.prepared.operation.sealNeverStarted()
+			slot.prepared.lifecycle.invalidate()
+			this.fence(slot)
+			return
+		}
+		if (
+			!slot.prepared.lifecycle.adopt(result) ||
+			this.sealed ||
+			slot.phase === "closing" ||
+			!slot.prepared.classifier.begin()
+		) {
+			slot.prepared.classifier.sealNeverStarted()
+			slot.prepared.analog.sealNeverStarted()
+			slot.prepared.filesystem.sealNeverStarted()
+			slot.prepared.operation.sealNeverStarted()
+			slot.prepared.lifecycle.invalidate()
+			return
+		}
+		slot.samples = new Float32Array(MAX_SAMPLES * 2)
+		slot.gaps ||= slot.prepared.lifecycle.continuityLost
+		slot.phase = "collecting"
+		slot.collectionStart = this.deps.now()
+		const onData = (bytes: unknown): void => {
+			slot.gaps ||= slot.prepared.lifecycle.continuityLost
+			if (
+				!Buffer.isBuffer(bytes) ||
+				!slot.prepared.lifecycle.live ||
+				slot.phase !== "collecting"
+			)
+				return
+			this.push(slot, bytes)
+		}
+		this.installIntake(slot, result.stream, onData)
+		if (!slot.prepared.lifecycle.live) slot.handle.cancel()
+	}
+
+	private push(slot: Slot, bytes: Buffer): void {
+		const remaining = MAX_BYTES - slot.count * 8
+		if (bytes.length > remaining + 7 - slot.tail.length) {
+			slot.gaps = true
+			slot.handle.cancel()
+			return
+		}
+		const data = slot.tail.length ? Buffer.concat([slot.tail, bytes]) : bytes
+		const complete = data.length - (data.length % 8)
+		for (let index = 0; index < complete; index += 8) {
+			const real = data.readFloatLE(index),
+				imaginary = data.readFloatLE(index + 4)
+			if (!Number.isFinite(real) || !Number.isFinite(imaginary)) {
+				slot.gaps = true
+				slot.handle.cancel()
+				return
+			}
+			slot.samples![slot.count * 2] = real
+			slot.samples![slot.count * 2 + 1] = imaginary
+			slot.count++
+		}
+		slot.tail = Buffer.from(data.subarray(complete))
+		if (
+			slot.count >= Math.ceil((RATE * Math.max(500, slot.input.minMs)) / 1000)
+		)
+			this.deliver(slot)
+	}
+
+	private deliver(slot: Slot): void {
+		if (
+			slot.collected ||
+			slot.phase !== "collecting" ||
+			!slot.prepared.lifecycle.live
+		)
+			return
+		slot.gaps ||= slot.prepared.lifecycle.continuityLost
+		slot.collected = true
+		slot.phase = "handoff"
+		if (!this.removeIntake(slot)) {
+			slot.handle.cancel()
+			return
+		}
+		const result = Object.freeze({
+			attempt: slot.input.attempt,
+			samples: slot.samples!.subarray(0, slot.count * 2),
+			outputRateHz: RATE as 48000,
+			format: "cf32" as const,
+			gaps: slot.gaps || slot.tail.length !== 0,
+		})
+		let outcome: CleanupOutcome = OK
+		try {
+			slot.input.collected(result, slot.handle)
+		} catch {
+			outcome = {
+				ok: false,
+				state: "failed",
+				detail: "Scanner classifier component failed",
+			}
+			slot.handle.cancel()
+		} finally {
+			// The synchronous consumer has finished; do not refund F with its buffer retained.
+			slot.samples = undefined
+			slot.tail = Buffer.alloc(0)
+			slot.prepared.classifier.settle(outcome)
+		}
+	}
+
+	private fence(slot: Slot): void {
+		const alreadyClosing = slot.phase === "closing"
+		slot.phase = "closing"
+		this.removeIntake(slot)
+		if (!alreadyClosing) {
+			try {
+				slot.analog?.cancel()
+			} catch {
+				slot.cleanupFailed = true
+			}
+		}
+	}
+
+	private attachAnalog(slot: Slot, consumer: ChannelAnalogConsumer): boolean {
+		if (slot.analog || !slot.analogBegun) return false
+		// Retain the original consumer before its cancellation can reenter.
+		slot.analog = consumer
+		void consumer.settled.catch(() => undefined)
+		const stream = slot.prepared.lifecycle.readable
+		if (
+			!stream ||
+			slot.phase !== "handoff" ||
+			this.sealed ||
+			slot.prepared.lifecycle.continuityLost
+		) {
+			consumer.cancel()
+			void this.close(slot).catch(() => undefined)
+			return false
+		}
+		slot.phase = "analog"
+		const onData = (bytes: unknown): void => {
+			if (slot.prepared.lifecycle.continuityLost) {
+				slot.gaps = true
+				slot.handle.cancel()
+				return
+			}
+			if (
+				!Buffer.isBuffer(bytes) ||
+				slot.phase !== "analog" ||
+				!slot.prepared.lifecycle.live
+			)
+				return
+			if (bytes.length > MAX_BYTES - slot.tail.length) {
+				slot.handle.cancel()
+				return
+			}
+			const data = slot.tail.length ? Buffer.concat([slot.tail, bytes]) : bytes
+			const complete = data.length - (data.length % 8)
+			const samples = new Float32Array(complete / 4)
+			for (let index = 0; index < complete; index += 4) {
+				const value = data.readFloatLE(index)
+				if (!Number.isFinite(value)) {
+					slot.handle.cancel()
+					return
+				}
+				samples[index / 4] = value
+			}
+			slot.tail = Buffer.from(data.subarray(complete))
+			try {
+				if (samples.length > 0) consumer.push(samples)
+			} catch {
+				slot.handle.cancel()
+			}
+		}
+		if (!this.installIntake(slot, stream, onData)) return false
+		if (!slot.prepared.lifecycle.live) {
+			slot.handle.cancel()
+			return false
+		}
+		return true
+	}
+
+	private installIntake(
+		slot: Slot,
+		stream: Readable,
+		onData: (bytes: unknown) => void,
+	): boolean {
+		// Classifier and analog are the only two intake phases; failed originals remain owned.
+		if (slot.registrations.length >= 2) {
+			slot.cleanupFailed = true
+			slot.handle.cancel()
+			return false
+		}
+		const registration = new RuntimeListenerRegistration(
+			() => {
+				stream.on("data", onData)
+			},
+			() => {
+				stream.off("data", onData)
+			},
+			() => !stream.listeners("data").includes(onData),
+		)
+		slot.registrations.push(registration)
+		try {
+			return registration.register()
+		} catch {
+			slot.cleanupFailed = true
+			slot.handle.cancel()
+			return false
+		}
+	}
+	private removeIntake(slot: Slot): boolean {
+		let settled = true
+		for (const registration of slot.registrations) {
+			try {
+				if (!registration.remove()) settled = false
+			} catch {
+				settled = false
+				slot.cleanupFailed = true
+			}
+			if (registration.failed) {
+				settled = false
+				slot.cleanupFailed = true
+			}
+		}
+		return settled
+	}
+
+	private close(slot: Slot): Promise<void> {
+		if (slot.drain) return slot.drain
+		let resolve!: () => void
+		let reject!: (cause: unknown) => void
+		slot.drain = new Promise<void>((yes, no) => {
+			resolve = yes
+			reject = no
+		})
+		void slot.drain.catch(() => undefined)
+		// Claim before ended/release callbacks can reenter this same owner.
+		this.fence(slot)
+		slot.prepared.lifecycle.invalidate()
+		void this.drain(slot).then(resolve, reject)
+		return slot.drain
+	}
+	private async drain(slot: Slot): Promise<void> {
+		let failure: WaveKitError | undefined
+		try {
+			await slot.acquisition
+		} catch {
+			failure = new WaveKitError(
+				"Scanner channel acquisition cleanup failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
+		}
+		const intakeSettled = this.removeIntake(slot)
+		slot.samples = undefined
+		slot.tail = Buffer.alloc(0)
+		slot.prepared.classifier.settle(
+			intakeSettled
+				? OK
+				: {
+						ok: false,
+						state: "unknown",
+						detail: "Scanner intake cleanup pending",
+					},
+		)
+		if (!intakeSettled)
+			failure ??= new WaveKitError(
+				"Scanner intake cleanup pending",
+				"SCANNER_CHANNEL_CLEANUP_PENDING",
+			)
+		if (slot.analog) {
+			let outcome: CleanupOutcome
+			try {
+				outcome = await slot.analog.settled
+			} catch {
+				outcome = {
+					ok: false,
+					state: "failed",
+					detail: "Scanner analog component cleanup failed",
+				}
+			}
+			if (outcome.ok && !intakeSettled)
+				outcome = {
+					ok: false,
+					state: "unknown",
+					detail: "Scanner analog intake cleanup pending",
+				}
+			slot.prepared.analog.settle(outcome)
+			if (!outcome.ok)
+				failure ??= new WaveKitError(
+					"Scanner analog component cleanup failed",
+					"SCANNER_CHANNEL_CLEANUP_FAILED",
+				)
+		} else if (slot.analogBegun) {
+			slot.prepared.analog.settle({
+				ok: false,
+				state: "unknown",
+				detail: "Scanner analog owner missing",
+			})
+			failure ??= new WaveKitError(
+				"Scanner analog owner missing",
+				"SCANNER_CHANNEL_CLEANUP_PENDING",
+			)
+		} else slot.prepared.analog.sealNeverStarted()
+		// Filesystem and operation are independent of the analog/logical-release outcome.
+		for (const [component, begun, settlement] of [
+			[
+				slot.prepared.filesystem,
+				slot.filesystemBegun,
+				slot.analog?.filesystemSettled,
+			],
+			[
+				slot.prepared.operation,
+				slot.operationBegun,
+				slot.analog?.operationSettled,
+			],
+		] as const) {
+			if (!begun) {
+				component.sealNeverStarted()
+				continue
+			}
+			let outcome: CleanupOutcome
+			try {
+				outcome = settlement
+					? await settlement
+					: {
+							ok: false,
+							state: "unknown",
+							detail: "Scanner recording component owner missing",
+						}
+			} catch {
+				outcome = {
+					ok: false,
+					state: "unknown",
+					detail: "Scanner recording component settlement unknown",
+				}
+			}
+			component.settle(outcome)
+			if (!outcome.ok)
+				failure ??= new WaveKitError(
+					"Scanner recording component cleanup pending",
+					"SCANNER_CHANNEL_CLEANUP_PENDING",
+				)
+		}
+		try {
+			await slot.prepared.lifecycle.logicalDrain()
+		} catch {
+			failure ??= new WaveKitError(
+				"Scanner logical channel release failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
+		}
+		if (slot.cleanupFailed)
+			failure ??= new WaveKitError(
+				"Scanner channel intake cleanup failed",
+				"SCANNER_CHANNEL_CLEANUP_FAILED",
+			)
+		if (failure) throw failure
+		slot.componentsDrained = true
+		this.reap()
+	}
+	private reap(): void {
+		for (const [source, slot] of this.slots) {
+			if (
+				slot.phase === "closing" &&
+				slot.componentsDrained &&
+				!slot.cleanupFailed &&
+				slot.prepared.lifecycle.reclaimIfSettled()
+			)
+				this.slots.delete(source)
+		}
+	}
+}

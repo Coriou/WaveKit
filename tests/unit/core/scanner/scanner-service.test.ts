@@ -3,7 +3,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import fc from "fast-check"
 import { describe, expect, it, vi } from "vitest"
+import type { ProbePool } from "../../../../src/core/scanner/probes/probe-pool.js"
+import { probeRequest } from "../../../mocks/scanner/probe-fakes.js"
 import { chooseLeaseHolder } from "../../../../src/core/scanner/job-runner.js"
+import { ScannerLifecycleOwner } from "../../../../src/core/scanner/channel/consumer-lifecycle.js"
+import {
+	ScannerService,
+	type ScannerServiceDeps,
+} from "../../../../src/core/scanner/scanner-service.js"
 import { ArbiterFakeTuner } from "../../../mocks/scanner/arbiter-fakes.js"
 import type { ScanJob } from "@wavekit/api-types"
 import {
@@ -48,6 +55,53 @@ async function untilRunning(h: Harness, id: string, seed = 20): Promise<void> {
 }
 
 describe("ScannerService", () => {
+	it("phase40 preserves a channel component UNKNOWN and attempts every subscription remover", async () => {
+		const h = serviceHarness()
+		const original = new Error("first remover unavailable")
+		const failedOff = vi.fn(() => {
+			throw original
+		})
+		const siblingOff = vi.fn()
+		const actualDrain = vi.fn()
+		let started = false
+		const actualOutcome = Promise.resolve({
+			ok: false as const,
+			state: "unknown" as const,
+			detail: "Actual channel filesystem cleanup unknown",
+		})
+		const component = {
+			sealAdmission: vi.fn(),
+			stop: vi.fn(() => {
+				if (!started) {
+					started = true
+					actualDrain()
+				}
+				return actualOutcome
+			}),
+			sweepSettledReferences: vi.fn(),
+		}
+		// Component boundary fixture only; these outcomes do not manufacture native proof.
+		const boundary = h.service as unknown as {
+			channelTaps: typeof component
+			channelSubscriptions: (() => void)[]
+		}
+		boundary.channelTaps = component
+		boundary.channelSubscriptions.push(failedOff, siblingOff)
+		const handle = h.service.beginStop()
+		await expect(handle.producerSettled).rejects.toMatchObject({
+			message: "Actual channel filesystem cleanup unknown",
+		})
+		// Two independent phase slots request the same real component's cached first drain.
+		expect(component.stop).toHaveBeenCalledTimes(2)
+		expect(actualDrain).toHaveBeenCalledOnce()
+		expect(failedOff).toHaveBeenCalledOnce()
+		expect(siblingOff).toHaveBeenCalledOnce()
+		expect(boundary.channelSubscriptions).toEqual([failedOff])
+		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({
+			message: "Actual channel filesystem cleanup unknown",
+		})
+	})
+
 	it("creates the passive job and credits one emission to every covering in-window job", async () => {
 		const h = serviceHarness()
 		await h.service.start()
@@ -948,7 +1002,7 @@ describe("ScannerService", () => {
 		await h.service.stop()
 	})
 
-	it("finishes the shutdown when a job fails to dispose, and a failed start keeps its own error (finding 8)", async () => {
+	it("reports disposal failure after sibling shutdown, and a failed start keeps its own error (finding 8)", async () => {
 		const h = serviceHarness({ liveCaps: false, patch: noPassive })
 		const svc = h.service as unknown as {
 			createDriver(r: unknown): { dispose(): Promise<void> }
@@ -969,11 +1023,16 @@ describe("ScannerService", () => {
 			mode: "in-window",
 			ranges: [{ startHz: 446_000_000, endHz: 446_300_000 }],
 		})
-		await h.service.stop()
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 		const jobs = JSON.parse(readFileSync(join(h.dir, "jobs.json"), "utf8"))
 			.jobs as { id: string }[]
 		expect(jobs.map(j => j.id)).toEqual([job.id])
 		expect(existsSync(join(h.dir, "discoveries.json"))).toBe(true)
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
 	})
 
 	it("marks a persisted job that no longer plans as failed (finding 9)", async () => {
@@ -1130,4 +1189,220 @@ describe("ScannerService", () => {
 		).toBe(true)
 		await h.service.stop()
 	})
+})
+
+describe("R14 immutable scanner component phase", () => {
+	it("owns actual partial arbiter registrations before the constructor assignment (C6)", async () => {
+		const h = serviceHarness()
+		const deps = (h.service as unknown as { deps: ScannerServiceDeps }).deps
+		await h.service.stop()
+		const owner = new ScannerLifecycleOwner()
+		const unrelated = vi.fn()
+		h.sources.on("disconnected", unrelated)
+		const original = new Error("removed registration failed")
+		const failRegistration = (event: string | symbol): void => {
+			if (event === "removed") throw original
+		}
+		h.sources.on("newListener", failRegistration)
+		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(
+			original,
+		)
+		owner.completeConstruction({
+			ok: false,
+			state: "failed",
+			detail: "Original construction failed",
+		})
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+		expect(h.tuner.listeners("command-sent")).toEqual([])
+		expect(h.tuner.listeners("control-mode-changed")).toEqual([])
+		expect(h.sources.listeners("disconnected")).toEqual([unrelated])
+		expect(h.sources.listeners("removed")).toEqual([])
+		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({
+			message: "Original construction failed",
+		})
+		h.sources.off("newListener", failRegistration)
+		h.sources.off("disconnected", unrelated)
+	})
+
+	it("partial removal failure cannot prevent sibling removal or rewrite the first failure (C6)", async () => {
+		const h = serviceHarness()
+		const deps = (h.service as unknown as { deps: ScannerServiceDeps }).deps
+		await h.service.stop()
+		const owner = new ScannerLifecycleOwner()
+		const original = new Error("Original removed registration error")
+		const failRegistration = (event: string | symbol): void => {
+			if (event === "removed") throw original
+		}
+		h.sources.on("newListener", failRegistration)
+		const actualOff = h.tuner.off.bind(h.tuner)
+		const removal = vi
+			.spyOn(h.tuner, "off")
+			.mockImplementation((event, listener) => {
+				if (event === "command-sent") throw new Error("owned removal failed")
+				return actualOff(event, listener)
+			})
+		expect(() => new ScannerService({ ...deps, construction: owner })).toThrow(
+			original,
+		)
+		owner.completeConstruction({
+			ok: false,
+			state: "failed",
+			detail: "Immutable original construction failure",
+		})
+		await expect(owner.beginStop().producerSettled).rejects.toMatchObject({
+			message: "Immutable original construction failure",
+		})
+		expect(h.tuner.listenerCount("command-sent")).toBe(1)
+		expect(h.tuner.listeners("control-mode-changed")).toEqual([])
+		expect(h.sources.listeners("disconnected")).toEqual([])
+		await expect(owner.finalizeStopNative(undefined)).rejects.toMatchObject({
+			message: "Immutable original construction failure",
+		})
+		removal.mockRestore()
+		h.sources.off("newListener", failRegistration)
+		// Explicit fixture cleanup; the owner did not claim this unresolved listener settled.
+		for (const listener of h.tuner.listeners("command-sent"))
+			h.tuner.off("command-sent", listener)
+	})
+	it("an early own failure cannot complete40 while an independent component remains held", async () => {
+		const h = serviceHarness({
+			patch: settings => {
+				settings.passive.enabled = false
+			},
+		})
+		const owner = (
+			h.service as unknown as {
+				consumerLifecycle: ScannerLifecycleOwner
+			}
+		).consumerLifecycle
+		let release!: () => void
+		const held = new Promise<void>(resolve => {
+			release = resolve
+		})
+		expect(
+			owner.ownCleanup("classifier", () =>
+				Promise.resolve({
+					ok: false,
+					state: "failed",
+					detail: "fixture own failure",
+				}),
+			),
+		).toBe(true)
+		expect(
+			owner.ownCleanup("admission", async () => {
+				await held
+				return { ok: true }
+			}),
+		).toBe(true)
+		const first = h.service.beginStop()
+		expect(h.service.beginStop()).toBe(first)
+		let settledPhase = false
+		void first.producerSettled.then(
+			() => {
+				settledPhase = true
+			},
+			() => {
+				settledPhase = true
+			},
+		)
+		await Promise.resolve()
+		await Promise.resolve()
+		expect(settledPhase).toBe(false)
+		release()
+		await expect(first.producerSettled).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+		await expect(h.service.finalizeStopNative()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+		await expect(h.service.stop()).rejects.toMatchObject({
+			code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+		})
+	})
+})
+
+describe("NC4 EACH nested component stop initiation", () => {
+	it.each([false, true])(
+		"starts unrelated stops while original probe cleanup is held (failure=%s)",
+		async failIndependent => {
+			const h = serviceHarness({
+				patch: s => {
+					s.passive.enabled = false
+				},
+			})
+			await h.service.start()
+			await h.service.createJob({ sourceId: "rtl", mode: "in-window" })
+			const internals = h.service as unknown as {
+				probes: ProbePool
+				ambient: { stop(): void }
+				recorder: { stop(): Promise<void> }
+				deps: ScannerServiceDeps
+			}
+			const ambientStop = vi.spyOn(internals.ambient, "stop")
+			const captureStop = vi.spyOn(internals.recorder, "stop")
+			const cpuStop = vi.fn(() => {
+				if (failIndependent) throw new TypeError("CPU stop failure")
+			})
+			internals.deps.cpuMeter = {
+				start: vi.fn(),
+				stop: cpuStop,
+				normalisedPercent: null,
+			}
+			const epoch = h.service.spectrum.engine("rtl")!.currentEpoch()
+			const result = internals.probes.request(
+				probeRequest({
+					epoch: epoch.epoch,
+					targetHz: CENTRE + 25_000,
+					holdMs: 60_000,
+				}),
+			)
+			expect(result).toHaveProperty("started")
+			if (!("started" in result))
+				throw new TypeError("fixture probe not admitted")
+			await vi.waitFor(() =>
+				expect(h.decoders.created.has(result.started)).toBe(true),
+			)
+			let release!: () => void
+			h.decoders.removeGate = new Promise<void>(resolve => {
+				release = resolve
+			})
+			const remove = vi.spyOn(h.decoders, "removeEphemeralDecoder")
+			const handle = h.service.beginStop()
+			let complete = false
+			const outcome = handle.producerSettled.then(
+				() => {
+					complete = true
+					return undefined
+				},
+				error => {
+					complete = true
+					return error as unknown
+				},
+			)
+			await vi.waitFor(() => expect(remove).toHaveBeenCalled())
+			await vi.waitFor(() => expect(cpuStop).toHaveBeenCalledOnce())
+			expect(ambientStop).toHaveBeenCalledOnce()
+			expect(captureStop).toHaveBeenCalledOnce()
+			expect(complete).toBe(false)
+			release()
+			const settledOutcome = await outcome
+			expect(h.decoders.created.size).toBe(0)
+			expect(h.service.beginStop()).toBe(handle)
+			if (failIndependent) {
+				expect(settledOutcome).toMatchObject({
+					code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+				})
+				const final = h.service.finalizeStopNative()
+				await expect(final).rejects.toMatchObject({
+					code: "SCANNER_COMPONENT_CLEANUP_FAILED",
+				})
+				expect(h.service.finalizeStopNative()).toBe(final)
+			} else {
+				expect(settledOutcome).toBeUndefined()
+				await h.service.finalizeStopNative()
+			}
+		},
+	)
 })

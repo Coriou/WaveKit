@@ -35,7 +35,7 @@ export const SCENARIOS = [
 const LONG = SCENARIOS.slice(3)
 export const PHASES = Object.freeze(["baseline", "storage"])
 export const LONG_PREREQUISITES = Object.freeze([
-	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only)",
+	"Accepted writer batch/ack protocol and baseline ack path (current worker accepts micro/runtime only through CLI; tiny is fixture-only)",
 	"Enforced conservative DB/WAL transaction growth bounds for every mutation, including setup and receipts",
 	"Accepted read-only query worker, receipt/fault contracts and exact extension qualification",
 	"Owned 4MiB capture reservation and separately accepted capped pipe consumer with post-exit verification",
@@ -75,6 +75,7 @@ export function parseArgs(args) {
 				"--reserve-gib",
 				"--deadline-ms",
 				"--resource-window",
+				"--capture-reservation",
 			].includes(key) ||
 			seen.has(key) ||
 			!value ||
@@ -85,7 +86,15 @@ export function parseArgs(args) {
 		if (key === "--scenario") config.scenario = value
 		else if (key === "--phase") config.phase = value
 		else if (key === "--output") config.output = value
-		else if (key === "--resource-window") {
+		else if (key === "--capture-reservation") {
+			if (
+				!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(:[0-9]{1,20}){4}$/.test(
+					value,
+				)
+			)
+				throw new Error("Invalid capture reservation")
+			config.captureReservation = value
+		} else if (key === "--resource-window") {
 			if (!/^[\x20-\x7e]{8,200}$/.test(value) || !value.trim())
 				throw new Error("Invalid operator attestation")
 			config.resourceWindow = value
@@ -122,6 +131,72 @@ export function parseArgs(args) {
 			"Long scenarios require --resource-window operator attestation",
 		)
 	return config
+}
+
+// Capture alone creates these directories. This is an identity handshake, never
+// caller-supplied write proof or permission to execute a long scenario.
+export function verifyCaptureReservation(config, root = ROOT) {
+	if (!config.captureReservation) return null
+	const [runId, captureInode, captureDevice, driverInode, driverDevice] =
+		config.captureReservation.split(":")
+	const base = join(resolve(root), "output", "qualification")
+	const path = join(base, `activity-capture-${runId}`)
+	const output = join(base, `activity-${runId}`)
+	if (resolve(root, config.output ?? "") !== output)
+		throw new Error("Capture output binding mismatch")
+	const capture = verifyOutputDirectory(path, root)
+	const driver = verifyOutputDirectory(output, root)
+	if (
+		String(capture.ino) !== captureInode ||
+		String(capture.dev) !== captureDevice ||
+		String(driver.ino) !== driverInode ||
+		String(driver.dev) !== driverDevice
+	)
+		throw new Error("Capture directory identity mismatch")
+	const empty = fs.opendirSync(output)
+	try {
+		if (empty.readSync()) throw new Error("Capture driver output not empty")
+	} finally {
+		empty.closeSync()
+	}
+	const entries = fs.opendirSync(path)
+	try {
+		const names = new Set()
+		let entry
+		while ((entry = entries.readSync())) {
+			if (
+				names.size === 3 ||
+				!["stdout.bin", "stderr.bin", "manifest.json"].includes(entry.name)
+			)
+				throw new Error("Unexpected capture reservation entry")
+			names.add(entry.name)
+		}
+		if (names.size !== 3) throw new Error("Missing capture reservation entry")
+	} finally {
+		entries.closeSync()
+	}
+	for (const name of ["stdout.bin", "stderr.bin", "manifest.json"]) {
+		const info = fs.lstatSync(join(path, name))
+		if (
+			!info.isFile() ||
+			info.isSymbolicLink() ||
+			info.nlink !== 1 ||
+			(info.mode & 0o777) !== 0o600 ||
+			info.size > 1024 ** 2 * (name === "stderr.bin" ? 2 : 1)
+		)
+			throw new Error("Unsafe capture reservation file")
+	}
+	return Object.freeze({
+		runId,
+		path,
+		output,
+		bytes: 4 * 1024 ** 2,
+		accounting: "external reservation; excluded from driver-local inventory",
+		captureInode: capture.ino,
+		captureDevice: capture.dev,
+		driverInode: driver.ino,
+		driverDevice: driver.dev,
+	})
 }
 
 export function supportedRuntime(version) {
@@ -295,7 +370,7 @@ export async function supervise(factory, deadlineMs, signal) {
 			worker.once("exit", code => {
 				if (code !== 0 || !result)
 					reject(new Error(`Worker interrupted: exit ${code}`))
-				else if (result.status !== "ok")
+				else if (!["ok", "unsupported"].includes(result.status))
 					reject(
 						Object.assign(new Error(result.error || "Worker failure"), {
 							workerResult: result,
@@ -392,7 +467,7 @@ export function inventoryArtifacts(path, long = false) {
 }
 
 // Live admission uses metadata only. Content hashing is a separate joined-worker
-// operation. The legacy micro worker still calls inspectArtifacts unchanged.
+// operation; workers never hash live database contents.
 export function inspectArtifacts(path, checkDeadline = () => {}) {
 	const inventory = inventoryArtifacts(path)
 	return {
@@ -437,12 +512,15 @@ export async function run(
 				deadlineMs: "--deadline-ms",
 				output: "--output",
 				resourceWindow: "--resource-window",
+				captureReservation: "--capture-reservation",
 			}[key]
 			if (!flag) throw new Error("Unknown configuration")
 			return [flag, String(key === "reserveBytes" ? value / GiB : value)]
 		}),
 	)
+	const externalCapture = verifyCaptureReservation(config, root)
 	const report = {
+		...(externalCapture ? { externalCapture } : {}),
 		harnessVersion: 2,
 		provisionalSQLite: true,
 		qualificationClaim: false,
@@ -473,7 +551,7 @@ export async function run(
 			...report,
 			status: "not-run",
 			reason:
-				"Deferred pending exact harness review and Main allocation; attestation is not authorization",
+				"Unsupported long mutation growth proof before persistent open/setup; exact review and execution allocation remain required",
 			resourceWindow: config.resourceWindow,
 			phase: config.phase,
 			remainingPrerequisites: LONG_PREREQUISITES,
@@ -499,7 +577,18 @@ export async function run(
 	)
 	report.workloadVersion = WORKLOAD_VERSION
 	report.commandArguments = config
-	const output = prepareOutput(config.output, config.reserveBytes, root, statfs)
+	const output = externalCapture
+		? {
+				path: externalCapture.output,
+				freeBytes: diskGuard(
+					statfs(externalCapture.output, { bigint: true }),
+					config.reserveBytes + externalCapture.bytes,
+				),
+				filesystemType: String(
+					statfs(externalCapture.output, { bigint: true }).type ?? "unknown",
+				),
+			}
+		: prepareOutput(config.output, config.reserveBytes, root, statfs)
 	const identity = verifyOutputDirectory(output.path, root)
 	const verify = () => {
 		const current = verifyOutputDirectory(output.path, root)
@@ -518,7 +607,7 @@ export async function run(
 							root: resolve(root),
 							identity: { inode: identity.ino, device: identity.dev },
 							limits: LIMITS,
-							reserveBytes: config.reserveBytes,
+							reserveBytes: config.reserveBytes + (externalCapture?.bytes ?? 0),
 						},
 						resourceLimits: {
 							maxOldGenerationSizeMb: 96,
@@ -531,7 +620,7 @@ export async function run(
 		)
 		outcome = {
 			...report,
-			status: "micro-only",
+			status: result.status === "unsupported" ? "unsupported" : "micro-only",
 			result,
 			counts: result.counts,
 			preflightFreeBytes: output.freeBytes,
@@ -1231,6 +1320,49 @@ export const QUERY_TERMINALS = Object.freeze([
 ])
 // Driver-only query partition. No SQL, actual query worker or result oracle is
 // implemented here. Retained state is at most one slot per client (eight total).
+// One bounded immutable request set per physical reader owner. Reply-supplied
+// context never supplies validation expectations.
+const readerExpectations = new WeakMap()
+function readerRequests(requests) {
+	if (!Array.isArray(requests) || !requests.length || requests.length > 16)
+		throw new Error("Invalid reader requests")
+	return Object.freeze(
+		requests.map(request => {
+			if (
+				!readerShape(
+					request,
+					"after,contract,generation,high,lower,queryClass",
+				) ||
+				![
+					request.after,
+					request.generation,
+					request.high,
+					request.lower,
+					request.queryClass,
+				].every(Number.isSafeInteger) ||
+				request.lower < 0 ||
+				request.after < request.lower ||
+				request.high < request.after ||
+				request.high > 64 ||
+				request.generation < 1 ||
+				request.queryClass < 0 ||
+				request.queryClass > 7 ||
+				typeof request.contract !== "string" ||
+				request.contract.length > 64
+			)
+				throw new Error("Invalid reader request cursor")
+			return Object.freeze({ ...request })
+		}),
+	)
+}
+function readerShape(value, fields) {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		Object.keys(value).sort().join() === fields
+	)
+}
 export function queryAccounting(seconds = 900) {
 	if (!Number.isInteger(seconds) || seconds < 1 || seconds > 900)
 		throw new Error("Invalid query duration")
@@ -1266,7 +1398,7 @@ export function queryAccounting(seconds = 900) {
 			if (nowUs - slot.timeUs >= 250000)
 				terminal(id, slot.dispatched ? "active-timeout" : "queue-expired")
 	}
-	return {
+	const driver = {
 		turn(nowUs) {
 			if (stopped) throw new Error("Invalid query clock/state")
 			monotonic(nowUs)
@@ -1296,15 +1428,23 @@ export function queryAccounting(seconds = 900) {
 			}
 			return processed
 		},
-		dispatch(nowUs) {
+		dispatch(nowUs, requests) {
 			monotonic(nowUs)
 			expire(nowUs)
 			if (stopped || readerOwner !== null || readerJoinFailed) return null
 			for (const [id, slot] of pending)
 				if (!slot.dispatched) {
+					const expected =
+						requests === undefined ? null : readerRequests(requests)
 					slot.dispatched = true
 					active = id
 					readerOwner = { id, owner: ++ownerSequence }
+					if (expected)
+						readerExpectations.set(driver, {
+							...readerOwner,
+							requests: expected,
+						})
+					else readerExpectations.delete(driver)
 					return id
 				}
 			return null
@@ -1328,6 +1468,7 @@ export function queryAccounting(seconds = 900) {
 				throw new Error("Retained reply quota exceeded")
 			terminal(id, reason)
 			readerOwner = null // A valid terminal reply confirms query settlement.
+			readerExpectations.delete(driver)
 			if (replyBytes) {
 				retainedReplies.set(id % 8, replyBytes)
 				retainedReplyBytes += replyBytes
@@ -1345,6 +1486,7 @@ export function queryAccounting(seconds = 900) {
 			}
 			if (readerJoinFailed) return false
 			readerOwner = null
+			readerExpectations.delete(driver)
 			return true
 		},
 		releaseReply(client) {
@@ -1395,4 +1537,139 @@ export function queryAccounting(seconds = 900) {
 			}
 		},
 	}
+	return driver
+}
+
+// Narrow fixture wire glue. Callbacks observe the parent's clock at reception;
+// worker clocks cannot be compared with admission clocks. State changes are sync.
+export function validateBatchEnvelope(batch) {
+	if (
+		!batch ||
+		Object.keys(batch).sort().join() !== "bytes,id,rows" ||
+		!Number.isSafeInteger(batch.id) ||
+		batch.id < 1 ||
+		!Array.isArray(batch.rows) ||
+		batch.rows.length < 1 ||
+		batch.rows.length > 64 ||
+		batch.bytes !== Buffer.byteLength(JSON.stringify(batch)) ||
+		batch.bytes > 262144
+	)
+		throw new Error("Invalid bounded batch envelope")
+	return batch
+}
+export function batchAcknowledgement(id, outcome, rows) {
+	if (
+		!Number.isSafeInteger(id) ||
+		id < 1 ||
+		!["committed", "failed", "uncertain"].includes(outcome) ||
+		!Number.isInteger(rows) ||
+		rows < 1 ||
+		rows > 64
+	)
+		throw new Error("Invalid batch acknowledgement")
+	return Object.freeze({ id, outcome, rows })
+}
+// Baseline performs identical envelope/ack ownership, with database I/O omitted.
+export function baselineBatchAcknowledgement(batch) {
+	validateBatchEnvelope(batch)
+	return batchAcknowledgement(batch.id, "committed", batch.rows.length)
+}
+export function receiveBatchAcknowledgement(driver, batch, ack, nowUs) {
+	validateBatchEnvelope(batch)
+	if (!Number.isSafeInteger(nowUs) || nowUs < 0)
+		throw new Error("Invalid receipt clock")
+	if (
+		!ack ||
+		Object.keys(ack).sort().join() !== "id,outcome,rows" ||
+		ack.id !== batch.id ||
+		ack.rows !== batch.rows.length ||
+		Buffer.byteLength(JSON.stringify(ack)) > 1024
+	)
+		throw new Error("Invalid batch acknowledgement ownership")
+	batchAcknowledgement(ack.id, ack.outcome, ack.rows)
+	return Object.freeze({
+		accepted: driver.settle(ack.id, ack.outcome, nowUs),
+		receiptUs: nowUs,
+	})
+}
+export function receiveReaderResult(driver, result, nowUs) {
+	const owner = driver.snapshot().readerOwner
+	if (!owner || result?.id !== owner.id || result.owner !== owner.owner)
+		return false
+	// With a physical owner still held, dispatch only observes time/expiration;
+	// it cannot dispatch or release a reader. Invalid overdue replies also time out.
+	driver.dispatch(nowUs)
+	const expected = readerExpectations.get(driver)
+	if (!expected || expected.id !== owner.id || expected.owner !== owner.owner)
+		throw new Error("Reader requests not bound at dispatch")
+	if (
+		!readerShape(
+			result,
+			result.reason === "successful"
+				? "id,owner,page,reason"
+				: "id,owner,reason",
+		) ||
+		!["successful", "query-failed"].includes(result.reason)
+	)
+		throw new Error("Invalid reader result envelope")
+	const bytes = Buffer.byteLength(JSON.stringify(result))
+	if (bytes > 1024 * 1024) throw new Error("Reader page quota exceeded")
+	if (result.reason === "successful") {
+		if (
+			!Array.isArray(result.page) ||
+			result.page.length !== expected.requests.length ||
+			result.page.length > 16
+		)
+			throw new Error("Invalid reader page array")
+		for (let index = 0; index < result.page.length; index++) {
+			const page = result.page[index]
+			const request = expected.requests[index]
+			const filterReset =
+				request.contract !== `tiny-v1:ascending:${request.queryClass}`
+			if (readerShape(page, "reset")) {
+				if (
+					filterReset
+						? page.reset !== "filter-contract"
+						: !["generation", "retention"].includes(page.reset)
+				)
+					throw new Error("Invalid reader reset")
+				continue
+			}
+			const end = Math.min(request.high, request.after + 4)
+			if (
+				filterReset ||
+				!readerShape(
+					page,
+					"done,generation,high,lower,scannedThrough,sequences",
+				) ||
+				![page.generation, page.high, page.lower, page.scannedThrough].every(
+					Number.isSafeInteger,
+				) ||
+				page.generation !== request.generation ||
+				page.high !== request.high ||
+				page.lower !== request.lower ||
+				page.scannedThrough !== end ||
+				page.done !== (end === request.high) ||
+				!Array.isArray(page.sequences) ||
+				page.sequences.length > 200
+			)
+				throw new Error("Invalid reader page cursor")
+			let previous = request.after
+			for (const sequence of page.sequences) {
+				if (
+					!Number.isSafeInteger(sequence) ||
+					sequence <= previous ||
+					sequence > end
+				)
+					throw new Error("Invalid reader page sequences")
+				previous = sequence
+			}
+		}
+	}
+	return driver.settle(
+		result.id,
+		result.reason,
+		nowUs,
+		result.reason === "successful" ? bytes : 0,
+	)
 }

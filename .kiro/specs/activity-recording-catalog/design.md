@@ -856,9 +856,9 @@ A pass permits Main to allocate implementation; it does not itself enable anythi
 ## Long-scenario extension plan (implementation and execution gated)
 
 The accepted microfixture remains the executable baseline. This extension plan
-has passed independent design review. Only the first sequential driver/admission/
-report-containment item and bounded scaled tests are allocated; worker/query/
-receipt/fault implementation and real execution remain separately gated.
+has passed independent design review. The first driver/admission/report-containment item is accepted. The second
+worker/query/receipt/fault item is allocated for bounded fixtures; independent
+exact review and real execution remain separately gated.
 Do not change the current `not-run` responses until the implementation phase is
 allocated and reviewed. Keep all changes within the seven paths listed above;
 no production modules, dependency changes, scanner imports or generalized store.
@@ -916,10 +916,96 @@ receipt clock; baseline acknowledgements must have equivalent queue ownership.
 Reader dispatch/cancel/join and bounded result bytes must agree with driver query
 accounting before any query worker is connected. Every mutation needs an enforced
 DB/WAL growth bound; an `enforced` flag in a virtual fixture is not evidence of an
-actual bound. The existing micro worker accepts only micro/runtime and is unchanged.
+actual bound. The second item implements this narrow interface for closed tiny fixtures only.
 A separately accepted capped capture consumer and post-exit verification remain
-required for real runs. These are prerequisites, not authorization to implement
-the worker/query/receipt/fault item in this delivery.
+required for real runs; the long CLI stays `not-run`.
+
+### Second worker item: bounded fixture boundary
+
+The candidate adds closed writer/reader actions, transactional seed receipts,
+20 virtual one-minute epochs with sixteen-minute receipt expiry, prune/retry and
+fixed termination barriers. Queries compare indexed/FTS membership with a separate
+in-memory oracle across filtered empty pages, fixed high barriers, pruning,
+reopening and a simulated generation reset. At most25 rows,16 page requests and
+four examined sequence positions per page are used. A reader opens only after the
+writer exits. This does not exercise pinned readers or concurrent WAL pressure.
+The79 bounded tests retain all65 prior regressions. The second item passed independent exact review; this does not qualify long workloads.
+
+Persistent fixture writes require Node25.2.1 and the exact SQLite3.50.4 source ID
+recorded in `worker.mjs`; a memory-only probe rejects other combinations before
+persistent DB creation. Node20 remains disabled before SQLite import/worker/state.
+The required deployment floor Node22.13+, Linux AMD64/ARM64, and other exact runtime
+patches remain unverified. Source matching is not platform acceptance.
+
+Before opening, configuring or mutating the DB, admission reserves524,288 DB bytes,
+597,048 WAL bytes and bootstrap journal/SHM space:1,223,744 bytes in total. Actual
+PRAGMAs enforce4096-byte pages,128-page maximum, spilling disabled and FULL sync;
+all schema/index/FTS/receipt/prune transactions use the same pre-BEGIN check.
+Reopen validates the joined DB/WAL page domain before SQLite can recover it.
+The bound follows the unique dirty-page commit path in SQLite's
+[pager](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/pager.c) and the
+32-byte header,24-byte frame header and sector padding in its
+[WAL implementation](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/wal.c).
+No custom VFS, extension, backup, VACUUM or arbitrary SQL is admitted. The bound
+covers file lengths; filesystem allocation overhead and synchronous OS stalls are
+not bounded by this proof. Free-space reserve and process containment remain necessary.
+Post-commit inventory is evidence, never the enforcement mechanism.
+
+This small128-page proof cannot support the planned2 GiB database/64 MiB WAL
+scenario. Long scenarios remain denied before writes. SQLITE_BUSY, pinned-reader
+checkpoint pressure, actual backup restoration, power loss, sustained throughput,
+per-index byte attribution and runtime matrix qualification remain unqualified.
+ENOSPC is injected before commit without filling disk; generation reset changes
+fixture metadata rather than restoring backup bytes. Every receipt/fault test
+joins the worker (with an outer process deadline) before reading or removing files.
+
+External capture still needs a separately allocated capped consumer: one exclusive
+ignored capture directory, a4 MiB aggregate reservation, stdout/stderr/manifest
+caps of1/2/1 MiB, pipe backpressure and capped draining, process-exit confirmation,
+then the separate60-second closure/size/hash/accounting reconciliation. No new
+consumer path or real execution window is authorized by this item.
+
+### Capped evidence consumer: implemented candidate
+
+`scripts/qualification/activity-storage/capture.mjs` and its separate
+`tests/unit/qualification/activity-storage-capture.test.ts` now provide the bounded
+consumer candidate. Independent exact code review remains pending. Its77 mock/virtual
+tests include100-case properties for byte conservation and single-assignment terminal
+outcomes; repository typecheck/lint and owned formatting passed. Corrected syntax,
+mock timing/binding and test typing failures preceded those passes. No real child,
+SQLite, runtime matrix or workload probe was run for this consumer; the earlier79
+qualification tests were preserved and not rerun during this mock-only batch.
+
+The consumer creates exclusive identity-bound capture/driver directories, reserves
+4 MiB once, and launches only the fixed sibling driver under the same executable with
+a closed environment and supervised POSIX group. Output caps are stdout1 MiB,
+stderr2 MiB and manifest1 MiB; reads/writes use bounded chunks and account partial
+writes. A signal request is not a join: root exit, pipe closure and write settlement
+are required. Unknown settlement preserves residue and returns incomplete evidence.
+The consumer does not recursively remove driver artifacts or claim that a pending
+manifest is a completed run. Its emitted summary separately confirms final manifest
+persistence and file closure; a missing/truncated summary is incomplete evidence.
+
+Before one JSON parse, a strict UTF-8 lexical pass limits depth16, values8192,
+properties4096 (256/object), array elements2048, string4096 code units, aggregate
+keys131072 and string values262144 code units, and number lexemes64 bytes. It rejects
+duplicate escaped keys and trailing documents. Closed report validation follows;
+raw byte caps alone do not bound parsed allocations. The8 MiB working-set figure is
+an estimate, never a native memory guarantee. Capture RSS96 MiB is an observed stop
+objective separate from the driver192 MiB objective. External driver/combined CPU
+and RSS remain unknown without a qualified platform sampler.
+
+Long scenarios still refuse before persistent SQLite open/setup. The whole2 GiB
+page-domain no-spill bound requires2,160,136,248 WAL bytes, exceeding64 MiB; a small
+input batch does not establish a smaller FTS/index mutation bound. The inspected
+[Node25.2.1 SQLite build](https://github.com/nodejs/node/blob/v25.2.1/deps/sqlite/sqlite.gyp)
+disables default memory statistics, so a hard-heap-limit readback cannot establish
+the needed dirty-page ceiling in the
+[allocator path](https://github.com/sqlite/sqlite/blob/version-3.50.4/src/malloc.c).
+This is absence of an established proof, not proof that no solution exists. Capture
+cannot enable long writes or promote the tiny128-page proof. Exact implementation
+review, local assembly and an explicit bounded execution window precede actual
+capture/runtime evidence; long-growth proof and production integration are separate.
 
 ### Closed execution phases and containment
 

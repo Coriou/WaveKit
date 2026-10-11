@@ -4,6 +4,12 @@
  * the `Assert` aliases fail the typecheck if a schema and its interface drift apart.
  */
 import { z } from "zod"
+import {
+	PreparedRecordingOperationsSchema,
+	UUIDSchema,
+	MAX_RECOVERY_OPERATIONS,
+} from "./recording-operation.js"
+import type { PreparedRecordingMetadata } from "./recording-operation.js"
 import type {
 	DecodeEvidence,
 	Discovery,
@@ -238,14 +244,37 @@ export interface StoreMutation {
 	/** Observation ids unlinked by this mutation (a late truncated/iqImage/spur flag, P3). */
 	removedObservations?: string[]
 	correction?: { sourceId: string; hz: number }
+	preparedRecordingOperations?: {
+		add: PreparedRecordingMetadata[]
+		remove: string[]
+	}
 }
-export const StoreMutationSchema = z.object({
-	discoveries: z.array(DiscoverySchema),
-	observations: z.array(ObservationSchema),
-	deleted: z.array(z.string()),
-	removedObservations: z.array(z.string()).optional(),
-	correction: z.object({ sourceId: z.string(), hz: z.number() }).optional(),
-})
+export const StoreMutationSchema = z
+	.object({
+		discoveries: z.array(DiscoverySchema),
+		observations: z.array(ObservationSchema),
+		deleted: z.array(z.string()),
+		removedObservations: z.array(z.string()).optional(),
+		correction: z.object({ sourceId: z.string(), hz: z.number() }).optional(),
+		preparedRecordingOperations: z
+			.object({
+				add: PreparedRecordingOperationsSchema,
+				remove: z.array(UUIDSchema).max(MAX_RECOVERY_OPERATIONS),
+			})
+			.strict()
+			.superRefine((patch, ctx) => {
+				if (
+					new Set(patch.remove).size !== patch.remove.length ||
+					patch.add.some(record => patch.remove.includes(record.operationId))
+				)
+					ctx.addIssue({
+						code: z.ZodIssueCode.custom,
+						message: "Duplicate/conflicting recording operation patch",
+					})
+			})
+			.optional(),
+	})
+	.strict()
 export type StoreMutationCheck = Assert<
 	SchemaMatches<StoreMutation, typeof StoreMutationSchema>
 >

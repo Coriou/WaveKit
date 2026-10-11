@@ -43,6 +43,13 @@ import type {
 } from "../../spectrum/types.js"
 import { EngineStateSchema } from "../../spectrum/engine-state.js"
 import { DEFAULT_CAPTURE } from "../evidence/capture-spec.js"
+import {
+	PreparedRecordingOperationsSchema,
+	MAX_RECOVERY_OPERATIONS,
+	samePreparedRecording,
+} from "./recording-operation.js"
+import type { PreparedRecordingMetadata } from "./recording-operation.js"
+import type { StoreMutation } from "./schemas.js"
 import type { JournalEntry, StoreSnapshot } from "./discovery-store.js"
 import { OccupancyStateSchema } from "../../spectrum/occupancy.js"
 import type { OccupancyState } from "../../spectrum/occupancy.js"
@@ -110,6 +117,8 @@ export interface LoadedState {
 	settings: RuntimeSettingsOverrides
 	engines: Record<string, EngineState>
 	droppedLines: number
+	recordingOperations?: PreparedRecordingMetadata[]
+	recoveryHealth: "healthy" | "degraded"
 }
 
 // ── schemas ──────────────────────────────────────────────────────────────
@@ -312,16 +321,19 @@ export const RuntimeSettingsOverridesSchema = z
 	})
 	.strict()
 
-const SnapshotFileSchema = z.object({
-	version: z.literal(FILE_VERSION),
-	lastSeq: z.number().int().nonnegative(),
-	savedAt: z.string(),
-	discoveries: z.array(DiscoverySchema),
-	observations: z.array(ObservationSchema),
-	corrections: z
-		.array(z.object({ sourceId: z.string().min(1), hz: z.number() }))
-		.default([]),
-})
+const SnapshotFileSchema = z
+	.object({
+		version: z.literal(FILE_VERSION),
+		lastSeq: z.number().int().nonnegative(),
+		recordingOperations: PreparedRecordingOperationsSchema.optional(),
+		savedAt: z.string(),
+		discoveries: z.array(DiscoverySchema),
+		observations: z.array(ObservationSchema),
+		corrections: z
+			.array(z.object({ sourceId: z.string().min(1), hz: z.number() }))
+			.default([]),
+	})
+	.strict()
 const JobsFileSchema = z.object({
 	version: z.literal(FILE_VERSION),
 	jobs: z.array(PersistedJobSchema),
@@ -432,6 +444,12 @@ export class ScannerPersistence {
 	private nextSeq = 1
 	private durableLastSeq = 0
 	private loaded = false
+	private authorityHealth: "healthy" | "degraded" = "degraded"
+
+	/** S1 can load fallback state; Task42 must require complete restored authority. */
+	recoveryHealth(): "healthy" | "degraded" {
+		return this.authorityHealth
+	}
 
 	/** `appendFile` is injectable for the short-write test; default `fs/promises.appendFile`. */
 	constructor(opts: {
@@ -448,10 +466,26 @@ export class ScannerPersistence {
 	}
 
 	async load(): Promise<LoadedState> {
+		try {
+			return await this.loadState()
+		} catch (err) {
+			this.authorityHealth = "degraded"
+			this.loaded = false
+			throw err
+		}
+	}
+
+	private async loadState(): Promise<LoadedState> {
+		this.authorityHealth = "healthy"
+		this.loaded = false
 		this.fileMaxSeq.clear()
 		this.fileBytes.clear()
 		const snapshot = await this.readSnapshot()
 		const journal = await this.readJournal(snapshot.lastSeq)
+		this.validateRecordingReplay(
+			snapshot.recordingOperations ?? [],
+			journal.entries,
+		)
 		const { jobs, leases } = await this.readJobs()
 		const settings = await this.readSettings()
 		const engines = await this.readEngines()
@@ -479,6 +513,8 @@ export class ScannerPersistence {
 			settings,
 			engines,
 			droppedLines: journal.dropped,
+			recordingOperations: snapshot.recordingOperations ?? [],
+			recoveryHealth: this.authorityHealth,
 		}
 	}
 
@@ -529,6 +565,16 @@ export class ScannerPersistence {
 
 	writeSnapshot(s: StoreSnapshot): Promise<void> {
 		if (!this.loaded) return Promise.reject(notLoaded())
+		const prepared = PreparedRecordingOperationsSchema.safeParse(
+			s.recordingOperations ?? [],
+		)
+		if (!prepared.success)
+			return Promise.reject(
+				new WaveKitError(
+					"Invalid recording snapshot",
+					"SCANNER_JOURNAL_INVALID",
+				),
+			)
 		const lastSeq = this.nextSeq - 1
 		const text = JSON.stringify({
 			version: FILE_VERSION,
@@ -537,6 +583,7 @@ export class ScannerPersistence {
 			discoveries: s.discoveries,
 			observations: s.observations,
 			corrections: s.corrections,
+			recordingOperations: prepared.data,
 		})
 		return this.enqueue(async () => {
 			await atomicWrite(join(this.root, SNAPSHOT_FILE), text)
@@ -678,6 +725,7 @@ export class ScannerPersistence {
 		const parsed =
 			read.kind === "ok" ? SnapshotFileSchema.safeParse(read.value) : null
 		if (parsed === null || !parsed.success) {
+			this.authorityHealth = "degraded"
 			const aside = await this.moveAside(file)
 			this.log.warn(
 				{
@@ -694,6 +742,7 @@ export class ScannerPersistence {
 			discoveries: parsed.data.discoveries as Discovery[],
 			observations: parsed.data.observations as Observation[],
 			corrections: parsed.data.corrections,
+			recordingOperations: parsed.data.recordingOperations ?? [],
 			lastSeq: parsed.data.lastSeq,
 		}
 	}
@@ -706,8 +755,10 @@ export class ScannerPersistence {
 		try {
 			names = (await readdir(dir)).filter(n => JOURNAL_NAME.test(n)).sort()
 		} catch (err) {
-			if (errorCode(err) !== "ENOENT")
+			if (errorCode(err) !== "ENOENT") {
+				this.authorityHealth = "degraded"
 				this.log.warn({ err, dir }, "Scanner journal directory unreadable")
+			}
 			return { entries: [], maxSeq: 0, dropped: 0 }
 		}
 		const bySeq = new Map<number, JournalEntry>()
@@ -719,6 +770,7 @@ export class ScannerPersistence {
 			if (text.length > 0 && !text.endsWith("\n")) {
 				const keep = text.slice(0, text.lastIndexOf("\n") + 1)
 				dropped++
+				this.authorityHealth = "degraded"
 				this.log.warn(
 					{
 						file: path,
@@ -735,12 +787,21 @@ export class ScannerPersistence {
 				const parsed = parseJournalLine(line)
 				if (parsed === null) {
 					dropped++
+					this.authorityHealth = "degraded"
 					this.log.warn({ file: path }, "Skipping an invalid journal line")
 					continue
 				}
 				fileMax = Math.max(fileMax, parsed.seq)
-				if (parsed.seq > lastSeq && !bySeq.has(parsed.seq))
-					bySeq.set(parsed.seq, parsed)
+				if (parsed.seq > lastSeq) {
+					const previous = bySeq.get(parsed.seq)
+					if (
+						previous !== undefined &&
+						JSON.stringify(previous) !== JSON.stringify(parsed)
+					) {
+						this.authorityHealth = "degraded"
+						dropped++
+					} else if (previous === undefined) bySeq.set(parsed.seq, parsed)
+				}
 			}
 			this.fileMaxSeq.set(name, fileMax)
 			this.fileBytes.set(name, Buffer.byteLength(text))
@@ -750,6 +811,36 @@ export class ScannerPersistence {
 			entries: [...bySeq.values()].sort((a, b) => a.seq - b.seq),
 			maxSeq,
 			dropped,
+		}
+	}
+
+	/** Validate aggregate prepared authority across snapshot+journal without changing S1 fallback. */
+	private validateRecordingReplay(
+		snapshot: PreparedRecordingMetadata[],
+		entries: JournalEntry[],
+	): void {
+		const operations = new Map(
+			snapshot.map(record => [record.operationId, record]),
+		)
+		for (const entry of entries) {
+			const patch = (entry.payload as StoreMutation).preparedRecordingOperations
+			if (patch === undefined) continue
+			const next = new Map(operations)
+			for (const id of patch.remove) next.delete(id)
+			for (const record of patch.add) {
+				const old = next.get(record.operationId)
+				if (old !== undefined && !samePreparedRecording(old, record)) {
+					this.authorityHealth = "degraded"
+					return
+				}
+				next.set(record.operationId, record)
+			}
+			if (next.size > MAX_RECOVERY_OPERATIONS) {
+				this.authorityHealth = "degraded"
+				return
+			}
+			operations.clear()
+			for (const [id, record] of next) operations.set(id, record)
 		}
 	}
 

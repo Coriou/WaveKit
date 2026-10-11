@@ -35,6 +35,17 @@ import type {
 import type { Raster, TrackSnapshot } from "../../spectrum/types.js"
 import { parseStoreMutation } from "./schemas.js"
 import type { StoreMutation } from "./schemas.js"
+import {
+	PreparedRecordingMetadataSchema,
+	PreparedRecordingOperationsSchema,
+	UUIDSchema,
+	MAX_RECOVERY_OPERATIONS,
+	samePreparedRecording,
+} from "./recording-operation.js"
+import type {
+	PreparedRecordingMetadata,
+	RecordingBinding,
+} from "./recording-operation.js"
 
 export type StoreChange =
 	| "created"
@@ -82,6 +93,21 @@ export interface StoreSnapshot {
 	discoveries: Discovery[]
 	observations: Observation[]
 	corrections: { sourceId: string; hz: number }[]
+	recordingOperations?: PreparedRecordingMetadata[]
+}
+
+/** Construct after the last await. References are existing plain internal objects. */
+export interface RecordingCommitPlan {
+	readonly metadata: PreparedRecordingMetadata
+	readonly observation: Observation
+	readonly discovery: Discovery
+	readonly evidence: Discovery["evidence"]
+	readonly priorIds: string[]
+	readonly priorRecording: Observation["recording"]
+	readonly priorCount: number
+	readonly recordingIds: string[]
+	readonly recordingState: "linked" | "cut"
+	readonly recordingCount: number
 }
 
 type Ingested = { discoveryId: string | null; change: StoreChange }
@@ -300,6 +326,10 @@ export class DiscoveryStore extends EventEmitter {
 	 */
 	private readonly flaggedIds = new Set<string>()
 	private readonly corrections = new Map<string, number>()
+	private readonly recordingOperations = new Map<
+		string,
+		PreparedRecordingMetadata
+	>()
 	private appliedSeq = 0
 
 	constructor(opts: DiscoveryStoreOptions) {
@@ -525,6 +555,210 @@ export class DiscoveryStore extends EventEmitter {
 		return { merged: op.merged }
 	}
 
+	/** Only private metadata is changed; register exact append correlation before emitting. */
+	prepareRecording(
+		value: PreparedRecordingMetadata,
+		beforeEmit?: (entry: Omit<JournalEntry, "seq">) => void,
+	): Omit<JournalEntry, "seq"> {
+		const parsed = PreparedRecordingMetadataSchema.safeParse(value)
+		if (!parsed.success)
+			throw new WaveKitError(
+				"Invalid prepared recording metadata",
+				"SCANNER_RECORDING_INVALID",
+			)
+		const metadata = parsed.data
+		const o = this.observationIndex.get(metadata.observationId)
+		const d = this.discoveries.get(metadata.discoveryId)
+		if (
+			o === undefined ||
+			d === undefined ||
+			o.discoveryId !== d.id ||
+			metadata.binding.sourceId !== o.sourceId ||
+			metadata.binding.stream !== o.sampleRange.stream ||
+			metadata.binding.epoch !== o.sampleRange.epoch ||
+			metadata.binding.inputFormat !== "cf32" ||
+			metadata.binding.inputSampleRateHz !== 48000 ||
+			metadata.binding.engineInstanceId === null ||
+			metadata.binding.channelId === null ||
+			metadata.binding.channelGeneration === null
+		)
+			throw new WaveKitError(
+				"Invalid recording association or binding",
+				"SCANNER_RECORDING_INVALID",
+			)
+		const existing = this.recordingOperations.get(metadata.operationId)
+		if (
+			(existing !== undefined && !samePreparedRecording(existing, metadata)) ||
+			(existing === undefined &&
+				this.recordingOperations.size >= MAX_RECOVERY_OPERATIONS)
+		)
+			throw new WaveKitError(
+				"Recording operation conflict or overflow",
+				"SCANNER_RECORDING_INVALID",
+			)
+		Object.freeze(metadata.binding)
+		Object.freeze(metadata.expectedOutput)
+		Object.freeze(metadata)
+		this.recordingOperations.set(metadata.operationId, metadata)
+		return this.emitPrepared({ add: [metadata], remove: [] }, beforeEmit)
+	}
+
+	/** Emit even when memory lacks it: an earlier snapshot can still contain this operation. */
+	removePreparedRecording(
+		operationId: string,
+		beforeEmit?: (entry: Omit<JournalEntry, "seq">) => void,
+	): Omit<JournalEntry, "seq"> {
+		if (!UUIDSchema.safeParse(operationId).success)
+			throw new WaveKitError(
+				"Invalid recording operation ID",
+				"SCANNER_RECORDING_INVALID",
+			)
+		this.recordingOperations.delete(operationId)
+		return this.emitPrepared({ add: [], remove: [operationId] }, beforeEmit)
+	}
+
+	preparedRecordingOperations(): PreparedRecordingMetadata[] {
+		return [...this.recordingOperations.values()].map(clone)
+	}
+
+	/** Exact current association, without pagination or any identity repair. */
+	recordingAssociation(
+		discoveryId: string,
+		observationId: string,
+		binding?: RecordingBinding,
+	): { aliasIds: readonly string[] } | null {
+		const observation = this.observationIndex.get(observationId)
+		if (
+			observation === undefined ||
+			observation.discoveryId !== discoveryId ||
+			!this.discoveries.has(discoveryId)
+		)
+			return null
+		if (
+			binding !== undefined &&
+			(observation.sourceId !== binding.sourceId ||
+				observation.sampleRange.stream !== binding.stream ||
+				observation.sampleRange.epoch !== binding.epoch)
+		)
+			return null
+		return { aliasIds: [...observation.recordingIds] }
+	}
+
+	buildRecordingCommitPlan(operationId: string): RecordingCommitPlan | null {
+		const metadata = this.recordingOperations.get(operationId)
+		if (metadata === undefined) return null
+		const observation = this.observationIndex.get(metadata.observationId)
+		const discovery = this.discoveries.get(metadata.discoveryId)
+		if (
+			observation === undefined ||
+			discovery === undefined ||
+			observation.discoveryId !== discovery.id ||
+			observation.sourceId !== metadata.binding.sourceId ||
+			observation.sampleRange.stream !== metadata.binding.stream ||
+			observation.sampleRange.epoch !== metadata.binding.epoch
+		)
+			return null
+		const priorCount = discovery.evidence.recordings
+		const present = observation.recordingIds.includes(metadata.alias)
+		const recordingCount = priorCount + (present ? 0 : 1)
+		if (
+			!Number.isSafeInteger(priorCount) ||
+			priorCount < 0 ||
+			!Number.isSafeInteger(recordingCount)
+		)
+			return null
+		return {
+			metadata,
+			observation,
+			discovery,
+			evidence: discovery.evidence,
+			priorIds: observation.recordingIds,
+			priorRecording: observation.recording,
+			priorCount,
+			recordingIds: present
+				? observation.recordingIds
+				: [...observation.recordingIds, metadata.alias],
+			recordingState: metadata.desiredState,
+			recordingCount,
+		}
+	}
+
+	/** Pure final current-state check, after every injected callback and immediately before linkSync. */
+	recordingCommitPlanCurrent(plan: RecordingCommitPlan): boolean {
+		return (
+			this.recordingOperations.get(plan.metadata.operationId) ===
+				plan.metadata &&
+			this.observationIndex.get(plan.metadata.observationId) ===
+				plan.observation &&
+			this.discoveries.get(plan.metadata.discoveryId) === plan.discovery &&
+			plan.observation.discoveryId === plan.discovery.id &&
+			plan.observation.sourceId === plan.metadata.binding.sourceId &&
+			plan.observation.sampleRange.stream === plan.metadata.binding.stream &&
+			plan.observation.sampleRange.epoch === plan.metadata.binding.epoch &&
+			plan.observation.recordingIds === plan.priorIds &&
+			plan.observation.recording === plan.priorRecording &&
+			plan.discovery.evidence === plan.evidence &&
+			plan.evidence.recordings === plan.priorCount
+		)
+	}
+
+	/** Caller may instead perform these exact three assignments directly in its marker decision interval. */
+	applyRecordingCommitPlan(plan: RecordingCommitPlan): void {
+		plan.observation.recordingIds = plan.recordingIds
+		plan.observation.recording = plan.recordingState
+		plan.evidence.recordings = plan.recordingCount
+	}
+
+	/** Postdecision only: capture/emit projection before public notifications can reenter. */
+	publishRecordingCommit(plan: RecordingCommitPlan): void {
+		const at = iso(this.now())
+		if (
+			this.observationIndex.get(plan.observation.id) !== plan.observation ||
+			this.discoveries.get(plan.discovery.id) !== plan.discovery
+		)
+			return
+		const entry: Omit<JournalEntry, "seq"> = {
+			at,
+			op: "evidence",
+			payload: {
+				discoveries: [clone(plan.discovery)],
+				observations: [clone(plan.observation)],
+				deleted: [],
+			} satisfies StoreMutation,
+		}
+		let failure: unknown
+		try {
+			this.emit("mutation", entry)
+		} catch (err) {
+			failure = err
+		}
+		try {
+			this.emit("change", plan.discovery.id, "updated")
+		} catch (err) {
+			failure ??= err
+		}
+		if (failure !== undefined) throw failure
+	}
+
+	private emitPrepared(
+		patch: NonNullable<StoreMutation["preparedRecordingOperations"]>,
+		beforeEmit?: (entry: Omit<JournalEntry, "seq">) => void,
+	): Omit<JournalEntry, "seq"> {
+		const entry: Omit<JournalEntry, "seq"> = {
+			at: iso(this.now()),
+			op: "evidence",
+			payload: {
+				discoveries: [],
+				observations: [],
+				deleted: [],
+				preparedRecordingOperations: patch,
+			} satisfies StoreMutation,
+		}
+		beforeEmit?.(entry)
+		this.emit("mutation", entry)
+		return entry
+	}
+
 	attachRecordings(
 		observationId: string,
 		recordingIds: string[],
@@ -669,6 +903,9 @@ export class DiscoveryStore extends EventEmitter {
 			observations: [...this.observationIndex.values()]
 				.sort(compareObs)
 				.map(clone),
+			...(this.recordingOperations.size > 0
+				? { recordingOperations: this.preparedRecordingOperations() }
+				: {}),
 			corrections: [...this.corrections]
 				.sort(([a], [b]) => compareText(a, b))
 				.map(([sourceId, hz]) => ({ sourceId, hz })),
@@ -676,6 +913,23 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	restore(s: StoreSnapshot): void {
+		const recordings = PreparedRecordingOperationsSchema.safeParse(
+			s.recordingOperations ?? [],
+		)
+		if (!recordings.success)
+			throw new WaveKitError(
+				"Invalid prepared recording snapshot",
+				"SCANNER_JOURNAL_INVALID",
+			)
+		this.recordingOperations.clear()
+		for (const recording of recordings.data) {
+			Object.freeze(recording.binding)
+			Object.freeze(recording.expectedOutput)
+			this.recordingOperations.set(
+				recording.operationId,
+				Object.freeze(recording),
+			)
+		}
 		this.discoveries.clear()
 		this.observationIndex.clear()
 		this.byDiscovery.clear()
@@ -1490,6 +1744,31 @@ export class DiscoveryStore extends EventEmitter {
 	}
 
 	private applyMutation(m: StoreMutation): void {
+		const patch = m.preparedRecordingOperations
+		if (patch !== undefined) {
+			const next = new Map(this.recordingOperations)
+			for (const id of patch.remove) next.delete(id)
+			for (const recording of patch.add) {
+				const old = next.get(recording.operationId)
+				if (old !== undefined && !samePreparedRecording(old, recording))
+					throw new WaveKitError(
+						"Conflicting prepared recording journal",
+						"SCANNER_JOURNAL_INVALID",
+					)
+				next.set(recording.operationId, recording)
+			}
+			if (next.size > MAX_RECOVERY_OPERATIONS)
+				throw new WaveKitError(
+					"Prepared recording journal overflow",
+					"SCANNER_JOURNAL_INVALID",
+				)
+			this.recordingOperations.clear()
+			for (const [id, recording] of next) {
+				Object.freeze(recording.binding)
+				Object.freeze(recording.expectedOutput)
+				this.recordingOperations.set(id, Object.freeze(recording))
+			}
+		}
 		if (m.correction !== undefined)
 			this.corrections.set(m.correction.sourceId, m.correction.hz)
 		for (const d of m.discoveries) this.insertDiscovery(clone(d))
