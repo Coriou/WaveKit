@@ -174,6 +174,9 @@ export class EvidenceStore {
 	private caps: StorageCaps
 	/** Per-discovery tail of pending evidence writes (`serialise`); never rejects. */
 	private readonly writeChains = new Map<string, Promise<void>>()
+	/** Only in-flight removals are retained; the discovery store supplies lasting authority. */
+	private readonly removals = new Map<string, Promise<void>>()
+	private readonly isDiscoveryLive: (id: string) => boolean
 
 	constructor(opts: {
 		dir: string
@@ -181,12 +184,19 @@ export class EvidenceStore {
 		logger: Logger
 		now: () => number
 		statfs?: (p: string) => Promise<{ freeBytes: number }>
+		/** Required by production producers; standalone stores may own admission themselves. */
+		isDiscoveryLive?: (id: string) => boolean
 	}) {
 		this.root = resolve(opts.dir)
 		this.caps = { ...opts.caps }
 		this.log = createComponentLogger(opts.logger, "EvidenceStore")
 		this.now = opts.now
 		this.statfs = opts.statfs ?? defaultStatfs
+		this.isDiscoveryLive = opts.isDiscoveryLive ?? (() => true)
+	}
+
+	private admits(id: string): boolean {
+		return !this.removals.has(id) && this.isDiscoveryLive(id)
 	}
 
 	setCaps(caps: StorageCaps): void {
@@ -299,18 +309,25 @@ export class EvidenceStore {
 				await rm(f.path, { force: true })
 				continue
 			}
-			const target = join(this.root, "recordings", "dv", c.discoveryId)
-			await mkdir(target, { recursive: true })
-			try {
-				await moveFile(f.path, join(target, f.name))
-			} catch (err) {
-				// already handled through another listing of the same directory
-				if (errorCode(err) === "ENOENT") continue
-				throw err
+			if (!this.admits(c.discoveryId)) {
+				await rm(f.path, { force: true })
+				continue
 			}
-			linked.push({
-				observationId: c.observationId,
-				recordingId: `${c.discoveryId}~${f.name}`,
+			// Reserve before any await: DELETE drains this accepted move before acknowledging.
+			await this.serialise(c.discoveryId, async () => {
+				if (!this.admits(c.discoveryId)) return
+				const target = join(this.root, "recordings", "dv", c.discoveryId)
+				await mkdir(target, { recursive: true })
+				try {
+					await moveFile(f.path, join(target, f.name))
+				} catch (err) {
+					if (errorCode(err) === "ENOENT") return
+					throw err
+				}
+				linked.push({
+					observationId: c.observationId,
+					recordingId: `${c.discoveryId}~${f.name}`,
+				})
 			})
 		}
 	}
@@ -344,8 +361,10 @@ export class EvidenceStore {
 		psd: { startHz: number; binHz: number; bins: number[]; snrDb: number },
 	): Promise<boolean> {
 		assertDiscoveryId(discoveryId)
+		if (!this.admits(discoveryId)) return false
 		return this.serialise(discoveryId, async () => {
-			if ((await this.diskState()) === "disk-low") return false
+			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
+				return false
 			const file = join(this.root, "evidence", discoveryId, "psd.json")
 			try {
 				const existing = PsdFileSchema.safeParse(
@@ -377,8 +396,10 @@ export class EvidenceStore {
 		meta: { sampleRateHz: number; centreHz: number },
 	): Promise<string | null> {
 		assertDiscoveryId(discoveryId)
+		if (!this.admits(discoveryId)) return null
 		return this.serialise(discoveryId, async () => {
-			if ((await this.diskState()) === "disk-low") return null
+			if (!this.admits(discoveryId) || (await this.diskState()) === "disk-low")
+				return null
 			const savedAt = this.now()
 			const limit = Math.max(2, Math.floor(meta.sampleRateHz) * 2)
 			const body = bytes.length > limit ? bytes.subarray(0, limit) : bytes
@@ -410,7 +431,12 @@ export class EvidenceStore {
 		const m = RECORDING_ID.exec(recordingId)
 		const discoveryId = m?.[1]
 		const file = m?.[2]
-		if (discoveryId === undefined || file === undefined || file.includes(".."))
+		if (
+			discoveryId === undefined ||
+			file === undefined ||
+			file.includes("..") ||
+			!this.admits(discoveryId)
+		)
 			return null
 		for (const kind of RECORDING_KINDS) {
 			const path = join(this.root, "recordings", kind, discoveryId, file)
@@ -420,7 +446,11 @@ export class EvidenceStore {
 	}
 
 	evidencePath(discoveryId: string, name: string): string | null {
-		if (!DISCOVERY_ID.test(discoveryId) || !EVIDENCE_NAME.test(name))
+		if (
+			!DISCOVERY_ID.test(discoveryId) ||
+			!EVIDENCE_NAME.test(name) ||
+			!this.admits(discoveryId)
+		)
 			return null
 		const path = join(this.root, "evidence", discoveryId, name)
 		return existsSync(path) ? path : null
@@ -428,8 +458,10 @@ export class EvidenceStore {
 
 	async removeDiscovery(discoveryId: string): Promise<void> {
 		assertDiscoveryId(discoveryId)
-		// behind pending evidence writes, so none of them recreates the folder afterwards
-		await this.serialise(discoveryId, async () => {
+		const pending = this.removals.get(discoveryId)
+		if (pending) return pending
+		// Fence admission synchronously and drain accepted writes/moves before removal.
+		const removal = this.serialise(discoveryId, async () => {
 			await rm(join(this.root, "evidence", discoveryId), {
 				recursive: true,
 				force: true,
@@ -440,6 +472,13 @@ export class EvidenceStore {
 					force: true,
 				})
 		})
+		this.removals.set(discoveryId, removal)
+		try {
+			await removal
+		} finally {
+			if (this.removals.get(discoveryId) === removal)
+				this.removals.delete(discoveryId)
+		}
 	}
 
 	async retention(

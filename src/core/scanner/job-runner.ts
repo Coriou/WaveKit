@@ -85,6 +85,8 @@ export interface LiveObservation {
 	source?: string
 	/** H3 reason recorded before the observation had a discovery; applied when it gets one. */
 	undecodedReason?: UndecodedReason
+	/** Explicit deletion invalidates late evidence from this bounded observation lifetime. */
+	evidenceDeleted?: boolean
 }
 
 export interface JobDriver {

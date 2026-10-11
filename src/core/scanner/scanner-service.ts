@@ -7,7 +7,7 @@
  * "discovery", "status" and "identify"(ScannerIdentifyEventData, Task 35a).
  */
 import { EventEmitter } from "node:events"
-import { readdir, rm } from "node:fs/promises"
+import { readdir } from "node:fs/promises"
 import { existsSync } from "node:fs"
 import { join } from "node:path"
 import { ZodError } from "zod"
@@ -399,6 +399,7 @@ export class ScannerService extends EventEmitter {
 			caps: storageCaps(deps.settings),
 			logger: deps.logger,
 			now: this.now,
+			isDiscoveryLive: id => this.store.get(id) !== undefined,
 		})
 		this.captures = new CaptureStore({
 			dir: join(this.storageDir, "captures"),
@@ -1094,18 +1095,12 @@ export class ScannerService extends EventEmitter {
 			change: "deleted",
 			discovery,
 		} satisfies ScannerDiscoveryEventData)
-		await rm(join(this.storageDir, "evidence", id), {
-			recursive: true,
-			force: true,
-		})
-		await rm(join(this.storageDir, "recordings", "dv", id), {
-			recursive: true,
-			force: true,
-		})
-		await rm(join(this.storageDir, "recordings", "analog", id), {
-			recursive: true,
-			force: true,
-		})
+		for (const o of [...this.live.values(), ...this.recent])
+			if (o.discoveryId === id) {
+				o.discoveryId = null
+				o.evidenceDeleted = true
+			}
+		await this.evidence.removeDiscovery(id)
 		return true
 	}
 
@@ -1119,12 +1114,14 @@ export class ScannerService extends EventEmitter {
 	): Promise<string | null> {
 		// Before any path join: an id is never a path fragment (Task 36 review).
 		requireDiscoveryIdFormat(discoveryId)
+		if (!this.store.get(discoveryId)) return null
 		const dir = join(this.storageDir, "evidence", discoveryId)
 		if (kind === "psd") {
 			const path = join(dir, "psd.json")
 			return existsSync(path) ? path : null
 		}
 		const files = await readdir(dir).catch(() => [] as string[])
+		if (!this.store.get(discoveryId)) return null
 		const iq = files
 			.filter(f => f.startsWith("iq-") && f.endsWith(".cu8"))
 			.sort()
@@ -1737,6 +1734,7 @@ export class ScannerService extends EventEmitter {
 	}
 
 	private applyEvidence(live: LiveObservation, ev: DecodeEvidence): void {
+		if (live.evidenceDeleted) return
 		if (ev.metadata.talkgroups?.[0]) live.talkgroup = ev.metadata.talkgroups[0]
 		if (ev.metadata.sources?.[0]) live.source = ev.metadata.sources[0]
 		if (ev.encrypted) live.encrypted = true
@@ -1863,7 +1861,9 @@ export class ScannerService extends EventEmitter {
 			o =>
 				o.trackId === r.req.trackId &&
 				o.sourceId === r.req.sourceId &&
-				o.discoveryId !== null,
+				!o.evidenceDeleted &&
+				o.discoveryId !== null &&
+				this.store.get(o.discoveryId) !== undefined,
 		)
 		const candidates = observations.map(o => ({
 			observationId: o.observationId,
@@ -1878,7 +1878,8 @@ export class ScannerService extends EventEmitter {
 			.linkProbeRecordings(r.probeDir, candidates)
 			.then(res => {
 				for (const l of res.linked)
-					this.markRecording(l.observationId, "linked", [l.recordingId])
+					if (this.evidence.recordingPath(l.recordingId))
+						this.markRecording(l.observationId, "linked", [l.recordingId])
 				for (const id of res.cut) this.markRecording(id, "cut")
 				for (const id of res.droppedEncrypted)
 					this.markRecording(id, "encrypted-dropped")

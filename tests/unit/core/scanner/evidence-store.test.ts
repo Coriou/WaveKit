@@ -680,3 +680,81 @@ describe("EvidenceStore.retention", () => {
 		)
 	}, 60_000) // 100 runs of real file I/O: ~5 s on a loaded laptop
 })
+
+describe("EvidenceStore deletion admission (review F3)", () => {
+	it.each(["psd", "iq"] as const)(
+		"drains an accepted %s writer and refuses late producers without tombstones",
+		async kind => {
+			await withDir(async root => {
+				let live = true
+				let enter!: () => void
+				let release!: () => void
+				const entered = new Promise<void>(resolve => {
+					enter = resolve
+				})
+				const gate = new Promise<void>(resolve => {
+					release = resolve
+				})
+				const store = new EvidenceStore({
+					dir: root,
+					caps: CAPS,
+					logger,
+					now: () => T0,
+					isDiscoveryLive: () => live,
+					statfs: async () => {
+						enter()
+						await gate
+						return plentyOfDisk()
+					},
+				})
+				const write = () =>
+					kind === "psd"
+						? store.writePsd("d_ONE", {
+								startHz: 0,
+								binHz: 1,
+								bins: [-50],
+								snrDb: 30,
+							})
+						: store.writeIq("d_ONE", new Uint8Array(4), {
+								sampleRateHz: 2,
+								centreHz: 0,
+							})
+				const pending = write()
+				await entered
+				live = false
+				let deleted = false
+				const removal = store.removeDiscovery("d_ONE").then(() => {
+					deleted = true
+				})
+				await Promise.resolve()
+				expect(deleted).toBe(false)
+				release()
+				await pending
+				await removal
+				expect(existsSync(join(root, "evidence", "d_ONE"))).toBe(false)
+				expect(await write()).toBe(kind === "psd" ? false : null)
+				expect(store.evidencePath("d_ONE", "psd.json")).toBeNull()
+				const name = callWav(T0, "9", "2001")
+				const probe = await probeDirWith(root, [name])
+				expect(
+					(
+						await store.linkProbeRecordings(probe, [
+							{
+								observationId: "o1",
+								discoveryId: "d_ONE",
+								startedAt: T0,
+								endedAt: T0 + 1000,
+								encrypted: false,
+							},
+						])
+					).linked,
+				).toEqual([])
+				expect(existsSync(probe)).toBe(false)
+				expect(store.recordingPath(`d_ONE~${name}`)).toBeNull()
+				// No retained tombstone: authoritative re-admission can reuse a standalone test ID.
+				live = true
+				expect(await write()).not.toBe(kind === "psd" ? false : null)
+			})
+		},
+	)
+})
