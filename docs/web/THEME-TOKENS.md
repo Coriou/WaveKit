@@ -1,25 +1,32 @@
-# WaveKit theme tokens (v1)
+# WaveKit theme tokens (v2)
 
-Semantic colour tokens for the web dashboard: dark (the original look), light (a light shell
-over a plot that stays dark) and five accents (phosphor, ice, violet, coral, mono). Every
-canvas board carries the same token block; the boards in [canvas/](canvas/) are the reference.
-Decided 2026-10-11 (see the decision log in [DESIGN.md](DESIGN.md)). For the dev handoff this
-becomes the Tailwind/shadcn theme in `packages/brand`.
+Semantic colour tokens for the web dashboard, on three axes: **theme** (dark / light), **ground**
+(Ink, Graphite, True black for dark; Paper for light) and **accent** (phosphor, ice, violet, coral,
+mono). Every canvas board carries the same token block (section 7); the boards in
+[canvas/](canvas/) are the reference. v1 decided 2026-10-11 (light shell over a dark plot); v2 the
+same evening (grounds, paper light, everything light). See the decision log in
+[DESIGN.md](DESIGN.md). For the dev handoff this becomes the Tailwind/shadcn theme in
+`packages/brand`.
 
 ## 1. Principles
 
-- **Dark + phosphor is the default and looks exactly as before.** Every dark token value is
-  the literal it replaces.
-- **Light is its own shell, not an inversion.** Islands, drawers, dock, menus and cards
-  become near-opaque white glass (92 to 98 %) with a crisp white top highlight, neutral ink
-  hairlines and soft green-ink shadows. Text is a green-tinted ink ramp.
-- **The plot stays a dark instrument screen in both themes.** Spectrum, waterfall, their
-  axis, band row, discovery row, signal tags, zoom pill and hover readout all stay dark. Do it
-  with a *forced-dark scope* (section 2.3), not with special tokens.
-- **Amber (`not live`) and red (danger) never change with the accent.** Light mode has darker
+- **Dark + Ink + phosphor is the default and looks exactly as before.** Every value in that
+  combination is the literal it replaced in v1.
+- **The ground is the whole surface, plot included.** Spectrum, waterfall and Map follow the
+  ground like every island. There is no "plot stays dark" rule any more and no "dark plot" option
+  in light mode: someone who wants a dark plot picks a dark ground.
+- **Ink takes its tint from the accent.** Phosphor gives the green-black of v1; ice navy-black,
+  violet aubergine-black, coral plum-black, mono slate. Graphite is a neutral grey and True black
+  is pure `#000` with neutral greys, for anyone who wants no tint.
+- **Paper is the light theme.** Warm cream ground, warm brown-black ink, warm hairlines, soft
+  warm two-layer shadows. Islands are near-opaque sheets lying on the page (96 %), with no white
+  top highlight and no grain.
+- **Accents keep their names on every ground** and get a value tuned per theme (deeper and less
+  saturated on Paper). Any accent works with any ground.
+- **Amber (`not live`) and red (danger) never change with the accent**; Paper has darker
   variants so text passes 4.5:1.
-- **Neutrals are WaveKit's green-tinted ink in every accent.** Only `--wk-accent*` and, in dark
-  mode, the hairline tint (`--wk-line-rgb`) follow the accent.
+- **The waterfall matches the accent by default** ("Match accent"), so trace, fill and waterfall
+  never disagree. Amber, Mono and Classic stay as explicit choices (section 5, rule 6).
 
 ## 2. Mechanism
 
@@ -29,19 +36,19 @@ everywhere a colour goes in this runtime: inline `style="…"`, JS-built style s
 `{{…}}`, gradients, `box-shadow`, `backdrop-filter`, and SVG presentation attributes
 (`stroke="var(--wk-accent)"` resolves; verified in headless Chromium with the canvas runtime).
 `rgba(var(--wk-accent-rgb),.14)` works because the `-rgb` tokens hold `r,g,b` triplets.
-The one place `var()` does **not** work is `<canvas>` 2D drawing (section 5.6).
+The one place `var()` does **not** work is `<canvas>` 2D drawing (section 5, rule 6).
 
 ### 2.1 Helmet: token block first, as its own `<style>`
 
 ```html
 <helmet>
 <style>
-/* wk-tokens v1 · copy verbatim, never edit per board */
-… the 11 lines of tokens.css, unchanged …
+/* wk-tokens v2 · copy verbatim, never edit per board */
+… the 17 lines of section 7, unchanged …
 </style>
 <style>
-@font-face{…}                       ← the board's existing style, converted
-body{margin:0;background:#0b1512}   ← keep this literal: body = the plot colour
+@font-face{…}                       ← the board's existing style
+body{margin:0}
 …
 </style>
 </helmet>
@@ -49,150 +56,161 @@ body{margin:0;background:#0b1512}   ← keep this literal: body = the plot colou
 
 Copy the token block byte for byte. Every board injects its own copy; identical copies are
 harmless, a stale copy in one board could override the others (whichever mounts later wins), so
-never hand-edit the block in a board. Change the token block and re-sync all boards with
-`a sync script over every board`.
+never hand-edit the block in a board. Change the block in one place and re-sync every board with a
+script.
 
-`body{background:#0b1512}` stays literal on purpose: outside the root there is no theme scope,
-and a standalone island over the dark plot colour is the realistic context in both themes.
+Selector layers, in order (later and more specific wins):
+
+1. `[data-wk-theme]`: dark, Ink, phosphor (the v1 dark block).
+2. `[data-wk-theme="light"]`: Paper.
+3. `[data-wk-theme="dark"][data-wk-accent="…"]`: dark accent and its hairline tint.
+4. `[data-wk-theme="light"][data-wk-accent="…"]`: Paper accents.
+5. `[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="…"]`:
+   the Ink neutrals tinted by a non-phosphor accent. A missing ground means Ink.
+6. `[data-wk-theme="dark"][data-wk-ground="graphite"|"black"][data-wk-accent]`: the neutral grounds,
+   including neutral hairlines (`--wk-line-rgb`), which beat the accent's hairline tint.
 
 ### 2.2 Board root, tweaks and `renderVals`
 
 Root element (the first element after `</helmet>`):
 
 ```html
-<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" style="…">
+<div data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}" data-wk-ground="{{wkGround}}" style="…">
 ```
 
-Both attributes always go on the same element; the accent rules match the pair.
+**All three attributes always go on the same element**, on the root and on every nested scope.
 
-`data-props` (first two entries, in a "Theme" section):
+`data-props` (first three entries, in a "Theme" section):
 
 ```json
 "theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},
 "accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"phosphor","section":"Theme"},
+"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"ink","section":"Theme"},
 ```
 
-Top of the main `return {` in `renderVals()`:
+`ground` is the dark ground; in light the ground is always Paper. Top of the main `return {` in
+`renderVals()`:
 
 ```js
-// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks
-wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'phosphor',
+wkTheme: this.props.theme === 'light' ? 'light' : 'dark', wkAccent: this.props.accent || 'phosphor', wkGround: this.props.theme === 'light' ? 'paper' : (this.props.ground || 'ink'),
 ```
 
-A board that embeds other boards passes the scope down on every `dc-import`
-(Messages → Decode, Decode → Json, SettingsPhone → Settings, TunedGallery → Tuned, …):
+A board that embeds other boards passes the scope down on every `dc-import`:
 
 ```html
-<dc-import name="Decode" theme="{{wkTheme}}" accent="{{wkAccent}}" … ></dc-import>
+<dc-import name="Decode" theme="{{wkTheme}}" accent="{{wkAccent}}" ground="{{wkGround}}" … ></dc-import>
 ```
 
-Immersive already passes `theme`/`accent` to all twelve imports, resolves its own
-`theme` tweak (`dark | light | system`, system follows `prefers-color-scheme`) and lets
-Settings override it: `onSet('theme', 'dark'|'light'|'system')` and
-`onSet('accent', 'phosphor'|…)` store the pick in Immersive's state (a later tweak change wins
-again). Settings › Display should call exactly those keys.
+Immersive resolves its own tweaks (`theme`: dark | light | system, `accent`, `ground`,
+`waterfall`) and lets Settings and ⌘K override them with `onSet('theme' | 'accent' | 'ground' |
+'waterfall', value)`, stored in its state (a later tweak change wins again). It passes
+`palette="{{waterfall}}"` to Spectrum.
 
-### 2.3 Forced-dark scopes and nested scopes
+### 2.3 Nested scopes
 
-Any element can open a new scope; descendants resolve tokens from the nearest one.
-
-- **Plot / instrument surfaces** put a literal dark theme on their root and keep the accent:
-  `data-wk-theme="dark" data-wk-accent="{{wkAccent}}"`. Spectrum does this on its root, so its
-  whole subtree resolves dark tokens (text, hairlines, glass of the signal tags) in either theme,
-  and still follows the accent. Use the same for Map's map canvas area, and for any other
-  "screen" (waterfall thumbnails, the band ruler only if you decide it is an instrument; by
-  default it follows the theme).
-- **Shell controls floating on a plot** reopen the shell scope:
-  `data-wk-theme="{{wkTheme}}" data-wk-accent="{{wkAccent}}"`. Spectrum does this for the
-  "Scan this range" pill and its confirmation toast: they are controls, not annotations.
-  Rule of thumb: annotations of the signal stay dark, things you act on follow the theme.
+Any element can open a new scope; descendants resolve tokens from the nearest one. v1's
+*forced-dark scope* for the plot and the Map is **withdrawn**: they carry the board scope. Nested
+scopes remain for previews: Settings' ground and accent swatches render a small plot + island in
+`data-wk-theme="dark" data-wk-ground="graphite" data-wk-accent="{{accent}}"` and so on.
 
 ## 3. Tokens
 
-All values exact. Light values are for `[data-wk-theme="light"]`.
+All values exact; section 7 is the source of truth, these tables explain it.
 
-### 3.1 Surfaces and glass
+### 3.1 Grounds at a glance
 
-| Token | Dark | Light | Use |
-|---|---|---|---|
-| `--wk-plot-bg` | `#0b1512` | `#0b1512` | Plot, waterfall, axis strip, Immersive root, standalone strip roots. Never changes. |
-| `--wk-bg` | `#0b1512` | `#e9eeeb` | Page / full-page board background (gallery pages, Messages gallery). |
-| `--wk-surface` | `#111c19` | `#ffffff` | Solid panel (Tuned `panel` variant, stat cells, sticky header base, focus-ring gap). |
-| `--wk-fill` | `#192b24` | `#e2e9e5` | Neutral fill: chips, hover (`.wk-ghost:hover`), selected segment, info boxes. |
-| `--wk-fill-glass` | `rgba(25,43,36,.92)` | `rgba(240,244,242,.96)` | Translucent fill: toasts, small status pills on glass. |
-| `--wk-well` | `#0b1512` | `rgba(22,50,42,.07)` | Recessed well inside a panel: segmented-control tracks, meters, strips, hollow tick fill, hatch gaps. |
-| `--wk-well-glass` | `rgba(11,21,18,.6)` | `rgba(22,50,42,.055)` | Softer well: inputs, the Tuned "now" block, mode group. |
-| `--wk-glass` | `rgba(17,28,25,.5)` | `rgba(248,250,249,.92)` | Island glass: Tuner, Receiver, Listen bars, dock, band strip, floating card. |
-| `--wk-glass-panel` | `rgba(17,28,25,.66)` | `rgba(248,250,249,.95)` | Expanded panels, drawers, feeds. |
-| `--wk-glass-strong` | `rgba(17,28,25,.92)` | `rgba(250,252,251,.98)` | Menus, tooltips, popovers, sticky overlays. |
-| `--wk-glass-fx` | `saturate(170%)` | `saturate(140%) brightness(1.08)` | `backdrop-filter: blur(22px) var(--wk-glass-fx)` (keep the blur radius literal). |
-| `--wk-glass-hi` | `rgba(255,255,255,.08)` | `rgba(255,255,255,.9)` | Top highlight: `box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow)`. |
+| Ground | Theme | `--wk-plot-bg` = `--wk-bg` = `--wk-well` | `--wk-surface` | `--wk-fill` | Island glass | Hairline (`--wk-line-rgb`) |
+|---|---|---|---|---|---|---|
+| Ink · phosphor | dark | `#0b1512` | `#111c19` | `#192b24` | surface at .5 | accent |
+| Ink · ice | dark | `#0d1319` | `#131a21` | `#1b2833` | surface at .5 | accent |
+| Ink · violet | dark | `#141119` | `#1a1820` | `#292432` | surface at .5 | accent |
+| Ink · coral | dark | `#181013` | `#20161a` | `#312128` | surface at .5 | accent |
+| Ink · mono | dark | `#111314` | `#171a1b` | `#23272a` | surface at .5 | accent |
+| Graphite | dark | `#161718` | `#1d1e1f` | `#2a2c2d` | surface at .5 | `226,230,235` |
+| True black | dark | `#000000` | `#101010` | `#1b1b1b` | surface at .72 (.82 panel, .95 strong) | `255,255,255` |
+| Paper | light | `#f4f0e6` | `#fbf8f1` | `#ebe5d8` | surface at .96 | `74,58,34` |
 
-### 3.2 Shadows
+The tinted Ink families keep the OKLCH lightness and chroma of every v1 Ink neutral and rotate
+the hue (ice 245°, violet 300°, coral 352°; mono keeps 30 % of the chroma at 230°). Graphite
+is the same lightness ramp, +0.02 L on surfaces, with 12 % chroma at 255°. True black uses
+neutral greys; its islands are more opaque so they still separate from the plot.
 
-| Token | Dark | Light |
-|---|---|---|
-| `--wk-shadow` | `0 12px 32px rgba(0,0,0,.35)` | `0 1px 2px rgba(10,34,26,.10),0 10px 28px rgba(10,34,26,.22)` |
-| `--wk-shadow-pop` | `0 12px 32px rgba(0,0,0,.4)` | `0 1px 2px rgba(10,34,26,.10),0 12px 32px rgba(10,34,26,.24)` |
-| `--wk-shadow-tip` | `0 8px 24px rgba(0,0,0,.4)` | `0 1px 2px rgba(10,34,26,.10),0 8px 20px rgba(10,34,26,.2)` |
-| `--wk-shadow-lg` | `0 16px 40px rgba(0,0,0,.4)` | `0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.24)` |
-| `--wk-shadow-drawer` | `0 16px 40px rgba(0,0,0,.5)` | `0 1px 3px rgba(10,34,26,.10),0 16px 40px rgba(10,34,26,.28)` |
-| `--wk-shadow-xl` | `0 18px 48px rgba(0,0,0,.45)` | `0 2px 4px rgba(10,34,26,.10),0 18px 48px rgba(10,34,26,.28)` |
-| `--wk-shadow-lift` | `0 28px 64px rgba(0,0,0,.55)` | `0 2px 6px rgba(10,34,26,.12),0 28px 64px rgba(10,34,26,.34)` |
+`--wk-on-accent` equals the ground's surface on dark grounds and `#ffffff` on Paper.
+
+### 3.2 Glass and shadows
+
+Dark grounds share v1's glass effect (`--wk-glass-fx: saturate(170%)`, `--wk-glass-hi:
+rgba(255,255,255,.08)`) and shadows (`0 12px 32px rgba(0,0,0,.35)` …, unchanged).
+
+Paper: `--wk-glass-fx: saturate(105%)`, `--wk-glass-hi: rgba(255,255,255,0)` (no top
+highlight), glass `rgba(251,248,241,.96)`, panel `.97`, strong `rgba(252,250,245,.985)`, wells
+`rgba(74,58,34,.07)` / `.05`. Shadows are warm and soft, a contact shadow plus a short ambient:
+
+| Token | Paper |
+|---|---|
+| `--wk-shadow` | `0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10)` |
+| `--wk-shadow-pop` | `0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12)` |
+| `--wk-shadow-tip` | `0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12)` |
+| `--wk-shadow-lg` | `0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13)` |
+| `--wk-shadow-drawer` | `0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16)` |
+| `--wk-shadow-xl` | `0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16)` |
+| `--wk-shadow-lift` | `0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20)` |
 
 Tiny shadows (blur ≤ 2 px, e.g. a knob's `0 1px 2px rgba(0,0,0,.35)`) stay literal.
 
 ### 3.3 Text, ink and lines
 
-| Token | Dark | Light | Use |
-|---|---|---|---|
-| `--wk-text` | `#f4f7f5` | `#12201b` | Primary text, values. |
-| `--wk-text-soft` | `#d9e4de` | `#22332d` | Body copy one step down (menu items, quotes, notes). |
-| `--wk-text-2` | `#b9cac1` | `#33463e` | Secondary text, idle button labels. |
-| `--wk-text-3` | `#8ba598` | `#44574f` | Labels, eyebrows, meta, icons. |
-| `--wk-text-4` | `#758b81` | `#4e6158` | Quietest readable text (still ≥ 4.5:1 on glass). |
-| `--wk-text-5` | `#52645d` | `#8a9b93` | Disabled / decorative only (leading zeros, hints like "↑↓ choose"); not for content. |
-| `--wk-ink-rgb` | `244,247,245` | `18,32,27` | Tints of the text colour: brackets, hover cursor line, "tuned now" outlines. |
-| `--wk-ink-2-rgb` | `185,202,193` | `51,70,62` | Hatches (excluded ranges), "heard" ticks. |
-| `--wk-ink-3-rgb` | `139,165,152` | `68,87,79` | Muted bars, closed meter fill. |
-| `--wk-knob` | `#f4f7f5` | `#ffffff` | Switch and slider knobs. |
-| `--wk-line-rgb` | accent rgb (`123,236,199`) | `22,50,42` (neutral ink) | Hairlines: `rgba(var(--wk-line-rgb),.14)`. |
-| `--wk-line-solid` | `#22362f` | `#d3dcd8` | Solid separators: slider rails, grid gaps between stat cells. |
-| `--wk-track` | `#2c443b` | `#77897f` | Off switch track, inactive meter bars, inactive dots. Light value is 3:1 against glass. |
+| Token | Ink · phosphor | Graphite | True black | Paper | Use |
+|---|---|---|---|---|---|
+| `--wk-text` | `#f4f7f5` | `#f6f6f6` | `#f5f5f5` | `#2a241c` | Primary text, values. |
+| `--wk-text-soft` | `#d9e4de` | `#e0e1e2` | `#dedede` | `#3a3328` | Body copy one step down. |
+| `--wk-text-2` | `#b9cac1` | `#c4c5c7` | `#c2c2c2` | `#4a4235` | Secondary text, idle labels. |
+| `--wk-text-3` | `#8ba598` | `#9c9ea0` | `#9c9c9c` | `#5a5143` | Labels, eyebrows, meta, icons. |
+| `--wk-text-4` | `#758b81` | `#8a8c8f` | `#878787` | `#72675a` | Quietest readable text. |
+| `--wk-text-5` | `#52645d` | `#5e5f61` | `#5e5e5e` | `#a39a89` | Disabled / decorative only. |
+| `--wk-ink-rgb` | `244,247,245` | `246,246,246` | `245,245,245` | `42,36,28` | Tints of the text colour. |
+| `--wk-ink-2-rgb` | `185,202,193` | `196,197,199` | `194,194,194` | `74,66,53` | Hatches, "heard" ticks. |
+| `--wk-ink-3-rgb` | `139,165,152` | `156,158,160` | `156,156,156` | `90,81,67` | Muted bars, closed meters. |
+| `--wk-knob` | `#f4f7f5` | `#f6f6f6` | `#f5f5f5` | `#ffffff` | Switch and slider knobs. |
+| `--wk-line-solid` | `#22362f` | `#353638` | `#262626` | `#e0d9ca` | Solid separators, rails. |
+| `--wk-track` | `#2c443b` | `#424345` | `#363636` | `#8f8573` | Off tracks, inactive meters. |
+
+The tinted Ink families (ice, violet, coral, mono) have their own ramp in section 7, same
+lightness as Ink · phosphor.
 
 ### 3.4 Accent, amber, danger
 
-| Token | Dark | Light |
+| Token | Dark (every dark ground) | Paper |
 |---|---|---|
-| `--wk-accent` | per accent (3.5) | per accent |
-| `--wk-accent-rgb` | per accent | per accent |
-| `--wk-on-accent` | `#111c19` | `#ffffff` |
+| `--wk-on-accent` | the ground's surface | `#ffffff` |
 | `--wk-amber` | `#f2b84b` | `#7a4f00` |
 | `--wk-amber-rgb` (tints) | `242,184,75` | `201,138,18` |
 | `--wk-amber-soft` (text on amber glass) | `#f7dca4` | `#5c3f00` |
 | `--wk-amber-muted` | `#d4bd8a` | `#6e5520` |
-| `--wk-amber-glass` | `rgba(48,37,12,.62)` | `rgba(255,246,222,.94)` |
-| `--wk-amber-fill` | `#2a2414` | `#fbecc8` |
+| `--wk-amber-glass` | `rgba(48,37,12,.62)` | `rgba(252,241,214,.97)` |
+| `--wk-amber-fill` | `#2a2414` | `#f6e7c4` |
 | `--wk-on-amber` | `#1a1406` | `#ffffff` |
-| `--wk-danger` | `#ff7a6b` | `#b3301f` |
+| `--wk-danger` | `#ff7a6b` | `#a8321e` |
 | `--wk-danger-rgb` (tints) | `255,122,107` | `214,64,48` |
-| `--wk-danger-soft` (text) | `#ff9d92` | `#9e2a1b` |
+| `--wk-danger-soft` (text) | `#ff9d92` | `#93291a` |
 
-Note `--wk-amber-rgb` and `--wk-danger-rgb` are brighter than the light text colours on purpose,
-so `rgba(var(--wk-amber-rgb),.14)` reads as amber, not brown.
+`--wk-amber-rgb` and `--wk-danger-rgb` are brighter than the Paper text colours on purpose, so
+`rgba(var(--wk-amber-rgb),.14)` reads as amber, not brown.
 
 ### 3.5 Accents (`data-wk-accent`)
 
-| Accent | Dark `--wk-accent` / rgb | Light `--wk-accent` / rgb | Dark `--wk-line-rgb` |
-|---|---|---|---|
-| `phosphor` (default) | `#7becc7` / `123,236,199` | `#086a50` / `8,106,80` | `123,236,199` |
-| `ice` | `#8fd0ff` / `143,208,255` | `#0a5fa6` / `10,95,166` | `143,208,255` |
-| `violet` | `#c4a6ff` / `196,166,255` | `#6941c6` / `105,65,198` | `196,166,255` |
-| `coral` | `#ffa0c8` / `255,160,200` | `#ad2470` / `173,36,112` | `255,160,200` |
-| `mono` | `#e6ece9` / `230,236,233` | `#1d2b26` / `29,43,38` | `200,212,206` |
+| Accent | Dark `--wk-accent` / rgb | Paper `--wk-accent` / rgb |
+|---|---|---|
+| `phosphor` (default) | `#7becc7` / `123,236,199` | `#1d6b52` / `29,107,82` |
+| `ice` | `#8fd0ff` / `143,208,255` | `#225f92` / `34,95,146` |
+| `violet` | `#c4a6ff` / `196,166,255` | `#5f45a8` / `95,69,168` |
+| `coral` | `#ffa0c8` / `255,160,200` | `#9e3370` / `158,51,112` |
+| `mono` | `#e6ece9` / `230,236,233` | `#2a241c` / `42,36,28` |
 
-"Coral" is pushed toward rose on purpose: a true coral (orange-pink) is indistinguishable from
-the danger red `#ff7a6b`. Light mode hairlines are neutral ink for every accent.
+Dark accents are the same on every dark ground (they pass 6.8:1 or better on every dark fill).
+On Ink the hairline tint follows the accent (mono uses `200,212,206`); Graphite and True black
+use neutral hairlines. "Coral" is pushed toward rose on purpose: a true coral (orange-pink) is
+indistinguishable from the danger red.
 
 ## 4. Literal → token mapping
 
@@ -213,7 +231,7 @@ the danger red `#ff7a6b`. Light mode hairlines are neutral ink for every accent.
 | `#2c443b` | `var(--wk-track)` | |
 | `#111c19` | `var(--wk-on-accent)` as a text/icon colour on an accent fill (`color:`, `fg`, `Fg` keys); otherwise `var(--wk-surface)` | |
 | `#141f1b` `#0e1815` `#111d19` | `var(--wk-surface)` | `#0e1815` is the gap of focus rings (`0 0 0 2px #0e1815, 0 0 0 4px #7becc7`); `#111d19` the sticky-header fade (`linear-gradient(#111d19 78%, rgba(17,29,25,0))` → `linear-gradient(var(--wk-surface) 78%, transparent)`). |
-| `#0b1512` | by context, never blind: root of a page board → `var(--wk-bg)`; root of a plot or strip board, Immersive root → `var(--wk-plot-bg)`; segmented-control track / meter / well inside a panel → `var(--wk-well)`; text on an accent fill → `var(--wk-on-accent)`; `body{…}` in the helmet → keep literal | |
+| `#0b1512` | by context, never blind: root of a page board → `var(--wk-bg)`; root of a plot or strip board, Immersive root → `var(--wk-plot-bg)`; segmented-control track / meter / well inside a panel → `var(--wk-well)`; text on an accent fill → `var(--wk-on-accent)`; `body{…}` in the helmet → keep literal (plus the Paper `body:has(…)` rule, rule 1) | |
 | `#07100d` | `var(--wk-well)` | Recordings waveform strip. |
 | `#12201b` | `var(--wk-line-solid)` | Recordings waveform fixed ticks. |
 | `#4d7a6a` | `rgba(var(--wk-accent-rgb),.5)` | Scanner activity bars. |
@@ -225,8 +243,8 @@ the danger red `#ff7a6b`. Light mode hairlines are neutral ink for every accent.
 | `#1a1406` `#1a1405` | `var(--wk-on-amber)` | Text on an amber button. |
 | `#ff7a6b` | `var(--wk-danger)` | |
 | `#ff9d92` `#ffb3aa` `#ffc2bb` | `var(--wk-danger-soft)` | |
-| `#8ec5ff` `#c9a8ff` `#f2a14b` `#e8d16a` `#9fd8ff` | **keep literal** | Data-vis categories and the altitude ramp in Map; they live on the dark map canvas (forced-dark scope). |
-| `#08110e` `#0f1c18` | **keep literal** | Map canvas sea/land; same reason. |
+| `#8ec5ff` `#c9a8ff` `#f2a14b` `#e8d16a` `#9fd8ff` | **keep literal** | Map data colours (canvas drawing): each ground has its own set in Map's `mapPal()`; see rule 6. |
+| `#08110e` `#0f1c18` | **keep literal** | Map canvas sea/land, now one set per ground in `mapPal()`. |
 
 ### 4.2 rgba families
 
@@ -250,15 +268,18 @@ the danger red `#ff7a6b`. Light mode hairlines are neutral ink for every accent.
 | `inset 0 1px 0 rgba(255,255,255,.08|.1)` | `inset 0 1px 0 var(--wk-glass-hi)` |
 | shadows `rgba(0,0,0,a)` | the shadow token whose geometry matches (3.2): `12px 32px .35` → `--wk-shadow`; `12px 32px .4|.45` → `--wk-shadow-pop`; `8px 24px` → `--wk-shadow-tip`; `16px 40px .4` → `--wk-shadow-lg`; `16px 40px .5|.55` → `--wk-shadow-drawer`; `18px 48px *`, `24px 64px *` → `--wk-shadow-xl`; `28px 64px` → `--wk-shadow-lift` |
 | `saturate(160%|170%)` in `backdrop-filter` | `var(--wk-glass-fx)` |
-| `rgba(142,197,255,a)` `rgba(201,168,255,a)` | keep literal (Map data colours) |
+| `rgba(142,197,255,a)` `rgba(201,168,255,a)` | keep literal (Map data colours, per ground) |
 
 Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
 `.wk-ghost:hover{background:var(--wk-fill);color:var(--wk-text)}` …).
 
 ## 5. Rules
 
-1. **No colour literals** outside: the helmet `body{}` rule, tiny knob shadows, canvas
-   drawing code (5.6) and the Map data-vis / map-canvas colours listed above.
+1. **No colour literals** outside: the helmet `body{}` rules, tiny knob shadows, canvas
+   drawing code (rule 6) and the Map data-vis / map-canvas colours listed above. Every board's
+   helmet has `body{margin:0;background:#0b1512}` followed by
+   `body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}`, so a
+   standalone board whose root is Paper sits on paper (nested preview scopes do not count).
 2. **Hairline or tint?** If it draws an edge (border, ring, 1 px divider), it is a line:
    `--wk-line-rgb`. If it fills or marks a state, it is the accent: `--wk-accent-rgb`. In dark
    both are identical, so a wrong call only shows in light mode (an accent-tinted edge).
@@ -273,20 +294,40 @@ Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
    box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow…);
    backdrop-filter: blur(22px) var(--wk-glass-fx)`. Paused/amber variant: `var(--wk-amber-glass)`
    with `rgba(var(--wk-amber-rgb),.14)` edge.
-6. **Canvas** cannot read `var()`. Inside a forced-dark scope (Spectrum, Map) keep neutral
-   canvas literals; for accent strokes resolve once per accent change, as Spectrum does:
+6. **Canvas** cannot read `var()`. Read the resolved tokens instead, once per
+   (theme|ground|accent) key, from an element inside the board's scope:
    ```js
-   accentRgb() {
-   	const k = this.props.accent || 'phosphor';
-   	if (this.accKey !== k || !this.accRgb) {
-   		const v = this.boxEl ? getComputedStyle(this.boxEl).getPropertyValue('--wk-accent-rgb').trim() : '';
-   		this.accRgb = v || '123,236,199'; this.accKey = v ? k : null;
+   tokens() {
+   	const k = [this.props.theme, this.props.ground, this.props.accent].join('|');
+   	if (this.tokKey !== k && this.boxEl) {
+   		const cs = getComputedStyle(this.boxEl), v = n => cs.getPropertyValue(n).trim();
+   		this.tok = { bg: v('--wk-plot-bg'), acc: v('--wk-accent-rgb'), ink: v('--wk-ink-rgb'), line: v('--wk-line-rgb') };
+   		this.tokKey = k;   // cache only once the DOM scope attributes match the props
    	}
-   	return this.accRgb;
+   	return this.tok;
    }
-   // c.strokeStyle = 'rgb(' + this.accentRgb() + ')'
    ```
-   Waterfall palettes (`phosphor | amber | mono`) are a separate user setting and stay literal.
+   Spectrum draws its grid with the hairline token, trace and fill with the accent, and the
+   outside-capture shading with ink. Map's `mapPal(theme, ground, accent, cs)` returns sea, land,
+   coast and data colours per ground (Ink + phosphor returns v1's `MAP.dark` unchanged; Paper is
+   a nautical chart: sea `#d9e3e6`, land `#f4f0e6`, a 0.9 px warm-ink coastline over a faint
+   shallow-water band). AIS vessels are teal (`#22a8bf` dark, `#00838f` Paper) so they no longer
+   sit next to the ice accent. A key change rebuilds the waterfall ramp and repaints its history.
+
+   **Waterfall colours** (`palette`: `match | amber | mono | classic`, default `match`; the v1
+   value `phosphor` is read as `match`). Stops come from Spectrum's `rampStops()` (`bg` = plot,
+   `acc` = accent, `ink` = text):
+   - *Match, dark grounds:* bg → accent hue at low lightness (0.3, 0.5) → accent hue at 0.49 L
+     (0.7) → accent (0.86) → ink (1). On Ink + phosphor every stop is within one level of v1's
+     phosphor ramp.
+   - *Match, Paper (ramp a, the default):* bg → 30 % accent over paper (0.38) → accent (0.72) →
+     ink (1). Strong signals are the darkest marks; weak carriers read as pale accent. Ramps b
+     (bg → accent → ink) and c (with a warm-grey "pencil" step) stay on the Spectrum board as the
+     `paperRamp` tweak for the owner to compare; b shows noise as grain, c makes weak signals look
+     disabled.
+   - *Amber, Mono, Classic* (blue → cyan → yellow → red heat): fixed stops with a dark and a
+     Paper variant each; on Paper they also run light to dark.
+   Settings' waterfall strips use the same stops as CSS gradients.
 7. **SVG**: `stroke="var(--wk-…)"`, `fill="var(--wk-…)"` and `currentColor` all work.
 8. **`color-scheme`** is set by the scope (dark / light), so native controls and scrollbars
    match. Range inputs in the boards are `opacity: 0`, so this is not visible there.
@@ -295,37 +336,54 @@ Helmet CSS converts the same way (`outline:2px solid var(--wk-accent)`,
 
 ## 6. Contrast results
 
-Backgrounds: dark island = `rgba(17,28,25,.5)` over the plot ≈ `#0e1916`, dark panel ≈ `#0f1a17`,
-fill `#192b24`. Light island = `rgba(248,250,249,.92)` over the dark plot (worst case, nothing
-bright behind) ≈ `#e5e8e7`, light panel ≈ `#ecefed`, fill `#e2e9e5`. Ratios are island / panel / fill.
+Islands are measured as their glass over the plot (dark .5, True black .72, Paper .96). Ratios
+are island / fill.
 
-| Token | Dark | Ratios | Light | Ratios |
+| Ground | text | text-2 | text-3 | text-4 | text-5 (decorative) |
+|---|---|---|---|---|---|
+| Ink · phosphor | 16.8 / 13.8 | 10.6 / 8.7 | 6.8 / 5.6 | 5.0 / 4.1 ¹ | 2.9 / 2.4 |
+| Ink · ice, violet, coral, mono | 16.8 / 13.9–14.1 | 10.5 / 8.7 | 6.6–6.8 / 5.5 | 4.8–4.9 / 4.0–4.1 ¹ | 2.8 / 2.3 |
+| Graphite | 16.1 / 13.0 | 10.1 / 8.1 | 6.5 / 5.2 | 5.2 / 4.2 ¹ | 2.7 / 2.2 |
+| True black | 17.9 / 15.8 | 11.0 / 9.7 | 7.1 / 6.3 | 5.4 / 4.8 | 3.0 / 2.7 |
+| Paper | 14.5 / 12.2 | 9.3 / 7.9 | 7.4 / 6.2 | 5.2 / 4.4 ¹ | 2.6 / 2.2 |
+
+Accents, island / fill:
+
+| Accent | Ink (own tint) | Graphite | True black | Paper |
 |---|---|---|---|---|
-| text | `#f4f7f5` | 16.8 / 16.5 / 13.8 | `#12201b` | 13.6 / 14.5 / 13.6 |
-| text-soft | `#d9e4de` | 13.9 / 13.6 / 11.4 | `#22332d` | 10.8 / 11.5 / 10.8 |
-| text-2 | `#b9cac1` | 10.6 / 10.4 / 8.7 | `#33463e` | 8.2 / 8.7 / 8.2 |
-| text-3 | `#8ba598` | 6.8 / 6.7 / 5.6 | `#44574f` | 6.3 / 6.7 / 6.3 |
-| text-4 | `#758b81` | 5.0 / 4.9 / 4.1 ¹ | `#4e6158` | 5.4 / 5.7 / 5.4 |
-| text-5 (decorative) | `#52645d` | 2.9 / 2.8 / 2.4 | `#8a9b93` | 2.4 / 2.5 / 2.4 |
-| track (UI, 3:1) | `#2c443b` | 1.7 ² | `#77897f` | 3.0 / 3.2 (knob on track 3.7) |
-| phosphor | `#7becc7` | 12.6 / 12.4 / 10.4 | `#086a50` | 5.3 / 5.7 / 5.3 |
-| ice | `#8fd0ff` | 10.9 / 10.7 / 8.9 | `#0a5fa6` | 5.3 / 5.7 / 5.3 |
-| violet | `#c4a6ff` | 8.8 / 8.7 / 7.3 | `#6941c6` | 5.4 / 5.7 / 5.4 |
-| coral | `#ffa0c8` | 9.6 / 9.4 / 7.9 | `#ad2470` | 5.2 / 5.6 / 5.2 |
-| mono | `#e6ece9` | 15.1 / 14.9 / 12.4 | `#1d2b26` | 11.9 / 12.7 / 11.9 |
-| amber | `#f2b84b` | 10.1 / 9.9 / 8.3 | `#7a4f00` | 5.8 / 6.2 / 5.8 |
-| danger | `#ff7a6b` | 7.1 / 7.0 / 5.8 | `#b3301f` | 5.1 / 5.4 / 5.1 |
+| phosphor | 12.6 / 10.4 | 12.1 / 9.8 | 13.7 / 12.0 | 6.0 / 5.1 |
+| ice | 10.9 / 9.0 | 10.5 / 8.4 | 11.8 / 10.4 | 6.3 / 5.4 |
+| violet | 8.9 / 7.4 | 8.5 / 6.8 | 9.5 / 8.4 | 6.8 / 5.8 |
+| coral | 9.6 / 8.1 | 9.2 / 7.4 | 10.4 / 9.1 | 6.3 / 5.3 |
+| mono | 15.2 / 12.6 | 14.5 / 11.7 | 16.3 / 14.4 | 14.5 / 12.2 |
 
-On-accent text (label on a filled accent button): dark `#111c19` on phosphor 12.2, ice 10.5,
-violet 8.5, coral 9.2, mono 14.6; light `#ffffff` on phosphor 6.6, ice 6.6, violet 6.6,
-coral 6.4, mono 14.7. Amber soft on amber glass: 12.4 dark, 7.9 light. Accents on the dark plot
-(Spectrum in either theme): 9.1 to 15.5.
+Paper amber `#7a4f00` is 5.7:1 and danger `#a8321e` 5.3:1 on the fill. White on a Paper accent
+button: 6.4 to 7.2 (mono 15.4). Paper text-4 was lightened from `#655b4b` to `#72675a` during
+the board sweep so text-3 and text-4 stay distinguishable (Json keys vs strings).
 
-Distance from amber and red (CIEDE2000, dark / light; ≥ 20 is clearly different at a glance):
-phosphor 38/35 from amber, 61/55 from red; ice 49/46, 48/45; violet 54/54, 35/41;
-coral 45/44, **21/26** (the tightest; why coral is rose); mono 28/31, 35/41.
+¹ text-4 on the solid fill is just under 4.5:1 on Ink (unchanged from v1, dark must not move),
+Graphite and Paper. Avoid text-4 on `--wk-fill` in new work.
 
-¹ Dark text-4 on the solid fill is 4.1:1; unchanged from the current design (dark must not
-move). Avoid text-4 on `--wk-fill` in new work.
-² Dark switch tracks are unchanged from the current design; the knob against the track is 11:1,
-so the state stays visible. Light mode meets 3:1 for the track itself.
+## 7. The token block, verbatim
+
+The source of truth. Every board's first helmet `<style>` is exactly this (17 lines).
+
+```css
+/* wk-tokens v2 · copy verbatim, never edit per board */
+[data-wk-theme]{color-scheme:dark;--wk-plot-bg:#0b1512;--wk-bg:#0b1512;--wk-surface:#111c19;--wk-fill:#192b24;--wk-fill-glass:rgba(25,43,36,.92);--wk-well:#0b1512;--wk-well-glass:rgba(11,21,18,.6);--wk-glass:rgba(17,28,25,.5);--wk-glass-panel:rgba(17,28,25,.66);--wk-glass-strong:rgba(17,28,25,.92);--wk-glass-fx:saturate(170%);--wk-glass-hi:rgba(255,255,255,.08);--wk-shadow:0 12px 32px rgba(0,0,0,.35);--wk-shadow-pop:0 12px 32px rgba(0,0,0,.4);--wk-shadow-tip:0 8px 24px rgba(0,0,0,.4);--wk-shadow-lg:0 16px 40px rgba(0,0,0,.4);--wk-shadow-drawer:0 16px 40px rgba(0,0,0,.5);--wk-shadow-xl:0 18px 48px rgba(0,0,0,.45);--wk-shadow-lift:0 28px 64px rgba(0,0,0,.55);--wk-text:#f4f7f5;--wk-text-soft:#d9e4de;--wk-text-2:#b9cac1;--wk-text-3:#8ba598;--wk-text-4:#758b81;--wk-text-5:#52645d;--wk-ink-rgb:244,247,245;--wk-ink-2-rgb:185,202,193;--wk-ink-3-rgb:139,165,152;--wk-knob:#f4f7f5;--wk-line-solid:#22362f;--wk-track:#2c443b;--wk-accent:#7becc7;--wk-accent-rgb:123,236,199;--wk-line-rgb:123,236,199;--wk-on-accent:#111c19;--wk-amber:#f2b84b;--wk-amber-rgb:242,184,75;--wk-amber-soft:#f7dca4;--wk-amber-muted:#d4bd8a;--wk-amber-glass:rgba(48,37,12,.62);--wk-amber-fill:#2a2414;--wk-on-amber:#1a1406;--wk-danger:#ff7a6b;--wk-danger-rgb:255,122,107;--wk-danger-soft:#ff9d92}
+[data-wk-theme="light"]{color-scheme:light;--wk-plot-bg:#f4f0e6;--wk-bg:#f4f0e6;--wk-surface:#fbf8f1;--wk-fill:#ebe5d8;--wk-fill-glass:rgba(251,248,241,.96);--wk-well:rgba(74,58,34,.07);--wk-well-glass:rgba(74,58,34,.05);--wk-glass:rgba(251,248,241,.96);--wk-glass-panel:rgba(251,248,241,.97);--wk-glass-strong:rgba(252,250,245,.985);--wk-glass-fx:saturate(105%);--wk-glass-hi:rgba(255,255,255,0);--wk-shadow:0 1px 2px rgba(74,52,24,.08),0 6px 18px rgba(74,52,24,.10);--wk-shadow-pop:0 1px 2px rgba(74,52,24,.08),0 10px 26px rgba(74,52,24,.12);--wk-shadow-tip:0 1px 2px rgba(74,52,24,.08),0 6px 16px rgba(74,52,24,.12);--wk-shadow-lg:0 1px 3px rgba(74,52,24,.08),0 12px 32px rgba(74,52,24,.13);--wk-shadow-drawer:0 1px 3px rgba(74,52,24,.08),0 14px 36px rgba(74,52,24,.16);--wk-shadow-xl:0 2px 4px rgba(74,52,24,.08),0 16px 44px rgba(74,52,24,.16);--wk-shadow-lift:0 2px 6px rgba(74,52,24,.10),0 24px 56px rgba(74,52,24,.20);--wk-text:#2a241c;--wk-text-soft:#3a3328;--wk-text-2:#4a4235;--wk-text-3:#5a5143;--wk-text-4:#72675a;--wk-text-5:#a39a89;--wk-ink-rgb:42,36,28;--wk-ink-2-rgb:74,66,53;--wk-ink-3-rgb:90,81,67;--wk-knob:#ffffff;--wk-line-solid:#e0d9ca;--wk-track:#8f8573;--wk-accent:#1d6b52;--wk-accent-rgb:29,107,82;--wk-line-rgb:74,58,34;--wk-on-accent:#ffffff;--wk-amber:#7a4f00;--wk-amber-rgb:201,138,18;--wk-amber-soft:#5c3f00;--wk-amber-muted:#6e5520;--wk-amber-glass:rgba(252,241,214,.97);--wk-amber-fill:#f6e7c4;--wk-on-amber:#ffffff;--wk-danger:#a8321e;--wk-danger-rgb:214,64,48;--wk-danger-soft:#93291a}
+[data-wk-theme="dark"][data-wk-accent="ice"]{--wk-accent:#8fd0ff;--wk-accent-rgb:143,208,255;--wk-line-rgb:143,208,255}
+[data-wk-theme="dark"][data-wk-accent="violet"]{--wk-accent:#c4a6ff;--wk-accent-rgb:196,166,255;--wk-line-rgb:196,166,255}
+[data-wk-theme="dark"][data-wk-accent="coral"]{--wk-accent:#ffa0c8;--wk-accent-rgb:255,160,200;--wk-line-rgb:255,160,200}
+[data-wk-theme="dark"][data-wk-accent="mono"]{--wk-accent:#e6ece9;--wk-accent-rgb:230,236,233;--wk-line-rgb:200,212,206}
+[data-wk-theme="light"][data-wk-accent="ice"]{--wk-accent:#225f92;--wk-accent-rgb:34,95,146}
+[data-wk-theme="light"][data-wk-accent="violet"]{--wk-accent:#5f45a8;--wk-accent-rgb:95,69,168}
+[data-wk-theme="light"][data-wk-accent="coral"]{--wk-accent:#9e3370;--wk-accent-rgb:158,51,112}
+[data-wk-theme="light"][data-wk-accent="mono"]{--wk-accent:#2a241c;--wk-accent-rgb:42,36,28}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="ice"]{--wk-plot-bg:#0d1319;--wk-bg:#0d1319;--wk-surface:#131a21;--wk-fill:#1b2833;--wk-fill-glass:rgba(27,40,51,.92);--wk-well:#0d1319;--wk-well-glass:rgba(13,19,25,.6);--wk-glass:rgba(19,26,33,.5);--wk-glass-panel:rgba(19,26,33,.66);--wk-glass-strong:rgba(19,26,33,.92);--wk-text:#f4f6f9;--wk-text-soft:#d9e2ea;--wk-text-2:#bac7d3;--wk-text-3:#8da1b2;--wk-text-4:#778796;--wk-text-5:#54616d;--wk-ink-rgb:244,246,249;--wk-ink-2-rgb:186,199,211;--wk-ink-3-rgb:141,161,178;--wk-knob:#f4f6f9;--wk-line-solid:#25333f;--wk-track:#2f404f;--wk-on-accent:#131a21}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="violet"]{--wk-plot-bg:#141119;--wk-bg:#141119;--wk-surface:#1a1820;--wk-fill:#292432;--wk-fill-glass:rgba(41,36,50,.92);--wk-well:#141119;--wk-well-glass:rgba(20,17,25,.6);--wk-glass:rgba(26,24,32,.5);--wk-glass-panel:rgba(26,24,32,.66);--wk-glass-strong:rgba(26,24,32,.92);--wk-text:#f6f6f9;--wk-text-soft:#e2dfe9;--wk-text-2:#c7c2d2;--wk-text-3:#a199b1;--wk-text-4:#878195;--wk-text-5:#615c6b;--wk-ink-rgb:246,246,249;--wk-ink-2-rgb:199,194,210;--wk-ink-3-rgb:161,153,177;--wk-knob:#f6f6f9;--wk-line-solid:#332e3e;--wk-track:#413a4e;--wk-on-accent:#1a1820}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="coral"]{--wk-plot-bg:#181013;--wk-bg:#181013;--wk-surface:#20161a;--wk-fill:#312128;--wk-fill-glass:rgba(49,33,40,.92);--wk-well:#181013;--wk-well-glass:rgba(24,16,19,.6);--wk-glass:rgba(32,22,26,.5);--wk-glass-panel:rgba(32,22,26,.66);--wk-glass-strong:rgba(32,22,26,.92);--wk-text:#f9f5f6;--wk-text-soft:#e9dde2;--wk-text-2:#d2c0c7;--wk-text-3:#b095a0;--wk-text-4:#947e87;--wk-text-5:#6b5a61;--wk-ink-rgb:249,245,246;--wk-ink-2-rgb:210,192,199;--wk-ink-3-rgb:176,149,160;--wk-knob:#f9f5f6;--wk-line-solid:#3d2b33;--wk-track:#4c3740;--wk-on-accent:#20161a}
+[data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
+[data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
+[data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+```

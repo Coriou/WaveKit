@@ -40,7 +40,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Board | What it is | State |
 | --- | --- | --- |
 | C · Immersive | **Chosen shell.** Full-bleed spectrum, floating glass islands | Active |
-| Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line | Active |
+| Spectrum + waterfall | Live mock with every decoded signal type at a realistic frequency: zoom, pan, retune past the capture edge, drag VFO / band edges, saved-frequency tags, squelch line. Follows the ground; Match-accent waterfall plus Amber / Mono / Classic; `paperRamp` tweak to pick the Paper ramp | Active |
 | Tuned-signal card | What is on the tuned frequency: one anatomy for every signal type | Active, reworked |
 | Tuned card, every signal type | Gallery of the card for all 18 mocked signals (voice, fleets, messages, sensors, audio only, unknown) | Active |
 | Tuner island | Digit tuning, typed entry with suggestions, mode, bandwidth, step, saved frequencies | Active |
@@ -51,7 +51,7 @@ Condensed + Noto Sans, Tabler-based icons).
 | Activity | Search with typed chips, multi-column, detail pane, audio replay, transcripts, live feed | Active, polished once |
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
-| Command palette (⌘K) | Tune, change any setting, act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
+| Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
 | Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
 | Scanner | Discoveries drawer and the "Scan a band" composer: band ruler, ranges, per-range protocols, Just find signals. Wired into C | Active, second pass |
@@ -568,6 +568,48 @@ Condensed + Noto Sans, Tabler-based icons).
     mono), each checked for contrast in both modes and kept clear of amber ("not live") and
     red. Settings › Display: Theme (System / Dark / Light) and Accent.
 
+- **Colour themes, second pass: grounds, paper light, ⌘K (owner, 2026-10-11, evening).**
+  Brainstormed one question at a time, then drawn; tokens in
+  [THEME-TOKENS.md](THEME-TOKENS.md) v2.
+  - *Three axes:* Theme (System / Dark / Light) stays, plus a **Dark ground** (Ink, Graphite,
+    True black) and a **Light ground** (Paper only for now), so System knows what to use by
+    night and by day. Rejected: one Ground list replacing Theme (System would need a second
+    "at night use…" setting) and fixed theme bundles.
+  - *Paper:* warm cream ground, warm brown-black ink, warm hairlines, soft warm two-layer
+    shadows, no grain (it reads as noise on a spectrum). Islands are near-opaque sheets (96 %)
+    with no glass top highlight; frosted glass looked washed out over a light plot.
+  - *Everything light on Paper,* spectrum, waterfall and Map included, with **no "dark plot"
+    option**. This withdraws the v1 rule "the plot stays a dark instrument screen" and its
+    forced-dark scopes: the plot follows the ground. A dark plot means a dark ground.
+  - *Ink takes its tint from the accent:* phosphor keeps today's green-black byte for byte; ice
+    navy-black, violet aubergine-black, coral plum-black, mono slate. Graphite (neutral grey)
+    and True black (pure `#000` plot, near-black islands, neutral hairlines) are the untinted
+    choices. Accents keep their five names on every ground with tuned values; no blocked pairs.
+  - *Waterfall colours:* **Match accent** (default) builds the ramp from ground + accent, so
+    trace, fill and waterfall never disagree (the pink-trace-over-green-waterfall problem).
+    Amber, Mono and Classic (SDR++-style heat) stay as explicit choices, each with a Paper
+    variant. The palette called "Phosphor" is gone (Match accent with phosphor is the same
+    ramp), which also ends its name clash with the accent. On Paper strong signals are the
+    darkest marks; three Paper ramps are on the Spectrum board (`paperRamp` tweak a/b/c), a is
+    the default and the agents' pick (weak carriers stay pale accent; b shows noise as grain,
+    c makes weak signals look disabled). **Owner to confirm by eye.**
+  - *Map on Paper* is a nautical chart: pale grey-blue sea, paper land, thin ink coastline, a
+    faint shallow-water band. On dark grounds the map follows the ground. AIS vessels moved to
+    teal so they no longer sit next to the ice accent.
+  - *Settings › Display* (On this device): Theme, Dark ground (three preview tiles: plot,
+    island, accent trace), Light ground (Paper tile), Accent (swatches previewed on the current
+    ground), Waterfall colours (four ramp strips). The old "Waterfall palette" row is gone.
+  - *⌘K fix:* "theme" found nothing because the palette kept its own hard-coded settings list.
+    Now Theme, Dark ground, Accent and Waterfall colours are palette scopes with live preview,
+    Esc revert and undo, and **every setting** in the Settings registry is a palette row
+    ("Label — Group", Open in Settings ›) that opens the drawer on that row and highlights it.
+    On the canvas the palette holds a copy of the registry; the real app has one shared
+    registry.
+  - *Smaller fixes:* JSON numbers no longer use amber (reserved for "not live"): keys text-3,
+    strings text-soft, numbers accent, literals text-4 italic. Sticky headers in Activity,
+    Recordings and Scanner sit on the sheet on Paper. Paper text-4 lightened to `#72675a` so it
+    stays distinct from text-3.
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -586,9 +628,8 @@ Condensed + Noto Sans, Tabler-based icons).
   purpose; revisit only if search plus day grouping stops being enough. `S` means *keep*
   in a focused Activity list but *save frequency* in the palette keymap: settle in the
   keymap pass. Recordings at phone width needs a look on a real phone layout.
-- Settings follow-ups: ⌘K should list individual settings ("Open in Settings" on a
-  palette row) and the palette's setting scopes should share the registry (confirmed
-  2026-10-11: "theme" finds nothing because the palette keeps its own list); first-run
+- Settings follow-ups: ⌘K now lists every setting (answered 2026-10-11; the real app must
+  build both from one registry, the canvas keeps a copy in Palette); first-run
   setup (the Pi first-boot page asks for the location today); guest accounts and what
   they may change; profiles or presets ("Night", "Portable"); editing the configuration
   as text. The Listen island still says Auto squelch keeps "6 dB" while the margin is now
@@ -597,6 +638,12 @@ Condensed + Noto Sans, Tabler-based icons).
   the `I` key in the keymap pass.
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
+- Theme follow-ups: confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
+  delete the other two; more light grounds later (a cool "Mist"?) only if asked; whether the
+  Ink tint should also follow the accent on the Pi image UI; the Map legend's "Aircraft"
+  swatch uses the accent while aircraft are coloured by altitude; the drawer resize grip is
+  faint until hovered; dark `--wk-text-5` hints stay under AA (decorative only). The ⌘K fuzzy
+  matcher still lets a few weak rows through below the right hit (e.g. "ppm").
 
 ## Core gaps
 
@@ -604,79 +651,35 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-11, at the end of the shell, Scanner composer and theming session.
-**Topic: colour themes, second pass (paper light, grounds incl. true black, accents).**
+Handoff written 2026-10-11, at the end of the colour themes second pass.
+**Topic: keyboard map pass** (single-key shortcuts, `G` chords, the `S` keep/save clash, the
+`I` identify key, palette on mobile), unless the owner picks another from the open questions.
 
-**State.** The owner reviewed the shell on the canvas and accepted it: one 16 px gutter,
-full-height overlay drawers (only Receiver and the tuned card slide left), dock regrouped,
-tuned card drag + snap + minimise, the Scanner composer (band ruler, ranges, per-range
-protocols). Every board runs on the tokens in [THEME-TOKENS.md](THEME-TOKENS.md) with dark
-(unchanged), light and five accents, set from Settings › Display or the Immersive tweaks.
-
-**Owner feedback on light (2026-10-11).** Light feels half done: a light shell floating over a
-dark spectrum and waterfall. Explore an **everything-light** theme, the plot and the Map
-included, with a more pleasant light: **paper-like** (warm off-white grounds, ink-like text,
-soft shadows), not a cold grey-white UI. This reopens the earlier decision "the plot stays a
-dark instrument screen" (record the outcome in the decision log either way).
+**State.** Every board runs on tokens v2 ([THEME-TOKENS.md](THEME-TOKENS.md)): Theme × ground
+× accent, Paper light with everything light, Match-accent waterfall, ⌘K colour scopes and every
+setting reachable from ⌘K. Ink + phosphor dark is unchanged.
 
 **Tasks, in order.**
-1. Sync: `git fetch origin && git merge origin/main`, then read this file, THEME-TOKENS.md and
-   the boards on the canvas (Immersive first).
-2. Brainstorm with the owner before drawing (one question at a time). Questions to settle:
-   - Paper direction: how warm, how much texture (none / subtle grain), which ink colours;
-     does each accent get a paper-friendly variant (deeper, less saturated)?
-   - Spectrum on paper: trace and fill colours, grid, squelch line, tags, the "now" glow; how
-     the waterfall ramp works on a light ground (paper → ink, or paper → accent → ink) while
-     weak signals stay visible. Prototype 2–3 ramps side by side on the Spectrum board and let
-     the owner pick by eye.
-   - Map on paper: a cartographic, chart-like style (the current light Map is a start).
-   - Do we keep "Dark plot" as an option in light mode (Settings › Display › Plot: Paper /
-     Dark), or does light mean everything light?
-   - Glass on paper: the islands' blur/translucency recipe over a light plot.
-3. Draw it: update the light tokens (keep dark and the token names unchanged), the Spectrum,
-   waterfall, BandStrip and Map light treatments, then check every board in light.
-4. **Palette bug:** typing "theme" in ⌘K finds nothing. Cause: Palette.dc.html keeps its own
-   hard-coded list of settings (`sc(...)` entries, e.g. "Waterfall palette" has the keyword
-   "theme") instead of the Settings registry, so Theme and Accent (added to Settings › Display
-   this session) are missing. Fix: add Theme and Accent as setting scopes with live preview,
-   wired to Immersive's `theme` / `accent` like Settings' `onSet`. Better, and already an open
-   question: make the palette list every setting from the one Settings registry ("Open in
-   Settings" on a row), so this cannot drift again.
-5. **Accents feel odd; rethink colour as ground + accent (owner, 2026-10-11).** With a non-green
-   accent (coral in the owner's screenshot) only highlights change: the surfaces keep their
-   green-tinted ink, the waterfall stays on its own "Phosphor" palette, so a pink trace sits
-   over a green waterfall in a green shell. The owner wants to be able to change the
-   **background** too, and a **full black** preset. Questions to settle with the owner:
-   - Grounds as presets: Ink (today's green-black), Graphite (neutral grey), True black
-     (OLED, pure #000 plot and near-black islands), Paper (the light theme), maybe one more
-     (navy?). Free colour picking stays out (contrast cannot be guaranteed).
-   - Does each ground tint its neutrals (greys follow the ground, not the accent)?
-   - Accent per ground or free mix (some pairs clash: phosphor on paper, mono on black)?
-   - Waterfall palette: follow the accent by default ("Match accent"), keeping Amber / Mono /
-     classic ramps as explicit choices; the trace, fill and waterfall should never disagree.
-   - Settings › Display then reads: Theme (System / Dark / Light), Ground (per mode),
-     Accent, Waterfall colours; plus ⌘K entries for each.
-   Update THEME-TOKENS.md: grounds become a third axis (`data-wk-ground`), keeping the
-   existing token names so boards only gain the new attribute.
-6. Smaller theme points from the agents: light "coral" is pushed toward rose to stay clear of
-   the danger red; neutral greys stay green-tinted whatever the accent; AIS vessel blue sits
-   close to the ice accent on the Map; JSON numbers use amber (reserved for state);
-   `--wk-text-5` hint text is under AA in dark; the drawer resize grip is faint until hovered;
-   the waterfall palette "Phosphor" shares its name with the accent.
-7. End of session: update this file (decision log, open questions, next session), CORE-GAPS
+1. Sync: `git fetch origin && git merge origin/main`, then read this file and the boards on the
+   canvas (Immersive first).
+2. Owner review of the themes on the real canvas (show the Browser pane): try each ground and
+   accent from Settings › Display and ⌘K; pick the Paper waterfall ramp on the Spectrum board
+   (`paperRamp` a / b / c), then remove the losing ramps and the tweak. Read canvas comments.
+3. The keymap pass, brainstormed with the owner before drawing (one question at a time).
+4. End of session: update this file (decision log, open questions, next session), CORE-GAPS
    if anything needs core, snapshot the boards into `docs/web/canvas/`, commit and push.
 
 **How the canvas work went well (keep doing it).**
-- Research and inventories go to subagents. Board work goes to parallel agents that each own
-  distinct files and publish only those; a refused publish means re-read and reapply. A
-  shared spec file (like THEME-TOKENS.md) lets several agents convert boards consistently.
-- The canvas pane is often hidden, so agents verify in a local headless harness kept in the
-  git-ignored `.agents/web-canvas-harness/` (README there). Always render with ALL current
-  boards; a stale embedded board gives false results. Ask the owner to show the Browser pane
-  when a real canvas check matters.
+- Settle the shared spec first (here: the v2 token block, written and contrast-checked before
+  any board work), apply mechanical changes to every board with one script, then give
+  parallel agents distinct files and a shared brief in the scratchpad. Agents edit local
+  copies and verify only; the orchestrator publishes all boards in one call.
+- The canvas pane is often hidden, so agents verify in the git-ignored
+  `.agents/web-canvas-harness/` (README there; `PORT=<n> node shot.js …` lets several agents
+  render at once, each with its own boards copy). Always render with ALL current boards.
 - To edit, read the Artifact type instructions (Artifact `read` on the canvas URL), work on
-  copies in the session scratchpad, publish with `root` and `files`, then copy every board read
-  fresh from the canvas into `docs/web/canvas/` and commit.
+  copies in the session scratchpad, publish with `root` and `files`, then copy every board into
+  `docs/web/canvas/` and commit.
 
 ## Handoff to the dev team (later)
 
