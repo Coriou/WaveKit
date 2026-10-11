@@ -2,6 +2,7 @@
  * Tuner Routes - RTL-TCP tuner control endpoints
  */
 
+import { TUNER_REST_COMMAND_POLICY } from "../../core/tuner-controller.js"
 import type { FastifyInstance, FastifyPluginAsync, FastifyReply } from "fastify"
 import type {
 	TunerController,
@@ -27,6 +28,19 @@ import type {
 /** Every REST tuner write is an operator command (signal discovery spec § 10.3). */
 const REST: TunerWriteOptions = { origin: "rest" }
 
+const gainModeSchema = {
+	type: "string",
+	enum: [...TUNER_REST_COMMAND_POLICY[2].rule.values],
+}
+const directSamplingSchema = {
+	type: "string",
+	enum: [...TUNER_REST_COMMAND_POLICY[8].rule.values],
+}
+const testModeSchema = { type: TUNER_REST_COMMAND_POLICY[6].rule.kind }
+const agcModeSchema = { type: TUNER_REST_COMMAND_POLICY[7].rule.kind }
+const offsetTuningSchema = { type: TUNER_REST_COMMAND_POLICY[9].rule.kind }
+const biasTeeSchema = { type: TUNER_REST_COMMAND_POLICY[13].rule.kind }
+
 const tunerIfGainSchema = {
 	type: "object",
 	nullable: true,
@@ -43,16 +57,16 @@ const tunerStateSchema = {
 		sourceId: { type: "string" },
 		frequency: { type: "integer" },
 		sampleRate: { type: "integer" },
-		gainMode: { type: "string", enum: ["manual", "agc"] },
+		gainMode: gainModeSchema,
 		gain: { type: "integer" },
 		ppm: { type: "integer" },
-		agcMode: { type: "boolean" },
-		biasTee: { type: "boolean" },
-		directSampling: { type: "string", enum: ["off", "i", "q"] },
-		offsetTuning: { type: "boolean" },
+		agcMode: agcModeSchema,
+		biasTee: biasTeeSchema,
+		directSampling: directSamplingSchema,
+		offsetTuning: offsetTuningSchema,
 		ifGain: { type: "integer" },
 		tunerIfGain: tunerIfGainSchema,
-		testMode: { type: "boolean" },
+		testMode: testModeSchema,
 		rtlXtal: { type: "integer" },
 		tunerXtal: { type: "integer" },
 		tunerGainIndex: { type: "integer" },
@@ -96,16 +110,16 @@ const tunerConfigUpdateSchema = {
 	properties: {
 		frequency: { type: "integer" },
 		sampleRate: { type: "integer" },
-		gainMode: { type: "string", enum: ["manual", "agc"] },
+		gainMode: gainModeSchema,
 		gain: { type: "integer" },
 		ppm: { type: "integer" },
-		agcMode: { type: "boolean" },
-		biasTee: { type: "boolean" },
-		directSampling: { type: "string", enum: ["off", "i", "q"] },
-		offsetTuning: { type: "boolean" },
+		agcMode: agcModeSchema,
+		biasTee: biasTeeSchema,
+		directSampling: directSamplingSchema,
+		offsetTuning: offsetTuningSchema,
 		ifGain: { type: "integer" },
 		tunerIfGain: tunerIfGainSchema,
-		testMode: { type: "boolean" },
+		testMode: testModeSchema,
 		rtlXtal: { type: "integer" },
 		tunerXtal: { type: "integer" },
 		tunerGainIndex: { type: "integer" },
@@ -267,7 +281,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set gain mode",
 				body: {
 					type: "object",
-					properties: { mode: { type: "string", enum: ["manual", "agc"] } },
+					properties: { mode: gainModeSchema },
 					required: ["mode"],
 					additionalProperties: false,
 				},
@@ -403,7 +417,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set test mode",
 				body: {
 					type: "object",
-					properties: { enabled: { type: "boolean" } },
+					properties: { enabled: testModeSchema },
 					required: ["enabled"],
 					additionalProperties: false,
 				},
@@ -437,7 +451,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set AGC mode",
 				body: {
 					type: "object",
-					properties: { enabled: { type: "boolean" } },
+					properties: { enabled: agcModeSchema },
 					required: ["enabled"],
 					additionalProperties: false,
 				},
@@ -471,7 +485,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set bias-T power",
 				body: {
 					type: "object",
-					properties: { enabled: { type: "boolean" } },
+					properties: { enabled: biasTeeSchema },
 					required: ["enabled"],
 					additionalProperties: false,
 				},
@@ -505,7 +519,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set direct sampling mode",
 				body: {
 					type: "object",
-					properties: { mode: { type: "string", enum: ["off", "i", "q"] } },
+					properties: { mode: directSamplingSchema },
 					required: ["mode"],
 					additionalProperties: false,
 				},
@@ -539,7 +553,7 @@ export const tunerRoutes: FastifyPluginAsync<TunerRoutesOptions> = async (
 				summary: "Set offset tuning",
 				body: {
 					type: "object",
-					properties: { enabled: { type: "boolean" } },
+					properties: { enabled: offsetTuningSchema },
 					required: ["enabled"],
 					additionalProperties: false,
 				},

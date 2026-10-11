@@ -86,6 +86,118 @@ const RTL_TCP_COMMANDS = {
 	SET_TUNER_IF_GAIN: 0x0f,
 } as const
 
+function freezeRestPolicy<T extends readonly object[]>(rows: T): T {
+	for (const row of rows) Object.freeze(row)
+	Object.freeze(rows)
+	return rows
+}
+
+/** The admitted REST argument policy, independent of receiver qualification. */
+export const TUNER_REST_COMMAND_POLICY = freezeRestPolicy([
+	{
+		id: "frequency",
+		unit: "Hz",
+		opcode: RTL_TCP_COMMANDS.SET_FREQUENCY,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.frequency }),
+	},
+	{
+		id: "sampleRate",
+		unit: "Hz",
+		opcode: RTL_TCP_COMMANDS.SET_SAMPLE_RATE,
+		rule: Object.freeze({
+			kind: "integer-ranges",
+			ranges: Object.freeze([
+				Object.freeze({ ...RTL_SAMPLE_RATE_RANGES[0] }),
+				Object.freeze({ ...RTL_SAMPLE_RATE_RANGES[1] }),
+			] as const),
+		}),
+	},
+	{
+		id: "gainMode",
+		unit: "enum",
+		opcode: RTL_TCP_COMMANDS.SET_GAIN_MODE,
+		rule: Object.freeze({
+			kind: "enum",
+			values: Object.freeze(["manual", "agc"]),
+		}),
+	},
+	{
+		id: "gain",
+		unit: "tenthsDb",
+		opcode: RTL_TCP_COMMANDS.SET_GAIN,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.gain }),
+	},
+	{
+		id: "ppm",
+		unit: "ppm",
+		opcode: RTL_TCP_COMMANDS.SET_FREQ_CORRECTION,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.ppm }),
+	},
+	{
+		id: "ifGain",
+		unit: "rawInteger",
+		opcode: RTL_TCP_COMMANDS.SET_IF_GAIN,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.uint32 }),
+	},
+	{
+		id: "testMode",
+		unit: "boolean",
+		opcode: RTL_TCP_COMMANDS.SET_TEST_MODE,
+		rule: Object.freeze({ kind: "boolean" }),
+	},
+	{
+		id: "agcMode",
+		unit: "boolean",
+		opcode: RTL_TCP_COMMANDS.SET_AGC_MODE,
+		rule: Object.freeze({ kind: "boolean" }),
+	},
+	{
+		id: "directSampling",
+		unit: "enum",
+		opcode: RTL_TCP_COMMANDS.SET_DIRECT_SAMPLING,
+		rule: Object.freeze({
+			kind: "enum",
+			values: Object.freeze(["off", "i", "q"]),
+		}),
+	},
+	{
+		id: "offsetTuning",
+		unit: "boolean",
+		opcode: RTL_TCP_COMMANDS.SET_OFFSET_TUNING,
+		rule: Object.freeze({ kind: "boolean" }),
+	},
+	{
+		id: "rtlXtal",
+		unit: "Hz",
+		opcode: RTL_TCP_COMMANDS.SET_RTL_XTAL,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.uint32 }),
+	},
+	{
+		id: "tunerXtal",
+		unit: "Hz",
+		opcode: RTL_TCP_COMMANDS.SET_TUNER_XTAL,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.uint32 }),
+	},
+	{
+		id: "gainIndex",
+		unit: "index",
+		opcode: RTL_TCP_COMMANDS.SET_TUNER_GAIN_INDEX,
+		rule: Object.freeze({ kind: "integer-range", ...VALIDATION.uint32 }),
+	},
+	{
+		id: "biasTee",
+		unit: "boolean",
+		opcode: RTL_TCP_COMMANDS.SET_BIAS_TEE,
+		rule: Object.freeze({ kind: "boolean" }),
+	},
+	{
+		id: "tunerIfGain",
+		unit: "stageRawPair",
+		opcode: RTL_TCP_COMMANDS.SET_TUNER_IF_GAIN,
+		rule: Object.freeze({ kind: "uint16-pair" }),
+	},
+] as const)
+
 // Command names for logging (matches tuner-relay.ts)
 const COMMAND_NAMES: Record<number, string> = {
 	0x01: "set-frequency",
