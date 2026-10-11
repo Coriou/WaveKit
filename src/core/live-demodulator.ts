@@ -52,6 +52,7 @@ import {
 	type DemodRateInfo,
 } from "./live-demod-pipeline.js"
 import type { FanoutManager } from "./fanout-manager.js"
+import type { SourceFanoutRouter } from "./source-fanout-router.js"
 import type { SourceManager } from "./source-manager.js"
 
 export type { LiveDemodConfig } from "../config.js"
@@ -138,7 +139,9 @@ export { streamHeaders, wavStreamHeader } from "./audio-stream-server.js"
 export class LiveDemodulator extends EventEmitter {
 	private readonly log: Logger
 	private readonly sourceManager: SourceManager
-	private readonly fanoutManager: FanoutManager
+	private readonly fanoutManager: FanoutManager | SourceFanoutRouter
+	private branchFanout: FanoutManager | null = null
+	private legacySourceId: string | null = null
 	private readonly options: Required<LiveDemodulatorOptions>
 	private config: LiveDemodConfig
 	private readonly http: AudioHttpServer
@@ -162,7 +165,7 @@ export class LiveDemodulator extends EventEmitter {
 	constructor(
 		logger: Logger,
 		sourceManager: SourceManager,
-		fanoutManager: FanoutManager,
+		fanoutManager: FanoutManager | SourceFanoutRouter,
 		config: LiveDemodConfig,
 		options: LiveDemodulatorOptions = {},
 	) {
@@ -204,6 +207,7 @@ export class LiveDemodulator extends EventEmitter {
 			if (!this.branchStream) {
 				const sourceId = this.resolveSourceId()
 				if (!sourceId) throw this.noSourceError()
+				this.planFor(sourceId, this.config)
 				this.activeSourceId = sourceId
 				this.attachBranch(sourceId)
 			}
@@ -215,6 +219,7 @@ export class LiveDemodulator extends EventEmitter {
 
 		const sourceId = this.resolveSourceId()
 		if (!sourceId) throw this.noSourceError()
+		this.planFor(sourceId, this.config)
 
 		this.activeSourceId = sourceId
 		this.consecutiveFailures = 0
@@ -264,9 +269,13 @@ export class LiveDemodulator extends EventEmitter {
 		).some(key => !NODE_ONLY_KEYS.has(key) && validated[key] !== previous[key])
 		const active = this.http.listening || this.run !== null
 
-		// Fail before touching the running pipeline if the new plan is invalid.
-		if (active && pipelineChanged && !sourceChanged && this.activeSourceId) {
-			this.planFor(this.activeSourceId, validated)
+		// Validate the new source and RF plan before detaching the current stream.
+		if (sourceChanged || (active && pipelineChanged)) {
+			const sourceId = sourceChanged
+				? this.resolveSourceId(validated)
+				: this.activeSourceId
+			if (!sourceId) throw this.noSourceError()
+			this.planFor(sourceId, validated)
 		}
 
 		this.config = validated
@@ -350,9 +359,12 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.listenerCount("error") > 0) this.emit("error", err)
 	}
 
-	private resolveSourceId(): string | null {
-		if (this.config.sourceId) {
-			return this.config.sourceId
+	private resolveSourceId(config = this.config): string | null {
+		if (config.sourceId) {
+			return config.sourceId
+		}
+		if ("getDefaultSourceId" in this.fanoutManager) {
+			return this.fanoutManager.getDefaultSourceId() ?? null
 		}
 
 		const sources = this.sourceManager.getAllStatus()
@@ -360,9 +372,15 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private attachBranch(sourceId: string): void {
+		// A legacy single fanout cannot switch radios; retain its initial identity.
+		if (!("getFanout" in this.fanoutManager)) this.legacySourceId = sourceId
+		this.branchFanout =
+			"getFanout" in this.fanoutManager
+				? this.fanoutManager.getFanout(sourceId)
+				: this.fanoutManager
 		const branchId = `live-demod-${sourceId}`
 		this.branchId = branchId
-		this.branchStream = this.fanoutManager.addBranch({
+		this.branchStream = this.branchFanout.addBranch({
 			id: branchId,
 			sourceId,
 		})
@@ -377,7 +395,8 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.branchErrorHandler) {
 			this.branchStream.removeListener("error", this.branchErrorHandler)
 		}
-		this.fanoutManager.removeBranch(this.branchId)
+		this.branchFanout?.removeBranch(this.branchId)
+		this.branchFanout = null
 		this.branchId = null
 		this.branchStream = null
 		this.branchErrorHandler = null
@@ -485,6 +504,12 @@ export class LiveDemodulator extends EventEmitter {
 	}
 
 	private planFor(sourceId: string, config: LiveDemodConfig) {
+		if (this.legacySourceId && sourceId !== this.legacySourceId) {
+			throw new WaveKitError(
+				"Changing live audio sources requires a source fanout router",
+				"LIVE_DEMOD_SOURCE_ROUTING_UNAVAILABLE",
+			)
+		}
 		const caps = this.sourceManager.getCaps(sourceId)
 		if (caps?.kind !== "iq") {
 			throw new WaveKitError(

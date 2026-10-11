@@ -4,8 +4,13 @@ import { join } from "node:path"
 import { describe, expect, it, vi } from "vitest"
 import { createServer, type Socket } from "node:net"
 import { once } from "node:events"
+import * as fc from "fast-check"
 import pino from "pino"
-import { SourceManager } from "../../../src/core/source-manager.js"
+import {
+	SourceManager,
+	alignIqChunk,
+	iqFrameBytes,
+} from "../../../src/core/source-manager.js"
 
 describe("IQ source frame boundaries", () => {
 	it("emits complete CU8 pairs across odd TCP chunks and suppresses unchanged caps", async () => {
@@ -20,6 +25,7 @@ describe("IQ source frame boundaries", () => {
 			throw new Error("Missing address")
 		const manager = new SourceManager(pino({ level: "silent" }))
 		try {
+			const accepted = once(server, "connection")
 			const stream = await manager.connect({
 				id: "iq",
 				type: "rtl_tcp",
@@ -35,6 +41,7 @@ describe("IQ source frame boundaries", () => {
 					exclusive: false,
 				},
 			})
+			await accepted
 			const chunks: Buffer[] = []
 			stream.on("data", chunk => chunks.push(Buffer.from(chunk)))
 			const changed = vi.fn()
@@ -66,10 +73,11 @@ describe("IQ source frame boundaries", () => {
 			peer.write(Buffer.from([0xff]))
 			await new Promise(resolve => setTimeout(resolve, 20))
 			const reconnected = once(manager, "connected")
+			const acceptedReconnect = once(server, "connection")
 			const previousPeer = peer
 			peer.destroy()
-			await reconnected
-			await vi.waitFor(() => expect(peer).not.toBe(previousPeer))
+			await Promise.all([reconnected, acceptedReconnect])
+			expect(peer).not.toBe(previousPeer)
 			peer.write(Buffer.concat([header, Buffer.from([0x10, 0x20])]))
 			await vi.waitFor(() =>
 				expect(Buffer.concat(chunks)).toEqual(
@@ -114,4 +122,89 @@ describe("IQ source frame boundaries", () => {
 			rmSync(directory, { recursive: true, force: true })
 		}
 	})
+})
+
+describe("IQ frame alignment for every IQ format", () => {
+	it("frame sizes: U8 pair 2, S16 pair 4, F32 pair 8; audio and auto are not aligned", () => {
+		expect(iqFrameBytes({ kind: "iq", format: "U8_IQ" })).toBe(2)
+		expect(iqFrameBytes({ kind: "iq", format: "S16_IQ" })).toBe(4)
+		expect(iqFrameBytes({ kind: "iq", format: "FLOAT32LE" })).toBe(8)
+		expect(iqFrameBytes({ kind: "audio_pcm", format: "FLOAT32LE" })).toBeNull()
+		expect(iqFrameBytes({ kind: "audio_pcm", format: "S16LE" })).toBeNull()
+		expect(iqFrameBytes({ kind: "iq", format: "auto" })).toBeNull()
+	})
+
+	// Feature: signal-discovery-scanner (§ 4.1 alignment; no numbered property)
+	it("any split of a stream yields whole frames, in order, losing only the unfinished tail", () => {
+		fc.assert(
+			fc.property(
+				fc.constantFrom(2, 4, 8),
+				fc.uint8Array({ minLength: 0, maxLength: 400 }),
+				fc.array(fc.integer({ min: 1, max: 37 }), {
+					minLength: 1,
+					maxLength: 40,
+				}),
+				(frame, bytes, cuts) => {
+					const data = Buffer.from(bytes)
+					let remainder: Buffer = Buffer.alloc(0)
+					const out: Buffer[] = []
+					let offset = 0
+					let i = 0
+					while (offset < data.length) {
+						const length = cuts[i++ % cuts.length]!
+						const result = alignIqChunk(
+							remainder,
+							data.subarray(offset, offset + length),
+							frame,
+						)
+						offset += length
+						expect(result.aligned.length % frame).toBe(0)
+						expect(result.remainder.length).toBeLessThan(frame)
+						out.push(result.aligned)
+						remainder = result.remainder
+					}
+					const whole = data.length - (data.length % frame)
+					expect(Buffer.concat(out)).toEqual(data.subarray(0, whole))
+					expect(remainder).toEqual(data.subarray(whole))
+				},
+			),
+			{ numRuns: 100 },
+		)
+	})
+
+	it.each([
+		["S16_IQ", 4],
+		["FLOAT32LE", 8],
+	] as const)(
+		"drops the unmatched tail of a %s recording at each loop boundary",
+		async (format, frame) => {
+			const directory = mkdtempSync(join(tmpdir(), "wavekit-iq-"))
+			const path = join(directory, `odd-${format}.bin`)
+			const whole = Buffer.from(
+				Array.from({ length: 2 * frame }, (_, n) => n + 1),
+			)
+			writeFileSync(
+				path,
+				Buffer.concat([whole, Buffer.from([0xee, 0xee, 0xee])]),
+			)
+			const manager = new SourceManager(pino({ level: "silent" }))
+			try {
+				const stream = await manager.connect({
+					id: `loop-${format}`,
+					type: "recording",
+					filePath: path,
+					loop: true,
+					playbackSpeed: 1,
+					caps: { kind: "iq", format, sampleRate: 2048000, exclusive: false },
+				})
+				const chunks: Buffer[] = []
+				stream.on("data", chunk => chunks.push(Buffer.from(chunk)))
+				await vi.waitFor(() => expect(chunks.length).toBeGreaterThanOrEqual(3))
+				expect(chunks.every(chunk => chunk.equals(whole))).toBe(true)
+			} finally {
+				await manager.disconnectAll()
+				rmSync(directory, { recursive: true, force: true })
+			}
+		},
+	)
 })

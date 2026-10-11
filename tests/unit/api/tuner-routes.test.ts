@@ -111,6 +111,7 @@ describe("Tuner Routes", () => {
 		expect(tunerController.setFrequency).toHaveBeenCalledWith(
 			"rtl-1",
 			145_000_000,
+			{ origin: "rest" },
 		)
 	})
 

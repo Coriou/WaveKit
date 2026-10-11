@@ -11,6 +11,8 @@ import type { Readable } from "node:stream"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import { iqClientBufferLimit } from "./client-buffer.js"
 import type { BranchConfig, FanoutManager } from "./fanout-manager.js"
+import type { SourceFanoutRouter } from "./source-fanout-router.js"
+import { WaveKitError } from "../utils/errors.js"
 import type {
 	RtlTcpHeaderInfo,
 	SourceCaps,
@@ -138,7 +140,8 @@ const COMMAND_NAMES: Record<number, string> = {
 export class TunerRelay extends EventEmitter {
 	private readonly log: Logger
 	private readonly sourceManager: SourceManager
-	private readonly fanoutManager: FanoutManager
+	private readonly fanoutManager: FanoutManager | SourceFanoutRouter
+	private branchFanout: FanoutManager | null = null
 	private readonly config: TunerRelayConfig
 	private server: net.Server | null = null
 	private branchStream: Readable | null = null
@@ -165,14 +168,21 @@ export class TunerRelay extends EventEmitter {
 	constructor(
 		logger: Logger,
 		sourceManager: SourceManager,
-		fanoutManager: FanoutManager,
+		fanoutManager: FanoutManager | SourceFanoutRouter,
 		config: TunerRelayConfig,
 	) {
 		super()
 		this.log = createComponentLogger(logger, "TunerRelay")
 		this.sourceManager = sourceManager
 		this.fanoutManager = fanoutManager
-		this.config = config
+		this.config = {
+			...config,
+			sourceId:
+				config.sourceId ??
+				("getDefaultSourceId" in fanoutManager
+					? fanoutManager.getDefaultSourceId()
+					: undefined),
+		}
 		this.commandHistoryLimit = Math.max(
 			0,
 			config.commandHistoryLimit ?? DEFAULT_COMMAND_HISTORY_LIMIT,
@@ -187,6 +197,14 @@ export class TunerRelay extends EventEmitter {
 		if (this.server) {
 			this.log.warn("Tuner relay already running")
 			return
+		}
+		if ("getFanout" in this.fanoutManager) {
+			if (!this.config.sourceId) {
+				throw new WaveKitError(
+					"No shared source is available for tuner relay; select a source explicitly",
+					"TUNER_RELAY_NO_SOURCE",
+				)
+			}
 		}
 		if (!this.config.sourceId) {
 			this.log.warn(
@@ -340,7 +358,11 @@ export class TunerRelay extends EventEmitter {
 		if (this.config.sourceId) {
 			branchConfig.sourceId = this.config.sourceId
 		}
-		this.branchStream = this.fanoutManager.addBranch(branchConfig)
+		this.branchFanout =
+			"getFanout" in this.fanoutManager
+				? this.fanoutManager.getFanout(this.config.sourceId)
+				: this.fanoutManager
+		this.branchStream = this.branchFanout.addBranch(branchConfig)
 
 		this.dataHandler = (chunk: Buffer) => this.distributeToClients(chunk)
 		this.branchStream.on("data", this.dataHandler)
@@ -358,9 +380,10 @@ export class TunerRelay extends EventEmitter {
 		}
 
 		if (this.branchId) {
-			this.fanoutManager.removeBranch(this.branchId)
+			this.branchFanout?.removeBranch(this.branchId)
 			this.branchId = null
 		}
+		this.branchFanout = null
 
 		this.branchStream = null
 	}

@@ -68,6 +68,7 @@ import { channelisedRatePlan } from "../core/channelizer/rate-plan.js"
 import { isValidRtlSampleRate } from "../core/tuner-controller.js"
 import type { FanoutManager } from "../core/fanout-manager.js"
 import type { SourceManager, SourceCaps } from "../core/source-manager.js"
+import { WaveKitError } from "../utils/errors.js"
 import { createComponentLogger, type Logger } from "../utils/logger.js"
 import {
 	validateDecoderVersion,
@@ -162,6 +163,14 @@ interface DecoderState {
 	 * band-suspended. Cleared to "auto" by stop; kept by restart.
 	 */
 	startMode: DecoderStartMode
+	/** "scanner": a runtime-only probe owned by a scanner job (spec § 6.5). */
+	owner: "config" | "scanner"
+	/** Owning scanner job of a probe; null for configured decoders. */
+	scannerJobId: string | null
+	/** Scanner-provided input used instead of a fanout branch (probes only). */
+	input: Readable | null
+	/** True while `input` is attached to the decoder. */
+	inputAttached: boolean
 }
 
 interface DecoderSuspension {
@@ -249,6 +258,10 @@ export interface DecoderManagerEvents {
 	"decoder:health": (decoderId: string, health: DecoderHealth) => void
 	/** Emitted after stop/exit cleanup so status consumers read the final state */
 	"decoder:status-changed": (decoderId: string) => void
+	/** Emitted after a decoder (configured or probe) is added */
+	"decoder:created": (decoderId: string) => void
+	/** Emitted after a decoder is removed from management */
+	"decoder:removed": (decoderId: string) => void
 	/** Emitted when decoder version validation fails (Requirement 27.2) */
 	"decoder:version-mismatch": (
 		decoderId: string,
@@ -272,6 +285,11 @@ const DEFAULT_CONFIG: DecoderManagerConfig = {
 /** Start intent; an omitted intent keeps the current start mode. */
 export interface DecoderStartIntent {
 	startMode: DecoderStartMode
+	/**
+	 * Throw SOURCE_HELD_BY_SCANNER instead of recording a suspended start when
+	 * a scanner sweep holds the source (REST routes only, spec § 10.4).
+	 */
+	refuseIfHeld?: boolean
 }
 
 /**
@@ -302,13 +320,19 @@ export class DecoderManager extends EventEmitter {
 		| ((sourceId: string, caps: SourceCaps) => void)
 		| null = null
 	private capsChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
-	private capsWorkerRunning = false
+	/** Tail of the serial caps worker; each drain runs after the previous one. */
+	private capsWork: Promise<void> = Promise.resolve()
 	private destroying = false
 	private readonly pendingCapsChanges = new Map<
 		string,
 		PendingSourceEvaluation
 	>()
 	private readonly bandOverrides: BandOverrideStore
+	/**
+	 * Sources held by scanner sweeps, keyed by holder (scanner job id);
+	 * configured decoders there stay suspended while any holder remains.
+	 */
+	private readonly heldSources = new Map<string, Set<string>>()
 	private static readonly CAPS_CHANGE_DEBOUNCE_MS = 300
 	/** Optional core channelizer (addendum §4); null keeps the raw fanout path. */
 	private channelizer: ChannelProvider | null = null
@@ -387,6 +411,13 @@ export class DecoderManager extends EventEmitter {
 	 * @throws RegistryError if the decoder type is not registered
 	 */
 	createDecoder(config: DecoderConfig): Decoder {
+		return this.registerDecoder(config, null)
+	}
+
+	private registerDecoder(
+		config: DecoderConfig,
+		probe: { jobId: string; input: Readable | null } | null,
+	): Decoder {
 		if (this.decoders.has(config.id)) {
 			this.log.warn(
 				{ decoderId: config.id },
@@ -396,7 +427,11 @@ export class DecoderManager extends EventEmitter {
 		}
 
 		this.log.info(
-			{ decoderId: config.id, type: config.type },
+			{
+				decoderId: config.id,
+				type: config.type,
+				owner: probe ? "scanner" : "config",
+			},
 			"Creating decoder",
 		)
 
@@ -448,13 +483,198 @@ export class DecoderManager extends EventEmitter {
 			channelStale: false,
 			keepFailureAccounting: false,
 			startMode: "auto",
+			owner: probe ? "scanner" : "config",
+			scannerJobId: probe?.jobId ?? null,
+			input: probe?.input ?? null,
+			inputAttached: false,
 		}
 
 		this.decoders.set(config.id, state)
 		this.setupDecoderEventHandlers(state)
 		this.refreshRatePlan(state)
+		this.emit("decoder:created", config.id)
 
 		return decoder
+	}
+
+	/**
+	 * Creates and starts a scanner probe (spec § 6.5): not in config, never
+	 * persisted, not band-checked, held or pinned, never auto-restarted. With
+	 * `input`, it reads that stream instead of a fanout branch. Resolves after
+	 * the process started; on failure the instance is removed and the error
+	 * rethrown.
+	 */
+	async createEphemeralDecoder(
+		config: DecoderConfig,
+		opts: { owner: "scanner"; jobId: string; input?: Readable },
+	): Promise<Decoder> {
+		if (this.decoders.has(config.id)) {
+			throw new WaveKitError(
+				`Decoder already exists: ${config.id}`,
+				"DECODER_EXISTS",
+			)
+		}
+		const decoder = this.registerDecoder(config, {
+			jobId: opts.jobId,
+			input: opts.input ?? null,
+		})
+		const state = this.decoders.get(config.id)!
+		state.desiredRunning = true
+		state.intentionallyStopped = false
+		state.rateGeneration++
+		try {
+			const outcome = await this.wireDecoderToFanout(state)
+			if (!this.probeLive(state)) throw this.probeRemovedError(config.id)
+			if (!outcome.wired) {
+				throw new WaveKitError(
+					`Scanner probe ${config.id} could not be wired: ${outcome.superseded ? "superseded" : `${outcome.reasonCode}: ${outcome.detail}`}`,
+					"PROBE_NOT_WIRED",
+				)
+			}
+			await decoder.start()
+			if (!this.probeLive(state)) {
+				// Removed or stopped while spawning: that stop ran before the
+				// process existed, so stop it again (this also clears timers the
+				// decoder armed after the spawn).
+				try {
+					await decoder.stop()
+				} catch (stopErr: unknown) {
+					this.log.warn(
+						{ err: stopErr, decoderId: config.id },
+						"Failed to stop a scanner probe removed during its start",
+					)
+				}
+				throw this.probeRemovedError(config.id)
+			}
+			// Attach only once the process exists: attachInput starts the stream
+			// flowing and pipes to stdin only when a process is running, so an
+			// earlier attach would drain the buffered pre-roll into the byte
+			// counter instead of the decoder.
+			if (state.input) {
+				decoder.attachInput(state.input)
+				state.inputAttached = true
+			}
+		} catch (err) {
+			// A concurrent stop or removal owns the cleanup of a probe it ended.
+			if (this.probeLive(state)) {
+				state.lastError = createDecoderLastError(err, "error")
+				try {
+					await this.removeDecoder(config.id)
+				} catch (removeErr: unknown) {
+					this.log.error(
+						{ err: removeErr, decoderId: config.id },
+						"Failed to remove a scanner probe whose start failed",
+					)
+				}
+			}
+			throw err
+		}
+		this.emitStatusChanged(state)
+		return decoder
+	}
+
+	/** False once the probe was removed or stopped (e.g. by the probe pool). */
+	private probeLive(state: DecoderState): boolean {
+		return (
+			this.decoders.get(state.config.id) === state &&
+			!state.intentionallyStopped
+		)
+	}
+
+	private probeRemovedError(id: string): WaveKitError {
+		return new WaveKitError(
+			`Scanner probe ${id} was removed during its start`,
+			"PROBE_REMOVED",
+		)
+	}
+
+	/** Stops and removes a probe; no-op for unknown ids. */
+	async removeEphemeralDecoder(id: string): Promise<void> {
+		const state = this.decoders.get(id)
+		if (!state) return
+		if (state.owner !== "scanner") {
+			throw new WaveKitError(
+				`Decoder ${id} is configured, not a scanner probe`,
+				"DECODER_NOT_EPHEMERAL",
+			)
+		}
+		await this.removeDecoder(id)
+	}
+
+	/**
+	 * Holds a source for a scanner sweep (spec § 10.4): every configured
+	 * decoder on it is suspended with reason "tuner-scanning" until the last
+	 * holder released it, so per-hop caps changes do not resume and
+	 * re-suspend them. Resolves once those decoders were suspended.
+	 */
+	async holdSource(
+		sourceId: string,
+		reason: "tuner-scanning",
+		holderId: string,
+	): Promise<void> {
+		const holders = this.heldSources.get(sourceId) ?? new Set<string>()
+		holders.add(holderId)
+		this.heldSources.set(sourceId, holders)
+		this.log.info(
+			{ sourceId, reason, holderId, holders: holders.size },
+			"Source held by the scanner",
+		)
+		await this.evaluateSourceNow(sourceId)
+	}
+
+	/**
+	 * Drops one holder's hold; the source stays held while another holder
+	 * remains. Resolves once the decoders were re-evaluated (resumed).
+	 */
+	async releaseSource(sourceId: string, holderId: string): Promise<void> {
+		const holders = this.heldSources.get(sourceId)
+		if (!holders?.delete(holderId)) return
+		if (holders.size > 0) {
+			this.log.debug(
+				{ sourceId, holderId, holders: holders.size },
+				"Scanner hold released; other holders remain",
+			)
+			return
+		}
+		this.heldSources.delete(sourceId)
+		this.log.info({ sourceId, holderId }, "Source released by the scanner")
+		await this.evaluateSourceNow(sourceId)
+	}
+
+	isSourceHeld(sourceId: string): boolean {
+		return (this.heldSources.get(sourceId)?.size ?? 0) > 0
+	}
+
+	/**
+	 * Evaluates a source on the serial caps worker now. The 300 ms debounce
+	 * cannot be used for holds: every scanner hop emits caps-changed and
+	 * re-arms it, so during a sweep it would never fire. Other sources'
+	 * pending evaluations are applied by the same drain.
+	 */
+	private evaluateSourceNow(sourceId: string): Promise<void> {
+		this.enqueueSourceEvaluation(sourceId, {
+			caps: this.sourceManager?.getCaps(sourceId) ?? null,
+			adapt: false,
+		})
+		return this.drainCapsChanges()
+	}
+
+	/** The hold reason that applies to a configured stdin decoder, if any. */
+	private heldReason(state: DecoderState): "tuner-scanning" | null {
+		if (state.owner !== "config" || state.decoder.caps.input === "external")
+			return null
+		const sourceId = this.selectedSourceId(state)
+		return sourceId !== undefined && this.isSourceHeld(sourceId)
+			? "tuner-scanning"
+			: null
+	}
+
+	private assertNotHeld(state: DecoderState): void {
+		if (this.heldReason(state) === null) return
+		throw new WaveKitError(
+			`Source ${this.selectedSourceId(state)} is held by a scanner sweep; decoder ${state.config.id} can start when the sweep ends`,
+			"SOURCE_HELD_BY_SCANNER",
+		)
 	}
 
 	/**
@@ -480,6 +700,7 @@ export class DecoderManager extends EventEmitter {
 			this.log.warn({ decoderId: id }, "Decoder already running")
 			return
 		}
+		if (intent?.refuseIfHeld === true) this.assertNotHeld(state)
 
 		if (intent) state.startMode = intent.startMode
 		this.log.info(
@@ -529,7 +750,7 @@ export class DecoderManager extends EventEmitter {
 				}
 				this.log.info(
 					{ decoderId: id, reasonCode: state.suspension.reasonCode },
-					"Start recorded; decoder suspended until the source rate and band are usable",
+					"Start recorded; decoder suspended (see reasonCode)",
 				)
 				this.emitStatusChanged(state)
 				return
@@ -600,11 +821,15 @@ export class DecoderManager extends EventEmitter {
 	 * @param id - The decoder ID to restart
 	 * @throws Error if decoder not found
 	 */
-	async restartDecoder(id: string): Promise<void> {
+	async restartDecoder(
+		id: string,
+		opts: { refuseIfHeld?: boolean } = {},
+	): Promise<void> {
 		const state = this.decoders.get(id)
 		if (!state) {
 			throw new Error(`Decoder not found: ${id}`)
 		}
+		if (opts.refuseIfHeld === true) this.assertNotHeld(state)
 
 		this.log.info({ decoderId: id }, "Restarting decoder")
 
@@ -635,6 +860,8 @@ export class DecoderManager extends EventEmitter {
 		const startPromises: Promise<void>[] = []
 
 		for (const [id, state] of this.decoders) {
+			// Probes are started and owned by the scanner's probe pool (spec § 6.5).
+			if (state.owner === "scanner") continue
 			if (state.config.enabled) {
 				startPromises.push(
 					this.startDecoder(id, { startMode: "auto" }).catch(err => {
@@ -707,6 +934,11 @@ export class DecoderManager extends EventEmitter {
 			...publicSuspension(state.suspension),
 			...(state.transition ? { transition: state.transition } : {}),
 			...(state.desiredRunning ? { startMode: state.startMode } : {}),
+			owner: state.owner,
+			...(state.scannerJobId !== null
+				? { scannerJobId: state.scannerJobId }
+				: {}),
+			...(state.owner === "scanner" ? { ephemeral: true as const } : {}),
 			...describeDecoderStatusFields({
 				config: state.config,
 				caps: state.decoder.caps,
@@ -769,13 +1001,25 @@ export class DecoderManager extends EventEmitter {
 		this.log.info({ decoderId: id }, "Removing decoder")
 
 		// Also cancel pending restarts when the process has already exited.
-		await this.stopDecoder(id)
+		// A probe is removed even when its stop fails: the probe pool cannot
+		// retry a removal that would fail the same way (spec § 6.5).
+		let stopFailed = false
+		let stopError: unknown
+		try {
+			await this.stopDecoder(id)
+		} catch (err) {
+			if (state.owner !== "scanner") throw err
+			stopFailed = true
+			stopError = err
+		}
 
 		// Remove event listeners
 		state.decoder.removeAllListeners()
 
 		// Remove from map
 		this.decoders.delete(id)
+		this.emit("decoder:removed", id)
+		if (stopFailed) throw stopError
 	}
 
 	/**
@@ -961,6 +1205,16 @@ export class DecoderManager extends EventEmitter {
 		const realExit = code !== null || signal !== null
 		if (!state.intentionallyStopped && realExit && !errorThisRun)
 			state.lastError = createDecoderExitError(code, signal)
+		// Probes are never restarted: their input is single-use and the probe
+		// pool owns their lifecycle (spec § 6.5).
+		if (state.owner === "scanner") {
+			if (!state.intentionallyStopped) {
+				state.desiredRunning = false
+				this.updateDecoderHealth(state, "faulted")
+			}
+			this.emitStatusChanged(state)
+			return
+		}
 
 		// Don't restart if intentionally stopped
 		if (state.intentionallyStopped) {
@@ -1113,6 +1367,9 @@ export class DecoderManager extends EventEmitter {
 			})
 			state.assignedSourceId = sourceId
 		}
+		// Scanner probes read pre-roll + live bytes from the probe pool;
+		// createEphemeralDecoder attaches the input after the spawn.
+		if (state.input) return { wired: true }
 		const provider = this.channelizer
 		// This wiring replaces whatever channel was invalidated.
 		state.channelStale = false
@@ -1432,9 +1689,10 @@ export class DecoderManager extends EventEmitter {
 	 * Unwires a decoder from its fanout branch.
 	 */
 	private unwireDecoderFromFanout(state: DecoderState): void {
-		const { decoder, branchId, branchFanout, assignedSourceId } = state
+		const { decoder, branchId, branchFanout, assignedSourceId, inputAttached } =
+			state
 		try {
-			if (branchId) decoder.detachInput()
+			if (branchId || inputAttached) decoder.detachInput()
 		} finally {
 			try {
 				if (branchId) branchFanout?.removeBranch(branchId)
@@ -1443,6 +1701,7 @@ export class DecoderManager extends EventEmitter {
 				state.channelStale = false
 				state.branchId = null
 				state.branchFanout = null
+				state.inputAttached = false
 				state.assignedSourceId = null
 				if (assignedSourceId) {
 					this.sourceManager?.unassignDecoder(state.config.id)
@@ -1582,10 +1841,16 @@ export class DecoderManager extends EventEmitter {
 		}, DecoderManager.CAPS_CHANGE_DEBOUNCE_MS)
 	}
 
-	/** Keep stop/start cycles serialized while retaining the latest tuning request. */
-	private async drainCapsChanges(): Promise<void> {
-		if (this.capsWorkerRunning) return
-		this.capsWorkerRunning = true
+	/**
+	 * Keep stop/start cycles serialized while retaining the latest tuning
+	 * request. Resolves once every evaluation pending at call time is applied.
+	 */
+	private drainCapsChanges(): Promise<void> {
+		this.capsWork = this.capsWork.then(() => this.runPendingCapsChanges())
+		return this.capsWork
+	}
+
+	private async runPendingCapsChanges(): Promise<void> {
 		try {
 			while (this.capsChangedHandler && this.pendingCapsChanges.size > 0) {
 				const pending = new Map(this.pendingCapsChanges)
@@ -1596,8 +1861,6 @@ export class DecoderManager extends EventEmitter {
 			}
 		} catch (err) {
 			this.log.error({ err }, "Failed to apply source tuning changes")
-		} finally {
-			this.capsWorkerRunning = false
 		}
 	}
 
@@ -1617,6 +1880,8 @@ export class DecoderManager extends EventEmitter {
 		for (const [decoderId, state] of [...this.decoders]) {
 			if (this.decoders.get(decoderId) !== state) continue
 			if (this.selectedSourceId(state) !== sourceId) continue
+			// The probe pool stops and re-creates probes on every epoch (H5).
+			if (state.owner === "scanner") continue
 			const adapting = await this.evaluateRate(state, caps)
 			// A decoder whose channel was invalidated is re-wired on any evaluation.
 			if (adapting && caps && (adapt || state.channelStale))
@@ -1879,7 +2144,7 @@ export class DecoderManager extends EventEmitter {
 			this.updateDecoderHealth(state, "running")
 		this.log.info(
 			{ decoderId: id, reasonCode: state.suspension.reasonCode },
-			"Suspending decoder: source rate or band is unusable",
+			"Suspending decoder (see reasonCode)",
 		)
 		this.emitStatusChanged(state)
 
@@ -2172,7 +2437,10 @@ export class DecoderManager extends EventEmitter {
 		return request && !("invalid" in request) ? request : undefined
 	}
 
-	/** Rate first: an unusable rate outranks the band as suspension reason. */
+	/**
+	 * Scanner hold first (spec § 10.4), then rate, then band. Rate and band are
+	 * still assessed for reporting while held.
+	 */
 	private assessEligibility(
 		state: DecoderState,
 		caps?: SourceCaps | null,
@@ -2180,17 +2448,19 @@ export class DecoderManager extends EventEmitter {
 		const rate = this.assessState(state, caps)
 		const band = this.assessBand(state, caps)
 		// An operator start (pin) and the per-decoder opt-out override only
-		// the band check; an unusable rate still suspends.
+		// the band check; an unusable rate still suspends. Probes are exempt.
 		const bandSuspends =
+			state.owner === "config" &&
 			this.config.bandSuspension &&
 			this.decoderBandSuspension(state) &&
 			state.startMode !== "operator"
 		const blockedBy =
-			rate.verdict === "unusable"
+			this.heldReason(state) ??
+			(rate.verdict === "unusable"
 				? (rate.reasonCode ?? "unsupported-sample-rate")
 				: bandSuspends && band.verdict === "out-of-band"
 					? "frequency-out-of-band"
-					: null
+					: null)
 		return { rate, band, blockedBy }
 	}
 

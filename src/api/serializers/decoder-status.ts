@@ -95,6 +95,11 @@ export function toApiDecoderStatus(
 			? { transition: status.transition }
 			: {}),
 		...(status.startMode !== undefined ? { startMode: status.startMode } : {}),
+		...(status.owner !== undefined ? { owner: status.owner } : {}),
+		...(status.scannerJobId !== undefined
+			? { scannerJobId: status.scannerJobId }
+			: {}),
+		...(status.ephemeral === true ? { ephemeral: true as const } : {}),
 	}
 }
 

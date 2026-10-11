@@ -56,6 +56,10 @@ export const decoderStatusExtensionProperties = {
 	bandAssessment: decoderBandAssessmentSchema,
 	// Band defaults + operator override: who started the decoder.
 	startMode: { type: "string", enum: ["auto", "operator"] },
+	// Signal discovery scanner (CLI-COORDINATION scanner proposal).
+	owner: { type: "string", enum: ["config", "scanner"] },
+	scannerJobId: { type: "string" },
+	ephemeral: { type: "boolean", enum: [true] },
 } as const
 
 /** Every DecoderHealth value; Fastify schemas share this one list. */

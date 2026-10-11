@@ -1139,10 +1139,11 @@ describe("API Server", () => {
 				const body = JSON.parse(response.body)
 				expect(body.message).toContain("decoder-1")
 				expect(body.decoder.running).toBe(true)
-				// A bare REST start is an operator start (band defaults spec §1.1).
+				// A bare REST start is an operator start (band defaults spec §1.1)
+				// and is refused on a scanner-held source (signal discovery § 10.4).
 				expect(mockDecoderManager.startDecoder).toHaveBeenCalledWith(
 					"decoder-1",
-					{ startMode: "operator" },
+					{ startMode: "operator", refuseIfHeld: true },
 				)
 			})
 
@@ -1311,6 +1312,7 @@ describe("API Server", () => {
 				expect(body.decoder.restartCount).toBe(1)
 				expect(mockDecoderManager.restartDecoder).toHaveBeenCalledWith(
 					"decoder-1",
+					{ refuseIfHeld: true },
 				)
 			})
 

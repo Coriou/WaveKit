@@ -19,6 +19,7 @@ import {
 	loadConfig,
 	DigitalVoiceConfigSchema,
 	LiveDemodConfigSchema,
+	sourceScannerConfig,
 	type Config,
 } from "./config.js"
 import {
@@ -29,7 +30,10 @@ import { createLogger, createComponentLogger } from "./utils/logger.js"
 import { GracefulShutdown } from "./utils/graceful-shutdown.js"
 import { SourceManager } from "./core/source-manager.js"
 import { FanoutManager } from "./core/fanout-manager.js"
-import { SourceFanoutRouter } from "./core/source-fanout-router.js"
+import {
+	SourceFanoutRouter,
+	defaultSourceIdFor,
+} from "./core/source-fanout-router.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
 import { TunerController } from "./core/tuner-controller.js"
@@ -37,6 +41,8 @@ import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
 import { ChannelizerManager } from "./core/channelizer/channelizer-manager.js"
+import { ScannerService } from "./core/scanner/scanner-service.js"
+import { CpuMeter } from "./core/scanner/cpu-meter.js"
 import { DecoderRegistry } from "./decoders/registry.js"
 import { DecoderManager } from "./decoders/manager.js"
 import { createDecoderManagerOptions } from "./decoders/manager-options.js"
@@ -268,18 +274,25 @@ async function main(): Promise<void> {
 		sourceManager,
 		fanoutManager,
 		logger,
-		config.sources[0]?.id,
+		defaultSourceIdFor(config.sources),
+		{
+			dedicated: new Set(
+				config.sources
+					.filter(s => sourceScannerConfig(s).role === "dedicated")
+					.map(s => s.id),
+			),
+		},
 	)
 	const audioOutput = new AudioOutput(logger, {
 		port: config.audio.tcpPort,
 		format: config.audio.format,
 		sampleRate: config.audio.sampleRate,
 	})
-	const tunerRelay = new TunerRelay(logger, sourceManager, fanoutManager, {
+	const tunerRelay = new TunerRelay(logger, sourceManager, sourceRouting, {
 		enabled: config.tunerRelay.enabled,
 		host: config.tunerRelay.host,
 		port: config.tunerRelay.port,
-		sourceId: config.tunerRelay.sourceId ?? config.sources[0]?.id,
+		sourceId: config.tunerRelay.sourceId,
 		controlPolicy: config.tunerRelay.controlPolicy,
 		maxClients: config.tunerRelay.maxClients,
 	})
@@ -290,7 +303,7 @@ async function main(): Promise<void> {
 	const liveDemod = new LiveDemodulator(
 		logger,
 		sourceManager,
-		fanoutManager,
+		sourceRouting,
 		liveDemodConfig,
 	)
 	const digitalVoiceConfig = DigitalVoiceConfigSchema.parse(
@@ -400,6 +413,48 @@ async function main(): Promise<void> {
 				"Failed to create decoder",
 			)
 		}
+	}
+
+	// Step 7b: Signal discovery scanner + core spectrum service (docs/SCANNER.md).
+	// Built after the decoders and digital voice so probes and ambient evidence
+	// can attach, and started before any source connects, so a persisted tuner
+	// lease is restored on the source's first payload-started (spec § 10.3).
+	// Always constructed: with scanner.enabled false it runs no jobs, but its
+	// SpectrumService still serves `spectrum` subscribers and /api/spectrum.
+	// An unreadable state directory never reaches this catch: start() logs it and
+	// runs without the unread files (Task 35). Only an unexpected construction or
+	// start failure drops the scanner, and with it /api/spectrum.
+	let scanner: ScannerService | null = null
+	try {
+		scanner = new ScannerService({
+			settings: config.scanner,
+			sourceConfigs: config.sources,
+			decoderConfigs,
+			region: bandRegion.code,
+			stateDir: config.stateDir,
+			sources: sourceManager,
+			routing: sourceRouting,
+			tuner: tunerController,
+			decoders: decoderManager,
+			digitalVoice,
+			liveDemod,
+			logger,
+			cpuMeter: new CpuMeter({ sampleMs: 5000 }),
+		})
+		await scanner.start()
+	} catch (err) {
+		log.error({ err }, "Scanner failed to start; continuing without it")
+		// A partial start leaves listeners, spectrum fanout branches and timers behind and
+		// there is no shutdown hook for a null scanner: stop it before dropping it.
+		await scanner
+			?.stop()
+			.catch((stopErr: unknown) =>
+				log.warn(
+					{ err: stopErr },
+					"Stopping the partially started scanner failed",
+				),
+			)
+		scanner = null
 	}
 
 	// Step 8: Initialize resource monitoring (if enabled)
@@ -532,6 +587,8 @@ async function main(): Promise<void> {
 			digitalVoice,
 			resourceAggregator,
 			aircraftTracker: aircraftTrackingManager.getTracker(),
+			scanner: scanner ?? undefined,
+			spectrum: scanner?.spectrum,
 			logger,
 			audioConfig: {
 				format: config.audio.format,
@@ -630,6 +687,21 @@ async function main(): Promise<void> {
 		},
 		timeout: 2000,
 	})
+
+	// Shutdown the scanner after the API server and before the decoders,
+	// channelizer, fanout and sources (LIFO): its tuner lease restore writes to
+	// a still-open rtl_tcp socket (spec § 10.3).
+	if (scanner) {
+		const scannerForShutdown = scanner
+		shutdown.register({
+			name: "scanner",
+			handler: async () => {
+				log.info("Shutting down scanner (restoring any tuner lease)")
+				await scannerForShutdown.stop()
+			},
+			timeout: 5000,
+		})
+	}
 
 	// First to shutdown: API server (stop accepting new connections)
 	shutdown.register({

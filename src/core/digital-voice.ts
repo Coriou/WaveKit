@@ -15,7 +15,8 @@
  *   `encrypted: true`. In stereo only that call's slot is silenced.
  *
  * Endpoints on httpPort (default 8082): /stream and /stream.wav serve the
- * first dsd-fme decoder; /decoders/<id>/stream[.wav] serve each decoder.
+ * first configured dsd-fme decoder; /decoders/<id>/stream[.wav] serve each
+ * decoder, including scanner probes added at runtime (addChannel).
  * Format is fixed for the stream's life (8000 Hz mono s16le), so clients are
  * never disconnected between calls.
  */
@@ -143,6 +144,8 @@ const DEFAULT_UDP_RECEIVE_BUFFER_BYTES = 32 * 1024
 
 interface VoiceChannel {
 	decoderId: string
+	/** "scanner": a probe channel added at runtime; never served on /stream. */
+	owner: "config" | "scanner"
 	mode: DsdFmeMode
 	channels: VoiceChannels
 	socket: dgram.Socket
@@ -172,6 +175,7 @@ export class DigitalVoiceService extends EventEmitter {
 	private readonly http: AudioHttpServer
 	private running = false
 	private lastError: string | null = null
+	private starting: Promise<void> | null = null
 
 	constructor(
 		logger: Logger,
@@ -217,7 +221,7 @@ export class DigitalVoiceService extends EventEmitter {
 			}
 			let channel: VoiceChannel
 			try {
-				channel = await this.createChannel(config)
+				channel = await this.createChannel(config, "config")
 			} catch (err) {
 				// The decoder still runs, with call metadata only (-o null).
 				this.log.error(
@@ -228,29 +232,82 @@ export class DigitalVoiceService extends EventEmitter {
 				continue
 			}
 			this.channels.set(config.id, channel)
-			const voiceSlot = config.options["voiceSlot"] ?? this.config.voiceSlot
-			prepared.push({
-				...config,
-				options: {
-					...config.options,
-					output: "udp",
-					udpHost: "127.0.0.1",
-					udpPort: channel.port,
-					voiceSlot,
-				},
-			})
-			this.log.info(
-				{
-					decoderId: config.id,
-					udpPort: channel.port,
-					mode: channel.mode,
-					channels: channel.channels,
-					voiceSlot,
-				},
-				"dsd-fme voice routed to the digital voice stream",
-			)
+			prepared.push(this.routeConfig(config, channel))
 		}
 		return prepared
+	}
+
+	/**
+	 * Binds a voice socket for a scanner probe and returns its config routed
+	 * to it (spec § 6.5). Unchanged when digital voice is disabled or the
+	 * config sets its own output. Does not start the server: ensureStarted().
+	 */
+	async addChannel(config: DecoderConfig): Promise<DecoderConfig> {
+		if (!this.config.enabled || !this.isEligible(config)) return config
+		if (this.channels.has(config.id)) {
+			throw new WaveKitError(
+				`Digital voice channel already exists: ${config.id}`,
+				"DIGITAL_VOICE_CHANNEL_EXISTS",
+			)
+		}
+		const channel = await this.createChannel(config, "scanner")
+		if (this.channels.has(config.id)) {
+			// A concurrent addChannel for the same id bound first.
+			channel.socket.close()
+			throw new WaveKitError(
+				`Digital voice channel already exists: ${config.id}`,
+				"DIGITAL_VOICE_CHANNEL_EXISTS",
+			)
+		}
+		this.channels.set(config.id, channel)
+		return this.routeConfig(config, channel)
+	}
+
+	/** Disconnects the channel's listeners and releases its socket; no-op if unknown. */
+	async removeChannel(decoderId: string): Promise<void> {
+		const channel = this.channels.get(decoderId)
+		if (!channel) return
+		this.channels.delete(decoderId)
+		channel.detach?.()
+		channel.paced.stop()
+		channel.registry.closeAll("removed", true)
+		channel.socket.close()
+		this.emit("clients-changed")
+		this.log.info({ decoderId }, "Digital voice channel removed")
+	}
+
+	/** Starts the HTTP server if it is not running (lazy start for the first probe). */
+	async ensureStarted(): Promise<void> {
+		if (this.running) return
+		await this.start()
+	}
+
+	private routeConfig(
+		config: DecoderConfig,
+		channel: VoiceChannel,
+	): DecoderConfig {
+		const voiceSlot = config.options["voiceSlot"] ?? this.config.voiceSlot
+		this.log.info(
+			{
+				decoderId: config.id,
+				owner: channel.owner,
+				udpPort: channel.port,
+				mode: channel.mode,
+				channels: channel.channels,
+				voiceSlot,
+			},
+			"dsd-fme voice routed to the digital voice stream",
+		)
+		return {
+			...config,
+			options: {
+				...config.options,
+				output: "udp",
+				udpHost: "127.0.0.1",
+				udpPort: channel.port,
+				voiceSlot,
+			},
+		}
 	}
 
 	/** Follows a decoder's call state (its "voice-call" events). */
@@ -263,11 +320,22 @@ export class DigitalVoiceService extends EventEmitter {
 		channel.detach = () => source.off("voice-call", listener)
 	}
 
+	/**
+	 * Starts the HTTP server. A call while a start is in flight (the boot
+	 * start racing a probe's ensureStarted()) joins it: one http.start.
+	 */
 	async start(): Promise<void> {
 		if (this.running) {
 			this.log.warn("Digital voice stream already running")
 			return
 		}
+		this.starting ??= this.startServer().finally(() => {
+			this.starting = null
+		})
+		await this.starting
+	}
+
+	private async startServer(): Promise<void> {
 		if (this.channels.size === 0) {
 			const err = new WaveKitError(
 				this.config.enabled
@@ -324,7 +392,9 @@ export class DigitalVoiceService extends EventEmitter {
 		const decoders = [...this.channels.values()].map(channel =>
 			this.channelStatus(channel),
 		)
-		const first = decoders[0]
+		const first = decoders.find(
+			d => this.channels.get(d.decoderId)?.owner === "config",
+		)
 		const status: DigitalVoiceStatus = {
 			enabled: this.config.enabled,
 			running: this.running,
@@ -350,7 +420,10 @@ export class DigitalVoiceService extends EventEmitter {
 		return output === "udp" && config.options["udpPort"] === undefined
 	}
 
-	private async createChannel(config: DecoderConfig): Promise<VoiceChannel> {
+	private async createChannel(
+		config: DecoderConfig,
+		owner: "config" | "scanner",
+	): Promise<VoiceChannel> {
 		const modeOption = config.options["mode"] ?? "auto"
 		const mode: DsdFmeMode = isDsdFmeMode(modeOption) ? modeOption : "auto"
 		const socket = dgram.createSocket({
@@ -377,6 +450,7 @@ export class DigitalVoiceService extends EventEmitter {
 		})
 		const channel: VoiceChannel = {
 			decoderId: config.id,
+			owner,
 			mode,
 			channels: dsdFmeUdpChannels(mode),
 			socket,
@@ -502,7 +576,8 @@ export class DigitalVoiceService extends EventEmitter {
 		const { base, wav } = parseStreamPath(req.url)
 		let channel: VoiceChannel | undefined
 		if (base === "/stream") {
-			channel = this.channels.values().next().value
+			// /stream is the configured decoders' stream; probes come and go.
+			channel = [...this.channels.values()].find(c => c.owner === "config")
 		} else {
 			const match = /^\/decoders\/([^/]+)\/stream$/.exec(base)
 			if (match?.[1]) {

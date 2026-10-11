@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events"
 import { FanoutManager, type FanoutStatus } from "./fanout-manager.js"
 import type { SourceManager } from "./source-manager.js"
+import { sourceScannerConfig, type SourceConfig } from "../config.js"
 import type { Logger } from "../utils/logger.js"
 
 /** Telemetry shared by a single fanout and the collection of source fanouts. */
@@ -10,12 +11,21 @@ export type FanoutTelemetryProvider = Pick<
 > &
 	Pick<EventEmitter, "on">
 
+/** First source that is not `scanner.role: "dedicated"` (spec § 10.7). */
+export function defaultSourceIdFor(
+	sources: readonly Pick<SourceConfig, "id" | "scanner">[],
+): string | undefined {
+	return sources.find(s => sourceScannerConfig(s).role !== "dedicated")?.id
+}
+
 /** Keeps each source's bytes in its own fanout while preserving the primary consumers. */
 export class SourceFanoutRouter extends EventEmitter {
 	private readonly fanouts = new Map<string, FanoutManager>()
 	private primarySourceId: string | undefined
 	private readonly connected = (sourceId: string) => {
-		this.primarySourceId ??= this.sources.getAllStatus()[0]?.id ?? sourceId
+		this.primarySourceId ??=
+			this.firstShared() ??
+			(this.dedicated.has(sourceId) ? undefined : sourceId)
 		const fanout =
 			this.fanouts.get(sourceId) ??
 			(sourceId === this.primarySourceId ? this.primary : undefined)
@@ -31,14 +41,18 @@ export class SourceFanoutRouter extends EventEmitter {
 		this.releaseUnused(sourceId)
 	}
 
+	private readonly dedicated: ReadonlySet<string>
+
 	constructor(
 		private readonly sources: SourceManager,
 		private readonly primary: FanoutManager,
 		private readonly logger: Logger,
 		primarySourceId?: string,
+		opts: { dedicated?: ReadonlySet<string> } = {},
 	) {
 		super()
-		this.primarySourceId = primarySourceId ?? sources.getAllStatus()[0]?.id
+		this.dedicated = opts.dedicated ?? new Set()
+		this.primarySourceId = primarySourceId ?? this.firstShared()
 		this.forwardEvents(primary)
 		sources.on("connected", this.connected)
 		sources.on("disconnected", this.disconnected)
@@ -48,15 +62,24 @@ export class SourceFanoutRouter extends EventEmitter {
 		}
 	}
 
+	/** The default source; never a dedicated scanner source (spec § 10.7). */
 	getDefaultSourceId(): string | undefined {
-		this.primarySourceId ??= this.sources.getAllStatus()[0]?.id
+		this.primarySourceId ??= this.firstShared()
 		return this.primarySourceId
+	}
+
+	private firstShared(): string | undefined {
+		return this.sources.getAllStatus().find(s => !this.dedicated.has(s.id))?.id
 	}
 
 	getFanout(sourceId?: string): FanoutManager {
 		// Registration precedes connection. Select the default before creating a
 		// secondary fanout so its identity cannot change when that source connects.
-		this.primarySourceId = this.getDefaultSourceId() ?? sourceId
+		this.primarySourceId =
+			this.getDefaultSourceId() ??
+			(sourceId !== undefined && !this.dedicated.has(sourceId)
+				? sourceId
+				: undefined)
 		if (!sourceId || sourceId === this.primarySourceId) return this.primary
 		let fanout = this.fanouts.get(sourceId)
 		if (!fanout) {

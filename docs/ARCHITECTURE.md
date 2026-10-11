@@ -293,6 +293,33 @@ IQ (U8/S16) -> csdr convert -> (optional IQ dcblock) -> csdr firdecimate
 -> (optional deemphasis) -> audio stream
 ```
 
+### Scanner
+
+Signal discovery: finds activity on a source, confirms it with a probe decode, and reports each emitter once as a discovery. Operator guide: [SCANNER.md](SCANNER.md); spec: [scanner design](superpowers/specs/2026-10-09-signal-discovery-scanner-design.md).
+
+**Location**: `src/core/scanner/` (`ScannerService`), `src/core/spectrum/` (`SpectrumService`, `SpectrumEngine`, `spectrum-worker`)
+
+**Responsibilities**:
+
+- Run scan jobs (in-window, sweep, passive per source, identify) with a job state machine and persistence (`jobs.json`)
+- Arbitrate the tuner per source (one lease, test-mode settle markers, origin-tagged preemption, restore on end and on boot)
+- Classify tracks from the spectrum and confirm them with ephemeral probe decoders and ambient decoder evidence
+- Keep discoveries, observations and evidence (`DiscoveryStore`, journal and snapshot, recordings, PSD/IQ evidence, burst IQ captures)
+- Hold configured decoders on a swept source (suspension reason `tuner-scanning`) and release them afterwards
+- Serve `/api/scanner` and the `scanner` WS channel
+
+**Data path:** the fanout branch `scanner-<sourceId>` → `SpectrumEngine` (copy-once batches, absolute sample index including drops, IQ ring) → `spectrum-worker` thread (`SpectrumPipeline`: FFT, floor, detector, tracker) → track events → `ScannerService` (classifier, crediting to jobs, `DiscoveryStore`, persistence) → REST/WS.
+
+**Control path:** `JobRunner` → `SweepScheduler` / `TunerArbiter` (leases, test-mode markers, origin-tagged preemption, restore) → `TunerController`. `ProbePool` → `DecoderManager.createEphemeralDecoder` (offset transport with pre-roll), `DigitalVoiceService.addChannel`.
+
+**Build:** a second esbuild entry, `dist/spectrum-worker.js`.
+
+**Spectrum service:** `src/core/spectrum/` is a core service the scanner consumes (it never imports the scanner). `SpectrumService` ref-counts one engine per source; scanner consumers (`job:<id>`) and display clients (`ws:<clientId>`) are separate sets, and only scanner consumers produce `stream`/`released` events. It builds `spectrum:frame` per profile, keeps the occupancy history, and serves `/api/spectrum`. A future `wavekit-chan` pipeline host can run the FFT behind the same `PipelineHost` protocol.
+
+**Wiring** (`src/index.ts`, step 7b): the scanner is built after the decoders and digital voice and started before any source connects, so a persisted lease is restored on the source's first data. It is always constructed: with `scanner.enabled: false` it runs no jobs, but its `SpectrumService` still serves `spectrum` subscribers and `/api/spectrum`. An unreadable state directory is handled inside `start()` (the scanner runs without the unread files and never overwrites them).
+
+**Decoder hold:** while a sweep holds a source, every configured decoder on it reports `suspended: true` with `suspension.reasonCode: "tuner-scanning"`, ahead of rate and band checks, and a manual start answers 409 `SOURCE_HELD_BY_SCANNER`. Scanner probes are exempt and appear as `owner: "scanner"`, `ephemeral: true` decoders (`decoder:created` / `decoder:removed`).
+
 ### Dynamic Sample Rate Handling
 
 When connected via the TunerRelay, sample rate changes from SDR++ are propagated through the system automatically:
@@ -378,6 +405,13 @@ HTTP /stream (audio)
        │
        ▼
 Players (ffplay, VLC, browser)
+```
+
+### Scanner and Spectrum Pipeline
+
+```
+FanoutManager → branch scanner-<sourceId> → SpectrumEngine → spectrum-worker (FFT, floor, detector, tracker)
+   → SpectrumService (spectrum:frame per profile, occupancy) → ScannerService (classify, probes, discoveries) → REST/WS
 ```
 
 ### Event Flow
@@ -541,6 +575,8 @@ On SIGTERM/SIGINT:
 3. Close all source connections
 4. Destroy all streams
 5. Exit
+
+Hooks run in reverse registration order. In `src/index.ts` that is: `audio-wiring`, `aircraft-tracking`, `resource-aggregator`, `api-server`, `scanner`, `audio-output`, `decoder-manager`, `channelizer` (only when enabled), `tuner-relay`, `digital-voice`, `live-demodulator`, `fanout-manager`, `source-manager`. The `scanner` hook runs after the API server stops taking requests and before the decoders, the channelizer, the fanout and the sources stop, so the tuner lease restore (bounded at 2 s) writes to a still-open rtl_tcp socket.
 
 Timeout: 10 seconds, then force exit.
 

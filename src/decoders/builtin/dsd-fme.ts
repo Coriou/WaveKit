@@ -41,6 +41,7 @@ import type {
 	DemodulationConfig,
 } from "../types.js"
 import type { Logger } from "../../utils/logger.js"
+import type { DsdFmeLinkLine } from "./dsd-fme-link.js"
 
 // =============================================================================
 // REGEX PATTERNS - Protocol-specific patterns for parsing dsd-fme output
@@ -57,6 +58,10 @@ const SYNC_PATTERN = /\bSync:\s*(?<pol>[+-])(?<proto>[A-Za-z0-9]+)\b/i
 
 /** Error conditions - FEC, CRC, sync lost */
 const ERROR_PATTERN = /\b(FEC ERR|CRC ERR|SYNC LOST|no sync)\b/i
+
+/** A line whose link control failed its CRC: never identity, never encryption. */
+const CRC_ERR = /\bCRC\s+ERR\b/i
+const FEC_ERR_ALL = /\bFEC\s+ERR\b/gi
 
 // --- DMR Patterns ---
 /** DMR color code: "Color Code=05" */
@@ -160,7 +165,7 @@ const INLVL = /\binlvl:\s*(?<inlvl>\d+)%\b/i
 // TYPES
 // =============================================================================
 
-/** Supported DSD-FME decoder modes (Requirement 6.5) */
+/** Supported DSD-FME decoder modes (Requirement 6.5; nxdn48/dpmr: signal discovery spec § 6.4) */
 export type DsdFmeMode =
 	| "auto"
 	| "dmr"
@@ -168,6 +173,8 @@ export type DsdFmeMode =
 	| "ysf"
 	| "dstar"
 	| "nxdn"
+	| "nxdn48"
+	| "dpmr"
 	| "provoice"
 
 /**
@@ -350,6 +357,8 @@ export interface DsdFmeOptions {
 	perCallRecordingMaxTotalMb: number
 	/** Per-call recordings: delete files older than this (default: 168 h) */
 	perCallRecordingMaxAgeHours: number
+	/** Run the per-call recording pruner (default true; scanner probes pass false and retain via EvidenceStore) */
+	perCallRecordingPrune: boolean
 }
 
 /** All supported DSD-FME modes */
@@ -360,6 +369,8 @@ export const DSD_FME_MODES: readonly DsdFmeMode[] = [
 	"ysf",
 	"dstar",
 	"nxdn",
+	"nxdn48",
+	"dpmr",
 	"provoice",
 ] as const
 
@@ -531,6 +542,8 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			perCallRecordingMaxAgeHours:
 				PositiveMsSchema.safeParse(options["perCallRecordingMaxAgeHours"])
 					.data ?? PER_CALL_RECORDING_MAX_AGE_HOURS,
+			perCallRecordingPrune:
+				z.boolean().safeParse(options["perCallRecordingPrune"]).data ?? true,
 		}
 	}
 
@@ -715,6 +728,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 	/** Runs per-call recording retention after `delayMs` (debounced). */
 	private schedulePrune(delayMs: number): void {
+		if (!this.options.perCallRecordingPrune) return
 		const dir = this.recordingDir()
 		if (dir === null || this.pruneTimer) return
 		this.pruneTimer = setTimeout(() => {
@@ -1036,6 +1050,13 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 				// NXDN96 (12.5 kHz)
 				args.push("-fn")
 				break
+			case "nxdn48":
+				// NXDN48 (6.25 kHz)
+				args.push("-fi")
+				break
+			case "dpmr":
+				args.push("-fm")
+				break
 			case "provoice":
 				args.push("-fp")
 				break
@@ -1117,6 +1138,10 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 
 		// STEP 3: Track errors for quality metrics (rolling window)
 		this.updateErrorWindow(cleanLine, nowMs)
+
+		// STEP 3b: Publish link-control lines for the scanner (spec § 6.4)
+		const link = this.parseLinkLine(cleanLine, nowMs)
+		if (link) this.emit("link", link)
 
 		// STEP 4: Check for sync (protocol detection)
 		const syncResult = this.handleSync(cleanLine, now)
@@ -1210,7 +1235,7 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 		}
 
 		// Track CRC errors
-		if (/\bCRC\s+ERR\b/i.test(line)) {
+		if (CRC_ERR.test(line)) {
 			this.errorWindow.push({ timestamp: nowMs, type: "crc" })
 			if (targetCall) {
 				targetCall.quality.crcErrs++
@@ -1289,6 +1314,12 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 	 * Routes to appropriate handler based on currentProtocol.
 	 */
 	private handleProtocolLine(line: string, now: Date): DecoderOutput | null {
+		// A CRC-error line keeps the ongoing call alive but never sets identity,
+		// starts or switches a call, or marks one encrypted (run8 key-up garbage).
+		if (CRC_ERR.test(line)) {
+			this.touchOngoing(now)
+			return null
+		}
 		switch (this.currentProtocol) {
 			case "dmr":
 				return this.handleDmrLine(line, now)
@@ -1308,6 +1339,106 @@ export class DsdFmeDecoder extends AudioDemodDecoder {
 			default:
 				// No protocol detected yet, try to extract metadata anyway
 				return this.handleUnknownProtocol(line, now)
+		}
+	}
+
+	/** Keeps the ongoing call of the current protocol from timing out. */
+	private touchOngoing(now: Date): void {
+		const ongoing = this.callState ?? this.pendingCall?.state ?? null
+		if (ongoing && ongoing.protocol === this.currentProtocol) {
+			ongoing.lastUpdate = now
+		}
+	}
+
+	/**
+	 * Parses one link-control line of the line's own sync protocol (or the
+	 * current one). Returns null for lines without identity fields.
+	 */
+	private parseLinkLine(line: string, at: number): DsdFmeLinkLine | null {
+		const sync = SYNC_PATTERN.exec(line)
+		const protocol = sync?.groups
+			? this.parseProtocol(sync.groups["proto"] ?? "")
+			: this.currentProtocol
+		const crcErr = CRC_ERR.test(line)
+		const fecErrs = line.match(FEC_ERR_ALL)?.length ?? 0
+		const base = { crcErr, at, ...(fecErrs > 0 ? { fecErrs } : {}) }
+		const ids = (
+			groups: Record<string, string> | undefined,
+			tg: string,
+			src: string,
+		) =>
+			groups
+				? {
+						tg: String(parseInt(groups[tg] ?? "0", 10)),
+						src: String(parseInt(groups[src] ?? "0", 10)),
+					}
+				: {}
+		switch (protocol) {
+			case "dmr": {
+				const cc = DMR_COLOR_CODE.exec(line)?.groups?.["cc"]
+				const idGroups =
+					DMR_VOICE_EVENT.exec(line)?.groups ?? DMR_TGT_SRC.exec(line)?.groups
+				if (cc === undefined && idGroups === undefined) return null
+				const slotText =
+					DMR_SLOT_INLINE.exec(line)?.groups?.["slot"] ??
+					DMR_SLOT_WORD.exec(line)?.groups?.["slot"]
+				const svc = DMR_TLC_FIELDS.exec(line)?.groups?.["svc"]
+				const alg = ALG_ID.exec(line)?.groups?.["alg"]
+				const encrypted =
+					(idGroups !== undefined && DMR_ENCRYPTED.test(line)) ||
+					(svc !== undefined && (parseInt(svc, 16) & DMR_SVC_PRIVACY) !== 0) ||
+					(alg !== undefined && !isClearAlgorithm(alg))
+				return {
+					protocol: "dmr",
+					...(cc !== undefined ? { cc: parseInt(cc, 10) } : {}),
+					...ids(idGroups, "tgt", "src"),
+					...(slotText === "1"
+						? { slot: 1 as const }
+						: slotText === "2"
+							? { slot: 2 as const }
+							: {}),
+					...base,
+					...(encrypted ? { encrypted: true } : {}),
+				}
+			}
+			case "p25p1":
+			case "p25p2": {
+				const nac = P25_NAC.exec(line)?.groups?.["nac"]
+				const idGroups =
+					P25_SRC_TG.exec(line)?.groups ?? P25P2_VCH.exec(line)?.groups
+				const alg = ALG_ID.exec(line)?.groups?.["alg"]
+				if (nac === undefined && idGroups === undefined && alg === undefined)
+					return null
+				return {
+					protocol: "p25",
+					...(nac !== undefined ? { nac: nac.toUpperCase() } : {}),
+					...ids(idGroups, "tg", "src"),
+					...base,
+					...(alg !== undefined && !isClearAlgorithm(alg)
+						? { encrypted: true }
+						: {}),
+				}
+			}
+			case "nxdn48":
+			case "nxdn96": {
+				const ran = NXDN_RAN.exec(line)?.groups?.["ran"]
+				const idGroups = NXDN_TGT_SRC.exec(line)?.groups
+				if (ran === undefined && idGroups === undefined) return null
+				return {
+					protocol: "nxdn",
+					...(ran !== undefined ? { ran: parseInt(ran, 10) } : {}),
+					...ids(idGroups, "tgt", "src"),
+					...base,
+				}
+			}
+			case "ysf":
+				return /\bFICH\b/i.test(line) ? { protocol: "ysf", ...base } : null
+			case "dstar": {
+				const my = DSTAR_MY.exec(line)?.groups?.["val"]?.trim()
+				return my ? { protocol: "dstar", callsign: my, ...base } : null
+			}
+			default:
+				return null
 		}
 	}
 
