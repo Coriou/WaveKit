@@ -72,6 +72,10 @@ import type { OperatorDataService } from "../operator-data/service.js"
 import { operatorDataRoutes } from "../operator-data/routes.js"
 import { sendOperatorDataSnapshot } from "../operator-data/broadcast-adapter.js"
 import type { OperatorDataBroadcastPort } from "../operator-data/broadcast-adapter.js"
+import { regionalRoutes } from "./routes/regional.js"
+import { receiverCapabilitiesRoutes } from "./routes/receiver-capabilities.js"
+import type { RegionalRegistry } from "../core/regional/registry.js"
+import type { ReceiverCapabilitiesProvider } from "../core/tuner-capabilities/types.js"
 
 /**
  * HTTP header name for correlation ID.
@@ -93,6 +97,8 @@ export interface AudioConfig {
 
 export interface ApiServerDependencies {
 	access?: NamedAccessRuntimeContext
+	regionalRegistry?: RegionalRegistry | null
+	receiverCapabilitiesProvider?: ReceiverCapabilitiesProvider | null | undefined
 
 	sourceManager: SourceManager
 	fanoutManager: FanoutManager
@@ -122,6 +128,11 @@ export interface ApiServerDependencies {
  * - CORS support for browser clients
  */
 export class ApiServer {
+	private readonly regionalRegistry: RegionalRegistry | null | undefined
+	private readonly receiverCapabilitiesProvider:
+		| ReceiverCapabilitiesProvider
+		| null
+		| undefined
 	private readonly access: NamedAccessRuntimeContext | undefined
 	private readonly accessController: FastifyAccessController | undefined
 	private readonly publicBootstrapConfigured: boolean
@@ -162,6 +173,9 @@ export class ApiServer {
 	private spectrumWiring: { dispose(): void } | null = null
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
+		this.regionalRegistry = dependencies.regionalRegistry
+		this.receiverCapabilitiesProvider =
+			dependencies.receiverCapabilitiesProvider
 		this.access = dependencies.access
 		this.sourceManager = dependencies.sourceManager
 		this.fanoutManager = dependencies.fanoutManager
@@ -989,6 +1003,15 @@ export class ApiServer {
 	 * Routes are implemented in separate files and registered here.
 	 */
 	private async registerRoutes(): Promise<void> {
+		// These child plugins inherit normal root admission in both access modes.
+		// Providers are borrowed; the composing runtime owns receiver disposal.
+		if (this.regionalRegistry !== undefined)
+			await this.app.register(regionalRoutes, {
+				registry: this.regionalRegistry,
+			})
+		await this.app.register(receiverCapabilitiesRoutes, {
+			provider: this.receiverCapabilitiesProvider,
+		})
 		if (this.access)
 			this.accessRoutes = registerAccessRoutes(this.app, this.access.services)
 

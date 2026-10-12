@@ -32,6 +32,7 @@ let failedOperatorEntry: string
 let pausedOperatorEntry: string
 let failedOperatorCloseEntry: string
 let scannerPhasesEntry: string
+let metadataLifecycleEntry: string
 const roots: string[] = []
 const processes: RunningCore[] = []
 const reservations: Server[] = []
@@ -200,6 +201,125 @@ beforeAll(async () => {
 		platform: "node",
 		format: "esm",
 		packages: "external",
+	})
+	// Instrument the real compiled entry/providers without production test hooks.
+	const metadataDirectory = join(buildDirectory, "metadata-lifecycle")
+	metadataLifecycleEntry = join(metadataDirectory, "index.js")
+	await build({
+		absWorkingDir: repository,
+		entryPoints: [{ in: "src/index.ts", out: "index" }],
+		bundle: true,
+		outdir: metadataDirectory,
+		platform: "node",
+		format: "esm",
+		packages: "external",
+		plugins: [
+			{
+				name: "metadata-provider-lifecycle-observations",
+				setup(builder) {
+					builder.onLoad(
+						{ filter: /[/\\]tuner-capabilities[/\\]provider\.ts$/ },
+						async args => {
+							const source = await readFile(args.path, "utf8")
+							if (!source.includes("dispose() {"))
+								throw new Error("Provider fixture seam missing")
+							return {
+								loader: "ts",
+								contents: source.replace(
+									"dispose() {",
+									'dispose() {\nprocess.stdout.write("metadata-disposed\\n")',
+								),
+							}
+						},
+					)
+					builder.onLoad({ filter: /[/\\]api[/\\]server\.ts$/ }, async args => {
+						let source = await readFile(args.path, "utf8")
+						const constructor =
+							"constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {"
+						const start = "private async finishStart(): Promise<void> {"
+						const finish = 'this.log.info("API server stopped")'
+						if (
+							![constructor, start, finish].every(marker =>
+								source.includes(marker),
+							)
+						)
+							throw new Error("API lifecycle fixture seam missing")
+						source = source.replace(
+							constructor,
+							constructor +
+								`
+						if (process.env.R14_PROCESS_CASE === "metadata-constructor-failure")
+							throw new Error("Fixture API constructor failed")
+					`,
+						)
+						source = source.replace(
+							start,
+							start +
+								`
+						if (process.env.R14_PROCESS_CASE === "metadata-start-paused") {
+							process.once("SIGTERM", () => process.stdout.write("metadata-signal-seen\\n"))
+							await new Promise(resolve => {
+								process.once("SIGUSR2", resolve)
+								process.stdout.write("metadata-start-paused\\n")
+							})
+						}
+					`,
+						)
+						const stop =
+							"private async finishStop(sealFailed: boolean): Promise<void> {"
+						if (!source.includes(stop))
+							throw new Error("API drain fixture seam missing")
+						source = source.replace(
+							stop,
+							stop +
+								`
+						if (process.env.R14_PROCESS_CASE === "metadata-drain-held") {
+							await new Promise(resolve => {
+								process.once("SIGUSR2", resolve)
+								process.stdout.write("metadata-drain-held\\n")
+							})
+						}
+					`,
+						)
+						source = source.replace(
+							finish,
+							finish + '\nprocess.stdout.write("metadata-api-drained\\n")',
+						)
+						return { loader: "ts", contents: source }
+					})
+					builder.onLoad({ filter: /[/\\]source-manager\.ts$/ }, async args => {
+						const source = await readFile(args.path, "utf8")
+						const seam = "async disconnectAll(): Promise<void> {"
+						if (!source.includes(seam))
+							throw new Error("Source cleanup fixture seam missing")
+						return {
+							loader: "ts",
+							contents: source.replace(
+								seam,
+								seam +
+									'\nprocess.stdout.write("metadata-sources-disconnected\\n")',
+							),
+						}
+					})
+					builder.onLoad(
+						{ filter: /[/\\]graceful-shutdown\.ts$/ },
+						async args => {
+							const source = await readFile(args.path, "utf8")
+							const seam = "}, handler.timeout)"
+							if (!source.includes(seam))
+								throw new Error("Shutdown timer fixture seam missing")
+							return {
+								loader: "ts",
+								contents: source.replace(
+									seam,
+									'}, process.env["R14_PROCESS_CASE"] === "metadata-drain-held" ? 20 : handler.timeout)',
+								),
+							}
+						},
+					)
+				},
+			},
+		],
 	})
 	const failureDirectory = join(buildDirectory, "failed-scanner")
 	failedScannerEntry = join(failureDirectory, "index.js")
@@ -1087,3 +1207,173 @@ describe("built protected runtime process", () => {
 		15_000,
 	)
 })
+
+// These are process-owned synthetic files/listeners, never a configured receiver.
+describe.each(["protected", "legacy"] as const)(
+	"metadata entry composition %s",
+	mode => {
+		async function prepare() {
+			const env = await fixture()
+			let token = ""
+			if (mode === "protected") {
+				const provision = await PrivateAccessStorage.open({
+					directory: env.directory,
+					mode: "provision",
+					ownership: "single-host-pid-namespace",
+				})
+				token = provision.useMachineCredential(value => value)
+				await provision.close()
+			} else
+				await writeFile(
+					env.configFile,
+					JSON.stringify({ ...env.config, access: { mode } }),
+				)
+			return {
+				...env,
+				token,
+				directory: mode === "protected" ? env.directory : undefined,
+			}
+		}
+
+		it("serves evidence-pending regional data and actual recording evidence, then disposes after API drain", async () => {
+			const env = await prepare()
+			const filePath = join(env.root, "TEST-only-iq.u8")
+			await writeFile(filePath, Buffer.alloc(4096, 128))
+			await writeFile(
+				env.configFile,
+				JSON.stringify({
+					...env.config,
+					...(mode === "legacy" ? { access: { mode } } : {}),
+					sources: [
+						{
+							id: "TEST-recording",
+							type: "recording",
+							filePath,
+							loop: false,
+							caps: {
+								kind: "iq",
+								format: "U8_IQ",
+								sampleRate: 2400000,
+								exclusive: false,
+							},
+						},
+					],
+				}),
+			)
+			await env.releasePorts()
+			const core = run(env.configFile, env.directory, metadataLifecycleEntry)
+			await started(core)
+			const headers =
+				mode === "protected" ? { Authorization: `Bearer ${env.token}` } : {}
+			const regional = await http(
+				env.api,
+				"/api/regional/channels?region=US&family=frs",
+				headers,
+			)
+			expect(regional.status).toBe(200)
+			expect(JSON.parse(regional.body)).toMatchObject({
+				state: "unavailable",
+				reason: "evidence-pending",
+			})
+			expect(JSON.parse(regional.body)).not.toHaveProperty("rows")
+			const receiver = await http(
+				env.api,
+				"/api/receiver-capabilities/TEST-recording",
+				headers,
+			)
+			expect(receiver.status).toBe(200)
+			const evidence = z
+				.object({
+					sourceId: z.literal("TEST-recording"),
+					sessionId: z.null(),
+					peerHeader: z.object({ state: z.literal("not-applicable") }),
+					controls: z
+						.array(
+							z.object({
+								physical: z.object({ state: z.literal("unknown") }),
+								currentValue: z.object({ state: z.literal("unknown") }),
+							}),
+						)
+						.length(15),
+				})
+				.parse(JSON.parse(receiver.body))
+			expect(evidence.sourceId).toBe("TEST-recording")
+			expect(receiver.headers["cache-control"]).toBe("no-store")
+			expect(await stop(core)).toEqual({ code: 0, signal: null })
+			const output = core.stdout()
+			expect(output.match(/metadata-disposed/g)).toHaveLength(1)
+			expect(output.indexOf("metadata-api-drained")).toBeLessThan(
+				output.indexOf("metadata-disposed"),
+			)
+			expect(output.indexOf("metadata-disposed")).toBeLessThan(
+				output.indexOf("metadata-sources-disconnected"),
+			)
+		}, 15_000)
+
+		it.each(["metadata-constructor-failure", "metadata-bind-failure"])(
+			"cleans immediately owned provider on %s",
+			async failure => {
+				const env = await prepare()
+				await env.releasePorts(failure === "metadata-bind-failure")
+				const core = run(
+					env.configFile,
+					env.directory,
+					metadataLifecycleEntry,
+					failure,
+				)
+				expect(await core.exited).toEqual({ code: 1, signal: null })
+				expect(core.stdout().match(/metadata-disposed/g)).toHaveLength(1)
+				expect(core.stdout()).not.toContain("WaveKit started successfully")
+				if (failure === "metadata-bind-failure")
+					expect(core.stdout().indexOf("metadata-api-drained")).toBeLessThan(
+						core.stdout().indexOf("metadata-disposed"),
+					)
+			},
+			15_000,
+		)
+
+		it("defers disposal until signal-stalled API startup actually settles", async () => {
+			const env = await prepare()
+			await env.releasePorts()
+			const core = run(
+				env.configFile,
+				env.directory,
+				metadataLifecycleEntry,
+				"metadata-start-paused",
+			)
+			await marker(core, "metadata-start-paused")
+			core.child.kill("SIGTERM")
+			await marker(core, "metadata-signal-seen")
+			expect(core.stdout()).not.toContain("metadata-disposed")
+			expect(await listening(env.api)).toBe(false)
+			core.child.kill("SIGUSR2")
+			expect(await core.exited).toEqual({ code: 0, signal: null })
+			expect(core.stdout().match(/metadata-disposed/g)).toHaveLength(1)
+			expect(core.stdout()).not.toContain("WaveKit started successfully")
+		}, 15_000)
+
+		it("does not mistake a generic shutdown-handler timeout for actual API drain", async () => {
+			const env = await prepare()
+			await env.releasePorts()
+			const core = run(
+				env.configFile,
+				env.directory,
+				metadataLifecycleEntry,
+				"metadata-drain-held",
+			)
+			await started(core)
+			core.child.kill("SIGTERM")
+			await marker(core, "metadata-drain-held")
+			if (mode === "legacy")
+				await marker(core, "Shutdown handler failed or timed out")
+			expect(core.stdout()).not.toContain("metadata-disposed")
+			expect(core.stdout()).not.toContain("metadata-sources-disconnected")
+			core.child.kill("SIGUSR2")
+			expect(await core.exited).toEqual({ code: 0, signal: null })
+			expect(core.stdout().match(/metadata-disposed/g)).toHaveLength(1)
+			expect(core.stdout().indexOf("metadata-api-drained")).toBeLessThan(
+				core.stdout().indexOf("metadata-disposed"),
+			)
+		}, 15_000)
+	},
+)

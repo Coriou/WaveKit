@@ -43,7 +43,13 @@ import {
 } from "./core/source-fanout-router.js"
 import { AudioOutput } from "./core/audio-output.js"
 import { TunerRelay } from "./core/tuner-relay.js"
-import { TunerController } from "./core/tuner-controller.js"
+import {
+	TunerController,
+	TUNER_REST_COMMAND_POLICY,
+} from "./core/tuner-controller.js"
+import { createRegionalRegistry } from "./core/regional/registry.js"
+import { createRegionalRegistration } from "./core/regional/data.js"
+import { createReceiverCapabilitiesProvider } from "./core/tuner-capabilities/provider.js"
 import { wireTunerControl } from "./core/tuner-wiring.js"
 import { LiveDemodulator } from "./core/live-demodulator.js"
 import { DigitalVoiceService } from "./core/digital-voice.js"
@@ -390,6 +396,16 @@ async function main(): Promise<void> {
 		if (protectedMode) cleanup.push({ priority, run })
 	}
 	let runtimeApi: ApiServer | undefined
+	let disposeReceiver: (() => void) | undefined
+	let receiverDisposeResult: Promise<void> | undefined
+	const disposeReceiverAfterApi = (): Promise<void> => {
+		receiverDisposeResult ??= (async () => {
+			// A utility-handler timeout cannot authorize disposal before actual drain.
+			await runtimeApi?.stop()
+			disposeReceiver?.()
+		})()
+		return receiverDisposeResult
+	}
 	let runtimeDecoders: DecoderManager | undefined
 	let runtimeChannelizer: ChannelizerManager | null = null
 	let scanner: ScannerService | null = null
@@ -579,6 +595,7 @@ async function main(): Promise<void> {
 					const outcomes = await Promise.allSettled([
 						shutdown.shutdown(),
 						scannerPhases.completed(),
+						disposeReceiverAfterApi(),
 					])
 					if (admissionFailed || outcomes.some(x => x.status === "rejected"))
 						throw new WaveKitError(
@@ -610,7 +627,10 @@ async function main(): Promise<void> {
 			signalFlatThresholdDbfs: config.health?.signalFlatThresholdDbfs,
 			signalFlatHoldMs: config.health?.signalFlatHoldMs,
 		})
-		own(100, () => sourceManager.disconnectAll())
+		own(100, async () => {
+			await disposeReceiverAfterApi()
+			await sourceManager.disconnectAll()
+		})
 		const fanoutManager = new FanoutManager(logger)
 		const sourceRouting = new SourceFanoutRouter(
 			sourceManager,
@@ -1046,10 +1066,33 @@ async function main(): Promise<void> {
 			aircraftTrackingManager.stop()
 		})
 
+		// Read-only metadata providers add no source consumers or receiver actions.
+		const regionalRegistry = createRegionalRegistry(
+			createRegionalRegistration(),
+		)
+		const receiverCapabilitiesProvider = createReceiverCapabilitiesProvider(
+			{
+				read: id => sourceManager.getReceiverEvidence(id),
+				readPage: (after, limit) =>
+					sourceManager.getReceiverEvidencePage(after, limit),
+			},
+			TUNER_REST_COMMAND_POLICY,
+		)
+		let receiverDisposed = false
+		disposeReceiver = () => {
+			if (receiverDisposed) return
+			receiverCapabilitiesProvider.dispose()
+			receiverDisposed = true
+		}
+		// Own immediately, including a constructor failure before runtimeApi exists.
+		own(15, disposeReceiverAfterApi)
+
 		// Step 9: Initialize API server
 		const apiServer = new ApiServer(
 			{
 				...(access ? { access } : {}),
+				regionalRegistry,
+				receiverCapabilitiesProvider,
 				sourceManager,
 				fanoutManager,
 				fanoutTelemetry: sourceRouting,
@@ -1136,6 +1179,7 @@ async function main(): Promise<void> {
 			name: "source-manager",
 			handler: async () => {
 				await scannerPhases.completed().catch(() => undefined)
+				await disposeReceiverAfterApi()
 				log.info("Shutting down source connections")
 				await sourceManager.disconnectAll()
 			},
@@ -1214,6 +1258,12 @@ async function main(): Promise<void> {
 				await audioOutput.stop()
 			},
 			timeout: 2000,
+		})
+
+		shutdown.register({
+			name: "receiver-capabilities",
+			handler: disposeReceiverAfterApi,
+			timeout: 5000,
 		})
 
 		// Shutdown the scanner after the API server and before the decoders,

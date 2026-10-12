@@ -356,6 +356,103 @@ live rtlmux with a dead upstream. The watchdog does not apply to recordings,
 accepts `stallTimeoutMs` (integer, `0` or 1000–600000) and validates the whole
 body with the config schema (`400 VALIDATION_ERROR` on failure).
 
+### Regional display registry
+
+Read-only display metadata uses normal API admission in protected mode and is
+also mounted by the standard legacy composition. It changes no scanner ranges,
+decoder defaults or receiver controls. The initial production family is US FRS,
+with `state: "unavailable"`, `reason: "evidence-pending"` and no numeric rows.
+Current source bytes, effective-date evidence and the simplex frequency
+representation remain unverified; this API confers no regulatory permission.
+
+| GET endpoint             | Required query              | Optional query             |
+| ------------------------ | --------------------------- | -------------------------- |
+| `/api/regional/families` | `region`                    | none                       |
+| `/api/regional/channels` | `region`, `family`          | `offset` (0), `limit` (64) |
+| `/api/regional/resolve`  | `region`, `family`, `alias` | none                       |
+
+Regions are `EU`, `US`, `CA`, `AU`, `NZ`, `JP`, `CN`. Explicit selection is
+separate from national dataset applicability; no location or cross-region
+fallback is inferred. US families returns one unavailable FRS manifest; US
+channels/resolve returns unavailable. Other accepted regions return unsupported.
+A syntactically valid unknown family returns 404 with a present provider.
+An intentionally mounted null provider returns 503; an omitted dependency leaves
+these routes unmounted. Empty verified data, unavailable data and infrastructure
+failure are distinct states.
+
+Query parsing rejects unknown/duplicate decoded keys, malformed escapes/UTF-8,
+empty pairs and overflow; it decodes exactly once. Literal `+` means a space,
+while `%2B` is a literal plus. Aliases are bounded printable ASCII, trimmed,
+space-collapsed and ASCII-lowercased. Ambiguous aliases return all candidates.
+Offset is 0–1024; limit is 1–128. Queries are bounded to 1024 ASCII bytes and four
+pairs, and actual response bytes to 128 KiB. All local responses use `no-store`.
+
+Exact-route HEAD/POST/PUT/PATCH/DELETE are denied with 405 and `Allow: GET`;
+HEAD has no body. Accepted positive/noncanonical Content-Length or any
+Transfer-Encoding is rejected with 400 before method denial, query parsing or
+provider reads. Empty framing proceeds to method denial before required GET
+query validation. Root admission, including unsafe-session CSRF/origin checks,
+comes first. OPTIONS and unmatched paths retain existing root/CORS behavior.
+Parser/router/transport failures outside the child route are not local errors.
+
+Local errors have fixed `{error, code, message}` fields: 400
+`REGIONAL_INVALID_REQUEST`, 404 `REGIONAL_FAMILY_NOT_FOUND`, 405
+`REGIONAL_METHOD_NOT_ALLOWED`, or 503 `REGIONAL_UNAVAILABLE`. Root admission
+keeps its existing code-only body and headers. Full contract and evidence gates:
+[regional registry specification](specs/regional-display-registry/design.md).
+
+### Receiver capabilities
+
+`GET /api/receiver-capabilities` lists a page; `GET
+/api/receiver-capabilities/:sourceId` reads one source. Both use normal protected
+admission and are mounted in the standard legacy composition. Absent, null or
+disposed provider means admitted 503, never a successful empty fallback.
+A valid provider with no sources returns an empty page.
+
+The page query accepts only `after` and `limit` (default 8, range 1–16).
+`after` is an exclusive UTF-8 lexical boundary, not a retained inventory cursor.
+A removed cursor remains usable; membership may change between pages. Every
+selected candidate, including lookahead, is validated before any row is returned;
+an unrepresentable current source fails the whole list. No rows are silently
+omitted. Successful items share one synchronous capture time/snapshot token.
+Tokens distinguish observations within one SourceManager lifetime and are not
+hardware identities or durable identities across restart.
+
+Source IDs preserve exact case/Unicode and must be scalar strings with 1–256
+UTF-8 bytes and at most 100 decoded UTF-16 code units, without controls or
+`/`, `\`, `?`, `#`. Encode route IDs once; encoded slash/backslash is rejected.
+Double-encoded percent text is not decoded twice. The root router's existing
+100-unit parameter limit remains: longer paths do not match feature handlers,
+whereas an invalid cursor receives a local 400 after admission. Receiver query
+`+` is literal, unlike regional form-query decoding. Single-source requests
+accept no nonempty query. Item/page/error byte limits are 16 KiB/256 KiB/256 bytes.
+
+The DTO separates command implementation and admitted REST argument policy from
+transport applicability, peer advertisement, effective stream declarations and
+physical readback. All 15 controls have unknown physical support and unknown
+current values. Numeric policy ranges are API acceptance rules, not RF bounds.
+A current literal 12-byte RTL0 header reports only raw uint32 `tunerType` and
+`gainCount`; it supplies no model, gain table, presets or bias-T support.
+Gain is in tenths dB; gain index is dimensionless. Delivery waiting/streaming/
+stale/paused is independent of header validity. SDR++ and recordings do not
+become unsupported hardware merely because RTL peer metadata is inapplicable.
+Reads add no commands, probes, files, connections, subscriptions or source consumers.
+
+Matched HEAD/POST/PUT/PATCH/DELETE returns 405 with `Allow: GET` before feature
+ID/query/framing validation; HEAD is bodyless. GET rejects accepted positive
+Content-Length or any Transfer-Encoding before input validation and evidence
+reads; absent framing or length zero is allowed. Root admission comes first.
+OPTIONS, extra segments, overlong router parameters and pre-routing decode/HTTP
+parser failures retain existing root behavior. No unframed arbitrary-stream or
+late-abort rollback guarantee is offered. Local responses use `no-store`.
+
+Fixed errors use `{error: "ReceiverCapabilitiesError", code, message}` and
+`RECEIVER_CAPABILITIES_` suffixes: 400 `INVALID_REQUEST`, 404 `NOT_FOUND`, 405
+`METHOD_NOT_ALLOWED`, 503 `UNAVAILABLE`, `FAILED`, `CONFLICT` or `LIMIT`.
+Unexpected response encoding/serialization failure uses 500 `FAILED`.
+Root denial envelopes and headers remain unchanged. Full contract:
+[receiver capabilities specification](specs/receiver-capabilities/design.md).
+
 ### Tuner
 
 #### GET /api/tuner
