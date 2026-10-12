@@ -2,6 +2,8 @@
  * Activity recording DTOs (event foundation batch 1).
  * Structural copies of src/core/activity/types.ts and the public record,
  * query and replay shapes in src/core/activity/storage/contract.ts.
+ * WebSocket server messages match the socket wire (`channel: "activity"`),
+ * not an internal `{ type: "activity:frame", frame }` wrapper.
  * tests/unit/core/activity/api-types-compat.test.ts fails typecheck on drift.
  */
 
@@ -241,6 +243,7 @@ export interface ActivityReplayResetFrame {
 		| "store-changed"
 		| "query-changed"
 		| "invalid-cursor"
+		| "reader-failed"
 }
 
 export interface ActivityStoreStats {
@@ -248,7 +251,7 @@ export interface ActivityStoreStats {
 	committed: number
 	duplicates: number
 	dropped: Record<
-		"rate-limited" | "queue-full" | "store-paused" | "write-failed",
+		"rate-limited" | "queue-full" | "store-paused" | "write-failed" | "closed",
 		number
 	>
 	excludedTelemetry: number
@@ -260,6 +263,7 @@ export interface ActivityStoreStats {
 	oldestReceivedAt: string | null
 	pruneWatermark: string
 	paused: boolean
+	writer: "running" | "stopped"
 }
 
 /** Client → server. `cursor` omitted starts live at the current committed max. */
@@ -275,15 +279,81 @@ export interface ActivityUnsubscribeMessage {
 	id: string
 }
 
-/** Server → client wrapper around one replay frame. */
-export interface ActivityFrameMessage {
-	type: "activity:frame"
-	id: string
-	frame: ActivityReplayFrame
-}
-
 export type ActivityClientMessage =
 	| ActivitySubscribeMessage
 	| ActivityUnsubscribeMessage
 
-export type ActivityServerMessage = ActivityFrameMessage
+/**
+ * Server → client. One JSON object per replay frame or subscription notice.
+ * `data` carries the subscription id; there is no `activity:frame` wrapper.
+ */
+export interface ActivityRecordsMessage {
+	type: "activity:records"
+	channel: "activity"
+	data: {
+		id: string
+		items: readonly ActivitySummary[]
+		scannedThrough: string
+		cursor: string
+	}
+}
+
+export interface ActivityProgressMessage {
+	type: "activity:progress"
+	channel: "activity"
+	data: {
+		id: string
+		scannedThrough: string
+		cursor: string
+	}
+}
+
+export interface ActivityResetMessage {
+	type: "activity:reset"
+	channel: "activity"
+	data: {
+		id: string
+		reason: ActivityReplayResetFrame["reason"]
+	}
+}
+
+export interface ActivitySubscribedMessage {
+	type: "activity:subscribed"
+	channel: "activity"
+	data: { id: string }
+}
+
+export interface ActivityUnsubscribedMessage {
+	type: "activity:unsubscribed"
+	channel: "activity"
+	data: { id: string }
+}
+
+/** Overflow close. `cursors` is the last delivered cursor per subscription id. */
+export interface ActivityClosedMessage {
+	type: "activity:closed"
+	channel: "activity"
+	data: {
+		reason: "resumable"
+		cursors: Readonly<Record<string, string>>
+	}
+}
+
+export interface ActivityErrorMessage {
+	type: "error"
+	channel: "activity"
+	data: {
+		code: string
+		message: string
+		id?: string
+	}
+}
+
+export type ActivityServerMessage =
+	| ActivityRecordsMessage
+	| ActivityProgressMessage
+	| ActivityResetMessage
+	| ActivitySubscribedMessage
+	| ActivityUnsubscribedMessage
+	| ActivityClosedMessage
+	| ActivityErrorMessage
