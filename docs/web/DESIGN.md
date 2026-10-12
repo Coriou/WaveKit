@@ -10,6 +10,16 @@ session and every machine can pick the work up.
 
 ## How we work
 
+- **The canvas stays the design source, also after the web app build starts** (owner,
+  2026-10-12). New designs and edits are iterated on the canvas first, then carried into code;
+  never designed directly in code. So the canvas must keep matching the app: the design-system
+  pass gives every canvas component a named counterpart in the app (inventory board), and a
+  change that lands in code without the canvas is a drift to fix.
+- **Performance is a first-class requirement at every stage** (owner, 2026-10-12): the UI must be
+  super responsive, fast and cheap to run. Design decisions count too: weigh the cost of what we
+  draw (e.g. `backdrop-filter` glass over a 60 fps waterfall, large blurred surfaces, many live
+  DOM nodes in lists, animated meters) and prefer designs that stay cheap at full frame rate.
+  Every spec and plan states its performance budget and how it is measured.
 - All design work lives on the **`design/web-dashboard`** branch, pushed to GitHub.
   Merge `origin/main` in at the start of each session (and whenever core lands
   something relevant) so the design tracks the real core:
@@ -731,9 +741,23 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after the Scanner UX review (canvas v75). The review is done (decision
-log, "Scanner UX review"); the owner took every recommendation to try it and may revisit after using
-the canvas. One session is queued.
+Handoff written 2026-10-12 after the Scanner UX review (canvas v76). Two sessions are queued, in
+this order. Two standing rules from the owner apply to both (see "How we work"): the canvas stays
+the design source after the build starts, and performance is a constraint at every stage.
+
+### 1. Scanner, second pass: the planner as an extension of the Scanner drawer (next)
+
+The owner tried the planner sheet (screenshots, 2026-10-12) and wants "Scan a band" to feel like an
+**extension of the Scanner panel**, not a separate sheet dropping from the top. Their sketch: a box
+that starts at the drawer's left edge and grows left over the plot, from just under the top islands
+(Tuner / Receiver row) down to the bottom islands (above the Listen / dock row), so the drawer and
+the planner read as one wide panel. If adopted, the same "wide drawer" pattern probably applies to
+**Activity** too (its multi-column view), so design it as a shell pattern, not a Scanner one-off.
+Brainstorm one question at a time; likely questions: does the drawer itself widen (one surface) or
+does a second pane attach to its left edge; what happens to the Tuner hold row, the tuned card and
+the Receiver island it overlaps; running mode in the same place; how Activity's wide mode uses it;
+phone layout. Seen in the owner's screenshot, fix in the same pass: on Paper the planner ruler can
+open on an empty view (176–236 MHz, no bands in the lanes): open on Fit, or on the band plans.
 
 **Scanner follow-ups to check with the owner first (short):**
 - How the planner sheet feels in use: its height (about 55 %), the glass-strong surface, and the
@@ -754,7 +778,7 @@ touches the Receiver island, which draws a gain table in dB: when the web app is
 an unknown table (gain index steps, or a dB table only where a reviewed source exists).
 CORE-GAPS records both as "Partly".
 
-### 2. Design system v1 and web app foundation (next)
+### 2. Design system v1 and web app foundation (after the Scanner second pass)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):
