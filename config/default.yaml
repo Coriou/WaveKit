@@ -734,6 +734,23 @@ csdr:
 #   inputHighWaterMark: 262144
 #   blockSamples: 16384
 
+# Activity recording (event foundation batch 1). Off by default: no database
+# file, no worker, and the legacy decoder:output stream is unchanged.
+# Retention and admission are optional overrides of the provisional defaults
+# (1_000_000 rows, 2 GiB, 7 days, 100/s burst 1000 global, 50/s burst 200
+# per decoder). Env: WAVEKIT_ACTIVITY__ENABLED=true
+# activity:
+#   enabled: false
+#   retention:
+#     maxRows: 1000000
+#     maxDbBytes: 2147483648
+#     maxAgeMs: 604800000
+#   admission:
+#     globalPerSecond: 100
+#     globalBurst: 1000
+#     perDecoderPerSecond: 50
+#     perDecoderBurst: 200
+
 # Protected runtime is opt-in; provision private state with the access command.
 # Public listener mappings are validated separately from private state.
 access:
