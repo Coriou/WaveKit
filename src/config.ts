@@ -575,7 +575,7 @@ const ACTIVITY_MAX_DECODER_BURST = 1_000_000
 
 export const ActivityRetentionConfigSchema = z
 	.object({
-		maxRows: z.number().int().positive().max(ACTIVITY_MAX_ROWS).optional(),
+		maxRows: z.number().int().min(1000).max(ACTIVITY_MAX_ROWS).optional(),
 		maxDbBytes: z
 			.number()
 			.int()
@@ -590,7 +590,7 @@ export const ActivityAdmissionConfigSchema = z
 	.object({
 		globalPerSecond: z
 			.number()
-			.finite()
+			.int()
 			.positive()
 			.max(ACTIVITY_MAX_GLOBAL_PER_SECOND)
 			.optional(),
@@ -602,7 +602,7 @@ export const ActivityAdmissionConfigSchema = z
 			.optional(),
 		perDecoderPerSecond: z
 			.number()
-			.finite()
+			.int()
 			.positive()
 			.max(ACTIVITY_MAX_DECODER_PER_SECOND)
 			.optional(),
