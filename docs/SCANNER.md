@@ -41,7 +41,7 @@ One per eligible source (`passive-<sourceId>`): in-window, all protocols, lowest
 | `ranges`           | the current window                                       | `[{startHz, endHz, rasters?, obwHz?, protocols?}]`                                 |
 | `bandplans`        | none                                                     | Built-in bandplan ids, expanded into ranges                                        |
 | `exclusions`       | none                                                     | `[{startHz, endHz, reason?}]`                                                      |
-| `protocols`        | the bandplans' protocols, else all                       | Priors for classification and the protocols to confirm                             |
+| `protocols`        | covering ranges per frequency, else all                  | Priors for classification and the protocols to confirm                             |
 | `sensitivity`      | `scanner.detection.sensitivity` (`normal`)               | Preset, see [Presets and bandplans](#presets-and-bandplans)                        |
 | `thresholdDb`      | adaptive (CFAR)                                          | Fixed detection threshold over the floor, 0–40 dB                                  |
 | `fftSize`          | `auto` (by sample rate)                                  | 512–16384, power of two                                                            |
@@ -90,6 +90,10 @@ pending ─► starting ─► running ⇄ holding
 - `resume-blocked`: auto-resume found more to disturb than was consented.
 
 Auto-resume: once the preemptor leaves (relay control back to `user`, and no REST tuner write for `resume.autoAfterIdleMs`, 60 s by default) the job re-checks its impact. If it is not larger than what was consented, it re-takes the lease and resumes at the same hop; otherwise it goes to `paused(resume-blocked)` and needs `resume` with `takeover: true`. An explicit `resume` from `paused(preempted-*)` arbitrates at once; `takeover` is not required (sending it records the current impact as consented for later auto-resumes). It answers 409 `SCANNER_SOURCE_BUSY` while another job holds the lease or a better waiter exists.
+
+Automatic resume is held by active identify trials on that source and, when an `OperatorActivityPort` is injected, by operator audio or recording. Audio adds a 3-second hang; the full idle interval starts after activity/hang ends. Job REST and `scanner:job` views expose `resumeAt` (ISO deadline or null) and `resumeHeldBy` (`audio`, `identify`, `recording`, or null). Without an operator port, no external audio/recording activity is inferred. `POST …/pause` on `paused(preempted-*)` means **Stay here**: it becomes `paused(operator)` without acquiring the lease and remains explicitly paused across restart, even with `onBoot` set.
+
+When job-level `protocols` is omitted, runtime probes and preview use the union of the ranges covering that signal/hop. A neighbouring range's DMR preference does not apply to a Marine VHF signal. Explicit job-level protocols, including an explicit empty list (all), override range preferences.
 
 Explicit `resume` in the other cases:
 

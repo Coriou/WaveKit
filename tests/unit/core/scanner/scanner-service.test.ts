@@ -55,6 +55,103 @@ async function untilRunning(h: Harness, id: string, seed = 20): Promise<void> {
 }
 
 describe("ScannerService", () => {
+	it("holds automatic resume during operator audio and restarts full idle after hang", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		let clock = Date.now()
+		let audio = true
+		let changed = () => {}
+		let removed = false
+		const inspected = h.service as unknown as {
+			deps: ScannerServiceDeps
+			now: () => number
+		}
+		inspected.now = () => clock
+		inspected.deps.operatorActivity = {
+			current: () => ({ audio, recording: false, sourceId: "rtl" }),
+			onChange: cb => {
+				changed = cb
+				return () => {
+					removed = true
+				}
+			},
+		}
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000 },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		clock += 10000
+		changed()
+		expect(h.service.getJob(job.id)).toMatchObject({
+			reason: "preempted-operator",
+			resumeAt: null,
+			resumeHeldBy: "audio",
+		})
+		audio = false
+		changed()
+		clock += 3000
+		expect(h.service.getJob(job.id)?.resumeAt).toBe(
+			new Date(clock + 1000).toISOString(),
+		)
+		clock += 999
+		await tick(30)
+		expect(h.service.getJob(job.id)?.state).toBe("paused")
+		clock += 1
+		await vi.waitFor(
+			() => expect(h.service.getJob(job.id)?.state).toBe("running"),
+			WAIT,
+		)
+		await h.service.stop()
+		expect(removed).toBe(true)
+	})
+	it("Stay here without the lease persists as operator pause rather than boot auto-resume", async () => {
+		const h = serviceHarness({ patch: noPassive })
+		await h.service.start()
+		const job = await h.service.createJob({
+			...sweep(50),
+			resume: { autoAfterIdleMs: 1000, onBoot: true },
+		})
+		await untilRunning(h, job.id)
+		h.tuner.external("rtl", "set-frequency", 433_920_000, "rest")
+		await settled(h.service)
+		const stayed = await h.service.pauseJob(job.id)
+		expect(stayed).toMatchObject({
+			state: "paused",
+			reason: "operator",
+			resumeAt: null,
+			resumeHeldBy: null,
+		})
+		expect(holderOf(h)).toBeUndefined()
+		await h.service.stop()
+		const restored = serviceHarness({ dir: h.dir, patch: noPassive })
+		await restored.service.start()
+		expect(restored.service.getJob(job.id)).toMatchObject({
+			state: "paused",
+			reason: "operator",
+			resumeAt: null,
+		})
+		await restored.service.resumeJob(job.id, { takeover: true })
+		expect(restored.service.getJob(job.id)?.state).toBe("running")
+		expect(holderOf(restored)).toBe(job.id)
+		expect(restored.service.status().engines.length).toBeGreaterThan(0)
+		await vi.waitFor(
+			() =>
+				expect(
+					restored.tuner.sent.some(
+						command =>
+							command.name === "set-frequency" &&
+							command.value >= 450000000 &&
+							command.value <= 450200000,
+					),
+				).toBe(true),
+			WAIT,
+		)
+		await restored.service.stop()
+	})
+
 	it("phase40 preserves a channel component UNKNOWN and attempts every subscription remover", async () => {
 		const h = serviceHarness()
 		const original = new Error("first remover unavailable")
@@ -189,7 +286,8 @@ describe("ScannerService", () => {
 								j =>
 									["starting", "running", "holding"].includes(j.state) ||
 									(j.state === "paused" &&
-										(j.reason === "operator" || j.reason === "preempted-job")),
+										((j.reason === "operator" && holder?.jobId === j.id) ||
+											j.reason === "preempted-job")),
 							)
 							const best = chooseLeaseHolder(
 								runnable.map(j => ({

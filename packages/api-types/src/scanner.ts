@@ -437,6 +437,8 @@ export interface ScanJobProgress {
 }
 /** GET /api/scanner/jobs/:id and the `scanner:job` WS message. */
 export interface ScanJob {
+	resumeAt: string | null
+	resumeHeldBy: "audio" | "identify" | "recording" | null
 	id: string
 	name: string | null
 	state: JobState
