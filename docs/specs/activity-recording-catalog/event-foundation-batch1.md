@@ -16,7 +16,10 @@ The frozen code contract is `src/core/activity/storage/contract.ts`.
   runtime capability probe, not a version string: `node:sqlite` must load and an
   in-memory FTS5 table with `contentless_delete=1` must be creatable. Measured
   locally: Node 22.14.0 has `node:sqlite` but no FTS5 (unsupported); 22.17.1
-  (SQLite 3.50.0) and 25.2.1 (3.50.4) pass. On a failing runtime, enabling Activity fails with `ACTIVITY_UNAVAILABLE` before any state file is
+  (SQLite 3.50.0), 22.23.2, 24.20.0 and 25.2.1 pass. WaveKit's supported
+  floor is Node 24 LTS (owner, 2026-10-12: engines, `.nvmrc`, CI and image
+  bases); the probe stays as the guard for unusual builds. On a failing runtime,
+  enabling Activity fails with `ACTIVITY_UNAVAILABLE` before any state file is
   written; the rest of WaveKit keeps running. `better-sqlite3` is not used.
 - **Admission:** simplified. Event IDs are allocated in-process once per decoder
   output; duplicate delivery of the same `eventId` is absorbed by the unique
