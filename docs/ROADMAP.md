@@ -58,6 +58,9 @@ Order of the remaining core gaps, by what they unblock in the dashboard:
 2. **Browser access end to end** before browser controls touch the receiver
    (onboarding, renewal, TLS/proxy acceptance, operator data in the default
    deployment; §4). Read-only views and a mock data server do not wait for it.
+   Batch 1 landed server-side: browser-lifecycle acceptance tests, machine
+   device administration, `make dev-protected` and an opt-in Caddy TLS compose
+   profile. Live TLS/browser deployment acceptance remains.
 3. **Band plans and settings**: the layered band-plan model fed to the scanner and
    spectrum labels, a persisted settings store with provenance, and core scan
    presets.
@@ -80,8 +83,10 @@ gates. The detailed workstreams:
    explicit origins across REST, WS and audio. It must land before connecting
    browser controls to the live receiver. Protected pairing and session refresh
    and exact public bootstrap/capabilities plus session-only device inventory are
-   implemented. Browser onboarding/renewal consumption, trusted canonical delivery
-   and TLS/proxy acceptance remain open.
+   implemented. Server-side browser lifecycle acceptance, machine device
+   administration and a reference TLS profile landed in browser access batch 1;
+   the shell's trust anchor is its configured API origin. Browser client
+   consumption and live TLS/proxy acceptance remain open.
    Operator data is protected-only while the default deployment remains legacy;
    changing that default is a separate decision. Regional registry and
    receiver-capability read-only routes are implemented and software-validated in protected and legacy modes, including API drain,
