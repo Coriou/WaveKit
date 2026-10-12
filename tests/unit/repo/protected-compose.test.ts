@@ -28,6 +28,8 @@ interface ComposeService {
 	volumes?: string[]
 	network_mode?: string
 	depends_on?: string[] | Record<string, unknown>
+	entrypoint?: string[]
+	command?: string[] | string
 	healthcheck?: { test?: string[] }
 }
 
@@ -252,12 +254,8 @@ describe("protected compose profile", () => {
 			caddyMounts.some(mount => mount.source === "wavekit-protected-access"),
 		).toBe(false)
 		expect(
-			coreMounts.find(mount => mount.source === "wavekit-protected-caddy"),
-		).toEqual({
-			source: "wavekit-protected-caddy",
-			target: "/caddy-data",
-			readOnly: true,
-		})
+			coreMounts.some(mount => mount.source === "wavekit-protected-caddy"),
+		).toBe(false)
 		expect(
 			caddyMounts.find(mount => mount.source === "wavekit-protected-caddy"),
 		).toEqual({
@@ -272,6 +270,7 @@ describe("protected compose profile", () => {
 			"wavekit-protected-access",
 			"wavekit-protected-state",
 			"wavekit-protected-caddy",
+			"wavekit-protected-trust",
 		]
 		expect(new Set(names).size).toBe(names.length)
 		for (const name of names) {
@@ -279,9 +278,70 @@ describe("protected compose profile", () => {
 		}
 	})
 
+	it("gives the core the public root and not the Caddy data volume", () => {
+		const current = composeFile()
+		const core = current.services["wavekit-protected"]
+		const caddy = current.services["wavekit-protected-caddy"]
+		const coreMounts = (core?.volumes ?? []).map(parseMount)
+		const caddyMounts = (caddy?.volumes ?? []).map(parseMount)
+		expect(
+			coreMounts.some(mount => mount.source === "wavekit-protected-caddy"),
+		).toBe(false)
+		expect(
+			coreMounts.some(
+				mount => mount.target === "/data" || mount.target === "/caddy-data",
+			),
+		).toBe(false)
+		for (const mount of [...coreMounts, ...caddyMounts]) {
+			expect(mount.source.endsWith(".key")).toBe(false)
+			expect(mount.target.endsWith(".key")).toBe(false)
+		}
+		expect(
+			coreMounts.find(mount => mount.source === "wavekit-protected-trust"),
+		).toEqual({
+			source: "wavekit-protected-trust",
+			target: "/caddy-trust",
+			readOnly: true,
+		})
+		expect(
+			caddyMounts.find(mount => mount.source === "wavekit-protected-trust"),
+		).toEqual({
+			source: "wavekit-protected-trust",
+			target: "/trust",
+			readOnly: false,
+		})
+		expect(
+			caddyMounts.some(mount => mount.source === "wavekit-protected-access"),
+		).toBe(false)
+		expect(caddy?.entrypoint).toEqual(["/bin/sh", "/etc/caddy/export-trust.sh"])
+		expect(caddy?.command).toEqual(["export-trust"])
+		const exporter = read("docker/caddy/export-trust.sh")
+		expect(exporter).toContain("/data/caddy/pki/authorities/local/root.crt")
+		expect(exporter).toContain("trust_dir=/trust")
+		expect(exporter).toContain('cert_dst="$trust_dir/root.crt"')
+		expect(exporter).not.toContain("root.key")
+		expect(exporter).not.toContain("intermediate.key")
+		expect(exporter).toContain("PRIVATE KEY")
+		expect(current.volumes).toHaveProperty("wavekit-protected-trust")
+
+		const doc = read("docs/DOCKER-SETUP.md")
+		expect(doc).toContain("CA key material")
+		expect(doc).not.toContain("/caddy-data")
+		expect(doc).toContain("NODE_EXTRA_CA_CERTS=/caddy-trust/root.crt")
+		expect(doc).toContain("one shared loopback bucket")
+		expect(doc).toContain("trusted-proxy address source")
+		expect(doc).toContain("devices list")
+		expect(doc).toContain("devices revoke DEVICE_ID")
+		expect(doc).toContain("devices revoke-all --yes")
+		expect(doc).toContain("rotate-credential")
+		expect(doc).toContain("--keep-sessions")
+		expect(doc).toContain("removes remembered browser")
+	})
+
 	it("agrees on origins across the runtime file, env, probe and Caddyfile", () => {
 		expect(readdirSync(join(root, "docker/caddy")).sort()).toEqual([
 			"Caddyfile",
+			"export-trust.sh",
 			"protected-runtime.yaml",
 		])
 		const caddy = read("docker/caddy/Caddyfile")
