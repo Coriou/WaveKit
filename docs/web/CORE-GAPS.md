@@ -14,7 +14,7 @@ accepted (S2 integrated, disabled), channelizer merged but off, operator data, a
 bootstrap and device list mounted. One fact behind several lines: `config/default.yaml`
 runs `access.mode: legacy`, where operator data is not mounted; anything marked
 *protected mode only* is unreachable in a default deployment.
-Re-checked 2026-10-12 (Scanner UX review): `origin/main` still at `b2b4473`, nothing to tick; the
+Re-checked 2026-10-12 (Scanner UX review) against `origin/main@7743665`: nothing to tick; the
 new planner sheet needs no new core item (plan preview, impact and `scanner:progress` cover it;
 ranges on/off mid-scan is already listed).
 
@@ -50,7 +50,12 @@ ranges on/off mid-scan is already listed).
   name, edges, display group (Air, Marine, Amateur, PMR / land mobile, Pagers, ISM), default
   mode, bandwidth, step and protocols to try; named channels with aliases (marine ch 16 / 12,
   PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Today `/api/scanner/bandplans`
-  returns `{id, region, name, ranges}` with scan ranges and rasters only.
+  returns `{id, region, name, ranges}` with scan ranges and rasters only. Partly (main@7743665):
+  the regional display registry spec plus unmounted modules (`/api/regional/families`,
+  `/channels`, `/resolve`): sourced channel rows with scoped aliases, simplex / duplex, advisory
+  mode / bandwidth / step hints. Its only family is US FRS and its data is evidence-pending, and it
+  leaves scanner band plans unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
+  AIS / ACARS / VDL2 channels), band display groups, and one model shared with the scanner.
 - [ ] Missing plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz), EU
   pagers 169.4–169.8 MHz and 466.0–466.25 MHz (only `pager-vhf` 137–174 exists), one ISM
   433 / 868 preset.
@@ -63,7 +68,12 @@ ranges on/off mid-scan is already listed).
 - [ ] `GET /api/tuner/:sourceId/capabilities`: `gainsTenthsDb[]` (or `null` with
   provenance), `sampleRatePresets[]`, `tuningRangeHz` (with and without direct sampling),
   `supports: {offsetTuning, biasTee, directSampling}`, unknown values reported as unknown.
-  Today `TunerInfo` has `tunerType` and `gainCount` only (ROADMAP §2).
+  Today `TunerInfo` has `tunerType` and `gainCount` only (ROADMAP §2). Partly (main@7743665):
+  the receiver-capabilities spec plus unmounted modules for `GET /api/receiver-capabilities` and
+  `/:sourceId` (per control: command availability, transport applicability, physical support;
+  peer `tunerType` / `gainCount`; the REST command policy). The spec forbids inferring a gain
+  table, rate presets or tuning range from the tuner type, so those three stay the gap: they
+  need a reviewed per-tuner data source or a hardware readback.
 - [ ] DC removal (`iqDcBlock` is deprecated and ignored), IQ correction, IQ swap. The
   spectrum masks the DC spike and spurs for display and detection; nothing corrects samples.
 

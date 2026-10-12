@@ -745,6 +745,15 @@ the canvas. One session is queued.
 - The mock shell ignores the planner's Options and its pass time; ⌘K presets start a sweep without
   per-range rows, so running mode falls back to one row.
 
+**Core since the last merge (main@7743665, merged 2026-10-12):** two specs with unmounted
+foundations, no new endpoint. *Regional display registry* (`/api/regional/*`): sourced channel
+labels and aliases with advisory mode / bandwidth / step hints; only US FRS so far, data pending.
+*Receiver capabilities* (`/api/receiver-capabilities`): per-control availability, tuner type and
+gain count, and by design no gain table in dB, rate presets or tuning range. That last point
+touches the Receiver island, which draws a gain table in dB: when the web app is built, plan for
+an unknown table (gain index steps, or a dB table only where a reviewed source exists).
+CORE-GAPS records both as "Partly".
+
 ### 2. Design system v1 and web app foundation (next)
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
