@@ -20,6 +20,10 @@ ranges on/off mid-scan is already listed).
 Re-audited 2026-10-12 (Scanner second pass) item by item against `origin/main@7743665`: nothing new
 landed; one tick withdrawn (per-hop protocols, below) and seven "Partly" texts corrected (the
 regional and receiver-capabilities foundations have no routes yet).
+Re-checked 2026-10-12 (band plans session) against `origin/main@6b4e5dc`: the regional display
+registry (`/api/regional/families`, `/channels`, `/resolve`) and receiver capabilities
+(`/api/receiver-capabilities`, `/:sourceId`) are now mounted, read-only, in protected and legacy
+composition; the two "Partly" texts below are updated. Nothing to tick.
 
 **Owner to decide first** (core specs on main lock these; the web design differs)
 - Activity categories: the decode-envelope spec on main (`docs/specs/decode-envelope/`,
@@ -53,8 +57,14 @@ Owner, 2026-10-12: band plans adapt to the user, configurable in core and in the
 ships strong defaults for popular countries. Labels must be right per country: in France "PMR"
 means PMR446, so "PMR / land mobile 136–174 MHz" (today's canvas and core naming) is wrong there.
 Plans like https://github.com/Arrin-KN1E/SDR-Band-Plans (CC0; SDR++ JSON, SDR# XML, Gqrx CSV;
-US, France, International) must import cleanly. The design session that draws this is queued
-(DESIGN.md › Next session).
+US, France, International) must import cleanly. Drawn 2026-10-12 (canvas v82, DESIGN.md › Decision log ›
+Band plans). Owner decisions that shape the core side: country from the station location with an
+override (coarse region as fallback); packs seeded from community CC0 files then corrected against
+regulator documents, per-band verified / community; WaveKit's fixed display groups (an open set,
+unknown → Other; imported colours only a hint); import by file or by URL fetched once by core, with a
+manual "Check for update" showing a diff (no auto-update); an ordered stack of active plans under the
+user's edits; a full band editor with channels; provenance shown only in Settings; the regional
+registry stays the verified layer that plan bands and channels link to.
 - [ ] Configurable band plans in core, layered and resolved user edits > imports > built-in:
   built-in country packs (a CEPT / EU baseline and France first; then UK, DE, IT, ES, NL / BE, US,
   CA, AU, JP), imported plans (SDR++ JSON first, then SDR# XML, which carries mode and step, and
@@ -75,7 +85,9 @@ US, France, International) must import cleanly. The design session that draws th
   "verified" layer that plan channels reference, or extend it.
 - [ ] Station country (ISO 3166) next to the coarse `region` enum (`EU|US|CA|AU|NZ|JP|CN`,
   `src/config.ts`), from config, the station location or the UI, with provenance; it picks the
-  default pack. Today there is no country and no station lat / lon in core.
+  default pack. Owner, 2026-10-12: derived from the station location (reverse lookup on a bundled
+  country boundary set, offline), overridable, falling back to `region` when no location is set.
+  Today there is no country and no station lat / lon in core.
 - [ ] Band plan model shared with the scanner (the original gap, now part of the layered model
   above): bands with
   name, edges, display group (Air, Marine, Amateur, Land mobile, PMR446, Pagers, ISM / SRD, named
@@ -83,10 +95,12 @@ US, France, International) must import cleanly. The design session that draws th
   PMR446 ch 1–16, AIS A/B, airband guard, ACARS, VDL2). Today `/api/scanner/bandplans`
   returns `{id, region, name, ranges}` with scan ranges and rasters only. Partly (main@7743665):
   the regional display registry spec, a core registry (`src/core/regional/`) and DTOs
-  (`packages/api-types/src/regional.ts`), with no routes yet (`/api/regional/families`, `/channels`,
-  `/resolve` exist only in the spec). The schema has sourced channel rows with scoped aliases,
+  (`packages/api-types/src/regional.ts`), mounted read-only at `/api/regional/families`, `/channels`,
+  `/resolve` (main@6b4e5dc). The schema has sourced channel rows with scoped aliases,
   simplex / duplex and advisory mode / bandwidth / step hints, but no rows ship: the only family is
-  US FRS with `dataset: null` (evidence-pending). Scanner band plans are unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
+  US FRS with `dataset: null` (evidence-pending). Owner, 2026-10-12: the registry stays the
+  verified layer; a plan band or channel that links to a registry row is what the UI marks
+  "verified". Scanner band plans are unchanged. Still the gap: EU families (marine VHF, PMR446, airband,
   AIS / ACARS / VDL2 channels), band display groups, and one model shared with the scanner.
 - [ ] Missing or wrong plans in `src/core/scanner/bandplan/builtin.ts`: Airband (118–137 MHz,
   8.33 kHz) and EU pagers 466.0–466.25 MHz (France: e*Message 466.025–466.230); 169.4–169.8 MHz
@@ -97,6 +111,17 @@ US, France, International) must import cleanly. The design session that draws th
   SSB); 380–400 MHz (TETRA / INPT, encrypted) as skip by default, not a preset; a combined ISM
   433 / 868 preset if presets stay one per plan. Partly: `ism-433` (433.05–434.79) and `ism-868`
   (863–870) exist as separate EU plans.
+- [ ] Band plan store details the canvas (v83) relies on: the plan stack's order and on/off as a
+  synced operator setting; a per-band edit layer with field-level diff against the pack (so "Reset
+  to France" and "3 edits" work, and pack updates still apply); import preview without committing,
+  with a group-mapping report ("48 mapped, 13 to Other") and the imported colour kept as an
+  off-by-default hint; "Check for update" on an imported URL or a pack returning bands changed /
+  added / removed, applied by hand; per band a channel list with aliases and a link to the decoder
+  that covers a channel. `WAVEKIT_COUNTRY` locks the country as `WAVEKIT_REGION` locks the region.
+- [ ] Band plans feed the scanner: bands skipped by default (with their reason, hidden ones too)
+  and channels covered by a running decoder become automatic exclusions; the fixed-channel list
+  (AIS, ACARS, VDL2, APRS, Meshtastic) comes from plan channels, not a hard-coded table; a preset
+  carries protocols and spacing per range (ISM 433 / 868, Pagers 169 + 466).
 - [ ] Scan presets in core, shared by every client: built-in presets per region from the
   band plans (name, ranges, protocols, step, dwell, sensitivity; read-only, "Save as new"),
   plus operator presets saved from the composer (name, ranges, skips, protocols, settings)
@@ -108,8 +133,8 @@ US, France, International) must import cleanly. The design session that draws th
   `supports: {offsetTuning, biasTee, directSampling}`, unknown values reported as unknown.
   Today `TunerInfo` has `tunerType` and `gainCount` only (ROADMAP §2). Partly (main@7743665):
   the receiver-capabilities spec, a core provider (`src/core/tuner-capabilities/`) and DTOs
-  (`packages/api-types/src/receiver-capabilities.ts`), not routed yet (`GET
-  /api/receiver-capabilities` and `/:sourceId` exist only in the spec): per control command
+  (`packages/api-types/src/receiver-capabilities.ts`), mounted read-only at `GET
+  /api/receiver-capabilities` and `/:sourceId` (main@6b4e5dc): per control command
   availability, transport applicability and physical support, peer `tunerType` / `gainCount`. The
   REST command policy (`TUNER_REST_COMMAND_POLICY`) is live in the tuner routes. The spec forbids inferring a gain
   table, rate presets or tuning range from the tuner type, so those three stay the gap: they

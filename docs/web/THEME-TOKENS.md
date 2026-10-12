@@ -48,7 +48,7 @@ The one place `var()` does **not** work is `<canvas>` 2D drawing (section 5, rul
 <helmet>
 <style>
 /* wk-tokens v2 · copy verbatim, never edit per board */
-… the 17 lines of section 7, unchanged …
+… the 19 lines of section 7, unchanged …
 </style>
 <style>
 @font-face{…}                       ← the board's existing style
@@ -215,6 +215,33 @@ Dark accents are the same on every dark ground (they pass 6.8:1 or better on eve
 On Ink the hairline tint follows the accent (mono uses `200,212,206`); Graphite and True black
 use neutral hairlines. "Coral" is pushed toward rose on purpose: a true coral (orange-pink) is
 indistinguishable from the danger red.
+
+### 3.6 Band groups (`--wk-grp-*`, proposed 2026-10-12, owner to approve)
+
+Identity colours for band plan display groups (spectrum lanes, Scan a band lanes, Settings ›
+Band plans). Seven categorical hues in a fixed order plus two neutrals; a ninth group never gets
+a generated hue, it folds into Other. Drawn only as swatches, dots or 2–3 px edges, always beside
+the group or band name: colour is never the only cue.
+
+| Token | Group | Dark | Paper |
+|---|---|---|---|
+| `--wk-grp-marine` | Marine | `#199e70` | `#1baf7a` |
+| `--wk-grp-air` | Air | `#3987e5` | `#2a78d6` |
+| `--wk-grp-srd` | ISM / SRD | `#d55181` | `#e87ba4` |
+| `--wk-grp-pagers` | Pagers | `#c98500` | `#eda100` |
+| `--wk-grp-personal` | Personal radio (CB, PMR446) | `#d95926` | `#eb6834` |
+| `--wk-grp-amateur` | Amateur | `#008300` | `#008300` |
+| `--wk-grp-landmobile` | Land mobile | `#9085e9` | `#4a3aa7` |
+| `--wk-grp-broadcast` | Broadcast | `var(--wk-text-4)` | `var(--wk-text-4)` |
+| `--wk-grp-other` | Other | `var(--wk-text-5)` | `var(--wk-text-5)` |
+
+Validated with the dataviz palette validator: as a set (lightness band, chroma, dark on `#000000`
+and `#101010` all ≥ 3:1), and the hue-to-group assignment was searched so the groups that nest or
+touch in real plans (Land mobile with Marine, ISM / SRD, Pagers, Amateur, Personal radio; Amateur
+with ISM / SRD; ISM / SRD with Pagers) keep CVD ΔE ≥ 13 and normal-vision ΔE ≥ 19.3 in both modes. On Paper, Marine, ISM / SRD,
+Pagers and Personal radio are under 3:1, so the label beside the swatch is required, not optional.
+Pagers yellow sits near the shell's amber ("not live"); amber is never used as a swatch, so the two
+do not meet in one control.
 
 ## 4. Literal → token mapping
 
@@ -393,7 +420,7 @@ Graphite and Paper. Avoid text-4 on `--wk-fill` in new work.
 
 ## 7. The token block, verbatim
 
-The source of truth. Every board's first helmet `<style>` is exactly this (17 lines).
+The source of truth. Every board's first helmet `<style>` is exactly this (19 lines).
 
 ```css
 /* wk-tokens v2 · copy verbatim, never edit per board */
@@ -413,4 +440,6 @@ The source of truth. Every board's first helmet `<style>` is exactly this (17 li
 [data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
 [data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
 [data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
+[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
 ```

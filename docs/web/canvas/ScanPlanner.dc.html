@@ -26,6 +26,8 @@
 [data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
 [data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
 [data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
+[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
 </style>
 <style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
@@ -112,7 +114,10 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			<sc-if value="{{showGutter}}" hint-placeholder-val="{{true}}">
 				<div aria-hidden="true" style="position: relative; flex: none; width: {{gutW}}px; border-right: 1px solid rgba(var(--wk-line-rgb),.08)">
 					<sc-for list="{{gutLabels}}" as="g" hint-placeholder-count="7">
-						<span style="position: absolute; left: 12px; right: 8px; top: {{g.top}}px; height: {{g.h}}px; display: flex; align-items: center; font-size: {{g.size}}px; font-weight: {{g.weight}}; color: {{g.fg}}; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{g.text}}</span>
+						<span style="position: absolute; left: 12px; right: 6px; top: {{g.top}}px; height: {{g.h}}px; display: flex; align-items: center; gap: 5px; font-size: {{g.size}}px; font-weight: {{g.weight}}; color: {{g.fg}}; white-space: nowrap">
+							<sc-if value="{{g.sw}}" hint-placeholder-val="{{true}}"><span style="flex: none; width: 7px; height: 7px; border-radius: 2px; background: {{g.swc}}"></span></sc-if>
+							<span style="min-width: 0; overflow: hidden; text-overflow: ellipsis">{{g.text}}</span>
+						</span>
 					</sc-for>
 				</div>
 			</sc-if>
@@ -121,7 +126,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 				<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
 					<sc-for list="{{laneBars}}" as="b" hint-placeholder-count="8">
-						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; overflow: hidden; display: flex; align-items: center; padding: 0 5px; font-size: 10.5px; font-weight: 700; line-height: 1; color: {{b.fg}}; white-space: nowrap">{{b.text}}</div>
+						<div title="{{b.title}}" style="position: absolute; top: {{b.top}}px; height: {{b.h}}px; left: {{b.left}}px; width: {{b.width}}px; box-sizing: border-box; border-radius: 3px; background: {{b.bg}}; box-shadow: inset 3px 0 0 {{b.edge}}; overflow: hidden; display: flex; align-items: center; padding: 0 5px 0 7px; font-size: 10.5px; font-weight: 700; line-height: 1; color: {{b.fg}}; white-space: nowrap">{{b.text}}</div>
 					</sc-for>
 					<div aria-hidden="true" style="position: absolute; left: 0; right: 0; top: {{laneLine}}px; height: 1px; background: rgba(var(--wk-line-rgb),.08)"></div>
 					<sc-for list="{{runBars}}" as="b" hint-placeholder-count="2">
@@ -280,7 +285,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</span>
 				<span role="cell" style="grid-area: act; display: flex; justify-content: flex-end">
 					<sc-if value="{{r.editable}}" hint-placeholder-val="{{true}}">
-						<button class="wk-ghost" onClick="{{r.openMore}}" aria-haspopup="menu" aria-label="More for {{r.name}}" title="Rename or remove" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+						<button class="wk-ghost" onClick="{{r.openMore}}" aria-haspopup="menu" aria-label="More for {{r.name}}" title="Rename, edit band or remove" style="width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
 							<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.7"></circle><circle cx="12" cy="12" r="1.7"></circle><circle cx="19" cy="12" r="1.7"></circle></svg>
 						</button>
 					</sc-if>
@@ -292,6 +297,12 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 				</span>
 			</div>
 		</sc-for>
+		<sc-if value="{{composing}}" hint-placeholder-val="{{true}}">
+			<div style="display: flex; align-items: center; flex-wrap: wrap; gap: 2px 10px; padding: 10px 8px 4px; font-size: 12.5px; color: var(--wk-text-3)">
+				<span title="{{bpTitle}}" style="min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{bpText}}</span>
+				<button class="wk-ghost" onClick="{{editPlan}}" title="Settings › Band plans" style="flex: none; height: 28px; margin-left: -4px; padding: 0 6px; border-radius: 6px; font-size: 12.5px; font-weight: 700; color: var(--wk-text-2)">Edit band plan</button>
+			</div>
+		</sc-if>
 	</div>
 
 	<sc-if value="{{hasToast}}" hint-placeholder-val="{{false}}">
@@ -382,7 +393,8 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 			<sc-if value="{{popMore}}" hint-placeholder-val="{{false}}">
 				<div role="menu" aria-label="{{popName}}" style="display: flex; flex-direction: column; margin: -6px">
 					<button role="menuitem" class="wk-ghost" onClick="{{menuRename}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Rename</button>
-					<button role="menuitem" class="wk-ghost" onClick="{{menuRemove}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; color: var(--wk-danger-soft)">Remove</button>
+					<sc-if value="{{menuHasBand}}" hint-placeholder-val="{{false}}"><button role="menuitem" class="wk-ghost" onClick="{{menuBand}}" title="{{menuBandTitle}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px">Edit band</button></sc-if>
+						<button role="menuitem" class="wk-ghost" onClick="{{menuRemove}}" style="height: 36px; padding: 0 10px; border-radius: 6px; text-align: left; font-size: 13.5px; color: var(--wk-danger-soft)">Remove</button>
 				</div>
 			</sc-if>
 
@@ -418,7 +430,7 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","running-edits","holding","paused"],"default":"combined"},"layout":{"editor":"enum","options":["pane","screen"],"default":"pane"},"width":{"editor":"range","min":360,"max":1400,"step":10,"unit":"px","default":990},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"onApply":{"editor":null},"$preview":{"width":990,"height":680}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"state":{"editor":"enum","options":["empty","preset","combined","custom","prefilled","running","running-edits","holding","paused"],"default":"combined"},"layout":{"editor":"enum","options":["pane","screen"],"default":"pane"},"width":{"editor":"range","min":360,"max":1400,"step":10,"unit":"px","default":990},"stage":{"editor":"enum","options":["S1","S2"],"default":"S1"},"sweep":{"editor":null},"prefill":{"editor":null},"discoveries":{"editor":null},"onScan":{"editor":null},"onTune":{"editor":null},"onClose":{"editor":null},"onApply":{"editor":null},"onSettings":{"editor":null},"$preview":{"width":990,"height":680}}'>
 // ---------- Protocols (S1 trials; AIS, ACARS, VDL2, LoRa are dedicated decoders) ----------
 // s2: arrives with stage S2 · only + by: lives on fixed channels an always-on decoder covers
 const PROTO = {
@@ -433,31 +445,120 @@ const pid = p => PALIAS[p] || p;
 const plabel = p => PROTO[pid(p)] ? PROTO[pid(p)].label : String(p).replace(/[-_]/g, ' ').toUpperCase();
 const PORDER = ['dmr', 'p25', 'nxdn', 'dpmr', 'ysf', 'dstar', 'fm', 'am', 'tones', 'pocsag', 'flex', 'aprs', 'ais', 'acars', 'vdl2', 'ism', 'lora'];
 
-// ---------- Presets (region EU; the station is in Toulouse, the mock stays in Brittany) ----------
-// sp: the band plan's channel spacing in Hz (0 = Any, no grid: wideband devices). lane: the ruler's band-plan lane.
-const PRESETS = [
-	{ id: 'marine', name: 'Marine VHF', short: 'Marine', lane: 'marine', ranges: [[156, 162.025]], protos: ['fm', 'ais'], sp: [25000] },
-	{ id: 'pmr', name: 'PMR / land mobile', short: 'PMR', lane: 'pmr', ranges: [[136, 174]], protos: ['dmr', 'p25', 'nxdn', 'fm', 'pocsag'], sp: [12500, 6250] },
-	{ id: 'pagers', name: 'Pagers', lane: 'pagers', ranges: [[169.4, 169.8, 'Pagers 169'], [466, 466.25, 'Pagers 466']], protos: ['pocsag', 'flex'], sp: [12500] },
-	{ id: 'air', name: 'Airband', lane: 'air', ranges: [[118, 137]], protos: ['am', 'acars', 'vdl2'], sp: [8330] },
-	{ id: 'pmr446', name: 'PMR446', lane: 'pmr', ranges: [[446, 446.2]], protos: ['fm', 'dpmr', 'dmr'], sp: [6250], labels: { dmr: 'DMR Tier I' } },
-	{ id: 'ism', name: 'ISM 433 / 868', short: 'ISM', lane: 'ism', ranges: [[433.05, 434.79, 'ISM 433'], [863, 870, 'ISM 868']], protos: ['ism', 'lora'], sp: [0] },
-	{ id: 'uhf', name: 'UHF land mobile', short: 'UHF', lane: 'pmr', ranges: [[400, 470]], protos: ['dmr', 'p25', 'nxdn', 'fm'], sp: [12500, 6250] },
-	{ id: '2m', name: '2 m amateur', chip: '2 m', short: '2 m', lane: 'ham', ranges: [[144, 146]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], sp: [12500] },
-	{ id: '70cm', name: '70 cm amateur', chip: '70 cm', short: '70 cm', lane: 'ham', ranges: [[430, 440]], protos: ['fm', 'dmr', 'ysf', 'dstar', 'p25'], sp: [12500] }
+// wk-bandplan v1 · shared band plan mock, copy verbatim into each board's script, never edit per board
+// Resolved stack: Your edits > France > CEPT / EU baseline (the International import is off).
+// MHz for edges and channels. Colour of a group: var(--wk-grp-<group id>). A band always shows its name: colour is never alone.
+const BP_COUNTRY = { code: 'FR', name: 'France', how: 'location', place: 'Roscoff', override: null, region: 'EU' };
+const BP_GROUPS = [
+	{ id: 'marine', name: 'Marine' }, { id: 'air', name: 'Air' }, { id: 'srd', name: 'ISM / SRD' }, { id: 'pagers', name: 'Pagers' },
+	{ id: 'personal', name: 'Personal radio' }, { id: 'amateur', name: 'Amateur' }, { id: 'landmobile', name: 'Land mobile' },
+	{ id: 'broadcast', name: 'Broadcast' }, { id: 'other', name: 'Other' }
 ];
-// Presets you saved (core keeps and syncs them: CORE GAPS). Shown first.
+// Top first. kind: edits | pack | import. ver = bands checked against a regulator source (a registry row in core).
+const BP_PLANS = [
+	{ id: 'edits', kind: 'edits', name: 'Your edits', on: true, sub: '3 changes, kept when packs update' },
+	{ id: 'fr', kind: 'pack', name: 'France', on: true, version: '2026.10', bands: 12, ver: 4, source: 'ANFR TNRBF, ECC Rec 70-03', seeded: 'Seeded from SDR-Band-Plans (CC0)', sub: 'Built in · picked by the station country' },
+	{ id: 'cept', kind: 'pack', name: 'CEPT / EU baseline', on: true, version: '2026.10', bands: 6, ver: 6, source: 'ERC Report 25', sub: 'Built in · fills what France leaves out' },
+	{ id: 'intl', kind: 'import', name: 'International', on: false, format: 'Gqrx CSV', url: 'https://github.com/Arrin-KN1E/SDR-Band-Plans', author: 'Arrin-KN1E', licence: 'CC0', imported: '12 Oct', bands: 61, sub: 'Imported from a URL · community, unverified' }
+];
+// from: the plan that names it. ver: verified. edit: added | renamed | hidden. parent: nesting (the narrower band wins the label).
+// sp: channel spacing in Hz. skip: scans skip it by default, with the reason. by: a decoder that already covers it.
+const BP_BANDS = [
+	{ id: 'cb', name: 'CB 27 MHz', group: 'personal', a: 26.965, b: 27.405, mode: 'AM', step: 10000, sp: [10000], protos: ['am', 'fm'], from: 'fr', ver: false,
+		ch: [{ n: '9', f: 27.065, name: 'CB ch 9', note: 'Emergency' }, { n: '19', f: 27.185, name: 'CB ch 19', note: 'Road users', alias: ['routiers'], edit: 'renamed' }] },
+	{ id: 'fm', name: 'FM broadcast', group: 'broadcast', a: 87.5, b: 108, mode: 'WFM', step: 100000, sp: [100000], protos: [], from: 'fr', ver: true, skip: 'Broadcast' },
+	{ id: 'air', name: 'Airband', group: 'air', a: 118, b: 137, mode: 'AM', step: 8330, sp: [8330, 25000], protos: ['am', 'acars', 'vdl2'], from: 'cept', ver: true,
+		ch: [{ f: 121.5, name: 'Guard 121.5', note: 'Emergency', alias: ['guard'] }, { f: 131.525, name: 'ACARS 131.525', by: 'acarsdec' }, { f: 131.725, name: 'ACARS Europe', by: 'acarsdec' }, { f: 136.975, name: 'VDL2 136.975', by: 'dumpvdl2' }] },
+	{ id: 'wxsat', name: 'Weather satellites', group: 'other', a: 137, b: 138, mode: 'WFM', step: 5000, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Passes only' },
+	{ id: '2m', name: '2 m amateur', group: 'amateur', a: 144, b: 146, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], from: 'cept', ver: true,
+		ch: [{ f: 144.8, name: 'APRS Europe', by: 'Direwolf', alias: ['aprs'] }] },
+	{ id: 'lmv', name: 'Land mobile VHF', group: 'landmobile', a: 146, b: 174, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'p25', 'fm', 'pocsag'], from: 'fr', ver: false },
+	{ id: 'marine', name: 'Marine VHF', group: 'marine', parent: 'lmv', a: 156, b: 162.025, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm', 'ais'], from: 'fr', ver: true,
+		ch: [{ n: '16', f: 156.8, name: 'Marine ch 16', note: 'Distress, calling' }, { n: '12', f: 156.6, name: 'Marine ch 12', note: 'Port operations' }, { n: '70', f: 156.525, name: 'Marine ch 70', note: 'DSC' },
+			{ f: 161.975, name: 'AIS A', by: 'AIS-catcher' }, { f: 162.025, name: 'AIS B', by: 'AIS-catcher' }] },
+	{ id: 'harbour', name: 'Harbour channels', group: 'marine', parent: 'marine', a: 156.5, b: 157.45, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm'], from: 'edits', ver: false, edit: 'added' },
+	{ id: 'wize', name: 'Wize meters 169', group: 'srd', parent: 'lmv', a: 169.4, b: 169.475, mode: 'NFM', step: 12500, sp: [12500], protos: ['ism'], from: 'fr', ver: false },
+	{ id: 'pg169', name: 'Pagers 169', group: 'pagers', parent: 'lmv', a: 169.475, b: 169.8, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'dab', name: 'DAB+', group: 'broadcast', a: 174, b: 230, mode: 'RAW', step: 1712000, sp: [0], protos: [], from: 'fr', ver: false, skip: 'Broadcast', edit: 'hidden' },
+	{ id: 'inpt', name: 'INPT (Tetrapol)', group: 'landmobile', a: 380, b: 400, mode: 'NFM', step: 12500, sp: [12500], protos: [], from: 'fr', ver: false, skip: 'Encrypted public safety' },
+	{ id: 'lmu', name: 'Land mobile UHF', group: 'landmobile', a: 400, b: 470, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'fm'], from: 'fr', ver: false },
+	{ id: '70cm', name: '70 cm amateur', group: 'amateur', parent: 'lmu', a: 430, b: 440, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar'], from: 'cept', ver: true },
+	{ id: 'ism433', name: 'ISM 433 · LPD433', group: 'srd', parent: '70cm', a: 433.05, b: 434.79, mode: 'NFM', step: 25000, sp: [0], protos: ['ism'], from: 'fr', ver: true,
+		ch: [{ f: 433.92, name: 'ISM 433.92', note: 'Sensors', alias: ['433'] }] },
+	{ id: 'pmr446', name: 'PMR446', group: 'personal', parent: 'lmu', a: 446.0, b: 446.2, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['fm', 'dpmr', 'dmr'], from: 'fr', ver: true,
+		ch: Array.from({ length: 16 }, (_, i) => ({ n: String(i + 1), f: +(446.00625 + i * 0.0125).toFixed(5), name: 'PMR446 ch ' + (i + 1), alias: ['pmr ' + (i + 1), 'pmr' + (i + 1)] })) },
+	{ id: 'pg466', name: 'Pagers 466 (e*Message)', group: 'pagers', parent: 'lmu', a: 466.025, b: 466.23, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'srd868', name: 'SRD 868', group: 'srd', a: 863, b: 870, mode: 'NFM', step: 25000, sp: [0], protos: ['ism', 'lora'], from: 'cept', ver: true,
+		ch: [{ f: 868.3, name: 'ISM 868.3', note: 'Sensors' }, { f: 868.95, name: 'wM-Bus 868.95', note: 'Meters' }, { f: 869.525, name: 'Meshtastic EU', by: 'Meshtastic', alias: ['mesh', 'lora'] }] },
+	{ id: 'adsb', name: 'ADS-B 1090', group: 'air', a: 1089, b: 1091, mode: 'RAW', step: 0, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Decoded elsewhere', by: 'readsb' }
+];
+// Helpers every board may use. bpBandAt: the narrowest visible band containing f (MHz).
+const bpGroup = id => BP_GROUPS.find(g => g.id === id) || BP_GROUPS[BP_GROUPS.length - 1];
+const bpPlan = id => BP_PLANS.find(p => p.id === id);
+const bpBandAt = f => BP_BANDS.filter(b => b.edit !== 'hidden' && f >= b.a && f <= b.b).sort((x, y) => (x.b - x.a) - (y.b - y.a))[0] || null;
+const bpChannels = () => BP_BANDS.reduce((out, b) => out.concat((b.ch || []).map(c => Object.assign({ band: b.id }, c))), []);
+
+// ---------- Presets, lanes and skips: derived from the active band plan (bandplan-mock above) ----------
+// The plan in force, named quietly at the foot of the range table (packs that are on; Your edits sit on top)
+const BP_NAME = BP_PLANS.filter(p => p.on && p.kind !== 'edits').map(p => p.id === 'cept' ? 'CEPT' : p.name).join(' + ');
+const BP_EDITS = BP_PLANS.some(p => p.kind === 'edits' && p.on);
+const bpBand = id => BP_BANDS.find(b => b.id === id);
+// Scannable bands (not skipped, not hidden) as presets, most useful first; a preset may join bands (Pagers 169 + 466).
+// Bands the order does not name follow at the end. short: the name in the plan summary ("Land mobile + Marine").
+const P_ORDER = [
+	{ id: 'marine', bands: ['marine'], short: 'Marine' },
+	{ id: 'lmv', bands: ['lmv'], short: 'Land mobile' },
+	{ id: 'pagers', bands: ['pg169', 'pg466'], name: 'Pagers' },
+	{ id: 'air', bands: ['air'] },
+	{ id: 'pmr446', bands: ['pmr446'], labels: { dmr: 'DMR Tier I' } },
+	{ id: 'ism', bands: ['ism433', 'srd868'], name: 'ISM 433 / 868', short: 'ISM' },
+	{ id: 'cb', bands: ['cb'], short: 'CB' },
+	{ id: '2m', bands: ['2m'], chip: '2 m', short: '2 m' },
+	{ id: '70cm', bands: ['70cm'], chip: '70 cm', short: '70 cm' },
+	{ id: 'lmu', bands: ['lmu'], short: 'Land mobile UHF' }
+];
+// bands you added (Harbour channels) are your presets, not the plan's
+const scannable = b => !b.skip && b.edit !== 'hidden' && b.from !== 'edits';
+const presetOf = o => {
+	const bs = o.bands.map(bpBand).filter(b => b && scannable(b));
+	if (!bs.length) return null;
+	const b0 = bs[0];
+	// each range keeps its own band's protocols and spacing: [low, high, label, band id]
+	return { id: o.id, name: o.name || b0.name, short: o.short, chip: o.chip, lane: b0.group, labels: o.labels,
+		ranges: bs.map(b => [b.a, b.b, b.name, b.id]), protos: Array.from(new Set([].concat.apply([], bs.map(b => b.protos)))), sp: b0.sp.slice() };
+};
+const PRESETS = P_ORDER.map(presetOf).filter(Boolean)
+	.concat(BP_BANDS.filter(b => scannable(b) && !P_ORDER.some(o => o.bands.includes(b.id))).map(b => presetOf({ id: b.id, bands: [b.id] })));
+// Presets you saved (core keeps and syncs them: CORE GAPS). Shown first. Harbour channels is also a band you added to the plan.
+const HB = bpBand('harbour');
 const USER0 = [
-	{ id: 'u-harbour', user: true, name: 'Harbour channels', short: 'Harbour', ranges: [[156.5, 157.45, 'Harbour channels']], protos: ['fm'], sp: [25000], opts: { hold: true } }
+	{ id: 'u-harbour', user: true, name: HB.name, short: 'Harbour', ranges: [[HB.a, HB.b, HB.name, HB.id]], protos: HB.protos.slice(), sp: HB.sp.slice(), opts: { hold: true } }
 ];
-const LANES = [{ id: 'marine', name: 'Marine' }, { id: 'ham', name: 'Amateur' }, { id: 'pmr', name: 'PMR / land mobile' }, { id: 'pagers', name: 'Pagers' }, { id: 'ism', name: 'ISM' }, { id: 'air', name: 'Air' }];
-// Channels the always-on decoders already cover. A scan skips them (core's marine plan does the same for AIS).
-const ELSEWHERE = [
-	{ a: 161.95, b: 162.05, name: 'AIS', by: 'AIS-catcher' },
-	{ a: 131.5125, b: 131.7375, name: 'ACARS', by: 'acarsdec' },
-	{ a: 136.9625, b: 136.9875, name: 'VDL2', by: 'dumpvdl2' },
-	{ a: 144.7875, b: 144.8125, name: 'APRS', by: 'Direwolf' }
-];
+// Band-plan lanes: the groups present, ordered by the frequency of their first band, each with its group colour.
+// Bands a scan skips by default show hatched in their group's lane (INPT, ADS-B), never as a preset.
+const LANES = BP_GROUPS.map(g => ({ id: g.id, name: g.name, color: 'var(--wk-grp-' + g.id + ')', lo: Math.min.apply(null, PRESETS.filter(p => p.lane === g.id).map(p => p.ranges[0][0])) }))
+	.filter(l => isFinite(l.lo)).sort((x, y) => x.lo - y.lo);
+const LANE_SKIPS = BP_BANDS.filter(b => b.skip && b.edit !== 'hidden' && LANES.some(l => l.id === b.group));
+// What a scan skips on its own: channels an always-on decoder already covers (one stretch per decoder, ±12.5 kHz),
+// then the bands the plan skips by default, with the plan's reason.
+const ELSEWHERE = (() => {
+	const out = [];
+	bpChannels().filter(c => c.by).sort((x, y) => x.f - y.f).forEach(c => {
+		const last = out[out.length - 1];
+		if (last && last.by === c.by && c.f - last.b < 0.25) { last.b = +(c.f + 0.0125).toFixed(4); return; }
+		out.push({ a: +(c.f - 0.0125).toFixed(4), b: +(c.f + 0.0125).toFixed(4), name: c.name.split(' ')[0], by: c.by, band: c.band });
+	});
+	BP_BANDS.filter(b => b.skip).forEach(b => out.push({ a: b.a, b: b.b, name: b.name, by: b.by || '', note: b.by ? '' : b.skip, band: b.id }));
+	return out;
+})();
+// fixed-channel protocols live where the plan's channels say (AIS A / B, ACARS, VDL2, APRS)
+[['ais', 'AIS'], ['acars', 'ACARS'], ['vdl2', 'VDL2'], ['aprs', 'APRS']].forEach(k => {
+	const cs = bpChannels().filter(c => c.by && c.name.split(' ')[0] === k[1]);
+	if (cs.length) Object.assign(PROTO[k[0]], { only: cs.map(c => c.f), by: cs[0].by });
+});
+// a skip in words: "AIS, already decoded by AIS-catcher" · "INPT (Tetrapol), encrypted public safety"
+const lc1 = t => t ? t.charAt(0).toLowerCase() + t.slice(1) : '';
+const xWhy = (x, sep) => !x.auto ? x.why : x.by ? x.why + (sep || ', ') + 'already decoded by ' + x.by : x.note ? x.why + (sep || ', ') + lc1(x.note) : x.why;
 // What a sweep pauses on this receiver (the Pi receiver at 161.150). ADS-B has its own receiver.
 const PAUSES = ['AIS', 'POCSAG', 'DMR'];
 const LIM = [24, 1766], OV = [100, 900], HOP_MHZ = 1.5, SR_HZ = 2400000;
@@ -508,15 +609,17 @@ const coveredElsewhere = (p, r) => { const o = PROTO[p].only; if (!o) return fal
 const textW = (t, px) => t.length * px * 0.56 + 2;
 
 let RID = 0;
-const autoSkips = (a, b) => ELSEWHERE.filter(m => m.b > a && m.a < b).map(m => ({ id: 'x' + (++RID), fa: f3(Math.max(a, m.a)), fb: f3(Math.min(b, m.b)), why: m.name, by: m.by, auto: true }));
+const autoSkips = (a, b) => ELSEWHERE.filter(m => m.b > a && m.a < b).map(m => ({ id: 'x' + (++RID), fa: f3(Math.max(a, m.a)), fb: f3(Math.min(b, m.b)), why: m.name, by: m.by, note: m.note || '', band: m.band || null, auto: true }));
 // a range you draw borrows the protocols and channel spacing of the band plan it falls in (the narrowest one), else 12.5 kHz
 const overlapping = (a, b) => PRESETS.filter(p => p.ranges.some(r => r[1] > a && r[0] < b));
 const guessProtos = (a, b) => { const hit = overlapping(a, b), ps = hit.length ? [].concat.apply([], hit.map(x => x.protos)) : ['fm', 'dmr', 'p25']; return PORDER.filter(p => ps.includes(p) && (!PROTO[p].only || PROTO[p].only.some(f => f >= a && f <= b))); };
 const guessSp = (a, b) => { const hit = overlapping(a, b).sort((x, y) => (x.ranges[0][1] - x.ranges[0][0]) - (y.ranges[0][1] - y.ranges[0][0])); return hit.length ? hit[0].sp.slice() : [12500]; };
 function mkRange(o) {
-	return { id: 'r' + (++RID), src: o.src || null, name: o.name, short: o.short || o.name, fa: f3(o.a), fb: f3(o.b), protos: withTones(o.protos), labels: o.labels || null, excl: autoSkips(o.a, o.b), spDef: o.sp ? o.sp.slice() : guessSp(o.a, o.b), sp: null };
+	return { id: 'r' + (++RID), src: o.src || null, band: o.band || null, name: o.name, short: o.short || o.name, fa: f3(o.a), fb: f3(o.b), protos: withTones(o.protos), labels: o.labels || null, excl: autoSkips(o.a, o.b), spDef: o.sp ? o.sp.slice() : guessSp(o.a, o.b), sp: null };
 }
-const fromPreset = p => p.ranges.map(r => mkRange({ src: p.id, name: r[2] || p.name, short: r[2] || p.short || p.name, a: r[0], b: r[1], protos: p.protos, labels: p.labels, sp: p.sp }));
+const fromPreset = p => p.ranges.map(r => { const bd = r[3] && bpBand(r[3]); return mkRange({ src: p.id, band: r[3] || null, name: r[2] || p.name, short: r[2] || p.short || p.name, a: r[0], b: r[1], protos: bd ? bd.protos : p.protos, labels: p.labels, sp: bd ? bd.sp : p.sp }); });
+// the band a range sits in: its own, else the narrowest visible band holding both edges
+const bandOfRange = r => (r.band && bpBand(r.band)) || BP_BANDS.filter(b => b.edit !== 'hidden' && pf(r.fa) >= b.a && pf(r.fb) <= b.b).sort((x, y) => (x.b - x.a) - (y.b - y.a))[0] || null;
 const presetById = (id, users) => (users || []).concat(PRESETS).find(p => p.id === id);
 
 // Tags: one numbered tag per range at its low edge; tags never overlap (a later one moves right), and a name is drawn
@@ -558,9 +661,9 @@ class Component extends DCLogic {
 		RID = 0;
 		st = st || 'empty';
 		let ranges = [];
-		if (st === 'preset') ranges = fromPreset(PRESETS[0]);
+		if (st === 'preset') ranges = fromPreset(presetById('marine'));
 		const run = st === 'running' || st === 'running-edits' || st === 'holding' || st === 'paused';
-		if (st === 'combined' || run) ranges = fromPreset(PRESETS[1]).concat(fromPreset(PRESETS[0]));
+		if (st === 'combined' || run) ranges = fromPreset(presetById('lmv')).concat(fromPreset(presetById('marine')));
 		if (st === 'custom') {
 			// ranges drawn, overlapped and skipped by hand: the case whose labels used to stack
 			const mk = (n, a, b) => mkRange({ name: n, a, b, protos: guessProtos(a, b) });
@@ -578,9 +681,9 @@ class Component extends DCLogic {
 			o.hop = st === 'running' || st === 'running-edits' ? 16 : this.hopAt(o.own, 161150000);
 			o.pass = 3;
 			if (st === 'running-edits') {
-				// two edits waiting: Marine VHF taken out, POCSAG dropped from PMR / land mobile
-				const base = this.runBase(o.own), pm = base.protos['PMR / land mobile'] || [];
-				o.rd = Object.assign({}, base, { off: { 'Marine VHF': true }, protos: Object.assign({}, base.protos, { 'PMR / land mobile': pm.filter(x => x !== 'pocsag') }) });
+				// two edits waiting: Marine VHF taken out, POCSAG dropped from Land mobile VHF
+				const base = this.runBase(o.own), pm = base.protos['Land mobile VHF'] || [];
+				o.rd = Object.assign({}, base, { off: { 'Marine VHF': true }, protos: Object.assign({}, base.protos, { 'Land mobile VHF': pm.filter(x => x !== 'pocsag') }) });
 			}
 			if (st === 'holding') Object.assign(o.own, { holdHz: 161150000, holdLabel: 'DMR · CC 1' });
 		}
@@ -694,7 +797,7 @@ class Component extends DCLogic {
 	}
 	// the region's band plans, for a ruler with no ranges yet: the VHF cluster where five of the six lanes have a band
 	// (118–174 MHz, EU); the whole plan (118–870) would draw every band as a sliver. The overview reaches the rest.
-	fitBands() { const rs = [].concat.apply([], PRESETS.map(p => p.ranges)).filter(r => r[1] <= 200); const a = Math.min.apply(null, rs.map(r => r[0])), b = Math.max.apply(null, rs.map(r => r[1])), pad = (b - a) * 0.02; return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) }; }
+	fitBands() { const rs = [].concat.apply([], PRESETS.map(p => p.ranges)).filter(r => r[0] >= 100 && r[1] <= 200); const a = Math.min.apply(null, rs.map(r => r[0])), b = Math.max.apply(null, rs.map(r => r[1])), pad = (b - a) * 0.02; return { vL: Math.max(LIM[0], a - pad), vR: Math.min(LIM[1], b + pad) }; }
 	// ruler geometry (px inside the track)
 	geo() {
 		const narrow = this.narrow();
@@ -764,6 +867,9 @@ class Component extends DCLogic {
 		this.setState({ pop: { kind, rid, w, left, top: up ? null : br.bottom - rr.top + 6, bottom: up ? rr.bottom - br.top + 6 : null, maxH: Math.max(140, (up ? above : below) - 14) }, spCustom: '', saveName: kind === 'save' ? this.planNow().name : s.saveName });
 	}
 
+	// Settings › Band plans (or one band's editor): the shell routes it, standalone it is a toast
+	openBandPlans(id) { if (this.props.onSettings) this.props.onSettings(id); else this.toast(id === 'bandplans' ? 'Opens Settings › Band plans' : 'Opens ' + ((bpBand(id.split(':')[1]) || {}).name || 'the band') + ' in Settings › Band plans'); }
+
 	// ---------- Plan (mirrors core's preview) ----------
 	stage() { return this.props.stage === 'S2' ? 'S2' : 'S1'; }
 	vis(p, st) { return !PROTO[p].s2 || st === 'S2'; }
@@ -802,7 +908,8 @@ class Component extends DCLogic {
 		const hops = merged.reduce((t, m) => t + m.hops, 0), T = merged.reduce((t, m) => t + m.hops * m.dwell, 0);
 		const users = o.users || [], srcs = Array.from(new Set(rs.filter(i => i.r.src).map(i => i.r.src))), nC = rs.filter(i => !i.r.src).length;
 		const order = users.concat(PRESETS).map(p => p.id);
-		const names = srcs.slice().sort((x, y) => order.indexOf(x) - order.indexOf(y)).map(id => { const p = presetById(id, users); return p ? p.short || p.name : id; }).concat(nC ? [nC > 1 ? 'your ranges' : 'your range'] : []);
+		const lo = id => { const p = presetById(id, users); return p ? p.ranges[0][0] : 0; };
+		const names = srcs.slice().sort((x, y) => lo(x) - lo(y) || order.indexOf(x) - order.indexOf(y)).map(id => { const p = presetById(id, users); return p ? p.short || p.name : id; }).concat(nC ? [nC > 1 ? 'your ranges' : 'your range'] : []);
 		const name0 = names.length <= 2 ? names.join(' + ') : names[0] + ' + ' + (names.length - 1) + ' more';
 		return { valid: true, rs, merged, uniq, hops, T, srcs, name: name0.charAt(0).toUpperCase() + name0.slice(1) };
 	}
@@ -811,7 +918,7 @@ class Component extends DCLogic {
 	payload(plan, o) {
 		const hz = x => Math.round(x * 1e6);
 		const ranges = plan.rs.map(i => ({ name: i.r.name, startHz: hz(i.a), endHz: hz(i.b), hops: i.hops, spacingHz: i.sp.slice(), protocols: o.findOnly ? [] : i.on.slice() }));
-		const exclusions = plan.uniq.map(e => ({ startHz: hz(e.ca), endHz: hz(e.cb), reason: e.x.auto ? e.x.why + ' · already decoded by ' + e.x.by : 'Skipped by you' }));
+		const exclusions = plan.uniq.map(e => ({ startHz: hz(e.ca), endHz: hz(e.cb), reason: e.x.auto ? xWhy(e.x, ' · ') : 'Skipped by you' }));
 		const stretches = plan.merged.map(m => ({ startHz: hz(m.a), endHz: hz(m.b), hops: m.hops, name: m.items.map(i => i.r.short).join(' + ') }));
 		return { preset: plan.name, startHz: hz(plan.merged[0].a), endHz: hz(plan.merged[plan.merged.length - 1].b), ranges, exclusions, hops: plan.hops, sweepS: Math.max(1, Math.round(plan.T)), stretches,
 			options: { holdOnActivity: o.hold, findOnly: o.findOnly, record: o.rec, stopAfter: o.stopAfter, timePerHop: o.dwell, sensitivity: o.sens } };
@@ -826,7 +933,7 @@ class Component extends DCLogic {
 		const rows = (w.ranges || []);
 		const protos = {};
 		rows.forEach(r => { protos[r.name] = Array.from(new Set((r.protocols || []).map(pid))); });
-		const excl = (w.exclusions || []).map((x, i) => { const auto = !!x.reason && !/^Skipped/.test(x.reason); return { id: 'e' + i, fa: f3(x.startHz / 1e6), fb: f3(x.endHz / 1e6), auto, why: auto ? x.reason.split(' · ')[0] : 'Skipped by you', by: auto ? (x.reason.split('decoded by ')[1] || 'its own decoder') : '' }; });
+		const excl = (w.exclusions || []).map((x, i) => { const auto = !!x.reason && !/^Skipped/.test(x.reason); return { id: 'e' + i, fa: f3(x.startHz / 1e6), fb: f3(x.endHz / 1e6), auto, why: auto ? x.reason.split(' · ')[0] : 'Skipped by you', by: auto ? (x.reason.split('decoded by ')[1] || '') : '', note: auto && !/decoded by /.test(x.reason) ? (x.reason.split(' · ')[1] || '') : '' }; });
 		return { off: {}, protos, excl };
 	}
 	runApplied(w) { return this.state.ra || this.runBase(w); }
@@ -918,7 +1025,12 @@ class Component extends DCLogic {
 				const fits = !!lbl && x0 >= edge;
 				if (fits) edge = x0 + textW(lbl, 10.5) + 12;
 				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: on ? 'rgba(var(--wk-accent-rgb),.26)' : 'rgba(var(--wk-ink-rgb),.09)', fg: on ? 'var(--wk-accent)' : 'var(--wk-text-3)', text: fits ? lbl : '',
-					title: h.label + ' · ' + mt(h.a) + '–' + mt(h.b) + ' MHz · click to ' + (on ? 'take it out' : 'add it') });
+					edge: ln.color, title: h.label + ' · ' + bpGroup(ln.id).name + ' · ' + mt(h.a) + '–' + mt(h.b) + ' MHz · click to ' + (on ? 'take it out' : 'add it') });
+			});
+			LANE_SKIPS.filter(b => b.group === ln.id && b.b > L && b.a < R).forEach(b => {
+				const x0 = Math.max(0, X(b.a)), w = Math.max(3, Math.min(tw, X(b.b)) - x0);
+				laneBars.push({ top: G.laneTop + li * (G.LH + G.LG), h: G.LH, left: x0, width: w, bg: 'repeating-linear-gradient(135deg, rgba(var(--wk-ink-2-rgb),.45) 0 1.5px, transparent 1.5px 4px)', fg: 'var(--wk-text-3)', text: w >= textW(b.name, 10.5) + 10 ? b.name : '',
+					edge: ln.color, title: b.name + ' · ' + mt(b.a) + '–' + mt(b.b) + ' MHz · scans skip it: ' + lc1(b.skip) });
 			});
 		});
 		// your ranges: elementary stretches, where two ranges overlap the fill doubles
@@ -932,7 +1044,7 @@ class Component extends DCLogic {
 			const x0 = Math.max(0, X(r.a)), x1 = Math.min(tw, X(r.b)), fl = r.cov.some(i => i.r.id === s.flash);
 			return { top: RT, h: G.rangeH, left: x0, width: Math.max(2, x1 - x0), title: r.cov.map(i => i.num + ' ' + i.r.name).join(' + ') + ' · ' + mt(r.a) + '–' + mt(r.b) + ' MHz', bg: fl ? 'rgba(var(--wk-accent-rgb),.55)' : r.cov.length > 1 ? 'rgba(var(--wk-accent-rgb),.36)' : 'rgba(var(--wk-accent-rgb),.18)' };
 		});
-		const skipBars = [].concat.apply([], ok.map(i => i.ex.filter(e => e.ok && e.cb > L && e.ca < R).map(e => { const x0 = Math.max(0, X(e.ca)); return { top: RT - 1, h: G.rangeH + 2, left: x0, width: Math.max(3, Math.min(tw, X(e.cb)) - x0), title: 'Skipped · ' + f3(e.ca) + '–' + f3(e.cb) + ' · ' + (e.x.auto ? e.x.why + ', already decoded by ' + e.x.by : e.x.why) }; })));
+		const skipBars = [].concat.apply([], ok.map(i => i.ex.filter(e => e.ok && e.cb > L && e.ca < R).map(e => { const x0 = Math.max(0, X(e.ca)); return { top: RT - 1, h: G.rangeH + 2, left: x0, width: Math.max(3, Math.min(tw, X(e.cb)) - x0), title: 'Skipped · ' + f3(e.ca) + '–' + f3(e.cb) + ' · ' + xWhy(e.x) }; })));
 		// zoomed in (under 2 MHz across), faint channel ticks show each range's spacing
 		const chanTicks = [];
 		if (R - L < 2) {
@@ -998,7 +1110,7 @@ class Component extends DCLogic {
 		const onIv = [];
 		rows.filter(o => o.on).map(o => [o.x0, o.x1]).sort((p, q) => p[0] - q[0]).forEach(iv => { const m = onIv[onIv.length - 1]; if (m && iv[0] <= m[1]) m[1] = Math.max(m[1], iv[1]); else onIv.push(iv.slice()); });
 		const coverBars = onIv.filter(iv => iv[0] < wx1).map(iv => ({ top: LT, h: LH, left: iv[0], width: Math.max(1, Math.min(iv[1], wx1) - iv[0]), bg: 'rgba(var(--wk-accent-rgb),.2)' }));
-		const runSkips = ap.excl.map(x => { const xa = pf(x.fa) * 1e6, xb = pf(x.fb) * 1e6, sg = lay.segs.find(q => xb > q.a && xa < q.b); if (!sg) return null; const x0 = lay.P(Math.max(sg.a, xa)), x1 = lay.P(Math.min(sg.b, xb)); return { top: LT, h: LH, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + x.fa + '–' + x.fb + ' · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why) }; }).filter(Boolean);
+		const runSkips = ap.excl.map(x => { const xa = pf(x.fa) * 1e6, xb = pf(x.fb) * 1e6, sg = lay.segs.find(q => xb > q.a && xa < q.b); if (!sg) return null; const x0 = lay.P(Math.max(sg.a, xa)), x1 = lay.P(Math.min(sg.b, xb)); return { top: LT, h: LH, left: x0, width: Math.max(3, x1 - x0), title: 'Not scanned · ' + x.fa + '–' + x.fb + ' · ' + xWhy(x) }; }).filter(Boolean);
 		const segGaps = lay.segs.slice(1).map((sg, i) => ({ top: LT, h: LH, left: lay.segs[i].x + lay.segs[i].w, width: lay.GAP, title: 'Not scanned · ' + short(lay.segs[i].b) + '–' + short(sg.a) + ' MHz' }));
 		const tags = placeTags(rows.map(o => ({ x0: o.x0, x1: o.x1, num: o.num, name: o.r.name, on: o.on })), tw, LT + 6, runSkips.filter(x => x.width >= 8).map(x => x.left).concat([wx0]))
 			.map(t => Object.assign(t, { bg: t.on ? 'var(--wk-accent)' : 'var(--wk-chip)', fg: t.on ? 'var(--wk-on-accent)' : 'var(--wk-text-3)', op: t.on ? 1 : 0.7, title: t.num + ' · ' + t.name + (t.on ? '' : ' · off') }));
@@ -1068,7 +1180,7 @@ class Component extends DCLogic {
 				protoAll: s.findOnly ? 'Find signals only · no decoding' : labels.length ? labels.join(', ') : 'Finds any signal, decodes nothing',
 				openProtos: e => this.openPop('protos', r.id, e, 360),
 				hasSkips: names.length > 0, skipText: names.length ? names.join(', ') : 'None', skipFg: names.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)',
-				skipTitle: r.excl.length ? r.excl.map(x => x.fa + '–' + x.fb + ' MHz · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why)).join('\n') : 'Skip a part · or Alt-drag on the ruler',
+				skipTitle: r.excl.length ? r.excl.map(x => x.fa + '–' + x.fb + ' MHz · ' + xWhy(x)).join('\n') : 'Skip a part · or Alt-drag on the ruler',
 				openSkips: e => this.openPop('skips', r.id, e, 400),
 				openMore: e => this.openPop('more', r.id, e, 160)
 			};
@@ -1091,7 +1203,7 @@ class Component extends DCLogic {
 				protos: pc.shown, protoMore: !!pc.more, protoMoreText: pc.more, protoNone: !labels.length, protoNoneText: 'Any signal', protoAll: labels.join(', ') || 'Any signal',
 				openProtos: e => this.openPop('protos', r.name, e, 360),
 				hasSkips: names.length > 0, skipText: names.length ? names.join(', ') : 'None', skipFg: names.length ? 'var(--wk-text-2)' : 'var(--wk-text-4)',
-				skipTitle: sk.length ? sk.map(x => x.fa + '–' + x.fb + ' MHz · ' + (x.auto ? x.why + ', already decoded by ' + x.by : x.why)).join('\n') : 'Skip a part',
+				skipTitle: sk.length ? sk.map(x => x.fa + '–' + x.fb + ' MHz · ' + xWhy(x)).join('\n') : 'Skip a part',
 				openSkips: e => this.openPop('skips', r.name, e, 400),
 				on, track: v.track, knob: v.knob, swTitle: on ? 'Take it out of the scan' : 'Scan it again',
 				toggle: () => this.editRun(w, nd => { nd.off[r.name] = on; })
@@ -1116,9 +1228,9 @@ class Component extends DCLogic {
 			const inR = x => pf(x.fb) > a && pf(x.fa) < b, mine = d.excl.filter(inR);
 			const patch = (id, o) => this.editRun(w, nd => { nd.excl = nd.excl.map(x => x.id === id ? Object.assign({}, x, o) : x); });
 			return Object.assign(base, { popSkips: true, popLabel: 'Skips in ' + r.name, popName: r.name, skipsNone: !mine.length,
-				skipRows: mine.map(x => ({ fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + x.by : x.why, title: x.auto ? x.why + ' is already decoded by ' + x.by : x.why, edge: pf(x.fb) > pf(x.fa) ? '' : 'rgba(var(--wk-amber-rgb),.7)',
+				skipRows: mine.map(x => ({ fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + (x.by || x.note) : x.why, title: xWhy(x), edge: pf(x.fb) > pf(x.fa) ? '' : 'rgba(var(--wk-amber-rgb),.7)',
 					onA: ev => patch(x.id, { fa: ev.target.value }), onB: ev => patch(x.id, { fb: ev.target.value }),
-					removeLabel: x.auto ? 'Scan the ' + x.why + ' channels too' : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.editRun(w, nd => { nd.excl = nd.excl.filter(y => y.id !== x.id); }) })),
+					removeLabel: x.auto ? (x.by ? 'Scan the ' + x.why + ' channels too' : 'Scan ' + x.why + ' too') : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.editRun(w, nd => { nd.excl = nd.excl.filter(y => y.id !== x.id); }) })),
 				addSkip: () => { const c = (a + b) / 2, h = Math.max(0.025, snap((b - a) * 0.05)); this.editRun(w, nd => { nd.excl = nd.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Skipped by you' }]); }); }
 			});
 		}
@@ -1126,7 +1238,7 @@ class Component extends DCLogic {
 	}
 	popVals(plan) {
 		const s = this.state, p = s.pop, st = this.stage();
-		const none = { hasPop: false, popSp: false, popProtos: false, popSkips: false, popMore: false, popOpts: false, popSave: false };
+		const none = { hasPop: false, popSp: false, popProtos: false, popSkips: false, popMore: false, popOpts: false, popSave: false, menuHasBand: false };
 		if (!p) return none;
 		const r = s.ranges.find(x => x.id === p.rid), i = r && plan.rs.find(x => x.r === r);
 		const base = Object.assign({}, none, { hasPop: true, popLeft: p.left, popW: p.w, popTop: p.top == null ? 'auto' : p.top + 'px', popBottom: p.bottom == null ? 'auto' : p.bottom + 'px', popMaxH: p.maxH, popName: r ? r.name : '' });
@@ -1184,14 +1296,16 @@ class Component extends DCLogic {
 		if (p.kind === 'skips') {
 			const amber = 'rgba(var(--wk-amber-rgb),.7)';
 			return Object.assign(base, { popSkips: true, popLabel: 'Skips in ' + r.name, skipsNone: !r.excl.length,
-				skipRows: r.excl.map(x => { const e = i.ex.find(q => q.x === x); return { fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + x.by : x.why, title: x.auto ? x.why + ' is already decoded by ' + x.by : x.why, edge: e && !e.ok ? amber : '',
+				skipRows: r.excl.map(x => { const e = i.ex.find(q => q.x === x); return { fa: x.fa, fb: x.fb, auto: !!x.auto, why: x.auto ? x.why + ' · ' + (x.by || x.note) : x.why, title: xWhy(x), edge: e && !e.ok ? amber : '',
 					onA: ev => this.patchExcl(r.id, x.id, { fa: ev.target.value }), onB: ev => this.patchExcl(r.id, x.id, { fb: ev.target.value }),
-					removeLabel: x.auto ? 'Scan the ' + x.why + ' channels too' : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.patchRange(r.id, { excl: r.excl.filter(y => y !== x) }) }; }),
+					removeLabel: x.auto ? (x.by ? 'Scan the ' + x.why + ' channels too' : 'Scan ' + x.why + ' too') : 'Stop skipping ' + x.fa + '–' + x.fb, remove: () => this.patchRange(r.id, { excl: r.excl.filter(y => y !== x) }) }; }),
 				addSkip: () => { if (!(i.b > i.a)) return; const c = (i.a + i.b) / 2, h = Math.max(0.025, snap((i.b - i.a) * 0.05)); this.patchRange(r.id, { excl: r.excl.concat([{ id: 'x' + (++RID), fa: f3(snap(c - h)), fb: f3(snap(c + h)), why: 'Skipped by you' }]) }); }
 			});
 		}
 		if (p.kind === 'more') {
-			return Object.assign(base, { popMore: true, popLabel: r.name, menuRename: () => this.setState({ renaming: r.id, renameText: r.name, pop: null }), menuRemove: () => this.removeRange(r) });
+			const bd = bandOfRange(r);
+			return Object.assign(base, { popMore: true, popLabel: r.name, menuRename: () => this.setState({ renaming: r.id, renameText: r.name, pop: null }), menuRemove: () => this.removeRange(r),
+				menuHasBand: !!bd, menuBandTitle: bd ? bd.name + ' in Settings › Band plans' : '', menuBand: () => { this.setState({ pop: null }); if (bd) this.openBandPlans('bandplans:' + bd.id); } });
 		}
 		return none;
 	}
@@ -1229,7 +1343,7 @@ class Component extends DCLogic {
 		const applyEdits = () => {
 			const d = this.runDraft(w);
 			const edit = { type: 'edit', ranges: (w.ranges || []).map(r => ({ name: r.name, on: !d.off[r.name], protocols: (d.protos[r.name] || []).slice() })),
-				exclusions: d.excl.filter(x => pf(x.fb) > pf(x.fa)).map(x => ({ startHz: Math.round(pf(x.fa) * 1e6), endHz: Math.round(pf(x.fb) * 1e6), reason: x.auto ? x.why + ' · already decoded by ' + x.by : 'Skipped by you' })) };
+				exclusions: d.excl.filter(x => pf(x.fb) > pf(x.fa)).map(x => ({ startHz: Math.round(pf(x.fa) * 1e6), endHz: Math.round(pf(x.fb) * 1e6), reason: x.auto ? xWhy(x, ' · ') : 'Skipped by you' })) };
 			if (this.props.onApply) this.props.onApply(edit); else if (this.props.onScan) this.props.onScan(edit);
 			this.setState({ ra: d, rd: null, pop: null });
 			this.toast('Applied · the scan re-plans at the next hop');
@@ -1239,8 +1353,8 @@ class Component extends DCLogic {
 		const hdAreas = composing ? (chipsRow ? (scr ? "'title title' 'presets save'" : "'title close' 'presets save'") : "'title presets save close'") : scr ? "'title'" : "'title close'";
 		const hdCols = composing ? (chipsRow ? 'minmax(0,1fr) auto' : 'auto minmax(0,1fr) auto auto') : scr ? 'minmax(0,1fr)' : 'minmax(0,1fr) auto';
 		const gutW = narrow || runningM ? 0 : mid ? 118 : 124;
-		const gutLabels = runningM ? [] : LANES.map((ln, li) => ({ top: G.laneTop + li * (G.LH + G.LG) - 1, h: G.LH + 2, text: ln.name, size: 11, weight: 400, fg: 'var(--wk-text-3)' }))
-			.concat([{ top: G.rangeTop, h: G.rangeH, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)' }]);
+		const gutLabels = runningM ? [] : LANES.map((ln, li) => ({ top: G.laneTop + li * (G.LH + G.LG) - 1, h: G.LH + 2, text: ln.name, size: 11, weight: 400, fg: 'var(--wk-text-3)', sw: true, swc: ln.color }))
+			.concat([{ top: G.rangeTop, h: G.rangeH, text: 'Your ranges', size: 12, weight: 700, fg: 'var(--wk-text-2)', sw: false, swc: 'transparent' }]);
 		// table: one line ≥ 860 px · two lines below (name, edges, spacing / protocols, skips, switch) · stacked on a phone
 		const gridAreas = narrow ? "'n name sp act' '. edges edges edges' '. protos protos protos' '. skips skips skips'" : two ? "'n name edges sp' '. protos skips act'" : "'n name edges sp protos skips act'";
 		const gridCols = narrow ? '24px minmax(0,1fr) auto 40px'
@@ -1298,7 +1412,9 @@ class Component extends DCLogic {
 			runQuiet: runningM, runWord, runHasWord: !!runWord, passText, passTitle,
 			runPending: pendN > 0, pendTitle: pendN === 1 ? '1 change waiting' : pendN + ' changes waiting',
 			discard: () => this.setState({ rd: null, pop: null }), applyEdits,
-			closePop: () => this.setState({ pop: null })
+			closePop: () => this.setState({ pop: null }),
+			bpText: 'Band plan: ' + BP_NAME + (BP_EDITS ? ', with your edits' : ''), bpTitle: 'Presets, lanes and skips come from the active band plans · ' + BP_PLANS.filter(p => p.on).map(p => p.name).join(' > '),
+			editPlan: () => this.openBandPlans('bandplans')
 		}, ruler, this.popVals(plan));
 	}
 }

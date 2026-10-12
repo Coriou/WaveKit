@@ -62,10 +62,10 @@ Condensed + Noto Sans, Tabler-based icons).
 | Map | Everything with a position around the station on a real Brittany coastline: layer rail, overlays and legend, collision-free labels, cluster chooser, location setup, last-hour replay chip, tile source. Wired into C (Map in the dock) | Active, second pass |
 | Recordings | What you kept: day-grouped list, rows that open in place with waveform + trim (or an IQ thumbnail), name and note, transcript, download / copy link; shared player; IQ "play as source"; storage line; live manual recording. Wired into C (Recordings in the dock); Keep (S) added to Activity | Active, first pass |
 | Command palette (⌘K) | Tune, change any setting (colour scopes with live preview; every Settings row reachable), act on Activity; nested scopes, live preview, frecency, undo. Wired into C (⌘K in the dock) | Active, first pass |
-| Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Wired into C (gear in the dock) | Active, first pass |
+| Settings | One registry of settings shown three ways: a wide right drawer (search, eight groups with a scroll-spy rail, decoder pages), the islands' "All … settings" links, ⌘K. Changed marks and reset, locked values, an Apply bar for changes that restart something or touch the hardware. Station › Country and the Band plans page (plan stack, import, band list, band editor). Wired into C (gear in the dock) | Active, band plans added |
 | Settings on a phone | The same Settings, full screen: groups push in as their own screens | Active, first pass |
 | Scanner | Discoveries drawer, one-row Watch here and the live hit log; "Scan a band" in the header opens the plan pane beside it. Wired into C | Active, fourth pass |
-| Scan planner | "Scan a band" as a pane attached to the Scanner drawer (pushed in as a screen on narrow windows): presets, one-lane ruler, range table with channel spacing; running mode (capture window, pass fill, ticks, mid-run edits behind Apply). Wired into C | Active, second pass |
+| Scan planner | "Scan a band" as a pane attached to the Scanner drawer (pushed in as a screen on narrow windows): presets and lanes from the active band plan, one-lane ruler, range table with channel spacing; running mode (capture window, pass fill, ticks, mid-run edits behind Apply). Wired into C | Active, second pass |
 | Identify | Every identify state of the tuned card | Active, first pass |
 | Orange "CORE GAPS" sticky | Visual copy of CORE-GAPS.md | Mirror |
 
@@ -795,6 +795,45 @@ Condensed + Noto Sans, Tabler-based icons).
   only never hold; "Stop after 1 pass" finishes the scan, which leaves the Tuner row); ⌘K presets start
   with one row per range (names, spacing, protocols) and the skips for channels decoded elsewhere.
 
+- **Band plans (owner, 2026-10-12; canvas v83–84).** One plan model for display and scanning; the
+  canvas labels were US-shaped ("PMR / land mobile 136–174 MHz"), and in France "PMR" means PMR446.
+  The owner's eight answers:
+  1. *Country* comes from the station location (Roscoff → France), shown as Settings › Station ›
+     Country with an override; with no location the coarse region decides. It replaces the Region
+     row and picks the default pack. Meshtastic's region follows the country.
+  2. *Packs are seeded, then verified:* built-in packs start from community CC0 files
+     (Arrin-KN1E/SDR-Band-Plans) and are corrected against regulator documents (ANFR TNRBF, ECC Rec
+     70-03, ERC Report 25); each band is *verified* or *community* until checked.
+  3. *Fixed display groups, an open set:* Marine, Air, ISM / SRD, Pagers, Personal radio (CB, PMR446),
+     Amateur, Land mobile, Broadcast, Other. Imported bands map to a group (unknown → Other); imported
+     colours are only an off-by-default hint. New `--wk-grp-*` tokens (THEME-TOKENS §3.6, **proposed,
+     owner to approve**): seven validated hues plus two neutrals, drawn only as swatches or 2–3 px edges
+     beside a name, never alone. The hue-to-group assignment was searched so groups that nest (Land
+     mobile around Marine, Amateur around ISM 433…) stay apart for colour-blind readers.
+  4. *Import* by file (SDR++ JSON, SDR# XML, Gqrx CSV) or URL fetched once by core; "Check for update"
+     is manual and shows what changes before Apply. No auto-update.
+  5. *An ordered stack:* Your edits on top, then plans in the user's order (France over CEPT / EU
+     baseline over imports); the higher plan names an overlapping band, gaps fall through.
+  6. *A full band editor:* name, edges, group, mode / bandwidth / step, then More (scan spacing,
+     protocols, skip by default with a reason, parent, hide) and a channel list with aliases. Edits
+     apply at once with Undo (nothing restarts), as a layer with "Reset to France".
+  7. *Provenance stays quiet:* source, licence, verified tick and community badge only in Settings ›
+     Band plans and the band editor; lanes, Tuner and ⌘K show plain names.
+  8. *The regional registry stays the verified layer:* a band or channel linked to a registry row is
+     what earns the tick; core's registry spec is untouched.
+  - *What the canvas shows:* Settings › Station › Country and a Band plans page (stack with grip, switch,
+    provenance and ⋯; Import sheet with preview and group mapping; nested band list with group chips and
+    search; band editor), ids `bandplans`, `bandplans:<band>`, `bandplans:import`, on the phone too.
+    Spectrum lanes, Tuner (band row under the frequency, mode and step follow the band, PMR446 ch 1–16,
+    "routiers" finds CB 19), ⌘K (Band plans, Import, Edit band, the same scan presets) and Scan a band
+    (presets, lanes with group swatches, skips with reasons, "Band plan: France + CEPT · Edit band
+    plan") all derive from one shared mock (`wk-bandplan v1`, copied verbatim per board). Mock sweep
+    renamed "Land mobile + Marine", 146–174 MHz, 19 hops, 8 s. Mocks stay in Brittany with French
+    labels (CB 27, LPD433, Wize 169.4, e*Message 466, DAB+ hidden, INPT (Tetrapol) skipped as
+    encrypted).
+  - *Performance:* lanes are plain DOM cached per view and width, nothing per frame, no new blurred
+    surface; long lists (imports, channels) are capped behind "Show all".
+
 ## Open questions and next topics
 
 - Auto band map: answered by the Scanner decisions (discoveries tag the spectrum).
@@ -823,8 +862,12 @@ Condensed + Noto Sans, Tabler-based icons).
   a setting. Signed-in devices needs the auth design.
 - Scanner listen-scan (S3, "Scan a list"), right-click signal menu with Identify first,
   the `I` key in the keymap pass.
-- Band plans (queued, see Next session): per-country packs, imports (SDR++ / SDR# / Gqrx),
-  user edits, station country; PMR naming per country.
+- Band plans follow-ups (2026-10-12): approve the `--wk-grp-*` hues; when the country has no pack
+  (or there is no location), should France switch off by itself (today the row says "No Germany pack
+  yet" and France stays on)? A custom group picker with swatches instead of the native select? Should
+  "Wize meters 169" stay a scan preset? Should a band you added (Harbour channels) get its own lane bar
+  in Scan a band? In Immersive's default view the tuned card and saved tags hide both lane names: fine,
+  or should one name always win? Dropping a plan onto Your edits places it just below (or refuse?).
 - Island panels on smaller laptop screens; mobile layout.
 - Design-system pass: tokens, type scale, spacing, motion, shadcn mapping.
 - Theme follow-ups: the owner liked the themes (2026-10-11); confirm the Paper waterfall ramp (a / b / c on the Spectrum board) and
@@ -840,63 +883,27 @@ Kept in [CORE-GAPS.md](CORE-GAPS.md), the file the core team watches.
 
 ## Next session
 
-Handoff written 2026-10-12 after Activity wide mode (canvas v81, with the owner's sideways-swipe fix). Two sessions are queued, in
-this order: band plans, then the design system v1 and web app foundation. Two standing rules from the
-owner apply (see "How we work"): the canvas stays the design source after the build starts, and
-performance is a constraint at every stage.
+Handoff written 2026-10-12 after the band plans pass (canvas v83, sticky v84). Next: the design
+system v1 and web app foundation. Two standing rules from the owner apply (see "How we work"): the
+canvas stays the design source after the build starts, and performance is a constraint at every
+stage.
 
-**Check with the owner first (short):** how the Activity columns pane feels in use (sideways swipes
-over the cards after the v81 fix, the peeking columns with "+N", "Pin as column" in the search field, the recording state shrinking to a dot beside
-Columns), and the open Activity follow-ups (per-column Live / audio follow; Recordings using the pane).
+**Check with the owner first (short):** approve the band group hues (`--wk-grp-*`, THEME-TOKENS
+§3.6; seen in Settings › Band plans and the spectrum lanes), then the band plans follow-ups in "Open
+questions" (France pack when the country has none, group picker, Wize preset, Harbour lane, lane
+names hidden under the tuned card).
 
-**Core since the last merge (main@7743665, merged 2026-10-12; origin/main unchanged at the end of the
-Activity pass):** two specs with unmounted foundations, no new endpoint. *Regional display registry*
-(`/api/regional/*`): sourced channel labels and aliases with advisory mode / bandwidth / step hints;
-only US FRS so far, data pending. *Receiver capabilities* (`/api/receiver-capabilities`): per-control
-availability, tuner type and gain count, and by design no gain table in dB, rate presets or tuning
-range. That last point touches the Receiver island, which draws a gain table in dB: when the web app
-is built, plan for an unknown table (gain index steps, or a dB table only where a reviewed source
-exists). CORE-GAPS records both as "Partly".
+**Core since the last merge (main@6b4e5dc, merged 2026-10-12):** the regional display registry and
+receiver capabilities are mounted read-only (`/api/regional/*`, `/api/receiver-capabilities`);
+CORE-GAPS updated, nothing to tick. The receiver capabilities give no gain table in dB, rate presets
+or tuning range by design: the web app must plan for an unknown gain table (index steps, or dB only
+where a reviewed source exists).
 
-### 1. Band plans (next, owner asked 2026-10-12)
+**Band plans on the canvas, for the design-system pass:** the shared mock `wk-bandplan v1` is copied
+verbatim into Settings, ScanPlanner, Tuner, Palette and Spectrum (like the token block); the real app
+reads one plan store. The `--wk-grp-*` lines are now part of the token block (19 lines).
 
-Owner rule: band plans adapt to the user, configurable in core and in the UI, and WaveKit ships strong
-defaults for popular countries. Plans like https://github.com/Arrin-KN1E/SDR-Band-Plans must work
-(CC0; SDR# XML, Gqrx CSV and SDR++ JSON for US and France, XML / CSV for International). The canvas
-labels are US-shaped today: in France "PMR" means PMR446, so "PMR / land mobile 136–174 MHz" in Scan a
-band (presets and lanes), ⌘K and the "Marine + PMR" mock sweep must go. Design only plus the core
-gap; the core team builds it later. CORE-GAPS › "Band plans and presets" now holds the full core
-side (layered plans, station country, builtin fixes), written from a research pass on 2026-10-12.
-
-What core has (main@7743665): scanner band plans in `src/core/scanner/bandplan/builtin.ts` (`Bandplan
-{id, region, name, ranges}` with rasters, protocols; EU / US variants only via `variantFor`), served by
-`GET /api/scanner/bandplans`; a coarse `region` enum (`EU|US|CA|AU|NZ|JP|CN`, guessed from TZ when
-unset), no country and no station lat / lon; the regional display registry (strict, primary-source
-channel rows, US FRS only, no rows, no routes, not linked to the scanner).
-
-Recommended shape to bring to the owner (from the research): one plan model, two uses (display and
-scanning). A plan has provenance and ordered bands; a band has edges, a display group, tuning hints,
-scan hints (spacing, protocols, skip by default with a reason) and named channels with aliases. Three
-layers resolved user edits > imports > built-in packs (CEPT / EU baseline and France first). Scan a
-band presets, spectrum lanes, Tuner `bandOf` / channels and ⌘K all read the active plans.
-
-Ask the owner one question at a time: (1) station country as its own setting, or derived from the
-location (with the coarse region as fallback)? (2) which packs ship first, and are they transcribed
-from regulator documents only or seeded from community files? (3) fixed display groups for the lanes,
-or groups from the plan with a colour map (and do imported colours win)? (4) imports: file only, or
-file and URL fetched by core? (5) several active plans in an order? (6) band editor scope (edges,
-group, mode, step, spacing, protocols, skip)? (7) how community data shows as unverified; (8) keep the
-regional registry as the verified layer, or extend it into the plan store?
-
-Boards to touch: Settings (a Band plans page beside Station › Region at `Settings.dc.html:591`: country
-pack, active plans with provenance, Import, band editor; SettingsPhone too); ScanPlanner (`PRESETS`,
-`LANES`, `ELSEWHERE` at `:438-460` derived from the active plan, plan name and "Edit band plan" link);
-Palette (`BANDS`, `CHANNELS`, `SCAN_PRESETS` at `:172` / `:316`); Tuner (`BANDS`, `CHANNELS`, `bandOf`
-at `:214-253`; PMR446 ch 1–16, not 1–8); Spectrum (`BANDS` at `:218`, lanes follow the plan);
-Immersive / Scanner mock sweep (rename "Marine + PMR"). Keep the mocks in Brittany with French
-labels: CB 27 MHz, LPD433, Wize 169.4, e*Message 466, DAB+, 380–400 MHz INPT as an encrypted skip.
-
-### 2. Design system v1 and web app foundation (after band plans)
+### 1. Design system v1 and web app foundation
 
 The owner wants the next big pass to "optimise everything": normalise, refactor duplicates,
 make it performant and efficient. Guidance agreed in chat (2026-10-11 late):

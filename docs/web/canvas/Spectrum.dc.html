@@ -26,6 +26,8 @@
 [data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
 [data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
 [data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
+[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
 </style>
 <style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
@@ -94,10 +96,10 @@ button:focus-visible,[tabindex]:focus-visible{outline:1.5px solid var(--wk-focus
 				<span style="position: absolute; left: {{vfoLeft}}%; top: 5px; transform: translateX(-50%); height: 20px; padding: 0 7px; border-radius: 4px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 11.5px; font-weight: 700; line-height: 20px; font-variant-numeric: tabular-nums; white-space: nowrap">{{vfoText}}</span>
 			</sc-if>
 		</div>
-		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08); overflow: hidden">
+		<div style="position: relative; height: 24px; flex: none; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08); overflow: hidden; isolation: isolate">
 			<sc-for list="{{bands}}" as="b" hint-placeholder-count="3">
-				<div style="position: absolute; left: {{b.left}}%; width: {{b.width}}%; top: 4px; height: 16px; border-top: 2px solid rgba(var(--wk-line-rgb),.28); box-sizing: border-box">
-					<sc-if value="{{b.showLabel}}" hint-placeholder-val="{{true}}"><span style="position: absolute; left: 6px; top: 1px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--wk-text-3); white-space: nowrap">{{b.label}}</span></sc-if>
+				<div title="{{b.title}}" style="position: absolute; left: {{b.left}}%; width: {{b.width}}%; top: 4px; height: 16px; z-index: {{b.z}}; border-top: 2px solid {{b.rule}}; box-shadow: inset 1px 0 0 {{b.edgeL}}, inset -1px 0 0 {{b.edgeR}}; box-sizing: border-box; opacity: {{b.op}}">
+					<sc-if value="{{b.showLabel}}" hint-placeholder-val="{{true}}"><span style="position: absolute; left: 6px; top: 1px; display: flex; align-items: center; gap: 5px; max-width: {{b.labelMax}}px; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: {{b.fg}}; white-space: nowrap"><span aria-hidden="true" style="width: 6px; height: 6px; flex: none; border-radius: 1.5px; background: {{b.sw}}"></span><span style="overflow: hidden; text-overflow: ellipsis">{{b.label}}</span></span></sc-if>
 				</div>
 			</sc-for>
 			<sc-for list="{{saved}}" as="s" hint-placeholder-count="2">
@@ -190,7 +192,7 @@ const SIG = [
 	{ f: 145.6375e6, bw: 11e3, p: -68, kind: 'voice', on: 6, per: 30, ph: 18, cat: 'analog', label: 'Rptr', sub: 'CTCSS 123' },
 	// Marine VHF, paging, land mobile
 	{ f: 156.600e6, bw: 11e3, p: -71, kind: 'voice', on: 3, per: 12, ph: 7 },
-	{ f: 156.800e6, bw: 11e3, p: -62, kind: 'voice', on: 4, per: 15, ph: 3, cat: 'analog', label: 'Ch 16', sub: 'Marine' },
+	{ f: 156.800e6, bw: 11e3, p: -62, kind: 'voice', on: 4, per: 15, ph: 3, cat: 'analog', label: 'Ch 16', sub: 'voice', chan: true },
 	{ f: 160.450e6, bw: 12.5e3, p: -60, kind: 'burst', on: 1.4, per: 7, ph: 0.5, cat: 'paging', label: 'POCSAG', sub: '1200' },
 	{ f: 160.625e6, bw: 11e3, p: -65, kind: 'voice', on: 5, per: 11, ph: 2, cat: 'analog', label: 'NFM', sub: 'CTCSS 88.5' },
 	{ f: 160.900e6, bw: 2.5e3, p: -84, kind: 'steady' },
@@ -203,7 +205,7 @@ const SIG = [
 	// UHF: LPD, ISM 433, PMR446, French pager network (not decoded here)
 	{ f: 433.075e6, bw: 11e3, p: -79, kind: 'voice', on: 2, per: 25, ph: 8 },
 	{ f: 433.920e6, bw: 60e3, p: -58, kind: 'burst', on: 0.3, per: 5, ph: 2, cat: 'sensors', label: 'ISM', sub: '433 sensors' },
-	{ f: 446.00625e6, bw: 11e3, p: -60, kind: 'voice', on: 6, per: 20, ph: 0, cat: 'analog', label: 'PMR 1', sub: 'voice' },
+	{ f: 446.00625e6, bw: 11e3, p: -60, kind: 'voice', on: 6, per: 20, ph: 0, cat: 'analog', label: 'PMR 1', sub: 'voice', chan: true },
 	{ f: 446.03125e6, bw: 11e3, p: -71, kind: 'voice', on: 4, per: 27, ph: 9 },
 	{ f: 446.09375e6, bw: 11e3, p: -77, kind: 'voice', on: 2, per: 33, ph: 15 },
 	{ f: 466.025e6, bw: 12.5e3, p: -62, kind: 'burst', on: 1.2, per: 10, ph: 3 },
@@ -215,19 +217,67 @@ const SIG = [
 	// ADS-B / Mode S: dense short pulses, about 2 MHz wide
 	{ f: 1090.000e6, bw: 2e6, p: -62, kind: 'pulse', cat: 'aircraft', label: 'ADS-B', sub: '34 aircraft' }
 ];
-const BANDS = [
-	{ from: 87.5e6, to: 108e6, label: 'FM broadcast' },
-	{ from: 118e6, to: 131.4e6, label: 'Airband voice' },
-	{ from: 131.4e6, to: 137e6, label: 'Aviation data' },
-	{ from: 144e6, to: 146e6, label: '2 m amateur' },
-	{ from: 156e6, to: 161.9625e6, label: 'Marine VHF' },
-	{ from: 161.9625e6, to: 162.0375e6, label: 'AIS' },
-	{ from: 433.05e6, to: 434.79e6, label: 'ISM 433' },
-	{ from: 446.0e6, to: 446.2e6, label: 'PMR446' },
-	{ from: 466.0e6, to: 466.25e6, label: 'Pagers' },
-	{ from: 863e6, to: 870e6, label: 'SRD 868' },
-	{ from: 1089e6, to: 1091e6, label: 'ADS-B' }
+// wk-bandplan v1 · shared band plan mock, copy verbatim into each board's script, never edit per board
+// Resolved stack: Your edits > France > CEPT / EU baseline (the International import is off).
+// MHz for edges and channels. Colour of a group: var(--wk-grp-<group id>). A band always shows its name: colour is never alone.
+const BP_COUNTRY = { code: 'FR', name: 'France', how: 'location', place: 'Roscoff', override: null, region: 'EU' };
+const BP_GROUPS = [
+	{ id: 'marine', name: 'Marine' }, { id: 'air', name: 'Air' }, { id: 'srd', name: 'ISM / SRD' }, { id: 'pagers', name: 'Pagers' },
+	{ id: 'personal', name: 'Personal radio' }, { id: 'amateur', name: 'Amateur' }, { id: 'landmobile', name: 'Land mobile' },
+	{ id: 'broadcast', name: 'Broadcast' }, { id: 'other', name: 'Other' }
 ];
+// Top first. kind: edits | pack | import. ver = bands checked against a regulator source (a registry row in core).
+const BP_PLANS = [
+	{ id: 'edits', kind: 'edits', name: 'Your edits', on: true, sub: '3 changes, kept when packs update' },
+	{ id: 'fr', kind: 'pack', name: 'France', on: true, version: '2026.10', bands: 12, ver: 4, source: 'ANFR TNRBF, ECC Rec 70-03', seeded: 'Seeded from SDR-Band-Plans (CC0)', sub: 'Built in · picked by the station country' },
+	{ id: 'cept', kind: 'pack', name: 'CEPT / EU baseline', on: true, version: '2026.10', bands: 6, ver: 6, source: 'ERC Report 25', sub: 'Built in · fills what France leaves out' },
+	{ id: 'intl', kind: 'import', name: 'International', on: false, format: 'Gqrx CSV', url: 'https://github.com/Arrin-KN1E/SDR-Band-Plans', author: 'Arrin-KN1E', licence: 'CC0', imported: '12 Oct', bands: 61, sub: 'Imported from a URL · community, unverified' }
+];
+// from: the plan that names it. ver: verified. edit: added | renamed | hidden. parent: nesting (the narrower band wins the label).
+// sp: channel spacing in Hz. skip: scans skip it by default, with the reason. by: a decoder that already covers it.
+const BP_BANDS = [
+	{ id: 'cb', name: 'CB 27 MHz', group: 'personal', a: 26.965, b: 27.405, mode: 'AM', step: 10000, sp: [10000], protos: ['am', 'fm'], from: 'fr', ver: false,
+		ch: [{ n: '9', f: 27.065, name: 'CB ch 9', note: 'Emergency' }, { n: '19', f: 27.185, name: 'CB ch 19', note: 'Road users', alias: ['routiers'], edit: 'renamed' }] },
+	{ id: 'fm', name: 'FM broadcast', group: 'broadcast', a: 87.5, b: 108, mode: 'WFM', step: 100000, sp: [100000], protos: [], from: 'fr', ver: true, skip: 'Broadcast' },
+	{ id: 'air', name: 'Airband', group: 'air', a: 118, b: 137, mode: 'AM', step: 8330, sp: [8330, 25000], protos: ['am', 'acars', 'vdl2'], from: 'cept', ver: true,
+		ch: [{ f: 121.5, name: 'Guard 121.5', note: 'Emergency', alias: ['guard'] }, { f: 131.525, name: 'ACARS 131.525', by: 'acarsdec' }, { f: 131.725, name: 'ACARS Europe', by: 'acarsdec' }, { f: 136.975, name: 'VDL2 136.975', by: 'dumpvdl2' }] },
+	{ id: 'wxsat', name: 'Weather satellites', group: 'other', a: 137, b: 138, mode: 'WFM', step: 5000, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Passes only' },
+	{ id: '2m', name: '2 m amateur', group: 'amateur', a: 144, b: 146, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], from: 'cept', ver: true,
+		ch: [{ f: 144.8, name: 'APRS Europe', by: 'Direwolf', alias: ['aprs'] }] },
+	{ id: 'lmv', name: 'Land mobile VHF', group: 'landmobile', a: 146, b: 174, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'p25', 'fm', 'pocsag'], from: 'fr', ver: false },
+	{ id: 'marine', name: 'Marine VHF', group: 'marine', parent: 'lmv', a: 156, b: 162.025, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm', 'ais'], from: 'fr', ver: true,
+		ch: [{ n: '16', f: 156.8, name: 'Marine ch 16', note: 'Distress, calling' }, { n: '12', f: 156.6, name: 'Marine ch 12', note: 'Port operations' }, { n: '70', f: 156.525, name: 'Marine ch 70', note: 'DSC' },
+			{ f: 161.975, name: 'AIS A', by: 'AIS-catcher' }, { f: 162.025, name: 'AIS B', by: 'AIS-catcher' }] },
+	{ id: 'harbour', name: 'Harbour channels', group: 'marine', parent: 'marine', a: 156.5, b: 157.45, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm'], from: 'edits', ver: false, edit: 'added' },
+	{ id: 'wize', name: 'Wize meters 169', group: 'srd', parent: 'lmv', a: 169.4, b: 169.475, mode: 'NFM', step: 12500, sp: [12500], protos: ['ism'], from: 'fr', ver: false },
+	{ id: 'pg169', name: 'Pagers 169', group: 'pagers', parent: 'lmv', a: 169.475, b: 169.8, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'dab', name: 'DAB+', group: 'broadcast', a: 174, b: 230, mode: 'RAW', step: 1712000, sp: [0], protos: [], from: 'fr', ver: false, skip: 'Broadcast', edit: 'hidden' },
+	{ id: 'inpt', name: 'INPT (Tetrapol)', group: 'landmobile', a: 380, b: 400, mode: 'NFM', step: 12500, sp: [12500], protos: [], from: 'fr', ver: false, skip: 'Encrypted public safety' },
+	{ id: 'lmu', name: 'Land mobile UHF', group: 'landmobile', a: 400, b: 470, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'fm'], from: 'fr', ver: false },
+	{ id: '70cm', name: '70 cm amateur', group: 'amateur', parent: 'lmu', a: 430, b: 440, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar'], from: 'cept', ver: true },
+	{ id: 'ism433', name: 'ISM 433 · LPD433', group: 'srd', parent: '70cm', a: 433.05, b: 434.79, mode: 'NFM', step: 25000, sp: [0], protos: ['ism'], from: 'fr', ver: true,
+		ch: [{ f: 433.92, name: 'ISM 433.92', note: 'Sensors', alias: ['433'] }] },
+	{ id: 'pmr446', name: 'PMR446', group: 'personal', parent: 'lmu', a: 446.0, b: 446.2, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['fm', 'dpmr', 'dmr'], from: 'fr', ver: true,
+		ch: Array.from({ length: 16 }, (_, i) => ({ n: String(i + 1), f: +(446.00625 + i * 0.0125).toFixed(5), name: 'PMR446 ch ' + (i + 1), alias: ['pmr ' + (i + 1), 'pmr' + (i + 1)] })) },
+	{ id: 'pg466', name: 'Pagers 466 (e*Message)', group: 'pagers', parent: 'lmu', a: 466.025, b: 466.23, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'srd868', name: 'SRD 868', group: 'srd', a: 863, b: 870, mode: 'NFM', step: 25000, sp: [0], protos: ['ism', 'lora'], from: 'cept', ver: true,
+		ch: [{ f: 868.3, name: 'ISM 868.3', note: 'Sensors' }, { f: 868.95, name: 'wM-Bus 868.95', note: 'Meters' }, { f: 869.525, name: 'Meshtastic EU', by: 'Meshtastic', alias: ['mesh', 'lora'] }] },
+	{ id: 'adsb', name: 'ADS-B 1090', group: 'air', a: 1089, b: 1091, mode: 'RAW', step: 0, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Decoded elsewhere', by: 'readsb' }
+];
+// Helpers every board may use. bpBandAt: the narrowest visible band containing f (MHz).
+const bpGroup = id => BP_GROUPS.find(g => g.id === id) || BP_GROUPS[BP_GROUPS.length - 1];
+const bpPlan = id => BP_PLANS.find(p => p.id === id);
+const bpBandAt = f => BP_BANDS.filter(b => b.edit !== 'hidden' && f >= b.a && f <= b.b).sort((x, y) => (x.b - x.a) - (y.b - y.a))[0] || null;
+const bpChannels = () => BP_BANDS.reduce((out, b) => out.concat((b.ch || []).map(c => Object.assign({ band: b.id }, c))), []);
+// Lanes: every visible band (hidden ones, DAB+, are not drawn), deepest first in nesting so the narrower band
+// sits over its parent; a skipped band is drawn quieter. Hz edges for this board.
+const LANES = BP_BANDS.filter(b => b.edit !== 'hidden').map(b => {
+	let depth = 0, p = b;
+	while (p && p.parent) { depth++; p = BP_BANDS.find(x => x.id === p.parent); }
+	return { id: b.id, from: b.a * 1e6, to: b.b * 1e6, label: b.name, group: b.group, skip: !!b.skip, depth, title: b.name + ' · ' + b.a + '–' + b.b + ' MHz' + (b.skip ? ' · scans skip it: ' + b.skip : '') };
+});
+// a signal sitting on a plan channel takes the channel's name (PMR 1 → PMR446 ch 1)
+const CHAN_HZ = bpChannels().map(c => ({ f: Math.round(c.f * 1e6), name: c.name }));
 // Scanner discoveries (shared mock, S1). Used when no `discoveries` prop is passed, so this board shows the tier on its own.
 const DISCOVERIES = [
 	{ hz: 161150000, bw: 12500, label: 'DMR · CC 1', sub: 'TG 2081, TG 9 · slot 1', conf: 'decoded', active: true, recent: true },
@@ -244,6 +294,7 @@ const DISCOVERIES = [
 	{ hz: 466025000, bw: 12500, label: 'Maybe FLEX', sub: 'No sync yet', conf: 'maybe', active: false, recent: false },
 	{ hz: 433075000, bw: 12500, label: 'Heard', sub: 'LPD', conf: 'heard', active: false, recent: false }
 ];
+SIG.forEach(x => { if (x.chan) { const c = CHAN_HZ.find(y => y.f === Math.round(x.f)); if (c) x.label = c.name; } });
 const CONF_RANK = { decoded: 3, likely: 2, maybe: 1, heard: 0 };
 const STEPS = [1e3, 2e3, 5e3, 10e3, 20e3, 25e3, 50e3, 100e3, 200e3, 250e3, 500e3, 1e6];
 // Waterfall ramps are built at runtime from the resolved plot tokens (bg, accent, ink), so trace,
@@ -671,6 +722,39 @@ class Component extends DCLogic {
 		this.trace(c, this.avg, m, W, H, n);
 		c.strokeStyle = 'rgb(' + a + ')'; c.lineWidth = 1.25 * d; c.lineJoin = 'round'; c.stroke();
 	}
+	// Band lanes, cut into pieces: a band shows where no narrower band covers it, so a nested band reads as drawn over
+	// its parent and the parent's name moves to a stretch it still owns. A name needs its piece to be wide enough and
+	// yields to a saved-frequency tag; the swatch goes with the name (colour is never alone). Cached per view and width.
+	lanes(L, R, w, savedTaken) {
+		const key = L + '|' + R + '|' + w + '|' + savedTaken.map(o => o[0] | 0).join(',');
+		if (key === this.laneKey) return this.laneOut;
+		const span = R - L, vis = LANES.filter(b => b.to > L && b.from < R).sort((a, b) => b.depth - a.depth || (a.to - a.from) - (b.to - b.from));
+		const out = [], covered = [];
+		vis.forEach(b => {
+			let segs = [[Math.max(b.from, L), Math.min(b.to, R)]];
+			covered.forEach(c => { segs = segs.reduce((acc, g) => acc.concat(c[1] <= g[0] || c[0] >= g[1] ? [g] : [[g[0], c[0]], [c[1], g[1]]].filter(x => x[1] - x[0] > 0)), []); });
+			covered.push([b.from, b.to]);
+			// the name goes in the widest piece
+			let best = null;
+			segs.forEach(g => { if (!best || g[1] - g[0] > best[1] - best[0]) best = g; });
+			const lw = b.label.length * 7.8 + 24;
+			segs.forEach(g => {
+				const px = (g[1] - g[0]) / span * w, lx = (g[0] - L) / span * w;
+				const named = g === best && px >= lw && !savedTaken.some(o => o[0] < lx + lw && o[1] > lx);
+				const starts = g[0] === b.from, ends = g[1] === b.to;
+				out.push({
+					left: (g[0] - L) / span * 100, width: (g[1] - g[0]) / span * 100, label: b.label, showLabel: named, title: b.title,
+					sw: 'var(--wk-grp-' + b.group + ')', z: 1 + b.depth,
+					rule: b.skip ? 'rgba(var(--wk-line-rgb),.14)' : 'rgba(var(--wk-line-rgb),.28)',
+					fg: b.skip ? 'var(--wk-text-4)' : 'var(--wk-text-3)', op: b.skip ? 0.7 : 1,
+					edgeL: starts ? 'rgba(var(--wk-line-rgb),.28)' : 'transparent', edgeR: ends ? 'rgba(var(--wk-line-rgb),.28)' : 'transparent',
+					labelMax: Math.max(0, px - 12)
+				});
+			});
+		});
+		this.laneKey = key; this.laneOut = out;
+		return out;
+	}
 	renderVals() {
 		const s = this.state, cap = this.cap();
 		const specH = this.props.specHeight ?? 260;
@@ -765,13 +849,7 @@ class Component extends DCLogic {
 			markers,
 			saved,
 			ticks: tickList(L, span, w).map(t => ({ left: pct(t.f), text: t.text })),
-			bands: BANDS.filter(b => b.to > L && b.from < R).map(b => {
-				const a = Math.max(b.from, L), z = Math.min(b.to, R);
-				// the band name yields to a saved-frequency tag and to a band too narrow to hold it
-				const lx = pct(a) / 100 * w + 6, lw = b.label.length * 7.5 + 8, bandPx = (z - a) / span * w;
-				const showLabel = bandPx >= Math.min(lw, 60) && !savedTaken.some(o => o[0] < lx + lw && o[1] > lx - 4);
-				return { left: pct(a), width: (z - a) / span * 100, label: b.label, showLabel };
-			}),
+			bands: this.lanes(L, R, w, savedTaken),
 			vfoVisible: inView(vfo),
 			vfoLeft: pct(vfo),
 			vfoWidth: bw / span * 100,

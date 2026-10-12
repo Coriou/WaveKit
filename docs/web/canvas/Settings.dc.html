@@ -26,6 +26,8 @@
 [data-wk-theme="dark"]:not([data-wk-ground="graphite"]):not([data-wk-ground="black"])[data-wk-accent="mono"]{--wk-plot-bg:#111314;--wk-bg:#111314;--wk-surface:#171a1b;--wk-fill:#23272a;--wk-fill-glass:rgba(35,39,42,.92);--wk-well:#111314;--wk-well-glass:rgba(17,19,20,.6);--wk-glass:rgba(23,26,27,.5);--wk-glass-panel:rgba(23,26,27,.66);--wk-glass-strong:rgba(23,26,27,.92);--wk-text:#f5f6f7;--wk-text-soft:#dee1e3;--wk-text-2:#c1c6c9;--wk-text-3:#989fa3;--wk-text-4:#808689;--wk-text-5:#5b6063;--wk-ink-rgb:245,246,247;--wk-ink-2-rgb:193,198,201;--wk-ink-3-rgb:152,159,163;--wk-knob:#f5f6f7;--wk-line-solid:#2d3235;--wk-track:#393f42;--wk-on-accent:#171a1b}
 [data-wk-theme="dark"][data-wk-ground="graphite"][data-wk-accent]{--wk-plot-bg:#161718;--wk-bg:#161718;--wk-surface:#1d1e1f;--wk-fill:#2a2c2d;--wk-fill-glass:rgba(42,44,45,.92);--wk-well:#161718;--wk-well-glass:rgba(22,23,24,.6);--wk-glass:rgba(29,30,31,.5);--wk-glass-panel:rgba(29,30,31,.66);--wk-glass-strong:rgba(29,30,31,.92);--wk-text:#f6f6f6;--wk-text-soft:#e0e1e2;--wk-text-2:#c4c5c7;--wk-text-3:#9c9ea0;--wk-text-4:#8a8c8f;--wk-text-5:#5e5f61;--wk-ink-rgb:246,246,246;--wk-ink-2-rgb:196,197,199;--wk-ink-3-rgb:156,158,160;--wk-knob:#f6f6f6;--wk-line-solid:#353638;--wk-track:#424345;--wk-on-accent:#1d1e1f;--wk-line-rgb:226,230,235}
 [data-wk-theme="dark"][data-wk-ground="black"][data-wk-accent]{--wk-plot-bg:#000000;--wk-bg:#000000;--wk-surface:#101010;--wk-fill:#1b1b1b;--wk-fill-glass:rgba(27,27,27,.92);--wk-well:#000000;--wk-well-glass:rgba(0,0,0,.6);--wk-glass:rgba(16,16,16,.72);--wk-glass-panel:rgba(16,16,16,.82);--wk-glass-strong:rgba(16,16,16,.95);--wk-text:#f5f5f5;--wk-text-soft:#dedede;--wk-text-2:#c2c2c2;--wk-text-3:#9c9c9c;--wk-text-4:#878787;--wk-text-5:#5e5e5e;--wk-ink-rgb:245,245,245;--wk-ink-2-rgb:194,194,194;--wk-ink-3-rgb:156,156,156;--wk-knob:#f5f5f5;--wk-line-solid:#262626;--wk-track:#363636;--wk-on-accent:#101010;--wk-line-rgb:255,255,255}
+[data-wk-theme]{--wk-grp-marine:#199e70;--wk-grp-air:#3987e5;--wk-grp-srd:#d55181;--wk-grp-pagers:#c98500;--wk-grp-personal:#d95926;--wk-grp-amateur:#008300;--wk-grp-landmobile:#9085e9;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
+[data-wk-theme="light"]{--wk-grp-marine:#1baf7a;--wk-grp-air:#2a78d6;--wk-grp-srd:#e87ba4;--wk-grp-pagers:#eda100;--wk-grp-personal:#eb6834;--wk-grp-amateur:#008300;--wk-grp-landmobile:#4a3aa7;--wk-grp-broadcast:var(--wk-text-4);--wk-grp-other:var(--wk-text-5)}
 </style>
 <style>
 @font-face{font-family:"D-DIN Condensed";font-weight:400;font-display:swap;src:url("/_blob/6b6b1c5cae1637ecc473a959a8d87a96") format("woff2")}
@@ -80,6 +82,9 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 .wk-phone .wk-rg>.wk-more{height:44px !important;width:36px !important}
 .wk-phone select{max-width:156px !important;height:40px !important}
 .wk-phone .wk-tall{height:40px !important}
+.wk-phone .wk-pmore{width:36px !important;height:44px !important}
+.wk-s .wk-pmore{opacity:.75}
+.wk-s .wk-pmore:hover,.wk-s .wk-pmore[aria-expanded="true"]{opacity:1}
 .wk-s .wk-swb[aria-checked="false"]:hover{border-color:rgba(var(--wk-ink-rgb),.28) !important}
 .wk-phone .wk-swb{width:44px !important;height:44px !important}
 .wk-s .wk-gsw[aria-checked="false"]:hover>.wk-gring,.wk-s .wk-wfb[aria-checked="false"]:hover>.wk-gring{border-color:rgba(var(--wk-ink-rgb),.28) !important}
@@ -322,6 +327,154 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 					</div>
 				</sc-if>
 
+				<!-- Band plans page (2026-10-12): section heads, the plan stack, the band list, a band's channels and provenance -->
+				<sc-if value="{{r.isBpSec}}" hint-placeholder-val="{{false}}">
+					<div style="margin-top: {{r.mt}}; padding: {{r.pt}} 4px 8px 16px; border-top: 1px solid {{r.line}}; display: flex; align-items: flex-start; gap: 10px">
+						<span style="flex: 1; min-width: 0">
+							<span style="display: block; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; line-height: 18px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-2); font-variant-numeric: tabular-nums">{{r.label}}</span>
+							<sc-if value="{{r.hasDesc}}" hint-placeholder-val="{{true}}"><span style="display: block; margin-top: 4px; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); text-wrap: pretty">{{r.desc}}</span></sc-if>
+						</span>
+						<sc-if value="{{r.hasBtn}}" hint-placeholder-val="{{false}}">
+							<button class="wk-out wk-tall" data-bp="{{r.btnKey}}" onClick="{{r.btnAct}}" style="flex: none; height: 32px; padding: 0 12px 0 10px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); color: var(--wk-accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; white-space: nowrap">
+								<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{r.btnIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>{{r.btn}}
+							</button>
+						</sc-if>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpPlan}}" hint-placeholder-val="{{false}}">
+					<div class="wk-row" data-bp-plan="{{r.id}}" onDragOver="{{r.over}}" onDrop="{{r.drop}}" style="position: relative; display: flex; align-items: flex-start; gap: 6px; margin-bottom: 2px; padding: 10px 4px 10px 2px; border-radius: 8px; box-shadow: {{r.ring}}; opacity: {{r.dragOp}}">
+						<span draggable="{{r.canDrag}}" onDragStart="{{r.dragStart}}" onDragEnd="{{r.dragEnd}}" title="{{r.gripTitle}}" aria-hidden="true" style="flex: none; width: 22px; height: 40px; display: grid; place-items: center; color: var(--wk-text-4); cursor: {{r.gripCursor}}">
+							<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" style="opacity: {{r.gripOp}}"><circle cx="9" cy="6" r="1.6"></circle><circle cx="15" cy="6" r="1.6"></circle><circle cx="9" cy="12" r="1.6"></circle><circle cx="15" cy="12" r="1.6"></circle><circle cx="9" cy="18" r="1.6"></circle><circle cx="15" cy="18" r="1.6"></circle></svg>
+						</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding-top: 1px">
+							<span style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; min-height: 20px">
+								<span style="font-weight: 700; font-size: 14px; line-height: 20px; color: {{r.nameC}}">{{r.name}}</span>
+								<sc-if value="{{r.hasKind}}" hint-placeholder-val="{{true}}"><span style="height: 18px; padding: 0 6px; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 700; background: var(--wk-chip); color: var(--wk-text-2); white-space: nowrap">{{r.kindLabel}}</span></sc-if>
+								<sc-if value="{{r.comm}}" hint-placeholder-val="{{false}}"><span style="height: 18px; padding: 0 6px; box-sizing: border-box; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11.5px; border: 1px solid rgba(var(--wk-line-rgb),.22); color: var(--wk-text-3); white-space: nowrap">Community</span></sc-if>
+								<sc-if value="{{r.off}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: var(--wk-text-4)">Off</span></sc-if>
+							</span>
+							<span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); text-wrap: pretty">{{r.sub}}</span>
+							<sc-if value="{{r.hasProv}}" hint-placeholder-val="{{true}}"><span style="font-size: 12px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums; text-wrap: pretty">{{r.prov}}</span></sc-if>
+							<sc-if value="{{r.hasUpd}}" hint-placeholder-val="{{false}}">
+								<span role="status" style="margin-top: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; padding: 8px 6px 8px 10px; border-radius: 8px; background: var(--wk-well-glass); border: 1px solid rgba(var(--wk-line-rgb),.12); font-size: 12.5px; line-height: 1.45; color: var(--wk-text-2)">
+									<span style="flex: 1 1 180px; min-width: 0">{{r.updText}}</span>
+									<span style="display: flex; gap: 4px">
+										<button class="wk-ghost" onClick="{{r.updLater}}" style="height: 30px; padding: 0 10px; border-radius: 6px; color: var(--wk-text-2); font-size: 12.5px">Not now</button>
+										<button class="wk-out" onClick="{{r.updApply}}" style="height: 30px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); color: var(--wk-accent); font-size: 12.5px; font-weight: 700">Apply</button>
+									</span>
+								</span>
+							</sc-if>
+						</span>
+						<button role="switch" aria-checked="{{r.on}}" aria-label="Use {{r.name}}" onClick="{{r.toggle}}" style="flex: none; width: 52px; height: 40px; display: grid; place-items: center; border-radius: 6px">
+							<span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{r.track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{r.knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span>
+						</button>
+						<button class="wk-ghost wk-pmore" onClick="{{r.toggleMenu}}" aria-haspopup="menu" aria-expanded="{{r.menuOpen}}" aria-label="More for {{r.name}}" style="flex: none; width: 28px; height: 40px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)">
+							<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path><path d="M17 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0"></path></svg>
+						</button>
+						<sc-if value="{{r.menuOpen}}" hint-placeholder-val="{{false}}">
+							<div role="menu" aria-label="{{r.name}}" class="wk-rise" onKeyDown="{{r.menuKey}}" style="position: absolute; right: 4px; top: 46px; z-index: 6; min-width: 200px; padding: 4px; border-radius: 12px; background: var(--wk-glass-strong); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-drawer); backdrop-filter: blur(24px)">
+								<sc-for list="{{r.menu}}" as="m" hint-placeholder-count="3">
+									<button role="menuitem" class="wk-ghost" onClick="{{m.act}}" autoFocus="{{m.first}}" style="width: 100%; height: 36px; padding: 0 10px; border-radius: 6px; display: flex; align-items: center; gap: 10px; text-align: left; font-size: 13px; color: {{m.fg}}">
+										<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><sc-for list="{{m.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>{{m.label}}
+									</button>
+								</sc-for>
+							</div>
+						</sc-if>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpTools}}" hint-placeholder-val="{{false}}">
+					<div style="padding: 2px 4px 10px 16px; display: flex; flex-direction: column; gap: 10px">
+						<div style="display: flex; align-items: center; gap: 8px; height: 36px; box-sizing: border-box; padding: 0 6px 0 12px; border-radius: 6px; background: var(--wk-well-glass); border: 1px solid rgba(var(--wk-line-rgb),.18)">
+							<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M10 10m-7 0a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6"></path></svg>
+							<input value="{{r.q}}" onChange="{{r.onQ}}" onKeyDown="{{r.qKey}}" aria-label="Find a band" placeholder="Find a band, channel or MHz" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 32px; border: 0; outline: none; background: transparent; color: var(--wk-text); font: inherit; font-size: 13.5px">
+						</div>
+						<div role="group" aria-label="Show bands of" style="display: flex; flex-wrap: wrap; gap: 6px">
+							<sc-for list="{{r.chips}}" as="c" hint-placeholder-count="4">
+								<button class="wk-tall" aria-pressed="{{c.on}}" onClick="{{c.pick}}" style="height: 30px; padding: 0 9px 0 8px; border-radius: 6px; display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 700; white-space: nowrap; background: {{c.bg}}; color: {{c.fg}}; transition: background .15s">
+									<span aria-hidden="true" style="display: {{c.swD}}; width: 8px; height: 8px; border-radius: 2px; background: {{c.sw}}; flex: none"></span>{{c.label}}<span style="font-weight: 400; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{c.n}}</span>
+								</button>
+							</sc-for>
+						</div>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpBand}}" hint-placeholder-val="{{false}}">
+					<button class="wk-row" data-bp-band="{{r.id}}" onClick="{{r.open}}" aria-label="{{r.aria}}" style="position: relative; width: 100%; display: flex; align-items: center; gap: 10px; min-height: 52px; margin-bottom: 2px; padding: 7px 12px 7px {{r.pl}}; border-radius: 8px; text-align: left">
+						<sc-if value="{{r.nested}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: {{r.guideX}}; top: 8px; bottom: 8px; width: 1px; background: rgba(var(--wk-line-rgb),.14)"></span></sc-if>
+						<span aria-hidden="true" style="width: 10px; height: 10px; border-radius: 3px; background: {{r.sw}}; flex: none; opacity: {{r.op}}"></span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; opacity: {{r.op}}">
+							<span style="display: flex; align-items: center; gap: 8px; min-width: 0">
+								<span style="font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+								<sc-if value="{{r.hasMark}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 18px; padding: 0 6px; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 700; background: {{r.markBg}}; color: {{r.markFg}}; white-space: nowrap">{{r.mark}}</span></sc-if>
+							</span>
+							<span style="display: flex; align-items: center; flex-wrap: wrap; gap: 2px 6px; font-size: 12px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums">
+								<span><span style="color: var(--wk-text-2)">{{r.edges}}</span> · {{r.meta}}</span>
+								<sc-if value="{{r.ver}}" hint-placeholder-val="{{false}}"><span style="display: inline-flex; align-items: center; gap: 3px; color: var(--wk-accent)"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg>Verified</span></sc-if>
+								<sc-if value="{{r.comm}}" hint-placeholder-val="{{false}}"><span style="height: 16px; padding: 0 5px; box-sizing: border-box; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11px; border: 1px solid rgba(var(--wk-line-rgb),.22); color: var(--wk-text-3)">community</span></sc-if>
+								<sc-if value="{{r.hasExtra}}" hint-placeholder-val="{{false}}"><span>· {{r.extra}}</span></sc-if>
+							</span>
+						</span>
+						<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--wk-text-4)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><path d="M9 6l6 6l-6 6"></path></svg>
+					</button>
+				</sc-if>
+
+				<sc-if value="{{r.isBpLinkBtn}}" hint-placeholder-val="{{false}}">
+					<button class="wk-row" onClick="{{r.act}}" style="width: 100%; min-height: 40px; padding: 0 12px 0 16px; border-radius: 8px; text-align: left; font-size: 13px; font-weight: 700; color: var(--wk-accent); font-variant-numeric: tabular-nums">{{r.label}}</button>
+				</sc-if>
+
+				<sc-if value="{{r.isBpEdHead}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; align-items: center; gap: 12px; margin-bottom: 8px; padding: 6px 4px 16px 16px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.08)">
+						<span aria-hidden="true" style="width: 40px; height: 40px; flex: none; border-radius: 6px; background: var(--wk-fill); display: grid; place-items: center"><span style="width: 14px; height: 14px; border-radius: 4px; background: {{r.sw}}"></span></span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px">
+							<span style="font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.where}}</span>
+							<span style="font-size: 12.5px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums">{{r.named}}</span>
+						</span>
+						<span style="display: flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 4px; background: {{r.pillBg}}; color: {{r.pillFg}}; font-size: 12px; font-weight: 700; white-space: nowrap; border: 1px solid {{r.pillLine}}; box-sizing: border-box">
+							<sc-if value="{{r.pillTick}}" hint-placeholder-val="{{false}}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12l5 5l10 -10"></path></svg></sc-if>{{r.pill}}
+						</span>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpCh}}" hint-placeholder-val="{{false}}">
+					<div class="wk-row" style="display: flex; align-items: center; gap: 10px; min-height: 48px; margin-bottom: 2px; padding: 6px 4px 6px 16px; border-radius: 8px">
+						<span style="flex: none; width: 22px; text-align: right; font-size: 12.5px; font-weight: 700; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{r.n}}</span>
+						<span style="flex: none; width: 82px; font-weight: 700; font-size: 13.5px; font-variant-numeric: tabular-nums">{{r.f}}</span>
+						<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px">
+							<span style="display: flex; align-items: center; gap: 8px; min-width: 0">
+								<span style="font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.name}}</span>
+								<sc-if value="{{r.hasMark}}" hint-placeholder-val="{{false}}"><span style="flex: none; height: 18px; padding: 0 6px; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11.5px; font-weight: 700; background: rgba(var(--wk-accent-rgb),.12); color: var(--wk-accent)">{{r.mark}}</span></sc-if>
+							</span>
+							<sc-if value="{{r.hasMeta}}" hint-placeholder-val="{{false}}"><span style="font-size: 12px; color: var(--wk-text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{r.meta}}</span></sc-if>
+						</span>
+						<button class="wk-ghost wk-stepb" onClick="{{r.remove}}" aria-label="Remove {{r.name}}" style="flex: none; width: 32px; height: 32px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpChAdd}}" hint-placeholder-val="{{false}}">
+					<div role="group" aria-label="Add a channel" style="display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 4px 4px 16px">
+						<input id="{{r.fId}}" class="wk-field wk-tall" onKeyDown="{{r.key}}" placeholder="MHz" aria-label="Channel frequency in MHz" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: none; width: 104px; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13px; font-variant-numeric: tabular-nums">
+						<input id="{{r.nId}}" class="wk-field wk-tall" onKeyDown="{{r.key}}" placeholder="Name, then aliases after commas" aria-label="Channel name, then aliases after commas" spellcheck="false" autocomplete="off" style="flex: 1 1 120px; min-width: 0; height: 34px; box-sizing: border-box; padding: 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13px">
+						<button class="wk-out wk-tall" onClick="{{r.add}}" style="flex: none; height: 34px; padding: 0 12px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); color: var(--wk-accent); font-size: 13px; font-weight: 700; white-space: nowrap">Add channel</button>
+					</div>
+				</sc-if>
+
+				<sc-if value="{{r.isBpProv}}" hint-placeholder-val="{{false}}">
+					<div style="margin-top: 14px; padding: 16px 4px 0 16px; border-top: 1px solid rgba(var(--wk-line-rgb),.08); display: flex; flex-direction: column; gap: 12px">
+						<div style="display: flex; gap: 8px; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3); font-variant-numeric: tabular-nums">
+							<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{{r.iconC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none; margin-top: 1px"><sc-for list="{{r.icon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
+							<span style="min-width: 0; text-wrap: pretty">{{r.prov}}</span>
+						</div>
+						<sc-if value="{{r.hasBtns}}" hint-placeholder-val="{{false}}">
+							<div style="display: flex; gap: 6px; flex-wrap: wrap">
+								<sc-if value="{{r.canReset}}" hint-placeholder-val="{{false}}"><button class="wk-out wk-tall" onClick="{{r.reset}}" style="height: 36px; padding: 0 14px 0 12px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); color: var(--wk-accent); font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 7px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14l-4 -4l4 -4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>{{r.resetLabel}}</button></sc-if>
+								<sc-if value="{{r.canDelete}}" hint-placeholder-val="{{false}}"><button class="wk-ghost wk-tall" onClick="{{r.del}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: var(--wk-danger-soft); font-size: 13px">Delete band</button></sc-if>
+							</div>
+						</sc-if>
+					</div>
+				</sc-if>
+
 				<sc-if value="{{r.isRow}}" hint-placeholder-val="{{true}}">
 					<div id="{{r.domId}}" class="wk-row {{r.rise}}" style="position: relative; margin-bottom: 2px; padding: 12px 4px 12px 16px; border-radius: 8px; background: {{r.bg}}; box-shadow: {{r.ring}}; transition: background .6s ease, box-shadow .6s ease">
 						<sc-if value="{{r.hasBar}}" hint-placeholder-val="{{false}}"><span aria-hidden="true" style="position: absolute; left: 6px; top: 14px; bottom: 14px; width: 2px; border-radius: 1px; background: {{r.barC}}"></span></sc-if>
@@ -409,7 +562,8 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 								</sc-if>
 
 								<sc-if value="{{r.isSel}}" hint-placeholder-val="{{false}}">
-									<span style="position: relative; display: inline-flex; min-width: 0">
+									<span style="position: relative; display: inline-flex; align-items: center; min-width: 0">
+										<span aria-hidden="true" style="display: {{r.swD}}; width: 10px; height: 10px; margin-right: 8px; border-radius: 3px; background: {{r.selSw}}; flex: none"></span>
 										<select class="wk-field" value="{{r.selVal}}" onChange="{{r.onSel}}" aria-labelledby="{{r.labelId}}" style="height: 34px; min-width: 96px; max-width: 200px; padding: 0 30px 0 10px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13px; cursor: pointer">
 											<sc-for list="{{r.opts}}" as="o" hint-placeholder-count="3"><option value="{{o.v}}">{{o.label}}</option></sc-for>
 										</select>
@@ -434,6 +588,15 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 
 								<sc-if value="{{r.isText}}" hint-placeholder-val="{{false}}">
 									<input class="wk-field {{r.badClass}} wk-tall" value="{{r.val}}" onChange="{{r.onText}}" placeholder="{{r.ph}}" aria-labelledby="{{r.labelId}}" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" spellcheck="false" autocomplete="off" style="width: 100%; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px">
+								</sc-if>
+
+								<sc-if value="{{r.isEdges}}" hint-placeholder-val="{{false}}">
+									<span role="group" aria-labelledby="{{r.labelId}}" style="flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; max-width: 360px">
+										<input class="wk-field {{r.badClass}} wk-tall" value="{{r.lo}}" onChange="{{r.onLo}}" aria-label="Lower edge, MHz" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums">
+										<span aria-hidden="true" style="color: var(--wk-text-3)">–</span>
+										<input class="wk-field {{r.badClass}} wk-tall" value="{{r.hi}}" onChange="{{r.onHi}}" aria-label="Upper edge, MHz" aria-invalid="{{r.invalid}}" aria-describedby="{{r.noteId}}" inputmode="decimal" spellcheck="false" autocomplete="off" style="flex: 1; min-width: 0; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 14px; font-variant-numeric: tabular-nums">
+										<span style="flex: none; font-size: 13px; color: var(--wk-text-3)">MHz</span>
+									</span>
 								</sc-if>
 
 								<sc-if value="{{r.isSecret}}" hint-placeholder-val="{{false}}">
@@ -529,11 +692,89 @@ body:has([data-wk-ground="paper"]:not([data-wk-theme] *)){background:#f4f0e6}
 		<div role="status" style="position: absolute; left: 50%; bottom: {{toastBottom}}; transform: translateX(-50%); animation: wktoast .24s cubic-bezier(.16,1,.3,1); z-index: 8; max-width: calc(100% - 32px); height: 40px; box-sizing: border-box; display: flex; align-items: center; gap: 10px; padding: 0 16px; border-radius: 12px; background: var(--wk-fill-glass); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: inset 0 1px 0 var(--wk-glass-hi), var(--wk-shadow-pop); white-space: nowrap; font-size: 13px">
 			<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="{{toastC}}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex: none"><sc-for list="{{toastIcon}}" as="p"><path d="{{p}}"></path></sc-for></svg>
 			<span style="overflow: hidden; text-overflow: ellipsis">{{toastText}}</span>
+			<sc-if value="{{hasToastAct}}" hint-placeholder-val="{{false}}"><button onClick="{{toastAct}}" style="flex: none; margin-right: -8px; height: 30px; padding: 0 10px; border-radius: 6px; color: var(--wk-accent); font-size: 13px; font-weight: 700">Undo</button></sc-if>
+		</div>
+	</sc-if>
+
+	<!-- Band plans › Import (2026-10-12): a small sheet over the drawer (a bottom sheet on a phone). Solid surface, no blur. -->
+	<sc-if value="{{hasSheet}}" hint-placeholder-val="{{false}}">
+		<div aria-hidden="true" onClick="{{closeSheet}}" style="position: absolute; inset: 0; z-index: 9; background: rgba(0,0,0,.36)"></div>
+		<div role="dialog" aria-modal="true" aria-label="{{sheetTitle}}" class="wk-rise" onKeyDown="{{sheetKey}}" style="position: absolute; z-index: 10; left: {{sheetX}}; right: {{sheetX}}; top: {{sheetTop}}; bottom: {{sheetBottom}}; max-height: {{sheetMax}}; max-width: {{sheetW}}; margin: 0 auto; display: flex; flex-direction: column; border-radius: {{sheetRad}}; background: var(--wk-surface); border: 1px solid rgba(var(--wk-line-rgb),.14); box-shadow: var(--wk-shadow-lift); overflow: hidden">
+			<div style="flex: none; display: flex; align-items: center; gap: 4px; padding: 12px 10px 8px {{sheetHeadPad}}">
+				<sc-if value="{{sheetPreview}}" hint-placeholder-val="{{false}}">
+					<button class="wk-ghost" onClick="{{sheetBack}}" aria-label="Back to choosing a file" style="width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6l6 6"></path></svg></button>
+				</sc-if>
+				<h3 style="margin: 0; flex: 1; min-width: 0; font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-weight: 700; font-size: 20px; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{sheetTitle}}</h3>
+				<button class="wk-ghost" onClick="{{closeSheet}}" aria-label="Close" autoFocus="{{true}}" style="width: 36px; height: 36px; border-radius: 6px; display: grid; place-items: center; color: var(--wk-text-3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6l-12 12"></path></svg></button>
+			</div>
+			<div class="wk-scroll" style="flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 18px 18px">
+				<sc-if value="{{sheetPick}}" hint-placeholder-val="{{true}}">
+					<div style="display: flex; flex-direction: column; gap: 14px">
+						<div style="font-size: 13px; line-height: 1.5; color: var(--wk-text-3)">A band plan from SDR++, SDR# or Gqrx. It joins your stack as community data, not checked.</div>
+						<button class="wk-out" data-bp="file" onClick="{{pickFile}}" style="display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 8px 14px 8px 12px; border-radius: 8px; border: 1px dashed rgba(var(--wk-line-rgb),.28); text-align: left">
+							<span style="width: 36px; height: 36px; flex: none; border-radius: 6px; background: rgba(var(--wk-accent-rgb),.10); display: grid; place-items: center; color: var(--wk-accent)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 9l5 -5l5 5"></path><path d="M12 4v12"></path></svg></span>
+							<span style="flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px"><span style="font-weight: 700">Choose a file</span><span style="font-size: 12.5px; color: var(--wk-text-3)">SDR++ JSON, SDR# XML or Gqrx CSV</span></span>
+						</button>
+						<div aria-hidden="true" style="display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--wk-text-4)"><span style="flex: 1; height: 1px; background: rgba(var(--wk-line-rgb),.1)"></span>or<span style="flex: 1; height: 1px; background: rgba(var(--wk-line-rgb),.1)"></span></div>
+						<div style="display: flex; flex-direction: column; gap: 8px">
+							<label for="{{urlId}}" style="font-weight: 700; font-size: 14px">From a URL</label>
+							<div style="display: flex; gap: 6px">
+								<input id="{{urlId}}" class="wk-field wk-tall" value="{{sheetUrl}}" onChange="{{onSheetUrl}}" onKeyDown="{{urlKey}}" placeholder="https://…/International.csv" spellcheck="false" autocomplete="off" inputmode="url" style="flex: 1; min-width: 0; height: 36px; box-sizing: border-box; padding: 0 12px; border-radius: 6px; background: var(--wk-well-glass); color: var(--wk-text); font: inherit; font-size: 13.5px">
+								<button class="wk-out wk-tall" data-bp="read" onClick="{{readUrl}}" style="flex: none; height: 36px; padding: 0 14px; border-radius: 6px; border: 1px solid rgba(var(--wk-line-rgb),.18); color: var(--wk-accent); font-size: 13px; font-weight: 700">Read</button>
+							</div>
+							<span style="font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3)">Your WaveKit fetches it once and keeps the address, so you can check for an update by hand. It never updates on its own.</span>
+						</div>
+					</div>
+				</sc-if>
+				<sc-if value="{{sheetPreview}}" hint-placeholder-val="{{false}}">
+					<div style="display: flex; flex-direction: column; gap: 16px">
+						<div style="display: flex; flex-direction: column; gap: 3px">
+							<span style="display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px"><span style="font-weight: 700; font-size: 16px">{{pv_name}}</span><span style="height: 18px; padding: 0 6px; box-sizing: border-box; border-radius: 4px; display: inline-flex; align-items: center; font-size: 11.5px; border: 1px solid rgba(var(--wk-line-rgb),.22); color: var(--wk-text-3); white-space: nowrap">Community, unverified</span></span>
+							<span style="font-size: 12.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums">{{pv_line}}</span>
+							<span style="font-size: 12.5px; color: var(--wk-text-3); overflow-wrap: anywhere">{{pv_src}}</span>
+						</div>
+						<sc-if value="{{pv_again}}" hint-placeholder-val="{{false}}">
+							<div style="padding: 8px 12px; border-radius: 8px; background: var(--wk-well-glass); border: 1px solid rgba(var(--wk-line-rgb),.1); font-size: 12.5px; line-height: 1.45; color: var(--wk-text-2)">{{pv_againText}}</div>
+						</sc-if>
+						<div>
+							<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-2)">Groups</div>
+							<div style="margin-top: 4px; font-size: 13px; color: var(--wk-text); font-variant-numeric: tabular-nums">{{pv_mapLine}}</div>
+							<div style="margin-top: 8px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 18px">
+								<sc-for list="{{pv_groups}}" as="g" hint-placeholder-count="4">
+									<span style="display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--wk-text-2); font-variant-numeric: tabular-nums"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 2px; background: {{g.sw}}; flex: none"></span><span style="flex: 1; min-width: 0">{{g.name}}</span><span style="color: var(--wk-text-3)">{{g.n}}</span></span>
+								</sc-for>
+							</div>
+						</div>
+						<div>
+							<div style="font-family: 'D-DIN Condensed', 'Noto Sans', sans-serif; font-size: 12px; letter-spacing: .1em; text-transform: uppercase; color: var(--wk-text-2)">Bands</div>
+							<div style="margin-top: 6px; display: flex; flex-direction: column">
+								<sc-for list="{{pv_bands}}" as="b" hint-placeholder-count="6">
+									<span style="display: flex; align-items: center; gap: 8px; min-height: 30px; font-size: 13px; border-bottom: 1px solid rgba(var(--wk-line-rgb),.06)"><span aria-hidden="true" style="width: 8px; height: 8px; border-radius: 2px; background: {{b.sw}}; flex: none"></span><span style="flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">{{b.name}}<span style="color: var(--wk-text-3)"> · {{b.group}}</span></span><span style="flex: none; font-size: 12.5px; color: var(--wk-text-3); font-variant-numeric: tabular-nums">{{b.edges}}</span></span>
+								</sc-for>
+							</div>
+							<sc-if value="{{pv_more}}" hint-placeholder-val="{{true}}"><button class="wk-ghost" onClick="{{pv_showAll}}" style="margin-top: 4px; margin-left: -8px; height: 32px; padding: 0 8px; border-radius: 6px; color: var(--wk-accent); font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums">{{pv_moreLabel}}</button></sc-if>
+						</div>
+						<div style="display: flex; align-items: center; gap: 10px">
+							<span style="flex: 1; min-width: 0"><span id="{{colId}}" style="display: block; font-weight: 700; font-size: 14px">Use imported colours</span><span style="display: block; margin-top: 2px; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3)">Off, each band takes its group’s colour. The file’s colours are only a hint.</span></span>
+							<button role="switch" aria-checked="{{pv_on}}" aria-labelledby="{{colId}}" onClick="{{pv_toggle}}" style="flex: none; width: 52px; height: 40px; margin-right: -8px; display: grid; place-items: center; border-radius: 6px"><span style="position: relative; width: 36px; height: 20px; border-radius: 10px; background: {{pv_track}}; transition: background .15s"><span style="position: absolute; top: 2px; left: {{pv_knob}}px; width: 16px; height: 16px; border-radius: 50%; background: var(--wk-knob); box-shadow: 0 1px 2px rgba(0,0,0,.35); transition: left .18s cubic-bezier(.16,1,.3,1)"></span></span></button>
+						</div>
+					</div>
+				</sc-if>
+			</div>
+			<sc-if value="{{sheetPreview}}" hint-placeholder-val="{{false}}">
+				<div style="flex: none; display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 12px 14px 12px 18px; border-top: 1px solid rgba(var(--wk-line-rgb),.1)">
+					<span style="flex: 1 1 200px; min-width: 0; font-size: 12.5px; line-height: 1.45; color: var(--wk-text-3)">Goes to the bottom of the stack, so it only names what the others leave out.</span>
+					<span style="display: flex; gap: 6px; margin-left: auto">
+						<button class="wk-ghost wk-tall" onClick="{{closeSheet}}" style="height: 36px; padding: 0 12px; border-radius: 6px; color: var(--wk-text-2); font-size: 13px">Cancel</button>
+						<button class="wk-tall" data-bp="add" onClick="{{addImport}}" style="height: 36px; padding: 0 16px; border-radius: 6px; background: var(--wk-accent); color: var(--wk-on-accent); font-size: 13px; font-weight: 700">Add to stack</button>
+					</span>
+				</div>
+			</sc-if>
 		</div>
 	</sc-if>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"layout":{"editor":"enum","options":["drawer","phone"],"default":"drawer"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","display","dev.accent","dec:mesh","au.margin","rx.biasT"],"default":"none"},"values":{"editor":null},"onSet":{"editor":null},"onClose":{"editor":null},"onAction":{"editor":null},"target":{"editor":null},"$preview":{"width":560,"height":820}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Theme"},"accent":{"editor":"enum","options":["phosphor","ice","violet","coral","mono"],"default":"mono","section":"Theme"},"ground":{"editor":"enum","options":["ink","graphite","black"],"default":"black","section":"Theme"},"layout":{"editor":"enum","options":["drawer","phone"],"default":"drawer"},"scenario":{"editor":"enum","options":["normal","pending","offline"],"default":"normal"},"storage":{"editor":"enum","options":["ok","low"],"default":"ok"},"openAt":{"editor":"enum","options":["none","receiver","storage","display","dev.accent","dec:mesh","au.margin","rx.biasT","station.country","bandplans","bandplans:pmr446","bandplans:harbour","bandplans:import"],"default":"none"},"country":{"editor":"enum","options":["location","none","locked"],"default":"location"},"values":{"editor":null},"onSet":{"editor":null},"onClose":{"editor":null},"onAction":{"editor":null},"target":{"editor":null},"$preview":{"width":560,"height":820}}'>
 const GAINS = [0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8, 36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6];
 const I = {
 	antenna: ['M20 4v8', 'M16 4.5v7', 'M12 5v16', 'M8 5.5v5', 'M4 6v4', 'M20 8h-16'],
@@ -556,6 +797,14 @@ const I = {
 	paging: ['M5 5h14a3 3 0 0 1 3 3v8a3 3 0 0 1 -3 3h-14a3 3 0 0 1 -3 -3v-8a3 3 0 0 1 3 -3z', 'M7 8h10a1 1 0 0 1 1 1v3a1 1 0 0 1 -1 1h-10a1 1 0 0 1 -1 -1v-3a1 1 0 0 1 1 -1z', 'M6 16h2M12 16h.01M16 16h.01'],
 	aprs: ['M17.657 16.657l-4.243 4.243a2 2 0 0 1 -2.827 0l-4.244 -4.243a8 8 0 1 1 11.314 0', 'M9 11a3 3 0 1 0 6 0a3 3 0 0 0 -6 0'],
 	sensors: ['M12 12v.01M14.828 9.172a4 4 0 0 1 0 5.656M9.168 14.828a4 4 0 0 1 0 -5.656', 'M17.657 6.343a8 8 0 0 1 0 11.314M6.337 17.657a8 8 0 0 1 0 -11.314'],
+	up: ['M12 5v14', 'M18 11l-6 -6', 'M6 11l6 -6'],
+	down: ['M12 5v14', 'M18 13l-6 6', 'M6 13l6 6'],
+	trash: ['M4 7h16', 'M10 11v6', 'M14 11v6', 'M5 7l1 12a2 2 0 0 0 2 2h8a2 2 0 0 0 2 -2l1 -12', 'M9 7v-3a1 1 0 0 1 1 -1h4a1 1 0 0 1 1 1v3'],
+	filter: ['M4 4h16v2.172a2 2 0 0 1 -.586 1.414l-4.414 4.414v7l-6 2v-8.5l-4.48 -4.928a2 2 0 0 1 -.52 -1.345v-2.227z'],
+	upload: ['M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2', 'M7 9l5 -5l5 5', 'M12 4v12'],
+	plus: ['M12 5v14', 'M5 12h14'],
+	info: ['M3 12a9 9 0 1 0 18 0a9 9 0 0 0 -18 0', 'M12 9h.01', 'M11 12h1v4h1'],
+	check: ['M5 12l5 5l10 -10'],
 	mesh: ['M6 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M14 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M2 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M10 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M18 12a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M6 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M14 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0', 'M9 7l2 3M15 7l-2 3M6 12h4M14 12h4M11 14l-2 3M13 14l2 3']
 };
 const GROUPS = [
@@ -580,6 +829,110 @@ const DECS = [
 	{ id: 'mesh', name: 'Meshtastic', tool: 'LoRa decoder', where: '869.525 MHz', state: 'fault', stat: 'Stopped · channel key rejected', icon: I.mesh, up: '—', last: '2 h ago' }
 ];
 const MHZ = v => (+v).toFixed(3);
+// ── Band plans (2026-10-12) ─────────────────────────────────────────────────────────────────────────────
+// The shared mock is copied verbatim below; this board derives its rows (one synthetic registry row per band field) from it.
+// wk-bandplan v1 · shared band plan mock, copy verbatim into each board's script, never edit per board
+// Resolved stack: Your edits > France > CEPT / EU baseline (the International import is off).
+// MHz for edges and channels. Colour of a group: var(--wk-grp-<group id>). A band always shows its name: colour is never alone.
+const BP_COUNTRY = { code: 'FR', name: 'France', how: 'location', place: 'Roscoff', override: null, region: 'EU' };
+const BP_GROUPS = [
+	{ id: 'marine', name: 'Marine' }, { id: 'air', name: 'Air' }, { id: 'srd', name: 'ISM / SRD' }, { id: 'pagers', name: 'Pagers' },
+	{ id: 'personal', name: 'Personal radio' }, { id: 'amateur', name: 'Amateur' }, { id: 'landmobile', name: 'Land mobile' },
+	{ id: 'broadcast', name: 'Broadcast' }, { id: 'other', name: 'Other' }
+];
+// Top first. kind: edits | pack | import. ver = bands checked against a regulator source (a registry row in core).
+const BP_PLANS = [
+	{ id: 'edits', kind: 'edits', name: 'Your edits', on: true, sub: '3 changes, kept when packs update' },
+	{ id: 'fr', kind: 'pack', name: 'France', on: true, version: '2026.10', bands: 12, ver: 4, source: 'ANFR TNRBF, ECC Rec 70-03', seeded: 'Seeded from SDR-Band-Plans (CC0)', sub: 'Built in · picked by the station country' },
+	{ id: 'cept', kind: 'pack', name: 'CEPT / EU baseline', on: true, version: '2026.10', bands: 6, ver: 6, source: 'ERC Report 25', sub: 'Built in · fills what France leaves out' },
+	{ id: 'intl', kind: 'import', name: 'International', on: false, format: 'Gqrx CSV', url: 'https://github.com/Arrin-KN1E/SDR-Band-Plans', author: 'Arrin-KN1E', licence: 'CC0', imported: '12 Oct', bands: 61, sub: 'Imported from a URL · community, unverified' }
+];
+// from: the plan that names it. ver: verified. edit: added | renamed | hidden. parent: nesting (the narrower band wins the label).
+// sp: channel spacing in Hz. skip: scans skip it by default, with the reason. by: a decoder that already covers it.
+const BP_BANDS = [
+	{ id: 'cb', name: 'CB 27 MHz', group: 'personal', a: 26.965, b: 27.405, mode: 'AM', step: 10000, sp: [10000], protos: ['am', 'fm'], from: 'fr', ver: false,
+		ch: [{ n: '9', f: 27.065, name: 'CB ch 9', note: 'Emergency' }, { n: '19', f: 27.185, name: 'CB ch 19', note: 'Road users', alias: ['routiers'], edit: 'renamed' }] },
+	{ id: 'fm', name: 'FM broadcast', group: 'broadcast', a: 87.5, b: 108, mode: 'WFM', step: 100000, sp: [100000], protos: [], from: 'fr', ver: true, skip: 'Broadcast' },
+	{ id: 'air', name: 'Airband', group: 'air', a: 118, b: 137, mode: 'AM', step: 8330, sp: [8330, 25000], protos: ['am', 'acars', 'vdl2'], from: 'cept', ver: true,
+		ch: [{ f: 121.5, name: 'Guard 121.5', note: 'Emergency', alias: ['guard'] }, { f: 131.525, name: 'ACARS 131.525', by: 'acarsdec' }, { f: 131.725, name: 'ACARS Europe', by: 'acarsdec' }, { f: 136.975, name: 'VDL2 136.975', by: 'dumpvdl2' }] },
+	{ id: 'wxsat', name: 'Weather satellites', group: 'other', a: 137, b: 138, mode: 'WFM', step: 5000, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Passes only' },
+	{ id: '2m', name: '2 m amateur', group: 'amateur', a: 144, b: 146, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar', 'aprs'], from: 'cept', ver: true,
+		ch: [{ f: 144.8, name: 'APRS Europe', by: 'Direwolf', alias: ['aprs'] }] },
+	{ id: 'lmv', name: 'Land mobile VHF', group: 'landmobile', a: 146, b: 174, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'p25', 'fm', 'pocsag'], from: 'fr', ver: false },
+	{ id: 'marine', name: 'Marine VHF', group: 'marine', parent: 'lmv', a: 156, b: 162.025, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm', 'ais'], from: 'fr', ver: true,
+		ch: [{ n: '16', f: 156.8, name: 'Marine ch 16', note: 'Distress, calling' }, { n: '12', f: 156.6, name: 'Marine ch 12', note: 'Port operations' }, { n: '70', f: 156.525, name: 'Marine ch 70', note: 'DSC' },
+			{ f: 161.975, name: 'AIS A', by: 'AIS-catcher' }, { f: 162.025, name: 'AIS B', by: 'AIS-catcher' }] },
+	{ id: 'harbour', name: 'Harbour channels', group: 'marine', parent: 'marine', a: 156.5, b: 157.45, mode: 'NFM', step: 25000, sp: [25000], protos: ['fm'], from: 'edits', ver: false, edit: 'added' },
+	{ id: 'wize', name: 'Wize meters 169', group: 'srd', parent: 'lmv', a: 169.4, b: 169.475, mode: 'NFM', step: 12500, sp: [12500], protos: ['ism'], from: 'fr', ver: false },
+	{ id: 'pg169', name: 'Pagers 169', group: 'pagers', parent: 'lmv', a: 169.475, b: 169.8, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'dab', name: 'DAB+', group: 'broadcast', a: 174, b: 230, mode: 'RAW', step: 1712000, sp: [0], protos: [], from: 'fr', ver: false, skip: 'Broadcast', edit: 'hidden' },
+	{ id: 'inpt', name: 'INPT (Tetrapol)', group: 'landmobile', a: 380, b: 400, mode: 'NFM', step: 12500, sp: [12500], protos: [], from: 'fr', ver: false, skip: 'Encrypted public safety' },
+	{ id: 'lmu', name: 'Land mobile UHF', group: 'landmobile', a: 400, b: 470, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['dmr', 'nxdn', 'dpmr', 'fm'], from: 'fr', ver: false },
+	{ id: '70cm', name: '70 cm amateur', group: 'amateur', parent: 'lmu', a: 430, b: 440, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm', 'dmr', 'ysf', 'dstar'], from: 'cept', ver: true },
+	{ id: 'ism433', name: 'ISM 433 · LPD433', group: 'srd', parent: '70cm', a: 433.05, b: 434.79, mode: 'NFM', step: 25000, sp: [0], protos: ['ism'], from: 'fr', ver: true,
+		ch: [{ f: 433.92, name: 'ISM 433.92', note: 'Sensors', alias: ['433'] }] },
+	{ id: 'pmr446', name: 'PMR446', group: 'personal', parent: 'lmu', a: 446.0, b: 446.2, mode: 'NFM', step: 12500, sp: [12500, 6250], protos: ['fm', 'dpmr', 'dmr'], from: 'fr', ver: true,
+		ch: Array.from({ length: 16 }, (_, i) => ({ n: String(i + 1), f: +(446.00625 + i * 0.0125).toFixed(5), name: 'PMR446 ch ' + (i + 1), alias: ['pmr ' + (i + 1), 'pmr' + (i + 1)] })) },
+	{ id: 'pg466', name: 'Pagers 466 (e*Message)', group: 'pagers', parent: 'lmu', a: 466.025, b: 466.23, mode: 'NFM', step: 12500, sp: [12500], protos: ['pocsag', 'flex'], from: 'fr', ver: false },
+	{ id: 'srd868', name: 'SRD 868', group: 'srd', a: 863, b: 870, mode: 'NFM', step: 25000, sp: [0], protos: ['ism', 'lora'], from: 'cept', ver: true,
+		ch: [{ f: 868.3, name: 'ISM 868.3', note: 'Sensors' }, { f: 868.95, name: 'wM-Bus 868.95', note: 'Meters' }, { f: 869.525, name: 'Meshtastic EU', by: 'Meshtastic', alias: ['mesh', 'lora'] }] },
+	{ id: 'adsb', name: 'ADS-B 1090', group: 'air', a: 1089, b: 1091, mode: 'RAW', step: 0, sp: [0], protos: [], from: 'cept', ver: true, skip: 'Decoded elsewhere', by: 'readsb' }
+];
+// Helpers every board may use. bpBandAt: the narrowest visible band containing f (MHz).
+const bpGroup = id => BP_GROUPS.find(g => g.id === id) || BP_GROUPS[BP_GROUPS.length - 1];
+const bpPlan = id => BP_PLANS.find(p => p.id === id);
+const bpBandAt = f => BP_BANDS.filter(b => b.edit !== 'hidden' && f >= b.a && f <= b.b).sort((x, y) => (x.b - x.a) - (y.b - y.a))[0] || null;
+const bpChannels = () => BP_BANDS.reduce((out, b) => out.concat((b.ch || []).map(c => Object.assign({ band: b.id }, c))), []);
+// this board's mapping layer
+const COUNTRIES = [['auto', 'From location'], ['FR', 'France'], ['BE', 'Belgium'], ['CH', 'Switzerland'], ['DE', 'Germany'], ['ES', 'Spain'], ['GB', 'United Kingdom'], ['IE', 'Ireland'], ['IT', 'Italy'], ['LU', 'Luxembourg'], ['NL', 'Netherlands'], ['PT', 'Portugal'], ['US', 'United States'], ['CA', 'Canada'], ['AU', 'Australia'], ['NZ', 'New Zealand'], ['JP', 'Japan']];
+const REGION_NAME = { EU: 'Europe', US: 'United States', CA: 'Canada', AU: 'Australia', NZ: 'New Zealand', JP: 'Japan' };
+const meshRegion = c => c === 'US' || c === 'CA' ? 'US 915' : c === 'AU' || c === 'NZ' ? 'ANZ 915' : c === 'JP' ? 'JP 920' : 'EU 868';
+const HZ = v => v >= 1e6 ? +(v / 1e6).toFixed(3) + ' MHz' : +(v / 1000).toFixed(3) + ' kHz';
+const BP_MODES = [['NFM', 'NFM'], ['AM', 'AM'], ['WFM', 'Wide FM'], ['USB', 'USB'], ['LSB', 'LSB'], ['RAW', 'Raw IQ']];
+const BP_BW = [6250, 8330, 10000, 12500, 25000, 40000, 200000].map(v => [v, HZ(v)]).concat([[0, 'Whole band']]);
+const BP_STEP = [[0, 'None']].concat([5000, 6250, 8330, 10000, 12500, 25000, 100000, 1712000].map(v => [v, HZ(v)]));
+const BP_SP = [6250, 8330, 10000, 12500, 25000, 100000].map(v => [v, HZ(v)]).concat([[0, 'No channel grid']]);
+const BP_PROTOS = [['am', 'AM voice'], ['fm', 'FM voice'], ['dmr', 'DMR'], ['nxdn', 'NXDN'], ['dpmr', 'dPMR'], ['p25', 'P25'], ['ysf', 'Fusion'], ['dstar', 'D-STAR'], ['pocsag', 'POCSAG'], ['flex', 'FLEX'], ['ais', 'AIS'], ['acars', 'ACARS'], ['vdl2', 'VDL2'], ['aprs', 'APRS'], ['ism', 'ISM sensors'], ['lora', 'LoRa']];
+const bpNum = x => parseFloat(String(x).replace(',', '.'));
+const bpF = f => { let t = (+f).toFixed(5); while (/\.\d{3,}0$/.test(t)) t = t.slice(0, -1); return t; };
+const bpEdges = e => { const a = bpNum(e[0]), b = bpNum(e[1]); return a > 0 && b > 0 ? MHZ(a) + '–' + MHZ(b) + ' MHz' : '— MHz'; };
+const edgesErr = v => { const a = bpNum(v[0]), b = bpNum(v[1]); if (!(a > 0) || !(b > 0)) return 'Type both edges in MHz'; if (a >= b) return 'The lower edge must be below the upper edge'; if (a < 24 || b > 1766) return 'Outside what the dongle tunes, 24 to 1766 MHz'; return ''; };
+const bpBw = b => b.mode === 'WFM' ? (b.id === 'wxsat' ? 40000 : 200000) : b.mode === 'RAW' ? 0 : [b.sp[0], b.step].find(v => BP_BW.some(o => o[0] === v)) || 12500;
+const bpSw = g => 'var(--wk-grp-' + g + ')';
+const BPD = {}; // band id → its synthetic rows
+// one registry row per band field, so the editor gets the Settings row: changed bar, Reset to …, ⋯ menu, errors
+const bpDefs = (b, all) => {
+	const D = (f, label, o) => Object.assign({ id: 'bp.' + b.id + '.' + f, g: 'bp', label, band: b.id, field: f }, o);
+	const parents = all.filter(x => x.id !== b.id && x.a <= b.a && b.b <= x.b && x.b - x.a > b.b - b.a);
+	// the pack's own channels: what Reset to France goes back to (a renamed channel loses the edit and the alias added with it)
+	const packCh = (b.ch || []).map(c => { const o = Object.assign({}, c); if (o.edit === 'renamed') delete o.alias; delete o.edit; return o; });
+	const list = v => v.map(x => (BP_SP.concat(BP_PROTOS).find(o => o[0] === x) || [x, String(x)])[1]).join(', ') || 'none';
+	const defs = [
+		D('name', 'Name', { kind: 'text', def: b.name, ph: 'Band name', validate: v => String(v).trim() ? '' : 'Give the band a name' }),
+		D('edges', 'Edges', { kind: 'edges', def: [MHZ(b.a), MHZ(b.b)], validate: edgesErr, sub: 'Lower and upper edge' }),
+		D('group', 'Group', { kind: 'sel', opts: BP_GROUPS.map(g => [g.id, g.name]), def: b.group, swOf: bpSw, sub: 'Sets the colour of its lane on the spectrum' }),
+		D('mode', 'Mode', { kind: 'sel', opts: BP_MODES, def: b.mode, sub: 'Used when you tune into the band' }),
+		D('bw', 'Bandwidth', { kind: 'sel', opts: BP_BW, def: bpBw(b) }),
+		D('step', 'Tuning step', { kind: 'sel', opts: BP_STEP, def: b.step }),
+		D('sp', 'Scan spacing', { kind: 'chips', opts: BP_SP, def: b.sp.slice(), fmt: list, sub: 'Channel grids Scan a band steps through' }),
+		D('protos', 'Protocols to try', { kind: 'chips', opts: BP_PROTOS, def: b.protos.slice(), fmt: list, sub: 'What a scan listens for when it stops here' }),
+		D('skip', 'Skip by default', { kind: 'sw', def: !!b.skip, sub: 'Scan a band leaves it out unless you add it' }),
+		D('why', 'Reason', { kind: 'text', def: b.skip || '', ph: 'Why scans skip it', sub: 'Shown beside the band in Scan a band' }),
+		D('parent', 'Parent band', { kind: 'sel', opts: [['none', 'None']].concat(parents.map(x => [x.id, x.name])), def: b.parent || 'none', sub: 'A narrower band names its part of a wider one' }),
+		D('hide', 'Hide this band', { kind: 'sw', def: false, init: b.edit === 'hidden' ? true : undefined, sub: 'Leaves the spectrum lanes, presets and ⌘K. Stays listed here.' }),
+		D('ch', 'Channels', { kind: 'chlist', def: packCh, init: (b.ch || []).map(c => Object.assign({}, c)) })
+	];
+	BPD[b.id] = defs;
+	return defs;
+};
+// the International import, as read from the file (the prototype carries 18 of its 61 rows)
+const BP_IMPORT = {
+	name: 'International', format: 'Gqrx CSV', bands: 61, author: 'Arrin-KN1E', licence: 'CC0', mapped: 48,
+	groups: [['amateur', 14], ['broadcast', 6], ['air', 7], ['marine', 5], ['landmobile', 6], ['personal', 4], ['srd', 3], ['pagers', 3], ['other', 13]],
+	rows: [['CB', 26.965, 27.405, 'personal'], ['10m Amateur', 28, 29.7, 'amateur'], ['VHF Low Band', 30, 50, 'landmobile'], ['6m Amateur', 50, 54, 'amateur'], ['TV Ch 2-6', 54, 88, 'other'], ['FM Broadcast', 87.5, 108, 'broadcast'],
+		['Aircraft Navigation', 108, 118, 'air'], ['Aircraft Voice', 118, 137, 'air'], ['Weather Satellites', 137, 138, 'other'], ['2m Amateur', 144, 148, 'amateur'], ['Marine VHF', 156, 162.025, 'marine'], ['NOAA Weather Radio', 162.4, 162.55, 'other'],
+		['1.25m Amateur', 222, 225, 'amateur'], ['Military Aircraft', 225, 380, 'other'], ['70cm Amateur', 420, 450, 'amateur'], ['FRS / GMRS', 462.5625, 467.7125, 'personal'], ['Cellular 850', 824, 894, 'other'], ['ADS-B', 1089, 1091, 'air']]
+};
 const callsignErr = v => !v || /^[A-Z0-9]{3,7}(-[0-9]{1,2})?$/i.test(v) ? '' : 'Use letters and digits only, like F4ABC or F4ABC-9';
 const keyErr = v => !v || (/^[A-Za-z0-9+/]+={0,2}$/.test(v) && (v.length === 4 || v.length === 24 || v.length === 44)) ? '' : 'Not a valid key. Expected 16 or 32 bytes in base64, as the Meshtastic app shares it.';
 const restarts = name => ({ eff: 'restart', effText: 'Restarts ' + name, effShort: 'restarts ' + name });
@@ -587,8 +940,10 @@ const S = (id, g, label, o) => Object.assign({ id, g, label }, o);
 const ON = [['on', 'On'], ['off', 'Off']];
 const R = [
 	S('station.name', 'station', 'Station name', { kind: 'text', def: 'WaveKit', init: 'Roscoff station', ph: 'WaveKit', sub: 'Shown in the tab title and on your other devices', alias: 'title' }),
-	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never shared.', alias: 'position latitude longitude coordinates maidenhead locator gps qth' }),
-	S('station.region', 'station', 'Region', { kind: 'sel', opts: [['EU', 'Europe'], ['US', 'United States'], ['CA', 'Canada'], ['AU', 'Australia'], ['NZ', 'New Zealand'], ['JP', 'Japan']], def: 'EU', lock: 'WAVEKIT_REGION', sub: 'Band plans, channel names and legal limits', alias: 'country band plan' }),
+	S('station.location', 'station', 'Location', { kind: 'btns', btns: [['Change on map', 'map']], sub: 'Roscoff · 48.727° N, 3.985° W. Used by the map and ADS-B, never shared.', alias: 'position latitude longitude coordinates maidenhead locator gps qth', dyn: c => c.props.country === 'none' ? { btns: [['Set on map', 'map']], sub: 'Not set. Used by the map, ADS-B and the country, never shared.' } : {} }),
+	// band plans 2026-10-12: Region becomes Country, from the station location (the coarse region is only the fallback); Band plans opens its page
+	S('station.country', 'station', 'Country', { kind: 'sel', opts: COUNTRIES, def: 'auto', sub: 'Picks the band plan and legal limits', alias: 'region nation band plan legal limits locale', dyn: c => c.countryDyn() }),
+	S('station.bandplans', 'station', 'Band plans', { kind: 'link', text: '3 edits', act: 'bandplans', sub: 'Band and channel names for the spectrum, Tuner, scans and ⌘K', alias: 'band plan bandplan bands channels frequency allocations import sdr++ sdrpp gqrx sdr# sdrsharp csv xml', dyn: c => c.bandplansDyn() }),
 	S('station.callsign', 'station', 'Callsign', Object.assign({ kind: 'text', def: '', ph: 'Optional', sub: 'For APRS and the map', validate: callsignErr, alias: 'call sign ham amateur licence' }, restarts('APRS'))),
 	S('station.saved', 'station', 'Saved frequencies', { kind: 'link', text: '3 saved', act: 'tuner', sub: 'Managed in the Tuner, shared by every device', alias: 'bookmarks memories favourites channels' }),
 	S('station.altitude', 'station', 'Altitude', { kind: 'step', def: 12, min: 0, max: 4000, step: 1, unit: ' m', more: true, sub: 'Antenna height above sea level, for ADS-B range' }),
@@ -671,7 +1026,7 @@ const R = [
 	S('dec.mesh.enabled', 'dec:mesh', 'Enabled', { kind: 'sw', def: true }),
 	S('dec.mesh.preset', 'dec:mesh', 'Preset', Object.assign({ kind: 'sel', opts: [['LongFast', 'Long Fast'], ['MediumFast', 'Medium Fast'], ['ShortFast', 'Short Fast'], ['LongSlow', 'Long Slow']], def: 'LongFast', sub: 'Must match your mesh' }, restarts('Meshtastic'))),
 	S('dec.mesh.key', 'dec:mesh', 'Channel key', Object.assign({ kind: 'secret', def: '', init: 'mVb2qX1Lz9wTkd', sub: 'From the Meshtastic app: Channel › Share', validate: keyErr, alias: 'psk encryption secret' }, restarts('Meshtastic'))),
-	S('dec.mesh.region', 'dec:mesh', 'Region', { kind: 'link', text: 'EU 868', act: 'station.region', sub: 'From the station region' }),
+	S('dec.mesh.region', 'dec:mesh', 'Region', { kind: 'link', text: 'EU 868', act: 'station.country', sub: 'From the station country', dyn: c => { const ci = c.countryInfo(); return { text: meshRegion(ci.code), sub: 'From the station country (' + ci.name + ')' }; } }),
 	S('dec.mesh.radio', 'dec:mesh', 'Radio', { kind: 'read', text: '869.525 MHz · 250 kHz · SF 11', more: true, sub: 'From the preset' }),
 
 	S('st.auto', 'storage', 'Record automatically', { kind: 'seg', opts: [['all', 'All audio'], ['digital', 'Digital calls'], ['off', 'Off']], def: 'all', sub: 'Every transmission, ready to replay in Activity', alias: 'auto record recording' }),
@@ -730,7 +1085,7 @@ const FILTERS = [
 ];
 const TOKEN = { changed: 'Changed', restart: 'Restarts something', hw: 'Touches hardware', locked: 'Locked' };
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const WIDE = { text: 1, secret: 1, freqs: 1, chips: 1, slider: 1, ground: 1, wf: 1 };
+const WIDE = { text: 1, secret: 1, freqs: 1, chips: 1, slider: 1, ground: 1, wf: 1, edges: 1 };
 // waterfall colour strips: weak to strong signal, per theme (Match accent reads the scope's own ground and accent)
 const WF = {
 	// same stops as Spectrum's rampStops() (Paper uses ramp a)
@@ -759,12 +1114,19 @@ class Component extends DCLogic {
 		super(props);
 		const vals = {};
 		R.forEach(d => { if (d.def !== undefined && !d.fromProp) vals[d.id] = d.init !== undefined ? d.init : d.def; });
+		// band plans: one synthetic row per band field (BY), values in vals like any other setting
+		BP_BANDS.forEach(b => bpDefs(b, BP_BANDS).forEach(d => { BY[d.id] = d; vals[d.id] = d.init !== undefined ? d.init : d.def; }));
 		const sc = props.scenario || 'normal';
 		const pending = sc === 'pending' ? { 'rx.rate': 3.2, 'rx.biasT': true } : {};
 		this.uid = 'wks' + Math.random().toString(36).slice(2, 7);
-		this.state = { vals, pending, draft: {}, failed: {}, offline: sc === 'offline', q: '', tokens: [], focus: false, dec: null, phoneGroup: null, more: {}, active: 'station', menu: null, pulse: null, toast: null, shown: {} };
+		this.state = { vals, pending, draft: {}, failed: {}, offline: sc === 'offline', q: '', tokens: [], focus: false, dec: null, phoneGroup: null, more: {}, active: 'station', menu: null, pulse: null, toast: null, shown: {},
+			// band plans page: bp open, bpBand = the band in the editor; the stack (order, on), imports, filters, the import sheet
+			bp: false, bpBand: null, bpOrder: BP_PLANS.map(p => p.id), bpOn: BP_PLANS.reduce((o, p) => { o[p.id] = p.on; return o; }, {}), bpMenu: null, bpUpd: null,
+			bpImported: (bpPlan('intl') || {}).imported, bpAdded: [], bpDel: [], bpQ: '', bpGrp: 'all', bpChAll: null, bpDrag: null, bpOver: null,
+			sheet: null, sheetUrl: '', sheetSrc: '', sheetAll: false, sheetColours: false };
 		this.scrollId = this.uid + '-scroll';
 		this.searchId = this.uid + '-q';
+		this.nBand = 0;
 	}
 	componentDidMount() {
 		// Theme "System" follows the OS while this board stands alone
@@ -787,6 +1149,30 @@ class Component extends DCLogic {
 		}
 	}
 	componentWillUnmount() { if (this.mq && this.mq.removeEventListener) this.mq.removeEventListener('change', this.onScheme); clearTimeout(this.tt); clearTimeout(this.pt); clearTimeout(this.st); }
+	// ── Station › Country (from the location, else the coarse region) ──
+	countryInfo() {
+		const how = this.props.country || 'location', v = this.val('station.country');
+		const name = c => (COUNTRIES.find(x => x[0] === c) || [c, c])[1];
+		if (how === 'locked') return { code: 'FR', name: 'France', how: 'env' };
+		if (v && v !== 'auto') return { code: v, name: name(v), how: 'hand' };
+		if (how === 'none') return { code: null, name: REGION_NAME[BP_COUNTRY.region] || BP_COUNTRY.region, how: 'region' };
+		return { code: BP_COUNTRY.code, name: BP_COUNTRY.name, how: 'location' };
+	}
+	countryDyn() {
+		const ci = this.countryInfo(), how = this.props.country || 'location';
+		if (ci.how === 'env') return { def: undefined, lock: 'WAVEKIT_COUNTRY', text: 'France', sub: 'Picks the band plan and legal limits' };
+		const opts = how === 'none' ? [['auto', 'From the region']].concat(COUNTRIES.slice(1)) : COUNTRIES;
+		if (ci.how === 'hand') return { opts, sub: ci.name + ' · set by hand. The station location says ' + BP_COUNTRY.name + '.' };
+		// the region keeps its env lock: with no location it decides, and says so
+		if (ci.how === 'region') return { opts, sub: 'No station location yet, so the region decides: ' + ci.name + ', set by WAVEKIT_REGION.' };
+		return { opts, sub: ci.name + ' · from the station location (' + BP_COUNTRY.place + ')' };
+	}
+	bandplansDyn() {
+		const s = this.state, ci = this.countryInfo(), n = this.bpEditCount();
+		const on = s.bpOrder.filter(id => id !== 'edits' && s.bpOn[id]).map(id => id === 'cept' ? 'CEPT baseline' : bpPlan(id).name);
+		const pack = ci.code && ci.code !== 'FR' ? 'No ' + ci.name + ' pack yet · ' : '';
+		return { text: n ? n + (n === 1 ? ' edit' : ' edits') : 'Open', sub: pack + (on.join(' + ') || 'No plan on') };
+	}
 	phone() { return this.props.layout === 'phone'; }
 	// System resolves here; children and the scope only get dark or light
 	theme() { const t = this.val('dev.theme'), mq = this.mq || (window.matchMedia ? window.matchMedia('(prefers-color-scheme: light)') : null); return t === 'system' ? (mq && mq.matches ? 'light' : 'dark') : t === 'light' ? 'light' : 'dark'; }
@@ -805,10 +1191,10 @@ class Component extends DCLogic {
 		if (id in s.pending) return s.pending[id];
 		return this.committed(id);
 	}
-	toast(text, warn) {
+	toast(text, warn, undo) {
 		clearTimeout(this.tt);
-		this.setState({ toast: text, toastWarn: !!warn });
-		this.tt = setTimeout(() => this.setState({ toast: null }), 3200);
+		this.setState({ toast: text, toastWarn: !!warn, toastUndo: undo || null });
+		this.tt = setTimeout(() => this.setState({ toast: null, toastUndo: null }), undo ? 5000 : 3200);
 	}
 	commitLive(d, v, st) {
 		st.vals = Object.assign({}, st.vals || this.state.vals, { [d.id]: v });
@@ -827,7 +1213,17 @@ class Component extends DCLogic {
 			if (eq(v, this.committed(id))) delete pending[id]; else pending[id] = v;
 			st.pending = pending;
 		} else this.commitLive(d, v, st);
+		const prev = this.committed(id);
 		this.setState(st);
+		if (d.g === 'bp' && !this.state.offline) this.bpSaved(id, prev);
+	}
+	// band edits apply at once (they restart nothing), with an undo toast; typing in one field keeps one undo
+	bpSaved(id, prev, text) {
+		const d = BY[id];
+		if (!(this.undoId === id && this.state.toastUndo)) this.undoPrev = prev;
+		this.undoId = id;
+		const back = this.undoPrev, band = this.committed('bp.' + d.band + '.name');
+		this.toast(text || d.label + ' saved · ' + band, false, () => { this.undoId = null; this.setState({ vals: Object.assign({}, this.state.vals, { [id]: back }) }); this.toast('Undone'); });
 	}
 	reset(id) {
 		const d = BY[id], st = { menu: null };
@@ -870,7 +1266,7 @@ class Component extends DCLogic {
 	}
 	spy() {
 		const s = this.state;
-		if (s.dec || s.q.trim() || s.tokens.length || this.phone() || Date.now() < (this.spyLock || 0)) return;
+		if (s.dec || s.bp || s.q.trim() || s.tokens.length || this.phone() || Date.now() < (this.spyLock || 0)) return;
 		const c = document.getElementById(this.scrollId);
 		if (!c) return;
 		const top = c.getBoundingClientRect().top, line = c.getBoundingClientRect().height * 0.3;
@@ -882,16 +1278,17 @@ class Component extends DCLogic {
 	rowDom(id) { return this.uid + '-' + id.replace(/[.:]/g, '-'); }
 	goGroup(id) {
 		const phone = this.phone();
-		this.setState({ q: '', tokens: [], dec: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
+		this.setState({ q: '', tokens: [], dec: null, bp: false, bpBand: null, sheet: null, bpMenu: null, phoneGroup: phone ? id : null, active: id, menu: null }, () => setTimeout(() => {
 			if (phone) { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }
 			else { this.spyLock = Date.now() + 900; this.scrollTo(this.rowDom('g:' + id)); }
 		}, 30));
 	}
 	openDec(id) {
-		this.setState({ dec: id, q: '', tokens: [], phoneGroup: this.phone() ? 'decoders' : this.state.phoneGroup, menu: null, active: 'decoders' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+		this.setState({ dec: id, bp: false, bpBand: null, sheet: null, bpMenu: null, q: '', tokens: [], phoneGroup: this.phone() ? 'decoders' : this.state.phoneGroup, menu: null, active: 'decoders' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
 	}
 	navTo(id) {
 		if (GID[id]) return this.goGroup(id);
+		if (id === 'bandplans' || id.indexOf('bandplans:') === 0) return this.openBp(id.slice(10) || null);
 		if (id.indexOf('dec:') === 0) return this.openDec(id.slice(4));
 		const d = BY[id];
 		if (!d) return;
@@ -899,10 +1296,10 @@ class Component extends DCLogic {
 		if (d.more) more[d.g] = true;
 		const isDec = d.g.indexOf('dec:') === 0;
 		const phone = this.phone();
-		this.setState({ q: '', tokens: [], more, menu: null, dec: isDec ? d.g.slice(4) : null, phoneGroup: phone ? (isDec ? 'decoders' : d.g) : null, active: isDec ? 'decoders' : d.g }, () => setTimeout(() => this.scrollTo(this.rowDom(id), id), 60));
+		this.setState({ q: '', tokens: [], more, menu: null, bp: false, bpBand: null, sheet: null, bpMenu: null, dec: isDec ? d.g.slice(4) : null, phoneGroup: phone ? (isDec ? 'decoders' : d.g) : null, active: isDec ? 'decoders' : d.g }, () => setTimeout(() => this.scrollTo(this.rowDom(id), id), 60));
 	}
 	act(a) {
-		if (BY[a] || GID[a] || a.indexOf('dec:') === 0) return this.navTo(a);
+		if (BY[a] || GID[a] || a.indexOf('dec:') === 0 || a.indexOf('bandplans') === 0) return this.navTo(a);
 		if (this.props.onAction && this.props.onAction(a) === true) return;
 		const T = { map: 'Opens the Map to place the station', tuner: 'Opens the Tuner on saved frequencies', shortcuts: 'Opens ⌘K on Keyboard shortcuts', pi: 'Opens the Pi status page', devices: 'Devices: designed with accounts, later', update: 'WaveKit is up to date', export: 'Downloaded wavekit-settings.yaml', import: 'Choose a YAML file to restore' };
 		this.toast(T[a] || a);
@@ -913,6 +1310,7 @@ class Component extends DCLogic {
 		if (d.kind === 'sw') return v ? 'On' : 'Off';
 		if (d.kind === 'step') return (v > 0 && d.min < 0 ? '+' : '') + v + (d.unit || '');
 		if (d.kind === 'freqs') return v.join(', ');
+		if (d.kind === 'edges') return bpEdges(v);
 		if (d.kind === 'chips') return v.length + ' selected';
 		if (d.kind === 'text' || d.kind === 'secret') return v ? (d.kind === 'secret' ? 'set' : '“' + v + '”') : 'empty';
 		return d.text || String(v);
@@ -924,7 +1322,9 @@ class Component extends DCLogic {
 		const changed = hasVal && !d.dev && !d.lock && !eq(committed, d.def);
 		return { changed, pending: id in s.pending, failed: !!s.failed[id] };
 	}
-	row(d, crumb) {
+	row(d0, crumb) {
+		// a few rows describe themselves from live state (Country, Band plans, Meshtastic region)
+		const d = d0.dyn ? Object.assign({}, d0, d0.dyn(this)) : d0;
 		const s = this.state, id = d.id, x = this.info(d);
 		const v = d.def !== undefined ? this.val(id) : undefined;
 		const err = d.validate ? d.validate(v) : '';
@@ -966,7 +1366,10 @@ class Component extends DCLogic {
 			hasEff: !!d.eff, effText: d.effText || '', effIcon: d.eff === 'hw' ? I.plug : I.restart, effC: x.pending ? 'var(--wk-amber)' : 'var(--wk-text-3)',
 			locked, ...sw(!!v),
 			canReset: x.changed && !x.pending && !x.failed && !locked, defText: d.def !== undefined ? this.label(d, d.def) : '', reset: () => this.reset(id),
-			isSw: kind === 'sw', isSeg: kind === 'seg', isSwatch: kind === 'swatch', isGround: kind === 'ground', isWf: kind === 'wf', isSel: kind === 'sel', isStep: kind === 'step', isSlider: kind === 'slider', isText: kind === 'text', isSecret: kind === 'secret', isLink: kind === 'link', isRead: kind === 'read', isBtns: kind === 'btns', isChips: kind === 'chips', isFreqs: kind === 'freqs',
+			isSw: kind === 'sw', isSeg: kind === 'seg', isSwatch: kind === 'swatch', isGround: kind === 'ground', isWf: kind === 'wf', isSel: kind === 'sel', isStep: kind === 'step', isSlider: kind === 'slider', isText: kind === 'text', isSecret: kind === 'secret', isLink: kind === 'link', isRead: kind === 'read', isBtns: kind === 'btns', isChips: kind === 'chips', isFreqs: kind === 'freqs', isEdges: kind === 'edges',
+			swD: d.swOf ? 'block' : 'none', selSw: d.swOf ? d.swOf(v) : 'transparent',
+			lo: kind === 'edges' ? v[0] : '', hi: kind === 'edges' ? v[1] : '',
+			onLo: e => this.setVal(id, [e.target.value, v[1]]), onHi: e => this.setVal(id, [v[0], e.target.value]),
 			opts, selVal: String(v),
 			onSel: e => { const o = (d.opts || []).find(o => String(o[0]) === e.target.value); if (o) this.setVal(id, o[0]); },
 			toggle: () => this.setVal(id, !v),
@@ -997,7 +1400,7 @@ class Component extends DCLogic {
 				if (v.indexOf(f) < 0) this.setVal(id, v.concat([f]).sort((a, b) => a - b));
 			};
 		}
-		const yaml = id.replace(/^dec\.([a-z0-9]+)\./, 'decoders.$1.') + ': ' + (v === undefined ? '' : JSON.stringify(v));
+		const yaml = id.replace(/^dec\.([a-z0-9]+)\./, 'decoders.$1.').replace(/^bp\./, 'bandplans.edits.') + ': ' + (v === undefined ? '' : JSON.stringify(v));
 		r.menuKey = e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); this.setState({ menu: null }); } };
 		r.menu = [
 			{ label: r.canReset ? 'Reset to ' + r.defText : 'Already the default', icon: I.reset, disabled: !r.canReset, fg: r.canReset ? 'var(--wk-text)' : 'var(--wk-text-5)', act: () => r.canReset ? this.reset(id) : this.setState({ menu: null }) },
@@ -1096,7 +1499,7 @@ class Component extends DCLogic {
 		const v = id => this.label(BY[id], this.val(id));
 		const run = DECS.filter(d => this.decOn(d) && d.state === 'run').length, stop = DECS.filter(d => this.decOn(d) && d.state === 'fault').length;
 		return {
-			station: (this.val('station.name') || 'WaveKit') + ' · ' + v('station.region'),
+			station: (this.val('station.name') || 'WaveKit') + ' · ' + this.countryInfo().name,
 			receiver: 'Pi receiver · ' + v('rx.rate') + ' · ' + v('rx.gain'),
 			audio: v('au.src') + ' · squelch +' + this.val('au.margin') + ' dB',
 			decoders: run + ' running' + (stop ? ' · ' + stop + ' stopped' : ''),
@@ -1113,12 +1516,233 @@ class Component extends DCLogic {
 		if (ids.some(d => d.id in s.pending || s.failed[d.id])) return { hasDot: true, dotC: 'var(--wk-amber)', dotLabel: 'Changes waiting' };
 		return { hasDot: false, dotC: 'transparent', dotLabel: '' };
 	}
+	// ── Band plans page (2026-10-12) ────────────────────────────────────────────────────────────────────
+	openBp(band) {
+		const phone = this.phone(), sheet = band === 'import' ? 'pick' : null;
+		const b = band && band !== 'import' && this.band(band) ? band : null;
+		this.setState({ bp: true, bpBand: b, sheet, dec: null, q: '', tokens: [], menu: null, bpMenu: null, phoneGroup: phone ? 'station' : null, active: 'station' }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20));
+	}
+	openBand(id) { this.setState({ bpBand: id, bpMenu: null, bpChAll: null }, () => setTimeout(() => { const c = document.getElementById(this.scrollId); if (c) c.scrollTop = 0; }, 20)); }
+	bands() { const s = this.state; return BP_BANDS.concat(s.bpAdded).filter(b => s.bpDel.indexOf(b.id) < 0); }
+	band(id) { return this.bands().find(b => b.id === id) || null; }
+	bv(b, f) { return this.committed('bp.' + b.id + '.' + f); }
+	bandEdit(b) {
+		const fields = (BPD[b.id] || []).filter(d => !eq(this.committed(d.id), d.def)).map(d => d.field);
+		const chs = this.bv(b, 'ch') || [];
+		return { added: b.edit === 'added', hidden: !!this.bv(b, 'hide'), renamed: fields.indexOf('name') >= 0, chRenamed: fields.length === 1 && fields[0] === 'ch' && chs.some(c => c.edit === 'renamed'), edited: fields.length > 0, fields };
+	}
+	bpEditCount() { return this.bands().filter(b => { const e = this.bandEdit(b); return e.added || e.edited; }).length; }
+	bpSec(label, desc, btn, act, key, icon, first) {
+		return { isBpSec: true, label, hasDesc: !!desc, desc: desc || '', hasBtn: !!btn, btn: btn || '', btnAct: act, btnKey: key || '', btnIcon: icon || I.plus, mt: first ? '0' : '18px', pt: first ? '4px' : '16px', line: first ? 'transparent' : 'rgba(var(--wk-line-rgb),.08)' };
+	}
+	bpPage() {
+		const s = this.state, out = [];
+		out.push({ isDesc: true, desc: 'What WaveKit calls each part of the spectrum. The spectrum lanes, the Tuner, Scan a band and ⌘K all read it.' });
+		out.push(this.bpSec('Active plans', 'Higher plans name a band where plans overlap. Gaps fall through to the next one.', 'Import', () => this.setState({ sheet: 'pick', sheetAll: false, bpMenu: null }), 'import', I.upload, true));
+		s.bpOrder.forEach((id, i) => out.push(this.planItem(id, i)));
+		this.bandListItems(out);
+		return out;
+	}
+	planItem(id, i) {
+		const s = this.state, p = bpPlan(id), on = !!s.bpOn[id], edits = id === 'edits', n = s.bpOrder.length, imp = p.kind === 'import';
+		let sub = '', prov = '';
+		if (edits) { const c = this.bpEditCount(); sub = (c ? c + (c === 1 ? ' change' : ' changes') : 'No changes yet') + ', kept when packs update. Always on top.'; }
+		else if (!imp) { sub = p.sub.replace(/^Built in · /, '').replace(/^./, m => m.toUpperCase()); prov = 'Version ' + p.version + ' · ' + p.ver + ' of ' + p.bands + ' verified · ' + p.source + (p.seeded ? ' · ' + p.seeded : ''); }
+		else { sub = 'Imported ' + s.bpImported + ' from ' + p.url.replace(/^https?:\/\//, ''); prov = p.format + ' · ' + p.bands + ' bands · by ' + p.author + ' · ' + p.licence + ' · none verified'; }
+		const close = () => this.setState({ bpMenu: null });
+		const M = (label, icon, act, danger) => ({ label, icon, fg: danger ? 'var(--wk-danger-soft)' : 'var(--wk-text)', act: () => { close(); act(); } });
+		const menu = edits
+			? [M('Show edited bands', I.filter, () => this.setState({ bpGrp: 'edited', bpQ: '' })), M('Undo all edits', I.reset, () => this.resetAll())]
+			: [M('Check for update', I.restart, () => this.checkUpd(id)), M('Show source', I.link, () => this.toast(imp ? 'Opens ' + p.url.replace(/^https?:\/\//, '') : 'Opens the ' + p.name + ' pack sources: ' + p.source))]
+				.concat(i > 1 ? [M('Move up', I.up, () => this.movePlan(id, -1))] : [])
+				.concat(i < n - 1 ? [M('Move down', I.down, () => this.movePlan(id, 1))] : [])
+				.concat(imp ? [M('Remove import', I.trash, () => this.removeImport(id), true)] : []);
+		menu.forEach((m, k) => { m.first = k === 0; });
+		const kind = { edits: '', pack: 'Built in', import: 'Imported' }[p.kind];
+		return Object.assign({
+			isBpPlan: true, id, name: p.name, nameC: on ? 'var(--wk-text)' : 'var(--wk-text-3)', hasKind: !!kind, kindLabel: kind, comm: imp, off: !on,
+			sub, hasProv: !!prov, prov, toggle: () => this.togglePlan(id),
+			hasUpd: s.bpUpd === id, updText: 'A newer file is there: 2 bands changed, 1 added. Your edits stay on top.',
+			updLater: () => this.setState({ bpUpd: null }),
+			updApply: () => { this.setState({ bpUpd: null }); this.toast(p.name + ' updated · 62 bands', false, () => this.toast('Back to the file from ' + s.bpImported)); },
+			menu, menuOpen: s.bpMenu === id, toggleMenu: () => this.setState({ bpMenu: s.bpMenu === id ? null : id, menu: null }),
+			menuKey: e => { if (e.key === 'Escape') { e.stopPropagation(); e.preventDefault(); close(); } },
+			// Your edits stay on top; the others reorder by dragging the grip (or Move up / down in ⋯)
+			canDrag: edits ? 'false' : 'true', gripOp: edits ? 0.35 : 1, gripCursor: edits ? 'default' : 'grab', gripTitle: edits ? 'Your edits stay on top' : 'Drag to reorder',
+			dragOp: s.bpDrag === id ? 0.5 : 1, ring: s.bpOver === id && s.bpDrag && s.bpDrag !== id ? 'inset 0 2px 0 var(--wk-accent)' : 'none',
+			dragStart: e => { if (edits) { e.preventDefault(); return; } try { e.dataTransfer.setData('text/plain', id); e.dataTransfer.effectAllowed = 'move'; } catch (err) { /* no dataTransfer */ } this.setState({ bpDrag: id, bpMenu: null }); },
+			dragEnd: () => this.setState({ bpDrag: null, bpOver: null }),
+			over: e => { if (!s.bpDrag || s.bpDrag === id) return; e.preventDefault(); if (s.bpOver !== id) this.setState({ bpOver: id }); },
+			drop: e => { e.preventDefault(); const from = s.bpDrag; if (!from || from === id) return; const o = s.bpOrder.filter(x => x !== from); o.splice(Math.max(1, o.indexOf(id)), 0, from); this.setState({ bpOrder: o, bpDrag: null, bpOver: null }); this.toast(bpPlan(from).name + ' moved', false, () => this.setState({ bpOrder: s.bpOrder })); }
+		}, sw(on));
+	}
+	togglePlan(id) {
+		const s = this.state, on = !s.bpOn[id], p = bpPlan(id), prev = s.bpOn;
+		this.setState({ bpOn: Object.assign({}, s.bpOn, { [id]: on }) });
+		const below = s.bpOrder.slice(s.bpOrder.indexOf(id) + 1).filter(x => s.bpOn[x]).map(x => bpPlan(x).name)[0];
+		this.toast(on ? p.name + ' on' : p.name + ' off' + (below ? ' · its bands fall through to ' + below : ''), false, () => this.setState({ bpOn: prev }));
+	}
+	movePlan(id, by) {
+		const s = this.state, o = s.bpOrder.slice(), i = o.indexOf(id), j = Math.max(1, Math.min(o.length - 1, i + by));
+		o.splice(i, 1); o.splice(j, 0, id);
+		this.setState({ bpOrder: o });
+	}
+	checkUpd(id) {
+		const p = bpPlan(id);
+		if (p.kind === 'import') return this.setState({ bpUpd: id });
+		this.toast(p.name + ' ' + p.version + ' is the newest. Packs update with WaveKit.');
+	}
+	removeImport(id) {
+		const s = this.state, prev = { bpOrder: s.bpOrder, bpOn: s.bpOn };
+		this.setState({ bpOrder: s.bpOrder.filter(x => x !== id), bpUpd: null });
+		this.toast(bpPlan(id).name + ' removed', false, () => this.setState(prev));
+	}
+	resetAll() {
+		const s = this.state, prev = { vals: s.vals, bpAdded: s.bpAdded, bpDel: s.bpDel }, vals = Object.assign({}, s.vals), n = this.bpEditCount();
+		this.bands().forEach(b => (BPD[b.id] || []).forEach(d => { vals[d.id] = d.def; }));
+		// bands you added go too
+		this.setState({ vals, bpAdded: [], bpDel: s.bpDel.concat(BP_BANDS.filter(b => b.edit === 'added').map(b => b.id)) });
+		this.toast(n + (n === 1 ? ' edit' : ' edits') + ' undone', false, () => this.setState(prev));
+	}
+	resetBand(b) {
+		const s = this.state, prev = s.vals, vals = Object.assign({}, s.vals);
+		(BPD[b.id] || []).forEach(d => { vals[d.id] = d.def; });
+		this.setState({ vals });
+		this.toast(this.bv(b, 'name') + ' is back to ' + bpPlan(b.from).name, false, () => this.setState({ vals: prev }));
+	}
+	deleteBand(b) {
+		const s = this.state, prev = { bpDel: s.bpDel, bpBand: b.id };
+		this.setState({ bpDel: s.bpDel.concat([b.id]), bpBand: null });
+		this.toast(this.bv(b, 'name') + ' deleted', false, () => this.setState(prev));
+	}
+	addBand() {
+		const s = this.state, id = 'new' + (++this.nBand);
+		const b = { id, name: 'New band', group: 'other', a: 433.05, b: 434.79, mode: 'NFM', step: 12500, sp: [12500], protos: ['fm'], from: 'edits', ver: false, edit: 'added' };
+		const vals = Object.assign({}, s.vals);
+		bpDefs(b, this.bands()).forEach(d => { BY[d.id] = d; vals[d.id] = d.def; });
+		this.setState({ vals, bpAdded: s.bpAdded.concat([b]) }, () => this.openBand(id));
+	}
+	bandListItems(out) {
+		const s = this.state, all = this.bands(), q = s.bpQ.trim().toLowerCase(), g = s.bpGrp;
+		const lo = b => bpNum(this.bv(b, 'edges')[0]), parent = b => this.bv(b, 'parent');
+		const qf = bpNum(q);
+		const match = b => {
+			const e = this.bandEdit(b), grp = this.bv(b, 'group');
+			if (g === 'edited' && !(e.added || e.edited)) return false;
+			if (g !== 'all' && g !== 'edited' && grp !== g) return false;
+			if (!q) return true;
+			const ed = this.bv(b, 'edges');
+			if (qf > 0 && /^[\d.,]+$/.test(q)) return qf >= bpNum(ed[0]) && qf <= bpNum(ed[1]);
+			const chs = this.bv(b, 'ch') || [];
+			return [this.bv(b, 'name'), bpGroup(grp).name, chs.map(c => c.name + ' ' + (c.alias || []).join(' ')).join(' ')].join(' ').toLowerCase().indexOf(q) >= 0;
+		};
+		const edN = all.filter(b => { const e = this.bandEdit(b); return e.added || e.edited; }).length;
+		const chip = (id, label, n, swc) => ({ label, n: String(n), on: g === id ? 'true' : 'false', swD: swc ? 'block' : 'none', sw: swc || 'transparent', bg: g === id ? 'var(--wk-sel)' : 'var(--wk-chip)', fg: g === id ? 'var(--wk-accent)' : 'var(--wk-text-2)', pick: () => this.setState({ bpGrp: g === id && id !== 'all' ? 'all' : id }) });
+		const chips = [chip('all', 'All', all.length)].concat(BP_GROUPS.map(x => [x, all.filter(b => this.bv(b, 'group') === x.id).length]).filter(x => x[1]).map(x => chip(x[0].id, x[0].name, x[1], bpSw(x[0].id)))).concat(edN ? [chip('edited', 'Edited', edN)] : []);
+		out.push(this.bpSec('Bands · ' + all.length, 'What the active plans add up to, lowest first. A narrower band names its part of a wider one.', 'Add band', () => this.addBand(), 'add', I.plus, false));
+		out.push({ isBpTools: true, q: s.bpQ, onQ: e => this.setState({ bpQ: e.target.value }), qKey: e => { if (e.key === 'Escape' && s.bpQ) { e.stopPropagation(); this.setState({ bpQ: '' }); } }, chips });
+		const flat = !!q || g !== 'all';
+		let rows = [];
+		if (flat) rows = all.filter(match).sort((x, y) => lo(x) - lo(y)).map(b => [b, 0]);
+		else {
+			const ids = all.map(b => b.id), walk = (p, depth) => all.filter(b => (p ? parent(b) === p : (parent(b) === 'none' || ids.indexOf(parent(b)) < 0))).sort((x, y) => lo(x) - lo(y)).forEach(b => { rows.push([b, depth]); walk(b.id, depth + 1); });
+			walk(null, 0);
+		}
+		if (!rows.length) out.push({ isDesc: true, desc: q ? 'No band or channel matches “' + s.bpQ.trim() + '”.' : 'No band here.' });
+		rows.forEach(r => out.push(this.bandItem(r[0], r[1])));
+	}
+	bandItem(b, depth) {
+		const e = this.bandEdit(b), grp = bpGroup(this.bv(b, 'group')), chs = this.bv(b, 'ch') || [], name = this.bv(b, 'name');
+		const named = e.added || e.renamed ? 'Your edits' : (bpPlan(b.from) || {}).name;
+		const skip = this.bv(b, 'skip'), why = this.bv(b, 'why');
+		const extra = [chs.length ? chs.length + (chs.length === 1 ? ' channel' : ' channels') : '', skip ? 'Scans skip it' + (why ? ': ' + why : '') : '', b.by ? 'Covered by ' + b.by : ''].filter(Boolean).join(' · ');
+		const mark = e.added ? 'Added' : e.hidden ? 'Hidden' : e.renamed ? 'Renamed' : e.edited ? 'Edited' : '';
+		const chEd = chs.filter(c => c.edit === 'renamed').map(c => 'ch ' + (c.n || bpF(c.f)) + ' renamed');
+		return {
+			isBpBand: true, id: b.id, name, sw: bpSw(grp.id), edges: bpEdges(this.bv(b, 'edges')), meta: named,
+			ver: !!b.ver && !e.added, comm: !b.ver && !e.added, hasExtra: !!(extra || chEd.length), extra: chEd.concat(extra ? [extra] : []).join(' · '),
+			hasMark: !!mark, mark, markBg: e.hidden ? 'var(--wk-chip)' : 'rgba(var(--wk-accent-rgb),.12)', markFg: e.hidden ? 'var(--wk-text-2)' : 'var(--wk-accent)',
+			op: e.hidden ? 0.5 : 1, pl: (12 + depth * 18) + 'px', nested: depth > 0, guideX: (5 + depth * 18) + 'px',
+			aria: name + ', ' + bpEdges(this.bv(b, 'edges')) + ', ' + grp.name + (mark ? ', ' + mark : ''), open: () => this.openBand(b.id)
+		};
+	}
+	bpEditor(id) {
+		const b = this.band(id);
+		if (!b) return this.bpPage();
+		const s = this.state, out = [], D = f => BY['bp.' + id + '.' + f], e = this.bandEdit(b), plan = bpPlan(b.from);
+		const grp = bpGroup(this.bv(b, 'group')), named = grp.name + ' · ' + (e.added ? 'added by you' : 'named by ' + (e.renamed ? 'Your edits' : plan.name) + (e.edited ? ', edited' : ''));
+		const pill = e.added ? { pill: 'Yours', pillBg: 'var(--wk-chip)', pillFg: 'var(--wk-text-2)', pillLine: 'transparent', pillTick: false } : b.ver ? { pill: 'Verified', pillBg: 'rgba(var(--wk-accent-rgb),.14)', pillFg: 'var(--wk-accent)', pillLine: 'transparent', pillTick: true } : { pill: 'Community', pillBg: 'transparent', pillFg: 'var(--wk-text-3)', pillLine: 'rgba(var(--wk-line-rgb),.22)', pillTick: false };
+		out.push(Object.assign({ isBpEdHead: true, sw: bpSw(grp.id), where: bpEdges(this.bv(b, 'edges')), named }, pill));
+		['name', 'edges', 'group', 'mode', 'bw', 'step'].forEach(f => out.push(this.row(D(f))));
+		const more = ['sp', 'protos', 'skip'].concat(this.val('bp.' + id + '.skip') ? ['why'] : []).concat(['parent', 'hide']).map(D);
+		this.fold(out, 'bp:' + id, more, 'band settings', false);
+		// channels: capped, "Show all N" past 8
+		const chs = this.val('bp.' + id + '.ch') || [], packCh = D('ch').def, cap = s.bpChAll === id ? chs.length : 8;
+		out.push(this.bpSec('Channels · ' + chs.length, 'Named frequencies in the band. Names and aliases work in the Tuner and ⌘K.', '', null));
+		if (!chs.length) out.push({ isDesc: true, desc: 'No channels yet. Add one below.' });
+		chs.slice(0, cap).forEach(c => {
+			const added = !packCh.some(p => p.f === c.f) && !e.added;
+			const meta = [c.note, c.alias && c.alias.length ? 'Also ' + c.alias.map(a => '“' + a + '”').join(', ') : '', c.by ? 'Covered by ' + c.by : ''].filter(Boolean).join(' · ');
+			const mark = c.edit === 'renamed' ? 'Renamed' : added ? 'Added' : '';
+			out.push({ isBpCh: true, n: c.n || '', f: bpF(c.f), name: c.name, hasMeta: !!meta, meta, hasMark: !!mark, mark,
+				remove: () => { const prev = this.committed('bp.' + id + '.ch'); this.setCh(id, prev.filter(x => x !== c)); this.bpSaved('bp.' + id + '.ch', prev, c.name + ' removed'); } });
+		});
+		if (chs.length > cap) out.push({ isBpLinkBtn: true, label: 'Show all ' + chs.length, act: () => this.setState({ bpChAll: id }) });
+		const fId = this.uid + '-chf', nId = this.uid + '-chn';
+		const add = () => {
+			const fe = document.getElementById(fId), ne = document.getElementById(nId), f = bpNum(fe && fe.value), ed = this.bv(b, 'edges');
+			if (!(f > 0)) return this.toast('Type the channel frequency in MHz', true);
+			if (f < bpNum(ed[0]) || f > bpNum(ed[1])) return this.toast(bpF(f) + ' MHz is outside ' + this.bv(b, 'name') + ' (' + bpEdges(ed) + ')', true);
+			const parts = String(ne && ne.value || '').split(',').map(x => x.trim()).filter(Boolean);
+			const prev = this.committed('bp.' + id + '.ch'), c = { f: +f.toFixed(5), name: parts[0] || bpF(f) + ' MHz' };
+			if (parts.length > 1) c.alias = parts.slice(1);
+			this.setCh(id, prev.concat([c]).sort((x, y) => x.f - y.f));
+			if (fe) fe.value = ''; if (ne) ne.value = '';
+			this.bpSaved('bp.' + id + '.ch', prev, c.name + ' added');
+		};
+		out.push({ isBpChAdd: true, fId, nId, add, key: ev => { if (ev.key === 'Enter') add(); } });
+		// provenance last: where the band comes from and whether a regulator source backs it
+		const src = plan && plan.source ? plan.source.split(',')[0] : '';
+		const prov = e.added ? 'Added by you on 12 Oct. In no plan, so pack updates never touch it.' : 'From ' + plan.name + ' ' + plan.version + (b.ver ? ' · checked against ' + src : ' · community, not yet checked' + (plan.seeded ? ' · ' + plan.seeded.charAt(0).toLowerCase() + plan.seeded.slice(1) : ''));
+		const canReset = !e.added && e.edited;
+		out.push({ isBpProv: true, prov, icon: b.ver && !e.added ? I.check : I.info, iconC: b.ver && !e.added ? 'var(--wk-accent)' : 'var(--wk-text-3)', hasBtns: canReset || e.added, canReset, resetLabel: canReset ? 'Reset to ' + plan.name : '', reset: () => this.resetBand(b), canDelete: e.added, del: () => this.deleteBand(b) });
+		return out;
+	}
+	setCh(id, v) { const st = {}; this.commitLive(BY['bp.' + id + '.ch'], v, st); this.setState(st); }
+	sheetVals() {
+		const s = this.state, phone = this.phone(), pv = BP_IMPORT, intl = s.bpOrder.indexOf('intl') >= 0;
+		const rows = (s.sheetAll ? pv.rows : pv.rows.slice(0, 6)).map(r => ({ name: r[0], group: bpGroup(r[3]).name, sw: bpSw(r[3]), edges: MHZ(r[1]) + '–' + MHZ(r[2]) }));
+		const close = () => this.setState({ sheet: null });
+		return {
+			hasSheet: !!s.sheet, sheetPick: s.sheet === 'pick', sheetPreview: s.sheet === 'preview', sheetTitle: s.sheet === 'preview' ? 'Check the import' : 'Import a band plan',
+			sheetX: phone ? '0' : '20px', sheetW: phone ? 'none' : '520px', sheetTop: phone ? 'auto' : '64px', sheetBottom: phone ? '0' : 'auto', sheetMax: phone ? '88%' : 'calc(100% - 88px)', sheetRad: phone ? '14px 14px 0 0' : '12px', sheetHeadPad: s.sheet === 'preview' ? '6px' : '18px',
+			closeSheet: close, sheetBack: () => this.setState({ sheet: 'pick' }),
+			sheetKey: e => { if (e.key === 'Escape') { e.stopPropagation(); close(); } },
+			urlId: this.uid + '-url', colId: this.uid + '-col', sheetUrl: s.sheetUrl, onSheetUrl: e => this.setState({ sheetUrl: e.target.value }),
+			pickFile: () => this.setState({ sheet: 'preview', sheetSrc: 'International.csv', sheetAll: false }),
+			readUrl: () => { const u = s.sheetUrl.trim(); if (!/^https?:\/\/\S+\.\S+/.test(u)) return this.toast('Paste the address of a plan file, starting with https://', true); this.setState({ sheet: 'preview', sheetSrc: u, sheetAll: false }); },
+			urlKey: e => { if (e.key === 'Enter') { const u = s.sheetUrl.trim(); if (/^https?:\/\/\S+\.\S+/.test(u)) this.setState({ sheet: 'preview', sheetSrc: u, sheetAll: false }); } },
+			pv_name: pv.name, pv_line: pv.format + ' · ' + pv.bands + ' bands · by ' + pv.author + ' · ' + pv.licence,
+			pv_src: 'From ' + (s.sheetSrc || 'International.csv').replace(/^https?:\/\//, ''),
+			pv_again: intl, pv_againText: 'You imported this on ' + s.bpImported + '. Adding it again replaces that copy and turns it on.',
+			pv_mapLine: pv.mapped + ' mapped to groups, ' + (pv.bands - pv.mapped) + ' to Other',
+			pv_groups: pv.groups.map(x => ({ name: bpGroup(x[0]).name, n: String(x[1]), sw: bpSw(x[0]) })),
+			pv_bands: rows, pv_more: !s.sheetAll, pv_moreLabel: 'Show all ' + pv.bands, pv_showAll: () => this.setState({ sheetAll: true }),
+			pv_on: s.sheetColours ? 'true' : 'false', pv_track: sw(s.sheetColours).track, pv_knob: sw(s.sheetColours).knob, pv_toggle: () => this.setState({ sheetColours: !s.sheetColours }),
+			addImport: () => {
+				const prev = { bpOrder: s.bpOrder, bpOn: s.bpOn, bpImported: s.bpImported };
+				this.setState({ sheet: null, bpOrder: s.bpOrder.filter(x => x !== 'intl').concat(['intl']), bpOn: Object.assign({}, s.bpOn, { intl: true }), bpImported: 'today' });
+				this.toast('International added at the bottom of the stack', false, () => this.setState(prev));
+			}
+		};
+	}
 	renderVals() {
 		const s = this.state, phone = this.phone();
 		const searching = !!(s.q.trim() || s.tokens.length);
 		const dec = s.dec;
 		let items;
-		if (dec) items = this.decPage(dec);
+		if (s.bp) items = s.bpBand ? this.bpEditor(s.bpBand) : this.bpPage();
+		else if (dec) items = this.decPage(dec);
 		else if (searching) items = this.searchItems();
 		else if (phone && !s.phoneGroup) items = GROUPS.map(g => Object.assign({ isGlink: true, label: g.label, icon: g.icon, summary: this.summary(g.id), pick: () => this.goGroup(g.id) }, this.groupFlags(g.id)));
 		else if (phone) items = this.groupItems(s.phoneGroup, false);
@@ -1127,9 +1751,10 @@ class Component extends DCLogic {
 		const pendN = Object.keys(s.pending).length;
 		const changedOn = s.tokens.indexOf('changed') >= 0;
 		const decObj = dec ? DECS.find(x => x.id === dec) : null;
-		const title = decObj ? decObj.name : phone && s.phoneGroup ? GID[s.phoneGroup].label : 'Settings';
-		const hasBack = !!dec || (phone && !!s.phoneGroup);
-		const backLabel = dec ? 'Decoders' : 'Settings';
+		const bpb = s.bp && s.bpBand ? this.band(s.bpBand) : null;
+		const title = s.bp ? (bpb ? this.bv(bpb, 'name') : 'Band plans') : decObj ? decObj.name : phone && s.phoneGroup ? GID[s.phoneGroup].label : 'Settings';
+		const hasBack = s.bp || !!dec || (phone && !!s.phoneGroup);
+		const backLabel = s.bp ? (bpb ? 'Band plans' : 'Station') : dec ? 'Decoders' : 'Settings';
 		return {
 			// theme scope: Immersive passes its theme and accent; standalone, the board's own tweaks or the pick in Display
 			wkTheme: this.theme(), wkAccent: this.val('dev.accent') || 'mono', wkGround: this.ground(),
@@ -1139,15 +1764,16 @@ class Component extends DCLogic {
 			headPad: hasBack ? '8px' : '18px',
 			title, hasBack, backLabel,
 			back: () => {
-				if (dec) { if (phone) this.setState({ dec: null }); else this.goGroup('decoders'); }
+				if (s.bp) { if (bpb) this.openBand(null); else this.navTo('station.bandplans'); }
+				else if (dec) { if (phone) this.setState({ dec: null }); else this.goGroup('decoders'); }
 				else this.setState({ phoneGroup: null });
 			},
 			hasClose: !!this.props.onClose, close: () => this.props.onClose && this.props.onClose(),
-			showChangedChip: changedN > 0 && !dec && !(phone && s.phoneGroup), changedText: changedN + ' changed', changedOn,
+			showChangedChip: changedN > 0 && !dec && !s.bp && !(phone && s.phoneGroup), changedText: changedN + ' changed', changedOn,
 			chipFg: changedOn ? 'var(--wk-accent)' : 'var(--wk-text-2)', chipBg: changedOn ? 'var(--wk-sel)' : 'var(--wk-chip)', chipBorder: 'transparent',
 			toggleChanged: () => this.setState({ tokens: changedOn ? s.tokens.filter(t => t !== 'changed') : s.tokens.concat(['changed']), dec: null, phoneGroup: null }),
 			offline: s.offline, retry: () => this.retry(),
-			showSearch: !dec && !(phone && s.phoneGroup),
+			showSearch: !dec && !s.bp && !(phone && s.phoneGroup),
 			searchId: this.searchId, q: s.q, ph: s.tokens.length ? 'Narrow down' : 'Search settings · squelch, ppm, retention…',
 			searchBorder: s.focus ? 'rgba(var(--wk-line-rgb),.3)' : 'rgba(var(--wk-line-rgb),.18)',
 			tokens: s.tokens.map(t => ({ label: TOKEN[t], remove: () => this.setState({ tokens: s.tokens.filter(x => x !== t) }) })),
@@ -1165,7 +1791,7 @@ class Component extends DCLogic {
 			}),
 			scrollId: this.scrollId, padX: phone ? '8px' : '8px',
 			onScroll: () => {
-				if (s.dec || searching || phone || Date.now() < (this.spyLock || 0)) return;
+				if (s.dec || s.bp || searching || phone || Date.now() < (this.spyLock || 0)) return;
 				this.spy();
 				clearTimeout(this.st);
 				this.st = setTimeout(() => this.spy(), 140);
@@ -1176,8 +1802,10 @@ class Component extends DCLogic {
 			pendingSub: this.pendingFx(),
 			discard: () => { this.setState({ pending: {} }); this.toast('Discarded'); },
 			apply: () => this.apply(),
-			hasMenu: !!s.menu, closeMenu: () => this.setState({ menu: null }),
-			hasToast: !!s.toast, toastText: s.toast || '', toastBottom: pendN ? '84px' : '16px'
+			hasMenu: !!s.menu || !!s.bpMenu, closeMenu: () => this.setState({ menu: null, bpMenu: null }),
+			hasToast: !!s.toast, toastText: s.toast || '', toastBottom: pendN ? '84px' : '16px',
+			hasToastAct: !!s.toastUndo, toastAct: () => { const f = s.toastUndo; clearTimeout(this.tt); this.setState({ toastUndo: null, toast: null }); if (f) f(); },
+			...this.sheetVals()
 		};
 	}
 }
