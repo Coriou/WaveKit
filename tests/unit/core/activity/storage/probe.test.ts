@@ -48,6 +48,7 @@ describe("activity runtime probe", () => {
 		expect(limits.gapMaxIntervalMs).toBe(60_000)
 		expect(limits.pruneBatchRows).toBe(500)
 		expect(limits.pruneBurstBatches).toBe(20)
+		expect(limits.pruneBurstMs).toBe(300)
 		expect(limits.walPassiveBytes).toBe(16 * 1024 * 1024)
 		expect(limits.walTruncateBytes).toBe(48 * 1024 * 1024)
 		expect(limits.walPauseBytes).toBe(64 * 1024 * 1024)
@@ -66,6 +67,9 @@ describe("activity runtime probe", () => {
 			/gap interval/,
 		)
 		expect(() => resolveActivityLimits({ pruneBurstBatches: 0 })).toThrow(
+			/prune burst/,
+		)
+		expect(() => resolveActivityLimits({ pruneBurstMs: 0 })).toThrow(
 			/prune burst/,
 		)
 	})

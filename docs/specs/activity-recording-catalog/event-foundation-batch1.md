@@ -105,8 +105,8 @@ under a low-water mark of 95% of that cap: once active, rows continue while
 `lowWater(maxDbBytes)`. Live bytes are
 `(page_count - freelist_count) * page_size`, so pages on the freelist do
 not keep the byte cap on. While a cap is active, one write runs consecutive
-prune transactions back to back, at most `pruneBurstBatches` (default 20).
-Each transaction deletes an ascending `seq` prefix of at most
+prune transactions back to back, stopping at `pruneBurstBatches` (default 20) or `pruneBurstMs` (default 300 ms), whichever comes first. Each
+transaction deletes an ascending `seq` prefix of at most
 `pruneBatchRows` and, for the row cap, never more than `count - lowWater`
 rows. It advances `pruneWatermark` to the greatest deleted seq and
 increments `pruneGeneration`, then runs `PRAGMA incremental_vacuum`. Never

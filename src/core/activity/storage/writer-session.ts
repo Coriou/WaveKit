@@ -1,6 +1,6 @@
 import type { StoreIdentity } from "./contract.js"
 import {
-	activityLowWater,
+	activityCapActive,
 	commitActivityBatch,
 	openActivityDatabase,
 	pruneActivityPrefix,
@@ -46,7 +46,9 @@ export interface ActivitySession {
 
 /**
  * Synchronous writer. The worker thread and the inline test execution share
- * this; the worker entry is only a message loop.
+ * this; the worker entry is only a message loop. `clock` times the prune
+ * burst. The inline store passes its injected clock; the worker uses
+ * Date.now so the budget is the same clock as the write timeout.
  */
 export function createActivitySession(
 	db: SqliteDatabase,
@@ -54,6 +56,7 @@ export function createActivitySession(
 	limits: ActivityLimits,
 	failNextWrites = 0,
 	throwNextWrites = 0,
+	clock: () => number = Date.now,
 ): ActivitySession {
 	const opened = openActivityDatabase(db)
 	let failures = failNextWrites
@@ -86,18 +89,6 @@ export function createActivitySession(
 		paused = state.walBytes >= limits.walPauseBytes
 	}
 
-	const refreshCaps = (): void => {
-		const observed = readActivityState(db, dbPath)
-		const rowLow = activityLowWater(limits.maxRows)
-		const byteLow = activityLowWater(limits.maxDbBytes)
-		rowCapPruning = rowCapPruning
-			? observed.rows > rowLow
-			: observed.rows > limits.maxRows
-		byteCapPruning = byteCapPruning
-			? observed.dbBytes > byteLow
-			: observed.dbBytes > limits.maxDbBytes
-	}
-
 	return {
 		created: opened.created,
 		snapshot,
@@ -118,22 +109,37 @@ export function createActivitySession(
 				watermark: previous.pruneWatermark,
 				generation: previous.pruneGeneration,
 				changed: false,
+				rowCount: state.rows,
+				dbBytes: state.dbBytes,
 			}
 			let note: string | undefined
 			try {
+				const started = clock()
 				const burst = limits.pruneBurstBatches
 				for (let batch = 0; batch < burst; batch++) {
-					refreshCaps()
+					if (batch > 0 && clock() - started >= limits.pruneBurstMs) break
 					const step = pruneActivityPrefix(db, limits, nowMs, {
 						rowCap: rowCapPruning,
 						byteCap: byteCapPruning,
 					})
+					rowCapPruning = activityCapActive(
+						rowCapPruning,
+						step.rowCount,
+						limits.maxRows,
+					)
+					byteCapPruning = activityCapActive(
+						byteCapPruning,
+						step.dbBytes,
+						limits.maxDbBytes,
+					)
 					if (!step.changed) break
 					prune = {
 						deleted: prune.deleted + step.deleted,
 						watermark: step.watermark,
 						generation: step.generation,
 						changed: true,
+						rowCount: step.rowCount,
+						dbBytes: step.dbBytes,
 					}
 				}
 			} catch (error) {

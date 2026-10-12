@@ -367,6 +367,7 @@ describe("activity retention", () => {
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
 				pruneBatchRows,
 				pruneBurstBatches: 20,
+				pruneBurstMs: 60_000,
 				incrementalVacuumPages: 0,
 			}),
 		)
@@ -411,6 +412,118 @@ describe("activity retention", () => {
 		}
 	})
 
+	it("stops a prune burst when the time budget is spent and continues later", async () => {
+		const maxRows = 1_000
+		const pruneBatchRows = 10
+		const lowWater = activityLowWater(maxRows)
+		let clock = 0
+		const raw = await openSqliteFile(":memory:")
+		const db: SqliteDatabase = {
+			exec(sql) {
+				raw.exec(sql)
+				if (sql === "COMMIT") clock += 300
+			},
+			prepare(sql) {
+				return raw.prepare(sql)
+			},
+			close() {
+				raw.close()
+			},
+		}
+		const session = createActivitySession(
+			db,
+			":memory:",
+			resolveActivityLimits({
+				maxRows,
+				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
+				pruneBatchRows,
+				pruneBurstBatches: 20,
+				pruneBurstMs: 300,
+				incrementalVacuumPages: 0,
+			}),
+			0,
+			0,
+			() => clock,
+		)
+		try {
+			const fill = session.write(
+				Array.from({ length: maxRows }, (_, index) => rowAt(`t-${index}`, NOW)),
+				NOW,
+			)
+			expect(fill.ok).toBe(true)
+			if (!fill.ok) return
+			expect(fill.prune.deleted).toBe(0)
+			const before = fill.snapshot.identity.pruneGeneration
+			const crossing = session.write([rowAt("cross", NOW)], NOW)
+			expect(crossing.ok).toBe(true)
+			if (!crossing.ok) return
+			expect(crossing.prune.deleted).toBe(pruneBatchRows)
+			expect(crossing.prune.generation).toBe(before + 1)
+			expect(crossing.snapshot.rows).toBe(maxRows + 1 - pruneBatchRows)
+			expect(crossing.snapshot.rows).toBeLessThan(maxRows)
+			expect(crossing.snapshot.rows).toBeGreaterThan(lowWater)
+			const next = session.write([rowAt("next", NOW)], NOW)
+			expect(next.ok).toBe(true)
+			if (!next.ok) return
+			expect(next.prune.deleted).toBe(pruneBatchRows)
+			expect(next.snapshot.rows).toBeLessThan(maxRows)
+			expect(next.snapshot.rows).toBeGreaterThan(lowWater)
+		} finally {
+			session.close()
+		}
+	})
+
+	it("keeps pruning under the row cap across writes when the burst is two batches", async () => {
+		const maxRows = 1_000
+		const pruneBatchRows = 10
+		const lowWater = activityLowWater(maxRows)
+		const db = await openSqliteFile(":memory:")
+		const session = createActivitySession(
+			db,
+			":memory:",
+			resolveActivityLimits({
+				maxRows,
+				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
+				pruneBatchRows,
+				pruneBurstBatches: 2,
+				pruneBurstMs: 60_000,
+				incrementalVacuumPages: 0,
+			}),
+		)
+		try {
+			const fill = session.write(
+				Array.from({ length: maxRows }, (_, index) => rowAt(`h-${index}`, NOW)),
+				NOW,
+			)
+			expect(fill.ok).toBe(true)
+			if (!fill.ok) return
+			expect(fill.prune.deleted).toBe(0)
+			const crossing = session.write([rowAt("cross", NOW)], NOW)
+			expect(crossing.ok).toBe(true)
+			if (!crossing.ok) return
+			expect(crossing.prune.deleted).toBe(pruneBatchRows * 2)
+			expect(crossing.snapshot.rows).toBeLessThan(maxRows)
+			expect(crossing.snapshot.rows).toBeGreaterThan(lowWater)
+			let wrote = crossing
+			let reachedLowWater = false
+			for (let step = 0; step < 30 && wrote.prune.deleted > 0; step++) {
+				expect(wrote.snapshot.rows).toBeLessThan(maxRows)
+				expect(wrote.snapshot.rows).toBeGreaterThanOrEqual(lowWater)
+				if (wrote.snapshot.rows === lowWater) reachedLowWater = true
+				const next = session.write([rowAt(`h-next-${step}`, NOW)], NOW)
+				expect(next.ok).toBe(true)
+				if (!next.ok) return
+				wrote = next
+			}
+			expect(reachedLowWater).toBe(true)
+			expect(wrote.prune.deleted).toBe(0)
+			expect(wrote.snapshot.rows).toBeGreaterThan(lowWater)
+			expect(wrote.snapshot.rows).toBeLessThanOrEqual(maxRows)
+		} finally {
+			session.close()
+		}
+	})
+
 	it("prunes the byte cap in one burst down to the live-byte low-water mark", async () => {
 		const maxDbBytes = 512 * 1024
 		const lowWater = activityLowWater(maxDbBytes)
@@ -424,6 +537,7 @@ describe("activity retention", () => {
 				maxAgeMs: 365 * 24 * 60 * 60 * 1000,
 				pruneBatchRows: 4,
 				pruneBurstBatches: 40,
+				pruneBurstMs: 60_000,
 				incrementalVacuumPages: 0,
 			}),
 		)

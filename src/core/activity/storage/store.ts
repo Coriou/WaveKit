@@ -127,6 +127,7 @@ export async function openActivityStore(
 					limits,
 					failNextWrites,
 					throwNextWrites,
+					now,
 				)
 			} catch (error) {
 				try {
