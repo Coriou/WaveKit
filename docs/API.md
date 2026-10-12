@@ -134,10 +134,13 @@ origin policy, with no HEAD wire body. Informational success grants no RF operat
 `GET` and `HEAD /api/access/machine/devices`, `POST /api/access/machine/devices/revoke`,
 and `POST /api/access/machine/devices/revoke-all` are exact machine-bearer routes.
 They use the same Host, Origin and bearer checks as `POST /api/access/pairing-codes`.
-A browser cookie is never sufficient, is ignored when a bearer is also present, and
-is never issued or renewed. CSRF is not required. Missing or invalid bearers return
-401 `AUTH_REQUIRED`. A valid session cookie returns 403 `MACHINE_REQUIRED`. The wrong
-Host or Origin keeps the existing 403. Queries, encoded paths and non-HTTP transports
+A browser cookie is never sufficient and is never issued or renewed. CSRF is not
+required. A cookie request that fails the existing safe-read boundary is denied
+there first (`ORIGIN_FORBIDDEN` when Origin and qualifying `Sec-Fetch-Site` are
+both absent). A session principal that passes that boundary returns 403
+`MACHINE_REQUIRED`. A cookie alongside a valid bearer is ignored. Missing or
+invalid bearers return 401 `AUTH_REQUIRED`. The wrong Host or a present disallowed
+Origin keeps the existing 403. Queries, encoded paths and non-HTTP transports
 return 400.
 
 The list reuses each `AccessDeviceDto` row (`deviceId`, `createdAt`, `renewedAt`,

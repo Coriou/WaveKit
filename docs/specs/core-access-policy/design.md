@@ -451,7 +451,8 @@ current semantics. These routes authenticate like `POST /api/access/pairing-code
 canonical Host, an allowed Origin when one is present, and the machine bearer.
 They never accept a cookie as authority, never renew, and do not require CSRF.
 A cookie alongside the bearer is ignored. Missing and invalid bearers stay
-401 `AUTH_REQUIRED`. A session principal is 403 `MACHINE_REQUIRED`.
+401 `AUTH_REQUIRED`. A cookie request that fails the existing safe-read boundary
+is denied there first. A session principal that passes it is 403 `MACHINE_REQUIRED`.
 
 | Route | Success |
 | --- | --- |
