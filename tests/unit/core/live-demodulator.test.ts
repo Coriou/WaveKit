@@ -395,7 +395,7 @@ describe("LiveDemodulator", () => {
 		processes[0]!.stdout.write(signal)
 		expect(liveDemod.isSquelchOpen()).toBe(true)
 		await liveDemod.reconfigure({ autoMarginDb: 10 })
-		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-70)
+		expect(liveDemod.getStatus().thresholdDbfs).toBeCloseTo(-70, 1)
 		await liveDemod.reconfigure({ squelchMode: "manual", squelch: 0 })
 		expect(liveDemod.getStatus().thresholdDbfs).toBe(0)
 		expect(spawnMock).toHaveBeenCalledTimes(2)
@@ -405,6 +405,60 @@ describe("LiveDemodulator", () => {
 			} as unknown as Partial<LiveDemodConfig>),
 		).rejects.toThrow()
 		await expect(liveDemod.reconfigure({ autoMarginDb: 41 })).rejects.toThrow()
+	})
+
+	async function feedPower(dbfs: number, seconds: number): Promise<void> {
+		const block = Buffer.alloc(250 * 8)
+		for (let i = 0; i < 250; i++) block.writeFloatLE(10 ** (dbfs / 20), i * 8)
+		processes[1]!.stdin.resume()
+		for (let i = 0; i < seconds * 100; i++) {
+			await new Promise<void>(resolve =>
+				processes[0]!.stdout.write(block, () => resolve()),
+			)
+		}
+	}
+
+	it("auto squelch survives a 20 s signal then closes a sustained 20 dB noise step within 60 s of stream time", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto", autoMarginDb: 6 })
+		await feedPower(-80, 1)
+		await feedPower(-60, 20)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		await feedPower(-60, 40)
+		expect(liveDemod.isSquelchOpen()).toBe(false)
+		// Only a scalar floor is retained, regardless of stream duration.
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeGreaterThan(-64)
+	})
+
+	it("keeps level estimation and stream buffers bounded over extended stream time", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		await feedPower(-80, 1)
+		for (let minute = 0; minute < 2; minute++) {
+			await feedPower(-60, 60)
+			expect(typeof liveDemod.getStatus().noiseFloorDbfs).toBe("number")
+			expect(processes[0]!.stdout.readableLength).toBe(0)
+			expect(processes[0]!.stdout.writableLength).toBe(0)
+			expect(processes[1]!.stdin.readableLength).toBe(0)
+			expect(processes[1]!.stdin.writableLength).toBe(0)
+		}
+	})
+
+	it("resets the auto floor on retained-pipeline tuning and mode changes", async () => {
+		await liveDemod.start()
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		await feedPower(-80, 1)
+		sourceManager.emitCaps({ centerFreq: 101_000_000 })
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		await feedPower(-80, 1)
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeCloseTo(-80)
+		await liveDemod.reconfigure({ squelchMode: "manual", squelch: -70 })
+		await feedPower(-60, 60)
+		expect(liveDemod.isSquelchOpen()).toBe(true)
+		expect(liveDemod.getStatus().thresholdDbfs).toBe(-70)
+		await liveDemod.reconfigure({ squelchMode: "auto" })
+		expect(liveDemod.getStatus().noiseFloorDbfs).toBeUndefined()
+		expect(spawnMock).toHaveBeenCalledTimes(2)
 	})
 
 	it("publishes null measurements at 20 Hz until input and clears activity on failure", async () => {

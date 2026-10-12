@@ -239,6 +239,8 @@ export function createWsClient(deps: WsClientDeps): WsClient {
 						})
 						return
 					}
+					// Levels are valid telemetry; the dashboard does not display them yet.
+					if (event.type === "live-audio:level") return
 					if (event.type === "subscribed") {
 						if (open) return // additive acknowledgements do not reopen/resync the socket
 						attempt = 0

@@ -720,6 +720,8 @@ function reduceWs(
 				at,
 				tunerSeen(ev.command, ev.value),
 			)
+		case "live-audio:level":
+			return s
 		case "live-audio:status":
 			return { ...s, audio: laneOk(ev.status, at, "ws") }
 		case "live-audio:config": {

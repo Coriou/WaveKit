@@ -274,6 +274,7 @@ export type WsEvent =
 	| { type: "fanout:snapshot"; snapshot: FanoutSnapshot }
 	| WsBackpressureEvent
 	| WsDrainEvent
+	| { type: "live-audio:level" }
 	| { type: "live-audio:status"; status: LiveAudioStatus }
 	| { type: "live-audio:config"; config: LiveAudioConfig }
 	| { type: "live-audio:started" }

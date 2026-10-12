@@ -1155,3 +1155,12 @@ Protected composition with canonical public mapping now provides explicit `GET|H
 Session-only `GET|HEAD /api/access/devices` returns closed `AccessDevicesDto` rows containing only device ID, creation/renewal/expiry clocks and current marker. This is committed unexpired remembered-session inventory, not online presence. Reads use one authority clock, revalidate the requester and expose no pending mutation, renewal, pruning or private metadata; machine authority remains forbidden. Shared schemas/types are exported by `@wavekit/api-types`; existing CLI contracts are additive and current CLI code does not consume these new endpoints. Both routes use no-store, safe serializers and body-free real-wire HEAD responses.
 
 Browser onboarding/renewal, trusted canonical destination delivery and actual cookie/CORS/TLS/proxy exposure remain separate acceptance gates. No web UI or live receiver change is included. See [API.md](API.md) and the [access checklist](specs/core-access-policy/tasks.md).
+
+
+### 2026-10-12 — live-audio level telemetry
+
+Core publishes `live-audio:level` on the existing `live-audio` WS channel at 10 Hz:
+`{ sourceId, channelPowerDbfs: number|null, noiseFloorDbfs: number|null, squelchOpen, thresholdDbfs }`.
+CLI validates these frames and drops them before store dispatch because it does not
+currently display the levels. Valid frames do not increment `invalidFrames` or
+trigger per-frame state updates; malformed level frames still count as invalid.

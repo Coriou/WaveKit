@@ -339,12 +339,17 @@ Live analog audio exposes measured channel-power levels and gate changes for
 operator activity. `manual` squelch keeps the existing negative dBFS threshold
 (`0` disables gating). `auto` uses a constant-memory lower-envelope estimate of
 the same pre-demodulation channel power plus `autoMarginDb` (0–40 dB, default 6).
-The estimate follows lower power immediately and rises slowly while the gate is
-closed; it is not a measured receiver noise calibration. A signal already present
+The estimate follows lower power immediately and rises by at most 1 dB/s while
+closed or 0.4 dB/s while open, using 10 ms blocks of stream time. The slower open
+rise keeps a signal 20 dB above a stable floor open for at least 20 s, while a
+sustained 20 dB noise step closes within 60 s with the default 6 dB margin. Long
+continuous signals can eventually be absorbed into the estimate. Pipeline rebuilds,
+source capability changes (including retained-pipeline retunes), and squelch mode
+changes reset the floor. It is not a measured receiver noise calibration. A signal already present
 when auto mode starts can be included in its initial floor estimate. `noise`
 squelch is not offered because there is no discriminator-noise measurement here.
 Threshold, mode and margin updates keep the running CSDR processes and streams.
-Level publication defaults to 10 Hz, with a bounded 10–20 Hz runtime option; before
+Levels are published at 10 Hz; before
 the first complete IQ block its power/floor values are null. Gate changes are
 reported immediately, and stopped/failed pipelines report inactive audio. Levels are
 published on the `live-audio` WebSocket channel as `live-audio:level`; `squelchMode`

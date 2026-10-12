@@ -146,6 +146,11 @@ interface PipelineRun {
 	failed: boolean
 }
 
+// Each measurement advances one 10 ms block of stream time.
+const LEVEL_BLOCK_SECONDS = 0.01
+const AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND = 1
+const AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND = 0.4
+
 /** Config keys that only affect Node-side behaviour (no CSDR restart). */
 const NODE_ONLY_KEYS = new Set<keyof LiveDemodConfig>([
 	"enabled",
@@ -336,6 +341,8 @@ export class LiveDemodulator extends EventEmitter {
 		}
 
 		this.config = validated
+		if (this.run && validated.squelchMode !== previous.squelchMode)
+			this.run.noiseFloorDbfs = null
 		if (this.run) this.applySquelchThreshold(this.run)
 		this.publishSquelchChange()
 
@@ -435,12 +442,19 @@ export class LiveDemodulator extends EventEmitter {
 		if (this.run !== run || run.stopping) return
 		const power = run.squelch.powerDbfs
 		if (power !== null) {
-			// Constant-memory lower envelope: follow falls immediately; rise 1 dB/s
-			// of stream time only while closed, so a call does not raise its floor.
+			// Constant-memory lower envelope: falls are immediate; a slower open
+			// rise preserves calls but eventually recovers from sustained noise steps.
 			if (run.noiseFloorDbfs === null || power < run.noiseFloorDbfs)
 				run.noiseFloorDbfs = power
-			else if (!run.squelch.open)
-				run.noiseFloorDbfs = Math.min(power, run.noiseFloorDbfs + 0.01)
+			else {
+				const riseRate = run.squelch.open
+					? AUTO_FLOOR_OPEN_RISE_DB_PER_SECOND
+					: AUTO_FLOOR_CLOSED_RISE_DB_PER_SECOND
+				run.noiseFloorDbfs = Math.min(
+					power,
+					run.noiseFloorDbfs + riseRate * LEVEL_BLOCK_SECONDS,
+				)
+			}
 		}
 		this.applySquelchThreshold(run)
 		this.publishSquelchChange()
@@ -570,6 +584,8 @@ export class LiveDemodulator extends EventEmitter {
 
 		this.capsChangedHandler = (sourceId: string, caps: SourceCaps) => {
 			if (sourceId !== this.activeSourceId) return
+			// Retunes can retain the DSP pipeline but invalidate its floor estimate.
+			if (this.run) this.run.noiseFloorDbfs = null
 			if (!this.capsNeedRestart(caps)) {
 				this.log.debug(
 					{ sourceId, centerFreq: caps.centerFreq },
