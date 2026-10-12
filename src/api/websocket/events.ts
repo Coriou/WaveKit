@@ -12,6 +12,11 @@
 import type { FastifyAccessController } from "../../access/fastify-adapter.js"
 import type { FastifyInstance } from "fastify"
 import type { WebSocket } from "ws"
+import type {
+	ActivityClientTransport,
+	ActivitySubscriptionHub,
+	ActivityWireMessage,
+} from "../activity-subscriptions.js"
 import type { Logger } from "../../utils/logger.js"
 import { createComponentLogger } from "../../utils/logger.js"
 import type { DecoderOutput } from "../../decoders/types.js"
@@ -232,6 +237,12 @@ function parseClientMessage(data: unknown): ClientMessage | null {
 	}
 }
 
+function isActivityClientMessage(data: unknown): boolean {
+	if (typeof data !== "object" || data === null) return false
+	const type = (data as { type?: unknown }).type
+	return type === "activity:subscribe" || type === "activity:unsubscribe"
+}
+
 /**
  * WebSocketEventBroadcaster - Manages WebSocket connections and broadcasts events.
  *
@@ -250,9 +261,18 @@ export class WebSocketEventBroadcaster {
 	private readonly observers = new Map<WebSocketChannel, ChannelObserver>()
 	private operatorDataEnabled = false
 	private subscriptionAdmissionStopped = false
+	private activityHub: ActivitySubscriptionHub | undefined
 
 	constructor(logger: Logger) {
 		this.log = createComponentLogger(logger, "WebSocketBroadcaster")
+	}
+
+	/**
+	 * Activity frames use their own queue. The transport key is the client id.
+	 * Outbound messages bypass the replaceable-telemetry queue.
+	 */
+	attachActivity(hub: ActivitySubscriptionHub): void {
+		this.activityHub = hub
 	}
 
 	/**
@@ -302,6 +322,13 @@ export class WebSocketEventBroadcaster {
 			this.handleMessage(clientState, data)
 		})
 
+		// ws does not always emit drain; maintainClients also resumes.
+		socket.on("drain", () => {
+			if (this.clients.get(clientId) !== clientState) return
+			if ((socket.bufferedAmount ?? 0) !== 0) return
+			this.activityHub?.resume(clientId)
+		})
+
 		// Handle client disconnect
 		socket.on("close", (code: number, reason: Buffer) => {
 			this.handleDisconnect(clientState, code, reason)
@@ -329,6 +356,10 @@ export class WebSocketEventBroadcaster {
 			const rawData = typeof data === "string" ? data : data.toString("utf-8")
 
 			const parsed = JSON.parse(rawData) as unknown
+			if (isActivityClientMessage(parsed)) {
+				this.handleActivityMessage(client, parsed)
+				return
+			}
 			const message = parseClientMessage(parsed)
 
 			if (!message) {
@@ -350,6 +381,55 @@ export class WebSocketEventBroadcaster {
 				type: "error",
 				data: { message: "Invalid JSON" },
 			})
+		}
+	}
+
+	/**
+	 * Activity subscribe/unsubscribe never fall through to "Invalid message format".
+	 * Frames go straight to the socket, not the telemetry queue.
+	 */
+	private handleActivityMessage(client: ClientState, parsed: unknown): void {
+		if (!this.activityHub) {
+			this.sendActivity(client, {
+				type: "error",
+				channel: "activity",
+				data: {
+					code: "ACTIVITY_DISABLED",
+					message: "Activity is disabled",
+				},
+			})
+			return
+		}
+		this.activityHub.handleMessage(this.activityTransport(client), parsed)
+	}
+
+	private activityTransport(client: ClientState): ActivityClientTransport {
+		return {
+			key: client.id,
+			send: message => this.sendActivity(client, message),
+			close: (code, reason) => {
+				try {
+					client.socket.close(code, reason)
+				} catch {
+					// The socket may already be closed.
+				}
+			},
+		}
+	}
+
+	/** Direct send. False means the message was not accepted and stays queued. */
+	private sendActivity(
+		client: ClientState,
+		message: ActivityWireMessage,
+	): boolean {
+		if (!this.currentClient(client) || client.socket.readyState !== 1)
+			return false
+		if ((client.socket.bufferedAmount ?? 0) !== 0) return false
+		try {
+			client.socket.send(JSON.stringify(message))
+			return true
+		} catch {
+			return false
 		}
 	}
 
@@ -429,6 +509,11 @@ export class WebSocketEventBroadcaster {
 		// A late close after terminateClient or closeAll is a no-op (finding 7).
 		if (!this.clients.has(client.id)) return
 		this.clients.delete(client.id)
+		try {
+			this.activityHub?.detach(client.id)
+		} catch (err) {
+			this.log.error({ err, clientId: client.id }, "Activity detach failed")
+		}
 		const state = this.delivery.get(client)
 		if (state) {
 			state.queue = []
@@ -530,6 +615,8 @@ export class WebSocketEventBroadcaster {
 			}
 			const state = this.getDelivery(client)
 			this.flushClient(client, state)
+			if ((client.socket.bufferedAmount ?? 0) === 0)
+				this.activityHub?.resume(client.id)
 			if (
 				!this.clients.has(client.id) ||
 				Date.now() - state.lastPing < HEARTBEAT_INTERVAL_MS
@@ -1086,6 +1173,11 @@ export class WebSocketEventBroadcaster {
 	 * Closes all client connections.
 	 */
 	closeAll(): void {
+		try {
+			this.activityHub?.close()
+		} catch (err) {
+			this.log.error({ err }, "Activity subscriptions close failed")
+		}
 		const clients = [...this.clients.values()]
 		for (const client of clients) this.handleDisconnect(client)
 		for (const client of clients) {

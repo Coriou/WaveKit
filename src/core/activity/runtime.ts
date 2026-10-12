@@ -1,0 +1,303 @@
+/**
+ * Activity lifecycle for the process entry. Disabled mode constructs nothing
+ * and does not load the store. node:sqlite stays behind the storage probe's
+ * dynamic import.
+ */
+import type { ActivityPublisher } from "../../decoders/manager.js"
+import { createComponentLogger, type Logger } from "../../utils/logger.js"
+import type { ActivityQueryService } from "./storage/contract.js"
+import type { ActivityStoreStats } from "./storage/contract.js"
+import type { ActivityLimits } from "./storage/limits.js"
+
+export type ActivityFailureCode =
+	| "ACTIVITY_UNAVAILABLE"
+	| "ACTIVITY_STORE_LOCKED"
+	| "ACTIVITY_SCHEMA_MISMATCH"
+
+export interface ActivityUnavailableState {
+	reason: ActivityFailureCode
+	message: string
+}
+
+export interface ActivityRetentionOverrides {
+	maxRows?: number | undefined
+	maxDbBytes?: number | undefined
+	maxAgeMs?: number | undefined
+}
+
+export interface ActivityAdmissionOverrides {
+	globalPerSecond?: number | undefined
+	globalBurst?: number | undefined
+	perDecoderPerSecond?: number | undefined
+	perDecoderBurst?: number | undefined
+}
+
+export interface ActivityRuntime {
+	readonly status: "disabled" | "unavailable" | "ready"
+	readonly service: ActivityQueryService
+	readonly unavailable?: ActivityUnavailableState
+	stats(): ActivityStoreStats
+	bindSubscriptions(hub: { close(): void }): void
+	close(): Promise<void>
+}
+
+export interface StartActivityRuntimeOptions {
+	enabled: boolean
+	stateDir: string
+	logger: Logger
+	retention?: ActivityRetentionOverrides
+	admission?: ActivityAdmissionOverrides
+	setPublisher: (publish: ActivityPublisher | null) => void
+	/**
+	 * Store limit overrides merged after retention and admission. Production
+	 * leaves this unset; tests use it to flush on admit.
+	 */
+	limits?: Partial<ActivityLimits>
+	/** Store execution. Production uses the default worker thread. */
+	execution?: "thread" | "inline"
+	workerUrl?: URL
+	/** Query execution. Production uses the default reader worker. */
+	queryExecution?: "worker" | "inline"
+	queryWorkerUrl?: URL
+	/** Replaces the capability probe. A failure writes no state file. */
+	probe?: () => Promise<{ ok: true } | { ok: false; reason: string }>
+	/** When false, failure logs carry the code only. */
+	discloseErrors?: boolean
+}
+
+/** Service that routes never call while Activity is disabled or unavailable. */
+export function inertActivityService(): ActivityQueryService {
+	const fail = (): never => {
+		throw new Error("Activity service is not available")
+	}
+	return {
+		search: async () => fail(),
+		detail: async () => fail(),
+		facets: async () => fail(),
+		replay: () => fail(),
+		close: async () => {},
+	}
+}
+
+function mapLimits(
+	retention: ActivityRetentionOverrides | undefined,
+	admission: ActivityAdmissionOverrides | undefined,
+): Partial<ActivityLimits> | undefined {
+	const limits: Partial<ActivityLimits> = {}
+	if (retention?.maxRows !== undefined) limits.maxRows = retention.maxRows
+	if (retention?.maxDbBytes !== undefined)
+		limits.maxDbBytes = retention.maxDbBytes
+	if (retention?.maxAgeMs !== undefined) limits.maxAgeMs = retention.maxAgeMs
+	if (admission?.globalPerSecond !== undefined)
+		limits.globalRatePerSec = admission.globalPerSecond
+	if (admission?.globalBurst !== undefined)
+		limits.globalBurst = admission.globalBurst
+	if (admission?.perDecoderPerSecond !== undefined)
+		limits.decoderRatePerSec = admission.perDecoderPerSecond
+	if (admission?.perDecoderBurst !== undefined)
+		limits.decoderBurst = admission.perDecoderBurst
+	return Object.keys(limits).length > 0 ? limits : undefined
+}
+
+interface RuntimeParts {
+	status: ActivityRuntime["status"]
+	service: ActivityQueryService
+	unavailable?: ActivityUnavailableState
+	stats: () => ActivityStoreStats
+	closeSteps: Array<() => Promise<void> | void>
+}
+
+function assemble(
+	options: StartActivityRuntimeOptions,
+	parts: RuntimeParts,
+): ActivityRuntime {
+	const log = createComponentLogger(options.logger, "Activity")
+	const disclose = options.discloseErrors !== false
+	let subscriptions: { close(): void } | undefined
+	let closed = false
+
+	function note(step: string, err: unknown): void {
+		try {
+			log.error(
+				disclose ? { err, step } : { step, code: "ACTIVITY_CLOSE_FAILED" },
+				"Activity shutdown step failed",
+			)
+		} catch {
+			// Shutdown must not throw.
+		}
+	}
+
+	const runtime: ActivityRuntime = {
+		status: parts.status,
+		service: parts.service,
+		stats: parts.stats,
+		...(parts.unavailable ? { unavailable: parts.unavailable } : {}),
+		bindSubscriptions(hub) {
+			subscriptions = hub
+			if (!closed) return
+			try {
+				hub.close()
+			} catch (err) {
+				note("subscriptions", err)
+			}
+		},
+		async close() {
+			if (closed) return
+			closed = true
+			const steps: Array<() => Promise<void> | void> = [
+				() => {
+					options.setPublisher(null)
+				},
+				() => {
+					subscriptions?.close()
+				},
+				...parts.closeSteps,
+			]
+			for (const step of steps) {
+				try {
+					await step()
+				} catch (err) {
+					note("close", err)
+				}
+			}
+		},
+	}
+	return runtime
+}
+
+function unavailableRuntime(
+	options: StartActivityRuntimeOptions,
+	unavailable: ActivityUnavailableState,
+): ActivityRuntime {
+	const log = createComponentLogger(options.logger, "Activity")
+	const disclose = options.discloseErrors !== false
+	try {
+		log.error(
+			disclose
+				? { code: unavailable.reason, err: unavailable.message }
+				: { code: unavailable.reason },
+			"Activity is unavailable; WaveKit continues without it",
+		)
+	} catch {
+		// A failing logger must not take the process down.
+	}
+	return assemble(options, {
+		status: "unavailable",
+		service: inertActivityService(),
+		unavailable,
+		stats: () => {
+			throw new Error("Activity store is not open")
+		},
+		closeSteps: [],
+	})
+}
+
+/**
+ * Opens the store, query service and ingress when Activity is enabled.
+ * Probe and open failures leave the process running with Activity unavailable.
+ */
+export async function startActivityRuntime(
+	options: StartActivityRuntimeOptions,
+): Promise<ActivityRuntime> {
+	if (!options.enabled) {
+		return assemble(options, {
+			status: "disabled",
+			service: inertActivityService(),
+			stats: () => {
+				throw new Error("Activity store is not open")
+			},
+			closeSteps: [],
+		})
+	}
+
+	const log = createComponentLogger(options.logger, "Activity")
+	try {
+		const storage = await import("./storage/index.js")
+		const query = await import("./query/index.js")
+		const ingressMod = await import("./ingress.js")
+		const probed = await (options.probe ?? storage.probeActivityRuntime)()
+		if (!probed.ok) {
+			return unavailableRuntime(options, {
+				reason: "ACTIVITY_UNAVAILABLE",
+				message: probed.reason,
+			})
+		}
+		const mapped = mapLimits(options.retention, options.admission)
+		const limits =
+			mapped || options.limits ? { ...mapped, ...options.limits } : undefined
+		const store = await storage.openActivityStore({
+			stateDir: options.stateDir,
+			logger: options.logger,
+			...(limits ? { limits } : {}),
+			...(options.execution ? { execution: options.execution } : {}),
+			...(options.workerUrl ? { workerUrl: options.workerUrl } : {}),
+			...(options.probe ? { probe: options.probe } : {}),
+		})
+		let service: ActivityQueryService
+		try {
+			service = query.createActivityQueryService({
+				store,
+				logger: options.logger,
+				...(options.queryExecution
+					? { execution: options.queryExecution }
+					: {}),
+				...(options.queryWorkerUrl
+					? { workerUrl: options.queryWorkerUrl }
+					: {}),
+			})
+		} catch (error) {
+			await store.close().catch(() => undefined)
+			throw error
+		}
+		const ingress = ingressMod.createActivityIngress({
+			sink: envelope => {
+				store.admit(envelope)
+			},
+			logger: options.logger,
+		})
+		try {
+			options.setPublisher((decoderId, decoderType, output) => {
+				ingress.publish(decoderId, decoderType, output)
+			})
+		} catch (error) {
+			try {
+				options.setPublisher(null)
+			} catch {
+				// The open error is reported below.
+			}
+			await service.close().catch(() => undefined)
+			await store.close().catch(() => undefined)
+			throw error
+		}
+		try {
+			log.info({ stateDir: options.stateDir }, "Activity store open")
+		} catch {
+			// Startup logging is not required for the store to run.
+		}
+		return assemble(options, {
+			status: "ready",
+			service,
+			stats: () => store.stats(),
+			closeSteps: [() => service.close(), () => store.close()],
+		})
+	} catch (error) {
+		let reason: ActivityFailureCode = "ACTIVITY_UNAVAILABLE"
+		let message = error instanceof Error ? error.message : String(error)
+		try {
+			const storage = await import("./storage/index.js")
+			if (error instanceof storage.ActivityStoreLockedError) {
+				reason = "ACTIVITY_STORE_LOCKED"
+				message = error.message
+			} else if (error instanceof storage.ActivitySchemaMismatchError) {
+				reason = "ACTIVITY_SCHEMA_MISMATCH"
+				message = error.message
+			} else if (error instanceof storage.ActivityUnavailableError) {
+				reason = "ACTIVITY_UNAVAILABLE"
+				message = error.message
+			}
+		} catch {
+			// Classification is best-effort; the process still stays up.
+		}
+		return unavailableRuntime(options, { reason, message })
+	}
+}

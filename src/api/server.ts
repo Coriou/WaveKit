@@ -35,6 +35,15 @@ import type { TunerController } from "../core/tuner-controller.js"
 import type { LiveDemodulator } from "../core/live-demodulator.js"
 import type { DigitalVoiceService } from "../core/digital-voice.js"
 import { WaveKitError } from "../utils/errors.js"
+import { ActivityQueryError } from "../core/activity/query/errors.js"
+import {
+	inertActivityService,
+	type ActivityRuntime,
+	type ActivityUnavailableState,
+} from "../core/activity/runtime.js"
+import { activityRoutes } from "./routes/activity.js"
+import { createActivitySubscriptions } from "./activity-subscriptions.js"
+import type { ActivitySubscriptionHub } from "./activity-subscriptions.js"
 import { healthRoutes } from "./routes/health.js"
 import { accessBootstrapRoutes } from "./routes/access-bootstrap.js"
 import { sourceRoutes } from "./routes/sources.js"
@@ -119,6 +128,8 @@ export interface ApiServerDependencies {
 	spectrum?: SpectrumService | undefined
 	logger: Logger
 	audioConfig?: AudioConfig | undefined
+	/** Omitted means Activity is disabled: routes 404 and the socket says so. */
+	activity?: ActivityRuntime
 }
 
 /**
@@ -175,6 +186,11 @@ export class ApiServer {
 	private scannerLimiter: WsLimiter<ServerMessage> | null = null
 	private scannerWiring: { dispose(): void } | null = null
 	private spectrumWiring: { dispose(): void } | null = null
+	private readonly activityRuntime: ActivityRuntime | undefined
+	private readonly activityService: ActivityRuntime["service"]
+	private readonly activityReady: boolean
+	private readonly activityUnavailable: ActivityUnavailableState | undefined
+	private readonly activityHub: ActivitySubscriptionHub
 
 	constructor(dependencies: ApiServerDependencies, config: ApiServerConfig) {
 		this.station = dependencies.station
@@ -208,6 +224,20 @@ export class ApiServer {
 
 		// Create WebSocket broadcaster
 		this.wsBroadcaster = new WebSocketEventBroadcaster(dependencies.logger)
+		const activity = dependencies.activity
+		const activityUnavailable =
+			activity?.status === "unavailable" ? activity.unavailable : undefined
+		this.activityRuntime = activity
+		this.activityService = activity?.service ?? inertActivityService()
+		this.activityReady = activity?.status === "ready"
+		this.activityUnavailable = activityUnavailable
+		this.activityHub = createActivitySubscriptions({
+			service: this.activityService,
+			enabled: this.activityReady,
+			...(activityUnavailable ? { unavailable: true } : {}),
+		})
+		this.wsBroadcaster.attachActivity(this.activityHub)
+		activity?.bindSubscriptions(this.activityHub)
 		this.sourceStatusPublisher = new SourceStatusPublisher({
 			sourceManager: this.sourceManager,
 			fanoutTelemetry: this.fanoutTelemetry,
@@ -869,12 +899,18 @@ export class ApiServer {
 				"Request error",
 			)
 
-			// Handle WaveKit-specific errors
+			// Handle WaveKit-specific errors. Activity query errors carry their
+			// own status (409/410/429/500/503); other WaveKit errors stay 400.
 			if (error instanceof WaveKitError) {
-				return reply.status(400).send({
+				const status =
+					error instanceof ActivityQueryError ? error.statusCode : 400
+				const reason =
+					error instanceof ActivityQueryError ? error.reason : undefined
+				return reply.status(status).send({
 					error: error.name,
 					code: error.code,
 					message: this.access ? "Request failed" : error.message,
+					...(reason !== undefined ? { reason } : {}),
 					correlationId,
 				})
 			}
@@ -1119,6 +1155,18 @@ export class ApiServer {
 				authorizeMetadataMutation: request =>
 					this.accessController!.authorizeMetadataMutation(request),
 			})
+
+		const activityRuntime = this.activityRuntime
+		await this.app.register(activityRoutes, {
+			service: this.activityService,
+			enabled: this.activityReady,
+			...(this.activityUnavailable
+				? { unavailable: this.activityUnavailable }
+				: {}),
+			...(this.activityReady && activityRuntime
+				? { stats: () => activityRuntime.stats() }
+				: {}),
+		})
 
 		// Register WebSocket route (Requirement 10.1, 10.2, 10.3, 10.4, 10.5)
 		this.wsBroadcaster.registerRoute(this.app, this.accessController)

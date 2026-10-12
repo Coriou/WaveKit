@@ -14,6 +14,7 @@ import {
 } from "../../../src/api/server.js"
 import { createLogger } from "../../../src/utils/logger.js"
 import { WaveKitError } from "../../../src/utils/errors.js"
+import { ActivityQueryBusyError } from "../../../src/core/activity/query/errors.js"
 import { EventEmitter } from "node:events"
 
 // Create a test logger
@@ -522,6 +523,17 @@ describe("API Server", () => {
 	})
 
 	describe("Error Handling", () => {
+		it("registers activity routes that answer ACTIVITY_DISABLED by default", async () => {
+			await apiServer.start()
+			const response = await apiServer.getApp().inject({
+				method: "GET",
+				url: "/api/activity",
+			})
+			expect(response.statusCode).toBe(404)
+			const body = JSON.parse(response.body) as { code: string }
+			expect(body.code).toBe("ACTIVITY_DISABLED")
+		})
+
 		it("should return 404 for unknown routes", async () => {
 			await apiServer.start()
 
@@ -578,6 +590,44 @@ describe("API Server", () => {
 				expect(body.error).toBe("WaveKitError")
 				expect(body.code).toBe("TEST_ERROR_CODE")
 				expect(body.message).toBe("Test error message")
+			} finally {
+				await testServer.stop()
+			}
+		})
+
+		it("keeps an Activity query error status instead of rewriting it to 400", async () => {
+			const testDependencies: ApiServerDependencies = {
+				sourceManager:
+					mockSourceManager as unknown as ApiServerDependencies["sourceManager"],
+				fanoutManager:
+					mockFanoutManager as unknown as ApiServerDependencies["fanoutManager"],
+				decoderManager:
+					mockDecoderManager as unknown as ApiServerDependencies["decoderManager"],
+				audioOutput:
+					mockAudioOutput as unknown as ApiServerDependencies["audioOutput"],
+				logger: testLogger,
+			}
+			const testServer = new ApiServer(testDependencies, {
+				host: "127.0.0.1",
+				port: 0,
+			})
+			const app = testServer.getApp()
+			app.get("/test-activity-busy", async () => {
+				throw new ActivityQueryBusyError()
+			})
+			await testServer.start()
+			try {
+				const response = await app.inject({
+					method: "GET",
+					url: "/test-activity-busy",
+				})
+				expect(response.statusCode).toBe(429)
+				const body = JSON.parse(response.body) as {
+					code: string
+					error: string
+				}
+				expect(body.code).toBe("ACTIVITY_QUERY_BUSY")
+				expect(body.error).toBe("ActivityQueryBusyError")
 			} finally {
 				await testServer.stop()
 			}

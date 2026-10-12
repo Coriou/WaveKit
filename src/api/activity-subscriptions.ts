@@ -100,7 +100,9 @@ function resolveLimits(
 ): ActivitySubscriptionLimits {
 	const limits = { ...DEFAULT_LIMITS }
 	if (!overrides) return limits
-	for (const key of Object.keys(overrides) as (keyof ActivitySubscriptionLimits)[]) {
+	for (const key of Object.keys(
+		overrides,
+	) as (keyof ActivitySubscriptionLimits)[]) {
 		const value = overrides[key]
 		if (value !== undefined) limits[key] = value
 	}
@@ -125,7 +127,10 @@ function parseRaw(raw: unknown): unknown {
 	return raw
 }
 
-function frameMessage(id: string, frame: ActivityReplayFrame): ActivityWireMessage {
+function frameMessage(
+	id: string,
+	frame: ActivityReplayFrame,
+): ActivityWireMessage {
 	if (frame.type === "records") {
 		return {
 			type: "activity:records",
@@ -155,6 +160,8 @@ function frameMessage(id: string, frame: ActivityReplayFrame): ActivityWireMessa
 export function createActivitySubscriptions(options: {
 	service: ActivityQueryService
 	enabled: boolean
+	/** Operator enabled Activity, but the store did not open. */
+	unavailable?: boolean
 	limits?: Partial<ActivitySubscriptionLimits>
 }): ActivitySubscriptionHub {
 	const limits = resolveLimits(options.limits)
@@ -246,10 +253,16 @@ export function createActivitySubscriptions(options: {
 		}
 	}
 
-	function enqueue(slot: Slot, message: ActivityWireMessage): "queued" | "pause" | "closed" {
+	function enqueue(
+		slot: Slot,
+		message: ActivityWireMessage,
+	): "queued" | "pause" | "closed" {
 		if (slot.closing) return "closed"
 		const bytes = Buffer.byteLength(JSON.stringify(message))
-		if (slot.queue.length >= limits.maxMessages || slot.queuedBytes + bytes > limits.maxBytes) {
+		if (
+			slot.queue.length >= limits.maxMessages ||
+			slot.queuedBytes + bytes > limits.maxBytes
+		) {
 			overflow(slot)
 			return "closed"
 		}
@@ -268,7 +281,10 @@ export function createActivitySubscriptions(options: {
 		id?: string,
 	): void {
 		const slot = slotFor(transport)
-		const data: { code: string; message: string; id?: string } = { code, message }
+		const data: { code: string; message: string; id?: string } = {
+			code,
+			message,
+		}
 		if (id !== undefined) data.id = id
 		enqueue(slot, { type: "error", channel: "activity", data })
 	}
@@ -276,17 +292,35 @@ export function createActivitySubscriptions(options: {
 	function subscribe(transport: ActivityClientTransport, raw: unknown): void {
 		const parsed = subscribeSchema.safeParse(raw)
 		if (!parsed.success) {
-			sendError(transport, "ACTIVITY_QUERY_INVALID", "Invalid activity subscribe message")
+			sendError(
+				transport,
+				"ACTIVITY_QUERY_INVALID",
+				"Invalid activity subscribe message",
+			)
 			return
 		}
 		const { id, cursor } = parsed.data
+		if (options.unavailable) {
+			sendError(
+				transport,
+				"ACTIVITY_UNAVAILABLE",
+				"Activity is unavailable",
+				id,
+			)
+			return
+		}
 		if (!options.enabled) {
 			sendError(transport, "ACTIVITY_DISABLED", "Activity is disabled", id)
 			return
 		}
 		const slot = slotFor(transport)
 		if (slot.subs.has(id)) {
-			sendError(transport, "ACTIVITY_QUERY_INVALID", "Activity subscription id already exists", id)
+			sendError(
+				transport,
+				"ACTIVITY_QUERY_INVALID",
+				"Activity subscription id already exists",
+				id,
+			)
 			return
 		}
 		if (slot.subs.size >= limits.perClient) {
@@ -349,8 +383,11 @@ export function createActivitySubscriptions(options: {
 		} catch (error) {
 			release()
 			const code =
-				error instanceof ActivityQueryError ? error.code : "ACTIVITY_QUERY_INVALID"
-			const message = error instanceof Error ? error.message : "Invalid activity query"
+				error instanceof ActivityQueryError
+					? error.code
+					: "ACTIVITY_QUERY_INVALID"
+			const message =
+				error instanceof Error ? error.message : "Invalid activity query"
 			sendError(transport, code, message, id)
 			return
 		}
@@ -365,13 +402,40 @@ export function createActivitySubscriptions(options: {
 	function unsubscribe(transport: ActivityClientTransport, raw: unknown): void {
 		const parsed = unsubscribeSchema.safeParse(raw)
 		if (!parsed.success) {
-			sendError(transport, "ACTIVITY_QUERY_INVALID", "Invalid activity unsubscribe message")
+			sendError(
+				transport,
+				"ACTIVITY_QUERY_INVALID",
+				"Invalid activity unsubscribe message",
+			)
+			return
+		}
+		if (options.unavailable) {
+			sendError(
+				transport,
+				"ACTIVITY_UNAVAILABLE",
+				"Activity is unavailable",
+				parsed.data.id,
+			)
+			return
+		}
+		if (!options.enabled) {
+			sendError(
+				transport,
+				"ACTIVITY_DISABLED",
+				"Activity is disabled",
+				parsed.data.id,
+			)
 			return
 		}
 		const slot = slots.get(transport.key)
 		const sub = slot?.subs.get(parsed.data.id)
 		if (!slot || !sub) {
-			sendError(transport, "ACTIVITY_QUERY_INVALID", "Unknown activity subscription", parsed.data.id)
+			sendError(
+				transport,
+				"ACTIVITY_QUERY_INVALID",
+				"Unknown activity subscription",
+				parsed.data.id,
+			)
 			return
 		}
 		sub.handle.stop()
@@ -386,8 +450,16 @@ export function createActivitySubscriptions(options: {
 	return {
 		handleMessage(transport, raw): void {
 			const message = parseRaw(raw)
-			if (typeof message !== "object" || message === null || !("type" in message)) {
-				sendError(transport, "ACTIVITY_QUERY_INVALID", "Invalid activity message")
+			if (
+				typeof message !== "object" ||
+				message === null ||
+				!("type" in message)
+			) {
+				sendError(
+					transport,
+					"ACTIVITY_QUERY_INVALID",
+					"Invalid activity message",
+				)
 				return
 			}
 			const type = (message as { type?: unknown }).type

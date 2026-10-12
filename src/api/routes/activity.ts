@@ -16,6 +16,7 @@ import type {
 } from "../../core/activity/storage/contract.js"
 import { ActivityQueryError } from "../../core/activity/query/errors.js"
 import { withActivityClient } from "../../core/activity/query/service.js"
+import type { ActivityUnavailableState } from "../../core/activity/runtime.js"
 import { errorResponseSchema, looseObjectSchema } from "./scanner-schemas.js"
 
 export interface ActivityRoutesOptions {
@@ -23,6 +24,11 @@ export interface ActivityRoutesOptions {
 	enabled: boolean
 	/** Required for a useful status payload. Omitted when Activity has no store. */
 	stats?: () => ActivityStoreStats | Promise<ActivityStoreStats>
+	/**
+	 * Set when the operator enabled Activity but the store did not open.
+	 * Routes answer 503 ACTIVITY_UNAVAILABLE and do not call the service.
+	 */
+	unavailable?: ActivityUnavailableState
 }
 
 const REF_TYPES = new Set<ActivityRefType>([
@@ -53,7 +59,8 @@ const SEARCH_PARAMS = new Set([
 ])
 
 function correlationOf(request: FastifyRequest): string | undefined {
-	const value = (request as FastifyRequest & { correlationId?: string }).correlationId
+	const value = (request as FastifyRequest & { correlationId?: string })
+		.correlationId
 	return typeof value === "string" ? value : undefined
 }
 
@@ -88,6 +95,28 @@ function disabled(reply: FastifyReply): FastifyReply {
 	})
 }
 
+function unavailable(
+	reply: FastifyReply,
+	state: ActivityUnavailableState,
+): FastifyReply {
+	return reply.code(503).send({
+		error: "ServiceUnavailable",
+		code: "ACTIVITY_UNAVAILABLE",
+		reason: state.reason,
+		message: state.message,
+	})
+}
+
+/** Disabled and unavailable answers. Undefined means the handler may proceed. */
+function blocked(
+	options: ActivityRoutesOptions,
+	reply: FastifyReply,
+): FastifyReply | undefined {
+	if (options.unavailable) return unavailable(reply, options.unavailable)
+	if (!options.enabled) return disabled(reply)
+	return undefined
+}
+
 /** Stable per caller. `x-activity-client` wins; otherwise the request IP. */
 export function activityClientKey(request: FastifyRequest): string {
 	const header = request.headers["x-activity-client"]
@@ -109,7 +138,11 @@ function asStrings(value: unknown): string[] {
 		for (const entry of value) parts.push(...asStrings(entry))
 		return parts
 	}
-	throw new ActivityQueryError("Query parameter must be a string", "ACTIVITY_QUERY_INVALID", 400)
+	throw new ActivityQueryError(
+		"Query parameter must be a string",
+		"ACTIVITY_QUERY_INVALID",
+		400,
+	)
 }
 
 function queryFromParams(params: Record<string, unknown>): ActivityQuery {
@@ -142,8 +175,10 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 	const frequencyMax = params["frequencyMax"]
 	if (frequencyMin !== undefined || frequencyMax !== undefined) {
 		const frequency: { min?: number; max?: number } = {}
-		if (frequencyMin !== undefined) frequency.min = numberParam(frequencyMin, "frequencyMin")
-		if (frequencyMax !== undefined) frequency.max = numberParam(frequencyMax, "frequencyMax")
+		if (frequencyMin !== undefined)
+			frequency.min = numberParam(frequencyMin, "frequencyMin")
+		if (frequencyMax !== undefined)
+			frequency.max = numberParam(frequencyMax, "frequencyMax")
 		query.frequencyHz = frequency
 	}
 	const producedFrom = params["producedFrom"]
@@ -152,25 +187,42 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 		const produced: { from?: string; to?: string } = {}
 		if (producedFrom !== undefined) {
 			if (typeof producedFrom !== "string") {
-				throw new ActivityQueryError("producedFrom must be a string", "ACTIVITY_QUERY_INVALID", 400)
+				throw new ActivityQueryError(
+					"producedFrom must be a string",
+					"ACTIVITY_QUERY_INVALID",
+					400,
+				)
 			}
 			produced.from = producedFrom
 		}
 		if (producedTo !== undefined) {
 			if (typeof producedTo !== "string") {
-				throw new ActivityQueryError("producedTo must be a string", "ACTIVITY_QUERY_INVALID", 400)
+				throw new ActivityQueryError(
+					"producedTo must be a string",
+					"ACTIVITY_QUERY_INVALID",
+					400,
+				)
 			}
 			produced.to = producedTo
 		}
 		query.producedAt = produced
 	}
-	if (typeof params["entityKey"] === "string") query.entityKey = params["entityKey"]
+	if (typeof params["entityKey"] === "string")
+		query.entityKey = params["entityKey"]
 	else if (params["entityKey"] !== undefined) {
-		throw new ActivityQueryError("entityKey must be a string", "ACTIVITY_QUERY_INVALID", 400)
+		throw new ActivityQueryError(
+			"entityKey must be a string",
+			"ACTIVITY_QUERY_INVALID",
+			400,
+		)
 	}
 	if (typeof params["text"] === "string") query.text = params["text"]
 	else if (params["text"] !== undefined) {
-		throw new ActivityQueryError("text must be a string", "ACTIVITY_QUERY_INVALID", 400)
+		throw new ActivityQueryError(
+			"text must be a string",
+			"ACTIVITY_QUERY_INVALID",
+			400,
+		)
 	}
 	if (params["refs"] !== undefined) {
 		const refs: { type: ActivityRefType; value: string }[] = []
@@ -178,7 +230,11 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 			const colon = entry.indexOf(":")
 			const type = entry.slice(0, colon)
 			const value = entry.slice(colon + 1)
-			if (colon <= 0 || !REF_TYPES.has(type as ActivityRefType) || value.length === 0) {
+			if (
+				colon <= 0 ||
+				!REF_TYPES.has(type as ActivityRefType) ||
+				value.length === 0
+			) {
 				throw new ActivityQueryError(
 					"refs entries must be type:value",
 					"ACTIVITY_QUERY_INVALID",
@@ -193,9 +249,18 @@ function queryFromParams(params: Record<string, unknown>): ActivityQuery {
 }
 
 function numberParam(value: unknown, name: string): number {
-	const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN
+	const parsed =
+		typeof value === "number"
+			? value
+			: typeof value === "string"
+				? Number(value)
+				: Number.NaN
 	if (!Number.isFinite(parsed)) {
-		throw new ActivityQueryError(`${name} must be a number`, "ACTIVITY_QUERY_INVALID", 400)
+		throw new ActivityQueryError(
+			`${name} must be a number`,
+			"ACTIVITY_QUERY_INVALID",
+			400,
+		)
 	}
 	return parsed
 }
@@ -204,20 +269,32 @@ function searchRequest(params: Record<string, unknown>): ActivitySearchRequest {
 	const request: ActivitySearchRequest = { query: queryFromParams(params) }
 	if (params["order"] !== undefined) {
 		if (params["order"] !== "asc" && params["order"] !== "desc") {
-			throw new ActivityQueryError("order must be asc or desc", "ACTIVITY_QUERY_INVALID", 400)
+			throw new ActivityQueryError(
+				"order must be asc or desc",
+				"ACTIVITY_QUERY_INVALID",
+				400,
+			)
 		}
 		request.order = params["order"]
 	}
 	if (params["limit"] !== undefined) {
 		const limit = numberParam(params["limit"], "limit")
 		if (!Number.isSafeInteger(limit)) {
-			throw new ActivityQueryError("limit must be an integer", "ACTIVITY_QUERY_INVALID", 400)
+			throw new ActivityQueryError(
+				"limit must be an integer",
+				"ACTIVITY_QUERY_INVALID",
+				400,
+			)
 		}
 		request.limit = limit
 	}
 	if (params["pageToken"] !== undefined) {
 		if (typeof params["pageToken"] !== "string") {
-			throw new ActivityQueryError("pageToken must be a string", "ACTIVITY_QUERY_INVALID", 400)
+			throw new ActivityQueryError(
+				"pageToken must be a string",
+				"ACTIVITY_QUERY_INVALID",
+				400,
+			)
 		}
 		request.pageToken = params["pageToken"]
 	}
@@ -229,7 +306,7 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 	options,
 ) => {
 	const tags = ["activity"]
-	const disabledReply = { 404: errorResponseSchema }
+	const disabledReply = { 404: errorResponseSchema, 503: errorResponseSchema }
 
 	fastify.get(
 		"/api/activity",
@@ -238,11 +315,19 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 				tags,
 				summary: "Search activity summaries inside a snapshot",
 				querystring: { type: "object", additionalProperties: true },
-				response: { 200: looseObjectSchema, ...disabledReply, 400: errorResponseSchema, 409: errorResponseSchema, 410: errorResponseSchema, 429: errorResponseSchema },
+				response: {
+					200: looseObjectSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					409: errorResponseSchema,
+					410: errorResponseSchema,
+					429: errorResponseSchema,
+				},
 			},
 		},
 		async (request, reply) => {
-			if (!options.enabled) return disabled(reply)
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
 			try {
 				const params = request.query as Record<string, unknown>
 				return await withActivityClient(activityClientKey(request), () =>
@@ -264,7 +349,8 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 			},
 		},
 		async (_request, reply) => {
-			if (!options.enabled) return disabled(reply)
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
 			if (!options.stats) {
 				return reply.code(500).send({
 					error: "InternalServerError",
@@ -283,11 +369,18 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 				tags,
 				summary: "Bounded facet counts for an activity query",
 				body: { type: "object", additionalProperties: true },
-				response: { 200: looseObjectSchema, ...disabledReply, 400: errorResponseSchema, 409: errorResponseSchema, 429: errorResponseSchema },
+				response: {
+					200: looseObjectSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					409: errorResponseSchema,
+					429: errorResponseSchema,
+				},
 			},
 		},
 		async (request, reply) => {
-			if (!options.enabled) return disabled(reply)
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
 			try {
 				const body = request.body as { query?: unknown; dimensions?: unknown }
 				return await withActivityClient(activityClientKey(request), () =>
@@ -313,14 +406,21 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 					properties: { eventId: { type: "string" } },
 					required: ["eventId"],
 				},
-				response: { 200: looseObjectSchema, ...disabledReply, 400: errorResponseSchema, 404: errorResponseSchema },
+				response: {
+					200: looseObjectSchema,
+					...disabledReply,
+					400: errorResponseSchema,
+					404: errorResponseSchema,
+				},
 			},
 		},
 		async (request, reply) => {
-			if (!options.enabled) return disabled(reply)
+			const blockedReply = blocked(options, reply)
+			if (blockedReply) return blockedReply
 			try {
-				const record = await withActivityClient(activityClientKey(request), () =>
-					options.service.detail(request.params.eventId),
+				const record = await withActivityClient(
+					activityClientKey(request),
+					() => options.service.detail(request.params.eventId),
 				)
 				if (!record) {
 					return reply.code(404).send({
@@ -337,4 +437,6 @@ export const activityRoutes: FastifyPluginAsync<ActivityRoutesOptions> = async (
 	)
 }
 
-type ActivityFacetDimensions = Parameters<ActivityQueryService["facets"]>[0]["dimensions"]
+type ActivityFacetDimensions = Parameters<
+	ActivityQueryService["facets"]
+>[0]["dimensions"]

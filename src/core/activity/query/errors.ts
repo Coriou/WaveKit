@@ -10,8 +10,9 @@ export type ActivityCursorReason =
 	| "snapshot-reset"
 
 /**
- * Query-lane failure. Routes map `statusCode` themselves: the process error
- * handler turns every WaveKitError into HTTP 400, which is wrong for 409/410/429.
+ * Query-lane failure. Routes map `statusCode` themselves. The process error
+ * handler also honours `statusCode` on this class, so a throw that escapes
+ * the plugin keeps 409, 410, 429 and 503.
  */
 export class ActivityQueryError extends WaveKitError {
 	readonly statusCode: number
@@ -56,19 +57,14 @@ export class ActivityCursorInvalidError extends ActivityQueryError {
 }
 
 export class ActivityCursorGapError extends ActivityQueryError {
-	constructor(
-		message = "Activity cursor is behind the prune watermark",
-	) {
+	constructor(message = "Activity cursor is behind the prune watermark") {
 		super(message, "ACTIVITY_CURSOR_GAP", 410, "cursor-gap")
 	}
 }
 
 export class ActivitySnapshotResetError extends ActivityQueryError {
 	constructor(
-		reason: Exclude<
-			ActivityCursorReason,
-			"invalid-cursor" | "cursor-gap"
-		>,
+		reason: Exclude<ActivityCursorReason, "invalid-cursor" | "cursor-gap">,
 		message: string,
 	) {
 		super(message, "ACTIVITY_SNAPSHOT_RESET", 409, reason)

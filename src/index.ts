@@ -71,6 +71,7 @@ import { createDecoderManagerOptions } from "./decoders/manager-options.js"
 import { resolveProcessBandRegion } from "./decoders/band-region.js"
 import { BandOverrideStore } from "./decoders/band-override-store.js"
 import { ApiServer } from "./api/server.js"
+import { startActivityRuntime } from "./core/activity/runtime.js"
 import { OperatorDataService } from "./operator-data/service.js"
 import { createOperatorDataCommitSink } from "./operator-data/broadcast-adapter.js"
 import {
@@ -1090,10 +1091,31 @@ async function main(): Promise<void> {
 		// Own immediately, including a constructor failure before runtimeApi exists.
 		own(15, disposeReceiverAfterApi)
 
+		// Activity is off unless config.activity.enabled. A failed probe or open
+		// logs and leaves the rest of WaveKit running.
+		const activity = await startActivityRuntime({
+			enabled: config.activity.enabled,
+			stateDir: config.stateDir,
+			logger,
+			setPublisher: publish => {
+				decoderManager.setActivityPublisher(publish)
+			},
+			discloseErrors: !protectedMode,
+			...(config.activity.retention
+				? { retention: config.activity.retention }
+				: {}),
+			...(config.activity.admission
+				? { admission: config.activity.admission }
+				: {}),
+		})
+		checkpoint()
+		own(8, () => activity.close())
+
 		// Step 9: Initialize API server
 		const apiServer = new ApiServer(
 			{
 				...(access ? { access } : {}),
+				activity,
 				station: stationIdentity(config, bandRegion.code),
 				regionalRegistry,
 				receiverCapabilitiesProvider,
@@ -1285,6 +1307,17 @@ async function main(): Promise<void> {
 			handler: async () => {
 				log.info("Shutting down API server")
 				await apiServer.stop()
+			},
+			timeout: 5000,
+		})
+
+		// Runs before the API server stops (LIFO): publisher, subscriptions,
+		// query service, then the store. Step errors are logged, not thrown.
+		shutdown.register({
+			name: "activity",
+			handler: async () => {
+				log.info("Shutting down activity")
+				await activity.close()
 			},
 			timeout: 5000,
 		})
