@@ -4,6 +4,7 @@
  * dynamic import.
  */
 import type { ActivityPublisher } from "../../decoders/manager.js"
+import { WaveKitError } from "../../utils/errors.js"
 import { createComponentLogger, type Logger } from "../../utils/logger.js"
 import type { ActivityQueryService } from "./storage/contract.js"
 import type { ActivityStoreStats } from "./storage/contract.js"
@@ -17,6 +18,8 @@ export type ActivityFailureCode =
 export interface ActivityUnavailableState {
 	reason: ActivityFailureCode
 	message: string
+	/** When false, routes replace `message` and still return `reason`. */
+	discloseErrors?: boolean
 }
 
 export interface ActivityRetentionOverrides {
@@ -36,6 +39,8 @@ export interface ActivityRuntime {
 	readonly status: "disabled" | "unavailable" | "ready"
 	readonly service: ActivityQueryService
 	readonly unavailable?: ActivityUnavailableState
+	/** False in protected mode: HTTP 503 messages stay generic. */
+	readonly discloseErrors: boolean
 	stats(): ActivityStoreStats
 	bindSubscriptions(hub: { close(): void }): void
 	close(): Promise<void>
@@ -68,7 +73,10 @@ export interface StartActivityRuntimeOptions {
 /** Service that routes never call while Activity is disabled or unavailable. */
 export function inertActivityService(): ActivityQueryService {
 	const fail = (): never => {
-		throw new Error("Activity service is not available")
+		throw new WaveKitError(
+			"Activity service is not available",
+			"ACTIVITY_UNAVAILABLE",
+		)
 	}
 	return {
 		search: async () => fail(),
@@ -76,6 +84,22 @@ export function inertActivityService(): ActivityQueryService {
 		facets: async () => fail(),
 		replay: () => fail(),
 		close: async () => {},
+	}
+}
+
+function closedStats(): never {
+	throw new WaveKitError("Activity store is not open", "ACTIVITY_UNAVAILABLE")
+}
+
+function failureState(
+	options: StartActivityRuntimeOptions,
+	reason: ActivityFailureCode,
+	message: string,
+): ActivityUnavailableState {
+	return {
+		reason,
+		message,
+		discloseErrors: options.discloseErrors !== false,
 	}
 }
 
@@ -130,6 +154,7 @@ function assemble(
 	const runtime: ActivityRuntime = {
 		status: parts.status,
 		service: parts.service,
+		discloseErrors: options.discloseErrors !== false,
 		stats: parts.stats,
 		...(parts.unavailable ? { unavailable: parts.unavailable } : {}),
 		bindSubscriptions(hub) {
@@ -185,9 +210,7 @@ function unavailableRuntime(
 		status: "unavailable",
 		service: inertActivityService(),
 		unavailable,
-		stats: () => {
-			throw new Error("Activity store is not open")
-		},
+		stats: closedStats,
 		closeSteps: [],
 	})
 }
@@ -203,9 +226,7 @@ export async function startActivityRuntime(
 		return assemble(options, {
 			status: "disabled",
 			service: inertActivityService(),
-			stats: () => {
-				throw new Error("Activity store is not open")
-			},
+			stats: closedStats,
 			closeSteps: [],
 		})
 	}
@@ -217,10 +238,10 @@ export async function startActivityRuntime(
 		const ingressMod = await import("./ingress.js")
 		const probed = await (options.probe ?? storage.probeActivityRuntime)()
 		if (!probed.ok) {
-			return unavailableRuntime(options, {
-				reason: "ACTIVITY_UNAVAILABLE",
-				message: probed.reason,
-			})
+			return unavailableRuntime(
+				options,
+				failureState(options, "ACTIVITY_UNAVAILABLE", probed.reason),
+			)
 		}
 		const mapped = mapLimits(options.retention, options.admission)
 		const limits =
@@ -298,6 +319,6 @@ export async function startActivityRuntime(
 		} catch {
 			// Classification is best-effort; the process still stays up.
 		}
-		return unavailableRuntime(options, { reason, message })
+		return unavailableRuntime(options, failureState(options, reason, message))
 	}
 }

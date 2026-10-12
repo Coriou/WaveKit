@@ -22,6 +22,7 @@ import type {
 	DecoderStatus,
 } from "../../../src/decoders/types.js"
 import pino from "pino"
+import { WaveKitError } from "../../../src/utils/errors.js"
 
 const logger = pino({ level: "silent" })
 
@@ -282,7 +283,12 @@ describe("activity foundation", () => {
 		})
 		runtimes.push(runtime)
 		expect(runtime.status).toBe("disabled")
+		expect(runtime.discloseErrors).toBe(true)
 		expect(existsSync(join(stateDir, "activity"))).toBe(false)
+		await expect(runtime.service.detail("evt")).rejects.toBeInstanceOf(
+			WaveKitError,
+		)
+		expect(() => runtime.stats()).toThrow(WaveKitError)
 		const app = Fastify({ logger: false })
 		await app.register(activityRoutes, {
 			service: runtime.service,
@@ -342,7 +348,46 @@ describe("activity foundation", () => {
 		expect(response.json()).toMatchObject({
 			code: "ACTIVITY_UNAVAILABLE",
 			reason: "ACTIVITY_UNAVAILABLE",
+			message: "fts5 missing",
 		})
+		await app.close()
+	})
+
+	it("masks the unavailable message when discloseErrors is false", async () => {
+		const stateDir = await tempDir()
+		const runtime = await startActivityRuntime({
+			enabled: true,
+			stateDir,
+			logger,
+			discloseErrors: false,
+			probe: async () => ({
+				ok: false,
+				reason: "EACCES '/data/activity/activity.db'",
+			}),
+			setPublisher: () => {
+				throw new Error("publisher should not be set")
+			},
+		})
+		runtimes.push(runtime)
+		expect(runtime.discloseErrors).toBe(false)
+		expect(runtime.unavailable?.message).toContain("activity.db")
+		const app = Fastify({ logger: false })
+		await app.register(activityRoutes, {
+			service: runtime.service,
+			enabled: true,
+			...(runtime.unavailable ? { unavailable: runtime.unavailable } : {}),
+		})
+		const response = await app.inject({
+			method: "GET",
+			url: "/api/activity",
+		})
+		expect(response.statusCode).toBe(503)
+		expect(response.json()).toMatchObject({
+			code: "ACTIVITY_UNAVAILABLE",
+			reason: "ACTIVITY_UNAVAILABLE",
+			message: "Request failed",
+		})
+		expect(response.body).not.toContain("activity.db")
 		await app.close()
 	})
 
