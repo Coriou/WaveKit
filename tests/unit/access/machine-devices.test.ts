@@ -130,9 +130,9 @@ describe("machine-credential device administration", () => {
 			expect(JSON.stringify(result)).not.toContain(ready.created.cookieValue)
 			expect(JSON.stringify(result)).not.toContain(ready.created.csrfToken)
 			expect(JSON.stringify(ready.flows)).toBe("{}")
-			expect(ready.sessions.lookupByPrincipal(ready.created.principalId)?.expiresAt).toBe(
-				before,
-			)
+			expect(
+				ready.sessions.lookupByPrincipal(ready.created.principalId)?.expiresAt,
+			).toBe(before)
 		})
 	})
 
@@ -199,7 +199,10 @@ describe("machine-credential device administration", () => {
 				}),
 				{ deviceId: env.created.principalId },
 			),
-		).resolves.toMatchObject({ status: 403, body: { code: "ORIGIN_FORBIDDEN" } })
+		).resolves.toMatchObject({
+			status: 403,
+			body: { code: "ORIGIN_FORBIDDEN" },
+		})
 		expect(env.persist).not.toHaveBeenCalled()
 	})
 
@@ -223,7 +226,9 @@ describe("machine-credential device administration", () => {
 		expect("cookie" in revoked).toBe(false)
 		expect(closed).toHaveBeenCalledOnce()
 		expect(kept).not.toHaveBeenCalled()
-		expect(env.sessions.lookupByPrincipal(env.created.principalId)).toBeUndefined()
+		expect(
+			env.sessions.lookupByPrincipal(env.created.principalId),
+		).toBeUndefined()
 		expect(env.sessions.lookupByPrincipal(other.principalId)?.principalId).toBe(
 			other.principalId,
 		)
@@ -321,9 +326,7 @@ describe("machine-credential device administration", () => {
 			{ deviceId: env.created.principalId },
 		)
 		expect(revoke).not.toHaveBeenCalled()
-		expect(
-			env.flows.machineDevices(env.machine()),
-		).toMatchObject({
+		expect(env.flows.machineDevices(env.machine())).toMatchObject({
 			body: {
 				devices: [
 					expect.objectContaining({
@@ -337,7 +340,9 @@ describe("machine-credential device administration", () => {
 		await refresh
 		await pending
 		expect(revoke).toHaveBeenCalledOnce()
-		expect(env.sessions.lookupByPrincipal(env.created.principalId)).toBeUndefined()
+		expect(
+			env.sessions.lookupByPrincipal(env.created.principalId),
+		).toBeUndefined()
 	})
 
 	it("rate-limits machine attempts like pairing redemption and ignores cookie denials", async () => {
@@ -386,7 +391,9 @@ describe("machine-credential device administration", () => {
 			),
 		).toMatchObject({ status: 400 })
 		expect(env.persist).not.toHaveBeenCalled()
-		expect(env.sessions.lookupByPrincipal(env.created.principalId)).toBeDefined()
+		expect(
+			env.sessions.lookupByPrincipal(env.created.principalId),
+		).toBeDefined()
 	})
 
 	it("rejects an unknown device without closing other leases", async () => {
@@ -460,9 +467,13 @@ describe("machine device projection", () => {
 		const remembered = env.sessions.snapshotRememberedDevices()
 		const projected = projectMachineAccessDevices(remembered)
 		expect(projected.devices).toEqual(remembered)
-		expect(
-			Object.keys(projected.devices[0] ?? {}).sort(),
-		).toEqual(["createdAt", "current", "deviceId", "expiresAt", "renewedAt"])
+		expect(Object.keys(projected.devices[0] ?? {}).sort()).toEqual([
+			"createdAt",
+			"current",
+			"deviceId",
+			"expiresAt",
+			"renewedAt",
+		])
 		expect(() =>
 			projectMachineAccessDevices([
 				{ ...remembered[0], csrfToken: env.created.csrfToken },

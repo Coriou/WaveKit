@@ -272,7 +272,10 @@ describe("machine device HTTP routes", () => {
 		const denied = await wire(env.app, {
 			method: "HEAD",
 			url: "/api/access/machine/devices",
-			headers: { host: "evil.lan:9000", authorization: env.machine.authorization },
+			headers: {
+				host: "evil.lan:9000",
+				authorization: env.machine.authorization,
+			},
 		})
 		expect(denied.statusCode).toBe(403)
 		expect(denied.body).toBe("")

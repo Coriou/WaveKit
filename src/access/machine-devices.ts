@@ -5,11 +5,7 @@ import {
 } from "@wavekit/api-types"
 import { z } from "zod"
 import { WaveKitError } from "../utils/errors.js"
-import {
-	admissionDenial,
-	flowDenial,
-	flowSuccess,
-} from "./cookies.js"
+import { admissionDenial, flowDenial, flowSuccess } from "./cookies.js"
 import type { AccessFlowResult } from "./cookies.js"
 import type { AccessPolicy } from "./policy.js"
 import type { SessionStore } from "./sessions.js"
@@ -69,7 +65,9 @@ export const machineAccessDevicesDtoSchema = z
 		}
 	})
 
-export type MachineAccessDevicesDto = z.infer<typeof machineAccessDevicesDtoSchema>
+export type MachineAccessDevicesDto = z.infer<
+	typeof machineAccessDevicesDtoSchema
+>
 
 /** Explicit projection: private session records never escape. */
 export function projectMachineAccessDevices(

@@ -72,7 +72,9 @@ function drop<T>(list: T[], item: T): void {
 
 async function reservePort(): Promise<number> {
 	const probe = createNetServer()
-	await new Promise<void>(resolve => probe.listen(0, "127.0.0.1", () => resolve()))
+	await new Promise<void>(resolve =>
+		probe.listen(0, "127.0.0.1", () => resolve()),
+	)
 	const address = probe.address()
 	await new Promise<void>(resolve => probe.close(() => resolve()))
 	if (!address || typeof address === "string") throw new Error("Missing port")
@@ -357,7 +359,11 @@ async function signIn(env: Stack, client: BrowserClient) {
 		webSocketUrl: `${env.apiOrigin.replace(/^http/, "ws")}/ws`,
 		analogAudioOrigin: env.analogOrigin,
 		digitalAudioOrigin: env.digitalOrigin,
-		access: { mode: "protected", sessionAvailable: true, pairingAvailable: true },
+		access: {
+			mode: "protected",
+			sessionAvailable: true,
+			pairingAvailable: true,
+		},
 	})
 	const anonymous = await client.fetch(`${env.apiOrigin}/api/access/session`)
 	expect(anonymous.status).toBe(401)
@@ -399,7 +405,10 @@ async function expectSocketClosed(
 async function expectStreamClosed(stream: BrowserByteStream): Promise<void> {
 	let timer: ReturnType<typeof setTimeout> | undefined
 	const timeout = new Promise<void>((_resolve, reject) => {
-		timer = setTimeout(() => reject(new Error("audio stream stayed open")), 1500)
+		timer = setTimeout(
+			() => reject(new Error("audio stream stayed open")),
+			1500,
+		)
 	})
 	try {
 		await Promise.race([stream.closed, timeout])
@@ -426,7 +435,11 @@ describe("browser cookie jar", () => {
 					requestPort: fc.constantFrom(9000, 9001),
 					secure: fc.boolean(),
 					httpOnly: fc.boolean(),
-					sameSite: fc.constantFrom("strict" as const, "lax" as const, "none" as const),
+					sameSite: fc.constantFrom(
+						"strict" as const,
+						"lax" as const,
+						"none" as const,
+					),
 					crossSite: fc.boolean(),
 					https: fc.boolean(),
 					topLevelGet: fc.boolean(),
@@ -490,7 +503,8 @@ describe("browser client preflight", () => {
 			const headers: Record<string, string> = {
 				"Access-Control-Allow-Origin": typeof origin === "string" ? origin : "",
 				"Access-Control-Allow-Credentials": "true",
-				"Access-Control-Allow-Methods": "GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
+				"Access-Control-Allow-Methods":
+					"GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS",
 				"Access-Control-Allow-Headers": "content-type, x-wavekit-csrf",
 				Vary: "Origin",
 			}
@@ -499,10 +513,15 @@ describe("browser client preflight", () => {
 				response.end()
 				return
 			}
-			response.writeHead(200, { ...headers, "Content-Type": "application/json" })
+			response.writeHead(200, {
+				...headers,
+				"Content-Type": "application/json",
+			})
 			response.end("{}")
 		})
-		await new Promise<void>(resolve => server.listen(0, "127.0.0.1", () => resolve()))
+		await new Promise<void>(resolve =>
+			server.listen(0, "127.0.0.1", () => resolve()),
+		)
 		const address = server.address()
 		if (!address || typeof address === "string") throw new Error("Missing port")
 		try {
@@ -516,7 +535,10 @@ describe("browser client preflight", () => {
 			})
 			same.csrf = "csrf-token"
 			hits.length = 0
-			const direct = await same.fetch(url, { method: "POST", json: { ok: true } })
+			const direct = await same.fetch(url, {
+				method: "POST",
+				json: { ok: true },
+			})
 			expect(direct.status).toBe(200)
 			expect(direct.preflight).toBeUndefined()
 			expect(hits).toEqual(["POST"])
@@ -665,8 +687,12 @@ describe("browser lifecycle against the assembled access server", () => {
 			const next = sessionSchema.parse(renewed.json())
 			expect(next.deviceId).toBe(body.deviceId)
 			expect(next.csrfToken).toBe(body.csrfToken)
-			expect(next.expiresAt).toBeGreaterThanOrEqual(body.expiresAt + 29 * DAY - 1000)
-			expect(next.expiresAt).toBeLessThanOrEqual(body.expiresAt + 29 * DAY + 5000)
+			expect(next.expiresAt).toBeGreaterThanOrEqual(
+				body.expiresAt + 29 * DAY - 1000,
+			)
+			expect(next.expiresAt).toBeLessThanOrEqual(
+				body.expiresAt + 29 * DAY + 5000,
+			)
 			const devices = accessDevicesDtoSchema.parse(
 				(await client.fetch(`${env.apiOrigin}/api/access/devices`)).json(),
 			)
@@ -700,7 +726,7 @@ describe("browser lifecycle against the assembled access server", () => {
 		const socket = await client.openSocket(bootstrap.webSocketUrl)
 		expect(socket.opened).toBe(true)
 		socket.send(JSON.stringify({ type: "subscribe", channels: ["status"] }))
-		socket.send("{\"type\":\"ping\"}")
+		socket.send('{"type":"ping"}')
 		await delay(400)
 		const after = accessDevicesDtoSchema.parse(
 			(await client.fetch(`${env.apiOrigin}/api/access/devices`)).json(),
@@ -798,7 +824,12 @@ describe("browser lifecycle against the assembled access server", () => {
 		const env = await setup()
 		const client = env.browser()
 		const { bootstrap, body } = await signIn(env, client)
-		const secrets = [env.token, env.privateDirectory, cookieValue(client), body.csrfToken]
+		const secrets = [
+			env.token,
+			env.privateDirectory,
+			cookieValue(client),
+			body.csrfToken,
+		]
 		const socket = await client.openSocket(bootstrap.webSocketUrl)
 		expect(socket.opened).toBe(true)
 		const analog = await client.openStream(`${env.analogOrigin}/stream.wav`)
@@ -812,7 +843,11 @@ describe("browser lifecycle against the assembled access server", () => {
 		expect(digital.headers["access-control-allow-origin"]).toBe(env.apiOrigin)
 		expect(analog.body.startsWith("RIFF")).toBe(true)
 		expect(digital.body.startsWith("RIFF")).toBe(true)
-		expect(client.requests.map(entry => entry.method).filter(method => method === "OPTIONS")).toEqual([])
+		expect(
+			client.requests
+				.map(entry => entry.method)
+				.filter(method => method === "OPTIONS"),
+		).toEqual([])
 
 		const deniedOrigin = await client.fetch(
 			`${env.apiOrigin}/api/access/session`,
@@ -821,9 +856,12 @@ describe("browser lifecycle against the assembled access server", () => {
 		expect(deniedOrigin.status).toBe(403)
 		expect(deniedOrigin.json()).toEqual({ code: "ORIGIN_FORBIDDEN" })
 		assertNoPrivate(deniedOrigin, secrets)
-		const deniedHost = await client.fetch(`${env.apiOrigin}/api/access/session`, {
-			hostHeader: "evil.example:9000",
-		})
+		const deniedHost = await client.fetch(
+			`${env.apiOrigin}/api/access/session`,
+			{
+				hostHeader: "evil.example:9000",
+			},
+		)
 		expect(deniedHost.status).toBe(403)
 		expect(deniedHost.json()).toEqual({ code: "HOST_FORBIDDEN" })
 		assertNoPrivate(deniedHost, secrets)
@@ -837,9 +875,12 @@ describe("browser lifecycle against the assembled access server", () => {
 		})
 		expect(deniedSocketHost.opened).toBe(false)
 		expect(deniedSocketHost.status).toBe(403)
-		const deniedAudio = await client.openStream(`${env.analogOrigin}/stream.wav`, {
-			origin: "http://evil.example",
-		})
+		const deniedAudio = await client.openStream(
+			`${env.analogOrigin}/stream.wav`,
+			{
+				origin: "http://evil.example",
+			},
+		)
 		expect(deniedAudio.status).toBe(403)
 		expect(deniedAudio.body).toContain("ORIGIN_FORBIDDEN")
 		const deniedAudioHost = await client.openStream(
@@ -872,9 +913,12 @@ describe("browser lifecycle against the assembled access server", () => {
 			return { socket, analog, digital }
 		}
 		const first = await openTransports()
-		const logout = await client.fetch(`${env.apiOrigin}/api/access/session/logout`, {
-			method: "POST",
-		})
+		const logout = await client.fetch(
+			`${env.apiOrigin}/api/access/session/logout`,
+			{
+				method: "POST",
+			},
+		)
 		expect(logout.status).toBe(200)
 		expect(logout.json()).toEqual({ revoked: true })
 		await expectSocketClosed(first.socket, 1008)
@@ -887,10 +931,13 @@ describe("browser lifecycle against the assembled access server", () => {
 
 		const revoked = await signIn(env, client)
 		const second = await openTransports()
-		const revoke = await client.fetch(`${env.apiOrigin}/api/access/devices/revoke`, {
-			method: "POST",
-			json: { deviceId: revoked.body.deviceId },
-		})
+		const revoke = await client.fetch(
+			`${env.apiOrigin}/api/access/devices/revoke`,
+			{
+				method: "POST",
+				json: { deviceId: revoked.body.deviceId },
+			},
+		)
 		expect(revoke.status).toBe(200)
 		expect(revoke.json()).toEqual({ revoked: true })
 		await expectSocketClosed(second.socket, 1008)
@@ -926,7 +973,11 @@ describe("browser lifecycle against the assembled access server", () => {
 			)
 			expect(failed.status).toBe(503)
 			expect(failed.json()).toEqual({ code: "ACCESS_UNAVAILABLE" })
-			assertNoPrivate(failed, [env.token, env.privateDirectory, cookieValue(client)])
+			assertNoPrivate(failed, [
+				env.token,
+				env.privateDirectory,
+				cookieValue(client),
+			])
 			await expectSocketClosed(socket, 1008)
 			await expectStreamClosed(analog)
 			const later = await client.fetch(`${env.apiOrigin}/api/access/session`)

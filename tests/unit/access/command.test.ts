@@ -419,10 +419,11 @@ describe("machine device command", () => {
 				},
 			],
 		}
-		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
-			async () =>
-				new Response(JSON.stringify(inventory), { status: 200 }),
-		)
+		const fetch = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				async () => new Response(JSON.stringify(inventory), { status: 200 }),
+			)
 		const table = await runAccessCommand([
 			"devices",
 			"list",
@@ -464,10 +465,12 @@ describe("machine device command", () => {
 
 	it("revokes one device and refuses revoke-all without --yes", async () => {
 		await runAccessCommand(setup())
-		const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(
-			async () =>
-				new Response(JSON.stringify({ revoked: true }), { status: 200 }),
-		)
+		const fetch = vi
+			.spyOn(globalThis, "fetch")
+			.mockImplementation(
+				async () =>
+					new Response(JSON.stringify({ revoked: true }), { status: 200 }),
+			)
 		const unconfirmed = await runAccessCommand([
 			"devices",
 			"revoke-all",

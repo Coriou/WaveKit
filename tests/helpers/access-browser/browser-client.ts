@@ -135,16 +135,25 @@ function allowsFollowUp(
 	requested: readonly string[],
 ): boolean {
 	if (preflight.status < 200 || preflight.status >= 300) return false
-	if (headerOne(preflight.headers, "access-control-allow-origin") !== requestOrigin)
+	if (
+		headerOne(preflight.headers, "access-control-allow-origin") !==
+		requestOrigin
+	)
 		return false
-	if (headerOne(preflight.headers, "access-control-allow-credentials") !== "true")
+	if (
+		headerOne(preflight.headers, "access-control-allow-credentials") !== "true"
+	)
 		return false
-	const methods = (headerOne(preflight.headers, "access-control-allow-methods") ?? "")
+	const methods = (
+		headerOne(preflight.headers, "access-control-allow-methods") ?? ""
+	)
 		.split(",")
 		.map(value => value.trim().toUpperCase())
 	if (!methods.includes(method.toUpperCase())) return false
 	if (requested.length === 0) return true
-	const allowed = (headerOne(preflight.headers, "access-control-allow-headers") ?? "")
+	const allowed = (
+		headerOne(preflight.headers, "access-control-allow-headers") ?? ""
+	)
 		.split(",")
 		.map(value => value.trim().toLowerCase())
 	return requested.every(name => allowed.includes(name))
@@ -254,7 +263,9 @@ export class BrowserClient {
 	}
 
 	fetch(url: string, init: BrowserFetchInit = {}): Promise<BrowserExchange> {
-		const method = (init.method ?? (init.json === undefined ? "GET" : "POST")).toUpperCase()
+		const method = (
+			init.method ?? (init.json === undefined ? "GET" : "POST")
+		).toUpperCase()
 		const target = new URL(url)
 		const page = new URL(init.origin ?? this.documentOrigin)
 		const sameOrigin = page.origin === target.origin
@@ -274,7 +285,9 @@ export class BrowserClient {
 		const send = async (): Promise<BrowserExchange> => {
 			let preflight: BrowserExchange["preflight"]
 			if (!sameOrigin && needsPreflight(method, pageHeaders)) {
-				const requested = Object.keys(pageHeaders).map(name => name.toLowerCase())
+				const requested = Object.keys(pageHeaders).map(name =>
+					name.toLowerCase(),
+				)
 				const probeHeaders: Record<string, string> = {
 					"Access-Control-Request-Method": method,
 				}
@@ -365,10 +378,13 @@ export class BrowserClient {
 				resolve(status)
 			}
 			socket.once("open", () => succeed(101))
-			socket.once("unexpected-response", (_request, response: IncomingMessage) => {
-				response.resume()
-				succeed(response.statusCode ?? 0)
-			})
+			socket.once(
+				"unexpected-response",
+				(_request, response: IncomingMessage) => {
+					response.resume()
+					succeed(response.statusCode ?? 0)
+				},
+			)
 			socket.once("error", () => setImmediate(() => succeed(0)))
 		})
 		handshake = opened
@@ -385,7 +401,10 @@ export class BrowserClient {
 		}
 	}
 
-	openStream(url: string, init: BrowserFetchInit = {}): Promise<BrowserByteStream> {
+	openStream(
+		url: string,
+		init: BrowserFetchInit = {},
+	): Promise<BrowserByteStream> {
 		const target = new URL(url)
 		const page = new URL(init.origin ?? this.documentOrigin)
 		const binding = bindingFor(target, this.#bindings)
@@ -466,7 +485,8 @@ export class BrowserClient {
 			...pageHeaders,
 		}
 		if (cookieHeader !== undefined) headers["Cookie"] = cookieHeader
-		if (body !== undefined) headers["Content-Length"] = String(Buffer.byteLength(body))
+		if (body !== undefined)
+			headers["Content-Length"] = String(Buffer.byteLength(body))
 		this.requests.push({ method, url: target.href })
 		return wire(
 			binding.port,
@@ -562,7 +582,9 @@ export function machinePost(
 				})
 			},
 		)
-		req.setTimeout(2000, () => req.destroy(new Error("Machine request timed out")))
+		req.setTimeout(2000, () =>
+			req.destroy(new Error("Machine request timed out")),
+		)
 		req.on("error", reject)
 		req.end(body)
 	})

@@ -136,13 +136,10 @@ export class CookieJar {
 		let domain: string | undefined
 		for (const attribute of parsed.attributes) {
 			const separator = attribute.indexOf("=")
-			const key = (
-				separator === -1 ? attribute : attribute.slice(0, separator)
-			)
+			const key = (separator === -1 ? attribute : attribute.slice(0, separator))
 				.trim()
 				.toLowerCase()
-			const raw =
-				separator === -1 ? "" : attribute.slice(separator + 1).trim()
+			const raw = separator === -1 ? "" : attribute.slice(separator + 1).trim()
 			if (key === "secure") secure = true
 			else if (key === "httponly") httpOnly = true
 			else if (key === "samesite") {
@@ -156,8 +153,7 @@ export class CookieJar {
 				if (!Number.isNaN(parsedExpires)) expires = parsedExpires
 			} else if (key === "path") {
 				if (raw.startsWith("/")) path = raw
-			} else if (key === "domain")
-				domain = raw.replace(/^\./, "").toLowerCase()
+			} else if (key === "domain") domain = raw.replace(/^\./, "").toLowerCase()
 		}
 		if (sameSiteMode === "none" && !secure) return
 		if (secure && !secureContext(url)) return
@@ -190,12 +186,7 @@ export class CookieJar {
 		})
 	}
 
-	#remove(
-		name: string,
-		hostOnly: boolean,
-		domain: string,
-		path: string,
-	): void {
+	#remove(name: string, hostOnly: boolean, domain: string, path: string): void {
 		this.#cookies = this.#cookies.filter(
 			cookie =>
 				cookie.name !== name ||

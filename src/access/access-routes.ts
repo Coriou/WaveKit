@@ -213,10 +213,10 @@ export function registerAccessRoutes(
 		},
 	})
 	const machinePost = (
-		url: "/api/access/machine/devices/revoke" | "/api/access/machine/devices/revoke-all",
-		invoke: (
-			request: FastifyRequest,
-		) => Promise<AccessFlowResult<unknown>>,
+		url:
+			| "/api/access/machine/devices/revoke"
+			| "/api/access/machine/devices/revoke-all",
+		invoke: (request: FastifyRequest) => Promise<AccessFlowResult<unknown>>,
 	): void => {
 		app.post(url, options, async (request, reply) => {
 			reply.serializer(JSON.stringify)
@@ -230,9 +230,7 @@ export function registerAccessRoutes(
 		),
 	)
 	machinePost("/api/access/machine/devices/revoke-all", request =>
-		services.flows.machineRevokeAll(
-			accessRequestFromHttp(request.raw, "api"),
-		),
+		services.flows.machineRevokeAll(accessRequestFromHttp(request.raw, "api")),
 	)
 	return controller
 }

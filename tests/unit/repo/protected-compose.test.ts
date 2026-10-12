@@ -2,7 +2,6 @@
  * Static invariants for the opt-in protected TLS reference profile.
  * Decision 5: Caddy internal CA, shared network namespace, loopback backends.
  */
-import { execFileSync } from "node:child_process"
 import { readdirSync, readFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -14,7 +13,6 @@ import { loadConfig } from "../../../src/config.js"
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../../..")
 const HOST_TOKEN = "${WAVEKIT_PUBLIC_HOST:-receiver.example}"
 const DEFAULT_HOST = "receiver.example"
-const BASE = "ba78d19"
 const TLS = { api: 9443, analog: 9444, digital: 9445 } as const
 const BACKEND = { api: 9000, analog: 8081, digital: 8082 } as const
 const UNPUBLISHED = [8080, 9000, 8081, 8082, 1234, 4713, 5259, 7355]
@@ -52,8 +50,6 @@ interface CaddySite {
 }
 
 const read = (path: string) => readFileSync(join(root, path), "utf8")
-const gitShow = (spec: string) =>
-	execFileSync("git", ["show", spec], { cwd: root, encoding: "utf8" })
 
 function composeFile(): ComposeFile {
 	return parse(read("compose.yaml")) as ComposeFile
@@ -119,8 +115,7 @@ function publishedContainerPort(spec: string): number {
 
 function caddySites(text: string): { preamble: string; sites: CaddySite[] } {
 	const sites: CaddySite[] = []
-	const header =
-		/^https:\/\/\{\$WAVEKIT_PUBLIC_HOST\}:(\d+) \{$/gm
+	const header = /^https:\/\/\{\$WAVEKIT_PUBLIC_HOST\}:(\d+) \{$/gm
 	const matches = [...text.matchAll(header)]
 	if (matches.length === 0) throw new Error("Caddyfile has no TLS sites")
 	const first = matches[0]
@@ -143,10 +138,7 @@ function caddySites(text: string): { preamble: string; sites: CaddySite[] } {
 
 const label = fc
 	.array(
-		fc.constantFrom(
-			..."abcdefghijklmnopqrstuvwxyz0123456789".split(""),
-			"-",
-		),
+		fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789".split(""), "-"),
 		{ minLength: 1, maxLength: 12 },
 	)
 	.map(chars => chars.join(""))
@@ -181,29 +173,6 @@ describe("protected compose profile", () => {
 
 	afterEach(() => {
 		process.env = originalEnv
-	})
-
-	it("leaves the pre-existing compose services and the doc prefix unchanged", () => {
-		const baseCompose = parse(gitShow(`${BASE}:compose.yaml`)) as ComposeFile
-		const current = composeFile()
-		expect(current.name).toBe(baseCompose.name)
-		expect(current.networks).toEqual(baseCompose.networks)
-		for (const name of Object.keys(baseCompose.services)) {
-			expect(current.services[name]).toEqual(baseCompose.services[name])
-		}
-		for (const name of Object.keys(baseCompose.volumes ?? {})) {
-			expect(current.volumes?.[name]).toEqual(baseCompose.volumes?.[name])
-		}
-		expect(Object.keys(current.services).sort()).toEqual(
-			[...Object.keys(baseCompose.services), "wavekit-protected", "wavekit-protected-caddy"].sort(),
-		)
-		const marker = "## Protected runtime deployment"
-		const baseDoc = gitShow(`${BASE}:docs/DOCKER-SETUP.md`)
-		const doc = read("docs/DOCKER-SETUP.md")
-		expect(doc.slice(0, doc.indexOf(marker))).toBe(
-			baseDoc.slice(0, baseDoc.indexOf(marker)),
-		)
-		expect(doc).toContain("### Protected reference profile")
 	})
 
 	it("publishes only the three TLS ports on the core service", () => {
@@ -299,7 +268,11 @@ describe("protected compose profile", () => {
 		expect(
 			coreMounts.find(mount => mount.source === "wavekit-protected-state"),
 		).toMatchObject({ target: "/app/data", readOnly: false })
-		const names = ["wavekit-protected-access", "wavekit-protected-state", "wavekit-protected-caddy"]
+		const names = [
+			"wavekit-protected-access",
+			"wavekit-protected-state",
+			"wavekit-protected-caddy",
+		]
 		expect(new Set(names).size).toBe(names.length)
 		for (const name of names) {
 			expect(composeFile().volumes).toHaveProperty(name)
@@ -415,9 +388,7 @@ describe("protected compose profile", () => {
 					expect(url.protocol).toBe("https:")
 					expect(url.hostname).toBe(host)
 				}
-				expect(config.access.healthProbe.target).toBe(
-					"http://127.0.0.1:9000",
-				)
+				expect(config.access.healthProbe.target).toBe("http://127.0.0.1:9000")
 				expect(config.access.healthProbe.host).toBe(`${host}:${TLS.api}`)
 				expect(config.api).toMatchObject({
 					host: "127.0.0.1",

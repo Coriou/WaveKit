@@ -79,8 +79,11 @@ describe("machine device client", () => {
 	})
 
 	it("posts the original device id and revoke-all target once", async () => {
-		const calls: Array<{ method: string | undefined; url: string | undefined; body: string }> =
-			[]
+		const calls: Array<{
+			method: string | undefined
+			url: string | undefined
+			body: string
+		}> = []
 		const origin = await listen((req, res) => {
 			const chunks: Buffer[] = []
 			req.on("data", (chunk: Buffer) => chunks.push(chunk))

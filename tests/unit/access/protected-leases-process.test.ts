@@ -1,6 +1,13 @@
 import { spawn } from "node:child_process"
 import type { ChildProcess } from "node:child_process"
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises"
 import { createServer } from "node:net"
 import type { Server } from "node:net"
 import { tmpdir } from "node:os"
@@ -43,7 +50,10 @@ const reservations: Server[] = []
 
 interface RunningCore {
 	readonly child: ChildProcess
-	readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>
+	readonly exited: Promise<{
+		code: number | null
+		signal: NodeJS.Signals | null
+	}>
 	stdout(): string
 	stderr(): string
 }
@@ -172,7 +182,9 @@ async function fixture() {
 
 function run(configFile: string, directory: string): RunningCore {
 	const env = Object.fromEntries(
-		Object.entries(process.env).filter(([name]) => !name.startsWith("WAVEKIT_")),
+		Object.entries(process.env).filter(
+			([name]) => !name.startsWith("WAVEKIT_"),
+		),
 	)
 	env["WAVEKIT_CONFIG"] = configFile
 	env["WAVEKIT_ACCESS_PRIVATE_DIRECTORY"] = directory
@@ -251,10 +263,7 @@ async function signIn(
 async function expectClosed(socket: BrowserSocket): Promise<void> {
 	let timer: ReturnType<typeof setTimeout> | undefined
 	const timeout = new Promise<number>((_resolve, reject) => {
-		timer = setTimeout(
-			() => reject(new Error("WebSocket stayed open")),
-			1500,
-		)
+		timer = setTimeout(() => reject(new Error("WebSocket stayed open")), 1500)
 	})
 	try {
 		expect(await Promise.race([socket.closeCode, timeout])).toBe(1008)
@@ -298,9 +307,9 @@ describe("compiled protected process browser leases", () => {
 			).status,
 		).toBe(200)
 		await expectClosed(loggedOut)
-		expect((await client.fetch(`${env.origin}/api/access/session`)).status).toBe(
-			401,
-		)
+		expect(
+			(await client.fetch(`${env.origin}/api/access/session`)).status,
+		).toBe(401)
 
 		const revoked = await signIn(env, client)
 		const revokedSocket = await open()

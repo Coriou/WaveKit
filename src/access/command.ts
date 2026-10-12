@@ -68,9 +68,7 @@ function invalid(): AccessCommandResult {
 	}
 }
 
-function timeoutOption(
-	value: string | undefined,
-): number | undefined | null {
+function timeoutOption(value: string | undefined): number | undefined | null {
 	if (value === undefined) return undefined
 	if (!/^[1-9][0-9]{0,4}$/.test(value) || Number(value) > 30_000) return null
 	return Number(value)
@@ -210,7 +208,8 @@ function parseDevices(args: readonly string[]): CommandOptions | undefined {
 		if (positional.length > 0) return undefined
 		return { command: "devices-list", json, ...remote }
 	}
-	if (action === "revoke-all") return { command: "devices-revoke-all", ...remote }
+	if (action === "revoke-all")
+		return { command: "devices-revoke-all", ...remote }
 	const deviceId = positional[0]
 	if (positional.length !== 1 || !deviceId || !deviceIdPattern.test(deviceId))
 		return undefined
@@ -394,7 +393,10 @@ function machineUnavailable(code: string): AccessCommandResult {
 
 function deviceTable(devices: MachineAccessDevicesDto["devices"]): string[] {
 	if (devices.length === 0)
-		return ["deviceId  createdAt  renewedAt  expiresAt  current", "No remembered devices."]
+		return [
+			"deviceId  createdAt  renewedAt  expiresAt  current",
+			"No remembered devices.",
+		]
 	const rows = devices.map(device => [
 		device.deviceId,
 		String(device.createdAt),
@@ -407,6 +409,9 @@ function deviceTable(devices: MachineAccessDevicesDto["devices"]): string[] {
 		Math.max(name.length, ...rows.map(row => row[index]?.length ?? 0)),
 	)
 	const format = (columns: string[]): string =>
-		columns.map((column, index) => column.padEnd(widths[index] ?? 0)).join("  ").trimEnd()
+		columns
+			.map((column, index) => column.padEnd(widths[index] ?? 0))
+			.join("  ")
+			.trimEnd()
 	return [format(header), ...rows.map(format)]
 }
